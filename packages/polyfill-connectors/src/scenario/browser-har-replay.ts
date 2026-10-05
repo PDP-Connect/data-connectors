@@ -635,12 +635,47 @@ export function resolveBrowserEvidence(
  */
 export function writeBrowserHarReplayPreload(
 	evidence: ResolvedBrowserEvidence,
+	options: {
+		fallbackReportPath?: string;
+		/** `run.clock.trace` (format.ts) when the scenario recorded one —
+		 *  see subprocess-fetch-preloads.ts's `createTraceReplayClock` doc
+		 *  comment (this file's copy is "necessarily duplicated, not
+		 *  imported", same as the rest of the clock-pin logic here). */
+		clockTrace?: readonly number[];
+		/** Written on exit with `{ beyondTraceCount }` — see
+		 *  `createTraceReplayClock`'s doc comment. */
+		clockReportPath?: string;
+	} = {},
 ): string {
 	const preloadFileName = `browser-har-replay-preload-${String(process.pid)}-${String(Date.now())}.mjs`;
 	const src = `
 const HAR_PATH = ${JSON.stringify(evidence.harPath)};
+// Written on process exit with { fallbackMatchCount } — see claims.ts's
+// ApiRequestFallbackMatchLimitation and this file's "APIRequestContext →
+// HAR bridge" module comment. Null when the caller didn't ask (every
+// call site other than bin/scenario-verify.ts's recorded-browser replay
+// path, if any is ever added, e.g. a future record-side use of this same
+// preload shape).
+const FALLBACK_REPORT_PATH = ${JSON.stringify(options.fallbackReportPath ?? null)};
+let apiRequestFallbackMatchCount = 0;
+if (FALLBACK_REPORT_PATH) {
+  process.on("exit", () => {
+    try {
+      writeFileSync(
+        FALLBACK_REPORT_PATH,
+        JSON.stringify({ fallbackMatchCount: apiRequestFallbackMatchCount }),
+      );
+    } catch {
+      // Best-effort, same posture as this file's other process.on("exit")
+      // cleanup — a report write failing must never crash an otherwise-
+      // successful replay.
+    }
+  });
+}
 const STORAGE_STATE_PATH = ${JSON.stringify(evidence.storageStatePath)};
 const FIXED_NOW_ISO = ${JSON.stringify(evidence.fixedNowIso ?? null)} ?? process.env.${PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV} ?? null;
+const CLOCK_TRACE = ${JSON.stringify(options.clockTrace ?? null)};
+const CLOCK_REPORT_PATH = ${JSON.stringify(options.clockReportPath ?? null)};
 
 // ── Node-process clock pin — VALUE only (Date.now()/new Date()), no
 // setTimeout/setInterval scaling. See this file's module doc comment,
@@ -653,11 +688,44 @@ const FIXED_NOW_ISO = ${JSON.stringify(evidence.fixedNowIso ?? null)} ?? process
 if (FIXED_NOW_ISO) {
   const startMs = new Date(FIXED_NOW_ISO).getTime();
   if (!Number.isNaN(startMs)) {
-    let callCount = 0;
+    // createTraceReplayClock's inline mirror (subprocess-fetch-preloads.ts)
+    // — consumes CLOCK_TRACE's recorded values IN ORDER first; only once
+    // exhausted does it fall back to the pre-existing 1ms-per-call counter,
+    // now starting from the trace's LAST value (or startMs when there is
+    // no trace at all).
+    // Array.isArray, not just "truthy": an undefined CLOCK_TRACE (never
+    // recorded — an old scenario captured before this field existed) is
+    // deliberately different from a declared-but-empty one — see
+    // createTraceReplayClock's doc comment (subprocess-fetch-preloads.ts)
+    // for why only the latter's overflow counts as "beyond the trace".
+    const traceWasDeclared = Array.isArray(CLOCK_TRACE);
+    const trace = traceWasDeclared ? CLOCK_TRACE : [];
+    let traceIndex = 0;
+    let fallbackCallCount = 0;
+    let beyondTraceCount = 0;
     const advance = () => {
-      callCount += 1;
-      return startMs + callCount;
+      if (traceIndex < trace.length) {
+        const value = trace[traceIndex];
+        traceIndex += 1;
+        return value;
+      }
+      if (traceWasDeclared) {
+        beyondTraceCount += 1;
+      }
+      fallbackCallCount += 1;
+      const base = trace.length > 0 ? trace[trace.length - 1] : startMs;
+      return base + fallbackCallCount;
     };
+    if (CLOCK_REPORT_PATH) {
+      process.on("exit", () => {
+        try {
+          writeFileSync(CLOCK_REPORT_PATH, JSON.stringify({ beyondTraceCount }));
+        } catch {
+          // Best-effort — same posture as this file's other process.on("exit")
+          // cleanup.
+        }
+      });
+    }
     Date.now = () => advance();
     const RealDate = Date;
     class ScenarioFixedDate extends RealDate {
@@ -685,7 +753,7 @@ if (FIXED_NOW_ISO) {
 // evidence is ONLY the captured storage state), not for reliability (no
 // contention on that profile's own SingletonLock), and not for safety (a
 // replay run must not be able to read from or mutate live session cookies).
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 
@@ -851,6 +919,13 @@ function installApiRequestContextHarBridge(context) {
         \`apiRequestContext.fetch: \${method} \${url} has no matching HAR entry \` +
           "(recorded-browser replay's APIRequestContext bridge — browser-har-replay.ts)",
       );
+    }
+    // Exact vs fallback is cheap to re-derive here (same two fields the
+    // exact-match pass inside findApiRequestHarMatch already checked) —
+    // see claims.ts's ApiRequestFallbackMatchLimitation for why this count
+    // must be disclosed.
+    if (!(entry.request?.method === method && entry.request?.url === url)) {
+      apiRequestFallbackMatchCount += 1;
     }
     return buildApiResponseFromHarEntry(entry);
   };

@@ -22,6 +22,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	createClockObserver,
+	createTraceReplayClock,
 	REPLAY_TIME_SCALE,
 	scaleReplayDelayMs,
 } from "./subprocess-fetch-preloads.ts";
@@ -80,4 +82,121 @@ test("scaleReplayDelayMs: missing/undefined delay (setTimeout(fn) with no delay 
 	// undefined must not propagate to NaN and silently break the connector's
 	// timer.
 	assert.equal(scaleReplayDelayMs(undefined), 0);
+});
+
+// ─── createClockObserver: RECORD-time observation is transparent ──────────
+
+test("createClockObserver: now() returns EXACTLY what the real clock returns, unmodified", () => {
+	const realValues = [1000, 1001, 1005, 1005, 2000];
+	let i = 0;
+	const observer = createClockObserver(() => {
+		const v = realValues[i];
+		i += 1;
+		return v as number;
+	});
+	for (const expected of realValues) {
+		assert.equal(
+			observer.now(),
+			expected,
+			"observing must never alter the value the real clock returned",
+		);
+	}
+});
+
+test("createClockObserver: getTrace() accumulates every observed value, in call order", () => {
+	const realValues = [42, 7, 7, 1_000_000];
+	let i = 0;
+	const observer = createClockObserver(() => {
+		const v = realValues[i];
+		i += 1;
+		return v as number;
+	});
+	for (const _ of realValues) {
+		observer.now();
+	}
+	assert.deepEqual(observer.getTrace(), realValues);
+});
+
+test("createClockObserver: getTrace() is empty before any call, and grows by exactly one per call", () => {
+	const observer = createClockObserver(() => 123);
+	assert.deepEqual(observer.getTrace(), []);
+	observer.now();
+	assert.equal(observer.getTrace().length, 1);
+	observer.now();
+	observer.now();
+	assert.equal(observer.getTrace().length, 3);
+});
+
+test("createClockObserver: a realNow that THROWS propagates, rather than being swallowed into a bogus observed value", () => {
+	const observer = createClockObserver(() => {
+		throw new Error("clock unavailable");
+	});
+	assert.throws(() => observer.now(), /clock unavailable/);
+	assert.deepEqual(
+		observer.getTrace(),
+		[],
+		"a throwing call must not be recorded as an observation",
+	);
+});
+
+// ─── createTraceReplayClock: REPLAY-time trace consumption + fallback ─────
+
+test("createTraceReplayClock: consumes the trace IN ORDER, one value per call", () => {
+	const clock = createTraceReplayClock([10, 20, 30], 999);
+	assert.equal(clock.now(), 10);
+	assert.equal(clock.now(), 20);
+	assert.equal(clock.now(), 30);
+});
+
+test("createTraceReplayClock: once the trace is exhausted, falls back to a 1ms-per-call counter from the trace's LAST value", () => {
+	const clock = createTraceReplayClock([10, 20, 30], 999);
+	clock.now();
+	clock.now();
+	clock.now();
+	assert.equal(clock.now(), 31, "first overflow call: last trace value + 1");
+	assert.equal(clock.now(), 32, "second overflow call: last trace value + 2");
+	assert.equal(clock.now(), 33);
+});
+
+test("createTraceReplayClock: an EMPTY (declared) trace falls back to fallbackStartMs from the very first call", () => {
+	const clock = createTraceReplayClock([], 500);
+	assert.equal(clock.now(), 501);
+	assert.equal(clock.now(), 502);
+});
+
+test("createTraceReplayClock: beyondTraceCount() is 0 while the trace still covers every call", () => {
+	const clock = createTraceReplayClock([10, 20, 30], 999);
+	clock.now();
+	clock.now();
+	assert.equal(clock.beyondTraceCount(), 0);
+});
+
+test("createTraceReplayClock: beyondTraceCount() increments exactly once per overflow call", () => {
+	const clock = createTraceReplayClock([10], 999);
+	clock.now();
+	assert.equal(clock.beyondTraceCount(), 0);
+	clock.now();
+	assert.equal(clock.beyondTraceCount(), 1);
+	clock.now();
+	assert.equal(clock.beyondTraceCount(), 2);
+});
+
+test("createTraceReplayClock: an UNDEFINED trace (never recorded — an old scenario) behaves identically value-wise to an empty one, but NEVER counts toward beyondTraceCount", () => {
+	const declaredEmpty = createTraceReplayClock([], 500);
+	const undeclared = createTraceReplayClock(undefined, 500);
+	assert.equal(undeclared.now(), declaredEmpty.now());
+	assert.equal(undeclared.now(), declaredEmpty.now());
+	assert.equal(undeclared.beyondTraceCount(), 0);
+	assert.equal(declaredEmpty.beyondTraceCount(), 2);
+});
+
+test("createTraceReplayClock: a one-entry trace consumes that entry, then overflows from it", () => {
+	const clock = createTraceReplayClock([777], 1);
+	assert.equal(clock.now(), 777, "the single recorded value, exactly");
+	assert.equal(
+		clock.now(),
+		778,
+		"first overflow: trace's last (only) value + 1",
+	);
+	assert.equal(clock.beyondTraceCount(), 1);
 });

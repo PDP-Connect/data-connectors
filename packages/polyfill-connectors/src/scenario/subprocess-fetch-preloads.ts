@@ -288,6 +288,10 @@ function writeWorkspaceFile(
  * `storageFailed` still works exactly as before.
  */
 export interface RecordPreloadCaptureEnvelope {
+	/** Every real Date.now()/new Date() value the connector process saw
+	 *  during this run, in call order — see `createClockObserver`'s doc
+	 *  comment. `bin/scenario-record.ts` stamps this onto `run.clock.trace`. */
+	clockTrace: number[];
 	incomplete: boolean;
 	interactions: ScenarioInteraction[];
 	normalizerNames: string[];
@@ -366,6 +370,34 @@ export function writeRecordPreload(
 	const src = `
 import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+
+// ── Clock trace observer (createClockObserver's inline mirror — see that
+// function's doc comment for why RECORD observes rather than pins: the
+// connector must see the REAL clock while it talks to the real provider).
+// Installed before anything else in this preload so it catches every
+// Date.now()/new Date() call from the connector's own first line onward.
+const clockTrace = [];
+const realDateNow = Date.now;
+const observeNow = () => {
+  const value = realDateNow();
+  clockTrace.push(value);
+  return value;
+};
+Date.now = () => observeNow();
+const RealDateForObserver = Date;
+class ObservedClockDate extends RealDateForObserver {
+  constructor(...args) {
+    if (args.length === 0) {
+      super(observeNow());
+    } else {
+      super(...args);
+    }
+  }
+  static now() {
+    return observeNow();
+  }
+}
+globalThis.Date = ObservedClockDate;
 
 const MAX_STORED_BODY_BYTES = 2 * 1024 * 1024;
 const CREDENTIAL_QUERY_PARAM_RE = /token|key|secret|signature|auth/i;
@@ -536,6 +568,7 @@ process.on("exit", () => {
         truncatedCount,
         pendingAtExit: pendingCount,
         incomplete: storageFailed || truncatedCount > 0 || pendingCount > 0,
+        clockTrace,
       })
     );
   } catch (err) {
@@ -727,6 +760,17 @@ export interface WriteReplayBridgePreloadOptions {
 	 * not thread it through a function argument.
 	 */
 	fixedNowIso?: string;
+	/** `run.clock.trace` (format.ts) when the scenario recorded one — see
+	 *  `createTraceReplayClock`'s doc comment. Consumed in call order;
+	 *  absent/empty falls back to the pre-existing counter-from-`fixedNowIso`
+	 *  behavior unchanged (an old scenario recorded before this field
+	 *  existed). */
+	clockTrace?: readonly number[];
+	/** When set, the preload writes `{ beyondTraceCount }` here on exit —
+	 *  see `createTraceReplayClock`'s doc comment on what that count means.
+	 *  The caller (bin/scenario-verify.ts) reads it back after the
+	 *  subprocess exits to feed `claims.ts`'s `ClockTraceExhaustedLimitation`. */
+	clockReportPath?: string;
 	/** UDS path to bridge over instead of TCP loopback — see FIX 3's module
 	 *  docstring on `startFetchBridgeServer`. Mutually exclusive with
 	 *  `bridgeUrl` being used as a live transport (bridgeUrl is still
@@ -834,6 +878,105 @@ export function scaleReplayDelayMs(delayMs: number | undefined): number {
 }
 
 /**
+ * The RECORD-time clock observer's pure core — extracted here for the same
+ * direct-unit-test reason `scaleReplayDelayMs` is (the generated preload
+ * source cannot be unit-tested in-process; this MUST stay byte-equivalent
+ * to the inline duplicate `writeRecordPreload`'s template embeds).
+ *
+ * WHY OBSERVE RATHER THAN PIN AT RECORD TIME. Pinning the connector's clock
+ * to a fixed/synthetic value while it talks to the REAL provider would make
+ * it see a fake "now" during a live session — breaking date-window
+ * computation, cookie-expiry comparisons, one-time-code windows, and any
+ * provider-side request validation keyed on client-reported time. Record
+ * must see REAL time. Observing instead — call the real clock, remember
+ * the value, return it UNCHANGED — costs nothing live and gives replay the
+ * exact value-by-value sequence a counter starting from one fixed instant
+ * can never reconstruct (real record-time calls are separated by real
+ * network/processing latency a counter has no way to know).
+ *
+ * `now()` NEVER alters what `realNow()` returns — this is the property
+ * `subprocess-fetch-preloads.test.ts` proves directly: observing is
+ * transparent, not a side channel that could itself introduce drift.
+ */
+export function createClockObserver(realNow: () => number): {
+	getTrace: () => readonly number[];
+	now: () => number;
+} {
+	const trace: number[] = [];
+	return {
+		now: () => {
+			const value = realNow();
+			trace.push(value);
+			return value;
+		},
+		getTrace: () => trace,
+	};
+}
+
+/**
+ * The REPLAY-time trace-consuming clock's pure core — same direct-unit-test
+ * seam as `createClockObserver`/`scaleReplayDelayMs`; MUST stay
+ * byte-equivalent to the inline duplicates in both
+ * `writeReplayBridgePreload`'s (this file) and `writeBrowserHarReplayPreload`'s
+ * (browser-har-replay.ts) generated sources.
+ *
+ * Returns the recorded `trace` values IN ORDER — "the same calls get the
+ * same recorded times", literally, for every call this run's record made.
+ * Once the trace is exhausted (this run's REPLAY took a code path that
+ * calls the clock MORE times than record did — a real control-flow
+ * divergence, not something to paper over), falls back to the pre-existing
+ * counter behavior: 1ms per call, starting from the trace's LAST value (or
+ * `fallbackStartMs` if the trace was empty) — monotonically increasing,
+ * deterministic given the same call sequence, exactly like the counter
+ * clock already did before any trace existed. `beyondTraceCount()` reports
+ * how many calls fell into that fallback, so the caller can disclose it
+ * (`ClockTraceExhaustedLimitation`, claims.ts) rather than silently
+ * presenting a partially-synthesized clock as fully proven.
+ *
+ * `trace: undefined` (never recorded at all — a scenario captured before
+ * this field existed) is DELIBERATELY DIFFERENT from `trace: []` (recorded,
+ * and the record run made zero clock calls): both fall back to the same
+ * counter for every call, but only the latter counts those calls as
+ * "beyond the trace" — an undefined trace was never expected to cover
+ * anything, so every one of its calls is the ORIGINAL, pre-trace behavior
+ * continuing unchanged, not a new divergence worth disclosing.
+ */
+export function createTraceReplayClock(
+	trace: readonly number[] | undefined,
+	fallbackStartMs: number,
+): {
+	beyondTraceCount: () => number;
+	now: () => number;
+} {
+	const resolvedTrace = trace ?? [];
+	let traceIndex = 0;
+	let fallbackCallCount = 0;
+	let beyondTraceCount = 0;
+	return {
+		now: () => {
+			if (traceIndex < resolvedTrace.length) {
+				const value = resolvedTrace[traceIndex];
+				traceIndex += 1;
+				// resolvedTrace[traceIndex] is always a number for traceIndex <
+				// resolvedTrace.length; the `as number` would be redundant noise —
+				// narrowed by the bound check above instead.
+				return value as number;
+			}
+			if (trace !== undefined) {
+				beyondTraceCount += 1;
+			}
+			fallbackCallCount += 1;
+			const base =
+				resolvedTrace.length > 0
+					? resolvedTrace[resolvedTrace.length - 1]
+					: fallbackStartMs;
+			return (base as number) + fallbackCallCount;
+		},
+		beyondTraceCount: () => beyondTraceCount,
+	};
+}
+
+/**
  * Writes a REPLAY-phase preload module and returns its path. The preload
  * forwards every outgoing `fetch()` call in the subprocess to `bridgeUrl`
  * (a `startFetchBridgeServer` instance in the parent process) — or, when
@@ -937,12 +1080,15 @@ export function writeReplayBridgePreload(
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
+import { writeFileSync } from "node:fs";
 
 const BRIDGE_URL = ${JSON.stringify(bridgeUrl)};
 const BRIDGE_HOST = ${JSON.stringify(bridgeHost)};
 const BRIDGE_PORT = ${JSON.stringify(bridgePort)};
 const UDS_PATH = ${JSON.stringify(options.udsSocketPath ?? null)} ?? process.env.${PDPP_SCENARIO_BRIDGE_UDS_PATH_ENV} ?? null;
 const FIXED_NOW_ISO = ${JSON.stringify(options.fixedNowIso ?? null)} ?? process.env.${PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV} ?? null;
+const CLOCK_TRACE = ${JSON.stringify(options.clockTrace ?? null)};
+const CLOCK_REPORT_PATH = ${JSON.stringify(options.clockReportPath ?? null)};
 // Captured BEFORE any of this preload's patching below, so the preload's
 // own UDS bridge call (in UDS mode) always uses the real implementation
 // regardless of what the connector-facing denial wrappers below do to
@@ -1110,13 +1256,45 @@ globalThis.fetch = async (input, init) => {
 if (FIXED_NOW_ISO) {
   const startMs = new Date(FIXED_NOW_ISO).getTime();
   if (!Number.isNaN(startMs)) {
-    let callCount = 0;
+    // createTraceReplayClock's inline mirror (see that function's doc
+    // comment) — consumes CLOCK_TRACE's recorded values IN ORDER first;
+    // only once exhausted does it fall back to the pre-existing 1ms-per-call
+    // counter, now starting from the trace's LAST value (or startMs, when
+    // there is no trace at all — an old scenario recorded before this field
+    // existed, or a scenario whose record run made zero clock calls).
+    // Array.isArray, not just "truthy": an undefined CLOCK_TRACE (never
+    // recorded — an old scenario captured before this field existed) is
+    // deliberately different from a declared-but-empty one — see
+    // createTraceReplayClock's doc comment (subprocess-fetch-preloads.ts)
+    // for why only the latter's overflow counts as "beyond the trace".
+    const traceWasDeclared = Array.isArray(CLOCK_TRACE);
+    const trace = traceWasDeclared ? CLOCK_TRACE : [];
+    let traceIndex = 0;
+    let fallbackCallCount = 0;
+    let beyondTraceCount = 0;
     const advance = () => {
-      callCount += 1;
-      // 1ms per call keeps reads strictly increasing without needing a
-      // real timer; deterministic given the same call sequence on replay.
-      return startMs + callCount;
+      if (traceIndex < trace.length) {
+        const value = trace[traceIndex];
+        traceIndex += 1;
+        return value;
+      }
+      if (traceWasDeclared) {
+        beyondTraceCount += 1;
+      }
+      fallbackCallCount += 1;
+      const base = trace.length > 0 ? trace[trace.length - 1] : startMs;
+      return base + fallbackCallCount;
     };
+    if (CLOCK_REPORT_PATH) {
+      process.on("exit", () => {
+        try {
+          writeFileSync(CLOCK_REPORT_PATH, JSON.stringify({ beyondTraceCount }));
+        } catch {
+          // Best-effort — a report write failing must never crash an
+          // otherwise-successful replay.
+        }
+      });
+    }
     Date.now = () => advance();
     const RealDate = Date;
     class ScenarioFixedDate extends RealDate {

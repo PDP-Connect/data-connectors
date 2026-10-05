@@ -170,6 +170,73 @@ export function buildFilesystemInputLimitation(
 }
 
 /**
+ * The APIRequestContext fallback-match limitation, PARAMETERIZED on the
+ * COUNT of `context.request` calls this replay served by approximate HAR
+ * match rather than an exact one — a template-literal type for the same
+ * reason `FilesystemInputLimitation` is: the count is per-run data, not a
+ * closed enum value.
+ *
+ * WHY IT EXISTS. `browser-har-replay.ts`'s APIRequestContext → HAR bridge
+ * (see that file's module comment) matches a `context.request` call
+ * EXACTLY first, but falls back — for GET only — to the highest-scoring
+ * same-origin-and-pathname HAR entry sharing at least one query parameter
+ * NAME with the live request when no exact match exists. That fallback can
+ * serve a response that is not byte-identical to what THIS exact call
+ * would have received live (e.g. a different page size) — a real, if
+ * narrow, approximation. A claim resting on it must say so rather than
+ * read like every byte of this call was proven, the same disclosure
+ * discipline `buildFilesystemInputLimitation` already applies to a widened
+ * sandbox. Zero fallback matches (the common case — an exact match covers
+ * every `context.request` call this run made) adds no limitation at all;
+ * this is never printed for a scenario that never exercises the bridge.
+ */
+export type ApiRequestFallbackMatchLimitation =
+	`context.request: ${number} request(s) served by approximate HAR match (same path, differing query); not an exact replay`;
+
+/** The single place an `ApiRequestFallbackMatchLimitation` string is built.
+ *  Callers never invoke this with `count <= 0` — see
+ *  `evaluateClaimEligibility`'s call site, which only pushes a limitation
+ *  when the count is positive. */
+export function buildApiRequestFallbackMatchLimitation(
+	count: number,
+): ApiRequestFallbackMatchLimitation {
+	return `context.request: ${count} request(s) served by approximate HAR match (same path, differing query); not an exact replay`;
+}
+
+/**
+ * The clock-trace-exhausted limitation, PARAMETERIZED on the COUNT of
+ * Date.now()/new Date() calls this replay made BEYOND its recorded
+ * `run.clock.trace` (format.ts) — a template-literal type for the same
+ * reason the other count-carrying limitations are.
+ *
+ * WHY IT EXISTS. `createTraceReplayClock`'s doc comment
+ * (subprocess-fetch-preloads.ts) explains the mechanism: replay returns
+ * record's own observed clock values in call order, and only falls back to
+ * a synthetic counter once that trace is exhausted — a real control-flow
+ * divergence between record and replay (this run's code took a path that
+ * reads the clock more times than record's did), not something to paper
+ * over. A claim resting on any synthesized clock value must say so, same
+ * disclosure discipline as every other "this run is not a byte-for-byte
+ * reproduction" limitation here. Zero calls beyond the trace (the common
+ * case: every clock read record made, replay also made, in the same
+ * order) adds no limitation — including every scenario recorded before
+ * `run.clock.trace` existed, which has no trace to exhaust and falls back
+ * to the pre-existing counter behavior from call one, unchanged.
+ */
+export type ClockTraceExhaustedLimitation =
+	`clock: ${number} call(s) beyond the recorded trace; values synthesized`;
+
+/** The single place a `ClockTraceExhaustedLimitation` string is built.
+ *  Callers never invoke this with `count <= 0` — see
+ *  `evaluateClaimEligibility`'s call site, which only pushes a limitation
+ *  when the count is positive. */
+export function buildClockTraceExhaustedLimitation(
+	count: number,
+): ClockTraceExhaustedLimitation {
+	return `clock: ${count} call(s) beyond the recorded trace; values synthesized`;
+}
+
+/**
  * The vacuous-run filesystem-input carve-out disclosure, PARAMETERIZED on
  * the carved-out run's own index and the OTHER run's index that proved the
  * same declared filesystem input actually yields data for this connector —
@@ -233,7 +300,9 @@ export type ClaimLimitation =
 	| SocketScanIncompleteLimitation
 	| ScenarioStalenessLimitation
 	| FilesystemInputLimitation
-	| VacuousRunFilesystemInputCarveOutLimitation;
+	| VacuousRunFilesystemInputCarveOutLimitation
+	| ApiRequestFallbackMatchLimitation
+	| ClockTraceExhaustedLimitation;
 
 /**
  * Builds the exact repository-UDS-socket limitation string for a run whose
@@ -304,6 +373,22 @@ export interface ClaimEligibilityInput {
 		runIndex: number;
 		sourceRunIndex: number;
 	}[];
+	/** Total count, across every run, of `context.request` calls
+	 *  `browser-har-replay.ts`'s APIRequestContext → HAR bridge served by
+	 *  approximate (fallback) match rather than an exact one. Adds an
+	 *  `ApiRequestFallbackMatchLimitation` when positive; omitted or zero
+	 *  adds nothing — the common case (no `context.request` traffic, or
+	 *  every call matched exactly) must not read as if this were a tracked
+	 *  failure condition. */
+	apiRequestFallbackMatchCount?: number;
+	/** Total count, across every run, of Date.now()/new Date() calls that
+	 *  fell beyond their run's recorded `clock.trace` and were synthesized
+	 *  by the counter fallback — see `createTraceReplayClock`'s doc comment
+	 *  (subprocess-fetch-preloads.ts). Adds a `ClockTraceExhaustedLimitation`
+	 *  when positive; omitted or zero adds nothing — the common case (every
+	 *  clock read record made, replay also made) must not read as a tracked
+	 *  failure condition. */
+	clockTraceExhaustedCount?: number;
 	/** True when `scenario.connector.captured_with` (or its deprecated
 	 *  top-level fallback) carries a `declaration_digest` — the capture-time
 	 *  half of the declaration-identity binding. */
@@ -579,6 +664,30 @@ export function evaluateClaimEligibility(
 			buildVacuousRunFilesystemInputCarveOutLimitation(
 				carveOut.runIndex,
 				carveOut.sourceRunIndex,
+			),
+		);
+	}
+
+	// Always named when present, for the same reason the other disclosures
+	// are: a reader of `limitations` must never have to infer that a
+	// context.request call was served by an approximate match rather than
+	// an exact one from the absence of a stronger claim.
+	if ((input.apiRequestFallbackMatchCount ?? 0) > 0) {
+		limitations.push(
+			buildApiRequestFallbackMatchLimitation(
+				input.apiRequestFallbackMatchCount as number,
+			),
+		);
+	}
+
+	// Always named when present, for the same reason the other disclosures
+	// are: a reader of `limitations` must never have to infer that a clock
+	// value was synthesized rather than reproduced from the actual record-time
+	// observation.
+	if ((input.clockTraceExhaustedCount ?? 0) > 0) {
+		limitations.push(
+			buildClockTraceExhaustedLimitation(
+				input.clockTraceExhaustedCount as number,
 			),
 		);
 	}

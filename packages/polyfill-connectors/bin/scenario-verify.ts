@@ -2129,6 +2129,17 @@ async function main(): Promise<void> {
 	// whenever any run is recorded-browser.
 	printReplayTimeBanner(declaredDrivers);
 	const isolationWorkspace = createScenarioEvidenceWorkspace();
+	// Total, across every recorded-browser run, of context.request calls
+	// browser-har-replay.ts's APIRequestContext bridge served by approximate
+	// (fallback) match — see claims.ts's ApiRequestFallbackMatchLimitation.
+	// Zero for every scenario that never exercises the bridge.
+	let apiRequestFallbackMatchTotal = 0;
+	// Total, across every run, of Date.now()/new Date() calls that fell
+	// beyond their run's recorded clock.trace and were synthesized by the
+	// counter fallback — see claims.ts's ClockTraceExhaustedLimitation.
+	// Zero for every scenario that never carries a clock.trace (including
+	// every scenario recorded before this field existed).
+	let clockTraceExhaustedTotal = 0;
 
 	// FIX 2d (repair wave 4): every run's raw messages, accumulated across the
 	// whole scenario, so `printCoverageReport` can feed them through
@@ -2256,7 +2267,25 @@ async function main(): Promise<void> {
 		// (mirrors 2b674fdf1's cleanup discipline for the same defect class in
 		// bin/scenario-cli.test.ts) since, unlike isolationWorkspace, nothing
 		// else owns removing it.
-		const preloadPath = writeBrowserHarReplayPreload(evidence);
+		// Lives inside isolationWorkspace.dir (the one rw bind the sandbox
+		// keeps visible — see runReplaySubprocess's `workspace` doc comment)
+		// so the preload can write it regardless of isolation, and the parent
+		// can read it back after the subprocess exits.
+		const fallbackReportPath = join(
+			isolationWorkspace.dir,
+			`api-request-fallback-run${String(runIndex)}.json`,
+		);
+		const clockReportPath = join(
+			isolationWorkspace.dir,
+			`clock-trace-run${String(runIndex)}.json`,
+		);
+		const preloadPath = writeBrowserHarReplayPreload(evidence, {
+			fallbackReportPath,
+			clockReportPath,
+			...(run.clock?.trace === undefined
+				? {}
+				: { clockTrace: run.clock.trace }),
+		});
 		let result: {
 			code: number | null;
 			messages: ProtocolMessage[];
@@ -2295,6 +2324,34 @@ async function main(): Promise<void> {
 			throw err;
 		} finally {
 			rmSync(preloadPath, { force: true });
+			// Best-effort: a report that was never written (old preload crash
+			// before any context.request call, or no context.request traffic
+			// at all) must not throw — it simply contributes 0.
+			try {
+				const reportRaw = readFileSync(fallbackReportPath, "utf8");
+				const parsed = JSON.parse(reportRaw) as {
+					fallbackMatchCount?: unknown;
+				};
+				if (typeof parsed.fallbackMatchCount === "number") {
+					apiRequestFallbackMatchTotal += parsed.fallbackMatchCount;
+				}
+			} catch {
+				// No report, or unreadable — contributes 0, never a failure.
+			}
+			rmSync(fallbackReportPath, { force: true });
+			// Best-effort, same posture as the fallback-match report above.
+			try {
+				const clockReportRaw = readFileSync(clockReportPath, "utf8");
+				const parsedClock = JSON.parse(clockReportRaw) as {
+					beyondTraceCount?: unknown;
+				};
+				if (typeof parsedClock.beyondTraceCount === "number") {
+					clockTraceExhaustedTotal += parsedClock.beyondTraceCount;
+				}
+			} catch {
+				// No report, or unreadable — contributes 0, never a failure.
+			}
+			rmSync(clockReportPath, { force: true });
 		}
 		emitReplayResult(runIndex, result, collectorArgs.emit);
 	};
@@ -2318,11 +2375,18 @@ async function main(): Promise<void> {
 			? join(isolationWorkspace.dir, `bridge-${String(runIndex)}.sock`)
 			: undefined;
 		const bridge = await startFetchBridgeServer(collectorArgs.fetch, udsPath);
+		const clockReportPath = join(
+			isolationWorkspace.dir,
+			`clock-trace-run${String(runIndex)}.json`,
+		);
 		try {
 			const fixedNow = scenario.runs[runIndex]?.clock?.fixed_now;
+			const clockTrace = scenario.runs[runIndex]?.clock?.trace;
 			const preloadPath = writeReplayBridgePreload(bridge.url, {
 				workspace: isolationWorkspace,
+				clockReportPath,
 				...(udsPath === undefined ? {} : { udsSocketPath: udsPath }),
+				...(clockTrace === undefined ? {} : { clockTrace }),
 			});
 			let result: {
 				code: number | null;
@@ -2355,6 +2419,19 @@ async function main(): Promise<void> {
 			emitReplayResult(runIndex, result, collectorArgs.emit);
 		} finally {
 			await bridge.close();
+			// Best-effort, same posture as runBrowserCollector's identical read.
+			try {
+				const clockReportRaw = readFileSync(clockReportPath, "utf8");
+				const parsedClock = JSON.parse(clockReportRaw) as {
+					beyondTraceCount?: unknown;
+				};
+				if (typeof parsedClock.beyondTraceCount === "number") {
+					clockTraceExhaustedTotal += parsedClock.beyondTraceCount;
+				}
+			} catch {
+				// No report, or unreadable — contributes 0, never a failure.
+			}
+			rmSync(clockReportPath, { force: true });
 		}
 	};
 
@@ -2473,6 +2550,8 @@ async function main(): Promise<void> {
 		socketScanResult,
 		filesystemInput,
 		result.vacuousRunFilesystemInputCarveOuts,
+		apiRequestFallbackMatchTotal,
+		clockTraceExhaustedTotal,
 	);
 	process.exitCode = 0;
 }
@@ -2511,6 +2590,8 @@ function printCoverageReport(
 		runIndex: number;
 		sourceRunIndex: number;
 	}>,
+	apiRequestFallbackMatchTotal: number,
+	clockTraceExhaustedTotal: number,
 ): void {
 	const capturedAt = scenario.capture.captured_at;
 	// state_seeded_second_run_with_changed_requests (formerly named
@@ -2629,6 +2710,12 @@ function printCoverageReport(
 		...(vacuousRunFilesystemInputCarveOuts.length === 0
 			? {}
 			: { vacuousRunFilesystemInputCarveOuts }),
+		...(apiRequestFallbackMatchTotal === 0
+			? {}
+			: { apiRequestFallbackMatchCount: apiRequestFallbackMatchTotal }),
+		...(clockTraceExhaustedTotal === 0
+			? {}
+			: { clockTraceExhaustedCount: clockTraceExhaustedTotal }),
 		isEntrypointOverride: Boolean(args.entrypoint),
 		capturedDeclarationDigestPresent:
 			digestObservation.capturedDeclarationDigestPresent,

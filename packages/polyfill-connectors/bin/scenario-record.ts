@@ -1150,6 +1150,11 @@ function computeProtocolViolation(args: {
 
 interface RecordRunResult {
 	code: number | null;
+	/** Every real Date.now()/new Date() value the connector process saw
+	 *  during this run, in call order — see `createClockObserver`'s doc
+	 *  comment (subprocess-fetch-preloads.ts). Stamped onto `run.clock.trace`
+	 *  (format.ts) by this run's caller. */
+	clockTrace: number[];
 	interactions: ScenarioInteraction[];
 	messages: ProtocolMessage[];
 	normalizerNames: string[];
@@ -1637,6 +1642,7 @@ function runRecordSubprocess(args: {
 		child.on("close", (code, signal) => {
 			watchdog.dispose();
 			let capture: {
+				clockTrace?: number[];
 				incomplete?: boolean;
 				interactions: ScenarioInteraction[];
 				normalizerNames: string[];
@@ -1670,6 +1676,7 @@ function runRecordSubprocess(args: {
 				stderr,
 				interactions: capture.interactions,
 				normalizerNames: capture.normalizerNames,
+				clockTrace: capture.clockTrace ?? [],
 				// Any incompleteness signal from the preload (recorder storage error,
 				// truncated body, or a request still in flight at exit) makes the
 				// capture untrustworthy - fold them all into storageFailed so every
@@ -1772,6 +1779,7 @@ async function recordOneRun(
 	workspace: ScenarioEvidenceWorkspace,
 	harRecordPaths?: { harPath: string; storageStatePath: string },
 ): Promise<{
+	clockTrace: number[];
 	finalState: Record<string, unknown>;
 	interactions: ScenarioInteraction[];
 	normalizerNames: string[];
@@ -1823,6 +1831,7 @@ async function recordOneRun(
 			reason:
 				"recorder preload reported a storage failure while capturing interactions",
 			interactions: result.interactions,
+			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
 			records,
 			finalState,
@@ -1848,6 +1857,7 @@ async function recordOneRun(
 			ok: false,
 			reason: `protocol-corrupt stdout: ${reasonDetail}`,
 			interactions: result.interactions,
+			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
 			records,
 			finalState,
@@ -1863,6 +1873,7 @@ async function recordOneRun(
 			ok: false,
 			reason: `unanswered interaction prompt(s) — no --answer supplied and stdin is not a TTY: ${names.join("; ")}`,
 			interactions: result.interactions,
+			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
 			records,
 			finalState,
@@ -1878,6 +1889,7 @@ async function recordOneRun(
 			ok: false,
 			reason: `protocol_violation: ${result.protocolViolation} (DONE status=${done?.status ?? "none"}, exit code=${String(result.code)}, signal=${String(result.signal)})`,
 			interactions: result.interactions,
+			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
 			records,
 			finalState,
@@ -1890,6 +1902,7 @@ async function recordOneRun(
 			ok: false,
 			reason: `connector run did not reach a succeeded DONE: ${JSON.stringify(done)}; stderr=${result.stderr}`,
 			interactions: result.interactions,
+			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
 			records,
 			finalState,
@@ -1900,6 +1913,7 @@ async function recordOneRun(
 	return {
 		ok: true,
 		interactions: result.interactions,
+		clockTrace: result.clockTrace,
 		normalizerNames: result.normalizerNames,
 		records,
 		finalState,
@@ -2198,7 +2212,7 @@ async function captureRuns(
 		// Stamp the run's actual start time so replay can pin Date.now() to it
 		// (see PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV) and wall-clock-dependent
 		// request planning stays deterministic across record and replay.
-		clock: { fixed_now: run1StartedAt },
+		clock: { fixed_now: run1StartedAt, trace: run1.clockTrace },
 		environment: resolveRunEnvironment(
 			run1Capture,
 			"run1.har",
@@ -2243,7 +2257,7 @@ async function captureRuns(
 			normalizerNames.add(name);
 		}
 		runs.push({
-			clock: { fixed_now: run2StartedAt },
+			clock: { fixed_now: run2StartedAt, trace: run2.clockTrace },
 			environment: resolveRunEnvironment(
 				run2Capture,
 				"run2.har",

@@ -305,6 +305,21 @@ export interface ScenarioUserInteraction {
  *  actual start time here. */
 export interface ScenarioClock {
 	fixed_now: string;
+	/** The REAL Date.now()/new Date() values (epoch milliseconds) the
+	 *  connector process actually saw during record, in call order —
+	 *  observed and passed through unchanged, never a synthetic/pinned
+	 *  value (see subprocess-fetch-preloads.ts's `createClockObserver`).
+	 *  Replay returns these same values, in the same order, for the
+	 *  identical "the same calls get the same recorded times" effect a
+	 *  counter-from-`fixed_now` cannot give when real record-time latency
+	 *  separated two calls. Optional: a scenario recorded before this field
+	 *  existed has none, and replay falls back to the pre-existing
+	 *  counter-from-`fixed_now` behavior unchanged — see
+	 *  `ClockTraceExhaustedLimitation` (claims.ts) for what happens when a
+	 *  replay makes MORE clock calls than this array has entries. Contains
+	 *  only timestamps, nothing else — see this field's "WHY NOT MORE"
+	 *  note in subprocess-fetch-preloads.ts's module doc comment. */
+	trace?: readonly number[];
 }
 
 export interface ScenarioRunStart {

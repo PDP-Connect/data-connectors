@@ -48,7 +48,9 @@ import { test } from "node:test";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
 import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import {
+	buildApiRequestFallbackMatchLimitation,
 	buildBrowserStalenessLimitation,
+	buildClockTraceExhaustedLimitation,
 	evaluateClaimEligibility,
 } from "../src/scenario/claims.ts";
 import type { ConnectorScenario, ScenarioRun } from "../src/scenario/format.ts";
@@ -1196,6 +1198,120 @@ test("evaluateClaimEligibility: a vacuous-run filesystem-input carve-out is alwa
 	]);
 });
 
+test("evaluateClaimEligibility: apiRequestFallbackMatchCount omitted or zero adds no limitation — the common case (no context.request traffic, or every call matched exactly) must not read as a tracked failure", () => {
+	const omitted = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+	});
+	assert.deepEqual(omitted, { claim: "recorded_replay" });
+
+	const zero = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		apiRequestFallbackMatchCount: 0,
+	});
+	assert.deepEqual(zero, { claim: "recorded_replay" });
+});
+
+test("evaluateClaimEligibility: a positive apiRequestFallbackMatchCount is always named, naming the exact count", () => {
+	const decision = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		apiRequestFallbackMatchCount: 3,
+	});
+	assert.ok(decision.claim === "diagnostic_replay");
+	assert.deepEqual(decision.limitations, [
+		"context.request: 3 request(s) served by approximate HAR match (same path, differing query); not an exact replay",
+	]);
+});
+
+test("evaluateClaimEligibility: a positive apiRequestFallbackMatchCount combines with other disclosures rather than replacing them", () => {
+	const decision = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		filesystemInputs: [
+			{ envVar: "STRAVA_EXPORT_DIR", path: "/data/strava", readOnlyBind: true },
+		],
+		apiRequestFallbackMatchCount: 1,
+	});
+	assert.ok(decision.claim === "diagnostic_replay");
+	assert.deepEqual(decision.limitations, [
+		"filesystem input: replay read /data/strava via STRAVA_EXPORT_DIR (read-only bind, manifest-declared); isolation did not exclude this host path",
+		"context.request: 1 request(s) served by approximate HAR match (same path, differing query); not an exact replay",
+	]);
+});
+
+test("buildApiRequestFallbackMatchLimitation: builds the exact string for a given count", () => {
+	assert.equal(
+		buildApiRequestFallbackMatchLimitation(5),
+		"context.request: 5 request(s) served by approximate HAR match (same path, differing query); not an exact replay",
+	);
+});
+
+test("evaluateClaimEligibility: clockTraceExhaustedCount omitted or zero adds no limitation — the common case (every clock read record made, replay also made) must not read as a tracked failure", () => {
+	const omitted = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+	});
+	assert.deepEqual(omitted, { claim: "recorded_replay" });
+
+	const zero = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		clockTraceExhaustedCount: 0,
+	});
+	assert.deepEqual(zero, { claim: "recorded_replay" });
+});
+
+test("evaluateClaimEligibility: a positive clockTraceExhaustedCount is always named, naming the exact count", () => {
+	const decision = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		clockTraceExhaustedCount: 7,
+	});
+	assert.ok(decision.claim === "diagnostic_replay");
+	assert.deepEqual(decision.limitations, [
+		"clock: 7 call(s) beyond the recorded trace; values synthesized",
+	]);
+});
+
+test("evaluateClaimEligibility: apiRequestFallbackMatchCount and clockTraceExhaustedCount both being positive combine as two separate limitations", () => {
+	const decision = evaluateClaimEligibility({
+		scenario: eligibleScenario(),
+		isEntrypointOverride: false,
+		...eligibleDigestObservations(),
+		isNamespaceIsolationActive: true,
+		apiRequestFallbackMatchCount: 2,
+		clockTraceExhaustedCount: 4,
+	});
+	assert.ok(decision.claim === "diagnostic_replay");
+	assert.deepEqual(decision.limitations, [
+		"context.request: 2 request(s) served by approximate HAR match (same path, differing query); not an exact replay",
+		"clock: 4 call(s) beyond the recorded trace; values synthesized",
+	]);
+});
+
+test("buildClockTraceExhaustedLimitation: builds the exact string for a given count", () => {
+	assert.equal(
+		buildClockTraceExhaustedLimitation(12),
+		"clock: 12 call(s) beyond the recorded trace; values synthesized",
+	);
+});
+
 test("evaluateClaimEligibility: condition (a) fails — --entrypoint override yields 'unbound entrypoint replay'", () => {
 	const decision = evaluateClaimEligibility({
 		scenario: eligibleScenario(),
@@ -2192,6 +2308,400 @@ test("scenario-verify --json: a filesystem-input connector's committed claim rep
 		} else {
 			process.env.STRAVA_EXPORT_DIR = savedExportDir;
 		}
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+// ─── ApiRequestFallbackMatchLimitation: end-to-end through a real browser ──
+//
+// browser-har-replay.ts's APIRequestContext → HAR bridge serves a
+// context.request call by EXACT match first, falling back (GET only) to
+// the best same-origin-and-pathname entry sharing a query parameter NAME —
+// see that file's module comment and claims.ts's
+// ApiRequestFallbackMatchLimitation. This proves the full path a unit test
+// of the matcher alone cannot: the preload's fallback COUNTER survives the
+// sandboxed subprocess boundary (written to a report file inside the
+// isolation workspace, read back by bin/scenario-verify.ts after the
+// subprocess exits) and lands in both the live stdout report and the
+// committed --json claim — through a REAL headless browser context, since
+// the bridge patches a genuine BrowserContext's prototype.
+const API_REQUEST_FALLBACK_STUB_PATH = join(
+	FIXTURES_DIR,
+	"scenario-api-request-fallback-stub-connector.ts",
+);
+
+function writeApiRequestFallbackScenario(dir: string): {
+	claimPath: string;
+	scenarioPath: string;
+} {
+	const harPath = join(dir, "entry.har");
+	const storageStatePath = join(dir, "state.json");
+	writeFileSync(
+		harPath,
+		JSON.stringify({
+			log: {
+				version: "1.2",
+				creator: { name: "test", version: "1" },
+				entries: [
+					{
+						startedDateTime: "2026-01-01T00:00:00.000Z",
+						time: 1,
+						request: {
+							method: "GET",
+							url: "https://example.test/data?a=1&b=2",
+							httpVersion: "HTTP/1.1",
+							cookies: [],
+							headers: [],
+							queryString: [
+								{ name: "a", value: "1" },
+								{ name: "b", value: "2" },
+							],
+							headersSize: -1,
+							bodySize: 0,
+						},
+						response: {
+							status: 200,
+							statusText: "OK",
+							httpVersion: "HTTP/1.1",
+							cookies: [],
+							headers: [{ name: "content-type", value: "application/json" }],
+							content: {
+								size: 11,
+								mimeType: "application/json",
+								text: '{"ok":true}',
+							},
+							redirectURL: "",
+							headersSize: -1,
+							bodySize: 11,
+						},
+						cache: {},
+						timings: { send: 0, wait: 1, receive: 0 },
+					},
+				],
+			},
+		}),
+	);
+	writeFileSync(storageStatePath, JSON.stringify({ cookies: [], origins: [] }));
+
+	const expectedRecord = { id: "probe", status: 200, body: '{"ok":true}' };
+	const scenario: ConnectorScenario = {
+		format: "pdpp.connector-scenario/1",
+		connector: { id: "api-request-fallback-stub" },
+		capture: {
+			captured_at: "2026-10-05T00:00:00.000Z",
+			evidence_class: "synthetic-spike",
+			privacy_class: "local-only",
+			recorder_version: "test",
+			complete: true,
+		},
+		runs: [
+			{
+				start: { scope: { streams: [{ name: "items" }] }, state: null },
+				environment: {
+					network: {
+						driver: "recorded-browser",
+						har_path: "entry.har",
+						storage_state_path: "state.json",
+						har_entry_count: 1,
+					} as never,
+				},
+				interactions: [],
+				expected: {
+					records: {
+						items: {
+							count: 1,
+							ids: [expectedRecord.id],
+							ops: ["upsert"],
+							record_sha256s: [hashCanonicalJson(expectedRecord)],
+						},
+					},
+					final_state: {},
+				},
+			},
+		],
+	};
+	const scenarioPath = join(dir, "scenario.json");
+	writeFileSync(scenarioPath, JSON.stringify(scenario));
+	return { scenarioPath, claimPath: join(dir, "claim.json") };
+}
+
+test("ApiRequestFallbackMatchLimitation: an EXACT context.request match carries no fallback limitation", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "api-request-exact-test-"));
+	try {
+		const { scenarioPath, claimPath } = writeApiRequestFallbackScenario(tmpDir);
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				"tsx",
+				VERIFY_CLI_PATH,
+				"api-request-fallback-stub",
+				"--entrypoint",
+				API_REQUEST_FALLBACK_STUB_PATH,
+				scenarioPath,
+				"--json",
+				claimPath,
+			],
+			{
+				cwd: PACKAGE_ROOT,
+				env: {
+					...process.env,
+					PDPP_TEST_API_REQUEST_URL: "https://example.test/data?a=1&b=2",
+				},
+				encoding: "utf8",
+				timeout: 60_000,
+			},
+		);
+		assert.equal(
+			result.status,
+			0,
+			`expected success; stdout=${result.stdout} stderr=${result.stderr}`,
+		);
+		assert.ok(
+			!result.stdout.includes("served by approximate HAR match"),
+			`exact match must not carry the fallback limitation; stdout=${result.stdout}`,
+		);
+		const claim = JSON.parse(readFileSync(claimPath, "utf8")) as {
+			limitations: string[];
+		};
+		assert.ok(
+			!claim.limitations.some((l) =>
+				l.includes("served by approximate HAR match"),
+			),
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("ApiRequestFallbackMatchLimitation: a context.request call served by the APPROXIMATE (fallback) match carries the limitation in both stdout and the committed claim", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "api-request-fallback-test-"));
+	try {
+		const { scenarioPath, claimPath } = writeApiRequestFallbackScenario(tmpDir);
+		// Shares the `a` query parameter NAME with the one recorded entry but
+		// differs in `b` — the bridge's fallback path, not an exact match.
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--import",
+				"tsx",
+				VERIFY_CLI_PATH,
+				"api-request-fallback-stub",
+				"--entrypoint",
+				API_REQUEST_FALLBACK_STUB_PATH,
+				scenarioPath,
+				"--json",
+				claimPath,
+			],
+			{
+				cwd: PACKAGE_ROOT,
+				env: {
+					...process.env,
+					PDPP_TEST_API_REQUEST_URL: "https://example.test/data?a=1&b=999",
+				},
+				encoding: "utf8",
+				timeout: 60_000,
+			},
+		);
+		assert.equal(
+			result.status,
+			0,
+			`expected success; stdout=${result.stdout} stderr=${result.stderr}`,
+		);
+		assert.match(
+			result.stdout,
+			/context\.request: 1 request\(s\) served by approximate HAR match \(same path, differing query\); not an exact replay/,
+		);
+		const claim = JSON.parse(readFileSync(claimPath, "utf8")) as {
+			limitations: string[];
+		};
+		assert.ok(
+			claim.limitations.some((l) =>
+				l.includes("served by approximate HAR match"),
+			),
+			`expected the fallback limitation in the committed claim; got: ${JSON.stringify(claim.limitations)}`,
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+// ─── ClockTraceExhaustedLimitation: record/replay clock-trace fidelity ────
+//
+// subprocess-fetch-preloads.ts's createClockObserver (RECORD) and
+// createTraceReplayClock (REPLAY) — see claims.ts's
+// ClockTraceExhaustedLimitation. Proves the full round trip through REAL
+// spawned subprocesses on both sides: a record run's OBSERVED clock values
+// land in run.clock.trace, and a replay making the SAME number of
+// Date.now() calls reproduces the IDENTICAL values (the connector's
+// emitted record, hashed, is the oracle — not a hand-asserted value this
+// test could get wrong). A replay making MORE calls than the trace holds
+// falls back to the pre-existing counter from the trace's last value and
+// discloses exactly how many calls were synthesized.
+const CLOCK_TRACE_STUB_PATH = join(
+	FIXTURES_DIR,
+	"scenario-clock-trace-stub-connector.ts",
+);
+
+/** Records once, applies `mutateClock` to run 0's `clock` field, rebuilds
+ *  `expected.records` from whatever the FIRST (expected-to-mismatch) verify
+ *  pass's `--dump-records` actually produced, and returns the paths so the
+ *  caller can run a second, expected-to-pass verify. Reading back the
+ *  ACTUAL projected record (rather than hand-predicting it) is deliberate:
+ *  see scenario-clock-trace-stub-connector.ts's module comment on why this
+ *  fixture's exact clock-call COUNT at any given point isn't something a
+ *  test can reliably predict (the shared runtime's own Date.now() calls are
+ *  interleaved with this fixture's, and record/replay use different
+ *  surrounding preloads). */
+function recordMutateAndRebuildExpected(
+	tmpDir: string,
+	mutateClock: (clock: { fixed_now: string; trace?: number[] }) => {
+		fixed_now: string;
+		trace?: number[];
+	},
+): { claimPath: string; scenarioPath: string } {
+	const scenarioPath = join(tmpDir, "scenario.json");
+	const dumpDir = join(tmpDir, "dump");
+	const recordResult = runRecordCli(
+		[
+			"scenario-clock-trace-stub-connector",
+			"--entrypoint",
+			CLOCK_TRACE_STUB_PATH,
+			"--runs",
+			"1",
+			"--out",
+			scenarioPath,
+		],
+		{ PDPP_TEST_CLOCK_CALLS: "3" },
+	);
+	assert.equal(
+		recordResult.code,
+		0,
+		`record should succeed; stderr=${recordResult.stderr}`,
+	);
+
+	const scenario = JSON.parse(
+		readFileSync(scenarioPath, "utf8"),
+	) as ConnectorScenario & {
+		runs: Array<{ clock?: { fixed_now: string; trace?: number[] } }>;
+	};
+	const run0 = scenario.runs[0];
+	assert.ok(
+		run0?.clock,
+		"sanity: record must have produced run 0 with a clock",
+	);
+	run0.clock = mutateClock(run0.clock);
+	writeFileSync(scenarioPath, JSON.stringify(scenario));
+
+	mkdirSync(dumpDir, { recursive: true });
+	const firstPass = spawnSync(
+		process.execPath,
+		[
+			"--import",
+			"tsx",
+			VERIFY_CLI_PATH,
+			"scenario-clock-trace-stub-connector",
+			"--entrypoint",
+			CLOCK_TRACE_STUB_PATH,
+			scenarioPath,
+			"--dump-records",
+			dumpDir,
+		],
+		{ cwd: PACKAGE_ROOT, env: process.env, encoding: "utf8", timeout: 60_000 },
+	);
+	assert.notEqual(
+		firstPass.status,
+		0,
+		`expected the first pass to fail on the now-stale expected.records; stdout=${firstPass.stdout}`,
+	);
+	const dumped = JSON.parse(
+		readFileSync(join(dumpDir, "run0-items.json"), "utf8"),
+	) as Array<{ actual_sha256: string; id: string }>;
+	const probe = dumped.find((d) => d.id === "probe");
+	assert.ok(
+		probe,
+		`expected a dumped 'probe' record; got: ${JSON.stringify(dumped)}`,
+	);
+
+	run0.expected.records = {
+		items: {
+			count: 1,
+			ids: ["probe"],
+			ops: ["upsert"],
+			record_sha256s: [probe.actual_sha256],
+		},
+	};
+	writeFileSync(scenarioPath, JSON.stringify(scenario));
+	return { scenarioPath, claimPath: join(tmpDir, "claim.json") };
+}
+
+test("clock trace: a run whose clock.trace is DECLARED (even if every call ends up synthesized) discloses the overflow count", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "clock-trace-declared-empty-"));
+	try {
+		// A declared-but-empty trace: every Date.now() call this run makes
+		// falls beyond it from the very first call, which is exactly the
+		// "clock.trace exists but this replay's code path reads the clock
+		// more than record's did" case the limitation exists to disclose.
+		const { scenarioPath } = recordMutateAndRebuildExpected(
+			tmpDir,
+			(clock) => ({
+				...clock,
+				trace: [],
+			}),
+		);
+
+		const verifyResult = runVerifyCli([
+			"scenario-clock-trace-stub-connector",
+			"--entrypoint",
+			CLOCK_TRACE_STUB_PATH,
+			scenarioPath,
+		]);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`verify should succeed once expected.records matches the synthesized values; stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.match(verifyResult.stdout, /run 0: PASS/);
+		assert.match(
+			verifyResult.stdout,
+			/clock: \d+ call\(s\) beyond the recorded trace; values synthesized/,
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("clock trace: a run whose clock.trace was NEVER DECLARED (old scenario, recorded before this field existed) carries NO clock-trace limitation, even though every call is still synthesized", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "clock-trace-undeclared-"));
+	try {
+		// Deletes `trace` entirely (not just empties it) — the "old scenario"
+		// shape. Falls back to the exact same pre-existing counter behavior,
+		// but must NOT be reported as a new divergence: that disclosure is
+		// reserved for a scenario that DECLARED a trace and still ran past it.
+		const { scenarioPath } = recordMutateAndRebuildExpected(
+			tmpDir,
+			(clock) => ({
+				fixed_now: clock.fixed_now,
+			}),
+		);
+
+		const verifyResult = runVerifyCli([
+			"scenario-clock-trace-stub-connector",
+			"--entrypoint",
+			CLOCK_TRACE_STUB_PATH,
+			scenarioPath,
+		]);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`verify should succeed once expected.records matches the synthesized values; stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.match(verifyResult.stdout, /run 0: PASS/);
+		assert.ok(
+			!verifyResult.stdout.includes("beyond the recorded trace"),
+			`an undeclared trace must never carry the clock-trace limitation; stdout=${verifyResult.stdout}`,
+		);
+	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });
