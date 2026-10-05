@@ -18,6 +18,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	manifestPath as manifestPathFor,
@@ -176,6 +177,18 @@ test("signal emits messages with a monotonic sent_at cursor", async () => {
 		});
 
 		const result = await runSignal(scriptPath, ["messages"]);
+		assertUserFacingProgress(result.messages);
+		assert.ok(
+			result.messages.some(
+				(m) =>
+					m.type === "PROGRESS" && m.message === "Reading your Signal messages",
+			),
+			"owner sees a plain stage line",
+		);
+		assert.match(
+			result.stderr,
+			/\[signal-diagnostic\] stage_progress \{"phase":"index","pass":"index","stream":"messages","detail":"querying rows"\}/,
+		);
 		const msgs = records(result.messages, "messages");
 		assert.equal(msgs.length, 2);
 		assert.equal(msgs[0]?.conversation_id, CONV_A);

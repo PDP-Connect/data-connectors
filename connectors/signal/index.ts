@@ -128,6 +128,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule } from "@pdpp/connector-protocol";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	buildDetailCoverageMessage,
 	type CollectContext,
@@ -750,10 +751,15 @@ async function emitMessageRowsAndReactions({
 			reactionSourceRows.push({ id: raw.id, json: raw.json });
 		}
 		if (itemOrdinal % PROGRESS_INTERVAL_ROWS === 0) {
-			await progress(
-				`Signal phase=emit pass=emit stream=messages item=${itemOrdinal}`,
-				{ stream: "messages" },
-			);
+			connectorDiagnostic("signal", "stage_progress", {
+				phase: "emit",
+				pass: "emit",
+				stream: "messages",
+				item: itemOrdinal,
+			});
+			await progress(`Imported ${itemOrdinal} messages`, {
+				stream: "messages",
+			});
 		}
 	}
 	return {
@@ -1147,10 +1153,15 @@ async function emitAttachmentRows({
 		emitted += 1;
 
 		if (emitted % ATTACHMENT_PROGRESS_INTERVAL === 0) {
-			await progress(
-				`Signal phase=emit pass=emit stream=attachments item=${emitted}`,
-				{ stream: "attachments" },
-			);
+			connectorDiagnostic("signal", "stage_progress", {
+				phase: "emit",
+				pass: "emit",
+				stream: "attachments",
+				item: emitted,
+			});
+			await progress(`Imported ${emitted} attachments`, {
+				stream: "attachments",
+			});
 		}
 	}
 	return emitted;
@@ -1164,10 +1175,15 @@ async function collectAttachments(ctx: CollectContext): Promise<void> {
 		join(tmpdir(), `pdpp-signal-attachments-${randomUUID()}`);
 	await mkdir(exportRoot, { recursive: true });
 
-	await progress(
-		"Signal phase=index pass=index stream=attachments exporting via sigtop",
-		{ stream: "attachments" },
-	);
+	connectorDiagnostic("signal", "stage_progress", {
+		phase: "index",
+		pass: "index",
+		stream: "attachments",
+		detail: "exporting via sigtop",
+	});
+	await progress("Exporting your Signal attachments", {
+		stream: "attachments",
+	});
 	const result = await runSigtop(["export-attachments", "-i", exportRoot]);
 	if (result.code !== 0) {
 		throw new Error(
@@ -1180,10 +1196,15 @@ async function collectAttachments(ctx: CollectContext): Promise<void> {
 		Promise.resolve(buildAttachmentMetadataIndex(db)),
 	);
 
-	await progress(
-		"Signal phase=emit pass=emit stream=attachments hydrating rows",
-		{ stream: "attachments" },
-	);
+	connectorDiagnostic("signal", "stage_progress", {
+		phase: "emit",
+		pass: "emit",
+		stream: "attachments",
+		detail: "hydrating rows",
+	});
+	await progress("Importing your Signal attachments", {
+		stream: "attachments",
+	});
 	const emitted = await emitAttachmentRows({
 		emitRecord,
 		exportRoot,
@@ -1319,10 +1340,13 @@ async function collectMessagesAndReactions({
 	since: number;
 }): Promise<void> {
 	const { emit, emitRecord, progress } = ctx;
-	await progress(
-		"Signal phase=index pass=index stream=messages querying rows",
-		{ stream: "messages" },
-	);
+	connectorDiagnostic("signal", "stage_progress", {
+		phase: "index",
+		pass: "index",
+		stream: "messages",
+		detail: "querying rows",
+	});
+	await progress("Reading your Signal messages", { stream: "messages" });
 
 	// Measured BEFORE the emit pass, at the source boundary, so the anchor
 	// cannot be contaminated by anything this run emitted. Throws on a
@@ -1372,10 +1396,13 @@ async function collectMessagesAndReactions({
 	}
 
 	if (emitReactions) {
-		await progress(
-			"Signal phase=emit pass=emit stream=reactions deriving from message json",
-			{ stream: "reactions" },
-		);
+		connectorDiagnostic("signal", "stage_progress", {
+			phase: "emit",
+			pass: "emit",
+			stream: "reactions",
+			detail: "deriving from message json",
+		});
+		await progress("Importing reactions", { stream: "reactions" });
 		await emitReactionRowsFromMessages(result.reactionSourceRows, emitRecord);
 		await emit({
 			type: "STATE",
@@ -1390,10 +1417,15 @@ async function collectConversations(
 	ctx: CollectContext,
 ): Promise<void> {
 	const { emit, emitRecord, progress } = ctx;
-	await progress(
-		"Signal phase=index pass=index stream=conversations querying rows",
-		{ stream: "conversations" },
-	);
+	connectorDiagnostic("signal", "stage_progress", {
+		phase: "index",
+		pass: "index",
+		stream: "conversations",
+		detail: "querying rows",
+	});
+	await progress("Reading your Signal conversations", {
+		stream: "conversations",
+	});
 	try {
 		await emitConversationRows(db, emitRecord);
 	} catch (err: unknown) {
@@ -1448,7 +1480,12 @@ async function collectMessagesConversationsReactions(
 }
 
 async function runHealthCheck(ctx: CollectContext): Promise<void> {
-	await ctx.progress("Signal phase=index pass=index sigtop check-database", {});
+	connectorDiagnostic("signal", "stage_progress", {
+		phase: "index",
+		pass: "index",
+		detail: "sigtop check-database",
+	});
+	await ctx.progress("Checking the Signal database", {});
 	const health = await runSigtop(["check-database"]);
 	if (health.code !== 0) {
 		throw new Error(
