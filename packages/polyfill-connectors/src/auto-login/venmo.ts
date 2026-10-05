@@ -40,6 +40,7 @@ import {
 	manualBrowserLogin,
 	withDeadline,
 } from "../browser-handoff.ts";
+import { connectorDiagnostic } from "../connector-diagnostic.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -1411,8 +1412,8 @@ function challengeHandoffMessage(
  * Independent review caught that, and it was the right catch: filling is not
  * signing in. It skipped `clickVenmoLoginSubmit` and its
  * `venmo_login_submit_missing` guard, the `onCredentialSubmit`
- * retry-classification marker, the durable `venmo_credential_submit` progress
- * event, the `domcontentloaded` wait, `handleVenmoOtpIfPresent`, and the POLLED
+ * retry-classification marker, the `venmo_credential_submit` diagnostic and the
+ * durable sign-in progress line, the `domcontentloaded` wait, `handleVenmoOtpIfPresent`, and the POLLED
  * post-submit verify — each of which exists because a real run once failed
  * without it.
  *
@@ -1827,9 +1828,10 @@ async function loginWithSavedCredentials({
 	// was submitted and Venmo rejected it" from "the flow never got this far" —
 	// `onCredentialSubmit` only flips an in-process retry-classification flag
 	// (session-establish.ts) and was never itself observable in spine_events.
-	await progress(
-		"venmo_credential_submit: saved password submitted to sign-in form, awaiting result",
-	);
+	connectorDiagnostic("venmo", "venmo_credential_submit", {
+		detail: "saved password submitted to sign-in form, awaiting result",
+	});
+	await progress("Signing in to Venmo with your saved password");
 	await page
 		.waitForLoadState("domcontentloaded", { timeout: 30_000 })
 		.catch((): null => null);

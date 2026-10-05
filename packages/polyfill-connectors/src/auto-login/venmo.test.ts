@@ -6,6 +6,10 @@ import { test } from "node:test";
 import type { Locator, Page } from "playwright";
 import { VENMO_RETRYABLE_PATTERN } from "../../../../connectors/venmo/index.ts";
 import { API_BASE } from "../../../../connectors/venmo/parsers.ts";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../connector-diagnostic.ts";
 import type {
 	InteractionRequest,
 	InteractionResponse,
@@ -632,29 +636,43 @@ test("ensureVenmoSession: progress emits a durable credential-submit marker exac
 		const { page } = makePageWithWorkingLoginForm();
 		const { sendInteraction } = recordingSendInteraction();
 		const progressMessages: string[] = [];
-		const result = await ensureVenmoSession({
-			credentials: {
-				VENMO_PASSWORD: "test-password",
-				VENMO_USERNAME: "test-user",
-			},
-			page,
-			// biome-ignore lint/suspicious/useAwait: mirrors the runtime's Promise-returning progress signature
-			progress: async (message) => {
-				progressMessages.push(message);
-			},
-			sendInteraction,
-		});
+		const diagnostics: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnostics.push(line));
+		let result: Awaited<ReturnType<typeof ensureVenmoSession>>;
+		try {
+			result = await ensureVenmoSession({
+				credentials: {
+					VENMO_PASSWORD: "test-password",
+					VENMO_USERNAME: "test-user",
+				},
+				page,
+				// biome-ignore lint/suspicious/useAwait: mirrors the runtime's Promise-returning progress signature
+				progress: async (message) => {
+					progressMessages.push(message);
+				},
+				sendInteraction,
+			});
+		} finally {
+			setConnectorDiagnosticSink(undefined);
+		}
 		assert.equal(result?.live, true);
-		const marker = progressMessages.filter((m) =>
-			m.startsWith("venmo_credential_submit"),
+		const marker = progressMessages.filter(
+			(m) => m === "Signing in to Venmo with your saved password",
 		);
 		assert.equal(
 			marker.length,
 			1,
 			"exactly one durable marker for one credential submission",
 		);
+		assertUserFacingProgress(
+			progressMessages.map((message) => ({ message, type: "PROGRESS" })),
+		);
+		const submitDiagnostics = diagnostics.filter((l) =>
+			l.startsWith("[venmo-diagnostic] venmo_credential_submit"),
+		);
+		assert.equal(submitDiagnostics.length, 1);
 		assert.doesNotMatch(
-			marker[0] ?? "",
+			[...marker, ...submitDiagnostics].join("\n"),
 			/test-password|test-user/,
 			"the marker must never carry the credential value itself",
 		);
@@ -675,8 +693,9 @@ test("ensureVenmoSession: progress does NOT emit the credential-submit marker on
 	});
 	assert.equal(result?.live, true);
 	assert.equal(
-		progressMessages.filter((m) => m.startsWith("venmo_credential_submit"))
-			.length,
+		progressMessages.filter(
+			(m) => m === "Signing in to Venmo with your saved password",
+		).length,
 		0,
 		"a reused, already-live session never submits a credential",
 	);
