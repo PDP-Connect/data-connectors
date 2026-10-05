@@ -28,6 +28,7 @@ import {
 	ensureAmazonSession,
 } from "../../packages/polyfill-connectors/src/auto-login/amazon.ts";
 import { resolveLoginCredentials } from "../../packages/polyfill-connectors/src/auto-login/login-credentials.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	type DetailGapMessage,
@@ -355,9 +356,7 @@ async function deepSessionCheck(page: Page): Promise<boolean> {
 	// Wait for either the orders page to render or a sign-in form (both are
 	// valid post-nav states; we branch on them).
 	await page
-		.locator(
-			AMAZON_SESSION_READY_SELECTOR,
-		)
+		.locator(AMAZON_SESSION_READY_SELECTOR)
 		.first()
 		.waitFor({ state: "attached", timeout: DEEP_PROBE_WAIT_MS })
 		.catch((cause: unknown) => {
@@ -1325,10 +1324,14 @@ async function emitItemCountReconciliation(
 	if (declared === undefined || emittedItemCount >= declared) {
 		return;
 	}
+	connectorDiagnostic("amazon", "item_count_shortfall", {
+		declared_items: declared,
+		emitted_items: emittedItemCount,
+	});
 	await deps.emit({
 		type: "PROGRESS",
 		stream: "order_items",
-		message: `item_count_shortfall: an order detail listed ${declared} items but only ${emittedItemCount} became records`,
+		message: `An order lists ${declared} items but we could only save ${emittedItemCount}`,
 	});
 }
 
@@ -1854,9 +1857,14 @@ export async function applyYearCompletionState({
 	// unreachable by ANY future run. Leaving the prior state untouched keeps the
 	// year eligible for a later, fuller scan.
 	if (truncated) {
+		connectorDiagnostic("amazon", "year_cursor_not_advanced", {
+			year,
+			reason: "page_limit",
+			page_limit: PAGE_LIMIT,
+			orders_seen: yearOrderCount,
+		});
 		await progress(
-			`Not advancing Amazon year ${year} cursor because its scan stopped at the ${PAGE_LIMIT}-page limit ` +
-				`with more orders still listed (${yearOrderCount} seen so far)`,
+			`Amazon year ${year}: stopped after ${PAGE_LIMIT} pages of orders; some orders from this year were not read`,
 			{ stream: "orders" },
 		);
 		return;
@@ -1874,10 +1882,15 @@ export async function applyYearCompletionState({
 			last_scraped: nowIso(),
 		};
 	} else {
+		connectorDiagnostic("amazon", "year_cursor_not_advanced", {
+			year,
+			reason: "unparseable_order_rows",
+			unparseable_rows: unparseableDateCount,
+		});
 		await progress(
-			`Not advancing Amazon year ${year} cursor because ${unparseableDateCount} order row${
-				unparseableDateCount === 1 ? "" : "s"
-			} could not be emitted`,
+			`Amazon year ${year}: ${unparseableDateCount} ${
+				unparseableDateCount === 1 ? "order" : "orders"
+			} could not be read; we will retry this year next run`,
 			{ stream: "orders" },
 		);
 	}
@@ -2198,8 +2211,11 @@ if (isMainModule(import.meta.url)) {
 					{ recoveryOnly: ctx.recoveryOnly === true, wantsItems },
 				);
 			if (gapRecovery.stoppedWithPending) {
+				connectorDiagnostic("amazon", "gap_recovery_stopped_pending", {
+					stopped_with_pending: true,
+				});
 				await progress(
-					"Amazon order-item gap recovery stopped with pending gaps still queued; the next run will continue recovery",
+					"Some order items are still missing; the next run will keep trying",
 				);
 			}
 			if (gapRecovery.suppressForward) {
@@ -2249,7 +2265,11 @@ if (isMainModule(import.meta.url)) {
 					currentYear,
 				);
 				for (const { year, reason } of skipped) {
-					await progress(`Skipping year ${year} (incremental: ${reason})`);
+					connectorDiagnostic("amazon", "year_skipped_incremental", {
+						year,
+						reason,
+					});
+					await progress(`Skipping year ${year} (already collected)`);
 				}
 				years = planned;
 			}
@@ -2306,7 +2326,8 @@ if (isMainModule(import.meta.url)) {
 				const prior = yearsState[String(year)];
 				// Year-freezing: skip if already frozen
 				if (prior?.frozen) {
-					await progress(`Skipping year ${year} (frozen)`);
+					connectorDiagnostic("amazon", "year_skipped_frozen", { year });
+					await progress(`Skipping year ${year} (already complete)`);
 					continue;
 				}
 
