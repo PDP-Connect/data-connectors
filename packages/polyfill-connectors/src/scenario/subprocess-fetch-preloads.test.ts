@@ -222,12 +222,19 @@ test("createTraceReplayClock: a one-entry trace consumes that entry, then overfl
 // shaped), silently shifting every trace index — exactly the drift a past
 // investigation chased into `node_modules/tsx`'s own module-transform
 // loader (see this file's and bin/scenario-verify.ts's history for that
-// finding: tsx's loader, not this package's code, is what actually reads
+// finding: tsx's loader, not this package's code, was what actually read
 // the patched clock a different number of times under sandboxed vs.
-// unisolated execution — not fixable from inside a preload, since tsx is a
-// separate `--import` entry, not a module this preload's template can wrap).
-// This test guards the part that IS this package's responsibility: that
-// neither generated preload's OWN code is ever the source of such drift.
+// unisolated execution, via its own on-disk transform cache's different
+// hit/miss shape in each mode). THAT specific cause is fixed two other
+// ways (not by this test): `SCENARIO_CLOCK_ARM_HOOK` (connector-runtime.ts)
+// arms observation/replay at this runtime's own START handling instead of
+// at process start, so tsx's pre-START module-loading work is never
+// traced at all; `TSX_DISABLE_CACHE=1` (set by both bin/scenario-record.ts
+// and bin/scenario-verify.ts) additionally makes tsx's own cache shape
+// equal in both modes, for any transform work that happens AFTER START
+// (a lazy dynamic import). This test guards the part that IS this
+// package's responsibility, independent of either fix: that neither
+// generated preload's OWN code is ever the source of such drift.
 //
 // A plain substring scan (not a parser) is deliberate and sufficient here:
 // the invariant under test is "this generated source contains no bare,

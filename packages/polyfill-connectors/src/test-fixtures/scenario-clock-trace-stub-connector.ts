@@ -11,16 +11,27 @@
  * so a test can drive a different count) and emits one record carrying
  * every value it saw, in order.
  *
- * NOT a byte-for-byte record/replay reproduction proof: the surrounding
- * runtime (`runConnector`'s own protocol/checkpoint bookkeeping) shares
- * the SAME patched `Date`, and makes a DIFFERENT number of its own
- * Date.now() calls before and after this fixture's `collect()` runs
- * between a RECORD invocation (`writeRecordPreload`'s direct, unisolated
- * execution) and a REPLAY invocation (`writeReplayBridgePreload`'s bridge-
- * based execution) — a real, found index-alignment limitation of a
- * process-wide clock trace, not a bug in this fixture. Tests here use
+ * HISTORY: an earlier version of the clock-trace mechanism armed
+ * observation/replay at PROCESS START rather than at the connector's own
+ * START message, so module loading — most of it `tsx`'s own TypeScript-
+ * transform work for this file and its dependents, via a persistent
+ * on-disk cache with a DIFFERENT hit/miss shape under record's unisolated
+ * execution vs. replay's sandboxed one — called the patched `Date.now()`/
+ * `new Date()` a different number of times before this fixture's
+ * `collect()` even ran, shifting which trace index its 3 real calls
+ * landed on between record and replay. Fixed two ways (see
+ * `SCENARIO_CLOCK_ARM_HOOK`'s doc comment, `connector-runtime.ts`, and
+ * the `TSX_DISABLE_CACHE` env var set in both `bin/scenario-record.ts`
+ * and `bin/scenario-verify.ts`): observation/replay now arms at this
+ * runtime's own START handling (identical in both modes, module-loading
+ * work never traced), and tsx's cache is disabled in both subprocesses
+ * so its loader's own clock reads, if any remain, are at least equal.
+ * `bin/scenario-verify-strict.test.ts`'s "an UNMODIFIED record/replay
+ * roundtrip" test proves this fixture's 3 values now replay EXACTLY from
+ * the trace, with no fallback/synthesis. Tests here also use
  * `--dump-records` to read back whatever the bridge ACTUALLY produced
- * rather than asserting a hand-predicted value.
+ * rather than asserting a hand-predicted value, which is how the
+ * original index-alignment drift was found in the first place.
  *
  * NOT registered in `src/orchestrator.ts` — fixture-only, never a
  * production connector.

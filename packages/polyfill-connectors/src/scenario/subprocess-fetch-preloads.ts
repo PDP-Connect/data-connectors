@@ -75,6 +75,7 @@ import {
 } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SCENARIO_CLOCK_ARM_HOOK } from "../connector-runtime.ts";
 import type { ScenarioInteraction, ScenarioResponseHeaders } from "./format.ts";
 import {
 	assertValidRecordMessage,
@@ -374,13 +375,25 @@ import { createHash } from "node:crypto";
 // ── Clock trace observer (createClockObserver's inline mirror — see that
 // function's doc comment for why RECORD observes rather than pins: the
 // connector must see the REAL clock while it talks to the real provider).
-// Installed before anything else in this preload so it catches every
-// Date.now()/new Date() call from the connector's own first line onward.
+// Installed before anything else in this preload so Date/Date.now are
+// ALREADY the observed versions by the time module loading (this file's
+// own remaining setup, tsx's own TS-transform work for the connector
+// module and its dependents) runs — but observations only start being
+// RECORDED once armed (see SCENARIO_CLOCK_ARM_HOOK's doc comment,
+// connector-runtime.ts): module loading is not part of either "record"
+// or "replay" and must never land in the trace. Before arming, this is
+// value-for-value identical to leaving Date/Date.now unpatched.
 const clockTrace = [];
+let clockArmed = false;
+globalThis[${JSON.stringify(SCENARIO_CLOCK_ARM_HOOK)}] = () => {
+  clockArmed = true;
+};
 const realDateNow = Date.now;
 const observeNow = () => {
   const value = realDateNow();
-  clockTrace.push(value);
+  if (clockArmed) {
+    clockTrace.push(value);
+  }
   return value;
 };
 Date.now = () => observeNow();
@@ -1082,6 +1095,20 @@ import https from "node:https";
 import net from "node:net";
 import { writeFileSync } from "node:fs";
 
+// Captured at the very top, before ANY patching below (including the
+// clock patch further down) — the one real reference this preload's own
+// pre-arm clock pass-through uses. See SCENARIO_CLOCK_ARM_HOOK's doc
+// comment (connector-runtime.ts) for why: module loading (this file's
+// own remaining setup, tsx's own TS-transform work for the connector
+// module and its dependents) happens before a run is armed and must see
+// the real clock, identically to record, not the deterministic replay
+// clock below.
+const realDateNowForClock = Date.now;
+let clockArmed = false;
+globalThis[${JSON.stringify(SCENARIO_CLOCK_ARM_HOOK)}] = () => {
+  clockArmed = true;
+};
+
 const BRIDGE_URL = ${JSON.stringify(bridgeUrl)};
 const BRIDGE_HOST = ${JSON.stringify(bridgeHost)};
 const BRIDGE_PORT = ${JSON.stringify(bridgePort)};
@@ -1273,6 +1300,15 @@ if (FIXED_NOW_ISO) {
     let fallbackCallCount = 0;
     let beyondTraceCount = 0;
     const advance = () => {
+      // Before arming (see SCENARIO_CLOCK_ARM_HOOK's doc comment,
+      // connector-runtime.ts), this is module-loading-era code (this
+      // preload's own remaining setup, tsx's own TS-transform work) — not
+      // part of the replayed run, so it must see the REAL clock,
+      // identically to record, rather than consuming trace entries that
+      // belong to the connector's own calls.
+      if (!clockArmed) {
+        return realDateNowForClock();
+      }
       if (traceIndex < trace.length) {
         const value = trace[traceIndex];
         traceIndex += 1;

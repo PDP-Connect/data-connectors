@@ -2705,3 +2705,62 @@ test("clock trace: a run whose clock.trace was NEVER DECLARED (old scenario, rec
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });
+
+test("clock trace: an UNMODIFIED record/replay roundtrip replays the fixture's own values EXACTLY from the trace — no fallback, no overflow, no limitation", () => {
+	// Proves the SCENARIO_CLOCK_ARM_HOOK fix (connector-runtime.ts) plus
+	// TSX_DISABLE_CACHE (bin/scenario-record.ts, bin/scenario-verify.ts):
+	// before arming-at-START and disabling tsx's own module-transform
+	// cache, this exact roundtrip failed — record's and replay's pre-START
+	// module-loading work (most of it tsx's own loader, transforming the
+	// connector module graph) called Date.now()/new Date() a DIFFERENT
+	// number of times in each mode, shifting every later trace index so
+	// the fixture's REAL 3 values landed on the WRONG trace entries during
+	// replay (see this file's history, and subprocess-fetch-preloads.ts's/
+	// browser-har-replay.ts's module doc comments, for the full finding).
+	// Unlike the two tests above, this one does NOT mutate run 0's clock —
+	// it is the direct, unmodified record-then-replay path every real
+	// scenario goes through, and must pass without any clock-trace
+	// disclosure at all.
+	const tmpDir = mkdtempSync(
+		join(tmpdir(), "clock-trace-unmodified-roundtrip-"),
+	);
+	try {
+		const scenarioPath = join(tmpDir, "scenario.json");
+		const recordResult = runRecordCli(
+			[
+				"scenario-clock-trace-stub-connector",
+				"--entrypoint",
+				CLOCK_TRACE_STUB_PATH,
+				"--runs",
+				"1",
+				"--out",
+				scenarioPath,
+			],
+			{ PDPP_TEST_CLOCK_CALLS: "3" },
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`record should succeed; stderr=${recordResult.stderr}`,
+		);
+
+		const verifyResult = runVerifyCli([
+			"scenario-clock-trace-stub-connector",
+			"--entrypoint",
+			CLOCK_TRACE_STUB_PATH,
+			scenarioPath,
+		]);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`an unmutated record/replay roundtrip must verify clean; stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+		);
+		assert.match(verifyResult.stdout, /run 0: PASS/);
+		assert.ok(
+			!verifyResult.stdout.includes("beyond the recorded trace"),
+			`every one of the fixture's 3 calls must replay from a real trace entry, not a synthesized fallback; stdout=${verifyResult.stdout}`,
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});

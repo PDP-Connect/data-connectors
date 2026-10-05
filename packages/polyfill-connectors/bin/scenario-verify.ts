@@ -1296,6 +1296,22 @@ function runReplaySubprocess(args: {
 				? {}
 				: { [args.filesystemInput.envVar]: args.filesystemInput.path }),
 			NODE_OPTIONS: `--import ${preloadPath}`,
+			// tsx's own module-transform result is cached (a persistent disk
+			// cache keyed by file content, falling back to a per-process
+			// in-memory Map only when this var is set — confirmed in
+			// node_modules/tsx/dist's own source). Left enabled, this
+			// subprocess's disk-cache HIT/MISS state (warm from a prior
+			// unisolated record run vs. cold under this sandboxed replay's
+			// redirected HOME/XDG_CACHE_HOME above) made tsx's loader call
+			// Date.now()/new Date() a DIFFERENT number of times transforming
+			// the identical connector module graph in record vs. replay — a
+			// real, found cause of clock-trace index drift (see
+			// SCENARIO_CLOCK_ARM_HOOK's doc comment, connector-runtime.ts,
+			// for the other half of that fix). Disabling it here makes both
+			// subprocesses start from the same cold, per-process, never-
+			// persisted cache shape every time, matching the identical
+			// setting bin/scenario-record.ts sets for the record subprocess.
+			TSX_DISABLE_CACHE: "1",
 			PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
 				process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
 			PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:

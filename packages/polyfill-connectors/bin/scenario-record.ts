@@ -1412,6 +1412,15 @@ function runRecordSubprocess(args: {
 				env: {
 					...subprocessEnv(),
 					NODE_OPTIONS: `--import ${preloadPath}`,
+					// See the identical setting (and its full rationale) in
+					// bin/scenario-verify.ts's runReplaySubprocess: tsx's
+					// persistent disk cache made its loader call Date.now()/
+					// new Date() a different number of times transforming this
+					// same connector module graph in record (this subprocess,
+					// unisolated) vs. replay (sandboxed, cold cache) — disabling
+					// it here makes both sides start from the same cold,
+					// per-process cache shape every time.
+					TSX_DISABLE_CACHE: "1",
 					PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
 						process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
 					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:
