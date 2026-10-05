@@ -286,11 +286,11 @@ test(
 		// A record outside its grant is dropped, not counted unreadable.
 		assert.deepEqual(noiseOf(run), []);
 		// Each cursor covers only what its own grant let the walk read: cycles stop at until, and
-		// sleeps start two days before their since.
+		// sleeps start thirty days before their since.
 		assertEachCursor(run, {
 			cycles: { ...FULL_CURSOR, through: "2026-09-16T00:00:00.000Z" },
 			recoveries: FULL_CURSOR,
-			sleeps: cursorFrom("2026-09-13T00:00:00.000Z"),
+			sleeps: cursorFrom("2026-08-16T00:00:00.000Z"),
 			workouts: FULL_CURSOR,
 		});
 	},
@@ -360,7 +360,7 @@ test(
 	async () => {
 		// Both bounds hold the nap (2026-09-15T05:10Z) and the run (2026-09-14T22:00Z), at the
 		// runtime's day precision and at the grant's exact instants alike. Both sit in the scored
-		// cycle, which began at 2026-09-14T12:40Z, before either bound: the walk reaches two days
+		// cycle, which began at 2026-09-14T12:40Z, before either bound: the walk reaches thirty days
 		// before the earliest since to read it, and each stream's floor records its own reach.
 		const run = await start([
 			{ name: "sleeps", time_range: { since: "2026-09-15T00:00:00.000Z" } },
@@ -371,8 +371,8 @@ test(
 		assert.deepEqual(idsIn(run, "workouts"), [RUN]);
 		assert.deepEqual(noiseOf(run), []);
 		assertEachCursor(run, {
-			sleeps: cursorFrom("2026-09-13T00:00:00.000Z"),
-			workouts: cursorFrom("2026-09-12T18:00:00.000Z"),
+			sleeps: cursorFrom("2026-08-16T00:00:00.000Z"),
+			workouts: cursorFrom("2026-08-15T18:00:00.000Z"),
 		});
 	},
 );
@@ -418,7 +418,7 @@ test(
 		assert.deepEqual(idsIn(run, "workouts"), [RUN]);
 		assert.deepEqual(noiseOf(run), []);
 		assertCursors(run, STREAMS, {
-			floor: "2026-09-12T18:00:00.000Z",
+			floor: "2026-08-15T18:00:00.000Z",
 			through: NOW,
 			open_since: OPEN_SINCE,
 		});
@@ -446,13 +446,13 @@ test(
 		// The run starts at workouts' since exactly.
 		assert.deepEqual(idsIn(run, "workouts"), [RUN]);
 		assert.deepEqual(noiseOf(run), []);
-		// Each floor is its own since less two days; recoveries' lies within two days of the
+		// Each floor is its own since less thirty days; recoveries' lies within thirty days of the
 		// account's start, so its reach stops there.
 		assertEachCursor(run, {
-			cycles: cursorFrom("2026-09-13T18:00:00.000Z"),
+			cycles: cursorFrom("2026-08-16T18:00:00.000Z"),
 			recoveries: FULL_CURSOR,
-			sleeps: cursorFrom("2026-09-12T18:00:00.000Z"),
-			workouts: cursorFrom("2026-09-12T22:00:00.000Z"),
+			sleeps: cursorFrom("2026-08-15T18:00:00.000Z"),
+			workouts: cursorFrom("2026-08-15T22:00:00.000Z"),
 		});
 	},
 );

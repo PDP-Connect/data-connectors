@@ -1326,13 +1326,13 @@ test("collect: the least advanced stream's cursor sets where the overlap starts"
 
 const SINCE = "2026-09-01T00:00:00.000Z";
 /** How far before a grant's start the walk reaches, for a cycle that began before it and holds sleeps after it. */
-const REACH = 2 * DAY;
+const REACH = 30 * DAY;
 
-test("collect: a grant starting after the account starts the walk, and the cursor's floor, two days before it", async () => {
+test("collect: a grant starting after the account starts the walk, and the cursor's floor, thirty days before it", async () => {
 	const fake = fakeWhoop(fixtures());
 	const h = await collect(fake, { ranges: everyStream({ since: SINCE }) });
 	const requests = cyclesRequests(fake);
-	assert.equal(requests.length, 1);
+	assert.equal(requests.length, 2, "the reach adds a window");
 	assert.equal(
 		nth(requests, 0).start,
 		Date.parse(SINCE) - REACH - DAY,
@@ -1345,7 +1345,7 @@ test("collect: a grant starting after the account starts the walk, and the curso
 	assert.deepEqual(idsOf(h, "cycles"), FIXTURE_CYCLE_IDS);
 });
 
-test("collect: a grant starting within two days of the account's start walks from the account's start", async () => {
+test("collect: a grant starting within thirty days of the account's start walks from the account's start", async () => {
 	const since = FLOOR + DAY; // the account's created_at
 	const fake = fakeWhoop(fixtures());
 	const h = await collect(fake, { ranges: everyStream({ since: iso(since) }) });
@@ -1383,6 +1383,35 @@ test("collect: a cycle that began a day before the grant gives the nap and worko
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(933)]);
 	assert.deepEqual(messagesOf(h, "PROGRESS"), [], "held out, not unreadable");
 	assert.deepEqual(statesOf(h), everyStream(cursorAt(since - REACH, NOW)));
+});
+
+test("collect: a workouts grant starting inside a cycle that began ten days earlier keeps the workout, on a first run and on one resumed from a two-day reach", async () => {
+	// A strap left off: the cycle runs from ten days before the grant until after it.
+	const since = Date.parse(SINCE);
+	const began = since - 10 * DAY;
+	const held = [
+		holding(
+			cycleAt(1_000_000_921, began, {
+				during: `['${iso(began)}','${iso(since + 2 * DAY)}')`,
+			}),
+			{ workouts: [workoutAt(951, since + HOUR)] },
+		),
+	];
+	const ranges = { workouts: { since: SINCE } };
+	const streams = ["workouts"] as const;
+	const first = await collect(fakeWhoop(serve(held)), { ranges, streams });
+	assert.deepEqual(idsOf(first, "workouts"), [uuid(951)], "first run");
+	assert.deepEqual(first.skipped, []);
+	// A cursor saved by a run that reached back only two days.
+	const fake = fakeWhoop(serve(held));
+	const resumed = await collect(fake, {
+		ranges,
+		streams,
+		now: LATER,
+		state: { workouts: cursorAt(since - 2 * DAY, NOW) },
+	});
+	assert.deepEqual(idsOf(resumed, "workouts"), [uuid(951)], "resumed run");
+	assert.equal(nth(cyclesRequests(fake), 0).start, since - REACH - DAY);
 });
 
 test("collect: each record is held to its own stream's start, to the instant: a sleep an hour before it is neither emitted nor counted, one at it is", async () => {

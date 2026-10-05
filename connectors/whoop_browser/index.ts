@@ -44,10 +44,14 @@ export const WINDOW_DAYS = 30;
 const PAD_DAYS = 1;
 /** Re-read the last week each run: WHOOP scores sleep and recovery after the fact. */
 export const OVERLAP_DAYS = 7;
-/** A cycle runs from one sleep to the next, so one that began up to this long before a grant's start can hold sleeps and workouts inside it. */
-const CYCLE_REACH_DAYS = 2;
 /** A cycle still open after this long was abandoned (a strap left off), not one to keep re-reading. */
 const OPEN_CYCLE_REACH_DAYS = 30;
+/**
+ * A cycle runs from one sleep to the next, so one that began before a grant's start can hold
+ * sleeps and workouts inside it. With the strap off it stays open for days, so the walk reaches
+ * back as far as a resumed run re-reads an open cycle.
+ */
+const CYCLE_REACH_DAYS = OPEN_CYCLE_REACH_DAYS;
 const SIGN_IN_ORIGIN = "https://id.whoop.com";
 /** No settle read starts after this long, so with one stalled 30 s read it ends inside the 120 s establish watchdog. */
 const SETTLE_BUDGET_MS = 60_000;
