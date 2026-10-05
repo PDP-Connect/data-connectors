@@ -13,6 +13,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -52,6 +53,18 @@ async function withExportDir(
 	} finally {
 		await rm(dir, { force: true, recursive: true });
 	}
+}
+
+/** Parse `[youtube_takeout-diagnostic] <event> {json}` lines for one event. */
+function diagnosticLines(
+	stderr: string,
+	event: string,
+): Array<Record<string, unknown>> {
+	const prefix = `[youtube_takeout-diagnostic] ${event} `;
+	return stderr
+		.split("\n")
+		.filter((line) => line.startsWith(prefix))
+		.map((line) => JSON.parse(line.slice(prefix.length)));
 }
 
 const ALL_STREAMS = [
@@ -123,30 +136,44 @@ test("watch_history: a real-shaped watch-history.json emits RECORD -> STATE for 
 			const done = messagesOf(result, "DONE");
 			assert.equal(done.length, 1);
 
-			const coverage = messagesOf(result, "PROGRESS").find(
-				(m) =>
-					typeof m.message === "string" &&
-					m.message.startsWith("youtube_takeout.coverage "),
-			);
-			assert.ok(coverage);
-			const payload = JSON.parse(
-				String(coverage.message).slice("youtube_takeout.coverage ".length),
-			) as { streams: Array<Record<string, unknown>> };
-			assert.deepEqual(payload.streams, [
-				{
-					stream: "watch_history",
-					requested: true,
-					source: "takeout",
-					expected_file_present: true,
-					emitted_count: 1,
-					enumerated_count: 2,
-					resumed_from_cursor: false,
-				},
-			]);
+			const coverageLines = diagnosticLines(result.stderr, "coverage");
+			assert.equal(coverageLines.length, 1);
+			assert.deepEqual(coverageLines[0], {
+				stream: "watch_history",
+				requested: true,
+				source: "takeout",
+				expected_file_present: true,
+				emitted_count: 1,
+				enumerated_count: 2,
+				resumed_from_cursor: false,
+			});
 			assert.doesNotMatch(
-				String(coverage.message),
+				result.stderr,
 				/How to make sourdough|Baker Channel|youtube\.com|abc123XYZ0/,
 			);
+
+			const startLines = diagnosticLines(
+				result.stderr,
+				"watch_history_emit_start",
+			);
+			assert.deepEqual(startLines, [
+				{
+					phase: "emit",
+					pass: "emit",
+					stream: "watch_history",
+					total_items: 2,
+				},
+			]);
+
+			const progress = messagesOf(result, "PROGRESS");
+			assert.deepEqual(
+				progress.map((m) => m.message),
+				[
+					"Reading 2 YouTube watch history entries",
+					"Finished YouTube Takeout: 1 item saved",
+				],
+			);
+			assertUserFacingProgress(progress);
 		},
 	);
 });

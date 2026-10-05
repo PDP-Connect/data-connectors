@@ -40,6 +40,7 @@ import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { WatchHistoryEntry } from "../../packages/polyfill-connectors/src/youtube-watch-history.ts";
@@ -103,12 +104,16 @@ async function emitCoverageProgress(
 	ctx: CollectContext,
 	facts: Iterable<CoverageFact>,
 ): Promise<void> {
+	const sorted = [...facts].sort((a, b) => a.stream.localeCompare(b.stream));
+	// One diagnostic line per stream keeps each line well under the helper's
+	// length bound. The same facts the old JSON PROGRESS carried.
+	for (const fact of sorted) {
+		connectorDiagnostic("youtube_takeout", "coverage", { ...fact });
+	}
+	const saved = sorted.reduce((sum, fact) => sum + fact.emitted_count, 0);
 	await ctx.emit({
 		type: "PROGRESS",
-		message: `youtube_takeout.coverage ${JSON.stringify({
-			connector: "youtube_takeout",
-			streams: [...facts].sort((a, b) => a.stream.localeCompare(b.stream)),
-		})}`,
+		message: `Finished YouTube Takeout: ${saved} ${saved === 1 ? "item" : "items"} saved`,
 	});
 }
 
@@ -449,10 +454,16 @@ async function collectWatchHistory(
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
 	if (fact) fact.enumerated_count = json.length;
+	connectorDiagnostic("youtube_takeout", "watch_history_emit_start", {
+		phase: "emit",
+		pass: "emit",
+		stream: WATCH_HISTORY_STREAM,
+		total_items: json.length,
+	});
 	await ctx.emit({
 		type: "PROGRESS",
 		stream: WATCH_HISTORY_STREAM,
-		message: `YouTube phase=emit pass=emit stream=watch_history total_items=${json.length}`,
+		message: `Reading ${json.length} YouTube watch history ${json.length === 1 ? "entry" : "entries"}`,
 	});
 	for (const entry of json) {
 		const record = buildWatchHistoryRecordFromEntry(entry);
