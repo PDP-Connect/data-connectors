@@ -37,6 +37,7 @@ import {
 	runCollectorConnector,
 } from "@pdpp/collector-runtime";
 import { buildConnectorSpec } from "../../packages/polyfill-connectors/bin/collector-runner.ts";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { resolveExecutionRoot } from "../../packages/polyfill-connectors/src/execution-root.ts";
 
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -506,10 +507,14 @@ test("a captured body's pending upload stays visible in reporting", async () => 
 	// Local retention is complete; remote delivery is not, and an operator has to
 	// be able to see that.
 	assert.ok(
-		harness.progress.some((line) =>
-			line.includes("artifact_bodies_awaiting_upload=1"),
+		harness.progress.some(
+			(line) =>
+				line === "1 Claude Code attachment saved locally, waiting to upload",
 		),
 		"the undelivered body is reported, not silently dropped",
+	);
+	assertUserFacingProgress(
+		harness.progress.map((message) => ({ message, type: "PROGRESS" })),
 	);
 });
 
