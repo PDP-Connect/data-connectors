@@ -1,0 +1,28 @@
+{
+  "schema": "pdpp.connector-claim/1",
+  "connector": "strava",
+  "captured_at": "2026-10-05T20:23:25.628Z",
+  "verified_at": "2026-10-05T20:24:38.021Z",
+  "claim": "diagnostic_replay",
+  "limitations": [
+    "network isolation: launcher trust or recursive read-only filesystem closure not proven for this run",
+    "no recorded provider interaction - driver evidence for recorded-http not satisfied",
+    "filesystem input: replay read $STRAVA_EXPORT_DIR via STRAVA_EXPORT_DIR (read-only bind, manifest-declared); isolation did not exclude this host path",
+    "run 1: zero records and zero interactions; accepted as non-vacuous because run 0 yielded records from the same declared filesystem input (file reads are not observed)"
+  ],
+  "coverage": [],
+  "runs": 2,
+  "drivers": [
+    "recorded-http"
+  ],
+  "captured_with": {
+    "source_digest": "e123837cd9e3ac2c4f0f13ddb4a1c5090018d11c49eafab0732d6b5d21e81b21",
+    "declaration_digest": "0166fd82746cf531d4a4c295dfec247bdd03d5f1d44bafd3d5c39f94c1dcacf4"
+  },
+  "verified_subject": {
+    "source_digest": "e123837cd9e3ac2c4f0f13ddb4a1c5090018d11c49eafab0732d6b5d21e81b21",
+    "declaration_digest": "0166fd82746cf531d4a4c295dfec247bdd03d5f1d44bafd3d5c39f94c1dcacf4"
+  },
+  "scenario_path": "strava-scenario.json",
+  "scenario_status": "candidate oracle"
+}
