@@ -323,13 +323,13 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	// reddit streams (history compactor churn fix); values recomputed
 	// against this branch's post-rebase manifests (main's #295 fetched_at
 	// removal + #298 stricter schema are both reflected in these streams).
-	["reddit.submitted", "PLACEHOLDER_SUBMITTED"],
-	["reddit.comments", "PLACEHOLDER_COMMENTS"],
-	["reddit.saved", "PLACEHOLDER_SAVED"],
-	["reddit.upvoted", "PLACEHOLDER_UPVOTED"],
-	["reddit.downvoted", "PLACEHOLDER_DOWNVOTED"],
-	["reddit.hidden", "PLACEHOLDER_HIDDEN"],
-	["slack.workspace", "PLACEHOLDER_WORKSPACE"],
+	["reddit.submitted", "f0b27a009dc59056"],
+	["reddit.comments", "2feaaf77fc5c091b"],
+	["reddit.saved", "c6df7d53b8f186bf"],
+	["reddit.upvoted", "1b677287c7a4ccca"],
+	["reddit.downvoted", "c8624917dc06587e"],
+	["reddit.hidden", "8d376db6510b5ff2"],
+	["slack.workspace", "a5e0a23064825e93"],
 	["slack.channels", "b7ef731906d7805a"],
 	["slack.channel_stats", "e1992218be93380a"],
 	["slack.channel_memberships", "e082c8d57da01c1c"],
