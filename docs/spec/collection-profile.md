@@ -1499,9 +1499,9 @@ names.
 | `element_expectation` | connector | `expectation` (a declared id), `states_seen`, `final`, OPTIONAL `fallback_used` | `expectation_mismatch` when `final` is not `matched` |
 | `wait_expired` | connector | `awaited` (a declared expectation id), `budget_ms` | nothing |
 | `provider_message` | connector | `kind`: `auth_failure` or `other`; OPTIONAL `rule` (a declared rule id) | `auth_rejected` when `kind` is `auth_failure` |
-| `credential_submission` | runtime | `attempt` (a runtime handle), `account`, `outcome`: `succeeded`, `rejected`, or `unsettled`; OPTIONAL `rule` (the declared rule under which the runtime settled the attempt) | `auth_rejected` when `outcome` is `rejected` under a declared `auth` rule |
+| `credential_submission` | runtime | `attempt` (a runtime handle), `account` (the runtime's handle for the connection's provider account, never a provider username or email address), `outcome`: `succeeded`, `rejected`, or `unsettled`; OPTIONAL `rule` (the declared rule under which the runtime settled the attempt) | `auth_rejected` when `outcome` is `rejected` under a declared `auth` rule |
 | `rule_match` | runtime | `rule` (a declared rule id), `kind`: `auth`, `handle` (the runtime handle it matched on) | `auth_rejected` for a declared `auth` rule |
-| `connector_defect` | runtime | `class`: `protocol_violation` or `hint_unsupported`; OPTIONAL `reason` and `count` for aggregated violations | nothing in this version |
+| `connector_defect` | runtime | `class`: `protocol_violation` or `hint_unsupported`; for a protocol violation, `reason` (Section 5.10.2) and OPTIONAL `count` for aggregated violations | nothing in this version |
 
 The element states are:
 
@@ -1530,13 +1530,39 @@ record, and a connector cannot write them. A runtime record carries a runtime
 handle that the runtime assigned when it initiated or observed the action, for
 example a submission attempt id.
 
-An `OBSERVATION` is a protocol violation when the connector did not declare
-the capability, when its fact type is a runtime fact type, when it is invalid,
-when it reuses an id, or when it exceeds the size limit. The runtime MUST
+A runtime records `credential_submission` only for a submission that it
+performed itself, with the outcome that it observed itself. Delivering a
+credential in `INTERACTION_RESPONSE` is not a runtime-performed submission. A
+runtime records `rule_match` only from a response that it observed itself on
+the named handle. A connector fact, `DONE.error`, or connector text never
+produces either record.
+
+An `OBSERVATION` is a protocol violation in each case below. The runtime MUST
 discard the fact and record `connector_defect` with class
-`protocol_violation`. It MAY aggregate repeated violations into one record. As
-an exception to Section 6.2 item 8, the runtime MAY let the run continue, so
-that the remaining facts can still be diagnosed.
+`protocol_violation` and the `reason` from this closed set:
+
+| `reason` | Case |
+| --- | --- |
+| `undeclared_capability` | The connector did not declare `OBSERVATION`. |
+| `runtime_fact_type` | The `fact` is a runtime fact type. |
+| `invalid` | The message does not match Section 5.10 and its fact type. |
+| `duplicate_id` | The `id` repeats an earlier `id` in the run. |
+| `oversize` | The serialized message exceeds the runtime's size limit. |
+| `count_exceeded` | The run already reached the runtime's count limit (Section 5.10.4). |
+
+A runtime record never contains connector-supplied text. The runtime MAY
+aggregate repeated violations with the same `reason` into one record with a
+`count`.
+
+A fact that names a step, expectation, or rule id that the manifest does not
+declare is not a protocol violation and is not `invalid`. The runtime keeps
+it, and it supports nothing (Section 3.8).
+
+After a violation, the runtime MUST continue the run. This is a deliberate
+exception to Section 6.2 item 8: `OBSERVATION` carries diagnosis, not data,
+so a discarded fact cannot corrupt collected records or state, and stopping
+the run would let a connector hide the remaining evidence by sending one bad
+fact.
 
 #### 5.10.3 Retirement
 
@@ -1584,7 +1610,8 @@ exit. A connector cannot choose the terminal event.
 Only the records of item 1 are action-eligible. Every other unretired fact
 stays visible to the owner and cannot become the cause.
 
-**Cause.** The cause is one category and the ids of its basis facts.
+**Cause.** The cause is one category and `cause.basis`, the ids of the facts
+that support it.
 
 | Category | Supported by an in-scope fact |
 | --- | --- |
@@ -1592,13 +1619,15 @@ stays visible to the owner and cannot become the cause.
 | `expectation_mismatch` | an `element_expectation` with `final` other than `matched`, for a declared expectation at its declared step |
 | `unknown` | nothing |
 
-The basis MUST cite at least one in-scope fact that meets the category's
-predicate. Otherwise the cause is `unknown`. Runtime records outrank connector
+The cause's basis (`cause.basis`, which is distinct from the connector's
+`DONE.error.basis`) MUST cite at least one in-scope fact that meets the
+category's predicate. Otherwise the cause is `unknown`. Runtime records outrank connector
 facts. `auth_rejected` outranks `expectation_mismatch`, because a login error
 page is also a mismatch and the specific signal explains more. Ties break by
 record order. The other in-scope findings are listed as contributing.
 
-A cause whose basis contains no runtime record is the connector's account. A
+A cause whose `cause.basis` contains no runtime record is the connector's
+account. A
 runtime MUST present it as the connector's report, for example "The connector
 reports that the provider rejected the sign-in", and it unlocks nothing.
 `expectation_mismatch` shows that what the connector saw differed from what
@@ -1619,6 +1648,12 @@ gate itself makes never satisfy a predicate.
 | `not_retriable`, `unknown` | Always holds. |
 | `manual_action_required`, `update_selector`, `retry_on_connector_upgrade`, `upstream_unblock`, `retry_by_runtime` | Never holds in this version. Each needs runtime evidence that this version does not define (Section 5.13). |
 
+Because a runtime records `credential_submission` only for a submission that
+it performed itself (Section 5.10.2), and runtime-performed submission belongs
+to the credential attempt ledger and sealed authentication (Section 5.13), the
+`refresh_credentials` predicate effectively never holds in this version. The
+owner's sign-in, which is always available (below), covers that case.
+
 `DONE.error.retryable` and the `retryable` member of a hint are connector
 claims. A runtime MUST NOT start an automatic retry or resubmission because of
 either. It starts one only when the gate allows `retry_by_runtime`, which
@@ -1630,7 +1665,9 @@ prompt or any other recovery control. Independently of diagnosis, a runtime
 that keeps connections MUST let the owner start a sign-in for a connection at
 any time. That sign-in runs on the provider's origin in a runtime-owned
 browser or through the runtime's credential store, never in a form that a
-connector renders.
+connector renders. Credential entry that the runtime renders itself is
+conformant when any connector-supplied text in it appears only as attributed,
+inert labels.
 
 The connector's own error text (`DONE.error.message`) stays visible to the
 owner together with the diagnosis. A runtime MUST NOT hide or replace that
@@ -1714,8 +1751,8 @@ A conforming runtime:
 6. Stages and commits state only under Section 5.3 and Section 5.8.
 7. Validates checkpoint dependencies, coverage, and gaps. If it advertises
    `STREAM_EVIDENCE`, it also validates that message as defined in Section 5.7.
-8. Terminates a connector on a protocol violation, except as Section 5.10.2
-   allows for `OBSERVATION`.
+8. Terminates a connector on a protocol violation, except that it continues
+   the run after an `OBSERVATION` violation as Section 5.10.2 requires.
 9. Does not report a cancelled, abandoned, malformed, or incomplete run as
    successful.
 10. If it confines filesystem access, makes only the declared filesystem
