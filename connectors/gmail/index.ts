@@ -3970,11 +3970,34 @@ export function validateAttachmentHydrationPreflight(args: {
  * the miss so it is not silently absent from the coverage story, mirroring
  * the `message_bodies` gap pattern (2026-08-23 owner decision) — though,
  * same as that gap, nothing in this connector currently consumes a served
- * gap of this kind to force a re-fetch; recovery today is incidental (the
- * message's modseq changing again triggers another delta-pass visit, or a
- * full resync). The flag/label change this pass exists to apply is simply
- * deferred to that next visit, the same accepted tradeoff as the
- * envelope-absent skip.
+ * gap of this kind to force a re-fetch.
+ *
+ * Skipping the RECORD is not enough on its own, though. The caller always
+ * persists `highest_modseq` as the mailbox's CURRENT value (see
+ * `runAllMailPasses`'s STATE emission), not "the modseq this pass actually
+ * finished covering" — so a skipped message's flag/label change (the very
+ * thing this pass exists to apply) would be silently and PERMANENTLY
+ * dropped once the floor moves past it: `changedSince` on the next run only
+ * re-surfaces a message whose modseq changes AGAIN, which may never happen.
+ * That is the exact defect this function guards `snippet` against, just
+ * aimed at `labels`/`is_seen`/`is_flagged` instead — recoverable-looking,
+ * actually permanent. `skippedAnyMessage` in the return value tells the
+ * caller a message was left behind this run, so it can hold `highest_modseq`
+ * at its PRIOR value instead of advancing it: the next run's `changedSince`
+ * then re-covers every message changed since that same floor, including the
+ * ones that succeeded this run. Re-emitting those is harmless — ingest
+ * treats a byte-identical re-emit as a no-op (`postgres-records.ts`'s
+ * `IS NOT DISTINCT FROM`).
+ *
+ * Both skip sites in this function set it: a thrown snippet re-fetch above,
+ * and the pre-existing envelope-absent skip below (same defect — an
+ * envelope-free message was ALREADY being skipped to avoid blanking the
+ * stored row, but until now nothing told the caller to hold the cursor back
+ * for it either). The one skip that does NOT set it is `!requested.has(
+ * "messages")`: that is not a failure to cover a change, it's "this run was
+ * never asked to collect `messages` at all," the same as `processMessage`'s
+ * own `wantMessages` gate — advancing the cursor past a scope the run
+ * deliberately excluded is correct, not lossy.
  */
 export async function runDeltaPass(
 	client: Pick<ImapFlow, "fetch">,
@@ -3983,13 +4006,13 @@ export async function runDeltaPass(
 	emitRecord: EmitRecordFn,
 	receivedAtFallback: string,
 	fetchBodiesFn: FetchBodiesFn,
-): Promise<void> {
+): Promise<{ skippedAnyMessage: boolean }> {
 	if (
 		session.fullResync ||
 		session.priorModseq === undefined ||
 		session.priorModseq === null
 	) {
-		return;
+		return { skippedAnyMessage: false };
 	}
 	const { priorModseq } = session;
 	const priorModseqBig =
@@ -4029,6 +4052,13 @@ export async function runDeltaPass(
 	// then tripped the runtime's post-DONE guard while the abandoned iterator
 	// drained. Draining first keeps the envelope guarantee below intact and
 	// costs only the metadata already held in memory.
+	// Set whenever a message this pass KNOWS changed (it passed the
+	// `changedSince` filter) does not get a record emitted for that change —
+	// see this function's doc comment for why the caller must hold
+	// `highest_modseq` back when this is true. NOT set by `!requested.has(
+	// "messages")`: that message was never examined for a change to apply,
+	// so there is nothing to hold the cursor back for.
+	let skippedAnyMessage = false;
 	const deltaMetas: FetchMessageObject[] = [];
 	for await (const msg of client.fetch("1:*", deltaQuery, {
 		uid: true,
@@ -4043,6 +4073,7 @@ export async function runDeltaPass(
 		// No envelope means no safe record to write. Skipping preserves the
 		// stored row; emitting would blank it.
 		if (!msg.envelope) {
+			skippedAnyMessage = true;
 			continue;
 		}
 		deltaMetas.push(msg);
@@ -4073,6 +4104,7 @@ export async function runDeltaPass(
 			// snippet (and every other field) intact. A genuinely bodyless
 			// message is NOT this branch: `fetchFailed` is false/absent for it,
 			// so it falls through to the normal emit below with `snippet: null`.
+			skippedAnyMessage = true;
 			await emit(buildMessageDeltaSnippetDetailGap({ failureClass, gmMsgid }));
 			continue;
 		}
@@ -4097,6 +4129,7 @@ export async function runDeltaPass(
 			}),
 		);
 	}
+	return { skippedAnyMessage };
 }
 
 // ─── Threads pass ───────────────────────────────────────────────────────
@@ -4579,7 +4612,7 @@ export async function runAllMailPasses(
 	await emitAttachmentDetailGaps(attachmentCoverage);
 
 	// Pass 2: detect flag/label changes on already-seen messages (incremental only)
-	await runDeltaPass(
+	const { skippedAnyMessage: deltaPassSkippedAnyMessage } = await runDeltaPass(
 		client,
 		session,
 		deps.requested,
@@ -4664,6 +4697,17 @@ export async function runAllMailPasses(
 		nextMessagesBackfill && nextMessagesBackfill.completed_at === null
 			? (nextMessagesBackfill.backfilled_through_uid ?? 0) + 1
 			: nextForwardUidnext;
+	// Advancing to the mailbox's CURRENT highestModseq is only correct when
+	// `runDeltaPass` covered every change since `priorModseq` — otherwise a
+	// skipped message's flag/label change falls permanently behind the new
+	// floor (see `runDeltaPass`'s doc comment: `changedSince` only re-surfaces
+	// a message whose modseq moves AGAIN, which this run's skip does nothing
+	// to cause). Holding the floor at `priorModseq` repeats this run's
+	// `changedSince` window next run; the messages that already succeeded
+	// re-emit byte-identically and ingest no-ops them.
+	const nextHighestModseq = deltaPassSkippedAnyMessage
+		? (session.priorModseq ?? null)
+		: (session.highestModseqCursor ?? null);
 	await emit({
 		type: "STATE",
 		stream: "messages",
@@ -4672,7 +4716,7 @@ export async function runAllMailPasses(
 				uidvalidity: session.uidvalidityNum,
 				uidnext: nextUidnext,
 				forward_uidnext: nextForwardUidnext,
-				highest_modseq: session.highestModseqCursor ?? null,
+				highest_modseq: nextHighestModseq,
 				// Carry the mailbox's own EXISTS forward so the next run in this epoch
 				// can prove the inventory did not shrink underneath us.
 				exists: session.existsTotal,
