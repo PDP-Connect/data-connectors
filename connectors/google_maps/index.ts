@@ -14,6 +14,7 @@ import { type Dirent, existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	buildDetailCoverageMessage,
@@ -323,9 +324,16 @@ async function processPointRecords(
 		await emitRecordSafely(load.ctx, "timeline_points", record);
 		load.summary.pointsEmitted += 1;
 		if (load.summary.pointsEmitted % POINT_PROGRESS_INTERVAL === 0) {
+			connectorDiagnostic("google_maps", "points_emit_progress", {
+				phase: "emit",
+				pass: "emit",
+				stream: "timeline_points",
+				emitted: load.summary.pointsEmitted,
+				total: "streaming",
+			});
 			await emitProgressSafely(
 				load.ctx,
-				`Google Maps phase=emit pass=emit stream=timeline_points emitted=${load.summary.pointsEmitted}/streaming`,
+				`Imported ${load.summary.pointsEmitted} location points so far`,
 				{ stream: "timeline_points" },
 			);
 		}
@@ -383,9 +391,16 @@ async function processSegmentRecords(
 		await emitRecordSafely(load.ctx, "timeline_segments", record);
 		load.summary.segmentsEmitted += 1;
 		if (load.summary.segmentsEmitted % SEGMENT_PROGRESS_INTERVAL === 0) {
+			connectorDiagnostic("google_maps", "segments_emit_progress", {
+				phase: "emit",
+				pass: "emit",
+				stream: "timeline_segments",
+				emitted: load.summary.segmentsEmitted,
+				total: "streaming",
+			});
 			await emitProgressSafely(
 				load.ctx,
-				`Google Maps phase=emit pass=emit stream=timeline_segments emitted=${load.summary.segmentsEmitted}/streaming`,
+				`Imported ${load.summary.segmentsEmitted} timeline segments so far`,
 				{ stream: "timeline_segments" },
 			);
 		}
@@ -503,24 +518,33 @@ async function loadExports(
 		summary,
 	};
 
-	await ctx.progress(
-		`Google Maps phase=index pass=index source_files=${files.length}`,
-	);
+	connectorDiagnostic("google_maps", "source_files_indexed", {
+		phase: "index",
+		pass: "index",
+		source_files: files.length,
+	});
+	await ctx.progress(`Found ${files.length} Google Maps files to read`);
 	if (requestedPoints) {
-		await ctx.progress(
-			"Google Maps phase=emit pass=emit stream=timeline_points total_items=streaming",
-			{
-				stream: "timeline_points",
-			},
-		);
+		connectorDiagnostic("google_maps", "points_emit_started", {
+			phase: "emit",
+			pass: "emit",
+			stream: "timeline_points",
+			total_items: "streaming",
+		});
+		await ctx.progress("Importing location points", {
+			stream: "timeline_points",
+		});
 	}
 	if (requestedSegments) {
-		await ctx.progress(
-			"Google Maps phase=emit pass=emit stream=timeline_segments total_items=streaming",
-			{
-				stream: "timeline_segments",
-			},
-		);
+		connectorDiagnostic("google_maps", "segments_emit_started", {
+			phase: "emit",
+			pass: "emit",
+			stream: "timeline_segments",
+			total_items: "streaming",
+		});
+		await ctx.progress("Importing timeline segments", {
+			stream: "timeline_segments",
+		});
 	}
 	if (!discovery.complete && discovery.incompleteReason) {
 		await emitRequestedSkip(
@@ -533,9 +557,12 @@ async function loadExports(
 	let fileOrdinal = 0;
 	for (const file of files) {
 		fileOrdinal += 1;
-		await ctx.progress(
-			`Google Maps phase=parse pass=parse source_file=${fileOrdinal}/${files.length}`,
-		);
+		connectorDiagnostic("google_maps", "source_file_parse", {
+			phase: "parse",
+			pass: "parse",
+			source_file: `${fileOrdinal}/${files.length}`,
+		});
+		await ctx.progress(`Reading file ${fileOrdinal} of ${files.length}`);
 		try {
 			await streamTimelineFile(load, file);
 		} catch (error) {
@@ -606,12 +633,15 @@ async function finishSegments(
 		return;
 	}
 	if (summary.unrecognizedKinds.size > 0) {
+		connectorDiagnostic("google_maps", "unrecognized_segments", {
+			phase: "emit",
+			pass: "emit",
+			stream: "timeline_segments",
+			unrecognized_segments: summary.unrecognizedCount,
+			unrecognized_kinds: [...summary.unrecognizedKinds].sort().join(","),
+		});
 		await ctx.progress(
-			`Google Maps phase=emit pass=emit stream=timeline_segments unrecognized_segments=${summary.unrecognizedCount} unrecognized_kinds=${[
-				...summary.unrecognizedKinds,
-			]
-				.sort()
-				.join(",")}`,
+			"Some timeline entries have a type we do not fully understand yet",
 			{ stream: "timeline_segments" },
 		);
 	}

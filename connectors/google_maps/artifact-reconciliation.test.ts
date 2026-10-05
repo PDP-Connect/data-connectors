@@ -26,6 +26,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -39,6 +40,13 @@ async function runImport(
 	importRoot: string,
 	streams: readonly string[] = ["timeline_points"],
 ): Promise<EmittedMessage[]> {
+	return (await runImportWithStderr(importRoot, streams)).messages;
+}
+
+async function runImportWithStderr(
+	importRoot: string,
+	streams: readonly string[] = ["timeline_points"],
+): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
@@ -54,7 +62,7 @@ async function runImport(
 			type: "START",
 		},
 	});
-	return result.messages;
+	return { messages: result.messages, stderr: result.stderr };
 }
 
 /**
@@ -289,6 +297,84 @@ test("a fully accountable artifact still reconciles as complete on both streams"
 		const segments = coverageFor(messages, "timeline_segments");
 		assert.equal(segments.considered, 1);
 		assert.equal(segments.covered, 1);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("progress is plain English and the old phase/pass detail moves to diagnostic lines", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-gm-plain-progress-"));
+	try {
+		await writeFile(
+			join(importRoot, "Records.json"),
+			JSON.stringify({
+				locations: [
+					{
+						timestampMs: "1717595122000",
+						latitudeE7: 377_749_000,
+						longitudeE7: -1_224_194_000,
+						accuracy: 12.4,
+					},
+				],
+			}),
+		);
+		await writeFile(
+			join(importRoot, "Timeline.json"),
+			JSON.stringify({
+				semanticSegments: [
+					{
+						startTime: "2024-06-05T13:00:00Z",
+						endTime: "2024-06-05T14:00:00Z",
+						timelineMemory: {
+							trip: { destinations: [{ identifier: "places/ChIJ-test" }] },
+						},
+					},
+				],
+			}),
+		);
+		const { messages, stderr } = await runImportWithStderr(importRoot, [
+			"timeline_points",
+			"timeline_segments",
+		]);
+
+		assertUserFacingProgress(messages);
+		const texts = messages.flatMap((m) =>
+			m.type === "PROGRESS" ? [m.message] : [],
+		);
+		assert.ok(
+			texts.includes("Found 2 Google Maps files to read"),
+			String(texts),
+		);
+		assert.ok(texts.includes("Importing location points"));
+		assert.ok(texts.includes("Importing timeline segments"));
+		assert.ok(texts.includes("Reading file 1 of 2"));
+		assert.ok(
+			texts.includes(
+				"Some timeline entries have a type we do not fully understand yet",
+			),
+		);
+		assert.equal(
+			texts.some((t) => t.includes("phase=")),
+			false,
+			"no phase=/pass= text in PROGRESS",
+		);
+
+		assert.match(
+			stderr,
+			/\[google_maps-diagnostic\] source_files_indexed \{"phase":"index","pass":"index","source_files":2\}/,
+		);
+		assert.match(
+			stderr,
+			/\[google_maps-diagnostic\] points_emit_started \{"phase":"emit","pass":"emit","stream":"timeline_points","total_items":"streaming"\}/,
+		);
+		assert.match(
+			stderr,
+			/\[google_maps-diagnostic\] source_file_parse \{"phase":"parse","pass":"parse","source_file":"2\/2"\}/,
+		);
+		assert.match(
+			stderr,
+			/\[google_maps-diagnostic\] unrecognized_segments \{"phase":"emit","pass":"emit","stream":"timeline_segments","unrecognized_segments":1,"unrecognized_kinds":"timelineMemory"\}/,
+		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
 	}
