@@ -146,9 +146,12 @@ test("ChatGPT push approval checkpoints while polling so the session watchdog se
 				passwordSubmitted = true;
 				return Promise.resolve();
 			},
-			count: () => count,
+			count: () => Promise.resolve(count),
 			fill: () => Promise.resolve(),
 			first: () => self,
+			isEnabled: () => Promise.resolve(true),
+			isVisible: () => Promise.resolve(visible),
+			nth: () => self,
 			waitFor: () => {
 				if (!visible) {
 					return Promise.reject(new Error("not visible"));
@@ -833,6 +836,11 @@ test("ChatGPT rejected stored password fails before push approval or browser ass
 						count: () => Promise.resolve(count),
 						fill: () => Promise.resolve(),
 						first() {
+							return locator;
+						},
+						isEnabled: () => Promise.resolve(true),
+						isVisible: () => Promise.resolve(count > 0),
+						nth() {
 							return locator;
 						},
 						waitFor: () =>

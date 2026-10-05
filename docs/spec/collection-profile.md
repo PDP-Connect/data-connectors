@@ -1,8 +1,8 @@
-# PDPP Collection Profile v0.1.0
+# PDPP Collection Profile v0.2.0
 
 Status: Normative draft. This is the canonical PDPP Collection Profile.
 
-Date: 2026-10-02
+Date: 2026-10-05
 
 ## 1. Scope
 
@@ -24,6 +24,11 @@ beyond what JSON Schema alone can express.
 checks that the binding, feature, and filesystem input tables in Section 3.3
 match the schema, and
 that every manifest under `connectors/` validates against it.
+[`schemas/observation.schema.json`](../../schemas/observation.schema.json)
+validates the `OBSERVATION` message of Section 5.10 and the
+`diagnostic_descriptors` member of Section 3.8.
+[`schemas/observation.schema.test.mjs`](../../schemas/observation.schema.test.mjs)
+checks that the fact table in Section 5.10.1 matches that schema.
 
 `PDP-Connect/pdpp` publishes `spec-collection-profile.md`, marked
 `Status: Informative`. That copy defines no conformance requirement. Where it
@@ -927,9 +932,15 @@ requires. A runtime MUST advertise its supported protocol version and
 capabilities before placement. It MUST reject a connector with an unsupported
 required capability before spawn.
 
-The only portable v0.1 capability is `STREAM_EVIDENCE`. A connector that can emit
-`STREAM_EVIDENCE` MUST declare that value. A runtime that does not advertise it
-MUST NOT start that connector.
+The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7)
+and `OBSERVATION` (since 0.2.0, Section 5.10). A connector that can emit one
+of these messages MUST declare that value. A runtime that does not advertise a
+declared capability MUST NOT start that connector. A runtime that implements
+profile version 0.2.0 MUST advertise and support `OBSERVATION`.
+
+A connector that does not declare `OBSERVATION` is diagnosed from runtime
+records alone (Section 5.11). A runtime MUST NOT record that connector as
+defective because it does not declare the capability.
 
 ### 3.5 Coverage and freshness strategies
 
@@ -996,6 +1007,42 @@ approval.
 In particular, a connector-authored option kind is only a claim. Runtime or
 operator policy decides whether an option changes collection scope. An unknown
 option MUST default to the more restrictive collection-scope treatment.
+
+### 3.8 Diagnostic descriptors
+
+`diagnostic_descriptors` is an OPTIONAL object. It declares the finite set of
+step, expectation, and rule ids that the connector's facts (Section 5.10) can
+name. The set is reviewed together with the manifest.
+
+```json
+{
+  "diagnostic_descriptors": {
+    "steps": [{ "id": "sign_in" }],
+    "expectations": [{ "id": "email_input", "step": "sign_in" }],
+    "rules": [{ "id": "password_rejected", "kind": "auth", "step": "sign_in" }]
+  }
+}
+```
+
+| Member | Entry members | Meaning |
+| --- | --- | --- |
+| `steps` | `id` | A named stage of a run, such as `sign_in`. |
+| `expectations` | `id`, `step` | A page element that the connector waits for at that step. A declared expectation is a declared shape, so a failed one supports `expectation_mismatch` without a baseline. |
+| `rules` | `id`, `kind`, OPTIONAL `step` | A provider response that a runtime can match. The only `kind` in this version is `auth`: the provider rejected a credential. |
+
+Each id matches `^[a-z][a-z0-9_]{0,63}$` and MUST be unique within its member.
+An expectation's `step` MUST name a declared step.
+
+A fact that names a step, expectation, or rule id that the manifest does not
+declare is kept and shown to the owner. It MUST NOT support a cause category
+or a recovery hint (Section 5.11).
+
+This version does not define the syntax of a rule's match condition
+(Section 5.13). A runtime records a match for a declared rule only from its
+own observations.
+
+A manifest that declares `diagnostic_descriptors` or the `OBSERVATION`
+capability declares `protocol_version` `0.2.0`.
 
 ## 4. Run protocol
 
@@ -1241,7 +1288,8 @@ actions are `retry_by_runtime`, `retry_on_connector_upgrade`,
 
 A runtime MUST reject an invalid portable recovery hint. It MUST NOT infer a
 connector-requested action from free-form `message`, diagnostics, or an error
-code.
+code. A valid hint is the connector's suggestion. Section 5.11 states when a
+runtime can present a hint as an instruction or act on it.
 
 ### 5.6 `DETAIL_GAP` and `DETAIL_COVERAGE`
 
@@ -1364,6 +1412,13 @@ A failed message includes `error` with a REQUIRED non-empty `message` and
 boolean `retryable`. It can also include a stable snake-case `code` and a
 `recovery_hint` as defined in Section 5.5.
 
+`error.basis` is OPTIONAL. It is an array of `OBSERVATION` ids (Section 5.10)
+from the same run that the connector says caused the failure. A connector MUST
+NOT send `basis` unless it declares `OBSERVATION`, and it cites only ids that
+it emitted in the run. `basis` is a connector claim. It cannot choose the
+terminal event and it cannot bring a runtime record into or out of the
+diagnosis scope (Section 5.11).
+
 A successful connector emits successful `DONE` and exits 0. A failed connector
 emits failed `DONE` where possible and exits non-zero. A runtime MUST fail the
 run if the process exits without valid `DONE` or emits a message after `DONE`.
@@ -1415,6 +1470,255 @@ owner on the owner's device or deployment. A runtime MUST NOT send them off
 that device or deployment, or to a data recipient, without an action by the
 owner.
 
+### 5.10 `OBSERVATION`
+
+`OBSERVATION` reports one typed fact about the run: what the connector saw,
+not what it concludes. A connector MUST NOT emit it unless it declares the
+`OBSERVATION` capability (Section 3.4).
+
+```json
+{
+  "type": "OBSERVATION",
+  "id": "o1",
+  "fact": "element_expectation",
+  "step": "sign_in",
+  "attrs": { "expectation": "email_input", "states_seen": ["absent", "hidden"], "final": "hidden" },
+  "evidence_ref": "trace:step-3"
+}
+```
+
+| Member | Requirement |
+| --- | --- |
+| `type`, `id`, `fact`, `attrs` | REQUIRED. `id` is unique within the run. `fact` is a connector fact type from Section 5.10.1. |
+| `step` | A declared step id (Section 3.8). REQUIRED for `element_expectation` and `wait_expired`, OPTIONAL otherwise. |
+| `evidence_ref` | OPTIONAL. A reference to a local artifact, such as a trace or a saved page. It is never the artifact itself and never a URL. |
+| `resolves` | OPTIONAL. The ids of earlier facts from this connector that this fact shows were recovered. |
+
+`attrs` holds only the members that its fact type defines. Their values are
+bounded enums, declared ids, booleans, and integers. A fact MUST NOT contain
+credentials, tokens, cookies, one-time codes, other secret values, or
+provider text. Provider text goes into a local artifact that `evidence_ref`
+names.
+
+#### 5.10.1 Facts in this version
+
+| Fact | Source | Attributes | Supports |
+| --- | --- | --- | --- |
+| `element_expectation` | connector | `expectation` (a declared id), `states_seen`, `final`, OPTIONAL `fallback_used` | `expectation_mismatch` when `final` is not `matched` |
+| `wait_expired` | connector | `awaited` (a declared expectation id), `budget_ms` | nothing |
+| `provider_message` | connector | `kind`: `auth_failure` or `other`; OPTIONAL `rule` (a declared rule id) | `auth_rejected` when `kind` is `auth_failure` |
+| `credential_submission` | runtime | `attempt` (a runtime handle), `account` (the runtime's handle for the connection's provider account, never a provider username or email address), `outcome`: `succeeded`, `rejected`, or `unsettled`; OPTIONAL `rule` (the declared rule under which the runtime settled the attempt) | `auth_rejected` when `outcome` is `rejected` under a declared `auth` rule |
+| `rule_match` | runtime | `rule` (a declared rule id), `kind`: `auth`, `handle` (the runtime handle it matched on) | `auth_rejected` for a declared `auth` rule |
+| `connector_defect` | runtime | `class`: `protocol_violation` or `hint_unsupported`; for a protocol violation, `reason` (Section 5.10.2) and OPTIONAL `count` for aggregated violations | nothing in this version |
+
+The element states are:
+
+- `matched`: an element that meets the expectation is present;
+- `absent`: no element matches the selector;
+- `hidden`: an element matches but is not visible;
+- `disabled`: an element is visible but not enabled;
+- `ambiguous`: more than one element meets an expectation that needs exactly
+  one.
+
+`final` is the state at the deadline. `states_seen` lists each state seen
+during the wait in order of first sighting, and includes `final`.
+
+When a wait for a declared expectation ends without a match, the connector
+SHOULD report `element_expectation` with the states seen and the final state,
+and `wait_expired`. Shared connector helpers SHOULD do this, so that every
+connector gets it by default. `wait_expired` supports no cause: elapsed time
+alone is not evidence of a cause.
+
+#### 5.10.2 Provenance
+
+The transport sets provenance. Every `OBSERVATION` on standard output is a
+connector fact, which is a claim. The message has no member that names an
+observer. A runtime appends its own records, with source `runtime`, to the run
+record, and a connector cannot write them. A runtime record carries a runtime
+handle that the runtime assigned when it initiated or observed the action, for
+example a submission attempt id.
+
+A runtime records `credential_submission` only for a submission that it
+performed itself, with the outcome that it observed itself. Delivering a
+credential in `INTERACTION_RESPONSE` is not a runtime-performed submission. A
+runtime records `rule_match` only from a response that it observed itself on
+the named handle. A connector fact, `DONE.error`, or connector text never
+produces either record.
+
+An `OBSERVATION` is a protocol violation in each case below. The runtime MUST
+discard the fact and record `connector_defect` with class
+`protocol_violation` and the `reason` from this closed set:
+
+| `reason` | Case |
+| --- | --- |
+| `undeclared_capability` | The connector did not declare `OBSERVATION`. |
+| `runtime_fact_type` | The `fact` is a runtime fact type. |
+| `invalid` | The message does not match Section 5.10 and its fact type. |
+| `duplicate_id` | The `id` repeats an earlier `id` in the run. |
+| `oversize` | The serialized message exceeds the runtime's size limit. |
+| `count_exceeded` | The run already reached the runtime's count limit (Section 5.10.4). |
+
+A runtime record never contains connector-supplied text. The runtime MAY
+aggregate repeated violations with the same `reason` into one record with a
+`count`.
+
+A fact that names a step, expectation, or rule id that the manifest does not
+declare is not a protocol violation and is not `invalid`. The runtime keeps
+it, and it supports nothing (Section 3.8).
+
+After a violation, the runtime MUST continue the run. This is a deliberate
+exception to Section 6.2 item 8: `OBSERVATION` carries diagnosis, not data,
+so a discarded fact cannot corrupt collected records or state, and stopping
+the run would let a connector hide the remaining evidence by sending one bad
+fact.
+
+#### 5.10.3 Retirement
+
+A retired fact stays visible to the owner and cannot become a cause.
+
+- A connector fact that a later connector fact names in `resolves` is retired.
+  `resolves` cannot name a runtime record.
+- A runtime record is retired only by a runtime record of an equivalent retry
+  that succeeded. In this version, a `credential_submission` with outcome
+  `rejected` or `unsettled` is retired by a later `credential_submission` on
+  the same `account` with outcome `succeeded`. The `rule_match` records on
+  the retired attempt's handle are retired with it.
+- No connector message retires, relocates, or hides a runtime record.
+
+#### 5.10.4 Limits
+
+A runtime MUST bound the number and the serialized size of the `OBSERVATION`
+messages that it accepts per run, the rate at which it accepts them, and the
+diagnostic storage that it keeps per connector. It MUST accept at least 64
+`OBSERVATION` messages per run, each up to 2048 bytes when serialized. A
+connector SHOULD stay within those values. A runtime MUST keep capacity for
+its own records. Past its limit, it discards further connector facts and marks
+the run record truncated. Evidence from a truncated run record MUST NOT
+authorize a recovery action or an instruction.
+
+### 5.11 Failure diagnosis and the recovery-hint gate
+
+A runtime derives the cause of a failed run from its run record. The
+derivation is deterministic and can run again over stored facts. This section
+fixes the predicates, the scope rule, and the order. The owner-facing wording
+belongs to tooling.
+
+**Terminal event.** The runtime chooses the terminal event from its own
+records, in this order: the latest unretired `credential_submission` with
+outcome `rejected` or `unsettled`; else the failed `DONE`; else the process
+exit. A connector cannot choose the terminal event.
+
+**Scope.** In this version, the diagnosis scope of the terminal failure is:
+
+1. the runtime records linked to the terminal event through a runtime handle,
+   which are the terminal `credential_submission` and the `rule_match` records
+   on its `attempt` handle; and
+2. the unretired connector facts that `DONE.error.basis` cites.
+
+Only the records of item 1 are action-eligible. Every other unretired fact
+stays visible to the owner and cannot become the cause.
+
+**Cause.** The cause is one category and `cause.basis`, the ids of the facts
+that support it.
+
+| Category | Supported by an in-scope fact |
+| --- | --- |
+| `auth_rejected` | a `credential_submission` with outcome `rejected` under a declared `auth` rule; a `rule_match` for a declared `auth` rule; a `provider_message` with kind `auth_failure` |
+| `expectation_mismatch` | an `element_expectation` with `final` other than `matched`, for a declared expectation at its declared step |
+| `unknown` | nothing |
+
+The cause's basis (`cause.basis`, which is distinct from the connector's
+`DONE.error.basis`) MUST cite at least one in-scope fact that meets the
+category's predicate. Otherwise the cause is `unknown`. Runtime records outrank connector
+facts. `auth_rejected` outranks `expectation_mismatch`, because a login error
+page is also a mismatch and the specific signal explains more. Ties break by
+record order. The other in-scope findings are listed as contributing.
+
+A cause whose `cause.basis` contains no runtime record is the connector's
+account. A
+runtime MUST present it as the connector's report, for example "The connector
+reports that the provider rejected the sign-in", and it unlocks nothing.
+`expectation_mismatch` shows that what the connector saw differed from what
+it expected. It does not show that the provider changed, and a runtime MUST
+NOT present it as a provider change.
+
+**The recovery-hint gate.** A runtime MUST NOT act on a portable recovery hint
+(Section 5.5), or present it to the owner as an instruction, unless the hint's
+predicate below holds over the failure's action-eligible facts. Otherwise it
+MUST show the hint only as the connector's attributed suggestion, together
+with the diagnosis. For a connector that declares `OBSERVATION`, it also
+records `connector_defect` with class `hint_unsupported`. Records that the
+gate itself makes never satisfy a predicate.
+
+| Hint | Predicate in this version |
+| --- | --- |
+| `refresh_credentials` | A runtime `credential_submission` with outcome `rejected` under a declared `auth` rule. |
+| `not_retriable`, `unknown` | Always holds. |
+| `manual_action_required`, `update_selector`, `retry_on_connector_upgrade`, `upstream_unblock`, `retry_by_runtime` | Never holds in this version. Each needs runtime evidence that this version does not define (Section 5.13). |
+
+Because a runtime records `credential_submission` only for a submission that
+it performed itself (Section 5.10.2), and runtime-performed submission belongs
+to the credential attempt ledger and sealed authentication (Section 5.13), the
+`refresh_credentials` predicate effectively never holds in this version. The
+owner's sign-in, which is always available (below), covers that case.
+
+`DONE.error.retryable` and the `retryable` member of a hint are connector
+claims. A runtime MUST NOT start an automatic retry or resubmission because of
+either. It starts one only when the gate allows `retry_by_runtime`, which
+never holds in this version.
+
+A `provider_message` with kind `auth_failure` and no runtime record derives
+`auth_rejected` as the connector's report. It does not unlock a credential
+prompt or any other recovery control. Independently of diagnosis, a runtime
+that keeps connections MUST let the owner start a sign-in for a connection at
+any time. That sign-in runs on the provider's origin in a runtime-owned
+browser or through the runtime's credential store, never in a form that a
+connector renders. Credential entry that the runtime renders itself is
+conformant when any connector-supplied text in it appears only as attributed,
+inert labels.
+
+The connector's own error text (`DONE.error.message`) stays visible to the
+owner together with the diagnosis. A runtime MUST NOT hide or replace that
+text because it has a diagnosis.
+
+### 5.12 Diagnostic data stays on the device
+
+Facts, run records, and causes are available to the owner locally. A runtime
+MUST NOT transmit them off the device, or to any data recipient, except by
+the owner's action for one incident, after the owner sees a preview of the
+exact payload. A runtime MUST NOT offer a standing opt-in that sends
+diagnostic reports automatically. Raw recordings, cookies, credentials, and
+saved pages MUST NOT leave the device by this path at all.
+
+A diagnostic report is minimized personal data, not anonymous data. It can
+reveal that the owner uses a provider and when a run failed, and a connector
+can steer which outcome occurs.
+
+### 5.13 Not in this version
+
+This version defines part of the failure-diagnosis design. This section only
+names the remaining parts. It does not define their behavior.
+
+- The credential attempt ledger: at most one unresolved credential attempt
+  per account, the attention state, and owner-authorized retries.
+- Sealed authentication, which keeps a secret from the connector.
+- Runtime re-evaluation of a declared expectation in a runtime-owned browser,
+  and the syntax of a declared rule's match condition.
+- Two-tier causal eligibility, step boundaries (`step_started`,
+  `step_completed`), runtime-assigned operations, and declared step
+  prerequisites.
+- Network-shape baselines, selector baselines, and `shape_divergence`.
+- Canary status in the catalog.
+- The other fact types and cause categories of the design, including
+  `http_response`, `api_error`, `challenge`, `interaction_unavailable`,
+  `network_failure`, `policy_denial`, `interruption`, and `not_observed`;
+  the other `provider_message` kinds; registered cause details; runtime
+  coverage markers on facts; and `SKIP_RESULT.basis` with per-stream
+  derivation.
+- Extension fact types named by absolute URIs. In this version an
+  `OBSERVATION` with any other `fact` value is invalid.
+- The structure of a shared diagnostic report.
+
 ## 6. Conformance
 
 ### 6.1 Connector conformance
@@ -1437,6 +1741,9 @@ A conforming connector:
     strategies.
 12. When it declares filesystem inputs, reads owner data from local paths only
     through those inputs and writes nothing under a `read` input.
+13. When it declares `OBSERVATION`, emits facts only as Section 5.10 defines,
+    with no secret and no provider text in them, and cites in
+    `DONE.error.basis` only ids that it emitted in the run.
 
 ### 6.2 Runtime conformance
 
@@ -1452,13 +1759,18 @@ A conforming runtime:
 6. Stages and commits state only under Section 5.3 and Section 5.8.
 7. Validates checkpoint dependencies, coverage, and gaps. If it advertises
    `STREAM_EVIDENCE`, it also validates that message as defined in Section 5.7.
-8. Terminates a connector on a protocol violation.
+8. Terminates a connector on a protocol violation, except that it continues
+   the run after an `OBSERVATION` violation as Section 5.10.2 requires.
 9. Does not report a cancelled, abandoned, malformed, or incomplete run as
    successful.
 10. If it confines filesystem access, makes only the declared filesystem
     inputs visible, read-only when `access` is `read`. If it supports the
     deprecated `import_dir_env_var`, it follows the transition rules in
     Section 3.3.5.
+11. Applies the recovery-hint gate of Section 5.11 before it acts on a hint or
+    presents one as an instruction, and keeps the connector's error text
+    visible.
+12. Transmits diagnostic data only as Section 5.12 allows.
 
 Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either
@@ -1498,6 +1810,12 @@ A runtime MUST NOT infer compatibility from an unknown version. It MUST either
 support that exact version or apply an explicit compatibility rule that it
 advertises. A new optional message that an older fail-closed runtime would
 reject requires capability negotiation and a runtime-first rollout.
+
+Version 0.2.0 adds the `OBSERVATION` capability and message, the
+`diagnostic_descriptors` manifest member, `DONE.error.basis`, and Sections
+5.11 to 5.13. Every valid 0.1.0 exchange stays valid. A 0.2.0 runtime
+presents the recovery hints of 0.1.0 connectors through the gate of
+Section 5.11.
 
 ## 9. Provisional source-backed fulfillment
 

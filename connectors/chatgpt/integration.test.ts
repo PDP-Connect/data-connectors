@@ -190,6 +190,30 @@ for (const code of CHATGPT_MANUAL_ACTION_ERROR_CODES) {
 	});
 }
 
+test("normalizeChatGptTerminalError does not read the runtime's session_failed prefix as an auth failure", () => {
+	// session-establish.ts prefixes EVERY ensureSession failure with
+	// `chatgpt_session_failed:` and recovers a code-shaped message as `code`.
+	// This is the production shape of the unexpected-UI failure, including the
+	// hidden-email-input case of 2026-10-02.
+	const unexpectedUi = normalizeChatGptTerminalError({
+		code: "chatgpt_login_unexpected_ui",
+		message: "chatgpt_session_failed: chatgpt_login_unexpected_ui",
+		retryable: false,
+	});
+	assert.equal(unexpectedUi.recovery_hint, "manual_action_required");
+	assert.doesNotMatch(unexpectedUi.message, /refresh_credentials/u);
+
+	// The pre-fix shape of the same incident: a fill on a hidden input timed
+	// out. A timeout says nothing about the credential.
+	const fillTimeout = normalizeChatGptTerminalError({
+		message:
+			'chatgpt_session_failed: locator.fill: Timeout 30000ms exceeded. Call log: waiting for locator(\'input[type="email"], input[name="username"], input[name="email"]\').first() - element is not visible',
+		retryable: false,
+	});
+	assert.notEqual(fillTimeout.recovery_hint, "refresh_credentials");
+	assert.doesNotMatch(fillTimeout.message, /refresh_credentials/u);
+});
+
 test("normalizeChatGptTerminalError maps a generic visible challenge to manual action", () => {
 	const normalized = normalizeChatGptTerminalError({
 		message: "Cloudflare challenge still visible",

@@ -1,0 +1,29 @@
+{
+	"format": "pdpp.run-summary/1",
+	"connector": "strava_browser",
+	"tool_version": "0.0.1",
+	"started_at": "2026-10-02T09:14:03.000Z",
+	"finished_at": "2026-10-02T09:14:41.000Z",
+	"duration_ms": 38000,
+	"streams": {},
+	"skips": 0,
+	"done": {
+		"status": "failed",
+		"error": {
+			"message": "strava_browser_session_failed: strava_session_dead",
+			"retryable": false,
+			"code": "strava_session_dead"
+		}
+	},
+	"generated_by": "connector-dev",
+	"provider_contact_observed": false,
+	"run_record": {
+		"protocol_capabilities": [],
+		"facts": [],
+		"truncated": false,
+		"process_exit": {
+			"code": 1,
+			"signal": null
+		}
+	}
+}

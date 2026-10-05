@@ -31,6 +31,7 @@ import {
 	connectorDir,
 	packageRoot as PACKAGE_ROOT,
 } from "../src/connector-paths.ts";
+import { diagnoseRun } from "../src/failure-diagnosis.ts";
 import type { RunSummary } from "../src/run-summary.ts";
 import {
 	type CheckpointEvidence,
@@ -69,6 +70,7 @@ const RUN_DIR_CONNECTORS = [
 	"connector-dev-interaction-fixture",
 	"connector-dev-scope-state-fixture",
 	"protocol-subprocess-fails-after-record",
+	"observation-hidden-element-fixture",
 ];
 
 after(() => {
@@ -94,7 +96,10 @@ after(() => {
 	}
 });
 
-function runCli(args: readonly string[]): {
+function runCli(
+	args: readonly string[],
+	env: NodeJS.ProcessEnv = {},
+): {
 	code: number | null;
 	stdout: string;
 	stderr: string;
@@ -108,6 +113,7 @@ function runCli(args: readonly string[]): {
 				...process.env,
 				PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
 				PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+				...env,
 			},
 			encoding: "utf8",
 			timeout: 30_000,
@@ -804,5 +810,162 @@ test("connector-dev CLI: a failure with capture enabled but no browser checkpoin
 		assert.doesNotMatch(result.stdout, /navigation_incomplete:/);
 	} finally {
 		rmSync(tmpCaptureRoot, { recursive: true, force: true });
+	}
+});
+
+// ─── OBSERVATION (Collection Profile Section 5.10) ─────────────────────────
+
+const OBSERVATION_FIXTURE = "observation-hidden-element-fixture";
+
+function runObservationFixture(
+	summaryPath: string,
+	options: {
+		connectorDeclares: boolean;
+		manifestDeclares: boolean;
+		mode?: "forged_auth";
+	},
+): { code: number | null; stdout: string; summary: RunSummary } {
+	const result = runCli(
+		[
+			OBSERVATION_FIXTURE,
+			"--entrypoint",
+			fixturePath(`${OBSERVATION_FIXTURE}.ts`),
+			...(options.manifestDeclares
+				? ["--manifest", fixturePath(`${OBSERVATION_FIXTURE}.manifest.json`)]
+				: []),
+			"--summary-out",
+			summaryPath,
+			"--no-capture",
+		],
+		{
+			FIXTURE_DECLARE_OBSERVATION: options.connectorDeclares ? "1" : "0",
+			FIXTURE_MODE: options.mode ?? "",
+		},
+	);
+	const summary = JSON.parse(readFileSync(summaryPath, "utf8")) as RunSummary;
+	return { code: result.code, stdout: result.stdout, summary };
+}
+
+test("connector-dev CLI: a declared OBSERVATION capability records connector facts in the run record", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "connector-dev-test-"));
+	try {
+		const { code, stdout, summary } = runObservationFixture(
+			join(tmpDir, "summary.json"),
+			{ connectorDeclares: true, manifestDeclares: true },
+		);
+		assert.notEqual(code, 0);
+		assert.match(
+			stdout,
+			/FACT {5}element_expectation at step sign_in: "email_input" was hidden at the deadline \(states seen: hidden\) \(connector\)/u,
+		);
+		const record = summary.run_record;
+		assert.ok(record, "the summary carries the run record");
+		assert.deepEqual(record.protocol_capabilities, ["OBSERVATION"]);
+		assert.deepEqual(
+			record.facts.map((fact) => [fact.source, fact.id, fact.fact]),
+			[
+				["connector", "o1", "element_expectation"],
+				["connector", "o2", "wait_expired"],
+			],
+		);
+		assert.equal(record.truncated, false);
+		assert.equal(record.process_exit?.code, 1);
+		assert.deepEqual(record.diagnostic_descriptors?.expectations, [
+			{ id: "email_input", step: "sign_in" },
+		]);
+		assert.deepEqual(summary.done.error?.basis, ["o1", "o2"]);
+		assert.equal(summary.done.error?.recovery_hint, "refresh_credentials");
+		// The failure output carries the diagnosis: the cause from the cited
+		// fact, and the incident's refresh_credentials hint shown only as the
+		// connector's suggestion.
+		assert.match(
+			stdout,
+			/primary cause: expectation_mismatch at step sign_in/u,
+		);
+		assert.match(
+			stdout,
+			/connector's recovery hint \(refresh_credentials\): shown as the connector's suggestion, not as an instruction/u,
+		);
+		assert.match(
+			stdout,
+			/connector's own error text: fixture_preprogress_failure: refresh_credentials: fixture_login_unexpected_ui/u,
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev CLI: an OBSERVATION from a connector whose manifest does not declare it is discarded and recorded", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "connector-dev-test-"));
+	try {
+		const { stdout, summary } = runObservationFixture(
+			join(tmpDir, "summary.json"),
+			{ connectorDeclares: true, manifestDeclares: false },
+		);
+		assert.match(
+			stdout,
+			/WARN {5}OBSERVATION discarded: protocol violation \(undeclared_capability\)/u,
+		);
+		assert.deepEqual(summary.run_record?.facts, [
+			{
+				source: "runtime",
+				id: "r1",
+				fact: "connector_defect",
+				attrs: {
+					class: "protocol_violation",
+					reason: "undeclared_capability",
+					count: 2,
+				},
+			},
+		]);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev CLI: a connector cannot launder its auth failure into runtime evidence for refresh_credentials", () => {
+	// Section 5.10.2: credential_submission and rule_match come only from the
+	// runtime's own submission and observation. The fixture reports a login
+	// error page, forges both runtime-only facts, cites them, and fails with
+	// auth-shaped text. None of it may yield an instruction.
+	const tmpDir = mkdtempSync(join(tmpdir(), "connector-dev-test-"));
+	try {
+		const { stdout, summary } = runObservationFixture(
+			join(tmpDir, "summary.json"),
+			{ connectorDeclares: true, manifestDeclares: true, mode: "forged_auth" },
+		);
+		const facts = summary.run_record?.facts ?? [];
+		assert.deepEqual(
+			facts.map((fact) => [fact.source, fact.fact]),
+			[
+				["connector", "provider_message"],
+				["runtime", "connector_defect"],
+			],
+		);
+		assert.deepEqual(facts[1]?.attrs, {
+			class: "protocol_violation",
+			reason: "runtime_fact_type",
+			count: 2,
+		});
+		assert.equal(
+			facts.some(
+				(fact) =>
+					fact.fact === "credential_submission" || fact.fact === "rule_match",
+			),
+			false,
+		);
+
+		const diagnosis = diagnoseRun({
+			connector: summary.connector,
+			done: summary.done,
+			run_record: summary.run_record,
+		});
+		assert.equal(diagnosis.cause?.category, "auth_rejected");
+		assert.equal(diagnosis.cause?.attribution, "connector");
+		assert.equal(diagnosis.hint?.action, "refresh_credentials");
+		assert.equal(diagnosis.hint?.verdict, "connector_suggestion");
+		assert.doesNotMatch(stdout, /may be presented as an instruction/u);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });

@@ -130,10 +130,21 @@ import {
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "../src/connector-paths.ts";
+import { diagnoseRun, renderDiagnosis } from "../src/failure-diagnosis.ts";
 import {
 	handleInteraction,
 	type InteractionMessage,
 } from "../src/interaction-handler.ts";
+import {
+	createObservationIngest,
+	describeFact,
+	isObservationLine,
+	type ManifestDiagnosticDeclarations,
+	manifestDiagnosticDeclarations,
+	type ObservationIngestOutcome,
+	type ObservationIngestSnapshot,
+	type RunRecord,
+} from "../src/observation.ts";
 import {
 	getConnectorPaths,
 	KNOWN_CONNECTOR_NAMES,
@@ -163,6 +174,12 @@ export interface CliArgs {
 	 * `src/orchestrator.ts`, without adding a parallel runner.
 	 */
 	entrypoint?: string;
+	/**
+	 * `--manifest <path>` — with `--entrypoint` only: the manifest whose
+	 * `protocol_capabilities` and `diagnostic_descriptors` this run uses. A
+	 * registered connector always uses its own manifest.
+	 */
+	manifest?: string;
 	/** `--no-capture` — opts out of the default on-failure evidence retention
 	 *  (see `resolveCaptureOnFailureEnv`). Absent means the default applies. */
 	noCapture: boolean;
@@ -181,7 +198,8 @@ export interface CliArgs {
 function usageAndExit(code: number): never {
 	process.stderr.write(
 		"Usage: connector-dev <connector> [--summary-out <path>] [--answer <id-or-index>=<value>] " +
-			"[--answers <json-file>] [--streams <name,name,...>] [--seed-last-state] [--no-capture]\n",
+			"[--answers <json-file>] [--streams <name,name,...>] [--seed-last-state] [--no-capture]\n" +
+			"       (test-only: --entrypoint <path> [--manifest <path>])\n",
 	);
 	process.stderr.write(
 		`Known connectors: ${KNOWN_CONNECTOR_NAMES.join(", ")}\n`,
@@ -194,6 +212,7 @@ interface MutableCliArgs {
 	answersFile: string | undefined;
 	connector: string | undefined;
 	entrypoint: string | undefined;
+	manifest: string | undefined;
 	noCapture: boolean;
 	seedLastState: boolean;
 	streams: string[] | undefined;
@@ -208,7 +227,7 @@ function consumeValueFlag(
 	argv: readonly string[],
 	i: number,
 	into: MutableCliArgs,
-	field: "answersFile" | "entrypoint" | "summaryOut",
+	field: "answersFile" | "entrypoint" | "manifest" | "summaryOut",
 ): number {
 	const value = argv[i];
 	if (!value) {
@@ -279,6 +298,7 @@ const VALUE_FLAG_CONSUMERS: Record<
 		consumeValueFlag(argv, i, into, "entrypoint"),
 	"--answers": (argv, i, into) =>
 		consumeValueFlag(argv, i, into, "answersFile"),
+	"--manifest": (argv, i, into) => consumeValueFlag(argv, i, into, "manifest"),
 	"--answer": consumeAnswerFlag,
 	"--streams": consumeStreamsFlag,
 };
@@ -297,6 +317,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 		connector: undefined,
 		summaryOut: undefined,
 		entrypoint: undefined,
+		manifest: undefined,
 		answersFile: undefined,
 		answers: [],
 		streams: undefined,
@@ -338,6 +359,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 		noCapture: parsed.noCapture,
 		...(parsed.summaryOut ? { summaryOut: parsed.summaryOut } : {}),
 		...(parsed.entrypoint ? { entrypoint: parsed.entrypoint } : {}),
+		...(parsed.manifest ? { manifest: parsed.manifest } : {}),
 		...(parsed.answersFile ? { answersFile: parsed.answersFile } : {}),
 		...(parsed.streams ? { streams: parsed.streams } : {}),
 	};
@@ -438,6 +460,12 @@ export function defaultSummaryPath(
 ): string {
 	const safeStamp = isoStamp.replace(/:/g, "-");
 	return join(PACKAGE_ROOT, "runs", connector, `${safeStamp}-summary.json`);
+}
+
+/** The run id `bin/diagnose.ts` accepts for a run whose summary went to
+ *  `defaultSummaryPath(connector, isoStamp)`. */
+export function runIdFor(connector: string, isoStamp: string): string {
+	return `${connector}/${isoStamp.replace(/:/g, "-")}`;
 }
 
 export function toolVersion(): string {
@@ -685,8 +713,13 @@ function renderMessage(message: EmittedMessage): void {
 			return;
 		}
 		case "SKIP_RESULT": {
+			const hint =
+				typeof message.recovery_hint === "object"
+					? message.recovery_hint.action
+					: message.recovery_hint;
+			// A hint is the connector's suggestion; this tool never acts on it.
 			printLine(
-				`  WARN     [${message.stream}] skip: ${message.reason} — ${message.message}`,
+				`  WARN     [${message.stream}] skip: ${message.reason} — ${message.message}${hint ? ` (connector's suggestion: ${hint})` : ""}`,
 			);
 			return;
 		}
@@ -728,6 +761,16 @@ function renderMessage(message: EmittedMessage): void {
 	}
 }
 
+function renderObservation(outcome: ObservationIngestOutcome): void {
+	if ("accepted" in outcome) {
+		printLine(`  FACT     ${describeFact(outcome.accepted)} (connector)`);
+		return;
+	}
+	printLine(
+		`  WARN     OBSERVATION discarded: ${outcome.discarded === "count_exceeded" ? "per-run limit reached (count_exceeded); the run record is truncated" : `protocol violation (${outcome.discarded})`}`,
+	);
+}
+
 /**
  * A DONE(succeeded) on stdout is NOT, by itself, proof the run actually
  * finished honestly — see this file's module docstring's "Exit code"
@@ -755,6 +798,9 @@ export type ProtocolViolationReason =
 export interface RunResult {
 	code: number | null;
 	messages: EmittedMessage[];
+	/** Facts from the connector's `OBSERVATION` lines, plus the runtime's
+	 *  records of any that were discarded. */
+	observations: ObservationIngestSnapshot;
 	/** Set when the run's DONE-finality was violated (see
 	 *  `ProtocolViolationReason`) — populated even when the subprocess's own
 	 *  DONE said `status: "succeeded"`, because a DONE claim is not
@@ -781,6 +827,10 @@ export interface RunAndStreamOptions {
 	captureOnFailure?: string;
 	/** Injectable for tests; defaults to `process.stdin.isTTY`. */
 	isTty?: boolean;
+	/** Whether the connector's manifest declares `OBSERVATION`. An
+	 *  `OBSERVATION` from a connector that does not is a protocol violation:
+	 *  discarded and recorded, never accepted as a fact. */
+	observationsDeclared?: boolean;
 }
 
 /**
@@ -817,6 +867,9 @@ export function runAndStream(
 		});
 
 		const messages: EmittedMessage[] = [];
+		const observations = createObservationIngest({
+			declared: options.observationsDeclared ?? false,
+		});
 		const unansweredInteractions: RunResult["unansweredInteractions"] = [];
 		let stdoutBuffer = "";
 		let settled = false;
@@ -889,9 +942,9 @@ export function runAndStream(
 			if (!line.trim()) {
 				return;
 			}
-			let parsed: EmittedMessage;
+			let raw: unknown;
 			try {
-				parsed = JSON.parse(line) as EmittedMessage;
+				raw = JSON.parse(line);
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
 				finish(() =>
@@ -910,6 +963,11 @@ export function runAndStream(
 				// it re-trigger the stdin-close side effect below.
 				messageAfterDone = true;
 			}
+			if (isObservationLine(raw)) {
+				renderObservation(observations.accept(raw, Buffer.byteLength(line)));
+				return;
+			}
+			const parsed = raw as EmittedMessage;
 			messages.push(parsed);
 			renderMessage(parsed);
 			if (parsed.type === "INTERACTION") {
@@ -974,6 +1032,7 @@ export function runAndStream(
 				resolvePromise({
 					code,
 					messages,
+					observations: observations.snapshot(),
 					signal,
 					unansweredInteractions,
 					...(protocolViolation ? { protocolViolation } : {}),
@@ -1002,6 +1061,14 @@ export function runAndStream(
  * CLI without a registered production connector — the same reason the test
  * fixture wiring exists at all.
  */
+interface ResolvedConnector {
+	connectorPath: string;
+	/** The manifest members diagnosis depends on (`protocol_capabilities`,
+	 *  `diagnostic_descriptors`). */
+	declarations: ManifestDiagnosticDeclarations;
+	streams: readonly ManifestStream[];
+}
+
 const ENTRYPOINT_MODE_STREAMS: readonly ManifestStream[] = [
 	{ name: "items" },
 	{ name: "extras" },
@@ -1020,17 +1087,16 @@ const ENTRYPOINT_MODE_STREAMS: readonly ManifestStream[] = [
  * applied uniformly regardless of whether the list came from a real
  * manifest or `ENTRYPOINT_MODE_STREAMS`.
  */
-function resolveConnector(args: CliArgs): {
-	connectorPath: string;
-	streams: readonly ManifestStream[];
-} {
-	const resolved = ((): {
-		connectorPath: string;
-		streams: readonly ManifestStream[];
-	} => {
+function resolveConnector(args: CliArgs): ResolvedConnector {
+	const resolved = ((): ResolvedConnector => {
 		if (args.entrypoint) {
 			return {
 				connectorPath: args.entrypoint,
+				declarations: manifestDiagnosticDeclarations(
+					args.manifest
+						? (JSON.parse(readFileSync(args.manifest, "utf8")) as unknown)
+						: undefined,
+				),
 				streams: ENTRYPOINT_MODE_STREAMS,
 			};
 		}
@@ -1042,6 +1108,7 @@ function resolveConnector(args: CliArgs): {
 		const { connectorPath } = getConnectorPaths(args.connector);
 		return {
 			connectorPath,
+			declarations: manifestDiagnosticDeclarations(manifest),
 			streams: (manifest.streams ?? []) as ManifestStream[],
 		};
 	})();
@@ -1112,6 +1179,7 @@ function printBrowserRendererNote(env: NodeJS.ProcessEnv): void {
 type PreflightRunConfig =
 	| {
 			connectorPath: string;
+			declarations: ManifestDiagnosticDeclarations;
 			ok: true;
 			seedState: Record<string, unknown> | undefined;
 			streams: readonly ManifestStream[];
@@ -1120,9 +1188,10 @@ type PreflightRunConfig =
 
 function resolvePreflightRunConfig(args: CliArgs): PreflightRunConfig {
 	let connectorPath: string;
+	let declarations: ManifestDiagnosticDeclarations;
 	let streams: readonly ManifestStream[];
 	try {
-		({ connectorPath, streams } = resolveConnector(args));
+		({ connectorPath, declarations, streams } = resolveConnector(args));
 	} catch (err) {
 		// filterStreamsByName's unknown-stream-name error — fail before spawning
 		// anything, same as every other pre-flight arg-validation failure.
@@ -1136,7 +1205,13 @@ function resolvePreflightRunConfig(args: CliArgs): PreflightRunConfig {
 	// anything, same as the --streams validation above: a missing prior file
 	// is a pre-flight failure, not a mid-run one.
 	if (!args.seedLastState) {
-		return { ok: true, connectorPath, streams, seedState: undefined };
+		return {
+			ok: true,
+			connectorPath,
+			declarations,
+			streams,
+			seedState: undefined,
+		};
 	}
 	let lastState: LastState;
 	try {
@@ -1148,7 +1223,13 @@ function resolvePreflightRunConfig(args: CliArgs): PreflightRunConfig {
 	printLine(
 		`SEEDED   state from ${lastStatePath(args.connector)} (run of ${lastState.started_at})`,
 	);
-	return { ok: true, connectorPath, streams, seedState: lastState.state };
+	return {
+		ok: true,
+		connectorPath,
+		declarations,
+		streams,
+		seedState: lastState.state,
+	};
 }
 
 /** Prints the per-stream/coverage/skip/provenance block of the terminal
@@ -1209,7 +1290,12 @@ async function main(): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	const { connectorPath, streams, seedState } = preflight;
+	const { connectorPath, declarations, streams, seedState } = preflight;
+	if (declarations.invalidDescriptors) {
+		printLine(
+			"WARN     manifest diagnostic_descriptors is invalid; the run uses no declared descriptors",
+		);
+	}
 
 	const start = {
 		type: "START" as const,
@@ -1232,6 +1318,7 @@ async function main(): Promise<void> {
 		result = await runAndStream(connectorPath, start, {
 			answers,
 			...(captureOnFailure === undefined ? {} : { captureOnFailure }),
+			observationsDeclared: declarations.declaresObservation,
 		});
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -1246,6 +1333,7 @@ async function main(): Promise<void> {
 		started_at: startedAt,
 		finished_at: finishedAt,
 		tool_version: toolVersion(),
+		run_record: buildRunRecord(declarations, result),
 	});
 
 	const outPath = summaryOut
@@ -1263,6 +1351,9 @@ async function main(): Promise<void> {
 
 	printLine("DONE");
 	printRunSummaryBody(summary, outPath);
+	printLine(
+		`  diagnose: pnpm exec tsx bin/diagnose.ts ${summaryOut ? outPath : runIdFor(connector, startedAt)}`,
+	);
 
 	// A succeeded DONE is not self-certifying: a nonzero exit or exit-by-signal
 	// after DONE, more than one DONE, or any protocol message after DONE, is a
@@ -1294,6 +1385,7 @@ async function main(): Promise<void> {
 		printLine(
 			`FAILED   no_terminal_done: exit code=${String(result.code)} signal=${String(result.signal)}`,
 		);
+		printDiagnosis(summary);
 		process.exitCode = 1;
 		return;
 	}
@@ -1304,8 +1396,41 @@ async function main(): Promise<void> {
 	printLine(
 		`FAILED   ${retryable ? "retryable" : "terminal"}: ${errorMessage}`,
 	);
+	printDiagnosis(summary);
 	printFailureDiagnostics(connector, captureOnFailure, process.env);
 	process.exitCode = 1;
+}
+
+/** The failure's cause, facts and recovery-hint verdict (Section 5.11). A
+ *  connector's hint is never shown as an instruction unless the runtime
+ *  holds the evidence its predicate needs. */
+function printDiagnosis(summary: RunSummary): void {
+	for (const line of renderDiagnosis(
+		diagnoseRun({
+			connector: summary.connector,
+			done: summary.done,
+			run_record: summary.run_record,
+		}),
+	)) {
+		printLine(line);
+	}
+}
+
+/** The run's diagnosis input: declarations at run time, facts with their
+ *  provenance, and how the process ended (Collection Profile Section 5.10). */
+export function buildRunRecord(
+	declarations: ManifestDiagnosticDeclarations,
+	result: Pick<RunResult, "code" | "observations" | "signal">,
+): RunRecord {
+	return {
+		protocol_capabilities: declarations.protocolCapabilities,
+		...(declarations.descriptors
+			? { diagnostic_descriptors: declarations.descriptors }
+			: {}),
+		facts: result.observations.facts,
+		truncated: result.observations.truncated,
+		process_exit: { code: result.code, signal: result.signal },
+	};
 }
 
 /** `findLatestCaptureDir` + `diagnosticNextSteps`, composed as one `main()`

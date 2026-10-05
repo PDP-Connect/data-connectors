@@ -84,6 +84,12 @@ import {
 	createCaptureSession,
 } from "./fixture-capture.ts";
 import {
+	createWireObservationSink,
+	OBSERVATION_CAPABILITY,
+	observationBasisOf,
+	setObservationSink,
+} from "./observation.ts";
+import {
 	DEFAULT_RETRYABLE_PATTERN,
 	type EnsureSessionArgs,
 	establishSession,
@@ -324,6 +330,19 @@ interface BaseRunConnectorConfig {
 	isTombstone?: (stream: string, data: RecordData) => boolean;
 	name: string;
 	normalizeTerminalError?: NormalizeTerminalError;
+	/**
+	 * Optional protocol capabilities this connector emits. It MUST equal the
+	 * manifest's `protocol_capabilities` (Collection Profile Section 3.4): a
+	 * runtime that does not advertise a declared capability refuses to start
+	 * the connector, so declare one only once the runtimes that place this
+	 * connector support it.
+	 *
+	 * `"OBSERVATION"` sends the facts the shared helpers record (for example
+	 * `waitForElementExpectation`) as `OBSERVATION` messages, and cites them in
+	 * `DONE.error.basis`. Without it the same facts go to standard error as
+	 * diagnostic lines and never reach the wire.
+	 */
+	protocolCapabilities?: readonly (typeof OBSERVATION_CAPABILITY)[];
 	/**
 	 * Optional post-commit hook. Runs ONLY on a successful run, AFTER the
 	 * runtime has acknowledged durable ingest (stdin EOF) and immediately
@@ -975,22 +994,36 @@ export function runConnector(config: RunConnectorConfig): void {
 		stream: string;
 	} | null = null;
 
+	const observationsDeclared =
+		config.protocolCapabilities?.includes(OBSERVATION_CAPABILITY) ?? false;
+	if (observationsDeclared) {
+		setObservationSink(createWireObservationSink());
+	}
+
 	const emitFailed = (
 		message: string,
 		retryable = false,
 		records_emitted = observedCounters?.totalEmitted ?? 0,
 		code?: string,
+		errorBasis: readonly string[] = [],
 	): void => {
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
 		// failed terminal status if Node exits before the explicit callback.
 		process.exitCode = 1;
-		const terminalError = composeNormalizedTerminalError({
+		const normalized = composeNormalizedTerminalError({
 			message,
 			retryable,
 			code,
 			normalizeTerminalError,
 		});
+		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
+		// (Section 5.8). It is a connector claim, distinct from a diagnosis
+		// cause's basis; the runtime decides scope on its own records.
+		const terminalError =
+			observationsDeclared && errorBasis.length > 0
+				? { ...normalized, basis: errorBasis }
+				: normalized;
 		// Fire-and-forget. emit() resolves after stdout drains; we're about to
 		// exit(1) anyway, so we don't need to block. If it rejects (the write
 		// fails), the process is dying either way.
@@ -1235,12 +1268,19 @@ export function runConnector(config: RunConnectorConfig): void {
 	// the runtime threw deliberately with an explicit retryable bit) from
 	// unexpected throws (where we pattern-match the message).
 	run().catch((err: unknown) => {
+		const errorBasis = observationBasisOf(err);
 		if (err instanceof TerminalError) {
-			emitFailed(err.message, err.retryable, undefined, err.code);
+			emitFailed(err.message, err.retryable, undefined, err.code, errorBasis);
 			return;
 		}
 		const message = describeUnexpectedFailure(err);
-		emitFailed(message, retryablePattern.test(message));
+		emitFailed(
+			message,
+			retryablePattern.test(message),
+			undefined,
+			undefined,
+			errorBasis,
+		);
 	});
 
 	async function run(): Promise<void> {

@@ -110,8 +110,15 @@ const CHATGPT_TERMINAL_DIAGNOSTIC_MAX = 240;
 // missing credential therefore fell through to the generic branch and was
 // labelled `retry_on_connector_upgrade`, telling the owner to await a code
 // release for something only re-entering a credential can fix.
+//
+// `session_failed` is deliberately NOT an auth token. The runtime prefixes
+// EVERY sign-in failure with `chatgpt_session_failed:` (session-establish.ts),
+// so matching it turned a hidden email input, a fill timeout, or an
+// unexpected login page into `refresh_credentials` (2026-10-02). The inner
+// cause decides: an explicit 401/403, a missing credential, or a session the
+// owner must renew.
 const CHATGPT_AUTH_FAILURE_RE =
-	/(?:^|[^A-Za-z0-9])(?:401|403|auth_missing|session_required|session_failed|unauthorized|forbidden|credentials|CHATGPT_USERNAME\/PASSWORD not set)(?:$|[^A-Za-z0-9])/iu;
+	/(?:^|[^A-Za-z0-9])(?:401|403|auth_missing|session_required|unauthorized|forbidden|credentials|CHATGPT_USERNAME\/PASSWORD not set)(?:$|[^A-Za-z0-9])/iu;
 const CHATGPT_MANUAL_ACTION_RE =
 	/(?:^|[^A-Za-z0-9_])(?:chatgpt_login_unexpected_ui|chatgpt_login_no_password_field|chatgpt_login_post_submit_failed|cloudflare|challenge|captcha|manual_action|2fa|verification code)(?:$|[^A-Za-z0-9_])/iu;
 const CHATGPT_SENSITIVE_DIAGNOSTIC_FIELD_RE =

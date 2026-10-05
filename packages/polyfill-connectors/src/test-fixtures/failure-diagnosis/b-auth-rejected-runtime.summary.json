@@ -1,0 +1,82 @@
+{
+	"format": "pdpp.run-summary/1",
+	"connector": "password_login_example",
+	"tool_version": "0.0.1",
+	"started_at": "2026-10-02T09:14:03.000Z",
+	"finished_at": "2026-10-02T09:14:41.000Z",
+	"duration_ms": 38000,
+	"streams": {},
+	"skips": 0,
+	"done": {
+		"status": "failed",
+		"error": {
+			"message": "password_login_example_session_failed: the provider said the password is incorrect",
+			"retryable": false,
+			"recovery_hint": {
+				"action": "refresh_credentials",
+				"retryable": false
+			},
+			"basis": ["o1"]
+		}
+	},
+	"generated_by": "connector-dev",
+	"provider_contact_observed": false,
+	"run_record": {
+		"protocol_capabilities": ["OBSERVATION"],
+		"diagnostic_descriptors": {
+			"steps": [
+				{
+					"id": "sign_in"
+				}
+			],
+			"rules": [
+				{
+					"id": "password_rejected",
+					"kind": "auth",
+					"step": "sign_in"
+				}
+			]
+		},
+		"facts": [
+			{
+				"source": "connector",
+				"id": "o1",
+				"fact": "provider_message",
+				"step": "sign_in",
+				"attrs": {
+					"kind": "auth_failure",
+					"rule": "password_rejected"
+				},
+				"evidence_ref": "artifact:sign-in-error-page"
+			},
+			{
+				"source": "runtime",
+				"id": "r1",
+				"fact": "credential_submission",
+				"step": "sign_in",
+				"attrs": {
+					"attempt": "a1",
+					"account": "acct-1",
+					"outcome": "rejected",
+					"rule": "password_rejected"
+				}
+			},
+			{
+				"source": "runtime",
+				"id": "r2",
+				"fact": "rule_match",
+				"step": "sign_in",
+				"attrs": {
+					"rule": "password_rejected",
+					"kind": "auth",
+					"handle": "a1"
+				}
+			}
+		],
+		"truncated": false,
+		"process_exit": {
+			"code": 1,
+			"signal": null
+		}
+	}
+}

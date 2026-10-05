@@ -28,7 +28,9 @@ import type {
 	SessionCheckpointFn,
 } from "../connector-runtime.ts";
 import type { CaptureSession } from "../fixture-capture.ts";
+import { withObservationBasis } from "../observation.ts";
 import { detectCloudflareChallenge } from "../platform-probes.ts";
+import { waitForElementExpectation } from "./locator-helpers.ts";
 import {
 	type LoginCredentialFields,
 	resolveLoginCredentials,
@@ -128,6 +130,10 @@ export const CHATGPT_SESSION_REQUIRED_NON_INTERACTIVE_MESSAGE =
 	"chatgpt_session_required: ChatGPT session is not active; start an owner-attended manual refresh to repair authentication.";
 export const CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE =
 	"chatgpt_stored_credential_rejected: ChatGPT rejected the stored username/password credential.";
+/** Declared step and expectation ids for the sign-in form (Section 3.8). */
+export const CHATGPT_SIGN_IN_STEP = "sign_in";
+export const CHATGPT_EMAIL_INPUT_EXPECTATION = "email_input";
+const CHATGPT_EMAIL_INPUT_WAIT_MS = 10_000;
 const PUSH_APPROVAL_POLL_INTERVAL_MS = 5000;
 const BROWSER_LOGIN_POLL_INTERVAL_MS = 5000;
 /**
@@ -851,10 +857,20 @@ async function findAndFillEmail({
 > & {
 	readonly email: string;
 }): Promise<boolean> {
-	const emailIn = page
-		.locator('input[type="email"], input[name="username"], input[name="email"]')
-		.first();
-	if (!(await emailIn.count())) {
+	// A hidden or disabled email input is an unexpected page, not a rejected
+	// credential: the 2026-10-02 run filled a hidden input, timed out, and was
+	// reported as "refresh your credentials". The shared wait records what the
+	// page showed at the deadline and the miss takes the unexpected-UI path.
+	const emailWait = await waitForElementExpectation({
+		expectation: CHATGPT_EMAIL_INPUT_EXPECTATION,
+		locator: page.locator(
+			'input[type="email"], input[name="username"], input[name="email"]',
+		),
+		sleep: (ms) => page.waitForTimeout(ms),
+		step: CHATGPT_SIGN_IN_STEP,
+		timeoutMs: CHATGPT_EMAIL_INPUT_WAIT_MS,
+	});
+	if (!emailWait.match) {
 		if (
 			await fallbackForUnexpectedLoginUi({
 				...(assist ? { assist } : {}),
@@ -868,10 +884,13 @@ async function findAndFillEmail({
 		) {
 			return true;
 		}
-		throw new Error("chatgpt_login_unexpected_ui");
+		throw withObservationBasis(
+			new Error("chatgpt_login_unexpected_ui"),
+			emailWait.observationIds,
+		);
 	}
 
-	await emailIn.fill(email);
+	await emailWait.match.fill(email);
 	await page
 		.locator('button[type="submit"], :text-is("Continue")')
 		.first()

@@ -21,6 +21,7 @@ import type {
 	DetailCoverageMessage,
 	EmittedMessage,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
+import type { RunRecord } from "./observation.ts";
 
 export interface RunSummaryStream {
 	/**
@@ -65,6 +66,11 @@ export interface RunSummaryDone {
 		message: string;
 		retryable: boolean;
 		code?: string;
+		/** The connector's portable recovery hint, kept verbatim. It is the
+		 *  connector's suggestion; `bin/diagnose.ts` decides how to present it. */
+		recovery_hint?: string | { action: string; retryable?: boolean };
+		/** OBSERVATION ids the connector cites for this failure (a claim). */
+		basis?: string[];
 	};
 	/**
 	 * ISO-8601 timestamp of the most recent RECORD.emitted_at seen in the run,
@@ -104,6 +110,13 @@ export interface RunSummary {
 	 * here for that evidence.
 	 */
 	provider_contact_observed: false;
+	/**
+	 * The diagnosis input for this run (Collection Profile Section 5.10):
+	 * facts with their provenance, the declared capabilities and descriptors,
+	 * and how the process ended. Contains no record data. Absent in summaries
+	 * written before this field existed.
+	 */
+	run_record?: RunRecord;
 	skips: number;
 	started_at: string;
 	streams: Record<string, RunSummaryStream>;
@@ -113,6 +126,7 @@ export interface RunSummary {
 export interface RunSummaryMeta {
 	connector: string;
 	finished_at: string;
+	run_record?: RunRecord;
 	started_at: string;
 	tool_version: string;
 }
@@ -194,14 +208,32 @@ function buildDone(messages: readonly EmittedMessage[]): RunSummaryDone {
 			? { latest_record_emitted_at: latestRecordEmittedAtValue }
 			: {}),
 		...(done.status === "failed" && done.error
-			? {
-					error: {
-						message: done.error.message,
-						retryable: done.error.retryable,
-						...(done.error.code ? { code: done.error.code } : {}),
-					},
-				}
+			? { error: summarizeDoneError(done.error) }
 			: {}),
+	};
+}
+
+function basisOf(error: object): string[] | undefined {
+	const basis: unknown = Reflect.get(error, "basis");
+	if (!Array.isArray(basis)) {
+		return;
+	}
+	const ids = basis.filter((id): id is string => typeof id === "string");
+	return ids.length > 0 ? ids : undefined;
+}
+
+function summarizeDoneError(
+	error: NonNullable<Extract<EmittedMessage, { type: "DONE" }>["error"]>,
+): NonNullable<RunSummaryDone["error"]> {
+	const basis = basisOf(error);
+	return {
+		message: error.message,
+		retryable: error.retryable,
+		...(error.code ? { code: error.code } : {}),
+		...(error.recovery_hint === undefined
+			? {}
+			: { recovery_hint: error.recovery_hint }),
+		...(basis ? { basis } : {}),
 	};
 }
 
@@ -286,5 +318,6 @@ export function buildRunSummary(
 		done: buildDone(messages),
 		generated_by: "connector-dev",
 		provider_contact_observed: false,
+		...(meta.run_record ? { run_record: meta.run_record } : {}),
 	};
 }

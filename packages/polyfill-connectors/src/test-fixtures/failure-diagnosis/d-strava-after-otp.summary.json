@@ -1,0 +1,42 @@
+{
+	"format": "pdpp.run-summary/1",
+	"connector": "strava_browser",
+	"tool_version": "0.0.1",
+	"started_at": "2026-10-02T09:14:03.000Z",
+	"finished_at": "2026-10-02T09:14:41.000Z",
+	"duration_ms": 38000,
+	"streams": {},
+	"skips": 0,
+	"done": {
+		"status": "no_done"
+	},
+	"generated_by": "connector-dev",
+	"provider_contact_observed": false,
+	"run_record": {
+		"protocol_capabilities": ["OBSERVATION"],
+		"diagnostic_descriptors": {
+			"steps": [
+				{
+					"id": "sign_in"
+				}
+			]
+		},
+		"facts": [
+			{
+				"source": "connector",
+				"id": "o1",
+				"fact": "provider_message",
+				"step": "sign_in",
+				"attrs": {
+					"kind": "other"
+				},
+				"evidence_ref": "artifact:strava/provider-message-1.txt"
+			}
+		],
+		"truncated": false,
+		"process_exit": {
+			"code": 1,
+			"signal": null
+		}
+	}
+}
