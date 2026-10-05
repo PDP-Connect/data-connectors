@@ -3,6 +3,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	CollectContext,
 	EmittedMessage,
@@ -91,9 +95,11 @@ function makeContext({
 } = {}): {
 	readonly ctx: CollectContext;
 	readonly messages: EmittedMessage[];
+	readonly progressMessages: string[];
 	readonly records: Array<{ data: RecordData; stream: string }>;
 } {
 	const messages: EmittedMessage[] = [];
+	const progressMessages: string[] = [];
 	const records: Array<{ data: RecordData; stream: string }> = [];
 	// `StartMessage.state` is the runtime's connector-agnostic open bag; the
 	// fixture stays typed as `GoogleContactsState` and widens only here.
@@ -105,6 +111,7 @@ function makeContext({
 	};
 	return {
 		messages,
+		progressMessages,
 		records,
 		ctx: {
 			assist: () => Promise.resolve("asst_test"),
@@ -121,7 +128,10 @@ function makeContext({
 				return Promise.resolve();
 			},
 			emittedAt: "2026-08-07T00:00:00.000Z",
-			progress: () => Promise.resolve(),
+			progress: (message) => {
+				progressMessages.push(message);
+				return Promise.resolve();
+			},
 			requested: new Map(streams.map((stream) => [stream.name, stream])),
 			requestDetailGapPage: () => Promise.resolve([]),
 			scope: start.scope,
@@ -382,17 +392,23 @@ test("falls back to a full resync when the syncToken has expired (HTTP 410)", as
 			fingerprints: { stale: "abc" },
 		},
 	};
-	const { ctx, messages, records } = makeContext({
+	const { ctx, messages, progressMessages, records } = makeContext({
 		state: priorState,
 		streams: [{ name: "people" }],
 	});
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
 
-	await collectGoogleContacts(ctx, {
-		clientFactory: () => fakeClient,
-		env: ENV,
-		now: () => FIXED_NOW,
-		...FAKE_TOKEN,
-	});
+	try {
+		await collectGoogleContacts(ctx, {
+			clientFactory: () => fakeClient,
+			env: ENV,
+			now: () => FIXED_NOW,
+			...FAKE_TOKEN,
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 
 	assert.equal(records.filter((r) => r.stream === "people").length, 1);
 	const cursor = lastStateCursor(messages, "people") as {
@@ -401,6 +417,17 @@ test("falls back to a full resync when the syncToken has expired (HTTP 410)", as
 	};
 	assert.equal(cursor.sync_token, "sync-fresh");
 	assert.equal(cursor.fingerprints?.stale, undefined);
+	assert.ok(
+		progressMessages.includes(
+			"Refreshing all Google Contacts (the saved sync point expired)",
+		),
+	);
+	assertUserFacingProgress(
+		progressMessages.map((message) => ({ type: "PROGRESS", message })),
+	);
+	assert.deepEqual(diagnostics, [
+		'[google_contacts-diagnostic] sync_token_rejected {"action":"full_resync","http_status":410,"stream":"people"}',
+	]);
 });
 
 test("proactively forces a full resync when the syncToken is past its 7-day window, without waiting for a 410", async () => {
@@ -424,22 +451,39 @@ test("proactively forces a full resync when the syncToken is past its 7-day wind
 			fingerprints: {},
 		},
 	};
-	const { ctx } = makeContext({
+	const { ctx, progressMessages } = makeContext({
 		state: priorState,
 		streams: [{ name: "people" }],
 	});
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
 
-	await collectGoogleContacts(ctx, {
-		clientFactory: () => fakeClient,
-		env: ENV,
-		now: () => FIXED_NOW,
-		...FAKE_TOKEN,
-	});
+	try {
+		await collectGoogleContacts(ctx, {
+			clientFactory: () => fakeClient,
+			env: ENV,
+			now: () => FIXED_NOW,
+			...FAKE_TOKEN,
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 
 	const call = fakeClient.calls.find((c) => c.method === "listConnectionsPage");
 	assert.ok(call);
 	// No syncToken sent — full resync requested proactively, before any 410.
 	assert.equal((call.args as { syncToken?: string }).syncToken, undefined);
+	assert.ok(
+		progressMessages.includes(
+			"Refreshing all Google Contacts (the saved sync point is too old)",
+		),
+	);
+	assertUserFacingProgress(
+		progressMessages.map((message) => ({ type: "PROGRESS", message })),
+	);
+	assert.deepEqual(diagnostics, [
+		'[google_contacts-diagnostic] sync_token_stale {"action":"full_resync","stream":"people","token_validity_days":7,"proactive_threshold_days":6}',
+	]);
 });
 
 test("does not force a full resync when the syncToken is still within its validity window", async () => {

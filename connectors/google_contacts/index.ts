@@ -36,6 +36,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
 	type CollectContext,
@@ -274,8 +275,14 @@ async function syncPeopleWithFallback(args: {
 	const tokenIsStale = syncTokenIsStale(priorState, now);
 	const syncToken = tokenIsStale ? undefined : priorState?.sync_token;
 	if (tokenIsStale) {
+		connectorDiagnostic("google_contacts", "sync_token_stale", {
+			action: "full_resync",
+			stream: "people",
+			token_validity_days: 7,
+			proactive_threshold_days: SYNC_TOKEN_MAX_AGE_MS / (24 * 60 * 60 * 1000),
+		});
 		await ctx.progress(
-			"Google Contacts syncToken is past its 7-day validity window — forcing full resync",
+			"Refreshing all Google Contacts (the saved sync point is too old)",
 			{
 				stream: "people",
 			},
@@ -287,8 +294,13 @@ async function syncPeopleWithFallback(args: {
 		if (!isSyncTokenExpired(error)) {
 			throw error;
 		}
+		connectorDiagnostic("google_contacts", "sync_token_rejected", {
+			action: "full_resync",
+			http_status: 410,
+			stream: "people",
+		});
 		await ctx.progress(
-			"Google Contacts syncToken rejected by the API (410) — falling back to full resync",
+			"Refreshing all Google Contacts (the saved sync point expired)",
 			{
 				stream: "people",
 			},
