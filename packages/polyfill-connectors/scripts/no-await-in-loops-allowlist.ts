@@ -1785,7 +1785,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/netflix_export/index.ts",
-			line: 364,
+			line: 379,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRecord(): Collection Profile protocol emission requiring in-order delivery",
