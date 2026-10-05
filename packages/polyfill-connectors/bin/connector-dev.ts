@@ -130,6 +130,7 @@ import {
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "../src/connector-paths.ts";
+import { diagnoseRun, renderDiagnosis } from "../src/failure-diagnosis.ts";
 import {
 	handleInteraction,
 	type InteractionMessage,
@@ -706,8 +707,13 @@ function renderMessage(message: EmittedMessage): void {
 			return;
 		}
 		case "SKIP_RESULT": {
+			const hint =
+				typeof message.recovery_hint === "object"
+					? message.recovery_hint.action
+					: message.recovery_hint;
+			// A hint is the connector's suggestion; this tool never acts on it.
 			printLine(
-				`  WARN     [${message.stream}] skip: ${message.reason} — ${message.message}`,
+				`  WARN     [${message.stream}] skip: ${message.reason} — ${message.message}${hint ? ` (connector's suggestion: ${hint})` : ""}`,
 			);
 			return;
 		}
@@ -1370,6 +1376,7 @@ async function main(): Promise<void> {
 		printLine(
 			`FAILED   no_terminal_done: exit code=${String(result.code)} signal=${String(result.signal)}`,
 		);
+		printDiagnosis(summary);
 		process.exitCode = 1;
 		return;
 	}
@@ -1380,8 +1387,24 @@ async function main(): Promise<void> {
 	printLine(
 		`FAILED   ${retryable ? "retryable" : "terminal"}: ${errorMessage}`,
 	);
+	printDiagnosis(summary);
 	printFailureDiagnostics(connector, captureOnFailure, process.env);
 	process.exitCode = 1;
+}
+
+/** The failure's cause, facts and recovery-hint verdict (Section 5.11). A
+ *  connector's hint is never shown as an instruction unless the runtime
+ *  holds the evidence its predicate needs. */
+function printDiagnosis(summary: RunSummary): void {
+	for (const line of renderDiagnosis(
+		diagnoseRun({
+			connector: summary.connector,
+			done: summary.done,
+			run_record: summary.run_record,
+		}),
+	)) {
+		printLine(line);
+	}
 }
 
 /** The run's diagnosis input: declarations at run time, facts with their

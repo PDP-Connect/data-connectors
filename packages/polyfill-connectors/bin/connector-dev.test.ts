@@ -867,6 +867,21 @@ test("connector-dev CLI: a declared OBSERVATION capability records connector fac
 		]);
 		assert.deepEqual(summary.done.error?.basis, ["o1", "o2"]);
 		assert.equal(summary.done.error?.recovery_hint, "refresh_credentials");
+		// The failure output carries the diagnosis: the cause from the cited
+		// fact, and the incident's refresh_credentials hint shown only as the
+		// connector's suggestion.
+		assert.match(
+			stdout,
+			/primary cause: expectation_mismatch at step sign_in/u,
+		);
+		assert.match(
+			stdout,
+			/connector's recovery hint \(refresh_credentials\): shown as the connector's suggestion, not as an instruction/u,
+		);
+		assert.match(
+			stdout,
+			/connector's own error text: fixture_preprogress_failure: refresh_credentials: fixture_login_unexpected_ui/u,
+		);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
