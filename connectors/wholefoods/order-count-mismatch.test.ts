@@ -15,14 +15,30 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import type { Page } from "playwright";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import * as connector from "./index.ts";
 import * as parsers from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
+
+/** Diagnostic lines written during the current test. */
+const diagnostics: string[] = [];
+beforeEach(() => {
+	diagnostics.length = 0;
+	setConnectorDiagnosticSink((line) => {
+		diagnostics.push(line);
+	});
+});
+afterEach(() => {
+	setConnectorDiagnosticSink(undefined);
+});
 
 const FIXTURE = readFileSync(
 	new URL("./__fixtures__/order-detail-instore-fopo.html", import.meta.url),
@@ -45,7 +61,8 @@ function pageServing(htmlByOrder: Record<string, string>): Page {
 	return {
 		content: () => Promise.resolve(current),
 		goto: (url: string) => {
-			current = htmlByOrder[new URL(url).searchParams.get("orderID") ?? ""] ?? "";
+			current =
+				htmlByOrder[new URL(url).searchParams.get("orderID") ?? ""] ?? "";
 			return Promise.resolve(null);
 		},
 		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
@@ -99,7 +116,10 @@ test("a count mismatch on order 2 delivers all 3 orders and reports one progress
 		orders.map((r) => r.data.id),
 		[A, B, C],
 	);
-	assert.equal(harness.emitted.filter((r) => r.stream === "order_items").length, 9);
+	assert.equal(
+		harness.emitted.filter((r) => r.stream === "order_items").length,
+		9,
+	);
 	assert.equal(
 		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
 		0,
@@ -108,25 +128,53 @@ test("a count mismatch on order 2 delivers all 3 orders and reports one progress
 		const progress = m as { type?: string; message?: string };
 		return (
 			progress.type === "PROGRESS" &&
-			progress.message?.startsWith(
-				`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}:`,
-			)
+			progress.message === "Could not confirm the item count for an order"
 		);
 	}) as unknown as { stream?: string; message?: string }[];
 	assert.equal(warnings.length, 1);
 	assert.equal(warnings[0]?.stream, "orders");
 	assert.equal(
 		warnings[0]?.message,
-		`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}: an order's item count could not be reconciled (search_count=9, detail_rows=3, detail_units=3)`,
+		"Could not confirm the item count for an order",
+	);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith(
+					"[wholefoods-diagnostic] order_item_count_unverified ",
+				) &&
+				line.includes(
+					`"reason":"${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}"`,
+				) &&
+				line.includes('"search_count":9') &&
+				line.includes('"detail_rows":3') &&
+				line.includes('"detail_units":3'),
+		),
+		diagnostics.join("\n"),
 	);
 	const summaries = harness.progressUpdates.filter((update) =>
-		update.message.startsWith(`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}:`),
+		update.message.startsWith("Item counts could not be checked"),
 	);
 	assert.equal(summaries.length, 1);
 	assert.equal(
 		summaries[0]?.message,
-		`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}: 1 of 3 Whole Foods order item counts could not be verified`,
+		"Item counts could not be checked for 1 of 3 Whole Foods orders",
 	);
+	assert.ok(
+		diagnostics.some((line) =>
+			line.startsWith(
+				'[wholefoods-diagnostic] order_item_counts_unverified_summary {"reason":',
+			),
+		),
+		diagnostics.join("\n"),
+	);
+	assertUserFacingProgress([
+		...harness.protocolMessages,
+		...harness.progressUpdates.map((update) => ({
+			type: "PROGRESS",
+			message: update.message,
+		})),
+	]);
 	assert.deepEqual(summaries[0]?.details, {
 		count: 1,
 		stream: "orders",
@@ -161,15 +209,24 @@ test("an online row without an ASIN keeps its order, omits the item record, and 
 	assert.ok(itemRecords.every((record) => record.data.order_id === B));
 	const warning = harness.protocolMessages.find((message) => {
 		const progress = message as { type?: string; message?: string };
-		return progress.message?.startsWith(
-			`${connector.ORDER_ITEM_ASIN_MISSING_REASON}:`,
-		);
+		return progress.message?.includes("had no product ID");
 	}) as { message?: string; stream?: string; type?: string } | undefined;
 	assert.equal(warning?.type, "PROGRESS");
 	assert.equal(warning?.stream, "orders");
 	assert.equal(
 		warning?.message,
-		`${connector.ORDER_ITEM_ASIN_MISSING_REASON}: 1 order item(s) had no source product ASIN and were omitted from order_items`,
+		"1 order item(s) had no product ID and were left out",
+	);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith("[wholefoods-diagnostic] order_item_asin_missing ") &&
+				line.includes(
+					`"reason":"${connector.ORDER_ITEM_ASIN_MISSING_REASON}"`,
+				) &&
+				line.includes('"count":1'),
+		),
+		diagnostics.join("\n"),
 	);
 });
 

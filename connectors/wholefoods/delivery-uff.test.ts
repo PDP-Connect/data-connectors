@@ -11,14 +11,30 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import type { Page } from "playwright";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import * as connector from "./index.ts";
 import * as parsers from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
+
+/** Diagnostic lines written during the current test. */
+const diagnostics: string[] = [];
+beforeEach(() => {
+	diagnostics.length = 0;
+	setConnectorDiagnosticSink((line) => {
+		diagnostics.push(line);
+	});
+});
+afterEach(() => {
+	setConnectorDiagnosticSink(undefined);
+});
 
 const FIXTURE = readFileSync(
 	new URL("./__fixtures__/order-detail-uff.html", import.meta.url),
@@ -48,7 +64,10 @@ test("delivery detail evidence and readiness match the captured structure", () =
 	assert.equal((FIXTURE.match(/id="[^"]+-item-grid-row"/g) ?? []).length, 31);
 	assert.equal(parsers.hasOrderDetailEvidence(FIXTURE), true);
 	assert.match(parsers.ORDER_DETAIL_READY_SELECTOR, /#line-items/);
-	assert.match(parsers.ORDER_DETAIL_READY_SELECTOR, /\[id\$="-item-grid-row"\]/);
+	assert.match(
+		parsers.ORDER_DETAIL_READY_SELECTOR,
+		/\[id\$="-item-grid-row"\]/,
+	);
 });
 
 test("parses all 31 delivery rows without clicking show-all and uses online quantity defaults", () => {
@@ -114,13 +133,22 @@ test("delivery count mismatch keeps the order and reports PROGRESS", async () =>
 		return (
 			progress.type === "PROGRESS" &&
 			progress.message?.startsWith(
-				`${connector.ORDER_ITEM_COUNT_UNVERIFIED_REASON}: an order's item count could not be reconciled`,
+				"Could not confirm the item count for an order",
 			)
 		);
 	});
 	assert.ok(warning);
-	assert.match(
-		(warning as unknown as { message?: string }).message ?? "",
-		/search_count=33, detail_rows=31, detail_units=32/,
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith(
+					"[wholefoods-diagnostic] order_item_count_unverified ",
+				) &&
+				line.includes('"search_count":33') &&
+				line.includes('"detail_rows":31') &&
+				line.includes('"detail_units":32'),
+		),
+		diagnostics.join("\n"),
 	);
+	assertUserFacingProgress(harness.protocolMessages);
 });
