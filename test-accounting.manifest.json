@@ -222,8 +222,9 @@
         "scripts/test-accounting/node-reporter.ts"
       ],
       "include": [
+        "schemas/connector-binding-grammar.test.mjs",
         "schemas/connector-index.schema.test.mjs",
-        "schemas/manifest.schema.test.mjs"
+        "schemas/connector-manifest.schema.test.mjs"
       ],
       "profiles": [
         {
