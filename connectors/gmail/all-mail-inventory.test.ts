@@ -30,6 +30,10 @@ import type {
 	ListResponse,
 	MessageEnvelopeObject,
 } from "imapflow";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { runAllMailPasses } from "./index.ts";
 import type { StreamRequest } from "./types.ts";
 
@@ -170,6 +174,36 @@ test("gmail all mail: the server-declared EXISTS is bound and disclosed, not dis
 		historical_backfill_complete: false,
 		uidvalidity: 123,
 	});
+});
+
+test("gmail all mail: owner text is plain; UID cursors go to a diagnostic line", async () => {
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		const { messages } = await runPass({ exists: 1200 });
+		assertUserFacingProgress(messages);
+		const texts = messages
+			.filter((m) => m.type === "PROGRESS")
+			.map((m) => (m as { message: string }).message);
+		assert.ok(texts.includes("Your mailbox has 1200 messages"));
+		assert.ok(
+			diagnostics.includes(
+				'[gmail-diagnostic] all_mail_historical_walk {"exists_total":1200,"backfilled_through_uid":0,"forward_floor_uid":1200}',
+			),
+			"UID cursors moved to the diagnostic line",
+		);
+		assert.ok(
+			diagnostics.some(
+				(l) =>
+					l.startsWith("[gmail-diagnostic] message_fetch_range ") &&
+					l.includes('"uid_range"') &&
+					l.includes('"mailbox":"[Gmail]/All Mail"'),
+			),
+			"fetch range and mailbox moved to the diagnostic line",
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 });
 
 test("gmail all mail: EXISTS is measured at the provider boundary, not derived from what was emitted", async () => {

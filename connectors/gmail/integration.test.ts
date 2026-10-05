@@ -44,6 +44,10 @@ import type {
 	MessageEnvelopeObject,
 	MessageStructureObject,
 } from "imapflow";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type {
 	DetailGapMessage,
@@ -1568,28 +1572,36 @@ test("resolveAttachmentProgressMinIntervalMs / resolveAttachmentProgressMinBytes
 	);
 });
 
-test("buildAttachmentTransferProgressMessage: renders phase/bytes/elapsed, omits total_bytes when untrusted", () => {
+/** Which recovery phase a PROGRESS message reports, from its owner text. */
+function recoveryPhase(message: string): string | undefined {
+	if (message.startsWith("Retrying ")) {
+		return "hydrating";
+	}
+	return message.startsWith("Recovered ") ? "settled" : undefined;
+}
+
+test("buildAttachmentTransferProgressMessage: renders megabytes, omits the total when untrusted", () => {
 	const withTotal = buildAttachmentTransferProgressMessage({
 		bytesTransferred: 524_288,
 		elapsedMs: 30_000,
 		phase: "transferring",
 		totalBytes: 4_774_421,
 	});
-	assert.match(withTotal, /phase=transferring/);
-	assert.match(withTotal, /bytes_transferred=524288/);
-	assert.match(withTotal, /total_bytes=4774421/);
-	assert.match(withTotal, /elapsed_ms=30000/);
+	assert.equal(withTotal, "Downloading attachment (0.5 of 4.6 MB)");
 
 	const withoutTotal = buildAttachmentTransferProgressMessage({
-		bytesTransferred: 1024,
+		bytesTransferred: 1_048_576,
 		elapsedMs: 500,
 		phase: "complete",
 		totalBytes: null,
 	});
-	assert.doesNotMatch(
+	assert.equal(
 		withoutTotal,
-		/total_bytes/,
+		"Downloading attachment (1.0 MB so far)",
 		"unknown total must never be guessed or fabricated",
+	);
+	assertUserFacingProgress(
+		[withTotal, withoutTotal].map((message) => ({ type: "PROGRESS", message })),
 	);
 });
 
@@ -3898,8 +3910,7 @@ test("runAttachmentBackfillAndRecoveryPass: served gaps preempt historical attac
 	);
 	const terminalRecoverySummary = runHarness.protocolMessages.find(
 		(msg): msg is ProgressMessage =>
-			msg.type === "PROGRESS" &&
-			msg.message.startsWith("Gmail served attachment-gap recovery summary:"),
+			msg.type === "PROGRESS" && msg.attachment_recovery_outcome !== undefined,
 	);
 	assert.deepEqual(
 		terminalRecoverySummary?.attachment_recovery_outcome,
@@ -3977,7 +3988,7 @@ test("runAttachmentBackfillAndRecoveryPass: served gaps preempt historical attac
 			(msg) =>
 				msg.type === "PROGRESS" &&
 				msg.stream === "attachments" &&
-				msg.message.includes("Backfilling historical attachment UIDs"),
+				msg.message === "Downloading attachments from older messages",
 		),
 		false,
 		"the historical byte-budget page must not run in the served-gap branch",
@@ -4195,15 +4206,24 @@ test("recoverServedAttachmentGaps: an oversized first candidate admits exactly o
 			return true;
 		};
 
-		const summary = await recoverServedAttachmentGaps(
-			{ search, fetchOne },
-			{
-				detailGaps: servedGaps,
-				emitProtocol: emitHarness.emit,
-				emitRecord,
-				hydrateAttachment: hydrateAttachmentMock as HydrateAttachmentFn,
-			},
-		);
+		const diagnostics: string[] = [];
+		setConnectorDiagnosticSink((line) => {
+			diagnostics.push(line);
+		});
+		let summary: Awaited<ReturnType<typeof recoverServedAttachmentGaps>>;
+		try {
+			summary = await recoverServedAttachmentGaps(
+				{ search, fetchOne },
+				{
+					detailGaps: servedGaps,
+					emitProtocol: emitHarness.emit,
+					emitRecord,
+					hydrateAttachment: hydrateAttachmentMock as HydrateAttachmentFn,
+				},
+			);
+		} finally {
+			setConnectorDiagnosticSink(undefined);
+		}
 
 		assert.equal(
 			search.mock.callCount(),
@@ -4230,13 +4250,27 @@ test("recoverServedAttachmentGaps: an oversized first candidate admits exactly o
 			2,
 			"the run should emit hydrating and settled progress for the admitted attempt",
 		);
-		assert.match(progressMessages[0]?.message ?? "", /phase=hydrating/u);
-		assert.match(progressMessages[1]?.message ?? "", /phase=settled/u);
+		assert.match(
+			progressMessages[0]?.message ?? "",
+			/^Retrying 1 attachment that failed earlier/u,
+		);
 		assert.match(
 			progressMessages[1]?.message ?? "",
-			/admitted=1 recovered=1 metadata_lookups=1/u,
-			"the progress message should stay bounded and non-secret",
+			/^Recovered 1 of 1 previously failed attachment$/u,
 		);
+		assert.ok(
+			diagnostics.some(
+				(line) =>
+					line.startsWith(
+						"[gmail-diagnostic] served_attachment_recovery_progress ",
+					) &&
+					line.includes('"admitted":1') &&
+					line.includes('"recovered":1') &&
+					line.includes('"metadata_lookups":1'),
+			),
+			`per-attempt metadata_lookups is on the diagnostic line; got ${JSON.stringify(diagnostics)}`,
+		);
+		assertUserFacingProgress(progressMessages);
 	} finally {
 		if (originalBudget === undefined) {
 			delete process.env.PDPP_GMAIL_ATTACHMENT_BACKFILL_PAGE_BYTES;
@@ -4366,7 +4400,7 @@ test("recoverServedAttachmentGaps: small candidates stop at budget after one rej
 			"each admitted attempt should emit hydrating and settled progress",
 		);
 		assert.deepEqual(
-			progressMessages.map((msg) => msg.message.match(/phase=([a-z]+)/u)?.[1]),
+			progressMessages.map((msg) => recoveryPhase(msg.message)),
 			["hydrating", "settled", "hydrating", "settled"],
 		);
 	} finally {
@@ -4551,7 +4585,10 @@ test("recoverServedAttachmentGaps: emits hydrating progress before a slow hydrat
 		1,
 		"only the hydrating progress should exist before hydration resolves",
 	);
-	assert.match(preResolveProgress[0]?.message ?? "", /phase=hydrating/u);
+	assert.match(
+		preResolveProgress[0]?.message ?? "",
+		/^Retrying 1 attachment that failed earlier/u,
+	);
 	assert.equal(
 		emitHarness.protocolMessages.some(
 			(msg) => msg.type === "DETAIL_GAP_RECOVERED",
@@ -4561,7 +4598,7 @@ test("recoverServedAttachmentGaps: emits hydrating progress before a slow hydrat
 	);
 	assert.equal(
 		emitHarness.protocolMessages.some(
-			(msg) => msg.type === "PROGRESS" && msg.message.includes("phase=settled"),
+			(msg) => msg.type === "PROGRESS" && msg.message.startsWith("Recovered "),
 		),
 		false,
 		"no settled progress should emit before hydration and record emission complete",
@@ -4613,12 +4650,18 @@ test("recoverServedAttachmentGaps: emits hydrating progress before a slow hydrat
 		2,
 		"hydrating and settled progress should both emit once the run completes",
 	);
-	assert.match(progressMessages[0]?.message ?? "", /phase=hydrating/u);
-	assert.match(progressMessages[1]?.message ?? "", /phase=settled/u);
+	assert.match(
+		progressMessages[0]?.message ?? "",
+		/^Retrying 1 attachment that failed earlier/u,
+	);
+	assert.match(
+		progressMessages[1]?.message ?? "",
+		/^Recovered 1 of 1 previously failed attachment/u,
+	);
 	const eventLabel = (event: RecordedEvent): string => {
 		if (event.kind === "message") {
 			if (event.message.type === "PROGRESS") {
-				return `progress:${event.message.message.match(/phase=([a-z]+)/u)?.[1]}`;
+				return `progress:${recoveryPhase(event.message.message)}`;
 			}
 			if (event.message.type === "DETAIL_GAP_RECOVERED") {
 				return "recovered";
@@ -5047,7 +5090,7 @@ test("recoverServedAttachmentGaps: same-message served gaps reuse one lookup", a
 	assert.deepEqual(
 		emitHarness.protocolMessages
 			.filter((msg): msg is ProgressMessage => msg.type === "PROGRESS")
-			.map((msg) => msg.message.match(/phase=([a-z]+)/u)?.[1]),
+			.map((msg) => recoveryPhase(msg.message)),
 		["hydrating", "settled", "hydrating", "settled"],
 	);
 });
