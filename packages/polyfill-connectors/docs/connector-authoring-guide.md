@@ -90,13 +90,16 @@ Multi-account note: the runtime today defaults `profileName` to the connector na
 
 ### 0a. Starting a new browser connector: `connector-init --browser`
 
-`pnpm exec tsx bin/connector-init.ts <name> --browser` scaffolds a browser-session connector that passes every repo check immediately — manifest-honesty, the schema tests, and its own generated `pilot-fixture.test.ts` — the same acceptance bar `connector-init.ts` (no flag) already holds API-class connectors to. It follows `connectors/github_browser/index.ts`, the fleet's smallest, most decomposed `*_browser` connector:
+`node --import tsx bin/connector-init.ts <name> --browser` scaffolds a browser-session connector that passes every repo check immediately — manifest-honesty, the schema tests, and its own generated `pilot-fixture.test.ts` — the same acceptance bar `connector-init.ts` (no flag) already holds API-class connectors to. It follows `connectors/github_browser/index.ts`, the fleet's smallest, most decomposed `*_browser` connector:
 
 - The manifest declares `runtime_requirements.bindings.browser` + `.network` and `capabilities.human_interaction: ["manual_action"]` — no `auth` block, since a browser-session connector authenticates via the owner's signed-in profile, not an env credential.
 - `index.ts` wires the canonical `runConnector({ browser: { profileName }, ensureSession, probeSession, probeSessionIsAuthoritative: true, collect })` shape: a session probe against two declared constants (`LOGIN_CHECK_URL`, `LOGIN_CHECK_SELECTOR`), the fleet's `manualBrowserLogin` handoff (`src/browser-handoff.ts`) when the probe fails, and one TODO (`extractRows`) where the author navigates to the real listing page and extracts rows.
-- Both the login-check constants and the extraction's `LISTING_URL`/`ROW_SELECTOR` start as literal `"TODO: ..."` strings. `requireConfigured()` throws a clear, named error the first time a still-placeholder value is actually read — the same posture as dlt's "Please set me up!" — instead of silently probing a URL that was never real.
+- Both the login-check constants and the extraction's `LISTING_URL`/`ROWS_CONTAINER_SELECTOR`/`ROW_SELECTOR` start as literal `"TODO: ..."` strings or recognizable placeholders. `requireConfigured()` throws a clear, named error the first time a still-placeholder login-check value is actually read — the same posture as dlt's "Please set me up!" — instead of silently probing a URL that was never real. The extraction placeholders instead rely on the diagnostic wiring below: a selector that matches nothing fails the run visibly rather than returning an empty-looking success.
+- The manifest declares `protocol_version: "0.2.0"`, `protocol_capabilities: ["OBSERVATION"]`, and `diagnostic_descriptors` (steps `sign_in`/`list_rows`, expectations `session_check`/`rows_container`), and `index.ts` passes `protocolCapabilities: ["OBSERVATION"]` to `runConnector()` and routes `probeLoggedIn`'s session check and `extractRows`'s rows-container check through `waitForElementExpectation` (`src/auto-login/locator-helpers.ts`). This is what turns a selector miss into a `diagnose`-able `expectation_mismatch` fact instead of `unknown` (§5.10-5.11 below), and what makes a hidden/removed rows container FAIL the run instead of succeeding with 0 records — a genuinely empty list (container present, no rows) still succeeds with 0 records.
+  **CAUTION**: `data-connect`, the production runtime, does not support Collection Profile 0.2.0 yet and currently rejects a manifest that declares a capability it does not recognize. `connector-dev.ts` (this authoring loop) does understand 0.2.0 today, but do not point `data-connect` at a connector scaffolded this way until it ships 0.2.0 support. The scaffold's `public_listing.tier: "development"` does not by itself keep a connector out of publishing — the actual gate is `scripts/connector-publish-allowlist.mjs`'s `CONNECTOR_PUBLISH_INVENTORY`, an opt-in allowlist a new connector is never added to automatically. Confirm a connector has no entry there (and data-connect has 0.2.0 support) before it ships.
+- Session-only cookies (no `Expires`/`Max-Age`) do not survive Chromium's clean exit, even inside the persistent profile `acquireIsolatedBrowser` keeps per connector — see §5's "Cookie longevity varies" below for how to recognize this and what to do about it (not a daemon: that mechanism was retired).
 
-Next: `pnpm exec tsx bin/connector-doctor.ts` (checks Node/deps/Chromium/display/`.env.local`/`~/.pdpp/profiles` before you drive a real browser), then `pnpm exec tsx bin/connector-dev.ts <name>` to watch the session check and manual-login handoff run live. `connector-init --browser`'s own printed next-steps give the exact commands and the TODO's file location.
+Next: `node --import tsx bin/connector-doctor.ts` (checks Node/deps/Chromium/display/`.env.local`/`~/.pdpp/profiles` before you drive a real browser), then `node --import tsx bin/connector-dev.ts <name>` to watch the session check and manual-login handoff run live. `connector-init --browser`'s own printed next-steps give the exact commands and the TODO's file location.
 
 ---
 
@@ -208,7 +211,7 @@ You can't run a new connector against a new user's account ahead of time. Shape 
 
 `validateRecord` is _optional in the `runConnector` type signature_ — the runtime stays zod-free so the framework can execute a zero-dependency connector. But authoring policy is stricter than the type: **a connector whose manifest declares any stream must wire `validateRecord`, or be listed on the schemaless allowlist with a justification.**
 
-This is enforced by `src/connector-schema-validation-honesty.test.ts` (the same test family as the browser/external-tool manifest-honesty checks), which runs in `pnpm test` / CI. A connector that declares manifest streams, omits `validateRecord`, and is not allowlisted fails the build by name.
+This is enforced by `src/connector-schema-validation-honesty.test.ts` (the same test family as the browser/external-tool manifest-honesty checks), which runs in `npm test` / CI. A connector that declares manifest streams, omits `validateRecord`, and is not allowlisted fails the build by name.
 
 The allowlist lives in `src/connector-schema-allowlist.ts` as connector → justification, and may only shrink: if you add a `schemas.ts` to an allowlisted connector, the gate forces you to delete its entry. Adding an allowlist entry is a deliberate, reviewed escape hatch — the default for a new connector is to validate. (See OpenSpec `polyfill-runtime` and `tmp/workstreams/ri-connector-schema-green-prep-audit-report.md`.)
 
@@ -367,7 +370,7 @@ Prior art: search/filter/facet/role modeled as separate axes (Algolia, Elasticse
 - **Login before challenge.** Drive credentials from env/secrets. If a challenge (OTP, 2FA, SMS) fires, emit `INTERACTION kind=otp` and block until the orchestrator forwards the code.
 - **Never assume a human is present.** A connector running unattended at 3am must either complete or emit a clear INTERACTION; it must not hang, retry indefinitely, or produce partial output.
 - **Session elevation is a thing.** Some platforms (Amazon Privacy Central) require a *recent* password entry even for logged-in sessions. Handle these distinct from "session dead".
-- **Cookie longevity varies.** Chromium drops `Session`-scoped cookies (no `Max-Age`) when the process exits. For platforms whose auth uses such cookies (USAA), accept that each run will re-auth via `ensureSession` — the connector's auto-login flow handles this. The runtime model serializes runs per connector and schedules them well outside any in-memory session-cookie window, so a long-lived daemon would not buy anything in practice.
+- **Cookie longevity varies.** Chromium drops `Session`-scoped cookies (no `Max-Age`) when the process exits, even inside the persistent per-connector profile — only a cookie with an expiry survives. **How to detect this**: if a connector reports "signed out" on every single run, never just the first cold one, despite a real prior sign-in, check the platform's auth cookie for a missing `Expires`/`Max-Age` in devtools before suspecting a selector or credential problem. For platforms whose auth uses such cookies (USAA), accept that each run will re-auth via `ensureSession` — the connector's auto-login flow handles this; this is a correct, expected cost for that platform shape, not a bug to work around with connector-local persistence. The runtime model serializes runs per connector and schedules them well outside any in-memory session-cookie window, so a long-lived daemon would not buy anything in practice — and there is no such daemon to opt into: the shared browser daemon mentioned in USAA's Appendix A entry below was retired 2026-04-25 because no production runtime used it. Don't build new session-persistence infrastructure for this; accept the re-auth cost.
 
 ---
 
@@ -519,7 +522,7 @@ Raw locator and ARIA captures may contain owner data. They follow the same rule 
 Raw fixtures contain your real PII — emails, addresses, order IDs, account numbers. Never commit `raw/`. Run the scrubber:
 
 ```bash
-pnpm exec tsx bin/scrub-fixtures.ts <connector>
+node --import tsx bin/scrub-fixtures.ts <connector>
 ```
 
 This applies the shared defaults in `src/scrub-defaults.ts` (emails, SSNs, credit-card-shaped digit runs, US phone numbers, labeled account numbers, deterministic street-address patterns, and labeled names) plus any connector-specific rules in `connectors/<connector>/scrub-rules.ts`. Output lands in `fixtures/<connector>/scrubbed/<runId>/`, which **is** committable after review.
@@ -527,7 +530,7 @@ This applies the shared defaults in `src/scrub-defaults.ts` (emails, SSNs, credi
 For free-form text that deterministic rules cannot classify safely, use an LLM or human reviewer to produce a structured redaction plan, then pass it to the scrubber:
 
 ```bash
-pnpm exec tsx bin/scrub-fixtures.ts <connector> <runId> --llm-redactions-dir ./local-redactions/<connector>
+node --import tsx bin/scrub-fixtures.ts <connector> <runId> --llm-redactions-dir ./local-redactions/<connector>
 ```
 
 The scrubber does not call a network API. It only consumes one reviewed plan file per raw fixture, named after the raw relative path with `.redactions.json` appended, for example `dom/orders-list.html.redactions.json`:
@@ -596,7 +599,7 @@ The three committed pilots double as the per-shape reference for new connectors:
 
 **Smoke-test the capture pipeline**
 
-`pnpm exec tsx bin/test-fixture-capture.ts` runs a self-contained end-to-end check (no network, no browser) that capture + scrub produce sanitized output from PII-bearing input. Local development writes raw captures under `fixtures/<connector>/raw/` by default; deployed reference stacks can set `PDPP_CAPTURE_ROOT_DIR` so live diagnostics live in persistent runtime storage instead of the checkout. Run the smoke after changing anything in `fixture-capture.ts`, `scrub-defaults.ts`, or `scrub-fixtures.ts`.
+`node --import tsx bin/test-fixture-capture.ts` runs a self-contained end-to-end check (no network, no browser) that capture + scrub produce sanitized output from PII-bearing input. Local development writes raw captures under `fixtures/<connector>/raw/` by default; deployed reference stacks can set `PDPP_CAPTURE_ROOT_DIR` so live diagnostics live in persistent runtime storage instead of the checkout. Run the smoke after changing anything in `fixture-capture.ts`, `scrub-defaults.ts`, or `scrub-fixtures.ts`.
 
 ### Pre-ship checklist
 
@@ -751,5 +754,5 @@ in the same PR.
 
 - **Amazon 2026-04-21**: Item rows where `innerText` begins with a digit (product titles like "2015 New Version..." or "100 Sheets...") caused a leading-digit regex to extract the digit as quantity. Fixed by switching to a DOM-selector (`.od-item-view-qty span`) for quantity. Lesson: never parse quantity out of concatenated text when the platform has a dedicated element for it.
 - **Amazon 2026-04-21**: "Customers Who Bought" recommendation cards render inside the same `.a-box` hierarchy as shipment items, and contain `"Sold by"` in some child text. Cross-sell rows leaked into `order_items` until the cross-sell regex was broadened to match casing variants. Lesson: "contains 'Sold by'" is not a reliable shipment-item marker; structural siblings matter.
-- **USAA 2026-04-19**: Chromium dropped session cookies on process exit, breaking every re-run. Fixed by introducing the long-lived browser daemon. Lesson: banking sites use session cookies (no Expires) for actual auth tokens.
+- **USAA 2026-04-19**: Chromium dropped session cookies on process exit, breaking every re-run. Fixed at the time by introducing a long-lived browser daemon. Lesson: banking sites use session cookies (no Expires) for actual auth tokens. **Superseded 2026-04-25**: the daemon was retired (no production runtime used it — "Remove the long-lived browser daemon and shared-profile launcher that no production runtime used", commit `61009d4d2`). USAA's actual, current answer to this same cookie shape is §5's "Cookie longevity varies": accept re-auth via `ensureSession` on every run. Don't resurrect a daemon for this.
 - **Chase 2026-04-20**: Selectors needed Shadow DOM piercing (`getByRole('option')` + `text=` on `mds-*` Web Components) because the bank uses Material Design Shadow web components. Lesson: don't assume flat DOM.

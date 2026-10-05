@@ -19,7 +19,7 @@
  *   connectors/<name>/fixtures/scrubbed/pilot-real-shape/provenance.json
  *
  * Usage:
- *   pnpm exec tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>] [--browser]
+ *   node --import tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>] [--browser]
  *
  * `<name>` becomes the connector key (directory name, manifest filename,
  * `connector_key`). It must be a lowercase snake_case identifier — the same
@@ -67,7 +67,7 @@ interface InitArgs {
 }
 
 const USAGE =
-	"usage: pnpm exec tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>] [--browser]";
+	"usage: node --import tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>] [--browser]";
 
 /** Thrown by parseArgs on any invalid invocation. main() maps this to a printed usage + exit(2). */
 export class InitArgsError extends Error {}
@@ -320,6 +320,14 @@ function buildManifest(
 //   - `refresh_policy.interaction_posture: "manual_action_likely"` instead
 //     of API mode's `"none"` — the session can go cold and need a fresh
 //     owner sign-in, exactly the posture every `*_browser` manifest states.
+//   - `protocol_version: "0.2.0"`, `protocol_capabilities: ["OBSERVATION"]`,
+//     and `diagnostic_descriptors` (steps `sign_in`/`list_rows`,
+//     expectations `session_check`/`rows_container`) — so a selector miss
+//     diagnoses as `expectation_mismatch` instead of `unknown` (Collection
+//     Profile §3.8, §5.10-5.11). index.ts's probeLoggedIn/extractRows wait
+//     on these exact ids via waitForElementExpectation. See the CAUTION
+//     comment above `protocolCapabilities` in buildBrowserIndexTs below
+//     before this connector is placed on anything but connector-dev.
 
 function buildBrowserManifest(
 	name: string,
@@ -327,7 +335,13 @@ function buildBrowserManifest(
 	stream: string,
 ): string {
 	const manifest = {
-		protocol_version: "0.1.0",
+		// 0.2.0, not 0.1.0: this manifest declares `protocol_capabilities`
+		// (OBSERVATION) and `diagnostic_descriptors` below, and Collection
+		// Profile §3.8 requires a manifest that declares either to state
+		// `protocol_version: "0.2.0"`. See the CAUTION comment above
+		// `protocolCapabilities` in index.ts before placing this connector on
+		// any runtime other than connector-dev.
+		protocol_version: "0.2.0",
 		connector_id: `https://registry.pdpp.dev/connectors/${name}`,
 		connector_key: name,
 		manifest_uri: `https://registry.pdpp.dev/connectors/${name}`,
@@ -365,6 +379,20 @@ function buildBrowserManifest(
 			public_listing: {
 				tier: "development",
 			},
+		},
+		// Declares the OBSERVATION wire capability (Collection Profile §3.4,
+		// §5.10) so a failed session check or extraction reports WHAT the page
+		// showed (expectation_mismatch) instead of `unknown`. index.ts's
+		// probeLoggedIn/extractRows wait on these declared ids via
+		// waitForElementExpectation — see the CAUTION comment above
+		// `protocolCapabilities` in index.ts.
+		protocol_capabilities: ["OBSERVATION"],
+		diagnostic_descriptors: {
+			steps: [{ id: "sign_in" }, { id: "list_rows" }],
+			expectations: [
+				{ id: "session_check", step: "sign_in" },
+				{ id: "rows_container", step: "list_rows" },
+			],
 		},
 		streams: [
 			{
@@ -633,6 +661,15 @@ if (isMainModule(import.meta.url)) {
 //     `progress`, the `emitRecord` loop) is already wired, matching how
 //     the API-mode scaffold's one TODO is its endpoint URL, not the
 //     surrounding protocol plumbing.
+//   - Both waits that matter for diagnosis — the session check in
+//     probeLoggedIn and the rows-container check in extractRows — go
+//     through `waitForElementExpectation` (src/auto-login/locator-helpers.ts)
+//     against the manifest's declared `diagnostic_descriptors` ids, and
+//     `runConnector` declares `protocolCapabilities: ["OBSERVATION"]`. A
+//     missing/hidden rows container then fails the run with an
+//     `expectation_mismatch` fact instead of succeeding with 0 records
+//     (Collection Profile §5.10-5.11) — see the CAUTION comment above
+//     `protocolCapabilities` below before this leaves connector-dev.
 
 function buildBrowserIndexTs(
 	name: string,
@@ -658,20 +695,38 @@ function buildBrowserIndexTs(
  * Canonical pattern followed: connectors/github_browser/index.ts (see
  * docs/connector-authoring-guide.md §0, "Browser architecture").
  *
+ * Declares the OBSERVATION protocol capability (manifest.json's
+ * protocol_capabilities + diagnostic_descriptors) and routes both waits
+ * that matter for diagnosis through waitForElementExpectation, so a
+ * selector miss reports expectation_mismatch instead of unknown
+ * (docs/connector-authoring-guide.md §0). See the CAUTION comment above
+ * protocolCapabilities below before this connector leaves connector-dev.
+ *
  * TODO: document the real ${displayName} login URL and the page(s) this
  * connector navigates, once known.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import { waitForElementExpectation } from "../../packages/polyfill-connectors/src/auto-login/locator-helpers.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
   type BrowserCollectContext,
   type EnsureSessionArgs,
   runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { withObservationBasis } from "../../packages/polyfill-connectors/src/observation.ts";
 import { ${recordFn} } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ${typeName} } from "./types.ts";
+
+// Declared diagnostic_descriptors ids (manifest.json) — the step/expectation
+// pair each waitForElementExpectation call below cites. Keep these in
+// lockstep with manifest.json's diagnostic_descriptors if you rename either.
+const SIGN_IN_STEP = "sign_in";
+const SESSION_CHECK_EXPECTATION = "session_check";
+const LIST_ROWS_STEP = "list_rows";
+const ROWS_CONTAINER_EXPECTATION = "rows_container";
+const ELEMENT_WAIT_TIMEOUT_MS = 8_000;
 
 // ─── Placeholder config: fails loudly, never silently ───────────────────
 //
@@ -697,20 +752,44 @@ function requireConfigured(value: string, fieldName: string): string {
   return value;
 }
 
+// "am I logged in" check, routed through waitForElementExpectation (step
+// SIGN_IN_STEP, expectation SESSION_CHECK_EXPECTATION) instead of a raw
+// page.waitForSelector, so a missed check becomes a diagnosable
+// element_expectation fact (absent/hidden/disabled/ambiguous at the
+// deadline) rather than a bare timeout. Returning false here is the
+// EXPECTED branch on a cold profile (not yet signed in) and routes to
+// manualBrowserLogin below — it does not, by itself, fail the run.
 async function probeLoggedIn(
   page: BrowserCollectContext["page"],
 ): Promise<boolean> {
   const url = requireConfigured(LOGIN_CHECK_URL, "LOGIN_CHECK_URL");
   const selector = requireConfigured(LOGIN_CHECK_SELECTOR, "LOGIN_CHECK_SELECTOR");
   await page.goto(url, { waitUntil: "domcontentloaded" });
-  try {
-    await page.waitForSelector(selector, { timeout: 8_000 });
-    return true;
-  } catch {
-    return false;
-  }
+  const wait = await waitForElementExpectation({
+    expectation: SESSION_CHECK_EXPECTATION,
+    locator: page.locator(selector),
+    require: "visible",
+    sleep: (ms) => page.waitForTimeout(ms),
+    step: SIGN_IN_STEP,
+    timeoutMs: ELEMENT_WAIT_TIMEOUT_MS,
+  });
+  return wait.final === "matched";
 }
 
+// Session-only cookies (no Expires/Max-Age) do not survive Chromium's clean
+// exit, even inside the persistent profile acquireIsolatedBrowser keeps at
+// ~/.pdpp/profiles/${name}/ — only cookies with an expiry do. If this
+// connector reports "signed out" on EVERY run despite a real prior sign-in
+// (never just the first cold run), check the ${displayName} auth cookie's
+// Expires/Max-Age in devtools; a session-only cookie is the likely cause,
+// not a selector or credential problem. There is no shared long-lived
+// browser daemon to opt into — it was retired 2026-04-25 because no
+// production runtime used it (docs/connector-authoring-guide.md §0, §5).
+// The fleet's actual answer for this shape (USAA) is to accept re-auth via
+// ensureSession on every run; the runtime schedules runs per connector well
+// outside any in-memory cookie window, so a daemon would not buy anything
+// here either. Do not build connector-local persistence to work around
+// this — accept the re-auth cost, as ensureSession below already does.
 async function ensureSession({
   page,
   sendInteraction,
@@ -742,26 +821,57 @@ async function ensureSession({
   }
 }
 
-// TODO: replace LISTING_URL/ROW_SELECTOR and the extraction below with the
-// real ${displayName} listing page and row shape for "${stream}" — this is
-// the one thing a new browser connector has to write. Prefer structure
-// over text (docs/connector-authoring-guide.md §2): read attributes/ARIA,
-// not regexed innerText. See connectors/github_browser/collector.ts for a
-// real example of this same extract-then-emitRecord shape.
+// TODO: replace LISTING_URL/ROWS_CONTAINER_SELECTOR/ROW_SELECTOR and the
+// extraction below with the real ${displayName} listing page and row shape
+// for "${stream}" — this is the one thing a new browser connector has to
+// write. Prefer structure over text (docs/connector-authoring-guide.md §2):
+// read attributes/ARIA, not regexed innerText. See
+// connectors/github_browser/collector.ts for a real example of this same
+// extract-then-emitRecord shape.
 const LISTING_URL = "https://example.invalid/TODO-${name}-${stream}";
+// The element that wraps every row, present even when the list is
+// genuinely empty (an ancestor of ROW_SELECTOR, never the rows themselves).
+// Waiting on THIS, not on individual rows, is what makes "0 rows" and
+// "broken selector" distinguishable — see the comment on extractRows below.
+const ROWS_CONTAINER_SELECTOR = "TODO-rows-container-selector";
 const ROW_SELECTOR = "TODO-row-selector";
 
+// Waits for ROWS_CONTAINER_SELECTOR (step LIST_ROWS_STEP, expectation
+// ROWS_CONTAINER_EXPECTATION) before reading rows out of it. This is the
+// fix for a known scaffold failure mode: reading ROW_SELECTOR directly
+// against the page, with no wait, turns a renamed/removed/hidden container
+// into a silent "0 records, succeeded" run — indistinguishable from a
+// genuinely empty list. Waiting on the CONTAINER first keeps both outcomes
+// honest: container absent/hidden -> the run fails with an
+// expectation_mismatch fact citing "rows_container"; container present
+// with zero matching rows -> 0 records, success, exactly as it should.
 async function extractRows(
   page: BrowserCollectContext["page"],
 ): Promise<${typeName}[]> {
   await page.goto(LISTING_URL, { waitUntil: "domcontentloaded" });
-  return await page.locator(ROW_SELECTOR).evaluateAll((elements) =>
-    elements.map((element) => ({
-      id: element.getAttribute("data-id") ?? "",
-      created_at: element.getAttribute("data-created-at") ?? "",
-      title: element.textContent?.trim() ?? null,
-    })),
-  );
+  const containerWait = await waitForElementExpectation({
+    expectation: ROWS_CONTAINER_EXPECTATION,
+    locator: page.locator(ROWS_CONTAINER_SELECTOR),
+    require: "visible",
+    sleep: (ms) => page.waitForTimeout(ms),
+    step: LIST_ROWS_STEP,
+    timeoutMs: ELEMENT_WAIT_TIMEOUT_MS,
+  });
+  if (!containerWait.match) {
+    throw withObservationBasis(
+      new Error("${name}_rows_container_missing"),
+      containerWait.observationIds,
+    );
+  }
+  return await containerWait.match
+    .locator(ROW_SELECTOR)
+    .evaluateAll((elements) =>
+      elements.map((element) => ({
+        id: element.getAttribute("data-id") ?? "",
+        created_at: element.getAttribute("data-created-at") ?? "",
+        title: element.textContent?.trim() ?? null,
+      })),
+    );
 }
 
 export async function collect({
@@ -791,6 +901,19 @@ if (isMainModule(import.meta.url)) {
     ensureSession,
     probeSession: ({ page }) => probeLoggedIn(page),
     probeSessionIsAuthoritative: true,
+    // CAUTION: matches manifest.json's protocol_capabilities, declaring the
+    // Collection Profile 0.2.0 OBSERVATION capability (§3.4, §5.10) this
+    // scaffold's probeLoggedIn/extractRows rely on for expectation_mismatch
+    // diagnosis. connector-dev.ts (0.2.0-aware) supports this today. The
+    // production runtime, data-connect, does not yet understand protocol
+    // 0.2.0 and currently REJECTS a connector manifest that declares a
+    // capability it does not recognize — so do not point data-connect at
+    // this manifest until it ships 0.2.0 support. This scaffold's
+    // public_listing.tier is "development", which scripts/
+    // connector-publish-allowlist.mjs's CONNECTOR_PUBLISH_INVENTORY does
+    // not include by default (it is an opt-in allowlist, not a tier
+    // filter) — confirm "${name}" has no entry there before adding one.
+    protocolCapabilities: ["OBSERVATION"],
     collect,
   });
 }
@@ -951,27 +1074,25 @@ Next steps:
      lockstep with manifests/${name}.json's stream schema) to match the
      real payload shape as you discover it.
   4. Run the connector against the real API and watch it live:
-       pnpm exec tsx bin/connector-dev.ts ${name}
+       node --import tsx bin/connector-dev.ts ${name}
   5. Capture a real run, then replay it strictly offline to prove the
      connector against fixed evidence:
-       pnpm exec tsx bin/scenario-record.ts ${name}
-       pnpm exec tsx bin/scenario-verify.ts ${name}
+       node --import tsx bin/scenario-record.ts ${name}
+       node --import tsx bin/scenario-verify.ts ${name}
      Scrub the capture (see bin/scrub-fixtures.ts) before committing
      anything under fixtures/${name}/scrubbed/, and replace this
      scaffold's synthetic pilot-real-shape fixture with a scrubbed real
      one once you have it.
   6. Run the test suite for this connector:
        node --test --import tsx "connectors/${name}/**/*.test.ts"
-  7. Wire the connector into the fleet (this scaffold does not edit
-     existing files, so these are manual — a connector implementation
-     alone is incomplete):
-       - register it in src/orchestrator.ts's KNOWN_CONNECTORS map
-         (connector-dev/scenario-record resolve entrypoints through it);
-       - check bin/register-all.ts and bin/orchestrate.ts pick it up;
-       - if the reference implementation should offer it to owners, add
-         the canonical-key / setup-planner / console wiring (see
-         docs/whoop-connector-learnings.md for the checklist a real
-         first-time contribution surfaced).
+  7. connector-dev, scenario-record, register-all, and orchestrate all
+     resolve this connector automatically — they discover it from
+     connectors/${name}/manifest.json (src/orchestrator.ts's
+     getConnectorPaths), so no hand-registration step is needed. If the
+     reference implementation should offer it to owners, add the
+     canonical-key / setup-planner / console wiring (see
+     docs/whoop-connector-learnings.md for the checklist a real
+     first-time contribution surfaced).
 `);
 }
 
@@ -988,26 +1109,35 @@ function printBrowserNextSteps(name: string, stream: string): void {
 Scaffolded browser connector "${name}" (stream: "${stream}").
 
 Next commands:
-  1. pnpm exec tsx bin/connector-doctor.ts
+  1. node --import tsx bin/connector-doctor.ts
        Checks Node, dependencies, the Patchright Chromium revision, display
        availability, .env.local location, and ~/.pdpp/profiles — before you
        drive a real browser.
-  2. pnpm exec tsx bin/connector-dev.ts ${name}
+  2. node --import tsx bin/connector-dev.ts ${name}
        Launches the browser, runs the session check, and hands you the
-       manual-login window if the ${name} profile isn't signed in yet
-       (register "${name}" in src/orchestrator.ts's KNOWN_CONNECTORS map
-       first, or pass --entrypoint connectors/${name}/index.ts to run it
-       unregistered).
+       manual-login window if the ${name} profile isn't signed in yet.
+       "${name}" is already resolvable — connector-dev/orchestrate discover
+       it from connectors/${name}/manifest.json, no registration step needed.
   3. The one TODO is extractRows() in connectors/${name}/index.ts — replace
-     LISTING_URL/ROW_SELECTOR and the extraction with real navigation for
-     the "${stream}" stream. LOGIN_CHECK_URL/LOGIN_CHECK_SELECTOR just above
-     it need a real value too (both fail loudly if left as-is).
+     LISTING_URL/ROWS_CONTAINER_SELECTOR/ROW_SELECTOR and the extraction
+     with real navigation for the "${stream}" stream. LOGIN_CHECK_URL/
+     LOGIN_CHECK_SELECTOR just above it need a real value too (all four
+     fail loudly if left as-is — a missing/hidden rows container now fails
+     the run with an "expectation_mismatch" diagnosis instead of silently
+     succeeding with 0 records).
 
 Widen connectors/${name}/types.ts, parsers.ts, and schemas.ts (in lockstep
 with manifests/${name}.json's stream schema) to match the real row shape as
 you discover it. See docs/connector-authoring-guide.md §0 ("Browser
 architecture") and connectors/github_browser/ for the fuller reference this
 scaffold follows.
+
+CAUTION: this manifest declares protocol_version 0.2.0 and the OBSERVATION
+capability so connector-dev's diagnosis works. data-connect (the production
+runtime) does not support 0.2.0 yet and rejects a manifest declaring a
+capability it doesn't know — keep this connector on connector-dev until
+that lands. It also stays out of scripts/connector-publish-allowlist.mjs's
+CONNECTOR_PUBLISH_INVENTORY (an opt-in allowlist) unless someone adds it.
 `);
 }
 
