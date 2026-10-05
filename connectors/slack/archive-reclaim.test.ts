@@ -4,7 +4,7 @@
 // Covers the archive steady-state-cost change's disk + observability surface:
 // - reclaimUploads removes ONLY __uploads/, leaves sqlite + sidecars, reports
 //   bytes, and is a no-op when the dir is absent (direct unit test).
-// - the connector emits phase-timing + archive-size PROGRESS lines every run.
+// - the connector emits phase-timing + archive-size diagnostic lines every run.
 // - __uploads reclaim is off by default and, when SLACK_RECLAIM_UPLOADS=1, runs
 //   only after a successful run's durable-commit ack (end-to-end subprocess).
 // All fixtures are synthetic — no private payloads.
@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { resolveConnectorArtifactDir } from "../../packages/polyfill-connectors/src/connector-artifact-root.ts";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -214,12 +215,16 @@ test("base archive resume is throttled on the 90-minute follow-up without invoki
 		});
 
 		assert.ok(
-			progressLines(result.messages).some(
-				(line) =>
-					line.includes("base archive at") &&
-					line.includes("not due for resume yet"),
+			diagnosticEvents(result.stderr, "base_archive_not_due_for_resume").some(
+				(fields) => fields.archive_path === archiveDir,
 			),
 		);
+		assert.ok(
+			progressLines(result.messages).includes(
+				"Using the saved copy; Slack was checked recently",
+			),
+		);
+		assertUserFacingProgress(result.messages);
 		assert.ok(
 			!existsSync(fakeSlackdump.callLog),
 			"the follow-up launched zero slackdump resume subprocesses",
@@ -527,6 +532,25 @@ test("reclaimUploads is a no-op returning 0 when __uploads/ is absent", async ()
 	}
 });
 
+/**
+ * Payloads of `[slack-diagnostic] <event> {json}` lines on the connector's
+ * stderr. Technical detail lives there, not in PROGRESS text.
+ */
+function diagnosticEvents(
+	stderr: string,
+	event: string,
+): Record<string, unknown>[] {
+	const prefix = `[slack-diagnostic] ${event}`;
+	return stderr
+		.split("\n")
+		.filter((line) => line === prefix || line.startsWith(`${prefix} `))
+		.map((line) =>
+			line.length > prefix.length
+				? (JSON.parse(line.slice(prefix.length + 1)) as Record<string, unknown>)
+				: {},
+		);
+}
+
 function progressLines(messages: EmittedMessage[]): string[] {
 	return messages
 		.filter(
@@ -575,7 +599,7 @@ function baseArchiveState(
 	};
 }
 
-test("connector emits phase-timing and archive-size PROGRESS every run", async () => {
+test("connector emits phase-timing and archive-size diagnostics every run", async () => {
 	const artifactRoot = await mkdtemp(join(tmpdir(), "pdpp-slack-timing-"));
 	try {
 		await seedArchive(artifactRoot, "timing-ws", true);
@@ -592,23 +616,36 @@ test("connector emits phase-timing and archive-size PROGRESS every run", async (
 			},
 			start: { type: "START", scope: { streams: [{ name: "messages" }] } },
 		});
-		const lines = progressLines(result.messages);
+		const phases = diagnosticEvents(result.stderr, "phase_timing");
+		for (const phase of [
+			"slackdump-subprocess",
+			"archive-open",
+			"read-and-emit",
+		]) {
+			assert.ok(
+				phases.some(
+					(fields) =>
+						fields.phase === phase && typeof fields.elapsed_ms === "number",
+				),
+				`reports ${phase} phase timing as a diagnostic`,
+			);
+		}
 		assert.ok(
-			lines.some((l) => l.includes("phase timing: slackdump-subprocess")),
-			"reports slackdump-subprocess phase timing",
+			diagnosticEvents(result.stderr, "archive_size").some(
+				(fields) =>
+					typeof fields.sqlite_bytes === "number" &&
+					typeof fields.uploads_bytes === "number",
+			),
+			"reports archive size snapshot as a diagnostic",
 		);
+		// Timings and sizes are diagnostics only: none reaches owner-facing text.
 		assert.ok(
-			lines.some((l) => l.includes("phase timing: archive-open")),
-			"reports archive-open phase timing",
+			!progressLines(result.messages).some((l) =>
+				/phase timing|archive size/i.test(l),
+			),
+			"phase timing and archive size are not PROGRESS text",
 		);
-		assert.ok(
-			lines.some((l) => l.includes("phase timing: read-and-emit")),
-			"reports read-and-emit phase timing",
-		);
-		assert.ok(
-			lines.some((l) => l.includes("archive size: sqlite=")),
-			"reports archive size snapshot",
-		);
+		assertUserFacingProgress(result.messages);
 	} finally {
 		await rm(artifactRoot, { recursive: true, force: true });
 	}
@@ -1152,7 +1189,9 @@ test("scoped-archive-reconcile phase timing is reported when source-cache healin
 
 		const lines = progressLines(result.messages);
 		assert.ok(
-			lines.some((l) => l.includes("phase timing: scoped-archive-reconcile")),
+			diagnosticEvents(result.stderr, "phase_timing").some(
+				(fields) => fields.phase === "scoped-archive-reconcile",
+			),
 			"reports scoped-archive-reconcile phase timing when healing runs",
 		);
 		// Elapsed-time phase timing alone is not a semantic bound — it says how
@@ -1163,28 +1202,48 @@ test("scoped-archive-reconcile phase timing is reported when source-cache healin
 		// cursor advances per unit, and the phase declares itself finished with 0
 		// remaining. One scoped archive covers C0MISSING here, so no repair
 		// attempt is needed: exactly 1 repair unit selected, 1 completed.
+		const selected = diagnosticEvents(
+			result.stderr,
+			"scoped_archive_reconcile_selected",
+		);
 		assert.ok(
-			lines.some(
-				(l) =>
-					/selected 1 repair unit\(s\)/.test(l) &&
-					l.includes("1 existing scoped archive(s), 1 due for resume"),
+			selected.some(
+				(f) =>
+					f.repair_unit_count === 1 &&
+					f.existing_scoped_archives === 1 &&
+					f.due_for_resume === 1,
 			),
 			"declares the exact repair-unit count before any subprocess runs",
 		);
 		assert.ok(
-			lines.some((l) => l.includes("lookback=p7d")),
+			selected.some((f) => f.lookback_window === "p7d"),
 			"declares the per-unit finite lookback bound (SLACK_LOOKBACK_DAYS, default 7)",
 		);
 		assert.ok(
-			lines.some((l) => l.includes("completed 1/1 repair unit(s)")),
+			diagnosticEvents(
+				result.stderr,
+				"scoped_archive_reconcile_unit_completed",
+			).some((f) => f.completed === 1 && f.repair_unit_count === 1),
 			"reports a completed/remaining cursor advancing per repair unit",
 		);
 		assert.ok(
-			lines.some((l) =>
-				l.includes("finished: 1/1 repair unit(s) completed, 0 remaining"),
+			diagnosticEvents(result.stderr, "scoped_archive_reconcile_finished").some(
+				(f) =>
+					f.completed === 1 && f.repair_unit_count === 1 && f.remaining === 0,
 			),
 			"declares the phase finished with 0 remaining — a single run cannot leave an open-ended backlog",
 		);
+		assert.ok(
+			lines.includes(
+				"Catching up on 1 channel group(s) that were missed earlier",
+			),
+			"owner sees the plain-English count of channel groups",
+		);
+		assert.ok(
+			lines.includes("Caught up on 1 of 1 channel groups"),
+			"owner sees plain-English completion",
+		);
+		assertUserFacingProgress(result.messages);
 	} finally {
 		await rm(artifactRoot, { recursive: true, force: true });
 	}
@@ -1237,17 +1296,19 @@ test("scoped-archive-reconcile declares 0 selected repair units and does no work
 			},
 		});
 
-		const lines = progressLines(result.messages);
 		assert.ok(
-			lines.some((l) => /selected 0 repair unit\(s\)/.test(l)),
+			diagnosticEvents(result.stderr, "scoped_archive_reconcile_selected").some(
+				(f) => f.repair_unit_count === 0,
+			),
 			"declares 0 repair units selected when no channel is missing",
 		);
 		assert.ok(
-			lines.some((l) =>
-				l.includes("finished: 0/0 repair unit(s) completed, 0 remaining"),
+			diagnosticEvents(result.stderr, "scoped_archive_reconcile_finished").some(
+				(f) => f.completed === 0 && f.repair_unit_count === 0,
 			),
 			"finishes immediately with 0/0, proving no unbounded work was attempted",
 		);
+		assertUserFacingProgress(result.messages);
 	} finally {
 		await rm(artifactRoot, { recursive: true, force: true });
 	}
@@ -1348,39 +1409,48 @@ test("scoped-archive-reconcile throttles a scoped archive's resume to at most on
 		);
 		const lines = progressLines(result.messages);
 		assert.ok(
-			lines.some(
-				(l) =>
-					/selected 1 repair unit\(s\)/.test(l) &&
-					l.includes("1 existing scoped archive(s), 0 due for resume"),
+			diagnosticEvents(result.stderr, "scoped_archive_reconcile_selected").some(
+				(f) =>
+					f.repair_unit_count === 1 &&
+					f.existing_scoped_archives === 1 &&
+					f.due_for_resume === 0,
 			),
 			"reports the archive as selected but NOT due for resume",
 		);
 		assert.ok(
-			lines.some(
-				(l) =>
-					l.includes("not due for resume yet") && l.includes(scopedArchiveDir),
+			diagnosticEvents(result.stderr, "scoped_archive_not_due_for_resume").some(
+				(f) => f.archive_path === scopedArchiveDir,
 			),
 			"explicitly reports the throttle decision for this archive",
 		);
-		// The decisive proof: ensureArchiveOnDisk's own "Skipping slackdump
-		// refresh (PDPP_SLACK_SKIP_SLACKDUMP=1); reading existing archive at
-		// <path>" line — which only fires when ensureArchiveOnDisk is actually
-		// invoked — must NOT appear for the scoped archive path, because the
-		// throttle short-circuits BEFORE ensureArchiveOnDisk is ever called.
+		// The decisive proof: ensureArchiveOnDisk's own "slackdump_refresh_skipped"
+		// diagnostic (PDPP_SLACK_SKIP_SLACKDUMP=1) — which only fires when
+		// ensureArchiveOnDisk is actually invoked — must NOT appear for the
+		// scoped archive path, because the throttle short-circuits BEFORE
+		// ensureArchiveOnDisk is ever called.
 		assert.ok(
-			!lines.some(
-				(l) =>
-					l.includes("reading existing archive at") &&
-					l.includes(scopedArchiveDir),
+			!diagnosticEvents(result.stderr, "slackdump_refresh_skipped").some(
+				(f) => f.archive_path === scopedArchiveDir,
 			),
 			"the scoped archive's resume subprocess path is never invoked when throttled (not merely fast — genuinely skipped)",
 		);
 		assert.ok(
-			lines.some((l) =>
-				l.includes("completed 1/1 repair unit(s) (throttled, not owed)"),
+			diagnosticEvents(
+				result.stderr,
+				"scoped_archive_reconcile_unit_completed",
+			).some(
+				(f) =>
+					f.completed === 1 &&
+					f.repair_unit_count === 1 &&
+					f.outcome === "throttled, not owed",
 			),
 			"the completed cursor reports this unit as throttled, not resumed",
 		);
+		assert.ok(
+			lines.includes("Caught up on 1 of 1 channel groups"),
+			"owner sees plain-English completion",
+		);
+		assertUserFacingProgress(result.messages);
 		const cursor = messagesState(result);
 		assert.equal(
 			(
@@ -1468,27 +1538,29 @@ test("scoped-archive-reconcile resumes a scoped archive again once its lookback 
 			},
 		});
 
-		const lines = progressLines(result.messages);
 		assert.ok(
-			lines.some(
-				(l) =>
-					/selected 1 repair unit\(s\)/.test(l) &&
-					l.includes("1 existing scoped archive(s), 1 due for resume"),
+			diagnosticEvents(result.stderr, "scoped_archive_reconcile_selected").some(
+				(f) =>
+					f.repair_unit_count === 1 &&
+					f.existing_scoped_archives === 1 &&
+					f.due_for_resume === 1,
 			),
 			"reports the archive as due for resume once the throttle window has elapsed",
 		);
 		assert.ok(
-			lines.some(
-				(l) =>
-					l.includes("reading existing archive at") &&
-					l.includes(scopedArchiveDir),
+			diagnosticEvents(result.stderr, "slackdump_refresh_skipped").some(
+				(f) => f.archive_path === scopedArchiveDir,
 			),
 			"ensureArchiveOnDisk IS invoked for a genuinely due scoped archive — real remaining gaps still resume",
 		);
 		assert.ok(
-			lines.some((l) => l.includes("completed 1/1 repair unit(s) (resumed)")),
+			diagnosticEvents(
+				result.stderr,
+				"scoped_archive_reconcile_unit_completed",
+			).some((f) => f.completed === 1 && f.outcome === "resumed"),
 			"the completed cursor reports this unit as actually resumed",
 		);
+		assertUserFacingProgress(result.messages);
 		const cursor = messagesState(result);
 		const newResumedAt = (
 			cursor.scoped_archive_resumed_at as Record<string, string> | undefined
@@ -1619,19 +1691,28 @@ process.exit(0);
 
 		const lines = progressLines(result.messages);
 		assert.ok(
-			lines.some(
-				(l) =>
-					l.includes("scoped archive refresh failed") &&
-					l.includes("channel(s)"),
+			diagnosticEvents(result.stderr, "scoped_archive_refresh_failed").some(
+				(f) => f.channel_count === 1 && typeof f.error === "string",
 			),
-			"reports the resume failure as progress evidence",
+			"records the resume failure and its error text as a diagnostic",
 		);
 		assert.ok(
-			lines.some((l) =>
-				l.includes("completed 1/1 repair unit(s) (failed, gap recorded)"),
+			lines.includes("Could not refresh 1 channel; will retry next run"),
+			"owner sees a plain-English refresh failure",
+		);
+		assert.ok(
+			diagnosticEvents(
+				result.stderr,
+				"scoped_archive_reconcile_unit_completed",
+			).some(
+				(f) =>
+					f.completed === 1 &&
+					f.repair_unit_count === 1 &&
+					f.outcome === "failed, gap recorded",
 			),
 			"the completed cursor honestly reports this unit as failed, not resumed",
 		);
+		assertUserFacingProgress(result.messages);
 
 		// The decisive fix: the STATE cursor must NOT advance on failure. If it
 		// did, the archive would be silently treated as caught-up for a full
@@ -1894,15 +1975,22 @@ process.exit(0);
 
 		const lines = progressLines(result.messages);
 		assert.ok(
-			lines.some(
-				(l) =>
-					l.includes("scoped archive auto-reconcile failed") &&
-					l.includes("channel(s)"),
-			),
-			"reports the new-repair failure as progress evidence",
+			diagnosticEvents(
+				result.stderr,
+				"scoped_archive_auto_reconcile_failed",
+			).some((f) => f.channel_count === 1 && typeof f.error === "string"),
+			"records the new-repair failure and its error text as a diagnostic",
 		);
 		assert.ok(
-			lines.some((l) => l.includes("(failed, gap recorded)")),
+			lines.some((l) => /^Could not refresh \d+ channels?; will retry/.test(l)),
+			"owner sees a plain-English refresh failure",
+		);
+		assertUserFacingProgress(result.messages);
+		assert.ok(
+			diagnosticEvents(
+				result.stderr,
+				"scoped_archive_reconcile_unit_completed",
+			).some((f) => f.outcome === "failed, gap recorded"),
 			"the completed cursor honestly reports the new-repair attempt as failed, not resumed — SAME label as the existing-archive-refresh path, not a parallel taxonomy",
 		);
 

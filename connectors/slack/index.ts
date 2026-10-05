@@ -68,6 +68,10 @@ import {
 	describeConnectorArtifactRoot,
 	resolveConnectorArtifactDir,
 } from "../../packages/polyfill-connectors/src/connector-artifact-root.ts";
+import {
+	type ConnectorDiagnosticFields,
+	connectorDiagnostic,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { readOptions } from "../../packages/polyfill-connectors/src/connector-options.ts";
 import {
 	buildDetailCoverageMessage,
@@ -721,11 +725,19 @@ export function slackdumpProgressChanged(
 	);
 }
 
-function formatSlackdumpProgress(
-	label: string,
-	snapshot: SlackdumpProgressSnapshot,
-): string {
-	return `Slack slackdump ${label} progress: archive_bytes=${snapshot.archiveBytes}`;
+/** Technical detail for the run log; PROGRESS carries only owner text. */
+function slackDiagnostic(
+	event: string,
+	fields?: ConnectorDiagnosticFields,
+): void {
+	connectorDiagnostic("slack", event, fields);
+}
+
+function formatSlackdumpProgress(snapshot: SlackdumpProgressSnapshot): string {
+	const megabytes = Math.floor(snapshot.archiveBytes / (1024 * 1024));
+	return megabytes < 1
+		? "Downloading Slack history (under 1 MB so far)"
+		: `Downloading Slack history (${String(megabytes)} MB so far)`;
 }
 
 function redactSlackdumpOutput(output: string, env: NodeJS.ProcessEnv): string {
@@ -829,7 +841,11 @@ export function runSlackdump(
 			if (!snapshot) {
 				return;
 			}
-			progress(formatSlackdumpProgress(progressLabel, snapshot), {
+			slackDiagnostic("slackdump_archive_progress", {
+				label: progressLabel,
+				archive_bytes: snapshot.archiveBytes,
+			});
+			progress(formatSlackdumpProgress(snapshot), {
 				stream: "messages",
 			}).catch(() => undefined);
 		};
@@ -1514,11 +1530,13 @@ async function refreshScopedArchive(
 ): Promise<RefreshScopedArchiveResult> {
 	const { childEnv, cookie, opts, progress, timeFrom, timeTo, token } = deps;
 	if (!options.dueForResume) {
-		progress(
-			`Slack: scoped archive at ${archive.paths.archivePath} not due for resume yet ` +
-				`(last resumed within lookback=p${String(opts.LOOKBACK_DAYS)}d) — reading existing data, skipping subprocess`,
-			{ stream: "messages" },
-		);
+		slackDiagnostic("scoped_archive_not_due_for_resume", {
+			archive_path: archive.paths.archivePath,
+			lookback_days: opts.LOOKBACK_DAYS,
+		});
+		progress("Some channels were updated recently; using the saved copy", {
+			stream: "messages",
+		});
 		return { outcome: { kind: "throttled" } };
 	}
 	const useResume = existsSync(archive.paths.archivePath);
@@ -1540,8 +1558,12 @@ async function refreshScopedArchive(
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		slackDiagnostic("scoped_archive_refresh_failed", {
+			channel_count: archive.channelIds.length,
+			error: message,
+		});
 		progress(
-			`Slack: scoped archive refresh failed for ${String(archive.channelIds.length)} channel(s): ${message}`,
+			`Could not refresh ${String(archive.channelIds.length)} ${archive.channelIds.length === 1 ? "channel" : "channels"}; will retry next run`,
 			{
 				stream: "messages",
 			},
@@ -1610,8 +1632,12 @@ async function repairMissingScopedArchive(
 		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
+		slackDiagnostic("scoped_archive_auto_reconcile_failed", {
+			channel_count: missingChannelIds.length,
+			error: message,
+		});
 		progress(
-			`Slack: scoped archive auto-reconcile failed for ${String(missingChannelIds.length)} channel(s): ${message}`,
+			`Could not refresh ${String(missingChannelIds.length)} ${missingChannelIds.length === 1 ? "channel" : "channels"}; will retry next run`,
 			{
 				stream: "messages",
 			},
@@ -1784,13 +1810,19 @@ async function reconcileMessageSourceCache(deps: {
 			nowIsoValue,
 		),
 	).length;
+	slackDiagnostic("scoped_archive_reconcile_selected", {
+		repair_unit_count: repairUnitCount,
+		existing_scoped_archives: scopedArchives.length,
+		due_for_resume: dueForResumeCount,
+		throttled: scopedArchives.length - dueForResumeCount,
+		new_repair_attempts: willAttemptRepair ? 1 : 0,
+		uncovered_channels: uncoveredAfterSelection.length,
+		lookback_window: lookbackWindow,
+	});
 	archiveRuntime.progress(
-		`Slack: scoped-archive-reconcile selected ${String(repairUnitCount)} repair unit(s) ` +
-			`(${String(scopedArchives.length)} existing scoped archive(s), ${String(dueForResumeCount)} due for resume + ` +
-			`${String(scopedArchives.length - dueForResumeCount)} throttled (not yet due) + ` +
-			`${String(willAttemptRepair ? 1 : 0)} new-repair attempt(s) for ` +
-			`${String(uncoveredAfterSelection.length)} uncovered channel(s)), ` +
-			`each bounded to lookback=${lookbackWindow}`,
+		repairUnitCount > 0
+			? `Catching up on ${String(repairUnitCount)} channel group(s) that were missed earlier`
+			: "Checking for channels that were missed earlier",
 		{ stream: "messages" },
 	);
 	let completedRepairUnits = 0;
@@ -1815,9 +1847,13 @@ async function reconcileMessageSourceCache(deps: {
 			},
 		);
 		completedRepairUnits += 1;
+		slackDiagnostic("scoped_archive_reconcile_unit_completed", {
+			completed: completedRepairUnits,
+			repair_unit_count: repairUnitCount,
+			outcome: outcomeLabel,
+		});
 		archiveRuntime.progress(
-			`Slack: scoped-archive-reconcile completed ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) ` +
-				`(${outcomeLabel})`,
+			`Caught up on ${String(completedRepairUnits)} of ${String(repairUnitCount)} channel groups`,
 			{ stream: "messages" },
 		);
 	}
@@ -1854,9 +1890,13 @@ async function reconcileMessageSourceCache(deps: {
 			},
 		);
 		completedRepairUnits += 1;
+		slackDiagnostic("scoped_archive_reconcile_unit_completed", {
+			completed: completedRepairUnits,
+			repair_unit_count: repairUnitCount,
+			outcome: outcomeLabel,
+		});
 		archiveRuntime.progress(
-			`Slack: scoped-archive-reconcile completed ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) ` +
-				`(${outcomeLabel})`,
+			`Caught up on ${String(completedRepairUnits)} of ${String(repairUnitCount)} channel groups`,
 			{ stream: "messages" },
 		);
 		// A successful repair (outcome "resumed" — ensureArchiveOnDisk did not
@@ -1885,10 +1925,14 @@ async function reconcileMessageSourceCache(deps: {
 		}
 	}
 
-	archiveRuntime.progress(
-		`Slack: scoped-archive-reconcile finished: ${String(completedRepairUnits)}/${String(repairUnitCount)} repair unit(s) completed, 0 remaining`,
-		{ stream: "messages" },
-	);
+	slackDiagnostic("scoped_archive_reconcile_finished", {
+		completed: completedRepairUnits,
+		repair_unit_count: repairUnitCount,
+		remaining: 0,
+	});
+	archiveRuntime.progress("Finished catching up on missed channels", {
+		stream: "messages",
+	});
 
 	return {
 		currentChannelIds,
@@ -2075,10 +2119,14 @@ function reportOwedEnumeration(
 	if (!archivePathEnumerationIncomplete(sqlitePath)) {
 		return false;
 	}
+	slackDiagnostic("archive_enumeration_incomplete", {
+		archive_path: archivePath,
+		action: "full_archive_over_existing_directory",
+		reason:
+			"no completed archive session; channel enumeration was cut short so resume would never request the unreached channels",
+	});
 	progress(
-		`Slack: the archive at ${archivePath} has no completed 'archive' session — its channel enumeration was cut ` +
-			"short, so channels it never reached hold no data and 'resume' would never request them. Running a full " +
-			"'archive' against the existing directory to finish the enumeration.",
+		"The last download did not finish listing channels; running a full download",
 		{ stream: "messages" },
 	);
 	return true;
@@ -2201,10 +2249,19 @@ async function runArchiveOrResume(deps: RunArchiveDeps): Promise<void> {
 		resumeTarget,
 		useResume,
 	} = deps;
+	slackDiagnostic(
+		useResume ? "slackdump_resume_start" : "slackdump_archive_start",
+		useResume
+			? {
+					resume_target: resumeTarget,
+					discovered_on_disk: !priorArchive,
+				}
+			: { archive_path: archivePath },
+	);
 	progress(
 		useResume
-			? `Resuming slackdump at ${resumeTarget}${priorArchive ? "" : " (discovered on disk)"}`
-			: `Running slackdump archive → ${archivePath}`,
+			? "Updating your Slack archive"
+			: "Downloading your Slack history",
 	);
 	if (useResume && resumeTarget) {
 		// `resume` does not accept `-y` (unlike `archive`): passing it aborts
@@ -2432,7 +2489,8 @@ export async function emitMessagesPass(
 		// the whole MESSAGE table, which is exactly the heap pressure this pass
 		// avoids. The "incremental"/priorTs signal callers wire to the UI is
 		// unchanged.
-		deps.progress(`incremental: filtering messages newer than ${priorTs}`, {
+		slackDiagnostic("incremental_message_filter", { prior_ts: priorTs });
+		deps.progress("Reading messages since the last run", {
 			stream: "messages",
 		});
 	}
@@ -3251,17 +3309,17 @@ function parseSinceTs(
 	return parseIsoInstantToSlackTs(since);
 }
 
-function messageProgressLabel(
+export function messageProgressLabel(
 	channelCursorCount: number,
 	priorTs: string | null,
 ): string {
 	if (channelCursorCount > 0) {
-		return `Slack: emitting messages from ${String(channelCursorCount)} channel cursor(s)`;
+		return `Reading new messages from ${String(channelCursorCount)} ${channelCursorCount === 1 ? "channel" : "channels"}`;
 	}
 	if (priorTs) {
-		return `Slack: emitting messages newer than ${priorTs}`;
+		return "Reading new messages since the last run";
 	}
-	return "Slack: emitting all messages (full pass)";
+	return "Reading all messages from Slack";
 }
 
 export async function runFilesStream(deps: StreamDeps): Promise<void> {
@@ -3564,18 +3622,21 @@ async function ensureArchiveOnDisk(deps: EnsureArchiveDeps): Promise<void> {
 	const skipSlackdump = process.env.PDPP_SLACK_SKIP_SLACKDUMP === "1";
 	try {
 		if (skipSlackdump) {
-			progress(
-				`Skipping slackdump refresh (PDPP_SLACK_SKIP_SLACKDUMP=1); reading existing archive at ${archivePath}`,
-			);
+			slackDiagnostic("slackdump_refresh_skipped", {
+				env: "PDPP_SLACK_SKIP_SLACKDUMP=1",
+				archive_path: archivePath,
+			});
+			progress("Using previously downloaded Slack data");
 			if (!existsSync(sqlitePath)) {
 				throw new Error(
 					`PDPP_SLACK_SKIP_SLACKDUMP=1 but no archive found at ${sqlitePath}`,
 				);
 			}
 		} else {
-			progress(
-				`Ensuring slackdump workspace is cached (SLACKDUMP_BIN=${process.env.SLACKDUMP_BIN || "<unset>"})`,
-			);
+			slackDiagnostic("ensure_workspace_cached", {
+				slackdump_bin: process.env.SLACKDUMP_BIN || "<unset>",
+			});
+			progress("Signing in to Slack");
 			await ensureWorkspaceCached({ token, cookie, env: childEnv });
 			// WHY we ship an API-limits config: slackdump's defaults set tier_3 /
 			// tier_4 retries to 3, which exhausts quickly on bot-heavy channels
@@ -3632,16 +3693,16 @@ async function refreshBaseArchiveIfDue(
 			deps.nowIso,
 		);
 	if (baseResumeDue) {
-		await timedPhase(deps.progress, "slackdump-subprocess", () =>
-			ensureArchiveOnDisk(deps),
-		);
+		await timedPhase("slackdump-subprocess", () => ensureArchiveOnDisk(deps));
 		return deps.isUnscopedMessageBoundary && deps.useResume;
 	}
-	deps.progress(
-		`Slack: base archive at ${deps.archivePath} not due for resume yet ` +
-			`(last resumed within lookback=p${String(deps.opts.LOOKBACK_DAYS)}d) — reading existing data, skipping subprocess`,
-		{ stream: "messages" },
-	);
+	slackDiagnostic("base_archive_not_due_for_resume", {
+		archive_path: deps.archivePath,
+		lookback_days: deps.opts.LOOKBACK_DAYS,
+	});
+	deps.progress("Using the saved copy; Slack was checked recently", {
+		stream: "messages",
+	});
 	return false;
 }
 
@@ -3762,6 +3823,10 @@ export async function runRequestedStreams(
 		const channelLastTs = options.ignoreMessageChannelCursors
 			? {}
 			: normalizeStringRecord(messagesState?.channel_last_ts);
+		slackDiagnostic("message_pass_start", {
+			channel_cursor_count: Object.keys(channelLastTs).length,
+			prior_ts: priorTs,
+		});
 		deps.progress(
 			messageProgressLabel(Object.keys(channelLastTs).length, priorTs),
 			{ stream: "messages" },
@@ -3819,24 +3884,21 @@ export async function runRequestedStreams(
 
 // ─── Phase timing observability ────────────────────────────────────────
 
-type ProgressFn = CollectContext["progress"];
-
-// Time an awaited phase and report its duration via `progress`. This splits
+// Time an awaited phase and report its duration as a diagnostic line. This splits
 // the run into measurable phases (slackdump subprocess, archive open, read+
 // emit) so the "run time scales with new data, not archive size" claim is a
 // number in run evidence, not an assumption — the diagnosis the archive-cost
 // investigation needed. `now()` uses Date.now via an injected clock so tests
 // stay deterministic.
-async function timedPhase<T>(
-	progress: ProgressFn,
-	phase: string,
-	run: () => Promise<T>,
-): Promise<T> {
+async function timedPhase<T>(phase: string, run: () => Promise<T>): Promise<T> {
 	const started = Date.now();
 	try {
 		return await run();
 	} finally {
-		progress(`Slack phase timing: ${phase} took ${Date.now() - started}ms`);
+		slackDiagnostic("phase_timing", {
+			phase,
+			elapsed_ms: Date.now() - started,
+		});
 	}
 }
 
@@ -3844,7 +3906,6 @@ async function timedPhase<T>(
 // `__uploads/` residue presence/size. Makes the steady-state disk bound
 // observable and shows whether reclaim would free anything.
 function reportArchiveSizeSnapshot(
-	progress: ProgressFn,
 	sqlitePath: string,
 	archivePath: string,
 ): void {
@@ -3856,9 +3917,11 @@ function reportArchiveSizeSnapshot(
 	const uploadsBytes = existsSync(uploadsDir)
 		? directorySizeBytes(uploadsDir)
 		: 0;
-	progress(
-		`Slack archive size: sqlite=${sqliteBytes}B uploads=${uploadsBytes}B (uploads are attachment bytes the connector does not ingest)`,
-	);
+	// uploads are attachment bytes the connector does not ingest.
+	slackDiagnostic("archive_size", {
+		sqlite_bytes: sqliteBytes,
+		uploads_bytes: uploadsBytes,
+	});
 }
 
 // ─── Entry ─────────────────────────────────────────────────────────────
@@ -3933,7 +3996,9 @@ if (isMainModule(import.meta.url)) {
 			// State the archive root before any work: on the local-development
 			// fallback this is the run log's only warning that the archive is not
 			// on a deployment-managed volume.
-			progress(baseArchivePaths.rootDisclosure);
+			slackDiagnostic("artifact_root", {
+				disclosure: baseArchivePaths.rootDisclosure,
+			});
 			const { archivePath, sqlitePath } = resolveScopedArchivePaths(
 				baseArchivePaths,
 				positionalChannels,
@@ -3982,12 +4047,11 @@ if (isMainModule(import.meta.url)) {
 					: undefined;
 			if (migratedBaseArchiveResumedAt) {
 				baseArchiveResumedAt[archivePath] = migratedBaseArchiveResumedAt;
-				progress(
-					`Slack: base archive at ${archivePath} has no base_archive_resumed_at fact yet but prior STATE proves ` +
-						"a completed resume before this throttle shipped — seeding the throttle from this run instead of " +
-						"replaying the archive",
-					{ stream: "messages" },
-				);
+				slackDiagnostic("base_archive_throttle_seeded", {
+					archive_path: archivePath,
+					reason:
+						"no base_archive_resumed_at fact yet but prior STATE proves a completed resume before this throttle shipped; seeding the throttle from this run instead of replaying the archive",
+				});
 			}
 			// Map time_range from messages stream scope into -time-from / -time-to.
 			const { timeFrom, timeTo } = extractMessageTimeRange(
@@ -4022,7 +4086,7 @@ if (isMainModule(import.meta.url)) {
 				baseArchiveResumedAt[archivePath] = ctx.emittedAt;
 			}
 
-			const db = await timedPhase(progress, "archive-open", () =>
+			const db = await timedPhase("archive-open", () =>
 				Promise.resolve(new DatabaseSync(sqlitePath, { readOnly: true })),
 			);
 			// One per-record fingerprint cursor per fingerprinted stream. The
@@ -4079,7 +4143,6 @@ if (isMainModule(import.meta.url)) {
 			// archiveDueForResume) so a permanently-missing-but-actively-
 			// growing channel's archive doesn't get a full resync every run.
 			const reconciledSourceCache = await timedPhase(
-				progress,
 				"scoped-archive-reconcile",
 				() =>
 					reconcileMessageSourceCache({
@@ -4158,13 +4221,10 @@ if (isMainModule(import.meta.url)) {
 			// still rate-limited by Slack. See run_1787407222861: slackdump had
 			// archived 1,066,135 messages to disk and only this local read-and-emit
 			// pass was in flight when the external-walk ceiling killed the run.
-			progress(
-				"Slack: external archive walk complete; beginning local archive read",
-				{
-					phase_boundary: "local_only_phase_started",
-				},
-			);
-			let messageResult = await timedPhase(progress, "read-and-emit", () =>
+			progress("Finished contacting Slack; processing the data now", {
+				phase_boundary: "local_only_phase_started",
+			});
+			let messageResult = await timedPhase("read-and-emit", () =>
 				runRequestedStreams(deps, state, { workspace, token, cookie }, emit, {
 					allowLegacyMessageCursorFallback: isUnscopedMessageBoundary,
 					ignoreMessageChannelCursors: Boolean(
@@ -4238,7 +4298,7 @@ if (isMainModule(import.meta.url)) {
 			// End-of-run size snapshot: makes the steady-state disk bound and any
 			// reclaimable residue visible in run evidence.
 			db.close();
-			reportArchiveSizeSnapshot(progress, sqlitePath, archivePath);
+			reportArchiveSizeSnapshot(sqlitePath, archivePath);
 		},
 	});
 }
