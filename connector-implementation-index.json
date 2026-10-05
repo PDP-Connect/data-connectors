@@ -17819,7 +17819,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.5",
+				"version": "0.2.6",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
