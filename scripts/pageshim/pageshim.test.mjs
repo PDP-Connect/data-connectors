@@ -2040,6 +2040,53 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 			assert.deepEqual(r.result.exportSummary, c.emptyExportSummary);
 		},
 	);
+
+	// The mobile host stores each { activities } payload as the newest whole
+	// version. A prefix of the list would replace the full stored list.
+	const listPage2Fails = (raw) => {
+		const url = new URL(raw);
+		return url.pathname === "/athlete/training_activities" &&
+			url.searchParams.get("page") === "2"
+			? {
+					status: 503,
+					contentType: "text/html",
+					body: "<html>Service Unavailable</html>",
+				}
+			: resolveFixture(raw);
+	};
+
+	await t.test(
+		"a list page that fails mid-walk fails the run, with no prefix",
+		async () => {
+			const r = await run(listPage2Fails);
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.equal(r.result["strava.activities"], undefined);
+			assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+			assert.equal(r.result.errors[0].disposition, "fatal");
+			assert.match(r.result.errors[0].reason, /HTTP 503/);
+			assert.equal(r.data.error, r.result.errors[0].reason);
+			assert.equal(r.states?.["strava.activities"], undefined);
+		},
+	);
+
+	await t.test(
+		"a list page that fails mid-walk streams no scope on the thin host",
+		async () => {
+			const r = await runHarness({
+				bundle: built.outfile,
+				fixtures: { ...c.fixtures, resolve: listPage2Fails },
+				scopes: c.scopes,
+				resultStreaming: true,
+				resultSpoolDirectory: join(out, "strava-list-fails-thin-host"),
+			});
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.notEqual(r.streamResult?.completed, true);
+			assert.deepEqual(r.streamScopeFiles, {});
+			assert.match(r.data.error, /HTTP 503/);
+		},
+	);
 });
 
 test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
