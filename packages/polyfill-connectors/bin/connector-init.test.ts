@@ -21,9 +21,16 @@
  *      tree is pristine afterward regardless of pass/fail. Verified with a
  *      `git status --porcelain` diff against a pre-run snapshot.
  *
- * The temp connector name is prefixed `zz_` and suffixed with the test's own
- * PID so concurrent runs (or a leftover from a prior crashed run) can never
- * collide with a real connector name or with each other.
+ * `assertScaffoldPassesAcceptanceSuite` runs steps 2-4 for any `InitArgs`;
+ * it is exercised once for the default API-mode scaffold and once for
+ * `--browser` (zz_init_browser_smoke_<pid>) — same acceptance bar, same
+ * honesty suite (`src/browser-manifest-honesty.test.ts` is already in the
+ * list below for both, since it must accept every manifest in the tree,
+ * API-mode or browser-mode).
+ *
+ * The temp connector names are prefixed `zz_` and suffixed with the test's
+ * own PID so concurrent runs (or a leftover from a prior crashed run) can
+ * never collide with a real connector name or with each other.
  */
 
 import assert from "node:assert/strict";
@@ -38,6 +45,7 @@ import {
 import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
 import {
 	findCollisions,
+	type InitArgs,
 	InitArgsError,
 	parseArgs,
 	planTargets,
@@ -45,6 +53,7 @@ import {
 } from "./connector-init.ts";
 
 const TEMP_NAME = `zz_init_smoke_${String(process.pid)}`;
+const TEMP_NAME_BROWSER = `zz_init_browser_smoke_${String(process.pid)}`;
 const TEMP_STREAM = "items";
 
 interface CliResult {
@@ -121,14 +130,14 @@ function cleanUp(
 	rmSync(manifestPath, { force: true });
 }
 
-test("connector-init: scaffolds a connector whose pilot-fixture and manifest-honesty tests pass immediately", () => {
-	const args = parseArgs([
-		TEMP_NAME,
-		"--display-name",
-		"ZZ Init Smoke",
-		"--stream",
-		TEMP_STREAM,
-	]);
+/**
+ * Steps 2-4 of this file's module docstring, for any `InitArgs`. Shared by
+ * the API-mode and `--browser`-mode acceptance tests below so both run the
+ * exact same bar — a passing API-mode scaffold proves nothing about
+ * `--browser` mode, since `writeScaffold` branches on `args.browser` to an
+ * entirely different set of file builders (see connector-init.ts).
+ */
+function assertScaffoldPassesAcceptanceSuite(args: InitArgs): void {
 	const plan = planTargets(args.name, args.stream);
 	const fixtureDir = fixturesDir(args.name);
 
@@ -137,7 +146,7 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 	assert.deepEqual(
 		findCollisions(plan),
 		[],
-		`unexpected pre-existing path(s) for ${TEMP_NAME}; clean up manually`,
+		`unexpected pre-existing path(s) for ${args.name}; clean up manually`,
 	);
 
 	const preStatus = gitStatusPorcelain();
@@ -154,7 +163,7 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 			assert.ok(existsSync(path), `${label} was not created at ${path}`);
 		}
 		const reconciliation = reconcileFromDisk({
-			connector: TEMP_NAME,
+			connector: args.name,
 			manifestPath: plan.files.manifestJson,
 			schemaPath: plan.files.schemasTs,
 			emitSourcePaths: [plan.files.indexTs, plan.files.parsersTs],
@@ -178,7 +187,7 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 		assert.equal(
 			tapFailCount(pilotResult.stdout),
 			0,
-			`pilot-fixture test for ${TEMP_NAME} failed:\n${pilotResult.stdout}\n${pilotResult.stderr}`,
+			`pilot-fixture test for ${args.name} failed:\n${pilotResult.stdout}\n${pilotResult.stderr}`,
 		);
 		assert.equal(
 			pilotResult.code,
@@ -241,6 +250,30 @@ test("connector-init: scaffolds a connector whose pilot-fixture and manifest-hon
 			"connector-init test left the working tree dirty after cleanup",
 		);
 	}
+}
+
+test("connector-init: scaffolds a connector whose pilot-fixture and manifest-honesty tests pass immediately", () => {
+	const args = parseArgs([
+		TEMP_NAME,
+		"--display-name",
+		"ZZ Init Smoke",
+		"--stream",
+		TEMP_STREAM,
+	]);
+	assertScaffoldPassesAcceptanceSuite(args);
+});
+
+test("connector-init --browser: scaffolds a browser connector whose pilot-fixture and manifest-honesty tests pass immediately", () => {
+	const args = parseArgs([
+		TEMP_NAME_BROWSER,
+		"--display-name",
+		"ZZ Init Browser Smoke",
+		"--stream",
+		TEMP_STREAM,
+		"--browser",
+	]);
+	assert.equal(args.browser, true);
+	assertScaffoldPassesAcceptanceSuite(args);
 });
 
 test("connector-init: refuses to overwrite an existing target and lists every collision", () => {

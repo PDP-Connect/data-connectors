@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * connector-init — scaffold a new API-class connector, declaration-first.
+ * connector-init — scaffold a new connector, declaration-first.
  *
  * Generates the minimal set of files a new connector needs to pass the
  * fleet's build-time guardrails (manifest-honesty suite, pilot-fixture
@@ -19,7 +19,7 @@
  *   connectors/<name>/fixtures/scrubbed/pilot-real-shape/provenance.json
  *
  * Usage:
- *   pnpm exec tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>]
+ *   pnpm exec tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>] [--browser]
  *
  * `<name>` becomes the connector key (directory name, manifest filename,
  * `connector_key`). It must be a lowercase snake_case identifier — the same
@@ -28,11 +28,21 @@
  * Refuses to run if any target file/directory already exists (lists every
  * collision and exits non-zero) — init never overwrites.
  *
- * The scaffold is deliberately tiny: one stream, one synthetic pilot
- * record, one TODO'd HTTP call. It exists to get a new connector past the
- * "does the fleet's plumbing accept this shape" question immediately, so a
- * connector author's first `node --test` run is green and every edit from
- * there on is adding real behavior, not fighting the harness.
+ * Default (API mode): the scaffold is deliberately tiny — one stream, one
+ * synthetic pilot record, one TODO'd HTTP call. It exists to get a new
+ * connector past the "does the fleet's plumbing accept this shape" question
+ * immediately, so a connector author's first `node --test` run is green and
+ * every edit from there on is adding real behavior, not fighting the
+ * harness.
+ *
+ * `--browser`: scaffolds a browser-session connector instead (manifest
+ * declares `browser` + `network` bindings and `human_interaction:
+ * ["manual_action"]"`; `index.ts` wires the canonical `runConnector({
+ * browser: { profileName } })` pattern — a session probe against a declared
+ * "am I logged in" URL/selector, the fleet's `manualBrowserLogin` handoff on
+ * a cold profile, and one TODO where the author navigates and extracts
+ * rows). Modeled on `connectors/github_browser/index.ts` — see
+ * docs/connector-authoring-guide.md §0 ("Browser architecture").
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -48,13 +58,16 @@ const NAME_RE = /^[a-z][a-z0-9_]*$/;
 const STREAM_RE = /^[a-z][a-z0-9_]*$/;
 
 interface InitArgs {
+	/** `--browser`: scaffold a browser-session connector instead of the
+	 *  default API-class one. See this file's module docstring. */
+	browser: boolean;
 	displayName: string;
 	name: string;
 	stream: string;
 }
 
 const USAGE =
-	"usage: pnpm exec tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>]";
+	"usage: pnpm exec tsx bin/connector-init.ts <name> [--display-name <n>] [--stream <stream-name>] [--browser]";
 
 /** Thrown by parseArgs on any invalid invocation. main() maps this to a printed usage + exit(2). */
 export class InitArgsError extends Error {}
@@ -85,6 +98,7 @@ function parseArgs(argv: string[]): InitArgs {
 	}
 	let displayName = titleCase(name);
 	let stream = "items";
+	let browser = false;
 	for (let i = 0; i < rest.length; i += 1) {
 		const arg = rest[i];
 		if (arg === "--display-name") {
@@ -101,6 +115,8 @@ function parseArgs(argv: string[]): InitArgs {
 			}
 			stream = value;
 			i += 1;
+		} else if (arg === "--browser") {
+			browser = true;
 		} else {
 			throw new InitArgsError(`unrecognized argument: ${String(arg)}`);
 		}
@@ -110,7 +126,7 @@ function parseArgs(argv: string[]): InitArgs {
 			`invalid stream name "${stream}": must be lowercase snake_case (e.g. "items")`,
 		);
 	}
-	return { name, displayName, stream };
+	return { name, displayName, stream, browser };
 }
 
 // ─── Target file plan ───────────────────────────────────────────────────
@@ -277,6 +293,133 @@ function buildManifest(
 	return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
+// ─── Browser-mode manifest ───────────────────────────────────────────────
+//
+// Same stream shape (id/created_at/title, same x_pdpp_role placements) as
+// buildManifest above — that shape is what already satisfies the honesty
+// suite, so browser mode keeps it unchanged and only varies the parts that
+// are genuinely different for a browser-session connector:
+//
+//   - `runtime_requirements.bindings` declares BOTH `browser` and `network`
+//     (every browser-binding connector in the fleet declares both — see
+//     connectors/github_browser and connectors/oura_browser/manifest.json).
+//     `browser.features` lists only what this scaffold's index.ts actually
+//     calls: `page_navigation` (the session-check/listing `page.goto`),
+//     `page_condition_wait` (the session-check `page.waitForSelector`), and
+//     `page_script_evaluation` (the TODO extraction's `page.locator(...)
+//     .evaluateAll(...)`). `network` is declared `required: true` with no
+//     `features` — this scaffold never makes a host-level or same-origin
+//     fetch, matching how the API-mode scaffold above also declares a
+//     bare, feature-less `network` binding.
+//   - `capabilities.auth` is omitted: a browser-session connector
+//     authenticates via the owner's signed-in browser profile, not an env
+//     credential (no `*_browser` connector in the fleet declares `auth`).
+//   - `capabilities.human_interaction: ["manual_action"]` — required by
+//     docs/spec/collection-profile.md §3.4 before a connector may emit an
+//     INTERACTION of that kind; this scaffold's manual-login handoff does.
+//   - `refresh_policy.interaction_posture: "manual_action_likely"` instead
+//     of API mode's `"none"` — the session can go cold and need a fresh
+//     owner sign-in, exactly the posture every `*_browser` manifest states.
+
+function buildBrowserManifest(
+	name: string,
+	displayName: string,
+	stream: string,
+): string {
+	const manifest = {
+		protocol_version: "0.1.0",
+		connector_id: `https://registry.pdpp.dev/connectors/${name}`,
+		connector_key: name,
+		manifest_uri: `https://registry.pdpp.dev/connectors/${name}`,
+		version: "0.1.0",
+		display_name: displayName,
+		runtime_requirements: {
+			bindings: {
+				browser: {
+					required: true,
+					features: [
+						"page_navigation",
+						"page_condition_wait",
+						"page_script_evaluation",
+					],
+				},
+				network: {
+					required: true,
+				},
+			},
+		},
+		capabilities: {
+			human_interaction: ["manual_action"],
+			refresh_policy: {
+				recommended_mode: "manual",
+				recommended_interval_seconds: 21_600,
+				minimum_interval_seconds: 3600,
+				maximum_staleness_seconds: 86_400,
+				interaction_posture: "manual_action_likely",
+				rate_limit_sensitivity: "medium",
+				bot_detection_sensitivity: "medium",
+				background_safe: false,
+				rationale:
+					"Scaffolded browser connector: manual refresh via the owner's signed-in session until a real rate profile is measured against the live site.",
+			},
+			public_listing: {
+				tier: "development",
+			},
+		},
+		streams: [
+			{
+				name: stream,
+				description: `TODO: describe the ${stream} stream (what it is, one sentence).`,
+				display: {
+					label: `Your ${displayName} ${stream}`,
+					detail:
+						"TODO: describe the fields an owner will see for this stream.",
+				},
+				semantics: "mutable_state",
+				schema: {
+					type: "object",
+					properties: {
+						id: {
+							type: "string",
+						},
+						created_at: {
+							type: "string",
+							format: "date-time",
+							x_pdpp_role: "event-time",
+						},
+						title: {
+							type: ["string", "null"],
+							x_pdpp_role: "primary-title",
+						},
+					},
+					required: ["id", "created_at"],
+				},
+				primary_key: ["id"],
+				cursor_field: "created_at",
+				consent_time_field: "created_at",
+				required: true,
+				selection: {
+					fields: true,
+					resources: true,
+				},
+				incremental: true,
+				query: {
+					search: {
+						lexical_fields: ["title"],
+						semantic_fields: ["title"],
+					},
+					aggregations: {
+						count: true,
+					},
+				},
+				coverage_strategy: "checkpoint_window",
+				freshness_strategy: "manual_as_of",
+			},
+		],
+	};
+	return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
 function buildTypesTs(displayName: string, stream: string): string {
 	return `// Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -292,6 +435,27 @@ export interface ${pascalCase(stream)}Item {
   created_at: string;
   id: number | string;
   title?: string | null;
+}
+`;
+}
+
+function buildBrowserTypesTs(displayName: string, stream: string): string {
+	return `// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// Shared types for the ${displayName} browser connector. Kept out of
+// index.ts so the pure record builder in parsers.ts can import them
+// without pulling in the Playwright-facing runtime entry point (see
+// connectors/github_browser/types.ts for the pattern this scaffold
+// follows).
+
+// TODO: replace with the real shape extracted from the ${displayName}
+// page's DOM for the "${stream}" stream, once index.ts's extractRows()
+// TODO is filled in.
+export interface ${pascalCase(stream)}Row {
+  created_at: string;
+  id: string;
+  title: string | null;
 }
 `;
 }
@@ -317,6 +481,34 @@ export function ${camelCase(stream)}Record(item: ${typeName}): RecordData {
     id: String(item.id),
     created_at: item.created_at,
     title: item.title ?? null,
+  };
+}
+`;
+}
+
+function buildBrowserParsersTs(name: string, stream: string): string {
+	const typeName = `${pascalCase(stream)}Row`;
+	return `// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// Pure parsers for the ${name} browser connector. Kept free of Playwright
+// calls so this builder can be unit-tested in isolation. The page
+// navigation, session check, and DOM extraction live in index.ts (see
+// connectors/github_browser/parsers.ts for the pattern this scaffold
+// follows).
+
+import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { ${typeName} } from "./types.ts";
+
+// Must emit exactly the fields declared in manifests/${name}.json's
+// "${stream}" stream schema (id, created_at, title). Already matches the
+// row shape index.ts's extractRows() TODO returns — widen both together as
+// the real DOM shape lands.
+export function ${camelCase(stream)}Record(row: ${typeName}): RecordData {
+  return {
+    id: row.id,
+    created_at: row.created_at,
+    title: row.title,
   };
 }
 `;
@@ -402,6 +594,204 @@ if (isMainModule(import.meta.url)) {
         cursor: { last_created_at: latest ?? null },
       });
     },
+  });
+}
+`;
+}
+
+// ─── Browser-mode index.ts ───────────────────────────────────────────────
+//
+// Follows connectors/github_browser/index.ts — the fleet's smallest, most
+// decomposed browser connector (120 lines; everything except the TODO'd
+// row extraction is canonical helper wiring) — not the two other `*_browser`
+// connectors in the fleet (oura_browser, strava_browser), which are larger
+// and inline more business logic. See this file's module docstring.
+//
+// Shape, matching every `*_browser` connector in the fleet:
+//   - `runConnector({ browser: { profileName: name }, ensureSession,
+//     probeSession, probeSessionIsAuthoritative: true, collect })`.
+//   - `probeLoggedIn` is the "am I logged in" check (3.4's declared
+//     human_interaction precondition): navigate to LOGIN_CHECK_URL, wait
+//     for LOGIN_CHECK_SELECTOR. Both are loud placeholders (see
+//     requireConfigured below) — a scaffold cannot know a real provider's
+//     login URL or a selector only present once signed in.
+//   - `ensureSession` re-probes, then falls back to `manualBrowserLogin`
+//     (packages/polyfill-connectors/src/browser-handoff.ts) in its SIMPLE
+//     form — page/probe/sendInteraction only, no assist/completeAssistance/
+//     readinessProbe — which emits a real "manual_action" INTERACTION
+//     (connector-dev.ts answers it via --answer, TTY, or file-drop) and
+//     re-probes once that resolves. Every shipped `*_browser` connector
+//     instead passes the assist-based args (see ensureSession's own
+//     comment, below, for why this scaffold deliberately doesn't): that
+//     richer form polls the live page directly and needs the reference
+//     server's streaming-companion wiring to show that page to a remote
+//     owner — infrastructure a brand-new `connector-dev` run doesn't have.
+//     `ensureSession` only throws if the session still isn't live after
+//     the handoff resolves.
+//   - `collect`'s ONE TODO is `extractRows`: navigate to the real listing
+//     page and extract rows. Everything around it (the `requested` gate,
+//     `progress`, the `emitRecord` loop) is already wired, matching how
+//     the API-mode scaffold's one TODO is its endpoint URL, not the
+//     surrounding protocol plumbing.
+
+function buildBrowserIndexTs(
+	name: string,
+	displayName: string,
+	stream: string,
+): string {
+	const typeName = `${pascalCase(stream)}Row`;
+	const recordFn = `${camelCase(stream)}Record`;
+	return `#!/usr/bin/env node
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * PDPP ${name} Connector (v0.1.0) — scaffolded by bin/connector-init.ts --browser.
+ *
+ * Browser-session connector: ${displayName} is collected from the owner's
+ * own signed-in browser session, not an API token. The runtime launches an
+ * isolated, persistent Patchright Chromium profile at
+ * ~/.pdpp/profiles/${name}/ (PDPP_BROWSER_PROFILE_ROOT overrides the root;
+ * see packages/polyfill-connectors/src/browser-launch.ts) and hands this
+ * connector a live \`page\` once acquired.
+ *
+ * Canonical pattern followed: connectors/github_browser/index.ts (see
+ * docs/connector-authoring-guide.md §0, "Browser architecture").
+ *
+ * TODO: document the real ${displayName} login URL and the page(s) this
+ * connector navigates, once known.
+ */
+
+import { isMainModule } from "@pdpp/connector-protocol";
+import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import {
+  type BrowserCollectContext,
+  type EnsureSessionArgs,
+  runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { ${recordFn} } from "./parsers.ts";
+import { validateRecord } from "./schemas.ts";
+import type { ${typeName} } from "./types.ts";
+
+// ─── Placeholder config: fails loudly, never silently ───────────────────
+//
+// These two constants ARE the connector's declared "am I logged in" check.
+// A literal "TODO:" value can never be a real URL or selector, so
+// requireConfigured() throws a clear, named error the first time either is
+// actually read — instead of this scaffold silently probing a URL that was
+// never real. Same posture as dlt's "Please set me up!": a config value
+// that cannot be skimmed past.
+const LOGIN_CHECK_URL =
+  "TODO: set the URL only a signed-in ${displayName} session can load (e.g. https://app.example.com/account)";
+const LOGIN_CHECK_SELECTOR =
+  "TODO: set a CSS selector only present once signed in (e.g. [data-testid='account-menu'])";
+
+const PLACEHOLDER_RE = /^TODO:/;
+
+function requireConfigured(value: string, fieldName: string): string {
+  if (PLACEHOLDER_RE.test(value)) {
+    throw new Error(
+      \`${name}_not_configured: \${fieldName} in connectors/${name}/index.ts is still a placeholder ("\${value}"). Set a real value before running connector-dev.\`,
+    );
+  }
+  return value;
+}
+
+async function probeLoggedIn(
+  page: BrowserCollectContext["page"],
+): Promise<boolean> {
+  const url = requireConfigured(LOGIN_CHECK_URL, "LOGIN_CHECK_URL");
+  const selector = requireConfigured(LOGIN_CHECK_SELECTOR, "LOGIN_CHECK_SELECTOR");
+  await page.goto(url, { waitUntil: "domcontentloaded" });
+  try {
+    await page.waitForSelector(selector, { timeout: 8_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureSession({
+  page,
+  sendInteraction,
+}: Pick<EnsureSessionArgs, "page" | "sendInteraction">): Promise<void> {
+  if (await probeLoggedIn(page)) return;
+  // manualBrowserLogin's SIMPLE form: pass only page/probe/sendInteraction
+  // (no assist/completeAssistance/readinessProbe) so it emits a real
+  // "manual_action" INTERACTION via sendInteraction and re-probes once that
+  // resolves — exactly what bin/connector-dev.ts answers via --answer (or
+  // its TTY/file-drop fallback) and what capabilities.human_interaction:
+  // ["manual_action"] (manifest.json) declares. Every shipped *_browser
+  // connector instead passes assist/completeAssistance/readinessProbe +
+  // readinessProbeOnHandoffPage: true, which polls the live page directly
+  // and needs the reference server's streaming-companion wiring to show
+  // that page to an owner — infrastructure a brand-new scaffold run
+  // (connector-dev, no reference server) does not have. Switch to that
+  // richer form once this connector is wired into a deployment that has it.
+  const ready = await manualBrowserLogin({
+    message:
+      "Sign in to ${displayName} in the secure browser, then continue. PDPP will verify the session before collecting.",
+    page,
+    probe: () => probeLoggedIn(page),
+    reason: "login",
+    sendInteraction,
+    timeoutSeconds: 30 * 60,
+  });
+  if (!ready) {
+    throw new Error("${name}_session_missing");
+  }
+}
+
+// TODO: replace LISTING_URL/ROW_SELECTOR and the extraction below with the
+// real ${displayName} listing page and row shape for "${stream}" — this is
+// the one thing a new browser connector has to write. Prefer structure
+// over text (docs/connector-authoring-guide.md §2): read attributes/ARIA,
+// not regexed innerText. See connectors/github_browser/collector.ts for a
+// real example of this same extract-then-emitRecord shape.
+const LISTING_URL = "https://example.invalid/TODO-${name}-${stream}";
+const ROW_SELECTOR = "TODO-row-selector";
+
+async function extractRows(
+  page: BrowserCollectContext["page"],
+): Promise<${typeName}[]> {
+  await page.goto(LISTING_URL, { waitUntil: "domcontentloaded" });
+  return await page.locator(ROW_SELECTOR).evaluateAll((elements) =>
+    elements.map((element) => ({
+      id: element.getAttribute("data-id") ?? "",
+      created_at: element.getAttribute("data-created-at") ?? "",
+      title: element.textContent?.trim() ?? null,
+    })),
+  );
+}
+
+export async function collect({
+  emitRecord,
+  page,
+  progress,
+  requested,
+}: Pick<
+  BrowserCollectContext,
+  "emitRecord" | "page" | "progress" | "requested"
+>): Promise<void> {
+  if (!requested.has("${stream}")) {
+    return;
+  }
+  await progress("Collecting ${stream}");
+  const rows = await extractRows(page);
+  for (const row of rows) {
+    await emitRecord("${stream}", ${recordFn}(row));
+  }
+}
+
+if (isMainModule(import.meta.url)) {
+  runConnector({
+    name: "${name}",
+    validateRecord,
+    browser: { profileName: "${name}" },
+    ensureSession,
+    probeSession: ({ page }) => probeLoggedIn(page),
+    probeSessionIsAuthoritative: true,
+    collect,
   });
 }
 `;
@@ -504,7 +894,7 @@ function camelCase(input: string): string {
 // ─── Writer ──────────────────────────────────────────────────────────────
 
 export function writeScaffold(args: InitArgs): TargetPlan {
-	const { name, displayName, stream } = args;
+	const { name, displayName, stream, browser } = args;
 	const plan = planTargets(name, stream);
 
 	mkdirSync(plan.connectorDir, { recursive: true });
@@ -512,11 +902,28 @@ export function writeScaffold(args: InitArgs): TargetPlan {
 
 	writeFileSync(
 		plan.files.manifestJson,
-		buildManifest(name, displayName, stream),
+		browser
+			? buildBrowserManifest(name, displayName, stream)
+			: buildManifest(name, displayName, stream),
 	);
-	writeFileSync(plan.files.typesTs, buildTypesTs(displayName, stream));
-	writeFileSync(plan.files.parsersTs, buildParsersTs(name, stream));
-	writeFileSync(plan.files.indexTs, buildIndexTs(name, stream));
+	writeFileSync(
+		plan.files.typesTs,
+		browser
+			? buildBrowserTypesTs(displayName, stream)
+			: buildTypesTs(displayName, stream),
+	);
+	writeFileSync(
+		plan.files.parsersTs,
+		browser
+			? buildBrowserParsersTs(name, stream)
+			: buildParsersTs(name, stream),
+	);
+	writeFileSync(
+		plan.files.indexTs,
+		browser
+			? buildBrowserIndexTs(name, displayName, stream)
+			: buildIndexTs(name, stream),
+	);
 	writeFileSync(plan.files.schemasTs, buildSchemasTs(name, stream));
 	writeFileSync(plan.files.pilotFixtureTestTs, buildPilotFixtureTestTs(name));
 	writeFileSync(plan.files.fixtureJsonl, buildFixtureJsonl(name));
@@ -568,6 +975,42 @@ Next steps:
 `);
 }
 
+/**
+ * Browser-mode next steps: deliberately just the three commands/pointers
+ * the task of getting a browser connector running actually needs — doctor
+ * first (so a missing Chromium revision or an unwritable profile dir is a
+ * clear message, not a confusing mid-run failure), then connector-dev (which
+ * drives the session check and manual-login handoff this scaffold already
+ * wires up), then where the one real TODO lives.
+ */
+function printBrowserNextSteps(name: string, stream: string): void {
+	console.log(`
+Scaffolded browser connector "${name}" (stream: "${stream}").
+
+Next commands:
+  1. pnpm exec tsx bin/connector-doctor.ts
+       Checks Node, dependencies, the Patchright Chromium revision, display
+       availability, .env.local location, and ~/.pdpp/profiles — before you
+       drive a real browser.
+  2. pnpm exec tsx bin/connector-dev.ts ${name}
+       Launches the browser, runs the session check, and hands you the
+       manual-login window if the ${name} profile isn't signed in yet
+       (register "${name}" in src/orchestrator.ts's KNOWN_CONNECTORS map
+       first, or pass --entrypoint connectors/${name}/index.ts to run it
+       unregistered).
+  3. The one TODO is extractRows() in connectors/${name}/index.ts — replace
+     LISTING_URL/ROW_SELECTOR and the extraction with real navigation for
+     the "${stream}" stream. LOGIN_CHECK_URL/LOGIN_CHECK_SELECTOR just above
+     it need a real value too (both fail loudly if left as-is).
+
+Widen connectors/${name}/types.ts, parsers.ts, and schemas.ts (in lockstep
+with manifests/${name}.json's stream schema) to match the real row shape as
+you discover it. See docs/connector-authoring-guide.md §0 ("Browser
+architecture") and connectors/github_browser/ for the fuller reference this
+scaffold follows.
+`);
+}
+
 function main(): void {
 	let args: InitArgs;
 	try {
@@ -588,7 +1031,11 @@ function main(): void {
 		process.exit(1);
 	}
 	writeScaffold(args);
-	printNextSteps(args.name, args.stream);
+	if (args.browser) {
+		printBrowserNextSteps(args.name, args.stream);
+	} else {
+		printNextSteps(args.name, args.stream);
+	}
 }
 
 if (isMainModule(import.meta.url)) {

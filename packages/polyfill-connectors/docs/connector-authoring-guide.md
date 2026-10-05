@@ -88,6 +88,16 @@ Multi-account note: the runtime today defaults `profileName` to the connector na
 
 **When to deviate**: if a connector is so cheap (a single HTTP call behind a session) that launching a full browser per run is wasteful, prefer a plain HTTP client (`fetch`, session cookies from a stored JSON). Scraping that drives a UI belongs in the isolated-browser pattern.
 
+### 0a. Starting a new browser connector: `connector-init --browser`
+
+`pnpm exec tsx bin/connector-init.ts <name> --browser` scaffolds a browser-session connector that passes every repo check immediately — manifest-honesty, the schema tests, and its own generated `pilot-fixture.test.ts` — the same acceptance bar `connector-init.ts` (no flag) already holds API-class connectors to. It follows `connectors/github_browser/index.ts`, the fleet's smallest, most decomposed `*_browser` connector:
+
+- The manifest declares `runtime_requirements.bindings.browser` + `.network` and `capabilities.human_interaction: ["manual_action"]` — no `auth` block, since a browser-session connector authenticates via the owner's signed-in profile, not an env credential.
+- `index.ts` wires the canonical `runConnector({ browser: { profileName }, ensureSession, probeSession, probeSessionIsAuthoritative: true, collect })` shape: a session probe against two declared constants (`LOGIN_CHECK_URL`, `LOGIN_CHECK_SELECTOR`), the fleet's `manualBrowserLogin` handoff (`src/browser-handoff.ts`) when the probe fails, and one TODO (`extractRows`) where the author navigates to the real listing page and extracts rows.
+- Both the login-check constants and the extraction's `LISTING_URL`/`ROW_SELECTOR` start as literal `"TODO: ..."` strings. `requireConfigured()` throws a clear, named error the first time a still-placeholder value is actually read — the same posture as dlt's "Please set me up!" — instead of silently probing a URL that was never real.
+
+Next: `pnpm exec tsx bin/connector-doctor.ts` (checks Node/deps/Chromium/display/`.env.local`/`~/.pdpp/profiles` before you drive a real browser), then `pnpm exec tsx bin/connector-dev.ts <name>` to watch the session check and manual-login handoff run live. `connector-init --browser`'s own printed next-steps give the exact commands and the TODO's file location.
+
 ---
 
 ## 1. Sources of ground truth, ranked
