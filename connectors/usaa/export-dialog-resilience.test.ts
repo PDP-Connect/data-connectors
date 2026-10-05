@@ -14,8 +14,13 @@ import { rmSync } from "node:fs";
 import { test } from "node:test";
 import type { BrowserContext, Page } from "playwright";
 import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import {
 	driveExport,
 	type EmitDeps,
+	emitPdfStatementTransactions,
 	runSingleLadderAttempt,
 	tryExportLadder,
 } from "./index.ts";
@@ -523,6 +528,10 @@ test("production export ladder stops after a structural fill failure", async () 
 		start: { editable: true, enabled: true, visible: true },
 	});
 	const progress: string[] = [];
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => {
+		diagnostics.push(line);
+	});
 	const deps = {
 		emit: (message: { message?: string }): Promise<void> => {
 			if (message.message) {
@@ -533,31 +542,36 @@ test("production export ladder stops after a structural fill failure", async () 
 		emitRecord: async (): Promise<void> => undefined,
 	} as EmitDeps;
 
-	const result = await tryExportLadder(
-		deps,
-		{} as BrowserContext,
-		probe.page,
-		async () => ({
-			request_id: "fixture",
-			status: "success",
-			type: "INTERACTION_RESPONSE",
-		}),
-		{
-			account_id_raw: "fixture-account",
-			account_type: "checking",
-			account_url: "/my/checking/fixture-account",
-			balance_cents: 0,
-			last_four: "0000",
-			name: "Fixture checking",
-			raw_text: "Fixture checking",
-		},
-		1,
-		1,
-		["2025-01-02", "2025-01-10"],
-		"2025-01-31",
-		{ sessionDeadMidRun: false, sessionRepairAttempted: false },
-		() => undefined,
-	);
+	let result: Awaited<ReturnType<typeof tryExportLadder>>;
+	try {
+		result = await tryExportLadder(
+			deps,
+			{} as BrowserContext,
+			probe.page,
+			async () => ({
+				request_id: "fixture",
+				status: "success",
+				type: "INTERACTION_RESPONSE",
+			}),
+			{
+				account_id_raw: "fixture-account",
+				account_type: "checking",
+				account_url: "/my/checking/fixture-account",
+				balance_cents: 0,
+				last_four: "0000",
+				name: "Fixture checking",
+				raw_text: "Fixture checking",
+			},
+			1,
+			1,
+			["2025-01-02", "2025-01-10"],
+			"2025-01-31",
+			{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+			() => undefined,
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 
 	assert.equal(result.csvPath, null);
 	assert.equal(
@@ -570,4 +584,71 @@ test("production export ladder stops after a structural fill failure", async () 
 		),
 		false,
 	);
+	assert.deepEqual(progress, [
+		"Waiting for USAA to prepare your transaction export",
+		"USAA changed its export page; skipping this account",
+	]);
+	assertUserFacingProgress(
+		progress.map((message) => ({ type: "PROGRESS", message })),
+	);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith("[usaa-diagnostic] export_wait ") &&
+				line.includes('"account":1') &&
+				line.includes('"window":1') &&
+				line.includes('"windows":2'),
+		),
+		"the account/window ordinals moved to a diagnostic line",
+	);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith("[usaa-diagnostic] export_attempt_failed ") &&
+				line.includes('"account":1') &&
+				line.includes('"window":1'),
+		),
+		diagnostics.join("\n"),
+	);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith("[usaa-diagnostic] export_structure_changed ") &&
+				line.includes('"phase":'),
+		),
+		diagnostics.join("\n"),
+	);
+});
+
+test("PDF parse summary shows plain progress and keeps the template counters in a diagnostic line", async () => {
+	const progress: string[] = [];
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => {
+		diagnostics.push(line);
+	});
+	try {
+		await emitPdfStatementTransactions(
+			{
+				emit: (message: { message?: string }): Promise<void> => {
+					if (message.message) {
+						progress.push(message.message);
+					}
+					return Promise.resolve();
+				},
+				emitRecord: async (): Promise<void> => undefined,
+			} as EmitDeps,
+			[],
+			new Map(),
+			[],
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.deepEqual(progress, ["Read 0 transaction(s) from 0 statement(s)"]);
+	assertUserFacingProgress(
+		progress.map((message) => ({ type: "PROGRESS", message })),
+	);
+	assert.deepEqual(diagnostics, [
+		'[usaa-diagnostic] pdf_parse_complete {"transactions":0,"statements":0,"unknown_templates":0,"unreconciled":0}',
+	]);
 });
