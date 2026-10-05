@@ -51,7 +51,7 @@
     "pdpp-source-contract:generate": "node ./scripts/generate-pdpp-source-contract.mjs",
     "pdpp-source-contract:check": "node ./scripts/generate-pdpp-source-contract.mjs --check",
     "old-installer-compat:test": "node --test ./scripts/old-installer-compat.test.mjs",
-    "manifest-schema:test": "node --test ./schemas/connector-manifest.schema.test.mjs ./schemas/connector-binding-grammar.test.mjs",
+    "manifest-schema:test": "node --test ./schemas/connector-manifest.schema.test.mjs ./schemas/connector-binding-grammar.test.mjs ./schemas/observation.schema.test.mjs",
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check"
   },

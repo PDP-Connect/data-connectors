@@ -1,0 +1,275 @@
+{
+  "description": "Shared OBSERVATION corpus. schemas/observation.schema.test.mjs checks the JSON schema against it and packages/polyfill-connectors/src/observation.test.ts checks the runtime's zod projection against it, so the two cannot drift apart. Each invalid case names the rule it breaks. The JSON schema does not check that final is one of states_seen; the case marked runtime_only is invalid only for the runtime.",
+  "valid": [
+    {
+      "type": "OBSERVATION",
+      "id": "o1",
+      "fact": "element_expectation",
+      "step": "sign_in",
+      "attrs": {
+        "expectation": "email_input",
+        "states_seen": [
+          "absent",
+          "hidden"
+        ],
+        "final": "hidden"
+      },
+      "evidence_ref": "trace:step-3"
+    },
+    {
+      "type": "OBSERVATION",
+      "id": "o2",
+      "fact": "element_expectation",
+      "step": "sign_in",
+      "attrs": {
+        "expectation": "email_input",
+        "states_seen": [
+          "disabled"
+        ],
+        "final": "disabled",
+        "fallback_used": false
+      }
+    },
+    {
+      "type": "OBSERVATION",
+      "id": "o3",
+      "fact": "wait_expired",
+      "step": "sign_in",
+      "attrs": {
+        "awaited": "email_input",
+        "budget_ms": 10000
+      }
+    },
+    {
+      "type": "OBSERVATION",
+      "id": "o4",
+      "fact": "provider_message",
+      "step": "sign_in",
+      "attrs": {
+        "kind": "auth_failure",
+        "rule": "password_rejected"
+      },
+      "evidence_ref": "artifact:sign-in-error-page"
+    },
+    {
+      "type": "OBSERVATION",
+      "id": "o5",
+      "fact": "provider_message",
+      "attrs": {
+        "kind": "other"
+      },
+      "resolves": [
+        "o1"
+      ]
+    }
+  ],
+  "invalid": [
+    {
+      "rule": "attrs carry no free text",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o1",
+        "fact": "element_expectation",
+        "step": "sign_in",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent",
+            "hidden"
+          ],
+          "final": "hidden",
+          "note": "free text"
+        },
+        "evidence_ref": "trace:step-3"
+      }
+    },
+    {
+      "rule": "evidence_ref is never a URL",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o1",
+        "fact": "element_expectation",
+        "step": "sign_in",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent",
+            "hidden"
+          ],
+          "final": "hidden"
+        },
+        "evidence_ref": "https://example.com/trace"
+      }
+    },
+    {
+      "rule": "unknown element state",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o1",
+        "fact": "element_expectation",
+        "step": "sign_in",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent",
+            "hidden"
+          ],
+          "final": "visible"
+        },
+        "evidence_ref": "trace:step-3"
+      }
+    },
+    {
+      "rule": "step is a declared id",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o1",
+        "fact": "element_expectation",
+        "step": "Sign In",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent",
+            "hidden"
+          ],
+          "final": "hidden"
+        },
+        "evidence_ref": "trace:step-3"
+      }
+    },
+    {
+      "rule": "no observer field",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o1",
+        "fact": "element_expectation",
+        "step": "sign_in",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent",
+            "hidden"
+          ],
+          "final": "hidden"
+        },
+        "evidence_ref": "trace:step-3",
+        "source": "runtime"
+      }
+    },
+    {
+      "rule": "element_expectation needs a step",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o1",
+        "fact": "element_expectation",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent",
+            "hidden"
+          ],
+          "final": "hidden"
+        },
+        "evidence_ref": "trace:step-3"
+      }
+    },
+    {
+      "rule": "runtime-only fact type",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o9",
+        "fact": "credential_submission",
+        "attrs": {
+          "attempt": "a1",
+          "account": "acct",
+          "outcome": "rejected"
+        }
+      }
+    },
+    {
+      "rule": "runtime-only fact type",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o9",
+        "fact": "rule_match",
+        "attrs": {
+          "rule": "password_rejected",
+          "kind": "auth",
+          "handle": "a1"
+        }
+      }
+    },
+    {
+      "rule": "provider text stays in an artifact",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o9",
+        "fact": "provider_message",
+        "attrs": {
+          "kind": "auth_failure",
+          "text": "Wrong password"
+        }
+      }
+    },
+    {
+      "rule": "unknown provider_message kind",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o9",
+        "fact": "provider_message",
+        "attrs": {
+          "kind": "maintenance"
+        }
+      }
+    },
+    {
+      "rule": "id charset",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o 1",
+        "fact": "element_expectation",
+        "step": "sign_in",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent",
+            "hidden"
+          ],
+          "final": "hidden"
+        },
+        "evidence_ref": "trace:step-3"
+      }
+    },
+    {
+      "rule": "budget_ms is an integer",
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o9",
+        "fact": "wait_expired",
+        "step": "sign_in",
+        "attrs": {
+          "awaited": "email_input",
+          "budget_ms": 1.5
+        }
+      }
+    },
+    {
+      "rule": "final is one of states_seen",
+      "runtime_only": true,
+      "message": {
+        "type": "OBSERVATION",
+        "id": "o1",
+        "fact": "element_expectation",
+        "step": "sign_in",
+        "attrs": {
+          "expectation": "email_input",
+          "states_seen": [
+            "absent"
+          ],
+          "final": "hidden"
+        },
+        "evidence_ref": "trace:step-3"
+      }
+    }
+  ]
+}

@@ -105,6 +105,8 @@ against Section 3.
 | State durability | The connector-side runtime emits state. The parent runtime owns durable writes and commit decisions. |
 | Recovery-hint vocabulary | The package types admit arbitrary action strings. They do not enforce the portable closed set. |
 | Protocol capabilities | The `STREAM_EVIDENCE` and `BLOB` types and the placement gate exist. The packaged collector capability profile advertises neither, although `anthropic` declares `BLOB`. |
+| `OBSERVATION` (profile 0.2.0) | Implemented in this package only. `runConnector({ protocolCapabilities: ["OBSERVATION"] })` sends the facts that shared helpers such as `waitForElementExpectation` record, and adds `DONE.error.basis`. `bin/connector-dev.ts` accepts and records them, and `bin/diagnose.ts` applies the cause rules and the recovery-hint gate. `@pdpp/connector-protocol` does not list the capability, and the parent runtime does not accept the message, so no production connector declares it yet. `connector-dev` bounds the count and size of facts per run, not their rate or the storage kept across runs. |
+| Recovery-hint gate (Section 5.11) | `connector-dev` and `diagnose` present hints through the gate. The parent runtime does not yet apply it. |
 | Terminal status | Connector-protocol types expose only `succeeded` and `failed`. |
 
 The parent runtime that spawns connectors lives outside this repository. The

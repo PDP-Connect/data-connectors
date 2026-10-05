@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
+import {
+	packageRoot as PACKAGE_ROOT,
+	repoRoot as REPO_ROOT,
+} from "./connector-paths.ts";
 import {
 	createObservationIngest,
 	createWireObservationSink,
@@ -91,6 +95,32 @@ test("the schema rejects free text, URLs, unknown states and runtime-only facts"
 			observationMessageSchema.safeParse(message).success,
 			false,
 			JSON.stringify(message),
+		);
+	}
+});
+
+test("the runtime schema agrees with the JSON schema's shared corpus", () => {
+	// schemas/observation.schema.test.mjs checks the JSON schema against the
+	// same corpus, so the spec's machine-readable half and this projection
+	// cannot drift apart.
+	const corpus = JSON.parse(
+		readFileSync(
+			join(REPO_ROOT, "schemas", "fixtures", "observation-corpus.json"),
+			"utf8",
+		),
+	) as { invalid: { message: unknown; rule: string }[]; valid: unknown[] };
+	for (const message of corpus.valid) {
+		assert.equal(
+			observationMessageSchema.safeParse(message).success,
+			true,
+			JSON.stringify(message),
+		);
+	}
+	for (const { message, rule } of corpus.invalid) {
+		assert.equal(
+			observationMessageSchema.safeParse(message).success,
+			false,
+			rule,
 		);
 	}
 });
