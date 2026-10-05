@@ -29,6 +29,10 @@
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	CollectContext,
 	EmittedMessage,
@@ -281,6 +285,47 @@ test("collectGroups: http error reports failed: true and does not throw (non-aut
 		assert.equal(outcome.considered, 0);
 		assert.equal(emitted.length, 0);
 	} finally {
+		restore();
+	}
+});
+
+test("collectGroups: http error shows plain progress and keeps the raw error in a diagnostic line", async () => {
+	const restore = stubFetch({ error: "server error" }, 500);
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const cursor = openFingerprintCursor(new Map());
+		const { emitRecord } = makeHarness();
+		const progress: EmittedMessage[] = [];
+		await collectGroups(
+			TOKEN,
+			cursor,
+			(message, extra) => {
+				progress.push({ type: "PROGRESS", message, ...extra });
+				return Promise.resolve();
+			},
+			emitRecord,
+		);
+
+		const texts = progress.map((m) => (m as { message: string }).message);
+		assert.ok(texts.includes("Fetching your GroupMe groups"), texts.join("|"));
+		assert.ok(texts.includes("Could not fetch GroupMe groups; will retry"));
+		assertUserFacingProgress(progress);
+		assert.ok(
+			lines.some(
+				(line) =>
+					line.startsWith("[groupme-diagnostic] stream_fetch_error ") &&
+					line.includes("retryable status 500"),
+			),
+			lines.join("\n"),
+		);
+		assert.ok(
+			lines.some((line) =>
+				line.startsWith('[groupme-diagnostic] list_fetch {"path":"/groups"'),
+			),
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
 		restore();
 	}
 });
