@@ -8,7 +8,17 @@ import type {
 	InteractionRequest,
 	InteractionResponse,
 } from "../connector-runtime.ts";
-import { ensureChatGptSession } from "./chatgpt.ts";
+import {
+	createWireObservationSink,
+	type ObservationMessage,
+	observationBasisOf,
+	setObservationSink,
+} from "../observation.ts";
+import {
+	CHATGPT_EMAIL_INPUT_EXPECTATION,
+	CHATGPT_SIGN_IN_STEP,
+	ensureChatGptSession,
+} from "./chatgpt.ts";
 
 /**
  * Regression coverage for the unexpected-login-UI (Cloudflare-challenge)
@@ -207,5 +217,81 @@ test("ensureChatGptSession fails only when login still has not happened after th
 
 		assert.equal(requests.length, 1);
 		assert.equal(requests[0]?.kind, "manual_action");
+	});
+});
+
+/**
+ * The 2026-10-02 incident: the email selector resolved to an input that was
+ * present but hidden. The old code counted it, called `fill`, timed out, and
+ * the run said "refresh credentials". Now the shared wait records the state
+ * at the deadline, nothing is filled, and the miss takes the unexpected-UI
+ * path whose failure cites the recorded facts.
+ */
+function makeHiddenEmailPage(fills: string[]): Page {
+	const hiddenEmail: Pick<
+		Locator,
+		"count" | "fill" | "first" | "isEnabled" | "isVisible" | "nth" | "waitFor"
+	> = {
+		count: (): Promise<number> => Promise.resolve(1),
+		fill: (value: string): Promise<void> => {
+			fills.push(value);
+			return Promise.resolve();
+		},
+		first(): Locator {
+			return hiddenEmail as Locator;
+		},
+		isEnabled: (): Promise<boolean> => Promise.resolve(true),
+		isVisible: (): Promise<boolean> => Promise.resolve(false),
+		nth(): Locator {
+			return hiddenEmail as Locator;
+		},
+		waitFor: (): Promise<void> => Promise.reject(new Error("not visible")),
+	};
+	const page = makeChallengePage(() => false);
+	const fake: Pick<Page, "locator"> = {
+		locator(selector: string): Locator {
+			return selector.includes('input[type="email"]')
+				? (hiddenEmail as Locator)
+				: page.locator(selector);
+		},
+	};
+	return Object.assign(page, fake);
+}
+
+test("a hidden email input is recorded as an expectation mismatch, never filled", async () => {
+	await withClearedStreamingEnv(async () => {
+		const fills: string[] = [];
+		const wire: ObservationMessage[] = [];
+		setObservationSink(createWireObservationSink((m) => wire.push(m)));
+		try {
+			const failure = await ensureChatGptSession({
+				context: makeContext(),
+				credentials: CHATGPT_TEST_CREDENTIALS,
+				page: makeHiddenEmailPage(fills),
+				sendInteraction: manualActionResponder([]),
+			}).then(
+				(): unknown => undefined,
+				(err: unknown): unknown => err,
+			);
+
+			assert.ok(failure instanceof Error);
+			assert.match(failure.message, /^chatgpt_login_unexpected_ui$/u);
+			assert.deepEqual(fills, [], "a hidden input must not be filled");
+			assert.deepEqual(
+				wire.map((m) => [m.id, m.fact, m.step]),
+				[
+					["o1", "element_expectation", CHATGPT_SIGN_IN_STEP],
+					["o2", "wait_expired", CHATGPT_SIGN_IN_STEP],
+				],
+			);
+			assert.deepEqual(wire[0]?.attrs, {
+				expectation: CHATGPT_EMAIL_INPUT_EXPECTATION,
+				states_seen: ["hidden"],
+				final: "hidden",
+			});
+			assert.deepEqual(observationBasisOf(failure), ["o1", "o2"]);
+		} finally {
+			setObservationSink(undefined);
+		}
 	});
 });
