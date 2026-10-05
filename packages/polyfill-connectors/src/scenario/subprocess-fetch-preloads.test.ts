@@ -20,12 +20,17 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
 	createClockObserver,
 	createTraceReplayClock,
 	REPLAY_TIME_SCALE,
 	scaleReplayDelayMs,
+	writeRecordPreload,
+	writeReplayBridgePreload,
 } from "./subprocess-fetch-preloads.ts";
 
 test("REPLAY_TIME_SCALE is 100 (the documented, printed factor)", () => {
@@ -199,4 +204,88 @@ test("createTraceReplayClock: a one-entry trace consumes that entry, then overfl
 		"first overflow: trace's last (only) value + 1",
 	);
 	assert.equal(clock.beyondTraceCount(), 1);
+});
+
+// ─── A preload's OWN bookkeeping must never read the clock it patches ─────
+//
+// The index-alignment limitation `ClockTraceExhaustedLimitation` exists to
+// disclose (see claims.ts) is only meaningful if, once a preload has
+// patched `Date.now()`/`new Date()`, the ONLY code that subsequently reads
+// through that patch is the connector's own logic (plus whatever the
+// surrounding runtime calls on the connector's behalf, which is identical
+// in record and replay by construction — see connector-runtime.ts). If a
+// preload's OWN setup code (fetch/HAR-matching bookkeeping, bridge
+// handshake, report writers) called the patched clock for its own
+// purposes, record and replay would almost certainly call it a DIFFERENT
+// number of times before the connector's first call runs (direct,
+// unisolated execution vs. bridge/isolated execution are differently
+// shaped), silently shifting every trace index — exactly the drift a past
+// investigation chased into `node_modules/tsx`'s own module-transform
+// loader (see this file's and bin/scenario-verify.ts's history for that
+// finding: tsx's loader, not this package's code, is what actually reads
+// the patched clock a different number of times under sandboxed vs.
+// unisolated execution — not fixable from inside a preload, since tsx is a
+// separate `--import` entry, not a module this preload's template can wrap).
+// This test guards the part that IS this package's responsibility: that
+// neither generated preload's OWN code is ever the source of such drift.
+//
+// A plain substring scan (not a parser) is deliberate and sufficient here:
+// the invariant under test is "this generated source contains no bare,
+// no-argument call to the live clock," which is a textual fact about the
+// template, not a behavior that needs a running subprocess to observe.
+// `new Date(someArg)` (constructing from a known value, e.g. FIXED_NOW_ISO)
+// is intentionally NOT flagged — only a bare, argument-less read of the
+// live clock is forbidden outside the one designated patch-definition
+// block (which legitimately mentions `Date.now`/`new Date` in prose
+// comments only, never as an executable bare call — stripped below).
+function assertNoBareLiveClockCalls(generatedSrc: string, label: string): void {
+	const withoutComments = generatedSrc
+		.split("\n")
+		.map((line) => line.replace(/\/\/.*$/, ""))
+		.join("\n");
+	const bareDateNowCalls = withoutComments.match(/\bDate\.now\(\)/g) ?? [];
+	const bareNewDateCalls = withoutComments.match(/\bnew Date\(\)/g) ?? [];
+	const barePerformanceNowCalls =
+		withoutComments.match(/\bperformance\.now\(\)/g) ?? [];
+	assert.deepEqual(
+		{
+			bareDateNowCalls: bareDateNowCalls.length,
+			bareNewDateCalls: bareNewDateCalls.length,
+			barePerformanceNowCalls: barePerformanceNowCalls.length,
+		},
+		{ bareDateNowCalls: 0, bareNewDateCalls: 0, barePerformanceNowCalls: 0 },
+		`${label}: a generated preload's own bookkeeping must never call the live clock directly (only through the captured real reference, or not at all)`,
+	);
+}
+
+test("writeRecordPreload: the generated preload's own code never calls Date.now()/new Date()/performance.now() directly", () => {
+	const dir = mkdtempSync(join(tmpdir(), "clock-preload-text-check-"));
+	try {
+		const preloadPath = writeRecordPreload(join(dir, "capture.json"), {
+			dir,
+		});
+		assertNoBareLiveClockCalls(
+			readFileSync(preloadPath, "utf8"),
+			"writeRecordPreload",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("writeReplayBridgePreload: the generated preload's own code never calls Date.now()/new Date()/performance.now() directly", () => {
+	const dir = mkdtempSync(join(tmpdir(), "clock-preload-text-check-"));
+	try {
+		const preloadPath = writeReplayBridgePreload("http://127.0.0.1:1/", {
+			workspace: { dir },
+			fixedNowIso: "2026-01-01T00:00:00.000Z",
+			clockTrace: [1, 2, 3],
+		});
+		assertNoBareLiveClockCalls(
+			readFileSync(preloadPath, "utf8"),
+			"writeReplayBridgePreload",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });

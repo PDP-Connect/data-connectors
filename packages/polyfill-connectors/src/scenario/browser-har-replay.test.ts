@@ -23,20 +23,38 @@
  * docs/reference/testing-policy.md's "choose the smallest sufficient
  * oracle" table (pure rule/parser/projection -> deterministic direct test).
  * `writeBrowserHarReplayPreload` (the NODE_OPTIONS preload generator) is
- * NOT unit-tested here — its generated source only runs inside a spawned
- * subprocess with a real patchright browser, which is exactly the kind of
- * expensive, hard-to-isolate integration surface this package's OTHER
- * browser-driven connectors (src/browser-launch.test.ts) also do not
+ * NOT otherwise unit-tested here — its generated source only runs inside a
+ * spawned subprocess with a real patchright browser, which is exactly the
+ * kind of expensive, hard-to-isolate integration surface this package's
+ * OTHER browser-driven connectors (src/browser-launch.test.ts) also do not
  * exercise with a real Chromium launch at this test tier; asserting that
  * the generated module STRING contains the expected patchright-patching/
- * routeFromHAR/setStorageState/clock-install shape would be a change-
+ * routeFromHAR/setStorageState/clock-install SHAPE would be a change-
  * detector on the template literal's exact text, not a test of observable
  * behavior — see this file's module doc for why the meaningful boundary
  * (evidence resolution) is what's covered instead.
+ *
+ * ONE exception, below ("the generated preload's own code never calls Date
+ * .now()/..."): that is not a shape check, it is a negative SAFETY
+ * invariant — this preload's own setup code must never read the live clock
+ * it patches, the same invariant subprocess-fetch-preloads.test.ts asserts
+ * for `writeRecordPreload`/`writeReplayBridgePreload` (see that file's
+ * comment for the full "why" — a past investigation into clock-trace index
+ * drift chased this exact question before finding the real cause lived in
+ * `node_modules/tsx`'s own loader, outside any of this package's code). A
+ * plain substring scan is the right tool for a textual fact about a
+ * template, and is cheap insurance against a future edit accidentally
+ * reintroducing it here.
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -46,6 +64,7 @@ import {
 	buildApiResponseFromHarEntry,
 	findApiRequestHarMatch,
 	resolveBrowserEvidence,
+	writeBrowserHarReplayPreload,
 } from "./browser-har-replay.ts";
 import type { ScenarioRun } from "./format.ts";
 
@@ -433,4 +452,60 @@ test("buildApiResponseFromHarEntry: base64-encoded HAR content decodes before te
 	const response = buildApiResponseFromHarEntry(entry);
 	assert.equal(await response.text(), '{"ok":true}');
 	assert.deepEqual(await response.json(), { ok: true });
+});
+
+// See this file's module doc comment ("ONE exception") for why this one
+// test is a deliberate exception to "not a change-detector on the
+// template literal's exact text" — it checks a negative safety invariant,
+// not shape. Kept in lockstep with the identically-named/identically-
+// reasoned test in subprocess-fetch-preloads.test.ts for the other two
+// preload generators.
+test("writeBrowserHarReplayPreload: the generated preload's own code never calls Date.now()/new Date()/performance.now() directly", () => {
+	withTmpDir((dir) => {
+		const harPath = join(dir, "run.har");
+		writeHar(harPath, 1);
+		const storageStatePath = join(dir, "state.json");
+		writeFileSync(storageStatePath, "{}");
+		// writeBrowserHarReplayPreload writes into this package's own tracked
+		// (not gitignored) tmp/ scratch dir — see its doc comment on why
+		// (needs real package-tree module resolution, unlike the 0700 mkdtemp
+		// evidence workspace the other two preloads use). Must be removed
+		// explicitly, or it is left behind as an untracked file this check's
+		// own biome pass then flags.
+		const preloadPath = writeBrowserHarReplayPreload(
+			{
+				fixedNowIso: "2026-01-01T00:00:00.000Z",
+				harEntryCount: 1,
+				harPath,
+				storageStatePath,
+			},
+			{ clockTrace: [1, 2, 3] },
+		);
+		try {
+			const generatedSrc = readFileSync(preloadPath, "utf8");
+			const withoutComments = generatedSrc
+				.split("\n")
+				.map((line) => line.replace(/\/\/.*$/, ""))
+				.join("\n");
+			assert.deepEqual(
+				{
+					bareDateNowCalls: (withoutComments.match(/\bDate\.now\(\)/g) ?? [])
+						.length,
+					bareNewDateCalls: (withoutComments.match(/\bnew Date\(\)/g) ?? [])
+						.length,
+					barePerformanceNowCalls: (
+						withoutComments.match(/\bperformance\.now\(\)/g) ?? []
+					).length,
+				},
+				{
+					bareDateNowCalls: 0,
+					bareNewDateCalls: 0,
+					barePerformanceNowCalls: 0,
+				},
+				"writeBrowserHarReplayPreload: a generated preload's own bookkeeping must never call the live clock directly",
+			);
+		} finally {
+			rmSync(preloadPath, { force: true });
+		}
+	});
 });
