@@ -1140,6 +1140,42 @@ test("github_browser: an incomplete stream is an omitted error", {
 	]);
 });
 
+test("oura_browser: a failed daily-data window reports the stream instead of Complete", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c, resolveFixture } = await import(
+		"./fixtures/oura_browser.mjs"
+	);
+	const built = await buildPageshim({
+		connector: "oura_browser",
+		outfile: join(out, "oura_browser-failed-window.js"),
+	});
+	const resolve = (raw) =>
+		new URL(raw).pathname === "/api/account/daily-data"
+			? {
+					status: 500,
+					contentType: "application/json",
+					body: JSON.stringify({ error: "fixture unavailable" }),
+				}
+			: resolveFixture(raw);
+	const r = await runHarness({
+		bundle: built.outfile,
+		fixtures: { ...c.fixtures, resolve },
+		scopes: c.scopes,
+	});
+	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+	assert.match(r.data.status, /^Partial:/);
+	assert.deepEqual(
+		r.result.errors.map((e) => [e.scope, e.disposition]),
+		[
+			["oura.sleep", "omitted"],
+			["oura.readiness", "omitted"],
+			["oura.activity", "omitted"],
+		],
+	);
+	for (const e of r.result.errors) assert.match(e.reason, /^Oura \w+ failed \d+ data window/);
+});
+
 test("harness rejects a page member the host does not offer", {
 	timeout: 60_000,
 }, async () => {

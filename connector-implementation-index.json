@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.26",
+				"version": "0.2.27",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -2311,7 +2311,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.26",
+				"version": "0.2.27",
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -6257,7 +6257,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.2.18",
+				"version": "0.2.19",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -12614,7 +12614,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.20",
+				"version": "0.1.21",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -16578,7 +16578,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.14",
+				"version": "0.1.15",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
