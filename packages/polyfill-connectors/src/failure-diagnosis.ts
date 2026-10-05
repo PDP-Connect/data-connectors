@@ -70,6 +70,8 @@ export interface CauseFinding {
 	/** `runtime` when any basis fact is a runtime record; otherwise the cause
 	 *  is the connector's account and unlocks nothing. */
 	attribution: Exclude<Attribution, "none">;
+	/** The cause's basis: ids of the in-scope facts that meet the category's
+	 *  predicate. Not `DONE.error.basis`, which is the connector's claim. */
 	basis: string[];
 	category: KnownCategory;
 	step?: string;
@@ -540,14 +542,16 @@ export function diagnoseRun(input: DiagnosisInput): Diagnosis {
 	const live = facts.filter((fact) => !retired.has(keyOf(fact)));
 	const terminal = terminalEventOf(live, input);
 	const actionEligible = actionEligibleFacts(live, terminal);
-	const cited = new Set(input.done.error?.basis ?? []);
+	// DONE.error.basis (the connector's claim), not the cause's basis.
+	const citedByDoneError = new Set(input.done.error?.basis ?? []);
 	const inScope =
 		terminal === undefined
 			? []
 			: [
 					...actionEligible,
 					...live.filter(
-						(fact) => fact.source === "connector" && cited.has(fact.id),
+						(fact) =>
+							fact.source === "connector" && citedByDoneError.has(fact.id),
 					),
 				];
 	const inScopeKeys = new Set(inScope.map(keyOf));
@@ -638,13 +642,13 @@ function renderCause(diagnosis: Diagnosis): string[] {
 	} else {
 		lines.push(
 			`    ${describeFinding({ attribution: cause.attribution, basis: cause.basis, category: cause.category })}`,
-			`    basis: ${cause.basis.join(", ")}`,
+			`    cause basis: ${cause.basis.join(", ")}`,
 		);
 	}
 	lines.push(
 		diagnosis.contributing.length === 0
 			? "  contributing: none"
-			: `  contributing: ${diagnosis.contributing.map((c) => `${c.category} (${c.attribution}; basis ${c.basis.join(", ")})`).join("; ")}`,
+			: `  contributing: ${diagnosis.contributing.map((c) => `${c.category} (${c.attribution}; cause basis ${c.basis.join(", ")})`).join("; ")}`,
 	);
 	return lines;
 }

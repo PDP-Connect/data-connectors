@@ -767,7 +767,7 @@ function renderObservation(outcome: ObservationIngestOutcome): void {
 		return;
 	}
 	printLine(
-		`  WARN     OBSERVATION discarded: ${outcome.discarded === "truncated" ? "per-run limit reached; the run record is truncated" : `protocol violation (${outcome.discarded})`}`,
+		`  WARN     OBSERVATION discarded: ${outcome.discarded === "count_exceeded" ? "per-run limit reached (count_exceeded); the run record is truncated" : `protocol violation (${outcome.discarded})`}`,
 	);
 }
 

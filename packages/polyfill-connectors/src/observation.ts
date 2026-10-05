@@ -73,12 +73,14 @@ export const CONNECTOR_DEFECT_CLASSES = [
 	"protocol_violation",
 	"hint_unsupported",
 ] as const;
+/** Closed set: no connector string ever reaches a runtime record. */
 export const PROTOCOL_VIOLATION_REASONS = [
-	"capability_not_declared",
-	"invalid_observation",
-	"runtime_only_fact",
+	"undeclared_capability",
+	"runtime_fact_type",
+	"invalid",
 	"duplicate_id",
 	"oversize",
+	"count_exceeded",
 ] as const;
 export type ProtocolViolationReason =
 	(typeof PROTOCOL_VIOLATION_REASONS)[number];
@@ -421,7 +423,7 @@ export interface ObservationIngestSnapshot {
 /** What happened to one `OBSERVATION` line. */
 export type ObservationIngestOutcome =
 	| { accepted: ConnectorRunRecordFact }
-	| { discarded: ProtocolViolationReason | "truncated" };
+	| { discarded: ProtocolViolationReason };
 
 export interface ObservationIngest {
 	/** One parsed standard-output object whose `type` is `OBSERVATION`. */
@@ -440,6 +442,10 @@ function isRuntimeOnlyFact(raw: unknown): boolean {
 /**
  * Runtime-side handling of a connector's `OBSERVATION` lines. Provenance
  * comes from the transport: every accepted fact is `source: "connector"`.
+ * Nothing here creates a `credential_submission` or `rule_match` record:
+ * those come only from a runtime's own submission and its own observation
+ * of the response (Section 5.10.2), never from connector output. A fact
+ * naming an undeclared id is accepted; it simply supports nothing.
  * Violations are discarded and aggregated into one `connector_defect` record
  * per reason, so a flood cannot crowd out the runtime's own records.
  */
@@ -460,17 +466,17 @@ export function createObservationIngest(options: {
 		lineBytes: number,
 	): ProtocolViolationReason | ObservationMessage => {
 		if (!options.declared) {
-			return "capability_not_declared";
+			return "undeclared_capability";
 		}
 		if (lineBytes > OBSERVATION_LIMITS.maxLineBytes) {
 			return "oversize";
 		}
 		if (isRuntimeOnlyFact(raw)) {
-			return "runtime_only_fact";
+			return "runtime_fact_type";
 		}
 		const parsed = observationMessageSchema.safeParse(raw);
 		if (!parsed.success) {
-			return "invalid_observation";
+			return "invalid";
 		}
 		if (seenIds.has(parsed.data.id)) {
 			return "duplicate_id";
@@ -482,7 +488,8 @@ export function createObservationIngest(options: {
 		accept(raw, lineBytes): ObservationIngestOutcome {
 			if (facts.length >= OBSERVATION_LIMITS.maxPerRun) {
 				truncated = true;
-				return { discarded: "truncated" };
+				violate("count_exceeded");
+				return { discarded: "count_exceeded" };
 			}
 			const result = classify(raw, lineBytes);
 			if (typeof result === "string") {

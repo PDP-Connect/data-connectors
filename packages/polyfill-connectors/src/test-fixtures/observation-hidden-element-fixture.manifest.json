@@ -3,7 +3,23 @@
 	"connector_key": "observation-hidden-element-fixture",
 	"protocol_capabilities": ["OBSERVATION"],
 	"diagnostic_descriptors": {
-		"steps": [{ "id": "sign_in" }],
-		"expectations": [{ "id": "email_input", "step": "sign_in" }]
+		"steps": [
+			{
+				"id": "sign_in"
+			}
+		],
+		"expectations": [
+			{
+				"id": "email_input",
+				"step": "sign_in"
+			}
+		],
+		"rules": [
+			{
+				"id": "password_rejected",
+				"kind": "auth",
+				"step": "sign_in"
+			}
+		]
 	}
 }

@@ -1005,7 +1005,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		retryable = false,
 		records_emitted = observedCounters?.totalEmitted ?? 0,
 		code?: string,
-		basis: readonly string[] = [],
+		errorBasis: readonly string[] = [],
 	): void => {
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
@@ -1017,11 +1017,12 @@ export function runConnector(config: RunConnectorConfig): void {
 			code,
 			normalizeTerminalError,
 		});
-		// `basis` cites the OBSERVATION ids the failure rests on (Section 5.8).
-		// It is a connector claim; the runtime decides scope on its own records.
+		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
+		// (Section 5.8). It is a connector claim, distinct from a diagnosis
+		// cause's basis; the runtime decides scope on its own records.
 		const terminalError =
-			observationsDeclared && basis.length > 0
-				? { ...normalized, basis }
+			observationsDeclared && errorBasis.length > 0
+				? { ...normalized, basis: errorBasis }
 				: normalized;
 		// Fire-and-forget. emit() resolves after stdout drains; we're about to
 		// exit(1) anyway, so we don't need to block. If it rejects (the write
@@ -1267,9 +1268,9 @@ export function runConnector(config: RunConnectorConfig): void {
 	// the runtime threw deliberately with an explicit retryable bit) from
 	// unexpected throws (where we pattern-match the message).
 	run().catch((err: unknown) => {
-		const basis = observationBasisOf(err);
+		const errorBasis = observationBasisOf(err);
 		if (err instanceof TerminalError) {
-			emitFailed(err.message, err.retryable, undefined, err.code, basis);
+			emitFailed(err.message, err.retryable, undefined, err.code, errorBasis);
 			return;
 		}
 		const message = describeUnexpectedFailure(err);
@@ -1278,7 +1279,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			retryablePattern.test(message),
 			undefined,
 			undefined,
-			basis,
+			errorBasis,
 		);
 	});
 

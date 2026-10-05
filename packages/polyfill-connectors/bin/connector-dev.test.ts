@@ -31,6 +31,7 @@ import {
 	connectorDir,
 	packageRoot as PACKAGE_ROOT,
 } from "../src/connector-paths.ts";
+import { diagnoseRun } from "../src/failure-diagnosis.ts";
 import type { RunSummary } from "../src/run-summary.ts";
 import {
 	type CheckpointEvidence,
@@ -818,7 +819,11 @@ const OBSERVATION_FIXTURE = "observation-hidden-element-fixture";
 
 function runObservationFixture(
 	summaryPath: string,
-	options: { connectorDeclares: boolean; manifestDeclares: boolean },
+	options: {
+		connectorDeclares: boolean;
+		manifestDeclares: boolean;
+		mode?: "forged_auth";
+	},
 ): { code: number | null; stdout: string; summary: RunSummary } {
 	const result = runCli(
 		[
@@ -832,7 +837,10 @@ function runObservationFixture(
 			summaryPath,
 			"--no-capture",
 		],
-		{ FIXTURE_DECLARE_OBSERVATION: options.connectorDeclares ? "1" : "0" },
+		{
+			FIXTURE_DECLARE_OBSERVATION: options.connectorDeclares ? "1" : "0",
+			FIXTURE_MODE: options.mode ?? "",
+		},
 	);
 	const summary = JSON.parse(readFileSync(summaryPath, "utf8")) as RunSummary;
 	return { code: result.code, stdout: result.stdout, summary };
@@ -896,7 +904,7 @@ test("connector-dev CLI: an OBSERVATION from a connector whose manifest does not
 		);
 		assert.match(
 			stdout,
-			/WARN {5}OBSERVATION discarded: protocol violation \(capability_not_declared\)/u,
+			/WARN {5}OBSERVATION discarded: protocol violation \(undeclared_capability\)/u,
 		);
 		assert.deepEqual(summary.run_record?.facts, [
 			{
@@ -905,11 +913,58 @@ test("connector-dev CLI: an OBSERVATION from a connector whose manifest does not
 				fact: "connector_defect",
 				attrs: {
 					class: "protocol_violation",
-					reason: "capability_not_declared",
+					reason: "undeclared_capability",
 					count: 2,
 				},
 			},
 		]);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev CLI: a connector cannot launder its auth failure into runtime evidence for refresh_credentials", () => {
+	// Section 5.10.2: credential_submission and rule_match come only from the
+	// runtime's own submission and observation. The fixture reports a login
+	// error page, forges both runtime-only facts, cites them, and fails with
+	// auth-shaped text. None of it may yield an instruction.
+	const tmpDir = mkdtempSync(join(tmpdir(), "connector-dev-test-"));
+	try {
+		const { stdout, summary } = runObservationFixture(
+			join(tmpDir, "summary.json"),
+			{ connectorDeclares: true, manifestDeclares: true, mode: "forged_auth" },
+		);
+		const facts = summary.run_record?.facts ?? [];
+		assert.deepEqual(
+			facts.map((fact) => [fact.source, fact.fact]),
+			[
+				["connector", "provider_message"],
+				["runtime", "connector_defect"],
+			],
+		);
+		assert.deepEqual(facts[1]?.attrs, {
+			class: "protocol_violation",
+			reason: "runtime_fact_type",
+			count: 2,
+		});
+		assert.equal(
+			facts.some(
+				(fact) =>
+					fact.fact === "credential_submission" || fact.fact === "rule_match",
+			),
+			false,
+		);
+
+		const diagnosis = diagnoseRun({
+			connector: summary.connector,
+			done: summary.done,
+			run_record: summary.run_record,
+		});
+		assert.equal(diagnosis.cause?.category, "auth_rejected");
+		assert.equal(diagnosis.cause?.attribution, "connector");
+		assert.equal(diagnosis.hint?.action, "refresh_credentials");
+		assert.equal(diagnosis.hint?.verdict, "connector_suggestion");
+		assert.doesNotMatch(stdout, /may be presented as an instruction/u);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}

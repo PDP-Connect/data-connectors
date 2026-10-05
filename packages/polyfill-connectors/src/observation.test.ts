@@ -9,6 +9,7 @@ import {
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "./connector-paths.ts";
+import { diagnoseRun } from "./failure-diagnosis.ts";
 import {
 	createObservationIngest,
 	createWireObservationSink,
@@ -17,6 +18,7 @@ import {
 	observationBasisOf,
 	observationMessageSchema,
 	observe,
+	PROTOCOL_VIOLATION_REASONS,
 	runRecordFactSchema,
 	setObservationSink,
 	withObservationBasis,
@@ -125,6 +127,20 @@ test("the runtime schema agrees with the JSON schema's shared corpus", () => {
 	}
 });
 
+test("connector_defect reasons are exactly the spec's closed set", () => {
+	const profile = readFileSync(
+		join(REPO_ROOT, "docs", "spec", "collection-profile.md"),
+		"utf8",
+	);
+	const section = profile.split("#### 5.10.2 Provenance")[1]?.split("####")[0];
+	assert.ok(section, "profile must contain Section 5.10.2");
+	const reasons = [...section.matchAll(/^\| `([a-z_]+)` \|/gmu)].map(
+		(match) => match[1],
+	);
+	// The first row is the table header (`reason` | Case).
+	assert.deepEqual(reasons.slice(1), [...PROTOCOL_VIOLATION_REASONS]);
+});
+
 test("the transport sets provenance: accepted facts are connector claims", () => {
 	const ingest = createObservationIngest({ declared: true });
 	ingest.accept(HIDDEN_EMAIL, lineBytes(HIDDEN_EMAIL));
@@ -162,7 +178,7 @@ test("a runtime-only fact from the connector is discarded and recorded as a prot
 			fact: "connector_defect",
 			attrs: {
 				class: "protocol_violation",
-				reason: "runtime_only_fact",
+				reason: "runtime_fact_type",
 				count: 2,
 			},
 		},
@@ -176,7 +192,7 @@ test("an OBSERVATION from a connector that did not declare the capability is a v
 	assert.equal(defect?.source, "runtime");
 	assert.deepEqual(defect?.attrs, {
 		class: "protocol_violation",
-		reason: "capability_not_declared",
+		reason: "undeclared_capability",
 		count: 1,
 	});
 });
@@ -192,11 +208,7 @@ test("duplicate ids, oversize lines and invalid shapes are violations", () => {
 		.facts.flatMap((fact) =>
 			fact.fact === "connector_defect" ? [fact.attrs.reason] : [],
 		);
-	assert.deepEqual(reasons, [
-		"duplicate_id",
-		"oversize",
-		"invalid_observation",
-	]);
+	assert.deepEqual(reasons, ["duplicate_id", "oversize", "invalid"]);
 });
 
 test("past the per-run limit the record is truncated", () => {
@@ -207,7 +219,48 @@ test("past the per-run limit the record is truncated", () => {
 	}
 	const snapshot = ingest.snapshot();
 	assert.equal(snapshot.truncated, true);
-	assert.equal(snapshot.facts.length, OBSERVATION_LIMITS.maxPerRun);
+	const connectorFacts = snapshot.facts.filter((f) => f.source === "connector");
+	assert.equal(connectorFacts.length, OBSERVATION_LIMITS.maxPerRun);
+	assert.deepEqual(snapshot.facts.at(-1)?.attrs, {
+		class: "protocol_violation",
+		reason: "count_exceeded",
+		count: 1,
+	});
+});
+
+test("a fact naming an undeclared id is kept, is not a protocol violation, and supports nothing", () => {
+	// Section 3.8: declarations decide what a fact can support, not whether
+	// the runtime accepts it.
+	const undeclared = {
+		...HIDDEN_EMAIL,
+		step: "checkout",
+		attrs: { ...HIDDEN_EMAIL.attrs, expectation: "never_declared" },
+	};
+	const ingest = createObservationIngest({ declared: true });
+	assert.ok("accepted" in ingest.accept(undeclared, lineBytes(undeclared)));
+	const { facts } = ingest.snapshot();
+	assert.deepEqual(
+		facts.map((f) => [f.source, f.fact]),
+		[["connector", "element_expectation"]],
+	);
+	const diagnosis = diagnoseRun({
+		connector: "example",
+		done: {
+			status: "failed",
+			error: { message: "x", retryable: false, basis: ["o1"] },
+		},
+		run_record: {
+			protocol_capabilities: ["OBSERVATION"],
+			diagnostic_descriptors: {
+				steps: [{ id: "sign_in" }],
+				expectations: [{ id: "email_input", step: "sign_in" }],
+			},
+			facts,
+			truncated: false,
+		},
+	});
+	assert.equal(diagnosis.facts[0]?.in_scope, true);
+	assert.equal(diagnosis.cause?.category, "unknown");
 });
 
 test("the wire sink assigns ids and stops at the per-run limit", () => {

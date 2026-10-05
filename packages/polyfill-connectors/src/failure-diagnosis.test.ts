@@ -195,7 +195,7 @@ test("a protocol violation stays visible and the cause comes from the remaining 
 		fact: "connector_defect",
 		attrs: {
 			class: "protocol_violation",
-			reason: "runtime_only_fact",
+			reason: "runtime_fact_type",
 			count: 1,
 		},
 	};

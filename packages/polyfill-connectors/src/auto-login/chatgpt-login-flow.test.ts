@@ -261,14 +261,19 @@ function makeHiddenEmailPage(fills: string[]): Page {
 test("a hidden email input is recorded as an expectation mismatch, never filled", async () => {
 	await withClearedStreamingEnv(async () => {
 		const fills: string[] = [];
+		let credentialSubmits = 0;
+		const requests: InteractionRequest[] = [];
 		const wire: ObservationMessage[] = [];
 		setObservationSink(createWireObservationSink((m) => wire.push(m)));
 		try {
 			const failure = await ensureChatGptSession({
 				context: makeContext(),
 				credentials: CHATGPT_TEST_CREDENTIALS,
+				onCredentialSubmit: () => {
+					credentialSubmits += 1;
+				},
 				page: makeHiddenEmailPage(fills),
-				sendInteraction: manualActionResponder([]),
+				sendInteraction: manualActionResponder(requests),
 			}).then(
 				(): unknown => undefined,
 				(err: unknown): unknown => err,
@@ -277,6 +282,13 @@ test("a hidden email input is recorded as an expectation mismatch, never filled"
 			assert.ok(failure instanceof Error);
 			assert.match(failure.message, /^chatgpt_login_unexpected_ui$/u);
 			assert.deepEqual(fills, [], "a hidden input must not be filled");
+			// The fallback is owner sign-in in the browser; the stored password
+			// is never submitted, automatically or otherwise.
+			assert.equal(credentialSubmits, 0);
+			assert.deepEqual(
+				requests.map((r) => r.kind),
+				["manual_action"],
+			);
 			assert.deepEqual(
 				wire.map((m) => [m.id, m.fact, m.step]),
 				[
