@@ -41,6 +41,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { isDeepStrictEqual } from "node:util";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -150,7 +151,7 @@ const FIELD_LIST = "none|[a-z_]+(?:,[a-z_]+)*";
 /** A coverage line's whole shape: fixed tokens, field names, counts and dates, and nothing else. */
 const COVERAGE_LINE_RE = new RegExp(
 	`^${[
-		"Fitbit phase=coverage stream=(?<stream>activities|daily_summaries|sleep)",
+		"coverage stream=(?<stream>activities|daily_summaries|sleep)",
 		"status=(?<status>complete|partial|empty)",
 		"reason=(?<reason>[a-z_]+)",
 		String.raw`delivered=(?<delivered>\d+)`,
@@ -331,11 +332,11 @@ const SLEEP_WITHOUT_SCORES: readonly Message[] = (
 /** The canonical export's coverage lines, in full. */
 const CANONICAL_COVERAGE: Readonly<Record<string, string>> = {
 	activities:
-		"Fitbit phase=coverage stream=activities status=complete reason=covered_in_full delivered=4 fields_unavailable=none fields_unreadable=none window_requested_from=none window_requested_to=none window_covered_from=2026-03-13 window_covered_to=2026-03-17",
+		"coverage stream=activities status=complete reason=covered_in_full delivered=4 fields_unavailable=none fields_unreadable=none window_requested_from=none window_requested_to=none window_covered_from=2026-03-13 window_covered_to=2026-03-17",
 	daily_summaries:
-		"Fitbit phase=coverage stream=daily_summaries status=complete reason=covered_in_full delivered=4 fields_unavailable=none fields_unreadable=none window_requested_from=none window_requested_to=none window_covered_from=2026-04-03 window_covered_to=2026-04-06",
+		"coverage stream=daily_summaries status=complete reason=covered_in_full delivered=4 fields_unavailable=none fields_unreadable=none window_requested_from=none window_requested_to=none window_covered_from=2026-04-03 window_covered_to=2026-04-06",
 	sleep:
-		"Fitbit phase=coverage stream=sleep status=complete reason=covered_in_full delivered=3 fields_unavailable=none fields_unreadable=none window_requested_from=none window_requested_to=none window_covered_from=2026-03-14 window_covered_to=2026-03-15",
+		"coverage stream=sleep status=complete reason=covered_in_full delivered=3 fields_unavailable=none fields_unreadable=none window_requested_from=none window_requested_to=none window_covered_from=2026-03-14 window_covered_to=2026-03-15",
 };
 
 after(() => {
@@ -385,7 +386,7 @@ interface RunOptions {
 	readonly env?: Readonly<Record<string, string>>;
 }
 
-/** A `phase=coverage` PROGRESS line, read back. `none` reads as null or []. */
+/** A `coverage` diagnostic, read back as `coverage key=value ...`. `none` reads as null or []. */
 interface CoverageLine {
 	readonly text: string;
 	readonly count: unknown;
@@ -401,17 +402,18 @@ interface CoverageLine {
 	readonly window_covered_to: string | null;
 }
 
-function parseCoverage(message: Message): CoverageLine {
-	const text = String(message.message);
+function parseCoverage(line: Message, count: unknown): CoverageLine {
+	const text = `coverage ${Object.entries(line)
+		.map(([name, value]) => `${name}=${String(value)}`)
+		.join(" ")}`;
 	const groups = COVERAGE_LINE_RE.exec(text)?.groups;
 	assert.ok(groups, `a coverage line in the expected shape: ${text}`);
-	assert.equal(groups.stream, message.stream, "the line is its stream's");
 	const list = (value = ""): string[] =>
 		value === "none" ? [] : value.split(",");
 	const date = (value = ""): string | null => (value === "none" ? null : value);
 	return {
 		text,
-		count: message.count,
+		count,
 		stream: groups.stream ?? "",
 		status: groups.status ?? "",
 		reason: groups.reason ?? "",
@@ -447,11 +449,31 @@ class Outcome {
 		return this.ofType("RECORD", stream).map((m) => m.data as Message);
 	}
 
-	/** Every `phase=coverage` PROGRESS line, parsed, whatever its stream. */
+	/** Every `[fitbit-diagnostic] <event>` line's fields, in order. */
+	diagnostics(event: string): Message[] {
+		const head = `[fitbit-diagnostic] ${event} `;
+		return this.stderr
+			.split("\n")
+			.filter((line) => line.startsWith(head))
+			.map((line) => JSON.parse(line.slice(head.length)) as Message);
+	}
+
+	/**
+	 * Every `coverage` diagnostic, parsed, whatever its stream, with the
+	 * `count` of the stream's one PROGRESS line that carries a count.
+	 */
 	coverageLines(): CoverageLine[] {
-		return this.ofType("PROGRESS")
-			.filter((m) => String(m.message).startsWith("Fitbit phase=coverage "))
-			.map(parseCoverage);
+		return this.diagnostics("coverage").map((line) => {
+			const counted = this.ofType("PROGRESS", String(line.stream)).filter(
+				(m) => m.count !== undefined,
+			);
+			assert.equal(
+				counted.length,
+				1,
+				`one counted PROGRESS for ${line.stream}`,
+			);
+			return parseCoverage(line, counted[0]?.count);
+		});
 	}
 
 	/** The stream's one coverage line. */
@@ -476,20 +498,17 @@ class Outcome {
 		return skips[0]?.diagnostics as Message;
 	}
 
-	/** The counters of the stream's `phase=done` PROGRESS line. */
+	/** The counters of the stream's `done` diagnostic. */
 	progressDone(stream: string): Readonly<Record<string, number>> {
-		return this.counters(stream, `Fitbit phase=done stream=${stream} `);
+		return this.counters("done", { stream });
 	}
 
-	/** The counters of one family's `phase=family` PROGRESS line. */
+	/** The counters of one family's `family` diagnostic. */
 	progressFamily(
 		stream: string,
 		family: string,
 	): Readonly<Record<string, number>> {
-		return this.counters(
-			stream,
-			`Fitbit phase=family stream=${stream} family=${family} `,
-		);
+		return this.counters("family", { stream, family });
 	}
 
 	/** Every RECORD's stream and data, without `emitted_at`, and every coverage line with its count. */
@@ -505,17 +524,22 @@ class Outcome {
 	}
 
 	private counters(
-		stream: string,
-		head: string,
+		event: string,
+		keys: Readonly<Record<string, string>>,
 	): Readonly<Record<string, number>> {
-		const lines = this.ofType("PROGRESS", stream)
-			.map((m) => String(m.message))
-			.filter((text) => text.startsWith(head));
-		assert.equal(lines.length, 1, `exactly one line starting ${head}`);
+		const lines = this.diagnostics(event).filter((line) =>
+			Object.entries(keys).every(([name, value]) => line[name] === value),
+		);
+		assert.equal(
+			lines.length,
+			1,
+			`exactly one ${event} diagnostic for ${JSON.stringify(keys)}`,
+		);
 		const counters: Record<string, number> = {};
-		for (const pair of (lines[0] ?? "").slice(head.length).split(" ")) {
-			const [name = "", value = ""] = pair.split("=");
-			counters[name] = Number(value);
+		for (const [name, value] of Object.entries(lines[0] ?? {})) {
+			if (!(name in keys)) {
+				counters[name] = Number(value);
+			}
 		}
 		return counters;
 	}
@@ -572,6 +596,7 @@ function checkInvariants(
 	assert.equal(done?.type, "DONE");
 	assert.equal(done?.status, "succeeded");
 	assert.deepEqual(outcome.ofType("STATE"), [], "no STATE, ever");
+	assertUserFacingProgress(outcome.messages);
 	const requested = options.streams ?? DATA_STREAMS;
 	const lines = outcome.coverageLines();
 	for (const stream of DATA_STREAMS) {
@@ -635,8 +660,8 @@ function checkInvariants(
 		for (const stream of DATA_STREAMS) {
 			// Only a stream that was read has counters; a failed upload is not read.
 			const read = outcome
-				.ofType("PROGRESS", stream)
-				.some((m) => String(m.message).startsWith("Fitbit phase=read "));
+				.diagnostics("read")
+				.some((line) => line.stream === stream);
 			if (read) {
 				assert.equal(
 					outcome.progressDone(stream).outside_window,
@@ -726,6 +751,17 @@ test("#1 the canonical export delivers every stream exactly, covered in full", a
 		assert.equal(coverage.count, expected.length, stream);
 		assert.deepEqual(outcome.skips(stream), [], stream);
 	}
+	assert.deepEqual(
+		outcome.ofType("PROGRESS").map((m) => m.message),
+		[
+			"Reading Fitbit activities.",
+			"Fitbit activities: 4 imported.",
+			"Reading Fitbit daily summaries.",
+			"Fitbit daily summaries: 4 imported.",
+			"Reading Fitbit sleep logs.",
+			"Fitbit sleep logs: 3 imported.",
+		],
+	);
 	assert.equal(outcome.progressDone("daily_summaries").zero_only, 4);
 	assert.equal(outcome.progressDone("daily_summaries").duplicates, 1);
 	assert.equal(
@@ -795,7 +831,7 @@ test("#5 a missing import folder is awaiting an upload, with a coverage line per
 	assertAllFailed(windowed, "awaiting_upload");
 	assert.equal(
 		windowed.coverage("sleep").text,
-		"Fitbit phase=coverage stream=sleep status=empty reason=awaiting_upload delivered=0 fields_unavailable=none fields_unreadable=none window_requested_from=2026-03-01 window_requested_to=2026-04-01 window_covered_from=none window_covered_to=none",
+		"coverage stream=sleep status=empty reason=awaiting_upload delivered=0 fields_unavailable=none fields_unreadable=none window_requested_from=2026-03-01 window_requested_to=2026-04-01 window_covered_from=none window_covered_to=none",
 	);
 	assert.equal(windowed.coverage("activities").window_requested_from, null);
 });
@@ -1505,7 +1541,7 @@ test("#18 a window is applied to the exercise's UTC start and stated as dates", 
 	);
 	assert.equal(
 		outcome.coverage("activities").text,
-		"Fitbit phase=coverage stream=activities status=complete reason=covered_in_full delivered=1 fields_unavailable=none fields_unreadable=none window_requested_from=2026-03-16 window_requested_to=2026-03-17 window_covered_from=2026-03-16 window_covered_to=2026-03-16",
+		"coverage stream=activities status=complete reason=covered_in_full delivered=1 fields_unavailable=none fields_unreadable=none window_requested_from=2026-03-16 window_requested_to=2026-03-17 window_covered_from=2026-03-16 window_covered_to=2026-03-16",
 	);
 	assert.equal(outcome.progressDone("activities").outside_window, 3);
 	// A stream without a window states none.
@@ -2434,7 +2470,7 @@ test("#38 a requested bound that names no real date is stated as unparsed, never
 	assert.equal(outcome.progressDone("activities").outside_window, 4);
 	assert.equal(
 		outcome.coverage("activities").text,
-		"Fitbit phase=coverage stream=activities status=empty reason=nothing_in_range delivered=0 fields_unavailable=none fields_unreadable=none window_requested_from=unparsed window_requested_to=none window_covered_from=none window_covered_to=none",
+		"coverage stream=activities status=empty reason=nothing_in_range delivered=0 fields_unavailable=none fields_unreadable=none window_requested_from=unparsed window_requested_to=none window_covered_from=none window_covered_to=none",
 	);
 	assert.equal(outcome.records("sleep").length, 3);
 	const sleep = outcome.coverage("sleep");

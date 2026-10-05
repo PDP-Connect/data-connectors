@@ -20,6 +20,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, test } from "node:test";
 import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import {
 	type CollectContext,
 	type EmittedMessage,
 	makeEmitRecord,
@@ -57,6 +61,7 @@ after(() => {
 });
 
 afterEach(() => {
+	setConnectorDiagnosticSink(undefined);
 	if (EXPORT_DIR_ENV === undefined) {
 		delete process.env.FITBIT_EXPORT_DIR;
 	} else {
@@ -72,7 +77,12 @@ interface Fake {
 	readonly messages: EmittedMessage[];
 	/** Every record handed to emitRecord. */
 	readonly records: { readonly stream: string; readonly data: RecordData }[];
+	/** Every diagnostic line's event and fields, in order. */
+	readonly diagnostics: { event: string; fields: Record<string, unknown> }[];
 }
+
+const DIAGNOSTIC_RE =
+	/^\[fitbit-diagnostic\] (?<event>[a-z_]+) (?<json>\{.*\})$/;
 
 /**
  * A context whose `isRecordSelected` is the runtime's own gate for these
@@ -95,6 +105,15 @@ function fakeContext(
 	const runtimeGate: Gate = (stream, data) => runtime.isSelected(stream, data);
 	const messages: EmittedMessage[] = [];
 	const records: { stream: string; data: RecordData }[] = [];
+	const diagnostics: Fake["diagnostics"] = [];
+	setConnectorDiagnosticSink((line) => {
+		const groups = DIAGNOSTIC_RE.exec(line)?.groups;
+		assert.ok(groups, `a fitbit diagnostic: ${line}`);
+		diagnostics.push({
+			event: groups.event ?? "",
+			fields: JSON.parse(groups.json ?? "{}") as Record<string, unknown>,
+		});
+	});
 	const ctx = {
 		requested,
 		emit: (message: EmittedMessage) => {
@@ -110,7 +129,7 @@ function fakeContext(
 				? runtimeGate(stream, data)
 				: gate(stream, data, runtimeGate),
 	} as unknown as CollectContext;
-	return { ctx, messages, records };
+	return { ctx, diagnostics, messages, records };
 }
 
 /** Rejects with the time-gate terminal failure. */
@@ -297,22 +316,30 @@ function canonicalImport(): string {
 	return dir;
 }
 
-/** The stream's one `phase=coverage` line, as its key=value pairs. */
+/** The stream's one `event` diagnostic, its values as text. */
+function diagnosticOf(
+	fake: Fake,
+	event: string,
+	stream: string,
+): Readonly<Record<string, string>> {
+	const lines = fake.diagnostics.filter(
+		(line) => line.event === event && line.fields.stream === stream,
+	);
+	assert.equal(lines.length, 1, `exactly one ${event} line for ${stream}`);
+	return Object.fromEntries(
+		Object.entries(lines[0]?.fields ?? {}).map(([name, value]) => [
+			name,
+			String(value),
+		]),
+	);
+}
+
+/** The stream's one `coverage` diagnostic. */
 function coverageOf(
 	fake: Fake,
 	stream: string,
 ): Readonly<Record<string, string>> {
-	const head = `Fitbit phase=coverage stream=${stream} `;
-	const lines = fake.messages.flatMap((m) =>
-		m.type === "PROGRESS" && m.message.startsWith(head) ? [m.message] : [],
-	);
-	assert.equal(lines.length, 1, `exactly one coverage line for ${stream}`);
-	const pairs: Record<string, string> = {};
-	for (const pair of (lines[0] ?? "").slice(head.length).split(" ")) {
-		const [name = "", value = ""] = pair.split("=");
-		pairs[name] = value;
-	}
-	return pairs;
+	return diagnosticOf(fake, "coverage", stream);
 }
 
 test("a device error part-way through daily_summaries stops the stream, delivers what was read and taints what was not", async () => {
@@ -324,21 +351,24 @@ test("a device error part-way through daily_summaries stops the stream, delivers
 		// The scratch folder vanishes once the steps files are read, as when a
 		// device fails: every later extraction fails with ENOENT.
 		const fake = fakeContext(ALL);
-		const emit = fake.ctx.emit;
-		fake.ctx.emit = (message) => {
-			if (
-				message.type === "PROGRESS" &&
-				message.message.startsWith(
-					"Fitbit phase=family stream=daily_summaries family=steps ",
-				)
-			) {
-				for (const name of readdirSync(tmp)) {
-					rmSync(join(tmp, name), { force: true, recursive: true });
+		const { diagnostics } = fake;
+		const push = diagnostics.push.bind(diagnostics);
+		diagnostics.push = (...lines) => {
+			for (const line of lines) {
+				if (
+					line.event === "family" &&
+					line.fields.stream === "daily_summaries" &&
+					line.fields.family === "steps"
+				) {
+					for (const name of readdirSync(tmp)) {
+						rmSync(join(tmp, name), { force: true, recursive: true });
+					}
 				}
 			}
-			return emit(message);
+			return push(...lines);
 		};
 		await collectFitbit(fake.ctx);
+		assertUserFacingProgress(fake.messages);
 
 		const records = (stream: string): RecordData[] =>
 			fake.records.filter((r) => r.stream === stream).map((r) => r.data);
@@ -378,18 +408,16 @@ test("a device error part-way through daily_summaries stops the stream, delivers
 		assert.match(JSON.stringify(skip), /"device_code":"ENOENT"/);
 		// The walk stopped at the error: the two steps files and the distance
 		// file were walked, and no member of a later family.
-		const done = (stream: string): string | undefined =>
-			fake.messages
-				.map((m) => (m.type === "PROGRESS" ? m.message : ""))
-				.find((text) => text.startsWith(`Fitbit phase=done stream=${stream} `));
-		assert.match(done("daily_summaries") ?? "", / files=3 /);
+		const done = (stream: string): Readonly<Record<string, string>> =>
+			diagnosticOf(fake, "done", stream);
+		assert.equal(done("daily_summaries").files, "3");
 		// Sleep stops at its score file: the logs are never extracted.
 		assert.equal(
 			coverageOf(fake, "sleep").reason,
 			"device_storage_unavailable",
 		);
 		assert.equal(coverageOf(fake, "sleep").status, "empty");
-		assert.match(done("sleep") ?? "", / files=1 /);
+		assert.equal(done("sleep").files, "1");
 	} finally {
 		if (tmpBefore === undefined) {
 			delete process.env.TMPDIR;

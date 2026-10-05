@@ -7,8 +7,9 @@
  * One upload is chosen (archive.ts), every part of it is checked and listed,
  * and then each requested stream reads its families one member at a time
  * (read.ts), builds records (parsers.ts, days.ts) and ends with one
- * `phase=coverage` PROGRESS line saying what it covered and why it stops
- * there, after a SKIP_RESULT when it skipped anything. A failure that stops
+ * plain-words PROGRESS line and one `coverage` diagnostic saying what it
+ * covered and why it stops there, after a SKIP_RESULT when it skipped
+ * anything. A failure that stops
  * the whole upload ends every requested stream the same way (`failAll`).
  *
  * HOW A STREAM'S REASON IS FOUND. Each family keeps a FamilyTally: how its
@@ -30,15 +31,17 @@
  *
  * NAMES AND VALUES STAY HERE. Every SKIP_RESULT message is a constant per
  * reason, its diagnostics are numbers, null or fixed tokens, and every
- * PROGRESS line names the stream, a family's fixed key, fixed reason and
- * status tokens and schema field names, and gives counts and dates. An error
- * is reported by its code alone.
+ * PROGRESS line is owner-facing plain words. Every diagnostic
+ * line (connector-diagnostic.ts, on stderr) names the stream, a family's
+ * fixed key, fixed reason and status tokens and schema field names, and
+ * gives counts and dates. An error is reported by its code alone.
  */
 
 import { closeSync, fstatSync, mkdtempSync, openSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { resourceSet } from "@pdpp/connector-protocol";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type CollectContext,
 	createConnectorFailure,
@@ -829,12 +832,34 @@ function nothingCovered(reason: SkipReason): Coverage {
 	};
 }
 
+/** What the owner calls each stream's records. */
+const STREAM_NOUN: Readonly<Record<DataStream, string>> = {
+	activities: "activities",
+	daily_summaries: "daily summaries",
+	sleep: "sleep logs",
+};
+
+/** The owner-facing line that ends a stream: what it imported, in plain words. */
+export function coverageMessage(
+	stream: DataStream,
+	status: CoverageStatus,
+	delivered: number,
+): string {
+	const noun = `Fitbit ${STREAM_NOUN[stream]}`;
+	if (status === "empty") {
+		return `${noun}: none imported.`;
+	}
+	return status === "complete"
+		? `${noun}: ${String(delivered)} imported.`
+		: `${noun}: ${String(delivered)} imported; some could not be read.`;
+}
+
 /**
- * Ends a stream's report with one PROGRESS line: its status and reason, the
- * records delivered (also as `count`), the fields the export never carried
- * and those it could not read, and the requested and covered windows as
- * dates. Only fixed tokens, schema field names, counts and dates: never a
- * name, a zone or a value.
+ * Ends a stream's report: one PROGRESS line in plain words, with the records
+ * delivered as `count`, and one `coverage` diagnostic with its status and
+ * reason, the fields the export never carried and those it could not read,
+ * and the requested and covered windows as dates. Only fixed tokens, schema
+ * field names, counts and dates: never a name, a zone or a value.
  */
 async function emitCoverage(
 	ctx: CollectContext,
@@ -842,22 +867,24 @@ async function emitCoverage(
 	coverage: Coverage,
 ): Promise<void> {
 	const range = ctx.requested.get(stream)?.time_range;
+	const status = statusFor(coverage.reason, coverage.delivered);
+	connectorDiagnostic("fitbit", "coverage", {
+		stream,
+		status,
+		reason: coverage.reason,
+		delivered: coverage.delivered,
+		fields_unavailable: coverage.fieldsUnavailable.join(",") || "none",
+		fields_unreadable: coverage.fieldsUnreadable.join(",") || "none",
+		window_requested_from: windowBound(range?.since),
+		window_requested_to: windowBound(range?.until),
+		window_covered_from: coverage.coveredFrom ?? "none",
+		window_covered_to: coverage.coveredTo ?? "none",
+	});
 	await ctx.emit({
 		type: "PROGRESS",
 		stream,
 		count: coverage.delivered,
-		message: [
-			`Fitbit phase=coverage stream=${stream}`,
-			`status=${statusFor(coverage.reason, coverage.delivered)}`,
-			`reason=${coverage.reason}`,
-			`delivered=${String(coverage.delivered)}`,
-			`fields_unavailable=${coverage.fieldsUnavailable.join(",") || "none"}`,
-			`fields_unreadable=${coverage.fieldsUnreadable.join(",") || "none"}`,
-			`window_requested_from=${windowBound(range?.since)}`,
-			`window_requested_to=${windowBound(range?.until)}`,
-			`window_covered_from=${coverage.coveredFrom ?? "none"}`,
-			`window_covered_to=${coverage.coveredTo ?? "none"}`,
-		].join(" "),
+		message: coverageMessage(stream, status, coverage.delivered),
 	});
 }
 
@@ -882,46 +909,32 @@ async function failAll(
 	}
 }
 
-function counterLine(
-	head: string,
-	counters: Readonly<Record<string, number>>,
-): string {
-	const pairs = Object.entries(counters).map(
-		([name, value]) => `${name}=${String(value)}`,
-	);
-	return `${head} ${pairs.join(" ")}`;
-}
-
-async function familyLine(
-	ctx: CollectContext,
+/** One family's counters, as a `family` diagnostic. Numbers only. */
+function familyLine(
 	stream: DataStream,
 	name: FamilyName,
 	family: FamilyTally,
-): Promise<void> {
-	await ctx.emit({
-		type: "PROGRESS",
+): void {
+	connectorDiagnostic("fitbit", "family", {
 		stream,
-		message: counterLine(
-			`Fitbit phase=family stream=${stream} family=${name}`,
-			{
-				files: family.walk.files,
-				rows: family.readable + family.valueUnreadable + family.unplaceable,
-				readable: family.readable,
-				value_unreadable: family.valueUnreadable,
-				unplaceable: family.unplaceable,
-				duplicates: family.duplicates,
-			},
-		),
+		family: name,
+		files: family.walk.files,
+		rows: family.readable + family.valueUnreadable + family.unplaceable,
+		readable: family.readable,
+		value_unreadable: family.valueUnreadable,
+		unplaceable: family.unplaceable,
+		duplicates: family.duplicates,
 	});
 }
 
-/** The counters a real-export run is measured by. Numbers only. */
+/** The counters a real-export run is measured by, as a `done` diagnostic. Numbers only. */
 function doneLine(
 	stream: DataStream,
 	read: StreamRead,
 	tally: StreamTally,
-): string {
-	return counterLine(`Fitbit phase=done stream=${stream}`, {
+): void {
+	connectorDiagnostic("fitbit", "done", {
+		stream,
 		files: read.files,
 		delivered: tally.delivered,
 		outside_window: tally.outsideWindow,
@@ -1009,7 +1022,6 @@ function countValue(family: FamilyTally, reading: Reading): void {
 }
 
 async function collectActivities(
-	ctx: CollectContext,
 	upload: Upload,
 	collector: StreamCollector,
 	read: StreamRead,
@@ -1025,7 +1037,7 @@ async function collectActivities(
 				collector.take(buildExercise(obj, upload.io.exportedAt), family),
 		},
 	);
-	await familyLine(ctx, "activities", "exercise", family);
+	familyLine("activities", "exercise", family);
 }
 
 function takeScoreRow(
@@ -1102,7 +1114,6 @@ async function readScores(
 }
 
 async function collectSleep(
-	ctx: CollectContext,
 	upload: Upload,
 	collector: StreamCollector,
 	read: StreamRead,
@@ -1110,7 +1121,7 @@ async function collectSleep(
 	const scoreFamily = read.family("sleep_score");
 	scoreFamily.duplicateMembers = duplicatedOf(upload, "sleep_score").length;
 	const scores = await readScores(upload, collector, read);
-	await familyLine(ctx, "sleep", "sleep_score", scoreFamily);
+	familyLine("sleep", "sleep_score", scoreFamily);
 
 	const sleepFamily = read.family("sleep");
 	sleepFamily.duplicateMembers = duplicatedOf(upload, "sleep").length;
@@ -1138,7 +1149,7 @@ async function collectSleep(
 			},
 		);
 	}
-	await familyLine(ctx, "sleep", "sleep", sleepFamily);
+	familyLine("sleep", "sleep", sleepFamily);
 }
 
 /**
@@ -1347,7 +1358,6 @@ function dailyPlan(
 }
 
 async function collectDaily(
-	ctx: CollectContext,
 	upload: Upload,
 	collector: StreamCollector,
 	read: StreamRead,
@@ -1381,7 +1391,7 @@ async function collectDaily(
 			stopped = done.walk.deviceError;
 		}
 		families.set(key, [...taints, ...duplicated.map(unreadTaint)]);
-		await familyLine(ctx, "daily_summaries", key, family);
+		familyLine("daily_summaries", key, family);
 	}
 	const taint = dailyTaint(families, clock !== null, upload.io.exportedAt);
 	for (const built of book.days(upload.io.exportedAt, taint)) {
@@ -1402,18 +1412,19 @@ async function collectStream(
 	for (const name of names) {
 		planned += membersOf(upload, name).length;
 	}
+	connectorDiagnostic("fitbit", "read", { stream, files: planned });
 	await ctx.emit({
 		type: "PROGRESS",
 		stream,
-		message: `Fitbit phase=read stream=${stream} files=${String(planned)}`,
+		message: `Reading Fitbit ${STREAM_NOUN[stream]}.`,
 	});
 	const collector = new StreamCollector(ctx, stream);
 	if (stream === "activities") {
-		await collectActivities(ctx, upload, collector, read);
+		await collectActivities(upload, collector, read);
 	} else if (stream === "daily_summaries") {
-		await collectDaily(ctx, upload, collector, read);
+		await collectDaily(upload, collector, read);
 	} else {
-		await collectSleep(ctx, upload, collector, read);
+		await collectSleep(upload, collector, read);
 	}
 	const { tally } = collector;
 	const reason = reasonFor(read, tally);
@@ -1446,11 +1457,7 @@ async function collectStream(
 		coveredFrom: tally.coveredFrom,
 		coveredTo: tally.coveredTo,
 	});
-	await ctx.emit({
-		type: "PROGRESS",
-		stream,
-		message: doneLine(stream, read, tally),
-	});
+	doneLine(stream, read, tally);
 }
 
 // ─── The upload ──────────────────────────────────────────────────────────

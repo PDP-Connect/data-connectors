@@ -168,30 +168,42 @@ function assertBoundedRss(
 	);
 }
 
-/** The reason on the run's one `phase=coverage` line. */
-function coverageReason(result: ConnectorSubprocessResult): string | undefined {
-	const messages = result.messages as unknown as Record<string, unknown>[];
-	const lines = messages
-		.map((m) => String(m.message))
-		.filter((text) => text.startsWith("Fitbit phase=coverage "));
-	assert.equal(lines.length, 1, "one coverage line");
-	return / reason=([a-z_]+) /.exec(lines[0] ?? "")?.[1];
+/** Every `[fitbit-diagnostic] <event>` line's fields on the run's stderr. */
+function diagnostics(
+	result: ConnectorSubprocessResult,
+	event: string,
+): Record<string, unknown>[] {
+	const head = `[fitbit-diagnostic] ${event} `;
+	return result.stderr
+		.split("\n")
+		.filter((line) => line.startsWith(head))
+		.map(
+			(line) => JSON.parse(line.slice(head.length)) as Record<string, unknown>,
+		);
 }
 
-/** The counters of the PROGRESS line starting `head`. */
+/** The reason on the run's one `coverage` diagnostic. */
+function coverageReason(result: ConnectorSubprocessResult): unknown {
+	const lines = diagnostics(result, "coverage");
+	assert.equal(lines.length, 1, "one coverage line");
+	return lines[0]?.reason;
+}
+
+/** The counters of the one `event` diagnostic whose fields include `keys`. */
 function counters(
 	result: ConnectorSubprocessResult,
-	head: string,
+	event: string,
+	keys: Readonly<Record<string, string>>,
 ): Readonly<Record<string, number>> {
-	const messages = result.messages as unknown as Record<string, unknown>[];
-	const line = messages
-		.map((m) => String(m.message))
-		.find((text) => text.startsWith(head));
-	assert.ok(line !== undefined, `a line starting ${head}`);
+	const line = diagnostics(result, event).find((fields) =>
+		Object.entries(keys).every(([name, value]) => fields[name] === value),
+	);
+	assert.ok(line !== undefined, `a ${event} line for ${JSON.stringify(keys)}`);
 	const found: Record<string, number> = {};
-	for (const pair of line.slice(head.length).trim().split(" ")) {
-		const [name = "", value = ""] = pair.split("=");
-		found[name] = Number(value);
+	for (const [name, value] of Object.entries(line)) {
+		if (!(name in keys)) {
+			found[name] = Number(value);
+		}
 	}
 	return found;
 }
@@ -218,7 +230,7 @@ test("a 128 MiB exercise page is read with bounded memory", async (t) => {
 		);
 		// Every log was parsed and placed, and nothing was cut short.
 		assert.equal(coverageReason(result), "nothing_in_range");
-		const done = counters(result, "Fitbit phase=done stream=activities ");
+		const done = counters(result, "done", { stream: "activities" });
 		assert.equal(done.outside_window, logs);
 		assert.equal(done.unreadable_total, 0);
 	} finally {
@@ -261,15 +273,15 @@ test("five years of steps minutes are placed with a bounded minute window", asyn
 			t.diagnostic(m),
 		);
 		assert.equal(coverageReason(result), "nothing_in_range");
-		const steps = counters(
-			result,
-			"Fitbit phase=family stream=daily_summaries family=steps ",
-		);
+		const steps = counters(result, "family", {
+			stream: "daily_summaries",
+			family: "steps",
+		});
 		// Every minute read and admitted: none repeated, none dropped.
 		assert.equal(steps.files, STEPS_MEMBERS);
 		assert.equal(steps.readable, minutes);
 		assert.equal(steps.duplicates, 0);
-		const done = counters(result, "Fitbit phase=done stream=daily_summaries ");
+		const done = counters(result, "done", { stream: "daily_summaries" });
 		assert.equal(done.duplicates, 0);
 		assert.equal(done.unreadable_total, 0);
 		assert.ok((done.outside_window ?? 0) > 1800, "every day was placed");

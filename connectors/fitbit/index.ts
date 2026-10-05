@@ -42,11 +42,12 @@
  * noticed, to tell a changed layout from an upload that is not a Fitbit
  * export.
  *
- * COVERAGE. Each requested stream ends with one PROGRESS line,
- * `Fitbit phase=coverage`, saying what it covered and why it stops there:
- * status, reason, records delivered, the fields the export never carried or
- * could not be read, and the requested and covered windows (collect.ts). A
- * stream that skipped anything also gets a SKIP_RESULT with a recovery hint.
+ * COVERAGE. Each requested stream ends with one plain-words PROGRESS line
+ * carrying the records delivered as `count`, and one `coverage` diagnostic
+ * on stderr saying what it covered and why it stops there: status, reason,
+ * records delivered, the fields the export never carried or could not be
+ * read, and the requested and covered windows (collect.ts). A stream that
+ * skipped anything also gets a SKIP_RESULT with a recovery hint.
  *
  * REPEAT IMPORTS. There is no cursor and never a STATE message. Every export
  * is a full-history snapshot of data Fitbit recomputes and owners edit, so
@@ -56,12 +57,14 @@
  * TIME WINDOWS. A requested window is applied to `start_time` for
  * activities, a UTC instant, and to `date` for the daily streams, Fitbit's
  * local calendar day; the runtime compares both by their first ten
- * characters. The coverage line counts only the records the runtime keeps,
+ * characters, and this connector compares an activity's start to each bound
+ * as an instant. The coverage line counts only the records both keep,
  * and an unreadable row counts against it only when it could fall inside the
  * requested window. A changed layout and `fields_unavailable` are judged over
  * the whole export, inside the window or not. The runtime's time gate and
- * this connector's own reading of the window must agree wherever no resource
- * filter explains a difference: if they ever do not, the coverage line would
+ * this connector's own reading of the window must agree, by the date rule or
+ * the exact-instant rule, wherever no resource filter explains a difference:
+ * if they ever do not, the coverage line would
  * describe a window the reader did not get, so the run fails with
  * `time_range_semantics_changed` rather than carry on silently.
  *
