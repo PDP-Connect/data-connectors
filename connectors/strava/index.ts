@@ -58,6 +58,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -279,10 +280,15 @@ async function collectActivities(
 	// cursor and re-emit the archive whole — the stream is declared
 	// mutable_state and the primary key is stable, so the reader supersedes
 	// rather than duplicates.
+	connectorDiagnostic("strava", "emit_start", {
+		stream: ACTIVITIES_STREAM,
+		source: fileName,
+		mode: "streaming",
+	});
 	await emit({
 		type: "PROGRESS",
 		stream: ACTIVITIES_STREAM,
-		message: `Strava phase=emit stream=activities source=${fileName} mode=streaming`,
+		message: "Reading your Strava activities",
 	});
 
 	let emitted = 0;
@@ -352,10 +358,15 @@ async function collectActivities(
 				cursorLatest = record.start_time;
 			}
 			if (emitted % 250 === 0) {
+				connectorDiagnostic("strava", "emit_batch", {
+					stream: ACTIVITIES_STREAM,
+					emitted,
+					unreadable,
+				});
 				await emit({
 					type: "PROGRESS",
 					stream: ACTIVITIES_STREAM,
-					message: `Strava phase=emit stream=activities emitted=${emitted} unreadable=${unreadable}`,
+					message: `Saved ${String(emitted)} Strava activities`,
 					count: emitted,
 				});
 			}
@@ -444,21 +455,39 @@ async function collectActivities(
 		resolvedColumns.maxHeartRate === null ? "max_heartrate" : null,
 		resolvedColumns.elevationGainM === null ? "total_elevation_gain_m" : null,
 	].filter((field): field is string => field !== null);
+	const coverageStatus =
+		truncated || unreadable > 0 || fieldsUnavailable.length > 0
+			? "partial"
+			: emitted === 0
+				? "empty"
+				: "complete";
+	connectorDiagnostic("strava", "coverage", {
+		stream: ACTIVITIES_STREAM,
+		status: coverageStatus,
+		fields_unavailable: fieldsUnavailable.join(",") || "none",
+		window_requested_from: timeRange?.since ?? since ?? "none",
+		window_requested_to: timeRange?.until ?? "none",
+		window_covered_from: earliest ?? "none",
+		window_covered_to: coveredLatest ?? "none",
+	});
+	const partialReasons = [
+		truncated ? "the export file was cut short" : null,
+		unreadable > 0
+			? `${String(unreadable)} ${unreadable === 1 ? "row" : "rows"} could not be read`
+			: null,
+		fieldsUnavailable.length > 0
+			? "some details were not in your export"
+			: null,
+	].filter((reason): reason is string => reason !== null);
 	await emit({
 		type: "PROGRESS",
 		stream: ACTIVITIES_STREAM,
 		count: emitted,
-		message: [
-			"Strava phase=coverage stream=activities",
-			`status=${truncated || unreadable > 0 || fieldsUnavailable.length > 0 ? "partial" : emitted === 0 ? "empty" : "complete"}`,
-			`fields_unavailable=${fieldsUnavailable.join(",") || "none"}`,
-			`window_requested_from=${timeRange?.since ?? since ?? "none"}`,
-			`window_requested_to=${timeRange?.until ?? "none"}`,
-			`window_covered_from=${earliest ?? "none"}`,
-			`window_covered_to=${coveredLatest ?? "none"}`,
-		].join(" "),
+		message:
+			coverageStatus === "partial"
+				? `Finished Strava activities: ${String(emitted)} saved; ${partialReasons.join("; ")}`
+				: `Finished Strava activities: ${String(emitted)} saved`,
 	});
-
 
 	// Hold the cursor ONLY when the file was truncated, because only then does
 	// unread history exist beyond it. Holding it for unreadable rows would stall

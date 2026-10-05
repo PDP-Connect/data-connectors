@@ -13,6 +13,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -208,34 +209,51 @@ test("a normal export emits activities in canonical units", async () => {
 });
 
 test("a thin export reports unavailable metrics and requested/covered windows", async () => {
-	const header = "Activity ID,Activity Date,Activity Type,Distance,Elapsed Time";
+	const header =
+		"Activity ID,Activity Date,Activity Type,Distance,Elapsed Time";
 	const row = "11385479490,2024-05-20T13:05:32Z,Run,8111.2,2890";
-	await withImportDir({ "activities.csv": `${header}\n${row}\n` }, async (dir) => {
-		const result = await run(dir, undefined, {
-			since: "2024-05-01T00:00:00Z",
-			until: "2024-06-01T00:00:00Z",
-		});
-		const activity = recordsOf(result, "activities")[0];
-		assert.ok(activity);
-		assert.equal(activity.calories_kcal, null);
-		assert.equal(activity.gear, null);
+	await withImportDir(
+		{ "activities.csv": `${header}\n${row}\n` },
+		async (dir) => {
+			const result = await run(dir, undefined, {
+				since: "2024-05-01T00:00:00Z",
+				until: "2024-06-01T00:00:00Z",
+			});
+			const activity = recordsOf(result, "activities")[0];
+			assert.ok(activity);
+			assert.equal(activity.calories_kcal, null);
+			assert.equal(activity.gear, null);
 
-		const diagnostics = messagesOf(result, "PROGRESS").find((message) =>
-			String(message.message).includes("phase=coverage"),
-		);
-		assert.ok(diagnostics, "successful imports expose a redacted coverage summary");
-		assert.match(String(diagnostics.message), /status=partial/);
-		assert.match(String(diagnostics.message), /fields_unavailable=calories_kcal,gear,/);
-		assert.match(
-			String(diagnostics.message),
-			/window_requested_from=2024-05-01T00:00:00Z window_requested_to=2024-06-01T00:00:00Z/,
-		);
-		assert.match(
-			String(diagnostics.message),
-			/window_covered_from=2024-05-20T13:05:32Z window_covered_to=2024-05-20T13:05:32Z/,
-		);
-		assert.doesNotMatch(String(diagnostics.message), /Parkrun|11385479490/);
-	});
+			// The subprocess writes diagnostics to stderr; read the coverage line there.
+			const coverageLine = result.stderr
+				.split("\n")
+				.find((line) => line.startsWith("[strava-diagnostic] coverage "));
+			assert.ok(
+				coverageLine,
+				"successful imports log a redacted coverage summary",
+			);
+			const coverage = JSON.parse(
+				coverageLine.slice("[strava-diagnostic] coverage ".length),
+			) as Record<string, string>;
+			assert.equal(coverage.status, "partial");
+			assert.match(coverage.fields_unavailable ?? "", /^calories_kcal,gear,/);
+			assert.equal(coverage.window_requested_from, "2024-05-01T00:00:00Z");
+			assert.equal(coverage.window_requested_to, "2024-06-01T00:00:00Z");
+			assert.equal(coverage.window_covered_from, "2024-05-20T13:05:32Z");
+			assert.equal(coverage.window_covered_to, "2024-05-20T13:05:32Z");
+			assert.doesNotMatch(coverageLine, /Parkrun|11385479490/);
+
+			const progress = messagesOf(result, "PROGRESS");
+			assertUserFacingProgress(progress);
+			assert.deepEqual(
+				progress.map((message) => message.message),
+				[
+					"Reading your Strava activities",
+					"Finished Strava activities: 1 saved; some details were not in your export",
+				],
+			);
+		},
+	);
 });
 
 test("a ZIP export streams activities.csv through the same collection path", async () => {
@@ -250,8 +268,6 @@ test("a ZIP export streams activities.csv through the same collection path", asy
 	});
 });
 
-
-
 test("a scoped import reports only the records and window that survived time_range", async () => {
 	await withImportDir(
 		{ "activities.csv": `${HEADER}\n${ROW_RUN}\n${ROW_RIDE}\n` },
@@ -262,7 +278,6 @@ test("a scoped import reports only the records and window that survived time_ran
 			});
 			assert.equal(recordsOf(result, "activities").length, 1);
 			assert.equal(recordsOf(result, "activities")[0]?.id, "11385479491");
-
 		},
 	);
 });
@@ -283,10 +298,15 @@ test("unreadable rows are their own outcome, distinct from empty and from trunca
 			const result = await run(dir);
 			assert.equal(recordsOf(result, "activities").length, 1);
 
-
 			const skips = messagesOf(result, "SKIP_RESULT");
 			assert.equal(skips.length, 1);
 			assert.equal(skips[0]?.reason, "records_unreadable");
+
+			const progress = messagesOf(result, "PROGRESS");
+			assertUserFacingProgress(progress);
+			const summary = String(progress.at(-1)?.message ?? "");
+			assert.match(summary, /1 row could not be read/);
+			assert.doesNotMatch(summary, /not in your export|cut short/);
 		},
 	);
 });
@@ -342,17 +362,13 @@ test("a truncated file DOES hold its cursor, because a remainder exists beyond i
 				| { cursor?: Record<string, unknown> }
 				| undefined;
 			assert.equal(state?.cursor?.last_start_time, null);
+			const summary = String(
+				messagesOf(result, "PROGRESS").at(-1)?.message ?? "",
+			);
+			assert.match(summary, /the export file was cut short/);
 		},
 	);
 });
-
-
-
-
-
-
-
-
 
 test("a full refresh ignores the cursor, so edits at source can propagate", async () => {
 	await withImportDir(
