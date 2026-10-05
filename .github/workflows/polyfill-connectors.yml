@@ -133,6 +133,110 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: npm run pack-install-run
 
+  connector-evidence:
+    name: Connector evidence summary
+    # INFORMATIONAL ONLY — deliberately absent from `gate`'s `needs` below.
+    # A missing or stale claim.json must never block a PR (see
+    # scripts/connector-evidence-summary.ts's module doc comment); this job
+    # only fails on a COMMITTED claim.json that doesn't parse, which is a
+    # real repo defect worth a red X, distinct from "no evidence yet".
+    needs: changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine which connectors this PR touches
+        id: connectors
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          CHANGED_CONNECTORS="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA" \
+            | grep -E '^connectors/' \
+            | sed -E 's#^connectors/([^/]+)/.*#\1#' \
+            | sort -u)"
+          echo "$CHANGED_CONNECTORS"
+          {
+            echo "list<<EOF"
+            echo "$CHANGED_CONNECTORS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.connectors.outputs.list != ''
+        with:
+          node-version: "24"
+
+      - name: Install workspace dependencies
+        if: steps.connectors.outputs.list != ''
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Summarize replay evidence and recompute code-binding digests
+        if: steps.connectors.outputs.list != ''
+        id: summary
+        env:
+          CHANGED_CONNECTORS: ${{ steps.connectors.outputs.list }}
+          CONNECTOR_EVIDENCE_LABELS_FILE: ${{ runner.temp }}/connector-evidence-labels.txt
+        working-directory: packages/polyfill-connectors
+        run: node --import tsx scripts/connector-evidence-summary.ts $CHANGED_CONNECTORS
+
+      - name: Ensure the three evidence labels exist
+        if: steps.connectors.outputs.list != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "evidence: author-replay" --color 0E8A16 \
+            --description "A connector's committed replay claim matches this PR's code" --force
+          gh label create "evidence: stale" --color D93F0B \
+            --description "A connector's committed replay claim predates a code/manifest change in this PR" --force
+          gh label create "evidence: none" --color CCCCCC \
+            --description "A touched connector has no committed replay claim yet" --force
+
+      - name: Apply the evidence label(s)
+        if: steps.connectors.outputs.list != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          LABELS_FILE: ${{ runner.temp }}/connector-evidence-labels.txt
+          # Every label this job can ever apply — used to remove whichever
+          # ones no longer apply on a re-run, so a PR never accumulates a
+          # stale "evidence: stale" label from an earlier push after the
+          # author fixes it.
+          ALL_LABELS: "evidence: author-replay,evidence: stale,evidence: none"
+        run: |
+          if [ ! -f "$LABELS_FILE" ]; then
+            echo "no labels file written (summary step found nothing to report) — skipping"
+            exit 0
+          fi
+          WANTED="$(tr '\n' ',' < "$LABELS_FILE" | sed 's/,$//')"
+          echo "wanted labels: $WANTED"
+          IFS=',' read -ra ALL_ARR <<< "$ALL_LABELS"
+          IFS=',' read -ra WANTED_ARR <<< "$WANTED"
+          for label in "${ALL_ARR[@]}"; do
+            is_wanted=false
+            for w in "${WANTED_ARR[@]}"; do
+              [ "$label" = "$w" ] && is_wanted=true
+            done
+            if [ "$is_wanted" = true ]; then
+              gh pr edit "$PR_NUMBER" --add-label "$label" || echo "::warning::could not add label '$label' (may not exist in this repo yet)"
+            else
+              gh pr edit "$PR_NUMBER" --remove-label "$label" 2>/dev/null || true
+            fi
+          done
+
   gate:
     name: Polyfill Connectors Gate
     needs: [changes, verify]
