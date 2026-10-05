@@ -1209,6 +1209,21 @@ export function createInactivityWatchdog(
 function runReplaySubprocess(args: {
 	bridgeUrl?: string;
 	connectorPath: string;
+	/** Extra directories to bind read-only into the sandbox, beyond
+	 *  `filesystemInput`'s own directory — currently only the
+	 *  `recorded-browser` driver's evidence directory (the scenario file's
+	 *  own directory, holding `har_path`/`storage_state_path`), which
+	 *  `resolveBrowserEvidence` resolves and reads from the HOST process
+	 *  fine but the ISOLATED subprocess cannot see unless it is explicitly
+	 *  bound here: `requiredFilesystemBinds()` only ever includes REPO_ROOT,
+	 *  the Node/`/usr`/`/etc` triad, the Playwright browser cache, and
+	 *  caller-supplied `extraReadOnlyPaths` — a scenario recorded outside
+	 *  REPO_ROOT (the only safe place for a real personal recording; see
+	 *  this repo's scenario docs) is otherwise invisible inside the
+	 *  sandbox, surfacing as patchright's own
+	 *  "could not open browser profile: ... ENOENT" instead of a named,
+	 *  diagnosed verdict. */
+	extraReadOnlyBinds?: readonly string[];
 	/** run.clock.fixed_now when the scenario recorded one — pins the
 	 *  subprocess's Date.now()/new Date() so wall-clock-dependent request
 	 *  planning replays deterministically. */
@@ -1293,6 +1308,12 @@ function runReplaySubprocess(args: {
 		};
 		delete childEnv.DISPLAY;
 		delete childEnv.WAYLAND_DISPLAY;
+		const extraReadOnlyBinds = [
+			...(args.filesystemInput === undefined
+				? []
+				: [args.filesystemInput.path]),
+			...(args.extraReadOnlyBinds ?? []),
+		];
 		const child = spawnWithNetworkIsolation(
 			process.execPath,
 			["--import", "tsx", args.connectorPath],
@@ -1302,9 +1323,7 @@ function runReplaySubprocess(args: {
 				stdio: ["pipe", "pipe", "pipe"],
 				isolate: args.isolate,
 				filesystemBindPath: args.workspace.dir,
-				...(args.filesystemInput === undefined
-					? {}
-					: { extraReadOnlyBinds: [args.filesystemInput.path] }),
+				...(extraReadOnlyBinds.length === 0 ? {} : { extraReadOnlyBinds }),
 			},
 		);
 		// `spawnWithNetworkIsolation` returns a plain `child_process.ChildProcess`
@@ -2153,6 +2172,15 @@ async function main(): Promise<void> {
 			result = await runReplaySubprocess({
 				connectorPath,
 				preloadPath,
+				// The scenario's own evidence directory (holding har_path and
+				// storage_state_path) — see runReplaySubprocess's
+				// `extraReadOnlyBinds` doc comment. Deduplicated by
+				// requiredFilesystemBinds() when both resolve to the same
+				// directory, which is the common case.
+				extraReadOnlyBinds: [
+					dirname(evidence.harPath),
+					dirname(evidence.storageStatePath),
+				],
 				...(filesystemInput === undefined ? {} : { filesystemInput }),
 				...(evidence.fixedNowIso === undefined
 					? {}
