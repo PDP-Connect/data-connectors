@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	type EnsureSessionArgs,
@@ -159,9 +160,7 @@ async function hasYoutubeSession(
 					'button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn, ytd-masthead button[aria-label*="Account"]',
 				),
 			) &&
-			!Boolean(
-				document.querySelector('a[href*="accounts.google.com/ServiceLogin"]'),
-			),
+			!document.querySelector('a[href*="accounts.google.com/ServiceLogin"]'),
 	);
 }
 
@@ -375,11 +374,15 @@ async function emitCoverageProgress(
 	connector: "youtube",
 	facts: Iterable<CoverageFact>,
 ): Promise<void> {
+	const sorted = [...facts].sort((a, b) => a.stream.localeCompare(b.stream));
+	// One diagnostic line per stream keeps each line under the helper's length
+	// bound. The facts are the ones the old JSON PROGRESS carried.
+	for (const fact of sorted) {
+		connectorDiagnostic(connector, "coverage", { ...fact });
+	}
+	const saved = sorted.reduce((sum, fact) => sum + fact.emitted_count, 0);
 	await ctx.progress(
-		`${connector}.coverage ${JSON.stringify({
-			connector,
-			streams: [...facts].sort((a, b) => a.stream.localeCompare(b.stream)),
-		})}`,
+		`Finished YouTube: ${saved} ${saved === 1 ? "item" : "items"} saved`,
 	);
 }
 
