@@ -42,7 +42,6 @@ export interface DashboardAccount {
 // ─── Emitted records ─────────────────────────────────────────────────────
 
 export interface AccountRecord extends RecordData {
-	fetched_at: string;
 	id: string;
 	last_four: string | null;
 	name: string | null;
@@ -75,7 +74,6 @@ export interface TransactionRecord extends RecordData {
 	currency: "USD";
 	date: string;
 	description: string;
-	fetched_at: string;
 	id: string;
 	original_description: string;
 	source: string;
@@ -83,7 +81,6 @@ export interface TransactionRecord extends RecordData {
 
 export interface InboxMessageRecord extends RecordData {
 	date_received: string | null;
-	fetched_at: string;
 	id: string;
 	preview: string;
 	status: "unread" | "read";
@@ -95,7 +92,6 @@ export interface StatementRecord extends RecordData {
 	account_reference: string | null;
 	date_delivered: string | null;
 	document_url: string | null;
-	fetched_at: string;
 	id: string;
 	pdf_page_count: number | null;
 	pdf_path: string | null;
@@ -111,7 +107,6 @@ export interface CreditCardBillingRecord extends RecordData {
 	card_holders: string | null;
 	cash_advance_apr: string | null;
 	credit_limit_cents: number | null;
-	fetched_at: string;
 	id: string;
 }
 
@@ -312,7 +307,6 @@ export interface StatementTxnRecord {
 	currency: "USD";
 	date: string;
 	description: string;
-	fetched_at: string;
 	id: string;
 	original_description: string;
 	source: string;

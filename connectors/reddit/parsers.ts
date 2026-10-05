@@ -126,7 +126,9 @@ export function isTopLevelComment(
 
 export function submittedRecord(
 	d: RedditChildData,
-	fetchedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_fetchedAt: string,
 ): SubmittedRecord {
 	const selftext = truncateText(d.selftext ?? null);
 	return {
@@ -145,13 +147,14 @@ export function submittedRecord(
 		upvote_ratio: d.upvote_ratio ?? null,
 		gilded: d.gilded ?? null,
 		created_utc: isoFromUnix(d.created_utc) ?? "",
-		fetched_at: fetchedAt,
 	};
 }
 
 export function commentRecord(
 	d: RedditChildData,
-	fetchedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_fetchedAt: string,
 ): CommentRecord {
 	const body = truncateText(d.body ?? null);
 	return {
@@ -166,11 +169,15 @@ export function commentRecord(
 		score: d.score ?? null,
 		gilded: d.gilded ?? null,
 		created_utc: isoFromUnix(d.created_utc) ?? "",
-		fetched_at: fetchedAt,
 	};
 }
 
-export function savedRecord(c: RedditChild, fetchedAt: string): SavedRecord {
+export function savedRecord(
+	c: RedditChild,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_fetchedAt: string,
+): SavedRecord {
 	const d = c.data;
 	const body = truncateText(d.body ?? d.selftext ?? null);
 	return {
@@ -184,7 +191,6 @@ export function savedRecord(c: RedditChild, fetchedAt: string): SavedRecord {
 		permalink: absolutePermalink(d.permalink),
 		url: d.url ?? null,
 		created_utc: isoFromUnix(d.created_utc) ?? "",
-		fetched_at: fetchedAt,
 	};
 }
 
@@ -192,7 +198,12 @@ export function savedRecord(c: RedditChild, fetchedAt: string): SavedRecord {
  *  Reddit returns posts (t3) and comments (t1) interleaved, and
  *  we preserve the kind + is_post discriminator so downstream queries
  *  can filter by content type. */
-export function voteRecord(c: RedditChild, fetchedAt: string): VoteRecord {
+export function voteRecord(
+	c: RedditChild,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_fetchedAt: string,
+): VoteRecord {
 	const d = c.data;
 	const body = truncateText(d.body ?? d.selftext ?? null);
 	return {
@@ -208,7 +219,6 @@ export function voteRecord(c: RedditChild, fetchedAt: string): VoteRecord {
 		score: d.score ?? null,
 		num_comments: d.num_comments ?? null,
 		created_utc: isoFromUnix(d.created_utc) ?? "",
-		fetched_at: fetchedAt,
 	};
 }
 

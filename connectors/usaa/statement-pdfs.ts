@@ -870,7 +870,6 @@ function buildStatementRecords(
 		period,
 	}: { accountId: string; accountName: string | null; period: string | null },
 ): StatementTxnRecord[] {
-	const nowIso = new Date().toISOString();
 	const provenance = `pdf_statement_${period || "unknown"}`;
 	return best.map((t) => ({
 		// Hash input is intentionally identical in shape to the CSV path so
@@ -888,7 +887,6 @@ function buildStatementRecords(
 		balance_after_cents: t.balance,
 		check_number: (t.description.match(CHECK_NUMBER_RE) || [])[1] || null,
 		source: provenance,
-		fetched_at: nowIso,
 	}));
 }
 

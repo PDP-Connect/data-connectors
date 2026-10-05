@@ -54,7 +54,6 @@ export interface OrderDetail {
 // nullable fields populated only from a structured row (design.md Decision 1);
 // a DOM-sourced row emits them as null.
 export interface OrdersRecord {
-	fetched_at: string;
 	fulfillment_location: string | null;
 	fulfillment_method: FulfillmentMethod;
 	id: string;
@@ -74,7 +73,6 @@ export interface OrdersRecord {
 // Shape of the emitted `order_items` stream record.
 export interface OrderItemRecord {
 	department: string | null;
-	fetched_at: string;
 	id: string;
 	image_url: string | null;
 	line_total: string | null;
@@ -141,7 +139,6 @@ export interface DeliveryAddress {
 export interface ProfileRecord {
 	delivery_addresses: DeliveryAddress[];
 	email: string | null;
-	fetched_at: string;
 	id: string;
 	name: string | null;
 	phone: string | null;
@@ -185,7 +182,6 @@ export interface NutritionRecord {
 	cholesterol_mg: number | null;
 	confidence: NutritionConfidence;
 	fat_g: number | null;
-	fetched_at: string;
 	fiber_g: number | null;
 	highlights: string[] | null;
 	id: string;

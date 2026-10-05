@@ -9,7 +9,7 @@
 	},
 	"connector_key": "reddit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/reddit",
-	"version": "0.2.5",
+	"version": "0.3.0",
 	"display_name": "Reddit",
 	"brand": {
 		"icon": "icon.svg",
@@ -130,11 +130,6 @@
 					"created_utc": {
 						"type": "string",
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -211,11 +206,6 @@
 					"created_utc": {
 						"type": "string",
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -289,11 +279,6 @@
 					"created_utc": {
 						"type": "string",
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -372,11 +357,6 @@
 					"created_utc": {
 						"type": "string",
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -457,11 +437,6 @@
 					"created_utc": {
 						"type": "string",
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "created_utc"]
@@ -542,11 +517,6 @@
 					"created_utc": {
 						"type": "string",
 						"format": "date-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "created_utc"]

@@ -588,7 +588,7 @@
     },
     "not_derivable": [],
     "semantic_notes": [
-      "Modern orders/order_items are considerably richer than legacy: status_detail, recipient_name, shipping_address_summary, payment_method_summary, gift_order, digital_order, fetched_at (orders); asin, seller, item_image_url, returned, refund_status (order_items) — all additive.",
+      "Modern orders/order_items are considerably richer than legacy: status_detail, recipient_name, shipping_address_summary, payment_method_summary, gift_order, digital_order (orders); asin, seller, item_image_url, returned, refund_status (order_items) — all additive. (orders.fetched_at was removed 2026-10-02: PDPP spec-core forbids a connector's own collection time in `data`.)",
       "total (D3 envelope) correctly dropped."
     ],
     "status": "derivable"

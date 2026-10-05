@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.5.15",
+	"version": "0.6.0",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -132,10 +132,6 @@
 					"unfulfilled_count": {
 						"type": ["integer", "null"],
 						"description": "Count of purchase-line items the source reports as unfulfilled on this order, from the structured order-list source's orderChangesOverview.unfulfilledCount. Distinct from item_count (the order's total item count). Null when the structured source did not supply this row."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id", "order_date"]
@@ -184,8 +180,7 @@
 						"total",
 						"total_cents",
 						"item_count",
-						"unfulfilled_count",
-						"fetched_at"
+						"unfulfilled_count"
 					]
 				}
 			],
@@ -266,10 +261,6 @@
 						"type": "string",
 						"format": "date",
 						"x_pdpp_role": "event-time"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id", "order_id", "name", "order_date"]
@@ -355,10 +346,6 @@
 							},
 							"required": ["address", "is_primary", "label"]
 						}
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id"]
@@ -519,10 +506,6 @@
 								"type": "null"
 							}
 						]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id", "product_id", "product_url", "name"]
