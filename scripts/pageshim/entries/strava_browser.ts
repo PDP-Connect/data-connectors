@@ -3,7 +3,10 @@
 
 // strava_browser on PageShim. Each scope is `{ activities }`, matching Vana's
 // stored Strava payload. The host persists STATE between runs; each run walks
-// from the newest activity up to the connector's page bound.
+// from the newest activity up to the connector's page bound. The mobile host
+// stores each `{ activities }` payload as the newest whole version, so a list
+// walk that stops early (a 503 or a 429 after the retries) fails the run: an
+// emitted prefix would replace the stored list.
 import {
 	collectStravaBrowser,
 	LOGIN_URL,
@@ -32,7 +35,9 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 			validateRecord,
 			probe: (pw) => probeStravaSession(pw as never),
 			collect: (ctx) =>
-				collectStravaBrowser(ctx as unknown as StravaCollectContext),
+				collectStravaBrowser(ctx as unknown as StravaCollectContext, {
+					failRunOnIncompleteList: true,
+				}),
 			toScope: (_stream, records) => ({ activities: records }),
 			streamScopeRecords: {
 				order: ["activities"],

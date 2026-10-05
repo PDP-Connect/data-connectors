@@ -103,6 +103,13 @@ export interface StravaCollectOptions {
 	pageDelayMs?: number;
 	activityDelayMs?: number;
 	rateLimitDelayMs?: number;
+	/**
+	 * Throw when the activity list walk stops early after listing some
+	 * activities, instead of emitting that prefix. Set by hosts that store
+	 * each run's `{ activities }` payload as the newest whole version: there,
+	 * a prefix replaces the full list.
+	 */
+	failRunOnIncompleteList?: boolean;
 }
 
 interface ActivitiesState {
@@ -707,6 +714,10 @@ export async function collectStravaBrowser(
 			break;
 		}
 		pageNumber += 1;
+	}
+
+	if (failure && options.failRunOnIncompleteList && listed.length > 0) {
+		throw new Error(failure.message);
 	}
 
 	const summaryRecords = fullRefresh ? listed : newlyListed;
