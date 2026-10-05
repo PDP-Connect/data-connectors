@@ -340,6 +340,145 @@ function countHarEntries(harPath: string): number {
 	return Array.isArray(entries) ? entries.length : 0;
 }
 
+/** The subset of a HAR entry's shape the APIRequestContext → HAR bridge
+ *  (see `findApiRequestHarMatch`/`buildApiResponseFromHarEntry` below, and
+ *  `installApiRequestContextHarBridge`'s generated-source mirror in
+ *  `writeBrowserHarReplayPreload`) reads. */
+export interface ApiRequestHarEntry {
+	request?: { method?: unknown; url?: unknown };
+	response?: {
+		content?: { encoding?: unknown; text?: unknown };
+		headers?: readonly { name?: unknown; value?: unknown }[];
+		status?: unknown;
+		statusText?: unknown;
+	};
+}
+
+/**
+ * Finds the HAR entry a `context.request` (Playwright `APIRequestContext`)
+ * call should be served from — the pure matching rule
+ * `installApiRequestContextHarBridge`'s generated-source mirror
+ * duplicates inline inside the subprocess preload (that duplication is
+ * necessarily by copy, not import — see this file's "APIRequestContext →
+ * HAR bridge" module comment and `writeBrowserHarReplayPreload`'s own doc
+ * comment on why a generated preload can't import this package's module
+ * graph). Exported and unit-tested here specifically so the ONE place the
+ * matching logic can be verified deterministically is a plain function
+ * call, not a spawned browser subprocess.
+ *
+ * An EXACT match (method + full URL including the query string) wins
+ * whenever one exists. Only for `GET` does this fall back to the
+ * highest-scoring same-origin-and-pathname entry that shares at least one
+ * query parameter NAME with the live request (zero shared names is "not a
+ * plausible match", never guessed) — scored by how many of those shared
+ * names also agree in VALUE, ties broken by file order. A mutating method
+ * never falls back: it must match exactly or not at all.
+ */
+export function findApiRequestHarMatch(
+	entries: readonly ApiRequestHarEntry[],
+	method: string,
+	urlString: string,
+): ApiRequestHarEntry | undefined {
+	for (const entry of entries) {
+		if (entry.request?.method === method && entry.request?.url === urlString) {
+			return entry;
+		}
+	}
+	if (method !== "GET") {
+		return undefined;
+	}
+	let live: URL;
+	try {
+		live = new URL(urlString);
+	} catch {
+		return undefined;
+	}
+	const liveKeys = new Set(live.searchParams.keys());
+	let best: ApiRequestHarEntry | undefined;
+	let bestScore = -1;
+	for (const entry of entries) {
+		if (
+			entry.request?.method !== method ||
+			typeof entry.request.url !== "string"
+		) {
+			continue;
+		}
+		let candidate: URL;
+		try {
+			candidate = new URL(entry.request.url);
+		} catch {
+			continue;
+		}
+		if (
+			candidate.origin !== live.origin ||
+			candidate.pathname !== live.pathname
+		) {
+			continue;
+		}
+		const sharedKeys = [...liveKeys].filter((k) =>
+			candidate.searchParams.has(k),
+		);
+		if (sharedKeys.length === 0) {
+			continue;
+		}
+		const score = sharedKeys.filter(
+			(k) => live.searchParams.get(k) === candidate.searchParams.get(k),
+		).length;
+		if (score > bestScore) {
+			bestScore = score;
+			best = entry;
+		}
+	}
+	return best;
+}
+
+/** Minimal `APIResponse` polyfill backing the bridge above — only the
+ *  surface this package's current `context.request` callers use
+ *  (`status`/`ok`/`text`/`json`/`dispose`; see the "APIRequestContext → HAR
+ *  bridge" module comment for which connectors). Narrower is more honest
+ *  than a speculative full polyfill of Playwright's real `APIResponse`. */
+export function buildApiResponseFromHarEntry(entry: ApiRequestHarEntry): {
+	body: () => Promise<Buffer>;
+	dispose: () => Promise<void>;
+	headers: () => Record<string, string>;
+	json: () => Promise<unknown>;
+	ok: () => boolean;
+	status: () => number;
+	statusText: () => string;
+	text: () => Promise<string>;
+	url: () => string;
+} {
+	const response = entry.response ?? {};
+	const content = response.content ?? {};
+	const rawText = typeof content.text === "string" ? content.text : "";
+	const bodyBuffer =
+		content.encoding === "base64"
+			? Buffer.from(rawText, "base64")
+			: Buffer.from(rawText, "utf8");
+	const status = typeof response.status === "number" ? response.status : 0;
+	return {
+		body: () => Promise.resolve(bodyBuffer),
+		dispose: () => Promise.resolve(),
+		headers: () => {
+			const out: Record<string, string> = {};
+			for (const h of response.headers ?? []) {
+				if (typeof h.name === "string" && typeof h.value === "string") {
+					out[h.name.toLowerCase()] = h.value;
+				}
+			}
+			return out;
+		},
+		json: () => Promise.resolve(JSON.parse(bodyBuffer.toString("utf8"))),
+		ok: () => status >= 200 && status < 300,
+		status: () => status,
+		statusText: () =>
+			typeof response.statusText === "string" ? response.statusText : "",
+		text: () => Promise.resolve(bodyBuffer.toString("utf8")),
+		url: () =>
+			typeof entry.request?.url === "string" ? entry.request.url : "",
+	};
+}
+
 /** Resolves a scenario-relative path (`har_path`/`storage_state_path`,
  *  format.ts's `ScenarioBrowserNetworkDriver`) against the scenario file's
  *  own directory — both fields are documented as "never absolute", but this
@@ -546,9 +685,176 @@ if (FIXED_NOW_ISO) {
 // evidence is ONLY the captured storage state), not for reliability (no
 // contention on that profile's own SingletonLock), and not for safety (a
 // replay run must not be able to read from or mutate live session cookies).
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
+
+// ── APIRequestContext → HAR bridge ──────────────────────────────────────
+//
+// \`context.request\`/\`page.context().request\` (Playwright's
+// \`APIRequestContext\`, used by every browser connector's own
+// "is this session still signed in" probe — strava_browser's
+// \`probeStravaSession\`, spotify's \`hasSpotifySession\`, github_browser's
+// \`probeGitHubBrowserSession\`) is a STRUCTURALLY SEPARATE network path
+// from the browser's own page/CDP traffic: it issues its HTTP call
+// directly from the Playwright driver process, never touching the
+// browser engine. Confirmed empirically (both directions, against this
+// exact patchright version): a \`context.request.get()\` call made while
+// \`recordHar\` is active does NOT appear in the resulting HAR, and the
+// identical call made while \`context.routeFromHAR(har, { notFound:
+// "abort" })\` is active still reaches the REAL network instead of being
+// served OR aborted — \`context.routeFromHAR\`'s interception is built on
+// \`context.route()\`, which only ever patches CDP-level network
+// interception for pages in that context (see \`HarRouter.addContextRoute\`
+// in patchright/playwright-core's own client code), and \`context.request\`
+// never goes through \`context.route()\` at all.
+//
+// Left unpatched, this is a double failure: at RECORD time, the
+// probe's traffic is invisible to the recorder, so no scenario can ever
+// capture it; at REPLAY time, inside this driver's network-isolated
+// sandbox (isolation.ts), the same call fails closed (no egress) rather
+// than failing because of anything about the SCENARIO — \`probeStravaSession\`
+// (etc.) swallows that failure and reports "not logged in", and the
+// connector falls through to its real login-wall navigation, which was
+// never recorded either (the capture session was already warm) — exactly
+// the \`net::ERR_FAILED\` at the login URL this bridge exists to fix.
+//
+// This patches \`APIRequestContext.prototype.fetch\` (the one method
+// \`get\`/\`post\`/\`put\`/\`patch\`/\`head\` all funnel through — confirmed in
+// patchright/playwright-core's \`lib/client/fetch.js\`) to serve EVERY
+// \`context.request\` call from THIS run's OWN HAR file, in-process,
+// instead of ever reaching the real network — closing the same "never
+// silently fall through to the real network" egress-denial gap
+// \`notFound: "abort"\` already closes for ordinary page traffic.
+//
+// Matching: an EXACT match (method + full URL, including the query
+// string) is tried first, so a recording that captures this exact call
+// (once the paired RECORD-side fix lands) always wins. Only for GET (a
+// mutating method always requires an exact match — never guessed) does
+// this fall back to the same pathname with the HIGHEST-scoring query:
+// among HAR entries sharing this request's method + origin + pathname
+// that share AT LEAST ONE query parameter NAME with the live request
+// (zero shared names is "not a plausible match", never guessed), pick
+// the one whose shared parameter NAMES agree in VALUE most often, tying
+// on file order. This is deliberately generic (no per-connector/
+// per-field allowlist) — a probe's own page-size/pagination choice is
+// exactly the kind of parameter that legitimately differs between two
+// calls to the identical liveness check without it being a different
+// request in any sense the probe cares about.
+let harEntriesCache;
+function loadHarEntriesForApiRequestBridge() {
+  if (harEntriesCache) return harEntriesCache;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(HAR_PATH, "utf8"));
+  } catch {
+    harEntriesCache = [];
+    return harEntriesCache;
+  }
+  const entries = parsed && parsed.log && parsed.log.entries;
+  harEntriesCache = Array.isArray(entries) ? entries : [];
+  return harEntriesCache;
+}
+function findApiRequestHarMatch(method, urlString) {
+  const entries = loadHarEntriesForApiRequestBridge();
+  for (const entry of entries) {
+    if (entry.request?.method === method && entry.request?.url === urlString) {
+      return entry;
+    }
+  }
+  if (method !== "GET") {
+    return undefined;
+  }
+  let live;
+  try {
+    live = new URL(urlString);
+  } catch {
+    return undefined;
+  }
+  const liveKeys = new Set(live.searchParams.keys());
+  let best;
+  let bestScore = -1;
+  for (const entry of entries) {
+    if (entry.request?.method !== method) {
+      continue;
+    }
+    let candidate;
+    try {
+      candidate = new URL(entry.request.url);
+    } catch {
+      continue;
+    }
+    if (candidate.origin !== live.origin || candidate.pathname !== live.pathname) {
+      continue;
+    }
+    const sharedKeys = [...liveKeys].filter((k) => candidate.searchParams.has(k));
+    if (sharedKeys.length === 0) {
+      continue;
+    }
+    const score = sharedKeys.filter(
+      (k) => live.searchParams.get(k) === candidate.searchParams.get(k),
+    ).length;
+    if (score > bestScore) {
+      bestScore = score;
+      best = entry;
+    }
+  }
+  return best;
+}
+// Minimal APIResponse polyfill — only the surface this package's current
+// APIRequestContext callers use (status/ok/text/json/dispose). Throws (via
+// the real method simply being absent) for anything else, same as this
+// file's module doc comment's "zero of this package's connectors use
+// either surface" precedent elsewhere: narrower is more honest than a
+// speculative full polyfill.
+function buildApiResponseFromHarEntry(entry) {
+  const response = entry.response ?? {};
+  const content = response.content ?? {};
+  const rawText = typeof content.text === "string" ? content.text : "";
+  const bodyBuffer = content.encoding === "base64"
+    ? Buffer.from(rawText, "base64")
+    : Buffer.from(rawText, "utf8");
+  const status = typeof response.status === "number" ? response.status : 0;
+  return {
+    status: () => status,
+    statusText: () => response.statusText ?? "",
+    ok: () => status >= 200 && status < 300,
+    url: () => entry.request?.url ?? "",
+    headers: () => {
+      const out = {};
+      for (const h of response.headers ?? []) {
+        out[String(h.name).toLowerCase()] = h.value;
+      }
+      return out;
+    },
+    body: async () => bodyBuffer,
+    text: async () => bodyBuffer.toString("utf8"),
+    json: async () => JSON.parse(bodyBuffer.toString("utf8")),
+    dispose: async () => {},
+  };
+}
+function installApiRequestContextHarBridge(context) {
+  const proto = Object.getPrototypeOf(context.request);
+  if (proto.__pdppHarBridgeInstalled) {
+    return;
+  }
+  proto.__pdppHarBridgeInstalled = true;
+  proto.fetch = async function pdppReplayApiRequestContextFetch(urlOrRequest, options) {
+    const isRequestObject = urlOrRequest !== null && typeof urlOrRequest === "object";
+    const url = isRequestObject ? urlOrRequest.url() : urlOrRequest;
+    const method = String(
+      options?.method ?? (isRequestObject ? urlOrRequest.method() : "GET") ?? "GET",
+    ).toUpperCase();
+    const entry = findApiRequestHarMatch(method, url);
+    if (!entry) {
+      throw new TypeError(
+        \`apiRequestContext.fetch: \${method} \${url} has no matching HAR entry \` +
+          "(recorded-browser replay's APIRequestContext bridge — browser-har-replay.ts)",
+      );
+    }
+    return buildApiResponseFromHarEntry(entry);
+  };
+}
 const ISOLATED_PROFILE_DIRS = [];
 let isolatedProfileCleanupRegistered = false;
 function freshIsolatedProfileDir() {
@@ -613,6 +919,12 @@ import("patchright").then((patchright) => {
     // ("EGRESS DENIAL SCOPE"). An unmatched request must fail loudly, never
     // silently reach the real network.
     await context.routeFromHAR(HAR_PATH, { notFound: "abort" });
+    // See this file's "APIRequestContext → HAR bridge" comment above —
+    // context.request never goes through context.routeFromHAR at all, so
+    // without this it would silently reach the real network (or, under
+    // this driver's network-isolated sandbox, simply fail closed for a
+    // reason that has nothing to do with the scenario).
+    installApiRequestContextHarBridge(context);
     if (FIXED_NOW_ISO) {
       // In-page clock pin — see this file's module doc comment ("CLOCK").
       // Installed AFTER routeFromHAR/setStorageState so neither of those
