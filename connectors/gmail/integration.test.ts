@@ -45,8 +45,6 @@ import type {
 	MessageStructureObject,
 } from "imapflow";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
-import type { CarryForwardCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
-import { openCarryForwardCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import type {
 	DetailGapMessage,
 	DetailGapStartEntry,
@@ -99,7 +97,6 @@ import {
 	makeAttachmentHydrator,
 	type PerMessageDeps,
 	processMessage,
-	readPriorMessageSnippets,
 	recordAttachmentCoverage,
 	recoverServedAttachmentGaps,
 	redactEmailForProgress,
@@ -109,7 +106,6 @@ import {
 	resolveAttachmentProgressMinIntervalMs,
 	resolveAttachmentRecoveryPageByteBudget,
 	resolveAttachmentStallTimeoutMs,
-	resolveEmittedSnippet,
 	resolveGmailAddressFromEnv,
 	resolveGmailPasswordFromEnv,
 	resolveMaxAttachmentBytes,
@@ -170,7 +166,6 @@ interface HarnessOverrides {
 	detailGaps?: readonly DetailGapStartEntry[];
 	fetchBodies?: FetchBodiesFn;
 	hydrateAttachment?: HydrateAttachmentFn;
-	messageSnippetCursor?: CarryForwardCursor<string | null>;
 	nowIso?: () => string;
 	requested?: Map<string, StreamRequest>;
 	timeRange?: { since?: string; until?: string };
@@ -205,9 +200,6 @@ function makeHarness(overrides: HarnessOverrides = {}): RecordingHarness {
 		hydrateAttachment:
 			overrides.hydrateAttachment ??
 			((_, attachment) => Promise.resolve(hydratedResult(attachment))),
-		...(overrides.messageSnippetCursor
-			? { messageSnippetCursor: overrides.messageSnippetCursor }
-			: {}),
 		recoveredAttachmentGapIds: new Set<string>(),
 		nowIso: overrides.nowIso ?? ((): string => FROZEN_NOW),
 		...(overrides.uploadBodyBlob
@@ -226,17 +218,6 @@ function makeHarness(overrides: HarnessOverrides = {}): RecordingHarness {
 		progress,
 		protocolMessages: harness.protocolMessages,
 	};
-}
-
-/** Open a shared `messages.snippet` carry-forward cursor seeded with the
- *  given prior entries — mirrors how `runAllMailPasses` seeds it from
- *  `readPriorMessageSnippets(state)`. An empty seed models the first run. */
-function makeSnippetCursor(
-	priorEntries: readonly [string, string | null][] = [],
-): CarryForwardCursor<string | null> {
-	return openCarryForwardCursor<string | null>(
-		new Map<string, string | null>(priorEntries),
-	);
 }
 
 function makeAttachmentMsg(): FetchMessageObject {
@@ -5185,109 +5166,18 @@ test("processMessage: genuinely empty body emits body_source='empty' and NO gap"
 // churn + a temporary data regression (readers briefly see no snippet), not
 // permanent loss. `records` upserts replace `record_json` wholesale, so a
 // `null` written here replaces a real value until the next lucky run.
+//
+// The forward/historical walk (`processMessage`) visits a given UID exactly
+// ONCE, ever — there is no prior `messages` record for a brand-new message
+// to protect, so a failed fetch there emitting `snippet: null` is an honest
+// "unknown yet", not a loss. The destructive-overwrite case can only happen
+// in `runDeltaPass`, which re-visits an ALREADY-stored message to apply a
+// flag/label change. That is why the fix lives entirely in `runDeltaPass`:
+// skip the emit (so the stored record, snippet included, survives
+// untouched) and record a retryable DETAIL_GAP, with no snippet content
+// carried through STATE.
 
-test("resolveEmittedSnippet: fetchFailed + a prior value carries it forward", () => {
-	assert.equal(
-		resolveEmittedSnippet(
-			{ fetchFailed: true, snippet: null },
-			"prior snippet",
-		),
-		"prior snippet",
-	);
-});
-
-test("resolveEmittedSnippet: fetchFailed + no prior value (first run) resolves to null", () => {
-	assert.equal(
-		resolveEmittedSnippet({ fetchFailed: true, snippet: null }, undefined),
-		null,
-		"nothing was ever collected for this message, so there is nothing to carry forward",
-	);
-});
-
-test("resolveEmittedSnippet: a successful fetch's value wins even when it is null (genuinely bodyless)", () => {
-	assert.equal(
-		resolveEmittedSnippet(
-			{ fetchFailed: false, snippet: null },
-			"stale prior value",
-		),
-		null,
-		"a message that genuinely has no plain part reports null honestly",
-	);
-});
-
-test("resolveEmittedSnippet: a successful fetch's EMPTY STRING snippet wins over a non-empty prior value", () => {
-	// The one case the live API can express as "legitimately empty": a plain
-	// part that decodes to zero characters. Distinct from null — this is a
-	// real, successfully-fetched observation, not a failure, so it must not
-	// be clobbered by carry-forward even though a non-empty prior exists.
-	assert.equal(
-		resolveEmittedSnippet({ fetchFailed: false, snippet: "" }, "old snippet"),
-		"",
-		"an empty-string snippet is a real observation, not a loss",
-	);
-});
-
-test("processMessage: body-fetch failure carries the PRIOR run's snippet forward instead of blanking it", async () => {
-	// `cursor.prior(id)` reads the map the cursor was SEEDED with, not values
-	// `note`d earlier in the same run (by design — see `openCarryForwardCursor`:
-	// "never the one note recorded this run"). A real prior run is therefore
-	// modeled by a FRESH cursor per run, chained through `toState()`, exactly
-	// how `runAllMailPasses` reseeds from persisted STATE on the next process
-	// invocation — not by reusing one cursor instance across two calls.
-	const msg = makeMsg();
-
-	// Run 1: the body fetch succeeds and collects a real snippet.
-	const cursor1 = makeSnippetCursor();
-	const run1 = makeHarness({
-		fetchBodies: (): Promise<FetchedBodies> =>
-			Promise.resolve({
-				bodyHtmlFull: null,
-				bodyTextFull: "Hello there",
-				snippet: "Hello there",
-			}),
-		messageSnippetCursor: cursor1,
-		wantMessages: true,
-	});
-	await processMessage(run1.deps, msg);
-	assert.equal(
-		run1.emitted.find((r) => r.stream === "messages")?.data.snippet,
-		"Hello there",
-	);
-
-	// Run 2: the IMAP body fetch THROWS — the exact failure mode behind the
-	// live regression. Its cursor is seeded from run 1's persisted STATE
-	// (`cursor1.toState()`), the same way `readPriorMessageSnippets` would
-	// decode it back out of the next process's `state.messages`.
-	const cursor2 = makeSnippetCursor(
-		Object.entries(cursor1.toState()) as Array<[string, string | null]>,
-	);
-	const run2 = makeHarness({
-		fetchBodies: (): Promise<FetchedBodies> =>
-			Promise.resolve({
-				bodyHtmlFull: null,
-				bodyTextFull: null,
-				snippet: null,
-				fetchFailed: true,
-				failureClass: "imap_body_fetch_transient",
-			}),
-		messageSnippetCursor: cursor2,
-		wantMessages: true,
-	});
-	await processMessage(run2.deps, msg);
-	assert.equal(
-		run2.emitted.find((r) => r.stream === "messages")?.data.snippet,
-		"Hello there",
-		"a failed body fetch must not blank a previously-collected snippet",
-	);
-	assert.deepEqual(
-		cursor2.toState()[String(msg.emailId)],
-		"Hello there",
-		"the cursor itself must keep remembering the real value, not the failed run's null",
-	);
-});
-
-test("processMessage: body-fetch failure on a message with NO prior snippet emits null (first run, nothing to carry forward)", async () => {
-	const cursor = makeSnippetCursor(); // empty seed — models a first-run message
+test("processMessage: body-fetch failure still emits the messages record with snippet=null (first-sight message, nothing to protect)", async () => {
 	const { deps, emitted } = makeHarness({
 		fetchBodies: (): Promise<FetchedBodies> =>
 			Promise.resolve({
@@ -5297,35 +5187,33 @@ test("processMessage: body-fetch failure on a message with NO prior snippet emit
 				fetchFailed: true,
 				failureClass: "imap_body_fetch_transient",
 			}),
-		messageSnippetCursor: cursor,
 		wantMessages: true,
 	});
 	await processMessage(deps, makeMsg());
 	assert.equal(
 		emitted.find((r) => r.stream === "messages")?.data.snippet,
 		null,
-		"first run has nothing to carry forward, so null is the honest value",
+		"a UID the forward/historical walk visits for the first and only time has no prior snippet to protect",
 	);
 });
 
-test("processMessage: a successful fetch's empty snippet is NOT overridden by a stale prior value", async () => {
-	const msg = makeMsg();
-	const cursor = makeSnippetCursor([[String(msg.emailId), "old snippet"]]);
-	const { deps, emitted } = makeHarness({
-		fetchBodies: (): Promise<FetchedBodies> =>
-			Promise.resolve({ bodyHtmlFull: null, bodyTextFull: "", snippet: "" }),
-		messageSnippetCursor: cursor,
-		wantMessages: true,
-	});
-	await processMessage(deps, msg);
-	assert.equal(
-		emitted.find((r) => r.stream === "messages")?.data.snippet,
-		"",
-		"a genuinely empty snippet this run observed is not a failure to carry-forward over",
+/** Narrow a captured JSONL protocol stream (see the stdout-capture pattern
+ *  used throughout this file, e.g. `runAllMailPasses: first historical
+ *  page...`) to a `messages`-stream DETAIL_GAP, or null. `runDeltaPass`
+ *  emits protocol messages (PROGRESS, DETAIL_GAP) through the module-level
+ *  `emit`, which writes real JSONL to `process.stdout` — there is no
+ *  `emitProtocol` dependency to inject, so capturing stdout is the only way
+ *  to observe them from a test. */
+function findMessagesStreamGap(
+	protocolMessages: readonly Record<string, unknown>[],
+): DetailGapMessage | null {
+	const gap = protocolMessages.find(
+		(m) => m.type === "DETAIL_GAP" && m.stream === "messages",
 	);
-});
+	return gap ? (gap as unknown as DetailGapMessage) : null;
+}
 
-test("runDeltaPass: body-fetch failure carries the PRIOR snippet forward instead of blanking it", async () => {
+test("runDeltaPass: body-fetch failure skips the messages record (stored snippet survives) and records a retryable DETAIL_GAP", async () => {
 	const delta = makeMsg({
 		uid: 102,
 		emailId: "gmmsgid-delta-fail",
@@ -5344,9 +5232,86 @@ test("runDeltaPass: body-fetch failure carries the PRIOR snippet forward instead
 			failureClass: "imap_body_fetch_transient",
 		}),
 	);
-	const cursor = makeSnippetCursor([
-		["gmmsgid-delta-fail", "previously collected snippet"],
-	]);
+	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
+	const emitRecord = (
+		stream: string,
+		data: Record<string, unknown>,
+	): Promise<void> => {
+		emitted.push({ data, stream });
+		return Promise.resolve();
+	};
+
+	const originalWrite = globalThis.process.stdout.write;
+	const protocolMessages: Record<string, unknown>[] = [];
+	globalThis.process.stdout.write = ((data: string): boolean => {
+		if (typeof data === "string") {
+			try {
+				protocolMessages.push(JSON.parse(data) as Record<string, unknown>);
+			} catch {
+				// Ignore non-protocol output.
+			}
+		}
+		return true;
+	}) as typeof process.stdout.write;
+
+	try {
+		await runDeltaPass(
+			{ fetch } as unknown as Pick<ImapFlow, "fetch">,
+			{ fullResync: false, priorModseq: 1n } as unknown as Parameters<
+				typeof runDeltaPass
+			>[1],
+			makeRequested(["messages"]),
+			emitRecord,
+			"2026-08-20T00:00:00.000Z",
+			fetchBodies as unknown as Parameters<typeof runDeltaPass>[5],
+		);
+	} finally {
+		globalThis.process.stdout.write = originalWrite;
+	}
+
+	assert.equal(
+		emitted.filter((r) => r.stream === "messages").length,
+		0,
+		"no record is emitted — emitting ANY record (even with snippet:null) would replace the stored row wholesale",
+	);
+	const gap = findMessagesStreamGap(protocolMessages);
+	assert.ok(gap, "a failed re-fetch must leave a retryable gap, not silence");
+	assert.equal(gap.record_key, "gmmsgid-delta-fail");
+	assert.equal(gap.status, "pending");
+	assert.equal(gap.retryable, true);
+	assert.equal(gap.reference_only, true);
+	assert.equal(
+		gap.parent_stream,
+		undefined,
+		"messages is the parent stream itself, not a child detail stream",
+	);
+	const locator = gap.detail_locator as Record<string, unknown>;
+	assert.equal(locator.kind, "gmail.message_delta_snippet_detail");
+	assert.equal(locator.message_id, "gmmsgid-delta-fail");
+	assert.equal(gap.last_error?.class, "imap_body_fetch_transient");
+});
+
+test("runDeltaPass: a later run whose fetch succeeds emits the full record normally", async () => {
+	// Demonstrates recovery with NO shared state between calls — unlike the
+	// removed carry-forward cursor, nothing here persists a value across
+	// runs; the stored row simply stays whatever it was until a run with a
+	// working fetch replaces it with fresh, real data.
+	const delta = makeMsg({
+		uid: 103,
+		emailId: "gmmsgid-delta-recovered",
+		flags: new Set(["\\Seen"]),
+	});
+	// biome-ignore lint/suspicious/useAwait: stands in for ImapFlow.fetch's async-iterable-returning signature.
+	const fetch = mock.fn(async function* () {
+		yield delta;
+	});
+	const fetchBodies = mock.fn(() =>
+		Promise.resolve({
+			bodyHtmlFull: null,
+			bodyTextFull: "Hello there",
+			snippet: "Hello there",
+		}),
+	);
 	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
 	const emitRecord = (
 		stream: string,
@@ -5365,45 +5330,52 @@ test("runDeltaPass: body-fetch failure carries the PRIOR snippet forward instead
 		emitRecord,
 		"2026-08-20T00:00:00.000Z",
 		fetchBodies as unknown as Parameters<typeof runDeltaPass>[5],
-		cursor,
 	);
 
 	const rec = emitted.find((r) => r.stream === "messages");
-	assert.ok(rec, "delta pass still emits a messages record");
-	assert.equal(
-		rec.data.snippet,
-		"previously collected snippet",
-		"delta pass must not blank snippet on a failed re-fetch",
-	);
+	assert.ok(rec, "a working fetch emits the full record");
+	assert.equal(rec.data.snippet, "Hello there");
 });
 
-test("readPriorMessageSnippets: tolerates missing state, missing field, and malformed entries, and keeps null entries", () => {
-	const empty = readPriorMessageSnippets({ type: "START" });
-	assert.equal(empty.size, 0);
-
-	const noField = readPriorMessageSnippets({
-		messages: { all_mail: { uidnext: 5 } },
+test("runDeltaPass: a genuinely bodyless message (fetchFailed false, snippet null) is still emitted with snippet null", async () => {
+	const delta = makeMsg({
+		uid: 104,
+		emailId: "gmmsgid-delta-bodyless",
+		flags: new Set(["\\Seen"]),
 	});
-	assert.equal(noField.size, 0);
-
-	const messy = readPriorMessageSnippets({
-		messages: {
-			snippet_carry_forward: {
-				"gmmsgid-good": "a real snippet",
-				"gmmsgid-null": null,
-				"gmmsgid-bad": 42,
-				"gmmsgid-obj": { nested: true },
-			},
-		},
+	// biome-ignore lint/suspicious/useAwait: stands in for ImapFlow.fetch's async-iterable-returning signature.
+	const fetch = mock.fn(async function* () {
+		yield delta;
 	});
-	assert.equal(messy.get("gmmsgid-good"), "a real snippet");
-	assert.equal(
-		messy.get("gmmsgid-null"),
-		null,
-		"a carried null is a real value, not an absent key",
+	const fetchBodies = mock.fn(() =>
+		Promise.resolve({ bodyHtmlFull: null, bodyTextFull: null, snippet: null }),
 	);
-	assert.equal(messy.has("gmmsgid-bad"), false, "non-string/null is dropped");
-	assert.equal(messy.has("gmmsgid-obj"), false, "non-string/null is dropped");
+	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
+	const emitRecord = (
+		stream: string,
+		data: Record<string, unknown>,
+	): Promise<void> => {
+		emitted.push({ data, stream });
+		return Promise.resolve();
+	};
+
+	await runDeltaPass(
+		{ fetch } as unknown as Pick<ImapFlow, "fetch">,
+		{ fullResync: false, priorModseq: 1n } as unknown as Parameters<
+			typeof runDeltaPass
+		>[1],
+		makeRequested(["messages"]),
+		emitRecord,
+		"2026-08-20T00:00:00.000Z",
+		fetchBodies as unknown as Parameters<typeof runDeltaPass>[5],
+	);
+
+	const rec = emitted.find((r) => r.stream === "messages");
+	assert.ok(
+		rec,
+		"a genuinely bodyless message still gets a record (fetchFailed is false, not a failure)",
+	);
+	assert.equal(rec.data.snippet, null);
 });
 
 // A schema-REJECTED body record is the sibling loss: `emitRecord` returns false,
