@@ -1125,7 +1125,7 @@ The runtime sends `START` to initialize one run.
 
 Each scope stream has a REQUIRED `name`. `resources` is an OPTIONAL array of
 canonical record-key strings. `fields` is an OPTIONAL array of top-level record
-fields. `time_range` is an OPTIONAL object with `since` and `until` timestamps.
+fields. `time_range` is an OPTIONAL object with `since` and `until` bounds.
 A runtime MUST resolve wildcards and view names before `START`. It MUST NOT send
 a wildcard stream name or an issuance-time `necessity` value.
 
@@ -1134,12 +1134,33 @@ the minified JSON array of its string components in `primary_key` order. For
 example, `["user-1","2026-09-02"]` is one canonical key string. Each
 `resources` entry uses this form.
 
-`time_range.since` and `time_range.until` MUST be ISO 8601 timestamps. `since`
-is inclusive and `until` is exclusive. The connector applies both bounds to
-the declared `consent_time_field`. A runtime MUST NOT send `time_range` for a
-stream without that field. During a time-bounded run, the connector MUST NOT
-emit a record whose consent-time value is absent, null, or not a valid ISO 8601
-timestamp.
+The connector applies `time_range.since` and `time_range.until` to the
+stream's declared `consent_time_field`. `since` is inclusive and `until` is
+exclusive. A runtime MUST NOT send `time_range` for a stream without that
+field.
+
+The bounds have the type of that field's declared format. `time_range` belongs
+to one scope stream, so one run can mix the two types:
+
+| Field schema | Bound type | Comparison |
+| --- | --- | --- |
+| `format: "date"` | RFC 3339 `full-date` | as calendar dates |
+| `format: "date-time"`, or a string with no `format` | RFC 3339 `date-time` with a time-zone offset | as exact instants |
+
+A runtime MUST NOT turn an instant into a date or a date into an instant to
+make a bound. It sends a bound that comes from a grant without changing it.
+When it chooses a window itself, for example the owner's "last 30 days", it
+states the window in the field's type, such as `since: "2026-09-05"` for a
+date field. A widened bound collects records outside the window, and a
+narrowed bound loses records at the edge of a day. A connector that receives a
+bound of the wrong type for the field, or a bound for a field of any other
+type, such as an epoch integer, MUST emit `SKIP_RESULT` with
+`reason: "scope_not_supported"` for that stream.
+
+During a time-bounded run, the connector MUST NOT emit a record whose
+consent-time value is absent, null, or not a valid value of the bound type:
+a `full-date` for a date field, or a `date-time` with an offset for an instant
+field. A `date-time` with no offset is not an instant.
 
 `now` stabilizes the decisions a connector derives from the current time. When
 `now` is present, a connector SHOULD use it instead of its own clock to compute
