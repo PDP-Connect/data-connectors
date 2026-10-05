@@ -305,7 +305,6 @@ test("rowsToTransactions: maps a normal USAA CSV header layout", () => {
 	assert.equal(first.amount, -450);
 	assert.equal(first.balance_after_cents, 10_000);
 	assert.equal(first.source, "csv_export");
-	assert.equal(first.fetched_at, "2026-04-22T00:00:00Z");
 });
 
 test("rowsToTransactions: empty description falls back to original; empty original falls back to description", () => {
@@ -603,7 +602,6 @@ test("buildAccountRecord: happy path (entity carries identity/settings only, no 
 	assert.equal(rec.name, "Primary Checking");
 	assert.equal(rec.last_four, "1234");
 	assert.equal(rec.status, "open");
-	assert.equal(rec.fetched_at, "2026-04-22T00:00:00Z");
 	// Point-in-time balances moved to account_stats; the entity no longer carries them.
 	assert.equal("balance_cents" in rec, false, "entity drops balance_cents");
 	assert.equal(

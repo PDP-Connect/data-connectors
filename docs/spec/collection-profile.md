@@ -1400,6 +1400,13 @@ already committed observable.
 `message` is REQUIRED. `stream`, `count`, and `total` are OPTIONAL. `PROGRESS`
 does not change connector state and does not prove collection coverage.
 
+`message` is owner-facing text. A runtime MAY show it to the owner verbatim.
+It SHOULD be a short plain-language description of the current stage, such as
+"Fetching conversations" or "Found 120 orders". It SHOULD NOT carry internal
+codes, identifiers, `key=value` counters, file paths, HTTP details, or raw
+error text. A connector writes that technical detail to standard error as a
+diagnostic (§4), and carries machine-readable counts in `count` and `total`.
+
 ## 6. Conformance
 
 ### 6.1 Connector conformance

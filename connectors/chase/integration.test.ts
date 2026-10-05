@@ -921,30 +921,6 @@ test("emitNoActivityProgress: reports checked/no-activity without advancing curs
 	);
 });
 
-// ─── Invariant 6: emittedAt propagates into every record's fetched_at ────
-
-test("emittedAt propagates into accounts.fetched_at + transactions.fetched_at + statements.fetched_at", async () => {
-	const { deps, emitted } = makeHarness();
-	const account = makeAccount();
-	await emitAccountsStream(deps, [account]);
-	await emitTransactionsForAccount(deps, account, "all", [makeTx()]);
-	await emitStatementIndexOnly(
-		deps,
-		"stmt-id",
-		makeStatementRow(),
-		"INTACC123",
-		"2026-04-13",
-	);
-
-	for (const r of emitted) {
-		assert.equal(
-			r.data.fetched_at,
-			FROZEN_EMITTED_AT,
-			`fetched_at on stream=${r.stream} must be the frozen emittedAt, got ${String(r.data.fetched_at)}`,
-		);
-	}
-});
-
 // ─── Invariant 7a: accountsResFilter narrows the filtered-accounts list ──
 
 test("filterAccountsByScope: resFilter on 'accounts' stream narrows to matching internal_ids", () => {

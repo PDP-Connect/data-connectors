@@ -9,7 +9,7 @@
 	},
 	"connector_key": "usaa",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-	"version": "0.1.5",
+	"version": "0.2.0",
 	"display_name": "USAA",
 	"runtime_requirements": {
 		"bindings": {
@@ -98,11 +98,6 @@
 					},
 					"status": {
 						"type": ["string", "null"]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id"]
@@ -239,10 +234,6 @@
 					},
 					"source": {
 						"type": "string"
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time"
 					}
 				},
 				"required": ["id", "account_id", "date", "amount", "currency"]
@@ -371,11 +362,6 @@
 					"pdf_page_count": {
 						"type": ["integer", "null"],
 						"description": "Integer page count from the PDF structure. A structural content invariant alongside pdf_text_sha256. Null when extraction failed."
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id", "title"]
@@ -443,11 +429,6 @@
 					},
 					"preview": {
 						"type": ["string", "null"]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id"]
@@ -498,7 +479,8 @@
 						"type": ["string", "null"]
 					},
 					"account_nickname": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
 					},
 					"credit_limit_cents": {
 						"type": ["integer", "null"]
@@ -511,11 +493,6 @@
 					},
 					"card_holders": {
 						"type": ["string", "null"]
-					},
-					"fetched_at": {
-						"type": "string",
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
 					}
 				},
 				"required": ["id"]

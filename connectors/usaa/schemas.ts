@@ -29,10 +29,6 @@ const dateString = z
 	.string()
 	.regex(/^\d{4}-\d{2}-\d{2}$/, "must be YYYY-MM-DD");
 
-const isoTimestamp = z
-	.string()
-	.regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "must be ISO-8601 timestamp");
-
 // Cents can be any integer (transactions sign negatively; balances can be
 // negative for overdrawn accounts). Keep a sane upper bound — $100M is
 // more than enough for a consumer account.
@@ -67,7 +63,6 @@ export const accountSchema = z.object({
 		.regex(/^\d{4}$/, "must be 4 digits")
 		.nullable(),
 	status: z.string().min(1).max(40).nullable(),
-	fetched_at: isoTimestamp,
 });
 
 // ─── account_stats (Family-2 observation stream) ─────────────────────────
@@ -109,7 +104,6 @@ export const transactionSchema = z.object({
 			/^(csv_export|pdf_statement_\d{4}-\d{2})$/,
 			"must be csv_export or pdf_statement_YYYY-MM",
 		),
-	fetched_at: isoTimestamp,
 });
 
 // ─── statements ─────────────────────────────────────────────────────────
@@ -138,7 +132,6 @@ export const statementSchema = z.object({
 		.nullable(),
 	// Integer page count from the PDF structure; null when extraction failed.
 	pdf_page_count: z.number().int().positive().nullable(),
-	fetched_at: isoTimestamp,
 });
 
 // ─── inbox_messages ─────────────────────────────────────────────────────
@@ -149,7 +142,6 @@ export const inboxMessageSchema = z.object({
 	status: z.string().min(1).max(40).nullable(),
 	subject: cleanString(400).nullable(),
 	preview: cleanString(1000).nullable(),
-	fetched_at: isoTimestamp,
 });
 
 // ─── credit_card_billing ────────────────────────────────────────────────
@@ -169,7 +161,6 @@ export const creditCardBillingSchema = z.object({
 		.regex(/^-?\d+\.?\d*%?$/, "must be percentage")
 		.nullable(),
 	card_holders: z.string().min(1).max(400).nullable(),
-	fetched_at: isoTimestamp,
 });
 
 // ─── credit_card_billing_stats (Family-2 observation stream) ─────────────

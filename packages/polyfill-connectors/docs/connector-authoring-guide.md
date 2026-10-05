@@ -602,7 +602,7 @@ Before a new connector is considered usable by another user:
 
 ## 10. Versioning and drift
 
-- Connector version is declared in the manifest. Bump it when schemas change, when selector strategies change materially, or when STATE cursor shape changes.
+- Connector version is declared in the manifest. Bump it when schemas change, when selector strategies change materially, or when STATE cursor shape changes. Before 1.0.0, a breaking schema change (a removed property or a newly required field) bumps the minor version. A connector moves to 1.0.0 only when a maintainer promotes it after verifying it works well in production; from then on, a breaking change bumps the major version.
 - Keep a short `CHANGES` section in the connector's header comment (or adjacent `.md`) noting "v0.3 — switched item extraction from innerText-regex to data-component (2026-04-21)". Future readers will thank you.
 - When selectors break (inevitably they will), resist the urge to silently edit them. Bump the connector version; commit with a message that names the drift observed.
 

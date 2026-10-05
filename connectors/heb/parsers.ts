@@ -897,7 +897,9 @@ export function redactHebListPageDiagnostics(
 export function buildOrderRecord(
 	listOrder: ListPageOrder,
 	orderDate: string,
-	emittedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_emittedAt: string,
 ): OrdersRecord {
 	return {
 		id: listOrder.orderId,
@@ -913,7 +915,6 @@ export function buildOrderRecord(
 		total: listOrder.total,
 		total_cents: parseCurrencyCents(listOrder.total),
 		item_count: listOrder.itemCount,
-		fetched_at: emittedAt,
 	};
 }
 
@@ -954,7 +955,9 @@ export function buildOrderItemRecord(
 	orderDate: string,
 	item: DetailItem,
 	itemIndex: number,
-	emittedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_emittedAt: string,
 	siblingItems: readonly DetailItem[] = [item],
 ): OrderItemRecord {
 	return {
@@ -969,7 +972,6 @@ export function buildOrderItemRecord(
 		line_total: item.lineTotal,
 		line_total_cents: parseCurrencyCents(item.lineTotal),
 		order_date: orderDate,
-		fetched_at: emittedAt,
 	};
 }
 
@@ -1049,12 +1051,13 @@ export function buildProfileRecord(
 		name: string | null;
 		phone: string | null;
 	},
-	emittedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_emittedAt: string,
 ): ProfileRecord {
 	return {
 		delivery_addresses: extraction.deliveryAddresses,
 		email: extraction.email,
-		fetched_at: emittedAt,
 		id: HEB_PROFILE_RECORD_ID,
 		name: extraction.name,
 		phone: extraction.phone,
@@ -1324,7 +1327,9 @@ export function buildNutritionRecord(
 	productId: string,
 	extraction: NutritionDomExtraction,
 	fallbackName: string,
-	emittedAt: string,
+	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
+	// Kept positionally so call sites and siblings stay stable.
+	_emittedAt: string,
 	productUrl: string | null,
 	sourceOverride?: NutritionSource,
 ): NutritionRecord {
@@ -1340,7 +1345,6 @@ export function buildNutritionRecord(
 		cholesterol_mg: extraction.cholesterolMg,
 		confidence: source === "heb_product_page" ? "high" : "low",
 		fat_g: extraction.fatG,
-		fetched_at: emittedAt,
 		fiber_g: extraction.fiberG,
 		highlights: extraction.highlights,
 		id: productId,

@@ -29,8 +29,6 @@ const dateTimeString = z
 	.string()
 	.regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "must be ISO-8601 timestamp");
 
-const isoTimestamp = dateTimeString;
-
 // Cents: integer, can be negative (overdrawn accounts / charge transactions).
 // Upper bound $100M — more than enough for consumer banking.
 const cents = z.number().int().min(-10_000_000_000).max(10_000_000_000);
@@ -68,7 +66,6 @@ export const accountSchema = z.object({
 	statement_balance_cents: cents.nullable(),
 	status: z.string().min(1).max(40).nullable(),
 	balance_as_of: dateTimeString.nullable(),
-	fetched_at: isoTimestamp,
 });
 
 // ─── transactions ───────────────────────────────────────────────────────
@@ -99,7 +96,6 @@ export const transactionSchema = z.object({
 	// Keep the schema permissive — the source is provenance metadata,
 	// not something a consumer should regex on.
 	source: z.string().min(3).max(120),
-	fetched_at: isoTimestamp,
 });
 
 // ─── current_activity ───────────────────────────────────────────────────
@@ -121,7 +117,6 @@ export const currentActivitySchema = z.object({
 	memo: cleanString(500).nullable(),
 	ui_transaction_id: z.string().min(1).max(160).nullable(),
 	source: z.literal("chase_activity_ui"),
-	fetched_at: isoTimestamp,
 });
 
 // ─── statements ─────────────────────────────────────────────────────────
@@ -149,7 +144,6 @@ export const statementSchema = z.object({
 		.nullable(),
 	// Integer page count from the PDF structure; null when extraction failed.
 	pdf_page_count: z.number().int().positive().nullable(),
-	fetched_at: isoTimestamp,
 });
 
 // ─── balances ───────────────────────────────────────────────────────────
@@ -160,7 +154,6 @@ export const balanceSchema = z.object({
 	as_of: dateTimeString,
 	ledger_balance_cents: cents.nullable(),
 	available_balance_cents: cents.nullable(),
-	fetched_at: isoTimestamp,
 });
 
 // ─── Registry ───────────────────────────────────────────────────────────

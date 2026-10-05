@@ -1365,6 +1365,9 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"usaa.inbox_messages",
 	"usaa.credit_card_billing",
 	"usaa.credit_card_billing_stats",
+	// Uber (browser + auth-walled; no credential-free fixture yet, same
+	// shape as Chase above).
+	"uber.trips",
 	"venmo.profile",
 	"venmo.friends",
 	"venmo.transactions",

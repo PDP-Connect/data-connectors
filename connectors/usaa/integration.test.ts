@@ -648,31 +648,6 @@ test("emitStatementRecords: duplicate rowIndex in indexRows emits once per row e
 	);
 });
 
-// ─── Invariant 6: emittedAt propagation into the accounts record ─────────
-
-test("emitAccountsStream: emittedAt propagates into every accounts record's fetched_at", async () => {
-	const { deps, emitted } = makeHarness();
-	const frozen = "2026-01-15T08:00:00.000Z";
-	const accounts = [
-		makeAccount({ account_id_raw: "A1" }),
-		makeAccount({
-			account_id_raw: "A2",
-			name: "USAA SAVINGS",
-			account_type: "savings",
-		}),
-	];
-	await emitAccountsStream(deps, accounts, frozen);
-	const accountRecords = emitted.filter((r) => r.stream === "accounts");
-	assert.equal(accountRecords.length, 2);
-	for (const r of accountRecords) {
-		assert.equal(
-			r.data.fetched_at,
-			frozen,
-			`fetched_at on account id=${String(r.data.id)} must be the frozen emittedAt`,
-		);
-	}
-});
-
 // ─── Invariant 7: backfill ladder exhausted → SKIP_RESULT shape ──────────
 
 test("emitExportFailure: a missing export affordance is reported as a structure-changed outcome, not export_no_download", async () => {
