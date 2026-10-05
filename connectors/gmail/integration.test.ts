@@ -95,6 +95,7 @@ import {
 	isoToImapDate,
 	makeAttachmentDetailCoverage,
 	makeAttachmentHydrator,
+	parseDeltaHoldbackRuns,
 	type PerMessageDeps,
 	processMessage,
 	recordAttachmentCoverage,
@@ -106,6 +107,7 @@ import {
 	resolveAttachmentProgressMinIntervalMs,
 	resolveAttachmentRecoveryPageByteBudget,
 	resolveAttachmentStallTimeoutMs,
+	resolveDeltaCursorAdvance,
 	resolveGmailAddressFromEnv,
 	resolveGmailPasswordFromEnv,
 	resolveMaxAttachmentBytes,
@@ -2509,6 +2511,9 @@ test("runAllMailPasses: scheduled runs advance historical pages while forwarding
 			exists: 1200,
 			forward_uidnext: 1201,
 			highest_modseq: null,
+			// No delta-pass skip this run (first run is a full resync — runDeltaPass
+			// is a no-op), so the hold-back streak stays at its zero default.
+			delta_holdback_runs: 0,
 			uidnext: 501,
 			uidvalidity: 123,
 		});
@@ -2783,6 +2788,88 @@ test("runAllMailPasses: a completed historical walk reopens for new mail instead
 	}
 });
 
+test("parseDeltaHoldbackRuns: tolerates missing/malformed input, otherwise passes a valid non-negative integer through", () => {
+	assert.equal(parseDeltaHoldbackRuns(undefined), 0, "absent — pre-counter state");
+	assert.equal(parseDeltaHoldbackRuns(null), 0);
+	assert.equal(parseDeltaHoldbackRuns("2"), 0, "non-number");
+	assert.equal(parseDeltaHoldbackRuns(-1), 0, "negative");
+	assert.equal(parseDeltaHoldbackRuns(1.5), 0, "fractional");
+	assert.equal(parseDeltaHoldbackRuns(Number.NaN), 0);
+	assert.equal(parseDeltaHoldbackRuns(Number.POSITIVE_INFINITY), 0);
+	assert.equal(parseDeltaHoldbackRuns(0), 0, "a valid zero passes through");
+	assert.equal(parseDeltaHoldbackRuns(2), 2, "a valid positive integer passes through");
+});
+
+test("resolveDeltaCursorAdvance: no skip always advances to the live value and resets the streak to 0, regardless of prior streak", () => {
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 0,
+			priorModseq: 400,
+			skippedAnyMessage: false,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+	);
+	// Proves "no counter growth on clean runs" at the unit level: even a
+	// nonzero prior streak resets the instant a run has nothing to skip.
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 5,
+			priorModseq: 400,
+			skippedAnyMessage: false,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+	);
+});
+
+test("resolveDeltaCursorAdvance: a skip holds the prior modseq and climbs the streak while under the limit", () => {
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 0,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 400, holdbackRuns: 1 },
+		"first held-back run",
+	);
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 1,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 400, holdbackRuns: 2 },
+		"second held-back run — still under DELTA_HOLDBACK_RUN_LIMIT (3)",
+	);
+});
+
+test("resolveDeltaCursorAdvance: a skip that would reach the limit advances anyway and resets the streak", () => {
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 2,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+		"the third consecutive skip hits the limit — advance, don't stall forever",
+	);
+	// Defensive: even a prior streak already past the limit (e.g. the limit
+	// was lowered, or state was hand-edited) never gets stuck.
+	assert.deepEqual(
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: 500,
+			priorHoldbackRuns: 10,
+			priorModseq: 400,
+			skippedAnyMessage: true,
+		}),
+		{ highestModseq: 500, holdbackRuns: 0 },
+	);
+});
+
 // ─── Invariant: a skipped delta message must hold highest_modseq back ───
 //
 // REGRESSION EVIDENCE. The messages STATE cursor's `highest_modseq` was
@@ -2796,7 +2883,7 @@ test("runAllMailPasses: a completed historical walk reopens for new mail instead
 // forever. `runDeltaPass` now reports `skippedAnyMessage`, and this run's
 // STATE holds `highest_modseq` at the prior value whenever that is true, so
 // the next run's `changedSince` re-covers exactly the same window.
-test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq at the prior value; a later successful run advances it with the full record", async () => {
+test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq (and bumps delta_holdback_runs) at the prior value; a later successful run advances both", async () => {
 	const originalWrite = globalThis.process.stdout.write;
 	const protocolMessages: Record<string, unknown>[] = [];
 	const emitted: Array<{ data: Record<string, unknown>; stream: string }> = [];
@@ -2908,6 +2995,11 @@ test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq at 
 			100,
 			"first run adopts the live highestModseq as the baseline",
 		);
+		assert.equal(
+			(afterRun1.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+			"no skip on a full resync — the hold-back streak starts at 0",
+		);
 
 		// Run 2: mail state advances (live highestModseq 100 -> 150) and the
 		// tracked message's snippet re-fetch FAILS. No record for it may emit
@@ -2928,6 +3020,11 @@ test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq at 
 			100,
 			"a skipped delta message holds highest_modseq at the prior value, not the live one",
 		);
+		assert.equal(
+			(afterRun2.all_mail as Record<string, unknown>).delta_holdback_runs,
+			1,
+			"the first held-back run starts the streak at 1",
+		);
 
 		// Run 3: same prior floor (100, carried from run 2's held-back STATE) —
 		// this time the re-fetch SUCCEEDS and the tracked message's labels have
@@ -2946,6 +3043,167 @@ test("runAllMailPasses: a failed delta snippet re-fetch holds highest_modseq at 
 			(afterRun3.all_mail as Record<string, unknown>).highest_modseq,
 			150,
 			"no skips this run — highest_modseq advances to the live value like before this fix",
+		);
+		assert.equal(
+			(afterRun3.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+			"a success after one held-back run resets the streak to 0",
+		);
+	} finally {
+		globalThis.process.stdout.write = originalWrite;
+	}
+});
+
+// ─── Invariant: the hold-back is bounded, not indefinite ──────────────────
+//
+// A message that fails its snippet re-fetch EVERY run (malformed MIME, a
+// message the server always errors on) must not stall highest_modseq
+// forever — that would make every later run's changedSince set grow
+// without bound. After DELTA_HOLDBACK_RUN_LIMIT (3) consecutive held-back
+// runs, the cursor advances anyway; the still-failing message's retryable
+// DETAIL_GAP is what keeps the miss visible in coverage once the cursor
+// moves past it, rather than it going silent.
+test("runAllMailPasses: a persistently failing delta snippet re-fetch is held back up to the limit, then the cursor advances with the gap still present", async () => {
+	const originalWrite = globalThis.process.stdout.write;
+	const protocolMessages: Record<string, unknown>[] = [];
+	globalThis.process.stdout.write = ((data: string): boolean => {
+		if (typeof data === "string") {
+			try {
+				protocolMessages.push(JSON.parse(data) as Record<string, unknown>);
+			} catch {
+				// Ignore non-protocol output.
+			}
+		}
+		return true;
+	}) as typeof process.stdout.write;
+
+	try {
+		let highestModseqLive = 100n;
+		const plainLeaf: MessageStructureObject = {
+			type: "text/plain",
+			encoding: "7bit",
+			parameters: { charset: "utf-8" },
+		};
+
+		const client: Pick<
+			ImapFlow,
+			"close" | "download" | "fetch" | "fetchOne" | "mailbox" | "search"
+		> = {
+			close: mock.fn(),
+			download: () => {
+				throw new Error("download must not be called without attachments");
+			},
+			// ALWAYS fails — the persistently-broken message this test models.
+			fetchOne: () =>
+				Promise.reject(new Error("synthetic persistent IMAP error")),
+			search: mock.fn(() => Promise.resolve([])),
+			mailbox: {
+				delimiter: "/",
+				exists: 1,
+				flags: new Set<string>(),
+				path: "[Gmail]/All Mail",
+				uidNext: 2,
+				uidValidity: 123n,
+				get highestModseq() {
+					return highestModseqLive;
+				},
+			},
+			// biome-ignore lint/suspicious/useAwait: async generator is required by the ImapFlow fetch shape.
+			async *fetch(
+				_range: string,
+				_query: unknown,
+				options?: { changedSince?: bigint },
+			) {
+				if (options?.changedSince === undefined) {
+					return;
+				}
+				yield makeMsg({
+					uid: 1,
+					emailId: "gmmsgid-persistent-fail",
+					bodyStructure: plainLeaf,
+				});
+			},
+		};
+
+		const run = async (
+			state: Record<string, unknown>,
+		): Promise<Record<string, unknown>> => {
+			protocolMessages.length = 0;
+			await runAllMailPasses(client, makeAllMailMailbox(), state, {
+				emitRecord: () => Promise.resolve(true),
+				emittedAt: FROZEN_NOW,
+				requested: makeRequested(["messages"]),
+			});
+			const stateMessage = protocolMessages.find(
+				(message) => message.type === "STATE" && message.stream === "messages",
+			);
+			assert.ok(stateMessage, "each run commits a messages state");
+			return stateMessage.cursor as Record<string, unknown>;
+		};
+		const gapForThisRun = (): Record<string, unknown> | undefined =>
+			protocolMessages.find(
+				(m) =>
+					m.type === "DETAIL_GAP" &&
+					m.stream === "messages" &&
+					(m.detail_locator as Record<string, unknown> | undefined)
+						?.message_id === "gmmsgid-persistent-fail",
+			);
+
+		// Run 1: baseline (full resync — runDeltaPass is a no-op).
+		const afterRun1 = await run({});
+		assert.equal((afterRun1.all_mail as Record<string, unknown>).highest_modseq, 100);
+		assert.equal(
+			(afterRun1.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+		);
+
+		// Runs 2 and 3: the message fails again each time. The cursor holds at
+		// the prior value (100) and the streak climbs 1, then 2 — still below
+		// DELTA_HOLDBACK_RUN_LIMIT (3).
+		highestModseqLive = 999n; // the "live" value every held-back run must NOT adopt
+		const afterRun2 = await run({ messages: afterRun1 });
+		assert.equal(
+			(afterRun2.all_mail as Record<string, unknown>).highest_modseq,
+			100,
+			"held back — run 1 of persistent failure",
+		);
+		assert.equal(
+			(afterRun2.all_mail as Record<string, unknown>).delta_holdback_runs,
+			1,
+		);
+		assert.ok(gapForThisRun(), "a retryable gap is recorded for the failing message");
+
+		const afterRun3 = await run({ messages: afterRun2 });
+		assert.equal(
+			(afterRun3.all_mail as Record<string, unknown>).highest_modseq,
+			100,
+			"held back — run 2 of persistent failure",
+		);
+		assert.equal(
+			(afterRun3.all_mail as Record<string, unknown>).delta_holdback_runs,
+			2,
+		);
+		assert.ok(gapForThisRun(), "a retryable gap is recorded for the failing message");
+
+		// Run 4: the THIRD consecutive failure. The streak would reach the
+		// limit, so this run advances highest_modseq to the live value anyway
+		// — the cursor must not stall forever — and the streak resets to 0.
+		// The gap for the still-failing message is still present: the miss
+		// stays visible in coverage even though the cursor moved past it.
+		const afterRun4 = await run({ messages: afterRun3 });
+		assert.equal(
+			(afterRun4.all_mail as Record<string, unknown>).highest_modseq,
+			999,
+			"the bound is reached — the cursor advances despite the ongoing failure",
+		);
+		assert.equal(
+			(afterRun4.all_mail as Record<string, unknown>).delta_holdback_runs,
+			0,
+			"hitting the limit resets the streak",
+		);
+		assert.ok(
+			gapForThisRun(),
+			"the still-failing message's gap is kept even as the cursor advances past it",
 		);
 	} finally {
 		globalThis.process.stdout.write = originalWrite;
@@ -3591,6 +3849,7 @@ test("runAttachmentBackfillAndRecoveryPass: served gaps preempt historical attac
 				backfilled_through_uid: 0,
 				completed_at: null,
 			},
+			priorDeltaHoldbackRuns: 0,
 			priorModseq: null,
 			priorUidnext: 500,
 			uidnext: 600,
@@ -3828,6 +4087,7 @@ test("runAttachmentBackfillAndRecoveryPass: recoveryOnly=true recovers served ga
 				backfilled_through_uid: 0,
 				completed_at: null,
 			},
+			priorDeltaHoldbackRuns: 0,
 			priorModseq: null,
 			priorUidnext: 500,
 			uidnext: 600,

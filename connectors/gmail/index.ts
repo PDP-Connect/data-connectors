@@ -118,6 +118,13 @@ const EMAIL_SPLIT_RE = /^(.*)@([^@]+)$/;
 
 const FETCH_HEADER_BATCH_PROGRESS = 1000;
 const SNIPPET_FETCH_MAX_BYTES = 4096;
+// Bounds runDeltaPass's highest_modseq hold-back (see runAllMailPasses's
+// STATE emission): after this many CONSECUTIVE runs held back because of a
+// skipped delta message, the next run advances highest_modseq anyway rather
+// than letting one persistently-failing message (malformed MIME, a message
+// the server always errors on) stall the cursor forever and grow every
+// later run's changedSince set without bound.
+const DELTA_HOLDBACK_RUN_LIMIT = 3;
 const ERROR_MSG_TAIL = 400;
 const DEFAULT_CRED_TIMEOUT_S = 1800;
 const DEFAULT_GMAIL_CONNECTOR_ID = "https://registry.pdpp.dev/connectors/gmail";
@@ -1540,6 +1547,9 @@ interface AllMailSession {
 	fullResync: boolean;
 	highestModseqCursor: number | string | null;
 	messagesBackfill: MessagesBackfillCursor;
+	/** See `AllMailCursor.delta_holdback_runs`. Always a non-negative integer —
+	 *  tolerantly parsed, defaulting to 0 for absent/malformed prior state. */
+	priorDeltaHoldbackRuns: number;
 	priorExistsTotal: number | undefined;
 	priorModseq: number | string | null | undefined;
 	priorUidnext: number;
@@ -1585,6 +1595,60 @@ function validateExistsTotal(
 		);
 	}
 	return value;
+}
+
+/**
+ * Tolerantly parse the prior `all_mail.delta_holdback_runs` counter.
+ * Absent (state written before this counter existed), non-number, negative,
+ * non-finite, or fractional input all read as 0 — the safe default is "not
+ * currently held back," never a crash and never a negative/fractional count
+ * that could make the `>= DELTA_HOLDBACK_RUN_LIMIT` comparison misbehave.
+ */
+export function parseDeltaHoldbackRuns(value: unknown): number {
+	if (
+		typeof value !== "number" ||
+		!Number.isFinite(value) ||
+		value < 0 ||
+		!Number.isInteger(value)
+	) {
+		return 0;
+	}
+	return value;
+}
+
+/**
+ * Decide this run's `messages.all_mail.highest_modseq` and
+ * `delta_holdback_runs`, given whether `runDeltaPass` skipped a message.
+ * Pure — the bound (`DELTA_HOLDBACK_RUN_LIMIT`) lives here so it has one
+ * seam to unit-test independent of a full `runAllMailPasses` + IMAP mock.
+ *
+ *   - No skip this run: advance to the live value, counter resets to 0 —
+ *     a clean run always clears the streak, matching `runDeltaPass`'s own
+ *     "not lossy" framing of `!requested.has("messages")`.
+ *   - Skip, and the streak (prior + this run) has not yet reached the
+ *     limit: hold `highest_modseq` at `priorModseq`, counter becomes the
+ *     new streak length.
+ *   - Skip, and the streak WOULD reach the limit: advance to the live
+ *     value anyway (the cursor must not stall forever on one persistently-
+ *     failing message) and reset the counter to 0 — the still-failing
+ *     message's retryable DETAIL_GAP (emitted by `runDeltaPass` itself,
+ *     independent of this decision) is what keeps the miss visible in
+ *     coverage once the cursor moves past it.
+ */
+export function resolveDeltaCursorAdvance(args: {
+	liveHighestModseq: number | string | null;
+	priorHoldbackRuns: number;
+	priorModseq: number | string | null | undefined;
+	skippedAnyMessage: boolean;
+}): { highestModseq: number | string | null; holdbackRuns: number } {
+	if (!args.skippedAnyMessage) {
+		return { highestModseq: args.liveHighestModseq, holdbackRuns: 0 };
+	}
+	const streak = args.priorHoldbackRuns + 1;
+	if (streak >= DELTA_HOLDBACK_RUN_LIMIT) {
+		return { highestModseq: args.liveHighestModseq, holdbackRuns: 0 };
+	}
+	return { highestModseq: args.priorModseq ?? null, holdbackRuns: streak };
 }
 
 /**
@@ -1652,6 +1716,9 @@ function deriveAllMailSession(
 					},
 		fullResync: !priorUidvalidity || priorUidvalidity !== uidvalidityNum,
 		highestModseqCursor: bigintToCursor(mailbox.highestModseq),
+		priorDeltaHoldbackRuns: parseDeltaHoldbackRuns(
+			priorAllMail.delta_holdback_runs,
+		),
 		priorModseq: priorAllMail.highest_modseq,
 		priorUidnext: priorAllMail.forward_uidnext ?? priorAllMail.uidnext ?? 1,
 		uidnext: mailbox.uidNext,
@@ -3989,6 +4056,16 @@ export function validateAttachmentHydrationPreflight(args: {
  * treats a byte-identical re-emit as a no-op (`postgres-records.ts`'s
  * `IS NOT DISTINCT FROM`).
  *
+ * The hold-back itself is bounded, not indefinite (`resolveDeltaCursorAdvance`,
+ * `DELTA_HOLDBACK_RUN_LIMIT`): a message that fails PERSISTENTLY (a malformed
+ * MIME structure, a message the server always errors on) would otherwise
+ * stall `highest_modseq` forever and make every later run's `changedSince`
+ * set grow without bound. After `DELTA_HOLDBACK_RUN_LIMIT` consecutive
+ * held-back runs, `runAllMailPasses` advances `highest_modseq` anyway; the
+ * still-failing message's retryable DETAIL_GAP (emitted below, independent
+ * of the cursor decision) is what keeps that miss visible in coverage once
+ * the cursor moves past it, rather than it going silent.
+ *
  * Both skip sites in this function set it: a thrown snippet re-fetch above,
  * and the pre-existing envelope-absent skip below (same defect — an
  * envelope-free message was ALREADY being skipped to avoid blanking the
@@ -4705,9 +4782,22 @@ export async function runAllMailPasses(
 	// to cause). Holding the floor at `priorModseq` repeats this run's
 	// `changedSince` window next run; the messages that already succeeded
 	// re-emit byte-identically and ingest no-ops them.
-	const nextHighestModseq = deltaPassSkippedAnyMessage
-		? (session.priorModseq ?? null)
-		: (session.highestModseqCursor ?? null);
+	//
+	// That hold-back is bounded (`resolveDeltaCursorAdvance`,
+	// `DELTA_HOLDBACK_RUN_LIMIT`): one message that fails PERSISTENTLY (a
+	// malformed MIME structure, a message the server always errors on) must
+	// not stall `highest_modseq` forever and grow every later run's
+	// `changedSince` set without bound. `delta_holdback_runs` tracks the
+	// consecutive held-back streak; once it would reach the limit, the
+	// cursor advances anyway and the streak resets — the message's retryable
+	// DETAIL_GAP (already emitted by `runDeltaPass`) keeps the miss visible.
+	const { highestModseq: nextHighestModseq, holdbackRuns: nextHoldbackRuns } =
+		resolveDeltaCursorAdvance({
+			liveHighestModseq: session.highestModseqCursor ?? null,
+			priorHoldbackRuns: session.priorDeltaHoldbackRuns,
+			priorModseq: session.priorModseq,
+			skippedAnyMessage: deltaPassSkippedAnyMessage,
+		});
 	await emit({
 		type: "STATE",
 		stream: "messages",
@@ -4717,6 +4807,7 @@ export async function runAllMailPasses(
 				uidnext: nextUidnext,
 				forward_uidnext: nextForwardUidnext,
 				highest_modseq: nextHighestModseq,
+				delta_holdback_runs: nextHoldbackRuns,
 				// Carry the mailbox's own EXISTS forward so the next run in this epoch
 				// can prove the inventory did not shrink underneath us.
 				exists: session.existsTotal,
