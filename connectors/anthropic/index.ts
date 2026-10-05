@@ -169,6 +169,7 @@ import {
 	type ZipReadPolicy,
 } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	type EmittedMessage,
@@ -1177,10 +1178,13 @@ async function emitLayoutUnrecognizedSkip(
 ): Promise<void> {
 	const shown = entryNames.slice(0, MAX_REPORTED_ENTRY_NAMES);
 	const hidden = entryNames.length - shown.length;
+	connectorDiagnostic("anthropic", "export_layout_unrecognized", {
+		entry_count: entryNames.length,
+		entry_names: shown.join(", ") || "(none)",
+		hidden_entry_count: hidden,
+	});
 	await progress(
-		`Export archive layout not recognized. Entry names (${entryNames.length}): ` +
-			`${shown.join(", ") || "(none)"}` +
-			`${hidden > 0 ? `, and ${hidden} more` : ""}.`,
+		"The Claude export did not contain conversations or projects in a format we recognize",
 		{ stream: CONVERSATIONS_STREAM },
 	);
 	for (const stream of ALL_STREAMS) {
@@ -1382,13 +1386,21 @@ export async function collectAnthropic({
 				!browserProfileAppliesToExport ||
 				profile.fullName === null
 			) {
+				connectorDiagnostic("anthropic", "account_profile_unverified", {
+					metadata_status: profile.metadataStatus,
+					name_source: profile.nameSource,
+					outcome: !browserProfileAppliesToExport
+						? "resumed_export_owner_not_verified_browser_name_and_plan_omitted"
+						: profile.fullName === null
+							? "export_owner_not_verified_name_and_plan_omitted"
+							: "browser_profile_belongs_to_new_export",
+				});
 				await progress(
-					`Claude users.json metadata: ${profile.metadataStatus}. Profile name source: ${profile.nameSource}. ` +
-						(!browserProfileAppliesToExport
-							? "Resumed export owner is not verified against the current browser session; browser name and plan omitted."
-							: profile.fullName === null
-								? "Export owner is not verified; profile name and plan omitted."
-								: "Browser profile belongs to the newly requested export."),
+					!browserProfileAppliesToExport
+						? "The signed-in Claude profile may not belong to this export, so its name and plan were not used"
+						: profile.fullName === null
+							? "Could not confirm which Claude account this export belongs to; profile name and plan were left out"
+							: "Claude account details for this export could not be fully verified",
 					{
 						stream: ACCOUNT_PROFILE_STREAM,
 					},
@@ -1520,10 +1532,18 @@ export async function collectAnthropic({
 				cause === "too_large"
 					? `exceed the ${HOST_BLOB_MAX_BYTES}-byte host blob limit`
 					: "could not be parsed";
+			const parentLabel = (parent ?? CONVERSATIONS_STREAM).replaceAll("_", " ");
+			if (cause === "too_large") {
+				connectorDiagnostic("anthropic", "export_items_too_large", {
+					stream: parent,
+					count,
+					max_bytes: HOST_BLOB_MAX_BYTES,
+				});
+			}
 			await progress(
 				cause === "too_large"
-					? `Warning: ${count} ${parent} item(s) in the export ${why} and were not imported (export_items_too_large).`
-					: `Warning: ${count} ${parent} item(s) in the export ${why} and were not imported.`,
+					? `${count} ${count === 1 ? "item" : "items"} of ${parentLabel} in the export ${count === 1 ? "was" : "were"} too large to import and ${count === 1 ? "was" : "were"} skipped`
+					: `${count} ${count === 1 ? "item" : "items"} of ${parentLabel} in the export could not be read and ${count === 1 ? "was" : "were"} not imported`,
 				{ stream: parent ?? CONVERSATIONS_STREAM, count },
 			);
 			// An oversized item can never reach the host, so leaving it out
@@ -1816,8 +1836,13 @@ export async function collectAnthropic({
 		}
 		parsedProjects.droppedConversations = droppedConversations;
 		if (oversizedConversations > 0) {
+			connectorDiagnostic("anthropic", "export_items_too_large", {
+				stream: CONVERSATIONS_STREAM,
+				count: oversizedConversations,
+				max_bytes: HOST_BLOB_MAX_BYTES,
+			});
 			await progress(
-				`Warning: ${oversizedConversations} conversations item(s) in the export exceed the ${HOST_BLOB_MAX_BYTES}-byte host blob limit and were not imported (export_items_too_large).`,
+				`${oversizedConversations} ${oversizedConversations === 1 ? "conversation" : "conversations"} in the export ${oversizedConversations === 1 ? "was" : "were"} too large to import and ${oversizedConversations === 1 ? "was" : "were"} skipped`,
 				{ stream: CONVERSATIONS_STREAM, count: oversizedConversations },
 			);
 		}
@@ -2282,18 +2307,22 @@ export async function collectAnthropic({
 						`${category} (${count} entr${count === 1 ? "y" : "ies"})`,
 				)
 				.join(", ");
+			connectorDiagnostic("anthropic", "export_categories_without_stream", {
+				categories: summary,
+			});
 			await progress(
-				`This export includes categories this connector does not yet ` +
-					`declare a stream for — downloaded but not parsed: ${summary}.`,
+				"Part of the Claude export is not supported yet and was skipped",
 				{ stream: CONVERSATIONS_STREAM },
 			);
 		}
 
 		if (unclassified.length > 0) {
+			connectorDiagnostic("anthropic", "export_entries_unrecognized", {
+				count: unclassified.length,
+				entries: unclassified.join(", "),
+			});
 			await progress(
-				`Warning: ${unclassified.length} export entry/entries did not ` +
-					"match a known conversation or project shape and were not " +
-					`parsed: ${unclassified.join(", ")}.`,
+				`${unclassified.length} export item(s) were not recognized and were skipped`,
 				{ stream: CONVERSATIONS_STREAM },
 			);
 		}
