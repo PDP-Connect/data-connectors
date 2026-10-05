@@ -40,6 +40,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	buildFullScanCoverageMessage,
 	createConnectorFailure,
@@ -504,7 +505,10 @@ async function hydrateMissingBodies(args: {
 	if (hrefs.length === 0) {
 		return 0;
 	}
-	await progress("Fetching contact bodies the sync response did not inline", {
+	connectorDiagnostic("apple_contacts", "contact_multiget_fallback", {
+		pending_hrefs: hrefs.length,
+	});
+	await progress("Fetching contact details", {
 		stream: "contacts",
 		count: 0,
 		total: hrefs.length,
@@ -605,12 +609,15 @@ async function resolveResumableSyncToken(
 		return storedSyncToken;
 	}
 	if (storedSyncToken) {
-		await progress(
-			collectionMode === "full_refresh"
-				? "Full refresh requested: re-enumerating this address book"
-				: "Initializing legacy address book: re-enumerating contacts",
-			{ stream: "contacts" },
-		);
+		connectorDiagnostic("apple_contacts", "address_book_reenumerate", {
+			reason:
+				collectionMode === "full_refresh"
+					? "full_refresh_requested"
+					: "legacy_book_initializing",
+		});
+		await progress("Re-reading this address book from scratch", {
+			stream: "contacts",
+		});
 	}
 	// Withhold the stored token so `resolveSyncResult` takes its initial-sync
 	// path and re-establishes the enumeration boundary. The token stays on disk.
@@ -671,7 +678,8 @@ export async function collectAddressBook(
 		progress,
 	);
 
-	await progress("Probing sync capability", { stream: "contacts" });
+	connectorDiagnostic("apple_contacts", "sync_capability_probe");
+	await progress("Checking how to read your contacts", { stream: "contacts" });
 	const syncResult = await resolveSyncResult({
 		bookUrl: book.url,
 		authHeader,
@@ -790,7 +798,11 @@ export async function collectAddressBook(
 				await emitRecord("contacts", contactTombstone(book.url, deletedHref));
 			}
 		}
-		await progress("Synced address book via sync-collection", {
+		connectorDiagnostic("apple_contacts", "address_book_synced", {
+			path: "sync_collection",
+			contacts: contactCount,
+		});
+		await progress(`Synced ${contactCount} contacts`, {
 			stream: "contacts",
 			count: contactCount,
 			total: contactCount,
@@ -815,7 +827,11 @@ export async function collectAddressBook(
 		// Full-scan source: prune ids the server no longer returns so a real
 		// deletion tombstones instead of silently no-opping forever.
 		entityCursor.dropUnseenIds();
-		await progress("Synced address book via bounded full snapshot", {
+		connectorDiagnostic("apple_contacts", "address_book_synced", {
+			path: "bounded_full_snapshot",
+			contacts: contactCount,
+		});
+		await progress(`Synced ${contactCount} contacts`, {
 			stream: "contacts",
 			count: contactCount,
 			total: contactCount,
@@ -859,7 +875,11 @@ export async function collectAddressBook(
 	// than emitted here: this scope's `emit` is deliberately narrowed to STATE
 	// messages, and widening it just to report a finding would erode a
 	// boundary that is doing useful work. The caller owns the full emit.
-	await progress("Group inventory checked against the enumerated collection", {
+	connectorDiagnostic("apple_contacts", "group_inventory_checked", {
+		server_group_vcards: groupAnchor.serverGroupVCards,
+		groups_emitted: groupsEmitted,
+	});
+	await progress("Checked contact groups", {
 		stream: "contact_groups",
 		count: groupsEmitted,
 		total: Math.max(groupAnchor.serverGroupVCards, groupsEmitted),
@@ -954,7 +974,8 @@ if (isMainModule(import.meta.url)) {
 			const authHeader = buildAuthHeader(accountEmail, appPassword);
 			const fetchImpl = nativeFetchAdapter;
 
-			await progress("Discovering CardDAV service", {
+			connectorDiagnostic("apple_contacts", "carddav_discovery_start");
+			await progress("Connecting to your contacts service", {
 				stream: "address_books",
 			});
 			const discovery = await discoverCardDav({
@@ -1091,14 +1112,15 @@ if (isMainModule(import.meta.url)) {
 				// fabricated complete — and PROGRESS surfaces the shape/parse
 				// failure so it isn't silently swallowed by the coverage numbers.
 				if (anyUnparseableResource) {
-					await progress(
-						"Some enumerated contacts had unparseable vCard data",
-						{
-							stream: "contacts",
-							count: contactsCovered,
-							total: contactsConsidered,
-						},
-					);
+					connectorDiagnostic("apple_contacts", "unparseable_vcards", {
+						covered: contactsCovered,
+						considered: contactsConsidered,
+					});
+					await progress("Some contacts could not be read and were skipped", {
+						stream: "contacts",
+						count: contactsCovered,
+						total: contactsConsidered,
+					});
 				}
 				await emitDetailCoverage(
 					{ emit },
