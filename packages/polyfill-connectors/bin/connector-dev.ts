@@ -462,6 +462,12 @@ export function defaultSummaryPath(
 	return join(PACKAGE_ROOT, "runs", connector, `${safeStamp}-summary.json`);
 }
 
+/** The run id `bin/diagnose.ts` accepts for a run whose summary went to
+ *  `defaultSummaryPath(connector, isoStamp)`. */
+export function runIdFor(connector: string, isoStamp: string): string {
+	return `${connector}/${isoStamp.replace(/:/g, "-")}`;
+}
+
 export function toolVersion(): string {
 	try {
 		const pkg = JSON.parse(
@@ -1345,6 +1351,9 @@ async function main(): Promise<void> {
 
 	printLine("DONE");
 	printRunSummaryBody(summary, outPath);
+	printLine(
+		`  diagnose: pnpm exec tsx bin/diagnose.ts ${summaryOut ? outPath : runIdFor(connector, startedAt)}`,
+	);
 
 	// A succeeded DONE is not self-certifying: a nonzero exit or exit-by-signal
 	// after DONE, more than one DONE, or any protocol message after DONE, is a

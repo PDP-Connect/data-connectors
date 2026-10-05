@@ -1,0 +1,54 @@
+{
+	"format": "pdpp.run-summary/1",
+	"connector": "chatgpt",
+	"tool_version": "0.0.1",
+	"started_at": "2026-10-02T09:14:03.000Z",
+	"finished_at": "2026-10-02T09:14:41.000Z",
+	"duration_ms": 38000,
+	"streams": {},
+	"skips": 0,
+	"done": {
+		"status": "failed",
+		"error": {
+			"message": "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: Timeout 30000ms exceeded.",
+			"retryable": false,
+			"recovery_hint": "refresh_credentials",
+			"basis": ["o2"]
+		}
+	},
+	"generated_by": "connector-dev",
+	"provider_contact_observed": false,
+	"run_record": {
+		"protocol_capabilities": ["OBSERVATION"],
+		"diagnostic_descriptors": {
+			"steps": [
+				{
+					"id": "sign_in"
+				}
+			],
+			"expectations": [
+				{
+					"id": "email_input",
+					"step": "sign_in"
+				}
+			]
+		},
+		"facts": [
+			{
+				"source": "connector",
+				"id": "o2",
+				"fact": "wait_expired",
+				"step": "sign_in",
+				"attrs": {
+					"awaited": "email_input",
+					"budget_ms": 10000
+				}
+			}
+		],
+		"truncated": false,
+		"process_exit": {
+			"code": 1,
+			"signal": null
+		}
+	}
+}

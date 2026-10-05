@@ -26,6 +26,7 @@
  * - Nothing here retries, prompts, or sends anything anywhere.
  */
 
+import { z } from "zod";
 import {
 	type DiagnosticDescriptors,
 	describeFact,
@@ -33,6 +34,7 @@ import {
 	type RunRecord,
 	type RunRecordFact,
 	type RuntimeRunRecordFact,
+	runRecordSchema,
 } from "./observation.ts";
 import type { RunSummaryDone } from "./run-summary.ts";
 
@@ -124,6 +126,75 @@ export interface DiagnosisInput {
 	connector: string;
 	done: RunSummaryDone;
 	run_record?: RunRecord | undefined;
+}
+
+/** The members of a run summary (`pdpp.run-summary/1`) diagnosis reads. */
+const diagnosisInputSchema = z.object({
+	connector: z.string().min(1),
+	done: z.object({
+		status: z.enum(["succeeded", "failed", "no_done"]),
+		error: z
+			.object({
+				message: z.string(),
+				retryable: z.boolean(),
+				code: z.string().optional(),
+				recovery_hint: z
+					.union([
+						z.string(),
+						z.object({
+							action: z.string(),
+							retryable: z.boolean().optional(),
+						}),
+					])
+					.optional(),
+				basis: z.array(z.string()).optional(),
+			})
+			.optional(),
+	}),
+	run_record: runRecordSchema.optional(),
+});
+
+/** Validate a parsed run-summary file. Throws with the first issue. */
+export function parseDiagnosisInput(summary: unknown): DiagnosisInput {
+	const parsed = diagnosisInputSchema.safeParse(summary);
+	if (!parsed.success) {
+		const [issue] = parsed.error.issues;
+		throw new Error(
+			`not a run summary diagnosis can read: ${issue ? `${issue.path.join(".")}: ${issue.message}` : "invalid"}`,
+		);
+	}
+	const { connector, done, run_record: runRecord } = parsed.data;
+	const { error } = done;
+	return {
+		connector,
+		done: {
+			status: done.status,
+			...(error
+				? {
+						error: {
+							message: error.message,
+							retryable: error.retryable,
+							...(error.code === undefined ? {} : { code: error.code }),
+							...(error.recovery_hint === undefined
+								? {}
+								: {
+										recovery_hint:
+											typeof error.recovery_hint === "string"
+												? error.recovery_hint
+												: {
+														action: error.recovery_hint.action,
+														...(error.recovery_hint.retryable === undefined
+															? {}
+															: { retryable: error.recovery_hint.retryable }),
+													},
+									}),
+							...(error.basis === undefined ? {} : { basis: error.basis }),
+						},
+					}
+				: {}),
+		},
+		run_record: runRecord,
+	};
 }
 
 const keyOf = (fact: RunRecordFact): string => `${fact.source}:${fact.id}`;
