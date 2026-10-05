@@ -183,6 +183,16 @@ export interface AllMailCursor {
 export interface PriorMessagesState {
 	all_mail?: AllMailCursor;
 	backfill?: MessagesBackfillCursor;
+	/**
+	 * Per-message `snippet` carry-forward, keyed by X-GM-MSGID. Lets a run
+	 * whose IMAP body fetch threw keep the previously-collected `snippet`
+	 * instead of overwriting the stored `messages` record with `null` (a
+	 * `records` upsert replaces `record_json` wholesale — see
+	 * `resolveEmittedSnippet` / `readPriorMessageSnippets` in index.ts). A
+	 * value of `null` is a real carried state (the last known snippet was
+	 * itself null), distinct from the key being absent (no prior run).
+	 */
+	snippet_carry_forward?: Record<string, unknown>;
 }
 
 export interface MessagesBackfillCursor {

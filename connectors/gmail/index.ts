@@ -53,7 +53,9 @@ import {
 	describeUnexpectedFailure,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
+	type CarryForwardCursor,
 	type FingerprintCursor,
+	openCarryForwardCursor,
 	openFingerprintCursor,
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import type { ReferenceBlobUploadFn } from "../../packages/polyfill-connectors/src/reference-blob-uploader.ts";
@@ -933,6 +935,18 @@ export interface PerMessageDeps {
 	failOnError?: boolean;
 	fetchBodies: FetchBodiesFn;
 	hydrateAttachment: HydrateAttachmentFn;
+	/**
+	 * Carry-forward cursor over the `messages` stream's `snippet` field, keyed
+	 * by X-GM-MSGID. `records` upserts replace `record_json` wholesale (see
+	 * `processMessage`'s doc comment), so a run whose body fetch THREW must not
+	 * write `snippet: null` over a value a prior run already collected.
+	 * `cursor.prior(id)` supplies that value; `cursor.note(id, value)` keeps the
+	 * chain intact for the next run regardless of whether this run emits.
+	 * Absent for callers that don't need carry-forward (e.g. tests pinning the
+	 * legacy emit-whatever-this-run-saw contract), in which case a failed fetch
+	 * emits `snippet: null` as before.
+	 */
+	messageSnippetCursor?: CarryForwardCursor<string | null>;
 	nowIso: () => string;
 	recoveredAttachmentGapIds?: Set<string>;
 	requested: Map<string, StreamRequest>;
@@ -1028,6 +1042,37 @@ async function emitMessageBody(
 }
 
 /**
+ * Decide what `snippet` the `messages` record should carry this run.
+ *
+ * `records` upserts replace `record_json` wholesale (PDPP Core, "Upsert by
+ * primary key"), so writing `snippet: null` over a value a prior run already
+ * collected does not add a field — it DESTROYS one, silently, until a later
+ * run happens to refetch the body. That is distinct from a message that
+ * genuinely has no snippet (no plain part, or a plain part that decodes to
+ * empty): those are real values this run observed, not losses, so they must
+ * NOT be overridden by a stale prior value.
+ *
+ * The two cases are told apart by `fetchFailed` alone — the same flag
+ * `emitMessageBody` already uses to gate the `message_bodies` DETAIL_GAP:
+ *   - `fetchFailed` true: the IMAP body fetch THREW. This run has nothing
+ *     honest to say about the snippet, so fall back to whatever the cursor
+ *     remembers (`undefined` on a message with no prior run, which resolves
+ *     to `null` — there is nothing to carry forward yet).
+ *   - `fetchFailed` false/absent: this run's `snippet` is authoritative,
+ *     including when it is `null` (no plain part) or `""` (an empty plain
+ *     part) — both are real observations, not failures.
+ */
+export function resolveEmittedSnippet(
+	bodies: { fetchFailed: boolean | undefined; snippet: string | null },
+	priorSnippet: string | null | undefined,
+): string | null {
+	if (bodies.fetchFailed) {
+		return priorSnippet ?? null;
+	}
+	return bodies.snippet;
+}
+
+/**
  * Emit the per-stream records for one Gmail message.
  *
  * Invariants (tested in integration.test.ts):
@@ -1039,11 +1084,16 @@ async function emitMessageBody(
  *      that references them.
  *   4. wantBodies / wantMessages / requested.has("attachments") each
  *      gate their own stream; disabling one doesn't suppress siblings.
- *   5. Body-fetch failure still emits the messages record with a null
- *      snippet — never silently drops the envelope — but ALSO emits a
- *      durable retryable DETAIL_GAP on `message_bodies`, so the body stays
- *      refetchable after the UID cursor advances past it. A genuinely
- *      bodyless message emits `body_source: "empty"` with no gap.
+ *   5. Body-fetch failure still emits the messages record — never silently
+ *      drops the envelope — and ALSO emits a durable retryable DETAIL_GAP on
+ *      `message_bodies`, so the body stays refetchable after the UID cursor
+ *      advances past it. A genuinely bodyless message emits `body_source:
+ *      "empty"` with no gap.
+ *   6. Body-fetch failure does NOT blank a previously-collected `snippet`:
+ *      `resolveEmittedSnippet` carries the prior value forward via
+ *      `deps.messageSnippetCursor` instead of writing `null` over it. A
+ *      genuinely empty snippet (no plain part, or an empty one) still emits
+ *      as observed — only a THROWN fetch triggers carry-forward.
  *
  * Returns true if the message produced any emits (or would have, modulo
  * scope). Returns false when skipped by an early filter so the caller
@@ -1098,6 +1148,11 @@ export async function processMessage(
 	}
 
 	if (deps.wantMessages) {
+		const emittedSnippet = resolveEmittedSnippet(
+			{ fetchFailed, snippet },
+			deps.messageSnippetCursor?.prior(gmMsgid),
+		);
+		deps.messageSnippetCursor?.note(gmMsgid, emittedSnippet);
 		await deps.emitRecord(
 			"messages",
 			buildMessageRecord({
@@ -1111,7 +1166,7 @@ export async function processMessage(
 				rawHeaders: msg.headers,
 				receivedAt,
 				sizeBytes: typeof msg.size === "number" ? msg.size : null,
-				snippet,
+				snippet: emittedSnippet,
 			}),
 		);
 	}
@@ -3916,7 +3971,12 @@ export function validateAttachmentHydrationPreflight(args: {
  * `fetchBodiesFn` is the same seam `processMessage` uses. Called with
  * `wantBodies: false` it fetches at most `SNIPPET_FETCH_MAX_BYTES` of the
  * plain part — enough to rebuild `snippet`, without touching the
- * externally-throttled full-body/attachment path.
+ * externally-throttled full-body/attachment path. That re-fetch can itself
+ * fail (a transient IMAP error on the bounded read), and unlike the forward
+ * pass this loop has no DETAIL_GAP to fall back on — so a thrown fetch here
+ * goes through the same `resolveEmittedSnippet` carry-forward as
+ * `processMessage`, via the optional `messageSnippetCursor`, rather than
+ * writing `snippet: null` over a value a prior run collected.
  */
 export async function runDeltaPass(
 	client: Pick<ImapFlow, "fetch">,
@@ -3925,6 +3985,7 @@ export async function runDeltaPass(
 	emitRecord: EmitRecordFn,
 	receivedAtFallback: string,
 	fetchBodiesFn: FetchBodiesFn,
+	messageSnippetCursor?: CarryForwardCursor<string | null>,
 ): Promise<void> {
 	if (
 		session.fullResync ||
@@ -4003,12 +4064,17 @@ export async function runDeltaPass(
 		// Bounded snippet-only body read, exactly as the forward pass does for a
 		// messages-without-bodies scope. Sequential by necessity: this is one IMAP
 		// command at a time on a connection that is not concurrent.
-		const { snippet } = await fetchBodiesFn(
+		const { snippet, fetchFailed } = await fetchBodiesFn(
 			msg,
 			selectBodyParts(msg.bodyStructure, false),
 			false,
 			true,
 		);
+		const emittedSnippet = resolveEmittedSnippet(
+			{ fetchFailed, snippet },
+			messageSnippetCursor?.prior(gmMsgid),
+		);
+		messageSnippetCursor?.note(gmMsgid, emittedSnippet);
 		await emitRecord(
 			"messages",
 			buildMessageRecord({
@@ -4026,7 +4092,7 @@ export async function runDeltaPass(
 				rawHeaders: msg.headers,
 				receivedAt,
 				sizeBytes: typeof msg.size === "number" ? msg.size : null,
-				snippet,
+				snippet: emittedSnippet,
 			}),
 		);
 	}
@@ -4147,6 +4213,41 @@ export function readPriorThreadFingerprints(
 	return out;
 }
 
+/**
+ * Parse the prior `messages` STATE cursor's `snippet_carry_forward` map —
+ * the seed for `resolveEmittedSnippet`'s carry-forward cursor. Tolerant of:
+ *   - missing/legacy cursors (no field, written before this carry-forward
+ *     existed — every message starts with no prior snippet, same as a
+ *     first-run message)
+ *   - malformed entries (anything that isn't a string or null is dropped)
+ * `null` is a valid carried value (a message whose last known snippet was
+ * itself null), so unlike `readPriorThreadFingerprints` this map keeps
+ * `null` entries rather than filtering them out.
+ */
+export function readPriorMessageSnippets(
+	state: Record<string, unknown>,
+): Map<string, string | null> {
+	const out = new Map<string, string | null>();
+	const streamState = state.messages;
+	if (
+		!streamState ||
+		typeof streamState !== "object" ||
+		Array.isArray(streamState)
+	) {
+		return out;
+	}
+	const raw = (streamState as PriorMessagesState).snippet_carry_forward;
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		return out;
+	}
+	for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+		if (typeof value === "string" || value === null) {
+			out.set(id, value);
+		}
+	}
+	return out;
+}
+
 // ─── All Mail orchestration (inside the mailbox lock) ───────────────────
 
 interface AllMailDeps {
@@ -4186,6 +4287,15 @@ export async function runAllMailPasses(
 		fail("missing UIDVALIDITY on All Mail mailbox");
 		return;
 	}
+	// Carry-forward cursor for `messages.snippet` (see `resolveEmittedSnippet`).
+	// Only stood up when `messages` is actually requested — a run that never
+	// emits the stream has nothing to carry and nothing to seed. `messages` is
+	// an incremental UID walk, never a full re-scan, so unlike the `threads`
+	// fingerprint cursor below this one must never call `dropUnseenIds`: a
+	// message outside this run's UID range was never looked at, not deleted.
+	const messageSnippetCursor = deps.requested.has("messages")
+		? openCarryForwardCursor<string | null>(readPriorMessageSnippets(state))
+		: undefined;
 
 	// Forward progress and historical progress are separate. A first run has no
 	// forward range: it receives one bounded historical UID page below.
@@ -4450,6 +4560,7 @@ export async function runAllMailPasses(
 		failOnError: false,
 		fetchBodies: fetchBodiesBound,
 		hydrateAttachment,
+		...(messageSnippetCursor ? { messageSnippetCursor } : {}),
 		recoveredAttachmentGapIds,
 		nowIso,
 		uploadBodyBlob: buildRuntimeBlobUploader(),
@@ -4519,6 +4630,7 @@ export async function runAllMailPasses(
 		deps.emitRecord,
 		deps.emittedAt,
 		fetchBodiesBound,
+		messageSnippetCursor,
 	);
 
 	if (messageHistoryRequested && historicalFetchRange) {
@@ -4611,6 +4723,13 @@ export async function runAllMailPasses(
 				exists: session.existsTotal,
 			},
 			...(nextMessagesBackfill ? { backfill: nextMessagesBackfill } : {}),
+			// Seeded even when this run's cursor carried nothing new forward — the
+			// map still has to survive to the next run exactly as `toState()`
+			// returns it (unchanged entries included), or a message skipped by
+			// every pass this run loses its carry-forward value.
+			...(messageSnippetCursor && messageSnippetCursor.size() > 0
+				? { snippet_carry_forward: messageSnippetCursor.toState() }
+				: {}),
 		},
 	});
 }
