@@ -1,6 +1,6 @@
 {
   "schema": "pdpp.test-accounting/v3",
-  "inventory_base_sha": "8fed6476a0f16ddbfcd9e1ca217ab727e6e6ce7d",
+  "inventory_base_sha": "cd5e31315538b24eaae991272c57ceb309a08a2d",
   "suites": [
     {
       "id": "mutation-falsification",
