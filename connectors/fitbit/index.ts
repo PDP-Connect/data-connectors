@@ -42,11 +42,12 @@
  * noticed, to tell a changed layout from an upload that is not a Fitbit
  * export.
  *
- * COVERAGE. Each requested stream ends with one PROGRESS line,
- * `Fitbit phase=coverage`, saying what it covered and why it stops there:
- * status, reason, records delivered, the fields the export never carried or
- * could not be read, and the requested and covered windows (collect.ts). A
- * stream that skipped anything also gets a SKIP_RESULT with a recovery hint.
+ * COVERAGE. Each requested stream ends with one plain-words PROGRESS line
+ * carrying the records delivered as `count`, and one `coverage` diagnostic
+ * on stderr saying what it covered and why it stops there: status, reason,
+ * records delivered, the fields the export never carried or could not be
+ * read, and the requested and covered windows (collect.ts). A stream that
+ * skipped anything also gets a SKIP_RESULT with a recovery hint.
  *
  * REPEAT IMPORTS. There is no cursor and never a STATE message. Every export
  * is a full-history snapshot of data Fitbit recomputes and owners edit, so
