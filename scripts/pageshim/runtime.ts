@@ -762,7 +762,12 @@ export async function runOnPageShim(
 					ERROR_TEXT_MAX_UNITS,
 				);
 				errors.push({
-					errorClass: inferErrorClass(reason),
+					// A failed stream leaves requested data uncollected, so the
+					// run is partial; other skips are intentional omissions.
+					errorClass:
+						msg.reason === "stream_collection_failed"
+							? "partial"
+							: inferErrorClass(reason),
 					reason,
 					disposition: (streamCounts[stream] ?? 0) ? "degraded" : "omitted",
 					scope: `${prefix}${stream}`,
@@ -856,6 +861,23 @@ export async function runOnPageShim(
 					message: message.slice(0, ERROR_TEXT_MAX_UNITS),
 				}),
 			requested,
+			// Same message as the desktop runtime's reportStreamFailure. PageShim
+			// has no failed DONE, so the SKIP_RESULT marks the result partial.
+			reportStreamFailure: (
+				stream: string,
+				message: string,
+				options: { retryable?: boolean } = {},
+			) =>
+				emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "stream_collection_failed",
+					message,
+					recovery_hint: {
+						action: "retry_by_runtime",
+						retryable: options.retryable === true,
+					},
+				}),
 			state,
 		});
 		// Some connectors emit STATE without awaiting the returned promise. Drain
