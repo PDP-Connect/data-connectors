@@ -1576,6 +1576,15 @@ export async function collectAnthropic({
 				cursor: { synced_at: syncedAt },
 			});
 		}
+		// Documents are collected with their projects, so they are checkpointed
+		// with them. An account with no projects then reports both as complete.
+		if (wantsDocuments && !skipped.has(PROJECT_DOCUMENTS_STREAM)) {
+			await emit({
+				type: "STATE",
+				stream: PROJECT_DOCUMENTS_STREAM,
+				cursor: { synced_at: syncedAt },
+			});
+		}
 	}
 
 	async function emitStreamingConversations(

@@ -454,6 +454,11 @@ export async function runOnPageShim(
 	for (const [stream, scope] of scopeByStream)
 		if (Object.hasOwn(initialState, scope)) state[stream] = initialState[scope];
 	const detailGapStreams = new Set<string>();
+	// A stream the connector checkpointed this run and never skipped was
+	// collected in full, so no records means the account has none.
+	const checkpointedStreams = new Set<string>();
+	const skippedStreams = new Set<string>();
+	const streamedStreams = new Set<string>();
 	// A thin host accepts streamed results only (mobile-host-v1 amendment A6).
 	const streamingHost = hostAcceptsStreamedResults(pageShim);
 	const streamConfig =
@@ -594,6 +599,7 @@ export async function runOnPageShim(
 		const scope = `${prefix}${stream}`;
 		streamProtocolUsed = true;
 		await sendStreamMessage("result:begin", { scope });
+		streamedStreams.add(stream);
 		activeStream = stream;
 		activeSequence = 0;
 		activeRecordCount = 0;
@@ -694,10 +700,12 @@ export async function runOnPageShim(
 						cursor: msg.cursor,
 					});
 				state[stream] = msg.cursor;
+				checkpointedStreams.add(stream);
 				return;
 			}
 			case "SKIP_RESULT": {
 				const stream = String(msg.stream);
+				skippedStreams.add(stream);
 				const reason = String(msg.message ?? msg.reason).slice(
 					0,
 					ERROR_TEXT_MAX_UNITS,
@@ -823,8 +831,22 @@ export async function runOnPageShim(
 		if (streamConfig) {
 			await finishStreamScope();
 			for (const stream of streamConfig.order) {
-				const buffered = pendingRecords[stream];
-				if (!buffered?.length) continue;
+				const buffered = pendingRecords[stream] ?? [];
+				// A confirmed-empty stream still sends its scope, empty, so the
+				// host can tell "collected, none" from "not collected". A
+				// windowed stream is not: no rows in the window says nothing
+				// about older ones.
+				const entry = requested.get(stream) as
+					| { time_range?: unknown }
+					| undefined;
+				const confirmedEmpty =
+					entry !== undefined &&
+					entry.time_range === undefined &&
+					checkpointedStreams.has(stream) &&
+					!skippedStreams.has(stream) &&
+					!detailGapStreams.has(stream) &&
+					!streamedStreams.has(stream);
+				if (buffered.length === 0 && !confirmedEmpty) continue;
 				await beginStreamScope(stream);
 				for (const record of buffered) await appendStreamRecord(stream, record);
 				await finishStreamScope();

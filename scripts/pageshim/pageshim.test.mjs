@@ -1264,6 +1264,77 @@ test("anthropic: export paths on the PageShim host", {
 		}
 	});
 
+	// An account with no projects: the thin host must still get both project
+	// scopes, empty, or it cannot tell "none" from "not collected".
+	await t.test("streamed result sends confirmed-empty project scopes", async () => {
+		const streamBundle = await buildPageshim({
+			connector: "anthropic",
+			outfile: join(out, "anthropic-streamed-no-projects.js"),
+		});
+		const spool = mkdtempSync(join(out, "anthropic-no-projects-"));
+		const conversation = {
+			uuid: "syn-conv-0000-0000-0000-000000000003",
+			name: "No project",
+			created_at: "2026-01-01T00:00:00.000Z",
+			updated_at: "2026-01-02T00:00:00.000Z",
+			is_starred: false,
+			project_uuid: null,
+			chat_messages: [],
+		};
+		fx.reset({ zip: fx.zipOf({ "conversations.json": [conversation] }) });
+		try {
+			const r = await runHarness({
+				bundle: streamBundle.outfile,
+				fixtures: c.fixtures,
+				scopes: c.scopes,
+				resultStreaming: true,
+				resultSpoolDirectory: spool,
+			});
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assert.equal(r.streamResult?.completed, true);
+			assert.deepEqual(r.streamDone.errors, []);
+			const streamed = Object.fromEntries(
+				Object.entries(r.streamScopeFiles).map(([scope, path]) => [
+					scope,
+					JSON.parse(readFileSync(path, "utf8")).records.length,
+				]),
+			);
+			assert.deepEqual(streamed, {
+				"claude.account_profile": 1,
+				"claude.conversations": 1,
+				"claude.messages": 0,
+				"claude.projects": 0,
+				"claude.project_documents": 0,
+			});
+		} finally {
+			rmSync(spool, { recursive: true, force: true });
+		}
+	});
+
+	// A skipped stream is not confirmed: it sends no scope at all.
+	await t.test("streamed result omits a skipped conversations scope", async () => {
+		const streamBundle = await buildPageshim({
+			connector: "anthropic",
+			outfile: join(out, "anthropic-streamed-skipped.js"),
+		});
+		const spool = mkdtempSync(join(out, "anthropic-skipped-"));
+		fx.reset({ zip: fx.zipOf({ "conversations.json": {}, "projects/p.json": [] }) });
+		try {
+			const r = await runHarness({
+				bundle: streamBundle.outfile,
+				fixtures: c.fixtures,
+				scopes: c.scopes,
+				resultStreaming: true,
+				resultSpoolDirectory: spool,
+			});
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			for (const scope of ["claude.conversations", "claude.messages"])
+				assert.equal(r.streamScopeFiles?.[scope], undefined, scope);
+		} finally {
+			rmSync(spool, { recursive: true, force: true });
+		}
+	});
+
 	// Archives the desktop reader refuses. The shim must refuse them too.
 	const refused = {
 		"a duplicate entry name": [
