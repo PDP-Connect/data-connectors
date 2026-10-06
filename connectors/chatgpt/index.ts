@@ -1608,18 +1608,36 @@ export function createChatGptApi({
 	providerBudget?: ProviderBudgetController | null;
 }): ChatGptApi {
 	let authCache: ChatGptAuth | null = null;
-	async function auth(): Promise<ChatGptAuth> {
-		if (authCache) {
-			return authCache;
-		}
-		const fresh = await getAuthFromPage(page);
-		if (!fresh.accessToken) {
-			throw new Error(
-				"chatgpt_auth_missing: could not extract bearer token from #client-bootstrap",
-			);
-		}
-		authCache = fresh;
-		return fresh;
+	// One extraction at a time. Each reauth starts a new generation, and only
+	// the current generation may fill the cache, so an older extraction that
+	// finishes late cannot replace a newer token.
+	let authLoading: Promise<ChatGptAuth> | null = null;
+	let authGeneration = 0;
+	// The reauth in progress, so concurrent 401s wait for its token.
+	let refreshing: Promise<ChatGptAuth> | null = null;
+	function loadAuth(): Promise<ChatGptAuth> {
+		const generation = authGeneration;
+		const pending = (async (): Promise<ChatGptAuth> => {
+			const fresh = await getAuthFromPage(page);
+			if (!fresh.accessToken) {
+				throw new Error(
+					"chatgpt_auth_missing: could not extract bearer token from #client-bootstrap",
+				);
+			}
+			if (generation === authGeneration) authCache = fresh;
+			return authCache ?? fresh;
+		})();
+		authLoading = pending;
+		pending
+			.finally(() => {
+				if (authLoading === pending) authLoading = null;
+			})
+			.catch(() => undefined);
+		return pending;
+	}
+	function auth(): Promise<ChatGptAuth> {
+		if (authCache) return Promise.resolve(authCache);
+		return authLoading ?? loadAuth();
 	}
 
 	// Re-extract the page's CURRENT bearer token, discarding the cached one. The
@@ -1629,7 +1647,15 @@ export function createChatGptApi({
 	// picks up the live token when the browser session is still valid.
 	function reauth(): Promise<ChatGptAuth> {
 		authCache = null;
-		return auth();
+		authGeneration += 1;
+		const pending = loadAuth();
+		refreshing = pending;
+		pending
+			.finally(() => {
+				if (refreshing === pending) refreshing = null;
+			})
+			.catch(() => undefined);
+		return pending;
 	}
 
 	// Run-scoped cap on credentialed reauth attempts, shared across every path
@@ -1681,14 +1707,28 @@ export function createChatGptApi({
 		// already spent, the result flows on to `shouldAbort` → terminal auth error,
 		// which §10-C routes to a reconnect prompt rather than a silent fail or a
 		// repeated credentialed reauth loop.
-		if (result.status === 401 && repairBudget.tryConsume()) {
-			const refreshed = await reauth();
+		if (result.status !== 401) return result;
+		// Requests run concurrently. A request whose token another request already
+		// replaced, or is replacing, retries with the replacement without
+		// spending the repair budget. Until `pending` is set this runs without
+		// awaiting, so two 401s cannot both start a reauth.
+		let pending = refreshing;
+		if (!pending) {
 			if (
-				refreshed.accessToken &&
-				refreshed.accessToken !== usedAuth.accessToken
+				authCache?.accessToken &&
+				authCache.accessToken !== usedAuth.accessToken
 			) {
-				return evaluate(refreshed);
+				return evaluate(authCache);
 			}
+			if (!repairBudget.tryConsume()) return result;
+			pending = reauth();
+		}
+		const refreshed = await pending;
+		if (
+			refreshed.accessToken &&
+			refreshed.accessToken !== usedAuth.accessToken
+		) {
+			return evaluate(refreshed);
 		}
 		return result;
 	}
@@ -2204,6 +2244,8 @@ export interface StreamDeps {
 	// forward instead of resetting the budget to zero. A holder object (not a bare
 	// number) so the count `createChatGptApi` increments is visible by reference.
 	preDetailPressure?: ChatGptPreDetailPressure;
+	/** Search pages pipelined on a full list walk. Unset or 1 walks strictly in order. */
+	conversationSearchPrefetchPages?: number;
 	progress: CollectContext["progress"];
 	providerBudget?: ProviderBudgetController | null;
 	/**
@@ -3335,6 +3377,106 @@ async function listConversationsSinceCursor(
 	startCursor = 0,
 	resumeBackfill?: ConversationBackfill,
 ): Promise<ConversationListResult> {
+	const requestedSince =
+		deps.requested.get("conversations")?.time_range?.since ??
+		deps.requested.get("messages")?.time_range?.since;
+	deps.emit({
+		type: "PROGRESS",
+		stream: "conversations",
+		message: priorCursor
+			? "Checking for new and updated conversations"
+			: "Listing your conversations",
+	});
+	const width = deps.conversationSearchPrefetchPages ?? 1;
+	// Only a full walk from the top prefetches. Windowed and incremental walks
+	// can stop on old pages, and a resumed backfill starts mid-list without a
+	// first-page baseline, so those keep the exact in-order request sequence.
+	// Concurrent requests could pass a run's request cap together.
+	const requestCapped = Number.isFinite(
+		deps.providerBudget?.runBudget?.maxRequests ?? Number.POSITIVE_INFINITY,
+	);
+	if (
+		width <= 1 ||
+		requestCapped ||
+		priorCursor !== null ||
+		requestedSince !== undefined ||
+		resumeBackfill !== undefined ||
+		startCursor !== 0
+	) {
+		return walkConversationSearch(
+			deps,
+			priorCursor,
+			startCursor,
+			resumeBackfill,
+			inOrderConversationSearchPages(deps),
+		);
+	}
+	const pages = prefetchingConversationSearchPages(deps, width);
+	// Hold this pass's skips until the list is verified, so a discarded pass
+	// never reports a failure that the in-order walk then contradicts.
+	const heldSkips: Parameters<StreamDeps["emit"]>[0][] = [];
+	const listed = await walkConversationSearch(
+		{
+			...deps,
+			emit: (message) => {
+				if (message.type !== "SKIP_RESULT") return deps.emit(message);
+				heldSkips.push(message);
+				return Promise.resolve();
+			},
+		},
+		priorCursor,
+		startCursor,
+		resumeBackfill,
+		pages,
+	);
+	await pages.settle();
+	// A page that stayed short may have been short only because of the burst
+	// it was read in. Read each one once more, alone, now that the walk is
+	// over, and keep any rows it adds.
+	const reread = pages.prefetched()
+		? await rereadShortConversationSearchPages(pages, listed)
+		: listed;
+	// Pages read together are trusted only if they are disjoint (a row under
+	// two cursors means a page was misplaced, and full disjoint pages up to a
+	// confirmed end cover the list) and if the first page, read again after
+	// every other read settled, shows no row added or updated since the walk
+	// began (out-of-order reads can lose a row across a list change).
+	const discardReason = !pages.prefetched()
+		? null
+		: reread === null
+			? "a short page could not be read again"
+			: pages.overlapped()
+				? "a row appeared under two cursors"
+				: conversationSearchFirstPageUnchanged(
+							await readConversationSearchFirstPage(deps),
+							pages.firstPageNewest(),
+							reread.items,
+						)
+					? null
+					: "the list changed or the first page could not be read again";
+	if (discardReason === null) {
+		await Promise.all(heldSkips.map((message) => deps.emit(message)));
+		return reread ?? listed;
+	}
+	console.info(
+		`[chatgpt-list-prefetch] ${discardReason} during the prefetched walk; walking again in order`,
+	);
+	return walkConversationSearch(
+		deps,
+		priorCursor,
+		startCursor,
+		resumeBackfill,
+		inOrderConversationSearchPages(deps),
+	);
+}
+
+async function walkConversationSearch(
+	deps: StreamDeps,
+	priorCursor: string | null,
+	startCursor: number,
+	resumeBackfill: ConversationBackfill | undefined,
+	pages: ConversationSearchPages,
+): Promise<ConversationListResult> {
 	const conversationsById = new Map<string, ConversationListItem>();
 	const backfillTailById = new Map<string, ConversationListItem>();
 	const savedBoundaryIds = new Set(resumeBackfill?.boundary_ids ?? []);
@@ -3380,13 +3522,6 @@ async function listConversationsSinceCursor(
 	const maxConsecutiveOldPages = 3;
 	let consecutiveOldPages = 0;
 	let page = 0;
-	deps.emit({
-		type: "PROGRESS",
-		stream: "conversations",
-		message: priorCursor
-			? "Checking for new and updated conversations"
-			: "Listing your conversations",
-	});
 	while (true) {
 		const attempts: ConversationListItem[][] = [];
 		let logicalPageEntirelyOld = true;
@@ -3397,9 +3532,7 @@ async function listConversationsSinceCursor(
 			if (attempt > 0) {
 				await waitForConversationListRetry(deps, 400);
 			}
-			const response = await deps.api.fetch(
-				`/conversations/search?query=&cursor=${cursor}`,
-			);
+			const response = await pages.fetch(cursor, attempt);
 			const classified = classifyChatGptListPage<unknown>(response, {
 				stream: "conversations",
 				endpointLabel: "conversations search",
@@ -3562,9 +3695,7 @@ async function listConversationsSinceCursor(
 		}
 		if (shouldProbeAgain) {
 			await waitForConversationListRetry(deps, 400);
-			const response = await deps.api.fetch(
-				`/conversations/search?query=&cursor=${cursor}`,
-			);
+			const response = await pages.fetch(cursor, maxPageAttempts);
 			const classified = classifyChatGptListPage<unknown>(response, {
 				stream: "conversations",
 				endpointLabel: "conversations search",
@@ -3649,6 +3780,361 @@ async function listConversationsSinceCursor(
 			};
 		}
 	}
+}
+
+/**
+ * Pages pipelined ahead of a full search walk. Six matches the reference
+ * connector, which measured no throttling at that width.
+ */
+const CONVERSATION_SEARCH_PREFETCH_PAGES = 6;
+
+/**
+ * Where the walk gets each search response. `attempt` 0 is the first read of
+ * a cursor; later attempts are retries of a short page or the end re-probe.
+ */
+interface ConversationSearchPages {
+	fetch(cursor: number, attempt: number): Promise<ChatGptFetchResult>;
+}
+
+function conversationSearchPath(cursor: number): string {
+	return `/conversations/search?query=&cursor=${cursor}`;
+}
+
+function inOrderConversationSearchPages(
+	deps: StreamDeps,
+): ConversationSearchPages {
+	return {
+		fetch: (cursor) => deps.api.fetch(conversationSearchPath(cursor)),
+	};
+}
+
+type SettledSearchPage =
+	| { ok: true; response: ChatGptFetchResult }
+	| { ok: false };
+
+/**
+ * Requests the first read of the next `width` grid cursors at once, but hands
+ * each response to the walk only when the walk asks for that cursor, in walk
+ * order. Retries of a short page and the end re-probe are fresh requests sent
+ * alone, once no prefetched read is in flight. A failed read is never used:
+ * it is requested again alone. Any failure, new rate limiting or a short page
+ * with no continuation stops further prefetching for this walk.
+ */
+function prefetchingConversationSearchPages(
+	deps: StreamDeps,
+	width: number,
+): ConversationSearchPages & {
+	/** Waits until no prefetched read is still in flight. */
+	settle(): Promise<void>;
+	/** True once any read was requested before the walk reached its cursor. */
+	prefetched(): boolean;
+	/** Newest update time on the first-page reads, taken before any prefetch. */
+	firstPageNewest(): string | null;
+	/** True if a row came back under two different cursors. */
+	overlapped(): boolean;
+	/** Cursors whose answers, together, held fewer rows than a full page. */
+	shortPages(): number[];
+	/** Reads a cursor alone and checks its rows; null if the read failed. */
+	readAgain(cursor: number): Promise<ChatGptFetchResult | null>;
+} {
+	const inFlight = new Map<number, Promise<SettledSearchPage>>();
+	// Counts reads until they settle, including reads for cursors the walk
+	// skipped, so at most `width` requests are ever in flight.
+	let outstanding = 0;
+	const rateLimitedAtStart = deps.preDetailPressure?.rateLimited ?? 0;
+	let enabled = true;
+	let prefetched = false;
+	let overlapped = false;
+	const cursorById = new Map<string, number>();
+	// Rows the walk was handed, by cursor.
+	const pageRows = new Map<number, Set<string>>();
+	const handed = (
+		cursor: number,
+		response: ChatGptFetchResult,
+	): ChatGptFetchResult => {
+		const items = isChatGptJsonObject(response.json)
+			? response.json.items
+			: undefined;
+		const rows = pageRows.get(cursor) ?? new Set<string>();
+		pageRows.set(cursor, rows);
+		for (const raw of Array.isArray(items) ? items : []) {
+			const id = isChatGptJsonObject(raw)
+				? typeof raw.id === "string"
+					? raw.id
+					: raw.conversation_id
+				: undefined;
+			if (typeof id === "string") rows.add(id);
+		}
+		return response;
+	};
+	let firstPageNewest: string | null = null;
+	const settle = async (): Promise<void> => {
+		// Settled reads stay usable: the walk may still reach those cursors.
+		await Promise.all(inFlight.values());
+	};
+	const noteRows = (cursor: number, response: ChatGptFetchResult): void => {
+		const items = isChatGptJsonObject(response.json)
+			? response.json.items
+			: undefined;
+		if (!Array.isArray(items)) return;
+		const inResponse = new Set<string>();
+		for (const raw of items) {
+			if (!isChatGptJsonObject(raw)) continue;
+			const id = typeof raw.id === "string" ? raw.id : raw.conversation_id;
+			if (typeof id !== "string") continue;
+			// A repeat inside one page can make a short page look full.
+			if (inResponse.has(id)) overlapped = true;
+			inResponse.add(id);
+			const seenAt = cursorById.get(id);
+			if (seenAt === undefined) cursorById.set(id, cursor);
+			else if (seenAt !== cursor) overlapped = true;
+		}
+	};
+	const alone = async (cursor: number): Promise<ChatGptFetchResult> => {
+		enabled = false;
+		await settle();
+		return deps.api.fetch(conversationSearchPath(cursor));
+	};
+	// A read sent while prefetched reads were in flight may have failed only
+	// because of the burst. Send it again alone, as the in-order walk would.
+	const read = async (
+		cursor: number,
+	): Promise<{ response: ChatGptFetchResult; crowded: boolean }> => {
+		const crowded = outstanding > 0;
+		try {
+			const response = await deps.api.fetch(conversationSearchPath(cursor));
+			if (response.status === 200 || !crowded) return { response, crowded };
+		} catch (error) {
+			if (!crowded) throw error;
+		}
+		return { response: await alone(cursor), crowded: false };
+	};
+	const request = (cursor: number): Promise<SettledSearchPage> => {
+		outstanding += 1;
+		const failed = (): SettledSearchPage => {
+			// Failures count toward the run's pressure budget: stop at the first.
+			enabled = false;
+			return { ok: false };
+		};
+		return deps.api
+			.fetch(conversationSearchPath(cursor))
+			.then((response): SettledSearchPage => {
+				if (response.status !== 200) return failed();
+				// Check every answer, used or not: a misplaced page can make
+				// the walk skip the cursor whose rows it repeats.
+				noteRows(cursor, response);
+				return { ok: true, response };
+			}, failed)
+			.finally(() => {
+				outstanding -= 1;
+			});
+	};
+	const noteFirstPage = (response: ChatGptFetchResult): void => {
+		const items = isChatGptJsonObject(response.json)
+			? response.json.items
+			: undefined;
+		if (!Array.isArray(items)) return;
+		for (const raw of items) {
+			const updateIso =
+				isChatGptJsonObject(raw) && raw.update_time
+					? tsToIso(raw.update_time)
+					: null;
+			if (
+				updateIso &&
+				(firstPageNewest === null || updateIso > firstPageNewest)
+			)
+				firstPageNewest = updateIso;
+		}
+	};
+	return {
+		async fetch(cursor, attempt) {
+			if ((deps.preDetailPressure?.rateLimited ?? 0) > rateLimitedAtStart)
+				enabled = false;
+			if (cursor === 0) {
+				// The first page is the baseline for the end check, so it is read
+				// before anything is prefetched.
+				const response = await deps.api.fetch(conversationSearchPath(0));
+				noteFirstPage(response);
+				noteRows(0, response);
+				return handed(0, response);
+			}
+			if (attempt > 0) {
+				// Retries of a short page and the end re-probe go alone, as in the
+				// in-order walk: crowded reads must not decide what a page holds.
+				await settle();
+				const response = await deps.api.fetch(conversationSearchPath(cursor));
+				noteRows(cursor, response);
+				return handed(cursor, response);
+			}
+			if (enabled) {
+				// A read of this cursor that is not prefetched is sent below.
+				const limit = inFlight.has(cursor) ? width : width - 1;
+				for (let ahead = 1; ahead < width; ahead += 1) {
+					const next = cursor + ahead * CONVERSATION_PAGE_SIZE;
+					if (outstanding >= limit || next > PAGINATION_SAFETY_LIMIT) break;
+					if (inFlight.has(next)) continue;
+					inFlight.set(next, request(next));
+					prefetched = true;
+				}
+			}
+			const pending = inFlight.get(cursor);
+			inFlight.delete(cursor);
+			let response: ChatGptFetchResult;
+			let crowded = true;
+			if (pending) {
+				const settled = await pending;
+				response = settled.ok ? settled.response : await alone(cursor);
+				crowded = settled.ok;
+			} else {
+				({ response, crowded } = await read(cursor));
+			}
+			// Only a lone read may move the walk off the 30-row grid.
+			if (crowded && conversationSearchLeavesGrid(cursor, response)) {
+				response = await alone(cursor);
+			}
+			noteRows(cursor, response);
+			// A short page with no continuation is usually the last one. Stop
+			// reading ahead, so the end re-probe does not wait on reads past it.
+			if (conversationSearchPageEnds(response)) enabled = false;
+			return handed(cursor, response);
+		},
+		settle,
+		prefetched: () => prefetched,
+		firstPageNewest: () => firstPageNewest,
+		overlapped: () => overlapped,
+		shortPages: () =>
+			[...pageRows]
+				.filter(
+					([, rows]) => rows.size > 0 && rows.size < CONVERSATION_PAGE_SIZE,
+				)
+				.map(([cursor]) => cursor)
+				.sort((a, b) => a - b),
+		async readAgain(cursor) {
+			await settle();
+			try {
+				const response = await deps.api.fetch(conversationSearchPath(cursor));
+				if (response.status !== 200) return null;
+				noteRows(cursor, response);
+				return response;
+			} catch {
+				return null;
+			}
+		},
+	};
+}
+
+/**
+ * Reads each short page once more, one at a time, and adds the rows it now
+ * holds. Returns null if a read failed: the pass then proves nothing.
+ */
+async function rereadShortConversationSearchPages(
+	pages: Pick<
+		ReturnType<typeof prefetchingConversationSearchPages>,
+		"readAgain" | "shortPages"
+	>,
+	listed: ConversationListResult,
+): Promise<ConversationListResult | null> {
+	const byId = new Map(listed.items.map((item) => [item.id, item]));
+	for (const cursor of pages.shortPages()) {
+		const response = await pages.readAgain(cursor);
+		if (response === null) return null;
+		const items = isChatGptJsonObject(response.json)
+			? response.json.items
+			: undefined;
+		for (const raw of Array.isArray(items) ? items : []) {
+			if (!isChatGptJsonObject(raw)) continue;
+			const id = typeof raw.id === "string" ? raw.id : raw.conversation_id;
+			if (typeof id === "string" && id.length > 0 && !byId.has(id))
+				byId.set(id, { ...raw, id } as ConversationListItem);
+		}
+	}
+	return byId.size === listed.items.length
+		? listed
+		: { ...listed, items: [...byId.values()] };
+}
+
+function conversationSearchLeavesGrid(
+	cursor: number,
+	response: ChatGptFetchResult,
+): boolean {
+	if (!isChatGptJsonObject(response.json)) return false;
+	const next = response.json.next_cursor ?? response.json.nextCursor;
+	if (next === null || next === undefined) return false;
+	return Number(next) !== cursor + CONVERSATION_PAGE_SIZE;
+}
+
+function conversationSearchPageEnds(response: ChatGptFetchResult): boolean {
+	if (!isChatGptJsonObject(response.json)) return false;
+	const { items } = response.json;
+	const next = response.json.next_cursor ?? response.json.nextCursor;
+	return (
+		Array.isArray(items) &&
+		items.length < CONVERSATION_PAGE_SIZE &&
+		(next === null || next === undefined) &&
+		response.json.has_more !== true
+	);
+}
+
+/**
+ * Reads the first page again after a prefetched walk, with the walk's own
+ * rule for short pages: up to three reads 400 ms apart, stopping at a full
+ * page, rows unioned. Returns null if a read fails.
+ */
+async function readConversationSearchFirstPage(
+	deps: StreamDeps,
+): Promise<unknown[] | null> {
+	const rows: unknown[] = [];
+	try {
+		for (let read = 0; read < 3; read += 1) {
+			if (read > 0) await waitForConversationListRetry(deps, 400);
+			const response = await deps.api.fetch(conversationSearchPath(0));
+			const page =
+				response.status === 200 && isChatGptJsonObject(response.json)
+					? response.json.items
+					: undefined;
+			if (!Array.isArray(page)) return null;
+			rows.push(...page);
+			if (page.length >= CONVERSATION_PAGE_SIZE) break;
+		}
+	} catch {
+		return null;
+	}
+	return rows;
+}
+
+/**
+ * A first-page row that is newer than the first-page reads before the walk,
+ * or newer than when the walk saw it, means the list changed while pages were
+ * in flight. An unreadable or empty first page proves nothing.
+ */
+function conversationSearchFirstPageUnchanged(
+	items: readonly unknown[] | null,
+	firstPageNewest: string | null,
+	listed: readonly ConversationListItem[],
+): boolean {
+	if (items === null || (items.length === 0 && listed.length > 0)) return false;
+	const seenUpdate = new Map(
+		listed.map((item) => [
+			item.id,
+			item.update_time ? tsToIso(item.update_time) : null,
+		]),
+	);
+	return items.every((raw) => {
+		if (!isChatGptJsonObject(raw)) return false;
+		const id = typeof raw.id === "string" ? raw.id : raw.conversation_id;
+		if (typeof id !== "string") return false;
+		const updateIso = raw.update_time ? tsToIso(raw.update_time) : null;
+		if (!seenUpdate.has(id))
+			return (
+				updateIso !== null &&
+				firstPageNewest !== null &&
+				updateIso < firstPageNewest
+			);
+		const seen = seenUpdate.get(id) ?? null;
+		return updateIso === null
+			? seen === null
+			: seen !== null && updateIso <= seen;
+	});
 }
 
 function conversationSearchNextCursor(
@@ -6198,6 +6684,7 @@ export async function collectChatGpt(
 		emitRecord,
 		isRecordSelected: ctx.isRecordSelected,
 		preDetailPressure,
+		conversationSearchPrefetchPages: CONVERSATION_SEARCH_PREFETCH_PAGES,
 		progress,
 		providerBudget,
 		// §4.3: thread recoveryOnly from the CollectContext (sourced from the

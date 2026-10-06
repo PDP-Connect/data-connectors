@@ -634,6 +634,96 @@ test("createChatGptApi caps repeated-stale-session reauth at one per run, across
 	);
 });
 
+test("createChatGptApi: a 401 on a token another request already replaced retries without a second reauth", async () => {
+	// Two requests leave with the same stale token and get their 401s in the
+	// same tick. The first spends the run's one reauth; the second must wait
+	// for that token, not fail.
+	let authExtractionCalls = 0;
+	const backendCalls: string[] = [];
+	// Both stale requests wait on one timer, so their 401s resume together.
+	const staleAnswer = new Promise((resolve) => setTimeout(resolve, 5));
+	const fakePage: Pick<Page, "evaluate" | "goto" | "waitForFunction"> = {
+		evaluate: (async (fn: unknown, arg?: unknown): Promise<unknown> => {
+			if (typeof fn === "function" && arg === undefined) {
+				return "https://chatgpt.com/";
+			}
+			if (arg === undefined) {
+				authExtractionCalls += 1;
+				return {
+					accessToken:
+						authExtractionCalls === 1 ? "stale-token" : "fresh-token",
+					deviceId: "fake-device",
+				};
+			}
+			const call = arg as { auth?: { accessToken?: string }; path?: string };
+			const token = call.auth?.accessToken ?? "";
+			backendCalls.push(`${call.path} ${token}`);
+			if (token === "stale-token") {
+				// The second stale request answers after the first has reauthed.
+				await staleAnswer;
+				return { status: 401, json: null };
+			}
+			return { status: 200, json: { ok: true } };
+		}) as Page["evaluate"],
+		goto: () => Promise.resolve(null),
+		waitForFunction: () =>
+			Promise.reject(new Error("fake page: no client-bootstrap")),
+	};
+	const api = createChatGptApi({ capture: null, page: fakePage as Page });
+	await api.auth();
+	const [first, second] = await Promise.all([api.fetch("/a"), api.fetch("/b")]);
+	assert.equal(first.status, 200);
+	assert.equal(second.status, 200);
+	assert.equal(authExtractionCalls, 2, "one initial auth and one reauth");
+	assert.deepEqual(backendCalls.sort(), [
+		"/a fresh-token",
+		"/a stale-token",
+		"/b fresh-token",
+		"/b stale-token",
+	]);
+});
+
+test("createChatGptApi: an auth read that finishes after a reauth cannot replace the new token", async () => {
+	// The first request's 401 starts a reauth. A second request starts while
+	// it runs, and in the old code made its own, slower extraction that came
+	// back with the stale token after the reauth had cached the fresh one.
+	let authExtractionCalls = 0;
+	const fakePage: Pick<Page, "evaluate" | "goto" | "waitForFunction"> = {
+		evaluate: (async (fn: unknown, arg?: unknown): Promise<unknown> => {
+			if (typeof fn === "function" && arg === undefined) {
+				return "https://chatgpt.com/";
+			}
+			if (arg === undefined) {
+				authExtractionCalls += 1;
+				const call = authExtractionCalls;
+				if (call === 2) await new Promise((resolve) => setTimeout(resolve, 10));
+				if (call === 3) await new Promise((resolve) => setTimeout(resolve, 30));
+				return {
+					accessToken: call === 2 ? "fresh-token" : "stale-token",
+					deviceId: "fake-device",
+				};
+			}
+			const call = arg as { auth?: { accessToken?: string } };
+			return call.auth?.accessToken === "fresh-token"
+				? { status: 200, json: { ok: true } }
+				: { status: 401, json: null };
+		}) as Page["evaluate"],
+		goto: () => Promise.resolve(null),
+		waitForFunction: () =>
+			Promise.reject(new Error("fake page: no client-bootstrap")),
+	};
+	const api = createChatGptApi({ capture: null, page: fakePage as Page });
+	await api.auth();
+	const first = api.fetch("/a");
+	await new Promise((resolve) => setTimeout(resolve, 2));
+	const second = api.fetch("/b");
+	assert.equal((await first).status, 200);
+	assert.equal((await second).status, 200);
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	assert.equal((await api.fetch("/c")).status, 200);
+	assert.equal(authExtractionCalls, 2, "one initial auth and one reauth");
+});
+
 test("createChatGptApi.fetchBatch posts capped conversation batch requests", async () => {
 	const backendCalls: Array<{
 		body?: unknown;
