@@ -18,16 +18,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
+import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
+	collectOrders,
 	collectProfile,
 	discoverOrderStubs,
+	OrderEnumerationUnprovenError,
 	lookupNutritionForProduct,
 	orderDetailCountsMatch,
 } from "./index.ts";
+import { parseOrderSearchPageDom } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
 
@@ -54,7 +58,9 @@ function fakePage(html: string): Page {
 
 test("collectProfile emits a profile record keyed by Amazon's stable customerId", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	await collectProfile(fakePage(PROFILE_HTML), harness.emitRecord);
+	await collectProfile(fakePage(PROFILE_HTML), harness.emitRecord, () => {
+		assert.fail("source identity must complete without a stream failure");
+	});
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.stream, "profile");
 	assert.equal(harness.emitted[0]?.data.id, "A39M9I106DZZ8N");
@@ -62,13 +68,56 @@ test("collectProfile emits a profile record keyed by Amazon's stable customerId"
 	assert.equal(harness.emitted[0]?.data.email, null);
 });
 
-test("collectProfile emits nothing when the account page has no scrapeable customerId", async () => {
+test("collectProfile emits a legacy-compatible profile from the authenticated greeting when customerId is missing", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	await collectProfile(
-		fakePage("<html><body>no account info</body></html>"),
+		fakePage(
+			'<html><body><span id="nav-link-accountList-nav-line-1">Hello, Jane Owner</span></body></html>',
+		),
 		harness.emitRecord,
+		() => {
+			assert.fail(
+				"authenticated greeting must complete without a stream failure",
+			);
+		},
+	);
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.stream, "profile");
+	assert.equal(harness.emitted[0]?.data.id, "me");
+	assert.equal(harness.emitted[0]?.data.name, "Jane Owner");
+	assert.equal(harness.emitted[0]?.data.email, null);
+});
+
+test("collectProfile reports a retryable stream failure when the account page has no authenticated identity evidence", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const failures: Array<{
+		stream: string;
+		message: string;
+		retryable: boolean;
+	}> = [];
+	const reportStreamFailure: NonNullable<
+		BrowserCollectContext["reportStreamFailure"]
+	> = (stream, message, options) => {
+		failures.push({ stream, message, retryable: options?.retryable === true });
+		return Promise.resolve();
+	};
+	await collectProfile(
+		fakePage(
+			'<html><body><span id="nav-link-accountList-nav-line-1">Hello, sign in</span></body></html>',
+		),
+		harness.emitRecord,
+		reportStreamFailure,
 	);
 	assert.equal(harness.emitted.length, 0);
+	assert.equal(failures.length, 1, "expected a runtime stream failure report");
+	assert.equal(failures[0]?.stream, "profile");
+	assert.equal(failures[0]?.retryable, true);
+	assert.match(failures[0]?.message ?? "", /authenticated account identity/);
+	assert.equal(
+		harness.protocolMessages.length,
+		0,
+		"profile must not emit completion STATE or a custom skip",
+	);
 });
 
 const STUB: OrderStub = {
@@ -608,7 +657,7 @@ function searchPage(
 		.join("");
 	const next = hasNext
 		? `<li class="a-last"><a href="?page=${pageNum + 1}">Next</a></li>`
-		: "";
+		: '<li class="a-disabled a-last">Next</li>';
 	return `<html><body>${grids}<ul class="a-pagination"><li class="a-selected"><a href="?page=${pageNum}">${pageNum}</a></li>${next}</ul></body></html>`;
 }
 
@@ -688,6 +737,986 @@ test("order search fails when Amazon serves the same page again", async () => {
 	const page1 = searchPage(1, rowsOf(a, 0, 10), true);
 	await assert.rejects(
 		discoverOrderStubs(pagedSearch([page1]), noProgress),
-		/pagination repeated/,
+		/pagination (?:repeated|served a different page)/,
 	);
+});
+
+test("order search without a last-page signal is not a complete enumeration", async () => {
+	const a = "111-1111111-1111111";
+	// Rows and a selected page, but neither a next link nor a disabled "Next".
+	const html = searchPage(1, rowsOf(a, 0, 3), false).replace(
+		'<li class="a-disabled a-last">Next</li>',
+		"",
+	);
+	await assert.rejects(
+		discoverOrderStubs(pagedSearch([html]), noProgress),
+		(error: unknown) =>
+			error instanceof OrderEnumerationUnprovenError &&
+			/without a last-page signal/.test(error.message),
+	);
+});
+
+test("order search readiness timeout is an unproven enumeration, not an auth failure", async () => {
+	const shape = {
+		...fakePage("<html></html>"),
+		locator: () => ({
+			first: () => ({ waitFor: () => Promise.reject(new Error("timed out")) }),
+		}),
+	} as unknown as Page;
+	await assert.rejects(
+		discoverOrderStubs(shape, noProgress),
+		OrderEnumerationUnprovenError,
+	);
+});
+
+const ORDER_A = "111-1111111-1111111";
+const DETAIL_HTML = `<html><body><div data-component="purchasedItemsRightGrid"><a href="/dp/B012345678">Organic Bananas</a><span>Qty: 1</span></div></body></html>`;
+
+/** Serves search pages and order details by URL. */
+function ordersSite(searchPages: string[], detailHtml: string): Page {
+	let current = "";
+	return {
+		content: () => Promise.resolve(current),
+		goto: (url: string) => {
+			const parsed = new URL(url);
+			if (parsed.pathname.includes("search")) {
+				const pageNum = Number(parsed.searchParams.get("page") ?? "1");
+				current = searchPages[pageNum - 1] ?? "";
+			} else {
+				current = detailHtml;
+			}
+			return Promise.resolve(null);
+		},
+		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
+		url: () => "https://www.amazon.com/your-orders/search",
+	} as unknown as Page;
+}
+
+async function runCollectOrders(
+	page: Page,
+	requested: string[],
+): Promise<{
+	failures: Array<{ stream: string; message: string; retryable: unknown }>;
+	harness: ReturnType<typeof makeRecordingEmit>;
+}> {
+	const harness = makeRecordingEmit(validateRecord);
+	const failures: Array<{
+		stream: string;
+		message: string;
+		retryable: unknown;
+	}> = [];
+	await collectOrders({
+		credentials: {},
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		page,
+		progress: noProgress,
+		reportStreamFailure: (stream, message, options) => {
+			failures.push({ stream, message, retryable: options?.retryable });
+			return Promise.resolve();
+		},
+		requested: new Map(requested.map((stream) => [stream, {}])) as never,
+		state: {},
+	});
+	return { failures, harness };
+}
+
+const stateStreams = (harness: ReturnType<typeof makeRecordingEmit>) =>
+	harness.protocolMessages
+		.filter((m) => m.type === "STATE")
+		.map((m) => (m as unknown as { stream: string }).stream);
+
+test("collectOrders completes orders on the source's own empty-state page", async () => {
+	const emptyShell =
+		'<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders</p></div>';
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([emptyShell], ""),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.equal(harness.emitted.length, 0);
+});
+
+test("collectOrders completes orders when the last page shows a disabled Next", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([searchPage(1, [[ORDER_A, "B012345678"]], false)], DETAIL_HTML),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.stream),
+		["orders", "order_items"],
+	);
+});
+
+test("collectOrders reports every requested order stream failed when the list end is unproven", async () => {
+	const noEnd = searchPage(1, [[ORDER_A, "B012345678"]], false).replace(
+		'<li class="a-disabled a-last">Next</li>',
+		"",
+	);
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([noEnd], DETAIL_HTML),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(
+		failures.map((f) => [f.stream, f.retryable]),
+		[
+			["orders", true],
+			["order_items", true],
+		],
+	);
+	assert.match(failures[0]?.message ?? "", /last-page signal/);
+	// The rows read are real and kept; no stream finishes.
+	assert.deepEqual(stateStreams(harness), []);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.stream),
+		["orders", "order_items"],
+	);
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
+});
+
+test("collectOrders fails the order streams without STATE when a detail page has no evidence", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+			"<html><body>loading</body></html>",
+		),
+		["orders", "nutrition"],
+	);
+	assert.deepEqual(
+		failures.map((f) => f.stream),
+		["orders", "nutrition"],
+	);
+	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("collectOrders still throws auth failures instead of reporting a stream failure", async () => {
+	await assert.rejects(
+		runCollectOrders(
+			ordersSite(['<html><form name="signIn"></form></html>'], ""),
+			["orders"],
+		),
+		/blocked or signed out/,
+	);
+});
+
+// ─── Review round 2: empty state, empty detail, navigation failures ────────
+
+const failedStreams = (
+	failures: Array<{ stream: string; message: string; retryable: unknown }>,
+) => failures.map((f) => [f.stream, f.retryable]);
+
+const ALL_ORDER_STREAMS = ["orders", "order_items", "nutrition"];
+
+// Search scaffold before results render: the search box plus a bundle that
+// names the empty-state class. Neither is the source's rendered empty state.
+const SCAFFOLD_ONLY_HTML =
+	'<html><body><input id="searchOrdersInput"><script>const emptyStateClass = "no-orders";</script></body></html>';
+
+test("a search scaffold whose script merely names no-orders is not an empty state", async () => {
+	const shape = {
+		...fakePage(SCAFFOLD_ONLY_HTML),
+		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
+	} as unknown as Page;
+	await assert.rejects(
+		discoverOrderStubs(shape, noProgress),
+		OrderEnumerationUnprovenError,
+	);
+});
+
+test("collectOrders reports every requested stream failed on scaffold-only search markup", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([SCAFFOLD_ONLY_HTML], ""),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(
+		failedStreams(failures),
+		ALL_ORDER_STREAMS.map((s) => [s, true]),
+	);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.equal(harness.emitted.length, 0);
+});
+
+test("collectOrders completes on the real-shape zero-order count element", async () => {
+	// Shape of Amazon's year filter on an empty account, captured live
+	// 2026-04-23 (scrubbed): `<span class="num-orders">0 orders</span>`.
+	const empty =
+		'<html><body><div class="your-orders-content-container"><label class="time-filter__label"><span class="num-orders">0 orders</span> placed in </label></div></body></html>';
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([empty], ""),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders", "nutrition"]);
+});
+
+test("one page of rows with no pagination markup is unproven until a live capture shows the end signal", async () => {
+	// No real single-page filtered-search capture exists in the repository: the
+	// only captured single-page Amazon list is the empty year page, which has
+	// no pagination. A one-page account therefore fails (retryable) rather than
+	// completing on a guessed signal.
+	const noPagination =
+		'<html><body><div class="a-fixed-left-grid"><a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a><a href="/dp/B012345678">item</a></div></body></html>';
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([noPagination], DETAIL_HTML),
+		["orders"],
+	);
+	assert.deepEqual(failedStreams(failures), [["orders", true]]);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("collectOrders fails every requested stream when a proven order's detail container is empty", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+			'<html><body><div id="line-items"></div></body></html>',
+		),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(
+		failedStreams(failures),
+		ALL_ORDER_STREAMS.map((s) => [s, true]),
+	);
+	assert.match(failures[0]?.message ?? "", /no items and no cancellation/);
+	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.equal(harness.emitted.length, 0);
+});
+
+test("collectOrders still completes a cancelled order whose detail renders no items", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+			'<html><body><div data-component="cancelled">Cancelled</div></body></html>',
+		),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.stream),
+		["orders"],
+	);
+});
+
+test("collectOrders fails every requested stream when the detail grid container is empty", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+			'<html><body><div data-component="purchasedItemsRightGrid"></div></body></html>',
+		),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(
+		failedStreams(failures),
+		ALL_ORDER_STREAMS.map((s) => [s, true]),
+	);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.equal(harness.emitted.length, 0);
+});
+
+test("collectOrders fails every requested stream when a delivery item row is an empty shell", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+			'<html><body><div id="line-items"><div id="x-item-grid-row"></div></div></body></html>',
+		),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(
+		failedStreams(failures),
+		ALL_ORDER_STREAMS.map((s) => [s, true]),
+	);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.equal(harness.emitted.length, 0);
+});
+
+const TWO_ROW_SEARCH = searchPage(
+	1,
+	[
+		[ORDER_A, "B012345678"],
+		[ORDER_A, "B087654321"],
+	],
+	false,
+);
+const ONE_ITEM_DETAIL = `<html><body><div data-component="purchasedItemsRightGrid">
+	<div data-component="itemTitle"><a href="/dp/B012345678">Organic bananas</a></div>
+	<div data-component="unitPrice">$1.99</div>Qty: 1
+</div></body></html>`;
+
+test("collectOrders fails order_items when the detail lists fewer rows than the search count", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([TWO_ROW_SEARCH], ONE_ITEM_DETAIL),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failedStreams(failures), [["order_items", true]]);
+	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
+	// The order row is proven by the search list; the rows read are kept.
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.stream),
+		["orders", "order_items"],
+	);
+});
+
+test("collectOrders fails nutrition without its finishing STATE on an unreconciled item count", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[TWO_ROW_SEARCH],
+			// An ASIN-less row keeps the test off the nutrition network path.
+			ONE_ITEM_DETAIL.replace("/dp/B012345678", "/product/unknown"),
+		),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(failedStreams(failures), [
+		["order_items", true],
+		["nutrition", true],
+	]);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+});
+
+test("collectOrders completes every stream when the detail count matches the search count", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[
+				// A search row with no product link carries only the count.
+				searchPage(1, [[ORDER_A, "B012345678"]], false).replace(
+					'<a href="/dp/B012345678">item</a>',
+					"",
+				),
+			],
+			ONE_ITEM_DETAIL.replace("/dp/B012345678", "/product/unknown"),
+		),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders", "nutrition"]);
+});
+
+/** A site whose navigation fails for URLs matched by `fails`. */
+function failingSite(
+	searchPages: string[],
+	detailHtml: string,
+	fails: (url: URL) => Error | { status: number } | null,
+): Page {
+	const base = ordersSite(searchPages, detailHtml);
+	return {
+		...base,
+		content: base.content.bind(base),
+		goto: (url: string) => {
+			const failure = fails(new URL(url));
+			if (failure instanceof Error) {
+				return Promise.reject(failure);
+			}
+			if (failure) {
+				return Promise.resolve({
+					ok: () => false,
+					status: () => failure.status,
+				});
+			}
+			return base.goto(url);
+		},
+	} as unknown as Page;
+}
+
+test("collectOrders reports every requested stream failed when the search navigation times out", async () => {
+	const timeout = new Error(
+		"page.goto: Timeout 30000ms exceeded. navigating to https://www.amazon.com/your-orders/search?orderID=111-1111111-1111111",
+	);
+	timeout.name = "TimeoutError";
+	const { failures, harness } = await runCollectOrders(
+		failingSite([], "", () => timeout),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(
+		failedStreams(failures),
+		ALL_ORDER_STREAMS.map((s) => [s, true]),
+	);
+	assert.match(failures[0]?.message ?? "", /navigation_failed: TimeoutError/);
+	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("collectOrders reports a detail navigation timeout as a stream failure without STATE", async () => {
+	const { failures, harness } = await runCollectOrders(
+		failingSite(
+			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+			DETAIL_HTML,
+			(url) =>
+				url.pathname.includes("search")
+					? null
+					: new Error("net::ERR_TIMED_OUT"),
+		),
+		["orders", "nutrition"],
+	);
+	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
+		["nutrition", true],
+	]);
+	assert.deepEqual(stateStreams(harness), []);
+});
+
+test("collectOrders reports a search HTTP 503 as a stream failure", async () => {
+	const { failures } = await runCollectOrders(
+		failingSite([], "", () => ({ status: 503 })),
+		["orders"],
+	);
+	assert.deepEqual(failedStreams(failures), [["orders", true]]);
+});
+
+test("collectOrders keeps an HTTP 403 search response a plain error, not a stream failure", async () => {
+	await assert.rejects(
+		runCollectOrders(
+			failingSite([], "", () => ({ status: 403 })),
+			["orders"],
+		),
+		/HTTP 403/,
+	);
+});
+
+// ─── Review round (latest): quantity, hidden empty state, page order, cap ──
+
+test("collectOrders fails order_items when a higher quantity offsets a missing product", async () => {
+	// Two search rows, two distinct ASINs; the detail lists only the first
+	// product with Qty: 2. The units equal the search count, but the second
+	// product was never seen.
+	const { failures, harness } = await runCollectOrders(
+		ordersSite([TWO_ROW_SEARCH], ONE_ITEM_DETAIL.replace("Qty: 1", "Qty: 2")),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failedStreams(failures), [["order_items", true]]);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+});
+
+test("collectOrders still accepts a repeated product whose units fold into one detail row", async () => {
+	const twoUnitsOfOneProduct = searchPage(
+		1,
+		[
+			[ORDER_A, "B012345678"],
+			[ORDER_A, "B012345678"],
+		],
+		false,
+	);
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[twoUnitsOfOneProduct],
+			ONE_ITEM_DETAIL.replace("Qty: 1", "Qty: 2"),
+		),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+});
+
+const HIDDEN_EMPTY_STATES = [
+	'<div class="no-orders" hidden>No orders</div>',
+	'<div class="no-orders" aria-hidden="true">No orders</div>',
+	'<div class="no-orders" style="display: none">No orders</div>',
+	'<div class="no-orders a-hidden">No orders</div>',
+	'<div hidden><div class="no-orders">No orders</div></div>',
+	'<div class="your-orders-content-container" hidden><p>No orders</p></div>',
+];
+
+for (const hiddenMarkup of HIDDEN_EMPTY_STATES) {
+	test(`collectOrders fails every requested stream on a hidden empty state: ${hiddenMarkup}`, async () => {
+		const scaffold = `<html><body><input id="searchOrdersInput">${hiddenMarkup}</body></html>`;
+		const { failures, harness } = await runCollectOrders(
+			ordersSite([scaffold], ""),
+			ALL_ORDER_STREAMS,
+		);
+		assert.deepEqual(
+			failedStreams(failures),
+			ALL_ORDER_STREAMS.map((stream) => [stream, true]),
+		);
+		assert.deepEqual(stateStreams(harness), []);
+		assert.equal(harness.emitted.length, 0);
+	});
+}
+
+test("a visible empty-state element is still the source's own empty state", async () => {
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[
+				'<html><body><div class="no-orders">No orders</div><div class="no-orders" hidden>stale</div></body></html>',
+			],
+			"",
+		),
+		["orders"],
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+});
+
+const ORDER_C = "333-3333333-3333333";
+
+test("collectOrders fails every requested stream when a terminal page skips ahead", async () => {
+	// Page 2 was requested; Amazon answered with page 3 and a disabled Next.
+	// Page 2 was never read, and may hold more orders.
+	const { failures, harness } = await runCollectOrders(
+		ordersSite(
+			[
+				searchPage(1, [[ORDER_A, "B012345678"]], true),
+				searchPage(3, [[ORDER_C, "B012345678"]], false),
+			],
+			DETAIL_HTML,
+		),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
+		["order_items", true],
+	]);
+	assert.match(failures[0]?.message ?? "", /different page than requested/);
+	assert.deepEqual(stateStreams(harness), []);
+	// The orders on the pages that were read are kept.
+	assert.deepEqual(
+		harness.emitted.filter((r) => r.stream === "orders").map((r) => r.data.id),
+		[ORDER_A, ORDER_C],
+	);
+});
+
+test("collectOrders keeps the orders it read when the page cap is reached", async () => {
+	const pages = Array.from({ length: 250 }, (_, i) =>
+		searchPage(
+			i + 1,
+			[[`${String(i + 1).padStart(3, "0")}-0000000-0000000`, "B012345678"]],
+			true,
+		),
+	);
+	const realSetTimeout = globalThis.setTimeout;
+	// The pacing delays are real time; this test walks 250 pages and 250 details.
+	globalThis.setTimeout = ((fn: () => void) => {
+		fn();
+		return 0;
+	}) as unknown as typeof setTimeout;
+	let run: Awaited<ReturnType<typeof runCollectOrders>>;
+	try {
+		run = await runCollectOrders(ordersSite(pages, DETAIL_HTML), [
+			"orders",
+			"order_items",
+		]);
+	} finally {
+		globalThis.setTimeout = realSetTimeout;
+	}
+	assert.deepEqual(failedStreams(run.failures), [
+		["orders", true],
+		["order_items", true],
+	]);
+	assert.match(run.failures[0]?.message ?? "", /page limit/);
+	assert.deepEqual(stateStreams(run.harness), []);
+	assert.equal(
+		run.harness.emitted.filter((r) => r.stream === "orders").length,
+		250,
+	);
+	assert.equal(
+		run.harness.emitted.filter((r) => r.stream === "order_items").length,
+		250,
+	);
+});
+
+// ─── Review round 3: one visibility test for all evidence; partial delivery ──
+
+// The pacing delays are real time, so these tests stub them.
+const runFast = (page: Page, requested: string[]) =>
+	withoutPacing(() => runCollectOrders(page, requested));
+
+const HIDDEN_WRAPPERS: Array<[label: string, wrap: (inner: string) => string]> =
+	[
+		["hidden attribute", (inner) => `<div hidden>${inner}</div>`],
+		["aria-hidden", (inner) => `<div aria-hidden="true">${inner}</div>`],
+		[
+			"inline display:none",
+			(inner) => `<div style="display:none">${inner}</div>`,
+		],
+		[
+			"inline visibility:hidden",
+			(inner) => `<div style="visibility: hidden">${inner}</div>`,
+		],
+		[
+			"hidden ancestor",
+			(inner) => `<section hidden><div>${inner}</div></section>`,
+		],
+	];
+
+for (const [label, wrap] of HIDDEN_WRAPPERS) {
+	test(`collectOrders fails every requested stream on a hidden cancellation marker (${label})`, async () => {
+		const detail = `<html><body><div id="line-items"></div>${wrap('<div data-component="cancelled">Cancelled</div>')}</body></html>`;
+		const { failures, harness } = await runFast(
+			ordersSite([searchPage(1, [[ORDER_A, "B012345678"]], false)], detail),
+			ALL_ORDER_STREAMS,
+		);
+		assert.deepEqual(
+			failedStreams(failures),
+			ALL_ORDER_STREAMS.map((s) => [s, true]),
+		);
+		assert.deepEqual(stateStreams(harness), []);
+		assert.equal(harness.emitted.length, 0);
+	});
+
+	test(`collectOrders fails every requested stream on hidden pagination (${label})`, async () => {
+		// Real rows, and a disabled Next the markup hides: not the end signal.
+		const rows = searchPage(1, [[ORDER_A, "B012345678"]], false);
+		const pagination =
+			/<ul class="a-pagination">.*<\/ul>/.exec(rows)?.[0] ?? "";
+		const hiddenPagination = rows.replace(pagination, wrap(pagination));
+		const { failures, harness } = await runFast(
+			ordersSite([hiddenPagination], DETAIL_HTML),
+			// No nutrition: the partial delivery would look products up over the network.
+			["orders", "order_items"],
+		);
+		assert.deepEqual(failedStreams(failures), [
+			["orders", true],
+			["order_items", true],
+		]);
+		assert.match(failures[0]?.message ?? "", /last-page signal/);
+		assert.deepEqual(stateStreams(harness), []);
+	});
+
+	test(`collectOrders fails order_items when its only item row is hidden (${label})`, async () => {
+		const detail = `<html><body>${wrap(
+			'<div data-component="purchasedItemsRightGrid"><a href="/dp/B012345678">Organic Bananas</a><span>Qty: 1</span></div>',
+		)}</body></html>`;
+		const { failures, harness } = await runFast(
+			ordersSite([searchPage(1, [[ORDER_A, "B012345678"]], false)], detail),
+			ALL_ORDER_STREAMS,
+		);
+		assert.deepEqual(
+			failedStreams(failures),
+			ALL_ORDER_STREAMS.map((s) => [s, true]),
+		);
+		assert.deepEqual(stateStreams(harness), []);
+		assert.equal(harness.emitted.length, 0);
+	});
+}
+
+test("collectOrders fails order_items when a hidden detail row cannot offset the search count", async () => {
+	const detail = `<html><body><div data-component="purchasedItemsRightGrid"><a href="/dp/B012345678">Organic bananas</a>Qty: 1</div><div hidden><div data-component="purchasedItemsRightGrid"><a href="/dp/B087654321">Whole milk</a>Qty: 1</div></div></body></html>`;
+	const { failures, harness } = await runFast(
+		ordersSite([TWO_ROW_SEARCH], detail),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failedStreams(failures), [["order_items", true]]);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+});
+
+test("collectOrders ignores a hidden search row when it counts the order's items", async () => {
+	const hiddenRow =
+		'<div hidden><div class="a-fixed-left-grid"><a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a><a href="/dp/B087654321">item</a></div></div>';
+	const search = searchPage(1, [[ORDER_A, "B012345678"]], false).replace(
+		"<ul",
+		`${hiddenRow}<ul`,
+	);
+	const { failures, harness } = await runFast(
+		ordersSite([search], ONE_ITEM_DETAIL),
+		["orders", "order_items"],
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders"]);
+});
+
+test("a visible cancellation marker and visible pagination still complete", async () => {
+	const { failures, harness } = await runFast(
+		ordersSite(
+			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+			'<html><body><div id="line-items"></div><div data-component="cancelled">Cancelled</div><div hidden data-component="cancelled">stale</div></body></html>',
+		),
+		ALL_ORDER_STREAMS,
+	);
+	assert.deepEqual(failures, []);
+	assert.deepEqual(stateStreams(harness), ["orders", "nutrition"]);
+});
+
+function ordersSiteByOrder(
+	searchPages: string[],
+	detailByOrder: Record<string, string>,
+	visited: string[],
+): Page {
+	let current = "";
+	return {
+		content: () => Promise.resolve(current),
+		goto: (url: string) => {
+			const parsed = new URL(url);
+			if (parsed.pathname.includes("search")) {
+				const pageNum = Number(parsed.searchParams.get("page") ?? "1");
+				current = searchPages[pageNum - 1] ?? "";
+			} else {
+				const orderId = parsed.searchParams.get("orderID") ?? "";
+				visited.push(orderId);
+				current = detailByOrder[orderId] ?? "";
+			}
+			return Promise.resolve(null);
+		},
+		locator: () => ({ first: () => ({ waitFor: () => Promise.resolve() }) }),
+		url: () => "https://www.amazon.com/your-orders/search",
+	} as unknown as Page;
+}
+
+const ORDER_B = "222-2222222-2222222";
+const EMPTY_DETAIL = '<html><body><div id="line-items"></div></body></html>';
+
+async function withoutPacing<T>(run: () => Promise<T>): Promise<T> {
+	const realSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((fn: () => void) => {
+		fn();
+		return 0;
+	}) as unknown as typeof setTimeout;
+	try {
+		return await run();
+	} finally {
+		globalThis.setTimeout = realSetTimeout;
+	}
+}
+
+test("partial delivery keeps reading after the first unreadable detail", async () => {
+	const noEnd = searchPage(
+		1,
+		[
+			[ORDER_A, "B012345678"],
+			[ORDER_B, "B012345678"],
+		],
+		false,
+	).replace('<li class="a-disabled a-last">Next</li>', "");
+	const visited: string[] = [];
+	const { failures, harness } = await withoutPacing(() =>
+		runCollectOrders(
+			ordersSiteByOrder(
+				[noEnd],
+				{ [ORDER_A]: EMPTY_DETAIL, [ORDER_B]: DETAIL_HTML },
+				visited,
+			),
+			["orders", "order_items"],
+		),
+	);
+	assert.deepEqual(visited, [ORDER_A, ORDER_B]);
+	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
+		["order_items", true],
+	]);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.stream),
+		["orders", "order_items"],
+	);
+	assert.equal(harness.emitted[0]?.data.id, ORDER_B);
+});
+
+test("a proven list keeps reading after one unreadable detail, then fails without STATE", async () => {
+	const visited: string[] = [];
+	const { failures, harness } = await withoutPacing(() =>
+		runCollectOrders(
+			ordersSiteByOrder(
+				[
+					searchPage(
+						1,
+						[
+							[ORDER_A, "B012345678"],
+							[ORDER_B, "B012345678"],
+						],
+						false,
+					),
+				],
+				{ [ORDER_A]: EMPTY_DETAIL, [ORDER_B]: DETAIL_HTML },
+				visited,
+			),
+			["orders", "order_items"],
+		),
+	);
+	assert.deepEqual(visited, [ORDER_A, ORDER_B]);
+	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
+		["order_items", true],
+	]);
+	assert.match(failures[0]?.message ?? "", /no items and no cancellation/);
+	assert.match(failures[0]?.message ?? "", /1 of 2 orders/);
+	assert.deepEqual(stateStreams(harness), []);
+	assert.equal(harness.emitted.filter((r) => r.stream === "orders").length, 1);
+});
+
+// ─── Review round (latest): inert ancestry; partial-delivery navigation ──
+
+const INERT_WRAPPERS: Array<[label: string, wrap: (inner: string) => string]> =
+	[
+		["noscript", (inner) => `<noscript>${inner}</noscript>`],
+		["template", (inner) => `<template>${inner}</template>`],
+		["nested noscript", (inner) => `<div><noscript>${inner}</noscript></div>`],
+	];
+
+for (const [label, wrap] of INERT_WRAPPERS) {
+	test(`collectOrders fails every requested stream on an inert cancellation marker (${label})`, async () => {
+		const detail = `<html><body><div id="line-items"></div>${wrap('<div data-component="cancelled">Cancelled</div>')}</body></html>`;
+		const { failures, harness } = await runFast(
+			ordersSite([searchPage(1, [[ORDER_A, "B012345678"]], false)], detail),
+			ALL_ORDER_STREAMS,
+		);
+		assert.deepEqual(
+			failedStreams(failures),
+			ALL_ORDER_STREAMS.map((s) => [s, true]),
+		);
+		assert.deepEqual(stateStreams(harness), []);
+		assert.equal(harness.emitted.length, 0);
+	});
+
+	test(`collectOrders fails every requested stream on inert pagination (${label})`, async () => {
+		const rows = searchPage(1, [[ORDER_A, "B012345678"]], false);
+		const pagination =
+			/<ul class="a-pagination">.*<\/ul>/.exec(rows)?.[0] ?? "";
+		const inertPagination = rows.replace(pagination, wrap(pagination));
+		const { failures, harness } = await runFast(
+			ordersSite([inertPagination], DETAIL_HTML),
+			["orders", "order_items"],
+		);
+		assert.deepEqual(failedStreams(failures), [
+			["orders", true],
+			["order_items", true],
+		]);
+		assert.match(failures[0]?.message ?? "", /last-page signal/);
+		assert.deepEqual(stateStreams(harness), []);
+	});
+
+	test(`collectOrders fails order_items when its only item row is inert (${label})`, async () => {
+		const detail = `<html><body>${wrap(
+			'<div data-component="purchasedItemsRightGrid"><a href="/dp/B012345678">Organic Bananas</a><span>Qty: 1</span></div>',
+		)}</body></html>`;
+		const { failures, harness } = await runFast(
+			ordersSite([searchPage(1, [[ORDER_A, "B012345678"]], false)], detail),
+			ALL_ORDER_STREAMS,
+		);
+		assert.deepEqual(
+			failedStreams(failures),
+			ALL_ORDER_STREAMS.map((s) => [s, true]),
+		);
+		assert.deepEqual(stateStreams(harness), []);
+		assert.equal(harness.emitted.length, 0);
+	});
+}
+
+test("an inert search row is not counted as a result row", () => {
+	const row =
+		'<div class="a-fixed-left-grid"><a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a><a href="/dp/B087654321">item</a></div>';
+	const parsed = parseOrderSearchPageDom(
+		`<html><body><noscript>${row}</noscript></body></html>`,
+	);
+	assert.deepEqual(parsed.stubs, []);
+});
+
+type DeliveryFailure =
+	| "goto-timeout"
+	| "readiness-timeout"
+	| "http-503"
+	| "http-403";
+
+/** Search pages without a last-page signal; ORDER_A reads, ORDER_B fails. */
+function siteWithFailingSecondDetail(failure: DeliveryFailure): {
+	page: Page;
+	visited: string[];
+} {
+	const visited: string[] = [];
+	let current = "";
+	let failNext = false;
+	const noEnd = searchPage(
+		1,
+		[
+			[ORDER_A, "B012345678"],
+			[ORDER_B, "B012345678"],
+		],
+		false,
+	).replace('<li class="a-disabled a-last">Next</li>', "");
+	const page = {
+		content: () => Promise.resolve(current),
+		goto: (url: string) => {
+			const parsed = new URL(url);
+			if (parsed.pathname.includes("search")) {
+				current = noEnd;
+				return Promise.resolve(null);
+			}
+			const orderId = parsed.searchParams.get("orderID") ?? "";
+			visited.push(orderId);
+			current = DETAIL_HTML;
+			failNext = false;
+			if (orderId !== ORDER_B) {
+				return Promise.resolve(null);
+			}
+			if (failure === "goto-timeout") {
+				const timeout = new Error("page.goto: Timeout 30000ms exceeded");
+				timeout.name = "TimeoutError";
+				return Promise.reject(timeout);
+			}
+			if (failure === "readiness-timeout") {
+				failNext = true;
+				return Promise.resolve(null);
+			}
+			const status = failure === "http-503" ? 503 : 403;
+			return Promise.resolve({ ok: () => false, status: () => status });
+		},
+		locator: () => ({
+			first: () => ({
+				waitFor: () =>
+					failNext
+						? Promise.reject(new Error("locator.waitFor: Timeout exceeded"))
+						: Promise.resolve(),
+			}),
+		}),
+		url: () => "https://www.amazon.com/your-orders/search",
+	} as unknown as Page;
+	return { page, visited };
+}
+
+for (const failure of [
+	"goto-timeout",
+	"readiness-timeout",
+	"http-503",
+] as const) {
+	test(`partial delivery reports every requested stream when a detail navigation fails (${failure})`, async () => {
+		const { page, visited } = siteWithFailingSecondDetail(failure);
+		const { failures, harness } = await withoutPacing(() =>
+			runCollectOrders(page, ["orders", "order_items"]),
+		);
+		assert.deepEqual(visited, [ORDER_A, ORDER_B]);
+		assert.deepEqual(failedStreams(failures), [
+			["orders", true],
+			["order_items", true],
+		]);
+		assert.match(failures[0]?.message ?? "", /last-page signal/);
+		assert.deepEqual(stateStreams(harness), []);
+		// The order read before the failure is kept.
+		assert.deepEqual(
+			harness.emitted.map((r) => r.stream),
+			["orders", "order_items"],
+		);
+		assert.equal(harness.emitted[0]?.data.id, ORDER_A);
+	});
+}
+
+test("partial delivery reports the streams, then still raises a signed-out detail", async () => {
+	const { page } = siteWithFailingSecondDetail("http-403");
+	const harness = makeRecordingEmit(validateRecord);
+	const failures: string[] = [];
+	await assert.rejects(
+		withoutPacing(() =>
+			collectOrders({
+				credentials: {},
+				emit: harness.emit,
+				emitRecord: harness.emitRecord,
+				page,
+				progress: noProgress,
+				reportStreamFailure: (stream) => {
+					failures.push(stream);
+					return Promise.resolve();
+				},
+				requested: new Map(
+					["orders", "order_items"].map((stream) => [stream, {}]),
+				) as never,
+				state: {},
+			}),
+		),
+		/HTTP 403/,
+	);
+	assert.deepEqual(failures, ["orders", "order_items"]);
+	assert.deepEqual(stateStreams(harness), []);
 });

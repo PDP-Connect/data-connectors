@@ -15,6 +15,8 @@ import { test } from "node:test";
 import {
 	bestUsdaMatch,
 	cleanProductName,
+	hasOrderSearchEmptyState,
+	isCancelledOrderDetail,
 	mapUsdaNutrients,
 	parseAmazonProfileDom,
 	parseDollarsToCents,
@@ -392,5 +394,111 @@ test("parseWholeFoodsSearchResultDom returns null when no product tile is presen
 	assert.equal(
 		parseWholeFoodsSearchResultDom("<html><body>no results</body></html>"),
 		null,
+	);
+});
+
+test("parseOrderSearchPageDom reads the disabled Next control as the last-page signal", () => {
+	const row = `<div class="a-fixed-left-grid"><a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a></div>`;
+	const last = parseOrderSearchPageDom(
+		`${row}<ul class="a-pagination"><li class="a-selected">2</li><li class="a-disabled a-last">Next</li></ul>`,
+	);
+	assert.equal(last.hasNextPage, false);
+	assert.equal(last.isLastPage, true);
+	const missing = parseOrderSearchPageDom(
+		`${row}<ul class="a-pagination"><li class="a-selected">2</li></ul>`,
+	);
+	assert.equal(missing.isLastPage, false);
+	const more = parseOrderSearchPageDom(
+		`${row}<ul class="a-pagination"><li class="a-last"><a href="?page=3">Next</a></li></ul>`,
+	);
+	assert.equal(more.hasNextPage, true);
+	assert.equal(more.isLastPage, false);
+});
+
+// ─── Order search empty state / cancelled detail ───────────────────────────
+
+test("hasOrderSearchEmptyState accepts a rendered empty-orders element and a zero count", () => {
+	assert.equal(
+		hasOrderSearchEmptyState(
+			'<div class="your-orders-content-container"><p>No orders</p></div>',
+		),
+		true,
+	);
+	assert.equal(
+		hasOrderSearchEmptyState(
+			'<label><span class="num-orders">0 orders</span> placed in</label>',
+		),
+		true,
+	);
+	assert.equal(
+		hasOrderSearchEmptyState(
+			'<div class="no-orders-banner">You have not placed any orders</div>',
+		),
+		true,
+	);
+});
+
+test("hasOrderSearchEmptyState rejects scaffold, script strings and nonzero counts", () => {
+	assert.equal(
+		hasOrderSearchEmptyState(
+			'<input id="searchOrdersInput"><script>const c = "no-orders"; // 0 orders</script>',
+		),
+		false,
+	);
+	assert.equal(
+		hasOrderSearchEmptyState(
+			'<div class="hzsearch-results-summary">30 orders matching Whole Foods Market</div>',
+		),
+		false,
+	);
+	assert.equal(
+		hasOrderSearchEmptyState('<div class="no-orders"></div>'),
+		false,
+	);
+	assert.equal(hasOrderSearchEmptyState("<html></html>"), false);
+});
+
+test("isCancelledOrderDetail needs the cancellation marker as an element", () => {
+	assert.equal(
+		isCancelledOrderDetail('<div data-component="cancelled">x</div>'),
+		true,
+	);
+	assert.equal(
+		isCancelledOrderDetail(
+			'<div id="line-items"></div><script>"data-component=\\"cancelled\\""</script>',
+		),
+		false,
+	);
+});
+
+test("an empty item container is not an item row", () => {
+	for (const html of [
+		'<div data-component="purchasedItemsRightGrid"></div>',
+		'<div id="line-items"><div id="x-item-grid-row"></div></div>',
+	]) {
+		assert.deepEqual(parseOrderDetailDom(html).items, [], html);
+	}
+});
+
+test("parseOrderSearchPageDom records the distinct product ASINs each order's search rows link", () => {
+	const row = (asin: string) =>
+		`<div class="a-fixed-left-grid"><a title="View order details" href="/your-orders/order-details?orderID=111-1111111-1111111">details</a><a href="/dp/${asin}">item</a></div>`;
+	const { stubs } = parseOrderSearchPageDom(
+		`<html><body>${row("B012345678")}${row("B087654321")}${row("B012345678")}</body></html>`,
+	);
+	assert.equal(stubs[0]?.expectedItemCount, 3);
+	assert.deepEqual(stubs[0]?.searchProductIds, ["B012345678", "B087654321"]);
+});
+
+test("a hidden empty-orders element is not an empty state", () => {
+	assert.equal(
+		hasOrderSearchEmptyState(
+			'<div class="no-orders" hidden>No orders</div>',
+		),
+		false,
+	);
+	assert.equal(
+		hasOrderSearchEmptyState('<div class="no-orders">No orders</div>'),
+		true,
 	);
 });
