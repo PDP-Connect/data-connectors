@@ -34,6 +34,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -315,10 +316,16 @@ async function collectViewingActivity(
 	const { rows, malformedCount, schema } = loaded;
 
 	if (malformedCount > 0) {
+		connectorDiagnostic("netflix_export", "malformed_rows", {
+			phase: "emit",
+			pass: "emit",
+			stream: "viewing_activity",
+			count: malformedCount,
+		});
 		await emit({
 			type: "PROGRESS",
 			stream,
-			message: `Netflix phase=emit pass=emit stream=viewing_activity note=malformed_rows count=${malformedCount}`,
+			message: `${malformedCount} rows in the Netflix file could not be read`,
 		});
 	}
 
@@ -340,10 +347,18 @@ async function collectViewingActivity(
 	let skippedCount = 0;
 	let emittedCount = 0;
 
+	connectorDiagnostic("netflix_export", "emit_start", {
+		phase: "emit",
+		pass: "emit",
+		stream: "viewing_activity",
+		source_schema: schema,
+		total_items: rows.length,
+		malformed: malformedCount,
+	});
 	await emit({
 		type: "PROGRESS",
 		stream,
-		message: `Netflix phase=emit pass=emit stream=viewing_activity source_schema=${schema} total_items=${rows.length} malformed=${malformedCount}`,
+		message: `Reading ${rows.length} Netflix viewing records`,
 	});
 
 	for (const row of rows) {
@@ -369,10 +384,17 @@ async function collectViewingActivity(
 		}
 
 		if (emittedCount % 100 === 0) {
+			connectorDiagnostic("netflix_export", "emit_counts", {
+				phase: "emit",
+				pass: "emit",
+				stream: "viewing_activity",
+				emitted: emittedCount,
+				skipped: skippedCount,
+			});
 			await emit({
 				type: "PROGRESS",
 				stream,
-				message: `Netflix phase=emit pass=emit stream=viewing_activity emitted=${emittedCount} skipped=${skippedCount}`,
+				message: `Saved ${emittedCount} Netflix viewing records`,
 			});
 		}
 	}
@@ -390,9 +412,14 @@ runConnector({
 			join(homedir(), ".pdpp", "imports", "netflix_export");
 
 		if (!existsSync(importDir)) {
+			connectorDiagnostic("netflix_export", "import_dir_not_found", {
+				import_dir: importDir,
+				env_var: "NETFLIX_EXPORT_DIR",
+				default_dir: "~/.pdpp/imports/netflix_export/",
+			});
 			await ctx.emit({
 				type: "PROGRESS",
-				message: `Netflix export import directory not found: ${importDir}. Set NETFLIX_EXPORT_DIR or extract the downloaded archive to ~/.pdpp/imports/netflix_export/`,
+				message: "No Netflix export found. Upload your Netflix data download.",
 			});
 			return;
 		}

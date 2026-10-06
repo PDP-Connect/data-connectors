@@ -12,6 +12,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -87,7 +88,7 @@ function records(
 
 async function runNetflixImport(
 	importRoot: string,
-): Promise<{ messages: EmittedMessage[] }> {
+): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: NETFLIX_ENTRYPOINT,
@@ -103,8 +104,48 @@ async function runNetflixImport(
 			type: "START",
 		},
 	});
-	return { messages: result.messages };
+	return { messages: result.messages, stderr: result.stderr };
 }
+
+function progressTexts(messages: EmittedMessage[]): string[] {
+	return messages
+		.filter((message) => message.type === "PROGRESS")
+		.map((message) => (message as { message: string }).message);
+}
+
+test("Netflix connector shows plain progress and writes the schema and counters to diagnostic lines", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-netflix-progress-"));
+	try {
+		await writeFile(
+			join(importRoot, "NetflixViewingHistory.csv"),
+			DIRECT_HISTORY_CSV,
+			"utf8",
+		);
+		const { messages, stderr } = await runNetflixImport(importRoot);
+		assert.deepEqual(progressTexts(messages), [
+			"Reading 2 Netflix viewing records",
+		]);
+		assertUserFacingProgress(messages);
+		assert.match(
+			stderr,
+			/\[netflix_export-diagnostic\] emit_start \{[^\n]*"source_schema":"direct_history","total_items":2,"malformed":0\}/,
+		);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+test("Netflix connector with no import directory shows plain progress and keeps the path and env var in a diagnostic line", async () => {
+	const missing = join(tmpdir(), "pdpp-netflix-does-not-exist-xyz");
+	const { messages, stderr } = await runNetflixImport(missing);
+	assert.deepEqual(progressTexts(messages), [
+		"No Netflix export found. Upload your Netflix data download.",
+	]);
+	assertUserFacingProgress(messages);
+	assert.match(stderr, /\[netflix_export-diagnostic\] import_dir_not_found /);
+	assert.ok(stderr.includes(missing));
+	assert.ok(stderr.includes("NETFLIX_EXPORT_DIR"));
+});
 
 const DIRECT_HISTORY_CSV = `Title,Date
 "The Crown",2024-01-15
