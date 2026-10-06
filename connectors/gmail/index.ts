@@ -42,6 +42,10 @@ import {
 	type ListResponse,
 	type MailboxObject,
 } from "imapflow";
+import {
+	type ConnectorDiagnosticFields,
+	connectorDiagnostic,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "../../packages/polyfill-connectors/src/connector-exit.ts";
 import {
 	buildDetailCoverageMessage,
@@ -481,6 +485,20 @@ export function addAttachmentBackfillRecordToSummary(
 	}
 }
 
+/** Technical detail for the run log; PROGRESS carries only owner text. */
+function gmailDiagnostic(
+	event: string,
+	fields?: ConnectorDiagnosticFields,
+): void {
+	connectorDiagnostic("gmail", event, fields);
+}
+
+function attachmentBackfillProgressMessage(
+	summary: AttachmentBackfillSummary,
+): string {
+	return `Downloaded ${summary.hydrated} ${summary.hydrated === 1 ? "attachment" : "attachments"} (${summary.too_large} too large, ${summary.failed} failed)`;
+}
+
 export function formatAttachmentBackfillSummary(
 	summary: AttachmentBackfillSummary,
 ): string {
@@ -677,11 +695,15 @@ async function emitAttachmentDetailCoverage(
 	if (!boundaryEstablished) {
 		// Deliberately not a SKIP_RESULT: nothing was skipped by policy. The run
 		// simply has no denominator worth reporting, and says so by staying quiet.
+		gmailDiagnostic("attachment_coverage_withheld", {
+			reason:
+				"historical messages walk has not completed; attachment counts describe an incremental window, not the mailbox",
+		});
 		await emit({
 			type: "PROGRESS",
 			stream: "attachments",
 			message:
-				"Withholding attachments coverage: the historical messages walk has not completed, so this run's attachment counts describe an incremental window, not the mailbox",
+				"Attachment totals will be reported after your full mailbox history has been read",
 		});
 		return;
 	}
@@ -1245,10 +1267,15 @@ async function emitAllMailInventoryDisclosure(
 	forwardFloorUid: number,
 ): Promise<void> {
 	const backfilledThroughUid = historicalCursor.backfilled_through_uid ?? 0;
+	gmailDiagnostic("all_mail_historical_walk", {
+		exists_total: session.existsTotal,
+		backfilled_through_uid: backfilledThroughUid,
+		forward_floor_uid: forwardFloorUid,
+	});
 	await emitFn({
 		type: "PROGRESS",
 		stream: "messages",
-		message: `All Mail reports ${session.existsTotal} messages; historical walk is through UID ${backfilledThroughUid} of ${forwardFloorUid}`,
+		message: `Your mailbox has ${session.existsTotal} messages`,
 		all_mail_inventory: {
 			all_mail_exists: session.existsTotal,
 			backfilled_through_uid: backfilledThroughUid,
@@ -2689,7 +2716,9 @@ function buildServedAttachmentRecoveryProgressMessage(args: {
 	phase: "hydrating" | "settled";
 	recovered: number;
 }): string {
-	return `Gmail served attachment-gap recovery phase=${args.phase} admitted=${args.admitted} recovered=${args.recovered} metadata_lookups=${args.metadataLookups}`;
+	return args.phase === "hydrating"
+		? `Retrying ${args.admitted} ${args.admitted === 1 ? "attachment" : "attachments"} that failed earlier (${args.recovered} recovered)`
+		: `Recovered ${args.recovered} of ${args.admitted} previously failed ${args.admitted === 1 ? "attachment" : "attachments"}`;
 }
 
 async function emitServedAttachmentRecoveryProgress(
@@ -2701,6 +2730,12 @@ async function emitServedAttachmentRecoveryProgress(
 		recovered: number;
 	},
 ): Promise<void> {
+	gmailDiagnostic("served_attachment_recovery_progress", {
+		phase: progress.phase,
+		admitted: progress.admitted,
+		recovered: progress.recovered,
+		metadata_lookups: progress.metadataLookups,
+	});
 	await emitProtocol({
 		type: "PROGRESS",
 		stream: "attachments",
@@ -3070,10 +3105,14 @@ async function recoverServedAttachmentGapsIfRequested(
 	});
 	const { attachment_hydration_failure_outcome, ...attachmentRecoveryOutcome } =
 		recoverySummary;
+	gmailDiagnostic("served_attachment_recovery_summary", {
+		admitted: recoverySummary.admitted,
+		recovered: recoverySummary.recovered,
+	});
 	await deps.emitProtocol({
 		type: "PROGRESS",
 		stream: "attachments",
-		message: `Gmail served attachment-gap recovery summary: admitted=${recoverySummary.admitted} recovered=${recoverySummary.recovered}`,
+		message: `Recovered ${recoverySummary.recovered} of ${recoverySummary.admitted} previously failed attachments`,
 		count: recoverySummary.recovered,
 		total: recoverySummary.admitted,
 		attachment_recovery_outcome: {
@@ -3152,10 +3191,15 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 			byteBudget,
 			Number(attachmentBackfillRange.split(":")[1]),
 		);
+		gmailDiagnostic("attachment_backfill_start", {
+			uid_range: `${attachmentBackfillRange.split(":")[0]}:${backfillWindowEndUid}`,
+			mailbox: args.allMail.path,
+			byte_budget: byteBudget,
+		});
 		await args.emit({
 			type: "PROGRESS",
 			stream: "attachments",
-			message: `Backfilling historical attachment UIDs (${attachmentBackfillRange.split(":")[0]}:${backfillWindowEndUid}) from ${args.allMail.path}, byte budget ${byteBudget}`,
+			message: "Downloading attachments from older messages",
 		});
 		const backfillSummary = createAttachmentBackfillSummary();
 		await emitMessagesPass(
@@ -3183,10 +3227,11 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 			},
 			backfillMetas,
 		);
+		gmailDiagnostic("attachment_backfill_summary", { ...backfillSummary });
 		await args.emit({
 			type: "PROGRESS",
 			stream: "attachments",
-			message: `Gmail attachment backfill summary: ${formatAttachmentBackfillSummary(backfillSummary)}`,
+			message: attachmentBackfillProgressMessage(backfillSummary),
 			count: backfillSummary.hydrated,
 			total:
 				backfillSummary.hydrated +
@@ -3209,10 +3254,12 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 			},
 		});
 	} else {
+		const emptySummary = createAttachmentBackfillSummary();
+		gmailDiagnostic("attachment_backfill_summary", { ...emptySummary });
 		await args.emit({
 			type: "PROGRESS",
 			stream: "attachments",
-			message: `Gmail attachment backfill summary: ${formatAttachmentBackfillSummary(createAttachmentBackfillSummary())}`,
+			message: attachmentBackfillProgressMessage(emptySummary),
 			count: 0,
 			total: 0,
 		});
@@ -3705,16 +3752,17 @@ function enforceTransferProgress(
 	};
 }
 
-/** Bounded, non-secret PROGRESS text for one in-transfer observation: phase,
- *  byte counters, and elapsed time only — matches
- *  `buildServedAttachmentRecoveryProgressMessage`'s shape for the same
- *  reason (a free-text `message` that a dashboard/log can render safely). */
+/** Owner-facing PROGRESS text for one in-transfer observation: megabytes
+ *  only. Phase, exact byte counters and elapsed time go to the
+ *  `attachment_transfer` diagnostic line instead. */
 export function buildAttachmentTransferProgressMessage(
 	progress: AttachmentTransferProgress,
 ): string {
-	const totalPart =
-		progress.totalBytes === null ? "" : ` total_bytes=${progress.totalBytes}`;
-	return `Gmail attachment transfer phase=${progress.phase} bytes_transferred=${progress.bytesTransferred}${totalPart} elapsed_ms=${progress.elapsedMs}`;
+	const megabytes = (bytes: number): string =>
+		(bytes / (1024 * 1024)).toFixed(1);
+	return progress.totalBytes === null
+		? `Downloading attachment (${megabytes(progress.bytesTransferred)} MB so far)`
+		: `Downloading attachment (${megabytes(progress.bytesTransferred)} of ${megabytes(progress.totalBytes)} MB)`;
 }
 
 /** A trusted, already-known expected size only — never inferred or guessed
@@ -4094,9 +4142,12 @@ export async function runDeltaPass(
 	const { priorModseq } = session;
 	const priorModseqBig =
 		typeof priorModseq === "bigint" ? priorModseq : BigInt(priorModseq);
+	gmailDiagnostic("flag_label_delta_fetch", {
+		prior_modseq: String(priorModseq),
+	});
 	await emit({
 		type: "PROGRESS",
-		message: `Fetching flag/label deltas since modseq=${String(priorModseq)}`,
+		message: "Checking for changed labels and read/unread flags",
 	});
 	// `envelope`/`internalDate`/`size`/`bodyStructure` ride along with the flags
 	// so the emitted record is whole. See this function's doc comment: a partial
@@ -4450,6 +4501,12 @@ export async function runAllMailPasses(
 		// only prevents an unhandled-rejection crash; it changes nothing about
 		// whether the attachment itself succeeds.
 		onTransferProgress: (progress) => {
+			gmailDiagnostic("attachment_transfer", {
+				phase: progress.phase,
+				bytes_transferred: progress.bytesTransferred,
+				total_bytes: progress.totalBytes,
+				elapsed_ms: progress.elapsedMs,
+			});
 			emit({
 				type: "PROGRESS",
 				stream: "attachments",
@@ -4500,12 +4557,21 @@ export async function runAllMailPasses(
 		return;
 	}
 
-	let fetchProgressMessage = "No Gmail message UID work is pending";
+	let fetchProgressMessage = "No new messages to fetch";
 	if (historicalFetchRange) {
-		fetchProgressMessage = `Fetching bounded historical messages (${historicalFetchRange}) from ${allMail.path}`;
+		fetchProgressMessage = "Fetching older messages";
 	} else if (forwardFetchRange) {
-		fetchProgressMessage = `Fetching new messages (${forwardFetchRange}) from ${allMail.path}`;
+		fetchProgressMessage = "Fetching new messages";
 	}
+	gmailDiagnostic("message_fetch_range", {
+		kind: historicalFetchRange
+			? "historical"
+			: forwardFetchRange
+				? "forward"
+				: "none",
+		uid_range: historicalFetchRange ?? forwardFetchRange ?? undefined,
+		mailbox: allMail.path,
+	});
 	await emit({ type: "PROGRESS", message: fetchProgressMessage });
 
 	// Phase A: pull all metadata into an array up-front.
