@@ -3122,14 +3122,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime-session-watchdog.test.ts",
-			line: 161,
+			line: 165,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "watchdog.checkpoint(): test drives/asserts an ordered per-case side effect",
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2187,
+			line: 2188,
 			column: 7,
 			category: "shared_mutable_accumulator",
 			note: "closeBrowserContextPagesExcept(): loop body mutates a shared closed accumulator the next iteration reads",
@@ -3248,7 +3248,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 1310,
+			line: 1311,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "run(): report each unsupported bounded stream's SKIP_RESULT before collection starts",
