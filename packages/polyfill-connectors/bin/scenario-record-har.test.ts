@@ -32,7 +32,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
@@ -424,15 +424,20 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 // tripping a fetch through a driver (browser-har-replay.ts's preload) that
 // was never built to intercept a plain Node-side fetch in the first place.
 test("scenario-verify --json: a recorded-browser scenario's committed claim carries no absolute path and no $HOME", async () => {
-	// Rooted at homedir(), NOT tmpdir() — the sanity check below needs this
-	// test's own scratch dir to actually sit under $HOME so the redaction
-	// path it's proving gets real work to do. tmpdir() only resolves under
-	// $HOME when $TMPDIR happens to be configured that way (a local
-	// developer-machine convention, not something a CI runner's default
-	// /tmp satisfies) — confirmed failing in CI before this fix.
-	const tmpDir = mkdtempSync(join(homedir(), ".scenario-verify-claim-safety-"));
+	// redactHostPaths (bin/scenario-verify.ts) calls os.homedir() at call
+	// time INSIDE the spawned verify subprocess, and Node's os.homedir()
+	// reads $HOME (POSIX) / $USERPROFILE (Windows) when set — so this test
+	// gives that subprocess a FAKE, disposable home instead of trusting the
+	// real one to be laid out any particular way. Never touches the real
+	// $HOME: a crash/SIGKILL before cleanup leaves clutter here, not there.
+	// tmpdir() is still used for fakeHome itself, since fakeHome only needs
+	// to be SOME real, writable directory — it's the subprocess's HOME, not
+	// a thing being tested.
+	const fakeHome = mkdtempSync(join(tmpdir(), "claim-safety-home-"));
+	const tmpDir = mkdtempSync(join(fakeHome, "scenario-verify-claim-safety-"));
 	const scenarioPath = join(tmpDir, "claim-safety.scenario.json");
 	const claimPath = join(tmpDir, "claim.json");
+	const subprocessEnv = { HOME: fakeHome, USERPROFILE: fakeHome };
 	try {
 		const recordResult = runRecordCli(
 			[
@@ -445,7 +450,7 @@ test("scenario-verify --json: a recorded-browser scenario's committed claim carr
 				scenarioPath,
 				"--record-har",
 			],
-			{},
+			subprocessEnv,
 		);
 		assert.equal(
 			recordResult.code,
@@ -453,8 +458,8 @@ test("scenario-verify --json: a recorded-browser scenario's committed claim carr
 			`record should succeed; stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
 		);
 		assert.ok(
-			tmpDir.startsWith(homedir()),
-			"sanity: this test's own tmpdir must actually be under $HOME, or the assertions below would pass vacuously",
+			tmpDir.startsWith(fakeHome),
+			"sanity: this test's own scratch dir must actually be under the HOME the code under test sees, or the assertions below would pass vacuously",
 		);
 
 		const verifyResult = runVerifyCli(
@@ -466,7 +471,7 @@ test("scenario-verify --json: a recorded-browser scenario's committed claim carr
 				"--json",
 				claimPath,
 			],
-			{},
+			subprocessEnv,
 		);
 		assert.equal(
 			verifyResult.code,
@@ -478,8 +483,8 @@ test("scenario-verify --json: a recorded-browser scenario's committed claim carr
 		const claimText = readFileSync(claimPath, "utf8");
 		const claim = JSON.parse(claimText) as { scenario_path: string };
 		assert.ok(
-			!claimText.includes(homedir()),
-			`claim.json must not contain $HOME (${homedir()}); got: ${claimText}`,
+			!claimText.includes(fakeHome),
+			`claim.json must not contain $HOME (${fakeHome}); got: ${claimText}`,
 		);
 		assert.ok(
 			!claimText.includes(tmpDir),
@@ -491,7 +496,7 @@ test("scenario-verify --json: a recorded-browser scenario's committed claim carr
 			"scenario_path must be reduced to a bare filename, never the directory it lives in",
 		);
 	} finally {
-		rmSync(tmpDir, { recursive: true, force: true });
+		rmSync(fakeHome, { recursive: true, force: true });
 	}
 });
 

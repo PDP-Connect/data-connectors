@@ -42,7 +42,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
@@ -88,7 +88,10 @@ function runRecordCli(
 }
 const FIXTURES_DIR = join(PACKAGE_ROOT, "src", "test-fixtures");
 
-function runVerifyCli(args: readonly string[]): {
+function runVerifyCli(
+	args: readonly string[],
+	extraEnv: Record<string, string> = {},
+): {
 	code: number | null;
 	stderr: string;
 	stdout: string;
@@ -98,7 +101,7 @@ function runVerifyCli(args: readonly string[]): {
 		["--import", "tsx", VERIFY_CLI_PATH, ...args],
 		{
 			cwd: PACKAGE_ROOT,
-			env: process.env,
+			env: { ...process.env, ...extraEnv },
 			encoding: "utf8",
 			timeout: 30_000,
 		},
@@ -2229,17 +2232,20 @@ test("evaluateClaimEligibility: a recorded-http scenario NEVER carries the brows
 // `~/Downloads/strava-mock-export.zip` fixture used to seed #81's own
 // committed claim.
 test("scenario-verify --json: a filesystem-input connector's committed claim replaces the host path with $ENVVAR, never the real path or $HOME", () => {
-	// Rooted at homedir(), NOT tmpdir() — see bin/scenario-record-har.test.ts's
-	// identical fix for why: the sanity check just below needs this test's
-	// own scratch dir to genuinely sit under $HOME, which tmpdir() only
-	// guarantees on a machine whose $TMPDIR happens to be configured that
-	// way, not on a CI runner's default /tmp.
+	// redactHostPaths (bin/scenario-verify.ts) calls os.homedir() at call
+	// time INSIDE the spawned verify subprocess, and Node's os.homedir()
+	// reads $HOME (POSIX) / $USERPROFILE (Windows) when set — so this test
+	// gives that subprocess a FAKE, disposable home instead of trusting the
+	// real one to be laid out any particular way. Never touches the real
+	// $HOME: a crash/SIGKILL before cleanup leaves clutter here, not there.
+	const fakeHome = mkdtempSync(join(tmpdir(), "claim-safety-home-"));
 	const tmpDir = mkdtempSync(
-		join(homedir(), ".scenario-verify-fs-claim-safety-"),
+		join(fakeHome, "scenario-verify-fs-claim-safety-"),
 	);
 	const exportDir = join(tmpDir, "export");
 	const scenarioPath = join(tmpDir, "strava.scenario.json");
 	const claimPath = join(tmpDir, "claim.json");
+	const subprocessEnv = { HOME: fakeHome, USERPROFILE: fakeHome };
 	mkdirSync(exportDir, { recursive: true });
 	writeFileSync(
 		join(exportDir, "activities.csv"),
@@ -2254,13 +2260,13 @@ test("scenario-verify --json: a filesystem-input connector's committed claim rep
 	process.env.STRAVA_EXPORT_DIR = exportDir;
 	try {
 		assert.ok(
-			tmpDir.startsWith(homedir()),
-			"sanity: this test's own tmpdir must actually be under $HOME, or the assertions below would pass vacuously",
+			tmpDir.startsWith(fakeHome),
+			"sanity: this test's own scratch dir must actually be under the HOME the code under test sees, or the assertions below would pass vacuously",
 		);
 
 		const recordResult = runRecordCli(
 			["strava", "--streams", "activities", "--out", scenarioPath],
-			{ STRAVA_EXPORT_DIR: exportDir },
+			{ STRAVA_EXPORT_DIR: exportDir, ...subprocessEnv },
 		);
 		assert.equal(
 			recordResult.code,
@@ -2268,12 +2274,10 @@ test("scenario-verify --json: a filesystem-input connector's committed claim rep
 			`record should succeed; stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
 		);
 
-		const verifyResult = runVerifyCli([
-			"strava",
-			scenarioPath,
-			"--json",
-			claimPath,
-		]);
+		const verifyResult = runVerifyCli(
+			["strava", scenarioPath, "--json", claimPath],
+			subprocessEnv,
+		);
 		assert.equal(
 			verifyResult.code,
 			0,
@@ -2283,8 +2287,8 @@ test("scenario-verify --json: a filesystem-input connector's committed claim rep
 
 		const claimText = readFileSync(claimPath, "utf8");
 		assert.ok(
-			!claimText.includes(homedir()),
-			`claim.json must not contain $HOME (${homedir()}); got: ${claimText}`,
+			!claimText.includes(fakeHome),
+			`claim.json must not contain $HOME (${fakeHome}); got: ${claimText}`,
 		);
 		assert.ok(
 			!claimText.includes(exportDir),
@@ -2313,7 +2317,7 @@ test("scenario-verify --json: a filesystem-input connector's committed claim rep
 		} else {
 			process.env.STRAVA_EXPORT_DIR = savedExportDir;
 		}
-		rmSync(tmpDir, { recursive: true, force: true });
+		rmSync(fakeHome, { recursive: true, force: true });
 	}
 });
 
