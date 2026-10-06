@@ -18,7 +18,11 @@
 import { createReadStream, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { runConnector, type StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import {
+	runConnector,
+	type StreamScope,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	APPLE_HEALTH_TAG_RE,
 	advanceCursor,
@@ -286,32 +290,52 @@ function handleWorkout(
 	return emitRecord("workouts", { ...rec });
 }
 
-/** Render the gap tally as a single human-readable progress line. Never silent — an empty tally still reports "no gaps". */
-function formatGapSummary(gaps: AppleHealthGapCounts): string {
+/** Report the gap tally: one plain owner line on PROGRESS, the raw tally as a diagnostic. Never silent — an empty tally still reports. */
+async function reportGapSummary(
+	gaps: AppleHealthGapCounts,
+	progress: (message: string) => Promise<void>,
+): Promise<void> {
+	const byType = [...gaps.unrecognizedRecordTypes.entries()]
+		.map(([type, count]) => `${type}:${count}`)
+		.join(",");
+	connectorDiagnostic("apple_health", "gap_summary", {
+		records_dropped_missing_start_date: gaps.recordsMissingStartDate,
+		workouts_dropped_missing_start_date: gaps.workoutsMissingStartDate,
+		unrecognized_record_types: byType,
+		workout_routes_uncaptured: gaps.workoutRoutesUncaptured,
+	});
+	const noun = (n: number, one: string, many: string): string =>
+		n === 1 ? one : many;
 	const parts: string[] = [];
+	const skipped: string[] = [];
 	if (gaps.recordsMissingStartDate > 0) {
-		parts.push(
-			`records_dropped_missing_start_date=${gaps.recordsMissingStartDate}`,
+		skipped.push(
+			`${gaps.recordsMissingStartDate} ${noun(gaps.recordsMissingStartDate, "record", "records")}`,
 		);
 	}
 	if (gaps.workoutsMissingStartDate > 0) {
-		parts.push(
-			`workouts_dropped_missing_start_date=${gaps.workoutsMissingStartDate}`,
+		skipped.push(
+			`${gaps.workoutsMissingStartDate} ${noun(gaps.workoutsMissingStartDate, "workout", "workouts")}`,
 		);
 	}
+	if (skipped.length > 0) {
+		parts.push(`Skipped ${skipped.join(" and ")} with no date`);
+	}
 	if (gaps.unrecognizedRecordTypes.size > 0) {
-		const byType = [...gaps.unrecognizedRecordTypes.entries()]
-			.map(([type, count]) => `${type}:${count}`)
-			.join(",");
-		parts.push(`unrecognized_record_types=${byType}`);
+		parts.push(
+			`${gaps.unrecognizedRecordTypes.size} ${noun(gaps.unrecognizedRecordTypes.size, "record type", "record types")} not supported yet`,
+		);
 	}
 	if (gaps.workoutRoutesUncaptured > 0) {
-		parts.push(`workout_routes_uncaptured=${gaps.workoutRoutesUncaptured}`);
+		parts.push(
+			`${gaps.workoutRoutesUncaptured} ${noun(gaps.workoutRoutesUncaptured, "workout route", "workout routes")} not captured`,
+		);
 	}
-	if (parts.length === 0) {
-		return "Apple Health phase=emit pass=emit gaps=none";
-	}
-	return `Apple Health phase=emit pass=emit gaps: ${parts.join(" ")}`;
+	await progress(
+		parts.length === 0
+			? "Apple Health export read completely"
+			: parts.join("; "),
+	);
 }
 
 runConnector({
@@ -355,22 +379,31 @@ runConnector({
 		};
 		const gaps = newGapCounts();
 
-		await progress("Apple Health phase=emit pass=emit starting stream parse");
+		connectorDiagnostic("apple_health", "stream_parse_start", {
+			phase: "emit",
+			pass: "emit",
+		});
+		await progress("Reading your Apple Health export");
 
 		await streamParse({
 			gaps,
 			path,
-			onProgress: (rc, wc): Promise<void> =>
-				progress(
-					`Apple Health phase=emit pass=emit records_parsed=${rc} workouts_parsed=${wc}`,
-				),
+			onProgress: (rc, wc): Promise<void> => {
+				connectorDiagnostic("apple_health", "stream_parse_progress", {
+					phase: "emit",
+					pass: "emit",
+					records_parsed: rc,
+					workouts_parsed: wc,
+				});
+				return progress(`Read ${rc} health records and ${wc} workouts so far`);
+			},
 			onRecord: (el): Promise<void> =>
 				handleRecord(el, recordRef, gaps, requested, emitRecord),
 			onWorkout: (el): Promise<void> =>
 				handleWorkout(el, workoutRef, gaps, requested, emitRecord),
 		});
 
-		await progress(formatGapSummary(gaps));
+		await reportGapSummary(gaps, progress);
 
 		if (requested.has("records")) {
 			await emit({

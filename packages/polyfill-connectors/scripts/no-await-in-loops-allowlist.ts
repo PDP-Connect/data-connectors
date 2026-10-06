@@ -497,7 +497,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/apple_health/index.ts",
-			line: 228,
+			line: 232,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "handleTagMatch(): Collection Profile protocol emission requiring in-order delivery (document-order Record/Workout scan)",

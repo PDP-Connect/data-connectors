@@ -22,6 +22,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -164,15 +165,26 @@ test("FORMAT-CONFORMANCE: synthetic multi-year, multi-source export.xml (~5k rec
 
 		// Honesty gate: the unrecognized type and the missing-startDate row
 		// must show up in the reported gap summary, not vanish silently.
+		// The owner sees plain text; the raw tally is a diagnostic line.
 		const gapsLine = progressLines(result.messages).find((l) =>
-			l.includes("gaps"),
+			l.includes("not supported yet"),
 		);
 		assert.ok(gapsLine, "expected a gap-summary PROGRESS line");
-		assert.match(gapsLine ?? "", /records_dropped_missing_start_date=1/);
 		assert.match(
 			gapsLine ?? "",
-			/unrecognized_record_types=HKBiomarkerTypeIdentifierFutureBiomarkerNotYetInvented:1/,
+			/^Skipped 1 record( and \d+ workouts?)? with no date/,
 		);
+		assert.match(gapsLine ?? "", /1 record type not supported yet/);
+		const gapDiag = result.stderr
+			.split("\n")
+			.find((l) => l.startsWith("[apple_health-diagnostic] gap_summary"));
+		assert.ok(gapDiag, "expected a gap_summary diagnostic line");
+		assert.match(gapDiag ?? "", /"records_dropped_missing_start_date":1/);
+		assert.match(
+			gapDiag ?? "",
+			/"unrecognized_record_types":"HKBiomarkerTypeIdentifierFutureBiomarkerNotYetInvented:1"/,
+		);
+		assertUserFacingProgress(result.messages);
 
 		// DST boundary record survived (a naive local-time parser could throw
 		// or silently produce a wrong-by-an-hour value across the fold). The
@@ -224,10 +236,14 @@ test("FORMAT-CONFORMANCE: WorkoutRoute (GPS geometry) is tallied as an honest ga
 			"the Workout itself must still be emitted",
 		);
 
-		const gapsLine = progressLines(result.messages).find((l) =>
-			l.includes("gaps"),
+		assert.ok(
+			progressLines(result.messages).includes("1 workout route not captured"),
 		);
-		assert.match(gapsLine ?? "", /workout_routes_uncaptured=1/);
+		assert.match(
+			result.stderr,
+			/\[apple_health-diagnostic\] gap_summary .*"workout_routes_uncaptured":1/,
+		);
+		assertUserFacingProgress(result.messages);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
