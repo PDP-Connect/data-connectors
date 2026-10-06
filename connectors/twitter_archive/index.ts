@@ -18,6 +18,7 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type EmittedMessage,
 	runConnector,
@@ -71,10 +72,15 @@ async function runTweetsStream(ctx: TweetsContext): Promise<void> {
 	}
 	const since = state?.last_created_at;
 	let latest: string | undefined = since;
+	connectorDiagnostic("twitter_archive", "stream_started", {
+		phase: "emit",
+		pass: "emit",
+		stream: "tweets",
+	});
 	await emit({
 		type: "PROGRESS",
 		stream: "tweets",
-		message: "Twitter archive phase=emit pass=emit stream=tweets streaming",
+		message: "Reading your tweets",
 	});
 	let itemOrdinal = 0;
 	try {
@@ -91,10 +97,16 @@ async function runTweetsStream(ctx: TweetsContext): Promise<void> {
 			latest = advanceCursor(latest, rec.created_at);
 			await emitRecord("tweets", { ...rec });
 			if (itemOrdinal % 10_000 === 0) {
+				connectorDiagnostic("twitter_archive", "stream_progress", {
+					phase: "emit",
+					pass: "emit",
+					stream: "tweets",
+					item: itemOrdinal,
+				});
 				await emit({
 					type: "PROGRESS",
 					stream: "tweets",
-					message: `Twitter archive phase=emit pass=emit stream=tweets item=${itemOrdinal}`,
+					message: `Read ${itemOrdinal} tweets`,
 				});
 			}
 		}
@@ -168,11 +180,15 @@ async function runDirectMessagesStream(ctx: DmsContext): Promise<void> {
 		since: state?.last_created_at,
 		latest: state?.last_created_at,
 	};
+	connectorDiagnostic("twitter_archive", "stream_started", {
+		phase: "emit",
+		pass: "emit",
+		stream: "direct_messages",
+	});
 	await emit({
 		type: "PROGRESS",
 		stream: "direct_messages",
-		message:
-			"Twitter archive phase=emit pass=emit stream=direct_messages streaming",
+		message: "Reading your direct messages",
 	});
 	let conversationOrdinal = 0;
 	try {
@@ -180,10 +196,16 @@ async function runDirectMessagesStream(ctx: DmsContext): Promise<void> {
 			conversationOrdinal += 1;
 			await emitDmConversation(rawConvo, cursor, emitRecord);
 			if (conversationOrdinal % 1000 === 0) {
+				connectorDiagnostic("twitter_archive", "stream_progress", {
+					phase: "emit",
+					pass: "emit",
+					stream: "direct_messages",
+					conversation: conversationOrdinal,
+				});
 				await emit({
 					type: "PROGRESS",
 					stream: "direct_messages",
-					message: `Twitter archive phase=emit pass=emit stream=direct_messages conversation=${conversationOrdinal}`,
+					message: `Read ${conversationOrdinal} conversations`,
 				});
 			}
 		}
