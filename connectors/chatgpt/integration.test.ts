@@ -79,6 +79,7 @@ import {
 	ChatGptRecoverableRetryExhaustedError,
 	ChatGptRunBudget,
 	chatGptBackendFetchInBrowser,
+	classifyChatGptBatchFailure,
 	classifyChatGptSourcePressure,
 	consumeChatGptProviderRetryBudget,
 	createChatGptApi,
@@ -3294,6 +3295,197 @@ test("runMessagesAndConversationsWithDetail: unavailable batch endpoint degrades
 	]);
 	assert.deepEqual(coverage.hydratedKeys, ["convo-1", "convo-2", "convo-3"]);
 	assert.deepEqual(coverage.gapKeys, []);
+	assert.deepEqual(
+		diagnostics.filter((line) => line.includes("batch conversation-detail")),
+		[
+			"batch conversation-detail fetch failed (kind=unknown); fetching the remaining conversation details one at a time",
+		],
+		"the downgrade is logged once, to diagnostics",
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) =>
+				message.type === "PROGRESS" &&
+				message.message.includes("batch conversation-detail"),
+		),
+		false,
+		"the owner-facing progress stays free of technical detail",
+	);
+});
+
+test("runMessagesAndConversationsWithDetail: batch fallback diagnostic carries no error text", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const secrets = [
+		"sk-live-REFRESHTOKEN-abc123",
+		"conv-private-id-9f8e7d",
+		"my private diary entry about the divorce",
+	];
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: (path: string): Promise<ChatGptFetchResult> =>
+			Promise.resolve(
+				makeDetailOkForConversation(path.replace("/conversation/", "")),
+			),
+		fetchBatch: (): Promise<ChatGptFetchResult[]> =>
+			Promise.reject(
+				new SyntaxError(
+					`Unexpected token in __NEXT_DATA__: {"refresh_token":"${secrets[0]}","conversation_id":"${secrets[1]}","text":"${secrets[2]}"}`,
+				),
+			),
+	};
+	const deps: StreamDeps = {
+		api,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+
+	await runMessagesAndConversationsWithDetail(
+		deps,
+		[makeConvo({ id: "convo-1" }), makeConvo({ id: "convo-2" })],
+		makeEmitConversation(deps),
+		{ random: () => 0, sleep: () => undefined },
+	);
+
+	const emitted = JSON.stringify([...diagnostics, ...harness.protocolMessages]);
+	for (const secret of secrets) {
+		assert.equal(emitted.includes(secret), false, `leaked: ${secret}`);
+	}
+	assert.deepEqual(
+		diagnostics.filter((line) => line.includes("batch conversation-detail")),
+		[
+			"batch conversation-detail fetch failed (kind=parse); fetching the remaining conversation details one at a time",
+		],
+	);
+});
+
+test("classifyChatGptBatchFailure: fixed kinds, optional status, never message text", () => {
+	assert.equal(
+		classifyChatGptBatchFailure(
+			new Error("chatgpt_batch_detail_unavailable: status=503"),
+		),
+		"kind=http status=503",
+	);
+	assert.equal(
+		classifyChatGptBatchFailure(
+			new Error("apiFetch got 403 on POST /conversations/batch (auth)"),
+		),
+		"kind=http status=403",
+	);
+	assert.equal(
+		classifyChatGptBatchFailure(
+			new ChatGptRecoverableRetryExhaustedError("secret text 429", {
+				class: "rate_limited",
+				httpStatus: 429,
+			}),
+		),
+		"kind=http status=429",
+	);
+	assert.equal(
+		classifyChatGptBatchFailure(
+			new Error("chatgpt_backend_fetch_timeout after 30000ms"),
+		),
+		"kind=timeout",
+	);
+	assert.equal(
+		classifyChatGptBatchFailure(
+			new Error("apiFetch network error on POST /x: socket hang up"),
+		),
+		"kind=network",
+	);
+	assert.equal(
+		classifyChatGptBatchFailure(new Error("boom with Bearer abc.def")),
+		"kind=unknown",
+	);
+	assert.equal(classifyChatGptBatchFailure("string failure"), "kind=unknown");
+});
+
+test("runConversationsAndMessagesStreams: batch fallback is logged once per run across recovery and forward passes", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let batchCalls = 0;
+	const api: ChatGptApi = {
+		auth: (): Promise<never> =>
+			Promise.reject(new Error("fakeApi.auth() unused in this test")),
+		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+			await Promise.resolve();
+			if (path.startsWith("/conversations/search?")) {
+				return {
+					status: 200,
+					json: {
+						items: [
+							{
+								id: "fwd-1",
+								title: "f1",
+								create_time: 1_700_000_300,
+								update_time: 1_700_000_300,
+								current_node: "a1",
+							},
+							{
+								id: "fwd-2",
+								title: "f2",
+								create_time: 1_700_000_200,
+								update_time: 1_700_000_200,
+								current_node: "a1",
+							},
+						],
+					} as ChatGptJson,
+				};
+			}
+			return makeDetailOkForConversation(path.replace("/conversation/", ""));
+		},
+		fetchBatch: (): Promise<ChatGptFetchResult[]> => {
+			batchCalls += 1;
+			return Promise.reject(new Error("batch unavailable"));
+		},
+	};
+	const deps: StreamDeps = {
+		api,
+		detailGaps: [
+			{
+				gap_id: "gap-rec-1",
+				stream: "messages",
+				record_key: "rec-1",
+				status: "pending" as const,
+				detail_locator: {
+					kind: "chatgpt.conversation",
+					conversation_id: "rec-1",
+					list_item: {
+						id: "rec-1",
+						title: "r1",
+						create_time: 1_700_000_000,
+						update_time: 1_700_000_000,
+					},
+				},
+			},
+		] as NonNullable<StreamDeps["detailGaps"]>,
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+	};
+
+	await runConversationsAndMessagesStreams(
+		deps,
+		{
+			conversations: { last_update_time: null },
+			messages: { last_update_time: null },
+		} as CollectContext["state"],
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+
+	assert.equal(batchCalls >= 2, true, "both passes attempted a batch fetch");
+	assert.equal(
+		diagnostics.filter((line) => line.includes("batch conversation-detail"))
+			.length,
+		1,
+		"one diagnostic per connector run",
+	);
 });
 
 test("runMessagesAndConversationsWithDetail: intermediate pressure is bounded and redacted", async () => {
