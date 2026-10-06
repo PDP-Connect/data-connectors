@@ -4,11 +4,14 @@
 /**
  * Integration tests for the Meta (Instagram) connector's `collect()` layer.
  *
- * No real browser: `page.evaluate` is faked to route each in-page fetch to
+ * Network collection fakes `page.evaluate` to route each in-page fetch to
  * scripted responses keyed by URL path, mirroring the Reddit connector's
  * `RedditListingFetch` test pattern. DOM-only calls (dialog scraping) are
  * routed by inspecting the evaluate function's source for a distinguishing
  * marker, since those calls take no serializable argument to key off of.
+ * The ads classifier and scrape fixtures also run in real headless Chromium
+ * to prove browser geometry and visibility; ads-dom.test.ts provides
+ * serialized DOM/virtual-clock coverage without launching a browser.
  *
  * Every emitted record is run through the real zod schema the runtime
  * applies in production via `makeRecordingEmit(validateRecord)` — a record
@@ -16,8 +19,10 @@
  */
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import type { Page } from "playwright";
+import { chromium } from "playwright";
 import type {
 	BrowserCollectContext,
 	EmittedMessage,
@@ -25,14 +30,47 @@ import type {
 import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
-	adsSurfacesRecoveryHint,
+	classifyAdsDialogInPage,
 	collectAllStreams,
+	pageShowsLoginOrChallengeControls,
+	scrapeAdTopics,
 	scrapeAdvertisers,
+	scrapeTargetingCategories,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
 const NO_DELAY = (): Promise<void> => Promise.resolve();
+const TEST_POSTS_CLOCK = { sleep: async (): Promise<void> => undefined };
+const makeVirtualAdsClock = (): {
+	now: () => number;
+	sleep: (ms: number) => Promise<void>;
+} => {
+	let now = 0;
+	return {
+		now: () => now,
+		sleep: async (ms: number): Promise<void> => {
+			now += ms;
+		},
+	};
+};
+
+const makeReportStreamFailure =
+	(
+		emit: BrowserCollectContext["emit"],
+	): NonNullable<BrowserCollectContext["reportStreamFailure"]> =>
+	async (stream, message, options): Promise<void> => {
+		await emit({
+			message,
+			reason: "stream_collection_failed",
+			recovery_hint: {
+				action: "retry_by_runtime",
+				retryable: options?.retryable ?? true,
+			},
+			stream,
+			type: "SKIP_RESULT",
+		});
+	};
 
 interface ScriptedFetch {
 	json: unknown;
@@ -44,7 +82,12 @@ interface ScriptedFetch {
  *  a fake Playwright Response exposing `.json()`/`.status()`. `null` means
  *  "the page never triggers this request" (used to prove the
  *  `meta_posts_response_not_observed` failure path). */
-type ScriptedPostsPage = { json: unknown; status: number } | null;
+type ScriptedPostsPage = {
+	json: unknown;
+	status: number;
+	operationName?: string;
+	fromCurrentPage?: boolean;
+} | null;
 
 /** Build a fake Playwright Page whose `evaluate` serves scripted JSON
  *  fetches keyed by URL path prefix, and scripted DOM-scrape results keyed
@@ -56,14 +99,21 @@ type ScriptedPostsPage = { json: unknown; status: number } | null;
 function makeFakePage(options: {
 	categoriesAvailable?: boolean;
 	categoryDestinationReached?: boolean;
+	categoryComplete?: boolean;
 	categoryRows?: Array<{ description: string | null; name: string }>;
+	dialogClassifications?: Array<ReturnType<typeof classifyAdsDialogInPage>>;
+	dialogComplete?: boolean[];
 	dialogScrapes?: string[][];
 	dialogReached?: boolean[];
+	dialogEmptyMessages?: boolean[];
 	delayFirstDialogItems?: boolean;
 	waitEmptySettle?: boolean;
 	fetchScript: Record<string, ScriptedFetch[]>;
 	navigationFailures?: string[];
 	postsScript?: ScriptedPostsPage[];
+	scrollFailure?: boolean;
+	categoryEmptyMessage?: boolean;
+	challengePage?: boolean;
 	webInfoUser?: unknown;
 }): {
 	calls: string[];
@@ -81,9 +131,12 @@ function makeFakePage(options: {
 	const dialogReachedQueue = [...(options.dialogReached ?? [])];
 	const postsQueue = [...(options.postsScript ?? [])];
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
+	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
 	let adsListWait = 0;
+	let dialogClassificationSequenceIndex = 0;
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
+	const responseListeners = new Set<(response: unknown) => void>();
 	const resolveReadiness = (ready: boolean): Promise<unknown> =>
 		ready
 			? Promise.resolve(true)
@@ -104,25 +157,60 @@ function makeFakePage(options: {
 			next(null);
 			return;
 		}
-		next({
+		const operationName = scripted.operationName ?? "PolarisProfilePostsQuery";
+		const response = {
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({ method: () => "POST" }),
+			request: () => ({
+				frame: () => ({
+					page: () =>
+						scripted.fromCurrentPage === false ? ({} as Page) : page,
+				}),
+				headers: () => ({ "x-fb-friendly-name": operationName }),
+				method: () => "POST",
+				postData: () => `fb_api_req_friendly_name=${operationName}`,
+			}),
 			status: () => scripted.status,
 			url: () => "https://www.instagram.com/graphql/query",
-		});
+		};
+		for (const listener of responseListeners) {
+			listener(response);
+		}
+		if (pendingPostsPredicate && !pendingPostsPredicate(response)) {
+			next(null);
+			return;
+		}
+		next(response);
 	};
 
 	const page = {
+		url: () =>
+			options.challengePage
+				? "https://www.instagram.com/challenge/"
+				: "https://www.instagram.com/testuser/",
 		goto: (url?: string): Promise<null> => {
-			if (url && options.navigationFailures?.some((path) => url.includes(path))) {
+			if (
+				url &&
+				options.navigationFailures?.some((path) => url.includes(path))
+			) {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
-		waitForResponse: (_predicate: unknown, _opts?: unknown): Promise<unknown> =>
+		off: (event: "response", listener: (response: unknown) => void): void => {
+			if (event === "response") {
+				responseListeners.delete(listener);
+			}
+		},
+		on: (event: "response", listener: (response: unknown) => void): void => {
+			if (event === "response") {
+				responseListeners.add(listener);
+			}
+		},
+		waitForResponse: (predicate: unknown, _opts?: unknown): Promise<unknown> =>
 			new Promise((resolve) => {
 				pendingPostsResolve = resolve;
+				pendingPostsPredicate = predicate as (value: unknown) => boolean;
 			}),
 		waitForFunction: (
 			condition: unknown,
@@ -142,6 +230,9 @@ function makeFakePage(options: {
 			};
 			if (source.includes("Manage info")) {
 				return readiness(options.categoriesAvailable === true);
+			}
+			if (source.includes("verify you are human")) {
+				return readiness(false);
 			}
 			if (source.includes("Categories used to reach you")) {
 				return readiness(options.categoriesAvailable === true);
@@ -204,7 +295,64 @@ function makeFakePage(options: {
 		},
 		evaluate: (fn: unknown, arg?: unknown): Promise<unknown> => {
 			const fnSource = String(fn);
+			if (fnSource.includes("classifyAdsDialogInPage")) {
+				if (options.dialogClassifications) {
+					const index = Math.min(
+						dialogClassificationSequenceIndex,
+						options.dialogClassifications.length - 1,
+					);
+					dialogClassificationSequenceIndex += 1;
+					return Promise.resolve(options.dialogClassifications[index]);
+				}
+				const args = arg as {
+					emptyMessage: string;
+					requiredAffordance?: string;
+					uiOnlyPatternSource?: string;
+				};
+				if (args.emptyMessage === "No categories") {
+					const items = options.categoryRows?.map((row) => row.name) ?? [];
+					if (items.length > 0) {
+						return Promise.resolve({
+							complete: options.categoryComplete === true,
+							items,
+							kind: "data",
+						});
+					}
+					return Promise.resolve(
+						options.categoryEmptyMessage
+							? { kind: "verified_empty" }
+							: { kind: "unavailable" },
+					);
+				}
+				const index = Math.max(adsListWait - 1, 0);
+				const items = dialogQueue[index] ?? [];
+				const filteredItems = args.uiOnlyPatternSource
+					? items.filter(
+							(item) =>
+								!new RegExp(args.uiOnlyPatternSource ?? "", "i").test(item),
+						)
+					: items;
+				const reached =
+					dialogReachedQueue[index] ?? dialogQueue[index] !== undefined;
+				const hasEmptyMessage = options.dialogEmptyMessages?.[index] === true;
+				const complete = options.dialogComplete?.[index] === true;
+				if (filteredItems.length > 0) {
+					return Promise.resolve({
+						complete,
+						items: filteredItems,
+						kind: "data",
+					});
+				}
+				return Promise.resolve(
+					reached && hasEmptyMessage
+						? { kind: "verified_empty" }
+						: { kind: "unavailable" },
+				);
+			}
 			if (fnSource.includes("scrollTo")) {
+				if (options.scrollFailure) {
+					return Promise.reject(new Error("scripted scroll failure"));
+				}
 				resolveNextPostsPage();
 				return Promise.resolve(undefined);
 			}
@@ -290,11 +438,17 @@ const WEB_INFO_USER = {
 function makeCtx(args: {
 	pageOptions?: {
 		categoriesAvailable?: boolean;
+		categoryComplete?: boolean;
 		categoryDestinationReached?: boolean;
 		categoryRows?: Array<{ description: string | null; name: string }>;
+		categoryEmptyMessage?: boolean;
+		challengePage?: boolean;
 		dialogScrapes?: string[][];
+		dialogComplete?: boolean[];
 		dialogReached?: boolean[];
+		dialogEmptyMessages?: boolean[];
 		navigationFailures?: string[];
+		scrollFailure?: boolean;
 	};
 	fetchScript: Record<string, ScriptedFetch[]>;
 	harness: ReturnType<typeof makeRecordingEmit>;
@@ -324,6 +478,7 @@ function makeCtx(args: {
 		emittedAt: EMITTED_AT,
 		page,
 		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(args.harness.emit),
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested,
 		scope: { streams: [] },
@@ -357,7 +512,12 @@ test("collectAllStreams: unrequested streams emit nothing", async () => {
 		requestedStreams: ["profile"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	assert.deepEqual(
 		harness.emitted.map((e) => e.stream),
@@ -383,7 +543,12 @@ test("collectAllStreams: requesting posts+post_likes but not profile emits no pr
 		requestedStreams: ["posts", "post_likes"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	assert.ok(!harness.emitted.some((e) => e.stream === "profile"));
 });
@@ -398,7 +563,12 @@ test("collectAllStreams: profile stream emits one record from web_info", async (
 		requestedStreams: ["profile"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.data.id, "u1");
@@ -463,7 +633,12 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 		requestedStreams: ["posts", "post_likes"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
 	const likes = harness.emitted.filter((e) => e.stream === "post_likes");
@@ -523,13 +698,42 @@ test("collectAllStreams: posts never emits STATE, requested or not", async () =>
 		requestedStreams: ["post_likes"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	assert.equal(
 		harness.protocolMessages.some(
 			(m) => m.type === "STATE" && m.stream === "posts",
 		),
 		false,
+	);
+});
+
+test("collectAllStreams: a post_likes-only request does not emit an unrequested posts STATE", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [EMPTY_POSTS],
+		requestedStreams: ["post_likes"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map((message) => message.stream),
+		["post_likes"],
 	);
 });
 
@@ -564,7 +768,12 @@ test("collectAllStreams: posts pagination walks a scroll-triggered second page",
 		requestedStreams: ["posts"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
 	assert.deepEqual(
@@ -574,7 +783,7 @@ test("collectAllStreams: posts pagination walks a scroll-triggered second page",
 	);
 });
 
-test("collectAllStreams: posts request never observed is a terminal error, not a silent empty result", async () => {
+test("collectAllStreams: posts request never observed emits a stream skip, not empty completion", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -583,10 +792,431 @@ test("collectAllStreams: posts request never observed is a terminal error, not a
 		requestedStreams: ["posts"],
 	});
 
-	await assert.rejects(
-		collectAllStreams(ctx, NO_DELAY),
-		/meta_posts_response_not_observed/,
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
 	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("collectAllStreams: a terminal empty posts fixture completes with zero records", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts", "post_likes"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(harness.emitted, []);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map((message) => message.stream)
+			.sort(),
+		["post_likes", "posts"],
+	);
+});
+
+test("collectAllStreams: populated posts fixture emits records without empty state", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.loaded.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.equal(
+		harness.emitted.filter((record) => record.stream === "posts").length,
+		1,
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: failed posts fixture cannot complete as empty", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.failed.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+		"a failed timeline load is skipped without claiming empty completion",
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: status fail with empty timeline edges cannot complete", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	json.status = "fail";
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("collectAllStreams: an HTTP error carrying empty edges is skipped", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json, status: 500 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("collectAllStreams: empty responses from unrelated operations or pages are skipped", async () => {
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	await Promise.all(
+		[
+			{ json, status: 200, operationName: "ProfilePageQuery" },
+			{ json, status: 200, fromCurrentPage: false },
+		].map(async (response) => {
+			const harness = makeRecordingEmit(validateRecord);
+			const { ctx } = makeCtx({
+				fetchScript: {},
+				harness,
+				postsScript: [response],
+				requestedStreams: ["posts"],
+			});
+
+			await collectAllStreams(
+				ctx,
+				NO_DELAY,
+				TEST_POSTS_CLOCK,
+				makeVirtualAdsClock(),
+			);
+			assert.equal(
+				harness.protocolMessages.some((message) => message.type === "STATE"),
+				false,
+			);
+			assert.ok(
+				harness.protocolMessages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" && message.stream === "posts",
+				),
+			);
+		}),
+	);
+});
+
+test("collectAllStreams: an empty nonterminal timeline does not complete posts", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [
+			{
+				json: {
+					data: {
+						xdt_api__v1__feed__user_timeline_graphql_connection: {
+							edges: [],
+							page_info: { has_next_page: true },
+						},
+					},
+				},
+				status: 200,
+			},
+			null,
+		],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("collectAllStreams: a login challenge cannot turn an empty response into completion", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const json = JSON.parse(
+		await readFile(
+			new URL("./fixtures/posts.empty.json", import.meta.url),
+			"utf8",
+		),
+	);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		pageOptions: { challengePage: true },
+		postsScript: [{ json, status: 200 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+		),
+	);
+});
+
+test("scrapeAdvertisers distinguishes explicit empty, populated, and failed fixtures", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		await Promise.all(
+			(
+				[
+					[
+						"ads.empty.html",
+						{
+							items: [],
+							reached: true,
+							step: "reached_empty",
+							surface: "advertisers",
+						},
+					],
+					[
+						"ads.loaded.html",
+						{
+							items: ["Example Advertiser"],
+							reached: true,
+							step: null,
+							surface: "advertisers",
+						},
+					],
+					[
+						"ads.failed.html",
+						{
+							items: [],
+							reached: false,
+							step: "destination_list_not_found",
+							surface: "advertisers",
+						},
+					],
+					[
+						"ads.blank.html",
+						{
+							items: [],
+							reached: false,
+							step: "destination_list_not_found",
+							surface: "advertisers",
+						},
+					],
+				] as const
+			).map(async ([fixture, expected]) => {
+				const html = await readFile(
+					new URL(`./fixtures/${fixture}`, import.meta.url),
+					"utf8",
+				);
+				const page = await browser.newPage();
+				try {
+					await page.route("https://accountscenter.instagram.com/**", (route) =>
+						route.fulfill({
+							body: html,
+							contentType: "text/html",
+							status: 200,
+						}),
+					);
+					assert.deepEqual(await scrapeAdvertisers(page), expected, fixture);
+				} finally {
+					await page.close();
+				}
+			}),
+		);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("classifyAdsDialogInPage requires visible surface-specific empty messages", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		await Promise.all(
+			(
+				[
+					["ads.topics.empty.html", "No ad topics"],
+					["ads.categories.empty.html", "No categories"],
+				] as const
+			).map(async ([fixture, emptyMessage]) => {
+				const page = await browser.newPage();
+				try {
+					const html = await readFile(
+						new URL(`./fixtures/${fixture}`, import.meta.url),
+						"utf8",
+					);
+					await page.setContent(html);
+					assert.deepEqual(
+						await page.evaluate(classifyAdsDialogInPage, { emptyMessage }),
+						{ kind: "verified_empty" },
+						fixture,
+					);
+				} finally {
+					await page.close();
+				}
+			}),
+		);
+		const page = await browser.newPage();
+		try {
+			const blank = await readFile(
+				new URL("./fixtures/ads.blank.html", import.meta.url),
+				"utf8",
+			);
+			await page.setContent(blank);
+			assert.deepEqual(
+				await page.evaluate(classifyAdsDialogInPage, {
+					emptyMessage: "No advertisers",
+				}),
+				{ kind: "unavailable" },
+			);
+			await page.setContent(
+				'<div role="dialog"><div role="list" style="height:0"></div><p>No advertisers</p><p>Something went wrong</p></div>',
+			);
+			assert.deepEqual(
+				await page.evaluate(classifyAdsDialogInPage, {
+					emptyMessage: "No advertisers",
+				}),
+				{ kind: "unavailable" },
+				"error text overrides a coincident empty marker",
+			);
+			await page.setContent(
+				'<div role="dialog"><div role="list" style="height:0"></div><p>No advertisers</p></div>',
+			);
+			assert.deepEqual(
+				await page.evaluate(classifyAdsDialogInPage, {
+					emptyMessage: "No advertisers",
+				}),
+				{ kind: "verified_empty" },
+				"a visible source message proves empty even if list geometry is zero",
+			);
+		} finally {
+			await page.close();
+		}
+	} finally {
+		await browser.close();
+	}
 });
 
 // ─── Invariant 4: following walks to completion or reports honest coverage ──
@@ -616,7 +1246,12 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 		requestedStreams: ["following"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const following = harness.emitted.filter((e) => e.stream === "following");
 	assert.deepEqual(
@@ -626,14 +1261,13 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 	assert.equal(
 		harness.protocolMessages.some(
 			(m) =>
-				m.type === "SKIP_RESULT" &&
-				m.reason === "following_pages_deferred_page_budget",
+				m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
 		),
 		false,
 	);
 });
 
-test("collectAllStreams: following hitting the page ceiling emits an honest SKIP_RESULT instead of silently truncating", async () => {
+test("collectAllStreams: following hitting the page ceiling reports a stream failure instead of silently truncating", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const fetchScript: Record<string, ScriptedFetch[]> = {};
 	// Every page reports a next cursor forever — forces the FOLLOWING_MAX_PAGES ceiling.
@@ -652,18 +1286,276 @@ test("collectAllStreams: following hitting the page ceiling emits an honest SKIP
 		requestedStreams: ["following"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const skip = harness.protocolMessages.find(
-		(m) =>
-			m.type === "SKIP_RESULT" &&
-			m.reason === "following_pages_deferred_page_budget",
+		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
 	);
-	assert.ok(
-		skip,
-		"expected a following_pages_deferred_page_budget SKIP_RESULT",
-	);
+	assert.ok(skip, "expected a stream_collection_failed SKIP_RESULT");
 	assert.equal((skip as { stream: string }).stream, "following");
+	assert.ok(
+		harness.emitted.some((e) => e.stream === "following"),
+		"records read before the cap are kept",
+	);
+});
+
+// ─── Later-page failures keep the records already read ──────────────────
+
+const timelinePage = (
+	id: string,
+	hasNextPage: boolean,
+	status = 200,
+): ScriptedPostsPage => ({
+	json: {
+		data: {
+			xdt_api__v1__feed__user_timeline_graphql_connection: {
+				edges: [{ node: { id, taken_at: 100 } }],
+				page_info: { has_next_page: hasNextPage },
+			},
+		},
+	},
+	status,
+});
+
+const streamFailures = (
+	harness: ReturnType<typeof makeRecordingEmit>,
+): string[] =>
+	harness.protocolMessages
+		.filter(
+			(m) =>
+				m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+		)
+		.map((m) => String((m as { stream: string }).stream))
+		.sort();
+
+const recordIndex = (
+	harness: ReturnType<typeof makeRecordingEmit>,
+	stream: string,
+): number =>
+	harness.protocolMessages.findIndex(
+		(m) => m.type === "RECORD" && m.stream === stream,
+	);
+
+const failureIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
+	harness.protocolMessages.findIndex(
+		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+	);
+
+test("collectAllStreams: a posts timeout after a valid page emits that page, then reports the failure", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [timelinePage("p1", true), null],
+		requestedStreams: ["posts", "post_likes"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(
+		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
+		["p1"],
+	);
+	assert.deepEqual(streamFailures(harness), ["post_likes", "posts"]);
+	assert.ok(
+		recordIndex(harness, "posts") < failureIndex(harness),
+		"records are emitted before the failure is reported",
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+		"a failed walk never finishes with STATE",
+	);
+});
+
+test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then reports the failure", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [
+			timelinePage("p1", true),
+			timelinePage("p2", true),
+			{ json: { errors: [{ message: "unavailable" }] }, status: 503 },
+		],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(
+		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
+		["p1", "p2"],
+	);
+	assert.deepEqual(streamFailures(harness), ["posts"]);
+	assert.ok(recordIndex(harness, "posts") < failureIndex(harness));
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: a browser error while advancing posts keeps the earlier page", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		pageOptions: { scrollFailure: true },
+		postsScript: [timelinePage("p1", true)],
+		requestedStreams: ["post_likes", "posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(
+		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
+		["p1"],
+	);
+	assert.deepEqual(streamFailures(harness), ["post_likes", "posts"]);
+	assert.ok(recordIndex(harness, "posts") < failureIndex(harness));
+});
+
+test("collectAllStreams: a first-page posts failure emits nothing and reports the failure", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		postsScript: [{ json: {}, status: 503 }],
+		requestedStreams: ["posts"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.equal(harness.emitted.filter((e) => e.stream === "posts").length, 0);
+	assert.deepEqual(streamFailures(harness), ["posts"]);
+});
+
+test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then reports the failure", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {
+			"/api/v1/friendships/u1/following/": [
+				{
+					json: {
+						next_max_id: "page2",
+						users: [{ pk: "f1", username: "followed1" }],
+					},
+					status: 200,
+				},
+				{ json: { message: "unavailable" }, status: 503 },
+			],
+		},
+		harness,
+		requestedStreams: ["following"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(
+		harness.emitted
+			.filter((e) => e.stream === "following")
+			.map((e) => e.data.username),
+		["followed1"],
+	);
+	assert.deepEqual(streamFailures(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < failureIndex(harness));
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("collectAllStreams: a browser error on a later following page keeps earlier pages", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {
+			"/api/v1/friendships/u1/following/": [
+				{
+					json: {
+						next_max_id: "page2",
+						users: [{ pk: "f1", username: "followed1" }],
+					},
+					status: 200,
+				},
+				// An undefined slot makes the fake page.evaluate throw.
+				undefined as unknown as ScriptedFetch,
+			],
+		},
+		harness,
+		requestedStreams: ["following"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(
+		harness.emitted
+			.filter((e) => e.stream === "following")
+			.map((e) => e.data.username),
+		["followed1"],
+	);
+	assert.deepEqual(streamFailures(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < failureIndex(harness));
+});
+
+test("collectAllStreams: a first-page following failure emits nothing and reports the failure", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {
+			"/api/v1/friendships/u1/following/": [
+				{ json: { message: "unavailable" }, status: 503 },
+			],
+		},
+		harness,
+		requestedStreams: ["following"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.equal(
+		harness.emitted.filter((e) => e.stream === "following").length,
+		0,
+	);
+	assert.deepEqual(streamFailures(harness), ["following"]);
 });
 
 // ─── Invariant 5: ads merges three DOM-scraped lists with a kind discriminator ──
@@ -672,7 +1564,9 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 	const harness = makeRecordingEmit(validateRecord);
 	const { page, waitConditions } = makeFakePage({
 		categoriesAvailable: true,
+		categoryComplete: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
+		dialogComplete: [true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -692,6 +1586,7 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 		emittedAt: EMITTED_AT,
 		page,
 		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(harness.emit),
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested,
 		scope: { streams: [] },
@@ -701,12 +1596,16 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 		state: {},
 	};
 
-	await collectAllStreams(harnessCtx, NO_DELAY);
+	await collectAllStreams(
+		harnessCtx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
 	const kinds = ads.map((a) => a.data.kind).sort();
 	assert.deepEqual(kinds, ["ad_category", "ad_topic", "advertiser"]);
-	assert.equal(waitConditions.length, 9);
 	assert.ok(
 		waitConditions.some((condition) => condition.includes("advertiser")),
 	);
@@ -745,8 +1644,10 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
+		categoryEmptyMessage: true,
 		categoryRows: [],
 		dialogScrapes: [[], []],
+		dialogEmptyMessages: [true, true],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
 	});
@@ -765,6 +1666,7 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 		emittedAt: EMITTED_AT,
 		page,
 		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(harness.emit),
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested,
 		scope: { streams: [] },
@@ -774,7 +1676,12 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 		state: {},
 	};
 
-	await collectAllStreams(harnessCtx, NO_DELAY);
+	await collectAllStreams(
+		harnessCtx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	assert.equal(harness.emitted.length, 0);
 	assert.deepEqual(
@@ -803,47 +1710,11 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 	);
 });
 
-test("scrapeAdvertisers waits for items that arrive after the list shell", async () => {
-	const { page, waitConditions } = makeFakePage({
-		delayFirstDialogItems: true,
-		dialogScrapes: [["Acme Corp"]],
-		fetchScript: {},
-	});
-
-	assert.deepEqual(await scrapeAdvertisers(page), {
-		items: ["Acme Corp"],
-		reached: true,
-		step: null,
-		surface: "advertisers",
-	});
-	assert.ok(
-		waitConditions.some((condition) => condition.includes('[role="listitem"]')),
-		"the scrape must wait for list items after the dialog list mounts",
-	);
-});
-
-test("scrapeAdvertisers preserves a genuine empty list after the settle window", async () => {
-	const { page, waitTimeouts } = makeFakePage({
-		dialogScrapes: [[]],
-		fetchScript: {},
-		waitEmptySettle: true,
-	});
-	const startedAt = Date.now();
-
-	assert.deepEqual(await scrapeAdvertisers(page), {
-		items: [],
-		reached: true,
-		step: "reached_empty",
-		surface: "advertisers",
-	});
-	assert.ok(Date.now() - startedAt >= 2_500);
-	assert.ok(waitTimeouts.includes(2_500));
-});
-
-test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
+test("collectAllStreams: nonempty ads without source total emits records but fails completion", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const { page, waitRejections } = makeFakePage({
-		categoriesAvailable: false,
+	const { page } = makeFakePage({
+		categoriesAvailable: true,
+		categoryRows: [{ description: "Music affinity", name: "Music" }],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -863,6 +1734,7 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 		emittedAt: EMITTED_AT,
 		page,
 		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(harness.emit),
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested,
 		scope: { streams: [] },
@@ -872,7 +1744,213 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 		state: {},
 	};
 
-	await collectAllStreams(harnessCtx, NO_DELAY);
+	await collectAllStreams(
+		harnessCtx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(harness.emitted.map((record) => record.data.kind).sort(), [
+		"ad_category",
+		"ad_topic",
+		"advertiser",
+	]);
+	const skip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "ads",
+	);
+	assert.ok(
+		skip?.type === "SKIP_RESULT",
+		"nonempty ads without source total must fail the stream",
+	);
+	assert.equal(skip.reason, "stream_collection_failed");
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "ads",
+		),
+		false,
+	);
+});
+
+test("scrapeAdvertisers waits for items that arrive after the list shell", async () => {
+	const { page, waitConditions } = makeFakePage({
+		delayFirstDialogItems: true,
+		dialogComplete: [true],
+		dialogScrapes: [["Acme Corp"]],
+		fetchScript: {},
+	});
+
+	assert.deepEqual(await scrapeAdvertisers(page), {
+		items: ["Acme Corp"],
+		reached: true,
+		step: null,
+		surface: "advertisers",
+	});
+	assert.ok(
+		waitConditions.some((condition) =>
+			condition.includes('[role="dialog"] [role="list"]'),
+		),
+		"the scrape must wait for the dialog list shell before settling",
+	);
+});
+
+test("scrapeAdvertisers waits for hidden-then-revealed rows to settle", async () => {
+	const clock = makeVirtualAdsClock();
+	const { page } = makeFakePage({
+		dialogClassifications: [
+			{ kind: "loading" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+		],
+		dialogReached: [true],
+		dialogScrapes: [["Acme Corp"]],
+		fetchScript: {},
+	});
+
+	assert.deepEqual(await scrapeAdvertisers(page, clock), {
+		items: ["Acme Corp"],
+		reached: true,
+		step: null,
+		surface: "advertisers",
+	});
+	assert.ok(clock.now() >= 2_500);
+});
+
+test("scrapeAdvertisers rejects transient data followed by stable unavailable", async () => {
+	const clock = makeVirtualAdsClock();
+	const { page } = makeFakePage({
+		dialogClassifications: [
+			{ complete: true, items: ["Acme Corp"], kind: "data" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+			{ kind: "unavailable" },
+		],
+		dialogReached: [true],
+		dialogScrapes: [["Acme Corp"]],
+		fetchScript: {},
+	});
+
+	assert.deepEqual(await scrapeAdvertisers(page, clock), {
+		items: [],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "advertisers",
+	});
+	assert.ok(clock.now() >= 2_500);
+});
+
+test("scrapeAdvertisers preserves a genuine empty list after the settle window", async () => {
+	const { page } = makeFakePage({
+		dialogScrapes: [[]],
+		fetchScript: {},
+		dialogEmptyMessages: [true],
+		waitEmptySettle: true,
+	});
+	const startedAt = Date.now();
+
+	assert.deepEqual(await scrapeAdvertisers(page), {
+		items: [],
+		reached: true,
+		step: "reached_empty",
+		surface: "advertisers",
+	});
+	assert.ok(Date.now() - startedAt >= 2_500);
+});
+
+test("scrapeTargetingCategories ignores hidden stale dialogs before the active categories dialog", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://accountscenter.instagram.com/**", (route) =>
+			route.fulfill({
+				contentType: "text/html",
+				status: 200,
+				body: `
+					<html><body>
+						<div role="tab">Manage info</div>
+						<div role="tabpanel"><a>Categories used to reach you</a></div>
+						<div role="dialog" style="display:none">
+							<div role="list">
+								<div role="listitem"><span>Hidden stale category</span><button>Remove</button></div>
+							</div>
+						</div>
+						<div role="dialog">
+							<div role="list" aria-setsize="1">
+								<div role="listitem" aria-posinset="1" aria-setsize="1"><span>Music</span><span>Based on activity</span><button>Remove</button></div>
+							</div>
+						</div>
+					</body></html>`,
+			}),
+		);
+
+		assert.deepEqual(await scrapeTargetingCategories(page), {
+			items: [{ description: "Based on activity", name: "Music" }],
+			reached: true,
+			step: null,
+			surface: "targeting_categories",
+		});
+	} finally {
+		await browser.close();
+	}
+});
+
+test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { page, waitRejections } = makeFakePage({
+		categoriesAvailable: false,
+		dialogComplete: [true, true],
+		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
+		fetchScript: {},
+		webInfoUser: WEB_INFO_USER,
+	});
+	const requested = new Map([["ads", { name: "ads" }]]);
+	const harnessCtx: BrowserCollectContext = {
+		assist: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		capture: null,
+		completeAssistance: async () => undefined,
+		context: {} as BrowserCollectContext["context"],
+		credentials: {},
+		detailGaps: [],
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		emittedAt: EMITTED_AT,
+		page,
+		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(harness.emit),
+		requestDetailGapPage: async (): Promise<readonly never[]> => [],
+		requested,
+		scope: { streams: [] },
+		sendInteraction: async (): Promise<never> => {
+			throw new Error("not implemented");
+		},
+		state: {},
+	};
+
+	await collectAllStreams(
+		harnessCtx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	assert.deepEqual(
 		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
@@ -899,17 +1977,20 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
 	assert.ok(skip, "partial ads scrape must emit a stream-level SKIP_RESULT");
-	assert.equal(skip.reason, "ads_surfaces_unavailable");
-	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["targeting_categories"],
-		surface_steps: [
-			{ surface: "targeting_categories", step: "control_not_found" },
-		],
+	assert.equal(skip.reason, "stream_collection_failed");
+	assert.equal(
+		skip.message,
+		"Instagram ads scan could not reach targeting_categories",
+	);
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
 	});
-	assert.deepEqual(
-		skip.recovery_hint,
-		{ action: "not_retriable", retryable: false },
-		"a loaded page without the control will look the same on a rerun",
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "ads",
+		),
+		false,
 	);
 	assert.ok(
 		waitRejections.some((condition) => condition.includes("Manage info")),
@@ -921,9 +2002,11 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
+		categoryEmptyMessage: true,
 		categoryRows: [],
 		dialogReached: [false, true],
 		dialogScrapes: [[], []],
+		dialogEmptyMessages: [true, true],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
 	});
@@ -941,6 +2024,7 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		emittedAt: EMITTED_AT,
 		page,
 		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(harness.emit),
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested: new Map([["ads", { name: "ads" }]]),
 		scope: { streams: [] },
@@ -950,7 +2034,12 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		state: {},
 	};
 
-	await collectAllStreams(harnessCtx, NO_DELAY);
+	await collectAllStreams(
+		harnessCtx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
@@ -960,14 +2049,11 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		skip,
 		"a dialog without its list must not count as a reached surface",
 	);
-	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["advertisers"],
-		surface_steps: [
-			{ surface: "advertisers", step: "destination_list_not_found" },
-			{ surface: "ad_topics", step: "reached_empty" },
-			{ surface: "targeting_categories", step: "reached_empty" },
-		],
-	});
+	assert.equal(skip.reason, "stream_collection_failed");
+	assert.equal(
+		skip.message,
+		"Instagram ads scan could not reach advertisers, ad_topics",
+	);
 });
 
 test("collectAllStreams: successful category clicks without a destination list emit SKIP_RESULT", async () => {
@@ -977,6 +2063,7 @@ test("collectAllStreams: successful category clicks without a destination list e
 		categoryDestinationReached: false,
 		categoryRows: [],
 		dialogScrapes: [[], []],
+		dialogEmptyMessages: [true, true],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
 	});
@@ -994,6 +2081,7 @@ test("collectAllStreams: successful category clicks without a destination list e
 		emittedAt: EMITTED_AT,
 		page,
 		progress: async () => undefined,
+		reportStreamFailure: makeReportStreamFailure(harness.emit),
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested: new Map([["ads", { name: "ads" }]]),
 		scope: { streams: [] },
@@ -1003,7 +2091,12 @@ test("collectAllStreams: successful category clicks without a destination list e
 		state: {},
 	};
 
-	await collectAllStreams(harnessCtx, NO_DELAY);
+	await collectAllStreams(
+		harnessCtx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
@@ -1013,17 +2106,11 @@ test("collectAllStreams: successful category clicks without a destination list e
 		skip,
 		"clicking through without a destination list must not count as reached",
 	);
-	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["targeting_categories"],
-		surface_steps: [
-			{ surface: "advertisers", step: "reached_empty" },
-			{ surface: "ad_topics", step: "reached_empty" },
-			{
-				surface: "targeting_categories",
-				step: "destination_list_not_found",
-			},
-		],
-	});
+	assert.equal(skip.reason, "stream_collection_failed");
+	assert.equal(
+		skip.message,
+		"Instagram ads scan could not reach targeting_categories",
+	);
 });
 
 test("collectAllStreams: ads navigation failure reports only a bounded surface step", async () => {
@@ -1033,28 +2120,1092 @@ test("collectAllStreams: ads navigation failure reports only a bounded surface s
 		harness,
 		pageOptions: {
 			categoriesAvailable: true,
+			categoryComplete: true,
 			categoryRows: [{ description: null, name: "Music" }],
+			dialogComplete: [true, true],
 			dialogScrapes: [["Acme"], ["Sports"]],
 			navigationFailures: ["/ads/ad_topics/"],
 		},
 		requestedStreams: ["ads"],
 	});
 
-	await collectAllStreams(ctx, NO_DELAY);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
 
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
 	assert.ok(skip);
-	assert.deepEqual(skip.diagnostics, {
-		missing_surfaces: ["ad_topics"],
-		surface_steps: [{ surface: "ad_topics", step: "navigation_failed" }],
-	});
+	assert.equal(skip.reason, "stream_collection_failed");
+	assert.equal(skip.message, "Instagram ads scan could not reach ad_topics");
 	assert.deepEqual(
 		harness.emitted.map((record) => record.data.kind),
 		["advertiser", "ad_category"],
 	);
+});
+
+// ─── Real-Chromium ports of the #221 ads classifier fixtures ───────────
+//
+// These tests prove browser geometry and visibility that linkedom cannot.
+// Completion rule: a surface is reached only on the source's exact visible
+// empty message or a source ARIA total that matches the visible items.
+// Static fixtures use the virtual ads clock; race fixtures (transient,
+// hidden-then-revealed, appended-after-View-all) use the real clock so the
+// page script actually races the settle window.
+
+const ACCOUNTS_CENTER_ROUTE = "https://accountscenter.instagram.com/**";
+const TOPIC_UI_ONLY_PATTERN = "^(?:special topic|see less)$";
+
+/** Serve `body` for every Accounts Center path in a fresh headless Chromium
+ *  page, run `scrape`, and always close the browser. */
+async function withAccountsCenterPage<T>(
+	body: string,
+	scrape: (page: Page) => Promise<T>,
+): Promise<T> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route(ACCOUNTS_CENTER_ROUTE, (route) =>
+			route.fulfill({ body, contentType: "text/html", status: 200 }),
+		);
+		return await scrape(page);
+	} finally {
+		await browser.close();
+	}
+}
+
+const htmlPage = (...parts: string[]): string =>
+	`<html><body>${parts.join("")}</body></html>`;
+
+/** Advertisers button that opens `dialogHtml` (no single quotes) on click. */
+const advertisersControl = (dialogHtml: string): string => `
+	<div role="button" aria-label="Advertisers you saw ads from">Advertisers</div>
+	<script>
+		document.querySelector('[role="button"][aria-label]').addEventListener('click', () => {
+			document.body.insertAdjacentHTML('beforeend', '${dialogHtml}');
+		});
+	</script>`;
+
+/** Manage info tab and categories link that run `clickScript` on click. */
+const categoriesControl = (clickScript: string): string => `
+	<div role="tab">Manage info</div>
+	<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+	<script>
+		document.querySelector('[role="link"]').addEventListener('click', () => {
+			${clickScript}
+		});
+	</script>`;
+
+const insertDialog = (dialogHtml: string): string =>
+	`document.body.insertAdjacentHTML('beforeend', '${dialogHtml}');`;
+
+const INSTAGRAM_WEB_INFO_HTML = `<html><body><script type="application/json" data-sjs>${JSON.stringify(
+	["PolarisViewer", "u1", { data: WEB_INFO_USER }],
+)}</script></body></html>`;
+
+/** Run `collectAllStreams` for the ads stream against a real Chromium page.
+ *  Instagram web_info and both Accounts Center paths are served locally. */
+async function collectAdsInChromium(pages: {
+	ads: string;
+	adTopics: string;
+}): Promise<ReturnType<typeof makeRecordingEmit>> {
+	const harness = makeRecordingEmit(validateRecord);
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.instagram.com/**", (route) =>
+			route.fulfill({
+				body: new URL(route.request().url()).pathname.startsWith(
+					"/accounts/web_info/",
+				)
+					? INSTAGRAM_WEB_INFO_HTML
+					: "<html><body></body></html>",
+				contentType: "text/html",
+				status: 200,
+			}),
+		);
+		await page.route(ACCOUNTS_CENTER_ROUTE, (route) =>
+			route.fulfill({
+				body: new URL(route.request().url()).pathname.startsWith(
+					"/ads/ad_topics/",
+				)
+					? pages.adTopics
+					: pages.ads,
+				contentType: "text/html",
+				status: 200,
+			}),
+		);
+		const ctx: BrowserCollectContext = {
+			assist: async (): Promise<never> => {
+				throw new Error("not implemented");
+			},
+			capture: null,
+			completeAssistance: async () => undefined,
+			context: {} as BrowserCollectContext["context"],
+			credentials: {},
+			detailGaps: [],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			emittedAt: EMITTED_AT,
+			page,
+			progress: async () => undefined,
+			reportStreamFailure: makeReportStreamFailure(harness.emit),
+			requestDetailGapPage: async (): Promise<readonly never[]> => [],
+			requested: new Map([["ads", { name: "ads" }]]),
+			scope: { streams: [] },
+			sendInteraction: async (): Promise<never> => {
+				throw new Error("not implemented");
+			},
+			state: {},
+		};
+		await collectAllStreams(
+			ctx,
+			NO_DELAY,
+			TEST_POSTS_CLOCK,
+			makeVirtualAdsClock(),
+		);
+		return harness;
+	} finally {
+		await browser.close();
+	}
+}
+
+function adsCoverage(
+	harness: ReturnType<typeof makeRecordingEmit>,
+): EmittedMessage | undefined {
+	return harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE");
+}
+
+function assertAdsStreamFailure(
+	harness: ReturnType<typeof makeRecordingEmit>,
+	missingSurfaces: string,
+): void {
+	const skip = harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT" && m.stream === "ads",
+	);
+	assert.ok(skip, "an unreached ads surface must fail the ads stream");
+	assert.equal(skip.reason, "stream_collection_failed");
+	assert.equal(
+		skip.message,
+		`Instagram ads scan could not reach ${missingSurfaces}`,
+	);
+	assert.deepEqual(skip.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "ads",
+		),
+		false,
+	);
+}
+
+const ADVERTISERS_UNAVAILABLE = {
+	items: [],
+	reached: false,
+	step: "destination_list_not_found",
+	surface: "advertisers",
+} as const;
+const AD_TOPICS_UNAVAILABLE = {
+	items: [],
+	reached: false,
+	step: "destination_list_not_found",
+	surface: "ad_topics",
+} as const;
+const CATEGORIES_UNAVAILABLE = {
+	items: [],
+	reached: false,
+	step: "destination_list_not_found",
+	surface: "targeting_categories",
+} as const;
+
+test("Meta browser-bound code does not use eval workarounds", async () => {
+	const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+	assert.equal(source.includes("new Function"), false);
+	assert.equal(source.includes("eval("), false);
+	assert.equal(source.includes("globalThis.__name"), false);
+});
+
+test("classifyAdsDialogInPage returns closed states for reviewer fixtures", async () => {
+	const cases: Array<{
+		body: string;
+		expected: ReturnType<typeof classifyAdsDialogInPage>;
+		name: string;
+	}> = [
+		{
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list" style="display:none"><div role="listitem">Travel</div></div></div>',
+			expected: { kind: "unavailable" },
+			name: "hidden list",
+		},
+		{
+			body: '<div role="dialog"><div role="progressbar" aria-label="Loading ad topics"></div><div role="list" style="min-height:40px"></div></div>',
+			expected: { kind: "loading" },
+			name: "progressbar",
+		},
+		{
+			body: '<div role="dialog"><div role="list" style="min-height:40px"></div><div role="list"><div role="listitem">Travel</div></div></div>',
+			expected: { complete: false, items: ["Travel"], kind: "data" },
+			name: "later populated list without a source total",
+		},
+		{
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div>',
+			expected: { kind: "unavailable" },
+			name: "ui-only list without an empty message",
+		},
+		{
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><span style="display:none">Travel</span><button>See less</button></div></div></div>',
+			expected: { kind: "loading" },
+			name: "hidden Travel plus known control",
+		},
+		{
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><span style="display:none">Travel</span><button>See less</button></div><div role="listitem">Travel</div></div></div>',
+			expected: { kind: "loading" },
+			name: "hidden unresolved sibling keeps a visible topic loading",
+		},
+		{
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem" style="display:none">Hidden topic</div><div role="listitem">Travel</div></div></div>',
+			expected: { kind: "loading" },
+			name: "hidden listitem sibling keeps a visible topic loading",
+		},
+		{
+			body: '<div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div>',
+			expected: { kind: "verified_empty" },
+			name: "live ui-only structure with empty copy",
+		},
+	];
+	const topicArgs = {
+		emptyMessage: "No ad topics",
+		uiOnlyPatternSource: TOPIC_UI_ONLY_PATTERN,
+	};
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const actual: Array<{
+			name: string;
+			result: ReturnType<typeof classifyAdsDialogInPage>;
+		}> = [];
+		for (const fixture of cases) {
+			await page.setContent(`<html><body>${fixture.body}</body></html>`);
+			actual.push({
+				name: fixture.name,
+				result: await page.evaluate(classifyAdsDialogInPage, topicArgs),
+			});
+		}
+		assert.deepEqual(
+			actual,
+			cases.map(({ expected, name }) => ({ name, result: expected })),
+		);
+
+		await page.setContent(`
+			<html><body>
+				<div role="dialog"><h2>Ad topics</h2><div role="list">
+					<div role="listitem">Special topic</div>
+					<div role="listitem"><span id="topic" style="display:none">Travel</span><button>See less</button></div>
+				</div></div>
+			</body></html>`);
+		assert.deepEqual(await page.evaluate(classifyAdsDialogInPage, topicArgs), {
+			kind: "loading",
+		});
+		await page.evaluate(() => {
+			const topic = document.querySelector("#topic") as HTMLElement | null;
+			if (topic) topic.style.display = "inline";
+		});
+		assert.deepEqual(await page.evaluate(classifyAdsDialogInPage, topicArgs), {
+			complete: false,
+			items: ["Travel"],
+			kind: "data",
+		});
+
+		await page.setContent(
+			'<html><body><div role="dialog"><div role="list"><div role="listitem"><button>Acme Corp</button></div></div></div></body></html>',
+		);
+		assert.deepEqual(
+			await page.evaluate(classifyAdsDialogInPage, {
+				emptyMessage: "No advertisers",
+			}),
+			{ complete: false, items: ["Acme Corp"], kind: "data" },
+		);
+	} finally {
+		await browser.close();
+	}
+});
+
+// ─── scrapeAdvertisers ───────────────────────────────────────────────────
+
+test("scrapeAdvertisers keeps a settled blank list unavailable", async () => {
+	const clock = makeVirtualAdsClock();
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			advertisersControl(
+				'<div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div>',
+			),
+		),
+		(page) => scrapeAdvertisers(page, clock),
+	);
+
+	assert.deepEqual(result, ADVERTISERS_UNAVAILABLE);
+	assert.ok(clock.now() >= 2_500, "the blank list settled before rejection");
+});
+
+test("scrapeAdvertisers rejects visible rows when an advertiser error is present", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			advertisersControl(
+				'<div role="dialog"><div role="list"><div role="listitem">Advertiser A</div></div><div role="alert">Some advertisers could not be loaded. Try again.</div></div>',
+			),
+		),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, ADVERTISERS_UNAVAILABLE);
+});
+
+test("scrapeAdvertisers accepts a visible exact empty marker", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			advertisersControl(
+				'<div role="dialog"><div role="list" style="min-height:40px"></div><div>No advertisers</div></div>',
+			),
+		),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: true,
+		step: "reached_empty",
+		surface: "advertisers",
+	});
+});
+
+test("scrapeAdvertisers keeps busy exact empty marker unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			advertisersControl(
+				'<div role="dialog" aria-busy="true"><div role="list"></div><div>No advertisers</div></div>',
+			),
+		),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, ADVERTISERS_UNAVAILABLE);
+});
+
+test("scrapeAdvertisers keeps busy rows unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			advertisersControl(
+				'<div role="dialog" aria-busy="true"><div role="list"><div role="listitem">Advertiser A</div></div></div>',
+			),
+		),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, ADVERTISERS_UNAVAILABLE);
+});
+
+// ─── scrapeAdTopics ──────────────────────────────────────────────────────
+
+test("scrapeAdTopics keeps a settled blank list unavailable", async () => {
+	const clock = makeVirtualAdsClock();
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div></body></html>',
+		(page) => scrapeAdTopics(page, clock),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+	assert.ok(clock.now() >= 2_500, "the blank list settled before rejection");
+});
+
+test("scrapeAdTopics keeps a hidden blank list unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list" style="display:none"></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps an ancestor-hidden blank list unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><section style="display:none"><div role="list"></div></section></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps an opacity-hidden blank list unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list" style="opacity:0;min-height:40px"></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps an ancestor-opacity-hidden blank list unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><section style="opacity:0"><div role="list" style="min-height:40px"></div></section></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps a zero-size blank list unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps hidden later list data unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="list" style="min-height:40px"></div><div role="list" style="display:none"><div role="listitem">Fixture topic</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics collects visible rows when another list row is hidden but cannot complete without a source total", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="list"><div role="listitem">Visible topic</div></div><div role="list" style="display:none"><div role="listitem">Hidden topic</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Visible topic"],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics completes visible rows beside a hidden list when the source total matches", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="list" aria-setsize="1"><div role="listitem">Visible topic</div></div><div role="list" style="display:none"><div role="listitem">Hidden topic</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Visible topic"],
+		reached: true,
+		step: null,
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics keeps a transient topic followed by hidden data unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		`
+			<html><body>
+				<div role="dialog">
+					<div role="list" style="min-height:40px"><div role="listitem" id="visible-topic">Visible topic</div></div>
+					<div role="list" style="display:none"><div role="listitem">Hidden topic</div></div>
+					<div>No ad topics</div>
+				</div>
+				<script>
+					setTimeout(() => document.querySelector('#visible-topic')?.remove(), 1000);
+				</script>
+			</body></html>`,
+		(page) => scrapeAdTopics(page),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps a transient topic followed by a hidden blank list unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		`
+			<html><body>
+				<div role="dialog">
+					<div role="list" style="min-height:40px"><div role="listitem" id="visible-topic">Visible topic</div></div>
+					<div role="list" style="display:none"></div>
+					<div>No ad topics</div>
+				</div>
+				<script>
+					setTimeout(() => document.querySelector('#visible-topic')?.remove(), 1000);
+				</script>
+			</body></html>`,
+		(page) => scrapeAdTopics(page),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps semantic loading indicators unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="progressbar" aria-label="Loading ad topics"></div><div role="list" style="min-height:40px"></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics collects visible rows from later dialog lists but cannot complete without a source total", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="list" style="min-height:40px"></div><div role="list"><div role="listitem">Travel</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Travel"],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics ignores hidden list rows and hidden empty marker", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="list"><div role="listitem" style="display:none">Hidden Topic</div></div><div><span style="display:none">No ad topics</span></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics keeps settled UI-only rows without an empty marker unavailable", async () => {
+	const clock = makeVirtualAdsClock();
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, clock),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+	assert.ok(clock.now() >= 2_500, "the UI-only rows settled before rejection");
+});
+
+test("scrapeAdTopics accepts UI-only rows with an empty marker as verified empty", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: true,
+		step: "reached_empty",
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics collects visible real rows alongside UI-only rows but cannot complete without a source total", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">Travel</div><div role="listitem">See less</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Travel"],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics completes real rows alongside UI-only rows when row ARIA positions match", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem" aria-posinset="1" aria-setsize="1">Travel</div><div role="listitem">See less</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Travel"],
+		reached: true,
+		step: null,
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics keeps unknown control rows unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><button type="button">Manage topic preferences</button></div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+test("scrapeAdTopics ignores hidden text beside visible controls", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><span style="display:none">Travel</span><button type="button">Manage topic preferences</button></div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
+});
+
+const hiddenTopicRevealPage = (rowAttributes: string): string => `
+	<html><body>
+		<div role="dialog"><h2>Ad topics</h2><div role="list">
+			<div role="listitem">Special topic</div>
+			<div role="listitem"${rowAttributes}>
+				<span id="topic" style="display:none">Travel</span><button>See less</button>
+			</div>
+		</div></div>
+		<script>
+			setTimeout(() => {
+				document.getElementById('topic').style.display = 'inline';
+			}, 800);
+		</script>
+	</body></html>`;
+
+test("scrapeAdTopics waits for hidden topic text beside known controls to settle visible", async () => {
+	const startedAt = Date.now();
+	const result = await withAccountsCenterPage(
+		hiddenTopicRevealPage(""),
+		(page) => scrapeAdTopics(page),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Travel"],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "ad_topics",
+	});
+	assert.ok(Date.now() - startedAt >= 2_500);
+});
+
+test("scrapeAdTopics completes hidden-then-revealed topic text when row ARIA positions match", async () => {
+	const startedAt = Date.now();
+	const result = await withAccountsCenterPage(
+		hiddenTopicRevealPage(' aria-posinset="1" aria-setsize="1"'),
+		(page) => scrapeAdTopics(page),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Travel"],
+		reached: true,
+		step: null,
+		surface: "ad_topics",
+	});
+	assert.ok(Date.now() - startedAt >= 2_500);
+});
+
+test("scrapeAdTopics accepts a visible exact empty marker", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><div role="list" style="min-height:40px"></div><div>No ad topics</div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: true,
+		step: "reached_empty",
+		surface: "ad_topics",
+	});
+});
+
+// ─── scrapeTargetingCategories ───────────────────────────────────────────
+
+test("scrapeTargetingCategories keeps hidden View all without new rows unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			'<button role="button">View all</button>',
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div role="list"><div role="listitem"><span>Category</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+					event.currentTarget.style.display = 'none';
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [{ description: null, name: "Category" }],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "targeting_categories",
+	});
+});
+
+const expandedCategoriesPage = (
+	firstListAttributes: string,
+	laterListAttributes: string,
+): string =>
+	htmlPage(
+		categoriesControl(`
+			${insertDialog(`<div role="dialog"><div role="list"${firstListAttributes}><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>`)}
+			document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+				event.currentTarget.style.display = 'none';
+				document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"${laterListAttributes}><div role="listitem"><span>Category B</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem" style="display:none"><span>Hidden Category</span><button role="button">Remove</button></div></div>');
+			});`),
+	);
+
+test("scrapeTargetingCategories collects visible removable rows across all expanded dialog lists but cannot complete without a source total", async () => {
+	const result = await withAccountsCenterPage(
+		expandedCategoriesPage("", ""),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: null, name: "Category A" },
+			{ description: null, name: "Category B" },
+		],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "targeting_categories",
+	});
+});
+
+test("scrapeTargetingCategories completes expanded dialog lists when each source total matches", async () => {
+	const result = await withAccountsCenterPage(
+		expandedCategoriesPage(' aria-setsize="1"', ' aria-setsize="1"'),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: null, name: "Category A" },
+			{ description: null, name: "Category B" },
+		],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
+const appendedAfterViewAllPage = (listAttributes: string): string =>
+	htmlPage(
+		categoriesControl(`
+			${insertDialog(`<div role="dialog"><div role="list"${listAttributes}><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>`)}
+			document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+				event.currentTarget.style.display = 'none';
+				setTimeout(() => {
+					document.querySelector('[role="dialog"] [role="list"]').insertAdjacentHTML('beforeend', '<div role="listitem"><span>Category B</span><button role="button">Remove</button></div><div role="listitem"><span>Category C</span><button role="button">Remove</button></div>');
+				}, 500);
+			});`),
+	);
+
+test("scrapeTargetingCategories waits for rows appended after View all hides", async () => {
+	const result = await withAccountsCenterPage(
+		appendedAfterViewAllPage(""),
+		(page) => scrapeTargetingCategories(page),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: null, name: "Category A" },
+			{ description: null, name: "Category B" },
+			{ description: null, name: "Category C" },
+		],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "targeting_categories",
+	});
+});
+
+test("scrapeTargetingCategories completes rows appended after View all hides when the source total matches", async () => {
+	const result = await withAccountsCenterPage(
+		appendedAfterViewAllPage(' aria-setsize="3"'),
+		(page) => scrapeTargetingCategories(page),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: null, name: "Category A" },
+			{ description: null, name: "Category B" },
+			{ description: null, name: "Category C" },
+		],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
+test("scrapeTargetingCategories returns unavailable when the dialog list is replaced by an error during settle", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog" style="min-height:40px"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div></div>')}
+				setTimeout(() => { document.querySelector('[role="dialog"]').innerHTML = '<div role="alert">Temporarily unavailable</div>'; }, 300);`),
+		),
+		(page) => scrapeTargetingCategories(page),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories does not complete while category rows are still busy", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog" aria-busy="true"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+					event.currentTarget.style.display = 'none';
+					document.querySelector('[role="dialog"] [role="list"]').insertAdjacentHTML('beforeend', '<div role="listitem"><span>Category B</span><button role="button">Remove</button></div>');
+					setTimeout(() => {
+						document.querySelector('[role="dialog"] [role="list"]').insertAdjacentHTML('beforeend', '<div role="listitem"><span>Category C</span><button role="button">Remove</button></div>');
+						document.querySelector('[role="dialog"]').setAttribute('aria-busy', 'false');
+					}, 3500);
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories ignores hidden empty categories marker", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list"></div><div style="display:none">No categories</div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories keeps display-none list with empty marker unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list" style="display:none"></div><div>No categories</div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories ignores visible wrapper with hidden empty text", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list"></div><div><span style="display:none">No categories</span></div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories keeps semantic loading indicator unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="progressbar" aria-label="Loading categories"></div><div role="list" style="min-height:40px"></div><div>No categories</div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories treats no-categories alert as unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list"></div><div role="alert">No categories could not be loaded. Try again.</div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories rejects rows when a visible category error is present", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><div role="alert">Some categories could not be loaded. Try again.</div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+test("scrapeTargetingCategories accepts explicit empty categories marker", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list" style="min-height:40px"></div><div>No categories</div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: true,
+		step: "reached_empty",
+		surface: "targeting_categories",
+	});
+});
+
+test("scrapeTargetingCategories keeps blank categories list without empty marker unavailable", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div>',
+				),
+			),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+});
+
+// ─── collectAllStreams ads completion in Chromium ────────────────────────
+
+const BLANK_ADVERTISERS_DIALOG =
+	'<div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div>';
+const BLANK_AD_TOPICS_PAGE =
+	'<html><body><div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div></body></html>';
+const EMPTY_AD_TOPICS_PAGE =
+	'<html><body><div role="dialog"><div role="list" style="min-height:40px"></div><div>No ad topics</div></div></body></html>';
+
+test("collectAllStreams: category View all ignores hidden page-wide buttons after dialog expansion", async () => {
+	const harness = await collectAdsInChromium({
+		adTopics: EMPTY_AD_TOPICS_PAGE,
+		ads: htmlPage(
+			'<button style="display:none">View all</button>',
+			advertisersControl(
+				'<div role="dialog"><div role="list" style="min-height:40px"></div><div>No advertisers</div></div>',
+			),
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div role="list" aria-setsize="2"><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+					event.currentTarget.style.display = 'none';
+					document.querySelector('[role="dialog"] [role="list"]').insertAdjacentHTML('beforeend', '<div role="listitem"><span>Category B</span><button role="button">Remove</button></div>');
+				});`),
+		),
+	});
+
+	assert.deepEqual(adsCoverage(harness), {
+		hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
+		reference_only: true,
+		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+		state_stream: "ads",
+		stream: "ads",
+		type: "DETAIL_COVERAGE",
+	});
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+	assert.deepEqual(
+		harness.emitted
+			.filter((record) => record.stream === "ads")
+			.map((record) => record.data.kind),
+		["ad_category", "ad_category"],
+	);
+});
+
+test("collectAllStreams: category-only ads reach reports an ads stream failure", async () => {
+	const harness = await collectAdsInChromium({
+		adTopics: BLANK_AD_TOPICS_PAGE,
+		ads: htmlPage(
+			advertisersControl(BLANK_ADVERTISERS_DIALOG),
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list" aria-setsize="1"><div role="listitem"><span>Category</span><button role="button">Remove</button></div></div></div>',
+				),
+			),
+		),
+	});
+
+	assert.deepEqual(adsCoverage(harness), {
+		hydrated_keys: ["targeting_categories"],
+		reference_only: true,
+		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+		state_stream: "ads",
+		stream: "ads",
+		type: "DETAIL_COVERAGE",
+	});
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.kind),
+		["ad_category"],
+	);
+	assertAdsStreamFailure(harness, "advertisers, ad_topics");
+});
+
+test("collectAllStreams: settled blank advertiser and ad-topic lists report an ads stream failure", async () => {
+	const harness = await collectAdsInChromium({
+		adTopics: BLANK_AD_TOPICS_PAGE,
+		ads: htmlPage(
+			advertisersControl(BLANK_ADVERTISERS_DIALOG),
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list" style="min-height:40px"></div><div>No categories</div></div>',
+				),
+			),
+		),
+	});
+
+	assert.equal(harness.emitted.length, 0);
+	assert.deepEqual(adsCoverage(harness), {
+		hydrated_keys: ["targeting_categories"],
+		reference_only: true,
+		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+		state_stream: "ads",
+		stream: "ads",
+		type: "DETAIL_COVERAGE",
+	});
+	assertAdsStreamFailure(harness, "advertisers, ad_topics");
+});
+
+test("collectAllStreams: verified empty ad topics alone reports an ads stream failure", async () => {
+	const harness = await collectAdsInChromium({
+		adTopics: EMPTY_AD_TOPICS_PAGE,
+		ads: htmlPage(
+			advertisersControl(BLANK_ADVERTISERS_DIALOG),
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog" style="width:200px;min-height:80px"><div role="list" style="min-height:40px"></div></div>',
+				),
+			),
+		),
+	});
+
+	assert.equal(harness.emitted.length, 0);
+	assert.deepEqual(adsCoverage(harness), {
+		hydrated_keys: ["ad_topics"],
+		reference_only: true,
+		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+		state_stream: "ads",
+		stream: "ads",
+		type: "DETAIL_COVERAGE",
+	});
+	assertAdsStreamFailure(harness, "advertisers, targeting_categories");
 });
 
 // ─── Invariant 6: shape-check catches a drifted record ──────────────────
@@ -1074,19 +3225,37 @@ test("collectAllStreams: a profile record missing username lands in SKIP_RESULT,
 	await assert.rejects(collectAllStreams(ctx), /meta_profile_unavailable/);
 });
 
-test("adsSurfacesRecoveryHint retries only when every missing surface failed to load", () => {
-	assert.deepEqual(adsSurfacesRecoveryHint(["navigation_failed"]), {
-		action: "retry_by_runtime",
-		retryable: true,
-	});
-	for (const steps of [
-		["control_not_found"],
-		["destination_list_not_found"],
-		["navigation_failed", "control_not_found"],
-	] as const) {
-		assert.deepEqual(adsSurfacesRecoveryHint(steps), {
-			action: "not_retriable",
-			retryable: false,
-		});
+test("pageShowsLoginOrChallengeControls ignores ordinary profile text and finds real challenge controls", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const detect = () => page.evaluate(pageShowsLoginOrChallengeControls);
+
+		await page.setContent(
+			'<html><body><h1>challenge_runner</h1><p>I enjoy a challenge. checkpoint tracker. security code ideas.</p><a href="/challenge_runner/">profile</a></body></html>',
+		);
+		assert.equal(await detect(), false);
+
+		await page.setContent(
+			'<html><body><p>Verify you are human</p><div data-sitekey="k"></div></body></html>',
+		);
+		assert.equal(await detect(), true);
+
+		await page.setContent(
+			'<html><body><p>Welcome back</p><input type="email" name="email"></body></html>',
+		);
+		assert.equal(await detect(), true);
+
+		await page.setContent(
+			'<html><body><form><input name="verificationCode"></form></body></html>',
+		);
+		assert.equal(await detect(), true);
+
+		await page.setContent(
+			'<html><body><form action="/challenge/action/abc/"><button>Continue</button></form></body></html>',
+		);
+		assert.equal(await detect(), true);
+	} finally {
+		await browser.close();
 	}
 });

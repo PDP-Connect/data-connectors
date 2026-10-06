@@ -1,0 +1,17 @@
+{
+	"data": {
+		"xdt_api__v1__feed__user_timeline_graphql_connection": {
+			"edges": [
+				{
+					"node": {
+						"id": "3401000000000000001",
+						"code": "fixture-post-1",
+						"caption": { "text": "Synthetic fixture post" },
+						"taken_at": 1785609000
+					}
+				}
+			],
+			"page_info": { "has_next_page": false }
+		}
+	}
+}

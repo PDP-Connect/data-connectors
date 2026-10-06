@@ -1,0 +1,12 @@
+<!doctype html>
+<html>
+	<body>
+		<button role="button" aria-label="Advertisers you saw ads from">Advertisers</button>
+		<div role="dialog"><div role="list" style="min-height: 40px"></div><p style="display: none">No advertisers</p></div>
+		<script>
+			document.querySelector('[role="button"]').addEventListener('click', () => {
+				document.body.insertAdjacentHTML('beforeend', '<div role="dialog"><div role="list" style="min-height: 40px"></div><p style="display: none">No advertisers</p></div>');
+			});
+		</script>
+	</body>
+</html>

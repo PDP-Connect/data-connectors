@@ -86,7 +86,10 @@ export interface InstagramFollowingUser {
 }
 
 export interface InstagramFollowingPage {
+	error?: unknown;
+	has_more?: boolean;
 	next_max_id?: string | null;
+	status?: string;
 	users?: InstagramFollowingUser[] | null;
 }
 
