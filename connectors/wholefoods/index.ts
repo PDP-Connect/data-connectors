@@ -31,6 +31,7 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
 import { ensureAmazonSession } from "../../packages/polyfill-connectors/src/auto-login/amazon.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	politeDelay,
@@ -578,10 +579,7 @@ async function collectOrderStubs({
 			ORDER_DETAIL_READY_SELECTOR,
 		);
 		const html = await page.content();
-		if (
-			isBlockedPage(html) ||
-			/<form[^>]*name=["']signIn["']/i.test(html)
-		) {
+		if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
 			throw new Error(
 				`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
 			);
@@ -596,18 +594,29 @@ async function collectOrderStubs({
 			(item) => !item.productId,
 		).length;
 		if (itemsWithoutAsin > 0) {
+			connectorDiagnostic("wholefoods", "order_item_asin_missing", {
+				reason: ORDER_ITEM_ASIN_MISSING_REASON,
+				count: itemsWithoutAsin,
+				stream: "order_items",
+			});
 			await emit({
 				type: "PROGRESS",
 				stream: "orders",
-				message: `${ORDER_ITEM_ASIN_MISSING_REASON}: ${itemsWithoutAsin} order item(s) had no source product ASIN and were omitted from order_items`,
+				message: `${itemsWithoutAsin} order item(s) had no product ID and were left out`,
 			});
 		}
 		if (!orderDetailCountsMatch(stub, detail.items)) {
 			unverifiedCountOrders += 1;
+			connectorDiagnostic("wholefoods", "order_item_count_unverified", {
+				reason: ORDER_ITEM_COUNT_UNVERIFIED_REASON,
+				search_count: stub.expectedItemCount,
+				detail_rows: detail.items.length,
+				detail_units: orderDetailUnitCount(detail.items),
+			});
 			await emit({
 				type: "PROGRESS",
 				stream: "orders",
-				message: `${ORDER_ITEM_COUNT_UNVERIFIED_REASON}: an order's item count could not be reconciled (search_count=${stub.expectedItemCount}, detail_rows=${detail.items.length}, detail_units=${orderDetailUnitCount(detail.items)})`,
+				message: "Could not confirm the item count for an order",
 			});
 		}
 
@@ -649,11 +658,7 @@ async function collectOrderStubs({
 				} else if (facts.source === "usda_fdc")
 					nutritionCoverage.foundUSDA += 1;
 				else nutritionCoverage.found += 1;
-				const record = buildNutritionRecord(
-					item.productId,
-					item.name,
-					facts,
-				);
+				const record = buildNutritionRecord(item.productId, item.name, facts);
 				if (nutritionCursor.shouldEmit(record)) {
 					await emitRecord("nutrition", record);
 				}
@@ -671,8 +676,13 @@ async function collectOrderStubs({
 	}
 
 	if (unverifiedCountOrders > 0) {
+		connectorDiagnostic("wholefoods", "order_item_counts_unverified_summary", {
+			reason: ORDER_ITEM_COUNT_UNVERIFIED_REASON,
+			unverified: unverifiedCountOrders,
+			total: stubs.length,
+		});
 		await progress(
-			`${ORDER_ITEM_COUNT_UNVERIFIED_REASON}: ${unverifiedCountOrders} of ${stubs.length} Whole Foods order item counts could not be verified`,
+			`Item counts could not be checked for ${unverifiedCountOrders} of ${stubs.length} Whole Foods orders`,
 			{
 				count: unverifiedCountOrders,
 				stream: "orders",
@@ -688,8 +698,16 @@ async function collectOrderStubs({
 		});
 	}
 	if (wantsNutrition && nutritionCursor) {
+		connectorDiagnostic("wholefoods", "nutrition_lookup_coverage", {
+			products: consideredProductIds.size,
+			whole_foods: nutritionCoverage.found,
+			usda: nutritionCoverage.foundUSDA,
+			blocked: nutritionCoverage.blocked,
+			error: nutritionCoverage.error,
+			not_found: nutritionCoverage.notFound,
+		});
 		await progress(
-			`Nutrition lookup coverage: ${consideredProductIds.size} products; ${nutritionCoverage.found} Whole Foods, ${nutritionCoverage.foundUSDA} USDA, ${nutritionCoverage.blocked} blocked, ${nutritionCoverage.error} error, ${nutritionCoverage.notFound} not found`,
+			`Looked up nutrition for ${consideredProductIds.size} products (${nutritionCoverage.notFound} not found)`,
 			{
 				count: nutritionCoverage.found + nutritionCoverage.foundUSDA,
 				stream: "nutrition",
@@ -811,7 +829,6 @@ if (isMainModule(import.meta.url)) {
 // Exported for tests — kept free of the isMainModule guard so integration
 // tests can call them directly without spawning a subprocess/browser.
 export {
-	orderDetailCountsMatch,
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
@@ -820,4 +837,5 @@ export {
 	discoverOrderStubs,
 	lookupNutritionForProduct,
 	lookupUsdaNutrition,
+	orderDetailCountsMatch,
 };
