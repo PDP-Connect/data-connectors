@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
 	connectorEntrypoint,
+	manifestFileNames,
 	packageRoot,
 	manifestPath as seamManifestPath,
 } from "./connector-paths.ts";
@@ -55,68 +56,31 @@ function c(name: string): ConnectorPaths {
 	};
 }
 
-const KNOWN_CONNECTORS: Record<string, ConnectorPaths> = {
-	ynab: c("ynab"),
-	gmail: c("gmail"),
-	chatgpt: c("chatgpt"),
-	usaa: c("usaa"),
-	amazon: c("amazon"),
-	github: c("github"),
-	github_browser: c("github_browser"),
-	oura: c("oura"),
-	oura_browser: c("oura_browser"),
-	spotify: c("spotify"),
-	anthropic: c("anthropic"),
-	shopify: c("shopify"),
-	heb: c("heb"),
-	wholefoods: c("wholefoods"),
-	linkedin: c("linkedin"),
-	meta: c("meta"),
-	loom: c("loom"),
-	uber: c("uber"),
-	doordash: c("doordash"),
-	whatsapp: c("whatsapp"),
-	slack: c("slack"),
-	pocket: c("pocket"),
-	google_takeout: c("google_takeout"),
-	google_maps: c("google_maps"),
-	google_maps_data_portability: c("google_maps_data_portability"),
-	twitter_archive: c("twitter_archive"),
-	imessage: c("imessage"),
-	strava: c("strava"),
-	strava_browser: c("strava_browser"),
-	notion: c("notion"),
-	reddit: c("reddit"),
-	whoop: c("whoop"),
-	claude_code: c("claude_code"),
-	codex: c("codex"),
-	apple_health: c("apple_health"),
-	apple_photos: c("apple_photos"),
-	ical: c("ical"),
-	chase: c("chase"),
-	apple_contacts: c("apple_contacts"),
-	google_messages: c("google_messages"),
-	google_calendar: c("google_calendar"),
-	google_contacts: c("google_contacts"),
-	groupme: c("groupme"),
-	jellyfin: c("jellyfin"),
-	netflix_export: c("netflix_export"),
-	steam: c("steam"),
-	venmo: c("venmo"),
-	signal: c("signal"),
-	youtube: c("youtube"),
-	youtube_takeout: c("youtube_takeout"),
-	icloud_notes: c("icloud_notes"),
-};
-
-export const KNOWN_CONNECTOR_NAMES: string[] = Object.keys(KNOWN_CONNECTORS);
+/**
+ * Every connector this package can resolve a path for, discovered from one
+ * root `connectors/<key>/manifest.json` per key — the same filesystem
+ * discovery `manifest-registry.ts` already uses for the reference
+ * implementation's manifest reads (`manifestFileNames`, `connector-paths.ts`).
+ *
+ * This used to be a hand-maintained `Record<string, ConnectorPaths>` literal,
+ * one line per connector, where every value was already `c(name)` — a path
+ * derived purely from the key, never a real override. The map added nothing
+ * over discovery except a second place that could drift from `connectors/`
+ * on disk, which is exactly the failure register-all.ts's own history
+ * documents (see the comment above `CONNECTORS` in bin/register-all.ts): a
+ * hand-maintained connector list silently omitting a real connector with no
+ * CI signal. A connector that exists on disk is reachable the moment
+ * `connector-init` scaffolds it — no hand-edit of this file required.
+ */
+export const KNOWN_CONNECTOR_NAMES: string[] = manifestFileNames()
+	.map((file) => file.replace(/\.json$/, ""))
+	.sort();
 
 export function getConnectorPaths(name: string): ConnectorPaths {
-	const paths = KNOWN_CONNECTORS[name];
-	if (!paths) {
+	if (!KNOWN_CONNECTOR_NAMES.includes(name)) {
 		throw new Error(`unknown connector: ${name}`);
 	}
-	return paths;
+	return c(name);
 }
 
 export interface Manifest {

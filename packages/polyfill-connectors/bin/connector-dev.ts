@@ -24,16 +24,16 @@
  * and the run-summary file; nothing is written to an RS.
  *
  * Usage:
- *   pnpm exec tsx bin/connector-dev.ts <connector> [--summary-out <path>]
+ *   node --import tsx bin/connector-dev.ts <connector> [--summary-out <path>]
  *     [--answer <id-or-index>=<value>]... [--answers <json-file>]
  *     [--streams <name,name,...>] [--seed-last-state]
  *
  * Example:
- *   pnpm exec tsx bin/connector-dev.ts ynab
- *   pnpm exec tsx bin/connector-dev.ts gmail --summary-out /tmp/gmail-run.json
- *   pnpm exec tsx bin/connector-dev.ts reddit --answer 0=123456
- *   pnpm exec tsx bin/connector-dev.ts ynab --streams transactions,accounts
- *   pnpm exec tsx bin/connector-dev.ts ynab --seed-last-state
+ *   node --import tsx bin/connector-dev.ts ynab
+ *   node --import tsx bin/connector-dev.ts gmail --summary-out /tmp/gmail-run.json
+ *   node --import tsx bin/connector-dev.ts reddit --answer 0=123456
+ *   node --import tsx bin/connector-dev.ts ynab --streams transactions,accounts
+ *   node --import tsx bin/connector-dev.ts ynab --seed-last-state
  *
  * ─── `--streams <a,b,c>` ───────────────────────────────────────────────────
  *
@@ -1352,7 +1352,7 @@ async function main(): Promise<void> {
 	printLine("DONE");
 	printRunSummaryBody(summary, outPath);
 	printLine(
-		`  diagnose: pnpm exec tsx bin/diagnose.ts ${summaryOut ? outPath : runIdFor(connector, startedAt)}`,
+		`  diagnose: node --import tsx bin/diagnose.ts ${summaryOut ? outPath : runIdFor(connector, startedAt)}`,
 	);
 
 	// A succeeded DONE is not self-certifying: a nonzero exit or exit-by-signal

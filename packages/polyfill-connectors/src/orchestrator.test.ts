@@ -11,7 +11,7 @@ import test from "node:test";
 import { readPolyfillManifests } from "./manifest-registry.ts";
 import { getConnectorPaths, issueOwnerToken } from "./orchestrator.ts";
 
-test("every manifest-declared connector is reachable via getConnectorPaths (registered in KNOWN_CONNECTORS)", () => {
+test("every manifest-declared connector is reachable via getConnectorPaths (discovered from connectors/<key>/manifest.json)", () => {
 	const manifestKeys = readPolyfillManifests()
 		.map(({ file }) => file.replace(/\.json$/, ""))
 		.sort();
@@ -28,7 +28,7 @@ test("every manifest-declared connector is reachable via getConnectorPaths (regi
 	assert.deepEqual(
 		unreachable,
 		[],
-		`connector(s) have a manifest but are not registered in orchestrator.ts KNOWN_CONNECTORS, so the scheduler/orchestrator path can never dispatch them: ${unreachable.join(", ")}`,
+		`connector(s) have a manifest but getConnectorPaths cannot resolve them, so the scheduler/orchestrator path can never dispatch them: ${unreachable.join(", ")}`,
 	);
 });
 

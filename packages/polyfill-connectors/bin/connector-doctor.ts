@@ -8,7 +8,7 @@
  * profile, a real display).
  *
  * Usage:
- *   pnpm exec tsx bin/connector-doctor.ts
+ *   node --import tsx bin/connector-doctor.ts
  *
  * Checks, each printing the exact fix on failure instead of a generic
  * "something's wrong":
@@ -19,7 +19,10 @@
  *   - Display availability for a headed run (Linux only — DISPLAY/
  *     WAYLAND_DISPLAY, plus the PDPP_BROWSER_EXTRA_ARGS=--ozone-platform=x11
  *     hint for the common tmux/SSH GPU-init failure; macOS/Windows don't
- *     need a check, so this always passes there).
+ *     need a check, so this always passes there). Skipped entirely (passes
+ *     with no DISPLAY/XAUTHORITY warning) when PDPP_BROWSER_HEADLESS=1 is
+ *     set — a deliberately headless run has nothing to render and a display
+ *     warning there is noise, not signal.
  *   - `.env.local` exists at the REPO ROOT — connector-dev.ts and every
  *     connector's own dotenv load only ever read that one file. Warns
  *     (never fails) if one exists only in a subdirectory instead — a known
@@ -351,7 +354,21 @@ export function checkChromiumRevision(ctx: DoctorContext): DoctorCheckResult {
 
 // ─── Check 4: display availability (headed runs) ──────────────────────────
 
+/** Same truthiness check `browser-launch.ts`/`connector-runtime.ts` use for
+ *  `PDPP_BROWSER_HEADLESS` — keep this in lockstep with those. */
+function headlessRequested(ctx: DoctorContext): boolean {
+	return ctx.env.PDPP_BROWSER_HEADLESS?.trim() === "1";
+}
+
 export function checkDisplayAvailable(ctx: DoctorContext): DoctorCheckResult {
+	if (headlessRequested(ctx)) {
+		return {
+			name: "display",
+			status: "pass",
+			message:
+				"PDPP_BROWSER_HEADLESS=1 is set — headless runs render nothing, so DISPLAY/WAYLAND_DISPLAY and XAUTHORITY are irrelevant here. Skipping the display check.",
+		};
+	}
 	if (ctx.platform !== "linux") {
 		const osName = ctx.platform === "darwin" ? "macOS" : "Windows";
 		return {

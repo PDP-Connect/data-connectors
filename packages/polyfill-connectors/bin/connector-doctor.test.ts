@@ -298,6 +298,24 @@ test("checkDisplayAvailable: warn on Linux with no display, naming the ozone-pla
 	);
 });
 
+test("checkDisplayAvailable: pass with no warning on Linux with no display when PDPP_BROWSER_HEADLESS=1", () => {
+	const { ctx } = baseContext({
+		platform: "linux",
+		env: { PDPP_BROWSER_HEADLESS: "1" },
+	});
+	const result = checkDisplayAvailable(ctx);
+	assert.equal(result.status, "pass");
+	assert.match(result.message, /PDPP_BROWSER_HEADLESS=1/);
+});
+
+test("checkDisplayAvailable: still checks DISPLAY when PDPP_BROWSER_HEADLESS is unset", () => {
+	const { ctx } = baseContext({
+		platform: "linux",
+		env: { PDPP_BROWSER_HEADLESS: "0" },
+	});
+	assert.equal(checkDisplayAvailable(ctx).status, "warn");
+});
+
 // ─── checkEnvLocalLocation ───────────────────────────────────────────────
 
 test("checkEnvLocalLocation: pass when .env.local exists at the repo root and nowhere else", () => {
