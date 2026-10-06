@@ -34,9 +34,13 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { after, afterEach, beforeEach, test } from "node:test";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 
 // Module-level poll/download timeouts in index.ts are env-overridable so
 // this file's "never becomes ready" test runs in milliseconds instead of
@@ -312,6 +316,18 @@ async function buildZipBytes(
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
+
+/** Diagnostic lines the connector wrote to the run log during one test. */
+const diagnostics: string[] = [];
+beforeEach(() => {
+	diagnostics.length = 0;
+	setConnectorDiagnosticSink((line) => {
+		diagnostics.push(line);
+	});
+});
+afterEach(() => {
+	setConnectorDiagnosticSink(undefined);
+});
 
 test("collectAnthropic: no requested streams -> no work, no messages", async () => {
 	const { ctx, emitted, protocolMessages } = makeContext({
@@ -622,12 +638,27 @@ test("collectAnthropic: excluded oversized source is never spooled; selected ove
 	const notes = selected.protocolMessages.filter(
 		(m) =>
 			m.type === "PROGRESS" &&
-			/export_items_too_large/.test((m as { message: string }).message),
+			/too large to import/.test((m as { message: string }).message),
 	) as Array<{ message: string; stream?: string; count?: number }>;
 	assert.equal(notes.length, 1);
 	assert.equal(notes[0]?.stream, "conversations");
 	assert.equal(notes[0]?.count, 1);
+	assert.equal(
+		notes[0]?.message,
+		"1 item of conversations in the export was too large to import and was skipped",
+	);
 	assert.doesNotMatch(notes[0]?.message ?? "", /conv-huge|Excluded source/);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith("[anthropic-diagnostic] export_items_too_large ") &&
+				line.includes('"stream":"conversations"') &&
+				line.includes('"count":1') &&
+				line.includes('"max_bytes":'),
+		),
+		diagnostics.join("\n"),
+	);
+	assertUserFacingProgress(selected.protocolMessages);
 	const synced = statesOf(selected.protocolMessages)
 		.filter((m) => "synced_at" in (m.cursor as Record<string, unknown>))
 		.map((m) => m.stream);
@@ -714,14 +745,27 @@ for (const scenario of [
 						: "users_json",
 			metadata_status: scenario.status,
 		});
+		const expectNote = scenario.status !== "valid" || scenario.name === null;
+		const expectedNote =
+			scenario.name === null
+				? "Could not confirm which Claude account this export belongs to; profile name and plan were left out"
+				: "Claude account details for this export could not be fully verified";
 		assert.equal(
 			protocolMessages.some(
 				(message) =>
-					message.type === "PROGRESS" &&
-					message.message.includes(`metadata: ${scenario.status}`),
+					message.type === "PROGRESS" && message.message === expectedNote,
 			),
-			scenario.status !== "valid" || scenario.name === null,
+			expectNote,
 		);
+		const profileLine = diagnostics.find((line) =>
+			line.startsWith("[anthropic-diagnostic] account_profile_unverified "),
+		);
+		assert.equal(profileLine !== undefined, expectNote);
+		if (profileLine) {
+			assert.ok(profileLine.includes(`"metadata_status":"${scenario.status}"`));
+			assert.ok(profileLine.includes('"name_source":'));
+		}
+		assertUserFacingProgress(protocolMessages);
 	});
 }
 
@@ -903,9 +947,18 @@ for (const scenario of [
 			protocolMessages.some(
 				(message) =>
 					message.type === "PROGRESS" &&
-					message.message.includes("Resumed export owner is not verified"),
+					message.message ===
+						"The signed-in Claude profile may not belong to this export, so its name and plan were not used",
 			),
 		);
+		const profileLine = diagnostics.find((line) =>
+			line.startsWith("[anthropic-diagnostic] account_profile_unverified "),
+		);
+		assert.match(
+			profileLine ?? "",
+			/"outcome":"resumed_export_owner_not_verified_browser_name_and_plan_omitted"/,
+		);
+		assertUserFacingProgress(protocolMessages);
 	});
 }
 
@@ -1361,8 +1414,14 @@ test("collectAnthropic: ZIP with entries under a top-level folder -> layout_unre
 		.filter((m) => m.type === "PROGRESS")
 		.map((m) => (m as { message: string }).message)
 		.join("\n");
-	assert.match(progressText, /data-2026\/conversations\.json/);
-	assert.doesNotMatch(progressText, /Test conversation/);
+	assert.match(progressText, /did not contain conversations or projects/);
+	assert.doesNotMatch(progressText, /data-2026|Test conversation/);
+	const layoutLine = diagnostics.find((line) =>
+		line.startsWith("[anthropic-diagnostic] export_layout_unrecognized "),
+	);
+	assert.match(layoutLine ?? "", /data-2026\/conversations\.json/);
+	assert.doesNotMatch(diagnostics.join("\n"), /Test conversation/);
+	assertUserFacingProgress(protocolMessages);
 });
 
 test("collectAnthropic: recognized ZIP with empty conversations.json -> verified empty (synced_at STATE, no skip)", async () => {
@@ -1539,8 +1598,8 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 		.filter((m) => m.type === "PROGRESS")
 		.map((m) => (m as { message: string }).message)
 		.join("\n");
-	assert.match(progressText, /memories\/memories\.json/);
-	assert.doesNotMatch(progressText, /not emitted/);
+	assert.match(diagnostics.join("\n"), /memories\/memories\.json/);
+	assert.doesNotMatch(progressText, /not emitted|memories\.json/);
 });
 
 function manifestFetchStub(
@@ -1691,9 +1750,13 @@ test("collectAnthropic: layout_unrecognized PROGRESS caps the entry names", asyn
 		.filter((m) => m.type === "PROGRESS")
 		.map((m) => (m as { message: string }).message)
 		.join("\n");
-	assert.match(progressText, /entry-49\.json/);
-	assert.doesNotMatch(progressText, /entry-50\.json/);
-	assert.match(progressText, /30 more/);
+	assert.doesNotMatch(progressText, /entry-\d+\.json/);
+	const layoutLine = diagnostics.find((line) =>
+		line.startsWith("[anthropic-diagnostic] export_layout_unrecognized "),
+	);
+	assert.match(layoutLine ?? "", /entry-49\.json/);
+	assert.doesNotMatch(layoutLine ?? "", /entry-50\.json/);
+	assert.match(layoutLine ?? "", /"hidden_entry_count":30/);
 });
 
 async function runManifest(
@@ -1807,7 +1870,10 @@ test("collectAnthropic: manifest conversations entry with an unparseable item sk
 		.filter((m) => m.type === "PROGRESS")
 		.map((m) => (m as { message: string }).message)
 		.join("\n");
-	assert.match(progressText, /1 conversations item\(s\)/);
+	assert.match(
+		progressText,
+		/1 item of conversations in the export could not be read and was not imported/,
+	);
 	assert.doesNotMatch(progressText, new RegExp(secret));
 });
 
@@ -2155,8 +2221,14 @@ test("collectAnthropic: nonce download that is a split-export manifest imports e
 		.filter((m) => m.type === "PROGRESS")
 		.map((m) => (m as { message: string }).message)
 		.join("\n");
-	assert.match(progressText, /memories \(1 entry\)/);
-	assert.match(progressText, /design_chats \(1 entry\)/);
+	assert.doesNotMatch(progressText, /design_chats/);
+	assert.match(progressText, /Part of the Claude export is not supported yet/);
+	const categoryLine = diagnostics.find((line) =>
+		line.startsWith("[anthropic-diagnostic] export_categories_without_stream "),
+	);
+	assert.match(categoryLine ?? "", /memories \(1 entry\)/);
+	assert.match(categoryLine ?? "", /design_chats \(1 entry\)/);
+	assertUserFacingProgress(protocolMessages);
 });
 
 test("collectAnthropic: split-export manifest returned by POST export_data imports every category part", async () => {
