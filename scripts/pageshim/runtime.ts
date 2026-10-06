@@ -15,7 +15,15 @@
 // It does not call runConnector(): that is the stdio + Patchright runtime.
 // It reuses makeEmitRecord, so record validation and scope filtering match
 // the desktop path.
-import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	consentTimeFieldResolver,
+	makeEmitRecord,
+	withholdsBoundedProgress,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { timeRangeUnsupportedReason } from "../../packages/polyfill-connectors/src/time-range.ts";
+
+/** Set by build.mjs: the connector directory whose manifest declares the streams. */
+declare const PAGESHIM_CONNECTOR_MANIFEST: string | undefined;
 
 /** The subset of the PageShim page API this adapter calls. */
 export interface ShimPage {
@@ -814,13 +822,21 @@ export async function runOnPageShim(
 		}
 		if (stateWriteFailure) throw stateWriteFailure;
 	};
+	// time_range applies to each stream's manifest consent_time_field, as on
+	// desktop. An unbuilt runtime has no manifest name and drops bounded
+	// streams' records rather than guessing a field.
+	const timeRangeFieldFor = consentTimeFieldResolver(
+		typeof PAGESHIM_CONNECTOR_MANIFEST === "string"
+			? PAGESHIM_CONNECTOR_MANIFEST
+			: "",
+	);
 	const emitRecord = makeEmitRecord({
 		requested: requested as never,
 		emit: emit as never,
 		emittedAt: new Date().toISOString(),
 		validateRecord: connector.validateRecord,
 		isTombstone: undefined,
-		timeRangeFieldFor: () => "date",
+		timeRangeFieldFor,
 	});
 	const result = (
 		scopes: Record<string, unknown>,
@@ -851,7 +867,19 @@ export async function runOnPageShim(
 			await shim.goHeadless();
 		}
 		await connector.collect({
-			emit,
+			// As on desktop: no checkpoint or gap-recovery receipt once a record
+			// was withheld at or after `until` in this run.
+			emit: (msg: Msg) =>
+				withholdsBoundedProgress(
+					msg as never,
+					emitRecord.withheldAtOrAfterUntil,
+				)
+					? emit({
+							type: "PROGRESS",
+							stream: msg.stream,
+							message: `${msg.type} for ${String(msg.stream)} not saved: a record at or after the time range's end was withheld`,
+						})
+					: emit(msg),
 			emitRecord: emitRecord.emit,
 			isRecordSelected: emitRecord.isSelected,
 			page,
@@ -883,6 +911,25 @@ export async function runOnPageShim(
 		// Some connectors emit STATE without awaiting the returned promise. Drain
 		// those host acknowledgements before committing the streamed result.
 		await settleStateWrites();
+		// Ranges arrive during collect(). A bounded stream that cannot apply its
+		// range (no timestamp consent field, or a bound that is not an instant)
+		// had its records withheld; say so instead of an empty success, as the
+		// desktop runtime does before collection.
+		for (const [stream, scope] of requested) {
+			const unsupported = timeRangeUnsupportedReason(
+				stream,
+				(scope as { time_range?: { since?: string; until?: string } })
+					.time_range,
+				timeRangeFieldFor(stream),
+			);
+			if (unsupported !== null)
+				await emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "scope_not_supported",
+					message: unsupported,
+				});
+		}
 		for (const stream of connector.partialStreamsFromDetailGaps?.([
 			...requested.keys(),
 		]) ?? []) {

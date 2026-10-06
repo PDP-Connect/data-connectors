@@ -61,6 +61,7 @@ import { join } from "node:path";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	ACTIVITIES_CSV,
 	type ActivitiesCsvSource,
@@ -206,18 +207,12 @@ async function openActivitiesCsv(filePath: string): Promise<CsvSourceResult> {
 	}
 }
 
-/** Match the runtime's inclusive-since/exclusive-until date filtering locally. */
+/** Match the runtime's inclusive-since/exclusive-until timestamp filtering locally. */
 function isOutsideRequestedTimeRange(
 	dateValue: string,
 	timeRange: { since?: string; until?: string } | undefined,
 ): boolean {
-	if (!timeRange) {
-		return false;
-	}
-	if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
-		return true;
-	}
-	return Boolean(timeRange.until && dateValue >= timeRange.until.slice(0, 10));
+	return timeRange !== undefined && isOutsideTimeRange(timeRange, dateValue);
 }
 
 async function collectActivities(
@@ -509,7 +504,6 @@ runConnector({
 	// Without this the runtime falls back to a field named "date", which these
 	// records do not have, and any connection carrying an owner-declared time
 	// scope fails the whole run instead of filtering.
-	timeRangeField: "start_time",
 	async collect(ctx) {
 		const importDir =
 			process.env.STRAVA_EXPORT_DIR ||

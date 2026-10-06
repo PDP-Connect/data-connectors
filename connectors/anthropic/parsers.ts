@@ -81,7 +81,7 @@ const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
  * they parse as such, else null (D4: unparseable value is null, never
  * guessed — never re-derive/reformat a timestamp the source already got
  * right). */
-function isoOrNull(v: unknown): string | null {
+export function isoOrNull(v: unknown): string | null {
 	const s = str(v);
 	if (s === null) {
 		return null;

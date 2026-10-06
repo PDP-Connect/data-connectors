@@ -58,7 +58,7 @@ after(() => {
 
 const { collectAnthropic } = await import("./index.ts");
 const { validateRecord } = await import("./schemas.ts");
-const { makeEmitRecord } = await import(
+const { consentTimeFieldResolver, makeEmitRecord } = await import(
 	"../../packages/polyfill-connectors/src/connector-runtime.ts"
 );
 const { makeRecordingEmit } = await import(
@@ -155,6 +155,8 @@ function makeContext(overrides: {
 	resources?: Record<string, string[]>;
 	since?: string;
 	until?: string;
+	/** Streams that get since/until; default every stream. */
+	timeRangeStreams?: string[];
 	state?: Record<string, unknown>;
 	fetchStub: FetchStub;
 }): {
@@ -168,7 +170,8 @@ function makeContext(overrides: {
 	const page = new FakePage(overrides.fetchStub);
 	const scopeStreams = overrides.streams.map((name) => ({
 		name,
-		...(overrides.since || overrides.until
+		...((overrides.since || overrides.until) &&
+		(overrides.timeRangeStreams ?? overrides.streams).includes(name)
 			? {
 					time_range: {
 						...(overrides.since ? { since: overrides.since } : {}),
@@ -189,7 +192,7 @@ function makeContext(overrides: {
 		emittedAt: "2026-01-01T00:00:00.000Z",
 		validateRecord,
 		isTombstone: undefined,
-		timeRangeFieldFor: () => "date",
+		timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
 	});
 	const ctx: BrowserCollectContext = {
 		assist: () => {
@@ -466,14 +469,18 @@ test("collectAnthropic: time window filters conversations and messages but retai
 			{
 				...CONVERSATIONS_JSON[0],
 				uuid: "conv-recent",
+				created_at: recent,
 				updated_at: recent,
-				chat_messages: [{ ...baseMessage, uuid: "msg-recent" }],
+				chat_messages: [
+					{ ...baseMessage, uuid: "msg-recent", created_at: recent },
+				],
 			},
 			{
 				...CONVERSATIONS_JSON[0],
 				uuid: "conv-old",
+				created_at: old,
 				updated_at: old,
-				chat_messages: [{ ...baseMessage, uuid: "msg-old" }],
+				chat_messages: [{ ...baseMessage, uuid: "msg-old", created_at: old }],
 			},
 		],
 		{
@@ -513,6 +520,8 @@ test("collectAnthropic: time window filters conversations and messages but retai
 		streams: ["conversations", "messages", "projects", "project_documents"],
 		since,
 		until,
+		// A conversation window: projects and documents are requested unbounded.
+		timeRangeStreams: ["conversations", "messages"],
 		fetchStub,
 	});
 	const originalGoto = page.goto.bind(page);

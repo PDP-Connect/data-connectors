@@ -33,6 +33,7 @@ import type {
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	activityGearId,
 	parseActivityCalories,
@@ -559,21 +560,6 @@ const earlier = (a: string | null, b: string): string =>
 const later = (a: string | null, b: string | null): string | null =>
 	!a ? b : !b ? a : a > b ? a : b;
 
-/**
- * The runtime's time-range rule, applied here too so the coverage record
- * describes the records the run keeps: by calendar day, since inclusive and
- * until exclusive, on `start_date`.
- */
-function isOutsideTimeRange(
-	startDate: string,
-	range: { since?: string; until?: string } | undefined,
-): boolean {
-	if (range?.since && startDate < range.since.slice(0, 10)) {
-		return true;
-	}
-	return Boolean(range?.until && startDate >= range.until.slice(0, 10));
-}
-
 export async function collectStravaBrowser(
 	ctx: StravaCollectContext,
 	options: StravaCollectOptions = {},
@@ -589,7 +575,7 @@ export async function collectStravaBrowser(
 	const stored =
 		(ctx.state[ACTIVITIES_STREAM] as ActivitiesState | undefined) ?? {};
 	const timeRange = ctx.requested.get(ACTIVITIES_STREAM)?.time_range;
-	const rangeSinceDay = timeRange?.since?.slice(0, 10) ?? null;
+	const rangeSince = timeRange?.since ?? null;
 	const priorKnownIds = new Set(
 		Array.isArray(stored.known_ids)
 			? stored.known_ids.filter((id): id is string => typeof id === "string")
@@ -602,7 +588,11 @@ export async function collectStravaBrowser(
 		: [];
 	const rangeExpanded =
 		stored.requested_since != null &&
-		(rangeSinceDay == null || rangeSinceDay < stored.requested_since);
+		// True when the new since is earlier than the stored one. An older
+		// cursor stored a calendar day, which is not an instant; it counts as
+		// expanded, so the run re-walks the full list once.
+		(rangeSince == null ||
+			isOutsideTimeRange({ since: stored.requested_since }, rangeSince));
 	const fullListWalk =
 		fullRefresh || stored.list_complete !== true || rangeExpanded;
 	const wasInventoryComplete = stored.list_complete === true;
@@ -676,10 +666,10 @@ export async function collectStravaBrowser(
 				unreadable += 1;
 				continue;
 			}
-			const inRequestedRange = !isOutsideTimeRange(
-				record.start_date,
-				timeRange,
-			);
+			// The runtime's rule, applied here too so the coverage record
+			// describes the records the run keeps.
+			const inRequestedRange =
+				!timeRange || !isOutsideTimeRange(timeRange, record.start_time);
 			if (!inRequestedRange) {
 				continue;
 			}
@@ -817,7 +807,7 @@ export async function collectStravaBrowser(
 	}
 
 	const listComplete = wasInventoryComplete || (listFinished && !failure);
-	const requestedSince = rangeSinceDay;
+	const requestedSince = rangeSince;
 	const cursor: ActivitiesState = {
 		known_ids: [...knownIds],
 		pending_detail_ids: pendingIds,
@@ -874,7 +864,6 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "strava_browser",
 		validateRecord,
-		timeRangeField: "start_time",
 		browser: { profileName: "strava_browser" },
 		ensureSession: ensureStravaSession,
 		probeSession: ({ page }) => probeStravaSession(page),

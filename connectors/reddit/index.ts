@@ -798,7 +798,6 @@ if (isMainModule(import.meta.url)) {
 		retryablePattern: REDDIT_RETRYABLE_PATTERN,
 		auth: { kind: "env", required: ["REDDIT_USERNAME", "REDDIT_PASSWORD"] },
 		browser: { profileName: "reddit" },
-		timeRangeField: "created_utc",
 		ensureSession: redditEnsureSession,
 		async collect(ctx: BrowserCollectContext): Promise<void> {
 			await collectAllStreams(ctx);

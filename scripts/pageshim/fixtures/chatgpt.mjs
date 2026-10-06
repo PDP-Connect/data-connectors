@@ -102,7 +102,8 @@ export function resolveFixture(raw) {
 				{
 					id: "memory-fixture-1",
 					content: "Synthetic fixture memory",
-					created_at: SYNTHETIC_MEMORY_TIMESTAMP,
+					// The API sends epoch seconds here; it has no `created_at`.
+					created_timestamp: Date.parse(SYNTHETIC_MEMORY_TIMESTAMP) / 1000,
 					updated_at: SYNTHETIC_MEMORY_TIMESTAMP,
 				},
 			],

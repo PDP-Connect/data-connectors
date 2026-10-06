@@ -1,0 +1,328 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// GENERATED FILE — do not hand-edit. Produced by
+// scripts/generate-consent-time-fields.ts from every shipped connector
+// manifest's per-stream consent_time_field. A stream maps to null when its
+// manifest declares no timestamp consent field (absent, calendar date, or
+// integer), so a bounded run reports scope_not_supported for it.
+// Regenerate with `node --experimental-strip-types
+// scripts/generate-consent-time-fields.ts` from packages/polyfill-connectors.
+
+export const CONSENT_TIME_FIELDS: Readonly<
+	Record<string, Readonly<Record<string, string | null>>>
+> = {
+	amazon: {
+		order_items: null,
+		orders: null,
+		profile: null,
+	},
+	anthropic: {
+		account_profile: null,
+		conversations: "create_time",
+		messages: "create_time",
+		project_documents: "create_time",
+		projects: "create_time",
+	},
+	apple_contacts: {
+		address_books: null,
+		contact_groups: null,
+		contacts: null,
+	},
+	apple_health: {
+		records: "start_date",
+		workouts: "start_date",
+	},
+	apple_photos: {
+		photos: "file_modified_at",
+	},
+	chase: {
+		accounts: null,
+		balances: "as_of",
+		current_activity: null,
+		statements: null,
+		transactions: null,
+	},
+	chatgpt: {
+		conversations: "create_time",
+		custom_gpts: "created_at",
+		custom_instructions: "updated_at",
+		memories: "created_at",
+		messages: "create_time",
+		shared_conversations: "created_at",
+	},
+	claude_code: {
+		attachments: "timestamp",
+		backup_inventory: null,
+		cache_inventory: null,
+		config_inventory: null,
+		file_history: null,
+		memory_notes: null,
+		messages: "timestamp",
+		sessions: "started_at",
+		skills: null,
+		slash_commands: null,
+		usage: null,
+	},
+	codex: {
+		cache_inventory: null,
+		config_inventory: null,
+		function_calls: "timestamp",
+		history: null,
+		messages: "timestamp",
+		prompts: null,
+		rules: null,
+		session_index: null,
+		sessions: "started_at",
+		shell_snapshots: null,
+		skills: null,
+	},
+	doordash: {
+		order_items: null,
+		orders: "order_date",
+	},
+	github: {
+		contributions: null,
+		events: "created_at",
+		gists: "created_at",
+		issues: "created_at",
+		organizations: null,
+		pinned_repositories: null,
+		pull_requests: "created_at",
+		repositories: "created_at",
+		starred: "starred_at",
+		user: "created_at",
+		user_stats: null,
+	},
+	github_browser: {
+		contributions: null,
+		events: null,
+		history: null,
+		profile: null,
+		repositories: null,
+		starred: null,
+	},
+	gmail: {
+		attachments: "message_received_at",
+		labels: null,
+		message_bodies: "message_received_at",
+		messages: "received_at",
+		threads: "first_message_date",
+	},
+	google_calendar: {
+		calendars: null,
+		events: "start",
+	},
+	google_contacts: {
+		contact_groups: null,
+		people: "updated",
+	},
+	google_maps: {
+		timeline_points: "timestamp",
+		timeline_segments: "start_time",
+	},
+	google_maps_data_portability: {
+		archive_jobs: "export_time",
+	},
+	google_messages: {
+		messages: "sent_at",
+	},
+	google_takeout: {
+		location_history: "timestamp",
+		photos: "event_time",
+		search_history: "timestamp",
+		youtube_watch_history: "watched_at",
+	},
+	groupme: {
+		attachments: null,
+		direct_chat_messages: "created_at",
+		direct_messages: "last_message_at",
+		group_messages: "created_at",
+		groups: "created_at",
+	},
+	heb: {
+		nutrition: null,
+		order_items: null,
+		orders: null,
+		profile: null,
+	},
+	ical: {
+		events: "start",
+	},
+	icloud_notes: {
+		folders: null,
+		notes: null,
+	},
+	imessage: {
+		attachments: null,
+		messages: "date",
+		participants: null,
+	},
+	jellyfin: {
+		items: "last_played_date",
+		libraries: null,
+	},
+	linkedin: {
+		connections: null,
+		education: null,
+		experience: null,
+		languages: null,
+		profile: null,
+		skills: null,
+	},
+	loom: {
+		transcripts: null,
+		videos: "created_at",
+	},
+	meta: {
+		ads: null,
+		following: null,
+		post_likes: null,
+		posts: "taken_at",
+		profile: null,
+	},
+	netflix_export: {
+		viewing_activity: "watched_at",
+	},
+	notion: {
+		databases: "created_time",
+		pages: "created_time",
+	},
+	oura: {
+		activity: null,
+		readiness: null,
+		sleep: null,
+	},
+	oura_browser: {
+		activity: null,
+		readiness: null,
+		sleep: null,
+	},
+	pocket: {
+		items: "time_added",
+	},
+	reddit: {
+		comments: "created_utc",
+		downvoted: "created_utc",
+		hidden: "created_utc",
+		saved: "created_utc",
+		submitted: "created_utc",
+		upvoted: "created_utc",
+	},
+	shopify: {
+		orders: "order_date",
+	},
+	signal: {
+		attachments: null,
+		conversations: null,
+		messages: "sent_at",
+		reactions: null,
+	},
+	slack: {
+		canvases: null,
+		channel_memberships: null,
+		channel_stats: null,
+		channels: null,
+		dm_read_states: null,
+		files: null,
+		message_attachments: null,
+		messages: "sent_at",
+		reactions: null,
+		reminders: null,
+		stars: null,
+		user_groups: null,
+		users: null,
+		workspace: null,
+	},
+	spotify: {
+		playlist_items: "added_at",
+		playlists: null,
+		profile: null,
+		saved_tracks: "added_at",
+	},
+	steam: {
+		friends: null,
+		owned_games: null,
+		profile: null,
+		recently_played_games: null,
+		steam_level: null,
+	},
+	strava: {
+		activities: "start_time",
+	},
+	strava_browser: {
+		activities: "start_time",
+	},
+	twitter_archive: {
+		direct_messages: "created_at",
+		tweets: "created_at",
+	},
+	uber: {
+		receipts: null,
+		trips: "requested_at",
+	},
+	usaa: {
+		account_stats: null,
+		accounts: null,
+		credit_card_billing: null,
+		credit_card_billing_stats: null,
+		inbox_messages: null,
+		statements: null,
+		transactions: null,
+	},
+	venmo: {
+		friends: null,
+		profile: null,
+		transactions: "date_created",
+	},
+	whatsapp: {
+		attachments: null,
+		chats: "first_message_date",
+		messages: "sent_at",
+	},
+	wholefoods: {
+		nutrition: null,
+		order_items: null,
+		orders: null,
+		profile: null,
+	},
+	whoop: {
+		body: null,
+		cycles: null,
+		profile: null,
+		recoveries: "created_at",
+		sleeps: "start_at",
+		workouts: "start_at",
+	},
+	ynab: {
+		account_stats: null,
+		accounts: null,
+		budgets: null,
+		categories: null,
+		category_groups: null,
+		month_categories: null,
+		months: null,
+		payee_locations: null,
+		payees: null,
+		scheduled_transactions: null,
+		transactions: null,
+	},
+	youtube: {
+		likes: null,
+		playlist_items: null,
+		playlists: null,
+		profile: null,
+		subscriptions: null,
+		watch_history: null,
+		watch_later: null,
+	},
+	youtube_takeout: {
+		likes: null,
+		playlist_items: null,
+		playlists: null,
+		profile: null,
+		subscriptions: null,
+		watch_history: "watched_at",
+		watch_later: null,
+	},
+};

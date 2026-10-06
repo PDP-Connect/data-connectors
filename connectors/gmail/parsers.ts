@@ -15,6 +15,7 @@ import type {
 	MessageStructureObject,
 } from "imapflow";
 import { recordFingerprint } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import type {
 	AttachmentRecord,
 	BodySource,
@@ -875,16 +876,7 @@ export function isInTimeRange(
 	receivedAt: string,
 	range: { since?: string; until?: string } | null | undefined,
 ): boolean {
-	if (!range) {
-		return true;
-	}
-	if (range.since && receivedAt < range.since) {
-		return false;
-	}
-	if (range.until && receivedAt >= range.until) {
-		return false;
-	}
-	return true;
+	return !range || !isOutsideTimeRange(range, receivedAt);
 }
 
 /** Extract the envelope participants (from/to/cc) as a de-duped email list. */

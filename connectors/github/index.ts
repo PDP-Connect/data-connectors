@@ -734,7 +734,10 @@ async function emitRepositoriesPage(
 			return { evaluated, latest, stop: true };
 		}
 		await ctx.emitRecord("repositories", repoRecord(r));
-		latest = laterIso(latest, r.pushed_at);
+		latest = cursorBeforeUntil(
+			laterIso(latest, r.pushed_at),
+			streamUntil(ctx, "repositories"),
+		);
 	}
 	return { evaluated, latest, stop: false };
 }
@@ -858,7 +861,10 @@ async function emitStarredPage(
 			continue;
 		}
 		await ctx.emitRecord("starred", rec);
-		latest = laterIso(latest, starredAt);
+		latest = cursorBeforeUntil(
+			laterIso(latest, starredAt),
+			streamUntil(ctx, "starred"),
+		);
 	}
 	return { dropped, evaluated, latest, stop: false };
 }
@@ -961,6 +967,28 @@ export async function collectStarred(ctx: StreamCtx): Promise<void> {
 	});
 }
 
+/** The `time_range.until` requested for one stream, if any. */
+function streamUntil(ctx: StreamCtx, stream: string): string | null {
+	return ctx.requested.get(stream)?.time_range?.until ?? null;
+}
+
+/**
+ * A run bounded by `until` keeps its cursor one second below `until`. The
+ * runtime withholds records whose consent time is at or after `until`, so a
+ * cursor taken from them, or from a later `updated_at`/`pushed_at`, would make
+ * the next run skip records it never delivered. GitHub timestamps have second
+ * precision and its `since` returns later updates only. Re-reading an item
+ * already emitted is idempotent.
+ */
+function cursorBeforeUntil<T extends string | null | undefined>(
+	cursor: T,
+	until: string | null,
+): T | string {
+	return cursor && until && isAtOrAfterUntil(cursor, until)
+		? new Date(Date.parse(until) - 1000).toISOString()
+		: cursor;
+}
+
 async function emitIssuesPage(
 	ctx: StreamCtx,
 	items: GitHubIssue[],
@@ -969,11 +997,11 @@ async function emitIssuesPage(
 ): Promise<string | null | undefined> {
 	let latest = latestIn;
 	for (const it of items) {
-		if (isAtOrAfterUntil(it.updated_at, until)) {
+		if (isAtOrAfterUntil(it.created_at, until)) {
 			continue;
 		}
 		await ctx.emitRecord("issues", issueRecord(it));
-		latest = laterIso(latest, it.updated_at);
+		latest = cursorBeforeUntil(laterIso(latest, it.updated_at), until);
 	}
 	return latest;
 }
@@ -1156,7 +1184,7 @@ function buildPrSearchPath(
 	const qParts = ["type:pr", `author:${login}`];
 	if (sinceParam) {
 		// Search API date-precision; strict `since` still applied per-item.
-		qParts.push(`updated:>=${sinceParam.slice(0, 10)}`);
+		qParts.push(`updated:>=${new Date(sinceParam).toISOString().slice(0, 10)}`);
 	}
 	if (createdRange) {
 		// Immutable partitioning field: each PR falls in exactly one window, so
@@ -1270,11 +1298,11 @@ async function emitPullRequestPage(
 		if (isBeforeSince(it.updated_at, sinceParam)) {
 			return { detailFailed, emitted, evaluated, latest, stop: true };
 		}
-		if (isAtOrAfterUntil(it.updated_at, until)) {
+		if (isAtOrAfterUntil(it.created_at, until)) {
 			continue;
 		}
 		const item = await emitPullRequestItem(ctx, it, latest);
-		({ latest } = item);
+		latest = cursorBeforeUntil(item.latest, until);
 		emitted += 1;
 		if (item.detailFailed) {
 			detailFailed += 1;
@@ -1535,11 +1563,11 @@ async function emitGistsPage(
 ): Promise<string | null | undefined> {
 	let latest = latestIn;
 	for (const g of items) {
-		if (isAtOrAfterUntil(g.updated_at, until)) {
+		if (isAtOrAfterUntil(g.created_at, until)) {
 			continue;
 		}
 		await ctx.emitRecord("gists", gistRecord(g));
-		latest = laterIso(latest, g.updated_at);
+		latest = cursorBeforeUntil(laterIso(latest, g.updated_at), until);
 	}
 	return latest;
 }
@@ -1580,7 +1608,10 @@ function emitEventsPage(
 			continue;
 		}
 		emitted.push(ctx.emitRecord("events", rec));
-		latest = laterIso(latest, e.created_at);
+		latest = cursorBeforeUntil(
+			laterIso(latest, e.created_at),
+			streamUntil(ctx, "events"),
+		);
 	}
 	return { droppedMalformed, emitted, latest, stop: false };
 }
@@ -1714,7 +1745,11 @@ export async function collectContributions(ctx: StreamCtx): Promise<void> {
 		| { last_date?: string }
 		| undefined;
 	const priorDate = contribState?.last_date;
-	const sinceDate = req?.time_range?.since?.slice(0, 10) || priorDate || null;
+	const rawSince = req?.time_range?.since;
+	const parsedSince = rawSince ? Date.parse(rawSince) : Number.NaN;
+	const sinceDate = !Number.isNaN(parsedSince)
+		? new Date(parsedSince).toISOString().slice(0, 10)
+		: priorDate || null;
 
 	const { data: me } = await gh<GitHubUser>(ctx, "/user");
 	const userId = String(me.id);

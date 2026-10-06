@@ -175,6 +175,8 @@ export async function buildPageshim({
 			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
 				manifest.version,
 			),
+			// The runtime reads each stream's consent_time_field by this name.
+			PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
 		},
 		plugins: [stubPlugin(stubbed, port)],
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the

@@ -184,6 +184,7 @@ import { savePlaywrightDownload } from "../../packages/polyfill-connectors/src/p
 import {
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
+	isoOrNull,
 	JSON_ENTRY_READ_CHUNK_UNITS,
 	type ManifestPartFile,
 	type ParsedExport,
@@ -1809,7 +1810,7 @@ export async function collectAnthropic({
 						}
 						const fields = topLevelStringFields(
 							prefix,
-							new Set(["uuid", "id", "updated_at"]),
+							new Set(["uuid", "id", "created_at", "updated_at"]),
 						);
 						if (!isWithinTimeWindow(fields.get("updated_at"))) return;
 						const id = fields.get("uuid") || fields.get("id");
@@ -1817,7 +1818,10 @@ export async function collectAnthropic({
 							droppedConversations += 1;
 							return;
 						}
-						if (isRecordSelected?.(CONVERSATIONS_STREAM, { id })) {
+						// The conversation's consent time, so a time-bounded run
+						// selects the same conversations here as at emission.
+						const create_time = isoOrNull(fields.get("created_at"));
+						if (isRecordSelected?.(CONVERSATIONS_STREAM, { id, create_time })) {
 							oversizedConversationIds.add(id);
 							oversizedConversations += 1;
 							return;

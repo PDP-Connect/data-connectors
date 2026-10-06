@@ -347,7 +347,6 @@ if (isMainModule(import.meta.url)) {
 		validateRecord,
 		retryablePattern:
 			/429|5\d\d|timeout|temporar|rate|unavailable|google_data_portability_api_error/i,
-		timeRangeField: "export_time",
 		collect: collectGoogleMapsDataPortability,
 	});
 }

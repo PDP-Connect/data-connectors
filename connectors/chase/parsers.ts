@@ -946,8 +946,12 @@ export function chooseActivity(
 		return {
 			activity: "date_range",
 			dateRange: {
-				from: timeRange.since?.slice(0, 10),
-				to: timeRange.until?.slice(0, 10) ?? runDate.slice(0, 10),
+				from: timeRange.since
+					? new Date(Date.parse(timeRange.since)).toISOString().slice(0, 10)
+					: undefined,
+				to: timeRange.until
+					? new Date(Date.parse(timeRange.until)).toISOString().slice(0, 10)
+					: runDate.slice(0, 10),
 			},
 		};
 	}
