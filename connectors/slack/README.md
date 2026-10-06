@@ -62,9 +62,11 @@ profiles — do not conflate them:
 the committed per-channel/legacy cursor into the dedup CTE, so the
 `MAX(CHUNK_ID) GROUP BY (CHANNEL_ID, TS)` aggregation only touches rows newer
 than the cursor instead of the whole (unbounded, un-indexed) `MESSAGE` table on
-every run. Every run reports per-phase timing and an archive size snapshot via
-`PROGRESS` (`slackdump-subprocess`, `archive-open`, `read-and-emit`, and
-`sqlite=…B uploads=…B`) so this bound is measurable and regressions are visible.
+every run. Every run reports per-phase timing and an archive size snapshot as
+`[slack-diagnostic]` stderr lines (`phase_timing` for `slackdump-subprocess`,
+`archive-open`, `read-and-emit`, and `archive_size` with `sqlite_bytes` and
+`uploads_bytes`) so this bound is measurable and regressions are visible. They
+are not `PROGRESS` text: hosts show that to the owner.
 
 **`SLACKDUMP_TIMEOUT_MS` bounds silence, not work.** It is a *stall* budget: it
 caps how long slackdump may go without observable progress, and every observed

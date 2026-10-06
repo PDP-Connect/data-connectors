@@ -20,6 +20,10 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import { resolveConnectorArtifactDir } from "../../packages/polyfill-connectors/src/connector-artifact-root.ts";
 import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import {
 	connectorEntrypoint,
 	manifestPath,
 	packageRoot as PACKAGE_ROOT,
@@ -297,6 +301,8 @@ test("runSlackdump: emits safe archive-growth progress while child is running", 
 	const fakeSlackdump = join(tmpDir, "fake-slackdump.mjs");
 	const sqlitePath = join(tmpDir, "slackdump.sqlite");
 	const progressEvents: Array<{ extra: unknown; message: string }> = [];
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
 	const priorBin = process.env.SLACKDUMP_BIN;
 	// Seed the initial snapshot. The child then grows only the WAL, so the
 	// assertion describes a genuine in-run archive advance instead of relying
@@ -331,6 +337,7 @@ setTimeout(() => process.exit(0), 100);
 			timeoutMs: 1000,
 		});
 	} finally {
+		setConnectorDiagnosticSink(undefined);
 		if (priorBin === undefined) {
 			delete process.env.SLACKDUMP_BIN;
 		} else {
@@ -340,11 +347,22 @@ setTimeout(() => process.exit(0), 100);
 	}
 
 	assert.ok(progressEvents.length >= 1, "expected archive-growth progress");
-	assert.match(
-		progressEvents[0]?.message ?? "",
-		/Slack slackdump resume progress:/,
+	assert.equal(
+		progressEvents[0]?.message,
+		"Downloading Slack history (under 1 MB so far)",
 	);
-	assert.match(progressEvents[0]?.message ?? "", /archive_bytes=/);
+	assertUserFacingProgress(
+		progressEvents.map(({ message }) => ({ type: "PROGRESS", message })),
+	);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.startsWith("[slack-diagnostic] slackdump_archive_progress ") &&
+				line.includes('"label":"resume"') &&
+				/"archive_bytes":\d+/.test(line),
+		),
+		"label and archive byte count moved to a diagnostic line",
+	);
 	assert.equal(
 		(progressEvents[0]?.extra as { stream?: unknown } | undefined)?.stream,
 		"messages",
@@ -1363,15 +1381,11 @@ test("slack archive resolves next to PDPP_DB_PATH, not HOME (survives container 
 
 		// The run log must state the durable root it chose, and must NOT claim the
 		// local-development fallback while running against a deployment path.
-		const progress = result.messages
-			.filter(
-				(message): message is Extract<EmittedMessage, { type: "PROGRESS" }> =>
-					message.type === "PROGRESS",
-			)
-			.map((message) => message.message)
-			.join("\n");
-		assert.match(progress, /Durable artifact root/);
-		assert.doesNotMatch(progress, /LOCAL-DEVELOPMENT FALLBACK/);
+		// The root is a diagnostic (path + env var names), not owner-facing text.
+		assert.match(result.stderr, /\[slack-diagnostic\] artifact_root /);
+		assert.match(result.stderr, /Durable artifact root/);
+		assert.doesNotMatch(result.stderr, /LOCAL-DEVELOPMENT FALLBACK/);
+		assertUserFacingProgress(result.messages);
 
 		// HOME stayed untouched — nothing durable was written to the layer that
 		// container replacement discards.

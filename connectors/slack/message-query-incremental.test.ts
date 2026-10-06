@@ -10,7 +10,8 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { buildMessageRowsQuery } from "./index.ts";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import { buildMessageRowsQuery, messageProgressLabel } from "./index.ts";
 
 interface Thresholds {
 	channelLastTs: Record<string, string>;
@@ -293,4 +294,22 @@ test("legacy-only cursor filters across all channels", () => {
 		"C2|250.000001|c2-250-v2-latest",
 	]);
 	db.close();
+});
+
+test("messageProgressLabel gives plain, correctly pluralized owner text", () => {
+	const labels = [
+		messageProgressLabel(1, null),
+		messageProgressLabel(3, "1700000000.000100"),
+		messageProgressLabel(0, "1700000000.000100"),
+		messageProgressLabel(0, null),
+	];
+	assert.deepEqual(labels, [
+		"Reading new messages from 1 channel",
+		"Reading new messages from 3 channels",
+		"Reading new messages since the last run",
+		"Reading all messages from Slack",
+	]);
+	assertUserFacingProgress(
+		labels.map((message) => ({ type: "PROGRESS", message })),
+	);
 });

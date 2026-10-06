@@ -37,6 +37,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
@@ -595,14 +596,27 @@ test("emitMessagesPass: priorTs triggers a progress emit tagged to the messages 
 	// future refactor that drops the extra={stream} tag lands as a failing
 	// test.
 	const { deps, progressCalls } = makeHarness();
-	await emitMessagesPass(deps, [makeRow({}, {})], "1699999999.000000");
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		await emitMessagesPass(deps, [makeRow({}, {})], "1699999999.000000");
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 
 	assert.equal(
 		progressCalls.length,
 		1,
 		"one progress emit on incremental runs",
 	);
-	assert.match(progressCalls[0]?.message ?? "", /incremental.*1699999999/);
+	assert.equal(
+		progressCalls[0]?.message,
+		"Reading messages since the last run",
+		"owner text carries no raw Slack timestamp",
+	);
+	assert.deepEqual(diagnostics, [
+		'[slack-diagnostic] incremental_message_filter {"prior_ts":"1699999999.000000"}',
+	]);
 	assert.equal(
 		progressCalls[0]?.extra?.stream,
 		"messages",
