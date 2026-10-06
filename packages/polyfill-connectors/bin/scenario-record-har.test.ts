@@ -424,7 +424,13 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 // tripping a fetch through a driver (browser-har-replay.ts's preload) that
 // was never built to intercept a plain Node-side fetch in the first place.
 test("scenario-verify --json: a recorded-browser scenario's committed claim carries no absolute path and no $HOME", async () => {
-	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-verify-claim-safety-"));
+	// Rooted at homedir(), NOT tmpdir() — the sanity check below needs this
+	// test's own scratch dir to actually sit under $HOME so the redaction
+	// path it's proving gets real work to do. tmpdir() only resolves under
+	// $HOME when $TMPDIR happens to be configured that way (a local
+	// developer-machine convention, not something a CI runner's default
+	// /tmp satisfies) — confirmed failing in CI before this fix.
+	const tmpDir = mkdtempSync(join(homedir(), ".scenario-verify-claim-safety-"));
 	const scenarioPath = join(tmpDir, "claim-safety.scenario.json");
 	const claimPath = join(tmpDir, "claim.json");
 	try {

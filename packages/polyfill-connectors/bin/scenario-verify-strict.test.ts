@@ -2229,8 +2229,13 @@ test("evaluateClaimEligibility: a recorded-http scenario NEVER carries the brows
 // `~/Downloads/strava-mock-export.zip` fixture used to seed #81's own
 // committed claim.
 test("scenario-verify --json: a filesystem-input connector's committed claim replaces the host path with $ENVVAR, never the real path or $HOME", () => {
+	// Rooted at homedir(), NOT tmpdir() — see bin/scenario-record-har.test.ts's
+	// identical fix for why: the sanity check just below needs this test's
+	// own scratch dir to genuinely sit under $HOME, which tmpdir() only
+	// guarantees on a machine whose $TMPDIR happens to be configured that
+	// way, not on a CI runner's default /tmp.
 	const tmpDir = mkdtempSync(
-		join(tmpdir(), "scenario-verify-fs-claim-safety-"),
+		join(homedir(), ".scenario-verify-fs-claim-safety-"),
 	);
 	const exportDir = join(tmpDir, "export");
 	const scenarioPath = join(tmpDir, "strava.scenario.json");
