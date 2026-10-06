@@ -1,6 +1,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+	isOutsideTimeRange,
+	parseIsoInstant,
+} from "../../packages/polyfill-connectors/src/time-range.ts";
+
 type TimeRange = { since?: string; until?: string };
 type ScopeEntry = { name: string; time_range?: TimeRange };
 
@@ -48,30 +53,21 @@ export function applyRequestedTimeRanges<T extends { time_range?: TimeRange }>(
 					`PageShim time_range for ${entry.name} must be an object.`,
 				);
 			const range = entry.time_range;
-			const validBound = (value: unknown) => {
-				if (
-					typeof value !== "string" ||
-					!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)
-				)
-					return false;
-				const timestamp = Date.parse(value);
-				return (
-					Number.isFinite(timestamp) &&
-					new Date(timestamp).toISOString().slice(0, 19) === value.slice(0, 19)
-				);
-			};
+			// RFC 3339 date-time with any time-zone offset (Collection Profile
+			// §5.1), checked by the runtime's own instant parser.
+			const validBound = (value: unknown) => parseIsoInstant(value) !== null;
 			if (
 				(range.since !== undefined && !validBound(range.since)) ||
 				(range.until !== undefined && !validBound(range.until)) ||
 				(range.since === undefined && range.until === undefined)
 			)
 				throw new Error(
-					`PageShim time_range for ${entry.name} must contain valid UTC ISO-8601 bounds.`,
+					`PageShim time_range for ${entry.name} must contain valid RFC 3339 date-time bounds with a time-zone offset.`,
 				);
 			if (
 				range.since !== undefined &&
 				range.until !== undefined &&
-				Date.parse(range.since) > Date.parse(range.until)
+				isOutsideTimeRange({ since: range.since }, range.until)
 			)
 				throw new Error(
 					`PageShim time_range for ${entry.name} has since after until.`,

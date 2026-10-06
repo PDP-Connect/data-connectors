@@ -69,6 +69,7 @@ import {
 } from "../../packages/polyfill-connectors/src/provider-budget.ts";
 import { createRepairBudget } from "../../packages/polyfill-connectors/src/repair-budget.ts";
 import { RunBudget } from "../../packages/polyfill-connectors/src/run-budget.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
@@ -3601,10 +3602,14 @@ async function walkConversationSearch(
 				const item = { ...raw, id } as ConversationListItem;
 				pageItems.push(item);
 				const updateIso = item.update_time ? tsToIso(item.update_time) : null;
+				// Compared as instants: a since bound can carry any offset.
+				const beforeSince =
+					requestedSince !== undefined &&
+					updateIso !== null &&
+					isOutsideTimeRange({ since: requestedSince }, updateIso);
 				const isOld =
 					updateIso !== null &&
-					((priorCursor !== null && updateIso <= priorCursor) ||
-						(requestedSince !== undefined && updateIso < requestedSince));
+					((priorCursor !== null && updateIso <= priorCursor) || beforeSince);
 				if (!isOld) responseEntirelyOld = false;
 				if (priorCursor && updateIso && updateIso <= priorCursor) {
 					continue;
@@ -3614,11 +3619,7 @@ async function walkConversationSearch(
 				if (requestedSince && updateIso === null) {
 					continue;
 				}
-				if (
-					requestedSince &&
-					updateIso !== null &&
-					updateIso < requestedSince
-				) {
+				if (beforeSince) {
 					continue;
 				}
 				items.push(item);
