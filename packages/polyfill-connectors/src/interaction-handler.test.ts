@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
 	__testing,
@@ -12,7 +13,8 @@ import {
 	type InteractionMessage,
 } from "./interaction-handler.ts";
 
-const { buildClickUrl, normalizeStatus, SECRET_FIELD_RE } = __testing;
+const { buildClickUrl, normalizeStatus, respondViaTerminal, SECRET_FIELD_RE } =
+	__testing;
 
 // Drop a synthetic response file before invoking the handler so waitForFile
 // resolves on the first poll.
@@ -258,6 +260,34 @@ describe("handleInteraction operator instructions", () => {
 		// The file-drop channel is still reachable, just as one pointer line.
 		assert.match(out, /answer below, or drop a response file at /);
 	});
+
+	// Regression: before this fix, an interactive run always said "answer
+	// below" regardless of `kind`, even though `respondViaTerminal` only
+	// understands `otp`/`credentials`/`manual_action`. A kind it doesn't
+	// understand must not make that promise.
+	test("an interactive run does not promise an inline answer for a kind the terminal path can't handle", async () => {
+		const request_id = withFreshRequestId("tty-unsupported");
+		dropResponse(request_id, { status: "cancelled" });
+		const out = await withIsTTY(true, () =>
+			captureStderr(async () => {
+				await handleInteraction(
+					{
+						kind: "some_future_kind",
+						message: "Test",
+						request_id,
+						timeout_seconds: 60,
+					},
+					{ connectorName: "test" },
+				);
+			}),
+		);
+
+		assert.ok(
+			!out.includes("answer below"),
+			`promised an inline answer for an unhandled kind:\n${out}`,
+		);
+		assert.match(out, /drop a response file at /);
+	});
 });
 
 describe("handleInteraction envelope shape", () => {
@@ -326,5 +356,92 @@ describe("handleInteraction envelope shape", () => {
 		};
 		const out = await handleInteraction(msg, { connectorName: "test" });
 		assert.ok(["success", "cancelled", "timeout"].includes(out.status));
+	});
+});
+
+// Regression for the live rehearsal bug: `respondViaTerminal` had no branch
+// for `manual_action`, so on a TTY the operator's Enter keypress went
+// nowhere — the file-drop path was the only way through, despite the
+// instructions above claiming otherwise. These exercise `respondViaTerminal`
+// directly with an injected stdin/stdout pair (same DI shape as
+// connector-exit.test.ts's PassThrough stdin) so the keystroke-to-response
+// path is actually driven, not just asserted by printed instructions.
+describe("respondViaTerminal manual_action", () => {
+	function fakeTty(): { input: PassThrough; output: PassThrough } {
+		const input = new PassThrough();
+		const output = new PassThrough();
+		output.on("data", () => {
+			/* drain writes (the prompt text) so they don't back up */
+		});
+		return { input, output };
+	}
+
+	test("pressing Enter answers success", async () => {
+		const io = fakeTty();
+		const pending = respondViaTerminal(
+			{ kind: "manual_action", message: "Sign in", request_id: "r-enter" },
+			io,
+		);
+		io.input.write("\n");
+		assert.deepEqual(await pending, { status: "success" });
+	});
+
+	test("typing 'cancel' answers with the protocol's cancelled status", async () => {
+		const io = fakeTty();
+		const pending = respondViaTerminal(
+			{ kind: "manual_action", message: "Sign in", request_id: "r-cancel" },
+			io,
+		);
+		io.input.write("cancel\n");
+		assert.deepEqual(await pending, { status: "cancelled" });
+	});
+
+	test("'cancel' is case- and whitespace-insensitive", async () => {
+		const io = fakeTty();
+		const pending = respondViaTerminal(
+			{ kind: "manual_action", message: "Sign in", request_id: "r-cancel-2" },
+			io,
+		);
+		io.input.write("  CANCEL  \n");
+		assert.deepEqual(await pending, { status: "cancelled" });
+	});
+
+	test("terminal success matches what a file-drop success response sends for this kind", async () => {
+		// The file-drop contract for manual_action: an owner (or another
+		// agent) writes `{"status":"success"}` — no `data`, since nothing
+		// downstream (connector-runtime.ts, browser-handoff.ts) reads `data`
+		// for this kind. The terminal path must send the same shape.
+		const request_id = withFreshRequestId("manual-filedrop");
+		dropResponse(request_id, { status: "success" });
+		const fileDropEnvelope = await handleInteraction(
+			{
+				kind: "manual_action",
+				message: "Sign in",
+				request_id,
+				timeout_seconds: 60,
+			},
+			{ connectorName: "test" },
+		);
+		assert.equal(fileDropEnvelope.status, "success");
+		assert.equal(fileDropEnvelope.data, undefined);
+
+		const io = fakeTty();
+		const pending = respondViaTerminal(
+			{ kind: "manual_action", message: "Sign in", request_id: "r-match" },
+			io,
+		);
+		io.input.write("\n");
+		assert.deepEqual(await pending, {
+			status: fileDropEnvelope.status,
+		});
+	});
+
+	test("an unsupported kind still returns null so the caller falls back to file drop", async () => {
+		const io = fakeTty();
+		const out = await respondViaTerminal(
+			{ kind: "some_future_kind", message: "?", request_id: "r-x" },
+			io,
+		);
+		assert.equal(out, null);
 	});
 });

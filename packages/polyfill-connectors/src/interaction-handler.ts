@@ -12,7 +12,9 @@
  *   1. File drop     — always available. Writes request to /tmp/pdpp-interaction-<id>.json;
  *                      polls for /tmp/pdpp-interaction-<id>.response.json.
  *                      Usable over SSH or from another agent.
- *   2. Terminal      — if stdin is a TTY, prompt inline for `credentials`/`otp`.
+ *   2. Terminal      — if stdin is a TTY, prompt inline for `credentials`/`otp`/
+ *                      `manual_action` (the last just waits on Enter/`cancel`,
+ *                      sent as the same response shape a file-drop would send).
  *   3. ntfy          — fire-and-forget notification with instructions.
  *
  * Timeout is taken from msg.timeout_seconds if present (clamped to [60, 3600]);
@@ -95,13 +97,37 @@ async function waitForFile(
 	throw new Error("interaction_timeout");
 }
 
-function promptStdin(question: string): Promise<string> {
+interface StdIO {
+	input: NodeJS.ReadableStream;
+	output: NodeJS.WritableStream;
+}
+
+const PROCESS_STDIO: StdIO = { input: process.stdin, output: process.stdout };
+
+function promptStdin(
+	question: string,
+	io: StdIO = PROCESS_STDIO,
+	signal?: AbortSignal,
+): Promise<string> {
 	return new Promise((resolve) => {
 		const rl = createInterface({
-			input: process.stdin,
-			output: process.stdout,
+			input: io.input,
+			output: io.output,
 		});
+		// `signal` lets a caller that raced this prompt against another
+		// surface (file drop) release the readline interface's listener on
+		// `io.input` once the race is decided in the other surface's favor.
+		// Without this, a prompt that loses the race on a real TTY leaves an
+		// open listener on real stdin for the rest of the process's life —
+		// harmless for the one-shot CLI today, but it would double-register
+		// on a connector's second manual_action/credentials prompt.
+		const onAbort = () => {
+			rl.close();
+			resolve("");
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
 		rl.question(question, (answer) => {
+			signal?.removeEventListener("abort", onAbort);
 			rl.close();
 			resolve(answer);
 		});
@@ -160,11 +186,18 @@ function promptStdinMasked(question: string): Promise<string> {
 	});
 }
 
+// Kinds `respondViaTerminal` can answer inline. Anything else falls back to
+// file drop so we don't fake a response the operator didn't intend. This set
+// also gates whether `handleInteraction` races the terminal path at all —
+// keep both in sync (the bug this fixes was `manual_action` missing from the
+// race's gate, which meant pressing Enter did nothing).
+const TERMINAL_HANDLED_KINDS = new Set(["otp", "credentials", "manual_action"]);
+
 async function respondViaTerminal(
 	msg: InteractionMessage,
+	io: StdIO = PROCESS_STDIO,
+	signal?: AbortSignal,
 ): Promise<InteractionResponseInner | null> {
-	// Only handle the simple/common kinds inline. Anything else falls back to
-	// file drop so we don't fake a response the user didn't intend.
 	if (msg.kind === "otp") {
 		const code = await promptStdinMasked(
 			`[interaction] OTP required (${msg.message || ""}): `,
@@ -182,6 +215,22 @@ async function respondViaTerminal(
 			data[key] = value;
 		}
 		return { status: "success", data };
+	}
+	if (msg.kind === "manual_action") {
+		// No fields to collect — the browser step itself is the answer. Send
+		// exactly what a file-drop response would send: `{ status: "success" }`
+		// (or "cancelled"), no `data`. See docs/spec/collection-profile.md §5.4:
+		// `data` may be present only for `success`, and nothing downstream
+		// (browser-handoff.ts, connector-runtime.ts) reads `data` for this kind.
+		const answer = await promptStdin(
+			"[interaction] Complete the step in the browser window, then press Enter to continue (or type 'cancel'): ",
+			io,
+			signal,
+		);
+		if (answer.trim().toLowerCase() === "cancel") {
+			return { status: "cancelled" };
+		}
+		return { status: "success" };
 	}
 	return null;
 }
@@ -251,12 +300,18 @@ export async function handleInteraction(
 	// echo-example line printed directly above a live prompt, with no
 	// indication either channel would work). Keep the full instructions for
 	// non-TTY runs, where file drop is the only way in, and a single pointer
-	// line otherwise.
+	// line otherwise. Only promise an inline answer for kinds
+	// `respondViaTerminal` actually handles — anything else really does need
+	// the file drop, so don't tell the operator to "answer below" when there
+	// is no below to answer.
 	const interactive = process.stdin.isTTY === true;
+	const terminalHandled = TERMINAL_HANDLED_KINDS.has(msg.kind);
 	const instructions = interactive
 		? [
 				`[interaction] ${connectorName} needs ${msg.kind}: ${msg.message || "(no message)"}`,
-				`[interaction] answer below, or drop a response file at ${respPath}`,
+				terminalHandled
+					? `[interaction] answer below, or drop a response file at ${respPath}`
+					: `[interaction] no terminal prompt for ${msg.kind}; drop a response file at ${respPath}`,
 			]
 		: [
 				`[interaction] ${connectorName} needs ${msg.kind}: ${msg.message || "(no message)"}`,
@@ -282,9 +337,17 @@ export async function handleInteraction(
 	}).catch((): undefined => undefined);
 
 	// Terminal path if interactive — fires concurrently with file-drop watch.
+	// `terminalAbort` releases the readline interface's listener on stdin if
+	// file drop wins the race instead — otherwise a losing prompt leaves a
+	// listener on real stdin for the rest of the process's life (harmless for
+	// a single interaction, but it would collide with a second prompt later
+	// in the same run).
+	const terminalAbort = new AbortController();
 	const terminalPromise: Promise<InteractionResponseInner | null> =
-		process.stdin.isTTY && (msg.kind === "otp" || msg.kind === "credentials")
-			? respondViaTerminal(msg).catch((): null => null)
+		process.stdin.isTTY && terminalHandled
+			? respondViaTerminal(msg, PROCESS_STDIO, terminalAbort.signal).catch(
+					(): null => null,
+				)
 			: new Promise<InteractionResponseInner | null>(() => {
 					/* never resolves */
 				});
@@ -300,6 +363,8 @@ export async function handleInteraction(
 			status: "timeout",
 			error: { code: "timeout", message },
 		};
+	} finally {
+		terminalAbort.abort();
 	}
 	await ntfyPromise;
 	await unlink(reqPath).catch((): undefined => undefined);
@@ -332,4 +397,9 @@ export async function handleInteraction(
 	return out;
 }
 
-export const __testing = { buildClickUrl, normalizeStatus, SECRET_FIELD_RE };
+export const __testing = {
+	buildClickUrl,
+	normalizeStatus,
+	respondViaTerminal,
+	SECRET_FIELD_RE,
+};

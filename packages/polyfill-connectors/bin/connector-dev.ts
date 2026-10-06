@@ -99,9 +99,9 @@
  *      — `data.code` covers `otp`'s conventional single-field schema without
  *      requiring the caller to know the exact schema key.
  *   2. TTY fallback — `src/interaction-handler.ts`'s `handleInteraction`,
- *      which prompts inline on a readline TTY for `otp`/`credentials` (and
- *      falls back to file-drop + ntfy for any kind, including
- *      `manual_action`).
+ *      which prompts inline on a readline TTY for `otp`/`credentials`/
+ *      `manual_action` (the last just waits on Enter, or `cancel`), and
+ *      falls back to file-drop + ntfy for any other kind.
  *   3. Non-TTY with no matching answer — fails loudly: writes a `cancelled`
  *      INTERACTION_RESPONSE naming the unanswered prompt so the subprocess
  *      terminates cleanly instead of hanging on file-drop indefinitely, and
