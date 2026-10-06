@@ -22,6 +22,10 @@ export interface OrderStub {
 	orderDateRaw: string | null;
 	orderId: string;
 	orderUrl: string;
+	/** Distinct product ASINs the search rows for this order link. When
+	 *  present, every one must appear on the order-detail page: a matching
+	 *  count alone does not show that no product is missing. */
+	searchProductIds?: readonly string[];
 }
 
 /** One line item as it appears on the Amazon order-detail page for a Whole

@@ -105,6 +105,27 @@ test("an integer-quantity in-store row is one search row, not three", () => {
 	assert.equal(connector.orderDetailCountsMatch(stub(A, 4), items), false);
 });
 
+test("equal units do not hide a search product the detail page lacks", () => {
+	const { items } = parsers.parseOrderDetailDom(FIXTURE);
+	const first = items[0]?.productId;
+	assert.ok(first);
+	const all = items.map((item) => item.productId).filter((id) => id) as string[];
+	assert.equal(
+		connector.orderDetailCountsMatch(
+			{ ...stub(A, 3), searchProductIds: all },
+			items,
+		),
+		true,
+	);
+	assert.equal(
+		connector.orderDetailCountsMatch(
+			{ ...stub(A, 3), searchProductIds: [...all, "B0MISSING00"] },
+			items,
+		),
+		false,
+	);
+});
+
 test("a count mismatch on order 2 delivers all 3 orders and reports one progress warning", async () => {
 	const harness = await runOrders([stub(A, 3), stub(B, 9), stub(C, 3)], {
 		[A]: FIXTURE,

@@ -18564,7 +18564,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.19",
+				"version": "0.3.20",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {

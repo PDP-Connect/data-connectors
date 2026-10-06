@@ -27,6 +27,7 @@ const ORDERED_ON_RE = /Ordered on\s+(.+)/i;
 const ASIN_FROM_HREF_RE = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/;
 const REF_PARAM_RE = /[?&]ref_=[^&]*/;
 const CUSTOMER_ID_RE = /"customerId":"([A-Z0-9]+)"/;
+const NAV_SIGN_IN_RE = /^\s*hello,\s*sign\s+in\s*$/i;
 const WHITESPACE_RE = /\s+/g;
 const QTY_RE = /(?:Qty|Quantity)[:\s]*(\d+(?:\.\d+)?)/i;
 const PRICE_RE = /\$(\d+(?:\.\d{2})?)/;
@@ -54,13 +55,28 @@ const IN_STORE_QTY_RE =
 export const ORDER_DETAIL_READY_SELECTOR =
 	'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"], #f3_food_ItemList, #line-items, [id$="-item-grid-row"]';
 
-const ORDER_DETAIL_EVIDENCE_RE =
-	/data-component=["'](?:purchasedItemsRightGrid|cancelled)["']|id=["'](?:f3_food_ItemList|line-items)["']|id=["'][^"']+-item-grid-row["']/i;
+const ORDER_DETAIL_EVIDENCE_SELECTOR =
+	'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], #f3_food_ItemList, #line-items, [id$="-item-grid-row"]';
 
-/** True when the page carries item, cancellation or in-store item-list
- *  evidence, so an empty parse is a real result and not a blank page. */
+/** True when the page is a recognised order-detail page: it renders an item
+ *  grid, a cancellation marker, an in-store item list or a delivery item list.
+ *  A hidden element, or one inside a hidden ancestor, is not rendered and is
+ *  not evidence. This is not proof that the items were read. A container with
+ *  no item rows proves nothing; see `isCancelledOrderDetail` for the one
+ *  explicit no-items explanation. */
 export function hasOrderDetailEvidence(html: string): boolean {
-	return ORDER_DETAIL_EVIDENCE_RE.test(html);
+	const { document } = parseHTML(html);
+	return renderedFirst(document, ORDER_DETAIL_EVIDENCE_SELECTOR) !== null;
+}
+
+/** True when the order-detail page renders Amazon's own cancellation marker
+ *  as a visible element (a marker inside a script string, or one the markup
+ *  hides, does not count). A cancelled order never renders an item grid, so it
+ *  is the only page where zero item rows is the source's statement and not a
+ *  missing render. */
+export function isCancelledOrderDetail(html: string): boolean {
+	const { document } = parseHTML(html);
+	return renderedFirst(document, '[data-component="cancelled"]') !== null;
 }
 
 /** Units on an order detail, comparable to the search page's row count: a
@@ -118,15 +134,126 @@ function textOf(el: Element | null | undefined): string {
  */
 export function parseAmazonProfileDom(html: string): WholeFoodsProfile {
 	const { document } = parseHTML(html);
+	const greeting = textOf(
+		document.querySelector("#nav-link-accountList-nav-line-1"),
+	);
 	const name =
-		textOf(document.querySelector("#nav-link-accountList-nav-line-1"))
-			.replace(/^hello,\s*/i, "")
-			.trim() || null;
+		greeting && !NAV_SIGN_IN_RE.test(greeting)
+			? greeting.replace(/^hello,\s*/i, "").trim() || null
+			: null;
 	const customerId = CUSTOMER_ID_RE.exec(html)?.[1] ?? null;
 	return { customerId, name };
 }
 
 // ─── Order search / list page ────────────────────────────────────────────
+
+// Text Amazon's order pages render for an account with no matching orders:
+// the year filter's `<span class="num-orders">0 orders</span>` (captured live
+// 2026-04-23, scrubbed), and the empty-history copy the Amazon connector
+// already treats as its empty state.
+const EMPTY_ORDERS_TEXT_RE =
+	/^\s*0\s+orders\b|\b(?:no|0)\s+(?:orders|results)\b|you have not placed any orders|no orders found|looks like you didn['\u2019]t place an order/i;
+const EMPTY_STATE_SCOPE_SELECTOR =
+	".num-orders, .hzsearch-results-summary, .your-orders-content-container, #ordersContainer";
+const EMPTY_STATE_ELEMENT_SELECTOR = '#no-orders, [class*="no-orders" i]';
+
+const HIDDEN_STYLE_RE = /display\s*:\s*none|visibility\s*:\s*hidden/i;
+// Amazon's own hiding classes.
+const HIDDEN_CLASS_RE = /(?:^|\s)(?:a-hidden|aok-hidden|hidden)(?:\s|$)/i;
+
+/** True when the element's own markup hides it: the `hidden` attribute,
+ *  `aria-hidden="true"`, an inline `display:none`/`visibility:hidden`, or one
+ *  of Amazon's hiding classes. Stylesheet rules cannot be seen here, so this is
+ *  the evidence the markup itself carries. */
+function isMarkedHidden(el: Element): boolean {
+	return (
+		el.hasAttribute("hidden") ||
+		el.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+		HIDDEN_STYLE_RE.test(el.getAttribute("style") ?? "") ||
+		HIDDEN_CLASS_RE.test(el.getAttribute("class") ?? "")
+	);
+}
+
+/** Elements whose descendants a scripting-enabled browser never renders:
+ *  Linkedom still exposes them as ordinary elements. */
+const INERT_TAGS = new Set(["NOSCRIPT", "SCRIPT", "STYLE", "TEMPLATE"]);
+
+/** True when the element and every ancestor are rendered. This is the one
+ *  visibility test for every piece of source evidence (empty state,
+ *  cancellation, pagination, result and item rows): an element counts as
+ *  observed only when nothing in its ancestry hides it or makes it inert. */
+function isRendered(el: Element): boolean {
+	for (let node: Element | null = el; node; node = node.parentElement) {
+		if (INERT_TAGS.has(node.tagName.toUpperCase()) || isMarkedHidden(node)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/** `querySelectorAll` limited to rendered elements. */
+function renderedAll<T extends Element = HTMLElement>(
+	root: ParentNode,
+	selector: string,
+): T[] {
+	return [...root.querySelectorAll<T>(selector)].filter(isRendered);
+}
+
+/** `querySelector` limited to rendered elements. */
+function renderedFirst<T extends Element = HTMLElement>(
+	root: ParentNode,
+	selector: string,
+): T | null {
+	return renderedAll<T>(root, selector)[0] ?? null;
+}
+
+/**
+ * True when an order-search page with no result rows shows the source's own
+ * empty-state renderer: a rendered empty-orders element, or an order count or
+ * summary element whose text says zero. Text in a script, style or template
+ * (a class name in a bundle, an inert string) is not a rendered empty state,
+ * nor is an element the markup hides (`hidden`, `aria-hidden`, inline
+ * `display:none`, `a-hidden`), and neither is the bare search scaffold
+ * (`#searchOrdersInput`) that a page shows before its results load.
+ */
+export function hasOrderSearchEmptyState(html: string): boolean {
+	const { document } = parseHTML(html);
+	for (const inert of document.querySelectorAll(
+		"script, style, template, noscript",
+	)) {
+		inert.remove();
+	}
+	// Removing a hidden element removes its descendants, so no text under a
+	// hidden ancestor survives either.
+	for (const el of [...document.querySelectorAll<HTMLElement>("*")]) {
+		if (isMarkedHidden(el)) {
+			el.remove();
+		}
+	}
+	for (const el of document.querySelectorAll<HTMLElement>(
+		EMPTY_STATE_ELEMENT_SELECTOR,
+	)) {
+		if (textOf(el).trim().length > 0) {
+			return true;
+		}
+	}
+	for (const el of document.querySelectorAll<HTMLElement>(
+		EMPTY_STATE_SCOPE_SELECTOR,
+	)) {
+		if (EMPTY_ORDERS_TEXT_RE.test(textOf(el))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Union of two product-ASIN lists, in first-seen order. */
+export function mergeProductIds(
+	left: readonly string[] | undefined,
+	right: readonly string[],
+): string[] {
+	return [...new Set([...(left ?? []), ...right])];
+}
 
 /**
  * Parse one page of Amazon's Whole-Foods-filtered order search results
@@ -136,6 +263,7 @@ export function parseAmazonProfileDom(html: string): WholeFoodsProfile {
  */
 export function parseOrderSearchPageDom(html: string): {
 	hasNextPage: boolean;
+	isLastPage: boolean;
 	rowSignature: string;
 	selectedPage: number | null;
 	stubs: OrderStub[];
@@ -147,10 +275,9 @@ export function parseOrderSearchPageDom(html: string): {
 	// large order's rows continue across several pages, so a page with no new
 	// order id is normal. Repetition is detected on the row signature instead.
 	const rowKeys: string[] = [];
-	for (const grid of document.querySelectorAll<HTMLElement>(
-		".a-fixed-left-grid",
-	)) {
-		const link = grid.querySelector<HTMLAnchorElement>(
+	for (const grid of renderedAll(document, ".a-fixed-left-grid")) {
+		const link = renderedFirst<HTMLAnchorElement>(
+			grid,
 			'a[title="View order details"], a[href*="order-details"]',
 		);
 		const href = link?.getAttribute("href") ?? "";
@@ -158,15 +285,22 @@ export function parseOrderSearchPageDom(html: string): {
 		if (!orderId) {
 			continue;
 		}
-		rowKeys.push(
-			[...grid.querySelectorAll<HTMLAnchorElement>("a[href]")]
-				.map((a) => a.getAttribute("href") ?? "")
-				.join(" "),
-		);
+		const rowHrefs = [
+			...grid.querySelectorAll<HTMLAnchorElement>("a[href]"),
+		].map((a) => a.getAttribute("href") ?? "");
+		rowKeys.push(rowHrefs.join(" "));
+		const rowProductIds = rowHrefs.flatMap((rowHref) => {
+			const asin = ASIN_FROM_HREF_RE.exec(rowHref)?.[1];
+			return asin ? [asin] : [];
+		});
 		if (seen.has(orderId)) {
 			const existing = stubs.find((stub) => stub.orderId === orderId);
 			if (existing) {
 				existing.expectedItemCount += 1;
+				existing.searchProductIds = mergeProductIds(
+					existing.searchProductIds,
+					rowProductIds,
+				);
 			}
 			continue;
 		}
@@ -190,16 +324,29 @@ export function parseOrderSearchPageDom(html: string): {
 			orderDateRaw,
 			orderId,
 			orderUrl: absoluteAmazonUrl(href),
+			searchProductIds: mergeProductIds(undefined, rowProductIds),
 		});
 	}
-	const hasNextPage = Boolean(
-		document.querySelector("ul.a-pagination li.a-last a"),
-	);
+	// Pagination counts only when it is rendered: hidden markup is not the
+	// source's statement about where the list ends.
+	const hasNextPage =
+		renderedFirst(document, "ul.a-pagination li.a-last a") !== null;
+	// Amazon renders the final page's "Next" control as a disabled `li`. That
+	// control, not the absence of a next link, is the source's last-page signal.
+	const isLastPage =
+		!hasNextPage &&
+		renderedFirst(document, "ul.a-pagination li.a-last.a-disabled") !== null;
 	const selectedText = textOf(
-		document.querySelector<HTMLElement>("ul.a-pagination li.a-selected"),
+		renderedFirst(document, "ul.a-pagination li.a-selected"),
 	);
 	const selectedPage = /^\d+$/.test(selectedText) ? Number(selectedText) : null;
-	return { hasNextPage, rowSignature: rowKeys.join("\n"), selectedPage, stubs };
+	return {
+		hasNextPage,
+		isLastPage,
+		rowSignature: rowKeys.join("\n"),
+		selectedPage,
+		stubs,
+	};
 }
 
 // ─── Order detail page ────────────────────────────────────────────────────
@@ -236,7 +383,8 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 	}
 	const items: OrderDetailItem[] = [];
 	const seenHrefs = new Set<string>();
-	for (const itemRow of document.querySelectorAll<HTMLElement>(
+	for (const itemRow of renderedAll(
+		document,
 		'[data-component="purchasedItemsRightGrid"]',
 	)) {
 		const title = itemRow.querySelector<HTMLElement>(
@@ -244,16 +392,19 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		);
 		const anchor =
 			itemRow.querySelector<HTMLAnchorElement>(
-			'a[href*="/dp/"], a[href*="/gp/product/"]',
-			) ??
-			title?.querySelector<HTMLAnchorElement>("a");
+				'a[href*="/dp/"], a[href*="/gp/product/"]',
+			) ?? title?.querySelector<HTMLAnchorElement>("a");
 		const href = anchor?.getAttribute("href") ?? "";
 		const sourceName = textOf(anchor ?? title).trim();
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		if (productId && sourceName.length < 3) {
 			throw new Error("Whole Foods order item has no source product name");
 		}
-		const name = sourceName || "Unknown Whole Foods item";
+		// A grid container with no title and no link is an empty shell, not a
+		// row: counting it would fabricate an item and hide that nothing was read.
+		if (!sourceName) {
+			continue;
+		}
 		// Keep an ASIN-less row for its parent order's item count. The legacy
 		// order_items schema requires a source product id, so the collector
 		// reports it and omits only that item record.
@@ -271,7 +422,7 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		);
 		items.push({
 			imageUrl: img?.getAttribute("src") ?? null,
-			name,
+			name: sourceName,
 			productId,
 			productUrl: productId ? absoluteAmazonUrl(href) : null,
 			quantity: quantity ? Number(quantity) : 1,
@@ -291,15 +442,14 @@ export function parseOrderDetailDom(html: string): OrderDetail {
  * an order_items record without a source ASIN.
  */
 function parseDeliveryOrderItems(document: Document): OrderDetailItem[] | null {
-	const container = document.querySelector<HTMLElement>("#line-items");
-	const rows = container
-		? container.querySelectorAll<HTMLElement>('[id$="-item-grid-row"]')
-		: document.querySelectorAll<HTMLElement>('[id$="-item-grid-row"]');
+	const container = renderedFirst(document, "#line-items");
+	const rows = renderedAll(container ?? document, '[id$="-item-grid-row"]');
 	if (!container && rows.length === 0) {
 		return null;
 	}
 
-	return [...rows].map((row) => {
+	const items: OrderDetailItem[] = [];
+	for (const row of rows) {
 		const anchor = row.querySelector<HTMLAnchorElement>('a[href*="/dp/"]');
 		const href = anchor?.getAttribute("href") ?? "";
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
@@ -307,20 +457,25 @@ function parseDeliveryOrderItems(document: Document): OrderDetailItem[] | null {
 		if (productId && !linkedName) {
 			throw new Error("Whole Foods delivery item has no source product name");
 		}
-		const rowText = textOf(row).replace(WHITESPACE_RE, " ");
+		const rowText = textOf(row).replace(WHITESPACE_RE, " ").trim();
+		// An empty row element is a shell, not an item.
+		if (!(linkedName || rowText)) {
+			continue;
+		}
 		const quantity = QTY_RE.exec(rowText)?.[1];
 		const price = PRICE_RE.exec(rowText)?.[1];
 		const image = row.querySelector<HTMLImageElement>("img");
 
-		return {
+		items.push({
 			imageUrl: image?.getAttribute("src") ?? null,
 			name: linkedName || "Unlinked Whole Foods item",
 			productId,
 			productUrl: productId ? absoluteAmazonUrl(href) : null,
 			quantity: quantity ? Number(quantity) : 1,
 			unitPriceDollars: price ? Number(price) : null,
-		};
-	});
+		});
+	}
+	return items;
 }
 
 function detailOrderDate(document: Document): string | null {
@@ -347,17 +502,13 @@ function detailOrderDate(document: Document): string | null {
  * no id is derived from the name.
  */
 function parseInStoreItems(document: Document): OrderDetailItem[] | null {
-	const container = document.querySelector<HTMLElement>(
-		IN_STORE_ITEM_LIST_SELECTOR,
-	);
+	const container = renderedFirst(document, IN_STORE_ITEM_LIST_SELECTOR);
 	if (!container) {
 		return null;
 	}
 	const items: OrderDetailItem[] = [];
 	const seenHrefs = new Set<string>();
-	for (const row of container.querySelectorAll<HTMLElement>(
-		".a-row.a-spacing-base",
-	)) {
+	for (const row of renderedAll(container, ".a-row.a-spacing-base")) {
 		const titleColumn = row.querySelector<HTMLElement>(
 			".a-column.a-span10 .a-column.a-span10",
 		);
