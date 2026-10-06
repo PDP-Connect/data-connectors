@@ -19,8 +19,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { after, test } from "node:test";
 import { runCollectorConnector } from "@pdpp/collector-runtime";
-import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { connectorEntrypoint } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { resolveExecutionRoot } from "../../packages/polyfill-connectors/src/execution-root.ts";
 import { scanLocalJsonl } from "../../packages/polyfill-connectors/src/local-jsonl-cursor.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
@@ -115,6 +116,7 @@ async function run(input: {
 	projects: string;
 	state?: Record<string, unknown>;
 	streams?: string[];
+	since?: string;
 }) {
 	const result = await runConnectorProtocolSubprocess({
 		allowFailedDone: true,
@@ -128,6 +130,7 @@ async function run(input: {
 			scope: {
 				streams: (input.streams ?? ["sessions", "messages"]).map((name) => ({
 					name,
+					...(input.since ? { time_range: { since: input.since } } : {}),
 				})),
 			},
 			...(input.state ? { state: input.state } : {}),
@@ -147,7 +150,13 @@ async function run(input: {
 		(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
 			message.type === "RECORD",
 	);
-	return { code: result.code, messages: result.messages, records, states };
+	return {
+		code: result.code,
+		messages: result.messages,
+		records,
+		stderr: result.stderr,
+		states,
+	};
 }
 
 async function scanLines(
@@ -174,6 +183,21 @@ test("M1: unchanged rich cursor fast-skips without a transcript replay", async (
 		state: { messages: first.states.messages, sessions: first.states.sessions },
 	});
 	assert.equal(second.records.length, 0);
+});
+
+test("a date-only limit is described without claiming selected folders", async () => {
+	const source = await makeSource();
+	const result = await run({ ...source, since: "2000-01-01T00:00:00.000Z" });
+	const texts = result.messages.flatMap((message) =>
+		message.type === "PROGRESS" ? [message.message] : [],
+	);
+	assert.ok(
+		texts.includes(
+			"Limiting the Claude Code scan to your selected date range or folders",
+		),
+		String(texts),
+	);
+	assertUserFacingProgress(result.messages);
 });
 
 test("M2: an mtime-only touch verifies the prefix and emits no transcript record", async () => {
@@ -1112,18 +1136,38 @@ test("partial rich session cursor state rebuilds all current contributors", asyn
 test("aggregate-only local JSONL telemetry contains counts but no source identifiers", async () => {
 	const source = await makeSource();
 	const result = await run(source);
-	const telemetry = result.messages.find(
-		(message) =>
-			message.type === "PROGRESS" &&
-			message.message.startsWith("Claude Code local_jsonl "),
+	const progress = result.messages.filter(
+		(message) => message.type === "PROGRESS",
 	);
-	assert.ok(telemetry && telemetry.type === "PROGRESS");
-	assert.match(
-		telemetry.message,
-		/fast_skip_files=\d+ verified_noop_files=\d+ append_files=\d+ rebuild_files=\d+ session_rebuild_all=\d+ prefix_bytes_hashed=\d+ tail_bytes_parsed=\d+ transcript_records_emitted=\d+ cursor_state_bytes=\d+/,
+	assert.ok(
+		progress.some((message) =>
+			/^Checked \d+ conversation files; \d+ had new activity$/.test(
+				message.message,
+			),
+		),
 	);
-	assert.equal(telemetry.message.includes(source.top), false);
-	assert.equal(telemetry.message.includes(source.subagent), false);
+	assertUserFacingProgress(progress);
+	const line = result.stderr
+		.split("\n")
+		.find((l) =>
+			l.startsWith("[claude_code-diagnostic] local_jsonl_telemetry "),
+		);
+	assert.ok(line, "counters belong in a diagnostic line");
+	for (const key of [
+		"fast_skip_files",
+		"verified_noop_files",
+		"append_files",
+		"rebuild_files",
+		"session_rebuild_all",
+		"prefix_bytes_hashed",
+		"tail_bytes_parsed",
+		"transcript_records_emitted",
+		"cursor_state_bytes",
+	]) {
+		assert.match(line, new RegExp(`"${key}":\\d+`));
+	}
+	assert.equal(line.includes(source.top), false);
+	assert.equal(line.includes(source.subagent), false);
 });
 
 test("M14: removed sources are pruned from rich and dual-written mtime state", async () => {
@@ -1623,19 +1667,19 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 			);
 		}
 		if (transcriptStreams.includes("sessions")) {
-				const sessionsOnly = await run({
-					...source,
-					streams: ["sessions"],
-					state: {
-						sessions: recovered.states.sessions,
-						messages: denied.states.messages,
-					},
-				});
+			const sessionsOnly = await run({
+				...source,
+				streams: ["sessions"],
+				state: {
+					sessions: recovered.states.sessions,
+					messages: denied.states.messages,
+				},
+			});
 			assert.equal(
 				sessionsOnly.messages.filter((m) => m.type === "SKIP_RESULT").length,
 				0,
 			);
-			}
+		}
 		const noop = await run({ ...source, streams, state: recovered.states });
 		assert.equal(noop.records.filter((r) => r.stream === "messages").length, 0);
 		const freshRecovered = await run({
@@ -1691,7 +1735,7 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 		await mkdir(healthyProject);
 		const healthyInitial = `${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`;
 		await writeFile(healthyPath, healthyInitial);
-			const streams = [...transcriptStreams];
+		const streams = [...transcriptStreams];
 		const initial = await run({ ...source, streams });
 		const original = await readFile(source.top, "utf8");
 		await writeFile(
@@ -1771,7 +1815,7 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 					after.session_aggregates?.[SESSION_ID],
 					before.session_aggregates?.[SESSION_ID],
 				);
-			}
+		}
 		assert.deepEqual(
 			denied.records
 				.filter((r) => r.stream === "messages")
@@ -1821,7 +1865,7 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 		}
 		await chmod(blockedProject, 0o700);
 		const recovered = await run({ ...source, streams, state: retried.states });
-			assert.deepEqual(
+		assert.deepEqual(
 			recovered.records
 				.filter((r) => r.stream === "messages")
 				.map((r) => r.data.id),
@@ -1895,7 +1939,7 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 		const healthyPath = join(healthyProject, `${healthySession}.jsonl`);
 		const healthy = `${transcriptLine("top-3", "2026-07-21T00:03:00Z", { sessionId: healthySession })}\n`;
 		await writeFile(healthyPath, healthy);
-			const streams = [...transcriptStreams];
+		const streams = [...transcriptStreams];
 		const initial = await run({ ...source, streams });
 		const lineGap = {
 			path: hiddenPath,
@@ -1920,15 +1964,15 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 					message.type === "SKIP_RESULT" && message.stream === stream,
 			);
-			const assertLineGap = (result: Awaited<ReturnType<typeof run>>) => {
-				for (const stream of transcriptStreams) {
-					const gaps = gapsFor(result, stream).filter(
-						(gap) => gap.reason === "malformed_jsonl_line",
-					);
-					assert.equal(gaps.length, 1);
-					assert.deepEqual(gaps[0]?.diagnostics, lineGap);
-				}
-			};
+		const assertLineGap = (result: Awaited<ReturnType<typeof run>>) => {
+			for (const stream of transcriptStreams) {
+				const gaps = gapsFor(result, stream).filter(
+					(gap) => gap.reason === "malformed_jsonl_line",
+				);
+				assert.equal(gaps.length, 1);
+				assert.deepEqual(gaps[0]?.diagnostics, lineGap);
+			}
+		};
 		assertLineGap(initial);
 		const healthyAppend = "00000000-0000-4000-8000-000000000008";
 		const siblingAppend = "00000000-0000-4000-8000-000000000009";
@@ -2056,7 +2100,7 @@ test("transcript symlinks report targets without following outside sources and r
 		source.subagent,
 		`${await readFile(source.subagent, "utf8")}not-json\n`,
 	);
-		const streams = ["sessions", "messages"];
+	const streams = ["sessions", "messages"];
 	const initial = await run({ ...source, streams });
 	await rename(source.top, join(source.claudeHome, "saved-top.jsonl"));
 	await rename(
@@ -2103,7 +2147,7 @@ test("transcript symlinks report targets without following outside sources and r
 						JSON.stringify({ path, target_path }),
 				),
 			);
-			assert.ok(
+		assert.ok(
 			result.messages.some(
 				(message) =>
 					message.type === "SKIP_RESULT" &&
@@ -2204,7 +2248,7 @@ test("dangling transcript and session-directory symlinks report gaps on every ru
 	const missingSession = join(external, "missing-session");
 	await symlink(missingTranscript, danglingTranscript);
 	await symlink(relative(project, missingSession), danglingSession);
-		const streams = ["sessions", "messages"];
+	const streams = ["sessions", "messages"];
 	const assertGaps = (result: Awaited<ReturnType<typeof run>>) => {
 		for (const stream of ["sessions", "messages"]) {
 			const gaps = result.messages.filter(
@@ -2227,8 +2271,8 @@ test("dangling transcript and session-directory symlinks report gaps on every ru
 				assert.equal(gap.reason, "symlink_skipped");
 				assert.deepEqual(gap.diagnostics, { path, target_path });
 			}
-			}
-		};
+		}
+	};
 	const initial = await run({ ...source, streams });
 	assert.deepEqual(
 		initial.records

@@ -50,6 +50,7 @@ import {
 	readEnumerationScope,
 	scopeBoundsEnumeration,
 } from "../../packages/polyfill-connectors/src/collection-scope-enumeration.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type CollectContext,
 	type RecordData,
@@ -878,9 +879,12 @@ async function parseJsonlFile(
 	for await (const obj of iterJsonlLines(path)) {
 		lineCount += 1;
 		if (!buildOnly && lineCount % LINE_PROGRESS_INTERVAL === 0) {
+			connectorDiagnostic("claude_code", "lines_parsed", {
+				lines_parsed: lineCount,
+			});
 			await emit({
 				type: "PROGRESS",
-				message: `Claude Code phase=emit pass=emit lines_parsed=${lineCount}`,
+				message: `Reading a large Claude Code conversation (${lineCount} lines so far)`,
 			});
 		}
 		const messageCountBeforeLine = obs.messageCount;
@@ -1322,11 +1326,16 @@ async function processJsonlFile({
 		args.newMtimes[path] = mtime;
 		return;
 	}
+	connectorDiagnostic("claude_code", "file_parse_started", {
+		file_size_mb: (st.size / BYTES_PER_MB).toFixed(1),
+		pass: args.buildOnly ? "index" : "emit",
+	});
 	await args.emit({
 		type: "PROGRESS",
-		message: `Claude Code phase=${args.buildOnly ? "index" : "emit"} pass=${
-			args.buildOnly ? "index" : "emit"
-		} file_size_mb=${(st.size / BYTES_PER_MB).toFixed(1)}`,
+		message:
+			st.size < BYTES_PER_MB / 10
+				? "Reading a Claude Code conversation file"
+				: `Reading a ${(st.size / BYTES_PER_MB).toFixed(1)} MB Claude Code conversation file`,
 	});
 	// A subagent file (forcedSessionId set) carries its own stable identity in
 	// its basename (e.g. "agent-abc.jsonl" -> "agent-abc"), independent of any
@@ -1539,9 +1548,12 @@ export async function scanProjectDirs(
 		return;
 	}
 	const totalProjectDirs = projectDirs.length;
+	connectorDiagnostic("claude_code", "project_dirs_found", {
+		total_project_dirs: totalProjectDirs,
+	});
 	await args.emit({
 		type: "PROGRESS",
-		message: `Claude Code phase=index pass=index total_project_dirs=${totalProjectDirs}`,
+		message: `Found ${totalProjectDirs} Claude Code projects`,
 	});
 	for (const projectDir of projectDirs) {
 		await scanProjectDir(projectDir, args);
@@ -1908,19 +1920,26 @@ async function emitLocalJsonlTelemetry(
 	emit: CollectContext["emit"],
 	telemetry: LocalJsonlTelemetry,
 ): Promise<void> {
+	connectorDiagnostic("claude_code", "local_jsonl_telemetry", {
+		append_files: telemetry.appendFiles,
+		cursor_state_bytes: telemetry.cursorStateBytes,
+		fast_skip_files: telemetry.fastSkipFiles,
+		prefix_bytes_hashed: telemetry.prefixBytesHashed,
+		rebuild_files: telemetry.rebuildFiles,
+		session_rebuild_all: telemetry.sessionRebuildAll,
+		tail_bytes_parsed: telemetry.tailBytesParsed,
+		transcript_records_emitted: telemetry.transcriptRecordsEmitted,
+		verified_noop_files: telemetry.verifiedNoopFiles,
+	});
+	const checked =
+		telemetry.fastSkipFiles +
+		telemetry.verifiedNoopFiles +
+		telemetry.appendFiles +
+		telemetry.rebuildFiles;
+	const changed = telemetry.appendFiles + telemetry.rebuildFiles;
 	await emit({
 		type: "PROGRESS",
-		message:
-			"Claude Code local_jsonl " +
-			`fast_skip_files=${telemetry.fastSkipFiles} ` +
-			`verified_noop_files=${telemetry.verifiedNoopFiles} ` +
-			`append_files=${telemetry.appendFiles} ` +
-			`rebuild_files=${telemetry.rebuildFiles} ` +
-			`session_rebuild_all=${telemetry.sessionRebuildAll} ` +
-			`prefix_bytes_hashed=${telemetry.prefixBytesHashed} ` +
-			`tail_bytes_parsed=${telemetry.tailBytesParsed} ` +
-			`transcript_records_emitted=${telemetry.transcriptRecordsEmitted} ` +
-			`cursor_state_bytes=${telemetry.cursorStateBytes}`,
+		message: `Checked ${checked} conversation files; ${changed} had new activity`,
 	});
 }
 
@@ -2410,10 +2429,12 @@ async function runSkillsAndCommands(
 		});
 	} catch {
 		skillsScanned = false;
+		connectorDiagnostic("claude_code", "scan_skipped", {
+			stream: "skills",
+		});
 		await emit({
 			type: "PROGRESS",
-			message:
-				"Claude Code phase=index pass=index stream=skills scan_skipped=true",
+			message: "Could not read Claude Code skills; skipped",
 		});
 	}
 	try {
@@ -2426,10 +2447,12 @@ async function runSkillsAndCommands(
 		});
 	} catch {
 		slashCommandsScanned = false;
+		connectorDiagnostic("claude_code", "scan_skipped", {
+			stream: "slash_commands",
+		});
 		await emit({
 			type: "PROGRESS",
-			message:
-				"Claude Code phase=index pass=index stream=slash_commands scan_skipped=true",
+			message: "Could not read Claude Code slash commands; skipped",
 		});
 	}
 	try {
@@ -2442,10 +2465,12 @@ async function runSkillsAndCommands(
 		});
 	} catch {
 		usageScanned = false;
+		connectorDiagnostic("claude_code", "scan_skipped", {
+			stream: "usage",
+		});
 		await emit({
 			type: "PROGRESS",
-			message:
-				"Claude Code phase=index pass=index stream=usage scan_skipped=true",
+			message: "Could not read Claude Code usage data; skipped",
 		});
 	}
 	if (requested.has("skills")) {
@@ -2713,11 +2738,14 @@ if (isMainModule(import.meta.url)) {
 				// already threads through. Read once here and applied at ENUMERATION so a
 				// bounded run does not open files it was never asked to collect.
 				if (scopeBoundsEnumeration(enumerationScope)) {
+					const boundedRoots = enumerationScope?.source_roots?.length ?? 0;
+					connectorDiagnostic("claude_code", "enumeration_bounded", {
+						roots: boundedRoots,
+					});
 					await emit({
 						type: "PROGRESS",
-						message: `Claude Code phase=index pass=index enumeration_bounded=true roots=${
-							enumerationScope?.source_roots?.length ?? 0
-						}`,
+						message:
+							"Limiting the Claude Code scan to your selected date range or folders",
 					});
 				}
 				const typedState = state as ClaudeCodeState;
@@ -3215,9 +3243,15 @@ if (isMainModule(import.meta.url)) {
 				if (captureLedger.size > 0) {
 					// Visible, and retried: these files' mtimes were withheld above, so
 					// the next run re-examines exactly them.
+					connectorDiagnostic("claude_code", "artifact_bodies_outstanding", {
+						artifact_bodies_outstanding: captureLedger.size,
+					});
 					await emit({
 						type: "PROGRESS",
-						message: `Claude Code artifact_bodies_outstanding=${captureLedger.size}`,
+						message:
+							captureLedger.size === 1
+								? "1 Claude Code attachment could not be saved this time; it will be retried next run"
+								: `${captureLedger.size} Claude Code attachments could not be saved this time; they will be retried next run`,
 					});
 				}
 				if (captureLedger.pendingUpload > 0) {
@@ -3225,9 +3259,14 @@ if (isMainModule(import.meta.url)) {
 					// upstream, because no upload transport is wired yet. Reported so
 					// the partial state is legible rather than passing as complete:
 					// local retention is done, remote delivery is still owed.
+					connectorDiagnostic(
+						"claude_code",
+						"artifact_bodies_awaiting_upload",
+						{ artifact_bodies_awaiting_upload: captureLedger.pendingUpload },
+					);
 					await emit({
 						type: "PROGRESS",
-						message: `Claude Code artifact_bodies_awaiting_upload=${captureLedger.pendingUpload}`,
+						message: `${captureLedger.pendingUpload} Claude Code ${captureLedger.pendingUpload === 1 ? "attachment" : "attachments"} saved locally, waiting to upload`,
 					});
 				}
 			} finally {
