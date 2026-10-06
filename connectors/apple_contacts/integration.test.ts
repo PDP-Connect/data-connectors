@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	packageRoot as CWD,
 	connectorEntrypoint,
@@ -85,6 +86,19 @@ test("apple_contacts integration: discovers, syncs via sync-collection, and emit
 		const done = result.messages.findLast((m) => m.type === "DONE");
 		assert.ok(done && done.type === "DONE");
 		assert.equal(done.status, "succeeded");
+		assertUserFacingProgress(result.messages);
+		assert.match(
+			result.stderr,
+			/\[apple_contacts-diagnostic\] address_book_synced \{"path":"sync_collection","contacts":\d+\}/,
+		);
+		assert.match(
+			result.stderr,
+			/\[apple_contacts-diagnostic\] group_inventory_checked \{"server_group_vcards":\d+,"groups_emitted":\d+\}/,
+		);
+		assert.match(
+			result.stderr,
+			/\[apple_contacts-diagnostic\] carddav_discovery_start/,
+		);
 
 		const addressBooks = recordsOf(result.messages, "address_books");
 		assert.equal(addressBooks.length, 1);
@@ -285,6 +299,11 @@ test("apple_contacts integration: falls back to bounded full snapshot when sync-
 		const done = result.messages.findLast((m) => m.type === "DONE");
 		assert.ok(done && done.type === "DONE");
 		assert.equal(done.status, "succeeded");
+		assertUserFacingProgress(result.messages);
+		assert.match(
+			result.stderr,
+			/\[apple_contacts-diagnostic\] address_book_synced \{"path":"bounded_full_snapshot","contacts":1\}/,
+		);
 
 		const addressBooks = recordsOf(result.messages, "address_books");
 		assert.equal(addressBooks[0]?.supports_sync_collection, false);
@@ -632,6 +651,18 @@ test("apple_contacts integration: a full_refresh run re-enumerates and proves co
 			contactsCoverage && contactsCoverage.type === "DETAIL_COVERAGE",
 			"a full_refresh run must re-establish the contacts boundary and claim coverage",
 		);
+		assert.match(
+			refreshed.stderr,
+			/\[apple_contacts-diagnostic\] address_book_reenumerate \{"reason":"full_refresh_requested"\}/,
+		);
+		assert.ok(
+			refreshed.messages.some(
+				(m) =>
+					m.type === "PROGRESS" &&
+					m.message === "Re-reading this address book from scratch",
+			),
+		);
+		assertUserFacingProgress(refreshed.messages);
 		// The claim must be the real inventory (both contacts), not a `considered: 0`
 		// artifact of a change feed — that distinction is the whole point.
 		assert.equal(contactsCoverage.considered, 2);
@@ -948,13 +979,19 @@ test("apple_contacts integration: an unparseable vCard resource is counted in co
 		const sawParseFailureNotice = progressMessages.some(
 			(m) =>
 				m.type === "PROGRESS" &&
-				m.message.toLowerCase().includes("unparseable"),
+				m.message === "Some contacts could not be read and were skipped",
 		);
 		assert.equal(
 			sawParseFailureNotice,
 			true,
 			"an honest shape/parse-failure signal must be emitted",
 		);
+		// The covered/considered numbers moved from the text to a diagnostic line.
+		assert.match(
+			result.stderr,
+			/\[apple_contacts-diagnostic\] unparseable_vcards \{"covered":1,"considered":2\}/,
+		);
+		assertUserFacingProgress(result.messages);
 	} finally {
 		await server.close();
 	}
