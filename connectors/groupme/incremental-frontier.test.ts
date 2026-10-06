@@ -40,6 +40,10 @@
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	CollectContext,
 	EmittedMessage,
@@ -753,6 +757,46 @@ test("deleted/invalid cursor fallback: a 400 on the FIRST resumed fetch falls ba
 			"a fresh cursor is established from the fallback walk",
 		);
 	} finally {
+		stub.restore();
+	}
+});
+
+test("deleted/invalid cursor fallback: progress is plain and the group id and cursor go to a diagnostic line", async () => {
+	const stub = stubFirstFetchStatus(400);
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const cursor = openFingerprintCursor(new Map());
+		const { emitRecord } = makeHarness();
+		const progress: Array<{ type: "PROGRESS"; message: string }> = [];
+		await collectGroupMessages(
+			TOKEN,
+			cursor,
+			undefined,
+			undefined,
+			(message) => {
+				progress.push({ type: "PROGRESS", message });
+				return Promise.resolve();
+			},
+			emitRecord,
+			null,
+			{ "group-1": "m-deleted-cursor" },
+		);
+
+		assert.ok(
+			progress.some(
+				(m) => m.message === "Re-reading a group's full history from the start",
+			),
+		);
+		assertUserFacingProgress(progress);
+		const line = lines.find((l) =>
+			l.startsWith("[groupme-diagnostic] resume_cursor_rejected "),
+		);
+		assert.ok(line, lines.join("\n"));
+		assert.ok(line.includes('"group_id":"group-1"'));
+		assert.ok(line.includes('"cursor":"m-deleted-cursor"'));
+	} finally {
+		setConnectorDiagnosticSink(undefined);
 		stub.restore();
 	}
 });

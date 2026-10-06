@@ -61,6 +61,7 @@
 import { createHash } from "node:crypto";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { SaxesParser } from "saxes";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
 	buildDetailCoverageMessage,
@@ -954,8 +955,11 @@ async function fetchPaginatedList<T extends { id?: string | null }>(
 	const seenIds = new Set<string>();
 	let page = 1;
 
+	const listLabel = path === "/chats" ? "direct chats" : "groups";
+
 	for (;;) {
-		await progressWithSignals(`Fetching ${path}`, {
+		connectorDiagnostic("groupme", "list_fetch", { path, page, stream });
+		await progressWithSignals(`Fetching your GroupMe ${listLabel}`, {
 			stream,
 			phase: "fetch",
 			page,
@@ -977,7 +981,7 @@ async function fetchPaginatedList<T extends { id?: string | null }>(
 			seenIds.add(itemId);
 			items.push(item);
 		}
-		await progressWithSignals(`Fetched ${path} page`, {
+		await progressWithSignals(`Fetched a page of ${listLabel}`, {
 			stream,
 			phase: "page",
 			page,
@@ -1330,12 +1334,16 @@ class NonProgressError extends Error {
  * unchanged content still no-ops through the fingerprint cursor).
  */
 class InvalidResumeCursorError extends Error {
+	readonly groupId: string;
+	readonly cursor: string;
 	constructor(groupId: string, cursor: string, cause: unknown) {
 		super(
 			`groupme: group ${groupId}'s persisted cursor ${cursor} was rejected by the provider — falling back to a full backward walk for this group`,
 			{ cause },
 		);
 		this.name = "InvalidResumeCursorError";
+		this.groupId = groupId;
+		this.cursor = cursor;
 	}
 }
 
@@ -1944,8 +1952,13 @@ async function runCollectionPass(
 		if (error instanceof Error && error.message === "groupme_auth_failed") {
 			throw error;
 		}
+		connectorDiagnostic("groupme", "stream_fetch_error", {
+			stream,
+			label: errorLabel,
+			error: error instanceof Error ? error.message : String(error),
+		});
 		await progressWithSignals(
-			`Error fetching ${errorLabel}: ${error instanceof Error ? error.message : String(error)}`,
+			`Could not fetch GroupMe ${errorLabel}; will retry`,
 			{
 				stream,
 				phase: "error",
@@ -2368,10 +2381,18 @@ async function collectOneGroupMessages(
 			if (!(error instanceof InvalidResumeCursorError)) {
 				throw error;
 			}
-			await progressWithSignals(error.message, {
-				stream: "group_messages",
-				phase: "cursor_reset",
+			connectorDiagnostic("groupme", "resume_cursor_rejected", {
+				group_id: error.groupId,
+				cursor: error.cursor,
+				message: error.message,
 			});
+			await progressWithSignals(
+				"Re-reading a group's full history from the start",
+				{
+					stream: "group_messages",
+					phase: "cursor_reset",
+				},
+			);
 			// Falls through to the same backward-to-natural-end walk a cold start
 			// uses — bounded to exactly one fallback attempt for this group, no
 			// retry loop. If this ALSO fails, it propagates normally and the
