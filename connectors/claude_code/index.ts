@@ -67,8 +67,8 @@ import {
 	buildLocalSourceInventory,
 	type KnownLocalStore,
 	listDirectoryInventory,
-	localInventoryDiagnosticsSummary,
 	openInventoryFingerprintCursor,
+	reportLocalInventory,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
 import {
 	ATTACHMENT_PREVIEW_CHARS,
@@ -2231,7 +2231,9 @@ async function scanChildSource(input: {
 		},
 	});
 	observeLocalJsonlScan(input.telemetry, result);
-	return { cursor: { ...result.cursor, current_session_id: observation.sessionId } };
+	return {
+		cursor: { ...result.cursor, current_session_id: observation.sessionId },
+	};
 }
 
 async function emitChangedSessions(input: {
@@ -2701,8 +2703,9 @@ if (isMainModule(import.meta.url)) {
 				);
 				await emit({
 					type: "PROGRESS",
-					message: localInventoryDiagnosticsSummary({
+					message: reportLocalInventory({
 						inventory,
+						source: "claude_code",
 						toolLabel: "Claude Code",
 					}),
 				});

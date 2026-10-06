@@ -94,8 +94,8 @@ import {
 	buildLocalSourceInventory,
 	type KnownLocalStore,
 	listDirectoryInventory,
-	localInventoryDiagnosticsSummary,
 	openInventoryFingerprintCursor,
+	reportLocalInventory,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
 import { CodexArtifactLedger } from "./artifact-ledger.ts";
 import {
@@ -3092,8 +3092,9 @@ async function collect({
 	);
 	await emit({
 		type: "PROGRESS",
-		message: localInventoryDiagnosticsSummary({
+		message: reportLocalInventory({
 			inventory,
+			source: "codex",
 			toolLabel: "Codex",
 		}),
 	});

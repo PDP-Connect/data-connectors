@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
@@ -81,11 +82,8 @@ test("claude_code inventory streams emit safe metadata, one STATE per stream, an
 
 	const start = {
 		scope: {
-				streams: [
-					{ name: "file_history" },
-					{ name: "cache_inventory" },
-				],
-			},
+			streams: [{ name: "file_history" }, { name: "cache_inventory" }],
+		},
 		type: "START" as const,
 	};
 	const result = await runConnectorProcess({
@@ -122,11 +120,7 @@ test("claude_code inventory streams emit safe metadata, one STATE per stream, an
 	assert(
 		!records.some((record) => JSON.stringify(record).includes("secret-token")),
 	);
-	assert(
-		!records.some(
-			(record) => record.data.relative_path === "auth.json",
-		),
-	);
+	assert(!records.some((record) => record.data.relative_path === "auth.json"));
 
 	const states = result.messages.filter(
 		(msg): msg is Extract<EmittedMessage, { type: "STATE" }> =>
@@ -189,12 +183,12 @@ test("claude_code context_mode is diagnostics-only, not a requestable stream", a
 
 	const result = await runConnectorProcess({
 		env: { CLAUDE_CODE_HOME: claudeHome },
-			start: {
-				scope: {
-					streams: [{ name: "context_mode" }],
-				},
-				type: "START",
+		start: {
+			scope: {
+				streams: [{ name: "context_mode" }],
 			},
+			type: "START",
+		},
 	});
 
 	assert.equal(result.exitCode, 0);
@@ -213,10 +207,23 @@ test("claude_code context_mode is diagnostics-only, not a requestable stream", a
 	assert(
 		progress.some(
 			(msg) =>
-				msg.message.startsWith(
-					"Claude Code phase=index pass=index local_inventory_stores=10 status_inventory_only=1 status_missing=9 stores=",
-				) && msg.message.includes("context_mode:inventory_only"),
+				msg.message ===
+				"Checked 10 places Claude Code keeps data (1 found, 9 missing)",
 		),
+	);
+	const inventoryLine = result.stderr
+		.split("\n")
+		.find((line) =>
+			line.startsWith("[claude_code-diagnostic] local_inventory "),
+		);
+	assert(inventoryLine, "inventory counters belong in a diagnostic line");
+	assert(inventoryLine.includes('"local_inventory_stores":10'));
+	assert(inventoryLine.includes('"status_inventory_only":1'));
+	assert(inventoryLine.includes('"status_missing":9'));
+	assert(inventoryLine.includes("context_mode:inventory_only"));
+	// Other connector-specific PROGRESS lines are converted in a separate change.
+	assertUserFacingProgress(
+		progress.filter((msg) => msg.message.startsWith("Checked ")),
 	);
 	assert(
 		!progress.some((msg) => msg.message.includes("do-not-emit")),

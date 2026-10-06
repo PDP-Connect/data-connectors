@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { type Dirent, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { connectorDiagnostic } from "./connector-diagnostic.ts";
 import type { RecordData } from "./connector-runtime.ts";
 import {
 	type FingerprintCursor,
@@ -606,23 +607,42 @@ export interface InventoryPlan {
 	recordsByStream: Map<string, InventoryRecord[]>;
 }
 
-export function localInventoryDiagnosticsSummary(input: {
+/**
+ * Report the result of a local-source inventory scan.
+ *
+ * The per-store status counters and store ids go to the run log as a
+ * `[<source>-diagnostic] local_inventory` line. The return value is the
+ * plain-English PROGRESS text for the owner; the caller emits it.
+ */
+export function reportLocalInventory(input: {
 	inventory: Pick<InventoryPlan, "coverage">;
+	/** Connector name used as the diagnostic source, for example `codex`. */
+	source: string;
+	/** Product name shown to the owner, for example `Codex`. */
 	toolLabel: string;
 }): string {
-	const counts = new Map<string, number>();
+	const statusCounts: Record<string, number> = {};
 	for (const record of input.inventory.coverage) {
 		const key = `status_${record.status}`;
-		counts.set(key, (counts.get(key) ?? 0) + 1);
+		statusCounts[key] = (statusCounts[key] ?? 0) + 1;
 	}
-	const parts = [...counts.entries()]
-		.sort(([left], [right]) => left.localeCompare(right))
-		.map(([key, count]) => `${key}=${count}`);
 	const stores = input.inventory.coverage
 		.map((record) => `${record.store}:${record.status}`)
 		.sort()
 		.join(",");
-	return `${input.toolLabel} phase=index pass=index local_inventory_stores=${input.inventory.coverage.length} ${parts.join(" ")} stores=${stores}`;
+	const sortedCounts = Object.fromEntries(
+		Object.entries(statusCounts).sort(([left], [right]) =>
+			left.localeCompare(right),
+		),
+	);
+	connectorDiagnostic(input.source, "local_inventory", {
+		local_inventory_stores: input.inventory.coverage.length,
+		...sortedCounts,
+		stores,
+	});
+	const total = input.inventory.coverage.length;
+	const missing = statusCounts.status_missing ?? 0;
+	return `Checked ${total} places ${input.toolLabel} keeps data (${total - missing} found, ${missing} missing)`;
 }
 
 function pathHash(tool: string, relativePath: string): string {

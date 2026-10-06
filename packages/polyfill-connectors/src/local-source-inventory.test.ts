@@ -16,6 +16,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "./connector-diagnostic.ts";
+import {
 	buildCoverageDiagnosticsStateSnapshot,
 	buildDerivedCoverageRecord,
 	describeDerivedCoverageReason,
@@ -25,6 +29,7 @@ import {
 	localCoverageStreamsMissingDescriptors,
 	openInventoryFingerprintCursor,
 	parseCoverageDiagnosticsStateSnapshot,
+	reportLocalInventory,
 } from "./local-source-inventory.ts";
 import { readPolyfillManifests } from "./manifest-registry.ts";
 
@@ -677,4 +682,32 @@ test("coverage STATE parser still fails closed when a required store is missing"
 	});
 	assert.equal(parsed.hasCommittedSnapshot, false);
 	assert.equal(parsed.missingStores.length, 1);
+});
+
+test("reportLocalInventory returns plain progress and writes counters to the diagnostic line", () => {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const message = reportLocalInventory({
+			inventory: {
+				coverage: [
+					{ store: "sessions", status: "collected" },
+					{ store: "memories", status: "inventory_only" },
+					{ store: "rules", status: "missing" },
+				] as never,
+			},
+			source: "codex",
+			toolLabel: "Codex",
+		});
+		assert.equal(
+			message,
+			"Checked 3 places Codex keeps data (2 found, 1 missing)",
+		);
+		assertUserFacingProgress([{ message, type: "PROGRESS" }]);
+		assert.deepEqual(lines, [
+			'[codex-diagnostic] local_inventory {"local_inventory_stores":3,"status_collected":1,"status_inventory_only":1,"status_missing":1,"stores":"memories:inventory_only,rules:missing,sessions:collected"}',
+		]);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 });
