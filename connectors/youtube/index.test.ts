@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { collectYoutubeBrowser, resolveWatchedDate } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -235,45 +239,51 @@ test("history is the first 50 visible records in page order with no timestamp cu
 			: undefined;
 	const history: Record<string, unknown>[] = [];
 	const progress: string[] = [];
-	await collectYoutubeBrowser({
-		page: page as never,
-		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
-		emitRecord: async (_stream, data) => {
-			history.push(data);
-		},
-		emit: async () => undefined,
-		progress: async (message) => {
-			progress.push(message);
-		},
-	});
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([
+				["watch_history", { name: "watch_history" }],
+			]) as never,
+			emitRecord: async (_stream, data) => {
+				history.push(data);
+			},
+			emit: async () => undefined,
+			progress: async (message) => {
+				progress.push(message);
+			},
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 	assert.equal(history.length, 50);
 	assert.equal(history[0]?.video_id, "video0");
 	assert.equal(history[49]?.video_id, "video49");
 	assert.equal(history[49]?.position, 49);
 	assert.equal("watched_at" in history[0]!, false);
 
-	const coverage = progress.find((message) =>
-		message.startsWith("youtube.coverage "),
-	);
-	assert.ok(coverage);
-	const payload = JSON.parse(coverage.slice("youtube.coverage ".length)) as {
-		streams: Array<Record<string, unknown>>;
-	};
-	assert.deepEqual(payload.streams, [
-		{
-			stream: "watch_history",
-			requested: true,
-			source: "browser",
-			emitted_count: 50,
-			time_range_requested: false,
-			enumerated_count: 50,
-			limit: 50,
-			skipped_unresolved_date_count: 0,
-		},
-	]);
+	const prefix = "[youtube-diagnostic] coverage ";
+	const coverageLines = diagnostics.filter((line) => line.startsWith(prefix));
+	assert.equal(coverageLines.length, 1);
+	assert.deepEqual(JSON.parse(coverageLines[0]!.slice(prefix.length)), {
+		stream: "watch_history",
+		requested: true,
+		source: "browser",
+		emitted_count: 50,
+		time_range_requested: false,
+		enumerated_count: 50,
+		limit: 50,
+		skipped_unresolved_date_count: 0,
+	});
 	assert.doesNotMatch(
-		coverage,
+		diagnostics.join("\n"),
 		/Real video title|Creator|youtube\.com|abc123XYZ0/,
+	);
+	assert.deepEqual(progress, ["Finished YouTube: 50 items saved"]);
+	assertUserFacingProgress(
+		progress.map((message) => ({ type: "PROGRESS", message })),
 	);
 });
 
