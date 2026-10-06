@@ -89,10 +89,18 @@ test("C-T4 the workflow matrix and the allowlist module agree", () => {
   assert.match(gate, /CONNECTOR_TEST_SHARD: \$\{\{ matrix\.shard \}\}/);
   assert.match(gate, /node --test scripts\/connector-publish-build\.test\.mjs/);
   const aggregate = gate.slice(gate.indexOf("  artifact-contract:"));
-  assert.match(aggregate, /needs: \[prepare, artifact-builds\]/);
+  assert.match(aggregate, /needs: \[prepare, artifact-builds, publish-version-bump-check\]/);
   assert.match(aggregate, /if: \$\{\{ always\(\) \}\}/);
   assert.match(aggregate, /BUILD_RESULT: \$\{\{ needs\.artifact-builds\.result \}\}/);
-  assert.match(aggregate, /run: test "\$BUILD_RESULT" = success/);
+  assert.match(aggregate, /test "\$BUILD_RESULT" = success/);
   assert.doesNotMatch(aggregate, /continue-on-error:/);
   assert.doesNotMatch(gate, /(?:id-token|packages): write|oras push|oras attach|cosign sign/);
+  // The version-bump dry run is PR-only (a push to main has no PR base/head)
+  // and must stay as powerless as the rest of this gate.
+  const bumpCheck = gate.slice(gate.indexOf("  publish-version-bump-check:"), gate.indexOf("  artifact-contract:"));
+  assert.match(bumpCheck, /if: \$\{\{ github\.event_name == 'pull_request' \}\}/);
+  assert.match(bumpCheck, /fetch-depth: 0/);
+  assert.match(bumpCheck, /node scripts\/check-publish-version-bumps\.mjs/);
+  assert.match(aggregate, /BUMP_CHECK_RESULT: \$\{\{ needs\.publish-version-bump-check\.result \}\}/);
+  assert.match(aggregate, /success\|skipped/);
 });

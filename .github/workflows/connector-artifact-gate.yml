@@ -116,17 +116,61 @@ jobs:
           path: ${{ runner.temp }}/content-check/report-shard-${{ matrix.shard }}.json
           if-no-files-found: warn
 
+  publish-version-bump-check:
+    name: Publish version-bump dry run
+    # #342 merged a shared polyfill-connectors runtime change into main
+    # without bumping every connector it re-shipped, and nothing caught it
+    # until the next push to main refused to publish (see
+    # scripts/check-publish-version-bumps.mjs). Run the identical selection
+    # rule here, at PR time, against the PR's merge-base and head, so that
+    # situation fails review instead of merging green. Only meaningful on a
+    # pull request: a push to main has no PR base/head to diff.
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Needs the merge-base commit and every commit back to it (git
+          # show on arbitrary ancestors), which a shallow checkout lacks.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: packages/polyfill-connectors/package.json
+
+      - name: Run the publish-selection refusal rule against this PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          echo "merge-base: $MERGE_BASE"
+          BEFORE_SHA="$MERGE_BASE" AFTER_SHA="$HEAD_SHA" node scripts/check-publish-version-bumps.mjs
+
   artifact-contract:
     # Preserve the existing required check as the aggregate for all new shards.
-    needs: [prepare, artifact-builds]
+    needs: [prepare, artifact-builds, publish-version-bump-check]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Require every artifact shard to pass
+      - name: Require every artifact shard to pass, and the version-bump dry run to pass or be skipped
         env:
           BUILD_RESULT: ${{ needs.artifact-builds.result }}
-        run: test "$BUILD_RESULT" = success
+          BUMP_CHECK_RESULT: ${{ needs.publish-version-bump-check.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+
+          case "$BUMP_CHECK_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::publish-version-bump-check reported '$BUMP_CHECK_RESULT' - expected 'success' or 'skipped'"
+              exit 1
+              ;;
+          esac
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -143,7 +187,7 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Publish allowlist and workflow contract tests
-        run: node --test scripts/connector-publish-allowlist.test.mjs scripts/select-publish-target.test.mjs scripts/select-publish-connectors.test.mjs
+        run: node --test scripts/connector-publish-allowlist.test.mjs scripts/select-publish-target.test.mjs scripts/select-publish-connectors.test.mjs scripts/check-publish-version-bumps.test.mjs
 
       - name: Artifact contract tests, including the negative controls
         run: node --test scripts/connector-oci-artifact.test.mjs
