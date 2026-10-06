@@ -69,6 +69,8 @@ test("routed browser collection emits seven schema-valid streams without a Takeo
 				records.set(stream, [...(records.get(stream) ?? []), data]);
 			},
 			emit: async () => undefined,
+			// The routed pages carry no source end evidence, so lists report failures.
+			reportStreamFailure: async () => undefined,
 			progress: async () => undefined,
 		});
 		for (const stream of streams)
@@ -169,6 +171,7 @@ test("history waits for delayed client DOM before recording", async () => {
 		});
 		const records: Record<string, unknown>[] = [];
 		const skips: unknown[] = [];
+		const failures: unknown[] = [];
 		await collectYoutubeBrowser({
 			page: page as never,
 			requested: new Map([
@@ -180,11 +183,68 @@ test("history waits for delayed client DOM before recording", async () => {
 			emit: async (message) => {
 				skips.push(message);
 			},
+			reportStreamFailure: async (stream, _message, options) => {
+				failures.push([stream, options]);
+			},
 			progress: async () => undefined,
 		});
 		assert.equal(records.length, 1);
 		assert.equal(records[0]?.video_title, "Delayed title");
-		assert.equal(skips.length, 0);
+		// The page shows no end of the list: a stream failure, not a completion.
+		assert.deepEqual(failures, [["watch_history", { retryable: true }]]);
+		assert.deepEqual(skips, []);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("real page data with an empty renderer completes history; a sign-in renderer fails it", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const run = async (text: string) => {
+			const page = await browser.newPage();
+			await page.route("https://www.youtube.com/**", async (route) => {
+				await route.fulfill({
+					contentType: "text/html",
+					body: `<html><body><script>var ytInitialData = ${JSON.stringify({ contents: { messageRenderer: { text: { runs: [{ text }] } } } })};</script></body></html>`,
+				});
+			});
+			const records: Record<string, unknown>[] = [];
+			const messages: Record<string, unknown>[] = [];
+			await collectYoutubeBrowser({
+				page: page as never,
+				requested: new Map([
+					["watch_history", { name: "watch_history" }],
+				]) as never,
+				emitRecord: async (_stream, data) => {
+					records.push(data);
+				},
+				emit: async (message) => {
+					messages.push(message as Record<string, unknown>);
+				},
+				reportStreamFailure: async (stream, message) => {
+					messages.push({
+						type: "SKIP_RESULT",
+						stream,
+						reason: "stream_collection_failed",
+						message,
+					});
+				},
+				progress: async () => undefined,
+			});
+			assert.equal(records.length, 0);
+			return messages.map((message) => [
+				message.type,
+				message.stream,
+				message.reason,
+			]);
+		};
+		assert.deepEqual(await run("You haven't watched any videos yet"), [
+			["STATE", "watch_history", undefined],
+		]);
+		assert.deepEqual(await run("Sign in to see your watch history"), [
+			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
+		]);
 	} finally {
 		await browser.close();
 	}
@@ -241,13 +301,14 @@ test("profile accepts page-header title after empty channel headings", async () 
 			const url = new URL(route.request().url());
 			let body = "";
 			if (url.pathname === "/")
-				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+				body =
+					'<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
 			else if (url.pathname === "/@owner")
 				body =
 					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1></h1><h1> </h1><yt-page-header-view-model><div class="yt-page-header-view-model__page-header-title"><h1><span>Real Owner</span></h1></div></yt-page-header-view-model>';
 			else if (url.pathname === "/@owner/about")
 				body =
-					'<ytd-channel-about-metadata-renderer><span>Joined Jan 3, 2020</span><span>1.2K subscribers</span></ytd-channel-about-metadata-renderer>';
+					"<ytd-channel-about-metadata-renderer><span>Joined Jan 3, 2020</span><span>1.2K subscribers</span></ytd-channel-about-metadata-renderer>";
 			await route.fulfill({
 				status: body ? 200 : 404,
 				contentType: "text/html",
@@ -327,7 +388,8 @@ test("profile reads joined date when About fields are outside legacy renderers",
 			const url = new URL(route.request().url());
 			let body = "";
 			if (url.pathname === "/")
-				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+				body =
+					'<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
 			else if (url.pathname === "/@owner")
 				body =
 					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><yt-page-header-view-model><div class="yt-page-header-view-model__page-header-title"><h1><span>Real Owner</span></h1></div></yt-page-header-view-model>';
@@ -411,7 +473,8 @@ test("profile never reads document-level counts outside About metadata", async (
 			const url = new URL(route.request().url());
 			let body = "";
 			if (url.pathname === "/")
-				body = '<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
+				body =
+					'<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span></ytd-active-account-header-renderer>';
 			else if (url.pathname === "/@owner")
 				body =
 					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';

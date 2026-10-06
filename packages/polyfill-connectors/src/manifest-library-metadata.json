@@ -657,7 +657,6 @@
 		"manifest": {
 			"connector_key": "youtube",
 			"reason_display_messages": {
-				"bounded_browser_snapshot": "This is a bounded browser snapshot. More items may exist beyond the visible list or scroll limit.",
 				"page_unreadable": "The signed-in page did not expose a trustworthy record.",
 				"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
 				"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",
