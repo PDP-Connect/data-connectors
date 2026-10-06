@@ -2917,7 +2917,7 @@
 				},
 				"connector_key": "claude-code",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-				"version": "0.3.8",
+				"version": "0.3.9",
 				"display_name": "Claude Code",
 				"brand": {
 					"icon": "icon.svg",
@@ -4019,7 +4019,7 @@
 				},
 				"connector_key": "codex",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-				"version": "0.3.7",
+				"version": "0.3.8",
 				"display_name": "OpenAI Codex CLI",
 				"brand": {
 					"icon": "icon.svg",
