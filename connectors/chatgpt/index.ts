@@ -1227,6 +1227,34 @@ function chatGptDiagnostic(line: string): void {
 	chatGptDiagnosticSink(line);
 }
 
+/**
+ * Reduce a batch detail failure to a fixed vocabulary plus an optional HTTP
+ * status. Error text can quote page content, ids and tokens, so the message is
+ * only matched against, never copied into the result.
+ */
+export function classifyChatGptBatchFailure(err: unknown): string {
+	if (err instanceof ChatGptRecoverableRetryExhaustedError) {
+		return err.httpStatus === null
+			? "kind=http"
+			: `kind=http status=${err.httpStatus}`;
+	}
+	const message = err instanceof Error ? err.message : String(err);
+	const status =
+		/\bstatus=(\d{3})\b/u.exec(message)?.[1] ??
+		/\bapiFetch got (\d{3}) on\b/u.exec(message)?.[1];
+	if (status) return `kind=http status=${status}`;
+	if (/chatgpt_backend_fetch_timeout/u.test(message)) return "kind=timeout";
+	if (
+		/network error|ECONNRESET|ECONNREFUSED|ENOTFOUND|fetch failed/iu.test(
+			message,
+		)
+	)
+		return "kind=network";
+	if (err instanceof SyntaxError || /\bJSON\b|__NEXT_DATA__/u.test(message))
+		return "kind=parse";
+	return "kind=unknown";
+}
+
 /** Plain-English wait for owner-facing PROGRESS text ("30 seconds", "2 minutes"). */
 function formatUserWait(ms: number): string {
 	const seconds = Math.max(1, Math.ceil(ms / 1000));
@@ -2263,6 +2291,13 @@ export interface StreamDeps {
 	// bounded together. Absent means helpers fall back to the connector defaults;
 	// tests can pass an empty budget object to exercise the no-cap primitive.
 	runBudget?: ChatGptRunBudget;
+	/** Run-scoped latch so the batch-fallback diagnostic logs once per run, not once per detail pass. */
+	batchFallbackLog?: ChatGptBatchFallbackLog;
+}
+
+/** Mutable holder shared by the recovery and forward detail passes of one run. */
+export interface ChatGptBatchFallbackLog {
+	logged: boolean;
 }
 
 /** Mutable holder for the run-scoped pre-detail served-429 count. */
@@ -5182,6 +5217,7 @@ export async function runMessagesAndConversationsWithDetail(
 	);
 	let nextBatchStart = 0;
 	let batchEndpointUnavailable = false;
+	const batchFallbackLog = deps.batchFallbackLog ?? { logged: false };
 	// Once run-cap or source-pressure deferral trips, all later conversation
 	// details are local bookkeeping: emit durable DETAIL_GAP rows for the tail,
 	// then abort queued lane work. With the launch-jitter floor deleted (now an ε
@@ -5345,8 +5381,17 @@ export async function runMessagesAndConversationsWithDetail(
 					)
 						waveWasClean = false;
 					await recordConversationDetailProviderSuccess();
-				} catch {
+				} catch (err) {
 					// Batch results are an optimization; the ordered per-id lane retries gaps.
+					// Log a bounded classification once per run: batching stops, and
+					// the slower per-id fetches would otherwise have no visible reason.
+					// Never log the error text; it can carry private page content.
+					if (!batchFallbackLog.logged) {
+						batchFallbackLog.logged = true;
+						chatGptDiagnostic(
+							`batch conversation-detail fetch failed (${classifyChatGptBatchFailure(err)}); fetching the remaining conversation details one at a time`,
+						);
+					}
 					batchEndpointUnavailable = true;
 					waveWasClean = false;
 				} finally {
@@ -6335,6 +6380,7 @@ export async function runConversationsAndMessagesStreams(
 	const runDeps: StreamDeps = {
 		...deps,
 		emittedMessageIdsThisRun: new Set<string>(),
+		batchFallbackLog: deps.batchFallbackLog ?? { logged: false },
 	};
 	const conversationsCursor = state.conversations as
 		| {
