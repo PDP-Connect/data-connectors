@@ -11,6 +11,7 @@ import type {
   EnsureSessionArgs,
   RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -248,10 +249,14 @@ async function fetchWindow(
       if (/\boura_auth_failed\b/.test(detail)) throw error;
       if (/oura_internal_api_(?:invalid_payload|4(?!29)\d\d)/.test(detail)) retryable = false;
       failedWindows.push({ start: from, end: to });
-      await ctx.progress(
-        `Oura ${stream} data chunk ${from} to ${to} failed: ${detail}`,
-        { stream }
-      );
+      connectorDiagnostic("oura_browser", "chunk_failed", {
+        stream,
+        from,
+        to,
+        detail,
+        retryable,
+      });
+      await ctx.progress(`Could not fetch Oura ${stream} data for ${from} to ${to}`, { stream });
     }
     start = new Date(chunkEnd);
     start.setUTCDate(start.getUTCDate() + 1);
