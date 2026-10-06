@@ -42,6 +42,7 @@ import {
 	browserSurfaceManagedState,
 	buildBrowserSurfaceDiagnostic,
 } from "../../packages/polyfill-connectors/src/browser-surface-diagnostic.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	type DetailGapMessage,
@@ -897,10 +898,15 @@ export async function emitStatementRecords(
 	// these reuse DETAIL_GAP / DETAIL_COVERAGE without promoting them to portable
 	// protocol. Strictly additive — no statement RECORD or STATE changes.
 	await emitStatementCoverage(deps, coverageRows);
+	connectorDiagnostic("usaa", "statement_pdfs_hydrated", {
+		successes: summary.successes,
+		attempts: summary.attempts,
+		total: summary.attempts || indexRows.length,
+	});
 	const progressMsg = {
 		type: "PROGRESS",
 		stream: "statements",
-		message: `Hydrated ${summary.successes}/${summary.attempts || indexRows.length} PDFs`,
+		message: `Downloaded ${summary.successes} of ${summary.attempts || indexRows.length} statement PDFs`,
 		count: summary.successes,
 		total: summary.attempts || indexRows.length,
 	} as const;
@@ -2269,10 +2275,19 @@ export async function runSingleLadderAttempt({
 	onSessionDead,
 	settleDelayMs,
 }: LadderAttemptArgs): Promise<AttemptOutcome> {
+	connectorDiagnostic("usaa", "export_wait", {
+		account: accountOrdinal,
+		accounts: accountTotal,
+		window: attemptOrdinal,
+		windows: attemptTotal,
+	});
 	await deps.emit({
 		type: "PROGRESS",
 		stream: "transactions",
-		message: `Export wait: account ${accountOrdinal}/${accountTotal}, window ${attemptOrdinal}/${attemptTotal}`,
+		message:
+			accountTotal > 1
+				? `Waiting for USAA to prepare the export for account ${accountOrdinal} of ${accountTotal}`
+				: "Waiting for USAA to prepare your transaction export",
 	});
 	let attemptDiagnostic: DiagnosticInfo | null = null;
 	const recordDiagnostic = (info: DiagnosticInfo): void => {
@@ -2396,10 +2411,19 @@ export async function tryExportLadder(
 			};
 		}
 		if (outcome.kind === "empty") {
+			connectorDiagnostic("usaa", "export_empty", {
+				account: accountOrdinal,
+				accounts: accountTotal,
+				window: i + 1,
+				windows: candidateStarts.length,
+			});
 			await deps.emit({
 				type: "PROGRESS",
 				stream: "transactions",
-				message: `Export complete: no transactions for account ${accountOrdinal}/${accountTotal}, window ${i + 1}/${candidateStarts.length}`,
+				message:
+					accountTotal > 1
+						? `USAA reported no transactions for account ${accountOrdinal} of ${accountTotal}`
+						: "USAA reported no transactions for this account",
 			});
 			return {
 				csvPath: null,
@@ -2411,25 +2435,34 @@ export async function tryExportLadder(
 		if (outcome.kind === "structure_changed") {
 			const diagNow = diagBox.current;
 			if (diagNow) {
-				await deps.emit({
-					type: "PROGRESS",
-					stream: "transactions",
-					message: `Export diagnostic: account ${accountOrdinal}/${accountTotal}, window ${i + 1}/${candidateStarts.length}, ${formatDiagnosticInfo(diagNow)}`,
+				connectorDiagnostic("usaa", "export_attempt_failed", {
+					account: accountOrdinal,
+					accounts: accountTotal,
+					window: i + 1,
+					windows: candidateStarts.length,
+					info: formatDiagnosticInfo(diagNow),
 				});
 			}
+			connectorDiagnostic("usaa", "export_structure_changed", {
+				phase: diagNow?.phase ?? "source_structure_changed",
+				account: accountOrdinal,
+				accounts: accountTotal,
+			});
 			await deps.emit({
 				type: "PROGRESS",
 				stream: "transactions",
-				message: `Export diagnostic: ${diagNow?.phase ?? "source_structure_changed"}; skipping retries for account ${accountOrdinal}/${accountTotal}`,
+				message: "USAA changed its export page; skipping this account",
 			});
 			break;
 		}
 		const diagNow = diagBox.current;
 		if (diagNow) {
-			await deps.emit({
-				type: "PROGRESS",
-				stream: "transactions",
-				message: `Export diagnostic: account ${accountOrdinal}/${accountTotal}, window ${i + 1}/${candidateStarts.length}, ${formatDiagnosticInfo(diagNow)}`,
+			connectorDiagnostic("usaa", "export_attempt_failed", {
+				account: accountOrdinal,
+				accounts: accountTotal,
+				window: i + 1,
+				windows: candidateStarts.length,
+				info: formatDiagnosticInfo(diagNow),
 			});
 		}
 		await deps.emit({
@@ -3218,7 +3251,7 @@ async function processPdfStatementRow(
 	}
 }
 
-async function emitPdfStatementTransactions(
+export async function emitPdfStatementTransactions(
 	deps: EmitDeps,
 	indexRows: readonly IndexRow[],
 	hydrationResults: Map<number, HydrationResult>,
@@ -3252,10 +3285,16 @@ async function emitPdfStatementTransactions(
 			fingerprintCursor,
 		);
 	}
+	connectorDiagnostic("usaa", "pdf_parse_complete", {
+		transactions: counters.pdfTxnCount,
+		statements: counters.parsedStatements,
+		unknown_templates: counters.unknownTemplates,
+		unreconciled: counters.unreconciledStatements,
+	});
 	await deps.emit({
 		type: "PROGRESS",
 		stream: "transactions",
-		message: `PDF parse complete: ${counters.pdfTxnCount} transaction(s) across ${counters.parsedStatements} statement(s) (${counters.unknownTemplates} unknown templates, ${counters.unreconciledStatements} unreconciled)`,
+		message: `Read ${counters.pdfTxnCount} transaction(s) from ${counters.parsedStatements} statement(s)`,
 	});
 }
 
