@@ -24,7 +24,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { chromium, type Page } from "playwright";
@@ -121,12 +121,39 @@ function noopSendInteraction(): ReturnType<
 
 const immediateWait = (): Promise<void> => Promise.resolve();
 
+/**
+ * Deterministic clock for the detail-surface poll loop. `Date.now` is frozen
+ * and advances only when the loop sleeps (`page.waitForTimeout`), by `stepMs`.
+ * A `timeoutMs` of 1 therefore always allows exactly one poll before timing
+ * out, regardless of how fast or slow the host runs the test.
+ */
+function withPollClock(
+	page: Page,
+	stepMs: number,
+): { page: Page; restore: () => void } {
+	let now = 1_800_000_000_000;
+	mock.method(Date, "now", () => now);
+	const clocked = new Proxy(page, {
+		get(target, prop): unknown {
+			if (prop === "waitForTimeout") {
+				return (): Promise<void> => {
+					now += stepMs;
+					return Promise.resolve();
+				};
+			}
+			return Reflect.get(target, prop);
+		},
+	});
+	return { page: clocked, restore: () => mock.restoreAll() };
+}
+
 function makeRecordingDeps(overrides: Partial<EmitDeps> = {}): RecordingDeps {
 	const harness = makeRecordingEmit(validateRecord);
 	const deps: EmitDeps = {
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		emittedAt: "2026-07-14T12:00:00.000Z",
+		emitItems: true,
 		orderItemsCoverage: undefined,
 		ordersCoverage: undefined,
 		ordersFingerprintCursor: undefined,
@@ -570,6 +597,46 @@ test("processListOrder: nothing recorded in ordersCoverage when orders is out of
 	assert.deepEqual(ordersCoverage.covered, []);
 });
 
+test("processListOrder: nutrition-only evidence hydrates details without emitting orders or order_items", async () => {
+	const orderItemsCoverage = newOrderItemsCoverage();
+	const targets: NutritionTarget[] = [];
+	const { deps, emitted } = makeRecordingDeps({
+		emitItems: false,
+		nutritionTargetSink: {
+			seenProductIds: new Set<string>(),
+			targets,
+		},
+		orderItemsCoverage,
+		ordersCoverage: undefined,
+		wantsItems: true,
+		wantsOrders: false,
+	});
+	const listOrder = makeListOrder({ orderId: "HEB1000000001" });
+
+	await processListOrder(
+		makePageStub({ content: DETAIL_HTML }),
+		deps,
+		makeRunFlags(),
+		listOrder,
+	);
+
+	assert.deepEqual(orderItemsCoverage.required, ["HEB1000000001"]);
+	assert.deepEqual(orderItemsCoverage.hydrated, ["HEB1000000001"]);
+	assert.deepEqual(orderItemsCoverage.gap, []);
+	assert.deepEqual(
+		emitted.map((record) => record.stream),
+		[],
+		"internal order evidence must not emit unrequested orders or order_items records",
+	);
+	assert.deepEqual(targets, [
+		{
+			name: "Widget",
+			productId: "500",
+			productUrl: "https://www.heb.com/product-detail/widget/500",
+		},
+	]);
+});
+
 test("processListOrder: a malformed order date is considered but not covered in ordersCoverage", async () => {
 	const ordersCoverage = newOrdersCoverage();
 	const { deps } = makeRecordingDeps({ ordersCoverage });
@@ -732,12 +799,17 @@ test("processListOrder: DETAIL_GAP retains elapsed time and surface poll count",
 		detailSurfaceTimeoutMs: 1,
 		orderItemsCoverage: coverage,
 	});
-	await processListOrder(
-		makePageStub({ content: DETAIL_HTML }),
-		deps,
-		makeRunFlags(),
-		makeListOrder({ itemCount: 100 }),
-	);
+	const clock = withPollClock(makePageStub({ content: DETAIL_HTML }), 1);
+	try {
+		await processListOrder(
+			clock.page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ itemCount: 100 }),
+		);
+	} finally {
+		clock.restore();
+	}
 
 	const [gap] = findDetailGaps(protocolMessages);
 	assert.ok(gap);
@@ -1519,7 +1591,7 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 		(message) => message.type === "SKIP_RESULT",
 	);
 	assert.ok(skip);
-	assert.equal(skip?.reason, "list_page_navigation_failed");
+	assert.equal(skip?.reason, "stream_collection_failed");
 	assert.equal(
 		protocolMessages.some(
 			(message) =>
@@ -2330,8 +2402,7 @@ test("runForwardScan: H-E-B's real 'No past orders' page aborts when this connec
 	const skip = protocolMessages.find(
 		(m) =>
 			m.type === "SKIP_RESULT" &&
-			(m as { reason: string }).reason ===
-				"heb_empty_history_after_prior_orders",
+			(m as { reason: string }).reason === "stream_collection_failed",
 	) as { message: string; diagnostics: Record<string, unknown> } | undefined;
 	assert.ok(skip, "the abort must surface a SKIP_RESULT the owner can read");
 	assert.match(skip.message, /previously collected orders/);
@@ -2608,7 +2679,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "nutrition" &&
-				message.reason === "nutrition_source_coverage_incomplete",
+				message.reason === "stream_collection_failed",
 		),
 		"nutrition must be marked incomplete before the recovery-only return",
 	);
@@ -2643,7 +2714,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "nutrition" &&
-				message.reason === "nutrition_source_coverage_incomplete",
+				message.reason === "stream_collection_failed",
 		),
 		"nutrition must be marked incomplete when the 100-detail budget suppresses the forward scan",
 	);
@@ -3111,13 +3182,19 @@ test("fetchOrderDetail: debug switch emits safe per-poll surface diagnostics", a
 });
 
 test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap, not partial hydrated data", async () => {
-	const page = makeLazyLoadPageStub(100); // Deliberately expect more than this fixture exposes.
+	// Deliberately expect more than this fixture exposes.
+	const clock = withPollClock(makeLazyLoadPageStub(100), 1);
 
-	const result = await fetchOrderDetail(page, "HEB999", {
-		detailSurfaceTimeoutMs: 1,
-		expectedItemCount: 101,
-		waitForHydration: immediateWait,
-	});
+	let result: Awaited<ReturnType<typeof fetchOrderDetail>>;
+	try {
+		result = await fetchOrderDetail(clock.page, "HEB999", {
+			detailSurfaceTimeoutMs: 1,
+			expectedItemCount: 101,
+			waitForHydration: immediateWait,
+		});
+	} finally {
+		clock.restore();
+	}
 
 	assert.equal(result.status, "failed");
 	assert.ok(
@@ -3798,7 +3875,7 @@ test("collectProfile emits SKIP_RESULT session_repair_required on a sign-in redi
 	assert.ok(skip);
 });
 
-test("nutritionCoverageBlockReason requires orders and order_items in the same run", () => {
+test("nutritionCoverageBlockReason accepts internally collected order evidence", () => {
 	assert.equal(
 		nutritionCoverageBlockReason({
 			itemCountShort: false,
@@ -3809,7 +3886,7 @@ test("nutritionCoverageBlockReason requires orders and order_items in the same r
 			ordersTruncated: false,
 			unrecoveredPriorOrderItemGapCount: 0,
 		}),
-		"nutrition requires orders and order_items in the same run",
+		null,
 	);
 });
 
@@ -4105,10 +4182,6 @@ test("reportListPageCeiling: the page-cap skip waits for a connector upgrade, be
 test("nutritionCoverageRecoveryHint retries only the causes a rerun can clear", () => {
 	const retry = { action: "retry_by_runtime", retryable: true };
 	const upgrade = { action: "retry_on_connector_upgrade", retryable: false };
-	assert.deepEqual(nutritionCoverageRecoveryHint("scope_missing"), {
-		action: "not_retriable",
-		retryable: false,
-	});
 	assert.deepEqual(nutritionCoverageRecoveryHint("orders_truncated"), upgrade);
 	assert.deepEqual(nutritionCoverageRecoveryHint("resume_boundary"), upgrade);
 	assert.deepEqual(nutritionCoverageRecoveryHint("item_count_short"), upgrade);
