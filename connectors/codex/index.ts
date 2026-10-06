@@ -84,6 +84,7 @@ import {
 	scopeBoundsEnumeration,
 	shouldDescendIntoDirectory,
 } from "../../packages/polyfill-connectors/src/collection-scope-enumeration.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "../../packages/polyfill-connectors/src/connector-exit.ts";
 import {
 	type CarryForwardCursor,
@@ -664,10 +665,13 @@ function openThreadsDb(dbPath: string): DatabaseSync | null {
 	try {
 		return new DatabaseSync(dbPath, { readOnly: true });
 	} catch {
+		connectorDiagnostic("codex", "state_db_unreadable", {
+			fallback: "rollouts_only",
+		});
 		emit({
 			type: "PROGRESS",
 			message:
-				"Codex phase=index pass=index state_db_readable=false fallback=rollouts_only",
+				"Codex thread index could not be read; reading session files only",
 		});
 		return null;
 	}
@@ -689,10 +693,12 @@ function* queryThreadsRows(db: DatabaseSync): Iterable<ThreadRow> {
 			}
 		}
 	} catch {
+		connectorDiagnostic("codex", "state_db_query_failed", {
+			fallback: "rollouts_only",
+		});
 		emit({
 			type: "PROGRESS",
-			message:
-				"Codex phase=index pass=index state_db_query_failed=true fallback=rollouts_only",
+			message: "Codex thread index query failed; reading session files only",
 		});
 	}
 }
@@ -1095,7 +1101,12 @@ export function processRolloutLine({
 }: ProcessRolloutLineArgs): void {
 	state.lineCount += 1;
 	if (state.lineCount % PROGRESS_EVERY === 0) {
-		deps.progress(`Codex phase=emit pass=emit lines_parsed=${state.lineCount}`);
+		connectorDiagnostic("codex", "lines_parsed", {
+			lines_parsed: state.lineCount,
+		});
+		deps.progress(
+			`Reading a large Codex session (${state.lineCount} lines so far)`,
+		);
 	}
 	const ts = obj.timestamp || null;
 	const range: TimestampRange = {
@@ -1692,13 +1703,16 @@ function carryFileCursorForward(
 	args.newMtimes[entry.path] = mtime;
 }
 
-/** Report `Codex phase=index sessions_dir_readable=false` and return the empty scan result. */
+/** Report that the sessions folder is unreadable and return the empty scan result. */
 async function reportMissingSessionsBase(
 	scanOutcomeOnBaseError: "unreadable" | null,
 ): Promise<ScanRolloutsResult> {
+	connectorDiagnostic("codex", "sessions_dir_unreadable", {
+		scan_outcome: scanOutcomeOnBaseError ?? "missing",
+	});
 	emit({
 		type: "PROGRESS",
-		message: "Codex phase=index pass=index sessions_dir_readable=false",
+		message: "Codex sessions folder not found or not readable",
 	});
 	await waitForEmitDrain();
 	// If we caught an error, it's unreadable; if not, ENOENT = complete
@@ -1922,9 +1936,14 @@ async function processRolloutEntry(
 			quietMs: args.activeQuietMs,
 		})
 	) {
+		connectorDiagnostic("codex", "rollout_deferred", {
+			backpressure: "active_rollout_deferred",
+			item: rolloutOrdinal,
+		});
 		emit({
 			type: "PROGRESS",
-			message: `Codex phase=index pass=index item=${rolloutOrdinal} backpressure=active_rollout_deferred`,
+			message:
+				"Skipping a Codex session that is still being written; it will be read next run",
 		});
 		await waitForEmitDrain();
 		// Defer: the file is being actively written, so it must be reconsidered
@@ -1943,9 +1962,14 @@ async function processRolloutEntry(
 	}
 
 	const isAppend = action.kind === "append";
+	connectorDiagnostic("codex", "rollout_parse_started", {
+		file_size_mb: (st.size / 1024 / 1024).toFixed(1),
+		item: rolloutOrdinal,
+		mode: isAppend ? "append" : "full",
+	});
 	emit({
 		type: "PROGRESS",
-		message: `Codex phase=emit pass=emit item=${rolloutOrdinal} mode=${isAppend ? "append" : "full"} file_size_mb=${(st.size / 1024 / 1024).toFixed(1)}`,
+		message: `Reading Codex session ${rolloutOrdinal}`,
 	});
 	await waitForEmitDrain();
 
@@ -2294,9 +2318,13 @@ export async function scanRollouts(
 		scanOutcome = "unreadable";
 		await reportRolloutSourceGap(args.requested, gap);
 	}
+	connectorDiagnostic("codex", "rollout_scan_summary", {
+		parsed_items: parsedRollouts,
+		total_items: totalRollouts,
+	});
 	emit({
 		type: "PROGRESS",
-		message: `Codex phase=index pass=index total_items=${totalRollouts} parsed_items=${parsedRollouts}`,
+		message: `Read ${parsedRollouts} of ${totalRollouts} Codex sessions`,
 	});
 	await waitForEmitDrain();
 
@@ -3106,11 +3134,13 @@ async function collect({
 	// yyyy/mm/dd, so a `since` prunes whole years, months, and days before they
 	// are listed, and `source_roots` skips out-of-root files before they open.
 	if (scopeBoundsEnumeration(enumerationScope)) {
+		connectorDiagnostic("codex", "enumeration_bounded", {
+			roots: enumerationScope?.source_roots?.length ?? 0,
+			since: enumerationScope?.since ? "set" : "unset",
+		});
 		emit({
 			type: "PROGRESS",
-			message: `Codex phase=index pass=index enumeration_bounded=true since=${
-				enumerationScope?.since ? "set" : "unset"
-			} roots=${enumerationScope?.source_roots?.length ?? 0}`,
+			message: "Limiting the Codex scan to your selected date range or folders",
 		});
 	}
 
@@ -3210,15 +3240,27 @@ async function collect({
 	// at capture time, since no transport exists to discharge them
 	// (see `hasUploadTransport` in src/artifact-capture.ts).
 	if (captureLedger.size > 0) {
+		connectorDiagnostic("codex", "artifact_bodies_outstanding", {
+			artifact_bodies_outstanding: captureLedger.size,
+		});
 		emit({
 			type: "PROGRESS",
-			message: `Codex artifact_bodies_outstanding=${captureLedger.size}`,
+			message:
+				captureLedger.size === 1
+					? "1 Codex session file could not be saved this time; it will be retried next run"
+					: `${captureLedger.size} Codex session files could not be saved this time; they will be retried next run`,
 		});
 	}
 	if (captureLedger.pendingUpload > 0) {
+		connectorDiagnostic("codex", "artifact_bodies_awaiting_upload", {
+			artifact_bodies_awaiting_upload: captureLedger.pendingUpload,
+		});
 		emit({
 			type: "PROGRESS",
-			message: `Codex artifact_bodies_awaiting_upload=${captureLedger.pendingUpload}`,
+			message:
+				captureLedger.pendingUpload === 1
+					? "1 Codex session file saved locally, waiting to upload"
+					: `${captureLedger.pendingUpload} Codex session files saved locally, waiting to upload`,
 		});
 	}
 	await waitForEmitDrain();

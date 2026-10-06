@@ -36,7 +36,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { RecordData, StreamScope } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import type {
+	RecordData,
+	StreamScope,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type CarryForwardCursor,
 	openCarryForwardCursor,
@@ -344,6 +351,35 @@ test("processRolloutLine: orphan function_call_output (no matching call) emits i
 	assert.equal(calls[0]?.data.name, null, "name null — no paired call_line");
 	assert.equal(calls[0]?.data.arguments, null);
 	assert.equal(calls[0]?.data.output_preview, "stdout bytes");
+});
+
+test("processRolloutLine: the 2000-line progress hook is plain English and the count goes to a diagnostic", () => {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const { deps, progressMessages } = makeHarness({
+			requested: ["sessions"],
+		});
+		const state = makeRolloutParseState();
+		state.lineCount = 1999;
+		processRolloutLine({
+			obj: sessionMetaLine("sess-progress"),
+			state,
+			deps,
+			file: "r.jsonl",
+		});
+		assert.deepEqual(progressMessages, [
+			"Reading a large Codex session (2000 lines so far)",
+		]);
+		assertUserFacingProgress(
+			progressMessages.map((message) => ({ message, type: "PROGRESS" })),
+		);
+		assert.deepEqual(lines, [
+			'[codex-diagnostic] lines_parsed {"lines_parsed":2000}',
+		]);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 });
 
 // ─── Memory bound: paired calls drain on their output line, not at EOF ──────

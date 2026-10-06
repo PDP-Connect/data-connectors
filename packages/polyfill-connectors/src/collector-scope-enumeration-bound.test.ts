@@ -294,9 +294,10 @@ test("codex: a real scoped run never enumerates the pruned year", async () => {
 	const env = { CODEX_HOME: codexHome };
 
 	// Codex reports how many rollout items its walk actually took into account.
-	// That count is the enumeration itself, so it distinguishes a pruned walk
-	// from a full walk whose output was filtered — the exact confusion this test
-	// exists to rule out.
+	// The count rides on the `[codex-diagnostic] rollout_scan_summary` line. It
+	// is the enumeration itself, so it distinguishes a pruned walk from a full
+	// walk whose output was filtered — the exact confusion this test exists to
+	// rule out.
 	const unbounded = await runConnectorChild({
 		connector: "codex",
 		env,
@@ -304,7 +305,7 @@ test("codex: a real scoped run never enumerates the pruned year", async () => {
 	});
 	assert.match(
 		unbounded,
-		/total_items=2\b/,
+		/"total_items":2\b/,
 		"baseline: an unscoped walk enumerates BOTH rollouts, including the 2020 one",
 	);
 
@@ -316,7 +317,7 @@ test("codex: a real scoped run never enumerates the pruned year", async () => {
 	});
 	assert.match(
 		bounded,
-		/total_items=1\b/,
+		/"total_items":1\b/,
 		"a whole calendar year before the boundary must be pruned from the walk, not walked and filtered",
 	);
 	assert.equal(
