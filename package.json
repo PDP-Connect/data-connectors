@@ -53,11 +53,23 @@
     "old-installer-compat:test": "node --test ./scripts/old-installer-compat.test.mjs",
     "manifest-schema:test": "node --test ./schemas/connector-manifest.schema.test.mjs ./schemas/connector-binding-grammar.test.mjs ./schemas/observation.schema.test.mjs",
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
-    "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check"
+    "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check",
+    "test:mutation-falsification": "node --import tsx scripts/test-accounting/authority.ts --run --suite mutation-falsification --profile default",
+    "test:accounting": "node --import tsx scripts/test-accounting/authority.ts --run --suite accounting --profile default",
+    "test:migration-oracle": "node --import tsx scripts/test-accounting/authority.ts --run --suite migration-oracle --profile default",
+    "test:polyfill-accounted": "node --import tsx scripts/test-accounting/authority.ts --run --suite polyfill-connectors --profile default",
+    "typecheck:mutation-falsification": "tsc --noEmit -p scripts/mutation-falsification/tsconfig.json",
+    "mutation:groupme-pilot": "node --import tsx scripts/mutation-falsification/run-groupme-pilot.ts",
+    "mutation:groupme-preflight": "node --import tsx scripts/mutation-falsification/run-groupme-pilot.ts --preflight"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
     "yaml": "2.9.1",
-    "zod": "4.6.5"
-  }
+    "zod": "4.6.5",
+    "@babel/parser": "8.0.5",
+    "@types/node": "26.6.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "npm@11.12.1"
 }

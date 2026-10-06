@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-	"version": "1.0.14",
+	"version": "1.0.15",
 	"display_name": "Strava",
 	"brand": {
 		"icon": "icon.svg",
