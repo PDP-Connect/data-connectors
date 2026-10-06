@@ -153,6 +153,25 @@ test("collectAllStreams: a trips-only START never calls GetReceipt", async () =>
 	assert.equal(calls.filter((c) => c.startsWith("GetTrip")).length, 2);
 });
 
+test("collectAllStreams: trips RECORD carries the GetTrip receipt's distance/duration display text", async () => {
+	const { fetchPath } = makeScriptedFetch({
+		activitiesPages: [{ body: activitiesBody([{ uuid: "trip-1" }]) }],
+		getTrip: {
+			"trip-1": {
+				body: getTripBody(
+					{ status: "COMPLETED", fare: "$10.00" },
+					{ distance: "12.3", distanceLabel: "miles", duration: "25 minutes" },
+				),
+			},
+		},
+	});
+	const { ctx, emitted } = makeCtx(["trips"]);
+	await collectAllStreams(ctx, fetchPath, NO_DELAY);
+	const trip = emitted.find((r) => r.stream === "trips");
+	assert.equal(trip?.data.distance_display, "12.3 miles");
+	assert.equal(trip?.data.duration_display, "25 minutes");
+});
+
 test("collectAllStreams: neither trips nor receipts requested fetches nothing", async () => {
 	const { fetchPath, calls } = makeScriptedFetch({});
 	const { ctx, emitted } = makeCtx(["some_other_stream"]);

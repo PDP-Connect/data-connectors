@@ -58,6 +58,8 @@ export const tripsSchema = z.object({
 	fare_total_cents: centsSchema,
 	distance_meters: z.number().min(0).nullable(),
 	duration_seconds: z.number().int().min(0).nullable(),
+	distance_display: pdppSafeText.max(128).nullable().optional(),
+	duration_display: pdppSafeText.max(128).nullable().optional(),
 	product_type: z.string().min(1).max(128).nullable(),
 	is_surge: z.boolean().nullable(),
 });

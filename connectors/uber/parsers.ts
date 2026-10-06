@@ -189,6 +189,16 @@ export function tripRecord(
 			receiptSummary?.distanceLabel,
 		),
 		duration_seconds: parseDurationSeconds(receiptSummary?.duration),
+		distance_display:
+			typeof receiptSummary?.distance === "string" &&
+			typeof receiptSummary.distanceLabel === "string" &&
+			["kilometers", "miles"].includes(receiptSummary.distanceLabel)
+				? `${receiptSummary.distance} ${receiptSummary.distanceLabel}`
+				: null,
+		duration_display:
+			typeof receiptSummary?.duration === "string"
+				? receiptSummary.duration
+				: null,
 		product_type:
 			receiptSummary?.vehicleType || trip.vehicleDisplayName || null,
 		is_surge: trip.isSurgeTrip ?? null,
