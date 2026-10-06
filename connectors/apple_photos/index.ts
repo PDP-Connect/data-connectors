@@ -70,6 +70,7 @@ import { existsSync } from "node:fs";
 import { opendir, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -129,16 +130,31 @@ async function emitCoverageProgress(
 		status: "collected" | "missing";
 	},
 ): Promise<void> {
+	const filesScanned = input.filesScanned ?? 0;
+	connectorDiagnostic("apple_photos", "coverage", {
+		files_scanned: filesScanned,
+		reason: input.reason,
+		status: input.status,
+		stream: "photos",
+	});
 	await emit({
 		type: "PROGRESS",
 		stream: "photos",
-		message: [
-			"Apple Photos phase=coverage stream=photos",
-			`status=${input.status}`,
-			`reason=${input.reason}`,
-			`files_scanned=${input.filesScanned ?? 0}`,
-		].join(" "),
+		message: coverageMessage(input.reason, filesScanned),
 	});
+}
+
+function coverageMessage(
+	reason: "collected" | "export_dir_empty" | "export_dir_missing",
+	filesScanned: number,
+): string {
+	if (reason === "export_dir_missing") {
+		return "No photo export folder found";
+	}
+	if (reason === "export_dir_empty") {
+		return "Photo export folder is empty";
+	}
+	return `Found ${filesScanned} ${filesScanned === 1 ? "photo" : "photos"} in your export`;
 }
 
 /**
@@ -213,7 +229,11 @@ runConnector({
 		let fileCount = 0;
 		const maxBytes = resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV);
 
-		await progress("Apple Photos phase=emit pass=emit starting directory walk");
+		connectorDiagnostic("apple_photos", "emit_start", {
+			pass: "emit",
+			phase: "emit",
+		});
+		await progress("Reading your exported photos");
 
 		for await (const file of walkDir(dir)) {
 			fileCount += 1;
@@ -233,15 +253,21 @@ runConnector({
 			await emitRecord("photos", { ...record });
 
 			if (fileCount % PROGRESS_INTERVAL_FILES === 0) {
-				await progress(
-					`Apple Photos phase=emit pass=emit files_scanned=${fileCount}`,
-				);
+				connectorDiagnostic("apple_photos", "emit_scan", {
+					files_scanned: fileCount,
+					pass: "emit",
+					phase: "emit",
+				});
+				await progress(`Scanned ${fileCount} photos so far`);
 			}
 		}
 
-		await progress(
-			`Apple Photos phase=emit pass=emit files_scanned=${fileCount}`,
-		);
+		connectorDiagnostic("apple_photos", "emit_scan", {
+			files_scanned: fileCount,
+			final: true,
+			pass: "emit",
+			phase: "emit",
+		});
 		await emitCoverageProgress(emit, {
 			filesScanned: fileCount,
 			reason: "collected",

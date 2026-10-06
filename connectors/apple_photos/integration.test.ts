@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -95,7 +96,11 @@ test("apple_photos SKIP_RESULTs export_not_found when the export dir does not ex
 	assert.match(skip?.message ?? "", /Export photos from Photos\.app/);
 	assert.match(
 		progressMessages(result.messages, "photos").join("\n"),
-		/Apple Photos phase=coverage stream=photos status=missing reason=export_dir_missing files_scanned=0/,
+		/^No photo export folder found$/,
+	);
+	assert.match(
+		result.stderr,
+		/\[apple_photos-diagnostic\] coverage \{"files_scanned":0,"reason":"export_dir_missing","status":"missing","stream":"photos"\}/,
 	);
 	assert.equal(records(result.messages, "photos").length, 0);
 });
@@ -109,7 +114,11 @@ test("apple_photos SKIP_RESULTs export_not_found when the export dir exists but 
 		assert.equal(skip?.reason, "export_not_found");
 		assert.match(
 			progressMessages(result.messages, "photos").join("\n"),
-			/Apple Photos phase=coverage stream=photos status=missing reason=export_dir_empty files_scanned=0/,
+			/^Photo export folder is empty$/,
+		);
+		assert.match(
+			result.stderr,
+			/\[apple_photos-diagnostic\] coverage \{"files_scanned":0,"reason":"export_dir_empty","status":"missing","stream":"photos"\}/,
 		);
 	} finally {
 		await rm(dir, { force: true, recursive: true });
@@ -136,8 +145,18 @@ test("apple_photos extracts filename/size/hash/mtime/content_type for fixture fi
 		assert.equal(photos.length, 2);
 		assert.match(
 			progressMessages(result.messages, "photos").join("\n"),
-			/Apple Photos phase=coverage stream=photos status=collected reason=collected files_scanned=2/,
+			/Found 2 photos in your export/,
 		);
+		assert.match(
+			result.stderr,
+			/\[apple_photos-diagnostic\] coverage \{"files_scanned":2,"reason":"collected","status":"collected","stream":"photos"\}/,
+		);
+		assert.match(
+			result.stderr,
+			/\[apple_photos-diagnostic\] emit_scan \{"files_scanned":2,"final":true,"pass":"emit","phase":"emit"\}/,
+		);
+		assert.match(result.stderr, /\[apple_photos-diagnostic\] emit_start/);
+		assertUserFacingProgress(result.messages);
 
 		const jpg = photos.find((p) => p.filename === "IMG_0001.jpg");
 		assert.ok(jpg, "expected the jpg record");
