@@ -87,7 +87,7 @@ export async function desktopRecords(zip, streams) {
 		emittedAt: "2026-01-01T00:00:00.000Z",
 		validateRecord,
 		isTombstone: undefined,
-		timeRangeFieldFor: () => "date",
+		timeRangeFieldFor: () => ({ field: "date", format: "date-time" }),
 	});
 	await collectAnthropic({
 		page: new FakePage(zip),

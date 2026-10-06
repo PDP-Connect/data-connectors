@@ -14,12 +14,17 @@
  * published connector is a single-file bundle with no manifest beside it.
  * `consent-time-fields-drift.test.ts` fails CI if this file drifts.
  *
- * Each stream maps to its consent field when the manifest schema declares that
- * field as a timestamp string (no `format`, or `format: "date-time"`). A stream
- * maps to `null` when the manifest declares no consent field, or declares one
- * whose values are calendar dates or integers: the pinned profile defines no
- * rule for comparing those with timestamp bounds, so a bounded run must
- * report `scope_not_supported` for that stream.
+ * Each stream maps to its consent field and that field's declared format when
+ * the runtime can compare bounds with it (Collection Profile §5.1):
+ *
+ * - `format: "date-time"`: always.
+ * - `format: "date"`: only for the streams in DATE_BOUND_STREAMS. A date
+ *   stream is listed once its connector's own range handling compares
+ *   full-date bounds as calendar dates.
+ *
+ * Every other stream maps to `null`: no consent field, a string with no
+ * format, an integer, or an unlisted date field. A bounded run reports
+ * `scope_not_supported` for it.
  *
  * Keys are connector directory names. The runtime normalizes a connector's
  * `name` (`youtube-takeout`) to that form (`youtube_takeout`).
@@ -47,7 +52,18 @@ interface StreamLike {
 	};
 }
 
-function timestampField(stream: StreamLike): string | null {
+/** `<connector>.<stream>` whose `format: "date"` consent field is compared. */
+const DATE_BOUND_STREAMS = new Set([
+	"strava.activities",
+	"strava_browser.activities",
+]);
+
+type ConsentTimeField = { field: string; format: "date" | "date-time" };
+
+function consentTimeField(
+	connector: string,
+	stream: StreamLike,
+): ConsentTimeField | null {
 	const field = stream.consent_time_field;
 	if (typeof field !== "string" || !field) return null;
 	const property = stream.schema?.properties?.[field];
@@ -55,10 +71,14 @@ function timestampField(stream: StreamLike): string | null {
 		? property.type
 		: [property?.type];
 	if (!types.includes("string")) return null;
-	if (property?.format !== undefined && property.format !== "date-time") {
-		return null;
+	if (property?.format === "date-time") return { field, format: "date-time" };
+	if (
+		property?.format === "date" &&
+		DATE_BOUND_STREAMS.has(`${connector}.${String(stream.name)}`)
+	) {
+		return { field, format: "date" };
 	}
-	return field;
+	return null;
 }
 
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
@@ -67,20 +87,24 @@ const key = (name: string): string =>
 
 const connectors = readPolyfillManifests()
 	.map(({ file, manifest }) => {
+		const connector = file.replace(/\.json$/u, "");
 		const streams = (manifest as { streams?: StreamLike[] }).streams ?? [];
 		const entries = streams
 			.filter((stream) => typeof stream.name === "string")
-			.map((stream) => [stream.name as string, timestampField(stream)] as const)
+			.map(
+				(stream) =>
+					[stream.name as string, consentTimeField(connector, stream)] as const,
+			)
 			.sort(([a], [b]) => a.localeCompare(b));
-		return [file.replace(/\.json$/u, ""), entries] as const;
+		return [connector, entries] as const;
 	})
 	.sort(([a], [b]) => a.localeCompare(b));
 
 const body = connectors
 	.map(([connector, entries]) => {
 		const lines = entries.map(
-			([stream, field]) =>
-				`\t\t${key(stream)}: ${field === null ? "null" : JSON.stringify(field)},`,
+			([stream, consent]) =>
+				`\t\t${key(stream)}: ${consent === null ? "null" : `{ field: ${JSON.stringify(consent.field)}, format: ${JSON.stringify(consent.format)} }`},`,
 		);
 		return `\t${key(connector)}: {\n${lines.join("\n")}\n\t},`;
 	})
@@ -93,14 +117,17 @@ writeFileSync(
 
 // GENERATED FILE — do not hand-edit. Produced by
 // scripts/generate-consent-time-fields.ts from every shipped connector
-// manifest's per-stream consent_time_field. A stream maps to null when its
-// manifest declares no timestamp consent field (absent, calendar date, or
-// integer), so a bounded run reports scope_not_supported for it.
+// manifest's per-stream consent_time_field and its declared format. A stream
+// maps to null when the runtime cannot compare bounds with its consent field
+// (absent, a string with no format, an integer, or a date field not yet
+// enabled), so a bounded run reports scope_not_supported for it.
 // Regenerate with \`node --experimental-strip-types
 // scripts/generate-consent-time-fields.ts\` from packages/polyfill-connectors.
 
+import type { ConsentTimeField } from "../time-range.ts";
+
 export const CONSENT_TIME_FIELDS: Readonly<
-	Record<string, Readonly<Record<string, string | null>>>
+	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 ${body}
 };

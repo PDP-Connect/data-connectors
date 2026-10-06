@@ -62,6 +62,24 @@ test("activity type prefers the legacy type, then folds sport_type to its coarse
 	assert.equal(at({}), null);
 });
 
+test("start_date_local is the local calendar day when the UTC day differs", () => {
+	// 23:45 UTC on 15 September is 00:45 on 16 September at +01:00.
+	const record = buildActivityRecord({
+		id: 3,
+		start_time: "2026-09-15T23:45:00+0000",
+		start_date_local_raw: Date.parse("2026-09-16T00:45:00Z") / 1000,
+	});
+	assert.equal(record?.start_date_local, "2026-09-16");
+	assert.equal(record?.start_time, "2026-09-16T00:45:00+01:00");
+	// One second short of midnight is not a real offset: no local day.
+	const rounded = buildActivityRecord({
+		id: 4,
+		start_time: "2026-09-16T00:00:00Z",
+		start_date_local_raw: Date.parse("2026-09-15T23:59:59Z") / 1000,
+	});
+	assert.equal(rounded?.start_date_local, null);
+});
+
 test("a model without a numeric id or zoned start is unreadable", () => {
 	assert.equal(
 		buildActivityRecord({ start_time: "2026-01-01T00:00:00Z" }),
@@ -107,6 +125,7 @@ test("start_date_local_raw puts the start on the local clock with its offset", (
 	assert.equal(local?.start_time, "2026-09-20T06:30:00-07:00");
 	assert.equal(local?.start_time_basis, "local");
 	assert.equal(local?.start_date, "2026-09-20");
+	assert.equal(local?.start_date_local, "2026-09-20");
 	const india = at(Date.parse("2026-09-20T19:00:00Z") / 1000);
 	assert.equal(india?.start_time, "2026-09-20T19:00:00+05:30");
 	// Absent, or not a real offset: fall back to UTC and say so.
@@ -120,5 +139,7 @@ test("start_date_local_raw puts the start on the local clock with its offset", (
 		const record = at(bad);
 		assert.equal(record?.start_time, "2026-09-20T13:30:00Z", String(bad));
 		assert.equal(record?.start_time_basis, "utc");
+		// The UTC day is not the local day, so the consent field stays null.
+		assert.equal(record?.start_date_local, null, String(bad));
 	}
 });

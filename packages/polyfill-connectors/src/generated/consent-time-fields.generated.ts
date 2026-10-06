@@ -3,14 +3,17 @@
 
 // GENERATED FILE — do not hand-edit. Produced by
 // scripts/generate-consent-time-fields.ts from every shipped connector
-// manifest's per-stream consent_time_field. A stream maps to null when its
-// manifest declares no timestamp consent field (absent, calendar date, or
-// integer), so a bounded run reports scope_not_supported for it.
+// manifest's per-stream consent_time_field and its declared format. A stream
+// maps to null when the runtime cannot compare bounds with its consent field
+// (absent, a string with no format, an integer, or a date field not yet
+// enabled), so a bounded run reports scope_not_supported for it.
 // Regenerate with `node --experimental-strip-types
 // scripts/generate-consent-time-fields.ts` from packages/polyfill-connectors.
 
+import type { ConsentTimeField } from "../time-range.ts";
+
 export const CONSENT_TIME_FIELDS: Readonly<
-	Record<string, Readonly<Record<string, string | null>>>
+	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 	amazon: {
 		order_items: null,
@@ -19,10 +22,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	},
 	anthropic: {
 		account_profile: null,
-		conversations: "create_time",
-		messages: "create_time",
-		project_documents: "create_time",
-		projects: "create_time",
+		conversations: { field: "create_time", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
+		project_documents: { field: "create_time", format: "date-time" },
+		projects: { field: "create_time", format: "date-time" },
 	},
 	apple_contacts: {
 		address_books: null,
@@ -30,36 +33,36 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		contacts: null,
 	},
 	apple_health: {
-		records: "start_date",
-		workouts: "start_date",
+		records: { field: "start_date", format: "date-time" },
+		workouts: { field: "start_date", format: "date-time" },
 	},
 	apple_photos: {
-		photos: "file_modified_at",
+		photos: { field: "file_modified_at", format: "date-time" },
 	},
 	chase: {
 		accounts: null,
-		balances: "as_of",
+		balances: { field: "as_of", format: "date-time" },
 		current_activity: null,
 		statements: null,
 		transactions: null,
 	},
 	chatgpt: {
-		conversations: "create_time",
-		custom_gpts: "created_at",
-		custom_instructions: "updated_at",
-		memories: "created_at",
-		messages: "create_time",
-		shared_conversations: "created_at",
+		conversations: { field: "create_time", format: "date-time" },
+		custom_gpts: { field: "created_at", format: "date-time" },
+		custom_instructions: { field: "updated_at", format: "date-time" },
+		memories: { field: "created_at", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
+		shared_conversations: { field: "created_at", format: "date-time" },
 	},
 	claude_code: {
-		attachments: "timestamp",
+		attachments: { field: "timestamp", format: "date-time" },
 		backup_inventory: null,
 		cache_inventory: null,
 		config_inventory: null,
 		file_history: null,
 		memory_notes: null,
-		messages: "timestamp",
-		sessions: "started_at",
+		messages: { field: "timestamp", format: "date-time" },
+		sessions: { field: "started_at", format: "date-time" },
 		skills: null,
 		slash_commands: null,
 		usage: null,
@@ -67,31 +70,31 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	codex: {
 		cache_inventory: null,
 		config_inventory: null,
-		function_calls: "timestamp",
+		function_calls: { field: "timestamp", format: "date-time" },
 		history: null,
-		messages: "timestamp",
+		messages: { field: "timestamp", format: "date-time" },
 		prompts: null,
 		rules: null,
 		session_index: null,
-		sessions: "started_at",
+		sessions: { field: "started_at", format: "date-time" },
 		shell_snapshots: null,
 		skills: null,
 	},
 	doordash: {
 		order_items: null,
-		orders: "order_date",
+		orders: { field: "order_date", format: "date-time" },
 	},
 	github: {
 		contributions: null,
-		events: "created_at",
-		gists: "created_at",
-		issues: "created_at",
+		events: { field: "created_at", format: "date-time" },
+		gists: { field: "created_at", format: "date-time" },
+		issues: { field: "created_at", format: "date-time" },
 		organizations: null,
 		pinned_repositories: null,
-		pull_requests: "created_at",
-		repositories: "created_at",
-		starred: "starred_at",
-		user: "created_at",
+		pull_requests: { field: "created_at", format: "date-time" },
+		repositories: { field: "created_at", format: "date-time" },
+		starred: { field: "starred_at", format: "date-time" },
+		user: { field: "created_at", format: "date-time" },
 		user_stats: null,
 	},
 	github_browser: {
@@ -103,42 +106,42 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		starred: null,
 	},
 	gmail: {
-		attachments: "message_received_at",
+		attachments: { field: "message_received_at", format: "date-time" },
 		labels: null,
-		message_bodies: "message_received_at",
-		messages: "received_at",
-		threads: "first_message_date",
+		message_bodies: { field: "message_received_at", format: "date-time" },
+		messages: { field: "received_at", format: "date-time" },
+		threads: { field: "first_message_date", format: "date-time" },
 	},
 	google_calendar: {
 		calendars: null,
-		events: "start",
+		events: { field: "start", format: "date-time" },
 	},
 	google_contacts: {
 		contact_groups: null,
-		people: "updated",
+		people: { field: "updated", format: "date-time" },
 	},
 	google_maps: {
-		timeline_points: "timestamp",
-		timeline_segments: "start_time",
+		timeline_points: { field: "timestamp", format: "date-time" },
+		timeline_segments: { field: "start_time", format: "date-time" },
 	},
 	google_maps_data_portability: {
-		archive_jobs: "export_time",
+		archive_jobs: { field: "export_time", format: "date-time" },
 	},
 	google_messages: {
-		messages: "sent_at",
+		messages: { field: "sent_at", format: "date-time" },
 	},
 	google_takeout: {
-		location_history: "timestamp",
-		photos: "event_time",
-		search_history: "timestamp",
-		youtube_watch_history: "watched_at",
+		location_history: { field: "timestamp", format: "date-time" },
+		photos: { field: "event_time", format: "date-time" },
+		search_history: { field: "timestamp", format: "date-time" },
+		youtube_watch_history: { field: "watched_at", format: "date-time" },
 	},
 	groupme: {
 		attachments: null,
-		direct_chat_messages: "created_at",
-		direct_messages: "last_message_at",
-		group_messages: "created_at",
-		groups: "created_at",
+		direct_chat_messages: { field: "created_at", format: "date-time" },
+		direct_messages: { field: "last_message_at", format: "date-time" },
+		group_messages: { field: "created_at", format: "date-time" },
+		groups: { field: "created_at", format: "date-time" },
 	},
 	heb: {
 		nutrition: null,
@@ -147,7 +150,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		profile: null,
 	},
 	ical: {
-		events: "start",
+		events: { field: "start", format: "date-time" },
 	},
 	icloud_notes: {
 		folders: null,
@@ -155,11 +158,11 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	},
 	imessage: {
 		attachments: null,
-		messages: "date",
+		messages: { field: "date", format: "date-time" },
 		participants: null,
 	},
 	jellyfin: {
-		items: "last_played_date",
+		items: { field: "last_played_date", format: "date-time" },
 		libraries: null,
 	},
 	linkedin: {
@@ -172,21 +175,21 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	},
 	loom: {
 		transcripts: null,
-		videos: "created_at",
+		videos: { field: "created_at", format: "date-time" },
 	},
 	meta: {
 		ads: null,
 		following: null,
 		post_likes: null,
-		posts: "taken_at",
+		posts: { field: "taken_at", format: "date-time" },
 		profile: null,
 	},
 	netflix_export: {
-		viewing_activity: "watched_at",
+		viewing_activity: { field: "watched_at", format: "date-time" },
 	},
 	notion: {
-		databases: "created_time",
-		pages: "created_time",
+		databases: { field: "created_time", format: "date-time" },
+		pages: { field: "created_time", format: "date-time" },
 	},
 	oura: {
 		activity: null,
@@ -199,23 +202,23 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		sleep: null,
 	},
 	pocket: {
-		items: "time_added",
+		items: { field: "time_added", format: "date-time" },
 	},
 	reddit: {
-		comments: "created_utc",
-		downvoted: "created_utc",
-		hidden: "created_utc",
-		saved: "created_utc",
-		submitted: "created_utc",
-		upvoted: "created_utc",
+		comments: { field: "created_utc", format: "date-time" },
+		downvoted: { field: "created_utc", format: "date-time" },
+		hidden: { field: "created_utc", format: "date-time" },
+		saved: { field: "created_utc", format: "date-time" },
+		submitted: { field: "created_utc", format: "date-time" },
+		upvoted: { field: "created_utc", format: "date-time" },
 	},
 	shopify: {
-		orders: "order_date",
+		orders: { field: "order_date", format: "date-time" },
 	},
 	signal: {
 		attachments: null,
 		conversations: null,
-		messages: "sent_at",
+		messages: { field: "sent_at", format: "date-time" },
 		reactions: null,
 	},
 	slack: {
@@ -226,7 +229,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		dm_read_states: null,
 		files: null,
 		message_attachments: null,
-		messages: "sent_at",
+		messages: { field: "sent_at", format: "date-time" },
 		reactions: null,
 		reminders: null,
 		stars: null,
@@ -235,10 +238,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		workspace: null,
 	},
 	spotify: {
-		playlist_items: "added_at",
+		playlist_items: { field: "added_at", format: "date-time" },
 		playlists: null,
 		profile: null,
-		saved_tracks: "added_at",
+		saved_tracks: { field: "added_at", format: "date-time" },
 	},
 	steam: {
 		friends: null,
@@ -248,18 +251,18 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		steam_level: null,
 	},
 	strava: {
-		activities: "start_time",
+		activities: { field: "start_date_local", format: "date" },
 	},
 	strava_browser: {
-		activities: "start_time",
+		activities: { field: "start_date_local", format: "date" },
 	},
 	twitter_archive: {
-		direct_messages: "created_at",
-		tweets: "created_at",
+		direct_messages: { field: "created_at", format: "date-time" },
+		tweets: { field: "created_at", format: "date-time" },
 	},
 	uber: {
 		receipts: null,
-		trips: "requested_at",
+		trips: { field: "requested_at", format: "date-time" },
 	},
 	usaa: {
 		account_stats: null,
@@ -273,12 +276,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	venmo: {
 		friends: null,
 		profile: null,
-		transactions: "date_created",
+		transactions: { field: "date_created", format: "date-time" },
 	},
 	whatsapp: {
 		attachments: null,
-		chats: "first_message_date",
-		messages: "sent_at",
+		chats: { field: "first_message_date", format: "date-time" },
+		messages: { field: "sent_at", format: "date-time" },
 	},
 	wholefoods: {
 		nutrition: null,
@@ -290,9 +293,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		body: null,
 		cycles: null,
 		profile: null,
-		recoveries: "created_at",
-		sleeps: "start_at",
-		workouts: "start_at",
+		recoveries: { field: "created_at", format: "date-time" },
+		sleeps: { field: "start_at", format: "date-time" },
+		workouts: { field: "start_at", format: "date-time" },
 	},
 	ynab: {
 		account_stats: null,
@@ -322,7 +325,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		playlists: null,
 		profile: null,
 		subscriptions: null,
-		watch_history: "watched_at",
+		watch_history: { field: "watched_at", format: "date-time" },
 		watch_later: null,
 	},
 };

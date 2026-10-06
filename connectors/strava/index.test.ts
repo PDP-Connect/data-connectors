@@ -101,8 +101,10 @@ async function run(
 	dir: string,
 	state?: Record<string, unknown>,
 	timeRange?: { since?: string; until?: string },
+	allowFailedDone = false,
 ) {
 	return await runConnectorProtocolSubprocess({
+		allowFailedDone,
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
 		env: {
@@ -208,17 +210,14 @@ test("a normal export emits activities in canonical units", async () => {
 	);
 });
 
-test("a thin export reports unavailable metrics and requested/covered windows", async () => {
+test("a thin export reports unavailable metrics and its covered window", async () => {
 	const header =
 		"Activity ID,Activity Date,Activity Type,Distance,Elapsed Time";
 	const row = "11385479490,2024-05-20T13:05:32Z,Run,8111.2,2890";
 	await withImportDir(
 		{ "activities.csv": `${header}\n${row}\n` },
 		async (dir) => {
-			const result = await run(dir, undefined, {
-				since: "2024-05-01T00:00:00Z",
-				until: "2024-06-01T00:00:00Z",
-			});
+			const result = await run(dir);
 			const activity = recordsOf(result, "activities")[0];
 			assert.ok(activity);
 			assert.equal(activity.calories_kcal, null);
@@ -237,8 +236,8 @@ test("a thin export reports unavailable metrics and requested/covered windows", 
 			) as Record<string, string>;
 			assert.equal(coverage.status, "partial");
 			assert.match(coverage.fields_unavailable ?? "", /^calories_kcal,gear,/);
-			assert.equal(coverage.window_requested_from, "2024-05-01T00:00:00Z");
-			assert.equal(coverage.window_requested_to, "2024-06-01T00:00:00Z");
+			assert.equal(coverage.window_requested_from, "none");
+			assert.equal(coverage.window_requested_to, "none");
 			assert.equal(coverage.window_covered_from, "2024-05-20T13:05:32Z");
 			assert.equal(coverage.window_covered_to, "2024-05-20T13:05:32Z");
 			assert.doesNotMatch(coverageLine, /Parkrun|11385479490/);
@@ -268,40 +267,75 @@ test("a ZIP export streams activities.csv through the same collection path", asy
 	});
 });
 
-test("a scoped import reports only the records and window that survived time_range", async () => {
+// 00:30 on 2 June at +02:00 is 22:30 UTC on 1 June: the local day is the 2nd.
+const ROW_LOCAL =
+	'11385479492,"2024-06-02T00:30:00+02:00","Night run",Run,,' +
+	"35:00,9.3,,,,activities/3.fit.gz,,9.1,2100,2000,14967.0,,31.0,";
+
+test("a scoped import compares full-date bounds with the local start day", async () => {
 	await withImportDir(
-		{ "activities.csv": `${HEADER}\n${ROW_RUN}\n${ROW_RIDE}\n` },
+		{ "activities.csv": `${HEADER}\n${ROW_LOCAL}\n` },
 		async (dir) => {
-			const result = await run(dir, undefined, {
-				since: "2024-06-01T00:00:00Z",
-				until: "2024-06-02T00:00:00Z",
+			const kept = await run(dir, undefined, {
+				since: "2024-06-02",
+				until: "2024-06-03",
 			});
-			assert.equal(recordsOf(result, "activities").length, 1);
-			assert.equal(recordsOf(result, "activities")[0]?.id, "11385479491");
+			const activities = recordsOf(kept, "activities");
+			assert.deepEqual(
+				activities.map((a) => [a.id, a.start_date_local]),
+				[["11385479492", "2024-06-02"]],
+			);
+			assert.equal(messagesOf(kept, "SKIP_RESULT").length, 0);
+
+			const before = await run(dir, undefined, { until: "2024-06-02" });
+			assert.equal(recordsOf(before, "activities").length, 0);
+			assert.equal(messagesOf(before, "SKIP_RESULT").length, 0);
 		},
 	);
 });
 
-test("a scoped import applies timestamp bounds within the same day", async () => {
+test("a scoped import reports rows with no local day instead of completing", async () => {
 	await withImportDir(
-		{ "activities.csv": `${HEADER}\n${ROW_RIDE}\n` },
+		{ "activities.csv": `${HEADER}\n${ROW_RUN}\n${ROW_RIDE}\n${ROW_LOCAL}\n` },
 		async (dir) => {
-			const since = await run(dir, undefined, {
-				since: "2024-06-01T08:00:00+01:00",
-			});
-			assert.equal(
-				recordsOf(since, "activities").length,
-				0,
-				"the activity is before the equivalent 07:00Z since instant",
+			const result = await run(dir, undefined, { since: "2024-01-01" }, true);
+			assert.deepEqual(
+				recordsOf(result, "activities").map((a) => a.id),
+				["11385479492"],
 			);
-
-			const until = await run(dir, undefined, {
-				until: "2024-06-01T15:00:00+01:00",
-			});
+			const skips = messagesOf(result, "SKIP_RESULT");
+			assert.deepEqual(
+				skips.map((m) => [m.reason, m.message]),
+				[
+					[
+						"stream_collection_failed",
+						"2 row(s) in activities.csv have no local start day, so they cannot be placed in the requested time range and were not saved.",
+					],
+				],
+			);
+			const done = messagesOf(result, "DONE")[0];
+			assert.equal(done?.status, "failed");
+			const progress = messagesOf(result, "PROGRESS");
+			assertUserFacingProgress(progress);
 			assert.equal(
-				recordsOf(until, "activities").length,
-				1,
-				"the activity is before the equivalent 14:00Z until instant",
+				progress.at(-1)?.message,
+				"Finished Strava activities: 1 saved; 2 activities have no local date to match the requested period",
+			);
+		},
+	);
+});
+
+test("an instant bound on the local start day reports scope_not_supported", async () => {
+	await withImportDir(
+		{ "activities.csv": `${HEADER}\n${ROW_LOCAL}\n` },
+		async (dir) => {
+			const result = await run(dir, undefined, {
+				since: "2024-06-01T00:00:00Z",
+			});
+			assert.equal(recordsOf(result, "activities").length, 0);
+			assert.deepEqual(
+				messagesOf(result, "SKIP_RESULT").map((m) => m.reason),
+				["scope_not_supported"],
 			);
 		},
 	);

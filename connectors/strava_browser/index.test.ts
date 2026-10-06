@@ -540,10 +540,7 @@ test("a complete run reports redacted coverage and requested time bounds", async
 	const h = harness(
 		["activities"],
 		{},
-		{
-			since: "2026-09-01T00:00:00Z",
-			until: "2026-10-01T00:00:00Z",
-		},
+		{ since: "2026-09-01", until: "2026-10-01" },
 	);
 	const lines = await captureDiagnostics(() =>
 		withStrava(listFetcher(), () => collectStravaBrowser(h.ctx, FAST)),
@@ -552,8 +549,8 @@ test("a complete run reports redacted coverage and requested time bounds", async
 	assert.equal(coverage.status, "complete");
 	assert.equal(coverage.pages_read, 2);
 	assert.equal(coverage.unreadable, 0);
-	assert.equal(coverage.window_requested_from, "2026-09-01T00:00:00Z");
-	assert.equal(coverage.window_requested_to, "2026-10-01T00:00:00Z");
+	assert.equal(coverage.window_requested_from, "2026-09-01");
+	assert.equal(coverage.window_requested_to, "2026-10-01");
 	assert.match(String(coverage.window_covered_from), /^2026-09-01T19:00:00Z/);
 	assert.equal(coverage.window_covered_to, "2026-09-20T13:30:00Z");
 	assert.doesNotMatch(lines.join("\n"), /9000000000/);
@@ -571,41 +568,72 @@ test("a complete run reports redacted coverage and requested time bounds", async
 	assertUserFacingProgress(h.messages);
 });
 
-test("time bounds compare start instants, not calendar days", async () => {
-	const startOf = (record: RecordData) =>
-		new Date(record.start_time as string).toISOString();
-	const until = harness(["activities"], {}, { until: "2026-09-20T14:00:00Z" });
-	await withStrava(listFetcher(), () => collectStravaBrowser(until.ctx, FAST));
-	assert.ok(
-		until.of("activities").map(startOf).includes("2026-09-20T13:30:00.000Z"),
-		"an activity before the until instant on the same day is kept",
-	);
-	const since = harness(["activities"], {}, { since: "2026-09-20T14:00:00Z" });
+test("time bounds compare local calendar days, the start_date_local consent field", async () => {
+	// Activity 3 starts at 23:45 UTC on 15 September, which is 00:45 on
+	// 16 September on the athlete's clock.
+	const ids = (h: ReturnType<typeof harness>) =>
+		h.of("activities").map((record) => record.id);
+	const since = harness(["activities"], {}, { since: "2026-09-16" });
 	await withStrava(listFetcher(), () => collectStravaBrowser(since.ctx, FAST));
 	assert.ok(
-		!since.of("activities").map(startOf).includes("2026-09-20T13:30:00.000Z"),
-		"an activity before the since instant on the same day is dropped",
+		ids(since).includes("90000000003"),
+		"an activity on the since day, local time, is kept",
 	);
+	assert.ok(!ids(since).includes("90000000002"), "an earlier day is dropped");
+	const until = harness(["activities"], {}, { until: "2026-09-16" });
+	await withStrava(listFetcher(), () => collectStravaBrowser(until.ctx, FAST));
+	assert.ok(
+		!ids(until).includes("90000000003"),
+		"until is exclusive: the local 16 September activity is dropped",
+	);
+	assert.ok(ids(until).includes("90000000002"));
 });
 
-test("a since moved earlier by under a millisecond re-walks the full list", async () => {
-	const log: string[] = [];
-	const h = harness(
-		BOTH,
-		{
-			activities: {
-				known_ids: ["90000000005", "90000000004"],
-				pending_detail_ids: [],
-				list_complete: true,
-				requested_since: "2026-09-01T00:00:00.0005Z",
-			},
-		},
-		{ since: "2026-09-01T00:00:00Z" },
-	);
-	await withStrava(listFetcher(PAGES, log), () =>
+test("a bounded run reports activities with no local day instead of completing", async () => {
+	const page = JSON.parse(PAGES["2"] as string) as {
+		models: Array<Record<string, unknown>>;
+	};
+	// Without start_date_local_raw the start is UTC and the local day unknown.
+	delete page.models[0]?.start_date_local_raw;
+	const reported: string[] = [];
+	const h = harness(["activities"], {}, { since: "2026-09-01" });
+	h.ctx.reportStreamFailure = async (stream, message) => {
+		reported.push(`${stream}: ${message}`);
+	};
+	await withStrava(listFetcher({ ...PAGES, "2": JSON.stringify(page) }), () =>
 		collectStravaBrowser(h.ctx, FAST),
 	);
-	assert.equal(log.length, 2, "both list pages are read again");
+	assert.ok(!h.of("activities").some((record) => record.id === "90000000002"));
+	assert.equal(h.of("activities").length, 4);
+	assert.deepEqual(reported, [
+		"activities: 1 Strava activity has no local start day, so it cannot be placed in the requested time range and was not saved.",
+	]);
+});
+
+test("a since moved one day earlier re-walks the full list", async () => {
+	const walk = async (requestedSince: string) => {
+		const log: string[] = [];
+		const h = harness(
+			BOTH,
+			{
+				activities: {
+					known_ids: ["90000000005", "90000000004"],
+					pending_detail_ids: [],
+					list_complete: true,
+					requested_since: requestedSince,
+				},
+			},
+			{ since: "2026-09-01" },
+		);
+		await withStrava(listFetcher(PAGES, log), () =>
+			collectStravaBrowser(h.ctx, FAST),
+		);
+		return log.length;
+	};
+	assert.equal(await walk("2026-09-02"), 2, "both list pages are read again");
+	// A cursor written before start_date_local was the consent field holds an instant.
+	assert.equal(await walk("2026-09-01T00:00:00Z"), 2);
+	assert.equal(await walk("2026-09-01"), 1, "an unchanged since stops early");
 });
 
 test("an unreadable row marks the run summary partial", async () => {

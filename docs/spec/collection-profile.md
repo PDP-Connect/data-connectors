@@ -1145,7 +1145,7 @@ to one scope stream, so one run can mix the two types:
 | Field schema | Bound type | Comparison |
 | --- | --- | --- |
 | `format: "date"` | RFC 3339 `full-date` | as calendar dates |
-| `format: "date-time"`, or a string with no `format` | RFC 3339 `date-time` with a time-zone offset | as exact instants |
+| `format: "date-time"` | RFC 3339 `date-time` with a time-zone offset | as exact instants |
 
 A runtime MUST NOT turn an instant into a date or a date into an instant to
 make a bound. It sends a bound that comes from a grant without changing it.
@@ -1154,8 +1154,8 @@ states the window in the field's type, such as `since: "2026-09-05"` for a
 date field. A widened bound collects records outside the window, and a
 narrowed bound loses records at the edge of a day. A connector that receives a
 bound of the wrong type for the field, or a bound for a field of any other
-type, such as an epoch integer, MUST emit `SKIP_RESULT` with
-`reason: "scope_not_supported"` for that stream.
+type, such as an epoch integer or a string with no `format`, MUST emit
+`SKIP_RESULT` with `reason: "scope_not_supported"` for that stream.
 
 During a time-bounded run, the connector MUST NOT emit a record whose
 consent-time value is absent, null, or not a valid value of the bound type:

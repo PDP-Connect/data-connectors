@@ -47,7 +47,10 @@ const connectors = readPolyfillManifests()
 		);
 	});
 
-/** True when the manifest declares a timestamp consent field for the stream. */
+/**
+ * True when the manifest declares a `date-time` consent field for the stream.
+ * A string with no format is not eligible (Collection Profile §5.1).
+ */
 function isTimestampField(stream: ManifestStream): boolean {
 	const field = stream.consent_time_field;
 	if (!field) return false;
@@ -55,10 +58,7 @@ function isTimestampField(stream: ManifestStream): boolean {
 	const types = Array.isArray(property?.type)
 		? property.type
 		: [property?.type];
-	return (
-		types.includes("string") &&
-		(property?.format === undefined || property.format === "date-time")
-	);
+	return types.includes("string") && property?.format === "date-time";
 }
 
 async function bounded(
@@ -252,10 +252,10 @@ test("YouTube watch_history (no timestamp consent field) reports scope_not_suppo
 });
 
 test("a full-date bound on an instant consent field reports scope_not_supported", async () => {
-	assert.equal(
-		consentTimeFieldResolver("claude_code")("messages"),
-		"timestamp",
-	);
+	assert.deepEqual(consentTimeFieldResolver("claude_code")("messages"), {
+		field: "timestamp",
+		format: "date-time",
+	});
 	const result = await runConnectorProtocolSubprocess({
 		cwd: fileURLToPath(new URL("../../..", import.meta.url)),
 		entrypoint: fileURLToPath(
@@ -294,6 +294,80 @@ test("a full-date bound on an instant consent field reports scope_not_supported"
 		/since and until for messages must be a date-time with a time-zone offset/,
 	);
 });
+
+/** Runs a shipped connector's name over the given records with one bounded stream. */
+function boundedRun(
+	connector: string,
+	stream: string,
+	records: Array<Record<string, unknown>>,
+	timeRange: { since?: string; until?: string },
+) {
+	return runConnectorProtocolSubprocess({
+		cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+		entrypoint: fileURLToPath(
+			new URL("./__fixtures__/manifest-consent-time.ts", import.meta.url),
+		),
+		env: {
+			PDPP_TEST_CONNECTOR_NAME: connector,
+			PDPP_TEST_RECORDS: JSON.stringify(
+				records.map((data) => ({ data, stream })),
+			),
+		},
+		start: {
+			scope: { streams: [{ name: stream, time_range: timeRange }] },
+			type: "START",
+		},
+	});
+}
+
+for (const connector of ["strava", "strava-browser"]) {
+	test(`${connector} compares full-date bounds with start_date_local`, async () => {
+		assert.deepEqual(consentTimeFieldResolver(connector)("activities"), {
+			field: "start_date_local",
+			format: "date",
+		});
+		const result = await boundedRun(
+			connector,
+			"activities",
+			[
+				{ id: "before", start_date_local: "2026-09-15" },
+				{ id: "first-day", start_date_local: "2026-09-16" },
+				{ id: "last-day", start_date_local: "2026-09-30" },
+				{ id: "until-day", start_date_local: "2026-10-01" },
+				{
+					id: "no-local-day",
+					start_date: "2026-09-20",
+					start_date_local: null,
+				},
+				{ id: "instant", start_date_local: "2026-09-20T12:00:00Z" },
+			],
+			{ since: "2026-09-16", until: "2026-10-01" },
+		);
+		assert.deepEqual(
+			result.messages
+				.filter((m) => m.type === "RECORD" || m.type === "SKIP_RESULT")
+				.map((m) => (m.type === "RECORD" ? m.key : m.type)),
+			["first-day", "last-day"],
+		);
+	});
+
+	test(`${connector}: an instant bound on start_date_local reports scope_not_supported`, async () => {
+		const result = await boundedRun(
+			connector,
+			"activities",
+			[{ id: "a1", start_date_local: "2026-09-20" }],
+			{
+				since: "2026-09-16T00:00:00Z",
+			},
+		);
+		assert.deepEqual(
+			result.messages
+				.filter((m) => m.type === "RECORD" || m.type === "SKIP_RESULT")
+				.map((m) => `${m.type}:${(m as { reason?: string }).reason ?? ""}`),
+			["SKIP_RESULT:scope_not_supported"],
+		);
+	});
+}
 
 test("a record withheld at or after until blocks that stream's checkpoint", async () => {
 	const run = (timestamp: string) =>
@@ -415,14 +489,20 @@ test("a shipped connector cannot override its manifest's consent field", () => {
 		() => consentTimeFieldResolver("claude_code", "date"),
 		/shipped manifest/u,
 	);
-	assert.equal(
+	assert.deepEqual(
 		consentTimeFieldResolver("youtube-takeout")("watch_history"),
-		"watched_at",
+		{
+			field: "watched_at",
+			format: "date-time",
+		},
 	);
 	assert.equal(consentTimeFieldResolver("unshipped-fixture")("events"), null);
-	assert.equal(
+	assert.deepEqual(
 		consentTimeFieldResolver("unshipped-fixture", "occurred_at")("events"),
-		"occurred_at",
+		{
+			field: "occurred_at",
+			format: "date-time",
+		},
 	);
 });
 
