@@ -33,6 +33,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -491,7 +495,7 @@ test("collect path does not advance a year cursor after unparseable order-date d
 	const src = readFileSync(AMAZON_INDEX_PATH, "utf8");
 	assert.match(
 		src,
-		/if \(unparseableDateCount === 0\) \{[\s\S]*?last_scraped:\s*nowIso\(\),[\s\S]*?\} else \{[\s\S]*?Not advancing Amazon year \$\{year\} cursor/,
+		/if \(unparseableDateCount === 0\) \{[\s\S]*?last_scraped:\s*nowIso\(\),[\s\S]*?\} else \{[\s\S]*?year_cursor_not_advanced/,
 		"last_scraped must only advance on a year with zero required-row drops",
 	);
 });
@@ -715,7 +719,8 @@ test("scrapeListPage: list readiness timeout is bounded and explained before par
 });
 
 test("scrapeListPage accepts the signed-in current empty-orders shell without cards", async () => {
-	const html = '<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders found</p></div>';
+	const html =
+		'<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders found</p></div>';
 	let readinessSelector = "";
 	const page = Object.assign({} as Page, {
 		content: (): Promise<string> => Promise.resolve(html),
@@ -731,11 +736,12 @@ test("scrapeListPage accepts the signed-in current empty-orders shell without ca
 				},
 			}),
 		}),
-		evaluate: (): Promise<ListPageDiagnostics> => Promise.resolve(
-			makeEmptyPageDiagnostics({ no_orders_text: "true" }),
-		),
+		evaluate: (): Promise<ListPageDiagnostics> =>
+			Promise.resolve(makeEmptyPageDiagnostics({ no_orders_text: "true" })),
 	});
-	const result = await scrapeListPage(page, null, 2024, 0, () => Promise.resolve());
+	const result = await scrapeListPage(page, null, 2024, 0, () =>
+		Promise.resolve(),
+	);
 	assert.deepEqual(result, []);
 	assert.notEqual(readinessSelector, "");
 });
@@ -3366,7 +3372,7 @@ function findItemCountShortfalls(
 	return protocolMessages.filter(
 		(m) =>
 			(m as { type?: string; message?: string }).type === "PROGRESS" &&
-			(m as { message?: string }).message?.startsWith("item_count_shortfall:"),
+			(m as { message?: string }).message?.startsWith("An order lists "),
 	) as Record<string, unknown>[];
 }
 
@@ -3404,12 +3410,22 @@ test("emitOrderAndItems: a detail item that never becomes a record reports a dia
 			makeDetailItem({ asin: "B000000001", name: "Widget A" }),
 		],
 	});
-	await emitOrderAndItems(
-		deps,
-		makeListOrder({ items: [] }),
-		detail,
-		"2026-01-05",
-	);
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	try {
+		await emitOrderAndItems(
+			deps,
+			makeListOrder({ items: [] }),
+			detail,
+			"2026-01-05",
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.deepEqual(diagnosticLines, [
+		'[amazon-diagnostic] item_count_shortfall {"declared_items":2,"emitted_items":1}',
+	]);
+	assertUserFacingProgress(protocolMessages);
 
 	const emittedItems = emitted.filter((r) => r.stream === "order_items").length;
 	const shortfalls = findItemCountShortfalls(protocolMessages);
@@ -3418,7 +3434,7 @@ test("emitOrderAndItems: a detail item that never becomes a record reports a dia
 	assert.equal(shortfalls[0]?.stream, "order_items");
 	assert.equal(
 		shortfalls[0]?.message,
-		"item_count_shortfall: an order detail listed 2 items but only 1 became records",
+		"An order lists 2 items but we could only save 1",
 	);
 	assert.equal(
 		protocolMessages.filter(
@@ -3518,19 +3534,33 @@ test("applyYearCompletionState: a page-ceiling-truncated year is never recorded,
 	// The second run of a truncated year: prior state holds the SAME capped
 	// count this run produced. That equality is exactly what `stableCount`
 	// tests, so an unguarded implementation freezes the year here.
-	await applyYearCompletionState({
-		newYearsState,
-		prior: {
-			frozen: false,
-			last_scraped: "2026-01-01T00:00:00.000Z",
-			order_count: 500,
-		},
-		progress,
-		truncated: true,
-		unparseableDateCount: 0,
-		year: 2024,
-		yearOrderCount: 500,
-	});
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	try {
+		await applyYearCompletionState({
+			newYearsState,
+			prior: {
+				frozen: false,
+				last_scraped: "2026-01-01T00:00:00.000Z",
+				order_count: 500,
+			},
+			progress,
+			truncated: true,
+			unparseableDateCount: 0,
+			year: 2024,
+			yearOrderCount: 500,
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.equal(diagnosticLines.length, 1);
+	assert.match(
+		diagnosticLines[0] ?? "",
+		/^\[amazon-diagnostic\] year_cursor_not_advanced \{"year":2024,"reason":"page_limit","page_limit":\d+,"orders_seen":500\}$/,
+	);
+	assertUserFacingProgress(
+		progressCalls.map((message) => ({ type: "PROGRESS", message })),
+	);
 
 	assert.deepEqual(
 		newYearsState,
@@ -3539,10 +3569,12 @@ test("applyYearCompletionState: a page-ceiling-truncated year is never recorded,
 			"freeze-once-stable policy mark a partially-scanned past year complete forever",
 	);
 	assert.ok(
-		progressCalls.some(
-			(m) => m.includes("page limit") || m.includes("-page limit"),
+		progressCalls.some((m) =>
+			m.includes(
+				"stopped after 50 pages of orders; some orders from this year were not read",
+			),
 		),
-		`the owner must be told the year stopped at its page limit; got ${JSON.stringify(progressCalls)}`,
+		`the owner must be told the year stopped early; got ${JSON.stringify(progressCalls)}`,
 	);
 });
 
