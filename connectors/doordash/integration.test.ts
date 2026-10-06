@@ -23,6 +23,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
@@ -348,10 +352,25 @@ test("collectAllStreams: never emits a STATE message (full refresh only, no incr
 });
 
 test("collectAllStreams: order missing orderUuid is a record-level diagnostic, not a RECORD and not a stream SKIP_RESULT", async () => {
-	const harness = await runCollectAllStreamsWithNodes(
-		[makeOrderNode("order-1", { orderUuid: null })],
-		["orders"],
-	);
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	let harness: Awaited<ReturnType<typeof runCollectAllStreamsWithNodes>>;
+	try {
+		harness = await runCollectAllStreamsWithNodes(
+			[makeOrderNode("order-1", { orderUuid: null })],
+			["orders"],
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	// The mock page serves the same bad node on every page, so the line repeats.
+	assert.ok(diagnostics.length >= 1);
+	for (const line of diagnostics) {
+		assert.equal(
+			line,
+			'[doordash-diagnostic] shape_check_failed {"stream":"orders","reason":"order node missing orderUuid"}',
+		);
+	}
 	assert.equal(harness.emitted.length, 0);
 	// One bad node must not skip the whole orders stream: Desktop drops every
 	// order of the run for a stream-level skip.
@@ -366,7 +385,10 @@ test("collectAllStreams: order missing orderUuid is a record-level diagnostic, n
 			(m) =>
 				m.type === "PROGRESS" &&
 				m.stream === "orders" &&
-				m.message.startsWith("shape_check_failed: "),
+				m.message === "Skipped an order DoorDash returned without an ID",
 		),
+	);
+	assertUserFacingProgress(
+		harness.protocolMessages.filter((m) => m.type === "PROGRESS"),
 	);
 });

@@ -1036,14 +1036,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/doordash/index.ts",
-			line: 297,
+			line: 302,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emit() record-level PROGRESS for an order node missing orderUuid: Collection Profile protocol emission requiring in-order delivery.",
 		},
 		{
 			path: "connectors/doordash/index.ts",
-			line: 322,
+			line: 327,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collectAllStreams(): emitRecord() order_items per order: Collection Profile protocol emission requiring in-order delivery.",
