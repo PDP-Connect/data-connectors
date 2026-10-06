@@ -17,6 +17,8 @@ const TRIP_RECORD = {
 	fare_total_cents: 4743,
 	distance_meters: 29_490,
 	duration_seconds: 2100,
+	distance_display: "29.49 kilometers",
+	duration_display: "35 minutes",
 	product_type: "UberX",
 	is_surge: false,
 };
@@ -38,6 +40,13 @@ test("trips schema accepts a fully populated record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("trips schema keeps the distance/duration display fields", () => {
+	const result = tripsSchema.safeParse(TRIP_RECORD);
+	assert.ok(result.success);
+	assert.equal(result.data.distance_display, "29.49 kilometers");
+	assert.equal(result.data.duration_display, "35 minutes");
+});
+
 test("trips schema accepts a record where every field but id is null (GetTrip carried no detail)", () => {
 	const result = tripsSchema.safeParse({
 		...TRIP_RECORD,
@@ -51,6 +60,8 @@ test("trips schema accepts a record where every field but id is null (GetTrip ca
 		fare_total_cents: null,
 		distance_meters: null,
 		duration_seconds: null,
+		distance_display: null,
+		duration_display: null,
 		product_type: null,
 		is_surge: null,
 	});
@@ -120,6 +131,8 @@ test("receipts schema has no trips-only field (D3)", () => {
 		"driver_name",
 		"distance_meters",
 		"duration_seconds",
+		"distance_display",
+		"duration_display",
 		"product_type",
 		"is_surge",
 	]) {

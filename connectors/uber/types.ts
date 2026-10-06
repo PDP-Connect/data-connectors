@@ -77,7 +77,8 @@ export interface UberTrip {
  * `data.getTrip.receipt` — vehicle-type and distance/duration fields only.
  * `distance` is a bare numeric string with the unit given separately by
  * `distanceLabel` ("kilometers" | "miles", observed). `duration` is a
- * display string ("35 minutes"), not seconds.
+ * display string ("35 minutes"), not seconds. The trips record keeps both
+ * strings as `distance_display`/`duration_display` beside the normalized values.
  */
 export interface UberReceiptSummary {
 	distance?: string;
