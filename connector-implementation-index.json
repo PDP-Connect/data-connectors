@@ -11561,7 +11561,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.13",
+				"version": "0.4.14",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -11877,12 +11877,7 @@
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
-				],
-				"reason_display_messages": {
-					"ads_surfaces_unavailable": "We reached only part of Meta Accounts Center's ad preferences screen, so this ads run is incomplete. Try again after opening Accounts Center in your browser.",
-					"following_pages_deferred_page_budget": "We stopped after reading a set number of pages of your following list, so it isn't complete yet. Nothing was lost — the next run picks up where this one stopped",
-					"posts_pages_deferred_page_budget": "We stopped after reading a set number of pages of your posts, so recent history isn't complete yet. Nothing was lost — the next run picks up where this one stopped"
-				}
+				]
 			}
 		},
 		{

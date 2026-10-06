@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+	<body>
+		<div role="dialog">
+			<!-- biome-ignore lint/a11y/useSemanticElements: mirrors Instagram dialog markup. -->
+			<div role="list">
+				<!-- biome-ignore lint/a11y/useSemanticElements: mirrors Instagram dialog markup. -->
+				<div role="listitem" aria-setsize="1" aria-posinset="1">
+					<span id="topic" style="display: none">Example Topic</span>
+					<button type="button">See less</button>
+				</div>
+			</div>
+		</div>
+		<script>
+			setTimeout(() => {
+				document.querySelector("#topic").style.display = "inline";
+			}, 100);
+		</script>
+	</body>
+</html>
