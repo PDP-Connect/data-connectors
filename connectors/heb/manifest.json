@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.4",
+	"version": "0.6.5",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -578,6 +578,7 @@
 		"source_auth_or_challenge": "We need you to sign in or pass a verification check to continue",
 		"source_reported_empty": "H-E-B showed us your order history and it has no orders in it",
 		"source_reported_empty_after_retention": "H-E-B no longer lists your orders because they're older than its retention window. Your collected orders are retained and untouched, and new orders will be collected normally",
+		"stream_collection_failed": "We couldn't confirm we reached the end of this H-E-B data, so we didn't mark it complete. The next run tries again",
 		"unparseable_order_date": "We skipped some orders because their dates couldn't be read"
 	}
 }
