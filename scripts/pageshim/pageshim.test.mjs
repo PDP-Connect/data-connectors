@@ -596,12 +596,55 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
 
+		// The same window written with non-UTC offsets selects the same message.
+		const offsetBounds = await run([
+			{
+				name: "chatgpt.messages",
+				time_range: {
+					since: "2026-01-25T01:00:00+01:00",
+					until: "2026-02-01T05:30:00.000+05:30",
+				},
+			},
+		]);
+		assert.deepEqual(
+			offsetBounds.ret,
+			{ ok: true },
+			offsetBounds.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(offsetBounds.result.errors, []);
+		assert.deepEqual(
+			offsetBounds.result["chatgpt.messages"].records.map((record) => record.id),
+			["msg-3-a"],
+		);
+
+		// conv-3 starts at 00:00Z on 30 January, one hour after this since
+		// instant. Its UTC text sorts before the bound's, so only an instant
+		// comparison keeps it.
+		const nearBound = {
+			since: "2026-01-30T01:00:00+02:00",
+			until: "2026-02-01T00:00:00Z",
+		};
+		const offsetNearBound = await run(
+			scopeEntries(fx.pageshimCase.scopes, {
+				"chatgpt.conversations": nearBound,
+				"chatgpt.messages": nearBound,
+			}),
+		);
+		assert.deepEqual(offsetNearBound.result.errors, []);
+		assert.deepEqual(
+			offsetNearBound.result["chatgpt.conversations"].records.map(
+				(record) => record.id,
+			),
+			["conv-3"],
+		);
+
 		for (const since of [
 			"2026-02-30T00:00:00.000Z",
 			"2026-04-31T00:00:00.000Z",
 			"2026-13-01T00:00:00.000Z",
 			"2025-02-29T00:00:00.000Z",
-			"2026-01-01T00:00:00+01:00",
+			"2026-01-01T00:00:00",
+			"2026-01-01",
 			"bad ISO",
 		]) {
 			const invalid = await run(
@@ -616,7 +659,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 			);
 			assert.match(
 				invalid.result.errors[0].reason,
-				/valid UTC ISO-8601 bounds/,
+				/valid RFC 3339 date-time bounds with a time-zone offset/,
 			);
 			assert.equal(invalid.result["chatgpt.conversations"], undefined);
 			assert.equal(bundleSha256(built.outfile), digest);
@@ -2012,12 +2055,32 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 	]);
 	assertDigest();
 
+	// The same instants written with non-UTC offsets select the same records.
+	const offsetRange = {
+		since: "2025-12-31T19:00:00-05:00",
+		until: "2026-02-01T09:00:00+09:00",
+	};
+	const offsetFiltered = await run(
+		scopeEntries(c.scopes, {
+			"claude.conversations": offsetRange,
+			"claude.messages": offsetRange,
+		}),
+	);
+	assert.deepEqual(offsetFiltered.result.errors, []);
+	assert.deepEqual(recordIds(offsetFiltered.result, "claude.conversations"), [
+		"conv-recent",
+	]);
+	assert.deepEqual(recordIds(offsetFiltered.result, "claude.messages"), [
+		"msg-recent",
+	]);
+
 	for (const since of [
 		"2026-02-30T00:00:00.000Z",
 		"2026-04-31T00:00:00.000Z",
 		"2026-13-01T00:00:00.000Z",
 		"2025-02-29T00:00:00.000Z",
-		"2026-01-01T00:00:00+01:00",
+		"2026-01-01T00:00:00",
+		"2026-01-01",
 		"bad ISO",
 	]) {
 		const invalid = await run(
@@ -2030,7 +2093,10 @@ test("anthropic: one publishing bundle handles full, ranged, legacy, and invalid
 			1,
 			JSON.stringify(invalid.result.errors),
 		);
-		assert.match(invalid.result.errors[0].reason, /valid UTC ISO-8601 bounds/);
+		assert.match(
+			invalid.result.errors[0].reason,
+			/valid RFC 3339 date-time bounds with a time-zone offset/,
+		);
 		assert.equal(invalid.result["claude.conversations"], undefined);
 		assertDigest();
 	}
