@@ -7,6 +7,10 @@
 // stores each `{ activities }` payload as the newest whole version, so a list
 // walk that stops early (a 503 or a 429 after the retries) fails the run: an
 // emitted prefix would replace the stored list.
+//
+// A host range for strava.activities applies to start_date_local, a
+// calendar day: full-date bounds are compared as days. A bound of another
+// type collects nothing, and the runtime reports scope_not_supported.
 import {
 	collectStravaBrowser,
 	LOGIN_URL,
@@ -14,10 +18,20 @@ import {
 	type StravaCollectContext,
 } from "../../../connectors/strava_browser/index.ts";
 import { validateRecord } from "../../../connectors/strava_browser/schemas.ts";
+import { consentTimeFieldResolver } from "../../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { timeRangeUnsupportedReason } from "../../../packages/polyfill-connectors/src/time-range.ts";
+import { applyRequestedTimeRanges } from "../requested-time-range.ts";
 import { runOnPageShim, type ShimPage } from "../runtime.ts";
 
 // Defined by build.mjs from connectors/strava_browser/manifest.json.
 declare const PAGESHIM_CONNECTOR_VERSION: string;
+
+type ScopeEntriesPage = ShimPage & {
+	requestedScopeEntries?: () => unknown;
+};
+
+const activitiesConsentField =
+	consentTimeFieldResolver("strava-browser")("activities");
 
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage,
@@ -34,10 +48,29 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 			loginMessage: "Sign in to Strava, then return here.",
 			validateRecord,
 			probe: (pw) => probeStravaSession(pw as never),
-			collect: (ctx) =>
-				collectStravaBrowser(ctx as unknown as StravaCollectContext, {
+			collect: async (ctx) => {
+				const { requested } = ctx as unknown as {
+					requested: Map<
+						string,
+						{ time_range?: { since?: string; until?: string } }
+					>;
+				};
+				applyRequestedTimeRanges(
+					requested,
+					(page as ScopeEntriesPage).requestedScopeEntries?.(),
+					"strava",
+					{ acceptFullDate: true },
+				);
+				const unsupported = timeRangeUnsupportedReason(
+					"activities",
+					requested.get("activities")?.time_range,
+					activitiesConsentField,
+				);
+				if (unsupported !== null) return;
+				await collectStravaBrowser(ctx as unknown as StravaCollectContext, {
 					failRunOnIncompleteList: true,
-				}),
+				});
+			},
 			toScope: (_stream, records) => ({ activities: records }),
 			streamScopeRecords: {
 				order: ["activities"],

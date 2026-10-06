@@ -2122,12 +2122,79 @@ test("strava_browser: records and fail-closed paths on the PageShim host", {
 		connector: "strava_browser",
 		outfile: join(out, "strava_browser-paths.js"),
 	});
-	const run = (resolve = resolveFixture) =>
+	const run = (resolve = resolveFixture, scopes = c.scopes) =>
 		runHarness({
 			bundle: built.outfile,
 			fixtures: { ...c.fixtures, resolve },
-			scopes: c.scopes,
+			scopes,
 		});
+	const ranged = (time_range) =>
+		run(resolveFixture, [{ name: "strava.activities", time_range }]);
+
+	await t.test(
+		"a full-date host range keeps the activities on those local days",
+		async () => {
+			// Activity 3 starts at 23:45 UTC on 15 September, 00:45 on the 16th
+			// on the athlete's clock; activity 5 is on the 20th.
+			const r = await ranged({ since: "2026-09-16", until: "2026-09-19" });
+			assertCleanRun(r);
+			assert.deepEqual(r.result.errors, []);
+			assert.deepEqual(
+				r.result["strava.activities"].activities.map((a) => [
+					a.id,
+					a.start_date_local,
+				]),
+				[
+					["90000000004", "2026-09-18"],
+					["90000000003", "2026-09-16"],
+				],
+			);
+		},
+	);
+
+	await t.test(
+		"an instant host range collects nothing and reports scope_not_supported",
+		async () => {
+			const listReads = [];
+			const r = await run(
+				(raw) => {
+					const url = new URL(raw);
+					// The sign-in probe reads one row; collection reads pages.
+					if (
+						url.pathname === "/athlete/training_activities" &&
+						url.searchParams.get("per_page") !== "1"
+					)
+						listReads.push(raw);
+					return resolveFixture(raw);
+				},
+				[
+					{
+						name: "strava.activities",
+						time_range: { since: "2026-09-16T00:00:00Z" },
+					},
+				],
+			);
+			assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+			assertCleanRun(r);
+			assert.equal(r.result["strava.activities"], undefined);
+			assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+			assert.match(
+				r.result.errors[0].reason,
+				/must be a full-date, because start_date_local is a calendar date/,
+			);
+			assert.deepEqual(listReads, [], "no activity list page is read");
+		},
+	);
+
+	await t.test("a malformed host range fails the run", async () => {
+		const r = await ranged({ since: "2026-9-16" });
+		assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+		assert.match(
+			r.result.errors[0].reason,
+			/must contain valid RFC 3339 full-date bounds/,
+		);
+		assert.equal(r.result["strava.activities"], undefined);
+	});
 
 	await t.test("activities cross as live records", async () => {
 		const r = await run();
