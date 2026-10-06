@@ -48,6 +48,7 @@ const ACTIVITY = {
 	id: "11385479490",
 	activity_type: "Run",
 	start_date: "2024-05-20",
+	start_date_local: null,
 	start_time: "2024-05-20T13:05:32Z",
 	start_time_basis: "utc" as const,
 	distance_m: 8123.4,

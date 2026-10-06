@@ -83,6 +83,10 @@ export const activitiesSchema = z.object({
 		.regex(NUMERIC_ID_RE, "id must be a numeric Strava activity id"),
 	activity_type: z.string().min(1).max(64).nullable(),
 	start_date: z.string().regex(ISO_DATE_RE, "start_date must be YYYY-MM-DD"),
+	start_date_local: z
+		.string()
+		.regex(ISO_DATE_RE, "start_date_local must be YYYY-MM-DD")
+		.nullable(),
 	start_time: isoDateTime,
 	start_time_basis: z.enum(START_TIME_BASES),
 	distance_m: metricSchema,

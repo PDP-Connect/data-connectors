@@ -104,6 +104,7 @@ import {
 	type TerminalErrorDetails,
 } from "./terminal-error.ts";
 import {
+	type ConsentTimeField,
 	isOutsideTimeRange,
 	timeRangeUnsupportedReason,
 } from "./time-range.ts";
@@ -1470,16 +1471,17 @@ async function parseStart(
 }
 
 /**
- * Resolve each stream's `scope.time_range` field. A shipped connector's
- * manifest `consent_time_field` is the only authority (via the generated
- * table); `null` means the stream has no timestamp consent field. Only a
- * connector with no shipped manifest (a test fixture) may name its field in
- * config, and one that has neither resolves every stream to `null`.
+ * Resolve each stream's `scope.time_range` field and its format. A shipped
+ * connector's manifest `consent_time_field` is the only authority (via the
+ * generated table); `null` means the runtime cannot compare bounds with the
+ * stream's consent field. Only a connector with no shipped manifest (a test
+ * fixture) may name a `date-time` field in config, and one that has neither
+ * resolves every stream to `null`.
  */
 export function consentTimeFieldResolver(
 	name: string,
 	timeRangeField?: string | ((stream: string) => string),
-): (stream: string) => string | null {
+): (stream: string) => ConsentTimeField | null {
 	const manifestFields = Object.hasOwn(
 		CONSENT_TIME_FIELDS,
 		name.replaceAll("-", "_"),
@@ -1498,9 +1500,13 @@ export function consentTimeFieldResolver(
 				: null;
 	}
 	if (timeRangeField === undefined) return () => null;
-	return typeof timeRangeField === "function"
-		? timeRangeField
-		: () => timeRangeField;
+	return (stream) => ({
+		field:
+			typeof timeRangeField === "function"
+				? timeRangeField(stream)
+				: timeRangeField,
+		format: "date-time",
+	});
 }
 
 /** Build the requested-streams map; the runtime requires at least one stream. */
@@ -1596,7 +1602,7 @@ export function makeEmitRecord(deps: {
 	emittedAt: string;
 	validateRecord: ValidateRecord | undefined;
 	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
-	timeRangeFieldFor: (stream: string) => string | null;
+	timeRangeFieldFor: (stream: string) => ConsentTimeField | null;
 }): {
 	emit: (
 		stream: string,
@@ -1644,13 +1650,14 @@ export function makeEmitRecord(deps: {
 		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
 			return "skip";
 		const streamScope = requested.get(stream);
-		const field = timeRangeFieldFor(stream);
-		if (streamScope?.time_range && field === null) return "skip";
+		const consent = timeRangeFieldFor(stream);
+		if (streamScope?.time_range && consent === null) return "skip";
+		const value = consent === null ? undefined : data[consent.field];
 		if (
 			streamScope?.time_range &&
-			field !== null &&
-			typeof data[field] === "string" &&
-			/^\d{4}-\d{2}-\d{2}$/.test(data[field])
+			consent?.format === "date-time" &&
+			typeof value === "string" &&
+			/^\d{4}-\d{2}-\d{2}$/.test(value)
 		) {
 			throw new TerminalError(
 				`time_range cannot be applied to date-precision consent value for ${stream}`,
@@ -1658,11 +1665,14 @@ export function makeEmitRecord(deps: {
 		}
 		if (
 			streamScope?.time_range &&
-			field !== null &&
-			isOutsideTimeRange(streamScope.time_range, data[field])
+			consent !== null &&
+			isOutsideTimeRange(streamScope.time_range, value, consent.format)
 		) {
 			const until = streamScope.time_range.until;
-			if (until !== undefined && isOutsideTimeRange({ until }, data[field]))
+			if (
+				until !== undefined &&
+				isOutsideTimeRange({ until }, value, consent.format)
+			)
 				withheldAtOrAfterUntil.add(stream);
 			return "skip";
 		}

@@ -9,7 +9,7 @@
 	},
 	"connector_key": "strava",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-	"version": "1.0.14",
+	"version": "1.0.15",
 	"display_name": "Strava",
 	"brand": {
 		"icon": "icon.svg",
@@ -99,6 +99,11 @@
 						"format": "date",
 						"description": "The calendar day of the activity, YYYY-MM-DD. Carried separately because start_time deliberately does not claim to be an instant: filtering and grouping need a field a server can treat as a date without inventing a timezone to do it. Derived from the same value as start_time, so it INHERITS start_time_basis — under basis 'utc' this is the UTC day, which is the wrong calendar day for any activity between local midnight and the owner's offset. Aggregates over a window (longest, furthest, how many) are safe on any basis; anything anchored to a particular day, including a same-day join against another source, is only safe under basis 'local'."
 					},
+					"start_date_local": {
+						"type": ["string", "null"],
+						"format": "date",
+						"description": "The activity's calendar day on the athlete's local clock, YYYY-MM-DD, or null when the source does not give that clock. This is the stream's consent_time_field: a time_range is a pair of full-dates compared with it as calendar days, and a bounded run never emits an activity whose value is null. strava-browser derives it from the local start time in Strava's activity list. The export fills it only when Activity Date states a numeric offset other than -00:00; a Z value gives the UTC day, which is not the local day for an activity between midnight and the offset."
+					},
 					"start_time": {
 						"type": "string",
 						"description": "Activity start, ISO-8601. Carries a UTC offset only when the archive stated one; Strava's own rendering does not, so a zoneless value is normal. Read start_time_basis before treating this as an instant or making any claim about time of day.",
@@ -163,7 +168,7 @@
 			},
 			"primary_key": ["id"],
 			"cursor_field": "start_date",
-			"consent_time_field": "start_time",
+			"consent_time_field": "start_date_local",
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -172,6 +177,7 @@
 			"query": {
 				"range_filters": {
 					"start_date": ["gte", "gt", "lte", "lt"],
+					"start_date_local": ["gte", "gt", "lte", "lt"],
 					"exported_at": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {

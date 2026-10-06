@@ -919,7 +919,7 @@ for (const scenario of [
 			emittedAt: ctx.emittedAt,
 			validateRecord,
 			isTombstone: undefined,
-			timeRangeFieldFor: () => "",
+			timeRangeFieldFor: () => ({ field: "", format: "date-time" }),
 		});
 		ctx.emitRecord = runtimeEmitter.emit;
 		const originalGoto = page.goto.bind(page);
@@ -1194,7 +1194,7 @@ test("collectAnthropic: new multi-part manifest format — downloads every part 
 		emittedAt: ctx.emittedAt,
 		validateRecord,
 		isTombstone: undefined,
-		timeRangeFieldFor: () => "",
+		timeRangeFieldFor: () => ({ field: "", format: "date-time" }),
 	});
 	ctx.emitRecord = runtimeEmitter.emit;
 

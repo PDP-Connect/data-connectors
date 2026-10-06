@@ -411,6 +411,24 @@ export function parseActivityDate(raw: string | undefined): ParsedStart | null {
 	return null;
 }
 
+/**
+ * The athlete's local calendar day, or null when Activity Date does not give
+ * the local clock. Only a stated numeric offset does: its wall-clock date is
+ * the local day. `Z` is a UTC rendering and `-00:00` says the offset is
+ * unknown (RFC 3339 §4.3), and Strava's own zoneless rendering states no
+ * clock at all.
+ */
+export function localDay(raw: string | undefined): string | null {
+	const zoned = ISO_WITH_ZONE_RE.exec(raw?.trim() ?? "");
+	if (!zoned) {
+		return null;
+	}
+	const [, date, , zone] = zoned;
+	return zone === "Z" || zone === "-00:00" || zone === "-0000"
+		? null
+		: (date ?? null);
+}
+
 export interface ActivityRecord {
 	activity_type: string | null;
 	average_heartrate: number | null;
@@ -424,6 +442,7 @@ export interface ActivityRecord {
 	max_heartrate: number | null;
 	moving_time_s: number | null;
 	start_date: string;
+	start_date_local: string | null;
 	start_time: string;
 	start_time_basis: "utc" | "local" | "unknown";
 	total_elevation_gain_m: number | null;
@@ -459,6 +478,7 @@ export function buildActivityRecord(
 		// does not claim to be an instant. Filtering and grouping need a field the
 		// server can treat as a date without one being invented for it.
 		start_date: start.iso.slice(0, 10),
+		start_date_local: localDay(at(row, columns.activityDate)),
 		start_time: start.iso,
 		start_time_basis: start.basis,
 		distance_m: numberOrNull(at(row, columns.distanceM)),

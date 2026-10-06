@@ -27,7 +27,7 @@ export async function desktopScopePayload(resolveFixture) {
 		emittedAt: "2026-01-01T00:00:00.000Z",
 		validateRecord,
 		isTombstone: undefined,
-		timeRangeFieldFor: () => "start_time",
+		timeRangeFieldFor: () => ({ field: "start_date_local", format: "date" }),
 	});
 
 	let currentUrl = new URL("https://www.strava.com/dashboard");

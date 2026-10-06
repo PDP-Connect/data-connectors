@@ -207,12 +207,17 @@ async function openActivitiesCsv(filePath: string): Promise<CsvSourceResult> {
 	}
 }
 
-/** Match the runtime's inclusive-since/exclusive-until timestamp filtering locally. */
+/**
+ * Match the runtime's full-date filtering on start_date_local locally. A null
+ * local day is outside every range: the runtime withholds it too.
+ */
 function isOutsideRequestedTimeRange(
-	dateValue: string,
+	localDay: string | null,
 	timeRange: { since?: string; until?: string } | undefined,
 ): boolean {
-	return timeRange !== undefined && isOutsideTimeRange(timeRange, dateValue);
+	return (
+		timeRange !== undefined && isOutsideTimeRange(timeRange, localDay, "date")
+	);
 }
 
 async function collectActivities(
@@ -288,6 +293,8 @@ async function collectActivities(
 
 	let emitted = 0;
 	let unreadable = 0;
+	// Rows a bounded import cannot place, because Activity Date gives no local day.
+	let unplaced = 0;
 	let earliest: string | null = null;
 	let coveredLatest: string | null = null;
 	let cursorLatest: string | null = since ?? null;
@@ -333,10 +340,14 @@ async function collectActivities(
 			// The cursor makes a re-import of an overlapping archive cheap: Strava's
 			// activity ids are stable across exports, so the second archive collapses
 			// onto the first rather than double-counting.
-			if (
-				(since && record.start_time <= since) ||
-				isOutsideRequestedTimeRange(record.start_time, timeRange)
-			) {
+			if (since && record.start_time <= since) {
+				return;
+			}
+			if (timeRange && record.start_date_local === null) {
+				unplaced += 1;
+				return;
+			}
+			if (isOutsideRequestedTimeRange(record.start_date_local, timeRange)) {
 				return;
 			}
 			// Apply the requested time range before emitRecord. The runtime repeats
@@ -439,6 +450,14 @@ async function collectActivities(
 		});
 	}
 
+	if (unplaced > 0) {
+		// The range's contents cannot be proven: these activities may be in it.
+		await ctx.reportStreamFailure?.(
+			ACTIVITIES_STREAM,
+			`${String(unplaced)} row(s) in ${ACTIVITIES_CSV} have no local start day, so they cannot be placed in the requested time range and were not saved.`,
+		);
+	}
+
 	// Keep the source-coverage facts visible after removing the dedicated
 	// coverage stream. This message contains only schema field names,
 	// counts, and timestamps; it never includes activity content.
@@ -451,7 +470,7 @@ async function collectActivities(
 		resolvedColumns.elevationGainM === null ? "total_elevation_gain_m" : null,
 	].filter((field): field is string => field !== null);
 	const coverageStatus =
-		truncated || unreadable > 0 || fieldsUnavailable.length > 0
+		truncated || unreadable > 0 || unplaced > 0 || fieldsUnavailable.length > 0
 			? "partial"
 			: emitted === 0
 				? "empty"
@@ -469,6 +488,9 @@ async function collectActivities(
 		truncated ? "the export file was cut short" : null,
 		unreadable > 0
 			? `${String(unreadable)} ${unreadable === 1 ? "row" : "rows"} could not be read`
+			: null,
+		unplaced > 0
+			? `${String(unplaced)} ${unplaced === 1 ? "activity has" : "activities have"} no local date to match the requested period`
 			: null,
 		fieldsUnavailable.length > 0
 			? "some details were not in your export"
@@ -493,7 +515,10 @@ async function collectActivities(
 		type: "STATE",
 		stream: ACTIVITIES_STREAM,
 		cursor: {
-			last_start_time: truncated ? (since ?? null) : cursorLatest,
+			// An unplaced row may be older than cursorLatest; keep the cursor so a
+			// later import still reads it.
+			last_start_time:
+				truncated || unplaced > 0 ? (since ?? null) : cursorLatest,
 		},
 	});
 }

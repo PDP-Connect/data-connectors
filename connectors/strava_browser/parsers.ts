@@ -155,6 +155,18 @@ function localStart(utc: string, localRaw: unknown): string | null {
 	return `${wall}${sign}${hh}:${mm}`;
 }
 
+/**
+ * True when the local and UTC starts differ by a whole number of minutes.
+ * localStart rounds the difference; a value it had to round is not a real
+ * offset, so the local day it implies is not trusted as the consent field.
+ */
+function hasExactOffset(utc: string, localRaw: unknown): boolean {
+	return (
+		typeof localRaw === "number" &&
+		(localRaw * 1000 - Date.parse(utc)) % 60_000 === 0
+	);
+}
+
 /** A record's start as a UTC instant, `YYYY-MM-DDTHH:MM:SSZ`, for ordering. */
 export function startInstant(
 	record: Pick<ActivityRecord, "start_time">,
@@ -167,9 +179,10 @@ export function startInstant(
  * placed: no numeric id or no zoned start time. The caller counts nulls.
  *
  * `start_time` is on the athlete's local clock, with its offset, when the
- * model gives the local time (basis `local`, so `start_date` is the local
- * calendar day); otherwise it is UTC (basis `utc`). Either way it is an
- * instant.
+ * model gives the local time (basis `local`, so `start_date` and
+ * `start_date_local` are the local calendar day); otherwise it is UTC (basis
+ * `utc`) and `start_date_local`, the consent-time field, is null. Either way
+ * `start_time` is an instant.
  *
  * Heart rate, calories and gear are null because the list does not carry
  * them; the manifest documents those permanent list limitations.
@@ -189,6 +202,10 @@ export function buildActivityRecord(model: unknown): ActivityRecord | null {
 		id,
 		activity_type: activityTypeOf(model),
 		start_date: start.slice(0, 10),
+		start_date_local:
+			local && hasExactOffset(utc, model.start_date_local_raw)
+				? local.slice(0, 10)
+				: null,
 		start_time: start,
 		start_time_basis: local ? "local" : "utc",
 		distance_m: numberOrNull(model.distance_raw),

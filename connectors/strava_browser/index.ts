@@ -97,6 +97,8 @@ export interface StravaCollectContext {
 	emitRecord: BrowserCollectContext["emitRecord"];
 	page: Pick<Page, "context" | "evaluate" | "goto">;
 	requested: BrowserCollectContext["requested"];
+	/** Both runtimes supply it; only hand-built test contexts omit it. */
+	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 	state: Record<string, unknown>;
 }
 
@@ -121,7 +123,7 @@ interface ActivitiesState {
 	pending_detail_ids?: string[];
 	/** Set after a complete initial inventory; detail work starts next run. */
 	list_complete?: boolean;
-	/** Earliest requested day represented by known_ids, when range-limited. */
+	/** Earliest requested full-date represented by known_ids, when range-limited. */
 	requested_since?: string | null;
 }
 
@@ -588,11 +590,16 @@ export async function collectStravaBrowser(
 		: [];
 	const rangeExpanded =
 		stored.requested_since != null &&
-		// True when the new since is earlier than the stored one. An older
-		// cursor stored a calendar day, which is not an instant; it counts as
-		// expanded, so the run re-walks the full list once.
+		// True when the new since is an earlier day than the stored one. A
+		// cursor from 0.1.18 or earlier stored an instant, which is not a
+		// full-date; it counts as expanded, so the run re-walks the full list
+		// once.
 		(rangeSince == null ||
-			isOutsideTimeRange({ since: stored.requested_since }, rangeSince));
+			isOutsideTimeRange(
+				{ since: stored.requested_since },
+				rangeSince,
+				"date",
+			));
 	const fullListWalk =
 		fullRefresh || stored.list_complete !== true || rangeExpanded;
 	const wasInventoryComplete = stored.list_complete === true;
@@ -606,6 +613,7 @@ export async function collectStravaBrowser(
 	let detailsUpdated = 0;
 	let detailsDeferred = 0;
 	let unreadable = 0;
+	let unplaced = 0;
 	let earliest: string | null = null;
 	let latest: string | null = null;
 	let previousFirstId: string | null = null;
@@ -666,10 +674,16 @@ export async function collectStravaBrowser(
 				unreadable += 1;
 				continue;
 			}
-			// The runtime's rule, applied here too so the coverage record
-			// describes the records the run keeps.
+			// The runtime's rule for the consent field start_date_local, applied
+			// here too so the coverage record describes the records the run keeps.
+			// An activity with no local day cannot be placed in the range.
+			if (timeRange && record.start_date_local === null) {
+				unplaced += 1;
+				continue;
+			}
 			const inRequestedRange =
-				!timeRange || !isOutsideTimeRange(timeRange, record.start_time);
+				!timeRange ||
+				!isOutsideTimeRange(timeRange, record.start_date_local, "date");
 			if (!inRequestedRange) {
 				continue;
 			}
@@ -787,7 +801,7 @@ export async function collectStravaBrowser(
 				: {}),
 			message:
 				failure?.message ??
-				`${unreadable} activities in the Strava list had no usable id or start time.`,
+				`${unreadable} activities in the Strava list had no usable id, start time or local start day.`,
 			diagnostics: {
 				pages_read: pagesRead,
 				unreadable,
@@ -806,6 +820,12 @@ export async function collectStravaBrowser(
 		});
 	}
 
+	if (unplaced > 0) {
+		// The range's contents cannot be proven: these activities may be in it.
+		const message = `${unplaced} Strava ${unplaced === 1 ? "activity has" : "activities have"} no local start day, so ${unplaced === 1 ? "it" : "they"} cannot be placed in the requested time range and ${unplaced === 1 ? "was" : "were"} not saved.`;
+		await ctx.reportStreamFailure?.(ACTIVITIES_STREAM, message);
+	}
+
 	const listComplete = wasInventoryComplete || (listFinished && !failure);
 	const requestedSince = rangeSince;
 	const cursor: ActivitiesState = {
@@ -817,7 +837,7 @@ export async function collectStravaBrowser(
 	const requestedFrom = timeRange?.since ?? "none";
 	const requestedTo = timeRange?.until ?? "none";
 	const coverageStatus =
-		failure || unreadable > 0
+		failure || unreadable > 0 || unplaced > 0
 			? "partial"
 			: listed.length === 0
 				? "empty"

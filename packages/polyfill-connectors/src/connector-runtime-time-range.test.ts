@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { makeEmitRecord } from "./connector-runtime.ts";
 import { runConnectorProtocolSubprocess } from "./test-harness.ts";
-import { isOutsideTimeRange } from "./time-range.ts";
+import {
+	isOutsideTimeRange,
+	parseFullDate,
+	timeRangeUnsupportedReason,
+} from "./time-range.ts";
 
 async function emitted(
 	timeRange: { since?: string; until?: string },
@@ -22,7 +26,7 @@ async function emitted(
 		emittedAt: "2026-05-03T00:00:00.000Z",
 		validateRecord: undefined,
 		isTombstone: undefined,
-		timeRangeFieldFor: () => "occurred_at",
+		timeRangeFieldFor: () => ({ field: "occurred_at", format: "date-time" }),
 	});
 
 	await gate.emit("events", { id: "event-1", occurred_at: value });
@@ -42,7 +46,7 @@ async function emittedTombstone(
 		emittedAt: "2026-05-03T00:00:00.000Z",
 		validateRecord: undefined,
 		isTombstone: () => true,
-		timeRangeFieldFor: () => "occurred_at",
+		timeRangeFieldFor: () => ({ field: "occurred_at", format: "date-time" }),
 	});
 	await gate.emit("events", { id: "event-1", occurred_at: value });
 	return messages;
@@ -188,6 +192,50 @@ test("Chase and YNAB date streams skip bounded runs as scope_not_supported witho
 			label,
 		);
 	}
+});
+
+test("a date consent field compares full-date bounds as calendar days", () => {
+	const range = { since: "2026-05-02", until: "2026-05-04" };
+	const outside = (value: unknown) => isOutsideTimeRange(range, value, "date");
+	assert.equal(outside("2026-05-01"), true);
+	assert.equal(outside("2026-05-02"), false, "since is inclusive");
+	assert.equal(outside("2026-05-03"), false);
+	assert.equal(outside("2026-05-04"), true, "until is exclusive");
+	// Neither a value nor a bound is ever converted between dates and instants.
+	assert.equal(outside("2026-05-03T12:00:00Z"), true);
+	assert.equal(outside("2026-02-30"), true);
+	assert.equal(
+		isOutsideTimeRange({ since: "2026-05-02T00:00:00Z" }, "2026-05-03", "date"),
+		true,
+	);
+	assert.equal(parseFullDate("2024-02-29"), "2024-02-29");
+	assert.equal(parseFullDate("2026-02-29"), null);
+	assert.equal(parseFullDate("2026-5-03"), null);
+});
+
+test("a bound of the wrong type for the consent field's format is unsupported", () => {
+	const date = { field: "start_date", format: "date" } as const;
+	const instant = { field: "created_at", format: "date-time" } as const;
+	assert.equal(
+		timeRangeUnsupportedReason("activities", { since: "2026-05-02" }, date),
+		null,
+	);
+	assert.match(
+		String(
+			timeRangeUnsupportedReason(
+				"activities",
+				{ since: "2026-05-02T00:00:00Z" },
+				date,
+			),
+		),
+		/must be a full-date, because start_date is a calendar date/,
+	);
+	assert.match(
+		String(
+			timeRangeUnsupportedReason("events", { until: "2026-05-02" }, instant),
+		),
+		/must be a date-time with a time-zone offset/,
+	);
 });
 
 test("lowercase t and z separators are valid RFC 3339 instants", () => {
