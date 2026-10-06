@@ -224,7 +224,8 @@
       "include": [
         "schemas/connector-binding-grammar.test.mjs",
         "schemas/connector-index.schema.test.mjs",
-        "schemas/connector-manifest.schema.test.mjs"
+        "schemas/connector-manifest.schema.test.mjs",
+        "schemas/observation.schema.test.mjs"
       ],
       "profiles": [
         {
