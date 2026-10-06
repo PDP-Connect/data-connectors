@@ -16,6 +16,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	packageRoot as PACKAGE_ROOT,
@@ -67,7 +68,7 @@ async function runTakeoutImport(
 	importRoot: string,
 	streams: readonly string[],
 	env: Record<string, string> = {},
-): Promise<{ messages: EmittedMessage[] }> {
+): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	return await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: GOOGLE_TAKEOUT_ENTRYPOINT,
@@ -88,10 +89,15 @@ async function runTakeoutImport(
 async function runPhotosImport(
 	importRoot: string,
 	env: Record<string, string> = {},
-): Promise<{ messages: EmittedMessage[]; photos: Record<string, unknown>[] }> {
+): Promise<{
+	messages: EmittedMessage[];
+	photos: Record<string, unknown>[];
+	stderr: string;
+}> {
 	const result = await runTakeoutImport(importRoot, ["photos"], env);
 	return {
 		messages: result.messages,
+		stderr: result.stderr,
 		photos: records(result.messages, "photos"),
 	};
 }
@@ -166,7 +172,7 @@ test("photos stream discovers files, matches sidecars, and skips unsupported fil
 			JSON.stringify({ title: "Photos from 2024" }),
 		);
 
-		const { photos, messages } = await runPhotosImport(importRoot);
+		const { photos, messages, stderr } = await runPhotosImport(importRoot);
 
 		assert.equal(
 			photos.length,
@@ -198,11 +204,19 @@ test("photos stream discovers files, matches sidecars, and skips unsupported fil
 			)
 			.map((m) => m.message)
 			.join("\n");
-		assert.match(progressText, /unsupported_files=1/);
 		assert.doesNotMatch(progressText, /notes\.txt/);
 		assert.match(
 			progressMessages(messages, "photos").join("\n"),
-			/Google Takeout phase=coverage stream=photos status=collected reason=collected items=3 unsupported_files=1/,
+			/Found 3 photos in your Takeout export \(1 file not supported\)/,
+		);
+		assertUserFacingProgress(messages);
+		assert.match(
+			stderr,
+			/\[google_takeout-diagnostic\] coverage \{"items":3,"reason":"collected","status":"collected","stream":"photos","unsupported_files":1\}/,
+		);
+		assert.match(
+			stderr,
+			/\[google_takeout-diagnostic\] emit_start \{"stream":"photos","total_items":3,"unsupported_files":1\}/,
 		);
 
 		const done = messages.at(-1);
@@ -224,19 +238,24 @@ test("requested missing Takeout stores emit redacted coverage progress", async (
 			"search_history",
 			"photos",
 		]);
-		for (const stream of [
-			"location_history",
-			"youtube_watch_history",
-			"search_history",
-			"photos",
-		]) {
+		const labels: Record<string, string> = {
+			location_history: "location history entries",
+			photos: "photos",
+			search_history: "search history entries",
+			youtube_watch_history: "YouTube watch history entries",
+		};
+		for (const [stream, label] of Object.entries(labels)) {
+			assert.deepEqual(progressMessages(result.messages, stream), [
+				`No ${label} found in your Takeout export`,
+			]);
 			assert.match(
-				progressMessages(result.messages, stream).join("\n"),
+				result.stderr,
 				new RegExp(
-					`Google Takeout phase=coverage stream=${stream} status=missing reason=records_not_found items=0 unsupported_files=0`,
+					`\\[google_takeout-diagnostic\\] coverage \\{"items":0,"reason":"records_not_found","status":"missing","stream":"${stream}","unsupported_files":0\\}`,
 				),
 			);
 		}
+		assertUserFacingProgress(result.messages);
 		assert.equal(skipResults(result.messages).length, 4);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });

@@ -24,6 +24,7 @@ import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -65,6 +66,17 @@ function maxPhotoBytes(env: NodeJS.ProcessEnv = process.env): number {
 	return resolveMaxMediaBytes(MAX_PHOTO_BYTES_ENV, env);
 }
 
+const STREAM_LABELS: Record<string, string> = {
+	location_history: "location history entries",
+	photos: "photos",
+	search_history: "search history entries",
+	youtube_watch_history: "YouTube watch history entries",
+};
+
+function streamLabel(stream: string): string {
+	return STREAM_LABELS[stream] ?? "items";
+}
+
 async function emitCoverageProgress(
 	emit: CollectContext["emit"],
 	input: {
@@ -75,17 +87,60 @@ async function emitCoverageProgress(
 		unsupportedFiles?: number;
 	},
 ): Promise<void> {
+	const items = input.items ?? 0;
+	const unsupportedFiles = input.unsupportedFiles ?? 0;
+	connectorDiagnostic("google_takeout", "coverage", {
+		items,
+		reason: input.reason,
+		status: input.status,
+		stream: input.stream,
+		unsupported_files: unsupportedFiles,
+	});
+	const label = streamLabel(input.stream);
+	const unsupportedNote =
+		unsupportedFiles > 0
+			? ` (${unsupportedFiles} ${unsupportedFiles === 1 ? "file" : "files"} not supported)`
+			: "";
 	await emit({
 		type: "PROGRESS",
 		stream: input.stream,
-		message: [
-			"Google Takeout phase=coverage",
-			`stream=${input.stream}`,
-			`status=${input.status}`,
-			`reason=${input.reason}`,
-			`items=${input.items ?? 0}`,
-			`unsupported_files=${input.unsupportedFiles ?? 0}`,
-		].join(" "),
+		message:
+			input.status === "collected"
+				? `Found ${items} ${label} in your Takeout export${unsupportedNote}`
+				: `No ${label} found in your Takeout export`,
+	});
+}
+
+/** Technical start-of-import facts go to the run log; the coverage line already told the owner the count. */
+function diagnoseEmitStart(
+	stream: string,
+	totalItems: number,
+	unsupportedFiles?: number,
+): void {
+	connectorDiagnostic("google_takeout", "emit_start", {
+		stream,
+		total_items: totalItems,
+		unsupported_files: unsupportedFiles,
+	});
+}
+
+async function emitImportStep(
+	emit: CollectContext["emit"],
+	stream: string,
+	imported: number,
+	total: number,
+): Promise<void> {
+	connectorDiagnostic("google_takeout", "emit_step", {
+		item: imported,
+		stream,
+		total_items: total,
+	});
+	await emit({
+		type: "PROGRESS",
+		stream,
+		count: imported,
+		total,
+		message: `Imported ${imported} of ${total} ${streamLabel(stream)}`,
 	});
 }
 
@@ -133,11 +188,7 @@ async function collectLocationHistory(
 	});
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
-	await emit({
-		type: "PROGRESS",
-		stream,
-		message: `Google Takeout phase=emit pass=emit stream=location_history total_items=${json.locations.length}`,
-	});
+	diagnoseEmitStart(stream, json.locations.length);
 	let itemOrdinal = 0;
 	for (const loc of json.locations) {
 		itemOrdinal += 1;
@@ -151,11 +202,7 @@ async function collectLocationHistory(
 		}
 		await emitRecord(stream, { ...buildLocationRecord(loc, ts) });
 		if (itemOrdinal % 10_000 === 0) {
-			await emit({
-				type: "PROGRESS",
-				stream,
-				message: `Google Takeout phase=emit pass=emit stream=location_history item=${itemOrdinal}/${json.locations.length}`,
-			});
+			await emitImportStep(emit, stream, itemOrdinal, json.locations.length);
 		}
 		if (!latest || ts > latest) {
 			latest = ts;
@@ -201,11 +248,7 @@ async function collectYoutubeWatchHistory(
 	});
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
-	await emit({
-		type: "PROGRESS",
-		stream,
-		message: `Google Takeout phase=emit pass=emit stream=youtube_watch_history total_items=${json.length}`,
-	});
+	diagnoseEmitStart(stream, json.length);
 	let itemOrdinal = 0;
 	for (const e of json) {
 		itemOrdinal += 1;
@@ -218,11 +261,7 @@ async function collectYoutubeWatchHistory(
 		}
 		await emitRecord(stream, { ...record });
 		if (itemOrdinal % 10_000 === 0) {
-			await emit({
-				type: "PROGRESS",
-				stream,
-				message: `Google Takeout phase=emit pass=emit stream=youtube_watch_history item=${itemOrdinal}/${json.length}`,
-			});
+			await emitImportStep(emit, stream, itemOrdinal, json.length);
 		}
 		if (!latest || record.watched_at > latest) {
 			latest = record.watched_at;
@@ -263,11 +302,7 @@ async function collectSearchHistory(
 	});
 	const since = streamState?.last_timestamp;
 	let latest: string | undefined = since;
-	await emit({
-		type: "PROGRESS",
-		stream,
-		message: `Google Takeout phase=emit pass=emit stream=search_history total_items=${json.length}`,
-	});
+	diagnoseEmitStart(stream, json.length);
 	let itemOrdinal = 0;
 	for (const e of json) {
 		itemOrdinal += 1;
@@ -280,11 +315,7 @@ async function collectSearchHistory(
 		}
 		await emitRecord(stream, { ...record });
 		if (itemOrdinal % 10_000 === 0) {
-			await emit({
-				type: "PROGRESS",
-				stream,
-				message: `Google Takeout phase=emit pass=emit stream=search_history item=${itemOrdinal}/${json.length}`,
-			});
+			await emitImportStep(emit, stream, itemOrdinal, json.length);
 		}
 		if (!latest || record.timestamp > latest) {
 			latest = record.timestamp;
@@ -404,11 +435,7 @@ async function emitPhotos(
 		await emitRecord(stream, { ...record });
 
 		if (processedItems % 10_000 === 0) {
-			await emit({
-				type: "PROGRESS",
-				stream,
-				message: `Google Takeout phase=emit pass=emit stream=photos item=${processedItems}/${mediaEntries.length}`,
-			});
+			await emitImportStep(emit, stream, processedItems, mediaEntries.length);
 		}
 
 		if (!latest || record.event_time > latest) {
@@ -505,11 +532,7 @@ async function collectPhotos(
 			unsupportedFiles: unsupportedCount,
 		});
 
-		await emit({
-			type: "PROGRESS",
-			stream,
-			message: `Google Takeout phase=emit pass=emit stream=photos total_items=${mediaEntries.length} unsupported_files=${unsupportedCount}`,
-		});
+		diagnoseEmitStart(stream, mediaEntries.length, unsupportedCount);
 
 		const { latest } = await emitPhotos(
 			ctx,
