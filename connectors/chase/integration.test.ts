@@ -49,6 +49,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
 import { buildBrowserSurfaceDiagnostic } from "../../packages/polyfill-connectors/src/browser-surface-diagnostic.ts";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import type {
 	EmittedMessage,
@@ -892,8 +896,18 @@ test("emitNoActivityProgress: reports checked/no-activity without advancing curs
 			},
 		},
 	});
-	await emitNoActivityProgress(deps, "date_range");
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		await emitNoActivityProgress(deps, "date_range");
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 
+	assert.deepEqual(lines, [
+		'[chase-diagnostic] qfx_no_activity {"activity":"date_range","verified":true}',
+	]);
+	assertUserFacingProgress(messages);
 	assert.equal(
 		emitted.length,
 		0,
@@ -914,10 +928,9 @@ test("emitNoActivityProgress: reports checked/no-activity without advancing curs
 			(m) =>
 				m.type === "PROGRESS" &&
 				m.stream === "transactions" &&
-				m.message.includes("no activity found") &&
-				m.message.includes("activity=date_range"),
+				m.message === "No transactions found for this period",
 		),
-		"expected a no-activity progress diagnostic",
+		"expected a no-activity progress message",
 	);
 });
 
