@@ -39,7 +39,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
-import { SCENARIO_CLOCK_ARM_HOOK } from "../src/connector-runtime.ts";
 import type { ScenarioInteraction } from "../src/scenario/format.ts";
 import {
 	isNamespaceIsolationAvailable,
@@ -1131,14 +1130,23 @@ test("scenario-fidelity: PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV patches Date.now()/ne
 			workspace,
 		});
 		// This probe is a bare script, not a real connector run through
-		// connector-runtime.ts's START handshake — so it must call the
-		// preload's exposed arm hook itself (see SCENARIO_CLOCK_ARM_HOOK's
-		// doc comment, connector-runtime.ts) before reading the clock.
-		// Before arming, the preload intentionally passes through the REAL
-		// clock unchanged (module-loading-era code must never see a pinned
-		// value) — only this probe's own post-arm read is meant to observe
-		// the fixed/replayed value under test here.
-		const probeScript = `globalThis[${JSON.stringify(SCENARIO_CLOCK_ARM_HOOK)}]?.(); console.log(JSON.stringify({ now: Date.now(), iso: new Date().toISOString() }))`;
+		// connector-runtime.ts's START handshake — so it writes a
+		// START-shaped line to its OWN stdin, exactly like the authority
+		// process does for a real connector, instead of calling anything
+		// exposed by the preload (there is no longer a hook to call: the
+		// preload arms itself by peeking at stdin for that line — see
+		// writeReplayBridgePreload's armOnStartLine). The probe waits for a
+		// full line to arrive on its own stdin before reading the clock:
+		// Node dispatches every 'data' listener for a given chunk
+		// synchronously, in attachment order, and the preload's listener
+		// attached first (a --import preload loads before this -e script's
+		// own code runs) — so by the time the probe's own listener sees the
+		// line, arming has already happened. Before arming, the preload
+		// intentionally passes through the REAL clock unchanged (module-
+		// loading-era code must never see a pinned value) — only this
+		// probe's own post-arm read is meant to observe the fixed/replayed
+		// value under test here.
+		const probeScript = `let buf = ""; process.stdin.on("data", (c) => { buf += c.toString(); if (buf.includes("\\n")) { console.log(JSON.stringify({ now: Date.now(), iso: new Date().toISOString() })); process.exit(0); } });`;
 		const result = await new Promise<{
 			code: number | null;
 			stdout: string;
@@ -1153,7 +1161,7 @@ test("scenario-fidelity: PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV patches Date.now()/ne
 						NODE_OPTIONS: `--import ${preloadPath}`,
 						[PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV]: "",
 					},
-					stdio: ["ignore", "pipe", "pipe"],
+					stdio: ["pipe", "pipe", "pipe"],
 				},
 			);
 			let stdout = "";
@@ -1176,6 +1184,9 @@ test("scenario-fidelity: PDPP_SCENARIO_CLOCK_FIXED_NOW_ENV patches Date.now()/ne
 				clearTimeout(timer);
 				resolve({ code, stdout, stderr });
 			});
+			child.stdin.write(
+				`${JSON.stringify({ type: "START", scope: { streams: [] } })}\n`,
+			);
 		});
 		assert.equal(result.code, 0, `probe must exit 0; stderr=${result.stderr}`);
 		const parsed = JSON.parse(result.stdout.trim()) as {

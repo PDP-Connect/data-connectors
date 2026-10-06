@@ -75,7 +75,6 @@ import {
 } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SCENARIO_CLOCK_ARM_HOOK } from "../connector-runtime.ts";
 import type { ScenarioInteraction, ScenarioResponseHeaders } from "./format.ts";
 import {
 	assertValidRecordMessage,
@@ -379,15 +378,50 @@ import { createHash } from "node:crypto";
 // ALREADY the observed versions by the time module loading (this file's
 // own remaining setup, tsx's own TS-transform work for the connector
 // module and its dependents) runs — but observations only start being
-// RECORDED once armed (see SCENARIO_CLOCK_ARM_HOOK's doc comment,
-// connector-runtime.ts): module loading is not part of either "record"
-// or "replay" and must never land in the trace. Before arming, this is
-// value-for-value identical to leaving Date/Date.now unpatched.
+// RECORDED once armed, and arming is tooling-only (this preload peeking
+// at the connector's OWN stdin for the START line — see armOnStartLine
+// below), never a hook the shipped runtime calls: module loading is not
+// part of either "record" or "replay" and must never land in the trace.
+// Before arming, this is value-for-value identical to leaving
+// Date/Date.now unpatched.
 const clockTrace = [];
 let clockArmed = false;
-globalThis[${JSON.stringify(SCENARIO_CLOCK_ARM_HOOK)}] = () => {
-  clockArmed = true;
+// Peeks at this process's own stdin for the START line WITHOUT consuming
+// or altering what connector-runtime.ts's own readline interface reads
+// from it. That interface is created later, inside runConnector() (called
+// from the connector module's top-level code, which only runs after this
+// preload's module-level code already has) — so this listener is already
+// attached by the time readline attaches its own. Node delivers every
+// 'data' chunk to EVERY attached listener (it is not a queue one listener
+// drains for the others), and nothing can arrive before this synchronous
+// attach completes (the event loop cannot deliver stdin bytes mid-module-
+// evaluation) — so neither listener can miss a byte the other needed.
+let stdinPeekBuffer = Buffer.alloc(0);
+const armOnStartLine = (chunk) => {
+  stdinPeekBuffer = Buffer.concat([stdinPeekBuffer, chunk]);
+  let newlineAt = stdinPeekBuffer.indexOf(10);
+  while (newlineAt !== -1) {
+    const lineBytes = stdinPeekBuffer.subarray(0, newlineAt);
+    stdinPeekBuffer = stdinPeekBuffer.subarray(newlineAt + 1);
+    if (!clockArmed) {
+      const line = lineBytes.toString("utf8").trim();
+      if (line.length > 0) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && parsed.type === "START") {
+            clockArmed = true;
+            process.stdin.off("data", armOnStartLine);
+          }
+        } catch {
+          // Not parseable JSON — not this listener's concern; the
+          // runtime's own parser decides whether that is fatal.
+        }
+      }
+    }
+    newlineAt = stdinPeekBuffer.indexOf(10);
+  }
 };
+process.stdin.on("data", armOnStartLine);
 const realDateNow = Date.now;
 const observeNow = () => {
   const value = realDateNow();
@@ -1097,17 +1131,44 @@ import { writeFileSync } from "node:fs";
 
 // Captured at the very top, before ANY patching below (including the
 // clock patch further down) — the one real reference this preload's own
-// pre-arm clock pass-through uses. See SCENARIO_CLOCK_ARM_HOOK's doc
-// comment (connector-runtime.ts) for why: module loading (this file's
-// own remaining setup, tsx's own TS-transform work for the connector
-// module and its dependents) happens before a run is armed and must see
-// the real clock, identically to record, not the deterministic replay
-// clock below.
+// pre-arm clock pass-through uses. Module loading (this file's own
+// remaining setup, tsx's own TS-transform work for the connector module
+// and its dependents) happens before a run is armed and must see the
+// real clock, identically to record, not the deterministic replay clock
+// below.
 const realDateNowForClock = Date.now;
 let clockArmed = false;
-globalThis[${JSON.stringify(SCENARIO_CLOCK_ARM_HOOK)}] = () => {
-  clockArmed = true;
+// Peeks at this process's own stdin for the START line WITHOUT consuming
+// or altering what connector-runtime.ts's own readline interface reads
+// from it — see writeRecordPreload's identical armOnStartLine for the
+// full "why this is safe" (necessarily duplicated, not imported: this
+// generated source cannot import from this package's module graph).
+let stdinPeekBuffer = Buffer.alloc(0);
+const armOnStartLine = (chunk) => {
+  stdinPeekBuffer = Buffer.concat([stdinPeekBuffer, chunk]);
+  let newlineAt = stdinPeekBuffer.indexOf(10);
+  while (newlineAt !== -1) {
+    const lineBytes = stdinPeekBuffer.subarray(0, newlineAt);
+    stdinPeekBuffer = stdinPeekBuffer.subarray(newlineAt + 1);
+    if (!clockArmed) {
+      const line = lineBytes.toString("utf8").trim();
+      if (line.length > 0) {
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed && parsed.type === "START") {
+            clockArmed = true;
+            process.stdin.off("data", armOnStartLine);
+          }
+        } catch {
+          // Not parseable JSON — not this listener's concern; the
+          // runtime's own parser decides whether that is fatal.
+        }
+      }
+    }
+    newlineAt = stdinPeekBuffer.indexOf(10);
+  }
 };
+process.stdin.on("data", armOnStartLine);
 
 const BRIDGE_URL = ${JSON.stringify(bridgeUrl)};
 const BRIDGE_HOST = ${JSON.stringify(bridgeHost)};
@@ -1300,12 +1361,11 @@ if (FIXED_NOW_ISO) {
     let fallbackCallCount = 0;
     let beyondTraceCount = 0;
     const advance = () => {
-      // Before arming (see SCENARIO_CLOCK_ARM_HOOK's doc comment,
-      // connector-runtime.ts), this is module-loading-era code (this
-      // preload's own remaining setup, tsx's own TS-transform work) — not
-      // part of the replayed run, so it must see the REAL clock,
-      // identically to record, rather than consuming trace entries that
-      // belong to the connector's own calls.
+      // Before arming (armOnStartLine above), this is module-loading-era
+      // code (this preload's own remaining setup, tsx's own TS-transform
+      // work) — not part of the replayed run, so it must see the REAL
+      // clock, identically to record, rather than consuming trace entries
+      // that belong to the connector's own calls.
       if (!clockArmed) {
         return realDateNowForClock();
       }

@@ -1455,48 +1455,6 @@ export function runConnector(config: RunConnectorConfig): void {
 // ─── run() helpers (top-level so each is independently readable) ───────
 
 /**
- * Global function name a scenario record/replay preload MAY install
- * (`subprocess-fetch-preloads.ts`'s `writeRecordPreload`/
- * `writeReplayBridgePreload`, `browser-har-replay.ts`'s
- * `writeBrowserHarReplayPreload`) so this runtime can arm the preload's
- * clock-trace observer/replay-clock at the exact moment a run begins —
- * right after a real START is parsed below — instead of at process start.
- *
- * Why this matters: module loading (importing this file and its
- * dependents, including `tsx`'s own TypeScript-transform work) happens
- * entirely BEFORE a connector's `runConnector()` call even reaches this
- * function, and that loading work is not part of either "record" or
- * "replay" — it must never be traced. Before this hook fires, a preload
- * that patches `Date`/`Date.now` must still return the REAL clock value,
- * unobserved/unreplayed, identically in both record and replay; only
- * calls made from this point onward belong to the actual run and are
- * safe to compare between the two modes (a past investigation found that
- * NOT gating this way let `tsx`'s own module loader's clock reads bleed
- * into the trace, a different number of times under replay's sandboxed
- * execution than record's unisolated one — see those three functions'
- * doc comments for the full finding).
- *
- * A no-op in every production run: no preload installs this global
- * outside scenario record/replay, so `armScenarioClockTraceIfPresent`
- * below always finds nothing and does nothing. This file has zero
- * compile-time dependency on the scenario-tooling modules that install
- * it — only this string name is shared, duplicated by hand in each
- * generated preload template (the same "necessarily duplicated, not
- * imported" posture those templates already use elsewhere, since a
- * generated `.mjs` string can't import from this package's module graph).
- */
-export const SCENARIO_CLOCK_ARM_HOOK = "__pdppScenarioClockArm";
-
-/** Calls the scenario clock-trace arming hook (`SCENARIO_CLOCK_ARM_HOOK`)
- *  if a preload installed one. See that constant's doc comment. */
-function armScenarioClockTraceIfPresent(): void {
-	const hook = (globalThis as Record<string, unknown>)[SCENARIO_CLOCK_ARM_HOOK];
-	if (typeof hook === "function") {
-		(hook as () => void)();
-	}
-}
-
-/**
  * Read the first line of stdin and parse it as a START message. Throws
  * TerminalError on malformed input or wrong type — the runtime can't
  * proceed without a valid START.
@@ -1508,9 +1466,6 @@ async function parseStart(
 	if (startMsg.type !== "START") {
 		throw new TerminalError("Expected START message");
 	}
-	// Arm the scenario clock-trace hook (if any preload installed one) the
-	// moment a real run begins — see SCENARIO_CLOCK_ARM_HOOK's doc comment.
-	armScenarioClockTraceIfPresent();
 	return startMsg;
 }
 

@@ -1306,8 +1306,8 @@ function runReplaySubprocess(args: {
 			// Date.now()/new Date() a DIFFERENT number of times transforming
 			// the identical connector module graph in record vs. replay — a
 			// real, found cause of clock-trace index drift (see
-			// SCENARIO_CLOCK_ARM_HOOK's doc comment, connector-runtime.ts,
-			// for the other half of that fix). Disabling it here makes both
+			// writeReplayBridgePreload's armOnStartLine, subprocess-fetch-
+			// preloads.ts, for the other half of that fix). Disabling it here makes both
 			// subprocesses start from the same cold, per-process, never-
 			// persisted cache shape every time, matching the identical
 			// setting bin/scenario-record.ts sets for the record subprocess.

@@ -2716,9 +2716,12 @@ test("clock trace: a run whose clock.trace was NEVER DECLARED (old scenario, rec
 });
 
 test("clock trace: an UNMODIFIED record/replay roundtrip replays the fixture's own values EXACTLY from the trace — no fallback, no overflow, no limitation", () => {
-	// Proves the SCENARIO_CLOCK_ARM_HOOK fix (connector-runtime.ts) plus
-	// TSX_DISABLE_CACHE (bin/scenario-record.ts, bin/scenario-verify.ts):
-	// before arming-at-START and disabling tsx's own module-transform
+	// Proves the arm-at-START fix (each preload's own armOnStartLine,
+	// subprocess-fetch-preloads.ts/browser-har-replay.ts — entirely
+	// tooling-side, no hook or call added to connector-runtime.ts or any
+	// other shipped connector-artifact file) plus TSX_DISABLE_CACHE
+	// (bin/scenario-record.ts, bin/scenario-verify.ts): before arming-at-
+	// START and disabling tsx's own module-transform
 	// cache, this exact roundtrip failed — record's and replay's pre-START
 	// module-loading work (most of it tsx's own loader, transforming the
 	// connector module graph) called Date.now()/new Date() a DIFFERENT

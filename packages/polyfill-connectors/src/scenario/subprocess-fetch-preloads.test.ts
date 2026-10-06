@@ -226,14 +226,19 @@ test("createTraceReplayClock: a one-entry trace consumes that entry, then overfl
 // the patched clock a different number of times under sandboxed vs.
 // unisolated execution, via its own on-disk transform cache's different
 // hit/miss shape in each mode). THAT specific cause is fixed two other
-// ways (not by this test): `SCENARIO_CLOCK_ARM_HOOK` (connector-runtime.ts)
-// arms observation/replay at this runtime's own START handling instead of
-// at process start, so tsx's pre-START module-loading work is never
-// traced at all; `TSX_DISABLE_CACHE=1` (set by both bin/scenario-record.ts
-// and bin/scenario-verify.ts) additionally makes tsx's own cache shape
-// equal in both modes, for any transform work that happens AFTER START
-// (a lazy dynamic import). This test guards the part that IS this
-// package's responsibility, independent of either fix: that neither
+// ways (not by this test): each preload's own armOnStartLine peeks at
+// the connector process's OWN stdin for the START line (never consuming
+// or altering what connector-runtime.ts's own readline interface reads
+// from it — see writeRecordPreload/writeReplayBridgePreload/
+// writeBrowserHarReplayPreload) and arms observation/replay at that
+// point instead of at process start, so tsx's pre-START module-loading
+// work is never traced at all — entirely tooling-side, with zero hook or
+// call added to connector-runtime.ts (or any other shipped connector-
+// artifact file); `TSX_DISABLE_CACHE=1` (set by both bin/scenario-
+// record.ts and bin/scenario-verify.ts) additionally makes tsx's own
+// cache shape equal in both modes, for any transform work that happens
+// AFTER START (a lazy dynamic import). This test guards the part that IS
+// this package's responsibility, independent of either fix: that neither
 // generated preload's OWN code is ever the source of such drift.
 //
 // A plain substring scan (not a parser) is deliberate and sufficient here:
