@@ -21,13 +21,15 @@
  * about. Only the refusal rule needs to move earlier.
  */
 
-import { selectChangedConnectors, PublishSelectionError } from "./select-publish-connectors.mjs";
+import { selectChangedConnectors } from "./select-publish-connectors.mjs";
 
 async function main() {
+  // selectChangedConnectors treats a missing `before` as "no prior commit"
+  // and silently compares against nothing, so it is checked here. A missing
+  // `after` already fails loudly inside selectChangedConnectors itself.
   const before = process.env.BEFORE_SHA;
-  const after = process.env.AFTER_SHA;
   if (!before) throw new Error("BEFORE_SHA is not set");
-  if (!after) throw new Error("AFTER_SHA is not set");
+  const after = process.env.AFTER_SHA;
 
   const selected = await selectChangedConnectors({ before, after });
   if (selected.length === 0) {
@@ -43,11 +45,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  if (error instanceof PublishSelectionError) {
-    console.error(`::error::${error.message}`);
-    console.error(`publish selection dry run refused: ${error.message}`);
-    process.exit(1);
-  }
   console.error(`::error::${error.message}`);
+  console.error(`publish selection dry run refused: ${error.message}`);
   process.exit(1);
 });
