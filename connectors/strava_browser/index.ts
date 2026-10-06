@@ -27,6 +27,7 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
@@ -433,20 +434,21 @@ async function fetchGearNames(
 	page: StravaCollectContext["page"],
 ): Promise<GearLookup> {
 	await page.goto(`${ORIGIN}/settings/gear`, { waitUntil: "domcontentloaded" });
-	const readPaths = () => page.evaluate(() => {
-		const found = new Set<string>();
-		for (const entry of performance.getEntriesByType("resource")) {
-			try {
-				const path = new URL(entry.name).pathname;
-				if (/^\/athletes\/\d+\/gear\/(?:bikes|shoes)$/.test(path)) {
-					found.add(path);
+	const readPaths = () =>
+		page.evaluate(() => {
+			const found = new Set<string>();
+			for (const entry of performance.getEntriesByType("resource")) {
+				try {
+					const path = new URL(entry.name).pathname;
+					if (/^\/athletes\/\d+\/gear\/(?:bikes|shoes)$/.test(path)) {
+						found.add(path);
+					}
+				} catch {
+					// Ignore non-URL performance entries.
 				}
-			} catch {
-				// Ignore non-URL performance entries.
 			}
-		}
-		return [...found];
-	});
+			return [...found];
+		});
 	const categories = new Map<string, string>();
 	for (let attempt = 0; attempt < 20; attempt += 1) {
 		const paths = await readPaths();
@@ -632,9 +634,7 @@ export async function collectStravaBrowser(
 		const lookup = await gearLookupPromise;
 		if (!lookup.ok) return { name: null, reason: lookup.reason };
 		const name = lookup.names.get(gearId);
-		return name
-			? { name }
-			: { name: null, reason: "gear_id_unmatched" };
+		return name ? { name } : { name: null, reason: "gear_id_unmatched" };
 	};
 
 	while (true) {
@@ -660,7 +660,8 @@ export async function collectStravaBrowser(
 			model,
 			record: buildActivityRecord(model),
 		}));
-		const firstId = records.find(({ record }) => record !== null)?.record?.id ?? null;
+		const firstId =
+			records.find(({ record }) => record !== null)?.record?.id ?? null;
 		if (firstId !== null && firstId === previousFirstId) {
 			failure = {
 				reason: "source_unreadable",
@@ -739,9 +740,7 @@ export async function collectStravaBrowser(
 	// The initial inventory run only emits summaries. Start detail work after
 	// Desktop has committed that complete inventory and its queue checkpoint.
 	const canBackfill = wasInventoryComplete && !failure && maxDetails > 0;
-	const detailCandidates = canBackfill
-		? pendingIds.slice(0, maxDetails)
-		: [];
+	const detailCandidates = canBackfill ? pendingIds.slice(0, maxDetails) : [];
 	const completedDetails = new Set<string>();
 	const deferredDetails: string[] = [];
 	if (canBackfill) {
@@ -796,7 +795,8 @@ export async function collectStravaBrowser(
 			...(failure?.reason === "collection_interrupted"
 				? { recovery_hint: { action: "retry_by_runtime", retryable: true } }
 				: {}),
-			message: failure?.message ??
+			message:
+				failure?.message ??
 				`${unreadable} activities in the Strava list had no usable id or start time.`,
 			diagnostics: {
 				pages_read: pagesRead,
@@ -805,9 +805,10 @@ export async function collectStravaBrowser(
 				details_pending: pendingIds.length,
 				...(Object.keys(gearUnresolvedReasons).length > 0
 					? {
-							gear_name_unresolved: Object.values(
-								gearUnresolvedReasons,
-							).reduce((sum, count) => sum + count, 0),
+							gear_name_unresolved: Object.values(gearUnresolvedReasons).reduce(
+								(sum, count) => sum + count,
+								0,
+							),
 							gear_name_reasons: gearUnresolvedReasons,
 						}
 					: {}),
@@ -825,30 +826,46 @@ export async function collectStravaBrowser(
 	};
 	const requestedFrom = timeRange?.since ?? "none";
 	const requestedTo = timeRange?.until ?? "none";
+	const coverageStatus =
+		failure || unreadable > 0
+			? "partial"
+			: listed.length === 0
+				? "empty"
+				: "complete";
+	const gearUnresolved = Object.values(gearUnresolvedReasons).reduce(
+		(sum, count) => sum + count,
+		0,
+	);
+	connectorDiagnostic("strava_browser", "coverage", {
+		stream: ACTIVITIES_STREAM,
+		status: coverageStatus,
+		pages_read: pagesRead,
+		unreadable,
+		summary_records: summaryRecords.length,
+		details_updated: detailsUpdated,
+		details_deferred: detailsDeferred,
+		details_pending: pendingIds.length,
+		window_requested_from: requestedFrom,
+		window_requested_to: requestedTo,
+		window_covered_from: earliest ?? "none",
+		window_covered_to: latest ?? "none",
+		...(Object.keys(gearUnresolvedReasons).length > 0
+			? {
+					gear_name_unresolved: gearUnresolved,
+					gear_name_reasons: Object.entries(gearUnresolvedReasons)
+						.map(([reason, count]) => `${reason}:${count}`)
+						.join(","),
+				}
+			: {}),
+	});
 	await ctx.emit({
 		type: "PROGRESS",
 		stream: ACTIVITIES_STREAM,
 		count: emitted,
-		message: [
-			"Strava phase=coverage stream=activities",
-			`status=${failure || unreadable > 0 ? "partial" : listed.length === 0 ? "empty" : "complete"}`,
-			`pages_read=${pagesRead}`,
-			`unreadable=${unreadable}`,
-			`summary_records=${summaryRecords.length}`,
-			`details_updated=${detailsUpdated}`,
-			`details_deferred=${detailsDeferred}`,
-			`details_pending=${pendingIds.length}`,
-			`window_requested_from=${requestedFrom}`,
-			`window_requested_to=${requestedTo}`,
-			`window_covered_from=${earliest ?? "none"}`,
-			`window_covered_to=${latest ?? "none"}`,
-			...(Object.keys(gearUnresolvedReasons).length > 0
-				? [
-						`gear_name_unresolved=${Object.values(gearUnresolvedReasons).reduce((sum, count) => sum + count, 0)}`,
-						`gear_name_reasons=${Object.entries(gearUnresolvedReasons).map(([reason, count]) => `${reason}:${count}`).join(",")}`,
-					]
-				: []),
-		].join(" "),
+		message:
+			pendingIds.length > 0
+				? `Finished reading Strava activities: ${emitted} saved, ${pendingIds.length} details still to fetch`
+				: `Finished reading Strava activities: ${emitted} saved`,
 	});
 	await ctx.emit({ type: "STATE", stream: ACTIVITIES_STREAM, cursor });
 }
