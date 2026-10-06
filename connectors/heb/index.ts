@@ -29,6 +29,7 @@ import {
 	probeHebSession,
 } from "../../packages/polyfill-connectors/src/auto-login/heb.ts";
 import { manualAction } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	buildDetailGap,
@@ -258,7 +259,10 @@ function inspectAndAdvanceDetailSurface(input: {
 		// number of purchased units; M is the measured weight and is not a
 		// second item count. Only whole-unit counts can satisfy the card's
 		// integer item total.
-		const unitMatch = /^\s*Qty:\s*(\d+)(?:\s+of\s+\d+(?:\.\d+)?\s*(?:lb|lbs))?\s*$/i.exec(qtyText);
+		const unitMatch =
+			/^\s*Qty:\s*(\d+)(?:\s+of\s+\d+(?:\.\d+)?\s*(?:lb|lbs))?\s*$/i.exec(
+				qtyText,
+			);
 		const unitCount = unitMatch?.[1] ? Number(unitMatch[1]) : null;
 		const positionalIdentity = ["data-index", "aria-posinset"]
 			.map((attribute) => {
@@ -298,10 +302,7 @@ function inspectAndAdvanceDetailSurface(input: {
 								.trim()
 								.replace(/\d+\.\d+/g, "#.#")
 								.replace(/\d+/g, "#")
-								.replace(
-									/\b(?!Qty\b|of\b|lb\b|lbs\b)[a-z]+\b/gi,
-									"[text]",
-								)
+								.replace(/\b(?!Qty\b|of\b|lb\b|lbs\b)[a-z]+\b/gi, "[text]")
 								.replace(/\s+/g, " ")
 						: qtyText.trim()
 							? "Qty: [label mismatch]"
@@ -566,7 +567,7 @@ async function collectDetailSurface(
 					rowsHtml: latest.rows
 						.map((row) => `${row.key}=${row.html}`)
 						.join("|"),
-					}
+				}
 			: null;
 		const changedSignatureComponents = signatureComponents
 			? previousSignatureComponents === null
@@ -580,8 +581,7 @@ async function collectDetailSurface(
 						previousSignatureComponents.scrollHeight
 							? ["scrollHeight"]
 							: []),
-						...(signatureComponents.keys !==
-						previousSignatureComponents.keys
+						...(signatureComponents.keys !== previousSignatureComponents.keys
 							? ["keys"]
 							: []),
 						...(signatureComponents.rowsHtml !==
@@ -604,20 +604,32 @@ async function collectDetailSurface(
 			lastAction = latest.actionPerformed;
 		}
 		if (onProgress && (progressed || latest.actionableControl)) {
+			connectorDiagnostic("heb", "detail_surface_rows", {
+				rows_observed: collected.size,
+				action: latest.actionableControl ?? "settling",
+			});
 			await onProgress(
-				`H-E-B detail surface: ${collected.size} rows observed; action=${latest.actionableControl ?? "settling"}`,
+				`Loading order details (${collected.size} ${collected.size === 1 ? "item" : "items"} so far)`,
 			);
 		}
 		const observedUnits = knownUnitTotal(collectedUnits.values());
-		if (debugDiagnostics && onProgress) {
+		if (debugDiagnostics) {
 			const changed = changedSignatureComponents?.join(",") || "none";
-			const qtyFailures = [...failedQuantityRows.values()]
-				.sort((left, right) => left.row - right.row)
-				.map(({ row, shape }) => `row ${row}:${shape}`)
-				.join("|") || "none";
-			await onProgress(
-				`detail_surface_poll;changed=${changed};atEnd=${latest.atEnd};loading=${latest.loading};actionableControl=${Boolean(latest.actionableControl)};observedUnits=${observedUnits ?? "unknown"};expectedUnits=${expectedUnits ?? "unknown"};stablePolls=${stablePolls};qtyFailures=${qtyFailures}`,
-			);
+			const qtyFailures =
+				[...failedQuantityRows.values()]
+					.sort((left, right) => left.row - right.row)
+					.map(({ row, shape }) => `row ${row}:${shape}`)
+					.join("|") || "none";
+			connectorDiagnostic("heb", "detail_surface_poll", {
+				changed,
+				at_end: latest.atEnd,
+				loading: latest.loading,
+				actionable_control: Boolean(latest.actionableControl),
+				observed_units: observedUnits ?? "unknown",
+				expected_units: expectedUnits ?? "unknown",
+				stable_polls: stablePolls,
+				qty_failures: qtyFailures,
+			});
 		}
 		if (ambiguousContentHref) {
 			// A repeated product whose two mounted appearances were never
@@ -982,7 +994,10 @@ export async function fetchOrderDetail(
 
 	const detail = parseOrderDetailDom(surface.html || html);
 	if (!detail) {
-		return failed("parse_missing", detailSurfaceErrorMessage(surface.diagnostics));
+		return failed(
+			"parse_missing",
+			detailSurfaceErrorMessage(surface.diagnostics),
+		);
 	}
 	return {
 		detail,
@@ -1356,7 +1371,10 @@ function buildHebDetailGap(
 	failureKind: DetailFailureKind,
 	orderDate?: string | undefined,
 	diagnostic?: string | undefined,
-	metrics: { elapsedMs?: number | undefined; pollCount?: number | undefined } = {},
+	metrics: {
+		elapsedMs?: number | undefined;
+		pollCount?: number | undefined;
+	} = {},
 ) {
 	const elapsedMs = Math.max(0, Math.round(metrics.elapsedMs ?? 0));
 	const pollCount = Math.max(0, Math.floor(metrics.pollCount ?? 0));
@@ -1679,11 +1697,11 @@ async function recoverPendingOrderItemDetailGapPage(
 			buildHebDetailGap(
 				locator.orderId,
 				result.reason,
-						result.failureKind,
-						locator.orderDate,
-						result.diagnostic,
-						{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
-					),
+				result.failureKind,
+				locator.orderDate,
+				result.diagnostic,
+				{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+			),
 		);
 		reDeferred += 1;
 	}
@@ -1839,9 +1857,13 @@ async function emitOrderAndItems(
 				fulfilledUnits === null ||
 				fulfilledUnits !== listOrder.itemCount)
 		) {
-			await deps.progress(
-				`item_count_reconciliation: card_units=${listOrder.itemCount}; product_rows=${detail.items.length}; fulfilled_units=${fulfilledUnits ?? "unknown"}; reason=unit_and_row_counts_differ`,
-			);
+			connectorDiagnostic("heb", "item_count_reconciliation", {
+				card_units: listOrder.itemCount,
+				product_rows: detail.items.length,
+				fulfilled_units: fulfilledUnits ?? "unknown",
+				reason: "unit_and_row_counts_differ",
+			});
+			await deps.progress("An order's item count did not match its details");
 		}
 		deps.itemCountTallies?.push({
 			orderId: listOrder.orderId,
@@ -1909,11 +1931,14 @@ export async function processListOrder(
 		// Record-level: the order joins the `orders` coverage denominator below
 		// (considered, not covered), so a stream SKIP_RESULT would only make the
 		// host drop every other order of the run.
+		connectorDiagnostic("heb", "unparseable_order_date", {
+			stream: "orders",
+			coverage: "considered_not_covered",
+		});
 		await deps.emit({
 			type: "PROGRESS",
 			stream: "orders",
-			message:
-				"unparseable_order_date: an order's date did not parse; the order counts as considered, not covered.",
+			message: "We skipped an order because its date could not be read",
 		});
 		// Unparseable order dates cannot reach the detail hydration lane. When
 		// order_items are in scope, emit a DETAIL_GAP (not a policy skip) backed
@@ -2047,8 +2072,7 @@ export async function runForwardScan(
 					orderDate !== null &&
 					listOrder.itemCount !== null &&
 					listOrder.itemCount >= DETAIL_SURFACE_DEBUG_MIN_ITEM_COUNT &&
-					debugLargeOrdersSelected <
-						DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT;
+					debugLargeOrdersSelected < DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT;
 				if (debugLargeOrder) {
 					debugLargeOrdersSelected += 1;
 				}
@@ -2061,12 +2085,12 @@ export async function runForwardScan(
 
 			if (shouldStopPaginating(pageOrderDates, boundary)) {
 				stoppedAtBoundary = true;
-				await deps.progress(
-					`H-E-B list page ${pageNum}: full page older than checkpoint boundary; stopping`,
-					{
-						stream: "orders",
-					},
-				);
+				connectorDiagnostic("heb", "list_page_older_than_checkpoint", {
+					page: pageNum,
+				});
+				await deps.progress("Reached orders we already have; stopping", {
+					stream: "orders",
+				});
 				return false;
 			}
 
@@ -2134,9 +2158,11 @@ export async function reportListPageCeiling(
 		}
 	}
 
+	connectorDiagnostic("heb", "list_scan_page_limit", {
+		max_list_pages: MAX_LIST_PAGES,
+	});
 	await deps.progress(
-		`H-E-B order-history scan stopped at its ${MAX_LIST_PAGES}-page limit with more pages available; ` +
-			"this run covered only the most recent orders",
+		`Stopped after ${String(MAX_LIST_PAGES)} pages of orders; older orders were not read`,
 		{ stream: "orders" },
 	);
 
@@ -2546,7 +2572,9 @@ export function nutritionCoverageBlockReason(
  *  that cause does not clear on a rerun either; only a collection change
  *  (a full re-walk for nutrition) can fix it. Without orders and order_items
  *  in scope, the same scope cannot change the result. */
-export function nutritionCoverageRecoveryHint(cause: NutritionCoverageCause):
+export function nutritionCoverageRecoveryHint(
+	cause: NutritionCoverageCause,
+):
 	| { action: "not_retriable"; retryable: false }
 	| { action: "retry_on_connector_upgrade"; retryable: false }
 	| { action: "retry_by_runtime"; retryable: true } {
@@ -2845,8 +2873,11 @@ if (isMainModule(import.meta.url)) {
 					},
 				);
 			if (gapRecovery.stoppedWithPending) {
+				connectorDiagnostic("heb", "gap_recovery_stopped_pending", {
+					stoppedWithPending: true,
+				});
 				await progress(
-					"H-E-B order-item gap recovery stopped with pending gaps still queued; the next run will continue recovery",
+					"Some order items are still missing; the next run will keep trying",
 				);
 			}
 			if (gapRecovery.suppressForward) {
@@ -2855,13 +2886,8 @@ if (isMainModule(import.meta.url)) {
 
 			await progress("H-E-B session verified; scanning order history");
 
-			const { newestOrderDate, stoppedAtBoundary, truncated } = await runForwardScan(
-				page,
-				deps,
-				flags,
-				boundary,
-				priorOrdersEvidence,
-			);
+			const { newestOrderDate, stoppedAtBoundary, truncated } =
+				await runForwardScan(page, deps, flags, boundary, priorOrdersEvidence);
 
 			if (wantsOrders) {
 				// A truncated scan holds the checkpoint at its prior value: advancing
@@ -2884,8 +2910,16 @@ if (isMainModule(import.meta.url)) {
 			if (itemCountTallies && itemCountTallies.length > 0) {
 				const summary = summarizeItemCounts(itemCountTallies);
 				if (summary.short > 0) {
+					connectorDiagnostic("heb", "item_count_mismatch", {
+						short_orders: summary.short,
+						declared_units: summary.declaredItems,
+						collected_units: summary.collectedItems,
+						reason: "detail_surface_complete_but_source_units_unreconciled",
+					});
 					await progress(
-						`item_count_mismatch: short_orders=${summary.short}; declared_units=${summary.declaredItems}; collected_units=${summary.collectedItems}; reason=detail_surface_complete_but_source_units_unreconciled`,
+						summary.short === 1
+							? "1 order has fewer items than H-E-B listed"
+							: `${summary.short} orders have fewer items than H-E-B listed`,
 					);
 				}
 			}
