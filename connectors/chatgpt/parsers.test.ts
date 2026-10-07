@@ -661,6 +661,35 @@ test("buildAccountPlanRecord: carries no billing identifier or profile field", (
 	}
 });
 
+// accounts-check-pro.json keeps the key layout of a live accounts/check
+// response for an active, renewing personal Pro subscription. Ids, dates,
+// residency, feature flags and offers are placeholders.
+test("buildAccountPlanRecord: normalizes an active Pro account without leaking billing fields", () => {
+	const raw = readFixtureJson<RawAccountsCheckBody>("accounts-check-pro.json");
+	const rec = buildAccountPlanRecord(raw);
+	assert.ok(rec);
+	assert.equal(rec.plan_type, "pro");
+	assert.equal(rec.account_structure, "personal");
+	assert.equal(rec.subscription_plan, "chatgptpro");
+	assert.equal(rec.has_active_subscription, true);
+	assert.equal(rec.will_renew, true);
+	assert.equal(rec.billing_period, "monthly");
+	assert.equal(typeof rec.renews_at, "string");
+	assert.equal(typeof rec.expires_at, "string");
+	assert.equal(rec.cancels_at, null);
+	assert.equal(rec.scheduled_plan_change, null);
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+	const serialized = JSON.stringify(rec);
+	for (const leaked of [
+		"subscription_id",
+		"processor",
+		"REDACTED",
+		"account_user_id",
+	]) {
+		assert.equal(serialized.includes(leaked), false, `${leaked} must not leak`);
+	}
+});
+
 test("buildAccountPlanRecord: whitespace-only identifiers do not make an account", () => {
 	for (const blank of [" ", "\t\n", "   "]) {
 		assert.equal(
