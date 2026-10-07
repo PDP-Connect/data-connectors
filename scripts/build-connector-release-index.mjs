@@ -123,7 +123,15 @@ export function buildReleaseIndex({
     sourceRepo: index.sourceRepo ?? `https://github.com/${repository}`,
     generatedAt,
     brandIcons: index.brandIcons ?? {},
-    signature: { type: "sigstoreBundle", bundlePath: INDEX_BUNDLE_PATH },
+    // The index is served from two releases (`connectors-<sha12>` and
+    // `connectors-latest`), which the workflow updates one after the other.
+    // An absolute bundleUrl into the immutable release keeps a reader that
+    // spans the two uploads, or sees a half-finished one, on one generation.
+    signature: {
+      type: "sigstoreBundle",
+      bundlePath: INDEX_BUNDLE_PATH,
+      bundleUrl: `${assetBase}/${INDEX_BUNDLE_PATH}`,
+    },
     connectors,
   };
   return { doc, published, retained };

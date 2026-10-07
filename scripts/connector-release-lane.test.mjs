@@ -84,7 +84,11 @@ test("entries with a committed tarball point at the release asset and declare it
   const { index, readArtifact } = fixture();
   const { doc, published, retained } = buildReleaseIndex({ index, releaseTag: TAG, releaseId: ID, repository: REPO, readArtifact, generatedAt: "2026-10-07T12:00:00Z" });
   assert.ok(validate(doc), JSON.stringify(validate.errors));
-  assert.deepEqual(doc.signature, { type: "sigstoreBundle", bundlePath: INDEX_BUNDLE_PATH });
+  assert.deepEqual(doc.signature, {
+    type: "sigstoreBundle",
+    bundlePath: INDEX_BUNDLE_PATH,
+    bundleUrl: `https://github.com/${REPO}/releases/download/${TAG}/${INDEX_BUNDLE_PATH}`,
+  });
   assert.equal(doc.generatedAt, "2026-10-07T12:00:00Z");
   assert.deepEqual(doc.brandIcons, index.brandIcons);
   const alpha2 = doc.connectors["alpha-playwright"].find((candidate) => candidate.version === "2.0.0");
@@ -215,7 +219,12 @@ test("the publish workflow is the pinned signing identity, runs only by hand, an
   const immutable = indexOf(/Publish the immutable release/);
   const latest = indexOf(/Publish the latest signed index/);
   assert.ok(build >= 0 && sign > build && immutable > sign && latest > immutable, `step order: ${steps.join(" | ")}`);
-  assert.match(source, /refs\/heads\/main/);
+  const guard = workflow.jobs.publish.steps[0];
+  assert.match(String(guard.if), /github\.ref != 'refs\/heads\/main'/, "the first step refuses any ref but main");
+  assert.match(String(guard.run), /exit 1/, "the guard fails the job");
+  assert.ok(!guard.uses, "the guard runs before any action, checkout included");
+  const immutable = workflow.jobs.publish.steps.find((step) => /Publish the immutable release/.test(String(step.name)));
+  assert.equal(immutable.with.target_commitish, "${{ github.sha }}", "the immutable tag is created at the dispatched commit, not the branch tip");
   assert.match(source, /release\/connector-index\.json\.sigstore\.json/);
   for (const uses of workflow.jobs.publish.steps.map((step) => step.uses).filter(Boolean)) {
     assert.match(uses, /@[a-f0-9]{40}( |$)/, `${uses}: actions are pinned to a commit`);
