@@ -150,8 +150,18 @@ export const accountPlanSchema = z.object({
 	renews_at: looseTimestamp.nullable(),
 	expires_at: looseTimestamp.nullable(),
 	cancels_at: looseTimestamp.nullable(),
-	// Only ever observed as null, so the non-null shape is not pinned.
-	scheduled_plan_change: z.record(z.string(), z.unknown()).nullable(),
+	// Only ever observed as null. Strict, so no key beyond these two (billing
+	// ids, profile fields) can be stored.
+	scheduled_plan_change: z
+		.object({
+			plan_type: z
+				.string()
+				.regex(/^[a-z][a-z_-]{0,39}$/)
+				.nullable(),
+			changes_at: looseTimestamp.nullable(),
+		})
+		.strict()
+		.nullable(),
 });
 
 // ─── shared_conversations ───────────────────────────────────────────────

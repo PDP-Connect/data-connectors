@@ -567,18 +567,31 @@ export function buildCustomInstructionsRecord(
 
 // ─── Account plan ───────────────────────────────────────────────────────
 
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+	Boolean(v) && typeof v === "object" && !Array.isArray(v);
+
+// An account object with nothing to identify it (`{}`, wrong primitives) is a
+// changed or broken response, not a free account: free accounts still carry
+// plan_type, and an entitlement may be absent.
 function isAccountEntry(v: unknown): v is RawAccountEntry {
-	if (!v || typeof v !== "object") {
+	if (!isPlainObject(v)) {
 		return false;
 	}
 	const { account } = v as RawAccountEntry;
-	return Boolean(account) && typeof account === "object";
+	if (!isPlainObject(account)) {
+		return false;
+	}
+	// Whitespace-only strings do not identify an account. Trimmed only here:
+	// emitted field values keep their existing semantics.
+	return [account.account_id, account.plan_type, account.structure].some(
+		(f) => typeof f === "string" && f.trim().length > 0,
+	);
 }
 
 /**
- * Pick the account the signed-in session resolves to: the "default" alias,
- * else the first `account_ordering` id that is present, else the first entry
- * that carries an `account` object.
+ * Pick the account the signed-in session resolves to: the "default" alias
+ * (null if present but invalid), else the first `account_ordering` id that
+ * is present, else the first entry that carries an `account` object.
  */
 function pickAccountEntry(
 	body: RawAccountsCheckBody,
@@ -590,7 +603,14 @@ function pickAccountEntry(
 	const ordering = Array.isArray(body.account_ordering)
 		? body.account_ordering.filter((k): k is string => typeof k === "string")
 		: [];
-	for (const key of ["default", ...ordering, ...Object.keys(accounts)]) {
+	// A present `default` is the session's account. If it is malformed the
+	// response is broken; falling through would silently switch identity.
+	if (accounts.default !== undefined) {
+		return isAccountEntry(accounts.default)
+			? { entry: accounts.default, key: "default" }
+			: null;
+	}
+	for (const key of [...ordering, ...Object.keys(accounts)]) {
 		const entry = accounts[key];
 		if (isAccountEntry(entry)) {
 			return { entry, key };
@@ -605,10 +625,30 @@ const stringOrNull = (v: unknown): string | null =>
 const booleanOrNull = (v: unknown): boolean | null =>
 	typeof v === "boolean" ? v : null;
 
-const plainObjectOrNull = (v: unknown): Record<string, unknown> | null =>
-	v && typeof v === "object" && !Array.isArray(v)
-		? (v as Record<string, unknown>)
-		: null;
+// A plan id such as "chatgptplusplan" or "plus": lowercase letters, "_" and
+// "-" only. No digits, so a processor id ("sub_1Nx…"), a UUID or an email
+// cannot pass as a plan name.
+const PLAN_SLUG = /^[a-z][a-z_-]{0,39}$/;
+
+/**
+ * A non-null scheduled_plan_change has not been observed. The only public
+ * reader found (gpt2agent usage.py) reads `plan_type` and `changes_at`, so
+ * those two are carried and every other key, at any depth, is dropped.
+ * Any object means a change is scheduled, so it maps to an object even when
+ * neither key is recognised: unknown keys must not read as "no change".
+ */
+function scheduledPlanChangeOrNull(
+	v: unknown,
+): { plan_type: string | null; changes_at: string | null } | null {
+	if (!isPlainObject(v)) {
+		return null;
+	}
+	const plan = stringOrNull(v.plan_type);
+	return {
+		plan_type: plan && PLAN_SLUG.test(plan) ? plan : null,
+		changes_at: tsToIso(v.changes_at),
+	};
+}
 
 /**
  * Normalize the accounts/check body into the single account_plan record.
@@ -643,8 +683,9 @@ export function buildAccountPlanRecord(
 		renews_at: tsToIso(entitlement.renews_at),
 		expires_at: tsToIso(entitlement.expires_at),
 		cancels_at: tsToIso(entitlement.cancels_at),
-		// Passed through as the API shapes it: only ever observed as null.
-		scheduled_plan_change: plainObjectOrNull(entitlement.scheduled_plan_change),
+		scheduled_plan_change: scheduledPlanChangeOrNull(
+			entitlement.scheduled_plan_change,
+		),
 	};
 }
 

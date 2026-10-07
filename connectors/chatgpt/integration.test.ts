@@ -11774,6 +11774,25 @@ test("runAccountPlanStream: 500 → SKIP_RESULT('http_error'), retryable, no rec
 for (const [label, json] of [
 	["an unreadable body", null],
 	["a body that names no account", { accounts: {} }],
+	["an array account", { accounts: { default: { account: [] } } }],
+	["an empty account object", { accounts: { default: { account: {} } } }],
+	[
+		"a whitespace-only plan_type",
+		{ accounts: { default: { account: { plan_type: " " } } } },
+	],
+	[
+		"an account the record schema rejects (over-long account_id)",
+		{ accounts: { default: { account: { account_id: "a".repeat(129) } } } },
+	],
+	[
+		"an invalid default beside a valid other account",
+		{
+			accounts: {
+				default: { account: {} },
+				team: { account: { account_id: "team", plan_type: "team" } },
+			},
+		},
+	],
 ] as const) {
 	test(`runAccountPlanStream: http 200 with ${label} is a parse_error — no record, STATE, or coverage`, async () => {
 		const { deps, emitted, messages } = makeAccountPlanHarness({
@@ -11790,3 +11809,35 @@ for (const [label, json] of [
 		);
 	});
 }
+
+test("runAccountPlanStream: a malformed 200 after a good run emits no STATE, so the prior fingerprint is retained", async () => {
+	const first = makeAccountPlanHarness({
+		status: 200,
+		json: ACCOUNT_PLAN_BODY,
+	});
+	await runAccountPlanStream(first.deps, {});
+	const priorCursor = lastStateCursor(first.messages, "account_plan");
+	assert.ok(priorCursor.fingerprints);
+
+	const second = makeAccountPlanHarness({
+		status: 200,
+		json: { accounts: { default: { account: {} } } },
+	});
+	await runAccountPlanStream(second.deps, { account_plan: priorCursor });
+	assert.equal(second.emitted.length, 0);
+	assert.equal(
+		second.messages.filter((m) => m.type === "STATE").length,
+		0,
+		"no STATE: the committed fingerprint from the last good run stands",
+	);
+	assert.equal(
+		second.messages.filter((m) => m.type === "DETAIL_COVERAGE").length,
+		0,
+	);
+	assert.equal(
+		second.messages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "parse_error",
+		),
+		true,
+	);
+});
