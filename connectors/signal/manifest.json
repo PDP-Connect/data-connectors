@@ -9,7 +9,7 @@
 	},
 	"connector_key": "signal",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/signal",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Signal Desktop",
 	"brand": {
 		"icon": "icon.svg",

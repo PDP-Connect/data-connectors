@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-messages",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-messages",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Google Messages (via gmcli)",
 	"brand": {
 		"icon": "icon.svg",
