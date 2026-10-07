@@ -29,6 +29,8 @@ jobs:
 
       - name: Test historical artifact contracts
         run: npm run historical-contract:test
+      - name: Test the legacy artifact release lane
+        run: npm run release-index:test
 
       - name: Test installer artifact contracts
         run: npm run installer:test

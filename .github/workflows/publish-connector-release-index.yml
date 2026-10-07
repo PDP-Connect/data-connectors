@@ -1,0 +1,119 @@
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+# Signs and publishes the legacy connector artifacts for Vana Desktop.
+#
+# Desktop resolves its bundled connectors and auto-installs updates from the
+# `connectors-latest` GitHub release of this repository, and verifies every
+# asset against the Sigstore identity of THIS workflow file on `main`
+# (`DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY` in connector-installer-core, and
+# the same string in Desktop's updater). The file name and the branch are the
+# identity; renaming either breaks every installed Desktop.
+#
+# The lane that used to run here regenerated the index from Playwright
+# sources. Those sources were retired at the 2026-09-23 cutover, so this
+# workflow signs what is committed instead: `connector-index.json` (frozen)
+# and the tarballs under `artifacts/`. See scripts/build-connector-release-index.mjs
+# for the exact rules. It runs only when dispatched by hand from `main`: a
+# merge that adds an artifact does not reach any Desktop until someone
+# decides it should.
+
+name: Publish Connector Release Index
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  attestations: write
+  contents: write
+
+concurrency:
+  group: publish-connector-release-index
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Refuse to publish from anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::This lane signs with the identity of main; dispatch it from main (got ${{ github.ref }})."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install release tooling dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check the frozen contracts before publishing them
+        run: npm run historical-contract:check
+
+      - name: Build the release index
+        env:
+          CONNECTOR_SOURCE_COMMIT: ${{ github.sha }}
+          CONNECTOR_RELEASE_OUTPUT: release
+        run: node scripts/build-connector-release-index.mjs
+
+      - name: Sign the release subjects
+        env:
+          CONNECTOR_RELEASE_OUTPUT: release
+        run: node scripts/sign-connector-release.mjs
+
+      - name: Attest the release subjects
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ github.workspace }}/release/connector-index.json
+            ${{ github.workspace }}/scope-catalog.json
+            ${{ github.workspace }}/schemas/scope-catalog.schema.json
+            ${{ github.workspace }}/artifacts/**/*.tgz
+
+      - name: Resolve release names
+        id: meta
+        run: |
+          echo "immutable_release_tag=connectors-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "latest_release_tag=connectors-latest" >> "$GITHUB_OUTPUT"
+
+      - name: Move the latest tag to this commit
+        run: |
+          git tag -f "${{ steps.meta.outputs.latest_release_tag }}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${{ steps.meta.outputs.latest_release_tag }}" --force
+
+      - name: Publish the immutable release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.meta.outputs.immutable_release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: Connector artifacts ${{ steps.meta.outputs.immutable_release_tag }}
+          # Keep original subjects and bundles when retrying the same commit.
+          overwrite_files: false
+          files: |
+            release/connector-index.json
+            release/connector-index.json.sigstore.json
+            scope-catalog.json
+            release/scope-catalog.json.sigstore.json
+            schemas/scope-catalog.schema.json
+            release/scope-catalog.schema.json.sigstore.json
+            artifacts/**/*.tgz
+            release/*.tgz.sigstore.json
+
+      - name: Publish the latest signed index
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.meta.outputs.latest_release_tag }}
+          name: Connector artifacts latest
+          overwrite_files: true
+          files: |
+            release/connector-index.json
+            release/connector-index.json.sigstore.json
+            scope-catalog.json
+            release/scope-catalog.json.sigstore.json
+            schemas/scope-catalog.schema.json
+            release/scope-catalog.schema.json.sigstore.json
