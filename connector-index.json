@@ -970,7 +970,7 @@
         "version": "1.0.0",
         "name": "Instagram Ads",
         "status": "beta",
-        "description": "Exports your Instagram ad interests — advertisers and ad topics.",
+        "description": "Exports your Instagram ad interests \u2014 advertisers and ad topics.",
         "sourceFiles": {
           "script": "meta/instagram-ads-playwright.js",
           "metadata": "meta/instagram-ads-playwright.json"
@@ -1007,7 +1007,7 @@
         "version": "1.1.0",
         "name": "Instagram Ads",
         "status": "beta",
-        "description": "Exports your Instagram ad interests — advertisers and ad topics.",
+        "description": "Exports your Instagram ad interests \u2014 advertisers and ad topics.",
         "sourceFiles": {
           "script": "meta/instagram-ads-playwright.js",
           "metadata": "meta/instagram-ads-playwright.json"
@@ -1039,7 +1039,7 @@
         "version": "1.1.1",
         "name": "Instagram Ads",
         "status": "beta",
-        "description": "Exports your Instagram ad interests — advertisers and ad topics.",
+        "description": "Exports your Instagram ad interests \u2014 advertisers and ad topics.",
         "sourceFiles": {
           "script": "meta/instagram-ads-playwright.js",
           "metadata": "meta/instagram-ads-playwright.json"
@@ -1480,6 +1480,43 @@
         "artifactSha256": "sha256:78257b0ac7f25b5acfe338b039be1e5e1fcf522ff4701d29d1d7684a0d4f5762",
         "artifactPath": "artifacts/oura-playwright/oura-playwright-3.0.0.tgz",
         "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/302c758fa84a889ff5f6ac4503be0a3430823589/artifacts/oura-playwright/oura-playwright-3.0.0.tgz",
+        "scopes": [
+          "oura.readiness",
+          "oura.sleep",
+          "oura.activity"
+        ],
+        "consumerMetadata": {
+          "sourceId": "oura",
+          "displayName": "Oura Ring",
+          "brandDomain": "ouraring.com",
+          "aliases": [
+            "ouraring"
+          ],
+          "iconKey": "oura",
+          "defaultScope": "oura.readiness"
+        }
+      },
+      {
+        "connectorId": "oura-playwright",
+        "company": "oura",
+        "version": "3.1.0",
+        "name": "Oura Ring",
+        "status": "stable",
+        "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity via the official Oura API V2, using a personal API application on your own Oura developer account. Follows the portal's better-auth sign-in and recovers from a stale portal session. Guided sign-in on phones (native cover), one-time session reuse at consent, and a declared telemetry contract (steps and failure codes).",
+        "sourceFiles": {
+          "script": "oura/oura-playwright.js",
+          "metadata": "oura/oura-playwright.json"
+        },
+        "publishedAt": "2026-10-07T00:00:00Z",
+        "sourceTag": "maciej/oura-playwright-3.1.0",
+        "sourceCommit": "cad6c07d1a35b8aae9a038faef2ac8b0cc7ae822",
+        "releaseId": "connectors-cad6c07d1a35",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:ff76b3262992ebd6b9beafc83f3233e5f986b2a174cc5ea3c47e1ebee55b86c1",
+        "scriptSha256": "sha256:35f1c285058071cc9ee80660df90fab077b135cf2cff07c7c75aa7c31dc327d7",
+        "artifactSha256": "sha256:7b37ca2f7d950d32fbe1d818f741d2e5e2b58ed76a84cd682158fd05ad60d7c3",
+        "artifactPath": "artifacts/oura-playwright/oura-playwright-3.1.0.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/cad6c07d1a35b8aae9a038faef2ac8b0cc7ae822/artifacts/oura-playwright/oura-playwright-3.1.0.tgz",
         "scopes": [
           "oura.readiness",
           "oura.sleep",
