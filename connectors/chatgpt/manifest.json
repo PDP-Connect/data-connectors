@@ -563,7 +563,19 @@
 						"format": "date-time"
 					},
 					"scheduled_plan_change": {
-						"type": ["object", "null"]
+						"type": ["object", "null"],
+						"properties": {
+							"plan_type": {
+								"type": ["string", "null"],
+								"pattern": "^[a-z][a-z_-]{0,39}$"
+							},
+							"changes_at": {
+								"type": ["string", "null"],
+								"format": "date-time"
+							}
+						},
+						"required": ["plan_type", "changes_at"],
+						"additionalProperties": false
 					}
 				},
 				"required": ["id"]

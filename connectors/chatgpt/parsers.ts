@@ -625,10 +625,30 @@ const stringOrNull = (v: unknown): string | null =>
 const booleanOrNull = (v: unknown): boolean | null =>
 	typeof v === "boolean" ? v : null;
 
-const plainObjectOrNull = (v: unknown): Record<string, unknown> | null =>
-	v && typeof v === "object" && !Array.isArray(v)
-		? (v as Record<string, unknown>)
-		: null;
+// A plan id such as "chatgptplusplan" or "plus": lowercase letters, "_" and
+// "-" only. No digits, so a processor id ("sub_1Nx…"), a UUID or an email
+// cannot pass as a plan name.
+const PLAN_SLUG = /^[a-z][a-z_-]{0,39}$/;
+
+/**
+ * A non-null scheduled_plan_change has not been observed. The only public
+ * reader found (gpt2agent usage.py) reads `plan_type` and `changes_at`, so
+ * those two are carried and every other key, at any depth, is dropped.
+ * Any object means a change is scheduled, so it maps to an object even when
+ * neither key is recognised: unknown keys must not read as "no change".
+ */
+function scheduledPlanChangeOrNull(
+	v: unknown,
+): { plan_type: string | null; changes_at: string | null } | null {
+	if (!isPlainObject(v)) {
+		return null;
+	}
+	const plan = stringOrNull(v.plan_type);
+	return {
+		plan_type: plan && PLAN_SLUG.test(plan) ? plan : null,
+		changes_at: tsToIso(v.changes_at),
+	};
+}
 
 /**
  * Normalize the accounts/check body into the single account_plan record.
@@ -663,8 +683,9 @@ export function buildAccountPlanRecord(
 		renews_at: tsToIso(entitlement.renews_at),
 		expires_at: tsToIso(entitlement.expires_at),
 		cancels_at: tsToIso(entitlement.cancels_at),
-		// Passed through as the API shapes it: only ever observed as null.
-		scheduled_plan_change: plainObjectOrNull(entitlement.scheduled_plan_change),
+		scheduled_plan_change: scheduledPlanChangeOrNull(
+			entitlement.scheduled_plan_change,
+		),
 	};
 }
 

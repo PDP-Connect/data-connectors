@@ -780,21 +780,82 @@ test("buildAccountPlanRecord: epoch-second dates and wrongly typed fields are no
 	assert.equal(rec?.scheduled_plan_change, null);
 });
 
-// The non-null shape has never been observed, so this object is invented: the
-// test only pins that whatever object arrives is passed through unchanged.
-test("buildAccountPlanRecord: a scheduled_plan_change object is passed through and stays schema-valid", () => {
-	const change = { placeholder_key: "placeholder_value" };
-	const rec = buildAccountPlanRecord({
+const planWithChange = (change: unknown) =>
+	buildAccountPlanRecord({
 		accounts: {
 			default: {
-				account: { plan_type: "plus" },
-				entitlement: { scheduled_plan_change: change },
+				account: { plan_type: "pro" },
+				entitlement: { scheduled_plan_change: change as never },
 			},
 		},
 	});
+
+// A non-null scheduled_plan_change has not been observed. These objects are
+// invented around the keys one public reader uses (plan_type, changes_at).
+test("buildAccountPlanRecord: scheduled_plan_change keeps plan_type and changes_at and drops every other key", () => {
+	const rec = planWithChange({
+		plan_type: "plus",
+		changes_at: 1_700_000_000,
+		subscription_id: "sub_123",
+		customer_id: "cus_456",
+		email: "someone@example.com",
+		payment: { processor_id: "pm_999", card: { last4: "4242" } },
+	});
 	assert.ok(rec);
-	assert.deepEqual(rec.scheduled_plan_change, change);
+	assert.deepEqual(rec.scheduled_plan_change, {
+		plan_type: "plus",
+		changes_at: new Date(1_700_000_000 * 1000).toISOString(),
+	});
 	assert.equal(validateRecord("account_plan", rec).ok, true);
+	const serialized = JSON.stringify(rec);
+	for (const leaked of ["sub_123", "cus_456", "someone@", "pm_999", "4242"]) {
+		assert.equal(serialized.includes(leaked), false, `${leaked} must not leak`);
+	}
+});
+
+test("buildAccountPlanRecord: a scheduled_plan_change with unrecognised keys still reads as a scheduled change", () => {
+	for (const change of [
+		{},
+		{ subscription_plan: "chatgptplusplan", effective_at: 1_700_000_000 },
+		{ plan_type: "someone@example.com", changes_at: "not a date" },
+		{ plan_type: "sub_1NxAbC23", changes_at: null },
+		{ plan_type: "cus_456" },
+		{ plan_type: "00000000-0000-4000-8000-000000000001" },
+		{ plan_type: { id: "sub_nested" }, changes_at: { at: "2026-01-01" } },
+		{ plan_type: 42, changes_at: true },
+	]) {
+		const rec = planWithChange(change);
+		assert.ok(rec);
+		assert.deepEqual(
+			rec.scheduled_plan_change,
+			{ plan_type: null, changes_at: null },
+			JSON.stringify(change),
+		);
+		assert.equal(validateRecord("account_plan", rec).ok, true);
+	}
+});
+
+test("buildAccountPlanRecord: a scheduled_plan_change that is not an object → null", () => {
+	for (const change of [null, undefined, [{ plan_type: "plus" }], "plus", 42]) {
+		assert.equal(planWithChange(change)?.scheduled_plan_change, null);
+	}
+});
+
+test("account_plan schema rejects extra keys or a non-slug plan_type inside scheduled_plan_change", () => {
+	const rec = planWithChange(null);
+	assert.ok(rec);
+	for (const change of [
+		{ plan_type: "plus", changes_at: null, subscription_id: "sub_1" },
+		{ plan_type: "someone@example.com", changes_at: null },
+		{ plan_type: "sub_123", changes_at: null },
+	]) {
+		assert.equal(
+			validateRecord("account_plan", { ...rec, scheduled_plan_change: change })
+				.ok,
+			false,
+			JSON.stringify(change),
+		);
+	}
 });
 
 test("buildAccountPlanRecord: an account without a usable discriminator → null", () => {
