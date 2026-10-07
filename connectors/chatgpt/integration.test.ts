@@ -94,6 +94,7 @@ import {
 	resolveChatGptMaxTailDeferralGapsPerRun,
 	resolveChatGptProviderBudget,
 	resolveChatGptRateLimitDensityStop,
+	runAccountPlanStream,
 	runConversationsAndMessagesStreams,
 	runCustomGptsStream,
 	runCustomInstructionsStream,
@@ -11653,4 +11654,190 @@ test("a missing credential asks the owner to re-enter it, never to await a conne
 			`${benign} SHALL NOT be read as a credential failure`,
 		);
 	}
+});
+
+// ─── runAccountPlanStream ────────────────────────────────────────────────
+
+const ACCOUNT_PLAN_BODY = {
+	accounts: {
+		default: {
+			account: { account_id: "acct-1", plan_type: "plus" },
+			entitlement: {
+				has_active_subscription: true,
+				subscription_plan: "chatgptplusplan",
+				renews_at: "2026-11-01T09:15:00+00:00",
+			},
+		},
+	},
+};
+
+/** Serves `result` only for the accounts/check path, so the path literal the
+ *  connector requests is load-bearing rather than decorative. */
+function makeAccountPlanHarness(result: ChatGptFetchResult): RecordingHarness {
+	const harness = makeHarness({ requested: ["account_plan"] });
+	harness.deps.api.fetch = (path: string): Promise<ChatGptFetchResult> =>
+		Promise.resolve(
+			path === "/accounts/check/v4-2023-04-27"
+				? result
+				: { status: 599, json: null },
+		);
+	return harness;
+}
+
+test("runAccountPlanStream: 200 → one record, STATE, and singleton coverage", async () => {
+	const { deps, emitted, messages } = makeAccountPlanHarness({
+		status: 200,
+		json: ACCOUNT_PLAN_BODY,
+	});
+	await runAccountPlanStream(deps);
+	assert.equal(emitted.length, 1);
+	assert.equal(emitted[0]?.stream, "account_plan");
+	assert.equal(emitted[0]?.data.plan_type, "plus");
+	assert.equal(emitted[0]?.data.renews_at, "2026-11-01T09:15:00.000Z");
+	assert.equal(
+		messages.filter((m) => m.type === "STATE" && m.stream === "account_plan")
+			.length,
+		1,
+	);
+	const coverage = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			m.type === "DETAIL_COVERAGE" && m.stream === "account_plan",
+	);
+	assert.ok(coverage, "a readable 200 proves the singleton was observed");
+});
+
+test("runAccountPlanStream: unchanged plan on a second run emits zero records but still writes STATE", async () => {
+	const first = makeAccountPlanHarness({
+		status: 200,
+		json: ACCOUNT_PLAN_BODY,
+	});
+	await runAccountPlanStream(first.deps, {});
+	const priorCursor = lastStateCursor(first.messages, "account_plan");
+	assert.ok(priorCursor.fingerprints);
+
+	const second = makeAccountPlanHarness({
+		status: 200,
+		json: ACCOUNT_PLAN_BODY,
+	});
+	await runAccountPlanStream(second.deps, { account_plan: priorCursor });
+	assert.equal(
+		second.emitted.length,
+		0,
+		"byte-identical plan is not re-emitted",
+	);
+	assert.equal(
+		second.messages.filter((m) => m.type === "STATE").length,
+		1,
+		"STATE still commits on an unchanged observation",
+	);
+});
+
+test("runAccountPlanStream: 403 → SKIP_RESULT('not_available'), no record, no STATE", async () => {
+	const { deps, emitted, messages } = makeAccountPlanHarness({
+		status: 403,
+		json: null,
+	});
+	await runAccountPlanStream(deps);
+	assert.equal(emitted.length, 0);
+	const skip = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT",
+	);
+	assert.equal(skip?.stream, "account_plan");
+	assert.equal(skip?.reason, "not_available");
+	assert.deepEqual(skip?.recovery_hint, {
+		action: "not_retriable",
+		retryable: false,
+	});
+	assert.equal(messages.filter((m) => m.type === "STATE").length, 0);
+});
+
+test("runAccountPlanStream: 500 → SKIP_RESULT('http_error'), retryable, no record", async () => {
+	const { deps, emitted, messages } = makeAccountPlanHarness({
+		status: 500,
+		json: null,
+	});
+	await runAccountPlanStream(deps);
+	assert.equal(emitted.length, 0);
+	const skip = messages.find(
+		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+			m.type === "SKIP_RESULT",
+	);
+	assert.equal(skip?.reason, "http_error");
+	assert.deepEqual(skip?.diagnostics, { http_status: 500 });
+	assert.deepEqual(skip?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+});
+
+for (const [label, json] of [
+	["an unreadable body", null],
+	["a body that names no account", { accounts: {} }],
+	["an array account", { accounts: { default: { account: [] } } }],
+	["an empty account object", { accounts: { default: { account: {} } } }],
+	[
+		"a whitespace-only plan_type",
+		{ accounts: { default: { account: { plan_type: " " } } } },
+	],
+	[
+		"an account the record schema rejects (over-long account_id)",
+		{ accounts: { default: { account: { account_id: "a".repeat(129) } } } },
+	],
+	[
+		"an invalid default beside a valid other account",
+		{
+			accounts: {
+				default: { account: {} },
+				team: { account: { account_id: "team", plan_type: "team" } },
+			},
+		},
+	],
+] as const) {
+	test(`runAccountPlanStream: http 200 with ${label} is a parse_error — no record, STATE, or coverage`, async () => {
+		const { deps, emitted, messages } = makeAccountPlanHarness({
+			status: 200,
+			json,
+		});
+		await runAccountPlanStream(deps);
+		assert.equal(emitted.length, 0, "must not synthesize an all-null plan");
+		assert.deepEqual(
+			messages
+				.filter((m) => m.type !== "PROGRESS")
+				.map((m) => `${m.type}:${m.type === "SKIP_RESULT" ? m.reason : ""}`),
+			["SKIP_RESULT:parse_error"],
+		);
+	});
+}
+
+test("runAccountPlanStream: a malformed 200 after a good run emits no STATE, so the prior fingerprint is retained", async () => {
+	const first = makeAccountPlanHarness({
+		status: 200,
+		json: ACCOUNT_PLAN_BODY,
+	});
+	await runAccountPlanStream(first.deps, {});
+	const priorCursor = lastStateCursor(first.messages, "account_plan");
+	assert.ok(priorCursor.fingerprints);
+
+	const second = makeAccountPlanHarness({
+		status: 200,
+		json: { accounts: { default: { account: {} } } },
+	});
+	await runAccountPlanStream(second.deps, { account_plan: priorCursor });
+	assert.equal(second.emitted.length, 0);
+	assert.equal(
+		second.messages.filter((m) => m.type === "STATE").length,
+		0,
+		"no STATE: the committed fingerprint from the last good run stands",
+	);
+	assert.equal(
+		second.messages.filter((m) => m.type === "DETAIL_COVERAGE").length,
+		0,
+	);
+	assert.equal(
+		second.messages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "parse_error",
+		),
+		true,
+	);
 });

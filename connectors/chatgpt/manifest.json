@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.35",
+	"version": "0.2.37",
 	"display_name": "ChatGPT",
 	"brand": {
 		"icon": "icon.svg",
@@ -502,6 +502,106 @@
 			},
 			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "account_plan",
+			"required": false,
+			"description": "The subscription plan of the signed-in ChatGPT account, with its renewal, expiry and cancellation dates and any scheduled plan change.",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
+			"display": {
+				"label": "Your ChatGPT plan",
+				"detail": "Which plan the signed-in account is on (free, Plus, Pro, Team…), whether the subscription is active and set to renew, its billing period, the renewal/expiry/cancellation dates, any scheduled plan change, and when the account was created. Usage limits are not included. Payment details and billing identifiers are not collected. Singleton — one record for the account the session is signed in to."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"account_id": {
+						"type": ["string", "null"]
+					},
+					"account_structure": {
+						"type": ["string", "null"]
+					},
+					"account_created_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"plan_type": {
+						"type": ["string", "null"],
+						"x_pdpp_role": "primary-title"
+					},
+					"plan_display_name": {
+						"type": ["string", "null"]
+					},
+					"subscription_plan": {
+						"type": ["string", "null"]
+					},
+					"has_active_subscription": {
+						"type": ["boolean", "null"]
+					},
+					"billing_period": {
+						"type": ["string", "null"]
+					},
+					"will_renew": {
+						"type": ["boolean", "null"]
+					},
+					"renews_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"expires_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"cancels_at": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
+					"scheduled_plan_change": {
+						"type": ["object", "null"],
+						"properties": {
+							"plan_type": {
+								"type": ["string", "null"],
+								"pattern": "^[a-z][a-z_-]{0,39}$"
+							},
+							"changes_at": {
+								"type": ["string", "null"],
+								"format": "date-time"
+							}
+						},
+						"required": ["plan_type", "changes_at"],
+						"additionalProperties": false
+					}
+				},
+				"required": ["id"]
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"search": {
+					"lexical_fields": ["plan_type", "plan_display_name", "subscription_plan"]
+				},
+				"range_filters": {
+					"account_created_at": ["gte", "gt", "lte", "lt"],
+					"renews_at": ["gte", "gt", "lte", "lt"],
+					"expires_at": ["gte", "gt", "lte", "lt"],
+					"cancels_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "scheduled_window"
 		}
 	],
 	"profiles": [
@@ -546,7 +646,7 @@
 		},
 		{
 			"id": "full",
-			"label": "Everything: chats, memories, custom GPTs, custom instructions, shares",
+			"label": "Everything: chats, memories, custom GPTs, custom instructions, shares, account plan",
 			"streams": [
 				{
 					"name": "conversations"
@@ -565,6 +665,9 @@
 				},
 				{
 					"name": "shared_conversations"
+				},
+				{
+					"name": "account_plan"
 				}
 			]
 		}

@@ -71,6 +71,7 @@ import { createRepairBudget } from "../../packages/polyfill-connectors/src/repai
 import { RunBudget } from "../../packages/polyfill-connectors/src/run-budget.ts";
 import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
+	buildAccountPlanRecord,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
 	buildGizmoRecord,
@@ -92,6 +93,7 @@ import type {
 	ChatGptJson,
 	ChatGptNode,
 	ConversationListItem,
+	RawAccountsCheckBody,
 	RawCustomInstructionsBody,
 	RawMemoryEntry,
 	RawSharedConversation,
@@ -140,7 +142,7 @@ function scrubChatGptTerminalDiagnostic(message: string): string {
 			"$1[redacted]",
 		)
 		.replace(
-			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations)(?:[/?]|$))[^\s)"'<>]*/giu,
+			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts)(?:[/?]|$))[^\s)"'<>]*/giu,
 			"[redacted-path]",
 		)
 		.replace(/\s+/g, " ")
@@ -2463,6 +2465,80 @@ export async function runCustomInstructionsStream(
 	// memories/shared_conversations all reported complete while this stream
 	// reported nothing).
 	deps.emit(buildFullScanCoverageMessage("custom_instructions", 1));
+}
+
+const ACCOUNTS_CHECK_PATH = "/accounts/check/v4-2023-04-27";
+
+/**
+ * Fetch the accounts/check body the web app loads at startup and emit at most
+ * one account_plan record: plan, renewal/expiry/cancellation dates, and any
+ * scheduled plan change. 404/403 → SKIP "not_available"; other non-200 →
+ * SKIP "http_error".
+ *
+ * A 200 that is unreadable, or that names no account, is a `parse_error`:
+ * no record and no fingerprint/STATE advancement, so a drifted response
+ * shape never overwrites the last real plan with an all-null one.
+ */
+export async function runAccountPlanStream(
+	deps: StreamDeps,
+	state: CollectContext["state"] = {},
+): Promise<void> {
+	deps.emit({
+		type: "PROGRESS",
+		stream: "account_plan",
+		message: "Fetching account plan",
+	});
+	const res = await deps.api.fetch(ACCOUNTS_CHECK_PATH);
+	if (res.status === 404 || res.status === 403) {
+		deps.emit({
+			type: "SKIP_RESULT",
+			stream: "account_plan",
+			reason: "not_available",
+			message: `accounts_check http ${res.status}`,
+			recovery_hint: { action: "not_retriable", retryable: false },
+		});
+		return;
+	}
+	if (res.status !== 200) {
+		deps.emit({
+			type: "SKIP_RESULT",
+			stream: "account_plan",
+			reason: "http_error",
+			message: `accounts_check http ${res.status}`,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: { http_status: res.status },
+		});
+		return;
+	}
+	const record = isUnreadableJsonBody(res)
+		? null
+		: buildAccountPlanRecord(res.json as RawAccountsCheckBody);
+	// A record the schema would reject (e.g. an over-long id) is dropped by
+	// emitRecord; without this check STATE would still advance past it.
+	const validation = record ? validateRecord("account_plan", record) : null;
+	if (!record || (validation && !validation.ok)) {
+		deps.emit({
+			type: "SKIP_RESULT",
+			stream: "account_plan",
+			reason: "parse_error",
+			message: "accounts_check http 200 with no readable account",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: { http_status: res.status },
+		});
+		return;
+	}
+	// Same gate as custom_instructions: a stable synthetic id and no run-clock
+	// field, so the fingerprint suppresses a byte-identical re-emit.
+	const fingerprintCursor = openFingerprintCursor(state.account_plan);
+	if (fingerprintCursor.shouldEmit(record)) {
+		await deps.emitRecord("account_plan", record);
+	}
+	deps.emit({
+		type: "STATE",
+		stream: "account_plan",
+		cursor: { fetched_at: nowIso(), fingerprints: fingerprintCursor.toState() },
+	});
+	deps.emit(buildFullScanCoverageMessage("account_plan", 1));
 }
 
 /**
@@ -6760,6 +6836,9 @@ export async function collectChatGpt(
 	}
 	if (requested.has("shared_conversations")) {
 		await runSharedConversationsStream(deps, state);
+	}
+	if (requested.has("account_plan")) {
+		await runAccountPlanStream(deps, state);
 	}
 	if (requested.has("conversations") || requested.has("messages")) {
 		await runConversationsAndMessagesStreams(deps, state);

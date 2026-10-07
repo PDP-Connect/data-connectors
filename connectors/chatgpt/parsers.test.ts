@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	buildAccountPlanRecord,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
 	buildGizmoRecord,
@@ -24,7 +25,12 @@ import {
 	unwrapGizmo,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
-import type { ChatGptNode, ConversationListItem, RawGizmo } from "./types.ts";
+import type {
+	ChatGptNode,
+	ConversationListItem,
+	RawAccountsCheckBody,
+	RawGizmo,
+} from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
@@ -610,6 +616,280 @@ test("buildCustomInstructionsRecord: falls back to fallback keys + null enabled 
 	assert.equal(rec.about_user, "legacy-a");
 	assert.equal(rec.response_style, "legacy-b");
 	assert.equal(rec.enabled, null);
+});
+
+// accounts-check.json follows a real accounts/check response from a free
+// account with a lapsed Pro subscription. Ids, dates and the feature list are
+// replaced with placeholders; the eligibility flags and offers are trimmed.
+test("buildAccountPlanRecord: normalizes the default account from the fixture", () => {
+	const raw = readFixtureJson<RawAccountsCheckBody>("accounts-check.json");
+	const rec = buildAccountPlanRecord(raw);
+	assert.deepEqual(rec, {
+		id: "account_plan",
+		account_id: "00000000-0000-4000-8000-000000000001",
+		account_structure: "personal",
+		account_created_at: "2023-01-15T10:00:00.000Z",
+		plan_type: "free",
+		plan_display_name: "Free",
+		subscription_plan: "chatgptpro",
+		has_active_subscription: false,
+		billing_period: "monthly",
+		will_renew: false,
+		renews_at: null,
+		expires_at: "2026-03-15T10:00:00.000Z",
+		cancels_at: null,
+		scheduled_plan_change: null,
+	});
+	assert.ok(rec);
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+});
+
+test("buildAccountPlanRecord: carries no billing identifier or profile field", () => {
+	const raw = readFixtureJson<RawAccountsCheckBody>("accounts-check.json");
+	const serialized = JSON.stringify(buildAccountPlanRecord(raw));
+	for (const leaked of [
+		"subscription_id",
+		"0000000000aa",
+		"processor",
+		"account_user_id",
+		"account_owner_id",
+		"REDACTED",
+		"profile_picture",
+		"pthdnu",
+	]) {
+		assert.equal(serialized.includes(leaked), false, `${leaked} must not leak`);
+	}
+});
+
+// accounts-check-pro.json keeps the key layout of a live accounts/check
+// response for an active, renewing personal Pro subscription. Ids, dates,
+// residency, feature flags and offers are placeholders.
+test("buildAccountPlanRecord: normalizes an active Pro account without leaking billing fields", () => {
+	const raw = readFixtureJson<RawAccountsCheckBody>("accounts-check-pro.json");
+	const rec = buildAccountPlanRecord(raw);
+	assert.ok(rec);
+	assert.equal(rec.plan_type, "pro");
+	assert.equal(rec.account_structure, "personal");
+	assert.equal(rec.subscription_plan, "chatgptpro");
+	assert.equal(rec.has_active_subscription, true);
+	assert.equal(rec.will_renew, true);
+	assert.equal(rec.billing_period, "monthly");
+	assert.equal(typeof rec.renews_at, "string");
+	assert.equal(typeof rec.expires_at, "string");
+	assert.equal(rec.cancels_at, null);
+	assert.equal(rec.scheduled_plan_change, null);
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+	const serialized = JSON.stringify(rec);
+	for (const leaked of [
+		"subscription_id",
+		"processor",
+		"REDACTED",
+		"account_user_id",
+	]) {
+		assert.equal(serialized.includes(leaked), false, `${leaked} must not leak`);
+	}
+});
+
+test("buildAccountPlanRecord: whitespace-only identifiers do not make an account", () => {
+	for (const blank of [" ", "\t\n", "   "]) {
+		assert.equal(
+			buildAccountPlanRecord({
+				accounts: { default: { account: { plan_type: blank } } },
+			}),
+			null,
+		);
+		assert.equal(
+			buildAccountPlanRecord({
+				accounts: {
+					default: {
+						account: { account_id: blank, plan_type: blank, structure: blank },
+					},
+				},
+			}),
+			null,
+		);
+	}
+});
+
+test("buildAccountPlanRecord: a present but invalid default is a parse failure, never a switch to another account", () => {
+	const team = { account: { account_id: "team", plan_type: "team" } };
+	for (const bad of [{ account: {} }, {}, null, "x", [], { account: [] }]) {
+		assert.equal(
+			buildAccountPlanRecord({
+				accounts: { default: bad as never, team },
+				account_ordering: ["team"],
+			}),
+			null,
+		);
+	}
+});
+
+test("buildAccountPlanRecord: an undefined default still falls back to the first valid entry", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: {
+			default: undefined as never,
+			team: { account: { account_id: "team", plan_type: "team" } },
+		},
+	});
+	assert.equal(rec?.account_id, "team");
+});
+
+test("buildAccountPlanRecord: without a default alias, account_ordering picks the entry and its key is the account id", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: {
+			"acct-b": { account: { plan_type: "team", structure: "workspace" } },
+			"acct-a": { account: { plan_type: "free" } },
+		},
+		account_ordering: ["acct-a", "acct-b"],
+	});
+	assert.equal(rec?.account_id, "acct-a");
+	assert.equal(rec?.plan_type, "free");
+});
+
+test("buildAccountPlanRecord: free account with no entitlement → nulls, still schema-valid", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: { default: { account: { plan_type: "free" } } },
+	});
+	assert.ok(rec);
+	assert.equal(rec.account_id, null);
+	assert.equal(rec.subscription_plan, null);
+	assert.equal(rec.has_active_subscription, null);
+	assert.equal(rec.will_renew, null);
+	assert.equal(rec.renews_at, null);
+	assert.equal(rec.scheduled_plan_change, null);
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+});
+
+test("buildAccountPlanRecord: epoch-second dates and wrongly typed fields are normalized, not passed through", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: {
+			default: {
+				account: { plan_type: "pro" },
+				entitlement: {
+					expires_at: 1_700_000_000,
+					cancels_at: "not a date",
+					has_active_subscription: null,
+					scheduled_plan_change: ["not", "an", "object"],
+				},
+			},
+		},
+	});
+	assert.equal(rec?.expires_at, new Date(1_700_000_000 * 1000).toISOString());
+	assert.equal(rec?.cancels_at, null);
+	assert.equal(rec?.has_active_subscription, null);
+	assert.equal(rec?.scheduled_plan_change, null);
+});
+
+const planWithChange = (change: unknown) =>
+	buildAccountPlanRecord({
+		accounts: {
+			default: {
+				account: { plan_type: "pro" },
+				entitlement: { scheduled_plan_change: change as never },
+			},
+		},
+	});
+
+// A non-null scheduled_plan_change has not been observed. These objects are
+// invented around the keys one public reader uses (plan_type, changes_at).
+test("buildAccountPlanRecord: scheduled_plan_change keeps plan_type and changes_at and drops every other key", () => {
+	const rec = planWithChange({
+		plan_type: "plus",
+		changes_at: 1_700_000_000,
+		subscription_id: "sub_123",
+		customer_id: "cus_456",
+		email: "someone@example.com",
+		payment: { processor_id: "pm_999", card: { last4: "4242" } },
+	});
+	assert.ok(rec);
+	assert.deepEqual(rec.scheduled_plan_change, {
+		plan_type: "plus",
+		changes_at: new Date(1_700_000_000 * 1000).toISOString(),
+	});
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+	const serialized = JSON.stringify(rec);
+	for (const leaked of ["sub_123", "cus_456", "someone@", "pm_999", "4242"]) {
+		assert.equal(serialized.includes(leaked), false, `${leaked} must not leak`);
+	}
+});
+
+test("buildAccountPlanRecord: a scheduled_plan_change with unrecognised keys still reads as a scheduled change", () => {
+	for (const change of [
+		{},
+		{ subscription_plan: "chatgptplusplan", effective_at: 1_700_000_000 },
+		{ plan_type: "someone@example.com", changes_at: "not a date" },
+		{ plan_type: "sub_1NxAbC23", changes_at: null },
+		{ plan_type: "cus_456" },
+		{ plan_type: "00000000-0000-4000-8000-000000000001" },
+		{ plan_type: { id: "sub_nested" }, changes_at: { at: "2026-01-01" } },
+		{ plan_type: 42, changes_at: true },
+	]) {
+		const rec = planWithChange(change);
+		assert.ok(rec);
+		assert.deepEqual(
+			rec.scheduled_plan_change,
+			{ plan_type: null, changes_at: null },
+			JSON.stringify(change),
+		);
+		assert.equal(validateRecord("account_plan", rec).ok, true);
+	}
+});
+
+test("buildAccountPlanRecord: a scheduled_plan_change that is not an object → null", () => {
+	for (const change of [null, undefined, [{ plan_type: "plus" }], "plus", 42]) {
+		assert.equal(planWithChange(change)?.scheduled_plan_change, null);
+	}
+});
+
+test("account_plan schema rejects extra keys or a non-slug plan_type inside scheduled_plan_change", () => {
+	const rec = planWithChange(null);
+	assert.ok(rec);
+	for (const change of [
+		{ plan_type: "plus", changes_at: null, subscription_id: "sub_1" },
+		{ plan_type: "someone@example.com", changes_at: null },
+		{ plan_type: "sub_123", changes_at: null },
+	]) {
+		assert.equal(
+			validateRecord("account_plan", { ...rec, scheduled_plan_change: change })
+				.ok,
+			false,
+			JSON.stringify(change),
+		);
+	}
+});
+
+test("buildAccountPlanRecord: an account without a usable discriminator → null", () => {
+	for (const body of [
+		{ accounts: { default: { account: [] } } },
+		{ accounts: { default: { account: {} } } },
+		{ accounts: { default: { account: { account_id: "" } } } },
+		{ accounts: { default: { account: { plan_type: 5, structure: true } } } },
+		{ accounts: { default: { account: "free" } } },
+		{ accounts: { default: { account: 1 } } },
+	]) {
+		assert.equal(
+			buildAccountPlanRecord(body as unknown as RawAccountsCheckBody),
+			null,
+			JSON.stringify(body),
+		);
+	}
+});
+
+test("buildAccountPlanRecord: a free account with only an account_id still builds", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: { default: { account: { account_id: "acct-free" } } },
+	});
+	assert.equal(rec?.account_id, "acct-free");
+});
+
+test("buildAccountPlanRecord: a body that names no account → null", () => {
+	assert.equal(buildAccountPlanRecord(null), null);
+	assert.equal(buildAccountPlanRecord({}), null);
+	assert.equal(buildAccountPlanRecord({ accounts: {} }), null);
+	assert.equal(
+		buildAccountPlanRecord({ accounts: { default: { account: null } } }),
+		null,
+	);
 });
 
 test("buildSharedConversationRecord: null when no id / share_id", () => {

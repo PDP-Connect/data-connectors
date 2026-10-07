@@ -9,7 +9,7 @@
 	},
 	"connector_key": "slack",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/slack",
-	"version": "0.7.0",
+	"version": "0.7.1",
 	"display_name": "Slack",
 	"brand": {
 		"icon": "icon.svg",
