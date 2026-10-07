@@ -12,8 +12,8 @@
     "pdpp": {
       "owner": "PDP-Connect",
       "repo": "pdpp",
-      "sha": "c5f62944c4eb5a200b810887321d09ea4cb24f9d",
-      "note": "Supersedes pinned SHA 422c277447c51a0b390d3c416a82b6dcaca246f8 with c5f62944c4eb5a200b810887321d09ea4cb24f9d on main. This pin backs drift jobs (d) reference-contract."
+      "sha": "667ca044fe9bc9364f0bf99bb7d019d343f78e84",
+      "note": "Supersedes pinned SHA c5f62944c4eb5a200b810887321d09ea4cb24f9d with 667ca044fe9bc9364f0bf99bb7d019d343f78e84 on main. This pin backs drift jobs (d) reference-contract."
     }
   }
 }
