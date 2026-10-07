@@ -9,7 +9,7 @@
 	},
 	"connector_key": "uber",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/uber",
-	"version": "1.0.12",
+	"version": "1.0.13",
 	"display_name": "Uber",
 	"brand": {
 		"icon": "icon.svg",
