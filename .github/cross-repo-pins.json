@@ -5,8 +5,8 @@
     "data-connect": {
       "owner": "PDP-Connect",
       "repo": "data-connect",
-      "sha": "6becccdeea0b72fc298ccf1eac71e2b1fe6b292b",
-      "note": "Supersedes pinned SHA e184b587e65528cd0f2d2ff588e526f2ff4a827d with 6becccdeea0b72fc298ccf1eac71e2b1fe6b292b on main. This pin backs drift jobs (a) collector-definitions, (b) connector-sources, (c) tarball-digests, and (e) collector-packaging-manifest."
+      "sha": "d21a9dcbb9eef7b8190096691b8c23435da8bfd9",
+      "note": "Supersedes pinned SHA 6becccdeea0b72fc298ccf1eac71e2b1fe6b292b with d21a9dcbb9eef7b8190096691b8c23435da8bfd9 on main. This pin backs drift jobs (a) collector-definitions, (b) connector-sources, (c) tarball-digests, and (e) collector-packaging-manifest."
     },
     "pdpp": {
       "owner": "PDP-Connect",
