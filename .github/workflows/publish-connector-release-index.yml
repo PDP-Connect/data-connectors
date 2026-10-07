@@ -92,7 +92,8 @@ jobs:
           tag_name: ${{ steps.meta.outputs.immutable_release_tag }}
           target_commitish: ${{ github.sha }}
           name: Connector artifacts ${{ steps.meta.outputs.immutable_release_tag }}
-          overwrite_files: true
+          # Keep original subjects and bundles when retrying the same commit.
+          overwrite_files: false
           files: |
             release/connector-index.json
             release/connector-index.json.sigstore.json

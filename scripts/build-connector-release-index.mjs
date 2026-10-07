@@ -22,6 +22,7 @@
 // `<output>/published.json` (the assets this release carries, for the signer
 // and the upload step), and prints what it kept verbatim.
 
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -150,6 +151,10 @@ export function repositoryArtifactReader(root = repositoryRoot) {
 function main() {
   const sha = process.env.CONNECTOR_SOURCE_COMMIT?.trim() || process.env.GITHUB_SHA?.trim();
   if (!sha) throw new Error("CONNECTOR_SOURCE_COMMIT or GITHUB_SHA is required");
+  if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("source commit must be an exact 40-character git SHA");
+  // Same-SHA retries must sign identical index bytes, independent of run time.
+  const commitTime = execFileSync("git", ["show", "-s", "--format=%ct", sha], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+  const generatedAt = new Date(Number(commitTime) * 1000).toISOString();
   const releaseTag = process.env.CONNECTOR_RELEASE_TAG?.trim() || `connectors-${sha.slice(0, 12)}`;
   const releaseId = process.env.CONNECTOR_RELEASE_ID?.trim() || `github-${sha}`;
   const repository = process.env.GITHUB_REPOSITORY?.trim() || "PDP-Connect/data-connectors";
@@ -161,6 +166,7 @@ function main() {
     releaseTag,
     releaseId,
     repository,
+    generatedAt,
     readArtifact: repositoryArtifactReader(),
   });
 

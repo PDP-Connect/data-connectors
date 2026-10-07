@@ -2,16 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import Ajv from "ajv/dist/2020.js";
 import { parse as parseYaml } from "yaml";
 
-import { DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY } from "../packages/connector-installer-core/index.mjs";
+import { DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY, loadConnectorIndex } from "../packages/connector-installer-core/index.mjs";
 import {
   INDEX_BUNDLE_PATH,
   buildReleaseIndex,
@@ -161,6 +162,79 @@ test("the artifact reader refuses paths outside the repository", () => {
   assert.throws(() => repositoryArtifactReader()("/etc/passwd"), /outside the repository/);
 });
 
+test("a same-SHA CLI retry preserves immutable subjects and bundles, and latest still verifies after interruption", async () => {
+  const root = mkdtempSync(join(tmpdir(), "connector-release-retry-"));
+  try {
+    // Use a source commit other than HEAD to catch accidentally reading the checkout timestamp.
+    const sourceCommit = execFileSync("git", ["rev-parse", "HEAD^"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+    const commitTime = execFileSync("git", ["show", "-s", "--format=%cI", sourceCommit], { cwd: repositoryRoot, encoding: "utf8" }).trim();
+    const workflow = parseYaml(readFileSync(join(repositoryRoot, ".github/workflows/publish-connector-release-index.yml"), "utf8"));
+    const immutableStep = workflow.jobs.publish.steps.find((step) => /Publish the immutable release/.test(String(step.name)));
+    const latestStep = workflow.jobs.publish.steps.find((step) => /Publish the latest signed index/.test(String(step.name)));
+    const immutableBase = `https://github.com/${REPO}/releases/download/connectors-${sourceCommit.slice(0, 12)}`;
+    const latestUrl = `https://github.com/${REPO}/releases/download/connectors-latest/connector-index.json`;
+    const assets = new Map();
+    const runs = [];
+
+    for (const [run, now] of ["2030-01-01T00:00:00Z", "2030-01-02T00:00:00Z"].entries()) {
+      const output = join(root, String(run));
+      const clock = `const RealDate = Date; globalThis.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : [${JSON.stringify(now)}])); } static now() { return new RealDate(${JSON.stringify(now)}).valueOf(); } };`;
+      execFileSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(clock)}`, join(repositoryRoot, "scripts/build-connector-release-index.mjs")], {
+        cwd: root,
+        env: {
+          ...process.env,
+          CONNECTOR_SOURCE_COMMIT: sourceCommit,
+          GITHUB_SHA: "0".repeat(40),
+          CONNECTOR_RELEASE_TAG: `connectors-${sourceCommit.slice(0, 12)}`,
+          CONNECTOR_RELEASE_ID: `github-${sourceCommit}`,
+          GITHUB_REPOSITORY: REPO,
+          CONNECTOR_RELEASE_OUTPUT: output,
+        },
+      });
+      const subjects = releaseSubjects({ output });
+      // Keyless signatures differ between runs even when their subject bytes match.
+      await signSubjects(subjects, async (bytes) => ({ digest: sha256(bytes), signingRun: run }));
+      const files = new Map();
+      for (const subject of subjects) {
+        files.set(`${immutableBase}/${basename(subject.path)}`, readFileSync(subject.path));
+        files.set(`${immutableBase}/${basename(subject.bundlePath)}`, readFileSync(subject.bundlePath));
+      }
+      runs.push({ index: readFileSync(join(output, "connector-index.json")), files });
+    }
+
+    const uploadImmutable = (files) => {
+      for (const [url, bytes] of files) {
+        if (!assets.has(url) || immutableStep.with.overwrite_files) assets.set(url, bytes);
+      }
+    };
+    const loadLatest = () => loadConnectorIndex({
+      indexUrl: latestUrl,
+      indexCertificateIdentityResolver: async () => DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY,
+      fetchImpl: async (url) => {
+        assert.ok(assets.has(url), `missing release asset: ${url}`);
+        return new Response(assets.get(url));
+      },
+      sigstoreVerifier: async (bundle, bytes) => assert.equal(bundle.digest, sha256(bytes), "index bytes must match the immutable bundle digest"),
+    });
+
+    uploadImmutable(runs[0].files);
+    assets.set(latestUrl, runs[0].index);
+    assert.equal((await loadLatest()).signatureVerified, true);
+    uploadImmutable(runs[1].files);
+    // The retry stops before updating latest: it must still load the first run's index.
+    assert.equal((await loadLatest()).signatureVerified, true);
+    assert.deepEqual(runs[1].index, runs[0].index, "same SHA must produce byte-identical index output at different wall-clock times");
+    assert.equal(JSON.parse(runs[1].index).generatedAt, new Date(commitTime).toISOString());
+    assert.notDeepEqual(runs[1].files.get(`${immutableBase}/${INDEX_BUNDLE_PATH}`), runs[0].files.get(`${immutableBase}/${INDEX_BUNDLE_PATH}`));
+    for (const [url, bytes] of runs[0].files) assert.deepEqual(assets.get(url), bytes, `${url} must not be overwritten`);
+    assert.equal(latestStep.with.overwrite_files, true);
+    assets.set(latestUrl, runs[1].index);
+    assert.equal((await loadLatest()).signatureVerified, true, "completed retry also verifies against the original immutable bundle");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("release subjects are the index, the frozen catalog files and every published tarball, each with an <asset>.sigstore.json bundle", async () => {
   const root = mkdtempSync(join(tmpdir(), "connector-release-lane-"));
   try {
@@ -225,6 +299,7 @@ test("the publish workflow is the pinned signing identity, runs only by hand, an
   assert.ok(!guard.uses, "the guard runs before any action, checkout included");
   const immutableStep = workflow.jobs.publish.steps.find((step) => /Publish the immutable release/.test(String(step.name)));
   assert.equal(immutableStep.with.target_commitish, "${{ github.sha }}", "the immutable tag is created at the dispatched commit, not the branch tip");
+  assert.equal(immutableStep.with.overwrite_files, false, "immutable subjects and bundles survive same-SHA retries");
   assert.match(source, /release\/connector-index\.json\.sigstore\.json/);
   for (const uses of workflow.jobs.publish.steps.map((step) => step.uses).filter(Boolean)) {
     assert.match(uses, /@[a-f0-9]{40}( |$)/, `${uses}: actions are pinned to a commit`);
