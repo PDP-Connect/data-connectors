@@ -2310,7 +2310,9 @@ const mapActivity = (rawActivity) =>
     for (const scope of requestedScopes) {
       const scopeEndpoints = SCOPE_ENDPOINTS[scope];
       const failed = scopeEndpoints.filter((endpoint) => !collections[endpoint].ok);
-      const incomplete = scopeEndpoints.filter((endpoint) => !collections[endpoint].complete);
+      const incomplete = scopeEndpoints.filter(
+        (endpoint) => collections[endpoint].ok && !collections[endpoint].complete,
+      );
       const rows = (endpoint) => collections[endpoint].data;
 
       if (failed.length === scopeEndpoints.length) {
@@ -2333,10 +2335,14 @@ const mapActivity = (rawActivity) =>
       }
 
       if (failed.length > 0 || incomplete.length > 0) {
+        const degradedReason = [
+          failed.length > 0 && `Oura API request failed for ${failed.join(", ")}`,
+          incomplete.length > 0 && `pagination was truncated for ${incomplete.join(", ")}`,
+        ].filter(Boolean).join(" and ");
         errors.push(makeConnectorError(
           "upstream_error",
           CODES.apiScopeDegraded,
-          `Oura API data is incomplete/truncated for ${scope} (${[...new Set([...failed, ...incomplete])].join(", ")}).`,
+          `${degradedReason}; ${scope} data is incomplete.`,
           "degraded",
           { scope, step: ENDPOINT_STEPS[(failed[0] || incomplete[0])] },
         ));

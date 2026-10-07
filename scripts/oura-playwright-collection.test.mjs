@@ -42,6 +42,35 @@ const credentialHarness = (page) => {
   return context.connector;
 };
 
+const authorizeAttemptHarness = (redirectError) => {
+  const source = [
+    "let currentStep = null;",
+    "const STEPS = { authorize: 'authorize' };",
+    "const CODES = { authorizeDeclined: 'authorize_declined' };",
+    "const createPkcePair = async () => ({ state: 'expected-state', challenge: 'challenge', verifier: 'verifier' });",
+    "const workingState = () => ({});",
+    "const showOverlay = async () => {};",
+    "const buildAuthorizeUrl = () => 'https://moi.ouraring.com/oauth/authorize';",
+    "const safeGoto = async () => true;",
+    "const APP_REDIRECT_URI = 'https://app.example.test/redirect';",
+    "const isOnRedirect = (url) => url.startsWith(APP_REDIRECT_URI);",
+    "const currentUrl = async () => APP_REDIRECT_URI;",
+    "const waitFor = async (check) => check();",
+    "const INTERACTION_TIMEOUT_MS = 1;",
+    "const readRedirectParams = async () => ({ error: redirectError });",
+    "const makeFatalRunError = (errorClass, code, reason, step) => {",
+    "  const error = new Error(reason);",
+    "  error.telemetryError = { errorClass, code, reason, step };",
+    "  return error;",
+    "};",
+    credentialSource("const runAuthorizeAttempt =", "// ── Auth orchestration"),
+    "globalThis.connector = { runAuthorizeAttempt };",
+  ].join("\n");
+  const context = vm.createContext({ console: { error: () => {} }, redirectError });
+  vm.runInContext(source, context, { filename: "oura-playwright-authorize.js" });
+  return context.connector;
+};
+
 const assertPayloadsHide = (payloads, forbidden) => {
   assert.doesNotMatch(JSON.stringify(payloads), new RegExp(forbidden));
 };
@@ -73,15 +102,17 @@ const record = (id, extra = {}) => ({
   ...extra,
 });
 
-async function runConnector({ requestedScopes, collectionResponse }) {
+async function runConnector({ requestedScopes, collectionResponse, failCachedTokenRead = false }) {
   const data = new Map();
   const calls = [];
+  const setDataCalls = [];
   const page = {
     requestedScopes: () => requestedScopes,
     url: async () => "https://developer.ouraring.com/applications",
     evaluate: async (source) => {
       if (source.includes("location.origin ===")) return true;
       if (source.includes("localStorage.getItem")) {
+        if (failCachedTokenRead) throw new Error("mock cached-token read failed");
         return { accessToken: "mock-cached-token", expiresAt: Date.now() + 60 * 60 * 1000 };
       }
       return "shown";
@@ -96,7 +127,10 @@ async function runConnector({ requestedScopes, collectionResponse }) {
       }
       return collectionResponse({ endpoint, nextToken, url, calls });
     },
-    setData: async (key, value) => { data.set(key, JSON.parse(JSON.stringify(value))); },
+    setData: async (key, value) => {
+      setDataCalls.push(key);
+      data.set(key, JSON.parse(JSON.stringify(value)));
+    },
     setProgress: async () => {},
     sleep: async () => {},
   };
@@ -110,7 +144,7 @@ async function runConnector({ requestedScopes, collectionResponse }) {
     clearTimeout,
   });
   await vm.runInContext(script, context, { filename: "oura-playwright-3.1.0/script.js" });
-  return { data, calls };
+  return { data, calls, setDataCalls };
 }
 
 test("uses no Math.random in the connector source", () => {
@@ -197,10 +231,22 @@ test("does not propagate raw portal application-list failure text", async () => 
   assertPayloadsHide(payloads, canary);
 });
 
-test("does not interpolate a raw OAuth redirect error into its failure reason", () => {
-  const redirectFailure = credentialSource("if (redirect?.error)", "if (!redirect?.code)");
-  assert.doesNotMatch(redirectFailure, /\$\{redirect\.error\}/);
-  assert.match(redirectFailure, /\^\[a-z_\]\{1,40\}\$/);
+test("does not propagate a raw OAuth redirect error into its failure reason", async () => {
+  const canary = "CANARY_SECRET_xyz";
+  const { runAuthorizeAttempt } = authorizeAttemptHarness(canary);
+
+  let error;
+  await assert.rejects(
+    () => runAuthorizeAttempt("client-id", "person@example.test", null, false),
+    (caught) => {
+      error = caught;
+      return true;
+    },
+  );
+  assert.ok(error?.telemetryError, error?.stack || String(error));
+  assert.equal(error.telemetryError.code, "authorize_declined");
+  assert.doesNotMatch(error?.message || "", new RegExp(canary));
+  assert.match(error?.message || "", /OAuth error/);
 });
 
 test("marks a 50-page cursor cap as degraded while retaining collected rows", async () => {
@@ -214,7 +260,10 @@ test("marks a 50-page cursor cap as degraded while retaining collected rows", as
 
   assert.equal(data.get("result")["oura.readiness"].days.length, 50);
   assert.deepEqual(data.get("scopeCounts"), { "oura.readiness": { found: 50, ok: false } });
-  assert.match(data.get("result").errors[0].reason, /incomplete|truncated/i);
+  assert.equal(
+    data.get("result").errors[0].reason,
+    "pagination was truncated for daily_readiness; oura.readiness data is incomplete.",
+  );
   assert.equal(data.get("result").errors[0].code, "api_scope_degraded");
 });
 
@@ -253,6 +302,68 @@ test("treats a null row in a 200 response as malformed", async () => {
 
   assert.deepEqual(data.get("scopeCounts"), { "oura.readiness": { found: 0, ok: false } });
   assert.equal(data.get("result").errors[0].code, "api_all_failed");
+});
+
+for (const [label, row] of [
+  ["array", [1]],
+  ["class instance", new (class OuraRow {})()],
+]) {
+  test(`treats a ${label} row in a 200 response as malformed`, async () => {
+    const { data } = await runConnector({
+      requestedScopes: ["oura.readiness"],
+      collectionResponse: () => apiResponse(200, { data: [row] }),
+    });
+
+    assert.deepEqual(data.get("scopeCounts"), { "oura.readiness": { found: 0, ok: false } });
+    assert.equal(data.get("result").errors[0].code, "api_all_failed");
+  });
+}
+
+for (const [label, options] of [
+  ["requested scope validation fails", { requestedScopes: ["oura.bogus"] }],
+  ["cached-token access fails before collection starts", {
+    requestedScopes: ["oura.readiness"],
+    failCachedTokenRead: true,
+  }],
+]) {
+  test(`does not write scope counts when ${label}`, async () => {
+    const { setDataCalls } = await runConnector({
+      ...options,
+      collectionResponse: () => apiResponse(200, { data: [] }),
+    });
+
+    assert.equal(setDataCalls.filter((key) => key === "scopeCounts").length, 0);
+  });
+}
+
+test("labels a failed endpoint as a request failure, not a truncation", async () => {
+  const { data } = await runConnector({
+    requestedScopes: ["oura.sleep"],
+    collectionResponse: ({ endpoint }) =>
+      endpoint === "daily_sleep" ? apiResponse(500) : apiResponse(200, { data: [record("sleep")] }),
+  });
+
+  assert.equal(
+    data.get("result").errors[0].reason,
+    "Oura API request failed for daily_sleep; oura.sleep data is incomplete.",
+  );
+  assert.equal(data.get("result").errors[0].code, "api_scope_degraded");
+});
+
+test("names both failed and truncated endpoints in a degraded scope", async () => {
+  const { data } = await runConnector({
+    requestedScopes: ["oura.sleep"],
+    collectionResponse: ({ endpoint, nextToken }) => {
+      if (endpoint === "daily_sleep") return apiResponse(500);
+      return apiResponse(200, { data: [record(nextToken || "first")], next_token: "repeat" });
+    },
+  });
+
+  assert.equal(
+    data.get("result").errors[0].reason,
+    "Oura API request failed for daily_sleep and pagination was truncated for sleep; oura.sleep data is incomplete.",
+  );
+  assert.equal(data.get("result").errors[0].code, "api_scope_degraded");
 });
 
 test("writes scope counts when Oura rejects the token during collection", async () => {
