@@ -661,6 +661,50 @@ test("buildAccountPlanRecord: carries no billing identifier or profile field", (
 	}
 });
 
+test("buildAccountPlanRecord: whitespace-only identifiers do not make an account", () => {
+	for (const blank of [" ", "\t\n", "   "]) {
+		assert.equal(
+			buildAccountPlanRecord({
+				accounts: { default: { account: { plan_type: blank } } },
+			}),
+			null,
+		);
+		assert.equal(
+			buildAccountPlanRecord({
+				accounts: {
+					default: {
+						account: { account_id: blank, plan_type: blank, structure: blank },
+					},
+				},
+			}),
+			null,
+		);
+	}
+});
+
+test("buildAccountPlanRecord: a present but invalid default is a parse failure, never a switch to another account", () => {
+	const team = { account: { account_id: "team", plan_type: "team" } };
+	for (const bad of [{ account: {} }, {}, null, "x", [], { account: [] }]) {
+		assert.equal(
+			buildAccountPlanRecord({
+				accounts: { default: bad as never, team },
+				account_ordering: ["team"],
+			}),
+			null,
+		);
+	}
+});
+
+test("buildAccountPlanRecord: an undefined default still falls back to the first valid entry", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: {
+			default: undefined as never,
+			team: { account: { account_id: "team", plan_type: "team" } },
+		},
+	});
+	assert.equal(rec?.account_id, "team");
+});
+
 test("buildAccountPlanRecord: without a default alias, account_ordering picks the entry and its key is the account id", () => {
 	const rec = buildAccountPlanRecord({
 		accounts: {
@@ -722,6 +766,30 @@ test("buildAccountPlanRecord: a scheduled_plan_change object is passed through a
 	assert.ok(rec);
 	assert.deepEqual(rec.scheduled_plan_change, change);
 	assert.equal(validateRecord("account_plan", rec).ok, true);
+});
+
+test("buildAccountPlanRecord: an account without a usable discriminator → null", () => {
+	for (const body of [
+		{ accounts: { default: { account: [] } } },
+		{ accounts: { default: { account: {} } } },
+		{ accounts: { default: { account: { account_id: "" } } } },
+		{ accounts: { default: { account: { plan_type: 5, structure: true } } } },
+		{ accounts: { default: { account: "free" } } },
+		{ accounts: { default: { account: 1 } } },
+	]) {
+		assert.equal(
+			buildAccountPlanRecord(body as unknown as RawAccountsCheckBody),
+			null,
+			JSON.stringify(body),
+		);
+	}
+});
+
+test("buildAccountPlanRecord: a free account with only an account_id still builds", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: { default: { account: { account_id: "acct-free" } } },
+	});
+	assert.equal(rec?.account_id, "acct-free");
 });
 
 test("buildAccountPlanRecord: a body that names no account → null", () => {
