@@ -13,6 +13,8 @@ import type {
 	ChatGptMessage,
 	ChatGptNode,
 	ConversationListItem,
+	RawAccountEntry,
+	RawAccountsCheckBody,
 	RawCustomInstructionsBody,
 	RawGizmo,
 	RawGizmoWrapper,
@@ -560,6 +562,89 @@ export function buildCustomInstructionsRecord(
 		response_style: body.about_model_message ?? body.response_style ?? null,
 		enabled: typeof body.enabled === "boolean" ? body.enabled : null,
 		updated_at: tsToIso(body.updated_at ?? body.update_time_detail),
+	};
+}
+
+// ─── Account plan ───────────────────────────────────────────────────────
+
+function isAccountEntry(v: unknown): v is RawAccountEntry {
+	if (!v || typeof v !== "object") {
+		return false;
+	}
+	const { account } = v as RawAccountEntry;
+	return Boolean(account) && typeof account === "object";
+}
+
+/**
+ * Pick the account the signed-in session resolves to: the "default" alias,
+ * else the first `account_ordering` id that is present, else the first entry
+ * that carries an `account` object.
+ */
+function pickAccountEntry(
+	body: RawAccountsCheckBody,
+): { entry: RawAccountEntry; key: string } | null {
+	const { accounts } = body;
+	if (!accounts || typeof accounts !== "object" || Array.isArray(accounts)) {
+		return null;
+	}
+	const ordering = Array.isArray(body.account_ordering)
+		? body.account_ordering.filter((k): k is string => typeof k === "string")
+		: [];
+	for (const key of ["default", ...ordering, ...Object.keys(accounts)]) {
+		const entry = accounts[key];
+		if (isAccountEntry(entry)) {
+			return { entry, key };
+		}
+	}
+	return null;
+}
+
+const stringOrNull = (v: unknown): string | null =>
+	typeof v === "string" && v.length > 0 ? v : null;
+
+const booleanOrNull = (v: unknown): boolean | null =>
+	typeof v === "boolean" ? v : null;
+
+const plainObjectOrNull = (v: unknown): Record<string, unknown> | null =>
+	v && typeof v === "object" && !Array.isArray(v)
+		? (v as Record<string, unknown>)
+		: null;
+
+/**
+ * Normalize the accounts/check body into the single account_plan record.
+ * Returns null when the body names no account at all — unlike a cleared
+ * custom-instructions body, an account-less response is not a state a
+ * signed-in session can be in, so the caller reports it instead of emitting
+ * an all-null record. Billing identifiers (subscription id, payment
+ * processor ids) and profile fields are deliberately not carried.
+ */
+export function buildAccountPlanRecord(
+	j: RawAccountsCheckBody | null | undefined,
+): RecordData | null {
+	const picked = pickAccountEntry(j || {});
+	if (!picked) {
+		return null;
+	}
+	const { entry, key } = picked;
+	const account = entry.account || {};
+	const entitlement = entry.entitlement || {};
+	return {
+		id: "account_plan",
+		account_id:
+			stringOrNull(account.account_id) ?? (key === "default" ? null : key),
+		account_structure: stringOrNull(account.structure),
+		account_created_at: tsToIso(account.created_time),
+		plan_type: stringOrNull(account.plan_type),
+		plan_display_name: stringOrNull(account.plan_display_name),
+		subscription_plan: stringOrNull(entitlement.subscription_plan),
+		has_active_subscription: booleanOrNull(entitlement.has_active_subscription),
+		billing_period: stringOrNull(entitlement.billing_period),
+		will_renew: booleanOrNull(entry.last_active_subscription?.will_renew),
+		renews_at: tsToIso(entitlement.renews_at),
+		expires_at: tsToIso(entitlement.expires_at),
+		cancels_at: tsToIso(entitlement.cancels_at),
+		// Passed through as the API shapes it: only ever observed as null.
+		scheduled_plan_change: plainObjectOrNull(entitlement.scheduled_plan_change),
 	};
 }
 

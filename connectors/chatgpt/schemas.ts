@@ -132,6 +132,28 @@ export const customInstructionsSchema = z.object({
 	updated_at: looseTimestamp.nullable(),
 });
 
+// ─── account_plan ───────────────────────────────────────────────────────
+
+export const accountPlanSchema = z.object({
+	id: idSchema,
+	account_id: idSchema.nullable(),
+	// "personal" / "workspace"
+	account_structure: pdppSafeText.max(80).nullable(),
+	account_created_at: looseTimestamp.nullable(),
+	// plan_type is like "free" / "plus" / "pro" / "team" / "enterprise".
+	plan_type: pdppSafeText.max(80).nullable(),
+	plan_display_name: pdppSafeText.max(120).nullable(),
+	subscription_plan: pdppSafeText.max(120).nullable(),
+	has_active_subscription: z.boolean().nullable(),
+	billing_period: pdppSafeText.max(40).nullable(),
+	will_renew: z.boolean().nullable(),
+	renews_at: looseTimestamp.nullable(),
+	expires_at: looseTimestamp.nullable(),
+	cancels_at: looseTimestamp.nullable(),
+	// Only ever observed as null, so the non-null shape is not pinned.
+	scheduled_plan_change: z.record(z.string(), z.unknown()).nullable(),
+});
+
 // ─── shared_conversations ───────────────────────────────────────────────
 
 export const sharedConversationSchema = z.object({
@@ -153,6 +175,7 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	memories: memorySchema,
 	custom_gpts: customGptSchema,
 	custom_instructions: customInstructionsSchema,
+	account_plan: accountPlanSchema,
 	shared_conversations: sharedConversationSchema,
 };
 

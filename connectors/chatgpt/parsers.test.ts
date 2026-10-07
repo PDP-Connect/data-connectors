@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	buildAccountPlanRecord,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
 	buildGizmoRecord,
@@ -24,7 +25,12 @@ import {
 	unwrapGizmo,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
-import type { ChatGptNode, ConversationListItem, RawGizmo } from "./types.ts";
+import type {
+	ChatGptNode,
+	ConversationListItem,
+	RawAccountsCheckBody,
+	RawGizmo,
+} from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = join(__dirname, "__fixtures__");
@@ -610,6 +616,122 @@ test("buildCustomInstructionsRecord: falls back to fallback keys + null enabled 
 	assert.equal(rec.about_user, "legacy-a");
 	assert.equal(rec.response_style, "legacy-b");
 	assert.equal(rec.enabled, null);
+});
+
+// accounts-check.json follows a real accounts/check response from a free
+// account with a lapsed Pro subscription. Ids, dates and the feature list are
+// replaced with placeholders; the eligibility flags and offers are trimmed.
+test("buildAccountPlanRecord: normalizes the default account from the fixture", () => {
+	const raw = readFixtureJson<RawAccountsCheckBody>("accounts-check.json");
+	const rec = buildAccountPlanRecord(raw);
+	assert.deepEqual(rec, {
+		id: "account_plan",
+		account_id: "00000000-0000-4000-8000-000000000001",
+		account_structure: "personal",
+		account_created_at: "2023-01-15T10:00:00.000Z",
+		plan_type: "free",
+		plan_display_name: "Free",
+		subscription_plan: "chatgptpro",
+		has_active_subscription: false,
+		billing_period: "monthly",
+		will_renew: false,
+		renews_at: null,
+		expires_at: "2026-03-15T10:00:00.000Z",
+		cancels_at: null,
+		scheduled_plan_change: null,
+	});
+	assert.ok(rec);
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+});
+
+test("buildAccountPlanRecord: carries no billing identifier or profile field", () => {
+	const raw = readFixtureJson<RawAccountsCheckBody>("accounts-check.json");
+	const serialized = JSON.stringify(buildAccountPlanRecord(raw));
+	for (const leaked of [
+		"subscription_id",
+		"0000000000aa",
+		"processor",
+		"account_user_id",
+		"account_owner_id",
+		"REDACTED",
+		"profile_picture",
+		"pthdnu",
+	]) {
+		assert.equal(serialized.includes(leaked), false, `${leaked} must not leak`);
+	}
+});
+
+test("buildAccountPlanRecord: without a default alias, account_ordering picks the entry and its key is the account id", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: {
+			"acct-b": { account: { plan_type: "team", structure: "workspace" } },
+			"acct-a": { account: { plan_type: "free" } },
+		},
+		account_ordering: ["acct-a", "acct-b"],
+	});
+	assert.equal(rec?.account_id, "acct-a");
+	assert.equal(rec?.plan_type, "free");
+});
+
+test("buildAccountPlanRecord: free account with no entitlement → nulls, still schema-valid", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: { default: { account: { plan_type: "free" } } },
+	});
+	assert.ok(rec);
+	assert.equal(rec.account_id, null);
+	assert.equal(rec.subscription_plan, null);
+	assert.equal(rec.has_active_subscription, null);
+	assert.equal(rec.will_renew, null);
+	assert.equal(rec.renews_at, null);
+	assert.equal(rec.scheduled_plan_change, null);
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+});
+
+test("buildAccountPlanRecord: epoch-second dates and wrongly typed fields are normalized, not passed through", () => {
+	const rec = buildAccountPlanRecord({
+		accounts: {
+			default: {
+				account: { plan_type: "pro" },
+				entitlement: {
+					expires_at: 1_700_000_000,
+					cancels_at: "not a date",
+					has_active_subscription: null,
+					scheduled_plan_change: ["not", "an", "object"],
+				},
+			},
+		},
+	});
+	assert.equal(rec?.expires_at, new Date(1_700_000_000 * 1000).toISOString());
+	assert.equal(rec?.cancels_at, null);
+	assert.equal(rec?.has_active_subscription, null);
+	assert.equal(rec?.scheduled_plan_change, null);
+});
+
+// The non-null shape has never been observed, so this object is invented: the
+// test only pins that whatever object arrives is passed through unchanged.
+test("buildAccountPlanRecord: a scheduled_plan_change object is passed through and stays schema-valid", () => {
+	const change = { placeholder_key: "placeholder_value" };
+	const rec = buildAccountPlanRecord({
+		accounts: {
+			default: {
+				account: { plan_type: "plus" },
+				entitlement: { scheduled_plan_change: change },
+			},
+		},
+	});
+	assert.ok(rec);
+	assert.deepEqual(rec.scheduled_plan_change, change);
+	assert.equal(validateRecord("account_plan", rec).ok, true);
+});
+
+test("buildAccountPlanRecord: a body that names no account → null", () => {
+	assert.equal(buildAccountPlanRecord(null), null);
+	assert.equal(buildAccountPlanRecord({}), null);
+	assert.equal(buildAccountPlanRecord({ accounts: {} }), null);
+	assert.equal(
+		buildAccountPlanRecord({ accounts: { default: { account: null } } }),
+		null,
+	);
 });
 
 test("buildSharedConversationRecord: null when no id / share_id", () => {
