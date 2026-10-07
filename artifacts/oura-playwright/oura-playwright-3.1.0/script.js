@@ -2062,14 +2062,31 @@ const isoDate = (date) => date.toISOString().split("T")[0];
 
 /**
  * Fetches every document of one usercollection endpoint in the window,
- * following next_token. Returns { ok, data, pages, error, status }.
+ * following next_token. Returns { ok, complete, data, pages, error, status }.
  */
 const fetchCollection = async (accessToken, endpoint, startDate, endDate) => {
   const data = [];
   let nextToken = null;
   let pages = 0;
+  const seenTokens = new Set();
+  const isPlainObject = (value) => {
+    if (value === null || Object.prototype.toString.call(value) !== "[object Object]") return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === null || Object.getPrototypeOf(prototype) === null;
+  };
 
   do {
+    if (nextToken && seenTokens.has(nextToken)) {
+      return {
+        ok: true,
+        complete: false,
+        data,
+        pages,
+        status: 200,
+        error: "Pagination stopped because Oura repeated a next_token; data is incomplete/truncated.",
+      };
+    }
+    if (nextToken) seenTokens.add(nextToken);
     const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
     if (nextToken) params.set("next_token", nextToken);
     const url = `${API_BASE}/${endpoint}?${params.toString()}`;
@@ -2096,6 +2113,7 @@ const fetchCollection = async (accessToken, endpoint, startDate, endDate) => {
     if (!resp?.ok || !resp.json) {
       return {
         ok: false,
+        complete: false,
         data,
         pages,
         status: resp?.status || 0,
@@ -2103,13 +2121,37 @@ const fetchCollection = async (accessToken, endpoint, startDate, endDate) => {
       };
     }
 
-    data.push(...(Array.isArray(resp.json.data) ? resp.json.data : []));
+    if (
+      !Array.isArray(resp.json.data) ||
+      resp.json.data.some((row) => !isPlainObject(row))
+    ) {
+      return {
+        ok: false,
+        complete: false,
+        data,
+        pages,
+        status: 200,
+        error: "malformed response",
+      };
+    }
+
+    data.push(...resp.json.data);
     nextToken = resp.json.next_token || null;
     pages++;
+    if (nextToken && pages === 50) {
+      return {
+        ok: true,
+        complete: false,
+        data,
+        pages,
+        status: 200,
+        error: "Pagination stopped at 50 pages with a remaining next_token; data is incomplete/truncated.",
+      };
+    }
     if (nextToken) await page.sleep(300);
   } while (nextToken && pages < 50);
 
-  return { ok: true, data, pages, status: 200, error: null };
+  return { ok: true, complete: true, data, pages, status: 200, error: null };
 };
 
 // ── Scope extraction helpers ────────────────────────────────────────
@@ -2179,6 +2221,15 @@ const mapActivity = (rawActivity) =>
 (async () => {
   let requestedScopes = [...CANONICAL_SCOPES];
   let initError = null;
+  const collections = {};
+  let collectionStarted = false;
+  const buildScopeCounts = () => Object.fromEntries(requestedScopes.map((scope) => {
+    const own = SCOPE_ENDPOINTS[scope];
+    return [scope, {
+      found: own.reduce((n, endpoint) => n + (collections[endpoint]?.data?.length || 0), 0),
+      ok: own.every((endpoint) => collections[endpoint]?.ok && collections[endpoint]?.complete),
+    }];
+  }));
   try {
     requestedScopes = resolveRequestedScopes();
   } catch (error) {
@@ -2209,7 +2260,6 @@ const mapActivity = (rawActivity) =>
     const endpoints = Array.from(
       new Set(requestedScopes.flatMap((scope) => SCOPE_ENDPOINTS[scope])),
     );
-    const collections = {};
     for (const endpoint of endpoints) {
       currentStep = ENDPOINT_STEPS[endpoint];
       await page.setProgress({
@@ -2219,6 +2269,7 @@ const mapActivity = (rawActivity) =>
       });
       lastStatus = null; // setProgress wrote the status line too
       await showOverlay(workingState(3, `Downloading ${ENDPOINT_LABELS[endpoint] || endpoint}…`));
+      collectionStarted = true;
       collections[endpoint] = await fetchCollection(accessToken, endpoint, startDate, endDate);
       if (collections[endpoint].status === 401) {
         await writeCachedToken(null);
@@ -2233,20 +2284,12 @@ const mapActivity = (rawActivity) =>
 
     // Per scope: did its requests work, and how many rows came back. The
     // host counts these so `no_data` can say "empty account" or "broken".
-    const scopeCounts = {};
-    for (const scope of requestedScopes) {
-      const own = SCOPE_ENDPOINTS[scope];
-      scopeCounts[scope] = {
-        found: own.reduce((n, endpoint) => n + (collections[endpoint].data?.length || 0), 0),
-        ok: own.every((endpoint) => collections[endpoint].ok),
-      };
-    }
-    await page.setData("scopeCounts", scopeCounts);
+    await page.setData("scopeCounts", buildScopeCounts());
 
     const allFailed = endpoints.every((endpoint) => !collections[endpoint].ok);
     if (allFailed) {
       const statuses = endpoints.map((e) => collections[e].status).join(", ");
-      const denied = collections[endpoints[0]].status === 403;
+      const denied = endpoints.every((endpoint) => collections[endpoint].status === 403);
       throw makeFatalRunError(
         denied ? "auth_failed" : "upstream_error",
         denied ? CODES.dailyAccessDenied : CODES.apiAllFailed,
@@ -2261,6 +2304,7 @@ const mapActivity = (rawActivity) =>
     for (const scope of requestedScopes) {
       const scopeEndpoints = SCOPE_ENDPOINTS[scope];
       const failed = scopeEndpoints.filter((endpoint) => !collections[endpoint].ok);
+      const incomplete = scopeEndpoints.filter((endpoint) => !collections[endpoint].complete);
       const rows = (endpoint) => collections[endpoint].data;
 
       if (failed.length === scopeEndpoints.length) {
@@ -2282,13 +2326,13 @@ const mapActivity = (rawActivity) =>
         scopes[scope] = { days: mapActivity(rows("daily_activity")) };
       }
 
-      if (failed.length > 0) {
+      if (failed.length > 0 || incomplete.length > 0) {
         errors.push(makeConnectorError(
           "upstream_error",
           CODES.apiScopeDegraded,
-          `Oura API request failed for ${failed.join(", ")}; ${scope} data is incomplete.`,
+          `Oura API data is incomplete/truncated for ${scope} (${[...new Set([...failed, ...incomplete])].join(", ")}).`,
           "degraded",
-          { scope, step: ENDPOINT_STEPS[failed[0]] },
+          { scope, step: ENDPOINT_STEPS[(failed[0] || incomplete[0])] },
         ));
       }
     }
@@ -2299,6 +2343,7 @@ const mapActivity = (rawActivity) =>
     await page.setProgress({ phase: "collect", step: STEPS.buildResult });
     const totalItems =
       (scopes["oura.readiness"]?.days?.length || 0) +
+      (scopes["oura.sleep"]?.dailyScores?.length || 0) +
       (scopes["oura.sleep"]?.sleepPeriods?.length || 0) +
       (scopes["oura.activity"]?.days?.length || 0);
 
@@ -2347,6 +2392,7 @@ const mapActivity = (rawActivity) =>
         { step: currentStep },
       );
     const result = buildEmptyResult(requestedScopes, [telemetryError]);
+    if (collectionStarted) await page.setData("scopeCounts", buildScopeCounts());
     await hideOverlay(" ", { now: true });
     await page.setData("result", result);
     await page.setData("errorDetail", {
