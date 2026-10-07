@@ -9,7 +9,7 @@
 // connector-index.json digests pointing at those bytes.
 //
 // Reproduce the tarball from the directory with GNU tar:
-//   tar --sort=name --owner=0 --group=0 --numeric-owner \
+//   tar --sort=name --owner=0 --group=0 --numeric-owner --mode='u=rwX,go=rX' \
 //       --mtime='1970-01-01 00:00:00 UTC' -cf - . | gzip -n -9
 
 import assert from "node:assert/strict";

@@ -1431,10 +1431,10 @@ const portalApi = async (method, path) =>
           ok: resp.ok,
           status: resp.status,
           apps: Array.isArray(json) ? json.map(pick) : null,
-          detail: json && json.detail ? String(json.detail).slice(0, 200) : (resp.ok ? null : text.slice(0, 200)),
+          detail: resp.ok && json && json.detail ? String(json.detail).slice(0, 200) : null,
         };
       } catch (err) {
-        return { ok: false, status: 0, detail: err.message || String(err) };
+        return { ok: false, status: 0, detail: 'request failed' };
       }
     })()
   `);
@@ -1462,7 +1462,7 @@ const findApiApplication = async () => {
     throw makeFatalRunError(
       "upstream_error",
       CODES.appListFailed,
-      `Could not list Oura API applications (HTTP ${listed?.status || "unknown"}): ${listed?.detail || "no detail"}`,
+      `Could not list Oura API applications (HTTP ${listed?.status || "unknown"}).`,
       STEPS.portalApp,
     );
   }
@@ -1614,7 +1614,8 @@ const createPkcePair = async () =>
         .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
       const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
       const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-      return { verifier, challenge: b64url(digest) };
+      const state = 'vana-' + b64url(crypto.getRandomValues(new Uint8Array(16)));
+      return { verifier, challenge: b64url(digest), state };
     })()
   `);
 
@@ -1657,7 +1658,9 @@ const requestTokens = async (grant, clientId, clientSecret) => {
   });
   const json = resp.json || {};
   if (!resp.ok || !json.access_token) {
-    const reason = json.error_description || json.error || resp.error || `HTTP ${resp.status}`;
+    const reason = typeof json.error === "string" && /^[a-z_]{1,40}$/.test(json.error)
+      ? json.error
+      : `HTTP ${resp.status}`;
     throw makeFatalRunError(
       "auth_failed",
       CODES.tokenRequestFailed,
@@ -1748,8 +1751,8 @@ const authorizeWithUser = async (clientId, clientSecret, email, { autoAllow = fa
 // person declining.
 const runAuthorizeAttempt = async (clientId, email, signInMethod, autoAllow) => {
   currentStep = STEPS.authorize;
-  const state = `vana-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const pkce = await createPkcePair();
+  const state = pkce.state;
   await showOverlay(workingState(2, "Opening Oura's approval screen…"));
   const opened = await safeGoto(buildAuthorizeUrl(clientId, state, pkce.challenge, signInMethod), {
     attempts: 2,
@@ -1859,7 +1862,10 @@ const runAuthorizeAttempt = async (clientId, email, signInMethod, autoAllow) => 
   const redirect = await readRedirectParams();
   if (redirect?.error) {
     if (signInMethod && redirect.error !== "access_denied") return { retry: true };
-    throw makeFatalRunError("auth_failed", CODES.authorizeDeclined, `Oura authorization was declined (${redirect.error}).`, STEPS.authorize);
+    const errorCode = typeof redirect.error === "string" && /^[a-z_]{1,40}$/.test(redirect.error)
+      ? redirect.error
+      : "OAuth error";
+    throw makeFatalRunError("auth_failed", CODES.authorizeDeclined, `Oura authorization was declined (${errorCode}).`, STEPS.authorize);
   }
   if (!redirect?.code) {
     throw makeFatalRunError("auth_failed", CODES.authorizeNoCode, "Oura authorization finished without an authorization code.", STEPS.authorize);
@@ -2062,14 +2068,31 @@ const isoDate = (date) => date.toISOString().split("T")[0];
 
 /**
  * Fetches every document of one usercollection endpoint in the window,
- * following next_token. Returns { ok, data, pages, error, status }.
+ * following next_token. Returns { ok, complete, data, pages, error, status }.
  */
 const fetchCollection = async (accessToken, endpoint, startDate, endDate) => {
   const data = [];
   let nextToken = null;
   let pages = 0;
+  const seenTokens = new Set();
+  const isPlainObject = (value) => {
+    if (value === null || Object.prototype.toString.call(value) !== "[object Object]") return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === null || Object.getPrototypeOf(prototype) === null;
+  };
 
   do {
+    if (nextToken && seenTokens.has(nextToken)) {
+      return {
+        ok: true,
+        complete: false,
+        data,
+        pages,
+        status: 200,
+        error: "Pagination stopped because Oura repeated a next_token; data is incomplete/truncated.",
+      };
+    }
+    if (nextToken) seenTokens.add(nextToken);
     const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
     if (nextToken) params.set("next_token", nextToken);
     const url = `${API_BASE}/${endpoint}?${params.toString()}`;
@@ -2096,6 +2119,7 @@ const fetchCollection = async (accessToken, endpoint, startDate, endDate) => {
     if (!resp?.ok || !resp.json) {
       return {
         ok: false,
+        complete: false,
         data,
         pages,
         status: resp?.status || 0,
@@ -2103,13 +2127,37 @@ const fetchCollection = async (accessToken, endpoint, startDate, endDate) => {
       };
     }
 
-    data.push(...(Array.isArray(resp.json.data) ? resp.json.data : []));
+    if (
+      !Array.isArray(resp.json.data) ||
+      resp.json.data.some((row) => !isPlainObject(row))
+    ) {
+      return {
+        ok: false,
+        complete: false,
+        data,
+        pages,
+        status: 200,
+        error: "malformed response",
+      };
+    }
+
+    data.push(...resp.json.data);
     nextToken = resp.json.next_token || null;
     pages++;
+    if (nextToken && pages === 50) {
+      return {
+        ok: true,
+        complete: false,
+        data,
+        pages,
+        status: 200,
+        error: "Pagination stopped at 50 pages with a remaining next_token; data is incomplete/truncated.",
+      };
+    }
     if (nextToken) await page.sleep(300);
   } while (nextToken && pages < 50);
 
-  return { ok: true, data, pages, status: 200, error: null };
+  return { ok: true, complete: true, data, pages, status: 200, error: null };
 };
 
 // ── Scope extraction helpers ────────────────────────────────────────
@@ -2179,6 +2227,15 @@ const mapActivity = (rawActivity) =>
 (async () => {
   let requestedScopes = [...CANONICAL_SCOPES];
   let initError = null;
+  const collections = {};
+  let collectionStarted = false;
+  const buildScopeCounts = () => Object.fromEntries(requestedScopes.map((scope) => {
+    const own = SCOPE_ENDPOINTS[scope];
+    return [scope, {
+      found: own.reduce((n, endpoint) => n + (collections[endpoint]?.data?.length || 0), 0),
+      ok: own.every((endpoint) => collections[endpoint]?.ok && collections[endpoint]?.complete),
+    }];
+  }));
   try {
     requestedScopes = resolveRequestedScopes();
   } catch (error) {
@@ -2209,7 +2266,6 @@ const mapActivity = (rawActivity) =>
     const endpoints = Array.from(
       new Set(requestedScopes.flatMap((scope) => SCOPE_ENDPOINTS[scope])),
     );
-    const collections = {};
     for (const endpoint of endpoints) {
       currentStep = ENDPOINT_STEPS[endpoint];
       await page.setProgress({
@@ -2219,6 +2275,7 @@ const mapActivity = (rawActivity) =>
       });
       lastStatus = null; // setProgress wrote the status line too
       await showOverlay(workingState(3, `Downloading ${ENDPOINT_LABELS[endpoint] || endpoint}…`));
+      collectionStarted = true;
       collections[endpoint] = await fetchCollection(accessToken, endpoint, startDate, endDate);
       if (collections[endpoint].status === 401) {
         await writeCachedToken(null);
@@ -2233,20 +2290,12 @@ const mapActivity = (rawActivity) =>
 
     // Per scope: did its requests work, and how many rows came back. The
     // host counts these so `no_data` can say "empty account" or "broken".
-    const scopeCounts = {};
-    for (const scope of requestedScopes) {
-      const own = SCOPE_ENDPOINTS[scope];
-      scopeCounts[scope] = {
-        found: own.reduce((n, endpoint) => n + (collections[endpoint].data?.length || 0), 0),
-        ok: own.every((endpoint) => collections[endpoint].ok),
-      };
-    }
-    await page.setData("scopeCounts", scopeCounts);
+    await page.setData("scopeCounts", buildScopeCounts());
 
     const allFailed = endpoints.every((endpoint) => !collections[endpoint].ok);
     if (allFailed) {
       const statuses = endpoints.map((e) => collections[e].status).join(", ");
-      const denied = collections[endpoints[0]].status === 403;
+      const denied = endpoints.every((endpoint) => collections[endpoint].status === 403);
       throw makeFatalRunError(
         denied ? "auth_failed" : "upstream_error",
         denied ? CODES.dailyAccessDenied : CODES.apiAllFailed,
@@ -2261,6 +2310,9 @@ const mapActivity = (rawActivity) =>
     for (const scope of requestedScopes) {
       const scopeEndpoints = SCOPE_ENDPOINTS[scope];
       const failed = scopeEndpoints.filter((endpoint) => !collections[endpoint].ok);
+      const incomplete = scopeEndpoints.filter(
+        (endpoint) => collections[endpoint].ok && !collections[endpoint].complete,
+      );
       const rows = (endpoint) => collections[endpoint].data;
 
       if (failed.length === scopeEndpoints.length) {
@@ -2282,13 +2334,17 @@ const mapActivity = (rawActivity) =>
         scopes[scope] = { days: mapActivity(rows("daily_activity")) };
       }
 
-      if (failed.length > 0) {
+      if (failed.length > 0 || incomplete.length > 0) {
+        const degradedReason = [
+          failed.length > 0 && `Oura API request failed for ${failed.join(", ")}`,
+          incomplete.length > 0 && `pagination was truncated for ${incomplete.join(", ")}`,
+        ].filter(Boolean).join(" and ");
         errors.push(makeConnectorError(
           "upstream_error",
           CODES.apiScopeDegraded,
-          `Oura API request failed for ${failed.join(", ")}; ${scope} data is incomplete.`,
+          `${degradedReason}; ${scope} data is incomplete.`,
           "degraded",
-          { scope, step: ENDPOINT_STEPS[failed[0]] },
+          { scope, step: ENDPOINT_STEPS[(failed[0] || incomplete[0])] },
         ));
       }
     }
@@ -2299,6 +2355,7 @@ const mapActivity = (rawActivity) =>
     await page.setProgress({ phase: "collect", step: STEPS.buildResult });
     const totalItems =
       (scopes["oura.readiness"]?.days?.length || 0) +
+      (scopes["oura.sleep"]?.dailyScores?.length || 0) +
       (scopes["oura.sleep"]?.sleepPeriods?.length || 0) +
       (scopes["oura.activity"]?.days?.length || 0);
 
@@ -2347,6 +2404,7 @@ const mapActivity = (rawActivity) =>
         { step: currentStep },
       );
     const result = buildEmptyResult(requestedScopes, [telemetryError]);
+    if (collectionStarted) await page.setData("scopeCounts", buildScopeCounts());
     await hideOverlay(" ", { now: true });
     await page.setData("result", result);
     await page.setData("errorDetail", {
