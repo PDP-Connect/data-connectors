@@ -1960,14 +1960,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/shopify/index.test.ts",
-			line: 896,
+			line: 899,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "collectShopify(): test drives each unconfirmed empty-cache case through a separate protocol recorder.",
 		},
 		{
 			path: "connectors/shopify/index.test.ts",
-			line: 954,
+			line: 957,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "collectShopify(): test drives each missing or throwing empty-state reader through a separate protocol recorder.",

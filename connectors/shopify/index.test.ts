@@ -680,9 +680,12 @@ test("collectShopify expires when a page reader never returns", async () => {
 	assert.equal(skip.reason, "shopify_order_history_evidence_timeout");
 });
 
-test("collectShopify emits scope_unavailable SKIP_RESULT when the Apollo cache never resolves", async () => {
+test("collectShopify emits scope_unavailable SKIP_RESULT when the Apollo cache never resolves", async (t) => {
 	const { emit, emitRecord, protocolMessages } =
 		makeRecordingEmit(validateRecord);
+	// Cache diagnostics use Date.now(); keep both timing samples on one clock.
+	// Mock only Date so the evidence deadline's timers retain their normal behavior.
+	t.mock.timers.enable({ apis: ["Date"], now: 1_000 });
 	const navigationStartedAt = Date.now();
 	await collectShopify({
 		emit,
