@@ -137,7 +137,7 @@ const AUTHORIZE_URL = "https://moi.ouraring.com/oauth/v2/ext/oauth-authorize";
 const TOKEN_URL = "https://moi.ouraring.com/oauth/v2/ext/oauth-token";
 const API_BASE = "https://api.ouraring.com/v2/usercollection";
 
-const APP_NAME = "Vana Connector";
+const APP_NAME = "Personal access";
 const APP_REDIRECT_URI = "https://vana.org/oauth/oura/callback";
 const APP_SCOPE = "extapi:daily";
 const OAUTH_SCOPE = "extapi:daily";
@@ -366,10 +366,19 @@ const checkLoginStatus = async () => {
     return await page.evaluate(`
       (async () => {
         if (!location.href.startsWith(${JSON.stringify(DEV_PORTAL)})) return null;
-        const resp = await fetch('/api/auth/session', { credentials: 'include' });
-        if (!resp.ok) return null;
-        const data = await resp.json().catch(() => null);
-        return (data && data.user && data.user.email) || null;
+        // The portal moved from NextAuth (/api/auth/session) to better-auth
+        // (/api/auth/get-session) in early October 2026; the old route is a
+        // 404 page now. Ask the current route first, keep the old one as a
+        // fallback, and read the signed-in email from whichever answers.
+        for (const route of ['/api/auth/get-session', '/api/auth/session']) {
+          const resp = await fetch(route, { credentials: 'include', headers: { Accept: 'application/json' } });
+          if (!resp.ok) continue;
+          const data = await resp.json().catch(() => null);
+          const email = data && data.user && data.user.email;
+          if (email) return email;
+          if (data !== null && typeof data === 'object') return null;
+        }
+        return null;
       })()
     `);
   } catch {
@@ -1443,6 +1452,12 @@ const isUsableApp = (app) =>
 const findApiApplication = async () => {
   currentStep = STEPS.portalApp;
   const listed = await portalApi("GET", "/applications");
+  if (listed?.status === 401 || listed?.status === 403) {
+    // The better-auth session cookie can outlive the portal's upstream API
+    // session: get-session still names the user while the applications API
+    // answers 401. That is a stale sign-in, not a portal failure.
+    return { clientId: null, unauthorized: true };
+  }
   if (!listed?.ok || !Array.isArray(listed.apps)) {
     throw makeFatalRunError(
       "upstream_error",
@@ -1932,8 +1947,16 @@ const obtainAccessToken = async () => {
     );
   }
 
-  let email = await checkLoginStatus();
-  if (!email) {
+  // Drives the Developer Portal sign-in in the headed browser and returns the
+  // signed-in email, or null. With `stale`, the portal session exists but its
+  // API rejects it, so the session is ended first and the sign-in starts fresh.
+  const signInToPortal = async ({ stale = false } = {}) => {
+    if (stale) {
+      try {
+        await page.evaluate(`fetch('/api/auth/sign-out', { method: 'POST', credentials: 'include' }).catch(() => {})`);
+      } catch {}
+      await safeGoto(`${DEV_PORTAL}/signin?callbackUrl=%2Fapplications`, { label: "portal sign-in" });
+    }
     // A single space keeps the shell's status card hidden: the overlay
     // carries the instructions while it is up.
     await page.promptUser(
@@ -1967,14 +1990,30 @@ const obtainAccessToken = async () => {
     );
     // promptUser and the shell both wrote the status line; resync it.
     lastStatus = null;
-    email = await checkLoginStatus();
-  }
+    return checkLoginStatus();
+  };
+
+  let email = await checkLoginStatus();
+  if (!email) email = await signInToPortal();
   if (!email) {
     throw makeFatalRunError("auth_failed", CODES.signinUnconfirmed, "Oura sign-in could not be confirmed on the Developer Portal.", STEPS.portalSignin);
   }
 
   await showOverlay(workingState(1, "Looking for your Oura app…"));
-  let { clientId } = await findApiApplication();
+  let app = await findApiApplication();
+  if (app.unauthorized) {
+    console.error("[oura] The Developer Portal session is stale (applications API answered 401); asking the user to sign in again");
+    email = await signInToPortal({ stale: true });
+    if (!email) {
+      throw makeFatalRunError("auth_failed", CODES.signinUnconfirmed, "Oura sign-in could not be confirmed on the Developer Portal.", STEPS.portalSignin);
+    }
+    await showOverlay(workingState(1, "Looking for your Oura app…"));
+    app = await findApiApplication();
+    if (app.unauthorized) {
+      throw makeFatalRunError("auth_failed", CODES.signinUnconfirmed, "The Oura Developer Portal rejected the session right after sign-in.", STEPS.portalSignin);
+    }
+  }
+  let { clientId } = app;
   if (!clientId) {
     clientId = await createApiApplicationWithUser(email);
   }
