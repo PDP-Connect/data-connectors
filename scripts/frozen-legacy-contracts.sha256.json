@@ -3,7 +3,7 @@
   "fixtureCount": 12,
   "sha256": {
     "SCOPES.md": "8d44ac3d218278eba5b120a839ecd183d30855b7a7d93614248e495aa6c8de2d",
-    "connector-index.json": "9f288bf8568dc88c6ff0fb34947b3455c72d56a99b5cfaea48672e3ffe6f9a49",
+    "connector-index.json": "0d2e9b4c65f12a8e6308f2931b707b34fa27df472f59d1c2f3df6a897333b91e",
     "connectors/amazon/schemas/amazon.orders.json": "611f3e807294deea97b66b80231765bb63c3e75111842993ca22accbe925d2a4",
     "connectors/amazon/schemas/amazon.profile.json": "242fdf1e165159f3e1dcaeae5e9cffa506ef87b708a5b2835ce7039757acc510",
     "connectors/anthropic/schemas/claude.conversations.json": "20068c79ce0d9f84be704f1abf8ace12f0bce5747a6e7cafecebc72350fc81dd",
