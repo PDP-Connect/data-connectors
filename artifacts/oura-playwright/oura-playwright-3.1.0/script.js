@@ -1431,10 +1431,10 @@ const portalApi = async (method, path) =>
           ok: resp.ok,
           status: resp.status,
           apps: Array.isArray(json) ? json.map(pick) : null,
-          detail: json && json.detail ? String(json.detail).slice(0, 200) : (resp.ok ? null : text.slice(0, 200)),
+          detail: resp.ok && json && json.detail ? String(json.detail).slice(0, 200) : null,
         };
       } catch (err) {
-        return { ok: false, status: 0, detail: err.message || String(err) };
+        return { ok: false, status: 0, detail: 'request failed' };
       }
     })()
   `);
@@ -1462,7 +1462,7 @@ const findApiApplication = async () => {
     throw makeFatalRunError(
       "upstream_error",
       CODES.appListFailed,
-      `Could not list Oura API applications (HTTP ${listed?.status || "unknown"}): ${listed?.detail || "no detail"}`,
+      `Could not list Oura API applications (HTTP ${listed?.status || "unknown"}).`,
       STEPS.portalApp,
     );
   }
@@ -1614,7 +1614,8 @@ const createPkcePair = async () =>
         .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
       const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
       const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-      return { verifier, challenge: b64url(digest) };
+      const state = 'vana-' + b64url(crypto.getRandomValues(new Uint8Array(16)));
+      return { verifier, challenge: b64url(digest), state };
     })()
   `);
 
@@ -1657,7 +1658,9 @@ const requestTokens = async (grant, clientId, clientSecret) => {
   });
   const json = resp.json || {};
   if (!resp.ok || !json.access_token) {
-    const reason = json.error_description || json.error || resp.error || `HTTP ${resp.status}`;
+    const reason = typeof json.error === "string" && /^[a-z_]{1,40}$/.test(json.error)
+      ? json.error
+      : `HTTP ${resp.status}`;
     throw makeFatalRunError(
       "auth_failed",
       CODES.tokenRequestFailed,
@@ -1748,8 +1751,8 @@ const authorizeWithUser = async (clientId, clientSecret, email, { autoAllow = fa
 // person declining.
 const runAuthorizeAttempt = async (clientId, email, signInMethod, autoAllow) => {
   currentStep = STEPS.authorize;
-  const state = `vana-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const pkce = await createPkcePair();
+  const state = pkce.state;
   await showOverlay(workingState(2, "Opening Oura's approval screen…"));
   const opened = await safeGoto(buildAuthorizeUrl(clientId, state, pkce.challenge, signInMethod), {
     attempts: 2,
@@ -1859,7 +1862,10 @@ const runAuthorizeAttempt = async (clientId, email, signInMethod, autoAllow) => 
   const redirect = await readRedirectParams();
   if (redirect?.error) {
     if (signInMethod && redirect.error !== "access_denied") return { retry: true };
-    throw makeFatalRunError("auth_failed", CODES.authorizeDeclined, `Oura authorization was declined (${redirect.error}).`, STEPS.authorize);
+    const errorCode = typeof redirect.error === "string" && /^[a-z_]{1,40}$/.test(redirect.error)
+      ? redirect.error
+      : "OAuth error";
+    throw makeFatalRunError("auth_failed", CODES.authorizeDeclined, `Oura authorization was declined (${errorCode}).`, STEPS.authorize);
   }
   if (!redirect?.code) {
     throw makeFatalRunError("auth_failed", CODES.authorizeNoCode, "Oura authorization finished without an authorization code.", STEPS.authorize);
