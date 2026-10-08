@@ -2,14 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 
 const root = join(dirname(new URL(import.meta.url).pathname), "..");
+// The newest committed oura-playwright source directory, so a new version is
+// covered the moment its directory lands beside the tarball.
+const OURA_VERSION = readdirSync(join(root, "artifacts/oura-playwright"), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory() && /^oura-playwright-\d+\.\d+\.\d+$/.test(entry.name))
+  .map((entry) => entry.name.replace("oura-playwright-", ""))
+  .sort((a, b) => { const [x, y] = [a, b].map((v) => v.split(".").map(Number)); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2]; })
+  .at(-1);
 const script = readFileSync(
-  join(root, "artifacts/oura-playwright/oura-playwright-3.1.0/script.js"),
+  join(root, `artifacts/oura-playwright/oura-playwright-${OURA_VERSION}/script.js`),
   "utf8",
 );
 
@@ -32,14 +39,35 @@ const credentialHarness = (page) => {
     "  error.telemetryError = { errorClass, code, reason, step };",
     "  return error;",
     "};",
+    credentialSource("const PORTAL_API_ATTEMPTS =", "const VEIL_SOURCE ="),
+    "const evaluateSettled = (source) => page.evaluate(source);",
+    credentialSource("const PORTAL_FETCH_SOURCE =", "const portalApi ="),
     credentialSource("const portalApi =", "// The authorization-code flow"),
     credentialSource("const findApiApplication =", "// One step of submitting"),
     credentialSource("const requestTokens =", "// On Oura's consent screen"),
     "globalThis.connector = { portalApi, findApiApplication, requestTokens };",
   ].join("\n");
-  const context = vm.createContext({ URLSearchParams, page });
+  const context = vm.createContext({ URLSearchParams, page, console: { error: () => {} } });
   vm.runInContext(source, context, { filename: "oura-playwright-credentials.js" });
   return context.connector;
+};
+
+// A page whose fetch answers from a scripted status sequence; the in-page
+// retry's setTimeout runs without delay. Returns the page and the call log.
+const sequencedPage = (statuses, body) => {
+  const calls = [];
+  const page = {
+    evaluate: async (source) => vm.runInNewContext(source, {
+      setTimeout: (fn) => fn(),
+      fetch: async (path, init) => {
+        const status = statuses[Math.min(calls.length, statuses.length - 1)];
+        calls.push({ path, headers: init?.headers, credentials: init?.credentials });
+        return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) };
+      },
+    }),
+    setData: async () => {},
+  };
+  return { page, calls };
 };
 
 const authorizeAttemptHarness = (redirectError) => {
@@ -143,7 +171,7 @@ async function runConnector({ requestedScopes, collectionResponse, failCachedTok
     setTimeout,
     clearTimeout,
   });
-  await vm.runInContext(script, context, { filename: "oura-playwright-3.1.0/script.js" });
+  await vm.runInContext(script, context, { filename: `oura-playwright-${OURA_VERSION}/script.js` });
   return { data, calls, setDataCalls };
 }
 
@@ -215,6 +243,7 @@ test("does not propagate raw portal application-list failure text", async () => 
   assert.deepEqual(JSON.parse(JSON.stringify(await portalApi("GET", "/applications"))), {
     ok: false,
     status: 502,
+    attempts: 1,
     apps: null,
     detail: null,
   });
@@ -428,4 +457,74 @@ test("preserves the normal three-scope result", async () => {
     details: { readiness: 1, sleepScores: 0, sleepPeriods: 1, activity: 1 },
   });
   assert.deepEqual(data.get("result").errors, []);
+});
+
+// The portal's CDN answers a share of API calls with an edge-generated 401
+// for a valid session (2026-10-08). The in-page fetch retries those before
+// the connector reads the session as stale.
+test("portal API retries edge 401s and reads the first real answer", async () => {
+  const app = { client_id: "cid", application_name: "Personal access", redirect_uris: ["https://vana.org/oauth/oura/callback"], scopes: ["daily"], application_status: "active" };
+  const { page, calls } = sequencedPage([401, 401, 403, 200], [app]);
+  const { portalApi } = credentialHarness(page);
+  const listed = JSON.parse(JSON.stringify(await portalApi("GET", "/applications")));
+  assert.equal(listed.status, 200);
+  assert.equal(listed.attempts, 4);
+  assert.equal(listed.apps[0].clientId, "cid");
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every((call) => call.path === "/api/extapi/v2/oauth/applications" && call.credentials === "include"));
+});
+
+test("portal API gives up on a 401 that survives every attempt", async () => {
+  const { page, calls } = sequencedPage([401], []);
+  const { portalApi, findApiApplication } = credentialHarness(page);
+  const listed = JSON.parse(JSON.stringify(await portalApi("GET", "/applications")));
+  assert.equal(listed.status, 401);
+  assert.equal(listed.attempts, 12);
+  assert.equal(calls.length, 12);
+  assert.deepEqual(JSON.parse(JSON.stringify(await findApiApplication())), { clientId: null, unauthorized: true });
+});
+
+// The portal bounces /applications -> /signin -> /applications right after a
+// sign-in; a page call made during the bounce is destroyed and made again.
+const settledHarness = (page, settles) => {
+  const source = [
+    "const PORTAL_CALL_RETRIES = 3;",
+    credentialSource("const isDestroyedContext =", "// ── Page state detection"),
+    "globalThis.connector = { evaluateSettled };",
+  ].join("\n");
+  const context = vm.createContext({
+    page,
+    console: { error: () => {} },
+    waitForPortalSettled: async () => { settles.push(1); return true; },
+  });
+  vm.runInContext(source, context, { filename: "oura-playwright-settled.js" });
+  return context.connector;
+};
+
+test("a page call destroyed by the portal's navigation is made again once the page settles", async () => {
+  const settles = [];
+  let calls = 0;
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      if (calls < 3) throw new Error("page.evaluate: Execution context was destroyed, most likely because of a navigation.");
+      return "answer";
+    },
+  };
+  const { evaluateSettled } = settledHarness(page, settles);
+  assert.equal(await evaluateSettled("1"), "answer");
+  assert.equal(calls, 3);
+  assert.equal(settles.length, 2, "waited for the portal to settle after each destroyed call");
+});
+
+test("a page call that keeps dying, or dies for another reason, is not retried forever", async () => {
+  const settles = [];
+  let calls = 0;
+  const dying = { evaluate: async () => { calls += 1; throw new Error("Execution context was destroyed"); } };
+  await assert.rejects(() => settledHarness(dying, settles).evaluateSettled("1"), /Execution context was destroyed/);
+  assert.equal(calls, 3);
+  calls = 0;
+  const other = { evaluate: async () => { calls += 1; throw new Error("ReferenceError: nope"); } };
+  await assert.rejects(() => settledHarness(other, settles).evaluateSettled("1"), /nope/);
+  assert.equal(calls, 1, "a script error is not a navigation and is not retried");
 });
