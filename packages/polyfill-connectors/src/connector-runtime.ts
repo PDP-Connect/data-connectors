@@ -2632,6 +2632,26 @@ export function resolveBrowserLaunchSource(
 	return { kind: "isolated_local" };
 }
 
+/**
+ * Whether to skip closing the remote browser's existing tabs before attach.
+ * A `PDPP_<NAME>_REMOTE_CDP_URL` browser was launched by someone else (an
+ * operator's own Chrome, a recording sandbox), so its tabs are not ours to
+ * close. A managed n.eko surface keeps the cleanup unless the connector
+ * preserves its pages.
+ */
+export function shouldPreserveRemotePagesOnAcquire(
+	browser: Pick<
+		BrowserConfig,
+		"preservePageOnFailure" | "preservePageOnSuccess"
+	>,
+	launchSource: BrowserLaunchSource,
+): boolean {
+	return (
+		launchSource.kind === "legacy_remote_cdp" ||
+		Boolean(browser.preservePageOnSuccess || browser.preservePageOnFailure)
+	);
+}
+
 export function decorateBrowserManualAction(
 	req: InteractionRequest,
 	visibility: BrowserRuntimeVisibility,
@@ -2702,7 +2722,7 @@ async function acquireBrowser(
 		return await acquireBrowserForConnector({
 			profileName,
 			headless,
-			...(browser.preservePageOnSuccess || browser.preservePageOnFailure
+			...(shouldPreserveRemotePagesOnAcquire(browser, launchSource)
 				? { preserveRemotePagesOnAcquire: true }
 				: {}),
 			...(streamingEnabled ? { streamingEnabled: true } : {}),

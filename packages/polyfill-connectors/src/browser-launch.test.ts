@@ -3,11 +3,15 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { chromium } from "playwright";
 import {
 	acquireBrowserForConnector,
+	acquireIsolatedBrowser,
 	CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE,
 	CdpAttachSessionRaceExhaustedError,
 	closeRemoteCdpPageTargets,
@@ -607,6 +611,92 @@ test("shouldCleanRemoteCdpPageTargets skips cleanup only for preserved remote pa
 		shouldCleanRemoteCdpPageTargets({ preserveRemotePagesOnAcquire: true }),
 		false,
 	);
+});
+
+function freeLoopbackPort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = createNetServer();
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			const port = typeof address === "object" && address ? address.port : 0;
+			server.close(() => resolve(port));
+		});
+	});
+}
+
+test("remote CDP attach records HAR and storage state, keeps existing tabs, and leaves the browser running", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-har-test-"));
+	const site = createHttpServer((_req, res) => {
+		res.writeHead(200, {
+			"content-type": "text/html",
+			"set-cookie": "remote_session=abc123; Path=/",
+		});
+		res.end("<html><body>remote har fixture</body></html>");
+	});
+	await new Promise<void>((resolve) => {
+		site.listen(0, "127.0.0.1", resolve);
+	});
+	const siteAddress = site.address();
+	const sitePort =
+		typeof siteAddress === "object" && siteAddress ? siteAddress.port : 0;
+	const cdpPort = await freeLoopbackPort();
+	const remote = await chromium.launch({
+		args: [`--remote-debugging-port=${String(cdpPort)}`],
+	});
+	t.after(async () => {
+		await remote.close().catch(() => undefined);
+		await new Promise<void>((resolve) => {
+			site.close(() => resolve());
+		});
+		await rm(dir, { recursive: true, force: true });
+	});
+	const [remoteContext] = remote.contexts();
+	const ownersTab = await (
+		remoteContext ?? (await remote.newContext())
+	).newPage();
+	await ownersTab.goto("about:blank#owners-tab");
+
+	const harPath = join(dir, "remote.har");
+	const storageStatePath = join(dir, "remote-storage-state.json");
+	const handle = await acquireIsolatedBrowser({
+		profileName: "remote_har_test",
+		remoteCdpUrl: `http://127.0.0.1:${String(cdpPort)}`,
+		preserveRemotePagesOnAcquire: true,
+		harRecording: { path: harPath },
+		storageStateRecording: { path: storageStatePath },
+	});
+	const page = await handle.context.newPage();
+	await page.goto(`http://127.0.0.1:${String(sitePort)}/fixture`);
+	await page.close();
+	await handle.release();
+
+	assert.deepEqual(await handle.harRecordingOutcome?.(), {
+		flushed: true,
+		path: harPath,
+	});
+	assert.deepEqual(await handle.storageStateRecordingOutcome?.(), {
+		flushed: true,
+		path: storageStatePath,
+	});
+	const har = JSON.parse(await readFile(harPath, "utf8")) as {
+		log: { entries: { request: { url: string } }[] };
+	};
+	assert.ok(
+		har.log.entries.some((entry) =>
+			entry.request.url.endsWith(`:${String(sitePort)}/fixture`),
+		),
+		"HAR must contain the request made through the attached context",
+	);
+	const storageState = JSON.parse(await readFile(storageStatePath, "utf8")) as {
+		cookies: { name: string }[];
+	};
+	assert.ok(
+		storageState.cookies.some((cookie) => cookie.name === "remote_session"),
+		"storage state must contain the cookie set during the attached run",
+	);
+	assert.equal(remote.isConnected(), true, "remote browser must keep running");
+	assert.equal(ownersTab.isClosed(), false, "pre-existing tab must stay open");
 });
 
 test("resolvePageTargetWsUrl reads DevToolsActivePort then queries /json with the parsed port", async () => {
