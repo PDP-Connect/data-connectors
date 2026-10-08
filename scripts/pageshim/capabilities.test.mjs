@@ -15,11 +15,13 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 	assert.deepEqual(pageShimConnectors(fileURLToPath(new URL("../..", import.meta.url))), [
 		"anthropic",
 		"chatgpt",
+		"discord_browser",
 		"github_browser",
 		"oura_browser",
 		"strava_browser",
+		"x_browser",
 	]);
-	for (const name of ["strava_browser", "github_browser", "oura_browser", "chatgpt", "anthropic"]) {
+	for (const name of ["strava_browser", "github_browser", "oura_browser", "chatgpt", "anthropic", "x_browser", "discord_browser"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -135,8 +137,12 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 	assert.equal(isPageShimCapable(capabilityConnector), true);
 });
 
-test("all five declared mobile connectors remain PageShim eligible", () => {
+test("all seven declared mobile connectors remain PageShim eligible", () => {
 	const expected = {
+		discord_browser: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		github_browser: {
 			network: ["host_http_request"],
 			browser: [
@@ -158,6 +164,10 @@ test("all five declared mobile connectors remain PageShim eligible", () => {
 		chatgpt: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		x_browser: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
 		},
 		anthropic: {
 			network: ["same_origin_page_fetch"],

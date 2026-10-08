@@ -1,0 +1,1181 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import vm from "node:vm";
+import {
+	assertUserFacingProgress,
+	setConnectorDiagnosticSink,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import type {
+	EmittedMessage,
+	RecordData,
+	StreamScope,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
+import {
+	ACTION_DELAY_MAX_MS,
+	ACTION_DELAY_MIN_MS,
+	collectXBrowser,
+	ensureXSession,
+	HOME_URL,
+	LOGIN_URL,
+	MAX_POSTS_PER_RUN,
+	probeXSession,
+	VIEW_POST_CAPS,
+	type XCollectContext,
+	type XCollectOptions,
+} from "./index.ts";
+import { validateRecord } from "./schemas.ts";
+
+const ORIGIN = "https://x.com";
+const OWNER_ID = "1900000000000000001";
+const HANDLE = "sample_owner";
+const fixture = (name: string) =>
+	readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+const manifest = JSON.parse(
+	readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+);
+
+/** A response holding only a top and a bottom cursor: the end of a list. */
+function cursorsOnly(bookmarks: boolean): string {
+	const instructions = [
+		{
+			type: "TimelineAddEntries",
+			entries: ["Top", "Bottom"].map((cursorType) => ({
+				entryId: `cursor-${cursorType.toLowerCase()}-0`,
+				sortIndex: "0",
+				content: {
+					entryType: "TimelineTimelineCursor",
+					cursorType,
+					value: `synthetic-end-${cursorType}`,
+				},
+			})),
+		},
+	];
+	return JSON.stringify(
+		bookmarks
+			? { data: { bookmark_timeline_v2: { timeline: { instructions } } } }
+			: {
+					data: {
+						user: { result: { timeline: { timeline: { instructions } } } },
+					},
+				},
+	);
+}
+
+type Pages = Record<string, Record<string, string>>;
+
+/** Response bodies by operation, then by request cursor ("" is the first page). */
+function fixturePages(): Pages {
+	return {
+		UserByScreenName: { "": fixture("user-by-screen-name.json") },
+		UserOriginalsTimeline: {
+			"": fixture("user-originals-timeline-page-1.json"),
+			"synthetic-originals-bottom-1": cursorsOnly(false),
+		},
+		UserRepliesTimeline: {
+			"": fixture("user-replies-timeline-page-1.json"),
+			"synthetic-replies-bottom-1": cursorsOnly(false),
+		},
+		Likes: {
+			"": fixture("likes-page-1.json"),
+			"synthetic-likes-bottom-1": fixture("likes-page-2.json"),
+			"synthetic-likes-bottom-2": cursorsOnly(false),
+		},
+		Bookmarks: {
+			"": fixture("bookmarks-page-1.json"),
+			"synthetic-bookmarks-bottom-1": cursorsOnly(true),
+		},
+	};
+}
+
+interface AppRequest {
+	cursor: string;
+	operation: string;
+	userId: string | null;
+}
+
+interface AppOptions {
+	/** The narrow layout still renders a link named Profile. */
+	profileLink?: boolean;
+	pages?: Pages;
+	/** Answer a request instead of the fixture pages. */
+	respond?: (
+		request: AppRequest,
+	) => { status: number; body: string } | undefined;
+	/** False: the app ignores `popstate`, so the history fallback goes nowhere. */
+	routerFollowsHistory?: boolean;
+	/** False: scrolling never loads another page. */
+	scrollLoads?: boolean;
+	/** False: the narrow layout, with no primary navigation. */
+	sidebar?: boolean;
+	signedIn?: boolean;
+	startUrl?: string;
+}
+
+interface FakeXhr {
+	open: (method: string, url: string) => void;
+	send: () => void;
+}
+
+/**
+ * A model of the x.com web app, enough for the connector's page scripts to
+ * run against unchanged. Each page load is a fresh `vm` context, so a load
+ * drops the observer exactly as a real one does. The app routes on link
+ * clicks and `popstate`, requests its GraphQL operations over an
+ * XMLHttpRequest class the scripts can wrap, and requests the next page when
+ * the window is scrolled.
+ */
+class FakeWebApp {
+	readonly clicks: string[] = [];
+	readonly gotos: string[] = [];
+	readonly historyPushes: string[] = [];
+	/** Called as each request is made, before it is answered. */
+	onRequest: ((request: AppRequest) => void) | null = null;
+	readonly requests: AppRequest[] = [];
+	scrolls = 0;
+	signedIn: boolean;
+
+	private context: vm.Context = vm.createContext({});
+	private readonly options: AppOptions;
+	private posts = 0;
+	private timeline: {
+		cursor: string;
+		ended: boolean;
+		operation: string;
+		variables: Record<string, unknown>;
+	} | null = null;
+	private window: Record<string, unknown> = {};
+
+	constructor(options: AppOptions = {}) {
+		this.options = options;
+		this.signedIn = options.signedIn ?? true;
+		this.load(options.startUrl ?? "about:blank");
+	}
+
+	get page(): XCollectContext["page"] {
+		return {
+			goto: async (url: string) => {
+				this.gotos.push(url);
+				this.load(url);
+				return null;
+			},
+			evaluate: async (script: unknown, ...rest: unknown[]) => {
+				assert.equal(typeof script, "string", "page scripts are strings");
+				// Patchright's fourth argument: the page's main world, where the
+				// web app's own XMLHttpRequest lives.
+				assert.deepEqual(rest, [undefined, undefined, false]);
+				const value = vm.runInContext(String(script), this.context);
+				// A real evaluate serialises the result.
+				return value === undefined
+					? undefined
+					: JSON.parse(JSON.stringify(value));
+			},
+		} as unknown as XCollectContext["page"];
+	}
+
+	get path(): string {
+		return (this.window["location"] as { pathname: string }).pathname;
+	}
+
+	/** X drops the session cookies; the page stays where it is. */
+	signOut(): void {
+		this.signedIn = false;
+		(this.window["document"] as { cookie: string }).cookie = "guest_id=v1%3A1";
+	}
+
+	/** X sends the page to its sign-in flow. */
+	sendToSignIn(): void {
+		(this.window["location"] as { pathname: string }).pathname =
+			"/i/flow/login";
+	}
+
+	private load(url: string): void {
+		const target = new URL(url);
+		const onX = target.origin === ORIGIN;
+		const live = onX && this.signedIn;
+		const location = {
+			origin: target.origin,
+			pathname:
+				onX && !this.signedIn && target.pathname !== "/login"
+					? "/i/flow/login"
+					: target.pathname,
+			get href(): string {
+				return `${this.origin}${this.pathname}`;
+			},
+		};
+		const answer = (xhr: Xhr) => this.answer(xhr);
+		class Xhr {
+			private readonly listeners: Array<() => void> = [];
+			responseText = "";
+			responseType = "";
+			status = 0;
+			url = "";
+			addEventListener(type: string, listener: () => void): void {
+				if (type === "loadend") {
+					this.listeners.push(listener);
+				}
+			}
+			finish(status: number, body: string): void {
+				this.status = status;
+				this.responseText = body;
+				for (const listener of this.listeners) {
+					listener();
+				}
+			}
+			open(_method: string, requestUrl: string): void {
+				this.url = requestUrl;
+			}
+			send(): void {
+				answer(this);
+			}
+		}
+		const window: Record<string, unknown> = {
+			location,
+			document: {
+				cookie: live
+					? `guest_id=v1%3A1; twid=u%3D${OWNER_ID}; ct0=synthetic-csrf-token`
+					: "guest_id=v1%3A1",
+				documentElement: {
+					scrollHeight: 800,
+				},
+				querySelector: (selector: string) => this.link(selector),
+			},
+			history: {
+				pushState: (_state: unknown, _title: string, path: string) => {
+					this.historyPushes.push(path);
+					location.pathname = path;
+				},
+			},
+			dispatchEvent: (event: { type: string }) => {
+				if (
+					event.type === "popstate" &&
+					this.options.routerFollowsHistory !== false
+				) {
+					this.render();
+				}
+				return true;
+			},
+			PopStateEvent: class {
+				readonly type: string;
+				constructor(type: string) {
+					this.type = type;
+				}
+			},
+			XMLHttpRequest: Xhr,
+			URL,
+			innerHeight: 800,
+			scrollY: 0,
+			scrollBy: () => this.scroll(),
+			scrollTo: () => {
+				window["scrollY"] = 0;
+			},
+		};
+		window["window"] = window;
+		this.window = window;
+		this.context = vm.createContext(window);
+		this.timeline = null;
+		this.posts = 0;
+		if (live) {
+			this.render();
+		}
+	}
+
+	/** The links the layout offers, by the selectors the connector uses. */
+	private link(selector: string): unknown {
+		const sidebar = this.options.sidebar !== false;
+		const onProfile = this.path.startsWith(`/${HANDLE}`);
+		const onHistory = this.path.startsWith("/i/history");
+		const offered: Record<string, string | null> = {
+			'a[data-testid="AppTabBar_Profile_Link"]': sidebar ? `/${HANDLE}` : null,
+			'a[aria-label="Profile"]':
+				sidebar || this.options.profileLink ? `/${HANDLE}` : null,
+			'nav[aria-label="Primary"] a[href="/i/history"]': sidebar
+				? "/i/history"
+				: null,
+			'[role="tablist"] a[href$="/with_replies"]': onProfile
+				? `/${HANDLE}/with_replies`
+				: null,
+			'[role="tablist"] a[href="/i/history/likes"]': onHistory
+				? "/i/history/likes"
+				: null,
+		};
+		assert.ok(selector in offered, `unexpected selector: ${selector}`);
+		const path = offered[selector];
+		if (!(path && this.signedIn)) {
+			return null;
+		}
+		return {
+			tagName: "A",
+			href: `${ORIGIN}${path}`,
+			getAttribute: (name: string) => (name === "href" ? path : null),
+			click: () => {
+				this.clicks.push(path);
+				(this.window["location"] as { pathname: string }).pathname = path;
+				this.render();
+			},
+		};
+	}
+
+	private render(): void {
+		this.timeline = null;
+		this.posts = 0;
+		this.setScroll(0);
+		const path = this.path;
+		if (path === `/${HANDLE}`) {
+			this.request("UserByScreenName", { screen_name: HANDLE });
+			this.open("UserOriginalsTimeline", {
+				userId: OWNER_ID,
+				count: 20,
+				includePromotedContent: true,
+				withQuickPromoteEligibilityTweetFields: true,
+				withVoice: true,
+			});
+		} else if (path === `/${HANDLE}/with_replies`) {
+			this.open("UserRepliesTimeline", {
+				userId: OWNER_ID,
+				count: 20,
+				includePromotedContent: true,
+				withCommunity: true,
+				withVoice: true,
+			});
+		} else if (path === "/i/history") {
+			// Bookmarks carries no userId.
+			this.open("Bookmarks", { count: 20, includePromotedContent: true });
+		} else if (path === "/i/history/likes") {
+			this.open("Likes", {
+				userId: OWNER_ID,
+				count: 20,
+				includePromotedContent: false,
+				withClientEventToken: false,
+				withBirdwatchNotes: false,
+				withVoice: true,
+			});
+		} else {
+			// The app makes GraphQL requests the connector does not read.
+			this.request("HomeTimeline", { count: 20 });
+		}
+	}
+
+	private open(operation: string, variables: Record<string, unknown>): void {
+		this.timeline = { operation, variables, cursor: "", ended: false };
+		this.request(operation, variables);
+	}
+
+	private setScroll(scrollY: number): void {
+		this.window["scrollY"] = scrollY;
+		const document = this.window["document"] as {
+			documentElement: { scrollHeight: number };
+		};
+		document.documentElement.scrollHeight = 800 + this.posts * 320;
+	}
+
+	private scroll(): void {
+		this.scrolls += 1;
+		// Every step in this model reaches the bottom of what is loaded.
+		this.setScroll(this.posts * 320);
+		const timeline = this.timeline;
+		if (
+			timeline !== null &&
+			!timeline.ended &&
+			this.options.scrollLoads !== false
+		) {
+			this.request(timeline.operation, {
+				...timeline.variables,
+				cursor: timeline.cursor,
+			});
+		}
+	}
+
+	private request(operation: string, variables: Record<string, unknown>): void {
+		const XhrClass = this.window["XMLHttpRequest"] as new () => FakeXhr;
+		const xhr = new XhrClass();
+		// A different query id on every request: the connector must not care.
+		xhr.open(
+			"GET",
+			`/i/api/graphql/Qid${this.requests.length}x/${operation}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=%7B%7D`,
+		);
+		xhr.send();
+	}
+
+	private answer(xhr: {
+		finish: (status: number, body: string) => void;
+		url: string;
+	}): void {
+		const url = new URL(xhr.url, ORIGIN);
+		const operation = url.pathname.split("/").at(-1) ?? "";
+		const variables = JSON.parse(url.searchParams.get("variables") ?? "{}");
+		const request: AppRequest = {
+			operation,
+			cursor: typeof variables.cursor === "string" ? variables.cursor : "",
+			userId: typeof variables.userId === "string" ? variables.userId : null,
+		};
+		this.requests.push(request);
+		this.onRequest?.(request);
+		const pages = this.options.pages ?? fixturePages();
+		const response = this.options.respond?.(request) ?? {
+			status: 200,
+			body: pages[operation]?.[request.cursor] ?? '{"data":{"viewer":{}}}',
+		};
+		const timeline = this.timeline;
+		if (timeline !== null && timeline.operation === operation) {
+			const entries: Array<{
+				content?: { cursorType?: string; entryType?: string; value?: string };
+			}> = [];
+			try {
+				const data = JSON.parse(response.body).data;
+				const instructions =
+					data.bookmark_timeline_v2?.timeline.instructions ??
+					data.user.result.timeline.timeline.instructions;
+				for (const instruction of instructions) {
+					entries.push(...(instruction.entries ?? []));
+				}
+			} catch {
+				timeline.ended = true;
+			}
+			const posts = entries.filter(
+				(entry) => entry.content?.entryType !== "TimelineTimelineCursor",
+			).length;
+			const bottom = entries.find(
+				(entry) => entry.content?.cursorType === "Bottom",
+			)?.content?.value;
+			this.posts += posts;
+			timeline.cursor = bottom ?? "";
+			if (response.status !== 200 || posts === 0 || !bottom) {
+				timeline.ended = true;
+			}
+		}
+		xhr.finish(response.status, response.body);
+	}
+}
+
+const FAST: XCollectOptions = { actionDelayMs: [0, 0], ownerHandleRetryMs: 0 };
+const ALL = ["profile", "posts", "likes", "bookmarks"];
+
+const POST_IDS = [
+	"1890000000000000090",
+	"1990000000000000105",
+	"1990000000000000104",
+	"1990000000000000103",
+	"1990000000000000102",
+	"1990000000000000202",
+	"1990000000000000204",
+];
+const LIKE_IDS = [
+	"1990000000000000301",
+	"1980000000000000302",
+	"1990000000000000303",
+	"1970000000000000304",
+	"1960000000000000305",
+];
+const BOOKMARK_IDS = ["1990000000000000401", "1950000000000000402"];
+
+function harness(
+	app: FakeWebApp,
+	names: string[] = ALL,
+	extra: {
+		collectionMode?: "full_refresh" | "incremental";
+		state?: Record<string, unknown>;
+		timeRanges?: Record<string, { since?: string; until?: string }>;
+	} = {},
+) {
+	const messages: EmittedMessage[] = [];
+	const records: Array<{ stream: string; data: RecordData }> = [];
+	const ctx: XCollectContext = {
+		collectionMode: extra.collectionMode,
+		page: app.page,
+		state: extra.state ?? {},
+		requested: new Map(
+			names.map((name) => [
+				name,
+				{
+					name,
+					...(extra.timeRanges?.[name]
+						? { time_range: extra.timeRanges[name] }
+						: {}),
+				} as StreamScope,
+			]),
+		),
+		emit: async (message: EmittedMessage) => {
+			messages.push(message);
+		},
+		emitRecord: async (stream: string, data: RecordData) => {
+			const parsed = validateRecord(stream, data);
+			assert.equal(parsed.ok, true, JSON.stringify(parsed));
+			records.push({ stream, data });
+		},
+	};
+	const ids = (stream: string) =>
+		records.filter((r) => r.stream === stream).map((r) => r.data["id"]);
+	const skips = () =>
+		Object.fromEntries(
+			messages
+				.filter((m) => m.type === "SKIP_RESULT")
+				.map((m) => [m.stream, (m as { reason?: string }).reason]),
+		);
+	const states = (): Record<string, unknown> =>
+		Object.fromEntries(
+			messages
+				.filter((m) => m.type === "STATE")
+				.map((m) => [m.stream, (m as { cursor?: unknown }).cursor]),
+		);
+	const lastProgress = () => {
+		const last = messages.at(-1);
+		return last?.type === "PROGRESS" ? last.message : undefined;
+	};
+	return { ctx, ids, lastProgress, messages, records, skips, states };
+}
+
+async function captureDiagnostics(fn: () => Promise<void>): Promise<string[]> {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		await fn();
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	return lines;
+}
+
+const requestLog = (app: FakeWebApp) =>
+	app.requests.map(({ operation, cursor }) =>
+		cursor ? `${operation}@${cursor}` : operation,
+	);
+
+test("a first run reads the profile, posts, bookmarks and likes the app loads", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+
+	assert.deepEqual(app.gotos, [HOME_URL]);
+	assert.deepEqual(h.ids("profile"), [OWNER_ID]);
+	assert.deepEqual(h.ids("posts"), POST_IDS);
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS);
+	assert.deepEqual(h.skips(), {});
+
+	// Only the owner's own posts are saved from the threads the app loaded.
+	const posts = h.records.filter((r) => r.stream === "posts");
+	assert.ok(posts.every((r) => r.data["author_id"] === OWNER_ID));
+	assert.deepEqual(
+		posts.map((r) => r.data["kind"]),
+		["post", "post", "post", "quote", "post", "reply", "reply"],
+	);
+	// A liked post carries who wrote it and what it says.
+	const like = h.records.find((r) => r.stream === "likes")?.data;
+	assert.equal(like?.["author_handle"], "example_writer");
+	assert.equal(like?.["author_name"], "Example Writer");
+	assert.equal(like?.["text"], "Synthetic liked post one.");
+
+	// It followed the app's own links, in order, and nothing else.
+	assert.deepEqual(app.clicks, [
+		`/${HANDLE}`,
+		`/${HANDLE}/with_replies`,
+		"/i/history",
+		"/i/history/likes",
+	]);
+	assert.deepEqual(app.historyPushes, []);
+	// Every request is the app's own. The home timeline loaded before the
+	// observer existed; each list was read to a page of cursors only.
+	assert.deepEqual(requestLog(app), [
+		"HomeTimeline",
+		"UserByScreenName",
+		"UserOriginalsTimeline",
+		"UserOriginalsTimeline@synthetic-originals-bottom-1",
+		"UserRepliesTimeline",
+		"UserRepliesTimeline@synthetic-replies-bottom-1",
+		"Bookmarks",
+		"Bookmarks@synthetic-bookmarks-bottom-1",
+		"Likes",
+		"Likes@synthetic-likes-bottom-1",
+		"Likes@synthetic-likes-bottom-2",
+	]);
+	assert.equal(app.scrolls, 5);
+
+	// STATE holds ids only: the newest of each list.
+	assert.deepEqual(h.states(), {
+		posts: {
+			head_ids: [
+				"1990000000000000204",
+				"1990000000000000202",
+				"1990000000000000105",
+				"1990000000000000104",
+				"1990000000000000103",
+				"1990000000000000102",
+				"1890000000000000090",
+			],
+			requested_since: null,
+		},
+		bookmarks: { head_ids: BOOKMARK_IDS, requested_since: null },
+		likes: { head_ids: LIKE_IDS, requested_since: null },
+	});
+	assertUserFacingProgress(h.messages);
+	assert.equal(h.lastProgress(), "Finished reading X: 14 saved");
+
+	const coverage = lines
+		.filter((line) => line.startsWith("[x_browser-diagnostic] coverage "))
+		.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
+	assert.deepEqual(
+		coverage.map((c) => [c.stream, c.status, c.view_ends]),
+		[
+			["profile", "complete", undefined],
+			["posts", "complete", "exhausted,exhausted"],
+			["bookmarks", "complete", "exhausted"],
+			["likes", "complete", "exhausted"],
+		],
+	);
+	// 6 + 5 on the profile, 2 bookmarks, 5 likes: what the run cost.
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"posts_seen":18/);
+	// Diagnostics carry counts, never ids, handles or text.
+	assert.ok(
+		!lines.some((line) => /sample_owner|19\d{17}|Synthetic/.test(line)),
+	);
+});
+
+test("a page already on the home timeline is not loaded again", async () => {
+	const app = new FakeWebApp({ startUrl: HOME_URL });
+	const h = harness(app, ["bookmarks"]);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(app.gotos, []);
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	// Only bookmarks was asked for, so the profile was never opened.
+	assert.deepEqual(app.clicks, ["/i/history"]);
+});
+
+test("a later run stops each list at the first post already collected", async () => {
+	const first = new FakeWebApp();
+	const h1 = harness(first);
+	await collectXBrowser(h1.ctx, FAST);
+
+	const app = new FakeWebApp();
+	const h = harness(app, ALL, { state: h1.states() });
+	await collectXBrowser(h.ctx, FAST);
+	// The profile is current state, read again; nothing else is new.
+	assert.deepEqual(h.ids("profile"), [OWNER_ID]);
+	assert.deepEqual(h.ids("posts"), []);
+	assert.deepEqual(h.ids("bookmarks"), []);
+	assert.deepEqual(h.ids("likes"), []);
+	assert.deepEqual(h.skips(), {});
+	// One response per list, the one the app loads on opening it. No scroll.
+	assert.deepEqual(requestLog(app), [
+		"HomeTimeline",
+		"UserByScreenName",
+		"UserOriginalsTimeline",
+		"UserRepliesTimeline",
+		"Bookmarks",
+		"Likes",
+	]);
+	assert.equal(app.scrolls, 0);
+	assert.deepEqual(h.states(), h1.states());
+});
+
+test("a later run saves only what is newer, past a known pinned post", async () => {
+	const first = new FakeWebApp();
+	const h1 = harness(first);
+	await collectXBrowser(h1.ctx, FAST);
+
+	// One new like at the top of the list.
+	const pages = fixturePages();
+	const likes = JSON.parse(pages["Likes"]?.[""] ?? "");
+	const entries =
+		likes.data.user.result.timeline.timeline.instructions[0].entries;
+	const added = structuredClone(entries[0]);
+	added.entryId = "tweet-1990000000000000999";
+	added.sortIndex = "2000000000000000999";
+	added.content.itemContent.tweet_results.result.rest_id =
+		"1990000000000000999";
+	added.content.itemContent.tweet_results.result.legacy.id_str =
+		"1990000000000000999";
+	entries.unshift(added);
+	(pages["Likes"] as Record<string, string>)[""] = JSON.stringify(likes);
+	// One new post below the pinned post, which is already collected.
+	const originals = JSON.parse(pages["UserOriginalsTimeline"]?.[""] ?? "");
+	const postEntries =
+		originals.data.user.result.timeline.timeline.instructions[2].entries;
+	const newPost = structuredClone(postEntries[0]);
+	newPost.entryId = "tweet-1990000000000000888";
+	newPost.content.itemContent.tweet_results.result.rest_id =
+		"1990000000000000888";
+	newPost.content.itemContent.tweet_results.result.legacy.id_str =
+		"1990000000000000888";
+	postEntries.unshift(newPost);
+	(pages["UserOriginalsTimeline"] as Record<string, string>)[""] =
+		JSON.stringify(originals);
+
+	const app = new FakeWebApp({ pages });
+	const h = harness(app, ALL, { state: h1.states() });
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("posts"), ["1990000000000000888"]);
+	assert.deepEqual(h.ids("likes"), ["1990000000000000999"]);
+	assert.deepEqual(h.ids("bookmarks"), []);
+	assert.equal(app.scrolls, 0);
+	const states = h.states() as Record<string, { head_ids: string[] }>;
+	assert.equal(states["likes"]?.head_ids[0], "1990000000000000999");
+	assert.deepEqual(states["likes"]?.head_ids.slice(1), LIKE_IDS);
+	assert.equal(states["posts"]?.head_ids[0], "1990000000000000888");
+});
+
+test("a full refresh reads to the end whatever is already collected", async () => {
+	const first = new FakeWebApp();
+	const h1 = harness(first);
+	await collectXBrowser(h1.ctx, FAST);
+	const app = new FakeWebApp();
+	const h = harness(app, ALL, {
+		state: h1.states(),
+		collectionMode: "full_refresh",
+	});
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("posts"), POST_IDS);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS);
+});
+
+test("HTTP 429 stops the whole run at once and keeps what was read", async () => {
+	const app = new FakeWebApp({
+		respond: ({ operation, cursor }) =>
+			operation === "UserRepliesTimeline" && cursor === ""
+				? { status: 429, body: fixture("error-body.json") }
+				: undefined,
+	});
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	// The profile and the posts tab were read before X refused.
+	assert.deepEqual(h.ids("profile"), [OWNER_ID]);
+	assert.deepEqual(h.ids("posts"), POST_IDS.slice(0, 5));
+	assert.deepEqual(h.ids("bookmarks"), []);
+	assert.deepEqual(h.ids("likes"), []);
+	assert.deepEqual(h.skips(), {
+		posts: "source_rate_limited",
+		bookmarks: "run_stopped_early",
+		likes: "run_stopped_early",
+	});
+	// Nothing was done on the page after the refusal: no retry, no scroll,
+	// no further view.
+	assert.equal(requestLog(app).at(-1), "UserRepliesTimeline");
+	assert.deepEqual(app.clicks, [`/${HANDLE}`, `/${HANDLE}/with_replies`]);
+	assert.equal(app.scrolls, 1);
+	// No stream that fell short moves its cursor.
+	assert.deepEqual(h.states(), {});
+	const skip = h.messages.find(
+		(m) => m.type === "SKIP_RESULT" && m.stream === "posts",
+	) as { message?: string; recovery_hint?: { retryable?: boolean } };
+	assert.match(skip.message ?? "", /HTTP 429/);
+	assert.equal(skip.recovery_hint?.retryable, false);
+	assertUserFacingProgress(h.messages);
+	assert.equal(h.lastProgress(), "Stopped reading X early: 5 saved");
+});
+
+test("a rate limit part way down a list keeps the pages before it", async () => {
+	const app = new FakeWebApp({
+		respond: ({ operation, cursor }) =>
+			operation === "Likes" && cursor === "synthetic-likes-bottom-1"
+				? { status: 429, body: "Rate limit exceeded" }
+				: undefined,
+	});
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS.slice(0, 3));
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	assert.deepEqual(h.skips(), { likes: "source_rate_limited" });
+	// Streams read in full before the stop keep their cursors; likes does not.
+	assert.deepEqual(Object.keys(h.states()).sort(), ["bookmarks", "posts"]);
+	assert.equal(requestLog(app).at(-1), "Likes@synthetic-likes-bottom-1");
+});
+
+test("any other non-200 GraphQL response stops the run, even for an operation it does not read", async () => {
+	const blocked = new FakeWebApp({
+		respond: ({ operation }) =>
+			operation === "UserByScreenName"
+				? { status: 503, body: "Service Unavailable" }
+				: undefined,
+	});
+	const h = harness(blocked);
+	await collectXBrowser(h.ctx, FAST);
+	assert.equal(h.skips()["profile"], "collection_interrupted");
+	assert.equal(h.skips()["likes"], "run_stopped_early");
+	assert.deepEqual(blocked.clicks, [`/${HANDLE}`]);
+});
+
+test("an error body without data stops the run", async () => {
+	const app = new FakeWebApp({
+		respond: ({ operation }) =>
+			operation === "Bookmarks"
+				? { status: 200, body: fixture("error-body.json") }
+				: undefined,
+	});
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("posts"), POST_IDS);
+	assert.deepEqual(h.skips(), {
+		bookmarks: "collection_interrupted",
+		likes: "run_stopped_early",
+	});
+	assert.deepEqual(app.clicks.at(-1), "/i/history");
+	assert.equal(requestLog(app).at(-1), "Bookmarks");
+});
+
+test("losing the twid cookie mid-run stops the run as sign-in required", async () => {
+	const app = new FakeWebApp();
+	app.onRequest = ({ operation }) => {
+		if (operation === "Bookmarks") {
+			app.signOut();
+		}
+	};
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	// The bookmarks page the app had already loaded is kept.
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	assert.deepEqual(h.skips(), {
+		bookmarks: "sign_in_required",
+		likes: "run_stopped_early",
+	});
+	assert.deepEqual(Object.keys(h.states()), ["posts"]);
+	assert.equal(requestLog(app).at(-1), "Bookmarks");
+});
+
+test("a redirect to the sign-in flow mid-run stops the run as sign-in required", async () => {
+	const app = new FakeWebApp();
+	app.onRequest = ({ operation, cursor }) => {
+		if (operation === "Likes" && cursor !== "") {
+			app.sendToSignIn();
+		}
+	};
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.skips(), { likes: "sign_in_required" });
+	assert.equal(requestLog(app).at(-1), "Likes@synthetic-likes-bottom-1");
+});
+
+test("a signed-out session reads nothing and says sign-in is needed", async () => {
+	const app = new FakeWebApp({ signedIn: false });
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.records, []);
+	assert.deepEqual(h.skips(), {
+		profile: "sign_in_required",
+		posts: "sign_in_required",
+		bookmarks: "sign_in_required",
+		likes: "sign_in_required",
+	});
+	assert.deepEqual(app.gotos, [HOME_URL]);
+	assert.deepEqual(app.clicks, []);
+	assert.deepEqual(app.requests, []);
+});
+
+test("another account's timeline in the buffer is never read as the owner's", async () => {
+	const app = new FakeWebApp();
+	// The app answers the owner's Likes request as usual, but claims the
+	// request was for someone else's timeline.
+	const h = harness(app, ["likes"]);
+	const original = app.page;
+	const evaluateOriginal = original.evaluate as (
+		...args: unknown[]
+	) => Promise<unknown>;
+	const rewritten: XCollectContext["page"] = {
+		goto: original.goto,
+		evaluate: (async (...args: unknown[]) => {
+			const value = (await evaluateOriginal(...args)) as {
+				entries?: Array<{ operation: string; variables: string }>;
+			} | null;
+			for (const entry of value?.entries ?? []) {
+				if (entry.operation === "Likes") {
+					entry.variables = '{"userId":"1900000000000000002"}';
+				}
+			}
+			return value;
+		}) as XCollectContext["page"]["evaluate"],
+	};
+	h.ctx.page = rewritten;
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("likes"), []);
+	assert.deepEqual(h.skips(), { likes: "source_unreadable" });
+});
+
+test("narrow layout: a link named Profile gives the handle, and the history fallback opens History", async () => {
+	const app = new FakeWebApp({ sidebar: false, profileLink: true });
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	assert.deepEqual(h.ids("profile"), [OWNER_ID]);
+	assert.deepEqual(h.ids("posts"), POST_IDS);
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS);
+	assert.deepEqual(h.skips(), {});
+	// The tabs are in the page body on any layout; the sidebar links are not.
+	assert.deepEqual(app.historyPushes, ["/i/history"]);
+	assert.deepEqual(app.clicks, [
+		`/${HANDLE}`,
+		`/${HANDLE}/with_replies`,
+		"/i/history/likes",
+	]);
+	assert.ok(
+		lines.some((line) => line.includes('"via":"profile_label"')),
+		"the handle came from the link named Profile",
+	);
+});
+
+test("no profile link anywhere: the run stops with that reason and opens nothing; the handle is never guessed", async () => {
+	const app = new FakeWebApp({ sidebar: false });
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.records, []);
+	assert.deepEqual(h.skips(), {
+		profile: "source_unreadable",
+		posts: "source_unreadable",
+		bookmarks: "source_unreadable",
+		likes: "source_unreadable",
+	});
+	const skip = h.messages.find((m) => m.type === "SKIP_RESULT") as {
+		message?: string;
+	};
+	assert.match(skip.message ?? "", /did not show a link to your profile/);
+	assert.deepEqual(app.clicks, []);
+	assert.deepEqual(app.historyPushes, []);
+	assert.deepEqual(h.states(), {});
+});
+
+test("lists that need no handle are still read when there is no profile link", async () => {
+	const app = new FakeWebApp({ sidebar: false });
+	const h = harness(app, ["bookmarks", "likes"]);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS);
+	assert.deepEqual(h.skips(), {});
+});
+
+test("a view the app never loads is reported, not read as empty", async () => {
+	const app = new FakeWebApp({
+		sidebar: false,
+		routerFollowsHistory: false,
+	});
+	const h = harness(app, ["bookmarks"]);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.records, []);
+	assert.deepEqual(h.skips(), { bookmarks: "source_unreadable" });
+	assert.deepEqual(h.states(), {});
+});
+
+test("a list that stops loading before its end is partial and keeps its old cursor", async () => {
+	const app = new FakeWebApp({ scrollLoads: false });
+	const h = harness(app, ["likes"]);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS.slice(0, 3));
+	assert.deepEqual(h.skips(), { likes: "list_end_unconfirmed" });
+	assert.deepEqual(h.states(), {});
+	// It tried a bounded number of scroll steps, then stopped.
+	assert.equal(app.scrolls, 3);
+});
+
+test("a view stops at its cap and the stream is complete to that bound", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app, ["likes"]);
+	await collectXBrowser(h.ctx, { ...FAST, viewPostCaps: { likes: 3 } });
+	assert.deepEqual(h.ids("likes"), LIKE_IDS.slice(0, 3));
+	assert.deepEqual(h.skips(), {});
+	assert.deepEqual(h.states(), {
+		likes: { head_ids: LIKE_IDS.slice(0, 3), requested_since: null },
+	});
+	assert.equal(app.scrolls, 0);
+	assert.deepEqual(requestLog(app).slice(-2), ["Bookmarks", "Likes"]);
+});
+
+test("the run's own post budget stops it before the next view", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app);
+	// The posts tab sends 6 posts; a budget of 6 is spent there.
+	await collectXBrowser(h.ctx, { ...FAST, maxPostsPerRun: 6 });
+	assert.deepEqual(h.ids("posts"), POST_IDS.slice(0, 5));
+	assert.deepEqual(h.skips(), {
+		posts: "run_budget_reached",
+		bookmarks: "run_stopped_early",
+		likes: "run_stopped_early",
+	});
+	assert.deepEqual(app.clicks, [`/${HANDLE}`]);
+	assert.equal(app.scrolls, 0);
+});
+
+test("unreadable posts are skipped and reported; the rest is saved", async () => {
+	const pages = fixturePages();
+	const likes = JSON.parse(pages["Likes"]?.[""] ?? "");
+	likes.data.user.result.timeline.timeline.instructions[0].entries[0].content.itemContent.tweet_results.result.legacy.created_at =
+		"not a date";
+	(pages["Likes"] as Record<string, string>)[""] = JSON.stringify(likes);
+	const app = new FakeWebApp({ pages });
+	const h = harness(app, ["likes"]);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS.slice(1));
+	assert.deepEqual(h.skips(), { likes: "records_unreadable" });
+	// The walk itself finished, so its cursor moves.
+	assert.deepEqual(Object.keys(h.states()), ["likes"]);
+});
+
+test("a posts time range stops the walk at the first older post; likes and bookmarks are not read under a range", async () => {
+	const app = new FakeWebApp();
+	const range = { since: "2026-10-03T00:00:00Z" };
+	const h = harness(app, ALL, {
+		timeRanges: {
+			posts: range,
+			likes: range,
+			bookmarks: range,
+			profile: range,
+		},
+	});
+	await collectXBrowser(h.ctx, FAST);
+	// The pinned post is older than the range but does not end the walk; the
+	// runtime's own range filter withholds it. 102 is the first older post.
+	assert.deepEqual(h.ids("posts"), [
+		"1890000000000000090",
+		"1990000000000000105",
+		"1990000000000000104",
+		"1990000000000000103",
+		"1990000000000000202",
+	]);
+	assert.deepEqual(h.ids("likes"), []);
+	assert.deepEqual(h.ids("bookmarks"), []);
+	assert.deepEqual(h.ids("profile"), []);
+	assert.deepEqual(app.clicks, [`/${HANDLE}`, `/${HANDLE}/with_replies`]);
+	assert.equal(app.scrolls, 0);
+	assert.equal(
+		(h.states()["posts"] as { requested_since?: string }).requested_since,
+		"2026-10-03T00:00:00.000Z",
+	);
+
+	// A later run with no range reads past the stored head: older posts were
+	// never collected under the range.
+	const wider = new FakeWebApp();
+	const h2 = harness(wider, ["posts"], { state: h.states() });
+	await collectXBrowser(h2.ctx, FAST);
+	assert.deepEqual(h2.ids("posts"), POST_IDS);
+});
+
+test("only the profile: the profile page is opened and nothing is scrolled", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app, ["profile"]);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("profile"), [OWNER_ID]);
+	assert.deepEqual(app.clicks, [`/${HANDLE}`]);
+	assert.equal(app.scrolls, 0);
+	assert.deepEqual(h.states(), {});
+});
+
+test("a profile response for a different account is not saved", async () => {
+	const pages = fixturePages();
+	const other = JSON.parse(pages["UserByScreenName"]?.[""] ?? "");
+	other.data.user.result.rest_id = "1900000000000000002";
+	(pages["UserByScreenName"] as Record<string, string>)[""] =
+		JSON.stringify(other);
+	const app = new FakeWebApp({ pages });
+	const h = harness(app, ["profile"]);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.records, []);
+	assert.deepEqual(h.skips(), { profile: "source_unreadable" });
+});
+
+test("no requested stream: the page is never touched", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app, []);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(app.gotos, []);
+	assert.deepEqual(h.messages, []);
+});
+
+test("the sign-in probe reads cookies and path, and never navigates", async () => {
+	const signedIn = new FakeWebApp({ startUrl: HOME_URL });
+	assert.equal(await probeXSession(signedIn.page), true);
+	// Cookies present, but X is showing its sign-in flow or a challenge.
+	signedIn.sendToSignIn();
+	assert.equal(await probeXSession(signedIn.page), false);
+	const signedOut = new FakeWebApp({ startUrl: HOME_URL, signedIn: false });
+	assert.equal(signedOut.path, "/i/flow/login");
+	assert.equal(await probeXSession(signedOut.page), false);
+	// Part way through single sign-on, on another origin.
+	const elsewhere = new FakeWebApp({
+		startUrl: "https://accounts.example.invalid/",
+	});
+	assert.equal(await probeXSession(elsewhere.page), false);
+	for (const app of [signedIn, signedOut, elsewhere]) {
+		assert.deepEqual(app.gotos, []);
+	}
+	// A page that cannot be read is not a session.
+	const dead = {
+		evaluate: async () => {
+			throw new Error("Execution context was destroyed");
+		},
+	} as unknown as XCollectContext["page"];
+	assert.equal(await probeXSession(dead), false);
+});
+
+test("a live session needs no sign-in", async () => {
+	const app = new FakeWebApp();
+	await ensureXSession(
+		Object.assign(Object.create(null) as EnsureSessionArgs, {
+			page: app.page,
+			assist: async () => {
+				throw new Error("unexpected assistance");
+			},
+		}),
+	);
+	// It opened x.com to look, and did not go to the sign-in page.
+	assert.deepEqual(app.gotos, [HOME_URL]);
+});
+
+test("without a session, the owner signs in on the login page; no credential is handled", async () => {
+	const app = new FakeWebApp({ signedIn: false });
+	const statuses: string[] = [];
+	await ensureXSession(
+		Object.assign(Object.create(null) as EnsureSessionArgs, {
+			page: app.page,
+			assist: async () => {
+				// The owner signs in; X then shows the home timeline.
+				app.signedIn = true;
+				await app.page.goto(HOME_URL);
+				return "assist-1";
+			},
+			completeAssistance: async (_id: string, status: string) => {
+				statuses.push(status);
+			},
+		}),
+	);
+	assert.deepEqual(app.gotos, [HOME_URL, LOGIN_URL, HOME_URL]);
+	assert.deepEqual(statuses, ["resolved"]);
+});
+
+test("the manifest states the safety posture the code keeps to", () => {
+	const policy = manifest.capabilities.refresh_policy;
+	assert.equal(policy.recommended_mode, "manual");
+	assert.equal(policy.background_safe, false);
+	assert.ok(policy.minimum_interval_seconds >= 86_400);
+	assert.equal(policy.bot_detection_sensitivity, "high");
+	assert.equal(manifest.capabilities.public_listing.tier, "development");
+	assert.deepEqual(manifest.capabilities.human_interaction, ["manual_action"]);
+	assert.equal(manifest.mobile.pageshim.login_url, LOGIN_URL);
+	// No direct messages, no follower or following lists.
+	assert.deepEqual(
+		manifest.streams.map((stream: { name: string }) => stream.name),
+		ALL,
+	);
+	// The budget the rationale and the README describe.
+	assert.equal(MAX_POSTS_PER_RUN, 400);
+	assert.equal(
+		Object.values(VIEW_POST_CAPS).reduce((sum, cap) => sum + cap, 0),
+		MAX_POSTS_PER_RUN,
+	);
+	assert.deepEqual([ACTION_DELAY_MIN_MS, ACTION_DELAY_MAX_MS], [2000, 5000]);
+	assert.match(policy.rationale, /400 posts/);
+	assert.match(policy.rationale, /2 to 5 seconds/);
+});
+
+test("every reason the connector can report has owner-facing copy", () => {
+	const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+	const block = /const SKIP_REASON[^{]*\{([^}]*)\}/.exec(source)?.[1] ?? "";
+	const reasons = [...block.matchAll(/: "([a-z_]+)"/g)].map((m) => m[1]);
+	assert.ok(reasons.length >= 8);
+	assert.deepEqual(
+		Object.keys(manifest.reason_display_messages).sort(),
+		[...reasons].sort(),
+	);
+});

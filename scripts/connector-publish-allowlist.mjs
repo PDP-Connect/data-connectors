@@ -24,6 +24,11 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["chatgpt", "chatgpt"],
     ["claude_code", "claude-code"],
     ["codex", "codex"],
+    [
+      "discord_browser",
+      "discord-browser",
+      "Discord's terms forbid automating a user account, and the connector has not yet run end to end against a live account or in the mobile WebView; held until the product owner approves publication.",
+    ],
     ["doordash", "doordash"],
     [
       "github",
@@ -78,6 +83,11 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["venmo", "venmo"],
     ["whatsapp", "whatsapp"],
     ["wholefoods", "wholefoods"],
+    [
+      "x_browser",
+      "x-browser",
+      "Not yet run against a live account, and X's terms do not permit automated access; held until an owner run is recorded and a maintainer decides to publish it.",
+    ],
     ["whoop", "whoop"],
     ["ynab", "ynab"],
     ["youtube", "youtube"],

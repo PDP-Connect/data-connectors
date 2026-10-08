@@ -2568,3 +2568,409 @@ test("strava_browser: old shell without initialState does not receive STATE", {
 	assert.ok(run.result["strava.activities"].activities.length > 0);
 	assert.deepEqual(run.stateMessages, []);
 });
+
+test("x_browser: STATE, the stop conditions and the narrow layout on the PageShim host", {
+	timeout: 300_000,
+}, async (t) => {
+	const { pageshimCase: c, makeResolver } = await import(
+		"./fixtures/x_browser.mjs"
+	);
+	// The published bundle pauses 2 to 5 seconds after every action. These
+	// runs shorten the pause; the gate above runs the published timing.
+	const built = await buildPageshim({
+		connector: "x_browser",
+		outfile: join(out, "x_browser-paths.js"),
+		extraDefines: { PAGESHIM_X_ACTION_DELAY_MS: "300" },
+	});
+	// Every GraphQL request the synthetic web app makes, as Operation@cursor.
+	const observed = (options = {}) => {
+		const requests = [];
+		const resolve = makeResolver({
+			...options,
+			graphql: (request) => {
+				requests.push(
+					request.cursor
+						? `${request.operation}@${request.cursor}`
+						: request.operation,
+				);
+				return options.graphql?.(request);
+			},
+		});
+		return { requests, fixtures: { ...c.fixtures, resolve } };
+	};
+	const ids = (scope) => (scope?.records ?? []).map((record) => record.id);
+	let states;
+
+	await t.test("a first run saves a cursor of post ids for each list", async () => {
+		const { fixtures, requests } = observed();
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes });
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.deepEqual(r.result.exportSummary, c.exportSummary);
+		assert.deepEqual(Object.keys(r.result["x.posts"]), ["records"]);
+		assert.ok(
+			r.result["x.posts"].records.every(
+				(post) => post.author_handle === "sample_owner",
+			),
+			"only the owner's own posts are saved",
+		);
+		assert.deepEqual(ids(r.result["x.likes"]), [
+			"1990000000000000301",
+			"1980000000000000302",
+			"1990000000000000303",
+			"1970000000000000304",
+			"1960000000000000305",
+		]);
+		assert.deepEqual(Object.keys(r.states).sort(), [
+			"x.bookmarks",
+			"x.likes",
+			"x.posts",
+		]);
+		assert.deepEqual(r.states["x.bookmarks"], {
+			head_ids: ["1990000000000000401", "1950000000000000402"],
+			requested_since: null,
+		});
+		// Scrolling made the app ask for the later pages of likes.
+		assert.ok(requests.includes("Likes@synthetic-likes-bottom-1"));
+		assert.ok(requests.includes("Likes@synthetic-likes-bottom-2"));
+		assert.ok(
+			!r.log.some((line) => /19\d{17}|sample_owner/.test(line)),
+			"ids and handles must not appear in logs",
+		);
+		states = r.states;
+	});
+
+	await t.test("a later run stops at the first collected post and does not scroll", async () => {
+		const { fixtures, requests } = observed();
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures,
+			scopes: c.scopes,
+			initialState: states,
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		// The profile is current state; no list has anything new.
+		assert.equal(r.result["x.profile"].records.length, 1);
+		for (const scope of ["x.posts", "x.likes", "x.bookmarks"])
+			assert.equal(r.result[scope], undefined, scope);
+		// The likes list is taller than the window, so only a scroll makes the
+		// app ask for its second page. The connector did not scroll.
+		assert.deepEqual(
+			requests.filter((request) => request.startsWith("Likes")),
+			["Likes"],
+		);
+	});
+
+	await t.test("a later run on the thin host sends each unchanged list as an empty scope", async () => {
+		const { fixtures } = observed();
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures,
+			scopes: c.scopes,
+			initialState: states,
+			resultStreaming: true,
+			resultSpoolDirectory: join(out, "x_browser-later-thin-host"),
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.equal(r.streamResult.completed, true);
+		assert.deepEqual(r.streamDone.errors, []);
+		for (const scope of ["x.posts", "x.likes", "x.bookmarks"])
+			assert.deepEqual(
+				JSON.parse(await readFile(r.streamScopeFiles[scope], "utf8")),
+				{ records: [] },
+				scope,
+			);
+	});
+
+	await t.test("an old shell without initialState does not receive STATE", async () => {
+		const { fixtures } = observed();
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures,
+			scopes: ["x.bookmarks"],
+			supportsStateArgument: false,
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.equal(r.result["x.bookmarks"].records.length, 2);
+		assert.deepEqual(r.stateMessages, []);
+	});
+
+	await t.test("HTTP 429 stops the run at once: partial, records kept, cursor not moved", async () => {
+		const { fixtures, requests } = observed({
+			graphql: ({ operation, cursor }) =>
+				operation === "Likes" && cursor === "synthetic-likes-bottom-1"
+					? {
+							status: 429,
+							contentType: "application/json",
+							body: '{"errors":[{"code":88,"message":"Synthetic: rate limit exceeded."}]}',
+						}
+					: undefined,
+		});
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes });
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.equal(r.data.error, undefined);
+		assert.match(r.data.status, /^Partial: 12 items/);
+		// The first page of likes, read before X refused, is kept.
+		assert.equal(r.result["x.likes"].records.length, 3);
+		assert.equal(r.result["x.bookmarks"].records.length, 2);
+		assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+		const [error] = r.result.errors;
+		assert.equal(error.scope, "x.likes");
+		assert.equal(error.errorClass, "partial");
+		assert.equal(error.disposition, "degraded");
+		assert.match(error.reason, /HTTP 429/);
+		// The refused request is the last one: no retry, no further page.
+		assert.equal(requests.at(-1), "Likes@synthetic-likes-bottom-1");
+		assert.deepEqual(Object.keys(r.states).sort(), ["x.bookmarks", "x.posts"]);
+	});
+
+	await t.test("an error body on the first list stops the run before the others", async () => {
+		const { fixtures, requests } = observed({
+			graphql: ({ operation }) =>
+				operation === "UserOriginalsTimeline"
+					? {
+							status: 200,
+							contentType: "application/json",
+							body: '{"errors":[{"code":88,"message":"Synthetic: rate limit exceeded."}]}',
+						}
+					: undefined,
+		});
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes });
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.match(r.data.status, /^Partial: 0 items/);
+		assert.equal(r.result["x.profile"].records.length, 1);
+		assert.deepEqual(
+			r.result.errors.map((error) => [error.scope, error.disposition]),
+			[
+				["x.posts", "omitted"],
+				["x.bookmarks", "omitted"],
+				["x.likes", "omitted"],
+			],
+		);
+		assert.ok(!requests.some((request) => /^(Bookmarks|Likes|UserReplies)/.test(request)));
+		assert.deepEqual(r.states, {});
+	});
+
+	await t.test("narrow layout: a link named Profile and the history fallback open each view", async () => {
+		const { fixtures } = observed({ sidebar: false });
+		const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes });
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.deepEqual(r.result.exportSummary, c.exportSummary);
+	});
+
+	await t.test("a posts range keeps posts in range and reports the lists that cannot take one", async () => {
+		const { fixtures, requests } = observed();
+		const time_range = { since: "2026-10-03T00:00:00Z" };
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures,
+			scopes: [
+				{ name: "x.posts", time_range },
+				{ name: "x.likes", time_range },
+			],
+		});
+		assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(ids(r.result["x.posts"]), [
+			"1990000000000000105",
+			"1990000000000000104",
+			"1990000000000000103",
+			"1990000000000000202",
+		]);
+		assert.equal(r.result["x.likes"], undefined);
+		assert.equal(r.result.errors.length, 1, JSON.stringify(r.result.errors));
+		assert.equal(r.result.errors[0].scope, "x.likes");
+		// The likes list was never opened.
+		assert.ok(!requests.some((request) => request.startsWith("Likes")));
+	});
+});
+
+test("discord_browser: the session token never crosses the bridge", {
+	timeout: 180_000,
+}, async () => {
+	const {
+		pageshimCase: c,
+		apiRequests,
+		reset,
+		SYNTHETIC_SUPER_PROPERTIES,
+		SYNTHETIC_TOKEN,
+	} = await import("./fixtures/discord_browser.mjs");
+	reset();
+	const built = await buildPageshim({
+		connector: "discord_browser",
+		outfile: join(out, "discord_browser-token.js"),
+	});
+	const bridge = [];
+	const run = await runHarness({
+		bundle: built.outfile,
+		fixtures: c.fixtures,
+		scopes: c.scopes,
+		timerScale: 0.01,
+		gotoDelayMs: 100,
+		observeBridge: (method, args, result) =>
+			bridge.push(JSON.stringify([method, args, result]) ?? ""),
+	});
+	assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
+	assertCleanRun(run);
+	assert.deepEqual(run.result.errors, []);
+	assert.deepEqual(run.result.exportSummary, c.exportSummary);
+	// The fixture answers 401 without the client's headers, so a complete
+	// result means the page reused them.
+	const outside = JSON.stringify([
+		bridge,
+		run.result,
+		run.states,
+		run.stateMessages,
+		run.data,
+		run.log,
+	]);
+	assert.ok(bridge.some((call) => call.startsWith('["evaluate"')));
+	for (const secret of [SYNTHETIC_TOKEN, SYNTHETIC_SUPER_PROPERTIES])
+		assert.equal(outside.includes(secret), false);
+	// A linked account's access token is dropped in the page.
+	assert.equal(outside.includes("synthetic-third-party-token"), false);
+	// Read-only, and no direct-message endpoint. The stand-in client's own
+	// requests, sent when the page moves to Shop and back, are set aside.
+	const clientOwn = /^(PATCH \/users\/@me\/settings-proto\/1|GET \/collectibles-categories)$/;
+	assert.equal(apiRequests.filter((r) => clientOwn.test(r)).length, 4);
+	const guilds = run.result["discord.servers"].records.map((r) => r.id);
+	const owner = run.result["discord.profile"].records[0].id;
+	const search = (id) =>
+		`GET /guilds/${id}/messages/search?author_id=${owner}&sort_by=timestamp&sort_order=desc&offset=0`;
+	assert.deepEqual(apiRequests.filter((r) => !clientOwn.test(r)), [
+		"GET /users/@me",
+		"GET /users/@me/guilds",
+		"GET /users/@me/connections",
+		...guilds.map(search),
+	]);
+	assert.equal(run.calls.httpFetch, undefined, "no request from the host");
+});
+
+test("discord_browser: saved STATE stops each server at the collected messages", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c, reset } = await import(
+		"./fixtures/discord_browser.mjs"
+	);
+	reset();
+	const built = await buildPageshim({
+		connector: "discord_browser",
+		outfile: join(out, "discord_browser-state.js"),
+	});
+	const run = (initialState) =>
+		runHarness({
+			bundle: built.outfile,
+			fixtures: c.fixtures,
+			scopes: c.scopes,
+			initialState,
+			timerScale: 0.01,
+			gotoDelayMs: 100,
+		});
+	const first = await run({});
+	assert.deepEqual(first.ret, { ok: true }, first.log.slice(-20).join("\n"));
+	assert.equal(first.result["discord.messages"].records.length, 2);
+	const cursor = first.states["discord.messages"];
+	assert.equal(cursor.queue.length, 2);
+	assert.equal(
+		cursor.servers[cursor.queue[0]].newest_id,
+		first.result["discord.messages"].records[0].id,
+	);
+	// STATE holds ids only.
+	assert.match(JSON.stringify(cursor), /^[\[\]{}",:0-9a-z_]+$/);
+
+	const second = await run(first.states);
+	assert.deepEqual(second.ret, { ok: true }, second.log.slice(-20).join("\n"));
+	assertCleanRun(second);
+	assert.deepEqual(second.result.errors, []);
+	assert.equal(second.result["discord.messages"], undefined);
+	assert.equal(second.result["discord.profile"].records.length, 1);
+});
+
+test("discord_browser: an idle client ends the run with nothing read", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c, apiRequests, configure, reset } = await import(
+		"./fixtures/discord_browser.mjs"
+	);
+	reset();
+	configure({ clientSendsRequests: false });
+	try {
+		const built = await buildPageshim({
+			connector: "discord_browser",
+			outfile: join(out, "discord_browser-idle.js"),
+		});
+		const run = await runHarness({
+			bundle: built.outfile,
+			fixtures: c.fixtures,
+			scopes: c.scopes,
+			timerScale: 0.01,
+			gotoDelayMs: 100,
+		});
+		assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
+		assertCleanRun(run);
+		assert.deepEqual(apiRequests, []);
+		assert.deepEqual(
+			run.result.errors.map((e) => [e.scope, e.disposition]),
+			c.scopes.map((scope) => [scope, "omitted"]),
+		);
+		for (const e of run.result.errors)
+			assert.match(e.reason, /did not send a request of its own/);
+		for (const scope of c.scopes) assert.equal(run.result[scope], undefined);
+		assert.deepEqual(run.states, {});
+	} finally {
+		reset();
+	}
+});
+
+test("discord_browser: a session that expires part way ends the run", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c, apiRequests, configure, reset } = await import(
+		"./fixtures/discord_browser.mjs"
+	);
+	reset();
+	configure({ expireAfterRequests: 1 });
+	try {
+		const built = await buildPageshim({
+			connector: "discord_browser",
+			outfile: join(out, "discord_browser-expired.js"),
+		});
+		const run = await runHarness({
+			bundle: built.outfile,
+			fixtures: c.fixtures,
+			scopes: c.scopes,
+			timerScale: 0.01,
+			gotoDelayMs: 100,
+		});
+		assert.deepEqual(run.ret, { ok: true }, run.log.slice(-20).join("\n"));
+		assertCleanRun(run);
+		// The profile is kept; the run stopped at the first 401.
+		assert.equal(run.result["discord.profile"].records.length, 1);
+		assert.deepEqual(
+			apiRequests.filter((r) => r.startsWith("GET /users/")),
+			[
+				"GET /users/@me",
+				"GET /users/@me/guilds",
+			],
+		);
+		assert.deepEqual(
+			run.result.errors.map((e) => [e.scope, e.errorClass]),
+			["servers", "connections", "messages"].map((s) => [
+				`discord.${s}`,
+				"auth_failed",
+			]),
+		);
+		assert.equal(run.calls.showBrowser, undefined, "no sign-in during a run");
+	} finally {
+		reset();
+	}
+});
