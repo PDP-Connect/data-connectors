@@ -518,8 +518,12 @@ const OVERLAY_MANUAL_KEY = "vana:oura:manual";
 // too; and it removes itself after VEIL_SAFETY_MS if no overlay ever arrives,
 // so a stalled connector can never leave the person behind a blank screen.
 const VEIL_SAFETY_MS = 8000;
-// How long the portal's API may lag a fresh sign-in before a 401 means stale.
-const API_SESSION_SETTLE_MS = 1500;
+// How long the portal's API may lag a fresh sign-in before a 401 or 403
+// means a stale session. Right after an email-code sign-in the API answered
+// 403 on every call for 14 s and then recovered (2026-10-08 21:22 UTC), so
+// the lookup is repeated every API_SESSION_POLL_MS for up to this long.
+const API_SESSION_SETTLE_MS = 45000;
+const API_SESSION_POLL_MS = 2000;
 // The portal's API proxy (/api/extapi) sits behind a CDN that answers about
 // half of all calls with a 401 generated at the edge (x-cache "Error from
 // cloudfront", ~60 ms, never reaching Oura), for a signed-in session, with
@@ -1574,8 +1578,9 @@ const findApiApplication = async () => {
   if (listed?.status === 401 || listed?.status === 403) {
     // The better-auth session cookie can outlive the portal's upstream API
     // session: get-session still names the user while the applications API
-    // answers 401. That is a stale sign-in, not a portal failure.
-    return { clientId: null, unauthorized: true };
+    // answers 401. That is a stale sign-in, not a portal failure. The same
+    // answer (401 or 403) comes for a few seconds after a fresh sign-in.
+    return { clientId: null, unauthorized: true, status: listed.status };
   }
   if (!listed?.ok || !Array.isArray(listed.apps)) {
     throw makeFatalRunError(
@@ -2137,10 +2142,16 @@ const obtainAccessToken = async () => {
   const findApiApplicationAfterSignIn = async () => {
     await showOverlay(workingState(1, "Looking for your Oura app…"));
     await waitForPortalSettled();
+    const deadline = Date.now() + API_SESSION_SETTLE_MS;
     let found = await findApiApplication();
-    if (found.unauthorized) {
-      await page.sleep(API_SESSION_SETTLE_MS);
+    let rounds = 1;
+    while (found.unauthorized && Date.now() < deadline) {
+      await page.sleep(API_SESSION_POLL_MS);
       found = await findApiApplication();
+      rounds += 1;
+    }
+    if (rounds > 1) {
+      console.error(`[oura] Portal API ${found.unauthorized ? "still rejects" : "accepted"} the session after ${rounds} lookups`);
     }
     return found;
   };

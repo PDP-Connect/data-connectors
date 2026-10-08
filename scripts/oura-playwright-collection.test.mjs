@@ -481,7 +481,7 @@ test("portal API gives up on a 401 that survives every attempt", async () => {
   assert.equal(listed.status, 401);
   assert.equal(listed.attempts, 12);
   assert.equal(calls.length, 12);
-  assert.deepEqual(JSON.parse(JSON.stringify(await findApiApplication())), { clientId: null, unauthorized: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(await findApiApplication())), { clientId: null, unauthorized: true, status: 401 });
 });
 
 // The portal bounces /applications -> /signin -> /applications right after a
