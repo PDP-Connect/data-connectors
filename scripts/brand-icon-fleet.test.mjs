@@ -78,7 +78,7 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
 
 // These Collection Profiles are carried by signed OCI artifacts, not by the
 // frozen Desktop connector index. Their manifest-local icons still need proof.
-const MODERN_ONLY_PROFILE_ICONS = new Set(["github_browser.json", "strava_browser.json", "youtube_takeout.json"]);
+const MODERN_ONLY_PROFILE_ICONS = new Set(["anthropic_live.json", "github_browser.json", "strava_browser.json", "youtube_takeout.json"]);
 
 function assertRealBrandMarkShape(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);

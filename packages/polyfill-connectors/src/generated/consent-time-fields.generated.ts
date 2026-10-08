@@ -27,6 +27,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		project_documents: { field: "create_time", format: "date-time" },
 		projects: { field: "create_time", format: "date-time" },
 	},
+	anthropic_live: {
+		account_plan: null,
+		conversations: { field: "create_time", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
+		usage_limits: null,
+	},
 	apple_contacts: {
 		address_books: null,
 		contact_groups: null,

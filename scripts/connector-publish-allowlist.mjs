@@ -17,6 +17,11 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
   [
     ["amazon", "amazon"],
     ["anthropic", "anthropic"],
+    [
+      "anthropic_live",
+      "anthropic-live",
+      "Run live once, against a free-plan account with one conversation; publish after an operator run covers a paid account with history.",
+    ],
     ["apple_contacts", "apple-contacts"],
     ["apple_health", "apple-health"],
     ["apple_photos", "apple-photos"],
