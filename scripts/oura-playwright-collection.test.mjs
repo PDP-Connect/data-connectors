@@ -523,8 +523,54 @@ test("a page call that keeps dying, or dies for another reason, is not retried f
   const dying = { evaluate: async () => { calls += 1; throw new Error("Execution context was destroyed"); } };
   await assert.rejects(() => settledHarness(dying, settles).evaluateSettled("1"), /Execution context was destroyed/);
   assert.equal(calls, 3);
+  assert.equal(settles.length, 2, "no settle wait after the final attempt");
   calls = 0;
   const other = { evaluate: async () => { calls += 1; throw new Error("ReferenceError: nope"); } };
   await assert.rejects(() => settledHarness(other, settles).evaluateSettled("1"), /nope/);
   assert.equal(calls, 1, "a script error is not a navigation and is not retried");
+});
+
+// The document-start veil runs before Oura's page exists. It must never
+// append to a document without a root element (that would make the veil the
+// root and drop the page), and it must leave non-Oura hosts alone.
+const veilSource = () => {
+  const consts = script.match(/const VEIL_SAFETY_MS = \d+;/)[0];
+  const def = script.match(/const VEIL_SOURCE = `[\s\S]*?`;\n/)[0];
+  return vm.runInNewContext(`${consts}\n${def}\nVEIL_SOURCE`, {});
+};
+
+const fakeDocument = (hostname) => {
+  const appended = [];
+  const timers = [];
+  const root = { appendChild: (el) => appended.push(el) };
+  const element = () => ({ id: "", attrs: {}, children: [], textContent: "", setAttribute(k, v) { this.attrs[k] = v; }, appendChild(c) { this.children.push(c); } });
+  const document = { documentElement: null, getElementById: () => null, createElement: element, addEventListener: () => {} };
+  const context = { document, location: { hostname }, sessionStorage: { getItem: () => null }, window: {}, setTimeout: (fn, ms) => timers.push({ fn, ms }) };
+  return { context, document, root, appended, timers };
+};
+
+test("the veil waits for the root element instead of appending to the document", () => {
+  const { context, document, root, appended, timers } = fakeDocument("moi.ouraring.com");
+  vm.runInNewContext(veilSource(), context);
+  assert.equal(appended.length, 0, "nothing appended while the document has no root");
+  const deferred = timers.filter((t) => t.ms === 0);
+  assert.equal(deferred.length, 1, "one deferred redraw scheduled");
+  document.documentElement = root;
+  deferred[0].fn();
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].id, "vana-oura-veil");
+  assert.match(appended[0].attrs.style, /position:fixed;inset:0;z-index:2147483647/);
+  assert.equal(typeof context.window.__vanaOuraRemoveVeil, "function");
+});
+
+test("the veil draws at once when the root exists and stays off other hosts", () => {
+  const ready = fakeDocument("moi.ouraring.com");
+  ready.document.documentElement = ready.root;
+  vm.runInNewContext(veilSource(), ready.context);
+  assert.equal(ready.appended.length, 1);
+  const other = fakeDocument("vana.org");
+  other.document.documentElement = other.root;
+  vm.runInNewContext(veilSource(), other.context);
+  assert.equal(other.appended.length, 0, "no veil on the redirect host");
+  assert.equal(other.context.window.__vanaOuraRemoveVeil, undefined);
 });

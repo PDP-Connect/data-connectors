@@ -363,6 +363,7 @@ const evaluateSettled = async (source) => {
     } catch (err) {
       if (!isDestroyedContext(err)) throw err;
       lastError = err;
+      if (attempt === PORTAL_CALL_RETRIES) break;
       console.error(`[oura] Portal call interrupted by a navigation (attempt ${attempt}/${PORTAL_CALL_RETRIES}); waiting for the page to settle`);
       await waitForPortalSettled();
     }
@@ -2129,25 +2130,29 @@ const obtainAccessToken = async () => {
     throw makeFatalRunError("auth_failed", CODES.signinUnconfirmed, "Oura sign-in could not be confirmed on the Developer Portal.", STEPS.portalSignin);
   }
 
-  await showOverlay(workingState(1, "Looking for your Oura app…"));
-  await waitForPortalSettled();
-  let app = await findApiApplication();
-  if (app.unauthorized) {
-    // Right after a fresh sign-in the portal's API session can lag the
-    // cookie by a second or two (seen 2026-10-08). One more round, after the
-    // edge retries inside portalApi, separates that from a stale session.
-    await page.sleep(API_SESSION_SETTLE_MS);
-    app = await findApiApplication();
-  }
+  // Looks the app up once the portal has settled after a sign-in. Right
+  // after a fresh sign-in the portal's API session can lag the cookie by a
+  // second or two (seen 2026-10-08); one more round, after the edge retries
+  // inside portalApi, separates that from a stale session.
+  const findApiApplicationAfterSignIn = async () => {
+    await showOverlay(workingState(1, "Looking for your Oura app…"));
+    await waitForPortalSettled();
+    let found = await findApiApplication();
+    if (found.unauthorized) {
+      await page.sleep(API_SESSION_SETTLE_MS);
+      found = await findApiApplication();
+    }
+    return found;
+  };
+
+  let app = await findApiApplicationAfterSignIn();
   if (app.unauthorized) {
     console.error("[oura] The Developer Portal session is stale (applications API answered 401); asking the user to sign in again");
     email = await signInToPortal({ stale: true });
     if (!email) {
       throw makeFatalRunError("auth_failed", CODES.signinUnconfirmed, "Oura sign-in could not be confirmed on the Developer Portal.", STEPS.portalSignin);
     }
-    await showOverlay(workingState(1, "Looking for your Oura app…"));
-    await waitForPortalSettled();
-    app = await findApiApplication();
+    app = await findApiApplicationAfterSignIn();
     if (app.unauthorized) {
       throw makeFatalRunError("auth_failed", CODES.signinUnconfirmed, "The Oura Developer Portal rejected the session right after sign-in.", STEPS.portalSignin);
     }
