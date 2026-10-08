@@ -1,0 +1,2 @@
+{"id":"session","kind":"session","group":"session","scope_model":null,"scope_surface":null,"percent_used":2,"severity":"normal","is_active":false,"resets_at":"2026-01-15T14:00:00.000000Z"}
+{"id":"weekly_scoped:fable","kind":"weekly_scoped","group":"weekly","scope_model":"Fable","scope_surface":null,"percent_used":58,"severity":"critical","is_active":true,"resets_at":"2026-01-20T08:00:00.000000Z"}
