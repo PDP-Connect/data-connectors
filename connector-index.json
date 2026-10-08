@@ -1532,6 +1532,43 @@
           "iconKey": "oura",
           "defaultScope": "oura.readiness"
         }
+      },
+      {
+        "connectorId": "oura-playwright",
+        "company": "oura",
+        "version": "3.1.1",
+        "name": "Oura Ring",
+        "status": "stable",
+        "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity via the official Oura API V2, using a personal API application on your own Oura developer account. Covers Oura's pages from document start on hosts that offer page.addInitScript, retries the portal API's edge-generated 401s, settles the portal's post-sign-in bounce, and follows the portal's better-auth sign-in.",
+        "sourceFiles": {
+          "script": "oura/oura-playwright.js",
+          "metadata": "oura/oura-playwright.json"
+        },
+        "publishedAt": "2026-10-08T00:00:00Z",
+        "sourceTag": "maciej/oura-playwright-3.1.1",
+        "sourceCommit": "6c5464e0e2a7b68d21aba19235722011836c6c38",
+        "releaseId": "connectors-6c5464e0e2a7",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:5adfa4e3e4f3caf071c2306aa5334b9058d43c70aed367018ca717e234f59b31",
+        "scriptSha256": "sha256:0592b5a08459d0a95e8faa37b6685aa0f43440f8f76e8e87fde8d8e24aeccbbd",
+        "artifactSha256": "sha256:cf9953703c5f2814f0e04e602f8dc923386a68976af5a6f845840353abafb96f",
+        "artifactPath": "artifacts/oura-playwright/oura-playwright-3.1.1.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/6c5464e0e2a7b68d21aba19235722011836c6c38/artifacts/oura-playwright/oura-playwright-3.1.1.tgz",
+        "scopes": [
+          "oura.readiness",
+          "oura.sleep",
+          "oura.activity"
+        ],
+        "consumerMetadata": {
+          "sourceId": "oura",
+          "displayName": "Oura Ring",
+          "brandDomain": "ouraring.com",
+          "aliases": [
+            "ouraring"
+          ],
+          "iconKey": "oura",
+          "defaultScope": "oura.readiness"
+        }
       }
     ],
     "shop-playwright": [
