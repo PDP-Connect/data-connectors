@@ -90,8 +90,10 @@ import {
 	parseProfileBody,
 	parseRequestVariables,
 	parseTimelineBody,
+	type TimelineItem,
 	TIMELINE_OPERATIONS,
 	type TimelineOperation,
+	type TimelineParse,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -167,19 +169,34 @@ const MAX_PAGE_READ_FAILURES = 2;
 const SIGN_IN_PATH_RE =
 	/^\/(?:login|logout|i\/flow\/|i\/jf\/onboarding\/|account\/(?:access|login_challenge|locked|suspended))/;
 const NUMERIC_ID_RE = /^\d{1,30}$/;
-/** X's handle shape, the same one parsers.ts and the page script enforce. */
-const HANDLE_RE = /^[A-Za-z0-9_]{1,15}$/;
-/** The `@`-prefixed form of HANDLE_RE's shape, to mask a mention in a label. */
-const AT_HANDLE_RE = /@[A-Za-z0-9_]{1,15}(?![A-Za-z0-9_])/g;
 /**
- * Longest accessible name the layout diagnostic keeps. An `aria-label` can
- * carry an account name, so it is masked and then clipped.
+ * The accessible names the layout diagnostic may emit verbatim: X's own fixed
+ * navigation labels. Any other name is replaced by LAYOUT_ARIA_LABEL_MASK,
+ * because an `aria-label` can carry a display name, a bare handle or a
+ * numeric id.
  */
-const LAYOUT_ARIA_LABEL_MAX_CHARS = 40;
+const LAYOUT_ARIA_LABELS = new Set([
+	"Back",
+	"Bookmarks",
+	"Close",
+	"Communities",
+	"Direct Messages",
+	"Explore",
+	"Grok",
+	"History",
+	"Home",
+	"Lists",
+	"Messages",
+	"Notifications",
+	"Profile",
+	"Search and explore",
+	"Settings and privacy",
+]);
+/** What a control with any other accessible name reports instead. */
+const LAYOUT_ARIA_LABEL_MASK = "*";
 /**
- * Shortest masked `aria-label` (`al`) and redacted path (`p`) a cut control
- * line keeps. `al` is shortened first, then `p`, and the line is marked
- * `cut:1`.
+ * Shortest accessible name (`al`) and redacted path (`p`) a cut control line
+ * keeps. `al` is shortened first, then `p`, and the line is marked `cut:1`.
  */
 const LAYOUT_ARIA_LABEL_MIN_CHARS = 16;
 const LAYOUT_PATH_MIN_CHARS = 12;
@@ -258,6 +275,12 @@ const POST_STREAMS: readonly PostStream[] = [
 
 type ViewName = "originals" | "replies" | "bookmarks" | "likes";
 
+const TIMELINE_OPERATION_SET: ReadonlySet<string> = new Set(TIMELINE_OPERATIONS);
+/** Whether an observed operation is one this connector reads as a timeline. */
+function isTimelineOperation(operation: string): operation is TimelineOperation {
+	return TIMELINE_OPERATION_SET.has(operation);
+}
+
 /** Why the whole run stops at once. */
 type StopReason =
 	| "collection_interrupted"
@@ -325,7 +348,7 @@ const HISTORY_PATH = "/i/history";
 /**
  * The links that open the owner's profile: the wide layout's own navigation
  * first, then the narrow layout's account-drawer link, built from the handle
- * already validated against HANDLE_RE. `followLinkScript` still checks the
+ * the page script already validated. `followLinkScript` still checks the
  * anchor's own href before clicking.
  */
 function profileStepSelectors(handle: string): string[] {
@@ -438,9 +461,12 @@ export interface XCollectOptions {
 /**
  * What STATE holds for posts, likes and bookmarks: post ids only, and the
  * `since` the stored head was collected under when the run was range-limited.
+ * For posts the head is split by view, so a run of replies cannot evict the
+ * originals checkpoint.
  */
 const cursorSchema = z.object({
 	head_ids: z.array(z.string()).optional(),
+	reply_head_ids: z.array(z.string()).optional(),
 	requested_since: z.string().nullable().optional(),
 });
 type StreamCursor = z.infer<typeof cursorSchema>;
@@ -451,6 +477,8 @@ const observedSchema = z.object({
 	status: z.number(),
 	wanted: z.boolean(),
 	body: z.string(),
+	refused: z.boolean(),
+	errorCode: z.number().nullable(),
 });
 type Observed = z.infer<typeof observedSchema>;
 
@@ -600,10 +628,23 @@ interface StreamPlan {
 	/** Read to the cap whatever is already collected. */
 	readonly fullWalk: boolean;
 	readonly known: ReadonlySet<string>;
-	/** In list order, newest first. */
-	readonly newIds: string[];
+	/** Ids saved in this run, by view, newest first in each view's order. */
+	readonly newIds: Map<ViewName, string[]>;
+	/** The stored head ids by view, so one view cannot evict another's. */
+	readonly stored: ReadonlyMap<ViewName, readonly string[]>;
 	/** An ISO instant; posts created before it end the walk. */
 	readonly since: string | null;
+}
+
+/** The ids this run saved for one view, created on first use. */
+function viewIds(plan: StreamPlan, view: ViewName): string[] {
+	const existing = plan.newIds.get(view);
+	if (existing !== undefined) {
+		return existing;
+	}
+	const created: string[] = [];
+	plan.newIds.set(view, created);
+	return created;
 }
 
 type ViewEnd =
@@ -645,6 +686,8 @@ interface Run {
 	navigations: Record<string, number>;
 	ownerId: string;
 	pageReadFailures: number;
+	/** Wanted responses drained but not yet read by the current view. */
+	readonly pending: Observed[];
 	postsSeen: number;
 	profile: ProfileRecord | null;
 	profileFailure: Failure | null;
@@ -735,17 +778,33 @@ function checkStatus(run: Run, entry: Observed): boolean {
 	return false;
 }
 
+/**
+ * Stop the run on an HTTP-200 refusal: `errors` with no `data`. The observer
+ * keeps only the error code for an operation the run did not ask for, so the
+ * signal is checked whether or not the operation was wanted.
+ */
+function checkRefusal(run: Run, entry: Observed): boolean {
+	if (!entry.refused) {
+		return true;
+	}
+	stopRun(
+		run,
+		"collection_interrupted",
+		`X answered ${entry.operation} with an error and no data${entry.errorCode === null ? "" : ` (code ${entry.errorCode})`}, so the run stopped.`,
+	);
+	return false;
+}
+
 interface Drained {
 	readonly atBottom: boolean;
-	readonly responses: readonly Observed[];
 }
 
 /**
  * Take everything the observer has buffered and check the session. Reading
- * the buffer is local to the page: it sends nothing to X.
+ * the buffer is local to the page: it sends nothing to X. Wanted responses
+ * accumulate in `run.pending` until the current view reads them.
  */
 async function drain(run: Run): Promise<Drained> {
-	const responses: Observed[] = [];
 	let atBottom = false;
 	while (run.stop === null) {
 		const reading = await readPage(run.ctx.page);
@@ -766,8 +825,8 @@ async function drain(run: Run): Promise<Drained> {
 			if (run.stop !== null) {
 				break;
 			}
-			if (checkStatus(run, entry) && entry.wanted) {
-				responses.push(entry);
+			if (checkStatus(run, entry) && checkRefusal(run, entry) && entry.wanted) {
+				run.pending.push(entry);
 			}
 		}
 		checkSession(run, reading);
@@ -775,7 +834,7 @@ async function drain(run: Run): Promise<Drained> {
 			break;
 		}
 	}
-	return { atBottom, responses };
+	return { atBottom };
 }
 
 /** Keep the owner's own `UserByScreenName` response; ignore anyone else's. */
@@ -811,6 +870,66 @@ function postData(post: PostRecord): Record<string, unknown> {
 	};
 }
 
+/** Group contiguous conversation-module items; every other item stands alone. */
+function groupModules(items: readonly TimelineItem[]): TimelineItem[][] {
+	const groups: TimelineItem[][] = [];
+	for (const item of items) {
+		const last = groups.at(-1);
+		if (item.module !== null && last?.[0]?.module === item.module) {
+			last.push(item);
+		} else {
+			groups.push([item]);
+		}
+	}
+	return groups;
+}
+
+/** Whether an item is the owner's own, in a stream that filters by author. */
+function isOwnerItem(view: View, run: Run, item: TimelineItem): boolean {
+	return view.stream !== POSTS_STREAM || item.post.author_id === run.ownerId;
+}
+
+/** Whether an item stands alone or shares a conversation module. */
+type ItemScope = "entry" | "module";
+
+/**
+ * Read one item into the view's stream, or say why the walk stops there. A
+ * known post ends the walk, except inside a conversation module: there the
+ * module's newest owner post sets the boundary and every member is read first.
+ */
+async function takeItem(
+	run: Run,
+	view: View,
+	plan: StreamPlan,
+	outcome: ViewOutcome,
+	item: TimelineItem,
+	scope: ItemScope,
+): Promise<ViewEnd | null> {
+	const { pinned, post } = item;
+	if (!isOwnerItem(view, run, item)) {
+		// The other side of a reply thread. Read by the app, never saved.
+		outcome.otherAuthors += 1;
+		return null;
+	}
+	// The pinned post sits above the timeline whatever its age, so it says
+	// nothing about where the already-collected posts begin.
+	if (!(pinned || plan.fullWalk) && plan.known.has(post.id)) {
+		return scope === "module" ? null : "reached_known";
+	}
+	if (!pinned && plan.since !== null && post.created_at < plan.since) {
+		return "older_than_range";
+	}
+	const pinnedAndCollected = pinned && !plan.fullWalk && plan.known.has(post.id);
+	if (plan.emitted.has(post.id) || pinnedAndCollected) {
+		return null;
+	}
+	plan.emitted.add(post.id);
+	viewIds(plan, view.name).push(post.id);
+	await run.ctx.emitRecord(view.stream, postData(post));
+	outcome.saved += 1;
+	return null;
+}
+
 /** Read one timeline response into the view's stream. */
 async function takeTimelinePage(
 	run: Run,
@@ -819,6 +938,7 @@ async function takeTimelinePage(
 	outcome: ViewOutcome,
 	seen: Set<string>,
 	entry: Observed,
+	parsed: TimelineParse,
 ): Promise<void> {
 	const variables = parseRequestVariables(entry.variables);
 	// The three user timelines carry `userId`. Bookmarks carries none: it is
@@ -827,7 +947,6 @@ async function takeTimelinePage(
 		// Someone else's timeline (a profile preview); never the owner's data.
 		return;
 	}
-	const parsed = parseTimelineBody(view.operation, entry.body);
 	if (!parsed.ok) {
 		if (parsed.failure === "error_body") {
 			stopRun(run, "collection_interrupted", parsed.message);
@@ -843,37 +962,43 @@ async function takeTimelinePage(
 	outcome.postResults += parsed.postResults;
 	outcome.unavailable += parsed.unavailable;
 	outcome.unreadable += parsed.unreadable;
-	run.postsSeen += parsed.postResults;
 	let fresh = 0;
-	for (const { pinned, post } of parsed.items) {
-		if (!seen.has(post.id)) {
-			seen.add(post.id);
+	for (const item of parsed.items) {
+		if (!seen.has(item.post.id)) {
+			seen.add(item.post.id);
 			fresh += 1;
 		}
-		if (view.stream === POSTS_STREAM && post.author_id !== run.ownerId) {
-			// The other side of a reply thread. Read by the app, never saved.
-			outcome.otherAuthors += 1;
-			continue;
+	}
+	for (const group of groupModules(parsed.items)) {
+		const module = group[0]?.module;
+		const scope: ItemScope =
+			module === undefined || module === null ? "entry" : "module";
+		if (scope === "module") {
+			// The boundary is the module's newest owner post, so a new reply
+			// after an already-collected post is still read.
+			const newestOwner = group
+				.filter((item) => isOwnerItem(view, run, item))
+				.at(-1);
+			if (
+				newestOwner !== undefined &&
+				!(newestOwner.pinned || plan.fullWalk) &&
+				plan.known.has(newestOwner.post.id)
+			) {
+				outcome.end = "reached_known";
+				break;
+			}
 		}
-		// The pinned post sits above the timeline whatever its age, so it
-		// says nothing about where the already-collected posts begin.
-		if (!(pinned || plan.fullWalk) && plan.known.has(post.id)) {
-			outcome.end = "reached_known";
+		let ended: ViewEnd | null = null;
+		for (const item of group) {
+			ended = await takeItem(run, view, plan, outcome, item, scope);
+			if (ended !== null) {
+				break;
+			}
+		}
+		if (ended !== null) {
+			outcome.end = ended;
 			break;
 		}
-		if (!pinned && plan.since !== null && post.created_at < plan.since) {
-			outcome.end = "older_than_range";
-			break;
-		}
-		const pinnedAndCollected =
-			pinned && !plan.fullWalk && plan.known.has(post.id);
-		if (plan.emitted.has(post.id) || pinnedAndCollected) {
-			continue;
-		}
-		plan.emitted.add(post.id);
-		plan.newIds.push(post.id);
-		await run.ctx.emitRecord(view.stream, postData(post));
-		outcome.saved += 1;
 	}
 	await run.ctx.emit({
 		type: "PROGRESS",
@@ -895,11 +1020,21 @@ async function takeTimelinePage(
 	}
 }
 
+/** Decode one path segment; a malformed escape gives null. */
+function decodeSegment(segment: string): string | null {
+	try {
+		return decodeURIComponent(segment);
+	} catch {
+		return null;
+	}
+}
+
 /**
- * A path with every handle-shaped or numeric segment masked, so a layout
- * diagnostic can name a control without naming the account it points at. The
- * static route words X uses are kept. It mirrors the handle and numeric-id
- * shapes parsers.ts already reads.
+ * A path with every segment replaced by a placeholder unless it is one of X's
+ * own fixed route words. A segment is decoded before it is classified, so an
+ * encoded handle or id cannot slip through, and a segment that decodes to
+ * anything outside the route list is never emitted raw: it becomes ":id" for a
+ * numeric id and ":handle" otherwise.
  */
 export function redactPathShape(pathname: string): string {
 	return pathname
@@ -908,28 +1043,26 @@ export function redactPathShape(pathname: string): string {
 			if (segment === "") {
 				return segment;
 			}
-			if (NUMERIC_ID_RE.test(segment)) {
-				return ":id";
+			const decoded = decodeSegment(segment);
+			if (decoded !== null && STATIC_PATH_SEGMENTS.has(decoded)) {
+				return decoded;
 			}
-			if (HANDLE_RE.test(segment) && !STATIC_PATH_SEGMENTS.has(segment)) {
-				return ":handle";
-			}
-			return segment;
+			return decoded !== null && NUMERIC_ID_RE.test(decoded) ? ":id" : ":handle";
 		})
 		.join("/");
 }
 
 /**
- * The accessible name a layout diagnostic may name: any `@handle` becomes
- * ":handle" and the rest is clipped, so a name in a label cannot leave the
- * page whole.
+ * The accessible name a layout diagnostic may emit: one of X's fixed
+ * navigation labels verbatim, or LAYOUT_ARIA_LABEL_MASK for any other name.
+ * The actual name is never written, because an `aria-label` can carry a
+ * display name, a bare handle or a numeric id.
  */
-function clipAriaLabel(value: string | null): string | null {
+function layoutAriaLabel(value: string | null): string | null {
 	if (value === null) {
 		return null;
 	}
-	const masked = value.replace(AT_HANDLE_RE, ":handle");
-	return masked.slice(0, LAYOUT_ARIA_LABEL_MAX_CHARS);
+	return LAYOUT_ARIA_LABELS.has(value) ? value : LAYOUT_ARIA_LABEL_MASK;
 }
 
 /**
@@ -941,7 +1074,7 @@ function clipAriaLabel(value: string | null): string | null {
  *   s   "d" when the control is inside an open dialog, omitted for the page
  *   t   tag name
  *   id  data-testid
- *   al  masked and clipped aria-label
+ *   al  fixed navigation label, or "*" for any other accessible name
  *   r   role
  *   x   aria-expanded
  *   p   handle-free, id-free path shape
@@ -963,7 +1096,7 @@ function baseControlFields(
 	if (control.testid !== null) {
 		fields["id"] = control.testid;
 	}
-	const ariaLabel = clipAriaLabel(control.ariaLabel);
+	const ariaLabel = layoutAriaLabel(control.ariaLabel);
 	if (ariaLabel !== null) {
 		fields["al"] = ariaLabel;
 	}
@@ -994,9 +1127,9 @@ function controlLineFits(fields: LayoutControlFields): boolean {
 }
 
 /**
- * Shorten a control line to the budget: the masked `aria-label` first, then
- * the path, each to its named minimum. A shortened line carries `cut:1`. `id`
- * is never dropped.
+ * Shorten a control line to the budget: the accessible name first, then the
+ * path, each to its named minimum. A shortened line carries `cut:1`. `id` is
+ * never dropped.
  */
 function fitControlFields(fields: LayoutControlFields): LayoutControlFields {
 	if (controlLineFits(fields)) {
@@ -1055,7 +1188,7 @@ function layoutRoute(pathname: string): string {
  * missing. One `layout` line carries the viewport, the redacted route, what
  * the run tried with the drawer, the total control count and the number of
  * control lines; then one `lc` line per control names it in the flat, short-key
- * shape baseControlFields documents (tag, test id, masked accessible name,
+ * shape baseControlFields documents (tag, test id, fixed navigation label,
  * role, expanded state, dialog/page scope and handle/id-free path shape: no
  * text, no handle, no id, no token). Dialog controls come first, and every line
  * is measured against the mobile host's 150-character budget. A page the
@@ -1138,10 +1271,13 @@ async function followStep(
 /**
  * Follow the app's links to a view. A link the narrow layout hides in the
  * account drawer is retried after opening the drawer; a link still missing is
- * reported before the history fallback. Each action is followed by a pause.
+ * reported before the history fallback. Each action is followed by a pause,
+ * then by a check of what the app answered, so a refusal or a lost session
+ * stops the run before the next link is followed.
  */
 async function openView(
 	run: Run,
+	view: View,
 	steps: readonly NavigationStep[],
 ): Promise<Failure | null> {
 	for (const step of steps) {
@@ -1157,11 +1293,17 @@ async function openView(
 		if (via === "none") {
 			return {
 				reason: "source_unreadable",
-				message: `X did not offer a way to open ${step.path} in this layout.`,
+				message: `X did not offer a way to open your ${view.label} in this layout.`,
 			};
 		}
 		if (via !== "already_there") {
 			await pause(run);
+		}
+		if (run.stop === null) {
+			await drain(run);
+		}
+		if (run.stop !== null) {
+			return null;
 		}
 	}
 	return null;
@@ -1203,7 +1345,7 @@ async function readView(
 		};
 		return outcome;
 	}
-	outcome.failure = await openView(run, steps);
+	outcome.failure = await openView(run, view, steps);
 	if (outcome.failure !== null) {
 		return outcome;
 	}
@@ -1213,16 +1355,28 @@ async function readView(
 	for (let step = 0; ; step += 1) {
 		const drained = await drain(run);
 		const pagesBefore = outcome.pages;
-		for (const entry of drained.responses) {
+		const entries = run.pending.splice(0);
+		for (const entry of entries) {
 			if (entry.operation === PROFILE_OPERATION) {
 				takeProfile(run, entry);
-			} else if (
+				continue;
+			}
+			if (!isTimelineOperation(entry.operation)) {
+				continue;
+			}
+			const parsed = parseTimelineBody(entry.operation, entry.body);
+			if (parsed.ok) {
+				// Every timeline the app loaded spends the owner's reading
+				// allowance, whether or not this view reads it.
+				run.postsSeen += parsed.postResults;
+			}
+			if (
 				plan !== null &&
 				entry.operation === view.operation &&
 				outcome.end === null &&
 				outcome.failure === null
 			) {
-				await takeTimelinePage(run, view, plan, outcome, seen, entry);
+				await takeTimelinePage(run, view, plan, outcome, seen, entry, parsed);
 			}
 		}
 		const done =
@@ -1306,7 +1460,16 @@ function planStream(
 	}
 	const stored = cursorSchema.safeParse(ctx.state[stream]);
 	const cursor: StreamCursor = stored.success ? stored.data : {};
-	const known = new Set(storedIds(cursor.head_ids));
+	const storedByView = new Map<ViewName, readonly string[]>();
+	if (stream === POSTS_STREAM) {
+		// A cursor written before the split kept every post in `head_ids`;
+		// treating it as the originals head still stops both views.
+		storedByView.set("originals", storedIds(cursor.head_ids));
+		storedByView.set("replies", storedIds(cursor.reply_head_ids));
+	} else {
+		storedByView.set(stream, storedIds(cursor.head_ids));
+	}
+	const known = new Set([...storedByView.values()].flat());
 	const storedSince =
 		typeof cursor.requested_since === "string" ? cursor.requested_since : null;
 	// The stored head was collected under a later `since` than this run's, so
@@ -1320,7 +1483,8 @@ function planStream(
 			known.size === 0 ||
 			rangeExpanded,
 		known,
-		newIds: [],
+		newIds: new Map(),
+		stored: storedByView,
 		since,
 	};
 }
@@ -1336,15 +1500,32 @@ function byIdDescending(a: string, b: string): number {
 	return a < b ? 1 : -1;
 }
 
-function nextCursor(stream: PostStream, plan: StreamPlan): StreamCursor {
-	const merged = [...new Set([...plan.newIds, ...plan.known])];
+/** The kept head for one view: this run's new ids first, then the stored ids. */
+function headIds(plan: StreamPlan, view: ViewName): string[] {
+	const merged = [
+		...new Set([
+			...(plan.newIds.get(view) ?? []),
+			...(plan.stored.get(view) ?? []),
+		]),
+	];
 	// Likes and bookmarks are in the order they were made, which their ids do
 	// not follow; the run's own order (new first, then the stored head) is kept.
-	if (stream === POSTS_STREAM) {
+	if (view === "originals" || view === "replies") {
 		merged.sort(byIdDescending);
 	}
+	return merged.slice(0, HEAD_IDS_KEPT);
+}
+
+function nextCursor(stream: PostStream, plan: StreamPlan): StreamCursor {
+	if (stream === POSTS_STREAM) {
+		return {
+			head_ids: headIds(plan, "originals"),
+			reply_head_ids: headIds(plan, "replies"),
+			requested_since: plan.since,
+		};
+	}
 	return {
-		head_ids: merged.slice(0, HEAD_IDS_KEPT),
+		head_ids: headIds(plan, stream),
 		requested_since: plan.since,
 	};
 }
@@ -1601,6 +1782,7 @@ export async function collectXBrowser(
 		navigations: {},
 		ownerId: reading.userId,
 		pageReadFailures: 0,
+		pending: [],
 		postsSeen: 0,
 		profile: null,
 		profileFailure: null,

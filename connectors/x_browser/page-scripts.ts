@@ -20,7 +20,7 @@
 /** The page global that holds the observer's buffer. */
 export const OBSERVER_GLOBAL = "__pdppXObserver";
 /** Bump when the buffer entry shape changes, so a stale observer is replaced. */
-const OBSERVER_VERSION = 1;
+const OBSERVER_VERSION = 2;
 
 export interface ObserverConfig {
 	/** How much of a non-200 body is kept for an operation that is not wanted. */
@@ -64,6 +64,22 @@ export function installObserverScript(config: ObserverConfig): string {
 			return null;
 		}
 	};
+	const refusal = (text) => {
+		try {
+			const payload = JSON.parse(text);
+			const data = payload && payload.data;
+			const hasData = Boolean(
+				data && typeof data === "object" && !Array.isArray(data) &&
+				Object.keys(data).length > 0,
+			);
+			const errors = payload && Array.isArray(payload.errors) ? payload.errors : [];
+			if (hasData || errors.length === 0) return { refused: false, errorCode: null };
+			const code = errors[0] && errors[0].code;
+			return { refused: true, errorCode: typeof code === "number" ? code : null };
+		} catch (error) {
+			return { refused: false, errorCode: null };
+		}
+	};
 	const record = (request, status, readBody) => {
 		state.seen += 1;
 		if (state.buffer.length >= config.maxBuffered) {
@@ -71,14 +87,20 @@ export function installObserverScript(config: ObserverConfig): string {
 			return;
 		}
 		const keep = wanted.has(request.operation);
+		let text = "";
+		try {
+			text = String(readBody() || "");
+		} catch (error) {
+			text = "";
+		}
+		// An operation the run did not ask for is not buffered, but a body X
+		// refused still has to reach the connector: keep its error code only.
+		const signal = refusal(text);
 		let body = "";
-		if (keep || status !== 200) {
-			try {
-				body = String(readBody() || "");
-			} catch (error) {
-				body = "";
-			}
-			if (!keep) body = body.slice(0, config.errorBodyChars);
+		if (keep) {
+			body = text;
+		} else if (status !== 200) {
+			body = text.slice(0, config.errorBodyChars);
 		}
 		state.buffer.push({
 			operation: request.operation,
@@ -86,6 +108,8 @@ export function installObserverScript(config: ObserverConfig): string {
 			status: Number(status) || 0,
 			wanted: keep,
 			body,
+			refused: signal.refused,
+			errorCode: signal.errorCode,
 		});
 	};
 	const requests = new WeakMap();

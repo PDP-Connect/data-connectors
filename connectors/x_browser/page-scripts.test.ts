@@ -234,6 +234,8 @@ test("the observer buffers GraphQL responses by operation name and changes no re
 			status: 200,
 			wanted: true,
 			body: '{"data":{"likes":1}}',
+			refused: false,
+			errorCode: null,
 		},
 	]);
 	// One large body per read: the second waits for the next.
@@ -262,6 +264,44 @@ test("operations it does not read keep no body, unless X refused them", () => {
 			["DataSaverMode", 429, false, "Rate limit"],
 			// An abandoned request: status 0.
 			["Likes", 0, true, ""],
+		],
+	);
+});
+
+test("an HTTP 200 refusal is signalled with only its error code, wanted or not", () => {
+	const page = fakePage();
+	page.run(INSTALL);
+	// An operation the connector does not read: its body is dropped, but the
+	// refusal survives.
+	page.request(
+		graphql("HomeTimeline"),
+		200,
+		'{"errors":[{"code":88,"message":"Synthetic: rate limit exceeded."}]}',
+	);
+	// Errors beside data are per-item notices, not a refusal.
+	page.request(
+		graphql("UserByScreenName"),
+		200,
+		'{"data":{"user":{}},"errors":[{"code":1}]}',
+	);
+	const { entries } = page.run(POLL_SCRIPT);
+	assert.deepEqual(
+		entries.map((entry: Record<string, unknown>) => [
+			entry["operation"],
+			entry["wanted"],
+			entry["body"],
+			entry["refused"],
+			entry["errorCode"],
+		]),
+		[
+			["HomeTimeline", false, "", true, 88],
+			[
+				"UserByScreenName",
+				true,
+				'{"data":{"user":{}},"errors":[{"code":1}]}',
+				false,
+				null,
+			],
 		],
 	);
 });

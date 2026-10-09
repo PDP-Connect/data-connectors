@@ -77,6 +77,55 @@ function cursorsOnly(bookmarks: boolean): string {
 
 type Pages = Record<string, Record<string, string>>;
 
+/** A one-page `UserRepliesTimeline` body of the owner's own replies. */
+function ownerRepliesPage(ids: readonly string[]): string {
+	const entries = ids.map((id, index) => ({
+		entryId: `tweet-${id}`,
+		sortIndex: String(9_000_000_000 - index),
+		content: {
+			entryType: "TimelineTimelineItem",
+			itemContent: {
+				tweet_results: {
+					result: {
+						__typename: "Tweet",
+						rest_id: id,
+						core: {
+							user_results: {
+								result: {
+									rest_id: OWNER_ID,
+									core: { screen_name: HANDLE },
+								},
+							},
+						},
+						legacy: {
+							id_str: id,
+							created_at: "Tue Oct 06 12:00:00 +0000 2026",
+							full_text: `synthetic reply ${id}`,
+							user_id_str: OWNER_ID,
+							conversation_id_str: id,
+							in_reply_to_status_id_str: "1990000000000000001",
+							in_reply_to_screen_name: "example_writer",
+						},
+					},
+				},
+			},
+		},
+	}));
+	return JSON.stringify({
+		data: {
+			user: {
+				result: {
+					timeline: {
+						timeline: {
+							instructions: [{ type: "TimelineAddEntries", entries }],
+						},
+					},
+				},
+			},
+		},
+	});
+}
+
 /** Response bodies by operation, then by request cursor ("" is the first page). */
 function fixturePages(): Pages {
 	return {
@@ -595,7 +644,8 @@ class FakeWebApp {
 		}
 	}
 
-	private request(operation: string, variables: Record<string, unknown>): void {
+	/** Make one GraphQL request the connector did not ask for. */
+	request(operation: string, variables: Record<string, unknown>): void {
 		const XhrClass = this.window["XMLHttpRequest"] as new () => FakeXhr;
 		const xhr = new XhrClass();
 		// A different query id on every request: the connector must not care.
@@ -827,18 +877,17 @@ test("a first run reads the profile, posts, bookmarks and likes the app loads", 
 	]);
 	assert.equal(app.scrolls, 5);
 
-	// STATE holds ids only: the newest of each list.
+	// STATE holds ids only, split by view for posts: the newest of each list.
 	assert.deepEqual(h.states(), {
 		posts: {
 			head_ids: [
-				"1990000000000000204",
-				"1990000000000000202",
 				"1990000000000000105",
 				"1990000000000000104",
 				"1990000000000000103",
 				"1990000000000000102",
 				"1890000000000000090",
 			],
+			reply_head_ids: ["1990000000000000204", "1990000000000000202"],
 			requested_since: null,
 		},
 		bookmarks: { head_ids: BOOKMARK_IDS, requested_since: null },
@@ -977,6 +1026,81 @@ test("a later run saves only what is newer, past a known pinned post", async () 
 	assert.equal(states["posts"]?.head_ids[0], "1990000000000000888");
 });
 
+test("a new reply after a known post in the same module is still read", async () => {
+	const pages = fixturePages();
+	const replies = JSON.parse(pages["UserRepliesTimeline"]?.[""] ?? "");
+	const entries =
+		replies.data.user.result.timeline.timeline.instructions[0].entries;
+	const module = entries.find(
+		(entry: { content?: { entryType?: string } }) =>
+			entry.content?.entryType === "TimelineTimelineModule",
+	);
+	assert.ok(module);
+	// The module's first post is the owner's too, already collected; the
+	// reply under it is new.
+	const parent = module.content.items[0].item.itemContent.tweet_results.result;
+	parent.legacy.user_id_str = OWNER_ID;
+	parent.core.user_results.result.rest_id = OWNER_ID;
+	parent.core.user_results.result.core.screen_name = HANDLE;
+	(pages["UserRepliesTimeline"] as Record<string, string>)[""] =
+		JSON.stringify(replies);
+
+	const app = new FakeWebApp({ pages });
+	const h = harness(app, ["posts"], {
+		state: { posts: { head_ids: ["1990000000000000201"], requested_since: null } },
+	});
+	await collectXBrowser(h.ctx, FAST);
+	assert.ok(h.ids("posts").includes("1990000000000000202"));
+});
+
+test("a run of replies does not evict the originals checkpoint", async () => {
+	const pages = fixturePages();
+	const replyIds = Array.from(
+		{ length: 51 },
+		(_, index) => `2000000000000000${String(100 + index).padStart(3, "0")}`,
+	);
+	(pages["UserRepliesTimeline"] as Record<string, string>)[""] =
+		ownerRepliesPage(replyIds);
+
+	const first = new FakeWebApp({ pages });
+	const h1 = harness(first, ["posts"]);
+	await collectXBrowser(h1.ctx, FAST);
+	const cursor = h1.states()["posts"] as {
+		head_ids: string[];
+		reply_head_ids: string[];
+	};
+	// The originals checkpoint survives even though the replies filled theirs.
+	assert.deepEqual(cursor.head_ids, [
+		"1990000000000000105",
+		"1990000000000000104",
+		"1990000000000000103",
+		"1990000000000000102",
+		"1890000000000000090",
+	]);
+	assert.equal(cursor.reply_head_ids.length, 50);
+
+	// An unchanged second run re-collects no originals. One reply falls off the
+	// 50-id reply head by design; the originals head holds all five.
+	const second = new FakeWebApp({ pages });
+	const h2 = harness(second, ["posts"], { state: h1.states() });
+	await collectXBrowser(h2.ctx, FAST);
+	const originals = [
+		"1990000000000000105",
+		"1990000000000000104",
+		"1990000000000000103",
+		"1990000000000000102",
+		"1890000000000000090",
+	];
+	assert.deepEqual(
+		h2
+			.ids("posts")
+			.filter(
+				(id): id is string => typeof id === "string" && originals.includes(id),
+			),
+		[],
+	);
+});
+
 test("a full refresh reads to the end whatever is already collected", async () => {
 	const first = new FakeWebApp();
 	const h1 = harness(first);
@@ -1073,6 +1197,49 @@ test("an error body without data stops the run", async () => {
 	});
 	assert.deepEqual(app.clicks.at(-1), "/i/history");
 	assert.equal(requestLog(app).at(-1), "Bookmarks");
+});
+
+test("an HTTP 200 refusal for a timeline the view did not ask for stops the run", async () => {
+	const app = new FakeWebApp({
+		respond: ({ operation }) =>
+			operation === "HomeTimeline"
+				? {
+						status: 200,
+						body: '{"errors":[{"code":88,"message":"Synthetic: rate limit exceeded."}]}',
+					}
+				: undefined,
+	});
+	// The app loads its home timeline again while opening the profile.
+	app.onRequest = ({ operation }) => {
+		if (operation === "UserByScreenName") {
+			app.request("HomeTimeline", { count: 20 });
+		}
+	};
+	const h = harness(app);
+	await collectXBrowser(h.ctx, FAST);
+	assert.deepEqual(h.ids("posts"), []);
+	assert.deepEqual(h.skips(), {
+		profile: "collection_interrupted",
+		posts: "collection_interrupted",
+		bookmarks: "run_stopped_early",
+		likes: "run_stopped_early",
+	});
+});
+
+test("a refusal while opening a view stops the run before the next link", async () => {
+	const app = new FakeWebApp({
+		respond: ({ operation, cursor }) =>
+			operation === "Bookmarks" && cursor === ""
+				? { status: 429, body: fixture("error-body.json") }
+				: undefined,
+	});
+	const h = harness(app, ["likes"]);
+	await collectXBrowser(h.ctx, FAST);
+	// History's Bookmarks was refused, so the Likes tab was never opened.
+	assert.deepEqual(h.ids("likes"), []);
+	assert.deepEqual(h.skips(), { likes: "source_rate_limited" });
+	assert.deepEqual(app.clicks, ["/i/history"]);
+	assert.ok(!requestLog(app).includes("Likes"));
 });
 
 test("losing the twid cookie mid-run stops the run as sign-in required", async () => {
@@ -1282,6 +1449,31 @@ test("no profile link and no drawer control: the run stops and reports the layou
 	assert.ok(!("r" in explore));
 });
 
+test("a navigation failure names the view, not the owner's handle", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app);
+	const base = app.page;
+	const evaluate = base.evaluate as (...args: unknown[]) => Promise<unknown>;
+	// No link and no route fallback ever moves: the view cannot be opened.
+	const page: XCollectContext["page"] = {
+		goto: base.goto,
+		evaluate: (async (...args: unknown[]) => {
+			if (String(args[0]).includes("PopStateEvent")) {
+				return { via: "none" };
+			}
+			return evaluate(...args);
+		}) as XCollectContext["page"]["evaluate"],
+	};
+	h.ctx.page = page;
+	await collectXBrowser(h.ctx, FAST);
+	const skip = h.messages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
+	) as { message?: string };
+	assert.ok(skip);
+	assert.doesNotMatch(skip.message ?? "", /sample_owner/);
+	assert.match(skip.message ?? "", /your posts/);
+});
+
 test("a drawer click that opens nothing is recorded in the layout line", async () => {
 	const app = new FakeWebApp({
 		drawer: true,
@@ -1342,14 +1534,15 @@ test("60 controls become one line each, in order, and every line fits", async ()
 		report.controls.map((control) => control["n"]),
 		Array.from({ length: LAYOUT_CONTROL_CAP }, () => LAYOUT_CONTROL_CAP),
 	);
-	// Every 40-char label is shortened; the path is long but still fits.
+	// Any name outside the fixed navigation labels is masked to "*", and the
+	// 6-segment path still fits, so no line is cut.
 	const expectedPath = `/${Array.from({ length: 6 }, () => ":handle").join("/")}`;
 	assert.deepEqual(
 		report.controls.map((control) => control["al"]),
-		syntheticControls(6).map((control) => control.ariaLabel.slice(0, 16)),
+		Array.from({ length: LAYOUT_CONTROL_CAP }, () => "*"),
 	);
 	for (const control of report.controls) {
-		assert.equal(control["cut"], 1);
+		assert.ok(!("cut" in control));
 		assert.equal(control["p"], expectedPath);
 	}
 	// Every line, the first included, fits the mobile host's budget.
@@ -1380,7 +1573,7 @@ test("a very long path is shortened after the label, and the line marked cut", a
 	assert.equal(report.controls.length, LAYOUT_CONTROL_CAP);
 	for (const control of report.controls) {
 		assert.equal(control["cut"], 1);
-		assert.equal(String(control["al"]).length, 16);
+		assert.equal(String(control["al"]).length, 1);
 		assert.equal(String(control["p"]).length, 12);
 	}
 	for (const line of report.lines) {
@@ -1410,7 +1603,7 @@ test("a control whose minimal line cannot fit is counted as omitted", async () =
 	}
 });
 
-test("control lines mask and clip an accessible name and omit null fields", async () => {
+test("control lines mask an accessible name that is not a fixed navigation label", async () => {
 	const app = new FakeWebApp({
 		layoutControls: [
 			{
@@ -1425,10 +1618,8 @@ test("control lines mask and clip an accessible name and omit null fields", asyn
 	const report = layoutReport(lines);
 	const control = report.controls[0];
 	assert.ok(control);
-	const ariaLabel = String(control["al"]);
-	assert.ok(ariaLabel.length <= 40);
-	assert.match(ariaLabel, /:handle/);
-	assert.doesNotMatch(ariaLabel, /sample_owner/);
+	// The name held a handle, so the field carries only the marker.
+	assert.equal(control["al"], "*");
 	assert.equal(control["p"], "/:handle");
 	assert.ok(!("id" in control));
 	assert.ok(!("r" in control));
@@ -1437,7 +1628,29 @@ test("control lines mask and clip an accessible name and omit null fields", asyn
 	assert.ok(!("cut" in control));
 });
 
-test("redactPathShape masks handles and ids but keeps X's route words", () => {
+test("an accessible name is emitted only when it is a fixed navigation label", async () => {
+	const app = new FakeWebApp({
+		layoutControls: [
+			{
+				ariaLabel: "Switch to Jane Doe 1900000000000000001",
+				href: `${ORIGIN}/${HANDLE}`,
+			},
+			{ ariaLabel: "Home", href: `${ORIGIN}/home` },
+		],
+		sidebar: false,
+	});
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	const report = layoutReport(lines);
+	assert.deepEqual(
+		report.controls.map((control) => control["al"]),
+		["*", "Home"],
+	);
+	const text = report.lines.join("\n");
+	assert.doesNotMatch(text, /Jane Doe|1900000000000000001/);
+});
+
+test("redactPathShape masks handles, ids and encoded identities but keeps X's route words", () => {
 	assert.equal(
 		redactPathShape(`/${HANDLE}/with_replies`),
 		"/:handle/with_replies",
@@ -1448,6 +1661,17 @@ test("redactPathShape masks handles and ids but keeps X's route words", () => {
 		redactPathShape(`/${HANDLE}/status/1900000000000000001`),
 		"/:handle/status/:id",
 	);
+	// A percent-encoded handle or id is decoded before it is classified, and
+	// a dynamic segment outside the fixed route words is never emitted raw.
+	assert.equal(redactPathShape("/%6Aane_doe"), "/:handle");
+	assert.equal(redactPathShape("/%6Aane_doe/status/%31%39%30"), "/:handle/status/:id");
+	assert.equal(
+		redactPathShape("/hashtag/PrivateProjectLaunch2026"),
+		"/hashtag/:handle",
+	);
+	// A malformed escape is still never emitted raw.
+	assert.equal(redactPathShape("/%E0%A4%A"), "/:handle");
+	assert.equal(redactPathShape("/%2F"), "/:handle");
 });
 
 test("lists that need no handle are still read when there is no profile link", async () => {
@@ -1508,6 +1732,18 @@ test("the run's own post budget stops it before the next view", async () => {
 	});
 	assert.deepEqual(app.clicks, [`/${HANDLE}`]);
 	assert.equal(app.scrolls, 0);
+});
+
+test("every timeline the app loaded counts against the run's budget", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app, ["likes"]);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	assert.deepEqual(h.ids("likes"), LIKE_IDS);
+	// History loaded 2 bookmarks on the way to the 5 likes; both count.
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"ps":7/);
 });
 
 test("unreadable posts are skipped and reported; the rest is saved", async () => {

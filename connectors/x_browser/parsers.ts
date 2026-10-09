@@ -126,6 +126,8 @@ export interface TimelineItem {
 	/** True for the profile's pinned post, which is not in timeline order. */
 	readonly pinned: boolean;
 	readonly post: PostRecord;
+	/** The conversation module this item came from; null when it stands alone. */
+	readonly module: string | null;
 }
 
 export interface TimelinePage {
@@ -456,6 +458,7 @@ function addPostResult(
 	itemContent: unknown,
 	sortIndex: string | null,
 	pinned: boolean,
+	module: string | null,
 ): void {
 	if (dig(itemContent, "promotedMetadata") !== undefined) {
 		page.skippedEntries += 1;
@@ -480,7 +483,7 @@ function addPostResult(
 		page.unreadable += 1;
 		return;
 	}
-	page.items.push({ pinned, post });
+	page.items.push({ pinned, post, module });
 }
 
 function addEntry(
@@ -505,7 +508,7 @@ function addEntry(
 		return;
 	}
 	if (entryType === "TimelineTimelineItem") {
-		addPostResult(page, dig(content, "itemContent"), sortIndex, pinned);
+		addPostResult(page, dig(content, "itemContent"), sortIndex, pinned, null);
 		return;
 	}
 	if (entryType === "TimelineTimelineModule") {
@@ -513,8 +516,15 @@ function addEntry(
 		if (items.length === 0) {
 			page.skippedEntries += 1;
 		}
+		const module = typeof entryId === "string" ? entryId : null;
 		for (const item of items) {
-			addPostResult(page, dig(item, "item", "itemContent"), sortIndex, pinned);
+			addPostResult(
+				page,
+				dig(item, "item", "itemContent"),
+				sortIndex,
+				pinned,
+				module,
+			);
 		}
 		return;
 	}
@@ -530,8 +540,10 @@ function addInstruction(page: PageAccumulator, instruction: unknown): void {
 	} else if (type === "TimelinePinEntry") {
 		addEntry(page, dig(instruction, "entry"), true);
 	} else if (type === "TimelineAddToModule") {
+		const rawModule = dig(instruction, "moduleEntryId");
+		const module = typeof rawModule === "string" ? rawModule : null;
 		for (const item of list(dig(instruction, "moduleItems"))) {
-			addPostResult(page, dig(item, "item", "itemContent"), null, false);
+			addPostResult(page, dig(item, "item", "itemContent"), null, false, module);
 		}
 	}
 	// TimelineClearCache and any other instruction carry no posts.

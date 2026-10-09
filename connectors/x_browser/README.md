@@ -58,23 +58,25 @@ Every post the web app loads counts against the owner's own daily reading allowa
 | Scroll steps in one view | 60 | `MAX_SCROLL_STEPS_PER_VIEW` |
 | Minimum time between runs | 1 day | manifest `minimum_interval_seconds` |
 
-- The count is of posts X sent, including other people's posts in reply threads and posts that could not be read. A view stops after the response that reaches its cap, so it can pass the cap by one response.
+- The count is of posts X sent, including other people's posts in reply threads and posts that could not be read. Every timeline the app loads counts against it, whichever view the run is reading (for example, the bookmarks History loads on the way to Likes). A view stops after the response that reaches its cap, so it can pass the cap by one response.
 - The count cannot include the home timeline, which the app loads before the observer exists. The cap leaves room for it.
 - One action at a time. No parallel requests, no retries.
-- The first run reads each list from the top to its cap. A later run stops a list at the first post already collected (STATE keeps the newest 50 ids per stream, and nothing else).
+- The first run reads each list from the top to its cap. A later run stops a list at the first post already collected; inside a conversation module it reads every member first, so a new reply under an already-collected post is still saved. STATE keeps the newest 50 ids for each of the originals, replies, likes and bookmarks lists, and nothing else, so a run of replies cannot evict the originals checkpoint.
 - Older history beyond the first run's cap is never read. That is the stream's stated bound, not a gap to be filled later.
 
 The whole run stops at once, keeping what was read, on any of:
 
 - a GraphQL response with a status other than 200 (429 is reported as a rate limit), for any operation, read or not;
-- a response body with `errors` and no `data`;
+- a response body with `errors` and no `data`, for any operation, read or not;
 - the page moving to a sign-in or challenge path;
 - the `twid` or `ct0` cookie disappearing, or `twid` naming a different account;
 - the page reloading (the observer is gone) or no longer answering.
 
+A refusal or a lost session the app shows while one view is opening stops the run before the next view is opened: what the app answered is checked between actions.
+
 The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short does not move its cursor, so the next run reads it from the top again.
 
-It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control.
+It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control. An `lc` line emits an accessible name only from a fixed list of X's own navigation labels; any other label becomes `al:"*"`, and a path segment outside X's fixed route words is never emitted raw.
 
 Every report line must fit a 150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS`, in `connector-diagnostic.ts`), measured on the whole formatted line the host sees (`[x_browser-diagnostic] ` + event + space + JSON), because the mobile host truncates a message to 160 characters past its own prefix. An `lc` line is therefore a flat JSON object, never a JSON string inside JSON, with short keys:
 
@@ -85,10 +87,10 @@ Every report line must fit a 150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS`, 
 | `s` | `"d"` when the control is inside an open dialog; omitted for the page |
 | `t` | tag name |
 | `id` | `data-testid` |
-| `al` | masked, clipped `aria-label` |
+| `al` | fixed navigation label (`Home`, `Search and explore`, ...), or `*` when the control carries any other accessible name |
 | `r` | `role` |
 | `x` | `aria-expanded` |
-| `p` | handle-free, id-free path shape |
+| `p` | handle-free, id-free path shape: only X's fixed route words survive |
 | `cut` | `1` when `al` was shortened, then `p`, to fit the budget |
 
 Dialog controls are named first, so the open drawer is never hidden by the line cap (`LAYOUT_MAX_CONTROL_LINES`, 60). Null or absent fields are left out, `id` is never dropped from a line that is written, and no text, handle or numeric id is ever named. If a control's shortest line still cannot fit, that control is left out (its `id` is not truncated away) and the first line reports `omitted`; otherwise at the page script's 60-control cap every control gets a line.
