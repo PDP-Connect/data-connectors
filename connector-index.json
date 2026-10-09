@@ -1265,6 +1265,44 @@
           "iconKey": "instagram",
           "defaultScope": "instagram.posts"
         }
+      },
+      {
+        "connectorId": "instagram-playwright",
+        "company": "meta",
+        "version": "2.2.3",
+        "name": "Instagram",
+        "status": "stable",
+        "description": "Exports your Instagram profile and posts. Relays post-login checkpoints (verification codes, code-delivery choice, approve-on-another-device) through requestInput on hosts that never show the browser.",
+        "sourceFiles": {
+          "script": "meta/instagram-playwright.js",
+          "metadata": "meta/instagram-playwright.json"
+        },
+        "publishedAt": "2026-10-09T00:00:00Z",
+        "sourceTag": "maciej/instagram-post-login-challenge",
+        "sourceCommit": "8025b917c4f8bd505ca14564499b0be40b117682",
+        "releaseId": "connectors-8025b917c4f8",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:84a41384e0b8c21085a24550fa60bf2bc0341ba80799220184c8a27d01059a67",
+        "scriptSha256": "sha256:682c4de8189bc713b0176e16a6b2db0e94103ffceb5dcbb862e92281b5b4e0d7",
+        "artifactSha256": "sha256:8b8a9166139afdd87bbeb31b614d0a2eae17732579cd80006deec28640e0942d",
+        "artifactPath": "artifacts/instagram-playwright/instagram-playwright-2.2.3.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/8025b917c4f8bd505ca14564499b0be40b117682/artifacts/instagram-playwright/instagram-playwright-2.2.3.tgz",
+        "scopes": [
+          "instagram.profile",
+          "instagram.posts",
+          "instagram.following",
+          "instagram.ads"
+        ],
+        "consumerMetadata": {
+          "sourceId": "instagram",
+          "displayName": "Instagram",
+          "brandDomain": "instagram.com",
+          "aliases": [
+            "meta"
+          ],
+          "iconKey": "instagram",
+          "defaultScope": "instagram.posts"
+        }
       }
     ],
     "linkedin-playwright": [
