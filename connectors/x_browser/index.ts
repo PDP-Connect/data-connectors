@@ -90,8 +90,8 @@ import {
 	parseProfileBody,
 	parseRequestVariables,
 	parseTimelineBody,
-	type TimelineItem,
 	TIMELINE_OPERATIONS,
+	type TimelineItem,
 	type TimelineOperation,
 	type TimelineParse,
 } from "./parsers.ts";
@@ -311,9 +311,13 @@ const POST_STREAMS: readonly PostStream[] = [
 
 type ViewName = "originals" | "replies" | "bookmarks" | "likes";
 
-const TIMELINE_OPERATION_SET: ReadonlySet<string> = new Set(TIMELINE_OPERATIONS);
+const TIMELINE_OPERATION_SET: ReadonlySet<string> = new Set(
+	TIMELINE_OPERATIONS,
+);
 /** Whether an observed operation is one this connector reads as a timeline. */
-function isTimelineOperation(operation: string): operation is TimelineOperation {
+function isTimelineOperation(
+	operation: string,
+): operation is TimelineOperation {
 	return TIMELINE_OPERATION_SET.has(operation);
 }
 
@@ -906,6 +910,41 @@ async function settleAction(run: Run, effect: ActionEffect): Promise<void> {
 	await drain(run);
 }
 
+/**
+ * Whether an action script's own report means the page changed. A link click,
+ * a history fallback, a drawer click and a scroll act on the page; being
+ * already there, finding no link and finding no control do not.
+ */
+function actionEffect(result: unknown): ActionEffect {
+	const parsed = navigationSchema.safeParse(result);
+	const via = parsed.success ? parsed.data.via : "";
+	return via === "link" ||
+		via === "history" ||
+		via === "drawer" ||
+		via === "scroll"
+		? "changed"
+		: "unchanged";
+}
+
+/**
+ * The only function that runs an action script on the page. It drains and
+ * checks everything X answered before the action, so a refusal, a lost
+ * session or a spent budget already buffered during a read stops the run
+ * before any click or scroll; then it settles: pause when the page changed
+ * and drain and check again. Every other evaluate call is a pure read that
+ * acts on nothing.
+ */
+async function runAction(run: Run, script: string): Promise<string> {
+	await drain(run);
+	if (run.stop !== null) {
+		return "none";
+	}
+	const result = await evaluateInPage(run.ctx.page, script);
+	const parsed = navigationSchema.safeParse(result);
+	await settleAction(run, actionEffect(result));
+	return parsed.success ? parsed.data.via : "none";
+}
+
 /** Keep the owner's own `UserByScreenName` response; ignore anyone else's. */
 function takeProfile(run: Run, entry: Observed): void {
 	if (run.profile !== null) {
@@ -990,7 +1029,8 @@ async function takeItem(
 		// the walk: the module's newest owner post sets the range boundary.
 		return scope === "module" ? null : "older_than_range";
 	}
-	const pinnedAndCollected = pinned && !plan.fullWalk && plan.known.has(post.id);
+	const pinnedAndCollected =
+		pinned && !plan.fullWalk && plan.known.has(post.id);
 	if (plan.emitted.has(post.id) || pinnedAndCollected) {
 		return null;
 	}
@@ -1093,10 +1133,10 @@ async function takeTimelinePage(
 	if (parsed.postResults === 0 || fresh === 0 || parsed.bottomCursor === null) {
 		// A page of cursors only, or of posts already seen: the list has ended.
 		outcome.end = "exhausted";
-	} else if (
-		outcome.postResults >= run.viewCaps[view.name] ||
-		run.postsSeen >= run.maxPosts
-	) {
+	} else if (outcome.postResults >= run.viewCaps[view.name]) {
+		// The view's own cap is the stream's stated bound. A run stopped on the
+		// shared budget instead leaves the view open, so its cursor does not
+		// move past what the budget stopped it from reading.
 		outcome.end = "cap_reached";
 	}
 }
@@ -1163,10 +1203,7 @@ export function redactPathShape(pathname: string): string {
 	while (segments.length > 0 && segments[segments.length - 1] === "") {
 		segments.pop();
 	}
-	for (const pattern of [
-		...STATIC_ROUTE_PATTERNS,
-		...HANDLE_ROUTE_PATTERNS,
-	]) {
+	for (const pattern of [...STATIC_ROUTE_PATTERNS, ...HANDLE_ROUTE_PATTERNS]) {
 		if (matchesPattern(pattern, segments)) {
 			return renderPattern(pattern);
 		}
@@ -1236,11 +1273,7 @@ function baseControlFields(
 
 /** One control line exactly as the formatter would write it. */
 function formatControlLine(fields: LayoutControlFields): string {
-	return formatConnectorDiagnostic(
-		"x_browser",
-		LAYOUT_CONTROL_EVENT,
-		fields,
-	);
+	return formatConnectorDiagnostic("x_browser", LAYOUT_CONTROL_EVENT, fields);
 }
 
 /** Whether a control line fits the budget as the host measures it. */
@@ -1350,13 +1383,10 @@ async function reportLayout(run: Run): Promise<void> {
  * shut before the link is followed.
  */
 async function openDrawer(run: Run, step?: NavigationStep): Promise<boolean> {
-	const parsed = navigationSchema.safeParse(
-		await evaluateInPage(
-			run.ctx.page,
-			openDrawerScript(DRAWER_OPEN_SELECTORS, step?.path ?? null),
-		),
+	const via = await runAction(
+		run,
+		openDrawerScript(DRAWER_OPEN_SELECTORS, step?.path ?? null),
 	);
-	const via = parsed.success ? parsed.data.via : "none";
 	run.navigations[via] = (run.navigations[via] ?? 0) + 1;
 	if (via === "none") {
 		// A click that already happened still describes the run better than a
@@ -1364,12 +1394,9 @@ async function openDrawer(run: Run, step?: NavigationStep): Promise<boolean> {
 		if (run.drawer !== "clicked") {
 			run.drawer = "no_control";
 		}
-		await settleAction(run, "unchanged");
 		return false;
 	}
 	run.drawer = "clicked";
-	// A click acts on the page; an already-open drawer does not.
-	await settleAction(run, via === "drawer" ? "changed" : "unchanged");
 	return true;
 }
 
@@ -1379,20 +1406,11 @@ async function followStep(
 	step: NavigationStep,
 	fallback: LinkFallback,
 ): Promise<string> {
-	const parsed = navigationSchema.safeParse(
-		await evaluateInPage(
-			run.ctx.page,
-			followLinkScript(step.selectors, step.path, fallback),
-		),
-	);
-	const via = parsed.success ? parsed.data.via : "none";
-	run.navigations[via] = (run.navigations[via] ?? 0) + 1;
-	// A link click or the history fallback acts on the page; being already
-	// there and finding no link do not.
-	await settleAction(
+	const via = await runAction(
 		run,
-		via === "link" || via === "history" ? "changed" : "unchanged",
+		followLinkScript(step.selectors, step.path, fallback),
 	);
+	run.navigations[via] = (run.navigations[via] ?? 0) + 1;
 	return via;
 }
 
@@ -1536,8 +1554,7 @@ async function readView(
 		const share =
 			SCROLL_VIEWPORT_SHARE_MIN +
 			Math.random() * (SCROLL_VIEWPORT_SHARE_MAX - SCROLL_VIEWPORT_SHARE_MIN);
-		await evaluateInPage(run.ctx.page, scrollScript(share));
-		await settleAction(run, "changed");
+		await runAction(run, scrollScript(share));
 	}
 	return outcome;
 }
@@ -1760,9 +1777,10 @@ async function finishStream(
 	if (failure !== null) {
 		await emitSkip(run.ctx, stream, failure, counts);
 	}
-	// A stream that fell short keeps its old cursor, so the next run reads
-	// from the top again instead of stopping above what this run missed.
-	if (viewFailure === null && !unfinished) {
+	// A stream that fell short in any way keeps its old cursor, so the next
+	// run reads from the top again instead of stopping above what this run
+	// missed.
+	if (failure === null) {
 		await run.ctx.emit({
 			type: "STATE",
 			stream,

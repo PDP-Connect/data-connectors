@@ -422,7 +422,7 @@ export function followLinkScript(
 export function scrollScript(viewportShare: number): string {
 	return `(() => {
 	window.scrollBy(0, Math.max(200, Math.round(window.innerHeight * ${Number(viewportShare)})));
-	return true;
+	return { via: "scroll" };
 })()`;
 }
 

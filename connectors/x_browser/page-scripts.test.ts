@@ -376,7 +376,8 @@ test("an unwanted timeline counts module and wrapped posts but not promoted ones
 	assert.equal(entries[0].body, "");
 });
 
-test("an HTTP 200 refusal is signalled with only its error code, wanted or not", () => {	const page = fakePage();
+test("an HTTP 200 refusal is signalled with only its error code, wanted or not", () => {
+	const page = fakePage();
 	page.run(INSTALL);
 	// An operation the connector does not read: its body is dropped, but the
 	// refusal survives.
@@ -581,9 +582,14 @@ test("the route fallback is skipped when the caller asks it to be", () => {
 			'a[href="/i/history"]': { href: "https://x.com/i/history" },
 		},
 	});
-	assert.deepEqual(linked.run(followLinkScript(['a[href="/i/history"]'], "/i/history", "none")), {
-		via: "link",
-	});
+	assert.deepEqual(
+		linked.run(
+			followLinkScript(['a[href="/i/history"]'], "/i/history", "none"),
+		),
+		{
+			via: "link",
+		},
+	);
 	assert.deepEqual(linked.pushed, []);
 });
 
@@ -761,24 +767,26 @@ test("a labelled control outside any container is reported; article controls are
 	});
 	const reading = page.run(LAYOUT_SCRIPT);
 	assert.deepEqual(
-		reading.controls.map((control: { testid: string | null }) => control.testid),
+		reading.controls.map(
+			(control: { testid: string | null }) => control.testid,
+		),
 		[null, "Avatar"],
 	);
 });
 
 test("the layout script stops at the control cap", () => {
 	const page = fakePage({
-		navControls: Array.from(
-			{ length: LAYOUT_CONTROL_CAP + 5 },
-			(_, index) => ({ href: `https://x.com/i/history/${index}`, tagName: "A" }),
-		),
+		navControls: Array.from({ length: LAYOUT_CONTROL_CAP + 5 }, (_, index) => ({
+			href: `https://x.com/i/history/${index}`,
+			tagName: "A",
+		})),
 	});
 	assert.equal(page.run(LAYOUT_SCRIPT).controls.length, LAYOUT_CONTROL_CAP);
 });
 
 test("scrolling moves the window by a share of its height and nothing else", () => {
 	const page = fakePage();
-	assert.equal(page.run(scrollScript(2.5)), true);
+	assert.deepEqual(page.run(scrollScript(2.5)), { via: "scroll" });
 	assert.deepEqual(page.scrolled, [2000]);
 	assert.equal(page.sent.length, 0);
 });

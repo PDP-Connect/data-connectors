@@ -245,6 +245,7 @@ interface AppControl {
  */
 class FakeWebApp {
 	readonly clicks: string[] = [];
+	drawerClicks = 0;
 	readonly gotos: string[] = [];
 	readonly historyPushes: string[] = [];
 	/** Called as each request is made, before it is answered. */
@@ -437,8 +438,7 @@ class FakeWebApp {
 			querySelectorAll: (selector: string) =>
 				selector === "a[href]"
 					? paths.map((path) => ({
-							getAttribute: (name: string) =>
-								name === "href" ? path : null,
+							getAttribute: (name: string) => (name === "href" ? path : null),
 							tagName: "A",
 						}))
 					: [],
@@ -476,6 +476,7 @@ class FakeWebApp {
 				getAttribute: (name: string) =>
 					name === "data-testid" ? "DashButton_ProfileIcon_Link" : null,
 				click: () => {
+					this.drawerClicks += 1;
 					if (this.options.drawerOpens !== false) {
 						this.drawerOpen = true;
 					}
@@ -974,9 +975,7 @@ test("a first run reads the profile, posts, bookmarks and likes the app loads", 
 	);
 	const countKeys = ["p", "n", "k", "o", "u", "x"];
 	assert.ok(
-		counts.every((c) =>
-			countKeys.every((key) => typeof c[key] === "number"),
-		),
+		counts.every((c) => countKeys.every((key) => typeof c[key] === "number")),
 	);
 	// 6 + 5 on the profile, 2 bookmarks, 5 likes: what the run cost.
 	const run = lines.find((line) =>
@@ -1100,7 +1099,9 @@ test("a new reply after a known post in the same module is still read", async ()
 
 	const app = new FakeWebApp({ pages });
 	const h = harness(app, ["posts"], {
-		state: { posts: { head_ids: ["1990000000000000201"], requested_since: null } },
+		state: {
+			posts: { head_ids: ["1990000000000000201"], requested_since: null },
+		},
 	});
 	await collectXBrowser(h.ctx, FAST);
 	assert.ok(h.ids("posts").includes("1990000000000000202"));
@@ -1352,6 +1353,54 @@ test("a refusal the drawer click triggered stops the run before the profile link
 	// followed and no view was opened.
 	assert.deepEqual(app.clicks, []);
 	assert.ok(!requestLog(app).includes("UserByScreenName"));
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"stop":"source_rate_limited"/);
+});
+
+test("a refusal buffered while the handle is read stops the run before the wide profile link", async () => {
+	const app = new FakeWebApp({
+		respond: ({ operation }) =>
+			operation === "HomeTimeline"
+				? { status: 429, body: "Rate limit exceeded" }
+				: undefined,
+	});
+	const h = harness(app);
+	h.ctx.page = hookedPage(app, (script) => {
+		// The handle lookup is a pure read; a refusal can land while it runs.
+		if (script.includes("drawer_following")) {
+			app.request("HomeTimeline", { count: 20 });
+		}
+	});
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	// The profile link is an action: the buffered refusal is checked first.
+	assert.deepEqual(app.clicks, []);
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"stop":"source_rate_limited"/);
+});
+
+test("a refusal buffered while the handle is read stops the run before the drawer click", async () => {
+	const app = new FakeWebApp({
+		drawer: true,
+		respond: ({ operation }) =>
+			operation === "HomeTimeline"
+				? { status: 429, body: "Rate limit exceeded" }
+				: undefined,
+		sidebar: false,
+	});
+	const h = harness(app);
+	h.ctx.page = hookedPage(app, (script) => {
+		if (script.includes("drawer_following")) {
+			app.request("HomeTimeline", { count: 20 });
+		}
+	});
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	// Opening the drawer is an action: it too waits for the buffered refusal.
+	assert.equal(app.drawerClicks, 0);
+	assert.deepEqual(app.clicks, []);
 	const run = lines.find((line) =>
 		line.startsWith("[x_browser-diagnostic] run "),
 	);
@@ -1798,7 +1847,10 @@ test("redactPathShape masks handles, ids and encoded identities but keeps X's ro
 	// A percent-encoded handle or id is decoded before it is classified, and
 	// a dynamic segment outside the fixed route words is never emitted raw.
 	assert.equal(redactPathShape("/%6Aane_doe"), "/:handle");
-	assert.equal(redactPathShape("/%6Aane_doe/status/%31%39%30"), "/:handle/status/:id");
+	assert.equal(
+		redactPathShape("/%6Aane_doe/status/%31%39%30"),
+		"/:handle/status/:id",
+	);
 	assert.equal(
 		redactPathShape("/hashtag/PrivateProjectLaunch2026"),
 		"/hashtag/:handle",
@@ -1822,7 +1874,10 @@ test("redactPathShape treats a route word as a handle unless the whole path is a
 		"/:handle/status/:id",
 	);
 	// An encoded route or handle is decoded before the path is matched.
-	assert.equal(redactPathShape("/%68ome/with_replies"), "/:handle/with_replies");
+	assert.equal(
+		redactPathShape("/%68ome/with_replies"),
+		"/:handle/with_replies",
+	);
 	assert.equal(redactPathShape("/%69"), "/:handle");
 	assert.equal(redactPathShape("/%69/history/likes"), "/i/history/likes");
 	// Trailing slashes and the empty path.
@@ -1937,19 +1992,33 @@ test("a home timeline the app loads on the way counts against the run's budget",
 	assert.deepEqual(h.skips(), { likes: "run_budget_reached" });
 });
 
-test("unreadable posts are skipped and reported; the rest is saved", async () => {
-	const pages = fixturePages();
-	const likes = JSON.parse(pages["Likes"]?.[""] ?? "");
-	likes.data.user.result.timeline.timeline.instructions[0].entries[0].content.itemContent.tweet_results.result.legacy.created_at =
+test("an unreadable like leaves the cursor unchanged, so a later run reads it again", async () => {
+	const broken = fixturePages();
+	const likes = JSON.parse(broken["Likes"]?.[""] ?? "");
+	likes.data.user.result.timeline.timeline.instructions[0].entries[1].content.itemContent.tweet_results.result.legacy.created_at =
 		"not a date";
-	(pages["Likes"] as Record<string, string>)[""] = JSON.stringify(likes);
-	const app = new FakeWebApp({ pages });
-	const h = harness(app, ["likes"]);
-	await collectXBrowser(h.ctx, FAST);
-	assert.deepEqual(h.ids("likes"), LIKE_IDS.slice(1));
-	assert.deepEqual(h.skips(), { likes: "records_unreadable" });
-	// The walk itself finished, so its cursor moves.
-	assert.deepEqual(Object.keys(h.states()), ["likes"]);
+	(broken["Likes"] as Record<string, string>)[""] = JSON.stringify(likes);
+
+	const first = new FakeWebApp({ pages: broken });
+	const h1 = harness(first, ["likes"]);
+	await collectXBrowser(h1.ctx, FAST);
+	// The unreadable like is skipped and reported, and the cursor must not
+	// move, or the records below it would never be read again.
+	assert.deepEqual(
+		h1.ids("likes"),
+		LIKE_IDS.filter((_id, index) => index !== 1),
+	);
+	assert.deepEqual(h1.skips(), { likes: "records_unreadable" });
+	assert.deepEqual(h1.states(), {});
+
+	// A healthy second run with the stored state reads the whole list. With
+	// the cursor moved, this run would stop at the first known like.
+	const second = new FakeWebApp();
+	const h2 = harness(second, ["likes"], { state: h1.states() });
+	await collectXBrowser(h2.ctx, FAST);
+	assert.deepEqual(h2.ids("likes"), LIKE_IDS);
+	assert.deepEqual(h2.skips(), {});
+	assert.deepEqual(Object.keys(h2.states()), ["likes"]);
 });
 
 test("a posts time range stops the walk at the first older post; likes and bookmarks are not read under a range", async () => {

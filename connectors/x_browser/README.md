@@ -72,9 +72,9 @@ The whole run stops at once, keeping what was read, on any of:
 - the `twid` or `ct0` cookie disappearing, or `twid` naming a different account;
 - the page reloading (the observer is gone) or no longer answering.
 
-A refusal or a lost session the app shows while one view is opening stops the run before the next view is opened: what the app answered is checked between actions.
+A refusal or a lost session the app shows while one view is opening stops the run before the next view is opened: what the app answered is drained and checked immediately before and after every action on the page.
 
-The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short does not move its cursor, so the next run reads it from the top again.
+The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short — an unreadable record, a refusal, a lost session, a run that stopped early, or a walk cut short by the run's own budget — does not move its cursor, so the next run reads it from the top again.
 
 It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control. An `lc` line emits an accessible name only from a fixed list of X's own navigation labels; any other label becomes `al:"*"`, and a path that does not match one of X's fixed route patterns is never emitted raw.
 
