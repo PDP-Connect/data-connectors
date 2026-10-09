@@ -163,11 +163,11 @@
 				"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
 				"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
 				"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
-				"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved, and the next run continues with the rest.",
+				"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
 				"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
 				"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
 				"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
-				"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run continues from where this one stopped."
+				"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
 			}
 		}
 	},

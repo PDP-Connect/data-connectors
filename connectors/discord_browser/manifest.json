@@ -38,7 +38,7 @@
 			"rate_limit_sensitivity": "high",
 			"bot_detection_sensitivity": "high",
 			"background_safe": false,
-			"rationale": "Discord's terms forbid automating a user account outside its OAuth2 and bot APIs, and Discord can terminate an account for it, so a run happens only when the owner starts one, never in the background and at most once a day. Collection runs in the owner's own signed-in discord.com session; every request the connector makes is a GET, one at a time from inside the page, 3 to 5 seconds apart. Prompting an idle client into the in-app Shop link makes the Discord client save its own settings state (a PATCH the client issues, not the connector); that client-side write is an accepted side effect decided by the product owner on 2026-10-09. A run reads the owner's profile, server list and linked accounts, then the owner's own messages from the last 90 days, at most about 1,000 messages and 25 servers per run; a saved queue continues with the remaining servers on later runs. Direct messages, group DMs and the friends list are never read. A sign-in prompt, a captcha, an account check or a second rate limit ends the run without a retry."
+			"rationale": "Discord's terms forbid automating a user account outside its OAuth2 and bot APIs, and Discord can terminate an account for it, so a run happens only when the owner starts one, never in the background and at most once a day. Collection runs in the owner's own signed-in discord.com session; every request the connector makes is a GET, one at a time from inside the page, 3 to 5 seconds apart. Prompting an idle client into the in-app Shop link makes the Discord client save its own settings state (a PATCH the client issues, not the connector); that client-side write is an accepted side effect decided by the product owner on 2026-10-09. A run reads the owner's profile, server list and linked accounts, then the owner's own messages from the last 90 days, at most about 1,000 messages and 25 servers per run; a saved queue continues with the remaining servers on later runs, and only a fully readable walk that reached a server's range end records coverage, so a server cut short by an interruption, an unreadable group, the budget or a refusal is read from its newest message again next run. Discord's search listing stops at offset 9,975, which the product owner accepts as a server's range end. Direct messages, group DMs and the friends list are never read. A sign-in prompt, a captcha, an account check or a second rate limit ends the run without a retry."
 		},
 		"public_listing": {
 			"tier": "development",
@@ -300,7 +300,7 @@
 		{
 			"name": "messages",
 			"required": false,
-			"description": "Messages the owner themselves wrote in servers, from the most recent 90 days. Other people's messages are never collected, and neither are direct messages or group DMs. A run saves at most about 1,000 messages from at most 25 servers; later runs continue with the remaining servers.",
+			"description": "Messages the owner themselves wrote in servers, from the most recent 90 days. Other people's messages are never collected, and neither are direct messages or group DMs. A run saves at most about 1,000 messages from at most 25 servers; later runs continue with the remaining servers. Discord's search listing stops at offset 9,975, accepted as a server's range end; a server whose walk is cut short by an interruption, an unreadable group, the budget or a refusal is read from its newest message again on the next run.",
 			"display": {
 				"label": "Your messages in servers",
 				"detail": "The text you wrote, when you sent and edited it, the server and channel, and the names and sizes of files you attached. No direct messages, and nothing written by anyone else."
@@ -430,11 +430,11 @@
 		"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
 		"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
 		"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
-		"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved, and the next run continues with the rest.",
+		"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
 		"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
 		"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
 		"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
-		"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run continues from where this one stopped."
+		"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
 	},
 	"mobile": {
 		"pageshim": {
