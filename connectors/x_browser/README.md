@@ -74,9 +74,9 @@ The whole run stops at once, keeping what was read, on any of:
 
 A refusal or a lost session the app shows while one view is opening stops the run before the next view is opened: what the app answered is drained and checked immediately before and after every action on the page.
 
-The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short — an unreadable record, a refusal, a lost session, a run that stopped early, or a walk cut short by the run's own budget — does not move its cursor, so the next run reads it from the top again.
+The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short — an unreadable record, a refusal, a lost session, a run that stopped early, or a walk cut short by the run's own budget — does not move its cursor, so the next run reads it from the top again. A stream whose read overlapped a stop is partial even when its own view ended at its cap or at the end of the list; only a stream whose walk finished before the stop keeps its cursor.
 
-It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control. An `lc` line emits an accessible name only from a fixed list of X's own navigation labels; any other label becomes `al:"*"`, and a path that does not match one of X's fixed route patterns is never emitted raw.
+It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. It resets the window to the top only as part of a navigation it actually performs, so a link lookup that finds nothing changes nothing on the page. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control. Every page-derived string in an `lc` line is either a value from a fixed, checked-in allowlist or the marker `*`; a path is emitted only as one of X's fixed positional route patterns, and any other path is a placeholder shape.
 
 Every report line must fit a 150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS`, in `connector-diagnostic.ts`), measured on the whole formatted line the host sees (`[x_browser-diagnostic] ` + event + space + JSON), because the mobile host truncates a message to 160 characters past its own prefix. An `lc` line is therefore a flat JSON object, never a JSON string inside JSON, with short keys:
 
@@ -85,11 +85,11 @@ Every report line must fit a 150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS`, 
 | `i` | 1-based position in the emitted order |
 | `n` | total controls the page offered |
 | `s` | `"d"` when the control is inside an open dialog; omitted for the page |
-| `t` | tag name |
-| `id` | `data-testid` |
-| `al` | fixed navigation label (`Home`, `Search and explore`, ...), or `*` when the control carries any other accessible name |
-| `r` | `role` |
-| `x` | `aria-expanded` |
+| `t` | tag from a fixed list (`a`, `button`, `div`, `span`, `nav`, `header`), or `*` |
+| `id` | known static `data-testid` (`AppTabBar_Profile_Link`, `DashButton_ProfileIcon_Link`, ...), or `*` |
+| `al` | fixed navigation label (`Home`, `Search and explore`, ...), or `*` |
+| `r` | ARIA role from a fixed list, or `*` |
+| `x` | `aria-expanded` (`true` or `false`), or `*` |
 | `p` | handle-free, id-free path shape: X's fixed route patterns survive whole, every other segment is a placeholder |
 | `cut` | `1` when `al` was shortened, then `p`, to fit the budget |
 
@@ -115,6 +115,8 @@ The per-stream diagnostics use the same budget with short keys, `coverage` plus 
 | | `stop` | stop reason, when the run stopped |
 | | `ab` | aborted requests |
 | | `nav` | `via:count` pairs for link, drawer, history, already-there and none clicks |
+
+A SKIP_RESULT message names the GraphQL operation only when it is one of the known operation names; any other page-supplied name becomes `*`, so a stop message cannot carry a page-derived token either.
 
 ## Sign-in
 

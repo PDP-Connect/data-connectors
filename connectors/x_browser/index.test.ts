@@ -225,6 +225,7 @@ interface SyntheticLayoutControl {
 	expanded?: string;
 	href: string;
 	role?: string;
+	tag?: string;
 	testid?: string;
 }
 
@@ -546,7 +547,7 @@ class FakeWebApp {
 					};
 					return attributes[name] ?? null;
 				},
-				tagName: "A",
+				tagName: control.tag ?? "A",
 			}));
 		}
 		const sidebar = this.options.sidebar !== false;
@@ -577,13 +578,13 @@ class FakeWebApp {
 			control("BUTTON", {
 				"aria-expanded": "true",
 				"aria-label": `Account menu for @${HANDLE} and the synthetic timeline`,
-				"data-testid": "AvatarDrawerButton",
+				"data-testid": "DashButton_ProfileIcon_Link",
 				role: "button",
 			}),
 			// A control in an open dialog: the diagnostic must call it "dialog".
 			control(
 				"BUTTON",
-				{ "aria-label": "Close", "data-testid": "DialogClose" },
+				{ "aria-label": "Close", "data-testid": "app-bar-back" },
 				"dialog",
 			),
 		];
@@ -1444,6 +1445,42 @@ test("losing the twid cookie mid-run stops the run as sign-in required", async (
 	assert.equal(requestLog(app).at(-1), "Bookmarks");
 });
 
+test("a stop during the read that reaches a stream's cap still marks it partial", async () => {
+	const app = new FakeWebApp();
+	app.onRequest = ({ operation }) => {
+		if (operation === "Bookmarks") {
+			app.signOut();
+		}
+	};
+	const h = harness(app, ["bookmarks"]);
+	await collectXBrowser(h.ctx, { ...FAST, viewPostCaps: { bookmarks: 1 } });
+	// The cap page the app sent before the stop is kept...
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	// ...but the stream overlapped the stop, so it is partial and keeps its
+	// previous cursor instead of moving past what the stop cut short.
+	assert.deepEqual(h.skips(), { bookmarks: "sign_in_required" });
+	assert.deepEqual(h.states(), {});
+});
+
+test("a rate limit during the read that reaches a cap still marks the stream partial", async () => {
+	const app = new FakeWebApp({
+		respond: ({ operation }) =>
+			operation === "HomeTimeline"
+				? { status: 429, body: "Rate limit exceeded" }
+				: undefined,
+	});
+	app.onRequest = ({ operation }) => {
+		if (operation === "Bookmarks") {
+			queueMicrotask(() => app.request("HomeTimeline", { count: 20 }));
+		}
+	};
+	const h = harness(app, ["bookmarks"]);
+	await collectXBrowser(h.ctx, { ...FAST, viewPostCaps: { bookmarks: 1 } });
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	assert.deepEqual(h.skips(), { bookmarks: "source_rate_limited" });
+	assert.deepEqual(h.states(), {});
+});
+
 test("a redirect to the sign-in flow mid-run stops the run as sign-in required", async () => {
 	const app = new FakeWebApp();
 	app.onRequest = ({ operation, cursor }) => {
@@ -1603,9 +1640,9 @@ test("no profile link and no drawer control: the run stops and reports the layou
 	assert.match(text, /:id/);
 
 	// Dialog controls come first: the open drawer is what the run needs.
-	const dialog = controls.find((control) => control["id"] === "DialogClose");
+	const dialog = controls.find((control) => control["id"] === "app-bar-back");
 	assert.equal(dialog?.["s"], "d");
-	assert.equal(controls[0]?.["id"], "DialogClose");
+	assert.equal(controls[0]?.["id"], "app-bar-back");
 	// The running index and total are on every control line.
 	assert.deepEqual(
 		controls.map((control) => control["i"]),
@@ -1615,7 +1652,7 @@ test("no profile link and no drawer control: the run stops and reports the layou
 
 	// The accessible name that holds the handle is masked, then clipped to fit.
 	const account = controls.find(
-		(control) => control["id"] === "AvatarDrawerButton",
+		(control) => control["id"] === "DashButton_ProfileIcon_Link",
 	);
 	assert.ok(account);
 	assert.equal(account["x"], "true");
@@ -1766,9 +1803,16 @@ test("a very long path is shortened after the label, and the line marked cut", a
 
 test("a control whose minimal line cannot fit is counted as omitted", async () => {
 	const controls = syntheticControls(6);
-	const huge = controls.at(30);
-	assert.ok(huge);
-	huge.testid = "T".repeat(200);
+	const long = controls[30];
+	assert.ok(long);
+	// Allowlisted values can still be long enough that no line fits, so the
+	// omission path stays reachable without a page-controlled field.
+	long.ariaLabel = "Settings and privacy";
+	long.expanded = "false";
+	long.href = `${ORIGIN}/i/history/likes`;
+	long.role = "menuitemcheckbox";
+	long.tag = "button";
+	long.testid = "FloatingActionButtons_Tweet_Button";
 	const app = new FakeWebApp({ layoutControls: controls, sidebar: false });
 	const h = harness(app);
 	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
@@ -1831,6 +1875,60 @@ test("an accessible name is emitted only when it is a fixed navigation label", a
 	);
 	const text = report.lines.join("\n");
 	assert.doesNotMatch(text, /Jane Doe|1900000000000000001/);
+});
+
+test("no page-derived value reaches a diagnostic or a stop message unmasked", async () => {
+	const sentinel = "sentinelidentity1900000000000000001";
+	const app = new FakeWebApp({
+		layoutControls: [
+			{
+				ariaLabel: `Account menu for ${sentinel}`,
+				expanded: sentinel,
+				href: `${ORIGIN}/${sentinel}`,
+				role: sentinel,
+				tag: sentinel,
+				testid: `UserAvatar-Container-${sentinel}`,
+			},
+		],
+		sidebar: false,
+	});
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	const emitted = [
+		...lines,
+		...h.messages.map((message) => JSON.stringify(message)),
+	].join("\n");
+	assert.doesNotMatch(emitted, /sentinelidentity/i);
+	// Every page-derived field says only that a value existed.
+	const control = layoutReport(lines).controls[0];
+	assert.ok(control);
+	assert.equal(control["t"], "*");
+	assert.equal(control["id"], "*");
+	assert.equal(control["al"], "*");
+	assert.equal(control["r"], "*");
+	assert.equal(control["x"], "*");
+});
+
+test("an operation name is never written raw into a stop message", async () => {
+	const sentinel = "Sentinel1900000000000000001Operation";
+	const app = new FakeWebApp({
+		respond: ({ operation }) =>
+			operation === sentinel
+				? { status: 503, body: "Service Unavailable" }
+				: undefined,
+	});
+	const h = harness(app, ["bookmarks"]);
+	h.ctx.page = hookedPage(app, (script) => {
+		if (script.includes("/i/history")) {
+			app.request(sentinel, {});
+		}
+	});
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	const emitted = [
+		...lines,
+		...h.messages.map((message) => JSON.stringify(message)),
+	].join("\n");
+	assert.doesNotMatch(emitted, /Sentinel1900000000000000001Operation/i);
 });
 
 test("redactPathShape masks handles, ids and encoded identities but keeps X's route words", () => {

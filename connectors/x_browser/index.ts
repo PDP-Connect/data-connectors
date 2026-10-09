@@ -175,9 +175,8 @@ const SIGN_IN_PATH_RE =
 const NUMERIC_ID_RE = /^\d{1,30}$/;
 /**
  * The accessible names the layout diagnostic may emit verbatim: X's own fixed
- * navigation labels. Any other name is replaced by LAYOUT_ARIA_LABEL_MASK,
- * because an `aria-label` can carry a display name, a bare handle or a
- * numeric id.
+ * navigation labels. Any other name is replaced by LAYOUT_MASK, because an
+ * `aria-label` can carry a display name, a bare handle or a numeric id.
  */
 const LAYOUT_ARIA_LABELS = new Set([
 	"Back",
@@ -196,8 +195,93 @@ const LAYOUT_ARIA_LABELS = new Set([
 	"Search and explore",
 	"Settings and privacy",
 ]);
-/** What a control with any other accessible name reports instead. */
-const LAYOUT_ARIA_LABEL_MASK = "*";
+/**
+ * Tags, ARIA roles and `aria-expanded` states a control line may name
+ * verbatim. A page can put a handle or a numeric id in any attribute, so every
+ * other page-derived string is replaced by LAYOUT_MASK.
+ */
+const LAYOUT_TAGS = new Set(["a", "button", "div", "span", "nav", "header"]);
+const LAYOUT_ROLES = new Set([
+	"alert",
+	"banner",
+	"button",
+	"checkbox",
+	"combobox",
+	"complementary",
+	"contentinfo",
+	"dialog",
+	"figure",
+	"form",
+	"grid",
+	"gridcell",
+	"group",
+	"heading",
+	"img",
+	"link",
+	"list",
+	"listitem",
+	"log",
+	"main",
+	"marquee",
+	"menu",
+	"menubar",
+	"menuitem",
+	"menuitemcheckbox",
+	"menuitemradio",
+	"navigation",
+	"none",
+	"note",
+	"option",
+	"presentation",
+	"progressbar",
+	"radio",
+	"region",
+	"row",
+	"rowheader",
+	"search",
+	"searchbox",
+	"separator",
+	"slider",
+	"spinbutton",
+	"status",
+	"switch",
+	"tab",
+	"table",
+	"tablist",
+	"textbox",
+	"timer",
+	"toolbar",
+	"tree",
+	"treeitem",
+]);
+const LAYOUT_EXPANDED = new Set(["true", "false"]);
+/**
+ * Static X navigation test ids a control line may name. A test id can carry a
+ * display name, a handle or a numeric id, so only these checked-in values are
+ * ever written; any other id becomes LAYOUT_MASK.
+ */
+const LAYOUT_TEST_IDS = new Set([
+	"AppTabBar_Bookmarks_Link",
+	"AppTabBar_Communities_Link",
+	"AppTabBar_DirectMessage_Link",
+	"AppTabBar_Explore_Link",
+	"AppTabBar_Home_Link",
+	"AppTabBar_Lists_Link",
+	"AppTabBar_More_Menu",
+	"AppTabBar_Notifications_Link",
+	"AppTabBar_Profile_Link",
+	"BottomBar",
+	"DashButton_ProfileIcon_Link",
+	"FloatingActionButtons_Tweet_Button",
+	"SideNav_AccountSwitcher_Button",
+	"app-bar-back",
+	"logout",
+	"primaryColumn",
+	"settings",
+	"switcher",
+]);
+/** What any page-derived value that is not allowlisted reports instead. */
+const LAYOUT_MASK = "*";
 /**
  * Shortest accessible name (`al`) and redacted path (`p`) a cut control line
  * keeps. `al` is shortened first, then `p`, and the line is marked `cut:1`.
@@ -319,6 +403,20 @@ function isTimelineOperation(
 	operation: string,
 ): operation is TimelineOperation {
 	return TIMELINE_OPERATION_SET.has(operation);
+}
+
+/**
+ * The operations a stop message may name. The operation comes from the page's
+ * request path, so it can carry any `[A-Za-z0-9_]+` token; every other value
+ * is replaced by LAYOUT_MASK so no page-derived name reaches the log.
+ */
+const KNOWN_OPERATIONS: ReadonlySet<string> = new Set([
+	PROFILE_OPERATION,
+	...TIMELINE_OPERATIONS,
+	"HomeTimeline",
+]);
+function knownOperation(operation: string): string {
+	return KNOWN_OPERATIONS.has(operation) ? operation : LAYOUT_MASK;
 }
 
 /** Why the whole run stops at once. */
@@ -536,11 +634,28 @@ const pollSchema = z.object({
 });
 type PageReading = z.infer<typeof pollSchema>;
 
+/** The `via` values the page scripts report; anything else is not a script. */
+const HANDLE_VIAS = [
+	"drawer_following",
+	"none",
+	"profile_label",
+	"profile_link",
+] as const;
+const NAVIGATION_VIAS = [
+	"already_open",
+	"already_there",
+	"drawer",
+	"history",
+	"link",
+	"none",
+	"scroll",
+] as const;
+
 const handleSchema = z.object({
 	handle: z.string().nullable(),
-	via: z.string(),
+	via: z.enum(HANDLE_VIAS),
 });
-const navigationSchema = z.object({ via: z.string() });
+const navigationSchema = z.object({ via: z.enum(NAVIGATION_VIAS) });
 
 const layoutControlSchema = z.object({
 	tag: z.string(),
@@ -717,6 +832,8 @@ interface ViewOutcome {
 type DrawerState = "clicked" | "no_control" | "not_tried";
 
 interface Run {
+	/** The stream whose view is being read, or null between views. */
+	activeStream: PostStream | null;
 	aborted: number;
 	readonly ctx: XCollectContext;
 	readonly delayRange: readonly [number, number];
@@ -733,11 +850,21 @@ interface Run {
 	profile: ProfileRecord | null;
 	profileFailure: Failure | null;
 	stop: { readonly message: string; readonly reason: StopReason } | null;
+	/** Streams whose read overlapped a stop, so they did not finish clean. */
+	readonly uncleanStreams: Set<PostStream>;
 	readonly viewCaps: Readonly<Record<ViewName, number>>;
 }
 
 function stopRun(run: Run, reason: StopReason, message: string): void {
-	run.stop ??= { reason, message };
+	if (run.stop !== null) {
+		return;
+	}
+	run.stop = { reason, message };
+	// The stop belongs to the stream being read, so that stream is partial
+	// even if its own view ended at a cap; earlier streams keep their cursors.
+	if (run.activeStream !== null) {
+		run.uncleanStreams.add(run.activeStream);
+	}
 }
 
 /** Wait a random time inside the action delay range. */
@@ -797,23 +924,24 @@ function checkStatus(run: Run, entry: Observed): boolean {
 		run.aborted += 1;
 		return false;
 	}
+	const operation = knownOperation(entry.operation);
 	if (entry.status === 429) {
 		stopRun(
 			run,
 			"source_rate_limited",
-			`X answered ${entry.operation} with HTTP 429 (rate limit), so the run stopped at once.`,
+			`X answered ${operation} with HTTP 429 (rate limit), so the run stopped at once.`,
 		);
 	} else if (entry.status === 401) {
 		stopRun(
 			run,
 			"sign_in_required",
-			`X answered ${entry.operation} with HTTP 401, so the run stopped.`,
+			`X answered ${operation} with HTTP 401, so the run stopped.`,
 		);
 	} else {
 		stopRun(
 			run,
 			"collection_interrupted",
-			`X answered ${entry.operation} with HTTP ${entry.status}, so the run stopped at once.`,
+			`X answered ${operation} with HTTP ${entry.status}, so the run stopped at once.`,
 		);
 	}
 	return false;
@@ -831,7 +959,7 @@ function checkRefusal(run: Run, entry: Observed): boolean {
 	stopRun(
 		run,
 		"collection_interrupted",
-		`X answered ${entry.operation} with an error and no data${entry.errorCode === null ? "" : ` (code ${entry.errorCode})`}, so the run stopped.`,
+		`X answered ${knownOperation(entry.operation)} with an error and no data${entry.errorCode === null ? "" : ` (code ${entry.errorCode})`}, so the run stopped.`,
 	);
 	return false;
 }
@@ -1212,16 +1340,28 @@ export function redactPathShape(pathname: string): string {
 }
 
 /**
- * The accessible name a layout diagnostic may emit: one of X's fixed
- * navigation labels verbatim, or LAYOUT_ARIA_LABEL_MASK for any other name.
- * The actual name is never written, because an `aria-label` can carry a
- * display name, a bare handle or a numeric id.
+ * A page-derived value only when it is a member of `allowed`, else the mask.
+ * Every string the layout script reads passes through this or a route pattern,
+ * so no attribute can carry a name, a handle or an id into a line.
  */
-function layoutAriaLabel(value: string | null): string | null {
+function allowedValue(
+	value: string | null,
+	allowed: ReadonlySet<string>,
+): string | null {
 	if (value === null) {
 		return null;
 	}
-	return LAYOUT_ARIA_LABELS.has(value) ? value : LAYOUT_ARIA_LABEL_MASK;
+	return allowed.has(value) ? value : LAYOUT_MASK;
+}
+
+/**
+ * The accessible name a layout diagnostic may emit: one of X's fixed
+ * navigation labels verbatim, or LAYOUT_MASK for any other name. The actual
+ * name is never written, because an `aria-label` can carry a display name, a
+ * bare handle or a numeric id.
+ */
+function layoutAriaLabel(value: string | null): string | null {
+	return allowedValue(value, LAYOUT_ARIA_LABELS);
 }
 
 /**
@@ -1231,11 +1371,11 @@ function layoutAriaLabel(value: string | null): string | null {
  *   i   1-based position in the emitted order
  *   n   total controls the page offered
  *   s   "d" when the control is inside an open dialog, omitted for the page
- *   t   tag name
- *   id  data-testid
- *   al  fixed navigation label, or "*" for any other accessible name
- *   r   role
- *   x   aria-expanded
+ *   t   allowlisted tag, or "*"
+ *   id  allowlisted static test id, or "*"
+ *   al  allowlisted navigation label, or "*"
+ *   r   allowlisted ARIA role, or "*"
+ *   x   allowlisted aria-expanded, or "*"
  *   p   handle-free, id-free path shape
  *   cut 1 when `al` or `p` was shortened to fit
  * Null or absent fields are left out entirely.
@@ -1248,22 +1388,28 @@ function baseControlFields(
 	index: number,
 	total: number,
 ): LayoutControlFields {
-	const fields: LayoutControlFields = { i: index, n: total, t: control.tag };
+	const fields: LayoutControlFields = {
+		i: index,
+		n: total,
+		t: allowedValue(control.tag, LAYOUT_TAGS) ?? LAYOUT_MASK,
+	};
 	if (control.scope === "dialog") {
 		fields["s"] = "d";
 	}
 	if (control.testid !== null) {
-		fields["id"] = control.testid;
+		fields["id"] = allowedValue(control.testid, LAYOUT_TEST_IDS) ?? LAYOUT_MASK;
 	}
 	const ariaLabel = layoutAriaLabel(control.ariaLabel);
 	if (ariaLabel !== null) {
 		fields["al"] = ariaLabel;
 	}
-	if (control.role !== null) {
-		fields["r"] = control.role;
+	const role = allowedValue(control.role, LAYOUT_ROLES);
+	if (role !== null) {
+		fields["r"] = role;
 	}
-	if (control.expanded !== null) {
-		fields["x"] = control.expanded;
+	const expanded = allowedValue(control.expanded, LAYOUT_EXPANDED);
+	if (expanded !== null) {
+		fields["x"] = expanded;
 	}
 	if (control.path !== null) {
 		fields["p"] = redactPathShape(control.path);
@@ -1738,6 +1884,7 @@ async function finishStream(
 	const viewFailure =
 		outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
 	const unfinished =
+		run.uncleanStreams.has(stream) ||
 		outcomes.length < expectedViews ||
 		outcomes.some((outcome) => outcome.end === null);
 	let failure: Failure | null = viewFailure;
@@ -1912,6 +2059,7 @@ export async function collectXBrowser(
 	}
 
 	const run: Run = {
+		activeStream: null,
 		aborted: 0,
 		ctx,
 		delayRange: options.actionDelayMs ?? [
@@ -1930,6 +2078,7 @@ export async function collectXBrowser(
 		profile: null,
 		profileFailure: null,
 		stop: null,
+		uncleanStreams: new Set(),
 		viewCaps: { ...VIEW_POST_CAPS, ...options.viewPostCaps },
 	};
 	const installed = await evaluateInPage(
@@ -1990,7 +2139,11 @@ export async function collectXBrowser(
 		if (view.name === "originals") {
 			profileAttempted = true;
 		}
+		// Name the stream being read, so a stop observed now taints it and not
+		// a stream whose own walk already finished.
+		run.activeStream = view.stream;
 		const outcome = await readView(run, view, handle, plan);
+		run.activeStream = null;
 		if (view.name === "originals" && run.profile === null) {
 			run.profileFailure ??= outcome.failure;
 		}

@@ -104,6 +104,7 @@ function fakePage(
 	const pushed: string[] = [];
 	const events: string[] = [];
 	const scrolled: number[] = [];
+	const topped: number[] = [];
 	const makeControl = (control: FakeControl) => ({
 		closest: (selector: string) => {
 			if (selector === "article") {
@@ -190,7 +191,9 @@ function fakePage(
 		scrollBy: (_x: number, y: number) => {
 			scrolled.push(y);
 		},
-		scrollTo: () => undefined,
+		scrollTo: (_x: number, y: number) => {
+			topped.push(y);
+		},
 	};
 	window["window"] = window;
 	const context = vm.createContext(window);
@@ -202,7 +205,18 @@ function fakePage(
 		xhr.send();
 		xhr.finish(status, body);
 	};
-	return { Xhr, events, links, pushed, request, run, scrolled, sent, window };
+	return {
+		Xhr,
+		events,
+		links,
+		pushed,
+		request,
+		run,
+		scrolled,
+		sent,
+		topped,
+		window,
+	};
 }
 
 const graphql = (operation: string, variables = "{}", queryId = "AbC123") =>
@@ -591,6 +605,40 @@ test("the route fallback is skipped when the caller asks it to be", () => {
 		},
 	);
 	assert.deepEqual(linked.pushed, []);
+});
+
+test("a link lookup that finds nothing leaves the page untouched", () => {
+	// A miss scrolls nothing, so the reported "none" matches what it did and
+	// the caller does not have to wait as if the page had changed.
+	const miss = fakePage();
+	assert.deepEqual(miss.run(followLinkScript(["a"], "/i/history", "none")), {
+		via: "none",
+	});
+	assert.deepEqual(miss.scrolled, []);
+	assert.deepEqual(miss.topped, []);
+	// Being already there and following a link each report their own effect.
+	const there = fakePage({ path: "/i/history" });
+	assert.deepEqual(there.run(followLinkScript(["a"], "/i/history", "none")), {
+		via: "already_there",
+	});
+	assert.deepEqual(there.topped, []);
+	const linked = fakePage({
+		links: { 'a[href="/i/history"]': { href: "https://x.com/i/history" } },
+	});
+	assert.deepEqual(
+		linked.run(
+			followLinkScript(['a[href="/i/history"]'], "/i/history", "none"),
+		),
+		{ via: "link" },
+	);
+	assert.deepEqual(linked.topped, [0]);
+	// The route fallback is the only other navigation, and it resets too.
+	const fallback = fakePage();
+	assert.deepEqual(fallback.run(followLinkScript(["a"], "/i/history")), {
+		via: "history",
+	});
+	assert.deepEqual(fallback.topped, [0]);
+	assert.deepEqual(fallback.pushed, ["/i/history"]);
 });
 
 test("the drawer's own profile link is followed", () => {

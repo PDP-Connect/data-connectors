@@ -376,6 +376,10 @@ export type LinkFallback = "route" | "none";
  * listen for; whether x.com's router follows it was not checked. With "none"
  * it reports `{ via: "none" }` instead, so the caller can try opening the
  * narrow layout's drawer before falling back.
+ *
+ * It resets the window to the top only as part of a navigation it performs
+ * (a click or the history fallback), so every reported `via` matches what the
+ * script did and a miss leaves the page untouched.
  */
 export function followLinkScript(
 	selectors: readonly string[],
@@ -385,8 +389,6 @@ export function followLinkScript(
 	return `(() => {
 	const path = ${JSON.stringify(path)};
 	if (location.pathname === path) return { via: "already_there" };
-	// The links sit above the list; a walk leaves the window far below them.
-	window.scrollTo(0, 0);
 	for (const selector of ${JSON.stringify(selectors)}) {
 		let link = null;
 		try {
@@ -398,17 +400,24 @@ export function followLinkScript(
 			target = new URL(link.href, location.href);
 		} catch (error) {}
 		if (!target || target.origin !== location.origin || target.pathname !== path) continue;
+		// The links sit above the list; reset the window only when a link is
+		// actually followed, so a lookup that finds nothing changes nothing.
+		window.scrollTo(0, 0);
 		link.click();
 		return { via: "link" };
 	}
 	if (${JSON.stringify(fallback)} === "none") return { via: "none" };
 	try {
 		history.pushState({}, "", path);
-		window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
-		return { via: "history" };
 	} catch (error) {
 		return { via: "none" };
 	}
+	// The URL moved, so the page changed whatever the router does with it.
+	window.scrollTo(0, 0);
+	try {
+		window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+	} catch (error) {}
+	return { via: "history" };
 })()`;
 }
 
