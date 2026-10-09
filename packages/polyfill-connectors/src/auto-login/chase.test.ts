@@ -843,6 +843,73 @@ test("shell sign-out text on an OTP error page does not resolve assistance", asy
 	});
 });
 
+test("navigation during the sign-out visibility read does not resolve OTP assistance", { timeout: 5000 }, async () => {
+	const { page, state } = makeOtpPage({
+		otpInputs: 1,
+		promptTextVisible: true,
+		signedOut: true,
+	});
+	const completions: Array<{ id: string; status: string }> = [];
+	let cancelInteraction: (() => void) | undefined;
+	let visibilityRead: (() => void) | undefined;
+	const readFinished = new Promise<void>((resolve) => {
+		visibilityRead = resolve;
+	});
+	const guardedPage = new Proxy(page, {
+		get(target: Page, prop: string | symbol, receiver: unknown): unknown {
+			if (prop === "getByText") {
+				return (text: Parameters<Page["getByText"]>[0]): Locator => {
+					if (cancelInteraction && /Sign Out/i.test(String(text))) {
+						const signOut = {
+							first: (): Locator => signOut as Locator,
+							isVisible: async (): Promise<boolean> => {
+								assert.equal(state.url, DASHBOARD_URL);
+								await Promise.resolve();
+								state.url = "https://secure.chase.com/web/auth/otp";
+								visibilityRead?.();
+								return true;
+							},
+						};
+						return signOut as Locator;
+					}
+					return target.getByText(text);
+				};
+			}
+			return Reflect.get(target, prop, receiver) as unknown;
+		},
+	});
+	const run = ensureChaseSession({
+		completeAssistance: (id, status) => {
+			completions.push({ id, status });
+			return Promise.resolve();
+		},
+		context: makeOtpContext(guardedPage),
+		credentials: CHASE_TEST_CREDENTIALS,
+		page: guardedPage,
+		sendInteraction: (req) => {
+			state.url = DASHBOARD_URL;
+			return new Promise<InteractionResponse>((resolve) => {
+				cancelInteraction = () => resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "cancelled",
+					type: "INTERACTION_RESPONSE",
+				});
+			});
+		},
+	});
+	try {
+		await readFinished;
+		// Drain the visibility read's promise continuations before checking.
+		// Cancellation must come later, or it could mask a false completion.
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.deepEqual(completions, []);
+	} finally {
+		cancelInteraction?.();
+		await run.catch(() => undefined);
+	}
+	await assert.rejects(run, /chase_otp_not_provided/);
+});
+
 test("manual OTP wait never navigates the active OTP page", async () => {
 	await withChaseCredentials(async () => {
 		const { gotoCalls, page, state } = makeOtpPage({
