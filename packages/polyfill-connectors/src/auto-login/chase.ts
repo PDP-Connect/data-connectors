@@ -422,11 +422,13 @@ async function activePageShowsSignedInDashboard(page: Page): Promise<boolean> {
 	if (page.isClosed() || !isChaseDashboardPage(page)) {
 		return false;
 	}
-	return page
+	const signOutVisible = await page
 		.getByText(SIGN_OUT_TEXT)
 		.first()
 		.isVisible()
 		.catch((): boolean => false);
+	// The page may navigate or close while the visibility read is pending.
+	return signOutVisible && !page.isClosed() && isChaseDashboardPage(page);
 }
 
 type ChaseOtpOutcome =
