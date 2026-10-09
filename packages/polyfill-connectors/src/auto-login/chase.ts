@@ -223,10 +223,12 @@ async function recoverAfterPageClosed(
 	);
 }
 
-function usablePage(
-	context: BrowserContext,
-	preferred: Page,
-): Page | Promise<Page> {
+/**
+ * The page to probe on: the preferred page, else any page still open in the
+ * run's context. Never `context.newPage()`: the connector runtime reserves it
+ * (`installOwnedRunPagePolicy`), so a sign-in probe cannot open its own page.
+ */
+function usablePage(context: BrowserContext, preferred: Page): Page {
 	if (!preferred.isClosed()) {
 		return preferred;
 	}
@@ -234,7 +236,12 @@ function usablePage(
 	const openPage = context
 		.pages()
 		.find((candidate): boolean => !candidate.isClosed());
-	return openPage ?? context.newPage();
+	if (!openPage) {
+		throw new Error(
+			"chase_no_open_page: the run's page closed and no other page is open",
+		);
+	}
+	return openPage;
 }
 
 function isViableChaseOtpDigitCount(codeCount: number): boolean {
@@ -370,7 +377,7 @@ export async function probeChaseSession(
 	context: BrowserContext,
 	page: Page,
 ): Promise<{ loggedIn: boolean; page: Page }> {
-	const probePage = await usablePage(context, page);
+	const probePage = usablePage(context, page);
 	return {
 		loggedIn: await probeSession(probePage),
 		page: probePage,
@@ -405,37 +412,23 @@ function isChaseDashboardPage(page: Page): boolean {
 	}
 }
 
-async function closeProbePage(
-	page: Page,
-	isContextClosed: () => boolean,
-): Promise<void> {
-	try {
-		await page.close();
-	} catch (error) {
-		if (!page.isClosed() && !isContextClosed()) {
-			throw error;
-		}
+/**
+ * Whether the owner finished sign-in on the active page. Read-only on purpose:
+ * the run owns exactly one page (`installOwnedRunPagePolicy` rejects
+ * `context.newPage()`), and navigating that page would discard an OTP form the
+ * owner may still be using.
+ */
+async function activePageShowsSignedInDashboard(page: Page): Promise<boolean> {
+	if (page.isClosed() || !isChaseDashboardPage(page)) {
+		return false;
 	}
-}
-
-async function probeChaseSessionOnSeparatePage(
-	context: BrowserContext,
-): Promise<boolean> {
-	let contextClosed = false;
-	context.once("close", (): void => {
-		contextClosed = true;
-	});
-	const probePage = await context.newPage();
-	let loggedIn = false;
-	try {
-		if (!probePage.isClosed()) {
-			loggedIn =
-				(await probeSession(probePage)) && isChaseDashboardPage(probePage);
-		}
-	} finally {
-		await closeProbePage(probePage, (): boolean => contextClosed);
-	}
-	return loggedIn;
+	const signOutVisible = await page
+		.getByText(SIGN_OUT_TEXT)
+		.first()
+		.isVisible()
+		.catch((): boolean => false);
+	// The page may navigate or close while the visibility read is pending.
+	return signOutVisible && !page.isClosed() && isChaseDashboardPage(page);
 }
 
 type ChaseOtpOutcome =
@@ -444,7 +437,6 @@ type ChaseOtpOutcome =
 	| { type: "timeout" };
 
 async function waitForChaseOtpOutcome(
-	context: BrowserContext,
 	page: Page,
 	interaction: Promise<InteractionResponse>,
 ): Promise<ChaseOtpOutcome> {
@@ -464,7 +456,7 @@ async function waitForChaseOtpOutcome(
 			return outcome;
 		}
 		if (hasLeftChaseAuthFlow(page)) {
-			const loggedIn = await probeChaseSessionOnSeparatePage(context);
+			const loggedIn = await activePageShowsSignedInDashboard(page);
 			if (!loggedIn) {
 				continue;
 			}
@@ -509,7 +501,7 @@ async function submitChaseOtp({
 		},
 		timeout_seconds: 600,
 	});
-	const outcome = await waitForChaseOtpOutcome(context, page, interaction);
+	const outcome = await waitForChaseOtpOutcome(page, interaction);
 	if (outcome.type === "manual") {
 		await completeAssistance?.(requestId, "resolved");
 		return { loggedIn: true, page: outcome.page };

@@ -2835,17 +2835,17 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/auto-login/chase.ts",
-			line: 257,
+			line: 264,
 			column: 30,
 			category: "ordered_browser_interaction",
 			note: "Promise.all(): sequential Playwright action against the shared page/context",
 		},
 		{
 			path: "src/auto-login/chase.ts",
-			line: 457,
+			line: 447,
 			column: 19,
 			category: "bounded_retry_polling",
-			note: "probeChaseSessionOnSeparatePage(): retry/poll loop gated on Chase leaving the auth flow",
+			note: "Promise.race(): poll loop waiting for the console OTP reply or the owner finishing sign-in in the page",
 		},
 		{
 			path: "src/auto-login/chatgpt.ts",

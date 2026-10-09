@@ -8,6 +8,7 @@ import type {
 	InteractionRequest,
 	InteractionResponse,
 } from "../connector-runtime.ts";
+import { installOwnedRunPagePolicy } from "../connector-runtime.ts";
 import {
 	classifyChaseBrowserSurface,
 	ensureChaseSession,
@@ -86,20 +87,29 @@ function makeContext(pages: Page[], newPage: Page): BrowserContext {
 	return fake as BrowserContext;
 }
 
-test("probeChaseSession opens a fresh page before probing when the OTP page was closed", async () => {
+test("probeChaseSession fails by name, without opening a page, when the run's page closed and no other page is open", async () => {
 	const closed = makePage({ closed: true, loggedIn: false });
 	const replacement = makePage({ closed: false, loggedIn: true });
-	const context = makeContext([], replacement.page);
+	let newPageCalls = 0;
+	const context = {
+		newPage: (): Promise<Page> => {
+			newPageCalls += 1;
+			return Promise.resolve(replacement.page);
+		},
+		pages: (): Page[] => [],
+	} as unknown as BrowserContext;
 
-	const result = await probeChaseSession(context, closed.page);
+	await assert.rejects(
+		probeChaseSession(context, closed.page),
+		/chase_no_open_page/,
+	);
 
-	assert.equal(result.loggedIn, true);
-	assert.equal(result.page, replacement.page);
+	assert.equal(newPageCalls, 0);
 	assert.deepEqual(closed.gotoCalls, []);
-	assert.deepEqual(replacement.gotoCalls, [DASHBOARD_URL]);
+	assert.deepEqual(replacement.gotoCalls, []);
 });
 
-test("probeChaseSession reuses an existing open page before creating a new one", async () => {
+test("probeChaseSession reuses an existing open page when the run's page closed", async () => {
 	const closed = makePage({ closed: true, loggedIn: false });
 	const existing = makePage({ closed: false, loggedIn: true });
 	const unusedNewPage = makePage({ closed: false, loggedIn: false });
@@ -723,6 +733,66 @@ test("manual entry in the host browser resolves the pending OTP interaction", as
 	});
 });
 
+test("manual OTP entry resolves under the runtime's owned-run-page policy", async () => {
+	await withChaseCredentials(async () => {
+		const { page, state } = makeOtpPage({
+			otpInputs: 1,
+			promptTextVisible: true,
+			signedOut: true,
+		});
+		// The real policy runInBrowser installs: context.newPage() rejects.
+		const listeners = new Set<unknown>();
+		const context = {
+			browser: () => null,
+			newPage: (): Promise<Page> => Promise.resolve(makeOtpProbePage(state)),
+			off: (_event: string, listener: unknown) => {
+				listeners.delete(listener);
+				return context;
+			},
+			on: (_event: string, listener: unknown) => {
+				listeners.add(listener);
+				return context;
+			},
+			once: () => context,
+			pages: (): Page[] => [page],
+		};
+		const stopPolicy = await installOwnedRunPagePolicy(
+			context as unknown as BrowserContext,
+			page,
+		);
+		const requests: InteractionRequest[] = [];
+		const completions: Array<{ id: string; status: string }> = [];
+		try {
+			const result = await ensureChaseSession({
+				completeAssistance: (id, status) => {
+					completions.push({ id, status });
+					return Promise.resolve();
+				},
+				context: context as unknown as BrowserContext,
+				credentials: CHASE_TEST_CREDENTIALS,
+				page,
+				sendInteraction: (req) => {
+					requests.push(req);
+					// The owner types the code into the streamed page; Chase lands
+					// on the dashboard. The console reply never arrives.
+					setTimeout(() => {
+						state.signedOut = false;
+						state.url = DASHBOARD_URL;
+					}, 10);
+					return new Promise<InteractionResponse>(() => undefined);
+				},
+			});
+			assert.equal(result, true);
+		} finally {
+			await stopPolicy();
+		}
+		assert.equal(requests.length, 1);
+		assert.deepEqual(completions, [
+			{ id: requests[0]?.request_id ?? "", status: "resolved" },
+		]);
+	});
+});
+
 test("shell sign-out text on an OTP error page does not resolve assistance", async () => {
 	await withChaseCredentials(async () => {
 		const fake = makeOtpPage({
@@ -771,6 +841,73 @@ test("shell sign-out text on an OTP error page does not resolve assistance", asy
 		);
 		assert.deepEqual(completions, []);
 	});
+});
+
+test("navigation during the sign-out visibility read does not resolve OTP assistance", { timeout: 5000 }, async () => {
+	const { page, state } = makeOtpPage({
+		otpInputs: 1,
+		promptTextVisible: true,
+		signedOut: true,
+	});
+	const completions: Array<{ id: string; status: string }> = [];
+	let cancelInteraction: (() => void) | undefined;
+	let visibilityRead: (() => void) | undefined;
+	const readFinished = new Promise<void>((resolve) => {
+		visibilityRead = resolve;
+	});
+	const guardedPage = new Proxy(page, {
+		get(target: Page, prop: string | symbol, receiver: unknown): unknown {
+			if (prop === "getByText") {
+				return (text: Parameters<Page["getByText"]>[0]): Locator => {
+					if (cancelInteraction && /Sign Out/i.test(String(text))) {
+						const signOut = {
+							first: (): Locator => signOut as Locator,
+							isVisible: async (): Promise<boolean> => {
+								assert.equal(state.url, DASHBOARD_URL);
+								await Promise.resolve();
+								state.url = "https://secure.chase.com/web/auth/otp";
+								visibilityRead?.();
+								return true;
+							},
+						};
+						return signOut as Locator;
+					}
+					return target.getByText(text);
+				};
+			}
+			return Reflect.get(target, prop, receiver) as unknown;
+		},
+	});
+	const run = ensureChaseSession({
+		completeAssistance: (id, status) => {
+			completions.push({ id, status });
+			return Promise.resolve();
+		},
+		context: makeOtpContext(guardedPage),
+		credentials: CHASE_TEST_CREDENTIALS,
+		page: guardedPage,
+		sendInteraction: (req) => {
+			state.url = DASHBOARD_URL;
+			return new Promise<InteractionResponse>((resolve) => {
+				cancelInteraction = () => resolve({
+					request_id: req.request_id ?? "test_interaction",
+					status: "cancelled",
+					type: "INTERACTION_RESPONSE",
+				});
+			});
+		},
+	});
+	try {
+		await readFinished;
+		// Drain the visibility read's promise continuations before checking.
+		// Cancellation must come later, or it could mask a false completion.
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.deepEqual(completions, []);
+	} finally {
+		cancelInteraction?.();
+		await run.catch(() => undefined);
+	}
+	await assert.rejects(run, /chase_otp_not_provided/);
 });
 
 test("manual OTP wait never navigates the active OTP page", async () => {
@@ -878,6 +1015,20 @@ test("console OTP reply wins when it arrives during the dashboard probe", async 
 						});
 						await new Promise((resolve) => setTimeout(resolve, 20));
 						return result;
+					};
+				}
+				if (prop === "getByText") {
+					return (text: Parameters<Page["getByText"]>[0]): Locator => {
+						// The reply lands while the connector reads the signed-in page.
+						if (requests.length > 0 && /Sign Out/i.test(String(text))) {
+							resolveInteraction?.({
+								data: { code: "123456" },
+								request_id: requests[0]?.request_id ?? "test_interaction",
+								status: "success",
+								type: "INTERACTION_RESPONSE",
+							});
+						}
+						return target.getByText(text);
 					};
 				}
 				return Reflect.get(target, prop, receiver) as unknown;
