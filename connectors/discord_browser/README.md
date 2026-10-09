@@ -95,15 +95,24 @@ Constants in `index.ts`:
   and the requested range is walked afresh, skipping only instants an earlier
   completed walk already proved. A server's cursor is written only when a
   single walk covered the whole requested range from newest to the lower bound
-  with every group readable and no refusal, cap or stop. Any other ending
-  (interruption, an unreadable group, the message or request cap, or the site's
-  own offset ceiling excepted below) writes no new coverage and leaves the
-  previous trusted cursor exactly as it was, so the next run reads that server
-  from its newest message again. The newest id never moves backward. STATE
-  holds ids, instants and offsets only.
+  with every group readable and no refusal, cap or stop. A group whose hit has
+  no usable message id or author id is unreadable: the walk cannot tell whose
+  message it is, so it neither emits it nor treats it as someone else's, and it
+  withholds that walk's coverage. A well-formed author id that differs from the
+  owner's is the only proof that drops a hit, and it is dropped on that proof.
+  Any other ending (interruption, an unreadable group, the message or request
+  cap, or the site's own offset ceiling excepted below) writes no new coverage
+  and leaves the previous trusted cursor exactly as it was, so the next run
+  reads that server from its newest message again. The newest id never moves
+  backward. STATE holds ids, instants and offsets only.
 - A server whose walk cannot finish inside one run's budget is read again from
   its newest message on every later run and does not progress past that budget.
-  The binding limits are `MAX_MESSAGES_PER_RUN` (1,000) and
+  Every server a run attempts moves to the back of the queue, finished or not,
+  so a server that cannot finish is retried only after every other server has
+  been attempted: no server is starved by one that never completes. The
+  accepted cost is that an over-budget server is re-read from its newest
+  message whenever its turn comes and never progresses past the budget. The
+  binding limits are `MAX_MESSAGES_PER_RUN` (1,000) and
   `MAX_REQUESTS_PER_RUN` (100); at Discord's fixed 25 results per search page,
   1,000 messages is 40 pages. A server with more than 1,000 messages in the
   90-day window therefore stays at its newest 1,000 records. Re-emitting
@@ -150,8 +159,9 @@ no header name or value:
 | `ms` | milliseconds the capture waited before the headers appeared |
 
 A `[discord_browser-diagnostic] search_hits_unreadable` line reports a search
-page with a group that had no usable id: `count`, the page's `offset`, and the
-raw result `positions` it left blank. Consecutive positions are packed as
+page with a group whose hit had no usable message id or author id: `count`, the
+page's `offset`, and the raw result `positions` it left blank. Consecutive
+positions are packed as
 `start-end`, and a page with many positions is split across as many lines as
 the phone host's 150-character budget needs, so no line is cut mid-field. That
 count does not stop pagination, but it withholds that walk's coverage: the

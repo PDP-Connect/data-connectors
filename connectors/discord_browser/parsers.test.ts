@@ -210,15 +210,101 @@ test("a message with no timestamp is dated by its id", () => {
 	const parsed = parseSearchPage(
 		{
 			total_results: 1,
-			messages: [[{ id: "1551201258700800013", hit: true, content: "" }]],
+			messages: [
+				[
+					{
+						id: "1551201258700800013",
+						hit: true,
+						content: "",
+						author: { id: OWNER },
+					},
+				],
+			],
 		},
 		SEARCHED,
 	);
 	assert.ok(parsed.ok);
 	assert.equal(parsed.hits[0]?.record.timestamp, "2026-09-20T12:00:00.000Z");
 	assert.equal(parsed.hits[0]?.record.content, null);
-	assert.equal(parsed.hits[0]?.authorId, null);
+	assert.equal(parsed.hits[0]?.authorId, OWNER);
 	assertValid("messages", parsed.hits[0]?.record);
+});
+
+test("a hit without a usable author id is unreadable, not a silent skip", () => {
+	for (const author of [
+		undefined,
+		null,
+		{},
+		{ id: "bad" },
+		{ id: 5 },
+		{ id: null },
+		"sample.user",
+	]) {
+		const message: Record<string, unknown> = {
+			content: "Synthetic message.",
+			hit: true,
+			id: "1551201258700800013",
+			timestamp: "2026-09-20T12:00:00.000Z",
+		};
+		if (author !== undefined) message.author = author;
+		const parsed = parseSearchPage(
+			{ total_results: 1, messages: [[message]] },
+			SEARCHED,
+		);
+		assert.ok(parsed.ok);
+		assert.equal(parsed.hits.length, 0, JSON.stringify(author));
+		assert.equal(parsed.unreadable, 1, JSON.stringify(author));
+		assert.deepEqual(parsed.unreadablePositions, [0], JSON.stringify(author));
+	}
+	// A well-formed author id that differs is a readable hit the caller can
+	// identify as someone else's and drop with proof.
+	const other = parseSearchPage(
+		{
+			total_results: 1,
+			messages: [
+				[
+					{
+						author: { id: "735204448665600002" },
+						hit: true,
+						id: "1551201258700800013",
+					},
+				],
+			],
+		},
+		SEARCHED,
+	);
+	assert.ok(other.ok);
+	assert.equal(other.unreadable, 0);
+	assert.equal(other.hits[0]?.authorId, "735204448665600002");
+});
+
+test("a group with two marked hits is unreadable", () => {
+	const owner = { author: { id: OWNER }, hit: true, id: "1551201258700800013" };
+	const other = {
+		author: { id: "735204448665600002" },
+		hit: true,
+		id: "1550431687802880011",
+	};
+	// Picking either marked hit would be a guess, so the group is unreadable.
+	const ambiguous = parseSearchPage(
+		{ total_results: 1, messages: [[other, owner]] },
+		SEARCHED,
+	);
+	assert.ok(ambiguous.ok);
+	assert.equal(ambiguous.hits.length, 0);
+	assert.equal(ambiguous.unreadable, 1);
+
+	// One marked hit with an unmarked context message still reads.
+	const clear = parseSearchPage(
+		{
+			total_results: 1,
+			messages: [[{ ...other, hit: false }, owner]],
+		},
+		SEARCHED,
+	);
+	assert.ok(clear.ok);
+	assert.equal(clear.unreadable, 0);
+	assert.equal(clear.hits[0]?.id, owner.id);
 });
 
 test("a search answer of another shape is refused", () => {

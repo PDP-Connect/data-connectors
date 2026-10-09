@@ -50,6 +50,8 @@
  * readable walk that reached the range's end writes coverage; a walk cut short
  * by an interruption, an unreadable group, the budget or a refusal writes
  * nothing, so that server is read from its newest message again next run.
+ * Every server attempted in a run, finished or not, moves to the back of that
+ * queue, so no server is retried before every other has been attempted.
  *
  * Tested surfaces (as of 2026-10-08): the header capture, the /shop
  * navigation that triggers it, and one 200 answer from each of the four
@@ -1039,6 +1041,9 @@ export async function collectDiscordBrowser(
 			server: { id: serverId, name: serverNames.get(serverId) ?? null },
 			untilMs: Number.isNaN(untilParsed) ? null : untilParsed,
 		});
+		// Every attempted server moves to the back, complete or not, so a walk
+		// that did not finish cannot starve the servers that never ran.
+		searched.push(serverId);
 		// Only a completed walk writes coverage. Any other ending leaves the
 		// previous trusted cursor exactly as it was.
 		if (outcome.kind === "complete") cursors[serverId] = outcome.cursor;
@@ -1051,7 +1056,6 @@ export async function collectDiscordBrowser(
 			limitReached = true;
 			break;
 		}
-		searched.push(serverId);
 		if (outcome.kind === "skipped") {
 			skippedServers += 1;
 			refusals = outcome.refused ? refusals + 1 : 0;
@@ -1064,7 +1068,8 @@ export async function collectDiscordBrowser(
 		}
 	}
 
-	// Searched servers go to the back; a server stopped part way stays in front.
+	// Every server attempted this run goes to the back, finished or not; the
+	// servers never reached keep their place at the front and run first.
 	const searchedSet = new Set(searched);
 	const nextQueue = [
 		...queue.filter((id) => !searchedSet.has(id)),

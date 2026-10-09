@@ -834,13 +834,14 @@ test("one short 429 is waited out once; a second ends the run", async () => {
 		[["messages", "discord_rate_limited"]],
 	);
 	// The first page is kept, but an interrupted walk writes no coverage: the
-	// next run starts over from the newest message.
+	// next run starts over from the newest message. The server that stopped
+	// part way moves behind the one that never ran.
 	assert.equal(h.of("messages").length, 25);
 	const state = h.cursor("messages") as {
 		queue: string[];
 		servers: Record<string, unknown>;
 	};
-	assert.deepEqual(state.queue, [SERVER_A, SERVER_B]);
+	assert.deepEqual(state.queue, [SERVER_B, SERVER_A]);
 	assert.equal(state.servers[SERVER_A], undefined);
 	assert.equal(state.servers[SERVER_B], undefined);
 });
@@ -1072,7 +1073,10 @@ test("the unreadable-position report fits the line budget at a full page", async
 	);
 	assert.ok(unreadable.length >= 2, String(unreadable.length));
 	for (const line of unreadable) {
-		assert.ok(line.length <= DIAGNOSTIC_LINE_MAX_CHARS, `${line.length}: ${line}`);
+		assert.ok(
+			line.length <= DIAGNOSTIC_LINE_MAX_CHARS,
+			`${line.length}: ${line}`,
+		);
 	}
 });
 
@@ -1286,6 +1290,61 @@ test("an unreadable group withholds coverage so the next run recovers it", async
 	);
 });
 
+test("a hit whose author id is unusable withholds the walk for its server", async () => {
+	// Each malformed author makes its group unreadable: the walk cannot prove
+	// the message is someone else's, so it must not claim coverage.
+	const variants: Array<[string, unknown]> = [
+		["author missing", undefined],
+		["author null", null],
+		["author empty", {}],
+		["id malformed", { id: "bad" }],
+		["id numeric", { id: 5 }],
+		["id null", { id: null }],
+		["author string", "sample.user"],
+	];
+	for (const [name, author] of variants) {
+		const all = messagesBy(OWNER, 50);
+		const groupsAt = (offset: number) =>
+			all.slice(offset, offset + SEARCH_PAGE).map((message, index) => {
+				if (offset + index !== 3) return [message];
+				return author === undefined
+					? [{ hit: true, id: message.id, timestamp: message.timestamp }]
+					: [{ ...message, author }];
+			});
+		const broken = fakeDiscord({
+			respond: discordApi({ [SERVER_A]: all }, (path) => {
+				const url = new URL(path, ORIGIN);
+				if (!url.pathname.endsWith("/messages/search")) return undefined;
+				const offset = Number(url.searchParams.get("offset"));
+				return {
+					status: 200,
+					body: { total_results: all.length, messages: groupsAt(offset) },
+				};
+			}),
+		});
+		const first = harness(broken, ["messages"]);
+		await collectDiscordBrowser(first.ctx, fast());
+		assert.equal(first.of("messages").length, 49, name);
+		// The unreadable author withholds coverage: no cursor for the server.
+		const state = first.cursor("messages") as {
+			servers: Record<string, unknown>;
+		};
+		assert.equal(state.servers[SERVER_A], undefined, name);
+
+		// A healthy run over the same state recovers the missing message.
+		const healthy = fakeDiscord({ respond: discordApi({ [SERVER_A]: all }) });
+		const second = harness(healthy, ["messages"], {
+			messages: first.cursor("messages"),
+		});
+		await collectDiscordBrowser(second.ctx, fast());
+		assert.equal(second.of("messages").length, 50, name);
+		assert.ok(
+			second.of("messages").some((record) => String(record.id) === all[3]?.id),
+			name,
+		);
+	}
+});
+
 test("an interrupted disjoint expansion cannot omit the uncovered interval", async () => {
 	const listing = messagesBy(OWNER, 90, NOW - DAY_MS, DAY_MS);
 	const servers = { [SERVER_A]: listing };
@@ -1490,7 +1549,7 @@ test("the message limit writes no coverage; a later run re-reads and completes",
 		],
 	);
 	assert.deepEqual(first.cursor("messages"), {
-		queue: [SERVER_A, SERVER_B],
+		queue: [SERVER_B, SERVER_A],
 		servers: {},
 	});
 
@@ -1504,7 +1563,7 @@ test("the message limit writes no coverage; a later run re-reads and completes",
 	assert.equal(second.of("messages").length, 73);
 	const afterSecond = second.cursor("messages");
 	assert.deepEqual(afterSecond, {
-		queue: [SERVER_A, SERVER_B],
+		queue: [SERVER_B, SERVER_A],
 		servers: {
 			[SERVER_A]: {
 				newest_id: servers[SERVER_A]?.[0]?.id,
@@ -1593,6 +1652,80 @@ test("at most 25 servers are searched in a run; the queue carries the rest", asy
 	assert.equal(second.of("messages").length, 5);
 	// Every server has now been searched, so the rotation is not a shortfall.
 	assert.deepEqual(second.skips(), []);
+});
+
+test("a server over budget moves to the back so every other is read first", async () => {
+	const big = messagesBy(OWNER, 3000);
+	const smallB = messagesBy(OWNER, 3, NOW - 5 * DAY_MS);
+	const smallC = messagesBy(OWNER, 3, NOW - 6 * DAY_MS);
+	const servers = {
+		[SERVER_A]: big,
+		[SERVER_B]: smallB,
+		[SERVER_C]: smallC,
+	};
+
+	// Run 1: A exhausts the message budget and leaves no coverage. Its walk
+	// did not finish, so it moves behind the servers that never ran.
+	const one = fakeDiscord({ respond: discordApi(servers) });
+	const first = harness(one, ["messages"]);
+	await collectDiscordBrowser(first.ctx, fast());
+	assert.deepEqual(
+		[...new Set(searches(one).map((call) => call.path.split("/")[2]))],
+		[SERVER_A],
+	);
+	assert.equal(first.of("messages").length, MAX_MESSAGES_PER_RUN);
+	assert.deepEqual((first.cursor("messages") as { queue: string[] }).queue, [
+		SERVER_B,
+		SERVER_C,
+		SERVER_A,
+	]);
+
+	// Run 2: both small servers are read and completed before A is retried.
+	const two = fakeDiscord({ respond: discordApi(servers) });
+	const second = harness(two, ["messages"], {
+		messages: first.cursor("messages"),
+	});
+	await collectDiscordBrowser(second.ctx, fast());
+	const order = searches(two).map((call) => call.path.split("/")[2]);
+	assert.deepEqual(order.slice(0, 2), [SERVER_B, SERVER_C]);
+	assert.ok(order.indexOf(SERVER_A) > order.indexOf(SERVER_C));
+	const expected: Record<string, number> = {
+		[SERVER_B]: smallB.length,
+		[SERVER_C]: smallC.length,
+	};
+	for (const server of [SERVER_B, SERVER_C]) {
+		const ids = new Set(
+			second
+				.of("messages")
+				.filter((record) => record.server_id === server)
+				.map((record) => String(record.id)),
+		);
+		assert.equal(ids.size, expected[server], server);
+	}
+	const afterSecond = second.cursor("messages") as {
+		queue: string[];
+		servers: Record<string, unknown>;
+	};
+	assert.deepEqual(afterSecond.queue, [SERVER_B, SERVER_C, SERVER_A]);
+	assert.equal(afterSecond.servers[SERVER_A], undefined);
+	assert.equal(afterSecond.servers[SERVER_B] !== undefined, true);
+	assert.equal(afterSecond.servers[SERVER_C] !== undefined, true);
+
+	// Run 3: A is retried after the small servers again and still makes no
+	// progress past the budget; the small servers stop at their known heads.
+	const three = fakeDiscord({ respond: discordApi(servers) });
+	const third = harness(three, ["messages"], { messages: afterSecond });
+	await collectDiscordBrowser(third.ctx, fast());
+	const thirdOrder = searches(three).map((call) => call.path.split("/")[2]);
+	assert.deepEqual(thirdOrder.slice(0, 2), [SERVER_B, SERVER_C]);
+	assert.ok(thirdOrder.indexOf(SERVER_A) > thirdOrder.indexOf(SERVER_C));
+	assert.equal(third.of("messages").length, MAX_MESSAGES_PER_RUN);
+	assert.equal(
+		(third.cursor("messages") as { servers: Record<string, unknown> }).servers[
+			SERVER_A
+		],
+		undefined,
+	);
 });
 
 test("a host that drops STATE on a skip gets deferred work as progress", async () => {
