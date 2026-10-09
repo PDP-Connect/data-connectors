@@ -24,6 +24,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["chatgpt", "chatgpt"],
     ["claude_code", "claude-code"],
     ["codex", "codex"],
+    ["discord_browser", "discord-browser"],
     ["doordash", "doordash"],
     [
       "github",
@@ -78,6 +79,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["venmo", "venmo"],
     ["whatsapp", "whatsapp"],
     ["wholefoods", "wholefoods"],
+    ["x_browser", "x-browser"],
     ["whoop", "whoop"],
     ["ynab", "ynab"],
     ["youtube", "youtube"],

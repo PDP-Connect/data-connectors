@@ -1,0 +1,10 @@
+{
+	"errors": [
+		{
+			"message": "Synthetic: rate limit exceeded.",
+			"code": 88,
+			"kind": "Validation",
+			"name": "ApiError"
+		}
+	]
+}

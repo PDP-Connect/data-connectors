@@ -155,6 +155,23 @@
 		}
 	},
 	{
+		"file": "discord_browser.json",
+		"manifest": {
+			"connector_key": "discord-browser",
+			"reason_display_messages": {
+				"discord_sign_in_required": "Discord needs you to sign in again before this can continue.",
+				"discord_verification_required": "Discord asked for a captcha or an account check, or refused a request, so collection stopped without retrying. Open Discord yourself and make sure your account is in good standing before running this again.",
+				"discord_rate_limited": "Discord asked us to slow down, so collection stopped early to protect your account. What was collected is saved. Wait at least a day before running this again.",
+				"discord_client_request_not_seen": "The Discord app didn't make a request of its own in time, so nothing could be read safely. Nothing was collected. Discord may have changed its site; please report this if it keeps happening.",
+				"discord_run_limit_reached": "This run reached its safety limit of about 1,000 messages and 25 servers. Everything collected is saved; the next run reads the range again from your newest message and the host skips what it already has.",
+				"discord_servers_skipped": "Some of your servers couldn't be searched this time, usually because search is switched off there or Discord's search index wasn't ready. Everything else was collected normally.",
+				"discord_source_unreadable": "Discord answered in a form this connector doesn't recognise, so nothing more was read. Discord may have changed its site; please report this rather than retrying.",
+				"discord_records_unreadable": "Some entries in Discord's answer couldn't be read and were skipped. Everything else was collected normally.",
+				"discord_collection_interrupted": "Discord stopped answering partway through, so some data is missing. What was collected is saved, and the next run reads the range again from your newest message."
+			}
+		}
+	},
+	{
 		"file": "doordash.json",
 		"manifest": {
 			"connector_key": "doordash",
@@ -639,6 +656,22 @@
 				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 				"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
 				"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
+			}
+		}
+	},
+	{
+		"file": "x_browser.json",
+		"manifest": {
+			"connector_key": "x-browser",
+			"reason_display_messages": {
+				"collection_interrupted": "X stopped answering normally partway through, so this run stopped straight away. What was already read is saved. Wait a while, then run it again.",
+				"list_end_unconfirmed": "X stopped loading more before the end of the list, so some older items may be missing. What was read is saved.",
+				"records_unreadable": "Some posts couldn't be read and were skipped. Everything else was collected normally.",
+				"run_budget_reached": "This run reached its own limit on how many posts it reads from X in one go, to protect your daily reading allowance. Run it again tomorrow for the rest.",
+				"run_stopped_early": "The run stopped before it got to this part. Nothing is wrong with it. Run it again later.",
+				"sign_in_required": "X needs you to sign in again before this can continue.",
+				"source_rate_limited": "X asked this connector to slow down, so the run stopped straight away. What was already read is saved. Wait a day before running it again.",
+				"source_unreadable": "X showed a page this connector doesn't recognise, so this part wasn't read. X may have changed its site. Please report this rather than retrying."
 			}
 		}
 	},
