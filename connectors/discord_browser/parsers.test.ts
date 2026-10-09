@@ -236,7 +236,14 @@ test("a search answer of another shape is refused", () => {
 		{ total_results: 2, messages: [[{ hit: true }], "x"] },
 		SEARCHED,
 	);
-	assert.deepEqual(parsed, { ok: true, hits: [], total: 2, unreadable: 2 });
+	assert.deepEqual(parsed, {
+		ok: true,
+		groups: 2,
+		hits: [],
+		total: 2,
+		unreadable: 2,
+		unreadablePositions: [0, 1],
+	});
 });
 
 test("captcha and account-check payloads are recognised", () => {

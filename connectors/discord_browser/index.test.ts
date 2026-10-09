@@ -30,7 +30,7 @@ import {
 	REQUEST_PAUSE_MAX_MS,
 	REQUEST_PAUSE_MIN_MS,
 } from "./index.ts";
-import { apiGetExpression } from "./page-script.ts";
+import { apiGetExpression, WATCH_EXPRESSION } from "./page-script.ts";
 import { validateRecord } from "./schemas.ts";
 
 const ORIGIN = "https://discord.com";
@@ -45,6 +45,8 @@ const SERVER_A = "797751587635200003";
 const SERVER_B = "970693646745600004";
 const SERVER_C = "1175889484185600005";
 const ALL = ["profile", "servers", "connections", "messages"];
+/** Discord's fixed results per search page. */
+const SEARCH_PAGE = 25;
 
 const fixture = (name: string): unknown =>
 	JSON.parse(
@@ -135,6 +137,8 @@ interface ApiCall {
 interface FakeOptions {
 	/** The API version in the client's own request path. */
 	apiVersion?: string;
+	/** When the stand-in client sends its own authorized request. */
+	clientRequestAt?: "nudge" | "watch";
 	respond?: Responder;
 	signedIn?: () => boolean;
 	startUrl?: string;
@@ -156,6 +160,7 @@ function fakeDiscord(options: FakeOptions = {}) {
 	const visits: string[] = [];
 	const returned: string[] = [];
 	let clientRequests = 0;
+	let watchClientRequestSent = false;
 	let context: vm.Context;
 
 	const hostFetch = async (
@@ -288,6 +293,16 @@ function fakeDiscord(options: FakeOptions = {}) {
 			assert.equal(typeof expression, "string");
 			assert.equal(isolatedContext, false, "evaluate in the page's own world");
 			const value = await vm.runInContext(String(expression), context);
+			// The client can send its own request as soon as the watch installed
+			// its hooks, with no navigation from the connector.
+			if (
+				options.clientRequestAt === "watch" &&
+				!watchClientRequestSent &&
+				String(expression) === WATCH_EXPRESSION
+			) {
+				watchClientRequestSent = true;
+				vm.runInContext("__clientRequest()", context);
+			}
 			// A result crosses to the host as JSON, as on PageShim.
 			const text = JSON.stringify(value) ?? "null";
 			returned.push(text);
@@ -512,8 +527,14 @@ test("a run reads the four streams with the client's own headers", async () => {
 	assert.deepEqual(h.cursor("messages"), {
 		queue: [SERVER_A, SERVER_B],
 		servers: {
-			[SERVER_A]: { newest_id: h.of("messages")[0]?.id },
-			[SERVER_B]: { newest_id: null },
+			[SERVER_A]: {
+				newest_id: h.of("messages")[0]?.id,
+				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+			},
+			[SERVER_B]: {
+				newest_id: null,
+				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+			},
 		},
 	});
 	assertUserFacingProgress(h.messages);
@@ -554,6 +575,31 @@ test("the client's headers never leave the page", async () => {
 	assert.equal(fake.inPage("fetch === __nativeFetch"), true);
 });
 
+test("an escaped token is redacted once the JSON is decoded", async () => {
+	const escaped = TOKEN.replaceAll(".", "\\u002e");
+	// The credential is JSON-escaped in the raw body, so it only appears
+	// after decoding; a check on the undecoded text would let it cross.
+	const echo = `{"id":"${OWNER}","username":"sample.user","bio":"${escaped}","${escaped}":"x"}`;
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: messagesBy(OWNER, 1) }, (path) =>
+			path === "/users/@me" ? { status: 200, body: echo } : undefined,
+		),
+	});
+	const h = harness(fake);
+	const lines = await captureDiagnostics(() =>
+		collectDiscordBrowser(h.ctx, fast()),
+	);
+	const outside = JSON.stringify([
+		fake.returned,
+		h.messages,
+		h.records,
+		lines,
+		h.ctx.state,
+	]);
+	assert.equal(outside.includes(TOKEN), false);
+	assert.equal(h.of("profile")[0]?.bio, "[redacted]");
+});
+
 test("a client that uses fetch is read the same way", async () => {
 	const fake = fakeDiscord({
 		transport: "fetch",
@@ -578,6 +624,43 @@ test("a client that uses fetch is read the same way", async () => {
 		coverage.length <= DIAGNOSTIC_LINE_MAX_CHARS,
 		`${coverage.length} chars: ${coverage}`,
 	);
+});
+
+test("an idle client is captured after the nudge, and reported", async () => {
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: messagesBy(OWNER, 1) }),
+	});
+	const h = harness(fake, ["messages"]);
+	const lines = await captureDiagnostics(() =>
+		collectDiscordBrowser(h.ctx, fast()),
+	);
+	const line = lines.find((entry) => entry.includes("header_capture"));
+	assert.ok(line);
+	// Six polls before the nudge, then one more for the captured headers.
+	assert.ok(line.includes('"n":"nudged"'), line);
+	assert.ok(line.includes('"v":9'), line);
+	assert.ok(line.includes('"ct":"xhr"'), line);
+	assert.ok(line.includes('"ms":3500'), line);
+	assert.ok(line.length <= DIAGNOSTIC_LINE_MAX_CHARS, String(line.length));
+	// The line names no header or value.
+	for (const secret of [TOKEN, SUPER_PROPERTIES, "authorization"])
+		assert.equal(line.includes(secret), false);
+});
+
+test("a client request sent while watching is captured passively, and reported", async () => {
+	const fake = fakeDiscord({
+		clientRequestAt: "watch",
+		respond: discordApi({ [SERVER_A]: messagesBy(OWNER, 1) }),
+	});
+	const h = harness(fake, ["messages"]);
+	const lines = await captureDiagnostics(() =>
+		collectDiscordBrowser(h.ctx, fast()),
+	);
+	const line = lines.find((entry) => entry.includes("header_capture"));
+	assert.ok(line);
+	assert.ok(line.includes('"n":"passive"'), line);
+	assert.ok(line.includes('"ms":500'), line);
+	assert.equal(fake.inPage("location.pathname"), "/channels/@me");
 });
 
 test("an idle client ends the run with nothing read", async () => {
@@ -899,6 +982,45 @@ test("messages older than the window are not read", async () => {
 	assert.deepEqual(h.skips(), []);
 });
 
+test("a malformed hit does not stop pagination", async () => {
+	const all = messagesBy(OWNER, 50);
+	const groupsAt = (offset: number) =>
+		all
+			.slice(offset, offset + SEARCH_PAGE)
+			.map((message, index) =>
+				offset + index === 3
+					? [{ author: { id: OWNER }, hit: true }]
+					: [message],
+			);
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: all }, (path) => {
+			const url = new URL(path, ORIGIN);
+			if (!url.pathname.endsWith("/messages/search")) return undefined;
+			const offset = Number(url.searchParams.get("offset"));
+			return {
+				status: 200,
+				body: { total_results: all.length, messages: groupsAt(offset) },
+			};
+		}),
+	});
+	const h = harness(fake, ["messages"]);
+	const lines = await captureDiagnostics(() =>
+		collectDiscordBrowser(h.ctx, fast()),
+	);
+	// The unreadable group is not counted, but the raw position still advances
+	// the listing, so the second page is read.
+	assert.equal(h.of("messages").length, 49);
+	assert.deepEqual(
+		searches(fake).map((call) => call.path.split("offset=")[1]),
+		["0", "25"],
+	);
+	const unreadable = lines.find((line) =>
+		line.includes("search_hits_unreadable"),
+	);
+	assert.ok(unreadable);
+	assert.ok(unreadable.includes('"positions":"3"'), unreadable);
+});
+
 test("a requested time range narrows the window", async () => {
 	const fake = fakeDiscord({
 		respond: discordApi({ [SERVER_A]: messagesBy(OWNER, 10, NOW, DAY_MS) }),
@@ -919,6 +1041,61 @@ test("a requested time range narrows the window", async () => {
 		h.of("messages").map((record) => record.timestamp),
 		[3, 4, 5].map((days) => new Date(NOW - days * DAY_MS).toISOString()),
 	);
+});
+
+test("a wider later range reads below the stored floor", async () => {
+	const listing = messagesBy(OWNER, 30, NOW - DAY_MS, DAY_MS);
+	const servers = { [SERVER_A]: listing };
+	const since = new Date(NOW - 7 * DAY_MS).toISOString();
+
+	const one = fakeDiscord({ respond: discordApi(servers) });
+	const first = harness(one, ["messages"], {}, { timeRange: { since } });
+	await collectDiscordBrowser(first.ctx, fast());
+	// Days 1..7 are inside the since bound; the walk stops at day 8.
+	assert.equal(first.of("messages").length, 7);
+	const afterFirst = first.cursor("messages") as {
+		servers: Record<string, { floor_ms: number }>;
+	};
+	assert.equal(afterFirst.servers[SERVER_A]?.floor_ms, NOW - 7 * DAY_MS);
+
+	// The next run asks for the default 90-day window. It reads days 8..30 and
+	// does not emit any of the seven already collected.
+	const two = fakeDiscord({ respond: discordApi(servers) });
+	const second = harness(two, ["messages"], { messages: afterFirst });
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		listing.slice(7).map((message) => message.id),
+	);
+});
+
+test("a backfill-only run does not move the newest id backward", async () => {
+	const listing = messagesBy(OWNER, 70);
+	const servers = { [SERVER_A]: listing };
+
+	const one = fakeDiscord({ respond: discordApi(servers) });
+	const first = harness(one, ["messages"]);
+	await collectDiscordBrowser(first.ctx, fast([], { maxMessages: 40 }));
+	const afterFirst = first.cursor("messages");
+
+	// An unchanged second run only backfills the 30 messages after the first 40.
+	const two = fakeDiscord({ respond: discordApi(servers) });
+	const second = harness(two, ["messages"], { messages: afterFirst });
+	await collectDiscordBrowser(second.ctx, fast([], { maxMessages: 30 }));
+	assert.deepEqual(
+		second.of("messages").map((record) => record.id),
+		listing.slice(40).map((message) => message.id),
+	);
+	const afterSecond = second.cursor("messages") as {
+		servers: Record<string, { newest_id: string }>;
+	};
+	assert.equal(afterSecond.servers[SERVER_A]?.newest_id, listing[0]?.id);
+
+	// The newest id still points at the head, so a third run re-reads nothing.
+	const three = fakeDiscord({ respond: discordApi(servers) });
+	const third = harness(three, ["messages"], { messages: afterSecond });
+	await collectDiscordBrowser(third.ctx, fast());
+	assert.deepEqual(third.of("messages"), []);
 });
 
 test("the message limit stops a run, and later runs resume then go incremental", async () => {
@@ -951,6 +1128,7 @@ test("the message limit stops a run, and later runs resume then go incremental",
 		servers: {
 			[SERVER_A]: {
 				newest_id: listing[0]?.id,
+				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
 				backfill: { before_id: listing[39]?.id, offset: 40 },
 			},
 		},
@@ -980,8 +1158,14 @@ test("the message limit stops a run, and later runs resume then go incremental",
 	assert.deepEqual(afterSecond, {
 		queue: [SERVER_A, SERVER_B],
 		servers: {
-			[SERVER_A]: { newest_id: servers[SERVER_A]?.[0]?.id },
-			[SERVER_B]: { newest_id: servers[SERVER_B]?.[0]?.id },
+			[SERVER_A]: {
+				newest_id: servers[SERVER_A]?.[0]?.id,
+				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+			},
+			[SERVER_B]: {
+				newest_id: servers[SERVER_B]?.[0]?.id,
+				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+			},
 		},
 	});
 

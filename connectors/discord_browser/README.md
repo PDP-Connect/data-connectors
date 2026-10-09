@@ -48,23 +48,28 @@ those headers, minus the ones that belong to a single request such as
 
 - The header values stay in that closure. No page evaluation returns them, and
   they are never logged, emitted in a record, placed in STATE or written to
-  diagnostics. A response body that repeats one is redacted in the page, and
-  the JSON keys `token`, `access_token` and `refresh_token` are dropped there.
+  diagnostics. A response body that repeats one is redacted in the page after
+  the JSON is decoded, so a JSON-escaped copy is caught too, and the JSON keys
+  `token`, `access_token` and `refresh_token` are dropped there.
 - The sign-in page is never wrapped.
 - If the client sends no request within 30 seconds, the run ends with
   `discord_client_request_not_seen`. There is no fallback that looks for the
   token in the app's internals or storage.
-- The page reader accepts only the four paths in the table above and only
-  sends GET, so no other endpoint can be reached through it.
+- The page reader accepts only the four paths in the table above, and every
+  request the connector itself makes is a GET, so no write endpoint can be
+  reached through it.
 - Requests are made from inside the discord.com page, never from the host.
 
 An idle client sends no request, so the connector clicks the in-app Shop link
 (`/shop`, then `/store` or `/quest-home` if it is absent, then a history
 navigation if none is), then the Friends link to return. It never
-opens a direct message, a channel or message requests. On that navigation the
-Discord client itself sends a `PATCH /users/@me/settings-proto/1`. That write
-is the client's own behaviour, the same as when the owner clicks the link; the
-connector sends no write of its own.
+opens a direct message, a channel or message requests. Every request the
+connector itself sends is a GET. The navigation it performs to prompt a client
+request makes the Discord client save its own settings state: a
+`PATCH /users/@me/settings-proto/1` issued by the client, not by the
+connector. That client-side write is an accepted side effect, decided by the
+product owner on 2026-10-09; it is the same write the client makes when the
+owner clicks the link by hand.
 
 ## Budget
 
@@ -83,9 +88,11 @@ Constants in `index.ts`:
 | Servers refusing in a row before the run ends | 3 |
 
 - The `messages` STATE holds a queue of server ids and, per server, the newest
-  collected message id and where an unfinished walk stopped. Later runs
-  continue with the next servers, then stop each server at the first message
-  already collected. STATE holds ids and offsets only.
+  collected message id, the lower-bound instant the cursor was read to, and
+  where an unfinished walk stopped. Later runs continue with the next servers,
+  stop each server at the first message already collected, and read below the
+  stored lower bound when the request asks for a wider range. The newest id
+  never moves backward. STATE holds ids, offsets and that instant only.
 - A 401, a captcha or account-check payload, a 403 on a profile endpoint, a
   second 429, a long or account-wide 429, or a server error ends the run with
   no retry. A 403 or a search index that is still not ready skips that server.
@@ -112,6 +119,21 @@ at the end of a run. Its keys are short so the line fits the phone host's
 | `sk` | servers skipped this run |
 | `w` | servers still waiting for the next run |
 | `m` | messages saved |
+
+A `[discord_browser-diagnostic] header_capture` line is written once per run,
+before collection, saying how the client's headers were obtained. It carries
+no header name or value:
+
+| Key | Meaning |
+| --- | --- |
+| `v` | client page API version |
+| `ct` | how the client request was captured (`xhr`, `fetch`) |
+| `n` | `passive` when the client sent a request on its own, `nudged` after the in-app navigation |
+| `ms` | milliseconds the capture waited before the headers appeared |
+
+A `[discord_browser-diagnostic] search_hits_unreadable` line reports a search
+page with a group that had no usable id: `count`, the page's `offset`, and the
+raw result `positions` it left blank. That count does not stop pagination.
 
 ## Verified on 2026-10-08
 

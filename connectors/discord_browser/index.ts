@@ -32,7 +32,11 @@
  *
  * Not collected: direct messages, group DMs and the friends list. The page
  * reader refuses every path but the four below, so those endpoints cannot be
- * reached through it. No WebSocket is opened and nothing is written.
+ * reached through it. No WebSocket is opened, and every request the connector
+ * makes is a GET. Prompting an idle client through the in-app Shop link makes
+ * the Discord client save its own settings state (PATCH
+ * /users/@me/settings-proto/1); that client-side write is an accepted side
+ * effect (product owner, 2026-10-09).
  *
  *   GET /users/@me                        -> profile
  *   GET /users/@me/guilds                 -> servers
@@ -177,11 +181,16 @@ interface ServerCursor {
 	 * `until_id` when everything at or below that id was collected earlier.
 	 */
 	backfill?: { before_id: string; offset: number; until_id?: string };
+	/**
+	 * Earliest instant this cursor was read down to. A later request that
+	 * reaches older is not covered and reads below this bound.
+	 */
+	floor_ms?: number;
 	/** Newest collected message id; a later run stops there. */
 	newest_id: string | null;
 }
 
-/** The `messages` cursor. Ids and offsets only. */
+/** The `messages` cursor. Ids, offsets and the floor instant only. */
 interface MessagesState {
 	/** Server ids in the order later runs search them. */
 	queue?: string[];
@@ -301,6 +310,17 @@ interface CaptureStatus {
 	wrongPage?: boolean;
 }
 
+/** How the capture got the client to send the request that carried the headers. */
+type HeaderCaptureMode = "nudged" | "passive";
+
+interface HeaderCapture {
+	status: CaptureStatus;
+	/** "passive" when the client sent a request on its own; "nudged" after the click. */
+	mode: HeaderCaptureMode;
+	/** Milliseconds the capture waited before the headers appeared. */
+	waitedMs: number;
+}
+
 /**
  * Wait for the Discord client to send an API request of its own, so the page
  * reader holds the client's headers. An idle client sends none, so after a
@@ -310,27 +330,38 @@ interface CaptureStatus {
 async function captureClientHeaders(
 	page: DiscordPage,
 	delay: (ms: number) => Promise<void>,
-): Promise<CaptureStatus | null> {
+): Promise<HeaderCapture | null> {
 	const polls = Math.ceil(HEADER_CAPTURE_TIMEOUT_MS / POLL_INTERVAL_MS);
 	let away = false;
+	let mode: HeaderCaptureMode = "passive";
+	let waitedMs = 0;
 	for (let poll = 0; poll < polls; poll += 1) {
 		const status = await evaluateInPage<CaptureStatus>(page, WATCH_EXPRESSION);
 		if (!status || status.wrongPage) return null;
 		if (status.captured) {
 			// Leave the app where the owner had it.
 			if (away) await evaluateInPage(page, nudgeExpression("home"));
-			return status;
+			return { status, mode, waitedMs };
 		}
 		if (poll === PASSIVE_CAPTURE_POLLS) {
 			away = true;
+			mode = "nudged";
 			await evaluateInPage(page, nudgeExpression("away"));
 		} else if (poll === PASSIVE_CAPTURE_POLLS + AWAY_CAPTURE_POLLS) {
 			away = false;
 			await evaluateInPage(page, nudgeExpression("home"));
 		}
 		await delay(POLL_INTERVAL_MS);
+		waitedMs += POLL_INTERVAL_MS;
 	}
 	return null;
+}
+
+/** The numeric API version behind the page's "v9" string, or null. */
+function apiVersionNumber(version: string | null | undefined): number | null {
+	if (typeof version !== "string") return null;
+	const digits = /^v(\d{1,2})$/.exec(version)?.[1];
+	return digits === undefined ? null : Number(digits);
 }
 
 type ApiOutcome =
@@ -463,27 +494,43 @@ interface ServerWalk {
  * where that run stopped and "tail" reads on from there. The jump is by
  * offset, which messages sent or deleted since can shift: the tail starts
  * one position early so the first hit should be the last collected message,
- * and steps back one page once when it is not.
+ * and steps back one page once when it is not. A cursor records the floor it
+ * was read to, so a later request for a wider range reads below it.
  */
 async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 	const { api, budget, floorMs, ownerId, prior, server, untilMs } = walk;
 	const priorNewest = prior?.newest_id ?? null;
+	const priorFloor = prior?.floor_ms ?? null;
 	const backfill = prior?.backfill ?? null;
+	// A stored cursor covers only the range it was read with. A request that
+	// reaches older than that floor is not covered, so the walk reads below it.
+	const widenBelowMs =
+		priorFloor !== null && floorMs < priorFloor ? priorFloor : null;
+	// The deepest instant the cursor may claim: coverage only grows.
+	const coveredFloor =
+		priorFloor === null ? floorMs : Math.min(floorMs, priorFloor);
 	let mode: "head" | "tail" = "head";
 	let offset = 0;
-	let fresh = 0;
 	let rewound = false;
 	let tailStart = 0;
 	let newestEmitted: string | null = null;
 	let oldestEmitted: string | null = null;
-	let pagesRead = 0;
+
+	/** The newest id the cursor may expose; never older than the stored one. */
+	const newestId = (): string | null => {
+		if (newestEmitted === null) return priorNewest;
+		if (priorNewest === null) return newestEmitted;
+		return compareSnowflakes(newestEmitted, priorNewest) > 0
+			? newestEmitted
+			: priorNewest;
+	};
 
 	/** The cursor when the walk stops at listing position `position`. */
 	const cut = (position: number): ServerCursor => {
-		const newest = newestEmitted ?? priorNewest;
 		if (mode === "tail" && backfill) {
 			return {
-				newest_id: newest,
+				newest_id: newestId(),
+				floor_ms: coveredFloor,
 				backfill: {
 					...backfill,
 					before_id: oldestEmitted ?? backfill.before_id,
@@ -492,22 +539,31 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 			};
 		}
 		if (oldestEmitted === null) {
-			return { newest_id: priorNewest, ...(backfill ? { backfill } : {}) };
+			return {
+				newest_id: priorNewest,
+				floor_ms: coveredFloor,
+				...(backfill ? { backfill } : {}),
+			};
 		}
 		return {
-			newest_id: newest,
+			newest_id: newestId(),
+			floor_ms: coveredFloor,
 			backfill: {
 				before_id: oldestEmitted,
 				offset: position,
-				// Everything at or below the old newest id is collected, unless an
-				// older gap was still open: then the tail reads to the window.
-				...(priorNewest !== null && !backfill ? { until_id: priorNewest } : {}),
+				// Everything at or below the old newest id is collected, unless the
+				// walk had already read past it: then it reads to the window.
+				...(priorNewest !== null &&
+				!backfill &&
+				compareSnowflakes(oldestEmitted, priorNewest) > 0
+					? { until_id: priorNewest }
+					: {}),
 			},
 		};
 	};
 	const complete = (): ServerOutcome => ({
 		kind: "complete",
-		cursor: { newest_id: newestEmitted ?? priorNewest },
+		cursor: { newest_id: newestId(), floor_ms: coveredFloor },
 	});
 
 	for (;;) {
@@ -540,10 +596,12 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 		if (!page.ok) {
 			return { kind: "stop", cursor: cut(offset), stop: "source_unreadable" };
 		}
-		pagesRead += 1;
-		if (pagesRead === 1 && page.unreadable > 0) {
+		if (page.unreadable > 0) {
+			// The raw listing positions a malformed group left blank.
 			connectorDiagnostic("discord_browser", "search_hits_unreadable", {
 				count: page.unreadable,
+				offset,
+				positions: page.unreadablePositions.map((at) => offset + at).join(","),
 			});
 		}
 
@@ -564,21 +622,29 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 		}
 
 		let jumped = false;
-		for (const [index, hit] of page.hits.entries()) {
+		for (const hit of page.hits) {
 			if (hit.timestampMs < floorMs) return complete();
 			if (mode === "head") {
 				if (
 					priorNewest !== null &&
 					compareSnowflakes(hit.id, priorNewest) <= 0
 				) {
-					if (!backfill) return complete();
-					mode = "tail";
-					tailStart = Math.max(0, backfill.offset + fresh - 1);
-					offset = tailStart;
-					jumped = true;
-					break;
+					if (backfill) {
+						mode = "tail";
+						// The prior run stopped at backfill.offset; the new head
+						// hits shifted the listing down by their raw positions.
+						tailStart = Math.max(
+							0,
+							backfill.offset + offset + hit.position - 1,
+						);
+						offset = tailStart;
+						jumped = true;
+						break;
+					}
+					if (widenBelowMs === null) return complete();
+					// Already collected above the stored floor: skip it and read on.
+					if (hit.timestampMs >= widenBelowMs) continue;
 				}
-				fresh += 1;
 			} else if (backfill) {
 				if (compareSnowflakes(hit.id, backfill.before_id) >= 0) continue;
 				if (
@@ -591,7 +657,7 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 			if (!isOwnMessage(hit, ownerId)) continue;
 			if (untilMs !== null && hit.timestampMs >= untilMs) continue;
 			if (budget.messagesLeft <= 0) {
-				return { kind: "limit", cursor: cut(offset + index) };
+				return { kind: "limit", cursor: cut(offset + hit.position) };
 			}
 			await walk.emitMessage(hit.record);
 			budget.messagesLeft -= 1;
@@ -599,10 +665,7 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 			oldestEmitted = hit.id;
 		}
 		if (jumped) continue;
-		if (
-			page.hits.length < SEARCH_PAGE_SIZE ||
-			offset + page.hits.length >= page.total
-		) {
+		if (page.groups < SEARCH_PAGE_SIZE || offset + page.groups >= page.total) {
 			return complete();
 		}
 		offset += SEARCH_PAGE_SIZE;
@@ -629,8 +692,14 @@ function readMessagesState(value: unknown): Required<MessagesState> {
 			const before = snowflake(cursor.backfill?.before_id);
 			const until = snowflake(cursor.backfill?.until_id);
 			const offset = cursor.backfill?.offset;
+			const floor = cursor.floor_ms;
 			servers[id] = {
 				newest_id: newest,
+				...(typeof floor === "number" &&
+				Number.isSafeInteger(floor) &&
+				floor >= 0
+					? { floor_ms: floor }
+					: {}),
 				...(before !== null &&
 				typeof offset === "number" &&
 				Number.isSafeInteger(offset) &&
@@ -815,6 +884,13 @@ export async function collectDiscordBrowser(
 		await stopRun("headers_unavailable");
 		return;
 	}
+	// One line per run: how the client's headers were obtained, no header data.
+	connectorDiagnostic("discord_browser", "header_capture", {
+		v: apiVersionNumber(capture.status.version),
+		ct: capture.status.transport,
+		n: capture.mode,
+		ms: capture.waitedMs,
+	});
 	const api = createApi(ctx.page, options);
 
 	// The owner's id decides which messages are theirs, so it is read first.
@@ -1030,8 +1106,8 @@ export async function collectDiscordBrowser(
 	connectorDiagnostic("discord_browser", "coverage", {
 		s: MESSAGES,
 		st: stop ? "stopped" : waiting > 0 ? "partial" : "complete",
-		v: capture.version,
-		ct: capture.transport,
+		v: capture.status.version,
+		ct: capture.status.transport,
 		rq: api.requests(),
 		n: queue.length,
 		sc: searched.length,

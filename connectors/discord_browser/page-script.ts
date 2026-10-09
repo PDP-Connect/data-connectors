@@ -51,6 +51,9 @@ const PER_REQUEST_HEADERS = [
 /** JSON keys dropped from every response before it leaves the page. */
 const SECRET_JSON_KEYS = ["access_token", "refresh_token", "token"];
 
+/** Shortest header value treated as a credential when redacting a body. */
+const SECRET_MIN_CHARS = 16;
+
 /**
  * Signed-in markers. The first was observed on an English desktop layout on
  * 2026-10-08; the second is the server list, which carries no translated
@@ -83,6 +86,7 @@ const PAGE_HELPERS = String.raw`
 		const API_PATH = /^\/api\/(v\d{1,2})\//;
 		const PER_REQUEST = new Set(${JSON.stringify(PER_REQUEST_HEADERS)});
 		const SECRET_KEYS = new Set(${JSON.stringify(SECRET_JSON_KEYS)});
+		const SECRET_MIN = ${SECRET_MIN_CHARS};
 		const ALLOWED = ${JSON.stringify(ALLOWED_PATHS)}.map((source) => new RegExp(source));
 		const nativeFetch = globalThis.fetch;
 		const proto = XMLHttpRequest.prototype;
@@ -163,6 +167,26 @@ const PAGE_HELPERS = String.raw`
 			const value = raw === null ? Number.NaN : Number(raw);
 			return Number.isFinite(value) ? value : null;
 		};
+		// Redact the decoded value. A credential can be JSON-escaped in the raw
+		// body, so a substring check on the undecoded text would miss it.
+		const redact = (value) => {
+			if (typeof value === "string") {
+				for (const [, secret] of captured.headers)
+					if (secret.length >= SECRET_MIN && value.includes(secret))
+						value = value.split(secret).join("[redacted]");
+				return value;
+			}
+			if (Array.isArray(value)) return value.map(redact);
+			if (value && typeof value === "object") {
+				const clean = {};
+				for (const [key, child] of Object.entries(value)) {
+					if (SECRET_KEYS.has(key)) continue;
+					clean[redact(key)] = redact(child);
+				}
+				return clean;
+			}
+			return value;
+		};
 		const get = async (path, timeoutMs) => {
 			if (location.origin !== ORIGIN) return { kind: "wrong_origin" };
 			if (!captured) return { kind: "no_headers" };
@@ -181,15 +205,10 @@ const PAGE_HELPERS = String.raw`
 						signal: controller.signal,
 					},
 				);
-				let text = await response.text();
-				for (const [, value] of captured.headers)
-					if (value.length >= 16 && text.includes(value))
-						text = text.split(value).join("[redacted]");
+				const text = await response.text();
 				let json = null;
 				try {
-					json = JSON.parse(text, (name, value) =>
-						SECRET_KEYS.has(name) ? undefined : value,
-					);
+					json = redact(JSON.parse(text));
 				} catch {}
 				return {
 					kind: "response",
