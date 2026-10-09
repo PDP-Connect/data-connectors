@@ -9,7 +9,7 @@
 	},
 	"connector_key": "loom",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/loom",
-	"version": "0.1.12",
+	"version": "0.1.13",
 	"display_name": "Loom",
 	"brand": {
 		"icon": "icon.svg",
