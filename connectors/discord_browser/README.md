@@ -88,14 +88,29 @@ Constants in `index.ts`:
 | Servers refusing in a row before the run ends | 3 |
 
 - The `messages` STATE holds a queue of server ids and, per server, the newest
-  collected message id, the since and until bounds of the completed walk that
-  proved its coverage, and, when a walk was interrupted, where it stopped. A
-  later run stops a server at the first message already collected only when
-  those recorded bounds exist and the current request is equal to or narrower;
-  any other cursor is ignored for stopping, and the requested range is walked
-  afresh, skipping only instants an earlier completed walk already proved. An
-  interrupted walk keeps the previous bounds and never extends coverage. The
-  newest id never moves backward. STATE holds ids, instants and offsets only.
+  collected message id plus the since and until bounds of the completed walk
+  that proved its coverage. A later run stops a server at the first message
+  already collected only when those recorded bounds exist and the current
+  request is equal to or narrower; any other cursor is ignored for stopping,
+  and the requested range is walked afresh, skipping only instants an earlier
+  completed walk already proved. A server's cursor is written only when a
+  single walk covered the whole requested range from newest to the lower bound
+  with every group readable and no refusal, cap or stop. Any other ending
+  (interruption, an unreadable group, the message or request cap, or the site's
+  own offset ceiling excepted below) writes no new coverage and leaves the
+  previous trusted cursor exactly as it was, so the next run reads that server
+  from its newest message again. The newest id never moves backward. STATE
+  holds ids, instants and offsets only.
+- A server whose walk cannot finish inside one run's budget is read again from
+  its newest message on every later run and does not progress past that budget.
+  The binding limits are `MAX_MESSAGES_PER_RUN` (1,000) and
+  `MAX_REQUESTS_PER_RUN` (100); at Discord's fixed 25 results per search page,
+  1,000 messages is 40 pages. A server with more than 1,000 messages in the
+  90-day window therefore stays at its newest 1,000 records. Re-emitting
+  messages the host already stored is expected; the host de-duplicates by id.
+- A search listing stops at Discord's result offset ceiling (9,975). The
+  product owner accepts that as a server's range end: a walk that reaches it
+  records complete coverage of everything the site will serve.
 - A 401, a captcha or account-check payload, a 403 on a profile endpoint, a
   second 429, a long or account-wide 429, or a server error ends the run with
   no retry. A 403 or a search index that is still not ready skips that server.
@@ -139,7 +154,8 @@ page with a group that had no usable id: `count`, the page's `offset`, and the
 raw result `positions` it left blank. Consecutive positions are packed as
 `start-end`, and a page with many positions is split across as many lines as
 the phone host's 150-character budget needs, so no line is cut mid-field. That
-count does not stop pagination.
+count does not stop pagination, but it withholds that walk's coverage: the
+server is read from its newest message again on the next run.
 
 ## Verified on 2026-10-08
 
@@ -174,8 +190,8 @@ reason, and nothing is guessed.
 - Signed out, `/channels/@me` is expected to redirect to `/login`.
 - The 202, 429 and captcha answers. The handling follows Discord's public API
   documentation.
-- Search past the first page: the 25-per-page size, the offset ceiling
-  (9,975), and the resume-by-offset walk.
+- Search past the first page: the 25-per-page size and the offset ceiling
+  (9,975).
 - Whether a search without `include_nsfw` leaves out age-restricted channels.
 - The status and code a server returns when its search is refused.
 - Whether `/users/@me/guilds` returns every server in one answer for an
@@ -194,5 +210,3 @@ reason, and nothing is guessed.
 - Whether the mobile host merges a scope's records across runs or replaces
   them. An unchanged or narrower run emits only new messages; a wider range
   can re-emit messages the host already stored.
-- More than one page of the owner's messages deleted from a server between
-  two runs of an unfinished walk can leave a gap in that server.

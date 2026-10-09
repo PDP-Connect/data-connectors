@@ -46,7 +46,10 @@
  * Budget (the constants below): one request at a time with a 3-5 s pause;
  * the newest 90 days of messages; about 1,000 messages and 25 servers per
  * run. A queue in STATE carries the remaining servers to later runs, which
- * then stop each server at the first message already collected.
+ * then stop each server at the first message already collected. Only a fully
+ * readable walk that reached the range's end writes coverage; a walk cut short
+ * by an interruption, an unreadable group, the budget or a refusal writes
+ * nothing, so that server is read from its newest message again next run.
  *
  * Tested surfaces (as of 2026-10-08): the header capture, the /shop
  * navigation that triggers it, and one 200 answer from each of the four
@@ -176,24 +179,19 @@ export interface DiscordCollectOptions {
 	random?: () => number;
 }
 
-/** Where a server's collected messages end, by message id. */
+/**
+ * A server's trusted coverage, written only by a completed walk. `floor_ms`
+ * and `until_ms` are the bounds that walk proved; `newest_id` is where a later
+ * run stops. An interrupted, refused or unreadable walk writes no cursor, so
+ * the previous trusted one stays in place.
+ */
 interface ServerCursor {
-	/**
-	 * Set while an interrupted walk still has older messages to read: the ids
-	 * from `before_id` up to `newest_id` were traversed, and the walk resumes
-	 * below `before_id`, which sat at `offset` in the search listing.
-	 */
-	backfill?: { before_id: string; offset: number };
-	/**
-	 * Lower bound of the completed walk that proved this cursor's coverage.
-	 * Missing on a legacy or interrupted cursor, so it is not trusted to end a
-	 * later walk.
-	 */
-	floor_ms?: number;
+	/** Lower bound of the completed walk that proved this coverage. */
+	floor_ms: number;
 	/** Newest collected message id; a later run stops there. */
 	newest_id: string | null;
 	/** Upper bound of that completed walk; null means no upper bound. */
-	until_ms?: number | null;
+	until_ms: number | null;
 }
 
 /** The `messages` cursor. Ids, instants and offsets only. */
@@ -472,13 +470,13 @@ async function getSessionResource(
 }
 
 type ServerOutcome =
-	/** The walk reached the end, the window, or the collected messages. */
+	/** A single readable walk covered the whole requested range. */
 	| { kind: "complete"; cursor: ServerCursor }
 	/** The run's message limit was reached part way through. */
-	| { kind: "limit"; cursor: ServerCursor }
-	/** This server could not be searched now; the run goes on. */
-	| { kind: "skipped"; cursor: ServerCursor; refused: boolean }
-	| { kind: "stop"; cursor: ServerCursor; stop: RunStop };
+	| { kind: "limit" }
+	/** This server could not be fully read now; the run goes on. */
+	| { kind: "skipped"; refused: boolean }
+	| { kind: "stop"; stop: RunStop };
 
 interface ServerWalk {
 	api: Api;
@@ -493,31 +491,15 @@ interface ServerWalk {
 }
 
 /**
- * Whether a stored cursor records a completed walk's coverage bounds. A
- * legacy cursor without them and an interrupted cursor with a resume marker
- * are both untrusted.
- */
-function hasCursorCoverage(
-	prior: ServerCursor | null,
-): prior is ServerCursor & { floor_ms: number; until_ms: number | null } {
-	return (
-		prior !== null &&
-		prior.backfill === undefined &&
-		prior.floor_ms !== undefined &&
-		prior.until_ms !== undefined
-	);
-}
-
-/**
- * Whether a stored cursor proves the current request's range is collected: it
- * must record its bounds and the request must be equal to or narrower.
+ * Whether a stored cursor proves the current request's range is collected: the
+ * request must be equal to or narrower than the walk that wrote it.
  */
 function cursorCovers(
 	prior: ServerCursor | null,
 	floorMs: number,
 	untilMs: number | null,
 ): boolean {
-	if (!hasCursorCoverage(prior)) return false;
+	if (!prior) return false;
 	if (floorMs < prior.floor_ms) return false;
 	if (prior.until_ms === null) return true;
 	return untilMs !== null && untilMs <= prior.until_ms;
@@ -525,12 +507,9 @@ function cursorCovers(
 
 /**
  * Whether an instant lies inside the coverage a stored cursor already proved.
- * Only a cursor with recorded bounds can answer yes.
  */
 function cursorCollected(prior: ServerCursor | null, ms: number): boolean {
-	if (!prior || prior.floor_ms === undefined || prior.until_ms === undefined) {
-		return false;
-	}
+	if (!prior) return false;
 	if (ms < prior.floor_ms) return false;
 	return prior.until_ms === null || ms < prior.until_ms;
 }
@@ -603,31 +582,25 @@ function reportUnreadable(
 /**
  * Read the owner's messages in one server, newest first.
  *
- * "head" reads from the top until the newest message already collected.
- * When an earlier run stopped part way (`backfill`), the walk then jumps to
- * where that run stopped and "tail" reads on from there. The jump is by
- * offset, which messages sent or deleted since can shift: the tail starts
- * one position early so the first hit should be the last collected message,
- * and steps back one page once when it is not.
+ * A stored cursor is trusted only when a completed walk proved its bounds and
+ * the current request is equal to or narrower. It is then safe to stop at the
+ * known head. Any other cursor is ignored for stopping: the walk covers the
+ * whole requested range again, skipping only instants the cursor already
+ * proved.
  *
- * A stored cursor is trusted only when it recorded a completed walk's own
- * since and until bounds and the current request is equal to or narrower. It
- * is then safe to stop at the known head. Any other cursor is ignored for
- * stopping: the walk covers the whole requested range again, skipping only
- * instants the cursor already proved. An interrupted walk never extends the
- * recorded coverage; it keeps the previous bounds and only notes its resume.
+ * Coverage is written only by a walk that reached the end, the window or the
+ * known head with every group readable and no refusal, cap or stop. An
+ * unreadable group, an interruption, a cap or a refusal returns a non-complete
+ * outcome, so the caller keeps the previous trusted cursor and the next run
+ * starts over from the newest message.
  */
 async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 	const { api, budget, floorMs, ownerId, prior, server, untilMs } = walk;
 	const priorNewest = prior?.newest_id ?? null;
-	const backfill = prior?.backfill ?? null;
 	const covered = cursorCovers(prior, floorMs, untilMs);
-	let mode: "head" | "tail" = "head";
 	let offset = 0;
-	let rewound = false;
-	let tailStart = 0;
 	let newestEmitted: string | null = null;
-	let oldestEmitted: string | null = null;
+	let sawUnreadable = false;
 
 	/** The newest id the cursor may expose; never older than the stored one. */
 	const newestId = (): string | null => {
@@ -638,33 +611,25 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 			: priorNewest;
 	};
 
-	/** A completed walk owns the request's bounds as its coverage. */
-	const complete = (): ServerOutcome => ({
-		kind: "complete",
-		cursor: { newest_id: newestId(), floor_ms: floorMs, until_ms: untilMs },
-	});
-
 	/**
-	 * An interrupted walk never extends coverage: it keeps the previous
-	 * bounds and only records where the next run resumes.
+	 * A fully readable walk owns the request's bounds as its coverage. A walk
+	 * that saw an unreadable group is a skip and writes no coverage.
 	 */
-	const cut = (position: number): ServerCursor => {
-		const before = oldestEmitted ?? backfill?.before_id;
-		const kept =
-			prior?.floor_ms !== undefined && prior.until_ms !== undefined
-				? { floor_ms: prior.floor_ms, until_ms: prior.until_ms }
-				: {};
-		return {
-			newest_id: newestId(),
-			...kept,
-			...(before === undefined
-				? {}
-				: { backfill: { before_id: before, offset: position } }),
-		};
-	};
+	const finish = (): ServerOutcome =>
+		sawUnreadable
+			? { kind: "skipped", refused: false }
+			: {
+					kind: "complete",
+					cursor: {
+						newest_id: newestId(),
+						floor_ms: floorMs,
+						until_ms: untilMs,
+					},
+				};
 
 	for (;;) {
-		if (offset > MAX_SEARCH_OFFSET) return complete();
+		// The site's own result-offset ceiling is accepted as the range's end.
+		if (offset > MAX_SEARCH_OFFSET) return finish();
 		const query = `author_id=${ownerId}&sort_by=timestamp&sort_order=desc&offset=${offset}`;
 		const path = `/guilds/${server.id}/messages/search?${query}`;
 		let outcome = await api.get(path);
@@ -674,86 +639,39 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 				outcome.waitMs === null ||
 				outcome.waitMs > SEARCH_INDEX_MAX_WAIT_MS
 			) {
-				return { kind: "skipped", cursor: cut(offset), refused: false };
+				return { kind: "skipped", refused: false };
 			}
 			api.waitBeforeNext(outcome.waitMs);
 			outcome = await api.get(path);
 		}
-		if (outcome.kind === "stop") {
-			return { kind: "stop", cursor: cut(offset), stop: outcome.stop };
-		}
+		if (outcome.kind === "stop") return { kind: "stop", stop: outcome.stop };
 		if (outcome.status !== 200) {
-			return {
-				kind: "skipped",
-				cursor: cut(offset),
-				refused: outcome.status === 403,
-			};
+			return { kind: "skipped", refused: outcome.status === 403 };
 		}
 		const page = parseSearchPage(outcome.json, server);
-		if (!page.ok) {
-			return { kind: "stop", cursor: cut(offset), stop: "source_unreadable" };
-		}
+		if (!page.ok) return { kind: "stop", stop: "source_unreadable" };
 		if (page.unreadable > 0) {
-			// The raw listing positions a malformed group left blank.
+			// The raw listing positions a malformed group left blank. It does
+			// not stop pagination, but it withholds coverage for this walk.
+			sawUnreadable = true;
 			reportUnreadable(page.unreadable, page.unreadablePositions, offset);
 		}
-
-		const first = page.hits[0];
-		if (
-			mode === "tail" &&
-			backfill &&
-			!rewound &&
-			offset === tailStart &&
-			offset > 0 &&
-			(!first || compareSnowflakes(first.id, backfill.before_id) < 0)
-		) {
-			// The last collected message is not where it was: look one page up.
-			// More than a page of deletions since the last run leaves a gap.
-			rewound = true;
-			offset = Math.max(0, offset - SEARCH_PAGE_SIZE);
-			continue;
-		}
-
-		let jumped = false;
 		for (const hit of page.hits) {
-			if (hit.timestampMs < floorMs) return complete();
-			if (mode === "head") {
-				if (
-					priorNewest !== null &&
-					compareSnowflakes(hit.id, priorNewest) <= 0
-				) {
-					if (backfill) {
-						mode = "tail";
-						// The prior run stopped at backfill.offset; the new head
-						// hits shifted the listing down by their raw positions.
-						tailStart = Math.max(
-							0,
-							backfill.offset + offset + hit.position - 1,
-						);
-						offset = tailStart;
-						jumped = true;
-						break;
-					}
-					if (covered) return complete();
-					// Already covered by an earlier walk: skip it and read on.
-					if (cursorCollected(prior, hit.timestampMs)) continue;
-				}
-			} else if (backfill) {
-				if (compareSnowflakes(hit.id, backfill.before_id) >= 0) continue;
+			if (hit.timestampMs < floorMs) return finish();
+			if (priorNewest !== null && compareSnowflakes(hit.id, priorNewest) <= 0) {
+				// The stored walk already proved everything below the known head.
+				if (covered) return finish();
+				if (cursorCollected(prior, hit.timestampMs)) continue;
 			}
 			if (!isOwnMessage(hit, ownerId)) continue;
 			if (untilMs !== null && hit.timestampMs >= untilMs) continue;
-			if (budget.messagesLeft <= 0) {
-				return { kind: "limit", cursor: cut(offset + hit.position) };
-			}
+			if (budget.messagesLeft <= 0) return { kind: "limit" };
 			await walk.emitMessage(hit.record);
 			budget.messagesLeft -= 1;
 			newestEmitted ??= hit.id;
-			oldestEmitted = hit.id;
 		}
-		if (jumped) continue;
 		if (page.groups < SEARCH_PAGE_SIZE || offset + page.groups >= page.total) {
-			return complete();
+			return finish();
 		}
 		offset += SEARCH_PAGE_SIZE;
 	}
@@ -782,25 +700,19 @@ function readMessagesState(value: unknown): Required<MessagesState> {
 			if (snowflake(id) === null || !cursor || typeof cursor !== "object") {
 				continue;
 			}
-			const newest = snowflake(cursor.newest_id);
-			const before = snowflake(cursor.backfill?.before_id);
-			const offset = cursor.backfill?.offset;
+			// Only a completed walk's own bounds are trusted. A legacy cursor,
+			// or one carrying the removed resume marker, is dropped so the
+			// server is read afresh.
 			const floor = validInstant(cursor.floor_ms);
-			// A null until_ms records "no upper bound"; a missing key is a legacy
-			// cursor and stays untrusted.
-			const until = cursor.until_ms === null ? null : validInstant(cursor.until_ms);
 			const hasUntil =
-				"until_ms" in cursor && (until !== null || cursor.until_ms === null);
+				"until_ms" in cursor &&
+				(cursor.until_ms === null || validInstant(cursor.until_ms) !== null);
+			if (floor === null || !hasUntil || "backfill" in cursor) continue;
 			servers[id] = {
-				newest_id: newest,
-				...(floor === null ? {} : { floor_ms: floor }),
-				...(hasUntil ? { until_ms: until } : {}),
-				...(before !== null &&
-				typeof offset === "number" &&
-				Number.isSafeInteger(offset) &&
-				offset >= 0
-					? { backfill: { before_id: before, offset } }
-					: {}),
+				newest_id: snowflake(cursor.newest_id),
+				floor_ms: floor,
+				until_ms:
+					cursor.until_ms === null ? null : validInstant(cursor.until_ms),
 			};
 		}
 	}
@@ -858,7 +770,7 @@ async function emitStop(
 				reason: "discord_run_limit_reached",
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message:
-					"This run reached its request limit. The next run continues from here.",
+					"This run reached its request limit. The next run reads the range again from the newest message.",
 			});
 			return;
 		case "source_unreadable":
@@ -1127,16 +1039,9 @@ export async function collectDiscordBrowser(
 			server: { id: serverId, name: serverNames.get(serverId) ?? null },
 			untilMs: Number.isNaN(untilParsed) ? null : untilParsed,
 		});
-		// A server stopped before anything was read keeps no cursor, so it still
-		// counts as waiting.
-		if (
-			outcome.kind === "complete" ||
-			outcome.kind === "skipped" ||
-			cursors[serverId] !== undefined ||
-			outcome.cursor.backfill !== undefined
-		) {
-			cursors[serverId] = outcome.cursor;
-		}
+		// Only a completed walk writes coverage. Any other ending leaves the
+		// previous trusted cursor exactly as it was.
+		if (outcome.kind === "complete") cursors[serverId] = outcome.cursor;
 		if (outcome.kind === "stop") {
 			if (outcome.stop === "request_limit") limitReached = true;
 			else stop = outcome.stop;
@@ -1165,9 +1070,7 @@ export async function collectDiscordBrowser(
 		...queue.filter((id) => !searchedSet.has(id)),
 		...searched,
 	];
-	const waiting = queue.filter(
-		(id) => cursors[id] === undefined || cursors[id]?.backfill !== undefined,
-	).length;
+	const waiting = queue.filter((id) => cursors[id] === undefined).length;
 
 	if (stop) {
 		await stopRun(stop);
@@ -1187,14 +1090,18 @@ export async function collectDiscordBrowser(
 				"limit",
 				waiting > 0
 					? `This run saved ${plural(saved, "message", "messages")} and reached its limit. ${plural(waiting, "server is", "servers are")} left for the next run.`
-					: `This run saved ${plural(saved, "message", "messages")} and reached its limit. The next run continues from here.`,
+					: `This run saved ${plural(saved, "message", "messages")} and reached its limit. The next run reads the range again from the newest message.`,
 			);
 		}
 	}
 
 	connectorDiagnostic("discord_browser", "coverage", {
 		s: MESSAGES,
-		st: stop ? "stopped" : waiting > 0 ? "partial" : "complete",
+		st: stop
+			? "stopped"
+			: limitReached || skippedServers > 0 || waiting > 0
+				? "partial"
+				: "complete",
 		v: capture.status.version,
 		ct: capture.status.transport,
 		rq: api.requests(),
