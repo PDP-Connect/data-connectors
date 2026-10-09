@@ -2838,8 +2838,11 @@ test("discord_browser: the session token never crosses the bridge", {
 		assert.equal(outside.includes(secret), false);
 	// A linked account's access token is dropped in the page.
 	assert.equal(outside.includes("synthetic-third-party-token"), false);
-	// Read-only, and no direct-message endpoint. The stand-in client's own
-	// requests, sent when the page moves to Shop and back, are set aside.
+	// The connector's own requests are GET only, and no direct-message
+	// endpoint. The stand-in client's own requests, sent when the page moves
+	// to Shop and back, are set aside; its settings PATCH is the client's own
+	// write, an accepted side effect per the product owner's 2026-10-09
+	// decision.
 	const clientOwn = /^(PATCH \/users\/@me\/settings-proto\/1|GET \/collectibles-categories)$/;
 	assert.equal(apiRequests.filter((r) => clientOwn.test(r)).length, 4);
 	const guilds = run.result["discord.servers"].records.map((r) => r.id);

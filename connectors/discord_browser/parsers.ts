@@ -180,12 +180,23 @@ export function buildConnectionRecords(json: unknown): ListParse {
 export interface SearchHit {
 	authorId: string | null;
 	id: string;
+	/** Its group's position in the raw result listing, counted from the page. */
+	position: number;
 	record: RecordData;
 	timestampMs: number;
 }
 
 export type SearchPageParse =
-	| { ok: true; hits: SearchHit[]; total: number; unreadable: number }
+	| {
+			ok: true;
+			/** Groups in the raw listing, readable or not. */
+			groups: number;
+			hits: SearchHit[];
+			total: number;
+			unreadable: number;
+			/** Raw group positions this page could not read. */
+			unreadablePositions: number[];
+	  }
 	| { ok: false };
 
 function buildAttachments(value: unknown): RecordData[] {
@@ -212,6 +223,7 @@ export interface SearchedServer {
 
 function buildSearchHit(
 	message: unknown,
+	position: number,
 	server: SearchedServer,
 ): SearchHit | null {
 	if (!isObject(message)) return null;
@@ -224,6 +236,7 @@ function buildSearchHit(
 		: null;
 	return {
 		id,
+		position,
 		authorId: isObject(message.author) ? snowflake(message.author.id) : null,
 		timestampMs: Date.parse(timestamp),
 		record: {
@@ -263,15 +276,24 @@ export function parseSearchPage(
 			: null;
 	if (total === null) return { ok: false };
 	const hits: SearchHit[] = [];
-	let unreadable = 0;
+	const unreadablePositions: number[] = [];
+	let position = 0;
 	for (const group of json.messages) {
 		const members: unknown[] = Array.isArray(group) ? group : [group];
 		const marked = members.find(
 			(member) => isObject(member) && member.hit === true,
 		);
-		const hit = buildSearchHit(marked ?? members[0], server);
+		const hit = buildSearchHit(marked ?? members[0], position, server);
 		if (hit) hits.push(hit);
-		else unreadable += 1;
+		else unreadablePositions.push(position);
+		position += 1;
 	}
-	return { ok: true, hits, total, unreadable };
+	return {
+		ok: true,
+		groups: json.messages.length,
+		hits,
+		total,
+		unreadable: unreadablePositions.length,
+		unreadablePositions,
+	};
 }
