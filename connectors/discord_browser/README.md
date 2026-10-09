@@ -115,8 +115,11 @@ at the end of a run. Its keys are short so the line fits the phone host's
 
 ## Verified on 2026-10-08
 
-Checked by hand in one signed-in desktop session, English locale. The
-connector's own code has not run against discord.com.
+Checked by hand in one signed-in desktop session, English locale, and then run
+end to end by this code on a real iPhone 12 in the Vana mobile app on
+2026-10-08/09, through the real connect flow with a signed-in owner: profile 1,
+servers 8, connections 0, messages 0, 11 requests; the XHR header capture worked
+and discord.com served the web app. Desktop with this code is not verified.
 
 - The client uses XHR for REST under `/api/v9/`; wrapping `open`,
   `setRequestHeader` and `send` captured its headers. It sent `Authorization`,
@@ -151,11 +154,12 @@ reason, and nothing is guessed.
   account in more than 200.
 - A non-empty `/users/@me/connections` answer. The record follows the
   documented Connection object.
-- The mobile WebView: whether discord.com renders the app there at all,
-  whether a narrow layout has the Shop link or the user area, and whether the
-  history-navigation fallback makes the client send a request. The
-  `[data-list-id="guildsnav"]` marker is a guess for layouts and languages
-  where the English "User area" label is absent.
+- A non-empty message history: the real run collected messages 0.
+- The mobile WebView beyond the render: discord.com served the web app on the
+  real iPhone 12 run, but whether a narrow layout has the Shop link or the user
+  area, and whether the history-navigation fallback makes the client send a
+  request, were not observed. The `[data-list-id="guildsnav"]` marker is a
+  guess for layouts and languages where the English "User area" label is absent.
 - Whether Discord detects the wrapped `XMLHttpRequest` and `fetch` during the
   seconds they are in place.
 - On desktop, Patchright's main-world evaluation on discord.com.

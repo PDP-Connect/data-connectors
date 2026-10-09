@@ -4,7 +4,7 @@ Reads the signed-in owner's own X data from the x.com web app, in the owner's ow
 
 It does not read direct messages, follower or following lists, or anyone else's account. For full history and direct messages, use the account export (`twitter_archive`).
 
-**Status: development. This code has collected nothing from x.com.** It has run against the synthetic fixtures in this directory and in `scripts/pageshim/fixtures/x_browser.mjs`, and once on a real iPhone (see [Unverified](#unverified) item 4), where it stopped before opening a view. Some of what it relies on was checked by hand; see [Checked by hand on x.com](#checked-by-hand-on-xcom) and [Unverified](#unverified).
+**Status: development.** It completed a real run on a real iPhone 12 in the Vana mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner: profile 1, posts 31, likes 61, bookmarks 4; 109 posts seen, no aborted requests. It has also run against the synthetic fixtures in this directory and in `scripts/pageshim/fixtures/x_browser.mjs`. Desktop with the current code, incremental second runs and Android are not verified; see [Unverified](#unverified). Some of what it relies on was checked by hand; see [Checked by hand on x.com](#checked-by-hand-on-xcom) and [Unverified](#unverified).
 
 ## Terms of service and the owner's legal basis
 
@@ -18,7 +18,7 @@ What follows from that:
 - Likes and bookmarks are other people's public posts. They are saved, with author and text, because which posts the owner liked or bookmarked is the owner's own data and is not meaningful without them.
 - The owner starts every run. Nothing runs in the background (`refresh_policy.recommended_mode: manual`, `background_safe: false`).
 - The owner signs in themselves, in the browser. The connector never fills in, reads or stores a credential.
-- It is not on the publish allowlist (`scripts/connector-publish-allowlist.mjs` holds it with a reason). Publishing it is a maintainer decision, to be made after a recorded owner run.
+- It is on the publish allowlist (`scripts/connector-publish-allowlist.mjs`) after a recorded owner run on 2026-10-08/09.
 
 This is not legal advice. Whether to run it is the owner's decision.
 
@@ -28,7 +28,7 @@ It does not build X's GraphQL requests. Their query ids rotate and each request 
 
 1. Open `https://x.com/home` (skipped when the page is already there).
 2. Install an observer in the page (`page-scripts.ts`). It wraps `XMLHttpRequest.prototype.open` and `send`, and `window.fetch` as a fallback, and buffers the response of every request to `/graphql/<queryId>/<OperationName>`. It matches on the operation name only and changes no request.
-3. Move between views by following the app's own links, so the page is not reloaded and the observer survives: the profile link, the profile's Replies tab, the History link, and its Likes tab. On the narrow layout the profile link is read from the account drawer the avatar control opens: the drawer's `/<handle>/following` link names the handle, and its own link to `/<handle>` is followed (see [Unverified](#unverified) item 16 for what was seen and what was not).
+3. Move between views by following the app's own links, so the page is not reloaded and the observer survives: the profile link, the profile's Replies tab, the History link, and its Likes tab. On the narrow layout the profile link is read from the account drawer the avatar control opens: the drawer's `/<handle>/following` link names the handle, and its own link to `/<handle>` is followed (this path completed a real run on a real iPhone 12 on 2026-10-08/09; see [Verified on a real iPhone](#verified-on-a-real-iphone)).
 4. Scroll the window down in steps. The app then requests the next page of the list itself.
 5. Take the buffered responses out of the page between steps and parse them in `parsers.ts`.
 
@@ -148,28 +148,46 @@ Seen in a signed-in desktop Chrome session on 2026-10-08, by hand, not by this c
 - **Request variables.** The three user timelines carry `userId`; `Bookmarks` carries only `count` and `includePromotedContent`. So the other-account check applies to posts and likes, and not to bookmarks, which are the session owner's by construction. `count` was 20.
 - **Profile shape.** `profile_bio{description}`, `website{url}`, `relationship_counts{followers, following}`, `tweet_counts{tweets}`, `privacy{protected}`, `verification{verified}`, `location{location}`, `action_counts{favorites_count}`, `avatar{image_url}`, `banner{image_url}`, `core{created_at, name, screen_name}`. The parser reads exactly these keys.
 - **Cookies.** `twid` and `ct0` are readable from page script on desktop, among `personalization_id`, `__cuid`, `lang`, `guest_id_ads`, `guest_id_marketing`, `guest_id` and `g_state`.
-- **No page state to read the handle from.** `window.__INITIAL_STATE__` is undefined on a signed-in page. The handle comes only from the app's own links: on the wide layout `a[data-testid="AppTabBar_Profile_Link"]`, then `a[aria-label="Profile"]`; on the narrow layout the drawer's `/<handle>/following` link (item 16). With neither on the wide layout, a run that needs the handle stops with that reason and opens nothing; the narrow layout is described in [Unverified](#unverified) items 4 and 16. The `twid` cookie gives the numeric id but not the handle, and `/i/user/<id>` is not known to redirect, so neither is used to guess one.
+- **No page state to read the handle from.** `window.__INITIAL_STATE__` is undefined on a signed-in page. The handle comes only from the app's own links: on the wide layout `a[data-testid="AppTabBar_Profile_Link"]`, then `a[aria-label="Profile"]`; on the narrow layout the drawer's `/<handle>/following` link. With neither on the wide layout, a run that needs the handle stops with that reason and opens nothing; the narrow layout completed a real run on a real iPhone 12 on 2026-10-08/09 (see [Verified on a real iPhone](#verified-on-a-real-iphone)). The `twid` cookie gives the numeric id but not the handle, and `/i/user/<id>` is not known to redirect, so neither is used to guess one.
+
+## Verified on a real iPhone
+
+Observed on a real iPhone 12 in the Vana mobile app, through the real connect
+flow with a signed-in owner, on 2026-10-08/09:
+
+- A run completed and collected profile 1, posts 31, likes 61 and bookmarks 4,
+  with 109 posts seen and no aborted requests.
+- The narrow layout has no profile link on the page. The account control
+  `[data-testid="DashButton_ProfileIcon_Link"]` opens a dialog whose links carry
+  no test id and no label; the handle is read from the drawer's
+  `/<handle>/following` link.
+- The profile page's tab strip links work, and scrolling pages.
+- From the profile page the History link is not found (the top-left control is a
+  Back button); the route fallback (`history.pushState` plus `popstate`) reached
+  History and Likes.
+
+The mobile host truncates connector log lines at 160 characters.
 
 ## Unverified
 
-Except where item 4 records a device observation, none of this was checked against x.com, by hand or by this code.
+Except where [Verified on a real iPhone](#verified-on-a-real-iphone) records a
+device observation, none of this was checked against x.com, by hand or by this
+code.
 
-1. **Any end-to-end run.** The connector has not collected a single real record.
+1. **Android.** An Android emulator WebView was refused at X login with "temporarily limited your login"; no real Android device was tried.
 2. **Signed-out behaviour.** That `/home` sends a signed-out session to `/i/flow/login` or `/login` was not observed. The probe treats "no `twid` cookie" or "on a sign-in path" as signed out.
 3. **Short lists.** Whether the app asks for a next page when a list is shorter than the window. If it does not, such a list reports `list_end_unconfirmed` instead of complete.
-4. **The narrow (phone) layout.** On a real iPhone 12, in an app WKWebView at phone width with the desktop Safari user agent and the owner signed in, neither `a[data-testid="AppTabBar_Profile_Link"]` nor `a[aria-label="Profile"]` was present: the run stopped with `source_unreadable` 4 seconds after sign-in and opened nothing. A later device run showed the avatar control's click succeed (`via:"drawer"` in the log) but still found no profile link, because the drawer's links carry no test id and no accessible name; the handle is now read from the drawer's `/<handle>/following` link instead (item 16). That drawer-link path has not run end to end against x.com. The `/with_replies` and `/i/history/likes` tab strips in the narrow layout were not observed. Opening a view with `history.pushState` plus a `popstate` event, used when a view's link is absent, is untested against x.com. When a needed link is missing, a `[x_browser-diagnostic] layout` line names the viewport, the route and the control count, and `[x_browser-diagnostic] lc` lines name the nav-like controls the layout did offer (no text, handle or id); each line fits the mobile host's 150-character budget, and the first line counts any controls left out past the line or budget bound.
-5. **Scrolling in a phone WebView.** The scroll check above was on desktop Chrome.
-6. **Overlap between the Posts and Replies tabs.** Both are read; whether Replies alone would cover Posts was not measured.
-7. **End of a list.** That the last page is a response with cursors and no posts is assumed.
-8. **`TimelinePinEntry`, `TimelineAddToModule`, `TweetWithVisibilityResults`, tombstones.** Handled from known shapes; not seen in the captured responses.
-9. **Cookies on a phone.** That `twid` and `ct0` are readable from page script was seen on desktop only.
-10. **The sign-in and challenge paths** in `SIGN_IN_PATH_RE` are a best list, not an observed one.
-11. **How X signals a rate limit** to the web app (HTTP 429, or 200 with an error body). Both stop the run.
-12. **Detection.** Whether X notices wrapped `XMLHttpRequest` and `fetch`, or scripted link clicks, drawer clicks and scrolling.
-13. **The allowance figures** are third-party reports.
-14. **The desktop runtime.** The sign-in handoff has run only against a fake page, and the main-world evaluation under Patchright has not run at all: the unit tests check only that the argument is passed.
-15. **The mobile host's handling of STATE and of later runs.** A later run sends only what is new, and on the streamed-result host sends an unchanged list as `{ "records": [] }`. The host must add to what it holds, not replace it.
-16. **The account drawer (partly seen).** In the owner's own browser at a 390 px viewport on 2026-10-09, signed in, `a[data-testid="DashButton_ProfileIcon_Link"]` opened exactly one `[role="dialog"]`. Its links, in order, are the avatar, the switcher, the display name, `@handle`, `/<handle>/following`, `/<handle>/verified_followers`, `/<handle>` (Profile), `/i/follow_people`, `/i/premium_sign_up`, `/<handle>/lists`, `/<handle>/communities`, `/i/history`, then settings and logout; none carries a test id or an accessible name except the switcher, settings, logout and Close controls, and there is no `/i/bookmarks` link. The handle is read from the `/<handle>/following` link, accepted only when the same dialog also links to `/<handle>`; the drawer's `/<handle>` link is then followed, and its `a[href="/i/history"]` opens History. Still unverified: the `/with_replies` and `/i/history/likes` tab strips in the narrow layout were not observed, and scrolling/paging in a phone WebView was not observed (item 5). If the drawer never shows the link, the run stops as before and the `layout` and `lc` lines name the controls the layout did offer.
+4. **Scrolling in a phone WebView on Android.** The scroll check above and the real iPhone run were on iPhone; Android was not observed.
+5. **Overlap between the Posts and Replies tabs.** Both are read; whether Replies alone would cover Posts was not measured.
+6. **End of a list.** That the last page is a response with cursors and no posts is assumed.
+7. **`TimelinePinEntry`, `TimelineAddToModule`, `TweetWithVisibilityResults`, tombstones.** Handled from known shapes; not seen in the captured responses.
+8. **Cookies on a phone.** That `twid` and `ct0` are readable from page script was seen on desktop only.
+9. **The sign-in and challenge paths** in `SIGN_IN_PATH_RE` are a best list, not an observed one.
+10. **How X signals a rate limit** to the web app (HTTP 429, or 200 with an error body). Both stop the run.
+11. **Detection.** Whether X notices wrapped `XMLHttpRequest` and `fetch`, or scripted link clicks, drawer clicks and scrolling.
+12. **The allowance figures** are third-party reports.
+13. **The desktop runtime.** The sign-in handoff has run only against a fake page, and the main-world evaluation under Patchright has not run at all: the unit tests check only that the argument is passed. Desktop with the current code is not verified.
+14. **The mobile host's handling of STATE and of later runs.** A later run sends only what is new, and on the streamed-result host sends an unchanged list as `{ "records": [] }`. The host must add to what it holds, not replace it. No incremental second run has been observed.
 
 ## Tests
 
