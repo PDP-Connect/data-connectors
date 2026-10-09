@@ -178,7 +178,8 @@ export function buildConnectionRecords(json: unknown): ListParse {
 
 /** One search hit, reduced to what the walk and the record need. */
 export interface SearchHit {
-	authorId: string | null;
+	/** Always well formed: a hit whose author id cannot be read is unreadable. */
+	authorId: string;
 	id: string;
 	/** Its group's position in the raw result listing, counted from the page. */
 	position: number;
@@ -229,6 +230,12 @@ function buildSearchHit(
 	if (!isObject(message)) return null;
 	const id = snowflake(message.id);
 	if (id === null) return null;
+	// Without a well-formed author id the walk cannot tell the owner's message
+	// from anyone else's, so the hit is unreadable rather than silently skipped.
+	const authorId = isObject(message.author)
+		? snowflake(message.author.id)
+		: null;
+	if (authorId === null) return null;
 	// A message's id carries its send time, so a missing timestamp is not fatal.
 	const timestamp = instant(message.timestamp) ?? snowflakeInstant(id);
 	const reference = isObject(message.message_reference)
@@ -237,7 +244,7 @@ function buildSearchHit(
 	return {
 		id,
 		position,
-		authorId: isObject(message.author) ? snowflake(message.author.id) : null,
+		authorId,
 		timestampMs: Date.parse(timestamp),
 		record: {
 			id,
@@ -280,10 +287,13 @@ export function parseSearchPage(
 	let position = 0;
 	for (const group of json.messages) {
 		const members: unknown[] = Array.isArray(group) ? group : [group];
-		const marked = members.find(
+		const marked = members.filter(
 			(member) => isObject(member) && member.hit === true,
 		);
-		const hit = buildSearchHit(marked ?? members[0], position, server);
+		// Exactly one marked hit, or the first message when none is marked. Two
+		// or more marked hits make the group ambiguous, so it is unreadable.
+		const target = marked.length > 1 ? null : (marked[0] ?? members[0]);
+		const hit = buildSearchHit(target, position, server);
 		if (hit) hits.push(hit);
 		else unreadablePositions.push(position);
 		position += 1;
