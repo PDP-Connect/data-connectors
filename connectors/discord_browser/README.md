@@ -88,11 +88,14 @@ Constants in `index.ts`:
 | Servers refusing in a row before the run ends | 3 |
 
 - The `messages` STATE holds a queue of server ids and, per server, the newest
-  collected message id, the lower-bound instant the cursor was read to, and
-  where an unfinished walk stopped. Later runs continue with the next servers,
-  stop each server at the first message already collected, and read below the
-  stored lower bound when the request asks for a wider range. The newest id
-  never moves backward. STATE holds ids, offsets and that instant only.
+  collected message id, the since and until bounds of the completed walk that
+  proved its coverage, and, when a walk was interrupted, where it stopped. A
+  later run stops a server at the first message already collected only when
+  those recorded bounds exist and the current request is equal to or narrower;
+  any other cursor is ignored for stopping, and the requested range is walked
+  afresh, skipping only instants an earlier completed walk already proved. An
+  interrupted walk keeps the previous bounds and never extends coverage. The
+  newest id never moves backward. STATE holds ids, instants and offsets only.
 - A 401, a captcha or account-check payload, a 403 on a profile endpoint, a
   second 429, a long or account-wide 429, or a server error ends the run with
   no retry. A 403 or a search index that is still not ready skips that server.
@@ -133,7 +136,10 @@ no header name or value:
 
 A `[discord_browser-diagnostic] search_hits_unreadable` line reports a search
 page with a group that had no usable id: `count`, the page's `offset`, and the
-raw result `positions` it left blank. That count does not stop pagination.
+raw result `positions` it left blank. Consecutive positions are packed as
+`start-end`, and a page with many positions is split across as many lines as
+the phone host's 150-character budget needs, so no line is cut mid-field. That
+count does not stop pagination.
 
 ## Verified on 2026-10-08
 
@@ -186,6 +192,7 @@ reason, and nothing is guessed.
   seconds they are in place.
 - On desktop, Patchright's main-world evaluation on discord.com.
 - Whether the mobile host merges a scope's records across runs or replaces
-  them. An incremental run emits only new messages.
+  them. An unchanged or narrower run emits only new messages; a wider range
+  can re-emit messages the host already stored.
 - More than one page of the owner's messages deleted from a server between
   two runs of an unfinished walk can leave a gap in that server.
