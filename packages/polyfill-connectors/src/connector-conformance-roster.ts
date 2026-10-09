@@ -73,6 +73,7 @@ export const KNOWN_SCAFFOLD_CONNECTORS = ["loom", "wholefoods"] as const;
 export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	anthropic: { testFile: "connectors/anthropic/integration.test.ts" },
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
+	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
 	icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
 	google_calendar: { testFile: "connectors/google_calendar/index.test.ts" },
@@ -101,6 +102,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	shopify: { testFile: "connectors/shopify/index.test.ts" },
 	spotify: { testFile: "connectors/spotify/schemas.test.ts" },
 	twitter_archive: { testFile: "connectors/twitter_archive/parsers.test.ts" },
+	x_browser: { testFile: "connectors/x_browser/index.test.ts" },
 	youtube: { testFile: "connectors/youtube/index.test.ts" },
 	youtube_takeout: { testFile: "connectors/youtube_takeout/index.test.ts" },
 };

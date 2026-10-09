@@ -1,0 +1,33 @@
+{
+	"id": "552071489126400001",
+	"username": "sample.user",
+	"global_name": "Sample User",
+	"discriminator": "0",
+	"avatar": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+	"public_flags": 0,
+	"banner": null,
+	"accent_color": 5793266,
+	"bio": "Synthetic profile for fixtures.",
+	"locale": "en-US",
+	"email": "sample.user@example.com",
+	"verified": true,
+	"phone": "+15550100",
+	"mfa_enabled": true,
+	"premium_type": 0,
+	"flags": 0,
+	"nsfw_allowed": true,
+	"avatar_decoration_data": null,
+	"collectibles": null,
+	"display_name_styles": null,
+	"banner_color": "#5865f2",
+	"clan": null,
+	"primary_guild": null,
+	"linked_users": [],
+	"authenticator_types": [2],
+	"age_verification_status": 1,
+	"store_country": {
+		"country": "US",
+		"set_at": "2026-01-05T00:00:00+00:00",
+		"is_locked": false
+	}
+}

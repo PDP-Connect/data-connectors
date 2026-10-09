@@ -31,6 +31,14 @@ export type ConnectorDiagnosticSink = (line: string) => void;
 /** Longest line written. Some hosts truncate console lines; keep them short. */
 export const CONNECTOR_DIAGNOSTIC_MAX_CHARS = 2000;
 
+/**
+ * Budget for one line on the phone host, which truncates a message 160
+ * characters past its own prefix. A connector that emits several report lines
+ * (the layout diagnostics) measures each formatted line against this, so a
+ * line is never cut mid-field.
+ */
+export const DIAGNOSTIC_LINE_MAX_CHARS = 150;
+
 const defaultSink: ConnectorDiagnosticSink = (line) => {
 	console.error(line);
 };

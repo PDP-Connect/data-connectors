@@ -60,7 +60,7 @@ name: Publish Polyfill Connectors
 # before any push or sign step, and that the signing ref condition and the consumer
 # identity expression agree with each other.
 #
-# SCOPE. scripts/connector-publish-allowlist.mjs classifies all 45 manifests. Its
+# SCOPE. scripts/connector-publish-allowlist.mjs classifies all 53 manifests. Its
 # publish list supplies this workflow's matrix and the pull-request build gate;
 # its exclusions record why the three external-tool connectors cannot yet be
 # self-contained OCI artifacts.

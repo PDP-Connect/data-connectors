@@ -81,6 +81,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		shell_snapshots: null,
 		skills: null,
 	},
+	discord_browser: {
+		connections: null,
+		messages: { field: "timestamp", format: "date-time" },
+		profile: null,
+		servers: null,
+	},
 	doordash: {
 		order_items: null,
 		orders: { field: "order_date", format: "date-time" },
@@ -297,6 +303,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		recoveries: { field: "created_at", format: "date-time" },
 		sleeps: { field: "start_at", format: "date-time" },
 		workouts: { field: "start_at", format: "date-time" },
+	},
+	x_browser: {
+		bookmarks: null,
+		likes: null,
+		posts: { field: "created_at", format: "date-time" },
+		profile: null,
 	},
 	ynab: {
 		account_stats: null,

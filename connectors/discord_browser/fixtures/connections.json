@@ -1,0 +1,27 @@
+[
+	{
+		"type": "github",
+		"id": "40000001",
+		"name": "sample-user",
+		"verified": true,
+		"revoked": false,
+		"visibility": 1,
+		"friend_sync": false,
+		"show_activity": true,
+		"two_way_link": false,
+		"metadata_visibility": 1
+	},
+	{
+		"type": "spotify",
+		"id": "synthetic-spotify-account",
+		"name": "Sample User",
+		"verified": true,
+		"revoked": false,
+		"visibility": 0,
+		"friend_sync": false,
+		"show_activity": false,
+		"two_way_link": false,
+		"metadata_visibility": 0,
+		"access_token": "synthetic-third-party-token-never-collected"
+	}
+]
