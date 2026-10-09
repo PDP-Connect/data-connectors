@@ -33,6 +33,7 @@ import {
 	resolveBrowserRuntimeVisibility,
 	selectBrowserPageForRun,
 	shouldCloseBrowserPageAfterRun,
+	shouldPreserveRemotePagesOnAcquire,
 } from "./connector-runtime.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
 
@@ -528,6 +529,38 @@ test("resolveBrowserLaunchSource keeps unmanaged per-profile CDP env as a dev ov
 			kind: "legacy_remote_cdp",
 			remoteCdpUrl: "http://legacy-dev:9223",
 		} satisfies BrowserLaunchSource,
+	);
+});
+
+test("shouldPreserveRemotePagesOnAcquire leaves tabs alone in a browser the runtime does not own", () => {
+	const legacy: BrowserLaunchSource = {
+		envKey: "PDPP_CHATGPT_REMOTE_CDP_URL",
+		kind: "legacy_remote_cdp",
+		remoteCdpUrl: "http://legacy-dev:9223",
+	};
+	const managed: BrowserLaunchSource = {
+		kind: "managed_neko",
+		remoteCdpUrl: "http://managed-neko:9223",
+	};
+	assert.equal(shouldPreserveRemotePagesOnAcquire({}, legacy), true);
+	assert.equal(shouldPreserveRemotePagesOnAcquire({}, managed), false);
+	assert.equal(
+		shouldPreserveRemotePagesOnAcquire({}, { kind: "isolated_local" }),
+		false,
+	);
+	assert.equal(
+		shouldPreserveRemotePagesOnAcquire(
+			{ preservePageOnSuccess: true },
+			managed,
+		),
+		true,
+	);
+	assert.equal(
+		shouldPreserveRemotePagesOnAcquire(
+			{ preservePageOnFailure: true },
+			managed,
+		),
+		true,
 	);
 });
 

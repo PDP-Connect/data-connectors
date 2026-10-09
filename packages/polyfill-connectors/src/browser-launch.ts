@@ -103,10 +103,11 @@ export interface AcquireIsolatedBrowserOptions {
 	 * `baseLaunchOptions` at BOTH `launchPersistentContext` call sites (the
 	 * explicit-channel branch and the default-channel branch), so this option
 	 * covers every local-launch path the same way `streamingEnabled` does.
-	 * Does NOT apply to `acquireRemoteCdpBrowser` (n.eko-attached contexts):
-	 * `connectOverCDP` attaches to an ALREADY-launched remote context, so
-	 * there is no `launchPersistentContext` call to carry `recordHar` on that
-	 * path — recording a remote-CDP session's traffic is out of scope here.
+	 * On the `acquireRemoteCdpBrowser` path there is no launch call to carry
+	 * `recordHar`, so the attached context records through
+	 * `routeFromHAR(path, { update: true })` instead, with the same embedded
+	 * content, and the HAR is exported when `release()` closes the attached
+	 * context (which only disconnects; the remote browser keeps running).
 	 *
 	 * `content: "embed"` (inline base64/text in the HAR JSON, chosen over
 	 * Playwright's zip-friendly `"attach"`) is a deliberate choice: a replay
@@ -140,9 +141,11 @@ export interface AcquireIsolatedBrowserOptions {
 	harRecording?: { path: string };
 	headless?: boolean;
 	/**
-	 * Skip remote-CDP page-target cleanup before attach. Use only when the
+	 * Skip remote-CDP page-target cleanup before attach. Use when the
 	 * connector intentionally preserves successful pages because the page itself
-	 * carries source auth state.
+	 * carries source auth state, or when the remote browser belongs to someone
+	 * else (a `PDPP_<NAME>_REMOTE_CDP_URL` attach) and its tabs are not ours
+	 * to close.
 	 */
 	preserveRemotePagesOnAcquire?: boolean;
 	profileName: string;
@@ -848,7 +851,7 @@ async function acquireRemoteCdpBrowser(
 	profileName: string,
 	options: Pick<
 		AcquireIsolatedBrowserOptions,
-		"preserveRemotePagesOnAcquire"
+		"harRecording" | "preserveRemotePagesOnAcquire" | "storageStateRecording"
 	> = {},
 ): Promise<IsolatedBrowser> {
 	// @ts-expect-error — patchright.chromium is runtime-identical to playwright.chromium
@@ -918,6 +921,17 @@ async function acquireRemoteCdpBrowser(
 			`[browser-launch] could not parse remote CDP URL ${cdpUrl}: ${err instanceof Error ? err.message : String(err)}\n`,
 		);
 	}
+	// `recordHar` is a context-creation option, and an attached browser hands
+	// us an existing context. `routeFromHAR` in update mode starts the same
+	// passive HAR recorder on an existing context without routing anything.
+	const { harRecording, storageStateRecording } = options;
+	if (harRecording) {
+		await context.routeFromHAR(harRecording.path, {
+			update: true,
+			updateContent: "embed",
+			updateMode: "full",
+		});
+	}
 	return {
 		browser,
 		context,
@@ -925,6 +939,22 @@ async function acquireRemoteCdpBrowser(
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
 			releaseRequested = true;
+			if (storageStateRecording) {
+				await writeStorageStateBestEffort(context, storageStateRecording.path);
+			}
+			if (harRecording) {
+				// The HAR is written when the context closes. On a CDP-attached
+				// default context, close() exports the HAR and then only
+				// disconnects; it does not close the remote browser or its pages.
+				try {
+					await context.close();
+				} catch (err) {
+					process.stderr.write(
+						`[browser-launch] remote CDP HAR export failed profile=${profileName}: ${err instanceof Error ? err.message : String(err)}\n`,
+					);
+				}
+				await redactHarFileBestEffort(harRecording.path);
+			}
 			try {
 				await browser.close();
 			} catch {
@@ -933,6 +963,19 @@ async function acquireRemoteCdpBrowser(
 				browser.off("disconnected", onDisconnected);
 			}
 		},
+		...(harRecording
+			? {
+					harRecordingOutcome: (): Promise<HarRecordingOutcome> =>
+						fileFlushOutcome(harRecording.path),
+				}
+			: {}),
+		...(storageStateRecording
+			? {
+					storageStateRecordingOutcome:
+						(): Promise<StorageStateRecordingOutcome> =>
+							fileFlushOutcome(storageStateRecording.path),
+				}
+			: {}),
 	};
 }
 
@@ -1257,11 +1300,11 @@ export async function acquireIsolatedBrowser({
 	// browser owns its own profile and lifecycle (e.g. the n.eko container);
 	// we just attach as a CDP client.
 	if (remoteCdpUrl) {
-		return acquireRemoteCdpBrowser(
-			remoteCdpUrl,
-			profileName,
-			preserveRemotePagesOnAcquire ? { preserveRemotePagesOnAcquire } : {},
-		);
+		return acquireRemoteCdpBrowser(remoteCdpUrl, profileName, {
+			...(preserveRemotePagesOnAcquire ? { preserveRemotePagesOnAcquire } : {}),
+			...(harRecording ? { harRecording } : {}),
+			...(storageStateRecording ? { storageStateRecording } : {}),
+		});
 	}
 	const effectiveHeadless = resolveDeploymentBrowserHeadless(headless);
 	const profileRoot =

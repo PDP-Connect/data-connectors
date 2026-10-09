@@ -9,7 +9,7 @@
 	},
 	"connector_key": "google-maps",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/google-maps",
-	"version": "0.1.12",
+	"version": "0.1.13",
 	"display_name": "Google Maps Timeline Import",
 	"brand": {
 		"icon": "icon.svg",
