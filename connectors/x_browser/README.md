@@ -28,7 +28,7 @@ It does not build X's GraphQL requests. Their query ids rotate and each request 
 
 1. Open `https://x.com/home` (skipped when the page is already there).
 2. Install an observer in the page (`page-scripts.ts`). It wraps `XMLHttpRequest.prototype.open` and `send`, and `window.fetch` as a fallback, and buffers the response of every request to `/graphql/<queryId>/<OperationName>`. It matches on the operation name only and changes no request.
-3. Move between views by following the app's own links, so the page is not reloaded and the observer survives: the profile link, the profile's Replies tab, the History link, and its Likes tab. When the profile link is not on screen, it first clicks the app's own avatar control to open the narrow layout's account drawer (see [Unverified](#unverified) item 16), waits a bounded time for the link, then follows it.
+3. Move between views by following the app's own links, so the page is not reloaded and the observer survives: the profile link, the profile's Replies tab, the History link, and its Likes tab. On the narrow layout the profile link is read from the account drawer the avatar control opens: the drawer's `/<handle>/following` link names the handle, and its own link to `/<handle>` is followed (see [Unverified](#unverified) item 16 for what was seen and what was not).
 4. Scroll the window down in steps. The app then requests the next page of the list itself.
 5. Take the buffered responses out of the page between steps and parse them in `parsers.ts`.
 
@@ -74,7 +74,45 @@ The whole run stops at once, keeping what was read, on any of:
 
 The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short does not move its cursor, so the next run reads it from the top again.
 
-It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write one `layout` diagnostic line naming the viewport, the route, the drawer result, the control count and the number of parts, followed by `layout_controls` lines that pack the controls (per nav-like control: its tag, test id, accessible name, role and a handle-free, id-free path shape). Each line is measured against the formatter and stays whole; if the parts bound is reached, the first line reports how many controls were left out.
+It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control.
+
+Every report line must fit a 150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS`, in `connector-diagnostic.ts`), measured on the whole formatted line the host sees (`[x_browser-diagnostic] ` + event + space + JSON), because the mobile host truncates a message to 160 characters past its own prefix. An `lc` line is therefore a flat JSON object, never a JSON string inside JSON, with short keys:
+
+| Key | Meaning |
+| --- | --- |
+| `i` | 1-based position in the emitted order |
+| `n` | total controls the page offered |
+| `s` | `"d"` when the control is inside an open dialog; omitted for the page |
+| `t` | tag name |
+| `id` | `data-testid` |
+| `al` | masked, clipped `aria-label` |
+| `r` | `role` |
+| `x` | `aria-expanded` |
+| `p` | handle-free, id-free path shape |
+| `cut` | `1` when `al` was shortened, then `p`, to fit the budget |
+
+Dialog controls are named first, so the open drawer is never hidden by the line cap (`LAYOUT_MAX_CONTROL_LINES`, 60). Null or absent fields are left out, `id` is never dropped from a line that is written, and no text, handle or numeric id is ever named. If a control's shortest line still cannot fit, that control is left out (its `id` is not truncated away) and the first line reports `omitted`; otherwise at the page script's 60-control cap every control gets a line.
+
+The per-stream diagnostics use the same budget with short keys, `coverage` plus a `coverage_counts` second line so no field is lost:
+
+| Line | Key | Meaning |
+| --- | --- | --- |
+| `coverage` | `s` | stream |
+| | `st` | `complete` or `partial` |
+| | `r` | failure reason, when partial |
+| | `e` | how each view ended: `end` exhausted, `cap` cap reached, `old` first post older than the range, `known` reached a post already collected, `open` unfinished |
+| | `w` | whether the stream is read to its cap whatever was already collected |
+| `coverage_counts` | `s` | stream |
+| | `p` | pages read |
+| | `n` | posts the app sent |
+| | `k` | records saved |
+| | `o` | other authors' posts read but not saved |
+| | `u` | posts the parser could not use |
+| | `x` | posts with no usable id, author or date |
+| `run` | `ps` | posts seen |
+| | `stop` | stop reason, when the run stopped |
+| | `ab` | aborted requests |
+| | `nav` | `via:count` pairs for link, drawer, history, already-there and none clicks |
 
 ## Sign-in
 
@@ -110,7 +148,7 @@ Seen in a signed-in desktop Chrome session on 2026-10-08, by hand, not by this c
 - **Request variables.** The three user timelines carry `userId`; `Bookmarks` carries only `count` and `includePromotedContent`. So the other-account check applies to posts and likes, and not to bookmarks, which are the session owner's by construction. `count` was 20.
 - **Profile shape.** `profile_bio{description}`, `website{url}`, `relationship_counts{followers, following}`, `tweet_counts{tweets}`, `privacy{protected}`, `verification{verified}`, `location{location}`, `action_counts{favorites_count}`, `avatar{image_url}`, `banner{image_url}`, `core{created_at, name, screen_name}`. The parser reads exactly these keys.
 - **Cookies.** `twid` and `ct0` are readable from page script on desktop, among `personalization_id`, `__cuid`, `lang`, `guest_id_ads`, `guest_id_marketing`, `guest_id` and `g_state`.
-- **No page state to read the handle from.** `window.__INITIAL_STATE__` is undefined on a signed-in page. The handle comes only from the app's own profile link (`a[data-testid="AppTabBar_Profile_Link"]`, then `a[aria-label="Profile"]`). With neither on the wide layout, a run that needs the handle stops with that reason and opens nothing; the narrow layout is described in [Unverified](#unverified) items 4 and 16. The `twid` cookie gives the numeric id but not the handle, and `/i/user/<id>` is not known to redirect, so neither is used to guess one.
+- **No page state to read the handle from.** `window.__INITIAL_STATE__` is undefined on a signed-in page. The handle comes only from the app's own links: on the wide layout `a[data-testid="AppTabBar_Profile_Link"]`, then `a[aria-label="Profile"]`; on the narrow layout the drawer's `/<handle>/following` link (item 16). With neither on the wide layout, a run that needs the handle stops with that reason and opens nothing; the narrow layout is described in [Unverified](#unverified) items 4 and 16. The `twid` cookie gives the numeric id but not the handle, and `/i/user/<id>` is not known to redirect, so neither is used to guess one.
 
 ## Unverified
 
@@ -119,7 +157,7 @@ Except where item 4 records a device observation, none of this was checked again
 1. **Any end-to-end run.** The connector has not collected a single real record.
 2. **Signed-out behaviour.** That `/home` sends a signed-out session to `/i/flow/login` or `/login` was not observed. The probe treats "no `twid` cookie" or "on a sign-in path" as signed out.
 3. **Short lists.** Whether the app asks for a next page when a list is shorter than the window. If it does not, such a list reports `list_end_unconfirmed` instead of complete.
-4. **The narrow (phone) layout.** On a real iPhone 12, in an app WKWebView at phone width with the desktop Safari user agent and the owner signed in, neither `a[data-testid="AppTabBar_Profile_Link"]` nor `a[aria-label="Profile"]` was present: the run stopped with `source_unreadable` 4 seconds after sign-in and opened nothing. That is the only narrow-layout observation. The connector now clicks the avatar control that opens the account drawer and looks for the profile link again, and clicks the control again before opening History; that drawer path has not run against x.com. Every link selector that was seen was seen on the wide layout only. Opening a view with `history.pushState` plus a `popstate` event, used when a view's link is absent, is untested against x.com. When a needed link is missing, a `[x_browser-diagnostic] layout` line names the viewport, the route and the control count, and `[x_browser-diagnostic] layout_controls` lines name the nav-like controls the layout did offer (no text, handle or id); each line stays under the formatter's truncation limit, and the first line counts any controls left out past the parts bound.
+4. **The narrow (phone) layout.** On a real iPhone 12, in an app WKWebView at phone width with the desktop Safari user agent and the owner signed in, neither `a[data-testid="AppTabBar_Profile_Link"]` nor `a[aria-label="Profile"]` was present: the run stopped with `source_unreadable` 4 seconds after sign-in and opened nothing. A later device run showed the avatar control's click succeed (`via:"drawer"` in the log) but still found no profile link, because the drawer's links carry no test id and no accessible name; the handle is now read from the drawer's `/<handle>/following` link instead (item 16). That drawer-link path has not run end to end against x.com. The `/with_replies` and `/i/history/likes` tab strips in the narrow layout were not observed. Opening a view with `history.pushState` plus a `popstate` event, used when a view's link is absent, is untested against x.com. When a needed link is missing, a `[x_browser-diagnostic] layout` line names the viewport, the route and the control count, and `[x_browser-diagnostic] lc` lines name the nav-like controls the layout did offer (no text, handle or id); each line fits the mobile host's 150-character budget, and the first line counts any controls left out past the line or budget bound.
 5. **Scrolling in a phone WebView.** The scroll check above was on desktop Chrome.
 6. **Overlap between the Posts and Replies tabs.** Both are read; whether Replies alone would cover Posts was not measured.
 7. **End of a list.** That the last page is a response with cursors and no posts is assumed.
@@ -131,7 +169,7 @@ Except where item 4 records a device observation, none of this was checked again
 13. **The allowance figures** are third-party reports.
 14. **The desktop runtime.** The sign-in handoff has run only against a fake page, and the main-world evaluation under Patchright has not run at all: the unit tests check only that the argument is passed.
 15. **The mobile host's handling of STATE and of later runs.** A later run sends only what is new, and on the streamed-result host sends an unchanged list as `{ "records": [] }`. The host must add to what it holds, not replace it.
-16. **The account-drawer hypothesis.** That the narrow layout replaces the left navigation with a side drawer, that the profile and History links live in it, and that the drawer is opened by the avatar button with selector `[data-testid="DashButton_ProfileIcon_Link"]`, is second-hand: not seen by this code. If the drawer never shows the link, the run stops as before and the `layout` and `layout_controls` lines name the controls the layout did offer. The History link inside the drawer is looked up with a bare `a[href="/i/history"]` alongside the primary-nav selector; which one the drawer renders was not checked.
+16. **The account drawer (partly seen).** In the owner's own browser at a 390 px viewport on 2026-10-09, signed in, `a[data-testid="DashButton_ProfileIcon_Link"]` opened exactly one `[role="dialog"]`. Its links, in order, are the avatar, the switcher, the display name, `@handle`, `/<handle>/following`, `/<handle>/verified_followers`, `/<handle>` (Profile), `/i/follow_people`, `/i/premium_sign_up`, `/<handle>/lists`, `/<handle>/communities`, `/i/history`, then settings and logout; none carries a test id or an accessible name except the switcher, settings, logout and Close controls, and there is no `/i/bookmarks` link. The handle is read from the `/<handle>/following` link, accepted only when the same dialog also links to `/<handle>`; the drawer's `/<handle>` link is then followed, and its `a[href="/i/history"]` opens History. Still unverified: the `/with_replies` and `/i/history/likes` tab strips in the narrow layout were not observed, and scrolling/paging in a phone WebView was not observed (item 5). If the drawer never shows the link, the run stops as before and the `layout` and `lc` lines name the controls the layout did offer.
 
 ## Tests
 

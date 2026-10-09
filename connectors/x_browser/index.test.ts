@@ -7,7 +7,7 @@ import test from "node:test";
 import vm from "node:vm";
 import {
 	assertUserFacingProgress,
-	CONNECTOR_DIAGNOSTIC_MAX_CHARS,
+	DIAGNOSTIC_LINE_MAX_CHARS,
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
@@ -31,7 +31,9 @@ import {
 	type XCollectOptions,
 } from "./index.ts";
 import {
+	DRAWER_DIALOG_SELECTOR,
 	DRAWER_OPEN_SELECTORS,
+	drawerProfileSelector,
 	LAYOUT_CONTAINER_SELECTOR,
 	LAYOUT_CONTROL_CAP,
 } from "./page-scripts.ts";
@@ -134,10 +136,15 @@ interface FakeXhr {
 	send: () => void;
 }
 
-/** A synthetic control the layout diagnostic sees, with only a label and path. */
+/** A synthetic control the layout diagnostic sees. */
 interface SyntheticLayoutControl {
 	ariaLabel: string;
+	/** True: the control sits inside an open dialog. */
+	dialog?: boolean;
+	expanded?: string;
 	href: string;
+	role?: string;
+	testid?: string;
 }
 
 /** One element the layout diagnostic can read, as the page scripts see it. */
@@ -319,11 +326,64 @@ class FakeWebApp {
 		}
 	}
 
+	/**
+	 * The drawer's own anchors, in the order the owner's 390 px browser showed
+	 * them on 2026-10-09. Its profile and History links carry no test id and
+	 * no accessible name, so only their hrefs are modelled.
+	 */
+	private drawerPaths(): string[] {
+		return [
+			`/${HANDLE}`,
+			`/${HANDLE}`,
+			`/${HANDLE}`,
+			`/${HANDLE}/following`,
+			`/${HANDLE}/verified_followers`,
+			`/${HANDLE}`,
+			"/i/follow_people",
+			"/i/premium_sign_up",
+			`/${HANDLE}/lists`,
+			`/${HANDLE}/communities`,
+			"/i/history",
+			"/settings",
+			"/logout",
+		];
+	}
+
+	/** The open drawer, as the handle script reads it: its anchors, in order. */
+	private dialog(): unknown {
+		const paths = this.drawerPaths();
+		return {
+			querySelectorAll: (selector: string) =>
+				selector === "a[href]"
+					? paths.map((path) => ({
+							getAttribute: (name: string) =>
+								name === "href" ? path : null,
+							tagName: "A",
+						}))
+					: [],
+		};
+	}
+
+	/** One anchor the page scripts can follow. */
+	private anchor(path: string): unknown {
+		return {
+			tagName: "A",
+			href: `${ORIGIN}${path}`,
+			getAttribute: (name: string) => (name === "href" ? path : null),
+			click: () => {
+				this.clicks.push(path);
+				// A navigation closes the drawer, as the real app does.
+				this.drawerOpen = false;
+				(this.window["location"] as { pathname: string }).pathname = path;
+				this.render();
+			},
+		};
+	}
+
 	/** The links the layout offers, by the selectors the connector uses. */
 	private link(selector: string): unknown {
 		const sidebar = this.options.sidebar !== false;
-		// The drawer, once open, renders the same primary navigation.
-		const navOpen = sidebar || this.drawerOpen;
+		const drawer = this.drawerOpen;
 		const onProfile = this.path.startsWith(`/${HANDLE}`);
 		const onHistory = this.path.startsWith("/i/history");
 		if (selector === DRAWER_OPEN_SELECTORS[0]) {
@@ -341,14 +401,35 @@ class FakeWebApp {
 				},
 			};
 		}
-		const offered: Record<string, string | null> = {
-			'a[data-testid="AppTabBar_Profile_Link"]': navOpen ? `/${HANDLE}` : null,
+		if (selector === DRAWER_DIALOG_SELECTOR) {
+			return drawer ? this.dialog() : null;
+		}
+		// The wide layout's own navigation, with its test id and accessible
+		// name. The observed drawer renders neither.
+		const sidebarLinks: Record<string, string | null> = {
+			'a[data-testid="AppTabBar_Profile_Link"]': sidebar ? `/${HANDLE}` : null,
 			'a[aria-label="Profile"]':
-				navOpen || this.options.profileLink ? `/${HANDLE}` : null,
-			'nav[aria-label="Primary"] a[href="/i/history"]': navOpen
+				sidebar || this.options.profileLink ? `/${HANDLE}` : null,
+			'nav[aria-label="Primary"] a[href="/i/history"]': sidebar
 				? "/i/history"
 				: null,
-			'a[href="/i/history"]': navOpen ? "/i/history" : null,
+		};
+		if (selector in sidebarLinks) {
+			const path = sidebarLinks[selector];
+			return path && this.signedIn ? this.anchor(path) : null;
+		}
+		// The drawer's profile link, addressed by the href built from the handle.
+		if (selector === drawerProfileSelector(HANDLE)) {
+			const hasProfile = this.drawerPaths().includes(`/${HANDLE}`);
+			return drawer && hasProfile && this.signedIn
+				? this.anchor(`/${HANDLE}`)
+				: null;
+		}
+		const offered: Record<string, string | null> = {
+			'a[href="/i/history"]':
+				sidebar || (drawer && this.drawerPaths().includes("/i/history"))
+					? "/i/history"
+					: null,
 			'[role="tablist"] a[href$="/with_replies"]': onProfile
 				? `/${HANDLE}/with_replies`
 				: null,
@@ -361,18 +442,7 @@ class FakeWebApp {
 		if (!(path && this.signedIn)) {
 			return null;
 		}
-		return {
-			tagName: "A",
-			href: `${ORIGIN}${path}`,
-			getAttribute: (name: string) => (name === "href" ? path : null),
-			click: () => {
-				this.clicks.push(path);
-				// A navigation closes the drawer, as the real app does.
-				this.drawerOpen = false;
-				(this.window["location"] as { pathname: string }).pathname = path;
-				this.render();
-			},
-		};
+		return this.anchor(path);
 	}
 
 	/** The controls the layout diagnostic sees, inside a nav-like container. */
@@ -380,13 +450,20 @@ class FakeWebApp {
 		const injected = this.options.layoutControls;
 		if (injected !== undefined) {
 			return injected.map((control) => ({
-				closest: () => null,
-				getAttribute: (name: string) =>
-					name === "href"
-						? control.href
-						: name === "aria-label"
-							? control.ariaLabel
-							: null,
+				closest: (selector: string) =>
+					selector === '[role="dialog"]' && control.dialog === true
+						? { tagName: "DIV" }
+						: null,
+				getAttribute: (name: string) => {
+					const attributes: Record<string, string | undefined> = {
+						"aria-expanded": control.expanded,
+						"aria-label": control.ariaLabel,
+						"data-testid": control.testid,
+						href: control.href,
+						role: control.role,
+					};
+					return attributes[name] ?? null;
+				},
 				tagName: "A",
 			}));
 		}
@@ -680,7 +757,7 @@ function layoutReport(lines: string[]): {
 	lines: string[];
 } {
 	const reportLines = lines.filter((line) =>
-		/^\[x_browser-diagnostic\] layout(?:_controls)? /.test(line),
+		/^\[x_browser-diagnostic\] (?:layout|lc) /.test(line),
 	);
 	const firstLines = reportLines.filter((line) =>
 		line.startsWith("[x_browser-diagnostic] layout "),
@@ -688,12 +765,10 @@ function layoutReport(lines: string[]): {
 	assert.equal(firstLines.length, 1, "exactly one layout report per run");
 	const first = firstLines[0] ?? "";
 	const controls = reportLines
-		.filter((line) => line.startsWith("[x_browser-diagnostic] layout_controls "))
-		.flatMap(
+		.filter((line) => line.startsWith("[x_browser-diagnostic] lc "))
+		.map(
 			(line) =>
-				JSON.parse(
-					JSON.parse(line.slice(line.indexOf("{"))).controls,
-				) as Array<Record<string, unknown>>,
+				JSON.parse(line.slice(line.indexOf("{"))) as Record<string, unknown>,
 		);
 	return {
 		controls,
@@ -776,19 +851,43 @@ test("a first run reads the profile, posts, bookmarks and likes the app loads", 
 		.filter((line) => line.startsWith("[x_browser-diagnostic] coverage "))
 		.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
 	assert.deepEqual(
-		coverage.map((c) => [c.stream, c.status, c.view_ends]),
+		coverage.map((c) => [c.s, c.st, c.e]),
 		[
 			["profile", "complete", undefined],
-			["posts", "complete", "exhausted,exhausted"],
-			["bookmarks", "complete", "exhausted"],
-			["likes", "complete", "exhausted"],
+			["posts", "complete", "end,end"],
+			["bookmarks", "complete", "end"],
+			["likes", "complete", "end"],
 		],
+	);
+	// The counters ride a second short line so every line fits the phone host.
+	const counts = lines
+		.filter((line) =>
+			line.startsWith("[x_browser-diagnostic] coverage_counts "),
+		)
+		.map((line) => JSON.parse(line.slice(line.indexOf("{"))));
+	assert.equal(counts.length, coverage.length - 1);
+	assert.equal(
+		counts.reduce((sum, c) => sum + Number(c.k), 0),
+		14,
+	);
+	const countKeys = ["p", "n", "k", "o", "u", "x"];
+	assert.ok(
+		counts.every((c) =>
+			countKeys.every((key) => typeof c[key] === "number"),
+		),
 	);
 	// 6 + 5 on the profile, 2 bookmarks, 5 likes: what the run cost.
 	const run = lines.find((line) =>
 		line.startsWith("[x_browser-diagnostic] run "),
 	);
-	assert.match(run ?? "", /"posts_seen":18/);
+	assert.match(run ?? "", /"ps":18/);
+	// Every diagnostic the run writes fits the phone host's line budget.
+	for (const line of lines) {
+		assert.ok(
+			line.length <= DIAGNOSTIC_LINE_MAX_CHARS,
+			`${line.length} chars: ${line}`,
+		);
+	}
 	// Diagnostics carry counts, never ids, handles or text.
 	assert.ok(
 		!lines.some((line) => /sample_owner|19\d{17}|Synthetic/.test(line)),
@@ -1092,11 +1191,19 @@ test("phone layout: the avatar drawer gives the handle, and later views reopen i
 		"/i/history",
 		"/i/history/likes",
 	]);
-	// The drawer was opened for the handle and again for History.
+	// The handle came from the drawer's own following link, not from a
+	// labelled anchor; the drawer's links have neither test id nor name.
+	assert.ok(
+		lines.some((line) => line.includes('"via":"drawer_following"')),
+		"the handle came from the drawer's following link",
+	);
+	// The drawer was opened for the handle and again for History, never a
+	// third time: the profile step followed the link already in the drawer.
 	const run = lines.find((line) =>
 		line.startsWith("[x_browser-diagnostic] run "),
 	);
-	assert.match(run ?? "", /"navigations":"[^"]*drawer:2/);
+	assert.match(run ?? "", /"nav":"[^"]*drawer:2/);
+	assert.doesNotMatch(run ?? "", /already_open/);
 	assert.ok(!lines.some((line) => /sample_owner|19\d{17}/.test(line)));
 });
 
@@ -1120,8 +1227,8 @@ test("no profile link and no drawer control: the run stops and reports the layou
 	assert.deepEqual(h.states(), {});
 
 	// One report names the viewport, the route and the controls across a
-	// `layout` line and its `layout_controls` lines, with the account handle
-	// and the numeric id replaced by placeholders.
+	// `layout` line and its `lc` lines, with the account handle and the
+	// numeric id replaced by placeholders.
 	const report = layoutReport(lines);
 	const { layout, controls } = report;
 	assert.equal(typeof layout.width, "number");
@@ -1131,36 +1238,48 @@ test("no profile link and no drawer control: the run stops and reports the layou
 	// The run offered the drawer control, but this layout has none.
 	assert.equal(layout.drawer, "no_control");
 	assert.equal(layout.controls, controls.length);
-	assert.equal(typeof layout.parts, "number");
+	assert.equal(layout.parts, controls.length);
 	assert.ok(controls.length <= LAYOUT_CONTROL_CAP);
+	// Every line, the first included, fits the mobile host's budget.
+	for (const line of report.lines) {
+		assert.ok(
+			line.length <= DIAGNOSTIC_LINE_MAX_CHARS,
+			`line is ${line.length} chars`,
+		);
+	}
 	const text = report.lines.join("\n");
 	assert.doesNotMatch(text, /sample_owner|1900000000000000001/);
 	assert.match(text, /:handle/);
 	assert.match(text, /:id/);
 
-	// The accessible name that holds the handle is masked and clipped.
+	// Dialog controls come first: the open drawer is what the run needs.
+	const dialog = controls.find((control) => control["id"] === "DialogClose");
+	assert.equal(dialog?.["s"], "d");
+	assert.equal(controls[0]?.["id"], "DialogClose");
+	// The running index and total are on every control line.
+	assert.deepEqual(
+		controls.map((control) => control["i"]),
+		controls.map((_control, index) => index + 1),
+	);
+	assert.ok(controls.every((control) => control["n"] === controls.length));
+
+	// The accessible name that holds the handle is masked, then clipped to fit.
 	const account = controls.find(
-		(control) => control["testid"] === "AvatarDrawerButton",
+		(control) => control["id"] === "AvatarDrawerButton",
 	);
 	assert.ok(account);
-	assert.equal(account["expanded"], "true");
-	assert.equal(account["scope"], "page");
-	const ariaLabel = String(account["aria_label"]);
+	assert.equal(account["x"], "true");
+	// A page control carries no `s`.
+	assert.ok(!("s" in account));
+	const ariaLabel = String(account["al"]);
 	assert.ok(ariaLabel.length <= 40);
-	assert.match(ariaLabel, /:handle/);
 	assert.doesNotMatch(ariaLabel, /sample_owner/);
 
-	// A control inside an open dialog is told apart from the page.
-	const dialog = controls.find((control) => control["testid"] === "DialogClose");
-	assert.equal(dialog?.["scope"], "dialog");
-
 	// A control with a null field leaves that field out entirely.
-	const explore = controls.find(
-		(control) => control["aria_label"] === "Explore",
-	);
+	const explore = controls.find((control) => control["al"] === "Explore");
 	assert.ok(explore);
-	assert.ok(!("testid" in explore));
-	assert.ok(!("role" in explore));
+	assert.ok(!("id" in explore));
+	assert.ok(!("r" in explore));
 });
 
 test("a drawer click that opens nothing is recorded in the layout line", async () => {
@@ -1188,7 +1307,7 @@ test("a drawer click that opens nothing is recorded in the layout line", async (
 	const run = lines.find((entry) =>
 		entry.startsWith("[x_browser-diagnostic] run "),
 	);
-	assert.match(run ?? "", /"navigations":"[^"]*drawer:1/);
+	assert.match(run ?? "", /"nav":"[^"]*drawer:1/);
 });
 
 /** 60 synthetic controls: a 40-char label and a path of handle-shaped parts. */
@@ -1202,7 +1321,7 @@ function syntheticControls(segments: number): SyntheticLayoutControl[] {
 	}));
 }
 
-test("60 controls are packed into whole lines, in order, without truncation", async () => {
+test("60 controls become one line each, in order, and every line fits", async () => {
 	const app = new FakeWebApp({
 		layoutControls: syntheticControls(6),
 		sidebar: false,
@@ -1212,28 +1331,45 @@ test("60 controls are packed into whole lines, in order, without truncation", as
 	const report = layoutReport(lines);
 	assert.equal(report.layout.controls, LAYOUT_CONTROL_CAP);
 	assert.equal(report.controls.length, LAYOUT_CONTROL_CAP);
-	// The controls come back in the order the page offered them.
+	assert.equal(report.layout.parts, LAYOUT_CONTROL_CAP);
+	assert.ok(!("omitted" in report.layout));
+	// One line per control, in the order the page offered them.
 	assert.deepEqual(
-		report.controls.map((control) => control["aria_label"]),
-		syntheticControls(6).map((control) => control.ariaLabel),
+		report.controls.map((control) => control["i"]),
+		Array.from({ length: LAYOUT_CONTROL_CAP }, (_, index) => index + 1),
 	);
-	// Every line is a whole line the formatter would not cut.
+	assert.deepEqual(
+		report.controls.map((control) => control["n"]),
+		Array.from({ length: LAYOUT_CONTROL_CAP }, () => LAYOUT_CONTROL_CAP),
+	);
+	// Every 40-char label is shortened; the path is long but still fits.
+	const expectedPath = `/${Array.from({ length: 6 }, () => ":handle").join("/")}`;
+	assert.deepEqual(
+		report.controls.map((control) => control["al"]),
+		syntheticControls(6).map((control) => control.ariaLabel.slice(0, 16)),
+	);
+	for (const control of report.controls) {
+		assert.equal(control["cut"], 1);
+		assert.equal(control["p"], expectedPath);
+	}
+	// Every line, the first included, fits the mobile host's budget.
 	for (const line of report.lines) {
 		assert.ok(
-			line.length <= CONNECTOR_DIAGNOSTIC_MAX_CHARS,
+			line.length <= DIAGNOSTIC_LINE_MAX_CHARS,
 			`line is ${line.length} chars`,
 		);
 		assert.ok(!line.endsWith("…"), "no line is truncated");
 	}
-	// A control's null fields are left out of the compact form.
+	// A control's null fields are left out of the flat form.
 	for (const control of report.controls) {
-		assert.ok(!("testid" in control));
-		assert.ok(!("role" in control));
-		assert.ok(!("expanded" in control));
+		assert.ok(!("id" in control));
+		assert.ok(!("r" in control));
+		assert.ok(!("x" in control));
+		assert.ok(!("s" in control));
 	}
 });
 
-test("past the line bound the first line counts the controls left out", async () => {
+test("a very long path is shortened after the label, and the line marked cut", async () => {
 	const app = new FakeWebApp({
 		layoutControls: syntheticControls(60),
 		sidebar: false,
@@ -1241,17 +1377,64 @@ test("past the line bound the first line counts the controls left out", async ()
 	const h = harness(app);
 	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
 	const report = layoutReport(lines);
-	assert.equal(report.layout.controls, LAYOUT_CONTROL_CAP);
-	// At these sizes the 60-control cap exceeds the parts bound, so the first
-	// line must count what it could not name.
-	const omitted = report.layout.omitted;
-	assert.equal(typeof omitted, "number");
-	assert.ok((omitted as number) > 0);
-	assert.equal(report.controls.length + (omitted as number), LAYOUT_CONTROL_CAP);
-	for (const line of report.lines) {
-		assert.ok(line.length <= CONNECTOR_DIAGNOSTIC_MAX_CHARS);
-		assert.ok(!line.endsWith("…"), "no line is truncated");
+	assert.equal(report.controls.length, LAYOUT_CONTROL_CAP);
+	for (const control of report.controls) {
+		assert.equal(control["cut"], 1);
+		assert.equal(String(control["al"]).length, 16);
+		assert.equal(String(control["p"]).length, 12);
 	}
+	for (const line of report.lines) {
+		assert.ok(line.length <= DIAGNOSTIC_LINE_MAX_CHARS);
+	}
+});
+
+test("a control whose minimal line cannot fit is counted as omitted", async () => {
+	const controls = syntheticControls(6);
+	const huge = controls.at(30);
+	assert.ok(huge);
+	huge.testid = "T".repeat(200);
+	const app = new FakeWebApp({ layoutControls: controls, sidebar: false });
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	const report = layoutReport(lines);
+	assert.equal(report.layout.controls, LAYOUT_CONTROL_CAP);
+	assert.equal(report.layout.omitted, 1);
+	assert.equal(report.controls.length, LAYOUT_CONTROL_CAP - 1);
+	// The omitted control leaves a gap in the running index.
+	assert.ok(!report.controls.some((control) => control["i"] === 31));
+	for (const line of report.lines) {
+		assert.ok(
+			line.length <= DIAGNOSTIC_LINE_MAX_CHARS,
+			`line is ${line.length} chars`,
+		);
+	}
+});
+
+test("control lines mask and clip an accessible name and omit null fields", async () => {
+	const app = new FakeWebApp({
+		layoutControls: [
+			{
+				ariaLabel: `Account menu for @${HANDLE} and more words here`,
+				href: `${ORIGIN}/${HANDLE}`,
+			},
+		],
+		sidebar: false,
+	});
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	const report = layoutReport(lines);
+	const control = report.controls[0];
+	assert.ok(control);
+	const ariaLabel = String(control["al"]);
+	assert.ok(ariaLabel.length <= 40);
+	assert.match(ariaLabel, /:handle/);
+	assert.doesNotMatch(ariaLabel, /sample_owner/);
+	assert.equal(control["p"], "/:handle");
+	assert.ok(!("id" in control));
+	assert.ok(!("r" in control));
+	assert.ok(!("x" in control));
+	assert.ok(!("s" in control));
+	assert.ok(!("cut" in control));
 });
 
 test("redactPathShape masks handles and ids but keeps X's route words", () => {

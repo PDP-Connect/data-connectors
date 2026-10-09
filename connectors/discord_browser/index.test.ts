@@ -7,6 +7,7 @@ import test from "node:test";
 import vm from "node:vm";
 import {
 	assertUserFacingProgress,
+	DIAGNOSTIC_LINE_MAX_CHARS,
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
@@ -567,7 +568,16 @@ test("a client that uses fetch is read the same way", async () => {
 	// Two client requests on the way to Shop, two on the way back to Friends.
 	assert.equal(fake.clientRequests(), 4);
 	assert.equal(fake.inPage("location.pathname"), "/channels/@me");
-	assert.ok(lines.some((line) => line.includes('"client_transport":"fetch"')));
+	assert.ok(lines.some((line) => line.includes('"ct":"fetch"')));
+	// The one coverage line fits the phone host's budget with every field.
+	const coverage = lines.find((line) =>
+		line.startsWith("[discord_browser-diagnostic] coverage "),
+	);
+	assert.ok(coverage);
+	assert.ok(
+		coverage.length <= DIAGNOSTIC_LINE_MAX_CHARS,
+		`${coverage.length} chars: ${coverage}`,
+	);
 });
 
 test("an idle client ends the run with nothing read", async () => {

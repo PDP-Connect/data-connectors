@@ -94,6 +94,25 @@ Constants in `index.ts`:
 - The manifest sets manual refresh, `background_safe: false` and a minimum
   interval of one day.
 
+## Diagnostics
+
+One `[discord_browser-diagnostic] coverage` line reports the messages stream
+at the end of a run. Its keys are short so the line fits the phone host's
+150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS` in `connector-diagnostic.ts`):
+
+| Key | Meaning |
+| --- | --- |
+| `s` | stream |
+| `st` | `complete`, `partial` or `stopped` |
+| `v` | client page API version |
+| `ct` | how the client request was captured (`xhr`, `fetch`) |
+| `rq` | requests made this run |
+| `n` | servers in the queue |
+| `sc` | servers searched this run |
+| `sk` | servers skipped this run |
+| `w` | servers still waiting for the next run |
+| `m` | messages saved |
+
 ## Verified on 2026-10-08
 
 Checked by hand in one signed-in desktop session, English locale. The

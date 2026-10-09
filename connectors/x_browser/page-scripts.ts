@@ -200,8 +200,8 @@ export const POLL_SCRIPT = `(() => {
  * The app's links to the signed-in owner's profile, whose href is
  * `/<handle>`. The first was seen in the wide desktop layout's navigation.
  * The second is the same link by its accessible name, for a layout that
- * renders it without the test id; whether a narrow layout does was not
- * checked.
+ * renders it without the test id. The narrow layout at 390 px renders neither
+ * (seen 2026-10-09); its drawer link is read by `OWNER_HANDLE_SCRIPT` instead.
  */
 export const PROFILE_LINK_SELECTORS = [
 	'a[data-testid="AppTabBar_Profile_Link"]',
@@ -210,23 +210,54 @@ export const PROFILE_LINK_SELECTORS = [
 
 /**
  * The control that opens the narrow layout's account drawer, where the
- * profile and History links live once the left navigation is gone. UNVERIFIED
- * hypothesis: supplied by the connector's own diagnostic report, never seen
- * by this code. It is a hypothesis only; the drawer's own links are read
- * through the ordinary selectors after the click.
+ * profile and History links live once the left navigation is gone. Seen in the
+ * owner's browser at a 390 px viewport on 2026-10-09: the button that carries
+ * this test id opened the drawer.
  */
 export const DRAWER_OPEN_SELECTORS = [
 	'[data-testid="DashButton_ProfileIcon_Link"]',
 ] as const;
 
 /**
- * Click the app's account control that opens the narrow layout's drawer. It
- * clicks only an element the selectors match and that is a link, a button or
- * a control role button declares; it changes no request. `via` is "drawer"
- * when a control was clicked and "none" when none is present.
+ * The narrow layout's account drawer, once open. Seen at 390 px on 2026-10-09.
+ * Its own links carry no test id and no accessible name, so the profile link
+ * is addressed by its href alone.
  */
-export function openDrawerScript(selectors: readonly string[]): string {
+export const DRAWER_DIALOG_SELECTOR = '[role="dialog"]';
+
+/** The drawer's link to the validated handle's profile. */
+export function drawerProfileSelector(handle: string): string {
+	return `${DRAWER_DIALOG_SELECTOR} a[href="/${handle}"]`;
+}
+
+/**
+ * Click the app's account control that opens the narrow layout's drawer. It
+ * clicks only an element the selectors match and that is a link, a button or a
+ * control role button declares; it changes no request.
+ *
+ * When `wantedPath` is given and a drawer is already open with a link to that
+ * path, it clicks nothing and reports "already_open": the control toggles, so
+ * clicking it again would shut the drawer before the link was followed. `via`
+ * is "drawer" when a control was clicked, "already_open" when an open drawer
+ * already held the link, and "none" when no control is present.
+ */
+export function openDrawerScript(
+	selectors: readonly string[],
+	wantedPath: string | null = null,
+): string {
 	return `(() => {
+	const wanted = ${JSON.stringify(wantedPath)};
+	if (wanted !== null) {
+		const dialog = document.querySelector(${JSON.stringify(DRAWER_DIALOG_SELECTOR)});
+		const links = dialog && dialog.querySelectorAll ? dialog.querySelectorAll("a[href]") : [];
+		for (const link of links) {
+			let path = "";
+			try {
+				path = new URL(String(link.getAttribute("href") || ""), location.href).pathname;
+			} catch (error) {}
+			if (path === wanted) return { via: "already_open" };
+		}
+	}
 	for (const selector of ${JSON.stringify(selectors)}) {
 		let control = null;
 		try {
@@ -245,10 +276,13 @@ export function openDrawerScript(selectors: readonly string[]): string {
 
 /**
  * The signed-in owner's handle, from the href of the app's own profile link.
- * There is no other source: the `twid` cookie gives the owner's numeric id
- * but not the handle, and `window.__INITIAL_STATE__` is undefined on a
- * signed-in page. When no link is present the handle is null and the caller
- * stops; it is never guessed.
+ * The wide layout's link is read first. When it is absent, the handle comes
+ * from the open account drawer without reading any text: an anchor whose own
+ * href path is `/<handle>/following`, with an anchor to `/<handle>` beside it
+ * in the same dialog. There is no other source: the `twid` cookie gives the
+ * owner's numeric id but not the handle, and `window.__INITIAL_STATE__` is
+ * undefined on a signed-in page. When no link is present the handle is null
+ * and the caller stops; it is never guessed.
  */
 export const OWNER_HANDLE_SCRIPT = `(() => {
 	const HANDLE = /^[A-Za-z0-9_]{1,15}$/;
@@ -257,6 +291,24 @@ export const OWNER_HANDLE_SCRIPT = `(() => {
 		const href = link ? String(link.getAttribute("href") || "") : "";
 		const handle = href.replace(/^\\//, "").replace(/\\/$/, "");
 		if (HANDLE.test(handle)) return { handle, via: selector.includes("testid") ? "profile_link" : "profile_label" };
+	}
+	const pathOf = (element) => {
+		const href = element ? String(element.getAttribute("href") || "") : "";
+		try {
+			return new URL(href, location.href).pathname;
+		} catch (error) {
+			return "";
+		}
+	};
+	const dialog = document.querySelector(${JSON.stringify(DRAWER_DIALOG_SELECTOR)});
+	const links = dialog && dialog.querySelectorAll ? dialog.querySelectorAll("a[href]") : [];
+	for (const link of links) {
+		const match = /^\\/([A-Za-z0-9_]{1,15})\\/following$/.exec(pathOf(link));
+		if (!match) continue;
+		const own = "/" + match[1];
+		for (const other of links) {
+			if (pathOf(other) === own) return { handle: match[1], via: "drawer_following" };
+		}
 	}
 	return { handle: null, via: "none" };
 })()`;

@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import {
+	DRAWER_DIALOG_SELECTOR,
 	DRAWER_OPEN_SELECTORS,
+	drawerProfileSelector,
 	followLinkScript,
 	installObserverScript,
 	LAYOUT_CONTAINER_SELECTOR,
@@ -47,6 +49,8 @@ interface FakeControl {
 function fakePage(
 	options: {
 		cookie?: string;
+		/** Anchors inside the open account drawer, in the order shown. */
+		drawerLinks?: Array<{ href: string }>;
 		innerHeight?: number;
 		innerWidth?: number;
 		links?: Record<string, { href: string; tagName?: string }>;
@@ -132,6 +136,15 @@ function fakePage(
 		...containerControls,
 		...(options.pageControls ?? []).map(makeControl),
 	];
+	const drawerControls = (options.drawerLinks ?? []).map((link) => ({
+		getAttribute: (name: string) =>
+			name === "href" ? new URL(link.href).pathname : null,
+		tagName: "A",
+	}));
+	const dialog =
+		options.drawerLinks === undefined
+			? null
+			: { querySelectorAll: () => drawerControls };
 	const location = {
 		origin: "https://x.com",
 		pathname: options.path ?? "/home",
@@ -144,7 +157,10 @@ function fakePage(
 		document: {
 			cookie: options.cookie ?? "",
 			documentElement: { scrollHeight: 3000 },
-			querySelector: (selector: string) => links.get(selector) ?? null,
+			querySelector: (selector: string) =>
+				selector === DRAWER_DIALOG_SELECTOR
+					? dialog
+					: (links.get(selector) ?? null),
 			querySelectorAll: (selector: string) =>
 				selector === LAYOUT_CONTAINER_SELECTOR
 					? [{ querySelectorAll: () => containerControls }]
@@ -308,7 +324,7 @@ test("the poll reports the bottom of the page and whether the observer is alive"
 	assert.ok(OBSERVER_GLOBAL in page.window);
 });
 
-test("the owner handle comes only from the app's own profile link", () => {
+test("the owner handle comes only from the app's own links", () => {
 	const linked = fakePage({
 		links: {
 			'a[data-testid="AppTabBar_Profile_Link"]': {
@@ -336,6 +352,28 @@ test("the owner handle comes only from the app's own profile link", () => {
 		},
 	});
 	assert.equal(settings.run(OWNER_HANDLE_SCRIPT).handle, null);
+	// The narrow layout's drawer has no test id or name: the handle comes from
+	// the following link, with a profile link to the same handle beside it.
+	const drawer = fakePage({
+		drawerLinks: [
+			{ href: "https://x.com/sample_owner" },
+			{ href: "https://x.com/sample_owner/following" },
+			{ href: "https://x.com/i/history" },
+		],
+	});
+	assert.deepEqual(drawer.run(OWNER_HANDLE_SCRIPT), {
+		handle: "sample_owner",
+		via: "drawer_following",
+	});
+	// A following link is not enough on its own: the same dialog must also
+	// link to the handle it names.
+	const orphan = fakePage({
+		drawerLinks: [{ href: "https://x.com/x/following" }],
+	});
+	assert.deepEqual(orphan.run(OWNER_HANDLE_SCRIPT), {
+		handle: null,
+		via: "none",
+	});
 	// No link: no handle. Page state is not consulted (x.com has none).
 	const bare = fakePage({ cookie: "twid=u%3D7; ct0=abc" });
 	bare.window["__INITIAL_STATE__"] = {
@@ -402,6 +440,19 @@ test("the route fallback is skipped when the caller asks it to be", () => {
 	assert.deepEqual(linked.pushed, []);
 });
 
+test("the drawer's own profile link is followed", () => {
+	const selector = drawerProfileSelector("sample_owner");
+	const page = fakePage({
+		links: { [selector]: { href: "https://x.com/sample_owner" } },
+	});
+	assert.deepEqual(
+		page.run(followLinkScript([selector], "/sample_owner", "none")),
+		{ via: "link" },
+	);
+	assert.equal(page.links.get(selector)?.clicked, 1);
+	assert.deepEqual(page.pushed, []);
+});
+
 test("the drawer control is clicked only when it is a link or button", () => {
 	const button = fakePage({
 		links: {
@@ -434,6 +485,32 @@ test("the drawer control is clicked only when it is a link or button", () => {
 	assert.deepEqual(fakePage().run(openDrawerScript(DRAWER_OPEN_SELECTORS)), {
 		via: "none",
 	});
+});
+
+test("an open drawer already holding the wanted link is not toggled shut", () => {
+	const control = {
+		href: "https://x.com/home",
+		tagName: "BUTTON",
+	};
+	const page = fakePage({
+		drawerLinks: [
+			{ href: "https://x.com/sample_owner" },
+			{ href: "https://x.com/sample_owner/following" },
+			{ href: "https://x.com/i/history" },
+		],
+		links: { [DRAWER_OPEN_SELECTORS[0]]: control },
+	});
+	assert.deepEqual(
+		page.run(openDrawerScript(DRAWER_OPEN_SELECTORS, "/i/history")),
+		{ via: "already_open" },
+	);
+	assert.equal(page.links.get(DRAWER_OPEN_SELECTORS[0])?.clicked, 0);
+	// A wanted link the drawer does not hold still clicks the control.
+	assert.deepEqual(
+		page.run(openDrawerScript(DRAWER_OPEN_SELECTORS, "/i/bookmarks")),
+		{ via: "drawer" },
+	);
+	assert.equal(page.links.get(DRAWER_OPEN_SELECTORS[0])?.clicked, 1);
 });
 
 test("the layout script reports the viewport, the route and each control's identity", () => {

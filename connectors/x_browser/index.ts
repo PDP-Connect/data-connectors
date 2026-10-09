@@ -62,6 +62,7 @@ import { z } from "zod";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	connectorDiagnostic,
+	DIAGNOSTIC_LINE_MAX_CHARS,
 	formatConnectorDiagnostic,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
@@ -71,6 +72,7 @@ import type {
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	DRAWER_OPEN_SELECTORS,
+	drawerProfileSelector,
 	followLinkScript,
 	installObserverScript,
 	LAYOUT_SCRIPT,
@@ -175,18 +177,26 @@ const AT_HANDLE_RE = /@[A-Za-z0-9_]{1,15}(?![A-Za-z0-9_])/g;
  */
 const LAYOUT_ARIA_LABEL_MAX_CHARS = 40;
 /**
- * Longest `layout_controls` line the layout diagnostic writes: safely under
- * the formatter's 2000-char truncation, with headroom for its prefix and the
- * JSON-in-string escaping the control list serializes into. The line is
- * measured as the formatter would write it, never estimated.
+ * Shortest masked `aria-label` (`al`) and redacted path (`p`) a cut control
+ * line keeps. `al` is shortened first, then `p`, and the line is marked
+ * `cut:1`.
  */
-const LAYOUT_CONTROL_LINE_MAX_CHARS = 1800;
+const LAYOUT_ARIA_LABEL_MIN_CHARS = 16;
+const LAYOUT_PATH_MIN_CHARS = 12;
 /**
- * Most `layout_controls` lines one report writes. At the page script's
- * 60-control cap and realistic control sizes this names them all; past it the
- * first line carries the count of controls that could not be named.
+ * Longest redacted route the first `layout` line names, so that line fits the
+ * budget whatever path the page reports.
  */
-const LAYOUT_MAX_PARTS = 8;
+const LAYOUT_ROUTE_MAX_CHARS = 20;
+/**
+ * Most control lines one report writes. At the page script's 60-control cap
+ * every control gets a line; past this the first line counts what could not be
+ * named.
+ */
+const LAYOUT_MAX_CONTROL_LINES = 60;
+/** Short event names leave the 150-character budget to the JSON tail. */
+const LAYOUT_EVENT = "layout";
+const LAYOUT_CONTROL_EVENT = "lc";
 
 /**
  * Path words that are part of X's own routes, never a handle, so a layout
@@ -313,10 +323,20 @@ interface View {
 
 const HISTORY_PATH = "/i/history";
 /**
+ * The links that open the owner's profile: the wide layout's own navigation
+ * first, then the narrow layout's account-drawer link, built from the handle
+ * already validated against HANDLE_RE. `followLinkScript` still checks the
+ * anchor's own href before clicking.
+ */
+function profileStepSelectors(handle: string): string[] {
+	return [...PROFILE_LINK_SELECTORS, drawerProfileSelector(handle)];
+}
+
+/**
  * The History (Bookmarks) link. The primary-nav selector was seen on the wide
- * desktop layout; the bare selector is the drawer fallback, so the click
- * finds the app's own link once the drawer is open. Which selector the drawer
- * renders was not checked.
+ * desktop layout; the bare selector also matches the drawer's own link, once
+ * the drawer is open. The drawer's History link has no test id (seen at
+ * 390 px on 2026-10-09).
  */
 const HISTORY_STEP: NavigationStep = {
 	drawer: true,
@@ -347,7 +367,7 @@ const VIEWS: readonly View[] = [
 						{
 							drawer: true,
 							path: `/${handle}`,
-							selectors: PROFILE_LINK_SELECTORS,
+							selectors: profileStepSelectors(handle),
 						},
 					],
 	},
@@ -363,7 +383,7 @@ const VIEWS: readonly View[] = [
 						{
 							drawer: true,
 							path: `/${handle}`,
-							selectors: PROFILE_LINK_SELECTORS,
+							selectors: profileStepSelectors(handle),
 						},
 						{
 							path: `/${handle}/with_replies`,
@@ -468,7 +488,7 @@ const layoutSchema = z.object({
 	path: z.string(),
 	controls: z.array(layoutControlSchema),
 });
-type LayoutControl = z.infer<typeof layoutControlSchema>;
+export type LayoutControl = z.infer<typeof layoutControlSchema>;
 
 const delay = (ms: number): Promise<void> =>
 	new Promise((resolve) => setTimeout(resolve, ms));
@@ -591,6 +611,14 @@ type ViewEnd =
 	| "exhausted"
 	| "older_than_range"
 	| "reached_known";
+
+/** One short code per view end, so a coverage line keeps several views. */
+const VIEW_END_CODE: Readonly<Record<ViewEnd, string>> = {
+	cap_reached: "cap",
+	exhausted: "end",
+	older_than_range: "old",
+	reached_known: "known",
+};
 
 interface ViewOutcome {
 	end: ViewEnd | null;
@@ -905,107 +933,133 @@ function clipAriaLabel(value: string | null): string | null {
 }
 
 /**
- * A control's identifying fields, with every null one left out so more fit in
- * a line. The names match the layout script's own fields.
+ * One control line's fields, flat so the host reads them without a second JSON
+ * parse. The keys are short because the whole line must fit the mobile host's
+ * budget:
+ *   i   1-based position in the emitted order
+ *   n   total controls the page offered
+ *   s   "d" when the control is inside an open dialog, omitted for the page
+ *   t   tag name
+ *   id  data-testid
+ *   al  masked and clipped aria-label
+ *   r   role
+ *   x   aria-expanded
+ *   p   handle-free, id-free path shape
+ *   cut 1 when `al` or `p` was shortened to fit
+ * Null or absent fields are left out entirely.
  */
-interface CompactLayoutControl {
-	aria_label?: string;
-	expanded?: string;
-	path?: string;
-	role?: string;
-	scope: "dialog" | "page";
-	tag: string;
-	testid?: string;
-}
+type LayoutControlFields = Record<string, string | number>;
 
-/** Drop a control's null fields, masking and clipping what it does name. */
-function compactControl(control: LayoutControl): CompactLayoutControl {
-	const ariaLabel = clipAriaLabel(control.ariaLabel);
-	const compact: CompactLayoutControl = {
-		scope: control.scope,
-		tag: control.tag,
-	};
-	if (control.testid !== null) {
-		compact.testid = control.testid;
+/** A control's full line before any fitting, with null fields left out. */
+function baseControlFields(
+	control: LayoutControl,
+	index: number,
+	total: number,
+): LayoutControlFields {
+	const fields: LayoutControlFields = { i: index, n: total, t: control.tag };
+	if (control.scope === "dialog") {
+		fields["s"] = "d";
 	}
+	if (control.testid !== null) {
+		fields["id"] = control.testid;
+	}
+	const ariaLabel = clipAriaLabel(control.ariaLabel);
 	if (ariaLabel !== null) {
-		compact.aria_label = ariaLabel;
+		fields["al"] = ariaLabel;
 	}
 	if (control.role !== null) {
-		compact.role = control.role;
+		fields["r"] = control.role;
 	}
 	if (control.expanded !== null) {
-		compact.expanded = control.expanded;
+		fields["x"] = control.expanded;
 	}
 	if (control.path !== null) {
-		compact.path = redactPathShape(control.path);
+		fields["p"] = redactPathShape(control.path);
 	}
-	return compact;
+	return fields;
 }
 
-/** One `layout_controls` line exactly as the formatter would write it. */
-function formatControlsLine(
-	part: number,
-	parts: number,
-	controls: readonly CompactLayoutControl[],
-): string {
-	return formatConnectorDiagnostic("x_browser", "layout_controls", {
-		part,
-		parts,
-		controls: JSON.stringify(controls),
-	});
-}
-
-/** Whether a part still fits the budget with all its controls. */
-function controlsFit(
-	part: number,
-	controls: readonly CompactLayoutControl[],
-): boolean {
-	// LAYOUT_MAX_PARTS is the largest `parts` can be, so this measures the
-	// longest the line could get once the real count is known.
-	return (
-		formatControlsLine(part, LAYOUT_MAX_PARTS, controls).length <=
-		LAYOUT_CONTROL_LINE_MAX_CHARS
+/** One control line exactly as the formatter would write it. */
+function formatControlLine(fields: LayoutControlFields): string {
+	return formatConnectorDiagnostic(
+		"x_browser",
+		LAYOUT_CONTROL_EVENT,
+		fields,
 	);
 }
 
+/** Whether a control line fits the budget as the host measures it. */
+function controlLineFits(fields: LayoutControlFields): boolean {
+	return formatControlLine(fields).length <= DIAGNOSTIC_LINE_MAX_CHARS;
+}
+
 /**
- * Pack consecutive controls into as few parts as fit the budget. No control is
- * split; one too large for a part is emitted alone. Once LAYOUT_MAX_PARTS
- * parts are full the rest are left out, for the caller to count.
+ * Shorten a control line to the budget: the masked `aria-label` first, then
+ * the path, each to its named minimum. A shortened line carries `cut:1`. `id`
+ * is never dropped.
  */
-function packControls(controls: readonly LayoutControl[]): {
-	packed: number;
-	parts: CompactLayoutControl[][];
-} {
-	const parts: CompactLayoutControl[][] = [];
-	let packed = 0;
-	for (const control of controls) {
-		const open = parts.at(-1);
-		const compact = compactControl(control);
-		if (open !== undefined && controlsFit(parts.length, [...open, compact])) {
-			open.push(compact);
-			packed += 1;
-			continue;
-		}
-		if (parts.length >= LAYOUT_MAX_PARTS) {
-			break;
-		}
-		parts.push([compact]);
-		packed += 1;
+function fitControlFields(fields: LayoutControlFields): LayoutControlFields {
+	if (controlLineFits(fields)) {
+		return fields;
 	}
-	return { packed, parts };
+	const fitted: LayoutControlFields = { ...fields, cut: 1 };
+	const ariaLabel = fitted["al"];
+	if (typeof ariaLabel === "string") {
+		fitted["al"] = ariaLabel.slice(0, LAYOUT_ARIA_LABEL_MIN_CHARS);
+	}
+	if (controlLineFits(fitted)) {
+		return fitted;
+	}
+	const path = fitted["p"];
+	if (typeof path === "string") {
+		fitted["p"] = path.slice(0, LAYOUT_PATH_MIN_CHARS);
+	}
+	return fitted;
+}
+
+/**
+ * One line per control, dialog controls first so a line cap never hides the
+ * open drawer, then the page controls in the order the page offered them. A
+ * control whose minimal line still does not fit is left out and counted rather
+ * than emitted over budget; its `id` is never dropped from a line that is
+ * written.
+ */
+function layoutControlLines(controls: readonly LayoutControl[]): {
+	lines: LayoutControlFields[];
+	omitted: number;
+} {
+	const total = controls.length;
+	const ordered = [
+		...controls.filter((control) => control.scope === "dialog"),
+		...controls.filter((control) => control.scope !== "dialog"),
+	].slice(0, LAYOUT_MAX_CONTROL_LINES);
+	const lines: LayoutControlFields[] = [];
+	for (const [position, control] of ordered.entries()) {
+		const fields = fitControlFields(
+			baseControlFields(control, position + 1, total),
+		);
+		if (controlLineFits(fields)) {
+			lines.push(fields);
+		}
+	}
+	return { lines, omitted: total - lines.length };
+}
+
+/** Redact a route and clip it to the first line's budget. */
+function layoutRoute(pathname: string): string {
+	return redactPathShape(pathname).slice(0, LAYOUT_ROUTE_MAX_CHARS);
 }
 
 /**
  * Name the current layout once per run, when a link the connector needs is
  * missing. One `layout` line carries the viewport, the redacted route, what
  * the run tried with the drawer, the total control count and the number of
- * parts; then one `layout_controls` line per part names as many consecutive
- * controls as fit, each with only its tag, test id, masked accessible name,
+ * control lines; then one `lc` line per control names it in the flat, short-key
+ * shape baseControlFields documents (tag, test id, masked accessible name,
  * role, expanded state, dialog/page scope and handle/id-free path shape: no
- * text, no handle, no id, no token. A page the connector cannot read reports
- * nothing.
+ * text, no handle, no id, no token). Dialog controls come first, and every line
+ * is measured against the mobile host's 150-character budget. A page the
+ * connector cannot read reports nothing.
  */
 async function reportLayout(run: Run): Promise<void> {
 	if (run.layoutReported) {
@@ -1018,30 +1072,34 @@ async function reportLayout(run: Run): Promise<void> {
 	if (!parsed.success) {
 		return;
 	}
-	const { packed, parts } = packControls(parsed.data.controls);
-	const omitted = parsed.data.controls.length - packed;
-	connectorDiagnostic("x_browser", "layout", {
+	const controls = parsed.data.controls;
+	const { lines, omitted } = layoutControlLines(controls);
+	connectorDiagnostic("x_browser", LAYOUT_EVENT, {
 		width: parsed.data.width,
 		height: parsed.data.height,
-		path: redactPathShape(parsed.data.path),
+		path: layoutRoute(parsed.data.path),
 		drawer: run.drawer,
-		controls: parsed.data.controls.length,
-		parts: parts.length,
+		controls: controls.length,
+		parts: lines.length,
 		...(omitted > 0 ? { omitted } : {}),
 	});
-	for (const [index, part] of parts.entries()) {
-		connectorDiagnostic("x_browser", "layout_controls", {
-			part: index + 1,
-			parts: parts.length,
-			controls: JSON.stringify(part),
-		});
+	for (const fields of lines) {
+		connectorDiagnostic("x_browser", LAYOUT_CONTROL_EVENT, fields);
 	}
 }
 
-/** Click the app's own account-drawer control; false when it is not there. */
-async function openDrawer(run: Run): Promise<boolean> {
+/**
+ * Open the app's own account-drawer control for `step`, or for the handle
+ * lookup when no step is given; false when it is not there. A drawer already
+ * open with the wanted link is left alone, so a second click cannot toggle it
+ * shut before the link is followed.
+ */
+async function openDrawer(run: Run, step?: NavigationStep): Promise<boolean> {
 	const parsed = navigationSchema.safeParse(
-		await evaluateInPage(run.ctx.page, openDrawerScript(DRAWER_OPEN_SELECTORS)),
+		await evaluateInPage(
+			run.ctx.page,
+			openDrawerScript(DRAWER_OPEN_SELECTORS, step?.path ?? null),
+		),
 	);
 	const via = parsed.success ? parsed.data.via : "none";
 	run.navigations[via] = (run.navigations[via] ?? 0) + 1;
@@ -1053,8 +1111,10 @@ async function openDrawer(run: Run): Promise<boolean> {
 		}
 		return false;
 	}
+	if (via === "drawer") {
+		await pause(run);
+	}
 	run.drawer = "clicked";
-	await pause(run);
 	return true;
 }
 
@@ -1087,7 +1147,7 @@ async function openView(
 	for (const step of steps) {
 		let via = await followStep(run, step, "none");
 		if (via === "none" && step.drawer) {
-			await openDrawer(run);
+			await openDrawer(run, step);
 			via = await followStep(run, step, "none");
 		}
 		if (via === "none") {
@@ -1334,6 +1394,15 @@ function sumOutcomes(outcomes: readonly ViewOutcome[]): Record<string, number> {
 	};
 }
 
+/** How each view ended, as codes, for the bounded coverage line. */
+function viewEndCodes(outcomes: readonly ViewOutcome[]): string {
+	return outcomes
+		.map((outcome) =>
+			outcome.end === null ? "open" : VIEW_END_CODE[outcome.end],
+		)
+		.join(",");
+}
+
 /** Report one post stream: a SKIP_RESULT when it fell short, else its STATE. */
 async function finishStream(
 	run: Run,
@@ -1363,14 +1432,24 @@ async function finishStream(
 			message: `${counts.unreadable} of your ${stream} had no usable id, author or date and ${counts.unreadable === 1 ? "was" : "were"} skipped.`,
 		};
 	}
-	const ends = outcomes.map((outcome) => outcome.end ?? "unfinished").join(",");
+	// Short keys and a second line keep every field inside the phone host's
+	// budget; the README's diagnostics table names them.
+	const ends = viewEndCodes(outcomes);
 	connectorDiagnostic("x_browser", "coverage", {
-		stream,
-		status: failure === null ? "complete" : "partial",
-		reason: failure?.reason,
-		view_ends: ends,
-		full_walk: plan.fullWalk,
-		...counts,
+		s: stream,
+		st: failure === null ? "complete" : "partial",
+		r: failure?.reason,
+		e: ends,
+		w: plan.fullWalk,
+	});
+	connectorDiagnostic("x_browser", "coverage_counts", {
+		s: stream,
+		p: counts["pages_read"],
+		n: counts["post_results"],
+		k: counts["saved"],
+		o: counts["other_authors"],
+		u: counts["unavailable"],
+		x: counts["unreadable"],
 	});
 	if (failure !== null) {
 		await emitSkip(run.ctx, stream, failure, counts);
@@ -1399,9 +1478,9 @@ async function finishProfile(run: Run, attempted: boolean): Promise<number> {
 						"X did not send your profile details after the connector opened your profile.",
 				});
 	connectorDiagnostic("x_browser", "coverage", {
-		stream: PROFILE_STREAM,
-		status: failure === null ? "complete" : "partial",
-		reason: failure?.reason,
+		s: PROFILE_STREAM,
+		st: failure === null ? "complete" : "partial",
+		r: failure?.reason,
 	});
 	if (run.profile === null || failure !== null) {
 		if (failure !== null) {
@@ -1620,10 +1699,10 @@ export async function collectXBrowser(
 		);
 	}
 	connectorDiagnostic("x_browser", "run", {
-		posts_seen: run.postsSeen,
-		stopped: run.stop?.reason,
-		aborted_requests: run.aborted,
-		navigations: Object.entries(run.navigations)
+		ps: run.postsSeen,
+		stop: run.stop?.reason,
+		ab: run.aborted,
+		nav: Object.entries(run.navigations)
 			.map(([via, count]) => `${via}:${count}`)
 			.join(","),
 	});

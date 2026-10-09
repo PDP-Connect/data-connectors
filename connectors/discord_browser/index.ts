@@ -1028,16 +1028,16 @@ export async function collectDiscordBrowser(
 	}
 
 	connectorDiagnostic("discord_browser", "coverage", {
-		stream: MESSAGES,
-		status: stop ? "stopped" : waiting > 0 ? "partial" : "complete",
-		api_version: capture.version,
-		client_transport: capture.transport,
-		requests: api.requests(),
-		servers_total: queue.length,
-		servers_searched: searched.length,
-		servers_skipped: skippedServers,
-		servers_waiting: waiting,
-		messages_saved: saved,
+		s: MESSAGES,
+		st: stop ? "stopped" : waiting > 0 ? "partial" : "complete",
+		v: capture.version,
+		ct: capture.transport,
+		rq: api.requests(),
+		n: queue.length,
+		sc: searched.length,
+		sk: skippedServers,
+		w: waiting,
+		m: saved,
 	});
 	await ctx.emit({
 		type: "PROGRESS",
