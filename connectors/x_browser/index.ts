@@ -137,6 +137,10 @@ export const ACTION_DELAY_MAX_MS = 5000;
 /** Scroll steps in one view before the walk gives up on reaching its end. */
 export const MAX_SCROLL_STEPS_PER_VIEW = 60;
 
+/** The one message a budget stop reports, whether it stops a walk or the run. */
+const BUDGET_STOP_MESSAGE =
+	"This run reached the number of posts it allows itself to read from X.";
+
 /**
  * Pauses spent waiting for a view's first response after following its link.
  * Waiting takes no action on the page.
@@ -215,49 +219,81 @@ const LAYOUT_MAX_CONTROL_LINES = 60;
 const LAYOUT_EVENT = "layout";
 const LAYOUT_CONTROL_EVENT = "lc";
 
+/** A route token: a literal segment, a handle slot or a numeric-id slot. */
+const HANDLE_TOKEN = ":handle";
+const ID_TOKEN = ":id";
+type PathToken = string | typeof HANDLE_TOKEN | typeof ID_TOKEN;
+
 /**
- * Path words that are part of X's own routes, never a handle, so a layout
- * diagnostic keeps them and only masks the account-shaped segments.
+ * Routes whose first segment is one of X's own fixed words. The whole path
+ * must match, so a handle that happens to equal a route word is still masked
+ * when it sits in a handle position (for example `/photo/following`).
  */
-const STATIC_PATH_SEGMENTS = new Set([
-	"about",
-	"account",
-	"access",
-	"bookmarks",
-	"communities",
-	"compose",
-	"explore",
-	"flow",
-	"followers",
-	"following",
-	"hashtag",
-	"history",
-	"home",
-	"i",
-	"intent",
-	"jf",
-	"likes",
-	"lists",
-	"locked",
-	"login",
-	"logout",
-	"media",
-	"messages",
-	"notifications",
-	"onboarding",
-	"photo",
-	"privacy",
-	"search",
-	"settings",
-	"share",
-	"status",
-	"suspended",
-	"tos",
-	"user",
-	"verified",
-	"video",
-	"with_replies",
-]);
+const STATIC_ROUTE_PATTERNS: readonly (readonly PathToken[])[] = [
+	["home"],
+	["explore"],
+	["notifications"],
+	["messages"],
+	["search"],
+	["login"],
+	["logout"],
+	["about"],
+	["tos"],
+	["privacy"],
+	["compose", "post"],
+	["hashtag", HANDLE_TOKEN],
+	["status", ID_TOKEN],
+	["settings"],
+	["settings", "profile"],
+	["settings", "account"],
+	["settings", "security_and_account_access"],
+	["settings", "privacy_and_safety"],
+	["settings", "notifications"],
+	["settings", "accessibility_display_and_languages"],
+	["settings", "your_tweets"],
+	["settings", "content_preferences"],
+	["account", "access"],
+	["account", "login_challenge"],
+	["account", "locked"],
+	["account", "suspended"],
+	["intent", HANDLE_TOKEN],
+	["share", HANDLE_TOKEN],
+	["i", "history"],
+	["i", "history", "likes"],
+	["i", "bookmarks"],
+	["i", "flow", "login"],
+	["i", "flow", "signup"],
+	["i", "lists"],
+	["i", "communities"],
+	["i", "messages"],
+	["i", "notifications"],
+	["i", "premium_sign_up"],
+	["i", "follow_people"],
+	["i", "connect_people"],
+	["i", "verified_followers"],
+	["i", "user", ID_TOKEN],
+	["i", "account", HANDLE_TOKEN],
+];
+
+/**
+ * Routes whose first segment is the owner's handle, so that segment is always
+ * masked whatever word it carries.
+ */
+const HANDLE_ROUTE_PATTERNS: readonly (readonly PathToken[])[] = [
+	[HANDLE_TOKEN],
+	[HANDLE_TOKEN, "with_replies"],
+	[HANDLE_TOKEN, "following"],
+	[HANDLE_TOKEN, "followers"],
+	[HANDLE_TOKEN, "media"],
+	[HANDLE_TOKEN, "photo"],
+	[HANDLE_TOKEN, "likes"],
+	[HANDLE_TOKEN, "lists"],
+	[HANDLE_TOKEN, "communities"],
+	[HANDLE_TOKEN, "verified_followers"],
+	[HANDLE_TOKEN, "status", ID_TOKEN],
+	[HANDLE_TOKEN, "status", ID_TOKEN, "photo", HANDLE_TOKEN],
+	[HANDLE_TOKEN, "status", ID_TOKEN, "analytics"],
+];
 
 const PROFILE_STREAM = "profile";
 const POSTS_STREAM = "posts";
@@ -479,6 +515,7 @@ const observedSchema = z.object({
 	body: z.string(),
 	refused: z.boolean(),
 	errorCode: z.number().nullable(),
+	postCount: z.number(),
 });
 type Observed = z.infer<typeof observedSchema>;
 
@@ -801,7 +838,9 @@ interface Drained {
 
 /**
  * Take everything the observer has buffered and check the session. Reading
- * the buffer is local to the page: it sends nothing to X. Wanted responses
+ * the buffer is local to the page: it sends nothing to X. Every response's
+ * post count is applied to the run's budget as it is drained, wanted or not,
+ * so a run stops as soon as the posts X sent reach the cap. Wanted responses
  * accumulate in `run.pending` until the current view reads them.
  */
 async function drain(run: Run): Promise<Drained> {
@@ -825,16 +864,46 @@ async function drain(run: Run): Promise<Drained> {
 			if (run.stop !== null) {
 				break;
 			}
-			if (checkStatus(run, entry) && checkRefusal(run, entry) && entry.wanted) {
+			const answered = checkStatus(run, entry) && checkRefusal(run, entry);
+			if (!answered) {
+				continue;
+			}
+			// Every post X sent spends the owner's allowance, whichever view
+			// the run is reading and whether or not this view reads it.
+			run.postsSeen += entry.postCount;
+			if (entry.wanted) {
 				run.pending.push(entry);
 			}
 		}
 		checkSession(run, reading);
+		if (run.stop !== null) {
+			break;
+		}
+		if (run.postsSeen >= run.maxPosts) {
+			stopRun(run, "run_budget_reached", BUDGET_STOP_MESSAGE);
+			break;
+		}
 		if (reading.remaining === 0) {
 			break;
 		}
 	}
 	return { atBottom };
+}
+
+/** Whether a page action changed the page, so the run waits before reading back. */
+type ActionEffect = "changed" | "unchanged";
+
+/**
+ * Settle after one action on the page: wait out the action delay when the
+ * action changed the page, then drain and check everything X answered. Every
+ * page action ends here, so no action can follow another without a refusal, a
+ * lost session or a spent budget being seen first.
+ */
+async function settleAction(run: Run, effect: ActionEffect): Promise<void> {
+	if (effect === "changed") {
+		await pause(run);
+	}
+	await drain(run);
 }
 
 /** Keep the owner's own `UserByScreenName` response; ignore anyone else's. */
@@ -917,7 +986,9 @@ async function takeItem(
 		return scope === "module" ? null : "reached_known";
 	}
 	if (!pinned && plan.since !== null && post.created_at < plan.since) {
-		return "older_than_range";
+		// Inside a module an out-of-range member is skipped rather than ending
+		// the walk: the module's newest owner post sets the range boundary.
+		return scope === "module" ? null : "older_than_range";
 	}
 	const pinnedAndCollected = pinned && !plan.fullWalk && plan.known.has(post.id);
 	if (plan.emitted.has(post.id) || pinnedAndCollected) {
@@ -975,17 +1046,27 @@ async function takeTimelinePage(
 			module === undefined || module === null ? "entry" : "module";
 		if (scope === "module") {
 			// The boundary is the module's newest owner post, so a new reply
-			// after an already-collected post is still read.
+			// after an already-collected post is still read, and an old parent
+			// out of range does not end the walk before a newer in-range child.
 			const newestOwner = group
 				.filter((item) => isOwnerItem(view, run, item))
 				.at(-1);
-			if (
-				newestOwner !== undefined &&
-				!(newestOwner.pinned || plan.fullWalk) &&
-				plan.known.has(newestOwner.post.id)
-			) {
-				outcome.end = "reached_known";
-				break;
+			if (newestOwner !== undefined) {
+				if (
+					!(newestOwner.pinned || plan.fullWalk) &&
+					plan.known.has(newestOwner.post.id)
+				) {
+					outcome.end = "reached_known";
+					break;
+				}
+				if (
+					!newestOwner.pinned &&
+					plan.since !== null &&
+					newestOwner.post.created_at < plan.since
+				) {
+					outcome.end = "older_than_range";
+					break;
+				}
 			}
 		}
 		let ended: ViewEnd | null = null;
@@ -1029,27 +1110,68 @@ function decodeSegment(segment: string): string | null {
 	}
 }
 
+/** Whether every decoded segment of a path matches one route pattern. */
+function matchesPattern(
+	pattern: readonly PathToken[],
+	segments: readonly string[],
+): boolean {
+	if (pattern.length !== segments.length) {
+		return false;
+	}
+	return pattern.every((token, index) => {
+		if (token === HANDLE_TOKEN || token === ID_TOKEN) {
+			return true;
+		}
+		const decoded = decodeSegment(segments[index] ?? "");
+		return decoded !== null && decoded === token;
+	});
+}
+
+/** A matched pattern with its literals kept and its slots masked. */
+function renderPattern(pattern: readonly PathToken[]): string {
+	const parts = pattern.map((token) =>
+		token === HANDLE_TOKEN ? ":handle" : token === ID_TOKEN ? ":id" : token,
+	);
+	return `/${parts.join("/")}`;
+}
+
+/** Every segment masked, a numeric one as an id and any other as a handle. */
+function genericPathShape(segments: readonly string[]): string {
+	const parts = segments.map((segment) => {
+		const decoded = decodeSegment(segment);
+		return decoded !== null && NUMERIC_ID_RE.test(decoded) ? ":id" : ":handle";
+	});
+	return `/${parts.join("/")}`;
+}
+
 /**
- * A path with every segment replaced by a placeholder unless it is one of X's
- * own fixed route words. A segment is decoded before it is classified, so an
- * encoded handle or id cannot slip through, and a segment that decodes to
- * anything outside the route list is never emitted raw: it becomes ":id" for a
- * numeric id and ":handle" otherwise.
+ * A path with every segment replaced by a placeholder unless the whole path
+ * matches one of X's own positional route patterns. A first segment is a
+ * handle unless the whole path matches a static-first route, so a handle that
+ * equals a route word (`/photo/following`) is still masked. Segments are
+ * decoded before matching, a trailing slash is dropped, and an unmatched path
+ * becomes a generic placeholder shape so nothing raw can slip through.
  */
 export function redactPathShape(pathname: string): string {
-	return pathname
-		.split("/")
-		.map((segment) => {
-			if (segment === "") {
-				return segment;
-			}
-			const decoded = decodeSegment(segment);
-			if (decoded !== null && STATIC_PATH_SEGMENTS.has(decoded)) {
-				return decoded;
-			}
-			return decoded !== null && NUMERIC_ID_RE.test(decoded) ? ":id" : ":handle";
-		})
-		.join("/");
+	if (pathname === "" || pathname === "/") {
+		return pathname;
+	}
+	const segments = pathname.split("/");
+	if (segments[0] === "") {
+		segments.shift();
+	}
+	while (segments.length > 0 && segments[segments.length - 1] === "") {
+		segments.pop();
+	}
+	for (const pattern of [
+		...STATIC_ROUTE_PATTERNS,
+		...HANDLE_ROUTE_PATTERNS,
+	]) {
+		if (matchesPattern(pattern, segments)) {
+			return renderPattern(pattern);
+		}
+	}
+	return genericPathShape(segments);
 }
 
 /**
@@ -1242,12 +1364,12 @@ async function openDrawer(run: Run, step?: NavigationStep): Promise<boolean> {
 		if (run.drawer !== "clicked") {
 			run.drawer = "no_control";
 		}
+		await settleAction(run, "unchanged");
 		return false;
 	}
-	if (via === "drawer") {
-		await pause(run);
-	}
 	run.drawer = "clicked";
+	// A click acts on the page; an already-open drawer does not.
+	await settleAction(run, via === "drawer" ? "changed" : "unchanged");
 	return true;
 }
 
@@ -1265,15 +1387,20 @@ async function followStep(
 	);
 	const via = parsed.success ? parsed.data.via : "none";
 	run.navigations[via] = (run.navigations[via] ?? 0) + 1;
+	// A link click or the history fallback acts on the page; being already
+	// there and finding no link do not.
+	await settleAction(
+		run,
+		via === "link" || via === "history" ? "changed" : "unchanged",
+	);
 	return via;
 }
 
 /**
  * Follow the app's links to a view. A link the narrow layout hides in the
  * account drawer is retried after opening the drawer; a link still missing is
- * reported before the history fallback. Each action is followed by a pause,
- * then by a check of what the app answered, so a refusal or a lost session
- * stops the run before the next link is followed.
+ * reported before the history fallback. Each action settles before the next
+ * one is taken, so a refusal or a lost session stops the run in between.
  */
 async function openView(
 	run: Run,
@@ -1282,28 +1409,31 @@ async function openView(
 ): Promise<Failure | null> {
 	for (const step of steps) {
 		let via = await followStep(run, step, "none");
+		if (run.stop !== null) {
+			return null;
+		}
 		if (via === "none" && step.drawer) {
 			await openDrawer(run, step);
+			if (run.stop !== null) {
+				return null;
+			}
 			via = await followStep(run, step, "none");
+			if (run.stop !== null) {
+				return null;
+			}
 		}
 		if (via === "none") {
 			await reportLayout(run);
 			via = await followStep(run, step, "route");
+			if (run.stop !== null) {
+				return null;
+			}
 		}
 		if (via === "none") {
 			return {
 				reason: "source_unreadable",
 				message: `X did not offer a way to open your ${view.label} in this layout.`,
 			};
-		}
-		if (via !== "already_there") {
-			await pause(run);
-		}
-		if (run.stop === null) {
-			await drain(run);
-		}
-		if (run.stop !== null) {
-			return null;
 		}
 	}
 	return null;
@@ -1365,11 +1495,6 @@ async function readView(
 				continue;
 			}
 			const parsed = parseTimelineBody(entry.operation, entry.body);
-			if (parsed.ok) {
-				// Every timeline the app loaded spends the owner's reading
-				// allowance, whether or not this view reads it.
-				run.postsSeen += parsed.postResults;
-			}
 			if (
 				plan !== null &&
 				entry.operation === view.operation &&
@@ -1412,7 +1537,7 @@ async function readView(
 			SCROLL_VIEWPORT_SHARE_MIN +
 			Math.random() * (SCROLL_VIEWPORT_SHARE_MAX - SCROLL_VIEWPORT_SHARE_MIN);
 		await evaluateInPage(run.ctx.page, scrollScript(share));
-		await pause(run);
+		await settleAction(run, "changed");
 	}
 	return outcome;
 }
@@ -1860,11 +1985,7 @@ export async function collectXBrowser(
 	}
 	if (run.stop === null && run.postsSeen >= run.maxPosts) {
 		// The run's allowance is spent; streams not yet read wait for the next run.
-		stopRun(
-			run,
-			"run_budget_reached",
-			"This run reached the number of posts it allows itself to read from X.",
-		);
+		stopRun(run, "run_budget_reached", BUDGET_STOP_MESSAGE);
 	}
 
 	const saved: Record<string, number> = {};

@@ -20,7 +20,7 @@
 /** The page global that holds the observer's buffer. */
 export const OBSERVER_GLOBAL = "__pdppXObserver";
 /** Bump when the buffer entry shape changes, so a stale observer is replaced. */
-const OBSERVER_VERSION = 2;
+const OBSERVER_VERSION = 3;
 
 export interface ObserverConfig {
 	/** How much of a non-200 body is kept for an operation that is not wanted. */
@@ -36,7 +36,9 @@ export interface ObserverConfig {
  * `send`, which is how x.com makes its GraphQL requests, and `window.fetch`
  * as a fallback, and buffers the response of every request whose path is
  * `/graphql/<queryId>/<OperationName>`. It matches on the operation name
- * only; query ids rotate and are never read. It changes no request.
+ * only; query ids rotate and are never read. It changes no request. For every
+ * response it also counts the posts the body carries, as a number only, so an
+ * operation the connector does not read still spends its reading budget.
  *
  * The observer lives in the page's JavaScript realm. A full page load drops
  * it, so the connector moves between views with the app's own client-side
@@ -64,7 +66,23 @@ export function installObserverScript(config: ObserverConfig): string {
 			return null;
 		}
 	};
-	const refusal = (text) => {
+	const countPosts = (node) => {
+		if (Array.isArray(node)) {
+			let total = 0;
+			for (const item of node) total += countPosts(item);
+			return total;
+		}
+		if (!node || typeof node !== "object") return 0;
+		// A promoted post is not a post this connector reads, so it is not
+		// counted, matching the parser's count.
+		const countThis =
+			Object.prototype.hasOwnProperty.call(node, "tweet_results") &&
+			!Object.prototype.hasOwnProperty.call(node, "promotedMetadata");
+		let total = countThis ? 1 : 0;
+		for (const key of Object.keys(node)) total += countPosts(node[key]);
+		return total;
+	};
+	const inspect = (text) => {
 		try {
 			const payload = JSON.parse(text);
 			const data = payload && payload.data;
@@ -73,11 +91,18 @@ export function installObserverScript(config: ObserverConfig): string {
 				Object.keys(data).length > 0,
 			);
 			const errors = payload && Array.isArray(payload.errors) ? payload.errors : [];
-			if (hasData || errors.length === 0) return { refused: false, errorCode: null };
-			const code = errors[0] && errors[0].code;
-			return { refused: true, errorCode: typeof code === "number" ? code : null };
+			const refused = !hasData && errors.length > 0;
+			const code = refused && errors[0] ? errors[0].code : null;
+			// The post count is a number only: an operation the connector does
+			// not read still pays for the posts its body loaded, yet no body,
+			// id or text leaves the page for it.
+			return {
+				refused,
+				errorCode: typeof code === "number" ? code : null,
+				postCount: countPosts(payload),
+			};
 		} catch (error) {
-			return { refused: false, errorCode: null };
+			return { refused: false, errorCode: null, postCount: 0 };
 		}
 	};
 	const record = (request, status, readBody) => {
@@ -95,7 +120,7 @@ export function installObserverScript(config: ObserverConfig): string {
 		}
 		// An operation the run did not ask for is not buffered, but a body X
 		// refused still has to reach the connector: keep its error code only.
-		const signal = refusal(text);
+		const signal = inspect(text);
 		let body = "";
 		if (keep) {
 			body = text;
@@ -110,6 +135,7 @@ export function installObserverScript(config: ObserverConfig): string {
 			body,
 			refused: signal.refused,
 			errorCode: signal.errorCode,
+			postCount: signal.postCount,
 		});
 	};
 	const requests = new WeakMap();

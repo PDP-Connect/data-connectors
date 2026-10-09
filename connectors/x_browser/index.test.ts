@@ -77,6 +77,38 @@ function cursorsOnly(bookmarks: boolean): string {
 
 type Pages = Record<string, Record<string, string>>;
 
+/** A one-page `HomeTimeline` body: a timeline the connector does not read. */
+function homeTimelinePage(ids: readonly string[]): string {
+	const entries = ids.map((id, index) => ({
+		entryId: `tweet-${id}`,
+		sortIndex: String(9_000_000_000 - index),
+		content: {
+			entryType: "TimelineTimelineItem",
+			itemContent: {
+				tweet_results: {
+					result: {
+						__typename: "Tweet",
+						rest_id: id,
+						legacy: {
+							id_str: id,
+							created_at: "Tue Oct 06 12:00:00 +0000 2026",
+						},
+					},
+				},
+			},
+		},
+	}));
+	return JSON.stringify({
+		data: {
+			home: {
+				home_timeline_urt: {
+					instructions: [{ type: "TimelineAddEntries", entries }],
+				},
+			},
+		},
+	});
+}
+
 /** A one-page `UserRepliesTimeline` body of the owner's own replies. */
 function ownerRepliesPage(ids: readonly string[]): string {
 	const entries = ids.map((id, index) => ({
@@ -800,6 +832,27 @@ const requestLog = (app: FakeWebApp) =>
 		cursor ? `${operation}@${cursor}` : operation,
 	);
 
+/**
+ * A page whose evaluate runs `onScript` after any page script, so a test can
+ * make one action (a drawer click) produce a response or a lost session that
+ * the connector must check before it takes the next action.
+ */
+function hookedPage(
+	app: FakeWebApp,
+	onScript: (script: string) => void,
+): XCollectContext["page"] {
+	const base = app.page;
+	const evaluate = base.evaluate as (...args: unknown[]) => Promise<unknown>;
+	return {
+		goto: base.goto,
+		evaluate: (async (...args: unknown[]) => {
+			const value = await evaluate(...args);
+			onScript(String(args[0]));
+			return value;
+		}) as XCollectContext["page"]["evaluate"],
+	};
+}
+
 /** The one layout report's first line and every control it named, in order. */
 function layoutReport(lines: string[]): {
 	controls: Array<Record<string, unknown>>;
@@ -1053,6 +1106,43 @@ test("a new reply after a known post in the same module is still read", async ()
 	assert.ok(h.ids("posts").includes("1990000000000000202"));
 });
 
+test("a range walk skips an out-of-range module parent and keeps its newer reply", async () => {
+	const pages = fixturePages();
+	const replies = JSON.parse(pages["UserRepliesTimeline"]?.[""] ?? "");
+	const entries =
+		replies.data.user.result.timeline.timeline.instructions[0].entries;
+	const module = entries.find(
+		(entry: { content?: { entryType?: string } }) =>
+			entry.content?.entryType === "TimelineTimelineModule",
+	);
+	assert.ok(module);
+	// Both module posts are the owner's: an old parent and a newer reply.
+	const parent = module.content.items[0].item.itemContent.tweet_results.result;
+	const reply = module.content.items[1].item.itemContent.tweet_results.result;
+	parent.legacy.user_id_str = OWNER_ID;
+	parent.core.user_results.result.rest_id = OWNER_ID;
+	parent.core.user_results.result.core.screen_name = HANDLE;
+	parent.legacy.created_at = "Mon Sep 28 12:00:00 +0000 2026";
+	reply.legacy.user_id_str = OWNER_ID;
+	reply.core.user_results.result.rest_id = OWNER_ID;
+	reply.core.user_results.result.core.screen_name = HANDLE;
+	reply.legacy.created_at = "Fri Oct 02 12:00:00 +0000 2026";
+	(pages["UserRepliesTimeline"] as Record<string, string>)[""] =
+		JSON.stringify(replies);
+
+	const app = new FakeWebApp({ pages });
+	const h = harness(app, ["posts"], {
+		timeRanges: { posts: { since: "2026-10-01T00:00:00Z" } },
+	});
+	await collectXBrowser(h.ctx, FAST);
+	// The newer reply is in range even though the module's older parent is not.
+	assert.ok(h.ids("posts").includes("1990000000000000202"));
+	assert.ok(!h.ids("posts").includes("1990000000000000201"));
+	// The walk finished rather than stopping at the old parent.
+	assert.deepEqual(h.skips(), {});
+	assert.ok(h.states()["posts"]);
+});
+
 test("a run of replies does not evict the originals checkpoint", async () => {
 	const pages = fixturePages();
 	const replyIds = Array.from(
@@ -1240,6 +1330,50 @@ test("a refusal while opening a view stops the run before the next link", async 
 	assert.deepEqual(h.skips(), { likes: "source_rate_limited" });
 	assert.deepEqual(app.clicks, ["/i/history"]);
 	assert.ok(!requestLog(app).includes("Likes"));
+});
+
+test("a refusal the drawer click triggered stops the run before the profile link", async () => {
+	const app = new FakeWebApp({
+		drawer: true,
+		respond: ({ operation }) =>
+			operation === "HomeTimeline"
+				? { status: 429, body: "Rate limit exceeded" }
+				: undefined,
+		sidebar: false,
+	});
+	const h = harness(app);
+	h.ctx.page = hookedPage(app, (script) => {
+		if (script.includes("DashButton_ProfileIcon_Link")) {
+			app.request("HomeTimeline", { count: 20 });
+		}
+	});
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	// The drawer click loaded a refused timeline; the profile link was never
+	// followed and no view was opened.
+	assert.deepEqual(app.clicks, []);
+	assert.ok(!requestLog(app).includes("UserByScreenName"));
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"stop":"source_rate_limited"/);
+});
+
+test("a sign-out during the drawer click stops the run before the route fallback", async () => {
+	const app = new FakeWebApp({ drawer: true, sidebar: false });
+	const h = harness(app);
+	h.ctx.page = hookedPage(app, (script) => {
+		if (script.includes("DashButton_ProfileIcon_Link")) {
+			app.signOut();
+		}
+	});
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	// No link was followed and the route fallback was never reached.
+	assert.deepEqual(app.clicks, []);
+	assert.deepEqual(app.historyPushes, []);
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"stop":"sign_in_required"/);
 });
 
 test("losing the twid cookie mid-run stops the run as sign-in required", async () => {
@@ -1674,6 +1808,33 @@ test("redactPathShape masks handles, ids and encoded identities but keeps X's ro
 	assert.equal(redactPathShape("/%2F"), "/:handle");
 });
 
+test("redactPathShape treats a route word as a handle unless the whole path is a route", () => {
+	// A handle that equals a route word is masked whenever the whole path is
+	// not one of X's own routes.
+	assert.equal(redactPathShape("/home/with_replies"), "/:handle/with_replies");
+	assert.equal(redactPathShape("/home/following"), "/:handle/following");
+	assert.equal(redactPathShape("/i"), "/:handle");
+	assert.equal(redactPathShape("/i/with_replies"), "/:handle/with_replies");
+	assert.equal(redactPathShape("/photo/following"), "/:handle/following");
+	assert.equal(redactPathShape("/settings/photo"), "/:handle/photo");
+	assert.equal(
+		redactPathShape("/following/status/1900000000000000001"),
+		"/:handle/status/:id",
+	);
+	// An encoded route or handle is decoded before the path is matched.
+	assert.equal(redactPathShape("/%68ome/with_replies"), "/:handle/with_replies");
+	assert.equal(redactPathShape("/%69"), "/:handle");
+	assert.equal(redactPathShape("/%69/history/likes"), "/i/history/likes");
+	// Trailing slashes and the empty path.
+	assert.equal(redactPathShape("/home/"), "/home");
+	assert.equal(redactPathShape(`/${HANDLE}/`), "/:handle");
+	assert.equal(redactPathShape(""), "");
+	assert.equal(redactPathShape("/"), "/");
+	// The fixed routes themselves still survive whole.
+	assert.equal(redactPathShape("/compose/post"), "/compose/post");
+	assert.equal(redactPathShape("/explore"), "/explore");
+});
+
 test("lists that need no handle are still read when there is no profile link", async () => {
 	const app = new FakeWebApp({ sidebar: false });
 	const h = harness(app, ["bookmarks", "likes"]);
@@ -1744,6 +1905,36 @@ test("every timeline the app loaded counts against the run's budget", async () =
 		line.startsWith("[x_browser-diagnostic] run "),
 	);
 	assert.match(run ?? "", /"ps":7/);
+});
+
+test("the run's budget stops the walk before the next action, not after the view", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app, ["likes"]);
+	// History loads two bookmarks on the way to Likes; a budget of 2 is spent
+	// there, so the Likes tab is never opened.
+	await collectXBrowser(h.ctx, { ...FAST, maxPostsPerRun: 2 });
+	assert.deepEqual(h.ids("likes"), []);
+	assert.deepEqual(app.clicks, ["/i/history"]);
+	assert.ok(!requestLog(app).includes("Likes"));
+	assert.deepEqual(h.skips(), { likes: "run_budget_reached" });
+});
+
+test("a home timeline the app loads on the way counts against the run's budget", async () => {
+	const pages = fixturePages();
+	pages["HomeTimeline"] = { "": homeTimelinePage(["1", "2", "3"]) };
+	const app = new FakeWebApp({ pages });
+	app.onRequest = ({ operation }) => {
+		if (operation === "Bookmarks") {
+			app.request("HomeTimeline", { count: 20 });
+		}
+	};
+	const h = harness(app, ["likes"]);
+	// History's 2 bookmarks plus the 3 home posts spend a budget of 3, so the
+	// Likes tab is never opened.
+	await collectXBrowser(h.ctx, { ...FAST, maxPostsPerRun: 3 });
+	assert.deepEqual(app.clicks, ["/i/history"]);
+	assert.ok(!requestLog(app).includes("Likes"));
+	assert.deepEqual(h.skips(), { likes: "run_budget_reached" });
 });
 
 test("unreadable posts are skipped and reported; the rest is saved", async () => {
@@ -1926,4 +2117,37 @@ test("every reason the connector can report has owner-facing copy", () => {
 		Object.keys(manifest.reason_display_messages).sort(),
 		[...reasons].sort(),
 	);
+});
+
+test("an HTTP 200 refusal the drawer click triggered also stops the run", async () => {
+	const app = new FakeWebApp({
+		drawer: true,
+		respond: ({ operation }) =>
+			operation === "HomeTimeline"
+				? { status: 200, body: '{"errors":[{"code":88}]}' }
+				: undefined,
+		sidebar: false,
+	});
+	const h = harness(app);
+	h.ctx.page = hookedPage(app, (script) => {
+		if (script.includes("DashButton_ProfileIcon_Link")) {
+			app.request("HomeTimeline", { count: 20 });
+		}
+	});
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	assert.deepEqual(app.clicks, []);
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"stop":"collection_interrupted"/);
+});
+
+test("the run's budget stops the walk before the tab's first scroll", async () => {
+	const app = new FakeWebApp();
+	const h = harness(app, ["likes"]);
+	await collectXBrowser(h.ctx, { ...FAST, maxPostsPerRun: 5 });
+	// History's 2 bookmarks plus the likes tab's first 3 posts spend the cap.
+	assert.deepEqual(h.ids("likes"), LIKE_IDS.slice(0, 3));
+	assert.equal(app.scrolls, 0);
+	assert.ok(!requestLog(app).includes("Likes@synthetic-likes-bottom-1"));
 });

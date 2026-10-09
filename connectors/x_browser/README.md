@@ -27,7 +27,7 @@ This is not legal advice. Whether to run it is the owner's decision.
 It does not build X's GraphQL requests. Their query ids rotate and each request carries a per-request signature header, so a rebuilt request is both fragile and conspicuous. It lets the web app make its own requests and reads the responses:
 
 1. Open `https://x.com/home` (skipped when the page is already there).
-2. Install an observer in the page (`page-scripts.ts`). It wraps `XMLHttpRequest.prototype.open` and `send`, and `window.fetch` as a fallback, and buffers the response of every request to `/graphql/<queryId>/<OperationName>`. It matches on the operation name only and changes no request.
+2. Install an observer in the page (`page-scripts.ts`). It wraps `XMLHttpRequest.prototype.open` and `send`, and `window.fetch` as a fallback, and buffers the response of every request to `/graphql/<queryId>/<OperationName>`. It matches on the operation name only and changes no request. It also counts the posts in every response body, so a timeline it does not read still spends the reading budget; only the number leaves the page.
 3. Move between views by following the app's own links, so the page is not reloaded and the observer survives: the profile link, the profile's Replies tab, the History link, and its Likes tab. On the narrow layout the profile link is read from the account drawer the avatar control opens: the drawer's `/<handle>/following` link names the handle, and its own link to `/<handle>` is followed (this path completed a real run on a real iPhone 12 on 2026-10-08/09; see [Verified on a real iPhone](#verified-on-a-real-iphone)).
 4. Scroll the window down in steps. The app then requests the next page of the list itself.
 5. Take the buffered responses out of the page between steps and parse them in `parsers.ts`.
@@ -58,8 +58,8 @@ Every post the web app loads counts against the owner's own daily reading allowa
 | Scroll steps in one view | 60 | `MAX_SCROLL_STEPS_PER_VIEW` |
 | Minimum time between runs | 1 day | manifest `minimum_interval_seconds` |
 
-- The count is of posts X sent, including other people's posts in reply threads and posts that could not be read. Every timeline the app loads counts against it, whichever view the run is reading (for example, the bookmarks History loads on the way to Likes). A view stops after the response that reaches its cap, so it can pass the cap by one response.
-- The count cannot include the home timeline, which the app loads before the observer exists. The cap leaves room for it.
+- The count is of posts X sent, including other people's posts in reply threads and posts that could not be read. Every timeline the app loads counts against it, whichever view the run is reading (for example, the bookmarks History loads on the way to Likes, and the home timeline the app reloads while moving between views). The count is taken inside the page from each response body and only the number leaves it, so an operation this connector does not read still spends the owner's allowance. A view stops after the response that reaches its cap, so it can pass the cap by one response.
+- The one home timeline load before the observer is installed cannot be counted. The cap leaves room for it. A later home timeline load does count; how many posts a typical first page adds is unverified, because the fixtures here contain no `HomeTimeline` body. The real device run read 109 posts in the wanted views, so the 400 default leaves room for that and a reload.
 - One action at a time. No parallel requests, no retries.
 - The first run reads each list from the top to its cap. A later run stops a list at the first post already collected; inside a conversation module it reads every member first, so a new reply under an already-collected post is still saved. STATE keeps the newest 50 ids for each of the originals, replies, likes and bookmarks lists, and nothing else, so a run of replies cannot evict the originals checkpoint.
 - Older history beyond the first run's cap is never read. That is the stream's stated bound, not a gap to be filled later.
@@ -76,7 +76,7 @@ A refusal or a lost session the app shows while one view is opening stops the ru
 
 The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short does not move its cursor, so the next run reads it from the top again.
 
-It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control. An `lc` line emits an accessible name only from a fixed list of X's own navigation labels; any other label becomes `al:"*"`, and a path segment outside X's fixed route words is never emitted raw.
+It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write diagnostics. One `layout` line names the viewport, the route, the drawer result, the control count and the number of control lines; then one `lc` line names each control. An `lc` line emits an accessible name only from a fixed list of X's own navigation labels; any other label becomes `al:"*"`, and a path that does not match one of X's fixed route patterns is never emitted raw.
 
 Every report line must fit a 150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS`, in `connector-diagnostic.ts`), measured on the whole formatted line the host sees (`[x_browser-diagnostic] ` + event + space + JSON), because the mobile host truncates a message to 160 characters past its own prefix. An `lc` line is therefore a flat JSON object, never a JSON string inside JSON, with short keys:
 
@@ -90,7 +90,7 @@ Every report line must fit a 150-character budget (`DIAGNOSTIC_LINE_MAX_CHARS`, 
 | `al` | fixed navigation label (`Home`, `Search and explore`, ...), or `*` when the control carries any other accessible name |
 | `r` | `role` |
 | `x` | `aria-expanded` |
-| `p` | handle-free, id-free path shape: only X's fixed route words survive |
+| `p` | handle-free, id-free path shape: X's fixed route patterns survive whole, every other segment is a placeholder |
 | `cut` | `1` when `al` was shortened, then `p`, to fit the budget |
 
 Dialog controls are named first, so the open drawer is never hidden by the line cap (`LAYOUT_MAX_CONTROL_LINES`, 60). Null or absent fields are left out, `id` is never dropped from a line that is written, and no text, handle or numeric id is ever named. If a control's shortest line still cannot fit, that control is left out (its `id` is not truncated away) and the first line reports `omitted`; otherwise at the page script's 60-control cap every control gets a line.

@@ -236,6 +236,7 @@ test("the observer buffers GraphQL responses by operation name and changes no re
 			body: '{"data":{"likes":1}}',
 			refused: false,
 			errorCode: null,
+			postCount: 0,
 		},
 	]);
 	// One large body per read: the second waits for the next.
@@ -268,8 +269,114 @@ test("operations it does not read keep no body, unless X refused them", () => {
 	);
 });
 
-test("an HTTP 200 refusal is signalled with only its error code, wanted or not", () => {
+test("a timeline the connector does not read leaves a post count only", () => {
 	const page = fakePage();
+	page.run(INSTALL);
+	const body = JSON.stringify({
+		data: {
+			home: {
+				home_timeline_urt: {
+					instructions: [
+						{
+							type: "TimelineAddEntries",
+							entries: ["1", "2", "3"].map((id) => ({
+								entryId: `tweet-${id}`,
+								content: {
+									entryType: "TimelineTimelineItem",
+									itemContent: {
+										tweet_results: {
+											result: { __typename: "Tweet", rest_id: id },
+										},
+									},
+								},
+							})),
+						},
+					],
+				},
+			},
+		},
+	});
+	page.request(graphql("HomeTimeline"), 200, body);
+	page.request(graphql("DataSaverMode"), 200, '{"data":{"viewer":{}}}');
+	const { entries } = page.run(POLL_SCRIPT);
+	// The body is dropped, but the posts it loaded still count.
+	assert.equal(entries[0].postCount, 3);
+	assert.equal(entries[0].body, "");
+	assert.equal(entries[1].postCount, 0);
+});
+
+test("an unwanted timeline counts module and wrapped posts but not promoted ones", () => {
+	const page = fakePage();
+	page.run(INSTALL);
+	const body = JSON.stringify({
+		data: {
+			home: {
+				home_timeline_urt: {
+					instructions: [
+						{
+							type: "TimelineAddEntries",
+							entries: [
+								{
+									entryId: "tweet-a",
+									content: {
+										entryType: "TimelineTimelineItem",
+										itemContent: {
+											tweet_results: { result: { rest_id: "a" } },
+										},
+									},
+								},
+								{
+									entryId: "promoted-b",
+									content: {
+										entryType: "TimelineTimelineItem",
+										itemContent: {
+											promotedMetadata: {},
+											tweet_results: { result: { rest_id: "b" } },
+										},
+									},
+								},
+								{
+									entryId: "module-c",
+									content: {
+										entryType: "TimelineTimelineModule",
+										items: ["c1", "c2"].map((id) => ({
+											item: {
+												itemContent: {
+													tweet_results: { result: { rest_id: id } },
+												},
+											},
+										})),
+									},
+								},
+								{
+									entryId: "tweet-d",
+									content: {
+										entryType: "TimelineTimelineItem",
+										itemContent: {
+											tweet_results: {
+												result: {
+													__typename: "TweetWithVisibilityResults",
+													tweet: { rest_id: "d" },
+												},
+											},
+										},
+									},
+								},
+							],
+						},
+					],
+				},
+			},
+		},
+	});
+	page.request(graphql("HomeTimeline"), 200, body);
+	const { entries } = page.run(POLL_SCRIPT);
+	// a + c1 + c2 + d count; the promoted b does not.
+	assert.equal(entries[0].postCount, 4);
+	assert.equal(entries[0].body, "");
+});
+
+test("an HTTP 200 refusal is signalled with only its error code, wanted or not", () => {	const page = fakePage();
 	page.run(INSTALL);
 	// An operation the connector does not read: its body is dropped, but the
 	// refusal survives.
