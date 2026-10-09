@@ -530,10 +530,12 @@ test("a run reads the four streams with the client's own headers", async () => {
 			[SERVER_A]: {
 				newest_id: h.of("messages")[0]?.id,
 				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+				until_ms: null,
 			},
 			[SERVER_B]: {
 				newest_id: null,
 				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+				until_ms: null,
 			},
 		},
 	});
@@ -1021,6 +1023,48 @@ test("a malformed hit does not stop pagination", async () => {
 	assert.ok(unreadable.includes('"positions":"3"'), unreadable);
 });
 
+test("the unreadable-position report fits the line budget at a full page", async () => {
+	const all = messagesBy(OWNER, 10_000);
+	const lastOffset = 9_975;
+	const fake = fakeDiscord({
+		respond: discordApi({ [SERVER_A]: all }, (path) => {
+			const url = new URL(path, ORIGIN);
+			if (!url.pathname.endsWith("/messages/search")) return undefined;
+			const offset = Number(url.searchParams.get("offset"));
+			if (offset !== lastOffset) return undefined;
+			// A full page with every other group unreadable: 13 four-digit
+			// positions that do not collapse into one range.
+			return {
+				status: 200,
+				body: {
+					total_results: all.length,
+					messages: all
+						.slice(offset, offset + SEARCH_PAGE)
+						.map((message, index) =>
+							index % 2 === 0
+								? [{ author: { id: OWNER }, hit: true }]
+								: [message],
+						),
+				},
+			};
+		}),
+	});
+	const h = harness(fake, ["messages"]);
+	const lines = await captureDiagnostics(() =>
+		collectDiscordBrowser(
+			h.ctx,
+			fast([], { maxMessages: 20_000, maxRequests: 500 }),
+		),
+	);
+	const unreadable = lines.filter((line) =>
+		line.includes("search_hits_unreadable"),
+	);
+	assert.ok(unreadable.length >= 2, String(unreadable.length));
+	for (const line of unreadable) {
+		assert.ok(line.length <= DIAGNOSTIC_LINE_MAX_CHARS, `${line.length}: ${line}`);
+	}
+});
+
 test("a requested time range narrows the window", async () => {
 	const fake = fakeDiscord({
 		respond: discordApi({ [SERVER_A]: messagesBy(OWNER, 10, NOW, DAY_MS) }),
@@ -1067,6 +1111,154 @@ test("a wider later range reads below the stored floor", async () => {
 		second.of("messages").map((record) => record.id),
 		listing.slice(7).map((message) => message.id),
 	);
+});
+
+test("an interrupted expansion does not claim a floor it never reached", async () => {
+	const listing = messagesBy(OWNER, 30, NOW - DAY_MS, DAY_MS);
+	const servers = { [SERVER_A]: listing };
+	const since = new Date(NOW - 7 * DAY_MS).toISOString();
+
+	// The first run reads the newest seven days and records their floor.
+	const one = fakeDiscord({ respond: discordApi(servers) });
+	const first = harness(one, ["messages"], {}, { timeRange: { since } });
+	await collectDiscordBrowser(first.ctx, fast());
+	assert.equal(first.of("messages").length, 7);
+
+	// The unrestricted run is refused before it reads below that floor.
+	const two = fakeDiscord({
+		respond: discordApi(servers, (path) =>
+			path.includes("/messages/search")
+				? { status: 403, body: fixture("missing-access.json") }
+				: undefined,
+		),
+	});
+	const second = harness(two, ["messages"], {
+		messages: first.cursor("messages"),
+	});
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.equal(second.of("messages").length, 0);
+
+	// The next healthy run must still read days 8..30, all 23 of them.
+	const three = fakeDiscord({ respond: discordApi(servers) });
+	const third = harness(three, ["messages"], {
+		messages: second.cursor("messages"),
+	});
+	await collectDiscordBrowser(third.ctx, fast());
+	const collected = new Set([
+		...first.of("messages").map((record) => String(record.id)),
+		...third.of("messages").map((record) => String(record.id)),
+	]);
+	assert.equal(collected.size, 30);
+});
+
+test("an expansion cut off in the new head still reaches the older floor", async () => {
+	const listing = messagesBy(OWNER, 30, NOW - DAY_MS, DAY_MS);
+	const since = new Date(NOW - 7 * DAY_MS).toISOString();
+
+	const one = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+	const first = harness(one, ["messages"], {}, { timeRange: { since } });
+	await collectDiscordBrowser(first.ctx, fast());
+
+	// A new message arrives, then the unrestricted run is cut to one message:
+	// it ends while still collecting the new head, before the old floor.
+	const withNew = {
+		[SERVER_A]: [...messagesBy(OWNER, 1, NOW - 60_000), ...listing],
+	};
+	const two = fakeDiscord({ respond: discordApi(withNew) });
+	const second = harness(two, ["messages"], {
+		messages: first.cursor("messages"),
+	});
+	await collectDiscordBrowser(second.ctx, fast([], { maxMessages: 1 }));
+	assert.equal(second.of("messages").length, 1);
+
+	// The next run must read below the head, including days 8..30.
+	const three = fakeDiscord({ respond: discordApi(withNew) });
+	const third = harness(three, ["messages"], {
+		messages: second.cursor("messages"),
+	});
+	await collectDiscordBrowser(third.ctx, fast());
+	const collected = new Set([
+		...first.of("messages").map((record) => String(record.id)),
+		...second.of("messages").map((record) => String(record.id)),
+		...third.of("messages").map((record) => String(record.id)),
+	]);
+	assert.equal(collected.size, 31);
+});
+
+test("disjoint ranges do not merge into one covered interval", async () => {
+	const listing = messagesBy(OWNER, 90, NOW - DAY_MS, DAY_MS);
+	const servers = { [SERVER_A]: listing };
+	const until = new Date(NOW - 30 * DAY_MS).toISOString();
+	const since = new Date(NOW - 7 * DAY_MS).toISOString();
+
+	// Days 31..90 are collected with an until bound.
+	const one = fakeDiscord({ respond: discordApi(servers) });
+	const first = harness(one, ["messages"], {}, { timeRange: { until } });
+	await collectDiscordBrowser(first.ctx, fast());
+	const firstIds = first.of("messages").map((record) => String(record.id));
+	assert.equal(firstIds.length, 60);
+
+	// Days 1..7 are collected with a since bound. The two ranges are disjoint.
+	const two = fakeDiscord({ respond: discordApi(servers) });
+	const second = harness(
+		two,
+		["messages"],
+		{ messages: first.cursor("messages") },
+		{ timeRange: { since } },
+	);
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.equal(second.of("messages").length, 7);
+
+	// The full window must read days 8..30 rather than treat them as covered.
+	const three = fakeDiscord({ respond: discordApi(servers) });
+	const third = harness(three, ["messages"], {
+		messages: second.cursor("messages"),
+	});
+	await collectDiscordBrowser(third.ctx, fast());
+	const collected = new Set([
+		...firstIds,
+		...second.of("messages").map((record) => String(record.id)),
+		...third.of("messages").map((record) => String(record.id)),
+	]);
+	assert.equal(collected.size, 90);
+});
+
+test("a legacy cursor without recorded bounds is not trusted", async () => {
+	const listing = messagesBy(OWNER, 5);
+	const legacy = {
+		queue: [SERVER_A],
+		servers: {
+			[SERVER_A]: {
+				newest_id: listing[0]?.id,
+				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+			},
+		},
+	};
+	const fake = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+	const h = harness(fake, ["messages"], { messages: legacy });
+	await collectDiscordBrowser(h.ctx, fast());
+	// The missing until_ms makes the cursor untrusted, so the range is re-read.
+	assert.deepEqual(
+		h.of("messages").map((record) => String(record.id)),
+		listing.map((message) => message.id),
+	);
+});
+
+test("an unchanged request still stops at the known head", async () => {
+	const listing = messagesBy(OWNER, 5);
+	const one = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+	const first = harness(one, ["messages"]);
+	await collectDiscordBrowser(first.ctx, fast());
+	assert.equal(first.of("messages").length, 5);
+
+	const two = fakeDiscord({ respond: discordApi({ [SERVER_A]: listing }) });
+	const second = harness(two, ["messages"], {
+		messages: first.cursor("messages"),
+	});
+	await collectDiscordBrowser(second.ctx, fast());
+	assert.deepEqual(second.of("messages"), []);
+	// One search reaches the known head and stops there.
+	assert.equal(searches(two).length, 1);
 });
 
 test("a backfill-only run does not move the newest id backward", async () => {
@@ -1128,7 +1320,7 @@ test("the message limit stops a run, and later runs resume then go incremental",
 		servers: {
 			[SERVER_A]: {
 				newest_id: listing[0]?.id,
-				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+				// The walk hit the limit, so it claims no floor coverage yet.
 				backfill: { before_id: listing[39]?.id, offset: 40 },
 			},
 		},
@@ -1161,10 +1353,12 @@ test("the message limit stops a run, and later runs resume then go incremental",
 			[SERVER_A]: {
 				newest_id: servers[SERVER_A]?.[0]?.id,
 				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+				until_ms: null,
 			},
 			[SERVER_B]: {
 				newest_id: servers[SERVER_B]?.[0]?.id,
 				floor_ms: NOW - MESSAGE_WINDOW_DAYS * DAY_MS,
+				until_ms: null,
 			},
 		},
 	});

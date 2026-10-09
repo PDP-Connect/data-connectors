@@ -65,7 +65,11 @@
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
-import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import {
+	connectorDiagnostic,
+	DIAGNOSTIC_LINE_MAX_CHARS,
+	formatConnectorDiagnostic,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
@@ -175,22 +179,24 @@ export interface DiscordCollectOptions {
 /** Where a server's collected messages end, by message id. */
 interface ServerCursor {
 	/**
-	 * Set while older messages are still to be read: the ids from `before_id`
-	 * up to `newest_id` are collected, and the walk continues below
-	 * `before_id`, which sat at `offset` in the search listing. It ends at
-	 * `until_id` when everything at or below that id was collected earlier.
+	 * Set while an interrupted walk still has older messages to read: the ids
+	 * from `before_id` up to `newest_id` were traversed, and the walk resumes
+	 * below `before_id`, which sat at `offset` in the search listing.
 	 */
-	backfill?: { before_id: string; offset: number; until_id?: string };
+	backfill?: { before_id: string; offset: number };
 	/**
-	 * Earliest instant this cursor was read down to. A later request that
-	 * reaches older is not covered and reads below this bound.
+	 * Lower bound of the completed walk that proved this cursor's coverage.
+	 * Missing on a legacy or interrupted cursor, so it is not trusted to end a
+	 * later walk.
 	 */
 	floor_ms?: number;
 	/** Newest collected message id; a later run stops there. */
 	newest_id: string | null;
+	/** Upper bound of that completed walk; null means no upper bound. */
+	until_ms?: number | null;
 }
 
-/** The `messages` cursor. Ids, offsets and the floor instant only. */
+/** The `messages` cursor. Ids, instants and offsets only. */
 interface MessagesState {
 	/** Server ids in the order later runs search them. */
 	queue?: string[];
@@ -487,6 +493,114 @@ interface ServerWalk {
 }
 
 /**
+ * Whether a stored cursor records a completed walk's coverage bounds. A
+ * legacy cursor without them and an interrupted cursor with a resume marker
+ * are both untrusted.
+ */
+function hasCursorCoverage(
+	prior: ServerCursor | null,
+): prior is ServerCursor & { floor_ms: number; until_ms: number | null } {
+	return (
+		prior !== null &&
+		prior.backfill === undefined &&
+		prior.floor_ms !== undefined &&
+		prior.until_ms !== undefined
+	);
+}
+
+/**
+ * Whether a stored cursor proves the current request's range is collected: it
+ * must record its bounds and the request must be equal to or narrower.
+ */
+function cursorCovers(
+	prior: ServerCursor | null,
+	floorMs: number,
+	untilMs: number | null,
+): boolean {
+	if (!hasCursorCoverage(prior)) return false;
+	if (floorMs < prior.floor_ms) return false;
+	if (prior.until_ms === null) return true;
+	return untilMs !== null && untilMs <= prior.until_ms;
+}
+
+/**
+ * Whether an instant lies inside the coverage a stored cursor already proved.
+ * Only a cursor with recorded bounds can answer yes.
+ */
+function cursorCollected(prior: ServerCursor | null, ms: number): boolean {
+	if (!prior || prior.floor_ms === undefined || prior.until_ms === undefined) {
+		return false;
+	}
+	if (ms < prior.floor_ms) return false;
+	return prior.until_ms === null || ms < prior.until_ms;
+}
+
+/** Consecutive positions collapse to `start-end`; others stay single. */
+function packPositions(positions: number[]): string[] {
+	const sorted = [...positions].sort((a, b) => a - b);
+	const tokens: string[] = [];
+	let start: number | null = null;
+	let previous: number | null = null;
+	for (const position of sorted) {
+		if (previous !== null && position === previous + 1) {
+			previous = position;
+			continue;
+		}
+		if (start !== null && previous !== null) {
+			tokens.push(start === previous ? String(start) : `${start}-${previous}`);
+		}
+		start = position;
+		previous = position;
+	}
+	if (start !== null && previous !== null) {
+		tokens.push(start === previous ? String(start) : `${start}-${previous}`);
+	}
+	return tokens;
+}
+
+/** Split packed position tokens so each chunk fits one diagnostic line. */
+function chunkTokens(tokens: string[], budget: number): string[] {
+	const chunks: string[] = [];
+	let current: string[] = [];
+	for (const token of tokens) {
+		const candidate = [...current, token].join(",");
+		if (current.length > 0 && candidate.length > budget) {
+			chunks.push(current.join(","));
+			current = [token];
+		} else {
+			current.push(token);
+		}
+	}
+	if (current.length > 0) chunks.push(current.join(","));
+	return chunks;
+}
+
+/**
+ * Report a search page's unreadable positions, split across as many
+ * diagnostic lines as the phone host's budget needs so no line is cut.
+ */
+function reportUnreadable(
+	count: number,
+	rawPositions: number[],
+	offset: number,
+): void {
+	const absolute = rawPositions.map((at) => offset + at);
+	const overhead = formatConnectorDiagnostic(
+		"discord_browser",
+		"search_hits_unreadable",
+		{ count, offset, positions: "" },
+	).length;
+	const budget = Math.max(1, DIAGNOSTIC_LINE_MAX_CHARS - overhead);
+	for (const positions of chunkTokens(packPositions(absolute), budget)) {
+		connectorDiagnostic("discord_browser", "search_hits_unreadable", {
+			count,
+			offset,
+			positions,
+		});
+	}
+}
+
+/**
  * Read the owner's messages in one server, newest first.
  *
  * "head" reads from the top until the newest message already collected.
@@ -494,21 +608,20 @@ interface ServerWalk {
  * where that run stopped and "tail" reads on from there. The jump is by
  * offset, which messages sent or deleted since can shift: the tail starts
  * one position early so the first hit should be the last collected message,
- * and steps back one page once when it is not. A cursor records the floor it
- * was read to, so a later request for a wider range reads below it.
+ * and steps back one page once when it is not.
+ *
+ * A stored cursor is trusted only when it recorded a completed walk's own
+ * since and until bounds and the current request is equal to or narrower. It
+ * is then safe to stop at the known head. Any other cursor is ignored for
+ * stopping: the walk covers the whole requested range again, skipping only
+ * instants the cursor already proved. An interrupted walk never extends the
+ * recorded coverage; it keeps the previous bounds and only notes its resume.
  */
 async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 	const { api, budget, floorMs, ownerId, prior, server, untilMs } = walk;
 	const priorNewest = prior?.newest_id ?? null;
-	const priorFloor = prior?.floor_ms ?? null;
 	const backfill = prior?.backfill ?? null;
-	// A stored cursor covers only the range it was read with. A request that
-	// reaches older than that floor is not covered, so the walk reads below it.
-	const widenBelowMs =
-		priorFloor !== null && floorMs < priorFloor ? priorFloor : null;
-	// The deepest instant the cursor may claim: coverage only grows.
-	const coveredFloor =
-		priorFloor === null ? floorMs : Math.min(floorMs, priorFloor);
+	const covered = cursorCovers(prior, floorMs, untilMs);
 	let mode: "head" | "tail" = "head";
 	let offset = 0;
 	let rewound = false;
@@ -525,46 +638,30 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 			: priorNewest;
 	};
 
-	/** The cursor when the walk stops at listing position `position`. */
-	const cut = (position: number): ServerCursor => {
-		if (mode === "tail" && backfill) {
-			return {
-				newest_id: newestId(),
-				floor_ms: coveredFloor,
-				backfill: {
-					...backfill,
-					before_id: oldestEmitted ?? backfill.before_id,
-					offset: position,
-				},
-			};
-		}
-		if (oldestEmitted === null) {
-			return {
-				newest_id: priorNewest,
-				floor_ms: coveredFloor,
-				...(backfill ? { backfill } : {}),
-			};
-		}
-		return {
-			newest_id: newestId(),
-			floor_ms: coveredFloor,
-			backfill: {
-				before_id: oldestEmitted,
-				offset: position,
-				// Everything at or below the old newest id is collected, unless the
-				// walk had already read past it: then it reads to the window.
-				...(priorNewest !== null &&
-				!backfill &&
-				compareSnowflakes(oldestEmitted, priorNewest) > 0
-					? { until_id: priorNewest }
-					: {}),
-			},
-		};
-	};
+	/** A completed walk owns the request's bounds as its coverage. */
 	const complete = (): ServerOutcome => ({
 		kind: "complete",
-		cursor: { newest_id: newestId(), floor_ms: coveredFloor },
+		cursor: { newest_id: newestId(), floor_ms: floorMs, until_ms: untilMs },
 	});
+
+	/**
+	 * An interrupted walk never extends coverage: it keeps the previous
+	 * bounds and only records where the next run resumes.
+	 */
+	const cut = (position: number): ServerCursor => {
+		const before = oldestEmitted ?? backfill?.before_id;
+		const kept =
+			prior?.floor_ms !== undefined && prior.until_ms !== undefined
+				? { floor_ms: prior.floor_ms, until_ms: prior.until_ms }
+				: {};
+		return {
+			newest_id: newestId(),
+			...kept,
+			...(before === undefined
+				? {}
+				: { backfill: { before_id: before, offset: position } }),
+		};
+	};
 
 	for (;;) {
 		if (offset > MAX_SEARCH_OFFSET) return complete();
@@ -598,11 +695,7 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 		}
 		if (page.unreadable > 0) {
 			// The raw listing positions a malformed group left blank.
-			connectorDiagnostic("discord_browser", "search_hits_unreadable", {
-				count: page.unreadable,
-				offset,
-				positions: page.unreadablePositions.map((at) => offset + at).join(","),
-			});
+			reportUnreadable(page.unreadable, page.unreadablePositions, offset);
 		}
 
 		const first = page.hits[0];
@@ -641,18 +734,12 @@ async function searchServer(walk: ServerWalk): Promise<ServerOutcome> {
 						jumped = true;
 						break;
 					}
-					if (widenBelowMs === null) return complete();
-					// Already collected above the stored floor: skip it and read on.
-					if (hit.timestampMs >= widenBelowMs) continue;
+					if (covered) return complete();
+					// Already covered by an earlier walk: skip it and read on.
+					if (cursorCollected(prior, hit.timestampMs)) continue;
 				}
 			} else if (backfill) {
 				if (compareSnowflakes(hit.id, backfill.before_id) >= 0) continue;
-				if (
-					backfill.until_id !== undefined &&
-					compareSnowflakes(hit.id, backfill.until_id) <= 0
-				) {
-					return complete();
-				}
 			}
 			if (!isOwnMessage(hit, ownerId)) continue;
 			if (untilMs !== null && hit.timestampMs >= untilMs) continue;
@@ -677,6 +764,13 @@ function isOwnMessage(hit: SearchHit, ownerId: string): boolean {
 	return hit.authorId === ownerId;
 }
 
+/** A non-negative integer instant, or null when the value is not one. */
+function validInstant(value: unknown): number | null {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? value
+		: null;
+}
+
 function readMessagesState(value: unknown): Required<MessagesState> {
 	const state = (value ?? {}) as MessagesState;
 	const queue = Array.isArray(state.queue)
@@ -690,27 +784,22 @@ function readMessagesState(value: unknown): Required<MessagesState> {
 			}
 			const newest = snowflake(cursor.newest_id);
 			const before = snowflake(cursor.backfill?.before_id);
-			const until = snowflake(cursor.backfill?.until_id);
 			const offset = cursor.backfill?.offset;
-			const floor = cursor.floor_ms;
+			const floor = validInstant(cursor.floor_ms);
+			// A null until_ms records "no upper bound"; a missing key is a legacy
+			// cursor and stays untrusted.
+			const until = cursor.until_ms === null ? null : validInstant(cursor.until_ms);
+			const hasUntil =
+				"until_ms" in cursor && (until !== null || cursor.until_ms === null);
 			servers[id] = {
 				newest_id: newest,
-				...(typeof floor === "number" &&
-				Number.isSafeInteger(floor) &&
-				floor >= 0
-					? { floor_ms: floor }
-					: {}),
+				...(floor === null ? {} : { floor_ms: floor }),
+				...(hasUntil ? { until_ms: until } : {}),
 				...(before !== null &&
 				typeof offset === "number" &&
 				Number.isSafeInteger(offset) &&
 				offset >= 0
-					? {
-							backfill: {
-								before_id: before,
-								offset,
-								...(until !== null ? { until_id: until } : {}),
-							},
-						}
+					? { backfill: { before_id: before, offset } }
 					: {}),
 			};
 		}
