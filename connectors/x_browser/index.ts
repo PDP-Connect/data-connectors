@@ -37,8 +37,8 @@
  * reading allowance, so a run is bounded: see the constants below. The
  * connector does one thing at a time, pauses between actions, never retries,
  * and stops the whole run on the first sign of a rate limit, an error
- * response, or a lost session. It never clicks anything but navigation links
- * and tabs.
+ * response, or a lost session. It never clicks anything but navigation links,
+ * tabs and the account control that opens the narrow layout's drawer.
  *
  * Streams: profile, posts, likes, bookmarks.
  *
@@ -60,16 +60,23 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import type { Page } from "playwright";
 import { z } from "zod";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
-import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import {
+	connectorDiagnostic,
+	formatConnectorDiagnostic,
+} from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
 	BrowserCollectContext,
 	EnsureSessionArgs,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
+	DRAWER_OPEN_SELECTORS,
 	followLinkScript,
 	installObserverScript,
+	LAYOUT_SCRIPT,
+	type LinkFallback,
 	OWNER_HANDLE_SCRIPT,
+	openDrawerScript,
 	POLL_SCRIPT,
 	PROFILE_LINK_SELECTORS,
 	scrollScript,
@@ -158,6 +165,72 @@ const MAX_PAGE_READ_FAILURES = 2;
 const SIGN_IN_PATH_RE =
 	/^\/(?:login|logout|i\/flow\/|i\/jf\/onboarding\/|account\/(?:access|login_challenge|locked|suspended))/;
 const NUMERIC_ID_RE = /^\d{1,30}$/;
+/** X's handle shape, the same one parsers.ts and the page script enforce. */
+const HANDLE_RE = /^[A-Za-z0-9_]{1,15}$/;
+/** The `@`-prefixed form of HANDLE_RE's shape, to mask a mention in a label. */
+const AT_HANDLE_RE = /@[A-Za-z0-9_]{1,15}(?![A-Za-z0-9_])/g;
+/**
+ * Longest accessible name the layout diagnostic keeps. An `aria-label` can
+ * carry an account name, so it is masked and then clipped.
+ */
+const LAYOUT_ARIA_LABEL_MAX_CHARS = 40;
+/**
+ * Longest `layout_controls` line the layout diagnostic writes: safely under
+ * the formatter's 2000-char truncation, with headroom for its prefix and the
+ * JSON-in-string escaping the control list serializes into. The line is
+ * measured as the formatter would write it, never estimated.
+ */
+const LAYOUT_CONTROL_LINE_MAX_CHARS = 1800;
+/**
+ * Most `layout_controls` lines one report writes. At the page script's
+ * 60-control cap and realistic control sizes this names them all; past it the
+ * first line carries the count of controls that could not be named.
+ */
+const LAYOUT_MAX_PARTS = 8;
+
+/**
+ * Path words that are part of X's own routes, never a handle, so a layout
+ * diagnostic keeps them and only masks the account-shaped segments.
+ */
+const STATIC_PATH_SEGMENTS = new Set([
+	"about",
+	"account",
+	"access",
+	"bookmarks",
+	"communities",
+	"compose",
+	"explore",
+	"flow",
+	"followers",
+	"following",
+	"hashtag",
+	"history",
+	"home",
+	"i",
+	"intent",
+	"jf",
+	"likes",
+	"lists",
+	"locked",
+	"login",
+	"logout",
+	"media",
+	"messages",
+	"notifications",
+	"onboarding",
+	"photo",
+	"privacy",
+	"search",
+	"settings",
+	"share",
+	"status",
+	"suspended",
+	"tos",
+	"user",
+	"verified",
+	"video",
+	"with_replies",
+]);
 
 const PROFILE_STREAM = "profile";
 const POSTS_STREAM = "posts";
@@ -224,6 +297,8 @@ const RECOVERY_ACTION: Record<FailureReason, string> = {
 };
 
 interface NavigationStep {
+	/** The narrow layout may hide this link in the account drawer. */
+	readonly drawer?: boolean;
 	readonly path: string;
 	readonly selectors: readonly string[];
 }
@@ -237,9 +312,19 @@ interface View {
 }
 
 const HISTORY_PATH = "/i/history";
+/**
+ * The History (Bookmarks) link. The primary-nav selector was seen on the wide
+ * desktop layout; the bare selector is the drawer fallback, so the click
+ * finds the app's own link once the drawer is open. Which selector the drawer
+ * renders was not checked.
+ */
 const HISTORY_STEP: NavigationStep = {
+	drawer: true,
 	path: HISTORY_PATH,
-	selectors: [`nav[aria-label="Primary"] a[href="${HISTORY_PATH}"]`],
+	selectors: [
+		`nav[aria-label="Primary"] a[href="${HISTORY_PATH}"]`,
+		`a[href="${HISTORY_PATH}"]`,
+	],
 };
 
 /**
@@ -260,6 +345,7 @@ const VIEWS: readonly View[] = [
 				? null
 				: [
 						{
+							drawer: true,
 							path: `/${handle}`,
 							selectors: PROFILE_LINK_SELECTORS,
 						},
@@ -275,6 +361,7 @@ const VIEWS: readonly View[] = [
 				? null
 				: [
 						{
+							drawer: true,
 							path: `/${handle}`,
 							selectors: PROFILE_LINK_SELECTORS,
 						},
@@ -365,6 +452,23 @@ const handleSchema = z.object({
 	via: z.string(),
 });
 const navigationSchema = z.object({ via: z.string() });
+
+const layoutControlSchema = z.object({
+	tag: z.string(),
+	testid: z.string().nullable(),
+	ariaLabel: z.string().nullable(),
+	role: z.string().nullable(),
+	expanded: z.string().nullable(),
+	scope: z.enum(["dialog", "page"]),
+	path: z.string().nullable(),
+});
+const layoutSchema = z.object({
+	width: z.number(),
+	height: z.number(),
+	path: z.string(),
+	controls: z.array(layoutControlSchema),
+});
+type LayoutControl = z.infer<typeof layoutControlSchema>;
 
 const delay = (ms: number): Promise<void> =>
 	new Promise((resolve) => setTimeout(resolve, ms));
@@ -499,12 +603,17 @@ interface ViewOutcome {
 	unreadable: number;
 }
 
+/** What the run did with the narrow layout's drawer before a layout report. */
+type DrawerState = "clicked" | "no_control" | "not_tried";
+
 interface Run {
 	aborted: number;
 	readonly ctx: XCollectContext;
 	readonly delayRange: readonly [number, number];
+	drawer: DrawerState;
 	readonly maxPosts: number;
 	readonly maxScrollSteps: number;
+	layoutReported: boolean;
 	navigations: Record<string, number>;
 	ownerId: string;
 	pageReadFailures: number;
@@ -758,20 +867,233 @@ async function takeTimelinePage(
 	}
 }
 
-/** Follow the app's links to a view. Each link is one action, then a pause. */
+/**
+ * A path with every handle-shaped or numeric segment masked, so a layout
+ * diagnostic can name a control without naming the account it points at. The
+ * static route words X uses are kept. It mirrors the handle and numeric-id
+ * shapes parsers.ts already reads.
+ */
+export function redactPathShape(pathname: string): string {
+	return pathname
+		.split("/")
+		.map((segment) => {
+			if (segment === "") {
+				return segment;
+			}
+			if (NUMERIC_ID_RE.test(segment)) {
+				return ":id";
+			}
+			if (HANDLE_RE.test(segment) && !STATIC_PATH_SEGMENTS.has(segment)) {
+				return ":handle";
+			}
+			return segment;
+		})
+		.join("/");
+}
+
+/**
+ * The accessible name a layout diagnostic may name: any `@handle` becomes
+ * ":handle" and the rest is clipped, so a name in a label cannot leave the
+ * page whole.
+ */
+function clipAriaLabel(value: string | null): string | null {
+	if (value === null) {
+		return null;
+	}
+	const masked = value.replace(AT_HANDLE_RE, ":handle");
+	return masked.slice(0, LAYOUT_ARIA_LABEL_MAX_CHARS);
+}
+
+/**
+ * A control's identifying fields, with every null one left out so more fit in
+ * a line. The names match the layout script's own fields.
+ */
+interface CompactLayoutControl {
+	aria_label?: string;
+	expanded?: string;
+	path?: string;
+	role?: string;
+	scope: "dialog" | "page";
+	tag: string;
+	testid?: string;
+}
+
+/** Drop a control's null fields, masking and clipping what it does name. */
+function compactControl(control: LayoutControl): CompactLayoutControl {
+	const ariaLabel = clipAriaLabel(control.ariaLabel);
+	const compact: CompactLayoutControl = {
+		scope: control.scope,
+		tag: control.tag,
+	};
+	if (control.testid !== null) {
+		compact.testid = control.testid;
+	}
+	if (ariaLabel !== null) {
+		compact.aria_label = ariaLabel;
+	}
+	if (control.role !== null) {
+		compact.role = control.role;
+	}
+	if (control.expanded !== null) {
+		compact.expanded = control.expanded;
+	}
+	if (control.path !== null) {
+		compact.path = redactPathShape(control.path);
+	}
+	return compact;
+}
+
+/** One `layout_controls` line exactly as the formatter would write it. */
+function formatControlsLine(
+	part: number,
+	parts: number,
+	controls: readonly CompactLayoutControl[],
+): string {
+	return formatConnectorDiagnostic("x_browser", "layout_controls", {
+		part,
+		parts,
+		controls: JSON.stringify(controls),
+	});
+}
+
+/** Whether a part still fits the budget with all its controls. */
+function controlsFit(
+	part: number,
+	controls: readonly CompactLayoutControl[],
+): boolean {
+	// LAYOUT_MAX_PARTS is the largest `parts` can be, so this measures the
+	// longest the line could get once the real count is known.
+	return (
+		formatControlsLine(part, LAYOUT_MAX_PARTS, controls).length <=
+		LAYOUT_CONTROL_LINE_MAX_CHARS
+	);
+}
+
+/**
+ * Pack consecutive controls into as few parts as fit the budget. No control is
+ * split; one too large for a part is emitted alone. Once LAYOUT_MAX_PARTS
+ * parts are full the rest are left out, for the caller to count.
+ */
+function packControls(controls: readonly LayoutControl[]): {
+	packed: number;
+	parts: CompactLayoutControl[][];
+} {
+	const parts: CompactLayoutControl[][] = [];
+	let packed = 0;
+	for (const control of controls) {
+		const open = parts.at(-1);
+		const compact = compactControl(control);
+		if (open !== undefined && controlsFit(parts.length, [...open, compact])) {
+			open.push(compact);
+			packed += 1;
+			continue;
+		}
+		if (parts.length >= LAYOUT_MAX_PARTS) {
+			break;
+		}
+		parts.push([compact]);
+		packed += 1;
+	}
+	return { packed, parts };
+}
+
+/**
+ * Name the current layout once per run, when a link the connector needs is
+ * missing. One `layout` line carries the viewport, the redacted route, what
+ * the run tried with the drawer, the total control count and the number of
+ * parts; then one `layout_controls` line per part names as many consecutive
+ * controls as fit, each with only its tag, test id, masked accessible name,
+ * role, expanded state, dialog/page scope and handle/id-free path shape: no
+ * text, no handle, no id, no token. A page the connector cannot read reports
+ * nothing.
+ */
+async function reportLayout(run: Run): Promise<void> {
+	if (run.layoutReported) {
+		return;
+	}
+	run.layoutReported = true;
+	const parsed = layoutSchema.safeParse(
+		await evaluateInPage(run.ctx.page, LAYOUT_SCRIPT),
+	);
+	if (!parsed.success) {
+		return;
+	}
+	const { packed, parts } = packControls(parsed.data.controls);
+	const omitted = parsed.data.controls.length - packed;
+	connectorDiagnostic("x_browser", "layout", {
+		width: parsed.data.width,
+		height: parsed.data.height,
+		path: redactPathShape(parsed.data.path),
+		drawer: run.drawer,
+		controls: parsed.data.controls.length,
+		parts: parts.length,
+		...(omitted > 0 ? { omitted } : {}),
+	});
+	for (const [index, part] of parts.entries()) {
+		connectorDiagnostic("x_browser", "layout_controls", {
+			part: index + 1,
+			parts: parts.length,
+			controls: JSON.stringify(part),
+		});
+	}
+}
+
+/** Click the app's own account-drawer control; false when it is not there. */
+async function openDrawer(run: Run): Promise<boolean> {
+	const parsed = navigationSchema.safeParse(
+		await evaluateInPage(run.ctx.page, openDrawerScript(DRAWER_OPEN_SELECTORS)),
+	);
+	const via = parsed.success ? parsed.data.via : "none";
+	run.navigations[via] = (run.navigations[via] ?? 0) + 1;
+	if (via === "none") {
+		// A click that already happened still describes the run better than a
+		// later miss does, so only an untouched drawer becomes "no_control".
+		if (run.drawer !== "clicked") {
+			run.drawer = "no_control";
+		}
+		return false;
+	}
+	run.drawer = "clicked";
+	await pause(run);
+	return true;
+}
+
+/** Follow one step with the given fallback and count how it was reached. */
+async function followStep(
+	run: Run,
+	step: NavigationStep,
+	fallback: LinkFallback,
+): Promise<string> {
+	const parsed = navigationSchema.safeParse(
+		await evaluateInPage(
+			run.ctx.page,
+			followLinkScript(step.selectors, step.path, fallback),
+		),
+	);
+	const via = parsed.success ? parsed.data.via : "none";
+	run.navigations[via] = (run.navigations[via] ?? 0) + 1;
+	return via;
+}
+
+/**
+ * Follow the app's links to a view. A link the narrow layout hides in the
+ * account drawer is retried after opening the drawer; a link still missing is
+ * reported before the history fallback. Each action is followed by a pause.
+ */
 async function openView(
 	run: Run,
 	steps: readonly NavigationStep[],
 ): Promise<Failure | null> {
 	for (const step of steps) {
-		const parsed = navigationSchema.safeParse(
-			await evaluateInPage(
-				run.ctx.page,
-				followLinkScript(step.selectors, step.path),
-			),
-		);
-		const via = parsed.success ? parsed.data.via : "none";
-		run.navigations[via] = (run.navigations[via] ?? 0) + 1;
+		let via = await followStep(run, step, "none");
+		if (via === "none" && step.drawer) {
+			await openDrawer(run);
+			via = await followStep(run, step, "none");
+		}
+		if (via === "none") {
+			await reportLayout(run);
+			via = await followStep(run, step, "route");
+		}
 		if (via === "none") {
 			return {
 				reason: "source_unreadable",
@@ -813,6 +1135,7 @@ async function readView(
 	const outcome = emptyOutcome();
 	const steps = view.steps(handle);
 	if (steps === null) {
+		await reportLayout(run);
 		outcome.failure = {
 			reason: "source_unreadable",
 			message:
@@ -1090,8 +1413,8 @@ async function finishProfile(run: Run, attempted: boolean): Promise<number> {
 	return 1;
 }
 
-/** The signed-in owner's handle, or null when the layout does not show it. */
-async function findOwnerHandle(
+/** Read the owner's handle from the app's own profile link, with retries. */
+async function readOwnerHandle(
 	run: Run,
 	retryMs: number,
 ): Promise<string | null> {
@@ -1111,6 +1434,26 @@ async function findOwnerHandle(
 		}
 	}
 	return null;
+}
+
+/**
+ * The owner's handle, or null when the layout does not show it. When no
+ * profile link is present, the narrow layout is given one drawer click and
+ * the link is looked for again; a layout with no drawer control still
+ * reports null and the caller stops.
+ */
+async function findOwnerHandle(
+	run: Run,
+	retryMs: number,
+): Promise<string | null> {
+	const direct = await readOwnerHandle(run, retryMs);
+	if (direct !== null) {
+		return direct;
+	}
+	if (!(await openDrawer(run))) {
+		return null;
+	}
+	return readOwnerHandle(run, retryMs);
 }
 
 /** Report every requested stream as needing sign-in. */
@@ -1172,8 +1515,10 @@ export async function collectXBrowser(
 			ACTION_DELAY_MIN_MS,
 			ACTION_DELAY_MAX_MS,
 		],
+		drawer: "not_tried",
 		maxPosts: options.maxPostsPerRun ?? MAX_POSTS_PER_RUN,
 		maxScrollSteps: options.maxScrollSteps ?? MAX_SCROLL_STEPS_PER_VIEW,
+		layoutReported: false,
 		navigations: {},
 		ownerId: reading.userId,
 		pageReadFailures: 0,
@@ -1209,8 +1554,9 @@ export async function collectXBrowser(
 			: null;
 	if (needsProfileView && handle === null) {
 		// The handle is only ever read from the app's own profile link. Without
-		// one this layout is not the one the connector knows; it stops here
-		// and opens nothing.
+		// one this layout is not the one the connector knows; name the controls
+		// it does offer, then stop and open nothing.
+		await reportLayout(run);
 		stopRun(
 			run,
 			"source_unreadable",

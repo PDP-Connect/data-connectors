@@ -5,10 +5,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import {
+	DRAWER_OPEN_SELECTORS,
 	followLinkScript,
 	installObserverScript,
+	LAYOUT_CONTAINER_SELECTOR,
+	LAYOUT_CONTROL_CAP,
+	LAYOUT_SCRIPT,
 	OBSERVER_GLOBAL,
 	OWNER_HANDLE_SCRIPT,
+	openDrawerScript,
 	POLL_SCRIPT,
 	scrollScript,
 } from "./page-scripts.ts";
@@ -25,11 +30,30 @@ interface FakeLink {
 	tagName: string;
 }
 
+/** One control the layout diagnostic can see, with where it sits in the page. */
+interface FakeControl {
+	ariaExpanded?: string;
+	ariaLabel?: string;
+	href?: string;
+	inArticle?: boolean;
+	inDialog?: boolean;
+	inPrimarySection?: boolean;
+	role?: string;
+	tagName?: string;
+	testid?: string;
+}
+
 /** A page with just enough of a browser for the scripts to run against. */
 function fakePage(
 	options: {
 		cookie?: string;
+		innerHeight?: number;
+		innerWidth?: number;
 		links?: Record<string, { href: string; tagName?: string }>;
+		/** Controls inside a nav-like container. */
+		navControls?: FakeControl[];
+		/** Controls anywhere else in the document. */
+		pageControls?: FakeControl[];
 		path?: string;
 	} = {},
 ) {
@@ -76,6 +100,38 @@ function fakePage(
 	const pushed: string[] = [];
 	const events: string[] = [];
 	const scrolled: number[] = [];
+	const makeControl = (control: FakeControl) => ({
+		closest: (selector: string) => {
+			if (selector === "article") {
+				return control.inArticle ? { tagName: "ARTICLE" } : null;
+			}
+			if (selector === '[data-testid="primaryColumn"] section') {
+				return control.inPrimarySection ? { tagName: "SECTION" } : null;
+			}
+			if (selector === '[role="dialog"]') {
+				return control.inDialog ? { tagName: "DIV" } : null;
+			}
+			return null;
+		},
+		getAttribute: (name: string) =>
+			name === "href"
+				? (control.href ?? null)
+				: name === "data-testid"
+					? (control.testid ?? null)
+					: name === "aria-label"
+						? (control.ariaLabel ?? null)
+						: name === "role"
+							? (control.role ?? null)
+							: name === "aria-expanded"
+								? (control.ariaExpanded ?? null)
+								: null,
+		tagName: control.tagName ?? "A",
+	});
+	const containerControls = (options.navControls ?? []).map(makeControl);
+	const documentControls = [
+		...containerControls,
+		...(options.pageControls ?? []).map(makeControl),
+	];
 	const location = {
 		origin: "https://x.com",
 		pathname: options.path ?? "/home",
@@ -89,6 +145,10 @@ function fakePage(
 			cookie: options.cookie ?? "",
 			documentElement: { scrollHeight: 3000 },
 			querySelector: (selector: string) => links.get(selector) ?? null,
+			querySelectorAll: (selector: string) =>
+				selector === LAYOUT_CONTAINER_SELECTOR
+					? [{ querySelectorAll: () => containerControls }]
+					: documentControls,
 		},
 		history: {
 			pushState: (_state: unknown, _title: string, path: string) => {
@@ -108,7 +168,8 @@ function fakePage(
 		},
 		XMLHttpRequest: Xhr,
 		URL,
-		innerHeight: 800,
+		innerHeight: options.innerHeight ?? 800,
+		innerWidth: options.innerWidth ?? 1280,
 		scrollY: 0,
 		scrollBy: (_x: number, y: number) => {
 			scrolled.push(y);
@@ -323,6 +384,174 @@ test("a view the page is already on is not opened again", () => {
 	assert.deepEqual(page.pushed, []);
 });
 
+test("the route fallback is skipped when the caller asks it to be", () => {
+	const page = fakePage();
+	assert.deepEqual(page.run(followLinkScript(["a"], "/i/history", "none")), {
+		via: "none",
+	});
+	assert.deepEqual(page.pushed, []);
+	// A matching link is still followed, without the route fallback.
+	const linked = fakePage({
+		links: {
+			'a[href="/i/history"]': { href: "https://x.com/i/history" },
+		},
+	});
+	assert.deepEqual(linked.run(followLinkScript(['a[href="/i/history"]'], "/i/history", "none")), {
+		via: "link",
+	});
+	assert.deepEqual(linked.pushed, []);
+});
+
+test("the drawer control is clicked only when it is a link or button", () => {
+	const button = fakePage({
+		links: {
+			[DRAWER_OPEN_SELECTORS[0]]: {
+				href: "https://x.com/home",
+				tagName: "BUTTON",
+			},
+		},
+	});
+	assert.deepEqual(button.run(openDrawerScript(DRAWER_OPEN_SELECTORS)), {
+		via: "drawer",
+	});
+	assert.equal(button.links.get(DRAWER_OPEN_SELECTORS[0])?.clicked, 1);
+
+	// A matching element that is neither a link nor a button is left alone.
+	const container = fakePage({
+		links: {
+			[DRAWER_OPEN_SELECTORS[0]]: {
+				href: "https://x.com/home",
+				tagName: "DIV",
+			},
+		},
+	});
+	assert.deepEqual(container.run(openDrawerScript(DRAWER_OPEN_SELECTORS)), {
+		via: "none",
+	});
+	assert.equal(container.links.get(DRAWER_OPEN_SELECTORS[0])?.clicked, 0);
+
+	// No control: nothing is clicked.
+	assert.deepEqual(fakePage().run(openDrawerScript(DRAWER_OPEN_SELECTORS)), {
+		via: "none",
+	});
+});
+
+test("the layout script reports the viewport, the route and each control's identity", () => {
+	const page = fakePage({
+		innerHeight: 844,
+		innerWidth: 390,
+		navControls: [
+			{
+				ariaLabel: "Profile",
+				href: "https://x.com/sample_owner?token=secret#frag",
+				tagName: "A",
+				testid: "AppTabBar_Profile_Link",
+			},
+			{
+				ariaExpanded: "false",
+				href: "https://x.com/i/history/likes",
+				role: "tab",
+				tagName: "A",
+			},
+			{ role: "button", tagName: "BUTTON", testid: "DashButton" },
+		],
+		pageControls: [
+			{
+				ariaExpanded: "true",
+				ariaLabel: "Account",
+				inDialog: true,
+				tagName: "BUTTON",
+				testid: "Avatar",
+			},
+		],
+		path: "/i/history",
+	});
+	const reading = page.run(LAYOUT_SCRIPT);
+	assert.equal(reading.width, 390);
+	assert.equal(reading.height, 844);
+	assert.equal(reading.path, "/i/history");
+	assert.deepEqual(reading.controls, [
+		{
+			tag: "a",
+			testid: "AppTabBar_Profile_Link",
+			ariaLabel: "Profile",
+			role: null,
+			expanded: null,
+			scope: "page",
+			// No query and no fragment ever leave the page.
+			path: "/sample_owner",
+		},
+		{
+			tag: "a",
+			testid: null,
+			ariaLabel: null,
+			role: "tab",
+			expanded: "false",
+			scope: "page",
+			path: "/i/history/likes",
+		},
+		{
+			tag: "button",
+			testid: "DashButton",
+			ariaLabel: null,
+			role: "button",
+			expanded: null,
+			scope: "page",
+			path: null,
+		},
+		// A control outside any container with a test id comes after them.
+		{
+			tag: "button",
+			testid: "Avatar",
+			ariaLabel: "Account",
+			role: null,
+			expanded: "true",
+			scope: "dialog",
+			path: null,
+		},
+	]);
+});
+
+test("a labelled control outside any container is reported; article controls are not", () => {
+	const page = fakePage({
+		navControls: [{ ariaLabel: "Explore", href: "/explore", tagName: "A" }],
+		pageControls: [
+			{ ariaLabel: "Account", tagName: "BUTTON", testid: "Avatar" },
+			// A timeline post's reply control: inside an article, so skipped.
+			{
+				ariaLabel: "Reply",
+				href: "/sample_owner/status/1",
+				inArticle: true,
+				testid: "Reply",
+			},
+			// A control in the primary column's own section: also skipped.
+			{
+				ariaLabel: "More",
+				inPrimarySection: true,
+				tagName: "BUTTON",
+				testid: "PostActions",
+			},
+			// An unlabelled control outside a container is not worth the cap.
+			{ href: "/unlabelled", tagName: "A" },
+		],
+	});
+	const reading = page.run(LAYOUT_SCRIPT);
+	assert.deepEqual(
+		reading.controls.map((control: { testid: string | null }) => control.testid),
+		[null, "Avatar"],
+	);
+});
+
+test("the layout script stops at the control cap", () => {
+	const page = fakePage({
+		navControls: Array.from(
+			{ length: LAYOUT_CONTROL_CAP + 5 },
+			(_, index) => ({ href: `https://x.com/i/history/${index}`, tagName: "A" }),
+		),
+	});
+	assert.equal(page.run(LAYOUT_SCRIPT).controls.length, LAYOUT_CONTROL_CAP);
+});
+
 test("scrolling moves the window by a share of its height and nothing else", () => {
 	const page = fakePage();
 	assert.equal(page.run(scrollScript(2.5)), true);
@@ -335,7 +564,9 @@ test("no page script uses eval or builds a function from text", () => {
 		INSTALL,
 		POLL_SCRIPT,
 		OWNER_HANDLE_SCRIPT,
+		LAYOUT_SCRIPT,
 		followLinkScript(["a"], "/x"),
+		openDrawerScript(DRAWER_OPEN_SELECTORS),
 		scrollScript(2),
 	]) {
 		assert.doesNotMatch(

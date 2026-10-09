@@ -12,8 +12,9 @@
  * the page as written. None of them uses `eval` or `new Function`
  * (CONNECTOR-GUIDELINES rule 4).
  *
- * Every script is read-only. The only action any of them takes on the page
- * is to follow one of the app's own navigation links or to scroll.
+ * Every script is read-only. The only actions any of them takes on the page
+ * are to follow one of the app's own navigation links, to click the account
+ * control that opens the narrow layout's drawer, or to scroll.
  */
 
 /** The page global that holds the observer's buffer. */
@@ -208,6 +209,41 @@ export const PROFILE_LINK_SELECTORS = [
 ] as const;
 
 /**
+ * The control that opens the narrow layout's account drawer, where the
+ * profile and History links live once the left navigation is gone. UNVERIFIED
+ * hypothesis: supplied by the connector's own diagnostic report, never seen
+ * by this code. It is a hypothesis only; the drawer's own links are read
+ * through the ordinary selectors after the click.
+ */
+export const DRAWER_OPEN_SELECTORS = [
+	'[data-testid="DashButton_ProfileIcon_Link"]',
+] as const;
+
+/**
+ * Click the app's account control that opens the narrow layout's drawer. It
+ * clicks only an element the selectors match and that is a link, a button or
+ * a control role button declares; it changes no request. `via` is "drawer"
+ * when a control was clicked and "none" when none is present.
+ */
+export function openDrawerScript(selectors: readonly string[]): string {
+	return `(() => {
+	for (const selector of ${JSON.stringify(selectors)}) {
+		let control = null;
+		try {
+			control = document.querySelector(selector);
+		} catch (error) {}
+		if (!control || typeof control.click !== "function") continue;
+		const tag = String(control.tagName || "");
+		const role = control.getAttribute ? String(control.getAttribute("role") || "") : "";
+		if (tag !== "A" && tag !== "BUTTON" && role !== "button") continue;
+		control.click();
+		return { via: "drawer" };
+	}
+	return { via: "none" };
+})()`;
+}
+
+/**
  * The signed-in owner's handle, from the href of the app's own profile link.
  * There is no other source: the `twid` cookie gives the owner's numeric id
  * but not the handle, and `window.__INITIAL_STATE__` is undefined on a
@@ -225,19 +261,24 @@ export const OWNER_HANDLE_SCRIPT = `(() => {
 	return { handle: null, via: "none" };
 })()`;
 
+/** Whether `followLinkScript` may push the path when no link matches. */
+export type LinkFallback = "route" | "none";
+
 /**
  * Move to another view of the app without a page load, so the observer
  * survives. Clicks the first of `selectors` that matches an `<a>` whose own
  * href is `path`; nothing else is ever clicked.
  *
- * UNVERIFIED fallback: when no link matches (the selectors are from the wide
- * desktop layout, and a narrow one may not render them), it pushes
- * `path` onto the history and dispatches `popstate`, which a client-side
- * router listens for. Whether x.com's router follows it was not checked.
+ * With `fallback` "route" (the default) it pushes `path` onto the history and
+ * dispatches `popstate` when no link matches, which a client-side router may
+ * listen for; whether x.com's router follows it was not checked. With "none"
+ * it reports `{ via: "none" }` instead, so the caller can try opening the
+ * narrow layout's drawer before falling back.
  */
 export function followLinkScript(
 	selectors: readonly string[],
 	path: string,
+	fallback: LinkFallback = "route",
 ): string {
 	return `(() => {
 	const path = ${JSON.stringify(path)};
@@ -258,6 +299,7 @@ export function followLinkScript(
 		link.click();
 		return { via: "link" };
 	}
+	if (${JSON.stringify(fallback)} === "none") return { via: "none" };
 	try {
 		history.pushState({}, "", path);
 		window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
@@ -281,3 +323,99 @@ export function scrollScript(viewportShare: number): string {
 	return true;
 })()`;
 }
+
+/**
+ * The containers whose controls describe the navigation a layout offers: the
+ * left navigation, the header, the tab strips and the narrow layout's bottom
+ * bar. Matched by element, not by X-specific test id, so a layout that moves
+ * its controls reports them.
+ */
+export const LAYOUT_CONTAINER_SELECTOR = [
+	"nav",
+	"header",
+	'[role="navigation"]',
+	'[role="tablist"]',
+	"footer",
+	'[data-testid="BottomBar"]',
+].join(", ");
+
+/** A control the layout can offer: a link, a button or a control role button. */
+const LAYOUT_CONTROL_SELECTOR = 'a, button, [role="button"]';
+
+/**
+ * Regions whose controls are not navigation and would spend the cap: a
+ * timeline post's many buttons and handle links, and the primary column's own
+ * sections. Matched with `closest`, so no nesting is assumed.
+ */
+const LAYOUT_EXCLUDE_SELECTORS = [
+	"article",
+	'[data-testid="primaryColumn"] section',
+] as const;
+
+/** Most controls one layout diagnostic names, to stay one short line. */
+export const LAYOUT_CONTROL_CAP = 60;
+
+/**
+ * The current layout's viewport, its route and its controls. It takes the
+ * controls inside a container above first, then any link, button or role
+ * button anywhere in the document that carries a test id or an accessible
+ * name, since a narrow layout may put its avatar control outside nav or
+ * header. A control inside an `article` or a primary-column section is
+ * skipped, and the cap bounds the rest.
+ *
+ * For each control it reads the attributes that identify it; from each href
+ * it keeps only the pathname, so no query, fragment or origin leaves the page.
+ * It reads no text content. The caller masks `@handle` in an accessible name
+ * and replaces handle-shaped and numeric path segments before the line is
+ * written.
+ */
+export const LAYOUT_SCRIPT = `(() => {
+	const controls = [];
+	const seen = new Set();
+	const controlSelector = ${JSON.stringify(LAYOUT_CONTROL_SELECTOR)};
+	const excluded = (element) => {
+		for (const selector of ${JSON.stringify(LAYOUT_EXCLUDE_SELECTORS)}) {
+			try {
+				if (element.closest(selector)) return true;
+			} catch (error) {}
+		}
+		return false;
+	};
+	const labelled = (element) =>
+		Boolean(element.getAttribute("data-testid") || element.getAttribute("aria-label"));
+	const describe = (element) => {
+		const href = element.getAttribute("href");
+		let path = null;
+		if (String(element.tagName || "").toUpperCase() === "A" && href) {
+			try {
+				path = new URL(href, location.href).pathname;
+			} catch (error) {}
+		}
+		return {
+			tag: String(element.tagName || "").toLowerCase(),
+			testid: element.getAttribute("data-testid") || null,
+			ariaLabel: element.getAttribute("aria-label") || null,
+			role: element.getAttribute("role") || null,
+			expanded: element.getAttribute("aria-expanded") || null,
+			scope: element.closest('[role="dialog"]') ? "dialog" : "page",
+			path,
+		};
+	};
+	const take = (element) => {
+		if (seen.has(element) || excluded(element)) return;
+		seen.add(element);
+		controls.push(describe(element));
+	};
+	for (const container of document.querySelectorAll(${JSON.stringify(LAYOUT_CONTAINER_SELECTOR)})) {
+		for (const element of container.querySelectorAll(controlSelector)) {
+			if (controls.length >= ${LAYOUT_CONTROL_CAP}) break;
+			take(element);
+		}
+		if (controls.length >= ${LAYOUT_CONTROL_CAP}) break;
+	}
+	for (const element of document.querySelectorAll(controlSelector)) {
+		if (controls.length >= ${LAYOUT_CONTROL_CAP}) break;
+		if (labelled(element)) take(element);
+	}
+	return { width: window.innerWidth, height: window.innerHeight, path: location.pathname, controls };
+})()`;

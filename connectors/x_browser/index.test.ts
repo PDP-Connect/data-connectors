@@ -7,6 +7,7 @@ import test from "node:test";
 import vm from "node:vm";
 import {
 	assertUserFacingProgress,
+	CONNECTOR_DIAGNOSTIC_MAX_CHARS,
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type {
@@ -24,10 +25,16 @@ import {
 	LOGIN_URL,
 	MAX_POSTS_PER_RUN,
 	probeXSession,
+	redactPathShape,
 	VIEW_POST_CAPS,
 	type XCollectContext,
 	type XCollectOptions,
 } from "./index.ts";
+import {
+	DRAWER_OPEN_SELECTORS,
+	LAYOUT_CONTAINER_SELECTOR,
+	LAYOUT_CONTROL_CAP,
+} from "./page-scripts.ts";
 import { validateRecord } from "./schemas.ts";
 
 const ORIGIN = "https://x.com";
@@ -101,6 +108,12 @@ interface AppRequest {
 interface AppOptions {
 	/** The narrow layout still renders a link named Profile. */
 	profileLink?: boolean;
+	/** The narrow layout renders an avatar control that opens the drawer. */
+	drawer?: boolean;
+	/** False: the drawer control is present but clicking it opens nothing. */
+	drawerOpens?: boolean;
+	/** Controls the layout diagnostic sees, replacing the default nav model. */
+	layoutControls?: SyntheticLayoutControl[];
 	pages?: Pages;
 	/** Answer a request instead of the fixture pages. */
 	respond?: (
@@ -119,6 +132,19 @@ interface AppOptions {
 interface FakeXhr {
 	open: (method: string, url: string) => void;
 	send: () => void;
+}
+
+/** A synthetic control the layout diagnostic sees, with only a label and path. */
+interface SyntheticLayoutControl {
+	ariaLabel: string;
+	href: string;
+}
+
+/** One element the layout diagnostic can read, as the page scripts see it. */
+interface AppControl {
+	closest: (selector: string) => unknown;
+	getAttribute: (name: string) => string | null;
+	tagName: string;
 }
 
 /**
@@ -140,6 +166,7 @@ class FakeWebApp {
 	signedIn: boolean;
 
 	private context: vm.Context = vm.createContext({});
+	private drawerOpen = false;
 	private readonly options: AppOptions;
 	private posts = 0;
 	private timeline: {
@@ -233,6 +260,9 @@ class FakeWebApp {
 				answer(this);
 			}
 		}
+		// The layout diagnostic runs both passes in one script, so the same
+		// element objects must come back or its de-duplication leaks duplicates.
+		const layoutControls = this.navControls();
 		const window: Record<string, unknown> = {
 			location,
 			document: {
@@ -243,6 +273,10 @@ class FakeWebApp {
 					scrollHeight: 800,
 				},
 				querySelector: (selector: string) => this.link(selector),
+				querySelectorAll: (selector: string) =>
+					selector === LAYOUT_CONTAINER_SELECTOR
+						? [{ querySelectorAll: () => layoutControls }]
+						: layoutControls,
 			},
 			history: {
 				pushState: (_state: unknown, _title: string, path: string) => {
@@ -268,6 +302,7 @@ class FakeWebApp {
 			XMLHttpRequest: Xhr,
 			URL,
 			innerHeight: 800,
+			innerWidth: 390,
 			scrollY: 0,
 			scrollBy: () => this.scroll(),
 			scrollTo: () => {
@@ -287,15 +322,33 @@ class FakeWebApp {
 	/** The links the layout offers, by the selectors the connector uses. */
 	private link(selector: string): unknown {
 		const sidebar = this.options.sidebar !== false;
+		// The drawer, once open, renders the same primary navigation.
+		const navOpen = sidebar || this.drawerOpen;
 		const onProfile = this.path.startsWith(`/${HANDLE}`);
 		const onHistory = this.path.startsWith("/i/history");
+		if (selector === DRAWER_OPEN_SELECTORS[0]) {
+			if (!(this.options.drawer === true && !this.drawerOpen)) {
+				return null;
+			}
+			return {
+				tagName: "BUTTON",
+				getAttribute: (name: string) =>
+					name === "data-testid" ? "DashButton_ProfileIcon_Link" : null,
+				click: () => {
+					if (this.options.drawerOpens !== false) {
+						this.drawerOpen = true;
+					}
+				},
+			};
+		}
 		const offered: Record<string, string | null> = {
-			'a[data-testid="AppTabBar_Profile_Link"]': sidebar ? `/${HANDLE}` : null,
+			'a[data-testid="AppTabBar_Profile_Link"]': navOpen ? `/${HANDLE}` : null,
 			'a[aria-label="Profile"]':
-				sidebar || this.options.profileLink ? `/${HANDLE}` : null,
-			'nav[aria-label="Primary"] a[href="/i/history"]': sidebar
+				navOpen || this.options.profileLink ? `/${HANDLE}` : null,
+			'nav[aria-label="Primary"] a[href="/i/history"]': navOpen
 				? "/i/history"
 				: null,
+			'a[href="/i/history"]': navOpen ? "/i/history" : null,
 			'[role="tablist"] a[href$="/with_replies"]': onProfile
 				? `/${HANDLE}/with_replies`
 				: null,
@@ -314,10 +367,85 @@ class FakeWebApp {
 			getAttribute: (name: string) => (name === "href" ? path : null),
 			click: () => {
 				this.clicks.push(path);
+				// A navigation closes the drawer, as the real app does.
+				this.drawerOpen = false;
 				(this.window["location"] as { pathname: string }).pathname = path;
 				this.render();
 			},
 		};
+	}
+
+	/** The controls the layout diagnostic sees, inside a nav-like container. */
+	private navControls(): AppControl[] {
+		const injected = this.options.layoutControls;
+		if (injected !== undefined) {
+			return injected.map((control) => ({
+				closest: () => null,
+				getAttribute: (name: string) =>
+					name === "href"
+						? control.href
+						: name === "aria-label"
+							? control.ariaLabel
+							: null,
+				tagName: "A",
+			}));
+		}
+		const sidebar = this.options.sidebar !== false;
+		const navOpen = sidebar || this.drawerOpen;
+		const control = (
+			tagName: string,
+			attributes: Record<string, string>,
+			scope: "dialog" | "page" = "page",
+		): AppControl => ({
+			closest: (selector: string) =>
+				selector === '[role="dialog"]' && scope === "dialog"
+					? { tagName: "DIV" }
+					: null,
+			getAttribute: (name: string) => attributes[name] ?? null,
+			tagName,
+		});
+		const controls = [
+			control("A", { href: "/explore", "aria-label": "Explore" }),
+			control("A", { href: "/notifications", "aria-label": "Notifications" }),
+			control("A", { href: "/messages", "aria-label": "Messages" }),
+			// A control whose href names the account and a numeric id: the
+			// diagnostic must mask both.
+			control("A", {
+				href: `/${HANDLE}/status/${OWNER_ID}`,
+				"aria-label": "Post",
+			}),
+			// The account control: the diagnostic must mask and clip its name.
+			control("BUTTON", {
+				"aria-expanded": "true",
+				"aria-label": `Account menu for @${HANDLE} and the synthetic timeline`,
+				"data-testid": "AvatarDrawerButton",
+				role: "button",
+			}),
+			// A control in an open dialog: the diagnostic must call it "dialog".
+			control(
+				"BUTTON",
+				{ "aria-label": "Close", "data-testid": "DialogClose" },
+				"dialog",
+			),
+		];
+		if (navOpen) {
+			controls.push(
+				control("A", { href: "/i/history", "aria-label": "History" }),
+				control("A", {
+					href: `/${HANDLE}`,
+					"data-testid": "AppTabBar_Profile_Link",
+				}),
+			);
+		}
+		if (this.options.drawer === true && !this.drawerOpen) {
+			controls.push(
+				control("BUTTON", {
+					"data-testid": "DashButton_ProfileIcon_Link",
+					role: "button",
+				}),
+			);
+		}
+		return controls;
 	}
 
 	private render(): void {
@@ -544,6 +672,35 @@ const requestLog = (app: FakeWebApp) =>
 	app.requests.map(({ operation, cursor }) =>
 		cursor ? `${operation}@${cursor}` : operation,
 	);
+
+/** The one layout report's first line and every control it named, in order. */
+function layoutReport(lines: string[]): {
+	controls: Array<Record<string, unknown>>;
+	layout: Record<string, unknown>;
+	lines: string[];
+} {
+	const reportLines = lines.filter((line) =>
+		/^\[x_browser-diagnostic\] layout(?:_controls)? /.test(line),
+	);
+	const firstLines = reportLines.filter((line) =>
+		line.startsWith("[x_browser-diagnostic] layout "),
+	);
+	assert.equal(firstLines.length, 1, "exactly one layout report per run");
+	const first = firstLines[0] ?? "";
+	const controls = reportLines
+		.filter((line) => line.startsWith("[x_browser-diagnostic] layout_controls "))
+		.flatMap(
+			(line) =>
+				JSON.parse(
+					JSON.parse(line.slice(line.indexOf("{"))).controls,
+				) as Array<Record<string, unknown>>,
+		);
+	return {
+		controls,
+		layout: JSON.parse(first.slice(first.indexOf("{"))),
+		lines: reportLines,
+	};
+}
 
 test("a first run reads the profile, posts, bookmarks and likes the app loads", async () => {
 	const app = new FakeWebApp();
@@ -918,10 +1075,35 @@ test("narrow layout: a link named Profile gives the handle, and the history fall
 	);
 });
 
-test("no profile link anywhere: the run stops with that reason and opens nothing; the handle is never guessed", async () => {
+test("phone layout: the avatar drawer gives the handle, and later views reopen it", async () => {
+	const app = new FakeWebApp({ sidebar: false, drawer: true });
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	assert.deepEqual(h.ids("profile"), [OWNER_ID]);
+	assert.deepEqual(h.ids("posts"), POST_IDS);
+	assert.deepEqual(h.ids("bookmarks"), BOOKMARK_IDS);
+	assert.deepEqual(h.ids("likes"), LIKE_IDS);
+	assert.deepEqual(h.skips(), {});
+	// Every view was opened by the app's own link, never by a built URL.
+	assert.deepEqual(app.historyPushes, []);
+	assert.deepEqual(app.clicks, [
+		`/${HANDLE}`,
+		`/${HANDLE}/with_replies`,
+		"/i/history",
+		"/i/history/likes",
+	]);
+	// The drawer was opened for the handle and again for History.
+	const run = lines.find((line) =>
+		line.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"navigations":"[^"]*drawer:2/);
+	assert.ok(!lines.some((line) => /sample_owner|19\d{17}/.test(line)));
+});
+
+test("no profile link and no drawer control: the run stops and reports the layout once", async () => {
 	const app = new FakeWebApp({ sidebar: false });
 	const h = harness(app);
-	await collectXBrowser(h.ctx, FAST);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
 	assert.deepEqual(h.records, []);
 	assert.deepEqual(h.skips(), {
 		profile: "source_unreadable",
@@ -936,6 +1118,153 @@ test("no profile link anywhere: the run stops with that reason and opens nothing
 	assert.deepEqual(app.clicks, []);
 	assert.deepEqual(app.historyPushes, []);
 	assert.deepEqual(h.states(), {});
+
+	// One report names the viewport, the route and the controls across a
+	// `layout` line and its `layout_controls` lines, with the account handle
+	// and the numeric id replaced by placeholders.
+	const report = layoutReport(lines);
+	const { layout, controls } = report;
+	assert.equal(typeof layout.width, "number");
+	assert.equal(typeof layout.height, "number");
+	// The route is the run's own location, handle-free.
+	assert.equal(layout.path, "/home");
+	// The run offered the drawer control, but this layout has none.
+	assert.equal(layout.drawer, "no_control");
+	assert.equal(layout.controls, controls.length);
+	assert.equal(typeof layout.parts, "number");
+	assert.ok(controls.length <= LAYOUT_CONTROL_CAP);
+	const text = report.lines.join("\n");
+	assert.doesNotMatch(text, /sample_owner|1900000000000000001/);
+	assert.match(text, /:handle/);
+	assert.match(text, /:id/);
+
+	// The accessible name that holds the handle is masked and clipped.
+	const account = controls.find(
+		(control) => control["testid"] === "AvatarDrawerButton",
+	);
+	assert.ok(account);
+	assert.equal(account["expanded"], "true");
+	assert.equal(account["scope"], "page");
+	const ariaLabel = String(account["aria_label"]);
+	assert.ok(ariaLabel.length <= 40);
+	assert.match(ariaLabel, /:handle/);
+	assert.doesNotMatch(ariaLabel, /sample_owner/);
+
+	// A control inside an open dialog is told apart from the page.
+	const dialog = controls.find((control) => control["testid"] === "DialogClose");
+	assert.equal(dialog?.["scope"], "dialog");
+
+	// A control with a null field leaves that field out entirely.
+	const explore = controls.find(
+		(control) => control["aria_label"] === "Explore",
+	);
+	assert.ok(explore);
+	assert.ok(!("testid" in explore));
+	assert.ok(!("role" in explore));
+});
+
+test("a drawer click that opens nothing is recorded in the layout line", async () => {
+	const app = new FakeWebApp({
+		drawer: true,
+		drawerOpens: false,
+		sidebar: false,
+	});
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	assert.deepEqual(h.records, []);
+	assert.deepEqual(h.skips(), {
+		profile: "source_unreadable",
+		posts: "source_unreadable",
+		bookmarks: "source_unreadable",
+		likes: "source_unreadable",
+	});
+	const line = lines.find((entry) =>
+		entry.startsWith("[x_browser-diagnostic] layout "),
+	);
+	assert.ok(line);
+	const layout = JSON.parse((line ?? "").slice((line ?? "").indexOf("{")));
+	assert.equal(layout.drawer, "clicked");
+	// The run did click the app's own drawer control, once.
+	const run = lines.find((entry) =>
+		entry.startsWith("[x_browser-diagnostic] run "),
+	);
+	assert.match(run ?? "", /"navigations":"[^"]*drawer:1/);
+});
+
+/** 60 synthetic controls: a 40-char label and a path of handle-shaped parts. */
+function syntheticControls(segments: number): SyntheticLayoutControl[] {
+	return Array.from({ length: LAYOUT_CONTROL_CAP }, (_, index) => ({
+		ariaLabel: `control ${index}`.padEnd(40, "x"),
+		href: `${ORIGIN}/${Array.from(
+			{ length: segments },
+			(_, part) => `handle${index}_${part}`,
+		).join("/")}`,
+	}));
+}
+
+test("60 controls are packed into whole lines, in order, without truncation", async () => {
+	const app = new FakeWebApp({
+		layoutControls: syntheticControls(6),
+		sidebar: false,
+	});
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	const report = layoutReport(lines);
+	assert.equal(report.layout.controls, LAYOUT_CONTROL_CAP);
+	assert.equal(report.controls.length, LAYOUT_CONTROL_CAP);
+	// The controls come back in the order the page offered them.
+	assert.deepEqual(
+		report.controls.map((control) => control["aria_label"]),
+		syntheticControls(6).map((control) => control.ariaLabel),
+	);
+	// Every line is a whole line the formatter would not cut.
+	for (const line of report.lines) {
+		assert.ok(
+			line.length <= CONNECTOR_DIAGNOSTIC_MAX_CHARS,
+			`line is ${line.length} chars`,
+		);
+		assert.ok(!line.endsWith("…"), "no line is truncated");
+	}
+	// A control's null fields are left out of the compact form.
+	for (const control of report.controls) {
+		assert.ok(!("testid" in control));
+		assert.ok(!("role" in control));
+		assert.ok(!("expanded" in control));
+	}
+});
+
+test("past the line bound the first line counts the controls left out", async () => {
+	const app = new FakeWebApp({
+		layoutControls: syntheticControls(60),
+		sidebar: false,
+	});
+	const h = harness(app);
+	const lines = await captureDiagnostics(() => collectXBrowser(h.ctx, FAST));
+	const report = layoutReport(lines);
+	assert.equal(report.layout.controls, LAYOUT_CONTROL_CAP);
+	// At these sizes the 60-control cap exceeds the parts bound, so the first
+	// line must count what it could not name.
+	const omitted = report.layout.omitted;
+	assert.equal(typeof omitted, "number");
+	assert.ok((omitted as number) > 0);
+	assert.equal(report.controls.length + (omitted as number), LAYOUT_CONTROL_CAP);
+	for (const line of report.lines) {
+		assert.ok(line.length <= CONNECTOR_DIAGNOSTIC_MAX_CHARS);
+		assert.ok(!line.endsWith("…"), "no line is truncated");
+	}
+});
+
+test("redactPathShape masks handles and ids but keeps X's route words", () => {
+	assert.equal(
+		redactPathShape(`/${HANDLE}/with_replies`),
+		"/:handle/with_replies",
+	);
+	assert.equal(redactPathShape("/i/history/likes"), "/i/history/likes");
+	assert.equal(redactPathShape("/status/1900000000000000001"), "/status/:id");
+	assert.equal(
+		redactPathShape(`/${HANDLE}/status/1900000000000000001`),
+		"/:handle/status/:id",
+	);
 });
 
 test("lists that need no handle are still read when there is no profile link", async () => {

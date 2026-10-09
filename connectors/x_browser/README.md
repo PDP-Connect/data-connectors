@@ -4,7 +4,7 @@ Reads the signed-in owner's own X data from the x.com web app, in the owner's ow
 
 It does not read direct messages, follower or following lists, or anyone else's account. For full history and direct messages, use the account export (`twitter_archive`).
 
-**Status: development. This code has never run against x.com.** It has run only against the synthetic fixtures in this directory and in `scripts/pageshim/fixtures/x_browser.mjs`. Some of what it relies on was checked by hand; see [Checked by hand on x.com](#checked-by-hand-on-xcom) and [Unverified](#unverified).
+**Status: development. This code has collected nothing from x.com.** It has run against the synthetic fixtures in this directory and in `scripts/pageshim/fixtures/x_browser.mjs`, and once on a real iPhone (see [Unverified](#unverified) item 4), where it stopped before opening a view. Some of what it relies on was checked by hand; see [Checked by hand on x.com](#checked-by-hand-on-xcom) and [Unverified](#unverified).
 
 ## Terms of service and the owner's legal basis
 
@@ -28,7 +28,7 @@ It does not build X's GraphQL requests. Their query ids rotate and each request 
 
 1. Open `https://x.com/home` (skipped when the page is already there).
 2. Install an observer in the page (`page-scripts.ts`). It wraps `XMLHttpRequest.prototype.open` and `send`, and `window.fetch` as a fallback, and buffers the response of every request to `/graphql/<queryId>/<OperationName>`. It matches on the operation name only and changes no request.
-3. Move between views by following the app's own links, so the page is not reloaded and the observer survives: the profile link, the profile's Replies tab, the History link, and its Likes tab.
+3. Move between views by following the app's own links, so the page is not reloaded and the observer survives: the profile link, the profile's Replies tab, the History link, and its Likes tab. When the profile link is not on screen, it first clicks the app's own avatar control to open the narrow layout's account drawer (see [Unverified](#unverified) item 16), waits a bounded time for the link, then follows it.
 4. Scroll the window down in steps. The app then requests the next page of the list itself.
 5. Take the buffered responses out of the page between steps and parse them in `parsers.ts`.
 
@@ -74,7 +74,7 @@ The whole run stops at once, keeping what was read, on any of:
 
 The stream being read reports the cause. Streams not yet opened report `run_stopped_early`. A stream that fell short does not move its cursor, so the next run reads it from the top again.
 
-It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, and scroll.
+It is read-only. The only things it does on the page are follow a link whose own address is the view it wants, click the avatar control that opens the narrow layout's account drawer, and scroll. When a link is missing it also reads the layout to write one `layout` diagnostic line naming the viewport, the route, the drawer result, the control count and the number of parts, followed by `layout_controls` lines that pack the controls (per nav-like control: its tag, test id, accessible name, role and a handle-free, id-free path shape). Each line is measured against the formatter and stays whole; if the parts bound is reached, the first line reports how many controls were left out.
 
 ## Sign-in
 
@@ -110,16 +110,16 @@ Seen in a signed-in desktop Chrome session on 2026-10-08, by hand, not by this c
 - **Request variables.** The three user timelines carry `userId`; `Bookmarks` carries only `count` and `includePromotedContent`. So the other-account check applies to posts and likes, and not to bookmarks, which are the session owner's by construction. `count` was 20.
 - **Profile shape.** `profile_bio{description}`, `website{url}`, `relationship_counts{followers, following}`, `tweet_counts{tweets}`, `privacy{protected}`, `verification{verified}`, `location{location}`, `action_counts{favorites_count}`, `avatar{image_url}`, `banner{image_url}`, `core{created_at, name, screen_name}`. The parser reads exactly these keys.
 - **Cookies.** `twid` and `ct0` are readable from page script on desktop, among `personalization_id`, `__cuid`, `lang`, `guest_id_ads`, `guest_id_marketing`, `guest_id` and `g_state`.
-- **No page state to read the handle from.** `window.__INITIAL_STATE__` is undefined on a signed-in page. The handle comes only from the app's own profile link (`a[data-testid="AppTabBar_Profile_Link"]`, then `a[aria-label="Profile"]`). With neither, a run that needs the handle stops with that reason and opens nothing. The `twid` cookie gives the numeric id but not the handle, and `/i/user/<id>` is not known to redirect, so neither is used to guess one.
+- **No page state to read the handle from.** `window.__INITIAL_STATE__` is undefined on a signed-in page. The handle comes only from the app's own profile link (`a[data-testid="AppTabBar_Profile_Link"]`, then `a[aria-label="Profile"]`). With neither on the wide layout, a run that needs the handle stops with that reason and opens nothing; the narrow layout is described in [Unverified](#unverified) items 4 and 16. The `twid` cookie gives the numeric id but not the handle, and `/i/user/<id>` is not known to redirect, so neither is used to guess one.
 
 ## Unverified
 
-None of this was checked against x.com, by hand or by this code.
+Except where item 4 records a device observation, none of this was checked against x.com, by hand or by this code.
 
 1. **Any end-to-end run.** The connector has not collected a single real record.
 2. **Signed-out behaviour.** That `/home` sends a signed-out session to `/i/flow/login` or `/login` was not observed. The probe treats "no `twid` cookie" or "on a sign-in path" as signed out.
 3. **Short lists.** Whether the app asks for a next page when a list is shorter than the window. If it does not, such a list reports `list_end_unconfirmed` instead of complete.
-4. **The narrow (phone) layout.** Every link selector was seen on the wide layout only. Whether a narrow layout renders a link the handle can be read from is unknown; if it does not, profile and posts cannot be read there. Opening a view with `history.pushState` plus a `popstate` event, used when a view's link is absent, is untested against x.com.
+4. **The narrow (phone) layout.** On a real iPhone 12, in an app WKWebView at phone width with the desktop Safari user agent and the owner signed in, neither `a[data-testid="AppTabBar_Profile_Link"]` nor `a[aria-label="Profile"]` was present: the run stopped with `source_unreadable` 4 seconds after sign-in and opened nothing. That is the only narrow-layout observation. The connector now clicks the avatar control that opens the account drawer and looks for the profile link again, and clicks the control again before opening History; that drawer path has not run against x.com. Every link selector that was seen was seen on the wide layout only. Opening a view with `history.pushState` plus a `popstate` event, used when a view's link is absent, is untested against x.com. When a needed link is missing, a `[x_browser-diagnostic] layout` line names the viewport, the route and the control count, and `[x_browser-diagnostic] layout_controls` lines name the nav-like controls the layout did offer (no text, handle or id); each line stays under the formatter's truncation limit, and the first line counts any controls left out past the parts bound.
 5. **Scrolling in a phone WebView.** The scroll check above was on desktop Chrome.
 6. **Overlap between the Posts and Replies tabs.** Both are read; whether Replies alone would cover Posts was not measured.
 7. **End of a list.** That the last page is a response with cursors and no posts is assumed.
@@ -127,16 +127,17 @@ None of this was checked against x.com, by hand or by this code.
 9. **Cookies on a phone.** That `twid` and `ct0` are readable from page script was seen on desktop only.
 10. **The sign-in and challenge paths** in `SIGN_IN_PATH_RE` are a best list, not an observed one.
 11. **How X signals a rate limit** to the web app (HTTP 429, or 200 with an error body). Both stop the run.
-12. **Detection.** Whether X notices wrapped `XMLHttpRequest` and `fetch`, or scripted link clicks and scrolling.
+12. **Detection.** Whether X notices wrapped `XMLHttpRequest` and `fetch`, or scripted link clicks, drawer clicks and scrolling.
 13. **The allowance figures** are third-party reports.
 14. **The desktop runtime.** The sign-in handoff has run only against a fake page, and the main-world evaluation under Patchright has not run at all: the unit tests check only that the argument is passed.
 15. **The mobile host's handling of STATE and of later runs.** A later run sends only what is new, and on the streamed-result host sends an unchanged list as `{ "records": [] }`. The host must add to what it holds, not replace it.
+16. **The account-drawer hypothesis.** That the narrow layout replaces the left navigation with a side drawer, that the profile and History links live in it, and that the drawer is opened by the avatar button with selector `[data-testid="DashButton_ProfileIcon_Link"]`, is second-hand: not seen by this code. If the drawer never shows the link, the run stops as before and the `layout` and `layout_controls` lines name the controls the layout did offer. The History link inside the drawer is looked up with a bare `a[href="/i/history"]` alongside the primary-nav selector; which one the drawer renders was not checked.
 
 ## Tests
 
 - `parsers.test.ts`: response bodies to records.
 - `page-scripts.test.ts`: the page scripts, run in a `vm` context with a fake `XMLHttpRequest`.
-- `index.test.ts`: whole runs against a model of the web app that the real page scripts drive: first run, later runs, every stop condition, the narrow layout, the caps, sign-in.
+- `index.test.ts`: whole runs against a model of the web app that the real page scripts drive: first run, later runs, every stop condition, the narrow layout and drawer path, the caps, sign-in, the layout diagnostic.
 - `scripts/pageshim/pageshim.test.mjs`: the built bundle in Chromium against a synthetic web app.
 
 All fixtures are synthetic; see `fixtures/README.md`.
