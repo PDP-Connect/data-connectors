@@ -901,6 +901,16 @@ const handlePostLoginChallenge = async ({ supportsRequestInput }) => {
         if (!challengeResult.loggedIn) {
           challengeFailure = challengeResult.reason;
         }
+      } else if (supportsRequestInput) {
+        // No login form: Instagram can send a pending verification session
+        // straight to a checkpoint. Relay it before the headed fallback.
+        const challengeResult = await handlePostLoginChallenge({
+          supportsRequestInput,
+        });
+        // An unrecognised page returns reason null and keeps the generic error.
+        if (!challengeResult.loggedIn) {
+          challengeFailure = challengeResult.reason;
+        }
       }
 
       for (let dismissAttempt = 0; dismissAttempt < 3; dismissAttempt++) {

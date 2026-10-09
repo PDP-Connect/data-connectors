@@ -302,3 +302,85 @@ test("a non-numeric entry is re-asked as malformed, not as refused by Instagram"
   assert.doesNotMatch(calls.requestInput[1].message, /did not accept/);
   assert.equal(calls.fill.length, 0);
 });
+
+// Runs the whole script against a fake page: Instagram lands on a checkpoint
+// with no login form, so the username/password prompt never appears.
+const runWholeScript = ({ snapshots, inputs }) => {
+  let loggedIn = false;
+  let snapIndex = 0;
+  const calls = { requestInput: [], fill: [], showBrowser: 0, data: {} };
+  const page = {
+    requestedScopes: () => ["instagram.profile"],
+    goto: async () => {},
+    sleep: async () => {},
+    setData: async (key, value) => { calls.data[key] = value; },
+    setProgress: async () => {},
+    captureNetwork: async () => {},
+    clearNetworkCaptures: async () => {},
+    getCapturedResponse: async (key) =>
+      key === "profileResponse"
+        ? { data: { data: { user: { username: "someone", id: "1", following_count: 0 } } } }
+        : null,
+    waitForSelector: async () => { throw new Error("Timeout 10000ms exceeded"); },
+    evaluate: async (source) => {
+      if (source.includes("accounts/web_info")) {
+        return loggedIn ? { success: true, data: { username: "someone" } } : { error: "no polaris data found" };
+      }
+      if (source.includes("methodOptions")) {
+        return snapshots[Math.min(snapIndex++, snapshots.length - 1)];
+      }
+      return "none";
+    },
+    requestInput: async (spec) => {
+      calls.requestInput.push(spec);
+      assert.ok(inputs.length > 0, `unexpected requestInput: ${spec.message}`);
+      return inputs.shift();
+    },
+    fill: async (selector, value) => { calls.fill.push({ selector, value }); loggedIn = true; },
+    press: async () => {},
+    click: async () => {},
+    showBrowser: async () => { calls.showBrowser++; return { headed: false }; },
+    promptUser: async () => { throw new Error("promptUser must not be reached"); },
+    goHeadless: async () => {},
+  };
+  const context = vm.createContext({
+    page,
+    console: { error: () => {}, log: () => {} },
+    setTimeout,
+    clearTimeout,
+    URLSearchParams,
+  });
+  const result = vm.runInContext(script, context, { filename: "instagram-playwright.js" });
+  return { result, calls };
+};
+
+test("no login form: a direct checkpoint is relayed through requestInput", async () => {
+  const { result, calls } = runWholeScript({
+    snapshots: [snapshot({
+      path: "/challenge/1/x/",
+      codeSelector: 'input[name="security_code"]',
+      bodyText: "enter the code we sent to m***@x.com",
+      buttons: ["Confirm"],
+    })],
+    inputs: [{ code: "654321" }],
+  });
+  const output = await result;
+  assert.equal(calls.requestInput.length, 1, "only the code prompt, no credentials prompt");
+  assert.match(calls.requestInput[0].message, /verification code sent to your email/);
+  assert.deepEqual(calls.fill, [{ selector: 'input[name="security_code"]', value: "654321" }]);
+  assert.equal(calls.showBrowser, 0);
+  assert.deepEqual([...output.errors], []);
+  assert.equal(output["instagram.profile"].username, "someone");
+});
+
+test("no login form and no recognised checkpoint keeps the generic error", async () => {
+  const { result, calls } = runWholeScript({
+    snapshots: [snapshot({ path: "/", buttons: [] })],
+    inputs: [],
+  });
+  const output = await result;
+  assert.equal(calls.requestInput.length, 0);
+  assert.equal(calls.showBrowser, 1);
+  assert.equal(output.errors[0].errorClass, "auth_failed");
+  assert.equal(output.errors[0].reason, "Instagram login requires a headed browser or requestInput support.");
+});
