@@ -22,7 +22,10 @@ export interface RunOwnedPages {
 	 * Close every open run-owned page except `except`. Each close is bounded so
 	 * a wedged renderer cannot hang teardown; failures are swallowed because
 	 * cleanup must never mask a run's real outcome. Resolves to the number of
-	 * pages that closed.
+	 * pages that closed. Popup listeners stay attached while closing, and close
+	 * repeats (a bounded number of passes) until a pass finds no newly adopted
+	 * open page, so a popup an owned page opens while the close is pending is
+	 * closed too. Call this before `dispose()`.
 	 */
 	close: (options?: { except?: Page }) => Promise<number>;
 	/** Stop following popups and restore the context's own `newPage`. */
@@ -33,6 +36,7 @@ export interface RunOwnedPages {
 }
 
 const OWNED_PAGE_CLOSE_DEADLINE_MS = 10_000;
+const OWNED_PAGE_CLOSE_MAX_PASSES = 5;
 
 async function closePageBounded(
 	page: Pick<Page, "close" | "isClosed">,
@@ -86,6 +90,35 @@ export function trackRunOwnedPages(
 		page.on("popup", onPopup);
 	};
 
+	// Each pass closes the owned pages that are open now. A page still open
+	// during a pass can open a popup before its close lands; the popup listener
+	// adopts it, and the next pass closes it. Pages a pass already tried are not
+	// retried (a wedged one would cost another full deadline). Bounded so a page
+	// that keeps spawning popups cannot keep teardown alive.
+	const closeOwnedPages = async (
+		except: Page | undefined,
+		attempted = new Set<Page>(),
+		pass = 1,
+	): Promise<number> => {
+		const targets = [...owned].filter(
+			(page) => page !== except && !page.isClosed() && !attempted.has(page),
+		);
+		if (targets.length === 0) {
+			return 0;
+		}
+		for (const page of targets) {
+			attempted.add(page);
+		}
+		const results = await Promise.all(
+			targets.map((page) => closePageBounded(page, deadlineMs)),
+		);
+		const closed = results.filter(Boolean).length;
+		if (pass >= OWNED_PAGE_CLOSE_MAX_PASSES) {
+			return closed;
+		}
+		return closed + (await closeOwnedPages(except, attempted, pass + 1));
+	};
+
 	let restoreNewPage: (() => void) | null = null;
 	if (context) {
 		const originalNewPage = context.newPage;
@@ -104,15 +137,7 @@ export function trackRunOwnedPages(
 
 	return {
 		adopt,
-		close: async ({ except } = {}) => {
-			const targets = [...owned].filter(
-				(page) => page !== except && !page.isClosed(),
-			);
-			const results = await Promise.all(
-				targets.map((page) => closePageBounded(page, deadlineMs)),
-			);
-			return results.filter(Boolean).length;
-		},
+		close: async ({ except } = {}) => closeOwnedPages(except),
 		dispose: () => {
 			for (const [page, onPopup] of listeners) {
 				page.off("popup", onPopup);

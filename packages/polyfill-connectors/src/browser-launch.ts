@@ -955,7 +955,6 @@ async function acquireRemoteCdpBrowser(
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
 			releaseRequested = true;
-			runPages.dispose();
 			if (recording) {
 				// A recording run leaves its page open so storage state can still
 				// be read here (see `shouldCloseBrowserPageAfterRun`). On a local
@@ -963,8 +962,11 @@ async function acquireRemoteCdpBrowser(
 				// context close only disconnects, so close the run's own pages
 				// (and nothing else) first. That also lets their in-flight
 				// requests finish before the HAR is exported.
+				// Close before dispose so a popup one of them opens while the close
+				// is pending is still adopted and closed.
 				await runPages.close();
 			}
+			runPages.dispose();
 			if (storageStateRecording) {
 				await writeStorageStateBestEffort(context, storageStateRecording.path);
 			}

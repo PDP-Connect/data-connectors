@@ -284,6 +284,7 @@ test("selectBrowserPageForRun ignores closed and blank pages", async () => {
 	const { context, newPageCalls } = makePageSelectionContext([
 		makeDiagnosticPage("https://chatgpt.com/", true),
 		makeDiagnosticPage("about:blank"),
+		makeDiagnosticPage("about:blank#owner-tab"),
 		makeDiagnosticPage("data:text/html,<html></html>"),
 		reusable,
 	]);
@@ -295,23 +296,6 @@ test("selectBrowserPageForRun ignores closed and blank pages", async () => {
 	assert.equal(newPageCalls(), 0);
 });
 
-test("selectBrowserPageForRun never reuses an existing page in an attached browser", async () => {
-	const existing = makeDiagnosticPage("https://chatgpt.com/");
-	const { context, newPage, newPageCalls } = makePageSelectionContext([
-		existing,
-	]);
-
-	assert.equal(
-		await selectBrowserPageForRun(
-			context,
-			{ preservePageOnFailure: true, preservePageOnSuccess: true },
-			{ reuseExistingPages: false },
-		),
-		newPage,
-	);
-	assert.equal(newPageCalls(), 1);
-});
-
 test("isReusableBrowserRunPage treats non-blank open pages as reusable", () => {
 	assert.equal(
 		isReusableBrowserRunPage(makeDiagnosticPage("https://chatgpt.com/")),
@@ -319,6 +303,10 @@ test("isReusableBrowserRunPage treats non-blank open pages as reusable", () => {
 	);
 	assert.equal(
 		isReusableBrowserRunPage(makeDiagnosticPage("about:blank")),
+		false,
+	);
+	assert.equal(
+		isReusableBrowserRunPage(makeDiagnosticPage("about:blank#owner-tab")),
 		false,
 	);
 	assert.equal(

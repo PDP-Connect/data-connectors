@@ -14,6 +14,11 @@
  * tab the owner opens mid-run survives, the run page and the provider popup
  * it opened are closed, and a recording run leaves a usable HAR and storage
  * state behind.
+ *
+ * A connector that declares page preservation (ChatGPT keeps its session in
+ * the live page) is the one exception to "never reuse a tab": consecutive runs
+ * share one preserved run page instead of piling up new ones, and the owner's
+ * tabs stay untouched.
  */
 
 import assert from "node:assert/strict";
@@ -49,6 +54,7 @@ interface ChildResult {
 	code: number | null;
 	done: { status?: string } | undefined;
 	output: string;
+	recordKeys: string[];
 }
 
 function runFixture(env: Record<string, string>): Promise<ChildResult> {
@@ -93,18 +99,25 @@ function runFixture(env: Record<string, string>): Promise<ChildResult> {
 		});
 		child.on("close", (code) => {
 			clearTimeout(timer);
-			const done = stdout
+			const messages = stdout
 				.split("\n")
 				.filter(Boolean)
 				.map((line) => {
 					try {
-						return JSON.parse(line) as { type?: string; status?: string };
+						return JSON.parse(line) as {
+							key?: string;
+							status?: string;
+							type?: string;
+						};
 					} catch {
 						return {};
 					}
-				})
-				.find((message) => message.type === "DONE");
-			resolve({ code, done, output: `${stdout}\n${stderr}` });
+				});
+			const done = messages.find((message) => message.type === "DONE");
+			const recordKeys = messages
+				.filter((message) => message.type === "RECORD")
+				.map((message) => message.key ?? "");
+			resolve({ code, done, output: `${stdout}\n${stderr}`, recordKeys });
 		});
 		child.stdin.end(
 			`${JSON.stringify({ scope: { streams: [{ name: "items" }] }, type: "START" })}\n`,
@@ -283,4 +296,79 @@ test("connector runs attached to an external browser close only their own pages"
 	} finally {
 		await replayBrowser.close();
 	}
+});
+
+test("a preserve-page connector attached to an external browser reuses its one run page", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-preserve-"));
+	const site = createHttpServer((req, res) => {
+		const path = new URL(req.url ?? "/", "http://localhost").pathname;
+		if (path === "/provider") {
+			res
+				.writeHead(200, { "content-type": "text/html" })
+				.end("<html><body>provider sign-in</body></html>");
+			return;
+		}
+		res
+			.writeHead(200, { "content-type": "text/html" })
+			.end(
+				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'/provider\', \'provider\')">Sign in</button></body></html>',
+			);
+	});
+	await new Promise<void>((resolve) => {
+		site.listen(0, "127.0.0.1", resolve);
+	});
+	const siteAddress = site.address();
+	assert.ok(siteAddress && typeof siteAddress !== "string");
+	const baseUrl = `http://127.0.0.1:${String(siteAddress.port)}`;
+	const cdpPort = await freeLoopbackPort();
+	const browserContext = await chromium.launchPersistentContext(
+		join(dir, "profile"),
+		{ args: [`--remote-debugging-port=${String(cdpPort)}`] },
+	);
+	t.after(async () => {
+		await browserContext.close().catch(() => undefined);
+		await new Promise<void>((resolve) => {
+			site.close(() => resolve());
+		});
+		await rm(dir, { recursive: true, force: true });
+	});
+	const ownerTabs = await Promise.all([
+		browserContext.newPage(),
+		browserContext.newPage(),
+	]);
+	await Promise.all(
+		ownerTabs.map((page, index) =>
+			page.goto(`about:blank#owner-tab-${String(index + 1)}`),
+		),
+	);
+	const env = {
+		[REMOTE_CDP_ENV]: `http://127.0.0.1:${String(cdpPort)}`,
+		PDPP_OWNERSHIP_FIXTURE_BASE_URL: baseUrl,
+		PDPP_OWNERSHIP_FIXTURE_PRESERVE_PAGE: "1",
+	};
+
+	const first = await runFixture(env);
+	assert.equal(first.done?.status, "succeeded", first.output);
+	const second = await runFixture(env);
+	assert.equal(second.done?.status, "succeeded", second.output);
+
+	assert.deepEqual(
+		[first.recordKeys, second.recordKeys],
+		[["1"], ["2"]],
+		"the second run served the page the first run preserved",
+	);
+	const urls = pageUrls(browserContext);
+	assert.deepEqual(
+		urls.filter((url) => url.startsWith(baseUrl)),
+		[`${baseUrl}/run`],
+		`exactly one run page remains and the provider popups are closed (open: ${urls.join(", ")})`,
+	);
+	assert.deepEqual(
+		ownerTabs.map((page) => [page.isClosed(), page.url()]),
+		[
+			[false, "about:blank#owner-tab-1"],
+			[false, "about:blank#owner-tab-2"],
+		],
+		"the owner's tabs are untouched",
+	);
 });

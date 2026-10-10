@@ -3276,21 +3276,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/browser-launch.ts",
-			line: 1725,
+			line: 1727,
 			column: 21,
 			category: "dependent_file_cursor",
 			note: "readFile(): sequential file/dir walk, incremental byte-offset read, or one-way fs mutation",
 		},
 		{
 			path: "src/browser-launch.ts",
-			line: 1835,
+			line: 1837,
 			column: 14,
 			category: "shared_mutable_accumulator",
 			note: "closeRemoteDevToolsTarget(): loop body mutates a shared accumulator the next iteration reads",
 		},
 		{
 			path: "src/browser-launch.ts",
-			line: 1848,
+			line: 1850,
 			column: 25,
 			category: "shared_mutable_accumulator",
 			note: "fetchRemoteDevToolsTargets(): loop body mutates a shared accumulator the next iteration reads",
@@ -3346,7 +3346,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime-remote-ownership.test.ts",
-			line: 204,
+			line: 217,
 			column: 18,
 			category: "test_assertion_sequencing",
 			note: "runFixture(): connector runs share one attached browser; each run asserts on the tabs the previous runs left behind",
@@ -3360,7 +3360,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2217,
+			line: 2233,
 			column: 7,
 			category: "shared_mutable_accumulator",
 			note: "closeBrowserContextPagesExcept(): loop body mutates a shared closed accumulator the next iteration reads",

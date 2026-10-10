@@ -1880,13 +1880,18 @@ async function runInBrowser(args: {
 	let page: Page | null = null;
 	let stopPagePolicy: (() => Promise<void>) | null = null;
 	let runSucceeded = false;
+	let runReusedAttachedPage = false;
 	let browserSurfaceAssistance: ReturnType<
 		typeof createBrowserSurfaceAssistanceLifecycle
 	> | null = null;
 	try {
-		page = await selectBrowserPageForRun(ctx, browser, {
-			reuseExistingPages: ownsBrowserPages,
-		});
+		const pagesBeforeRun = new Set(ctx.pages());
+		page = await selectBrowserPageForRun(ctx, browser);
+		// A page the run reused (only a connector that declares page
+		// preservation reuses one, see `selectBrowserPageForRun`) is the run's
+		// page for popup tracking, but in an attached browser it is never
+		// closed: it predates this run and is kept for the next one.
+		runReusedAttachedPage = !ownsBrowserPages && pagesBeforeRun.has(page);
 		stopPagePolicy = await installOwnedRunPagePolicy(ctx, page, {
 			closeUnownedPages: ownsBrowserPages,
 		});
@@ -2002,7 +2007,10 @@ async function runInBrowser(args: {
 		await stopPagePolicy?.();
 		await finalizeDiagnostics();
 		await browserSurfaceAssistance?.close();
-		if (shouldCloseBrowserPageAfterRun(browser, runSucceeded)) {
+		if (
+			!runReusedAttachedPage &&
+			shouldCloseBrowserPageAfterRun(browser, runSucceeded)
+		) {
 			await closeBrowserPage(page);
 		}
 		await release().catch((): undefined => undefined);
@@ -2023,7 +2031,9 @@ export function isReusableBrowserRunPage(page: ReusableBrowserPage): boolean {
 		return false;
 	}
 	const url = page.url();
-	return Boolean(url) && url !== "about:blank" && !url.startsWith("data:");
+	// An `about:` page (including `about:blank#anything`) or a `data:` page
+	// carries no provider session, so it is never a preserved run page.
+	return Boolean(url) && !url.startsWith("about:") && !url.startsWith("data:");
 }
 
 export async function selectBrowserPageForRun(
@@ -2032,14 +2042,17 @@ export async function selectBrowserPageForRun(
 		BrowserConfig,
 		"preservePageOnFailure" | "preservePageOnSuccess"
 	>,
-	{ reuseExistingPages = true }: { reuseExistingPages?: boolean } = {},
 ): Promise<Page> {
-	// An existing page in an attached browser may be its owner's own tab, so a
-	// run there always starts on a page it created.
-	if (
-		reuseExistingPages &&
-		(browser.preservePageOnSuccess || browser.preservePageOnFailure)
-	) {
+	// A connector that declares page preservation keeps its run page open
+	// between runs because its authenticated session lives in that live page
+	// (ChatGPT, see `browser-surface-policy.ts`), so the next run must pick it
+	// up instead of opening another one. This applies to an attached browser
+	// (`PDPP_<NAME>_REMOTE_CDP_URL`) too: pointing a preserve-page connector at
+	// a browser hands that browser's session pages to the connector, which is
+	// consent to reuse them. Without reuse every run would open a new page and
+	// the preserved ones would pile up. Connectors without preservation always
+	// start on a page they created, so they never touch an existing tab.
+	if (browser.preservePageOnSuccess || browser.preservePageOnFailure) {
 		for (const page of context.pages()) {
 			if (isReusableBrowserRunPage(page)) {
 				return page;
@@ -2074,9 +2087,12 @@ export async function installOwnedRunPagePolicy(
 	const runPages = trackRunOwnedPages();
 	runPages.adopt(ownedPage);
 	return async () => {
+		// Close before dispose: popup listeners stay attached while the closes
+		// are pending, so a popup an owned page opens meanwhile is adopted and
+		// closed by `close()`'s next pass instead of escaping.
+		await runPages.close({ except: ownedPage });
 		runPages.dispose();
 		context.newPage = originalNewPage;
-		await runPages.close({ except: ownedPage });
 		if (closeUnownedPages) {
 			await closeBrowserContextPagesExcept(context, ownedPage);
 		}
