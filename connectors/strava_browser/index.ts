@@ -364,6 +364,45 @@ function classifyActivityResponse(
 	return { ok: true, body: response.body };
 }
 
+/**
+ * The activity's heart-rate summary from its stream. An activity without
+ * recorded streams (a manual entry) answers 404: that is no heart-rate data,
+ * not an unreadable source, so the detail is complete with null heart rate.
+ */
+async function fetchActivityHeartRate(
+	page: StravaCollectContext["page"],
+	activityId: string,
+): Promise<
+	| { ok: true; average: number | null; maximum: number | null }
+	| { ok: false; reason: CoverageReason; message: string }
+> {
+	const query = new URLSearchParams();
+	query.append("stream_types[]", "heartrate");
+	const response = await fetchActivityResource(
+		page,
+		`/activities/${encodeURIComponent(activityId)}/streams?${query}`,
+		"application/json, text/javascript",
+	);
+	if (response.kind === "response" && response.status === 404) {
+		return { ok: true, average: null, maximum: null };
+	}
+	const stream = classifyActivityResponse(
+		response,
+		"json",
+		"activity heartrate stream",
+	);
+	if (!stream.ok) return stream;
+	const heartRate = parseHeartRateStream(stream.body);
+	if (!heartRate) {
+		return {
+			ok: false,
+			reason: "source_unreadable",
+			message: "Strava returned an unknown activity heartrate stream shape.",
+		};
+	}
+	return { ok: true, ...heartRate };
+}
+
 async function fetchActivityRecordFields(
 	page: StravaCollectContext["page"],
 	model: unknown,
@@ -392,26 +431,8 @@ async function fetchActivityRecordFields(
 		"activity detail",
 	);
 	if (!detail.ok) return detail;
-	const query = new URLSearchParams();
-	query.append("stream_types[]", "heartrate");
-	const stream = classifyActivityResponse(
-		await fetchActivityResource(
-			page,
-			`/activities/${encodeURIComponent(activityId)}/streams?${query}`,
-			"application/json, text/javascript",
-		),
-		"json",
-		"activity heartrate stream",
-	);
-	if (!stream.ok) return stream;
-	const heartRate = parseHeartRateStream(stream.body);
-	if (!heartRate) {
-		return {
-			ok: false,
-			reason: "source_unreadable",
-			message: "Strava returned an unknown activity heartrate stream shape.",
-		};
-	}
+	const heartRate = await fetchActivityHeartRate(page, activityId);
+	if (!heartRate.ok) return heartRate;
 	const gearId = activityGearId(model);
 	const gear = gearId ? await resolveGearName(gearId) : { name: null };
 	return {
