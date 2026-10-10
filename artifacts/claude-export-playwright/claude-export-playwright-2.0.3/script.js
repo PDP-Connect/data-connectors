@@ -13,12 +13,21 @@
  * with full threads, projects, profile), retrieved in one shot with no
  * per-conversation rate limiting. It is produced by an async job, so this
  * connector is resumable: run 1 requests the export and checkpoints the nonce;
- * if the archive is not ready yet (or cannot be read) the run marks both scopes
+ * if the archive is not ready yet (or cannot be read) the run marks the scopes
  * `omitted` and emits no payload for them, and a later run captures it. An
  * omitted scope is never emitted empty: a host would ingest the empty payload
- * as if the account held no data. Output is the same honest-telemetry scoped result the live-API
- * connector emits (claude.conversations / claude.projects), so the two are
- * interchangeable downstream.
+ * as if the account held no data. Output is the same honest-telemetry scoped
+ * result the live-API connector emits (claude.conversations /
+ * claude.projects), so the two are interchangeable downstream.
+ *
+ * Two export shapes are read. The original is one ZIP holding conversations.json
+ * and projects/*.json. Since 2026-09-22 Claude can instead deliver a MANIFEST
+ * ({ data_files: [{ category, part, filename, export_url }] }) plus one ZIP per
+ * category (conversations-000.zip, projects-000.zip, ...). The manifest comes
+ * either in the POST export_data response or as the file the nonce download
+ * saves. Each export_url is a one-shot link. A category that was not downloaded,
+ * or a conversations category that holds no conversations.json, is `omitted`,
+ * never an empty collected scope.
  *
  * Requires runner page methods: page.captureDownload(url) and
  * page.extractZipEntries(path) (DataConnect playwright-runner). The page-API
@@ -151,7 +160,7 @@ const requestExport = async (organizationId) => {
             headers: { 'content-type': 'application/json', accept: '*/*' }, body: '{}'
           });
           let json = null; try { json = await r.json(); } catch (_) {}
-          return { ok: r.ok, status: r.status, nonce: json && json.nonce ? json.nonce : null };
+          return { ok: r.ok, status: r.status, nonce: json && json.nonce ? json.nonce : null, manifest: json && Array.isArray(json.data_files) ? json : null };
         } catch (e) { return { ok: false, status: 0, error: e.message }; }
       })()
     `);
@@ -214,24 +223,35 @@ const normalizeProject = (p) => {
   };
 };
 
+// Export parts the connector reads. Everything else in a split export
+// (memories, design_chats, light_metadata other than users.json) is not used.
+const SCOPE_C = 'claude.conversations';
+const SCOPE_P = 'claude.projects';
+
+// ctx.omitted maps a scope to the reason it was not collected. ctx.pending
+// omits every requested scope with ctx.pendingReason. A scope in neither is
+// collected, and is emitted even when empty.
 const buildResult = (requestedScopes, ctx) => {
-  const wantsC = requestedScopes.includes('claude.conversations');
-  const wantsP = requestedScopes.includes('claude.projects');
-  const conversations = ctx.conversations || [];
-  const projects = ctx.projects || [];
+  const omittedReasons = {};
+  const defaultReason = ctx.pendingReason ||
+    'Claude is still preparing the export. The request is checkpointed — re-run in a few minutes to finish.';
+  for (const scope of requestedScopes) {
+    if (ctx.pending) omittedReasons[scope] = defaultReason;
+    else if (ctx.omitted && ctx.omitted[scope]) omittedReasons[scope] = ctx.omitted[scope];
+  }
+  const isOmitted = (scope) => Object.prototype.hasOwnProperty.call(omittedReasons, scope);
+  const wantsC = requestedScopes.includes(SCOPE_C) && !isOmitted(SCOPE_C);
+  const wantsP = requestedScopes.includes(SCOPE_P) && !isOmitted(SCOPE_P);
+  const conversations = wantsC ? (ctx.conversations || []) : [];
+  const projects = wantsP ? (ctx.projects || []) : [];
   const totalMessages = conversations.reduce((s, c) => s + (c.messageCount || 0), 0);
   const profile = ctx.profile || { name: null, plan: null };
 
-  const errors = [];
-  if (ctx.pending) {
-    const reason = ctx.pendingReason ||
-      'Claude is still preparing the export. The request is checkpointed — re-run in a few minutes to finish.';
-    // The export was not collected, so the scopes are `omitted`: no payload is
-    // emitted for them (below). An empty payload marked `degraded` would be
-    // ingested as if the account had no conversations or projects.
-    if (wantsC) errors.push({ errorClass: 'upstream_error', reason, disposition: 'omitted', scope: 'claude.conversations', phase: 'export' });
-    if (wantsP) errors.push({ errorClass: 'upstream_error', reason, disposition: 'omitted', scope: 'claude.projects', phase: 'export' });
-  }
+  // An omitted scope is reported and has no payload (below): an empty payload
+  // marked `degraded` would be ingested as if the account had no data.
+  const errors = Object.keys(omittedReasons).map((scope) => (
+    { errorClass: 'upstream_error', reason: omittedReasons[scope], disposition: 'omitted', scope, phase: 'export' }
+  ));
 
   const result = {
     requestedScopes,
@@ -247,6 +267,7 @@ const buildResult = (requestedScopes, ctx) => {
         projects: projects.length,
         designChats: ctx.designChats || 0,
         pending: Boolean(ctx.pending),
+        exportFormat: ctx.exportFormat || null,
         source: 'official-export',
         organizationId: ctx.organizationId || null,
         // Markers so a tester can confirm this is the trimmed v2 build:
@@ -258,15 +279,130 @@ const buildResult = (requestedScopes, ctx) => {
     errors,
   };
   const payloads = {
-    'claude.conversations': { profile, organizationId: ctx.organizationId || null, conversations, total: conversations.length, messageTotal: totalMessages, source: 'official-export' },
-    'claude.projects': { profile, organizationId: ctx.organizationId || null, projects, total: projects.length, source: 'official-export' },
+    [SCOPE_C]: { profile, organizationId: ctx.organizationId || null, conversations, total: conversations.length, messageTotal: totalMessages, source: 'official-export' },
+    [SCOPE_P]: { profile, organizationId: ctx.organizationId || null, projects, total: projects.length, source: 'official-export' },
   };
-  // An omitted scope has no key. A collected scope is emitted even when it is
-  // empty: an export that was read and held zero conversations is a real result.
   for (const scope of Object.keys(payloads)) {
-    if (requestedScopes.includes(scope) && !ctx.pending) result[scope] = payloads[scope];
+    if (requestedScopes.includes(scope) && !isOmitted(scope)) result[scope] = payloads[scope];
   }
   return result;
+};
+
+// ─── Reading an export ───────────────────────────────────────────────
+
+const ZIP_INCLUDE = ['conversations.json', 'projects/', 'users.json', 'design_chats/'];
+const PART_DOWNLOAD_TIMEOUT_MS = 60000;
+// A manifest is a small JSON file; anything larger is not one.
+const MAX_MANIFEST_CHARS = 1024 * 1024;
+
+const isManifest = (m) => Boolean(m) && typeof m === 'object' && !Array.isArray(m) && Array.isArray(m.data_files);
+
+// The runner can only parse ZIPs, so a manifest the nonce download saved is
+// read by opening the saved file in the page and taking its text. Returns the
+// manifest, or null when the file is not (or cannot be read as) a manifest.
+const readSavedManifest = async (filePath) => {
+  try {
+    await page.goto('file://' + encodeURI(filePath));
+    const text = await page.evaluate(`(() => (document.body ? document.body.innerText : '') || '')()`);
+    if (typeof text !== 'string' || text.length === 0 || text.length > MAX_MANIFEST_CHARS) return null;
+    const json = JSON.parse(text);
+    return isManifest(json) ? json : null;
+  } catch (e) { return null; }
+};
+
+// Download and read one category ZIP of a manifest. Never throws: a part that
+// cannot be downloaded or read is reported as failed.
+const downloadPart = async (dataFile) => {
+  const label = `${dataFile.category}/${dataFile.filename || dataFile.part}`;
+  try {
+    const dl = await page.captureDownload(dataFile.export_url, { timeout: PART_DOWNLOAD_TIMEOUT_MS });
+    if (!dl || !dl.ok || !dl.ready) return { ok: false, label, category: dataFile.category };
+    const extracted = await page.extractZipEntries(dl.path, { include: ZIP_INCLUDE });
+    if (!extracted || !extracted.ok) return { ok: false, label, category: dataFile.category };
+    return { ok: true, label, category: dataFile.category, json: extracted.json || {}, path: dl.path || null };
+  } catch (e) { return { ok: false, label, category: dataFile.category }; }
+};
+
+const byPart = (a, b) => (a.part || 0) - (b.part || 0) || (a.batch_index || 0) - (b.batch_index || 0);
+
+// Reads a manifest's category ZIPs (every part). Returns { omitted, conversations,
+// projects, profile, designChats, rawArchivePath }; `omitted` maps each
+// requested scope that was not positively collected to a reason.
+const readManifestExport = async (manifest, requestedScopes) => {
+  const wantsC = requestedScopes.includes(SCOPE_C);
+  const wantsP = requestedScopes.includes(SCOPE_P);
+  const files = manifest.data_files.filter(f => f && typeof f.category === 'string' && typeof f.export_url === 'string').sort(byPart);
+  const omitted = {};
+  let rawConversations = [];
+  const rawProjects = [];
+  let users = null;
+
+  let rawArchivePath = null;
+
+  const fetchCategory = async (category) => {
+    const parts = files.filter(f => f.category === category);
+    const done = [];
+    for (const f of parts) done.push(await downloadPart(f));
+    return { listed: parts.length, done, failed: done.filter(d => !d.ok) };
+  };
+
+  if (wantsC) {
+    const c = await fetchCategory('conversations');
+    if (c.listed === 0) {
+      omitted[SCOPE_C] = 'Claude\'s export lists no conversations category, so the conversations were not collected. Re-run to retry.';
+    } else if (c.failed.length > 0) {
+      omitted[SCOPE_C] = `The conversations part(s) of Claude's export could not be downloaded or read (${c.failed.map(d => d.label).join(', ')}). Re-run to retry.`;
+    } else {
+      // Only a conversations.json that parsed to an array proves the category:
+      // items, or a literal [] for an account with no conversations.
+      let found = false;
+      for (const d of c.done) {
+        const list = d.json['conversations.json'];
+        if (Array.isArray(list)) { found = true; rawConversations = rawConversations.concat(list); }
+        rawArchivePath = rawArchivePath || d.path;
+        if (d.json['users.json'] !== undefined && users === null) users = d.json['users.json'];
+      }
+      if (!found) omitted[SCOPE_C] = 'Claude\'s conversations export held no readable conversations.json, so the conversations were not collected. Re-run to retry.';
+    }
+  }
+  if (wantsP) {
+    const pr = await fetchCategory('projects');
+    if (pr.listed === 0) {
+      omitted[SCOPE_P] = 'Claude\'s export lists no projects category, so the projects were not collected. Re-run to retry.';
+    } else if (pr.failed.length > 0) {
+      omitted[SCOPE_P] = `The projects part(s) of Claude's export could not be downloaded or read (${pr.failed.map(d => d.label).join(', ')}). Re-run to retry.`;
+    } else {
+      for (const d of pr.done) {
+        for (const k of Object.keys(d.json)) if (k.startsWith('projects/')) rawProjects.push(d.json[k]);
+      }
+    }
+  }
+  // Account name: users.json from light_metadata, when that part is available.
+  if (users === null) {
+    const lm = files.filter(f => f.category === 'light_metadata');
+    for (const f of lm) {
+      const d = await downloadPart(f);
+      if (d.ok && d.json['users.json'] !== undefined) { users = d.json['users.json']; break; }
+    }
+  }
+  return { omitted, rawConversations, rawProjects, users, rawArchivePath };
+};
+
+const nameFromUsers = (users, profile) =>
+  Array.isArray(users) && users[0] && users[0].full_name
+    ? { name: users[0].full_name || profile.name || null, plan: profile.plan || null }
+    : profile;
+
+// Builds the result for a manifest export and returns { result, collectedAll }.
+const resultFromManifest = async (manifest, requestedScopes, base) => {
+  const m = await readManifestExport(manifest, requestedScopes);
+  const conversations = m.rawConversations.map(normalizeConversation).filter(c => c.id);
+  const projects = m.rawProjects.map(normalizeProject).filter(p => p.id);
+  const result = buildResult(requestedScopes, {
+    ...base, conversations, projects, omitted: m.omitted, pending: false,
+    profile: nameFromUsers(m.users, base.profile), rawArchivePath: m.rawArchivePath, exportFormat: 'split-manifest',
+  });
+  return { result, collectedAll: Object.keys(m.omitted).length === 0 };
 };
 
 // ─── Main ────────────────────────────────────────────────────────────
@@ -319,6 +455,24 @@ const buildResult = (requestedScopes, ctx) => {
     return;
   }
 
+  // Completes the run from a built result. The pending nonce is dropped only
+  // when every requested scope was collected; otherwise it stays for the re-run.
+  const finish = async (built) => {
+    await page.setData('result', built.result);
+    if (built.collectedAll) {
+      await ckptClear();
+      const d = built.result.exportSummary.details;
+      await page.setData('status', `Complete! Imported ${d.conversations} conversations (${d.messages} messages) and ${d.projects} projects from the Claude export.`);
+    } else {
+      await page.setData('status', 'Part of the Claude export could not be collected. Re-run to retry.');
+    }
+  };
+  const notCollected = async (pendingReason, status) => {
+    const ctx = { organizationId, profile, conversations: [], projects: [], pending: true, pendingReason };
+    await page.setData('result', buildResult(requestedScopes, ctx));
+    await page.setData('status', status);
+  };
+
   // Phase 2: ensure an export exists (resume a checkpointed nonce, else request).
   const ckpt = await ckptGet();
   let nonce = ckpt && ckpt.organizationId === organizationId ? ckpt.nonce : null;
@@ -326,11 +480,17 @@ const buildResult = (requestedScopes, ctx) => {
   if (!nonce) {
     await page.setProgress({ phase: { step: 1, total: 3, label: 'Requesting export' }, message: 'Asking Claude to prepare your data export...' });
     const req = await requestExport(organizationId);
+    if (req.ok && req.manifest && !req.nonce) {
+      // Claude answered with the split-export manifest directly. Its links are
+      // one-shot and are not checkpointed.
+      await page.setProgress({ phase: { step: 3, total: 3, label: 'Reading export' }, message: 'Downloading your Claude export...' });
+      await finish(await resultFromManifest(req.manifest, requestedScopes, { organizationId, profile }));
+      return;
+    }
     if (!req.ok || !req.nonce) {
-      const ctx = { organizationId, profile, conversations: [], projects: [], pending: true,
-        pendingReason: `Could not start the export (HTTP ${req.status || 0}${req.error ? ': ' + req.error : ''}). Claude may rate-limit exports — try again later.` };
-      await page.setData('result', buildResult(requestedScopes, ctx));
-      await page.setData('status', 'Could not start the Claude export. Re-run later.');
+      await notCollected(
+        `Could not start the export (HTTP ${req.status || 0}${req.error ? ': ' + req.error : ''}). Claude may rate-limit exports — try again later.`,
+        'Could not start the Claude export. Re-run later.');
       return;
     }
     nonce = req.nonce;
@@ -362,29 +522,42 @@ const buildResult = (requestedScopes, ctx) => {
     // Exceeded the wait budget — keep the nonce checkpointed so a re-run resumes
     // (the job will be ready by then) rather than discarding progress.
     const waited = Math.round((Date.now() - waitStart) / 60000);
-    const ctx = { organizationId, profile, conversations: [], projects: [], pending: true,
-      pendingReason: `Claude's export was still not ready after ${waited} min. The request is checkpointed — re-run to finish.` };
-    await page.setData('result', buildResult(requestedScopes, ctx));
-    await page.setData('status', 'Export is taking longer than usual to prepare. Re-run shortly to finish.');
+    await notCollected(
+      `Claude's export was still not ready after ${waited} min. The request is checkpointed — re-run to finish.`,
+      'Export is taking longer than usual to prepare. Re-run shortly to finish.');
     return;
   }
 
   await page.setProgress({ phase: { step: 3, total: 3, label: 'Reading export' }, message: `Unpacking ${dl.name} (${Math.round((dl.size || 0) / 1048576)} MB)...` });
-  const extracted = await page.extractZipEntries(dl.path, { include: ['conversations.json', 'projects/', 'users.json', 'design_chats/'] });
+  const extracted = await page.extractZipEntries(dl.path, { include: ZIP_INCLUDE });
   if (!extracted || !extracted.ok) {
-    const ctx = { organizationId, profile, conversations: [], projects: [], pending: true,
-      pendingReason: `The export archive could not be read (${extracted && extracted.error ? extracted.error : 'unknown'}). Re-run to retry.` };
-    await page.setData('result', buildResult(requestedScopes, ctx));
-    await page.setData('status', 'Could not read the downloaded export. Re-run to retry.');
+    // Not a ZIP. Claude's nonce download can deliver the split-export manifest.
+    const manifest = await readSavedManifest(dl.path);
+    await page.goto(CLAUDE_HOME_URL);
+    if (manifest) {
+      await finish(await resultFromManifest(manifest, requestedScopes, { organizationId, profile, rawArchivePath: dl.path || null }));
+      return;
+    }
+    await notCollected(
+      `The export file could not be read as an archive or a manifest (${extracted && extracted.error ? extracted.error : 'unknown'}). Re-run to retry.`,
+      'Could not read the downloaded export. Re-run to retry.');
     return;
   }
 
   const json = extracted.json || {};
-  const wantsC = requestedScopes.includes('claude.conversations');
-  const wantsP = requestedScopes.includes('claude.projects');
+  // Only a conversations.json that parsed to an array proves a single-ZIP
+  // export; a ZIP without one is an unknown layout, not an empty account.
+  if (!Array.isArray(json['conversations.json'])) {
+    const names = Array.isArray(extracted.names) ? extracted.names.slice(0, 20).join(', ') : '';
+    await notCollected(
+      `The export archive has no readable conversations.json (entries: ${names || 'none'}). Re-run to retry.`,
+      'Could not read the downloaded export. Re-run to retry.');
+    return;
+  }
 
-  const conversations = wantsC && Array.isArray(json['conversations.json'])
-    ? json['conversations.json'].map(normalizeConversation).filter(c => c.id) : [];
+  const wantsC = requestedScopes.includes(SCOPE_C);
+  const wantsP = requestedScopes.includes(SCOPE_P);
+  const conversations = wantsC ? json['conversations.json'].map(normalizeConversation).filter(c => c.id) : [];
   const projects = wantsP
     ? Object.keys(json).filter(k => k.startsWith('projects/')).map(k => normalizeProject(json[k])).filter(p => p.id) : [];
   const designChats = Object.keys(json).filter(k => k.startsWith('design_chats/')).length;
@@ -392,17 +565,12 @@ const buildResult = (requestedScopes, ctx) => {
     ? { name: json['users.json'][0].full_name || profile.name || null, plan: profile.plan || null }
     : profile;
 
-  const ctx = { organizationId, profile: exportProfile, conversations, projects, designChats, pending: false,
-    // The downloaded export ZIP IS the full-fidelity raw archive; it stays on
-    // the user's machine and never enters the Personal Server. captureDownload
-    // returns its persisted path.
-    rawArchivePath: dl.path || null };
-  const result = buildResult(requestedScopes, ctx);
-  await page.setData('result', result);
-
-  // Success — the export was consumed; drop the checkpointed nonce.
-  await ckptClear();
-
-  const d = result.exportSummary.details;
-  await page.setData('status', `Complete! Imported ${d.conversations} conversations (${d.messages} messages) and ${d.projects} projects from the Claude export.`);
+  // The downloaded export ZIP IS the full-fidelity raw archive; it stays on
+  // the user's machine and never enters the Personal Server. captureDownload
+  // returns its persisted path.
+  await finish({
+    result: buildResult(requestedScopes, { organizationId, profile: exportProfile, conversations, projects, designChats, pending: false,
+      exportFormat: 'single-zip', rawArchivePath: dl.path || null }),
+    collectedAll: true,
+  });
 })();
