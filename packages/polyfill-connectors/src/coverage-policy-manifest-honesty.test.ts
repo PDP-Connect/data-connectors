@@ -255,7 +255,9 @@ const KNOWN_MISSING_REQUIRED = new Map([
 	["chase.current_activity", "941cb66bfef81f48"],
 	["chase.statements", "42f171687cb31b07"],
 	["chase.balances", "fe1f0c87463b52cf"],
-	["chatgpt.conversations", "d657ca4397289582"],
+	// consent_time_field moved from create_time to update_time; the stream still
+	// has the same implicit required default.
+	["chatgpt.conversations", "00b3c285c36210c1"],
 	["chatgpt.messages", "cc672810cdb9d950"],
 	// The already-integrated memories.type schema changed this fingerprint before
 	// the root move; the stream still has the same implicit required default.
