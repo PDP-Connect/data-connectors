@@ -9,7 +9,7 @@
 	},
 	"connector_key": "discord-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"display_name": "Discord (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
