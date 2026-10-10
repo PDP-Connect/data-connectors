@@ -218,7 +218,7 @@ for (const name of pageShimConnectors(
 				phase: "init",
 				requestedScopes:
 					name === "chatgpt"
-						? [...c.scopes, "chatgpt.memories"]
+						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
 						: c.scopes,
 			});
 		});
@@ -230,7 +230,7 @@ for (const name of pageShimConnectors(
 				phase: "init",
 				requestedScopes:
 					name === "chatgpt"
-						? [...c.scopes, "chatgpt.memories"]
+						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
 						: c.scopes,
 			});
 		});
@@ -298,7 +298,7 @@ test("chatgpt: complete bounded walk is not marked partial just because STATE wa
 		assert.deepEqual(r.result.exportSummary, {
 			count: 1,
 			label: "conversation",
-			details: { conversations: 1, messages: 1, memories: 0 },
+			details: { conversations: 1, messages: 1, memories: 0, account_plan: 0 },
 		});
 	} finally {
 		fx.useConversationCount(2);
@@ -345,6 +345,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 			conversations: 2,
 			messages: 2,
 			memories: 1,
+			account_plan: 0,
 		});
 
 		const streamed = await runHarness({
@@ -373,6 +374,7 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 			conversations: 2,
 			messages: 2,
 			memories: 1,
+			account_plan: 0,
 		});
 
 		const unsupported = await runHarness({
@@ -409,8 +411,159 @@ test("chatgpt: memories are accepted and emitted with conversation scopes", {
 			conversations: 0,
 			messages: 0,
 			memories: 1,
+			account_plan: 0,
 		});
 	} finally {
+		rmSync(spool, { recursive: true, force: true });
+	}
+});
+
+test("chatgpt: account_plan is served as its own timeless scope", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const scopes = [...fx.pageshimCase.scopes, "chatgpt.account_plan"];
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-account-plan.js"),
+	});
+	const spool = mkdtempSync(join(out, "chatgpt-account-plan-result-"));
+	const expectedPlan = {
+		id: "account_plan",
+		account_id: "00000000-0000-4000-8000-000000000001",
+		account_structure: "personal",
+		plan_type: "free",
+		plan_display_name: "Free",
+	};
+	const planFields = (record) =>
+		Object.fromEntries(
+			Object.keys(expectedPlan).map((key) => [key, record[key]]),
+		);
+	try {
+		const legacy = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes,
+		});
+		assert.deepEqual(
+			legacy.ret,
+			{ ok: true },
+			legacy.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(legacy.result.errors, []);
+		assert.deepEqual(legacy.result.requestedScopes, scopes);
+		const plans = legacy.result["chatgpt.account_plan"].records;
+		assert.equal(plans.length, 1);
+		assert.deepEqual(planFields(plans[0]), expectedPlan);
+		assert.equal(legacy.result["chatgpt.conversations"].records.length, 2);
+		assert.equal(legacy.result["chatgpt.memories"], undefined);
+		assert.deepEqual(legacy.result.exportSummary.details, {
+			conversations: 2,
+			messages: 2,
+			memories: 0,
+			account_plan: 1,
+		});
+
+		const streamed = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes,
+			resultStreaming: true,
+			resultSpoolDirectory: spool,
+		});
+		assert.deepEqual(
+			streamed.ret,
+			{ ok: true },
+			streamed.log.slice(-20).join("\n"),
+		);
+		assert.equal(streamed.streamResult?.completed, true);
+		assert.equal(streamed.streamResult.scopeCount, scopes.length);
+		assert.deepEqual(
+			JSON.parse(
+				readFileSync(streamed.streamScopeFiles["chatgpt.account_plan"], "utf8"),
+			).records,
+			plans,
+		);
+		assert.deepEqual(
+			streamed.streamDone.exportSummary.details,
+			legacy.result.exportSummary.details,
+		);
+
+		fx.requestedPaths.length = 0;
+		const planOnly = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: ["chatgpt.account_plan"],
+		});
+		assert.deepEqual(
+			planOnly.ret,
+			{ ok: true },
+			planOnly.log.slice(-20).join("\n"),
+		);
+		assert.deepEqual(planOnly.result.errors, []);
+		assert.equal(planOnly.result["chatgpt.conversations"], undefined);
+		assert.equal(planOnly.result["chatgpt.messages"], undefined);
+		assert.deepEqual(
+			planFields(planOnly.result["chatgpt.account_plan"].records[0]),
+			expectedPlan,
+		);
+		assert.ok(
+			fx.requestedPaths.includes("/backend-api/accounts/check/v4-2023-04-27"),
+		);
+		assert.ok(
+			!fx.requestedPaths.some((path) => path.startsWith("/backend-api/conversation")),
+			"a plan-only run must not walk conversations",
+		);
+
+		// The plan has no consent time field, so a host window is refused
+		// instead of completing empty.
+		const windowed = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes: scopeEntries(["chatgpt.account_plan"], {
+				"chatgpt.account_plan": {
+					since: "2026-09-01T00:00:00.000Z",
+					until: "2026-10-01T00:00:00.000Z",
+				},
+			}),
+		});
+		assert.deepEqual(
+			windowed.ret,
+			{ ok: true },
+			windowed.log.slice(-20).join("\n"),
+		);
+		assert.equal(windowed.result["chatgpt.account_plan"], undefined);
+		assert.ok(
+			windowed.result.errors.some(
+				(error) =>
+					error.scope === "chatgpt.account_plan" &&
+					/no supported consent_time_field/.test(error.reason),
+			),
+			JSON.stringify(windowed.result.errors),
+		);
+
+		fx.setAccountsCheckStatus(404);
+		const unavailable = await runHarness({
+			bundle: built.outfile,
+			fixtures: fx.pageshimCase.fixtures,
+			scopes,
+		});
+		assert.deepEqual(
+			unavailable.ret,
+			{ ok: true },
+			unavailable.log.slice(-20).join("\n"),
+		);
+		assert.equal(unavailable.result["chatgpt.account_plan"], undefined);
+		assert.equal(unavailable.result["chatgpt.conversations"].records.length, 2);
+		assert.deepEqual(
+			unavailable.result.errors.map(({ scope, disposition }) => ({
+				scope,
+				disposition,
+			})),
+			[{ scope: "chatgpt.account_plan", disposition: "omitted" }],
+		);
+	} finally {
+		fx.setAccountsCheckStatus(200);
 		rmSync(spool, { recursive: true, force: true });
 	}
 });
@@ -1125,7 +1278,7 @@ test("chatgpt: capped PageShim walk reports partial with omitted detail evidence
 	assert.deepEqual(r.result.exportSummary, {
 		count: 1,
 		label: "conversation",
-		details: { conversations: 1, messages: 1, memories: 0 },
+		details: { conversations: 1, messages: 1, memories: 0, account_plan: 0 },
 	});
 	assert.deepEqual(r.result.errors, [
 		{

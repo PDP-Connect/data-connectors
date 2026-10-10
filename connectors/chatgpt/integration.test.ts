@@ -11732,6 +11732,81 @@ test("runAccountPlanStream: unchanged plan on a second run emits zero records bu
 	);
 });
 
+test("runAccountPlanStream: stateless (PageShim) emits the plan and coverage without a fingerprint STATE", async () => {
+	const previous = process.env.PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS;
+	process.env.PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS = "1";
+	try {
+		const first = makeAccountPlanHarness({
+			status: 200,
+			json: ACCOUNT_PLAN_BODY,
+		});
+		await runAccountPlanStream(first.deps, {});
+		assert.equal(first.emitted.length, 1);
+		assert.equal(first.emitted[0]?.data.plan_type, "plus");
+		assert.equal(first.messages.filter((m) => m.type === "STATE").length, 0);
+		assert.ok(
+			first.messages.some(
+				(m) => m.type === "DETAIL_COVERAGE" && m.stream === "account_plan",
+			),
+		);
+		const second = makeAccountPlanHarness({
+			status: 200,
+			json: ACCOUNT_PLAN_BODY,
+		});
+		await runAccountPlanStream(second.deps, {});
+		assert.equal(second.emitted.length, 1, "every stateless run emits the plan");
+	} finally {
+		if (previous === undefined)
+			delete process.env.PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS;
+		else process.env.PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS = previous;
+	}
+});
+
+test("runAccountPlanStream: a thrown 403 or exhausted retry ends only this stream; a 401 still ends the run", async () => {
+	const rejecting = (error: Error): RecordingHarness => {
+		const harness = makeHarness({ requested: ["account_plan"] });
+		harness.deps.api.fetch = () => Promise.reject(error);
+		return harness;
+	};
+	const skipOf = (h: RecordingHarness) =>
+		h.messages.find(
+			(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+				m.type === "SKIP_RESULT" && m.stream === "account_plan",
+		);
+
+	const forbidden = rejecting(
+		new Error(
+			"apiFetch got 403 on GET /accounts/check/v4-2023-04-27 (auth - not retryable)",
+		),
+	);
+	await runAccountPlanStream(forbidden.deps);
+	assert.equal(forbidden.emitted.length, 0);
+	assert.equal(skipOf(forbidden)?.reason, "not_available");
+	assert.equal(forbidden.messages.filter((m) => m.type === "STATE").length, 0);
+
+	const exhausted = rejecting(
+		new ChatGptRecoverableRetryExhaustedError(
+			"apiFetch got 429 on GET /accounts/check/v4-2023-04-27 after retry budget exhausted",
+			{ class: "rate_limited", httpStatus: 429 },
+		),
+	);
+	await runAccountPlanStream(exhausted.deps);
+	assert.equal(exhausted.emitted.length, 0);
+	assert.equal(skipOf(exhausted)?.reason, "http_error");
+	assert.deepEqual(skipOf(exhausted)?.recovery_hint, {
+		action: "retry_by_runtime",
+		retryable: true,
+	});
+
+	const unauthorized = rejecting(
+		new Error(
+			"apiFetch got 401 on GET /accounts/check/v4-2023-04-27 (auth - not retryable)",
+		),
+	);
+	await assert.rejects(runAccountPlanStream(unauthorized.deps), /got 401/);
+	assert.equal(skipOf(unauthorized), undefined);
+});
+
 test("runAccountPlanStream: 403 → SKIP_RESULT('not_available'), no record, no STATE", async () => {
 	const { deps, emitted, messages } = makeAccountPlanHarness({
 		status: 403,

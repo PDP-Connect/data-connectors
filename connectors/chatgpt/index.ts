@@ -2468,6 +2468,10 @@ export async function runCustomInstructionsStream(
 }
 
 const ACCOUNTS_CHECK_PATH = "/accounts/check/v4-2023-04-27";
+// Set by the PageShim (mobile) entry. That host has no node:crypto and never
+// persists STATE, so the fingerprint gate has nothing to compare against there:
+// the plan is emitted on every run without a fingerprint STATE.
+const CHATGPT_ACCOUNT_PLAN_STATELESS_ENV = "PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS";
 
 /**
  * Fetch the accounts/check body the web app loads at startup and emit at most
@@ -2488,7 +2492,28 @@ export async function runAccountPlanStream(
 		stream: "account_plan",
 		message: "Fetching account plan",
 	});
-	const res = await deps.api.fetch(ACCOUNTS_CHECK_PATH);
+	let res: ChatGptFetchResult;
+	try {
+		res = await deps.api.fetch(ACCOUNTS_CHECK_PATH);
+	} catch (err) {
+		// The live client throws on 403 and on an exhausted retry budget. The
+		// plan is optional and runs before conversations, so those end this
+		// stream only; a 401 or a planned budget deferral still ends the run.
+		const forbidden =
+			err instanceof Error && /^apiFetch got 403 /.test(err.message);
+		if (!forbidden && !(err instanceof ChatGptRecoverableRetryExhaustedError))
+			throw err;
+		deps.emit({
+			type: "SKIP_RESULT",
+			stream: "account_plan",
+			reason: forbidden ? "not_available" : "http_error",
+			message: `accounts_check ${err.message}`,
+			recovery_hint: forbidden
+				? { action: "not_retriable", retryable: false }
+				: { action: "retry_by_runtime", retryable: true },
+		});
+		return;
+	}
 	if (res.status === 404 || res.status === 403) {
 		deps.emit({
 			type: "SKIP_RESULT",
@@ -2525,6 +2550,11 @@ export async function runAccountPlanStream(
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			diagnostics: { http_status: res.status },
 		});
+		return;
+	}
+	if (process.env[CHATGPT_ACCOUNT_PLAN_STATELESS_ENV] === "1") {
+		await deps.emitRecord("account_plan", record);
+		deps.emit(buildFullScanCoverageMessage("account_plan", 1));
 		return;
 	}
 	// Same gate as custom_instructions: a stable synthetic id and no run-clock
