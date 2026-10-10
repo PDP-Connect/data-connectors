@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.41",
+	"version": "0.2.42",
 	"display_name": "ChatGPT",
 	"brand": {
 		"icon": "icon.svg",
@@ -97,7 +97,7 @@
 			},
 			"primary_key": ["id"],
 			"cursor_field": "update_time",
-			"consent_time_field": "create_time",
+			"consent_time_field": "update_time",
 			"selection": {
 				"fields": true,
 				"resources": true
