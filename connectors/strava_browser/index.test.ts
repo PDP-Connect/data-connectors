@@ -122,6 +122,7 @@ async function withStrava<T>(
 	origin = ORIGIN,
 	gearBikes = GEAR_BIKES,
 	detailStatus: (activityId: string) => number = () => 200,
+	streamStatus: (activityId: string) => number = () => 200,
 ): Promise<T> {
 	const savedFetch = globalThis.fetch;
 	const savedLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
@@ -159,6 +160,8 @@ async function withStrava<T>(
 			});
 		}
 		if (/^\/activities\/\d+\/streams$/.test(url.pathname)) {
+			const status = streamStatus(url.pathname.split("/").at(-2) ?? "");
+			if (status !== 200) return json("", status);
 			return json(ACTIVITY_HEARTRATE);
 		}
 		if (/^\/athletes\/\d+\/gear\/bikes$/.test(url.pathname)) {
@@ -432,6 +435,57 @@ test("a failed activity detail stays queued while later details continue", async
 	assert.deepEqual(
 		(h.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
 		[firstPending],
+	);
+});
+
+test("an activity without a heart-rate stream (404) is saved with null heart rate, not re-queued", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
+	const manual = (initial.cursor() as { pending_detail_ids: string[] })
+		.pending_detail_ids[0];
+	const h = harness(BOTH, { activities: initial.cursor() });
+	await withStrava(
+		listFetcher(),
+		() => collectStravaBrowser(h.ctx, FAST),
+		ORIGIN,
+		GEAR_BIKES,
+		() => 200,
+		(id) => (id === manual ? 404 : 200),
+	);
+	assert.equal(h.of("activities").length, 5);
+	const record = h.of("activities").find((r) => r.id === manual);
+	assert.equal(record?.average_heartrate, null);
+	assert.equal(record?.max_heartrate, null);
+	assert.notEqual(record?.calories_kcal, undefined);
+	assert.deepEqual(
+		(h.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		[],
+	);
+	assert.equal(h.skips().length, 0);
+});
+
+test("a heart-rate stream error other than 404 keeps the activity queued", async () => {
+	const initial = harness(BOTH);
+	await withStrava(listFetcher(), () =>
+		collectStravaBrowser(initial.ctx, FAST),
+	);
+	const failing = (initial.cursor() as { pending_detail_ids: string[] })
+		.pending_detail_ids[0];
+	const h = harness(BOTH, { activities: initial.cursor() });
+	await withStrava(
+		listFetcher(),
+		() => collectStravaBrowser(h.ctx, FAST),
+		ORIGIN,
+		GEAR_BIKES,
+		() => 200,
+		(id) => (id === failing ? 400 : 200),
+	);
+	assert.equal(h.of("activities").length, 4);
+	assert.deepEqual(
+		(h.cursor() as { pending_detail_ids: string[] }).pending_detail_ids,
+		[failing],
 	);
 });
 
