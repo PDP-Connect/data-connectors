@@ -833,6 +833,56 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 	}
 });
 
+test("chatgpt: a windowed conversations-only run keeps list items that carry only update_time", {
+	timeout: 180_000,
+}, async () => {
+	const fx = await import("./fixtures/chatgpt.mjs");
+	const built = await buildPageshim({
+		connector: "chatgpt",
+		outfile: join(out, "chatgpt-update-time-only.js"),
+	});
+	const now = Date.now() / 1000;
+	fx.useConversationCount(4);
+	// The live list endpoints return update_time and no create_time.
+	const resolve = (raw) => {
+		const response = fx.resolveFixture(raw);
+		const path = new URL(raw).pathname;
+		if (
+			path === "/backend-api/conversations" ||
+			path === "/backend-api/conversations/search"
+		) {
+			const body = JSON.parse(response.body);
+			body.items = body.items.map(({ create_time: _create, ...item }, index) => ({
+				...item,
+				update_time: now - (index < 2 ? index + 1 : 40 + index) * 86400,
+			}));
+			response.body = JSON.stringify(body);
+		}
+		return response;
+	};
+	let r;
+	try {
+		r = await runHarness({
+			bundle: built.outfile,
+			fixtures: { ...fx.pageshimCase.fixtures, resolve },
+			scopes: thirtyDayScopes(["chatgpt.conversations"]),
+			resultStreaming: true,
+			resultSpoolDirectory: join(out, "chatgpt-update-time-only-stream"),
+		});
+	} finally {
+		fx.useConversationCount(2);
+	}
+	assertCleanRun(r);
+	assert.deepEqual(r.streamDone.errors, []);
+	const conversations = JSON.parse(
+		await readFile(r.streamScopeFiles["chatgpt.conversations"], "utf8"),
+	);
+	assert.deepEqual(
+		conversations.records.map((record) => record.id),
+		["conv-1", "conv-2"],
+	);
+});
+
 test("chatgpt: 30-day PageShim filters old details and keeps scanning mixed pages", {
 	timeout: 180_000,
 }, async () => {

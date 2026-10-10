@@ -9,7 +9,7 @@
 	},
 	"connector_key": "x-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "X (Browser Sign-In)",
 	"brand": {
 		"icon": "icon.svg",
