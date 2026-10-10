@@ -31,6 +31,7 @@ import {
 	makeTracer,
 	resolveBrowserLaunchSource,
 	resolveBrowserRuntimeVisibility,
+	runtimeOwnsBrowserPages,
 	selectBrowserPageForRun,
 	shouldCloseBrowserPageAfterRun,
 	shouldPreserveRemotePagesOnAcquire,
@@ -283,6 +284,7 @@ test("selectBrowserPageForRun ignores closed and blank pages", async () => {
 	const { context, newPageCalls } = makePageSelectionContext([
 		makeDiagnosticPage("https://chatgpt.com/", true),
 		makeDiagnosticPage("about:blank"),
+		makeDiagnosticPage("about:blank#owner-tab"),
 		makeDiagnosticPage("data:text/html,<html></html>"),
 		reusable,
 	]);
@@ -301,6 +303,10 @@ test("isReusableBrowserRunPage treats non-blank open pages as reusable", () => {
 	);
 	assert.equal(
 		isReusableBrowserRunPage(makeDiagnosticPage("about:blank")),
+		false,
+	);
+	assert.equal(
+		isReusableBrowserRunPage(makeDiagnosticPage("about:blank#owner-tab")),
 		false,
 	);
 	assert.equal(
@@ -562,6 +568,12 @@ test("shouldPreserveRemotePagesOnAcquire leaves tabs alone in a browser the runt
 		),
 		true,
 	);
+});
+
+test("runtimeOwnsBrowserPages is false only for a browser someone else launched", () => {
+	assert.equal(runtimeOwnsBrowserPages({ kind: "legacy_remote_cdp" }), false);
+	assert.equal(runtimeOwnsBrowserPages({ kind: "managed_neko" }), true);
+	assert.equal(runtimeOwnsBrowserPages({ kind: "isolated_local" }), true);
 });
 
 test("resolveBrowserLaunchSource falls back to isolated local launch only when no remote surface applies", () => {

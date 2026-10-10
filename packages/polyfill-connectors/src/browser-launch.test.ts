@@ -32,7 +32,9 @@ import {
 	runCdpAttemptWithRaceGuard,
 	STORAGE_STATE_RECORD_PATH_ENV,
 	shouldCleanRemoteCdpPageTargets,
+	startRemoteCdpHarRecording,
 	type UnhandledRejectionHost,
+	warnIfRecordingSharedRemoteBrowser,
 } from "./browser-launch.ts";
 
 const ENV_VARS = [
@@ -641,7 +643,9 @@ test("remote CDP attach records HAR and storage state, keeps existing tabs, and 
 	const sitePort =
 		typeof siteAddress === "object" && siteAddress ? siteAddress.port : 0;
 	const cdpPort = await freeLoopbackPort();
-	const remote = await chromium.launch({
+	// A persistent context is the browser's default context, the one a CDP
+	// attach hands to the connector, so the owner's tab shares it with ours.
+	const remote = await chromium.launchPersistentContext(join(dir, "profile"), {
 		args: [`--remote-debugging-port=${String(cdpPort)}`],
 	});
 	t.after(async () => {
@@ -651,10 +655,7 @@ test("remote CDP attach records HAR and storage state, keeps existing tabs, and 
 		});
 		await rm(dir, { recursive: true, force: true });
 	});
-	const [remoteContext] = remote.contexts();
-	const ownersTab = await (
-		remoteContext ?? (await remote.newContext())
-	).newPage();
+	const ownersTab = await remote.newPage();
 	await ownersTab.goto("about:blank#owners-tab");
 
 	const harPath = join(dir, "remote.har");
@@ -668,7 +669,8 @@ test("remote CDP attach records HAR and storage state, keeps existing tabs, and 
 	});
 	const page = await handle.context.newPage();
 	await page.goto(`http://127.0.0.1:${String(sitePort)}/fixture`);
-	await page.close();
+	// The runtime leaves its page open during a recording run and expects
+	// release() to close it, so the test does not close it either.
 	await handle.release();
 
 	assert.deepEqual(await handle.harRecordingOutcome?.(), {
@@ -695,8 +697,73 @@ test("remote CDP attach records HAR and storage state, keeps existing tabs, and 
 		storageState.cookies.some((cookie) => cookie.name === "remote_session"),
 		"storage state must contain the cookie set during the attached run",
 	);
-	assert.equal(remote.isConnected(), true, "remote browser must keep running");
+	assert.equal(
+		remote.browser()?.isConnected() ?? true,
+		true,
+		"remote browser must keep running",
+	);
 	assert.equal(ownersTab.isClosed(), false, "pre-existing tab must stay open");
+	assert.equal(
+		remote.pages().some((p) => p.url().endsWith("/fixture")),
+		false,
+		"release() must close the page the run created",
+	);
+});
+
+test("remote CDP HAR start failure disconnects without closing any page", async () => {
+	let disconnects = 0;
+	let failureHook = 0;
+	await assert.rejects(
+		startRemoteCdpHarRecording({
+			browser: {
+				close: () => {
+					disconnects += 1;
+					return Promise.resolve();
+				},
+			},
+			context: {
+				routeFromHAR: () => Promise.reject(new Error("har start refused")),
+			},
+			harPath: "/nonexistent/remote.har",
+			onFailure: () => {
+				failureHook += 1;
+			},
+			profileName: "remote_har_test",
+		}),
+		/har start refused/,
+	);
+	// The fake context exposes no pages and no close(), so the only way to
+	// pass is to disconnect the client and touch nothing else.
+	assert.equal(disconnects, 1);
+	assert.equal(failureHook, 1);
+});
+
+test("warnIfRecordingSharedRemoteBrowser warns once when other pages are open, not for blank ones", () => {
+	const writes: string[] = [];
+	const original = process.stderr.write.bind(process.stderr);
+	process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+		writes.push(String(chunk));
+		return true;
+	}) as typeof process.stderr.write;
+	const page = (url: string) => ({ isClosed: () => false, url: () => url });
+	try {
+		warnIfRecordingSharedRemoteBrowser(
+			{ pages: () => [page("about:blank")] } as never,
+			"p",
+		);
+		assert.equal(writes.length, 0);
+		warnIfRecordingSharedRemoteBrowser(
+			{
+				pages: () => [page("about:blank"), page("https://mail.example/")],
+			} as never,
+			"p",
+		);
+	} finally {
+		process.stderr.write = original;
+	}
+	assert.equal(writes.length, 1);
+	assert.match(writes[0] ?? "", /1 other open page/);
+	assert.match(writes[0] ?? "", /dedicated sandbox profile/);
 });
 
 test("resolvePageTargetWsUrl reads DevToolsActivePort then queries /json with the parsed port", async () => {

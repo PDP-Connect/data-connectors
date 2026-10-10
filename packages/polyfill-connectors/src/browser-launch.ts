@@ -36,6 +36,7 @@ import {
 	removeChromiumSingletonResidue,
 	withProfileLockMutex,
 } from "./profile-lock.ts";
+import { trackRunOwnedPages } from "./run-owned-pages.ts";
 import { isRunningInContainer } from "./runtime-environment.ts";
 
 const PROFILE_NAME_RE = /^[A-Za-z0-9_-]+$/;
@@ -108,6 +109,10 @@ export interface AcquireIsolatedBrowserOptions {
 	 * `routeFromHAR(path, { update: true })` instead, with the same embedded
 	 * content, and the HAR is exported when `release()` closes the attached
 	 * context (which only disconnects; the remote browser keeps running).
+	 * An attached context is shared with whatever else runs in that browser,
+	 * so the HAR and storage state include other tabs' traffic and cookies.
+	 * Remote recording is meant for a dedicated sandbox browser or profile
+	 * signed in to a test account; attach warns when other pages are open.
 	 *
 	 * `content: "embed"` (inline base64/text in the HAR JSON, chosen over
 	 * Playwright's zip-friendly `"attach"`) is a deliberate choice: a replay
@@ -827,7 +832,9 @@ export async function connectOverCdpWithRetry<TBrowser>({
  * Pages opened by the connector are NOT cleaned up automatically — the
  * connector should close any pages it opened in its own cleanup. This
  * matches `launchPersistentContext` semantics where the context outlives
- * individual pages.
+ * individual pages. The one exception is a recording run: `release()` closes
+ * the pages created through this context (and their popups) before it exports
+ * the HAR, and never touches pages it did not create.
  *
  * The attach itself is wrapped in `connectOverCdpWithRetry` to ride out the
  * transient session-closed race n.eko's transient targets trigger during
@@ -921,15 +928,24 @@ async function acquireRemoteCdpBrowser(
 			`[browser-launch] could not parse remote CDP URL ${cdpUrl}: ${err instanceof Error ? err.message : String(err)}\n`,
 		);
 	}
-	// `recordHar` is a context-creation option, and an attached browser hands
-	// us an existing context. `routeFromHAR` in update mode starts the same
-	// passive HAR recorder on an existing context without routing anything.
 	const { harRecording, storageStateRecording } = options;
+	const recording = Boolean(harRecording || storageStateRecording);
+	if (recording) {
+		warnIfRecordingSharedRemoteBrowser(context, profileName);
+	}
+	// Pages this client creates (and the popups they open) are the only pages
+	// release() may close. See `run-owned-pages.ts`.
+	const runPages = trackRunOwnedPages(context);
 	if (harRecording) {
-		await context.routeFromHAR(harRecording.path, {
-			update: true,
-			updateContent: "embed",
-			updateMode: "full",
+		await startRemoteCdpHarRecording({
+			browser,
+			context,
+			harPath: harRecording.path,
+			onFailure: () => {
+				runPages.dispose();
+				browser.off("disconnected", onDisconnected);
+			},
+			profileName,
 		});
 	}
 	return {
@@ -939,6 +955,18 @@ async function acquireRemoteCdpBrowser(
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
 			releaseRequested = true;
+			if (recording) {
+				// A recording run leaves its page open so storage state can still
+				// be read here (see `shouldCloseBrowserPageAfterRun`). On a local
+				// launch the context close below would close it; an attached
+				// context close only disconnects, so close the run's own pages
+				// (and nothing else) first. That also lets their in-flight
+				// requests finish before the HAR is exported.
+				// Close before dispose so a popup one of them opens while the close
+				// is pending is still adopted and closed.
+				await runPages.close();
+			}
+			runPages.dispose();
 			if (storageStateRecording) {
 				await writeStorageStateBestEffort(context, storageStateRecording.path);
 			}
@@ -977,6 +1005,71 @@ async function acquireRemoteCdpBrowser(
 				}
 			: {}),
 	};
+}
+
+/**
+ * Start HAR recording on an attached context. `recordHar` is a
+ * context-creation option and an attached browser hands us an existing
+ * context, so this uses `routeFromHAR` in update mode, which starts the same
+ * passive recorder without routing anything. If it fails, the CDP client is
+ * disconnected before the error propagates: no release handle exists yet, so
+ * nobody else would. Disconnecting never closes the remote browser's pages.
+ */
+export async function startRemoteCdpHarRecording({
+	browser,
+	context,
+	harPath,
+	onFailure,
+	profileName,
+}: {
+	browser: Pick<Browser, "close">;
+	context: Pick<BrowserContext, "routeFromHAR">;
+	harPath: string;
+	onFailure?: () => void;
+	profileName: string;
+}): Promise<void> {
+	try {
+		await context.routeFromHAR(harPath, {
+			update: true,
+			updateContent: "embed",
+			updateMode: "full",
+		});
+	} catch (err) {
+		process.stderr.write(
+			`[browser-launch] remote CDP HAR recording failed to start profile=${profileName}: ${err instanceof Error ? err.message : String(err)}; disconnecting\n`,
+		);
+		onFailure?.();
+		await browser.close().catch(() => undefined);
+		throw err;
+	}
+}
+
+/**
+ * HAR and storage state capture the whole attached context: every tab's
+ * traffic and every cookie, not only the connector's. Remote recording is
+ * meant for a dedicated sandbox browser or profile signed in to a test
+ * account. Warn (do not block) when the attached browser already has other
+ * pages open, since their traffic and cookies will land in the artifacts.
+ */
+export function warnIfRecordingSharedRemoteBrowser(
+	context: Pick<BrowserContext, "pages">,
+	profileName: string,
+): void {
+	let openPages = 0;
+	try {
+		openPages = context
+			.pages()
+			.filter(
+				(page) => !page.isClosed() && page.url() !== "about:blank",
+			).length;
+	} catch {
+		return;
+	}
+	if (openPages > 0) {
+		process.stderr.write(
+			`[browser-launch] warning: recording an attached browser with ${String(openPages)} other open page(s) profile=${profileName}; the HAR and storage state cover the whole browser context, including their traffic and cookies. Use a dedicated sandbox profile with a test account.\n`,
+		);
+	}
 }
 
 function redactCdpUrl(rawUrl: string): string {

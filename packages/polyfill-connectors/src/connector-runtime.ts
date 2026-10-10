@@ -91,6 +91,7 @@ import {
 	observationBasisOf,
 	setObservationSink,
 } from "./observation.ts";
+import { trackRunOwnedPages } from "./run-owned-pages.ts";
 import {
 	DEFAULT_RETRYABLE_PATTERN,
 	type EnsureSessionArgs,
@@ -1847,6 +1848,7 @@ async function runInBrowser(args: {
 	const { context: ctx, release } = await acquireBrowser(browser, name);
 	const visibility = resolveBrowserRuntimeVisibility(browser, name);
 	const browserSurface = resolveBrowserLaunchSource(visibility).kind;
+	const ownsBrowserPages = runtimeOwnsBrowserPages({ kind: browserSurface });
 	// Prevention layer (Layer A): register a SIGTERM/SIGINT handler that
 	// awaits release() before exit. Without this, Docker stop / controller
 	// restart kills this child process before the `finally` block below
@@ -1878,12 +1880,21 @@ async function runInBrowser(args: {
 	let page: Page | null = null;
 	let stopPagePolicy: (() => Promise<void>) | null = null;
 	let runSucceeded = false;
+	let runReusedAttachedPage = false;
 	let browserSurfaceAssistance: ReturnType<
 		typeof createBrowserSurfaceAssistanceLifecycle
 	> | null = null;
 	try {
+		const pagesBeforeRun = new Set(ctx.pages());
 		page = await selectBrowserPageForRun(ctx, browser);
-		stopPagePolicy = await installOwnedRunPagePolicy(ctx, page);
+		// A page the run reused (only a connector that declares page
+		// preservation reuses one, see `selectBrowserPageForRun`) is the run's
+		// page for popup tracking, but in an attached browser it is never
+		// closed: it predates this run and is kept for the next one.
+		runReusedAttachedPage = !ownsBrowserPages && pagesBeforeRun.has(page);
+		stopPagePolicy = await installOwnedRunPagePolicy(ctx, page, {
+			closeUnownedPages: ownsBrowserPages,
+		});
 		const surfaceAssistance = createBrowserSurfaceAssistanceLifecycle({
 			assist,
 			completeAssistance,
@@ -1922,7 +1933,9 @@ async function runInBrowser(args: {
 			},
 		});
 		await captureBrowserPage(baseCtx.capture, page, "runtime-run-page");
-		await closeBrowserContextPagesExcept(ctx, page);
+		if (ownsBrowserPages) {
+			await closeBrowserContextPagesExcept(ctx, page);
+		}
 		// Session establishment is the window the watchdog guards. A wedged
 		// renderer can hang a connector's ensureSession indefinitely with no
 		// INTERACTION ever emitted, so the controller's mid-wait detector cannot
@@ -1994,7 +2007,10 @@ async function runInBrowser(args: {
 		await stopPagePolicy?.();
 		await finalizeDiagnostics();
 		await browserSurfaceAssistance?.close();
-		if (shouldCloseBrowserPageAfterRun(browser, runSucceeded)) {
+		if (
+			!runReusedAttachedPage &&
+			shouldCloseBrowserPageAfterRun(browser, runSucceeded)
+		) {
 			await closeBrowserPage(page);
 		}
 		await release().catch((): undefined => undefined);
@@ -2015,7 +2031,9 @@ export function isReusableBrowserRunPage(page: ReusableBrowserPage): boolean {
 		return false;
 	}
 	const url = page.url();
-	return Boolean(url) && url !== "about:blank" && !url.startsWith("data:");
+	// An `about:` page (including `about:blank#anything`) or a `data:` page
+	// carries no provider session, so it is never a preserved run page.
+	return Boolean(url) && !url.startsWith("about:") && !url.startsWith("data:");
 }
 
 export async function selectBrowserPageForRun(
@@ -2025,6 +2043,15 @@ export async function selectBrowserPageForRun(
 		"preservePageOnFailure" | "preservePageOnSuccess"
 	>,
 ): Promise<Page> {
+	// A connector that declares page preservation keeps its run page open
+	// between runs because its authenticated session lives in that live page
+	// (ChatGPT, see `browser-surface-policy.ts`), so the next run must pick it
+	// up instead of opening another one. This applies to an attached browser
+	// (`PDPP_<NAME>_REMOTE_CDP_URL`) too: pointing a preserve-page connector at
+	// a browser hands that browser's session pages to the connector, which is
+	// consent to reuse them. Without reuse every run would open a new page and
+	// the preserved ones would pile up. Connectors without preservation always
+	// start on a page they created, so they never touch an existing tab.
 	if (browser.preservePageOnSuccess || browser.preservePageOnFailure) {
 		for (const page of context.pages()) {
 			if (isReusableBrowserRunPage(page)) {
@@ -2036,31 +2063,39 @@ export async function selectBrowserPageForRun(
 }
 
 /**
- * Reserve context.newPage for the runtime's next run. Pages opened by the site
- * remain visible with their native opener and are closed when this run ends.
+ * Reserve context.newPage for the runtime's next run. Popups opened by the run
+ * page (and popups of those popups) stay visible with their native opener and
+ * are closed when this run ends. Ownership follows the page's `popup` event,
+ * never membership in the context, so a tab someone else opens in the same
+ * browser during the run is left alone.
+ *
+ * `closeUnownedPages` additionally closes every other page in the context at
+ * teardown. Only a browser the runtime launched may do that; an attached
+ * browser (`PDPP_<NAME>_REMOTE_CDP_URL`) belongs to someone else, see
+ * `runtimeOwnsBrowserPages`.
  */
 export async function installOwnedRunPagePolicy(
 	context: BrowserContext,
 	ownedPage: Page,
+	{ closeUnownedPages = true }: { closeUnownedPages?: boolean } = {},
 ): Promise<() => Promise<void>> {
-	const originalNewPage = context.newPage.bind(context);
+	const originalNewPage = context.newPage;
 	context.newPage = () =>
 		Promise.reject(
 			new Error("additional_browser_page_forbidden: use the owned run page"),
 		);
-	const sitePopups = new Set<Page>();
-	const onPage = (openedPage: Page): void => {
-		if (openedPage !== ownedPage) {
-			sitePopups.add(openedPage);
-		}
-	};
-	context.on("page", onPage);
+	const runPages = trackRunOwnedPages();
+	runPages.adopt(ownedPage);
 	return async () => {
-		context.off("page", onPage);
+		// Close before dispose: popup listeners stay attached while the closes
+		// are pending, so a popup an owned page opens meanwhile is adopted and
+		// closed by `close()`'s next pass instead of escaping.
+		await runPages.close({ except: ownedPage });
+		runPages.dispose();
 		context.newPage = originalNewPage;
-		await Promise.all([...sitePopups].map((popup) => closeBrowserPage(popup)));
-		await closeBrowserContextPagesExcept(context, ownedPage);
-		sitePopups.clear();
+		if (closeUnownedPages) {
+			await closeBrowserContextPagesExcept(context, ownedPage);
+		}
 	};
 }
 
@@ -2633,6 +2668,19 @@ export function resolveBrowserLaunchSource(
 }
 
 /**
+ * Whether the runtime may close pages it did not create. True for a browser
+ * the runtime launched and for a managed n.eko surface leased to this run.
+ * False for a `PDPP_<NAME>_REMOTE_CDP_URL` attach: that browser belongs to
+ * someone else, so the run only ever closes its own page and the popups that
+ * page opened (see `installOwnedRunPagePolicy`).
+ */
+export function runtimeOwnsBrowserPages(
+	launchSource: Pick<BrowserLaunchSource, "kind">,
+): boolean {
+	return launchSource.kind !== "legacy_remote_cdp";
+}
+
+/**
  * Whether to skip closing the remote browser's existing tabs before attach.
  * A `PDPP_<NAME>_REMOTE_CDP_URL` browser was launched by someone else (an
  * operator's own Chrome, a recording sandbox), so its tabs are not ours to
@@ -2647,7 +2695,7 @@ export function shouldPreserveRemotePagesOnAcquire(
 	launchSource: BrowserLaunchSource,
 ): boolean {
 	return (
-		launchSource.kind === "legacy_remote_cdp" ||
+		!runtimeOwnsBrowserPages(launchSource) ||
 		Boolean(browser.preservePageOnSuccess || browser.preservePageOnFailure)
 	);
 }

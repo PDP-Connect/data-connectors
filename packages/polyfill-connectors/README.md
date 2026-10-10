@@ -10,7 +10,7 @@ node --import tsx bin/scenario-record.ts oura --out runs/oura/scenario.json
 node --import tsx bin/scenario-verify.ts oura runs/oura/scenario.json
 ```
 
-Recording contacts the provider with your configured credentials and captures two runs by default. Add `--runs 1` for one run, `--streams <names>` to select streams, or `--record-har` to capture a local browser context's HAR and storage state. Browser recording requires the package's browser installation. Remote CDP sessions do not support HAR recording.
+Recording contacts the provider with your configured credentials and captures two runs by default. Add `--runs 1` for one run, `--streams <names>` to select streams, or `--record-har` to capture a local browser context's HAR and storage state. Browser recording requires the package's browser installation. With `PDPP_<NAME>_REMOTE_CDP_URL` set, `--record-har` records the attached browser instead. That recording covers the whole attached browser context, including traffic and cookies from tabs the connector did not open, so point it at a dedicated sandbox browser or profile signed in to a test account.
 
 Replay uses the current connector source. Add `--require-capture-source` to require the source digest recorded at capture time. A mismatch in replayed output or invalid scenario exits nonzero. The printed `recorded_replay` claim has separate eligibility checks: the isolation-evidence claim remains withheld exactly as in [pdpp #274](https://github.com/PDP-Connect/pdpp/pull/274). Passing replay is not certification that the isolation boundary is closed. Browser replay also reports its driver-specific evidence limitations.
 
