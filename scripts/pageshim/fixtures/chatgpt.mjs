@@ -1,6 +1,15 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { readFileSync } from "node:fs";
+
+// The connector's own accounts/check fixture: a real response shape with ids
+// and dates replaced by placeholders.
+const accountsCheck = readFileSync(
+	new URL("../../../connectors/chatgpt/__fixtures__/accounts-check.json", import.meta.url),
+	"utf8",
+);
+
 const conversation = (id, title, updateTime, currentNode) => ({
 	id,
 	title,
@@ -69,6 +78,7 @@ const json = (value) => ({
 let loggedIn = true;
 let conversationCount = 2;
 let emptySession = false;
+let accountsCheckStatus = 200;
 export const setLoggedIn = (value) => {
 	loggedIn = value;
 };
@@ -78,10 +88,15 @@ export const useConversationCount = (value) => {
 export const setEmptySession = (value) => {
 	emptySession = value;
 };
+export const setAccountsCheckStatus = (value) => {
+	accountsCheckStatus = value;
+};
+export const requestedPaths = [];
 
 export function resolveFixture(raw) {
 	const url = new URL(raw);
 	const path = url.pathname;
+	requestedPaths.push(path);
 	if (!loggedIn && path !== "/auth/login") {
 		return { status: 401, contentType: "application/json", body: "{}" };
 	}
@@ -108,6 +123,15 @@ export function resolveFixture(raw) {
 				},
 			],
 		});
+	}
+	if (path === "/backend-api/accounts/check/v4-2023-04-27") {
+		return accountsCheckStatus === 200
+			? {
+				status: 200,
+				contentType: "application/json; charset=utf-8",
+				body: accountsCheck,
+			}
+			: { status: accountsCheckStatus, contentType: "application/json", body: "{}" };
 	}
 	if (
 		path === "/backend-api/conversations" ||
@@ -157,11 +181,11 @@ export const pageshimCase = {
 	exportSummary: {
 		count: 2,
 		label: "conversations",
-		details: { conversations: 2, messages: 2, memories: 0 },
+		details: { conversations: 2, messages: 2, memories: 0, account_plan: 0 },
 	},
 	emptyExportSummary: {
 		count: 0,
 		label: "conversations",
-		details: { conversations: 0, messages: 0, memories: 0 },
+		details: { conversations: 0, messages: 0, memories: 0, account_plan: 0 },
 	},
 };
