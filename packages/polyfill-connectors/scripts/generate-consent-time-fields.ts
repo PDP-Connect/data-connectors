@@ -47,6 +47,7 @@ const targetPath = process.argv[2]
 interface StreamLike {
 	consent_time_field?: unknown;
 	name?: unknown;
+	primary_key?: string[];
 	schema?: {
 		properties?: Record<string, { format?: unknown; type?: unknown }>;
 	};
@@ -93,12 +94,26 @@ const connectors = readPolyfillManifests()
 			.filter((stream) => typeof stream.name === "string")
 			.map(
 				(stream) =>
-					[stream.name as string, consentTimeField(connector, stream)] as const,
+					[
+						stream.name as string,
+						consentTimeField(connector, stream),
+						stream.primary_key ?? ["id"],
+					] as const,
 			)
 			.sort(([a], [b]) => a.localeCompare(b));
 		return [connector, entries] as const;
 	})
 	.sort(([a], [b]) => a.localeCompare(b));
+
+const primaryKeyBody = connectors
+	.map(([connector, entries]) => {
+		const lines = entries.map(
+			([stream, , fields]) =>
+				`\t\t${key(stream)}: ${`[${fields.map((field) => JSON.stringify(field)).join(", ")}]`},`,
+		);
+		return `\t${key(connector)}: {\n${lines.join("\n")}\n\t},`;
+	})
+	.join("\n");
 
 const body = connectors
 	.map(([connector, entries]) => {
@@ -117,7 +132,7 @@ writeFileSync(
 
 // GENERATED FILE — do not hand-edit. Produced by
 // scripts/generate-consent-time-fields.ts from every shipped connector
-// manifest's per-stream consent_time_field and its declared format. A stream
+// manifest's per-stream consent_time_field, format, and primary_key. A stream
 // maps to null when the runtime cannot compare bounds with its consent field
 // (absent, a string with no format, an integer, or a date field not yet
 // enabled), so a bounded run reports scope_not_supported for it.
@@ -130,6 +145,13 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 ${body}
+};
+
+/** Declared primary-key field order for RECORD delete envelopes (§5.2). */
+export const PRIMARY_KEYS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+${primaryKeyBody}
 };
 `,
 );

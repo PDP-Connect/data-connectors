@@ -57,8 +57,9 @@ the runtime behavior in these cases.
 
 The connector runtime reads the first input line as `START`. It checks only
 `type` and a non-empty `scope.streams` array, so it ignores `START` members it
-does not read, including `now`. It forwards prior state to the connector. It
-filters records by resource key and time range. It validates records when the
+does not read, including `now`. It rejects any second `START` and forwards prior
+state to the connector. It filters records by resource key and time range. It
+validates records when the
 connector supplies a validator. It emits `RECORD`, `STATE`, `SKIP_RESULT`,
 `PROGRESS`, and final `DONE` messages.
 
@@ -96,11 +97,13 @@ against Section 3.
 | Runtime clock | No runtime sends `START.now`, and no connector reads it. |
 | Collection time in record data | Seven connectors (`amazon`, `chase`, `heb`, `jellyfin`, `reddit`, `slack`, `usaa`) declare a `fetched_at` field in record data. A separate change removes them. |
 | Manifest validation before spawn | Placement checks bindings and protocol capabilities, but no local validator checks the full Collection Profile manifest. |
-| Exactly one `START` | The first line is checked. A later `START` is not rejected by the connector-side runtime. |
+| Exactly one `START` | The first line is checked. A later `START` fails the connector with a failed `DONE`. If `DONE` is already queued, the runtime reports the violation on stderr and exits with failure without emitting another terminal message. |
 | Scope stream enforcement | A non-empty scope is required. `emitRecord()` does not reject an undeclared stream or project `fields`. The parent runtime is expected to enforce both before durable write. |
 | Record envelope | The parent runtime is expected to check key, data, operation, and ISO 8601 `emitted_at`. The ingest path remains responsible for schema and record-identity checks. |
-| Delete records | `emitRecord()` builds a tombstone from `data.id` alone: `key` is `String(data.id)` and `data` is `{ id }`. That meets the profile only for a stream whose primary key is the single field `id`. |
+| Delete records | `emitRecord()` builds tombstone data from the manifest primary-key fields and preserves their declared order in `key`. It rejects missing key values. Unknown connector names retain the legacy single-field `id` default. |
 | Consent time | Time-bounded runs reject absent or unparseable values. Three Steam streams (`owned_games`, `recently_played_games`, `friends`) declare integer Unix-time consent fields instead of ISO 8601 strings. |
+| Pending interaction | Runtime-owned protocol writers stop while a response is pending. Blocked writes reject with a connector-side error before stdout. For unresolved ambiguity A1, failed `DONE` carrying an error remains permitted. |
+| Diagnostic text | Browser-surface and withheld-checkpoint details go to standard error, outside `PROGRESS`. |
 | Interaction timeout | The package interaction handler accepts `timeout`. The connector-protocol type declares `error` instead. |
 | State durability | The connector-side runtime emits state. The parent runtime owns durable writes and commit decisions. |
 | Recovery-hint vocabulary | The package types admit arbitrary action strings. They do not enforce the portable closed set. |
