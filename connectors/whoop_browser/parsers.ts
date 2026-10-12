@@ -167,28 +167,41 @@ export interface Cycle {
 	element: Obj;
 }
 
-/** How many records a nested list holds: none when absent, one unreadable when it is not a list. */
-const listSize = (value: unknown): number =>
-	value === null || value === undefined
-		? 0
-		: Array.isArray(value)
-			? value.length
-			: 1;
+/** A record's start, where it parses. */
+export type Start = string | undefined;
 
-/** What an unreadable element costs each stream: the records recordsFor would have built from it. */
-function nested(element: unknown): Record<Stream, number> {
+/** The start of each record a nested list holds, or its cycle's where its own does not parse: none when absent, one when it is not a list. */
+const listStarts = (value: unknown, cycleStart: Start): Start[] =>
+	value === null || value === undefined
+		? []
+		: Array.isArray(value)
+			? value.map((item) => {
+					const [start] = isObj(item) ? interval(item.during) : [DRIFT];
+					return typeof start === "string" ? start : cycleStart;
+				})
+			: [cycleStart];
+
+/**
+ * What an unreadable element costs each stream: the start of each record recordsFor would have
+ * built from it, where that parses, so a record is counted only within its stream's grant.
+ */
+function nested(element: unknown): Record<Stream, Start[]> {
 	const source = isObj(element) ? element : {};
+	const [cycleStart] = isObj(source.cycle)
+		? interval(source.cycle.during)
+		: [DRIFT];
+	const at = typeof cycleStart === "string" ? cycleStart : undefined;
 	const { recovery } = source;
 	return {
-		cycles: 1,
+		cycles: [at],
 		recoveries:
 			recovery === null || recovery === undefined
-				? 0
+				? []
 				: isObj(recovery) && !hasMeasure(recoveryMetrics(recovery))
-					? 0
-					: 1,
-		sleeps: listSize(source.sleeps),
-		workouts: listSize(source.workouts),
+					? []
+					: [at],
+		sleeps: listStarts(source.sleeps, at),
+		workouts: listStarts(source.workouts, at),
 	};
 }
 
@@ -197,7 +210,7 @@ export function readElement(
 	element: unknown,
 ):
 	| { kind: "cycle"; cycle: Cycle }
-	| { kind: "unreadable"; lost: Record<Stream, number> } {
+	| { kind: "unreadable"; lost: Record<Stream, Start[]> } {
 	const cycle = isObj(element) && isObj(element.cycle) ? element.cycle : null;
 	const id = cycle ? positiveInteger(cycle.id) : null;
 	const [startAt] = cycle ? interval(cycle.during) : [DRIFT];

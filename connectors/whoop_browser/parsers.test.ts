@@ -16,6 +16,7 @@ import {
 	parseRange,
 	readElement,
 	recordsFor,
+	type Start,
 	toInstant,
 	toOffset,
 } from "./parsers.ts";
@@ -73,13 +74,20 @@ function cycleOf(element: unknown): Cycle {
 	}
 	return result.cycle;
 }
-function lostBy(element: unknown): Record<Stream, number> {
+function startsLostBy(element: unknown): Record<Stream, Start[]> {
 	const result = readElement(element);
 	if (result.kind !== "unreadable") {
 		assert.fail(`element read as cycle ${result.cycle.id}`);
 	}
 	return result.lost;
 }
+const lostBy = (element: unknown): Record<Stream, number> =>
+	Object.fromEntries(
+		Object.entries(startsLostBy(element)).map(([stream, starts]) => [
+			stream,
+			starts.length,
+		]),
+	) as Record<Stream, number>;
 const builtFor = (stream: Stream, element: unknown): Built[] =>
 	recordsFor(stream, cycleOf(element));
 const kinds = (list: Built[]): string[] => list.map(({ kind }) => kind);
@@ -501,6 +509,33 @@ test("readElement gives a cycle its id, start, last update and element", () => {
 			Number.NEGATIVE_INFINITY,
 		);
 	}
+});
+
+test("readElement: an unreadable element gives the start of each record it holds where that parses, else its cycle's", () => {
+	const startsOf = (element: unknown, stream: Stream): Start[] =>
+		recordsFor(stream, cycleOf(element)).map((built) =>
+			built.kind === "record" ? String(built.record.start_at) : undefined,
+		);
+	const element = scored();
+	assert.deepEqual(
+		startsLostBy(withPart(element, "cycle", { id: 0 })),
+		{
+			cycles: startsOf(element, "cycles"),
+			recoveries: startsOf(element, "recoveries"),
+			sleeps: startsOf(element, "sleeps"),
+			workouts: startsOf(element, "workouts"),
+		},
+		"each as recordsFor builds it",
+	);
+	const [main] = startsOf(element, "sleeps");
+	const broken = merged(withPart(element, "cycle", { id: 0 }), {
+		sleeps: [{ during: "soon" }],
+	});
+	assert.deepEqual(startsLostBy(broken).sleeps, startsOf(element, "cycles"));
+	assert.notEqual(main, undefined);
+	assert.deepEqual(startsLostBy(merged(element, { cycle: null })).cycles, [
+		undefined,
+	]);
 });
 
 test("readElement: no cycle, a bad id or an unreadable start makes the element unreadable, with what it held", () => {

@@ -974,6 +974,57 @@ test("collect: two different unreadable elements are each counted, though one wi
 	assert.deepEqual(progressOf(h), [{ stream: "cycles", count: 2 }]);
 });
 
+test("collect: an element it cannot read is counted only for the records inside each stream's grant", async () => {
+	const since = Date.parse("2026-09-14T00:00:00.000Z");
+	const began = since - DAY;
+	const fake = fakeWhoop(
+		serve([
+			holding(
+				cycleAt(1_000_000_813, began, {
+					id: "x",
+					during: span(began, 30 * 60),
+				}),
+				{
+					sleeps: [sleepAt(960, began)],
+					workouts: [workoutAt(961, since + HOUR)],
+				},
+			),
+			cycleAt(1_000_000_814, since + 6 * HOUR),
+		]),
+	);
+	const h = await collect(fake, { ranges: everyStream({ since: iso(since) }) });
+	// The cycle and its sleep start before the grant; the workout inside it.
+	assert.deepEqual(progressOf(h), [{ stream: "workouts", count: 1 }]);
+	assert.deepEqual(idsOf(h, "cycles"), ["1000000814"]);
+});
+
+test("collect: a step back that meets a window of cycles it cannot read stops there, counts what they hold inside the grant, and the run goes on", async () => {
+	const since = Date.parse("2026-09-14T00:00:00.000Z");
+	const began = Date.parse("2026-09-10T00:00:00.000Z");
+	const fake = fakeWhoop(
+		serve([
+			// Long before, and never read.
+			cycleAt(1_000_000_811, Date.parse("2026-08-01T00:00:00.000Z")),
+			// The cycle under way, its id unreadable.
+			holding(
+				cycleAt(1_000_000_812, began, {
+					id: "x",
+					during: `['${iso(began)}',)`,
+				}),
+				{ workouts: [workoutAt(959, since + HOUR)] },
+			),
+		]),
+	);
+	const h = await collect(fake, {
+		ranges: { workouts: { since: iso(since) } },
+		streams: ["workouts"],
+	});
+	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+	assert.deepEqual(progressOf(h), [{ stream: "workouts", count: 1 }]);
+	assert.equal(cyclesRequests(fake).length, 2, "the walk's window, one back");
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, NOW) });
+});
+
 test("collect: a window whose every cycle is unreadable stops the walk there, every stream skipped and no cursor moved", async () => {
 	// WHOOP changing the shape of every cycle (here, ids sent as strings) must not move the cursor
 	// past history the connector could not read.

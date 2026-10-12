@@ -24,6 +24,7 @@ import {
 	cycleElements,
 	readElement,
 	recordsFor,
+	type Start,
 } from "./parsers.ts";
 import { STREAMS, type Stream, validateRecord } from "./schemas.ts";
 
@@ -554,10 +555,23 @@ export const cyclesPath = (
 	`/core-details-bff/v0/cycles/details?apiVersion=7&id=${encodeURIComponent(userId)}&startTime=${iso(start)}&endTime=${iso(end)}&limit=${limit}`;
 
 /** An element that did not parse, keyed so one returned by two padded windows is counted once. */
-type Lost = { key: string; lost: Record<Stream, number> };
+type Lost = { key: string; lost: Record<Stream, Start[]> };
+/** `unreadable`: the answer held cycles, and not one whose id and start parse. */
 type Window =
-	| { ok: true; end: number; cycles: Cycle[]; lost: Lost[] }
+	| {
+			ok: true;
+			end: number;
+			cycles: Cycle[];
+			lost: Lost[];
+			unreadable: boolean;
+	  }
 	| Failure;
+/** Every cycle in a window unreadable: WHOOP changed their shape. */
+const SHAPELESS: Failure = {
+	ok: false,
+	reason: "source_unreadable",
+	message: "WHOOP's cycles were not in the shape expected.",
+};
 
 /**
  * The cycles that start in [start, end), each once, oldest first. The request reaches a day past
@@ -607,18 +621,10 @@ async function readWindow(
 			const seen = kept.get(cycle.id);
 			if (!seen || cycle.updatedMs >= seen.updatedMs) kept.set(cycle.id, cycle);
 		}
-		// Not one cycle whose id and start parse: WHOOP changed their shape, so the walk stops here
-		// rather than move the cursor past history it could not read.
-		if (elements.length > 0 && lost.length === elements.length) {
-			return {
-				ok: false,
-				reason: "source_unreadable",
-				message: "WHOOP's cycles were not in the shape expected.",
-			};
-		}
 		if (elements.length < limit || kept.size === 0) {
 			const cycles = [...kept.values()].sort((a, b) => a.startMs - b.startMs);
-			return { ok: true, end: stop, cycles, lost };
+			const unreadable = elements.length > 0 && lost.length === elements.length;
+			return { ok: true, end: stop, cycles, lost, unreadable };
 		}
 		if (stop - start <= DAY_MS) {
 			return {
@@ -726,28 +732,37 @@ export async function collectWhoopBrowser(
 		const lostSeen = new Set<string>();
 		/** No element went unread: one that did may be the cycle a hint would name. */
 		let clean = true;
-		/** One paced window read, counted toward the run's windows. */
+		/** One paced window read. */
 		const read = async (from: number, to: number): Promise<Window> => {
 			// Before each request, never after the last.
 			await p.sleep(p.requestDelayMs);
-			const window = await readWindow(ctx.page, facts.userId, from, to, p);
-			if (!window.ok) return window;
+			return readWindow(ctx.page, facts.userId, from, to, p);
+		};
+		/** A window read and kept, counted toward the run's windows, with what it could not read. */
+		const tally = (window: Window & { ok: true }): void => {
 			windows += 1;
 			if (window.lost.length > 0) clean = false;
 			for (const { key, lost } of window.lost) {
 				if (lostSeen.has(key)) continue;
 				lostSeen.add(key);
-				for (const stream of streams) unreadable[stream] += lost[stream];
+				for (const stream of streams) {
+					const range = ranges.get(stream);
+					// As for a record that does not build: outside its stream's grant, not counted.
+					unreadable[stream] += lost[stream].filter(
+						(startAt) => startAt === undefined || inRange(startAt, range),
+					).length;
+				}
 			}
-			return window;
 		};
 		/**
 		 * The latest cycle that starts before `before`, and the instant from which every cycle start
 		 * up to `before` is known. With the strap off, a cycle stays under way for as long as it is
 		 * off: when an earlier walk gave its start (`began`) the one window from there is read, and
 		 * otherwise, or when that window holds none, the walk steps back a window at a time to the
-		 * account's start. Not held to maxWindowsPerRun, since the account's start bounds it and a
-		 * run cut short in it would begin it again next time.
+		 * account's start. A window whose cycles are all unreadable ends it: with cycles that do not
+		 * overlap, the latest of them is the one under way, and what it holds inside a grant is
+		 * counted. Not held to maxWindowsPerRun, since the account's start bounds it and a run cut
+		 * short in it would begin it again next time.
 		 */
 		const latestBefore = async (
 			before: number,
@@ -767,12 +782,19 @@ export async function collectWhoopBrowser(
 				: Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
 			while (to > historyMs) {
 				let latest: Cycle | null = null;
+				let lostLast = false;
 				for (let from = back; from < to; ) {
 					const window = await read(from, to);
 					if (!window.ok) return window;
-					latest = window.cycles.at(-1) ?? latest;
+					tally(window);
+					if (window.unreadable) lostLast = true;
+					else if (window.cycles.length > 0) {
+						latest = window.cycles.at(-1) ?? latest;
+						lostLast = false;
+					}
 					from = window.end;
 				}
+				if (lostLast) return { ok: true, cycle: null, known: before };
 				if (latest) return { ok: true, cycle: latest, known: latest.startMs };
 				to = back;
 				back = Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
@@ -803,6 +825,13 @@ export async function collectWhoopBrowser(
 				failure = window;
 				break;
 			}
+			// Not one cycle whose id and start parse: the walk stops here rather than move the
+			// cursor past history it could not read.
+			if (window.unreadable) {
+				failure = SHAPELESS;
+				break;
+			}
+			tally(window);
 			const cycles = window.cycles;
 			covered ||= cycles.some((cycle) => cycle.startMs <= delivery);
 			if (!covered && window.end > delivery) {
