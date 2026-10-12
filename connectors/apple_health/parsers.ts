@@ -9,6 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { parseIsoInstant } from "../../packages/polyfill-connectors/src/time-range.ts";
 import { isListedHealthType } from "./areas.ts";
 import {
 	MAX_TYPE_LENGTH,
@@ -598,10 +599,14 @@ export function isoDate(v: string | undefined): string | null {
 	}
 	// Apple Health dates look like "2024-06-05 13:45:22 -0700"
 	const d = new Date(v);
-	if (!Number.isNaN(d.getTime())) {
-		return d.toISOString();
+	if (Number.isNaN(d.getTime())) {
+		return null;
 	}
-	return null;
+	// A year past 9999 serialises with a sign and six digits, which is no
+	// RFC 3339 instant: the runtime's window would drop the record, and it
+	// would sort before every real date.
+	const iso = d.toISOString();
+	return parseIsoInstant(iso) === null ? null : iso;
 }
 
 /**

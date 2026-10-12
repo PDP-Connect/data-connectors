@@ -39,7 +39,10 @@ import {
 	runConnector,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
+import {
+	isOutsideTimeRange,
+	parseIsoInstant,
+} from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	HEALTH_AREA_STREAMS,
 	healthAreaOf,
@@ -1033,16 +1036,18 @@ function fieldsUnavailable(
 }
 
 /**
- * A requested window bound as the UTC date-time the receipt's schema
- * requires. The runtime refuses a stream whose bound is not a date-time with
- * an offset before collection begins, so only those reach here.
+ * A requested window bound as the runtime applied it, in UTC, with every
+ * fractional digit it was given (three at least). The runtime refuses a
+ * stream whose bound is not a date-time with an offset before collection
+ * begins, so only those reach here.
  */
 function requestedBound(value: string | undefined): string | null {
-	if (!value) {
+	const instant = value ? parseIsoInstant(value) : null;
+	if (instant === null) {
 		return null;
 	}
-	const instant = Date.parse(value);
-	return Number.isNaN(instant) ? null : new Date(instant).toISOString();
+	const whole = new Date(instant.second).toISOString().slice(0, 19);
+	return `${whole}.${instant.fraction.padEnd(3, "0")}Z`;
 }
 
 interface StreamOutcome {

@@ -911,6 +911,38 @@ test("the gap summary is one plain sentence, in the singular where it counts one
 	});
 });
 
+test("a receipt echoes each bound as applied, and a date past year 9999 is no reading", async () => {
+	// The bound keeps every fractional digit the runtime compared, in UTC. A
+	// start in year 10000 is no RFC 3339 instant, so its record is unreadable,
+	// as is any whose date cannot be read; the runtime dropped it unseen
+	// before, and it sorted before every real date.
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<HealthData locale="en_US">
+ <ExportDate value="2026-09-01 12:00:00 -0500"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 07:00:00 +0000" endDate="2024-06-05 07:05:00 +0000" value="1"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 14:00:00 +0000" endDate="2024-06-05 14:05:00 +0000" value="2"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="10000-01-01 00:00:00 +0000" endDate="10000-01-01 00:05:00 +0000" value="3"/>
+</HealthData>
+`;
+	await withImportDir({ "export.xml": xml }, async (dir) => {
+		const result = await run(dir, {
+			timeRange: {
+				since: "2024-06-05T12:00:00.0000001Z",
+				until: "2024-06-06T00:30:00+09:30",
+			},
+		});
+		const receipt = receiptOf(result, "activity");
+		assert.equal(
+			receipt?.window_requested_from,
+			"2024-06-05T12:00:00.0000001Z",
+		);
+		assert.equal(receipt?.window_requested_to, "2024-06-05T15:00:00.000Z");
+		assert.equal(receipt?.record_count, 1);
+		assert.equal(receipt?.records_skipped_unreadable, 1);
+		assert.equal(receipt?.reason, "records_unreadable");
+	});
+});
+
 test("an export that ends early is never reported as read completely", async () => {
 	// Its receipts say collection_interrupted; the owner's line must agree.
 	const cut = EXPORT_XML.slice(0, EXPORT_XML.indexOf("</HealthData>"));

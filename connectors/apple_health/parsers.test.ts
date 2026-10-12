@@ -440,6 +440,15 @@ test("buildHealthRecord: missing startDate → null (skip), tallied as a gap not
 	assert.equal(gaps.recordsMissingStartDate, 1);
 });
 
+test("isoDate: only an RFC 3339 instant with a four-digit year is a date", () => {
+	assert.equal(
+		isoDate("2024-06-05 13:45:22 -0700"),
+		"2024-06-05T20:45:22.000Z",
+	);
+	assert.equal(isoDate("10000-01-01 00:00:00 +0000"), null);
+	assert.equal(isoDate("not a date"), null);
+});
+
 test("buildHealthRecord: same key fields → same id (dedup stability)", () => {
 	const a = buildHealthRecord(
 		el("Record", STEP_COUNT_RECORD),
