@@ -19,6 +19,7 @@ import {
 	type RecordData,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	type Built,
 	type DayStream,
@@ -642,15 +643,13 @@ export function grantDays(stream: Stream, range: Range | undefined): DayRange {
 	};
 }
 
-/** Whether a record's start lies in its stream's grant, to the instant: the runtime's own filter compares days. */
+/**
+ * Whether a record's start lies in its stream's grant, by the runtime's own comparison, every
+ * fractional digit included: the connector emits nothing the runtime would withhold, so no record
+ * at or after `until` holds back the run's checkpoints, and drops nothing the runtime would keep.
+ */
 export function inRange(startAt: unknown, range: Range | undefined): boolean {
-	const start = instant(startAt);
-	if (start === null) return false;
-	const since = instant(range?.since);
-	const until = instant(range?.until);
-	return (
-		(since === null || start >= since) && (until === null || start < until)
-	);
+	return !isOutsideTimeRange(range ?? {}, startAt);
 }
 
 /** Pure: the days this run reads, the `overlap` days before the cursor among them, and the cursor it starts from. */

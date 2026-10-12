@@ -24,6 +24,7 @@ import {
 	classify,
 	type DayCursor,
 	ensureSession,
+	inRange,
 	LOGIN_URL,
 	MAX_RETRY_DAYS,
 	makeEnsureSession,
@@ -912,6 +913,22 @@ test("planDays never reads before the grant's start, though the overlap reaches 
 			"a grant starting before the cursor restarts nothing",
 		);
 	}
+});
+
+test("inRange holds a start to its grant as the runtime does, every fractional digit included", () => {
+	const at = "2026-09-15T19:15:00.000Z";
+	assert.equal(inRange(at, undefined), true);
+	assert.equal(
+		inRange(at, { since: at, until: "2026-09-15T19:15:00.001Z" }),
+		true,
+	);
+	// Past the millisecond Date.parse keeps: the runtime keeps this start, and so must the connector.
+	assert.equal(inRange(at, { until: "2026-09-15T19:15:00.0005Z" }), true);
+	assert.equal(inRange(at, { since: "2026-09-15T19:15:00.0005Z" }), false);
+	assert.equal(inRange(at, { until: at }), false, "until is exclusive");
+	// The same instant at another offset.
+	assert.equal(inRange(at, { until: "2026-09-16T08:15:00.000+13:00" }), false);
+	assert.equal(inRange("2026-09-15", { since: "2026-09-01T00:00:00Z" }), false);
 });
 
 // ── Layer 3.1: probes ──────────────────────────────────────────────────────

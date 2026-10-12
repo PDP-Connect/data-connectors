@@ -93,8 +93,11 @@ export function isDay(value: unknown): value is string {
 	return Number.isFinite(ms) && new Date(ms).toISOString().startsWith(value);
 }
 
-/** The latest instant `Date` can hold. */
-const MAX_EPOCH_MS = 8_640_000_000_000_000;
+/**
+ * The last instant RFC 3339 can write, the end of year 9999: past it `toISOString` writes a
+ * six-digit year, which the runtime's time-range comparison cannot read.
+ */
+const MAX_EPOCH_MS = 253_402_300_799_999;
 
 /** Epoch milliseconds as RFC 3339 UTC with milliseconds; absent is null. */
 function epochInstant(value: unknown): Field<string> {

@@ -528,6 +528,9 @@ test("sleepRow: no start instant is unreadable with nothing to place it by", () 
 		-1,
 		0,
 		Number.MAX_SAFE_INTEGER,
+		// Instants Date holds but RFC 3339 cannot write: from year 10000 on.
+		Date.UTC(10_000, 0, 1),
+		8_640_000_000_000_000,
 	]) {
 		const row = nth(nightRows(), 0);
 		(row.values as Obj).gmtSleepStartTimeInMillis = start;
@@ -537,6 +540,14 @@ test("sleepRow: no start instant is unreadable with nothing to place it by", () 
 			String(start),
 		);
 	}
+	const last = nth(nightRows(), 0);
+	(last.values as Obj).gmtSleepStartTimeInMillis = Date.UTC(10_000, 0, 1) - 1;
+	assert.equal(
+		(sleepRow(last, WINDOW) as { record?: { start_at?: unknown } }).record
+			?.start_at,
+		"9999-12-31T23:59:59.999Z",
+		"the last instant RFC 3339 writes still reads",
+	);
 	assert.deepEqual(sleepRow({ calendarDate: "2026-09-15" }, WINDOW), {
 		kind: "unreadable",
 	});
