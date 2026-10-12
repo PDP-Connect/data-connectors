@@ -58,11 +58,37 @@ export async function signSubjects(subjects, sign) {
   return count;
 }
 
+// Rekor answers slowly at times. sigstore's sign() gives each request 5 s and
+// retries a timed-out request; when Rekor had already logged the first one,
+// the retry gets 409 "an equivalent entry already exists" and sign() does not
+// fetch that entry (its fetchOnConflict is fixed to false), so the lane fails.
+// A longer timeout avoids most of those retries. A 409 that still comes back is
+// signed again: every sign() call has its own key and certificate, so the new
+// entry is distinct and the earlier one is simply unused.
+export const SIGN_TIMEOUT_MS = 30000;
+export const SIGN_ATTEMPTS = 3;
+
+const isTlogConflict = (error) => /\(409\)/.test(String(error?.message ?? ""));
+
+/** Wraps `sign(bytes)` so a transparency-log 409 is signed again. */
+export function retryOnTlogConflict(sign, { attempts = SIGN_ATTEMPTS, log = console.error } = {}) {
+  return async (bytes) => {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await sign(bytes);
+      } catch (error) {
+        if (attempt >= attempts || !isTlogConflict(error)) throw error;
+        log(`[sign-connector-release] transparency log answered 409 (attempt ${attempt}/${attempts}); signing again`);
+      }
+    }
+  };
+}
+
 async function main() {
   const output = resolve(process.env.CONNECTOR_RELEASE_OUTPUT?.trim() || join(repositoryRoot, "release"));
   const subjects = releaseSubjects({ output });
   const { sign } = await import("sigstore");
-  const count = await signSubjects(subjects, (bytes) => sign(bytes));
+  const count = await signSubjects(subjects, retryOnTlogConflict((bytes) => sign(bytes, { timeout: SIGN_TIMEOUT_MS })));
   console.log(`[sign-connector-release] signed ${count} release subject(s) into ${output}`);
 }
 
