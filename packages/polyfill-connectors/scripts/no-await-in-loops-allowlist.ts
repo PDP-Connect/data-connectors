@@ -1190,14 +1190,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/garmin_browser/index.test.ts",
-			line: 1120,
+			line: 1142,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "probeSession() per 401/403 status, each swapping the page globals in turn.",
 		},
 		{
 			path: "connectors/garmin_browser/index.test.ts",
-			line: 1127,
+			line: 1149,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "probeSession() per 429/5xx status, each swapping the page globals in turn.",

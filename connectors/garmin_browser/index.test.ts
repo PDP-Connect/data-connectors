@@ -963,6 +963,14 @@ test("planDays: a grant starting earlier, to the instant, raises the floor past 
 		floor: "2026-09-16",
 		since_at: "2026-09-14T00:00:00.000Z",
 	});
+	// The floor rises no higher than next_day.
+	assert.equal(
+		plan(
+			{ ...EVENING, next_day: "2026-09-15" },
+			activities("2026-09-14T00:00:00.000Z"),
+		).cursor.floor,
+		"2026-09-15",
+	);
 	// Earlier by less than a millisecond is earlier.
 	assert.equal(
 		plan(
@@ -984,6 +992,20 @@ test("planDays: a grant ending later than the cursor's, or not at all, sends nex
 		assert.equal(cursor.until_at, until, String(until));
 		assert.equal(segments[0]?.from, "2026-09-13", String(until));
 	}
+	// Later by less than a millisecond is later.
+	assert.equal(
+		plan(ended, activities(EVENING.since_at, "2026-09-14T06:00:00.0005Z"))
+			.cursor.next_day,
+		"2026-09-13",
+	);
+	// An until well above the floor sends next_day back to the day before its own UTC day.
+	assert.equal(
+		plan(
+			{ ...EVENING, until_at: "2026-10-01T00:00:00.000Z" },
+			activities(EVENING.since_at),
+		).cursor.next_day,
+		"2026-09-30",
+	);
 });
 
 test("planDays: a grant no wider than the cursor's, to the instant, moves neither the floor nor next_day, keeps the history read so far, and the cursor takes its instants", () => {

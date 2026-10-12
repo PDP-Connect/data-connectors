@@ -2638,6 +2638,54 @@ test("collect: a grant that drops both its bounds reads back to ninety days befo
 	});
 });
 
+test("collect: a grant that drops its start reads the history back to ninety days before the owner's today, the days the last start held records back on included", async () => {
+	const first = await activitiesRun({ since: EVENING });
+	const fake = fakeGarmin();
+	const open = await activitiesRun({}, first, fake);
+	assert.deepEqual(idsOf(open, "activities"), ["41000101"]);
+	assert.deepEqual(piecesOf(fake).at(-1), ["2026-09-01", "2026-09-15"]);
+	assert.deepEqual(statesOf(open), {
+		activities: { next_day: "2026-11-02", floor: "2026-08-04" },
+	});
+});
+
+test("collect: an until narrowed and then widened again reads the run it held back, though the narrower grant read its kept window cleanly", async () => {
+	const since = "2026-09-01T00:00:00.000Z";
+	const later = "2026-12-01T00:00:00.000Z";
+	// The run (06:30Z on the 14th) does not read on the first run, so its window is kept.
+	const unreadable = fakeGarmin(
+		site((data) => {
+			for (const row of data.activities as Array<Record<string, unknown>>)
+				if (row.activityId === 41000101) row.distance = "far";
+		}),
+	);
+	const first = await activitiesRun(
+		{ since, until: later },
+		undefined,
+		unreadable,
+	);
+	assert.deepEqual(idsOf(first, "activities"), ["41000102"]);
+	assert.deepEqual(progressOf(first), [{ stream: "activities", count: 1 }]);
+	// It reads now, but starts after this until.
+	const narrow = await activitiesRun(
+		{ since, until: "2026-09-14T06:00:00.000Z" },
+		first,
+	);
+	assert.deepEqual(idsOf(narrow, "activities"), []);
+	const wide = await activitiesRun(
+		{ since, until: later },
+		narrow,
+		fakeGarmin(),
+		{
+			now: new Date("2027-01-14T13:30:00.000Z"),
+		},
+	);
+	assert.deepEqual(idsOf(wide, "activities").toSorted(), [
+		"41000101",
+		"41000102",
+	]);
+});
+
 test("collect: a widening the run cannot reach keeps its floor raised, and the next run reads the days below it", async () => {
 	const first = await activitiesRun({ since: EVENING });
 	// Two windows: the re-read from 4 October takes both.
