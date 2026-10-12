@@ -205,17 +205,21 @@ function nested(element: unknown): Record<Stream, Start[]> {
 	};
 }
 
-/** One element of the answer: its cycle's id and start, or what it cost each stream when those do not parse. */
+/** One element of the answer: its cycle's id and start, or, when those do not parse, its cycle's start where that does and what it cost each stream. */
 export function readElement(
 	element: unknown,
 ):
 	| { kind: "cycle"; cycle: Cycle }
-	| { kind: "unreadable"; lost: Record<Stream, Start[]> } {
+	| { kind: "unreadable"; at: Start; lost: Record<Stream, Start[]> } {
 	const cycle = isObj(element) && isObj(element.cycle) ? element.cycle : null;
 	const id = cycle ? positiveInteger(cycle.id) : null;
 	const [startAt] = cycle ? interval(cycle.during) : [DRIFT];
 	if (!isObj(element) || !id || typeof startAt !== "string") {
-		return { kind: "unreadable", lost: nested(element) };
+		return {
+			kind: "unreadable",
+			at: typeof startAt === "string" ? startAt : undefined,
+			lost: nested(element),
+		};
 	}
 	const updated = toInstant(cycle?.updated_at);
 	return {

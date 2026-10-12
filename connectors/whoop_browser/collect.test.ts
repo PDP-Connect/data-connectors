@@ -1026,32 +1026,97 @@ test("collect: an element it cannot read is counted only for the records inside 
 	assert.deepEqual(idsOf(h, "cycles"), ["1000000814"]);
 });
 
-test("collect: a step back that meets a window of cycles it cannot read stops there, counts what they hold inside the grant, and the run goes on", async () => {
+/** Workouts granted from September 14, and a cycle under way from `began` whose id does not parse, holding these workouts. */
+function unreadableUnderWay(began: number, workouts: number[]) {
 	const since = Date.parse("2026-09-14T00:00:00.000Z");
-	const began = Date.parse("2026-09-10T00:00:00.000Z");
-	const fake = fakeWhoop(
-		serve([
-			// Long before, and never read.
-			cycleAt(1_000_000_811, Date.parse("2026-08-01T00:00:00.000Z")),
-			// The cycle under way, its id unreadable.
-			holding(
-				cycleAt(1_000_000_812, began, {
-					id: "x",
-					during: `['${iso(began)}',)`,
-				}),
-				{ workouts: [workoutAt(959, since + HOUR)] },
-			),
-		]),
-	);
-	const h = await collect(fake, {
+	const held = [
+		// Long before, and never read.
+		cycleAt(1_000_000_811, Date.parse("2026-08-01T00:00:00.000Z")),
+		holding(
+			cycleAt(1_000_000_812, began, {
+				id: "x",
+				during: `['${iso(began)}',)`,
+			}),
+			{ workouts: workouts.map((at, i) => workoutAt(959 + i, at)) },
+		),
+	];
+	return {
+		held,
+		since,
 		ranges: { workouts: { since: iso(since) } },
-		streams: ["workouts"],
-	});
+		streams: ["workouts"] as const,
+	};
+}
+
+test("collect: a step back that meets only cycles it cannot read, one holding a granted record, stops the run there", async () => {
+	const { held, ranges, since, streams } = unreadableUnderWay(
+		Date.parse("2026-09-10T00:00:00.000Z"),
+		[Date.parse("2026-09-14T01:00:00.000Z")],
+	);
+	const fake = fakeWhoop(serve(held));
+	const h = await collect(fake, { ranges, streams });
+	assertSkips(h, "source_unreadable", UPGRADE, streams);
+	assert.equal(cyclesRequests(fake).length, 2, "the walk's window, one back");
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, since) });
+});
+
+test("collect: a step back that meets only cycles it cannot read, holding nothing granted, ends there and the run goes on", async () => {
+	const { held, ranges, since, streams } = unreadableUnderWay(
+		Date.parse("2026-09-10T00:00:00.000Z"),
+		[Date.parse("2026-09-11T01:00:00.000Z")],
+	);
+	const fake = fakeWhoop(serve(held));
+	const h = await collect(fake, { ranges, streams });
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
-	assert.deepEqual(progressOf(h), [{ stream: "workouts", count: 1 }]);
+	assert.deepEqual(progressOf(h), [], "nothing inside the grant to count");
 	assert.equal(cyclesRequests(fake).length, 2, "the walk's window, one back");
 	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, NOW) });
 });
+
+test("collect: a step back that meets an element it cannot place in time stops the run, whatever lies further back", async () => {
+	const since = Date.parse("2026-09-14T00:00:00.000Z");
+	const july = Date.parse("2026-07-01T00:00:00.000Z");
+	const fake = fakeWhoop(
+		serve([
+			holding(cycleAt(1_000_000_821, july, { during: `['${iso(july)}',)` }), {
+				workouts: [workoutAt(964, since + HOUR)],
+			}),
+			{
+				start: Date.parse("2026-08-25T00:00:00.000Z"),
+				element: { cycle: null, recovery: null, sleeps: [] },
+			},
+		]),
+	);
+	const streams = ["workouts"] as const;
+	const h = await collect(fake, {
+		ranges: { workouts: { since: iso(since) } },
+		streams,
+	});
+	assertSkips(h, "source_unreadable", UPGRADE, streams);
+	assert.deepEqual(idsOf(h, "workouts"), []);
+});
+
+// Where the walk starts (September 12) less its day's pad: a cycle starting at it is in the walk's
+// first answer when WHOOP answers by start, one a millisecond earlier only in the step back's.
+// Answered by overlap, the open cycle is in the walk's. Each is stopped the same way.
+for (const [label, began] of [
+	["at the walk's front pad", "2026-09-11T00:00:00.000Z"],
+	["a millisecond before it", "2026-09-10T23:59:59.999Z"],
+] as const) {
+	for (const [mode, answer] of [
+		["by start", (held: Held[]) => serve(held)],
+		["by overlap", (held: Held[]) => serveOverlap(held)],
+	] as const) {
+		test(`collect: an unreadable cycle under way that holds a granted record stops the run, begun ${label}, answered ${mode}`, async () => {
+			const { held, ranges, streams } = unreadableUnderWay(Date.parse(began), [
+				Date.parse("2026-09-14T01:00:00.000Z"),
+			]);
+			const h = await collect(fakeWhoop(answer(held)), { ranges, streams });
+			assertSkips(h, "source_unreadable", UPGRADE, streams);
+			assert.deepEqual(idsOf(h, "workouts"), []);
+		});
+	}
+}
 
 test("collect: a window whose every cycle is unreadable stops the walk there, every stream skipped and no cursor moved", async () => {
 	// WHOOP changing the shape of every cycle (here, ids sent as strings) must not move the cursor

@@ -592,7 +592,8 @@ export const cyclesPath = (
 	`/core-details-bff/v0/cycles/details?apiVersion=7&id=${encodeURIComponent(userId)}&startTime=${iso(start)}&endTime=${iso(end)}&limit=${limit}`;
 
 /** An element that did not parse, keyed so one returned by two padded windows is counted once. */
-type Lost = { key: string; lost: Record<Stream, Start[]> };
+/** An element that did not parse: its cycle's start, where that does, and what it cost each stream. */
+type Lost = { key: string; at: Start; lost: Record<Stream, Start[]> };
 /** `unreadable`: the answer held cycles, and not one whose id and start parse. */
 type Window =
 	| {
@@ -603,7 +604,7 @@ type Window =
 			unreadable: boolean;
 	  }
 	| Failure;
-/** Every cycle in a window unreadable: WHOOP changed their shape. */
+/** Every cycle in a window unreadable, and something granted among them: WHOOP changed their shape. */
 const SHAPELESS: Failure = {
 	ok: false,
 	reason: "source_unreadable",
@@ -652,7 +653,11 @@ async function readWindow(
 		for (const element of elements) {
 			const read = readElement(element);
 			if (read.kind === "unreadable") {
-				lost.push({ key: JSON.stringify(element) ?? "", lost: read.lost });
+				lost.push({
+					key: JSON.stringify(element) ?? "",
+					at: read.at,
+					lost: read.lost,
+				});
 				continue;
 			}
 			const { cycle } = read;
@@ -764,6 +769,21 @@ export async function collectWhoopBrowser(
 			await p.sleep(p.requestDelayMs);
 			return readWindow(ctx.page, facts.userId, from, to, p);
 		};
+		/**
+		 * Whether passing a window of nothing but unreadable cycles passes nothing granted: each is
+		 * placed in time, and every record it holds lies outside its stream's grant.
+		 */
+		const passable = (window: Window & { ok: true }): boolean =>
+			window.lost.every(
+				({ at, lost }) =>
+					at !== undefined &&
+					streams.every((stream) =>
+						lost[stream].every(
+							(startAt) =>
+								startAt !== undefined && !inRange(startAt, ranges.get(stream)),
+						),
+					),
+			);
 		/** A window read and kept, counted toward the run's windows, with what it could not read. */
 		const tally = (window: Window & { ok: true }): void => {
 			windows += 1;
@@ -787,10 +807,10 @@ export async function collectWhoopBrowser(
 		 * first window back, which a cycle synced late may have joined, an earlier walk's finding
 		 * (`began`) speaks for the rest: none had begun, or the next window read is the one where it
 		 * began. That trusts WHOOP not to add a cycle older than the first window back. A window
-		 * whose cycles are all unreadable ends it: with cycles that do not overlap, the latest of
-		 * them is the one under way, and what it holds inside a grant is counted. Not held to
-		 * maxWindowsPerRun, since the account's start bounds it and a run cut short in it would
-		 * begin it again next time.
+		 * whose cycles are all unreadable ends it when passable: with cycles that do not overlap,
+		 * the latest of them is the one under way, and nothing granted is lost; otherwise the run
+		 * stops there, as the walk does. Not held to maxWindowsPerRun, since the account's start
+		 * bounds it and a run cut short in it would begin it again next time.
 		 */
 		const latestBefore = async (
 			before: number,
@@ -804,6 +824,7 @@ export async function collectWhoopBrowser(
 				for (let from = back; from < to; ) {
 					const window = await read(from, to);
 					if (!window.ok) return window;
+					if (window.unreadable && !passable(window)) return SHAPELESS;
 					tally(window);
 					if (window.unreadable) lostLast = true;
 					else if (window.cycles.length > 0) {
@@ -858,9 +879,9 @@ export async function collectWhoopBrowser(
 					stop = window;
 					break;
 				}
-				// Not one cycle whose id and start parse: the walk stops here rather than move the
-				// cursor past history it could not read.
-				if (window.unreadable) {
+				// Not one cycle whose id and start parse, and something granted among them: the walk
+				// stops here rather than move the cursor past history it could not read.
+				if (window.unreadable && !passable(window)) {
 					stop = SHAPELESS;
 					break;
 				}
