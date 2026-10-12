@@ -121,6 +121,18 @@
  * `re_record_interval` failure mode (a cassette silently re-recorded on a
  * schedule, quietly changing what a "PASS" means) has no equivalent here.
  *
+ * ─── `PDPP_SCENARIO_TRANSCRIPT_DIR` (raw protocol transcript) ─────────────
+ *
+ * The scenario JSON keeps record HASHES, not records. A recording host that
+ * classifies the run itself (counts per stream, DONE status, DETAIL_GAP and
+ * STATE shape) needs the protocol messages as the connector emitted them.
+ * When `PDPP_SCENARIO_TRANSCRIPT_DIR` names a directory, every stdout
+ * protocol message of run N is appended to `<dir>/run<N>.jsonl` as
+ * `{"at": <ms>, "message": <message>}`. The directory is created 0700 and
+ * each file 0600. Off by default. The transcript holds record VALUES (it is
+ * the connector's output, unredacted), so it is `local-only` like the
+ * storageState file: never commit or share it.
+ *
  * KNOWN GAP, VERIFIED UNEXERCISED: `recordHar` does not capture WebSocket/
  * EventSource/SSE frames, and a browser download's body can bypass HAR
  * capture entirely (Playwright's HAR machinery is HTTP request/response
@@ -203,6 +215,7 @@
 
 import { spawn } from "node:child_process";
 import {
+	appendFileSync,
 	chmodSync,
 	copyFileSync,
 	existsSync,
@@ -1371,6 +1384,36 @@ function toScenarioUserInteraction(
  * `bin/connector-dev.ts`) and captures each prompt/response pair into
  * `userInteractions` for this run's `ScenarioRun.user_interactions`.
  */
+let transcriptRunNumber = 0;
+
+/**
+ * Where run N's raw protocol transcript goes, or undefined when
+ * `PDPP_SCENARIO_TRANSCRIPT_DIR` is unset or blank (see the file header).
+ * Creates the directory 0700 on first use.
+ */
+export function scenarioTranscriptPath(
+	env: NodeJS.ProcessEnv,
+	runNumber: number,
+): string | undefined {
+	const dir = env.PDPP_SCENARIO_TRANSCRIPT_DIR?.trim();
+	if (!dir) {
+		return undefined;
+	}
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	return join(dir, `run${String(runNumber)}.jsonl`);
+}
+
+/** Appends one protocol message to a transcript file, created 0600. */
+export function appendScenarioTranscript(
+	path: string,
+	message: unknown,
+	at: number,
+): void {
+	appendFileSync(path, `${JSON.stringify({ at, message })}\n`, {
+		mode: 0o600,
+	});
+}
+
 function runRecordSubprocess(args: {
 	answers: Record<string, string>;
 	connectorPath: string;
@@ -1437,6 +1480,11 @@ function runRecordSubprocess(args: {
 			},
 		);
 
+		transcriptRunNumber += 1;
+		const transcriptPath = scenarioTranscriptPath(
+			process.env,
+			transcriptRunNumber,
+		);
 		const messages: ProtocolMessage[] = [];
 		const userInteractions: ScenarioUserInteraction[] = [];
 		const unansweredInteractions: RecordRunResult["unansweredInteractions"] =
@@ -1593,6 +1641,9 @@ function runRecordSubprocess(args: {
 				child.stdin.end();
 			}
 			messages.push(parsed as ProtocolMessage);
+			if (transcriptPath) {
+				appendScenarioTranscript(transcriptPath, parsed, Date.now());
+			}
 		};
 
 		// Repair wave 6 (P1-2 duty 1): parses and type-checks one nonempty

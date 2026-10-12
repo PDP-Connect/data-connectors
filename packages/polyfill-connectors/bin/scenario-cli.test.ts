@@ -2259,6 +2259,79 @@ test("scenario-record: no pdpp-scenario-* temp files remain in os.tmpdir() after
 	}
 });
 
+test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol messages to run<N>.jsonl (dir 0700, files 0600); unset writes nothing", async () => {
+	const stubProvider = await startStubProvider();
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-transcript-test-"));
+	const transcriptDir = join(tmpDir, "transcript");
+	try {
+		const recordResult = runRecordCli(
+			[
+				"scenario-cli-stub-connector",
+				"--entrypoint",
+				STUB_CONNECTOR_PATH,
+				"--out",
+				join(tmpDir, "with.scenario.json"),
+			],
+			{
+				PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url,
+				PDPP_SCENARIO_TRANSCRIPT_DIR: transcriptDir,
+			},
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`scenario-record failed: stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+		assert.deepEqual(readdirSync(transcriptDir).sort(), [
+			"run1.jsonl",
+			"run2.jsonl",
+		]);
+		assert.equal(statSync(transcriptDir).mode.toString(8).slice(-3), "700");
+		for (const name of ["run1.jsonl", "run2.jsonl"]) {
+			const path = join(transcriptDir, name);
+			assert.equal(statSync(path).mode.toString(8).slice(-3), "600");
+			const lines = readFileSync(path, "utf8")
+				.split("\n")
+				.filter((line) => line.length > 0)
+				.map(
+					(line) =>
+						JSON.parse(line) as { at: number; message: { type: string } },
+				);
+			assert.ok(lines.length > 0, `${name} is empty`);
+			assert.ok(lines.every((line) => typeof line.at === "number"));
+			assert.ok(lines.some((line) => line.message.type === "RECORD"));
+			assert.equal(lines.at(-1)?.message.type, "DONE");
+		}
+
+		const sizesBefore = ["run1.jsonl", "run2.jsonl"].map(
+			(name) => statSync(join(transcriptDir, name)).size,
+		);
+		const plain = runRecordCli(
+			[
+				"scenario-cli-stub-connector",
+				"--entrypoint",
+				STUB_CONNECTOR_PATH,
+				"--runs",
+				"1",
+				"--out",
+				join(tmpDir, "without.scenario.json"),
+			],
+			{ PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url },
+		);
+		assert.equal(plain.code, 0, plain.stderr);
+		// Unset: the earlier transcript is left exactly as it was.
+		assert.deepEqual(
+			["run1.jsonl", "run2.jsonl"].map(
+				(name) => statSync(join(transcriptDir, name)).size,
+			),
+			sizesBefore,
+		);
+	} finally {
+		await stubProvider.close().catch(() => undefined);
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
 // ─── FIX C: credentials interactions are never persisted ──────────────────
 
 const CREDENTIALS_FIXTURE_PATH = join(
