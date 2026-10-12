@@ -2236,9 +2236,12 @@ test("collect: a saved cursor whose re-read reaches back past its grant's start 
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	const since_at = "2026-09-10T00:00:00.000Z";
+	// The days each daily stream's start cut off its re-read are owed a read.
 	assert.deepEqual(statesOf(h), {
-		...everyStream(FULL),
+		daily_summaries: { ...FULL, reread: "2026-09-15" },
 		sleep: { ...FULL, since_at },
+		hrv: { ...FULL, reread: "2026-08-24" },
+		training_status: { ...FULL, reread: "2026-09-15" },
 		activities: { ...FULL, since_at },
 	});
 });
@@ -3154,6 +3157,50 @@ test("collect: a kept day that a narrower until reads cleanly stays kept where t
 	]);
 	const open = await activitiesRun({}, ended, may.reads());
 	assert.ok(idsOf(open, "activities").includes("7001"));
+});
+
+test("collect: a daily stream whose re-read a narrower start cut short reads on from the cut once a grant reaches it again, so a summary that reached Garmin late still ships", async () => {
+	// The summary for 20 October reaches Garmin on the 24th.
+	const day = (synced: boolean) =>
+		fakeGarmin(
+			site((data) => {
+				if (synced) summaryOn(data, "2026-10-20");
+			}),
+		);
+	const run = (
+		since: string,
+		now: string,
+		synced: boolean,
+		after?: RecordingEmit,
+	) =>
+		collect(day(synced), {
+			now: new Date(now),
+			streams: ["daily_summaries"],
+			ranges: { daily_summaries: { since } },
+			state: after ? statesOf(after) : {},
+		});
+	const first = await run("2026-09-20", "2026-10-20T13:30:00.000Z", false);
+	// The week it re-reads starts on the 15th; its start cuts that at the 21st.
+	const narrow = await run(
+		"2026-10-21",
+		"2026-10-26T13:30:00.000Z",
+		true,
+		first,
+	);
+	assert.equal(
+		(statesOf(narrow).daily_summaries as { reread?: string }).reread,
+		"2026-10-15",
+	);
+	const wide = await run(
+		"2026-09-20",
+		"2026-10-28T13:30:00.000Z",
+		true,
+		narrow,
+	);
+	assert.ok(idsOf(wide, "daily_summaries").includes("2026-10-20"));
+	assert.deepEqual(statesOf(wide), {
+		daily_summaries: { next_day: "2026-10-30", floor: "2026-09-20" },
+	});
 });
 
 // ── Days kept to read again ────────────────────────────────────────────────

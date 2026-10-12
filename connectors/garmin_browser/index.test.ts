@@ -906,10 +906,10 @@ test("planDays re-reads the overlap it is given before the cursor, never before 
 	);
 });
 
-test("planDays never reads before the grant's start, though the overlap reaches back past it", () => {
-	for (const [since, overlap] of [
-		["2026-09-17", OVERLAP.daily_summaries],
-		["2026-09-10", OVERLAP.hrv],
+test("planDays never reads before the grant's start, though the overlap reaches back past it, and leaves the days it cuts off owed a read", () => {
+	for (const [since, overlap, reread] of [
+		["2026-09-17", OVERLAP.daily_summaries, "2026-09-15"],
+		["2026-09-10", OVERLAP.hrv, "2026-08-24"],
 	] as const) {
 		const plan = planDays(CURSOR, "2026-09-21", { since }, false, overlap);
 		assert.deepEqual(
@@ -919,7 +919,7 @@ test("planDays never reads before the grant's start, though the overlap reaches 
 		);
 		assert.deepEqual(
 			plan.cursor,
-			CURSOR,
+			{ ...CURSOR, reread },
 			"a grant starting before the cursor restarts nothing",
 		);
 	}
@@ -1098,6 +1098,27 @@ test("planDays: a grant starting past where a later until sent next_day back mov
 	});
 });
 
+test("planDays reads on from a re-read a start cut short only once a grant reaches it; until then the owed day waits and the forward read goes on as before", () => {
+	const owing = {
+		next_day: "2026-11-14",
+		floor: "2026-07-22",
+		reread: "2026-08-12",
+	};
+	const reach = (since?: string) =>
+		planDays(owing, "2026-12-08", since ? { since } : {}, false, 7);
+	// Its start lies after the owed day: the week before next_day, and the owed day kept.
+	const short = reach("2026-08-16");
+	assert.equal(short.segments[0]?.from, "2026-11-07");
+	assert.equal(short.cursor.reread, "2026-08-12");
+	for (const since of [undefined, "2026-08-12", "2026-08-01"]) {
+		const { segments, cursor } = reach(since);
+		assert.equal(segments[0]?.from, "2026-08-12", String(since));
+		assert.equal(cursor.reread, "2026-08-12", String(since));
+	}
+	// A later cut keeps the earlier owed day.
+	assert.equal(reach("2026-11-10").cursor.reread, "2026-08-12");
+});
+
 test("planDays reads history from where it stopped for a start no earlier than the one it was read from, and from the start for an earlier one", () => {
 	const cursor = {
 		next_day: "2026-09-22",
@@ -1144,6 +1165,18 @@ test("readCursor keeps a grant's instants that parse, and starts afresh from one
 			.backfill,
 		undefined,
 	);
+	// The first day a cut re-read owes: kept between the floor and next_day, else dropped alone.
+	assert.equal(
+		readCursor({ ...ended, reread: "2026-09-20" }).reread,
+		"2026-09-20",
+	);
+	for (const reread of ["2026-09-01", "2026-11-02", "soon", 20260920]) {
+		assert.deepEqual(
+			readCursor({ ...ended, reread }),
+			readCursor(ended),
+			String(reread),
+		);
+	}
 });
 
 test("grantDays reads an instant grant from the day before its first UTC day to the last day a record starting inside it is filed under: two days on for sleep, one for activities", () => {

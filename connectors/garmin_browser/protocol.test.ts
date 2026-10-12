@@ -351,7 +351,12 @@ test(
 				],
 				retry_next: "2026-05-23",
 			},
-			hrv: { ...FULL, retry: [{ from: "2026-08-01", to: "2026-08-01" }] },
+			// Its start cut the re-read from 24 August: those days are owed a read.
+			hrv: {
+				...FULL,
+				reread: "2026-08-24",
+				retry: [{ from: "2026-08-01", to: "2026-08-01" }],
+			},
 			activities: FULL,
 		});
 	},

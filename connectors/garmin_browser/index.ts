@@ -474,13 +474,15 @@ async function fetchJson(
  * starts inside them has been delivered, or its day is kept in `retry`. Each is absent for an open
  * end.
  * `backfill.until_at` is the earliest until the history below the floor was read under, absent
- * while every such read was open.
+ * while every such read was open. `reread`, for a stream consented by day, is the first day of a
+ * re-read a grant's start cut short: a later grant that reaches it reads on from there.
  */
 export interface DayCursor {
 	next_day?: string;
 	floor?: string;
 	since_at?: string;
 	until_at?: string;
+	reread?: string;
 	backfill?: { since: string; next_day: string; until_at?: string };
 	retry?: Window[];
 	retry_next?: string;
@@ -617,8 +619,16 @@ function readSpan(value: unknown): Window[] {
  */
 export function readCursor(value: unknown): DayCursor {
 	if (typeof value !== "object" || value === null) return {};
-	const { next_day, floor, since_at, until_at, backfill, retry, retry_next } =
-		value as Record<string, unknown>;
+	const {
+		next_day,
+		floor,
+		since_at,
+		until_at,
+		reread,
+		backfill,
+		retry,
+		retry_next,
+	} = value as Record<string, unknown>;
 	if (!isDay(next_day) || !isDay(floor) || floor > next_day) return {};
 	const kept: DayCursor = {};
 	const spans = Array.isArray(retry) ? retry.flatMap(readSpan) : [];
@@ -634,6 +644,9 @@ export function readCursor(value: unknown): DayCursor {
 	const cursor: DayCursor = { next_day, floor, ...kept };
 	if (typeof since_at === "string") cursor.since_at = since_at;
 	if (typeof until_at === "string") cursor.until_at = until_at;
+	if (isDay(reread) && floor <= reread && reread < next_day) {
+		cursor.reread = reread;
+	}
 	if (typeof backfill === "object" && backfill !== null) {
 		const {
 			since,
@@ -886,9 +899,19 @@ export function planDays(
 	const floor = cursor.floor as string;
 	const segments: Segment[] = [];
 	let from = fresh ? floor : addDays(cursor.next_day as string, -overlap);
+	// A re-read a narrower start cut short goes on from where it was cut, once a grant reaches it.
+	const owed = cursor.reread;
+	// readCursor keeps it at or above the floor, and a day-keyed stream's floor only falls.
+	if (owed !== undefined && owed >= from) delete cursor.reread;
+	else if (owed !== undefined && !(since && since > owed)) from = owed;
 	if (from < floor) from = floor;
-	// Never read outside the grant.
-	if (since && since > from) from = since;
+	// Never read outside the grant. A start that cuts the re-read short leaves the days below it owed
+	// a read, for a stream consented by day: one consented by instant reads them again when a later
+	// grant reaches past its start (widen). An earlier owed day stays.
+	if (since && since > from) {
+		if (!fresh && grant.since_at === undefined) cursor.reread ??= from;
+		from = since;
+	}
 	if (from <= last) {
 		// Past next_day only when the grant starts past it: the days between hold nothing of the
 		// grant, and its start, read here, becomes the cursor's.
@@ -985,8 +1008,15 @@ function advance(cursor: DayCursor, segment: Segment, day: string): void {
 		return;
 	}
 	if (segment.kind === "forward") {
-		// Only a contiguous read moves it.
+		// Only a contiguous read moves either.
+		if (day === cursor.reread) cursor.reread = addDays(day, 1);
 		if (day === cursor.next_day) cursor.next_day = addDays(day, 1);
+		if (
+			cursor.reread !== undefined &&
+			cursor.reread >= (cursor.next_day as string)
+		) {
+			delete cursor.reread;
+		}
 	} else if (day === addDays(cursor.floor as string, -1)) {
 		cursor.floor = segment.since;
 		delete cursor.backfill;
