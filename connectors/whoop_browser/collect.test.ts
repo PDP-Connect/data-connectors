@@ -1260,6 +1260,52 @@ test("collect: a granted record whose own start does not parse is counted, and a
 	assertSkips(unreadable, "source_unreadable", UPGRADE, streams);
 });
 
+test("collect: an unreadable cycle alone in its window stops the run when it holds a record starting exactly where delivery starts", async () => {
+	const since = Date.parse("2026-09-14T01:00:00.000Z");
+	const began = Date.parse("2026-09-13T06:00:00.000Z");
+	const fake = fakeWhoop(
+		serve([
+			cycleAt(1_000_000_844, Date.parse("2026-09-12T00:00:00.000Z")),
+			holding(
+				cycleAt(1_000_000_845, began, {
+					id: "x",
+					during: `['${iso(began)}',)`,
+				}),
+				{ workouts: [workoutAt(980, since)] },
+			),
+		]),
+	);
+	const streams = ["workouts"] as const;
+	const h = await collect(fake, {
+		ranges: { workouts: { since: iso(since) } },
+		streams,
+	});
+	assertSkips(h, "source_unreadable", UPGRADE, streams);
+});
+
+test("collect: an unreadable cycle in a window's back pad is judged by the next window, whose readable cycle lets it pass with a count", async () => {
+	// The first window runs from the account's start for thirty days; the unreadable cycle starts
+	// six hours after it ends, and a readable one two days after.
+	const edge = FLOOR + WINDOW_DAYS * DAY;
+	const fake = fakeWhoop(
+		serve([
+			holding(
+				cycleAt(1_000_000_846, edge + 6 * HOUR, {
+					id: "x",
+					during: `['${iso(edge + 6 * HOUR)}','${iso(edge + 2 * DAY)}')`,
+				}),
+				{ workouts: [workoutAt(981, edge + 12 * HOUR)] },
+			),
+			cycleAt(1_000_000_847, edge + 2 * DAY),
+		]),
+	);
+	const streams = ["workouts"] as const;
+	const h = await collect(fake, { streams });
+	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+	assert.deepEqual(progressOf(h), [{ stream: "workouts", count: 1 }]);
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(FLOOR, NOW) });
+});
+
 // A readable neighbour in the walk's front pad or just before it: the run is judged on the
 // unreadable cycle itself, under either answer rule.
 for (const neighbour of [
