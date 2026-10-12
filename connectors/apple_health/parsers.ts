@@ -306,9 +306,16 @@ export function normaliseDevice(
 		return null;
 	}
 	const fields = new Map<string, string>();
-	const re = new RegExp(HKDEVICE_FIELD_RE.source, "g");
-	const marks = [...body.matchAll(re)];
-	for (const [index, mark] of marks.entries()) {
+	// A value runs to the next boundary of any key. Only the published field
+	// still open is held: a description under the pending-tag ceiling can hold
+	// millions of boundaries, and every match held at once exceeds the bound.
+	let open: { key: string; from: number } | null = null;
+	for (const mark of body.matchAll(new RegExp(HKDEVICE_FIELD_RE.source, "g"))) {
+		const at = mark.index ?? 0;
+		if (open) {
+			fields.set(open.key, body.slice(open.from, at).trim());
+			open = null;
+		}
 		const key = mark[1] ?? "";
 		if (!PUBLISHED_DEVICE_FIELD_SET.has(key)) {
 			continue;
@@ -317,9 +324,10 @@ export function normaliseDevice(
 			noteField(pending, "device");
 			return null;
 		}
-		const start = (mark.index ?? 0) + mark[0].length;
-		const end = marks[index + 1]?.index ?? body.length;
-		fields.set(key, body.slice(start, end).trim());
+		open = { key, from: at + mark[0].length };
+	}
+	if (open) {
+		fields.set(open.key, body.slice(open.from).trim());
 	}
 	return (
 		PUBLISHED_DEVICE_FIELDS.filter((key) => fields.get(key))

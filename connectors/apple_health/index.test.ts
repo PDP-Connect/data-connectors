@@ -3259,6 +3259,36 @@ test("a workout whose markers each carry a 15 MiB attribute stays within the str
 	});
 });
 
+test("a device description with millions of field boundaries stays within the streaming bound", {
+	timeout: 240_000,
+}, async (t) => {
+	// 8 MB of `, a:` is under the pending-tag ceiling, so the record is read.
+	// Every boundary held at once, as a list of matches, came to over 500 MiB.
+	await withImportDir({}, async (dir) => {
+		const boundaries = ", a:".repeat(2_000_000);
+		writeExport(join(dir, "export.xml"), (w) => {
+			w(
+				` <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2026-06-05 09:00:00 -0500" endDate="2026-06-05 09:05:00 -0500" value="12" device="&lt;&lt;HKDevice: 0x1&gt;, manufacturer:Apple${boundaries}, model:Watch&gt;"/>\n`,
+			);
+		});
+		const result = await run(dir, {
+			peakRssPollIntervalMs: 20,
+			timeoutMs: 180_000,
+		});
+		const peakMb = Math.round((result.peakRssBytes ?? 0) / 1024 / 1024);
+		t.diagnostic(`peak RSS ${peakMb}MB`);
+		assert.ok(result.peakRssBytes !== null, "expected a sampled peak RSS");
+		assert.ok(
+			(result.peakRssBytes ?? 0) < STREAMING_BOUND_BYTES,
+			`peak RSS ${peakMb}MB exceeded the streaming bound`,
+		);
+		assert.deepEqual(
+			recordsOf(result, "activity").map((r) => r.device),
+			["manufacturer:Apple, model:Watch"],
+		);
+	});
+});
+
 test("an element with millions of attributes is read, and the run completes", {
 	timeout: 120_000,
 }, async () => {
