@@ -2481,7 +2481,7 @@ test("collect: a grant narrowed to a later day, whose run reads no day it could 
 });
 
 test("collect: a grant narrowed to a later day whose run reads the days it holds records back on keeps its start, and a grant widened again reads everything it could have held back, so what the first held back ships too", async () => {
-	// Two days after the first run: its re-read reaches the 17th.
+	// At NOW the re-read reaches back past the 17th.
 	const options = { now: NOW };
 	const first = await activitiesRun(
 		{ since: EVENING },
@@ -2503,6 +2503,74 @@ test("collect: a grant narrowed to a later day whose run reads the days it holds
 		"41000101",
 		"41000102",
 	]);
+	assert.deepEqual(statesOf(wide), {
+		activities: {
+			next_day: "2026-09-22",
+			floor: "2026-09-13",
+			since_at: MIDNIGHT,
+		},
+	});
+});
+
+test("collect: a narrower start whose run reads only a one-day history on the first day it holds records back on still sets the cursor's start, so a grant widened again ships what it held back", async () => {
+	// 20:00Z on the 19th, the 20th on the owner's clock.
+	const account = () =>
+		fakeGarmin(
+			site((data) => {
+				activityAt(data, 7101, "2026-09-19 20:00:00", "2026-09-20 08:00:00");
+			}),
+		);
+	const wide = { since: "2026-08-01T00:00:00.000Z" };
+	const first = await activitiesRun(
+		{ since: "2026-09-20T00:00:00.000Z" },
+		undefined,
+		account(),
+	);
+	// Raises the floor to the 21st, and stops before the history below it.
+	const short = await activitiesRun(wide, first, account(), {
+		pacing: { maxWindowsPerRun: 2 },
+	});
+	// Its history is the 20th alone.
+	const since = "2026-09-21T00:00:00.000Z";
+	const narrow = await activitiesRun({ since }, short, account());
+	assert.equal(
+		(statesOf(narrow).activities as { since_at?: string }).since_at,
+		since,
+	);
+	const again = await activitiesRun(wide, narrow, account());
+	assert.ok(idsOf(again, "activities").includes("7101"));
+});
+
+test("collect: a narrower start whose run resumes history on the last day it holds records back on still sets the cursor's start, so a grant widened again ships what it held back", async () => {
+	// 20:00Z on 27 August, the 28th on the owner's clock.
+	const account = () =>
+		fakeGarmin(
+			site((data) => {
+				activityAt(data, 7201, "2026-08-27 20:00:00", "2026-08-28 08:00:00");
+			}),
+		);
+	const wide = { since: "2026-08-01T00:00:00.000Z" };
+	const first = await activitiesRun(
+		{ since: "2026-09-20T00:00:00.000Z" },
+		undefined,
+		account(),
+	);
+	// Reads its history to the 27th and stops: saved from the 28th on.
+	const short = await activitiesRun(wide, first, account(), {
+		pacing: { maxWindowsPerRun: 3 },
+	});
+	assert.deepEqual(
+		(statesOf(short).activities as { backfill?: unknown }).backfill,
+		{ since: "2026-07-31", next_day: "2026-08-28" },
+	);
+	const since = "2026-08-28T00:00:00.000Z";
+	const narrow = await activitiesRun({ since }, short, account());
+	assert.equal(
+		(statesOf(narrow).activities as { since_at?: string }).since_at,
+		since,
+	);
+	const again = await activitiesRun(wide, narrow, account());
+	assert.ok(idsOf(again, "activities").includes("7201"));
 });
 
 test("collect: a narrower until whose run reads only kept days near it leaves the cursor's open until, though a record there never reads", async () => {
