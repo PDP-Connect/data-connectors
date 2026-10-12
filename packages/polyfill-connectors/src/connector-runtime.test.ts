@@ -9,6 +9,7 @@ import {
 	manualBrowserLogin,
 	type PrepareBrowserInteractionTargetArgs,
 } from "./browser-handoff.ts";
+import { setConnectorDiagnosticSink } from "./connector-diagnostic.ts";
 import {
 	type BrowserLaunchSource,
 	type BrowserRuntimeVisibility,
@@ -781,8 +782,11 @@ test("makeBrowserInteractionKeepalive ignores CDP ping errors without failing in
 	assert.ok(pingCalls > 0);
 });
 
-test("makeBrowserInteractionKeepalive emits gated browser-surface diagnostics around interactions", async () => {
+test("makeBrowserInteractionKeepalive emits gated browser-surface diagnostics around interactions", async (t) => {
 	const progressMessages: string[] = [];
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	t.after(() => setConnectorDiagnosticSink(undefined));
 	let resolveInteraction:
 		| ((value: {
 				request_id: string;
@@ -832,12 +836,11 @@ test("makeBrowserInteractionKeepalive emits gated browser-surface diagnostics ar
 	});
 	assert.equal((await responsePromise).status, "success");
 
-	assert.equal(progressMessages.length, 2);
-	const diagnostics = progressMessages.map((message) => {
-		assert.match(message, /^browser_surface\.diagnostic /u);
-		return JSON.parse(
-			message.replace(/^browser_surface\.diagnostic /u, ""),
-		) as {
+	assert.deepEqual(progressMessages, []);
+	assert.equal(diagnosticLines.length, 2);
+	const diagnostics = diagnosticLines.map((message) => {
+		assert.match(message, /^\[runtime-diagnostic\] browser_surface /u);
+		return parseBrowserDiagnostic(message) as {
 			keepalive: null | { pingAttempts: number; pingSuccesses: number };
 			phase: string;
 			response_status: string | null;
@@ -855,8 +858,11 @@ test("makeBrowserInteractionKeepalive emits gated browser-surface diagnostics ar
 	);
 });
 
-test("makeBrowserInteractionKeepalive records browser disconnect timing in diagnostics", async () => {
+test("makeBrowserInteractionKeepalive records browser disconnect timing in diagnostics", async (t) => {
 	const progressMessages: string[] = [];
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	t.after(() => setConnectorDiagnosticSink(undefined));
 	let connected = true;
 	let disconnectedListener: (() => void) | undefined;
 	let detachCalls = 0;
@@ -933,9 +939,8 @@ test("makeBrowserInteractionKeepalive records browser disconnect timing in diagn
 	});
 	assert.equal((await responsePromise).status, "success");
 
-	const responseDiagnostic = JSON.parse(
-		progressMessages.at(-1)?.replace(/^browser_surface\.diagnostic /u, "") ??
-			"{}",
+	const responseDiagnostic = parseBrowserDiagnostic(
+		diagnosticLines.at(-1) ?? "",
 	) as {
 		keepalive?: {
 			browserConnectedAtStop: boolean;
@@ -963,8 +968,11 @@ test("makeBrowserInteractionKeepalive records browser disconnect timing in diagn
 	assert.equal(disconnectedListener, undefined);
 });
 
-test("makeBrowserInteractionKeepalive records poll-only disconnect timing without an event listener", async () => {
+test("makeBrowserInteractionKeepalive records poll-only disconnect timing without an event listener", async (t) => {
 	const progressMessages: string[] = [];
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	t.after(() => setConnectorDiagnosticSink(undefined));
 	let connected = true;
 	let resolvePollObserved: (() => void) | undefined;
 	const pollObserved = new Promise<void>((resolve) => {
@@ -1014,9 +1022,8 @@ test("makeBrowserInteractionKeepalive records poll-only disconnect timing withou
 			(await wrapped({ kind: "otp", message: "Enter OTP" })).status,
 			"success",
 		);
-		const responseDiagnostic = JSON.parse(
-			progressMessages.at(-1)?.replace(/^browser_surface\.diagnostic /u, "") ??
-				"{}",
+		const responseDiagnostic = parseBrowserDiagnostic(
+			diagnosticLines.at(-1) ?? "",
 		) as {
 			keepalive?: {
 				disconnectEventElapsedMs?: number;
@@ -1948,3 +1955,10 @@ test("describeUnexpectedFailure bounds a pathological responseText so it cannot 
 	);
 	assert.match(message, /…$/);
 });
+
+function parseBrowserDiagnostic(line: string): unknown {
+	const envelope = JSON.parse(
+		line.replace(/^\[runtime-diagnostic\] browser_surface /u, ""),
+	) as { details: string };
+	return JSON.parse(envelope.details);
+}

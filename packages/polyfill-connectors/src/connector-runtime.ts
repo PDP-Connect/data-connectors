@@ -84,10 +84,14 @@ import {
 	type CaptureSession,
 	createCaptureSession,
 } from "./fixture-capture.ts";
-import { CONSENT_TIME_FIELDS } from "./generated/consent-time-fields.generated.ts";
+import {
+	CONSENT_TIME_FIELDS,
+	PRIMARY_KEYS,
+} from "./generated/consent-time-fields.generated.ts";
 import {
 	createWireObservationSink,
 	OBSERVATION_CAPABILITY,
+	type ObservationMessage,
 	observationBasisOf,
 	setObservationSink,
 } from "./observation.ts";
@@ -334,7 +338,7 @@ interface BaseRunConnectorConfig {
 	 * function without its secret — see `resolveCredentials`.
 	 */
 	authOptional?: boolean;
-	/** Marks a record as a tombstone; runtime strips to { id } + op:'delete'. */
+	/** Marks a tombstone; runtime retains declared primary-key fields only. */
 	isTombstone?: (stream: string, data: RecordData) => boolean;
 	name: string;
 	normalizeTerminalError?: NormalizeTerminalError;
@@ -954,12 +958,49 @@ export function runConnector(config: RunConnectorConfig): void {
 	// stdin reader for START + INTERACTION_RESPONSE.
 	const rl = createInterface({ input: process.stdin, terminal: false });
 
-	// Wraps stdout write with backpressure. RECORD messages auto-captured.
-	const emit = (msg: EmittedMessage): Promise<void> => {
+	let pendingInteractionId: string | null = null;
+	let terminalEmitted = false;
+	let recordsWritten = 0;
+	// One gate for every runtime-owned protocol writer, including observations.
+	const emit = (msg: EmittedMessage | ObservationMessage): Promise<void> => {
+		if (terminalEmitted) {
+			return Promise.reject(new TerminalError("Cannot emit after DONE"));
+		}
+		// A1 is unresolved: retain terminal failure while blocking every other emit.
+		if (
+			pendingInteractionId !== null &&
+			!(
+				msg.type === "DONE" &&
+				msg.status === "failed" &&
+				msg.error?.message.trim() &&
+				typeof msg.error.retryable === "boolean"
+			)
+		) {
+			return Promise.reject(
+				new TerminalError(
+					`Cannot emit ${msg.type} while pending INTERACTION ${pendingInteractionId} awaits INTERACTION_RESPONSE`,
+					{ code: "interaction_emit_blocked" },
+				),
+			);
+		}
+		if (msg.type === "INTERACTION") {
+			pendingInteractionId = msg.request_id;
+		}
+		if (msg.type === "DONE") {
+			terminalEmitted = true;
+			if (msg.status === "failed") {
+				process.exitCode = 1;
+			}
+		}
 		if (capture && msg.type === "RECORD") {
 			capture.recordRecord(msg);
 		}
-		return emitToStdout(msg);
+		const write = emitToStdout(
+			msg.type === "DONE" ? { ...msg, records_emitted: recordsWritten } : msg,
+		);
+		// A queued RECORD is already on the wire, even while stdout drains.
+		if (msg.type === "RECORD") recordsWritten += 1;
+		return write;
 	};
 
 	if (capture) {
@@ -972,6 +1013,9 @@ export function runConnector(config: RunConnectorConfig): void {
 	}
 
 	const flushAndExit = (code: number): void => {
+		// Input violations during the ACK wait must survive a queued success.
+		const exit = (finalCode: number): never =>
+			process.exit(process.exitCode === 1 ? 1 : finalCode);
 		// On a successful run, run the optional durable-commit hook after the
 		// runtime acknowledges ingest (the `exit` callback fires post-ack) and
 		// before the real process exit. Best-effort: a hook failure never changes
@@ -982,21 +1026,22 @@ export function runConnector(config: RunConnectorConfig): void {
 			};
 			flushAndExitAfterRuntimeAck(code, {
 				exit: (finalCode: number): void => {
+					if (process.exitCode === 1) {
+						exit(finalCode);
+					}
 					Promise.resolve()
 						.then(() => onDurableCommit(logDurableCommit))
 						.catch((): undefined => undefined)
 						.finally((): void => {
-							process.exit(finalCode);
+							exit(finalCode);
 						});
 				},
 			});
 			return;
 		}
-		flushAndExitAfterRuntimeAck(code);
+		flushAndExitAfterRuntimeAck(code, { exit });
 	};
 
-	let observedCounters: { totalEmitted: number; totalSkipped: number } | null =
-		null;
 	let reportedStreamFailure: {
 		message: string;
 		retryable: boolean;
@@ -1006,16 +1051,30 @@ export function runConnector(config: RunConnectorConfig): void {
 	const observationsDeclared =
 		config.protocolCapabilities?.includes(OBSERVATION_CAPABILITY) ?? false;
 	if (observationsDeclared) {
-		setObservationSink(createWireObservationSink());
+		setObservationSink(
+			createWireObservationSink((message) => {
+				emit(message).catch((error: unknown) => {
+					emitFailed(
+						describeUnexpectedFailure(error),
+						false,
+						undefined,
+						"interaction_emit_blocked",
+					);
+				});
+			}),
+		);
 	}
 
 	const emitFailed = (
 		message: string,
 		retryable = false,
-		records_emitted = observedCounters?.totalEmitted ?? 0,
+		records_emitted = recordsWritten,
 		code?: string,
 		errorBasis: readonly string[] = [],
 	): void => {
+		if (terminalEmitted) {
+			return;
+		}
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
 		// failed terminal status if Node exits before the explicit callback.
@@ -1045,6 +1104,50 @@ export function runConnector(config: RunConnectorConfig): void {
 		flushAndExit(1);
 	};
 
+	let startReceived = false;
+	rl.on("line", (line: string) => {
+		let message: unknown;
+		try {
+			message = JSON.parse(line);
+		} catch {
+			return;
+		}
+		if (
+			typeof message !== "object" ||
+			message === null ||
+			!("type" in message)
+		) {
+			return;
+		}
+		if (
+			message.type === "INTERACTION_RESPONSE" &&
+			pendingInteractionId !== null &&
+			"request_id" in message &&
+			message.request_id === pendingInteractionId
+		) {
+			pendingInteractionId = null;
+			return;
+		}
+		if (message.type !== "START") return;
+		if (startReceived) {
+			if (terminalEmitted) {
+				process.exitCode = 1;
+				connectorDiagnostic("runtime", "duplicate_start", {
+					message: "Received a second START message after DONE",
+				});
+				return;
+			}
+			emitFailed(
+				"Received a second START message",
+				false,
+				undefined,
+				"duplicate_start",
+			);
+		} else {
+			startReceived = true;
+		}
+	});
+
 	let interactionCounter = 0;
 	const nextInteractionId = (): string => {
 		interactionCounter += 1;
@@ -1064,6 +1167,14 @@ export function runConnector(config: RunConnectorConfig): void {
 	const sendInteraction = (
 		req: InteractionRequest,
 	): Promise<InteractionResponse> => {
+		if (pendingInteractionId !== null) {
+			return Promise.reject(
+				new TerminalError(
+					`Cannot emit INTERACTION while pending INTERACTION ${pendingInteractionId} awaits INTERACTION_RESPONSE`,
+					{ code: "interaction_emit_blocked" },
+				),
+			);
+		}
 		const request_id = req.request_id ?? nextInteractionId();
 		const wrapped: EmittedMessage = {
 			type: "INTERACTION",
@@ -1075,8 +1186,7 @@ export function runConnector(config: RunConnectorConfig): void {
 				? {}
 				: { timeout_seconds: req.timeout_seconds }),
 		};
-		// Fire the INTERACTION; response arrives separately on stdin.
-		emit(wrapped).catch((): undefined => undefined);
+		// Register the response listener before writing the request.
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			const cleanup = (): void => {
@@ -1100,7 +1210,9 @@ export function runConnector(config: RunConnectorConfig): void {
 						parsed.type === "INTERACTION_RESPONSE" &&
 						parsed.request_id === request_id
 					) {
-						settle(() => resolve(parsed));
+						settle(() => {
+							resolve(parsed);
+						});
 					}
 				} catch (err) {
 					settle(() =>
@@ -1126,6 +1238,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			rl.once("close", onClose);
 			process.stdin.once("end", onClose);
 			process.stdin.once("error", onError);
+			emit(wrapped).catch((error: unknown) => settle(() => reject(error)));
 		});
 	};
 
@@ -1191,13 +1304,13 @@ export function runConnector(config: RunConnectorConfig): void {
 			req.maxBytes > 0
 				? Math.floor(req.maxBytes)
 				: undefined;
-		emit({
+		const message: EmittedMessage = {
 			type: "DETAIL_GAPS_PAGE_REQUEST",
 			reference_only: true,
 			request_id,
 			...(streams && streams.length > 0 ? { streams } : {}),
 			...(maxBytes ? { max_bytes: maxBytes } : {}),
-		}).catch((): undefined => undefined);
+		};
 		return new Promise((resolve, reject) => {
 			const onLine = (line: string): void => {
 				try {
@@ -1223,6 +1336,10 @@ export function runConnector(config: RunConnectorConfig): void {
 				}
 			};
 			rl.on("line", onLine);
+			emit(message).catch((error: unknown) => {
+				rl.off("line", onLine);
+				reject(error);
+			});
 		});
 	};
 
@@ -1294,6 +1411,7 @@ export function runConnector(config: RunConnectorConfig): void {
 
 	async function run(): Promise<void> {
 		const startMsg = await parseStart(readStart);
+		if (terminalEmitted) return;
 		const scopeRequested = buildRequested(startMsg);
 		// §5.1: a bounded stream with no timestamp consent field cannot apply
 		// the bound. Report it and withhold it from collection rather than
@@ -1362,21 +1480,24 @@ export function runConnector(config: RunConnectorConfig): void {
 			validateRecord,
 			isTombstone,
 			timeRangeFieldFor,
+			primaryKeyFor: (stream) =>
+				PRIMARY_KEYS[name.replaceAll("-", "_")]?.[stream] ?? ["id"],
 		});
-		observedCounters = emitRecord.counters;
 		const emittedAt = nowIso();
 		// After a record was withheld at or after `until`, a cursor may point
 		// past it, and a recovery receipt may close a gap whose record was
 		// withheld. Save neither in this run; the next run resumes from the
 		// prior checkpoints and re-reads instead of losing it.
-		const emitWithBoundedCheckpoints = (msg: EmittedMessage): Promise<void> =>
-			withholdsBoundedProgress(msg, emitRecord.withheldAtOrAfterUntil)
-				? emit({
-						type: "PROGRESS",
-						stream: msg.stream,
-						message: `${msg.type} for ${msg.stream} not saved: a record at or after the time range's end was withheld in this run, so the next run resumes from the previous checkpoint`,
-					})
-				: emit(msg);
+		const emitWithBoundedCheckpoints = (msg: EmittedMessage): Promise<void> => {
+			if (withholdsBoundedProgress(msg, emitRecord.withheldAtOrAfterUntil)) {
+				connectorDiagnostic("runtime", "bounded_checkpoint_withheld", {
+					message_type: msg.type,
+					stream: msg.stream,
+				});
+				return Promise.resolve();
+			}
+			return emit(msg);
+		};
 
 		const baseCtx: BaseCollectContext = {
 			scope: startMsg.scope,
@@ -1604,6 +1725,7 @@ export function makeEmitRecord(deps: {
 	validateRecord: ValidateRecord | undefined;
 	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
 	timeRangeFieldFor: (stream: string) => ConsentTimeField | null;
+	primaryKeyFor?: (stream: string) => readonly string[];
 }): {
 	emit: (
 		stream: string,
@@ -1629,6 +1751,7 @@ export function makeEmitRecord(deps: {
 		validateRecord,
 		isTombstone,
 		timeRangeFieldFor,
+		primaryKeyFor = () => ["id"],
 	} = deps;
 	// `totalAnomalous` counts records RETAINED despite unmodeled values; it is a
 	// subset of totalEmitted, not a sibling of totalSkipped.
@@ -1646,13 +1769,37 @@ export function makeEmitRecord(deps: {
 		data: RecordData,
 		options: EmitRecordOptions = {},
 	): "skip" | "tombstone" | "record" => {
-		if (data.id == null) return "skip";
-		const rs = resFilters.get(stream);
-		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
+		const tombstone = isTombstone?.(stream, data) ?? false;
+		if (!tombstone && data.id == null) {
 			return "skip";
+		}
+		if (tombstone) {
+			const fields = primaryKeyFor(stream);
+			if (
+				fields.length === 0 ||
+				fields.some(
+					(field) => data[field] == null || String(data[field]).length === 0,
+				)
+			) {
+				throw new TerminalError(
+					`Delete record for ${stream} is missing a primary-key value`,
+				);
+			}
+		}
+		const rs = resFilters.get(stream);
+		const values = (tombstone ? primaryKeyFor(stream) : ["id"]).map((field) =>
+			String(data[field]),
+		);
+		const canonicalKey =
+			values.length === 1 ? (values[0] ?? "") : JSON.stringify(values);
+		if (!options.skipResourceFilter && rs && !rs.has(canonicalKey)) {
+			return "skip";
+		}
 		const streamScope = requested.get(stream);
 		const consent = timeRangeFieldFor(stream);
-		if (streamScope?.time_range && consent === null) return "skip";
+		if (streamScope?.time_range && consent === null) {
+			return "skip";
+		}
 		const value = consent === null ? undefined : data[consent.field];
 		if (
 			streamScope?.time_range &&
@@ -1673,11 +1820,14 @@ export function makeEmitRecord(deps: {
 			if (
 				until !== undefined &&
 				isOutsideTimeRange({ until }, value, consent.format)
-			)
+			) {
 				withheldAtOrAfterUntil.add(stream);
+			}
 			return "skip";
 		}
-		if (isTombstone?.(stream, data)) return "tombstone";
+		if (tombstone) {
+			return "tombstone";
+		}
 		return "record";
 	};
 
@@ -1687,28 +1837,35 @@ export function makeEmitRecord(deps: {
 		options: EmitRecordOptions = {},
 	): Promise<void> => {
 		const selection = selectRecord(stream, data, options);
-		if (selection === "skip" || data.id == null) return Promise.resolve();
+		if (selection === "skip") {
+			return Promise.resolve();
+		}
 		if (selection === "tombstone") {
-			counters.totalEmitted += 1;
+			const fields = primaryKeyFor(stream);
+			const values = fields.map((field) => String(data[field]));
 			return emit({
 				type: "RECORD",
 				stream,
-				key: String(data.id),
-				data: { id: data.id },
+				key: values.length === 1 ? (values[0] ?? "") : values,
+				data: Object.fromEntries(fields.map((field) => [field, data[field]])),
 				emitted_at: emittedAt,
 				op: "delete",
+			}).then(() => {
+				counters.totalEmitted += 1;
 			});
 		}
 
 		const validation = validateRecord?.(stream, data);
 		if (validation && !validation.ok) {
-			counters.totalSkipped += 1;
-			return emit(makeShapeCheckSkip(stream, data, validation.issues));
+			return emit(makeShapeCheckSkip(stream, data, validation.issues)).then(
+				() => {
+					counters.totalSkipped += 1;
+				},
+			);
 		}
 		// Present only when the record was RETAINED despite carrying a value the
 		// schema does not model (see makeValidateRecord in schema-registry.ts).
 		const anomalies = validation?.anomalies;
-		counters.totalEmitted += 1;
 		const record: EmittedMessage = {
 			type: "RECORD",
 			stream,
@@ -1721,16 +1878,23 @@ export function makeEmitRecord(deps: {
 		// BEFORE the RECORD so a truncated stream never shows the record without the
 		// caveat attached to it.
 		if (anomalies?.length) {
-			counters.totalAnomalous += 1;
-			return emit(makeShapeAnomalyReport(stream, data, anomalies)).then(() =>
-				options.beforeEmit
-					? options.beforeEmit().then(() => emit(record))
-					: emit(record),
-			);
+			return emit(makeShapeAnomalyReport(stream, data, anomalies))
+				.then(() =>
+					options.beforeEmit
+						? options.beforeEmit().then(() => emit(record))
+						: emit(record),
+				)
+				.then(() => {
+					counters.totalEmitted += 1;
+					counters.totalAnomalous += 1;
+				});
 		}
-		return options.beforeEmit
+		const write = options.beforeEmit
 			? options.beforeEmit().then(() => emit(record))
 			: emit(record);
+		return write.then(() => {
+			counters.totalEmitted += 1;
+		});
 	};
 
 	return {
@@ -2298,38 +2462,34 @@ export function makeBrowserInteractionKeepalive(args: {
 		context,
 		diagnostics = false,
 		intervalMs = BROWSER_INTERACTION_KEEPALIVE_INTERVAL_MS,
-		progress,
 		sendInteraction,
 	} = args;
 	return async (req) => {
-		await emitBrowserSurfaceDiagnostic({
+		emitBrowserSurfaceDiagnostic({
 			context,
 			diagnostics,
 			phase: "interaction_start",
-			progress,
 			req,
 		});
 		const keepalive = startBrowserConnectionKeepalive(context, intervalMs);
 		try {
 			const response = await sendInteraction(req);
-			await emitBrowserSurfaceDiagnostic({
+			emitBrowserSurfaceDiagnostic({
 				context,
 				diagnostics,
 				keepalive: keepalive.stop(),
 				phase: "interaction_response",
-				progress,
 				req,
 				responseStatus: response.status,
 			});
 			return response;
 		} catch (err) {
-			await emitBrowserSurfaceDiagnostic({
+			emitBrowserSurfaceDiagnostic({
 				context,
 				diagnostics,
 				error: err,
 				keepalive: keepalive.stop(),
 				phase: "interaction_error",
-				progress,
 				req,
 			});
 			throw err;
@@ -2337,27 +2497,18 @@ export function makeBrowserInteractionKeepalive(args: {
 	};
 }
 
-async function emitBrowserSurfaceDiagnostic(args: {
+function emitBrowserSurfaceDiagnostic(args: {
 	context: BrowserSurfaceDiagnosticContext;
 	diagnostics: boolean;
 	error?: unknown;
 	keepalive?: BrowserConnectionKeepaliveSummary;
 	phase: "interaction_error" | "interaction_response" | "interaction_start";
-	progress: BaseCollectContext["progress"] | undefined;
 	req: InteractionRequest;
 	responseStatus?: InteractionResponse["status"];
-}): Promise<void> {
-	const {
-		context,
-		diagnostics,
-		error,
-		keepalive,
-		phase,
-		progress,
-		req,
-		responseStatus,
-	} = args;
-	if (!(diagnostics && progress)) {
+}): void {
+	const { context, diagnostics, error, keepalive, phase, req, responseStatus } =
+		args;
+	if (!diagnostics) {
 		return;
 	}
 	let errorMessage: string | null = null;
@@ -2375,17 +2526,10 @@ async function emitBrowserSurfaceDiagnostic(args: {
 		keepalive: keepalive ?? null,
 		error: errorMessage,
 	};
-	try {
-		await progress(`browser_surface.diagnostic ${JSON.stringify(payload)}`);
-	} catch (progressError) {
-		const message =
-			progressError instanceof Error
-				? progressError.message
-				: String(progressError);
-		process.stderr.write(
-			`[browser-surface-diagnostics] progress emit failed: ${message}\n`,
-		);
-	}
+	connectorDiagnostic("runtime", "browser_surface", {
+		phase,
+		details: JSON.stringify(payload),
+	});
 }
 
 function describeBrowserSurface(context: BrowserSurfaceDiagnosticContext): {

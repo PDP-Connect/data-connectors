@@ -3,7 +3,7 @@
 
 // GENERATED FILE — do not hand-edit. Produced by
 // scripts/generate-consent-time-fields.ts from every shipped connector
-// manifest's per-stream consent_time_field and its declared format. A stream
+// manifest's per-stream consent_time_field, format, and primary_key. A stream
 // maps to null when the runtime cannot compare bounds with its consent field
 // (absent, a string with no format, an integer, or a date field not yet
 // enabled), so a bounded run reports scope_not_supported for it.
@@ -340,5 +340,337 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		subscriptions: null,
 		watch_history: { field: "watched_at", format: "date-time" },
 		watch_later: null,
+	},
+};
+
+/** Declared primary-key field order for RECORD delete envelopes (§5.2). */
+export const PRIMARY_KEYS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	amazon: {
+		order_items: ["id"],
+		orders: ["id"],
+		profile: ["id"],
+	},
+	anthropic: {
+		account_profile: ["id"],
+		conversations: ["id"],
+		messages: ["id"],
+		project_documents: ["id"],
+		projects: ["id"],
+	},
+	apple_contacts: {
+		address_books: ["id"],
+		contact_groups: ["id"],
+		contacts: ["id"],
+	},
+	apple_health: {
+		records: ["id"],
+		workouts: ["id"],
+	},
+	apple_photos: {
+		photos: ["id"],
+	},
+	chase: {
+		accounts: ["id"],
+		balances: ["id"],
+		current_activity: ["id"],
+		statements: ["id"],
+		transactions: ["id"],
+	},
+	chatgpt: {
+		account_plan: ["id"],
+		conversations: ["id"],
+		custom_gpts: ["id"],
+		custom_instructions: ["id"],
+		memories: ["id"],
+		messages: ["id"],
+		shared_conversations: ["id"],
+	},
+	claude_code: {
+		attachments: ["id"],
+		backup_inventory: ["id"],
+		cache_inventory: ["id"],
+		config_inventory: ["id"],
+		file_history: ["id"],
+		memory_notes: ["id"],
+		messages: ["id"],
+		sessions: ["id"],
+		skills: ["id"],
+		slash_commands: ["id"],
+		usage: ["id"],
+	},
+	codex: {
+		cache_inventory: ["id"],
+		config_inventory: ["id"],
+		function_calls: ["id"],
+		history: ["id"],
+		messages: ["id"],
+		prompts: ["id"],
+		rules: ["id"],
+		session_index: ["id"],
+		sessions: ["id"],
+		shell_snapshots: ["id"],
+		skills: ["id"],
+	},
+	discord_browser: {
+		connections: ["id"],
+		messages: ["id"],
+		profile: ["id"],
+		servers: ["id"],
+	},
+	doordash: {
+		order_items: ["id"],
+		orders: ["id"],
+	},
+	github: {
+		contributions: ["id"],
+		events: ["id"],
+		gists: ["id"],
+		issues: ["id"],
+		organizations: ["id"],
+		pinned_repositories: ["id"],
+		pull_requests: ["id"],
+		repositories: ["id"],
+		starred: ["id"],
+		user: ["id"],
+		user_stats: ["id"],
+	},
+	github_browser: {
+		contributions: ["id"],
+		events: ["id"],
+		history: ["id"],
+		profile: ["id"],
+		repositories: ["id"],
+		starred: ["id"],
+	},
+	gmail: {
+		attachments: ["id"],
+		labels: ["name"],
+		message_bodies: ["id"],
+		messages: ["id"],
+		threads: ["id"],
+	},
+	google_calendar: {
+		calendars: ["id"],
+		events: ["id"],
+	},
+	google_contacts: {
+		contact_groups: ["id"],
+		people: ["id"],
+	},
+	google_maps: {
+		timeline_points: ["id"],
+		timeline_segments: ["id"],
+	},
+	google_maps_data_portability: {
+		archive_jobs: ["id"],
+	},
+	google_messages: {
+		messages: ["id"],
+	},
+	google_takeout: {
+		location_history: ["id"],
+		photos: ["id"],
+		search_history: ["id"],
+		youtube_watch_history: ["id"],
+	},
+	groupme: {
+		attachments: ["id"],
+		direct_chat_messages: ["id"],
+		direct_messages: ["id"],
+		group_messages: ["id"],
+		groups: ["id"],
+	},
+	heb: {
+		nutrition: ["id"],
+		order_items: ["id"],
+		orders: ["id"],
+		profile: ["id"],
+	},
+	ical: {
+		events: ["id"],
+	},
+	icloud_notes: {
+		folders: ["id"],
+		notes: ["id"],
+	},
+	imessage: {
+		attachments: ["id"],
+		messages: ["id"],
+		participants: ["id"],
+	},
+	jellyfin: {
+		items: ["id"],
+		libraries: ["id"],
+	},
+	linkedin: {
+		connections: ["id"],
+		education: ["id"],
+		experience: ["id"],
+		languages: ["id"],
+		profile: ["id"],
+		skills: ["id"],
+	},
+	loom: {
+		transcripts: ["id"],
+		videos: ["id"],
+	},
+	meta: {
+		ads: ["id"],
+		following: ["id"],
+		post_likes: ["post_id", "liker_ordinal"],
+		posts: ["id"],
+		profile: ["id"],
+	},
+	netflix_export: {
+		viewing_activity: ["id"],
+	},
+	notion: {
+		databases: ["id"],
+		pages: ["id"],
+	},
+	oura: {
+		activity: ["id"],
+		readiness: ["id"],
+		sleep: ["id"],
+	},
+	oura_browser: {
+		activity: ["id"],
+		readiness: ["id"],
+		sleep: ["id"],
+	},
+	pocket: {
+		items: ["id"],
+	},
+	reddit: {
+		comments: ["id"],
+		downvoted: ["id"],
+		hidden: ["id"],
+		saved: ["id"],
+		submitted: ["id"],
+		upvoted: ["id"],
+	},
+	shopify: {
+		orders: ["id"],
+	},
+	signal: {
+		attachments: ["id"],
+		conversations: ["id"],
+		messages: ["id"],
+		reactions: ["id"],
+	},
+	slack: {
+		canvases: ["id"],
+		channel_memberships: ["id"],
+		channel_stats: ["id"],
+		channels: ["id"],
+		dm_read_states: ["id"],
+		files: ["id"],
+		message_attachments: ["id"],
+		messages: ["id"],
+		reactions: ["id"],
+		reminders: ["id"],
+		stars: ["id"],
+		user_groups: ["id"],
+		users: ["id"],
+		workspace: ["id"],
+	},
+	spotify: {
+		playlist_items: ["id"],
+		playlists: ["id"],
+		profile: ["id"],
+		saved_tracks: ["id"],
+	},
+	steam: {
+		friends: ["id"],
+		owned_games: ["id"],
+		profile: ["steamid"],
+		recently_played_games: ["id"],
+		steam_level: ["id"],
+	},
+	strava: {
+		activities: ["id"],
+	},
+	strava_browser: {
+		activities: ["id"],
+	},
+	twitter_archive: {
+		direct_messages: ["id"],
+		tweets: ["id"],
+	},
+	uber: {
+		receipts: ["trip_id"],
+		trips: ["id"],
+	},
+	usaa: {
+		account_stats: ["id"],
+		accounts: ["id"],
+		credit_card_billing: ["id"],
+		credit_card_billing_stats: ["id"],
+		inbox_messages: ["id"],
+		statements: ["id"],
+		transactions: ["id"],
+	},
+	venmo: {
+		friends: ["id"],
+		profile: ["id"],
+		transactions: ["id"],
+	},
+	whatsapp: {
+		attachments: ["id"],
+		chats: ["id"],
+		messages: ["id"],
+	},
+	wholefoods: {
+		nutrition: ["product_id"],
+		order_items: ["id"],
+		orders: ["id"],
+		profile: ["id"],
+	},
+	whoop: {
+		body: ["id"],
+		cycles: ["id"],
+		profile: ["id"],
+		recoveries: ["id"],
+		sleeps: ["id"],
+		workouts: ["id"],
+	},
+	x_browser: {
+		bookmarks: ["id"],
+		likes: ["id"],
+		posts: ["id"],
+		profile: ["id"],
+	},
+	ynab: {
+		account_stats: ["id"],
+		accounts: ["id"],
+		budgets: ["id"],
+		categories: ["id"],
+		category_groups: ["id"],
+		month_categories: ["id"],
+		months: ["id"],
+		payee_locations: ["id"],
+		payees: ["id"],
+		scheduled_transactions: ["id"],
+		transactions: ["id"],
+	},
+	youtube: {
+		likes: ["id"],
+		playlist_items: ["id"],
+		playlists: ["id"],
+		profile: ["id"],
+		subscriptions: ["id"],
+		watch_history: ["id"],
+		watch_later: ["id"],
+	},
+	youtube_takeout: {
+		likes: ["id"],
+		playlist_items: ["id"],
+		playlists: ["id"],
+		profile: ["id"],
+		subscriptions: ["id"],
+		watch_history: ["id"],
+		watch_later: ["id"],
 	},
 };

@@ -408,11 +408,15 @@ test("a record withheld at or after until blocks that stream's checkpoint", asyn
 	]);
 	const after = await run("2026-02-01T00:00:00Z");
 	assert.deepEqual(kinds(after), []);
-	assert.ok(
+	assert.equal(
 		after.messages.some(
-			(m) =>
-				m.type === "PROGRESS" && /STATE for messages not saved/.test(m.message),
+			(m) => m.type === "PROGRESS" && /not saved/.test(m.message),
 		),
+		false,
+	);
+	assert.match(
+		after.stderr,
+		/\[runtime-diagnostic\] bounded_checkpoint_withheld/u,
 	);
 	// A record before `since` is withheld too, but it cannot be past the cursor.
 	assert.deepEqual(kinds(await run("2025-12-31T00:00:00Z")), ["STATE"]);
