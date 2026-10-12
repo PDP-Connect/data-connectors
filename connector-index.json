@@ -573,6 +573,33 @@
           "claude.projects"
         ],
         "consumerMetadata": null
+      },
+      {
+        "connectorId": "claude-export-playwright",
+        "company": "Anthropic",
+        "version": "2.0.4",
+        "name": "Claude",
+        "status": "experimental",
+        "description": "Exports your Claude conversations and projects via Anthropic's official data export (one complete archive, no per-conversation rate limiting).",
+        "sourceFiles": {
+          "script": "anthropic/claude-export-playwright.js",
+          "metadata": "anthropic/claude-export-playwright.json"
+        },
+        "publishedAt": "2026-10-10T00:00:00Z",
+        "sourceTag": "fix/claude-export-not-ready-emits-empty",
+        "sourceCommit": "d1a11bc719a34de9bd6286210e6562687ac99954",
+        "releaseId": "connectors-d1a11bc719a3",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:bb594534f7416bb5a4572e2e2136dbc64f795a0d5129d37824f75c5dbbdc56ee",
+        "scriptSha256": "sha256:453eade9acbc99a9c741f024c2e3ab5d085bef76b0c0dc9f396295eda2fb3ef2",
+        "artifactSha256": "sha256:b45f52ed252c61493faa5dab8ec4217104e5f3edd68626b50172253b631ce423",
+        "artifactPath": "artifacts/claude-export-playwright/claude-export-playwright-2.0.4.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/d1a11bc719a34de9bd6286210e6562687ac99954/artifacts/claude-export-playwright/claude-export-playwright-2.0.4.tgz",
+        "scopes": [
+          "claude.conversations",
+          "claude.projects"
+        ],
+        "consumerMetadata": null
       }
     ],
     "doordash-playwright": [
