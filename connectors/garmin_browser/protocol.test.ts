@@ -240,6 +240,42 @@ test(
 );
 
 test(
+	"garmin_browser: a calendar-date stream answers an instant bound with scope_not_supported before reading, and reads a full-date bound by its days",
+	SUBPROCESS,
+	async () => {
+		// Inside one day, as instants: no day to read, so the owner is told rather than sent nothing.
+		const instants = {
+			since: "2026-09-16T00:00:00Z",
+			until: "2026-09-16T12:00:00Z",
+		};
+		const run = await start([
+			{ name: "daily_summaries", time_range: instants },
+			{ name: "hrv", time_range: instants },
+			{
+				name: "training_status",
+				time_range: { since: "2026-09-16", until: "2026-09-17" },
+			},
+		]);
+		assertSucceeded(run);
+		assert.deepEqual(
+			noiseOf(run).map((m) => [
+				m.type,
+				streamOf(m),
+				(m as { reason?: string }).reason,
+			]),
+			[
+				["SKIP_RESULT", "daily_summaries", "scope_not_supported"],
+				["SKIP_RESULT", "hrv", "scope_not_supported"],
+			],
+		);
+		assert.deepEqual(countsOf(run), { training_status: 1 });
+		assertCursors(run, {
+			training_status: { next_day: "2026-09-17", floor: "2026-09-16" },
+		});
+	},
+);
+
+test(
 	"garmin_browser: a run seeded with the first run's STATE succeeds, re-reads a week of each daily stream and each range stream from four weeks before the last run's day, and keeps the cursor",
 	SUBPROCESS,
 	async () => {
