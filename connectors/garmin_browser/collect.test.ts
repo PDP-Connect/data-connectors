@@ -2537,6 +2537,35 @@ test("collect: a narrower until whose run reads only kept days near it leaves th
 	]);
 });
 
+test("collect: a grant starting earlier and ending far behind the cursor keeps its until with the history it read, so the open grant it alternates with does not go back to that until", async () => {
+	const open = { since: "2026-05-01T00:00:00.000Z" };
+	const until = "2026-03-01T00:00:00.000Z";
+	const first = await activitiesRun(open);
+	// History from the last day of 2024 up to the until, below the floor: it cannot reach the floor.
+	const behind = await activitiesRun(
+		{ since: "2025-01-01T00:00:00.000Z", until },
+		first,
+	);
+	const saved = statesOf(behind).activities as {
+		until_at?: string;
+		backfill?: unknown;
+	};
+	assert.equal(saved.until_at, undefined);
+	assert.deepEqual(saved.backfill, {
+		since: "2024-12-31",
+		next_day: "2026-03-02",
+		until_at: until,
+	});
+	const fake = fakeGarmin();
+	await activitiesRun(open, behind, fake);
+	// The re-read, then the two days below the floor its own start reads.
+	assert.deepEqual(piecesOf(fake), [
+		["2026-10-04", "2026-10-31"],
+		["2026-11-01", "2026-11-01"],
+		["2026-04-30", "2026-05-01"],
+	]);
+});
+
 test("collect: grants alternating on one cursor, one narrower at an edge whose held days lie behind the re-read, cost the wider one only its re-read", async () => {
 	const wide = { since: MIDNIGHT };
 	const cases = [
@@ -2651,9 +2680,15 @@ test("collect: history read under an until is read again from the day before the
 	// The history from 31 August, read up to the 11th, is saved part read.
 	assert.deepEqual(
 		(statesOf(ended).activities as { backfill?: unknown }).backfill,
-		{ since: "2026-08-31", next_day: "2026-09-12" },
+		{
+			since: "2026-08-31",
+			next_day: "2026-09-12",
+			until_at: "2026-09-10T12:00:00.000Z",
+		},
 	);
-	const open = await activitiesRun({ since }, ended, account());
+	const fake = account();
+	const open = await activitiesRun({ since }, ended, fake);
+	assert.deepEqual(piecesOf(fake).at(-1), ["2026-09-09", "2026-09-16"]);
 	assert.deepEqual(idsOf(open, "activities").toSorted(), [
 		"41000101",
 		"41000102",

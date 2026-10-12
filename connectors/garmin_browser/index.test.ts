@@ -1132,6 +1132,18 @@ test("readCursor keeps a grant's instants that parse, and starts afresh from one
 		readCursor({ ...ended, since_at: null, retry, retry_next: "2026-01-02" }),
 		{ retry, retry_next: "2026-01-02" },
 	);
+	// The history's own until: kept when it parses; the history is read again when it does not.
+	const backfill = {
+		since: "2026-08-01",
+		next_day: "2026-08-20",
+		until_at: "2026-08-15T00:00:00.000Z",
+	};
+	assert.deepEqual(readCursor({ ...ended, backfill }).backfill, backfill);
+	assert.equal(
+		readCursor({ ...ended, backfill: { ...backfill, until_at: "soon" } })
+			.backfill,
+		undefined,
+	);
 });
 
 test("grantDays reads an instant grant from the day before its first UTC day to the last day a record starting inside it is filed under: two days on for sleep, one for activities", () => {

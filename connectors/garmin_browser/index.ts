@@ -472,13 +472,15 @@ async function fetchJson(
  * kept day again. `since_at` and `until_at`, for a stream consented by instant, are the grant the
  * cursor was last read with: on the days from `floor` up to `next_day`, every record that starts
  * inside it has been delivered, or its day is kept in `retry`. Each is absent for an open end.
+ * `backfill.until_at` is the earliest until the history below the floor was read under, absent
+ * while every such read was open.
  */
 export interface DayCursor {
 	next_day?: string;
 	floor?: string;
 	since_at?: string;
 	until_at?: string;
-	backfill?: { since: string; next_day: string };
+	backfill?: { since: string; next_day: string; until_at?: string };
 	retry?: Window[];
 	retry_next?: string;
 }
@@ -489,7 +491,14 @@ export interface DayCursor {
 export const MAX_RETRY_DAYS = 366;
 /** Days a run reads: on from the cursor, back before its floor, or again from `retry`. */
 type Segment =
-	| { kind: "forward" | "backfill"; from: string; to: string; since: string }
+	| { kind: "forward"; from: string; to: string; since: string }
+	| {
+			kind: "backfill";
+			from: string;
+			to: string;
+			since: string;
+			until_at?: string;
+	  }
 	| { kind: "retry"; from: string; to: string };
 /**
  * A grant in days: `since` inclusive, `until` exclusive. A stream consented by instant also carries
@@ -625,9 +634,21 @@ export function readCursor(value: unknown): DayCursor {
 	if (typeof since_at === "string") cursor.since_at = since_at;
 	if (typeof until_at === "string") cursor.until_at = until_at;
 	if (typeof backfill === "object" && backfill !== null) {
-		const { since, next_day: resume } = backfill as Record<string, unknown>;
-		if (isDay(since) && isDay(resume) && since <= resume && resume <= floor) {
+		const {
+			since,
+			next_day: resume,
+			until_at: read,
+		} = backfill as Record<string, unknown>;
+		// An until that does not parse could claim the history whole past it: it is read again.
+		if (
+			isDay(since) &&
+			isDay(resume) &&
+			since <= resume &&
+			resume <= floor &&
+			(read === undefined || parseIsoInstant(read) !== null)
+		) {
 			cursor.backfill = { since, next_day: resume };
+			if (typeof read === "string") cursor.backfill.until_at = read;
 		}
 	}
 	return cursor;
@@ -752,13 +773,26 @@ function widen(cursor: DayCursor, grant: DayRange): void {
 	if (later) {
 		const edge = addDays(utcDay(Date.parse(until_at)), -1);
 		cursor.next_day = within(edge);
-		const saved = cursor.backfill;
-		if (saved && saved.next_day > edge) {
-			if (edge <= saved.since) delete cursor.backfill;
-			else saved.next_day = edge;
-		}
+		cutHistory(cursor, edge);
+	}
+	// History read under an until this grant reaches past is whole only before that until's edge.
+	const read = cursor.backfill?.until_at;
+	if (
+		read !== undefined &&
+		(grant.until_at === undefined || isBefore(read, grant.until_at))
+	) {
+		cutHistory(cursor, addDays(utcDay(Date.parse(read)), -1));
+		if (cursor.backfill) delete cursor.backfill.until_at;
 	}
 	if (earlier) delete cursor.backfill;
+}
+
+/** Cuts the history read so far back to `edge`, the first day it may lack a record on; none is left when that is where it began. */
+function cutHistory(cursor: DayCursor, edge: string): void {
+	const saved = cursor.backfill;
+	if (!saved || saved.next_day <= edge) return;
+	if (edge <= saved.since) delete cursor.backfill;
+	else saved.next_day = edge;
 }
 
 /**
@@ -788,10 +822,17 @@ function keepWider(
 		if (!narrower[edge] || at === undefined) continue;
 		const held = heldBy(at, grant.filed_after ?? 0);
 		// At the until, mark() keeps those days on the retry list, so kept days read again there hold
-		// back nothing the wider until does not still keep.
+		// back nothing the wider until does not still keep; and history that cannot reach the floor in
+		// this run keeps its own until (`backfill.until_at`), so its days join the cursor's only once
+		// a later run reads them under the until then.
+		const floorEnd = addDays(cursor.floor as string, -1);
 		const holds = (segment: Segment): boolean =>
 			intersects(segment, held) &&
-			!(edge === "until_at" && segment.kind === "retry");
+			!(
+				edge === "until_at" &&
+				(segment.kind === "retry" ||
+					(segment.kind === "backfill" && segment.to < floorEnd))
+			);
 		if (segments.some(holds)) continue;
 		const wider = claim[edge];
 		if (wider === undefined) delete cursor[edge];
@@ -862,7 +903,13 @@ export function planDays(
 				: start;
 		const to = addDays(floor, -1) < last ? addDays(floor, -1) : last;
 		if (resume <= to) {
-			segments.push({ kind: "backfill", from: resume, to, since: start });
+			segments.push({
+				kind: "backfill",
+				from: resume,
+				to,
+				since: start,
+				...(grant.until_at === undefined ? {} : { until_at: grant.until_at }),
+			});
 		}
 	}
 	// Last, the days to read again: inside the grant, not read above, and from where the last run
@@ -937,7 +984,14 @@ function advance(cursor: DayCursor, segment: Segment, day: string): void {
 		cursor.floor = segment.since;
 		delete cursor.backfill;
 	} else {
+		const kept = cursor.backfill?.until_at;
+		const until_at =
+			kept === undefined ||
+			(segment.until_at !== undefined && isBefore(segment.until_at, kept))
+				? segment.until_at
+				: kept;
 		cursor.backfill = { since: segment.since, next_day: addDays(day, 1) };
+		if (until_at !== undefined) cursor.backfill.until_at = until_at;
 	}
 }
 
