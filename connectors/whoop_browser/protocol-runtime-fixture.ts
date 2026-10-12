@@ -1,7 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Synthetic WHOOP answers, real connector runtime. Run only as a test subprocess.
+// Synthetic WHOOP answers, real connector runtime. It runs under the shipped name, so the runtime
+// takes each stream's consent field from the manifest, as for whoop_browser itself. Run only as a
+// test subprocess.
 import { readFileSync } from "node:fs";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { collectWhoopBrowser, type WhoopCollectContext } from "./index.ts";
@@ -27,9 +29,8 @@ const page = {
 } as unknown as WhoopCollectContext["page"];
 
 runConnector({
-	name: "whoop_browser_synthetic_runtime",
+	name: "whoop_browser",
 	validateRecord,
-	timeRangeField: "start_at",
 	collect: (ctx) =>
 		collectWhoopBrowser(
 			{ ...ctx, page },

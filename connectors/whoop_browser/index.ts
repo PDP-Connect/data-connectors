@@ -428,7 +428,7 @@ export function readCursor(value: unknown): WindowCursor | null {
 	};
 }
 
-/** Whether a record's start lies in its stream's grant, to the instant: the runtime's own filter compares days. */
+/** Whether a record's start lies in its stream's grant, to the instant, as the runtime also checks: outside it, a record is neither emitted nor counted. */
 function inRange(startAt: unknown, range: Range | undefined): boolean {
 	const start = instant(startAt);
 	if (start === null) return false;
@@ -772,8 +772,6 @@ if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "whoop_browser",
 		validateRecord,
-		// Every stream's consent field: an RFC 3339 instant, the start of the cycle, sleep or workout.
-		timeRangeField: "start_at",
 		// = connector_key (authoring.md, Naming): the runtime keys the host-browser variable by it.
 		browser: { profileName: "whoop-browser" },
 		probeSession: ({ page }) => probeSession(page),

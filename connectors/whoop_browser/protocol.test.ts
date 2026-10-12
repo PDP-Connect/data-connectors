@@ -11,7 +11,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
-import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	consentTimeFieldResolver,
+	type EmittedMessage,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type ConnectorSubprocessResult,
 	runConnectorProtocolSubprocess,
@@ -265,10 +268,9 @@ test(
 	"whoop_browser: a START time_range drops each stream's records outside its own range",
 	SUBPROCESS,
 	async () => {
-		// The runtime drops a record when `start_at < since.slice(0, 10)` or `start_at >=
-		// until.slice(0, 10)`, comparing strings at day precision. Both bounds sit on UTC midnight,
-		// so that filter and the connector's own, at the grant's exact instants, agree on every
-		// fixture record. Recoveries and workouts carry no range, so the walk is the unbounded one.
+		// The runtime, from the manifest's consent_time_field, and the connector both hold each
+		// record to its stream's grant at the instant. Recoveries and workouts carry no range, so
+		// the walk is the unbounded one.
 		const run = await start([
 			{ name: "cycles", time_range: { until: "2026-09-16T00:00:00.000Z" } },
 			{ name: "recoveries" },
@@ -358,10 +360,9 @@ test(
 	"whoop_browser: a bounded grant keeps the naps and workouts of the cycle under way at its start",
 	SUBPROCESS,
 	async () => {
-		// Both bounds hold the nap (2026-09-15T05:10Z) and the run (2026-09-14T22:00Z), at the
-		// runtime's day precision and at the grant's exact instants alike. Both sit in the scored
-		// cycle, which began at 2026-09-14T12:40Z, before either bound: the walk reaches two days
-		// before the earliest since to read it, and each stream's floor records its own reach.
+		// Both bounds hold the nap (2026-09-15T05:10Z) and the run (2026-09-14T22:00Z). Both sit in
+		// the scored cycle, which began at 2026-09-14T12:40Z, before either bound: the walk reaches
+		// two days before the earliest since to read it, and each stream's floor records its own reach.
 		const run = await start([
 			{ name: "sleeps", time_range: { since: "2026-09-15T00:00:00.000Z" } },
 			{ name: "workouts", time_range: { since: "2026-09-14T18:00:00.000Z" } },
@@ -382,8 +383,7 @@ test(
 	SUBPROCESS,
 	async () => {
 		// Cycles carry no range, so the walk is unbounded and the nap (2026-09-15T05:10Z) is built.
-		// It starts before since's instant but on since's day, so the runtime's day-precision
-		// filter keeps it: a record from outside the grant ships unless the connector drops it.
+		// It starts before since's instant but on since's day, so it is held out at the instant.
 		const run = await start([
 			{ name: "cycles" },
 			{ name: "sleeps", time_range: { since: "2026-09-15T12:00:00.000Z" } },
@@ -404,8 +404,8 @@ test(
 	SUBPROCESS,
 	async () => {
 		// Every stream from 2026-09-14T18:00Z: the walk reads the scored cycle (12:40Z that day)
-		// for the run inside it. The runtime keeps everything on since's day, so the scored cycle,
-		// its recovery and its main sleep, all starting at 12:40Z, are the connector's to drop.
+		// for the run inside it. The scored cycle, its recovery and its main sleep, all starting at
+		// 12:40Z on since's day, are held out at the instant.
 		const since = "2026-09-14T18:00:00.000Z";
 		const run = await start(
 			STREAMS.map((name) => ({ name, time_range: { since } })),
@@ -430,7 +430,7 @@ test(
 	SUBPROCESS,
 	async () => {
 		// One walk serves the earliest since; each stream then keeps what starts at or after its
-		// own. Where a since falls later on a record's day, the runtime would keep the record.
+		// own. Where a since falls later on a record's day, the record is held out at the instant.
 		const run = await start([
 			{ name: "cycles", time_range: { since: "2026-09-15T18:00:00.000Z" } },
 			{ name: "recoveries", time_range: { since: "2026-08-01T00:00:00.000Z" } },
@@ -558,7 +558,7 @@ test("whoop_browser: every stream keys on id and consents and cursors on start_a
 		assert.equal(cursor_field, "start_at", stream);
 		assert.equal(consent_time_field, "start_at", stream);
 		assert.equal(schema.properties.id?.type, "string", `${stream}.id`);
-		// Never nullable: the runtime keeps a record whose range field is missing.
+		// Never nullable: the runtime does not emit a record whose consent field is missing.
 		assert.deepEqual(
 			schema.properties.start_at,
 			{ ...schema.properties.start_at, type: "string", format: "date-time" },
@@ -570,13 +570,17 @@ test("whoop_browser: every stream keys on id and consents and cursors on start_a
 			`${stream} requires start_at`,
 		);
 	}
-	// The runtime filters a grant on timeRangeField; nothing fails when it is not the consent field.
-	for (const file of ["index.ts", "protocol-runtime-fixture.ts"])
-		assert.equal(
-			/timeRangeField: "([^"]*)"/u.exec(text(file))?.[1],
-			"start_at",
-			file,
+	// The runtime takes each stream's consent field from the manifest, through the generated
+	// table, and refuses to start a shipped connector that also names a timeRangeField.
+	const consentField = consentTimeFieldResolver("whoop_browser");
+	for (const stream of STREAMS)
+		assert.deepEqual(
+			consentField(stream),
+			{ field: "start_at", format: "date-time" },
+			stream,
 		);
+	for (const file of ["index.ts", "protocol-runtime-fixture.ts"])
+		assert.doesNotMatch(text(file), /timeRangeField/u, file);
 });
 
 test("whoop_browser: every reason the connector can emit has its own copy, and no other reason does", () => {
