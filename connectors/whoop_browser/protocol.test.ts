@@ -48,7 +48,7 @@ const SLEEP = {
 };
 const RUN = "00000000-0000-4000-8000-000000000201"; // 2026-09-14T22:00Z, inside the scored cycle
 /** The cursor of an unbounded walk over the fixtures: from the account's start to now. */
-const FULL_CURSOR = { floor: HISTORY_START, through: NOW };
+const FULL_CURSOR = { v: 2, floor: HISTORY_START, through: NOW };
 const COUNTS: Record<Stream, number> = {
 	cycles: 3,
 	recoveries: 1,
@@ -103,24 +103,30 @@ const streamOf = (m: EmittedMessage): string | undefined =>
 const noiseOf = (run: ConnectorSubprocessResult): EmittedMessage[] =>
 	run.messages.filter((m) => m.type === "PROGRESS" || m.type === "SKIP_RESULT");
 
+/** A STATE's cursor without its hint for the next run's walk, which the collector tests check. */
+const withoutHint = (m: StateMessage): Record<string, unknown> => {
+	const { under_way: _, ...cursor } = m.cursor as Record<string, unknown>;
+	return cursor;
+};
+
 /** One STATE per stream named, in that order, each holding exactly this cursor. */
 function assertCursors(
 	run: ConnectorSubprocessResult,
 	streams: readonly Stream[],
-	cursor: Record<string, string>,
+	cursor: Record<string, unknown>,
 ): void {
 	const states = statesOf(run);
 	assert.deepEqual(
 		states.map((m) => m.stream),
 		[...streams],
 	);
-	for (const m of states) assert.deepEqual(m.cursor, cursor, m.stream);
+	for (const m of states) assert.deepEqual(withoutHint(m), cursor, m.stream);
 }
 
 /** One STATE per stream named, in stream order, each holding that stream's own cursor. */
 function assertEachCursor(
 	run: ConnectorSubprocessResult,
-	cursors: Partial<Record<Stream, Record<string, string>>>,
+	cursors: Partial<Record<Stream, Record<string, unknown>>>,
 ): void {
 	const states = statesOf(run);
 	assert.deepEqual(
@@ -128,7 +134,7 @@ function assertEachCursor(
 		Object.keys(cursors),
 	);
 	for (const m of states) {
-		assert.deepEqual(m.cursor, cursors[m.stream as Stream], m.stream);
+		assert.deepEqual(withoutHint(m), cursors[m.stream as Stream], m.stream);
 	}
 }
 /** The fixtures' cursor for a stream whose grant reaches back to `floor`. */
@@ -316,7 +322,7 @@ test(
 		// A floor before the account's start is no reason to start afresh, so the run resumes these
 		// cursors, each floor narrowed to the account's start. A field a cursor does not hold, an
 		// instant or not, is dropped and does not make the cursor unreadable.
-		const seeded = { floor: "2026-01-01T00:00:00.000Z", through: NOW };
+		const seeded = { v: 2, floor: "2026-01-01T00:00:00.000Z", through: NOW };
 		const run = await start(everyStream(), {
 			state: {
 				cycles: { ...seeded, open_since: "soon" },
@@ -460,7 +466,7 @@ test(
 		assert.deepEqual(idsIn(run, "sleeps"), [SLEEP.main, SLEEP.nap]);
 		assert.deepEqual(idsIn(run, "workouts"), [RUN]);
 		assert.deepEqual(noiseOf(run), []);
-		assertCursors(run, STREAMS, { floor: HISTORY_START, through: until });
+		assertCursors(run, STREAMS, { ...FULL_CURSOR, through: until });
 	},
 );
 

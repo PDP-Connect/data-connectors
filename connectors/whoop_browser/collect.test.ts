@@ -50,6 +50,7 @@ const uuid = (n: number): string =>
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 const cursorAt = (floor: number, through: number | Date) => ({
+	v: 2,
 	floor: iso(floor),
 	through: iso(typeof through === "number" ? through : through.getTime()),
 });
@@ -337,6 +338,16 @@ function statesOf(h: RecordingEmit): Record<string, unknown> {
 	return states;
 }
 
+/** Each stream's STATE cursor without its hint for the next run's walk, which the hint's own tests check. */
+function cursorsOf(h: RecordingEmit): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(statesOf(h)).map(([stream, cursor]) => {
+			const { under_way: _, ...rest } = cursor as Record<string, unknown>;
+			return [stream, rest];
+		}),
+	);
+}
+
 /** One SKIP_RESULT per stream, in stream order, each with this reason and hint. */
 function assertSkips(
 	h: RecordingEmit,
@@ -404,7 +415,7 @@ test("collect: a first run emits each fixture record once, though every window a
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(201)]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 	assertStateLast(h);
 	for (const stream of STREAMS) {
 		const last = h.events.findLastIndex(
@@ -508,7 +519,7 @@ test("collect: an account summary without created_at walks from WHOOP's earliest
 		Math.ceil((NOW.getTime() - fallback) / (WINDOW_DAYS * DAY)),
 	);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), [], "fits one run");
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(fallback, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(fallback, NOW)));
 	assert.deepEqual(idsOf(h, "cycles"), FIXTURE_CYCLE_IDS);
 });
 
@@ -541,7 +552,7 @@ test("collect: only the requested stream is emitted and checkpointed", async () 
 		new Set(["sleeps"]),
 	);
 	assert.deepEqual(idsOf(h, "sleeps"), [uuid(101), uuid(102), uuid(103)]);
-	assert.deepEqual(statesOf(h), { sleeps: cursorAt(FLOOR, NOW) });
+	assert.deepEqual(cursorsOf(h), { sleeps: cursorAt(FLOOR, NOW) });
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
 });
@@ -689,7 +700,7 @@ test("collect: a window still rate limited after two 60 s waits skips every stre
 	assert.deepEqual(idsOf(h, "cycles"), ["1000000201", "1000000202"]);
 	assertSkips(h, "collection_interrupted", RETRY);
 	assert.deepEqual(
-		statesOf(h),
+		cursorsOf(h),
 		everyStream(cursorAt(FLOOR, W1_END)),
 		"not now",
 	);
@@ -755,7 +766,7 @@ for (const failure of WINDOW_FAILURES) {
 		assert.deepEqual(fake.visits, [], "only the bootstrap may navigate");
 		assert.deepEqual(idsOf(h, "cycles"), ["1000000201", "1000000202"]);
 		assertSkips(h, failure.reason, failure.hint);
-		assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, W1_END)));
+		assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, W1_END)));
 		assertStateLast(h);
 	});
 }
@@ -787,7 +798,7 @@ test("collect: a 429 that clears on retry costs one 60 s wait and no skip", asyn
 		sleeps: 3,
 		workouts: 1,
 	});
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });
 
 test("collect: a 429 waits the Retry-After seconds it carries", async () => {
@@ -829,7 +840,7 @@ test("collect: off the app, the bootstrap navigates to it once and reads again",
 		sleeps: 3,
 		workouts: 1,
 	});
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });
 
 test("collect: a bootstrap still off the app after one navigation skips every stream and saves no cursor", async () => {
@@ -875,7 +886,7 @@ test("collect: a retyped strain or an unreadable sleep range costs that record a
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(
-		statesOf(h),
+		cursorsOf(h),
 		everyStream(cursorAt(FLOOR, NOW)),
 		"the cursor still advances",
 	);
@@ -908,7 +919,7 @@ test("collect: a value outside its unit guard is counted unreadable and never re
 		{ stream: "recoveries", count: 1 },
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });
 
 test("collect: an element whose cycle does not parse costs every record it holds", async () => {
@@ -933,7 +944,7 @@ test("collect: an element whose cycle does not parse costs every record it holds
 		{ stream: "workouts", count: 1 },
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });
 
 test("collect: an unreadable element that two padded windows both return is counted once", async () => {
@@ -981,7 +992,7 @@ test("collect: a window whose every cycle is unreadable stops the walk there, ev
 	assert.deepEqual(h.emitted, []);
 	assertSkips(h, "source_unreadable", UPGRADE);
 	assert.deepEqual(
-		statesOf(h),
+		cursorsOf(h),
 		{},
 		"a first window that fails saves no cursor",
 	);
@@ -997,7 +1008,7 @@ test("collect: a later window whose every cycle is unreadable keeps each cursor 
 	const h = await collect(fake);
 	assert.deepEqual(idsOf(h, "cycles"), ["1000000322"]);
 	assertSkips(h, "source_unreadable", UPGRADE);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, W1_END)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, W1_END)));
 });
 
 test("collect: a requested stream whose records were all readable gets no PROGRESS", async () => {
@@ -1091,20 +1102,19 @@ const RESUMED = NOW.getTime() - OVERLAP_DAYS * DAY - REACH;
 test("collect: a run from the last STATE re-reads the overlap week, then moves through to now", async () => {
 	const first = await collect(fakeWhoop(fixtures()));
 	const fake = fakeWhoop(fixtures());
+	// No cycle had begun by the week before NOW: the first run found so, and says where.
+	assert.deepEqual(
+		(statesOf(first).cycles as { under_way?: unknown }).under_way,
+		{ at: iso(NOW.getTime() - OVERLAP_DAYS * DAY), began: null },
+	);
 	const h = await collect(fake, { state: statesOf(first), now: LATER });
 	assert.deepEqual(
 		cyclesRequests(fake).map(({ start, end }) => [start, end]),
-		[
-			// Through, less the week, the reach and the pad.
-			[RESUMED - DAY, LATER.getTime() + DAY],
-			// The fixture holds no cycle before September 14, so the run steps back to the
-			// account's start for one under way when the week begins.
-			[RESUMED - WINDOW_DAYS * DAY - DAY, RESUMED + DAY],
-			[FLOOR - DAY, RESUMED - WINDOW_DAYS * DAY + DAY],
-		],
+		// Through, less the week, the reach and the pad; no step back for a cycle under way.
+		[[RESUMED - DAY, LATER.getTime() + DAY]],
 	);
 	assert.deepEqual(
-		statesOf(h),
+		cursorsOf(h),
 		everyStream(cursorAt(FLOOR, LATER)),
 		"floor kept, through moved",
 	);
@@ -1127,13 +1137,37 @@ const CLOSED_CYCLE = cycleAt(1_000_000_801, ABANDONED, {
 	updated_at: "2026-09-21T13:00:00.000+0000",
 });
 
-test("collect: a cycle under way since before the overlap week is re-read once it closes, stepping back a window at a time to its start", async () => {
+test("collect: a cycle under way since before the overlap week is re-read once it closes, in the one window where the last walk found it began", async () => {
 	const first = await collect(fakeWhoop(serve([OPEN_CYCLE])));
 	assert.equal(nth(recordsOf(first, "cycles"), 0).end_at, null);
-	assert.deepEqual(statesOf(first), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(first), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(
+		(statesOf(first).cycles as { under_way?: unknown }).under_way,
+		{ at: iso(NOW.getTime() - OVERLAP_DAYS * DAY), began: iso(ABANDONED) },
+	);
 
 	const fake = fakeWhoop(serve([CLOSED_CYCLE]));
 	const h = await collect(fake, { state: statesOf(first), now: LATER });
+	assert.deepEqual(
+		cyclesRequests(fake).map(({ start, end }) => [start, end]),
+		[
+			[RESUMED - DAY, LATER.getTime() + DAY],
+			[ABANDONED - DAY, ABANDONED + WINDOW_DAYS * DAY + DAY],
+		],
+	);
+	assert.deepEqual(
+		recordsOf(h, "cycles").map((record) => record.end_at),
+		[iso(NOW.getTime() + DAY)],
+	);
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, LATER)));
+});
+
+test("collect: with no hint, a cycle under way since before the overlap week is re-read once it closes, stepping back a window at a time to its start", async () => {
+	const fake = fakeWhoop(serve([CLOSED_CYCLE]));
+	const h = await collect(fake, {
+		state: everyStream(cursorAt(FLOOR, NOW)),
+		now: LATER,
+	});
 	assert.deepEqual(
 		cyclesRequests(fake).map(({ start, end }) => [start, end]),
 		[
@@ -1148,7 +1182,7 @@ test("collect: a cycle under way since before the overlap week is re-read once i
 		recordsOf(h, "cycles").map((record) => record.end_at),
 		[iso(NOW.getTime() + DAY)],
 	);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, LATER)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, LATER)));
 });
 
 test("collect: a grant starting inside a cycle that began weeks earlier steps back for it, however long ago that was", async () => {
@@ -1175,7 +1209,7 @@ test("collect: a grant starting inside a cycle that began weeks earlier steps ba
 		3,
 		"the walk's window and two back",
 	);
-	assert.deepEqual(statesOf(h), { workouts: cursorAt(since, NOW) });
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, NOW) });
 });
 
 /**
@@ -1203,7 +1237,7 @@ test("collect: a grant starting inside a cycle under way for days keeps its work
 	const first = await collect(fakeWhoop(serve(held)), { ranges, streams });
 	assert.deepEqual(first.skipped, []);
 	assert.deepEqual(idsOf(first, "workouts"), [uuid(953)], "first run");
-	assert.deepEqual(statesOf(first), { workouts: cursorAt(since, NOW) });
+	assert.deepEqual(cursorsOf(first), { workouts: cursorAt(since, NOW) });
 	// The strap is still off; a workout logged by hand since lands in the same cycle.
 	const later = strapOff([workoutAt(954, NOW.getTime() + HOUR)]);
 	const h = await collect(fakeWhoop(serve(later.held)), {
@@ -1213,7 +1247,7 @@ test("collect: a grant starting inside a cycle under way for days keeps its work
 		now: LATER,
 	});
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(953), uuid(954)], "next run");
-	assert.deepEqual(statesOf(h), { workouts: cursorAt(since, LATER) });
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, LATER) });
 });
 
 test("collect: a step back that fails skips the run with its cursor unmoved", async () => {
@@ -1224,7 +1258,7 @@ test("collect: a step back that fails skips the run with its cursor unmoved", as
 	const h = await collect(fake, { ranges, streams });
 	assertSkips(h, "collection_interrupted", RETRY, streams);
 	assert.deepEqual(idsOf(h, "workouts"), []);
-	assert.deepEqual(statesOf(h), { workouts: cursorAt(since, since) });
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, since) });
 });
 
 test("collect: lifting a grant's end delivers a workout after the old end, in a closed cycle that began weeks before", async () => {
@@ -1247,13 +1281,13 @@ test("collect: lifting a grant's end delivers a workout after the old end, in a 
 		streams,
 	});
 	assert.deepEqual(idsOf(first, "workouts"), [], "after the grant's end");
-	assert.deepEqual(statesOf(first), { workouts: cursorAt(FLOOR, until) });
+	assert.deepEqual(cursorsOf(first), { workouts: cursorAt(FLOOR, until) });
 	const h = await collect(fakeWhoop(serve(held)), {
 		state: statesOf(first),
 		streams,
 	});
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(955)]);
-	assert.deepEqual(statesOf(h), { workouts: cursorAt(FLOOR, NOW) });
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(FLOOR, NOW) });
 });
 
 test("collect: a run that reads no window keeps its cursor, held to the grant's end", async () => {
@@ -1266,7 +1300,7 @@ test("collect: a run that reads no window keeps its cursor, held to the grant's 
 		ranges: everyStream({ until: iso(until) }),
 	});
 	assert.deepEqual(cyclesRequests(fake), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, until)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, until)));
 });
 
 test("collect: full_refresh ignores the saved cursor and walks from the account's start", async () => {
@@ -1280,7 +1314,7 @@ test("collect: full_refresh ignores the saved cursor and walks from the account'
 	const requests = cyclesRequests(fake);
 	assert.equal(nth(requests, 0).start, FLOOR - DAY);
 	assert.equal(requests.length, 2);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, LATER)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, LATER)));
 });
 
 test("collect: a stream with no cursor of its own sends the walk back to the account's start", async () => {
@@ -1292,7 +1326,7 @@ test("collect: a stream with no cursor of its own sends the walk back to the acc
 	});
 	assert.equal(nth(cyclesRequests(fake), 0).start, FLOOR - DAY);
 	assert.deepEqual(
-		statesOf(h),
+		cursorsOf(h),
 		everyStream(cursorAt(FLOOR, NOW), ["cycles", "workouts"]),
 	);
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(201)]);
@@ -1300,14 +1334,15 @@ test("collect: a stream with no cursor of its own sends the walk back to the acc
 
 for (const [label, cursor] of [
 	["through before floor", cursorAt(NOW.getTime(), FLOOR)],
-	["through not an instant", { floor: iso(FLOOR), through: "yesterday" }],
+	["through not an instant", { v: 2, floor: iso(FLOOR), through: "yesterday" }],
+	["no shape version", { floor: iso(FLOOR), through: iso(NOW.getTime()) }],
 	["no object at all", "2026-09-20"],
 ] as const) {
 	test(`collect: a saved cursor with ${label} counts as none`, async () => {
 		const fake = fakeWhoop(fixtures());
 		const h = await collect(fake, { state: everyStream(cursor) });
 		assert.equal(nth(cyclesRequests(fake), 0).start, FLOOR - DAY);
-		assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+		assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 	});
 }
 
@@ -1325,7 +1360,7 @@ test("collect: the least advanced stream's cursor sets where the overlap starts"
 		nth(cyclesRequests(fake), 0).start,
 		behind - OVERLAP_DAYS * DAY - REACH - DAY,
 	);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, LATER)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, LATER)));
 });
 
 test("collect: a grant starting after the account starts the walk two days before it, and the cursor's floor at it", async () => {
@@ -1340,7 +1375,7 @@ test("collect: a grant starting after the account starts the walk two days befor
 	// The fixture holds no cycle before September 14: one window back reaches the account's start.
 	assert.equal(requests.length, 2);
 	assert.equal(nth(requests, 1).start, FLOOR - DAY);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(Date.parse(SINCE), NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(Date.parse(SINCE), NOW)));
 	assert.deepEqual(idsOf(h, "cycles"), FIXTURE_CYCLE_IDS);
 });
 
@@ -1349,7 +1384,7 @@ test("collect: a grant starting within two days of the account's start walks fro
 	const fake = fakeWhoop(fixtures());
 	const h = await collect(fake, { ranges: everyStream({ since: iso(since) }) });
 	assert.equal(nth(cyclesRequests(fake), 0).start, FLOOR - DAY);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(since, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(since, NOW)));
 });
 
 test("collect: a cycle that began a day before the grant gives the nap and workout it holds inside it, and nothing before", async () => {
@@ -1378,7 +1413,7 @@ test("collect: a cycle that began a day before the grant gives the nap and worko
 	assert.deepEqual(idsOf(h, "sleeps"), [uuid(932)]);
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(933)]);
 	assert.deepEqual(messagesOf(h, "PROGRESS"), [], "held out, not unreadable");
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(since, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(since, NOW)));
 });
 
 test("collect: each record is held to its own stream's start, to the instant: a sleep an hour before it is neither emitted nor counted, one at it is", async () => {
@@ -1434,14 +1469,14 @@ test("collect: a grant's end is exclusive, to the instant: a nap starting at it 
 	assert.deepEqual(idsOf(h, "sleeps"), [uuid(951)]);
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(953)], "a minute before");
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, until)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, until)));
 });
 
 test("collect: one stream granted without a start walks every stream from the account's start; the granted one's cursor starts at its own grant", async () => {
 	const fake = fakeWhoop(fixtures());
 	const h = await collect(fake, { ranges: { sleeps: { since: SINCE } } });
 	assert.equal(nth(cyclesRequests(fake), 0).start, FLOOR - DAY);
-	assert.deepEqual(statesOf(h), {
+	assert.deepEqual(cursorsOf(h), {
 		...everyStream(cursorAt(FLOOR, NOW)),
 		sleeps: cursorAt(Date.parse(SINCE), NOW),
 	});
@@ -1477,7 +1512,7 @@ test("collect: on a young account, a grant widened back reads what it adds, thou
 		streams,
 	});
 	assert.equal(idsOf(first, "sleeps").length, 0, "the nap is before the grant");
-	assert.deepEqual(statesOf(first), { sleeps: cursorAt(created + DAY, NOW) });
+	assert.deepEqual(cursorsOf(first), { sleeps: cursorAt(created + DAY, NOW) });
 	const fake = fakeWhoop(serve(held));
 	const h = await collect(fake, {
 		ranges: grant(created),
@@ -1487,7 +1522,7 @@ test("collect: on a young account, a grant widened back reads what it adds, thou
 	});
 	assert.equal(nth(cyclesRequests(fake), 0).start, FLOOR - DAY, "afresh");
 	assert.deepEqual(idsOf(h, "sleeps"), [uuid(961)]);
-	assert.deepEqual(statesOf(h), { sleeps: cursorAt(created, LATER) });
+	assert.deepEqual(cursorsOf(h), { sleeps: cursorAt(created, LATER) });
 });
 
 test("collect: a grant whose end moves back holds the cursor to it, so lifting the end reads on from there", async () => {
@@ -1498,7 +1533,7 @@ test("collect: a grant whose end moves back holds the cursor to it, so lifting t
 		state: statesOf(first),
 		now: LATER,
 	});
-	assert.deepEqual(statesOf(narrowed), everyStream(cursorAt(FLOOR, until)));
+	assert.deepEqual(cursorsOf(narrowed), everyStream(cursorAt(FLOOR, until)));
 	const fake = fakeWhoop(fixtures());
 	await collect(fake, { state: statesOf(narrowed), now: LATER });
 	assert.equal(
@@ -1546,7 +1581,7 @@ for (const [label, widened, bootstrap] of [
 		const later = new Date(NOW.getTime() + 21 * DAY);
 		const narrowed = await run({ since: iso(since) }, later, statesOf(first));
 		assert.deepEqual(idsOf(narrowed, "sleeps"), [uuid(103)]);
-		assert.deepEqual(statesOf(narrowed), { sleeps: cursorAt(since, later) });
+		assert.deepEqual(cursorsOf(narrowed), { sleeps: cursorAt(since, later) });
 		const h = await run(
 			widened,
 			new Date(later.getTime() + 7 * DAY),
@@ -1573,7 +1608,7 @@ for (const [label, widened] of [
 			new Date("2026-10-10T00:00:00.000Z"),
 			statesOf(first),
 		);
-		assert.deepEqual(statesOf(narrowed), { sleeps: cursorAt(FLOOR, until) });
+		assert.deepEqual(cursorsOf(narrowed), { sleeps: cursorAt(FLOOR, until) });
 		const h = await sleepsRun(
 			widened,
 			new Date("2026-10-20T00:00:00.000Z"),
@@ -1596,10 +1631,10 @@ test("collect: an until moved before the cursor's floor holds the cursor at the 
 		statesOf(first),
 	);
 	assert.deepEqual(idsOf(empty, "sleeps"), []);
-	assert.deepEqual(statesOf(empty), { sleeps: cursorAt(since, since) });
+	assert.deepEqual(cursorsOf(empty), { sleeps: cursorAt(since, since) });
 	const h = await sleepsRun({ since: SINCE }, OCT_12, statesOf(empty));
 	assert.deepEqual(idsOf(h, "sleeps"), SLEEP_IDS);
-	assert.deepEqual(statesOf(h), { sleeps: cursorAt(since, OCT_12) });
+	assert.deepEqual(cursorsOf(h), { sleeps: cursorAt(since, OCT_12) });
 });
 
 test("collect: a stream whose grant's end is later lifted reads on from where that end left its cursor", async () => {
@@ -1640,7 +1675,7 @@ test("collect: a grant starting before the account walks from the account's star
 		ranges: everyStream({ since: "2020-01-01T00:00:00.000Z" }),
 	});
 	assert.equal(nth(cyclesRequests(fake), 0).start, FLOOR - DAY);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });
 
 test("collect: a grant ending in the past ends the walk, and the cursor, there", async () => {
@@ -1661,7 +1696,7 @@ test("collect: a grant ending in the past ends the walk, and the cursor, there",
 	);
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(201)]);
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, until)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, until)));
 });
 
 // ── The per-run cap ────────────────────────────────────────────────────────
@@ -1670,6 +1705,120 @@ const LONG_BOOTSTRAP = bootstrapWith((b) => {
 	b.user.created_at = "2025-01-01T00:00:00.000Z";
 });
 const LONG_FLOOR = Date.parse("2024-12-31T00:00:00.000Z");
+
+// ── The cycle under way, carried to the next run ───────────────────────────
+const hintOf = (h: RecordingEmit, stream: Stream): unknown =>
+	(statesOf(h)[stream] as { under_way?: unknown }).under_way;
+/** A first run's windows over the long account: from its start to NOW. */
+const LONG_WINDOWS = Math.ceil(
+	(NOW.getTime() - LONG_FLOOR) / (WINDOW_DAYS * DAY),
+);
+
+test("collect: a strap left off for a year costs each later run one window for the cycle under way, where the last walk found it began", async () => {
+	const began = NOW.getTime() - 365 * DAY;
+	const held = [
+		holding(cycleAt(1_000_000_807, began, { during: `['${iso(began)}',)` }), {
+			workouts: [workoutAt(957, NOW.getTime() - 3 * DAY)],
+		}),
+	];
+	const streams = ["workouts"] as const;
+	let state: Record<string, unknown> = {};
+	const requests: number[] = [];
+	for (const now of [NOW, LATER, new Date(LATER.getTime() + DAY)]) {
+		const fake = fakeWhoop(serve(held, LONG_BOOTSTRAP));
+		const h = await collect(fake, { streams, state, now });
+		assert.deepEqual(idsOf(h, "workouts"), [uuid(957)], iso(now.getTime()));
+		assert.deepEqual(hintOf(h, "workouts"), {
+			at: iso(now.getTime() - OVERLAP_DAYS * DAY),
+			began: iso(began),
+		});
+		requests.push(cyclesRequests(fake).length);
+		state = statesOf(h);
+	}
+	assert.deepEqual(requests, [LONG_WINDOWS, 2, 2]);
+	// Without the hint, a later run steps back a window at a time over the year.
+	const fake = fakeWhoop(serve(held, LONG_BOOTSTRAP));
+	await collect(fake, {
+		streams,
+		state: { workouts: cursorAt(LONG_FLOOR, NOW) },
+		now: LATER,
+	});
+	assert.equal(
+		cyclesRequests(fake).length,
+		1 + Math.ceil((RESUMED - began) / (WINDOW_DAYS * DAY)),
+	);
+});
+
+test("collect: an account with no cycles is walked back to its start once; later runs read their week alone", async () => {
+	let state: Record<string, unknown> = {};
+	const requests: number[] = [];
+	for (const now of [NOW, LATER, new Date(LATER.getTime() + DAY)]) {
+		const fake = fakeWhoop(serve([], LONG_BOOTSTRAP));
+		const h = await collect(fake, { streams: ["sleeps"], state, now });
+		assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+		assert.deepEqual(hintOf(h, "sleeps"), {
+			at: iso(now.getTime() - OVERLAP_DAYS * DAY),
+			began: null,
+		});
+		requests.push(cyclesRequests(fake).length);
+		state = statesOf(h);
+	}
+	assert.deepEqual(requests, [LONG_WINDOWS, 1, 1]);
+});
+
+test("collect: a hint whose window holds no cycle steps back from where it said the cycle began", async () => {
+	const began = NOW.getTime() - 200 * DAY;
+	const wrong = NOW.getTime() - 100 * DAY;
+	const fake = fakeWhoop(
+		serve(
+			[
+				holding(
+					cycleAt(1_000_000_808, began, { during: `['${iso(began)}',)` }),
+					{
+						workouts: [workoutAt(958, NOW.getTime() - 3 * DAY)],
+					},
+				),
+			],
+			LONG_BOOTSTRAP,
+		),
+	);
+	const at = iso(NOW.getTime() - OVERLAP_DAYS * DAY);
+	const h = await collect(fake, {
+		streams: ["workouts"],
+		state: {
+			workouts: {
+				...cursorAt(LONG_FLOOR, NOW),
+				under_way: { at, began: iso(wrong) },
+			},
+		},
+		now: LATER,
+	});
+	assert.deepEqual(idsOf(h, "workouts"), [uuid(958)]);
+	assert.equal(
+		nth(cyclesRequests(fake), 1).start,
+		wrong - DAY,
+		"its window first",
+	);
+	assert.deepEqual(hintOf(h, "workouts"), {
+		at: iso(LATER.getTime() - OVERLAP_DAYS * DAY),
+		began: iso(began),
+	});
+});
+
+test("collect: a walk that meets an element it cannot read saves no hint: that element may be the cycle under way", async () => {
+	const h = await collect(
+		fakeWhoop(
+			serve([
+				cycleAt(1_000_000_809, NOW.getTime() - 20 * DAY, { id: "x" }),
+				cycleAt(1_000_000_810, NOW.getTime() - 19 * DAY),
+			]),
+		),
+		{ streams: ["cycles"] },
+	);
+	assert.deepEqual(progressOf(h), [{ stream: "cycles", count: 1 }]);
+	assert.equal(hintOf(h, "cycles"), undefined);
+	assert.deepEqual(cursorsOf(h), { cycles: cursorAt(FLOOR, NOW) });
+});
 
 test("collect: a stream delivered to a grant end over a week ago neither starts nor extends the walk, so an unbounded stream keeps moving", async () => {
 	// A cycle a day, each with a sleep, from twelve days before NOW to three after.
@@ -1698,7 +1847,7 @@ test("collect: a stream delivered to a grant end over a week ago neither starts 
 		assert.deepEqual(messagesOf(h, "SKIP_RESULT"), [], `run ${run}`);
 		assert.equal(idsOf(h, "sleeps").at(-1), sleepOf(newest), `run ${run}`);
 		assert.deepEqual(idsOf(h, "cycles"), [], `run ${run}`);
-		assert.deepEqual(statesOf(h), {
+		assert.deepEqual(cursorsOf(h), {
 			cycles: cursorAt(LONG_FLOOR, until),
 			sleeps: cursorAt(LONG_FLOOR, now),
 		});
@@ -1716,22 +1865,21 @@ test("collect: a walk past maxWindowsPerRun stops after that many windows, and t
 		[LONG_FLOOR - DAY, LONG_FLOOR + WINDOW_DAYS * DAY - DAY],
 	);
 	assertSkips(h, "source_limit_reached", RETRY);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(LONG_FLOOR, through)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(LONG_FLOOR, through)));
 	assertStateLast(h);
 
 	const next = fakeWhoop(fixtures(CYCLES, LONG_BOOTSTRAP));
 	const h2 = await collect(next, { pacing, state: statesOf(h) });
 	const resume = through - OVERLAP_DAYS * DAY - REACH;
-	// The fixture holds no cycle before 2026: after its first window the run steps back to the
-	// account's start, which uses the run's windows, and stops once that window is delivered.
+	// The first run found no cycle had begun by where this one delivers from: no step back.
 	assert.deepEqual(
 		cyclesRequests(next).map((request) => request.start),
-		[resume - DAY, resume - WINDOW_DAYS * DAY - DAY, LONG_FLOOR - DAY],
+		[resume - DAY, resume + WINDOW_DAYS * DAY - DAY],
 	);
 	assertSkips(h2, "source_limit_reached", RETRY);
 	assert.deepEqual(
-		statesOf(h2),
-		everyStream(cursorAt(LONG_FLOOR, resume + WINDOW_DAYS * DAY)),
+		cursorsOf(h2),
+		everyStream(cursorAt(LONG_FLOOR, resume + 2 * WINDOW_DAYS * DAY)),
 	);
 });
 
@@ -1740,7 +1888,7 @@ test("collect: a walk that fits maxWindowsPerRun exactly is not deferred", async
 	const h = await collect(fake, { pacing: { maxWindowsPerRun: 2 } });
 	assert.equal(cyclesRequests(fake).length, 2);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });
 
 test("collect: a step back is not cut short by maxWindowsPerRun: the run delivers the window it began, then stops", async () => {
@@ -1772,7 +1920,7 @@ test("collect: a step back is not cut short by maxWindowsPerRun: the run deliver
 	);
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(956)]);
 	assertSkips(h, "source_limit_reached", RETRY, streams);
-	assert.deepEqual(statesOf(h), {
+	assert.deepEqual(cursorsOf(h), {
 		workouts: cursorAt(since, start + WINDOW_DAYS * DAY),
 	});
 });
@@ -1786,7 +1934,7 @@ test("collect: a since moved back a long way, past the account's start, delivers
 		YOUNG_BOOTSTRAP,
 	);
 	assert.deepEqual(idsOf(first, "sleeps"), [uuid(103)]);
-	assert.deepEqual(statesOf(first), { sleeps: cursorAt(since, OCT_10) });
+	assert.deepEqual(cursorsOf(first), { sleeps: cursorAt(since, OCT_10) });
 	const h = await sleepsRun(
 		{ since: "2020-01-01T00:00:00.000Z" },
 		OCT_12,
@@ -1795,7 +1943,7 @@ test("collect: a since moved back a long way, past the account's start, delivers
 	);
 	assert.deepEqual(idsOf(h, "sleeps"), SLEEP_IDS);
 	const young = Date.parse("2026-09-13T06:00:00.000Z");
-	assert.deepEqual(statesOf(h), { sleeps: cursorAt(young, OCT_12) });
+	assert.deepEqual(cursorsOf(h), { sleeps: cursorAt(young, OCT_12) });
 });
 
 test("collect: a since widened back further than one run's windows is delivered over later runs, each moving the cursor on", async () => {
@@ -1866,7 +2014,7 @@ test("collect: a window answered with as many cycles as asked for, some from ins
 	assert.equal(new Set(ids).size, 64, "each cycle once");
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });
 
 test("collect: a window answered with as many cycles as asked for, none from inside it, is not halved", async () => {
@@ -1985,5 +2133,5 @@ test("collect: a cycle outside a window is dropped there without a count, and on
 	assert.deepEqual(idsOf(h, "cycles"), ["1000000702", "1000000703"]);
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
-	assert.deepEqual(statesOf(h), everyStream(cursorAt(FLOOR, NOW)));
+	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, NOW)));
 });

@@ -564,10 +564,13 @@ test("whoop_browser: sign-in and collection keep one headless Patchright page", 
 				),
 				[],
 			);
-			// The account began 2026-08-01T09:30Z: the walk starts a day earlier and reaches NOW.
+			// The account began 2026-08-01T09:30Z: the walk starts a day earlier and reaches NOW. It
+			// found no cycle had begun by the week before NOW, where the next run delivers from.
 			const cursor = {
+				v: 2,
 				floor: "2026-07-31T09:30:00.000Z",
 				through: NOW.toISOString(),
+				under_way: { at: "2026-09-13T12:00:00.000Z", began: null },
 			};
 			assert.deepEqual(
 				h.protocolMessages.filter((m) => m.type === "STATE"),

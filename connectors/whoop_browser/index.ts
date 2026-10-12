@@ -395,13 +395,24 @@ async function fetchJson(
 }
 
 // ── Windows and cursors ────────────────────────────────────────────────────
+/** The cursor's shape: one of any other shape, or of none, is read afresh. */
+const CURSOR_VERSION = 2;
 /**
  * One cursor per stream, all four written from one walk: every record of the stream that starts in
- * [floor, through) has been delivered under the stream's grant. Both RFC 3339 instants.
+ * [floor, through) has been delivered under the stream's grant. `under_way`, when present, is what
+ * the walk that wrote it found where the stream next delivers from, and spares the next run a
+ * step back. RFC 3339 instants; `v` is the cursor's shape.
  */
 export interface WindowCursor {
+	v: typeof CURSOR_VERSION;
 	floor: string;
 	through: string;
+	under_way?: UnderWay;
+}
+/** The cycle under way at `at` began at `began`, or none had begun (null). */
+export interface UnderWay {
+	at: string;
+	began: string | null;
 }
 type Range = { since?: string; until?: string };
 
@@ -413,16 +424,55 @@ const instant = (value: unknown): number | null => {
 
 export function readCursor(value: unknown): WindowCursor | null {
 	if (typeof value !== "object" || value === null) return null;
-	const { floor, through } = value as Record<string, unknown>;
+	const { v, floor, through, under_way } = value as Record<string, unknown>;
 	const floorMs = instant(floor);
 	const throughMs = instant(through);
-	if (floorMs === null || throughMs === null || throughMs < floorMs) {
+	if (
+		v !== CURSOR_VERSION ||
+		floorMs === null ||
+		throughMs === null ||
+		throughMs < floorMs
+	) {
+		return null;
+	}
+	const hint = readUnderWay(under_way);
+	return {
+		v: CURSOR_VERSION,
+		floor: new Date(floorMs).toISOString(),
+		through: new Date(throughMs).toISOString(),
+		...(hint ? { under_way: hint } : {}),
+	};
+}
+
+/** A hint that does not parse is no hint: the run steps back instead. */
+function readUnderWay(value: unknown): UnderWay | null {
+	if (typeof value !== "object" || value === null) return null;
+	const { at, began } = value as Record<string, unknown>;
+	const atMs = instant(at);
+	const beganMs = instant(began);
+	if (
+		atMs === null ||
+		(began !== null && (beganMs === null || beganMs > atMs))
+	) {
 		return null;
 	}
 	return {
-		floor: new Date(floorMs).toISOString(),
-		through: new Date(throughMs).toISOString(),
+		at: new Date(atMs).toISOString(),
+		began: beganMs === null ? null : new Date(beganMs).toISOString(),
 	};
+}
+
+/** When the cycle under way at `at` began, as a hint gives it: null when none had begun, undefined when the hint does not say. */
+function beganBy(
+	hint: UnderWay | undefined,
+	at: number,
+): number | null | undefined {
+	if (!hint) return undefined;
+	const began = instant(hint.began);
+	if (at > Date.parse(hint.at) || (began !== null && began > at)) {
+		return undefined;
+	}
+	return began;
 }
 
 /** Whether a record's start lies in its stream's grant, to the instant, as the runtime also checks: outside it, a record is neither emitted nor counted. */
@@ -470,7 +520,11 @@ export function planStream(
 	const through = previous ? Date.parse(previous.through) : Number.NaN;
 	if (!previous || fullRefresh || start < floor || start > through) {
 		const at = new Date(start).toISOString();
-		return { from: start, cursor: { floor: at, through: at }, until };
+		return {
+			from: start,
+			cursor: { v: CURSOR_VERSION, floor: at, through: at },
+			until,
+		};
 	}
 	// A grant whose end moved back holds less than the cursor delivered.
 	const held = Math.max(start, Math.min(through, until ?? through));
@@ -479,8 +533,10 @@ export function planStream(
 	return {
 		from: done ? null : resumeAt(start, held),
 		cursor: {
+			v: CURSOR_VERSION,
 			floor: new Date(start).toISOString(),
 			through: new Date(held).toISOString(),
+			...(previous.under_way ? { under_way: previous.under_way } : {}),
 		},
 		until,
 	};
@@ -668,6 +724,8 @@ export async function collectWhoopBrowser(
 			Math.max(...active.map((plan) => plan.until ?? Number.POSITIVE_INFINITY)),
 		);
 		const lostSeen = new Set<string>();
+		/** No element went unread: one that did may be the cycle a hint would name. */
+		let clean = true;
 		/** One paced window read, counted toward the run's windows. */
 		const read = async (from: number, to: number): Promise<Window> => {
 			// Before each request, never after the last.
@@ -675,6 +733,7 @@ export async function collectWhoopBrowser(
 			const window = await readWindow(ctx.page, facts.userId, from, to, p);
 			if (!window.ok) return window;
 			windows += 1;
+			if (window.lost.length > 0) clean = false;
 			for (const { key, lost } of window.lost) {
 				if (lostSeen.has(key)) continue;
 				lostSeen.add(key);
@@ -683,16 +742,30 @@ export async function collectWhoopBrowser(
 			return window;
 		};
 		/**
-		 * The latest cycle that starts before `before`, a window at a time back to the account's
-		 * start: with the strap off, a cycle stays under way for as long as it is off. Not held to
-		 * maxWindowsPerRun, since the account's start bounds it and a run cut short in it would
-		 * begin it again next time.
+		 * The latest cycle that starts before `before`, and the instant from which every cycle start
+		 * up to `before` is known. With the strap off, a cycle stays under way for as long as it is
+		 * off: when an earlier walk gave its start (`began`) the one window from there is read, and
+		 * otherwise, or when that window holds none, the walk steps back a window at a time to the
+		 * account's start. Not held to maxWindowsPerRun, since the account's start bounds it and a
+		 * run cut short in it would begin it again next time.
 		 */
 		const latestBefore = async (
 			before: number,
-		): Promise<{ ok: true; cycle: Cycle | null } | Failure> => {
-			for (let to = before; to > historyMs; ) {
-				const back = Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
+			began: number | null | undefined,
+		): Promise<{ ok: true; cycle: Cycle | null; known: number } | Failure> => {
+			const none = {
+				ok: true,
+				cycle: null,
+				known: Number.NEGATIVE_INFINITY,
+			} as const;
+			// None had begun: the walk that found so read back to the account's start.
+			if (began === null) return none;
+			const hinted = began !== undefined && began < before;
+			let to = hinted ? Math.min(began + WINDOW_DAYS * DAY_MS, before) : before;
+			let back = hinted
+				? began
+				: Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
+			while (to > historyMs) {
 				let latest: Cycle | null = null;
 				for (let from = back; from < to; ) {
 					const window = await read(from, to);
@@ -700,14 +773,22 @@ export async function collectWhoopBrowser(
 					latest = window.cycles.at(-1) ?? latest;
 					from = window.end;
 				}
-				if (latest) return { ok: true, cycle: latest };
+				if (latest) return { ok: true, cycle: latest, known: latest.startMs };
 				to = back;
+				back = Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
 			}
-			return { ok: true, cycle: null };
+			return none;
 		};
+		// What an earlier walk found about the cycle under way where this one starts delivering.
+		const began = all
+			.map((plan) => beganBy(plan.cursor.under_way, delivery))
+			.find((ms) => ms !== undefined);
 		// Delivery needs the cycle under way where it starts. Once the walk reads a cycle starting by
 		// then, every earlier one ended before it; before the account's start, none began.
 		let covered = start <= historyMs;
+		// Every cycle that starts in [known, from) has been read, its start in `starts`.
+		let known = covered ? Number.NEGATIVE_INFINITY : start;
+		const starts: number[] = [];
 		let from = start;
 		while (from < end) {
 			if (windows >= p.maxWindowsPerRun) {
@@ -725,15 +806,17 @@ export async function collectWhoopBrowser(
 			const cycles = window.cycles;
 			covered ||= cycles.some((cycle) => cycle.startMs <= delivery);
 			if (!covered && window.end > delivery) {
-				const before = await latestBefore(start);
+				const before = await latestBefore(start, began);
 				if (!before.ok) {
 					failure = before;
 					break;
 				}
 				if (before.cycle) cycles.unshift(before.cycle);
+				known = before.known;
 				covered = true;
 			}
 			for (const cycle of cycles) {
+				starts.push(cycle.startMs);
 				for (const stream of streams) {
 					const range = ranges.get(stream);
 					for (const built of recordsFor(stream, cycle)) {
@@ -759,6 +842,24 @@ export async function collectWhoopBrowser(
 				if (reach > Date.parse(plan.cursor.through)) {
 					plan.cursor.through = new Date(reach).toISOString();
 				}
+			}
+		}
+		// For each stream, the cycle under way where it next delivers from, when this walk read
+		// every cycle that starts between that cycle's start and there.
+		if (windows > 0 && clean) {
+			for (const plan of active) {
+				const at = resumeAt(
+					Date.parse(plan.cursor.floor),
+					Date.parse(plan.cursor.through),
+				);
+				if (at >= from) continue;
+				const latest = starts.findLast((ms) => ms >= known && ms <= at);
+				if (latest === undefined && known !== Number.NEGATIVE_INFINITY)
+					continue;
+				plan.cursor.under_way = {
+					at: new Date(at).toISOString(),
+					began: latest === undefined ? null : new Date(latest).toISOString(),
+				};
 			}
 		}
 	}
