@@ -796,7 +796,7 @@ function keepWider(
 
 /**
  * Pure: the days this run reads, the `overlap` days before the cursor among them, the cursor it
- * starts from, and the days its grant can hold records back on.
+ * starts from, and the days its grant's until can hold records back on.
  */
 export function planDays(
 	prev: DayCursor,
@@ -873,16 +873,19 @@ export function planDays(
 		segments.push({ kind: "retry", ...span });
 	}
 	if (!fresh) keepWider(cursor, claim, grant, segments);
-	const held = [grant.since_at, grant.until_at].flatMap((at) =>
-		at === undefined ? [] : [heldBy(at, grant.filed_after ?? 0)],
-	);
+	// At the until only: next_day moves on past those days, so they are read again and let go. At a
+	// start that moves on they would fall below the grant, where nothing reads them again.
+	const held =
+		grant.until_at === undefined
+			? []
+			: [heldBy(grant.until_at, grant.filed_after ?? 0)];
 	return { cursor, segments, held };
 }
 
 /**
  * Records how a day or window read in full went: one with an unreadable record joins the retry
- * list, a clean one leaves it, except on the days the grant holds records back on (`held`), where a
- * record outside the grant is neither delivered nor counted, so a kept one may still not read. The
+ * list, a clean one leaves it, except on the days the grant's until holds records back on (`held`),
+ * where a record after it is neither delivered nor counted, so a kept one may still not read. The
  * list stays raw while the run reads: `settle` puts it in its one form, cap included, once at the
  * end, so a day read again is never let go twice.
  */

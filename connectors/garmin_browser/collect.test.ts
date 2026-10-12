@@ -2381,6 +2381,7 @@ test("collect: an activity starting before since is neither emitted nor counted,
 // ── A grant that widens ────────────────────────────────────────────────────
 /** Six weeks on from NOW: the owner's day is 1 November, and a range stream's re-read reaches back to 4 October. */
 const NOVEMBER = new Date("2026-10-31T13:30:00.000Z");
+const DAY_MS = 86_400_000;
 /** A grant's start: 18:00Z on the 14th, after the run (06:30Z) and before the ride (19:15Z on the 15th). */
 const EVENING = "2026-09-14T18:00:00.000Z";
 const MIDNIGHT = "2026-09-14T00:00:00.000Z";
@@ -2864,7 +2865,7 @@ const MAY = () => {
 	return { kept: () => account(true), reads: () => account(false) };
 };
 
-test("collect: a kept day that a narrower start reads cleanly stays kept where that start holds records back, so a grant with no start still ships what did not read", async () => {
+test("collect: a kept day older than ninety days that a narrower start reads cleanly is read again by a grant whose start reaches it, not by a grant with no start", async () => {
 	const may = MAY();
 	const first = await activitiesRun(
 		{ since: "2026-05-01T00:00:00.000Z" },
@@ -2872,7 +2873,7 @@ test("collect: a kept day that a narrower start reads cleanly stays kept where t
 		may.kept(),
 	);
 	assert.deepEqual(progressOf(first), [{ stream: "activities", count: 1 }]);
-	// 7001 reads now, but starts a millisecond before this grant.
+	// 7001 reads now, but starts a millisecond before this grant, which lets its days go.
 	const narrow = await activitiesRun(
 		{ since: "2026-05-20T06:00:00.001Z" },
 		first,
@@ -2880,10 +2881,58 @@ test("collect: a kept day that a narrower start reads cleanly stays kept where t
 	);
 	assert.deepEqual(idsOf(narrow, "activities"), []);
 	assert.deepEqual((statesOf(narrow).activities as { retry?: unknown }).retry, [
-		span("2026-04-30", "2026-05-21"),
+		span("2026-04-30", "2026-05-18"),
 	]);
-	const open = await activitiesRun({}, narrow, may.reads());
-	assert.ok(idsOf(open, "activities").includes("7001"));
+	// A grant with no start reads history back to 4 August only.
+	const [open, reaching] = await Promise.all([
+		activitiesRun({}, narrow, may.reads()),
+		activitiesRun({ since: "2026-05-01T00:00:00.000Z" }, narrow, may.reads()),
+	]);
+	assert.equal(idsOf(open, "activities").includes("7001"), false);
+	assert.ok(idsOf(reaching, "activities").includes("7001"));
+});
+
+test("collect: under a start that rolls on with the clock, the kept days of a record that does not read do not pile up below it", async () => {
+	// One activity a day from 1 August; the one on 20 October never reads.
+	const account = () =>
+		fakeGarmin(
+			site((data) => {
+				data.activities = [];
+				for (let i = 120; i >= 0; i -= 1) {
+					const gmt = Date.parse("2026-08-01T06:00:00.000Z") + i * DAY_MS;
+					const clock = (ms: number) =>
+						new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+					activityAt(
+						data,
+						74000 + i,
+						clock(gmt),
+						clock(gmt + 12 * 3_600_000),
+						i === 80 ? { distance: "far" } : {},
+					);
+				}
+			}),
+		);
+	const runs: RecordingEmit[] = [];
+	// Daily runs, each since thirty days before its own clock.
+	const rolling = async (n: number): Promise<void> => {
+		const now = new Date(NOVEMBER.getTime() + n * DAY_MS);
+		const since = new Date(now.getTime() - 30 * DAY_MS).toISOString();
+		runs.push(await activitiesRun({ since }, runs.at(-1), account(), { now }));
+		if (n < 19) await rolling(n + 1);
+	};
+	await rolling(0);
+	const letGo = runs.flatMap((h) =>
+		progressLines(h).filter(({ message }) =>
+			message.includes("could not be kept"),
+		),
+	);
+	assert.deepEqual(letGo, []);
+	// What stays is the first run's day below every later grant.
+	assert.deepEqual(
+		(statesOf(runs.at(-1) as RecordingEmit).activities as { retry?: unknown })
+			.retry,
+		[span("2026-09-30")],
+	);
 });
 
 test("collect: a kept day that a narrower until reads cleanly stays kept where that until holds records back, so a grant with no bounds still ships what did not read", async () => {
