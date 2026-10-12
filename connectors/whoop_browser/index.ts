@@ -436,25 +436,31 @@ function inRange(startAt: unknown, range: Range | undefined): boolean {
 	);
 }
 
-/** One stream's part in a run: where its delivery starts, the cursor it carries, and its grant's end. */
+/** One stream's part in a run: where its delivery starts (null when it has nothing left to deliver), the cursor it carries, and its grant's end. */
 export interface StreamPlan {
-	from: number;
+	from: number | null;
 	cursor: WindowCursor;
 	until: number | null;
 }
+
+/** Where a run resumed from a cursor delivers again from: the week before its end, which WHOOP may still be scoring, and not before its floor. */
+const resumeAt = (floor: number, through: number): number =>
+	Math.max(through - OVERLAP_DAYS * DAY_MS, floor);
 
 /**
  * Pure: one stream's plan. Its grant starts at its own start, or the account's (a day early, for
  * the time zone). It delivers afresh from there when it has no cursor, on full_refresh, or when
  * that start lies outside what its cursor delivered (a grant widened back, or moved past).
  * Otherwise it delivers again from the week before its cursor, which WHOOP may still be scoring,
- * and the cursor keeps only what the grant still covers.
+ * and the cursor keeps only what the grant still covers. A grant delivered to an end more than a
+ * week before `now` has nothing left to deliver.
  */
 export function planStream(
 	previous: WindowCursor | null,
 	historyStart: string,
 	range: Range | undefined,
 	fullRefresh: boolean,
+	now: number,
 ): StreamPlan {
 	const since = instant(range?.since);
 	const until = instant(range?.until);
@@ -468,8 +474,10 @@ export function planStream(
 	}
 	// A grant whose end moved back holds less than the cursor delivered.
 	const held = Math.max(start, Math.min(through, until ?? through));
+	const done =
+		until !== null && held >= until && until < now - OVERLAP_DAYS * DAY_MS;
 	return {
-		from: Math.max(through - OVERLAP_DAYS * DAY_MS, start),
+		from: done ? null : resumeAt(start, held),
 		cursor: {
 			floor: new Date(start).toISOString(),
 			through: new Date(held).toISOString(),
@@ -642,16 +650,22 @@ export async function collectWhoopBrowser(
 					history,
 					ranges.get(stream),
 					ctx.collectionMode === "full_refresh",
+					now.getTime(),
 				),
 			);
 		}
 		const all = [...plans.values()];
+		// A stream with nothing left to deliver neither starts nor extends the walk; with none
+		// left, the walk is empty.
+		const active = all.filter(
+			(plan): plan is StreamPlan & { from: number } => plan.from !== null,
+		);
 		const historyMs = Date.parse(history);
-		const delivery = Math.min(...all.map((plan) => plan.from));
+		const delivery = Math.min(...active.map((plan) => plan.from));
 		const start = Math.max(delivery - CYCLE_REACH_DAYS * DAY_MS, historyMs);
 		const end = Math.min(
 			now.getTime(),
-			Math.max(...all.map((plan) => plan.until ?? Number.POSITIVE_INFINITY)),
+			Math.max(...active.map((plan) => plan.until ?? Number.POSITIVE_INFINITY)),
 		);
 		const lostSeen = new Set<string>();
 		/** One paced window read, counted toward the run's windows. */

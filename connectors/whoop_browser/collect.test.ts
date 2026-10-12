@@ -1671,6 +1671,41 @@ const LONG_BOOTSTRAP = bootstrapWith((b) => {
 });
 const LONG_FLOOR = Date.parse("2024-12-31T00:00:00.000Z");
 
+test("collect: a stream delivered to a grant end over a week ago neither starts nor extends the walk, so an unbounded stream keeps moving", async () => {
+	// A cycle a day, each with a sleep, from twelve days before NOW to three after.
+	const days = Array.from({ length: 16 }, (_, i) => i - 12);
+	const held = days.map((i) =>
+		holding(cycleAt(1_000_001_000 + i + 12, NOW.getTime() + i * DAY), {
+			sleeps: [sleepAt(500 + i + 12, NOW.getTime() + i * DAY + HOUR)],
+		}),
+	);
+	const sleepOf = (i: number): string => uuid(500 + i + 12);
+	const streams = ["cycles", "sleeps"] as const;
+	const until = Date.parse("2025-02-01T00:00:00.000Z");
+	const ranges = { cycles: { until: iso(until) } };
+	const pacing = { maxWindowsPerRun: 3 };
+	let state: Record<string, unknown> = everyStream(
+		cursorAt(LONG_FLOOR, NOW),
+		streams,
+	);
+	for (const [run, now, newest] of [
+		[1, LATER, 1],
+		[2, new Date(LATER.getTime() + DAY), 2],
+	] as const) {
+		const fake = fakeWhoop(serve(held, LONG_BOOTSTRAP));
+		const h = await collect(fake, { ranges, streams, pacing, state, now });
+		assert.equal(cyclesRequests(fake).length, 1, `run ${run}: one window`);
+		assert.deepEqual(messagesOf(h, "SKIP_RESULT"), [], `run ${run}`);
+		assert.equal(idsOf(h, "sleeps").at(-1), sleepOf(newest), `run ${run}`);
+		assert.deepEqual(idsOf(h, "cycles"), [], `run ${run}`);
+		assert.deepEqual(statesOf(h), {
+			cycles: cursorAt(LONG_FLOOR, until),
+			sleeps: cursorAt(LONG_FLOOR, now),
+		});
+		state = statesOf(h);
+	}
+});
+
 test("collect: a walk past maxWindowsPerRun stops after that many windows, and the next run continues", async () => {
 	const pacing = { maxWindowsPerRun: 2 };
 	const fake = fakeWhoop(fixtures(CYCLES, LONG_BOOTSTRAP));
