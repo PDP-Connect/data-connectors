@@ -36,7 +36,7 @@ const run = async ({ requestedScopes = ALL, download, extract, checkpoint = null
     static now() { return clock; }
   }
   const data = {};
-  const calls = { exportRequests: 0, checkpointSets: [], checkpointCleared: 0, downloads: 0, urls: [], extracted: [] };
+  const calls = { exportRequests: 0, checkpointSets: [], checkpointCleared: 0, downloads: 0, urls: [], extracted: [], downloadOptions: [], extractOptions: [] };
   const page = {
     requestedScopes: async () => requestedScopes,
     goto: async () => {},
@@ -54,8 +54,8 @@ const run = async ({ requestedScopes = ALL, download, extract, checkpoint = null
       if (source.includes("user-menu-button") && source.includes("textContent")) return { name: "Ada", plan: "Pro" };
       return true; // login check
     },
-    captureDownload: async (url) => { calls.downloads += 1; calls.urls.push(url); assert.ok(url.includes(`/export/${ORG}/download/`)); return download(calls.downloads, url); },
-    extractZipEntries: async (path, options) => { calls.extracted.push(path); return extract(path, options); },
+    captureDownload: async (url, options) => { calls.downloads += 1; calls.urls.push(url); calls.downloadOptions.push(options); assert.ok(url.includes(`/export/${ORG}/download/`)); return download(calls.downloads, url); },
+    extractZipEntries: async (path, options) => { calls.extracted.push(path); calls.extractOptions.push(options); return extract(path, options); },
   };
   const context = vm.createContext({ page, Date: FakeDate, console, JSON, Math, Object, Array, Boolean, Number, String, Promise });
   vm.runInContext(script, context, { filename: "claude-export-playwright.js" });
@@ -292,4 +292,107 @@ test("single ZIP without conversations.json is an unknown layout: both scopes om
     extract: async () => ({ ok: true, names: ["something.json"], json: { "projects/p1.json": { uuid: "p1", name: "P" } } }),
   });
   assertNotCollected(result, ALL);
+});
+
+// ─── Completeness: what the host reports about an export it could not finish ──
+// Contract (see "Completeness" in script.js): partialErrors items carry an
+// optional `category`; conversations/projects items omit that scope, uncategorised
+// ones omit every requested scope, other categories are ignored, and the
+// checkpoint is cleared only when nothing was omitted.
+
+const CONVERSATIONS_ONLY = { "conversations.json": [conv("c1")], "users.json": [{ full_name: "Ada L" }] };
+const PROJECTS_ONLY = { "projects/p1.json": { uuid: "p1", name: "Proj" } };
+const incompleteHost = (json, partialErrors, complete = false) => ({
+  download: readyZip,
+  extract: async () => ({ ok: true, names: Object.keys(json), json, complete, partialErrors }),
+});
+
+test("host reports the projects part missing: projects omitted, conversations kept, checkpoint kept", async () => {
+  const { data, calls, result } = await run(incompleteHost(CONVERSATIONS_ONLY, [{ part: "2", category: "projects", reason: "timeout" }]));
+  assertNotCollected(result, ["claude.projects"]);
+  assert.equal(result["claude.conversations"].total, 1);
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0].reason, /part 2 projects: timeout/);
+  assert.equal(calls.checkpointCleared, 0, "an incomplete set must not clear the checkpoint");
+  assert.doesNotMatch(data.status, /^Complete/);
+  assert.equal(calls.extractOptions[0].acceptIncomplete, true, "tells the host that partialErrors are read");
+  assert.equal(calls.downloadOptions[0].acceptIncomplete, true);
+});
+
+test("host reports the conversations part missing: conversations omitted without a conversations.json, projects kept", async () => {
+  const { calls, result } = await run(incompleteHost(PROJECTS_ONLY, [{ part: "5", category: "conversations", reason: "invalid_archive" }]));
+  assertNotCollected(result, ["claude.conversations"]);
+  assert.equal(result["claude.projects"].total, 1);
+  assert.equal(calls.checkpointCleared, 0);
+});
+
+test("a gap with no category (a host that predates categories) omits every requested scope", async () => {
+  const { calls, result } = await run(incompleteHost(CONVERSATIONS_ONLY, [{ part: "2", reason: "timeout" }], undefined));
+  assertNotCollected(result, ALL);
+  assert.equal(calls.checkpointCleared, 0);
+
+  const flagOnly = await run(incompleteHost(CONVERSATIONS_ONLY, [], false));
+  assertNotCollected(flagOnly.result, ALL);
+});
+
+test("gaps in categories the connector does not read, and clean sets, behave as a complete export", async () => {
+  const other = await run(incompleteHost({ ...CONVERSATIONS_ONLY, ...PROJECTS_ONLY }, [{ part: "3", category: "memories", reason: "timeout" }, { entry: "users.json", reason: "invalid_json" }], true));
+  assert.deepEqual(other.result.errors, []);
+  assert.equal(other.result["claude.conversations"].total, 1);
+  assert.equal(other.result["claude.projects"].total, 1);
+  assert.equal(other.calls.checkpointCleared, 1);
+
+  const clean = await run(incompleteHost({ ...CONVERSATIONS_ONLY, ...PROJECTS_ONLY }, [], true));
+  assert.deepEqual(clean.result.errors, []);
+  assert.equal(clean.calls.checkpointCleared, 1);
+});
+
+test("a gap named only by its entry (the mobile shell) is attributed by the entry name", async () => {
+  const { result } = await run(incompleteHost({ ...CONVERSATIONS_ONLY, ...PROJECTS_ONLY }, [{ entry: "projects/p2.json", reason: "invalid_json" }]));
+  assertNotCollected(result, ["claude.projects"]);
+  assert.equal(result["claude.conversations"].total, 1);
+});
+
+test("a gap only matters for a requested scope", async () => {
+  const { calls, result } = await run({ requestedScopes: ["claude.conversations"], ...incompleteHost(CONVERSATIONS_ONLY, [{ part: "2", category: "projects", reason: "timeout" }]) });
+  assert.deepEqual(result.errors, []);
+  assert.equal(result["claude.conversations"].total, 1);
+  assert.equal(calls.checkpointCleared, 1);
+});
+
+test("an incomplete set leaves the checkpoint, and the re-run that gets the whole set finishes and clears it", async () => {
+  const checkpoint = { organizationId: ORG, nonce: "nonce-1" };
+  const first = await run({ checkpoint, ...incompleteHost(CONVERSATIONS_ONLY, [{ part: "2", category: "projects", reason: "timeout" }]) });
+  assert.equal(first.calls.checkpointCleared, 0);
+  assert.equal(first.calls.exportRequests, 0);
+
+  const second = await run({ checkpoint, ...incompleteHost({ ...CONVERSATIONS_ONLY, ...PROJECTS_ONLY }, [], true) });
+  assert.deepEqual(second.result.errors, []);
+  assert.equal(second.result["claude.projects"].total, 1);
+  assert.equal(second.calls.exportRequests, 0, "resumed, not requested again");
+  assert.equal(second.calls.checkpointCleared, 1);
+});
+
+test("a host that withholds an incomplete set (ok:false) ends in the not-collected path with the checkpoint kept", async () => {
+  const { calls, result } = await run({
+    download: readyZip,
+    extract: async () => ({ ok: false, complete: false, error: "Claude export is incomplete (part 2 (projects): timeout)" }),
+  });
+  assertNotCollected(result, ALL);
+  assert.equal(calls.checkpointCleared, 0);
+});
+
+test("split export where a part has an unreadable projects entry: projects omitted, conversations kept", async () => {
+  const host = splitHost();
+  const extract = host.extract;
+  const { calls, result } = await run({
+    ...host,
+    extract: (path, options) => {
+      const out = extract(path, options);
+      return path.endsWith("projects-000.zip") ? { ...out, partialErrors: [{ entry: "projects/p9.json", category: "projects", reason: "invalid_json" }] } : out;
+    },
+  });
+  assertNotCollected(result, ["claude.projects"]);
+  assert.equal(result["claude.conversations"].total, 2);
+  assert.equal(calls.checkpointCleared, 0);
 });
