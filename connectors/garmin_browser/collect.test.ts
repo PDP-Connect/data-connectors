@@ -2590,7 +2590,7 @@ test("collect: a grant whose until ends later, or not at all, reads again from t
 	});
 });
 
-test("collect: history read under an until is read again from the grant's start once the until ends later, not from where it stopped", async () => {
+test("collect: history read under an until is read again from the day before the until's UTC day once the until ends later, not from where it stopped", async () => {
 	// 15:00Z on 10 September, the 11th on the owner's clock: after the until below.
 	const account = () =>
 		fakeGarmin(
@@ -2633,6 +2633,48 @@ test("collect: history read under an until is read again from the grant's start 
 			since_at: since,
 		},
 	});
+});
+
+test("collect: a grant whose until moves later every run keeps the history it read under the earlier until, so a start reaching back further than one run allows still completes", async () => {
+	const on = (n: number) => new Date(NOVEMBER.getTime() + n * 86_400_000);
+	const since = "2026-05-01T00:00:00.000Z";
+	const account = () =>
+		fakeGarmin(
+			site((data) => {
+				activityAt(
+					data,
+					41000501,
+					"2026-07-01 06:00:00",
+					"2026-07-01 18:00:00",
+				);
+			}),
+		);
+	// Each run's until is its own clock; three windows a run, two of them the re-read.
+	const rolling = (n: number, after: RecordingEmit) =>
+		activitiesRun({ since, until: on(n).toISOString() }, after, account(), {
+			now: on(n),
+			pacing: { maxWindowsPerRun: 3 },
+		});
+	const first = await activitiesRun(
+		{ since: "2026-09-01T00:00:00.000Z" },
+		undefined,
+		account(),
+	);
+	const runs = [await rolling(0, first)];
+	runs.push(await rolling(1, runs[0] as RecordingEmit));
+	runs.push(await rolling(2, runs[1] as RecordingEmit));
+	assert.deepEqual(
+		runs.map((h) => idsOf(h, "activities")),
+		[[], [], ["41000501"]],
+	);
+	assert.deepEqual(
+		runs.map(
+			(h) =>
+				(statesOf(h).activities as { backfill?: { next_day: string } }).backfill
+					?.next_day,
+		),
+		["2026-05-28", "2026-06-25", "2026-07-23"],
+	);
 });
 
 test("collect: a grant that drops both its bounds reads back to ninety days before the owner's today, and again past where the last until stopped", async () => {

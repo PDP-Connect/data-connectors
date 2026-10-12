@@ -728,8 +728,8 @@ export function inRange(startAt: unknown, range: Range | undefined): boolean {
  * only records that start inside the cursor's grant: delivered, or their days kept in `retry`. The
  * days outside those are read again: the floor rises to the first of them, so the history below it
  * is read from the new grant's start, and `next_day` falls back to the last of them, so the forward
- * read goes on from there. History read part way under the narrower grant is read again from its
- * start.
+ * read goes on from there. History read part way under the narrower grant is read again: all of it
+ * for an earlier start, and from the day before the old until's UTC day for a later until.
  */
 function widen(cursor: DayCursor, grant: DayRange): void {
 	const { since_at, until_at } = cursor;
@@ -749,9 +749,15 @@ function widen(cursor: DayCursor, grant: DayRange): void {
 		cursor.floor = within(addDays(lastFiledBefore(since_at, after), 1));
 	}
 	if (later) {
-		cursor.next_day = within(addDays(utcDay(Date.parse(until_at)), -1));
+		const edge = addDays(utcDay(Date.parse(until_at)), -1);
+		cursor.next_day = within(edge);
+		const saved = cursor.backfill;
+		if (saved && saved.next_day > edge) {
+			if (edge <= saved.since) delete cursor.backfill;
+			else saved.next_day = edge;
+		}
 	}
-	if (earlier || later) delete cursor.backfill;
+	if (earlier) delete cursor.backfill;
 }
 
 /**

@@ -998,6 +998,19 @@ test("planDays: a grant ending later than the cursor's, or not at all, sends nex
 			.cursor.next_day,
 		"2026-09-13",
 	);
+	// History read under the old until keeps what lies below the first day it could hold a record
+	// back on, and is dropped when that day is where it began.
+	const below = { ...EVENING, until_at: "2026-09-05T00:00:00.000Z" };
+	for (const [since, kept] of [
+		["2026-08-20", { since: "2026-08-20", next_day: "2026-09-04" }],
+		["2026-09-04", undefined],
+	] as const) {
+		const { cursor } = plan(
+			{ ...below, backfill: { since, next_day: "2026-09-10" } },
+			activities(EVENING.since_at),
+		);
+		assert.deepEqual(cursor.backfill, kept, since);
+	}
 	// An until well above the floor sends next_day back to the day before its own UTC day.
 	assert.equal(
 		plan(
