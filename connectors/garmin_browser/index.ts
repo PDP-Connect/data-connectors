@@ -489,7 +489,9 @@ export interface DayCursor {
 }
 /**
  * The most days `retry` holds, and so the bound on reading kept days again until they read: past
- * it, the oldest are let go, and PROGRESS counts them.
+ * it, the oldest are let go, and PROGRESS counts them. Kept days below a grant's start wait there
+ * for a grant that reaches them, so under a start that moves on they count towards it until one
+ * does.
  */
 export const MAX_RETRY_DAYS = 366;
 /** Days a run reads: on from the cursor, back before its floor, or again from `retry`. */
@@ -1021,14 +1023,11 @@ function advance(cursor: DayCursor, segment: Segment, day: string): void {
 		cursor.floor = segment.since;
 		delete cursor.backfill;
 	} else {
-		const kept = cursor.backfill?.until_at;
-		const until_at =
-			kept === undefined ||
-			(segment.until_at !== undefined && isBefore(segment.until_at, kept))
-				? segment.until_at
-				: kept;
+		// widen has dropped a saved until this grant reaches past, so the grant's is the earliest.
 		cursor.backfill = { since: segment.since, next_day: addDays(day, 1) };
-		if (until_at !== undefined) cursor.backfill.until_at = until_at;
+		if (segment.until_at !== undefined) {
+			cursor.backfill.until_at = segment.until_at;
+		}
 	}
 }
 
