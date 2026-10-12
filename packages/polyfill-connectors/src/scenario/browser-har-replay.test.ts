@@ -64,6 +64,7 @@ import {
 	buildApiResponseFromHarEntry,
 	findApiRequestHarMatch,
 	resolveBrowserEvidence,
+	sequentialHarResponseGroups,
 	writeBrowserHarReplayPreload,
 } from "./browser-har-replay.ts";
 import type { ScenarioRun } from "./format.ts";
@@ -508,4 +509,36 @@ test("writeBrowserHarReplayPreload: the generated preload's own code never calls
 			rmSync(preloadPath, { force: true });
 		}
 	});
+});
+
+test("sequentialHarResponseGroups: a polled URL whose responses differ replays in recorded order; identical repeats and single entries are left to routeFromHAR", () => {
+	const at = (seconds: number): string =>
+		new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
+	const entry = (
+		method: string,
+		url: string,
+		status: number,
+		size: number,
+		startedDateTime: string,
+	) => ({
+		request: { method, url },
+		response: { content: { size }, status },
+		startedDateTime,
+	});
+	const status = "https://example.test/api/export/status";
+	const groups = sequentialHarResponseGroups([
+		// Out of file order on purpose: the rule orders by start time.
+		entry("GET", status, 200, 42, at(9)),
+		entry("GET", status, 404, 0, at(1)),
+		entry("GET", status, 404, 0, at(5)),
+		entry("GET", "https://example.test/api/me", 200, 10, at(2)),
+		entry("GET", "https://example.test/api/me", 200, 10, at(3)),
+		entry("POST", status, 200, 5, at(4)),
+		entry("GET", "https://example.test/once", 200, 1, at(6)),
+	]);
+	assert.deepEqual([...groups.keys()], [`GET ${status}`]);
+	assert.deepEqual(
+		groups.get(`GET ${status}`)?.map((e) => e.response.status),
+		[404, 404, 200],
+	);
 });

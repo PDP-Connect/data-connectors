@@ -432,6 +432,66 @@ export function findApiRequestHarMatch(
 	return best;
 }
 
+/**
+ * A HAR entry as `sequentialHarResponseGroups` reads it: request method and
+ * URL, response status, content size, and start time.
+ */
+export interface SequentialHarEntry {
+	request?: { method?: unknown; url?: unknown };
+	response?: { content?: { size?: unknown }; status?: unknown };
+	startedDateTime?: unknown;
+}
+
+/**
+ * `routeFromHAR` answers every request with the FIRST entry that matches its
+ * method and URL, so a URL the connector polls (an export status that
+ * answered 404 and later 200) replays "not ready" forever. This picks the
+ * method + URL keys whose recorded entries DIFFER in status or body size and
+ * returns each key's entries in recorded order; the replay preload serves
+ * them in that order (the last one repeats) and leaves every other request
+ * to `routeFromHAR`. A key whose entries all look the same is left out:
+ * order cannot change what it replays.
+ *
+ * The pure rule the generated preload's `installSequentialHarRoutes` mirrors
+ * inline (by copy, not import; see `findApiRequestHarMatch`).
+ */
+export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
+	entries: readonly T[],
+): Map<string, T[]> {
+	const groups = new Map<string, T[]>();
+	for (const entry of entries) {
+		const key = `${String(entry.request?.method)} ${String(entry.request?.url)}`;
+		const group = groups.get(key);
+		if (group) {
+			group.push(entry);
+		} else {
+			groups.set(key, [entry]);
+		}
+	}
+	const sequential = new Map<string, T[]>();
+	for (const [key, group] of groups) {
+		if (group.length < 2) {
+			continue;
+		}
+		const shapes = new Set(
+			group.map(
+				(entry) =>
+					`${String(entry.response?.status)}:${String(entry.response?.content?.size ?? "")}`,
+			),
+		);
+		if (shapes.size < 2) {
+			continue;
+		}
+		const started = (entry: T): number =>
+			Date.parse(String(entry.startedDateTime));
+		sequential.set(
+			key,
+			[...group].sort((left, right) => started(left) - started(right)),
+		);
+	}
+	return sequential;
+}
+
 /** Minimal `APIResponse` polyfill backing the bridge above — only the
  *  surface this package's current `context.request` callers use
  *  (`status`/`ok`/`text`/`json`/`dispose`; see the "APIRequestContext → HAR
@@ -999,6 +1059,55 @@ function installApiRequestContextHarBridge(context) {
     return buildApiResponseFromHarEntry(entry);
   };
 }
+// Polled URLs replay in recorded order. Inline mirror of
+// sequentialHarResponseGroups (browser-har-replay.ts), which is the tested
+// rule: routeFromHAR answers every request with the FIRST matching entry, so
+// for a method + URL whose entries differ in status or body size the entries
+// are served in recorded order (the last one repeats). Registered AFTER
+// routeFromHAR, so it is consulted first; any other request falls back.
+async function installSequentialHarRoutes(context) {
+  let har;
+  try {
+    har = JSON.parse(readFileSync(HAR_PATH, "utf8"));
+  } catch {
+    return;
+  }
+  const groups = new Map();
+  for (const entry of har.log?.entries ?? []) {
+    const key = String(entry.request?.method) + " " + String(entry.request?.url);
+    const group = groups.get(key);
+    if (group) group.push(entry);
+    else groups.set(key, [entry]);
+  }
+  const sequences = new Map();
+  for (const [key, group] of groups) {
+    if (group.length < 2) continue;
+    const shapes = new Set(group.map((entry) => String(entry.response?.status) + ":" + String(entry.response?.content?.size ?? "")));
+    if (shapes.size < 2) continue;
+    const started = (entry) => Date.parse(String(entry.startedDateTime));
+    sequences.set(key, { entries: [...group].sort((a, b) => started(a) - started(b)), next: 0 });
+  }
+  if (sequences.size === 0) return;
+  await context.route("**/*", async (route) => {
+    const request = route.request();
+    const sequence = sequences.get(request.method() + " " + request.url());
+    if (!sequence) return route.fallback();
+    const entry = sequence.entries[Math.min(sequence.next, sequence.entries.length - 1)];
+    sequence.next += 1;
+    if (!(entry.response?.status > 0)) return route.abort();
+    const content = entry.response.content ?? {};
+    const body = typeof content.text === "string"
+      ? Buffer.from(content.text, content.encoding === "base64" ? "base64" : "utf8")
+      : Buffer.alloc(0);
+    const headers = {};
+    for (const header of entry.response.headers ?? []) {
+      const name = header.name.toLowerCase();
+      if (name === "content-length" || name === "content-encoding" || name.startsWith(":")) continue;
+      headers[header.name] = header.value;
+    }
+    await route.fulfill({ status: entry.response.status, headers, body });
+  });
+}
 const ISOLATED_PROFILE_DIRS = [];
 let isolatedProfileCleanupRegistered = false;
 function freshIsolatedProfileDir() {
@@ -1063,6 +1172,7 @@ import("patchright").then((patchright) => {
     // ("EGRESS DENIAL SCOPE"). An unmatched request must fail loudly, never
     // silently reach the real network.
     await context.routeFromHAR(HAR_PATH, { notFound: "abort" });
+    await installSequentialHarRoutes(context);
     // See this file's "APIRequestContext → HAR bridge" comment above —
     // context.request never goes through context.routeFromHAR at all, so
     // without this it would silently reach the real network (or, under
