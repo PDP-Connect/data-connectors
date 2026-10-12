@@ -41,7 +41,7 @@ export const PROBE_PATH =
 export const HISTORY_FALLBACK = "2015-01-01T00:00:00.000Z";
 /** The web app reads cycles a month at a time. */
 export const WINDOW_DAYS = 30;
-/** Each request reaches a day past both edges, so a cycle near one is returned whatever WHOOP's edge rule; it is kept only by the window its start falls in. */
+/** Each request reaches a day past both edges, so a cycle near one, if shorter than the pad, is returned whatever WHOOP's edge rule; it is kept only by the window its start falls in. */
 const PAD_DAYS = 1;
 /** Re-read the last week each run: WHOOP scores sleep and recovery after the fact. */
 export const OVERLAP_DAYS = 7;
@@ -577,7 +577,9 @@ const SHAPELESS: Failure = {
  * The cycles that start in [start, end), each once, oldest first. The request reaches a day past
  * both edges and asks for twice the cycles the span can hold; an answer that fills that limit
  * with cycles from the span may be cut short, so the span halves and the read repeats. An answer
- * of cycles from outside the span (WHOOP's reply to a window it holds nothing for) is not.
+ * of cycles from outside the span (WHOOP's reply to a window it holds nothing for) is not. It
+ * relies on WHOOP returning a cycle to any request whose range holds the cycle's start, as it does
+ * if it answers by start or by overlap; no live account has confirmed which.
  */
 async function readWindow(
 	page: Pick<Page, "evaluate" | "goto">,
