@@ -1369,10 +1369,10 @@
 					{
 						"name": "activity",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Activity, such as steps, distances, energy burned, flights climbed, exercise, move and stand time, stand hours, running, cycling, rowing and paddling metrics, workout effort, VO2 max and low cardio fitness notifications. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Activity, such as steps, distances, energy burned, flights climbed, exercise, move and stand time, stand hours, running, cycling, rowing and paddling metrics, workout effort, VO2 max and low cardio fitness notifications. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your activity",
-							"detail": "Readings such as steps; walking, running, cycling, swimming, wheelchair, rowing, paddling, skating and snow-sports distances; flights climbed; active and resting energy; exercise, move and stand minutes and stand hours; running and cycling speed, power, cadence and form; workout effort; VO2 max, and notifications of low cardio fitness. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Readings such as steps; walking, running, cycling, swimming, wheelchair, rowing, paddling, skating and snow-sports distances; flights climbed; active and resting energy; exercise, move and stand minutes and stand hours; running and cycling speed, power, cadence and form; workout effort; VO2 max, and notifications of low cardio fitness. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1432,7 +1432,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -1461,10 +1468,10 @@
 					{
 						"name": "body_measurements",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Body measurements: height, body mass, body mass index, lean body mass, body fat percentage, waist circumference and sleeping wrist temperature, which Apple also uses to estimate menstrual cycles. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Body measurements: height, body mass, body mass index, lean body mass, body fat percentage, waist circumference and sleeping wrist temperature, which Apple also uses to estimate menstrual cycles. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your body measurements",
-							"detail": "Height, weight, body mass index, lean body mass, body fat percentage, waist circumference, and the wrist temperature your Apple Watch measures while you sleep, which Apple also uses to estimate your menstrual cycle. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Height, weight, body mass index, lean body mass, body fat percentage, waist circumference, and the wrist temperature your Apple Watch measures while you sleep, which Apple also uses to estimate your menstrual cycle. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1524,7 +1531,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -1553,10 +1567,10 @@
 					{
 						"name": "reproductive_health",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Reproductive health: menstrual flow and bleeding, cycle irregularity notifications, cervical mucus, basal body temperature, ovulation, progesterone and pregnancy test results, sexual activity, contraceptive use, pregnancy, lactation and menopause. It also carries the three symptoms HealthKit's documentation files under Reproduction (breast pain, pelvic pain and vaginal dryness). That is a deliberate deviation from Apple's grouping, which lists them among the symptoms: it keeps reproductive information behind this stream's own grant, so a grant of the symptoms stream never carries it. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Reproductive health: menstrual flow and bleeding, cycle irregularity notifications, cervical mucus, basal body temperature, ovulation, progesterone and pregnancy test results, sexual activity, contraceptive use, pregnancy, lactation and menopause. It also carries the three symptoms HealthKit's documentation files under Reproduction (breast pain, pelvic pain and vaginal dryness). That is a deliberate deviation from Apple's grouping, which lists them among the symptoms: it keeps reproductive information behind this stream's own grant, so a grant of the symptoms stream never carries it. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your reproductive health",
-							"detail": "Cycle tracking and reproductive health: menstrual flow and spotting, cycle irregularity notifications, cervical mucus, basal body temperature, ovulation, progesterone and pregnancy test results, sexual activity, contraceptive use, pregnancy, lactation, menopause, and bleeding after menopause or during or after pregnancy. It also includes three reproduction-related symptoms, breast pain, pelvic pain and vaginal dryness, which are kept here rather than with your other symptoms so that they are shared only if you share this. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Cycle tracking and reproductive health: menstrual flow and spotting, cycle irregularity notifications, cervical mucus, basal body temperature, ovulation, progesterone and pregnancy test results, sexual activity, contraceptive use, pregnancy, lactation, menopause, and bleeding after menopause or during or after pregnancy. It also includes three reproduction-related symptoms, breast pain, pelvic pain and vaginal dryness, which are kept here rather than with your other symptoms so that they are shared only if you share this. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1616,7 +1630,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -1645,10 +1666,10 @@
 					{
 						"name": "hearing",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Hearing: environmental and headphone audio exposure, environmental sound reduction, and loud-environment and headphone-level notifications. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Hearing: environmental and headphone audio exposure, environmental sound reduction, and loud-environment and headphone-level notifications. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your hearing and sound exposure",
-							"detail": "Environmental sound levels, headphone audio levels, the sound reduction your headphones applied, and notifications of loud environments and loud headphone audio. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Environmental sound levels, headphone audio levels, the sound reduction your headphones applied, and notifications of loud environments and loud headphone audio. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1708,7 +1729,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -1737,10 +1765,10 @@
 					{
 						"name": "vital_signs",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Vital signs: heart rate, resting and walking heart rate, heart rate variability, heart rate recovery, AFib burden, oxygen saturation, body temperature, blood pressure, respiratory rate, and high, low and irregular heart rhythm and hypertension notifications. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Vital signs: heart rate, resting and walking heart rate, heart rate variability, heart rate recovery, AFib burden, oxygen saturation, body temperature, blood pressure, respiratory rate, and high, low and irregular heart rhythm and hypertension notifications. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your vital signs",
-							"detail": "Heart rate, resting and walking heart rate, heart rate variability, heart rate recovery, AFib history, blood oxygen, body temperature, blood pressure and respiratory rate, and notifications of a high, low or irregular heart rhythm and of possible hypertension. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Heart rate, resting and walking heart rate, heart rate variability, heart rate recovery, AFib history, blood oxygen, body temperature, blood pressure and respiratory rate, and notifications of a high, low or irregular heart rhythm and of possible hypertension. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1800,7 +1828,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -1829,10 +1864,10 @@
 					{
 						"name": "lab_results",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Lab and test results: blood glucose, insulin delivery, inhaler usage, forced vital capacity, forced expiratory volume, peak expiratory flow rate, electrodermal activity, peripheral perfusion index and number of times fallen. Clinical records from healthcare providers, which Health keeps apart from these, are not included. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Lab and test results: blood glucose, insulin delivery, inhaler usage, forced vital capacity, forced expiratory volume, peak expiratory flow rate, electrodermal activity, peripheral perfusion index and number of times fallen. Clinical records from healthcare providers, which Health keeps apart from these, are not included. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your lab and test results",
-							"detail": "Blood glucose, insulin delivery, inhaler use, lung function (forced vital capacity, FEV1 and peak expiratory flow), electrodermal activity, peripheral perfusion index, and the number of times you fell. Health records that a doctor, clinic or hospital shared with Health are not included. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Blood glucose, insulin delivery, inhaler use, lung function (forced vital capacity, FEV1 and peak expiratory flow), electrodermal activity, peripheral perfusion index, and the number of times you fell. Health records that a doctor, clinic or hospital shared with Health are not included. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1892,7 +1927,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -1921,10 +1963,10 @@
 					{
 						"name": "sleep",
 						"required": false,
-						"description": "Apple Health sleep records: sleep analysis, sleep apnea notifications and sleeping breathing disturbances, from the types HealthKit's documentation groups under Mindfulness and sleep, and the export's sleep duration goal. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health sleep records: sleep analysis, sleep apnea notifications and sleeping breathing disturbances, from the types HealthKit's documentation groups under Mindfulness and sleep, and the export's sleep duration goal. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your sleep",
-							"detail": "Sleep stages and time in bed, breathing disturbances while you sleep, sleep apnea notifications, and your sleep duration goal. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Sleep stages and time in bed, breathing disturbances while you sleep, sleep apnea notifications, and your sleep duration goal. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -1984,7 +2026,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2013,10 +2062,10 @@
 					{
 						"name": "mindfulness",
 						"required": false,
-						"description": "Apple Health mindful sessions, the mindfulness type HealthKit's documentation groups under Mindfulness and sleep. Kept apart from sleep so that each has its own grant. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health mindful sessions, the mindfulness type HealthKit's documentation groups under Mindfulness and sleep. Kept apart from sleep so that each has its own grant. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your mindful minutes",
-							"detail": "Your mindful minutes: when each mindfulness session began and ended. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Your mindful minutes: when each mindfulness session began and ended. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -2076,7 +2125,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2105,10 +2161,10 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Nutrition: dietary energy, macronutrients, vitamins, minerals, caffeine and water. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Nutrition: dietary energy, macronutrients, vitamins, minerals, caffeine and water. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your nutrition",
-							"detail": "What you logged eating and drinking: energy, carbohydrates, fat, protein, sugar and fibre, vitamins and minerals, caffeine and water. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "What you logged eating and drinking: energy, carbohydrates, fat, protein, sugar and fibre, vitamins and minerals, caffeine and water. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -2168,7 +2224,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2197,10 +2260,10 @@
 					{
 						"name": "alcohol_consumption",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Alcohol consumption: blood alcohol content and number of alcoholic beverages. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Alcohol consumption: blood alcohol content and number of alcoholic beverages. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your alcohol consumption",
-							"detail": "Blood alcohol content and the number of alcoholic drinks you logged. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Blood alcohol content and the number of alcoholic drinks you logged. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -2260,7 +2323,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2289,10 +2359,10 @@
 					{
 						"name": "mobility",
 						"required": false,
-						"description": "Apple Health records of the types HealthKit's documentation groups under Mobility: walking steadiness and its notifications, six-minute walk distance, walking speed, step length, asymmetry and double support, and stair ascent and descent speed. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of the types HealthKit's documentation groups under Mobility: walking steadiness and its notifications, six-minute walk distance, walking speed, step length, asymmetry and double support, and stair ascent and descent speed. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your mobility",
-							"detail": "Walking steadiness and its notifications, walking speed, step length, walking asymmetry and double support time, stair ascent and descent speed, and six-minute walk distance. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Walking steadiness and its notifications, walking speed, step length, walking asymmetry and double support time, stair ascent and descent speed, and six-minute walk distance. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -2352,7 +2422,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2381,10 +2458,10 @@
 					{
 						"name": "symptoms",
 						"required": false,
-						"description": "Apple Health symptom records, the types HealthKit's documentation lists as symptom type identifiers, except the three it files under Reproduction (breast pain, pelvic pain and vaginal dryness), which are in reproductive_health. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health symptom records, the types HealthKit's documentation lists as symptom type identifiers, except the three it files under Reproduction (breast pain, pelvic pain and vaginal dryness), which are in reproductive_health. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your symptoms",
-							"detail": "Symptoms you logged, such as headache, fatigue, fever, coughing, nausea, dizziness, mood changes, sleep changes, skin and hair changes and bladder incontinence. Breast pain, pelvic pain and vaginal dryness are in Reproductive health instead. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Symptoms you logged, such as headache, fatigue, fever, coughing, nausea, dizziness, mood changes, sleep changes, skin and hair changes and bladder incontinence. Breast pain, pelvic pain and vaginal dryness are in Reproductive health instead. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -2444,7 +2521,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2473,10 +2557,10 @@
 					{
 						"name": "other",
 						"required": false,
-						"description": "Apple Health records of every type no other stream carries: UV exposure, time in daylight, underwater depth, water temperature, toothbrushing and handwashing, and any type this version does not assign to an area, such as one added to HealthKit later. A record is never dropped for having an unfamiliar type; this stream's receipt counts such records under records_type_unrecognized. Not incremental: every import re-sends every record in the export under a content-derived id, so a record already held is superseded rather than duplicated. Deletions and edits made in Health are not propagated: no tombstone is emitted, and an edited record arrives as a new record beside the old one.",
+						"description": "Apple Health records of every type no other stream carries: UV exposure, time in daylight, underwater depth, water temperature, toothbrushing and handwashing, and any type this version does not assign to an area, such as one added to HealthKit later. A record is never dropped for having an unfamiliar type; this stream's receipt counts such records under records_type_unrecognized. Not incremental: every import re-sends every record in the export under an id derived from its type and its start, end and creation dates, so a record already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edit that keeps a record's type and dates replaces the record already held; an edit to any of them arrives as a new record beside the old one.",
 						"display": {
 							"label": "Your other Health data",
-							"detail": "Everything that belongs to none of the other areas: UV exposure, time in daylight, underwater depth, water temperature, toothbrushing and handwashing, and any kind of Health data this version does not recognise yet, such as one Apple adds in a later iOS release, whatever it measures. Nothing is dropped for having an unfamiliar type, and the import receipt says how many such readings arrived. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. An identical reading recorded twice arrives once; on a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Readings are told apart by what they record and by the device's maker, model and hardware, not by which physical device made them or the firmware and software versions it ran: the same reading at the same times from two devices with the same maker, model and hardware arrives once, as do two otherwise identical readings whose device descriptions are missing or could not be read. Readings of the same thing from devices whose maker, model or hardware differ are all kept; they are not reconciled. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
+							"detail": "Everything that belongs to none of the other areas: UV exposure, time in daylight, underwater depth, water temperature, toothbrushing and handwashing, and any kind of Health data this version does not recognise yet, such as one Apple adds in a later iOS release, whatever it measures. Nothing is dropped for having an unfamiliar type, and the import receipt says how many such readings arrived. Each reading carries its type, value and unit as the export states them; its start, end and creation dates; the time-zone offset where it was recorded, which shows when you were in another time zone; and whether it was typed in by hand. The names of the apps and devices that recorded it are not included, nor anything that identifies a particular device, so no reading carries the name someone gave their phone or watch; the device's maker, model, and hardware, firmware and software versions are kept, because a reader needs to know whether a measurement came from a watch or a chest strap. Readings are told apart by their type and their start, end and creation dates only: two readings of the same type with the same start, end and creation dates arrive once, whatever their values, units or devices, and the import receipt counts the second as a duplicate. On a very large export this stops once 400,000 different readings across all the health areas have been remembered, and the import receipt of each area affected says so. Every import brings in everything in your export again: a reading you already have is updated rather than duplicated, and a reading you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -2536,7 +2620,14 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "type", "start_date", "freshness"]
+							"required": [
+								"id",
+								"type",
+								"start_date",
+								"end_date",
+								"creation_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2565,10 +2656,10 @@
 					{
 						"name": "workouts",
 						"required": false,
-						"description": "Apple Health workouts. Not incremental: every import re-sends every workout in the export under a content-derived id, so a workout already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edited workout replaces the one already held, unless the edit changed its type, its device's manufacturer, model or hardware, its start, time-zone offset or end, or its duration; it then arrives as a new workout beside the old one.",
+						"description": "Apple Health workouts. Not incremental: every import re-sends every workout in the export under an id derived from its type, start and end, so a workout already held is superseded rather than duplicated. Deletions made in Health are not propagated: no tombstone is emitted. An edited workout replaces the one already held, unless the edit changed its type, start or end; it then arrives as a new workout beside the old one.",
 						"display": {
 							"label": "Your workouts",
-							"detail": "Workout type, with duration in minutes, energy in kilocalories and distance in kilometres, each converted from whatever unit the export stated, plus start and end dates, the time-zone offset where it began, which shows when you were in another time zone, and up to 500 pause or segment markers and up to 500 per-metric statistics per workout, which summarise readings taken during it, such as its average, minimum and maximum heart rate; a workout with more of either has that list cut at 500, and the import receipt names which list under fields_unavailable. On iPhones running iOS 16 or later, a workout can also carry separate detail for each activity within it; that per-activity detail is not included, and the activities' statistics are used only to add up the workout's totals where the workout's own do not. Such exports typically state no total distance or energy for a workout, so those are added up from the workout's own statistics, or from its activities' where those record a kind the workout's own lack, never from both; where each records a kind of distance the other lacks, the total is left empty and the import receipt says so. A quantity that is not a number, or whose unit could not be converted, is left empty rather than guessed, and the import receipt says so. Application and source names are excluded, as is the workout's weather block and any GPS route, because weather on a known date reconstructs location. The device's maker, model, and hardware, firmware and software versions are kept; its name and identifiers are not. A workout recorded twice with the same type, device maker, model and hardware, start and end, time-zone offset and duration arrives once, even if the two state a different distance, energy, or firmware or software version, including one recorded by two devices with the same maker, model and hardware, which cannot be told apart, and two whose device descriptions are missing or could not be read; on a very large export this stops once 100,000 different workouts have been remembered, and the workouts import receipt says so. Every import brings in everything in your export again, and a workout you already have is updated rather than duplicated; a workout you delete in Health is not removed here."
+							"detail": "Workout type, with duration in minutes, energy in kilocalories and distance in kilometres, each converted from whatever unit the export stated, plus start and end dates, the time-zone offset where it began, which shows when you were in another time zone, and up to 500 pause or segment markers and up to 500 per-metric statistics per workout, which summarise readings taken during it, such as its average, minimum and maximum heart rate; a workout with more of either has that list cut at 500, and the import receipt names which list under fields_unavailable. On iPhones running iOS 16 or later, a workout can also carry separate detail for each activity within it; that per-activity detail is not included, and the activities' statistics are used only to add up the workout's totals where the workout's own do not. Such exports typically state no total distance or energy for a workout, so those are added up from the workout's own statistics, or from its activities' where those record a kind the workout's own lack, never from both; where each records a kind of distance the other lacks, the total is left empty and the import receipt says so. A quantity that is not a number, or whose unit could not be converted, is left empty rather than guessed, and the import receipt says so. Application and source names are excluded, as is the workout's weather block and any GPS route, because weather on a known date reconstructs location. The device's maker, model, and hardware, firmware and software versions are kept; its name and identifiers are not. Workouts are told apart by their type, start and end only: two of the same type with the same start and end arrive once, whatever their duration, distance, energy or device, and the import receipt counts the second as a duplicate; on a very large export this stops once 100,000 different workouts have been remembered, and the workouts import receipt says so. Every import brings in everything in your export again, and a workout you already have is updated rather than duplicated; a workout you delete in Health is not removed here."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -2668,7 +2759,13 @@
 									"description": "Minutes east of UTC at the moment this was recorded. start_date is normalised to UTC, which keeps the instant exact but loses the wall clock the owner lived in. For health data that clock is often the fact itself - a sleep record at 23:00 local is not the same claim as 13:00 UTC - so the offset travels alongside rather than being discarded or guessed. Null when the export states no offset. Also null when it states one beyond 18 hours either side of UTC, which no time zone uses, and the stream's receipt then lists start_utc_offset_minutes under fields_unavailable."
 								}
 							},
-							"required": ["id", "start_date", "freshness"]
+							"required": [
+								"id",
+								"workout_activity_type",
+								"start_date",
+								"end_date",
+								"freshness"
+							]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "start_date",
@@ -2739,7 +2836,7 @@
 								},
 								"duplicates_discarded": {
 									"type": ["integer", "null"],
-									"description": "Records dropped because a record with the same identity had already been seen in this import: for a health record, the same type, device manufacturer, model and hardware, unit, dates, offset, creation stamp, reading, and whether it was typed in or sensed; for a workout, the same type, device manufacturer, model and hardware, dates, offset and duration, whatever distance and energy each states. A device's firmware and software are published but not compared, and a device description that is missing or could not be read is compared as none. Records whose device manufacturer, model or hardware differ are not reconciled and are not counted here. Two devices with the same manufacturer, model and hardware cannot be told apart, so an identical record from each, at identical times, is counted here. Suppression remembers up to 400,000 distinct identities across all the health-area streams together, and up to 100,000 workouts. A stream that meets a new identity after its budget is spent says so: its count is a floor from there, and duplicates_discarded appears under its fields_unavailable. Published because once source names are excluded a reader cannot audit any dropping from the records themselves, and a silent discard is indistinguishable from a reading that never existed."
+									"description": "Records dropped because a record with the same id had already been seen in this import. A health record's id is derived from its type and its start, end and creation dates, and a workout's from its type, start and end: fields every grant carries, so an id reveals nothing a grant withholds. Records alike in those are counted here whatever their values, units, devices or other fields. Suppression remembers up to 400,000 distinct identities across all the health-area streams together, and up to 100,000 workouts. A stream that meets a new identity after its budget is spent says so: its count is a floor from there, and duplicates_discarded appears under its fields_unavailable. Published because once source names are excluded a reader cannot audit any dropping from the records themselves, and a silent discard is indistinguishable from a reading that never existed."
 								},
 								"records_skipped_unreadable": {
 									"type": ["integer", "null"],

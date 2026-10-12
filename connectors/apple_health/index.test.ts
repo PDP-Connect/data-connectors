@@ -1427,10 +1427,10 @@ test("the receipt does not count records the host did not ask for", async () => 
 });
 
 test("identity is derived only from fields a reader can already see", async () => {
-	// The id is a content hash over published inputs only. With sourceName in
-	// the hash but withheld from the record, a reader could hash candidate
-	// device names against the published id until one matched. Two records
-	// differing ONLY in sourceName must therefore share an id.
+	// The id hashes required fields only. With sourceName in the hash but
+	// withheld from the record, a reader could hash candidate device names
+	// against the published id until one matched. Two records differing ONLY
+	// in sourceName must therefore share an id.
 	const base =
 		'type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:05:00 -0500" value="120"';
 	const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1455,9 +1455,9 @@ test("identity is derived only from fields a reader can already see", async () =
 	});
 });
 
-test("two watches sharing a source name but not a device get distinct ids", async () => {
-	// With sourceName out of the hash, the published device is what tells two
-	// watches apart, and it must actually do so.
+test("readings of one type at the same times from two devices are one record", async () => {
+	// The device is optional, so a grant may withhold it, and it takes no part
+	// in the id. The second reading is a duplicate, and the receipt counts it.
 	const base =
 		'type="HKQuantityTypeIdentifierHeartRate" sourceName="Apple Watch" unit="count/min" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:00:01 -0500" value="72"';
 	const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1470,15 +1470,14 @@ test("two watches sharing a source name but not a device get distinct ids", asyn
 	await withImportDir({ "export.xml": xml }, async (dir) => {
 		const result = await run(dir);
 		const records = recordsOf(result, "vital_signs");
-		assert.equal(records.length, 2, "different hardware is two observations");
-		assert.notEqual(records[0]?.id, records[1]?.id);
+		assert.equal(records.length, 1);
+		assert.equal(receiptOf(result, "vital_signs")?.duplicates_discarded, 1);
 	});
 });
 
-test("a workout's duration unit participates in its identity", async () => {
-	// Hashing the raw duration without its unit would give duration="1" min
-	// and duration="1" h the same id, and one of two real workouts would be
-	// dropped.
+test("a workout's duration takes no part in its id", async () => {
+	// Two workouts of one type with the same start and end are one, whatever
+	// duration each states; the second is counted as a duplicate.
 	const base =
 		'workoutActivityType="HKWorkoutActivityTypeRunning" startDate="2024-06-05 07:00:00 -0500" endDate="2024-06-05 07:30:00 -0500" duration="1"';
 	const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1490,11 +1489,11 @@ test("a workout's duration unit participates in its identity", async () => {
 `;
 	await withImportDir({ "export.xml": xml }, async (dir) => {
 		const result = await run(dir);
-		const workouts = recordsOf(result, "workouts");
-		assert.equal(workouts.length, 2);
-		const minutes = workouts.map((w) => w.duration_minutes).sort();
-		assert.deepEqual(minutes, [1, 60]);
-		assert.notEqual(workouts[0]?.id, workouts[1]?.id);
+		assert.deepEqual(
+			recordsOf(result, "workouts").map((w) => w.duration_minutes),
+			[1],
+		);
+		assert.equal(receiptOf(result, "workouts")?.duplicates_discarded, 1);
 	});
 });
 
@@ -1542,26 +1541,23 @@ test("a workout keeps its id whichever way an export states its totals", async (
 	assert.equal(new Set(seen.map((w) => w.id)).size, 1);
 });
 
-test("identity is unambiguous when a published string contains a delimiter", async () => {
-	// Joined with "|", model "D|E" with unit "U" and model "D" with unit "E|U"
-	// would give the same bytes, and so the same id. JSON keeps them apart.
+test("identity is unambiguous when one of its fields is empty", async () => {
+	// An end date with no creation date and a creation date with no end date
+	// at the same instant are two readings. The id keeps each field in its
+	// place, so neither can stand in for the other.
 	const base =
-		'type="HKQuantityTypeIdentifierStepCount" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:05:00 -0500" value="120"';
+		'type="HKQuantityTypeIdentifierStepCount" startDate="2024-06-05 08:00:00 -0500" value="120"';
 	const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <HealthData locale="en_US">
  <ExportDate value="2026-09-01 12:00:00 -0500"/>
- <Record device="&lt;&lt;HKDevice: 0x1&gt;, model:D|E&gt;" unit="U" ${base}/>
- <Record device="&lt;&lt;HKDevice: 0x1&gt;, model:D&gt;" unit="E|U" ${base}/>
+ <Record endDate="2024-06-05 08:05:00 -0500" ${base}/>
+ <Record creationDate="2024-06-05 08:05:00 -0500" ${base}/>
 </HealthData>
 `;
 	await withImportDir({ "export.xml": xml }, async (dir) => {
 		const result = await run(dir);
 		const records = recordsOf(result, "activity");
-		assert.equal(
-			records.length,
-			2,
-			"different device and unit are two records",
-		);
+		assert.equal(records.length, 2);
 		assert.notEqual(records[0]?.id, records[1]?.id);
 	});
 });
@@ -2127,10 +2123,10 @@ ${events.join("\n")}
 
 // ─── Identity and receipt precision ────────────────────────────────────
 
-test("a typed-in reading and a sensed reading are two records", async () => {
-	// was_user_entered is a real difference in what the record IS, so it is
-	// part of identity. Two otherwise identical readings differing only in it
-	// must not collapse.
+test("whether a reading was typed in takes no part in its id", async () => {
+	// was_user_entered is optional, and with it in the hash a reader holding
+	// the rest could test its three values against the id. Two readings alike
+	// but for it are one record, and the receipt counts the second.
 	const base =
 		'type="HKQuantityTypeIdentifierBodyMass" unit="kg" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:00:00 -0500" value="80"';
 	const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -2142,16 +2138,17 @@ test("a typed-in reading and a sensed reading are two records", async () => {
 `;
 	await withImportDir({ "export.xml": xml }, async (dir) => {
 		const result = await run(dir);
-		const records = recordsOf(result, "body_measurements");
-		assert.equal(records.length, 2);
-		assert.notEqual(records[0]?.id, records[1]?.id);
+		assert.equal(recordsOf(result, "body_measurements").length, 1);
+		assert.equal(
+			receiptOf(result, "body_measurements")?.duplicates_discarded,
+			1,
+		);
 	});
 });
 
 test("two readings a person created separately are two records", async () => {
 	// creation_date is in the identity. Leaving it out would merge two
-	// readings the Health app itself shows as two. Identity is the published
-	// scalar content.
+	// readings the Health app itself shows as two.
 	const base =
 		'type="HKQuantityTypeIdentifierBodyMass" unit="kg" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:00:00 -0500" value="80"';
 	const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -2945,16 +2942,22 @@ test("with both identity budgets spent, memory stays within the streaming bound 
 	const bodyMass =
 		' <Record type="HKQuantityTypeIdentifierBodyMass" unit="kg" startDate="2024-01-01 07:00:00 -0500" endDate="2024-01-01 07:00:00 -0500" value="80"/>';
 	parts.push(bodyMass, bodyMass);
+	// An id hashes the type and the dates, so each reading takes a creation
+	// date of its own, and each workout an end of its own.
+	const secondsAfter = (iso: string, seconds: number): string => {
+		const at = new Date(Date.parse(iso) + seconds * 1000).toISOString();
+		return `${at.slice(0, 10)} ${at.slice(11, 19)} +0000`;
+	};
 	for (let i = 0; i < AREA_BUDGET; i += 1) {
 		parts.push(
-			` <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:05:00 -0500" value="${i}"/>`,
+			` <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:05:00 -0500" creationDate="${secondsAfter("2024-06-05T13:05:00Z", i)}" value="${i}"/>`,
 		);
 	}
 	const sleep =
 		' <Record type="HKCategoryTypeIdentifierSleepAnalysis" startDate="2024-06-05 23:00:00 -0500" endDate="2024-06-06 06:00:00 -0500" value="HKCategoryValueSleepAnalysisAsleepCore"/>';
 	parts.push(sleep, sleep);
-	const workout = (minutes: number): string =>
-		` <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="${minutes}" durationUnit="min" startDate="2024-06-05 07:00:00 -0500" endDate="2024-06-05 07:30:00 -0500"/>`;
+	const workout = (n: number): string =>
+		` <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="${30 + n / 60}" durationUnit="min" startDate="2024-06-05 07:00:00 -0500" endDate="${secondsAfter("2024-06-05T12:30:00Z", n)}"/>`;
 	parts.push(workout(0), workout(0));
 	for (let i = 1; i <= WORKOUT_BUDGET; i += 1) {
 		parts.push(workout(i));

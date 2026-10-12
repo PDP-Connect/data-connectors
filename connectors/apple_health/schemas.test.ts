@@ -21,6 +21,7 @@ import { test } from "node:test";
 import type { z } from "zod";
 import { manifestPath } from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import { HEALTH_AREA_STREAMS } from "./areas.ts";
+import { HEALTH_RECORD_ID_FIELDS, WORKOUT_ID_FIELDS } from "./parsers.ts";
 import {
 	coverageDiagnosticsSchema,
 	healthRecordSchema,
@@ -294,6 +295,27 @@ const PAIRS: ReadonlyArray<[string, z.ZodObject<z.ZodRawShape>]> = [
 	["coverage_diagnostics", coverageDiagnosticsSchema],
 ];
 
+test("parity: an id is derived from exactly the fields its stream requires", () => {
+	// Required fields are sent under every grant, so an id over exactly these
+	// reveals nothing a grant withholds. freshness is required but constant.
+	const streams = manifestStreams();
+	const idFields = [
+		...HEALTH_AREA_STREAMS.map((stream): [string, readonly string[]] => [
+			stream,
+			HEALTH_RECORD_ID_FIELDS,
+		]),
+		["workouts", WORKOUT_ID_FIELDS] as [string, readonly string[]],
+	];
+	for (const [stream, fields] of idFields) {
+		const required = streams.get(stream)?.schema.required ?? [];
+		assert.deepEqual(
+			required.filter((f) => f !== "id" && f !== "freshness").sort(),
+			[...fields].sort(),
+			stream,
+		);
+	}
+});
+
 test("parity: the manifest declares one optional stream per health area, then workouts and the receipts", () => {
 	const streams = manifestStreamList();
 	assert.deepEqual(
@@ -348,27 +370,27 @@ test("the owner copy names what reproductive_health carries, and where the repro
 	assert.match(symptoms.display.detail, /Reproductive health instead/);
 });
 
-test("the owner copy and the receipt say which device fields tell records apart, and what cannot be told apart", () => {
+test("the owner copy and the receipt say what tells records apart, and that nothing else does", () => {
 	const streams = manifestStreams();
-	for (const name of [...HEALTH_AREA_STREAMS, "workouts"]) {
+	for (const name of HEALTH_AREA_STREAMS) {
 		const consent = streams.get(name)?.display.detail ?? "";
 		assert.match(
 			consent,
-			/two devices with the same maker, model and hardware/,
+			/told apart by their type and their start, end and creation dates only/,
 			name,
 		);
-		assert.match(
-			consent,
-			/descriptions are missing or could not be read/,
-			name,
-		);
+		assert.match(consent, /whatever their values, units or devices/, name);
 	}
+	assert.match(
+		streams.get("workouts")?.display.detail ?? "",
+		/told apart by their type, start and end only/,
+	);
 	const duplicates = streams.get("coverage_diagnostics")?.schema.properties
 		.duplicates_discarded as { description?: string } | undefined;
 	for (const stated of [
-		/firmware and software are published but not compared/,
-		/missing or could not be read is compared as none/,
-		/Two devices with the same manufacturer, model and hardware cannot be told apart/,
+		/derived from its type and its start, end and creation dates/,
+		/a workout's from its type, start and end/,
+		/an id reveals nothing a grant withholds/,
 	]) {
 		assert.match(duplicates?.description ?? "", stated);
 	}
@@ -438,7 +460,7 @@ test("the workouts consent copy names heart-rate summaries, where activities' st
 	assert.match(consent, /used only to add up the workout's totals/);
 	assert.match(
 		consent,
-		/the same type, device maker, model and hardware, start and end/,
+		/two of the same type with the same start and end arrive once/,
 	);
 	assert.match(consent, /100,000 different workouts/);
 });
@@ -448,7 +470,7 @@ test("the copy says which workout edits replace a workout, and which rows a reso
 	const workouts = streams.get("workouts")?.description ?? "";
 	assert.match(
 		workouts,
-		/An edited workout replaces the one already held, unless the edit changed its type, its device's manufacturer, model or hardware, its start, time-zone offset or end, or its duration/,
+		/An edited workout replaces the one already held, unless the edit changed its type, start or end/,
 	);
 	const skipped = streams.get("coverage_diagnostics")?.schema.properties
 		.records_skipped_unreadable as { description?: string } | undefined;

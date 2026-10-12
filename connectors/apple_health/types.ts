@@ -109,14 +109,11 @@ export interface AppleHealthProvenance {
 /** Tally of real-format surface the connector saw but could not (or chose not to) turn into an emitted field. Reported honestly, never silently dropped. */
 export interface AppleHealthGapCounts {
 	/**
-	 * Records dropped because a record with the same identity had already been
-	 * seen in this import. Identity is the hash in parsers.ts: every published
-	 * scalar of a health record, and a workout's type, device, start, offset,
-	 * end and duration, the device by its manufacturer, model and hardware.
-	 * Readings of one measurement from devices that differ in those are not
-	 * reconciled and are not counted here; two devices alike in them cannot be
-	 * told apart, and an identical reading from each is counted here. The
-	 * manifest copy and the receipt description state the same identity.
+	 * Records dropped because a record with the same id had already been seen
+	 * in this import. An id hashes only the stream's required fields
+	 * (HEALTH_RECORD_ID_FIELDS and WORKOUT_ID_FIELDS in parsers.ts), so records
+	 * alike in those are counted here whatever else differs. The manifest copy
+	 * and the receipt description state the same identity.
 	 */
 	duplicatesDiscarded: number;
 	/** Emitted records whose value attribute was blank, published as null. Progress line only; the receipt names "value". */

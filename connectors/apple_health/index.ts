@@ -1246,12 +1246,10 @@ runConnector({
 		// window. A later export carries records dated before the newest an
 		// earlier export held, from a watch that syncs late or a reading entered
 		// by hand, and a cursor would skip them for good. Re-sending is safe:
-		// the streams are mutable_state and ids hash published fields, so a
+		// the streams are mutable_state and ids hash required fields only, so a
 		// record already held is upserted. No tombstone is emitted, so a record
 		// deleted in Health stays; an edit to a field in a record's id arrives
-		// beside the old record, and an edit to a workout that leaves its type,
-		// its device's maker, model and hardware, and its start, offset, end and
-		// duration alone replaces it.
+		// beside the old record, and any other edit replaces it.
 		const run: RunContext = { emitRecord, gaps, lanes, provenance };
 
 		connectorDiagnostic("apple_health", "stream_parse_start", {

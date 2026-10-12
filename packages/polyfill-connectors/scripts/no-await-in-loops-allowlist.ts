@@ -497,7 +497,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/apple_health/index.test.ts",
-			line: 3175,
+			line: 3178,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "small-XML-entry archive cases: each imported in turn by its own subprocess, whose peak RSS is measured alone",

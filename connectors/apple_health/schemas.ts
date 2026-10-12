@@ -43,9 +43,9 @@
  *     themselves — "Ada's Apple Watch", "Sam's iPhone". On streams that
  *     together cover every health record, that places a human name on EVERY
  *     row. It is a name, not safe device or application provenance.
- *     `sourceName` is not read at all: record identity is a hash of published
- *     fields only (see buildHealthRecord), since a hash over a withheld name
- *     would let a reader test candidate names against the id. `sourceVersion`
+ *     `sourceName` is not read at all: an id is a hash of required fields
+ *     only (HEALTH_RECORD_ID_FIELDS in parsers.ts), since a hash over a
+ *     withheld value would let a reader test candidates against the id. `sourceVersion`
  *     goes with it: an application version detached from the
  *     application it versions is uninterpretable, and it still fingerprints.
  *

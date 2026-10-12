@@ -276,25 +276,9 @@ const PUBLISHED_DEVICE_FIELD_SET: ReadonlySet<string> = new Set(
 	PUBLISHED_DEVICE_FIELDS,
 );
 /**
- * The published device fields a record's identity includes. Firmware and
- * software are left out: an export that states a device's current versions
- * rather than those it ran when it recorded would otherwise give every
- * reading from it a new id after each update.
- */
-const IDENTITY_DEVICE_FIELDS = ["manufacturer", "model", "hardware"] as const;
-
-/** A device description as published, and the part of it that identity includes. */
-export interface NormalisedDevice {
-	readonly identity: string | null;
-	readonly published: string | null;
-}
-
-const NO_DEVICE: NormalisedDevice = { identity: null, published: null };
-
-/**
  * The published `device`: the hardware fields of the export's HKDevice
  * description as `key:value` pairs in PUBLISHED_DEVICE_FIELDS order, or null
- * when it has none; and its identity, the IDENTITY_DEVICE_FIELDS among them.
+ * when it has none.
  *
  * Apple writes `<<HKDevice: 0x…>, name:…, manufacturer:…, model:…,
  * hardware:…, firmware:…, software:…, localIdentifier:…,
@@ -312,14 +296,14 @@ const NO_DEVICE: NormalisedDevice = { identity: null, published: null };
 export function normaliseDevice(
 	raw: string | undefined,
 	pending: AppleHealthElementGaps,
-): NormalisedDevice {
+): string | null {
 	if (!raw) {
-		return NO_DEVICE;
+		return null;
 	}
 	const body = HKDEVICE_RE.exec(raw)?.[1];
 	if (body === undefined) {
 		noteField(pending, "device");
-		return NO_DEVICE;
+		return null;
 	}
 	const fields = new Map<string, string>();
 	const re = new RegExp(HKDEVICE_FIELD_RE.source, "g");
@@ -331,21 +315,17 @@ export function normaliseDevice(
 		}
 		if (fields.has(key)) {
 			noteField(pending, "device");
-			return NO_DEVICE;
+			return null;
 		}
 		const start = (mark.index ?? 0) + mark[0].length;
 		const end = marks[index + 1]?.index ?? body.length;
 		fields.set(key, body.slice(start, end).trim());
 	}
-	const describe = (keys: readonly string[]): string | null =>
-		keys
-			.filter((key) => fields.get(key))
+	return (
+		PUBLISHED_DEVICE_FIELDS.filter((key) => fields.get(key))
 			.map((key) => `${key}:${fields.get(key)}`)
-			.join(", ") || null;
-	return {
-		identity: describe(IDENTITY_DEVICE_FIELDS),
-		published: describe(PUBLISHED_DEVICE_FIELDS),
-	};
+			.join(", ") || null
+	);
 }
 
 /**
@@ -384,6 +364,41 @@ export function hashId(s: string): string {
 		.digest()
 		.subarray(0, RECORD_ID_HASH_LENGTH / 2)
 		.toString("hex");
+}
+
+/**
+ * The fields an id is derived from: exactly those the stream's schema
+ * requires besides the id itself and the constant `freshness`. Required
+ * fields are sent under every grant (Core §6), so an id reveals nothing a
+ * grant withholds: hashed with an optional field, an id would let a reader
+ * holding the rest test candidate values of it, such as the three a
+ * withheld was_user_entered can take. The ids stay stable across exports
+ * too, since value and device descriptions change between them and no field
+ * here does. Readings of one type with the same start, end and creation
+ * dates share an id, and a later one is a duplicate; so are workouts of one
+ * type with the same start and end.
+ */
+export const HEALTH_RECORD_ID_FIELDS = [
+	"type",
+	"start_date",
+	"end_date",
+	"creation_date",
+] as const;
+export const WORKOUT_ID_FIELDS = [
+	"workout_activity_type",
+	"start_date",
+	"end_date",
+] as const;
+
+/**
+ * The id of a record from the named fields of it. JSON rather than a
+ * delimiter, so no value can move a boundary between two fields.
+ */
+export function recordId(
+	fields: readonly string[],
+	record: Readonly<Record<string, unknown>>,
+): string {
+	return hashId(JSON.stringify(fields.map((field) => record[field] ?? null)));
 }
 
 // Attribute values are XML text: real exports carry entity-escaped `<`,
@@ -1055,10 +1070,9 @@ export function buildHealthRecord(
 	if (finite && !attrs.unit) {
 		el.pending.units.push({ field: "unit", unit: "(absent)" });
 	}
-	const device = normaliseDevice(attrs.device, el.pending);
 	const published = {
 		type,
-		device: device.published,
+		device: normaliseDevice(attrs.device, el.pending),
 		// The export's own unit attribute, verbatim. Never inferred, and never
 		// converted: unlike a workout total there is no canonical unit per record
 		// type to convert toward.
@@ -1073,39 +1087,10 @@ export function buildHealthRecord(
 		freshness: "snapshot" as const,
 		exported_at: provenance.exported_at,
 	};
-	// Identity is the record's published content: every published scalar, read
-	// back from the object that is emitted, with the device represented by its
-	// maker, model and hardware (IDENTITY_DEVICE_FIELDS). A description that is
-	// absent or cannot be read is null here, so readings that differ only in
-	// such descriptions share an id, and two physical devices with the same
-	// maker, model and hardware are one device: telling them apart would take
-	// the identifier that is withheld. The manifest says both.
-	//
-	// creation_date is in: without it, two readings a person entered
-	// separately, which Health shows as two, would be one. The offset is in
-	// because the local wall clock is often the fact itself.
-	//
-	// Published values only. With a withheld field such as sourceName in the
-	// hash and every other input published, a reader could test candidate
-	// names against the id. The normalised number is hashed, so value="1" and
-	// value="1.0" are one reading. JSON rather than a delimiter, so no value
-	// can move a boundary: model "D|E" with unit "U" and model "D" with unit
-	// "E|U" would otherwise give one id to two readings.
-	const id = hashId(
-		JSON.stringify([
-			published.type,
-			device.identity,
-			published.unit,
-			published.start_date,
-			published.start_utc_offset_minutes,
-			published.end_date,
-			published.creation_date,
-			published.value,
-			published.value_raw,
-			published.was_user_entered,
-		]),
-	);
-	return { id, ...published };
+	// creation_date separates two readings a person entered separately, which
+	// Health shows as two, and end_date consecutive sleep stages that share a
+	// start (see HEALTH_RECORD_ID_FIELDS).
+	return { id: recordId(HEALTH_RECORD_ID_FIELDS, published), ...published };
 }
 
 /**
@@ -1125,12 +1110,11 @@ export function buildWorkoutRecord(
 		return null;
 	}
 	const endDate = isoDate(attrs.endDate);
-	const device = normaliseDevice(attrs.device, el.pending);
 	const published = {
 		workout_activity_type: attrs.workoutActivityType
 			? attrs.workoutActivityType.replace(APPLE_HEALTH_WORKOUT_PREFIX_RE, "")
 			: null,
-		device: device.published,
+		device: normaliseDevice(attrs.device, el.pending),
 		// Bounded at attach time in index.ts, with a tally per kind; nothing is
 		// sliced here.
 		events: el.workoutEvents.length > 0 ? el.workoutEvents : null,
@@ -1171,33 +1155,9 @@ export function buildWorkoutRecord(
 		freshness: "snapshot" as const,
 		exported_at: provenance.exported_at,
 	};
-	// As on records: published values only, the device by its maker, model and
-	// hardware, the offset included, serialised as JSON. The duration is
-	// hashed as converted, or duration="1" min and duration="1" h would be one
-	// workout. End date and duration separate back-to-back intervals of one
-	// type on one device, such as a swim set, that would otherwise share a
-	// start.
-	//
-	// Distance and energy are left out. Apple states them differently between
-	// exports, as the workout's attributes on older ones and as statistics of
-	// the workout or its activities on newer ones (see workoutTotal), each
-	// giving a slightly different figure or none; in the id, an unchanged
-	// workout would take a new id per representation, and a reader, never
-	// sent a deletion, would keep every copy. The events and statistics lists
-	// are left out as detail rather than identity: in the id, their order
-	// would matter, and a workout that gained a marker past the cap of 500
-	// would change identity without changing.
-	const id = hashId(
-		JSON.stringify([
-			published.workout_activity_type,
-			device.identity,
-			published.start_date,
-			published.start_utc_offset_minutes,
-			published.end_date,
-			published.duration_minutes,
-		]),
-	);
-	return { id, ...published };
+	// end_date separates back-to-back intervals of one type, such as a swim
+	// set, that share a start (see WORKOUT_ID_FIELDS).
+	return { id: recordId(WORKOUT_ID_FIELDS, published), ...published };
 }
 
 // ─── Manual-upload validation summary scan ─────────────────────────────

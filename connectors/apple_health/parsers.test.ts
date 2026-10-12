@@ -4,12 +4,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { packageRoot as PACKAGE_ROOT } from "../../packages/polyfill-connectors/src/connector-paths.ts";
+import {
+	manifestPath,
+	packageRoot as PACKAGE_ROOT,
+} from "../../packages/polyfill-connectors/src/connector-paths.ts";
 import {
 	CATEGORY_RECORD,
 	HEART_RATE_RECORD,
@@ -28,6 +31,7 @@ import {
 	buildWorkoutEvent,
 	buildWorkoutRecord,
 	buildWorkoutStatistics,
+	HEALTH_RECORD_ID_FIELDS,
 	hashId,
 	healthTypeShort,
 	isoDate,
@@ -39,13 +43,19 @@ import {
 	normaliseDevice,
 	noteField,
 	parseAttrs,
+	recordId,
 	sniffLeadingAttrs,
 	tallyUnconvertibleUnit,
 	tallyUnrecognizedType,
 	utcOffsetMinutes,
+	WORKOUT_ID_FIELDS,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
-import type { AppleHealthAttrs, AppleHealthElement } from "./types.ts";
+import type {
+	AppleHealthAttrs,
+	AppleHealthElement,
+	AppleHealthProvenance,
+} from "./types.ts";
 
 // Test-only helper: wraps raw attrs the way index.ts's streaming scanner
 // would, so table-driven fixture tests can call buildHealthRecord/
@@ -794,7 +804,7 @@ test("buildWorkoutEvent: an unstated duration unit is not assumed", () => {
 /** The published device of `raw`, and the fields its reading left unavailable. */
 function deviceOf(raw: string | undefined): [string | null, string[]] {
 	const pending = newElementGaps();
-	return [normaliseDevice(raw, pending).published, pending.fields];
+	return [normaliseDevice(raw, pending), pending.fields];
 }
 
 test("normaliseDevice: keeps the hardware fields and drops the address, name and identifiers", () => {
@@ -931,9 +941,10 @@ test("buildHealthRecord: two records differing only in endDate get different ids
 	);
 });
 
-test("a device's firmware and software are published, and are not part of an id", () => {
+test("a device's firmware and software are published, and no part of a device is in an id", () => {
 	// An export that states a device's current versions, rather than those it
-	// ran when it recorded, would otherwise re-id every reading after an update.
+	// ran when it recorded, would otherwise re-id every reading after an update;
+	// and the device is optional, so a grant may withhold it.
 	const device = (model: string, software: string): string =>
 		`<<HKDevice: 0x1>, manufacturer:Apple Inc., model:${model}, hardware:Watch6,2, firmware:${software}, software:${software}>`;
 	const record = (d: string) =>
@@ -956,7 +967,7 @@ test("a device's firmware and software are published, and are not part of an id"
 		assert.match(String(before.device), /software:9\.0$/);
 		assert.match(String(after.device), /software:10\.1$/);
 		assert.equal(before.id, after.id);
-		assert.notEqual(after.id, other.id, "the model is part of identity");
+		assert.equal(after.id, other.id, "nor is the model");
 	}
 });
 
@@ -980,7 +991,8 @@ test("a device description that is absent or cannot be read takes no part in an 
 	assert.equal(new Set(ids).size, 1, ids.join(" "));
 });
 
-test("buildWorkoutRecord: two workouts differing only in duration get different ids", () => {
+test("buildWorkoutRecord: back-to-back workouts of one type that share a start get different ids", () => {
+	// A swim set: intervals that start together and end apart.
 	const base = {
 		workoutActivityType: "HKWorkoutActivityTypeSwimming",
 		sourceName: "Apple Watch",
@@ -988,17 +1000,190 @@ test("buildWorkoutRecord: two workouts differing only in duration get different 
 		durationUnit: "min",
 	};
 	const a = buildWorkoutRecord(
-		el("Workout", { ...base, duration: "20" }),
+		el("Workout", {
+			...base,
+			duration: "20",
+			endDate: "2024-06-05 07:20:00 +0100",
+		}),
 		newGapCounts(),
 		PROVENANCE,
 	);
 	const b = buildWorkoutRecord(
-		el("Workout", { ...base, duration: "35" }),
+		el("Workout", {
+			...base,
+			duration: "35",
+			endDate: "2024-06-05 07:35:00 +0100",
+		}),
 		newGapCounts(),
 		PROVENANCE,
 	);
 	assert.ok(a && b);
 	assert.notEqual(a.id, b.id);
+});
+
+// ─── Identity: an id carries no field a grant can withhold ─────────────
+
+/** A variation of one input of a build, to change one field of its record. */
+interface Variant {
+	attrs?: AppleHealthAttrs;
+	el?: Partial<AppleHealthElement>;
+	provenance?: AppleHealthProvenance;
+}
+
+/** The fields of a stream its schema does not require, which a grant may withhold. */
+function optionalFields(stream: string): string[] {
+	const manifest = JSON.parse(
+		readFileSync(manifestPath("apple_health"), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			schema: { properties: Record<string, unknown>; required: string[] };
+		}>;
+	};
+	const schema = manifest.streams.find((s) => s.name === stream)?.schema;
+	assert.ok(schema, stream);
+	return Object.keys(schema.properties).filter(
+		(field) => !schema.required.includes(field),
+	);
+}
+
+test("an id is unchanged when any field a grant may withhold is projected out or changed", () => {
+	// Required fields are sent under every grant; any other may be withheld.
+	// The id must be a function of the required ones alone, or a reader could
+	// recover a withheld field by testing its candidate values against the id.
+	const gaps = newElementGaps();
+	const cases = [
+		{
+			stream: "activity",
+			fields: HEALTH_RECORD_ID_FIELDS,
+			build: (v: Variant) =>
+				buildHealthRecord(
+					el("Record", { ...STEP_COUNT_RECORD, ...v.attrs }, v.el),
+					newGapCounts(),
+					v.provenance ?? PROVENANCE,
+				),
+			optional: {
+				device: {
+					attrs: {
+						device:
+							"<<HKDevice: 0x2>, manufacturer:Garmin, model:Forerunner, hardware:F1>",
+					},
+				},
+				unit: { attrs: { unit: "kcal" } },
+				value: { attrs: { value: "43" } },
+				value_raw: { attrs: { value: "not a number" } },
+				was_user_entered: {
+					el: { metadata: [{ key: "HKWasUserEntered", value: "1" }] },
+				},
+				exported_at: { provenance: { exported_at: null } },
+				start_utc_offset_minutes: {
+					attrs: { startDate: "2024-06-05 20:45:22 +0000" },
+				},
+			} as Record<string, Variant>,
+			required: {
+				type: { attrs: { type: "HKQuantityTypeIdentifierFlightsClimbed" } },
+				start_date: { attrs: { startDate: "2024-06-05 13:45:23 -0700" } },
+				end_date: { attrs: { endDate: "2024-06-05 13:50:11 -0700" } },
+				creation_date: { attrs: { creationDate: "2024-06-05 13:45:23 -0700" } },
+			} as Record<string, Variant>,
+		},
+		{
+			stream: "workouts",
+			fields: WORKOUT_ID_FIELDS,
+			build: (v: Variant) =>
+				buildWorkoutRecord(
+					el("Workout", { ...RUN_WORKOUT, ...v.attrs }, v.el),
+					newGapCounts(),
+					v.provenance ?? PROVENANCE,
+				),
+			optional: {
+				duration_minutes: { attrs: { duration: "40" } },
+				total_energy_burned_kcal: { attrs: { totalEnergyBurned: "400" } },
+				total_distance_km: { attrs: { totalDistance: "6" } },
+				device: {
+					attrs: {
+						device:
+							"<<HKDevice: 0x2>, manufacturer:Apple Inc., model:Watch, hardware:Watch6,2>",
+					},
+				},
+				events: {
+					el: {
+						workoutEvents: [
+							buildWorkoutEvent(
+								{
+									type: "HKWorkoutEventTypePause",
+									date: "2024-06-05 06:40:00 -0700",
+								},
+								gaps,
+							),
+						],
+					},
+				},
+				statistics: {
+					el: {
+						workoutStatistics: [
+							buildWorkoutStatistics({
+								type: "HKQuantityTypeIdentifierHeartRate",
+								average: "150",
+								unit: "count/min",
+							}),
+						],
+					},
+				},
+				exported_at: { provenance: { exported_at: null } },
+				start_utc_offset_minutes: {
+					attrs: { startDate: "2024-06-05 13:30:00 +0000" },
+				},
+			} as Record<string, Variant>,
+			required: {
+				workout_activity_type: {
+					attrs: { workoutActivityType: "HKWorkoutActivityTypeWalking" },
+				},
+				start_date: { attrs: { startDate: "2024-06-05 06:30:01 -0700" } },
+				end_date: { attrs: { endDate: "2024-06-05 07:02:31 -0700" } },
+			} as Record<string, Variant>,
+		},
+	];
+	for (const c of cases) {
+		const row = (v: Variant): Record<string, unknown> => {
+			const built = c.build(v);
+			assert.ok(built, c.stream);
+			return built as unknown as Record<string, unknown>;
+		};
+		const base = row({});
+		const optional = optionalFields(c.stream);
+		assert.deepEqual(
+			Object.keys(c.optional).sort(),
+			[...optional].sort(),
+			`${c.stream}: every optional field has a variant`,
+		);
+		for (const field of optional) {
+			const projected = Object.fromEntries(
+				Object.entries(base).filter(([key]) => key !== field),
+			);
+			assert.equal(
+				recordId(c.fields, projected),
+				base.id,
+				`${c.stream}: ${field} projected out`,
+			);
+			const changed = row(c.optional[field] ?? {});
+			assert.notDeepEqual(
+				changed[field],
+				base[field],
+				`${c.stream}: the variant changes ${field}`,
+			);
+			assert.equal(changed.id, base.id, `${c.stream}: ${field} changed`);
+		}
+		// And each required field the id is derived from does change it.
+		assert.deepEqual(Object.keys(c.required), [...c.fields], c.stream);
+		for (const field of c.fields) {
+			assert.notEqual(
+				row(c.required[field] ?? {}).id,
+				base.id,
+				`${c.stream}: ${field} changes the id`,
+			);
+		}
+	}
 });
 
 // ─── Units: read from the export, never assumed ─────────────────────────
