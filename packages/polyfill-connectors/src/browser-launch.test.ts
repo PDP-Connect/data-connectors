@@ -36,6 +36,7 @@ import {
 	startRemoteCdpHarRecording,
 	type UnhandledRejectionHost,
 	warnIfRecordingSharedRemoteBrowser,
+	withScenarioClockPaused,
 } from "./browser-launch.ts";
 
 const ENV_VARS = [
@@ -650,6 +651,25 @@ test("remoteCdpPageCleanupSkipReason names why cleanup is skipped; the env opt-i
 		),
 		false,
 	);
+});
+
+test("withScenarioClockPaused nests, and restores the pause counter when the body throws", async () => {
+	const scope = globalThis as { __pdppScenarioClockPaused?: number };
+	const before = scope.__pdppScenarioClockPaused ?? 0;
+	const seen: number[] = [];
+	await withScenarioClockPaused(async () => {
+		seen.push(scope.__pdppScenarioClockPaused ?? 0);
+		await withScenarioClockPaused(async () => {
+			seen.push(scope.__pdppScenarioClockPaused ?? 0);
+		});
+		seen.push(scope.__pdppScenarioClockPaused ?? 0);
+	});
+	assert.deepEqual(seen, [before + 1, before + 2, before + 1]);
+	await assert.rejects(
+		withScenarioClockPaused(() => Promise.reject(new Error("acquire failed"))),
+		/acquire failed/,
+	);
+	assert.equal(scope.__pdppScenarioClockPaused ?? 0, before);
 });
 
 function freeLoopbackPort(): Promise<number> {

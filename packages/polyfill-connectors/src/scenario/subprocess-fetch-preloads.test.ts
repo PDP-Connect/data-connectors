@@ -20,6 +20,7 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -296,6 +297,101 @@ test("writeReplayBridgePreload: the generated preload's own code never calls Dat
 		assertNoBareLiveClockCalls(
 			readFileSync(preloadPath, "utf8"),
 			"writeReplayBridgePreload",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ─── Host plumbing stays out of the clock trace ───────────────────────────
+//
+// browser-launch.ts pauses the trace around browser acquire/release
+// (`withScenarioClockPaused`), because record (remote CDP attach) and replay
+// (local launch) read the clock a different number of times there. This
+// drives the REAL generated record preload in a subprocess: after START, a
+// read while `__pdppScenarioClockPaused` is set must not be traced, and the
+// reads around it must be.
+test("writeRecordPreload: clock reads while __pdppScenarioClockPaused is set are not traced", () => {
+	const dir = mkdtempSync(join(tmpdir(), "clock-preload-paused-"));
+	try {
+		const capturePath = join(dir, "capture.json");
+		const preloadPath = writeRecordPreload(capturePath, { dir });
+		const script = [
+			"process.stdin.on('data', () => {",
+			"  setTimeout(() => {",
+			"    Date.now();",
+			"    globalThis.__pdppScenarioClockPaused = 1;",
+			"    Date.now(); Date.now(); Date.now();",
+			"    globalThis.__pdppScenarioClockPaused = 0;",
+			"    Date.now();",
+			"    process.exit(0);",
+			"  }, 20);",
+			"});",
+		].join("\n");
+		const result = spawnSync(
+			process.execPath,
+			["--import", preloadPath, "--input-type=module", "-e", script],
+			{
+				input: `${JSON.stringify({ type: "START" })}\n`,
+				encoding: "utf8",
+				timeout: 20_000,
+			},
+		);
+		assert.equal(result.status, 0, result.stderr);
+		const capture = JSON.parse(readFileSync(capturePath, "utf8")) as {
+			clockTrace: number[];
+		};
+		assert.equal(
+			capture.clockTrace.length,
+			2,
+			`expected only the two unpaused reads in the trace, got ${String(capture.clockTrace.length)}`,
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("writeReplayBridgePreload: a read while __pdppScenarioClockPaused is set sees the real clock and consumes no trace entry", () => {
+	const dir = mkdtempSync(join(tmpdir(), "clock-replay-paused-"));
+	try {
+		const preloadPath = writeReplayBridgePreload("http://127.0.0.1:1/", {
+			workspace: { dir },
+			fixedNowIso: "2026-01-01T00:00:00.000Z",
+			clockTrace: [111, 222],
+		});
+		const script = [
+			"process.stdin.on('data', () => {",
+			"  setTimeout(() => {",
+			"    const first = Date.now();",
+			"    globalThis.__pdppScenarioClockPaused = 1;",
+			"    const paused = Date.now();",
+			"    globalThis.__pdppScenarioClockPaused = 0;",
+			"    const second = Date.now();",
+			"    process.stdout.write(JSON.stringify({ first, paused, second }));",
+			"    process.exit(0);",
+			"  }, 20);",
+			"});",
+		].join("\n");
+		const result = spawnSync(
+			process.execPath,
+			["--import", preloadPath, "--input-type=module", "-e", script],
+			{
+				input: `${JSON.stringify({ type: "START" })}\n`,
+				encoding: "utf8",
+				timeout: 20_000,
+			},
+		);
+		assert.equal(result.status, 0, result.stderr);
+		const reads = JSON.parse(result.stdout) as {
+			first: number;
+			paused: number;
+			second: number;
+		};
+		assert.equal(reads.first, 111);
+		assert.equal(reads.second, 222, "the paused read must not consume 222");
+		assert.ok(
+			reads.paused > Date.parse("2026-01-01T00:00:00.000Z"),
+			"the paused read must be the real clock",
 		);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });

@@ -1426,7 +1426,39 @@ export async function fileFlushOutcome(
  * The connector runtime scopes the profile name with the stable connector
  * instance ID when the reference runtime supplies one.
  */
-export async function acquireIsolatedBrowser({
+export async function acquireIsolatedBrowser(
+	options: AcquireIsolatedBrowserOptions,
+): Promise<IsolatedBrowser> {
+	return withScenarioClockPaused(async () => {
+		const acquired = await acquireIsolatedBrowserWithClock(options);
+		const release = acquired.release;
+		acquired.release = () => withScenarioClockPaused(release);
+		return acquired;
+	});
+}
+
+/**
+ * Runs `fn` with the scenario clock trace paused. Browser acquire and release
+ * are host plumbing, not connector behavior: a recording attaches to a remote
+ * CDP browser and a replay launches a local one, so their clock reads differ
+ * in number, and traced they would shift every later value the connector
+ * reads in replay. The scenario preloads read `__pdppScenarioClockPaused`
+ * (see `subprocess-fetch-preloads.ts` and `browser-har-replay.ts`); outside a
+ * scenario run nothing reads it.
+ */
+export async function withScenarioClockPaused<T>(
+	fn: () => Promise<T>,
+): Promise<T> {
+	const scope = globalThis as { __pdppScenarioClockPaused?: number };
+	scope.__pdppScenarioClockPaused = (scope.__pdppScenarioClockPaused ?? 0) + 1;
+	try {
+		return await fn();
+	} finally {
+		scope.__pdppScenarioClockPaused -= 1;
+	}
+}
+
+async function acquireIsolatedBrowserWithClock({
 	profileName,
 	headless,
 	streamingEnabled,
