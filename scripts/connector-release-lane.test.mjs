@@ -20,7 +20,7 @@ import {
   repositoryRoot,
   sha256,
 } from "./build-connector-release-index.mjs";
-import { releaseSubjects, signSubjects } from "./sign-connector-release.mjs";
+import { releaseSubjects, retryOnTlogConflict, signSubjects } from "./sign-connector-release.mjs";
 
 const schema = JSON.parse(readFileSync(join(repositoryRoot, "schemas/connector-index.schema.json"), "utf8"));
 const validate = new Ajv({ strict: false, validateFormats: false }).compile(schema);
@@ -304,4 +304,26 @@ test("the publish workflow is the pinned signing identity, runs only by hand, an
   for (const uses of workflow.jobs.publish.steps.map((step) => step.uses).filter(Boolean)) {
     assert.match(uses, /@[a-f0-9]{40}( |$)/, `${uses}: actions are pinned to a commit`);
   }
+});
+
+test("a transparency-log 409 is signed again, other errors are not", async () => {
+  const conflict = Object.assign(new Error("error creating tlog entry - (409) an equivalent entry already exists in the transparency log"), { code: "TLOG_CREATE_ENTRY_ERROR" });
+  let calls = 0;
+  const flaky = retryOnTlogConflict(async (bytes) => {
+    calls += 1;
+    if (calls === 1) throw conflict;
+    return { signed: bytes.toString() };
+  }, { log: () => {} });
+  assert.deepEqual(await flaky(Buffer.from("subject")), { signed: "subject" });
+  assert.equal(calls, 2);
+
+  let always = 0;
+  const stuck = retryOnTlogConflict(async () => { always += 1; throw conflict; }, { attempts: 3, log: () => {} });
+  await assert.rejects(stuck(Buffer.from("x")), /409/);
+  assert.equal(always, 3, "gives up after the attempt limit");
+
+  let other = 0;
+  const broken = retryOnTlogConflict(async () => { other += 1; throw new Error("fulcio: unauthorized"); }, { log: () => {} });
+  await assert.rejects(broken(Buffer.from("x")), /unauthorized/);
+  assert.equal(other, 1, "only a 409 is retried");
 });
