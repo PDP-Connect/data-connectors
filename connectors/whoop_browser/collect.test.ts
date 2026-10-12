@@ -1418,17 +1418,88 @@ test("collect: answered by overlap rather than by start, both of the review's ca
 	assert.deepEqual(await runs(serveOverlap), byStart);
 });
 
-test("collect: a run that reads no window keeps its cursor, held to the grant's end", async () => {
+test("collect: a grant whose end moved back into the past re-reads the week before that end, its cursor held there", async () => {
 	const fake = fakeWhoop(fixtures());
-	// The grant ends before the walk would start, so this run reads nothing.
 	const until = NOW.getTime() - 20 * DAY;
 	const h = await collect(fake, {
 		now: LATER,
 		state: everyStream(cursorAt(FLOOR, NOW)),
 		ranges: everyStream({ until: iso(until) }),
 	});
-	assert.deepEqual(cyclesRequests(fake), []);
+	assert.deepEqual(
+		cyclesRequests(fake).map(({ start, end }) => [start, end]),
+		[
+			[until - OVERLAP_DAYS * DAY - REACH - DAY, until + DAY],
+			// No cycle starts in it: one window back, to the account's start.
+			[FLOOR - DAY, until - OVERLAP_DAYS * DAY - REACH + DAY],
+		],
+	);
 	assert.deepEqual(cursorsOf(h), everyStream(cursorAt(FLOOR, until)));
+});
+
+test("collect: a grant that ended a week before the next run re-reads its last week then, so a recovery WHOOP scored after the end is delivered", async () => {
+	const until = Date.parse("2026-10-10T12:00:00.000Z");
+	const began = Date.parse("2026-10-10T02:00:00.000Z");
+	const recovery = nth(elements(), 0).recovery;
+	assert.ok(recovery);
+	const cycle = (scored: boolean): Held =>
+		holding(cycleAt(1_000_000_818, began), {
+			recovery: scored ? { ...recovery } : null,
+		});
+	const streams = ["recoveries"] as const;
+	const ranges = { recoveries: { until: iso(until) } };
+	const first = await collect(fakeWhoop(serve([cycle(false)])), {
+		streams,
+		ranges,
+		now: new Date("2026-10-10T13:00:00.000Z"),
+	});
+	assert.deepEqual(idsOf(first, "recoveries"), []);
+	assert.deepEqual(cursorsOf(first), { recoveries: cursorAt(FLOOR, until) });
+	const h = await collect(fakeWhoop(serve([cycle(true)])), {
+		streams,
+		ranges,
+		state: statesOf(first),
+		now: new Date("2026-10-18T13:00:00.000Z"),
+	});
+	assert.deepEqual(idsOf(h, "recoveries"), ["1000000818"]);
+});
+
+test("collect: a cycle under way at a past grant's end is delivered closed once it closes", async () => {
+	const until = Date.parse("2026-10-01T00:00:00.000Z");
+	const began = Date.parse("2026-09-20T02:00:00.000Z");
+	const closed = Date.parse("2026-10-15T02:00:00.000Z");
+	const streams = ["cycles"] as const;
+	const ranges = { cycles: { until: iso(until) } };
+	const first = await collect(
+		fakeWhoop(
+			serve([cycleAt(1_000_000_819, began, { during: `['${iso(began)}',)` })]),
+		),
+		{ streams, ranges, now: new Date("2026-10-02T00:00:00.000Z") },
+	);
+	assert.deepEqual(
+		recordsOf(first, "cycles").map((record) => record.end_at),
+		[null],
+	);
+	const h = await collect(
+		fakeWhoop(
+			serve([
+				cycleAt(1_000_000_819, began, {
+					during: `['${iso(began)}','${iso(closed)}')`,
+				}),
+				cycleAt(1_000_000_820, closed),
+			]),
+		),
+		{
+			streams,
+			ranges,
+			state: statesOf(first),
+			now: new Date("2026-10-20T00:00:00.000Z"),
+		},
+	);
+	assert.deepEqual(
+		recordsOf(h, "cycles").map((record) => record.end_at),
+		[iso(closed)],
+	);
 });
 
 test("collect: full_refresh ignores the saved cursor and walks from the account's start", async () => {
@@ -1992,7 +2063,7 @@ test("collect: a walk that meets an element it cannot read saves no hint: that e
 	assert.deepEqual(cursorsOf(h), { cycles: cursorAt(FLOOR, NOW) });
 });
 
-test("collect: a stream delivered to a grant end over a week ago neither starts nor extends the walk, so an unbounded stream keeps moving", async () => {
+test("collect: a stream whose grant ended long ago reads only its last week, a stretch of its own, so an unbounded stream keeps moving", async () => {
 	// A cycle a day, each with a sleep, from twelve days before NOW to three after.
 	const days = Array.from({ length: 16 }, (_, i) => i - 12);
 	const held = days.map((i) =>
@@ -2015,7 +2086,9 @@ test("collect: a stream delivered to a grant end over a week ago neither starts 
 	] as const) {
 		const fake = fakeWhoop(serve(held, LONG_BOOTSTRAP));
 		const h = await collect(fake, { ranges, streams, pacing, state, now });
-		assert.equal(cyclesRequests(fake).length, 1, `run ${run}: one window`);
+		// The cycles grant's last week and one window back from it (none begins in it), then the
+		// sleeps' week: the years between are not read.
+		assert.equal(cyclesRequests(fake).length, 3, `run ${run}`);
 		assert.deepEqual(messagesOf(h, "SKIP_RESULT"), [], `run ${run}`);
 		assert.equal(idsOf(h, "sleeps").at(-1), sleepOf(newest), `run ${run}`);
 		assert.deepEqual(idsOf(h, "cycles"), [], `run ${run}`);

@@ -487,9 +487,9 @@ function inRange(startAt: unknown, range: Range | undefined): boolean {
 	);
 }
 
-/** One stream's part in a run: where its delivery starts (null when it has nothing left to deliver), the cursor it carries, and its grant's end. */
+/** One stream's part in a run: where its delivery starts, the cursor it carries, and its grant's end. */
 export interface StreamPlan {
-	from: number | null;
+	from: number;
 	cursor: WindowCursor;
 	until: number | null;
 }
@@ -503,15 +503,13 @@ const resumeAt = (floor: number, through: number): number =>
  * the time zone). It delivers afresh from there when it has no cursor, on full_refresh, or when
  * that start lies outside what its cursor delivered (a grant widened back, or moved past).
  * Otherwise it delivers again from the week before its cursor, which WHOOP may still be scoring,
- * and the cursor keeps only what the grant still covers. A grant delivered to an end more than a
- * week before `now` has nothing left to deliver.
+ * and the cursor keeps only what the grant still covers.
  */
 export function planStream(
 	previous: WindowCursor | null,
 	historyStart: string,
 	range: Range | undefined,
 	fullRefresh: boolean,
-	now: number,
 ): StreamPlan {
 	const since = instant(range?.since);
 	const until = instant(range?.until);
@@ -529,10 +527,8 @@ export function planStream(
 	}
 	// A grant whose end moved back holds less than the cursor delivered.
 	const held = Math.max(start, Math.min(through, until ?? through));
-	const done =
-		until !== null && held >= until && until < now - OVERLAP_DAYS * DAY_MS;
 	return {
-		from: done ? null : resumeAt(start, held),
+		from: resumeAt(start, held),
 		cursor: {
 			v: CURSOR_VERSION,
 			floor: new Date(start).toISOString(),
@@ -541,6 +537,47 @@ export function planStream(
 		},
 		until,
 	};
+}
+
+/** A stretch of the walk: the cycles from `start` to `end`, delivered from `delivery` on to its streams. */
+export interface Stretch {
+	delivery: number;
+	start: number;
+	end: number;
+	plans: StreamPlan[];
+}
+
+/**
+ * Pure: what one run walks. Each stream reads from two days before where it delivers, for the
+ * cycle under way there, to its grant's end or `now`. Reads that overlap are one stretch, read
+ * once, oldest first, and the gap between two stretches is not read: a grant that ended long ago
+ * re-reads only its last week, which WHOOP may still have been scoring when last read.
+ */
+export function stretchesOf(
+	plans: readonly StreamPlan[],
+	history: number,
+	now: number,
+): Stretch[] {
+	const spans = plans
+		.map((plan) => ({
+			plan,
+			start: Math.max(plan.from - CYCLE_REACH_DAYS * DAY_MS, history),
+			end: Math.min(now, plan.until ?? Number.POSITIVE_INFINITY),
+		}))
+		.filter(({ start, end }) => start < end)
+		.sort((a, b) => a.start - b.start);
+	const stretches: Stretch[] = [];
+	for (const { plan, start, end } of spans) {
+		const last = stretches.at(-1);
+		if (last && start <= last.end) {
+			last.delivery = Math.min(last.delivery, plan.from);
+			last.end = Math.max(last.end, end);
+			last.plans.push(plan);
+		} else {
+			stretches.push({ delivery: plan.from, start, end, plans: [plan] });
+		}
+	}
+	return stretches;
 }
 
 const iso = (ms: number): string =>
@@ -660,11 +697,11 @@ async function emitClean(
 }
 
 /**
- * One walk of the cycles, oldest first, feeds all four streams. It starts two days before the
- * earliest instant a stream delivers from, reads the cycle under way there wherever it began, and
- * ends at the widest grant's end; each window's cycles yield the requested streams' records, each
- * held to its own stream's grant, and each stream's cursor moves only over what its grant let it
- * deliver. Every stream ends with its unreadable count, any skip and its cursor.
+ * One walk of the cycles, oldest first, feeds all four streams, in stretches (stretchesOf). Each
+ * stretch starts two days before the earliest instant its streams deliver from and reads the
+ * cycle under way there wherever it began; each window's cycles yield the requested streams'
+ * records, each held to its own stream's grant, and each stream's cursor moves only over what its
+ * grant let it deliver. Every stream ends with its unreadable count, any skip and its cursor.
  */
 export async function collectWhoopBrowser(
 	ctx: WhoopCollectContext,
@@ -714,23 +751,10 @@ export async function collectWhoopBrowser(
 					history,
 					ranges.get(stream),
 					ctx.collectionMode === "full_refresh",
-					now.getTime(),
 				),
 			);
 		}
-		const all = [...plans.values()];
-		// A stream with nothing left to deliver neither starts nor extends the walk; with none
-		// left, the walk is empty.
-		const active = all.filter(
-			(plan): plan is StreamPlan & { from: number } => plan.from !== null,
-		);
 		const historyMs = Date.parse(history);
-		const delivery = Math.min(...active.map((plan) => plan.from));
-		const start = Math.max(delivery - CYCLE_REACH_DAYS * DAY_MS, historyMs);
-		const end = Math.min(
-			now.getTime(),
-			Math.max(...active.map((plan) => plan.until ?? Number.POSITIVE_INFINITY)),
-		);
 		const lostSeen = new Set<string>();
 		/** No element went unread: one that did may be the cycle a hint would name. */
 		let clean = true;
@@ -799,82 +823,92 @@ export async function collectWhoopBrowser(
 			}
 			return { ok: true, cycle: null, known: Number.NEGATIVE_INFINITY };
 		};
-		// What an earlier walk found about the cycle under way where this one starts delivering.
-		const began = all
-			.map((plan) => beganBy(plan.cursor.under_way, delivery))
-			.find((ms) => ms !== undefined);
-		// Delivery needs the cycle under way where it starts. Once the walk reads a cycle starting by
-		// then, every earlier one ended before it; before the account's start, none began.
-		let covered = start <= historyMs;
-		// Every cycle that starts in [known, from) has been read, its start in `starts`.
-		let known = covered ? Number.NEGATIVE_INFINITY : start;
-		const starts: number[] = [];
-		let from = start;
-		while (from < end) {
-			if (windows >= p.maxWindowsPerRun) {
-				deferred = true;
-				break;
-			}
-			const window = await read(
-				from,
-				Math.min(from + WINDOW_DAYS * DAY_MS, end),
-			);
-			if (!window.ok) {
-				failure = window;
-				break;
-			}
-			// Not one cycle whose id and start parse: the walk stops here rather than move the
-			// cursor past history it could not read.
-			if (window.unreadable) {
-				failure = SHAPELESS;
-				break;
-			}
-			tally(window);
-			const cycles = window.cycles;
-			covered ||= cycles.some((cycle) => cycle.startMs <= delivery);
-			if (!covered && window.end > delivery) {
-				const before = await latestBefore(start, began);
-				if (!before.ok) {
-					failure = before;
+		/**
+		 * One stretch, oldest first: null once it reaches its end, else why it stopped. Its streams'
+		 * cursors move only over the windows it reads.
+		 */
+		const walk = async ({
+			delivery,
+			start,
+			end,
+			plans: own,
+		}: Stretch): Promise<Failure | "deferred" | null> => {
+			// What an earlier walk found about the cycle under way where this one starts delivering.
+			const began = own
+				.map((plan) => beganBy(plan.cursor.under_way, delivery))
+				.find((ms) => ms !== undefined);
+			// Delivery needs the cycle under way where it starts. Once the walk reads a cycle starting
+			// by then, every earlier one ended before it; before the account's start, none began.
+			let covered = start <= historyMs;
+			// Every cycle that starts in [known, from) has been read, its start in `starts`.
+			let known = covered ? Number.NEGATIVE_INFINITY : start;
+			const starts: number[] = [];
+			let from = start;
+			let stop: Failure | "deferred" | null = null;
+			while (from < end) {
+				if (windows >= p.maxWindowsPerRun) {
+					stop = "deferred";
 					break;
 				}
-				if (before.cycle) cycles.unshift(before.cycle);
-				known = before.known;
-				covered = true;
-			}
-			for (const cycle of cycles) {
-				starts.push(cycle.startMs);
-				for (const stream of streams) {
-					const range = ranges.get(stream);
-					for (const built of recordsFor(stream, cycle)) {
-						const startAt =
-							built.kind === "record"
-								? built.record.start_at
-								: (built.startAt ?? cycle.startAt);
-						// Outside the stream's grant: neither emitted nor counted.
-						if (!inRange(startAt, range)) continue;
-						const clean =
-							built.kind === "record" &&
-							(await emitClean(ctx, stream, built.record));
-						if (!clean) unreadable[stream] += 1;
+				const window = await read(
+					from,
+					Math.min(from + WINDOW_DAYS * DAY_MS, end),
+				);
+				if (!window.ok) {
+					stop = window;
+					break;
+				}
+				// Not one cycle whose id and start parse: the walk stops here rather than move the
+				// cursor past history it could not read.
+				if (window.unreadable) {
+					stop = SHAPELESS;
+					break;
+				}
+				tally(window);
+				const cycles = window.cycles;
+				covered ||= cycles.some((cycle) => cycle.startMs <= delivery);
+				if (!covered && window.end > delivery) {
+					const before = await latestBefore(start, began);
+					if (!before.ok) {
+						stop = before;
+						break;
+					}
+					if (before.cycle) cycles.unshift(before.cycle);
+					known = before.known;
+					covered = true;
+				}
+				for (const cycle of cycles) {
+					starts.push(cycle.startMs);
+					for (const stream of streams) {
+						const range = ranges.get(stream);
+						for (const built of recordsFor(stream, cycle)) {
+							const startAt =
+								built.kind === "record"
+									? built.record.start_at
+									: (built.startAt ?? cycle.startAt);
+							// Outside the stream's grant: neither emitted nor counted.
+							if (!inRange(startAt, range)) continue;
+							const clean =
+								built.kind === "record" &&
+								(await emitClean(ctx, stream, built.record));
+							if (!clean) unreadable[stream] += 1;
+						}
+					}
+				}
+				from = window.end;
+				for (const plan of own) {
+					const reach = Math.min(
+						window.end,
+						plan.until ?? Number.POSITIVE_INFINITY,
+					);
+					if (reach > Date.parse(plan.cursor.through)) {
+						plan.cursor.through = new Date(reach).toISOString();
 					}
 				}
 			}
-			from = window.end;
-			for (const plan of all) {
-				const reach = Math.min(
-					window.end,
-					plan.until ?? Number.POSITIVE_INFINITY,
-				);
-				if (reach > Date.parse(plan.cursor.through)) {
-					plan.cursor.through = new Date(reach).toISOString();
-				}
-			}
-		}
-		// For each stream, the cycle under way where it next delivers from, when this walk read
-		// every cycle that starts between that cycle's start and there.
-		if (windows > 0 && clean) {
-			for (const plan of active) {
+			// For each stream, the cycle under way where it next delivers from, when this stretch
+			// read every cycle that starts between that cycle's start and there.
+			for (const plan of clean ? own : []) {
 				const at = resumeAt(
 					Date.parse(plan.cursor.floor),
 					Date.parse(plan.cursor.through),
@@ -888,6 +922,17 @@ export async function collectWhoopBrowser(
 					began: latest === undefined ? null : new Date(latest).toISOString(),
 				};
 			}
+			return stop;
+		};
+		for (const stretch of stretchesOf(
+			[...plans.values()],
+			historyMs,
+			now.getTime(),
+		)) {
+			const stop = await walk(stretch);
+			if (stop === "deferred") deferred = true;
+			else if (stop) failure = stop;
+			if (stop) break;
 		}
 	}
 
