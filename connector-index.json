@@ -1569,6 +1569,43 @@
           "iconKey": "oura",
           "defaultScope": "oura.readiness"
         }
+      },
+      {
+        "connectorId": "oura-playwright",
+        "company": "oura",
+        "version": "3.1.2",
+        "name": "Oura Ring",
+        "status": "stable",
+        "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity via the official Oura API V2, using a personal API application on your own Oura developer account. Creates that application through the Developer Portal's registration API (the Create New form is the fallback), covers Oura's pages from document start on hosts that offer page.addInitScript, retries the portal API's edge-generated 401s, settles the portal's post-sign-in bounce, and follows the portal's better-auth sign-in.",
+        "sourceFiles": {
+          "script": "oura/oura-playwright.js",
+          "metadata": "oura/oura-playwright.json"
+        },
+        "publishedAt": "2026-10-12T00:00:00Z",
+        "sourceTag": "maciej/oura-playwright-3.1.2",
+        "sourceCommit": "e838c8479c516d63a14ab4480eaa053ad7962163",
+        "releaseId": "connectors-e838c8479c51",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:165d1eeeee9cdeb6b28f2d01cadffdd527b740cfe4169e7ac87a721a6ca54aa7",
+        "scriptSha256": "sha256:981c6b007f8ab6dec4c0a336e6b5a0b0ae2cf671acaaed84f83b74fac833658d",
+        "artifactSha256": "sha256:538f9636e1f5057e534790906a20a9f48c41a0923d699112055cf98f761d713f",
+        "artifactPath": "artifacts/oura-playwright/oura-playwright-3.1.2.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/e838c8479c516d63a14ab4480eaa053ad7962163/artifacts/oura-playwright/oura-playwright-3.1.2.tgz",
+        "scopes": [
+          "oura.readiness",
+          "oura.sleep",
+          "oura.activity"
+        ],
+        "consumerMetadata": {
+          "sourceId": "oura",
+          "displayName": "Oura Ring",
+          "brandDomain": "ouraring.com",
+          "aliases": [
+            "ouraring"
+          ],
+          "iconKey": "oura",
+          "defaultScope": "oura.readiness"
+        }
       }
     ],
     "shop-playwright": [
