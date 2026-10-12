@@ -39,6 +39,7 @@ import {
 	runConnector,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	HEALTH_AREA_STREAMS,
 	healthAreaOf,
@@ -109,7 +110,6 @@ const MAX_REMEMBERED_WORKOUT_IDS = 100_000;
 
 /** Every data stream, in the order the manifest declares them; each gets its own receipt. */
 const DATA_STREAMS = [...HEALTH_AREA_STREAMS, "workouts"] as const;
-const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const COVERAGE_STREAM = "coverage_diagnostics";
 // A character XML does not count as whitespace (XML 1.0 production S).
 const XML_NON_WHITESPACE_RE = /[^\t\n\r ]/;
@@ -613,30 +613,20 @@ function newStreamRef(): StreamRef {
 	};
 }
 
-interface TimeRange {
-	since?: string | undefined;
-	until?: string | undefined;
-}
+type TimeRange = NonNullable<StreamScope["time_range"]>;
 
 function rangeOf(scope: StreamScope | undefined): TimeRange {
-	const tr = scope?.time_range;
-	return { since: tr?.since, until: tr?.until };
+	return scope?.time_range ?? {};
 }
 
 /**
  * Whether a record falls inside the window the runtime applies, so a receipt
- * counts what the runtime keeps. It mirrors `isOutsideTimeRange` in
- * connector-runtime.ts, bounds cut to their ten-character date and `until`
- * exclusive; any divergence would set the receipt against the records.
+ * counts what the runtime keeps. It is the runtime's own test, instants
+ * compared with `until` exclusive (Collection Profile §5.1); any divergence
+ * would set the receipt against the records.
  */
 function withinRange(startDate: string, range: TimeRange): boolean {
-	if (range.since && startDate < range.since.slice(0, 10)) {
-		return false;
-	}
-	if (range.until && startDate >= range.until.slice(0, 10)) {
-		return false;
-	}
-	return true;
+	return !isOutsideTimeRange(range, startDate, "date-time");
 }
 
 function noteSeen(ref: StreamRef, startDate: string): void {
@@ -1025,17 +1015,13 @@ function fieldsUnavailable(
 }
 
 /**
- * A requested window bound as the date-time the receipt's schema requires.
- * A bare date is the midnight UTC the runtime applies; passed through, it
- * would fail the schema and cost the receipt itself. An unparseable bound is
- * null.
+ * A requested window bound as the UTC date-time the receipt's schema
+ * requires. The runtime refuses a stream whose bound is not a date-time with
+ * an offset before collection begins, so only those reach here.
  */
 function requestedBound(value: string | undefined): string | null {
 	if (!value) {
 		return null;
-	}
-	if (DATE_ONLY_RE.test(value)) {
-		return `${value}T00:00:00.000Z`;
 	}
 	const instant = Date.parse(value);
 	return Number.isNaN(instant) ? null : new Date(instant).toISOString();
@@ -1099,13 +1085,13 @@ function outcomeOf(
 	const { ref, range } = lane;
 	const emitted = ref.emitted > 0;
 	const skipped = ref.unreadable + ref.failedValidation;
-	// Asked for history the data does not reach. Judged on the earliest
-	// record in the export, emitted or not, since every one emitted is inside
-	// the window, and by date, as the runtime applies the bound.
+	// Asked for history the data does not reach: the window starts before the
+	// earliest record in the export, emitted or not, since every one emitted
+	// is inside the window. An instant, as the runtime applies the bound.
 	const short = Boolean(
 		range.since &&
 			ref.earliestSeen &&
-			ref.earliestSeen.slice(0, 10) > range.since.slice(0, 10),
+			isOutsideTimeRange({ since: ref.earliestSeen }, range.since, "date-time"),
 	);
 	if (truncated) {
 		return {

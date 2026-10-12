@@ -934,16 +934,22 @@ test("a window the export reaches back to is not reported as unavailable", async
 		assert.equal(before?.reason, "window_unavailable");
 		assert.equal(before?.status, "partial");
 
-		// The runtime truncates the bound to its date, so a window asked from
-		// 12:00 on the day the export starts is applied from that day's
-		// midnight and the export does reach it: the 08:00 local (13:00 UTC)
-		// record on 2019-03-01 is on the window's first day.
-		const sameDay = await run(dir, {
+		// Bounds are instants. The export's first record was taken at 13:00 UTC
+		// on 2019-03-01, so it reaches a window that opens then, and not one
+		// that opens an hour before.
+		const atFirst = await run(dir, {
+			timeRange: { since: "2019-03-01T13:00:00Z" },
+		});
+		assert.equal(recordsOf(atFirst, "activity").length, 2);
+		assert.equal(receiptOf(atFirst, "activity")?.reason, "covered_in_full");
+		const hourBefore = await run(dir, {
 			timeRange: { since: "2019-03-01T12:00:00Z" },
 		});
-		assert.equal(recordsOf(sameDay, "activity").length, 2);
-		const onFirstDay = receiptOf(sameDay, "activity");
-		assert.equal(onFirstDay?.reason, "covered_in_full");
+		assert.equal(recordsOf(hourBefore, "activity").length, 2);
+		assert.equal(
+			receiptOf(hourBefore, "activity")?.reason,
+			"window_unavailable",
+		);
 	});
 });
 
@@ -1009,6 +1015,54 @@ test("a date-only window is refused, not applied as midnight UTC", async () => {
 		);
 		assert.equal(receiptOf(result, "activity"), undefined);
 		assert.equal(receiptOf(result, "workouts")?.reason, "covered_in_full");
+	});
+});
+
+test("a window bound at noon is applied at noon, and the receipt counts what arrived", async () => {
+	// Collection Profile §5.1 compares instants. Cut to its date, a noon since
+	// would admit that morning's reading and a noon until would drop it, and
+	// the receipt would count what the runtime did not deliver.
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<HealthData locale="en_US">
+ <ExportDate value="2026-09-01 12:00:00 -0500"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 08:00:00 -0500" endDate="2024-06-05 08:05:00 -0500" value="5"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 14:00:00 -0500" endDate="2024-06-05 14:05:00 -0500" value="6"/>
+</HealthData>
+`;
+	const cases = [
+		{
+			window: { since: "2024-06-05T16:00:00Z" },
+			starts: ["2024-06-05T19:00:00.000Z"],
+			reason: "covered_in_full",
+		},
+		{
+			window: { until: "2024-06-05T16:00:00Z" },
+			starts: ["2024-06-05T13:00:00.000Z"],
+			reason: "covered_in_full",
+		},
+		{
+			// The export's first reading is at 13:00 that day, so it does not
+			// reach back to a window that opens at 10:00.
+			window: { since: "2024-06-05T10:00:00Z" },
+			starts: ["2024-06-05T13:00:00.000Z", "2024-06-05T19:00:00.000Z"],
+			reason: "window_unavailable",
+		},
+	];
+	await withImportDir({ "export.xml": xml }, async (dir) => {
+		await Promise.all(
+			cases.map(async (c) => {
+				const result = await run(dir, { timeRange: c.window });
+				const label = JSON.stringify(c.window);
+				assert.deepEqual(
+					recordsOf(result, "activity").map((r) => r.start_date),
+					c.starts,
+					label,
+				);
+				const receipt = receiptOf(result, "activity");
+				assert.equal(receipt?.record_count, c.starts.length, label);
+				assert.equal(receipt?.reason, c.reason, label);
+			}),
+		);
 	});
 });
 
@@ -1193,7 +1247,7 @@ test("an element carrying an invalid character reference is counted as unreadabl
 		// Held to the same scope test as any record: outside the window, the
 		// undecodable record costs the receipt nothing.
 		const later = await run(dir, {
-			timeRange: { since: "2024-06-05T00:00:00.000Z" },
+			timeRange: { since: "2024-06-05T13:00:00.000Z" },
 		});
 		const laterRc = receiptOf(later, "activity");
 		assert.equal(recordsOf(later, "activity").length, 2);

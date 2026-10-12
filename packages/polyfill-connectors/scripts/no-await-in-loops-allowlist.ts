@@ -497,7 +497,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/apple_health/index.test.ts",
-			line: 3178,
+			line: 3232,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "small-XML-entry archive cases: each imported in turn by its own subprocess, whose peak RSS is measured alone",
@@ -511,7 +511,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/apple_health/index.ts",
-			line: 1161,
+			line: 1147,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "emitReceipts(): one coverage_diagnostics receipt per requested data stream, each with that stream's own outcome, emitted in order after the records they account for, on every exit path",
