@@ -876,6 +876,27 @@ test("an upload that cannot be read is reported in a plain sentence, never by it
 	);
 });
 
+test("an export that ends early is never reported as read completely", async () => {
+	// Its receipts say collection_interrupted; the owner's line must agree.
+	const cut = EXPORT_XML.slice(0, EXPORT_XML.indexOf("</HealthData>"));
+	await withImportDir({ "export.xml": cut }, async (dir) => {
+		const result = await run(dir);
+		assert.equal(
+			receiptOf(result, "activity")?.reason,
+			"collection_interrupted",
+		);
+		const lines = messagesOf(result, "PROGRESS").map((m) => String(m.message));
+		assert.ok(
+			lines.includes(
+				"Your export file ended earlier than expected, so some records may be missing",
+			),
+			lines.join("\n"),
+		);
+		assert.ok(!lines.includes("Apple Health export read completely"));
+		assert.equal(gapSummaryOf(result).truncated, true);
+	});
+});
+
 test("no export uploaded yet is a waiting state with a receipt, not a silent nothing", async () => {
 	// The likeliest first-run state, and the one most likely to be seen by a
 	// person. It is also the exit path most likely to have no test.

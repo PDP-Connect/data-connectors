@@ -877,9 +877,14 @@ function settleNotEmitted(
 		p.oversizedMetadata + p.oversizedEvents + p.oversizedStatistics;
 }
 
-/** Report the gap tally: one plain owner line on PROGRESS, the raw tally as a diagnostic. Never silent — an empty tally still reports. */
+/**
+ * Report the gap tally: one plain owner line on PROGRESS, the raw tally as a
+ * diagnostic. Never silent: an empty tally still reports, and an export that
+ * ended early says so first, since its receipts say collection_interrupted.
+ */
 async function reportGapSummary(
 	gaps: AppleHealthGapCounts,
+	truncated: boolean,
 	progress: (message: string) => Promise<void>,
 ): Promise<void> {
 	const tally = (counts: Map<string, number>): string =>
@@ -895,6 +900,7 @@ async function reportGapSummary(
 	];
 	const oversizedSkipped = oversized.filter(([, n]) => n > 0);
 	connectorDiagnostic("apple_health", "gap_summary", {
+		truncated,
 		records_dropped_missing_start_date: gaps.recordsMissingStartDate,
 		workouts_dropped_missing_start_date: gaps.workoutsMissingStartDate,
 		unrecognized_record_types: tally(gaps.unrecognizedRecordTypes),
@@ -987,6 +993,11 @@ async function reportGapSummary(
 	if (beyondLimit.length > 0) {
 		parts.push(
 			`${beyondLimit.join(" and ")} past the limit per workout left out`,
+		);
+	}
+	if (truncated) {
+		parts.unshift(
+			"Your export file ended earlier than expected, so some records may be missing",
 		);
 	}
 	await progress(
@@ -1306,7 +1317,7 @@ runConnector({
 			onWorkout: (el): Promise<void> => handleWorkout(el, run),
 		});
 
-		await reportGapSummary(gaps, progress);
+		await reportGapSummary(gaps, truncated, progress);
 		const newerTooLarge = resolved.newerTooLarge !== undefined;
 		await emitReceipts(
 			(lane) => outcomeOf(lane, truncated, newerTooLarge, passedOver > 0),
