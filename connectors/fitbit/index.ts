@@ -82,12 +82,13 @@
  * daily files are padded past the export date, so a day more than one day
  * past the export's UTC date is a record only with a readable non-zero value.
  *
- * NAMES AND VALUES STAY HERE. No record, SKIP_RESULT, PROGRESS message or
- * error names a member, the upload, the import folder, a scratch file, the
- * time zone or any record value: messages are constant per reason, progress
- * names the stream, a family's fixed key, fixed reason and status tokens and
- * schema field names and gives counts and dates, and an error is reported by
- * its code alone.
+ * NAMES AND VALUES STAY HERE. No record, SKIP_RESULT, PROGRESS message,
+ * diagnostic or error names a member, the upload, the import folder, a
+ * scratch file, the time zone or any record value: messages are constant per
+ * reason, progress is plain words and a count, a diagnostic names the
+ * stream, a family's fixed key, fixed reason and status tokens and schema
+ * field names and gives counts and dates, and an error is reported by its
+ * code alone.
  *
  * EXCLUDED. Location and its proxies (GPS files, route links, the profile's
  * place and time zone, every local time of day), identity (every other
