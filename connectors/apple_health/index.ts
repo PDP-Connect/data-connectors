@@ -1037,17 +1037,24 @@ function fieldsUnavailable(
 
 /**
  * A requested window bound as the runtime applied it, in UTC, with every
- * fractional digit it was given (three at least). The runtime refuses a
- * stream whose bound is not a date-time with an offset before collection
- * begins, so only those reach here.
+ * significant fractional digit (three at least), so one instant has one
+ * spelling: the receipt's id hashes it. The runtime refuses a stream whose
+ * bound is not a date-time with an offset before collection begins, so only
+ * those reach here. A bound whose UTC year leaves 0000-9999 has no RFC 3339
+ * spelling, so it is null, as no bound is.
  */
 function requestedBound(value: string | undefined): string | null {
 	const instant = value ? parseIsoInstant(value) : null;
 	if (instant === null) {
 		return null;
 	}
-	const whole = new Date(instant.second).toISOString().slice(0, 19);
-	return `${whole}.${instant.fraction.padEnd(3, "0")}Z`;
+	const utc = new Date(instant.second);
+	const year = utc.getUTCFullYear();
+	if (year < 0 || year > 9999) {
+		return null;
+	}
+	const fraction = instant.fraction.replace(/0+$/, "").padEnd(3, "0");
+	return `${utc.toISOString().slice(0, 19)}.${fraction}Z`;
 }
 
 interface StreamOutcome {

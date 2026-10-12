@@ -911,7 +911,7 @@ test("the gap summary is one plain sentence, in the singular where it counts one
 	});
 });
 
-test("a receipt echoes each bound as applied, and a date past year 9999 is no reading", async () => {
+test("a receipt echoes each bound as applied, and a UTC year past 9999 is no reading", async () => {
 	// The bound keeps every fractional digit the runtime compared, in UTC. A
 	// start in year 10000 is no RFC 3339 instant, so its record is unreadable,
 	// as is any whose date cannot be read; the runtime dropped it unseen
@@ -940,6 +940,23 @@ test("a receipt echoes each bound as applied, and a date past year 9999 is no re
 		assert.equal(receipt?.record_count, 1);
 		assert.equal(receipt?.records_skipped_unreadable, 1);
 		assert.equal(receipt?.reason, "records_unreadable");
+
+		// One instant has one spelling, whatever zeros end its fraction. A bound
+		// whose UTC year passes 9999 has none, and is given as no bound, rather
+		// than spelt so that every receipt fails its schema and is dropped.
+		const spelt = await run(dir, {
+			timeRange: {
+				since: "2024-06-05T12:00:00.000000Z",
+				until: "9999-12-31T23:59:59.5-01:00",
+			},
+		});
+		const echoed = receiptOf(spelt, "activity");
+		assert.equal(echoed?.window_requested_from, "2024-06-05T12:00:00.000Z");
+		assert.equal(echoed?.window_requested_to, null);
+		assert.equal(
+			recordsOf(spelt, "coverage_diagnostics").length,
+			DATA_STREAMS.length,
+		);
 	});
 });
 

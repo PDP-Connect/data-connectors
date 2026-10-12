@@ -440,12 +440,14 @@ test("buildHealthRecord: missing startDate → null (skip), tallied as a gap not
 	assert.equal(gaps.recordsMissingStartDate, 1);
 });
 
-test("isoDate: only an RFC 3339 instant with a four-digit year is a date", () => {
+test("isoDate: an instant whose UTC year is past 9999 (or before 0000) is no date", () => {
 	assert.equal(
 		isoDate("2024-06-05 13:45:22 -0700"),
 		"2024-06-05T20:45:22.000Z",
 	);
 	assert.equal(isoDate("10000-01-01 00:00:00 +0000"), null);
+	// Written in 9999, but past it in UTC.
+	assert.equal(isoDate("9999-12-31 23:30:00 -0100"), null);
 	assert.equal(isoDate("not a date"), null);
 });
 

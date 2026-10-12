@@ -602,9 +602,9 @@ export function isoDate(v: string | undefined): string | null {
 	if (Number.isNaN(d.getTime())) {
 		return null;
 	}
-	// A year past 9999 serialises with a sign and six digits, which is no
-	// RFC 3339 instant: the runtime's window would drop the record, and it
-	// would sort before every real date.
+	// An instant whose UTC year is past 9999 (or before 0000) serialises with
+	// a sign and six digits, which is no RFC 3339 instant: the runtime's window
+	// would drop the record, and it would sort before every real date.
 	const iso = d.toISOString();
 	return parseIsoInstant(iso) === null ? null : iso;
 }
