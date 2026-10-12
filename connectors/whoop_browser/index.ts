@@ -759,30 +759,22 @@ export async function collectWhoopBrowser(
 		/**
 		 * The latest cycle that starts before `before`, and the instant from which every cycle start
 		 * up to `before` is known. With the strap off, a cycle stays under way for as long as it is
-		 * off: when an earlier walk gave its start (`began`) the one window from there is read, and
-		 * otherwise, or when that window holds none, the walk steps back a window at a time to the
-		 * account's start. A window whose cycles are all unreadable ends it: with cycles that do not
-		 * overlap, the latest of them is the one under way, and what it holds inside a grant is
-		 * counted. Not held to maxWindowsPerRun, since the account's start bounds it and a run cut
-		 * short in it would begin it again next time.
+		 * off, so the walk steps back a window at a time, at most to the account's start. Past the
+		 * first window back, which a cycle synced late may have joined, an earlier walk's finding
+		 * (`began`) speaks for the rest: none had begun, or the next window read is the one where it
+		 * began. That trusts WHOOP not to add a cycle older than the first window back. A window
+		 * whose cycles are all unreadable ends it: with cycles that do not overlap, the latest of
+		 * them is the one under way, and what it holds inside a grant is counted. Not held to
+		 * maxWindowsPerRun, since the account's start bounds it and a run cut short in it would
+		 * begin it again next time.
 		 */
 		const latestBefore = async (
 			before: number,
 			began: number | null | undefined,
 		): Promise<{ ok: true; cycle: Cycle | null; known: number } | Failure> => {
-			const none = {
-				ok: true,
-				cycle: null,
-				known: Number.NEGATIVE_INFINITY,
-			} as const;
-			// None had begun: the walk that found so read back to the account's start.
-			if (began === null) return none;
-			const hinted = began !== undefined && began < before;
-			let to = hinted ? Math.min(began + WINDOW_DAYS * DAY_MS, before) : before;
-			let back = hinted
-				? began
-				: Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
-			while (to > historyMs) {
+			let hint = began;
+			for (let to = before; to > historyMs; ) {
+				const back = Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
 				let latest: Cycle | null = null;
 				let lostLast = false;
 				for (let from = back; from < to; ) {
@@ -798,10 +790,14 @@ export async function collectWhoopBrowser(
 				}
 				if (lostLast) return { ok: true, cycle: null, known: before };
 				if (latest) return { ok: true, cycle: latest, known: latest.startMs };
-				to = back;
-				back = Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
+				if (hint === null) break;
+				to =
+					hint === undefined
+						? back
+						: Math.min(hint + WINDOW_DAYS * DAY_MS, back);
+				hint = undefined;
 			}
-			return none;
+			return { ok: true, cycle: null, known: Number.NEGATIVE_INFINITY };
 		};
 		// What an earlier walk found about the cycle under way where this one starts delivering.
 		const began = all

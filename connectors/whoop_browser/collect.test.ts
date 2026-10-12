@@ -1189,8 +1189,12 @@ test("collect: a run from the last STATE re-reads the overlap week, then moves t
 	const h = await collect(fake, { state: statesOf(first), now: LATER });
 	assert.deepEqual(
 		cyclesRequests(fake).map(({ start, end }) => [start, end]),
-		// Through, less the week, the reach and the pad; no step back for a cycle under way.
-		[[RESUMED - DAY, LATER.getTime() + DAY]],
+		[
+			// Through, less the week, the reach and the pad.
+			[RESUMED - DAY, LATER.getTime() + DAY],
+			// One window back, where a cycle synced late would be; then the hint says none.
+			[RESUMED - WINDOW_DAYS * DAY - DAY, RESUMED + DAY],
+		],
 	);
 	assert.deepEqual(
 		cursorsOf(h),
@@ -1216,7 +1220,7 @@ const CLOSED_CYCLE = cycleAt(1_000_000_801, ABANDONED, {
 	updated_at: "2026-09-21T13:00:00.000+0000",
 });
 
-test("collect: a cycle under way since before the overlap week is re-read once it closes, in the one window where the last walk found it began", async () => {
+test("collect: a cycle under way since before the overlap week is re-read once it closes, one window back and then where the last walk found it began", async () => {
 	const first = await collect(fakeWhoop(serve([OPEN_CYCLE])));
 	assert.equal(nth(recordsOf(first, "cycles"), 0).end_at, null);
 	assert.deepEqual(cursorsOf(first), everyStream(cursorAt(FLOOR, NOW)));
@@ -1231,7 +1235,9 @@ test("collect: a cycle under way since before the overlap week is re-read once i
 		cyclesRequests(fake).map(({ start, end }) => [start, end]),
 		[
 			[RESUMED - DAY, LATER.getTime() + DAY],
-			[ABANDONED - DAY, ABANDONED + WINDOW_DAYS * DAY + DAY],
+			[RESUMED - WINDOW_DAYS * DAY - DAY, RESUMED + DAY],
+			// ABANDONED lies just past the first window back: the next, to the account's start.
+			[FLOOR - DAY, RESUMED - WINDOW_DAYS * DAY + DAY],
 		],
 	);
 	assert.deepEqual(
@@ -1836,7 +1842,7 @@ const LONG_WINDOWS = Math.ceil(
 	(NOW.getTime() - LONG_FLOOR) / (WINDOW_DAYS * DAY),
 );
 
-test("collect: a strap left off for a year costs each later run one window for the cycle under way, where the last walk found it began", async () => {
+test("collect: a strap left off for a year costs each later run two windows for the cycle under way: one back, and the one where the last walk found it began", async () => {
 	const began = NOW.getTime() - 365 * DAY;
 	const held = [
 		holding(cycleAt(1_000_000_807, began, { during: `['${iso(began)}',)` }), {
@@ -1857,7 +1863,7 @@ test("collect: a strap left off for a year costs each later run one window for t
 		requests.push(cyclesRequests(fake).length);
 		state = statesOf(h);
 	}
-	assert.deepEqual(requests, [LONG_WINDOWS, 2, 2]);
+	assert.deepEqual(requests, [LONG_WINDOWS, 3, 3]);
 	// Without the hint, a later run steps back a window at a time over the year.
 	const fake = fakeWhoop(serve(held, LONG_BOOTSTRAP));
 	await collect(fake, {
@@ -1871,7 +1877,7 @@ test("collect: a strap left off for a year costs each later run one window for t
 	);
 });
 
-test("collect: an account with no cycles is walked back to its start once; later runs read their week alone", async () => {
+test("collect: an account with no cycles is walked back to its start once; later runs read their week and one window back", async () => {
 	let state: Record<string, unknown> = {};
 	const requests: number[] = [];
 	for (const now of [NOW, LATER, new Date(LATER.getTime() + DAY)]) {
@@ -1885,7 +1891,51 @@ test("collect: an account with no cycles is walked back to its start once; later
 		requests.push(cyclesRequests(fake).length);
 		state = statesOf(h);
 	}
-	assert.deepEqual(requests, [LONG_WINDOWS, 1, 1]);
+	assert.deepEqual(requests, [LONG_WINDOWS, 2, 2]);
+});
+
+test("collect: a cycle synced late, after the hint's start and before the walk's, is read from the window before the walk", async () => {
+	// The strap off from June 1, then worn offline from October 1: one cycle from October 3 to 8,
+	// synced on October 14, a day after a run that found the June cycle still under way.
+	const june = Date.parse("2026-06-01T00:00:00.000Z");
+	const at = (day: string): number => Date.parse(`2026-10-${day}Z`);
+	const streams = ["workouts"] as const;
+	const before = [
+		cycleAt(1_000_000_815, june, { during: `['${iso(june)}',)` }),
+	];
+	const first = await collect(fakeWhoop(serve(before, LONG_BOOTSTRAP)), {
+		streams,
+		now: new Date(at("13T12:00:00")),
+	});
+	assert.deepEqual(hintOf(first, "workouts"), {
+		at: iso(at("06T12:00:00")),
+		began: iso(june),
+	});
+	const synced = [
+		cycleAt(1_000_000_815, june, {
+			during: `['${iso(june)}','${iso(at("03T00:00:00"))}')`,
+		}),
+		holding(
+			cycleAt(1_000_000_816, at("03T00:00:00"), {
+				during: `['${iso(at("03T00:00:00"))}','${iso(at("08T00:00:00"))}')`,
+			}),
+			{
+				workouts: [
+					workoutAt(962, at("05T02:00:00")),
+					workoutAt(963, at("07T02:00:00")),
+				],
+			},
+		),
+		cycleAt(1_000_000_817, at("08T00:00:00"), {
+			during: `['${iso(at("08T00:00:00"))}',)`,
+		}),
+	];
+	const h = await collect(fakeWhoop(serve(synced, LONG_BOOTSTRAP)), {
+		streams,
+		state: statesOf(first),
+		now: new Date(at("14T12:00:00")),
+	});
+	assert.deepEqual(idsOf(h, "workouts"), [uuid(962), uuid(963)]);
 });
 
 test("collect: a hint whose window holds no cycle steps back from where it said the cycle began", async () => {
@@ -1917,9 +1967,9 @@ test("collect: a hint whose window holds no cycle steps back from where it said 
 	});
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(958)]);
 	assert.equal(
-		nth(cyclesRequests(fake), 1).start,
+		nth(cyclesRequests(fake), 2).start,
 		wrong - DAY,
-		"its window first",
+		"after one window back, its window",
 	);
 	assert.deepEqual(hintOf(h, "workouts"), {
 		at: iso(LATER.getTime() - OVERLAP_DAYS * DAY),
@@ -1993,15 +2043,16 @@ test("collect: a walk past maxWindowsPerRun stops after that many windows, and t
 	const next = fakeWhoop(fixtures(CYCLES, LONG_BOOTSTRAP));
 	const h2 = await collect(next, { pacing, state: statesOf(h) });
 	const resume = through - OVERLAP_DAYS * DAY - REACH;
-	// The first run found no cycle had begun by where this one delivers from: no step back.
+	// The first run found no cycle had begun by where this one delivers from: one window back
+	// confirms it, and uses the run's second window.
 	assert.deepEqual(
 		cyclesRequests(next).map((request) => request.start),
-		[resume - DAY, resume + WINDOW_DAYS * DAY - DAY],
+		[resume - DAY, resume - WINDOW_DAYS * DAY - DAY],
 	);
 	assertSkips(h2, "source_limit_reached", RETRY);
 	assert.deepEqual(
 		cursorsOf(h2),
-		everyStream(cursorAt(LONG_FLOOR, resume + 2 * WINDOW_DAYS * DAY)),
+		everyStream(cursorAt(LONG_FLOOR, resume + WINDOW_DAYS * DAY)),
 	);
 });
 
