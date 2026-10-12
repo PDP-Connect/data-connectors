@@ -23,6 +23,7 @@ import {
 	APP_URL,
 	classify,
 	type DayCursor,
+	type DayRange,
 	ensureSession,
 	grantDays,
 	inRange,
@@ -864,8 +865,11 @@ test("planDays re-reads the overlap it is given before the cursor, never before 
 		training_status: 7,
 		activities: 29,
 	});
-	const forward = (overlap: number, prev: DayCursor = CURSOR) =>
-		planDays(prev, "2026-09-23", {}, false, overlap).segments;
+	const forward = (
+		overlap: number,
+		prev: DayCursor = CURSOR,
+		grant: DayRange = {},
+	) => planDays(prev, "2026-09-23", grant, false, overlap).segments;
 	assert.deepEqual(forward(OVERLAP.daily_summaries), [
 		{
 			kind: "forward",
@@ -884,7 +888,12 @@ test("planDays re-reads the overlap it is given before the cursor, never before 
 		},
 	]);
 	assert.deepEqual(
-		forward(OVERLAP.sleep, { next_day: "2026-09-22", floor: "2026-09-09" }),
+		// The grant that set that floor: with none, the history below it would be read too.
+		forward(
+			OVERLAP.sleep,
+			{ next_day: "2026-09-22", floor: "2026-09-09" },
+			{ since: "2026-09-09" },
+		),
 		[
 			{
 				kind: "forward",
@@ -916,23 +925,145 @@ test("planDays never reads before the grant's start, though the overlap reaches 
 	}
 });
 
+// ── A grant that reaches past the cursor's ─────────────────────────────────
+/** An activities cursor last read with a grant from 18:00Z on 14 September, read on to 1 November. */
+const EVENING: DayCursor = {
+	next_day: "2026-11-02",
+	floor: "2026-09-13",
+	since_at: "2026-09-14T18:00:00.000Z",
+};
+/** An activities grant, in days as grantDays gives it. */
+const activities = (since?: string, until?: string): DayRange => {
+	const range = { ...(since ? { since } : {}), ...(until ? { until } : {}) };
+	return Object.fromEntries(
+		Object.entries(grantDays("activities", range)).filter(
+			([, value]) => value !== undefined,
+		),
+	);
+};
+const plan = (prev: DayCursor, grant: DayRange) =>
+	planDays(prev, "2026-11-01", grant, false, OVERLAP.activities);
+
+test("planDays: a grant starting earlier, to the instant, raises the floor past the last day a record before the cursor's start is filed under, and reads the history below it from the new start", () => {
+	const { cursor, segments } = plan(
+		{ ...EVENING, backfill: { since: "2026-09-01", next_day: "2026-09-05" } },
+		activities("2026-09-14T00:00:00.000Z"),
+	);
+	assert.deepEqual(segments.slice(1), [
+		{
+			kind: "backfill",
+			from: "2026-09-13",
+			to: "2026-09-15",
+			since: "2026-09-13",
+		},
+	]);
+	// History read part way under the narrower grant is forgotten.
+	assert.deepEqual(cursor, {
+		next_day: "2026-11-02",
+		floor: "2026-09-16",
+		since_at: "2026-09-14T00:00:00.000Z",
+	});
+	// Earlier by less than a millisecond is earlier.
+	assert.equal(
+		plan(
+			{ ...EVENING, since_at: "2026-09-14T18:00:00.0005Z" },
+			activities(EVENING.since_at),
+		).cursor.floor,
+		"2026-09-16",
+	);
+});
+
+test("planDays: a grant ending later than the cursor's, or not at all, sends next_day back to the day before the cursor's until's UTC day", () => {
+	const ended = { ...EVENING, until_at: "2026-09-14T06:00:00.000Z" };
+	for (const until of [undefined, "2026-09-20T00:00:00.000Z"]) {
+		const { cursor, segments } = plan(
+			ended,
+			activities(EVENING.since_at, until),
+		);
+		assert.equal(cursor.next_day, "2026-09-13", String(until));
+		assert.equal(cursor.until_at, until, String(until));
+		assert.equal(segments[0]?.from, "2026-09-13", String(until));
+	}
+});
+
+test("planDays: a grant no wider than the cursor's, to the instant, moves neither the floor nor next_day, keeps the history read so far, and the cursor takes its instants", () => {
+	const saved = {
+		...EVENING,
+		until_at: "2026-10-01T00:00:00.000Z",
+		backfill: { since: "2026-09-01", next_day: "2026-09-05" },
+	};
+	for (const [since, until] of [
+		[EVENING.since_at, saved.until_at],
+		// The same instants at another offset, and a narrower grant.
+		["2026-09-15T07:00:00.000+13:00", "2026-10-01T13:00:00.000+13:00"],
+		["2026-09-14T20:00:00.000Z", "2026-09-30T00:00:00.000Z"],
+	] as const) {
+		const { cursor } = plan(saved, activities(since, until));
+		assert.deepEqual(
+			cursor,
+			{ ...saved, since_at: since, until_at: until },
+			`${since} ${until}`,
+		);
+	}
+});
+
+test("planDays reads history from where it stopped for a start no earlier than the one it was read from, and from the start for an earlier one", () => {
+	const cursor = {
+		next_day: "2026-09-22",
+		floor: "2026-08-01",
+		backfill: { since: "2026-06-24", next_day: "2026-07-10" },
+	};
+	const history = (since?: string) =>
+		planDays(cursor, "2026-09-21", since ? { since } : {}, false, 7)
+			.segments.filter(({ kind }) => kind === "backfill")
+			.map(({ from, to }) => [from, to]);
+	// With no start, ninety days back: 24 June.
+	assert.deepEqual(history(), [["2026-07-10", "2026-07-31"]]);
+	assert.deepEqual(history("2026-07-01"), [["2026-07-10", "2026-07-31"]]);
+	assert.deepEqual(history("2026-07-15"), [["2026-07-15", "2026-07-31"]]);
+	assert.deepEqual(history("2026-06-20"), [["2026-06-20", "2026-07-31"]]);
+});
+
+test("readCursor keeps a grant's instants that parse, and starts afresh from one that does not", () => {
+	const ended = { ...EVENING, until_at: "2026-10-01T00:00:00.000Z" };
+	assert.deepEqual(readCursor(ended), ended);
+	for (const bad of ["2026-09-14", "soon", 1789408800000, null]) {
+		for (const edge of ["since_at", "until_at"]) {
+			assert.deepEqual(
+				readCursor({ ...ended, [edge]: bad }),
+				{},
+				`${edge} ${JSON.stringify(bad)}`,
+			);
+		}
+	}
+});
+
 test("grantDays reads an instant grant from the day before its first UTC day to the last day a record starting inside it is filed under: two days on for sleep, one for activities", () => {
 	const range = {
 		since: "2026-09-14T23:00:00.000Z",
 		until: "2026-09-15T00:00:00.000Z",
 	};
+	// Each also carries the grant's instants, read again when a later grant reaches past them.
+	const instants = { since_at: range.since, until_at: range.until };
 	assert.deepEqual(grantDays("sleep", range), {
 		since: "2026-09-13",
 		until: "2026-09-17",
+		...instants,
+		filed_after: 2,
 	});
 	assert.deepEqual(grantDays("activities", range), {
 		since: "2026-09-13",
 		until: "2026-09-16",
+		...instants,
+		filed_after: 1,
 	});
 	// A night starting at 00:00:00.000Z on the 15th lies before this until, and is filed up to the 17th.
 	assert.deepEqual(grantDays("sleep", { until: "2026-09-15T00:00:00.0005Z" }), {
 		since: undefined,
 		until: "2026-09-18",
+		since_at: undefined,
+		until_at: "2026-09-15T00:00:00.0005Z",
+		filed_after: 2,
 	});
 	assert.deepEqual(grantDays("hrv", range), {
 		since: "2026-09-14",

@@ -1241,9 +1241,19 @@ const leavesOf = (
 			),
 	);
 
-/** A cursor whose next window is 9 to 21 September: thirteen days, an odd number. */
+/**
+ * A cursor whose next window is 9 to 21 September: thirteen days, an odd number. Its floor lies
+ * inside the ninety days a grant with no start reads, so the history below it, back to FLOOR, is
+ * read after the window.
+ */
 const ODD = { next_day: "2026-09-09", floor: "2026-09-09" };
-const ODD_DONE = { next_day: "2026-09-22", floor: "2026-09-09" };
+const ODD_DONE = { next_day: "2026-09-22", floor: FLOOR };
+/** The history below ODD's floor, in the windows read after it: no activity lies there. */
+const ODD_HISTORY = [
+	["2026-06-24", "2026-07-21"],
+	["2026-07-22", "2026-08-18"],
+	["2026-08-19", "2026-09-08"],
+] as const;
 const WHOLE = ["2026-09-09", TODAY] as const;
 const OLDER = ["2026-09-09", "2026-09-14"] as const;
 const NEWER = ["2026-09-15", TODAY] as const;
@@ -1282,7 +1292,7 @@ for (const [count, pieces] of [
 			state: { activities: ODD },
 			streams: ["activities"],
 		});
-		assert.deepEqual(piecesOf(fake), pieces);
+		assert.deepEqual(piecesOf(fake), [...pieces, ...ODD_HISTORY]);
 		// The oldest piece first, each newest first, as Garmin answered it.
 		assert.deepEqual(
 			idsOf(h, "activities"),
@@ -1308,7 +1318,8 @@ test("collect: every request of a halved window, its full answers included, come
 	});
 	assert.deepEqual(fake.log, [
 		"read settings",
-		...Array.from({ length: 7 }, () => ["sleep 5", "read activities"]).flat(),
+		// Seven pieces of the window, then the three windows of its history.
+		...Array.from({ length: 10 }, () => ["sleep 5", "read activities"]).flat(),
 	]);
 });
 
@@ -1470,7 +1481,10 @@ test("collect: a window that needs more than maxRequestsPerWindow requests skips
 		[],
 		"the window never completed",
 	);
-	assert.equal(pathsOf(exact.fake, "activities").length, 7);
+	assert.equal(
+		pathsOf(exact.fake, "activities").length,
+		7 + ODD_HISTORY.length,
+	);
 	assert.deepEqual(messagesOf(exact.h, "SKIP_RESULT"), []);
 	assert.equal(idsOf(exact.h, "activities").length, 249);
 	assert.deepEqual(progressOf(exact.h), [{ stream: "activities", count: 1 }]);
@@ -1507,7 +1521,7 @@ test("collect: a row a piece's answer holds from outside that piece is counted u
 		state: { activities: ODD },
 		streams: ["activities"],
 	});
-	assert.deepEqual(piecesOf(fake), [WHOLE, OLDER, NEWER]);
+	assert.deepEqual(piecesOf(fake), [WHOLE, OLDER, NEWER, ...ODD_HISTORY]);
 	assert.deepEqual(idsOf(h, "activities"), [
 		...idsIn(rows, ...OLDER),
 		...idsIn(rows, ...NEWER),
@@ -1531,7 +1545,7 @@ test("collect: an activity that does not read inside a full answer is counted on
 		state: { activities: ODD },
 		streams: ["activities"],
 	});
-	assert.deepEqual(piecesOf(fake), [WHOLE, OLDER, NEWER]);
+	assert.deepEqual(piecesOf(fake), [WHOLE, OLDER, NEWER, ...ODD_HISTORY]);
 	assert.deepEqual(
 		idsOf(h, "activities"),
 		[...idsIn(rows, ...OLDER), ...idsIn(rows, ...NEWER)].filter(
@@ -1559,8 +1573,11 @@ test("collect: two records that do not read in one window, one answer, are count
 		state: everyStream(ODD, streams),
 		streams,
 	});
-	assert.deepEqual(pathsOf(fake, "sleep"), [`${SLEEP}${WHOLE[0]}/${TODAY}`]);
-	assert.deepEqual(piecesOf(fake), [WHOLE]);
+	assert.deepEqual(pathsOf(fake, "sleep"), [
+		`${SLEEP}${WHOLE[0]}/${TODAY}`,
+		...ODD_HISTORY.map(([from, to]) => `${SLEEP}${from}/${to}`),
+	]);
+	assert.deepEqual(piecesOf(fake), [WHOLE, ...ODD_HISTORY]);
 	assert.deepEqual(countsOf(h), everyStream(0));
 	assert.deepEqual(progressLines(h), [
 		{ stream: "sleep", count: 2, message: "2 record(s) unreadable." },
@@ -2218,7 +2235,12 @@ test("collect: a saved cursor whose re-read reaches back past its grant's start 
 	});
 	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
-	assert.deepEqual(statesOf(h), everyStream(FULL));
+	const since_at = "2026-09-10T00:00:00.000Z";
+	assert.deepEqual(statesOf(h), {
+		...everyStream(FULL),
+		sleep: { ...FULL, since_at },
+		activities: { ...FULL, since_at },
+	});
 });
 
 test("collect: sleep reads from the day before its grant to two days past its last UTC day, and keeps only the nights that start inside it, to the instant", async () => {
@@ -2241,7 +2263,12 @@ test("collect: sleep reads from the day before its grant to two days past its la
 		"outside the grant is not unreadable",
 	);
 	assert.deepEqual(statesOf(h), {
-		sleep: { next_day: "2026-09-18", floor: "2026-09-13" },
+		sleep: {
+			next_day: "2026-09-18",
+			floor: "2026-09-13",
+			since_at: "2026-09-14T18:00:00.000Z",
+			until_at: "2026-09-16T00:00:00.000Z",
+		},
 	});
 });
 
@@ -2349,6 +2376,329 @@ test("collect: an activity starting before since is neither emitted nor counted,
 	assert.deepEqual(idsOf(h, "activities"), []);
 	// The run (06:30Z on the 14th) is outside the grant; the ride is inside.
 	assert.deepEqual(progressOf(h), [{ stream: "activities", count: 1 }]);
+});
+
+// ── A grant that widens ────────────────────────────────────────────────────
+/** Six weeks on from NOW: the owner's day is 1 November, and a range stream's re-read reaches back to 4 October. */
+const NOVEMBER = new Date("2026-10-31T13:30:00.000Z");
+/** A grant's start: 18:00Z on the 14th, after the run (06:30Z) and before the ride (19:15Z on the 15th). */
+const EVENING = "2026-09-14T18:00:00.000Z";
+const MIDNIGHT = "2026-09-14T00:00:00.000Z";
+
+/** One activities run at NOVEMBER under `range`, from `after`'s STATE when given. */
+const activitiesRun = (
+	range: Range,
+	after?: RecordingEmit,
+	fake: Fake = fakeGarmin(),
+	options: RunOptions = {},
+): Promise<RecordingEmit> =>
+	collect(fake, {
+		now: NOVEMBER,
+		streams: ["activities"],
+		ranges: { activities: range },
+		state: after ? statesOf(after) : {},
+		...options,
+	});
+
+/** A copy of the fixture's run (41000101) as activity `id`, starting at `gmt`, `local` on the owner's clock. */
+function activityAt(
+	data: SiteData,
+	id: number,
+	gmt: string,
+	local: string,
+	change: Record<string, unknown> = {},
+): void {
+	const run = (data.activities as Array<Record<string, unknown>>).find(
+		(row) => row.activityId === 41000101,
+	);
+	data.activities.push({
+		...run,
+		activityId: id,
+		startTimeGMT: gmt,
+		startTimeLocal: local,
+		...change,
+	});
+}
+
+test("collect: a grant that starts earlier, inside the last grant's first day, reads again the days the last held records back on and ships what they hold", async () => {
+	const first = await activitiesRun({ since: EVENING });
+	assert.deepEqual(idsOf(first, "activities"), ["41000102"]);
+	assert.deepEqual(statesOf(first), {
+		activities: {
+			next_day: "2026-11-02",
+			floor: "2026-09-13",
+			since_at: EVENING,
+		},
+	});
+	const fake = fakeGarmin();
+	const second = await activitiesRun({ since: MIDNIGHT }, first, fake);
+	assert.deepEqual(idsOf(second, "activities"), ["41000101"]);
+	// The re-read from 4 October, then the history up to the last day a record starting before the
+	// last grant can be filed under, the 15th, read from the day before the new grant's first UTC day.
+	assert.deepEqual(piecesOf(fake), [
+		["2026-10-04", "2026-10-31"],
+		["2026-11-01", "2026-11-01"],
+		["2026-09-13", "2026-09-15"],
+	]);
+	const read = {
+		next_day: "2026-11-02",
+		floor: "2026-09-13",
+		since_at: MIDNIGHT,
+	};
+	assert.deepEqual(statesOf(second), { activities: read });
+	assert.deepEqual(messagesOf(second, "PROGRESS"), []);
+	// The same grant again holds nothing more back: only the re-read.
+	const again = fakeGarmin();
+	const third = await activitiesRun({ since: MIDNIGHT }, second, again);
+	assert.deepEqual(piecesOf(again), [
+		["2026-10-04", "2026-10-31"],
+		["2026-11-01", "2026-11-01"],
+	]);
+	assert.deepEqual(statesOf(third), { activities: read });
+});
+
+test("collect: a grant narrowed to a later day and then widened reads again everything the narrower grant could have held back, so what the first held back ships too", async () => {
+	const first = await activitiesRun({ since: EVENING });
+	const narrow = await activitiesRun(
+		{ since: "2026-09-17T00:00:00.000Z" },
+		first,
+	);
+	assert.deepEqual(idsOf(narrow, "activities"), []);
+	const fake = fakeGarmin();
+	const wide = await activitiesRun({ since: MIDNIGHT }, narrow, fake);
+	// From the day before the 14th to the last day a record starting before the 17th is filed under.
+	assert.deepEqual(piecesOf(fake).at(-1), ["2026-09-13", "2026-09-17"]);
+	assert.deepEqual(idsOf(wide, "activities"), ["41000102", "41000101"]);
+	assert.deepEqual(statesOf(wide), {
+		activities: {
+			next_day: "2026-11-02",
+			floor: "2026-09-13",
+			since_at: MIDNIGHT,
+		},
+	});
+});
+
+test("collect: in Pago Pago, an activity filed the local day before its grant's first UTC day ships once a grant narrowed by a day widens again", async () => {
+	// 06:30Z on the 14th is 19:30 on the 13th in UTC-11.
+	const pagoPago = () =>
+		fakeGarmin(
+			site((data) => {
+				data.settings = {
+					displayName: "fixture-owner",
+					timeZone: "Pacific/Pago_Pago",
+				};
+				data.activities = [];
+				activityAt(
+					data,
+					41000301,
+					"2026-09-14 06:30:00",
+					"2026-09-13 19:30:00",
+				);
+			}),
+		);
+	const first = await activitiesRun({ since: EVENING }, undefined, pagoPago());
+	const narrow = await activitiesRun(
+		{ since: "2026-09-15T06:00:00.000Z" },
+		first,
+		pagoPago(),
+	);
+	const wide = await activitiesRun({ since: MIDNIGHT }, narrow, pagoPago());
+	for (const h of [first, narrow]) assert.deepEqual(idsOf(h, "activities"), []);
+	assert.deepEqual(idsOf(wide, "activities"), ["41000301"]);
+});
+
+test("collect: a grant whose until ends later, or not at all, reads again from the day before the last until's first UTC day, though that lies seven weeks behind the cursor", async () => {
+	const first = await activitiesRun({ since: EVENING });
+	// Reads the history from the 13th under an until that holds back the run (06:30Z) and the ride.
+	const until = "2026-09-14T06:00:00.000Z";
+	const ended = await activitiesRun({ since: MIDNIGHT, until }, first);
+	assert.deepEqual(idsOf(ended, "activities"), []);
+	assert.deepEqual(statesOf(ended), {
+		activities: {
+			next_day: "2026-11-02",
+			floor: "2026-09-13",
+			since_at: MIDNIGHT,
+			until_at: until,
+		},
+	});
+	const fake = fakeGarmin();
+	const open = await activitiesRun({ since: MIDNIGHT }, ended, fake);
+	assert.deepEqual(piecesOf(fake), [
+		["2026-09-13", "2026-10-10"],
+		["2026-10-11", "2026-11-01"],
+	]);
+	assert.deepEqual(idsOf(open, "activities"), ["41000102", "41000101"]);
+	assert.deepEqual(statesOf(open), {
+		activities: {
+			next_day: "2026-11-02",
+			floor: "2026-09-13",
+			since_at: MIDNIGHT,
+		},
+	});
+});
+
+test("collect: history read under an until is read again from the grant's start once the until ends later, not from where it stopped", async () => {
+	// 15:00Z on 10 September, the 11th on the owner's clock: after the until below.
+	const account = () =>
+		fakeGarmin(
+			site((data) => {
+				activityAt(
+					data,
+					41000201,
+					"2026-09-10 15:00:00",
+					"2026-09-11 03:00:00",
+				);
+			}),
+		);
+	const since = "2026-09-01T00:00:00.000Z";
+	const first = await activitiesRun(
+		{ since: "2026-09-16T00:00:00.000Z" },
+		undefined,
+		account(),
+	);
+	const ended = await activitiesRun(
+		{ since, until: "2026-09-10T12:00:00.000Z" },
+		first,
+		account(),
+	);
+	assert.deepEqual(idsOf(ended, "activities"), []);
+	// The history from 31 August, read up to the 11th, is saved part read.
+	assert.deepEqual(
+		(statesOf(ended).activities as { backfill?: unknown }).backfill,
+		{ since: "2026-08-31", next_day: "2026-09-12" },
+	);
+	const open = await activitiesRun({ since }, ended, account());
+	assert.deepEqual(idsOf(open, "activities").toSorted(), [
+		"41000101",
+		"41000102",
+		"41000201",
+	]);
+	assert.deepEqual(statesOf(open), {
+		activities: {
+			next_day: "2026-11-02",
+			floor: "2026-08-31",
+			since_at: since,
+		},
+	});
+});
+
+test("collect: a grant that drops both its bounds reads back to ninety days before the owner's today, and again past where the last until stopped", async () => {
+	const account = () =>
+		fakeGarmin(
+			site((data) => {
+				activityAt(
+					data,
+					41000201,
+					"2026-09-10 15:00:00",
+					"2026-09-11 03:00:00",
+				);
+				activityAt(
+					data,
+					41000202,
+					"2026-09-01 06:00:00",
+					"2026-09-01 18:00:00",
+				);
+				summaryOn(data, "2026-09-01");
+			}),
+		);
+	const streams = ["daily_summaries", "activities"] as const;
+	const first = await collect(account(), {
+		now: NOVEMBER,
+		streams,
+		ranges: {
+			daily_summaries: { since: "2026-09-14", until: "2026-10-01" },
+			activities: { since: EVENING, until: "2026-09-16T00:00:00.000Z" },
+		},
+	});
+	assert.deepEqual(idsOf(first, "daily_summaries"), ["2026-09-16"]);
+	assert.deepEqual(idsOf(first, "activities"), ["41000102"]);
+	const fake = account();
+	const open = await collect(fake, {
+		now: NOVEMBER,
+		streams,
+		state: statesOf(first),
+	});
+	// The 16th lies inside the days already read, and outside the week re-read.
+	assert.deepEqual(idsOf(open, "daily_summaries"), ["2026-09-01"]);
+	assert.deepEqual(idsOf(open, "activities").toSorted(), [
+		"41000101",
+		"41000102",
+		"41000201",
+		"41000202",
+	]);
+	// Ninety days back to and including 1 November.
+	const floor = "2026-08-04";
+	assert.equal(
+		pathsOf(fake, "daily_summaries").map(dayOf).toSorted()[0],
+		floor,
+	);
+	assert.deepEqual(statesOf(open), {
+		daily_summaries: { next_day: "2026-11-02", floor },
+		activities: { next_day: "2026-11-02", floor },
+	});
+});
+
+test("collect: a widening the run cannot reach keeps its floor raised, and the next run reads the days below it", async () => {
+	const first = await activitiesRun({ since: EVENING });
+	// Two windows: the re-read from 4 October takes both.
+	const short = await activitiesRun({ since: MIDNIGHT }, first, fakeGarmin(), {
+		pacing: { maxWindowsPerRun: 2 },
+	});
+	assert.deepEqual(idsOf(short, "activities"), []);
+	assertSkips(short, "source_limit_reached", RETRY, ["activities"]);
+	assert.deepEqual(statesOf(short), {
+		activities: {
+			next_day: "2026-11-02",
+			floor: "2026-09-16",
+			since_at: MIDNIGHT,
+		},
+	});
+	const next = await activitiesRun({ since: MIDNIGHT }, short);
+	assert.deepEqual(idsOf(next, "activities"), ["41000101"]);
+	assert.equal(
+		(statesOf(next).activities as { floor: string }).floor,
+		"2026-09-13",
+	);
+});
+
+test("collect: days a widening reads again come before the kept days, so a full list of kept days that still do not read neither delays nor lets them go", async () => {
+	// A year on: the kept days run from the 16th, the day after the last held back, for 366 days.
+	const now = new Date("2027-09-30T13:30:00.000Z");
+	const fake = fakeGarmin(
+		site((data) => {
+			activityAt(data, 41000401, "2026-10-20 06:00:00", "2026-10-20 19:00:00", {
+				distance: "far",
+			});
+		}),
+	);
+	const h = await collect(fake, {
+		now,
+		streams: ["activities"],
+		ranges: { activities: { since: MIDNIGHT } },
+		state: {
+			activities: {
+				next_day: "2027-10-01",
+				floor: "2026-09-13",
+				since_at: EVENING,
+				retry: [span("2026-09-16", "2027-09-16")],
+				retry_next: "2026-10-14",
+			},
+		},
+	});
+	assert.deepEqual(idsOf(h, "activities"), ["41000101"]);
+	// The kept window from 14 October still does not read, and the cap lets nothing go.
+	assert.deepEqual(progressOf(h), [{ stream: "activities", count: 1 }]);
+	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+	assert.deepEqual(statesOf(h), {
+		activities: {
+			next_day: "2027-10-02",
+			floor: "2026-09-13",
+			since_at: MIDNIGHT,
+			// The forward read let go the kept days it read cleanly.
+			retry: [span("2026-09-16", "2027-09-01")],
+			retry_next: "2026-11-11",
+		},
+	});
 });
 
 // ── Days kept to read again ────────────────────────────────────────────────
@@ -2536,6 +2886,7 @@ test("collect: a history window with a night that does not read is kept whole, t
 		sleep: {
 			next_day: "2026-09-22",
 			floor: "2026-06-09",
+			since_at: "2026-06-10T00:00:00.000Z",
 			retry: [span("2026-06-09", "2026-06-23")],
 		},
 	});
@@ -2938,6 +3289,7 @@ test("collect: a range stream past MAX_RETRY_DAYS lets the oldest kept days go a
 	assert.deepEqual(statesOf(h), {
 		sleep: {
 			...FULL,
+			since_at: "2026-06-25T00:00:00.000Z",
 			retry: [
 				span("2025-06-29", "2026-06-01"),
 				span("2026-08-24", "2026-09-20"),

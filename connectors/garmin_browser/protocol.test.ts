@@ -219,13 +219,22 @@ test(
 		assert.deepEqual(idsIn(run, "activities"), ["41000102"]);
 		// A record outside its grant is dropped, not counted unreadable.
 		assert.deepEqual(noiseOf(run), []);
-		// Each cursor covers only what its grant let it read; sleep and activities read a day early.
+		// Each cursor covers only what its grant let it read; sleep and activities read a day early and
+		// keep their grant's start.
 		assertCursors(run, {
 			daily_summaries: { next_day: "2026-09-16", floor: "2026-06-24" },
-			sleep: { next_day: "2026-09-22", floor: "2026-09-14" },
+			sleep: {
+				next_day: "2026-09-22",
+				floor: "2026-09-14",
+				since_at: "2026-09-15T00:00:00.000Z",
+			},
 			hrv: { next_day: "2026-09-22", floor: "2026-09-15" },
 			training_status: FULL,
-			activities: { next_day: "2026-09-22", floor: "2026-09-13" },
+			activities: {
+				next_day: "2026-09-22",
+				floor: "2026-09-13",
+				since_at: "2026-09-14T12:00:00.000Z",
+			},
 		});
 	},
 );
