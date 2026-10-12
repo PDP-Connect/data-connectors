@@ -287,12 +287,12 @@ test(
 		assert.equal(recordsOf(run).length, 6);
 		// A record outside its grant is dropped, not counted unreadable.
 		assert.deepEqual(noiseOf(run), []);
-		// Each cursor covers only what its own grant let the walk read: cycles stop at until, and
-		// sleeps start two days before their since.
+		// Each cursor covers only what its own grant delivered: cycles stop at until, and sleeps
+		// start at their since.
 		assertEachCursor(run, {
 			cycles: { ...FULL_CURSOR, through: "2026-09-16T00:00:00.000Z" },
 			recoveries: FULL_CURSOR,
-			sleeps: cursorFrom("2026-09-13T00:00:00.000Z"),
+			sleeps: cursorFrom("2026-09-15T00:00:00.000Z"),
 			workouts: FULL_CURSOR,
 		});
 	},
@@ -320,9 +320,10 @@ test(
 	"whoop_browser: a seeded cursor's open_since is read, then written afresh from what the walk finds",
 	SUBPROCESS,
 	async () => {
-		// A floor before the account's start is no reason to start afresh, so a run that kept the
-		// seeded floor read these cursors. The quiet cycle the seed names has since closed, and one
-		// stream's open_since is no instant: neither is carried, and neither makes the cursor unreadable.
+		// A floor before the account's start is no reason to start afresh, so the run resumes these
+		// cursors, each floor narrowed to the account's start. The quiet cycle the seed names has
+		// since closed, and one stream's open_since is no instant: neither is carried, and neither
+		// makes the cursor unreadable.
 		const seeded = { floor: "2026-01-01T00:00:00.000Z", through: NOW };
 		const run = await start(everyStream(), {
 			state: {
@@ -334,7 +335,7 @@ test(
 		});
 		assertSucceeded(run);
 		assert.deepEqual(countsOf(run), COUNTS);
-		assertCursors(run, STREAMS, { ...seeded, open_since: OPEN_SINCE });
+		assertCursors(run, STREAMS, FULL_CURSOR);
 	},
 );
 
@@ -362,7 +363,7 @@ test(
 	async () => {
 		// Both bounds hold the nap (2026-09-15T05:10Z) and the run (2026-09-14T22:00Z). Both sit in
 		// the scored cycle, which began at 2026-09-14T12:40Z, before either bound: the walk reaches
-		// two days before the earliest since to read it, and each stream's floor records its own reach.
+		// two days before the earliest since to read it, and each stream's floor records its own since.
 		const run = await start([
 			{ name: "sleeps", time_range: { since: "2026-09-15T00:00:00.000Z" } },
 			{ name: "workouts", time_range: { since: "2026-09-14T18:00:00.000Z" } },
@@ -372,8 +373,8 @@ test(
 		assert.deepEqual(idsIn(run, "workouts"), [RUN]);
 		assert.deepEqual(noiseOf(run), []);
 		assertEachCursor(run, {
-			sleeps: cursorFrom("2026-09-13T00:00:00.000Z"),
-			workouts: cursorFrom("2026-09-12T18:00:00.000Z"),
+			sleeps: cursorFrom("2026-09-15T00:00:00.000Z"),
+			workouts: cursorFrom("2026-09-14T18:00:00.000Z"),
 		});
 	},
 );
@@ -417,11 +418,7 @@ test(
 		assert.deepEqual(idsIn(run, "sleeps"), [SLEEP.nap, SLEEP.open]);
 		assert.deepEqual(idsIn(run, "workouts"), [RUN]);
 		assert.deepEqual(noiseOf(run), []);
-		assertCursors(run, STREAMS, {
-			floor: "2026-09-12T18:00:00.000Z",
-			through: NOW,
-			open_since: OPEN_SINCE,
-		});
+		assertCursors(run, STREAMS, cursorFrom(since));
 	},
 );
 
@@ -446,13 +443,12 @@ test(
 		// The run starts at workouts' since exactly.
 		assert.deepEqual(idsIn(run, "workouts"), [RUN]);
 		assert.deepEqual(noiseOf(run), []);
-		// Each floor is its own since less two days; recoveries' lies within two days of the
-		// account's start, so its reach stops there.
+		// Each floor is its own since, though the walk reached two days before the earliest.
 		assertEachCursor(run, {
-			cycles: cursorFrom("2026-09-13T18:00:00.000Z"),
-			recoveries: FULL_CURSOR,
-			sleeps: cursorFrom("2026-09-12T18:00:00.000Z"),
-			workouts: cursorFrom("2026-09-12T22:00:00.000Z"),
+			cycles: cursorFrom("2026-09-15T18:00:00.000Z"),
+			recoveries: cursorFrom("2026-08-01T00:00:00.000Z"),
+			sleeps: cursorFrom("2026-09-14T18:00:00.000Z"),
+			workouts: cursorFrom("2026-09-14T22:00:00.000Z"),
 		});
 	},
 );

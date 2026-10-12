@@ -394,8 +394,8 @@ async function fetchJson(
 
 // ── Windows and cursors ────────────────────────────────────────────────────
 /**
- * One cursor per stream, all four written from one walk. `floor` is where the contiguous read
- * began and `through` the end of the last completed window; `open_since`, when present, is the
+ * One cursor per stream, all four written from one walk: every record of the stream that starts in
+ * [floor, through) has been delivered under the stream's grant. `open_since`, when present, is the
  * start of the earliest cycle the walk found still under way, which the next run re-reads even
  * when it lies more than a week back. All RFC 3339 instants.
  */
@@ -447,11 +447,12 @@ export interface StreamPlan {
 }
 
 /**
- * Pure: one stream's plan. It reads afresh from its own grant's start, reached back far enough
- * for a cycle that began before it, or else the account's (a day early, for the time zone), when
- * it has no cursor, on full_refresh, or when that start lies outside what its cursor covers (a
- * grant widened back, or moved past). Otherwise it re-reads the week before its cursor, or back
- * to a cycle the last run found still open, if that is earlier and within a month.
+ * Pure: one stream's plan. Its grant starts delivering at its own start, or the account's (a day
+ * early, for the time zone). It reads afresh from there, reached back far enough for a cycle that
+ * began before it, when it has no cursor, on full_refresh, or when that start lies outside what
+ * its cursor delivered (a grant widened back, or moved past). Otherwise it re-reads the week
+ * before its cursor, or back to a cycle the last run found still open, if that is earlier and
+ * within a month; the cursor keeps only what the grant still covers.
  */
 export function planStream(
 	previous: WindowCursor | null,
@@ -462,24 +463,28 @@ export function planStream(
 	const since = instant(range?.since);
 	const until = instant(range?.until);
 	const history = instant(historyStart) ?? Date.parse(HISTORY_FALLBACK);
-	const target =
-		since === null
-			? history
-			: Math.max(since - CYCLE_REACH_DAYS * DAY_MS, history);
+	const start = since === null ? history : Math.max(since, history);
+	const reach = Math.max(start - CYCLE_REACH_DAYS * DAY_MS, history);
 	const floor = previous ? Date.parse(previous.floor) : Number.NaN;
 	const through = previous ? Date.parse(previous.through) : Number.NaN;
-	if (!previous || fullRefresh || target < floor || target > through) {
-		const start = new Date(target).toISOString();
-		return { from: target, cursor: { floor: start, through: start }, until };
+	if (!previous || fullRefresh || start < floor || start > through) {
+		const at = new Date(start).toISOString();
+		return { from: reach, cursor: { floor: at, through: at }, until };
 	}
 	const open = instant(previous.open_since) ?? Number.POSITIVE_INFINITY;
 	const replay = Math.min(
 		through - OVERLAP_DAYS * DAY_MS,
 		Math.max(open, through - OPEN_CYCLE_REACH_DAYS * DAY_MS),
 	);
+	// A grant whose end moved back holds less than the cursor delivered.
+	const held = Math.max(start, Math.min(through, until ?? through));
 	return {
-		from: Math.max(replay, floor, target),
-		cursor: { ...previous },
+		from: Math.max(replay, reach),
+		cursor: {
+			...previous,
+			floor: new Date(start).toISOString(),
+			through: new Date(held).toISOString(),
+		},
 		until,
 	};
 }
