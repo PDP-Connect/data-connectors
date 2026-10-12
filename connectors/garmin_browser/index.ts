@@ -625,21 +625,53 @@ const dayPrefix = (value: string | undefined): string | undefined => {
 };
 
 /**
+ * For a stream consented by instant, the most days past a record's UTC start day Garmin files it
+ * under, an owner-local day. An activity is filed under the day it started, at most a day on in
+ * UTC+14. A night is filed under the day the owner woke: in UTC+14, two days on for a night from
+ * 23:00Z (13:00 local) that ends after 10:00Z; a third day on would take a night of about 34 hours.
+ * Either can also lie a day before its UTC start day.
+ */
+const FILED_AFTER: Record<"sleep" | "activities", number> = {
+	sleep: 2,
+	activities: 1,
+};
+
+/** Whether instant `a` lies before instant `b`, at the runtime's precision. */
+const isBefore = (a: string, b: string): boolean =>
+	isOutsideTimeRange({ since: b }, a);
+
+/**
+ * The last day a record starting before `at` can be filed under: the UTC day of the last millisecond
+ * before it, plus `after`. Date.parse keeps milliseconds only, so of an `at` with more digits the
+ * millisecond it keeps is itself before `at`.
+ */
+function lastFiledBefore(at: string, after: number): string {
+	const ms = Date.parse(at);
+	return addDays(
+		utcDay(isBefore(new Date(ms).toISOString(), at) ? ms : ms - 1),
+		after,
+	);
+}
+
+/**
  * The days a stream's grant lets it read. A stream consented by day reads the grant's days, as the
- * runtime filters them. One consented by instant files each record under an owner-local day that
- * can lie a day either side of its UTC start, so it reads a day past each edge of the grant's UTC
- * days and keeps only what starts inside the grant (inRange).
+ * runtime filters them. One consented by instant reads from the day before the grant's first UTC
+ * day to the last day a record starting inside it can be filed under (FILED_AFTER), and keeps only
+ * what starts inside the grant (inRange).
  */
 export function grantDays(stream: Stream, range: Range | undefined): DayRange {
 	if (TIME_RANGE_FIELD[stream] === "date") {
 		return { since: dayPrefix(range?.since), until: dayPrefix(range?.until) };
 	}
+	const after = FILED_AFTER[stream as keyof typeof FILED_AFTER];
 	const since = instant(range?.since);
-	const until = instant(range?.until);
+	const until = instant(range?.until) === null ? undefined : range?.until;
 	return {
 		since: since === null ? undefined : addDays(utcDay(since), -1),
-		// The UTC day of the grant's last instant, plus one, as an exclusive end.
-		until: until === null ? undefined : addDays(utcDay(until - 1), 2),
+		until:
+			until === undefined
+				? undefined
+				: addDays(lastFiledBefore(until, after), 1),
 	};
 }
 

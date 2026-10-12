@@ -24,6 +24,7 @@ import {
 	classify,
 	type DayCursor,
 	ensureSession,
+	grantDays,
 	inRange,
 	LOGIN_URL,
 	MAX_RETRY_DAYS,
@@ -913,6 +914,30 @@ test("planDays never reads before the grant's start, though the overlap reaches 
 			"a grant starting before the cursor restarts nothing",
 		);
 	}
+});
+
+test("grantDays reads an instant grant from the day before its first UTC day to the last day a record starting inside it is filed under: two days on for sleep, one for activities", () => {
+	const range = {
+		since: "2026-09-14T23:00:00.000Z",
+		until: "2026-09-15T00:00:00.000Z",
+	};
+	assert.deepEqual(grantDays("sleep", range), {
+		since: "2026-09-13",
+		until: "2026-09-17",
+	});
+	assert.deepEqual(grantDays("activities", range), {
+		since: "2026-09-13",
+		until: "2026-09-16",
+	});
+	// A night starting at 00:00:00.000Z on the 15th lies before this until, and is filed up to the 17th.
+	assert.deepEqual(grantDays("sleep", { until: "2026-09-15T00:00:00.0005Z" }), {
+		since: undefined,
+		until: "2026-09-18",
+	});
+	assert.deepEqual(grantDays("hrv", range), {
+		since: "2026-09-14",
+		until: "2026-09-15",
+	});
 });
 
 test("inRange holds a start to its grant as the runtime does, every fractional digit included", () => {

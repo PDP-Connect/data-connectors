@@ -2221,7 +2221,7 @@ test("collect: a saved cursor whose re-read reaches back past its grant's start 
 	assert.deepEqual(statesOf(h), everyStream(FULL));
 });
 
-test("collect: sleep reads a day past each edge of its grant and keeps only the nights that start inside it, to the instant", async () => {
+test("collect: sleep reads from the day before its grant to two days past its last UTC day, and keeps only the nights that start inside it, to the instant", async () => {
 	const fake = fakeGarmin();
 	const h = await collect(fake, {
 		streams: ["sleep"],
@@ -2232,7 +2232,7 @@ test("collect: sleep reads a day past each edge of its grant and keeps only the 
 			},
 		},
 	});
-	assert.deepEqual(pathsOf(fake, "sleep"), [`${SLEEP}2026-09-13/2026-09-16`]);
+	assert.deepEqual(pathsOf(fake, "sleep"), [`${SLEEP}2026-09-13/2026-09-17`]);
 	// The first night starts at 12:40Z on the 14th, before since; the second inside.
 	assert.deepEqual(idsOf(h, "sleep"), ["2026-09-16"]);
 	assert.deepEqual(
@@ -2241,8 +2241,47 @@ test("collect: sleep reads a day past each edge of its grant and keeps only the 
 		"outside the grant is not unreadable",
 	);
 	assert.deepEqual(statesOf(h), {
-		sleep: { next_day: "2026-09-17", floor: "2026-09-13" },
+		sleep: { next_day: "2026-09-18", floor: "2026-09-13" },
 	});
+});
+
+test("collect: a night in UTC+14 is filed two days past its UTC start, and sleep reads that far past its grant's last UTC day", async () => {
+	// From 23:00Z on the 14th, 13:00 on the 15th in Kiritimati, to 11:00Z on the 15th, 01:00 on the
+	// 16th there: Garmin dates the night the 16th, the day the owner woke.
+	const start = Date.parse("2026-09-14T23:00:00.000Z");
+	const end = Date.parse("2026-09-15T11:00:00.000Z");
+	const fake = fakeGarmin(
+		site((data) => {
+			data.settings = {
+				displayName: "fixture-owner",
+				timeZone: "Pacific/Kiritimati",
+			};
+			data.sleep = [
+				{
+					calendarDate: "2026-09-16",
+					values: {
+						totalSleepTimeInSeconds: 43_200,
+						gmtSleepStartTimeInMillis: start,
+						gmtSleepEndTimeInMillis: end,
+						localSleepStartTimeInMillis: start + 14 * 3_600_000,
+						localSleepEndTimeInMillis: end + 14 * 3_600_000,
+					},
+				},
+			];
+		}),
+	);
+	const h = await collect(fake, {
+		streams: ["sleep"],
+		ranges: {
+			sleep: {
+				since: "2026-09-14T23:00:00.000Z",
+				until: "2026-09-15T00:00:00.000Z",
+			},
+		},
+	});
+	assert.deepEqual(pathsOf(fake, "sleep"), [`${SLEEP}2026-09-13/2026-09-16`]);
+	assert.deepEqual(idsOf(h, "sleep"), ["2026-09-16"]);
+	assert.deepEqual(messagesOf(h, "PROGRESS"), []);
 });
 
 test("collect: a night or an activity starting exactly at its grant's since is kept, and one a millisecond before it is not", async () => {
