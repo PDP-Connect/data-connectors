@@ -539,19 +539,30 @@ export function planStream(
 	};
 }
 
-/** A stretch of the walk: the cycles from `start` to `end`, delivered from `delivery` on to its streams. */
+/**
+ * A stretch of the walk: the cycles from `start` to `end`, delivered from `delivery` on to its
+ * streams. `settled`: every one is delivered to its grant's end, so the stretch re-reads that last
+ * week alone, about nine days and one step back, and draws on no window budget.
+ */
 export interface Stretch {
 	delivery: number;
 	start: number;
 	end: number;
 	plans: StreamPlan[];
+	settled: boolean;
 }
+
+/** Delivered to its grant's end: a run only re-reads its last week. */
+const settledPlan = (plan: StreamPlan): boolean =>
+	plan.until !== null && Date.parse(plan.cursor.through) >= plan.until;
 
 /**
  * Pure: what one run walks. Each stream reads from two days before where it delivers, for the
  * cycle under way there, to its grant's end or `now`. Reads that overlap are one stretch, read
  * once, oldest first, and the gap between two stretches is not read: a grant that ended long ago
- * re-reads only its last week, which WHOOP may still have been scoring when last read.
+ * re-reads only its last week, which WHOOP may still have been scoring when last read. A settled
+ * stream's read joins only other settled ones, so its week is a stretch of its own, outside the
+ * run's window budget, however other reads overlap it.
  */
 export function stretchesOf(
 	plans: readonly StreamPlan[],
@@ -563,18 +574,25 @@ export function stretchesOf(
 			plan,
 			start: Math.max(plan.from - CYCLE_REACH_DAYS * DAY_MS, history),
 			end: Math.min(now, plan.until ?? Number.POSITIVE_INFINITY),
+			settled: settledPlan(plan),
 		}))
 		.filter(({ start, end }) => start < end)
 		.sort((a, b) => a.start - b.start);
 	const stretches: Stretch[] = [];
-	for (const { plan, start, end } of spans) {
+	for (const { plan, start, end, settled } of spans) {
 		const last = stretches.at(-1);
-		if (last && start <= last.end) {
+		if (last && last.settled === settled && start <= last.end) {
 			last.delivery = Math.min(last.delivery, plan.from);
 			last.end = Math.max(last.end, end);
 			last.plans.push(plan);
 		} else {
-			stretches.push({ delivery: plan.from, start, end, plans: [plan] });
+			stretches.push({
+				delivery: plan.from,
+				start,
+				end,
+				plans: [plan],
+				settled,
+			});
 		}
 	}
 	return stretches;
@@ -864,6 +882,7 @@ export async function collectWhoopBrowser(
 			start,
 			end,
 			plans: own,
+			settled,
 		}: Stretch): Promise<Failure | "deferred" | null> => {
 			// What an earlier walk found about the cycle under way where this one starts delivering.
 			const began = own
@@ -877,12 +896,6 @@ export async function collectWhoopBrowser(
 			const starts: number[] = [];
 			let from = start;
 			let stop: Failure | "deferred" | null = null;
-			// Every stream here delivered to its grant's end: the stretch re-reads that last week
-			// alone, so its cost is bounded and it never holds a later stretch back.
-			const settled = own.every(
-				(plan) =>
-					plan.until !== null && Date.parse(plan.cursor.through) >= plan.until,
-			);
 			const spent = windows;
 			while (from < end) {
 				if (!settled && windows - rereads >= p.maxWindowsPerRun) {

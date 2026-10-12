@@ -2390,6 +2390,41 @@ test("collect: a stream whose grant ended long ago reads only its last week, a s
 	}
 });
 
+test("collect: past grants chained into an unbounded stream's read still walk apart, so at one window a run it moves every run", async () => {
+	// Sleeps, recoveries and workouts ended weeks ago, delivered to their ends, their last weeks
+	// overlapping each other and the cycles stream's read; a cycle a day throughout.
+	const day = (n: number): number => NOW.getTime() + n * DAY;
+	const held = Array.from({ length: 64 }, (_, i) =>
+		cycleAt(1_000_003_000 + i, day(i - 60)),
+	);
+	const until = { sleeps: day(-40), recoveries: day(-32), workouts: day(-24) };
+	let state: Record<string, unknown> = {
+		cycles: cursorAt(day(-31), day(-20)),
+		sleeps: cursorAt(LONG_FLOOR, until.sleeps),
+		recoveries: cursorAt(LONG_FLOOR, until.recoveries),
+		workouts: cursorAt(LONG_FLOOR, until.workouts),
+	};
+	for (const now of [NOW, new Date(day(1)), new Date(day(2))]) {
+		const h = await collect(fakeWhoop(serve(held, LONG_BOOTSTRAP)), {
+			ranges: {
+				cycles: { since: iso(day(-31)) },
+				sleeps: { until: iso(until.sleeps) },
+				recoveries: { until: iso(until.recoveries) },
+				workouts: { until: iso(until.workouts) },
+			},
+			pacing: { maxWindowsPerRun: 1 },
+			state,
+			now,
+		});
+		assert.deepEqual(messagesOf(h, "SKIP_RESULT"), [], iso(now.getTime()));
+		assert.deepEqual(
+			(cursorsOf(h) as Record<string, unknown>).cycles,
+			cursorAt(day(-31), now),
+		);
+		state = statesOf(h);
+	}
+});
+
 test("collect: a stretch two streams share delivers from the earlier one, reading the cycle under way there", async () => {
 	const sep = (day: string): number => Date.parse(`2026-09-${day}Z`);
 	const fake = fakeWhoop(
