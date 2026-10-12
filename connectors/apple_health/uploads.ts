@@ -734,16 +734,30 @@ export function exportTooLargeMessage(limits: UploadLimits): string {
 	return `The export inside the uploaded .zip is larger than ${describeBytes(limits.maxExportBytes)}, the most this import reads.`;
 }
 
+/** A reason the zip reader gives as its whole message, such as `unsupported_zip_compression_method:9`. */
+const ZIP_REASON_RE = /^[a-z_]+(:\d+)?$/;
+
 /**
- * Log why an upload could not be read, by its error code alone: an error's
- * message names the path, and the owner is told only what happened.
+ * Why an upload could not be read, as a code: an fs or zlib error's own, the
+ * zip reader's bare reason, or else the error's name. Never a message of any
+ * other shape, which may name a path or an entry in the archive.
  */
+function errorCode(err: unknown): string | null {
+	if (!(err instanceof Error)) {
+		return null;
+	}
+	if ("code" in err && typeof err.code === "string") {
+		return err.code;
+	}
+	return ZIP_REASON_RE.test(err.message) ? err.message : err.name;
+}
+
+/** Log why an upload could not be read, by its code alone; the owner is told only what happened. */
 function logUnreadable(stage: "inspect" | "extract", err: unknown): void {
-	const code =
-		err instanceof Error && "code" in err && typeof err.code === "string"
-			? err.code
-			: null;
-	connectorDiagnostic("apple_health", "upload_unreadable", { stage, code });
+	connectorDiagnostic("apple_health", "upload_unreadable", {
+		stage,
+		code: errorCode(err),
+	});
 }
 
 async function inspectZipCandidate(

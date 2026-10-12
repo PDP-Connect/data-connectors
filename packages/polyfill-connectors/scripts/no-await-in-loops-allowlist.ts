@@ -497,7 +497,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/apple_health/index.test.ts",
-			line: 3447,
+			line: 3481,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "small-XML-entry archive cases: each imported in turn by its own subprocess, whose peak RSS is measured alone",
@@ -525,7 +525,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/apple_health/uploads.ts",
-			line: 974,
+			line: 988,
 			column: 22,
 			category: "shared_mutable_accumulator",
 			note: "resolveUploadedExport(): uploads inspected one at a time against the leading export so far, whose zip descriptor stays open for extraction while every other is closed",

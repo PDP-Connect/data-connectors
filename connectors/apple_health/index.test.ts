@@ -943,6 +943,40 @@ test("a receipt echoes each bound as applied, and a date past year 9999 is no re
 	});
 });
 
+test("a .zip the reader cannot open is logged by the reader's own reason", async () => {
+	// Deflate64, method 9, which the reader does not inflate. Its reason is a
+	// bare token, so it goes to the run log; the owner gets the plain sentence.
+	const zip = buildZip([
+		{
+			name: "apple_health_export/export.xml",
+			data: exportTakenOn("2026-09-01"),
+		},
+	]);
+	for (const [signature, at] of [
+		[0x04_03_4b_50, 8],
+		[0x02_01_4b_50, 10],
+	] as const) {
+		for (let i = 0; i + 4 <= zip.length; i += 1) {
+			if (zip.readUInt32LE(i) === signature) {
+				zip.writeUInt16LE(9, i + at);
+			}
+		}
+	}
+	await withImportDir({}, async (dir) => {
+		await writeFile(join(dir, "export.zip"), zip);
+		const result = await run(dir);
+		const [skip] = messagesOf(result, "SKIP_RESULT");
+		assert.equal(
+			skip?.message,
+			"The uploaded .zip could not be read, so nothing was imported.",
+		);
+		assert.match(
+			result.stderr,
+			/\[apple_health-diagnostic\] upload_unreadable \{"stage":"inspect","code":"unsupported_zip_compression_method:9"\}/,
+		);
+	});
+});
+
 test("an export that ends early is never reported as read completely", async () => {
 	// Its receipts say collection_interrupted; the owner's line must agree.
 	const cut = EXPORT_XML.slice(0, EXPORT_XML.indexOf("</HealthData>"));
