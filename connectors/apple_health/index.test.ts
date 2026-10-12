@@ -538,10 +538,16 @@ test("a clean export beside a newer .zip refused for its size is imported, and e
 						String(r.stream),
 					);
 				}
-				const progress = messagesOf(result, "PROGRESS")
-					.map((m) => String(m.message))
-					.join("\n");
-				assert.match(progress, /a newer upload could not be opened: .*zip64/);
+				assert.ok(
+					messagesOf(result, "PROGRESS").some((m) =>
+						String(m.message).startsWith("A newer .zip among your uploads"),
+					),
+				);
+				assert.match(
+					result.stderr,
+					/\[apple_health-diagnostic\] newer_upload_too_large .*zip64/,
+				);
+				assertUserFacingProgress(result.messages);
 			}),
 		),
 	);
@@ -601,10 +607,16 @@ test("beside a newer .zip refused for its size, a stream with worse news keeps i
 				for (const [stream, reason] of Object.entries(c.reasons)) {
 					assert.equal(receiptOf(result, stream)?.reason, reason, stream);
 				}
-				const progress = messagesOf(result, "PROGRESS")
-					.map((m) => String(m.message))
-					.join("\n");
-				assert.match(progress, /a newer upload could not be opened: .*zip64/);
+				assert.ok(
+					messagesOf(result, "PROGRESS").some((m) =>
+						String(m.message).startsWith("A newer .zip among your uploads"),
+					),
+				);
+				assert.match(
+					result.stderr,
+					/\[apple_health-diagnostic\] newer_upload_too_large .*zip64/,
+				);
+				assertUserFacingProgress(result.messages);
 			}),
 		),
 	);
@@ -683,7 +695,7 @@ test("past the upload limit, the newest uploads are compared and the rest are re
 	});
 });
 
-test("a directory that cannot be listed is named on a progress line", {
+test("a directory that cannot be listed is reported in plain words, without its path", {
 	skip: process.getuid?.() === 0 && "root lists a directory whatever its mode",
 }, async () => {
 	await withImportDir(
@@ -698,13 +710,22 @@ test("a directory that cannot be listed is named on a progress line", {
 					String(m.message),
 				);
 				assert.ok(
-					lines.some(
-						(line) =>
-							line.includes("could not be read") &&
-							line.includes(join(dir, "locked")),
+					lines.includes(
+						"Some folders among your uploads could not be read and were skipped",
 					),
 					lines.join("\n"),
 				);
+				assert.ok(!lines.some((line) => line.includes(dir)));
+				assertUserFacingProgress(result.messages);
+				const diagnostics = result.stderr
+					.split("\n")
+					.filter((l) => l.startsWith("[apple_health-diagnostic]"));
+				assert.ok(
+					diagnostics.includes(
+						'[apple_health-diagnostic] unreadable_directories {"count":1}',
+					),
+				);
+				assert.ok(!diagnostics.some((line) => line.includes(dir)));
 			} finally {
 				await chmod(join(dir, "locked"), 0o755);
 			}

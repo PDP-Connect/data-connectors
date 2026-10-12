@@ -1177,21 +1177,26 @@ runConnector({
 		const skipStream =
 			DATA_STREAMS.find((stream) => requested.has(stream)) ?? DATA_STREAMS[0];
 
-		const unreadableDirectories: string[] = [];
+		let unreadableDirectories = 0;
 		let passedOver = 0;
 		const resolved = await resolveUploadedExport(
 			dir,
 			UPLOAD_LIMITS,
-			(path) => {
-				unreadableDirectories.push(path);
+			() => {
+				unreadableDirectories += 1;
 			},
 			(count) => {
 				passedOver = count;
 			},
 		);
-		if (unreadableDirectories.length > 0) {
+		// Hosts show PROGRESS to the owner as written (§5.9): plain words there,
+		// a count in the run log, and no folder's path in either.
+		if (unreadableDirectories > 0) {
+			connectorDiagnostic("apple_health", "unreadable_directories", {
+				count: unreadableDirectories,
+			});
 			await progress(
-				`Apple Health phase=discover skipped directories that could not be read: ${unreadableDirectories.join(", ")}`,
+				"Some folders among your uploads could not be read and were skipped",
 			);
 		}
 
@@ -1217,7 +1222,7 @@ runConnector({
 		}
 		// A folder among the uploads that could not be listed may hold the
 		// export, so the owner is told of it beside what was found.
-		const unlisted = unreadableDirectories.length > 0;
+		const unlisted = unreadableDirectories > 0;
 		if (resolved.kind === "not_export") {
 			await emitReceipts(empty("source_unreadable"));
 			await emit({
@@ -1250,8 +1255,11 @@ runConnector({
 		}
 		const { path } = resolved;
 		if (resolved.newerTooLarge !== undefined) {
+			connectorDiagnostic("apple_health", "newer_upload_too_large", {
+				message: resolved.newerTooLarge,
+			});
 			await progress(
-				`Apple Health phase=discover reading an older export; a newer upload could not be opened: ${resolved.newerTooLarge}`,
+				"A newer .zip among your uploads could not be opened here, so an older export is being read",
 			);
 		}
 
