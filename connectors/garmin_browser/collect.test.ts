@@ -2605,6 +2605,70 @@ test("collect: a narrower until whose run reads only kept days near it leaves th
 	]);
 });
 
+test("collect: history a grant's until stops short of the floor reads again from where the forward read's re-read starts, each run, so a record that reaches Garmin late still ships", async () => {
+	// 06:00Z on 19 December, synced on 4 January.
+	const late = (synced: boolean) =>
+		fakeGarmin(
+			site((data) => {
+				data.activities = [];
+				if (synced)
+					activityAt(data, 7878, "2026-12-19 06:00:00", "2026-12-19 19:00:00");
+			}),
+		);
+	const first = await activitiesRun(
+		{ since: "2026-12-24T00:00:00.000Z" },
+		undefined,
+		late(false),
+		{ now: new Date("2026-12-30T01:30:00.000Z") },
+	);
+	// Wholly below the floor that start leaves.
+	const grant = {
+		since: "2026-12-16T00:00:00.000Z",
+		until: "2026-12-22T22:00:00.000Z",
+	};
+	const before = await activitiesRun(grant, first, late(false), {
+		now: new Date("2027-01-02T01:30:00.000Z"),
+	});
+	const fake = late(true);
+	const after = await activitiesRun(grant, before, fake, {
+		now: new Date("2027-01-05T01:30:00.000Z"),
+	});
+	assert.deepEqual(piecesOf(fake), [["2026-12-15", "2026-12-23"]]);
+	assert.deepEqual(idsOf(after, "activities"), ["7878"]);
+});
+
+test("collect: daily history an until stopped short of the floor reads its last week again once the until is gone, so a summary that reached Garmin late still ships", async () => {
+	// 14:30 on the owner's clock.
+	const at = (day: string) => new Date(`${day}T01:30:00.000Z`);
+	const run = (
+		range: Range,
+		day: string,
+		synced: boolean,
+		after?: RecordingEmit,
+	) =>
+		collect(
+			fakeGarmin(
+				site((data) => {
+					if (synced) summaryOn(data, "2026-12-19");
+				}),
+			),
+			{
+				now: at(day),
+				streams: ["daily_summaries"],
+				ranges: { daily_summaries: range },
+				state: after ? statesOf(after) : {},
+			},
+		);
+	const first = await run({ since: "2026-12-24" }, "2026-12-24", false);
+	// History from 1 December, which its until stops at the 19th, short of the floor.
+	const ended = { since: "2026-12-01", until: "2026-12-20" };
+	const before = await run(ended, "2026-12-24", false, first);
+	const last = await run(ended, "2026-12-25", false, before);
+	// The summary for the 19th reaches Garmin after that run; then the until goes.
+	const open = await run({ since: "2026-12-01" }, "2026-12-26", true, last);
+	assert.ok(idsOf(open, "daily_summaries").includes("2026-12-19"));
+});
+
 test("collect: a grant starting earlier and ending far behind the cursor keeps its until with the history it read, so the open grant it alternates with does not go back to that until", async () => {
 	const open = { since: "2026-05-01T00:00:00.000Z" };
 	const until = "2026-03-01T00:00:00.000Z";

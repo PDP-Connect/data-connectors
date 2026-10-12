@@ -899,11 +899,16 @@ export function planDays(
 		// History before the floor, back to the grant's start or, with none, INITIAL_DAYS: its own
 		// cursor, so the forward read keeps its place. Where it stopped holds for a later start too.
 		const saved = cursor.backfill;
-		const resume =
+		let resume =
 			saved && saved.since <= start && saved.next_day > start
 				? saved.next_day
 				: start;
 		const to = addDays(floor, -1) < last ? addDays(floor, -1) : last;
+		// History near the cursor reads again, as the forward read does, from `overlap` days before
+		// next_day, for records that reach Garmin late: whether the grant's until stops it short of
+		// the floor or not.
+		const reach = addDays(cursor.next_day as string, -overlap);
+		if (resume > reach) resume = reach < start ? start : reach;
 		if (resume <= to) {
 			segments.push({
 				kind: "backfill",
