@@ -83,7 +83,11 @@ import type {
 	StreamParseArgs,
 	WorkoutRecordOut,
 } from "./types.ts";
-import { resolveUploadedExport, UPLOAD_LIMITS } from "./uploads.ts";
+import {
+	MAX_UPLOADS,
+	resolveUploadedExport,
+	UPLOAD_LIMITS,
+} from "./uploads.ts";
 
 // Streaming buffer size — 64 KB balances memory and syscalls on large exports.
 const READ_BUFFER_SIZE = 65_536;
@@ -1081,6 +1085,7 @@ function outcomeOf(
 	lane: Lane,
 	truncated: boolean,
 	newerTooLarge: boolean,
+	notAllCompared: boolean,
 ): StreamOutcome {
 	const { ref, range } = lane;
 	const emitted = ref.emitted > 0;
@@ -1114,6 +1119,12 @@ function outcomeOf(
 	if (newerTooLarge) {
 		return {
 			reason: "newer_upload_too_large",
+			status: emitted ? "partial" : "empty",
+		};
+	}
+	if (notAllCompared) {
+		return {
+			reason: "uploads_not_all_compared",
 			status: emitted ? "partial" : "empty",
 		};
 	}
@@ -1167,15 +1178,33 @@ runConnector({
 			DATA_STREAMS.find((stream) => requested.has(stream)) ?? DATA_STREAMS[0];
 
 		const unreadableDirectories: string[] = [];
-		const resolved = await resolveUploadedExport(dir, UPLOAD_LIMITS, (path) => {
-			unreadableDirectories.push(path);
-		});
+		let passedOver = 0;
+		const resolved = await resolveUploadedExport(
+			dir,
+			UPLOAD_LIMITS,
+			(path) => {
+				unreadableDirectories.push(path);
+			},
+			(count) => {
+				passedOver = count;
+			},
+		);
 		if (unreadableDirectories.length > 0) {
 			await progress(
 				`Apple Health phase=discover skipped directories that could not be read: ${unreadableDirectories.join(", ")}`,
 			);
 		}
 
+		// Uploads past MAX_UPLOADS were not inspected, and the newest export
+		// may be among them, so the owner is told of them too.
+		const notAllCompared = `Only the ${MAX_UPLOADS} most recently added of your uploads were compared, so a newer export among the others may not have been read.`;
+		if (passedOver > 0) {
+			connectorDiagnostic("apple_health", "uploads_passed_over", {
+				compared: MAX_UPLOADS,
+				passed_over: passedOver,
+			});
+			await progress(notAllCompared);
+		}
 		if (resolved.kind === "failed") {
 			await emitReceipts(empty("export_extraction_failed"));
 			await emit({
@@ -1195,9 +1224,13 @@ runConnector({
 				type: "SKIP_RESULT",
 				stream: skipStream,
 				reason: "source_unreadable",
-				message: unlisted
-					? "That file isn't an Apple Health export we can read. Upload the export.zip your iPhone produced, or the export.xml from inside it. Some folders among your uploads could not be read."
-					: "That file isn't an Apple Health export we can read. Upload the export.zip your iPhone produced, or the export.xml from inside it.",
+				message: [
+					"That file isn't an Apple Health export we can read. Upload the export.zip your iPhone produced, or the export.xml from inside it.",
+					...(unlisted
+						? ["Some folders among your uploads could not be read."]
+						: []),
+					...(passedOver > 0 ? [notAllCompared] : []),
+				].join(" "),
 			});
 			return;
 		}
@@ -1268,7 +1301,7 @@ runConnector({
 		await reportGapSummary(gaps, progress);
 		const newerTooLarge = resolved.newerTooLarge !== undefined;
 		await emitReceipts(
-			(lane) => outcomeOf(lane, truncated, newerTooLarge),
+			(lane) => outcomeOf(lane, truncated, newerTooLarge, passedOver > 0),
 			provenance,
 		);
 	},

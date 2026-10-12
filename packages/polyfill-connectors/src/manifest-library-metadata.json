@@ -64,7 +64,8 @@
 				"collection_interrupted": "Your export file ended earlier than expected, so some records are missing. Take a fresh export on your iPhone and upload the new file.",
 				"records_unreadable": "Some entries in your export couldn't be read and were skipped - everything else imported normally. Importing the same file again won't recover them.",
 				"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have.",
-				"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here."
+				"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here.",
+				"uploads_not_all_compared": "You have more uploads than one import compares, so only the 100 most recently added were checked, and a newer export among the others may not have been read. Remove old exports from your uploads, then import again."
 			}
 		}
 	},

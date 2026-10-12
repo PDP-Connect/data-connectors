@@ -225,6 +225,7 @@ const coverageReasonSchema = z.enum([
 	"records_unreadable",
 	"window_unavailable",
 	"newer_upload_too_large",
+	"uploads_not_all_compared",
 ]);
 
 export const coverageDiagnosticsSchema = z.object({

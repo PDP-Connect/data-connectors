@@ -2812,7 +2812,7 @@
 								"status": {
 									"type": "string",
 									"enum": ["complete", "partial", "empty"],
-									"description": "Whether the covered window matches the requested window. A stream with records is also 'partial', whatever its window, when rows may be missing (collection_interrupted, records_unreadable) or a newer .zip could not be opened (newer_upload_too_large). 'empty' is an ordinary outcome, not a failure. Under a resource list, a record requested by id that cannot be read is not reported on the receipt, since an unreadable row has no id to match against the request; 'complete' and covered_in_full then speak only for the rows that could be read, so a reader that asked for specific ids should check that each one arrived."
+									"description": "Whether the covered window matches the requested window. A stream with records is also 'partial', whatever its window, when rows may be missing (collection_interrupted, records_unreadable) or a newer export may not have been read (newer_upload_too_large, uploads_not_all_compared). 'empty' is an ordinary outcome, not a failure. Under a resource list, a record requested by id that cannot be read is not reported on the receipt, since an unreadable row has no id to match against the request; 'complete' and covered_in_full then speak only for the rows that could be read, so a reader that asked for specific ids should check that each one arrived."
 								},
 								"reason": {
 									"type": "string",
@@ -2825,9 +2825,10 @@
 										"collection_interrupted",
 										"records_unreadable",
 										"window_unavailable",
-										"newer_upload_too_large"
+										"newer_upload_too_large",
+										"uploads_not_all_compared"
 									],
-									"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner and has a reason_display_messages entry. newer_upload_too_large replaces covered_in_full and nothing_in_range on the receipts of an import that read an export beside a newer .zip it could not open, for its size or the number of files it holds, since the export inside that .zip may supersede what was read; a receipt with any other reason keeps that reason.",
+									"description": "Why the covered window ends where it does. Always present, including on success, so a reader branches on the value and never on the field being absent. Each value implies a different next action for the owner and has a reason_display_messages entry. newer_upload_too_large replaces covered_in_full and nothing_in_range on the receipts of an import that read an export beside a newer .zip it could not open, for its size or the number of files it holds, since the export inside that .zip may supersede what was read. uploads_not_all_compared replaces them in the same way when there were more uploads than one import compares, so only the most recently added were inspected and a newer export among the others may not have been read. A receipt with any other reason keeps that reason.",
 									"x_pdpp_role": "primary-title"
 								},
 								"record_count": {
@@ -2923,7 +2924,8 @@
 					"collection_interrupted": "Your export file ended earlier than expected, so some records are missing. Take a fresh export on your iPhone and upload the new file.",
 					"records_unreadable": "Some entries in your export couldn't be read and were skipped - everything else imported normally. Importing the same file again won't recover them.",
 					"window_unavailable": "Your export doesn't reach back as far as the period asked for, so the dates shown are the dates we actually have.",
-					"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here."
+					"newer_upload_too_large": "A newer .zip among your uploads couldn't be opened here, because it is too large or holds too many files, so the export in another of your uploads was imported instead. If you haven't already, unzip that .zip on a computer and, if the export XML inside it is under 8 GB, upload that XML here.",
+					"uploads_not_all_compared": "You have more uploads than one import compares, so only the 100 most recently added were checked, and a newer export among the others may not have been read. Remove old exports from your uploads, then import again."
 				}
 			}
 		},

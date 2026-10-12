@@ -266,6 +266,7 @@ export type AppleHealthCoverageReason =
 	| "covered_in_full"
 	| "export_extraction_failed"
 	| "newer_upload_too_large"
+	| "uploads_not_all_compared"
 	| "nothing_in_range"
 	| "records_unreadable"
 	| "source_unreadable"

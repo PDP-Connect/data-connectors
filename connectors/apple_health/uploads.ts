@@ -122,9 +122,11 @@ const ZIP_EOCD_SEARCH_BYTES = ZIP_EOCD_LENGTH + 0xff_ff;
 // (join(importDir, fileName)) or one level down under its artifact id, and a
 // developer may place an unzipped apple_health_export/ folder at either.
 const MAX_DISCOVERY_DEPTH = 3;
-// Every upload found is inspected, so the count bounds the time spent reading
-// heads and zip directories. An import directory holds one file per upload.
-const MAX_UPLOADS = 100;
+// The uploads inspected, which bounds the time spent reading heads and zip
+// directories. An import directory holds one file per upload. Past this many,
+// the most recently written are inspected and the rest are counted, since
+// the newest export may be among them.
+export const MAX_UPLOADS = 100;
 /**
  * Directories never searched. Apple writes these beside the export inside
  * apple_health_export/, one file per clinical record, ECG or route, and none
@@ -503,6 +505,8 @@ function byName(a: Dirent, b: Dirent): number {
 interface Walk {
 	readonly deeper: string[];
 	readonly onUnreadableDirectory: (dir: string) => void;
+	/** Uploads found past MAX_UPLOADS and not kept. */
+	passedOver: number;
 	/** Real paths already visited: a symlink loop or a second link to one file is walked once. */
 	readonly seen: Set<string>;
 	readonly uploads: Upload[];
@@ -538,17 +542,32 @@ function scanDirectory(dir: string, walk: Walk): void {
 	}
 }
 
+/**
+ * Keep an upload, or, once MAX_UPLOADS are kept, keep it in place of the
+ * least recently written if it was written later, and count the one left out.
+ */
 function addUpload(path: string, mtimeMs: number, walk: Walk): void {
 	const real = realpathOrNull(path);
-	if (
-		real === null ||
-		walk.seen.has(real) ||
-		walk.uploads.length >= MAX_UPLOADS
-	) {
+	if (real === null || walk.seen.has(real)) {
 		return;
 	}
 	walk.seen.add(real);
-	walk.uploads.push({ mtimeMs, path });
+	if (walk.uploads.length < MAX_UPLOADS) {
+		walk.uploads.push({ mtimeMs, path });
+		return;
+	}
+	walk.passedOver += 1;
+	let oldest = 0;
+	let oldestMs = Number.POSITIVE_INFINITY;
+	for (const [index, upload] of walk.uploads.entries()) {
+		if (upload.mtimeMs < oldestMs) {
+			oldest = index;
+			oldestMs = upload.mtimeMs;
+		}
+	}
+	if (mtimeMs > oldestMs) {
+		walk.uploads[oldest] = { mtimeMs, path };
+	}
 }
 
 /**
@@ -556,18 +575,21 @@ function addUpload(path: string, mtimeMs: number, walk: Walk): void {
  * first, so the import directory itself and the folders directly in it
  * (an upload's artifact directory, an unzipped apple_health_export/) are
  * searched before anything deeper. Symlinks are followed, each real path
- * once. The walk is bounded by depth and by the number of uploads found,
+ * once. The walk is bounded by depth and by the number of uploads kept,
  * never by the number of other files it passes; see SKIPPED_DIRECTORIES.
- * A directory that cannot be listed is passed to `onUnreadableDirectory` and
- * skipped.
+ * Past MAX_UPLOADS the most recently written are kept, and the number left
+ * out is passed to `onPassedOver`. A directory that cannot be listed is
+ * passed to `onUnreadableDirectory` and skipped.
  */
 export function findUploads(
 	importDir: string,
 	onUnreadableDirectory: (dir: string) => void = () => undefined,
+	onPassedOver: (count: number) => void = () => undefined,
 ): Upload[] {
 	const walk: Walk = {
 		deeper: [],
 		onUnreadableDirectory,
+		passedOver: 0,
 		seen: new Set(),
 		uploads: [],
 	};
@@ -578,6 +600,9 @@ export function findUploads(
 			scanDirectory(dir, walk);
 		}
 		level = [...walk.deeper];
+	}
+	if (walk.passedOver > 0) {
+		onPassedOver(walk.passedOver);
 	}
 	return walk.uploads;
 }
@@ -899,20 +924,26 @@ function newestFailure(
  * Uploads are inspected one at a time, and only the leading export's zip is
  * held open, so that its directory is read once and its export extracted
  * from the same descriptor. A directory that cannot be listed is passed to
- * `onUnreadableDirectory` and skipped, for the caller to tell the owner of
- * beside what was found. The import folder itself, unlisted, is the outcome,
- * since nothing in it can be found.
+ * `onUnreadableDirectory` and skipped, and the number of uploads left
+ * uninspected past MAX_UPLOADS to `onPassedOver`, for the caller to tell the
+ * owner of beside what was found. The import folder itself, unlisted, is the
+ * outcome, since nothing in it can be found.
  */
 export async function resolveUploadedExport(
 	importDir: string,
 	limits: UploadLimits = UPLOAD_LIMITS,
 	onUnreadableDirectory?: (dir: string) => void,
+	onPassedOver?: (count: number) => void,
 ): Promise<UploadedExport> {
 	let importDirUnlisted = false;
-	const uploads = findUploads(importDir, (dir) => {
-		importDirUnlisted ||= dir === importDir;
-		onUnreadableDirectory?.(dir);
-	});
+	const uploads = findUploads(
+		importDir,
+		(dir) => {
+			importDirUnlisted ||= dir === importDir;
+			onUnreadableDirectory?.(dir);
+		},
+		onPassedOver,
+	);
 	if (importDirUnlisted) {
 		return { kind: "failed", message: UNREADABLE_DIRECTORY_MESSAGE };
 	}

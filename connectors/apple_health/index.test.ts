@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { deflateRawSync } from "node:zlib";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorEntrypoint,
 	manifestPath,
@@ -647,6 +648,39 @@ test("a newer upload that cannot be read is reported, and nothing older is impor
 			}),
 		),
 	);
+});
+
+test("past the upload limit, the newest uploads are compared and the rest are reported", async () => {
+	// Kept in name order, the first hundred older exports would fill the limit
+	// and the newer one, named last, would never be compared: an older export
+	// read with no word of it. The most recently written are kept instead, and
+	// the receipts say that not every upload was compared.
+	await withImportDir({}, async (dir) => {
+		await Promise.all(
+			Array.from({ length: 100 }, (_, i) =>
+				writeAged(
+					join(dir, `a-${String(i).padStart(3, "0")}.xml`),
+					exportTakenOn("2025-09-01"),
+					86_400_000,
+				),
+			),
+		);
+		await writeAged(join(dir, "z-new.xml"), exportTakenOn("2026-09-01"), 0);
+		const result = await run(dir);
+		assert.deepEqual(
+			recordsOf(result, "activity").map((r) => r.exported_at),
+			["2026-09-01T17:00:00.000Z"],
+		);
+		const receipt = receiptOf(result, "activity");
+		assert.equal(receipt?.reason, "uploads_not_all_compared");
+		assert.equal(receipt?.status, "partial");
+		assert.ok(
+			messagesOf(result, "PROGRESS").some((m) =>
+				String(m.message).startsWith("Only the 100 most recently added"),
+			),
+		);
+		assertUserFacingProgress(result.messages);
+	});
 });
 
 test("a directory that cannot be listed is named on a progress line", {
