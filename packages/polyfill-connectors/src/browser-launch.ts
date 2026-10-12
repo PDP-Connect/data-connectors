@@ -844,13 +844,37 @@ export async function connectOverCdpWithRetry<TBrowser>({
  * `unhandledRejection` guard. See `runCdpAttemptWithRaceGuard` and
  * `isCdpAttachSessionRaceError`.
  */
-export function shouldCleanRemoteCdpPageTargets({
-	preserveRemotePagesOnAcquire,
-}: Pick<
-	AcquireIsolatedBrowserOptions,
-	"preserveRemotePagesOnAcquire"
->): boolean {
-	return !preserveRemotePagesOnAcquire;
+export function shouldCleanRemoteCdpPageTargets(
+	options: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire">,
+	env: NodeJS.ProcessEnv = {},
+): boolean {
+	return remoteCdpPageCleanupSkipReason(options, env) === null;
+}
+
+/**
+ * Why the pre-attach page-target cleanup is skipped, or null when it runs.
+ *
+ * - `preserve_remote_pages_on_acquire`: the caller attaches to a browser whose
+ *   pages it does not own.
+ * - `recording_host_fresh_browser`: `PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP=1`. A
+ *   recording host that hands over a browser it just started (a sandbox with
+ *   nothing to clean) sets it, because the cleanup's `/json` calls are
+ *   Node-side fetches the scenario recorder captures as provider traffic,
+ *   and a replay, which launches its own browser, never makes them.
+ */
+export function remoteCdpPageCleanupSkipReason(
+	{
+		preserveRemotePagesOnAcquire,
+	}: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire">,
+	env: NodeJS.ProcessEnv,
+): "preserve_remote_pages_on_acquire" | "recording_host_fresh_browser" | null {
+	if (preserveRemotePagesOnAcquire) {
+		return "preserve_remote_pages_on_acquire";
+	}
+	if (env.PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP === "1") {
+		return "recording_host_fresh_browser";
+	}
+	return null;
 }
 
 async function acquireRemoteCdpBrowser(
@@ -869,7 +893,11 @@ async function acquireRemoteCdpBrowser(
 	process.stderr.write(
 		`[browser-launch] remote CDP attach start profile=${profileName} url=${redactedUrl}\n`,
 	);
-	if (shouldCleanRemoteCdpPageTargets(options)) {
+	const cleanupSkipReason = remoteCdpPageCleanupSkipReason(
+		options,
+		process.env,
+	);
+	if (cleanupSkipReason === null) {
 		// Remote profiles usually persist cookies; stale page targets do not need
 		// to persist. Replace pages before attach so Patchright does not auto-attach
 		// to a wedged renderer, while n.eko Chromium still keeps at least one page alive.
@@ -881,7 +909,7 @@ async function acquireRemoteCdpBrowser(
 		);
 	} else {
 		process.stderr.write(
-			`[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=preserve_remote_pages_on_acquire\n`,
+			`[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=${cleanupSkipReason}\n`,
 		);
 	}
 	const browser = await connectOverCdpWithRetry<Browser>({

@@ -27,6 +27,7 @@ import {
 	isDefinitivelyZeroViewport,
 	redactHarDocument,
 	redactHarFileBestEffort,
+	remoteCdpPageCleanupSkipReason,
 	resolveDeploymentBrowserHeadless,
 	resolvePageTargetWsUrl,
 	runCdpAttemptWithRaceGuard,
@@ -611,6 +612,42 @@ test("shouldCleanRemoteCdpPageTargets skips cleanup only for preserved remote pa
 	);
 	assert.equal(
 		shouldCleanRemoteCdpPageTargets({ preserveRemotePagesOnAcquire: true }),
+		false,
+	);
+});
+
+test("remoteCdpPageCleanupSkipReason names why cleanup is skipped; the env opt-in needs exactly 1", () => {
+	assert.equal(remoteCdpPageCleanupSkipReason({}, {}), null);
+	assert.equal(
+		remoteCdpPageCleanupSkipReason(
+			{},
+			{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: "1" },
+		),
+		"recording_host_fresh_browser",
+	);
+	for (const value of ["", "0", "true", "yes"]) {
+		assert.equal(
+			remoteCdpPageCleanupSkipReason(
+				{},
+				{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: value },
+			),
+			null,
+			`value ${JSON.stringify(value)} must not skip cleanup`,
+		);
+	}
+	// The caller's own preserve option wins and is the reported reason.
+	assert.equal(
+		remoteCdpPageCleanupSkipReason(
+			{ preserveRemotePagesOnAcquire: true },
+			{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: "1" },
+		),
+		"preserve_remote_pages_on_acquire",
+	);
+	assert.equal(
+		shouldCleanRemoteCdpPageTargets(
+			{},
+			{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: "1" },
+		),
 		false,
 	);
 });
