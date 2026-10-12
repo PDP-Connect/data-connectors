@@ -170,16 +170,16 @@ export interface Cycle {
 /** A record's start, where it parses. */
 export type Start = string | undefined;
 
-/** The start of each record a nested list holds, or its cycle's where its own does not parse: none when absent, one when it is not a list. */
-const listStarts = (value: unknown, cycleStart: Start): Start[] =>
+/** The start of each record a nested list holds, where it parses: none when absent, one unplaced when it is not a list. */
+const listStarts = (value: unknown): Start[] =>
 	value === null || value === undefined
 		? []
 		: Array.isArray(value)
 			? value.map((item) => {
 					const [start] = isObj(item) ? interval(item.during) : [DRIFT];
-					return typeof start === "string" ? start : cycleStart;
+					return typeof start === "string" ? start : undefined;
 				})
-			: [cycleStart];
+			: [undefined];
 
 /**
  * What an unreadable element costs each stream: the start of each record recordsFor would have
@@ -200,8 +200,8 @@ function nested(element: unknown): Record<Stream, Start[]> {
 				: isObj(recovery) && !hasMeasure(recoveryMetrics(recovery))
 					? []
 					: [at],
-		sleeps: listStarts(source.sleeps, at),
-		workouts: listStarts(source.workouts, at),
+		sleeps: listStarts(source.sleeps),
+		workouts: listStarts(source.workouts),
 	};
 }
 

@@ -591,10 +591,9 @@ export const cyclesPath = (
 ): string =>
 	`/core-details-bff/v0/cycles/details?apiVersion=7&id=${encodeURIComponent(userId)}&startTime=${iso(start)}&endTime=${iso(end)}&limit=${limit}`;
 
-/** An element that did not parse, keyed so one returned by two padded windows is counted once. */
-/** An element that did not parse: its cycle's start, where that does, and what it cost each stream. */
+/** An element that did not parse: its cycle's start, where that does, and what it cost each stream; keyed so one returned by two padded windows is counted once. */
 type Lost = { key: string; at: Start; lost: Record<Stream, Start[]> };
-/** `unreadable`: the answer held cycles, and not one whose id and start parse. */
+/** `unreadable`: not one cycle of the span parsed, and an element that did not lies in it or cannot be placed. */
 type Window =
 	| {
 			ok: true;
@@ -653,6 +652,9 @@ async function readWindow(
 		for (const element of elements) {
 			const read = readElement(element);
 			if (read.kind === "unreadable") {
+				// One placed outside the span is the window's whose span holds it.
+				const at = instant(read.at);
+				if (at !== null && (at < start || at >= stop)) continue;
 				lost.push({
 					key: JSON.stringify(element) ?? "",
 					at: read.at,
@@ -667,7 +669,7 @@ async function readWindow(
 		}
 		if (elements.length < limit || kept.size === 0) {
 			const cycles = [...kept.values()].sort((a, b) => a.startMs - b.startMs);
-			const unreadable = elements.length > 0 && lost.length === elements.length;
+			const unreadable = kept.size === 0 && lost.length > 0;
 			return { ok: true, end: stop, cycles, lost, unreadable };
 		}
 		if (stop - start <= DAY_MS) {
@@ -769,9 +771,15 @@ export async function collectWhoopBrowser(
 			await p.sleep(p.requestDelayMs);
 			return readWindow(ctx.page, facts.userId, from, to, p);
 		};
+		/** Whether this run delivers a record of `stream` that starts at `startAt`: inside its grant, from where its delivery starts. */
+		const delivers = (stream: Stream, startAt: string): boolean =>
+			inRange(startAt, ranges.get(stream)) &&
+			Date.parse(startAt) >=
+				(plans.get(stream)?.from ?? Number.NEGATIVE_INFINITY);
 		/**
-		 * Whether passing a window of nothing but unreadable cycles passes nothing granted: each is
-		 * placed in time, and every record it holds lies outside its stream's grant.
+		 * Whether passing a window of nothing but unreadable cycles passes nothing this run
+		 * delivers: each is placed in time, and so is every record it holds, none where its
+		 * stream's delivery lies.
 		 */
 		const passable = (window: Window & { ok: true }): boolean =>
 			window.lost.every(
@@ -779,8 +787,7 @@ export async function collectWhoopBrowser(
 					at !== undefined &&
 					streams.every((stream) =>
 						lost[stream].every(
-							(startAt) =>
-								startAt !== undefined && !inRange(startAt, ranges.get(stream)),
+							(startAt) => startAt !== undefined && !delivers(stream, startAt),
 						),
 					),
 			);
@@ -792,10 +799,10 @@ export async function collectWhoopBrowser(
 				if (lostSeen.has(key)) continue;
 				lostSeen.add(key);
 				for (const stream of streams) {
-					const range = ranges.get(stream);
-					// As for a record that does not build: outside its stream's grant, not counted.
+					// As for a record that does not build: counted where this run delivers, or when it
+					// cannot be placed.
 					unreadable[stream] += lost[stream].filter(
-						(startAt) => startAt === undefined || inRange(startAt, range),
+						(startAt) => startAt === undefined || delivers(stream, startAt),
 					).length;
 				}
 			}
@@ -905,14 +912,20 @@ export async function collectWhoopBrowser(
 						for (const built of recordsFor(stream, cycle)) {
 							const startAt =
 								built.kind === "record"
-									? built.record.start_at
-									: (built.startAt ?? cycle.startAt);
+									? String(built.record.start_at)
+									: built.startAt;
 							// Outside the stream's grant: neither emitted nor counted.
-							if (!inRange(startAt, range)) continue;
+							if (startAt !== undefined && !inRange(startAt, range)) continue;
 							const clean =
 								built.kind === "record" &&
 								(await emitClean(ctx, stream, built.record));
-							if (!clean) unreadable[stream] += 1;
+							// Counted where this run delivers, or when it cannot be placed.
+							if (
+								!clean &&
+								(startAt === undefined || delivers(stream, startAt))
+							) {
+								unreadable[stream] += 1;
+							}
 						}
 					}
 				}

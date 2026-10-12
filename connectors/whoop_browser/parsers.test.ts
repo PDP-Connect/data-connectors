@@ -511,7 +511,7 @@ test("readElement gives a cycle its id, start, last update and element", () => {
 	}
 });
 
-test("readElement: an unreadable element gives the start of each record it holds where that parses, else its cycle's", () => {
+test("readElement: an unreadable element gives the start of each record it holds where that parses, and none where it does not", () => {
 	const startsOf = (element: unknown, stream: Stream): Start[] =>
 		recordsFor(stream, cycleOf(element)).map((built) =>
 			built.kind === "record" ? String(built.record.start_at) : undefined,
@@ -531,7 +531,13 @@ test("readElement: an unreadable element gives the start of each record it holds
 	const broken = merged(withPart(element, "cycle", { id: 0 }), {
 		sleeps: [{ during: "soon" }],
 	});
-	assert.deepEqual(startsLostBy(broken).sleeps, startsOf(element, "cycles"));
+	assert.deepEqual(startsLostBy(broken).sleeps, [undefined]);
+	assert.deepEqual(
+		startsLostBy(merged(withPart(element, "cycle", { id: 0 }), { sleeps: {} }))
+			.sleeps,
+		[undefined],
+		"a field that is not a list",
+	);
 	assert.notEqual(main, undefined);
 	assert.deepEqual(startsLostBy(merged(element, { cycle: null })).cycles, [
 		undefined,
