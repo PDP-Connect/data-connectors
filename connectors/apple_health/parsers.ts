@@ -995,7 +995,7 @@ export function tallyUnrecognizedType(
 }
 
 /**
- * Tally, for the progress line, a unit that left a quantity on a DELIVERED
+ * Tally, for the gap summary, a unit that left a quantity on a DELIVERED
  * record null: absent, or one this connector cannot convert. Bounded like
  * the unrecognised-type tally.
  */

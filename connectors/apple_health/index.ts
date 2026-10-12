@@ -543,7 +543,7 @@ async function streamParse({
 			} else {
 				// A MetadataEntry under a Workout, a route, or an element this
 				// connector never publishes. Nothing a reader would have received
-				// was lost, so it goes on the progress line and no receipt.
+				// was lost, so it goes in the gap summary and no receipt.
 				gaps.oversizedOtherSkipped += 1;
 			}
 			pending.clear();
@@ -832,7 +832,7 @@ async function admit(
 	return true;
 }
 
-/** Charge an emitted element's gaps to its stream's receipt and the progress line. */
+/** Charge an emitted element's gaps to its stream's receipt and the gap summary. */
 function settleEmitted(
 	el: AppleHealthElement,
 	ref: StreamRef,
@@ -869,7 +869,7 @@ function settleEmitted(
 
 /**
  * An element that was not emitted costs no receipt anything. A child dropped
- * as oversized from it stays visible on the progress line as out of scope.
+ * as oversized from it stays visible in the gap summary as out of scope.
  */
 function settleNotEmitted(
 	el: AppleHealthElement,

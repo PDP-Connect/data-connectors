@@ -20,8 +20,8 @@
  *
  * A second import must re-send every record under the same id. No cursor is
  * saved, so nothing an earlier import persisted can exclude a record from a
- * later one; the streams are mutable_state and the id is a hash of published
- * fields, so a repeat is an upsert rather than a duplicate.
+ * later one; the streams are mutable_state and the id is a hash of the
+ * stream's required fields, so a repeat is an upsert rather than a duplicate.
  *
  * Nothing that identifies a person may leave the connector. That is asserted
  * against the emitted protocol output rather than against the schema, because
@@ -1096,8 +1096,8 @@ test("a later, larger export delivers late-synced and backfilled records", async
 test("the requested time range bounds what is emitted and what the receipt counts", async () => {
 	await withImportDir({ "export.xml": EXPORT_XML }, async (dir) => {
 		// The 5 June records only; the 6 June sleep stages fall outside.
-		// `until` is exclusive and both bounds truncate to a date prefix, matching
-		// isOutsideTimeRange in connector-runtime.ts.
+		// Bounds are instants, `since` inclusive and `until` exclusive, as the
+		// runtime's isOutsideTimeRange applies them.
 		const result = await run(dir, {
 			timeRange: {
 				since: "2024-06-05T00:00:00.000Z",
@@ -2546,7 +2546,7 @@ test("each stream's receipt reflects that stream, not the run", async () => {
 	});
 });
 
-test("the progress line names a bounded number of unconvertible units and counts the rest", async () => {
+test("the gap summary names a bounded number of unconvertible units and counts the rest", async () => {
 	const workouts = Array.from(
 		{ length: 25 },
 		(_, i) =>

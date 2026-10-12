@@ -106,7 +106,12 @@ export interface AppleHealthProvenance {
 	exported_at: string | null;
 }
 
-/** Tally of real-format surface the connector saw but could not (or chose not to) turn into an emitted field. Reported honestly, never silently dropped. */
+/**
+ * Tally of real-format surface the connector saw but could not (or chose not
+ * to) turn into an emitted field. Reported honestly, never silently dropped:
+ * the gap summary (reportGapSummary in index.ts) gives the owner one plain
+ * line on PROGRESS, and the gap_summary diagnostic the names and counts.
+ */
 export interface AppleHealthGapCounts {
 	/**
 	 * Records dropped because a record with the same id had already been seen
@@ -116,11 +121,11 @@ export interface AppleHealthGapCounts {
 	 * and the receipt description state the same identity.
 	 */
 	duplicatesDiscarded: number;
-	/** Emitted records whose value attribute was blank, published as null. Progress line only; the receipt names "value". */
+	/** Emitted records whose value attribute was blank, published as null. Gap summary only; the receipt names "value". */
 	emptyValues: number;
 	/**
 	 * Elements of any kind whose attributes carried a numeric character
-	 * reference that names no XML character, as seen. Progress line only; a
+	 * reference that names no XML character, as seen. Gap summary only; a
 	 * Record or Workout the reader would have received is also charged to its
 	 * stream's receipt as unreadable.
 	 */
@@ -129,21 +134,21 @@ export interface AppleHealthGapCounts {
 	recordsMissingStartDate: number;
 	/**
 	 * Delivered records whose `type` the area table does not list, by type,
-	 * for at most MAX_NAMED_PER_TALLY distinct types. Progress line only.
+	 * for at most MAX_NAMED_PER_TALLY distinct types. Gap summary only.
 	 */
 	unrecognizedRecordTypes: Map<string, number>;
-	/** Delivered records of further unlisted types, once that many are named. Progress line only. */
+	/** Delivered records of further unlisted types, once that many are named. Gap summary only. */
 	unrecognizedRecordsUnnamed: number;
 	/**
 	 * Quantities on emitted records left null because the export stated no
 	 * unit or one this connector does not know how to convert. Keyed by the
-	 * unit string as the export wrote it. Progress line only; the receipt names
+	 * unit string as the export wrote it. Gap summary only; the receipt names
 	 * the affected fields. Nulling one field is deliberate: labelling a value
 	 * with a unit it is not in would be silently wrong, which is worse than
 	 * absent.
 	 */
 	unrecognizedUnits: Map<string, number>;
-	/** Such quantities whose unit is beyond the named ones. Progress line only. */
+	/** Such quantities whose unit is beyond the named ones. Gap summary only. */
 	unrecognizedUnitsUnnamed: number;
 	/** WorkoutRoute elements (GPS route data nested under a Workout) seen but not captured — deliberately excluded, never parsed. */
 	workoutRoutesUncaptured: number;
@@ -172,7 +177,7 @@ export interface AppleHealthGapCounts {
 	oversizedWorkoutEventsSkipped: number;
 	/** A WorkoutStatistics under an emitted Workout, which still emits, minus that statistic. */
 	oversizedWorkoutStatisticsSkipped: number;
-	/** Anything else, including a MetadataEntry under a Workout, of which nothing is published. Progress line only. */
+	/** Anything else, including a MetadataEntry under a Workout, of which nothing is published. Gap summary only. */
 	oversizedOtherSkipped: number;
 	/**
 	 * A Record or Workout dropped as oversized that the reader would never have
@@ -180,14 +185,14 @@ export interface AppleHealthGapCounts {
 	 * the requested window, or that cannot be matched to a requested record id
 	 * because it has none; or a child dropped from a parent that was not
 	 * emitted. Ordinary records are range-filtered before receipt accounting;
-	 * this is the same filter applied to a drop. Progress line only, because
+	 * this is the same filter applied to a drop. Gap summary only, because
 	 * the requested window lost nothing; charging it would degrade a fully
 	 * covered window because of a drop dated years outside it.
 	 */
 	oversizedOutOfScopeSkipped: number;
 	/**
 	 * WorkoutEvent children beyond the per-workout cap on emitted workouts,
-	 * for the progress line. The receipt of the stream that emitted the
+	 * for the gap summary. The receipt of the stream that emitted the
 	 * workout names "events" under fields_unavailable, so the owner-facing
 	 * promise of "up to N markers" is checkable rather than a silent slice.
 	 */

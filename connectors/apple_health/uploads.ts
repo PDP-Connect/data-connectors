@@ -576,8 +576,8 @@ function addUpload(path: string, mtimeMs: number, walk: Walk): void {
  * first, so the import directory itself and the folders directly in it
  * (an upload's artifact directory, an unzipped apple_health_export/) are
  * searched before anything deeper. Symlinks are followed, each real path
- * once. The walk is bounded by depth and by the number of uploads kept,
- * never by the number of other files it passes; see SKIPPED_DIRECTORIES.
+ * once. The walk is bounded by depth, and inspection by MAX_UPLOADS, never
+ * by the number of other files it passes; see SKIPPED_DIRECTORIES.
  * Past MAX_UPLOADS the most recently written are kept, and the number left
  * out is passed to `onPassedOver`. A directory that cannot be listed is
  * passed to `onUnreadableDirectory` and skipped.
