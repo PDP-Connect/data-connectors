@@ -33,7 +33,8 @@
  * PROGRESS line is owner-facing plain words. Every diagnostic
  * line (connector-diagnostic.ts, on stderr) names the stream, a family's
  * fixed key, fixed reason and status tokens and schema field names, and
- * gives counts and dates. An error is reported by its code alone.
+ * gives counts, dates and the requested bounds. An error is reported by its
+ * code alone.
  */
 
 import { closeSync, fstatSync, mkdtempSync, openSync } from "node:fs";
@@ -49,6 +50,8 @@ import {
 import {
 	type ConsentTimeField,
 	isOutsideTimeRange,
+	parseFullDate,
+	parseIsoInstant,
 } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	type ExportInspection,
@@ -82,7 +85,6 @@ import {
 	type Built,
 	buildExercise,
 	buildSleepLog,
-	calendarDate,
 	countText,
 	type KeyedRow,
 	measureText,
@@ -334,14 +336,28 @@ function isOutsideWindow(
 
 /**
  * A requested bound as the coverage line states it: `none` when no bound was
- * requested, the date its first ten characters name, or `unparsed` when they
- * name no real date. The line never echoes a bound.
+ * requested, the bound as the runtime applies it when it is of the field's
+ * type, or `unparsed` when it is not. An activities bound is an instant,
+ * stated in UTC with every fractional digit, so a bound's own offset is
+ * never echoed; a daily bound is a full-date. The runtime withholds a stream
+ * whose bound is not of its field's type before collection, so only a
+ * hand-built context gets `unparsed`.
  */
-function windowBound(bound: string | undefined): string {
+function windowBound(stream: string, bound: string | undefined): string {
 	if (bound === undefined) {
 		return "none";
 	}
-	return calendarDate(bound.slice(0, 10)) ?? "unparsed";
+	if (consentTimeField(stream).format === "date") {
+		return parseFullDate(bound) ?? "unparsed";
+	}
+	const instant = parseIsoInstant(bound);
+	if (instant === null) {
+		return "unparsed";
+	}
+	const second = new Date(instant.second).toISOString().slice(0, 19);
+	return instant.fraction === ""
+		? `${second}Z`
+		: `${second}.${instant.fraction}Z`;
 }
 
 function timeGateFailure(): Error {
@@ -833,8 +849,9 @@ export function coverageMessage(
  * Ends a stream's report: one PROGRESS line in plain words, with the records
  * delivered as `count`, and one `coverage` diagnostic with its status and
  * reason, the fields the export never carried and those it could not read,
- * and the requested and covered windows as dates. Only fixed tokens, schema
- * field names, counts and dates: never a name, a zone or a value.
+ * the requested window as the runtime applies it and the covered window as
+ * dates. Only fixed tokens, schema field names, counts, dates and the
+ * requested bounds: never a name, a zone or a value.
  */
 async function emitCoverage(
 	ctx: CollectContext,
@@ -850,8 +867,8 @@ async function emitCoverage(
 		delivered: coverage.delivered,
 		fields_unavailable: coverage.fieldsUnavailable.join(",") || "none",
 		fields_unreadable: coverage.fieldsUnreadable.join(",") || "none",
-		window_requested_from: windowBound(range?.since),
-		window_requested_to: windowBound(range?.until),
+		window_requested_from: windowBound(stream, range?.since),
+		window_requested_to: windowBound(stream, range?.until),
 		window_covered_from: coverage.coveredFrom ?? "none",
 		window_covered_to: coverage.coveredTo ?? "none",
 	});

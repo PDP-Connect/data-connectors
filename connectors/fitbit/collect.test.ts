@@ -199,6 +199,53 @@ test("the window agrees with the runtime's gate at both bounds of a UTC start", 
 	}
 });
 
+test("a bound inside a day holds at its instant, read strictly as the runtime reads it", async () => {
+	// E1 starts 2026-03-13T23:00:00Z. Cases from review/pr-300-suggested-fixes.
+	for (const [range, kept] of [
+		[{ since: "2026-03-13T23:30:00Z" }, false],
+		[{ since: "2026-03-13T23:00:00Z" }, true],
+		[{ since: "2026-03-13T12:00:00-12:00" }, false],
+		[{ until: "2026-03-13T23:00:00Z" }, false],
+		// Finer than a millisecond: Date.parse alone would read these as 23:00.
+		[{ since: "2026-03-13T23:00:00.0001Z" }, false],
+		[{ since: "2026-03-13T23:00:00.0000Z" }, true],
+		[{ since: "2026-03-13t23:00:00.0001z" }, false],
+		[{ since: "2026-03-13T22:00:00.0001-01:00" }, false],
+		[{ since: "2026-03-13T22:00:00-01:00" }, true],
+		[{ since: "0001-01-01T00:00:00Z" }, true],
+		// Not an RFC 3339 date-time with an offset: nothing is kept, and a
+		// bound is never read by its date.
+		[{ since: "2026-03-13T23:00:00,0001Z" }, false],
+		[{ since: "2026-03-13 23:00:00Z" }, false],
+		[{ since: "2026-03-13T22:59:60Z" }, false],
+		[{ since: "2026-03-13T23:00Z" }, false],
+		[{ since: "2026-03-13" }, false],
+		[{ since: "2026-02-30T00:00:00Z" }, false],
+		[{ until: "garbage" }, false],
+	] as const) {
+		const { ctx, records } = fakeContext([
+			{ name: "activities", time_range: range },
+		]);
+		const collector = new StreamCollector(ctx, "activities");
+		await collector.take(builtExercise());
+		assert.equal(records.length, kept ? 1 : 0, JSON.stringify(range));
+		assert.equal(collector.tally.outsideWindow, kept ? 0 : 1);
+	}
+});
+
+test("a runtime that reads a bound by its date, as before #217, stops the run", async () => {
+	// The date rule keeps E1 (2026-03-13T23:00:00Z) for a since of 23:30 that day.
+	const since = "2026-03-13T23:30:00Z";
+	const { ctx, records } = fakeContext(
+		[{ name: "activities", time_range: { since } }],
+		(_stream, data) =>
+			String(data.start_time).slice(0, 10) >= since.slice(0, 10),
+	);
+	const collector = new StreamCollector(ctx, "activities");
+	await assertTimeGateFailure(collector.take(builtExercise()));
+	assert.deepEqual(records, []);
+});
+
 test("an unreadable row with a readable id is checked against the runtime's gate too", async () => {
 	// A sleep log whose date cannot be read: its id goes to the runtime alone.
 	const [log] = canonicalSleepLogs();

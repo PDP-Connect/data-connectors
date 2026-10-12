@@ -150,8 +150,10 @@ const COVERAGE_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 const DAY = String.raw`\d{4}-\d{2}-\d{2}`;
+/** A UTC instant, as an activities bound is stated: never with an offset. */
+const INSTANT = String.raw`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z`;
 const FIELD_LIST = "none|[a-z_]+(?:,[a-z_]+)*";
-/** A coverage line's whole shape: fixed tokens, field names, counts and dates, and nothing else. */
+/** A coverage line's whole shape: fixed tokens, field names, counts, dates and the requested bounds, and nothing else. */
 const COVERAGE_LINE_RE = new RegExp(
 	`^${[
 		"coverage stream=(?<stream>activities|daily_summaries|sleep)",
@@ -160,8 +162,8 @@ const COVERAGE_LINE_RE = new RegExp(
 		String.raw`delivered=(?<delivered>\d+)`,
 		`fields_unavailable=(?<unavailable>${FIELD_LIST})`,
 		`fields_unreadable=(?<unreadable>${FIELD_LIST})`,
-		`window_requested_from=(?<requestedFrom>none|unparsed|${DAY})`,
-		`window_requested_to=(?<requestedTo>none|unparsed|${DAY})`,
+		`window_requested_from=(?<requestedFrom>none|unparsed|${INSTANT}|${DAY})`,
+		`window_requested_to=(?<requestedTo>none|unparsed|${INSTANT}|${DAY})`,
 		`window_covered_from=(?<coveredFrom>none|${DAY})`,
 		`window_covered_to=(?<coveredTo>none|${DAY})`,
 	].join(" ")}$`,
@@ -1542,7 +1544,7 @@ test("#17 fields_unavailable names what no row carried, whatever the window", as
 
 // ─── Windows, filters and the choice of upload ───────────────────────────
 
-test("#18 a window is applied to the exercise's UTC start and stated as dates", async () => {
+test("#18 a window is applied to the exercise's UTC start and stated as requested", async () => {
 	const outcome = await run(uploaded(), {
 		timeRanges: {
 			activities: {
@@ -1561,7 +1563,7 @@ test("#18 a window is applied to the exercise's UTC start and stated as dates", 
 	);
 	assert.equal(
 		outcome.coverage("activities").text,
-		"coverage stream=activities status=complete reason=covered_in_full delivered=1 fields_unavailable=none fields_unreadable=none window_requested_from=2026-03-16 window_requested_to=2026-03-17 window_covered_from=2026-03-16 window_covered_to=2026-03-16",
+		"coverage stream=activities status=complete reason=covered_in_full delivered=1 fields_unavailable=none fields_unreadable=none window_requested_from=2026-03-16T00:00:00Z window_requested_to=2026-03-17T00:00:00Z window_covered_from=2026-03-16 window_covered_to=2026-03-16",
 	);
 	assert.equal(outcome.progressDone("activities").outside_window, 3);
 	// A stream without a window states none.
@@ -1570,6 +1572,54 @@ test("#18 a window is applied to the exercise's UTC start and stated as dates", 
 	assert.equal(outcome.records("sleep").length, 3);
 	assert.equal(outcome.coverage("sleep").window_requested_from, "2026-03-14");
 	assert.equal(outcome.coverage("sleep").window_covered_from, "2026-03-14");
+});
+
+test("#18b a since inside a day is applied at its instant, not the day's start", async () => {
+	// 21000000002 starts 2026-03-15T06:10:00Z, before since on since's day.
+	const outcome = await run(uploaded(), {
+		streams: ["activities"],
+		timeRanges: {
+			activities: {
+				since: "2026-03-15T12:00:00Z",
+				until: "2026-03-16T00:00:00Z",
+			},
+		},
+	});
+	assert.deepEqual(outcome.records("activities"), []);
+	assert.equal(outcome.progressDone("activities").outside_window, 4);
+	const coverage = outcome.coverage("activities");
+	assert.equal(coverage.window_requested_from, "2026-03-15T12:00:00Z");
+	assert.equal(coverage.window_requested_to, "2026-03-16T00:00:00Z");
+});
+
+test("#18c an until inside a day keeps a start before it on that day, at its instant across offsets", async () => {
+	// 21000000003 starts 2026-03-16T08:00:00Z. The line states each bound in
+	// UTC, every fractional digit kept, and never the bound's own offset.
+	for (const [until, kept, stated] of [
+		["2026-03-16T12:00:00Z", ["21000000003"], "2026-03-16T12:00:00Z"],
+		[
+			"2026-03-16T08:00:00.000001Z",
+			["21000000003"],
+			"2026-03-16T08:00:00.000001Z",
+		],
+		// 08:00 UTC: until is exclusive.
+		["2026-03-16T09:00:00+01:00", [], "2026-03-16T08:00:00Z"],
+	] as const) {
+		const outcome = await run(uploaded(), {
+			streams: ["activities"],
+			timeRanges: { activities: { since: "2026-03-16T00:00:00Z", until } },
+		});
+		assert.deepEqual(
+			outcome.records("activities").map((r) => r.id),
+			kept,
+			until,
+		);
+		assert.equal(
+			outcome.coverage("activities").window_requested_to,
+			stated,
+			until,
+		);
+	}
 });
 
 test("#19 a resource filter delivers and counts only the ids requested", async () => {
