@@ -464,7 +464,7 @@ function readUnderWay(value: unknown): UnderWay | null {
 }
 
 /** When the cycle under way at `at` began, as a hint gives it: null when none had begun, undefined when the hint does not say. */
-function beganBy(
+export function beganBy(
 	hint: UnderWay | undefined,
 	at: number,
 ): number | null | undefined {

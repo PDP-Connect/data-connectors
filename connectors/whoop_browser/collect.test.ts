@@ -20,6 +20,7 @@ import {
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	API_BASE,
+	beganBy,
 	collectWhoopBrowser,
 	HISTORY_FALLBACK,
 	ORIGIN,
@@ -1412,6 +1413,19 @@ test("collect: a step back that fails skips the run with its cursor unmoved", as
 	assert.deepEqual(fake.visits, [], "a step back reads the page it is on");
 });
 
+test("collect: a step back reads the page it is on: one that has left the app is an interruption, not a navigation", async () => {
+	const { held, ranges, since, streams } = strapOff();
+	const fake = fakeWhoop((path, before) =>
+		isCycles(path) && before === 1
+			? { kind: "wrong_origin", origin: "https://www.whoop.com" }
+			: serve(held)(path, before),
+	);
+	const h = await collect(fake, { ranges, streams });
+	assert.deepEqual(fake.visits, []);
+	assertSkips(h, "collection_interrupted", RETRY, streams);
+	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, since) });
+});
+
 /**
  * The review's second case: a cycle from August 5 to 25 holds a workout at 2026-08-21T01:00Z,
  * after a workouts grant's end on August 20.
@@ -1971,6 +1985,19 @@ const LONG_BOOTSTRAP = bootstrapWith((b) => {
 const LONG_FLOOR = Date.parse("2024-12-31T00:00:00.000Z");
 
 // ── The cycle under way, carried to the next run ───────────────────────────
+test("collect: a hint speaks for the instants from its cycle's start to its at, and for none after", () => {
+	const began = NOW.getTime() - 10 * DAY;
+	const hint = { at: iso(NOW.getTime()), began: iso(began) };
+	assert.equal(beganBy(hint, NOW.getTime()), began);
+	assert.equal(beganBy(hint, began), began);
+	assert.equal(beganBy(hint, NOW.getTime() + 1), undefined, "after its at");
+	assert.equal(beganBy(hint, began - 1), undefined, "before its cycle");
+	const none = { at: hint.at, began: null };
+	assert.equal(beganBy(none, NOW.getTime()), null);
+	assert.equal(beganBy(none, NOW.getTime() + 1), undefined, "after its at");
+	assert.equal(beganBy(undefined, NOW.getTime()), undefined);
+});
+
 const hintOf = (h: RecordingEmit, stream: Stream): unknown =>
 	(statesOf(h)[stream] as { under_way?: unknown }).under_way;
 /** A first run's windows over the long account: from its start to NOW. */
