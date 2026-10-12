@@ -603,18 +603,25 @@ function readSpan(value: unknown): Window[] {
  * A saved cursor, kept only where its days and its grant's instants parse and agree: anything else
  * starts afresh, but a bad retry span is dropped alone, and `retry_next` is kept only beside a
  * retry list. An instant that does not parse is not dropped alone: read as an open end, it would
- * claim every record past it delivered.
+ * claim every record past it delivered, so the cursor starts afresh, keeping only its retry list.
  */
 export function readCursor(value: unknown): DayCursor {
 	if (typeof value !== "object" || value === null) return {};
 	const { next_day, floor, since_at, until_at, backfill, retry, retry_next } =
 		value as Record<string, unknown>;
 	if (!isDay(next_day) || !isDay(floor) || floor > next_day) return {};
+	const kept: DayCursor = {};
+	const spans = Array.isArray(retry) ? retry.flatMap(readSpan) : [];
+	const list = normaliseRetry(spans).retry;
+	if (list.length > 0) {
+		kept.retry = list;
+		if (isDay(retry_next)) kept.retry_next = retry_next;
+	}
 	const edges = [since_at, until_at];
 	if (edges.some((at) => at !== undefined && parseIsoInstant(at) === null)) {
-		return {};
+		return kept;
 	}
-	const cursor: DayCursor = { next_day, floor };
+	const cursor: DayCursor = { next_day, floor, ...kept };
 	if (typeof since_at === "string") cursor.since_at = since_at;
 	if (typeof until_at === "string") cursor.until_at = until_at;
 	if (typeof backfill === "object" && backfill !== null) {
@@ -622,12 +629,6 @@ export function readCursor(value: unknown): DayCursor {
 		if (isDay(since) && isDay(resume) && since <= resume && resume <= floor) {
 			cursor.backfill = { since, next_day: resume };
 		}
-	}
-	const spans = Array.isArray(retry) ? retry.flatMap(readSpan) : [];
-	const kept = normaliseRetry(spans).retry;
-	if (kept.length > 0) {
-		cursor.retry = kept;
-		if (isDay(retry_next)) cursor.retry_next = retry_next;
 	}
 	return cursor;
 }
@@ -699,12 +700,12 @@ export function grantDays(stream: Stream, range: Range | undefined): DayRange {
 	const after = FILED_AFTER[stream as keyof typeof FILED_AFTER];
 	const since = instant(range?.since);
 	const until = instant(range?.until) === null ? undefined : range?.until;
+	const end =
+		until === undefined ? undefined : addDays(lastFiledBefore(until, after), 1);
 	return {
 		since: since === null ? undefined : addDays(utcDay(since), -1),
-		until:
-			until === undefined
-				? undefined
-				: addDays(lastFiledBefore(until, after), 1),
+		// An end past the last day RFC 3339 can write bounds no day read; the cursor keeps the instant.
+		until: end !== undefined && isDay(end) ? end : undefined,
 		since_at: since === null ? undefined : range?.since,
 		until_at: until,
 		filed_after: after,
@@ -806,11 +807,14 @@ export function planDays(
 ): { cursor: DayCursor; segments: Segment[]; held: Window[] } {
 	const { since, until } = grant;
 	const last = until && addDays(until, -1) < today ? addDays(until, -1) : today;
-	// Restart on full_refresh, on a first run, and when the grant starts past the cursor.
+	const tomorrow = addDays(today, 1);
+	// Restart on full_refresh, on a first run, when the grant starts past the cursor, and when the
+	// cursor's floor lies past the owner's today.
 	const fresh =
 		fullRefresh ||
 		!prev.next_day ||
 		!prev.floor ||
+		prev.floor > tomorrow ||
 		(since !== undefined && since > prev.next_day);
 	const start = since ?? addDays(today, 1 - INITIAL_DAYS);
 	const cursor: DayCursor = fresh
@@ -822,6 +826,9 @@ export function planDays(
 		cursor.retry = structuredClone(prev.retry);
 		if (prev.retry_next) cursor.retry_next = prev.retry_next;
 	}
+	// A cursor saved under a clock ahead of the owner's reads on from their today.
+	if (!fresh && (cursor.next_day as string) > tomorrow)
+		cursor.next_day = tomorrow;
 	const claim = { since_at: cursor.since_at, until_at: cursor.until_at };
 	if (!fresh) widen(cursor, grant);
 	if (grant.since_at === undefined) delete cursor.since_at;
@@ -834,8 +841,12 @@ export function planDays(
 	if (from < floor) from = floor;
 	// Never read outside the grant.
 	if (since && since > from) from = since;
-	if (from <= last)
+	if (from <= last) {
+		// Past next_day only when the grant starts past it: the days between hold nothing of the
+		// grant, and its start, read here, becomes the cursor's.
+		if ((cursor.next_day as string) < from) cursor.next_day = from;
 		segments.push({ kind: "forward", from, to: last, since: floor });
+	}
 	if (!fresh && start < floor) {
 		// History before the floor, back to the grant's start or, with none, INITIAL_DAYS: its own
 		// cursor, so the forward read keeps its place. Where it stopped holds for a later start too.

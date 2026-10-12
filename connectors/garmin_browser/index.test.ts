@@ -932,6 +932,7 @@ const EVENING: DayCursor = {
 	floor: "2026-09-13",
 	since_at: "2026-09-14T18:00:00.000Z",
 };
+const MIDNIGHT_14 = "2026-09-14T00:00:00.000Z";
 /** An activities grant, in days as grantDays gives it. */
 const activities = (since?: string, until?: string): DayRange => {
 	const range = { ...(since ? { since } : {}), ...(until ? { until } : {}) };
@@ -1055,6 +1056,48 @@ test("planDays: a grant no wider than the cursor's, to the instant, moves neithe
 	assert.deepEqual(cursor, { ...young, since_at: since, until_at: until });
 });
 
+test("planDays reads on from the owner's tomorrow for a cursor saved ahead of it, and starts afresh from a floor past it", () => {
+	const ahead = plan(
+		{ next_day: "2099-01-01", floor: "2026-09-13" },
+		activities(MIDNIGHT_14),
+	);
+	assert.equal(ahead.cursor.next_day, "2026-11-02");
+	assert.equal(ahead.segments[0]?.from, "2026-10-04");
+	assert.deepEqual(
+		plan(
+			{ next_day: "2099-01-01", floor: "2098-01-01" },
+			activities(MIDNIGHT_14),
+		).cursor,
+		{ next_day: "2026-09-13", floor: "2026-09-13", since_at: MIDNIGHT_14 },
+	);
+});
+
+test("planDays: a grant starting past where a later until sent next_day back moves next_day to its start, so the forward read moves it on", () => {
+	const since = "2026-10-25T00:00:00.000Z";
+	const { cursor, segments } = plan(
+		{
+			next_day: "2026-11-02",
+			floor: "2026-08-31",
+			since_at: "2026-09-01T00:00:00.000Z",
+			until_at: "2026-10-20T00:00:00.000Z",
+		},
+		activities(since),
+	);
+	assert.deepEqual(segments, [
+		{
+			kind: "forward",
+			from: "2026-10-24",
+			to: "2026-11-01",
+			since: "2026-08-31",
+		},
+	]);
+	assert.deepEqual(cursor, {
+		next_day: "2026-10-24",
+		floor: "2026-08-31",
+		since_at: since,
+	});
+});
+
 test("planDays reads history from where it stopped for a start no earlier than the one it was read from, and from the start for an earlier one", () => {
 	const cursor = {
 		next_day: "2026-09-22",
@@ -1072,7 +1115,7 @@ test("planDays reads history from where it stopped for a start no earlier than t
 	assert.deepEqual(history("2026-06-20"), [["2026-06-20", "2026-07-31"]]);
 });
 
-test("readCursor keeps a grant's instants that parse, and starts afresh from one that does not", () => {
+test("readCursor keeps a grant's instants that parse, and starts afresh from one that does not, keeping only its retry list", () => {
 	const ended = { ...EVENING, until_at: "2026-10-01T00:00:00.000Z" };
 	assert.deepEqual(readCursor(ended), ended);
 	for (const bad of ["2026-09-14", "soon", 1789408800000, null]) {
@@ -1084,6 +1127,11 @@ test("readCursor keeps a grant's instants that parse, and starts afresh from one
 			);
 		}
 	}
+	const retry = [span("2026-01-01", "2026-01-02")];
+	assert.deepEqual(
+		readCursor({ ...ended, since_at: null, retry, retry_next: "2026-01-02" }),
+		{ retry, retry_next: "2026-01-02" },
+	);
 });
 
 test("grantDays reads an instant grant from the day before its first UTC day to the last day a record starting inside it is filed under: two days on for sleep, one for activities", () => {
@@ -1117,6 +1165,13 @@ test("grantDays reads an instant grant from the day before its first UTC day to 
 		since: "2026-09-14",
 		until: "2026-09-15",
 	});
+	// An end past the last day RFC 3339 writes bounds no day read; the instant is kept.
+	const last = "9999-12-31T00:00:00.000Z";
+	for (const stream of ["sleep", "activities"] as const) {
+		const days = grantDays(stream, { until: last });
+		assert.equal(days.until, undefined, stream);
+		assert.equal(days.until_at, last, stream);
+	}
 });
 
 test("inRange holds a start to its grant as the runtime does, every fractional digit included", () => {

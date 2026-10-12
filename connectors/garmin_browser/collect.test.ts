@@ -1243,8 +1243,8 @@ const leavesOf = (
 
 /**
  * A cursor whose next window is 9 to 21 September: thirteen days, an odd number. Its floor lies
- * inside the ninety days a grant with no start reads, so the history below it, back to FLOOR, is
- * read after the window.
+ * inside the ninety days a grant with no start reads, as after a grant that dropped its start, so
+ * the history below it, back to FLOOR, is read after the window.
  */
 const ODD = { next_day: "2026-09-09", floor: "2026-09-09" };
 const ODD_DONE = { next_day: "2026-09-22", floor: FLOOR };
