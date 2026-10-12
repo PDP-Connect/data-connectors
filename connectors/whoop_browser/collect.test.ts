@@ -1508,6 +1508,100 @@ test("collect: a grant whose end moves back holds the cursor to it, so lifting t
 	);
 });
 
+// ── A bound narrowed, then widened or dropped ──────────────────────────────
+/** The fixture's sleeps: the main sleep (Sep 14), the nap (Sep 15, 05:10Z) and the open sleep (Sep 16). */
+const SLEEP_IDS = [uuid(101), uuid(102), uuid(103)];
+/** An account begun a day before the fixture's first cycle: a walk from up to two days before its start starts at the account's. */
+const YOUNG_BOOTSTRAP = bootstrapWith((b) => {
+	b.account.created_at = "2026-09-14T06:00:00.000Z";
+	b.user.created_at = "2026-09-14T06:00:00.000Z";
+});
+/** Runs on sleeps alone, each from the last one's STATE, at a time well past the overlap week. */
+async function sleepsRun(
+	range: Range | undefined,
+	now: Date,
+	state: Record<string, unknown> = {},
+	bootstrap = BOOTSTRAP,
+): Promise<RecordingEmit> {
+	return collect(fakeWhoop(fixtures(CYCLES, bootstrap)), {
+		streams: ["sleeps"],
+		ranges: range ? { sleeps: range } : {},
+		now,
+		state,
+	});
+}
+
+// Dropped, on the young account: the walk started at the account's start before and after.
+for (const [label, widened, bootstrap] of [
+	["widened back", { since: "2026-09-14T00:00:00.000Z" }, BOOTSTRAP],
+	["dropped", undefined, YOUNG_BOOTSTRAP],
+] as const) {
+	test(`collect: a since narrowed to a later day, then ${label}, delivers again what the narrowing held out`, async () => {
+		const run = (range: Range | undefined, now: Date, state = {}) =>
+			sleepsRun(range, now, state, bootstrap);
+		const first = await run({ since: "2026-09-14T00:00:00.000Z" }, NOW);
+		assert.deepEqual(idsOf(first, "sleeps"), SLEEP_IDS);
+		// The next day at 06:00Z: the main sleep and the nap, at 05:10Z, are held out.
+		const since = Date.parse("2026-09-15T06:00:00.000Z");
+		const later = new Date(NOW.getTime() + 21 * DAY);
+		const narrowed = await run({ since: iso(since) }, later, statesOf(first));
+		assert.deepEqual(idsOf(narrowed, "sleeps"), [uuid(103)]);
+		assert.deepEqual(statesOf(narrowed), { sleeps: cursorAt(since, later) });
+		const h = await run(
+			widened,
+			new Date(later.getTime() + 7 * DAY),
+			statesOf(narrowed),
+		);
+		assert.deepEqual(idsOf(h, "sleeps"), SLEEP_IDS);
+	});
+}
+
+for (const [label, widened] of [
+	["widened back", { until: "2026-10-05T00:00:00.000Z" }],
+	["dropped", undefined],
+] as const) {
+	test(`collect: an until narrowed to an earlier day, then ${label}, delivers again what the narrowing held out`, async () => {
+		const first = await sleepsRun(
+			{ until: "2026-10-05T00:00:00.000Z" },
+			new Date("2026-10-06T00:00:00.000Z"),
+		);
+		assert.deepEqual(idsOf(first, "sleeps"), SLEEP_IDS);
+		// Before the nap's day: the cursor is held to it, though this run reads nothing.
+		const until = Date.parse("2026-09-15T00:00:00.000Z");
+		const narrowed = await sleepsRun(
+			{ until: iso(until) },
+			new Date("2026-10-10T00:00:00.000Z"),
+			statesOf(first),
+		);
+		assert.deepEqual(statesOf(narrowed), { sleeps: cursorAt(FLOOR, until) });
+		const h = await sleepsRun(
+			widened,
+			new Date("2026-10-20T00:00:00.000Z"),
+			statesOf(narrowed),
+		);
+		assert.deepEqual(idsOf(h, "sleeps"), SLEEP_IDS);
+	});
+}
+
+/** Three weeks past the fixture's last cycle: the week before a cursor through then holds none of its records. */
+const OCT_10 = new Date("2026-10-10T00:00:00.000Z");
+const OCT_12 = new Date("2026-10-12T00:00:00.000Z");
+
+test("collect: an until moved before the cursor's floor holds the cursor at the floor, and lifting it delivers again from there", async () => {
+	const since = Date.parse(SINCE);
+	const first = await sleepsRun({ since: SINCE }, OCT_10);
+	const empty = await sleepsRun(
+		{ since: SINCE, until: "2026-08-01T00:00:00.000Z" },
+		OCT_12,
+		statesOf(first),
+	);
+	assert.deepEqual(idsOf(empty, "sleeps"), []);
+	assert.deepEqual(statesOf(empty), { sleeps: cursorAt(since, since) });
+	const h = await sleepsRun({ since: SINCE }, OCT_12, statesOf(empty));
+	assert.deepEqual(idsOf(h, "sleeps"), SLEEP_IDS);
+	assert.deepEqual(statesOf(h), { sleeps: cursorAt(since, OCT_12) });
+});
+
 test("collect: a stream whose grant's end is later lifted reads on from where that end left its cursor", async () => {
 	const until = Date.parse("2026-08-20T00:00:00.000Z");
 	const first = await collect(fakeWhoop(fixtures()), {
@@ -1646,6 +1740,60 @@ test("collect: a step back is not cut short by maxWindowsPerRun: the run deliver
 	assert.deepEqual(statesOf(h), {
 		workouts: cursorAt(since, start + WINDOW_DAYS * DAY),
 	});
+});
+
+test("collect: a since moved back a long way, past the account's start, delivers what it adds, though both walks started at the account's start", async () => {
+	const since = Date.parse("2026-09-15T06:00:00.000Z");
+	const first = await sleepsRun(
+		{ since: iso(since) },
+		OCT_10,
+		{},
+		YOUNG_BOOTSTRAP,
+	);
+	assert.deepEqual(idsOf(first, "sleeps"), [uuid(103)]);
+	assert.deepEqual(statesOf(first), { sleeps: cursorAt(since, OCT_10) });
+	const h = await sleepsRun(
+		{ since: "2020-01-01T00:00:00.000Z" },
+		OCT_12,
+		statesOf(first),
+		YOUNG_BOOTSTRAP,
+	);
+	assert.deepEqual(idsOf(h, "sleeps"), SLEEP_IDS);
+	const young = Date.parse("2026-09-13T06:00:00.000Z");
+	assert.deepEqual(statesOf(h), { sleeps: cursorAt(young, OCT_12) });
+});
+
+test("collect: a since widened back further than one run's windows is delivered over later runs, each moving the cursor on", async () => {
+	const pacing = { maxWindowsPerRun: 2 };
+	const streams = ["sleeps"] as const;
+	let state = statesOf(
+		await collect(fakeWhoop(fixtures(CYCLES, LONG_BOOTSTRAP)), {
+			streams,
+			ranges: { sleeps: { since: SINCE } },
+		}),
+	);
+	const delivered = new Set<unknown>();
+	let through = Number.NEGATIVE_INFINITY;
+	for (let run = 1; ; run += 1) {
+		assert.ok(run <= 40, "the backfill ends");
+		// The grant's start dropped: back to the account's start, two windows a run.
+		const h = await collect(fakeWhoop(fixtures(CYCLES, LONG_BOOTSTRAP)), {
+			streams,
+			pacing,
+			state,
+			now: LATER,
+		});
+		for (const id of idsOf(h, "sleeps")) delivered.add(id);
+		const cursor = statesOf(h).sleeps as { floor: string; through: string };
+		assert.equal(cursor.floor, iso(LONG_FLOOR), `run ${run}`);
+		assert.ok(Date.parse(cursor.through) > through, `run ${run} moves on`);
+		through = Date.parse(cursor.through);
+		state = statesOf(h);
+		if (messagesOf(h, "SKIP_RESULT").length === 0) break;
+		assertSkips(h, "source_limit_reached", RETRY, streams);
+	}
+	assert.equal(through, LATER.getTime());
+	assert.deepEqual([...delivered], SLEEP_IDS);
 });
 
 // ── Truncation ─────────────────────────────────────────────────────────────

@@ -2673,6 +2673,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "emit(): stream cursor state follows all covered WHOOP records",
 		},
 		{
+			path: "connectors/whoop_browser/collect.test.ts",
+			line: 1771,
+			column: 13,
+			category: "test_assertion_sequencing",
+			note: "Each synthetic run consumes the prior run's STATE before asserting the next run's progress.",
+		},
+		{
 			path: "connectors/whoop_browser/index.test.ts",
 			line: 275,
 			column: 4,
