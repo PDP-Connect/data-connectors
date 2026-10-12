@@ -841,6 +841,14 @@ test("#5 a missing import folder is awaiting an upload, with a coverage line per
 		code: null,
 		failure: null,
 	});
+	assert.deepEqual(
+		outcome.ofType("PROGRESS").map((m) => [m.stream, m.message, m.count]),
+		[
+			["activities", "Fitbit activities: none imported.", 0],
+			["daily_summaries", "Fitbit daily summaries: none imported.", 0],
+			["sleep", "Fitbit sleep logs: none imported.", 0],
+		],
+	);
 	// The line states the window asked for, as the runtime applies it, even
 	// when nothing could be read.
 	const windowed = await run(join(TEMP, "no-such-folder"), {
@@ -1161,6 +1169,13 @@ test("#12 a member cut short keeps what was read before the cut, and says so", a
 	assert.deepEqual(
 		sleepCut.records("sleep"),
 		(CANONICAL_RECORDS.sleep ?? []).slice(0, 2),
+	);
+	assert.deepEqual(
+		sleepCut.ofType("PROGRESS", "sleep").map((m) => [m.message, m.count]),
+		[
+			["Reading Fitbit sleep logs.", undefined],
+			["Fitbit sleep logs: 2 imported; some could not be read.", 2],
+		],
 	);
 	assert.deepEqual(sleepCut.coverage("sleep").fields_unreadable, []);
 	assert.deepEqual(sleepCut.coverage("sleep").fields_unavailable, []);
@@ -1964,6 +1979,56 @@ test("#29 an unreadable row counts against a stream's reason only when it could 
 	assertReason(filtered, "activities", "records_unreadable", "partial");
 	assert.equal(filtered.progressDone("activities").unreadable, 1);
 	assert.equal(filtered.progressDone("activities").outside_window, 3);
+});
+
+test("#29b a row with a readable id and no readable start is ruled out by a resource filter, never by a window", async () => {
+	const rows = canonicalRows();
+	const dir = uploaded(
+		canonicalMembers({
+			exercise: [
+				jsonMember("exercise-0.json", [
+					...rows.exercise,
+					exercise({ logId: 21_000_000_009, startTime: "garbage" }),
+				]),
+			],
+		}),
+	);
+	// 21000000001 starts before the window; 002, 003 and 004 are inside it.
+	const streams = ["activities"];
+	const timeRanges = { activities: { since: "2026-03-14T00:00:00Z" } };
+
+	const bounded = await run(dir, { streams, timeRanges });
+	assertReason(bounded, "activities", "records_unreadable", "partial");
+	assert.equal(bounded.records("activities").length, 3);
+	assert.equal(bounded.progressDone("activities").unreadable, 1);
+	assert.equal(bounded.progressDone("activities").outside_window, 1);
+
+	const named = await run(dir, {
+		streams,
+		timeRanges,
+		resources: { activities: ["21000000003", "21000000009"] },
+	});
+	assertReason(named, "activities", "records_unreadable", "partial");
+	assert.deepEqual(
+		named.records("activities").map((r) => r.id),
+		["21000000003"],
+	);
+	assert.equal(named.progressDone("activities").unreadable, 1);
+	assert.equal(named.progressDone("activities").outside_window, 3);
+
+	const excluded = await run(dir, {
+		streams,
+		timeRanges,
+		resources: { activities: ["21000000003"] },
+	});
+	assertReason(excluded, "activities", "covered_in_full", "complete");
+	assert.deepEqual(
+		excluded.records("activities").map((r) => r.id),
+		["21000000003"],
+	);
+	assert.equal(excluded.progressDone("activities").unreadable, 0);
+	assert.equal(excluded.progressDone("activities").outside_window, 4);
+	assert.equal(excluded.progressDone("activities").unreadable_total, 1);
 });
 
 test("#30 with no usable zone, steps and distance are blank and named on every day, and the reason follows the cause", async () => {

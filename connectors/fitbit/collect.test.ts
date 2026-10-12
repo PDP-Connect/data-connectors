@@ -209,15 +209,18 @@ test("a bound inside a day holds at its instant, read strictly as the runtime re
 		// Finer than a millisecond: Date.parse alone would read these as 23:00.
 		[{ since: "2026-03-13T23:00:00.0001Z" }, false],
 		[{ since: "2026-03-13T23:00:00.0000Z" }, true],
+		[{ since: "2026-03-13t23:00:00z" }, true],
 		[{ since: "2026-03-13t23:00:00.0001z" }, false],
 		[{ since: "2026-03-13T22:00:00.0001-01:00" }, false],
 		[{ since: "2026-03-13T22:00:00-01:00" }, true],
 		[{ since: "0001-01-01T00:00:00Z" }, true],
-		// Not an RFC 3339 date-time with an offset: nothing is kept, and a
-		// bound is never read by its date.
+		// Refused by the runtime's parser (time-range.ts): nothing is kept, and
+		// a bound is never read by its date. A space is outside RFC 3339's
+		// date-time grammar; a real leap second is valid RFC 3339, refused
+		// since #217.
 		[{ since: "2026-03-13T23:00:00,0001Z" }, false],
 		[{ since: "2026-03-13 23:00:00Z" }, false],
-		[{ since: "2026-03-13T22:59:60Z" }, false],
+		[{ since: "2016-12-31T23:59:60Z" }, false],
 		[{ since: "2026-03-13T23:00Z" }, false],
 		[{ since: "2026-03-13" }, false],
 		[{ since: "2026-02-30T00:00:00Z" }, false],

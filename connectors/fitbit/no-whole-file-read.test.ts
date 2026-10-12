@@ -27,6 +27,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { assertUserFacingProgress } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	connectorDir,
 	connectorEntrypoint,
@@ -129,11 +130,12 @@ function writeStepsMember(path: string, index: number): string {
 	return new Date(start).toISOString().slice(0, 10);
 }
 
-function run(
+/** One bounded run of `stream`; its PROGRESS text is checked as owner-facing. */
+async function run(
 	importDir: string,
 	stream: string,
 ): Promise<ConnectorSubprocessResult> {
-	return runConnectorProtocolSubprocess({
+	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: connectorEntrypoint("fitbit"),
 		env: {
@@ -162,6 +164,8 @@ function run(
 		},
 		timeoutMs: 180_000,
 	});
+	assertUserFacingProgress(result.messages);
+	return result;
 }
 
 function assertBoundedRss(
