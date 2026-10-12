@@ -565,11 +565,9 @@ test("whoop_browser: sign-in and collection keep one headless Patchright page", 
 				[],
 			);
 			// The account began 2026-08-01T09:30Z: the walk starts a day earlier and reaches NOW.
-			// The fixture's third cycle has no end yet: the next run re-reads from its start.
 			const cursor = {
 				floor: "2026-07-31T09:30:00.000Z",
 				through: NOW.toISOString(),
-				open_since: "2026-09-16T12:50:00.000Z",
 			};
 			assert.deepEqual(
 				h.protocolMessages.filter((m) => m.type === "STATE"),

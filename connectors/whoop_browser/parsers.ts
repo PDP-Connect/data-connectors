@@ -163,8 +163,6 @@ export interface Cycle {
 	id: string;
 	startAt: string;
 	startMs: number;
-	/** Still under way: its range has no end yet. */
-	open: boolean;
 	updatedMs: number;
 	element: Obj;
 }
@@ -202,7 +200,7 @@ export function readElement(
 	| { kind: "unreadable"; lost: Record<Stream, number> } {
 	const cycle = isObj(element) && isObj(element.cycle) ? element.cycle : null;
 	const id = cycle ? positiveInteger(cycle.id) : null;
-	const [startAt, endAt] = cycle ? interval(cycle.during) : [DRIFT, DRIFT];
+	const [startAt] = cycle ? interval(cycle.during) : [DRIFT];
 	if (!isObj(element) || !id || typeof startAt !== "string") {
 		return { kind: "unreadable", lost: nested(element) };
 	}
@@ -213,7 +211,6 @@ export function readElement(
 			id,
 			startAt,
 			startMs: Date.parse(startAt),
-			open: endAt === null,
 			updatedMs: updated ? Date.parse(updated) : Number.NEGATIVE_INFINITY,
 			element,
 		},

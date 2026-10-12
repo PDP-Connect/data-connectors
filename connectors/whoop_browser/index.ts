@@ -44,10 +44,12 @@ export const WINDOW_DAYS = 30;
 const PAD_DAYS = 1;
 /** Re-read the last week each run: WHOOP scores sleep and recovery after the fact. */
 export const OVERLAP_DAYS = 7;
-/** A cycle runs from one sleep to the next, so one that began up to this long before a grant's start can hold sleeps and workouts inside it. */
+/**
+ * A cycle runs from one sleep to the next, so the one under way where a run starts delivering
+ * usually began within a day of it: the walk starts this long before, and its first window holds
+ * that cycle. One that began earlier (a strap left off) is found by stepping back.
+ */
 const CYCLE_REACH_DAYS = 2;
-/** A cycle still open after this long was abandoned (a strap left off), not one to keep re-reading. */
-const OPEN_CYCLE_REACH_DAYS = 30;
 const SIGN_IN_ORIGIN = "https://id.whoop.com";
 /** No settle read starts after this long, so with one stalled 30 s read it ends inside the 120 s establish watchdog. */
 const SETTLE_BUDGET_MS = 60_000;
@@ -395,14 +397,11 @@ async function fetchJson(
 // ── Windows and cursors ────────────────────────────────────────────────────
 /**
  * One cursor per stream, all four written from one walk: every record of the stream that starts in
- * [floor, through) has been delivered under the stream's grant. `open_since`, when present, is the
- * start of the earliest cycle the walk found still under way, which the next run re-reads even
- * when it lies more than a week back. All RFC 3339 instants.
+ * [floor, through) has been delivered under the stream's grant. Both RFC 3339 instants.
  */
 export interface WindowCursor {
 	floor: string;
 	through: string;
-	open_since?: string;
 }
 type Range = { since?: string; until?: string };
 
@@ -414,17 +413,15 @@ const instant = (value: unknown): number | null => {
 
 export function readCursor(value: unknown): WindowCursor | null {
 	if (typeof value !== "object" || value === null) return null;
-	const { floor, through, open_since } = value as Record<string, unknown>;
+	const { floor, through } = value as Record<string, unknown>;
 	const floorMs = instant(floor);
 	const throughMs = instant(through);
 	if (floorMs === null || throughMs === null || throughMs < floorMs) {
 		return null;
 	}
-	const openMs = instant(open_since);
 	return {
 		floor: new Date(floorMs).toISOString(),
 		through: new Date(throughMs).toISOString(),
-		...(openMs === null ? {} : { open_since: new Date(openMs).toISOString() }),
 	};
 }
 
@@ -439,7 +436,7 @@ function inRange(startAt: unknown, range: Range | undefined): boolean {
 	);
 }
 
-/** One stream's part in a run: where its reading starts, the cursor it carries, and its grant's end. */
+/** One stream's part in a run: where its delivery starts, the cursor it carries, and its grant's end. */
 export interface StreamPlan {
 	from: number;
 	cursor: WindowCursor;
@@ -447,12 +444,11 @@ export interface StreamPlan {
 }
 
 /**
- * Pure: one stream's plan. Its grant starts delivering at its own start, or the account's (a day
- * early, for the time zone). It reads afresh from there, reached back far enough for a cycle that
- * began before it, when it has no cursor, on full_refresh, or when that start lies outside what
- * its cursor delivered (a grant widened back, or moved past). Otherwise it re-reads the week
- * before its cursor, or back to a cycle the last run found still open, if that is earlier and
- * within a month; the cursor keeps only what the grant still covers.
+ * Pure: one stream's plan. Its grant starts at its own start, or the account's (a day early, for
+ * the time zone). It delivers afresh from there when it has no cursor, on full_refresh, or when
+ * that start lies outside what its cursor delivered (a grant widened back, or moved past).
+ * Otherwise it delivers again from the week before its cursor, which WHOOP may still be scoring,
+ * and the cursor keeps only what the grant still covers.
  */
 export function planStream(
 	previous: WindowCursor | null,
@@ -464,24 +460,17 @@ export function planStream(
 	const until = instant(range?.until);
 	const history = instant(historyStart) ?? Date.parse(HISTORY_FALLBACK);
 	const start = since === null ? history : Math.max(since, history);
-	const reach = Math.max(start - CYCLE_REACH_DAYS * DAY_MS, history);
 	const floor = previous ? Date.parse(previous.floor) : Number.NaN;
 	const through = previous ? Date.parse(previous.through) : Number.NaN;
 	if (!previous || fullRefresh || start < floor || start > through) {
 		const at = new Date(start).toISOString();
-		return { from: reach, cursor: { floor: at, through: at }, until };
+		return { from: start, cursor: { floor: at, through: at }, until };
 	}
-	const open = instant(previous.open_since) ?? Number.POSITIVE_INFINITY;
-	const replay = Math.min(
-		through - OVERLAP_DAYS * DAY_MS,
-		Math.max(open, through - OPEN_CYCLE_REACH_DAYS * DAY_MS),
-	);
 	// A grant whose end moved back holds less than the cursor delivered.
 	const held = Math.max(start, Math.min(through, until ?? through));
 	return {
-		from: Math.max(replay, reach),
+		from: Math.max(through - OVERLAP_DAYS * DAY_MS, start),
 		cursor: {
-			...previous,
 			floor: new Date(start).toISOString(),
 			through: new Date(held).toISOString(),
 		},
@@ -599,11 +588,11 @@ async function emitClean(
 }
 
 /**
- * One walk of the cycles, oldest first, feeds all four streams. It starts where the least
- * advanced stream needs it to and ends at the widest grant's end; each window's cycles yield the
- * requested streams' records, each held to its own stream's grant, and each stream's cursor moves
- * only over what its grant let it read. Every stream ends with its unreadable count, any skip and
- * its cursor.
+ * One walk of the cycles, oldest first, feeds all four streams. It starts two days before the
+ * earliest instant a stream delivers from, reads the cycle under way there wherever it began, and
+ * ends at the widest grant's end; each window's cycles yield the requested streams' records, each
+ * held to its own stream's grant, and each stream's cursor moves only over what its grant let it
+ * deliver. Every stream ends with its unreadable count, any skip and its cursor.
  */
 export async function collectWhoopBrowser(
 	ctx: WhoopCollectContext,
@@ -657,39 +646,80 @@ export async function collectWhoopBrowser(
 			);
 		}
 		const all = [...plans.values()];
-		const start = Math.min(...all.map((plan) => plan.from));
+		const historyMs = Date.parse(history);
+		const delivery = Math.min(...all.map((plan) => plan.from));
+		const start = Math.max(delivery - CYCLE_REACH_DAYS * DAY_MS, historyMs);
 		const end = Math.min(
 			now.getTime(),
 			Math.max(...all.map((plan) => plan.until ?? Number.POSITIVE_INFINITY)),
 		);
 		const lostSeen = new Set<string>();
-		let openSince = Number.POSITIVE_INFINITY;
-		let from = start;
-		while (from < end) {
-			if (windows === p.maxWindowsPerRun) {
-				deferred = true;
-				break;
-			}
+		/** One paced window read, counted toward the run's windows. */
+		const read = async (from: number, to: number): Promise<Window> => {
 			// Before each request, never after the last.
 			await p.sleep(p.requestDelayMs);
-			const window = await readWindow(
-				ctx.page,
-				facts.userId,
-				from,
-				Math.min(from + WINDOW_DAYS * DAY_MS, end),
-				p,
-			);
-			if (!window.ok) {
-				failure = window;
-				break;
-			}
+			const window = await readWindow(ctx.page, facts.userId, from, to, p);
+			if (!window.ok) return window;
+			windows += 1;
 			for (const { key, lost } of window.lost) {
 				if (lostSeen.has(key)) continue;
 				lostSeen.add(key);
 				for (const stream of streams) unreadable[stream] += lost[stream];
 			}
-			for (const cycle of window.cycles) {
-				if (cycle.open) openSince = Math.min(openSince, cycle.startMs);
+			return window;
+		};
+		/**
+		 * The latest cycle that starts before `before`, a window at a time back to the account's
+		 * start: with the strap off, a cycle stays under way for as long as it is off. Not held to
+		 * maxWindowsPerRun, since the account's start bounds it and a run cut short in it would
+		 * begin it again next time.
+		 */
+		const latestBefore = async (
+			before: number,
+		): Promise<{ ok: true; cycle: Cycle | null } | Failure> => {
+			for (let to = before; to > historyMs; ) {
+				const back = Math.max(to - WINDOW_DAYS * DAY_MS, historyMs);
+				let latest: Cycle | null = null;
+				for (let from = back; from < to; ) {
+					const window = await read(from, to);
+					if (!window.ok) return window;
+					latest = window.cycles.at(-1) ?? latest;
+					from = window.end;
+				}
+				if (latest) return { ok: true, cycle: latest };
+				to = back;
+			}
+			return { ok: true, cycle: null };
+		};
+		// Delivery needs the cycle under way where it starts. Once the walk reads a cycle starting by
+		// then, every earlier one ended before it; before the account's start, none began.
+		let covered = start <= historyMs;
+		let from = start;
+		while (from < end) {
+			if (windows >= p.maxWindowsPerRun) {
+				deferred = true;
+				break;
+			}
+			const window = await read(
+				from,
+				Math.min(from + WINDOW_DAYS * DAY_MS, end),
+			);
+			if (!window.ok) {
+				failure = window;
+				break;
+			}
+			const cycles = window.cycles;
+			covered ||= cycles.some((cycle) => cycle.startMs <= delivery);
+			if (!covered && window.end > delivery) {
+				const before = await latestBefore(start);
+				if (!before.ok) {
+					failure = before;
+					break;
+				}
+				if (before.cycle) cycles.unshift(before.cycle);
+				covered = true;
+			}
+			for (const cycle of cycles) {
 				for (const stream of streams) {
 					const range = ranges.get(stream);
 					for (const built of recordsFor(stream, cycle)) {
@@ -706,7 +736,6 @@ export async function collectWhoopBrowser(
 					}
 				}
 			}
-			windows += 1;
 			from = window.end;
 			for (const plan of all) {
 				const reach = Math.min(
@@ -716,25 +745,6 @@ export async function collectWhoopBrowser(
 				if (reach > Date.parse(plan.cursor.through)) {
 					plan.cursor.through = new Date(reach).toISOString();
 				}
-			}
-		}
-		// A cycle still open: the earliest this run saw, or one an earlier run saw that this run's
-		// windows did not reach, while it is less than a month behind the cursor.
-		for (const plan of all) {
-			const earlier = instant(plan.cursor.open_since);
-			const unreached =
-				earlier !== null && (earlier < start || earlier >= from)
-					? earlier
-					: Number.POSITIVE_INFINITY;
-			const stale =
-				Date.parse(plan.cursor.through) - OPEN_CYCLE_REACH_DAYS * DAY_MS;
-			const open = Math.min(
-				...[openSince, unreached].filter((ms) => ms >= stale),
-			);
-			if (Number.isFinite(open)) {
-				plan.cursor.open_since = new Date(open).toISOString();
-			} else {
-				delete plan.cursor.open_since;
 			}
 		}
 	}

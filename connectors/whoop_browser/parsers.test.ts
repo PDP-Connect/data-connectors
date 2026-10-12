@@ -471,7 +471,7 @@ test("cycleElements takes { records: [...] } or a bare array, and refuses any ot
 });
 
 // ── readElement ────────────────────────────────────────────────────────────
-test("readElement gives a cycle its id, start, whether it is open, last update and element", () => {
+test("readElement gives a cycle its id, start, last update and element", () => {
 	const element = scored();
 	assert.deepEqual(readElement(element), {
 		kind: "cycle",
@@ -479,7 +479,6 @@ test("readElement gives a cycle its id, start, whether it is open, last update a
 			id: "1000000101",
 			startAt: A,
 			startMs: Date.UTC(2026, 8, 14, 12, 40),
-			open: false,
 			updatedMs: Date.UTC(2026, 8, 15, 13, 6),
 			element,
 		},
@@ -501,29 +500,6 @@ test("readElement gives a cycle its id, start, whether it is open, last update a
 			cycleOf(withPart(scored(), "cycle", { updated_at })).updatedMs,
 			Number.NEGATIVE_INFINITY,
 		);
-	}
-});
-
-test("readElement: a cycle is open while its range has no upper bound, and closed once it has one", () => {
-	const open = (during: unknown): boolean =>
-		cycleOf(withPart(scored(), "cycle", { during })).open;
-	assert.equal(cycleOf(underWay()).open, true, "the fixture's cycle under way");
-	assert.equal(cycleOf(scored()).open, false, "the fixture's scored cycle");
-	assert.equal(cycleOf(quiet()).open, false, "the fixture's quiet cycle");
-	for (const during of [
-		`['${A}',)`,
-		`['${A}','')`,
-		`['${A}',infinity)`,
-		`['${A}','Infinity']`,
-	]) {
-		assert.equal(open(during), true, during);
-	}
-	for (const during of [
-		`['${A}','${B}')`,
-		`['${A}','${B}']`,
-		"['2026-09-14T22:40:00.000+1000','2026-09-15T23:05:00.000+1000')",
-	]) {
-		assert.equal(open(during), false, during);
 	}
 });
 

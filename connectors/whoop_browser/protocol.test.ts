@@ -47,14 +47,8 @@ const SLEEP = {
 	open: "00000000-0000-4000-8000-000000000103", // 2026-09-16T12:50Z, opens the open cycle
 };
 const RUN = "00000000-0000-4000-8000-000000000201"; // 2026-09-14T22:00Z, inside the scored cycle
-/** The open cycle's start: a walk that keeps it writes it to the cursor as open_since. */
-const OPEN_SINCE = "2026-09-16T12:50:00.000Z";
-/** The cursor of an unbounded walk over the fixtures: account start, now, the open cycle. */
-const FULL_CURSOR = {
-	floor: HISTORY_START,
-	through: NOW,
-	open_since: OPEN_SINCE,
-};
+/** The cursor of an unbounded walk over the fixtures: from the account's start to now. */
+const FULL_CURSOR = { floor: HISTORY_START, through: NOW };
 const COUNTS: Record<Stream, number> = {
 	cycles: 3,
 	recoveries: 1,
@@ -221,7 +215,7 @@ test(
 );
 
 test(
-	"whoop_browser: one STATE per stream, after that stream's last RECORD, from the account's start to now, marking the open cycle",
+	"whoop_browser: one STATE per stream, after that stream's last RECORD, from the account's start to now",
 	SUBPROCESS,
 	async () => {
 		const run = await full();
@@ -235,8 +229,7 @@ test(
 			assert.ok(lastRecord >= 0, `${stream}: has records`);
 			assert.ok(state > lastRecord, `${stream}: STATE after its records`);
 		}
-		// The spec's floor (account start less a day), the walk's end (now) and the start of the
-		// cycle still under way, which the next run re-reads, in every stream.
+		// The spec's floor (account start less a day) and the walk's end (now), in every stream.
 		assertCursors(run, STREAMS, FULL_CURSOR);
 	},
 );
@@ -317,13 +310,12 @@ test(
 );
 
 test(
-	"whoop_browser: a seeded cursor's open_since is read, then written afresh from what the walk finds",
+	"whoop_browser: a seeded cursor resumes with its floor narrowed to the account's start, dropping fields it does not hold",
 	SUBPROCESS,
 	async () => {
 		// A floor before the account's start is no reason to start afresh, so the run resumes these
-		// cursors, each floor narrowed to the account's start. The quiet cycle the seed names has
-		// since closed, and one stream's open_since is no instant: neither is carried, and neither
-		// makes the cursor unreadable.
+		// cursors, each floor narrowed to the account's start. A field a cursor does not hold, an
+		// instant or not, is dropped and does not make the cursor unreadable.
 		const seeded = { floor: "2026-01-01T00:00:00.000Z", through: NOW };
 		const run = await start(everyStream(), {
 			state: {
@@ -454,7 +446,7 @@ test(
 );
 
 test(
-	"whoop_browser: a grant that ends before the open cycle closes the walk at until and leaves no open_since",
+	"whoop_browser: a grant that ends at the open cycle's start ends the walk, and the cursor, at until",
 	SUBPROCESS,
 	async () => {
 		// Until is the open cycle's start exactly: it begins the next walk, not this one.
