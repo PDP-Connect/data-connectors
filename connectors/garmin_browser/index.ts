@@ -673,6 +673,20 @@ function lastFiledBefore(at: string, after: number): string {
 }
 
 /**
+ * The days a bound at `at` can hold a record back on: from the day before its UTC day, where a
+ * record starting at it can be filed, to the last day a record starting before it can be.
+ */
+function heldBy(at: string, after: number): Window {
+	return {
+		from: addDays(utcDay(Date.parse(at)), -1),
+		to: lastFiledBefore(at, after),
+	};
+}
+
+const intersects = (a: Window, b: Window): boolean =>
+	a.from <= b.to && b.from <= a.to;
+
+/**
  * The days a stream's grant lets it read. A stream consented by day reads the grant's days, as the
  * runtime filters them. One consented by instant reads from the day before the grant's first UTC
  * day to the last day a record starting inside it can be filed under (FILED_AFTER), and keeps only
@@ -740,6 +754,39 @@ function widen(cursor: DayCursor, grant: DayRange): void {
 	if (earlier || later) delete cursor.backfill;
 }
 
+/**
+ * Where the grant is narrower than the cursor's at an edge, its run holds nothing back there unless
+ * it reads a day that edge can hold a record back on: planning none, the cursor keeps its wider
+ * bound, so a later wider grant need not read again what it already holds. `claim` is the cursor's
+ * instants before this run.
+ */
+function keepWider(
+	cursor: DayCursor,
+	claim: { since_at?: string | undefined; until_at?: string | undefined },
+	grant: DayRange,
+	segments: readonly Segment[],
+): void {
+	const narrower = {
+		since_at:
+			grant.since_at !== undefined &&
+			(claim.since_at === undefined ||
+				isBefore(claim.since_at, grant.since_at)),
+		until_at:
+			grant.until_at !== undefined &&
+			(claim.until_at === undefined ||
+				isBefore(grant.until_at, claim.until_at)),
+	};
+	for (const edge of ["since_at", "until_at"] as const) {
+		const at = grant[edge];
+		if (!narrower[edge] || at === undefined) continue;
+		const held = heldBy(at, grant.filed_after ?? 0);
+		if (segments.some((segment) => intersects(segment, held))) continue;
+		const wider = claim[edge];
+		if (wider === undefined) delete cursor[edge];
+		else cursor[edge] = wider;
+	}
+}
+
 /** Pure: the days this run reads, the `overlap` days before the cursor among them, and the cursor it starts from. */
 export function planDays(
 	prev: DayCursor,
@@ -766,6 +813,7 @@ export function planDays(
 		cursor.retry = structuredClone(prev.retry);
 		if (prev.retry_next) cursor.retry_next = prev.retry_next;
 	}
+	const claim = { since_at: cursor.since_at, until_at: cursor.until_at };
 	if (!fresh) widen(cursor, grant);
 	if (grant.since_at === undefined) delete cursor.since_at;
 	else cursor.since_at = grant.since_at;
@@ -804,6 +852,7 @@ export function planDays(
 	for (const span of rotate(again, cursor.retry_next)) {
 		segments.push({ kind: "retry", ...span });
 	}
+	if (!fresh) keepWider(cursor, claim, grant, segments);
 	return { cursor, segments };
 }
 

@@ -1008,17 +1008,16 @@ test("planDays: a grant ending later than the cursor's, or not at all, sends nex
 	);
 });
 
-test("planDays: a grant no wider than the cursor's, to the instant, moves neither the floor nor next_day, keeps the history read so far, and the cursor takes its instants", () => {
+test("planDays: a grant no wider than the cursor's, to the instant, moves neither the floor nor next_day and keeps the history read so far; the cursor takes its instants where its run reads a day they hold records back on, and keeps its own where not", () => {
 	const saved = {
 		...EVENING,
 		until_at: "2026-10-01T00:00:00.000Z",
 		backfill: { since: "2026-09-01", next_day: "2026-09-05" },
 	};
+	// The same instants at another offset.
 	for (const [since, until] of [
 		[EVENING.since_at, saved.until_at],
-		// The same instants at another offset, and a narrower grant.
 		["2026-09-15T07:00:00.000+13:00", "2026-10-01T13:00:00.000+13:00"],
-		["2026-09-14T20:00:00.000Z", "2026-09-30T00:00:00.000Z"],
 	] as const) {
 		const { cursor } = plan(saved, activities(since, until));
 		assert.deepEqual(
@@ -1027,6 +1026,20 @@ test("planDays: a grant no wider than the cursor's, to the instant, moves neithe
 			`${since} ${until}`,
 		);
 	}
+	// A narrower grant: its run plans nothing at all, then a re-read from 13 September, which holds
+	// the days around both its instants.
+	const since = "2026-09-14T20:00:00.000Z";
+	const until = "2026-09-30T00:00:00.000Z";
+	assert.deepEqual(plan(saved, activities(since, until)).cursor, saved);
+	const young = { ...saved, next_day: "2026-09-20" };
+	const { cursor, segments } = plan(young, activities(since, until));
+	assert.deepEqual(segments[0], {
+		kind: "forward",
+		from: "2026-09-13",
+		to: "2026-09-30",
+		since: "2026-09-13",
+	});
+	assert.deepEqual(cursor, { ...young, since_at: since, until_at: until });
 });
 
 test("planDays reads history from where it stopped for a start no earlier than the one it was read from, and from the start for an earlier one", () => {

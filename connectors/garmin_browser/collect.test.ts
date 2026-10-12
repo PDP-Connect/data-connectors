@@ -2457,18 +2457,19 @@ test("collect: a grant that starts earlier, inside the last grant's first day, r
 	assert.deepEqual(statesOf(third), { activities: read });
 });
 
-test("collect: a grant narrowed to a later day and then widened reads again everything the narrower grant could have held back, so what the first held back ships too", async () => {
+test("collect: a grant narrowed to a later day, whose run reads no day it could hold a record back on, leaves the cursor's start as it was, and a grant widened again reads what the first held back", async () => {
 	const first = await activitiesRun({ since: EVENING });
+	// The re-read from 4 October reads nothing a start on the 17th holds back.
 	const narrow = await activitiesRun(
 		{ since: "2026-09-17T00:00:00.000Z" },
 		first,
 	);
 	assert.deepEqual(idsOf(narrow, "activities"), []);
+	assert.deepEqual(statesOf(narrow), statesOf(first));
 	const fake = fakeGarmin();
 	const wide = await activitiesRun({ since: MIDNIGHT }, narrow, fake);
-	// From the day before the 14th to the last day a record starting before the 17th is filed under.
-	assert.deepEqual(piecesOf(fake).at(-1), ["2026-09-13", "2026-09-17"]);
-	assert.deepEqual(idsOf(wide, "activities"), ["41000102", "41000101"]);
+	assert.deepEqual(piecesOf(fake).at(-1), ["2026-09-13", "2026-09-15"]);
+	assert.deepEqual(idsOf(wide, "activities"), ["41000101"]);
 	assert.deepEqual(statesOf(wide), {
 		activities: {
 			next_day: "2026-11-02",
@@ -2476,6 +2477,58 @@ test("collect: a grant narrowed to a later day and then widened reads again ever
 			since_at: MIDNIGHT,
 		},
 	});
+});
+
+test("collect: a grant narrowed to a later day whose run reads the days it holds records back on keeps its start, and a grant widened again reads everything it could have held back, so what the first held back ships too", async () => {
+	// Two days after the first run: its re-read reaches the 17th.
+	const options = { now: NOW };
+	const first = await activitiesRun(
+		{ since: EVENING },
+		undefined,
+		fakeGarmin(),
+		options,
+	);
+	const since = "2026-09-17T00:00:00.000Z";
+	const narrow = await activitiesRun({ since }, first, fakeGarmin(), options);
+	assert.equal(
+		(statesOf(narrow).activities as { since_at?: string }).since_at,
+		since,
+	);
+	const fake = fakeGarmin();
+	const wide = await activitiesRun({ since: MIDNIGHT }, narrow, fake, options);
+	// From the day before the 14th to the last day a record starting before the 17th is filed under.
+	assert.deepEqual(piecesOf(fake).at(-1), ["2026-09-13", "2026-09-17"]);
+	assert.deepEqual(idsOf(wide, "activities").toSorted(), [
+		"41000101",
+		"41000102",
+	]);
+});
+
+test("collect: grants alternating on one cursor, one narrower at an edge whose held days lie behind the re-read, cost the wider one only its re-read", async () => {
+	const wide = { since: MIDNIGHT };
+	const cases = [
+		{ since: MIDNIGHT, until: "2026-09-20T00:00:00.000Z" },
+		{ since: "2026-09-20T00:00:00.000Z" },
+	];
+	await Promise.all(
+		cases.map(async (narrower) => {
+			const label = JSON.stringify(narrower);
+			const first = await activitiesRun(wide);
+			const narrow = await activitiesRun(narrower, first);
+			assert.deepEqual(statesOf(narrow), statesOf(first), label);
+			const fake = fakeGarmin();
+			const again = await activitiesRun(wide, narrow, fake);
+			assert.deepEqual(
+				piecesOf(fake),
+				[
+					["2026-10-04", "2026-10-31"],
+					["2026-11-01", "2026-11-01"],
+				],
+				label,
+			);
+			assert.deepEqual(statesOf(again), statesOf(first), label);
+		}),
+	);
 });
 
 test("collect: in Pago Pago, an activity filed the local day before its grant's first UTC day ships once a grant narrowed by a day widens again", async () => {
@@ -3337,7 +3390,6 @@ test("collect: a range stream past MAX_RETRY_DAYS lets the oldest kept days go a
 	assert.deepEqual(statesOf(h), {
 		sleep: {
 			...FULL,
-			since_at: "2026-06-25T00:00:00.000Z",
 			retry: [
 				span("2025-06-29", "2026-06-01"),
 				span("2026-08-24", "2026-09-20"),
