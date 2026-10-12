@@ -765,6 +765,8 @@ export async function collectWhoopBrowser(
 		}
 		const historyMs = Date.parse(history);
 		const lostSeen = new Set<string>();
+		/** The cycles this run has emitted: a later stretch's step back may return one again. */
+		const emitted = new Set<string>();
 		/** No element went unread: one that did may be the cycle a hint would name. */
 		let clean = true;
 		/** One paced window read. */
@@ -916,6 +918,8 @@ export async function collectWhoopBrowser(
 				}
 				for (const cycle of cycles) {
 					starts.push(cycle.startMs);
+					if (emitted.has(cycle.id)) continue;
+					emitted.add(cycle.id);
 					for (const stream of streams) {
 						const range = ranges.get(stream);
 						for (const built of recordsFor(stream, cycle)) {

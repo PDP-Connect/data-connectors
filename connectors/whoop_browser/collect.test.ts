@@ -2390,6 +2390,78 @@ test("collect: a stream whose grant ended long ago reads only its last week, a s
 	}
 });
 
+test("collect: a stretch two streams share delivers from the earlier one, reading the cycle under way there", async () => {
+	const sep = (day: string): number => Date.parse(`2026-09-${day}Z`);
+	const fake = fakeWhoop(
+		serve([
+			holding(
+				cycleAt(1_000_000_841, sep("10T00:00:00"), {
+					during: `['${iso(sep("10T00:00:00"))}','${iso(sep("16T00:00:00"))}')`,
+				}),
+				{ workouts: [workoutAt(977, sep("14T01:00:00"))] },
+			),
+			cycleAt(1_000_000_842, sep("16T00:00:00"), {
+				during: `['${iso(sep("16T00:00:00"))}',)`,
+			}),
+		]),
+	);
+	const h = await collect(fake, {
+		streams: ["sleeps", "workouts"],
+		ranges: {
+			sleeps: { since: iso(sep("17T00:00:00")) },
+			workouts: { since: iso(sep("14T00:00:00")) },
+		},
+	});
+	assert.deepEqual(idsOf(h, "workouts"), [uuid(977)]);
+});
+
+test("collect: a stretch that holds a shorter grant runs to the longer one's end", async () => {
+	// Both start afresh at the account's start; the workouts grant ends ten days in.
+	const until = FLOOR + 11 * DAY;
+	const h = await collect(fakeWhoop(fixtures()), {
+		streams: ["cycles", "workouts"],
+		ranges: { workouts: { until: iso(until) } },
+	});
+	assert.deepEqual(idsOf(h, "cycles"), FIXTURE_CYCLE_IDS);
+	assert.deepEqual(cursorsOf(h), {
+		cycles: cursorAt(FLOOR, NOW),
+		workouts: cursorAt(FLOOR, until),
+	});
+});
+
+test("collect: a cycle two stretches read in one run is emitted once", async () => {
+	// The cycles and workouts grants ended September 5; a strap left off from September 3 holds
+	// both their last week and the sleeps' delivery point.
+	const sep = (day: string): number => Date.parse(`2026-09-${day}Z`);
+	const until = sep("05T00:00:00");
+	const fake = fakeWhoop(
+		serve([
+			holding(
+				cycleAt(1_000_000_843, sep("03T00:00:00"), {
+					during: `['${iso(sep("03T00:00:00"))}',)`,
+				}),
+				{
+					sleeps: [sleepAt(978, sep("03T01:00:00"))],
+					workouts: [workoutAt(979, sep("04T01:00:00"))],
+				},
+			),
+		]),
+	);
+	const h = await collect(fake, {
+		streams: ["cycles", "sleeps", "workouts"],
+		ranges: { cycles: { until: iso(until) }, workouts: { until: iso(until) } },
+		state: {
+			cycles: cursorAt(FLOOR, until),
+			sleeps: cursorAt(FLOOR, NOW),
+			workouts: cursorAt(FLOOR, until),
+		},
+		now: LATER,
+	});
+	assert.deepEqual(idsOf(h, "cycles"), ["1000000843"]);
+	assert.deepEqual(idsOf(h, "sleeps"), [uuid(978)]);
+	assert.deepEqual(idsOf(h, "workouts"), [uuid(979)]);
+});
+
 test("collect: a walk past maxWindowsPerRun stops after that many windows, and the next run continues", async () => {
 	const pacing = { maxWindowsPerRun: 2 };
 	const fake = fakeWhoop(fixtures(CYCLES, LONG_BOOTSTRAP));
