@@ -202,6 +202,15 @@ function messagesOf(result: { messages?: unknown[] }, type: string) {
 	return messages.filter((m) => m.type === type);
 }
 
+/** Neither PROGRESS nor SKIP_RESULT, which the owner reads, may name a path. */
+function assertNoPathShown(result: { messages?: unknown[] }, dir: string) {
+	for (const type of ["PROGRESS", "SKIP_RESULT"]) {
+		for (const m of messagesOf(result, type)) {
+			assert.ok(!String(m.message).includes(dir), String(m.message));
+		}
+	}
+}
+
 const GAP_SUMMARY_PREFIX = "[apple_health-diagnostic] gap_summary ";
 
 /** The raw gap tally, which goes to the run log; the owner sees plain words. */
@@ -749,6 +758,9 @@ test("an import folder that cannot be read says so, not that nothing was uploade
 				for (const r of recordsOf(result, "coverage_diagnostics")) {
 					assert.equal(r.reason, "export_extraction_failed");
 				}
+				// The folder itself is the outcome, not a folder among the uploads.
+				assert.deepEqual(messagesOf(result, "PROGRESS"), []);
+				assertNoPathShown(result, dir);
 			} finally {
 				await chmod(dir, 0o755);
 			}
@@ -796,8 +808,68 @@ test("a folder among the uploads that cannot be read is named beside what was fo
 					for (const r of recordsOf(result, "coverage_diagnostics")) {
 						assert.equal(r.reason, c.reason);
 					}
+					assertUserFacingProgress(result.messages);
+					assertNoPathShown(result, dir);
 				} finally {
 					await chmod(join(dir, "lost+found"), 0o755);
+				}
+			}),
+		),
+	);
+});
+
+test("an upload that cannot be read is reported in a plain sentence, never by its error or path", {
+	skip: process.getuid?.() === 0 && "root reads a file whatever its mode",
+}, async () => {
+	// A file the connector may not open, and a .zip in a read-only folder,
+	// beside which its export cannot be unpacked. An error's message names
+	// the path; only its code goes to the run log.
+	const zip = buildZip([
+		{
+			name: "apple_health_export/export.xml",
+			data: exportTakenOn("2026-09-01"),
+		},
+	]);
+	const cases = [
+		{
+			stage: "inspect",
+			message: "The uploaded file could not be read, so nothing was imported.",
+			setUp: async (dir: string) => {
+				await writeFile(join(dir, "export.xml"), exportTakenOn("2026-09-01"));
+				await chmod(join(dir, "export.xml"), 0o000);
+			},
+			tearDown: (dir: string) => chmod(join(dir, "export.xml"), 0o644),
+		},
+		{
+			stage: "extract",
+			message:
+				"The export inside the uploaded .zip could not be unpacked, so nothing was imported.",
+			setUp: async (dir: string) => {
+				await mkdir(join(dir, "ro"));
+				await writeFile(join(dir, "ro", "export.zip"), zip);
+				await chmod(join(dir, "ro"), 0o555);
+			},
+			tearDown: (dir: string) => chmod(join(dir, "ro"), 0o755),
+		},
+	];
+	await Promise.all(
+		cases.map((c) =>
+			withImportDir({}, async (dir) => {
+				await c.setUp(dir);
+				try {
+					const result = await run(dir);
+					const [skip] = messagesOf(result, "SKIP_RESULT");
+					assert.equal(skip?.reason, "export_extraction_failed", c.stage);
+					assert.equal(skip?.message, c.message);
+					assertNoPathShown(result, dir);
+					assert.match(
+						result.stderr,
+						new RegExp(
+							`\\[apple_health-diagnostic\\] upload_unreadable \\{"stage":"${c.stage}","code":"EACCES"\\}`,
+						),
+					);
+				} finally {
+					await c.tearDown(dir);
 				}
 			}),
 		),

@@ -57,6 +57,7 @@ import {
 	ZipPolicyViolationError,
 	type ZipReadPolicy,
 } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { isoDate } from "./parsers.ts";
 
 // ─── Limits ─────────────────────────────────────────────────────────────
@@ -733,8 +734,16 @@ export function exportTooLargeMessage(limits: UploadLimits): string {
 	return `The export inside the uploaded .zip is larger than ${describeBytes(limits.maxExportBytes)}, the most this import reads.`;
 }
 
-function errorMessage(err: unknown): string {
-	return err instanceof Error ? err.message : String(err);
+/**
+ * Log why an upload could not be read, by its error code alone: an error's
+ * message names the path, and the owner is told only what happened.
+ */
+function logUnreadable(stage: "inspect" | "extract", err: unknown): void {
+	const code =
+		err instanceof Error && "code" in err && typeof err.code === "string"
+			? err.code
+			: null;
+	connectorDiagnostic("apple_health", "upload_unreadable", { stage, code });
 }
 
 async function inspectZipCandidate(
@@ -809,10 +818,11 @@ async function inspectUpload(
 				}
 			: { kind: "not_export" };
 	} catch (err) {
+		logUnreadable("inspect", err);
 		return {
 			kind: "failed",
 			cause: isXml ? "unreadable" : "damaged",
-			message: `Failed to read the uploaded ${isXml ? "file" : ".zip"}: ${errorMessage(err)}`,
+			message: `The uploaded ${isXml ? "file" : ".zip"} could not be read, so nothing was imported.`,
 		};
 	}
 }
@@ -876,9 +886,11 @@ async function readOut(
 			};
 		}
 	} catch (err) {
+		logUnreadable("extract", err);
 		return {
 			kind: "failed",
-			message: `Failed to extract the export from the uploaded .zip: ${errorMessage(err)}`,
+			message:
+				"The export inside the uploaded .zip could not be unpacked, so nothing was imported.",
 		};
 	}
 	return { kind: "export", exportedAt: found.exportedAt, path: extractionPath };
@@ -923,8 +935,8 @@ function newestFailure(
  *
  * Uploads are inspected one at a time, and only the leading export's zip is
  * held open, so that its directory is read once and its export extracted
- * from the same descriptor. A directory that cannot be listed is passed to
- * `onUnreadableDirectory` and skipped, and the number of uploads left
+ * from the same descriptor. A directory below the import folder that cannot
+ * be listed is passed to `onUnreadableDirectory` and skipped, and the number of uploads left
  * uninspected past MAX_UPLOADS to `onPassedOver`, for the caller to tell the
  * owner of beside what was found. The import folder itself, unlisted, is the
  * outcome, since nothing in it can be found.
@@ -939,8 +951,11 @@ export async function resolveUploadedExport(
 	const uploads = findUploads(
 		importDir,
 		(dir) => {
-			importDirUnlisted ||= dir === importDir;
-			onUnreadableDirectory?.(dir);
+			if (dir === importDir) {
+				importDirUnlisted = true;
+			} else {
+				onUnreadableDirectory?.(dir);
+			}
 		},
 		onPassedOver,
 	);
