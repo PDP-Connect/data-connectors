@@ -109,7 +109,10 @@ interface Held {
 	element: unknown;
 	start: number;
 }
-/** WHOOP as D found it: the cycles that start in the requested range, oldest first, cut at the limit. */
+/**
+ * WHOOP answering by a cycle's start: the cycles that start in the requested range, oldest first,
+ * cut at the limit. Which rule this endpoint follows is unverified; serveOverlap answers by overlap.
+ */
 const serve =
 	(held: Held[], bootstrap = BOOTSTRAP): Answer =>
 	(path) => {
@@ -119,6 +122,31 @@ const serve =
 		const { start, end, limit } = requestOf(path);
 		const records = held
 			.filter((h) => h.start >= start && h.start < end)
+			.sort((a, b) => a.start - b.start)
+			.slice(0, limit)
+			.map((h) => h.element);
+		return json({ records });
+	};
+
+/** A held cycle's end, or null while it is under way. */
+const endOf = (h: Held): number | null => {
+	const during = String((h.element as { cycle: Obj }).cycle.during);
+	const upper = /,\s*'([^']+)'/.exec(during)?.[1];
+	return upper ? Date.parse(upper) : null;
+};
+/**
+ * WHOOP answering by overlap, as its public API documents /v2/cycle: the cycles that start before
+ * the requested range ends and end after it begins, one under way ending at `now`.
+ */
+const serveOverlap =
+	(held: Held[], now = NOW): Answer =>
+	(path) => {
+		if (path === PROBE_PATH) {
+			return ok(BOOTSTRAP);
+		}
+		const { start, end, limit } = requestOf(path);
+		const records = held
+			.filter((h) => h.start < end && (endOf(h) ?? now.getTime()) > start)
 			.sort((a, b) => a.start - b.start)
 			.slice(0, limit)
 			.map((h) => h.element);
@@ -1310,13 +1338,16 @@ test("collect: a step back that fails skips the run with its cursor unmoved", as
 	assertSkips(h, "collection_interrupted", RETRY, streams);
 	assert.deepEqual(idsOf(h, "workouts"), []);
 	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(since, since) });
+	assert.deepEqual(fake.visits, [], "a step back reads the page it is on");
 });
 
-test("collect: lifting a grant's end delivers a workout after the old end, in a closed cycle that began weeks before", async () => {
-	// The review's second case: a cycle from August 5 to 25 holds a workout at 2026-08-21T01:00Z.
+/**
+ * The review's second case: a cycle from August 5 to 25 holds a workout at 2026-08-21T01:00Z,
+ * after a workouts grant's end on August 20.
+ */
+function august() {
 	const began = Date.parse("2026-08-05T00:00:00.000Z");
 	const closed = Date.parse("2026-08-25T00:00:00.000Z");
-	const until = Date.parse("2026-08-20T00:00:00.000Z");
 	const held = [
 		holding(
 			cycleAt(1_000_000_804, began, {
@@ -1326,6 +1357,11 @@ test("collect: lifting a grant's end delivers a workout after the old end, in a 
 		),
 		cycleAt(1_000_000_805, closed),
 	];
+	return { held, until: Date.parse("2026-08-20T00:00:00.000Z") };
+}
+
+test("collect: lifting a grant's end delivers a workout after the old end, in a closed cycle that began weeks before", async () => {
+	const { held, until } = august();
 	const streams = ["workouts"] as const;
 	const first = await collect(fakeWhoop(serve(held)), {
 		ranges: { workouts: { until: iso(until) } },
@@ -1339,6 +1375,41 @@ test("collect: lifting a grant's end delivers a workout after the old end, in a 
 	});
 	assert.deepEqual(idsOf(h, "workouts"), [uuid(955)]);
 	assert.deepEqual(cursorsOf(h), { workouts: cursorAt(FLOOR, NOW) });
+});
+
+test("collect: answered by overlap rather than by start, both of the review's cases deliver the same records, each once", async () => {
+	const runs = async (answer: (held: Held[], now: Date) => Answer) => {
+		const { held, ranges, streams } = strapOff();
+		const first = await collect(fakeWhoop(answer(held, NOW)), {
+			ranges,
+			streams,
+		});
+		const later = strapOff([workoutAt(954, NOW.getTime() + HOUR)]).held;
+		const next = await collect(fakeWhoop(answer(later, LATER)), {
+			ranges,
+			streams,
+			state: statesOf(first),
+			now: LATER,
+		});
+		const lift = august();
+		const ended = await collect(fakeWhoop(answer(lift.held, NOW)), {
+			ranges: { workouts: { until: iso(lift.until) } },
+			streams,
+		});
+		const lifted = await collect(fakeWhoop(answer(lift.held, NOW)), {
+			state: statesOf(ended),
+			streams,
+		});
+		return [first, next, ended, lifted].map((h) => idsOf(h, "workouts"));
+	};
+	const byStart = await runs((held) => serve(held));
+	assert.deepEqual(byStart, [
+		[uuid(953)],
+		[uuid(953), uuid(954)],
+		[],
+		[uuid(955)],
+	]);
+	assert.deepEqual(await runs(serveOverlap), byStart);
 });
 
 test("collect: a run that reads no window keeps its cursor, held to the grant's end", async () => {

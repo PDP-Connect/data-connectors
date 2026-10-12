@@ -470,6 +470,36 @@ test(
 	},
 );
 
+test(
+	"whoop_browser: the shipped entry starts, and answers a date-only since with scope_not_supported",
+	SUBPROCESS,
+	async () => {
+		// The runtime refuses a day-precision bound on an instant before it opens a browser, so this
+		// runs index.ts itself, through every check runConnector makes before collecting.
+		const run = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_DIR,
+			entrypoint: new URL("./index.ts", import.meta.url).pathname,
+			start: {
+				type: "START",
+				scope: {
+					streams: [{ name: "cycles", time_range: { since: "2026-09-01" } }],
+				},
+			},
+			timeoutMs: 30_000,
+		});
+		assertSucceeded(run);
+		assert.deepEqual(
+			run.messages
+				.filter(
+					(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+						m.type === "SKIP_RESULT",
+				)
+				.map((m) => [m.stream, m.reason]),
+			[["cycles", "scope_not_supported"]],
+		);
+	},
+);
+
 // ── Layer 5: manifest agreement ────────────────────────────────────────────
 interface Property {
 	type?: string | string[];
