@@ -138,9 +138,10 @@ function scopeFor(name: string, opts: RunOpts) {
 	};
 }
 
+/** Run the connector; whatever else a test asserts, its owner text is plain. */
 async function run(dir: string, opts: RunOpts = {}) {
 	const streams = opts.streams ?? [...DATA_STREAMS, "coverage_diagnostics"];
-	return await runConnectorProtocolSubprocess({
+	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
 		entrypoint: ENTRYPOINT,
 		env: {
@@ -161,6 +162,8 @@ async function run(dir: string, opts: RunOpts = {}) {
 			type: "START",
 		},
 	});
+	assertUserFacingProgress(result.messages);
+	return result;
 }
 
 function recordsOf(result: { messages?: unknown[] }, stream: string) {
@@ -697,7 +700,9 @@ test("past the upload limit, the newest uploads are compared and the rest are re
 		assert.equal(receipt?.status, "partial");
 		assert.ok(
 			messagesOf(result, "PROGRESS").some((m) =>
-				String(m.message).startsWith("Only the 100 most recently added"),
+				String(m.message).startsWith(
+					"You have more than 100 uploads and only 100 were checked",
+				),
 			),
 		);
 		assertUserFacingProgress(result.messages);
@@ -874,6 +879,36 @@ test("an upload that cannot be read is reported in a plain sentence, never by it
 			}),
 		),
 	);
+});
+
+test("the gap summary is one plain sentence, in the singular where it counts one", async () => {
+	const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<HealthData locale="en_US">
+ <ExportDate value="2026-09-01 12:00:00 -0500"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" endDate="2024-06-05 08:05:00 -0500" value="1"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="not a date" value="2"/>
+ <Record type="HKQuantityTypeIdentifierSomethingAppleAddsLater" unit="count" startDate="2024-06-05 09:00:00 -0500" endDate="2024-06-05 09:05:00 -0500" value="3"/>
+ <Record type="HKQuantityTypeIdentifierBodyMass" unit="kg" startDate="2024-06-05 10:00:00 -0500" endDate="2024-06-05 10:00:00 -0500" value=""/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 11:00:00 -0500" endDate="2024-06-05 11:05:00 -0500" value="4"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" unit="count" startDate="2024-06-05 11:00:00 -0500" endDate="2024-06-05 11:05:00 -0500" value="4"/>
+ <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="3" durationUnit="furlong" startDate="2024-06-05 07:00:00 -0500" endDate="2024-06-05 07:30:00 -0500">
+  <WorkoutRoute sourceName="Watch"/>
+ </Workout>
+</HealthData>
+`;
+	await withImportDir({ "export.xml": xml }, async (dir) => {
+		const result = await run(dir);
+		const lines = messagesOf(result, "PROGRESS").map((m) => String(m.message));
+		assert.equal(
+			lines.find((line) => line.startsWith("Skipped")),
+			"Skipped 2 records with no date; 1 record type not supported yet; 1 value left out because its unit could not be converted; 1 record with a blank value; 1 workout route not captured; 1 duplicate left out",
+			lines.join("\n"),
+		);
+		assert.ok(
+			lines.includes("Read 6 health records and 1 workout so far"),
+			lines.join("\n"),
+		);
+	});
 });
 
 test("an export that ends early is never reported as read completely", async () => {

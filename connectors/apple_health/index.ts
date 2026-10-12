@@ -877,6 +877,11 @@ function settleNotEmitted(
 		p.oversizedMetadata + p.oversizedEvents + p.oversizedStatistics;
 }
 
+/** `n` with the word for one or for many of it. */
+function noun(n: number, one: string, many: string): string {
+	return `${n} ${n === 1 ? one : many}`;
+}
+
 /**
  * Report the gap tally: one plain owner line on PROGRESS, the raw tally as a
  * diagnostic. Never silent: an empty tally still reports, and an export that
@@ -917,8 +922,6 @@ async function reportGapSummary(
 		workout_events_truncated: gaps.workoutEventsTruncated,
 		workout_statistics_truncated: gaps.workoutStatisticsTruncated,
 	});
-	const noun = (n: number, one: string, many: string): string =>
-		`${n} ${n === 1 ? one : many}`;
 	const parts: string[] = [];
 	const skipped: string[] = [];
 	if (gaps.recordsMissingStartDate > 0) {
@@ -947,7 +950,7 @@ async function reportGapSummary(
 		gaps.unrecognizedUnitsUnnamed;
 	if (unconvertible > 0) {
 		parts.push(
-			`${noun(unconvertible, "value", "values")} left out because their unit could not be converted`,
+			`${noun(unconvertible, "value", "values")} left out because ${unconvertible === 1 ? "its unit" : "their units"} could not be converted`,
 		);
 	}
 	if (gaps.emptyValues > 0) {
@@ -973,7 +976,7 @@ async function reportGapSummary(
 	const tooLarge = oversizedSkipped.reduce((sum, [, n]) => sum + n, 0);
 	if (tooLarge > 0) {
 		parts.push(
-			`${noun(tooLarge, "entry", "entries")} too large to read were skipped`,
+			`${noun(tooLarge, "entry", "entries")} too large to read ${tooLarge === 1 ? "was" : "were"} skipped`,
 		);
 	}
 	const beyondLimit = [
@@ -1213,7 +1216,7 @@ runConnector({
 
 		// Uploads past MAX_UPLOADS were not inspected, and the newest export
 		// may be among them, so the owner is told of them too.
-		const notAllCompared = `Only the ${MAX_UPLOADS} most recently added of your uploads were compared, so a newer export among the others may not have been read.`;
+		const notAllCompared = `You have more than ${MAX_UPLOADS} uploads and only ${MAX_UPLOADS} were checked, so a newer export among the others may not have been read.`;
 		if (passedOver > 0) {
 			connectorDiagnostic("apple_health", "uploads_passed_over", {
 				compared: MAX_UPLOADS,
@@ -1227,7 +1230,10 @@ runConnector({
 				type: "SKIP_RESULT",
 				stream: skipStream,
 				reason: "export_extraction_failed",
-				message: resolved.message,
+				message:
+					passedOver > 0
+						? `${resolved.message} ${notAllCompared}`
+						: resolved.message,
 			});
 			return;
 		}
@@ -1311,7 +1317,10 @@ runConnector({
 					records_parsed: rc,
 					workouts_parsed: wc,
 				});
-				return progress(`Read ${rc} health records and ${wc} workouts so far`);
+				return progress(
+					`Read ${noun(rc, "health record", "health records")} and ${noun(wc, "workout", "workouts")} so far`,
+					{ count: rc + wc },
+				);
 			},
 			onRecord: (el): Promise<void> => handleRecord(el, run),
 			onWorkout: (el): Promise<void> => handleWorkout(el, run),

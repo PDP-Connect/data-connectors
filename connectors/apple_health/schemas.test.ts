@@ -30,6 +30,7 @@ import {
 	validateRecord,
 	workoutsSchema,
 } from "./schemas.ts";
+import { MAX_UPLOADS } from "./uploads.ts";
 
 // Shaped exactly as buildHealthRecord(...) returns. A numeric quantity record
 // (heart rate): value is a finite float, value_raw is null.
@@ -294,6 +295,26 @@ const PAIRS: ReadonlyArray<[string, z.ZodObject<z.ZodRawShape>]> = [
 	["workouts", workoutsSchema],
 	["coverage_diagnostics", coverageDiagnosticsSchema],
 ];
+
+test("the copy for uploads past the limit names the limit the code applies", () => {
+	const parsed = JSON.parse(
+		readFileSync(manifestPath("apple_health"), "utf8"),
+	) as { reason_display_messages: Record<string, string> };
+	assert.match(
+		parsed.reason_display_messages.uploads_not_all_compared ?? "",
+		new RegExp(
+			`^You have more than ${MAX_UPLOADS} uploads and only ${MAX_UPLOADS} were checked`,
+		),
+	);
+	const reason = manifestStreams().get("coverage_diagnostics")?.schema
+		.properties.reason as { description?: string } | undefined;
+	assert.match(
+		reason?.description ?? "",
+		new RegExp(
+			`more than ${MAX_UPLOADS} uploads and only ${MAX_UPLOADS} were inspected`,
+		),
+	);
+});
 
 test("parity: an id is derived from exactly the fields its stream requires", () => {
 	// Required fields are sent under every grant, so an id over exactly these
