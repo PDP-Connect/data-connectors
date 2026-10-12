@@ -574,3 +574,107 @@ test("the veil draws at once when the root exists and stays off other hosts", ()
   assert.equal(other.appended.length, 0, "no veil on the redirect host");
   assert.equal(other.context.window.__vanaOuraRemoveVeil, undefined);
 });
+
+// createApiApplicationWithUser over a fake portal: the registration API, the
+// applications list and the Create New form, with the DOM calls recorded.
+const createAppHarness = ({ registrationStatus, appAfter }) => {
+  const app = {
+    client_id: "client-1",
+    application_name: "Personal access",
+    redirect_uris: ["https://vana.org/oauth/oura/callback"],
+    scopes: ["extapi:daily"],
+  };
+  const state = { created: false, registrations: [], domCalls: [] };
+  const page = {
+    sleep: async () => {},
+    evaluate: async (source) => {
+      if (!source.includes("portalFetch")) {
+        state.domCalls.push(source);
+        if (source.includes("create application")) {
+          if (appAfter === "form") state.created = true;
+          return "submitted";
+        }
+        return true;
+      }
+      return vm.runInNewContext(source, {
+        setTimeout: (fn) => fn(),
+        fetch: async (path, init) => {
+          if (path.endsWith("/registration")) {
+            state.registrations.push(JSON.parse(init.body));
+            if (registrationStatus >= 200 && registrationStatus < 300) state.created = true;
+            return { ok: registrationStatus < 300, status: registrationStatus, text: async () => JSON.stringify({ detail: [{ loc: ["body", "tos"] }] }) };
+          }
+          return { ok: true, status: 200, text: async () => JSON.stringify(state.created ? [app] : []) };
+        },
+      });
+    },
+  };
+  const source = [
+    "let currentStep = null;",
+    "const STEPS = { portalApp: 'portal_app' };",
+    "const CODES = { appListFailed: 'portal_app_list_failed', appNotCreated: 'portal_app_not_created' };",
+    "const APP_NAME = 'Personal access';",
+    "const APP_REDIRECT_URI = 'https://vana.org/oauth/oura/callback';",
+    "const APP_SCOPE = 'extapi:daily';",
+    "const APPS_URL = 'https://developer.ouraring.com/applications';",
+    "const CREATE_FORM_GRACE_MS = 15000;",
+    "const INTERACTION_TIMEOUT_MS = 1;",
+    "const makeFatalRunError = (errorClass, code, reason, step) => {",
+    "  const error = new Error(reason);",
+    "  error.telemetryError = { errorClass, code, reason, step };",
+    "  return error;",
+    "};",
+    "const workingState = () => ({});",
+    "const showOverlay = async () => {};",
+    "const hideOverlay = async () => {};",
+    "const safeGoto = async () => true;",
+    "const isOnPortal = () => true;",
+    "const currentUrl = async () => APPS_URL;",
+    "const waitFor = async (check) => { for (let i = 0; i < 5; i++) { const v = await check(); if (v) return v; } return null; };",
+    credentialSource("const PORTAL_API_ATTEMPTS =", "const VEIL_SOURCE ="),
+    "const evaluateSettled = (source) => page.evaluate(source);",
+    credentialSource("const PORTAL_FETCH_SOURCE =", "const portalApi ="),
+    credentialSource("const portalApi =", "// The authorization-code flow"),
+    credentialSource("const isUsableApp =", "// ── OAuth2 authorization-code flow"),
+    "globalThis.connector = { createApiApplicationWithUser };",
+  ].join("\n");
+  const context = vm.createContext({ page, console: { error: () => {} } });
+  vm.runInContext(source, context, { filename: "oura-playwright-create-app.js" });
+  return { connector: context.connector, state };
+};
+
+test("the app is created through the registration API with the form's values", async () => {
+  const { connector, state } = createAppHarness({ registrationStatus: 200 });
+  assert.equal(await connector.createApiApplicationWithUser("person@example.com"), "client-1");
+  assert.equal(state.registrations.length, 1);
+  assert.deepEqual({ ...state.registrations[0] }, {
+    application_name: "Personal access",
+    description: "Personal connector that exports my own Oura readiness, sleep and activity data to my Vana account.",
+    contact_email: "person@example.com",
+    website: "https://vana.org",
+    privacy_policy: "https://vana.org/privacy",
+    tos: "https://vana.org/terms",
+    redirect_uris: ["https://vana.org/oauth/oura/callback"],
+    scopes: ["extapi:daily"],
+    group_id: "",
+    api_agreement: "v1.0.0",
+  });
+  assert.equal(state.domCalls.length, 0, "the Create New form is never opened");
+});
+
+test("a refused registration falls back to the Create New form, found by field name", async () => {
+  const { connector, state } = createAppHarness({ registrationStatus: 422, appAfter: "form" });
+  assert.equal(await connector.createApiApplicationWithUser("person@example.com"), "client-1");
+  assert.equal(state.registrations.length, 1);
+  const dom = state.domCalls.join("\n");
+  assert.match(dom, /create-new-application-button/);
+  assert.match(dom, /input\[name="application_name"\]/, "waits for the rendered form");
+  assert.match(dom, /api_agreement/);
+});
+
+test("without a contact email the registration API is skipped", async () => {
+  const { connector, state } = createAppHarness({ registrationStatus: 200, appAfter: "form" });
+  assert.equal(await connector.createApiApplicationWithUser(null), "client-1");
+  assert.equal(state.registrations.length, 0);
+  assert.ok(state.domCalls.length > 0);
+});
