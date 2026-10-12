@@ -2364,7 +2364,8 @@ test("collect: a stream whose grant ended long ago reads only its last week, a s
 	const streams = ["cycles", "sleeps"] as const;
 	const until = Date.parse("2025-02-01T00:00:00.000Z");
 	const ranges = { cycles: { until: iso(until) } };
-	const pacing = { maxWindowsPerRun: 3 };
+	// One window a run: the past week's re-read is not held to it, so it starves no stretch.
+	const pacing = { maxWindowsPerRun: 1 };
 	let state: Record<string, unknown> = everyStream(
 		cursorAt(LONG_FLOOR, NOW),
 		streams,

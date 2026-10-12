@@ -743,6 +743,8 @@ export async function collectWhoopBrowser(
 	};
 	const plans = new Map<Stream, StreamPlan>();
 	let windows = 0;
+	/** Windows that re-read a week already delivered to its grant's end: not held to maxWindowsPerRun. */
+	let rereads = 0;
 	let deferred = false;
 	if (facts) {
 		const created = instant(facts.createdAt);
@@ -873,8 +875,15 @@ export async function collectWhoopBrowser(
 			const starts: number[] = [];
 			let from = start;
 			let stop: Failure | "deferred" | null = null;
+			// Every stream here delivered to its grant's end: the stretch re-reads that last week
+			// alone, so its cost is bounded and it never holds a later stretch back.
+			const settled = own.every(
+				(plan) =>
+					plan.until !== null && Date.parse(plan.cursor.through) >= plan.until,
+			);
+			const spent = windows;
 			while (from < end) {
-				if (windows >= p.maxWindowsPerRun) {
+				if (!settled && windows - rereads >= p.maxWindowsPerRun) {
 					stop = "deferred";
 					break;
 				}
@@ -940,6 +949,7 @@ export async function collectWhoopBrowser(
 					}
 				}
 			}
+			if (settled) rereads += windows - spent;
 			// For each stream, the cycle under way where it next delivers from, when this stretch
 			// read every cycle that starts between that cycle's start and there.
 			for (const plan of clean ? own : []) {
