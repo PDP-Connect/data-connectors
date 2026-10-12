@@ -2505,6 +2505,38 @@ test("collect: a grant narrowed to a later day whose run reads the days it holds
 	]);
 });
 
+test("collect: a narrower until whose run reads only kept days near it leaves the cursor's open until, though a record there never reads", async () => {
+	// 20:00Z on the 19th, the 20th on the owner's clock: inside the narrower grant, kept on every run.
+	const account = () =>
+		fakeGarmin(
+			site((data) => {
+				activityAt(data, 7501, "2026-09-19 20:00:00", "2026-09-20 08:00:00", {
+					distance: "far",
+				});
+			}),
+		);
+	const open = { since: MIDNIGHT };
+	const first = await activitiesRun(open, undefined, account());
+	const narrow = await activitiesRun(
+		{ since: MIDNIGHT, until: "2026-09-20T00:00:00.000Z" },
+		first,
+		account(),
+	);
+	assert.deepEqual(progressOf(narrow), [{ stream: "activities", count: 1 }]);
+	assert.equal(
+		Object.hasOwn(statesOf(narrow).activities as object, "until_at"),
+		false,
+	);
+	// The open grant does not go back to the narrower until: its re-read, then the kept days.
+	const fake = account();
+	await activitiesRun(open, narrow, fake);
+	assert.deepEqual(piecesOf(fake), [
+		["2026-10-04", "2026-10-31"],
+		["2026-11-01", "2026-11-01"],
+		["2026-09-13", "2026-10-03"],
+	]);
+});
+
 test("collect: grants alternating on one cursor, one narrower at an edge whose held days lie behind the re-read, cost the wider one only its re-read", async () => {
 	const wide = { since: MIDNIGHT };
 	const cases = [

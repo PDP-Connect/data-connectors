@@ -787,7 +787,12 @@ function keepWider(
 		const at = grant[edge];
 		if (!narrower[edge] || at === undefined) continue;
 		const held = heldBy(at, grant.filed_after ?? 0);
-		if (segments.some((segment) => intersects(segment, held))) continue;
+		// At the until, mark() keeps those days on the retry list, so kept days read again there hold
+		// back nothing the wider until does not still keep.
+		const holds = (segment: Segment): boolean =>
+			intersects(segment, held) &&
+			!(edge === "until_at" && segment.kind === "retry");
+		if (segments.some(holds)) continue;
 		const wider = claim[edge];
 		if (wider === undefined) delete cursor[edge];
 		else cursor[edge] = wider;
