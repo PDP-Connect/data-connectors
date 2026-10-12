@@ -793,14 +793,17 @@ function keepWider(
 	}
 }
 
-/** Pure: the days this run reads, the `overlap` days before the cursor among them, and the cursor it starts from. */
+/**
+ * Pure: the days this run reads, the `overlap` days before the cursor among them, the cursor it
+ * starts from, and the days its grant can hold records back on.
+ */
 export function planDays(
 	prev: DayCursor,
 	today: string,
 	grant: DayRange,
 	fullRefresh: boolean,
 	overlap: number,
-): { cursor: DayCursor; segments: Segment[] } {
+): { cursor: DayCursor; segments: Segment[]; held: Window[] } {
 	const { since, until } = grant;
 	const last = until && addDays(until, -1) < today ? addDays(until, -1) : today;
 	// Restart on full_refresh, on a first run, and when the grant starts past the cursor.
@@ -859,17 +862,35 @@ export function planDays(
 		segments.push({ kind: "retry", ...span });
 	}
 	if (!fresh) keepWider(cursor, claim, grant, segments);
-	return { cursor, segments };
+	const held = [grant.since_at, grant.until_at].flatMap((at) =>
+		at === undefined ? [] : [heldBy(at, grant.filed_after ?? 0)],
+	);
+	return { cursor, segments, held };
 }
 
 /**
  * Records how a day or window read in full went: one with an unreadable record joins the retry
- * list, a clean one leaves it. The list stays raw while the run reads: `settle` puts it in its one
- * form, cap included, once at the end, so a day read again is never let go twice.
+ * list, a clean one leaves it, except on the days the grant holds records back on (`held`), where a
+ * record outside the grant is neither delivered nor counted, so a kept one may still not read. The
+ * list stays raw while the run reads: `settle` puts it in its one form, cap included, once at the
+ * end, so a day read again is never let go twice.
  */
-function mark(cursor: DayCursor, span: Window, keep: boolean): void {
+function mark(
+	cursor: DayCursor,
+	span: Window,
+	keep: boolean,
+	held: readonly Window[],
+): void {
 	const spans = cursor.retry ?? [];
-	cursor.retry = keep ? [...spans, span] : subtract(spans, span);
+	if (keep) {
+		cursor.retry = [...spans, span];
+		return;
+	}
+	const read = held.reduce(
+		(parts, days) => parts.flatMap((part) => subtract([part], days)),
+		[span],
+	);
+	cursor.retry = read.reduce((list, part) => subtract(list, part), spans);
 }
 
 /** Normalises and caps the retry list once a stream's reading is done. Answers how many days the cap let go. */
@@ -1021,7 +1042,7 @@ async function walkDays(s: StreamRun, stream: DayStream): Promise<Walk> {
 			if (unreadable) walk.unreadable += 1;
 			tally(walk, segment, unreadable);
 			// An unreadable day advances too: PROGRESS counts it, and the retry list keeps it.
-			mark(plan.cursor, { from: day, to: day }, unreadable);
+			mark(plan.cursor, { from: day, to: day }, unreadable, plan.held);
 			advance(plan.cursor, segment, day);
 		}
 	}
@@ -1134,7 +1155,7 @@ async function walkWindows(s: StreamRun, stream: RangeStream): Promise<Walk> {
 			}
 			const keep = read.unreadable > 0;
 			tally(walk, segment, keep);
-			mark(plan.cursor, window, keep);
+			mark(plan.cursor, window, keep, plan.held);
 			for (let day = window.from; day <= window.to; day = addDays(day, 1)) {
 				advance(plan.cursor, segment, day);
 			}

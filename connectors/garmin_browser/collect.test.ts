@@ -2844,6 +2844,70 @@ test("collect: days a widening reads again come before the kept days, so a full 
 	});
 });
 
+/**
+ * Activity 7001, 06:00Z on 20 May, as an account where it does not read (first) and where it does:
+ * its window is kept on a first run since 1 May.
+ */
+const MAY = () => {
+	const account = (unreadable: boolean) =>
+		fakeGarmin(
+			site((data) => {
+				activityAt(
+					data,
+					7001,
+					"2026-05-20 06:00:00",
+					"2026-05-20 18:00:00",
+					unreadable ? { distance: "far" } : {},
+				);
+			}),
+		);
+	return { kept: () => account(true), reads: () => account(false) };
+};
+
+test("collect: a kept day that a narrower start reads cleanly stays kept where that start holds records back, so a grant with no start still ships what did not read", async () => {
+	const may = MAY();
+	const first = await activitiesRun(
+		{ since: "2026-05-01T00:00:00.000Z" },
+		undefined,
+		may.kept(),
+	);
+	assert.deepEqual(progressOf(first), [{ stream: "activities", count: 1 }]);
+	// 7001 reads now, but starts a millisecond before this grant.
+	const narrow = await activitiesRun(
+		{ since: "2026-05-20T06:00:00.001Z" },
+		first,
+		may.reads(),
+	);
+	assert.deepEqual(idsOf(narrow, "activities"), []);
+	assert.deepEqual((statesOf(narrow).activities as { retry?: unknown }).retry, [
+		span("2026-04-30", "2026-05-21"),
+	]);
+	const open = await activitiesRun({}, narrow, may.reads());
+	assert.ok(idsOf(open, "activities").includes("7001"));
+});
+
+test("collect: a kept day that a narrower until reads cleanly stays kept where that until holds records back, so a grant with no bounds still ships what did not read", async () => {
+	const may = MAY();
+	const first = await activitiesRun(
+		{ since: "2026-05-01T00:00:00.000Z" },
+		undefined,
+		may.kept(),
+	);
+	// 7001 reads now, but starts after this until; the refresh forgets where reading stood.
+	const ended = await activitiesRun(
+		{ until: "2026-05-20T00:00:00.000Z" },
+		first,
+		may.reads(),
+		{ mode: "full_refresh" },
+	);
+	assert.deepEqual(idsOf(ended, "activities"), []);
+	assert.deepEqual((statesOf(ended).activities as { retry?: unknown }).retry, [
+		span("2026-05-19", "2026-05-27"),
+	]);
+	const open = await activitiesRun({}, ended, may.reads());
+	assert.ok(idsOf(open, "activities").includes("7001"));
+});
+
 // ── Days kept to read again ────────────────────────────────────────────────
 /** Older than the overlap week of every run here. */
 const HISTORY = "2026-08-01";
