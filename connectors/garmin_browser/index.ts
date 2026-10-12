@@ -469,9 +469,10 @@ async function fetchJson(
  * read cleanly: later runs read them again until they do, as long as the list holds them
  * (MAX_RETRY_DAYS); with none, the key is absent. `retry_next` is the kept day the next run starts
  * reading again from, round to the oldest: present only when a run stopped before reading every
- * kept day again. `since_at` and `until_at`, for a stream consented by instant, are the grant the
- * cursor was last read with: on the days from `floor` up to `next_day`, every record that starts
- * inside it has been delivered, or its day is kept in `retry`. Each is absent for an open end.
+ * kept day again. `since_at` and `until_at`, for a stream consented by instant, are the grant
+ * instants its days are complete for: on the days from `floor` up to `next_day`, every record that
+ * starts inside them has been delivered, or its day is kept in `retry`. Each is absent for an open
+ * end.
  * `backfill.until_at` is the earliest until the history below the floor was read under, absent
  * while every such read was open.
  */
@@ -682,9 +683,9 @@ const isBefore = (a: string, b: string): boolean =>
 	isOutsideTimeRange({ since: b }, a);
 
 /**
- * The last day a record starting before `at` can be filed under: the UTC day of the last millisecond
- * before it, plus `after`. Date.parse keeps milliseconds only, so of an `at` with more digits the
- * millisecond it keeps is itself before `at`.
+ * The last day a record starting before `at` can be filed under: the UTC day of the last
+ * millisecond before it, plus `after`. Date.parse keeps milliseconds only, so of an `at` with more
+ * digits the millisecond it keeps is itself before `at`.
  */
 function lastFiledBefore(at: string, after: number): string {
 	const ms = Date.parse(at);
@@ -743,15 +744,16 @@ export function inRange(startAt: unknown, range: Range | undefined): boolean {
 }
 
 /**
- * Readies a saved cursor for a grant that reaches past the one it was last read with, at either
- * end, to the instant. A record starting at t is filed from the day before t's UTC day to
- * FILED_AFTER days past it, so the days after the last one a record starting before `since_at` can
- * be filed under, and before the first one a record starting at or after `until_at` can be, hold
- * only records that start inside the cursor's grant: delivered, or their days kept in `retry`. The
- * days outside those are read again: the floor rises to the first of them, so the history below it
- * is read from the new grant's start, and `next_day` falls back to the last of them, so the forward
- * read goes on from there. History read part way under the narrower grant is read again: all of it
- * for an earlier start, and from the day before the old until's UTC day for a later until.
+ * Readies a saved cursor for a grant that reaches past the grant instants its days are complete
+ * for, at either end, to the instant. A record starting at t is filed from the day before t's UTC
+ * day to FILED_AFTER days past it, so the days after the last one a record starting before
+ * `since_at` can be filed under, and before the first one a record starting at or after `until_at`
+ * can be, hold only records that start inside the cursor's grant: delivered, or their days kept in
+ * `retry`. The days outside those are read again: the floor rises to the first of them, so the
+ * history below it is read from the new grant's start, and `next_day` falls back to the last of
+ * them, so the forward read goes on from there. History read part way is read again: all of it for
+ * an earlier start, and from the day before an until's UTC day for a grant reaching past that
+ * until, the cursor's or the one the history was read under.
  */
 function widen(cursor: DayCursor, grant: DayRange): void {
 	const { since_at, until_at } = cursor;
