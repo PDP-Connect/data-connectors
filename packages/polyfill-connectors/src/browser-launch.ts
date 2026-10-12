@@ -36,6 +36,11 @@ import {
 	removeChromiumSingletonResidue,
 	withProfileLockMutex,
 } from "./profile-lock.ts";
+import {
+	embedDownloadBodiesInHarFile,
+	readDownloadBodies,
+	trackRunOwnedDownloads,
+} from "./remote-download-har.ts";
 import { trackRunOwnedPages } from "./run-owned-pages.ts";
 import { isRunningInContainer } from "./runtime-environment.ts";
 
@@ -964,12 +969,18 @@ async function acquireRemoteCdpBrowser(
 	// Pages this client creates (and the popups they open) are the only pages
 	// release() may close. See `run-owned-pages.ts`.
 	const runPages = trackRunOwnedPages(context);
+	// Downloads of run-owned pages, so release() can put their bodies into
+	// the HAR (see `remote-download-har.ts`).
+	const runDownloads = harRecording
+		? trackRunOwnedDownloads(context, runPages.owns)
+		: null;
 	if (harRecording) {
 		await startRemoteCdpHarRecording({
 			browser,
 			context,
 			harPath: harRecording.path,
 			onFailure: () => {
+				runDownloads?.dispose();
 				runPages.dispose();
 				browser.off("disconnected", onDisconnected);
 			},
@@ -983,6 +994,12 @@ async function acquireRemoteCdpBrowser(
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
 			releaseRequested = true;
+			// Read download bytes while the pages and the context are still
+			// open: Playwright deletes download artifacts with the context.
+			const downloadBodies = runDownloads
+				? await readDownloadBodies(runDownloads.downloads())
+				: [];
+			runDownloads?.dispose();
 			if (recording) {
 				// A recording run leaves its page open so storage state can still
 				// be read here (see `shouldCloseBrowserPageAfterRun`). On a local
@@ -1009,6 +1026,10 @@ async function acquireRemoteCdpBrowser(
 						`[browser-launch] remote CDP HAR export failed profile=${profileName}: ${err instanceof Error ? err.message : String(err)}\n`,
 					);
 				}
+				await embedDownloadBodiesInHarFile(
+					harRecording.path,
+					downloadBodies,
+				).catch(() => 0);
 				await redactHarFileBestEffort(harRecording.path);
 			}
 			try {

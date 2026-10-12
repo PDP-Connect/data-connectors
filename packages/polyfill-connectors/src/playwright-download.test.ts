@@ -9,6 +9,7 @@ import { Readable } from "node:stream";
 import test from "node:test";
 
 import {
+	copyMirroredRemoteDownload,
 	type PlaywrightDownloadLike,
 	readPlaywrightDownloadBuffer,
 	readPlaywrightDownloadBufferDetailed,
@@ -252,4 +253,74 @@ test("readPlaywrightDownloadBufferDetailed: surfaces zero-byte fallback evidence
 	assert.equal(outcome.source, "createReadStream");
 	assert.equal(outcome.saveAsError, "saveAs_returned_zero_bytes");
 	assert.equal(outcome.bytes, 0);
+});
+
+test("copyMirroredRemoteDownload: off unless PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS is a positive number", async () => {
+	let pathCalls = 0;
+	const download = {
+		path: async () => {
+			pathCalls += 1;
+			return "/nonexistent";
+		},
+		saveAs: async () => undefined,
+	};
+	for (const value of [undefined, "", "0", "-5", "abc"]) {
+		const env: NodeJS.ProcessEnv =
+			value === undefined
+				? {}
+				: { PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS: value };
+		assert.equal(
+			await copyMirroredRemoteDownload(download, "/unused", env),
+			null,
+		);
+	}
+	assert.equal(pathCalls, 0);
+});
+
+test("copyMirroredRemoteDownload: copies the mirrored file once it appears, and gives up after the timeout", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-download-mirror-"));
+	try {
+		const { writeFile } = await import("node:fs/promises");
+		const mirrored = join(dir, "artifact");
+		const target = join(dir, "out.zip");
+		setTimeout(() => {
+			writeFile(mirrored, "mirrored-bytes").catch(() => undefined);
+		}, 300);
+		const env = { PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS: "5000" };
+		const download = {
+			failure: async () => null,
+			path: async () => mirrored,
+			saveAs: async () => {
+				throw new Error("saveAs must not run when the mirror has the file");
+			},
+		};
+		assert.equal(
+			await copyMirroredRemoteDownload(download, target, env),
+			"mirrored-bytes".length,
+		);
+		assert.equal(await readFile(target, "utf8"), "mirrored-bytes");
+
+		const never = {
+			failure: async () => null,
+			path: async () => join(dir, "never"),
+			saveAs: async () => undefined,
+		};
+		assert.equal(
+			await copyMirroredRemoteDownload(never, join(dir, "x"), {
+				PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS: "500",
+			}),
+			null,
+		);
+		const failed = {
+			failure: async () => "canceled",
+			path: async () => mirrored,
+			saveAs: async () => undefined,
+		};
+		assert.equal(
+			await copyMirroredRemoteDownload(failed, join(dir, "y"), env),
+			null,
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });

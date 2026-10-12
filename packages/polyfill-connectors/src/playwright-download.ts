@@ -15,6 +15,7 @@
 
 import { createWriteStream } from "node:fs";
 import {
+	copyFile,
 	mkdir,
 	mkdtemp,
 	readFile,
@@ -29,7 +30,10 @@ import type { Download } from "playwright";
 
 export type PlaywrightDownloadLike = Pick<Download, "saveAs"> &
 	Partial<
-		Pick<Download, "createReadStream" | "failure" | "suggestedFilename" | "url">
+		Pick<
+			Download,
+			"createReadStream" | "failure" | "path" | "suggestedFilename" | "url"
+		>
 	>;
 
 /**
@@ -111,6 +115,10 @@ export async function savePlaywrightDownloadDetailed(
 		await writeFile(targetPath, dataUrlBuffer);
 		return { bytes: dataUrlBuffer.length, source: "dataUrl" };
 	}
+	const mirrored = await copyMirroredRemoteDownload(download, targetPath);
+	if (mirrored !== null) {
+		return { bytes: mirrored, source: "saveAs" };
+	}
 	let saveAsError: string | undefined;
 	try {
 		await download.saveAs(targetPath);
@@ -146,6 +154,57 @@ export async function savePlaywrightDownloadDetailed(
 			{ cause: streamErr },
 		);
 	}
+}
+
+const MIRROR_POLL_MS = 250;
+
+/**
+ * Remote-CDP download mirror. Over `connectOverCDP` Chrome writes a download
+ * to Playwright's downloads path, which is a path on THIS machine; a browser
+ * on another machine writes it to that same path on its own disk, so
+ * `saveAs` cannot reach it. A host that mirrors that directory back (same
+ * absolute path, each file appearing once complete) sets
+ * `PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS`, and the download is copied from
+ * the mirrored file once it appears. Returns the byte count, or null when
+ * the mirror is off, the download failed, or the file did not appear in
+ * time; the caller then takes the normal `saveAs` path.
+ */
+export async function copyMirroredRemoteDownload(
+	download: PlaywrightDownloadLike,
+	targetPath: string,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<number | null> {
+	const timeoutMs = Number(env.PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS);
+	if (!download.path || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+		return null;
+	}
+	let localPath: string | null;
+	try {
+		localPath = await download.path();
+	} catch {
+		return null;
+	}
+	if (!localPath) {
+		return null;
+	}
+	const failure = download.failure
+		? await download.failure().catch((): null => null)
+		: null;
+	if (failure) {
+		return null;
+	}
+	// Counted polls instead of Date.now(): the clock is traced during a
+	// scenario recording, and a replay never takes this path, so an extra
+	// clock read here would shift every later recorded value.
+	for (let waited = 0; waited < timeoutMs; waited += MIRROR_POLL_MS) {
+		const size = await statSize(localPath);
+		if (size > 0) {
+			await copyFile(localPath, targetPath);
+			return size;
+		}
+		await new Promise((resolve) => setTimeout(resolve, MIRROR_POLL_MS));
+	}
+	return null;
 }
 
 async function statSize(path: string): Promise<number> {
