@@ -316,6 +316,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		sleeps: { field: "start_at", format: "date-time" },
 		workouts: { field: "start_at", format: "date-time" },
 	},
+	whoop_browser: {
+		cycles: { field: "start_at", format: "date-time" },
+		recoveries: { field: "start_at", format: "date-time" },
+		sleeps: { field: "start_at", format: "date-time" },
+		workouts: { field: "start_at", format: "date-time" },
+	},
 	x_browser: {
 		bookmarks: null,
 		likes: null,
