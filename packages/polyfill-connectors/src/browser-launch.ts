@@ -38,7 +38,6 @@ import {
 } from "./profile-lock.ts";
 import {
 	embedDownloadBodiesInHarFile,
-	readDownloadBodies,
 	trackRunOwnedDownloads,
 } from "./remote-download-har.ts";
 import { trackRunOwnedPages } from "./run-owned-pages.ts";
@@ -1015,11 +1014,11 @@ async function acquireRemoteCdpBrowser(
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
 			releaseRequested = true;
-			// Read download bytes while the pages and the context are still
-			// open: Playwright deletes download artifacts with the context.
-			const downloadBodies = runDownloads
-				? await readDownloadBodies(runDownloads.downloads())
-				: [];
+			// Captures started with each download; this waits only for the ones
+			// still running, each within its own window, while the pages and
+			// the context are open (Playwright deletes download artifacts with
+			// the context).
+			const downloadBodies = runDownloads ? await runDownloads.bodies() : [];
 			runDownloads?.dispose();
 			reusedRunPages.dispose();
 			if (recording) {

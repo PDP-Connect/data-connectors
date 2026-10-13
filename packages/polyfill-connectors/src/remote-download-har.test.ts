@@ -9,9 +9,9 @@ import { join } from "node:path";
 import test from "node:test";
 import type { BrowserContext, Download, Page } from "playwright";
 import {
+	captureDownloadBody,
 	embedDownloadBodies,
 	embedDownloadBodiesInHarFile,
-	readDownloadBodies,
 	trackRunOwnedDownloads,
 } from "./remote-download-har.ts";
 
@@ -46,65 +46,126 @@ function fakeDownload(fields: {
 	};
 }
 
-test("trackRunOwnedDownloads keeps downloads of run-owned pages only, including pages that appear later", () => {
-	const owned = fakePage();
-	const foreign = fakePage();
-	const context = fakeContext([owned, foreign]);
-	const ownedSet = new Set<Page>([owned]);
-	const tracker = trackRunOwnedDownloads(context, (page) => ownedSet.has(page));
+const sleep = (ms: number): Promise<void> =>
+	new Promise((resolve) => {
+		setTimeout(resolve, ms);
+	});
 
-	const ownedDownload = { url: () => "https://example.test/export.zip" };
-	const foreignDownload = { url: () => "https://example.test/private.pdf" };
-	owned.emit("download", ownedDownload);
-	foreign.emit("download", foreignDownload);
+test("trackRunOwnedDownloads captures downloads of run-owned pages only, including pages that appear later", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "remote-download-track-"));
+	try {
+		const file = (name: string) => join(dir, name);
+		await writeFile(file("owned"), "owned-bytes");
+		await writeFile(file("foreign"), "foreign-bytes");
+		await writeFile(file("popup"), "popup-bytes");
+		const owned = fakePage();
+		const foreign = fakePage();
+		const context = fakeContext([owned, foreign]);
+		const ownedSet = new Set<Page>([owned]);
+		const tracker = trackRunOwnedDownloads(
+			context,
+			(page) => ownedSet.has(page),
+			{
+				pollMs: 5,
+				windowMs: 1000,
+			},
+		);
+		owned.emit(
+			"download",
+			fakeDownload({
+				path: file("owned"),
+				url: "https://example.test/export.zip",
+			}),
+		);
+		foreign.emit(
+			"download",
+			fakeDownload({
+				path: file("foreign"),
+				url: "https://example.test/private.pdf",
+			}),
+		);
+		// A popup the run adopts after it opened is followed too.
+		const popup = fakePage();
+		context.emit("page", popup);
+		ownedSet.add(popup);
+		popup.emit(
+			"download",
+			fakeDownload({
+				path: file("popup"),
+				url: "https://example.test/popup.csv",
+			}),
+		);
 
-	// A popup the run adopts after it opened is followed too.
-	const popup = fakePage();
-	context.emit("page", popup);
-	ownedSet.add(popup);
-	const popupDownload = { url: () => "https://example.test/popup.csv" };
-	popup.emit("download", popupDownload);
-
-	assert.deepEqual(tracker.downloads(), [ownedDownload, popupDownload]);
-
-	tracker.dispose();
-	owned.emit("download", { url: () => "https://example.test/late.zip" });
-	assert.equal(tracker.downloads().length, 2);
-	assert.equal(owned.listenerCount("download"), 0);
-	assert.equal(context.listenerCount("page"), 0);
+		const bodies = await tracker.bodies();
+		assert.deepEqual(
+			bodies.map((b) => [b.url, b.bytes?.toString("utf8") ?? null]),
+			[
+				["https://example.test/export.zip", "owned-bytes"],
+				["https://example.test/popup.csv", "popup-bytes"],
+			],
+		);
+		tracker.dispose();
+		owned.emit(
+			"download",
+			fakeDownload({
+				path: file("owned"),
+				url: "https://example.test/late.zip",
+			}),
+		);
+		assert.equal((await tracker.bodies()).length, 2);
+		assert.equal(owned.listenerCount("download"), 0);
+		assert.equal(context.listenerCount("page"), 0);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });
 
-test("readDownloadBodies returns one result per download, in order, with null bytes for failed, missing and unfinished ones", async () => {
-	const dir = await mkdtemp(join(tmpdir(), "remote-download-har-"));
+test("a stuck download does not cost a later one: capture starts with each download, and a read in progress is never cut off", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "remote-download-eager-"));
 	try {
-		const file = join(dir, "export.zip");
-		await writeFile(file, Buffer.from([1, 2, 3]));
-		const bodies = await readDownloadBodies(
-			[
-				fakeDownload({ path: file, url: "https://example.test/a" }),
-				fakeDownload({
-					failure: "canceled",
-					path: file,
-					url: "https://example.test/failed",
-				}),
-				fakeDownload({
-					path: join(dir, "missing.zip"),
-					url: "https://example.test/missing",
-				}),
-				fakeDownload({
-					path: () => new Promise<string>(() => undefined),
-					url: "https://example.test/stuck",
-				}),
-			],
-			50,
+		const ready = join(dir, "ready.zip");
+		await writeFile(ready, "slow-but-complete");
+		const page = fakePage();
+		const tracker = trackRunOwnedDownloads(fakeContext([page]), () => true, {
+			pollMs: 5,
+			windowMs: 300,
+			// The read itself takes 250ms.
+			read: async (path) => {
+				await sleep(250);
+				return readFile(path);
+			},
+		});
+		// t=0: A never finishes; B finishes at t=200 and its read runs to t=450.
+		page.emit(
+			"download",
+			fakeDownload({
+				path: () => new Promise<string>(() => undefined),
+				url: "https://example.test/stuck.zip",
+			}),
 		);
+		page.emit(
+			"download",
+			fakeDownload({
+				path: async () => {
+					await sleep(200);
+					return ready;
+				},
+				url: "https://example.test/ready.zip",
+			}),
+		);
+		// "release" at t=100: a deadline counted from here (t=400) would cut
+		// B's read, which ends at t=450.
+		await sleep(100);
+		const bodies = await tracker.bodies();
 		assert.deepEqual(
-			bodies.map((b) => [b.url, b.bytes === null ? null : [...b.bytes]]),
+			bodies.map((b) => [
+				b.url,
+				b.bytes?.toString("utf8") ?? null,
+				b.unfinished ?? false,
+			]),
 			[
-				["https://example.test/a", [1, 2, 3]],
-				["https://example.test/failed", null],
-				["https://example.test/missing", null],
-				["https://example.test/stuck", null],
+				["https://example.test/stuck.zip", null, true],
+				["https://example.test/ready.zip", "slow-but-complete", false],
 			],
 		);
 	} finally {
@@ -112,23 +173,53 @@ test("readDownloadBodies returns one result per download, in order, with null by
 	}
 });
 
-test("readDownloadBodies applies ONE deadline to all downloads, not one each", async () => {
-	const stuck = () =>
-		fakeDownload({
-			path: () => new Promise<string>(() => undefined),
-			url: "https://example.test/stuck",
+test("captureDownloadBody waits for a mirrored file to appear; a failed download is null but not unfinished", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "remote-download-mirror-"));
+	try {
+		const later = join(dir, "later.zip");
+		setTimeout(() => {
+			writeFile(later, "mirrored").catch(() => undefined);
+		}, 60);
+		const mirrored = await captureDownloadBody(
+			fakeDownload({ path: later, url: "https://example.test/later.zip" }),
+			{
+				pollMs: 10,
+				windowMs: 1000,
+			},
+		);
+		assert.equal(mirrored.bytes?.toString("utf8"), "mirrored");
+
+		const failed = await captureDownloadBody(
+			fakeDownload({
+				failure: "canceled",
+				path: later,
+				url: "https://example.test/failed",
+			}),
+			{ pollMs: 10, windowMs: 1000 },
+		);
+		assert.deepEqual(failed, {
+			bytes: null,
+			url: "https://example.test/failed",
 		});
-	const started = performance.now();
-	const bodies = await readDownloadBodies(
-		[stuck(), stuck(), stuck(), stuck(), stuck()],
-		200,
-	);
-	const elapsed = performance.now() - started;
-	assert.equal(bodies.length, 5);
-	assert.ok(
-		elapsed < 600,
-		`five stuck downloads took ${String(Math.round(elapsed))}ms; one shared 200ms deadline expected`,
-	);
+
+		const never = await captureDownloadBody(
+			fakeDownload({
+				path: join(dir, "never"),
+				url: "https://example.test/never",
+			}),
+			{
+				pollMs: 10,
+				windowMs: 60,
+			},
+		);
+		assert.deepEqual(never, {
+			bytes: null,
+			unfinished: true,
+			url: "https://example.test/never",
+		});
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });
 
 interface SlotEntry {

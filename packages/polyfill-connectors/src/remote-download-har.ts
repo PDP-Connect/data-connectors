@@ -8,9 +8,11 @@
  * download, so a replay through `routeFromHAR` cannot serve the file and a
  * connector that collects through a download (an export ZIP) fails replay.
  * While recording over remote CDP, `acquireRemoteCdpBrowser` keeps the
- * downloads of run-owned pages, reads their bytes before the context closes
- * (Playwright deletes download artifacts with the context), and writes them
- * into the HAR entry for the download's URL after the HAR export.
+ * downloads of run-owned pages, captures each body from the moment the
+ * download starts (Playwright deletes download artifacts with the context,
+ * so they must be read before it closes), and writes them into the HAR entry
+ * for the download's URL after the HAR export. A download still unfinished
+ * at release is counted and logged, never silently dropped.
  *
  * A body is placed only into an entry the HAR already has. A download the
  * page navigated to has one; Chromium does not report a request for an
@@ -27,37 +29,132 @@
  * that is not readable is left out and the HAR entry stays as recorded.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import type { BrowserContext, Download, Page } from "playwright";
 
 /**
  * One tracked download, in start order: its URL and its bytes, or null when
- * it failed, did not finish in time, or its file is not on this machine. A
- * null still holds its place, so the downloads after it pair correctly.
+ * it failed, its file never became readable here in time, or it was still
+ * unfinished at release (`unfinished`). A null still holds its place, so the
+ * downloads after it pair correctly.
  */
 export interface DownloadBody {
 	bytes: Buffer | null;
+	unfinished?: boolean;
 	url: string;
 }
 
 export interface RunOwnedDownloads {
-	/** Stop listening; already collected downloads stay available. */
+	/**
+	 * The body of every run-owned download, in start order. Capture started
+	 * when each download did; this only waits for the captures already
+	 * running, each within its own window (see `captureDownloadBody`).
+	 */
+	bodies: () => Promise<DownloadBody[]>;
+	/** Stop listening; captures already started keep running. */
 	dispose: () => void;
-	/** Downloads of run-owned pages, in the order they started. */
-	downloads: () => Download[];
+}
+
+export interface DownloadCaptureOptions {
+	/**
+	 * How long a download's file may take to become readable here, counted
+	 * from the download's own start. A read that has started is never cut
+	 * off by it.
+	 */
+	windowMs?: number;
+	/** Interval for checking whether the (mirrored) file has appeared. */
+	pollMs?: number;
+	/** Reads the finished file. Injectable for tests. */
+	read?: (path: string) => Promise<Buffer>;
+}
+
+const DOWNLOAD_CAPTURE_WINDOW_MS = 30_000;
+const DOWNLOAD_FILE_POLL_MS = 250;
+
+function fileSize(path: string): number {
+	try {
+		return existsSync(path) ? statSync(path).size : 0;
+	} catch {
+		return 0;
+	}
 }
 
 /**
- * Collects downloads started on pages the run owns. Every page of the context
- * is watched, but a download is kept only if `owns(page)` holds when it
- * starts; ownership is never inferred from the context.
+ * Starts capturing one download's body NOW (call it when the download
+ * starts) and returns a promise that always resolves, never rejects.
+ *
+ * Two phases. "Ready": the download finished (`path()` resolved, no
+ * `failure()`) and its file is readable here with a non-zero size; for a
+ * remote browser the host's mirror may copy it back a little later, so the
+ * file is polled for. "Read": its bytes are read. The window applies only to
+ * becoming ready: a download not ready within `windowMs` of its own start
+ * resolves `unfinished`. Once the read has started it is awaited to the end.
+ * Polls are counted, not timed with the clock, because the clock is traced
+ * during a scenario recording.
+ */
+export function captureDownloadBody(
+	download: Pick<Download, "failure" | "path" | "url">,
+	{
+		pollMs = DOWNLOAD_FILE_POLL_MS,
+		read = (path) => readFile(path),
+		windowMs = DOWNLOAD_CAPTURE_WINDOW_MS,
+	}: DownloadCaptureOptions = {},
+): Promise<DownloadBody> {
+	const url = download.url();
+	let windowOver = false;
+	let readStarted = false;
+	const sleep = (ms: number): Promise<void> =>
+		new Promise((resolve) => {
+			setTimeout(resolve, ms);
+		});
+	const ready = async (): Promise<string | null> => {
+		const path = await download.path();
+		if (!path || (await download.failure())) {
+			return null;
+		}
+		while (!windowOver) {
+			if (fileSize(path) > 0) {
+				return path;
+			}
+			await sleep(pollMs);
+		}
+		return null;
+	};
+	const work = (async (): Promise<DownloadBody> => {
+		const path = await ready();
+		if (!path || windowOver) {
+			return { bytes: null, url };
+		}
+		readStarted = true;
+		return { bytes: await read(path), url };
+	})().catch((): DownloadBody => ({ bytes: null, url }));
+	return new Promise<DownloadBody>((resolve) => {
+		const timer = setTimeout(() => {
+			windowOver = true;
+			if (!readStarted) {
+				resolve({ bytes: null, unfinished: true, url });
+			}
+		}, windowMs);
+		work.then((body) => {
+			clearTimeout(timer);
+			resolve(body);
+		});
+	});
+}
+
+/**
+ * Captures downloads started on pages the run owns, each from the moment it
+ * starts. Every page of the context is watched, but a download is kept only
+ * if `owns(page)` holds when it starts; ownership is never inferred from the
+ * context.
  */
 export function trackRunOwnedDownloads(
 	context: Pick<BrowserContext, "off" | "on" | "pages">,
 	owns: (page: Page) => boolean,
+	options: DownloadCaptureOptions = {},
 ): RunOwnedDownloads {
-	const kept: Download[] = [];
+	const captures: Promise<DownloadBody>[] = [];
 	const listeners = new Map<Page, (download: Download) => void>();
 	const watch = (page: Page): void => {
 		if (listeners.has(page)) {
@@ -65,7 +162,7 @@ export function trackRunOwnedDownloads(
 		}
 		const onDownload = (download: Download): void => {
 			if (owns(page)) {
-				kept.push(download);
+				captures.push(captureDownloadBody(download, options));
 			}
 		};
 		listeners.set(page, onDownload);
@@ -76,6 +173,7 @@ export function trackRunOwnedDownloads(
 	}
 	context.on("page", watch);
 	return {
+		bodies: () => Promise.all(captures),
 		dispose: () => {
 			context.off("page", watch);
 			for (const [page, onDownload] of listeners) {
@@ -83,53 +181,7 @@ export function trackRunOwnedDownloads(
 			}
 			listeners.clear();
 		},
-		downloads: () => [...kept],
 	};
-}
-
-const DOWNLOAD_READ_DEADLINE_MS = 30_000;
-
-/**
- * Reads the bytes of every download, all under ONE shared deadline (not one
- * per download), in parallel. Returns one result per download in the same
- * order; a failed, unfinished or missing download gives `bytes: null`. Never
- * throws, because it runs inside `release()`.
- */
-export async function readDownloadBodies(
-	downloads: readonly Pick<Download, "failure" | "path" | "url">[],
-	deadlineMs = DOWNLOAD_READ_DEADLINE_MS,
-): Promise<DownloadBody[]> {
-	if (downloads.length === 0) {
-		return [];
-	}
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const expired = new Promise<null>((resolve) => {
-		timer = setTimeout(() => resolve(null), deadlineMs);
-	});
-	try {
-		return await Promise.all(
-			downloads.map(async (download) => ({
-				bytes: await Promise.race([readOneDownload(download), expired]),
-				url: download.url(),
-			})),
-		);
-	} finally {
-		clearTimeout(timer);
-	}
-}
-
-async function readOneDownload(
-	download: Pick<Download, "failure" | "path">,
-): Promise<Buffer | null> {
-	try {
-		const path = await download.path();
-		if (!path || (await download.failure()) || !existsSync(path)) {
-			return null;
-		}
-		return await readFile(path);
-	} catch {
-		return null;
-	}
 }
 
 interface HarContentEntry {
@@ -201,7 +253,7 @@ export async function embedDownloadBodiesInHarFile(
 	path: string,
 	bodies: readonly DownloadBody[],
 ): Promise<number> {
-	if (!bodies.some((body) => body.bytes)) {
+	if (bodies.length === 0) {
 		return 0;
 	}
 	let har: { log?: { entries?: HarContentEntry[] } };
@@ -213,8 +265,9 @@ export async function embedDownloadBodiesInHarFile(
 		return 0;
 	}
 	const placed = embedDownloadBodies(har, bodies);
+	const unfinished = bodies.filter((body) => body.unfinished).length;
 	process.stderr.write(
-		`[browser-launch] remote HAR: embedded ${String(placed)}/${String(bodies.length)} download body(ies)\n`,
+		`[browser-launch] remote HAR: embedded ${String(placed)}/${String(bodies.length)} download body(ies); ${String(unfinished)} unfinished at release (no body)\n`,
 	);
 	if (placed > 0) {
 		await writeFile(path, JSON.stringify(har), "utf8");
