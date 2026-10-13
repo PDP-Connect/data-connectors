@@ -39,7 +39,8 @@
 //              whose entries carries a string code, every one of which is
 //              MANIFEST_UNKNOWN or NAME_UNKNOWN
 //   unknown  — EVERYTHING else, with no exceptions worth carving out:
-//              401/403 (auth), 5xx, any token-endpoint failure, transport
+//              401/403 (auth), 5xx, a 429 that outlasts the rate-limit
+//              retries (registry-rate-limit.mjs), any token-endpoint failure, transport
 //              errors, HTML, unparseable JSON, a 404 whose body does not carry
 //              one of those two codes, which mixes one with a code that says
 //              something else, or whose array holds any entry without a
@@ -63,6 +64,13 @@
 
 import { request } from "node:https";
 import { request as requestHttp } from "node:http";
+import {
+  RATE_LIMIT_POLICY,
+  parseRetryAfter,
+  policyFromEnv,
+  rateLimitDelayMs,
+  sleep,
+} from "./registry-rate-limit.mjs";
 
 const MANIFEST_ACCEPT = [
   "application/vnd.oci.image.manifest.v1+json",
@@ -289,6 +297,40 @@ function fetchOnce(url, { method = "GET", headers = {}, timeoutMs = 30000, maxBo
 }
 
 /**
+ * Send one request, and send it again only while the reply is HTTP 429.
+ *
+ * GHCR rate-limits bursts of publish jobs. A 429 says nothing about the
+ * manifest, so it is retried on the shared rate-limit policy, with the same URL
+ * and the same headers; a Retry-After header (seconds or HTTP date) is honored
+ * as a lower bound on the wait. Every other status and every transport error
+ * is returned or thrown at once, unchanged. When the policy is spent, the last
+ * 429 is returned and the caller classifies it as before: `unknown`, never
+ * `absent`. Each attempt is a full `fetchImpl` call, so the per-request
+ * deadline, body ceiling and socket teardown apply to each one.
+ */
+async function fetchRateLimited(fetchImpl, url, options, { policy, now, random, wait }) {
+  const started = now();
+  for (let attempt = 1; ; attempt += 1) {
+    const response = await fetchImpl(url, options);
+    if (response.status !== 429) return response;
+    const retryAfter = response.headers?.["retry-after"];
+    const delayMs = rateLimitDelayMs(attempt, {
+      policy,
+      retryAfterMs: parseRetryAfter(retryAfter, now()),
+      elapsedMs: now() - started,
+      random,
+    });
+    if (delayMs === null) return response;
+    const { origin, pathname } = new URL(url);
+    process.stderr.write(
+      `${origin}${pathname}: HTTP 429${retryAfter ? ` (Retry-After: ${retryAfter})` : ""}; ` +
+        `retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${policy.attempts})\n`,
+    );
+    await wait(delayMs);
+  }
+}
+
+/**
  * Parse a `WWW-Authenticate: Bearer realm="...",service="...",scope="..."`
  * challenge. Returns null for any other scheme, which keeps an unexpected
  * challenge on the unknown path rather than guessing at a token exchange.
@@ -461,14 +503,17 @@ export async function lookupManifest({
   timeoutMs,
   allowInsecureLoopback = false,
   fetchImpl = fetchOnce,
+  rateLimit = {},
 }) {
+  const retry = { policy: RATE_LIMIT_POLICY, now: Date.now, random: Math.random, wait: sleep, ...rateLimit };
+  const fetchWithRetry = (url, options) => fetchRateLimited(fetchImpl, url, options, retry);
   const manifestUrl = `${scheme}://${registry}/v2/${name}/manifests/${encodeURIComponent(tag)}`;
   const accept = { accept: MANIFEST_ACCEPT };
   const budget = timeoutMs ? { timeoutMs } : {};
 
   let response;
   try {
-    response = await fetchImpl(manifestUrl, { method: "GET", headers: accept, ...budget });
+    response = await fetchWithRetry(manifestUrl, { method: "GET", headers: accept, ...budget });
   } catch (error) {
     return { outcome: "unknown", reason: `manifest request failed: ${error.message}` };
   }
@@ -507,7 +552,7 @@ export async function lookupManifest({
 
     let tokenResponse;
     try {
-      tokenResponse = await fetchImpl(tokenUrl.toString(), {
+      tokenResponse = await fetchWithRetry(tokenUrl.toString(), {
         method: "GET",
         headers: credential ? { authorization: `Basic ${credential}` } : {},
         ...budget,
@@ -540,7 +585,7 @@ export async function lookupManifest({
     }
 
     try {
-      response = await fetchImpl(manifestUrl, {
+      response = await fetchWithRetry(manifestUrl, {
         method: "GET",
         headers: { ...accept, authorization: `Bearer ${token}` },
         ...budget,
@@ -604,6 +649,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     // LOOKUP_SCHEME, and even when set it permits loopback only. A CI run that
     // publishes for real never sets it.
     allowInsecureLoopback: process.env.LOOKUP_ALLOW_INSECURE_TOKEN_REALM === "1",
+    // The rate-limit policy; only the tests' scale hook can shorten it.
+    rateLimit: { policy: policyFromEnv() },
   });
 
   if (result.reason) process.stderr.write(`${reference}: ${result.outcome}: ${result.reason}\n`);

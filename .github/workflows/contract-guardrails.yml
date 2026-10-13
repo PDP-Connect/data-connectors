@@ -47,6 +47,9 @@ jobs:
       - name: Test manifest lookup classifier
         run: node --test scripts/lookup-manifest.test.mjs
 
+      - name: Test registry rate-limit retry
+        run: node --test scripts/registry-rate-limit.test.mjs
+
       - name: Check scope schemas additive (HC-COMPAT-ADDITIVE-SCHEMA-001)
         env:
           BASE_REF: origin/${{ github.base_ref || 'main' }}
