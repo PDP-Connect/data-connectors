@@ -31,7 +31,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Browser, BrowserContext, chromium } from "playwright";
+import type { Browser, BrowserContext, chromium, Page } from "playwright";
 import {
 	removeChromiumSingletonResidue,
 	withProfileLockMutex,
@@ -87,6 +87,15 @@ export interface IsolatedBrowser {
 	 * mistakenly read a stale/undefined outcome as a real one.
 	 */
 	harRecordingOutcome?: () => Promise<HarRecordingOutcome>;
+	/**
+	 * Tells the launcher that `page` is the run's page although the launcher
+	 * did not create it: a preserve-page connector reusing a tab that was
+	 * already open (see `selectBrowserPageForRun`). The launcher then treats
+	 * it and its popups as run-owned for recording (their downloads go into
+	 * the HAR) but never closes it, because it predates the run. Present only
+	 * on the remote-CDP path, where the launcher tracks run-owned pages.
+	 */
+	adoptRunPage?: (page: Page) => void;
 	release: () => Promise<void>;
 	/**
 	 * Present only when this context was launched with `storageStateRecording`
@@ -971,8 +980,14 @@ async function acquireRemoteCdpBrowser(
 	const runPages = trackRunOwnedPages(context);
 	// Downloads of run-owned pages, so release() can put their bodies into
 	// the HAR (see `remote-download-har.ts`).
+	// Pages the runtime reused and reported through `adoptRunPage`: owned for
+	// recording, never closed here.
+	const reusedRunPages = trackRunOwnedPages();
 	const runDownloads = harRecording
-		? trackRunOwnedDownloads(context, runPages.owns)
+		? trackRunOwnedDownloads(
+				context,
+				(page) => runPages.owns(page) || reusedRunPages.owns(page),
+			)
 		: null;
 	if (harRecording) {
 		await startRemoteCdpHarRecording({
@@ -981,6 +996,7 @@ async function acquireRemoteCdpBrowser(
 			harPath: harRecording.path,
 			onFailure: () => {
 				runDownloads?.dispose();
+				reusedRunPages.dispose();
 				runPages.dispose();
 				browser.off("disconnected", onDisconnected);
 			},
@@ -990,6 +1006,11 @@ async function acquireRemoteCdpBrowser(
 	return {
 		browser,
 		context,
+		adoptRunPage: (page: Page): void => {
+			if (!runPages.owns(page)) {
+				reusedRunPages.adopt(page);
+			}
+		},
 		release: async (): Promise<void> => {
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
@@ -1000,6 +1021,7 @@ async function acquireRemoteCdpBrowser(
 				? await readDownloadBodies(runDownloads.downloads())
 				: [];
 			runDownloads?.dispose();
+			reusedRunPages.dispose();
 			if (recording) {
 				// A recording run leaves its page open so storage state can still
 				// be read here (see `shouldCloseBrowserPageAfterRun`). On a local

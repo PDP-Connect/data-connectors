@@ -16,6 +16,8 @@
  * page preservation (like ChatGPT): its run page stays open between runs and
  * the next run picks it up. In that mode a run counts how many runs the page
  * has served and emits the count as the record id.
+ * `PDPP_OWNERSHIP_FIXTURE_DOWNLOAD=1` (with preserve) also downloads
+ * `/export.zip` on the run page.
  */
 
 import type {
@@ -52,6 +54,16 @@ async function collectOnPreservedPage(
 		page.click("#provider"),
 	]);
 	await popup.waitForLoadState();
+	if (process.env.PDPP_OWNERSHIP_FIXTURE_DOWNLOAD === "1") {
+		// A download on the reused run page: the launcher must count it as the
+		// run's (it goes into a recording's HAR) although it did not create
+		// the page.
+		const download = page.waitForEvent("download");
+		await page.evaluate((href) => {
+			window.location.href = href;
+		}, new URL("/export.zip", baseUrl).toString());
+		await (await download).path();
+	}
 	await emitRecord("items", { id: String(runsServed) });
 }
 

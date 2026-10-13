@@ -372,3 +372,89 @@ test("a preserve-page connector attached to an external browser reuses its one r
 		"the owner's tabs are untouched",
 	);
 });
+
+test("a download on a reused preserve-page run page is recorded into the HAR, and the page stays open", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-preserve-download-"));
+	const site = createHttpServer((req, res) => {
+		const path = new URL(req.url ?? "/", "http://localhost").pathname;
+		if (path === "/export.zip") {
+			res
+				.writeHead(200, {
+					"content-type": "application/zip",
+					"content-disposition": "attachment; filename=export.zip",
+				})
+				.end("reused-page-export");
+			return;
+		}
+		if (path === "/provider") {
+			res.writeHead(200, { "content-type": "text/html" }).end("<html></html>");
+			return;
+		}
+		res
+			.writeHead(200, { "content-type": "text/html" })
+			.end(
+				"<html><body><button id=\"provider\" onclick=\"window.open('/provider', 'provider')\">Sign in</button></body></html>",
+			);
+	});
+	await new Promise<void>((resolve) => {
+		site.listen(0, "127.0.0.1", resolve);
+	});
+	const siteAddress = site.address();
+	assert.ok(siteAddress && typeof siteAddress !== "string");
+	const baseUrl = `http://127.0.0.1:${String(siteAddress.port)}`;
+	const cdpPort = await freeLoopbackPort();
+	const browserContext = await chromium.launchPersistentContext(
+		join(dir, "profile"),
+		{ args: [`--remote-debugging-port=${String(cdpPort)}`] },
+	);
+	t.after(async () => {
+		await browserContext.close().catch(() => undefined);
+		await new Promise<void>((resolve) => {
+			site.close(() => resolve());
+		});
+		await rm(dir, { recursive: true, force: true });
+	});
+	const env = {
+		[REMOTE_CDP_ENV]: `http://127.0.0.1:${String(cdpPort)}`,
+		PDPP_OWNERSHIP_FIXTURE_BASE_URL: baseUrl,
+		PDPP_OWNERSHIP_FIXTURE_PRESERVE_PAGE: "1",
+	};
+	// Run 1 opens and preserves the run page.
+	const first = await runFixture(env);
+	assert.equal(first.done?.status, "succeeded", first.output);
+	// Run 2 reuses it, records, and downloads on it.
+	const harPath = join(dir, "run2.har");
+	const second = await runFixture({
+		...env,
+		PDPP_OWNERSHIP_FIXTURE_DOWNLOAD: "1",
+		PDPP_SCENARIO_HAR_RECORD_PATH: harPath,
+		PDPP_SCENARIO_STORAGE_STATE_RECORD_PATH: join(dir, "run2.storage.json"),
+	});
+	assert.equal(second.done?.status, "succeeded", second.output);
+	assert.deepEqual(second.recordKeys, ["2"], "run 2 reused the preserved page");
+
+	const har = JSON.parse(await readFile(harPath, "utf8")) as {
+		log: {
+			entries: {
+				request: { url: string };
+				response: { content?: { encoding?: string; text?: string } };
+			}[];
+		};
+	};
+	const entry = har.log.entries.find((e) =>
+		e.request.url.endsWith("/export.zip"),
+	);
+	assert.equal(
+		entry?.response.content?.encoding === "base64" &&
+			entry.response.content.text
+			? Buffer.from(entry.response.content.text, "base64").toString("utf8")
+			: undefined,
+		"reused-page-export",
+		"the download on the reused run page is the run's",
+	);
+	assert.equal(
+		pageUrls(browserContext).filter((url) => url.startsWith(baseUrl)).length,
+		1,
+		"the reused run page is still open after the recording run",
+	);
+});
