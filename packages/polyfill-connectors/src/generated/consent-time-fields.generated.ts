@@ -96,6 +96,13 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		daily_summaries: { field: "date", format: "date" },
 		sleep: { field: "date", format: "date" },
 	},
+	garmin_browser: {
+		activities: { field: "start_at", format: "date-time" },
+		daily_summaries: { field: "date", format: "date" },
+		hrv: { field: "date", format: "date" },
+		sleep: { field: "start_at", format: "date-time" },
+		training_status: { field: "date", format: "date" },
+	},
 	github: {
 		contributions: null,
 		events: { field: "created_at", format: "date-time" },

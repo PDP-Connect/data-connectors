@@ -75,6 +75,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
+	garmin_browser: { testFile: "connectors/garmin_browser/index.test.ts" },
 	icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
 	fitbit: { testFile: "connectors/fitbit/index.test.ts" },
 	google_calendar: { testFile: "connectors/google_calendar/index.test.ts" },
