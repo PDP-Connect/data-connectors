@@ -1,15 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// The lock-entry contract of index.mjs: what it refuses, and that it refuses
-// before any registry request. Runs against the in-process fixture registry
-// in oci-fixture.mjs; nothing contacts GHCR.
+// Native filesystem safety and lock-entry refusal contracts. OCI tests use
+// the in-process fixture registry; nothing contacts GHCR.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test from "node:test";
+import { join, posix, win32 } from "node:path";
+import test, { after } from "node:test";
 import {
   FixtureRegistry,
   PINNED_IDENTITY,
@@ -18,7 +17,7 @@ import {
   ociLockEntry,
   publishArtifact,
 } from "./oci-fixture.mjs";
-import { fetchResolvedArtifact, installFromLock, verifyInstalled } from "./index.mjs";
+import { fetchResolvedArtifact, installFromLock, pruneInstalled, toPortableArtifactPath, verifyInstalled } from "./index.mjs";
 
 function fixtureOptions(registry, signer) {
   return {
@@ -105,4 +104,67 @@ test("an index source is refused rather than ignored", async () => {
     }
     assert.deepEqual(registry.requests, []);
   });
+});
+
+const temporaryRoots = [];
+after(() => {
+  for (const root of temporaryRoots) rmSync(root, { recursive: true, force: true });
+});
+
+function createTempDir(prefix) {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  temporaryRoots.push(root);
+  return root;
+}
+
+test("normalizes extracted artifact paths to the portable POSIX contract", () => {
+  const windowsRelativePath = win32.relative(
+    "D:\\artifact\\bundle",
+    "D:\\artifact\\bundle\\profile\\collection-profile.json",
+  );
+  const posixRelativePath = posix.relative(
+    "/artifact/bundle",
+    "/artifact/bundle/profile/collection-profile.json",
+  );
+
+  assert.equal(windowsRelativePath, "profile\\collection-profile.json");
+  assert.equal(
+    toPortableArtifactPath(windowsRelativePath, win32.sep),
+    "profile/collection-profile.json",
+  );
+  assert.equal(
+    toPortableArtifactPath(posixRelativePath, posix.sep),
+    "profile/collection-profile.json",
+  );
+});
+
+test("pruning preserves configured link subtrees and removes only unpreserved links", () => {
+  const installRoot = createTempDir("prune-install-test-");
+  const externalRoot = createTempDir("prune-external-test-");
+  const externalFile = join(externalRoot, "must-survive.txt");
+  writeFileSync(externalFile, "outside\n");
+  writeFileSync(join(installRoot, "expected.txt"), "expected\n");
+  writeFileSync(join(installRoot, ".legacy-file"), "hidden\n");
+  mkdirSync(join(installRoot, ".legacy-directory", "nested"), { recursive: true });
+  writeFileSync(join(installRoot, ".legacy-directory", "nested", "state.txt"), "hidden\n");
+  symlinkSync(externalRoot, join(installRoot, "preserved-link"));
+  mkdirSync(join(installRoot, "preserved-subtree"), { recursive: true });
+  symlinkSync(externalRoot, join(installRoot, "preserved-subtree", "nested-link"));
+  symlinkSync(externalRoot, join(installRoot, "remove-link"));
+
+  pruneInstalled({
+    installRoot,
+    expectedPaths: ["expected.txt"],
+    preserveTopLevel: ["preserved-link", "preserved-subtree"],
+  });
+
+  assert.equal(lstatSync(join(installRoot, "preserved-link")).isSymbolicLink(), true);
+  assert.equal(lstatSync(join(installRoot, "preserved-subtree", "nested-link")).isSymbolicLink(), true);
+  assert.equal(readFileSync(join(installRoot, ".legacy-file"), "utf8"), "hidden\n");
+  assert.equal(
+    readFileSync(join(installRoot, ".legacy-directory", "nested", "state.txt"), "utf8"),
+    "hidden\n",
+  );
+  assert.equal(existsSync(join(installRoot, "remove-link")), false);
+  assert.equal(readFileSync(externalFile, "utf8"), "outside\n");
 });

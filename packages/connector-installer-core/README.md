@@ -45,6 +45,8 @@ The OIDC certificate issuer is pinned to GitHub Actions
 
 ## Contract
 
+Signed-index installation and its resolution and update APIs are no longer supported.
+
 - `fetchCatalog` — fetch and verify the signed connector catalog.
 - `fetchResolvedArtifact(null, entry, options)` — fetch and verify one
   artifact without installing it.
