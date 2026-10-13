@@ -127,6 +127,7 @@
  * BECAUSE this module refuses to paper over the problem automatically.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -433,34 +434,65 @@ export function findApiRequestHarMatch(
 }
 
 /**
- * A HAR entry as `sequentialHarResponseGroups` reads it: request method and
- * URL, response status, content size, and start time.
+ * A HAR entry as `sequentialHarResponseGroups` reads it: the request's
+ * method, URL and body, the response's status and body, and start time.
  */
 export interface SequentialHarEntry {
-	request?: { method?: unknown; url?: unknown };
-	response?: { content?: { size?: unknown }; status?: unknown };
+	request?: { method?: unknown; postData?: { text?: unknown }; url?: unknown };
+	response?: {
+		content?: { encoding?: unknown; text?: unknown };
+		status?: unknown;
+	};
 	startedDateTime?: unknown;
 }
 
+const sha256 = (value: string): string =>
+	createHash("sha256").update(value).digest("hex");
+
 /**
- * `routeFromHAR` answers every request with the FIRST entry that matches its
- * method and URL, so a URL the connector polls (an export status that
- * answered 404 and later 200) replays "not ready" forever. This picks the
- * method + URL keys whose recorded entries DIFFER in status or body size and
- * returns each key's entries in recorded order; the replay preload serves
- * them in that order (the last one repeats) and leaves every other request
- * to `routeFromHAR`. A key whose entries all look the same is left out:
- * order cannot change what it replays.
+ * The identity a recorded or live request is replayed by: method, URL and
+ * the request body (hashed). Two POSTs to one GraphQL URL with different
+ * bodies are different requests and never share a sequence.
+ */
+export function sequentialHarRequestKey(
+	method: unknown,
+	url: unknown,
+	postData: unknown,
+): string {
+	return `${String(method)} ${String(url)} ${sha256(typeof postData === "string" ? postData : "")}`;
+}
+
+/** Status plus the hash of the actual response body (not its size). */
+function responseIdentity(entry: SequentialHarEntry): string {
+	const content = entry.response?.content;
+	const text = typeof content?.text === "string" ? content.text : "";
+	return `${String(entry.response?.status)}:${String(content?.encoding ?? "")}:${sha256(text)}`;
+}
+
+/**
+ * `routeFromHAR` answers every request with the FIRST matching entry, so a
+ * URL the connector polls (an export status that answered 404 and later 200)
+ * replays "not ready" forever. This groups entries by full request identity
+ * (`sequentialHarRequestKey`) and returns, in recorded order, the groups
+ * whose responses DIFFER in status or body content; the replay preload
+ * serves those in order (the last one repeats) and leaves every other
+ * request to `routeFromHAR`. A group whose responses are all identical is
+ * left out: order cannot change what it replays.
  *
  * The pure rule the generated preload's `installSequentialHarRoutes` mirrors
- * inline (by copy, not import; see `findApiRequestHarMatch`).
+ * inline (by copy, not import; see `findApiRequestHarMatch`). The generated
+ * copy is exercised directly in browser-har-replay.test.ts.
  */
 export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
 	entries: readonly T[],
 ): Map<string, T[]> {
 	const groups = new Map<string, T[]>();
 	for (const entry of entries) {
-		const key = `${String(entry.request?.method)} ${String(entry.request?.url)}`;
+		const key = sequentialHarRequestKey(
+			entry.request?.method,
+			entry.request?.url,
+			entry.request?.postData?.text,
+		);
 		const group = groups.get(key);
 		if (group) {
 			group.push(entry);
@@ -470,16 +502,7 @@ export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
 	}
 	const sequential = new Map<string, T[]>();
 	for (const [key, group] of groups) {
-		if (group.length < 2) {
-			continue;
-		}
-		const shapes = new Set(
-			group.map(
-				(entry) =>
-					`${String(entry.response?.status)}:${String(entry.response?.content?.size ?? "")}`,
-			),
-		);
-		if (shapes.size < 2) {
+		if (group.length < 2 || new Set(group.map(responseIdentity)).size < 2) {
 			continue;
 		}
 		const started = (entry: T): number =>
@@ -882,6 +905,7 @@ if (FIXED_NOW_ISO) {
 // evidence is ONLY the captured storage state), not for reliability (no
 // contention on that profile's own SingletonLock), and not for safety (a
 // replay run must not be able to read from or mutate live session cookies).
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
@@ -1059,12 +1083,14 @@ function installApiRequestContextHarBridge(context) {
     return buildApiResponseFromHarEntry(entry);
   };
 }
+// BEGIN installSequentialHarRoutes
 // Polled URLs replay in recorded order. Inline mirror of
 // sequentialHarResponseGroups (browser-har-replay.ts), which is the tested
 // rule: routeFromHAR answers every request with the FIRST matching entry, so
-// for a method + URL whose entries differ in status or body size the entries
-// are served in recorded order (the last one repeats). Registered AFTER
-// routeFromHAR, so it is consulted first; any other request falls back.
+// for one request identity (method, URL, request body) whose responses
+// differ in status or body content the entries are served in recorded order
+// (the last one repeats). Registered AFTER routeFromHAR, so it is consulted
+// first; any other request falls back to routeFromHAR.
 async function installSequentialHarRoutes(context) {
   let har;
   try {
@@ -1072,25 +1098,31 @@ async function installSequentialHarRoutes(context) {
   } catch {
     return;
   }
+  const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+  const requestKey = (method, url, postData) =>
+    String(method) + " " + String(url) + " " + sha256(typeof postData === "string" ? postData : "");
+  const responseIdentity = (entry) => {
+    const content = entry.response?.content;
+    const text = typeof content?.text === "string" ? content.text : "";
+    return String(entry.response?.status) + ":" + String(content?.encoding ?? "") + ":" + sha256(text);
+  };
   const groups = new Map();
   for (const entry of har.log?.entries ?? []) {
-    const key = String(entry.request?.method) + " " + String(entry.request?.url);
+    const key = requestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text);
     const group = groups.get(key);
     if (group) group.push(entry);
     else groups.set(key, [entry]);
   }
   const sequences = new Map();
   for (const [key, group] of groups) {
-    if (group.length < 2) continue;
-    const shapes = new Set(group.map((entry) => String(entry.response?.status) + ":" + String(entry.response?.content?.size ?? "")));
-    if (shapes.size < 2) continue;
+    if (group.length < 2 || new Set(group.map(responseIdentity)).size < 2) continue;
     const started = (entry) => Date.parse(String(entry.startedDateTime));
     sequences.set(key, { entries: [...group].sort((a, b) => started(a) - started(b)), next: 0 });
   }
   if (sequences.size === 0) return;
   await context.route("**/*", async (route) => {
     const request = route.request();
-    const sequence = sequences.get(request.method() + " " + request.url());
+    const sequence = sequences.get(requestKey(request.method(), request.url(), request.postData()));
     if (!sequence) return route.fallback();
     const entry = sequence.entries[Math.min(sequence.next, sequence.entries.length - 1)];
     sequence.next += 1;
@@ -1108,6 +1140,7 @@ async function installSequentialHarRoutes(context) {
     await route.fulfill({ status: entry.response.status, headers, body });
   });
 }
+// END installSequentialHarRoutes
 const ISOLATED_PROFILE_DIRS = [];
 let isolatedProfileCleanupRegistered = false;
 function freshIsolatedProfileDir() {
