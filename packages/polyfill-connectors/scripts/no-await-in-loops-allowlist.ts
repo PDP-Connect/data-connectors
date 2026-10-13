@@ -3282,6 +3282,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "copyMirroredRemoteDownload off-switch test: asserts each env value in turn against the same path() call counter",
 		},
 		{
+			path: "src/scenario/browser-har-replay.test.ts",
+			line: 1017,
+			column: 43,
+			category: "test_assertion_sequencing",
+			note: "sequential-replay equivalence test: the generated route is stateful, so each identity is asked in order",
+		},
+		{
 			path: "src/remote-download-har.ts",
 			line: 120,
 			column: 4,
