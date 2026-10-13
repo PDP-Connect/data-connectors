@@ -108,7 +108,9 @@ jobs:
   prepare:
     name: Load connector publish allowlist
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The GHCR lookups in select-publish-connectors.mjs wait out HTTP 429 on a
+    # minute scale (scripts/registry-rate-limit.mjs).
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: read
@@ -151,10 +153,17 @@ jobs:
       # Cosign keyless signing: the OIDC token is what Fulcio binds the
       # certificate to, so the signature names this workflow rather than a key.
       id-token: write
-    timeout-minutes: 20
+    # Covers the minute-scale rate-limit waits in scripts/registry-command.mjs.
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
+      # GHCR answers a burst of parallel publishes with HTTP 429 TOOMANYREQUESTS
+      # ("allowed: 2000/minute"). With every leg running at once, about 10 of 50
+      # legs failed in `cosign sign` after the clients' own seconds-long retries.
+      # Four is a cautious starting point, not a documented GHCR capacity; the
+      # rate-limit retry in scripts/registry-command.mjs covers the rest.
+      max-parallel: 4
       # YNAB authenticates with a personal access token, has many streams, and
       # exercises the transport end to end, including a consumer install that
       # collects data. Oura would prove the build, but not that collection path.
@@ -311,6 +320,9 @@ jobs:
           CONNECTOR: ${{ steps.target.outputs.connector }}
         run: |
           set -euo pipefail
+          # Every `oras` and `cosign` below retries a registry rate limit, and
+          # nothing else. See scripts/registry-command.mjs.
+          source "${GITHUB_WORKSPACE}/scripts/registry-command.sh"
           cd "${RUNNER_TEMP}/artifact"
 
           echo "$GH_TOKEN" | oras login ghcr.io \
@@ -561,6 +573,7 @@ jobs:
           SOURCE_DECLARATION_DIGEST: ${{ steps.publish.outputs.source_declaration_digest }}
         run: |
           set -euo pipefail
+          source scripts/registry-command.sh
 
           # The digest must have come from the push. An empty value here would
           # otherwise make `cosign verify` run against a malformed reference and
@@ -594,7 +607,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
-    timeout-minutes: 20
+    # Covers the minute-scale rate-limit waits in scripts/registry-command.mjs.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -650,6 +664,7 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
+          source scripts/registry-command.sh
           CATALOG_DIR="${RUNNER_TEMP}/connector-catalog"
           mkdir -p "$CATALOG_DIR"
           CREATED="$(git show -s --format=%cI "$GITHUB_SHA")"

@@ -159,6 +159,8 @@ function startRegistry(root) {
  *   error-notfound  HTTP 500 UNKNOWN whose message contains "not found".
  *   timeout         the connection is accepted and never answered.
  *   html            HTTP 200 with an HTML body and no digest header.
+ *   ratelimit       HTTP 429 TOOMANYREQUESTS on every manifest request.
+ *   ratelimit-once  HTTP 429 on the first authenticated manifest request only.
  *
  * The harness selects one by writing `<root>/fault` before a run.
  *
@@ -243,6 +245,11 @@ const server = createServer((req, res) => {
   }
   if (currentFault() === "timeout") {
     return; // accepted, never answered
+  }
+  const limitedOnce = join(root, "rate-limited-once");
+  if (currentFault() === "ratelimit" || (currentFault() === "ratelimit-once" && !existsSync(limitedOnce))) {
+    writeFileSync(limitedOnce, "");
+    return json(res, 429, distError("TOOMANYREQUESTS", "retry-after: 700.652µs, allowed: 2000/minute"));
   }
 
   const digest = existsSync(tagFile(name, tag)) ? readFileSync(tagFile(name, tag), "utf8").trim() : null;
@@ -482,9 +489,18 @@ console.error("substitute oras: unsupported: " + argv.join(" "));
 process.exit(1);
 `;
 
+// Records every call. The first COSIGN_RATE_LIMITED_CALLS calls fail the way
+// Cosign 3.1.3 fails when GHCR rate-limits a signature upload.
 const COSIGN_STUB = `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 appendFileSync(process.env.ARGV_LOG, JSON.stringify(["cosign", ...process.argv.slice(2)]) + "\\n");
+const counter = process.env.ARGV_LOG + ".cosign-calls";
+const calls = (existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0) + 1;
+writeFileSync(counter, String(calls));
+if (calls <= Number(process.env.COSIGN_RATE_LIMITED_CALLS || 0)) {
+  console.error("Error: signing [x]: signing digest: PUT https://ghcr.io/v2/x/blobs/upload/1?digest=sha256%3Aabc: TOOMANYREQUESTS: retry-after: 700.652µs, allowed: 2000/minute");
+  process.exit(1);
+}
 process.exit(0);
 `;
 
@@ -502,7 +518,7 @@ process.exit(0);
  * Returns the exit status, the recorded argv, and — separately — what the
  * registry holds afterwards.
  */
-function runPublish({ registry, dir, name, code, lookupFault = "" }) {
+function runPublish({ registry, dir, name, code, lookupFault = "", cosignRateLimitedCalls = 0 }) {
   const scratch = mkdtempSync(join(dir, "run-"));
   const artifact = join(scratch, "artifact");
   mkdirSync(artifact, { recursive: true });
@@ -534,6 +550,7 @@ function runPublish({ registry, dir, name, code, lookupFault = "" }) {
   // and read per request by the server, so a case can publish A healthily and
   // then attempt B under a fault against the very same registry.
   writeFileSync(join(registry.root, "fault"), lookupFault);
+  rmSync(join(registry.root, "rate-limited-once"), { force: true });
 
   const argvLog = join(scratch, "argv.jsonl");
   const env = {
@@ -562,6 +579,10 @@ function runPublish({ registry, dir, name, code, lookupFault = "" }) {
     // Keeps the never-answered case cheap; it changes only how long the
     // unknown takes to be reached, never which outcome is reached.
     LOOKUP_TIMEOUT_MS: "1500",
+    // Shortens the minute-scale rate-limit waits (scripts/registry-rate-limit.mjs)
+    // without changing how many tries are made.
+    REGISTRY_RETRY_DELAY_SCALE: "0.0001",
+    COSIGN_RATE_LIMITED_CALLS: String(cosignRateLimitedCalls),
     VERSION: "0.3.0",
     CONNECTOR: "ynab",
     GITHUB_REPOSITORY: "PDP-Connect/data-connectors",
@@ -798,6 +819,13 @@ for (const { fault, label, expected } of [
     label: "an HTTP 500 UNKNOWN whose message happens to contain \"not found\"",
     expected: /UNKNOWN/,
   },
+  {
+    fault: "ratelimit",
+    label: "a lookup the registry rate-limits past the retry policy",
+    // The lookup retries a 429, but a 429 that outlasts the policy is still
+    // not an answer about the manifest.
+    expected: /UNKNOWN/,
+  },
 ]) {
   test(`${label} refuses before the version tag moves`, () => {
     withRegistry(({ registry, dir }) => {
@@ -997,4 +1025,55 @@ test("the push that precedes the guard writes no tag", () => {
     attachLine < signLine,
     `the SourceDeclaration referrer must be attached before signatures complete (attach ${attachLine}, sign ${signLine})`,
   );
+});
+
+// RATE LIMITS. GHCR answers a burst of parallel publishes with HTTP 429. The
+// shell sources scripts/registry-command.sh, so each `oras`/`cosign` command,
+// and each request the lookup makes, is retried on its own. These run the
+// workflow's shell to show that a retry repeats the same command on the same
+// digest and changes nothing about the guard.
+
+test("a rate-limited signature is retried on the pushed digest, and the tag lands on it", () => {
+  withRegistry(({ registry, dir }) => {
+    const name = "connector/ynab";
+    const result = runPublish({ registry, dir, name, code: "CODE-NEW", cosignRateLimitedCalls: 1 });
+
+    assert.equal(result.status, 0, `a rate-limited sign must be retried, not fail the publish\n${result.output}`);
+
+    const signed = result.calls.filter((call) => call[0] === "cosign");
+    assert.equal(signed.length, 5, "four signatures plus one retry");
+    assert.deepEqual(signed[1], signed[0], "the retry repeats the same command, by the same digest");
+
+    const tagged = registry.resolveTag(name, "0.3.0");
+    const reported = result.output.match(/published \S+@(sha256:[0-9a-f]{64})/)?.[1];
+    assert.equal(tagged, reported, "the tag must resolve to the digest the push reported");
+    assert.ok(
+      signed.slice(2).some((call) => call.at(-1).endsWith(`@${tagged}`)),
+      "the connector digest is signed",
+    );
+    for (const call of signed) {
+      assert.match(call.at(-1), /@sha256:[0-9a-f]{64}$/, `cosign signs by digest: ${call.join(" ")}`);
+    }
+    assert.equal(result.calls.filter((call) => call[0] === "push").length, 1, "the push is not repeated");
+  });
+});
+
+test("a conflicting republication behind a rate-limited lookup still refuses and leaves the tag", () => {
+  withRegistry(({ registry, dir }) => {
+    const name = "connector/ynab";
+    const released = runPublish({ registry, dir, name, code: "CODE-A-RELEASED" });
+    assert.equal(released.status, 0, released.output);
+    const digestA = registry.resolveTag(name, "0.3.0");
+
+    const conflicting = runPublish({
+      registry, dir, name, code: "CODE-B-DIFFERENT", lookupFault: "ratelimit-once",
+    });
+
+    assert.equal(registry.resolveTag(name, "0.3.0"), digestA, "the released tag must not move");
+    assert.equal(conflicting.status, 1, conflicting.output);
+    assert.match(conflicting.output, /HTTP 429/, "the lookup met the rate limit");
+    assert.match(conflicting.output, /refusing to redefine it/, "and then answered present, and refused");
+    assert.deepEqual(conflicting.calls.filter((call) => call[0] === "cosign"), []);
+    assert.deepEqual(conflicting.calls.filter((call) => call[0] === "tag"), []);
+  });
 });
