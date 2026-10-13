@@ -31,11 +31,16 @@ import { existsSync, mkdirSync } from "node:fs";
 import { chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Browser, BrowserContext, chromium } from "playwright";
+import type { Browser, BrowserContext, chromium, Page } from "playwright";
 import {
 	removeChromiumSingletonResidue,
 	withProfileLockMutex,
 } from "./profile-lock.ts";
+import {
+	downloadCaptureOptionsFromEnv,
+	embedDownloadBodiesInHarFile,
+	trackRunOwnedDownloads,
+} from "./remote-download-har.ts";
 import { trackRunOwnedPages } from "./run-owned-pages.ts";
 import { isRunningInContainer } from "./runtime-environment.ts";
 
@@ -82,6 +87,15 @@ export interface IsolatedBrowser {
 	 * mistakenly read a stale/undefined outcome as a real one.
 	 */
 	harRecordingOutcome?: () => Promise<HarRecordingOutcome>;
+	/**
+	 * Tells the launcher that `page` is the run's page although the launcher
+	 * did not create it: a preserve-page connector reusing a tab that was
+	 * already open (see `selectBrowserPageForRun`). The launcher then treats
+	 * it and its popups as run-owned for recording (their downloads go into
+	 * the HAR) but never closes it, because it predates the run. Present only
+	 * on the remote-CDP path, where the launcher tracks run-owned pages.
+	 */
+	adoptRunPage?: (page: Page) => void;
 	release: () => Promise<void>;
 	/**
 	 * Present only when this context was launched with `storageStateRecording`
@@ -844,13 +858,37 @@ export async function connectOverCdpWithRetry<TBrowser>({
  * `unhandledRejection` guard. See `runCdpAttemptWithRaceGuard` and
  * `isCdpAttachSessionRaceError`.
  */
-export function shouldCleanRemoteCdpPageTargets({
-	preserveRemotePagesOnAcquire,
-}: Pick<
-	AcquireIsolatedBrowserOptions,
-	"preserveRemotePagesOnAcquire"
->): boolean {
-	return !preserveRemotePagesOnAcquire;
+export function shouldCleanRemoteCdpPageTargets(
+	options: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire">,
+	env: NodeJS.ProcessEnv = {},
+): boolean {
+	return remoteCdpPageCleanupSkipReason(options, env) === null;
+}
+
+/**
+ * Why the pre-attach page-target cleanup is skipped, or null when it runs.
+ *
+ * - `preserve_remote_pages_on_acquire`: the caller attaches to a browser whose
+ *   pages it does not own.
+ * - `recording_host_fresh_browser`: `PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP=1`. A
+ *   recording host that hands over a browser it just started (a sandbox with
+ *   nothing to clean) sets it, because the cleanup's `/json` calls are
+ *   Node-side fetches the scenario recorder captures as provider traffic,
+ *   and a replay, which launches its own browser, never makes them.
+ */
+export function remoteCdpPageCleanupSkipReason(
+	{
+		preserveRemotePagesOnAcquire,
+	}: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire">,
+	env: NodeJS.ProcessEnv,
+): "preserve_remote_pages_on_acquire" | "recording_host_fresh_browser" | null {
+	if (preserveRemotePagesOnAcquire) {
+		return "preserve_remote_pages_on_acquire";
+	}
+	if (env.PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP === "1") {
+		return "recording_host_fresh_browser";
+	}
+	return null;
 }
 
 async function acquireRemoteCdpBrowser(
@@ -869,7 +907,11 @@ async function acquireRemoteCdpBrowser(
 	process.stderr.write(
 		`[browser-launch] remote CDP attach start profile=${profileName} url=${redactedUrl}\n`,
 	);
-	if (shouldCleanRemoteCdpPageTargets(options)) {
+	const cleanupSkipReason = remoteCdpPageCleanupSkipReason(
+		options,
+		process.env,
+	);
+	if (cleanupSkipReason === null) {
 		// Remote profiles usually persist cookies; stale page targets do not need
 		// to persist. Replace pages before attach so Patchright does not auto-attach
 		// to a wedged renderer, while n.eko Chromium still keeps at least one page alive.
@@ -881,7 +923,7 @@ async function acquireRemoteCdpBrowser(
 		);
 	} else {
 		process.stderr.write(
-			`[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=preserve_remote_pages_on_acquire\n`,
+			`[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=${cleanupSkipReason}\n`,
 		);
 	}
 	const browser = await connectOverCdpWithRetry<Browser>({
@@ -936,12 +978,26 @@ async function acquireRemoteCdpBrowser(
 	// Pages this client creates (and the popups they open) are the only pages
 	// release() may close. See `run-owned-pages.ts`.
 	const runPages = trackRunOwnedPages(context);
+	// Downloads of run-owned pages, so release() can put their bodies into
+	// the HAR (see `remote-download-har.ts`).
+	// Pages the runtime reused and reported through `adoptRunPage`: owned for
+	// recording, never closed here.
+	const reusedRunPages = trackRunOwnedPages();
+	const runDownloads = harRecording
+		? trackRunOwnedDownloads(
+				context,
+				(page) => runPages.owns(page) || reusedRunPages.owns(page),
+				downloadCaptureOptionsFromEnv(process.env),
+			)
+		: null;
 	if (harRecording) {
 		await startRemoteCdpHarRecording({
 			browser,
 			context,
 			harPath: harRecording.path,
 			onFailure: () => {
+				runDownloads?.dispose();
+				reusedRunPages.dispose();
 				runPages.dispose();
 				browser.off("disconnected", onDisconnected);
 			},
@@ -951,10 +1007,22 @@ async function acquireRemoteCdpBrowser(
 	return {
 		browser,
 		context,
+		adoptRunPage: (page: Page): void => {
+			if (!runPages.owns(page)) {
+				reusedRunPages.adopt(page);
+			}
+		},
 		release: async (): Promise<void> => {
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
 			releaseRequested = true;
+			// Captures started with each download; this waits only for the ones
+			// still running, each within its own window, while the pages and
+			// the context are open (Playwright deletes download artifacts with
+			// the context).
+			const downloadBodies = runDownloads ? await runDownloads.bodies() : [];
+			runDownloads?.dispose();
+			reusedRunPages.dispose();
 			if (recording) {
 				// A recording run leaves its page open so storage state can still
 				// be read here (see `shouldCloseBrowserPageAfterRun`). On a local
@@ -981,6 +1049,10 @@ async function acquireRemoteCdpBrowser(
 						`[browser-launch] remote CDP HAR export failed profile=${profileName}: ${err instanceof Error ? err.message : String(err)}\n`,
 					);
 				}
+				await embedDownloadBodiesInHarFile(
+					harRecording.path,
+					downloadBodies,
+				).catch(() => 0);
 				await redactHarFileBestEffort(harRecording.path);
 			}
 			try {
@@ -1377,7 +1449,39 @@ export async function fileFlushOutcome(
  * The connector runtime scopes the profile name with the stable connector
  * instance ID when the reference runtime supplies one.
  */
-export async function acquireIsolatedBrowser({
+export async function acquireIsolatedBrowser(
+	options: AcquireIsolatedBrowserOptions,
+): Promise<IsolatedBrowser> {
+	return withScenarioClockPaused(async () => {
+		const acquired = await acquireIsolatedBrowserWithClock(options);
+		const release = acquired.release;
+		acquired.release = () => withScenarioClockPaused(release);
+		return acquired;
+	});
+}
+
+/**
+ * Runs `fn` with the scenario clock trace paused. Browser acquire and release
+ * are host plumbing, not connector behavior: a recording attaches to a remote
+ * CDP browser and a replay launches a local one, so their clock reads differ
+ * in number, and traced they would shift every later value the connector
+ * reads in replay. The scenario preloads read `__pdppScenarioClockPaused`
+ * (see `subprocess-fetch-preloads.ts` and `browser-har-replay.ts`); outside a
+ * scenario run nothing reads it.
+ */
+export async function withScenarioClockPaused<T>(
+	fn: () => Promise<T>,
+): Promise<T> {
+	const scope = globalThis as { __pdppScenarioClockPaused?: number };
+	scope.__pdppScenarioClockPaused = (scope.__pdppScenarioClockPaused ?? 0) + 1;
+	try {
+		return await fn();
+	} finally {
+		scope.__pdppScenarioClockPaused -= 1;
+	}
+}
+
+async function acquireIsolatedBrowserWithClock({
 	profileName,
 	headless,
 	streamingEnabled,

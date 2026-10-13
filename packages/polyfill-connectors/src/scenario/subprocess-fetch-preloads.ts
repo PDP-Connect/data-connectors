@@ -422,10 +422,29 @@ const armOnStartLine = (chunk) => {
   }
 };
 process.stdin.on("data", armOnStartLine);
+// The clock trace is for the CONNECTOR's own clock reads. Patchright runs
+// its driver in this process, and its internals (HAR tracer, network
+// events, routing) read the clock a different number of times in record
+// (remote CDP attach, HAR recording) and in replay (local launch,
+// routeFromHAR); traced, those reads shift every later recorded value.
+// So a read whose nearest caller outside this preload is patchright or
+// playwright code, or one made while browser-launch.ts has paused the
+// trace (browser acquire and release), sees the real clock, untraced.
+const PRELOAD_URL = import.meta.url;
+const BROWSER_LIBRARY_FRAME = /[\\\\/]node_modules[\\\\/](?:patchright|playwright)(?:-core)?[\\\\/]/;
+const untracedClockRead = () => {
+  if (globalThis.__pdppScenarioClockPaused) return true;
+  const frames = String(new Error().stack ?? "").split("\\n").slice(1);
+  for (const frame of frames) {
+    if (frame.includes(PRELOAD_URL)) continue;
+    return BROWSER_LIBRARY_FRAME.test(frame);
+  }
+  return false;
+};
 const realDateNow = Date.now;
 const observeNow = () => {
   const value = realDateNow();
-  if (clockArmed) {
+  if (clockArmed && !untracedClockRead()) {
     clockTrace.push(value);
   }
   return value;
@@ -1136,6 +1155,25 @@ import { writeFileSync } from "node:fs";
 // and its dependents) happens before a run is armed and must see the
 // real clock, identically to record, not the deterministic replay clock
 // below.
+// The clock trace is for the CONNECTOR's own clock reads. Patchright runs
+// its driver in this process, and its internals (HAR tracer, network
+// events, routing) read the clock a different number of times in record
+// (remote CDP attach, HAR recording) and in replay (local launch,
+// routeFromHAR); traced, those reads shift every later recorded value.
+// So a read whose nearest caller outside this preload is patchright or
+// playwright code, or one made while browser-launch.ts has paused the
+// trace (browser acquire and release), sees the real clock, untraced.
+const PRELOAD_URL = import.meta.url;
+const BROWSER_LIBRARY_FRAME = /[\\\\/]node_modules[\\\\/](?:patchright|playwright)(?:-core)?[\\\\/]/;
+const untracedClockRead = () => {
+  if (globalThis.__pdppScenarioClockPaused) return true;
+  const frames = String(new Error().stack ?? "").split("\\n").slice(1);
+  for (const frame of frames) {
+    if (frame.includes(PRELOAD_URL)) continue;
+    return BROWSER_LIBRARY_FRAME.test(frame);
+  }
+  return false;
+};
 const realDateNowForClock = Date.now;
 let clockArmed = false;
 // Peeks at this process's own stdin for the START line WITHOUT consuming
@@ -1366,7 +1404,7 @@ if (FIXED_NOW_ISO) {
       // work) — not part of the replayed run, so it must see the REAL
       // clock, identically to record, rather than consuming trace entries
       // that belong to the connector's own calls.
-      if (!clockArmed) {
+      if (!clockArmed || untracedClockRead()) {
         return realDateNowForClock();
       }
       if (traceIndex < trace.length) {

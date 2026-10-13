@@ -127,6 +127,7 @@
  * BECAUSE this module refuses to paper over the problem automatically.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -432,6 +433,138 @@ export function findApiRequestHarMatch(
 	return best;
 }
 
+/**
+ * A HAR entry as `sequentialHarResponseGroups` reads it: the request's
+ * method, URL and body, the response's status and body, and start time.
+ */
+export interface SequentialHarEntry {
+	request?: {
+		bodySize?: unknown;
+		headers?: readonly { name?: unknown; value?: unknown }[];
+		method?: unknown;
+		postData?: { text?: unknown };
+		url?: unknown;
+	};
+	response?: {
+		content?: { encoding?: unknown; text?: unknown };
+		status?: unknown;
+	};
+	startedDateTime?: unknown;
+}
+
+const sha256 = (value: string): string =>
+	createHash("sha256").update(value).digest("hex");
+
+/** The multipart boundary of a content-type value, as Playwright reads it. */
+function multipartBoundary(contentType: unknown): string | undefined {
+	if (
+		typeof contentType !== "string" ||
+		!contentType.includes("multipart/form-data")
+	) {
+		return undefined;
+	}
+	return /boundary=(\S+)/.exec(contentType)?.[1];
+}
+
+/**
+ * The identity a recorded or live request is replayed by: method, URL and
+ * the request body (hashed). A multipart body is compared without its
+ * boundary, which is random per request, as Playwright's own HAR matcher
+ * does. Two POSTs to one GraphQL URL with different bodies are different
+ * requests and never share a sequence.
+ */
+export function sequentialHarRequestKey(
+	method: unknown,
+	url: unknown,
+	postData: unknown,
+	contentType?: unknown,
+): string {
+	const body = typeof postData === "string" ? postData : "";
+	const boundary = multipartBoundary(contentType);
+	const normalized = boundary ? body.replaceAll(boundary, "") : body;
+	return `${String(method)} ${String(url)} ${sha256(normalized)}`;
+}
+
+function headerValue(
+	headers: readonly { name?: unknown; value?: unknown }[] | undefined,
+	name: string,
+): unknown {
+	return headers?.find((header) => String(header.name).toLowerCase() === name)
+		?.value;
+}
+
+/**
+ * A recorded request that HAD a body the HAR kept no text for (a binary
+ * octet-stream upload): its identity cannot be known, so it is never
+ * sequenced and stays with routeFromHAR.
+ */
+function hasOpaqueBody(entry: SequentialHarEntry): boolean {
+	const text = entry.request?.postData?.text;
+	const bodySize = entry.request?.bodySize;
+	return (
+		typeof bodySize === "number" &&
+		bodySize > 0 &&
+		!(typeof text === "string" && text.length > 0)
+	);
+}
+
+/** Status plus the hash of the actual response body (not its size). */
+function responseIdentity(entry: SequentialHarEntry): string {
+	const content = entry.response?.content;
+	const text = typeof content?.text === "string" ? content.text : "";
+	return `${String(entry.response?.status)}:${String(content?.encoding ?? "")}:${sha256(text)}`;
+}
+
+/**
+ * `routeFromHAR` answers every request with the FIRST matching entry, so a
+ * URL the connector polls (an export status that answered 404 and later 200)
+ * replays "not ready" forever. This groups entries by full request identity
+ * (`sequentialHarRequestKey`) and returns, in recorded order, the groups
+ * whose responses DIFFER in status or body content; the replay preload
+ * serves those in order (the last one repeats) and leaves every other
+ * request to `routeFromHAR`. A group whose responses are all identical is
+ * left out: order cannot change what it replays.
+ *
+ * The pure rule the generated preload's `installSequentialHarRoutes` mirrors
+ * inline (by copy, not import; see `findApiRequestHarMatch`). The generated
+ * copy is exercised directly in browser-har-replay.test.ts.
+ */
+export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
+	entries: readonly T[],
+): Map<string, T[]> {
+	const groups = new Map<string, T[]>();
+	for (const entry of entries) {
+		if (hasOpaqueBody(entry)) {
+			continue;
+		}
+		const key = sequentialHarRequestKey(
+			entry.request?.method,
+			entry.request?.url,
+			entry.request?.postData?.text,
+			headerValue(entry.request?.headers, "content-type"),
+		);
+		const group = groups.get(key);
+		if (group) {
+			group.push(entry);
+		} else {
+			groups.set(key, [entry]);
+		}
+	}
+	const sequential = new Map<string, T[]>();
+	for (const [key, group] of groups) {
+		if (group.length < 2 || new Set(group.map(responseIdentity)).size < 2) {
+			continue;
+		}
+		const started = (entry: T): number =>
+			Date.parse(String(entry.startedDateTime));
+		sequential.set(
+			key,
+			[...group].sort((left, right) => started(left) - started(right)),
+		);
+	}
+	return sequential;
+}
+
 /** Minimal `APIResponse` polyfill backing the bridge above — only the
  *  surface this package's current `context.request` callers use
  *  (`status`/`ok`/`text`/`json`/`dispose`; see the "APIRequestContext → HAR
@@ -656,6 +789,25 @@ export function writeBrowserHarReplayPreload(
 // and its dependents) happens before a run is armed and must see the
 // real clock, identically to record, not the deterministic replay clock
 // below.
+// The clock trace is for the CONNECTOR's own clock reads. Patchright runs
+// its driver in this process, and its internals (HAR tracer, network
+// events, routing) read the clock a different number of times in record
+// (remote CDP attach, HAR recording) and in replay (local launch,
+// routeFromHAR); traced, those reads shift every later recorded value.
+// So a read whose nearest caller outside this preload is patchright or
+// playwright code, or one made while browser-launch.ts has paused the
+// trace (browser acquire and release), sees the real clock, untraced.
+const PRELOAD_URL = import.meta.url;
+const BROWSER_LIBRARY_FRAME = /[\\\\/]node_modules[\\\\/](?:patchright|playwright)(?:-core)?[\\\\/]/;
+const untracedClockRead = () => {
+  if (globalThis.__pdppScenarioClockPaused) return true;
+  const frames = String(new Error().stack ?? "").split("\\n").slice(1);
+  for (const frame of frames) {
+    if (frame.includes(PRELOAD_URL)) continue;
+    return BROWSER_LIBRARY_FRAME.test(frame);
+  }
+  return false;
+};
 const realDateNowForClock = Date.now;
 let clockArmed = false;
 // Peeks at this process's own stdin for the START line WITHOUT consuming
@@ -751,7 +903,7 @@ if (FIXED_NOW_ISO) {
       // work) — not part of the replayed run, so it must see the REAL
       // clock, identically to record, rather than consuming trace entries
       // that belong to the connector's own calls.
-      if (!clockArmed) {
+      if (!clockArmed || untracedClockRead()) {
         return realDateNowForClock();
       }
       if (traceIndex < trace.length) {
@@ -803,6 +955,7 @@ if (FIXED_NOW_ISO) {
 // evidence is ONLY the captured storage state), not for reliability (no
 // contention on that profile's own SingletonLock), and not for safety (a
 // replay run must not be able to read from or mutate live session cookies).
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
@@ -980,6 +1133,79 @@ function installApiRequestContextHarBridge(context) {
     return buildApiResponseFromHarEntry(entry);
   };
 }
+// BEGIN installSequentialHarRoutes
+// Polled URLs replay in recorded order. Inline mirror of
+// sequentialHarResponseGroups (browser-har-replay.ts), which is the tested
+// rule: routeFromHAR answers every request with the FIRST matching entry, so
+// for one request identity (method, URL, request body) whose responses
+// differ in status or body content the entries are served in recorded order
+// (the last one repeats). Registered AFTER routeFromHAR, so it is consulted
+// first; any other request falls back to routeFromHAR.
+async function installSequentialHarRoutes(context) {
+  let har;
+  try {
+    har = JSON.parse(readFileSync(HAR_PATH, "utf8"));
+  } catch {
+    return;
+  }
+  const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+  const multipartBoundary = (contentType) =>
+    typeof contentType === "string" && contentType.includes("multipart/form-data")
+      ? /boundary=(\\S+)/.exec(contentType)?.[1]
+      : undefined;
+  const requestKey = (method, url, postData, contentType) => {
+    const body = typeof postData === "string" ? postData : "";
+    const boundary = multipartBoundary(contentType);
+    return String(method) + " " + String(url) + " " + sha256(boundary ? body.replaceAll(boundary, "") : body);
+  };
+  const headerValue = (headers, name) =>
+    (headers ?? []).find((header) => String(header.name).toLowerCase() === name)?.value;
+  const hasOpaqueBody = (entry) => {
+    const text = entry.request?.postData?.text;
+    const bodySize = entry.request?.bodySize;
+    return typeof bodySize === "number" && bodySize > 0 && !(typeof text === "string" && text.length > 0);
+  };
+  const responseIdentity = (entry) => {
+    const content = entry.response?.content;
+    const text = typeof content?.text === "string" ? content.text : "";
+    return String(entry.response?.status) + ":" + String(content?.encoding ?? "") + ":" + sha256(text);
+  };
+  const groups = new Map();
+  for (const entry of har.log?.entries ?? []) {
+    if (hasOpaqueBody(entry)) continue;
+    const key = requestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text, headerValue(entry.request?.headers, "content-type"));
+    const group = groups.get(key);
+    if (group) group.push(entry);
+    else groups.set(key, [entry]);
+  }
+  const sequences = new Map();
+  for (const [key, group] of groups) {
+    if (group.length < 2 || new Set(group.map(responseIdentity)).size < 2) continue;
+    const started = (entry) => Date.parse(String(entry.startedDateTime));
+    sequences.set(key, { entries: [...group].sort((a, b) => started(a) - started(b)), next: 0 });
+  }
+  if (sequences.size === 0) return;
+  await context.route("**/*", async (route) => {
+    const request = route.request();
+    const sequence = sequences.get(requestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]));
+    if (!sequence) return route.fallback();
+    const entry = sequence.entries[Math.min(sequence.next, sequence.entries.length - 1)];
+    sequence.next += 1;
+    if (!(entry.response?.status > 0)) return route.abort();
+    const content = entry.response.content ?? {};
+    const body = typeof content.text === "string"
+      ? Buffer.from(content.text, content.encoding === "base64" ? "base64" : "utf8")
+      : Buffer.alloc(0);
+    const headers = {};
+    for (const header of entry.response.headers ?? []) {
+      const name = header.name.toLowerCase();
+      if (name === "content-length" || name === "content-encoding" || name.startsWith(":")) continue;
+      headers[header.name] = header.value;
+    }
+    await route.fulfill({ status: entry.response.status, headers, body });
+  });
+}
+// END installSequentialHarRoutes
 const ISOLATED_PROFILE_DIRS = [];
 let isolatedProfileCleanupRegistered = false;
 function freshIsolatedProfileDir() {
@@ -1044,6 +1270,7 @@ import("patchright").then((patchright) => {
     // ("EGRESS DENIAL SCOPE"). An unmatched request must fail loudly, never
     // silently reach the real network.
     await context.routeFromHAR(HAR_PATH, { notFound: "abort" });
+    await installSequentialHarRoutes(context);
     // See this file's "APIRequestContext → HAR bridge" comment above —
     // context.request never goes through context.routeFromHAR at all, so
     // without this it would silently reach the real network (or, under

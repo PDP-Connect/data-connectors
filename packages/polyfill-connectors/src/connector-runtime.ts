@@ -1845,7 +1845,11 @@ async function runInBrowser(args: {
 		baseCtx,
 		retryablePattern,
 	} = args;
-	const { context: ctx, release } = await acquireBrowser(browser, name);
+	const {
+		adoptRunPage,
+		context: ctx,
+		release,
+	} = await acquireBrowser(browser, name);
 	const visibility = resolveBrowserRuntimeVisibility(browser, name);
 	const browserSurface = resolveBrowserLaunchSource(visibility).kind;
 	const ownsBrowserPages = runtimeOwnsBrowserPages({ kind: browserSurface });
@@ -1887,6 +1891,10 @@ async function runInBrowser(args: {
 	try {
 		const pagesBeforeRun = new Set(ctx.pages());
 		page = await selectBrowserPageForRun(ctx, browser);
+		// One ownership authority: a page the launcher did not create (a
+		// reused preserve-page tab) is still this run's page, so the launcher
+		// must record it (downloads into the HAR) without closing it.
+		adoptRunPage?.(page);
 		// A page the run reused (only a connector that declares page
 		// preservation reuses one, see `selectBrowserPageForRun`) is the run's
 		// page for popup tracking, but in an attached browser it is never
@@ -2605,6 +2613,8 @@ async function finalizeRun(
 // ─── Browser-mode helpers ──────────────────────────────────────────────
 
 interface AcquiredBrowser {
+	/** See `IsolatedBrowser.adoptRunPage` (browser-launch.ts). */
+	adoptRunPage?: (page: Page) => void;
 	context: BrowserContext;
 	release: () => Promise<void>;
 }

@@ -121,6 +121,20 @@
  * `re_record_interval` failure mode (a cassette silently re-recorded on a
  * schedule, quietly changing what a "PASS" means) has no equivalent here.
  *
+ * ─── `PDPP_SCENARIO_TRANSCRIPT_DIR` (raw protocol transcript) ─────────────
+ *
+ * The scenario JSON keeps record HASHES, not records. A recording host that
+ * classifies the run itself (counts per stream, DONE status, DETAIL_GAP and
+ * STATE shape) needs the protocol messages as the connector emitted them.
+ * When `PDPP_SCENARIO_TRANSCRIPT_DIR` names a directory, every stdout
+ * protocol message of run N is appended to `<dir>/run<N>.jsonl` as
+ * `{"at": <ms>, "message": <message>}`, INTERACTION prompts included. The
+ * directory is prepared before the connector starts (created or tightened
+ * to 0700) and each run's file is truncated and set 0600 at the start of
+ * the run, so a rerun never appends to an old transcript. Off by default. The transcript holds record VALUES (it is
+ * the connector's output, unredacted), so it is `local-only` like the
+ * storageState file: never commit or share it.
+ *
  * KNOWN GAP, VERIFIED UNEXERCISED: `recordHar` does not capture WebSocket/
  * EventSource/SSE frames, and a browser download's body can bypass HAR
  * capture entirely (Playwright's HAR machinery is HTTP request/response
@@ -203,6 +217,7 @@
 
 import { spawn } from "node:child_process";
 import {
+	appendFileSync,
 	chmodSync,
 	copyFileSync,
 	existsSync,
@@ -1352,6 +1367,41 @@ function toScenarioUserInteraction(
 	};
 }
 
+let transcriptRunNumber = 0;
+
+/**
+ * Prepares run N's raw protocol transcript and returns its path, or undefined
+ * when `PDPP_SCENARIO_TRANSCRIPT_DIR` is unset or blank (see the file header).
+ * Runs BEFORE the connector is spawned. The directory is created, or an
+ * existing one tightened, to 0700; the run file is created empty or
+ * TRUNCATED (a rerun into the same directory never appends to an old run)
+ * and set to 0600.
+ */
+export function prepareScenarioTranscript(
+	env: NodeJS.ProcessEnv,
+	runNumber: number,
+): string | undefined {
+	const dir = env.PDPP_SCENARIO_TRANSCRIPT_DIR?.trim();
+	if (!dir) {
+		return undefined;
+	}
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	chmodSync(dir, 0o700);
+	const path = join(dir, `run${String(runNumber)}.jsonl`);
+	writeFileSync(path, "", { mode: 0o600 });
+	chmodSync(path, 0o600);
+	return path;
+}
+
+/** Appends one protocol message to a prepared transcript file. */
+export function appendScenarioTranscript(
+	path: string,
+	message: unknown,
+	at: number,
+): void {
+	appendFileSync(path, `${JSON.stringify({ at, message })}\n`);
+}
+
 /**
  * Spawns the connector entrypoint with the RECORD preload installed via
  * NODE_OPTIONS, drives START over stdio, and reads back the preload's
@@ -1403,6 +1453,11 @@ function runRecordSubprocess(args: {
 			`capture-${String(process.pid)}-${String(Date.now())}.json`,
 		);
 		const preloadPath = writeRecordPreload(capturePath, args.workspace);
+		transcriptRunNumber += 1;
+		const transcriptPath = prepareScenarioTranscript(
+			process.env,
+			transcriptRunNumber,
+		);
 
 		const child = spawn(
 			process.execPath,
@@ -1559,6 +1614,11 @@ function runRecordSubprocess(args: {
 		// protocol message", so recording fails the same honest way for either.
 		const handleParsedLine = (parsed: unknown): void => {
 			assertKnownMessageType(parsed);
+			// Every known message goes to the transcript, INTERACTION prompts
+			// included (they return early below).
+			if (transcriptPath) {
+				appendScenarioTranscript(transcriptPath, parsed, Date.now());
+			}
 			lastMessageSeenAt = {
 				at: Date.now(),
 				type: (parsed as { type: string }).type,
