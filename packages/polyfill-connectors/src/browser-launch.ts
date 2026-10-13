@@ -37,6 +37,7 @@ import {
 	withProfileLockMutex,
 } from "./profile-lock.ts";
 import {
+	downloadCaptureOptionsFromEnv,
 	embedDownloadBodiesInHarFile,
 	trackRunOwnedDownloads,
 } from "./remote-download-har.ts";
@@ -986,6 +987,7 @@ async function acquireRemoteCdpBrowser(
 		? trackRunOwnedDownloads(
 				context,
 				(page) => runPages.owns(page) || reusedRunPages.owns(page),
+				downloadCaptureOptionsFromEnv(process.env),
 			)
 		: null;
 	if (harRecording) {

@@ -27,6 +27,12 @@
  * here only when the host mirrors that directory back (see
  * `PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS` in `playwright-download.ts`); one
  * that is not readable is left out and the HAR entry stays as recorded.
+ *
+ * Contract: each download's file has 30s to become readable here, counted
+ * from that download's OWN start (`PDPP_REMOTE_DOWNLOAD_CAPTURE_WINDOW_MS`
+ * overrides it); a read that has started is never cut off. Release seals
+ * tracking: a download that starts after that is not captured, and is
+ * counted and logged as late.
  */
 
 import { existsSync, statSync } from "node:fs";
@@ -47,20 +53,25 @@ export interface DownloadBody {
 
 export interface RunOwnedDownloads {
 	/**
-	 * The body of every run-owned download, in start order. Capture started
-	 * when each download did; this only waits for the captures already
-	 * running, each within its own window (see `captureDownloadBody`).
+	 * Seals tracking (a download that starts after this is not captured; it
+	 * is counted and logged as late), then waits for every capture already
+	 * running and returns the bodies in start order. When it resolves no
+	 * capture, poll or timer of this tracker is still running.
 	 */
 	bodies: () => Promise<DownloadBody[]>;
 	/** Stop listening; captures already started keep running. */
 	dispose: () => void;
+	/** Download events that arrived after `bodies()` sealed tracking. */
+	late: () => number;
 }
 
 export interface DownloadCaptureOptions {
 	/**
 	 * How long a download's file may take to become readable here, counted
-	 * from the download's own start. A read that has started is never cut
-	 * off by it.
+	 * from the download's OWN start (not from release). A read that has
+	 * started is never cut off by it. Default 30s; a host can set
+	 * `PDPP_REMOTE_DOWNLOAD_CAPTURE_WINDOW_MS` (see
+	 * `downloadCaptureOptionsFromEnv`).
 	 */
 	windowMs?: number;
 	/** Interval for checking whether the (mirrored) file has appeared. */
@@ -71,6 +82,14 @@ export interface DownloadCaptureOptions {
 
 const DOWNLOAD_CAPTURE_WINDOW_MS = 30_000;
 const DOWNLOAD_FILE_POLL_MS = 250;
+
+/** `PDPP_REMOTE_DOWNLOAD_CAPTURE_WINDOW_MS`, when it is a positive number. */
+export function downloadCaptureOptionsFromEnv(
+	env: NodeJS.ProcessEnv,
+): DownloadCaptureOptions {
+	const windowMs = Number(env.PDPP_REMOTE_DOWNLOAD_CAPTURE_WINDOW_MS);
+	return Number.isFinite(windowMs) && windowMs > 0 ? { windowMs } : {};
+}
 
 function fileSize(path: string): number {
 	try {
@@ -87,11 +106,12 @@ function fileSize(path: string): number {
  * Two phases. "Ready": the download finished (`path()` resolved, no
  * `failure()`) and its file is readable here with a non-zero size; for a
  * remote browser the host's mirror may copy it back a little later, so the
- * file is polled for. "Read": its bytes are read. The window applies only to
- * becoming ready: a download not ready within `windowMs` of its own start
- * resolves `unfinished`. Once the read has started it is awaited to the end.
- * Polls are counted, not timed with the clock, because the clock is traced
- * during a scenario recording.
+ * file is polled for, with one last check when the window ends. "Read": its
+ * bytes are read. The window (`windowMs`, from this download's own start)
+ * applies only to becoming ready: a download not ready by then resolves
+ * `unfinished`. Once the read has started it runs to the end. Every timer is
+ * cleared when the promise resolves. Polls are counted, not timed with the
+ * clock, because the clock is traced during a scenario recording.
  */
 export function captureDownloadBody(
 	download: Pick<Download, "failure" | "path" | "url">,
@@ -102,44 +122,69 @@ export function captureDownloadBody(
 	}: DownloadCaptureOptions = {},
 ): Promise<DownloadBody> {
 	const url = download.url();
-	let windowOver = false;
-	let readStarted = false;
-	const sleep = (ms: number): Promise<void> =>
-		new Promise((resolve) => {
-			setTimeout(resolve, ms);
-		});
-	const ready = async (): Promise<string | null> => {
-		const path = await download.path();
-		if (!path || (await download.failure())) {
-			return null;
-		}
-		while (!windowOver) {
-			if (fileSize(path) > 0) {
-				return path;
-			}
-			await sleep(pollMs);
-		}
-		return null;
-	};
-	const work = (async (): Promise<DownloadBody> => {
-		const path = await ready();
-		if (!path || windowOver) {
-			return { bytes: null, url };
-		}
-		readStarted = true;
-		return { bytes: await read(path), url };
-	})().catch((): DownloadBody => ({ bytes: null, url }));
 	return new Promise<DownloadBody>((resolve) => {
-		const timer = setTimeout(() => {
-			windowOver = true;
-			if (!readStarted) {
-				resolve({ bytes: null, unfinished: true, url });
+		let settled = false;
+		let reading = false;
+		let readyPath: string | null = null;
+		let pollTimer: ReturnType<typeof setTimeout> | undefined;
+		let wakePoll: (() => void) | null = null;
+		const stopPolling = (): void => {
+			clearTimeout(pollTimer);
+			wakePoll?.();
+			wakePoll = null;
+		};
+		const finish = (body: DownloadBody): void => {
+			if (settled) {
+				return;
 			}
-		}, windowMs);
-		work.then((body) => {
-			clearTimeout(timer);
+			settled = true;
+			clearTimeout(windowTimer);
+			stopPolling();
 			resolve(body);
-		});
+		};
+		const readFrom = (path: string): void => {
+			reading = true;
+			clearTimeout(windowTimer);
+			stopPolling();
+			read(path).then(
+				(bytes) => finish({ bytes, url }),
+				() => finish({ bytes: null, url }),
+			);
+		};
+		const windowTimer = setTimeout(() => {
+			if (reading || settled) {
+				return;
+			}
+			// One last look at the window end: a file that landed during the
+			// final poll sleep still counts.
+			if (readyPath && fileSize(readyPath) > 0) {
+				readFrom(readyPath);
+				return;
+			}
+			finish({ bytes: null, unfinished: true, url });
+		}, windowMs);
+		const poll = async (): Promise<void> => {
+			const path = await download.path();
+			if (settled) {
+				return;
+			}
+			if (!path || (await download.failure())) {
+				finish({ bytes: null, url });
+				return;
+			}
+			readyPath = path;
+			while (!(settled || reading)) {
+				if (fileSize(path) > 0) {
+					readFrom(path);
+					return;
+				}
+				await new Promise<void>((wake) => {
+					wakePoll = wake;
+					pollTimer = setTimeout(wake, pollMs);
+				});
+			}
+		};
+		poll().catch(() => finish({ bytes: null, url }));
 	});
 }
 
@@ -156,14 +201,21 @@ export function trackRunOwnedDownloads(
 ): RunOwnedDownloads {
 	const captures: Promise<DownloadBody>[] = [];
 	const listeners = new Map<Page, (download: Download) => void>();
+	let sealed = false;
+	let late = 0;
 	const watch = (page: Page): void => {
 		if (listeners.has(page)) {
 			return;
 		}
 		const onDownload = (download: Download): void => {
-			if (owns(page)) {
-				captures.push(captureDownloadBody(download, options));
+			if (!owns(page)) {
+				return;
 			}
+			if (sealed) {
+				late += 1;
+				return;
+			}
+			captures.push(captureDownloadBody(download, options));
 		};
 		listeners.set(page, onDownload);
 		page.on("download", onDownload);
@@ -173,7 +225,18 @@ export function trackRunOwnedDownloads(
 	}
 	context.on("page", watch);
 	return {
-		bodies: () => Promise.all(captures),
+		bodies: async () => {
+			// Seal first: everything accepted from here on is in `captures`,
+			// so the wait below covers every capture this tracker started.
+			sealed = true;
+			const bodies = await Promise.all(captures);
+			if (late > 0) {
+				process.stderr.write(
+					`[browser-launch] remote HAR: ${String(late)} download(s) started after release began; not captured\n`,
+				);
+			}
+			return bodies;
+		},
 		dispose: () => {
 			context.off("page", watch);
 			for (const [page, onDownload] of listeners) {
@@ -181,6 +244,7 @@ export function trackRunOwnedDownloads(
 			}
 			listeners.clear();
 		},
+		late: () => late,
 	};
 }
 

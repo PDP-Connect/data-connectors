@@ -10,6 +10,7 @@ import test from "node:test";
 import type { BrowserContext, Download, Page } from "playwright";
 import {
 	captureDownloadBody,
+	downloadCaptureOptionsFromEnv,
 	embedDownloadBodies,
 	embedDownloadBodiesInHarFile,
 	trackRunOwnedDownloads,
@@ -220,6 +221,109 @@ test("captureDownloadBody waits for a mirrored file to appear; a failed download
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+const ourTimers = (): number =>
+	process.getActiveResourcesInfo().filter((kind) => kind === "Timeout").length;
+
+test("bodies() seals tracking: a download that starts after it is counted as late, and nothing is left running", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "remote-download-seal-"));
+	try {
+		const file = join(dir, "first.zip");
+		await writeFile(file, "first");
+		const page = fakePage();
+		const timersBefore = ourTimers();
+		const tracker = trackRunOwnedDownloads(fakeContext([page]), () => true, {
+			pollMs: 5,
+			windowMs: 200,
+		});
+		page.emit(
+			"download",
+			fakeDownload({ path: file, url: "https://example.test/first.zip" }),
+		);
+		// A stuck one, so the window timer path runs too.
+		page.emit(
+			"download",
+			fakeDownload({
+				path: () => new Promise<string>(() => undefined),
+				url: "https://example.test/stuck.zip",
+			}),
+		);
+		const pending = tracker.bodies();
+		// Fires while release() is awaiting.
+		page.emit(
+			"download",
+			fakeDownload({ path: file, url: "https://example.test/late.zip" }),
+		);
+		const bodies = await pending;
+		tracker.dispose();
+		assert.deepEqual(
+			bodies.map((b) => [
+				b.url,
+				b.bytes?.toString("utf8") ?? null,
+				b.unfinished ?? false,
+			]),
+			[
+				["https://example.test/first.zip", "first", false],
+				["https://example.test/stuck.zip", null, true],
+			],
+		);
+		assert.equal(
+			tracker.late(),
+			1,
+			"the late download is counted, not silently lost",
+		);
+		assert.equal(
+			ourTimers(),
+			timersBefore,
+			"no capture timer or poll is left running",
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("captureDownloadBody takes a file that lands during the last poll sleep, at the window end", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "remote-download-final-"));
+	try {
+		const late = join(dir, "late.zip");
+		// Polls every 100ms; window 250ms; the file lands at ~220ms, after the
+		// last in-loop check at 200ms.
+		setTimeout(() => {
+			writeFile(late, "landed").catch(() => undefined);
+		}, 220);
+		const body = await captureDownloadBody(
+			fakeDownload({ path: late, url: "https://example.test/late.zip" }),
+			{
+				pollMs: 100,
+				windowMs: 250,
+			},
+		);
+		assert.equal(body.bytes?.toString("utf8"), "landed");
+		assert.equal(body.unfinished, undefined);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("downloadCaptureOptionsFromEnv: only a positive number overrides the 30s window", () => {
+	assert.deepEqual(downloadCaptureOptionsFromEnv({}), {});
+	for (const value of ["", "0", "-1", "abc"]) {
+		assert.deepEqual(
+			downloadCaptureOptionsFromEnv({
+				PDPP_REMOTE_DOWNLOAD_CAPTURE_WINDOW_MS: value,
+			}),
+			{},
+		);
+	}
+	assert.deepEqual(
+		downloadCaptureOptionsFromEnv({
+			PDPP_REMOTE_DOWNLOAD_CAPTURE_WINDOW_MS: "120000",
+		}),
+		{
+			windowMs: 120_000,
+		},
+	);
 });
 
 interface SlotEntry {
