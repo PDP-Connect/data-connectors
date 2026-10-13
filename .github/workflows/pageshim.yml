@@ -20,9 +20,20 @@ concurrency:
 
 jobs:
   harness:
-    name: PageShim harness
+    name: PageShim harness (${{ matrix.shard.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The per-connector gates alone take about 8 minutes sequentially, and
+    # the whole suite in one job grew past 15 minutes. Two shards run in
+    # parallel; the timeout leaves headroom for new connectors.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: connector gates
+            args: --test-name-pattern="pageshim gate" scripts/pageshim/pageshim.test.mjs
+          - name: harness
+            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,4 +53,4 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Build and run the harness
-        run: node --test scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs
+        run: node --test ${{ matrix.shard.args }}
