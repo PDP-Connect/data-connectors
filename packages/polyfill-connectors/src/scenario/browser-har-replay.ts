@@ -438,7 +438,13 @@ export function findApiRequestHarMatch(
  * method, URL and body, the response's status and body, and start time.
  */
 export interface SequentialHarEntry {
-	request?: { method?: unknown; postData?: { text?: unknown }; url?: unknown };
+	request?: {
+		bodySize?: unknown;
+		headers?: readonly { name?: unknown; value?: unknown }[];
+		method?: unknown;
+		postData?: { text?: unknown };
+		url?: unknown;
+	};
 	response?: {
 		content?: { encoding?: unknown; text?: unknown };
 		status?: unknown;
@@ -449,17 +455,57 @@ export interface SequentialHarEntry {
 const sha256 = (value: string): string =>
 	createHash("sha256").update(value).digest("hex");
 
+/** The multipart boundary of a content-type value, as Playwright reads it. */
+function multipartBoundary(contentType: unknown): string | undefined {
+	if (
+		typeof contentType !== "string" ||
+		!contentType.includes("multipart/form-data")
+	) {
+		return undefined;
+	}
+	return /boundary=(\S+)/.exec(contentType)?.[1];
+}
+
 /**
  * The identity a recorded or live request is replayed by: method, URL and
- * the request body (hashed). Two POSTs to one GraphQL URL with different
- * bodies are different requests and never share a sequence.
+ * the request body (hashed). A multipart body is compared without its
+ * boundary, which is random per request, as Playwright's own HAR matcher
+ * does. Two POSTs to one GraphQL URL with different bodies are different
+ * requests and never share a sequence.
  */
 export function sequentialHarRequestKey(
 	method: unknown,
 	url: unknown,
 	postData: unknown,
+	contentType?: unknown,
 ): string {
-	return `${String(method)} ${String(url)} ${sha256(typeof postData === "string" ? postData : "")}`;
+	const body = typeof postData === "string" ? postData : "";
+	const boundary = multipartBoundary(contentType);
+	const normalized = boundary ? body.replaceAll(boundary, "") : body;
+	return `${String(method)} ${String(url)} ${sha256(normalized)}`;
+}
+
+function headerValue(
+	headers: readonly { name?: unknown; value?: unknown }[] | undefined,
+	name: string,
+): unknown {
+	return headers?.find((header) => String(header.name).toLowerCase() === name)
+		?.value;
+}
+
+/**
+ * A recorded request that HAD a body the HAR kept no text for (a binary
+ * octet-stream upload): its identity cannot be known, so it is never
+ * sequenced and stays with routeFromHAR.
+ */
+function hasOpaqueBody(entry: SequentialHarEntry): boolean {
+	const text = entry.request?.postData?.text;
+	const bodySize = entry.request?.bodySize;
+	return (
+		typeof bodySize === "number" &&
+		bodySize > 0 &&
+		!(typeof text === "string" && text.length > 0)
+	);
 }
 
 /** Status plus the hash of the actual response body (not its size). */
@@ -488,10 +534,14 @@ export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
 ): Map<string, T[]> {
 	const groups = new Map<string, T[]>();
 	for (const entry of entries) {
+		if (hasOpaqueBody(entry)) {
+			continue;
+		}
 		const key = sequentialHarRequestKey(
 			entry.request?.method,
 			entry.request?.url,
 			entry.request?.postData?.text,
+			headerValue(entry.request?.headers, "content-type"),
 		);
 		const group = groups.get(key);
 		if (group) {
@@ -1099,8 +1149,22 @@ async function installSequentialHarRoutes(context) {
     return;
   }
   const sha256 = (value) => createHash("sha256").update(value).digest("hex");
-  const requestKey = (method, url, postData) =>
-    String(method) + " " + String(url) + " " + sha256(typeof postData === "string" ? postData : "");
+  const multipartBoundary = (contentType) =>
+    typeof contentType === "string" && contentType.includes("multipart/form-data")
+      ? /boundary=(\\S+)/.exec(contentType)?.[1]
+      : undefined;
+  const requestKey = (method, url, postData, contentType) => {
+    const body = typeof postData === "string" ? postData : "";
+    const boundary = multipartBoundary(contentType);
+    return String(method) + " " + String(url) + " " + sha256(boundary ? body.replaceAll(boundary, "") : body);
+  };
+  const headerValue = (headers, name) =>
+    (headers ?? []).find((header) => String(header.name).toLowerCase() === name)?.value;
+  const hasOpaqueBody = (entry) => {
+    const text = entry.request?.postData?.text;
+    const bodySize = entry.request?.bodySize;
+    return typeof bodySize === "number" && bodySize > 0 && !(typeof text === "string" && text.length > 0);
+  };
   const responseIdentity = (entry) => {
     const content = entry.response?.content;
     const text = typeof content?.text === "string" ? content.text : "";
@@ -1108,7 +1172,8 @@ async function installSequentialHarRoutes(context) {
   };
   const groups = new Map();
   for (const entry of har.log?.entries ?? []) {
-    const key = requestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text);
+    if (hasOpaqueBody(entry)) continue;
+    const key = requestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text, headerValue(entry.request?.headers, "content-type"));
     const group = groups.get(key);
     if (group) group.push(entry);
     else groups.set(key, [entry]);
@@ -1122,7 +1187,7 @@ async function installSequentialHarRoutes(context) {
   if (sequences.size === 0) return;
   await context.route("**/*", async (route) => {
     const request = route.request();
-    const sequence = sequences.get(requestKey(request.method(), request.url(), request.postData()));
+    const sequence = sequences.get(requestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]));
     if (!sequence) return route.fallback();
     const entry = sequence.entries[Math.min(sequence.next, sequence.entries.length - 1)];
     sequence.next += 1;

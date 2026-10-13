@@ -527,6 +527,8 @@ const at = (seconds: number): string =>
 
 function seqEntry(fields: {
 	body?: string;
+	bodySize?: number;
+	contentType?: string;
 	method?: string;
 	postData?: string;
 	seconds: number;
@@ -537,6 +539,10 @@ function seqEntry(fields: {
 		request: {
 			method: fields.method ?? "GET",
 			url: fields.url,
+			bodySize: fields.bodySize ?? fields.postData?.length ?? 0,
+			headers: fields.contentType
+				? [{ name: "Content-Type", value: fields.contentType }]
+				: [],
 			...(fields.postData === undefined
 				? {}
 				: { postData: { text: fields.postData } }),
@@ -641,6 +647,11 @@ test("sequentialHarResponseGroups: POSTs to one URL with different bodies are di
 	);
 });
 
+type SequentialRouteOutcome =
+	| { kind: "fallback" }
+	| { kind: "abort" }
+	| { body: string; kind: "fulfill"; status: number };
+
 /**
  * The generated preload's own `installSequentialHarRoutes`, cut out of the
  * real generated source between its BEGIN/END markers and run against a fake
@@ -650,6 +661,7 @@ async function generatedSequentialRoute(
 	entries: unknown[],
 ): Promise<
 	| ((request: {
+			contentType?: string;
 			method: string;
 			postData: string | null;
 			url: string;
@@ -715,6 +727,8 @@ async function generatedSequentialRoute(
 			};
 			await installed({
 				request: () => ({
+					headers: () =>
+						request.contentType ? { "content-type": request.contentType } : {},
 					method: () => request.method,
 					postData: () => request.postData,
 					url: () => request.url,
@@ -853,4 +867,178 @@ test("generated installSequentialHarRoutes: installs nothing when no request ide
 		}),
 	]);
 	assert.equal(route, null);
+});
+
+const UPLOAD_URL = "https://example.test/upload";
+const multipart = (boundary: string, value: string): string =>
+	`--${boundary}\r\nContent-Disposition: form-data; name="q"\r\n\r\n${value}\r\n--${boundary}--\r\n`;
+
+/** A fixture that exercises every rule: polling, repeats, POST bodies, multipart, opaque bodies. */
+function sharedSequencingFixture() {
+	return [
+		seqEntry({ url: STATUS_URL, status: 404, body: "", seconds: 1 }),
+		seqEntry({
+			url: STATUS_URL,
+			status: 200,
+			body: '{"state":"done"}',
+			seconds: 9,
+		}),
+		seqEntry({
+			url: "https://example.test/api/me",
+			status: 200,
+			body: "{}",
+			seconds: 2,
+		}),
+		seqEntry({
+			url: "https://example.test/api/me",
+			status: 200,
+			body: "{}",
+			seconds: 3,
+		}),
+		seqEntry({
+			method: "POST",
+			url: GRAPHQL_URL,
+			postData: '{"op":"A"}',
+			status: 200,
+			body: '{"a":1}',
+			seconds: 4,
+		}),
+		seqEntry({
+			method: "POST",
+			url: GRAPHQL_URL,
+			postData: '{"op":"A"}',
+			status: 200,
+			body: '{"a":2}',
+			seconds: 6,
+		}),
+		seqEntry({
+			method: "POST",
+			url: GRAPHQL_URL,
+			postData: '{"op":"B"}',
+			status: 200,
+			body: '{"b":1}',
+			seconds: 5,
+		}),
+		// Same multipart content, different random boundaries, differing responses.
+		seqEntry({
+			method: "POST",
+			url: UPLOAD_URL,
+			contentType: "multipart/form-data; boundary=AAA111",
+			postData: multipart("AAA111", "x"),
+			status: 202,
+			body: '{"queued":true}',
+			seconds: 7,
+		}),
+		seqEntry({
+			method: "POST",
+			url: UPLOAD_URL,
+			contentType: "multipart/form-data; boundary=BBB222",
+			postData: multipart("BBB222", "x"),
+			status: 200,
+			body: '{"done":true}',
+			seconds: 8,
+		}),
+		// A binary body the HAR kept no text for: never sequenced.
+		seqEntry({
+			method: "POST",
+			url: `${UPLOAD_URL}/bin`,
+			contentType: "application/octet-stream",
+			bodySize: 512,
+			status: 202,
+			body: "1",
+			seconds: 10,
+		}),
+		seqEntry({
+			method: "POST",
+			url: `${UPLOAD_URL}/bin`,
+			contentType: "application/octet-stream",
+			bodySize: 512,
+			status: 200,
+			body: "2",
+			seconds: 11,
+		}),
+	];
+}
+
+test("sequentialHarResponseGroups: multipart bodies match across random boundaries; an opaque (octet-stream, no text) body is never sequenced", () => {
+	const groups = sequentialHarResponseGroups(sharedSequencingFixture());
+	const multipartKey = sequentialHarRequestKey(
+		"POST",
+		UPLOAD_URL,
+		multipart("CCC333", "x"),
+		"multipart/form-data; boundary=CCC333",
+	);
+	assert.deepEqual(
+		groups.get(multipartKey)?.map((e) => e.response.status),
+		[202, 200],
+		"one multipart request identity, whatever the boundary",
+	);
+	assert.equal(
+		[...groups.values()].some((group) =>
+			group.some((e) => e.request.url === `${UPLOAD_URL}/bin`),
+		),
+		false,
+		"the opaque-body entries stay with routeFromHAR",
+	);
+});
+
+test("generated installSequentialHarRoutes and sequentialHarResponseGroups agree on a shared fixture", async () => {
+	const fixture = sharedSequencingFixture();
+	const groups = sequentialHarResponseGroups(fixture);
+	const route = await generatedSequentialRoute(fixture);
+	assert.ok(route);
+	// Every recorded request identity, asked as often as it was recorded plus
+	// one: the generated route must serve exactly the TS rule's sequence (the
+	// last entry repeating), or fall back where the rule has no group.
+	const asked = new Set<string>();
+	for (const entry of fixture) {
+		const contentType = entry.request.headers[0]?.value;
+		const key = sequentialHarRequestKey(
+			entry.request.method,
+			entry.request.url,
+			entry.request.postData?.text,
+			contentType,
+		);
+		if (asked.has(key)) {
+			continue;
+		}
+		asked.add(key);
+		const group = groups.get(key);
+		const recorded = fixture.filter(
+			(e) =>
+				sequentialHarRequestKey(
+					e.request.method,
+					e.request.url,
+					e.request.postData?.text,
+					e.request.headers[0]?.value,
+				) === key,
+		);
+		for (let i = 0; i <= recorded.length; i += 1) {
+			const served: SequentialRouteOutcome = await route({
+				method: entry.request.method,
+				postData: entry.request.postData?.text ?? null,
+				url: entry.request.url,
+				...(contentType ? { contentType } : {}),
+			});
+			if (!group) {
+				assert.deepEqual(served, { kind: "fallback" }, key);
+				continue;
+			}
+			const expected = group[Math.min(i, group.length - 1)];
+			assert.deepEqual(
+				served,
+				{
+					body: expected?.response.content.text,
+					kind: "fulfill",
+					status: expected?.response.status,
+				},
+				key,
+			);
+		}
+	}
+	assert.equal(
+		groups.size,
+		3,
+		"polled GET, POST op A, and the multipart upload",
+	);
 });
