@@ -206,6 +206,13 @@ export async function copyMirroredRemoteDownload(
 			setTimeout(resolve, Math.min(MIRROR_POLL_MS, timeoutMs - waited)),
 		);
 	}
+	// One last look at the deadline: a file that landed during the final
+	// sleep still counts.
+	const finalSize = await statSize(localPath);
+	if (finalSize > 0) {
+		await copyFile(localPath, targetPath);
+		return finalSize;
+	}
 	return null;
 }
 

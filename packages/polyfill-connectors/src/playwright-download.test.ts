@@ -343,3 +343,30 @@ test("copyMirroredRemoteDownload: never sleeps past the timeout", async () => {
 		`a 60ms mirror timeout took ${String(Math.round(elapsed))}ms`,
 	);
 });
+
+test("copyMirroredRemoteDownload: a file that lands during the last sleep is still taken at the deadline", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-download-mirror-final-"));
+	try {
+		const { writeFile } = await import("node:fs/promises");
+		const mirrored = join(dir, "artifact");
+		const target = join(dir, "out.zip");
+		// Timeout 300ms: polls at 0 and 250, last sleep 250..300. The file
+		// lands at ~270ms, after the last in-loop stat.
+		setTimeout(() => {
+			writeFile(mirrored, "late").catch(() => undefined);
+		}, 270);
+		const copied = await copyMirroredRemoteDownload(
+			{
+				failure: async () => null,
+				path: async () => mirrored,
+				saveAs: async () => undefined,
+			},
+			target,
+			{ PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS: "300" },
+		);
+		assert.equal(copied, "late".length);
+		assert.equal(await readFile(target, "utf8"), "late");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});

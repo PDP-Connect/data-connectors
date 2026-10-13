@@ -21,10 +21,11 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { writeBrowserHarReplayPreload } from "./browser-har-replay.ts";
 import {
 	createClockObserver,
 	createTraceReplayClock,
@@ -398,10 +399,28 @@ test("writeReplayBridgePreload: a read while __pdppScenarioClockPaused is set se
 	}
 });
 
-test("generated preloads: the browser-library frame pattern matches only a real node_modules/patchright or playwright path segment", () => {
+test("generated preloads (record, replay bridge, browser HAR replay): the browser-library frame pattern matches only a real node_modules/patchright or playwright path segment", () => {
 	const dir = mkdtempSync(join(tmpdir(), "clock-frame-pattern-"));
 	try {
+		writeFileSync(
+			join(dir, "run.har"),
+			JSON.stringify({ log: { entries: [] } }),
+		);
+		writeFileSync(join(dir, "state.json"), "{}");
+		// writeBrowserHarReplayPreload writes into the package's tmp/; removed below.
+		const harReplayPreload = writeBrowserHarReplayPreload(
+			{
+				fixedNowIso: "2026-01-01T00:00:00.000Z",
+				harEntryCount: 1,
+				harPath: join(dir, "run.har"),
+				storageStatePath: join(dir, "state.json"),
+			},
+			{ clockTrace: [1] },
+		);
+		const harReplaySource = readFileSync(harReplayPreload, "utf8");
+		rmSync(harReplayPreload, { force: true });
 		const sources = [
+			harReplaySource,
 			readFileSync(
 				writeRecordPreload(join(dir, "capture.json"), { dir }),
 				"utf8",
