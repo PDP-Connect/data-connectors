@@ -85,7 +85,7 @@ These connectors parse local files without network access. Run on-device only. *
 | fitbit | `~/.pdpp/imports/fitbit/` (Google Takeout `.zip` files with only Fitbit selected, all parts of one export; no Google credential, no network) | 🟡 code ready | ✅ (expected) |
 | twitter_archive | `~/.pdpp/imports/twitter_archive/` (extracted archive) | 🟡 code ready | ✅ (expected) |
 | imessage | `~/Library/Messages/chat.db` (auto-discovered on macOS) | 🟡 code ready | ✅ (expected) |
-| apple_health | `~/.pdpp/imports/apple_health/` (extracted iOS export) | 🟡 code ready | ✅ (expected) |
+| apple_health | `~/.pdpp/imports/apple_health/` (`export.zip` from the Health app or the `export.xml` inside it; no account API, no network) | 🟡 code ready | ✅ (expected) |
 | strava | `~/.pdpp/imports/strava/` (`.zip` account export or `activities.csv`; no API token, no network) | 🟡 code ready | ✅ (expected) |
 | apple_photos | `~/.pdpp/imports/apple_photos/` (Photos.app "Export Unmodified Originals") | 🟡 code ready | ✅ (expected) |
 | google_messages | External `gmcli` (github.com/johnlindquist/gmkit, AGPL-3.0) subprocess — QR-paired local SQLite archive, `gmcli --json` query output normalized (slackdump-style arms-length wrapper; PDPP never imports libgm) | 🟡 in progress, unproven without a real paired account | ⚠️ requires `gmcli` binary + one-time QR pairing + phone online |
