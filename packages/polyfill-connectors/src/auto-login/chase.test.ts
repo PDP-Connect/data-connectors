@@ -740,6 +740,8 @@ test("manual OTP entry resolves under the runtime's owned-run-page policy", asyn
 			promptTextVisible: true,
 			signedOut: true,
 		});
+		// The run-page tracker listens for popups on the owned page.
+		Object.assign(page, { off: () => page, on: () => page });
 		// The real policy runInBrowser installs: context.newPage() rejects.
 		const listeners = new Set<unknown>();
 		const context = {
@@ -843,7 +845,9 @@ test("shell sign-out text on an OTP error page does not resolve assistance", asy
 	});
 });
 
-test("navigation during the sign-out visibility read does not resolve OTP assistance", { timeout: 5000 }, async () => {
+test("navigation during the sign-out visibility read does not resolve OTP assistance", {
+	timeout: 5000,
+}, async () => {
 	const { page, state } = makeOtpPage({
 		otpInputs: 1,
 		promptTextVisible: true,
@@ -889,11 +893,12 @@ test("navigation during the sign-out visibility read does not resolve OTP assist
 		sendInteraction: (req) => {
 			state.url = DASHBOARD_URL;
 			return new Promise<InteractionResponse>((resolve) => {
-				cancelInteraction = () => resolve({
-					request_id: req.request_id ?? "test_interaction",
-					status: "cancelled",
-					type: "INTERACTION_RESPONSE",
-				});
+				cancelInteraction = () =>
+					resolve({
+						request_id: req.request_id ?? "test_interaction",
+						status: "cancelled",
+						type: "INTERACTION_RESPONSE",
+					});
 			});
 		},
 	});

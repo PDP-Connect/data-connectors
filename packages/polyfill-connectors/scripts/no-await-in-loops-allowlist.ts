@@ -3381,7 +3381,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/auto-login/chase.ts",
-			line: 447,
+			line: 449,
 			column: 19,
 			category: "bounded_retry_polling",
 			note: "Promise.race(): poll loop waiting for the console OTP reply or the owner finishing sign-in in the page",
