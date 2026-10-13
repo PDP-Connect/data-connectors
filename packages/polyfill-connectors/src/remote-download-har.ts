@@ -31,9 +31,13 @@ import { existsSync } from "node:fs";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import type { BrowserContext, Download, Page } from "playwright";
 
-/** A finished download's URL and bytes, read before the context closes. */
+/**
+ * One tracked download, in start order: its URL and its bytes, or null when
+ * it failed, did not finish in time, or its file is not on this machine. A
+ * null still holds its place, so the downloads after it pair correctly.
+ */
 export interface DownloadBody {
-	bytes: Buffer;
+	bytes: Buffer | null;
 	url: string;
 }
 
@@ -86,46 +90,45 @@ export function trackRunOwnedDownloads(
 const DOWNLOAD_READ_DEADLINE_MS = 30_000;
 
 /**
- * Reads the bytes of each finished download whose file is on this machine.
- * A failed, unfinished (past the deadline) or missing download is skipped;
- * this never throws, because it runs inside `release()`.
+ * Reads the bytes of every download, all under ONE shared deadline (not one
+ * per download), in parallel. Returns one result per download in the same
+ * order; a failed, unfinished or missing download gives `bytes: null`. Never
+ * throws, because it runs inside `release()`.
  */
 export async function readDownloadBodies(
 	downloads: readonly Pick<Download, "failure" | "path" | "url">[],
 	deadlineMs = DOWNLOAD_READ_DEADLINE_MS,
 ): Promise<DownloadBody[]> {
-	const bodies: DownloadBody[] = [];
-	for (const download of downloads) {
-		// Sequential on purpose: bounded per download, and a release() that
-		// fans out file reads gains nothing.
-		const body = await readOneDownload(download, deadlineMs);
-		if (body) {
-			bodies.push(body);
-		}
+	if (downloads.length === 0) {
+		return [];
 	}
-	return bodies;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const expired = new Promise<null>((resolve) => {
+		timer = setTimeout(() => resolve(null), deadlineMs);
+	});
+	try {
+		return await Promise.all(
+			downloads.map(async (download) => ({
+				bytes: await Promise.race([readOneDownload(download), expired]),
+				url: download.url(),
+			})),
+		);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 async function readOneDownload(
-	download: Pick<Download, "failure" | "path" | "url">,
-	deadlineMs: number,
-): Promise<DownloadBody | null> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	download: Pick<Download, "failure" | "path">,
+): Promise<Buffer | null> {
 	try {
-		const path = await Promise.race([
-			download.path(),
-			new Promise<null>((resolve) => {
-				timer = setTimeout(() => resolve(null), deadlineMs);
-			}),
-		]);
+		const path = await download.path();
 		if (!path || (await download.failure()) || !existsSync(path)) {
 			return null;
 		}
-		return { bytes: await readFile(path), url: download.url() };
+		return await readFile(path);
 	} catch {
 		return null;
-	} finally {
-		clearTimeout(timer);
 	}
 }
 
@@ -139,35 +142,53 @@ interface HarContentEntry {
 			text?: string;
 		};
 	};
+	startedDateTime?: string;
 }
 
 /**
- * Writes each body into the LAST entry for its URL that has no body yet, as
- * base64. Returns how many bodies were placed. Mutates `har`.
+ * Pairs downloads with HAR entries per URL, FORWARD in order: the i-th
+ * download of a URL (in start order) goes to the i-th entry for that URL
+ * that has no body yet (in start order). A download whose bytes could not be
+ * read keeps its slot, so a failed first download does not shift the rest
+ * onto the wrong entries. Writes each body as base64 and returns how many
+ * were placed. Mutates `har`.
  */
 export function embedDownloadBodies(
 	har: { log?: { entries?: HarContentEntry[] } },
-	bodies: readonly DownloadBody[],
+	downloads: readonly DownloadBody[],
 ): number {
 	const entries = har.log?.entries ?? [];
+	const byUrl = new Map<string, DownloadBody[]>();
+	for (const download of downloads) {
+		byUrl.set(download.url, [...(byUrl.get(download.url) ?? []), download]);
+	}
+	const started = (entry: HarContentEntry): number => {
+		const time = Date.parse(entry.startedDateTime ?? "");
+		return Number.isNaN(time) ? 0 : time;
+	};
 	let placed = 0;
-	for (const body of bodies) {
-		const entry = entries.findLast(
-			(candidate) =>
-				candidate.request?.url === body.url &&
-				candidate.response !== undefined &&
-				!candidate.response.content?.text,
-		);
-		if (!entry?.response) {
-			continue;
+	for (const [url, group] of byUrl) {
+		const slots = entries
+			.filter(
+				(entry) =>
+					entry.request?.url === url &&
+					entry.response !== undefined &&
+					!entry.response.content?.text,
+			)
+			.sort((left, right) => started(left) - started(right));
+		for (const [index, download] of group.entries()) {
+			const response = slots[index]?.response;
+			if (!(response && download.bytes)) {
+				continue;
+			}
+			response.content = {
+				...response.content,
+				encoding: "base64",
+				size: download.bytes.length,
+				text: download.bytes.toString("base64"),
+			};
+			placed += 1;
 		}
-		entry.response.content = {
-			...entry.response.content,
-			encoding: "base64",
-			size: body.bytes.length,
-			text: body.bytes.toString("base64"),
-		};
-		placed += 1;
 	}
 	return placed;
 }
@@ -180,7 +201,7 @@ export async function embedDownloadBodiesInHarFile(
 	path: string,
 	bodies: readonly DownloadBody[],
 ): Promise<number> {
-	if (bodies.length === 0) {
+	if (!bodies.some((body) => body.bytes)) {
 		return 0;
 	}
 	let har: { log?: { entries?: HarContentEntry[] } };

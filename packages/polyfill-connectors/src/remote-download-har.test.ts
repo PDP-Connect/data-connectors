@@ -74,7 +74,7 @@ test("trackRunOwnedDownloads keeps downloads of run-owned pages only, including 
 	assert.equal(context.listenerCount("page"), 0);
 });
 
-test("readDownloadBodies reads finished local files and skips failed, missing and unfinished downloads", async () => {
+test("readDownloadBodies returns one result per download, in order, with null bytes for failed, missing and unfinished ones", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "remote-download-har-"));
 	try {
 		const file = join(dir, "export.zip");
@@ -99,29 +99,110 @@ test("readDownloadBodies reads finished local files and skips failed, missing an
 			50,
 		);
 		assert.deepEqual(
-			bodies.map((b) => [b.url, [...b.bytes]]),
-			[["https://example.test/a", [1, 2, 3]]],
+			bodies.map((b) => [b.url, b.bytes === null ? null : [...b.bytes]]),
+			[
+				["https://example.test/a", [1, 2, 3]],
+				["https://example.test/failed", null],
+				["https://example.test/missing", null],
+				["https://example.test/stuck", null],
+			],
 		);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
 });
 
-test("embedDownloadBodies fills the last body-less entry for the URL and leaves others alone", () => {
+test("readDownloadBodies applies ONE deadline to all downloads, not one each", async () => {
+	const stuck = () =>
+		fakeDownload({
+			path: () => new Promise<string>(() => undefined),
+			url: "https://example.test/stuck",
+		});
+	const started = performance.now();
+	const bodies = await readDownloadBodies(
+		[stuck(), stuck(), stuck(), stuck(), stuck()],
+		200,
+	);
+	const elapsed = performance.now() - started;
+	assert.equal(bodies.length, 5);
+	assert.ok(
+		elapsed < 600,
+		`five stuck downloads took ${String(Math.round(elapsed))}ms; one shared 200ms deadline expected`,
+	);
+});
+
+interface SlotEntry {
+	request: { url: string };
+	response: { content: { mimeType?: string; size?: number; text?: string } };
+	startedDateTime: string;
+}
+
+function slotHar(
+	url: string,
+	count: number,
+): { log: { entries: SlotEntry[] } } {
+	return {
+		log: {
+			entries: Array.from({ length: count }, (_, index) => ({
+				request: { url },
+				response: { content: { mimeType: "application/zip", size: 0 } },
+				startedDateTime: new Date(
+					Date.UTC(2026, 0, 1, 0, 0, index),
+				).toISOString(),
+			})),
+		},
+	};
+}
+
+const decoded = (
+	entry: { response: { content: { text?: string } } } | undefined,
+) =>
+	entry?.response.content.text === undefined
+		? undefined
+		: Buffer.from(entry.response.content.text, "base64").toString("utf8");
+
+test("embedDownloadBodies pairs two downloads of one URL forward, oldest entry first", () => {
+	const url = "https://example.test/export.zip";
+	const har = slotHar(url, 2);
+	const placed = embedDownloadBodies(har, [
+		{ bytes: Buffer.from("first"), url },
+		{ bytes: Buffer.from("second"), url },
+	]);
+	assert.equal(placed, 2);
+	assert.equal(decoded(har.log.entries[0]), "first");
+	assert.equal(decoded(har.log.entries[1]), "second");
+});
+
+test("embedDownloadBodies: a missing first download keeps its slot, so the second lands on the second entry", () => {
+	const url = "https://example.test/export.zip";
+	const har = slotHar(url, 2);
+	const placed = embedDownloadBodies(har, [
+		{ bytes: null, url },
+		{ bytes: Buffer.from("second"), url },
+	]);
+	assert.equal(placed, 1);
+	assert.equal(decoded(har.log.entries[0]), undefined);
+	assert.equal(decoded(har.log.entries[1]), "second");
+});
+
+test("embedDownloadBodies skips entries that already have a body and leaves other URLs alone", () => {
 	const har = {
 		log: {
 			entries: [
 				{
 					request: { url: "https://example.test/export.zip" },
-					response: { content: { mimeType: "application/zip", size: 0 } },
+					response: { content: { text: "already", size: 7 } },
+					startedDateTime: "2026-01-01T00:00:00.000Z",
 				},
 				{
 					request: { url: "https://example.test/export.zip" },
 					response: { content: { mimeType: "application/zip", size: 0 } },
+					startedDateTime: "2026-01-01T00:00:01.000Z",
 				},
 				{
 					request: { url: "https://example.test/page" },
 					response: { content: { text: "<html>", size: 6 } },
+					startedDateTime: "2026-01-01T00:00:02.000Z",
 				},
 			],
 		},
@@ -131,7 +212,7 @@ test("embedDownloadBodies fills the last body-less entry for the URL and leaves 
 		{ bytes: Buffer.from("x"), url: "https://example.test/not-in-har" },
 	]);
 	assert.equal(placed, 1);
-	assert.equal(har.log.entries[0]?.response.content.text, undefined);
+	assert.equal(har.log.entries[0]?.response.content.text, "already");
 	assert.deepEqual(har.log.entries[1]?.response.content, {
 		encoding: "base64",
 		mimeType: "application/zip",

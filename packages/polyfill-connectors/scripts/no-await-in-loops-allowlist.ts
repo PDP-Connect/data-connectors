@@ -3282,13 +3282,6 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "copyMirroredRemoteDownload off-switch test: asserts each env value in turn against the same path() call counter",
 		},
 		{
-			path: "src/remote-download-har.ts",
-			line: 101,
-			column: 16,
-			category: "dependent_file_cursor",
-			note: "readDownloadBodies(): one bounded file read per download inside release(), in download order",
-		},
-		{
 			path: "src/browser-launch.ts",
 			line: 796,
 			column: 11,
