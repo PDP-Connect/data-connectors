@@ -19,10 +19,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  harness:
-    name: PageShim harness
+  harness-shards:
+    name: PageShim harness (${{ matrix.shard.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Keep the sequential connector gates separate from the regression tests.
+    # Together they exceed the job deadline; each shard takes about 8 minutes.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - name: connector gates
+            args: --test-name-pattern="pageshim gate" scripts/pageshim/pageshim.test.mjs
+          - name: regressions
+            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,4 +52,16 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Build and run the harness
-        run: node --test scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs
+        run: node --test ${{ matrix.shard.args }}
+
+  harness:
+    name: PageShim harness
+    needs: harness-shards
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require both shards to pass
+        env:
+          SHARD_RESULT: ${{ needs.harness-shards.result }}
+        run: test "$SHARD_RESULT" = success
