@@ -161,9 +161,11 @@ jobs:
       # GHCR answers a burst of parallel publishes with HTTP 429 TOOMANYREQUESTS
       # ("allowed: 2000/minute"). With every leg running at once, about 10 of 50
       # legs failed in `cosign sign` after the clients' own seconds-long retries.
-      # Four is a cautious starting point, not a documented GHCR capacity; the
-      # rate-limit retry in scripts/registry-command.mjs covers the rest.
-      max-parallel: 4
+      # Ten keeps a 50-connector release near five minutes (each leg takes about
+      # 50 s) at a fifth of the concurrency that failed. It is not a documented
+      # GHCR capacity; the rate-limit retry in scripts/registry-command.mjs
+      # covers the rest.
+      max-parallel: 10
       # YNAB authenticates with a personal access token, has many streams, and
       # exercises the transport end to end, including a consumer install that
       # collects data. Oura would prove the build, but not that collection path.

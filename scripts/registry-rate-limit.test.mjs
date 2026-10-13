@@ -544,5 +544,5 @@ test("the publish matrix is bounded and does not fail fast", () => {
   );
   const strategy = workflow.match(/\n {4}strategy:\n((?: {6}.*\n|\s*\n)+)/)?.[1] ?? "";
   assert.match(strategy, /^ {6}fail-fast: false$/m);
-  assert.match(strategy, /^ {6}max-parallel: 4$/m);
+  assert.match(strategy, /^ {6}max-parallel: 10$/m);
 });
