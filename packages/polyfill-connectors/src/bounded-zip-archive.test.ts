@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import { test } from "node:test";
 import { deflateRawSync } from "node:zlib";
 import {
@@ -27,6 +28,8 @@ import {
 
 interface BuildZipFile {
 	content: Buffer;
+	/** DEFLATE data written as the entry's bytes instead of `content` compressed. */
+	deflated?: Buffer;
 	/** Declared uncompressed_size written into headers; defaults to content.length. Set to lie about it. */
 	declaredUncompressedSize?: number;
 	name: string;
@@ -40,7 +43,7 @@ function buildZip(files: BuildZipFile[]): Buffer {
 	for (const file of files) {
 		const nameBuf = Buffer.from(file.name, "utf8");
 		const contentBuf = file.content;
-		const compressed = deflateRawSync(contentBuf);
+		const compressed = file.deflated ?? deflateRawSync(contentBuf);
 		const declaredSize = file.declaredUncompressedSize ?? contentBuf.length;
 
 		const localHeader = Buffer.alloc(30);
@@ -1475,5 +1478,240 @@ test("streamZipEntryToFile handles content spanning many read-chunk boundaries w
 			assert.equal(result.bytesWritten, content.length);
 			assert.deepEqual(readFileSync(destPath), content);
 		});
+	});
+});
+
+// ─── maxCentralDirectoryBytes ───────────────────────────────────────────
+
+/** The central directory size buildZip wrote, read back from its EOCD. */
+function centralDirectorySizeOf(zip: Buffer): number {
+	return zip.readUInt32LE(zip.length - 22 + 12);
+}
+
+test("maxCentralDirectoryBytes: a directory at the ceiling is read, one byte over is refused before it is read", () => {
+	const zip = buildZip(
+		Array.from({ length: 50 }, (_, i) => ({
+			content: Buffer.from(`entry ${i}`),
+			name: `routes/route_${i}.gpx`,
+		})),
+	);
+	const size = centralDirectorySizeOf(zip);
+	withTempZipFile(zip, (fd, fileSize) => {
+		const atCeiling = readZipEntriesFromFile(fd, fileSize, {
+			...GENEROUS_POLICY,
+			maxCentralDirectoryBytes: size,
+		});
+		assert.equal(atCeiling.length, 50);
+		assert.throws(
+			() =>
+				readZipEntriesFromFile(fd, fileSize, {
+					...GENEROUS_POLICY,
+					maxCentralDirectoryBytes: size - 1,
+				}),
+			(err: unknown) =>
+				err instanceof ZipPolicyViolationError &&
+				err.code === "too_many_entries" &&
+				/maxCentralDirectoryBytes/.test(err.message),
+		);
+	});
+	assert.throws(
+		() =>
+			readZipEntries(zip, {
+				...GENEROUS_POLICY,
+				maxCentralDirectoryBytes: size - 1,
+			}),
+		ZipPolicyViolationError,
+		"the buffer API applies the same ceiling",
+	);
+});
+
+test("maxCentralDirectoryBytes: streamZipEntryToFile applies the same ceiling", async () => {
+	const zip = buildZip([
+		{ content: Buffer.from("hello"), name: "export.xml" },
+		{ content: Buffer.from("route"), name: "routes/route.gpx" },
+	]);
+	const size = centralDirectorySizeOf(zip);
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		await withTempDestPath(async (destPath) => {
+			await assert.rejects(
+				streamZipEntryToFile(fd, fileSize, "export.xml", destPath, {
+					...GENEROUS_POLICY,
+					maxCentralDirectoryBytes: size - 1,
+				}),
+				(err: unknown) =>
+					err instanceof ZipPolicyViolationError &&
+					err.code === "too_many_entries",
+			);
+			assert.ok(!existsSync(destPath));
+		});
+	});
+});
+
+// ─── ZipEntry.openStream ────────────────────────────────────────────────
+
+async function readStreamFully(stream: Readable): Promise<Buffer> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of stream) {
+		chunks.push(chunk as Buffer);
+	}
+	return Buffer.concat(chunks);
+}
+
+test("openStream yields a DEFLATE entry byte-for-byte across many read windows", async () => {
+	const content = Buffer.from(
+		Array.from(
+			{ length: 40_000 },
+			(_, i) => `<Record id="${i}" value="${(i * 7919) % 100_003}"/>`,
+		).join("\n"),
+	);
+	assert.ok(content.length > 1024 * 1024, "spans many 64 KiB windows");
+	const zip = buildZip([{ content, name: "apple_health_export/export.xml" }]);
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		const [entry] = readZipEntriesFromFile(fd, fileSize, GENEROUS_POLICY);
+		assert.ok(entry);
+		assert.deepEqual(await readStreamFully(entry.openStream()), content);
+	});
+});
+
+test("openStream yields a STORE entry byte-for-byte", async () => {
+	const content = Buffer.from("plain uncompressed content ".repeat(10_000));
+	const zip = buildStoredZip(content);
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		const [entry] = readZipEntriesFromFile(fd, fileSize, GENEROUS_POLICY);
+		assert.ok(entry);
+		assert.deepEqual(await readStreamFully(entry.openStream()), content);
+	});
+});
+
+test("openStream reads the entry it was listed as, however many share its base name", async () => {
+	const zip = buildZip([
+		{ content: Buffer.from("root"), name: "export.xml" },
+		{ content: Buffer.from("old"), name: "old/export.xml" },
+		{ content: Buffer.from("notes"), name: "notes/export.xml" },
+	]);
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		const entries = readZipEntriesFromFile(fd, fileSize, GENEROUS_POLICY);
+		const byName = new Map(entries.map((e) => [e.name, e]));
+		for (const [name, want] of [
+			["export.xml", "root"],
+			["old/export.xml", "old"],
+			["notes/export.xml", "notes"],
+		] as const) {
+			const entry = byName.get(name);
+			assert.ok(entry, name);
+			assert.equal(
+				(await readStreamFully(entry.openStream())).toString(),
+				want,
+			);
+		}
+	});
+});
+
+test("openStream: a LYING declared size cannot bypass the per-entry cap on actual bytes", async () => {
+	const zip = buildZip([
+		{
+			content: Buffer.alloc(200_000, 0x61),
+			declaredUncompressedSize: 10,
+			name: "bomb.xml",
+		},
+	]);
+	const policy: ZipReadPolicy = {
+		maxEntries: 10,
+		maxEntryUncompressedBytes: 100_000,
+		maxTotalUncompressedBytes: 10 * 1024 * 1024,
+	};
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		const [entry] = readZipEntriesFromFile(fd, fileSize, policy);
+		assert.ok(entry);
+		await assert.rejects(
+			readStreamFully(entry.openStream()),
+			(err: unknown) =>
+				err instanceof ZipPolicyViolationError &&
+				err.code === "entry_too_large",
+		);
+	});
+});
+
+test("openStream charges the shared budget for what is read, and only for what is read", async () => {
+	// A 50 MiB entry against a 1 MiB total: reading its head and stopping
+	// leaves the budget nearly whole for another entry; reading all of it
+	// exceeds the total. It under-declares its size, so only actual bytes
+	// can stop it.
+	const zip = buildZip([
+		{
+			content: Buffer.alloc(50 * 1024 * 1024, 0x20),
+			declaredUncompressedSize: 1,
+			name: "big.xml",
+		},
+		{ content: Buffer.alloc(900 * 1024, 0x62), name: "small.xml" },
+	]);
+	const policy: ZipReadPolicy = {
+		maxEntries: 10,
+		maxEntryUncompressedBytes: 100 * 1024 * 1024,
+		maxTotalUncompressedBytes: 1024 * 1024,
+	};
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		const [big, small] = readZipEntriesFromFile(fd, fileSize, policy);
+		assert.ok(big && small);
+		const head = big.openStream();
+		for await (const chunk of head) {
+			assert.ok((chunk as Buffer).length > 0);
+			break;
+		}
+		assert.equal(small.data().length, 900 * 1024);
+
+		const [bigAgain] = readZipEntriesFromFile(fd, fileSize, policy);
+		assert.ok(bigAgain);
+		await assert.rejects(
+			readStreamFully(bigAgain.openStream()),
+			(err: unknown) =>
+				err instanceof ZipPolicyViolationError &&
+				err.code === "total_too_large",
+		);
+	});
+});
+
+/** `blocks` empty stored DEFLATE blocks and a final one: valid, and inflating to nothing. */
+function emptyDeflateBlocks(blocks: number): Buffer {
+	const data = Buffer.alloc((blocks + 1) * 5);
+	for (let i = 0; i <= blocks; i += 1) {
+		data[i * 5] = i === blocks ? 0x01 : 0x00;
+		data.writeUInt16LE(0, i * 5 + 1);
+		data.writeUInt16LE(0xff_ff, i * 5 + 3);
+	}
+	return data;
+}
+
+test("openStream: maxCompressedBytes bounds the input read for an entry that inflates to nothing", async () => {
+	// Two MiB of empty blocks produce no output, so no cap on inflated bytes
+	// can stop the read; only a cap on compressed input can.
+	const deflated = emptyDeflateBlocks(Math.floor((2 * 1024 * 1024) / 5));
+	const zip = buildZip([
+		{ content: Buffer.alloc(0), deflated, name: "empty-blocks.xml" },
+	]);
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		const [entry] = readZipEntriesFromFile(fd, fileSize, GENEROUS_POLICY);
+		assert.ok(entry);
+		assert.equal((await readStreamFully(entry.openStream())).length, 0);
+		await assert.rejects(
+			readStreamFully(entry.openStream({ maxCompressedBytes: 64 * 1024 })),
+			/needs more than 65536 compressed bytes/,
+		);
+	});
+});
+
+test("openStream: an entry within maxCompressedBytes is read whole", async () => {
+	const content = Buffer.from("a readable entry ".repeat(5000));
+	const zip = buildZip([{ content, name: "entry.xml" }]);
+	const compressedSize = deflateRawSync(content).length;
+	await withTempZipFileAsync(zip, async (fd, fileSize) => {
+		const [entry] = readZipEntriesFromFile(fd, fileSize, GENEROUS_POLICY);
+		assert.ok(entry);
+		assert.deepEqual(
+			await readStreamFully(
+				entry.openStream({ maxCompressedBytes: compressedSize }),
+			),
+			content,
+		);
 	});
 });

@@ -32,7 +32,6 @@ export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 		apple_contacts: {
 			testFile: "connectors/apple_contacts/integration.test.ts",
 		},
-		apple_health: { testFile: "connectors/apple_health/parsers.test.ts" },
 		chase: { testFile: "connectors/chase/integration.test.ts" },
 		chatgpt: { testFile: "connectors/chatgpt/integration.test.ts" },
 		claude_code: { testFile: "connectors/claude_code/integration.test.ts" },
@@ -72,10 +71,15 @@ export const KNOWN_SCAFFOLD_CONNECTORS = ["loom", "wholefoods"] as const;
  */
 export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	anthropic: { testFile: "connectors/anthropic/integration.test.ts" },
+	// Tier development. The oracle is the end-to-end protocol test, matching
+	// strava.
+	apple_health: { testFile: "connectors/apple_health/index.test.ts" },
 	apple_photos: { testFile: "connectors/apple_photos/integration.test.ts" },
 	discord_browser: { testFile: "connectors/discord_browser/index.test.ts" },
 	doordash: { testFile: "connectors/doordash/integration.test.ts" },
+	garmin_browser: { testFile: "connectors/garmin_browser/index.test.ts" },
 	icloud_notes: { testFile: "connectors/icloud_notes/integration.test.ts" },
+	fitbit: { testFile: "connectors/fitbit/index.test.ts" },
 	google_calendar: { testFile: "connectors/google_calendar/index.test.ts" },
 	google_contacts: { testFile: "connectors/google_contacts/index.test.ts" },
 	google_maps_data_portability: {
@@ -95,6 +99,7 @@ export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
 	oura: { testFile: "connectors/oura/schemas.test.ts" },
 	oura_browser: { testFile: "connectors/oura_browser/index.test.ts" },
 	strava_browser: { testFile: "connectors/strava_browser/index.test.ts" },
+	whoop_browser: { testFile: "connectors/whoop_browser/index.test.ts" },
 	ical: { testFile: "connectors/ical/parsers.test.ts" },
 	imessage: { testFile: "connectors/imessage/integration.test.ts" },
 	linkedin: { testFile: "connectors/linkedin/integration.test.ts" },

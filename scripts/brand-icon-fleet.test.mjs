@@ -66,6 +66,8 @@ function assertSafeRecognisableSvg(source, filename) {
 // original per-connector removal verdict.
 const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "heb.json",
+  "fitbit.json", // a mark exists; omitted by choice (trademark)
+  "garmin_browser.json",
   "google_takeout.json",
   "oura.json",
   "oura_browser.json",
@@ -73,6 +75,7 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "usaa.json",
   "wholefoods.json",
   "whoop.json",
+  "whoop_browser.json",
   "ynab.json",
 ]);
 

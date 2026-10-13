@@ -4,8 +4,8 @@
 /**
  * Generates a realistic, multi-year, multi-source synthetic export.xml —
  * used to FORMAT-CONFORMANCE-prove the connector against the real Apple
- * Health XML shape (see ai/research/apple-health-export-format/ for the
- * format research this is built from). This is NOT live proof: it proves
+ * Health XML shape. It is a synthetic approximation built from Apple's
+ * documentation, not a capture. This is NOT live proof: it proves
  * the parser handles the documented/observed shape, not that a real
  * iPhone export matches it exactly (Apple has never published a schema).
  */
