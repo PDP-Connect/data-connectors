@@ -8,8 +8,10 @@
 <body>
   <h1>PDPP Connector Registry</h1>
   <p>This is a scaffold for the PDPP connector registry site. It is <strong>not yet a trust root</strong>.</p>
-  <p>Signed connector artifacts and the authoritative index live in
-    <a href="https://github.com/PDP-Connect/data-connectors/releases">GitHub Releases</a>
-    for this repository.</p>
+  <p>Each connector is published as a signed OCI artifact at
+    <code>ghcr.io/pdp-connect/connector/&lt;key&gt;</code>. The signed connector catalog,
+    <code>ghcr.io/pdp-connect/connector-catalog:latest</code>, lists every published
+    version by digest; see
+    <a href="https://github.com/PDP-Connect/data-connectors/blob/main/packages/connector-installer-core/CATALOG.md">the catalog documentation</a>.</p>
 </body>
 </html>

@@ -7,4 +7,4 @@ Create and maintain PDPP Collection Profile implementations in this repository u
 3. Install dependencies from the repository root with `npm ci`, then run the package verify gate and focused connector tests.
 4. Build and verify its OCI artifact with `scripts/build-connector-oci-artifact.mjs` and `scripts/verify-connector-oci-artifact.mjs`. Publication is selected by `scripts/select-publish-connectors.mjs` and signed from the protected main workflow.
 
-The historical Playwright scope catalog is frozen. A new Collection Profile stream does not automatically replace a Desktop scope or authorize writing raw records under a legacy scope ID. Such a replacement needs a separately reviewed projection and consumer activation.
+Legacy Desktop scope IDs and their payload shapes are Vana's, not this repository's. A Collection Profile stream does not replace a Desktop scope or authorize writing raw records under a legacy scope ID; that needs a Vana-reviewed projection and consumer activation.
