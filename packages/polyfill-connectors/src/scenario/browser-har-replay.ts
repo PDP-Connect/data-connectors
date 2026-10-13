@@ -748,7 +748,7 @@ export function writeBrowserHarReplayPreload(
 // playwright code, or one made while browser-launch.ts has paused the
 // trace (browser acquire and release), sees the real clock, untraced.
 const PRELOAD_URL = import.meta.url;
-const BROWSER_LIBRARY_FRAME = new RegExp("node_modules.(patchright|playwright)(-core)?.");
+const BROWSER_LIBRARY_FRAME = /[\\\\/]node_modules[\\\\/](?:patchright|playwright)(?:-core)?[\\\\/]/;
 const untracedClockRead = () => {
   if (globalThis.__pdppScenarioClockPaused) return true;
   const frames = String(new Error().stack ?? "").split("\\n").slice(1);

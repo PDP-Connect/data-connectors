@@ -397,3 +397,50 @@ test("writeReplayBridgePreload: a read while __pdppScenarioClockPaused is set se
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("generated preloads: the browser-library frame pattern matches only a real node_modules/patchright or playwright path segment", () => {
+	const dir = mkdtempSync(join(tmpdir(), "clock-frame-pattern-"));
+	try {
+		const sources = [
+			readFileSync(
+				writeRecordPreload(join(dir, "capture.json"), { dir }),
+				"utf8",
+			),
+			readFileSync(
+				writeReplayBridgePreload("http://127.0.0.1:1/", {
+					workspace: { dir },
+					fixedNowIso: "2026-01-01T00:00:00.000Z",
+					clockTrace: [1],
+				}),
+				"utf8",
+			),
+		];
+		for (const source of sources) {
+			const line = source
+				.split("\n")
+				.find((l) => l.startsWith("const BROWSER_LIBRARY_FRAME = "));
+			assert.ok(line, "the generated preload declares the pattern");
+			const pattern = new Function(
+				`${line}\nreturn BROWSER_LIBRARY_FRAME;`,
+			)() as RegExp;
+			for (const frame of [
+				"    at x (/app/node_modules/patchright-core/lib/server/har.js:10:5)",
+				"    at x (/app/node_modules/playwright/lib/index.js:1:1)",
+				"    at x (file:///app/node_modules/playwright-core/lib/a.js:1:1)",
+				"    at x (C:\\app\\node_modules\\patchright\\lib\\a.js:1:1)",
+			]) {
+				assert.equal(pattern.test(frame), true, frame);
+			}
+			for (const frame of [
+				"    at x (/app/connectors/my_node_modules/playwright/a.ts:1:1)",
+				"    at x (/app/node_modules/playwright-extra/a.js:1:1)",
+				"    at x (/app/node_modules_patchright/a.js:1:1)",
+				"    at x (/app/connectors/playwright/index.ts:1:1)",
+			]) {
+				assert.equal(pattern.test(frame), false, frame);
+			}
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

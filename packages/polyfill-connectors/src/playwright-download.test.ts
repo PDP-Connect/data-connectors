@@ -324,3 +324,22 @@ test("copyMirroredRemoteDownload: copies the mirrored file once it appears, and 
 		await rm(dir, { recursive: true, force: true });
 	}
 });
+
+test("copyMirroredRemoteDownload: never sleeps past the timeout", async () => {
+	const started = performance.now();
+	const result = await copyMirroredRemoteDownload(
+		{
+			failure: async () => null,
+			path: async () => "/nonexistent/pdpp-mirror-never",
+			saveAs: async () => undefined,
+		},
+		"/nonexistent/target",
+		{ PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS: "60" },
+	);
+	const elapsed = performance.now() - started;
+	assert.equal(result, null);
+	assert.ok(
+		elapsed < 200,
+		`a 60ms mirror timeout took ${String(Math.round(elapsed))}ms`,
+	);
+});

@@ -202,7 +202,9 @@ export async function copyMirroredRemoteDownload(
 			await copyFile(localPath, targetPath);
 			return size;
 		}
-		await new Promise((resolve) => setTimeout(resolve, MIRROR_POLL_MS));
+		await new Promise((resolve) =>
+			setTimeout(resolve, Math.min(MIRROR_POLL_MS, timeoutMs - waited)),
+		);
 	}
 	return null;
 }
