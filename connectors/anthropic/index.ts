@@ -1154,6 +1154,7 @@ function archiveEntriesMatch(
 			fd,
 			statSync(zipPath).size,
 			EXPORT_ZIP_POLICY,
+			{ requireCompleteCentralDirectory: true },
 		);
 		return entries.length > 0 && entries.every((entry) => known(entry.name));
 	} finally {
@@ -2422,6 +2423,21 @@ export async function collectAnthropic({
 		let conversationsSourceFound = false;
 		const outOfScopeByCategory = new Map<string, number>();
 		for (const result of results) {
+			// A competing project discriminator must not hide an explicit
+			// malformed conversation child list from completeness accounting.
+			for (const entry of result.entries) {
+				const items = Array.isArray(entry.json) ? entry.json : [entry.json];
+				if (
+					items.some(
+						(item) =>
+							isPlainObject(item) &&
+							Object.hasOwn(item, "chat_messages") &&
+							!Array.isArray(item.chat_messages),
+					)
+				) {
+					completeMessages = false;
+				}
+			}
 			const classified = classifyManifestPartEntries(
 				result.category,
 				result.entries,
