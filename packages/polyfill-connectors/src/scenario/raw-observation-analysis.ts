@@ -516,7 +516,7 @@ export function analyzeRawObservations(
 				: []),
 			...(scopeMismatch
 				? [
-						"Some matching identities had different or unknown scope or selection context; those comparisons were omitted.",
+						"Some matching identities came from runs whose scope or selection context differed or could not be established (for example, any run that used an OTP prompt); those comparisons were omitted.",
 					]
 				: []),
 			...(truncated

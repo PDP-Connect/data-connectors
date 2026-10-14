@@ -63,7 +63,12 @@ import {
 	computeDeclarationDigest,
 	computeSourceDigest,
 } from "../src/scenario/validate.ts";
-import { createInactivityWatchdog as createRecordInactivityWatchdog } from "./scenario-record.ts";
+import { assertValidInteractionMessage } from "../src/scenario/wire-registry.ts";
+import {
+	createInactivityWatchdog as createRecordInactivityWatchdog,
+	MAX_SELECTION_CONTEXT_LENGTH,
+	selectionContextKey,
+} from "./scenario-record.ts";
 import {
 	assertNoPostRunSourceMutation,
 	createInactivityWatchdog as createVerifyInactivityWatchdog,
@@ -4261,8 +4266,35 @@ ${options.collectBody}
 	);
 }
 
+/** Reads every INTERACTION the connector actually put on the wire (from the
+ *  recorder's transcript) and runs the repo's own wire validator over it, so
+ *  a fixture that drifts outside the closed kind enum fails here instead of
+ *  silently passing a recorder that does not validate. Returns the count. */
+function assertTranscriptInteractionsContractValid(
+	transcriptDir: string,
+): number {
+	let count = 0;
+	for (const file of readdirSync(transcriptDir)) {
+		for (const line of readFileSync(join(transcriptDir, file), "utf8").split(
+			"\n",
+		)) {
+			if (line.length === 0) {
+				continue;
+			}
+			const { message } = JSON.parse(line) as {
+				message: Parameters<typeof assertValidInteractionMessage>[0];
+			};
+			if (message.type === "INTERACTION") {
+				assertValidInteractionMessage(message);
+				count += 1;
+			}
+		}
+	}
+	return count;
+}
+
 const SELECTION_FIXTURE_BODY = `    const selection = await sendInteraction({
-      kind: "selection",
+      kind: "manual_action",
       message: "SELECTION_PROMPT_PRIVATE_CANARY",
       request_id: process.env.SELECTION_FIXTURE_SAME === "1" ? "pick" : repeated ? "pick-second" : "pick-first",
     });
@@ -4286,6 +4318,8 @@ test("scenario-record: advisory omits repeated-key comparisons when the runs ans
 		tmpDir,
 	});
 	try {
+		const differentTranscript = join(tmpDir, "transcript-different");
+		const sameTranscript = join(tmpDir, "transcript-same");
 		const differentSelections = runRecordCli(
 			[
 				connectorKey,
@@ -4296,9 +4330,16 @@ test("scenario-record: advisory omits repeated-key comparisons when the runs ans
 				"--answer",
 				"pick-second=SELECTION_ACCOUNT_B_CANARY",
 			],
-			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				PDPP_SCENARIO_TRANSCRIPT_DIR: differentTranscript,
+			},
 		);
 		assert.equal(differentSelections.code, 0, differentSelections.stderr);
+		assert.equal(
+			assertTranscriptInteractionsContractValid(differentTranscript),
+			2,
+		);
 		assert.match(
 			differentSelections.stdout,
 			/items: insufficient-repeat-observations \(0 repeated identities;/,
@@ -4318,10 +4359,12 @@ test("scenario-record: advisory omits repeated-key comparisons when the runs ans
 			],
 			{
 				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				PDPP_SCENARIO_TRANSCRIPT_DIR: sameTranscript,
 				SELECTION_FIXTURE_SAME: "1",
 			},
 		);
 		assert.equal(sameSelection.code, 0, sameSelection.stderr);
+		assert.equal(assertTranscriptInteractionsContractValid(sameTranscript), 2);
 		assert.match(
 			sameSelection.stdout,
 			/items: differences-observed \(1 repeated identities;/,
@@ -4438,4 +4481,95 @@ test("scenario-record: a deeply nested declared schema cannot abort capture befo
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
+});
+
+const OTP_FIXTURE_BODY = `    const different = process.env.OTP_FIXTURE_IDENTICAL !== "1";
+    const otp = await sendInteraction({
+      kind: "otp",
+      message: different
+        ? repeated ? "OTP_ACCOUNT_B_PROMPT_CANARY" : "OTP_ACCOUNT_A_PROMPT_CANARY"
+        : "OTP_SHARED_PROMPT_CANARY",
+      request_id: different ? (repeated ? "otp-second" : "otp-first") : "otp",
+    });
+    if (otp.status !== "success") throw new Error("otp not answered");
+    await emitRecord("items", { id: "same-stream-local-id", label: repeated ? "second" : "first" });`;
+
+test("scenario-record: advisory treats any OTP exchange as unknown context and omits cross-run comparisons", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-otp-context-"),
+	);
+	const connectorKey = "otp_context_fixture";
+	writeBoundObservationFixture({
+		collectBody: OTP_FIXTURE_BODY,
+		connectorKey,
+		schemaJson: SIMPLE_SCHEMA,
+		tmpDir,
+	});
+	try {
+		const cases = [
+			{
+				name: "different",
+				answers: [
+					"otp-first=OTP_CODE_A_CANARY",
+					"otp-second=OTP_CODE_B_CANARY",
+				],
+				env: {},
+			},
+			{
+				name: "identical",
+				answers: ["otp=OTP_CODE_A_CANARY"],
+				env: { OTP_FIXTURE_IDENTICAL: "1" },
+			},
+		];
+		for (const { name, answers, env } of cases) {
+			const transcriptDir = join(tmpDir, `transcript-${name}`);
+			const result = runRecordCli(
+				[
+					connectorKey,
+					"--out",
+					join(tmpDir, `${name}.scenario.json`),
+					...answers.flatMap((answer) => ["--answer", answer]),
+				],
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+					PDPP_SCENARIO_TRANSCRIPT_DIR: transcriptDir,
+					...env,
+				},
+			);
+			assert.equal(result.code, 0, result.stderr);
+			assert.equal(assertTranscriptInteractionsContractValid(transcriptDir), 2);
+			assert.match(result.stdout, /user_interactions recorded: 2/);
+			assert.match(
+				result.stdout,
+				/items: insufficient-repeat-observations \(0 repeated identities;/,
+				`${name} OTP inputs must stay unknown`,
+			);
+			assert.match(
+				result.stdout,
+				/limitation: [^\n]*scope or selection context/,
+			);
+			for (const canary of [
+				"OTP_ACCOUNT_A_PROMPT_CANARY",
+				"OTP_ACCOUNT_B_PROMPT_CANARY",
+				"OTP_SHARED_PROMPT_CANARY",
+				"OTP_CODE_A_CANARY",
+				"OTP_CODE_B_CANARY",
+				"same-stream-local-id",
+			]) {
+				assert.equal(result.stdout.includes(canary), false);
+				assert.equal(result.stderr.includes(canary), false);
+			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("selection context is kept up to exactly 65,536 serialized characters and unknown beyond", () => {
+	// JSON.stringify(["x"...]) adds 4 characters: [ " " ].
+	const atLimit = "a".repeat(MAX_SELECTION_CONTEXT_LENGTH - 4);
+	assert.equal(MAX_SELECTION_CONTEXT_LENGTH, 65_536);
+	assert.equal(selectionContextKey([atLimit])?.length, 65_536);
+	assert.equal(selectionContextKey([`${atLimit}a`]), undefined);
+	assert.equal(selectionContextKey([]), "[]");
 });

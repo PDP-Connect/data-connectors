@@ -1449,20 +1449,24 @@ function toScenarioUserInteraction(
 	};
 }
 
+/** Marks a run whose selection context cannot be established. */
+const UNKNOWN_SELECTION_CONTEXT = Symbol("unknown-selection-context");
+
 /**
  * Private, in-memory equality input for "did these runs answer the same
  * selections?". The persisted `user_interactions` redact credentials and OTP
  * values, so they cannot say whether two runs picked the same account or
  * resource; the advisory needs the raw answers, and must never print or
- * persist them (or a hash of them). OTP prompts contribute only their kind
- * and status: a single-use code proves identity, it does not select data.
+ * persist them (or a hash of them). An OTP exchange makes the whole run's
+ * context unknown: nothing in the wire protocol binds a successful OTP to
+ * the same account across runs, so the advisory does not infer it.
  */
 function selectionContextEntry(
 	prompt: RawInteractionLine,
 	response: InteractionResponse,
 ): unknown {
 	if (isOtpPrompt(prompt)) {
-		return { kind: prompt.kind, status: response.status };
+		return UNKNOWN_SELECTION_CONTEXT;
 	}
 	return {
 		kind: prompt.kind,
@@ -1476,11 +1480,20 @@ function selectionContextEntry(
 	};
 }
 
-const MAX_SELECTION_CONTEXT_LENGTH = 65_536;
+/** Largest serialized context (JavaScript string length, measured after
+ *  `JSON.stringify`) kept for comparison; the answers are fully materialized
+ *  before this check, so it limits what is retained, not memory or CPU. */
+export const MAX_SELECTION_CONTEXT_LENGTH = 65_536;
 
-/** `undefined` (unknown context; never equal to anything) when the answers
- *  cannot be serialized or are too large to keep for comparison. */
-function selectionContextKey(entries: readonly unknown[]): string | undefined {
+/** `undefined` (unknown context; never equal to anything) when any entry is
+ *  unknown, or the answers cannot be serialized or serialize past
+ *  `MAX_SELECTION_CONTEXT_LENGTH`. */
+export function selectionContextKey(
+	entries: readonly unknown[],
+): string | undefined {
+	if (entries.includes(UNKNOWN_SELECTION_CONTEXT)) {
+		return undefined;
+	}
 	try {
 		const key = JSON.stringify(entries);
 		return key.length <= MAX_SELECTION_CONTEXT_LENGTH ? key : undefined;
