@@ -3,11 +3,15 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { chromium } from "playwright";
 import {
 	acquireBrowserForConnector,
+	acquireIsolatedBrowser,
 	CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE,
 	CdpAttachSessionRaceExhaustedError,
 	closeRemoteCdpPageTargets,
@@ -23,12 +27,16 @@ import {
 	isDefinitivelyZeroViewport,
 	redactHarDocument,
 	redactHarFileBestEffort,
+	remoteCdpPageCleanupSkipReason,
 	resolveDeploymentBrowserHeadless,
 	resolvePageTargetWsUrl,
 	runCdpAttemptWithRaceGuard,
 	STORAGE_STATE_RECORD_PATH_ENV,
 	shouldCleanRemoteCdpPageTargets,
+	startRemoteCdpHarRecording,
 	type UnhandledRejectionHost,
+	warnIfRecordingSharedRemoteBrowser,
+	withScenarioClockPaused,
 } from "./browser-launch.ts";
 
 const ENV_VARS = [
@@ -607,6 +615,297 @@ test("shouldCleanRemoteCdpPageTargets skips cleanup only for preserved remote pa
 		shouldCleanRemoteCdpPageTargets({ preserveRemotePagesOnAcquire: true }),
 		false,
 	);
+});
+
+test("remoteCdpPageCleanupSkipReason names why cleanup is skipped; the env opt-in needs exactly 1", () => {
+	assert.equal(remoteCdpPageCleanupSkipReason({}, {}), null);
+	assert.equal(
+		remoteCdpPageCleanupSkipReason(
+			{},
+			{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: "1" },
+		),
+		"recording_host_fresh_browser",
+	);
+	for (const value of ["", "0", "true", "yes"]) {
+		assert.equal(
+			remoteCdpPageCleanupSkipReason(
+				{},
+				{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: value },
+			),
+			null,
+			`value ${JSON.stringify(value)} must not skip cleanup`,
+		);
+	}
+	// The caller's own preserve option wins and is the reported reason.
+	assert.equal(
+		remoteCdpPageCleanupSkipReason(
+			{ preserveRemotePagesOnAcquire: true },
+			{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: "1" },
+		),
+		"preserve_remote_pages_on_acquire",
+	);
+	assert.equal(
+		shouldCleanRemoteCdpPageTargets(
+			{},
+			{ PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP: "1" },
+		),
+		false,
+	);
+});
+
+test("withScenarioClockPaused nests, and restores the pause counter when the body throws", async () => {
+	const scope = globalThis as { __pdppScenarioClockPaused?: number };
+	const before = scope.__pdppScenarioClockPaused ?? 0;
+	const seen: number[] = [];
+	await withScenarioClockPaused(async () => {
+		seen.push(scope.__pdppScenarioClockPaused ?? 0);
+		await withScenarioClockPaused(async () => {
+			seen.push(scope.__pdppScenarioClockPaused ?? 0);
+		});
+		seen.push(scope.__pdppScenarioClockPaused ?? 0);
+	});
+	assert.deepEqual(seen, [before + 1, before + 2, before + 1]);
+	await assert.rejects(
+		withScenarioClockPaused(() => Promise.reject(new Error("acquire failed"))),
+		/acquire failed/,
+	);
+	assert.equal(scope.__pdppScenarioClockPaused ?? 0, before);
+});
+
+function freeLoopbackPort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = createNetServer();
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			const port = typeof address === "object" && address ? address.port : 0;
+			server.close(() => resolve(port));
+		});
+	});
+}
+
+test("remote CDP attach records HAR and storage state, keeps existing tabs, and leaves the browser running", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-har-test-"));
+	const site = createHttpServer((_req, res) => {
+		res.writeHead(200, {
+			"content-type": "text/html",
+			"set-cookie": "remote_session=abc123; Path=/",
+		});
+		res.end("<html><body>remote har fixture</body></html>");
+	});
+	await new Promise<void>((resolve) => {
+		site.listen(0, "127.0.0.1", resolve);
+	});
+	const siteAddress = site.address();
+	const sitePort =
+		typeof siteAddress === "object" && siteAddress ? siteAddress.port : 0;
+	const cdpPort = await freeLoopbackPort();
+	// A persistent context is the browser's default context, the one a CDP
+	// attach hands to the connector, so the owner's tab shares it with ours.
+	const remote = await chromium.launchPersistentContext(join(dir, "profile"), {
+		args: [`--remote-debugging-port=${String(cdpPort)}`],
+	});
+	t.after(async () => {
+		await remote.close().catch(() => undefined);
+		await new Promise<void>((resolve) => {
+			site.close(() => resolve());
+		});
+		await rm(dir, { recursive: true, force: true });
+	});
+	const ownersTab = await remote.newPage();
+	await ownersTab.goto("about:blank#owners-tab");
+
+	const harPath = join(dir, "remote.har");
+	const storageStatePath = join(dir, "remote-storage-state.json");
+	const handle = await acquireIsolatedBrowser({
+		profileName: "remote_har_test",
+		remoteCdpUrl: `http://127.0.0.1:${String(cdpPort)}`,
+		preserveRemotePagesOnAcquire: true,
+		harRecording: { path: harPath },
+		storageStateRecording: { path: storageStatePath },
+	});
+	const page = await handle.context.newPage();
+	await page.goto(`http://127.0.0.1:${String(sitePort)}/fixture`);
+	// The runtime leaves its page open during a recording run and expects
+	// release() to close it, so the test does not close it either.
+	await handle.release();
+
+	assert.deepEqual(await handle.harRecordingOutcome?.(), {
+		flushed: true,
+		path: harPath,
+	});
+	assert.deepEqual(await handle.storageStateRecordingOutcome?.(), {
+		flushed: true,
+		path: storageStatePath,
+	});
+	const har = JSON.parse(await readFile(harPath, "utf8")) as {
+		log: { entries: { request: { url: string } }[] };
+	};
+	assert.ok(
+		har.log.entries.some((entry) =>
+			entry.request.url.endsWith(`:${String(sitePort)}/fixture`),
+		),
+		"HAR must contain the request made through the attached context",
+	);
+	const storageState = JSON.parse(await readFile(storageStatePath, "utf8")) as {
+		cookies: { name: string }[];
+	};
+	assert.ok(
+		storageState.cookies.some((cookie) => cookie.name === "remote_session"),
+		"storage state must contain the cookie set during the attached run",
+	);
+	assert.equal(
+		remote.browser()?.isConnected() ?? true,
+		true,
+		"remote browser must keep running",
+	);
+	assert.equal(ownersTab.isClosed(), false, "pre-existing tab must stay open");
+	assert.equal(
+		remote.pages().some((p) => p.url().endsWith("/fixture")),
+		false,
+		"release() must close the page the run created",
+	);
+});
+
+test("remote CDP recording embeds the bodies of downloads from run-owned pages only", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-remote-har-download-test-"));
+	const site = createHttpServer((req, res) => {
+		if (req.url?.endsWith(".zip")) {
+			res.writeHead(200, {
+				"content-type": "application/zip",
+				"content-disposition": "attachment; filename=export.zip",
+			});
+			res.end(`zip-bytes-for-${req.url}`);
+			return;
+		}
+		res.writeHead(200, { "content-type": "text/html" });
+		res.end("<html><body>downloads</body></html>");
+	});
+	await new Promise<void>((resolve) => {
+		site.listen(0, "127.0.0.1", resolve);
+	});
+	const siteAddress = site.address();
+	const sitePort =
+		typeof siteAddress === "object" && siteAddress ? siteAddress.port : 0;
+	const origin = `http://127.0.0.1:${String(sitePort)}`;
+	const cdpPort = await freeLoopbackPort();
+	const remote = await chromium.launchPersistentContext(join(dir, "profile"), {
+		args: [`--remote-debugging-port=${String(cdpPort)}`],
+	});
+	t.after(async () => {
+		await remote.close().catch(() => undefined);
+		await new Promise<void>((resolve) => {
+			site.close(() => resolve());
+		});
+		await rm(dir, { recursive: true, force: true });
+	});
+	const harPath = join(dir, "remote.har");
+	const handle = await acquireIsolatedBrowser({
+		profileName: "remote_har_download_test",
+		remoteCdpUrl: `http://127.0.0.1:${String(cdpPort)}`,
+		preserveRemotePagesOnAcquire: true,
+		harRecording: { path: harPath },
+	});
+	// The owner opens a tab in the attached browser and downloads a file
+	// while the run is recording; the run downloads its own export.
+	const attachedContext = handle.context;
+	const ownersTab = await remote.newPage();
+	await ownersTab.goto(`${origin}/owner`);
+	const ownerDownload = ownersTab.waitForEvent("download");
+	await ownersTab.evaluate((href) => {
+		window.location.href = href;
+	}, `${origin}/owner-private.zip`);
+	await (await ownerDownload).path();
+
+	const page = await attachedContext.newPage();
+	await page.goto(`${origin}/run`);
+	const runDownload = page.waitForEvent("download");
+	await page.evaluate((href) => {
+		window.location.href = href;
+	}, `${origin}/export.zip`);
+	await (await runDownload).path();
+	await handle.release();
+
+	const har = JSON.parse(await readFile(harPath, "utf8")) as {
+		log: {
+			entries: {
+				request: { url: string };
+				response: { content?: { encoding?: string; text?: string } };
+			}[];
+		};
+	};
+	const bodyFor = (suffix: string): string | undefined => {
+		const entry = har.log.entries.findLast((e) =>
+			e.request.url.endsWith(suffix),
+		);
+		const content = entry?.response.content;
+		return content?.encoding === "base64" && content.text
+			? Buffer.from(content.text, "base64").toString("utf8")
+			: undefined;
+	};
+	assert.equal(bodyFor("/export.zip"), "zip-bytes-for-/export.zip");
+	assert.equal(
+		bodyFor("/owner-private.zip"),
+		undefined,
+		"a download in the owner's tab must not be embedded",
+	);
+	assert.equal(ownersTab.isClosed(), false, "owner's tab must stay open");
+});
+
+test("remote CDP HAR start failure disconnects without closing any page", async () => {
+	let disconnects = 0;
+	let failureHook = 0;
+	await assert.rejects(
+		startRemoteCdpHarRecording({
+			browser: {
+				close: () => {
+					disconnects += 1;
+					return Promise.resolve();
+				},
+			},
+			context: {
+				routeFromHAR: () => Promise.reject(new Error("har start refused")),
+			},
+			harPath: "/nonexistent/remote.har",
+			onFailure: () => {
+				failureHook += 1;
+			},
+			profileName: "remote_har_test",
+		}),
+		/har start refused/,
+	);
+	// The fake context exposes no pages and no close(), so the only way to
+	// pass is to disconnect the client and touch nothing else.
+	assert.equal(disconnects, 1);
+	assert.equal(failureHook, 1);
+});
+
+test("warnIfRecordingSharedRemoteBrowser warns once when other pages are open, not for blank ones", () => {
+	const writes: string[] = [];
+	const original = process.stderr.write.bind(process.stderr);
+	process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+		writes.push(String(chunk));
+		return true;
+	}) as typeof process.stderr.write;
+	const page = (url: string) => ({ isClosed: () => false, url: () => url });
+	try {
+		warnIfRecordingSharedRemoteBrowser(
+			{ pages: () => [page("about:blank")] } as never,
+			"p",
+		);
+		assert.equal(writes.length, 0);
+		warnIfRecordingSharedRemoteBrowser(
+			{
+				pages: () => [page("about:blank"), page("https://mail.example/")],
+			} as never,
+			"p",
+		);
+	} finally {
+		process.stderr.write = original;
+	}
+	assert.equal(writes.length, 1);
+	assert.match(writes[0] ?? "", /1 other open page/);
+	assert.match(writes[0] ?? "", /dedicated sandbox profile/);
 });
 
 test("resolvePageTargetWsUrl reads DevToolsActivePort then queries /json with the parsed port", async () => {

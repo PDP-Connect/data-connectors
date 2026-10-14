@@ -31,11 +31,17 @@ import { existsSync, mkdirSync } from "node:fs";
 import { chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Browser, BrowserContext, chromium } from "playwright";
+import type { Browser, BrowserContext, chromium, Page } from "playwright";
 import {
 	removeChromiumSingletonResidue,
 	withProfileLockMutex,
 } from "./profile-lock.ts";
+import {
+	downloadCaptureOptionsFromEnv,
+	embedDownloadBodiesInHarFile,
+	trackRunOwnedDownloads,
+} from "./remote-download-har.ts";
+import { trackRunOwnedPages } from "./run-owned-pages.ts";
 import { isRunningInContainer } from "./runtime-environment.ts";
 
 const PROFILE_NAME_RE = /^[A-Za-z0-9_-]+$/;
@@ -81,6 +87,15 @@ export interface IsolatedBrowser {
 	 * mistakenly read a stale/undefined outcome as a real one.
 	 */
 	harRecordingOutcome?: () => Promise<HarRecordingOutcome>;
+	/**
+	 * Tells the launcher that `page` is the run's page although the launcher
+	 * did not create it: a preserve-page connector reusing a tab that was
+	 * already open (see `selectBrowserPageForRun`). The launcher then treats
+	 * it and its popups as run-owned for recording (their downloads go into
+	 * the HAR) but never closes it, because it predates the run. Present only
+	 * on the remote-CDP path, where the launcher tracks run-owned pages.
+	 */
+	adoptRunPage?: (page: Page) => void;
 	release: () => Promise<void>;
 	/**
 	 * Present only when this context was launched with `storageStateRecording`
@@ -103,10 +118,15 @@ export interface AcquireIsolatedBrowserOptions {
 	 * `baseLaunchOptions` at BOTH `launchPersistentContext` call sites (the
 	 * explicit-channel branch and the default-channel branch), so this option
 	 * covers every local-launch path the same way `streamingEnabled` does.
-	 * Does NOT apply to `acquireRemoteCdpBrowser` (n.eko-attached contexts):
-	 * `connectOverCDP` attaches to an ALREADY-launched remote context, so
-	 * there is no `launchPersistentContext` call to carry `recordHar` on that
-	 * path — recording a remote-CDP session's traffic is out of scope here.
+	 * On the `acquireRemoteCdpBrowser` path there is no launch call to carry
+	 * `recordHar`, so the attached context records through
+	 * `routeFromHAR(path, { update: true })` instead, with the same embedded
+	 * content, and the HAR is exported when `release()` closes the attached
+	 * context (which only disconnects; the remote browser keeps running).
+	 * An attached context is shared with whatever else runs in that browser,
+	 * so the HAR and storage state include other tabs' traffic and cookies.
+	 * Remote recording is meant for a dedicated sandbox browser or profile
+	 * signed in to a test account; attach warns when other pages are open.
 	 *
 	 * `content: "embed"` (inline base64/text in the HAR JSON, chosen over
 	 * Playwright's zip-friendly `"attach"`) is a deliberate choice: a replay
@@ -140,9 +160,11 @@ export interface AcquireIsolatedBrowserOptions {
 	harRecording?: { path: string };
 	headless?: boolean;
 	/**
-	 * Skip remote-CDP page-target cleanup before attach. Use only when the
+	 * Skip remote-CDP page-target cleanup before attach. Use when the
 	 * connector intentionally preserves successful pages because the page itself
-	 * carries source auth state.
+	 * carries source auth state, or when the remote browser belongs to someone
+	 * else (a `PDPP_<NAME>_REMOTE_CDP_URL` attach) and its tabs are not ours
+	 * to close.
 	 */
 	preserveRemotePagesOnAcquire?: boolean;
 	profileName: string;
@@ -824,7 +846,9 @@ export async function connectOverCdpWithRetry<TBrowser>({
  * Pages opened by the connector are NOT cleaned up automatically — the
  * connector should close any pages it opened in its own cleanup. This
  * matches `launchPersistentContext` semantics where the context outlives
- * individual pages.
+ * individual pages. The one exception is a recording run: `release()` closes
+ * the pages created through this context (and their popups) before it exports
+ * the HAR, and never touches pages it did not create.
  *
  * The attach itself is wrapped in `connectOverCdpWithRetry` to ride out the
  * transient session-closed race n.eko's transient targets trigger during
@@ -834,13 +858,37 @@ export async function connectOverCdpWithRetry<TBrowser>({
  * `unhandledRejection` guard. See `runCdpAttemptWithRaceGuard` and
  * `isCdpAttachSessionRaceError`.
  */
-export function shouldCleanRemoteCdpPageTargets({
-	preserveRemotePagesOnAcquire,
-}: Pick<
-	AcquireIsolatedBrowserOptions,
-	"preserveRemotePagesOnAcquire"
->): boolean {
-	return !preserveRemotePagesOnAcquire;
+export function shouldCleanRemoteCdpPageTargets(
+	options: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire">,
+	env: NodeJS.ProcessEnv = {},
+): boolean {
+	return remoteCdpPageCleanupSkipReason(options, env) === null;
+}
+
+/**
+ * Why the pre-attach page-target cleanup is skipped, or null when it runs.
+ *
+ * - `preserve_remote_pages_on_acquire`: the caller attaches to a browser whose
+ *   pages it does not own.
+ * - `recording_host_fresh_browser`: `PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP=1`. A
+ *   recording host that hands over a browser it just started (a sandbox with
+ *   nothing to clean) sets it, because the cleanup's `/json` calls are
+ *   Node-side fetches the scenario recorder captures as provider traffic,
+ *   and a replay, which launches its own browser, never makes them.
+ */
+export function remoteCdpPageCleanupSkipReason(
+	{
+		preserveRemotePagesOnAcquire,
+	}: Pick<AcquireIsolatedBrowserOptions, "preserveRemotePagesOnAcquire">,
+	env: NodeJS.ProcessEnv,
+): "preserve_remote_pages_on_acquire" | "recording_host_fresh_browser" | null {
+	if (preserveRemotePagesOnAcquire) {
+		return "preserve_remote_pages_on_acquire";
+	}
+	if (env.PDPP_REMOTE_CDP_SKIP_PAGE_CLEANUP === "1") {
+		return "recording_host_fresh_browser";
+	}
+	return null;
 }
 
 async function acquireRemoteCdpBrowser(
@@ -848,7 +896,7 @@ async function acquireRemoteCdpBrowser(
 	profileName: string,
 	options: Pick<
 		AcquireIsolatedBrowserOptions,
-		"preserveRemotePagesOnAcquire"
+		"harRecording" | "preserveRemotePagesOnAcquire" | "storageStateRecording"
 	> = {},
 ): Promise<IsolatedBrowser> {
 	// @ts-expect-error — patchright.chromium is runtime-identical to playwright.chromium
@@ -859,7 +907,11 @@ async function acquireRemoteCdpBrowser(
 	process.stderr.write(
 		`[browser-launch] remote CDP attach start profile=${profileName} url=${redactedUrl}\n`,
 	);
-	if (shouldCleanRemoteCdpPageTargets(options)) {
+	const cleanupSkipReason = remoteCdpPageCleanupSkipReason(
+		options,
+		process.env,
+	);
+	if (cleanupSkipReason === null) {
 		// Remote profiles usually persist cookies; stale page targets do not need
 		// to persist. Replace pages before attach so Patchright does not auto-attach
 		// to a wedged renderer, while n.eko Chromium still keeps at least one page alive.
@@ -871,7 +923,7 @@ async function acquireRemoteCdpBrowser(
 		);
 	} else {
 		process.stderr.write(
-			`[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=preserve_remote_pages_on_acquire\n`,
+			`[browser-launch] remote CDP page-target cleanup skipped profile=${profileName} reason=${cleanupSkipReason}\n`,
 		);
 	}
 	const browser = await connectOverCdpWithRetry<Browser>({
@@ -918,13 +970,91 @@ async function acquireRemoteCdpBrowser(
 			`[browser-launch] could not parse remote CDP URL ${cdpUrl}: ${err instanceof Error ? err.message : String(err)}\n`,
 		);
 	}
+	const { harRecording, storageStateRecording } = options;
+	const recording = Boolean(harRecording || storageStateRecording);
+	if (recording) {
+		warnIfRecordingSharedRemoteBrowser(context, profileName);
+	}
+	// Pages this client creates (and the popups they open) are the only pages
+	// release() may close. See `run-owned-pages.ts`.
+	const runPages = trackRunOwnedPages(context);
+	// Downloads of run-owned pages, so release() can put their bodies into
+	// the HAR (see `remote-download-har.ts`).
+	// Pages the runtime reused and reported through `adoptRunPage`: owned for
+	// recording, never closed here.
+	const reusedRunPages = trackRunOwnedPages();
+	const runDownloads = harRecording
+		? trackRunOwnedDownloads(
+				context,
+				(page) => runPages.owns(page) || reusedRunPages.owns(page),
+				downloadCaptureOptionsFromEnv(process.env),
+			)
+		: null;
+	if (harRecording) {
+		await startRemoteCdpHarRecording({
+			browser,
+			context,
+			harPath: harRecording.path,
+			onFailure: () => {
+				runDownloads?.dispose();
+				reusedRunPages.dispose();
+				runPages.dispose();
+				browser.off("disconnected", onDisconnected);
+			},
+			profileName,
+		});
+	}
 	return {
 		browser,
 		context,
+		adoptRunPage: (page: Page): void => {
+			if (!runPages.owns(page)) {
+				reusedRunPages.adopt(page);
+			}
+		},
 		release: async (): Promise<void> => {
 			// Disconnect only. Closing the remote browser would kill the n.eko
 			// X-attached process; that lifecycle is owned by the neko container.
 			releaseRequested = true;
+			// Captures started with each download; this waits only for the ones
+			// still running, each within its own window, while the pages and
+			// the context are open (Playwright deletes download artifacts with
+			// the context).
+			const downloadBodies = runDownloads ? await runDownloads.bodies() : [];
+			runDownloads?.dispose();
+			reusedRunPages.dispose();
+			if (recording) {
+				// A recording run leaves its page open so storage state can still
+				// be read here (see `shouldCloseBrowserPageAfterRun`). On a local
+				// launch the context close below would close it; an attached
+				// context close only disconnects, so close the run's own pages
+				// (and nothing else) first. That also lets their in-flight
+				// requests finish before the HAR is exported.
+				// Close before dispose so a popup one of them opens while the close
+				// is pending is still adopted and closed.
+				await runPages.close();
+			}
+			runPages.dispose();
+			if (storageStateRecording) {
+				await writeStorageStateBestEffort(context, storageStateRecording.path);
+			}
+			if (harRecording) {
+				// The HAR is written when the context closes. On a CDP-attached
+				// default context, close() exports the HAR and then only
+				// disconnects; it does not close the remote browser or its pages.
+				try {
+					await context.close();
+				} catch (err) {
+					process.stderr.write(
+						`[browser-launch] remote CDP HAR export failed profile=${profileName}: ${err instanceof Error ? err.message : String(err)}\n`,
+					);
+				}
+				await embedDownloadBodiesInHarFile(
+					harRecording.path,
+					downloadBodies,
+				).catch(() => 0);
+				await redactHarFileBestEffort(harRecording.path);
+			}
 			try {
 				await browser.close();
 			} catch {
@@ -933,7 +1063,85 @@ async function acquireRemoteCdpBrowser(
 				browser.off("disconnected", onDisconnected);
 			}
 		},
+		...(harRecording
+			? {
+					harRecordingOutcome: (): Promise<HarRecordingOutcome> =>
+						fileFlushOutcome(harRecording.path),
+				}
+			: {}),
+		...(storageStateRecording
+			? {
+					storageStateRecordingOutcome:
+						(): Promise<StorageStateRecordingOutcome> =>
+							fileFlushOutcome(storageStateRecording.path),
+				}
+			: {}),
 	};
+}
+
+/**
+ * Start HAR recording on an attached context. `recordHar` is a
+ * context-creation option and an attached browser hands us an existing
+ * context, so this uses `routeFromHAR` in update mode, which starts the same
+ * passive recorder without routing anything. If it fails, the CDP client is
+ * disconnected before the error propagates: no release handle exists yet, so
+ * nobody else would. Disconnecting never closes the remote browser's pages.
+ */
+export async function startRemoteCdpHarRecording({
+	browser,
+	context,
+	harPath,
+	onFailure,
+	profileName,
+}: {
+	browser: Pick<Browser, "close">;
+	context: Pick<BrowserContext, "routeFromHAR">;
+	harPath: string;
+	onFailure?: () => void;
+	profileName: string;
+}): Promise<void> {
+	try {
+		await context.routeFromHAR(harPath, {
+			update: true,
+			updateContent: "embed",
+			updateMode: "full",
+		});
+	} catch (err) {
+		process.stderr.write(
+			`[browser-launch] remote CDP HAR recording failed to start profile=${profileName}: ${err instanceof Error ? err.message : String(err)}; disconnecting\n`,
+		);
+		onFailure?.();
+		await browser.close().catch(() => undefined);
+		throw err;
+	}
+}
+
+/**
+ * HAR and storage state capture the whole attached context: every tab's
+ * traffic and every cookie, not only the connector's. Remote recording is
+ * meant for a dedicated sandbox browser or profile signed in to a test
+ * account. Warn (do not block) when the attached browser already has other
+ * pages open, since their traffic and cookies will land in the artifacts.
+ */
+export function warnIfRecordingSharedRemoteBrowser(
+	context: Pick<BrowserContext, "pages">,
+	profileName: string,
+): void {
+	let openPages = 0;
+	try {
+		openPages = context
+			.pages()
+			.filter(
+				(page) => !page.isClosed() && page.url() !== "about:blank",
+			).length;
+	} catch {
+		return;
+	}
+	if (openPages > 0) {
+		process.stderr.write(
+			`[browser-launch] warning: recording an attached browser with ${String(openPages)} other open page(s) profile=${profileName}; the HAR and storage state cover the whole browser context, including their traffic and cookies. Use a dedicated sandbox profile with a test account.\n`,
+		);
+	}
 }
 
 function redactCdpUrl(rawUrl: string): string {
@@ -1241,7 +1449,39 @@ export async function fileFlushOutcome(
  * The connector runtime scopes the profile name with the stable connector
  * instance ID when the reference runtime supplies one.
  */
-export async function acquireIsolatedBrowser({
+export async function acquireIsolatedBrowser(
+	options: AcquireIsolatedBrowserOptions,
+): Promise<IsolatedBrowser> {
+	return withScenarioClockPaused(async () => {
+		const acquired = await acquireIsolatedBrowserWithClock(options);
+		const release = acquired.release;
+		acquired.release = () => withScenarioClockPaused(release);
+		return acquired;
+	});
+}
+
+/**
+ * Runs `fn` with the scenario clock trace paused. Browser acquire and release
+ * are host plumbing, not connector behavior: a recording attaches to a remote
+ * CDP browser and a replay launches a local one, so their clock reads differ
+ * in number, and traced they would shift every later value the connector
+ * reads in replay. The scenario preloads read `__pdppScenarioClockPaused`
+ * (see `subprocess-fetch-preloads.ts` and `browser-har-replay.ts`); outside a
+ * scenario run nothing reads it.
+ */
+export async function withScenarioClockPaused<T>(
+	fn: () => Promise<T>,
+): Promise<T> {
+	const scope = globalThis as { __pdppScenarioClockPaused?: number };
+	scope.__pdppScenarioClockPaused = (scope.__pdppScenarioClockPaused ?? 0) + 1;
+	try {
+		return await fn();
+	} finally {
+		scope.__pdppScenarioClockPaused -= 1;
+	}
+}
+
+async function acquireIsolatedBrowserWithClock({
 	profileName,
 	headless,
 	streamingEnabled,
@@ -1257,11 +1497,11 @@ export async function acquireIsolatedBrowser({
 	// browser owns its own profile and lifecycle (e.g. the n.eko container);
 	// we just attach as a CDP client.
 	if (remoteCdpUrl) {
-		return acquireRemoteCdpBrowser(
-			remoteCdpUrl,
-			profileName,
-			preserveRemotePagesOnAcquire ? { preserveRemotePagesOnAcquire } : {},
-		);
+		return acquireRemoteCdpBrowser(remoteCdpUrl, profileName, {
+			...(preserveRemotePagesOnAcquire ? { preserveRemotePagesOnAcquire } : {}),
+			...(harRecording ? { harRecording } : {}),
+			...(storageStateRecording ? { storageStateRecording } : {}),
+		});
 	}
 	const effectiveHeadless = resolveDeploymentBrowserHeadless(headless);
 	const profileRoot =

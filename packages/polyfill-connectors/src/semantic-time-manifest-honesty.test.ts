@@ -46,6 +46,8 @@ import { manifestPath as MANIFEST_PATH } from "./connector-paths.ts";
 const DELIBERATELY_TIMELESS: Record<string, string> = {
 	"chase/accounts":
 		"an account is a standing entity; its only timestamp is the run-clock fetched_at",
+	"chatgpt/account_plan":
+		"standing subscription terms; renews_at/expires_at/cancels_at are scheduled future dates, not a moment the owner lived",
 	"gmail/labels":
 		"a label is a folder, not an event; Gmail exposes no created/applied time",
 	"spotify/playlists":

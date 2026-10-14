@@ -9,7 +9,7 @@
 	},
 	"connector_key": "codex",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-	"version": "0.3.12",
+	"version": "0.3.13",
 	"display_name": "OpenAI Codex CLI",
 	"brand": {
 		"icon": "icon.svg",

@@ -1,0 +1,55 @@
+{
+	"data": {
+		"user": {
+			"result": {
+				"__typename": "User",
+				"id": "VXNlcjpzeW50aGV0aWM=",
+				"rest_id": "1900000000000000001",
+				"core": {
+					"created_at": "Tue Mar 04 09:15:00 +0000 2014",
+					"name": "Sample Owner",
+					"screen_name": "sample_owner"
+				},
+				"avatar": {
+					"image_url": "https://pbs.example.invalid/profile_images/1900000000000000001/avatar_normal.jpg"
+				},
+				"is_blue_verified": false,
+				"banner": {
+					"image_url": "https://pbs.example.invalid/profile_banners/1900000000000000001/1700000000"
+				},
+				"location": {
+					"location": "Example City"
+				},
+				"profile_bio": {
+					"description": "Synthetic account for connector fixtures. Not a real person.",
+					"entities": {
+						"description": {},
+						"url": {
+							"urls": []
+						}
+					}
+				},
+				"website": {
+					"url": "https://sample-owner.example.invalid/"
+				},
+				"relationship_counts": {
+					"followers": 128,
+					"following": 256
+				},
+				"tweet_counts": {
+					"media_tweets": 16,
+					"tweets": 1024
+				},
+				"action_counts": {
+					"favorites_count": 512
+				},
+				"verification": {
+					"verified": false
+				},
+				"privacy": {
+					"protected": false
+				}
+			}
+		}
+	}
+}

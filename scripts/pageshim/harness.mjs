@@ -471,6 +471,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {(args: {url:string,loggedIn:boolean,call:number}) => string|undefined} [o.fixtures.failGoto] return an error to emulate a PageShim navigation failure
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
+ * @param {(method: string, args: unknown[], result: unknown) => void} [o.observeBridge] sees every bridge call and its reply
  */
 export async function runHarness({
 	bundle,
@@ -497,6 +498,7 @@ export async function runHarness({
 	clockNowMs,
 	legacyScopeBridge = false,
 	acceptLegacyResult,
+	observeBridge,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -536,6 +538,7 @@ export async function runHarness({
 			const f = fixtures.resolve(request.url(), {
 				method: request.method(),
 				postData: request.postData(),
+				headers: request.headers(),
 			});
 			return route.fulfill({
 				...f,
@@ -718,6 +721,7 @@ export async function runHarness({
 						"Bridge request argument exceeds 256 Ki UTF-16 code units",
 				};
 			const result = await dispatch(method, args);
+			observeBridge?.(method, args, result);
 			const replyUnits = jsonPayloadUnits(result);
 			maxBridgePayloadUnits = Math.max(maxBridgePayloadUnits, replyUnits);
 			if (replyUnits > PAGE_BRIDGE_MAX_UNITS)

@@ -1,0 +1,29 @@
+[
+	{
+		"id": "797751587635200003",
+		"name": "Synthetic Trail Club",
+		"icon": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+		"banner": null,
+		"owner": false,
+		"permissions": "140737488355327",
+		"features": ["COMMUNITY", "NEWS"]
+	},
+	{
+		"id": "970693646745600004",
+		"name": "Example Book Circle",
+		"icon": null,
+		"banner": null,
+		"owner": true,
+		"permissions": "562949953421311",
+		"features": []
+	},
+	{
+		"id": "1175889484185600005",
+		"name": "Placeholder Makers",
+		"icon": null,
+		"banner": null,
+		"owner": false,
+		"permissions": "104189505",
+		"features": ["COMMUNITY"]
+	}
+]

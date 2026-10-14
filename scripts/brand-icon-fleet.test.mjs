@@ -66,6 +66,8 @@ function assertSafeRecognisableSvg(source, filename) {
 // original per-connector removal verdict.
 const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "heb.json",
+  "fitbit.json", // a mark exists; omitted by choice (trademark)
+  "garmin_browser.json",
   "google_takeout.json",
   "oura.json",
   "oura_browser.json",
@@ -73,12 +75,13 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "usaa.json",
   "wholefoods.json",
   "whoop.json",
+  "whoop_browser.json",
   "ynab.json",
 ]);
 
 // These Collection Profiles are carried by signed OCI artifacts, not by the
 // frozen Desktop connector index. Their manifest-local icons still need proof.
-const MODERN_ONLY_PROFILE_ICONS = new Set(["anthropic_live.json", "github_browser.json", "strava_browser.json", "youtube_takeout.json"]);
+const MODERN_ONLY_PROFILE_ICONS = new Set(["anthropic_live.json", "discord_browser.json", "github_browser.json", "strava_browser.json", "x_browser.json", "youtube_takeout.json"]);
 
 function assertRealBrandMarkShape(source, filename) {
   const root = source.match(/^\s*<svg\b([^>]*)>/);

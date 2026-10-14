@@ -11,8 +11,18 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { streamZipEntryToFile } from "../../packages/polyfill-connectors/src/bounded-zip-archive.ts";
-import { appleHealthZipPolicy, scanExportXmlSummary } from "./parsers.ts";
+import { scanExportXmlSummary } from "./parsers.ts";
+import {
+	exportTooLargeMessage,
+	extractExportEntry,
+	inspectXmlUpload,
+	inspectZipUpload,
+	UNREADABLE_ARCHIVE_MESSAGE,
+	UPLOAD_LIMITS,
+	type UploadLimits,
+	ZIP_MAX_CLASSIC_SIZE,
+	zipTooLargeMessage,
+} from "./uploads.ts";
 
 export type AppleHealthExportValidationStatus =
 	| "valid"
@@ -54,8 +64,6 @@ function remediationFor(
 			return "This export was already imported. Produce a newer export from iPhone Health app > profile > Export All Health Data if you need more recent data.";
 		case "empty":
 			return "This looks like an Apple Health export, but it does not contain any records or workouts to import.";
-		case "too_large":
-			return "This export is larger than PDPP can safely process from a browser upload. Ask your PDPP operator to raise the upload limit, or import a smaller date range if your Health app supports it.";
 		case "unsupported":
 			return "Choose the .zip from Health app > profile > Export All Health Data, or the export.xml file extracted from it. Other files (Health app backups, screenshots, CSV exports from third-party apps) are not supported.";
 		case "valid":
@@ -63,6 +71,29 @@ function remediationFor(
 		default:
 			return null;
 	}
+}
+
+/**
+ * For an upload over the host's upload limit. Unzipping would not help,
+ * since the XML inside is larger than its compressed copy, and Export All
+ * Health Data offers no smaller date range. A higher limit helps only while
+ * the host's is below the most this import reads and the file is one it
+ * reads: an XML within that ceiling, or a .zip under 4 GiB, since a larger
+ * one needs the zip64 format this reader refuses. The operator is named only
+ * then.
+ */
+function overUploadLimit(
+	fileSize: number,
+	maxFileBytes: number,
+	zip: boolean,
+): string {
+	const ceiling = UPLOAD_LIMITS.maxExportBytes;
+	const readable = zip ? fileSize < ZIP_MAX_CLASSIC_SIZE : fileSize <= ceiling;
+	const advice =
+		maxFileBytes < ceiling && readable
+			? " Ask your PDPP operator to raise the upload limit."
+			: "";
+	return `This export is larger than PDPP can safely process from a browser upload.${advice}`;
 }
 
 function baseValidation(
@@ -122,10 +153,10 @@ function buildValidationFromSummary(
  * Validate an already-staged Apple Health export artifact from disk (a bare
  * export.xml, or the .zip Health app produces) — the primary entrypoint,
  * used by the manual-upload route's file-backed dispatch. `fd`/`filePath`
- * are caller-owned; this function neither opens nor closes `fd`, but DOES
- * open its own second descriptor internally for a .zip's temporary
- * extraction (closed before returning). Matches
- * {@link scanExportXmlSummary}'s O(1)-memory streaming guarantee.
+ * are caller-owned; this function neither opens nor closes `fd`. A .zip is
+ * read through `fd`, and its export is written to a scratch file removed
+ * before returning. Matches {@link scanExportXmlSummary}'s O(1)-memory
+ * streaming guarantee.
  */
 export async function validateAppleHealthExportArtifactFromFile(
 	fd: number,
@@ -146,12 +177,23 @@ export async function validateAppleHealthExportArtifactFromFile(
 	) {
 		return {
 			...base,
-			remediation: remediationFor("too_large"),
+			remediation: overUploadLimit(
+				fileSize,
+				options.maxFileBytes,
+				ZIP_EXT_RE.test(options.fileName),
+			),
 			status: "too_large",
 		};
 	}
 
 	if (XML_EXT_RE.test(options.fileName)) {
+		if (inspectXmlUpload(filePath).kind !== "export") {
+			return {
+				...base,
+				remediation: remediationFor("unsupported"),
+				status: "unsupported",
+			};
+		}
 		const summary = await scanExportXmlSummary(filePath);
 		return buildValidationFromSummary(
 			summary,
@@ -169,25 +211,59 @@ export async function validateAppleHealthExportArtifactFromFile(
 		};
 	}
 
-	// Extract export.xml to a scratch temp file purely to scan it -- this
-	// validation-preview extraction is thrown away, never reused by the real
-	// collect-time extraction (which writes its own cached sibling file next
-	// to the PERMANENT staged upload, not this ephemeral preview one).
+	return await validateZipArtifact(fd, fileSize, options);
+}
+
+/**
+ * The preview of an uploaded .zip. The export is found and extracted by the
+ * same functions the import uses, to a scratch file that is scanned for the
+ * preview's counts and then thrown away; the import extracts its own copy.
+ * `limits` exists so a test can reach the export-size ceiling without an
+ * 8 GB fixture.
+ */
+export async function validateZipArtifact(
+	fd: number,
+	fileSize: number,
+	options: {
+		readonly existingFileHashes?: readonly string[];
+		readonly fileSha256: string;
+	},
+	limits: UploadLimits = UPLOAD_LIMITS,
+): Promise<AppleHealthExportValidation> {
+	const base = baseValidation(options.fileSha256);
+	const unsupported: AppleHealthExportValidation = {
+		...base,
+		remediation: remediationFor("unsupported"),
+		status: "unsupported",
+	};
 	const scratchDir = mkdtempSync(join(tmpdir(), "pdpp-apple-health-validate-"));
 	const scratchPath = join(scratchDir, "export.xml");
 	try {
-		const result = await streamZipEntryToFile(
-			fd,
-			fileSize,
-			"export.xml",
-			scratchPath,
-			appleHealthZipPolicy(),
-		);
-		if (!result.found) {
+		const zip = await inspectZipUpload(fd, fileSize, limits);
+		if (zip.kind === "too_large") {
+			// The same advice the import gives: unzip it, if what is inside is
+			// within the size this import reads.
 			return {
 				...base,
-				remediation: remediationFor("unsupported"),
-				status: "unsupported",
+				remediation: zipTooLargeMessage(zip.detail, limits),
+				status: "too_large",
+			};
+		}
+		if (zip.kind === "unreadable_archive") {
+			// Most often an upload cut short; the import says the same of it.
+			return { ...unsupported, remediation: UNREADABLE_ARCHIVE_MESSAGE };
+		}
+		if (zip.kind !== "export") {
+			return unsupported;
+		}
+		const extraction = await extractExportEntry(zip.entry, scratchPath);
+		if (extraction.kind === "export_too_large") {
+			// Unzipping would not help, and no operator setting raises this
+			// ceiling: the XML itself is over it.
+			return {
+				...base,
+				remediation: exportTooLargeMessage(limits),
+				status: "too_large",
 			};
 		}
 		const summary = await scanExportXmlSummary(scratchPath);
@@ -197,23 +273,10 @@ export async function validateAppleHealthExportArtifactFromFile(
 			options.fileSha256,
 			options.existingFileHashes,
 		);
-	} catch (err) {
-		// A ZipPolicyViolationError (declared or actual bytes exceeding policy)
-		// means this IS a real (or plausibly real) export that tripped the
-		// decompression-bomb ceiling -- report too_large, not unsupported, so
-		// the owner gets actionable guidance instead of "not a health export".
-		const code = (err as { code?: unknown })?.code;
-		const isSizePolicyRejection =
-			code === "entry_too_large" ||
-			code === "total_too_large" ||
-			code === "too_many_entries";
-		return {
-			...base,
-			remediation: remediationFor(
-				isSizePolicyRejection ? "too_large" : "unsupported",
-			),
-			status: isSizePolicyRejection ? "too_large" : "unsupported",
-		};
+	} catch {
+		// An archive that throws is corrupt or unsafe: not one this connector
+		// can read, whatever it holds.
+		return unsupported;
 	} finally {
 		rmSync(scratchDir, { force: true, recursive: true });
 	}

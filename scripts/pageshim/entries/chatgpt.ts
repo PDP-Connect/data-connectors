@@ -9,7 +9,7 @@ import { applyRequestedTimeRanges } from "../requested-time-range.ts";
 declare const PAGESHIM_CONNECTOR_VERSION: string;
 
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const STREAMS = ["conversations", "messages", "memories"];
+const STREAMS = ["conversations", "messages", "memories", "account_plan"];
 const env = (globalThis as { __pageshimEnv?: Record<string, string> })
 	.__pageshimEnv ?? {};
 
@@ -28,6 +28,7 @@ for (const name of [
 	if (env[name] !== undefined) process.env[name] = env[name];
 }
 process.env.PDPP_CHATGPT_DETAIL_INITIAL_CONCURRENCY = "1";
+process.env.PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS = "1";
 process.env.PDPP_CHATGPT_DETAIL_MAX_CONCURRENCY = "1";
 
 type Facade = {
@@ -78,7 +79,7 @@ const count = (scope: unknown): number => {
 		},
 		toScope: (_stream, records) => ({ records }),
 		streamScopeRecords: {
-			order: ["messages", "conversations", "memories"],
+			order: ["messages", "conversations", "memories", "account_plan"],
 			summarizeCounts: (counts) => {
 				const details = Object.fromEntries(
 					STREAMS.map((stream) => [stream, counts[stream] ?? 0]),

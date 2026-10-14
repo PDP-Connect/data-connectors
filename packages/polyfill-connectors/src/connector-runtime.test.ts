@@ -31,8 +31,10 @@ import {
 	makeTracer,
 	resolveBrowserLaunchSource,
 	resolveBrowserRuntimeVisibility,
+	runtimeOwnsBrowserPages,
 	selectBrowserPageForRun,
 	shouldCloseBrowserPageAfterRun,
+	shouldPreserveRemotePagesOnAcquire,
 } from "./connector-runtime.ts";
 import type { CaptureSession } from "./fixture-capture.ts";
 
@@ -282,6 +284,7 @@ test("selectBrowserPageForRun ignores closed and blank pages", async () => {
 	const { context, newPageCalls } = makePageSelectionContext([
 		makeDiagnosticPage("https://chatgpt.com/", true),
 		makeDiagnosticPage("about:blank"),
+		makeDiagnosticPage("about:blank#owner-tab"),
 		makeDiagnosticPage("data:text/html,<html></html>"),
 		reusable,
 	]);
@@ -300,6 +303,10 @@ test("isReusableBrowserRunPage treats non-blank open pages as reusable", () => {
 	);
 	assert.equal(
 		isReusableBrowserRunPage(makeDiagnosticPage("about:blank")),
+		false,
+	);
+	assert.equal(
+		isReusableBrowserRunPage(makeDiagnosticPage("about:blank#owner-tab")),
 		false,
 	);
 	assert.equal(
@@ -529,6 +536,44 @@ test("resolveBrowserLaunchSource keeps unmanaged per-profile CDP env as a dev ov
 			remoteCdpUrl: "http://legacy-dev:9223",
 		} satisfies BrowserLaunchSource,
 	);
+});
+
+test("shouldPreserveRemotePagesOnAcquire leaves tabs alone in a browser the runtime does not own", () => {
+	const legacy: BrowserLaunchSource = {
+		envKey: "PDPP_CHATGPT_REMOTE_CDP_URL",
+		kind: "legacy_remote_cdp",
+		remoteCdpUrl: "http://legacy-dev:9223",
+	};
+	const managed: BrowserLaunchSource = {
+		kind: "managed_neko",
+		remoteCdpUrl: "http://managed-neko:9223",
+	};
+	assert.equal(shouldPreserveRemotePagesOnAcquire({}, legacy), true);
+	assert.equal(shouldPreserveRemotePagesOnAcquire({}, managed), false);
+	assert.equal(
+		shouldPreserveRemotePagesOnAcquire({}, { kind: "isolated_local" }),
+		false,
+	);
+	assert.equal(
+		shouldPreserveRemotePagesOnAcquire(
+			{ preservePageOnSuccess: true },
+			managed,
+		),
+		true,
+	);
+	assert.equal(
+		shouldPreserveRemotePagesOnAcquire(
+			{ preservePageOnFailure: true },
+			managed,
+		),
+		true,
+	);
+});
+
+test("runtimeOwnsBrowserPages is false only for a browser someone else launched", () => {
+	assert.equal(runtimeOwnsBrowserPages({ kind: "legacy_remote_cdp" }), false);
+	assert.equal(runtimeOwnsBrowserPages({ kind: "managed_neko" }), true);
+	assert.equal(runtimeOwnsBrowserPages({ kind: "isolated_local" }), true);
 });
 
 test("resolveBrowserLaunchSource falls back to isolated local launch only when no remote surface applies", () => {

@@ -39,7 +39,20 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		contacts: null,
 	},
 	apple_health: {
-		records: { field: "start_date", format: "date-time" },
+		activity: { field: "start_date", format: "date-time" },
+		alcohol_consumption: { field: "start_date", format: "date-time" },
+		body_measurements: { field: "start_date", format: "date-time" },
+		coverage_diagnostics: null,
+		hearing: { field: "start_date", format: "date-time" },
+		lab_results: { field: "start_date", format: "date-time" },
+		mindfulness: { field: "start_date", format: "date-time" },
+		mobility: { field: "start_date", format: "date-time" },
+		nutrition: { field: "start_date", format: "date-time" },
+		other: { field: "start_date", format: "date-time" },
+		reproductive_health: { field: "start_date", format: "date-time" },
+		sleep: { field: "start_date", format: "date-time" },
+		symptoms: { field: "start_date", format: "date-time" },
+		vital_signs: { field: "start_date", format: "date-time" },
 		workouts: { field: "start_date", format: "date-time" },
 	},
 	apple_photos: {
@@ -53,7 +66,8 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		transactions: null,
 	},
 	chatgpt: {
-		conversations: { field: "create_time", format: "date-time" },
+		account_plan: null,
+		conversations: { field: "update_time", format: "date-time" },
 		custom_gpts: { field: "created_at", format: "date-time" },
 		custom_instructions: { field: "updated_at", format: "date-time" },
 		memories: { field: "created_at", format: "date-time" },
@@ -86,9 +100,27 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		shell_snapshots: null,
 		skills: null,
 	},
+	discord_browser: {
+		connections: null,
+		messages: { field: "timestamp", format: "date-time" },
+		profile: null,
+		servers: null,
+	},
 	doordash: {
 		order_items: null,
 		orders: { field: "order_date", format: "date-time" },
+	},
+	fitbit: {
+		activities: { field: "start_time", format: "date-time" },
+		daily_summaries: { field: "date", format: "date" },
+		sleep: { field: "date", format: "date" },
+	},
+	garmin_browser: {
+		activities: { field: "start_at", format: "date-time" },
+		daily_summaries: { field: "date", format: "date" },
+		hrv: { field: "date", format: "date" },
+		sleep: { field: "start_at", format: "date-time" },
+		training_status: { field: "date", format: "date" },
 	},
 	github: {
 		contributions: null,
@@ -302,6 +334,18 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		recoveries: { field: "created_at", format: "date-time" },
 		sleeps: { field: "start_at", format: "date-time" },
 		workouts: { field: "start_at", format: "date-time" },
+	},
+	whoop_browser: {
+		cycles: { field: "start_at", format: "date-time" },
+		recoveries: { field: "start_at", format: "date-time" },
+		sleeps: { field: "start_at", format: "date-time" },
+		workouts: { field: "start_at", format: "date-time" },
+	},
+	x_browser: {
+		bookmarks: null,
+		likes: null,
+		posts: { field: "created_at", format: "date-time" },
+		profile: null,
 	},
 	ynab: {
 		account_stats: null,
