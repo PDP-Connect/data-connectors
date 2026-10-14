@@ -312,16 +312,6 @@ async function collectSyntheticHeb(input: {
 	}
 }
 
-function stateFromMessages(
-	messages: EmittedMessage[],
-): Record<string, unknown> {
-	return Object.fromEntries(
-		messages
-			.filter((message) => message.type === "STATE")
-			.map((message) => [message.stream, message.cursor]),
-	);
-}
-
 test("collect: identical synthetic provider bodies map to identical RECORD data across collection clocks", async () => {
 	const clocks = ["2026-08-20T12:00:00.000Z", "2026-09-21T12:00:00.000Z"];
 	for (const streams of [["order_items"], ["orders", "order_items"]]) {
@@ -378,6 +368,54 @@ test("collect: state-seeded repeat keeps all selected records and exposes busine
 		state: {},
 		streams: ["orders", "order_items"],
 	});
+	const firstOrders = first.emitted.filter(
+		(record) => record.stream === "orders",
+	);
+	const firstItems = first.emitted.filter(
+		(record) => record.stream === "order_items",
+	);
+	assert.equal(firstOrders.length, 1, "the first run emits one fixture order");
+	assert.equal(firstOrders[0]?.data.id, "HEB1000000001");
+	assert.equal(firstItems.length, 1, "the first run emits one fixture item");
+	assert.equal(firstItems[0]?.data.id, "HEB1000000001|9001");
+
+	const firstOrdersStates = first.protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
+			message.type === "STATE" && message.stream === "orders",
+	);
+	assert.equal(firstOrdersStates.length, 1, "the first run emits one orders STATE");
+	const firstOrdersState = firstOrdersStates[0];
+	assert.ok(firstOrdersState);
+	const cursor = firstOrdersState.cursor;
+	assert.ok(
+		cursor && typeof cursor === "object" && !Array.isArray(cursor),
+		"the orders STATE carries its cursor object",
+	);
+	const firstOrdersCursor = cursor as Record<string, unknown>;
+	assert.equal(firstOrdersCursor.checkpoint, "2026-07-14");
+	const fingerprints = firstOrdersCursor.fingerprints;
+	assert.ok(
+		fingerprints &&
+			typeof fingerprints === "object" &&
+			!Array.isArray(fingerprints),
+		"the orders cursor carries a fingerprint map",
+	);
+	const fingerprintEntries = Object.entries(
+		fingerprints as Record<string, unknown>,
+	);
+	assert.deepEqual(
+		fingerprintEntries.map(([id]) => id),
+		["HEB1000000001"],
+		"the fingerprint map contains the selected source order",
+	);
+	assert.ok(
+		fingerprintEntries.every(
+			([, fingerprint]) =>
+				typeof fingerprint === "string" && /^[a-f0-9]{40}$/.test(fingerprint),
+		),
+		"each source fingerprint is a SHA-1 hex digest",
+	);
+
 	const changedBody: SyntheticProviderBody = {
 		lineTotal: "$12.00",
 		orderDate: "2026-07-15",
@@ -386,7 +424,7 @@ test("collect: state-seeded repeat keeps all selected records and exposes busine
 	const repeated = await collectSyntheticHeb({
 		body: changedBody,
 		emittedAt: "2026-09-21T12:00:00.000Z",
-		state: stateFromMessages(first.protocolMessages),
+		state: { orders: firstOrdersCursor },
 		streams: ["orders", "order_items"],
 	});
 	const orders = repeated.emitted.filter(
