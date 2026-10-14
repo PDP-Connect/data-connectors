@@ -132,16 +132,6 @@ export function buildMessageRecord(
 	};
 }
 
-/** The later of a message's created_at and updated_at, as epoch ms. */
-export function messageChangedAtMs(raw: RawMessage): number {
-	const created = Date.parse(str(raw.created_at) ?? "");
-	const updated = Date.parse(str(raw.updated_at) ?? "");
-	return Math.max(
-		Number.isFinite(created) ? created : 0,
-		Number.isFinite(updated) ? updated : 0,
-	);
-}
-
 function capabilities(org: RawOrganization): string[] {
 	return Array.isArray(org.capabilities)
 		? org.capabilities.filter((c): c is string => typeof c === "string")

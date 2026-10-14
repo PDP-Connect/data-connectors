@@ -27,8 +27,9 @@
  *
  * Streams:
  *   - conversations, messages: same field names as connectors/anthropic.
- *     Incremental on the list's `updated_at`, oldest change first, so the
- *     cursor only moves past conversations whose messages were read.
+ *     Incremental on the list's `updated_at`, oldest change first. Each
+ *     stream keeps its own cursor (ChatCursor) and window, so either can be
+ *     requested, widened or added later without skipping its history.
  *   - account_plan: same fields as the chatgpt connector's account_plan.
  *   - usage_limits: the share of each usage limit used and its reset time.
  *
@@ -42,14 +43,19 @@
  *   - A conversation deleted on claude.ai is not retracted. Temporary chats
  *     are not listed by claude.ai and are not collected.
  *   - At most MAX_CONVERSATIONS_PER_RUN conversations are read per run; a
- *     first run on a large account finishes over several runs.
+ *     first run on a large account finishes over several runs. A list longer
+ *     than MAX_LIST_PAGES pages fails the run instead of skipping its oldest
+ *     conversations.
+ *   - Incremental message reads assume the list shows every conversation
+ *     whose messages predate a completed run. A conversation the list did not
+ *     show then (one skipped while another was deleted mid-paging) has its
+ *     older messages collected only by a full refresh.
  *
  * Reachability probe: permanently exempt. Every endpoint sits behind the
  * claude.ai login wall and there is no unauthenticated probe target.
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
-import type { BrowserContext } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
@@ -60,13 +66,17 @@ import {
 	politeDelay,
 	type RecordData,
 	runConnector,
+	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	isOutsideTimeRange,
+	parseIsoInstant,
+} from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	buildAccountPlanRecord,
 	buildConversationRecord,
 	buildMessageRecord,
 	buildUsageLimitRecords,
-	messageChangedAtMs,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -76,9 +86,9 @@ import type {
 	RawSubscriptionDetails,
 } from "./types.ts";
 
-const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
+const CLAUDE_LOGIN_URL = `${CLAUDE_ORIGIN}/login`;
 export const ANTHROPIC_LIVE_LOGIN_MESSAGE =
 	"Sign in to Claude in the secure browser. PDPP continues automatically when Claude confirms the session.";
 
@@ -95,6 +105,7 @@ export const MAX_CONVERSATIONS_PER_RUN = 200;
 const detailDelayMs = () =>
 	Number(process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS) || 400;
 const DETAIL_QUERY = "tree=True&rendering_mode=messages&render_all_tools=true";
+const TRAILING_ZEROS_RE = /0+$/;
 
 type Page = BrowserCollectContext["page"];
 
@@ -109,19 +120,25 @@ class AuthError extends Error {
 	}
 }
 
-/** Same probe as connectors/anthropic: a session cookie, else open sign-in. */
-export async function probeAnthropicLiveSession({
-	context,
-	page,
-}: ProbeSessionArgs): Promise<boolean> {
-	if (await hasSessionCookie(context)) return true;
-	await page.goto(CLAUDE_HOME_URL, { waitUntil: "domcontentloaded" });
-	return false;
+/**
+ * Whether Claude's API accepts this page's session. Read-only and never
+ * navigates, so it is safe to repeat on the page the owner is signing in on.
+ * A session cookie is not proof: a revoked or expired cookie stays in the
+ * profile, and only the API says whether it still works.
+ */
+export async function hasClaudeSession(page: Page): Promise<boolean> {
+	try {
+		if (!(await isOnClaude(page))) return false;
+		const orgs = await apiGet(page, "/api/organizations");
+		return orgs.status === 200 && Array.isArray(orgs.json);
+	} catch {
+		return false;
+	}
 }
 
 /**
- * Session probe for hosts with no browser context to read the HttpOnly
- * cookie from (PageShim): ask Claude's API from the claude.ai document.
+ * Session check that may navigate: opens claude.ai first when the page is on
+ * another origin. Used where no one is signing in, and by PageShim hosts.
  */
 export async function probeAnthropicLiveSessionOnPage(
 	page: Page,
@@ -129,54 +146,54 @@ export async function probeAnthropicLiveSessionOnPage(
 	if (!(await isOnClaude(page))) {
 		await page.goto(CLAUDE_HOME_URL, { waitUntil: "domcontentloaded" });
 	}
-	const orgs = await apiGet(page, "/api/organizations");
-	return orgs.status === 200 && Array.isArray(orgs.json);
+	return await hasClaudeSession(page);
+}
+
+export async function probeAnthropicLiveSession({
+	page,
+}: ProbeSessionArgs): Promise<boolean> {
+	return await probeAnthropicLiveSessionOnPage(page);
 }
 
 async function isOnClaude(page: Page): Promise<boolean> {
 	try {
-		return (await page.evaluate(() => location.origin)) === "https://claude.ai";
+		return (await page.evaluate(() => location.origin)) === CLAUDE_ORIGIN;
 	} catch {
 		return false;
 	}
 }
 
-async function hasSessionCookie(context: BrowserContext): Promise<boolean> {
-	const cookies = await context.cookies(`${CLAUDE_ORIGIN}/`);
-	return cookies.some(
-		(cookie) => SESSION_COOKIE.test(cookie.name) && Boolean(cookie.value),
-	);
-}
-
+/**
+ * Hand sign-in to the owner on the runtime-owned page. The readiness check
+ * only asks Claude's API from that page; it never navigates away from the
+ * sign-in form the owner is using.
+ */
 export async function ensureAnthropicLiveSession({
 	assist,
 	capture,
 	completeAssistance,
-	context,
 	page,
 	sendInteraction,
 }: Pick<
 	EnsureSessionArgs,
-	| "assist"
-	| "capture"
-	| "completeAssistance"
-	| "context"
-	| "page"
-	| "sendInteraction"
+	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
 >): Promise<void> {
-	await manualBrowserLogin({
+	if (await probeAnthropicLiveSessionOnPage(page)) return;
+	await page.goto(CLAUDE_LOGIN_URL, { waitUntil: "domcontentloaded" });
+	const ready = await manualBrowserLogin({
 		assist,
 		...(capture ? { capture } : {}),
 		completeAssistance,
 		isProbeSuccessful: (isLive: boolean) => isLive,
 		message: ANTHROPIC_LIVE_LOGIN_MESSAGE,
 		page,
-		probe: () => probeAnthropicLiveSession({ context, page }),
-		readinessProbe: () => hasSessionCookie(context),
+		probe: () => probeAnthropicLiveSessionOnPage(page),
+		readinessProbe: hasClaudeSession,
 		readinessProbeOnHandoffPage: true,
 		sendInteraction,
 		timeoutSeconds: 1800,
 	});
+	if (!ready) throw new Error("anthropic_live_session_required");
 }
 
 /**
@@ -391,33 +408,301 @@ export async function runUsageLimitsStream(
 	);
 }
 
-interface ListedConversation {
-	raw: RawConversation;
+/**
+ * A conversation's place in the list order: its update time with every
+ * fractional digit claude.ai reports, then its id to order equal times.
+ */
+interface ListKey {
+	update_time: string;
 	id: string;
-	updatedAt: string;
-	updatedAtMs: number;
+}
+
+interface ListedConversation extends ListKey {
+	raw: RawConversation;
+}
+
+/**
+ * Order two RFC 3339 instants exactly. Date.parse keeps milliseconds only;
+ * claude.ai reports microseconds. Callers pass values already parsed once.
+ */
+function compareInstants(left: string, right: string): number {
+	const a = parseIsoInstant(left);
+	const b = parseIsoInstant(right);
+	if (a === null || b === null) {
+		throw new Error("anthropic_live_unparsed_instant");
+	}
+	if (a.second !== b.second) return a.second - b.second;
+	// With trailing zeros removed, decimal fractions order as strings.
+	const fa = a.fraction.replace(TRAILING_ZEROS_RE, "");
+	const fb = b.fraction.replace(TRAILING_ZEROS_RE, "");
+	return fa < fb ? -1 : fa > fb ? 1 : 0;
+}
+
+function compareKeys(left: ListKey, right: ListKey): number {
+	const byTime = compareInstants(left.update_time, right.update_time);
+	if (byTime !== 0) return byTime;
+	return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
+/** A whole second before `instant`: earlier than it at any precision. */
+function secondBefore(instant: string): string {
+	const parsed = parseIsoInstant(instant);
+	if (parsed === null) throw new Error("anthropic_live_unparsed_instant");
+	return new Date(parsed.second - 1000).toISOString();
+}
+
+function isInstant(value: unknown): value is string {
+	return parseIsoInstant(value) !== null;
+}
+
+/** The parts of a stream's START scope that decide what a cursor covers. */
+interface ChatScope {
+	since: string | null;
+	until: string | null;
+	resources: string[] | null;
+	fields: string[] | null;
+}
+
+function chatScopeOf(scope: StreamScope | undefined): ChatScope {
+	const strings = (value: unknown): string[] | null =>
+		Array.isArray(value)
+			? value.filter((v): v is string => typeof v === "string").sort()
+			: null;
+	return {
+		since: scope?.time_range?.since ?? null,
+		until: scope?.time_range?.until ?? null,
+		resources: strings(scope?.resources),
+		fields: strings(scope?.fields),
+	};
+}
+
+/**
+ * Whether records collected under `prior` include every record `current`
+ * selects, apart from `until`, which resumeFrom handles by rewinding.
+ */
+function covers(prior: ChatScope, current: ChatScope): boolean {
+	const subset = (had: string[] | null, wants: string[] | null) =>
+		had === null || wants?.every((v) => had.includes(v)) === true;
+	return (
+		(prior.since === null ||
+			(current.since !== null &&
+				compareInstants(current.since, prior.since) >= 0)) &&
+		subset(prior.resources, current.resources) &&
+		subset(prior.fields, current.fields)
+	);
+}
+
+/**
+ * STATE of `conversations` and of `messages`, one per stream (0.2 format).
+ *
+ * - read_through: every conversation listed at or before this key was read
+ *   at that version, under `scope`, in `organization_id`.
+ * - emitted_through (messages only): every in-scope message whose latest
+ *   create/update time is at or before this instant was emitted. It moves
+ *   only when a run reads every changed conversation, because a conversation
+ *   left unread past read_through can hold messages older than it.
+ *
+ * Holds no record content and no credential.
+ */
+interface ChatCursor {
+	version: 2;
+	organization_id: string;
+	scope: ChatScope;
+	read_through: ListKey | null;
+	emitted_through?: string | null;
+}
+
+function parseCursor(value: unknown): ChatCursor | null {
+	if (!isRecord(value) || value.version !== 2) return null;
+	const { organization_id: org, scope, read_through: through } = value;
+	const emitted = value.emitted_through ?? null;
+	if (typeof org !== "string" || !isRecord(scope)) return null;
+	if (
+		through !== null &&
+		!(
+			isRecord(through) &&
+			isInstant(through.update_time) &&
+			typeof through.id === "string"
+		)
+	) {
+		return null;
+	}
+	if (emitted !== null && !isInstant(emitted)) return null;
+	const bound = (v: unknown) => (v === null ? null : isInstant(v) ? v : false);
+	const since = bound(scope.since ?? null);
+	const until = bound(scope.until ?? null);
+	if (since === false || until === false) return null;
+	const isString = (x: unknown): x is string => typeof x === "string";
+	const list = (v: unknown) =>
+		v === null || v === undefined
+			? null
+			: Array.isArray(v) && v.every(isString)
+				? v.filter(isString)
+				: false;
+	const resources = list(scope.resources);
+	const fields = list(scope.fields);
+	if (resources === false || fields === false) return null;
+	return {
+		version: 2,
+		organization_id: org,
+		scope: { since, until, resources, fields },
+		read_through:
+			through === null
+				? null
+				: { update_time: String(through.update_time), id: String(through.id) },
+		emitted_through: emitted,
+	};
+}
+
+/** One requested chat stream: its window and where this run resumes it. */
+interface StreamPlan {
+	stream: string;
+	scope: ChatScope;
+	timeRange: StreamScope["time_range"];
+	readThrough: ListKey | null;
+	emittedThrough: string | null;
+}
+
+/**
+ * Where a stream resumes. A full refresh, a 0.1 cursor, another
+ * organization or a wider selection starts over. A later `until` keeps the
+ * cursor but rewinds it to before the old `until`: records at or after it
+ * were left out, and only conversations updated since then can hold them.
+ */
+function planStream(
+	ctx: Ctx,
+	stream: string,
+	organizationId: string,
+): StreamPlan {
+	const requested = ctx.requested.get(stream);
+	const scope = chatScopeOf(requested);
+	const plan: StreamPlan = {
+		stream,
+		scope,
+		timeRange: requested?.time_range,
+		readThrough: null,
+		emittedThrough: null,
+	};
+	const prior = parseCursor(ctx.state[stream]);
+	if (
+		ctx.collectionMode === "full_refresh" ||
+		prior === null ||
+		prior.organization_id !== organizationId ||
+		!covers(prior.scope, scope)
+	) {
+		return plan;
+	}
+	plan.readThrough = prior.read_through;
+	plan.emittedThrough = prior.emitted_through ?? null;
+	const priorUntil = prior.scope.until;
+	if (
+		priorUntil !== null &&
+		(scope.until === null || compareInstants(scope.until, priorUntil) > 0)
+	) {
+		const before = secondBefore(priorUntil);
+		if (
+			plan.readThrough &&
+			compareInstants(plan.readThrough.update_time, before) > 0
+		) {
+			// "" orders before every id, so all conversations at `before` reread.
+			plan.readThrough = { update_time: before, id: "" };
+		}
+		if (
+			plan.emittedThrough &&
+			compareInstants(plan.emittedThrough, before) > 0
+		) {
+			plan.emittedThrough = before;
+		}
+	}
+	return plan;
+}
+
+/**
+ * Whether `item` can hold a record this stream has not collected: listed
+ * after its cursor, and updated at or after its `since` (a record's create
+ * time is never later than its conversation's update time).
+ */
+function needs(plan: StreamPlan, item: ListKey): boolean {
+	return (
+		(plan.readThrough === null || compareKeys(item, plan.readThrough) > 0) &&
+		(plan.scope.since === null ||
+			compareInstants(item.update_time, plan.scope.since) >= 0)
+	);
+}
+
+/** The oldest update time any conversation this stream needs can have. */
+function oldestNeeded(plan: StreamPlan): string | null {
+	const { readThrough, scope } = plan;
+	if (readThrough === null) return scope.since;
+	if (scope.since === null) return readThrough.update_time;
+	return compareInstants(readThrough.update_time, scope.since) > 0
+		? readThrough.update_time
+		: scope.since;
+}
+
+/** The oldest update time any requested stream needs; null reads it all. */
+function listFloor(plans: readonly StreamPlan[]): string | null {
+	let floor: string | null = null;
+	for (const plan of plans) {
+		const oldest = oldestNeeded(plan);
+		if (oldest === null) return null;
+		if (floor === null || compareInstants(oldest, floor) < 0) floor = oldest;
+	}
+	return floor;
+}
+
+/**
+ * Whether the stream's own window admits a record. The runtime applies the
+ * same rule; checking first keeps a record at or after `until` from reaching
+ * it, which would hold back every STATE of the run.
+ */
+function inWindow(plan: StreamPlan, record: RecordData): boolean {
+	return (
+		plan.timeRange === undefined ||
+		!isOutsideTimeRange(plan.timeRange, record.create_time)
+	);
+}
+
+function cursorOf(plan: StreamPlan, organizationId: string): ChatCursor {
+	return {
+		version: 2,
+		organization_id: organizationId,
+		scope: plan.scope,
+		read_through: plan.readThrough,
+		...(plan.stream === MESSAGES_STREAM
+			? { emitted_through: plan.emittedThrough }
+			: {}),
+	};
+}
+
+/** A run stops on it with a stream failure and keeps its cursor. */
+class ChatCollectionFailure extends Error {
+	readonly retryable: boolean;
+	constructor(message: string, retryable: boolean) {
+		super(message);
+		this.retryable = retryable;
+	}
 }
 
 function listed(raw: unknown): ListedConversation | null {
 	if (!isRecord(raw)) return null;
 	const { uuid, updated_at: updatedAt } = raw;
-	if (typeof uuid !== "string" || typeof updatedAt !== "string") return null;
-	const updatedAtMs = Date.parse(updatedAt);
-	if (!Number.isFinite(updatedAtMs)) return null;
-	return { raw, id: uuid, updatedAt, updatedAtMs };
+	if (typeof uuid !== "string" || !uuid || !isInstant(updatedAt)) return null;
+	return { raw, id: uuid, update_time: updatedAt };
 }
 
 /**
- * Page the conversation list (newest change first) down to `floorMs` and
- * return the conversations changed after it, oldest change first. Throws on
- * any unreadable page: a partial list must not advance the cursor.
+ * Page the conversation list (newest change first) until a page reaches a
+ * conversation updated before `oldest`, or the end. Every entry must be
+ * readable: one that cannot be placed in the order could sit behind the
+ * cursor. Running out of pages first is a failure, never a shorter list.
  */
-async function listChangedConversations(
+async function listConversations(
 	ctx: Ctx,
 	orgPath: string,
-	floorMs: number,
+	oldest: string | null,
 ): Promise<ListedConversation[]> {
-	const changed: ListedConversation[] = [];
+	const byId = new Map<string, ListedConversation>();
 	for (let pageIndex = 0; pageIndex < MAX_LIST_PAGES; pageIndex++) {
 		const offset = pageIndex * LIST_PAGE_SIZE;
 		const res = await apiGet(
@@ -430,177 +715,225 @@ async function listChangedConversations(
 		if (res.status !== 200 || !Array.isArray(res.json)) {
 			throw new Error(`anthropic_live_list_failed: http ${res.status}`);
 		}
-		const items = res.json
-			.map(listed)
-			.filter((item): item is ListedConversation => item !== null);
-		const fresh = items.filter((item) => item.updatedAtMs > floorMs);
-		changed.push(...fresh);
-		if (
-			res.json.length < LIST_PAGE_SIZE ||
-			fresh.length < items.length ||
-			items.length === 0
-		) {
-			break;
+		const items = res.json.map(listed);
+		if (items.some((item) => item === null)) {
+			throw new ChatCollectionFailure(
+				`Claude's conversation list had an entry without a readable id or update time at offset ${offset}; nothing was checkpointed past it.`,
+				true,
+			);
+		}
+		let reachedOldest = false;
+		for (const item of items) {
+			if (item === null) continue;
+			// The list can shift between pages while the owner is chatting.
+			const seen = byId.get(item.id);
+			if (!seen || compareKeys(item, seen) > 0) byId.set(item.id, item);
+			if (oldest !== null && compareInstants(item.update_time, oldest) < 0) {
+				reachedOldest = true;
+			}
+		}
+		if (res.json.length < LIST_PAGE_SIZE || reachedOldest) {
+			return [...byId.values()];
 		}
 	}
-	// The list can shift between pages while the owner is chatting.
-	const unique = new Map(changed.map((item) => [item.id, item]));
-	return [...unique.values()].sort((a, b) => a.updatedAtMs - b.updatedAtMs);
+	throw new ChatCollectionFailure(
+		`Claude's conversation list is longer than ${MAX_LIST_PAGES * LIST_PAGE_SIZE} entries; older conversations were not read and nothing was checkpointed.`,
+		false,
+	);
 }
 
-function messageRecords(
-	detail: Record<string, unknown>,
-	item: ListedConversation,
-	emittedBeforeMs: number,
-): { records: RecordData[]; total: number } {
-	const raw = Array.isArray(detail.chat_messages)
-		? detail.chat_messages.filter(isRecord)
-		: [];
-	const model =
-		typeof detail.model === "string" && detail.model
-			? detail.model
-			: typeof item.raw.model === "string" && item.raw.model
-				? item.raw.model
-				: null;
-	const records = (raw as RawMessage[])
-		.filter((message) => messageChangedAtMs(message) > emittedBeforeMs)
-		.sort(
-			(a, b) =>
-				(Date.parse(String(a.created_at)) || 0) -
-				(Date.parse(String(b.created_at)) || 0),
-		)
-		.map((message) => buildMessageRecord(message, item.id, model))
-		.filter((record): record is RecordData => record !== null);
-	return { records, total: raw.length };
+interface ParsedMessage {
+	raw: RawMessage;
+	id: string;
+	createdAt: string;
+	/** The later of created_at and updated_at. */
+	changedAt: string;
+}
+
+interface ConversationDetail {
+	model: string | null;
+	messages: ParsedMessage[];
 }
 
 /**
- * conversations + messages. The cursor is `update_time`, the `updated_at` of
- * the last conversation fully read, with the `since` bound it was built under; `messages` checkpoints through it
- * (manifest `state_stream`). On an incremental run only messages newer than
- * the prior cursor are emitted, so a message keeps the model it was first
- * collected with.
+ * The detail's messages, or null when the body is not a conversation with a
+ * readable `chat_messages` array of messages with an id and a create time.
+ * An empty array is a readable, empty conversation.
+ */
+function readDetail(
+	json: unknown,
+	item: ListedConversation,
+): ConversationDetail | null {
+	if (!isRecord(json) || !Array.isArray(json.chat_messages)) return null;
+	const messages: ParsedMessage[] = [];
+	for (const raw of json.chat_messages) {
+		if (!isRecord(raw)) return null;
+		const { uuid, created_at: created, updated_at: updated } = raw;
+		if (typeof uuid !== "string" || !uuid || !isInstant(created)) return null;
+		if (updated !== undefined && updated !== null && !isInstant(updated)) {
+			return null;
+		}
+		const changedAt =
+			isInstant(updated) && compareInstants(updated, created) > 0
+				? updated
+				: created;
+		messages.push({ raw, id: uuid, createdAt: created, changedAt });
+	}
+	messages.sort(
+		(a, b) =>
+			compareInstants(a.createdAt, b.createdAt) ||
+			(a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+	);
+	const model =
+		typeof json.model === "string" && json.model
+			? json.model
+			: typeof item.raw.model === "string" && item.raw.model
+				? item.raw.model
+				: null;
+	return { model, messages };
+}
+
+/**
+ * conversations + messages, each with its own cursor (see ChatCursor). One
+ * list read serves both. Conversations are read oldest change first, at most
+ * MAX_CONVERSATIONS_PER_RUN per run, and each stream's cursor moves past a
+ * conversation only after it was read. A changed conversation emits only the
+ * messages changed after `emitted_through`, so a message keeps the model it
+ * was first collected with unless a selection change makes the run reread it.
  */
 export async function runConversationStreams(
 	ctx: Ctx,
+	organizationId: string,
 	orgPath: string,
 ): Promise<void> {
-	const wantsConversations = ctx.requested.has(CONVERSATIONS_STREAM);
-	const wantsMessages = ctx.requested.has(MESSAGES_STREAM);
-	const streams = [
-		...(wantsConversations ? [CONVERSATIONS_STREAM] : []),
-		...(wantsMessages ? [MESSAGES_STREAM] : []),
-	];
-	const since =
-		ctx.requested.get(CONVERSATIONS_STREAM)?.time_range?.since ??
-		ctx.requested.get(MESSAGES_STREAM)?.time_range?.since ??
-		null;
-	const sinceMs = since ? Date.parse(since) || 0 : 0;
-	const prior = ctx.state[CONVERSATIONS_STREAM] as
-		| { update_time?: unknown; since?: unknown }
-		| undefined;
-	// The cursor only covers history from the window it was built under. A
-	// window that now starts earlier (or has no start) is read again from its
-	// own start.
-	const priorSince = typeof prior?.since === "string" ? prior.since : null;
-	const widened =
-		priorSince !== null &&
-		(since === null || sinceMs < (Date.parse(priorSince) || 0));
-	const priorCursor =
-		ctx.collectionMode !== "full_refresh" &&
-		!widened &&
-		typeof prior?.update_time === "string"
-			? prior.update_time
-			: null;
-	const cursorMs = priorCursor ? Date.parse(priorCursor) || 0 : 0;
+	const plans = [CONVERSATIONS_STREAM, MESSAGES_STREAM]
+		.filter((stream) => ctx.requested.has(stream))
+		.map((stream) => planStream(ctx, stream, organizationId));
+	const conversations = plans.find((p) => p.stream === CONVERSATIONS_STREAM);
+	const messages = plans.find((p) => p.stream === MESSAGES_STREAM);
+	const saveState = async () => {
+		for (const plan of plans) {
+			await ctx.emit({
+				type: "STATE",
+				stream: plan.stream,
+				cursor: { ...cursorOf(plan, organizationId) },
+			});
+		}
+	};
 
 	await ctx.progress("Listing conversations", {
-		stream: wantsConversations ? CONVERSATIONS_STREAM : MESSAGES_STREAM,
+		stream: plans[0]?.stream ?? CONVERSATIONS_STREAM,
 	});
-	const changed = await listChangedConversations(
-		ctx,
-		orgPath,
-		Math.max(cursorMs, sinceMs),
-	);
-	// A full refresh ignores the cursor, so a cap would re-read the same
-	// oldest conversations on every run.
-	const batch =
-		ctx.collectionMode === "full_refresh"
-			? changed
-			: changed.slice(0, MAX_CONVERSATIONS_PER_RUN);
-	let cursor = priorCursor;
-	let failure: { message: string; retryable: boolean } | null = null;
+	let changed: ListedConversation[] = [];
+	let batch: ListedConversation[] = [];
+	try {
+		const listedItems = await listConversations(ctx, orgPath, listFloor(plans));
+		changed = listedItems
+			.filter((item) => plans.some((plan) => needs(plan, item)))
+			.sort(compareKeys);
+		// A full refresh ignores the cursor, so a cap would re-read the same
+		// oldest conversations on every run.
+		batch =
+			ctx.collectionMode === "full_refresh"
+				? changed
+				: changed.slice(0, MAX_CONVERSATIONS_PER_RUN);
 
-	for (const [index, item] of batch.entries()) {
-		let messageCount: number | null = null;
-		let messages: RecordData[] = [];
-		if (wantsMessages) {
-			if (index > 0) await politeDelay(detailDelayMs());
-			await ctx.progress(
-				`Reading conversation ${index + 1} of ${batch.length}`,
-				{ stream: MESSAGES_STREAM },
-			);
-			const res = await apiGet(
-				ctx.page,
-				`${orgPath}/chat_conversations/${item.id}?${DETAIL_QUERY}`,
-			);
-			if (res.status === 401 || res.status === 403) {
-				throw new AuthError(res.status);
+		for (const [index, item] of batch.entries()) {
+			let detail: ConversationDetail | null = null;
+			let deleted = false;
+			if (messages) {
+				if (index > 0) await politeDelay(detailDelayMs());
+				await ctx.progress(
+					`Reading conversation ${index + 1} of ${batch.length}`,
+					{ stream: MESSAGES_STREAM },
+				);
+				const res = await apiGet(
+					ctx.page,
+					`${orgPath}/chat_conversations/${item.id}?${DETAIL_QUERY}`,
+				);
+				if (res.status === 401 || res.status === 403) {
+					throw new AuthError(res.status);
+				}
+				// Deleted between the list and the detail read: nothing to collect.
+				deleted = res.status === 404;
+				if (!deleted && res.status !== 200) {
+					throw new ChatCollectionFailure(
+						`Claude conversation read failed with http ${res.status} after ${index} of ${batch.length}; the next run resumes there.`,
+						isRetryableStatus(res.status),
+					);
+				}
+				if (!deleted) {
+					detail = readDetail(res.json, item);
+					if (detail === null) {
+						throw new ChatCollectionFailure(
+							`Claude conversation ${index + 1} of ${batch.length} came back without readable messages; the next run resumes there.`,
+							true,
+						);
+					}
+				}
 			}
-			// Deleted between the list and the detail read: nothing to collect.
-			if (res.status === 404) continue;
-			if (res.status !== 200 || !isRecord(res.json)) {
-				failure = {
-					message: `Claude conversation read failed with http ${res.status} after ${index} of ${batch.length}; the next run resumes there.`,
-					retryable: res.status === 200 || isRetryableStatus(res.status),
-				};
-				break;
+			if (!deleted && conversations && needs(conversations, item)) {
+				const record = buildConversationRecord(
+					item.raw,
+					detail ? detail.messages.length : null,
+				);
+				if (record && inWindow(conversations, record)) {
+					await ctx.emitRecord(CONVERSATIONS_STREAM, record);
+				}
 			}
-			const built = messageRecords(res.json, item, cursorMs);
-			messageCount = built.total;
-			messages = built.records;
+			if (detail && messages && needs(messages, item)) {
+				const { emittedThrough } = messages;
+				for (const message of detail.messages) {
+					if (
+						emittedThrough !== null &&
+						compareInstants(message.changedAt, emittedThrough) <= 0
+					) {
+						continue;
+					}
+					const record = buildMessageRecord(message.raw, item.id, detail.model);
+					if (record && inWindow(messages, record)) {
+						await ctx.emitRecord(MESSAGES_STREAM, record);
+					}
+				}
+			}
+			// Every changed conversation up to this one has now been read.
+			for (const plan of plans) {
+				if (
+					plan.readThrough === null ||
+					compareKeys(item, plan.readThrough) > 0
+				) {
+					plan.readThrough = { update_time: item.update_time, id: item.id };
+				}
+			}
+			await saveState();
 		}
-		if (wantsConversations) {
-			const record = buildConversationRecord(item.raw, messageCount);
-			if (record) await ctx.emitRecord(CONVERSATIONS_STREAM, record);
-		}
-		for (const message of messages) {
-			await ctx.emitRecord(MESSAGES_STREAM, message);
-		}
-		cursor = item.updatedAt;
-		await ctx.emit({
-			type: "STATE",
-			stream: CONVERSATIONS_STREAM,
-			cursor: { update_time: cursor, since },
-		});
-	}
-
-	if (failure) {
-		for (const stream of streams) {
-			await ctx.reportStreamFailure?.(stream, failure.message, {
-				retryable: failure.retryable,
+	} catch (error) {
+		if (!(error instanceof ChatCollectionFailure)) throw error;
+		for (const plan of plans) {
+			await ctx.reportStreamFailure?.(plan.stream, error.message, {
+				retryable: error.retryable,
 			});
 		}
 		return;
 	}
+
 	if (changed.length > batch.length) {
-		for (const stream of streams) {
+		for (const plan of plans) {
 			await skip(
 				ctx,
-				stream,
+				plan.stream,
 				"anthropic_live_backlog_deferred",
 				`Read ${batch.length} of ${changed.length} changed conversations; the rest remain for the next run.`,
 				true,
 			);
 		}
+	} else if (messages) {
+		// Every changed conversation was read: no message at or before the
+		// newest one read is left unemitted.
+		messages.emittedThrough =
+			messages.readThrough?.update_time ?? messages.emittedThrough;
 	}
-	if (batch.length === 0) {
-		await ctx.emit({
-			type: "STATE",
-			stream: CONVERSATIONS_STREAM,
-			cursor: { update_time: cursor, since },
-		});
-	}
+	await saveState();
 }
 
 export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
@@ -640,7 +973,7 @@ export async function collectAnthropicLive(ctx: Ctx): Promise<void> {
 		await runUsageLimitsStream(ctx, orgPath);
 	}
 	if (requested.has(CONVERSATIONS_STREAM) || requested.has(MESSAGES_STREAM)) {
-		await runConversationStreams(ctx, orgPath);
+		await runConversationStreams(ctx, String(org.uuid), orgPath);
 	}
 }
 
