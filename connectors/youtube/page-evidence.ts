@@ -40,9 +40,11 @@ export interface ListEnd {
 }
 
 /**
- * True only after the page showed a positive terminal signal: a continuation
- * renderer was observed and then removed, or the page showed an explicit end
- * marker. Missing controls, totals, timeouts and row growth are not evidence.
+ * True only when the source proves exhaustion: a verified empty list has no
+ * rows, a readable list has no data or DOM continuation and all source entries
+ * were read, a followed continuation disappeared, or the page showed an
+ * explicit end marker. Missing controls, mismatched totals and row growth
+ * alone are not evidence.
  */
 export function enumerationEnded(
 	end: ListEnd | null | undefined,
@@ -52,7 +54,18 @@ export function enumerationEnded(
 	if (!end) return false;
 	if (end.domItemCount !== null && end.domItemCount > renderedCount)
 		return false;
+	if (end.declaredTotal !== null && end.declaredTotal !== renderedCount)
+		return false;
 	if (end.domHasContinuation) return false;
+	if (end.verifiedEmpty) return renderedCount === 0;
+	if (
+		end.dataReadable &&
+		!end.dataHasContinuation &&
+		!end.domHasContinuation &&
+		end.dataItemCount > 0 &&
+		renderedCount >= end.dataItemCount
+	)
+		return true;
 	return end.domHasEndMarker || continuationFollowed;
 }
 

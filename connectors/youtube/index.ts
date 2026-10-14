@@ -613,9 +613,11 @@ async function readVideoList(
 				? "youtube-watch-history-after-scroll"
 				: "youtube-playlist-items-after-scroll",
 	);
+	const evidenceReadCount =
+		mode === "history" ? Math.min(out.length, HISTORY_LIMIT) : renderedCount;
 	const evidence = exhaustionEvidence(
 		pageEnd,
-		renderedCount,
+		evidenceReadCount,
 		continuationRemoved && !discardedRows,
 	);
 	return {

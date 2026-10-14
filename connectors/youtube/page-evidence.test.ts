@@ -37,8 +37,25 @@ test("enumeration ends only on positive page terminal evidence", () => {
 	assert.equal(ended({ declaredTotal: 9 }, 3), false, "total not reached");
 	assert.equal(
 		ended({ dataReadable: true, dataItemCount: 3 }, 3),
+		true,
+		"a complete readable source list with no continuation is terminal",
+	);
+	assert.equal(
+		ended(
+			{
+				dataReadable: true,
+				dataItemCount: 3,
+				domHasContinuation: true,
+			},
+			3,
+		),
 		false,
-		"absence of a next page at load is not a terminal response",
+		"a rendered continuation still means another page may exist",
+	);
+	assert.equal(
+		ended({ dataItemCount: 3 }, 3),
+		false,
+		"unreadable source data cannot prove the end",
 	);
 	assert.equal(
 		ended({ dataReadable: true, domHasContinuation: true }, 3),
@@ -93,6 +110,11 @@ test("enumeration ends only on positive page terminal evidence", () => {
 		ended({ dataReadable: true, dataItemCount: 3 }, 1),
 		false,
 		"source entries were left unread",
+	);
+	assert.equal(
+		ended({ verifiedEmpty: true }, 0),
+		true,
+		"verified empty source data is terminal when no rows were read",
 	);
 	assert.equal(
 		ended({ declaredTotal: 3, dataReadable: true, dataItemCount: 1 }, 1),

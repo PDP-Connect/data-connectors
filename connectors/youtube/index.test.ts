@@ -104,7 +104,7 @@ class FixturePage {
 			return {
 				dataReadable: !empty,
 				dataItemCount: empty ? 0 : 1,
-				dataHasContinuation: false,
+				dataHasContinuation: !empty,
 				domHasContinuation: false,
 				declaredTotal: null,
 				domItemCount: null,
@@ -996,12 +996,12 @@ test("finding 1: a matching source total without a terminal marker still fails",
 	assert.deepEqual(outcome("watch_later"), ["stream_collection_failed"]);
 });
 
-test("finding 1: no next-page token at load does not prove completion", async () => {
+test("finding 1: source entries left unread do not prove completion without a next-page token", async () => {
 	const pages = (url: string) =>
 		url.includes("feed/history")
-			? `${historyRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }] } }))}`
+			? `${historyRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }, { lockupViewModel: { contentId: "bbbbbbbbbbb" } }] } }))}`
 			: url.includes("feed/channels")
-				? `${channelRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ channelRenderer: { channelId: "UC1" } }] } }))}`
+				? `${channelRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ channelRenderer: { channelId: "UC1" } }, { channelRenderer: { channelId: "UC2" } }] } }))}`
 				: "";
 	const { records, outcome } = await collectFromDocuments(pages, [
 		"watch_history",
@@ -1057,6 +1057,7 @@ test("finding 1: a list with a next page still pending fails with stream_collect
 });
 
 test("finding 1: reading to the history limit is a cap that fails the stream, not the end of the list", async () => {
+	const sourceItems = Array.from({ length: 60 }, () => ({ lockupViewModel: {} }));
 	const rows = Array.from(
 		{ length: 60 },
 		(_, n) =>
@@ -1064,7 +1065,7 @@ test("finding 1: reading to the history limit is a cap that fails the stream, no
 	).join("");
 	const { records, messages, outcome } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: {} }] } }))}`,
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
