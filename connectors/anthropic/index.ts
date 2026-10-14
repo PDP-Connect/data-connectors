@@ -2625,11 +2625,17 @@ export async function collectAnthropic({
 		};
 		const conversationsManifestBoundary = categoryBoundary("conversations");
 		const projectsManifestBoundary = categoryBoundary("projects");
-		const partitionsContiguous = [
+		// Observed in parsers.ts and __fixtures__/split-export/manifest.json:
+		// these categories have no declared stream, but their parts still
+		// require the same archive accounting as consumed categories.
+		const knownUnconsumedCategories = new Set(["memories", "design_chats"]);
+		const accountedCategories = [
 			"conversations",
 			"projects",
 			"light_metadata",
-		].every(
+			...knownUnconsumedCategories,
+		];
+		const partitionsContiguous = accountedCategories.every(
 			(category) =>
 				!dataFiles.some((part) => part.category === category) ||
 				categoryBoundary(category),
@@ -2657,9 +2663,10 @@ export async function collectAnthropic({
 			results.every(
 				(result) =>
 					result.completeJsonBoundary === true &&
-					["conversations", "projects", "light_metadata"].includes(
-						result.category,
-					),
+					accountedCategories.includes(result.category) &&
+					// safeJsonParse returns null when an extra entry is unreadable.
+					(!knownUnconsumedCategories.has(result.category) ||
+						result.entries.every((entry) => entry.json !== null)),
 			);
 		completeMessages &&= conversationsManifestBoundary;
 		conversationsExact &&= conversationsManifestBoundary;
@@ -2807,14 +2814,17 @@ export async function collectAnthropic({
 			return;
 		}
 
+		const unaccountedCategories = [...outOfScopeByCategory.keys()].some(
+			(category) => !knownUnconsumedCategories.has(category),
+		);
 		if (
 			!conversationsSourceFound ||
 			unclassified.length > 0 ||
-			outOfScopeByCategory.size > 0
+			unaccountedCategories
 		) {
 			completeMessages = false;
 		}
-		if (unclassified.length > 0 || outOfScopeByCategory.size > 0) {
+		if (unclassified.length > 0 || unaccountedCategories) {
 			archiveComplete = false;
 		}
 		conversationsBoundary =

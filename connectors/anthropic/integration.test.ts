@@ -3797,3 +3797,148 @@ test("manifest category boundary: global part numbering fails closed without an 
 		]),
 	);
 });
+
+// Known unconsumed categories use the observed, sanitized split-export shapes.
+const KNOWN_EXTRA_PARTS = ["memories", "design_chats"].map((category) => ({
+	category,
+	part: 0,
+	entries: listFilesRecursive(join(SPLIT_EXPORT_DIR, `${category}-000`)).map(
+		(name) => ({
+			name,
+			content: JSON.parse(
+				readFileSync(join(SPLIT_EXPORT_DIR, `${category}-000`, name), "utf8"),
+			),
+		}),
+	),
+}));
+const EMPTY_PROJECTS_PART = {
+	category: "projects",
+	part: 0,
+	entries: [{ name: "projects.json", content: [] }],
+};
+const COMPLETION_BASE_PARTS = [
+	conversationsPart(),
+	EMPTY_PROJECTS_PART,
+	{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+];
+
+test("manifest known extras: memories and design_chats coexist with proven empty projects and documents", async () => {
+	const run = await runPartitions([
+		...COMPLETION_BASE_PARTS,
+		...KNOWN_EXTRA_PARTS,
+	]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
+	assertSelfMapped(run, "projects", 0);
+	assertSelfMapped(run, "project_documents", 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assert.equal(run.recordsOf("account_profile").length, 1);
+});
+
+test("manifest known extras: an unknown category still withholds every proof", async () => {
+	const run = await runPartitions([
+		...COMPLETION_BASE_PARTS,
+		...KNOWN_EXTRA_PARTS,
+		{
+			category: "future_category",
+			part: 0,
+			entries: [{ name: "future.json", content: [] }],
+		},
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assertNoProofs(run);
+});
+
+for (const extra of KNOWN_EXTRA_PARTS) {
+	test(`manifest known extras: ${extra.category} alone keeps proofs when the other extra is absent`, async () => {
+		const run = await runPartitions([...COMPLETION_BASE_PARTS, extra]);
+		assertSelfMapped(run, "conversations", 1);
+		assertSelfMapped(run, "projects", 0);
+		assertSelfMapped(run, "project_documents", 0);
+	});
+	test(`manifest known extras: contiguous ${extra.category} parts from zero keep proofs`, async () => {
+		const run = await runPartitions([
+			...COMPLETION_BASE_PARTS,
+			extra,
+			{ ...extra, part: 1 },
+		]);
+		assertSelfMapped(run, "conversations", 1);
+		assertSelfMapped(run, "projects", 0);
+		assertSelfMapped(run, "project_documents", 0);
+	});
+	for (const [label, parts] of [
+		["missing zero", [1]],
+		["gap", [0, 2]],
+		["duplicate", [0, 0]],
+	] as const) {
+		test(`manifest known extras: ${extra.category} ${label} withholds every proof`, async () => {
+			const run = await runPartitions([
+				...COMPLETION_BASE_PARTS,
+				...parts.map((part) => ({ ...extra, part })),
+			]);
+			assert.equal(run.recordsOf("conversations").length, 1);
+			assertNoProofs(run);
+		});
+	}
+	test(`manifest known extras: unreadable ${extra.category} JSON withholds every proof`, async () => {
+		const { deflateRawSync } = await import("node:zlib");
+		const name = `${extra.category}/invalid.json`;
+		const invalidZip = await buildManifestPartZip([{ name, content: null }]);
+		// "null" and "nope" have the same compressed and uncompressed lengths.
+		// Replace only the entry payload, retaining an intact ZIP directory.
+		const invalidJson = deflateRawSync(Buffer.from("nope"));
+		assert.equal(
+			invalidJson.length,
+			deflateRawSync(Buffer.from("null")).length,
+		);
+		invalidZip.set(invalidJson, 30 + Buffer.byteLength(name));
+		const parts = [...COMPLETION_BASE_PARTS, extra];
+		const context = makeContext({
+			streams: ALL_PLUS_MESSAGES,
+			fetchStub: manifestFetchStub(
+				parts.map((part, index) => ({
+					category: part.category,
+					part: part.part,
+					token: `invalid-json-${index}`,
+				})),
+			),
+		});
+		const zips = await Promise.all(
+			COMPLETION_BASE_PARTS.map((part) => buildManifestPartZip(part.entries)),
+		);
+		const runtime = makeEmitRecord({
+			requested: context.ctx.requested,
+			emit: context.ctx.emit,
+			emittedAt: context.ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+		});
+		context.ctx.emitRecord = runtime.emit;
+		context.ctx.isRecordSelected = runtime.isSelected;
+		serveDownloads(
+			context.page,
+			new Map([
+				...zips.map((zip, index): [string, Buffer] => [
+					`invalid-json-${index}`,
+					zip,
+				]),
+				[`invalid-json-${zips.length}`, invalidZip],
+			]),
+		);
+		await collectAnthropic(context.ctx);
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) =>
+					message.type === "RECORD" && message.stream === "conversations",
+			).length,
+			1,
+		);
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) => message.type === "DETAIL_COVERAGE",
+			).length,
+			0,
+		);
+	});
+}
