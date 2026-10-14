@@ -642,3 +642,103 @@ test("output never carries item, key, cursor or caller-string content", () => {
 	assert.equal(bd.pagesRead, 0);
 	assert.equal(bd.rule, undefined);
 });
+
+// Regressions from the independent review of f095c05. Each fixture is valid
+// except for one cross-field contradiction.
+
+test("declared_total does not bypass the epoch check", () => {
+	// 15 rows from one filter/source epoch and 15 from another can sum to the
+	// declared total without the total covering either epoch.
+	check(
+		"full_inventory",
+		read({
+			traversal: { epochChanges: 1 },
+			stop: end({
+				rule: "declared_total",
+				declaredTotal: 30,
+				continuationVisible: false,
+			}),
+		}),
+		"unproven",
+		"epoch_changed",
+	);
+});
+
+test("end facts that contradict the cumulative counts or the page count are unproven", () => {
+	// The last page cannot have parsed more rows than the whole walk read.
+	check(
+		"full_inventory",
+		read({ accounting: { rawItems: 0, distinctKeys: 0 } }),
+		"unproven",
+		"count_mismatch",
+	);
+	check(
+		"full_inventory",
+		read({
+			accounting: { rawItems: 9, distinctKeys: 9 },
+			stop: end({ ...(TERMINAL as object), pageRowsSeen: 10 } as EndFacts),
+		}),
+		"unproven",
+		"count_mismatch",
+	);
+	// One page cannot attest three consecutive old pages.
+	check(
+		"checkpoint_window",
+		read({
+			requested: "window",
+			traversal: { ordering: "stable_order", pagesRead: 1 },
+			stop: end({
+				rule: "window_boundary",
+				intervalBounded: true,
+				ordering: "stable_order",
+				oldPagesInARow: 3,
+				required: 3,
+			}),
+		}),
+		"unproven",
+		"count_mismatch",
+	);
+});
+
+test("only own keys on plain objects count; inherited, hidden and symbol keys are rejected", () => {
+	const proto = (inherited: object, own: object): object =>
+		Object.assign(Object.create(inherited), own);
+	const valid = read();
+	const cases: unknown[] = [
+		// required `kind` inherited, unknown own key takes its place in the count
+		{ ...valid, stop: proto({ kind: "end" }, { end: TERMINAL, extra: true }) },
+		// required `kind` only inherited
+		{ ...valid, stop: proto({ kind: "end" }, { end: TERMINAL }) },
+		// unknown own key that is not enumerable
+		{
+			...valid,
+			stop: Object.defineProperty({ kind: "end", end: TERMINAL }, "hidden", {
+				value: 1,
+				enumerable: false,
+			}),
+		},
+		// unknown symbol-keyed own property
+		{ ...valid, stop: { kind: "end", end: TERMINAL, [Symbol("x")]: 1 } },
+		// non-plain prototypes at each level
+		{
+			...valid,
+			stop: new (class Stop {
+				kind = "end";
+				end = TERMINAL;
+			})(),
+		},
+		{ ...valid, traversal: proto({}, valid.traversal) },
+		{ ...valid, accounting: proto({}, valid.accounting) },
+		{ ...valid, stop: { kind: "end", end: proto({}, TERMINAL) } },
+		proto({}, valid),
+	];
+	for (const input of cases) {
+		check("full_inventory", asRead(input), "unproven", "invalid_facts");
+	}
+	// counter-example: a null-prototype object with exactly the own keys is fine
+	const plain = Object.assign(Object.create(null), {
+		kind: "end",
+		end: TERMINAL,
+	});
+	check("full_inventory", read({ stop: plain }), "complete");
+});

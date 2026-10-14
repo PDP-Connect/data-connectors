@@ -196,16 +196,26 @@ const partial = (reason: Reason, resumable?: boolean): Verdict =>
 		? { outcome: "partial", reason }
 		: { outcome: "partial", reason, resumable };
 
+/** A plain data object: `Object.prototype` or `null` as prototype, not an array. */
 function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return false;
+	}
+	const proto: unknown = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
 }
 
 function hasExactKeys(
 	value: Record<string, unknown>,
 	keys: readonly string[],
 ): boolean {
-	const actual = Object.keys(value);
-	return actual.length === keys.length && keys.every((key) => key in value);
+	// Own keys only, including non-enumerable and symbol keys, so an inherited
+	// required key cannot stand in for a missing own one.
+	const actual = Reflect.ownKeys(value);
+	return (
+		actual.length === keys.length &&
+		keys.every((key) => Object.hasOwn(value, key))
+	);
 }
 
 function isCount(value: unknown): value is number {
@@ -481,7 +491,11 @@ function countProblem(end: EndFacts, a: ReadAccounting): Reason | null {
 		case "declared_total":
 			return end.declaredTotal === a.distinctKeys ? null : "count_mismatch";
 		case "provider_terminal":
-			return end.pageRowsParsed === end.pageRowsSeen ? null : "parse_mismatch";
+			if (end.pageRowsParsed !== end.pageRowsSeen) {
+				return "parse_mismatch";
+			}
+			// The last page cannot have held more rows than the whole walk read.
+			return end.pageRowsSeen <= a.rawItems ? null : "count_mismatch";
 		case "continuation_consumed":
 		case "source_end_marker":
 			return end.renderedAtEnd === a.distinctKeys &&
@@ -496,7 +510,15 @@ function countProblem(end: EndFacts, a: ReadAccounting): Reason | null {
 	}
 }
 
-/** The contiguous-traversal obligation. Not required by count-only rules. */
+/** Rows from different source/filter/order epochs are never one inventory. */
+function epochProblem(t: Traversal): Reason | null {
+	return t.epochChanges > 0 ? "epoch_changed" : null;
+}
+
+/**
+ * The contiguous-traversal obligation. `declared_total` is exempt from it
+ * (its count proof stands alone) but not from `epochProblem`.
+ */
 function chainProblem(t: Traversal): Reason | null {
 	if (t.pagesRead < 1) {
 		return "invalid_facts";
@@ -510,7 +532,7 @@ function chainProblem(t: Traversal): Reason | null {
 	if (t.pagesSkippedUnaccounted > 0 || t.synthesizedSuccessors > 0) {
 		return "chain_unproven";
 	}
-	return t.epochChanges > 0 ? "epoch_changed" : null;
+	return epochProblem(t);
 }
 
 function settleEnd(
@@ -534,6 +556,10 @@ function settleEnd(
 		) {
 			return unproven("ordering_unguaranteed");
 		}
+		// One page cannot attest several consecutive old pages.
+		if (end.oldPagesInARow > p.traversal.pagesRead) {
+			return unproven("count_mismatch");
+		}
 		if (claim === "full_inventory") {
 			return partial("window_only");
 		}
@@ -556,11 +582,12 @@ function settleEnd(
 		}
 		return unproven("scope_mismatch");
 	}
-	if (end.rule !== "declared_total") {
-		const broken = chainProblem(p.traversal);
-		if (broken) {
-			return unproven(broken);
-		}
+	const broken =
+		end.rule === "declared_total"
+			? epochProblem(p.traversal)
+			: chainProblem(p.traversal);
+	if (broken) {
+		return unproven(broken);
 	}
 	if (p.accounting.unaccountedItems > 0) {
 		return unproven("rows_unaccounted");
