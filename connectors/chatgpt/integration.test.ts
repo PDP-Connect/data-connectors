@@ -2855,6 +2855,50 @@ test("processConversationDetail: a repeat detail in the same run keeps loss acco
 	assert.notEqual(conversations[1]?.data.current_node, null);
 });
 
+test("processConversationDetail: a branch whose parent chain dangles emits a DETAIL_GAP and is not complete", async () => {
+	const { deps, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a1" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a1",
+				mapping: { a1: userNode("missing-earlier-turn", [], "last", "assistant") },
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	const gaps = detailGaps(messages);
+	assert.equal(gaps.length, 1);
+	assert.equal(
+		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		"branch_structurally_incomplete",
+	);
+	assert.deepEqual(outcome, {
+		complete: false,
+		reason: "branch_structurally_incomplete",
+	});
+});
+
+test("processConversationDetail: a declared current_node absent from the mapping emits a DETAIL_GAP and is not complete", async () => {
+	const { deps, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "tip-never-received" }),
+		{
+			status: 200,
+			json: {
+				current_node: "tip-never-received",
+				mapping: { a0: userNode(null, [], "first") },
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	assert.equal(detailGaps(messages).length, 1);
+	assert.equal(outcome.complete, false);
+});
+
 test("processConversationDetail: a clean detail emits no gap and is complete", async () => {
 	const { deps, messages } = makeHarness();
 	const outcome = await processConversationDetail(

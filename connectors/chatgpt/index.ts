@@ -2639,21 +2639,21 @@ export async function runAccountPlanStream(
  * counting on-branch messages matched the declared count for 5,815 exactly and
  * NEVER exceeded it, so equality is the right contract and a shortfall is real.
  *
- * Emitted as a record-level PROGRESS diagnostic, the same as `empty_detail`.
- * It is not a DETAIL_GAP: the fetch SUCCEEDED and the conversation is genuinely
- * hydrated. Re-fetching returns the same truncated graph, so a retryable gap
- * would spin forever. It is not a SKIP_RESULT either: a stream-level skip tells
- * the host the whole `messages` stream is unavailable, and Desktop then drops
- * every message of the run because of one conversation. The honest report is
- * "we reached it, and what it gave us is internally inconsistent".
+ * Each finding is reported as a record-level diagnostic, the same as
+ * `empty_detail`, and returns true so the caller records a durable
+ * `branch_structurally_incomplete` DETAIL_GAP: a successful fetch of a graph
+ * that declares missing earlier history is not a hydrated conversation. It is
+ * not a SKIP_RESULT: a stream-level skip tells the host the whole `messages`
+ * stream is unavailable, and Desktop then drops every message of the run
+ * because of one conversation.
  */
 async function emitBranchReconciliation(
 	mapping: Record<string, ChatGptNode>,
 	currentNode: string | null | undefined,
 	emittedBranchCount: number,
-): Promise<void> {
+): Promise<boolean> {
 	if (!currentNode) {
-		return;
+		return false;
 	}
 	// Measured at the payload boundary, independently of what was emitted: does
 	// the graph contain the tip it claims to be on?
@@ -2661,7 +2661,7 @@ async function emitBranchReconciliation(
 		chatGptDiagnostic(
 			`branch_tip_missing: a conversation declares a current_node its mapping does not contain; the branch is truncated (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		);
-		return;
+		return true;
 	}
 	// Walk the declared parent chain to its end. A chain that ends on a node
 	// whose `parent` names an id the mapping lacks was cut short upstream — the
@@ -2673,7 +2673,9 @@ async function emitBranchReconciliation(
 		chatGptDiagnostic(
 			`branch_truncated: a conversation has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		);
+		return true;
 	}
+	return false;
 }
 
 /**
@@ -2893,7 +2895,11 @@ export async function processConversationDetail(
 		if (messageId) alreadyEmittedIds.add(messageId);
 		await deps.emitRecord("messages", msg);
 	}
-	await emitBranchReconciliation(mapping, currentNode, emittedBranchCount);
+	const branchStructurallyIncomplete = await emitBranchReconciliation(
+		mapping,
+		currentNode,
+		emittedBranchCount,
+	);
 	// A schema-rejected node or a lossy body means the emitted messages are not
 	// the source's full conversation. Say so durably instead of letting the
 	// caller count the conversation as hydrated.
@@ -2902,7 +2908,9 @@ export async function processConversationDetail(
 			? "message_shape_rejected"
 			: lossyContentMessages > 0
 				? "message_content_lossy"
-				: null;
+				: branchStructurallyIncomplete
+					? "branch_structurally_incomplete"
+					: null;
 	if (incompleteReason) {
 		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
 	}
@@ -5400,6 +5408,7 @@ function conversationListItemFromGap(
 }
 
 export type ConversationDetailIncompleteReason =
+	| "branch_structurally_incomplete"
 	| "detail_http_error"
 	| "detail_mapping_missing"
 	| "message_content_lossy"
