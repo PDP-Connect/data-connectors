@@ -23,6 +23,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Page as BrowserPage } from "playwright";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { ProviderBudgetController } from "../../packages/polyfill-connectors/src/provider-budget.ts";
 import {
@@ -30,6 +31,10 @@ import {
 	makeRecordingEmit,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	ChatGptRunBudget,
+	ChatGptPlannedProviderBudgetDeferredError,
+	ChatGptRecoverableRetryExhaustedError,
+	createChatGptApi,
 	runConversationsAndMessagesStreams,
 	type StreamDeps,
 } from "./index.ts";
@@ -38,6 +43,591 @@ import type { ChatGptApi, ChatGptFetchResult } from "./types.ts";
 
 const PRODUCTION_WIDTH = 6;
 const SEARCH_PREFIX = "/conversations/search?query=&cursor=";
+
+function heldPromise<T>() {
+	let resolve: (value: T) => void = () => undefined;
+	let reject: (reason: unknown) => void = () => undefined;
+	const promise = new Promise<T>((onResolve, onReject) => {
+		resolve = onResolve;
+		reject = onReject;
+	});
+	return { promise, resolve, reject };
+}
+
+async function runCircuitListing(
+	width: number,
+	tripCursor: number,
+	persistent = false,
+	wallClockMs = 60_000,
+	tripOnRead?: (cursor: number, read: number) => boolean,
+	failure?: "retry_exhausted" | "programmer" | "auth",
+	retryAfterMs?: number,
+) {
+	const harness = makeRecordingEmit(validateRecord);
+	let now = 0;
+	const sleeps: number[] = [];
+	const providerReads: number[] = [];
+	const providerBudget = new ProviderBudgetController({
+		circuitBreaker: {
+			minimumThroughput: 1,
+			windowSize: 1,
+			failureRateThreshold: 1,
+			resetTimeoutMs: 1000,
+			now: () => now,
+		},
+	});
+	const page: Pick<BrowserPage, "evaluate" | "goto" | "waitForFunction"> = {
+		evaluate: ((fn: unknown, arg?: unknown) => {
+			if (arg === undefined) {
+				return Promise.resolve(
+					typeof fn === "function"
+						? "https://chatgpt.com/"
+						: { accessToken: "fixture", deviceId: "fixture" },
+				);
+			}
+			const { path } = arg as { path: string };
+			const cursor = cursorOf(path);
+			assert.notEqual(
+				providerBudget.circuitBreaker?.state,
+				"open",
+				"no provider request while circuit is open",
+			);
+			providerReads.push(cursor);
+			return Promise.resolve(
+				respond(
+					cursor === 0 && tripCursor > 0
+						? { items: range("listed", 0, 30), next_cursor: 30 }
+						: {
+								items: cursor === 30 ? [convo("tail")] : [],
+								next_cursor: null,
+							},
+				),
+			);
+		}) as BrowserPage["evaluate"],
+		goto: () => Promise.resolve(null),
+		waitForFunction: () => Promise.reject(new Error("unused")),
+	};
+	const realApi = createChatGptApi({
+		page: page as BrowserPage,
+		capture: null,
+		providerBudget,
+	});
+	let tripped = false;
+	const attemptedReads = new Map<number, number>();
+	const api: ChatGptApi = {
+		...realApi,
+		fetch: (path, options) => {
+			const cursor = cursorOf(path);
+			const read = (attemptedReads.get(cursor) ?? 0) + 1;
+			attemptedReads.set(cursor, read);
+			if (
+				(tripOnRead?.(cursor, read) ?? cursor >= tripCursor) &&
+				(!tripped || persistent)
+			) {
+				tripped = true;
+				if (failure === "programmer" || failure === "auth")
+					return Promise.reject(
+						new Error(
+							failure === "auth"
+								? "apiFetch got 403 (auth - not retryable)"
+								: "fixture programmer error",
+						),
+					);
+				if (failure === "retry_exhausted")
+					return Promise.reject(
+						new ChatGptRecoverableRetryExhaustedError(
+							"fixture bare 429 exhaustion",
+							{
+								class: "rate_limited",
+								httpStatus: 429,
+								...(retryAfterMs === undefined
+									? {}
+									: {
+											networkPressure: {
+												endpoint_route: "/conversations/search",
+												method: "GET",
+												error_class: "rate_limited",
+												retry_after_ms: retryAfterMs,
+											},
+										}),
+							},
+						),
+					);
+				if (persistent) {
+					providerBudget.circuitBreaker?.beforeRequest();
+				}
+				providerBudget.recordFailure();
+			}
+			return realApi.fetch(path, options);
+		},
+	};
+	await runConversationsAndMessagesStreams(
+		{
+			api,
+			providerBudget,
+			conversationSearchPrefetchPages: width,
+			runBudget: new ChatGptRunBudget({
+				maxWallClockMs: wallClockMs,
+				now: () => now,
+			}),
+			sleep: (ms) => {
+				sleeps.push(ms);
+				now += ms;
+				return Promise.resolve();
+			},
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		},
+		{},
+	);
+	return { harness, sleeps, providerReads, providerBudget, now };
+}
+
+test("listing circuit before page zero resumes at the same cursor at widths 1 and 6", async () => {
+	const outcomes = await Promise.all(
+		[1, 6].map((width) => runCircuitListing(width, 0)),
+	);
+	for (const result of outcomes) {
+		assert.equal(result.sleeps[0], 1000);
+		assert.ok(result.providerReads.every((cursor) => cursor === 0));
+		assert.equal(result.providerBudget.circuitBreaker?.state, "closed");
+		assert.equal(
+			result.harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+			false,
+		);
+	}
+});
+
+test("listing circuit in a six-page wave drains and resumes serially without losing rows", async () => {
+	const result = await runCircuitListing(6, 30);
+	assert.deepEqual(
+		result.sleeps.filter((ms) => ms === 1000),
+		[1000],
+	);
+	assert.deepEqual(
+		result.harness.emitted.map((r) => r.data.id).sort(),
+		[...range("listed", 0, 30).map((r) => r.id), "tail"].sort(),
+	);
+	assert.equal(result.providerBudget.circuitBreaker?.state, "closed");
+});
+
+test("listing waits once after a crowded failure and drains held speculative reads before probing", {
+	timeout: 2000,
+}, async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let now = 0;
+	let active = 0;
+	let firstWave = true;
+	const waits: number[] = [];
+	const afterWait: number[] = [];
+	const budget = new ProviderBudgetController({
+		circuitBreaker: {
+			minimumThroughput: 1,
+			windowSize: 1,
+			failureRateThreshold: 1,
+			resetTimeoutMs: 1000,
+			now: () => now,
+		},
+	});
+	const ready = heldPromise<void>();
+	const pending = new Map<
+		number,
+		ReturnType<typeof heldPromise<ChatGptFetchResult>>
+	>();
+	const responseAt = (cursor: number) =>
+		respond({
+			items: cursor < 90 ? range("held", cursor, 30) : [],
+			next_cursor: cursor < 90 ? cursor + 30 : null,
+		});
+	const api: ChatGptApi = {
+		auth: () => Promise.reject(new Error("unused")),
+		fetch: async (path) => {
+			const gate = await budget.beforeRequest();
+			if (!gate.ok)
+				throw new ChatGptPlannedProviderBudgetDeferredError(
+					"fixture circuit_open",
+					"circuit_open",
+					gate,
+				);
+			const cursor = cursorOf(path);
+			if (now >= 1000) afterWait.push(cursor);
+			active += 1;
+			try {
+				if (firstWave && cursor > 0) {
+					const held = heldPromise<ChatGptFetchResult>();
+					pending.set(cursor, held);
+					if (pending.size === 6) ready.resolve(undefined);
+					return await held.promise;
+				}
+				return responseAt(cursor);
+			} finally {
+				active -= 1;
+			}
+		},
+	};
+	const run = runConversationsAndMessagesStreams(
+		{
+			api,
+			providerBudget: budget,
+			conversationSearchPrefetchPages: 6,
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: () => Promise.resolve(),
+			runBudget: new ChatGptRunBudget({
+				maxWallClockMs: 60_000,
+				now: () => now,
+			}),
+			sleep: (ms) => {
+				assert.equal(
+					active,
+					0,
+					"all in-flight provider reads drain before any cooldown/probe",
+				);
+				waits.push(ms);
+				now += ms;
+				return Promise.resolve();
+			},
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		},
+		{},
+	);
+	await ready.promise;
+	firstWave = false;
+	budget.recordFailure();
+	const error = new ChatGptPlannedProviderBudgetDeferredError(
+		"fixture circuit_open",
+		"circuit_open",
+	);
+	pending.get(30)?.reject(error);
+	pending.get(60)?.reject(error);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(
+		waits,
+		[],
+		"the coordinator does not wait/probe while reads are held",
+	);
+	for (const cursor of [180, 150, 120, 90])
+		pending.get(cursor)?.resolve(responseAt(cursor));
+	await run;
+	assert.deepEqual(
+		waits.filter((ms) => ms === 1000),
+		[1000],
+	);
+	assert.deepEqual(
+		afterWait.slice(0, 3),
+		[30, 60, 90],
+		"continuation after pressure is serial, with no new speculative wave",
+	);
+	assert.equal(harness.emitted.length, 90);
+	assert.equal(new Set(harness.emitted.map((r) => r.data.id)).size, 90);
+});
+
+test("persistent listing circuit defers with retryable pressure and bounded waits", async () => {
+	const result = await runCircuitListing(1, 0, true);
+	assert.equal(result.sleeps.length, 8);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+	);
+	assert.ok(
+		result.harness.protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "upstream_pressure" &&
+				typeof m.recovery_hint === "object" &&
+				m.recovery_hint.retryable === true,
+		),
+	);
+	assert.deepEqual(result.providerReads, []);
+});
+
+test("listing circuit respects a positive wall-clock budget below the floor tick", async () => {
+	const result = await runCircuitListing(1, 0, true, 20);
+	assert.deepEqual(result.sleeps, [20]);
+	assert.equal(result.now, 20);
+});
+
+test("listing circuit at first-page verification waits instead of retrying into the gate", async () => {
+	const result = await runCircuitListing(
+		6,
+		30,
+		false,
+		60_000,
+		(cursor, read) => cursor === 0 && read === 2,
+	);
+	assert.equal(result.sleeps.filter((ms) => ms === 1000).length, 1);
+	assert.equal(result.harness.emitted.length, 31);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("listing circuit at short-page verification uses the same recovery", async () => {
+	const result = await runCircuitListing(
+		6,
+		30,
+		false,
+		60_000,
+		(cursor, read) => cursor === 30 && read === 4,
+	);
+	assert.equal(result.sleeps.filter((ms) => ms === 1000).length, 1);
+	assert.equal(result.harness.emitted.length, 31);
+});
+
+test("listing bare 429 exhaustion waits then resumes without failing the run", async () => {
+	const result = await runCircuitListing(
+		1,
+		0,
+		false,
+		600_000,
+		undefined,
+		"retry_exhausted",
+	);
+	assert.equal(result.sleeps[0], 300_000);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("persistent mid-list circuit keeps the proven serial prefix and its boundary", async () => {
+	const result = await runCircuitListing(1, 30, true);
+	assert.equal(result.sleeps.filter((ms) => ms === 1000).length, 8);
+	assert.equal(result.harness.emitted.length, 30);
+	const state = result.harness.protocolMessages.find(
+		(m) => m.type === "STATE" && m.stream === "conversations",
+	);
+	assert.ok(state && state.type === "STATE");
+	const backfill = (state.cursor as Record<string, unknown>).backfill as Record<
+		string,
+		unknown
+	>;
+	assert.equal(backfill.position_hint, 30);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+});
+
+test("persistent listing circuit on the empty-page end probe is a resumable partial", async () => {
+	const result = await runCircuitListing(
+		1,
+		0,
+		true,
+		60_000,
+		(cursor, read) => cursor === 0 && read > 1,
+	);
+	assert.equal(result.sleeps.filter((ms) => ms === 1000).length, 8);
+	assert.ok(
+		result.harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "upstream_pressure",
+		),
+	);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+});
+
+test("empty-page end-probe delay cannot exceed the remaining run budget", async () => {
+	const result = await runCircuitListing(1, 0, false, 20, () => false);
+	assert.deepEqual(result.sleeps, [20]);
+	assert.equal(result.now, 20);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+});
+
+test("listing retry exhaustion respects the reported Retry-After delay", async () => {
+	const result = await runCircuitListing(
+		1,
+		0,
+		false,
+		1_000_000,
+		undefined,
+		"retry_exhausted",
+		900_000,
+	);
+	assert.equal(result.sleeps[0], 900_000);
+});
+
+test("unused speculative retry exhaustion coordinates its Retry-After before further listing reads", async () => {
+	const result = await runCircuitListing(
+		6,
+		30,
+		false,
+		1_000_000,
+		(cursor) => cursor === 150,
+		"retry_exhausted",
+		900_000,
+	);
+	assert.equal(result.sleeps.filter((ms) => ms === 900_000).length, 1);
+	assert.equal(result.harness.emitted.length, 31);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("persistent speculative listing pressure never commits an unverified prefix", async () => {
+	const result = await runCircuitListing(6, 30, true);
+	assert.equal(result.sleeps.filter((ms) => ms === 1000).length, 8);
+	assert.equal(result.harness.emitted.length, 0);
+	assert.equal(
+		result.harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	const state = result.harness.protocolMessages.find(
+		(m) => m.type === "STATE" && m.stream === "conversations",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.deepEqual((state.cursor as Record<string, unknown>).backfill, {
+		position_hint: 0,
+		oldest_update_time: null,
+		boundary_ids: [],
+	});
+});
+
+test("crowded listing and unused background auth/programmer errors remain terminal", async () => {
+	const cases = (["auth", "programmer"] as const).flatMap((failure) =>
+		[30, 150].map((cursor) => ({ failure, cursor })),
+	);
+	await Promise.all(
+		cases.map(({ failure, cursor }) =>
+			assert.rejects(
+				runCircuitListing(
+					6,
+					30,
+					false,
+					60_000,
+					(readCursor) => readCursor === cursor,
+					failure,
+				),
+				failure === "auth" ? /got 403/ : /programmer error/,
+			),
+		),
+	);
+});
+
+test("a speculative error with cursor=4290 cannot disguise auth or programmer failure as pressure", async () => {
+	await Promise.all(
+		["auth", "programmer"].map(async (failure) => {
+			const harness = makeRecordingEmit(validateRecord);
+			await assert.rejects(
+				runConversationsAndMessagesStreams(
+					{
+						api: {
+							auth: () => Promise.reject(new Error("unused")),
+							fetch: (path) => {
+								const cursor = cursorOf(path);
+								if (cursor === 4290)
+									return Promise.reject(
+										new Error(
+											failure === "auth"
+												? `apiFetch got 403 on GET ${path} (auth - not retryable)`
+												: `fixture programmer error on ${path}`,
+										),
+									);
+								return Promise.resolve(
+									respond({
+										items: cursor === 0 ? range("numeric", 0, 30) : [],
+										next_cursor: cursor === 0 ? 4200 : null,
+									}),
+								);
+							},
+						},
+						emit: harness.emit,
+						emitRecord: harness.emitRecord,
+						sleep: () => Promise.resolve(),
+						progress: () => Promise.resolve(),
+						conversationSearchPrefetchPages: 6,
+						requested: new Map([["conversations", { name: "conversations" }]]),
+					},
+					{},
+				),
+				failure === "auth" ? /got 403/ : /programmer error/,
+			);
+			assert.equal(
+				harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+				false,
+			);
+		}),
+	);
+});
+
+test("successful listing pages reset the no-progress bound across more than eight circuit trips", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let now = 0;
+	const waits: number[] = [];
+	const tripped = new Set<number>();
+	const budget = new ProviderBudgetController({
+		circuitBreaker: {
+			minimumThroughput: 1,
+			windowSize: 1,
+			failureRateThreshold: 1,
+			resetTimeoutMs: 1000,
+			now: () => now,
+		},
+	});
+	await runConversationsAndMessagesStreams(
+		{
+			api: {
+				auth: () => Promise.reject(new Error("unused")),
+				fetch: async (path) => {
+					const cursor = cursorOf(path);
+					if (cursor < 270 && !tripped.has(cursor)) {
+						tripped.add(cursor);
+						budget.recordFailure();
+					}
+					const gate = await budget.beforeRequest();
+					if (!gate.ok)
+						throw new ChatGptPlannedProviderBudgetDeferredError(
+							"fixture circuit_open",
+							"circuit_open",
+							gate,
+						);
+					return respond({
+						items: cursor < 270 ? range("reset", cursor, 30) : [],
+						next_cursor: cursor < 270 ? cursor + 30 : null,
+					});
+				},
+			},
+			providerBudget: budget,
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			sleep: (ms) => {
+				waits.push(ms);
+				now += ms;
+				return Promise.resolve();
+			},
+			progress: () => Promise.resolve(),
+			runBudget: new ChatGptRunBudget({
+				maxWallClockMs: 60_000,
+				now: () => now,
+			}),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		},
+		{},
+	);
+	assert.deepEqual(
+		waits.filter((ms) => ms === 1000),
+		Array.from({ length: 9 }, () => 1000),
+	);
+	assert.equal(harness.emitted.length, 270);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+	assert.equal(budget.circuitBreaker?.state, "closed");
+});
 
 type Page = { items: unknown[]; next_cursor?: number | null } | "503" | "null";
 /** Responses per cursor; the k-th read of a cursor gets entry min(k, last). */

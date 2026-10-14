@@ -50,6 +50,7 @@
  */
 
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
 import {
 	RetryExhaustedError,
@@ -66,6 +67,7 @@ import { ProviderBudgetController } from "../../packages/polyfill-connectors/src
 import {
 	type EmittedRecord,
 	makeRecordingEmit,
+	runConnectorProtocolSubprocess,
 	type SkippedRecord,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
@@ -122,6 +124,217 @@ interface RecordingHarness {
 	messages: EmittedMessage[];
 	skipped: SkippedRecord[];
 }
+
+test("persistent listing circuit publishes completed metadata through successful partial DONE", async () => {
+	const prior = "2023-11-14T22:13:20.000Z";
+	const result = await runConnectorProtocolSubprocess({
+		cwd: fileURLToPath(new URL("../../", import.meta.url)),
+		entrypoint: fileURLToPath(
+			new URL("./__fixtures__/listing-circuit-runtime.ts", import.meta.url),
+		),
+		start: {
+			type: "START",
+			collection_mode: "full_refresh",
+			scope: {
+				streams: [
+					"memories",
+					"custom_instructions",
+					"shared_conversations",
+					"account_plan",
+					"conversations",
+					"messages",
+				].map((name) => ({ name })),
+			},
+			state: {
+				conversations: { last_update_time: prior },
+				messages: { last_update_time: prior },
+			},
+		},
+	});
+	assert.equal(result.code, 0);
+	const done = result.messages.find((m) => m.type === "DONE");
+	assert.ok(done && done.type === "DONE");
+	assert.equal(done.status, "succeeded");
+	assert.equal(result.messages.filter((m) => m.type === "RECORD").length, 59);
+	for (const stream of ["conversations", "messages"]) {
+		const skip = result.messages.find(
+			(m) => m.type === "SKIP_RESULT" && m.stream === stream,
+		);
+		assert.ok(skip && skip.type === "SKIP_RESULT");
+		assert.equal(skip.reason, "upstream_pressure");
+		assert.equal(
+			typeof skip.recovery_hint === "object" && skip.recovery_hint.retryable,
+			true,
+		);
+		assert.equal(
+			result.messages.some(
+				(m) => m.type === "DETAIL_COVERAGE" && m.stream === stream,
+			),
+			false,
+		);
+		const state = result.messages.find(
+			(m) => m.type === "STATE" && m.stream === stream,
+		);
+		assert.ok(state && state.type === "STATE");
+		assert.equal(
+			(state.cursor as Record<string, unknown>).last_update_time,
+			prior,
+		);
+		assert.deepEqual((state.cursor as Record<string, unknown>).backfill, {
+			position_hint: 0,
+			oldest_update_time: null,
+			boundary_ids: [],
+		});
+	}
+	assert.equal(
+		result.messages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+	);
+	const messagesState = result.messages.find(
+		(m) => m.type === "STATE" && m.stream === "messages",
+	);
+	assert.ok(messagesState && messagesState.type === "STATE");
+	assert.equal(
+		readChatGptPersistedPacing({ messages: messagesState.cursor })?.intervalMs,
+		1234,
+	);
+	for (const stream of [
+		"memories",
+		"custom_instructions",
+		"shared_conversations",
+		"account_plan",
+	]) {
+		assert.ok(
+			result.messages.some((m) => m.type === "STATE" && m.stream === stream),
+		);
+		assert.ok(
+			result.messages.some(
+				(m) => m.type === "DETAIL_COVERAGE" && m.stream === stream,
+			),
+		);
+	}
+});
+
+test("listing auth and programmer errors retain failed DONE", async () => {
+	const results = await Promise.all(
+		["auth", "programmer"].map((failure) =>
+			runConnectorProtocolSubprocess({
+				cwd: fileURLToPath(new URL("../../", import.meta.url)),
+				entrypoint: fileURLToPath(
+					new URL("./__fixtures__/listing-circuit-runtime.ts", import.meta.url),
+				),
+				allowFailedDone: true,
+				env: { LISTING_FIXTURE_FAILURE: failure },
+				start: {
+					type: "START",
+					scope: {
+						streams: [
+							"memories",
+							"custom_instructions",
+							"shared_conversations",
+							"account_plan",
+							"conversations",
+							"messages",
+						].map((name) => ({ name })),
+					},
+				},
+			}),
+		),
+	);
+	for (const result of results) {
+		assert.equal(result.code, 1);
+		const done = result.messages.find((m) => m.type === "DONE");
+		assert.ok(done && done.type === "DONE");
+		assert.equal(done.status, "failed");
+	}
+});
+
+test("backlog re-list and differing forward cursors share one listing pressure envelope", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let now = 0;
+	const waits: number[] = [];
+	const budget = new ProviderBudgetController({
+		circuitBreaker: {
+			minimumThroughput: 1,
+			windowSize: 1,
+			resetTimeoutMs: 1000,
+			now: () => now,
+		},
+	});
+	const deps: StreamDeps = {
+		api: {
+			auth: () => Promise.reject(new Error("unused")),
+			fetch: async () => {
+				budget.circuitBreaker?.beforeRequest();
+				budget.recordFailure();
+				await admitFakeProviderBudget(budget);
+				throw new Error("persistent circuit unexpectedly admitted");
+			},
+		},
+		providerBudget: budget,
+		runBudget: new ChatGptRunBudget({ maxWallClockMs: 60_000, now: () => now }),
+		sleep: (ms) => {
+			waits.push(ms);
+			now += ms;
+			return Promise.resolve();
+		},
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		),
+		detailGaps: [
+			{
+				gap_id: "listing-backlog",
+				stream: "messages",
+				record_key: "chatgpt.conversation_backlog",
+				status: "pending",
+				reference_only: true,
+				detail_locator: {
+					kind: "chatgpt.conversation_backlog",
+					before_update_time: "2023-11-14T22:13:20.000Z",
+					remaining: 50,
+				},
+			},
+		],
+	};
+	const prior = {
+		conversations: { last_update_time: "2023-11-14T22:13:20.000Z" },
+		messages: { last_update_time: "2023-11-15T22:13:20.000Z" },
+	};
+	await runConversationsAndMessagesStreams(deps, prior);
+	assert.deepEqual(
+		waits,
+		Array.from({ length: 8 }, () => 1000),
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		false,
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	for (const stream of ["conversations", "messages"] as const) {
+		const state = harness.protocolMessages.find(
+			(m) => m.type === "STATE" && m.stream === stream,
+		);
+		assert.ok(state && state.type === "STATE");
+		assert.equal(
+			(state.cursor as Record<string, unknown>).last_update_time,
+			prior[stream].last_update_time,
+		);
+		assert.ok(
+			harness.protocolMessages.some(
+				(m) =>
+					m.type === "SKIP_RESULT" &&
+					m.stream === stream &&
+					m.reason === "upstream_pressure",
+			),
+		);
+	}
+});
 
 test("CHATGPT_RETRYABLE_ERROR_PATTERN treats retry-budget exhaustion as retryable", () => {
 	assert.equal(
@@ -11754,7 +11967,11 @@ test("runAccountPlanStream: stateless (PageShim) emits the plan and coverage wit
 			json: ACCOUNT_PLAN_BODY,
 		});
 		await runAccountPlanStream(second.deps, {});
-		assert.equal(second.emitted.length, 1, "every stateless run emits the plan");
+		assert.equal(
+			second.emitted.length,
+			1,
+			"every stateless run emits the plan",
+		);
 	} finally {
 		if (previous === undefined)
 			delete process.env.PDPP_CHATGPT_ACCOUNT_PLAN_STATELESS;
