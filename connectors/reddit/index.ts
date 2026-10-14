@@ -21,25 +21,41 @@
  *   downvoted     /user/{u}/downvoted.json   — posts/comments the owner downvoted (owner-only)
  *   hidden        /user/{u}/hidden.json      — posts the owner hid (owner-only)
  *
+ * Content vs current metrics: the five listings that carry volatile source
+ * counters also have a `<stream>_stats` stream — submitted_stats,
+ * comments_stats, upvoted_stats, downvoted_stats, hidden_stats — keyed by the
+ * SAME Reddit fullname as the content record. The content streams say what an
+ * item is; the stats streams hold the latest score / num_comments /
+ * upvote_ratio / gilded the source reported. One listing walk serves both
+ * outputs; each output honors its own requested scope, so a score that moves
+ * changes only the stats record; the content
+ * record stays byte-identical. Nothing here persists a "skip unchanged"
+ * fingerprint: every walked record is re-emitted each run and unchanged ones
+ * rely on the resource server's identical-record no-op. `saved` carries no
+ * counters and has no stats stream.
+ *
  * The owner-only streams are the biggest reason to use a logged-in
  * connector over the public API — they capture preference signal
  * (upvoted/downvoted history) no third party can see.
  *
- * Pagination: opaque `after` cursor. The stop rule is per-stream, because
- * Reddit does not order every listing the same way:
- *   submitted/comments  — ordered by the item's own `created_utc`, so an
- *     incremental run stops once it crosses the prior run's high-water mark.
- *   saved/upvoted/downvoted/hidden — ordered by OWNER ACTION time. An old
- *     post upvoted today sits at rank 1 with an old `created_utc`, so the
- *     created-based stop is invalid here: these walk the full listing and
- *     dedupe by fullname. See `RedditListingOrder` in parsers.ts.
+ * Pagination: opaque `after` cursor. Collection walks each requested listing
+ * from the beginning on every run, because creation-time cursors cannot prove
+ * that the stored content payload has the current schema. Fullnames provide
+ * stable identity when an item appears again. A listing is bounded by its end
+ * or MAX_PAGES; a capped walk emits deferred evidence and no checkpoint.
  *
  * Rate limit: Reddit's logged-in web JSON allows ~100 req/min before 429.
  * We page at limit=100 and use a conservative 500ms politeDelay between
  * pages.
  *
  * CHANGES
- *   v1.0.0 (2026-10-02) — removed the connector-stamped `fetched_at` from
+ *   manifest 0.4.0 (2026-10-14) — split volatile metrics out of the content
+ *     streams into `<stream>_stats` streams (see above). Breaking for
+ *     consumers: score/num_comments/upvote_ratio/gilded and their range
+ *     filters moved off submitted/comments/upvoted/downvoted/hidden. Every
+ *     requested output now refreshes the currently listed observations on
+ *     each run; the connector does not persist a repair-complete marker.
+ *   manifest 0.3.13 (2026-10-02) — removed the connector-stamped `fetched_at` from
  *     every record (PDPP spec-core: a producer must not put its own
  *     collection time in `data`; that is the envelope's `emitted_at`).
  *     No field took over `fetched_at`'s manifest `event-time` role:
@@ -73,7 +89,6 @@ import {
 } from "../../packages/polyfill-connectors/src/auto-login/reddit.ts";
 import {
 	type BrowserCollectContext,
-	buildDetailCoverageMessage,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	type NormalizeTerminalError,
@@ -84,22 +99,23 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import { createRepairBudget } from "../../packages/polyfill-connectors/src/repair-budget.ts";
+import { validateRecord } from "./schemas.ts";
 import {
 	appendNewChildren,
 	classifyListingStatus,
 	commentRecord,
+	commentStatsRecord,
 	dedupeByFullname,
 	MAX_PAGES,
-	maxCreatedEpoch,
 	nextAfter,
 	pagePath,
 	type RedditListingOrder,
 	savedRecord,
-	sinceFromState,
 	submittedRecord,
+	submittedStatsRecord,
 	voteRecord,
+	voteStatsRecord,
 } from "./parsers.ts";
-import { validateRecord } from "./schemas.ts";
 import type { RedditChild, RedditFetchResult, RedditListing } from "./types.ts";
 
 const USER_AGENT = "pdpp-reddit-connector/0.2 (polyfill; +https://pdpp.dev)";
@@ -297,8 +313,9 @@ function assertListingEnvelope(
 
 /**
  * Paginate a Reddit listing. Newest-first, opaque `after` cursor. Stops
- * once we cross the prior run's high-water created_utc (incremental), hit
- * an empty page, or run out of `after`. The fetch function is injected
+ * at an empty page, the end cursor, or the page cap. The optional creation
+ * cursor is retained for parser-level compatibility; collection passes null
+ * so every requested observation is revisited. The fetch function is injected
  * so integration tests can run this against a fake listing server
  * without a browser.
  */
@@ -433,15 +450,10 @@ export async function paginate(
 		},
 	});
 
-	// `action`-ordered streams walk the whole listing every run, so the same
-	// item recurs across runs and (rarely) within one walk when Reddit shifts
-	// items between pages mid-walk. Dedupe by fullname before the caller counts
-	// `considered`/`covered`, so coverage reflects distinct items rather than
-	// repeat sightings. `created`-ordered streams stop at the cursor and are
-	// already distinct, so this is a no-op for them.
+	// `action`-ordered listings can repeat an item within one walk when Reddit
+	// shifts items between pages. Dedupe those by fullname before emission.
 	return {
-		// EXIT A — all normal breaks above mean the listing ended, crossed the
-		// created-order boundary, or supplied no continuation cursor.
+		// Normal breaks mean the listing ended or supplied no continuation cursor.
 		children: order === "action" ? dedupeByFullname(all) : all,
 		truncated: walk.truncated,
 	};
@@ -449,22 +461,44 @@ export async function paginate(
 
 // ─── Stream runner ──────────────────────────────────────────────────────
 
-/** Declarative description of one stream collectStream() knows how to
- *  fetch. Exported so integration tests can reuse the same table the
- *  runtime uses. */
+/** One output (RECORD stream) derived from a provider listing. */
+export interface RedditOutputConfig {
+	name: string;
+	toRecord: (c: RedditChild) => RecordData;
+}
+
+/** Declarative description of one provider listing and the outputs derived
+ *  from it: the content stream (`name`/`toRecord`) and, when the listing
+ *  carries volatile counters, its current-stats stream. Retrieval policy
+ *  (endpoint, order, what to walk) belongs to the listing; mapping and scope
+ *  belong to each output. Exported so integration
+ *  tests can reuse the same table the runtime uses. */
 export interface RedditStreamConfig {
 	endpoint: string;
+	/** Content stream name. */
 	name: string;
 	/** How Reddit sorts this listing. Drives the pagination stop rule — see
 	 *  {@link RedditListingOrder}. Omitted means `created` (authorship
 	 *  timeline), the only ordering for which an early stop is sound. */
 	order?: RedditListingOrder;
 	progressMessage: string;
+	/** Current-metrics stream over the same listing, keyed by the same
+	 *  fullname. Absent when the listing carries no volatile counters. */
+	stats?: RedditOutputConfig;
 	toRecord: (c: RedditChild) => RecordData;
+}
+
+/** The slice of a runtime `StreamScope` this connector reads. */
+export interface RedditOutputScope {
+	resources?: readonly string[];
+	time_range?: { since?: string; until?: string };
 }
 
 export interface CollectStreamArgs {
 	capture: CaptureSession | null;
+	/** Retained for compatibility with the connector runtime; Reddit always
+	 *  reads its current listing in full. */
+	collectionMode?: "full_refresh" | "incremental";
 	/** Pacing delay between pages. Defaults to politeDelay(500ms). Tests
 	 *  inject a no-op so they don't sleep. */
 	delay?: (ms: number) => Promise<void>;
@@ -480,13 +514,61 @@ export interface CollectStreamArgs {
 	 *  every stream in this run. Defaults to a fresh one-shot budget so direct
 	 *  callers (tests) that don't pass one keep today's per-call ceiling of 1. */
 	repairBudget?: ReturnType<typeof createRepairBudget>;
+	/** Streams (content and/or stats) this run was asked for, with their scope.
+	 *  Omitted means the content stream alone, unscoped. An output that is not
+	 *  here emits nothing: no RECORD, STATE, SKIP_RESULT. */
+	requested?: ReadonlyMap<string, RedditOutputScope>;
 	state: Record<string, unknown>;
 	stream: RedditStreamConfig;
 }
 
-interface CollectStreamResult {
+interface OutputResult {
 	considered: number;
-	covered: number;
+}
+
+interface CollectStreamResult {
+	/** Null when that output was not requested. */
+	content: OutputResult | null;
+	stats: OutputResult | null;
+}
+
+/**
+ * Emit one output's records. Every walked record is emitted; whether a record
+ * is a no-op is the resource server's identical-record check, not a cache kept
+ * here. `considered` is measured before runtime scope selection and schema
+ * validation; it does not claim that the host accepted or stored each record.
+ */
+async function emitOutput(
+	emitRecord: CollectStreamArgs["emitRecord"],
+	output: RedditOutputConfig,
+	items: readonly RedditChild[],
+): Promise<OutputResult> {
+	for (const c of items) {
+		await emitRecord(output.name, output.toRecord(c));
+	}
+	return { considered: items.length };
+}
+
+async function emitDeferredPages(
+	emit: CollectStreamArgs["emit"],
+	stream: string,
+	totalSeen: number,
+): Promise<void> {
+	// Reddit does not expose a total page count. One synthetic considered unit
+	// is the honest lower bound for the unread tail: the next page exists, but
+	// this run deliberately did not fetch it. The deferred suffix keeps the
+	// stream out of `complete` without inventing an item count.
+	await emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "older_pages_deferred_page_budget",
+		message: `Reddit ${stream} stopped at the ${MAX_PAGES}-page limit with more pages still listed`,
+		diagnostics: {
+			page_limit: MAX_PAGES,
+			total_seen: totalSeen,
+			unread_pages: 1,
+		},
+	});
 }
 
 export async function collectStream(
@@ -501,77 +583,67 @@ export async function collectStream(
 		onAuthFailed,
 		progress,
 		repairBudget,
-		state,
 		stream,
 	} = args;
-	await progress(stream.progressMessage, { stream: stream.name });
+	const requested =
+		args.requested ?? new Map<string, RedditOutputScope>([[stream.name, {}]]);
+	const contentScope = requested.get(stream.name);
+	const statsOutput = stream.stats;
+	const statsScope = statsOutput ? requested.get(statsOutput.name) : undefined;
+	if (!(contentScope || statsScope)) {
+		return { content: null, stats: null };
+	}
+	const order = stream.order ?? "created";
+	const progressName = contentScope ? stream.name : (statsOutput?.name ?? "");
+	await progress(stream.progressMessage, { stream: progressName });
 
-	const sinceEpoch = sinceFromState(state, stream.name);
-	const { children: items, truncated } = await paginate(
+	// Every requested output walks the full listing. A creation-time cursor cannot
+	// prove that stored payloads match the current schema.
+	const { children, truncated } = await paginate(
 		fetchPath,
 		stream.endpoint,
-		sinceEpoch,
+		null,
 		capture,
 		delay,
 		progress,
-		stream.name,
+		progressName,
 		onAuthFailed,
 		repairBudget,
-		stream.order ?? "created",
+		order,
 	);
 
-	const latestEpoch = maxCreatedEpoch(items, sinceEpoch ?? 0);
-	let covered = 0;
-	for (const c of items) {
-		const record = stream.toRecord(c);
-		// Validate record using the canonical schema. Connectors must count covered
-		// independently at validation boundary: only schema-ok records count toward
-		// coverage, schema-invalid records are weighed but not covered.
-		const validation = validateRecord(stream.name, record);
-		if (validation.ok) {
-			covered += 1;
-		}
-		// Still emit to runtime so SKIP_RESULT remains authoritative for runtime layer.
-		await emitRecord(stream.name, record);
-	}
-	await progress("Emitted Reddit stream records", {
-		stream: stream.name,
-		phase: "emit",
-		item_count: items.length,
-		total_seen: items.length,
-		cursor_present: latestEpoch > 0,
-	});
-
-	if (truncated) {
-		// Reddit does not expose a total page count. One synthetic considered unit
-		// is the honest lower bound for the unread tail: the next page exists, but
-		// this run deliberately did not fetch it. The deferred suffix keeps the
-		// stream out of `complete` without inventing an item count.
-		await emit({
-			type: "SKIP_RESULT",
+	let content: OutputResult | null = null;
+	if (contentScope) {
+		const items = children;
+		content = await emitOutput(emitRecord, stream, items);
+		// Counts are offered to runtime selection and validation, before either runs.
+		await progress("Offered Reddit stream records", {
 			stream: stream.name,
-			reason: "older_pages_deferred_page_budget",
-			message: `Reddit ${stream.name} stopped at the ${MAX_PAGES}-page limit with more pages still listed`,
-			diagnostics: {
-				page_limit: MAX_PAGES,
-				total_seen: items.length,
-				unread_pages: 1,
-			},
+			phase: "emit",
+			item_count: items.length,
+			total_seen: items.length,
+			cursor_present: false,
 		});
+		if (truncated) {
+			await emitDeferredPages(emit, stream.name, items.length);
+		}
 	}
 
-	await emit({
-		type: "STATE",
-		stream: stream.name,
-		// A created-order watermark comes from the newest page. Advancing it after
-		// a capped walk would make the next run stop before the unread tail. The
-		// action-ordered streams do not use this watermark for their stop rule,
-		// but holding it there keeps the checkpoint contract uniform across all
-		// six Reddit streams.
-		cursor: { last_created_utc: truncated ? (sinceEpoch ?? 0) : latestEpoch },
-	});
+	let stats: OutputResult | null = null;
+	if (statsOutput && statsScope) {
+		stats = await emitOutput(emitRecord, statsOutput, children);
+		await progress("Offered Reddit stats records", {
+			stream: statsOutput.name,
+			phase: "emit",
+			item_count: children.length,
+			total_seen: children.length,
+		});
+		if (truncated) {
+			await emitDeferredPages(emit, statsOutput.name, children.length);
+		}
+	}
 
-	return { considered: items.length + (truncated ? 1 : 0), covered };
+	return { content, stats };
 }
 
 /** Build the list of streams this connector can populate, bound to a
@@ -586,12 +658,20 @@ export function buildStreamTable(
 			endpoint: `${userPath}/submitted.json`,
 			progressMessage: "Fetching submissions",
 			toRecord: (c) => submittedRecord(c.data, emittedAt),
+			stats: {
+				name: "submitted_stats",
+				toRecord: (c) => submittedStatsRecord(c.data),
+			},
 		},
 		{
 			name: "comments",
 			endpoint: `${userPath}/comments.json`,
 			progressMessage: "Fetching comments",
 			toRecord: (c) => commentRecord(c.data, emittedAt),
+			stats: {
+				name: "comments_stats",
+				toRecord: (c) => commentStatsRecord(c.data),
+			},
 		},
 		// The four streams below are ordered by OWNER ACTION time, not by the
 		// item's `created_utc` — acting on an old item puts an old `created_utc`
@@ -610,6 +690,10 @@ export function buildStreamTable(
 			order: "action",
 			progressMessage: "Fetching upvoted items",
 			toRecord: (c) => voteRecord(c, emittedAt),
+			stats: {
+				name: "upvoted_stats",
+				toRecord: (c) => voteStatsRecord(c),
+			},
 		},
 		{
 			name: "downvoted",
@@ -617,6 +701,10 @@ export function buildStreamTable(
 			order: "action",
 			progressMessage: "Fetching downvoted items",
 			toRecord: (c) => voteRecord(c, emittedAt),
+			stats: {
+				name: "downvoted_stats",
+				toRecord: (c) => voteStatsRecord(c),
+			},
 		},
 		{
 			name: "hidden",
@@ -624,6 +712,10 @@ export function buildStreamTable(
 			order: "action",
 			progressMessage: "Fetching hidden items",
 			toRecord: (c) => voteRecord(c, emittedAt),
+			stats: {
+				name: "hidden_stats",
+				toRecord: (c) => voteStatsRecord(c),
+			},
 		},
 	];
 }
@@ -695,9 +787,11 @@ export function makeReauth(ctx: BrowserCollectContext): RedditReauthFn {
 
 export async function collectAllStreams(
 	ctx: BrowserCollectContext,
+	options: { delay?: (ms: number) => Promise<void> } = {},
 ): Promise<void> {
 	const {
 		capture,
+		collectionMode,
 		credentials,
 		emit,
 		emitRecord,
@@ -721,10 +815,7 @@ export async function collectAllStreams(
 	const repairBudget = createRepairBudget();
 
 	for (const stream of buildStreamTable(userPath, emittedAt)) {
-		if (!requested.has(stream.name)) {
-			continue;
-		}
-		const result = await collectStream({
+		await collectStream({
 			stream,
 			fetchPath,
 			state,
@@ -734,17 +825,10 @@ export async function collectAllStreams(
 			onAuthFailed,
 			repairBudget,
 			capture,
+			requested,
+			...(collectionMode ? { collectionMode } : {}),
+			...(options.delay ? { delay: options.delay } : {}),
 		});
-		await emit(
-			buildDetailCoverageMessage({
-				stream: stream.name,
-				stateStream: stream.name,
-				requiredKeys: [],
-				hydratedKeys: [],
-				considered: result.considered,
-				covered: result.covered,
-			}),
-		);
 	}
 }
 

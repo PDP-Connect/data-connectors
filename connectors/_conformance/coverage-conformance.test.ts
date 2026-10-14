@@ -108,6 +108,7 @@ import {
 	GROUPME_ATTACHMENTS_SHORTFALL_DRIVER,
 	GROUPME_ATTACHMENTS_WITHHELD_DRIVER,
 	GROUPME_HIGH_VOLUME_DRIVER,
+	REDDIT_EXCLUDED_DRIVER,
 	GROUPME_ZERO_DIRECT_INVENTORY_DRIVER,
 	KNOWN_UNEXERCISED_COVERAGE,
 	REDDIT_MALFORMED_DRIVER,
@@ -281,8 +282,9 @@ function doneMessage(
 
 /**
  * Derive the run-local `StreamEvidenceEnvelope` for one stream from the raw
- * protocol messages a driver captured — STATE (checkpoint + collected count,
- * via RECORD tally), DETAIL_COVERAGE (considered/covered), SKIP_RESULT
+ * protocol messages a driver captured — STATE (checkpoint), RECORD count
+ * (or an in-process emitted count for direct-import drivers), DETAIL_COVERAGE
+ * (considered/covered), SKIP_RESULT
  * (skipped), and DETAIL_GAP with status "pending" (pending_detail_gaps) —
  * PLUS `skippedRecords`, the direct-import-harness counterpart of
  * SKIP_RESULT (see `SkippedRecordFact` in coverage-conformance-drivers.ts):
@@ -293,10 +295,10 @@ function doneMessage(
  * `skippedRecords` in here, a stream whose every considered record failed
  * schema validation would still read `checkpoint: "committed"` with no
  * `skipped` evidence, and the shared oracle would have nothing telling it
- * the attempt was unresolved — exactly the gap a genuinely broken Reddit
- * fixture exposed (considered=1, covered=0, yet the aggregate gate passed,
- * because the validation failure only ever reached `harness.skipped`, never
- * `messages`). This is the one piece of run-local aggregation this gate
+ * the attempt was unresolved — exactly the gap a broken Reddit fixture
+ * exposed (source enumeration=1 but no locally accepted output, while the
+ * validation failure only reached `harness.skipped`, never `messages`). This
+ * is the one piece of run-local aggregation this gate
  * owns; everything downstream of the envelope is the shared oracle's
  * judgement, not this gate's.
  *
@@ -311,17 +313,20 @@ function deriveStreamEnvelope(
 	messages: readonly EmittedMessage[],
 	stream: string,
 	skippedRecords: readonly { stream: string }[] = [],
+	enumeratedCount?: number,
+	emittedCount?: number,
 ): StreamEvidenceEnvelope {
 	const stateForStream = messages.some(
 		(m) =>
 			(m as { type?: unknown; stream?: unknown }).type === "STATE" &&
 			(m as { stream?: unknown }).stream === stream,
 	);
-	const collected = messages.filter(
+	const protocolCollected = messages.filter(
 		(m) =>
 			(m as { type?: unknown; stream?: unknown }).type === "RECORD" &&
 			(m as { stream?: unknown }).stream === stream,
 	).length;
+	const collected = emittedCount ?? protocolCollected;
 	const coverageMsgs = messages.filter(
 		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			(m as { type?: unknown }).type === "DETAIL_COVERAGE" &&
@@ -344,7 +349,10 @@ function deriveStreamEnvelope(
 	// per-budget loop); sum considered/covered when every emission carries a
 	// measured value, otherwise fall through to "no measurement" (null) rather
 	// than silently dropping a partial sum.
-	let considered: number | null = null;
+	let considered =
+		typeof enumeratedCount === "number" && enumeratedCount >= 0
+			? enumeratedCount
+			: null;
 	let covered: number | null = null;
 	if (coverageMsgs.length > 0) {
 		const consideredValues = coverageMsgs.map(
@@ -480,6 +488,8 @@ test("verified-coverage conformance: every exercised required stream proves cove
 			driverResult.messages,
 			stream,
 			driverResult.skippedRecords,
+			driverResult.enumeratedCounts?.[stream],
+			driverResult.emittedCounts?.[stream] ?? 0,
 		);
 		const declaration = proofDeclarationFor(manifest, stream);
 		const verdict = evaluateStreamCoherence(envelope, declaration);
@@ -612,7 +622,22 @@ test("capability: Amazon's real emitOrdersCoverage path proves verified emptines
 	assert.equal(envelope.covered, 0);
 });
 
-test("capability: Reddit's real collectAllStreams path proves under the shared oracle for all six required checkpoint_window streams with a schema-valid fixture", async () => {
+/** The six content streams (the original pins) plus their five stats streams. */
+const REDDIT_STREAMS = [
+	"submitted",
+	"comments",
+	"saved",
+	"upvoted",
+	"downvoted",
+	"hidden",
+	"submitted_stats",
+	"comments_stats",
+	"upvoted_stats",
+	"downvoted_stats",
+	"hidden_stats",
+];
+
+test("capability: Reddit full-inventory outputs prove measured source enumeration without STATE or self-coverage messages", async () => {
 	const driver = CONNECTOR_DRIVERS.reddit;
 	assert.ok(driver);
 	const result = await driver.run();
@@ -621,31 +646,35 @@ test("capability: Reddit's real collectAllStreams path proves under the shared o
 	}
 	const manifest = readManifest("reddit");
 	assert.ok(manifest);
-	for (const stream of [
-		"submitted",
-		"comments",
-		"saved",
-		"upvoted",
-		"downvoted",
-		"hidden",
-	]) {
+	assert.equal(
+		result.messages.some((m) => m.type === "STATE" || m.type === "DETAIL_COVERAGE"),
+		false,
+		"full-inventory streams emit neither empty checkpoints nor undeclared self-coverage",
+	);
+	for (const stream of REDDIT_STREAMS) {
+		const declaration: NonNullable<typeof manifest.streams>[number] | undefined =
+			manifest.streams?.find((s) => s.name === stream);
+		assert.equal(declaration?.coverage_strategy, "full_inventory", `${stream}: strategy`);
+		assert.equal(
+			(declaration as { incremental?: boolean } | undefined)?.incremental,
+			false,
+			`${stream}: non-incremental`,
+		);
+		assert.equal("state_stream" in (declaration ?? {}), false, `${stream}: no parent declaration`);
+		assert.equal("parent_streams" in (declaration ?? {}), false, `${stream}: no parent declaration`);
 		const envelope = deriveStreamEnvelope(
 			result.messages,
 			stream,
 			result.skippedRecords,
+			result.enumeratedCounts?.[stream],
+			result.emittedCounts?.[stream] ?? 0,
 		);
-		// The happy-path fixture must be schema-valid end to end: considered ===
-		// covered === 1 proves every considered record was ALSO accounted for,
-		// not merely that a considered count was reported (which the earlier,
-		// schema-invalid `t3_coverage_conformance` fixture also produced while
-		// silently reporting covered=0 — a gap the oracle-fidelity fix below
-		// closes).
+		// The synthetic source contains one row for each output boundary. Compare
+		// that source-side count with actual RECORD messages; do not claim durable
+		// host storage or derive a covered numerator from connector-side validation.
 		assert.equal(envelope.considered, 1, `${stream}: considered`);
-		assert.equal(
-			envelope.covered,
-			1,
-			`${stream}: covered — a schema-invalid fixture record would read 0 here`,
-		);
+		assert.equal(envelope.covered, null, `${stream}: no covered numerator`);
+		assert.equal(envelope.collected, 1, `${stream}: in-process shape-checked record count`);
 		assert.deepEqual(
 			envelope.skipped,
 			null,
@@ -663,7 +692,7 @@ test("capability: Reddit's real collectAllStreams path proves under the shared o
 	}
 });
 
-test("mutation: a schema-invalid Reddit record is not laundered into proven coverage — proves skippedRecords fidelity, not just message presence", async () => {
+test("mutation: a schema-invalid Reddit record fails full-inventory proof at the runtime validation boundary", async () => {
 	const manifest = readManifest("reddit");
 	assert.ok(manifest);
 	const result = await REDDIT_MALFORMED_DRIVER.run();
@@ -672,34 +701,20 @@ test("mutation: a schema-invalid Reddit record is not laundered into proven cove
 			`reddit malformed driver reported unexercised: ${result.reason}`,
 		);
 	}
-	for (const stream of [
-		"submitted",
-		"comments",
-		"saved",
-		"upvoted",
-		"downvoted",
-		"hidden",
-	]) {
+	for (const stream of REDDIT_STREAMS) {
 		const envelope = deriveStreamEnvelope(
 			result.messages,
 			stream,
 			result.skippedRecords,
+			result.enumeratedCounts?.[stream],
 		);
-		// The malformed fixture considers exactly one record per stream, and
-		// that record fails schema validation — proving the harness actually
-		// saw the failure (considered=1) rather than silently dropping it
-		// (which would read considered=null, a different and less informative
-		// failure mode).
 		assert.equal(
 			envelope.considered,
 			1,
 			`${stream}: considered (the record was weighed)`,
 		);
-		assert.equal(
-			envelope.covered,
-			0,
-			`${stream}: covered (the record was rejected, not accounted for)`,
-		);
+		assert.equal(envelope.covered, null, `${stream}: no connector coverage numerator`);
+		assert.equal(envelope.collected, 0, `${stream}: invalid record was not emitted`);
 		assert.ok(
 			envelope.skipped,
 			`${stream}: skippedRecords must surface as envelope.skipped`,
@@ -721,20 +736,7 @@ test("mutation: a schema-invalid Reddit record is not laundered into proven cove
 	}
 });
 
-test("mutation: without skippedRecords fidelity, the malformed Reddit fixture no longer falsely reads proven — the explicit-covered-numerator fix (coherence.ts) independently closes this, on top of the skippedRecords fidelity fix", async () => {
-	// Re-derive the envelope EXACTLY as the pre-skippedRecords-fix
-	// deriveStreamEnvelope did — ignoring skippedRecords entirely. Before the
-	// reference-contract oracle fix (the explicit-covered-count rule), this
-	// read PROVEN via `enumeration_boundary`'s "closed window bounds rather
-	// than counts" branch, because a window-bounding strategy's `covered`
-	// shortfall was ignored once the checkpoint closed — the exact false pass
-	// the skippedRecords fidelity change closed for THIS gate. The oracle fix
-	// now rejects the identical envelope on its own terms: Reddit's malformed
-	// fixture emits an explicit `covered: 0` against `considered: 1` (never
-	// absent), so rule 2's covered-numerator check catches it even with
-	// `skipped: null` — two independent defenses against the same shape of
-	// bug, not a redundant assertion (skippedRecords fidelity still matters
-	// for streams that don't emit an explicit covered count at all).
+test("mutation: missing validation-skip fidelity cannot make an invalid full-inventory row complete", async () => {
 	const result = await REDDIT_MALFORMED_DRIVER.run();
 	if (!result.exercised) {
 		assert.fail(
@@ -747,6 +749,7 @@ test("mutation: without skippedRecords fidelity, the malformed Reddit fixture no
 		result.messages,
 		"submitted",
 		[],
+		result.enumeratedCounts?.submitted,
 	);
 	assert.deepEqual(
 		envelopeWithoutSkipFidelity.skipped,
@@ -754,11 +757,8 @@ test("mutation: without skippedRecords fidelity, the malformed Reddit fixture no
 		"confirms the pre-fix code path: with skippedRecords withheld, the envelope reports no skip at all",
 	);
 	assert.equal(envelopeWithoutSkipFidelity.considered, 1);
-	assert.equal(
-		envelopeWithoutSkipFidelity.covered,
-		0,
-		"the malformed record was never credited",
-	);
+	assert.equal(envelopeWithoutSkipFidelity.covered, null);
+	assert.equal(envelopeWithoutSkipFidelity.collected, 0);
 	const verdictWithoutSkipFidelity = evaluateStreamCoherence(
 		envelopeWithoutSkipFidelity,
 		proofDeclarationFor(manifest, "submitted"),
@@ -766,9 +766,29 @@ test("mutation: without skippedRecords fidelity, the malformed Reddit fixture no
 	assert.equal(
 		verdictWithoutSkipFidelity.proven,
 		false,
-		"the explicit covered:0 < considered:1 numerator check now catches this independently of skip fidelity",
+		"the emitted-record count is below the measured source-side enumeration count",
 	);
 	assert.equal(verdictWithoutSkipFidelity.reason, "boundary_shortfall");
+});
+
+test("mutation: resource-excluded Reddit rows remain in the measured source boundary", async () => {
+	const result = await REDDIT_EXCLUDED_DRIVER.run();
+	if (!result.exercised) assert.fail(result.reason);
+	const manifest = readManifest("reddit");
+	assert.ok(manifest);
+	const envelope = deriveStreamEnvelope(
+		result.messages,
+		"submitted",
+		result.skippedRecords,
+		result.enumeratedCounts?.submitted,
+	);
+	assert.equal(envelope.considered, 1);
+	assert.equal(envelope.collected, 0, "runtime selection excludes the source row");
+	assert.equal(envelope.covered, null, "no connector-supplied numerator");
+	assert.deepEqual(
+		evaluateStreamCoherence(envelope, proofDeclarationFor(manifest, "submitted")),
+		{ proven: false, reason: "boundary_shortfall" },
+	);
 });
 
 test("capability: Apple Contacts' real subprocess entrypoint proves under the shared oracle for all three required full_inventory streams", async () => {
@@ -1030,6 +1050,8 @@ test("capability: GroupMe's empty direct inventory emits measured 0/0 proof for 
 			result.messages,
 			stream,
 			result.skippedRecords,
+		result.enumeratedCounts?.[stream],
+		result.emittedCounts?.[stream] ?? 0,
 		);
 		const verdict = evaluateStreamCoherence(
 			envelope,
