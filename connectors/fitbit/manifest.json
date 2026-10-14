@@ -9,7 +9,7 @@
 	},
 	"connector_key": "fitbit",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"display_name": "Fitbit",
 	"runtime_requirements": {
 		"bindings": {
