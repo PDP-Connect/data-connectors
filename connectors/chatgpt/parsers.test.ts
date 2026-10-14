@@ -237,22 +237,55 @@ test("extractContent: empty / null-shaped content falls back to null", () => {
 	assert.equal(extractContent({}), null);
 });
 
-test("extractContent: content with U+0000 (NUL) returns null, not shape-check-failing string", () => {
-	// Simulates a real ChatGPT message whose text field contains an embedded NUL byte.
-	// Previously this would pass through extractContent as a raw string, reach
-	// pdppSafeText in the schema validator, and cause a shape_check_failed SKIP_RESULT
-	// that made the message non-backfillable. The fix: sanitize at extraction time.
+test("extractContent: content with U+0000 (NUL) keeps its text with the control char escaped, never null", () => {
+	// A raw NUL would fail the messages schema (shape_check_failed, non-backfillable)
+	// and nulling the body silently loses the whole message text. Escape the
+	// forbidden char visibly instead; the loss marker is asserted on the record.
 	assert.equal(
 		extractContent({ content_type: "text", parts: ["hello\x00world"] }),
-		null,
+		"hello\\u0000world",
 	);
 });
 
-test("extractContent: content with other forbidden control char (VT U+000B) returns null", () => {
+test("extractContent: content with other forbidden control char (VT U+000B) keeps its text, escaped", () => {
 	assert.equal(
 		extractContent({ content_type: "text", parts: ["line1\x0Bline2"] }),
-		null,
+		"line1\\u000Bline2",
 	);
+});
+
+function textNode(text: string): ChatGptNode {
+	return {
+		parent: null,
+		children: [],
+		message: {
+			author: { role: "user" },
+			content: { content_type: "text", parts: [text] },
+		},
+	} as ChatGptNode;
+}
+
+test("extractMessage: control-rich text is kept escaped and marked content_loss", () => {
+	const rec = extractMessage("n1", textNode("a\x00b"), "c1", true);
+	assert.equal(rec?.content, "a\\u0000b");
+	assert.equal(rec?.content_loss, "control_chars_escaped");
+	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+});
+
+test("extractMessage: oversize text is marked content_loss truncated", () => {
+	const rec = extractMessage(
+		"n1",
+		textNode("y".repeat(CONTENT_CAP * 2)),
+		"c1",
+		true,
+	);
+	assert.equal(rec?.content_loss, "truncated");
+	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+});
+
+test("extractMessage: clean text has content_loss null", () => {
+	const rec = extractMessage("n1", textNode("hello"), "c1", true);
+	assert.equal(rec?.content_loss, null);
 });
 
 test("extractContent: content with only allowed whitespace (\\t \\n \\r) is preserved", () => {

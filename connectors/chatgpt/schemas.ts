@@ -80,6 +80,9 @@ export const messageSchema = z.object({
 	// role can be user / assistant / system / tool / etc.
 	role: pdppSafeText.max(40).nullable(),
 	content: largeText.nullable(),
+	// Set when `content` is not the source's full text (escaped control chars,
+	// truncated, or dropped); null when nothing was lost.
+	content_loss: pdppSafeText.max(80).nullable(),
 	// content_type is like "text" / "code" / "multimodal_text" / etc.
 	content_type: pdppSafeText.max(60).nullable(),
 	model_slug: pdppSafeText.max(80).nullable(),

@@ -2728,7 +2728,7 @@ export async function processConversationDetail(
 		c: ConversationListItem,
 		detail: ConversationDetail | null,
 	) => Promise<void>,
-): Promise<void> {
+): Promise<ConversationDetailOutcome> {
 	const processingStarted = performance.now();
 	const reportProcessingTime = (): void => {
 		(
@@ -2747,10 +2747,14 @@ export async function processConversationDetail(
 		chatGptDiagnostic(
 			`${detail.status === 200 ? "missing_mapping" : "http_error"}: a conversation detail returned http ${detail.status}`,
 		);
-		// Fall back to list-only conversation record.
+		// Fall back to list-only conversation record. The record is not
+		// hydrated: the retryable gap keeps the missing messages owed.
 		reportProcessingTime();
 		await emitConversation(c, null);
-		return;
+		const reason =
+			detail.status === 200 ? "detail_mapping_missing" : "detail_http_error";
+		await deps.emit(makeIncompleteConversationDetailGap(c, reason));
+		return { complete: false, reason };
 	}
 	const { mapping } = detail.json;
 	const currentNode = detail.json.current_node || c.current_node;
@@ -2767,6 +2771,8 @@ export async function processConversationDetail(
 	let filteredByShape = 0;
 	let filteredAsDuplicate = 0;
 	let filteredAsNonMessage = 0;
+	let rejectedByShapeAnywhere = 0;
+	let lossyContentMessages = 0;
 	let currentNodeFilteredReason:
 		| "selection"
 		| "shape"
@@ -2808,12 +2814,16 @@ export async function processConversationDetail(
 		}
 		const validation = validateRecord("messages", msg);
 		if (validation && !validation.ok) {
+			rejectedByShapeAnywhere += 1;
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredByShape += 1;
 				if (nodeId === currentNode) currentNodeFilteredReason = "shape";
 			}
 			continue;
+		}
+		if (msg.content_loss !== null) {
+			lossyContentMessages += 1;
 		}
 		candidates.push({ nodeId, msg, onBranch });
 		if (messageId) candidateIds.add(messageId);
@@ -2876,6 +2886,18 @@ export async function processConversationDetail(
 		await deps.emitRecord("messages", msg);
 	}
 	await emitBranchReconciliation(mapping, currentNode, emittedBranchCount);
+	// A schema-rejected node or a lossy body means the emitted messages are not
+	// the source's full conversation. Say so durably instead of letting the
+	// caller count the conversation as hydrated.
+	const incompleteReason: ConversationDetailIncompleteReason | null =
+		rejectedByShapeAnywhere > 0
+			? "message_shape_rejected"
+			: lossyContentMessages > 0
+				? "message_content_lossy"
+				: null;
+	if (incompleteReason) {
+		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
+	}
 	if (emittedMessageCount === 0) {
 		// Completeness guard. A 200-with-mapping detail whose graph contains NO
 		// message-bearing node leaves a bare conversation row with zero messages
@@ -2898,6 +2920,10 @@ export async function processConversationDetail(
 			`empty_detail: a conversation returned http 200 with a mapping but no message-bearing nodes (node_count=${Object.keys(mapping).length})`,
 		);
 	}
+	if (incompleteReason) {
+		return { complete: false, reason: incompleteReason };
+	}
+	return { complete: true };
 }
 
 const PAGINATION_SAFETY_LIMIT = 5000;
@@ -5278,6 +5304,42 @@ function conversationListItemFromGap(
 	return { ...(hint as Record<string, unknown>), id } as ConversationListItem;
 }
 
+export type ConversationDetailIncompleteReason =
+	| "detail_http_error"
+	| "detail_mapping_missing"
+	| "message_content_lossy"
+	| "message_shape_rejected";
+
+/** What `processConversationDetail` proved about one conversation's messages. */
+export type ConversationDetailOutcome =
+	| { complete: true }
+	| { complete: false; reason: ConversationDetailIncompleteReason };
+
+/**
+ * Retryable gap for a conversation whose detail arrived but whose messages are
+ * not the source's full content. The next run re-fetches it; until the same
+ * conversation comes back clean the gap stays pending.
+ */
+function makeIncompleteConversationDetailGap(
+	c: ConversationListItem,
+	reason: ConversationDetailIncompleteReason,
+): DetailGapMessage {
+	// `reason` is a closed protocol enum; `retry_exhausted` arms no source
+	// cooldown (this is not source pressure). The specific cause rides in the
+	// locator so recovery and reviewers can tell the defect classes apart.
+	return buildDetailGap({
+		stream: "messages",
+		recordKey: c.id,
+		reason: "retry_exhausted",
+		locator: {
+			kind: "chatgpt.conversation",
+			conversation_id: c.id,
+			incomplete_reason: reason,
+			list_item: safeConversationListItemHint(c),
+		},
+	});
+}
+
 function makeConversationDetailGap(
 	c: ConversationListItem,
 	error: ChatGptRecoverableRetryExhaustedError,
@@ -6387,7 +6449,7 @@ export async function runMessagesAndConversationsWithDetail(
 					detailMs,
 					detail.providerFetchMs ?? detailMs,
 				);
-				await processConversationDetail(
+				const detailOutcome = await processConversationDetail(
 					detailDeps,
 					c,
 					detail,
@@ -6404,8 +6466,14 @@ export async function runMessagesAndConversationsWithDetail(
 				// Reset the progress-based give-up counter: any successful fetch proves the
 				// account is alive, so N consecutive no-progress waits restarts from 0.
 				consecutiveWaitOutsWithoutSuccess = 0;
-				hydratedKeys.add(c.id);
-				coverage.hydratedKeys.push(c.id);
+				if (detailOutcome.complete) {
+					hydratedKeys.add(c.id);
+					coverage.hydratedKeys.push(c.id);
+				} else {
+					// processConversationDetail already emitted the DETAIL_GAP.
+					gapKeys.add(c.id);
+					coverage.gapKeys.push(c.id);
+				}
 				// Count this hydration against the bounded-run cap. Done after a successful
 				// fetch so deferred/failed conversations never consume the size budget; the
 				// next `reason()` check (this pass or the forward pass sharing the budget)

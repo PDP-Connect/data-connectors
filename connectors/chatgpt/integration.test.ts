@@ -2697,6 +2697,131 @@ test("processConversationDetail: detail=200 with missing mapping — list-only f
 	);
 });
 
+function detailGaps(messages: readonly unknown[]): Array<Record<string, unknown>> {
+	return messages.filter(
+		(m): m is Record<string, unknown> =>
+			typeof m === "object" &&
+			m !== null &&
+			(m as { type?: unknown }).type === "DETAIL_GAP",
+	);
+}
+
+function userNode(
+	parent: string | null,
+	children: string[],
+	text: string,
+	role = "user",
+): ChatGptNode {
+	return {
+		parent,
+		children,
+		message: {
+			author: { role },
+			content: { content_type: "text", parts: [text] },
+		},
+	} as ChatGptNode;
+}
+
+test("processConversationDetail: a missing mapping emits a retryable messages DETAIL_GAP and is not complete", async () => {
+	const { deps, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo(),
+		{ status: 200, json: { title: "stub but no mapping" } },
+		makeEmitConversation(deps),
+	);
+	const gaps = detailGaps(messages);
+	assert.equal(gaps.length, 1);
+	assert.equal(gaps[0]?.stream, "messages");
+	assert.equal(gaps[0]?.record_key, "convo-abc");
+	assert.equal(gaps[0]?.reason, "retry_exhausted");
+	assert.equal(
+		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		"detail_mapping_missing",
+	);
+	assert.equal(gaps[0]?.retryable, true);
+	assert.equal(outcome.complete, false);
+});
+
+test("processConversationDetail: a schema-rejected branch node emits a DETAIL_GAP instead of a silent relink", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a2" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a2",
+				mapping: {
+					a0: userNode(null, ["a1"], "first"),
+					// role longer than the 40-char schema cap: rejected before emit
+					a1: userNode("a0", ["a2"], "bad role", "r".repeat(41)),
+					a2: userNode("a1", [], "last", "assistant"),
+				},
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	assert.equal(emitted.filter((r) => r.stream === "messages").length, 2);
+	const gaps = detailGaps(messages);
+	assert.equal(gaps.length, 1);
+	assert.equal(gaps[0]?.record_key, "convo-abc");
+	assert.equal(gaps[0]?.reason, "retry_exhausted");
+	assert.equal(
+		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		"message_shape_rejected",
+	);
+	assert.equal(outcome.complete, false);
+});
+
+test("processConversationDetail: lossy message content emits a DETAIL_GAP and keeps the text", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a0" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a0",
+				mapping: { a0: userNode(null, [], "bell\x00char") },
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	const msg = emitted.find((r) => r.stream === "messages");
+	assert.equal(msg?.data.content, "bell\\u0000char");
+	assert.equal(msg?.data.content_loss, "control_chars_escaped");
+	const gaps = detailGaps(messages);
+	assert.equal(gaps.length, 1);
+	assert.equal(gaps[0]?.reason, "retry_exhausted");
+	assert.equal(
+		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		"message_content_lossy",
+	);
+	assert.equal(outcome.complete, false);
+});
+
+test("processConversationDetail: a clean detail emits no gap and is complete", async () => {
+	const { deps, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a1" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a1",
+				mapping: {
+					a0: userNode(null, ["a1"], "first"),
+					a1: userNode("a0", [], "second", "assistant"),
+				},
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	assert.equal(detailGaps(messages).length, 0);
+	assert.equal(outcome.complete, true);
+});
+
 test("processConversationDetail: detail=200 with mapping but zero message-bearing nodes — records a record-level empty_detail diagnostic, not a stream SKIP", async () => {
 	// Completeness guard for the silent-empty class (dataconnect audit rec #5):
 	// a 200-with-mapping whose graph has only synthetic/role-less nodes lands a
@@ -2797,11 +2922,13 @@ test("processConversationDetail: detail=200 with at least one message — no emp
 	);
 });
 
-test("runConversationsAndMessagesStreams: unsafe message content is sanitized to null, message still emits (no shape-skip)", async () => {
+test("runConversationsAndMessagesStreams: unsafe message content is kept escaped and marked lossy, message still emits with a gap (no shape-skip)", async () => {
 	// SLVP-ideal behavior: a message whose text contains U+0000 or other forbidden
 	// control characters must NOT be dropped or made non-backfillable.
-	// extractContent sanitizes at extraction time: content becomes null and the
-	// record passes the schema. Both messages emit; no SKIP_RESULT is generated.
+	// extractContent escapes the forbidden char at extraction time and marks the
+	// record `content_loss`; the record passes the schema, both messages emit, no
+	// SKIP_RESULT is generated, and the conversation is NOT counted hydrated: a
+	// retryable DETAIL_GAP keeps the lossy body owed.
 	const unsafeNodeId = "unsafe-message";
 	const safeNodeId = "safe-message";
 	const listItem = makeConvo({
@@ -2906,8 +3033,22 @@ test("runConversationsAndMessagesStreams: unsafe message content is sanitized to
 	assert.ok(unsafeRecord, "unsafe message record must be present");
 	assert.equal(
 		unsafeRecord?.data.content,
-		null,
-		"unsafe content is null after sanitization",
+		"binary-ish\\u0000payload",
+		"unsafe content keeps its text with the control char escaped",
+	);
+	assert.equal(unsafeRecord?.data.content_loss, "control_chars_escaped");
+	const lossyGaps = harness.protocolMessages.filter(
+		(m) => m.type === "DETAIL_GAP",
+	);
+	assert.equal(lossyGaps.length, 1, "lossy content leaves a durable gap");
+	const coverageMsg = harness.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "messages",
+	);
+	assert.deepEqual(
+		(coverageMsg as { hydrated_keys?: unknown[] } | undefined)?.hydrated_keys ??
+			[],
+		[],
+		"a lossy conversation is not counted as hydrated",
 	);
 	const safeRecord = messageRecords.find((r) => r.data.id === safeNodeId);
 	assert.equal(
@@ -2930,9 +3071,10 @@ test("runConversationsAndMessagesStreams: unsafe message content is sanitized to
 		state_stream: "conversations",
 		stream: "messages",
 		required_keys: ["convo-with-binary-text"],
-		hydrated_keys: ["convo-with-binary-text"],
+		hydrated_keys: [],
 		considered: 1,
-		covered: 1,
+		covered: 0,
+		gap_keys: ["convo-with-binary-text"],
 	});
 
 	const stateEvents = harness.events.filter(

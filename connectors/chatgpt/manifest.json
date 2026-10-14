@@ -152,6 +152,9 @@
 						"type": ["string", "null"],
 						"x_pdpp_role": "primary-title"
 					},
+					"content_loss": {
+						"type": ["string", "null"]
+					},
 					"content_type": {
 						"type": ["string", "null"]
 					},

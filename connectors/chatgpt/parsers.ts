@@ -302,16 +302,47 @@ const CONTENT_EXTRACTORS: Readonly<
 	user_editable_context: extractUserEditableContext,
 };
 
+/** Why a message body is not the source's full text (null = nothing lost). */
+export type ContentLoss =
+	| "control_chars_escaped"
+	| "truncated"
+	| "truncated,control_chars_escaped"
+	| "unsafe_text_dropped";
+
+// Candidate code units that may fail PDPP-safe text: C0/C1 controls, lone
+// surrogates and noncharacters. Each candidate is re-checked against the real
+// validator so the escape set never drifts from `pdppSafeText`.
+const UNSAFE_CANDIDATE =
+	/[\u0000-\u001f\u007f-\u009f\ud800-\udfff\ufdd0-\ufdef\ufffe\uffff]/g;
+
+function isSafeText(s: string): boolean {
+	return pdppSafeText.safeParse(s).success;
+}
+
 /**
- * Sanitize extracted full text without preview-truncating it. Control-rich
- * payloads become null so the message record still lands instead of failing
- * shape validation and becoming non-backfillable.
+ * Make extracted full text PDPP-safe without discarding it: each code unit the
+ * validator rejects becomes a visible `\uXXXX` escape. Returns the escaped text
+ * and whether any escape was needed. A body that still fails after escaping
+ * (not expected) becomes null with the "dropped" marker so the loss is explicit.
  */
-function toSafeFullContent(s: string | null): string | null {
+function toSafeFullContent(
+	s: string | null,
+): { text: string | null; escaped: boolean; dropped: boolean } {
 	if (s === null) {
-		return null;
+		return { text: null, escaped: false, dropped: false };
 	}
-	return pdppSafeText.safeParse(s).success ? s : null;
+	if (isSafeText(s)) {
+		return { text: s, escaped: false, dropped: false };
+	}
+	const text = s.replace(UNSAFE_CANDIDATE, (ch) =>
+		isSafeText(ch)
+			? ch
+			: `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`,
+	);
+	if (!isSafeText(text)) {
+		return { text: null, escaped: false, dropped: true };
+	}
+	return { text, escaped: true, dropped: false };
 }
 
 // The messages schema caps `content` at `largeText.max(1_048_576)` chars
@@ -337,9 +368,12 @@ const OVERSIZE_TRUNCATION_MARKER =
  * code-unit boundary that never splits a surrogate pair, so the result stays
  * valid PDPP-safe text.
  */
-function toBoundedContent(s: string | null): string | null {
+function toBoundedContent(s: string | null): {
+	text: string | null;
+	truncated: boolean;
+} {
 	if (s === null || s.length <= CONTENT_MAX_CHARS) {
-		return s;
+		return { text: s, truncated: false };
 	}
 	let head =
 		CONTENT_MAX_CHARS - OVERSIZE_HEADROOM - OVERSIZE_TRUNCATION_MARKER.length;
@@ -352,7 +386,7 @@ function toBoundedContent(s: string | null): string | null {
 	if (last >= 0xd8_00 && last <= 0xdb_ff) {
 		head -= 1;
 	}
-	return s.slice(0, head) + OVERSIZE_TRUNCATION_MARKER;
+	return { text: s.slice(0, head) + OVERSIZE_TRUNCATION_MARKER, truncated: true };
 }
 
 /**
@@ -362,20 +396,40 @@ function toBoundedContent(s: string | null): string | null {
  * returns a string; we return null only if the payload is truly empty.
  *
  * Two safe-landing passes run after extraction so a single pathological
- * message never becomes a terminal shape_check_failed SKIP: control-rich
- * payloads collapse to null (toSafeFullContent), and safe-but-oversized
- * payloads truncate in-band with a recovery marker (toBoundedContent).
+ * message never becomes a terminal shape_check_failed SKIP, and neither pass
+ * is silent: control chars are escaped (not nulled) and oversize bodies are
+ * truncated in-band, each reported through `loss` so the record carries a
+ * `content_loss` marker.
  */
-export function extractContent(
-	content: ChatGptContent | undefined,
-): string | null {
+export function extractContentWithLoss(content: ChatGptContent | undefined): {
+	text: string | null;
+	loss: ContentLoss | null;
+} {
 	if (!content || typeof content !== "object") {
-		return null;
+		return { text: null, loss: null };
 	}
 	const type = content.content_type;
 	const handler = type ? CONTENT_EXTRACTORS[type] : undefined;
 	const raw = handler ? handler(content) : extractFallback(content);
-	return toBoundedContent(toSafeFullContent(raw));
+	const safe = toSafeFullContent(raw);
+	const bounded = toBoundedContent(safe.text);
+	let loss: ContentLoss | null = null;
+	if (safe.dropped) {
+		loss = "unsafe_text_dropped";
+	} else if (bounded.truncated && safe.escaped) {
+		loss = "truncated,control_chars_escaped";
+	} else if (bounded.truncated) {
+		loss = "truncated";
+	} else if (safe.escaped) {
+		loss = "control_chars_escaped";
+	}
+	return { text: bounded.text, loss };
+}
+
+export function extractContent(
+	content: ChatGptContent | undefined,
+): string | null {
+	return extractContentWithLoss(content).text;
 }
 
 // ─── Tool calls ─────────────────────────────────────────────────────────
@@ -429,7 +483,7 @@ export function extractMessage(
 	if (!m) {
 		return null;
 	}
-	const content = extractContent(m.content);
+	const { text: content, loss } = extractContentWithLoss(m.content);
 	return {
 		id: nodeId,
 		conversation_id: conversationId,
@@ -437,6 +491,7 @@ export function extractMessage(
 		children_ids: node.children ?? [],
 		role: m.author?.role ?? null,
 		content: content || null,
+		content_loss: loss,
 		content_type: m.content?.content_type ?? null,
 		model_slug: m.metadata?.model_slug ?? null,
 		create_time: tsToIso(m.create_time),
