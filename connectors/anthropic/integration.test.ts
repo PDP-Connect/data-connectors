@@ -3942,3 +3942,170 @@ for (const extra of KNOWN_EXTRA_PARTS) {
 		);
 	});
 }
+
+const FULL_METADATA_ENTRIES = listFilesRecursive(
+	join(SPLIT_EXPORT_DIR, "light_metadata-000"),
+).map((name) => ({
+	name,
+	content: JSON.parse(
+		readFileSync(join(SPLIT_EXPORT_DIR, "light_metadata-000", name), "utf8"),
+	),
+}));
+const FULL_FIXTURE_EMPTY_PROJECT_PARTS = [
+	{
+		category: "conversations",
+		part: 0,
+		entries: [
+			{
+				name: "conversations.json",
+				content: JSON.parse(
+					readFileSync(
+						join(SPLIT_EXPORT_DIR, "conversations-000/conversations.json"),
+						"utf8",
+					),
+				),
+			},
+		],
+	},
+	EMPTY_PROJECTS_PART,
+	{ category: "light_metadata", part: 0, entries: FULL_METADATA_ENTRIES },
+	...KNOWN_EXTRA_PARTS,
+];
+
+test("manifest known metadata: full fixture shape proves empty projects and documents beside login history", async () => {
+	const run = await runPartitions(FULL_FIXTURE_EMPTY_PROJECT_PARTS);
+	assertSelfMapped(run, "conversations", 2);
+	assertSelfMapped(run, "messages", 3);
+	assertSelfMapped(run, "projects", 0);
+	assertSelfMapped(run, "project_documents", 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assert.equal(run.recordsOf("account_profile").length, 1);
+	assert.deepEqual(run.recordsOf("account_profile")[0]?.data, {
+		id: "org-1",
+		organization_id: "org-1",
+		full_name: null,
+		plan: null,
+		name_source: "none",
+		metadata_status: "mismatch",
+	});
+});
+
+test("manifest known metadata: absent login history keeps archive proof", async () => {
+	const run = await runPartitions(
+		FULL_FIXTURE_EMPTY_PROJECT_PARTS.map((part) => ({
+			...part,
+			entries:
+				part.category === "light_metadata"
+					? part.entries.filter((entry) => entry.name !== "login_history.json")
+					: part.entries,
+		})),
+	);
+	assertSelfMapped(run, "conversations", 2);
+	assertSelfMapped(run, "projects", 0);
+	assertSelfMapped(run, "project_documents", 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+});
+
+for (const name of ["future_metadata.json", "nested/login_history.json"]) {
+	test(`manifest known metadata: unknown ${name} withholds every proof`, async () => {
+		const run = await runPartitions(
+			FULL_FIXTURE_EMPTY_PROJECT_PARTS.map((part) => ({
+				...part,
+				entries:
+					part.category === "light_metadata"
+						? [...part.entries, { name, content: [] }]
+						: part.entries,
+			})),
+		);
+		assert.equal(run.recordsOf("conversations").length, 2);
+		assertNoProofs(run);
+	});
+}
+
+for (const mode of ["buffered", "chunks"] as const) {
+	test(`manifest known metadata: unreadable login history ${mode} withholds every proof`, async () => {
+		const { deflateRawSync } = await import("node:zlib");
+		const parts = FULL_FIXTURE_EMPTY_PROJECT_PARTS.map((part) => ({
+			...part,
+			entries:
+				part.category === "light_metadata"
+					? [
+							{ name: "login_history.json", content: null },
+							...part.entries.filter(
+								(entry) => entry.name !== "login_history.json",
+							),
+						]
+					: part.entries,
+		}));
+		const zips = await Promise.all(
+			parts.map((part) => buildManifestPartZip(part.entries)),
+		);
+		const metadataIndex = parts.findIndex(
+			(part) => part.category === "light_metadata",
+		);
+		const metadataZip = zips[metadataIndex];
+		assert.ok(metadataZip);
+		const invalidJson = deflateRawSync(Buffer.from("nope"));
+		assert.equal(
+			invalidJson.length,
+			deflateRawSync(Buffer.from("null")).length,
+		);
+		metadataZip.set(invalidJson, 30 + Buffer.byteLength("login_history.json"));
+		const context = makeContext({
+			streams: ALL_PLUS_MESSAGES,
+			fetchStub: manifestFetchStub(
+				parts.map((part, index) => ({
+					category: part.category,
+					part: part.part,
+					token: `metadata-${index}`,
+				})),
+			),
+		});
+		const runtime = makeEmitRecord({
+			requested: context.ctx.requested,
+			emit: context.ctx.emit,
+			emittedAt: context.ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+		});
+		context.ctx.emitRecord = runtime.emit;
+		context.ctx.isRecordSelected = runtime.isSelected;
+		serveDownloads(
+			context.page,
+			new Map(zips.map((zip, index) => [`metadata-${index}`, zip])),
+		);
+		const texts = new Map(
+			parts.flatMap((part) =>
+				part.entries.map(
+					(entry) => [entry.name, JSON.stringify(entry.content)] as const,
+				),
+			),
+		);
+		texts.set("login_history.json", "nope");
+		await collectAnthropic({
+			...context.ctx,
+			...(mode === "chunks"
+				? {
+						readZipEntryChunk: (name: string, offset: number, length: number) =>
+							Promise.resolve(
+								texts.get(name)?.slice(offset, offset + length) ?? "",
+							),
+					}
+				: {}),
+		});
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) =>
+					message.type === "RECORD" && message.stream === "conversations",
+			).length,
+			2,
+		);
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) => message.type === "DETAIL_COVERAGE",
+			).length,
+			0,
+		);
+	});
+}

@@ -2629,6 +2629,9 @@ export async function collectAnthropic({
 		// these categories have no declared stream, but their parts still
 		// require the same archive accounting as consumed categories.
 		const knownUnconsumedCategories = new Set(["memories", "design_chats"]);
+		// parsers.ts and the split-export fixture document this exact name;
+		// other files inside light_metadata still have unknown semantics.
+		const knownUnconsumedMetadataFiles = new Set(["login_history.json"]);
 		const accountedCategories = [
 			"conversations",
 			"projects",
@@ -2666,7 +2669,13 @@ export async function collectAnthropic({
 					accountedCategories.includes(result.category) &&
 					// safeJsonParse returns null when an extra entry is unreadable.
 					(!knownUnconsumedCategories.has(result.category) ||
-						result.entries.every((entry) => entry.json !== null)),
+						result.entries.every((entry) => entry.json !== null)) &&
+					(result.category !== "light_metadata" ||
+						result.entries.every(
+							(entry) =>
+								!knownUnconsumedMetadataFiles.has(entry.name) ||
+								entry.json !== null,
+						)),
 			);
 		completeMessages &&= conversationsManifestBoundary;
 		conversationsExact &&= conversationsManifestBoundary;
@@ -2682,6 +2691,7 @@ export async function collectAnthropic({
 		// in a conversations part.
 		let conversationsSourceFound = false;
 		const outOfScopeByCategory = new Map<string, number>();
+		let unaccountedEntries = false;
 		for (const result of results) {
 			// A competing project discriminator must not hide an explicit
 			// malformed conversation child list from completeness accounting.
@@ -2702,6 +2712,12 @@ export async function collectAnthropic({
 			const classified = classifyManifestPartEntries(
 				result.category,
 				result.entries,
+			);
+			unaccountedEntries ||= classified.outOfScopeEntryNames.some(
+				(name) =>
+					!knownUnconsumedCategories.has(result.category) &&
+					(result.category !== "light_metadata" ||
+						!knownUnconsumedMetadataFiles.has(name)),
 			);
 			if (
 				result.category === "projects" &&
@@ -2814,17 +2830,14 @@ export async function collectAnthropic({
 			return;
 		}
 
-		const unaccountedCategories = [...outOfScopeByCategory.keys()].some(
-			(category) => !knownUnconsumedCategories.has(category),
-		);
 		if (
 			!conversationsSourceFound ||
 			unclassified.length > 0 ||
-			unaccountedCategories
+			unaccountedEntries
 		) {
 			completeMessages = false;
 		}
-		if (unclassified.length > 0 || unaccountedCategories) {
+		if (unclassified.length > 0 || unaccountedEntries) {
 			archiveComplete = false;
 		}
 		conversationsBoundary =
