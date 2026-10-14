@@ -2481,3 +2481,306 @@ test("collectAnthropic: a download failure that is not a spent link keeps the pe
 	assert.equal(emitted.length, 0);
 	assert.deepEqual(statesOf(protocolMessages), []);
 });
+
+test("collectAnthropic: completion evidence measures explicit empty messages", async () => {
+	const { protocolMessages } = await runManifest(
+		[
+			{
+				category: "conversations",
+				entries: [
+					{
+						name: "conversations.json",
+						content: [{ uuid: "conv-empty", chat_messages: [] }],
+					},
+				],
+			},
+		],
+		["messages"],
+	);
+	const proofs = protocolMessages.filter(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	assert.equal(proofs.length, 1);
+	assert.deepEqual(proofs[0], {
+		type: "DETAIL_COVERAGE",
+		stream: "messages",
+		state_stream: "messages",
+		reference_only: true,
+		required_keys: [],
+		hydrated_keys: [],
+		considered: 0,
+		covered: 0,
+	});
+});
+
+async function runCompletionExport(
+	mode: "buffered" | "streaming" | "manifest",
+	conversations: unknown,
+	options: {
+		scope?: {
+			time_range?: { since?: string; until?: string };
+			resources?: readonly string[];
+			fields?: readonly string[];
+		};
+		recoveryOnly?: boolean;
+		unknownEntry?: boolean;
+		unknownNonJson?: boolean;
+		wrongTotal?: boolean;
+		partGap?: boolean;
+		unknownPart?: boolean;
+		missingPart?: boolean;
+		pending?: boolean;
+	} = {},
+) {
+	const entries = [{ name: "conversations.json", content: conversations }];
+	if (options.unknownEntry) {
+		entries.push({ name: "future.json", content: [] });
+	}
+	if (options.unknownNonJson) {
+		entries.push({ name: "unknown.bin", content: [] });
+	}
+	const bytes = await buildManifestPartZip(entries);
+	const context = makeContext({
+		streams: ["conversations", "messages"],
+		fetchStub:
+			mode === "manifest"
+				? manifestFetchStub([
+						{ category: "conversations", token: "tok-c" },
+						...(options.unknownPart
+							? [{ category: "future", token: "tok-f" }]
+							: []),
+						...(options.missingPart
+							? [{ category: "conversations", token: "tok-m" }]
+							: []),
+					])
+				: oldFormatFetchStub({ exportRequests: 0 }),
+	});
+	if (options.wrongTotal || options.partGap) {
+		const originalEvaluate = context.page.evaluate.bind(context.page);
+		context.page.evaluate = async (fn, arg) => {
+			const result = await originalEvaluate(fn, arg);
+			if (
+				typeof result === "object" &&
+				result !== null &&
+				"manifest" in result
+			) {
+				const { manifest } = result;
+				if (
+					typeof manifest === "object" &&
+					manifest !== null &&
+					"total_files" in manifest &&
+					"data_files" in manifest
+				) {
+					if (options.wrongTotal) {
+						manifest.total_files = 2;
+					}
+					if (options.partGap && Array.isArray(manifest.data_files)) {
+						const [part] = manifest.data_files;
+						if (typeof part === "object" && part !== null) {
+							part.part = 1;
+						}
+					}
+				}
+			}
+			return result;
+		};
+	}
+	context.ctx.requested.set("messages", {
+		name: "messages",
+		...options.scope,
+		...(options.scope?.resources
+			? { resources: [...options.scope.resources] }
+			: {}),
+		...(options.scope?.fields ? { fields: [...options.scope.fields] } : {}),
+	});
+	if (options.recoveryOnly !== undefined) {
+		context.ctx.recoveryOnly = options.recoveryOnly;
+	}
+	const runtime = makeEmitRecord({
+		requested: context.ctx.requested,
+		emit: context.ctx.emit,
+		emittedAt: context.ctx.emittedAt,
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+	});
+	context.ctx.emitRecord = runtime.emit;
+	context.ctx.isRecordSelected = runtime.isSelected;
+	if (!options.pending) {
+		if (mode === "manifest") {
+			serveDownloads(
+				context.page,
+				new Map([
+					["tok-c", bytes],
+					["tok-f", bytes],
+				]),
+			);
+		} else {
+			serveDownload(context.page, bytes);
+		}
+	}
+	const texts = new Map(
+		entries.map((entry) => [entry.name, JSON.stringify(entry.content)]),
+	);
+	await collectAnthropic({
+		...context.ctx,
+		...(mode === "streaming"
+			? {
+					readZipEntryChunk: (name: string, offset: number, length: number) =>
+						Promise.resolve(
+							texts.get(name)?.slice(offset, offset + length) ?? "",
+						),
+					entriesValidated: true,
+				}
+			: {}),
+	});
+	const records = context.protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
+			message.type === "RECORD" && message.stream === "messages",
+	);
+	const proofs = context.protocolMessages.filter(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	return { ...context, records, proofs };
+}
+
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	for (const empty of [[], [{ uuid: "conv-empty", chat_messages: [] }]]) {
+		test(`collectAnthropic: completion evidence ${mode} recognizes empty boundary ${empty.length}`, async () => {
+			const { records, proofs } = await runCompletionExport(mode, empty);
+			assert.equal(records.length, 0);
+			assert.equal(proofs.length, 1);
+			assert.deepEqual(proofs[0], {
+				type: "DETAIL_COVERAGE",
+				stream: "messages",
+				state_stream: "messages",
+				reference_only: true,
+				required_keys: [],
+				hydrated_keys: [],
+				considered: 0,
+				covered: 0,
+			});
+		});
+	}
+	test(`collectAnthropic: completion evidence ${mode} measures delivery after the last message`, async () => {
+		const message = CONVERSATIONS_JSON[0]?.chat_messages[0];
+		assert.ok(message);
+		const { records, proofs, protocolMessages } = await runCompletionExport(
+			mode,
+			[
+				{
+					uuid: "conv-1",
+					chat_messages: [
+						{ ...message, uuid: "second", created_at: "2026-01-02T00:00:00Z" },
+						{ ...message, uuid: "first", created_at: "2026-01-01T00:00:00Z" },
+					],
+				},
+			],
+		);
+		assert.deepEqual(
+			records.map((record) => record.key),
+			["first", "second"],
+		);
+		assert.equal(proofs.length, 1);
+		assert.equal(proofs[0]?.considered, 2);
+		assert.equal(proofs[0]?.covered, 2);
+		assert.ok(proofs[0]);
+		assert.ok(records[1]);
+		assert.ok(
+			protocolMessages.indexOf(proofs[0]) >
+				protocolMessages.indexOf(records[1]),
+		);
+	});
+	for (const [label, conversations] of [
+		["missing child list", [{ uuid: "conv-1" }]],
+		["non-array child list", [{ uuid: "conv-1", chat_messages: null }]],
+		[
+			"malformed child",
+			[{ uuid: "conv-1", chat_messages: [null, { text: "no identity" }] }],
+		],
+		[
+			"duplicate message identities",
+			[{ uuid: "conv-1", chat_messages: [{ uuid: "same" }, { uuid: "same" }] }],
+		],
+		[
+			"duplicate parent identities",
+			[
+				{ uuid: "same", chat_messages: [] },
+				{ uuid: "same", chat_messages: [] },
+			],
+		],
+		["missing parent identity", [{ chat_messages: [{ uuid: "msg-1" }] }]],
+		[
+			"runtime schema rejection",
+			[
+				{
+					uuid: "conv-1",
+					chat_messages: [{ uuid: "valid-id", sender: "x".repeat(65) }],
+				},
+			],
+		],
+	] as const) {
+		test(`collectAnthropic: completion evidence ${mode} refuses ${label}`, async () => {
+			const { proofs } = await runCompletionExport(mode, conversations);
+			assert.equal(proofs.length, 0);
+		});
+	}
+	for (const [label, options] of [
+		[
+			"since window",
+			{ scope: { time_range: { since: "2025-01-01T00:00:00Z" } } },
+		],
+		[
+			"until window",
+			{ scope: { time_range: { until: "2027-01-01T00:00:00Z" } } },
+		],
+		["resource selection", { scope: { resources: ["absent"] } }],
+		["field selection", { scope: { fields: ["id"] } }],
+		["recovery-only enumeration", { recoveryOnly: true }],
+		["pending export", { pending: true }],
+	] as const) {
+		test(`collectAnthropic: completion evidence ${mode} refuses ${label}`, async () => {
+			const { proofs } = await runCompletionExport(
+				mode,
+				CONVERSATIONS_JSON,
+				options,
+			);
+			assert.equal(proofs.length, 0);
+		});
+	}
+}
+
+for (const [label, options] of [
+	["unknown category", { unknownPart: true }],
+	["missing manifest download", { missingPart: true }],
+	["wrong total files", { wrongTotal: true }],
+	["missing declared part index", { partGap: true }],
+	["unknown non-JSON entry", { unknownNonJson: true }],
+] as const) {
+	test(`collectAnthropic: completion evidence manifest refuses ${label}`, async () => {
+		const { proofs } = await runCompletionExport(
+			"manifest",
+			CONVERSATIONS_JSON,
+			options,
+		);
+		assert.equal(proofs.length, 0);
+	});
+}
+for (const mode of ["buffered", "streaming"] as const) {
+	test(`collectAnthropic: completion evidence ${mode} refuses unknown archive entry`, async () => {
+		const { proofs } = await runCompletionExport(mode, CONVERSATIONS_JSON, {
+			unknownEntry: true,
+		});
+		assert.equal(proofs.length, 0);
+	});
+	test(`collectAnthropic: completion evidence ${mode} refuses oversized parent`, async () => {
+		const { proofs } = await runCompletionExport(mode, [
+			{
+				uuid: "huge",
+				name: "x".repeat(33_554_432),
+				chat_messages: [{ uuid: "child" }],
+			},
+		]);
+		assert.equal(proofs.length, 0);
+	});
+}
