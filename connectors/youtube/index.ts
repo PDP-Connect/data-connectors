@@ -25,6 +25,7 @@ import {
 } from "./browser-dom.ts";
 import {
 	enumerationEnded,
+	type ListEnd,
 	type ListKind,
 	readListEnd,
 	readPageReadiness,
@@ -35,12 +36,22 @@ export { readPageReadiness } from "./page-evidence.ts";
 
 const HOME = "https://www.youtube.com/";
 const HISTORY_LIMIT = 50;
+const PAGE_HYDRATION_WAIT_MS = 2_000;
 const SCROLLS = {
 	subscriptions: 3,
 	playlists: 5,
 	playlist_items: 20,
 	history: 4,
 } as const;
+const LIST_CONTINUATION_SELECTORS: Record<ListKind, string> = {
+	history: "ytd-item-section-renderer ytd-continuation-item-renderer",
+	playlist:
+		"ytd-playlist-video-list-renderer ytd-continuation-item-renderer, #contents ytd-playlist-video-list-renderer ytd-continuation-item-renderer",
+	"playlist-index":
+		"ytd-rich-grid-renderer ytd-continuation-item-renderer, ytd-grid-renderer ytd-continuation-item-renderer",
+	subscriptions:
+		"ytd-expanded-shelf-contents-renderer ytd-continuation-item-renderer",
+};
 
 type CoverageFact = {
 	stream: string;
@@ -205,16 +216,43 @@ async function scroll(
 	page: BrowserCollectContext["page"],
 	rounds: number,
 	selector: string,
+	continuationSelector: string,
 	settleMilliseconds: number,
 ): Promise<boolean> {
-	let grew = false;
+	let unchangedRounds = 0;
 	for (let i = 0; i < rounds; i += 1) {
 		const before = await page.locator(selector).count();
-		await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+		const continuationBefore = await page
+			.locator(continuationSelector)
+			.count();
+		await page.evaluate((itemSelector) => {
+			const scrollable = Array.from(document.querySelectorAll("*"))
+				.filter(
+					(element) =>
+						element.scrollHeight > element.clientHeight + 8 &&
+						element.querySelector(itemSelector),
+				)
+				.sort(
+					(a, b) =>
+						b.scrollHeight - b.clientHeight - (a.scrollHeight - a.clientHeight),
+				)[0];
+			if (scrollable) scrollable.scrollBy(0, window.innerHeight * 2);
+			else window.scrollBy(0, window.innerHeight * 2);
+		}, selector);
 		await page.waitForTimeout(settleMilliseconds);
-		grew = (await page.locator(selector).count()) > before || grew;
+		const after = await page.locator(selector).count();
+		unchangedRounds = after === before ? unchangedRounds + 1 : 0;
+		const continuationAfter = await page
+			.locator(continuationSelector)
+			.count();
+		if (continuationBefore > 0 && continuationAfter === 0) {
+			await page.waitForTimeout(settleMilliseconds);
+			if ((await page.locator(continuationSelector).count()) === 0)
+				return true;
+		}
+		if (unchangedRounds >= 2) break;
 	}
-	return grew;
+	return false;
 }
 
 const EMPTY_STATE =
@@ -378,43 +416,127 @@ async function emitVerifiedEmptyState(
 	});
 }
 
-/**
- * Whether the source showed the end of the list that was just enumerated. Any
- * read failure counts as no evidence.
- */
-async function listEnded(
-	page: BrowserCollectContext["page"],
-	kind: ListKind,
-	renderedCount: number,
-	continuationFollowed = false,
-): Promise<boolean> {
-	try {
-		return enumerationEnded(
-			await page.evaluate(readListEnd, kind),
-			renderedCount,
-			continuationFollowed,
-		);
-	} catch {
-		return false;
-	}
+type ExhaustionEvidence = {
+	readonly kind:
+		| "continuation-removed"
+		| "explicit-end-marker"
+		| "page-data-empty"
+		| "unproven";
+	readonly page: ListEnd | null;
+};
+
+interface ListRead<T> {
+	readonly items: T[];
+	readonly exhausted: boolean;
+	readonly evidence: ExhaustionEvidence;
 }
 
-interface VideoReadResult {
-	readonly videos: BrowserVideo[];
+function exhaustionEvidence(
+	page: ListEnd | null,
+	renderedCount: number,
+	continuationRemoved: boolean,
+): ExhaustionEvidence {
+	if (page?.verifiedEmpty) return { kind: "page-data-empty", page };
+	if (!page || !enumerationEnded(page, renderedCount, continuationRemoved))
+		return { kind: "unproven", page };
+	return {
+		kind: continuationRemoved ? "continuation-removed" : "explicit-end-marker",
+		page,
+	};
+}
+
+async function readSubscriptionsList(
+	page: BrowserCollectContext["page"],
+	state: "content" | "empty",
+): Promise<
+	ListRead<Awaited<ReturnType<typeof readSubscriptions>>[number]>
+> {
+	const selector = "ytd-channel-renderer";
+	const continuationRemoved =
+		state === "content"
+			? await scroll(
+					page,
+					SCROLLS.subscriptions,
+					selector,
+					LIST_CONTINUATION_SELECTORS.subscriptions,
+					800,
+				)
+			: false;
+	const items =
+		state === "empty"
+			? []
+			: await page.evaluate(
+					readSubscriptions as () => ReturnType<typeof readSubscriptions>,
+				);
+	const pageEnd = await page.evaluate<ListEnd, ListKind>(
+		readListEnd,
+		"subscriptions",
+	);
+	const evidence = exhaustionEvidence(
+		pageEnd,
+		items.length,
+		continuationRemoved,
+	);
+	return {
+		items,
+		exhausted: evidence.kind !== "unproven",
+		evidence,
+	};
+}
+
+async function readPlaylistIndex(
+	page: BrowserCollectContext["page"],
+	state: "content" | "empty",
+): Promise<ListRead<Awaited<ReturnType<typeof readPlaylistLinks>>[number]>> {
+	const selector =
+		'ytd-playlist-renderer a[href*="list="], ytd-grid-playlist-renderer a[href*="list="], ytd-compact-playlist-renderer a[href*="list="], yt-lockup-view-model a[href*="list="], a[href*="list="]';
+	const continuationRemoved =
+		state === "content"
+			? await scroll(
+					page,
+					SCROLLS.playlists,
+					selector,
+					LIST_CONTINUATION_SELECTORS["playlist-index"],
+					1_000,
+				)
+			: false;
+	const items =
+		state === "empty"
+			? []
+			: await page.evaluate(
+					readPlaylistLinks as () => ReturnType<typeof readPlaylistLinks>,
+				);
+	const pageEnd = await page.evaluate<ListEnd, ListKind>(
+		readListEnd,
+		"playlist-index",
+	);
+	const evidence = exhaustionEvidence(
+		pageEnd,
+		items.length,
+		continuationRemoved,
+	);
+	return {
+		items,
+		exhausted: evidence.kind !== "unproven",
+		evidence,
+	};
+}
+
+interface VideoReadResult extends ListRead<BrowserVideo> {
 	readonly verifiedEmpty: boolean;
-	/** The source showed the end of the list. */
-	readonly endObserved: boolean;
 	/** The read stopped at the connector's own item limit. */
 	readonly cappedAtLimit: boolean;
 }
 
-async function visibleVideos(
+async function readVideoList(
 	page: BrowserCollectContext["page"],
 	url: string,
 	rounds: number,
 	mode: "playlist" | "history",
+	capture?: BrowserCollectContext["capture"],
 ): Promise<VideoReadResult> {
 	await page.goto(url, { waitUntil: "domcontentloaded" });
+	await page.waitForTimeout(PAGE_HYDRATION_WAIT_MS);
 	const state = await waitForContent(
 		page,
 		mode === "history"
@@ -423,17 +545,29 @@ async function visibleVideos(
 	);
 	if (state === "unreadable")
 		throw new Error(`youtube_${mode}_page_unreadable`);
-	if (state === "empty")
+	await capture?.captureDom(
+		page,
+		url.includes("list=LL")
+			? "youtube-liked-videos"
+			: mode === "history"
+				? "youtube-watch-history"
+				: "youtube-playlist-items",
+	);
+	if (state === "empty") {
+		const end = await page.evaluate(readListEnd, mode);
+		if (!end.verifiedEmpty) throw new Error("youtube_empty_list_unproven");
 		return {
-			videos: [],
+			items: [],
+			exhausted: true,
+			evidence: { kind: "page-data-empty", page: end },
 			verifiedEmpty: true,
-			endObserved: true,
 			cappedAtLimit: false,
 		};
+	}
 	const seen = new Set<string>();
 	const out: BrowserVideo[] = [];
 	let renderedCount = 0;
-	let continuationFollowed = false;
+	let continuationRemoved = false;
 	let noChangeRounds = 0;
 	const selector =
 		mode === "history"
@@ -453,11 +587,16 @@ async function visibleVideos(
 		noChangeRounds = out.length === previousCount ? noChangeRounds + 1 : 0;
 		if (mode === "history" && out.length >= HISTORY_LIMIT) break;
 		if (noChangeRounds >= 2) break;
-		if (await listEnded(page, mode, batch.length, continuationFollowed)) break;
 		if (round < rounds)
-			continuationFollowed =
-				(await scroll(page, 1, selector, mode === "history" ? 800 : 1_500)) ||
-				continuationFollowed;
+			continuationRemoved =
+				(await scroll(
+					page,
+					1,
+					selector,
+					LIST_CONTINUATION_SELECTORS[mode],
+					mode === "history" ? 800 : 1_500,
+				)) ||
+				continuationRemoved;
 	}
 	if (out.length === 0) throw new Error("youtube_video_parse_mismatch");
 	// The history limit is a cap the connector chose, not the end of the list.
@@ -465,14 +604,45 @@ async function visibleVideos(
 	// the cap discarded rows that were read.
 	const cappedAtLimit = mode === "history" && out.length >= HISTORY_LIMIT;
 	const discardedRows = mode === "history" && out.length > HISTORY_LIMIT;
+	const pageEnd = await page.evaluate(readListEnd, mode);
+	await capture?.captureDom(
+		page,
+		url.includes("list=LL")
+			? "youtube-liked-videos-after-scroll"
+			: mode === "history"
+				? "youtube-watch-history-after-scroll"
+				: "youtube-playlist-items-after-scroll",
+	);
+	const evidence = exhaustionEvidence(
+		pageEnd,
+		renderedCount,
+		continuationRemoved && !discardedRows,
+	);
 	return {
-		videos: mode === "history" ? out.slice(0, HISTORY_LIMIT) : out,
+		items: mode === "history" ? out.slice(0, HISTORY_LIMIT) : out,
+		exhausted: evidence.kind !== "unproven",
+		evidence,
 		verifiedEmpty: false,
-		endObserved:
-			!discardedRows &&
-			(await listEnded(page, mode, renderedCount, continuationFollowed)),
 		cappedAtLimit,
 	};
+}
+
+function readPlaylistVideoList(
+	page: BrowserCollectContext["page"],
+	url: string,
+	rounds: number,
+	capture?: BrowserCollectContext["capture"],
+): Promise<VideoReadResult> {
+	return readVideoList(page, url, rounds, "playlist", capture);
+}
+
+function readWatchHistoryList(
+	page: BrowserCollectContext["page"],
+	url: string,
+	rounds: number,
+	capture?: BrowserCollectContext["capture"],
+): Promise<VideoReadResult> {
+	return readVideoList(page, url, rounds, "history", capture);
 }
 
 async function readableVideos(
@@ -480,12 +650,14 @@ async function readableVideos(
 	streams: StreamReporter,
 	url: string,
 	rounds: number,
-	mode: "playlist" | "history",
 	stream: string,
 ): Promise<VideoReadResult | null> {
 	try {
-		const result = await visibleVideos(ctx.page, url, rounds, mode);
-		if (!result.endObserved)
+		const result =
+			stream === "watch_history"
+				? await readWatchHistoryList(ctx.page, url, rounds, ctx.capture)
+				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
+		if (!result.exhausted)
 			await streams.fail(
 				stream,
 				result.cappedAtLimit ? HISTORY_CAP_MESSAGE : undefined,
@@ -510,7 +682,7 @@ type BrowserContext = Pick<
 	| "emit"
 	| "progress"
 	| "reportStreamFailure"
->;
+> & { capture?: BrowserCollectContext["capture"] };
 
 async function emitCoverageProgress(
 	ctx: Pick<BrowserContext, "progress">,
@@ -679,40 +851,31 @@ export async function collectYoutubeBrowser(
 			await page.goto(`${HOME}feed/channels`, {
 				waitUntil: "domcontentloaded",
 			});
+			await page.waitForTimeout(PAGE_HYDRATION_WAIT_MS);
 			const state = await waitForContent(page, "ytd-channel-renderer");
+			await ctx.capture?.captureDom(page, "youtube-subscriptions");
 			if (state === "unreadable")
 				await streams.fail(
 					"subscriptions",
 					"YouTube did not expose readable subscription cards.",
 				);
 			else {
-				const continuationFollowed = await scroll(
+				const result = await readSubscriptionsList(page, state);
+				await ctx.capture?.captureDom(
 					page,
-					SCROLLS.subscriptions,
-					"ytd-channel-renderer",
-					800,
+					"youtube-subscriptions-after-scroll",
 				);
-				const subscriptions =
-					state === "empty"
-						? []
-						: await page.evaluate(
-								readSubscriptions as () => ReturnType<typeof readSubscriptions>,
-							);
+				const subscriptions = result.items;
 				if (state === "content" && subscriptions.length === 0) {
 					await streams.fail(
 						"subscriptions",
 						"YouTube showed subscription content, but the connector could not parse any channel cards.",
 					);
 				} else if (state === "empty") {
-					await emitVerifiedEmptyState(ctx, "subscriptions", capturedAt);
-				} else if (
-					!(await listEnded(
-						page,
-						"subscriptions",
-						subscriptions.length,
-						continuationFollowed,
-					))
-				) {
+					if (result.exhausted)
+						await emitVerifiedEmptyState(ctx, "subscriptions", capturedAt);
+					else await streams.fail("subscriptions");
+				} else if (!result.exhausted) {
 					await streams.fail("subscriptions");
 				}
 				for (const channel of subscriptions)
@@ -742,44 +905,35 @@ export async function collectYoutubeBrowser(
 			await page.goto(`${HOME}feed/playlists`, {
 				waitUntil: "domcontentloaded",
 			});
+			await page.waitForTimeout(PAGE_HYDRATION_WAIT_MS);
 			const state = await waitForContent(page, 'a[href*="list="]', {
 				playlistIndex: true,
 			});
+			await ctx.capture?.captureDom(page, "youtube-playlist-index");
 			if (state === "unreadable") {
 				playlistIndexReadable = false;
 				await failPlaylistStreams(
 					"YouTube did not expose a readable playlist index.",
 				);
-			} else if (state === "content") {
-				const continuationFollowed = await scroll(
+			} else {
+				const result = await readPlaylistIndex(page, state);
+				await ctx.capture?.captureDom(
 					page,
-					SCROLLS.playlists,
-					'ytd-playlist-renderer a[href*="list="], ytd-grid-playlist-renderer a[href*="list="], ytd-compact-playlist-renderer a[href*="list="], a[href*="list="]',
-					1_000,
+					"youtube-playlist-index-after-scroll",
 				);
-				playlistLinks = await page.evaluate(
-					readPlaylistLinks as () => ReturnType<typeof readPlaylistLinks>,
-				);
-				const indexEnded =
-					playlistLinks.length > 0 &&
-					(await listEnded(
-						page,
-						"playlist-index",
-						playlistLinks.length,
-						continuationFollowed,
-					));
+				playlistLinks = result.items;
 				for (const stream of ["playlists", "playlist_items"]) {
 					if (!requested.has(stream)) continue;
-					if (playlistLinks.length === 0) {
+					if (state === "empty" && result.exhausted) {
+						playlistIndexVerifiedEmpty = true;
+					} else if (playlistLinks.length === 0) {
 						playlistIndexReadable = false;
 						await streams.fail(
 							stream,
 							"YouTube showed playlist index content, but the connector could not parse any playlist links.",
 						);
-					} else if (!indexEnded) await streams.fail(stream);
+					} else if (!result.exhausted) await streams.fail(stream);
 				}
-			} else if (state === "empty") {
-				playlistIndexVerifiedEmpty = true;
 			}
 		} catch {
 			playlistIndexReadable = false;
@@ -837,11 +991,10 @@ export async function collectYoutubeBrowser(
 						streams,
 						playlist.url,
 						SCROLLS.playlist_items,
-						"playlist",
 						"playlist_items",
 					);
 					if (result) {
-						for (const video of result.videos) {
+						for (const video of result.items) {
 							await emit("playlist_items", {
 								id: id(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
 								playlist_id: playlist.id,
@@ -873,11 +1026,10 @@ export async function collectYoutubeBrowser(
 			streams,
 			`${HOME}playlist?list=${list}`,
 			SCROLLS.playlist_items,
-			"playlist",
 			stream,
 		);
 		if (!result) continue;
-		for (const video of result.videos)
+		for (const video of result.items)
 			await emit(stream, {
 				id: id(`${stream}|${videoIdentity(video)}`),
 				...videoFields(video),
@@ -902,14 +1054,13 @@ export async function collectYoutubeBrowser(
 			streams,
 			`${HOME}feed/history`,
 			SCROLLS.history,
-			"history",
 			"watch_history",
 		);
 		if (result) {
-			const { videos } = result;
+			const { items } = result;
 			const fact = coverage.get("watch_history");
 			if (fact) {
-				fact.enumerated_count = videos.length;
+				fact.enumerated_count = items.length;
 				fact.limit = HISTORY_LIMIT;
 				fact.skipped_unresolved_date_count = 0;
 			}
@@ -921,7 +1072,7 @@ export async function collectYoutubeBrowser(
 				Array.isArray(browserDate) && browserDate.length === 3
 					? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
 					: new Date(capturedAt);
-			for (const [position, video] of videos.entries()) {
+			for (const [position, video] of items.entries()) {
 				const watchedDate = resolveWatchedDate(
 					video.watched_date_label ?? null,
 					dateReference,

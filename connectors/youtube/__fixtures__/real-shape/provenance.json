@@ -1,0 +1,12 @@
+{
+  "source": "scrubbed live capture",
+  "run": "2026-10-14T23-10-31-284Z",
+  "captures": [
+    "youtube-subscriptions",
+    "youtube-subscriptions-after-scroll",
+    "youtube-playlist-index",
+    "youtube-playlist-index-after-scroll"
+  ],
+  "scrubber": "packages/polyfill-connectors/bin/scrub-fixtures.ts",
+  "personalValues": "removed from curated DOM"
+}

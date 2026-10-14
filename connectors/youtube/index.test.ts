@@ -62,6 +62,7 @@ class FixturePage {
 	private readonly waitStates: Array<
 		"content" | "empty" | "json-empty" | "unreadable"
 	>;
+	private lastWaitState: "content" | "empty" | "json-empty" = "content";
 	private readonly ownAccount: {
 		channel_url: string | null;
 		email: string | null;
@@ -91,11 +92,26 @@ class FixturePage {
 	async waitForFunction() {
 		const state = this.waitStates.shift() ?? "content";
 		if (state === "unreadable") throw new Error("fixture page read timed out");
+		this.lastWaitState = state;
 		if (state === "json-empty")
 			return { jsonValue: async () => "empty", dispose: async () => undefined };
 		return { jsonValue: async () => state, dispose: async () => undefined };
 	}
-	async evaluate(fn: Function): Promise<any> {
+	async evaluate(fn: Function): Promise<unknown> {
+		if (fn.name === "readListEnd") {
+			const empty =
+				this.lastWaitState === "empty" || this.lastWaitState === "json-empty";
+			return {
+				dataReadable: !empty,
+				dataItemCount: empty ? 0 : 1,
+				dataHasContinuation: false,
+				domHasContinuation: false,
+				declaredTotal: null,
+				domItemCount: null,
+				domHasEndMarker: false,
+				verifiedEmpty: empty,
+			};
+		}
 		if (fn.name === "readOwnAccount") return this.ownAccount;
 		if (fn.name === "readChannelPage")
 			return {
@@ -880,6 +896,8 @@ const tabbedData = (content: unknown, extra: Record<string, unknown> = {}) => ({
 const playlistRow = `<ytd-playlist-video-renderer><a href="/watch?v=abc123XYZ0&list=LL"></a><h3>Real video title</h3></ytd-playlist-video-renderer>`;
 const historyRow = `<ytd-item-section-renderer><yt-lockup-view-model><a href="/watch?v=aaaaaaaaaaa"></a><h3>Seen</h3></yt-lockup-view-model></ytd-item-section-renderer>`;
 const channelRow = `<ytd-channel-renderer><a id="main-link" href="/@creator"></a><ytd-channel-name><yt-formatted-string id="text">Creator</yt-formatted-string></ytd-channel-name></ytd-channel-renderer>`;
+const END_OF_LIST = `<div id="contents"><div id="message">No more videos</div></div>`;
+const END_OF_PLAYLIST_INDEX = `<div id="contents"><div id="message">No more items</div></div>`;
 const headerTotal = (text: string) =>
 	`<div class="yt-content-metadata-view-model__metadata-text">${text}</div>`;
 const playlistPageData = (itemCount: number, continuation = false) =>
@@ -967,18 +985,18 @@ async function collectFromDocuments(
 	return { records, messages, outcome };
 }
 
-test("finding 1: a list whose source total matches what was read completes with no skip", async () => {
+test("finding 1: a matching source total without a terminal marker still fails", async () => {
 	const { records, outcome } = await collectFromDocuments(
 		() => `${playlistRow}${headerTotal("1 video")}${playlistPageData(1, true)}`,
 		["likes", "watch_later"],
 	);
 	assert.equal(records.get("likes")?.length, 1);
 	assert.equal(records.get("watch_later")?.length, 1);
-	assert.deepEqual(outcome("likes"), []);
-	assert.deepEqual(outcome("watch_later"), []);
+	assert.deepEqual(outcome("likes"), ["stream_collection_failed"]);
+	assert.deepEqual(outcome("watch_later"), ["stream_collection_failed"]);
 });
 
-test("finding 1: a list the source reports no next page for completes with no skip", async () => {
+test("finding 1: no next-page token at load does not prove completion", async () => {
 	const pages = (url: string) =>
 		url.includes("feed/history")
 			? `${historyRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }] } }))}`
@@ -991,15 +1009,15 @@ test("finding 1: a list the source reports no next page for completes with no sk
 	]);
 	assert.equal(records.get("watch_history")?.length, 1);
 	assert.equal(records.get("subscriptions")?.length, 1);
-	assert.deepEqual(outcome("watch_history"), []);
-	assert.deepEqual(outcome("subscriptions"), []);
+	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+	assert.deepEqual(outcome("subscriptions"), ["stream_collection_failed"]);
 });
 
-test("finding 1: playlist index and every playlist read to their end complete with no skip", async () => {
+test("a playlist index and each playlist with explicit end markers complete", async () => {
 	const pages = (url: string) =>
 		url.includes("feed/playlists")
-			? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}`
-			: `<h1><yt-formatted-string>My list</yt-formatted-string></h1>${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}`;
+			? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
+			: `<h1><yt-formatted-string>My list</yt-formatted-string></h1>${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`;
 	const { records, outcome } = await collectFromDocuments(pages, [
 		"playlists",
 		"playlist_items",
@@ -1014,8 +1032,8 @@ test("playlist item collection continues when playlist header details are unread
 	const { records, outcome } = await collectFromDocuments(
 		(url) =>
 			url.includes("feed/playlists")
-				? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}`
-				: `${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}`,
+				? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
+				: `${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`,
 		["playlists", "playlist_items"],
 	);
 	assert.equal(records.get("playlists")?.length, undefined);
@@ -1187,26 +1205,33 @@ test("finding 3: the playlist index counts only the playlists the connector enum
 
 test("finding 3: readiness and readPlaylistLinks agree on which links are playlists", async () => {
 	const { readPlaylistLinks } = await import("./browser-dom.ts");
-	for (const html of [
-		BUILT_IN_LINKS,
-		`${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`,
-		`<a href="https://evil.example/playlist?list=PL9">Elsewhere</a>`,
-		`<a href="/playlist?list=PL1">A</a><a href="/playlist?list=PL1&amp;x=1">Again</a>`,
-	]) {
+	const cases = [
+		{ html: BUILT_IN_LINKS, ready: false, playlists: 0 },
+		{ html: `${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`, ready: true, playlists: 1 },
+		{ html: `<a href="https://evil.example/playlist?list=PL9">Elsewhere</a>`, ready: false, playlists: 0 },
+		{ html: `<a href="/playlist?list=PL1">A</a><a href="/playlist?list=PL1&amp;x=1">Again</a>`, ready: true, playlists: 1 },
+		{ html: `<yt-lockup-view-model>${BUILT_IN_LINKS}</yt-lockup-view-model>`, ready: true, playlists: 0 },
+	];
+	for (const { html, ready, playlists } of cases) {
 		withBrowserGlobals(html, () => {
 			const readiness = readPageReadiness(PLAYLIST_INDEX);
 			assert.equal(
 				readiness === "content",
-				readPlaylistLinks().length > 0,
+				ready,
 				html,
 			);
+			assert.equal(readPlaylistLinks().length, playlists, html);
 		});
 	}
 });
 
-test("finding 3: an account with only built-in lists and a genuine empty state completes both playlist streams", async () => {
+test("built-in lists plus page-data empty evidence complete both playlist streams", async () => {
 	const { records, messages, outcome } = await collectFromDocuments(
-		() => `${BUILT_IN_LINKS}${NO_PLAYLISTS}`,
+		() => `${BUILT_IN_LINKS}${pageData(tabbedData({ richGridRenderer: { contents: [
+			{ lockupViewModel: { contentId: "WL" } },
+			{ lockupViewModel: { contentId: "LL" } },
+			{ messageRenderer: { text: { runs: [{ text: "No playlists yet" }] } } },
+		] } }))}`,
 		["playlists", "playlist_items"],
 	);
 	assert.equal(records.size, 0);
@@ -1330,7 +1355,7 @@ test("round 3: exactly 50 complete history items with source-end evidence comple
 		.join("");
 	const { records, outcome } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}`,
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}${END_OF_LIST}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);

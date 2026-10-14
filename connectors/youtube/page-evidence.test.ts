@@ -16,9 +16,11 @@ const NO_EVIDENCE: ListEnd = {
 	domHasContinuation: false,
 	declaredTotal: null,
 	domItemCount: null,
+	domHasEndMarker: false,
+	verifiedEmpty: false,
 };
 
-test("enumeration ends only on a matching source total or a no-next-page signal", () => {
+test("enumeration ends only on positive page terminal evidence", () => {
 	const ended = (
 		end: Partial<ListEnd> | null,
 		rendered: number,
@@ -31,12 +33,12 @@ test("enumeration ends only on a matching source total or a no-next-page signal"
 		);
 	assert.equal(ended(null, 3), false, "no evidence read");
 	assert.equal(ended({}, 3), false, "unreadable page data is not evidence");
-	assert.equal(ended({ declaredTotal: 3 }, 3), true, "total matches");
+	assert.equal(ended({ declaredTotal: 3 }, 3), false, "a total is not an end marker");
 	assert.equal(ended({ declaredTotal: 9 }, 3), false, "total not reached");
 	assert.equal(
 		ended({ dataReadable: true, dataItemCount: 3 }, 3),
-		true,
-		"no next page at load",
+		false,
+		"absence of a next page at load is not a terminal response",
 	);
 	assert.equal(
 		ended({ dataReadable: true, domHasContinuation: true }, 3),
@@ -64,14 +66,28 @@ test("enumeration ends only on a matching source total or a no-next-page signal"
 			{
 				dataReadable: true,
 				dataItemCount: 3,
-				dataHasContinuation: true,
+				dataHasContinuation: false,
 				domHasContinuation: false,
 			},
 			7,
 			true,
 		),
 		true,
-		"a followed continuation that grew the rendered list and removed its control reached the end",
+		"a followed continuation with no remaining token reached the end",
+	);
+	assert.equal(
+		ended({ domHasEndMarker: true }, 3),
+		true,
+		"an explicit rendered end marker proves exhaustion",
+	);
+	assert.equal(
+		ended(
+			{ dataReadable: true, dataItemCount: 3, dataHasContinuation: true },
+			7,
+			false,
+		),
+		false,
+		"row growth while a continuation remains is not end evidence",
 	);
 	assert.equal(
 		ended({ dataReadable: true, dataItemCount: 3 }, 1),
@@ -99,6 +115,26 @@ test("a page-data region with no recognized entry is not readable evidence", () 
 	globals.window = window;
 	try {
 		assert.equal(readListEnd("playlist").dataReadable, false);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+});
+
+test("an unrelated empty message without a list renderer cannot prove an empty playlist", () => {
+	const globals = globalThis as Record<string, unknown>;
+	const data = {
+		contents: {
+			messageRenderer: { text: { simpleText: "Nothing to show" } },
+		},
+	};
+	const { document, window } = parseHTML(
+		`<script>var ytInitialData = ${JSON.stringify(data)};</script>`,
+	);
+	globals.document = document;
+	globals.window = window;
+	try {
+		assert.equal(readListEnd("playlist").verifiedEmpty, false);
 	} finally {
 		globals.document = undefined;
 		globals.window = undefined;
@@ -141,6 +177,8 @@ test("readListEnd reads the header total, continuation and row count from the pa
 			domHasContinuation: false,
 			declaredTotal: 1204,
 			domItemCount: null,
+			domHasEndMarker: false,
+			verifiedEmpty: false,
 		});
 		assert.equal(readListEnd("history").declaredTotal, null);
 		assert.equal(readListEnd("subscriptions").domItemCount, 1);

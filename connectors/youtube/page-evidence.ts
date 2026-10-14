@@ -33,14 +33,16 @@ export interface ListEnd {
 	readonly declaredTotal: number | null;
 	/** Rendered items before the connector's own row limit (kinds with one). */
 	readonly domItemCount: number | null;
+	/** The target list's own rendered end marker is present. */
+	readonly domHasEndMarker: boolean;
+	/** The target page data explicitly says the list is empty. */
+	readonly verifiedEmpty: boolean;
 }
 
 /**
- * True only when the source shows the end of the list. Either the header total
- * equals what was read, or the page's own data had no next page and every item
- * in it was read. A header total that differs from the read count is not an end.
- * A missing next-page control, a timeout, an unreadable page, or row growth is
- * not evidence: the final source response is never observed.
+ * True only after the page showed a positive terminal signal: a continuation
+ * renderer was observed and then removed, or the page showed an explicit end
+ * marker. Missing controls, totals, timeouts and row growth are not evidence.
  */
 export function enumerationEnded(
 	end: ListEnd | null | undefined,
@@ -50,18 +52,8 @@ export function enumerationEnded(
 	if (!end) return false;
 	if (end.domItemCount !== null && end.domItemCount > renderedCount)
 		return false;
-	if (end.declaredTotal !== null) return end.declaredTotal === renderedCount;
-	if (
-		continuationFollowed &&
-		end.dataReadable &&
-		end.dataHasContinuation &&
-		renderedCount > end.dataItemCount &&
-		!end.domHasContinuation
-	)
-		return true;
-	if (!end.dataReadable || end.dataHasContinuation || end.domHasContinuation)
-		return false;
-	return renderedCount >= end.dataItemCount;
+	if (end.domHasContinuation) return false;
+	return end.domHasEndMarker || continuationFollowed;
 }
 
 const PAGE_DATA_HELPERS = String.raw`
@@ -171,7 +163,11 @@ const PAGE_DATA_HELPERS = String.raw`
 				if (LIST_KEYS.includes(key) && isObject(child)) {
 					facts.lists += 1;
 					const contents = child.contents ?? child.items;
-					if (Array.isArray(contents) && contents.length === 0 && !child.continuations) facts.emptyLists += 1;
+					const onlyBuiltIns = playlistIndex && Array.isArray(contents) && contents.every((item) =>
+						BUILT_IN_PLAYLIST.test(JSON.stringify(item)) ||
+						(isObject(item) && Object.keys(item).some((name) => EMPTY_MESSAGE_KEYS.includes(name)))
+					);
+					if (Array.isArray(contents) && (contents.length === 0 || onlyBuiltIns) && !child.continuations) facts.emptyLists += 1;
 				}
 				visit(child);
 			}
@@ -191,19 +187,20 @@ const PAGE_DATA_HELPERS = String.raw`
 
 const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
 	${PAGE_DATA_HELPERS}
-	const hasContent = playlistIndex
+	const hasEnumerableContent = playlistIndex
 		? Array.from(document.querySelectorAll(content)).some(isEnumerablePlaylistLink)
 		: Boolean(document.querySelector(content));
-	if (hasContent) return "content";
-	if (Array.from(document.querySelectorAll(empty)).some((node) =>
-		isRecognizedEmptyText(node.textContent ?? ""))) return "empty";
+	if (hasEnumerableContent) return "content";
 	const facts = pageDataFacts(Boolean(playlistIndex));
 	// Every readable copy of the page data must show no item, no next page and no
 	// non-empty list. Another list's empty payload cannot prove this one empty.
 	const holdsNothing = (f) => f.items === 0 && !f.continuation && f.emptyLists === f.lists;
-	return facts.some((f) => f.emptyMessage || f.emptyLists > 0) && facts.every(holdsNothing)
-		? "empty"
-		: false;
+	const hasSourceEmptyMessage = facts.some((f) => f.emptyMessage || f.emptyLists > 0);
+	if (hasSourceEmptyMessage && facts.every(holdsNothing)) return "empty";
+	if (playlistIndex && document.querySelector("yt-lockup-view-model")) return "content";
+	if (Array.from(document.querySelectorAll(empty)).some((node) =>
+		isRecognizedEmptyText(node.textContent ?? ""))) return "empty";
+	return false;
 }`;
 
 const LIST_END_FUNCTION = `(kind) => {
@@ -227,15 +224,33 @@ const LIST_END_FUNCTION = `(kind) => {
 			if (isEnumerablePlaylistLink(anchor)) ids.add(new URL(anchor.getAttribute("href") ?? "", BASE).searchParams.get("list"));
 		domItemCount = ids.size;
 	}
+	const endText = Array.from(document.querySelectorAll("#contents #message, .ytd-item-section-renderer #message"))
+		.map((node) => node.textContent ?? "")
+		.join(" ");
+	const continuationSelector = kind === "subscriptions"
+		? "ytd-expanded-shelf-contents-renderer ytd-continuation-item-renderer"
+		: kind === "playlist-index"
+			? "ytd-rich-grid-renderer ytd-continuation-item-renderer, ytd-grid-renderer ytd-continuation-item-renderer"
+			: kind === "history"
+				? "ytd-item-section-renderer ytd-continuation-item-renderer"
+				: "ytd-playlist-video-list-renderer ytd-continuation-item-renderer, #contents ytd-playlist-video-list-renderer ytd-continuation-item-renderer";
 	return {
 		// A region with no recognized entry (an error, an unrelated payload) shows
 		// neither a last page nor a next page, so it is not readable evidence.
 		dataReadable: facts.some((f) => f.items > 0),
 		dataItemCount: facts.reduce((most, f) => Math.max(most, f.items), 0),
 		dataHasContinuation: facts.some((f) => f.continuation),
-		domHasContinuation: Boolean(document.querySelector("ytd-continuation-item-renderer")),
+		domHasContinuation: Boolean(document.querySelector(continuationSelector)),
 		declaredTotal,
 		domItemCount,
+		domHasEndMarker: /(?:no more (?:videos|items)|end of (?:the )?list|you(?:'|’)ve reached the end)/i.test(endText),
+		verifiedEmpty: facts.length > 0 && facts.every((f) =>
+			f.items === 0 &&
+			!f.continuation &&
+			f.lists > 0 &&
+			f.emptyMessage &&
+			f.emptyLists === f.lists
+		),
 	};
 }`;
 

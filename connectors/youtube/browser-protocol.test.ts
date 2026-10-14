@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -198,165 +199,122 @@ test("history waits for delayed client DOM before recording", async () => {
 	}
 });
 
-test("subscriptions wait for continuation rows beyond the first rendered batch", async () => {
+test("scrubbed live subscription DOM scrolls its app container and reports missing end evidence", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
-		const subscription = (number: number) =>
-			`<ytd-channel-renderer><ytd-channel-name><yt-formatted-string id="text">Creator ${number}</yt-formatted-string></ytd-channel-name><a id="main-link" href="/@creator${number}"></a></ytd-channel-renderer>`;
-		const initialData = {
-			contents: {
-				twoColumnBrowseResultsRenderer: {
-					tabs: [
-						{
-							tabRenderer: {
-								selected: true,
-								content: {
-									richGridRenderer: {
-										contents: [
-											...Array.from({ length: 4 }, () => ({
-												channelRenderer: {},
-											})),
-											{
-												continuationItemRenderer: { continuationEndpoint: {} },
-											},
-										],
-									},
-								},
-							},
-						},
-					],
-				},
-			},
-		};
+		const html = readFileSync(
+			new URL("./__fixtures__/real-shape/subscriptions-before-scroll.html", import.meta.url),
+			"utf8",
+		);
 		await page.route("https://www.youtube.com/**", async (route) => {
-			await route.fulfill({
-				contentType: "text/html",
-				body: `<html><body><div style="height:6000px"><div id="subscriptions">${Array.from({ length: 4 }, (_, index) => subscription(index + 1)).join("")}</div></div><script>var ytInitialData = ${JSON.stringify(initialData)}; setTimeout(() => document.querySelector("#subscriptions").insertAdjacentHTML("beforeend", ${JSON.stringify(Array.from({ length: 16 }, (_, index) => subscription(index + 5)).join(""))}), 1800);</script></body></html>`,
-			});
+			await route.fulfill({ contentType: "text/html", body: html });
 		});
 		const records: Record<string, unknown>[] = [];
 		const failures: string[] = [];
+		const messages: Record<string, unknown>[] = [];
 		await collectYoutubeBrowser({
 			page: page as never,
-			requested: new Map([
-				["subscriptions", { name: "subscriptions" }],
-			]) as never,
+			requested: new Map([["subscriptions", { name: "subscriptions" }]]) as never,
 			emitRecord: async (_stream, data) => {
 				records.push(data);
 			},
-			emit: async () => undefined,
-			reportStreamFailure: async (stream, message) => {
-				failures.push(`${stream}:${message}`);
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
 			},
 			progress: async () => undefined,
 		});
-		assert.equal(records.length, 20);
-		assert.deepEqual(failures, []);
+		const scrollTop = await page.evaluate(
+			() => document.querySelector(".ytd-app")?.scrollTop ?? 0,
+		);
+		assert.equal(records.length, 4);
+		assert.ok(scrollTop > 0, "the captured YouTube app container was scrolled");
+		assert.deepEqual(failures, ["subscriptions"]);
+		assert.equal(messages.some((message) => message.type === "STATE"), false);
+		assert.equal(
+			await page.locator("ytd-continuation-item-renderer").count(),
+			0,
+		);
+		const afterScrollPage = await browser.newPage();
+		await afterScrollPage.setContent(
+			readFileSync(
+				new URL("./__fixtures__/real-shape/subscriptions-after-scroll.html", import.meta.url),
+				"utf8",
+			),
+		);
+		assert.equal(
+			await afterScrollPage.locator("ytd-channel-renderer").count(),
+			records.length,
+		);
 	} finally {
 		await browser.close();
 	}
 });
 
-test("playlist index continuations, playlist items and LL likes use the legacy page shapes", async () => {
+test("scrubbed live playlist DOM accepts modern lockups before scrolling", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
-		const playlistCard = (number: number) =>
-			`<ytd-grid-playlist-renderer><a href="/playlist?list=PL${number}">Playlist ${number}</a></ytd-grid-playlist-renderer>`;
-		const videosData = {
-			contents: {
-				twoColumnBrowseResultsRenderer: {
-					tabs: [
-						{
-							tabRenderer: {
-								selected: true,
-								content: {
-									playlistVideoListRenderer: {
-										contents: [{ playlistVideoRenderer: {} }],
-									},
-								},
-							},
-						},
-					],
-				},
-			},
-		};
-		const indexData = {
-			contents: {
-				twoColumnBrowseResultsRenderer: {
-					tabs: [
-						{
-							tabRenderer: {
-								selected: true,
-								content: {
-									richGridRenderer: {
-										contents: [
-											{ gridPlaylistRenderer: { playlistId: "PL1" } },
-											{
-												continuationItemRenderer: { continuationEndpoint: {} },
-											},
-										],
-									},
-								},
-							},
-						},
-					],
-				},
-			},
-		};
+		const html = readFileSync(
+			new URL("./__fixtures__/real-shape/playlist-index-before-scroll.html", import.meta.url),
+			"utf8",
+		);
 		await page.route("https://www.youtube.com/**", async (route) => {
-			const url = new URL(route.request().url());
-			let body = "";
-			if (url.pathname === "/feed/playlists") {
-				body = `<div style="height:6000px"><div id="playlists">${playlistCard(1)}</div></div><script>var ytInitialData = ${JSON.stringify(indexData)}; setTimeout(() => document.querySelector("#playlists").insertAdjacentHTML("beforeend", ${JSON.stringify(Array.from({ length: 7 }, (_, index) => playlistCard(index + 2)).join(""))}), 1200);</script>`;
-			} else if (url.pathname === "/playlist") {
-				const listId = url.searchParams.get("list") ?? "LL";
-				const videoId = listId === "LL" ? "likedvideo01" : "video0000001";
-				body = `<h1 id="title">${listId} list</h1><span class="yt-content-metadata-view-model__metadata-text">1 video</span><ytd-playlist-video-renderer><a href="/watch?v=${videoId}"><span id="video-title">${listId} item</span></a></ytd-playlist-video-renderer><script>var ytInitialData = ${JSON.stringify(videosData)};</script>`;
-			}
-			await route.fulfill({
-				status: body ? 200 : 404,
-				contentType: "text/html",
-				body: `<html><body>${body}</body></html>`,
-			});
+			await route.fulfill({ contentType: "text/html", body: html });
 		});
-		const records = new Map<string, Record<string, unknown>[]>();
 		const failures: string[] = [];
 		await collectYoutubeBrowser({
 			page: page as never,
 			requested: new Map([
 				["playlists", { name: "playlists" }],
 				["playlist_items", { name: "playlist_items" }],
-				["likes", { name: "likes" }],
 			]) as never,
-			emitRecord: async (stream, data) => {
-				records.set(stream, [...(records.get(stream) ?? []), data]);
-			},
+			emitRecord: async () => undefined,
 			emit: async () => undefined,
-			reportStreamFailure: async (stream, message) => {
-				failures.push(`${stream}:${message}`);
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
 			},
 			progress: async () => undefined,
 		});
-		assert.equal(records.get("playlists")?.length, 8);
-		assert.equal(records.get("playlist_items")?.length, 8);
-		assert.equal(records.get("likes")?.length, 1);
-		assert.deepEqual(failures, []);
+		assert.ok(
+			(await page.evaluate(() => document.querySelector(".ytd-app")?.scrollTop ?? 0)) > 0,
+			"the captured YouTube app container was scrolled",
+		);
+		assert.deepEqual(failures, ["playlists", "playlist_items"]);
+		const afterScrollPage = await browser.newPage();
+		await afterScrollPage.setContent(
+			readFileSync(
+				new URL("./__fixtures__/real-shape/playlist-index-after-scroll.html", import.meta.url),
+				"utf8",
+			),
+		);
+		assert.equal(
+			await afterScrollPage.locator("yt-lockup-view-model").count(),
+			2,
+		);
 	} finally {
 		await browser.close();
 	}
 });
 
-test("real page data with an empty renderer completes history; a sign-in renderer fails it", async () => {
+test("history needs target-list empty evidence; a sign-in renderer still fails", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
-		const run = async (text: string) => {
+		const run = async (text: string, withTargetList = false) => {
 			const page = await browser.newPage();
 			await page.route("https://www.youtube.com/**", async (route) => {
+				const contents = {
+					...(withTargetList
+						? { playlistVideoListRenderer: { contents: [] } }
+						: {}),
+					messageRenderer: { text: { runs: [{ text }] } },
+				};
 				await route.fulfill({
 					contentType: "text/html",
-					body: `<html><body><script>var ytInitialData = ${JSON.stringify({ contents: { messageRenderer: { text: { runs: [{ text }] } } } })};</script></body></html>`,
+					body: `<html><body><script>var ytInitialData = ${JSON.stringify({ contents })};</script></body></html>`,
 				});
 			});
 			const records: Record<string, unknown>[] = [];
@@ -390,9 +348,12 @@ test("real page data with an empty renderer completes history; a sign-in rendere
 			]);
 		};
 		assert.deepEqual(await run("You haven't watched any videos yet"), [
+			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
+		]);
+		assert.deepEqual(await run("You haven't watched any videos yet", true), [
 			["STATE", "watch_history", undefined],
 		]);
-		assert.deepEqual(await run("Sign in to see your watch history"), [
+		assert.deepEqual(await run("Sign in to see your watch history", true), [
 			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
 		]);
 	} finally {
