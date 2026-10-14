@@ -2523,6 +2523,7 @@ async function runCompletionExport(
 			fields?: readonly string[];
 		};
 		recoveryOnly?: boolean;
+		detailGaps?: BrowserCollectContext["detailGaps"];
 		unknownEntry?: boolean;
 		unknownNonJson?: boolean;
 		wrongTotal?: boolean;
@@ -2595,6 +2596,9 @@ async function runCompletionExport(
 	});
 	if (options.recoveryOnly !== undefined) {
 		context.ctx.recoveryOnly = options.recoveryOnly;
+	}
+	if (options.detailGaps) {
+		context.ctx.detailGaps = options.detailGaps;
 	}
 	const runtime = makeEmitRecord({
 		requested: context.ctx.requested,
@@ -2783,4 +2787,172 @@ for (const mode of ["buffered", "streaming"] as const) {
 		]);
 		assert.equal(proofs.length, 0);
 	});
+}
+
+// Regression cases from independent review; all inputs are synthetic.
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	test(
+		`completion boundary: corrupt second ZIP directory entry ${mode}`,
+		async () => {
+			const entries = [
+				{ name: "conversations.json", content: [] },
+				{
+					name: "unrecognized.json",
+					content: [
+						{ uuid: "lost", chat_messages: [{ uuid: "lost-message" }] },
+					],
+				},
+			];
+			const bytes = await buildManifestPartZip(entries);
+			const directoryOffset = bytes.readUInt32LE(bytes.length - 6);
+			const second =
+				directoryOffset +
+				46 +
+				bytes.readUInt16LE(directoryOffset + 28) +
+				bytes.readUInt16LE(directoryOffset + 30) +
+				bytes.readUInt16LE(directoryOffset + 32);
+			assert.equal(bytes.readUInt32LE(second), 0x02_01_4b_50);
+			bytes.writeUInt32LE(0, second);
+			const context = makeContext({
+				streams: ["conversations", "messages"],
+				fetchStub:
+					mode === "manifest"
+						? manifestFetchStub([
+								{ category: "conversations", token: "review-part" },
+							])
+						: oldFormatFetchStub({ exportRequests: 0 }),
+			});
+			const runtime = makeEmitRecord({
+				requested: context.ctx.requested,
+				emit: context.ctx.emit,
+				emittedAt: context.ctx.emittedAt,
+				validateRecord,
+				isTombstone: undefined,
+				timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+			});
+			context.ctx.emitRecord = runtime.emit;
+			context.ctx.isRecordSelected = runtime.isSelected;
+			serveDownload(context.page, bytes);
+			await collectAnthropic({
+				...context.ctx,
+				...(mode === "streaming"
+					? {
+							readZipEntryChunk: (
+								_name: string,
+								offset: number,
+								length: number,
+							) => Promise.resolve("[]".slice(offset, offset + length)),
+							entriesValidated: true,
+						}
+					: {}),
+			});
+			const proofs = context.protocolMessages.filter(
+				(m) => m.type === "DETAIL_COVERAGE",
+			);
+			assert.equal(
+				proofs.length,
+				0,
+				"Incomplete central directory cannot prove full source boundary",
+			);
+		},
+	);
+}
+test("completion boundary: malformed child list before manifest classification", async () => {
+	const { proofs } = await runCompletionExport("manifest", [
+		{ uuid: "known-empty", chat_messages: [] },
+		{ uuid: "ambiguous-parent", chat_messages: null, docs: [] },
+	]);
+	assert.equal(
+		proofs.length,
+		0,
+		"Non-array raw chat_messages must withhold proof even if classified as project",
+	);
+});
+
+test("completion control: a genuine mixed project is not a missing messages list", async () => {
+	const { proofs } = await runCompletionExport("manifest", [
+		{ uuid: "known-empty", chat_messages: [] },
+		{ uuid: "actual-project", docs: [] },
+	]);
+	assert.equal(proofs.length, 1);
+});
+test("completion control: malformed conversation without competing project shape withholds proof", async () => {
+	const { proofs } = await runCompletionExport("manifest", [
+		{ uuid: "known-empty", chat_messages: [] },
+		{ uuid: "bad-parent", chat_messages: null },
+	]);
+	assert.equal(proofs.length, 0);
+});
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	test(`completion control: intact two-entry ZIP ${mode}`, async () => {
+		const entries = [
+			{ name: "conversations.json", content: [] },
+			{
+				name: "unrecognized.json",
+				content: [{ uuid: "lost", chat_messages: [{ uuid: "lost-message" }] }],
+			},
+		];
+		const bytes = await buildManifestPartZip(entries);
+		const context = makeContext({
+			streams: ["conversations", "messages"],
+			fetchStub:
+				mode === "manifest"
+					? manifestFetchStub([
+							{ category: "conversations", token: "review-part" },
+						])
+					: oldFormatFetchStub({ exportRequests: 0 }),
+		});
+		const runtime = makeEmitRecord({
+			requested: context.ctx.requested,
+			emit: context.ctx.emit,
+			emittedAt: context.ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+		});
+		context.ctx.emitRecord = runtime.emit;
+		context.ctx.isRecordSelected = runtime.isSelected;
+		serveDownload(context.page, bytes);
+		await collectAnthropic({
+			...context.ctx,
+			...(mode === "streaming"
+				? {
+						readZipEntryChunk: (
+							_name: string,
+							offset: number,
+							length: number,
+						) => Promise.resolve("[]".slice(offset, offset + length)),
+						entriesValidated: true,
+					}
+				: {}),
+		});
+		const proofs = context.protocolMessages.filter(
+			(m) => m.type === "DETAIL_COVERAGE",
+		);
+		assert.equal(proofs.length, mode === "manifest" ? 1 : 0);
+		if (mode === "manifest") {
+			assert.equal(proofs[0]?.considered, 1);
+		}
+	});
+}
+
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	for (const [label, options] of [
+		["empty resource selector", { scope: { resources: [] } }],
+		["empty field selector", { scope: { fields: [] } }],
+		["empty time selector", { scope: { time_range: {} } }],
+		[
+			"supplied detail gap",
+			{
+				detailGaps: [
+					{ gap_id: "pending-gap", stream: "messages", status: "pending" },
+				],
+			},
+		],
+	] as const) {
+		test(`completion boundary: ${mode} refuses ${label}`, async () => {
+			const { proofs } = await runCompletionExport(mode, [], options);
+			assert.equal(proofs.length, 0);
+		});
+	}
 }
