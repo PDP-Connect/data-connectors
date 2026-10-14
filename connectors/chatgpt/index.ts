@@ -2763,8 +2763,15 @@ export async function processConversationDetail(
 	const branchOrder = new Map(
 		currentBranch.map((entry, index) => [entry.nodeId, index]),
 	);
-	const candidates: { nodeId: string; msg: RecordData; onBranch: boolean }[] =
-		[];
+	// `alreadyEmitted` rows were emitted earlier in this run. They still count
+	// toward loss accounting and conversation metadata; only the record emit is
+	// skipped, so a repeat detail cannot hide a loss or blank the branch tip.
+	const candidates: {
+		nodeId: string;
+		msg: RecordData;
+		onBranch: boolean;
+		alreadyEmitted: boolean;
+	}[] = [];
 	const candidateIds = new Set<string>();
 	let filteredBranchCount = 0;
 	let filteredBySelection = 0;
@@ -2793,10 +2800,7 @@ export async function processConversationDetail(
 		}
 
 		const messageId = typeof msg.id === "string" ? msg.id : null;
-		if (
-			messageId &&
-			(alreadyEmittedIds.has(messageId) || candidateIds.has(messageId))
-		) {
+		if (messageId && candidateIds.has(messageId)) {
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredAsDuplicate += 1;
@@ -2825,7 +2829,12 @@ export async function processConversationDetail(
 		if (msg.content_loss !== null) {
 			lossyContentMessages += 1;
 		}
-		candidates.push({ nodeId, msg, onBranch });
+		candidates.push({
+			nodeId,
+			msg,
+			onBranch,
+			alreadyEmitted: messageId !== null && alreadyEmittedIds.has(messageId),
+		});
 		if (messageId) candidateIds.add(messageId);
 	}
 
@@ -2877,12 +2886,11 @@ export async function processConversationDetail(
 				`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
 		);
 	}
-	let emittedMessageCount = 0;
 	for (const candidate of candidates) {
 		const { msg } = candidate;
+		if (candidate.alreadyEmitted) continue;
 		const messageId = typeof msg.id === "string" ? msg.id : null;
 		if (messageId) alreadyEmittedIds.add(messageId);
-		emittedMessageCount += 1;
 		await deps.emitRecord("messages", msg);
 	}
 	await emitBranchReconciliation(mapping, currentNode, emittedBranchCount);
@@ -2898,7 +2906,7 @@ export async function processConversationDetail(
 	if (incompleteReason) {
 		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
 	}
-	if (emittedMessageCount === 0) {
+	if (candidates.length === 0) {
 		// Completeness guard. A 200-with-mapping detail whose graph contains NO
 		// message-bearing node leaves a bare conversation row with zero messages
 		// and, without this, no signal at all — indistinguishable downstream from

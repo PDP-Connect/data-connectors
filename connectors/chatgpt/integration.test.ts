@@ -2803,6 +2803,58 @@ test("processConversationDetail: lossy message content emits a DETAIL_GAP and ke
 	assert.equal(outcome.complete, false);
 });
 
+test("processConversationDetail: a repeat detail in the same run keeps loss accounting and conversation metadata", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	deps.emittedMessageIdsThisRun = new Set<string>();
+	const lossy = (): ChatGptFetchResult => ({
+		status: 200,
+		json: {
+			current_node: "a1",
+			mapping: {
+				a0: userNode(null, ["a1"], "first"),
+				a1: userNode("a0", [], "bell\x00char", "assistant"),
+			},
+		},
+	});
+	const first = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a1" }),
+		lossy(),
+		makeEmitConversation(deps),
+	);
+	const second = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a1" }),
+		lossy(),
+		makeEmitConversation(deps),
+	);
+	assert.equal(first.complete, false);
+	assert.equal(
+		second.complete,
+		false,
+		"a lossy conversation stays incomplete on a repeat detail",
+	);
+	assert.equal(
+		detailGaps(messages).length,
+		2,
+		"each detail pass reports its own gap",
+	);
+	assert.equal(emitted.filter((r) => r.stream === "messages").length, 2);
+	const conversations = emitted.filter((r) => r.stream === "conversations");
+	assert.equal(conversations.length, 2);
+	assert.equal(
+		conversations[1]?.data.current_node,
+		conversations[0]?.data.current_node,
+		"a repeat detail keeps the branch tip",
+	);
+	assert.equal(
+		conversations[1]?.data.message_count_on_current_branch,
+		conversations[0]?.data.message_count_on_current_branch,
+		"a repeat detail keeps the message count",
+	);
+	assert.notEqual(conversations[1]?.data.current_node, null);
+});
+
 test("processConversationDetail: a clean detail emits no gap and is complete", async () => {
 	const { deps, messages } = makeHarness();
 	const outcome = await processConversationDetail(
