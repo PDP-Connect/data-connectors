@@ -344,6 +344,29 @@ describe("buildSourceDeclaration — one declaration per source", () => {
     );
   });
 
+  it("names the canonical member of the claude source explicitly, and only that source", () => {
+    const rehome = (key, id) => ({
+      ...structuredClone(browserProfile),
+      connector_key: key,
+      source: { ...browserProfile.source, id },
+    });
+    const claude = "https://registry.pdpp.dev/sources/claude";
+    const named = rehome("anthropic", claude);
+    const sibling = { ...rehome("anthropic-live", claude), streams: [structuredClone(browserProfile.streams[1])] };
+    const declaration = buildSourceDeclaration([sibling, named]);
+    assert.equal(declaration.streams[0].description, browserProfile.streams[0].description);
+    assert.throws(
+      () => {
+        const other = "https://registry.pdpp.dev/sources/other";
+        return buildSourceDeclaration([
+          rehome("anthropic", other),
+          { ...rehome("anthropic-live", other), streams: sibling.streams },
+        ]);
+      },
+      /no member artifact's connector key matches/,
+    );
+  });
+
   it("refuses members that disagree on the source", () => {
     const other = structuredClone(browserProfile);
     other.source.display.name = "Oura Ring";

@@ -64,7 +64,7 @@ test("development is the only non-offered lifecycle tier", () => {
 });
 
 test("recent or non-repeatable live evidence stays Preview", () => {
-	for (const name of ["apple_contacts.json"]) {
+	for (const name of ["apple_contacts.json", "anthropic_live.json"]) {
 		const { capabilities } = manifest(name);
 		const { public_listing: listing } = capabilities ?? {};
 		assert.equal(listing?.tier, "preview");
