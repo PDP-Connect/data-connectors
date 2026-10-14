@@ -6775,6 +6775,67 @@ test("runConversationsAndMessagesStreams: a resumed discovery continues past the
 	);
 });
 
+test("runConversationsAndMessagesStreams: with an older saved watermark, repeated budget-limited runs still reach the tail and clear the backfill", async () => {
+	// 12,000 stable rows, all newer than the saved last_update_time. The forward
+	// walk must read all of them before the watermark may advance, so its budget
+	// grows with the backfill hint. The resumed backfill's own progress must be
+	// kept even while the forward walk is still truncated; discarding it pins the
+	// hint at 5010 forever and the tail is never reached.
+	const TOTAL = 12_000;
+	const makeDeps = (
+		harness: ReturnType<typeof makeRecordingEmit>,
+	): StreamDeps => ({
+		api: {
+			auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				await Promise.resolve();
+				if (!path.startsWith("/conversations/search?")) {
+					throw new Error(`unexpected fetch ${path}`);
+				}
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				const items = Array.from(
+					{ length: Math.max(0, Math.min(30, TOTAL - cursor)) },
+					(_, idx) =>
+						makeConvo({
+							id: `old-wm-${cursor + idx}`,
+							update_time: 1_900_000_000 - (cursor + idx),
+						}),
+				);
+				return { status: 200, json: { items } };
+			},
+		},
+		sleep: (): Promise<void> => Promise.resolve(),
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map([["conversations", { name: "conversations" }]]),
+	});
+	const emittedIds = new Set<string>();
+	let cursor: unknown = { last_update_time: "2000-01-01T00:00:00.000Z" };
+	let cleared = false;
+	for (let run = 0; run < 6 && !cleared; run += 1) {
+		const harness = makeRecordingEmit(validateRecord);
+		await runConversationsAndMessagesStreams(makeDeps(harness), {
+			conversations: cursor,
+		} as CollectContext["state"]);
+		for (const record of harness.emitted) emittedIds.add(record.data.id);
+		const state = harness.protocolMessages.filter(
+			(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
+				m.type === "STATE",
+		)[0];
+		cursor = state?.cursor;
+		cleared = (cursor as { backfill?: unknown }).backfill === undefined;
+	}
+	assert.ok(cleared, "the backfill clears within a few budget-limited runs");
+	assert.ok(
+		emittedIds.has(`old-wm-${TOTAL - 1}`),
+		"the oldest row above the watermark was collected",
+	);
+	assert.equal(emittedIds.size, TOTAL);
+});
+
 // ─── task 16: bounded cap-tail deferral materialization ──────────────────────
 
 test("resolveChatGptMaxTailDeferralGapsPerRun: default-off, explicit, and fetch-cap-derived", () => {

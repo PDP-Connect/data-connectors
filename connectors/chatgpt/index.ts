@@ -3404,6 +3404,8 @@ interface ConversationListResult {
 	/** True when the walk stopped only because it spent its per-run page budget. */
 	budgetExhausted?: boolean;
 	items: ConversationListItem[];
+	/** Cursor the walk was at when it reached the end of the list. */
+	endCursor?: number;
 	/**
 	 * Set on a non-truncated walk that stopped on consecutive old pages instead
 	 * of the end-of-list response. That proves the incremental window was read,
@@ -3752,6 +3754,7 @@ async function walkConversationSearch(
 			items: [...conversationsById.values()],
 			truncated: false,
 			backfill: null,
+			endCursor: cursor,
 			...(options.oldPages ? { stoppedOnOldPages: true } : {}),
 			...(resumeBackfill
 				? { backfillItems: [...backfillTailById.values()] }
@@ -7023,9 +7026,20 @@ export async function runConversationsAndMessagesStreams(
 			const merged = new Map<string, ConversationListItem>();
 			for (const item of backfill.items) merged.set(item.id, item);
 			for (const item of forward.items) merged.set(item.id, item);
-			const nextBackfill = forward.truncated
-				? savedBackfill
-				: backfill.backfill;
+			// The two walks progress independently. While the forward walk is still
+			// truncated the watermark stays pinned, so the forward budget (which
+			// grows with the hint) must keep growing: keep the backfill's own
+			// continuation, or, once it drained, a boundary at the end it reached.
+			let nextBackfill = backfill.backfill;
+			if (forward.truncated && !backfill.truncated) {
+				nextBackfill =
+					backfill.endCursor === undefined
+						? savedBackfill
+						: conversationBackfillAt(
+								backfill.backfillItems ?? backfill.items,
+								Math.max(backfill.endCursor, savedBackfill.position_hint),
+							);
+			}
 			return {
 				items: [...merged.values()],
 				truncated: forward.truncated || backfill.truncated,
