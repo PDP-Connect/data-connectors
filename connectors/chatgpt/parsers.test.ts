@@ -15,6 +15,7 @@ import {
 	buildSharedConversationRecord,
 	countBranchMessages,
 	extractContent,
+	extractContentWithLoss,
 	extractMessage,
 	extractToolCalls,
 	flattenTreeCurrentBranch,
@@ -251,6 +252,24 @@ test("extractContent: content with other forbidden control char (VT U+000B) keep
 	assert.equal(
 		extractContent({ content_type: "text", parts: ["line1\x0Bline2"] }),
 		"line1\\u000Bline2",
+	);
+});
+
+test("extractContentWithLoss: forbidden controls at the edges are escaped and reported, not trimmed away", () => {
+	assert.deepEqual(
+		extractContentWithLoss({
+			content_type: "text",
+			parts: ["\u000Bhello\u000C"],
+		}),
+		{ text: "\\u000Bhello\\u000C", loss: "control_chars_escaped" },
+	);
+	assert.deepEqual(
+		extractContentWithLoss({ content_type: "text", parts: ["\u000B\u000C"] }),
+		{ text: "\\u000B\\u000C", loss: "control_chars_escaped" },
+	);
+	assert.deepEqual(
+		extractContentWithLoss({ content_type: "text", parts: ["  hello \n"] }),
+		{ text: "hello", loss: null },
 	);
 });
 

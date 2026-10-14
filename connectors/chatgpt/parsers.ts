@@ -89,6 +89,19 @@ export function flattenTreeCurrentBranch(
 	});
 }
 
+/**
+ * `String.prototype.trim` also strips VT (U+000B) and FF (U+000C), which are
+ * forbidden control characters. Trimming them away before the safe-text pass
+ * would lose them with no `content_loss` marker, so trim only the whitespace
+ * that is not a forbidden control.
+ */
+const EDGE_WHITESPACE =
+	/^[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+|[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+$/g;
+
+function trimKeepingControls(s: string): string {
+	return s.replace(EDGE_WHITESPACE, "");
+}
+
 // ─── extractContent per-content_type helpers ──────────────────────────
 
 /**
@@ -121,7 +134,7 @@ function stringifyContentPart(p: unknown): string {
 /** Canonical user/assistant text: `{ parts: ["...", {asset_pointer}...] }`. */
 function extractTextContent(content: ChatGptContent): string | null {
 	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = parts.map(stringifyContentPart).join("\n").trim();
+	const s = trimKeepingControls(parts.map(stringifyContentPart).join("\n"));
 	return s || null;
 }
 
@@ -132,7 +145,9 @@ function extractTextContent(content: ChatGptContent): string | null {
  */
 function extractMultimodalContent(content: ChatGptContent): string | null {
 	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = parts.map(stringifyContentPart).filter(Boolean).join("\n").trim();
+	const s = trimKeepingControls(
+		parts.map(stringifyContentPart).filter(Boolean).join("\n"),
+	);
 	return s || null;
 }
 
@@ -152,7 +167,9 @@ function extractCodeContent(content: ChatGptContent): string | null {
  */
 function extractThoughtsContent(content: ChatGptContent): string | null {
 	const thoughts = Array.isArray(content.thoughts) ? content.thoughts : [];
-	const s = thoughts.map(stringifyThought).filter(Boolean).join("\n\n").trim();
+	const s = trimKeepingControls(
+		thoughts.map(stringifyThought).filter(Boolean).join("\n\n"),
+	);
 	return s || null;
 }
 
@@ -189,7 +206,7 @@ function extractTetherBrowsingDisplay(content: ChatGptContent): string | null {
 	if (typeof content.result === "string" && content.result) {
 		pieces.push(content.result);
 	}
-	const s = pieces.join("\n\n").trim();
+	const s = trimKeepingControls(pieces.join("\n\n"));
 	return s || null;
 }
 
@@ -205,7 +222,7 @@ function extractTetherQuote(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	const s = pieces.join("\n").trim();
+	const s = trimKeepingControls(pieces.join("\n"));
 	return s || null;
 }
 
@@ -235,7 +252,7 @@ function extractModelEditableContext(content: ChatGptContent): string | null {
 	if (typeof content.repo_summary === "string" && content.repo_summary) {
 		pieces.push(content.repo_summary);
 	}
-	const s = pieces.join("\n\n").trim();
+	const s = trimKeepingControls(pieces.join("\n\n"));
 	return s || null;
 }
 
@@ -248,7 +265,7 @@ function extractSystemError(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	return pieces.join(": ").trim() || null;
+	return trimKeepingControls(pieces.join(": ")) || null;
 }
 
 /** User custom-instructions shape (observed on imported conversations). */
@@ -263,7 +280,7 @@ function extractUserEditableContext(content: ChatGptContent): string | null {
 	) {
 		pieces.push(content.user_instructions);
 	}
-	return pieces.join("\n\n").trim() || null;
+	return trimKeepingControls(pieces.join("\n\n")) || null;
 }
 
 // Fallback for unrecognized shape — prefer an explicit handler. Stringify so
@@ -324,9 +341,11 @@ function isSafeText(s: string): boolean {
  * and whether any escape was needed. A body that still fails after escaping
  * (not expected) becomes null with the "dropped" marker so the loss is explicit.
  */
-function toSafeFullContent(
-	s: string | null,
-): { text: string | null; escaped: boolean; dropped: boolean } {
+function toSafeFullContent(s: string | null): {
+	text: string | null;
+	escaped: boolean;
+	dropped: boolean;
+} {
 	if (s === null) {
 		return { text: null, escaped: false, dropped: false };
 	}
@@ -385,7 +404,10 @@ function toBoundedContent(s: string | null): {
 	if (last >= 0xd8_00 && last <= 0xdb_ff) {
 		head -= 1;
 	}
-	return { text: s.slice(0, head) + OVERSIZE_TRUNCATION_MARKER, truncated: true };
+	return {
+		text: s.slice(0, head) + OVERSIZE_TRUNCATION_MARKER,
+		truncated: true,
+	};
 }
 
 /**
