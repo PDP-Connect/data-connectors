@@ -6682,6 +6682,97 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	assert.equal(skip.reason, "pagination_cap_truncated");
 });
 
+test("runConversationsAndMessagesStreams: a resumed discovery continues past the per-run budget until the list is drained", async () => {
+	// 6,000 stable rows (200 full pages), newest first. Run 1 stops at the
+	// per-run budget with an honest SKIP_RESULT and a checkpoint. Run 2 resumes
+	// from that checkpoint, must read past cursor 5010, reach the end of the
+	// list, and then clear the backfill. Before the fix the absolute ceiling
+	// stopped run 2 at the same 4980 -> 5010 step, so history never drained.
+	const TOTAL = 6000;
+	const fetchedCursors: number[] = [];
+	const makeDeps = (
+		harness: ReturnType<typeof makeRecordingEmit>,
+	): StreamDeps => ({
+		api: {
+			auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
+			fetch: async (path: string): Promise<ChatGptFetchResult> => {
+				await Promise.resolve();
+				if (!path.startsWith("/conversations/search?")) {
+					throw new Error(`unexpected fetch ${path}`);
+				}
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				fetchedCursors.push(cursor);
+				const items = Array.from(
+					{ length: Math.max(0, Math.min(30, TOTAL - cursor)) },
+					(_, idx) =>
+						makeConvo({
+							id: `drain-${cursor + idx}`,
+							update_time: 1_900_000_000 - (cursor + idx),
+						}),
+				);
+				return { status: 200, json: { items } };
+			},
+		},
+		sleep: (): Promise<void> => Promise.resolve(),
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: (): Promise<void> => Promise.resolve(),
+		requested: new Map([["conversations", { name: "conversations" }]]),
+	});
+	const first = makeRecordingEmit(validateRecord);
+	await runConversationsAndMessagesStreams(makeDeps(first), {});
+	const firstState = first.protocolMessages.filter(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
+	)[0];
+	const firstCursor = firstState?.cursor as {
+		backfill?: { position_hint: number };
+	};
+	assert.equal(firstCursor.backfill?.position_hint, 5010);
+	assert.ok(
+		first.protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" && m.reason === "pagination_cap_truncated",
+		),
+		"an incomplete run keeps the honest SKIP_RESULT",
+	);
+
+	fetchedCursors.length = 0;
+	const second = makeRecordingEmit(validateRecord);
+	await runConversationsAndMessagesStreams(makeDeps(second), {
+		conversations: firstState?.cursor,
+	} as CollectContext["state"]);
+	assert.ok(
+		fetchedCursors.includes(4980),
+		"resume replays one page before the hint",
+	);
+	assert.ok(
+		fetchedCursors.includes(5970),
+		"resume continues past the first run's ceiling to the end of the list",
+	);
+	assert.equal(
+		second.protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" && m.reason === "pagination_cap_truncated",
+		),
+		false,
+		"a drained list reports no truncation",
+	);
+	const secondState = second.protocolMessages.filter(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
+	)[0];
+	assert.equal(
+		(secondState?.cursor as { backfill?: unknown }).backfill,
+		undefined,
+		"completion is claimed only after end-of-list evidence, then the backfill clears",
+	);
+	assert.ok(
+		second.emitted.some((r) => r.data.id === "drain-5999"),
+		"the oldest history emits",
+	);
+});
+
 // ─── task 16: bounded cap-tail deferral materialization ──────────────────────
 
 test("resolveChatGptMaxTailDeferralGapsPerRun: default-off, explicit, and fetch-cap-derived", () => {

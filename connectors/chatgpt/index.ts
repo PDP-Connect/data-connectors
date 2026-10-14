@@ -2927,6 +2927,8 @@ export async function processConversationDetail(
 }
 
 const PAGINATION_SAFETY_LIMIT = 5000;
+/** Consecutive all-old pages that end an incremental conversation walk. */
+const CONVERSATION_OLD_PAGES_TO_STOP = 3;
 const GIZMO_MAX_PAGES = 50;
 
 /**
@@ -3399,6 +3401,8 @@ export async function runSharedConversationsStream(
 interface ConversationListResult {
 	backfill: ConversationBackfill | null;
 	backfillItems?: ConversationListItem[];
+	/** True when the walk stopped only because it spent its per-run page budget. */
+	budgetExhausted?: boolean;
 	items: ConversationListItem[];
 	truncated: boolean;
 }
@@ -3582,6 +3586,7 @@ async function listConversationsSinceCursor(
 	startCursor = 0,
 	resumeBackfill?: ConversationBackfill,
 	recovery = deps.searchRecovery ?? conversationSearchRecovery(deps),
+	budget = PAGINATION_SAFETY_LIMIT,
 ): Promise<ConversationListResult> {
 	const requestedSince =
 		deps.requested.get("conversations")?.time_range?.since ??
@@ -3615,6 +3620,7 @@ async function listConversationsSinceCursor(
 			startCursor,
 			resumeBackfill,
 			inOrderConversationSearchPages(recovery),
+			budget,
 		);
 	}
 	const pages = prefetchingConversationSearchPages(deps, width, recovery);
@@ -3636,6 +3642,7 @@ async function listConversationsSinceCursor(
 		startCursor,
 		resumeBackfill,
 		pages,
+		budget,
 	);
 	try {
 		await pages.settle();
@@ -3649,6 +3656,7 @@ async function listConversationsSinceCursor(
 			startCursor,
 			resumeBackfill,
 			inOrderConversationSearchPages(recovery),
+			budget,
 		);
 	}
 	// A page that stayed short may have been short only because of the burst
@@ -3688,6 +3696,7 @@ async function listConversationsSinceCursor(
 		startCursor,
 		resumeBackfill,
 		inOrderConversationSearchPages(recovery),
+		budget,
 	);
 }
 
@@ -3697,6 +3706,7 @@ async function walkConversationSearch(
 	startCursor: number,
 	resumeBackfill: ConversationBackfill | undefined,
 	pages: ConversationSearchPages,
+	budget = PAGINATION_SAFETY_LIMIT,
 ): Promise<ConversationListResult> {
 	const conversationsById = new Map<string, ConversationListItem>();
 	const backfillTailById = new Map<string, ConversationListItem>();
@@ -3763,7 +3773,7 @@ async function walkConversationSearch(
 			return null;
 		}
 	};
-	const maxConsecutiveOldPages = 3;
+	const maxConsecutiveOldPages = CONVERSATION_OLD_PAGES_TO_STOP;
 	let consecutiveOldPages = 0;
 	let page = 0;
 	while (true) {
@@ -4007,25 +4017,78 @@ async function walkConversationSearch(
 				};
 		}
 		cursor = nextCursor;
-		if (cursor > PAGINATION_SAFETY_LIMIT) {
+		// The budget is per run, measured from where this run started, so a
+		// resumed walk (which restarts one page before its checkpoint) always
+		// makes net progress instead of hitting the same absolute ceiling.
+		if (cursor - resumeStartCursor > budget) {
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
-				message: `conversations search stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
+				message: `conversations search spent its ${budget}-item per-run budget with more items remaining; the next run resumes from the saved position`,
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				diagnostics: { cursor, collected: conversationsById.size },
 			});
 			return {
 				items: [...conversationsById.values()],
 				truncated: true,
+				budgetExhausted: true,
 				backfill: conversationBackfillAt(conversationsById.values(), cursor),
 			};
 		}
 	}
+}
+
+/** Evidence behind a discovery run's stopping point. */
+type ConversationDiscoveryEvidence =
+	| "budget_exhausted"
+	| "end_of_list"
+	| "interrupted";
+
+type ConversationDiscovery = ConversationListResult & {
+	evidence: ConversationDiscoveryEvidence;
+	/** True only with end-of-list (or old-page) evidence from the walk. */
+	exhausted: boolean;
+	/** Cursor the next run resumes from (replayed one page earlier); null once drained. */
+	nextCursor: number | null;
+};
+
+/**
+ * Connector-local resumable discovery: read the conversation list from
+ * `startCursor` for at most `budget` items of cursor distance, then report where
+ * to continue. `exhausted` is true only when the walk itself proved the end of
+ * the list; a spent budget or an interrupted read is never completion. Kept in
+ * one place so it can be swapped onto a shared paginator later.
+ */
+async function discoverConversationsWithinBudget(
+	deps: StreamDeps,
+	options: {
+		budget: number;
+		priorCursor: string | null;
+		recovery: ReturnType<typeof conversationSearchRecovery>;
+		resumeBackfill?: ConversationBackfill;
+		startCursor?: number;
+	},
+): Promise<ConversationDiscovery> {
+	const result = await listConversationsSinceCursor(
+		deps,
+		options.priorCursor,
+		options.startCursor ?? 0,
+		options.resumeBackfill,
+		options.recovery,
+		options.budget,
+	);
+	const exhausted = !result.truncated;
+	let evidence: ConversationDiscoveryEvidence = "end_of_list";
+	if (result.truncated) {
+		evidence = result.budgetExhausted ? "budget_exhausted" : "interrupted";
+	}
+	return {
+		...result,
+		evidence,
+		exhausted,
+		nextCursor: result.backfill?.position_hint ?? null,
+	};
 }
 
 /**
@@ -6914,24 +6977,28 @@ export async function runConversationsAndMessagesStreams(
 			return existing;
 		}
 		const listed = (async (): Promise<ConversationListResult> => {
-			const forward = await listConversationsSinceCursor(
-				deps,
-				cursor,
-				0,
-				undefined,
-				listingRecovery,
-			);
+			// While a backfill is saved, every row above its checkpoint is newer
+			// than the pinned watermark, so the forward walk must read past the
+			// checkpoint plus the old-page evidence window before it can stop.
+			const forward = await discoverConversationsWithinBudget(deps, {
+				priorCursor: cursor,
+				recovery: listingRecovery,
+				budget:
+					savedBackfill === null
+						? PAGINATION_SAFETY_LIMIT
+						: savedBackfill.position_hint +
+							CONVERSATION_PAGE_SIZE * (CONVERSATION_OLD_PAGES_TO_STOP + 1),
+			});
 			if (savedBackfill === null) return forward;
 			// Collect the incremental frontier first, then resume the incomplete
 			// full-list walk. The update-time watermark and paging continuation are
 			// independent: one finds arrivals; the other drains older unseen pages.
-			const backfill = await listConversationsSinceCursor(
-				deps,
-				null,
-				0,
-				savedBackfill,
-				listingRecovery,
-			);
+			const backfill = await discoverConversationsWithinBudget(deps, {
+				priorCursor: null,
+				recovery: listingRecovery,
+				resumeBackfill: savedBackfill,
+				budget: PAGINATION_SAFETY_LIMIT,
+			});
 			const merged = new Map<string, ConversationListItem>();
 			for (const item of backfill.items) merged.set(item.id, item);
 			for (const item of forward.items) merged.set(item.id, item);
