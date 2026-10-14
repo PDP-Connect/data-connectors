@@ -2209,14 +2209,12 @@ test("scenario-verify: under namespace isolation, a fixture connector's spawned 
 
 // ─── FIX B: private evidence workspace wired into scenario-record ─────────
 
-test("scenario-record: no pdpp-scenario-* temp files remain in os.tmpdir() after a successful run, and the scenario file is mode 0600", async () => {
+test("scenario-record leaves no pdpp-scenario-* files in its private temp directory and writes mode 0600", async () => {
 	const stubProvider = await startStubProvider();
 	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-workspace-test-"));
+	const recorderTmpDir = join(tmpDir, "recorder-tmp");
+	mkdirSync(recorderTmpDir);
 	const scenarioPath = join(tmpDir, "workspace.scenario.json");
-
-	const before = new Set(
-		readdirSync(tmpdir()).filter((name) => name.startsWith("pdpp-scenario")),
-	);
 
 	try {
 		const recordResult = runRecordCli(
@@ -2229,7 +2227,12 @@ test("scenario-record: no pdpp-scenario-* temp files remain in os.tmpdir() after
 				"--out",
 				scenarioPath,
 			],
-			{ PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url },
+			{
+				PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url,
+				TMPDIR: recorderTmpDir,
+				TMP: recorderTmpDir,
+				TEMP: recorderTmpDir,
+			},
 		);
 		assert.equal(
 			recordResult.code,
@@ -2237,14 +2240,13 @@ test("scenario-record: no pdpp-scenario-* temp files remain in os.tmpdir() after
 			`scenario-record failed: stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
 		);
 
-		const after = new Set(
-			readdirSync(tmpdir()).filter((name) => name.startsWith("pdpp-scenario")),
+		const leftover = readdirSync(recorderTmpDir).filter((name) =>
+			name.startsWith("pdpp-scenario"),
 		);
-		const leftover = [...after].filter((name) => !before.has(name));
 		assert.deepEqual(
 			leftover,
 			[],
-			`expected no leftover pdpp-scenario-* files in os.tmpdir(), found: ${leftover.join(", ")}`,
+			`expected no leftover pdpp-scenario-* files in recorder temp dir, found: ${leftover.join(", ")}`,
 		);
 
 		const { mode } = statSync(scenarioPath);
