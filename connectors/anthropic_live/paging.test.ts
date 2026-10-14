@@ -246,6 +246,7 @@ test("a list that keeps changing fails without a checkpoint, then recovers once 
 	]);
 	// Bounded: a few listing attempts, not a loop.
 	const listCalls = h.calls.filter((c) => c.includes("/chat_conversations?"));
+	assert.ok(listCalls.length > 0, "conversation listing was observed");
 	assert.ok(listCalls.length <= 3 * 5, `${listCalls.length} list reads`);
 
 	changing = false;

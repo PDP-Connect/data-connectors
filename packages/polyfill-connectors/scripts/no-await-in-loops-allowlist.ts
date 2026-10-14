@@ -497,14 +497,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/anthropic_live/paging.test.ts",
-			line: 374,
+			line: 375,
 			column: 16,
 			category: "test_assertion_sequencing",
 			note: "the messages-alone and conversations-alone scenarios run one after the other.",
 		},
 		{
 			path: "connectors/anthropic_live/paging.test.ts",
-			line: 487,
+			line: 488,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "each run starts from the STATE the previous failed run left.",
