@@ -738,15 +738,47 @@ function manifestObject(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
-function declaredSchemaPaths(schema: unknown, prefix = ""): string[] {
-	const properties = manifestObject(manifestObject(schema)?.properties);
-	if (!properties) {
-		return [];
+/** Collection bounds for declared schema paths. Manifest schemas are
+ *  author-controlled and unbounded, so collection is iterative and capped;
+ *  fields past a bound fall into the advisory's generic bucket. */
+const MAX_SCHEMA_PATH_DEPTH = 32;
+const MAX_SCHEMA_PATHS = 2000;
+
+function declaredSchemaPaths(schema: unknown): {
+	bounded: boolean;
+	paths: string[];
+} {
+	const paths: string[] = [];
+	let bounded = false;
+	const pending: Array<{ depth: number; prefix: string; schema: unknown }> = [
+		{ depth: 0, prefix: "", schema },
+	];
+	for (let next = pending.pop(); next; next = pending.pop()) {
+		const properties = manifestObject(manifestObject(next.schema)?.properties);
+		if (!properties) {
+			continue;
+		}
+		for (const name in properties) {
+			if (!Object.hasOwn(properties, name)) {
+				continue;
+			}
+			if (paths.length >= MAX_SCHEMA_PATHS) {
+				return { bounded: true, paths };
+			}
+			const path = next.prefix ? `${next.prefix}.${name}` : name;
+			paths.push(path);
+			if (next.depth + 1 < MAX_SCHEMA_PATH_DEPTH) {
+				pending.push({
+					depth: next.depth + 1,
+					prefix: path,
+					schema: properties[name],
+				});
+			} else if (manifestObject(manifestObject(properties[name])?.properties)) {
+				bounded = true;
+			}
+		}
 	}
-	return Object.entries(properties).flatMap(([name, child]) => {
-		const path = prefix ? `${prefix}.${name}` : name;
-		return [path, ...declaredSchemaPaths(child, path)];
-	});
+	return { bounded, paths };
 }
 
 function rawObservationMetadata(
@@ -756,9 +788,11 @@ function rawObservationMetadata(
 	return streams.map((stream) => {
 		const primaryKey = stream.primary_key;
 		const excluded = excludedFields.get(stream.name);
+		const { bounded, paths } = declaredSchemaPaths(stream.schema);
 		return {
 			name: stream.name,
-			safeFieldPaths: declaredSchemaPaths(stream.schema),
+			safeFieldPaths: paths,
+			...(bounded ? { schemaPathsBounded: true } : {}),
 			...(Array.isArray(primaryKey)
 				? {
 						primaryKey: primaryKey.filter(
@@ -1244,6 +1278,9 @@ interface RecordRunResult {
 		message: string;
 		requestId: string;
 	}>;
+	/** Private equality key for the selections this run answered — see
+	 *  `selectionContextKey`. Never printed or persisted. */
+	selectionContext: string | undefined;
 	userInteractions: ScenarioUserInteraction[];
 }
 
@@ -1412,6 +1449,46 @@ function toScenarioUserInteraction(
 	};
 }
 
+/**
+ * Private, in-memory equality input for "did these runs answer the same
+ * selections?". The persisted `user_interactions` redact credentials and OTP
+ * values, so they cannot say whether two runs picked the same account or
+ * resource; the advisory needs the raw answers, and must never print or
+ * persist them (or a hash of them). OTP prompts contribute only their kind
+ * and status: a single-use code proves identity, it does not select data.
+ */
+function selectionContextEntry(
+	prompt: RawInteractionLine,
+	response: InteractionResponse,
+): unknown {
+	if (isOtpPrompt(prompt)) {
+		return { kind: prompt.kind, status: response.status };
+	}
+	return {
+		kind: prompt.kind,
+		message: prompt.message,
+		response: {
+			status: response.status,
+			value: response.value,
+			data: response.data,
+			error: response.error,
+		},
+	};
+}
+
+const MAX_SELECTION_CONTEXT_LENGTH = 65_536;
+
+/** `undefined` (unknown context; never equal to anything) when the answers
+ *  cannot be serialized or are too large to keep for comparison. */
+function selectionContextKey(entries: readonly unknown[]): string | undefined {
+	try {
+		const key = JSON.stringify(entries);
+		return key.length <= MAX_SELECTION_CONTEXT_LENGTH ? key : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 let transcriptRunNumber = 0;
 
 /**
@@ -1539,6 +1616,7 @@ function runRecordSubprocess(args: {
 
 		const messages: ProtocolMessage[] = [];
 		const userInteractions: ScenarioUserInteraction[] = [];
+		const selectionEntries: unknown[] = [];
 		const unansweredInteractions: RecordRunResult["unansweredInteractions"] =
 			[];
 		let stdoutBuffer = "";
@@ -1589,6 +1667,7 @@ function runRecordSubprocess(args: {
 			);
 			const record = (response: InteractionResponse): void => {
 				userInteractionSeq += 1;
+				selectionEntries.push(selectionContextEntry(raw, response));
 				userInteractions.push(
 					toScenarioUserInteraction(
 						userInteractionSeq,
@@ -1800,6 +1879,7 @@ function runRecordSubprocess(args: {
 					capture.incomplete === true ||
 					(capture.truncatedCount ?? 0) > 0 ||
 					(capture.pendingAtExit ?? 0) > 0,
+				selectionContext: selectionContextKey(selectionEntries),
 				userInteractions,
 				unansweredInteractions,
 				...(protocolViolation ? { protocolViolation } : {}),
@@ -1904,8 +1984,10 @@ async function recordOneRun(
 		id: string;
 		op: "upsert" | "delete";
 		stream: string;
+		wireKey: string | string[];
 	}>;
 	reason?: string;
+	selectionContext: string | undefined;
 	userInteractions: ScenarioUserInteraction[];
 }> {
 	const result = await runRecordSubprocess({
@@ -1953,6 +2035,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -1979,6 +2062,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -1995,6 +2079,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -2011,6 +2096,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -2024,6 +2110,7 @@ async function recordOneRun(
 			records,
 			finalState,
 			protocolTrace,
+			selectionContext: result.selectionContext,
 			userInteractions: result.userInteractions,
 		};
 	}
@@ -2035,6 +2122,7 @@ async function recordOneRun(
 		records,
 		finalState,
 		protocolTrace,
+		selectionContext: result.selectionContext,
 		userInteractions: result.userInteractions,
 	};
 }
@@ -2300,12 +2388,14 @@ async function captureRuns(
 	// Read once per capture: both runs must hash under the SAME projection, and
 	// `scenario-verify` reads the same declaration when it recomputes.
 	const excludedComparisonFields = readExcludedComparisonFields(args.connector);
-	const observationMetadata = args.entrypoint
-		? []
-		: rawObservationMetadata(streams, excludedComparisonFields);
-	const observationScopeKey = JSON.stringify(
-		streams.map((stream) => stream.name),
-	);
+	const streamNames = JSON.stringify(streams.map((stream) => stream.name));
+	// Comparable only when the runs also answered the same selections. An
+	// unknown selection context is unique per run, so it never compares equal.
+	const observationScopeKey = (
+		run: number,
+		selectionContext: string | undefined,
+	): string =>
+		`${streamNames}|${selectionContext ?? `unknown-selection-run-${String(run)}`}`;
 	process.stdout.write(
 		`RECORDING ${args.connector} — run 1 (full refresh, state=null)\n`,
 	);
@@ -2324,7 +2414,13 @@ async function captureRuns(
 	const runs: ScenarioRun[] = [];
 	const browserCaptures: Array<BrowserCaptureArtifact | undefined> = [];
 	const observationRuns: RawObservationRun[] = run1.ok
-		? [{ records: run1.records, run: 1, scopeKey: observationScopeKey }]
+		? [
+				{
+					records: run1.records,
+					run: 1,
+					scopeKey: observationScopeKey(1, run1.selectionContext),
+				},
+			]
 		: [];
 	let complete = run1.ok;
 	const normalizerNames = new Set(run1.normalizerNames);
@@ -2384,7 +2480,7 @@ async function captureRuns(
 			observationRuns.push({
 				records: run2.records,
 				run: 2,
-				scopeKey: observationScopeKey,
+				scopeKey: observationScopeKey(2, run2.selectionContext),
 			});
 		}
 		for (const name of run2.normalizerNames) {
@@ -2421,6 +2517,11 @@ async function captureRuns(
 
 	let rawObservationSummary: RawObservationSummary;
 	try {
+		// Metadata collection runs inside the advisory boundary: a hostile or
+		// malformed manifest schema must never abort an otherwise good capture.
+		const observationMetadata = args.entrypoint
+			? []
+			: rawObservationMetadata(streams, excludedComparisonFields);
 		rawObservationSummary = analyzeRawObservations(
 			observationRuns,
 			observationMetadata,

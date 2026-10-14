@@ -664,7 +664,10 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		const envLosesDir = join(tmpDir, "dump-env-loses");
 		const precedenceVerify = runVerifyCli(
 			[...verifyBaseArgs, tamperedPath, "--dump-records", flagWinsDir],
-			{ ...verifyEnv, PDPP_SCENARIO_DUMP_DIR: envLosesDir },
+			{
+				...verifyEnv,
+				PDPP_SCENARIO_DUMP_DIR: envLosesDir,
+			},
 		);
 		assert.notEqual(precedenceVerify.code, 0);
 		assert.equal(
@@ -694,7 +697,9 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		assert.notEqual(dumpAllVerify.code, 0);
 		const dumpAllRecords = JSON.parse(
 			readFileSync(join(dumpAllDir, "run0-items.json"), "utf8"),
-		) as Array<{ id: string }>;
+		) as Array<{
+			id: string;
+		}>;
 		assert.deepEqual(
 			dumpAllRecords.map((r) => r.id),
 			["item-1", "item-2", "item-3"],
@@ -2488,7 +2493,9 @@ runConnector({
 	try {
 		const result = runRecordCli(
 			[connectorKey, "--out", join(tmpDir, "bound.scenario.json")],
-			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+			},
 		);
 		assert.equal(result.code, 0, result.stderr);
 		assert.match(
@@ -4221,5 +4228,214 @@ test("scenario-verify: replay subprocess forces PLAYWRIGHT_BROWSERS_PATH and PDP
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 		rmSync(connectorPath, { force: true });
+	}
+});
+
+// ─── raw observation advisory: selection context, typed wire keys, deep schemas ───
+
+function writeBoundObservationFixture(options: {
+	collectBody: string;
+	connectorKey: string;
+	schemaJson: string;
+	tmpDir: string;
+}): void {
+	const connectorDir = join(options.tmpDir, "connectors", options.connectorKey);
+	mkdirSync(connectorDir, { recursive: true });
+	writeFileSync(
+		join(connectorDir, "index.ts"),
+		`import { runConnector } from "../../../../src/connector-runtime.ts";
+runConnector({
+  name: ${JSON.stringify(options.connectorKey)},
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, emitRecord, sendInteraction, state }) {
+    const repeated = Object.hasOwn(state, "items");
+${options.collectBody}
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+`,
+	);
+	writeFileSync(
+		join(connectorDir, "manifest.json"),
+		`{"connector_id":"https://registry.pdpp.dev/connectors/${options.connectorKey.replaceAll("_", "-")}","connector_key":${JSON.stringify(options.connectorKey)},"protocol_version":"0.1.0","version":"0.0.0-test","streams":[{"name":"items","primary_key":["id"],"schema":${options.schemaJson}}]}`,
+	);
+}
+
+const SELECTION_FIXTURE_BODY = `    const selection = await sendInteraction({
+      kind: "selection",
+      message: "SELECTION_PROMPT_PRIVATE_CANARY",
+      request_id: process.env.SELECTION_FIXTURE_SAME === "1" ? "pick" : repeated ? "pick-second" : "pick-first",
+    });
+    if (selection.status !== "success") throw new Error("selection not answered");
+    await emitRecord("items", { id: "same-stream-local-id", label: repeated ? "second" : "first" });`;
+
+const SIMPLE_SCHEMA = JSON.stringify({
+	type: "object",
+	properties: { id: { type: "string" }, label: { type: "string" } },
+});
+
+test("scenario-record: advisory omits repeated-key comparisons when the runs answered different selections", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-selection-context-"),
+	);
+	const connectorKey = "selection_context_fixture";
+	writeBoundObservationFixture({
+		collectBody: SELECTION_FIXTURE_BODY,
+		connectorKey,
+		schemaJson: SIMPLE_SCHEMA,
+		tmpDir,
+	});
+	try {
+		const differentSelections = runRecordCli(
+			[
+				connectorKey,
+				"--out",
+				join(tmpDir, "different.scenario.json"),
+				"--answer",
+				"pick-first=SELECTION_ACCOUNT_A_CANARY",
+				"--answer",
+				"pick-second=SELECTION_ACCOUNT_B_CANARY",
+			],
+			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+		);
+		assert.equal(differentSelections.code, 0, differentSelections.stderr);
+		assert.match(
+			differentSelections.stdout,
+			/items: insufficient-repeat-observations \(0 repeated identities;/,
+		);
+		assert.match(
+			differentSelections.stdout,
+			/limitation: [^\n]*scope or selection context/,
+		);
+
+		const sameSelection = runRecordCli(
+			[
+				connectorKey,
+				"--out",
+				join(tmpDir, "same.scenario.json"),
+				"--answer",
+				"pick=SELECTION_ACCOUNT_A_CANARY",
+			],
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				SELECTION_FIXTURE_SAME: "1",
+			},
+		);
+		assert.equal(sameSelection.code, 0, sameSelection.stderr);
+		assert.match(
+			sameSelection.stdout,
+			/items: differences-observed \(1 repeated identities;/,
+		);
+		for (const output of [differentSelections, sameSelection]) {
+			for (const canary of [
+				"SELECTION_PROMPT_PRIVATE_CANARY",
+				"SELECTION_ACCOUNT_A_CANARY",
+				"SELECTION_ACCOUNT_B_CANARY",
+				"same-stream-local-id",
+			]) {
+				assert.equal(output.stdout.includes(canary), false);
+				assert.equal(output.stderr.includes(canary), false);
+			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: advisory keeps wire key [x] distinct from the scalar string whose text is [x]", () => {
+	const tmpDir = mkdtempSync(join(packageScratchDir(), "scenario-wire-key-"));
+	const fixturePath = join(tmpDir, "wire-key-fixture.ts");
+	writeFileSync(
+		fixturePath,
+		`import { runConnector } from "../../src/connector-runtime.ts";
+runConnector({
+  name: "wire-key-smoke",
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, state }) {
+    const repeated = Object.hasOwn(state, "items");
+    const same = process.env.WIRE_KEY_FIXTURE_SAME === "1";
+    await emit({
+      type: "RECORD",
+      stream: "items",
+      key: repeated && !same ? '["wire-key-canary"]' : ["wire-key-canary"],
+      data: { id: "wire-key-canary", value: repeated ? "second" : "first" },
+      emitted_at: new Date().toISOString(),
+    });
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+`,
+	);
+	try {
+		const distinct = runRecordCli(
+			[
+				"wire-key-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--out",
+				join(tmpDir, "distinct.scenario.json"),
+			],
+			{},
+		);
+		assert.equal(distinct.code, 0, distinct.stderr);
+		assert.match(
+			distinct.stdout,
+			/\(undeclared stream\): insufficient-repeat-observations \(0 repeated identities;/,
+		);
+		const same = runRecordCli(
+			[
+				"wire-key-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--out",
+				join(tmpDir, "same.scenario.json"),
+			],
+			{ WIRE_KEY_FIXTURE_SAME: "1" },
+		);
+		assert.equal(same.code, 0, same.stderr);
+		assert.match(
+			same.stdout,
+			/\(undeclared stream\): differences-observed \(1 repeated identities;/,
+		);
+		for (const output of [distinct, same]) {
+			assert.equal(output.stdout.includes("wire-key-canary"), false);
+			assert.equal(output.stderr.includes("wire-key-canary"), false);
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: a deeply nested declared schema cannot abort capture before run 1", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-deep-schema-"),
+	);
+	const connectorKey = "deep_schema_fixture";
+	const depth = 20_000;
+	const deepSchema = `{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"deep":${'{"properties":{"a":'.repeat(depth)}{}${"}}".repeat(depth)}}}`;
+	writeBoundObservationFixture({
+		collectBody: `    await emitRecord("items", { id: "deep-schema-id", label: repeated ? "second" : "first" });`,
+		connectorKey,
+		schemaJson: deepSchema,
+		tmpDir,
+	});
+	try {
+		const result = runRecordCli(
+			[connectorKey, "--out", join(tmpDir, "deep.scenario.json")],
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+			},
+		);
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(result.stdout, /RECORDING [^\n]* run 1/);
+		assert.match(result.stdout, /complete: true/);
+		assert.match(
+			result.stdout,
+			/limitation: [^\n]*(schema|metadata)[^\n]*(bounded|unavailable|omitted)/i,
+		);
+		assert.equal(result.stdout.includes("deep-schema-id"), false);
+		assert.equal(result.stderr.includes("RangeError"), false);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });

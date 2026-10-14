@@ -8,6 +8,10 @@ export interface RawObservationRecord {
 	id?: string;
 	identity?: unknown;
 	stream: string;
+	/** The wire RECORD `key` exactly as emitted (string or string[]), before the
+	 *  decoder flattened it into `id`. Preferred over `id`, which cannot tell
+	 *  the key ["x"] from the scalar string '["x"]'. */
+	wireKey?: unknown;
 }
 
 export interface RawObservationStreamMetadata {
@@ -15,6 +19,9 @@ export interface RawObservationStreamMetadata {
 	primaryKey?: readonly string[];
 	safeFieldPaths: readonly string[];
 	excludedFields?: readonly string[];
+	/** Set when `safeFieldPaths` stopped at a collection bound, so deeper
+	 *  declared fields fall into the generic bucket. */
+	schemaPathsBounded?: boolean;
 }
 
 export interface RawObservationRun {
@@ -215,7 +222,8 @@ function identityForRecord(
 	) {
 		candidates.push(metadata.primaryKey.map((field) => [field, data[field]]));
 	}
-	if (typeof record.id === "string") candidates.push(record.id);
+	if (record.wireKey !== undefined) candidates.push(record.wireKey);
+	else if (typeof record.id === "string") candidates.push(record.id);
 	for (const candidate of candidates) {
 		const key = boundedCanonicalJson(candidate, maxLength);
 		if (key !== undefined) return { key, hadCandidate: true };
@@ -322,6 +330,9 @@ export function analyzeRawObservations(
 	const sampledByStream = new Map<string, number>();
 	const truncatedStreams = new Set<string>();
 	let safeMetadataUnavailable = false;
+	const schemaPathsBounded = metadata.some(
+		(stream) => stream.schemaPathsBounded,
+	);
 	let missingIdentityRecords = 0;
 	let oversizedIdentityRecords = 0;
 	const scopeMismatch = new Set(runs.map((run) => run.scopeKey)).size > 1;
@@ -490,6 +501,14 @@ export function analyzeRawObservations(
 		truncated: truncatedStreams.size > 0,
 		limitations: [
 			"This advisory compares emitted records from this capture only; it does not prove freshness, completeness, author-clock independence, or future provider behavior.",
+			"Raw means the wire RECORD.data before comparison exclusions, not the provider's pre-normalization response.",
+			"Only the first observation of each identity in a run is retained; later records with the same identity in that run are not compared.",
+			`The retained-identity limit of ${identityLimit} does not bound total payload size, scan CPU, or schema size.`,
+			...(schemaPathsBounded
+				? [
+						"Schema field metadata was bounded for one or more streams; fields past the bound are reported in generic buckets.",
+					]
+				: []),
 			...(safeMetadataUnavailable
 				? [
 						"Manifest/schema metadata was unavailable for one or more observed streams; generic stream or field buckets are used.",
@@ -497,7 +516,7 @@ export function analyzeRawObservations(
 				: []),
 			...(scopeMismatch
 				? [
-						"Some matching identities had different scope or selection context; those comparisons were omitted.",
+						"Some matching identities had different or unknown scope or selection context; those comparisons were omitted.",
 					]
 				: []),
 			...(truncated

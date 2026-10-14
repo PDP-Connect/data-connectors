@@ -363,3 +363,75 @@ test("missing identity records are skipped instead of pairing canonical undefine
 		summary.limitations.some((line) => line.includes("missing identity")),
 	);
 });
+
+test("typed wire keys keep an array key distinct from a scalar string with the same text", () => {
+	const summary = analyzeRawObservations(
+		[
+			run(1, [
+				{
+					data: { business: "left" },
+					id: '["x"]',
+					stream: "items",
+					wireKey: ["x"],
+				},
+			]),
+			run(2, [
+				{
+					data: { business: "right" },
+					id: '["x"]',
+					stream: "items",
+					wireKey: '["x"]',
+				},
+			]),
+		],
+		[{ name: "items", safeFieldPaths: ["business"] }],
+	);
+	assert.equal(summary.streams[0]?.comparedIdentities, 0);
+	assert.equal(summary.streams[0]?.status, "insufficient-repeat-observations");
+
+	const sameKey = analyzeRawObservations(
+		[
+			run(1, [
+				{
+					data: { business: "left" },
+					id: '["x"]',
+					stream: "items",
+					wireKey: ["x"],
+				},
+			]),
+			run(2, [
+				{
+					data: { business: "right" },
+					id: '["x"]',
+					stream: "items",
+					wireKey: ["x"],
+				},
+			]),
+		],
+		[{ name: "items", safeFieldPaths: ["business"] }],
+	);
+	assert.equal(sameKey.streams[0]?.comparedIdentities, 1);
+	assert.deepEqual(sameKey.streams[0]?.rawChangedFields, [
+		{ field: "business", identities: 1 },
+	]);
+});
+
+test("limitations state the first-observation rule and what raw means without claiming payload bounds", () => {
+	const text = analyzeRawObservations([], metadata).limitations.join("\n");
+	assert.match(text, /first observation of each identity in a run/i);
+	assert.match(text, /wire RECORD\.data before comparison exclusions/);
+	assert.match(text, /not the provider's pre-normalization/);
+	assert.match(text, /does not bound total payload size/);
+});
+
+test("schema paths that were bounded at collection time are disclosed", () => {
+	const summary = analyzeRawObservations(
+		[],
+		[{ name: "items", safeFieldPaths: ["a"], schemaPathsBounded: true }],
+	);
+	assert.ok(
+		summary.limitations.some((line) =>
+			line.includes("Schema field metadata was bounded"),
+		),
+	);
+});
