@@ -2774,7 +2774,7 @@ test("processConversationDetail: a schema-rejected branch node emits a DETAIL_GA
 	assert.equal(outcome.complete, false);
 });
 
-test("processConversationDetail: lossy message content emits a DETAIL_GAP and keeps the text", async () => {
+test("processConversationDetail: lossy message content keeps the escaped text and is not complete", async () => {
 	const { deps, emitted, messages } = makeHarness();
 	const outcome = await processConversationDetail(
 		deps,
@@ -2791,14 +2791,8 @@ test("processConversationDetail: lossy message content emits a DETAIL_GAP and ke
 	const msg = emitted.find((r) => r.stream === "messages");
 	assert.equal(msg?.data.content, "bell\\u0000char");
 	assert.equal(msg?.data.content_loss, "control_chars_escaped");
-	const gaps = detailGaps(messages);
-	assert.equal(gaps.length, 1);
-	assert.equal(gaps[0]?.reason, "retry_exhausted");
-	assert.equal(
-		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
-		"message_content_lossy",
-	);
-	assert.equal(outcome.complete, false);
+	assert.equal(detailGaps(messages).length, 0);
+	assert.deepEqual(outcome, { complete: false, permanent: true });
 });
 
 test("processConversationDetail: a repeat detail in the same run keeps loss accounting and conversation metadata", async () => {
@@ -2832,11 +2826,7 @@ test("processConversationDetail: a repeat detail in the same run keeps loss acco
 		false,
 		"a lossy conversation stays incomplete on a repeat detail",
 	);
-	assert.equal(
-		detailGaps(messages).length,
-		2,
-		"each detail pass reports its own gap",
-	);
+	assert.equal(detailGaps(messages).length, 0, "permanent loss owes no gap");
 	assert.equal(emitted.filter((r) => r.stream === "messages").length, 2);
 	const conversations = emitted.filter((r) => r.stream === "conversations");
 	assert.equal(conversations.length, 2);
@@ -2926,8 +2916,8 @@ test("processConversationDetail: an oversize unknown content shape is reported a
 	);
 	const msg = emitted.find((r) => r.stream === "messages");
 	assert.equal(msg?.data.content_loss, "truncated");
-	assert.equal(detailGaps(messages).length, 1);
-	assert.equal(outcome.complete, false);
+	assert.equal(detailGaps(messages).length, 0);
+	assert.deepEqual(outcome, { complete: false, permanent: true });
 });
 
 test("processConversationDetail: a clean detail emits no gap and is complete", async () => {
@@ -3169,7 +3159,7 @@ test("runConversationsAndMessagesStreams: unsafe message content is kept escaped
 	const lossyGaps = harness.protocolMessages.filter(
 		(m) => m.type === "DETAIL_GAP",
 	);
-	assert.equal(lossyGaps.length, 1, "lossy content leaves a durable gap");
+	assert.equal(lossyGaps.length, 0, "permanent loss owes no refetch gap");
 	const coverageMsg = harness.protocolMessages.find(
 		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "messages",
 	);
@@ -3178,6 +3168,12 @@ test("runConversationsAndMessagesStreams: unsafe message content is kept escaped
 			[],
 		[],
 		"a lossy conversation is not counted as hydrated",
+	);
+	assert.deepEqual(
+		(coverageMsg as { optional_skip_keys?: unknown[] } | undefined)
+			?.optional_skip_keys,
+		["convo-with-binary-text"],
+		"the permanent loss is declared explicitly, not hidden",
 	);
 	const safeRecord = messageRecords.find((r) => r.data.id === safeNodeId);
 	assert.equal(
@@ -3203,7 +3199,7 @@ test("runConversationsAndMessagesStreams: unsafe message content is kept escaped
 		hydrated_keys: [],
 		considered: 1,
 		covered: 0,
-		gap_keys: ["convo-with-binary-text"],
+		optional_skip_keys: ["convo-with-binary-text"],
 	});
 
 	const stateEvents = harness.events.filter(
@@ -12529,5 +12525,258 @@ test("processConversationDetail: a repeat detail never changes an already-emitte
 				(g.detail_locator as { incomplete_reason?: string }).incomplete_reason ===
 				"branch_structurally_incomplete",
 		),
+	);
+});
+
+test("processConversationDetail: deterministic content loss is recorded on the record and schedules no refetch", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a0" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a0",
+				mapping: { a0: userNode(null, [], "bell\x00char") },
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	const msg = emitted.find((r) => r.stream === "messages");
+	assert.equal(msg?.data.content_loss, "control_chars_escaped");
+	assert.equal(
+		detailGaps(messages).length,
+		0,
+		"a refetch returns the same bytes, so no retryable gap is owed",
+	);
+	assert.deepEqual(outcome, { complete: false, permanent: true });
+});
+
+test("runConversationsAndMessagesStreams: persistently lossy conversations do not starve new conversations under a capped run", async () => {
+	const lossyIds = ["lossy-1", "lossy-2"];
+	const lossyItem = (id: string, updateTime: number): ConversationListItem =>
+		makeConvo({ id, current_node: "a0", update_time: updateTime });
+	const lossyDetail: ChatGptFetchResult = {
+		status: 200,
+		json: {
+			current_node: "a0",
+			mapping: { a0: userNode(null, [], "bell\x00char") },
+		},
+	};
+	const fetched: string[] = [];
+	let pending: Array<CollectContext["detailGaps"][number]> = [];
+	let state: Record<string, unknown> = {};
+	const runOnce = async (
+		listItems: ConversationListItem[],
+	): Promise<ReturnType<typeof makeRecordingEmit>> => {
+		const harness = makeRecordingEmit(validateRecord);
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: (path: string): Promise<ChatGptFetchResult> => {
+				if (path.startsWith("/conversations/search?")) {
+					const cursor = Number(
+						new URLSearchParams(path.split("?")[1]).get("cursor"),
+					);
+					return Promise.resolve({
+						status: 200,
+						json: {
+							items: cursor === 0 ? listItems : [],
+							has_missing_conversations: false,
+							total: listItems.length,
+						},
+					});
+				}
+				fetched.push(path);
+				return Promise.resolve(
+					lossyIds.some((id) => path.endsWith(id))
+						? lossyDetail
+						: makeDetailOkForConversation(path.split("/").pop() ?? ""),
+				);
+			},
+		};
+		await runConversationsAndMessagesStreams(
+			{
+				api,
+				detailGaps: pending,
+				emit: harness.emit,
+				emitRecord: harness.emitRecord,
+				progress: (): Promise<void> => Promise.resolve(),
+				requested: new Map(
+					["conversations", "messages"].map((name) => [name, { name }]),
+				),
+				runBudget: new ChatGptRunBudget({ maxFetches: 1 }),
+			},
+			state as CollectContext["state"],
+			{ detailPacing: { random: () => 0, sleep: () => undefined } },
+		);
+		const recovered = new Set(
+			harness.protocolMessages
+				.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+				.map((m) => (m as { record_key?: unknown }).record_key),
+		);
+		pending = [
+			...pending.filter((g) => !recovered.has(g.record_key)),
+			...harness.protocolMessages
+				.filter((m) => m.type === "DETAIL_GAP")
+				.map((m, index) => ({
+					...(m as object),
+					gap_id: `g-${fetched.length}-${index}`,
+				})),
+		] as typeof pending;
+		for (const m of harness.protocolMessages) {
+			if (m.type === "STATE") {
+				state = {
+					...state,
+					[m.stream]: (m as { cursor?: unknown }).cursor,
+				};
+			}
+		}
+		return harness;
+	};
+
+	// Run 1: one lossy conversation, cap 1.
+	await runOnce([lossyItem("lossy-1", 1_700_000_100)]);
+	// Run 2: a second lossy conversation arrives, cap 1.
+	await runOnce([
+		lossyItem("lossy-2", 1_700_000_200),
+		lossyItem("lossy-1", 1_700_000_100),
+	]);
+	// Run 3: a clean conversation arrives. It must be fetched, not starved.
+	const harness = await runOnce([
+		makeConvo({ id: "fresh-1", update_time: 1_700_000_300 }),
+		lossyItem("lossy-2", 1_700_000_200),
+		lossyItem("lossy-1", 1_700_000_100),
+	]);
+	assert.ok(
+		harness.emitted.some(
+			(r) => r.stream === "messages" && r.data.conversation_id === "fresh-1",
+		),
+		`fresh-1 starved; fetched=${fetched.join(",")}`,
+	);
+	assert.equal(
+		fetched.filter((p) => p.endsWith("lossy-1")).length,
+		1,
+		"a permanently lossy conversation is fetched once, not every run",
+	);
+});
+
+test("processConversationDetail: a same-run lossy-to-clean repeat is not certified hydrated", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	deps.emittedMessageIdsThisRun = new Set<string>();
+	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
+	deps.emittedMessageLossThisRun = new Map<string, string | null>();
+	const detail = (text: string): ChatGptFetchResult => ({
+		status: 200,
+		json: {
+			current_node: "a0",
+			mapping: { a0: userNode(null, [], text) },
+		},
+	});
+	await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a0" }),
+		detail("bell\x00char"),
+		makeEmitConversation(deps),
+	);
+	const second = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a0" }),
+		detail("bell char"),
+		makeEmitConversation(deps),
+	);
+	const records = emitted.filter((r) => r.stream === "messages");
+	assert.equal(records.length, 1, "append-only: the clean repeat is not emitted");
+	assert.equal(records[0]?.data.content_loss, "control_chars_escaped");
+	assert.equal(
+		second.complete,
+		false,
+		"the emitted record is still the lossy one",
+	);
+	assert.equal(
+		detailGaps(messages).length,
+		1,
+		"the clean source can repair it, so a retryable gap is owed",
+	);
+});
+
+test("processConversationDetail: a same-run clean-to-lossy repeat is accounted by the clean emitted record", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	deps.emittedMessageIdsThisRun = new Set<string>();
+	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
+	deps.emittedMessageLossThisRun = new Map<string, string | null>();
+	const detail = (text: string): ChatGptFetchResult => ({
+		status: 200,
+		json: {
+			current_node: "a0",
+			mapping: { a0: userNode(null, [], text) },
+		},
+	});
+	await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a0" }),
+		detail("bell char"),
+		makeEmitConversation(deps),
+	);
+	const second = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a0" }),
+		detail("bell\x00char"),
+		makeEmitConversation(deps),
+	);
+	const records = emitted.filter((r) => r.stream === "messages");
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.data.content_loss, null);
+	assert.deepEqual(second, { complete: true });
+	assert.equal(detailGaps(messages).length, 0);
+});
+
+test("runConversationsAndMessagesStreams: a stale retryable gap for permanently lossy content is recovered, not refetched forever", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const item = makeConvo({ id: "lossy-old", current_node: "a0" });
+	const api: ChatGptApi = {
+		auth: (): Promise<never> => Promise.reject(new Error("unused")),
+		fetch: (path: string): Promise<ChatGptFetchResult> => {
+			if (path.startsWith("/conversations/search?")) {
+				return Promise.resolve({
+					status: 200,
+					json: { items: [], has_missing_conversations: false, total: 0 },
+				});
+			}
+			return Promise.resolve({
+				status: 200,
+				json: {
+					current_node: "a0",
+					mapping: { a0: userNode(null, [], "bell\x00char") },
+				},
+			});
+		},
+	};
+	await runConversationsAndMessagesStreams(
+		{
+			api,
+			detailGaps: [makeDetailGapFromConvo("gap-old", item)],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: (): Promise<void> => Promise.resolve(),
+			requested: new Map(
+				["conversations", "messages"].map((name) => [name, { name }]),
+			),
+		},
+		{
+			conversations: { last_update_time: null },
+			messages: { last_update_time: null },
+		} as CollectContext["state"],
+		{ detailPacing: { random: () => 0, sleep: () => undefined } },
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(m) =>
+				m.type === "DETAIL_GAP_RECOVERED" &&
+				(m as { gap_id?: string }).gap_id === "gap-old",
+		),
+	);
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP").length,
+		0,
 	);
 });
