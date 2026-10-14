@@ -42,7 +42,7 @@
 			"rationale": "Collection reuses the owner's signed-in claude.ai browser session and reads the web app's own JSON endpoints; it requests no data export and sends no email. Automatic refresh is session-reuse-only: first collection and expired sessions need the owner to sign in through the browser handoff. Each run reads at most 200 changed conversations."
 		},
 		"public_listing": {
-			"tier": "development"
+			"tier": "preview"
 		}
 	},
 	"reason_display_messages": {

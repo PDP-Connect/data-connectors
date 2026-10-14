@@ -29,6 +29,7 @@
 export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 	{
 		amazon: { testFile: "connectors/amazon/integration.test.ts" },
+		anthropic_live: { testFile: "connectors/anthropic_live/index.test.ts" },
 		apple_contacts: {
 			testFile: "connectors/apple_contacts/integration.test.ts",
 		},
@@ -70,7 +71,6 @@ export const KNOWN_SCAFFOLD_CONNECTORS = ["loom", "wholefoods"] as const;
  * or Supported; the conformance test keeps the rosters disjoint.
  */
 export const REAL_UNLISTED_CONNECTORS: Record<string, { testFile: string }> = {
-	anthropic_live: { testFile: "connectors/anthropic_live/index.test.ts" },
 	anthropic: { testFile: "connectors/anthropic/integration.test.ts" },
 	// Tier development. The oracle is the end-to-end protocol test, matching
 	// strava.
