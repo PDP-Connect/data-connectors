@@ -132,7 +132,6 @@
 		"check": "node --import tsx ./scripts/check-biome.ts",
 		"check:published-entrypoints": "node ./scripts/check-published-entrypoints.mjs",
 		"check:noAwaitInLoops-conformance": "node --import tsx ./scripts/check-no-await-in-loops-conformance.ts",
-		"check:connectorStdoutConsole": "node --import tsx ./scripts/check-connector-stdout-console.ts",
 		"check:noDirectCredentialEnv": "node --import tsx ./scripts/check-no-direct-credential-env.ts",
 		"check:noUnnecessaryConditions-expiry": "node ./scripts/check-no-unnecessary-conditions-expiry.ts",
 		"conformance": "tsx scripts/conformance.ts",
@@ -141,7 +140,7 @@
 		"test": "node scripts/run-tests.mjs",
 		"test:related": "node --import tsx scripts/related-tests/run.ts",
 		"typecheck": "tsc --noEmit",
-		"verify": "npm --prefix ../.. run polyfill-library-metadata:check && npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:connectorStdoutConsole && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
+		"verify": "npm --prefix ../.. run polyfill-library-metadata:check && npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
 		"pack-install-run": "npm run build && node ./scripts/pack-install-run.mjs",
 		"prepack": "npm --prefix ../.. run polyfill-library-metadata:check && npm run build"
 	},

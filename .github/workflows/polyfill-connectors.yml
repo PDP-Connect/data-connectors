@@ -114,6 +114,11 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: npm run verify
 
+      - name: Check connector stdout stays protocol-only
+        # This scan targets connectors/ at the repository root, outside the
+        # package-local verification scope.
+        run: npm run connector-stdout-console:check
+
       - name: Test
         working-directory: packages/polyfill-connectors
         # Excludes the @pdpp/reference-contract-dependent suites; see
