@@ -63,6 +63,8 @@ function formatJson(source) {
 			path.join(repoRoot, "node_modules", ".bin", "biome"),
 			["format", "--stdin-file-path", indexPath],
 		);
+		biome.stdout.setEncoding("utf8");
+		biome.stderr.setEncoding("utf8");
 		let output = "";
 		let error = "";
 		biome.stdout.on("data", (chunk) => {

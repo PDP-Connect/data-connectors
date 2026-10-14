@@ -43,6 +43,19 @@
 		}
 	},
 	{
+		"file": "anthropic_live.json",
+		"manifest": {
+			"connector_key": "anthropic-live",
+			"reason_display_messages": {
+				"anthropic_live_backlog_deferred": "This run read as many changed Claude conversations as one run allows. The rest are read on later runs from the saved checkpoint.",
+				"no_chat_organization": "No Claude organization with chat access could be found for this account.",
+				"http_error": "We hit a network problem talking to Claude",
+				"parse_error": "Claude sent back a response we couldn't read",
+				"not_available": "This data isn't available for this Claude account"
+			}
+		}
+	},
+	{
 		"file": "apple_contacts.json",
 		"manifest": {
 			"connector_key": "apple-contacts",
