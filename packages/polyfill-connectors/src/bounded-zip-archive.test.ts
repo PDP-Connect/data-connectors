@@ -1715,3 +1715,126 @@ test("openStream: an entry within maxCompressedBytes is read whole", async () =>
 		);
 	});
 });
+
+const COMPLETE_DIRECTORY = { requireCompleteCentralDirectory: true };
+
+test("complete ZIP directory proof accepts an intact archive through both readers", () => {
+	const bytes = buildZip([
+		{ name: "first.json", content: Buffer.from("[]") },
+		{ name: "second.json", content: Buffer.from("[]") },
+	]);
+	assert.deepEqual(
+		readZipEntries(bytes, GENEROUS_POLICY, COMPLETE_DIRECTORY).map(
+			(entry) => entry.name,
+		),
+		["first.json", "second.json"],
+	);
+	withTempZipFile(bytes, (fd, size) => {
+		assert.equal(
+			readZipEntriesFromFile(fd, size, GENEROUS_POLICY, COMPLETE_DIRECTORY)
+				.length,
+			2,
+		);
+	});
+});
+
+for (const defect of [
+	"signature",
+	"truncated record",
+	"under-count",
+	"over-count",
+	"directory extent",
+	"split disk",
+	"disk count",
+	"entry disk",
+	"ZIP64 entry",
+	"truncated comment",
+] as const) {
+	test(`complete ZIP directory proof refuses ${defect} while preserving ordinary salvage`, () => {
+		const bytes = buildZip([
+			{ name: "first.json", content: Buffer.from("[]") },
+			{ name: "second.json", content: Buffer.from("[]") },
+		]);
+		const eocd = bytes.length - 22;
+		const directory = bytes.readUInt32LE(eocd + 16);
+		const second = directory + 46 + bytes.readUInt16LE(directory + 28);
+		let salvageCount = 2;
+		switch (defect) {
+			case "signature":
+				bytes.writeUInt32LE(0, second);
+				salvageCount = 1;
+				break;
+			case "truncated record":
+				bytes.writeUInt16LE(65_535, second + 28);
+				salvageCount = 1;
+				break;
+			case "under-count":
+				bytes.writeUInt16LE(1, eocd + 8);
+				bytes.writeUInt16LE(1, eocd + 10);
+				salvageCount = 1;
+				break;
+			case "over-count":
+				bytes.writeUInt16LE(3, eocd + 8);
+				bytes.writeUInt16LE(3, eocd + 10);
+				break;
+			case "directory extent":
+				bytes.writeUInt32LE(bytes.readUInt32LE(eocd + 12) - 1, eocd + 12);
+				salvageCount = 1;
+				break;
+			case "split disk":
+				bytes.writeUInt16LE(1, eocd + 4);
+				break;
+			case "disk count":
+				bytes.writeUInt16LE(1, eocd + 8);
+				break;
+			case "entry disk":
+				bytes.writeUInt16LE(1, second + 34);
+				break;
+			case "ZIP64 entry":
+				bytes.writeUInt16LE(45, second + 6);
+				break;
+			case "truncated comment":
+				bytes.writeUInt16LE(1, eocd + 20);
+				break;
+			default:
+				throw new Error("Unhandled strict-directory fixture");
+		}
+		assert.equal(readZipEntries(bytes, GENEROUS_POLICY).length, salvageCount);
+		assert.deepEqual(
+			readZipEntries(bytes, GENEROUS_POLICY, COMPLETE_DIRECTORY),
+			[],
+		);
+		withTempZipFile(bytes, (fd, size) => {
+			assert.equal(
+				readZipEntriesFromFile(fd, size, GENEROUS_POLICY).length,
+				salvageCount,
+			);
+			assert.deepEqual(
+				readZipEntriesFromFile(fd, size, GENEROUS_POLICY, COMPLETE_DIRECTORY),
+				[],
+			);
+		});
+	});
+}
+
+test("complete ZIP directory proof consumes every directory byte and a complete archive comment", () => {
+	const bytes = buildZip([{ name: "first.json", content: Buffer.from("[]") }]);
+	const eocd = bytes.length - 22;
+	const extra = Buffer.concat([
+		bytes.subarray(0, eocd),
+		Buffer.from([0]),
+		bytes.subarray(eocd),
+	]);
+	extra.writeUInt32LE(bytes.readUInt32LE(eocd + 12) + 1, eocd + 1 + 12);
+	assert.equal(readZipEntries(extra, GENEROUS_POLICY).length, 1);
+	assert.deepEqual(
+		readZipEntries(extra, GENEROUS_POLICY, COMPLETE_DIRECTORY),
+		[],
+	);
+	const commented = Buffer.concat([bytes, Buffer.from("comment")]);
+	commented.writeUInt16LE(7, eocd + 20);
+	assert.equal(
+		readZipEntries(commented, GENEROUS_POLICY, COMPLETE_DIRECTORY).length,
+		1,
+	);
+});

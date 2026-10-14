@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.41",
+				"version": "0.2.42",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -1299,7 +1299,7 @@
 				},
 				"connector_key": "apple-health",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/apple-health",
-				"version": "0.2.0",
+				"version": "0.2.1",
 				"display_name": "Apple Health",
 				"brand": {
 					"icon": "icon.svg",
@@ -7086,7 +7086,7 @@
 				},
 				"connector_key": "fitbit",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/fitbit",
-				"version": "0.1.0",
+				"version": "0.1.1",
 				"display_name": "Fitbit",
 				"runtime_requirements": {
 					"bindings": {
@@ -14740,7 +14740,7 @@
 				},
 				"connector_key": "netflix-export",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/netflix-export",
-				"version": "0.1.19",
+				"version": "0.1.20",
 				"display_name": "Netflix Export",
 				"brand": {
 					"icon": "icon.svg",
@@ -19242,7 +19242,7 @@
 				},
 				"connector_key": "strava",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava",
-				"version": "1.0.23",
+				"version": "1.0.24",
 				"display_name": "Strava",
 				"brand": {
 					"icon": "icon.svg",
@@ -21096,7 +21096,7 @@
 				},
 				"connector_key": "whatsapp",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-				"version": "0.2.17",
+				"version": "0.2.18",
 				"display_name": "WhatsApp (chat export)",
 				"brand": {
 					"icon": "icon.svg",
