@@ -19,8 +19,16 @@ const NO_EVIDENCE: ListEnd = {
 };
 
 test("enumeration ends only on a matching source total or a no-next-page signal", () => {
-	const ended = (end: Partial<ListEnd> | null, rendered: number) =>
-		enumerationEnded(end ? { ...NO_EVIDENCE, ...end } : null, rendered);
+	const ended = (
+		end: Partial<ListEnd> | null,
+		rendered: number,
+		continuationFollowed = false,
+	) =>
+		enumerationEnded(
+			end ? { ...NO_EVIDENCE, ...end } : null,
+			rendered,
+			continuationFollowed,
+		);
 	assert.equal(ended(null, 3), false, "no evidence read");
 	assert.equal(ended({}, 3), false, "unreadable page data is not evidence");
 	assert.equal(ended({ declaredTotal: 3 }, 3), true, "total matches");
@@ -50,6 +58,20 @@ test("enumeration ends only on a matching source total or a no-next-page signal"
 		),
 		false,
 		"row growth with no next-page control is not the final source response",
+	);
+	assert.equal(
+		ended(
+			{
+				dataReadable: true,
+				dataItemCount: 3,
+				dataHasContinuation: true,
+				domHasContinuation: false,
+			},
+			7,
+			true,
+		),
+		true,
+		"a followed continuation that grew the rendered list and removed its control reached the end",
 	);
 	assert.equal(
 		ended({ dataReadable: true, dataItemCount: 3 }, 1),

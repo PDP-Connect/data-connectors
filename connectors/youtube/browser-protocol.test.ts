@@ -198,6 +198,156 @@ test("history waits for delayed client DOM before recording", async () => {
 	}
 });
 
+test("subscriptions wait for continuation rows beyond the first rendered batch", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const subscription = (number: number) =>
+			`<ytd-channel-renderer><ytd-channel-name><yt-formatted-string id="text">Creator ${number}</yt-formatted-string></ytd-channel-name><a id="main-link" href="/@creator${number}"></a></ytd-channel-renderer>`;
+		const initialData = {
+			contents: {
+				twoColumnBrowseResultsRenderer: {
+					tabs: [
+						{
+							tabRenderer: {
+								selected: true,
+								content: {
+									richGridRenderer: {
+										contents: [
+											...Array.from({ length: 4 }, () => ({
+												channelRenderer: {},
+											})),
+											{
+												continuationItemRenderer: { continuationEndpoint: {} },
+											},
+										],
+									},
+								},
+							},
+						},
+					],
+				},
+			},
+		};
+		await page.route("https://www.youtube.com/**", async (route) => {
+			await route.fulfill({
+				contentType: "text/html",
+				body: `<html><body><div style="height:6000px"><div id="subscriptions">${Array.from({ length: 4 }, (_, index) => subscription(index + 1)).join("")}</div></div><script>var ytInitialData = ${JSON.stringify(initialData)}; setTimeout(() => document.querySelector("#subscriptions").insertAdjacentHTML("beforeend", ${JSON.stringify(Array.from({ length: 16 }, (_, index) => subscription(index + 5)).join(""))}), 1800);</script></body></html>`,
+			});
+		});
+		const records: Record<string, unknown>[] = [];
+		const failures: string[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([
+				["subscriptions", { name: "subscriptions" }],
+			]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async () => undefined,
+			reportStreamFailure: async (stream, message) => {
+				failures.push(`${stream}:${message}`);
+			},
+			progress: async () => undefined,
+		});
+		assert.equal(records.length, 20);
+		assert.deepEqual(failures, []);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("playlist index continuations, playlist items and LL likes use the legacy page shapes", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const playlistCard = (number: number) =>
+			`<ytd-grid-playlist-renderer><a href="/playlist?list=PL${number}">Playlist ${number}</a></ytd-grid-playlist-renderer>`;
+		const videosData = {
+			contents: {
+				twoColumnBrowseResultsRenderer: {
+					tabs: [
+						{
+							tabRenderer: {
+								selected: true,
+								content: {
+									playlistVideoListRenderer: {
+										contents: [{ playlistVideoRenderer: {} }],
+									},
+								},
+							},
+						},
+					],
+				},
+			},
+		};
+		const indexData = {
+			contents: {
+				twoColumnBrowseResultsRenderer: {
+					tabs: [
+						{
+							tabRenderer: {
+								selected: true,
+								content: {
+									richGridRenderer: {
+										contents: [
+											{ gridPlaylistRenderer: { playlistId: "PL1" } },
+											{
+												continuationItemRenderer: { continuationEndpoint: {} },
+											},
+										],
+									},
+								},
+							},
+						},
+					],
+				},
+			},
+		};
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			let body = "";
+			if (url.pathname === "/feed/playlists") {
+				body = `<div style="height:6000px"><div id="playlists">${playlistCard(1)}</div></div><script>var ytInitialData = ${JSON.stringify(indexData)}; setTimeout(() => document.querySelector("#playlists").insertAdjacentHTML("beforeend", ${JSON.stringify(Array.from({ length: 7 }, (_, index) => playlistCard(index + 2)).join(""))}), 1200);</script>`;
+			} else if (url.pathname === "/playlist") {
+				const listId = url.searchParams.get("list") ?? "LL";
+				const videoId = listId === "LL" ? "likedvideo01" : "video0000001";
+				body = `<h1 id="title">${listId} list</h1><span class="yt-content-metadata-view-model__metadata-text">1 video</span><ytd-playlist-video-renderer><a href="/watch?v=${videoId}"><span id="video-title">${listId} item</span></a></ytd-playlist-video-renderer><script>var ytInitialData = ${JSON.stringify(videosData)};</script>`;
+			}
+			await route.fulfill({
+				status: body ? 200 : 404,
+				contentType: "text/html",
+				body: `<html><body>${body}</body></html>`,
+			});
+		});
+		const records = new Map<string, Record<string, unknown>[]>();
+		const failures: string[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([
+				["playlists", { name: "playlists" }],
+				["playlist_items", { name: "playlist_items" }],
+				["likes", { name: "likes" }],
+			]) as never,
+			emitRecord: async (stream, data) => {
+				records.set(stream, [...(records.get(stream) ?? []), data]);
+			},
+			emit: async () => undefined,
+			reportStreamFailure: async (stream, message) => {
+				failures.push(`${stream}:${message}`);
+			},
+			progress: async () => undefined,
+		});
+		assert.equal(records.get("playlists")?.length, 8);
+		assert.equal(records.get("playlist_items")?.length, 8);
+		assert.equal(records.get("likes")?.length, 1);
+		assert.deepEqual(failures, []);
+	} finally {
+		await browser.close();
+	}
+});
+
 test("real page data with an empty renderer completes history; a sign-in renderer fails it", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {

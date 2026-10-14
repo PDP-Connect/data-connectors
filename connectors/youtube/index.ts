@@ -204,11 +204,17 @@ export async function ensureYoutubeSession(
 async function scroll(
 	page: BrowserCollectContext["page"],
 	rounds: number,
-): Promise<void> {
+	selector: string,
+	settleMilliseconds: number,
+): Promise<boolean> {
+	let grew = false;
 	for (let i = 0; i < rounds; i += 1) {
+		const before = await page.locator(selector).count();
 		await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-		await page.waitForTimeout(500);
+		await page.waitForTimeout(settleMilliseconds);
+		grew = (await page.locator(selector).count()) > before || grew;
 	}
+	return grew;
 }
 
 const EMPTY_STATE =
@@ -380,11 +386,13 @@ async function listEnded(
 	page: BrowserCollectContext["page"],
 	kind: ListKind,
 	renderedCount: number,
+	continuationFollowed = false,
 ): Promise<boolean> {
 	try {
 		return enumerationEnded(
 			await page.evaluate(readListEnd, kind),
 			renderedCount,
+			continuationFollowed,
 		);
 	} catch {
 		return false;
@@ -425,7 +433,14 @@ async function visibleVideos(
 	const seen = new Set<string>();
 	const out: BrowserVideo[] = [];
 	let renderedCount = 0;
+	let continuationFollowed = false;
+	let noChangeRounds = 0;
+	const selector =
+		mode === "history"
+			? "yt-lockup-view-model"
+			: "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer";
 	for (let round = 0; round <= rounds; round += 1) {
+		const previousCount = out.length;
 		const batch = await page.evaluate(readVideos, mode);
 		renderedCount = batch.length;
 		for (const video of batch) {
@@ -435,8 +450,14 @@ async function visibleVideos(
 				out.push(video);
 			}
 		}
+		noChangeRounds = out.length === previousCount ? noChangeRounds + 1 : 0;
 		if (mode === "history" && out.length >= HISTORY_LIMIT) break;
-		if (round < rounds) await scroll(page, 1);
+		if (noChangeRounds >= 2) break;
+		if (await listEnded(page, mode, batch.length, continuationFollowed)) break;
+		if (round < rounds)
+			continuationFollowed =
+				(await scroll(page, 1, selector, mode === "history" ? 800 : 1_500)) ||
+				continuationFollowed;
 	}
 	if (out.length === 0) throw new Error("youtube_video_parse_mismatch");
 	// The history limit is a cap the connector chose, not the end of the list.
@@ -447,7 +468,9 @@ async function visibleVideos(
 	return {
 		videos: mode === "history" ? out.slice(0, HISTORY_LIMIT) : out,
 		verifiedEmpty: false,
-		endObserved: !discardedRows && (await listEnded(page, mode, renderedCount)),
+		endObserved:
+			!discardedRows &&
+			(await listEnded(page, mode, renderedCount, continuationFollowed)),
 		cappedAtLimit,
 	};
 }
@@ -468,8 +491,13 @@ async function readableVideos(
 				result.cappedAtLimit ? HISTORY_CAP_MESSAGE : undefined,
 			);
 		return result;
-	} catch {
-		await streams.fail(stream);
+	} catch (error) {
+		const preciseReason =
+			error instanceof Error &&
+			/^youtube_(?:history|playlist)_page_unreadable$/.test(error.message)
+				? error.message
+				: undefined;
+		await streams.fail(stream, preciseReason);
 		return null;
 	}
 }
@@ -508,9 +536,9 @@ export async function collectYoutubeBrowser(
 	const capturedAt = new Date().toISOString();
 	const { page, requested } = ctx;
 	const streams = createStreamReporter(ctx);
-	const failPlaylistStreams = async () => {
+	const failPlaylistStreams = async (message?: string) => {
 		for (const stream of ["playlists", "playlist_items"])
-			if (requested.has(stream)) await streams.fail(stream);
+			if (requested.has(stream)) await streams.fail(stream, message);
 	};
 	const coverage = new Map<string, CoverageFact>(
 		[...requested.keys()].map((stream) => [
@@ -652,9 +680,18 @@ export async function collectYoutubeBrowser(
 				waitUntil: "domcontentloaded",
 			});
 			const state = await waitForContent(page, "ytd-channel-renderer");
-			if (state === "unreadable") await streams.fail("subscriptions");
+			if (state === "unreadable")
+				await streams.fail(
+					"subscriptions",
+					"YouTube did not expose readable subscription cards.",
+				);
 			else {
-				await scroll(page, SCROLLS.subscriptions);
+				const continuationFollowed = await scroll(
+					page,
+					SCROLLS.subscriptions,
+					"ytd-channel-renderer",
+					800,
+				);
 				const subscriptions =
 					state === "empty"
 						? []
@@ -662,11 +699,19 @@ export async function collectYoutubeBrowser(
 								readSubscriptions as () => ReturnType<typeof readSubscriptions>,
 							);
 				if (state === "content" && subscriptions.length === 0) {
-					await streams.fail("subscriptions");
+					await streams.fail(
+						"subscriptions",
+						"YouTube showed subscription content, but the connector could not parse any channel cards.",
+					);
 				} else if (state === "empty") {
 					await emitVerifiedEmptyState(ctx, "subscriptions", capturedAt);
 				} else if (
-					!(await listEnded(page, "subscriptions", subscriptions.length))
+					!(await listEnded(
+						page,
+						"subscriptions",
+						subscriptions.length,
+						continuationFollowed,
+					))
 				) {
 					await streams.fail("subscriptions");
 				}
@@ -697,25 +742,40 @@ export async function collectYoutubeBrowser(
 			await page.goto(`${HOME}feed/playlists`, {
 				waitUntil: "domcontentloaded",
 			});
-			const state = await waitForContent(page, 'a[href*="playlist?list="]', {
+			const state = await waitForContent(page, 'a[href*="list="]', {
 				playlistIndex: true,
 			});
 			if (state === "unreadable") {
 				playlistIndexReadable = false;
-				await failPlaylistStreams();
+				await failPlaylistStreams(
+					"YouTube did not expose a readable playlist index.",
+				);
 			} else if (state === "content") {
-				await scroll(page, SCROLLS.playlists);
+				const continuationFollowed = await scroll(
+					page,
+					SCROLLS.playlists,
+					'ytd-playlist-renderer a[href*="list="], ytd-grid-playlist-renderer a[href*="list="], ytd-compact-playlist-renderer a[href*="list="], a[href*="list="]',
+					1_000,
+				);
 				playlistLinks = await page.evaluate(
 					readPlaylistLinks as () => ReturnType<typeof readPlaylistLinks>,
 				);
 				const indexEnded =
 					playlistLinks.length > 0 &&
-					(await listEnded(page, "playlist-index", playlistLinks.length));
+					(await listEnded(
+						page,
+						"playlist-index",
+						playlistLinks.length,
+						continuationFollowed,
+					));
 				for (const stream of ["playlists", "playlist_items"]) {
 					if (!requested.has(stream)) continue;
 					if (playlistLinks.length === 0) {
 						playlistIndexReadable = false;
-						await streams.fail(stream);
+						await streams.fail(
+							stream,
+							"YouTube showed playlist index content, but the connector could not parse any playlist links.",
+						);
 					} else if (!indexEnded) await streams.fail(stream);
 				}
 			} else if (state === "empty") {
@@ -723,7 +783,9 @@ export async function collectYoutubeBrowser(
 			}
 		} catch {
 			playlistIndexReadable = false;
-			await failPlaylistStreams();
+			await failPlaylistStreams(
+				"YouTube playlist index navigation or parsing failed.",
+			);
 		}
 	}
 	if (
@@ -731,35 +793,45 @@ export async function collectYoutubeBrowser(
 		(requested.has("playlists") || requested.has("playlist_items"))
 	) {
 		for (const playlist of playlistLinks) {
-			try {
-				await page.goto(playlist.url, { waitUntil: "domcontentloaded" });
-				if (
-					(await waitForContent(
-						page,
-						"yt-dynamic-text-view-model h1 span, .yt-page-header-view-model__page-header-title h1 span, h1#title, h1 yt-formatted-string",
-					)) !== "content"
-				) {
-					await failPlaylistStreams();
-					continue;
+			if (requested.has("playlists")) {
+				try {
+					await page.goto(playlist.url, { waitUntil: "domcontentloaded" });
+					if (
+						(await waitForContent(
+							page,
+							"yt-dynamic-text-view-model h1 span, .yt-page-header-view-model__page-header-title h1 span, h1#title, h1 yt-formatted-string",
+						)) !== "content"
+					) {
+						await streams.fail(
+							"playlists",
+							`YouTube playlist ${playlist.id} did not expose readable header details.`,
+						);
+					} else {
+						const header = await page.evaluate(
+							readPlaylistHeader as () => ReturnType<typeof readPlaylistHeader>,
+						);
+						await emit("playlists", {
+							id: playlist.id,
+							url: playlist.url,
+							title: header.title,
+							owner: header.owner,
+							owner_url: header.owner_url,
+							visibility: header.visibility,
+							video_count: parseCount(header.video_count_text),
+							view_count: /no views/i.test(header.view_count_text ?? "")
+								? 0
+								: parseCount(header.view_count_text),
+						});
+					}
+				} catch {
+					await streams.fail(
+						"playlists",
+						`YouTube playlist ${playlist.id} header navigation or parsing failed.`,
+					);
 				}
-				const header = await page.evaluate(
-					readPlaylistHeader as () => ReturnType<typeof readPlaylistHeader>,
-				);
-				if (requested.has("playlists")) {
-					await emit("playlists", {
-						id: playlist.id,
-						url: playlist.url,
-						title: header.title,
-						owner: header.owner,
-						owner_url: header.owner_url,
-						visibility: header.visibility,
-						video_count: parseCount(header.video_count_text),
-						view_count: /no views/i.test(header.view_count_text ?? "")
-							? 0
-							: parseCount(header.view_count_text),
-					});
-				}
-				if (requested.has("playlist_items")) {
+			}
+			if (requested.has("playlist_items")) {
+				try {
 					const result = await readableVideos(
 						ctx,
 						streams,
@@ -777,9 +849,12 @@ export async function collectYoutubeBrowser(
 							});
 						}
 					}
+				} catch {
+					await streams.fail(
+						"playlist_items",
+						`YouTube playlist ${playlist.id} items could not be collected.`,
+					);
 				}
-			} catch {
-				await failPlaylistStreams();
 			}
 		}
 	}

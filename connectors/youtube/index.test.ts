@@ -80,7 +80,10 @@ class FixturePage {
 		this.url = url;
 	}
 	locator() {
-		return { first: () => ({ click: async () => undefined }) };
+		return {
+			first: () => ({ click: async () => undefined }),
+			count: async () => 0,
+		};
 	}
 	async waitForTimeout() {
 		/* fixture has no renderer delay */
@@ -905,8 +908,12 @@ class DocumentPage {
 	async goto(url: string) {
 		this.url = url;
 	}
-	locator() {
-		return { first: () => ({ click: async () => undefined }) };
+	locator(selector: string) {
+		return {
+			first: () => ({ click: async () => undefined }),
+			count: async () =>
+				this.inPage(() => document.querySelectorAll(selector).length),
+		};
 	}
 	async waitForTimeout() {
 		/* no renderer delay */
@@ -1000,6 +1007,20 @@ test("finding 1: playlist index and every playlist read to their end complete wi
 	assert.equal(records.get("playlists")?.length, 1);
 	assert.equal(records.get("playlist_items")?.length, 1);
 	assert.deepEqual(outcome("playlists"), []);
+	assert.deepEqual(outcome("playlist_items"), []);
+});
+
+test("playlist item collection continues when playlist header details are unreadable", async () => {
+	const { records, outcome } = await collectFromDocuments(
+		(url) =>
+			url.includes("feed/playlists")
+				? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}`
+				: `${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}`,
+		["playlists", "playlist_items"],
+	);
+	assert.equal(records.get("playlists")?.length, undefined);
+	assert.equal(records.get("playlist_items")?.length, 1);
+	assert.deepEqual(outcome("playlists"), ["stream_collection_failed"]);
 	assert.deepEqual(outcome("playlist_items"), []);
 });
 

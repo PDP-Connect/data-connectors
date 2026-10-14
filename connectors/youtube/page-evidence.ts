@@ -45,11 +45,20 @@ export interface ListEnd {
 export function enumerationEnded(
 	end: ListEnd | null | undefined,
 	renderedCount: number,
+	continuationFollowed = false,
 ): boolean {
 	if (!end) return false;
 	if (end.domItemCount !== null && end.domItemCount > renderedCount)
 		return false;
 	if (end.declaredTotal !== null) return end.declaredTotal === renderedCount;
+	if (
+		continuationFollowed &&
+		end.dataReadable &&
+		end.dataHasContinuation &&
+		renderedCount > end.dataItemCount &&
+		!end.domHasContinuation
+	)
+		return true;
 	if (!end.dataReadable || end.dataHasContinuation || end.domHasContinuation)
 		return false;
 	return renderedCount >= end.dataItemCount;
@@ -214,7 +223,7 @@ const LIST_END_FUNCTION = `(kind) => {
 	if (kind === "subscriptions") domItemCount = document.querySelectorAll("ytd-channel-renderer").length;
 	if (kind === "playlist-index") {
 		const ids = new Set();
-		for (const anchor of Array.from(document.querySelectorAll('a[href*="playlist?list="]')))
+		for (const anchor of Array.from(document.querySelectorAll('a[href*="list="]')))
 			if (isEnumerablePlaylistLink(anchor)) ids.add(new URL(anchor.getAttribute("href") ?? "", BASE).searchParams.get("list"));
 		domItemCount = ids.size;
 	}

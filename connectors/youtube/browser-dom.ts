@@ -188,7 +188,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 		.flatMap((node) => {
 			const title = node
 				.querySelector(
-					"ytd-channel-name yt-formatted-string#text, ytd-channel-name yt-formatted-string",
+					"ytd-channel-name#channel-title yt-formatted-string#text, ytd-channel-name yt-formatted-string#text, ytd-channel-name yt-formatted-string",
 				)
 				?.textContent?.trim();
 			const href = node
@@ -201,7 +201,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 			if (url.origin !== "https://www.youtube.com") return [];
 			const badgeArea = node.querySelector("ytd-channel-name");
 			const bell = node.querySelector<HTMLButtonElement>(
-				'ytd-subscription-notification-toggle-button-renderer-next button, [aria-label*="notifications"]',
+				'ytd-subscription-notification-toggle-button-renderer-next button, [aria-label*="All notifications"], yt-button-shape[aria-label*="notification"] button, [aria-label*="notifications"]',
 			);
 			const bellLabel = bell?.getAttribute("aria-label")?.toLowerCase() ?? "";
 			return [
@@ -224,7 +224,11 @@ export function readSubscriptions(doc: Document = document): Array<{
 							.querySelector("#metadata span#video-count")
 							?.textContent?.trim() || null,
 					is_verified: badgeArea
-						? Boolean(badgeArea.querySelector("badge-shape, .badge-shape"))
+						? Boolean(
+								badgeArea.querySelector(
+									"badge-shape, .badge-shape, ytd-badge-supported-renderer badge-shape",
+								),
+							)
 						: null,
 					notifications: /all notifications/.test(bellLabel)
 						? true
@@ -241,9 +245,18 @@ export function readPlaylistLinks(
 	doc: Document = document,
 ): Array<{ id: string; url: string }> {
 	const seen = new Set<string>();
-	const links = Array.from(
-		doc.querySelectorAll<HTMLAnchorElement>('a[href*="playlist?list="]'),
+	const playlistCards = Array.from(
+		doc.querySelectorAll(
+			"ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer",
+		),
 	);
+	const cardLinks = playlistCards.flatMap((card) => {
+		const link = card.querySelector<HTMLAnchorElement>('a[href*="list="]');
+		return link ? [link] : [];
+	});
+	const links = cardLinks.length
+		? cardLinks
+		: Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="list="]'));
 	return links
 		.flatMap((a) => {
 			const url = new URL(
@@ -340,7 +353,7 @@ export function readVideos(
 				/\/shorts\/([\w-]+)/.exec(video_url)?.[1] ||
 				null;
 			const titleNode = node.querySelector(
-				"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title",
+				"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title, a#video-title span, span#video-title, a#video-title yt-formatted-string",
 			);
 			const video_title =
 				titleNode?.getAttribute("title")?.trim() ||
