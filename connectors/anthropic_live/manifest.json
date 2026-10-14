@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic-live",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-	"version": "0.1.0",
+	"version": "0.3.0",
 	"display_name": "Claude (Live Session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -42,7 +42,7 @@
 			"rationale": "Collection reuses the owner's signed-in claude.ai browser session and reads the web app's own JSON endpoints; it requests no data export and sends no email. Automatic refresh is session-reuse-only: first collection and expired sessions need the owner to sign in through the browser handoff. Each run reads at most 200 changed conversations."
 		},
 		"public_listing": {
-			"tier": "development"
+			"tier": "preview"
 		}
 	},
 	"reason_display_messages": {
@@ -106,6 +106,16 @@
 					},
 					"is_starred": {
 						"type": ["boolean", "null"]
+					},
+					"blob_ref": {
+						"type": "object",
+						"properties": {
+							"blob_id": { "type": "string" },
+							"mime_type": { "type": "string" },
+							"size_bytes": { "type": "integer" },
+							"sha256": { "type": "string" }
+						},
+						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					}
 				},
 				"required": ["id"]
@@ -119,7 +129,7 @@
 			"incremental": true,
 			"query": {
 				"search": {
-					"lexical_fields": ["title", "model"],
+					"lexical_fields": ["title"],
 					"semantic_fields": ["title"]
 				},
 				"range_filters": {
@@ -132,8 +142,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
-			"freshness_strategy": "scheduled_window",
-			"cursor_field": "update_time"
+			"freshness_strategy": "scheduled_window"
 		},
 		{
 			"name": "messages",
@@ -205,7 +214,7 @@
 			],
 			"query": {
 				"search": {
-					"lexical_fields": ["content", "model"],
+					"lexical_fields": ["content"],
 					"semantic_fields": ["content"]
 				},
 				"range_filters": {
@@ -218,9 +227,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
-			"freshness_strategy": "scheduled_window",
-			"cursor_field": "create_time",
-			"state_stream": "conversations"
+			"freshness_strategy": "scheduled_window"
 		},
 		{
 			"name": "account_plan",

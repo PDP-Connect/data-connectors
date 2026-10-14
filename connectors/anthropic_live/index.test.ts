@@ -3,16 +3,9 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type {
-	BrowserCollectContext,
-	EmittedMessage,
-	RecordData,
-	StreamScope,
-} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	collectAnthropicLive,
 	MAX_CONVERSATIONS_PER_RUN,
-	probeAnthropicLiveSession,
 	selectChatOrganization,
 } from "./index.ts";
 import {
@@ -21,243 +14,12 @@ import {
 	buildUsageLimitRecords,
 	planTypeOf,
 } from "./parsers.ts";
-import { validateRecord } from "./schemas.ts";
+import { at, conv, harness, ORG, ORGS, uuid } from "./test-support.ts";
 
-process.env.PDPP_ANTHROPIC_LIVE_DETAIL_DELAY_MS = "1";
-
-const ORG = "00000000-0000-4000-8000-0000000000f1";
-const O = `/api/organizations/${ORG}`;
-const uuid = (n: number) =>
-	`00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const at = (minute: number) =>
-	`2026-01-15T09:${String(minute).padStart(2, "0")}:00.000000Z`;
-
-const ORGS = [
-	{ uuid: uuid(900), capabilities: ["api"], billing_type: "prepaid" },
-	{
-		uuid: ORG,
-		capabilities: ["claude_max", "chat"],
-		rate_limit_tier: "default_claude_max_20x",
-		billing_type: "stripe_subscription",
-		raven_type: null,
-		plan_display_name: null,
-		created_at: "2025-03-01T12:00:00.000000Z",
-	},
-];
-const SUBSCRIPTION = {
-	status: "active",
-	billing_interval: "monthly",
-	next_charge_at: "2026-02-01T12:00:00Z",
-	plan_ending_at: null,
-	payment_method: { type: "card", last4: "4242" },
-};
-const USAGE = {
-	five_hour: { utilization: 2, resets_at: at(50) },
-	limits: [
-		{
-			kind: "session",
-			group: "session",
-			percent: 2,
-			severity: "normal",
-			resets_at: at(50),
-			scope: null,
-			is_active: false,
-		},
-		{
-			kind: "weekly_scoped",
-			group: "weekly",
-			percent: 58,
-			severity: "critical",
-			resets_at: at(55),
-			scope: { model: { id: null, display_name: "Fable" }, surface: null },
-			is_active: true,
-		},
-	],
-	extra_usage: { used_credits: 12 },
-};
-
-interface Conv {
-	uuid: string;
-	name: string;
-	model: string | null;
-	created_at: string;
-	updated_at: string;
-	is_starred: boolean;
-	project_uuid: string | null;
-	chat_messages: Record<string, unknown>[];
-}
-
-function conv(n: number, minute: number, model = "claude-sonnet-4-6"): Conv {
-	return {
-		uuid: uuid(n),
-		name: `Conversation ${n}`,
-		model,
-		created_at: at(0),
-		updated_at: at(minute),
-		is_starred: false,
-		project_uuid: null,
-		chat_messages: [
-			{
-				uuid: uuid(n * 1000 + 1),
-				text: "",
-				content: [{ type: "text", text: "question" }],
-				sender: "human",
-				created_at: at(0),
-				updated_at: at(0),
-				attachments: [],
-				parent_message_uuid: uuid(0),
-			},
-			{
-				uuid: uuid(n * 1000 + 2),
-				text: "",
-				content: [
-					{ type: "thinking", thinking: "private" },
-					{ type: "text", text: "answer" },
-				],
-				sender: "assistant",
-				created_at: at(minute),
-				updated_at: at(minute),
-				attachments: [],
-				parent_message_uuid: uuid(n * 1000 + 1),
-			},
-		],
-	};
-}
-
-type Route = (url: URL) => { status: number; body?: unknown } | undefined;
-
-function harness(
-	convs: Conv[],
-	options: {
-		streams?: string[];
-		state?: Record<string, unknown>;
-		since?: string;
-		route?: Route;
-		collectionMode?: "full_refresh" | "incremental";
-	} = {},
-) {
-	const calls: string[] = [];
-	const emitted: EmittedMessage[] = [];
-	const records: Array<{ stream: string; data: RecordData }> = [];
-	const failures: Array<{ stream: string; retryable: boolean | undefined }> =
-		[];
-	const respond = (path: string): { status: number; body?: unknown } => {
-		const url = new URL(path, "https://claude.ai");
-		const routed = options.route?.(url);
-		if (routed) return routed;
-		if (url.pathname === "/api/organizations") {
-			return { status: 200, body: ORGS };
-		}
-		if (url.pathname === `${O}/subscription_details`) {
-			return { status: 200, body: SUBSCRIPTION };
-		}
-		if (url.pathname === `${O}/usage`) return { status: 200, body: USAGE };
-		if (url.pathname === `${O}/chat_conversations`) {
-			const limit = Number(url.searchParams.get("limit"));
-			const offset = Number(url.searchParams.get("offset"));
-			const sorted = [...convs].sort((a, b) =>
-				b.updated_at.localeCompare(a.updated_at),
-			);
-			return {
-				status: 200,
-				body: sorted
-					.slice(offset, offset + limit)
-					.map(({ chat_messages: _messages, ...item }) => item),
-			};
-		}
-		const detail = convs.find(
-			(c) => url.pathname === `${O}/chat_conversations/${c.uuid}`,
-		);
-		if (detail && url.searchParams.get("tree") === "True") {
-			return { status: 200, body: detail };
-		}
-		return { status: 404 };
-	};
-	const fakeFetch = (async (input: string) => {
-		calls.push(input);
-		const { status, body } = respond(input);
-		return {
-			status,
-			ok: status >= 200 && status < 300,
-			json: async () => {
-				if (body === undefined) throw new Error("no body");
-				return structuredClone(body);
-			},
-		};
-	}) as unknown as typeof fetch;
-	const page = {
-		url: () => "https://claude.ai/new",
-		goto: async () => null,
-		evaluate: async (fn: (arg: unknown) => unknown, arg: unknown) => {
-			const savedFetch = globalThis.fetch;
-			const savedLocation = Object.getOwnPropertyDescriptor(
-				globalThis,
-				"location",
-			);
-			Object.defineProperty(globalThis, "location", {
-				configurable: true,
-				value: { origin: "https://claude.ai" },
-			});
-			globalThis.fetch = fakeFetch;
-			try {
-				return await fn(arg);
-			} finally {
-				globalThis.fetch = savedFetch;
-				if (savedLocation) {
-					Object.defineProperty(globalThis, "location", savedLocation);
-				} else {
-					Reflect.deleteProperty(globalThis, "location");
-				}
-			}
-		},
-	};
-	const streams = options.streams ?? [
-		"conversations",
-		"messages",
-		"account_plan",
-		"usage_limits",
-	];
-	const ctx = {
-		collectionMode: options.collectionMode ?? "incremental",
-		emit: async (message: EmittedMessage) => {
-			emitted.push(message);
-		},
-		emitRecord: async (stream: string, data: RecordData) => {
-			const result = validateRecord(stream, data);
-			assert.equal(result.ok, true, `${stream} ${JSON.stringify(result)}`);
-			records.push({ stream, data });
-		},
-		page,
-		progress: async () => undefined,
-		reportStreamFailure: async (
-			stream: string,
-			_message: string,
-			opts?: { retryable?: boolean },
-		) => {
-			failures.push({ stream, retryable: opts?.retryable });
-		},
-		requested: new Map<string, StreamScope>(
-			streams.map((name) => [
-				name,
-				(options.since
-					? { time_range: { since: options.since } }
-					: {}) as StreamScope,
-			]),
-		),
-		state: options.state ?? {},
-	} as unknown as BrowserCollectContext;
-	const of = (stream: string) =>
-		records.filter((r) => r.stream === stream).map((r) => r.data);
-	const states = (stream: string) =>
-		emitted
-			.filter((m) => m.type === "STATE" && m.stream === stream)
-			.map((m) => (m as { cursor: Record<string, unknown> }).cursor);
-	const skips = () =>
-		emitted
-			.filter((m) => m.type === "SKIP_RESULT")
-			.map((m) => m as unknown as { stream: string; reason: string });
-	return { calls, ctx, emitted, failures, of, skips, states };
-}
+/** The update time a STATE cursor has read through. */
+const through = (cursor: Record<string, unknown> | undefined) =>
+	(cursor?.read_through as { update_time?: string } | null | undefined)
+		?.update_time;
 
 test("first run reads every conversation oldest change first and stamps the conversation model", async () => {
 	const h = harness([conv(1, 10), conv(2, 30, "claude-opus-4-7"), conv(3, 20)]);
@@ -282,10 +44,12 @@ test("first run reads every conversation oldest change first and stamps the conv
 		["claude-opus-4-7", "conversation", "answer"],
 	);
 	assert.equal(assistant?.parent_id, uuid(2001));
-	assert.deepEqual(
-		h.states("conversations").map((c) => c.update_time),
-		[at(10), at(20), at(30)],
-	);
+	assert.deepEqual(h.states("conversations").map(through), [
+		at(10),
+		at(20),
+		at(30),
+		at(30),
+	]);
 	assert.deepEqual(h.skips(), []);
 	// The API-only organization is never read.
 	assert.equal(
@@ -295,12 +59,17 @@ test("first run reads every conversation oldest change first and stamps the conv
 });
 
 test("incremental run reads only conversations changed after the cursor and only their new messages", async () => {
+	const first = harness([conv(1, 10), conv(2, 15), conv(3, 20)], {
+		streams: ["conversations", "messages"],
+	});
+	await collectAnthropicLive(first.ctx);
+
 	const changed = conv(2, 30, "claude-opus-5");
 	changed.chat_messages[0] = { ...changed.chat_messages[0], updated_at: at(5) };
 	changed.chat_messages[0].created_at = at(5);
 	const h = harness([conv(1, 10), changed, conv(3, 20)], {
 		streams: ["conversations", "messages"],
-		state: { conversations: { update_time: at(20) } },
+		state: first.nextState(),
 	});
 	await collectAnthropicLive(h.ctx);
 
@@ -318,15 +87,23 @@ test("incremental run reads only conversations changed after the cursor and only
 		h.calls.filter((c) => c.includes("/chat_conversations/")).length,
 		1,
 	);
-	assert.deepEqual(h.states("conversations"), [
-		{ update_time: at(30), since: null },
-	]);
+	assert.deepEqual(h.states("messages").at(-1), {
+		version: 3,
+		organization_id: ORG,
+		scope: { since: null, until: null, resources: null, fields: null },
+		read_through: { update_time: at(30), id: uuid(2) },
+		emitted_through: at(30),
+	});
 });
 
 test("a run with no changes makes no detail request and keeps the cursor", async () => {
+	const first = harness([conv(1, 10)], {
+		streams: ["conversations", "messages"],
+	});
+	await collectAnthropicLive(first.ctx);
 	const h = harness([conv(1, 10)], {
 		streams: ["conversations", "messages"],
-		state: { conversations: { update_time: at(10) } },
+		state: first.nextState(),
 	});
 	await collectAnthropicLive(h.ctx);
 	assert.deepEqual(h.of("conversations"), []);
@@ -334,13 +111,15 @@ test("a run with no changes makes no detail request and keeps the cursor", async
 		h.calls.some((c) => c.includes("/chat_conversations/")),
 		false,
 	);
-	assert.deepEqual(h.states("conversations"), [
-		{ update_time: at(10), since: null },
-	]);
+	assert.deepEqual(h.nextState(), first.nextState());
 });
 
 test("a window that starts earlier than the cursor's is read again from its start", async () => {
-	const convs = [conv(1, 10), conv(2, 20), conv(3, 30)];
+	// The window applies to create_time, the stream's consent field.
+	const convs = [conv(1, 10), conv(2, 20), conv(3, 30)].map((c) => ({
+		...c,
+		created_at: c.updated_at,
+	}));
 	const windowed = harness(convs, {
 		streams: ["conversations"],
 		since: at(15),
@@ -350,8 +129,8 @@ test("a window that starts earlier than the cursor's is read again from its star
 		windowed.of("conversations").map((r) => r.id),
 		[uuid(2), uuid(3)],
 	);
-	const state = { conversations: windowed.states("conversations").at(-1) };
-	assert.deepEqual(state.conversations, { update_time: at(30), since: at(15) });
+	const state = windowed.nextState();
+	assert.equal(through(windowed.states("conversations").at(-1)), at(30));
 
 	const same = harness(convs, {
 		streams: ["conversations"],
@@ -367,7 +146,12 @@ test("a window that starts earlier than the cursor's is read again from its star
 		widened.of("conversations").map((r) => r.id),
 		[uuid(1), uuid(2), uuid(3)],
 	);
-	assert.equal(widened.states("conversations").at(-1)?.since, null);
+	assert.deepEqual(widened.states("conversations").at(-1)?.scope, {
+		since: null,
+		until: null,
+		resources: null,
+		fields: null,
+	});
 });
 
 test("conversations alone are read from the list without detail requests", async () => {
@@ -393,7 +177,8 @@ test("the list is paged and a backlog over the per-run cap is deferred", async (
 	assert.equal(h.of("conversations").length, MAX_CONVERSATIONS_PER_RUN);
 	assert.equal(
 		h.calls.filter((c) => c.includes("/chat_conversations?limit=50")).length,
-		Math.ceil(total / 50),
+		// Read twice: a list of several pages is used only when two reads agree.
+		2 * Math.ceil(total / 50),
 	);
 	assert.deepEqual(h.skips(), [
 		{
@@ -406,14 +191,14 @@ test("the list is paged and a backlog over the per-run cap is deferred", async (
 	]);
 	// The cursor sits at the newest conversation read, so the next run resumes.
 	assert.equal(
-		h.states("conversations").at(-1)?.update_time,
+		through(h.states("conversations").at(-1)),
 		convs[MAX_CONVERSATIONS_PER_RUN - 1]?.updated_at,
 	);
 
 	const full = harness(convs, {
 		streams: ["conversations"],
 		collectionMode: "full_refresh",
-		state: { conversations: { update_time: convs.at(-1)?.updated_at } },
+		state: h.nextState(),
 	});
 	await collectAnthropicLive(full.ctx);
 	assert.equal(full.of("conversations").length, total);
@@ -430,9 +215,10 @@ test("a rate-limited detail read stops the run with the cursor before it", async
 		h.of("conversations").map((r) => r.id),
 		[uuid(1)],
 	);
-	assert.deepEqual(h.states("conversations"), [
-		{ update_time: at(10), since: null },
-	]);
+	assert.deepEqual(
+		[...h.states("conversations"), ...h.states("messages")].map(through),
+		[at(10), at(10)],
+	);
 	assert.deepEqual(h.failures, [
 		{ stream: "conversations", retryable: true },
 		{ stream: "messages", retryable: true },
@@ -618,24 +404,4 @@ test("organization selection follows the export connector's rule", () => {
 	);
 	assert.equal(selectChatOrganization([{ name: "no uuid" }]), null);
 	assert.equal(selectChatOrganization({}), null);
-});
-
-test("session probe opens the sign-in origin only when no session cookie exists", async () => {
-	const visits: string[] = [];
-	const args = (cookies: Array<{ name: string; value: string }>) =>
-		({
-			context: { cookies: async () => cookies },
-			page: {
-				goto: async (url: string) => {
-					visits.push(url);
-				},
-			},
-		}) as never;
-	assert.equal(
-		await probeAnthropicLiveSession(args([{ name: "sessionKey", value: "x" }])),
-		true,
-	);
-	assert.deepEqual(visits, []);
-	assert.equal(await probeAnthropicLiveSession(args([])), false);
-	assert.deepEqual(visits, ["https://claude.ai/new"]);
 });
