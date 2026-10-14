@@ -1,0 +1,48 @@
+{
+  "manifest_version": "1.0",
+  "connector_id": "oura-playwright",
+  "source_id": "oura",
+  "version": "3.1.1",
+  "name": "Oura Ring",
+  "company": "Oura",
+  "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity via the official Oura API V2, using a personal API application on your own Oura developer account.",
+  "runtime": "playwright",
+  "page_api_version": 1,
+  "connect_url": "https://developer.ouraring.com/applications",
+  "connect_selector": "[data-testid='nav-sign-out'], [data-testid='create-new-application-button']",
+  "icon": "icons/oura.png",
+  "scopes": [
+    {
+      "scope": "oura.readiness",
+      "label": "Your daily readiness scores",
+      "description": "Daily readiness scores and contributing factors like HRV balance, resting heart rate, recovery, and body temperature"
+    },
+    {
+      "scope": "oura.sleep",
+      "label": "Your sleep data",
+      "description": "Daily sleep scores with contributor breakdowns and detailed sleep period data including duration, stages, heart rate, and HRV"
+    },
+    {
+      "scope": "oura.activity",
+      "label": "Your daily activity",
+      "description": "Daily activity scores, step counts, calorie burn, and activity level breakdowns"
+    }
+  ],
+  "id": "oura-playwright",
+  "connectURL": "https://developer.ouraring.com/applications",
+  "connectSelector": "[data-testid='nav-sign-out'], [data-testid='create-new-application-button']",
+  "iconURL": "icons/oura.png",
+  "exportFrequency": "daily",
+  "vectorize_config": {
+    "documents": "readiness"
+  },
+  "consumer_metadata": {
+    "display_name": "Oura Ring",
+    "brand_domain": "ouraring.com",
+    "aliases": [
+      "ouraring"
+    ],
+    "icon_key": "oura",
+    "default_scope": "oura.readiness"
+  }
+}

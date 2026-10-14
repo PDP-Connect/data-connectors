@@ -135,6 +135,9 @@ function checkTests(connector: string): Step {
 			{
 				cwd: PACKAGE_ROOT,
 				encoding: "utf8",
+				// A passing suite can print more than the 1 MB default (chatgpt's
+				// diagnostics run to ~3 MB), and ENOBUFS would read as a failure.
+				maxBuffer: 64 * 1024 * 1024,
 				stdio: "pipe",
 				timeout: 300_000,
 			},

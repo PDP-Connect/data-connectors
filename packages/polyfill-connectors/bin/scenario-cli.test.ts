@@ -41,6 +41,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -2255,6 +2256,132 @@ test("scenario-record: no pdpp-scenario-* temp files remain in os.tmpdir() after
 		);
 	} finally {
 		await stubProvider.close().catch(() => undefined);
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol messages to run<N>.jsonl (dir 0700, files 0600); unset writes nothing", async () => {
+	const stubProvider = await startStubProvider();
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-transcript-test-"));
+	const transcriptDir = join(tmpDir, "transcript");
+	try {
+		const recordResult = runRecordCli(
+			[
+				"scenario-cli-stub-connector",
+				"--entrypoint",
+				STUB_CONNECTOR_PATH,
+				"--out",
+				join(tmpDir, "with.scenario.json"),
+			],
+			{
+				PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url,
+				PDPP_SCENARIO_TRANSCRIPT_DIR: transcriptDir,
+			},
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`scenario-record failed: stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+		assert.deepEqual(readdirSync(transcriptDir).sort(), [
+			"run1.jsonl",
+			"run2.jsonl",
+		]);
+		assert.equal(statSync(transcriptDir).mode.toString(8).slice(-3), "700");
+		for (const name of ["run1.jsonl", "run2.jsonl"]) {
+			const path = join(transcriptDir, name);
+			assert.equal(statSync(path).mode.toString(8).slice(-3), "600");
+			const lines = readFileSync(path, "utf8")
+				.split("\n")
+				.filter((line) => line.length > 0)
+				.map(
+					(line) =>
+						JSON.parse(line) as { at: number; message: { type: string } },
+				);
+			assert.ok(lines.length > 0, `${name} is empty`);
+			assert.ok(lines.every((line) => typeof line.at === "number"));
+			assert.ok(lines.some((line) => line.message.type === "RECORD"));
+			assert.equal(lines.at(-1)?.message.type, "DONE");
+		}
+
+		const sizesBefore = ["run1.jsonl", "run2.jsonl"].map(
+			(name) => statSync(join(transcriptDir, name)).size,
+		);
+		const plain = runRecordCli(
+			[
+				"scenario-cli-stub-connector",
+				"--entrypoint",
+				STUB_CONNECTOR_PATH,
+				"--runs",
+				"1",
+				"--out",
+				join(tmpDir, "without.scenario.json"),
+			],
+			{ PDPP_SCENARIO_STUB_BASE_URL: stubProvider.url },
+		);
+		assert.equal(plain.code, 0, plain.stderr);
+		// Unset: the earlier transcript is left exactly as it was.
+		assert.deepEqual(
+			["run1.jsonl", "run2.jsonl"].map(
+				(name) => statSync(join(transcriptDir, name)).size,
+			),
+			sizesBefore,
+		);
+	} finally {
+		await stubProvider.close().catch(() => undefined);
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR tightens a pre-existing dir to 0700, truncates an old run file to 0600, and records INTERACTION prompts", () => {
+	const tmpDir = mkdtempSync(
+		join(tmpdir(), "scenario-cli-transcript-interaction-"),
+	);
+	const transcriptDir = join(tmpDir, "transcript");
+	try {
+		mkdirSync(transcriptDir, { mode: 0o755 });
+		chmodSync(transcriptDir, 0o755);
+		const oldRun = join(transcriptDir, "run1.jsonl");
+		writeFileSync(oldRun, '{"stale":true}\n', { mode: 0o644 });
+		chmodSync(oldRun, 0o644);
+
+		const recordResult = runRecordCli(
+			[
+				"connector-dev-interaction-fixture",
+				"--entrypoint",
+				INTERACTION_FIXTURE_PATH,
+				"--runs",
+				"1",
+				"--out",
+				join(tmpDir, "interaction.scenario.json"),
+				"--answer",
+				"0=555111",
+			],
+			{ PDPP_SCENARIO_TRANSCRIPT_DIR: transcriptDir },
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`scenario-record failed: stdout=${recordResult.stdout} stderr=${recordResult.stderr}`,
+		);
+		assert.equal(statSync(transcriptDir).mode.toString(8).slice(-3), "700");
+		assert.equal(statSync(oldRun).mode.toString(8).slice(-3), "600");
+		const text = readFileSync(oldRun, "utf8");
+		assert.equal(
+			text.includes("stale"),
+			false,
+			"the old run file was truncated",
+		);
+		const types = text
+			.split("\n")
+			.filter((line) => line.length > 0)
+			.map(
+				(line) =>
+					(JSON.parse(line) as { message: { type: string } }).message.type,
+			);
+		assert.ok(types.includes("INTERACTION"), `types: ${types.join(",")}`);
+		assert.equal(types.at(-1), "DONE");
+	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });

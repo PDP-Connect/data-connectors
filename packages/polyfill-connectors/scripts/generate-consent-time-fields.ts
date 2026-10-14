@@ -54,6 +54,11 @@ interface StreamLike {
 
 /** `<connector>.<stream>` whose `format: "date"` consent field is compared. */
 const DATE_BOUND_STREAMS = new Set([
+	"fitbit.daily_summaries",
+	"fitbit.sleep",
+	"garmin_browser.daily_summaries",
+	"garmin_browser.hrv",
+	"garmin_browser.training_status",
 	"strava.activities",
 	"strava_browser.activities",
 ]);

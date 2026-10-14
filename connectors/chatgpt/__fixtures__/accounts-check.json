@@ -1,0 +1,215 @@
+{
+	"accounts": {
+		"00000000-0000-4000-8000-000000000001": {
+			"account": {
+				"account_user_role": "account-owner",
+				"account_user_id": "user-REDACTED000000000000000000__00000000-0000-4000-8000-000000000001",
+				"trial_state": null,
+				"is_trial": false,
+				"is_view_only": false,
+				"account_owner_id": "user-REDACTED000000000000000000",
+				"account_residency_region": "no_constraint",
+				"account_compute_residency": "no_constraint",
+				"account_compute_residency_display_name": "No Constraint",
+				"account_compute_residency_description": "No inference residency constraints",
+				"processor": {
+					"a001": {
+						"has_customer_object": true,
+						"processor_entity": "openai_llc"
+					},
+					"b001": {
+						"has_transaction_history": false
+					},
+					"c001": {
+						"has_transaction_history": false
+					}
+				},
+				"account_id": "00000000-0000-4000-8000-000000000001",
+				"created_time": "2023-01-15T10:00:00.000000Z",
+				"organization_id": null,
+				"is_most_recent_expired_subscription_gratis": false,
+				"has_previously_paid_subscription": true,
+				"name": null,
+				"profile_picture_id": null,
+				"profile_picture_url": null,
+				"structure": "personal",
+				"workspace_type": null,
+				"is_usage_based_seat_enabled": false,
+				"subscription_seat_pools_enabled": false,
+				"plan_type": "free",
+				"tbo_config": {
+					"plan_eligible": false,
+					"tbo_available": false,
+					"waitlist_info": "NO_WAITLIST"
+				},
+				"plan_display_name": "Free",
+				"is_zdr": false,
+				"pthdnu": "0000000000000000000000000000000000000000000000000000000000000000",
+				"is_deactivated": false,
+				"eligible_for_reactivation": true,
+				"promo_data": {},
+				"user_segmentation_info": null,
+				"reseller_hosted_account": false,
+				"reseller_id": null,
+				"ekm_config": null,
+				"is_hipaa_compliant_workspace": false,
+				"hipaa_workspace_baa_metadata": null,
+				"is_finserv_enabled_workspace": false,
+				"is_fedramp_compliant_workspace": false,
+				"is_conversation_classifier_enabled_for_workspace": true,
+				"started_as_free_workspace": false,
+				"disable_account_switching": true,
+				"enable_account_switching": false
+			},
+			"features": ["REDACTED_FEATURE_A", "REDACTED_FEATURE_B"],
+			"plugin_incentives_ui_enabled": false,
+			"entitlement": {
+				"subscription_id": "00000000-0000-4000-8000-0000000000aa",
+				"has_active_subscription": false,
+				"is_active_subscription_gratis": false,
+				"subscription_plan": "chatgptpro",
+				"expires_at": "2026-03-15T10:00:00+00:00",
+				"renews_at": null,
+				"cancels_at": null,
+				"billing_period": "monthly",
+				"scheduled_plan_change": null,
+				"billing_currency": "USD",
+				"discount": null,
+				"applied_discounts": [],
+				"trial": null,
+				"is_eligible_for_cp": false,
+				"is_delinquent": false,
+				"became_delinquent_timestamp": null,
+				"grace_period_end_timestamp": null,
+				"grace_period_id": null
+			},
+			"last_active_subscription": {
+				"subscription_id": "00000000-0000-4000-8000-0000000000aa",
+				"purchase_origin_platform": "chatgpt_web",
+				"will_renew": false,
+				"cancellation_outcome": null
+			},
+			"is_eligible_for_yearly_plus_subscription": false,
+			"can_access_with_session": true,
+			"sso_connection_name": null,
+			"eligible_promo_campaigns": {},
+			"eligible_offers": {
+				"offers": [
+					{
+						"id": "chatgptplusplan",
+						"epl_enabled": false,
+						"revenuecat_offering_ids": ["default"]
+					}
+				],
+				"eligible_purchase_platforms": ["chatgpt_web"],
+				"default_offer_id": "chatgptteamplan"
+			}
+		},
+		"default": {
+			"account": {
+				"account_user_role": "account-owner",
+				"account_user_id": "user-REDACTED000000000000000000__00000000-0000-4000-8000-000000000001",
+				"trial_state": null,
+				"is_trial": false,
+				"is_view_only": false,
+				"account_owner_id": "user-REDACTED000000000000000000",
+				"account_residency_region": "no_constraint",
+				"account_compute_residency": "no_constraint",
+				"account_compute_residency_display_name": "No Constraint",
+				"account_compute_residency_description": "No inference residency constraints",
+				"processor": {
+					"a001": {
+						"has_customer_object": true,
+						"processor_entity": "openai_llc"
+					},
+					"b001": {
+						"has_transaction_history": false
+					},
+					"c001": {
+						"has_transaction_history": false
+					}
+				},
+				"account_id": "00000000-0000-4000-8000-000000000001",
+				"created_time": "2023-01-15T10:00:00.000000Z",
+				"organization_id": null,
+				"is_most_recent_expired_subscription_gratis": false,
+				"has_previously_paid_subscription": true,
+				"name": null,
+				"profile_picture_id": null,
+				"profile_picture_url": null,
+				"structure": "personal",
+				"workspace_type": null,
+				"is_usage_based_seat_enabled": false,
+				"subscription_seat_pools_enabled": false,
+				"plan_type": "free",
+				"tbo_config": {
+					"plan_eligible": false,
+					"tbo_available": false,
+					"waitlist_info": "NO_WAITLIST"
+				},
+				"plan_display_name": "Free",
+				"is_zdr": false,
+				"pthdnu": "0000000000000000000000000000000000000000000000000000000000000000",
+				"is_deactivated": false,
+				"eligible_for_reactivation": true,
+				"promo_data": {},
+				"user_segmentation_info": null,
+				"reseller_hosted_account": false,
+				"reseller_id": null,
+				"ekm_config": null,
+				"is_hipaa_compliant_workspace": false,
+				"hipaa_workspace_baa_metadata": null,
+				"is_finserv_enabled_workspace": false,
+				"is_fedramp_compliant_workspace": false,
+				"is_conversation_classifier_enabled_for_workspace": true,
+				"started_as_free_workspace": false,
+				"disable_account_switching": true,
+				"enable_account_switching": false
+			},
+			"features": ["REDACTED_FEATURE_A", "REDACTED_FEATURE_B"],
+			"plugin_incentives_ui_enabled": false,
+			"entitlement": {
+				"subscription_id": "00000000-0000-4000-8000-0000000000aa",
+				"has_active_subscription": false,
+				"is_active_subscription_gratis": false,
+				"subscription_plan": "chatgptpro",
+				"expires_at": "2026-03-15T10:00:00+00:00",
+				"renews_at": null,
+				"cancels_at": null,
+				"billing_period": "monthly",
+				"scheduled_plan_change": null,
+				"billing_currency": "USD",
+				"discount": null,
+				"applied_discounts": [],
+				"trial": null,
+				"is_eligible_for_cp": false,
+				"is_delinquent": false,
+				"became_delinquent_timestamp": null,
+				"grace_period_end_timestamp": null,
+				"grace_period_id": null
+			},
+			"last_active_subscription": {
+				"subscription_id": "00000000-0000-4000-8000-0000000000aa",
+				"purchase_origin_platform": "chatgpt_web",
+				"will_renew": false,
+				"cancellation_outcome": null
+			},
+			"is_eligible_for_yearly_plus_subscription": false,
+			"can_access_with_session": true,
+			"sso_connection_name": null,
+			"eligible_promo_campaigns": {},
+			"eligible_offers": {
+				"offers": [
+					{
+						"id": "chatgptplusplan",
+						"epl_enabled": false,
+						"revenuecat_offering_ids": ["default"]
+					}
+				],
+				"eligible_purchase_platforms": ["chatgpt_web"],
+				"default_offer_id": "chatgptteamplan"
+			}
+		}
+	},
+	"account_ordering": ["00000000-0000-4000-8000-000000000001"]
+}

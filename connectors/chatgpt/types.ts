@@ -213,6 +213,36 @@ export interface RawCustomInstructionsBody {
 	updated_at?: number | string | null;
 }
 
+// Raw body of GET /backend-api/accounts/check/v4-2023-04-27. `accounts` is
+// keyed by account id, plus a "default" alias for the account the session
+// resolves to. Only the fields account_plan reads are described.
+export interface RawAccountEntitlement {
+	billing_period?: string | null;
+	cancels_at?: number | string | null;
+	expires_at?: number | string | null;
+	has_active_subscription?: boolean | null;
+	renews_at?: number | string | null;
+	scheduled_plan_change?: unknown;
+	subscription_plan?: string | null;
+}
+
+export interface RawAccountEntry {
+	account?: {
+		account_id?: string | null;
+		created_time?: number | string | null;
+		plan_display_name?: string | null;
+		plan_type?: string | null;
+		structure?: string | null;
+	} | null;
+	entitlement?: RawAccountEntitlement | null;
+	last_active_subscription?: { will_renew?: boolean | null } | null;
+}
+
+export interface RawAccountsCheckBody {
+	account_ordering?: unknown;
+	accounts?: Record<string, RawAccountEntry | null> | null;
+}
+
 export interface RawSharedConversation {
 	anonymous?: boolean;
 	conversation_id?: string;

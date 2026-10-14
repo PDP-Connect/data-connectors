@@ -29,6 +29,8 @@ jobs:
 
       - name: Test historical artifact contracts
         run: npm run historical-contract:test
+      - name: Test the legacy artifact release lane
+        run: npm run release-index:test
 
       - name: Test installer artifact contracts
         run: npm run installer:test
@@ -44,6 +46,9 @@ jobs:
 
       - name: Test manifest lookup classifier
         run: node --test scripts/lookup-manifest.test.mjs
+
+      - name: Test registry rate-limit retry
+        run: node --test scripts/registry-rate-limit.test.mjs
 
       - name: Check scope schemas additive (HC-COMPAT-ADDITIVE-SCHEMA-001)
         env:

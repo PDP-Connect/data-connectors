@@ -1,0 +1,449 @@
+{
+	"data": {
+		"user": {
+			"result": {
+				"__typename": "User",
+				"timeline": {
+					"timeline": {
+						"instructions": [
+							{
+								"type": "TimelineAddEntries",
+								"entries": [
+									{
+										"entryId": "profile-conversation-1990000000000000201",
+										"sortIndex": "1990000000000000299",
+										"content": {
+											"entryType": "TimelineTimelineModule",
+											"__typename": "TimelineTimelineModule",
+											"displayType": "VerticalConversation",
+											"items": [
+												{
+													"entryId": "profile-conversation-1990000000000000201-tweet-1990000000000000201",
+													"item": {
+														"itemContent": {
+															"itemType": "TimelineTweet",
+															"__typename": "TimelineTweet",
+															"tweet_results": {
+																"result": {
+																	"__typename": "Tweet",
+																	"rest_id": "1990000000000000201",
+																	"core": {
+																		"user_results": {
+																			"result": {
+																				"__typename": "User",
+																				"id": "VXNlcjpzeW50aGV0aWM=",
+																				"rest_id": "1900000000000000002",
+																				"core": {
+																					"created_at": "Mon Jan 02 10:00:00 +0000 2017",
+																					"name": "Example Writer",
+																					"screen_name": "example_writer"
+																				},
+																				"avatar": {
+																					"image_url": "https://pbs.example.invalid/profile_images/1900000000000000002/avatar_normal.jpg"
+																				},
+																				"is_blue_verified": false
+																			}
+																		}
+																	},
+																	"views": {
+																		"count": "120",
+																		"state": "EnabledWithCount"
+																	},
+																	"edit_control": {
+																		"edit_tweet_ids": ["1990000000000000201"],
+																		"editable_until_msecs": "0",
+																		"is_edit_eligible": false,
+																		"edits_remaining": "5"
+																	},
+																	"legacy": {
+																		"id_str": "1990000000000000201",
+																		"created_at": "Tue Oct 06 09:00:00 +0000 2026",
+																		"full_text": "A synthetic question from someone else.",
+																		"lang": "en",
+																		"conversation_id_str": "1990000000000000201",
+																		"user_id_str": "1900000000000000002",
+																		"is_quote_status": false,
+																		"favorite_count": 3,
+																		"retweet_count": 1,
+																		"reply_count": 1,
+																		"quote_count": 0,
+																		"bookmark_count": 0,
+																		"favorited": false,
+																		"bookmarked": false,
+																		"retweeted": false,
+																		"entities": {
+																			"media": [],
+																			"urls": [],
+																			"hashtags": [],
+																			"user_mentions": [],
+																			"symbols": []
+																		}
+																	}
+																}
+															},
+															"tweetDisplayType": "Tweet"
+														}
+													}
+												},
+												{
+													"entryId": "profile-conversation-1990000000000000201-tweet-1990000000000000202",
+													"item": {
+														"itemContent": {
+															"itemType": "TimelineTweet",
+															"__typename": "TimelineTweet",
+															"tweet_results": {
+																"result": {
+																	"__typename": "Tweet",
+																	"rest_id": "1990000000000000202",
+																	"core": {
+																		"user_results": {
+																			"result": {
+																				"__typename": "User",
+																				"id": "VXNlcjpzeW50aGV0aWM=",
+																				"rest_id": "1900000000000000001",
+																				"core": {
+																					"created_at": "Tue Mar 04 09:15:00 +0000 2014",
+																					"name": "Sample Owner",
+																					"screen_name": "sample_owner"
+																				},
+																				"avatar": {
+																					"image_url": "https://pbs.example.invalid/profile_images/1900000000000000001/avatar_normal.jpg"
+																				},
+																				"is_blue_verified": false
+																			}
+																		}
+																	},
+																	"views": {
+																		"count": "120",
+																		"state": "EnabledWithCount"
+																	},
+																	"edit_control": {
+																		"edit_tweet_ids": ["1990000000000000202"],
+																		"editable_until_msecs": "0",
+																		"is_edit_eligible": false,
+																		"edits_remaining": "5"
+																	},
+																	"legacy": {
+																		"id_str": "1990000000000000202",
+																		"created_at": "Tue Oct 06 09:20:00 +0000 2026",
+																		"full_text": "@example_writer A synthetic reply from the owner.",
+																		"lang": "en",
+																		"conversation_id_str": "1990000000000000201",
+																		"user_id_str": "1900000000000000001",
+																		"is_quote_status": false,
+																		"favorite_count": 3,
+																		"retweet_count": 1,
+																		"reply_count": 0,
+																		"quote_count": 0,
+																		"bookmark_count": 0,
+																		"favorited": false,
+																		"bookmarked": false,
+																		"retweeted": false,
+																		"entities": {
+																			"media": [],
+																			"urls": [],
+																			"hashtags": [],
+																			"user_mentions": [
+																				{
+																					"screen_name": "example_writer",
+																					"name": "Example Writer",
+																					"id_str": "1900000000000000002"
+																				}
+																			],
+																			"symbols": []
+																		},
+																		"in_reply_to_status_id_str": "1990000000000000201",
+																		"in_reply_to_screen_name": "example_writer",
+																		"in_reply_to_user_id_str": "1900000000000000002"
+																	}
+																}
+															},
+															"tweetDisplayType": "Tweet"
+														}
+													}
+												}
+											]
+										}
+									},
+									{
+										"entryId": "tweet-1990000000000000105",
+										"sortIndex": "1990000000000000298",
+										"content": {
+											"entryType": "TimelineTimelineItem",
+											"__typename": "TimelineTimelineItem",
+											"itemContent": {
+												"itemType": "TimelineTweet",
+												"__typename": "TimelineTweet",
+												"tweet_results": {
+													"result": {
+														"__typename": "Tweet",
+														"rest_id": "1990000000000000105",
+														"core": {
+															"user_results": {
+																"result": {
+																	"__typename": "User",
+																	"id": "VXNlcjpzeW50aGV0aWM=",
+																	"rest_id": "1900000000000000001",
+																	"core": {
+																		"created_at": "Tue Mar 04 09:15:00 +0000 2014",
+																		"name": "Sample Owner",
+																		"screen_name": "sample_owner"
+																	},
+																	"avatar": {
+																		"image_url": "https://pbs.example.invalid/profile_images/1900000000000000001/avatar_normal.jpg"
+																	},
+																	"is_blue_verified": false
+																}
+															}
+														},
+														"views": {
+															"count": "120",
+															"state": "EnabledWithCount"
+														},
+														"edit_control": {
+															"edit_tweet_ids": ["1990000000000000105"],
+															"editable_until_msecs": "0",
+															"is_edit_eligible": false,
+															"edits_remaining": "5"
+														},
+														"legacy": {
+															"id_str": "1990000000000000105",
+															"created_at": "Mon Oct 05 18:30:00 +0000 2026",
+															"full_text": "Synthetic post with a photo and a link https://t.example.invalid/a #fixtures",
+															"lang": "en",
+															"conversation_id_str": "1990000000000000105",
+															"user_id_str": "1900000000000000001",
+															"is_quote_status": false,
+															"favorite_count": 12,
+															"retweet_count": 1,
+															"reply_count": 0,
+															"quote_count": 0,
+															"bookmark_count": 2,
+															"favorited": false,
+															"bookmarked": false,
+															"retweeted": false,
+															"entities": {
+																"media": [
+																	{
+																		"id_str": "1990000000000000900",
+																		"media_url_https": "https://pbs.example.invalid/media/synthetic-photo-1.jpg",
+																		"type": "photo",
+																		"url": "https://t.example.invalid/synthetic1",
+																		"display_url": "pic.example.invalid/synthetic1",
+																		"expanded_url": "https://x.com/sample_owner/status/1990000000000000105/photo/1"
+																	}
+																],
+																"urls": [
+																	{
+																		"url": "https://t.example.invalid/a",
+																		"expanded_url": "https://example.invalid/articles/synthetic",
+																		"display_url": "example.invalid/articles/synthetic"
+																	}
+																],
+																"hashtags": [
+																	{
+																		"text": "fixtures",
+																		"indices": [62, 71]
+																	}
+																],
+																"user_mentions": [],
+																"symbols": []
+															},
+															"extended_entities": {
+																"media": [
+																	{
+																		"id_str": "1990000000000000900",
+																		"media_url_https": "https://pbs.example.invalid/media/synthetic-photo-1.jpg",
+																		"type": "photo",
+																		"url": "https://t.example.invalid/synthetic1",
+																		"display_url": "pic.example.invalid/synthetic1",
+																		"expanded_url": "https://x.com/sample_owner/status/1990000000000000105/photo/1"
+																	}
+																]
+															}
+														}
+													}
+												},
+												"tweetDisplayType": "Tweet"
+											}
+										}
+									},
+									{
+										"entryId": "profile-conversation-1990000000000000203",
+										"sortIndex": "1990000000000000297",
+										"content": {
+											"entryType": "TimelineTimelineModule",
+											"__typename": "TimelineTimelineModule",
+											"displayType": "VerticalConversation",
+											"items": [
+												{
+													"entryId": "profile-conversation-1990000000000000203-tweet-1990000000000000203",
+													"item": {
+														"itemContent": {
+															"itemType": "TimelineTweet",
+															"__typename": "TimelineTweet",
+															"tweet_results": {
+																"result": {
+																	"__typename": "Tweet",
+																	"rest_id": "1990000000000000203",
+																	"core": {
+																		"user_results": {
+																			"result": {
+																				"__typename": "User",
+																				"id": "VXNlcjpzeW50aGV0aWM=",
+																				"rest_id": "1900000000000000003",
+																				"core": {
+																					"created_at": "Sat Jun 06 12:30:00 +0000 2020",
+																					"name": "Sample Gardener",
+																					"screen_name": "sample_gardener"
+																				},
+																				"avatar": {
+																					"image_url": "https://pbs.example.invalid/profile_images/1900000000000000003/avatar_normal.jpg"
+																				},
+																				"is_blue_verified": false
+																			}
+																		}
+																	},
+																	"views": {
+																		"count": "120",
+																		"state": "EnabledWithCount"
+																	},
+																	"edit_control": {
+																		"edit_tweet_ids": ["1990000000000000203"],
+																		"editable_until_msecs": "0",
+																		"is_edit_eligible": false,
+																		"edits_remaining": "5"
+																	},
+																	"legacy": {
+																		"id_str": "1990000000000000203",
+																		"created_at": "Wed Sep 30 15:00:00 +0000 2026",
+																		"full_text": "Another synthetic post by someone else.",
+																		"lang": "en",
+																		"conversation_id_str": "1990000000000000203",
+																		"user_id_str": "1900000000000000003",
+																		"is_quote_status": false,
+																		"favorite_count": 3,
+																		"retweet_count": 1,
+																		"reply_count": 1,
+																		"quote_count": 0,
+																		"bookmark_count": 0,
+																		"favorited": false,
+																		"bookmarked": false,
+																		"retweeted": false,
+																		"entities": {
+																			"media": [],
+																			"urls": [],
+																			"hashtags": [],
+																			"user_mentions": [],
+																			"symbols": []
+																		}
+																	}
+																}
+															},
+															"tweetDisplayType": "Tweet"
+														}
+													}
+												},
+												{
+													"entryId": "profile-conversation-1990000000000000203-tweet-1990000000000000204",
+													"item": {
+														"itemContent": {
+															"itemType": "TimelineTweet",
+															"__typename": "TimelineTweet",
+															"tweet_results": {
+																"result": {
+																	"__typename": "Tweet",
+																	"rest_id": "1990000000000000204",
+																	"core": {
+																		"user_results": {
+																			"result": {
+																				"__typename": "User",
+																				"id": "VXNlcjpzeW50aGV0aWM=",
+																				"rest_id": "1900000000000000001",
+																				"core": {
+																					"created_at": "Tue Mar 04 09:15:00 +0000 2014",
+																					"name": "Sample Owner",
+																					"screen_name": "sample_owner"
+																				},
+																				"avatar": {
+																					"image_url": "https://pbs.example.invalid/profile_images/1900000000000000001/avatar_normal.jpg"
+																				},
+																				"is_blue_verified": false
+																			}
+																		}
+																	},
+																	"views": {
+																		"count": "120",
+																		"state": "EnabledWithCount"
+																	},
+																	"edit_control": {
+																		"edit_tweet_ids": ["1990000000000000204"],
+																		"editable_until_msecs": "0",
+																		"is_edit_eligible": false,
+																		"edits_remaining": "5"
+																	},
+																	"legacy": {
+																		"id_str": "1990000000000000204",
+																		"created_at": "Wed Sep 30 16:10:00 +0000 2026",
+																		"full_text": "@sample_gardener A second synthetic reply.",
+																		"lang": "en",
+																		"conversation_id_str": "1990000000000000203",
+																		"user_id_str": "1900000000000000001",
+																		"is_quote_status": false,
+																		"favorite_count": 3,
+																		"retweet_count": 1,
+																		"reply_count": 0,
+																		"quote_count": 0,
+																		"bookmark_count": 0,
+																		"favorited": false,
+																		"bookmarked": false,
+																		"retweeted": false,
+																		"entities": {
+																			"media": [],
+																			"urls": [],
+																			"hashtags": [],
+																			"user_mentions": [],
+																			"symbols": []
+																		},
+																		"in_reply_to_status_id_str": "1990000000000000203",
+																		"in_reply_to_screen_name": "sample_gardener",
+																		"in_reply_to_user_id_str": "1900000000000000003"
+																	}
+																}
+															},
+															"tweetDisplayType": "Tweet"
+														}
+													}
+												}
+											]
+										}
+									},
+									{
+										"entryId": "cursor-top-1990000000000000300",
+										"sortIndex": "1990000000000000300",
+										"content": {
+											"entryType": "TimelineTimelineCursor",
+											"__typename": "TimelineTimelineCursor",
+											"value": "synthetic-replies-top-1",
+											"cursorType": "Top"
+										}
+									},
+									{
+										"entryId": "cursor-bottom-1990000000000000002",
+										"sortIndex": "1990000000000000002",
+										"content": {
+											"entryType": "TimelineTimelineCursor",
+											"__typename": "TimelineTimelineCursor",
+											"value": "synthetic-replies-bottom-1",
+											"cursorType": "Bottom"
+										}
+									}
+								]
+							}
+						]
+					}
+				}
+			}
+		}
+	}
+}

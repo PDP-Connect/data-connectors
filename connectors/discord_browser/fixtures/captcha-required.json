@@ -1,0 +1,5 @@
+{
+	"captcha_key": ["captcha-required"],
+	"captcha_sitekey": "synthetic-sitekey",
+	"captcha_service": "hcaptcha"
+}

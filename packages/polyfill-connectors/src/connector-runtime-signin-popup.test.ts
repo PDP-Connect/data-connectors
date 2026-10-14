@@ -285,3 +285,42 @@ test("HTTP OIDC popup redirect makes one authorize request and leaves owner page
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
 });
+
+test("a tab opened by someone else during the run is not mistaken for a popup", async () => {
+	await withPopupFixture(async (baseUrl) => {
+		const browser = await chromium.launch({ headless: true });
+		try {
+			const context = await browser.newContext();
+			const ownersTab = await context.newPage();
+			const page = await context.newPage();
+			const stopPolicy = await installOwnedRunPagePolicy(context, page, {
+				closeUnownedPages: false,
+			});
+			await page.goto(baseUrl);
+			// The browser's owner opens a tab from their own tab mid-run. It lands
+			// in the same context, but its opener is not the run page.
+			const [ownerOpened] = await Promise.all([
+				context.waitForEvent("page"),
+				ownersTab.evaluate(() => {
+					window.open("about:blank#owner", "_blank", "noopener");
+				}),
+			]);
+			const [popup] = await Promise.all([
+				context.waitForEvent("page"),
+				page.click("#scripted"),
+			]);
+			await popup.waitForLoadState();
+			await stopPolicy();
+			assert.equal(popup.isClosed(), true, "the run's popup is closed");
+			assert.equal(ownersTab.isClosed(), false, "the owner's tab stays");
+			assert.equal(
+				ownerOpened.isClosed(),
+				false,
+				"a tab the owner opened mid-run stays",
+			);
+			assert.equal(page.isClosed(), false);
+		} finally {
+			await browser.close();
+		}
+	});
+});

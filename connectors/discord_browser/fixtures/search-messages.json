@@ -1,0 +1,168 @@
+{
+	"analytics_id": "synthetic-analytics-id",
+	"doing_deep_historical_index": false,
+	"total_results": 3,
+	"messages": [
+		[
+			{
+				"id": "1551201258700800013",
+				"type": 0,
+				"content": "Synthetic message about the weekend plan.",
+				"channel_id": "797751839293440006",
+				"author": {
+					"id": "552071489126400001",
+					"username": "sample.user",
+					"global_name": "Sample User",
+					"discriminator": "0",
+					"avatar": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+					"public_flags": 0
+				},
+				"attachments": [],
+				"embeds": [
+					{
+						"type": "link",
+						"url": "https://example.com/plan"
+					}
+				],
+				"mentions": [],
+				"mention_roles": [],
+				"pinned": false,
+				"mention_everyone": false,
+				"tts": false,
+				"timestamp": "2026-09-20T12:00:00.000000+00:00",
+				"edited_timestamp": null,
+				"flags": 0,
+				"components": [],
+				"position": 0,
+				"hit": true
+			},
+			{
+				"id": "1551201510359040014",
+				"type": 0,
+				"content": "Synthetic context from someone else.",
+				"channel_id": "797751839293440006",
+				"author": {
+					"id": "735204448665600002",
+					"username": "another.person",
+					"global_name": "Another Person",
+					"discriminator": "0",
+					"avatar": null,
+					"public_flags": 0
+				},
+				"attachments": [],
+				"embeds": [],
+				"mentions": [],
+				"mention_roles": [],
+				"pinned": false,
+				"mention_everyone": false,
+				"tts": false,
+				"timestamp": "2026-09-20T12:01:00.000000+00:00",
+				"edited_timestamp": null,
+				"flags": 0,
+				"components": [],
+				"position": 0
+			}
+		],
+		[
+			{
+				"id": "1550430932828160010",
+				"type": 0,
+				"content": "Synthetic question from someone else.",
+				"channel_id": "797751839293440006",
+				"author": {
+					"id": "735204448665600002",
+					"username": "another.person",
+					"global_name": "Another Person",
+					"discriminator": "0",
+					"avatar": null,
+					"public_flags": 0
+				},
+				"attachments": [],
+				"embeds": [],
+				"mentions": [],
+				"mention_roles": [],
+				"pinned": false,
+				"mention_everyone": false,
+				"tts": false,
+				"timestamp": "2026-09-18T08:59:00.000000+00:00",
+				"edited_timestamp": null,
+				"flags": 0,
+				"components": [],
+				"position": 0
+			},
+			{
+				"id": "1550431687802880011",
+				"type": 19,
+				"content": "Synthetic reply with a file.",
+				"channel_id": "797751839293440006",
+				"author": {
+					"id": "552071489126400001",
+					"username": "sample.user",
+					"global_name": "Sample User",
+					"discriminator": "0",
+					"avatar": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+					"public_flags": 0
+				},
+				"attachments": [
+					{
+						"id": "1550431687802880012",
+						"filename": "route-notes.txt",
+						"size": 482,
+						"content_type": "text/plain; charset=utf-8",
+						"url": "https://cdn.example.invalid/attachments/route-notes.txt",
+						"proxy_url": "https://media.example.invalid/attachments/route-notes.txt"
+					}
+				],
+				"embeds": [],
+				"mentions": [],
+				"mention_roles": [],
+				"pinned": false,
+				"mention_everyone": false,
+				"tts": false,
+				"timestamp": "2026-09-18T09:02:00.000000+00:00",
+				"edited_timestamp": "2026-09-18T09:05:30.000000+00:00",
+				"flags": 0,
+				"components": [],
+				"position": 0,
+				"hit": true,
+				"message_reference": {
+					"type": 0,
+					"channel_id": "797751839293440006",
+					"message_id": "1550430932828160010",
+					"guild_id": "797751587635200003"
+				}
+			}
+		],
+		[
+			{
+				"id": "1549472366592000015",
+				"type": 0,
+				"content": "Synthetic hit by another author.",
+				"channel_id": "797751839293440006",
+				"author": {
+					"id": "735204448665600002",
+					"username": "another.person",
+					"global_name": "Another Person",
+					"discriminator": "0",
+					"avatar": null,
+					"public_flags": 0
+				},
+				"attachments": [],
+				"embeds": [],
+				"mentions": [],
+				"mention_roles": [],
+				"pinned": false,
+				"mention_everyone": false,
+				"tts": false,
+				"timestamp": "2026-09-15T17:30:00.000000+00:00",
+				"edited_timestamp": null,
+				"flags": 0,
+				"components": [],
+				"position": 0,
+				"hit": true
+			}
+		]
+	],
+	"threads": [],
+	"members": []
+}
