@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Oura Connector (v0.1.1)
+ * PDPP Oura Connector (v0.1.20)
  *
  * Auth: OURA_PERSONAL_ACCESS_TOKEN env var.
  * Generate at https://cloud.ouraring.com/personal-access-tokens
@@ -31,6 +31,7 @@ import {
 import {
 	type CollectContext,
 	type RecordData,
+	buildDetailGap,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
@@ -64,6 +65,7 @@ const httpGovernor = createConnectorHttpGovernor({
 type OuraHttpGovernor = Pick<ConnectorHttpGovernor, "request">;
 
 interface OuraSleepSession {
+	awake_time?: number | null;
 	average_breath?: number | null;
 	average_heart_rate?: number | null;
 	average_hrv?: number | null;
@@ -96,12 +98,14 @@ interface OuraDailySleep {
 	day: string;
 	id: string;
 	score?: number | null;
+	timestamp?: string | null;
 }
 
 interface OuraReadiness {
 	contributors?: Record<string, unknown>;
 	day: string;
 	id: string;
+	timestamp?: string | null;
 	score?: number | null;
 	temperature_deviation?: number | null;
 	temperature_trend_deviation?: number | null;
@@ -114,6 +118,7 @@ interface OuraActivity {
 	equivalent_walking_distance?: number | null;
 	high_activity_time?: number | null;
 	id: string;
+	timestamp?: string | null;
 	inactivity_alerts?: number | null;
 	low_activity_time?: number | null;
 	medium_activity_time?: number | null;
@@ -183,11 +188,22 @@ async function oura<T>(
 		throw new Error("oura_auth_failed");
 	}
 	if (raw.status < 200 || raw.status >= 300) {
-		throw new Error(
-			`oura_http_${String(raw.status)}: ${raw.body.slice(0, 200)}`,
-		);
+		throw new Error(`oura_http_${String(raw.status)}`);
 	}
-	return JSON.parse(raw.body) as OuraListResponse<T>;
+	const parsed: unknown = JSON.parse(raw.body);
+	if (
+		parsed === null ||
+		typeof parsed !== "object" ||
+		!Array.isArray((parsed as Partial<OuraListResponse<T>>).data) ||
+		!("next_token" in parsed
+			? (parsed as OuraListResponse<T>).next_token == null ||
+				(typeof (parsed as OuraListResponse<T>).next_token === "string" &&
+					(parsed as OuraListResponse<T>).next_token !== "")
+			: true)
+	) {
+		throw new Error(`oura_invalid_envelope:${endpoint}`);
+	}
+	return parsed as OuraListResponse<T>;
 }
 
 /**
@@ -202,41 +218,79 @@ async function fetchAll<T>(
 	token: string,
 	startDate: string | null,
 	maxPages: number,
-): Promise<{ rows: T[]; truncated: boolean }> {
+	endDate: string,
+): Promise<{
+	rows: T[];
+	truncated: boolean;
+	pages: number;
+	invalidRows: number;
+	error: string | null;
+	failure: Error | null;
+}> {
 	const all: T[] = [];
+	let pages = 0;
+	let invalidRows = 0;
 	let nextToken: string | undefined;
-	const walk = await walkPagesWithCeiling({
-		maxPages,
-		fetchPage: async () => {
-			const params: OuraParams = {};
-			if (startDate) {
-				params.start_date = startDate;
-			}
-			if (nextToken) {
-				params.next_token = nextToken;
-			}
-			const json = await oura<T>(governor, endpoint, token, params);
-			if (Array.isArray(json.data)) {
-				all.push(...json.data);
-			}
-			nextToken = json.next_token || undefined;
-			return Boolean(nextToken);
-		},
-	});
-	return { rows: all, truncated: walk.truncated };
+	try {
+		const walk = await walkPagesWithCeiling({
+			maxPages,
+			fetchPage: async () => {
+				const params: OuraParams = {};
+				if (startDate) {
+					params.start_date = startDate;
+				}
+				params.end_date = endDate;
+				if (nextToken) {
+					params.next_token = nextToken;
+				}
+				const json = await oura<T>(governor, endpoint, token, params);
+				pages += 1;
+				for (const row of json.data) {
+					if (row && typeof row === "object" && !Array.isArray(row))
+						all.push(row);
+					else invalidRows += 1;
+				}
+				nextToken = json.next_token || undefined;
+				return Boolean(nextToken);
+			},
+		});
+		return {
+			rows: all,
+			truncated: walk.truncated,
+			pages,
+			invalidRows,
+			error: invalidRows ? "invalid_row" : null,
+			failure: null,
+		};
+	} catch (cause) {
+		const error =
+			cause instanceof Error &&
+			cause.message.startsWith("oura_invalid_envelope")
+				? "invalid_envelope"
+				: cause instanceof Error && cause.message === "oura_auth_failed"
+					? "auth_failed"
+					: "fetch_failed";
+		return {
+			rows: all,
+			truncated: false,
+			pages,
+			invalidRows,
+			error,
+			failure: cause instanceof Error ? cause : new Error(String(cause)),
+		};
+	}
 }
 
 /**
- * `dailySleep` is the same day's /v2/usercollection/daily_sleep document, when
- * one was fetched and matched by day (see collectSleep) — absent for a day
- * whose daily_sleep document is missing or unmatched, which contributes
- * `sleep_score: null` / `contributors: {}` rather than failing the record.
+ * Session records retain the matched daily score when available. Daily score
+ * documents also emit independently, so a daily-only day is not lost.
  */
 function sleepRecord(
 	s: OuraSleepSession,
 	dailySleep: OuraDailySleep | undefined,
 ): RecordData {
 	return {
+		record_type: "sleep_session",
 		id: s.id,
 		day: s.day,
 		bedtime_start: s.bedtime_start ?? null,
@@ -255,14 +309,39 @@ function sleepRecord(
 		average_breath: s.average_breath ?? null,
 		restless_periods: s.restless_periods ?? null,
 		time_in_bed: s.time_in_bed ?? null,
+		awake_time: s.awake_time ?? null,
+		daily_sleep_id: dailySleep?.id ?? null,
+		daily_sleep_timestamp: dailySleep?.timestamp ?? null,
 		type: s.type ?? null,
 		contributors: dailySleep?.contributors ?? {},
 	};
 }
 
+function dailySleepRecord(d: OuraDailySleep): RecordData {
+	return {
+		record_type: "daily_score",
+		id: d.id,
+		day: d.day,
+		daily_sleep_id: d.id,
+		daily_sleep_timestamp: d.timestamp ?? null,
+		sleep_score: d.score ?? null,
+		contributors: d.contributors ?? {},
+	};
+}
+
+function sourceRowKey(
+	row: { id?: unknown; day?: unknown },
+	fallback: string,
+): string {
+	if (typeof row.id === "string" && row.id) return row.id;
+	if (typeof row.day === "string" && row.day) return row.day;
+	return fallback;
+}
+
 function readinessRecord(r: OuraReadiness): RecordData {
 	return {
 		id: r.id,
+		timestamp: r.timestamp ?? null,
 		day: r.day,
 		score: r.score ?? null,
 		temperature_deviation: r.temperature_deviation ?? null,
@@ -274,6 +353,7 @@ function readinessRecord(r: OuraReadiness): RecordData {
 function activityRecord(a: OuraActivity): RecordData {
 	return {
 		id: a.id,
+		timestamp: a.timestamp ?? null,
 		day: a.day,
 		score: a.score ?? null,
 		active_calories: a.active_calories ?? null,
@@ -299,31 +379,121 @@ interface StreamConfig<T extends OuraRow> {
 
 interface RunStreamArgs<T extends OuraRow> {
 	config: StreamConfig<T>;
+	endDate: string;
 	emit: CollectContext["emit"];
 	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	detailGaps?: CollectContext["detailGaps"];
+	isRecordSelected?: CollectContext["isRecordSelected"];
 	governor: OuraHttpGovernor;
 	/** Page ceiling actually enforced by this walk. Injectable so a test can
 	 *  reach the capped exit with a two-page fixture instead of 100 real pages. */
 	maxPages: number;
 	progress: (message: string, extra?: { stream?: string }) => Promise<void>;
+	reportStreamFailure?: CollectContext["reportStreamFailure"];
 	requested: Map<string, { time_range?: { since?: string } }>;
 	state: Record<string, unknown>;
 	token: string;
 }
 
+async function emitValidRecord(
+	stream: string,
+	data: RecordData,
+	emit: CollectContext["emit"],
+	emitRecord: RunStreamArgs<OuraRow>["emitRecord"],
+	isRecordSelected?: CollectContext["isRecordSelected"],
+): Promise<{ valid: boolean; emitted: boolean }> {
+	const result = validateRecord(stream, data);
+	if (!result.ok) {
+		if (typeof data.id !== "string" || data.id.length === 0) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "invalid_record_shape",
+				message: "Oura returned a record without a usable identity",
+				recovery_hint: { action: "retry", retryable: true },
+				diagnostics: { day: String(data.day) },
+			});
+		} else {
+			await emit(
+				buildDetailGap({
+					stream,
+					recordKey: data.id,
+					reason: "temporary_unavailable",
+					locator: { kind: "oura.invalid_record", day: String(data.day) },
+					error: { class: "invalid_record_shape" },
+				}),
+			);
+		}
+		return { valid: false, emitted: false };
+	}
+	if (isRecordSelected && !isRecordSelected(stream, result.data))
+		return { valid: true, emitted: false };
+	await emitRecord(stream, result.data);
+	return { valid: true, emitted: true };
+}
+
+async function recoverServedGaps(
+	stream: string,
+	detailGaps: CollectContext["detailGaps"] | undefined,
+	recovered: ReadonlySet<string>,
+	emit: CollectContext["emit"],
+): Promise<void> {
+	for (const gap of detailGaps ?? []) {
+		if (gap.stream !== stream || gap.status !== "pending") continue;
+		const kind = gap.detail_locator?.kind;
+		const key = gap.record_key;
+		if (
+			typeof kind !== "string" ||
+			(typeof key !== "string" && typeof key !== "number")
+		)
+			continue;
+		if (!recovered.has(`${kind}:${String(key)}`)) continue;
+		await emit({
+			type: "DETAIL_GAP_RECOVERED",
+			reference_only: true,
+			gap_id: gap.gap_id,
+			stream,
+			record_key: key,
+		});
+	}
+}
+
 function sinceFor(
 	state: Record<string, unknown>,
-	requested: Map<string, { time_range?: { since?: string } }>,
+	requested: Map<string, { time_range?: { since?: string; until?: string } }>,
 	stream: string,
 ): string | null {
 	const streamState = state[stream] as { last_day?: string } | undefined;
 	const priorDay = streamState?.last_day;
 	const scopeReq = requested.get(stream);
 	const rawScopeSince = scopeReq?.time_range?.since;
-	const scopeSince = rawScopeSince && !Number.isNaN(Date.parse(rawScopeSince))
-		? new Date(Date.parse(rawScopeSince)).toISOString().slice(0, 10)
-		: undefined;
+	const scopeSince =
+		rawScopeSince && !Number.isNaN(Date.parse(rawScopeSince))
+			? rawScopeSince.slice(0, 10)
+			: undefined;
+	const rawUntil = scopeReq?.time_range?.until;
+	if (
+		priorDay &&
+		rawUntil &&
+		!Number.isNaN(Date.parse(rawUntil)) &&
+		priorDay > rawUntil.slice(0, 10)
+	) {
+		return scopeSince ?? null;
+	}
+	if (priorDay && scopeSince)
+		return priorDay < scopeSince ? priorDay : scopeSince;
 	return priorDay || scopeSince || null;
+}
+
+function endFor(
+	requested: Map<string, { time_range?: { until?: string } }>,
+	stream: string,
+	runDay: string,
+): string {
+	const rawUntil = requested.get(stream)?.time_range?.until;
+	if (!rawUntil || Number.isNaN(Date.parse(rawUntil))) return runDay;
+	const requestedDay = rawUntil.slice(0, 10);
+	return requestedDay < runDay ? requestedDay : runDay;
 }
 
 async function runStream<T extends OuraRow>(
@@ -331,61 +501,105 @@ async function runStream<T extends OuraRow>(
 ): Promise<void> {
 	const {
 		config,
+		endDate,
 		token,
 		state,
 		requested,
 		emit,
 		emitRecord,
+		detailGaps,
+		isRecordSelected,
 		progress,
 		maxPages,
 		governor,
+		reportStreamFailure,
 	} = args;
 	const { streamName, endpoint, toRecord } = config;
 	await progress(`Fetching ${streamName}`, { stream: streamName });
 	const startDate = sinceFor(state, requested, streamName);
-	const { rows, truncated } = await fetchAll<T>(
-		governor,
-		endpoint,
-		token,
-		startDate,
-		maxPages,
-	);
+	const { rows, truncated, pages, invalidRows, error, failure } =
+		await fetchAll<T>(governor, endpoint, token, startDate, maxPages, endDate);
 	const streamState = state[streamName] as { last_day?: string } | undefined;
 	const priorDay: string | null = streamState?.last_day || null;
 	let lastDay: string | null = priorDay;
+	let invalid = 0;
+	let emitted = 0;
+	const recovered = new Set<string>();
 	for (const row of rows) {
-		await emitRecord(streamName, toRecord(row));
+		const outcome = await emitValidRecord(
+			streamName,
+			toRecord(row),
+			emit,
+			emitRecord,
+			isRecordSelected,
+		);
+		if (!outcome.valid) invalid += 1;
+		if (outcome.emitted) emitted += 1;
+		if (outcome.emitted)
+			recovered.add(`oura.invalid_record:${sourceRowKey(row, "")}`);
 		if (row.day && (!lastDay || row.day > lastDay)) {
 			lastDay = row.day;
 		}
 	}
+	await recoverServedGaps(streamName, detailGaps, recovered, emit);
 
-	if (truncated) {
+	if (truncated || error) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: streamName,
-			reason: "older_pages_deferred_page_budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+			reason: error ?? "older_pages_deferred_page_budget",
+			recovery_hint: {
+				action: error ? "retry" : "retry_on_connector_upgrade",
+				retryable: Boolean(error),
+			},
 			// The ceiling reported here is the one actually enforced, not the module
 			// default — otherwise a lowered cap would disclose a limit the walk
 			// never applied.
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+			message: error
+				? `Oura ${streamName} stopped after ${String(pages)} pages: ${error}`
+				: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
 			diagnostics: {
 				page_limit: maxPages,
+				pages,
 				total_seen: rows.length,
-				unread_pages: 1,
+				invalid_rows: invalidRows,
+				unread_pages: truncated ? 1 : null,
+				start_date: startDate,
+				terminal: false,
 			},
 		});
 	}
-
 	await emit({
 		type: "STATE",
 		stream: streamName,
 		// `last_day` is the next run's `start_date`. Advancing it after a capped
 		// walk would skip past days this run never read, so a truncated walk holds
 		// the day it started from and re-reads the same prefix next time.
-		cursor: { last_day: truncated ? priorDay : lastDay },
+		cursor: {
+			last_day: truncated || error || invalid ? priorDay : lastDay,
+			coverage: {
+				start_date: startDate,
+				end_date: endDate,
+				resources: {
+					[endpoint]: {
+						pages,
+						fetched: rows.length + invalidRows,
+						terminal: !truncated && !error,
+					},
+				},
+				emitted,
+				gaps: invalid + invalidRows + (truncated || error ? 1 : 0),
+			},
+		},
 	});
+	if (failure) {
+		if (!reportStreamFailure) throw failure;
+		await reportStreamFailure(streamName, failure.message, {
+			retryable: /rate_limited|oura_http_5|ECONN|fetch failed/i.test(
+				failure.message,
+			),
+		});
+	}
 }
 
 /**
@@ -394,7 +608,7 @@ async function runStream<T extends OuraRow>(
  * restless_periods, time_in_bed, type) and /usercollection/daily_sleep (the
  * daily score + contributors aggregate). Oura can emit more than one sleep
  * session for a day (naps); every session for a day is joined against that
- * same day's single daily_sleep document. The daily_sleep walk shares the
+ * same day's daily_sleep document when the day has one. The daily_sleep walk shares the
  * sleep stream's own cursor/truncation state (`state.sleep`) rather than a
  * separate `state.daily_sleep`, since daily_sleep is sleep's supporting
  * fetch, not an independently-requestable stream.
@@ -408,69 +622,235 @@ async function collectSleep(
 		requested,
 		emit,
 		emitRecord,
+		detailGaps,
+		isRecordSelected,
 		progress,
 		maxPages,
+		endDate,
 		governor,
+		reportStreamFailure,
 	} = args;
 	const streamName = "sleep";
 	await progress(`Fetching ${streamName}`, { stream: streamName });
 	const startDate = sinceFor(state, requested, streamName);
 
 	const [sessions, dailySleep] = await Promise.all([
-		fetchAll<OuraSleepSession>(governor, "sleep", token, startDate, maxPages),
+		fetchAll<OuraSleepSession>(
+			governor,
+			"sleep",
+			token,
+			startDate,
+			maxPages,
+			endDate,
+		),
 		fetchAll<OuraDailySleep>(
 			governor,
 			"daily_sleep",
 			token,
 			startDate,
 			maxPages,
+			endDate,
 		),
 	]);
 	const truncated = sessions.truncated || dailySleep.truncated;
+	const sourceError = sessions.error || dailySleep.error;
 	const streamState = state[streamName] as { last_day?: string } | undefined;
 	const priorDay: string | null = streamState?.last_day || null;
-	if (truncated) {
+	if (truncated || sourceError) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: streamName,
-			reason: "older_pages_deferred_page_budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+			reason: sourceError ?? "older_pages_deferred_page_budget",
+			recovery_hint: {
+				action: sourceError ? "retry" : "retry_on_connector_upgrade",
+				retryable: Boolean(sourceError),
+			},
+			message: sourceError
+				? `Oura ${streamName} source stopped: ${sourceError}`
+				: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
 			diagnostics: {
 				page_limit: maxPages,
-				total_seen: sessions.rows.length,
-				unread_pages: 1,
+				total_seen: sessions.rows.length + dailySleep.rows.length,
+				sleep_pages: sessions.pages,
+				daily_sleep_pages: dailySleep.pages,
+				sleep_rows: sessions.rows.length,
+				daily_sleep_rows: dailySleep.rows.length,
+				sleep_invalid_rows: sessions.invalidRows,
+				daily_sleep_invalid_rows: dailySleep.invalidRows,
+				sleep_terminal: !sessions.truncated && !sessions.error,
+				daily_sleep_terminal: !dailySleep.truncated && !dailySleep.error,
+				sleep_error: sessions.error,
+				daily_sleep_error: dailySleep.error,
+				start_date: startDate,
+				unread_pages: truncated ? 1 : null,
 			},
 		});
-		await emit({
-			type: "STATE",
-			stream: streamName,
-			cursor: { last_day: priorDay },
-		});
-		return;
 	}
 
 	const dailySleepByDay = new Map<string, OuraDailySleep>();
+	const duplicateDailyDays = new Set<string>();
+	const validDailyDayCounts = new Map<string, number>();
+	let joinGaps = 0;
 	for (const d of dailySleep.rows) {
+		// An invalid daily score cannot supply fields to a healthy session.
+		// Its own emission below reports the invalid row as a detail gap.
+		if (!validateRecord(streamName, dailySleepRecord(d)).ok) continue;
+		validDailyDayCounts.set(d.day, (validDailyDayCounts.get(d.day) ?? 0) + 1);
+		if (dailySleepByDay.has(d.day) || duplicateDailyDays.has(d.day)) {
+			dailySleepByDay.delete(d.day);
+			duplicateDailyDays.add(d.day);
+			if (
+				isRecordSelected &&
+				!isRecordSelected(streamName, dailySleepRecord(d))
+			)
+				continue;
+			joinGaps += 1;
+			await emit(
+				buildDetailGap({
+					stream: streamName,
+					recordKey: d.day,
+					reason: "temporary_unavailable",
+					locator: { kind: "oura.daily_sleep_duplicate", day: d.day },
+				}),
+			);
+			continue;
+		}
 		dailySleepByDay.set(d.day, d);
 	}
 
 	let lastDay: string | null = priorDay;
-	for (const row of sessions.rows) {
-		await emitRecord(
+	let invalid = 0;
+	let emitted = 0;
+	const recovered = new Set<string>();
+	const validSessionDays = new Set<string>();
+	for (const [rowIndex, row] of sessions.rows.entries()) {
+		const record = sleepRecord(row, dailySleepByDay.get(row.day));
+		const selected = isRecordSelected?.(streamName, record) ?? true;
+		if (
+			selected &&
+			typeof row.id === "string" &&
+			row.id &&
+			!dailySleepByDay.has(row.day)
+		) {
+			joinGaps += 1;
+			await emit(
+				buildDetailGap({
+					stream: streamName,
+					recordKey: sourceRowKey(row, `sleep-row-${String(rowIndex)}`),
+					reason: "temporary_unavailable",
+					locator: {
+						kind: duplicateDailyDays.has(row.day)
+							? "oura.daily_sleep_ambiguous"
+							: "oura.daily_sleep_missing",
+						day: row.day,
+					},
+				}),
+			);
+		}
+		const outcome = await emitValidRecord(
 			streamName,
-			sleepRecord(row, dailySleepByDay.get(row.day)),
+			record,
+			emit,
+			emitRecord,
+			isRecordSelected,
 		);
+		if (!outcome.valid) invalid += 1;
+		if (outcome.emitted) emitted += 1;
+		if (outcome.emitted) {
+			validSessionDays.add(row.day);
+			recovered.add(`oura.invalid_record:${sourceRowKey(row, "")}`);
+			if (dailySleepByDay.has(row.day))
+				recovered.add(`oura.daily_sleep_missing:${row.id}`);
+			if (dailySleepByDay.has(row.day))
+				recovered.add(`oura.daily_sleep_ambiguous:${row.id}`);
+		}
 		if (row.day && (!lastDay || row.day > lastDay)) {
 			lastDay = row.day;
 		}
 	}
-
+	for (const [rowIndex, row] of dailySleep.rows.entries()) {
+		const record = dailySleepRecord(row);
+		const selected = isRecordSelected?.(streamName, record) ?? true;
+		if (
+			selected &&
+			typeof row.id === "string" &&
+			row.id &&
+			!validSessionDays.has(row.day)
+		) {
+			joinGaps += 1;
+			await emit(
+				buildDetailGap({
+					stream: streamName,
+					recordKey: sourceRowKey(row, `daily-sleep-row-${String(rowIndex)}`),
+					reason: "temporary_unavailable",
+					locator: { kind: "oura.sleep_session_missing", day: row.day },
+				}),
+			);
+		}
+		const outcome = await emitValidRecord(
+			streamName,
+			record,
+			emit,
+			emitRecord,
+			isRecordSelected,
+		);
+		if (!outcome.valid) invalid += 1;
+		if (outcome.emitted) emitted += 1;
+		if (outcome.emitted) {
+			recovered.add(`oura.invalid_record:${sourceRowKey(row, "")}`);
+			if (validSessionDays.has(row.day))
+				recovered.add(`oura.sleep_session_missing:${row.id}`);
+			if (
+				!dailySleep.truncated &&
+				!dailySleep.error &&
+				validDailyDayCounts.get(row.day) === 1
+			)
+				recovered.add(`oura.daily_sleep_duplicate:${row.day}`);
+		}
+		if (row.day && (!lastDay || row.day > lastDay)) lastDay = row.day;
+	}
+	await recoverServedGaps(streamName, detailGaps, recovered, emit);
 	await emit({
 		type: "STATE",
 		stream: streamName,
-		cursor: { last_day: lastDay },
+		cursor: {
+			last_day:
+				truncated || sourceError || joinGaps || invalid ? priorDay : lastDay,
+			coverage: {
+				start_date: startDate,
+				end_date: endDate,
+				resources: {
+					sleep: {
+						pages: sessions.pages,
+						fetched: sessions.rows.length + sessions.invalidRows,
+						terminal: !sessions.truncated && !sessions.error,
+					},
+					daily_sleep: {
+						pages: dailySleep.pages,
+						fetched: dailySleep.rows.length + dailySleep.invalidRows,
+						terminal: !dailySleep.truncated && !dailySleep.error,
+					},
+				},
+				emitted,
+				gaps:
+					joinGaps +
+					invalid +
+					sessions.invalidRows +
+					dailySleep.invalidRows +
+					(sessions.truncated || sessions.error ? 1 : 0) +
+					(dailySleep.truncated || dailySleep.error ? 1 : 0),
+			},
+		},
 	});
+	for (const failure of [sessions.failure, dailySleep.failure]) {
+		if (!failure) continue;
+		if (!reportStreamFailure) throw failure;
+		await reportStreamFailure(streamName, failure.message, {
+			retryable: /rate_limited|oura_http_5|ECONN|fetch failed/i.test(
+				failure.message,
+			),
+		});
+	}
 }
 
 export interface OuraCollectOptions {
@@ -485,7 +865,18 @@ export async function collectOura(
 	ctx: CollectContext,
 	options: OuraCollectOptions = {},
 ): Promise<void> {
-	const { state, requested, credentials, emit, emitRecord, progress } = ctx;
+	const {
+		state,
+		requested,
+		credentials,
+		emit,
+		emitRecord,
+		detailGaps,
+		isRecordSelected,
+		progress,
+		reportStreamFailure,
+	} = ctx;
+	const runDay = ctx.emittedAt.slice(0, 10);
 	const maxPages = options.maxPages ?? MAX_PAGES;
 	const governor = options.httpGovernor ?? httpGovernor;
 	const token = credentials.OURA_PERSONAL_ACCESS_TOKEN;
@@ -495,12 +886,16 @@ export async function collectOura(
 
 	if (requested.has("sleep")) {
 		await collectSleep({
+			endDate: endFor(requested, "sleep", runDay),
 			token,
 			state,
 			requested,
 			emit,
 			emitRecord,
+			detailGaps,
+			isRecordSelected,
 			progress,
+			reportStreamFailure,
 			maxPages,
 			governor,
 		});
@@ -508,6 +903,7 @@ export async function collectOura(
 
 	if (requested.has("readiness")) {
 		await runStream<OuraReadiness>({
+			endDate: endFor(requested, "readiness", runDay),
 			config: {
 				streamName: "readiness",
 				endpoint: "daily_readiness",
@@ -518,7 +914,10 @@ export async function collectOura(
 			requested,
 			emit,
 			emitRecord,
+			detailGaps,
+			isRecordSelected,
 			progress,
+			reportStreamFailure,
 			maxPages,
 			governor,
 		});
@@ -526,6 +925,7 @@ export async function collectOura(
 
 	if (requested.has("activity")) {
 		await runStream<OuraActivity>({
+			endDate: endFor(requested, "activity", runDay),
 			config: {
 				streamName: "activity",
 				endpoint: "daily_activity",
@@ -536,7 +936,10 @@ export async function collectOura(
 			requested,
 			emit,
 			emitRecord,
+			detailGaps,
+			isRecordSelected,
 			progress,
+			reportStreamFailure,
 			maxPages,
 			governor,
 		});

@@ -14,11 +14,8 @@
  *     the cursor field, always present.
  *   - `bedtime_start` / `bedtime_end` are ISO-8601 datetimes (with offset) or
  *     null.
- *   - All physiological metrics are nullable numbers. They are NOT constrained
- *     to integers: Oura returns floats for HRV, efficiency, temperature deltas,
- *     and walking-equivalent distance, and the builder passes them through
- *     unchanged. Durations/steps/calories happen to arrive as integers but are
- *     left as `z.number()` to follow the passthrough rather than over-constrain.
+ *   - Fractional source metrics (HRV, efficiency, temperature, walking distance)
+ *     stay numbers. Legacy integer fields and scores use integer validators.
  *   - `contributors` (readiness, activity, sleep) is the raw Oura contributors
  *     object, an opaque provider map the builder forwards verbatim
  *     (`r.contributors ?? {}`). It is genuinely opaque key→score data, so it
@@ -26,9 +23,8 @@
  *     on the schema. On `sleep` it is joined in from the separate
  *     /usercollection/daily_sleep resource by day (see index.ts collectSleep),
  *     not the /usercollection/sleep session document itself.
- *   - `sleep.type` is Oura's v2 session-type string (e.g. long_sleep, sleep,
- *     late_nap, rest); bounded free text, not an enumerated union, since Oura
- *     documents this as an evolving provider-defined set.
+ *   - `sleep.type` remains bounded source text. The frozen legacy enum is
+ *     narrower; an unrecognized source value is retained for cutover review.
  *
  * No free-form human text fields exist on any Oura stream, so this module has
  * no `pdppSafeText` usage; every string is structurally constrained (UUID /
@@ -49,44 +45,44 @@ import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schem
 // Module-scoped regexes (Biome useTopLevelRegex).
 const UUID_RE =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
-const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
 const ouraIdSchema = z
 	.string()
 	.regex(UUID_RE, "id must be an Oura document UUID");
-const daySchema = z.string().regex(DAY_RE, "day must be YYYY-MM-DD");
-const isoDateTimeNullable = z
-	.string()
-	.regex(ISO_DT_RE, "must be an ISO-8601 datetime")
-	.nullable();
-// Physiological metrics: nullable floats. Oura returns floats for HRV /
-// efficiency / temperature; do not force .int() (would reject real records).
+const daySchema = z.iso.date();
+const isoDateTimeNullable = z.iso.datetime({ offset: true }).nullable();
+// Source floats remain exact; do not round them to satisfy the frozen legacy schema.
 const metricSchema = z.number().nullable();
+const integerSchema = z.int().nullable();
+const scoreSchema = z.int().min(0).max(100).nullable();
 
 /**
- * sleep stream: one record per nightly sleep session.
+ * sleep stream: session and daily score records with independent source IDs.
  * Cursor: day.
  */
-export const sleepSchema = z.object({
+export const sleepSessionSchema = z.object({
+	record_type: z.literal("sleep_session"),
 	id: ouraIdSchema,
 	day: daySchema,
+	daily_sleep_id: ouraIdSchema.nullable(),
+	daily_sleep_timestamp: isoDateTimeNullable,
 	bedtime_start: isoDateTimeNullable,
 	bedtime_end: isoDateTimeNullable,
-	total_sleep_duration: metricSchema,
-	rem_sleep_duration: metricSchema,
-	deep_sleep_duration: metricSchema,
-	light_sleep_duration: metricSchema,
+	total_sleep_duration: integerSchema,
+	rem_sleep_duration: integerSchema,
+	deep_sleep_duration: integerSchema,
+	light_sleep_duration: integerSchema,
 	efficiency: metricSchema,
-	latency: metricSchema,
+	latency: integerSchema,
 	average_heart_rate: metricSchema,
-	lowest_heart_rate: metricSchema,
+	lowest_heart_rate: integerSchema,
 	average_hrv: metricSchema,
 	temperature_delta: metricSchema,
-	sleep_score: metricSchema,
+	sleep_score: scoreSchema,
 	average_breath: metricSchema,
-	restless_periods: metricSchema,
-	time_in_bed: metricSchema,
+	restless_periods: integerSchema,
+	time_in_bed: integerSchema,
+	awake_time: integerSchema,
 	// Oura's v2 sleep `type` enum (long_sleep / sleep / late_nap / rest, etc.).
 	// Not enumerated here since Oura documents it as an evolving set of
 	// provider-defined session-type strings; bounded free text, not a fixed
@@ -98,6 +94,21 @@ export const sleepSchema = z.object({
 	contributors: z.record(z.string(), z.number().nullable()),
 });
 
+const dailyScoreSchema = z.object({
+	record_type: z.literal("daily_score"),
+	id: ouraIdSchema,
+	day: daySchema,
+	daily_sleep_id: ouraIdSchema,
+	daily_sleep_timestamp: isoDateTimeNullable,
+	sleep_score: scoreSchema,
+	contributors: z.record(z.string(), z.number().nullable()),
+});
+
+export const sleepSchema = z.discriminatedUnion("record_type", [
+	sleepSessionSchema,
+	dailyScoreSchema,
+]);
+
 /**
  * readiness stream: one record per daily readiness document.
  * `contributors` is Oura's opaque contributors map (key → 0-100 sub-score).
@@ -108,7 +119,8 @@ export const sleepSchema = z.object({
 export const readinessSchema = z.object({
 	id: ouraIdSchema,
 	day: daySchema,
-	score: metricSchema,
+	timestamp: isoDateTimeNullable,
+	score: scoreSchema,
 	temperature_deviation: metricSchema,
 	temperature_trend_deviation: metricSchema,
 	contributors: z.record(z.string(), z.number().nullable()),
@@ -121,18 +133,19 @@ export const readinessSchema = z.object({
 export const activitySchema = z.object({
 	id: ouraIdSchema,
 	day: daySchema,
-	score: metricSchema,
-	active_calories: metricSchema,
-	total_calories: metricSchema,
-	steps: metricSchema,
-	target_calories: metricSchema,
+	timestamp: isoDateTimeNullable,
+	score: scoreSchema,
+	active_calories: integerSchema,
+	total_calories: integerSchema,
+	steps: integerSchema,
+	target_calories: integerSchema,
 	equivalent_walking_distance: metricSchema,
-	high_activity_time: metricSchema,
-	medium_activity_time: metricSchema,
-	low_activity_time: metricSchema,
-	sedentary_time: metricSchema,
-	resting_time: metricSchema,
-	inactivity_alerts: metricSchema,
+	high_activity_time: integerSchema,
+	medium_activity_time: integerSchema,
+	low_activity_time: integerSchema,
+	sedentary_time: integerSchema,
+	resting_time: integerSchema,
+	inactivity_alerts: integerSchema,
 	contributors: z.record(z.string(), z.number().nullable()),
 });
 

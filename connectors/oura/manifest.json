@@ -9,7 +9,7 @@
 	},
 	"connector_key": "oura",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/oura",
-	"version": "0.1.19",
+	"version": "0.1.20",
 	"display_name": "Oura",
 	"runtime_requirements": {
 		"bindings": {
@@ -64,10 +64,10 @@
 	"streams": [
 		{
 			"name": "sleep",
-			"description": "Daily sleep sessions.",
+			"description": "Sleep sessions and independent daily sleep scores.",
 			"display": {
-				"label": "Your sleep sessions",
-				"detail": "Per-night: total sleep duration, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing."
+				"label": "Your sleep",
+				"detail": "Daily scores and sleep sessions: duration, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -78,7 +78,8 @@
 						"enum": ["sleep_session", "daily_score"]
 					},
 					"id": {
-						"type": "string"
+						"type": "string",
+						"format": "uuid"
 					},
 					"day": {
 						"type": "string",
@@ -86,10 +87,12 @@
 						"x_pdpp_role": "event-time"
 					},
 					"bedtime_start": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"format": "date-time"
 					},
 					"bedtime_end": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"format": "date-time"
 					},
 					"total_sleep_duration": {
 						"type": ["integer", "null"]
@@ -104,7 +107,7 @@
 						"type": ["integer", "null"]
 					},
 					"efficiency": {
-						"type": ["integer", "null"]
+						"type": ["number", "null"]
 					},
 					"latency": {
 						"type": ["integer", "null"]
@@ -123,10 +126,13 @@
 					},
 					"sleep_score": {
 						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 100,
 						"x_pdpp_role": "amount"
 					},
 					"daily_sleep_id": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"format": "uuid"
 					},
 					"daily_sleep_timestamp": {
 						"type": ["string", "null"],
@@ -145,13 +151,64 @@
 						"type": ["integer", "null"]
 					},
 					"type": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"minLength": 1,
+						"maxLength": 64
 					},
 					"contributors": {
-						"type": "object"
+						"type": "object",
+						"additionalProperties": { "type": ["number", "null"] }
 					}
 				},
-				"required": ["id", "day"]
+				"required": ["record_type", "id", "day"],
+				"allOf": [
+					{
+						"if": {
+							"properties": { "record_type": { "const": "sleep_session" } }
+						},
+						"then": {
+							"required": [
+								"daily_sleep_id",
+								"daily_sleep_timestamp",
+								"bedtime_start",
+								"bedtime_end",
+								"total_sleep_duration",
+								"rem_sleep_duration",
+								"deep_sleep_duration",
+								"light_sleep_duration",
+								"efficiency",
+								"latency",
+								"average_heart_rate",
+								"lowest_heart_rate",
+								"average_hrv",
+								"temperature_delta",
+								"sleep_score",
+								"average_breath",
+								"restless_periods",
+								"time_in_bed",
+								"awake_time",
+								"type",
+								"contributors"
+							]
+						}
+					},
+					{
+						"if": {
+							"properties": { "record_type": { "const": "daily_score" } }
+						},
+						"then": {
+							"properties": {
+								"daily_sleep_id": { "type": "string", "format": "uuid" }
+							},
+							"required": [
+								"daily_sleep_id",
+								"daily_sleep_timestamp",
+								"sleep_score",
+								"contributors"
+							]
+						}
+					}
+				]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "day",
@@ -187,15 +244,22 @@
 				"type": "object",
 				"properties": {
 					"id": {
-						"type": "string"
+						"type": "string",
+						"format": "uuid"
 					},
 					"day": {
 						"type": "string",
 						"format": "date",
 						"x_pdpp_role": "event-time"
 					},
+					"timestamp": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
 					"score": {
 						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 100,
 						"x_pdpp_role": "amount"
 					},
 					"temperature_deviation": {
@@ -205,10 +269,19 @@
 						"type": ["number", "null"]
 					},
 					"contributors": {
-						"type": "object"
+						"type": "object",
+						"additionalProperties": { "type": ["number", "null"] }
 					}
 				},
-				"required": ["id", "day"]
+				"required": [
+					"id",
+					"day",
+					"timestamp",
+					"score",
+					"temperature_deviation",
+					"temperature_trend_deviation",
+					"contributors"
+				]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "day",
@@ -243,15 +316,22 @@
 				"type": "object",
 				"properties": {
 					"id": {
-						"type": "string"
+						"type": "string",
+						"format": "uuid"
 					},
 					"day": {
 						"type": "string",
 						"format": "date",
 						"x_pdpp_role": "event-time"
 					},
+					"timestamp": {
+						"type": ["string", "null"],
+						"format": "date-time"
+					},
 					"score": {
 						"type": ["integer", "null"],
+						"minimum": 0,
+						"maximum": 100,
 						"x_pdpp_role": "amount"
 					},
 					"active_calories": {
@@ -267,7 +347,7 @@
 						"type": ["integer", "null"]
 					},
 					"equivalent_walking_distance": {
-						"type": ["integer", "null"]
+						"type": ["number", "null"]
 					},
 					"high_activity_time": {
 						"type": ["integer", "null"]
@@ -288,10 +368,28 @@
 						"type": ["integer", "null"]
 					},
 					"contributors": {
-						"type": "object"
+						"type": "object",
+						"additionalProperties": { "type": ["number", "null"] }
 					}
 				},
-				"required": ["id", "day"]
+				"required": [
+					"id",
+					"day",
+					"timestamp",
+					"score",
+					"active_calories",
+					"total_calories",
+					"steps",
+					"target_calories",
+					"equivalent_walking_distance",
+					"high_activity_time",
+					"medium_activity_time",
+					"low_activity_time",
+					"sedentary_time",
+					"resting_time",
+					"inactivity_alerts",
+					"contributors"
+				]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "day",
@@ -316,6 +414,6 @@
 		}
 	],
 	"reason_display_messages": {
-		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your Oura history, so some earlier days haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+		"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your Oura history. Fetched records were saved, but unread pages remain. The next run retries from the held checkpoint."
 	}
 }
