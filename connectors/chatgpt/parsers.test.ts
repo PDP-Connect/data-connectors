@@ -477,6 +477,43 @@ test("buildMemoryRecord: created_at comes from created_timestamp (epoch seconds)
 	assert.equal(dated?.updated_at, "2025-10-02T12:00:00Z");
 });
 
+test("buildMemoryRecord: reads the legacy created_at / createdAt / updatedAt aliases", () => {
+	const snake = buildMemoryRecord({
+		id: "m-snake",
+		content: "synthetic",
+		created_at: "2025-03-01T00:00:00Z",
+		updatedAt: "2025-03-02T00:00:00Z",
+	});
+	assert.equal(snake?.created_at, "2025-03-01T00:00:00.000Z");
+	assert.equal(snake?.updated_at, "2025-03-02T00:00:00Z");
+	const camel = buildMemoryRecord({
+		id: "m-camel",
+		content: "synthetic",
+		createdAt: "2025-04-01T00:00:00Z",
+		updated_at: "2025-04-02T00:00:00Z",
+		updatedAt: "2099-01-01T00:00:00Z",
+	});
+	assert.equal(camel?.created_at, "2025-04-01T00:00:00.000Z");
+	// legacy precedence: updated_at wins over updatedAt
+	assert.equal(camel?.updated_at, "2025-04-02T00:00:00Z");
+	// legacy precedence: created_at wins over createdAt; created_timestamp is the fallback
+	const both = buildMemoryRecord({
+		id: "m-both",
+		content: "synthetic",
+		created_at: "2025-05-01T00:00:00Z",
+		createdAt: "2025-06-01T00:00:00Z",
+		created_timestamp: 1759406400,
+	});
+	assert.equal(both?.created_at, "2025-05-01T00:00:00.000Z");
+	const fallback = buildMemoryRecord({
+		id: "m-fb",
+		content: "synthetic",
+		created_at: "not a date",
+		created_timestamp: 1759406400,
+	});
+	assert.equal(fallback?.created_at, "2025-10-02T12:00:00.000Z");
+});
+
 test("buildMemoryRecord: created_at is null for an undated memory", () => {
 	const nullTs = buildMemoryRecord({
 		id: "m-undated",

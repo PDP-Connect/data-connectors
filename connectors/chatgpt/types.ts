@@ -148,12 +148,16 @@ export interface ChatGptApi {
 
 export interface RawMemoryEntry {
 	content?: string;
-	/** Epoch seconds; null on older memories. The API has no `created_at`. */
+	/** Legacy collector aliases, read in this order before `created_timestamp`. */
+	created_at?: string | number | null;
+	createdAt?: string | number | null;
+	/** Epoch seconds; null on older memories. */
 	created_timestamp?: number | null;
 	id?: string;
 	name?: string;
 	type?: string | null;
 	updated_at?: string | null;
+	updatedAt?: string | null;
 }
 
 export interface RawGizmoDisplay {

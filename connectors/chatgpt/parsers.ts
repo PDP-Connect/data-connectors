@@ -462,8 +462,11 @@ export function buildMemoryRecord(m: RawMemoryEntry): RecordData | null {
 	return {
 		id: m.id,
 		content: m.content || m.name || "",
-		created_at: tsToIso(m.created_timestamp),
-		updated_at: m.updated_at || null,
+		created_at:
+			tsToIso(m.created_at) ??
+			tsToIso(m.createdAt) ??
+			tsToIso(m.created_timestamp),
+		updated_at: m.updated_at || m.updatedAt || null,
 		type: m.type || null,
 	};
 }
