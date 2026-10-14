@@ -267,6 +267,12 @@ import type {
 } from "../src/scenario/format.ts";
 import { SCENARIO_FORMAT } from "../src/scenario/format.ts";
 import {
+	analyzeRawObservations,
+	type RawObservationRun,
+	type RawObservationStreamMetadata,
+	type RawObservationSummary,
+} from "../src/scenario/raw-observation-analysis.ts";
+import {
 	type ExcludedFieldsByStream,
 	projectRecordForComparison,
 	readExcludedComparisonFields,
@@ -724,6 +730,45 @@ export function createInactivityWatchdog(
 interface ManifestStream {
 	name: string;
 	[extra: string]: unknown;
+}
+
+function manifestObject(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function declaredSchemaPaths(schema: unknown, prefix = ""): string[] {
+	const properties = manifestObject(manifestObject(schema)?.properties);
+	if (!properties) {
+		return [];
+	}
+	return Object.entries(properties).flatMap(([name, child]) => {
+		const path = prefix ? `${prefix}.${name}` : name;
+		return [path, ...declaredSchemaPaths(child, path)];
+	});
+}
+
+function rawObservationMetadata(
+	streams: readonly ManifestStream[],
+	excludedFields: ExcludedFieldsByStream,
+): RawObservationStreamMetadata[] {
+	return streams.map((stream) => {
+		const primaryKey = stream.primary_key;
+		const excluded = excludedFields.get(stream.name);
+		return {
+			name: stream.name,
+			safeFieldPaths: declaredSchemaPaths(stream.schema),
+			...(Array.isArray(primaryKey)
+				? {
+						primaryKey: primaryKey.filter(
+							(field): field is string => typeof field === "string",
+						),
+					}
+				: {}),
+			...(excluded === undefined ? {} : { excludedFields: excluded }),
+		};
+	});
 }
 
 export interface CliArgs {
@@ -1875,6 +1920,9 @@ async function recordOneRun(
 		...(harRecordPaths ? { harRecordPaths } : {}),
 	});
 	const done = result.messages.find((m) => m.type === "DONE");
+	// `msg.data` is the parsed, validated wire RECORD payload. Retain this
+	// reference for the advisory before `expectedForRecords` applies the
+	// replay-comparison exclusions; no post-normalizer data is called raw.
 	const { records, stateMessages } = messagesToRecordsAndState(result.messages);
 	const finalState: Record<string, unknown> = { ...startState };
 	for (const s of stateMessages) {
@@ -2046,6 +2094,7 @@ interface CaptureRunsResult {
 	browserCaptures: Array<BrowserCaptureArtifact | undefined>;
 	complete: boolean;
 	normalizerNames: Set<string>;
+	rawObservationSummary: RawObservationSummary;
 	runs: ScenarioRun[];
 }
 
@@ -2251,6 +2300,12 @@ async function captureRuns(
 	// Read once per capture: both runs must hash under the SAME projection, and
 	// `scenario-verify` reads the same declaration when it recomputes.
 	const excludedComparisonFields = readExcludedComparisonFields(args.connector);
+	const observationMetadata = args.entrypoint
+		? []
+		: rawObservationMetadata(streams, excludedComparisonFields);
+	const observationScopeKey = JSON.stringify(
+		streams.map((stream) => stream.name),
+	);
 	process.stdout.write(
 		`RECORDING ${args.connector} — run 1 (full refresh, state=null)\n`,
 	);
@@ -2268,6 +2323,9 @@ async function captureRuns(
 
 	const runs: ScenarioRun[] = [];
 	const browserCaptures: Array<BrowserCaptureArtifact | undefined> = [];
+	const observationRuns: RawObservationRun[] = run1.ok
+		? [{ records: run1.records, run: 1, scopeKey: observationScopeKey }]
+		: [];
 	let complete = run1.ok;
 	const normalizerNames = new Set(run1.normalizerNames);
 
@@ -2322,6 +2380,13 @@ async function captureRuns(
 				args.recordHar,
 				2,
 			);
+		if (run2.ok) {
+			observationRuns.push({
+				records: run2.records,
+				run: 2,
+				scopeKey: observationScopeKey,
+			});
+		}
 		for (const name of run2.normalizerNames) {
 			normalizerNames.add(name);
 		}
@@ -2354,7 +2419,34 @@ async function captureRuns(
 		}
 	}
 
-	return { runs, complete, normalizerNames, browserCaptures };
+	let rawObservationSummary: RawObservationSummary;
+	try {
+		rawObservationSummary = analyzeRawObservations(
+			observationRuns,
+			observationMetadata,
+		);
+	} catch {
+		// Advisory analysis is deliberately outside capture success semantics.
+		// Do not include an exception message, which could contain record data.
+		rawObservationSummary = {
+			identityLimit: 250,
+			missingIdentityRecords: 0,
+			oversizedIdentityRecords: 0,
+			unknownStreamSampleLimit: 50,
+			streams: [],
+			truncated: false,
+			limitations: [
+				"Raw observation analysis failed; no stability verdict was produced.",
+			],
+		};
+	}
+	return {
+		runs,
+		complete,
+		normalizerNames,
+		browserCaptures,
+		rawObservationSummary,
+	};
 }
 
 /**
@@ -2621,6 +2713,46 @@ function printCaptureSummary(outPath: string, built: BuiltScenario): void {
 	);
 }
 
+function printRawObservationSummary(summary: RawObservationSummary): void {
+	process.stdout.write(
+		"\nauthor advisory: raw RECORD differences across capture runs\n",
+	);
+	for (const stream of summary.streams) {
+		process.stdout.write(
+			`  ${stream.stream}: ${stream.status} (${String(stream.comparedIdentities)} repeated identities; sample limit ${String(stream.sampleLimit)}, retained ${String(stream.sampledIdentities)}, truncated ${String(stream.truncated)})\n`,
+		);
+		if (stream.rawChangedFields.length > 0) {
+			process.stdout.write(
+				`    raw changed fields: ${stream.rawChangedFields.map(({ field, identities }) => `${field} (${String(identities)})`).join(", ")}\n`,
+			);
+		}
+		if (stream.rawUnnamedFieldIdentities > 0) {
+			process.stdout.write(
+				`    raw changes in unnamed or undeclared fields: ${String(stream.rawUnnamedFieldIdentities)} identity/identities\n`,
+			);
+		}
+		if (stream.projectedChangedFields.length > 0) {
+			process.stdout.write(
+				`    changed after declared comparison exclusions: ${stream.projectedChangedFields.map(({ field, identities }) => `${field} (${String(identities)})`).join(", ")}\n`,
+			);
+		}
+		if (stream.projectedUnnamedFieldIdentities > 0) {
+			process.stdout.write(
+				`    projected changes in unnamed or undeclared fields: ${String(stream.projectedUnnamedFieldIdentities)} identity/identities\n`,
+			);
+		}
+	}
+	process.stdout.write(
+		`  total identity limit: ${String(summary.identityLimit)}; generic unknown-stream bucket limit: ${String(summary.unknownStreamSampleLimit)}; truncation: ${String(summary.truncated)}\n`,
+	);
+	process.stdout.write(
+		"  comparison exclusions apply only to declared top-level keys; nested-path exclusions are not supported.\n",
+	);
+	for (const limitation of summary.limitations) {
+		process.stdout.write(`  limitation: ${limitation}\n`);
+	}
+}
+
 /**
  * Prints where each run's HAR/storageState landed (or, honestly, that
  * `--record-har` produced nothing usable for that run) and exactly what
@@ -2818,6 +2950,7 @@ async function main(): Promise<void> {
 		);
 
 		printCaptureSummary(outPath, built);
+		printRawObservationSummary(captureResult.rawObservationSummary);
 		printBrowserCaptureSummary(outPath, built.scenario.runs);
 
 		if (captureResult.complete) {

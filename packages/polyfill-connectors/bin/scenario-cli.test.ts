@@ -2333,6 +2333,199 @@ test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol m
 	}
 });
 
+test("scenario-record: raw observation advisory compares two synthetic runs and keeps one-run captures insufficient", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-raw-observations-test-"));
+	const fixturePath = join(
+		packageScratchDir(),
+		`scenario-raw-observations-${String(process.pid)}.ts`,
+	);
+	const firstClockCanary = "CLOCK_FIRST_PRIVATE_CANARY";
+	const secondClockCanary = "CLOCK_SECOND_PRIVATE_CANARY";
+	const idCanary = "RECORD_ID_PRIVATE_CANARY";
+	const dynamicKeyCanary = "DYNAMIC_KEY_PRIVATE_CANARY";
+	writeFileSync(
+		fixturePath,
+		`import { runConnector } from "../src/connector-runtime.ts";
+runConnector({
+  name: "raw-observation-smoke",
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, emitRecord, state }) {
+    const repeated = Object.hasOwn(state, "items");
+    await emitRecord("items", {
+      id: ${JSON.stringify(idCanary)},
+      clock: repeated ? ${JSON.stringify(secondClockCanary)} : ${JSON.stringify(firstClockCanary)},
+      stable: "business-field-canary",
+      [${JSON.stringify(dynamicKeyCanary)}]: "dynamic-value-canary",
+    });
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+
+`,
+	);
+	try {
+		const twoRun = runRecordCli(
+			[
+				"raw-observation-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--out",
+				join(tmpDir, "two-runs.scenario.json"),
+			],
+			{},
+		);
+		assert.equal(twoRun.code, 0, twoRun.stderr);
+		assert.match(
+			twoRun.stdout,
+			/\(undeclared stream\): differences-observed \(1 repeated identities; sample limit 50, retained 1, truncated false\)/,
+		);
+		assert.match(
+			twoRun.stdout,
+			/raw changes in unnamed or undeclared fields: 1/,
+		);
+		assert.match(twoRun.stdout, /Manifest\/schema metadata was unavailable/);
+		for (const canary of [
+			firstClockCanary,
+			secondClockCanary,
+			idCanary,
+			dynamicKeyCanary,
+			"business-field-canary",
+			"dynamic-value-canary",
+		]) {
+			assert.equal(twoRun.stdout.includes(canary), false);
+			assert.equal(twoRun.stderr.includes(canary), false);
+		}
+
+		const oneRun = runRecordCli(
+			[
+				"raw-observation-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--runs",
+				"1",
+				"--out",
+				join(tmpDir, "one-run.scenario.json"),
+			],
+			{},
+		);
+		assert.equal(oneRun.code, 0, oneRun.stderr);
+		assert.match(
+			oneRun.stdout,
+			/\(undeclared stream\): insufficient-repeat-observations \(0 repeated identities; sample limit 50, retained 1, truncated false\)/,
+		);
+		assert.match(
+			oneRun.stdout,
+			/total identity limit: 250; generic unknown-stream bucket limit: 50; truncation: false/,
+		);
+		assert.equal(oneRun.stdout.includes(firstClockCanary), false);
+		assert.equal(oneRun.stdout.includes(idCanary), false);
+	} finally {
+		rmSync(fixturePath, { force: true });
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: bound synthetic manifest reports declared changes and hides record data", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-bound-raw-observation-"),
+	);
+	const connectorKey = "bound_raw_observation_fixture";
+	const connectorDir = join(tmpDir, "connectors", connectorKey);
+	const connectorPath = join(connectorDir, "index.ts");
+	const manifestPath = join(connectorDir, "manifest.json");
+	const firstCanary = "BOUND_FIRST_VALUE_PRIVATE_CANARY";
+	const secondCanary = "BOUND_SECOND_VALUE_PRIVATE_CANARY";
+	const firstClockCanary = "BOUND_FIRST_CLOCK_PRIVATE_CANARY";
+	const secondClockCanary = "BOUND_SECOND_CLOCK_PRIVATE_CANARY";
+	const idCanary = "BOUND_ID_PRIVATE_CANARY";
+	const dynamicKey = "dynamic_BOUND_PRIVATE_KEY";
+	mkdirSync(connectorDir, { recursive: true });
+	writeFileSync(
+		connectorPath,
+		`import { runConnector } from "../../../../src/connector-runtime.ts";
+runConnector({
+  name: ${JSON.stringify(connectorKey)},
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, emitRecord, state }) {
+    const repeated = Object.hasOwn(state, "items");
+    await emitRecord("items", {
+      id: ${JSON.stringify(idCanary)},
+      created_at: repeated ? ${JSON.stringify(secondCanary)} : ${JSON.stringify(firstCanary)},
+      clock: repeated ? ${JSON.stringify(secondClockCanary)} : ${JSON.stringify(firstClockCanary)},
+      [${JSON.stringify(dynamicKey)}]: "dynamic_PRIVATE_VALUE",
+    });
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+`,
+	);
+	writeFileSync(
+		manifestPath,
+		JSON.stringify({
+			connector_id:
+				"https://registry.pdpp.dev/connectors/bound-raw-observation-fixture",
+			connector_key: connectorKey,
+			protocol_version: "0.1.0",
+			version: "0.0.0-test",
+			streams: [
+				{
+					name: "items",
+					primary_key: ["id"],
+					compaction_fingerprint: { exclude_keys: ["clock"] },
+					schema: {
+						type: "object",
+						properties: {
+							id: { type: "string" },
+							created_at: { type: "string" },
+							clock: { type: "string" },
+							stable: { type: "string" },
+						},
+					},
+				},
+			],
+		}),
+	);
+	try {
+		const result = runRecordCli(
+			[connectorKey, "--out", join(tmpDir, "bound.scenario.json")],
+			{ PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir },
+		);
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(
+			result.stdout,
+			/items: differences-observed \(1 repeated identities; sample limit 200, retained 1, truncated false\)/,
+		);
+		assert.match(
+			result.stdout,
+			/raw changed fields: clock \(1\), created_at \(1\)/,
+		);
+		assert.match(result.stdout, /raw changed fields: [^\n]*created_at \(1\)/);
+		assert.match(result.stdout, /raw changed fields: [^\n]*clock \(1\)/);
+		assert.match(
+			result.stdout,
+			/changed after declared comparison exclusions: created_at \(1\)/,
+		);
+		assert.doesNotMatch(
+			result.stdout,
+			/changed after declared comparison exclusions: [^\n]*clock/,
+		);
+		for (const canary of [
+			firstCanary,
+			secondCanary,
+			firstClockCanary,
+			secondClockCanary,
+			idCanary,
+			dynamicKey,
+			"dynamic_PRIVATE_VALUE",
+		]) {
+			assert.equal(result.stdout.includes(canary), false);
+			assert.equal(result.stderr.includes(canary), false);
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
 test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR tightens a pre-existing dir to 0700, truncates an old run file to 0600, and records INTERACTION prompts", () => {
 	const tmpDir = mkdtempSync(
 		join(tmpdir(), "scenario-cli-transcript-interaction-"),
