@@ -16583,7 +16583,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -16642,7 +16642,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -16709,7 +16709,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -16762,7 +16762,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -16832,7 +16832,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -16907,7 +16907,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -16960,7 +16960,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -17031,7 +17031,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -17084,7 +17084,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -17155,7 +17155,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -17208,7 +17208,7 @@
 						"primary_key": ["id"],
 						"consent_time_field": "created_utc",
 						"selection": {
-							"fields": true,
+							"fields": false,
 							"resources": true
 						},
 						"incremental": false,
@@ -17226,10 +17226,7 @@
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
-				],
-				"reason_display_messages": {
-					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of this Reddit listing, so older posts haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
-				}
+				]
 			}
 		},
 		{

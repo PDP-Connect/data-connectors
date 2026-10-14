@@ -38,11 +38,17 @@
  * connector over the public API — they capture preference signal
  * (upvoted/downvoted history) no third party can see.
  *
+ * Field scope: no output supports a START `fields` subset (manifest
+ * `selection.fields: false`). The host replaces the stored row with each
+ * RECORD, so a projected record would erase the omitted current fields. The
+ * whole request is checked before any fetch; any proper subset, or a
+ * malformed `fields`, fails the run with no RECORD. See MIGRATION-0.4.md.
+ *
  * Pagination: opaque `after` cursor. Collection walks each requested listing
  * from the beginning on every run, because creation-time cursors cannot prove
  * that the stored content payload has the current schema. Fullnames provide
  * stable identity when an item appears again. A listing is bounded by its end
- * or MAX_PAGES; a capped walk emits deferred evidence and no checkpoint.
+ * or MAX_PAGES; a capped walk reports a stream failure for each requested output and no checkpoint.
  *
  * Rate limit: Reddit's logged-in web JSON allows ~100 req/min before 429.
  * We page at limit=100 and use a conservative 500ms politeDelay between
@@ -55,6 +61,7 @@
  *     filters moved off submitted/comments/upvoted/downvoted/hidden. Every
  *     requested output now refreshes the currently listed observations on
  *     each run; the connector does not persist a repair-complete marker.
+ *     A field subset is refused (selection.fields: false), never projected.
  *   manifest 0.3.13 (2026-10-02) — removed the connector-stamped `fetched_at` from
  *     every record (PDPP spec-core: a producer must not put its own
  *     collection time in `data`; that is the envelope's `emitted_at`).
@@ -99,7 +106,7 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import { createRepairBudget } from "../../packages/polyfill-connectors/src/repair-budget.ts";
-import { validateRecord } from "./schemas.ts";
+import { OUTPUT_FIELDS, validateRecord } from "./schemas.ts";
 import {
 	appendNewChildren,
 	classifyListingStatus,
@@ -490,6 +497,9 @@ export interface RedditStreamConfig {
 
 /** The slice of a runtime `StreamScope` this connector reads. */
 export interface RedditOutputScope {
+	/** Raw START `fields`. Only an absent value, or a list naming every output
+	 *  field, is supported; see {@link unsupportedFieldScopes}. */
+	fields?: unknown;
 	resources?: readonly string[];
 	time_range?: { since?: string; until?: string };
 }
@@ -514,6 +524,12 @@ export interface CollectStreamArgs {
 	 *  every stream in this run. Defaults to a fresh one-shot budget so direct
 	 *  callers (tests) that don't pass one keep today's per-call ceiling of 1. */
 	repairBudget?: ReturnType<typeof createRepairBudget>;
+	/** Runtime stream-failure reporter; required when a walk can hit MAX_PAGES. */
+	reportStreamFailure?: (
+		stream: string,
+		message: string,
+		options?: { retryable?: boolean },
+	) => Promise<void>;
 	/** Streams (content and/or stats) this run was asked for, with their scope.
 	 *  Omitted means the content stream alone, unscoped. An output that is not
 	 *  here emits nothing: no RECORD, STATE, SKIP_RESULT. */
@@ -549,26 +565,80 @@ async function emitOutput(
 	return { considered: items.length };
 }
 
-async function emitDeferredPages(
-	emit: CollectStreamArgs["emit"],
+/**
+ * A walk stopped by MAX_PAGES never observed the end of the inventory, so a
+ * full-inventory stream cannot claim success. Report a stream failure for each
+ * requested output; the runtime ends the run as failed. Records already
+ * offered stay offered, and no checkpoint is written. Not retryable: the same
+ * listing hits the same limit.
+ */
+async function reportPageLimitFailure(
+	reportStreamFailure: CollectStreamArgs["reportStreamFailure"],
 	stream: string,
 	totalSeen: number,
 ): Promise<void> {
-	// Reddit does not expose a total page count. One synthetic considered unit
-	// is the honest lower bound for the unread tail: the next page exists, but
-	// this run deliberately did not fetch it. The deferred suffix keeps the
-	// stream out of `complete` without inventing an item count.
-	await emit({
-		type: "SKIP_RESULT",
+	if (!reportStreamFailure) {
+		throw new Error(
+			"reddit_page_limit_unreported: the runtime did not supply reportStreamFailure",
+		);
+	}
+	await reportStreamFailure(
 		stream,
-		reason: "older_pages_deferred_page_budget",
-		message: `Reddit ${stream} stopped at the ${MAX_PAGES}-page limit with more pages still listed`,
-		diagnostics: {
-			page_limit: MAX_PAGES,
-			total_seen: totalSeen,
-			unread_pages: 1,
-		},
-	});
+		`Reddit ${stream} stopped at the ${MAX_PAGES}-page limit (${totalSeen} items read) with more pages still listed`,
+		{ retryable: false },
+	);
+}
+
+/**
+ * The host replaces a stored row with each RECORD it receives (no partial
+ * merge), so a record projected to a field subset would erase the omitted
+ * current fields. Reddit therefore cannot honor a restricted START `fields`.
+ * An output is unrestricted when `fields` is absent or is a list of strings
+ * that names every field of its full record (extra names request nothing).
+ * Anything else, including null, an empty list or a malformed value, is
+ * rejected: guessing "no restriction" would silently broaden the scope.
+ * Returns the requested outputs whose `fields` Reddit cannot honor.
+ */
+export function unsupportedFieldScopes(
+	requested: ReadonlyMap<string, RedditOutputScope>,
+): string[] {
+	const unsupported: string[] = [];
+	for (const [name, scope] of requested) {
+		const all = OUTPUT_FIELDS.get(name);
+		if (!all || scope.fields === undefined) {
+			continue;
+		}
+		const named = scope.fields;
+		const coversEveryField =
+			Array.isArray(named) &&
+			named.every((f) => typeof f === "string") &&
+			[...all].every((f) => named.includes(f));
+		if (!coversEveryField) {
+			unsupported.push(name);
+		}
+	}
+	return unsupported;
+}
+
+/** Fail the whole run for each output whose field scope cannot be honored.
+ *  Called before any listing fetch so nothing is offered for ANY output. The
+ *  message names only the output, never requested field names or source data. */
+async function rejectUnsupportedFieldScopes(
+	reportStreamFailure: CollectStreamArgs["reportStreamFailure"],
+	streams: readonly string[],
+): Promise<void> {
+	if (!reportStreamFailure) {
+		throw new Error(
+			"reddit_field_scope_unreported: the runtime did not supply reportStreamFailure",
+		);
+	}
+	for (const stream of streams) {
+		await reportStreamFailure(
+			stream,
+			`Reddit cannot return a subset of the ${stream} fields: each record replaces the stored row, so omitted fields would be erased. Request all fields.`,
+			{ retryable: false },
+		);
+	}
 }
 
 export async function collectStream(
@@ -577,12 +647,12 @@ export async function collectStream(
 	const {
 		capture,
 		delay,
-		emit,
 		emitRecord,
 		fetchPath,
 		onAuthFailed,
 		progress,
 		repairBudget,
+		reportStreamFailure,
 		stream,
 	} = args;
 	const requested =
@@ -625,7 +695,11 @@ export async function collectStream(
 			cursor_present: false,
 		});
 		if (truncated) {
-			await emitDeferredPages(emit, stream.name, items.length);
+			await reportPageLimitFailure(
+				reportStreamFailure,
+				stream.name,
+				items.length,
+			);
 		}
 	}
 
@@ -639,7 +713,11 @@ export async function collectStream(
 			total_seen: children.length,
 		});
 		if (truncated) {
-			await emitDeferredPages(emit, statsOutput.name, children.length);
+			await reportPageLimitFailure(
+				reportStreamFailure,
+				statsOutput.name,
+				children.length,
+			);
 		}
 	}
 
@@ -798,9 +876,16 @@ export async function collectAllStreams(
 		emittedAt,
 		page,
 		progress,
+		reportStreamFailure,
 		requested,
 		state,
 	} = ctx;
+
+	const unsupported = unsupportedFieldScopes(requested);
+	if (unsupported.length > 0) {
+		await rejectUnsupportedFieldScopes(reportStreamFailure, unsupported);
+		return;
+	}
 
 	const user = credentials.REDDIT_USERNAME;
 	if (!user) {
@@ -824,6 +909,7 @@ export async function collectAllStreams(
 			progress,
 			onAuthFailed,
 			repairBudget,
+			...(reportStreamFailure ? { reportStreamFailure } : {}),
 			capture,
 			requested,
 			...(collectionMode ? { collectionMode } : {}),

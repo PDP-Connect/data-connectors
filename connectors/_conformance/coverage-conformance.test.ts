@@ -386,6 +386,27 @@ function deriveStreamEnvelope(
 	};
 }
 
+/**
+ * The one boundary where a driver's result becomes an envelope. The count
+ * fields are optional overrides: in-process drivers keep records in their
+ * harness (not in `messages`) and report an explicit `emittedCounts`;
+ * subprocess drivers return protocol `messages` only. An absent override is
+ * passed through as absent so the envelope counts RECORD messages; it is never
+ * turned into a zero.
+ */
+function envelopeForDriverResult(
+	driverResult: Extract<DriverResult, { exercised: true }>,
+	stream: string,
+): StreamEvidenceEnvelope {
+	return deriveStreamEnvelope(
+		driverResult.messages,
+		stream,
+		driverResult.skippedRecords,
+		driverResult.enumeratedCounts?.[stream],
+		driverResult.emittedCounts?.[stream],
+	);
+}
+
 /** Run a driver and evaluate one of its streams under the shared oracle in
  *  one call — the common shape every capability-pin test below needs.
  *  Throws (failing the test with a clear message) if the driver reports
@@ -484,13 +505,7 @@ test("verified-coverage conformance: every exercised required stream proves cove
 			);
 			continue;
 		}
-		const envelope = deriveStreamEnvelope(
-			driverResult.messages,
-			stream,
-			driverResult.skippedRecords,
-			driverResult.enumeratedCounts?.[stream],
-			driverResult.emittedCounts?.[stream] ?? 0,
-		);
+		const envelope = envelopeForDriverResult(driverResult, stream);
 		const declaration = proofDeclarationFor(manifest, stream);
 		const verdict = evaluateStreamCoherence(envelope, declaration);
 
@@ -647,34 +662,47 @@ test("capability: Reddit full-inventory outputs prove measured source enumeratio
 	const manifest = readManifest("reddit");
 	assert.ok(manifest);
 	assert.equal(
-		result.messages.some((m) => m.type === "STATE" || m.type === "DETAIL_COVERAGE"),
+		result.messages.some(
+			(m) => m.type === "STATE" || m.type === "DETAIL_COVERAGE",
+		),
 		false,
 		"full-inventory streams emit neither empty checkpoints nor undeclared self-coverage",
 	);
 	for (const stream of REDDIT_STREAMS) {
-		const declaration: NonNullable<typeof manifest.streams>[number] | undefined =
-			manifest.streams?.find((s) => s.name === stream);
-		assert.equal(declaration?.coverage_strategy, "full_inventory", `${stream}: strategy`);
+		const declaration:
+			| NonNullable<typeof manifest.streams>[number]
+			| undefined = manifest.streams?.find((s) => s.name === stream);
+		assert.equal(
+			declaration?.coverage_strategy,
+			"full_inventory",
+			`${stream}: strategy`,
+		);
 		assert.equal(
 			(declaration as { incremental?: boolean } | undefined)?.incremental,
 			false,
 			`${stream}: non-incremental`,
 		);
-		assert.equal("state_stream" in (declaration ?? {}), false, `${stream}: no parent declaration`);
-		assert.equal("parent_streams" in (declaration ?? {}), false, `${stream}: no parent declaration`);
-		const envelope = deriveStreamEnvelope(
-			result.messages,
-			stream,
-			result.skippedRecords,
-			result.enumeratedCounts?.[stream],
-			result.emittedCounts?.[stream] ?? 0,
+		assert.equal(
+			"state_stream" in (declaration ?? {}),
+			false,
+			`${stream}: no parent declaration`,
 		);
+		assert.equal(
+			"parent_streams" in (declaration ?? {}),
+			false,
+			`${stream}: no parent declaration`,
+		);
+		const envelope = envelopeForDriverResult(result, stream);
 		// The synthetic source contains one row for each output boundary. Compare
 		// that source-side count with actual RECORD messages; do not claim durable
 		// host storage or derive a covered numerator from connector-side validation.
 		assert.equal(envelope.considered, 1, `${stream}: considered`);
 		assert.equal(envelope.covered, null, `${stream}: no covered numerator`);
-		assert.equal(envelope.collected, 1, `${stream}: in-process shape-checked record count`);
+		assert.equal(
+			envelope.collected,
+			1,
+			`${stream}: in-process shape-checked record count`,
+		);
 		assert.deepEqual(
 			envelope.skipped,
 			null,
@@ -713,8 +741,16 @@ test("mutation: a schema-invalid Reddit record fails full-inventory proof at the
 			1,
 			`${stream}: considered (the record was weighed)`,
 		);
-		assert.equal(envelope.covered, null, `${stream}: no connector coverage numerator`);
-		assert.equal(envelope.collected, 0, `${stream}: invalid record was not emitted`);
+		assert.equal(
+			envelope.covered,
+			null,
+			`${stream}: no connector coverage numerator`,
+		);
+		assert.equal(
+			envelope.collected,
+			0,
+			`${stream}: invalid record was not emitted`,
+		);
 		assert.ok(
 			envelope.skipped,
 			`${stream}: skippedRecords must surface as envelope.skipped`,
@@ -783,10 +819,17 @@ test("mutation: resource-excluded Reddit rows remain in the measured source boun
 		result.enumeratedCounts?.submitted,
 	);
 	assert.equal(envelope.considered, 1);
-	assert.equal(envelope.collected, 0, "runtime selection excludes the source row");
+	assert.equal(
+		envelope.collected,
+		0,
+		"runtime selection excludes the source row",
+	);
 	assert.equal(envelope.covered, null, "no connector-supplied numerator");
 	assert.deepEqual(
-		evaluateStreamCoherence(envelope, proofDeclarationFor(manifest, "submitted")),
+		evaluateStreamCoherence(
+			envelope,
+			proofDeclarationFor(manifest, "submitted"),
+		),
 		{ proven: false, reason: "boundary_shortfall" },
 	);
 });
@@ -1046,13 +1089,7 @@ test("capability: GroupMe's empty direct inventory emits measured 0/0 proof for 
 	assert.ok(manifest, "GroupMe manifest must exist for the coverage oracle");
 
 	for (const stream of ["direct_messages", "direct_chat_messages"]) {
-		const envelope = deriveStreamEnvelope(
-			result.messages,
-			stream,
-			result.skippedRecords,
-		result.enumeratedCounts?.[stream],
-		result.emittedCounts?.[stream] ?? 0,
-		);
+		const envelope = envelopeForDriverResult(result, stream);
 		const verdict = evaluateStreamCoherence(
 			envelope,
 			proofDeclarationFor(manifest, stream),
@@ -1198,5 +1235,68 @@ test("capability: groupme.attachments is required:false and therefore absent fro
 	assert.ok(
 		!KNOWN_UNEXERCISED_COVERAGE.has("groupme.attachments"),
 		"attachments is not a required stream, so it must not appear in the required-stream ratchet either",
+	);
+});
+
+// ─── Driver-result → envelope: absent count is not a zero count ────────────
+
+const recordCount = (messages: readonly EmittedMessage[], stream: string) =>
+	messages.filter(
+		(m) =>
+			(m as { type?: unknown }).type === "RECORD" &&
+			(m as { stream?: unknown }).stream === stream,
+	).length;
+
+test("count boundary: a real subprocess driver (Jellyfin, messages only) collects what it emitted", async () => {
+	const driver = CONNECTOR_DRIVERS.jellyfin;
+	assert.ok(driver, "jellyfin driver registered");
+	const result = await driver.run();
+	if (!result.exercised) {
+		assert.fail(`jellyfin driver reported unexercised: ${result.reason}`);
+	}
+	assert.equal(
+		result.emittedCounts,
+		undefined,
+		"precondition: this driver reports protocol messages only",
+	);
+	let sawRecords = 0;
+	for (const stream of driver.coveredStreams) {
+		const emitted = recordCount(result.messages, stream);
+		sawRecords += emitted;
+		assert.equal(
+			envelopeForDriverResult(result, stream).collected,
+			emitted,
+			`${stream}: collected must equal the RECORD messages on the wire`,
+		);
+	}
+	assert.ok(sawRecords > 0, "the driver must emit at least one RECORD");
+});
+
+test("count boundary: an explicit in-process count is kept, including an explicit zero", () => {
+	const record: EmittedMessage = {
+		type: "RECORD",
+		stream: "items",
+		key: "a",
+		data: { id: "a" },
+		emitted_at: "2026-10-14T12:00:00.000Z",
+	};
+	const base = { exercised: true as const, messages: [record] };
+	assert.equal(
+		envelopeForDriverResult({ ...base, emittedCounts: { items: 0 } }, "items")
+			.collected,
+		0,
+	);
+	assert.equal(
+		envelopeForDriverResult(
+			{ exercised: true, messages: [], emittedCounts: { items: 3 } },
+			"items",
+		).collected,
+		3,
+	);
+	assert.equal(
+		envelopeForDriverResult({ ...base, emittedCounts: { other: 9 } }, "items")
+			.collected,
+		1,
+		"a count for a different stream does not count for this one",
 	);
 });

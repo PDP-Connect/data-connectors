@@ -484,15 +484,6 @@
 		}
 	},
 	{
-		"file": "reddit.json",
-		"manifest": {
-			"connector_key": "reddit",
-			"reason_display_messages": {
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of this Reddit listing, so older posts haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
-			}
-		}
-	},
-	{
 		"file": "shopify.json",
 		"manifest": {
 			"connector_key": "shopify",

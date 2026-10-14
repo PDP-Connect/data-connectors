@@ -259,8 +259,14 @@ test("collectStream: emits listed records without STATE", async () => {
 	});
 
 	assert.equal(harness.emitted.length, 2);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
 });
 
 test("collectStream: old creation state does not affect full-inventory traversal", async () => {
@@ -292,8 +298,14 @@ test("collectStream: old creation state does not affect full-inventory traversal
 		delay: NO_DELAY,
 	});
 
-	assert.deepEqual(harness.emitted.map((e) => e.data.id), ["t3_a", "t3_b", "t3_c"]);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
+	assert.deepEqual(
+		harness.emitted.map((e) => e.data.id),
+		["t3_a", "t3_b", "t3_c"],
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
 });
 
 test("collectStream: a created-time boundary never stops the listing walk", async () => {
@@ -326,14 +338,13 @@ test("collectStream: a created-time boundary never stops the listing walk", asyn
 		delay: NO_DELAY,
 	});
 
-	assert.equal(
-		calls.length,
-		2,
-		"must read all listed pages despite old state",
-	);
+	assert.equal(calls.length, 2, "must read all listed pages despite old state");
 	const ids = harness.emitted.map((e) => e.data.id);
 	assert.deepEqual(ids, ["t3_a", "t3_b", "t3_c", "t3_d"]);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
 });
 
 for (const stream of buildStreamTable(USER_PATH, EMITTED_AT)) {
@@ -354,7 +365,10 @@ for (const stream of buildStreamTable(USER_PATH, EMITTED_AT)) {
 			capture: null,
 			delay: NO_DELAY,
 		});
-		assert.equal(firstHarness.protocolMessages.some((m) => m.type === "STATE"), false);
+		assert.equal(
+			firstHarness.protocolMessages.some((m) => m.type === "STATE"),
+			false,
+		);
 
 		const secondHarness = makeRecordingEmit(validateRecord);
 		const secondFetch = makeScriptedFetch({
@@ -380,8 +394,14 @@ for (const stream of buildStreamTable(USER_PATH, EMITTED_AT)) {
 
 		const emittedIds = secondHarness.emitted.map((record) => record.data.id);
 		const prefix = stream.name === "comments" ? "t1_" : "t3_";
-		assert.deepEqual(emittedIds, [`${prefix}${stream.name}new`, `${prefix}${stream.name}old`]);
-		assert.equal(secondHarness.protocolMessages.some((m) => m.type === "STATE"), false);
+		assert.deepEqual(emittedIds, [
+			`${prefix}${stream.name}new`,
+			`${prefix}${stream.name}old`,
+		]);
+		assert.equal(
+			secondHarness.protocolMessages.some((m) => m.type === "STATE"),
+			false,
+		);
 	});
 }
 
@@ -1466,7 +1486,10 @@ test("collectStream: zero results report only the enumerated count", async () =>
 	});
 
 	assert.equal(result.content?.considered, 0);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
 });
 
 test("collectStream: nonzero results report the number enumerated", async () => {
@@ -1531,8 +1554,9 @@ test("collectAllStreams: a Reddit listing beyond MAX_PAGES is partial and does n
 	assert.equal(pagesFetched, 100, "the safety ceiling still bounds the walk");
 });
 
-test("collectStream: a capped full-inventory walk reports the deferred tail without STATE", async () => {
+test("collectStream: a capped full-inventory walk reports a stream failure without STATE and keeps the records it read", async () => {
 	const harness = makeRecordingEmit(validateRecord);
+	const failures: Array<{ message: string; stream: string }> = [];
 	const fetch: RedditListingFetch = (() => {
 		let pagesFetched = 0;
 		return () => {
@@ -1563,16 +1587,66 @@ test("collectStream: a capped full-inventory walk reports the deferred tail with
 		progress: async () => undefined,
 		capture: null,
 		delay: NO_DELAY,
+		reportStreamFailure: async (failedStream, message) => {
+			failures.push({ message, stream: failedStream });
+		},
 	});
 
 	assert.equal(result.content?.considered, 100);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
-	assert.ok(
-		harness.protocolMessages.some(
-			(m) => m.type === "SKIP_RESULT" && m.stream === "submitted",
-		),
-		"a capped walk must announce the deferred pages",
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	assert.equal(
+		harness.emitted.length,
+		100,
+		"records already read stay offered",
+	);
+	assert.deepEqual(
+		failures.map((f) => f.stream),
+		["submitted"],
+		"a capped walk must be reported as a stream failure",
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+test("collectStream: a capped walk with no runtime failure reporter throws instead of succeeding", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let pagesFetched = 0;
+	const fetch: RedditListingFetch = () => {
+		pagesFetched += 1;
+		return Promise.resolve(
+			okResult(
+				listing(
+					[makePost(`t3_cap${pagesFetched}`, 100_000 - pagesFetched)],
+					`after-${pagesFetched}`,
+				),
+			),
+		);
+	};
+	const stream = buildStreamTable(USER_PATH, EMITTED_AT).find(
+		(s) => s.name === "submitted",
+	);
+	assert.ok(stream);
+	await assert.rejects(
+		collectStream({
+			stream,
+			fetchPath: fetch,
+			state: {},
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: async () => undefined,
+			capture: null,
+			delay: NO_DELAY,
+		}),
+		/reddit_page_limit_unreported/,
 	);
 });
 
@@ -1588,8 +1662,14 @@ test("collectAllStreams: an exhausted Reddit listing emits no checkpoint or self
 	);
 
 	assert.equal(harness.emitted.length, 1);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
 		false,
@@ -1634,7 +1714,10 @@ test("collectStream: schema-invalid item is left to runtime validation", async (
 		2,
 		"considered: both enumerated items (weighed)",
 	);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
 	assert.equal(harness.emitted.length, 1, "runtime receives only valid record");
 	assert.equal(
 		harness.skipped.length,
@@ -1716,8 +1799,14 @@ for (const stream of buildStreamTable(USER_PATH, EMITTED_AT)) {
 			0,
 			`${stream.name}: verified empty emits no records`,
 		);
-		assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
-		assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+		assert.equal(
+			harness.protocolMessages.some((m) => m.type === "STATE"),
+			false,
+		);
+		assert.equal(
+			harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+			false,
+		);
 	});
 }
 
@@ -1767,8 +1856,14 @@ test("collectAllStreams: empty inventory emits no self-naming coverage claim", a
 		createMockBrowserContext(fetch, harness, ["submitted"]),
 	);
 
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
 });
 
 test("collectAllStreams: invalid inventory item produces a runtime skip, not connector coverage", async () => {
@@ -1795,8 +1890,14 @@ test("collectAllStreams: invalid inventory item produces a runtime skip, not con
 		createMockBrowserContext(fetch, harness, ["comments"]),
 	);
 
-	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"), false);
-	assert.equal(harness.protocolMessages.some((m) => m.type === "STATE"), false);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+	);
 	assert.equal(harness.emitted.length, 1, "runtime emits only valid record");
 	assert.equal(
 		harness.skipped.length,

@@ -146,6 +146,8 @@ interface RunOptions {
 
 interface RunResult {
 	error: Error | null;
+	/** Stream failures reported through the runtime's reportStreamFailure. */
+	failures: Array<{ message: string; retryable: boolean; stream: string }>;
 	messages: EmittedMessage[];
 	/** State the runtime would hold for the next run. */
 	nextState: PersistedState;
@@ -153,6 +155,7 @@ interface RunResult {
 
 async function run(fake: FakeReddit, opts: RunOptions): Promise<RunResult> {
 	const messages: EmittedMessage[] = [];
+	const failures: RunResult["failures"] = [];
 	const rawEmit = (m: EmittedMessage): Promise<void> => {
 		messages.push(m);
 		return Promise.resolve();
@@ -197,6 +200,18 @@ async function run(fake: FakeReddit, opts: RunOptions): Promise<RunResult> {
 		// biome-ignore lint/suspicious/noExplicitAny: only evaluate/goto/url are read
 		page: page as any,
 		progress: () => Promise.resolve(),
+		reportStreamFailure: (
+			stream: string,
+			message: string,
+			options?: { retryable?: boolean },
+		) => {
+			failures.push({
+				message,
+				retryable: options?.retryable === true,
+				stream,
+			});
+			return Promise.resolve();
+		},
 		requestDetailGapPage: () => Promise.resolve([]),
 		requested,
 		scope: { streams: [...requested.values()] },
@@ -218,7 +233,7 @@ async function run(fake: FakeReddit, opts: RunOptions): Promise<RunResult> {
 			}
 		}
 	}
-	return { error, messages, nextState };
+	return { error, failures, messages, nextState };
 }
 
 const records = (r: RunResult, stream: string) =>
@@ -386,7 +401,11 @@ test("unchanged source: later runs re-emit byte-identical records without checkp
 				`run ${round}: no undeclared self-coverage for ${s}`,
 			);
 		}
-		assert.deepEqual(r.nextState, state, "old opaque runtime state is preserved");
+		assert.deepEqual(
+			r.nextState,
+			state,
+			"old opaque runtime state is preserved",
+		);
 		state = r.nextState;
 	}
 });
@@ -479,7 +498,7 @@ test("submitted_stats: stats-only refresh reads below old cursor state and emits
 	);
 });
 
-test("stats walk past the page cap: emits partial evidence and no checkpoint or self-coverage", async () => {
+test("stats walk past the page cap: keeps partial evidence, reports a stream failure, and writes no checkpoint or self-coverage", async () => {
 	const fake = new FakeReddit();
 	fake.pageSize = 1;
 	fake.set(
@@ -494,15 +513,19 @@ test("stats walk past the page cap: emits partial evidence and no checkpoint or 
 	assert.equal(r.error, null);
 	assert.equal(fake.calls.length, 100, "bounded by the page ceiling");
 	assert.equal(ids(r, "submitted_stats").length, 100);
-	const skip = r.messages.find(
-		(m) => m.type === "SKIP_RESULT" && m.stream === "submitted_stats",
+	assert.deepEqual(
+		r.failures.map((f) => [f.stream, f.retryable]),
+		[["submitted_stats", false]],
+		"the capped output is reported as a stream failure, once",
 	);
-	assert.ok(skip && skip.type === "SKIP_RESULT");
-	assert.equal(skip.reason, "older_pages_deferred_page_budget");
+	assert.match(r.failures[0]?.message ?? "", /100-page limit/);
 	assert.deepEqual(streamsTouched(r), ["submitted_stats"]);
 	assert.deepEqual(r.nextState.submitted, priorState.submitted);
 	assert.equal(stateMsgs(r, "submitted_stats").length, 0);
-	assert.equal(r.messages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+	assert.equal(
+		r.messages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
 });
 
 // ─── 5. Scope isolation and A/B/A ───────────────────────────────────────
@@ -610,12 +633,27 @@ test("old creation state never limits a full-inventory content refresh", async (
 	const oldState = { submitted: { last_created_utc: LEGACY_T } };
 	const r1 = await run(fake, { requested: ["submitted"], state: oldState });
 	assert.deepEqual(ids(r1, "submitted").sort(), ["t3_s1", "t3_s2", "t3_s3"]);
-	assert.deepEqual(r1.nextState, oldState, "opaque old state is left untouched");
+	assert.deepEqual(
+		r1.nextState,
+		oldState,
+		"opaque old state is left untouched",
+	);
 	assert.equal(stateMsgs(r1, "submitted").length, 0);
-	assert.equal(r1.messages.some((m) => m.type === "DETAIL_COVERAGE"), false);
-	fake.lists.submitted = [post("t3_s4", T0 + 400), ...(fake.lists.submitted ?? [])];
+	assert.equal(
+		r1.messages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	fake.lists.submitted = [
+		post("t3_s4", T0 + 400),
+		...(fake.lists.submitted ?? []),
+	];
 	const r2 = await run(fake, { requested: ["submitted"], state: r1.nextState });
-	assert.deepEqual(ids(r2, "submitted").sort(), ["t3_s1", "t3_s2", "t3_s3", "t3_s4"]);
+	assert.deepEqual(ids(r2, "submitted").sort(), [
+		"t3_s1",
+		"t3_s2",
+		"t3_s3",
+		"t3_s4",
+	]);
 });
 
 test("a host-rejected legacy observation is attempted again on the next full-inventory run", async () => {
@@ -638,31 +676,54 @@ test("a host-rejected legacy observation is attempted again on the next full-inv
 	assert.deepEqual(first.nextState, oldState);
 	assert.equal(stateMsgs(first, "submitted").length, 0);
 
-	const later = await run(fake, { requested: ["submitted"], state: first.nextState });
+	const later = await run(fake, {
+		requested: ["submitted"],
+		state: first.nextState,
+	});
 	assert.ok(ids(later, "submitted").includes(rejectedKey));
 });
 
 test("old opaque state shapes do not block full inventory and are not rewritten", async () => {
-	const shapes: unknown[] = [null, {}, [], "junk", { last_created_utc: "x" }, { fingerprints: { t3_s1: 7 } }];
-	for (const shape of shapes) {
-		const fake = legacyListing();
-		const oldState = { submitted: shape, submitted_stats: shape };
-		const r = await run(fake, {
-			requested: ["submitted", "submitted_stats"],
-			state: oldState,
-		});
-		assert.equal(r.error, null, JSON.stringify(shape));
-		assert.deepEqual(ids(r, "submitted").sort(), ["t3_s1", "t3_s2", "t3_s3"]);
-		assert.deepEqual(ids(r, "submitted_stats").sort(), ["t3_s1", "t3_s2", "t3_s3"]);
-		assert.deepEqual(r.nextState, oldState);
-	}
+	const shapes: unknown[] = [
+		null,
+		{},
+		[],
+		"junk",
+		{ last_created_utc: "x" },
+		{ fingerprints: { t3_s1: 7 } },
+	];
+	// Each shape runs against its own fake listing, so the runs are independent.
+	await Promise.all(
+		shapes.map(async (shape) => {
+			const fake = legacyListing();
+			const oldState = { submitted: shape, submitted_stats: shape };
+			const r = await run(fake, {
+				requested: ["submitted", "submitted_stats"],
+				state: oldState,
+			});
+			assert.equal(r.error, null, JSON.stringify(shape));
+			assert.deepEqual(ids(r, "submitted").sort(), ["t3_s1", "t3_s2", "t3_s3"]);
+			assert.deepEqual(ids(r, "submitted_stats").sort(), [
+				"t3_s1",
+				"t3_s2",
+				"t3_s3",
+			]);
+			assert.deepEqual(r.nextState, oldState);
+		}),
+	);
 });
 
-test("page-cap runs emit partial evidence for each requested output and never checkpoint it", async () => {
+test("page-cap runs keep partial evidence and report a failure for each requested output, never checkpointing", async () => {
 	const fake = new FakeReddit();
 	fake.pageSize = 1;
-	fake.set("submitted", Array.from({ length: 105 }, (_, i) => post(`t3_s${i + 1}`, T0 + 5000 - i)));
-	const oldState = { submitted: { legacy: "opaque" }, submitted_stats: { old: true } };
+	fake.set(
+		"submitted",
+		Array.from({ length: 105 }, (_, i) => post(`t3_s${i + 1}`, T0 + 5000 - i)),
+	);
+	const oldState = {
+		submitted: { legacy: "opaque" },
+		submitted_stats: { old: true },
+	};
 	const result = await run(fake, {
 		requested: ["submitted", "submitted_stats"],
 		state: oldState,
@@ -670,11 +731,24 @@ test("page-cap runs emit partial evidence for each requested output and never ch
 	assert.equal(ids(result, "submitted").length, 100);
 	assert.equal(ids(result, "submitted_stats").length, 100);
 	assert.deepEqual(
-		result.messages.flatMap((m) => m.type === "SKIP_RESULT" ? [m.stream] : []),
+		result.failures.map((f) => f.stream),
 		["submitted", "submitted_stats"],
+		"each requested capped output is reported",
 	);
-	assert.equal(stateMsgs(result, "submitted").length + stateMsgs(result, "submitted_stats").length, 0);
-	assert.equal(result.messages.some((m) => m.type === "DETAIL_COVERAGE"), false);
+	assert.equal(
+		result.messages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+		"the legacy deferred-page SKIP is gone",
+	);
+	assert.equal(
+		stateMsgs(result, "submitted").length +
+			stateMsgs(result, "submitted_stats").length,
+		0,
+	);
+	assert.equal(
+		result.messages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
 	assert.deepEqual(result.nextState, oldState);
 });
 
@@ -694,8 +768,14 @@ test("schema-rejected records produce runtime skips without connector coverage c
 		(m) => m.type === "SKIP_RESULT" && m.reason === "shape_check_failed",
 	);
 	assert.equal(skips.length >= 2, true, "runtime still reports the rejection");
-	assert.equal(r1.messages.some((m) => m.type === "DETAIL_COVERAGE"), false);
-	assert.equal(r1.messages.some((m) => m.type === "STATE"), false);
+	assert.equal(
+		r1.messages.some((m) => m.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	assert.equal(
+		r1.messages.some((m) => m.type === "STATE"),
+		false,
+	);
 });
 
 test("no per-record cache or connector checkpoint is persisted", async () => {
@@ -706,7 +786,10 @@ test("no per-record cache or connector checkpoint is persisted", async () => {
 	fake.set("saved", [post("t3_sv1", T0 + 20)]);
 	const r = await run(fake, { requested: ALL_STREAMS });
 	assert.deepEqual(r.nextState, {});
-	assert.equal(r.messages.some((m) => m.type === "STATE"), false);
+	assert.equal(
+		r.messages.some((m) => m.type === "STATE"),
+		false,
+	);
 });
 
 test("resource-filtered runs emit only the selected record and leave nothing that hides the rest from a later unscoped run", async () => {
@@ -754,11 +837,19 @@ test("a malformed listed item remains a runtime skip on later full-inventory run
 	]);
 	const legacy = { submitted: { last_created_utc: LEGACY_T } };
 	const r1 = await run(fake, { requested: ["submitted"], state: legacy });
-	assert.ok(r1.messages.some((m) => m.type === "SKIP_RESULT" && m.stream === "submitted"));
+	assert.ok(
+		r1.messages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "submitted",
+		),
+	);
 	fake.calls.length = 0;
 	const r2 = await run(fake, { requested: ["submitted"], state: r1.nextState });
 	assert.deepEqual(ids(r2, "submitted"), ["t3_s2"]);
-	assert.ok(r2.messages.some((m) => m.type === "SKIP_RESULT" && m.stream === "submitted"));
+	assert.ok(
+		r2.messages.some(
+			(m) => m.type === "SKIP_RESULT" && m.stream === "submitted",
+		),
+	);
 });
 
 test("resource-scoped runs do not hide other listed rows from later runs", async () => {
@@ -831,7 +922,11 @@ test("content emitted before a failed later listing is re-emitted by the next ru
 	});
 	assert.ok(failed.error);
 	assert.equal(ids(failed, "submitted").length, 3, "repair rows were stored");
-	assert.deepEqual(failed.nextState, legacy, "opaque old state remains untouched");
+	assert.deepEqual(
+		failed.nextState,
+		legacy,
+		"opaque old state remains untouched",
+	);
 	fake.failOn = null;
 	const later = await run(fake, {
 		requested: ["submitted", "comments"],
@@ -880,25 +975,28 @@ test("incremental and full_refresh both refresh every currently listed record", 
 // ─── 9. Identity, source time, schema, manifest ─────────────────────────
 
 test("stats records share the parent's fullname key and carry only source values", async () => {
-	for (const g of GROUPS) {
-		const fake = fakeFor(g);
-		const r = await run(fake, { requested: [g.entity, g.stats] });
-		assert.deepEqual(ids(r, g.stats).sort(), ids(r, g.entity).sort());
-		for (const d of records(r, g.stats)) {
-			assert.deepEqual(
-				Object.keys(d).sort(),
-				["created_utc", "id", ...g.statsKeys].sort(),
-				`${g.stats} keys`,
-			);
-			assert.match(String(d.id), /^t[13]_[a-z0-9]+$/u);
-			assert.match(String(d.created_utc), /^\d{4}-\d{2}-\d{2}T.*\.\d{3}Z$/u);
-			assert.equal(
-				String(d.created_utc).startsWith("2023-"),
-				true,
-				"created_utc is the source creation time, not the run clock",
-			);
-		}
-	}
+	// Each group runs against its own fake listing, so the runs are independent.
+	await Promise.all(
+		GROUPS.map(async (g) => {
+			const fake = fakeFor(g);
+			const r = await run(fake, { requested: [g.entity, g.stats] });
+			assert.deepEqual(ids(r, g.stats).sort(), ids(r, g.entity).sort());
+			for (const d of records(r, g.stats)) {
+				assert.deepEqual(
+					Object.keys(d).sort(),
+					["created_utc", "id", ...g.statsKeys].sort(),
+					`${g.stats} keys`,
+				);
+				assert.match(String(d.id), /^t[13]_[a-z0-9]+$/u);
+				assert.match(String(d.created_utc), /^\d{4}-\d{2}-\d{2}T.*\.\d{3}Z$/u);
+				assert.equal(
+					String(d.created_utc).startsWith("2023-"),
+					true,
+					"created_utc is the source creation time, not the run clock",
+				);
+			}
+		}),
+	);
 });
 
 test("no record on any stream carries a collection clock", async () => {

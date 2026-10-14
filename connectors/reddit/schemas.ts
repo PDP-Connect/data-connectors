@@ -161,3 +161,14 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);
+
+/** Every top-level field each output's full record carries, by output name.
+ *  Derived from the same schemas that validate emitted records. */
+export const OUTPUT_FIELDS: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+	Object.entries(SCHEMAS).map(([name, schema]) => {
+		if (!(schema instanceof z.ZodObject)) {
+			throw new Error(`reddit schema for ${name} is not an object schema`);
+		}
+		return [name, new Set(Object.keys(schema.shape))];
+	}),
+);
