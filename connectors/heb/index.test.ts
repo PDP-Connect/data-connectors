@@ -314,51 +314,54 @@ async function collectSyntheticHeb(input: {
 
 test("collect: identical synthetic provider bodies map to identical RECORD data across collection clocks", async () => {
 	const clocks = ["2026-08-20T12:00:00.000Z", "2026-09-21T12:00:00.000Z"];
-	for (const streams of [["order_items"], ["orders", "order_items"]]) {
-		const [firstClock, secondClock] = clocks;
-		assert.ok(firstClock && secondClock);
-		const first = await collectSyntheticHeb({
-			body: SYNTHETIC_ORDER,
-			emittedAt: firstClock,
-			state: {},
-			streams,
-		});
-		const second = await collectSyntheticHeb({
-			body: SYNTHETIC_ORDER,
-			emittedAt: secondClock,
-			state: {},
-			streams,
-		});
-		const firstRecords = first.emitted.filter((record) =>
-			streams.includes(record.stream),
-		);
-		const secondRecords = second.emitted.filter((record) =>
-			streams.includes(record.stream),
-		);
-		const expectedStreams = streams.includes("orders")
-			? ["orders", "order_items"]
-			: ["order_items"];
-		assert.deepEqual(
-			firstRecords.map((record) => record.stream),
-			expectedStreams,
-			"the first mapping run emits every selected stream record",
-		);
-		assert.deepEqual(
-			secondRecords.map((record) => record.stream),
-			expectedStreams,
-			"independent empty state keeps the second mapping run complete",
-		);
-		assert.deepEqual(
-			firstRecords.map((record) => record.data),
-			secondRecords.map((record) => record.data),
-			"raw RECORD data must not depend on the collection clock",
-		);
-		assert.deepEqual(
-			firstRecords.map((record) => record.data.id),
-			secondRecords.map((record) => record.data.id),
-			"matching cardinality and keys prove no record was suppressed",
-		);
-	}
+	const [firstClock, secondClock] = clocks;
+	assert.ok(firstClock && secondClock);
+	// Each stream set launches its own browser and shares no state, so the sets run concurrently.
+	await Promise.all(
+		[["order_items"], ["orders", "order_items"]].map(async (streams) => {
+			const first = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: firstClock,
+				state: {},
+				streams,
+			});
+			const second = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: secondClock,
+				state: {},
+				streams,
+			});
+			const firstRecords = first.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const secondRecords = second.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const expectedStreams = streams.includes("orders")
+				? ["orders", "order_items"]
+				: ["order_items"];
+			assert.deepEqual(
+				firstRecords.map((record) => record.stream),
+				expectedStreams,
+				"the first mapping run emits every selected stream record",
+			);
+			assert.deepEqual(
+				secondRecords.map((record) => record.stream),
+				expectedStreams,
+				"independent empty state keeps the second mapping run complete",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data),
+				secondRecords.map((record) => record.data),
+				"raw RECORD data must not depend on the collection clock",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data.id),
+				secondRecords.map((record) => record.data.id),
+				"matching cardinality and keys prove no record was suppressed",
+			);
+		}),
+	);
 });
 
 test("collect: state-seeded repeat keeps all selected records and exposes business changes", async () => {
