@@ -1516,7 +1516,7 @@ async function emitChatGptCollectionRateOnChange(
 	if (!rate || rate.current_interval_ms === lastEmittedIntervalMs) {
 		return lastEmittedIntervalMs;
 	}
-	console.debug("[chatgpt-debug] collection rate", rate);
+	console.error("[chatgpt-debug] collection rate", rate);
 	return rate.current_interval_ms;
 }
 
@@ -3443,7 +3443,7 @@ function logConversationListPageShape(
 	const shapes = [...shapeCounts]
 		.map(([fields, count]) => `${fields}:${count}`)
 		.join(",");
-	console.info(
+	console.error(
 		`[chatgpt-list-shape] page=${page} items=${items.length} dateFields=${[...allDateFields].sort().join(",") || "none"} itemShapes=${shapes} order=${order}`,
 	);
 }
@@ -3600,7 +3600,7 @@ async function listConversationsSinceCursor(
 		await Promise.all(heldSkips.map((message) => deps.emit(message)));
 		return reread ?? listed;
 	}
-	console.info(
+	console.error(
 		`[chatgpt-list-prefetch] ${discardReason} during the prefetched walk; walking again in order`,
 	);
 	return walkConversationSearch(
