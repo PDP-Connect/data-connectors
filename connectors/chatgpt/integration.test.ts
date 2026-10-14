@@ -6916,7 +6916,7 @@ test("runConversationsAndMessagesStreams: with an older saved watermark, repeate
 		await runConversationsAndMessagesStreams(makeDeps(harness), {
 			conversations: cursor,
 		} as CollectContext["state"]);
-		for (const record of harness.emitted) emittedIds.add(record.data.id);
+		for (const record of harness.emitted) emittedIds.add(String(record.data.id));
 		const state = harness.protocolMessages.filter(
 			(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
 				m.type === "STATE",
