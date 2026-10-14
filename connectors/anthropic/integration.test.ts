@@ -556,7 +556,7 @@ test("collectAnthropic: time window filters conversations and messages but retai
 	);
 });
 
-test("collectAnthropic: excluded oversized source is never spooled; selected oversized source is left out with its messages in a PROGRESS note; no stream is skipped", async () => {
+test("collectAnthropic: excluded oversized source is never spooled; selected oversized source keeps its typed records with a stand-in blob, a PROGRESS note and a DETAIL_GAP; no stream is skipped", async () => {
 	const hugeConversation = {
 		uuid: "conv-huge",
 		name: "Excluded source",
@@ -614,32 +614,56 @@ test("collectAnthropic: excluded oversized source is never spooled; selected ove
 		["account_profile", "conversations", "messages", "projects"],
 	);
 	await collectAnthropic(selected.ctx);
-	// The oversized conversation and its messages are left out; every other
-	// record is still imported.
+	// The oversized conversation keeps its typed record and its messages;
+	// only its raw envelope is left out.
 	assert.deepEqual(
 		selected.emitted
 			.filter((r) => r.stream === "conversations")
-			.map((r) => r.data.id),
-		["conv-1"],
+			.map((r) => r.data.id)
+			.sort(),
+		["conv-1", "conv-huge"],
 	);
-	assert.ok(
+	assert.deepEqual(
 		selected.emitted
 			.filter((r) => r.stream === "messages")
-			.every((r) => r.data.conversation_id === "conv-1"),
+			.map((r) => r.data.conversation_id)
+			.sort(),
+		["conv-1", "conv-huge"],
 	);
 	assert.equal(
 		selected.emitted.filter((r) => r.stream === "projects").length,
 		1,
 	);
-	assert.equal(
-		selected.protocolMessages.filter((message) => message.type === "BLOB")
-			.length,
-		2,
+	// conv-1, conv-huge (stand-in) and proj-1 each get one blob.
+	const blobs = selected.protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "BLOB" }> =>
+			message.type === "BLOB",
 	);
+	assert.equal(blobs.length, 3);
 	assert.equal(
 		readdirSync(blobSpoolDir).filter((file) => !beforeSelected.has(file))
 			.length,
-		2,
+		3,
+	);
+	const standIn = blobs.find((blob) => blob.key === "conv-huge");
+	assert.ok(standIn);
+	assert.ok(standIn.size_bytes < 1024, "the stand-in blob is small");
+	assert.deepEqual(
+		JSON.parse(readFileSync(join(blobSpoolDir, standIn.file), "utf8")).payload,
+		{
+			source_omitted: {
+				reason: "exceeds_host_blob_limit",
+				max_bytes: 33_554_432,
+			},
+		},
+	);
+	assert.deepEqual(
+		gapsOf(selected.protocolMessages).map((g) => [
+			g.stream,
+			g.record_key,
+			g.retryable,
+		]),
+		[["conversations", "conv-huge", true]],
 	);
 	// An oversized item never reaches the host, so no stream is skipped:
 	// a SKIP_RESULT would make Desktop drop all conversations.
@@ -647,14 +671,14 @@ test("collectAnthropic: excluded oversized source is never spooled; selected ove
 	const notes = selected.protocolMessages.filter(
 		(m) =>
 			m.type === "PROGRESS" &&
-			/too large to import/.test((m as { message: string }).message),
+			/too large to keep a raw copy/.test((m as { message: string }).message),
 	) as Array<{ message: string; stream?: string; count?: number }>;
 	assert.equal(notes.length, 1);
 	assert.equal(notes[0]?.stream, "conversations");
 	assert.equal(notes[0]?.count, 1);
 	assert.equal(
 		notes[0]?.message,
-		"1 item of conversations in the export was too large to import and was skipped",
+		"1 item of conversations in the export was too large to keep a raw copy of; the record was imported without it",
 	);
 	assert.doesNotMatch(notes[0]?.message ?? "", /conv-huge|Excluded source/);
 	assert.ok(
@@ -4109,3 +4133,231 @@ for (const mode of ["buffered", "chunks"] as const) {
 		);
 	});
 }
+
+// ─── Collection completeness: large parents and independent projects ─────
+
+const HUGE_TEXT = "x".repeat(33_554_432);
+
+function gapsOf(messages: EmittedMessage[]) {
+	return messages.filter(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_GAP" }> =>
+			m.type === "DETAIL_GAP",
+	);
+}
+
+async function runOldFormat(
+	files: { name: string; content: unknown }[],
+	options: {
+		streams?: string[];
+		streaming?: boolean;
+		entriesValidated?: boolean;
+	} = {},
+) {
+	const bytes = await buildManifestPartZip(files);
+	const context = makeContext({
+		streams: options.streams ?? ALL_EXPORT_STREAMS,
+		fetchStub: oldFormatFetchStub({ exportRequests: 0 }),
+	});
+	serveDownload(context.page, bytes);
+	const texts = new Map(
+		files.map((file) => [file.name, JSON.stringify(file.content)]),
+	);
+	await collectAnthropic({
+		...context.ctx,
+		...(options.streaming
+			? {
+					readZipEntryChunk: (name: string, offset: number, length: number) =>
+						Promise.resolve(
+							texts.get(name)?.slice(offset, offset + length) ?? "",
+						),
+					entriesValidated: options.entriesValidated ?? true,
+				}
+			: {}),
+	});
+	return context;
+}
+
+for (const streaming of [false, true]) {
+	const mode = streaming ? "streaming" : "buffered";
+	test(`collectAnthropic: ${mode} oversized conversation keeps the parent and its messages and reports an explicit gap`, async () => {
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						{
+							uuid: "conv-huge",
+							name: "Huge",
+							created_at: "2026-01-01T00:00:00.000Z",
+							chat_messages: [
+								{
+									uuid: "msg-huge-1",
+									sender: "human",
+									created_at: "2026-01-01T00:00:00.000Z",
+									text: HUGE_TEXT,
+								},
+								{
+									uuid: "msg-huge-2",
+									sender: "assistant",
+									created_at: "2026-01-01T00:00:01.000Z",
+									text: "short reply",
+								},
+							],
+						},
+						CONVERSATIONS_JSON[0],
+					],
+				},
+			],
+			{
+				streams: ["conversations", "messages"],
+				streaming,
+			},
+		);
+		assert.deepEqual(
+			emitted
+				.filter((r) => r.stream === "conversations")
+				.map((r) => r.data.id)
+				.sort(),
+			["conv-1", "conv-huge"],
+		);
+		assert.deepEqual(
+			emitted
+				.filter(
+					(r) =>
+						r.stream === "messages" && r.data.conversation_id === "conv-huge",
+				)
+				.map((r) => r.data.id)
+				.sort(),
+			["msg-huge-1", "msg-huge-2"],
+		);
+		assert.deepEqual(
+			gapsOf(protocolMessages).map((g) => [g.stream, g.record_key]),
+			[["conversations", "conv-huge"]],
+		);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+		assert.equal(
+			protocolMessages.filter((m) => m.type === "DETAIL_COVERAGE").length,
+			0,
+			"an incomplete source must not be reported as a full scan",
+		);
+	});
+}
+
+test("collectAnthropic: oversized project keeps the project and its documents and reports an explicit gap", async () => {
+	const { emitted, protocolMessages } = await runOldFormat(
+		[
+			{ name: "conversations.json", content: CONVERSATIONS_JSON },
+			{
+				name: "projects/proj-huge.json",
+				content: {
+					uuid: "proj-huge",
+					name: "Huge project",
+					created_at: "2026-01-01T00:00:00.000Z",
+					docs: [
+						{ uuid: "doc-huge", filename: "big.md", content: HUGE_TEXT },
+						{ uuid: "doc-small", filename: "small.md", content: "ok" },
+					],
+				},
+			},
+		],
+		{ streams: ["projects", "project_documents"] },
+	);
+	assert.deepEqual(
+		emitted.filter((r) => r.stream === "projects").map((r) => r.data.id),
+		["proj-huge"],
+	);
+	assert.deepEqual(
+		emitted
+			.filter((r) => r.stream === "project_documents")
+			.map((r) => r.data.id)
+			.sort(),
+		["doc-huge", "doc-small"],
+	);
+	assert.deepEqual(
+		gapsOf(protocolMessages).map((g) => [g.stream, g.record_key]),
+		[["projects", "proj-huge"]],
+	);
+	assert.deepEqual(skipsOf(protocolMessages), []);
+});
+
+for (const streaming of [false, true]) {
+	for (const [label, conversations] of [
+		["missing", undefined],
+		["not an array", { not: "an array" }],
+	] as const) {
+		test(`collectAnthropic: ${streaming ? "streaming" : "buffered"} projects are collected when conversations.json is ${label}`, async () => {
+			const { emitted, protocolMessages } = await runOldFormat(
+				[
+					...(conversations === undefined
+						? []
+						: [{ name: "conversations.json", content: conversations }]),
+					{ name: "projects/proj-1.json", content: PROJECT_JSON },
+				],
+				{ streaming, entriesValidated: false },
+			);
+			assert.deepEqual(
+				emitted.filter((r) => r.stream === "projects").map((r) => r.data.id),
+				["proj-1"],
+			);
+			assert.deepEqual(
+				emitted
+					.filter((r) => r.stream === "project_documents")
+					.map((r) => r.data.id),
+				["doc-1"],
+			);
+			assert.equal(
+				emitted.filter((r) => r.stream === "conversations").length,
+				0,
+			);
+			const skips = skipsOf(protocolMessages);
+			assert.deepEqual(skips.map((s) => s.stream).sort(), [
+				"conversations",
+				"messages",
+			]);
+			assert.ok(
+				skips.every((s) => s.reason === "export_conversations_missing"),
+			);
+			assertNoSyncedAt(protocolMessages, ["conversations", "messages"]);
+			const projectState = statesOf(protocolMessages).findLast(
+				(m) => m.stream === "projects",
+			);
+			assert.ok(
+				(projectState?.cursor as Record<string, unknown> | undefined)
+					?.synced_at,
+				"projects checkpoint normally",
+			);
+		});
+	}
+}
+
+test("collectAnthropic: organization selection prefers chat, then claude_pro, then the first organization", async () => {
+	const requestedOrgs: string[] = [];
+	const run = async (orgs: unknown[]) => {
+		const context = makeContext({
+			streams: ["conversations"],
+			fetchStub: (url) => {
+				if (url.includes("/api/organizations") && !url.includes("export_data"))
+					return Promise.resolve(jsonResponse(200, orgs));
+				if (url.includes("/export_data")) {
+					requestedOrgs.push(
+						url.split("/organizations/")[1]?.split("/")[0] ?? "",
+					);
+					return Promise.resolve(jsonResponse(200, { nonce: "nonce-org" }));
+				}
+				return Promise.reject(new Error(`unexpected fetch: ${url}`));
+			},
+		});
+		serveDownload(context.page, await buildZipBytes());
+		await collectAnthropic(context.ctx);
+	};
+	await run([
+		{ uuid: "org-api", capabilities: ["api"] },
+		{ uuid: "org-max", capabilities: ["claude_max"] },
+		{ uuid: "org-pro", capabilities: ["claude_pro"] },
+	]);
+	await run([
+		{ uuid: "org-api", capabilities: ["api"] },
+		{ uuid: "org-max", capabilities: ["claude_max"] },
+	]);
+	assert.deepEqual(requestedOrgs, ["org-pro", "org-api"]);
+});
