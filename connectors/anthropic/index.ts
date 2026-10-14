@@ -1156,7 +1156,9 @@ function archiveEntriesMatch(
 			fd,
 			statSync(zipPath).size,
 			EXPORT_ZIP_POLICY,
-			{ requireCompleteCentralDirectory: true },
+			{
+				requireCompleteCentralDirectory: true,
+			},
 		);
 		return entries.length > 0 && entries.every((entry) => known(entry.name));
 	} finally {
@@ -1212,7 +1214,9 @@ async function emitLayoutUnrecognizedSkip(
 	});
 	await progress(
 		"The Claude export did not contain conversations or projects in a format we recognize",
-		{ stream: CONVERSATIONS_STREAM },
+		{
+			stream: CONVERSATIONS_STREAM,
+		},
 	);
 	for (const stream of ALL_STREAMS) {
 		if (!requested.has(stream)) {
@@ -2609,18 +2613,26 @@ export async function collectAnthropic({
 			return;
 		}
 
-		// Each category numbers its own parts from 0; a missing prefix, gap or
-		// repeated index in any category leaves that category unproven.
+		// Only accept present, contiguous category-local parts starting at 0.
+		// The real part-numbering contract is not captured in our fixtures;
+		// other numbering schemes fail closed. No zero-part boundary exists.
+		const categoryBoundary = (category: string) => {
+			const parts = dataFiles
+				.filter((part) => part.category === category)
+				.map((part) => part.part)
+				.sort((a, b) => a - b);
+			return parts.length > 0 && parts.every((part, index) => part === index);
+		};
+		const conversationsManifestBoundary = categoryBoundary("conversations");
+		const projectsManifestBoundary = categoryBoundary("projects");
 		const partitionsContiguous = [
 			"conversations",
 			"projects",
 			"light_metadata",
-		].every((category) =>
-			dataFiles
-				.filter((part) => part.category === category)
-				.map((part) => part.part)
-				.sort((a, b) => a - b)
-				.every((part, index) => part === index),
+		].every(
+			(category) =>
+				!dataFiles.some((part) => part.category === category) ||
+				categoryBoundary(category),
 		);
 		archiveComplete = completeMessages =
 			manifest.version === "1.0" &&
@@ -2639,6 +2651,9 @@ export async function collectAnthropic({
 			new Set(dataFiles.map((part) => part.filename)).size ===
 				dataFiles.length &&
 			partitionsContiguous &&
+			// Missing metadata is as incomplete as a partial metadata partition:
+			// conservatively withhold archive-wide proof, but keep record delivery.
+			categoryBoundary("light_metadata") &&
 			results.every(
 				(result) =>
 					result.completeJsonBoundary === true &&
@@ -2646,6 +2661,9 @@ export async function collectAnthropic({
 						result.category,
 					),
 			);
+		completeMessages &&= conversationsManifestBoundary;
+		conversationsExact &&= conversationsManifestBoundary;
+		projectsExact &&= projectsManifestBoundary;
 		const rawConversations: unknown[] = [];
 		const rawProjects: unknown[] = [];
 		const rawUserProfiles: unknown[] = [];
@@ -2683,6 +2701,24 @@ export async function collectAnthropic({
 				classified.emptyEntryNames.length > 0
 			) {
 				projectsExplicitEmpty = true;
+			}
+			// Cross-classified records still reach the sink, but cannot enlarge
+			// another category's measured boundary or prove an empty stream.
+			if (result.category === "conversations") {
+				for (const raw of classified.conversations) {
+					accountRawConversation(raw);
+				}
+			} else if (classified.conversations.length > 0) {
+				conversationsExact = false;
+				completeMessages = false;
+			}
+			if (result.category === "projects") {
+				for (const raw of classified.projects) {
+					accountRawProject(raw);
+				}
+			} else if (classified.projects.length > 0) {
+				projectsExact = false;
+				documentsExact = false;
 			}
 			rawConversations.push(...classified.conversations);
 			rawProjects.push(...classified.projects);
@@ -2742,7 +2778,9 @@ export async function collectAnthropic({
 			});
 			await progress(
 				"Part of the Claude export is not supported yet and was skipped",
-				{ stream: CONVERSATIONS_STREAM },
+				{
+					stream: CONVERSATIONS_STREAM,
+				},
 			);
 		}
 
@@ -2753,7 +2791,9 @@ export async function collectAnthropic({
 			});
 			await progress(
 				`${unclassified.length} export item(s) were not recognized and were skipped`,
-				{ stream: CONVERSATIONS_STREAM },
+				{
+					stream: CONVERSATIONS_STREAM,
+				},
 			);
 		}
 
@@ -2777,13 +2817,8 @@ export async function collectAnthropic({
 		if (unclassified.length > 0 || outOfScopeByCategory.size > 0) {
 			archiveComplete = false;
 		}
-		conversationsBoundary = conversationsSourceFound;
-		for (const raw of rawConversations) {
-			accountRawConversation(raw);
-		}
-		for (const raw of rawProjects) {
-			accountRawProject(raw);
-		}
+		conversationsBoundary =
+			conversationsManifestBoundary && conversationsSourceFound;
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
 		await emitParsed(
 			parsed,
