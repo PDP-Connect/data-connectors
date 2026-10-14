@@ -2209,7 +2209,7 @@ test("scenario-verify: under namespace isolation, a fixture connector's spawned 
 
 // ─── FIX B: private evidence workspace wired into scenario-record ─────────
 
-test("scenario-record: no pdpp-scenario-* temp files remain in os.tmpdir() after a successful run, and the scenario file is mode 0600", async () => {
+test("scenario-record leaves no pdpp-scenario-* files in its private temp directory and writes mode 0600", async () => {
 	const stubProvider = await startStubProvider();
 	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-workspace-test-"));
 	const recorderTmpDir = join(tmpDir, "recorder-tmp");

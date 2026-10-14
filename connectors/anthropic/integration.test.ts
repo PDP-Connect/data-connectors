@@ -1612,18 +1612,26 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 });
 
 function manifestFetchStub(
-	parts: Array<{ category: string; token: string }>,
+	parts: Array<{ category: string; token: string; part?: number }>,
 ): FetchStub {
+	// Synthetic default: category-local numbering matches the only scheme
+	// accepted for proof. Observed filenames do not prove raw part semantics.
+	const seen = new Map<string, number>();
 	const manifest = {
 		version: "1.0",
 		total_files: parts.length,
-		data_files: parts.map((p, i) => ({
-			batch_index: 0,
-			category: p.category,
-			part: i,
-			filename: `${p.category}-00${i}.zip`,
-			export_url: `https://claude.ai/export/org-1/download/${p.token}`,
-		})),
+		data_files: parts.map((p, i) => {
+			const next = seen.get(p.category) ?? 0;
+			seen.set(p.category, next + 1);
+			const part = p.part ?? next;
+			return {
+				batch_index: 0,
+				category: p.category,
+				part,
+				filename: `${p.category}-00${i}.zip`,
+				export_url: `https://claude.ai/export/org-1/download/${p.token}`,
+			};
+		}),
 	};
 	return (url) => {
 		if (url.includes("/api/organizations") && !url.includes("export_data")) {
@@ -2072,7 +2080,9 @@ test("collectAnthropic: an expired export_retry_not_before does not block POST e
 	const notBefore = new Date(Date.now() - 60_000).toISOString();
 	const { exportPosts, skip } = await runExportRefusal(
 		() => new Response("", { status: 500 }),
-		{ conversations: { export_retry_not_before: notBefore } },
+		{
+			conversations: { export_retry_not_before: notBefore },
+		},
 	);
 	assert.equal(exportPosts, 1);
 	assert.equal(skip.reason, "export_request_failed");
@@ -2481,3 +2491,1621 @@ test("collectAnthropic: a download failure that is not a spent link keeps the pe
 	assert.equal(emitted.length, 0);
 	assert.deepEqual(statesOf(protocolMessages), []);
 });
+
+test("collectAnthropic: completion evidence measures explicit empty messages", async () => {
+	const { protocolMessages } = await runManifest(
+		[
+			{
+				category: "conversations",
+				entries: [
+					{
+						name: "conversations.json",
+						content: [{ uuid: "conv-empty", chat_messages: [] }],
+					},
+				],
+			},
+			{
+				category: "light_metadata",
+				entries: [{ name: "users.json", content: [] }],
+			},
+		],
+		["messages"],
+	);
+	const proofs = protocolMessages.filter(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	assert.equal(proofs.length, 1);
+	assert.deepEqual(proofs[0], {
+		type: "DETAIL_COVERAGE",
+		stream: "messages",
+		state_stream: "messages",
+		reference_only: true,
+		required_keys: [],
+		hydrated_keys: [],
+		considered: 0,
+		covered: 0,
+	});
+});
+
+type CoverageEvent = Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> & {
+	considered: number;
+	covered: number;
+};
+
+async function runCompletionExport(
+	mode: "buffered" | "streaming" | "manifest",
+	conversations: unknown,
+	options: {
+		scope?: {
+			time_range?: { since?: string; until?: string };
+			resources?: readonly string[];
+			fields?: readonly string[];
+		};
+		recoveryOnly?: boolean;
+		detailGaps?: BrowserCollectContext["detailGaps"];
+		unknownEntry?: boolean;
+		unknownNonJson?: boolean;
+		wrongTotal?: boolean;
+		partGap?: boolean;
+		unknownPart?: boolean;
+		missingPart?: boolean;
+		pending?: boolean;
+	} = {},
+) {
+	const entries = [{ name: "conversations.json", content: conversations }];
+	if (options.unknownEntry) {
+		entries.push({ name: "future.json", content: [] });
+	}
+	if (options.unknownNonJson) {
+		entries.push({ name: "unknown.bin", content: [] });
+	}
+	const bytes = await buildManifestPartZip(entries);
+	const context = makeContext({
+		streams: ["conversations", "messages"],
+		fetchStub:
+			mode === "manifest"
+				? manifestFetchStub([
+						{ category: "conversations", token: "tok-c" },
+						{ category: "light_metadata", token: "tok-u" },
+						...(options.unknownPart
+							? [{ category: "future", token: "tok-f" }]
+							: []),
+						...(options.missingPart
+							? [{ category: "conversations", token: "tok-m" }]
+							: []),
+					])
+				: oldFormatFetchStub({ exportRequests: 0 }),
+	});
+	if (options.wrongTotal || options.partGap) {
+		const originalEvaluate = context.page.evaluate.bind(context.page);
+		context.page.evaluate = async (fn, arg) => {
+			const result = await originalEvaluate(fn, arg);
+			if (
+				typeof result === "object" &&
+				result !== null &&
+				"manifest" in result
+			) {
+				const { manifest } = result;
+				if (
+					typeof manifest === "object" &&
+					manifest !== null &&
+					"total_files" in manifest &&
+					"data_files" in manifest
+				) {
+					if (options.wrongTotal) {
+						manifest.total_files = 3;
+					}
+					if (options.partGap && Array.isArray(manifest.data_files)) {
+						const [part] = manifest.data_files;
+						if (typeof part === "object" && part !== null) {
+							part.part = 1;
+						}
+					}
+				}
+			}
+			return result;
+		};
+	}
+	context.ctx.requested.set("messages", {
+		name: "messages",
+		...options.scope,
+		...(options.scope?.resources
+			? { resources: [...options.scope.resources] }
+			: {}),
+		...(options.scope?.fields ? { fields: [...options.scope.fields] } : {}),
+	});
+	if (options.recoveryOnly !== undefined) {
+		context.ctx.recoveryOnly = options.recoveryOnly;
+	}
+	if (options.detailGaps) {
+		context.ctx.detailGaps = options.detailGaps;
+	}
+	const runtime = makeEmitRecord({
+		requested: context.ctx.requested,
+		emit: context.ctx.emit,
+		emittedAt: context.ctx.emittedAt,
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+	});
+	context.ctx.emitRecord = runtime.emit;
+	context.ctx.isRecordSelected = runtime.isSelected;
+	if (!options.pending) {
+		if (mode === "manifest") {
+			serveDownloads(
+				context.page,
+				new Map([
+					["tok-c", bytes],
+					["tok-f", bytes],
+					[
+						"tok-u",
+						await buildManifestPartZip([{ name: "users.json", content: [] }]),
+					],
+				]),
+			);
+		} else {
+			serveDownload(context.page, bytes);
+		}
+	}
+	const texts = new Map(
+		entries.map((entry) => [entry.name, JSON.stringify(entry.content)]),
+	);
+	await collectAnthropic({
+		...context.ctx,
+		...(mode === "streaming"
+			? {
+					readZipEntryChunk: (name: string, offset: number, length: number) =>
+						Promise.resolve(
+							texts.get(name)?.slice(offset, offset + length) ?? "",
+						),
+					entriesValidated: true,
+				}
+			: {}),
+	});
+	const records = context.protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
+			message.type === "RECORD" && message.stream === "messages",
+	);
+	// Messages evidence only: the conversations stream is also requested here
+	// and has its own coverage message, asserted in the full-stream tests.
+	const proofs = context.protocolMessages.filter(
+		(message): message is CoverageEvent =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "messages",
+	);
+	return { ...context, records, proofs };
+}
+
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	for (const empty of [[], [{ uuid: "conv-empty", chat_messages: [] }]]) {
+		test(`collectAnthropic: completion evidence ${mode} recognizes empty boundary ${empty.length}`, async () => {
+			const { records, proofs } = await runCompletionExport(mode, empty);
+			assert.equal(records.length, 0);
+			assert.equal(proofs.length, 1);
+			assert.deepEqual(proofs[0], {
+				type: "DETAIL_COVERAGE",
+				stream: "messages",
+				state_stream: "messages",
+				reference_only: true,
+				required_keys: [],
+				hydrated_keys: [],
+				considered: 0,
+				covered: 0,
+			});
+		});
+	}
+	test(`collectAnthropic: completion evidence ${mode} measures delivery after the last message`, async () => {
+		const message = CONVERSATIONS_JSON[0]?.chat_messages[0];
+		assert.ok(message);
+		const { records, proofs, protocolMessages } = await runCompletionExport(
+			mode,
+			[
+				{
+					uuid: "conv-1",
+					chat_messages: [
+						{ ...message, uuid: "second", created_at: "2026-01-02T00:00:00Z" },
+						{ ...message, uuid: "first", created_at: "2026-01-01T00:00:00Z" },
+					],
+				},
+			],
+		);
+		assert.deepEqual(
+			records.map((record) => record.key),
+			["first", "second"],
+		);
+		assert.equal(proofs.length, 1);
+		assert.equal(proofs[0]?.considered, 2);
+		assert.equal(proofs[0]?.covered, 2);
+		assert.ok(proofs[0]);
+		assert.ok(records[1]);
+		assert.ok(
+			protocolMessages.indexOf(proofs[0]) >
+				protocolMessages.indexOf(records[1]),
+		);
+	});
+	for (const [label, conversations] of [
+		["missing child list", [{ uuid: "conv-1" }]],
+		["non-array child list", [{ uuid: "conv-1", chat_messages: null }]],
+		[
+			"malformed child",
+			[{ uuid: "conv-1", chat_messages: [null, { text: "no identity" }] }],
+		],
+		[
+			"duplicate message identities",
+			[{ uuid: "conv-1", chat_messages: [{ uuid: "same" }, { uuid: "same" }] }],
+		],
+		[
+			"duplicate parent identities",
+			[
+				{ uuid: "same", chat_messages: [] },
+				{ uuid: "same", chat_messages: [] },
+			],
+		],
+		["missing parent identity", [{ chat_messages: [{ uuid: "msg-1" }] }]],
+		[
+			"runtime schema rejection",
+			[
+				{
+					uuid: "conv-1",
+					chat_messages: [{ uuid: "valid-id", sender: "x".repeat(65) }],
+				},
+			],
+		],
+	] as const) {
+		test(`collectAnthropic: completion evidence ${mode} refuses ${label}`, async () => {
+			const { proofs } = await runCompletionExport(mode, conversations);
+			assert.equal(proofs.length, 0);
+		});
+	}
+	for (const [label, options] of [
+		[
+			"since window",
+			{ scope: { time_range: { since: "2025-01-01T00:00:00Z" } } },
+		],
+		[
+			"until window",
+			{ scope: { time_range: { until: "2027-01-01T00:00:00Z" } } },
+		],
+		["resource selection", { scope: { resources: ["absent"] } }],
+		["field selection", { scope: { fields: ["id"] } }],
+		["recovery-only enumeration", { recoveryOnly: true }],
+		["pending export", { pending: true }],
+	] as const) {
+		test(`collectAnthropic: completion evidence ${mode} refuses ${label}`, async () => {
+			const { proofs } = await runCompletionExport(
+				mode,
+				CONVERSATIONS_JSON,
+				options,
+			);
+			assert.equal(proofs.length, 0);
+		});
+	}
+}
+
+for (const [label, options] of [
+	["unknown category", { unknownPart: true }],
+	["missing manifest download", { missingPart: true }],
+	["wrong total files", { wrongTotal: true }],
+	["missing declared part index", { partGap: true }],
+	["unknown non-JSON entry", { unknownNonJson: true }],
+] as const) {
+	test(`collectAnthropic: completion evidence manifest refuses ${label}`, async () => {
+		const { proofs } = await runCompletionExport(
+			"manifest",
+			CONVERSATIONS_JSON,
+			options,
+		);
+		assert.equal(proofs.length, 0);
+	});
+}
+for (const mode of ["buffered", "streaming"] as const) {
+	test(`collectAnthropic: completion evidence ${mode} refuses unknown archive entry`, async () => {
+		const { proofs } = await runCompletionExport(mode, CONVERSATIONS_JSON, {
+			unknownEntry: true,
+		});
+		assert.equal(proofs.length, 0);
+	});
+	test(`collectAnthropic: completion evidence ${mode} refuses oversized parent`, async () => {
+		const { proofs } = await runCompletionExport(mode, [
+			{
+				uuid: "huge",
+				name: "x".repeat(33_554_432),
+				chat_messages: [{ uuid: "child" }],
+			},
+		]);
+		assert.equal(proofs.length, 0);
+	});
+}
+
+// Regression cases from independent review; all inputs are synthetic.
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	test(`completion boundary: corrupt second ZIP directory entry ${mode}`, async () => {
+		const entries = [
+			{ name: "conversations.json", content: [] },
+			{
+				name: "unrecognized.json",
+				content: [{ uuid: "lost", chat_messages: [{ uuid: "lost-message" }] }],
+			},
+		];
+		const bytes = await buildManifestPartZip(entries);
+		const directoryOffset = bytes.readUInt32LE(bytes.length - 6);
+		const second =
+			directoryOffset +
+			46 +
+			bytes.readUInt16LE(directoryOffset + 28) +
+			bytes.readUInt16LE(directoryOffset + 30) +
+			bytes.readUInt16LE(directoryOffset + 32);
+		assert.equal(bytes.readUInt32LE(second), 0x02_01_4b_50);
+		bytes.writeUInt32LE(0, second);
+		const context = makeContext({
+			streams: ["conversations", "messages"],
+			fetchStub:
+				mode === "manifest"
+					? manifestFetchStub([
+							{ category: "conversations", token: "review-part" },
+							{ category: "light_metadata", token: "review-meta" },
+						])
+					: oldFormatFetchStub({ exportRequests: 0 }),
+		});
+		const runtime = makeEmitRecord({
+			requested: context.ctx.requested,
+			emit: context.ctx.emit,
+			emittedAt: context.ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+		});
+		context.ctx.emitRecord = runtime.emit;
+		context.ctx.isRecordSelected = runtime.isSelected;
+		if (mode === "manifest") {
+			serveDownloads(
+				context.page,
+				new Map([
+					["review-part", bytes],
+					[
+						"review-meta",
+						await buildManifestPartZip([{ name: "users.json", content: [] }]),
+					],
+				]),
+			);
+		} else {
+			serveDownload(context.page, bytes);
+		}
+		await collectAnthropic({
+			...context.ctx,
+			...(mode === "streaming"
+				? {
+						readZipEntryChunk: (
+							_name: string,
+							offset: number,
+							length: number,
+						) => Promise.resolve("[]".slice(offset, offset + length)),
+						entriesValidated: true,
+					}
+				: {}),
+		});
+		const proofs = context.protocolMessages.filter(
+			(m) => m.type === "DETAIL_COVERAGE",
+		);
+		assert.equal(
+			proofs.length,
+			0,
+			"Incomplete central directory cannot prove full source boundary",
+		);
+	});
+}
+test("completion boundary: malformed child list before manifest classification", async () => {
+	const { proofs } = await runCompletionExport("manifest", [
+		{ uuid: "known-empty", chat_messages: [] },
+		{ uuid: "ambiguous-parent", chat_messages: null, docs: [] },
+	]);
+	assert.equal(
+		proofs.length,
+		0,
+		"Non-array raw chat_messages must withhold proof even if classified as project",
+	);
+});
+
+test("completion control: a genuine mixed project is not a missing messages list", async () => {
+	const { proofs } = await runCompletionExport("manifest", [
+		{ uuid: "known-empty", chat_messages: [] },
+		{ uuid: "actual-project", docs: [] },
+	]);
+	assert.equal(proofs.length, 1);
+});
+test("completion control: malformed conversation without competing project shape withholds proof", async () => {
+	const { proofs } = await runCompletionExport("manifest", [
+		{ uuid: "known-empty", chat_messages: [] },
+		{ uuid: "bad-parent", chat_messages: null },
+	]);
+	assert.equal(proofs.length, 0);
+});
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	test(`completion control: intact two-entry ZIP ${mode}`, async () => {
+		const entries = [
+			{ name: "conversations.json", content: [] },
+			{
+				name: "unrecognized.json",
+				content: [{ uuid: "lost", chat_messages: [{ uuid: "lost-message" }] }],
+			},
+		];
+		const bytes = await buildManifestPartZip(entries);
+		const context = makeContext({
+			streams: ["conversations", "messages"],
+			fetchStub:
+				mode === "manifest"
+					? manifestFetchStub([
+							{ category: "conversations", token: "review-part" },
+							{ category: "light_metadata", token: "review-meta" },
+						])
+					: oldFormatFetchStub({ exportRequests: 0 }),
+		});
+		const runtime = makeEmitRecord({
+			requested: context.ctx.requested,
+			emit: context.ctx.emit,
+			emittedAt: context.ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+		});
+		context.ctx.emitRecord = runtime.emit;
+		context.ctx.isRecordSelected = runtime.isSelected;
+		if (mode === "manifest") {
+			serveDownloads(
+				context.page,
+				new Map([
+					["review-part", bytes],
+					[
+						"review-meta",
+						await buildManifestPartZip([{ name: "users.json", content: [] }]),
+					],
+				]),
+			);
+		} else {
+			serveDownload(context.page, bytes);
+		}
+		await collectAnthropic({
+			...context.ctx,
+			...(mode === "streaming"
+				? {
+						readZipEntryChunk: (
+							_name: string,
+							offset: number,
+							length: number,
+						) => Promise.resolve("[]".slice(offset, offset + length)),
+						entriesValidated: true,
+					}
+				: {}),
+		});
+		// Messages evidence only; conversations has its own coverage message.
+		const proofs = context.protocolMessages.filter(
+			(m): m is CoverageEvent =>
+				m.type === "DETAIL_COVERAGE" && m.stream === "messages",
+		);
+		assert.equal(proofs.length, mode === "manifest" ? 1 : 0);
+		if (mode === "manifest") {
+			assert.equal(proofs[0]?.considered, 1);
+		}
+	});
+}
+
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	for (const [label, options] of [
+		["empty resource selector", { scope: { resources: [] } }],
+		["empty field selector", { scope: { fields: [] } }],
+		["empty time selector", { scope: { time_range: {} } }],
+		[
+			"supplied detail gap",
+			{
+				detailGaps: [
+					{ gap_id: "pending-gap", stream: "messages", status: "pending" },
+				],
+			},
+		],
+	] as const) {
+		test(`completion boundary: ${mode} refuses ${label}`, async () => {
+			const { proofs } = await runCompletionExport(mode, [], options);
+			assert.equal(proofs.length, 0);
+		});
+	}
+}
+
+// ─── Full-stream completion evidence (profile, conversations, projects, documents)
+
+type FullMode = "buffered" | "streaming" | "manifest";
+const OWNER_MENU = ["Browser Owner", "Pro plan"];
+const FULL_PROJECT = {
+	uuid: "proj-1",
+	name: "Test project",
+	created_at: "2026-01-01T00:00:00.000Z",
+	docs: [
+		{ uuid: "doc-1", filename: "a.md", content: "a" },
+		{ uuid: "doc-2", filename: "b.md", content: "b" },
+	],
+};
+
+async function runFullCompletion(
+	mode: FullMode,
+	input: {
+		conversations?: unknown;
+		projects?: unknown[];
+		users?: unknown;
+		explicitEmptyProjectsPart?: boolean;
+		streams?: string[];
+		scope?: Record<string, Record<string, unknown>>;
+		recoveryOnly?: boolean;
+		detailGaps?: BrowserCollectContext["detailGaps"];
+		unknownEntry?: boolean;
+		skipUsers?: boolean;
+		/** Manifest mode: replace the generated parts with these exact ones. */
+		partitions?: Array<{
+			category: string;
+			part: number;
+			entries: Array<{ name: string; content: unknown }>;
+		}>;
+		/** Awaited before each RECORD reaches the sink; may defer or reject. */
+		recordGate?: (
+			message: EmittedMessage,
+			protocolMessages: readonly EmittedMessage[],
+		) => Promise<void>;
+	} = {},
+) {
+	// An explicitly supplied null/undefined is a malformed raw input, not a
+	// request for the default fixture.
+	const conversations =
+		"conversations" in input ? input.conversations : CONVERSATIONS_JSON;
+	const projects = input.projects ?? [FULL_PROJECT];
+	const users =
+		"users" in input ? input.users : [{ full_name: "Browser Owner" }];
+	const streams = input.streams ?? [
+		"account_profile",
+		"conversations",
+		"projects",
+		"project_documents",
+	];
+	const flat: Array<{ name: string; content: unknown }> = [
+		{ name: "conversations.json", content: conversations },
+		...(input.skipUsers ? [] : [{ name: "users.json", content: users }]),
+		...projects.map((content, index) => ({
+			name: `projects/p${index}.json`,
+			content,
+		})),
+		...(input.unknownEntry ? [{ name: "future.json", content: [] }] : []),
+	];
+	const generatedParts: Array<{
+		category: string;
+		part?: number;
+		entries: Array<{ name: string; content: unknown }>;
+	}> = [
+		{
+			category: "conversations",
+			entries: [{ name: "conversations.json", content: conversations }],
+		},
+		...(projects.length > 0
+			? [
+					{
+						category: "projects",
+						entries: projects.map((content, index) => ({
+							name: `projects/p${index}.json`,
+							content,
+						})),
+					},
+				]
+			: input.explicitEmptyProjectsPart
+				? [
+						{
+							category: "projects",
+							entries: [{ name: "projects.json", content: [] }],
+						},
+					]
+				: []),
+		...(input.skipUsers
+			? []
+			: [
+					{
+						category: "light_metadata",
+						entries: [{ name: "users.json", content: users }],
+					},
+				]),
+	];
+	const parts = input.partitions ?? generatedParts;
+	const tokens = parts.map((part, index) => ({
+		category: part.category,
+		token: `tok-${index}`,
+		...("part" in part && part.part !== undefined ? { part: part.part } : {}),
+	}));
+	const context = makeContext({
+		streams,
+		fetchStub:
+			mode === "manifest"
+				? manifestFetchStub(tokens)
+				: oldFormatFetchStub({ exportRequests: 0 }),
+	});
+	context.page.menuSpans = OWNER_MENU;
+	for (const [stream, scope] of Object.entries(input.scope ?? {})) {
+		context.ctx.requested.set(stream, { name: stream, ...scope });
+	}
+	if (input.recoveryOnly !== undefined)
+		context.ctx.recoveryOnly = input.recoveryOnly;
+	if (input.detailGaps) context.ctx.detailGaps = input.detailGaps;
+	const gate = input.recordGate;
+	const runtime = makeEmitRecord({
+		requested: context.ctx.requested,
+		emit: gate
+			? async (message) => {
+					if (message.type === "RECORD")
+						await gate(message, context.protocolMessages);
+					return context.ctx.emit(message);
+				}
+			: context.ctx.emit,
+		emittedAt: context.ctx.emittedAt,
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+	});
+	context.ctx.emitRecord = runtime.emit;
+	context.ctx.isRecordSelected = runtime.isSelected;
+	if (mode === "manifest") {
+		const zips = await Promise.all(
+			parts.map((part) => buildManifestPartZip(part.entries)),
+		);
+		serveDownloads(
+			context.page,
+			new Map(zips.map((bytes, index) => [`tok-${index}`, bytes])),
+		);
+	} else {
+		serveDownload(context.page, await buildManifestPartZip(flat));
+	}
+	const texts = new Map(
+		flat.map((entry) => [entry.name, JSON.stringify(entry.content)]),
+	);
+	await collectAnthropic({
+		...context.ctx,
+		...(mode === "streaming"
+			? {
+					readZipEntryChunk: (name: string, offset: number, length: number) =>
+						Promise.resolve(
+							texts.get(name)?.slice(offset, offset + length) ?? "",
+						),
+					entriesValidated: true,
+				}
+			: {}),
+	});
+	const proofs = context.protocolMessages.filter(
+		(
+			message,
+		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			message.type === "DETAIL_COVERAGE",
+	);
+	const proofFor = (stream: string) =>
+		proofs.filter((proof) => proof.stream === stream);
+	const recordsOf = (stream: string) =>
+		context.protocolMessages.filter(
+			(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
+				message.type === "RECORD" && message.stream === stream,
+		);
+	return { ...context, proofs, proofFor, recordsOf };
+}
+
+function assertSelfMapped(
+	run: Awaited<ReturnType<typeof runFullCompletion>>,
+	stream: string,
+	count: number,
+) {
+	const proofs = run.proofFor(stream);
+	assert.equal(proofs.length, 1, `${stream} has exactly one final report`);
+	const [proof] = proofs;
+	assert.ok(proof);
+	assert.equal(proof.considered, count);
+	assert.equal(proof.covered, count);
+	assert.equal(proof.state_stream, stream);
+	assert.equal(run.recordsOf(stream).length, count);
+	// The report follows the stream's last record.
+	const lastRecord = run.recordsOf(stream).at(-1);
+	if (lastRecord)
+		assert.ok(
+			run.protocolMessages.indexOf(proof) >
+				run.protocolMessages.indexOf(lastRecord),
+		);
+}
+
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	test(`full completion ${mode}: every stream proves its measured whole boundary`, async () => {
+		const run = await runFullCompletion(mode);
+		assertSelfMapped(run, "conversations", 1);
+		assertSelfMapped(run, "projects", 1);
+		assertSelfMapped(run, "project_documents", 2);
+		assert.equal(run.proofFor("account_profile").length, 0);
+		assert.equal(run.proofs.length, 3);
+		// The profile RECORD itself is unchanged by withholding its completion.
+		assert.equal(run.recordsOf("account_profile").length, 1);
+	});
+	test(`full completion ${mode}: explicit empty document lists prove zero documents`, async () => {
+		const run = await runFullCompletion(mode, {
+			projects: [{ ...FULL_PROJECT, docs: [] }],
+		});
+		assertSelfMapped(run, "projects", 1);
+		assertSelfMapped(run, "project_documents", 0);
+	});
+	for (const [label, docs] of [
+		["missing", undefined],
+		["null", null],
+		["object", {}],
+	] as const) {
+		test(`full completion ${mode}: ${label} document list gives no documents proof`, async () => {
+			const project: Record<string, unknown> = { ...FULL_PROJECT };
+			if (docs === undefined) {
+				delete project.docs;
+				project.archived_at = null;
+			} else project.docs = docs;
+			const run = await runFullCompletion(mode, { projects: [project] });
+			assert.equal(run.proofFor("project_documents").length, 0);
+			assertSelfMapped(run, "projects", 1);
+		});
+	}
+	test(`full completion ${mode}: unknown document child blocks only documents`, async () => {
+		const run = await runFullCompletion(mode, {
+			projects: [{ ...FULL_PROJECT, docs: [{ uuid: "doc-1" }, { name: "x" }] }],
+		});
+		assert.equal(run.proofFor("project_documents").length, 0);
+		assertSelfMapped(run, "projects", 1);
+	});
+	test(`full completion ${mode}: duplicate document identities give no documents proof`, async () => {
+		const run = await runFullCompletion(mode, {
+			projects: [{ ...FULL_PROJECT, docs: [{ uuid: "d" }, { uuid: "d" }] }],
+		});
+		assert.equal(run.proofFor("project_documents").length, 0);
+	});
+	test(`full completion ${mode}: duplicate project identities give no project proof`, async () => {
+		const run = await runFullCompletion(mode, {
+			projects: [FULL_PROJECT, { ...FULL_PROJECT, name: "again" }],
+		});
+		assert.equal(run.proofFor("projects").length, 0);
+		assert.equal(run.proofFor("project_documents").length, 0);
+	});
+	test(`full completion ${mode}: duplicate conversation identities give no conversation proof`, async () => {
+		const run = await runFullCompletion(mode, {
+			conversations: [...CONVERSATIONS_JSON, ...CONVERSATIONS_JSON],
+		});
+		assert.equal(run.proofFor("conversations").length, 0);
+	});
+	test(`full completion ${mode}: conversation without identity gives no conversation proof`, async () => {
+		const run = await runFullCompletion(mode, {
+			conversations: [{ name: "no id", chat_messages: [] }],
+		});
+		assert.equal(run.proofFor("conversations").length, 0);
+	});
+	test(`full completion ${mode}: project that is also a conversation is ambiguous`, async () => {
+		const run = await runFullCompletion(mode, {
+			projects: [{ ...FULL_PROJECT, chat_messages: [] }],
+		});
+		assert.equal(run.proofFor("projects").length, 0);
+		assert.equal(run.proofFor("project_documents").length, 0);
+	});
+	for (const [label, options] of [
+		[
+			"since window",
+			{
+				scope: {
+					conversations: { time_range: { since: "2025-01-01T00:00:00Z" } },
+				},
+			},
+		],
+		[
+			"resource selection",
+			{ scope: { conversations: { resources: ["absent"] } } },
+		],
+		["field selection", { scope: { conversations: { fields: ["id"] } } }],
+		["recovery-only", { recoveryOnly: true }],
+		[
+			"pending detail gap",
+			{ detailGaps: [{ stream: "conversations", key: "conv-1" }] },
+		],
+	] as const) {
+		test(`full completion ${mode}: ${label} withholds conversation proof`, async () => {
+			const run = await runFullCompletion(mode, options as never);
+			assert.equal(run.proofFor("conversations").length, 0);
+		});
+	}
+	test(`full completion ${mode}: a restricted projects stream withholds projects and documents`, async () => {
+		const run = await runFullCompletion(mode, {
+			scope: { projects: { resources: ["absent"] } },
+		});
+		assert.equal(run.proofFor("projects").length, 0);
+		assert.equal(run.proofFor("project_documents").length, 0);
+		assertSelfMapped(run, "conversations", 1);
+	});
+	test(`full completion ${mode}: documents never prove without their parent stream`, async () => {
+		const run = await runFullCompletion(mode, {
+			streams: ["project_documents"],
+		});
+		assert.equal(run.proofs.length, 0);
+	});
+	for (const [label, users] of [
+		[
+			"ambiguous roster",
+			[{ full_name: "Browser Owner" }, { full_name: "Other" }],
+		],
+		["owner mismatch", [{ full_name: "Someone Else" }]],
+		["malformed identity", [{}]],
+	] as const) {
+		test(`full completion ${mode}: ${label} gives no account_profile proof`, async () => {
+			const run = await runFullCompletion(mode, { users });
+			assert.equal(run.proofFor("account_profile").length, 0);
+		});
+	}
+	test(`full completion ${mode}: missing users data gives no account_profile proof and no fake empty report`, async () => {
+		const run = await runFullCompletion(mode, { skipUsers: true });
+		assert.equal(run.proofFor("account_profile").length, 0);
+	});
+}
+
+for (const mode of ["buffered", "streaming"] as const) {
+	test(`full completion ${mode}: an unknown archive entry withholds every proof`, async () => {
+		const run = await runFullCompletion(mode, { unknownEntry: true });
+		assert.equal(run.proofs.length, 0);
+	});
+	test(`full completion ${mode}: projects absent without an explicit boundary is not a proven empty`, async () => {
+		const run = await runFullCompletion(mode, { projects: [] });
+		assert.equal(run.proofFor("projects").length, 0);
+		assert.equal(run.proofFor("project_documents").length, 0);
+		assertSelfMapped(run, "conversations", 1);
+	});
+}
+
+test("full completion manifest: an explicit empty projects part proves empty projects and documents", async () => {
+	const run = await runFullCompletion("manifest", {
+		projects: [],
+		explicitEmptyProjectsPart: true,
+	});
+	assertSelfMapped(run, "projects", 0);
+	assertSelfMapped(run, "project_documents", 0);
+});
+
+test("full completion manifest: absent projects part is not a proven empty", async () => {
+	const run = await runFullCompletion("manifest", { projects: [] });
+	assert.equal(run.proofFor("projects").length, 0);
+	assert.equal(run.proofFor("project_documents").length, 0);
+});
+
+test("full completion: messages evidence keeps its guarantees beside the other streams", async () => {
+	const run = await runFullCompletion("manifest", {
+		streams: ["conversations", "messages"],
+	});
+	assertSelfMapped(run, "messages", 1);
+	assertSelfMapped(run, "conversations", 1);
+	const malformed = await runFullCompletion("manifest", {
+		streams: ["conversations", "messages"],
+		conversations: [{ uuid: "conv-1", chat_messages: null }],
+	});
+	assert.equal(malformed.proofFor("messages").length, 0);
+	assert.equal(malformed.proofFor("conversations").length, 0);
+});
+
+// ─── Review R1/R2 counterexamples: profile identity and partition identity
+
+const ALL_PLUS_MESSAGES = [
+	"account_profile",
+	"conversations",
+	"messages",
+	"projects",
+	"project_documents",
+];
+const FINAL_RECORD_COUNTS = {
+	conversations: 1,
+	messages: 1,
+	projects: 1,
+	project_documents: 2,
+} as const;
+
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	for (const [label, users] of [
+		["a roster with no raw identity", [{ full_name: "Browser Owner" }]],
+		[
+			"a same-name roster entry for another identity",
+			[{ uuid: "someone-else", full_name: "Browser Owner" }],
+		],
+		[
+			"a raw user id that no export field ties to the requested organization",
+			[{ uuid: "user-1", full_name: "Browser Owner" }],
+		],
+		[
+			"an explicit null users wrapper beside a top-level name",
+			{ users: null, full_name: "Browser Owner" },
+		],
+		[
+			"a non-array users wrapper beside a top-level name",
+			{ users: "Browser Owner", full_name: "Browser Owner" },
+		],
+	] as const) {
+		test(`full completion ${mode}: ${label} withholds account_profile completion on every stream`, async () => {
+			const run = await runFullCompletion(mode, {
+				users,
+				streams: ALL_PLUS_MESSAGES,
+			});
+			assert.equal(run.proofFor("account_profile").length, 0);
+			// Old record behavior is preserved: the profile record is still delivered.
+			const [record] = run.recordsOf("account_profile");
+			assert.equal(record?.data.full_name, "Browser Owner");
+			assert.equal(record?.data.metadata_status, "valid");
+			// The other streams keep their own measured proofs.
+			assertSelfMapped(run, "conversations", 1);
+			assertSelfMapped(run, "messages", 1);
+			assertSelfMapped(run, "projects", 1);
+			assertSelfMapped(run, "project_documents", 2);
+			assert.equal(run.proofs.length, 4);
+		});
+	}
+	for (const [label, options] of [
+		["null conversations file", { conversations: null }],
+		["object conversations file", { conversations: {} }],
+		["string conversations file", { conversations: "[]" }],
+	] as const) {
+		test(`full completion ${mode}: ${label} gives no conversation or message proof`, async () => {
+			const run = await runFullCompletion(mode, {
+				...options,
+				streams: ALL_PLUS_MESSAGES,
+			});
+			assert.equal(run.proofFor("conversations").length, 0);
+			assert.equal(run.proofFor("messages").length, 0);
+			assert.equal(run.proofFor("account_profile").length, 0);
+		});
+	}
+	for (const [label, users] of [
+		["null users file", null],
+		["string users file", "Browser Owner"],
+		["numeric users file", 7],
+	] as const) {
+		test(`full completion ${mode}: ${label} gives no account_profile proof`, async () => {
+			const run = await runFullCompletion(mode, {
+				users,
+				streams: ALL_PLUS_MESSAGES,
+			});
+			assert.equal(run.proofFor("account_profile").length, 0);
+		});
+	}
+	test(`full completion ${mode}: a null project file gives no projects proof`, async () => {
+		const run = await runFullCompletion(mode, {
+			projects: [null],
+			streams: ALL_PLUS_MESSAGES,
+		});
+		assert.equal(run.proofFor("projects").length, 0);
+		assert.equal(run.proofFor("project_documents").length, 0);
+	});
+
+	for (const stream of Object.keys(FINAL_RECORD_COUNTS) as Array<
+		keyof typeof FINAL_RECORD_COUNTS
+	>) {
+		test(`full completion ${mode}: ${stream} proof waits for the final RECORD to be accepted`, async () => {
+			let seen = 0;
+			let proofsWhenFinalRecordHeld = -1;
+			const run = await runFullCompletion(mode, {
+				streams: ALL_PLUS_MESSAGES,
+				recordGate: async (message, protocolMessages) => {
+					if (message.type !== "RECORD" || message.stream !== stream) return;
+					seen += 1;
+					if (seen !== FINAL_RECORD_COUNTS[stream]) return;
+					await new Promise((resolve) => setTimeout(resolve, 5));
+					proofsWhenFinalRecordHeld = protocolMessages.filter(
+						(m) => m.type === "DETAIL_COVERAGE" && m.stream === stream,
+					).length;
+				},
+			});
+			assert.equal(seen, FINAL_RECORD_COUNTS[stream]);
+			assert.equal(proofsWhenFinalRecordHeld, 0);
+			assertSelfMapped(run, stream, FINAL_RECORD_COUNTS[stream]);
+		});
+		test(`full completion ${mode}: ${stream} proof is withheld when the final RECORD is rejected`, async () => {
+			let seen = 0;
+			let observed: readonly EmittedMessage[] = [];
+			await assert.rejects(
+				runFullCompletion(mode, {
+					streams: ALL_PLUS_MESSAGES,
+					recordGate: async (message, protocolMessages) => {
+						observed = protocolMessages;
+						if (message.type !== "RECORD" || message.stream !== stream) return;
+						seen += 1;
+						if (seen === FINAL_RECORD_COUNTS[stream]) {
+							await new Promise((resolve) => setTimeout(resolve, 1));
+							throw new Error("sink rejected final record");
+						}
+					},
+				}),
+				/sink rejected final record/,
+			);
+			assert.equal(
+				observed.filter(
+					(m) => m.type === "DETAIL_COVERAGE" && m.stream === stream,
+				).length,
+				0,
+			);
+		});
+	}
+}
+
+// Manifest partition identity: proof requires category-local parts from 0.
+const CONV_ENTRY = [
+	{ name: "conversations.json", content: CONVERSATIONS_JSON },
+];
+const projectEntry = (index: number, project: unknown = FULL_PROJECT) => [
+	{ name: `projects/p${index}.json`, content: project },
+];
+const OWNER_USERS = [
+	{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+];
+const conversationsPart = (part = 0) => ({
+	category: "conversations",
+	part,
+	entries: CONV_ENTRY,
+});
+
+async function runPartitions(
+	partitions: Array<{
+		category: string;
+		part: number;
+		entries: Array<{ name: string; content: unknown }>;
+	}>,
+) {
+	return runFullCompletion("manifest", {
+		partitions,
+		streams: ALL_PLUS_MESSAGES,
+	});
+}
+
+function assertNoProofs(run: Awaited<ReturnType<typeof runPartitions>>) {
+	assert.deepEqual(
+		run.proofs.map((proof) => proof.stream),
+		[],
+	);
+}
+
+test("manifest partitions: a lone projects part 1 holding [] does not prove empty projects or documents", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{
+				category: "projects",
+				part: 1,
+				entries: [{ name: "projects.json", content: [] }],
+			},
+		]),
+	);
+});
+test("manifest partitions: a missing projects part 0 withholds proofs even beside a valid part 1", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 1, entries: projectEntry(0) },
+		]),
+	);
+});
+test("manifest partitions: two distinct projects files both labelled part 0 withhold proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{
+				category: "projects",
+				part: 0,
+				entries: projectEntry(1, {
+					uuid: "proj-2",
+					name: "Other",
+					docs: [{ uuid: "doc-9", filename: "z.md", content: "z" }],
+				}),
+			},
+		]),
+	);
+});
+test("manifest partitions: a projects gap (0 and 2) withholds proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{
+				category: "projects",
+				part: 2,
+				entries: projectEntry(1, { uuid: "proj-2", docs: [] }),
+			},
+		]),
+	);
+});
+test("manifest partitions: light_metadata part 1 without part 0 gives no profile or other proof", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{ category: "light_metadata", part: 1, entries: OWNER_USERS },
+		]),
+	);
+});
+test("manifest partitions: duplicate light_metadata part 0 withholds proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+			{
+				category: "light_metadata",
+				part: 0,
+				entries: [
+					{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+				],
+			},
+		]),
+	);
+});
+test("manifest partitions: duplicate or missing conversations parts still withhold proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(0),
+			conversationsPart(0),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+		]),
+	);
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(1),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+		]),
+	);
+});
+test("manifest partitions: contiguous multi-part projects from 0 keep their proofs", async () => {
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+		{
+			category: "projects",
+			part: 1,
+			entries: projectEntry(1, {
+				uuid: "proj-2",
+				name: "Second",
+				docs: [{ uuid: "doc-9", filename: "z.md", content: "z" }],
+			}),
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "projects", 2);
+	assertSelfMapped(run, "project_documents", 3);
+	assertSelfMapped(run, "messages", 1);
+});
+
+// A missing category is unknown, and cross-classified records are delivery only.
+test("manifest category boundary: absent projects with a cross-classified project cannot prove projects or empty documents", async () => {
+	const run = await runPartitions([
+		{
+			category: "conversations",
+			part: 0,
+			entries: [
+				{
+					name: "conversations.json",
+					content: [
+						{ uuid: "c1", chat_messages: [] },
+						{ uuid: "p1", name: "P", docs: [] },
+					],
+				},
+			],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 0);
+	assert.equal(run.proofFor("projects").length, 0);
+	assert.equal(run.proofFor("project_documents").length, 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 0);
+});
+
+test("manifest category boundary: absent conversations with a cross-classified conversation cannot prove conversations or messages", async () => {
+	const run = await runPartitions([
+		{
+			category: "projects",
+			part: 0,
+			entries: [
+				{
+					name: "projects.json",
+					content: [FULL_PROJECT, ...CONVERSATIONS_JSON],
+				},
+			],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 1);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 2);
+	assert.equal(run.proofFor("conversations").length, 0);
+	assert.equal(run.proofFor("messages").length, 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assertSelfMapped(run, "projects", 1);
+	assertSelfMapped(run, "project_documents", 2);
+});
+
+test("manifest category boundary: absent light_metadata withholds every proof while records are delivered", async () => {
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 1);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 2);
+	assertNoProofs(run);
+});
+
+test("manifest category boundary: projects found in conversations do not count toward a present projects category", async () => {
+	const run = await runPartitions([
+		{
+			category: "conversations",
+			part: 0,
+			entries: [
+				{
+					name: "conversations.json",
+					content: [...CONVERSATIONS_JSON, FULL_PROJECT],
+				},
+			],
+		},
+		{
+			category: "projects",
+			part: 0,
+			entries: [{ name: "projects.json", content: [] }],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 2);
+	assert.equal(run.proofFor("projects").length, 0);
+	assert.equal(run.proofFor("project_documents").length, 0);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
+});
+
+test("manifest category boundary: conversations found in projects do not count toward a present conversations category", async () => {
+	const run = await runPartitions([
+		{
+			category: "conversations",
+			part: 0,
+			entries: [{ name: "conversations.json", content: [] }],
+		},
+		{
+			category: "projects",
+			part: 0,
+			entries: [
+				{
+					name: "projects.json",
+					content: [FULL_PROJECT, ...CONVERSATIONS_JSON],
+				},
+			],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 1);
+	assert.equal(run.proofFor("conversations").length, 0);
+	assert.equal(run.proofFor("messages").length, 0);
+	assertSelfMapped(run, "projects", 1);
+	assertSelfMapped(run, "project_documents", 2);
+});
+
+test("manifest category boundary: global part numbering fails closed without an authoritative numbering contract", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(0),
+			{ category: "projects", part: 1, entries: projectEntry(0) },
+			{ category: "light_metadata", part: 2, entries: OWNER_USERS },
+		]),
+	);
+});
+
+// Known unconsumed categories use the observed, sanitized split-export shapes.
+const KNOWN_EXTRA_PARTS = ["memories", "design_chats"].map((category) => ({
+	category,
+	part: 0,
+	entries: listFilesRecursive(join(SPLIT_EXPORT_DIR, `${category}-000`)).map(
+		(name) => ({
+			name,
+			content: JSON.parse(
+				readFileSync(join(SPLIT_EXPORT_DIR, `${category}-000`, name), "utf8"),
+			),
+		}),
+	),
+}));
+const EMPTY_PROJECTS_PART = {
+	category: "projects",
+	part: 0,
+	entries: [{ name: "projects.json", content: [] }],
+};
+const COMPLETION_BASE_PARTS = [
+	conversationsPart(),
+	EMPTY_PROJECTS_PART,
+	{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+];
+
+test("manifest known extras: memories and design_chats coexist with proven empty projects and documents", async () => {
+	const run = await runPartitions([
+		...COMPLETION_BASE_PARTS,
+		...KNOWN_EXTRA_PARTS,
+	]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
+	assertSelfMapped(run, "projects", 0);
+	assertSelfMapped(run, "project_documents", 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assert.equal(run.recordsOf("account_profile").length, 1);
+});
+
+test("manifest known extras: an unknown category still withholds every proof", async () => {
+	const run = await runPartitions([
+		...COMPLETION_BASE_PARTS,
+		...KNOWN_EXTRA_PARTS,
+		{
+			category: "future_category",
+			part: 0,
+			entries: [{ name: "future.json", content: [] }],
+		},
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assertNoProofs(run);
+});
+
+for (const extra of KNOWN_EXTRA_PARTS) {
+	test(`manifest known extras: ${extra.category} alone keeps proofs when the other extra is absent`, async () => {
+		const run = await runPartitions([...COMPLETION_BASE_PARTS, extra]);
+		assertSelfMapped(run, "conversations", 1);
+		assertSelfMapped(run, "projects", 0);
+		assertSelfMapped(run, "project_documents", 0);
+	});
+	test(`manifest known extras: contiguous ${extra.category} parts from zero keep proofs`, async () => {
+		const run = await runPartitions([
+			...COMPLETION_BASE_PARTS,
+			extra,
+			{ ...extra, part: 1 },
+		]);
+		assertSelfMapped(run, "conversations", 1);
+		assertSelfMapped(run, "projects", 0);
+		assertSelfMapped(run, "project_documents", 0);
+	});
+	for (const [label, parts] of [
+		["missing zero", [1]],
+		["gap", [0, 2]],
+		["duplicate", [0, 0]],
+	] as const) {
+		test(`manifest known extras: ${extra.category} ${label} withholds every proof`, async () => {
+			const run = await runPartitions([
+				...COMPLETION_BASE_PARTS,
+				...parts.map((part) => ({ ...extra, part })),
+			]);
+			assert.equal(run.recordsOf("conversations").length, 1);
+			assertNoProofs(run);
+		});
+	}
+	test(`manifest known extras: unreadable ${extra.category} JSON withholds every proof`, async () => {
+		const { deflateRawSync } = await import("node:zlib");
+		const name = `${extra.category}/invalid.json`;
+		const invalidZip = await buildManifestPartZip([{ name, content: null }]);
+		// "null" and "nope" have the same compressed and uncompressed lengths.
+		// Replace only the entry payload, retaining an intact ZIP directory.
+		const invalidJson = deflateRawSync(Buffer.from("nope"));
+		assert.equal(
+			invalidJson.length,
+			deflateRawSync(Buffer.from("null")).length,
+		);
+		invalidZip.set(invalidJson, 30 + Buffer.byteLength(name));
+		const parts = [...COMPLETION_BASE_PARTS, extra];
+		const context = makeContext({
+			streams: ALL_PLUS_MESSAGES,
+			fetchStub: manifestFetchStub(
+				parts.map((part, index) => ({
+					category: part.category,
+					part: part.part,
+					token: `invalid-json-${index}`,
+				})),
+			),
+		});
+		const zips = await Promise.all(
+			COMPLETION_BASE_PARTS.map((part) => buildManifestPartZip(part.entries)),
+		);
+		const runtime = makeEmitRecord({
+			requested: context.ctx.requested,
+			emit: context.ctx.emit,
+			emittedAt: context.ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+		});
+		context.ctx.emitRecord = runtime.emit;
+		context.ctx.isRecordSelected = runtime.isSelected;
+		serveDownloads(
+			context.page,
+			new Map([
+				...zips.map((zip, index): [string, Buffer] => [
+					`invalid-json-${index}`,
+					zip,
+				]),
+				[`invalid-json-${zips.length}`, invalidZip],
+			]),
+		);
+		await collectAnthropic(context.ctx);
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) =>
+					message.type === "RECORD" && message.stream === "conversations",
+			).length,
+			1,
+		);
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) => message.type === "DETAIL_COVERAGE",
+			).length,
+			0,
+		);
+	});
+}
+
+const FULL_METADATA_ENTRIES = listFilesRecursive(
+	join(SPLIT_EXPORT_DIR, "light_metadata-000"),
+).map((name) => ({
+	name,
+	content: JSON.parse(
+		readFileSync(join(SPLIT_EXPORT_DIR, "light_metadata-000", name), "utf8"),
+	),
+}));
+const FULL_FIXTURE_EMPTY_PROJECT_PARTS = [
+	{
+		category: "conversations",
+		part: 0,
+		entries: [
+			{
+				name: "conversations.json",
+				content: JSON.parse(
+					readFileSync(
+						join(SPLIT_EXPORT_DIR, "conversations-000/conversations.json"),
+						"utf8",
+					),
+				),
+			},
+		],
+	},
+	EMPTY_PROJECTS_PART,
+	{ category: "light_metadata", part: 0, entries: FULL_METADATA_ENTRIES },
+	...KNOWN_EXTRA_PARTS,
+];
+
+test("manifest known metadata: full fixture shape proves empty projects and documents beside login history", async () => {
+	const run = await runPartitions(FULL_FIXTURE_EMPTY_PROJECT_PARTS);
+	assertSelfMapped(run, "conversations", 2);
+	assertSelfMapped(run, "messages", 3);
+	assertSelfMapped(run, "projects", 0);
+	assertSelfMapped(run, "project_documents", 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assert.equal(run.recordsOf("account_profile").length, 1);
+	assert.deepEqual(run.recordsOf("account_profile")[0]?.data, {
+		id: "org-1",
+		organization_id: "org-1",
+		full_name: null,
+		plan: null,
+		name_source: "none",
+		metadata_status: "mismatch",
+	});
+});
+
+test("manifest known metadata: absent login history keeps archive proof", async () => {
+	const run = await runPartitions(
+		FULL_FIXTURE_EMPTY_PROJECT_PARTS.map((part) => ({
+			...part,
+			entries:
+				part.category === "light_metadata"
+					? part.entries.filter((entry) => entry.name !== "login_history.json")
+					: part.entries,
+		})),
+	);
+	assertSelfMapped(run, "conversations", 2);
+	assertSelfMapped(run, "projects", 0);
+	assertSelfMapped(run, "project_documents", 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+});
+
+for (const name of ["future_metadata.json", "nested/login_history.json"]) {
+	test(`manifest known metadata: unknown ${name} withholds every proof`, async () => {
+		const run = await runPartitions(
+			FULL_FIXTURE_EMPTY_PROJECT_PARTS.map((part) => ({
+				...part,
+				entries:
+					part.category === "light_metadata"
+						? [...part.entries, { name, content: [] }]
+						: part.entries,
+			})),
+		);
+		assert.equal(run.recordsOf("conversations").length, 2);
+		assertNoProofs(run);
+	});
+}
+
+for (const mode of ["buffered", "chunks"] as const) {
+	test(`manifest known metadata: unreadable login history ${mode} withholds every proof`, async () => {
+		const { deflateRawSync } = await import("node:zlib");
+		const parts = FULL_FIXTURE_EMPTY_PROJECT_PARTS.map((part) => ({
+			...part,
+			entries:
+				part.category === "light_metadata"
+					? [
+							{ name: "login_history.json", content: null },
+							...part.entries.filter(
+								(entry) => entry.name !== "login_history.json",
+							),
+						]
+					: part.entries,
+		}));
+		const zips = await Promise.all(
+			parts.map((part) => buildManifestPartZip(part.entries)),
+		);
+		const metadataIndex = parts.findIndex(
+			(part) => part.category === "light_metadata",
+		);
+		const metadataZip = zips[metadataIndex];
+		assert.ok(metadataZip);
+		const invalidJson = deflateRawSync(Buffer.from("nope"));
+		assert.equal(
+			invalidJson.length,
+			deflateRawSync(Buffer.from("null")).length,
+		);
+		metadataZip.set(invalidJson, 30 + Buffer.byteLength("login_history.json"));
+		const context = makeContext({
+			streams: ALL_PLUS_MESSAGES,
+			fetchStub: manifestFetchStub(
+				parts.map((part, index) => ({
+					category: part.category,
+					part: part.part,
+					token: `metadata-${index}`,
+				})),
+			),
+		});
+		const runtime = makeEmitRecord({
+			requested: context.ctx.requested,
+			emit: context.ctx.emit,
+			emittedAt: context.ctx.emittedAt,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
+		});
+		context.ctx.emitRecord = runtime.emit;
+		context.ctx.isRecordSelected = runtime.isSelected;
+		serveDownloads(
+			context.page,
+			new Map(zips.map((zip, index) => [`metadata-${index}`, zip])),
+		);
+		const texts = new Map(
+			parts.flatMap((part) =>
+				part.entries.map(
+					(entry) => [entry.name, JSON.stringify(entry.content)] as const,
+				),
+			),
+		);
+		texts.set("login_history.json", "nope");
+		await collectAnthropic({
+			...context.ctx,
+			...(mode === "chunks"
+				? {
+						readZipEntryChunk: (name: string, offset: number, length: number) =>
+							Promise.resolve(
+								texts.get(name)?.slice(offset, offset + length) ?? "",
+							),
+					}
+				: {}),
+		});
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) =>
+					message.type === "RECORD" && message.stream === "conversations",
+			).length,
+			2,
+		);
+		assert.equal(
+			context.protocolMessages.filter(
+				(message) => message.type === "DETAIL_COVERAGE",
+			).length,
+			0,
+		);
+	});
+}

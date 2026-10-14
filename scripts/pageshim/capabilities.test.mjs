@@ -166,13 +166,13 @@ test("all eight declared mobile connectors remain PageShim eligible", () => {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
-		x_browser: {
-			network: ["same_origin_page_fetch"],
-			browser: ["page_script_evaluation", "page_navigation"],
-		},
 		anthropic_live: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation"],
+		},
+		x_browser: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
 		},
 		anthropic: {
 			network: ["same_origin_page_fetch"],
