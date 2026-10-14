@@ -4,6 +4,8 @@ This repository is the source home for PDPP Collection Profile connectors. Each 
 
 ## Build and verify
 
+Start with the [connector authoring loop](AUTHORING.md) for the scaffold, local run, capture, replay, and safe evidence workflow.
+
 Install from the repository root so TypeScript and runtime imports resolve the declared workspace dependencies:
 
 ```bash

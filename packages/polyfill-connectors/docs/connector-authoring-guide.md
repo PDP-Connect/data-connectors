@@ -603,25 +603,29 @@ The three committed pilots double as the per-shape reference for new connectors:
 
 ### 9.2 Scenario replay evidence (`claim.json`)
 
-`bin/scenario-record.ts` and `bin/scenario-verify.ts` are this package's second evidence track, separate from the fixture-capture/scrub pipeline above: a scenario captures a connector run's real network traffic (`recorded-http`) or browser session (`recorded-browser`) and lets anyone replay it offline, without a provider account, to prove the connector's data mapping still matches. See each file's module doc comment for the full mechanics; this section is only about the ONE artifact a connector author commits.
+The [authoring loop](../../../AUTHORING.md#local-authoring-loop) gives the current scaffold → run/watch → capture → replay sequence. Run its commands from the repository root after `npm ci`. Recording is live collection using configured credentials; replay is offline against captured interactions and checks the current connector's output against that scenario. Replay does not test provider freshness or stability under provider churn.
 
-**Commit the claim, never the scenario itself.** A scenario's HAR/storageState/interactions carry real request and response content — they are `capture.privacy_class: local-only`, never committed, same as a raw fixture. What a PR DOES carry is the one-line verdict `scenario-verify --json` writes:
+To write the machine-readable claim, add `--json connectors/<key>/evidence/claim.json` to the `scenario-verify` command:
 
 ```bash
-pnpm exec tsx bin/scenario-verify.ts <connector> <path-to-local-scenario.json> --json connectors/<connector>/evidence/claim.json
+node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <path-to-local-scenario.json> --json connectors/<key>/evidence/claim.json
 ```
 
-This writes `pdpp.connector-claim/1` — a small, deliberately SAFE-TO-COMMIT JSON record: the claim (`recorded_replay` or `diagnostic_replay`), its limitations, stream coverage, run/driver counts, the digests the claim was captured and verified against, and a bare scenario filename. It never carries an absolute host path, a username, or any record/URL content — `writeClaimRecord` (bin/scenario-verify.ts) redacts a filesystem-input connector's real import-directory path down to `$<ITS_ENV_VAR>` before the file is ever written, and reduces the scenario path to its filename. If you ever see an absolute path or `$HOME` in a generated `claim.json`, that is a bug in `writeClaimRecord`, not something to hand-edit around.
+`--json` uses the path relative to the process working directory. From the repository root, this writes to `connectors/<key>/evidence/claim.json`, alongside the connector. Run from `packages/polyfill-connectors/` only if you also pass `../../connectors/<key>/evidence/claim.json`.
+
+The file uses schema `pdpp.connector-claim/1`. It includes capture and verification timestamps, claim and limitations, stream coverage, run/driver counts, source and declaration digests, and only the scenario filename. Review generated content before committing. Commit this claim file only; scenario JSON, HAR, storage state, and diagnostic dumps are local-only and can contain account data or credentials.
 
 **Path and freshness convention**
 
-- Commit to exactly `connectors/<connector>/evidence/claim.json` — one file, the LATEST claim only. Overwrite it (don't append a timestamped file) each time you re-verify.
-- Re-generate it whenever `connectors/<connector>/` or `connectors/<connector>/manifest.json` changes materially — the committed claim's `captured_with` digests are what this repo's CI job (see below) compares against the PR's own code to decide whether the claim is still BOUND or has gone STALE.
-- A connector with no `evidence/claim.json` simply has no established claim yet — that is a valid, honest state (CI reports it as `evidence: none`), not an error.
+- Keep exactly one committed claim at `connectors/<key>/evidence/claim.json`: the latest claim. Overwrite it when you re-verify; do not add timestamped claim files.
+- Re-generate it when connector source or its manifest changes materially. CI compares the claim's `captured_with` source and declaration digests with the PR's connector source and manifest. Matching digests are reported as BOUND; differing digests are STALE.
+- No claim file means no established replay claim. That is an honest state: CI reports `evidence: none` and does not fail because evidence is missing.
 
 **What CI does with it**
 
-A PR touching `connectors/<name>/` gets an informational job summary (never a required/blocking check) per changed connector: whether a committed claim is present, whether its `captured_with` digests still match the PR's own `connectors/<name>/` source and manifest (BOUND) or not (STALE), who produced it (always "author-run" — CI does not re-execute a real provider session), and what is NOT established (e.g. "no maintainer live run"). It also applies a `evidence: author-replay` / `evidence: stale` / `evidence: none` label. See the workflow for the exact table/label logic.
+For a PR that touches a connector, the workflow prints an informational summary for each changed connector and applies an `evidence: author-replay`, `evidence: stale`, or `evidence: none` label on same-repository PRs. The summary reports whether a claim exists, whether its captured digests match the PR source and manifest, and that CI did not re-run a provider session. This is informational, not a required or blocking check. See `.github/workflows/polyfill-connectors.yml` and `scripts/connector-evidence-summary.ts` for the current table and label logic.
+
+`recorded_replay` has explicit eligibility requirements. The current verifier hardcodes `isolationEvidenceBoundaryProven: false`, so it withholds `recorded_replay` for every driver pending independent review; a passing replay currently produces `diagnostic_replay`. Recorded-browser replay is also capped at diagnostic evidence. A driver this verifier does not support fails replay rather than earning either claim. Coverage names are deliberately narrow: `empty_state_run` requires run 0 to start with null state, perform an interaction, and expect at least one record. `state_seeded_second_run_with_changed_requests` requires a later run seeded from an earlier run with non-trivial final state and requests that differ from run 1. A capture with two runs does not automatically meet either condition or prove full-refresh/incremental semantics. Generated claims remain candidates for review; they do not guarantee the generated connector's behavior. Claim digest binding describes code at capture/verification and is not a live-provider check.
 
 ### Pre-ship checklist
 
@@ -631,7 +635,7 @@ Before a new connector is considered usable by another user:
 - [ ] Declares all streams in manifest, even nullable ones.
 - [ ] Has a SKIP_RESULT path for selector drift (list page returning zero records is a drift signal, not a "no data" signal).
 - [ ] Documents locale / account-type assumptions in the connector's header comment.
-- [ ] Has been run at least twice (so incremental/STATE behavior is exercised).
+- [ ] Has been run at least twice; review the captured state and request differences before making claims about incremental behavior.
 
 ---
 
