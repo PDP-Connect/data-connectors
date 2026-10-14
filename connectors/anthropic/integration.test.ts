@@ -1614,8 +1614,8 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 function manifestFetchStub(
 	parts: Array<{ category: string; token: string; part?: number }>,
 ): FetchStub {
-	// Claude numbers parts within each category (`<category>-000.zip`), so the
-	// default index counts per category, as in the observed layout.
+	// Synthetic default: category-local numbering matches the only scheme
+	// accepted for proof. Observed filenames do not prove raw part semantics.
 	const seen = new Map<string, number>();
 	const manifest = {
 		version: "1.0",
@@ -2080,7 +2080,9 @@ test("collectAnthropic: an expired export_retry_not_before does not block POST e
 	const notBefore = new Date(Date.now() - 60_000).toISOString();
 	const { exportPosts, skip } = await runExportRefusal(
 		() => new Response("", { status: 500 }),
-		{ conversations: { export_retry_not_before: notBefore } },
+		{
+			conversations: { export_retry_not_before: notBefore },
+		},
 	);
 	assert.equal(exportPosts, 1);
 	assert.equal(skip.reason, "export_request_failed");
@@ -2502,6 +2504,10 @@ test("collectAnthropic: completion evidence measures explicit empty messages", a
 					},
 				],
 			},
+			{
+				category: "light_metadata",
+				entries: [{ name: "users.json", content: [] }],
+			},
 		],
 		["messages"],
 	);
@@ -2560,6 +2566,7 @@ async function runCompletionExport(
 			mode === "manifest"
 				? manifestFetchStub([
 						{ category: "conversations", token: "tok-c" },
+						{ category: "light_metadata", token: "tok-u" },
 						...(options.unknownPart
 							? [{ category: "future", token: "tok-f" }]
 							: []),
@@ -2586,7 +2593,7 @@ async function runCompletionExport(
 					"data_files" in manifest
 				) {
 					if (options.wrongTotal) {
-						manifest.total_files = 2;
+						manifest.total_files = 3;
 					}
 					if (options.partGap && Array.isArray(manifest.data_files)) {
 						const [part] = manifest.data_files;
@@ -2630,6 +2637,10 @@ async function runCompletionExport(
 				new Map([
 					["tok-c", bytes],
 					["tok-f", bytes],
+					[
+						"tok-u",
+						await buildManifestPartZip([{ name: "users.json", content: [] }]),
+					],
 				]),
 			);
 		} else {
@@ -2831,6 +2842,7 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 				mode === "manifest"
 					? manifestFetchStub([
 							{ category: "conversations", token: "review-part" },
+							{ category: "light_metadata", token: "review-meta" },
 						])
 					: oldFormatFetchStub({ exportRequests: 0 }),
 		});
@@ -2844,7 +2856,20 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 		});
 		context.ctx.emitRecord = runtime.emit;
 		context.ctx.isRecordSelected = runtime.isSelected;
-		serveDownload(context.page, bytes);
+		if (mode === "manifest") {
+			serveDownloads(
+				context.page,
+				new Map([
+					["review-part", bytes],
+					[
+						"review-meta",
+						await buildManifestPartZip([{ name: "users.json", content: [] }]),
+					],
+				]),
+			);
+		} else {
+			serveDownload(context.page, bytes);
+		}
 		await collectAnthropic({
 			...context.ctx,
 			...(mode === "streaming"
@@ -2910,6 +2935,7 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 				mode === "manifest"
 					? manifestFetchStub([
 							{ category: "conversations", token: "review-part" },
+							{ category: "light_metadata", token: "review-meta" },
 						])
 					: oldFormatFetchStub({ exportRequests: 0 }),
 		});
@@ -2923,7 +2949,20 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 		});
 		context.ctx.emitRecord = runtime.emit;
 		context.ctx.isRecordSelected = runtime.isSelected;
-		serveDownload(context.page, bytes);
+		if (mode === "manifest") {
+			serveDownloads(
+				context.page,
+				new Map([
+					["review-part", bytes],
+					[
+						"review-meta",
+						await buildManifestPartZip([{ name: "users.json", content: [] }]),
+					],
+				]),
+			);
+		} else {
+			serveDownload(context.page, bytes);
+		}
 		await collectAnthropic({
 			...context.ctx,
 			...(mode === "streaming"
@@ -3483,7 +3522,7 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 	}
 }
 
-// Manifest partition identity. Each category numbers its own parts from 0.
+// Manifest partition identity: proof requires category-local parts from 0.
 const CONV_ENTRY = [
 	{ name: "conversations.json", content: CONVERSATIONS_JSON },
 ];
@@ -3628,4 +3667,133 @@ test("manifest partitions: contiguous multi-part projects from 0 keep their proo
 	assertSelfMapped(run, "projects", 2);
 	assertSelfMapped(run, "project_documents", 3);
 	assertSelfMapped(run, "messages", 1);
+});
+
+// A missing category is unknown, and cross-classified records are delivery only.
+test("manifest category boundary: absent projects with a cross-classified project cannot prove projects or empty documents", async () => {
+	const run = await runPartitions([
+		{
+			category: "conversations",
+			part: 0,
+			entries: [
+				{
+					name: "conversations.json",
+					content: [
+						{ uuid: "c1", chat_messages: [] },
+						{ uuid: "p1", name: "P", docs: [] },
+					],
+				},
+			],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 0);
+	assert.equal(run.proofFor("projects").length, 0);
+	assert.equal(run.proofFor("project_documents").length, 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 0);
+});
+
+test("manifest category boundary: absent conversations with a cross-classified conversation cannot prove conversations or messages", async () => {
+	const run = await runPartitions([
+		{
+			category: "projects",
+			part: 0,
+			entries: [
+				{
+					name: "projects.json",
+					content: [FULL_PROJECT, ...CONVERSATIONS_JSON],
+				},
+			],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 1);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 2);
+	assert.equal(run.proofFor("conversations").length, 0);
+	assert.equal(run.proofFor("messages").length, 0);
+	assert.equal(run.proofFor("account_profile").length, 0);
+	assertSelfMapped(run, "projects", 1);
+	assertSelfMapped(run, "project_documents", 2);
+});
+
+test("manifest category boundary: absent light_metadata withholds every proof while records are delivered", async () => {
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 1);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 2);
+	assertNoProofs(run);
+});
+
+test("manifest category boundary: projects found in conversations do not count toward a present projects category", async () => {
+	const run = await runPartitions([
+		{
+			category: "conversations",
+			part: 0,
+			entries: [
+				{
+					name: "conversations.json",
+					content: [...CONVERSATIONS_JSON, FULL_PROJECT],
+				},
+			],
+		},
+		{
+			category: "projects",
+			part: 0,
+			entries: [{ name: "projects.json", content: [] }],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("projects").length, 1);
+	assert.equal(run.recordsOf("project_documents").length, 2);
+	assert.equal(run.proofFor("projects").length, 0);
+	assert.equal(run.proofFor("project_documents").length, 0);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "messages", 1);
+});
+
+test("manifest category boundary: conversations found in projects do not count toward a present conversations category", async () => {
+	const run = await runPartitions([
+		{
+			category: "conversations",
+			part: 0,
+			entries: [{ name: "conversations.json", content: [] }],
+		},
+		{
+			category: "projects",
+			part: 0,
+			entries: [
+				{
+					name: "projects.json",
+					content: [FULL_PROJECT, ...CONVERSATIONS_JSON],
+				},
+			],
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 1);
+	assert.equal(run.proofFor("conversations").length, 0);
+	assert.equal(run.proofFor("messages").length, 0);
+	assertSelfMapped(run, "projects", 1);
+	assertSelfMapped(run, "project_documents", 2);
+});
+
+test("manifest category boundary: global part numbering fails closed without an authoritative numbering contract", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(0),
+			{ category: "projects", part: 1, entries: projectEntry(0) },
+			{ category: "light_metadata", part: 2, entries: OWNER_USERS },
+		]),
+	);
 });
