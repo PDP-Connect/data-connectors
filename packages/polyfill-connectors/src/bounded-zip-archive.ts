@@ -177,6 +177,13 @@ export interface ZipReadPolicy {
 	readonly maxTotalUncompressedBytes: number;
 }
 
+/** Read-entries proof mode; ordinary readers continue to salvage valid prefixes. */
+export interface ZipDirectoryReadOptions {
+	/** Return no entries unless every declared record and directory byte was consumed.
+	 * ZIP64, split archives and unsupported extended layouts cannot prove completeness. */
+	readonly requireCompleteCentralDirectory?: boolean;
+}
+
 export class ZipPolicyViolationError extends Error {
 	readonly code:
 		| "entry_too_large"
@@ -657,21 +664,71 @@ function makeEntryStreamOpener(
 	};
 }
 
+/** The ordinary reader does not interpret ZIP64 or split-directory metadata. */
+function hasCompleteStandardDirectory(
+	source: BytesSource,
+	eocd: NonNullable<ReturnType<typeof findEndOfCentralDirectory>>,
+	observed: {
+		entries: number;
+		consumedBytes: number;
+		readBytes: number;
+		standardEntries: boolean;
+	},
+): boolean {
+	const { offset, tail, tailStart } = eocd;
+	const entryCount = tail.readUInt16LE(offset + 10);
+	const directorySize = tail.readUInt32LE(offset + 12);
+	const directoryStart = tail.readUInt32LE(offset + 16);
+	return (
+		tail.readUInt16LE(offset + 4) === 0 &&
+		tail.readUInt16LE(offset + 6) === 0 &&
+		tail.readUInt16LE(offset + 8) === entryCount &&
+		observed.entries === entryCount &&
+		observed.consumedBytes === directorySize &&
+		observed.readBytes === directorySize &&
+		observed.standardEntries &&
+		entryCount !== 0xff_ff &&
+		directorySize !== 0xff_ff_ff_ff &&
+		directoryStart !== 0xff_ff_ff_ff &&
+		directoryStart + directorySize === tailStart + offset &&
+		tailStart +
+			offset +
+			ZIP_EOCD_MIN_LENGTH +
+			tail.readUInt16LE(offset + 20) ===
+			source.length
+	);
+}
+
+function isStandardDirectoryEntry(
+	bytes: Buffer,
+	offset: number,
+	record: CentralDirectoryRecord,
+): boolean {
+	return (
+		bytes.readUInt16LE(offset + 6) < 45 &&
+		bytes.readUInt16LE(offset + 34) === 0 &&
+		record.compressedSize !== 0xff_ff_ff_ff &&
+		record.uncompressedSize !== 0xff_ff_ff_ff &&
+		record.localHeaderOffset !== 0xff_ff_ff_ff
+	);
+}
+
 /**
  * Shared core: reads the central directory from `source` (a bounded EOCD
  * tail scan plus the central-directory records themselves — small even for
  * a multi-GB archive, since it's metadata, not entry payload) and returns
- * one lazy entry per file. Entry payload bytes are never read until `data()`
+ * lazy entries and the observed completeness of their directory. Entry
+ * payload bytes are never read until `data()`
  * is called on that specific entry, and then only that one entry's
  * compressed bytes are pulled from `source` — never the whole archive.
  */
-function readZipEntriesFromSource(
+function readZipDirectoryFromSource(
 	source: BytesSource,
 	policy: ZipReadPolicy,
-): ZipEntry[] {
+): { entries: ZipEntry[]; complete: boolean } {
 	const eocd = findEndOfCentralDirectory(source);
 	if (!eocd) {
-		return [];
+		return { entries: [], complete: false };
 	}
 	const entryCount = eocd.tail.readUInt16LE(eocd.offset + 10);
 	if (entryCount > policy.maxEntries) {
@@ -704,6 +761,7 @@ function readZipEntriesFromSource(
 	const centralDirBytes = source.readWindow(centralDirStart, centralDirSize);
 
 	let offset = 0;
+	let standardEntries = true;
 	const entries: ZipEntry[] = [];
 	const budget: ExtractionBudget = {
 		remainingTotalBytes: policy.maxTotalUncompressedBytes,
@@ -715,6 +773,9 @@ function readZipEntriesFromSource(
 		if (!record) {
 			break;
 		}
+		standardEntries =
+			isStandardDirectoryEntry(centralDirBytes, offset, record) &&
+			standardEntries;
 		// Name-safety gate (fail-closed, before any size logic): a dangerous
 		// name, a Unix-symlink entry, or an exact duplicate of an already-seen
 		// name is treated as evidence the whole archive is adversarial, not a
@@ -770,7 +831,15 @@ function readZipEntriesFromSource(
 		});
 		offset = record.nextOffset;
 	}
-	return entries;
+	return {
+		entries,
+		complete: hasCompleteStandardDirectory(source, eocd, {
+			entries: entries.length,
+			consumedBytes: offset,
+			readBytes: centralDirBytes.length,
+			standardEntries,
+		}),
+	};
 }
 
 /**
@@ -795,8 +864,16 @@ function readZipEntriesFromSource(
 export function readZipEntries(
 	bytes: Buffer,
 	policy: ZipReadPolicy,
+	options?: ZipDirectoryReadOptions,
 ): ZipEntry[] {
-	return readZipEntriesFromSource(bufferBytesSource(bytes), policy);
+	const directory = readZipDirectoryFromSource(
+		bufferBytesSource(bytes),
+		policy,
+	);
+	if (options?.requireCompleteCentralDirectory && !directory.complete) {
+		return [];
+	}
+	return directory.entries;
 }
 
 /**
@@ -816,8 +893,16 @@ export function readZipEntriesFromFile(
 	fd: number,
 	fileSize: number,
 	policy: ZipReadPolicy,
+	options?: ZipDirectoryReadOptions,
 ): ZipEntry[] {
-	return readZipEntriesFromSource(fileBytesSource(fd, fileSize), policy);
+	const directory = readZipDirectoryFromSource(
+		fileBytesSource(fd, fileSize),
+		policy,
+	);
+	if (options?.requireCompleteCentralDirectory && !directory.complete) {
+		return [];
+	}
+	return directory.entries;
 }
 
 // Chunk size for streamZipEntryToFile's compressed-bytes read loop. Bounds
@@ -840,9 +925,9 @@ export class ZipEntryNotFoundError extends Error {
  * Find one named entry's central-directory record without building `data()`
  * closures for every entry in the archive -- callers that only need ONE
  * entry (streamZipEntryToFile below) skip the per-entry closure allocation
- * `readZipEntriesFromSource` does for entries they'll never touch. Applies
+ * `readZipDirectoryFromSource` does for entries they'll never touch. Applies
  * the same fail-closed name-safety and declared-size gates as
- * `readZipEntriesFromSource` to every record it walks past, not just the
+ * `readZipDirectoryFromSource` to every record it walks past, not just the
  * match, so a policy-violating archive is rejected even when the requested
  * entry would itself have been fine.
  */

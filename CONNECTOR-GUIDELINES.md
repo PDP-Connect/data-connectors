@@ -2,7 +2,7 @@
 
 How to write a connector that runs **unchanged on desktop and mobile**.
 
-Connectors are written against the [`page` API](README.md#page-api-reference), not
+Connectors are written against the [`page` API](scripts/pageshim/runtime.ts) (`ShimPage`), not
 against a specific browser. Desktop implements `page` with Playwright + Chromium;
 mobile implements it with a native WebView shim. A connector that only assumes the
 `page` contract runs on both. A connector that assumes *Chromium on a laptop*

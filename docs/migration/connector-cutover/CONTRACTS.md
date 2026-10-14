@@ -1,6 +1,6 @@
 # Connector hard cutover: contract decisions
 
-Status: lead decisions for the cutover integration branch. The per-scope mapping is in [`capability-map.json`](capability-map.json). A lane that finds evidence against a decision must stop and file a contract-change request in its report. It must not invent a local answer.
+Status: lead decisions for the cutover integration branch. The per-scope mapping from legacy scope fields to PDPP streams is Vana projection material and is no longer kept in this repository; it remains in Git history. A lane that finds evidence against a decision must stop and file a contract-change request in its report. It must not invent a local answer.
 
 Base: `main` at `20bba85`.
 
@@ -29,7 +29,7 @@ Flat `platform.scope` strings (for example `claude.conversations` and `instagram
 - The Vana stack owns the compatibility implementation, likely a shared `unity-surfaces` package used by app.vana.org, Desktop, and the embedded Personal Server runtime, which consume one generated contract. Context Gateway (ODL's commercial wrapper) does not own or define it, and Vana takes no dependency on Context Gateway. Data Gateway remains the issued-grant ledger, not the owner of connector fulfillment.
 - Vana derives the protected scope set from production issued-scope records (Context Gateway `connect_sessions.canonical_scopes` as evidence, and Data Gateway `grants.scopes` / `grant_registration_history.scopes`), not from all 54 catalog entries.
 - This repo keeps only connector-side evidence: which PDPP connector streams and fields can produce each legacy payload. That evidence lives in the cutover report, not in product code here.
-- The cutover does not rename any published scope ID. The fate of the legacy-derived `scope-catalog.json` and `SCOPES.md` (Vana DPv2 vocabulary that currently lives here) is an open decision: hand them over to the Vana owner, or freeze them. They must not be deleted while consumers pin them.
+- The cutover does not rename any published scope ID. The legacy-derived `scope-catalog.json`, `SCOPES.md` and their frozen schemas and fixtures are Vana DPv2 vocabulary owned by Vana. This tree no longer carries them; a consumer that pins an earlier commit still resolves the exact bytes from Git history.
 
 **D1. Identity.** The connector key (`anthropic`, `meta`, `shopify`, `youtube`, `icloud_notes`, ...) is the PDPP implementation identity: directory, manifest `connector_key`, and OCI name. It is not a public DPv2 scope prefix. The earlier proposal to rename public scopes (`claude.*`→`anthropic.*`, etc.) is WITHDRAWN (see the ownership boundary above).
 
