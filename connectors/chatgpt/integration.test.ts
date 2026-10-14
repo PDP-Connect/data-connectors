@@ -92,8 +92,6 @@ import {
 	resolveChatGptBackendFetchTimeoutMs,
 	resolveChatGptDetailLaneTuning,
 	resolveChatGptMaxDetailFetchesPerRun,
-	conversationSearchRecovery,
-	discoverConversationsWithinBudget,
 	resolveChatGptMaxRunWallClockMs,
 	resolveChatGptMaxTailDeferralGapsPerRun,
 	resolveChatGptProviderBudget,
@@ -6813,158 +6811,6 @@ test("runConversationsAndMessagesStreams: hitting the PAGINATION_SAFETY_LIMIT mi
 	assert.equal(skip.reason, "pagination_cap_truncated");
 });
 
-test("runConversationsAndMessagesStreams: a resumed discovery continues past the per-run budget until the list is drained", async () => {
-	// 6,000 stable rows (200 full pages), newest first. Run 1 stops at the
-	// per-run budget with an honest SKIP_RESULT and a checkpoint. Run 2 resumes
-	// from that checkpoint, must read past cursor 5010, reach the end of the
-	// list, and then clear the backfill. Before the fix the absolute ceiling
-	// stopped run 2 at the same 4980 -> 5010 step, so history never drained.
-	const TOTAL = 6000;
-	const fetchedCursors: number[] = [];
-	const makeDeps = (
-		harness: ReturnType<typeof makeRecordingEmit>,
-	): StreamDeps => ({
-		api: {
-			auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
-			fetch: async (path: string): Promise<ChatGptFetchResult> => {
-				await Promise.resolve();
-				if (!path.startsWith("/conversations/search?")) {
-					throw new Error(`unexpected fetch ${path}`);
-				}
-				const cursor = Number(
-					new URLSearchParams(path.split("?")[1]).get("cursor"),
-				);
-				fetchedCursors.push(cursor);
-				const items = Array.from(
-					{ length: Math.max(0, Math.min(30, TOTAL - cursor)) },
-					(_, idx) =>
-						makeConvo({
-							id: `drain-${cursor + idx}`,
-							update_time: 1_900_000_000 - (cursor + idx),
-						}),
-				);
-				return { status: 200, json: { items } };
-			},
-		},
-		sleep: (): Promise<void> => Promise.resolve(),
-		emit: harness.emit,
-		emitRecord: harness.emitRecord,
-		progress: (): Promise<void> => Promise.resolve(),
-		requested: new Map([["conversations", { name: "conversations" }]]),
-	});
-	const first = makeRecordingEmit(validateRecord);
-	await runConversationsAndMessagesStreams(makeDeps(first), {});
-	const firstState = first.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
-	)[0];
-	const firstCursor = firstState?.cursor as {
-		backfill?: { position_hint: number };
-	};
-	assert.equal(firstCursor.backfill?.position_hint, 5010);
-	assert.ok(
-		first.protocolMessages.some(
-			(m) =>
-				m.type === "SKIP_RESULT" && m.reason === "pagination_cap_truncated",
-		),
-		"an incomplete run keeps the honest SKIP_RESULT",
-	);
-
-	fetchedCursors.length = 0;
-	const second = makeRecordingEmit(validateRecord);
-	await runConversationsAndMessagesStreams(makeDeps(second), {
-		conversations: firstState?.cursor,
-	} as CollectContext["state"]);
-	assert.ok(
-		fetchedCursors.includes(4980),
-		"resume replays one page before the hint",
-	);
-	assert.ok(
-		fetchedCursors.includes(5970),
-		"resume continues past the first run's ceiling to the end of the list",
-	);
-	assert.equal(
-		second.protocolMessages.some(
-			(m) =>
-				m.type === "SKIP_RESULT" && m.reason === "pagination_cap_truncated",
-		),
-		false,
-		"a drained list reports no truncation",
-	);
-	const secondState = second.protocolMessages.filter(
-		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
-	)[0];
-	assert.equal(
-		(secondState?.cursor as { backfill?: unknown }).backfill,
-		undefined,
-		"completion is claimed only after end-of-list evidence, then the backfill clears",
-	);
-	assert.ok(
-		second.emitted.some((r) => r.data.id === "drain-5999"),
-		"the oldest history emits",
-	);
-});
-
-test("runConversationsAndMessagesStreams: with an older saved watermark, repeated budget-limited runs still reach the tail and clear the backfill", async () => {
-	// 12,000 stable rows, all newer than the saved last_update_time. The forward
-	// walk must read all of them before the watermark may advance, so its budget
-	// grows with the backfill hint. The resumed backfill's own progress must be
-	// kept even while the forward walk is still truncated; discarding it pins the
-	// hint at 5010 forever and the tail is never reached.
-	const TOTAL = 12_000;
-	const makeDeps = (
-		harness: ReturnType<typeof makeRecordingEmit>,
-	): StreamDeps => ({
-		api: {
-			auth: (): Promise<never> => Promise.reject(new Error("auth unused")),
-			fetch: async (path: string): Promise<ChatGptFetchResult> => {
-				await Promise.resolve();
-				if (!path.startsWith("/conversations/search?")) {
-					throw new Error(`unexpected fetch ${path}`);
-				}
-				const cursor = Number(
-					new URLSearchParams(path.split("?")[1]).get("cursor"),
-				);
-				const items = Array.from(
-					{ length: Math.max(0, Math.min(30, TOTAL - cursor)) },
-					(_, idx) =>
-						makeConvo({
-							id: `old-wm-${cursor + idx}`,
-							update_time: 1_900_000_000 - (cursor + idx),
-						}),
-				);
-				return { status: 200, json: { items } };
-			},
-		},
-		sleep: (): Promise<void> => Promise.resolve(),
-		emit: harness.emit,
-		emitRecord: harness.emitRecord,
-		progress: (): Promise<void> => Promise.resolve(),
-		requested: new Map([["conversations", { name: "conversations" }]]),
-	});
-	const emittedIds = new Set<string>();
-	let cursor: unknown = { last_update_time: "2000-01-01T00:00:00.000Z" };
-	let cleared = false;
-	for (let run = 0; run < 6 && !cleared; run += 1) {
-		const harness = makeRecordingEmit(validateRecord);
-		await runConversationsAndMessagesStreams(makeDeps(harness), {
-			conversations: cursor,
-		} as CollectContext["state"]);
-		for (const record of harness.emitted) emittedIds.add(String(record.data.id));
-		const state = harness.protocolMessages.filter(
-			(m): m is Extract<EmittedMessage, { type: "STATE" }> =>
-				m.type === "STATE",
-		)[0];
-		cursor = state?.cursor;
-		cleared = (cursor as { backfill?: unknown }).backfill === undefined;
-	}
-	assert.ok(cleared, "the backfill clears within a few budget-limited runs");
-	assert.ok(
-		emittedIds.has(`old-wm-${TOTAL - 1}`),
-		"the oldest row above the watermark was collected",
-	);
-	assert.equal(emittedIds.size, TOTAL);
-});
-
 // ─── task 16: bounded cap-tail deferral materialization ──────────────────────
 
 test("resolveChatGptMaxTailDeferralGapsPerRun: default-off, explicit, and fetch-cap-derived", () => {
@@ -12559,79 +12405,129 @@ test("runAccountPlanStream: a malformed 200 after a good run emits no STATE, so 
 	);
 });
 
-function discoveryHarness(rows: ReturnType<typeof makeConvo>[]): StreamDeps {
-	const sorted = [...rows].sort(
-		(a, b) => Number(b.update_time) - Number(a.update_time),
-	);
+test("runConversationsAndMessagesStreams: a cursor jump in the walk is not a contiguous read and never claims the list end", async () => {
+	// Cursors 0 -> 60 -> 90 skip rows 30-59, so the end-of-list response at 90
+	// proves nothing about the unread middle.
 	const harness = makeRecordingEmit(validateRecord);
-	const api: ChatGptApi = {
-		auth: (): Promise<never> => Promise.reject(new Error("unused")),
-		fetch: async (path: string): Promise<ChatGptFetchResult> => {
-			const cursor = Number(
-				new URLSearchParams(path.split("?")[1]).get("cursor"),
-			);
-			return {
-				status: 200,
-				json: {
-					items: sorted.slice(cursor, cursor + 30),
-					next_cursor: cursor + 30 < sorted.length ? cursor + 30 : null,
-				},
-			};
-		},
+	const row = (id: string, t: number) => makeConvo({ id, update_time: t });
+	const pageAt = (cursor: number) => {
+		const items = Array.from({ length: 30 }, (_, i) =>
+			row(`jump-${cursor + i}`, 1_900_000_000 - cursor - i),
+		);
+		if (cursor === 0) return { items, next_cursor: 60 };
+		if (cursor === 60) return { items, next_cursor: 90 };
+		return { items: [], next_cursor: null };
 	};
-	return {
-		api,
-		sleep: () => Promise.resolve(),
-		emit: harness.emit,
-		emitRecord: harness.emitRecord,
-		progress: () => Promise.resolve(),
-		requested: new Map([["conversations", { name: "conversations" }]]),
-	} as StreamDeps;
-}
-
-const discoveryRows = () =>
-	Array.from({ length: 200 }, (_, index) =>
-		makeConvo({ id: `c-${index}`, update_time: 1_700_001_000 - index }),
+	await runConversationsAndMessagesStreams(
+		{
+			api: {
+				auth: (): Promise<never> => Promise.reject(new Error("unused")),
+				fetch: async (path: string): Promise<ChatGptFetchResult> => {
+					await Promise.resolve();
+					const cursor = Number(
+						new URLSearchParams(path.split("?")[1]).get("cursor"),
+					);
+					return { status: 200, json: pageAt(cursor) };
+				},
+			},
+			sleep: (): Promise<void> => Promise.resolve(),
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			progress: (): Promise<void> => Promise.resolve(),
+			requested: new Map([["conversations", { name: "conversations" }]]),
+		},
+		{ conversations: undefined } as CollectContext["state"],
 	);
-
-test("conversation discovery: an incremental walk stopped by old pages is an incremental window, not inventory proof", async () => {
-	const deps = discoveryHarness(discoveryRows());
-	const found = await discoverConversationsWithinBudget(deps, {
-		budget: 10_000,
-		priorCursor: new Date(1_800_000_000 * 1000).toISOString(),
-		recovery: conversationSearchRecovery(deps),
-	});
-	assert.equal(found.truncated, false);
-	assert.equal(found.evidence, "incremental_window");
-	assert.equal(found.exhausted, false);
+	assert.ok(
+		harness.protocolMessages.some(
+			(m) => m.type === "SKIP_RESULT" && m.reason === "conversation_list_unstable",
+		),
+		"a non-contiguous walk reports the list as unstable",
+	);
+	const state = harness.protocolMessages.find(
+		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
+	);
+	assert.notEqual(
+		(state?.cursor as { backfill?: unknown } | undefined)?.backfill,
+		undefined,
+		"the walk stays incomplete, so the backfill is kept",
+	);
 });
 
-test("conversation discovery: a full walk from cursor 0 to the end of the list is exhausted", async () => {
-	const deps = discoveryHarness(discoveryRows());
-	const found = await discoverConversationsWithinBudget(deps, {
-		budget: 10_000,
-		priorCursor: null,
-		recovery: conversationSearchRecovery(deps),
-	});
-	assert.equal(found.truncated, false);
-	assert.equal(found.evidence, "end_of_list");
-	assert.equal(found.exhausted, true);
+test("processConversationDetail: a parent cycle is structurally incomplete, never complete", async () => {
+	const { deps, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a2" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a2",
+				mapping: {
+					a1: userNode("a2", ["a2"], "one"),
+					a2: userNode("a1", ["a1"], "two", "assistant"),
+				},
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	assert.equal(outcome.complete, false);
+	const gaps = detailGaps(messages);
+	assert.equal(gaps.length, 1);
+	assert.equal(
+		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		"branch_structurally_incomplete",
+	);
 });
 
-test("conversation discovery: a walk resumed from a saved cursor cannot claim the inventory is complete", async () => {
-	const rows = discoveryRows();
-	const deps = discoveryHarness(rows);
-	const found = await discoverConversationsWithinBudget(deps, {
-		budget: 10_000,
-		priorCursor: null,
-		recovery: conversationSearchRecovery(deps),
-		resumeBackfill: {
-			position_hint: 60,
-			oldest_update_time: new Date(1_700_000_941 * 1000).toISOString(),
-			boundary_ids: ["c-59"],
+test("processConversationDetail: a repeat detail never changes an already-emitted message's parent_id on the append-only stream", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	deps.emittedMessageIdsThisRun = new Set<string>();
+	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
+	const detail = (a1Role: string): ChatGptFetchResult => ({
+		status: 200,
+		json: {
+			current_node: "a2",
+			mapping: {
+				a0: userNode(null, ["a1"], "first"),
+				// a role over the 40-char cap is rejected, so a2 relinks to a0
+				a1: userNode("a0", ["a2"], "middle", a1Role),
+				a2: userNode("a1", [], "last", "assistant"),
+			},
 		},
 	});
-	assert.equal(found.truncated, false);
-	assert.equal(found.evidence, "resumed_end_of_list");
-	assert.equal(found.exhausted, false);
+	await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a2" }),
+		detail("r".repeat(41)),
+		makeEmitConversation(deps),
+	);
+	const second = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a2" }),
+		detail("user"),
+		makeEmitConversation(deps),
+	);
+	const a2Emits = emitted.filter(
+		(r) => r.stream === "messages" && r.data.id === "a2",
+	);
+	assert.equal(a2Emits.length, 1, "a2 is emitted once");
+	assert.equal(a2Emits[0]?.data.parent_id, "a0");
+	const conversations = emitted.filter((r) => r.stream === "conversations");
+	const a2InMapping = (
+		conversations[1]?.data as { mapping?: Record<string, { parent?: string }> }
+	).mapping?.a2;
+	assert.equal(
+		a2InMapping?.parent ?? "a0",
+		"a0",
+		"the conversation record keeps the emitted parent",
+	);
+	assert.equal(second.complete, false, "the changed link is reported, not repaired");
+	assert.ok(
+		detailGaps(messages).some(
+			(g) =>
+				(g.detail_locator as { incomplete_reason?: string }).incomplete_reason ===
+				"branch_structurally_incomplete",
+		),
+	);
 });

@@ -2303,6 +2303,8 @@ export interface StreamDeps {
 	isRecordSelected?: CollectContext["isRecordSelected"];
 	/** Message IDs already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
+	/** parent_id each message was emitted with this run; the stream is append-only. */
+	emittedMessageParentsThisRun?: Map<string, string | null>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -2667,6 +2669,12 @@ async function emitBranchReconciliation(
 	// whose `parent` names an id the mapping lacks was cut short upstream — the
 	// branch continues in the provider's data but not in ours.
 	const danglingParent = findDanglingBranchParent(mapping, currentNode);
+	if (danglingParent === BRANCH_PARENT_CYCLE) {
+		chatGptDiagnostic(
+			`branch_cycle: a conversation's current-branch parent links form a cycle; the branch has no root (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
+		);
+		return true;
+	}
 	if (danglingParent !== null) {
 		// The diagnostic carries no conversation or node id (the same form as
 		// `empty_detail`).
@@ -2695,7 +2703,9 @@ function findDanglingBranchParent(
 ): string | null {
 	const visited = new Set<string>();
 	let id: string | null | undefined = currentNode;
-	while (id && !visited.has(id) && mapping[id]) {
+	while (id && mapping[id]) {
+		// A revisited node means the parent links loop and never reach a root.
+		if (visited.has(id)) return BRANCH_PARENT_CYCLE;
 		visited.add(id);
 		const parent: string | null | undefined = mapping[id]?.parent;
 		if (parent && !mapping[parent]) {
@@ -2705,6 +2715,9 @@ function findDanglingBranchParent(
 	}
 	return null;
 }
+
+/** Sentinel for `findDanglingBranchParent`: not a real node id. */
+const BRANCH_PARENT_CYCLE = "\u0000branch-parent-cycle";
 
 /**
  * Process a single fetched conversation detail payload: emit the merged
@@ -2789,6 +2802,8 @@ export async function processConversationDetail(
 		| "non_message"
 		| null = null;
 	const alreadyEmittedIds = deps.emittedMessageIdsThisRun ?? new Set<string>();
+	const emittedParents =
+		deps.emittedMessageParentsThisRun ?? new Map<string, string | null>();
 	for (const [nodeId, node] of Object.entries(mapping)) {
 		const onBranch = currentBranchIds.has(nodeId);
 		const msg = extractMessage(nodeId, node, c.id, onBranch);
@@ -2860,6 +2875,24 @@ export async function processConversationDetail(
 			retained.msg.parent_id = reconciled.parent_id;
 		}
 	}
+	// `messages` is append_only: a record already emitted keeps its payload. A
+	// repeat detail whose repair would relink it keeps the emitted parent and
+	// reports the conversation as structurally incomplete instead.
+	let emittedParentConflict = false;
+	for (const candidate of retainedBranch) {
+		const id = typeof candidate.msg.id === "string" ? candidate.msg.id : null;
+		if (!id || !candidate.alreadyEmitted || !emittedParents.has(id)) continue;
+		const emittedParent = emittedParents.get(id) ?? null;
+		if (candidate.msg.parent_id !== emittedParent) {
+			candidate.msg.parent_id = emittedParent;
+			emittedParentConflict = true;
+		}
+	}
+	if (emittedParentConflict) {
+		chatGptDiagnostic(
+			"branch_parent_changed: a repeat detail would relink an already-emitted message; the emitted parent_id was kept",
+		);
+	}
 	const emittedCurrentNode = reconciledBranch.currentNode;
 	const emittedBranchCount = reconciledBranch.count;
 	const emittedMapping: Record<string, ChatGptNode> = {};
@@ -2892,7 +2925,10 @@ export async function processConversationDetail(
 		const { msg } = candidate;
 		if (candidate.alreadyEmitted) continue;
 		const messageId = typeof msg.id === "string" ? msg.id : null;
-		if (messageId) alreadyEmittedIds.add(messageId);
+		if (messageId) {
+			alreadyEmittedIds.add(messageId);
+			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
+		}
 		await deps.emitRecord("messages", msg);
 	}
 	const branchStructurallyIncomplete = await emitBranchReconciliation(
@@ -2908,7 +2944,7 @@ export async function processConversationDetail(
 			? "message_shape_rejected"
 			: lossyContentMessages > 0
 				? "message_content_lossy"
-				: branchStructurallyIncomplete
+				: branchStructurallyIncomplete || emittedParentConflict
 					? "branch_structurally_incomplete"
 					: null;
 	if (incompleteReason) {
@@ -2943,8 +2979,6 @@ export async function processConversationDetail(
 }
 
 const PAGINATION_SAFETY_LIMIT = 5000;
-/** Consecutive all-old pages that end an incremental conversation walk. */
-const CONVERSATION_OLD_PAGES_TO_STOP = 3;
 const GIZMO_MAX_PAGES = 50;
 
 /**
@@ -3417,17 +3451,7 @@ export async function runSharedConversationsStream(
 interface ConversationListResult {
 	backfill: ConversationBackfill | null;
 	backfillItems?: ConversationListItem[];
-	/** True when the walk stopped only because it spent its per-run page budget. */
-	budgetExhausted?: boolean;
 	items: ConversationListItem[];
-	/** Cursor the walk was at when it reached the end of the list. */
-	endCursor?: number;
-	/**
-	 * Set on a non-truncated walk that stopped on consecutive old pages instead
-	 * of the end-of-list response. That proves the incremental window was read,
-	 * not that the whole inventory was seen.
-	 */
-	stoppedOnOldPages?: boolean;
 	truncated: boolean;
 }
 
@@ -3610,7 +3634,6 @@ async function listConversationsSinceCursor(
 	startCursor = 0,
 	resumeBackfill?: ConversationBackfill,
 	recovery = deps.searchRecovery ?? conversationSearchRecovery(deps),
-	budget = PAGINATION_SAFETY_LIMIT,
 ): Promise<ConversationListResult> {
 	const requestedSince =
 		deps.requested.get("conversations")?.time_range?.since ??
@@ -3644,7 +3667,6 @@ async function listConversationsSinceCursor(
 			startCursor,
 			resumeBackfill,
 			inOrderConversationSearchPages(recovery),
-			budget,
 		);
 	}
 	const pages = prefetchingConversationSearchPages(deps, width, recovery);
@@ -3666,7 +3688,6 @@ async function listConversationsSinceCursor(
 		startCursor,
 		resumeBackfill,
 		pages,
-		budget,
 	);
 	try {
 		await pages.settle();
@@ -3680,7 +3701,6 @@ async function listConversationsSinceCursor(
 			startCursor,
 			resumeBackfill,
 			inOrderConversationSearchPages(recovery),
-			budget,
 		);
 	}
 	// A page that stayed short may have been short only because of the burst
@@ -3720,7 +3740,6 @@ async function listConversationsSinceCursor(
 		startCursor,
 		resumeBackfill,
 		inOrderConversationSearchPages(recovery),
-		budget,
 	);
 }
 
@@ -3730,7 +3749,6 @@ async function walkConversationSearch(
 	startCursor: number,
 	resumeBackfill: ConversationBackfill | undefined,
 	pages: ConversationSearchPages,
-	budget = PAGINATION_SAFETY_LIMIT,
 ): Promise<ConversationListResult> {
 	const conversationsById = new Map<string, ConversationListItem>();
 	const backfillTailById = new Map<string, ConversationListItem>();
@@ -3747,9 +3765,23 @@ async function walkConversationSearch(
 	const requestedSince =
 		deps.requested.get("conversations")?.time_range?.since ??
 		deps.requested.get("messages")?.time_range?.since;
-	const complete = (
-		options: { oldPages?: boolean } = {},
-	): ConversationListResult => {
+	// Every next cursor must be the expected successor of the one before it.
+	// A jump leaves the rows between unread, so the walk cannot claim the end.
+	let contiguous = true;
+	const complete = (): ConversationListResult => {
+		if (!contiguous) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT conversation search skipped cursor positions, so the list was not read contiguously",
+				{ cursor },
+			);
+			return {
+				items: [...conversationsById.values()],
+				truncated: true,
+				backfillItems: [...conversationsById.values()],
+				backfill: conversationBackfillAt(conversationsById.values(), cursor),
+			};
+		}
 		if (resumeBackfill && !resumeBoundarySeen) {
 			emitConversationListUnstable(
 				deps,
@@ -3770,8 +3802,6 @@ async function walkConversationSearch(
 			items: [...conversationsById.values()],
 			truncated: false,
 			backfill: null,
-			endCursor: cursor,
-			...(options.oldPages ? { stoppedOnOldPages: true } : {}),
 			...(resumeBackfill
 				? { backfillItems: [...backfillTailById.values()] }
 				: {}),
@@ -3801,7 +3831,7 @@ async function walkConversationSearch(
 			return null;
 		}
 	};
-	const maxConsecutiveOldPages = CONVERSATION_OLD_PAGES_TO_STOP;
+	const maxConsecutiveOldPages = 3;
 	let consecutiveOldPages = 0;
 	let page = 0;
 	while (true) {
@@ -4031,7 +4061,7 @@ async function walkConversationSearch(
 				? consecutiveOldPages + 1
 				: 0;
 			if (consecutiveOldPages >= maxConsecutiveOldPages) {
-				return complete({ oldPages: true });
+				return complete();
 			}
 		}
 		if (nextCursor === null) {
@@ -4044,91 +4074,33 @@ async function walkConversationSearch(
 					...complete(),
 				};
 		}
+		const readCount = Math.max(0, ...attempts.map((items) => items.length));
+		if (
+			nextCursor !== cursor + pageSize &&
+			(readCount === 0 || nextCursor !== cursor + readCount)
+		) {
+			contiguous = false;
+		}
 		cursor = nextCursor;
-		// The budget is per run, measured from where this run started, so a
-		// resumed walk (which restarts one page before its checkpoint) always
-		// makes net progress instead of hitting the same absolute ceiling.
-		if (cursor - resumeStartCursor > budget) {
+		if (cursor > PAGINATION_SAFETY_LIMIT) {
 			deps.emit({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
-				message: `conversations search spent its ${budget}-item per-run budget with more items remaining; the next run resumes from the saved position`,
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message: `conversations search stopped at the ${PAGINATION_SAFETY_LIMIT}-item safety cap with more items remaining`,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
 				diagnostics: { cursor, collected: conversationsById.size },
 			});
 			return {
 				items: [...conversationsById.values()],
 				truncated: true,
-				budgetExhausted: true,
 				backfill: conversationBackfillAt(conversationsById.values(), cursor),
 			};
 		}
 	}
-}
-
-/** Evidence behind a discovery run's stopping point. */
-type ConversationDiscoveryEvidence =
-	| "budget_exhausted"
-	| "end_of_list"
-	| "incremental_window"
-	| "interrupted"
-	| "resumed_end_of_list";
-
-type ConversationDiscovery = ConversationListResult & {
-	evidence: ConversationDiscoveryEvidence;
-	/**
-	 * True only for a contiguous walk from cursor 0 to the end-of-list response
-	 * within one run. An old-page stop (`incremental_window`) and a walk resumed
-	 * from a saved cursor (`resumed_end_of_list`) are never inventory proof.
-	 */
-	exhausted: boolean;
-	/** Cursor the next run resumes from (replayed one page earlier); null once drained. */
-	nextCursor: number | null;
-};
-
-/**
- * Connector-local resumable discovery: read the conversation list from
- * `startCursor` for at most `budget` items of cursor distance, then report where
- * to continue. `exhausted` is true only when one run's walk from cursor 0
- * reached the end of the list; a spent budget, an interrupted read, an old-page
- * stop or a cross-run resumed walk is never inventory completion. Kept in
- * one place so it can be swapped onto a shared paginator later.
- */
-export async function discoverConversationsWithinBudget(
-	deps: StreamDeps,
-	options: {
-		budget: number;
-		priorCursor: string | null;
-		recovery: ReturnType<typeof conversationSearchRecovery>;
-		resumeBackfill?: ConversationBackfill;
-		startCursor?: number;
-	},
-): Promise<ConversationDiscovery> {
-	const result = await listConversationsSinceCursor(
-		deps,
-		options.priorCursor,
-		options.startCursor ?? 0,
-		options.resumeBackfill,
-		options.recovery,
-		options.budget,
-	);
-	const resumed =
-		options.resumeBackfill !== undefined || (options.startCursor ?? 0) !== 0;
-	let evidence: ConversationDiscoveryEvidence = "end_of_list";
-	if (result.truncated) {
-		evidence = result.budgetExhausted ? "budget_exhausted" : "interrupted";
-	} else if (result.stoppedOnOldPages) {
-		evidence = "incremental_window";
-	} else if (resumed) {
-		evidence = "resumed_end_of_list";
-	}
-	return {
-		...result,
-		evidence,
-		exhausted: evidence === "end_of_list",
-		nextCursor: result.backfill?.position_hint ?? null,
-	};
 }
 
 /**
@@ -4198,7 +4170,7 @@ async function emitConversationSearchDeferred(
 
 /** Only the consumer waits/probes. Speculative reads retain their errors and
  * drain before recovery; they never start independent cooldown loops. */
-export function conversationSearchRecovery(deps: StreamDeps) {
+function conversationSearchRecovery(deps: StreamDeps) {
 	const runBudget = deps.runBudget ?? new ChatGptRunBudget();
 	let consecutiveWaits = 0;
 	let pressured = false;
@@ -5686,7 +5658,11 @@ export async function runMessagesAndConversationsWithDetail(
 	let completedDetails = 0;
 	const detailDeps = deps.emittedMessageIdsThisRun
 		? deps
-		: { ...deps, emittedMessageIdsThisRun: new Set<string>() };
+		: {
+				...deps,
+				emittedMessageIdsThisRun: new Set<string>(),
+				emittedMessageParentsThisRun: new Map<string, string | null>(),
+			};
 	const random = pacing.random ?? Math.random;
 	const sleep = pacing.sleep ?? sleepMs;
 	const providerBudget = pacing.providerBudget ?? deps.providerBudget ?? null;
@@ -6980,6 +6956,7 @@ export async function runConversationsAndMessagesStreams(
 	const runDeps: StreamDeps = {
 		...deps,
 		emittedMessageIdsThisRun: new Set<string>(),
+		emittedMessageParentsThisRun: new Map<string, string | null>(),
 		batchFallbackLog: deps.batchFallbackLog ?? { logged: false },
 		searchRecovery: listingRecovery,
 	};
@@ -7018,45 +6995,30 @@ export async function runConversationsAndMessagesStreams(
 			return existing;
 		}
 		const listed = (async (): Promise<ConversationListResult> => {
-			// While a backfill is saved, every row above its checkpoint is newer
-			// than the pinned watermark, so the forward walk must read past the
-			// checkpoint plus the old-page evidence window before it can stop.
-			const forward = await discoverConversationsWithinBudget(deps, {
-				priorCursor: cursor,
-				recovery: listingRecovery,
-				budget:
-					savedBackfill === null
-						? PAGINATION_SAFETY_LIMIT
-						: savedBackfill.position_hint +
-							CONVERSATION_PAGE_SIZE * (CONVERSATION_OLD_PAGES_TO_STOP + 1),
-			});
+			const forward = await listConversationsSinceCursor(
+				deps,
+				cursor,
+				0,
+				undefined,
+				listingRecovery,
+			);
 			if (savedBackfill === null) return forward;
 			// Collect the incremental frontier first, then resume the incomplete
 			// full-list walk. The update-time watermark and paging continuation are
 			// independent: one finds arrivals; the other drains older unseen pages.
-			const backfill = await discoverConversationsWithinBudget(deps, {
-				priorCursor: null,
-				recovery: listingRecovery,
-				resumeBackfill: savedBackfill,
-				budget: PAGINATION_SAFETY_LIMIT,
-			});
+			const backfill = await listConversationsSinceCursor(
+				deps,
+				null,
+				0,
+				savedBackfill,
+				listingRecovery,
+			);
 			const merged = new Map<string, ConversationListItem>();
 			for (const item of backfill.items) merged.set(item.id, item);
 			for (const item of forward.items) merged.set(item.id, item);
-			// The two walks progress independently. While the forward walk is still
-			// truncated the watermark stays pinned, so the forward budget (which
-			// grows with the hint) must keep growing: keep the backfill's own
-			// continuation, or, once it drained, a boundary at the end it reached.
-			let nextBackfill = backfill.backfill;
-			if (forward.truncated && !backfill.truncated) {
-				nextBackfill =
-					backfill.endCursor === undefined
-						? savedBackfill
-						: conversationBackfillAt(
-								backfill.backfillItems ?? backfill.items,
-								Math.max(backfill.endCursor, savedBackfill.position_hint),
-							);
-			}
+			const nextBackfill = forward.truncated
+				? savedBackfill
+				: backfill.backfill;
 			return {
 				items: [...merged.values()],
 				truncated: forward.truncated || backfill.truncated,
