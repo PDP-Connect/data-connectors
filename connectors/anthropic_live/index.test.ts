@@ -88,7 +88,7 @@ test("incremental run reads only conversations changed after the cursor and only
 		1,
 	);
 	assert.deepEqual(h.states("messages").at(-1), {
-		version: 2,
+		version: 3,
 		organization_id: ORG,
 		scope: { since: null, until: null, resources: null, fields: null },
 		read_through: { update_time: at(30), id: uuid(2) },
@@ -177,7 +177,8 @@ test("the list is paged and a backlog over the per-run cap is deferred", async (
 	assert.equal(h.of("conversations").length, MAX_CONVERSATIONS_PER_RUN);
 	assert.equal(
 		h.calls.filter((c) => c.includes("/chat_conversations?limit=50")).length,
-		Math.ceil(total / 50),
+		// Read twice: a list of several pages is used only when two reads agree.
+		2 * Math.ceil(total / 50),
 	);
 	assert.deepEqual(h.skips(), [
 		{

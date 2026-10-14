@@ -46,10 +46,10 @@
  *     first run on a large account finishes over several runs. A list longer
  *     than MAX_LIST_PAGES pages fails the run instead of skipping its oldest
  *     conversations.
- *   - Incremental message reads assume the list shows every conversation
- *     whose messages predate a completed run. A conversation the list did not
- *     show then (one skipped while another was deleted mid-paging) has its
- *     older messages collected only by a full refresh.
+ *   - The list is paged by offset. A list of more than one page is read
+ *     again until two reads agree, at most LIST_PASSES reads; then the run
+ *     fails, retryable, with no checkpoint (see listConversations). An owner
+ *     who changes conversations during every run delays collection.
  *
  * Reachability probe: permanently exempt. Every endpoint sits behind the
  * claude.ai login wall and there is no unauthenticated probe target.
@@ -99,6 +99,8 @@ const USAGE_LIMITS_STREAM = "usage_limits";
 
 const LIST_PAGE_SIZE = 50;
 const MAX_LIST_PAGES = 400;
+/** Reads of the whole list per run before a changing list fails the run. */
+const LIST_PASSES = 4;
 export const MAX_CONVERSATIONS_PER_RUN = 200;
 // Read per call so tests can shorten it (the repo's timeout-override
 // convention; see connectors/anthropic/index.ts).
@@ -127,12 +129,19 @@ class AuthError extends Error {
  * profile, and only the API says whether it still works.
  */
 export async function hasClaudeSession(page: Page): Promise<boolean> {
+	return (await readSession(page)) === "live";
+}
+
+/** "live", or the HTTP status that says it is not (0: no answer). */
+async function readSession(page: Page): Promise<"live" | number> {
 	try {
-		if (!(await isOnClaude(page))) return false;
+		if (!(await isOnClaude(page))) return 0;
 		const orgs = await apiGet(page, "/api/organizations");
-		return orgs.status === 200 && Array.isArray(orgs.json);
+		return orgs.status === 200 && Array.isArray(orgs.json)
+			? "live"
+			: orgs.status;
 	} catch {
-		return false;
+		return 0;
 	}
 }
 
@@ -140,13 +149,17 @@ export async function hasClaudeSession(page: Page): Promise<boolean> {
  * Session check that may navigate: opens claude.ai first when the page is on
  * another origin. Used where no one is signing in, and by PageShim hosts.
  */
-export async function probeAnthropicLiveSessionOnPage(
-	page: Page,
-): Promise<boolean> {
+async function readSessionOnPage(page: Page): Promise<"live" | number> {
 	if (!(await isOnClaude(page))) {
 		await page.goto(CLAUDE_HOME_URL, { waitUntil: "domcontentloaded" });
 	}
-	return await hasClaudeSession(page);
+	return await readSession(page);
+}
+
+export async function probeAnthropicLiveSessionOnPage(
+	page: Page,
+): Promise<boolean> {
+	return (await readSessionOnPage(page)) === "live";
 }
 
 export async function probeAnthropicLiveSession({
@@ -178,7 +191,13 @@ export async function ensureAnthropicLiveSession({
 	EnsureSessionArgs,
 	"assist" | "capture" | "completeAssistance" | "page" | "sendInteraction"
 >): Promise<void> {
-	if (await probeAnthropicLiveSessionOnPage(page)) return;
+	const session = await readSessionOnPage(page);
+	if (session === "live") return;
+	// Claude failing, not refusing: signing in again would not help. The
+	// message matches the runtime's retryable pattern.
+	if (session === 429 || session >= 500) {
+		throw new Error(`anthropic_live_organizations_failed: http ${session}`);
+	}
 	await page.goto(CLAUDE_LOGIN_URL, { waitUntil: "domcontentloaded" });
 	const ready = await manualBrowserLogin({
 		assist,
@@ -493,7 +512,9 @@ function covers(prior: ChatScope, current: ChatScope): boolean {
 }
 
 /**
- * STATE of `conversations` and of `messages`, one per stream (0.2 format).
+ * STATE of `conversations` and of `messages`, one per stream. Version 3:
+ * version 2 cursors came from a list read that did not check for changes
+ * between pages, so they can sit past a conversation that was never read.
  *
  * - read_through: every conversation listed at or before this key was read
  *   at that version, under `scope`, in `organization_id`.
@@ -505,7 +526,7 @@ function covers(prior: ChatScope, current: ChatScope): boolean {
  * Holds no record content and no credential.
  */
 interface ChatCursor {
-	version: 2;
+	version: 3;
 	organization_id: string;
 	scope: ChatScope;
 	read_through: ListKey | null;
@@ -513,7 +534,7 @@ interface ChatCursor {
 }
 
 function parseCursor(value: unknown): ChatCursor | null {
-	if (!isRecord(value) || value.version !== 2) return null;
+	if (!isRecord(value) || value.version !== 3) return null;
 	const { organization_id: org, scope, read_through: through } = value;
 	const emitted = value.emitted_through ?? null;
 	if (typeof org !== "string" || !isRecord(scope)) return null;
@@ -543,7 +564,7 @@ function parseCursor(value: unknown): ChatCursor | null {
 	const fields = list(scope.fields);
 	if (resources === false || fields === false) return null;
 	return {
-		version: 2,
+		version: 3,
 		organization_id: org,
 		scope: { since, until, resources, fields },
 		read_through:
@@ -564,7 +585,7 @@ interface StreamPlan {
 }
 
 /**
- * Where a stream resumes. A full refresh, a 0.1 cursor, another
+ * Where a stream resumes. A full refresh, a 0.1 or version 2 cursor, another
  * organization or a wider selection starts over. A later `until` keeps the
  * cursor but rewinds it to before the old `until`: records at or after it
  * were left out, and only conversations updated since then can hold them.
@@ -665,7 +686,7 @@ function inWindow(plan: StreamPlan, record: RecordData): boolean {
 
 function cursorOf(plan: StreamPlan, organizationId: string): ChatCursor {
 	return {
-		version: 2,
+		version: 3,
 		organization_id: organizationId,
 		scope: plan.scope,
 		read_through: plan.readThrough,
@@ -691,54 +712,141 @@ function listed(raw: unknown): ListedConversation | null {
 	return { raw, id: uuid, update_time: updatedAt };
 }
 
+/** Read one page of the conversation list; every entry must be readable. */
+async function listPage(
+	ctx: Ctx,
+	orgPath: string,
+	offset: number,
+): Promise<ListedConversation[]> {
+	const res = await apiGet(
+		ctx.page,
+		`${orgPath}/chat_conversations?limit=${LIST_PAGE_SIZE}&offset=${offset}`,
+	);
+	if (res.status === 401 || res.status === 403) {
+		throw new AuthError(res.status);
+	}
+	if (res.status !== 200 || !Array.isArray(res.json)) {
+		throw new Error(`anthropic_live_list_failed: http ${res.status}`);
+	}
+	const items = res.json.map(listed);
+	if (items.some((item) => item === null)) {
+		throw new ChatCollectionFailure(
+			`Claude's conversation list had an entry without a readable id or update time at offset ${offset}; nothing was checkpointed past it.`,
+			true,
+		);
+	}
+	return items as ListedConversation[];
+}
+
+interface ListPass {
+	items: ListedConversation[];
+	pages: number;
+}
+
 /**
- * Page the conversation list (newest change first) until a page reaches a
- * conversation updated before `oldest`, or the end. Every entry must be
- * readable: one that cannot be placed in the order could sit behind the
- * cursor. Running out of pages first is a failure, never a shorter list.
+ * Page the list once (newest change first) until a page reaches a
+ * conversation updated before `oldest`, or the end. Running out of pages
+ * first is a failure, never a shorter list.
+ */
+async function listPass(
+	ctx: Ctx,
+	orgPath: string,
+	oldest: string | null,
+): Promise<ListPass> {
+	const items: ListedConversation[] = [];
+	for (let pageIndex = 0; pageIndex < MAX_LIST_PAGES; pageIndex++) {
+		const page = await listPage(ctx, orgPath, pageIndex * LIST_PAGE_SIZE);
+		items.push(...page);
+		const reachedOldest =
+			oldest !== null &&
+			page.some((item) => compareInstants(item.update_time, oldest) < 0);
+		if (page.length < LIST_PAGE_SIZE || reachedOldest) {
+			return { items, pages: pageIndex + 1 };
+		}
+	}
+	throw new ChatCollectionFailure(
+		`Claude's conversation list is longer than ${MAX_LIST_PAGES * LIST_PAGE_SIZE} entries; older conversations were not read and nothing was checkpointed.`,
+		false,
+	);
+}
+
+/**
+ * The id and update time of every listed conversation updated at or after
+ * `oldest`. Null when an id is listed twice, or when an entry is newer than
+ * the first one: it changed after the first page was read.
+ */
+function inventory(
+	items: readonly ListedConversation[],
+	oldest: string | null,
+): Set<string> | null {
+	const entries = new Set<string>();
+	const ids = new Set<string>();
+	const first = items[0];
+	for (const item of items) {
+		if (oldest !== null && compareInstants(item.update_time, oldest) < 0) {
+			continue;
+		}
+		if (ids.has(item.id)) return null;
+		if (first && compareInstants(item.update_time, first.update_time) > 0) {
+			return null;
+		}
+		ids.add(item.id);
+		entries.add(`${item.id} ${item.update_time}`);
+	}
+	return entries;
+}
+
+function sameInventory(a: Set<string>, b: Set<string>): boolean {
+	return a.size === b.size && [...a].every((entry) => b.has(entry));
+}
+
+/**
+ * The listed conversations a run reads from. The list is paged by offset
+ * and can change between pages, and equal update times can come back in any
+ * order, so one pass over several pages can miss a conversation. Such a pass
+ * is used only when its inventory (see inventory()) is not null and equals
+ * the inventory of the next full pass. A single page is one response and is used
+ * as it is.
+ *
+ * Why that is enough. Let A and B be the two passes and t the time A read
+ * its last page. B, read after t, lists every entry of A with the same
+ * update time. Update times only grow and a deleted conversation does not
+ * come back, so at t every entry of A still existed unchanged. A's entries
+ * from the pages before its last are distinct, at or after `oldest`, and as
+ * many as those pages' positions. At t they must fill exactly those
+ * positions: anywhere else ahead of the first older entry, A's last page
+ * would list them again. A's last page lists every other position ahead of
+ * the first older entry. So A holds every conversation that existed
+ * unchanged through A. A conversation updated or added after A read its
+ * first page is newer than every entry A may hold, so B lists it, ahead of
+ * A's entries, and the inventories differ. The read cursor never passes it.
+ *
+ * Assumptions: the list is in update-time order (equal times in any order),
+ * each page is one consistent response, a change gets an update time later
+ * than every one listed before it, and a deleted conversation does not come
+ * back with its old update time.
+ *
+ * At most LIST_PASSES passes per run; a list that keeps changing fails the
+ * run, retryable, keeping both cursors.
  */
 async function listConversations(
 	ctx: Ctx,
 	orgPath: string,
 	oldest: string | null,
 ): Promise<ListedConversation[]> {
-	const byId = new Map<string, ListedConversation>();
-	for (let pageIndex = 0; pageIndex < MAX_LIST_PAGES; pageIndex++) {
-		const offset = pageIndex * LIST_PAGE_SIZE;
-		const res = await apiGet(
-			ctx.page,
-			`${orgPath}/chat_conversations?limit=${LIST_PAGE_SIZE}&offset=${offset}`,
-		);
-		if (res.status === 401 || res.status === 403) {
-			throw new AuthError(res.status);
+	let previous: Set<string> | null = null;
+	for (let attempt = 0; attempt < LIST_PASSES; attempt++) {
+		const pass = await listPass(ctx, orgPath, oldest);
+		if (pass.pages === 1) return pass.items;
+		const current = inventory(pass.items, oldest);
+		if (previous && current && sameInventory(previous, current)) {
+			return pass.items;
 		}
-		if (res.status !== 200 || !Array.isArray(res.json)) {
-			throw new Error(`anthropic_live_list_failed: http ${res.status}`);
-		}
-		const items = res.json.map(listed);
-		if (items.some((item) => item === null)) {
-			throw new ChatCollectionFailure(
-				`Claude's conversation list had an entry without a readable id or update time at offset ${offset}; nothing was checkpointed past it.`,
-				true,
-			);
-		}
-		let reachedOldest = false;
-		for (const item of items) {
-			if (item === null) continue;
-			// The list can shift between pages while the owner is chatting.
-			const seen = byId.get(item.id);
-			if (!seen || compareKeys(item, seen) > 0) byId.set(item.id, item);
-			if (oldest !== null && compareInstants(item.update_time, oldest) < 0) {
-				reachedOldest = true;
-			}
-		}
-		if (res.json.length < LIST_PAGE_SIZE || reachedOldest) {
-			return [...byId.values()];
-		}
+		previous = current;
 	}
 	throw new ChatCollectionFailure(
-		`Claude's conversation list is longer than ${MAX_LIST_PAGES * LIST_PAGE_SIZE} entries; older conversations were not read and nothing was checkpointed.`,
-		false,
+		`Claude's conversation list changed while it was read, in ${LIST_PASSES} reads; nothing was checkpointed and the next run reads it again.`,
+		true,
 	);
 }
 
@@ -840,7 +948,6 @@ export async function runConversationStreams(
 
 		for (const [index, item] of batch.entries()) {
 			let detail: ConversationDetail | null = null;
-			let deleted = false;
 			if (messages) {
 				if (index > 0) await politeDelay(detailDelayMs());
 				await ctx.progress(
@@ -854,25 +961,29 @@ export async function runConversationStreams(
 				if (res.status === 401 || res.status === 403) {
 					throw new AuthError(res.status);
 				}
-				// Deleted between the list and the detail read: nothing to collect.
-				deleted = res.status === 404;
-				if (!deleted && res.status !== 200) {
+				// A detail 404 does not prove deletion: it can be temporary. Stop
+				// before advancing either stream cursor so the next run relists it.
+				if (res.status === 404) {
+					throw new ChatCollectionFailure(
+						`Claude conversation read failed with http 404 after ${index} of ${batch.length}; the next run relists it.`,
+						true,
+					);
+				}
+				if (res.status !== 200) {
 					throw new ChatCollectionFailure(
 						`Claude conversation read failed with http ${res.status} after ${index} of ${batch.length}; the next run resumes there.`,
 						isRetryableStatus(res.status),
 					);
 				}
-				if (!deleted) {
-					detail = readDetail(res.json, item);
-					if (detail === null) {
-						throw new ChatCollectionFailure(
-							`Claude conversation ${index + 1} of ${batch.length} came back without readable messages; the next run resumes there.`,
-							true,
-						);
-					}
+				detail = readDetail(res.json, item);
+				if (detail === null) {
+					throw new ChatCollectionFailure(
+						`Claude conversation ${index + 1} of ${batch.length} came back without readable messages; the next run resumes there.`,
+						true,
+					);
 				}
 			}
-			if (!deleted && conversations && needs(conversations, item)) {
+			if (conversations && needs(conversations, item)) {
 				const record = buildConversationRecord(
 					item.raw,
 					detail ? detail.messages.length : null,

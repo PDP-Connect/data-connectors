@@ -149,7 +149,7 @@
 						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					}
 				},
-				"required": ["id", "blob_ref"]
+				"required": ["id"]
 			},
 			"primary_key": ["id"],
 			"consent_time_field": "create_time",
@@ -205,6 +205,9 @@
 						"x_pdpp_role": "primary-title"
 					},
 					"model": {
+						"type": ["string", "null"]
+					},
+					"model_source": {
 						"type": ["string", "null"]
 					},
 					"create_time": {
