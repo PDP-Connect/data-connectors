@@ -2899,6 +2899,39 @@ test("processConversationDetail: a declared current_node absent from the mapping
 	assert.equal(outcome.complete, false);
 });
 
+test("processConversationDetail: an oversize unknown content shape is reported as truncated and the detail is not complete", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a0" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a0",
+				mapping: {
+					a0: {
+						parent: null,
+						children: [],
+						message: {
+							author: { role: "assistant" },
+							create_time: 1_700_000_000,
+							content: {
+								content_type: "unknown_future_shape",
+								text: "x".repeat(6000),
+							},
+						},
+					},
+				},
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	const msg = emitted.find((r) => r.stream === "messages");
+	assert.equal(msg?.data.content_loss, "truncated");
+	assert.equal(detailGaps(messages).length, 1);
+	assert.equal(outcome.complete, false);
+});
+
 test("processConversationDetail: a clean detail emits no gap and is complete", async () => {
 	const { deps, messages } = makeHarness();
 	const outcome = await processConversationDetail(

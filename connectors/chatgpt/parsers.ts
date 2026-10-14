@@ -267,7 +267,8 @@ function extractUserEditableContext(content: ChatGptContent): string | null {
 }
 
 // Fallback for unrecognized shape — prefer an explicit handler. Stringify so
-// *something* lands rather than null; truncate to keep rows sane.
+// *something* lands rather than null; extractContentWithLoss truncates it to
+// keep rows sane and reports that truncation.
 const FALLBACK_MAX_CHARS = 5000;
 
 function extractFallback(content: ChatGptContent): string | null {
@@ -276,9 +277,7 @@ function extractFallback(content: ChatGptContent): string | null {
 		if (!s || s === "{}" || s === "null") {
 			return null;
 		}
-		return s.length > FALLBACK_MAX_CHARS
-			? `${s.slice(0, FALLBACK_MAX_CHARS)}…`
-			: s;
+		return s;
 	} catch {
 		return null;
 	}
@@ -410,15 +409,23 @@ export function extractContentWithLoss(content: ChatGptContent | undefined): {
 	}
 	const type = content.content_type;
 	const handler = type ? CONTENT_EXTRACTORS[type] : undefined;
-	const raw = handler ? handler(content) : extractFallback(content);
+	let raw = handler ? handler(content) : extractFallback(content);
+	// The fallback cap is a loss like any other: account for it here, before
+	// the text is shortened, so the record carries `content_loss`.
+	const fallbackTruncated =
+		!handler && raw !== null && raw.length > FALLBACK_MAX_CHARS;
+	if (fallbackTruncated && raw !== null) {
+		raw = `${raw.slice(0, FALLBACK_MAX_CHARS)}…`;
+	}
 	const safe = toSafeFullContent(raw);
 	const bounded = toBoundedContent(safe.text);
+	const truncated = bounded.truncated || fallbackTruncated;
 	let loss: ContentLoss | null = null;
 	if (safe.dropped) {
 		loss = "unsafe_text_dropped";
-	} else if (bounded.truncated && safe.escaped) {
+	} else if (truncated && safe.escaped) {
 		loss = "truncated,control_chars_escaped";
-	} else if (bounded.truncated) {
+	} else if (truncated) {
 		loss = "truncated";
 	} else if (safe.escaped) {
 		loss = "control_chars_escaped";
