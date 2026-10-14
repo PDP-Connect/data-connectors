@@ -1208,17 +1208,25 @@
             "activeCalories": "activity.active_calories",
             "totalCalories": "activity.total_calories",
             "steps": "activity.steps",
-            "equivalentWalkingDistance": "activity.equivalent_walking_distance (meters, D4)"
+            "equivalentWalkingDistance": "activity.equivalent_walking_distance (meters, D4; fractions do not meet legacy integer type)",
+            "timestamp": "activity.timestamp when supplied by Oura",
+            "highActivityTime": "activity.high_activity_time",
+            "mediumActivityTime": "activity.medium_activity_time",
+            "lowActivityTime": "activity.low_activity_time",
+            "sedentaryTime": "activity.sedentary_time",
+            "restingTime": "activity.resting_time",
+            "inactivityAlerts": "activity.inactivity_alerts",
+            "contributors": "activity.contributors"
           },
           "dropped": [
             {
-              "field": "highActivityTime, mediumActivityTime, lowActivityTime, sedentaryTime, restingTime, inactivityAlerts, contributors.*",
-              "reason": "believed removed from Oura's v2 daily_activity API response; NOT independently confirmed against a live v2 payload in this audit"
+              "field": "timestamp when absent upstream; integer equivalentWalkingDistance or contributor scores when upstream supplies fractions",
+              "reason": "Canonical projection preserves source values and does not invent a timestamp or round distance; live capture remains pending"
             }
           ],
           "status": "needs_parity_audit",
-          "question": "The claim that Oura v2 API dropped activity time-breakdown and contributors fields is unverified against a real API response in this audit. Confirm with one real v2 daily_activity capture before marking as a documented upstream break (vs. an unclaimed implementation gap).",
-          "lead_decision": "PENDING EVIDENCE. Needs one real v2 daily_activity capture. Oura is API-token based and not in Tim's bootstrap. Until then the status is 'suspected upstream removal', not a documented break."
+          "question": "Capture a real v2 daily_activity response to confirm field shape and values before claiming live parity.",
+          "lead_decision": "PENDING EVIDENCE. Implemented documented v2 fields; live credentialed verification and legacy type parity remain open."
         },
         {
           "legacy_scope": "oura.readiness",
@@ -1228,20 +1236,26 @@
           "migration": "rename",
           "field_map": {
             "day": "readiness.day",
+            "timestamp": "readiness.timestamp when supplied by Oura",
             "score": "readiness.score",
             "temperatureDeviation": "readiness.temperature_deviation",
             "temperatureTrendDeviation": "readiness.temperature_trend_deviation",
             "contributors": "readiness.contributors (opaque map, forwarded verbatim by design)"
           },
-          "dropped": [],
-          "status": "contracted"
+          "dropped": [
+            {
+              "field": "timestamp when absent upstream; integer contributor scores when upstream supplies fractions",
+              "reason": "Canonical projection does not fabricate a date-time from day or round contributor scores"
+            }
+          ],
+          "status": "needs_parity_audit"
         },
         {
           "legacy_scope": "oura.sleep",
           "streams": [
             "oura.sleep"
           ],
-          "migration": "merge (legacy dailyScores[] + sleepPeriods[] -> one per-session record, D3)",
+          "migration": "project independent daily_score and sleep_session records into legacy dailyScores[] and sleepPeriods[] (D3)",
           "field_map": {
             "sleepPeriods[].day": "sleep.day",
             "sleepPeriods[].bedtimeStart": "sleep.bedtime_start",
@@ -1255,21 +1269,30 @@
             "sleepPeriods[].averageHeartRate": "sleep.average_heart_rate",
             "sleepPeriods[].lowestHeartRate": "sleep.lowest_heart_rate",
             "sleepPeriods[].averageHrv": "sleep.average_hrv",
-            "dailyScores[].score": "sleep.sleep_score"
+            "sleepPeriods[].awakeTime": "sleep.awake_time",
+            "sleepPeriods[].averageBreath": "sleep.average_breath",
+            "sleepPeriods[].restlessPeriods": "sleep.restless_periods",
+            "sleepPeriods[].timeInBed": "sleep.time_in_bed",
+            "sleepPeriods[].type": "sleep.type when in the legacy enum",
+            "dailyScores[].id": "daily_score.id",
+            "dailyScores[].day": "daily_score.day",
+            "dailyScores[].score": "daily_score.sleep_score",
+            "dailyScores[].timestamp": "daily_score.daily_sleep_timestamp when supplied by Oura",
+            "dailyScores[].contributors": "daily_score.contributors"
           },
           "dropped": [
             {
-              "field": "averageBreath, restlessPeriods, timeInBed, type",
-              "reason": "believed removed from Oura v2 sleep API response; NOT independently confirmed in this audit"
+              "field": "dailyScores[].timestamp when absent upstream; sleepPeriods[].type outside the legacy enum or null",
+              "reason": "Canonical projection retains source values and does not invent a date-time or translate unknown types"
             },
             {
-              "field": "contributors.* (sleep contributors: 7 fields)",
-              "reason": "believed replaced by a single sleep_score in v2; NOT independently confirmed"
+              "field": "integer sleepPeriods[].efficiency or averageHrv, or dailyScores[].contributors values when upstream supplies fractions",
+              "reason": "Canonical projection preserves fractional source metrics without rounding"
             }
           ],
           "status": "needs_parity_audit",
-          "question": "Same as oura.activity: the v2-API-removed-these-fields claim needs one real captured payload to confirm before this is recorded as a settled upstream break rather than a gap.",
-          "lead_decision": "PENDING EVIDENCE (same as oura.activity)."
+          "question": "Capture real v2 sleep and daily_sleep responses; confirm join cardinality and agree an enum/null and fractional metric policy with the Vana owner.",
+          "lead_decision": "PENDING EVIDENCE. Independent daily records preserve daily-only rows; legacy projection and live parity remain open."
         }
       ]
     },

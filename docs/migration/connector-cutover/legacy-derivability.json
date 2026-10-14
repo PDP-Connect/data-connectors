@@ -745,6 +745,7 @@
     "streams": ["activity"],
     "derivable": {
       "day": "activity.day",
+      "timestamp": "activity.timestamp when supplied; canonical null otherwise, which Vana must omit from the optional legacy field",
       "score": "activity.score",
       "activeCalories": "activity.active_calories",
       "totalCalories": "activity.total_calories",
@@ -758,12 +759,16 @@
       "inactivityAlerts": "activity.inactivity_alerts (daily_activity.inactivity_alerts)",
       "contributors": "activity.contributors (daily_activity.contributors, opaque map forwarded verbatim, same treatment as oura.readiness.contributors)"
     },
-    "not_derivable": [],
+    "not_derivable": [
+      "timestamp when absent upstream",
+      "integer equivalentWalkingDistance when upstream supplies a fractional meter value",
+      "integer legacy contributor scores when upstream supplies fractional values"
+    ],
     "semantic_notes": [
       "IMPLEMENTED this cutover: all 7 previously-gapped fields are now mapped from the documented Oura v2 daily_activity response shape (https://cloud.ouraring.com/docs/daily-activity) — high_activity_time/medium_activity_time/low_activity_time/sedentary_time/resting_time/inactivity_alerts/contributors, matching the legacy field names 1:1 after camelCase->snake_case rename.",
       "LIVE PROOF PENDING: no Oura personal access token is available in this environment. Field names/types are taken from Oura's published v2 API documentation, not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures only (connectors/oura/schemas.test.ts, connectors/oura/index.test.ts) — the next Oura-credentialed run should capture a real daily_activity response and diff it against these fixtures before this scope can be called live-verified."
     ],
-    "status": "derivable"
+    "status": "in_progress"
   },
   {
     "scope": "oura.readiness",
@@ -771,14 +776,20 @@
     "streams": ["readiness"],
     "derivable": {
       "day": "readiness.day",
+      "timestamp": "readiness.timestamp when supplied; canonical null otherwise, which Vana must omit from the optional legacy field",
       "score": "readiness.score",
       "temperatureDeviation": "readiness.temperature_deviation",
       "temperatureTrendDeviation": "readiness.temperature_trend_deviation",
-      "contributors": "readiness.contributors (opaque map, forwarded verbatim, index.ts:223, schemas.ts:88)"
+      "contributors": "readiness.contributors (opaque map, forwarded verbatim)"
     },
-    "not_derivable": [],
-    "semantic_notes": [],
-    "status": "derivable"
+    "not_derivable": [
+      "timestamp when absent upstream",
+      "integer legacy contributor scores when upstream supplies fractional values"
+    ],
+    "semantic_notes": [
+      "Canonical records preserve a source timestamp when present. No timestamp is fabricated from day."
+    ],
+    "status": "in_progress"
   },
   {
     "scope": "oura.sleep",
@@ -786,6 +797,7 @@
     "streams": ["sleep"],
     "derivable": {
       "sleepPeriods[].day": "sleep.day",
+      "sleepPeriods[].awakeTime": "sleep.awake_time from the session document",
       "sleepPeriods[].bedtimeStart": "sleep.bedtime_start",
       "sleepPeriods[].bedtimeEnd": "sleep.bedtime_end",
       "sleepPeriods[].totalSleepDuration": "sleep.total_sleep_duration (seconds, D4)",
@@ -801,16 +813,24 @@
       "sleepPeriods[].restlessPeriods": "sleep.restless_periods (v2 sleep.restless_periods)",
       "sleepPeriods[].timeInBed": "sleep.time_in_bed (v2 sleep.time_in_bed)",
       "sleepPeriods[].type": "sleep.type (v2 sleep.type, e.g. long_sleep/sleep/late_nap/rest)",
-      "dailyScores[].score": "sleep.sleep_score (now sourced from the separate Oura v2 GET /v2/usercollection/daily_sleep resource, joined onto the per-session sleep record by day — see index.ts collectSleep; previously read from a non-existent s.readiness?.score field on the /sleep document)",
-      "dailyScores[].contributors": "sleep.contributors (daily_sleep.contributors, opaque map forwarded verbatim, joined by day alongside sleep_score)"
+      "dailyScores[].score": "daily_score.sleep_score from Oura v2 /usercollection/daily_sleep, emitted independently of sessions",
+      "dailyScores[].id": "daily_score.id and sleep.daily_sleep_id from daily_sleep.id",
+      "dailyScores[].day": "daily_score.day from daily_sleep.day, including daily-only rows",
+      "dailyScores[].timestamp": "daily_score.daily_sleep_timestamp from daily_sleep.timestamp when present",
+      "dailyScores[].contributors": "daily_score.contributors from daily_sleep.contributors, forwarded as an opaque map"
     },
-    "not_derivable": [],
+    "not_derivable": [
+      "dailyScores[].timestamp when absent upstream",
+      "integer sleepPeriods[].efficiency or averageHrv when upstream supplies fractions",
+      "integer dailyScores[].contributors values when upstream supplies fractions",
+      "legacy sleepPeriods[].type when upstream supplies an unrecognized value or null"
+    ],
     "semantic_notes": [
-      "IMPLEMENTED this cutover: average_breath/restless_periods/time_in_bed/type are mapped from the documented Oura v2 /usercollection/sleep response shape (https://cloud.ouraring.com/docs/sleep). sleep_score and the 7-field contributors map are mapped from the separate /usercollection/daily_sleep resource (https://cloud.ouraring.com/docs/daily-sleep), joined onto each sleep session by its day — a genuine two-resource join, not a same-endpoint field addition. This also corrects a latent bug: the connector previously read sleep_score off `s.readiness?.score`, a field that does not exist on the real v2 /sleep document shape (readiness is not nested there); it now reads it from daily_sleep.score, matching the documented API.",
+      "Session fields come from /usercollection/sleep. Daily score, contributors, id, and timestamp come from /usercollection/daily_sleep. Each daily document emits independently; matching sessions also carry its daily fields. Unmatched and duplicate days emit gap evidence and hold the checkpoint. Vana must project dailyScores from daily_score records by daily id to avoid duplication across naps.",
       "Modern adds temperature_delta at the sleep-period level with no legacy counterpart (legacy carried temperature only on activity/readiness) — an addition, not a loss.",
       "LIVE PROOF PENDING: no Oura personal access token is available in this environment. Field names/types (both /sleep and /daily_sleep) are taken from Oura's published v2 API documentation, not confirmed against a captured real response, including whether a given day reliably has exactly one matching daily_sleep document per sleep session (naps may complicate the join). Synthetic-but-shape-calibrated fixtures only — the next Oura-credentialed run should capture real /sleep and /daily_sleep responses and diff them against these fixtures."
     ],
-    "status": "derivable"
+    "status": "in_progress"
   },
   {
     "scope": "spotify.playlists",
