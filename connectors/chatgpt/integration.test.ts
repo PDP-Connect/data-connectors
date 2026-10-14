@@ -92,6 +92,8 @@ import {
 	resolveChatGptBackendFetchTimeoutMs,
 	resolveChatGptDetailLaneTuning,
 	resolveChatGptMaxDetailFetchesPerRun,
+	conversationSearchRecovery,
+	discoverConversationsWithinBudget,
 	resolveChatGptMaxRunWallClockMs,
 	resolveChatGptMaxTailDeferralGapsPerRun,
 	resolveChatGptProviderBudget,
@@ -12365,4 +12367,81 @@ test("runAccountPlanStream: a malformed 200 after a good run emits no STATE, so 
 		),
 		true,
 	);
+});
+
+function discoveryHarness(rows: ReturnType<typeof makeConvo>[]): StreamDeps {
+	const sorted = [...rows].sort(
+		(a, b) => Number(b.update_time) - Number(a.update_time),
+	);
+	const harness = makeRecordingEmit(validateRecord);
+	const api: ChatGptApi = {
+		auth: (): Promise<never> => Promise.reject(new Error("unused")),
+		fetch: async (path: string): Promise<ChatGptFetchResult> => {
+			const cursor = Number(
+				new URLSearchParams(path.split("?")[1]).get("cursor"),
+			);
+			return {
+				status: 200,
+				json: {
+					items: sorted.slice(cursor, cursor + 30),
+					next_cursor: cursor + 30 < sorted.length ? cursor + 30 : null,
+				},
+			};
+		},
+	};
+	return {
+		api,
+		sleep: () => Promise.resolve(),
+		emit: harness.emit,
+		emitRecord: harness.emitRecord,
+		progress: () => Promise.resolve(),
+		requested: new Map([["conversations", { name: "conversations" }]]),
+	} as StreamDeps;
+}
+
+const discoveryRows = () =>
+	Array.from({ length: 200 }, (_, index) =>
+		makeConvo({ id: `c-${index}`, update_time: 1_700_001_000 - index }),
+	);
+
+test("conversation discovery: an incremental walk stopped by old pages is an incremental window, not inventory proof", async () => {
+	const deps = discoveryHarness(discoveryRows());
+	const found = await discoverConversationsWithinBudget(deps, {
+		budget: 10_000,
+		priorCursor: new Date(1_800_000_000 * 1000).toISOString(),
+		recovery: conversationSearchRecovery(deps),
+	});
+	assert.equal(found.truncated, false);
+	assert.equal(found.evidence, "incremental_window");
+	assert.equal(found.exhausted, false);
+});
+
+test("conversation discovery: a full walk from cursor 0 to the end of the list is exhausted", async () => {
+	const deps = discoveryHarness(discoveryRows());
+	const found = await discoverConversationsWithinBudget(deps, {
+		budget: 10_000,
+		priorCursor: null,
+		recovery: conversationSearchRecovery(deps),
+	});
+	assert.equal(found.truncated, false);
+	assert.equal(found.evidence, "end_of_list");
+	assert.equal(found.exhausted, true);
+});
+
+test("conversation discovery: a walk resumed from a saved cursor cannot claim the inventory is complete", async () => {
+	const rows = discoveryRows();
+	const deps = discoveryHarness(rows);
+	const found = await discoverConversationsWithinBudget(deps, {
+		budget: 10_000,
+		priorCursor: null,
+		recovery: conversationSearchRecovery(deps),
+		resumeBackfill: {
+			position_hint: 60,
+			oldest_update_time: new Date(1_700_000_941 * 1000).toISOString(),
+			boundary_ids: ["c-59"],
+		},
+	});
+	assert.equal(found.truncated, false);
+	assert.equal(found.evidence, "resumed_end_of_list");
+	assert.equal(found.exhausted, false);
 });

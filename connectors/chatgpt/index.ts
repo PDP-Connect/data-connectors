@@ -3404,6 +3404,12 @@ interface ConversationListResult {
 	/** True when the walk stopped only because it spent its per-run page budget. */
 	budgetExhausted?: boolean;
 	items: ConversationListItem[];
+	/**
+	 * Set on a non-truncated walk that stopped on consecutive old pages instead
+	 * of the end-of-list response. That proves the incremental window was read,
+	 * not that the whole inventory was seen.
+	 */
+	stoppedOnOldPages?: boolean;
 	truncated: boolean;
 }
 
@@ -3723,7 +3729,9 @@ async function walkConversationSearch(
 	const requestedSince =
 		deps.requested.get("conversations")?.time_range?.since ??
 		deps.requested.get("messages")?.time_range?.since;
-	const complete = (): ConversationListResult => {
+	const complete = (
+		options: { oldPages?: boolean } = {},
+	): ConversationListResult => {
 		if (resumeBackfill && !resumeBoundarySeen) {
 			emitConversationListUnstable(
 				deps,
@@ -3744,6 +3752,7 @@ async function walkConversationSearch(
 			items: [...conversationsById.values()],
 			truncated: false,
 			backfill: null,
+			...(options.oldPages ? { stoppedOnOldPages: true } : {}),
 			...(resumeBackfill
 				? { backfillItems: [...backfillTailById.values()] }
 				: {}),
@@ -4003,7 +4012,7 @@ async function walkConversationSearch(
 				? consecutiveOldPages + 1
 				: 0;
 			if (consecutiveOldPages >= maxConsecutiveOldPages) {
-				return complete();
+				return complete({ oldPages: true });
 			}
 		}
 		if (nextCursor === null) {
@@ -4043,11 +4052,17 @@ async function walkConversationSearch(
 type ConversationDiscoveryEvidence =
 	| "budget_exhausted"
 	| "end_of_list"
-	| "interrupted";
+	| "incremental_window"
+	| "interrupted"
+	| "resumed_end_of_list";
 
 type ConversationDiscovery = ConversationListResult & {
 	evidence: ConversationDiscoveryEvidence;
-	/** True only with end-of-list (or old-page) evidence from the walk. */
+	/**
+	 * True only for a contiguous walk from cursor 0 to the end-of-list response
+	 * within one run. An old-page stop (`incremental_window`) and a walk resumed
+	 * from a saved cursor (`resumed_end_of_list`) are never inventory proof.
+	 */
 	exhausted: boolean;
 	/** Cursor the next run resumes from (replayed one page earlier); null once drained. */
 	nextCursor: number | null;
@@ -4056,11 +4071,12 @@ type ConversationDiscovery = ConversationListResult & {
 /**
  * Connector-local resumable discovery: read the conversation list from
  * `startCursor` for at most `budget` items of cursor distance, then report where
- * to continue. `exhausted` is true only when the walk itself proved the end of
- * the list; a spent budget or an interrupted read is never completion. Kept in
+ * to continue. `exhausted` is true only when one run's walk from cursor 0
+ * reached the end of the list; a spent budget, an interrupted read, an old-page
+ * stop or a cross-run resumed walk is never inventory completion. Kept in
  * one place so it can be swapped onto a shared paginator later.
  */
-async function discoverConversationsWithinBudget(
+export async function discoverConversationsWithinBudget(
 	deps: StreamDeps,
 	options: {
 		budget: number;
@@ -4078,15 +4094,20 @@ async function discoverConversationsWithinBudget(
 		options.recovery,
 		options.budget,
 	);
-	const exhausted = !result.truncated;
+	const resumed =
+		options.resumeBackfill !== undefined || (options.startCursor ?? 0) !== 0;
 	let evidence: ConversationDiscoveryEvidence = "end_of_list";
 	if (result.truncated) {
 		evidence = result.budgetExhausted ? "budget_exhausted" : "interrupted";
+	} else if (result.stoppedOnOldPages) {
+		evidence = "incremental_window";
+	} else if (resumed) {
+		evidence = "resumed_end_of_list";
 	}
 	return {
 		...result,
 		evidence,
-		exhausted,
+		exhausted: evidence === "end_of_list",
 		nextCursor: result.backfill?.position_hint ?? null,
 	};
 }
@@ -4158,7 +4179,7 @@ async function emitConversationSearchDeferred(
 
 /** Only the consumer waits/probes. Speculative reads retain their errors and
  * drain before recovery; they never start independent cooldown loops. */
-function conversationSearchRecovery(deps: StreamDeps) {
+export function conversationSearchRecovery(deps: StreamDeps) {
 	const runBudget = deps.runBudget ?? new ChatGptRunBudget();
 	let consecutiveWaits = 0;
 	let pressured = false;
