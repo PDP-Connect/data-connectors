@@ -195,6 +195,8 @@ import {
 	parseExport,
 	parseJsonArrayChunks,
 	parseMessage,
+	parseProject,
+	parseProjectDocument,
 	resolveExportedProfile,
 	type SourceRecordEnvelope,
 	topLevelRawFields,
@@ -1332,6 +1334,104 @@ export async function collectAnthropic({
 	const rawConversationIds = new Set<string>();
 	const deliveredMessageIds = new Set<string>();
 	let completeMessages = true;
+	// Archive-wide and per-stream source accounting for the other native
+	// streams. Each flag only ever moves from true to false.
+	let archiveComplete = true;
+	let conversationsBoundary = false;
+	let conversationsExact = true;
+	let projectsExact = true;
+	let documentsExact = true;
+	let projectsExplicitEmpty = false;
+	let ambiguousClassification = false;
+	const rawCoverageConversationIds = new Set<string>();
+	const rawProjectIds = new Set<string>();
+	const rawDocumentIds = new Set<string>();
+	const deliveredConversationIds = new Set<string>();
+	const deliveredProjectIds = new Set<string>();
+	const deliveredDocumentIds = new Set<string>();
+	let deliveredProfiles = 0;
+	const unrestrictedStream = (stream: string) => {
+		if (recoveryOnly || detailGaps?.length) {
+			return false;
+		}
+		const scope = requested.get(stream);
+		return (
+			scope !== undefined &&
+			scope.time_range === undefined &&
+			scope.resources === undefined &&
+			scope.fields === undefined
+		);
+	};
+	const accountRawConversationSource = (raw: unknown) => {
+		if (!wantsConversations) {
+			return;
+		}
+		if (isPlainObject(raw) && Object.hasOwn(raw, "docs")) {
+			ambiguousClassification = true;
+		}
+		const parent =
+			isPlainObject(raw) && Array.isArray(raw.chat_messages)
+				? parseConversationHeader(raw, 0)
+				: null;
+		if (!parent || rawCoverageConversationIds.has(parent.id)) {
+			conversationsExact = false;
+			return;
+		}
+		rawCoverageConversationIds.add(parent.id);
+	};
+	const accountRawProject = (raw: unknown) => {
+		if (!wantsProjects && !wantsDocuments) {
+			return;
+		}
+		const parsed = isPlainObject(raw) ? parseProject(raw) : null;
+		if (!isPlainObject(raw) || !parsed) {
+			projectsExact = false;
+			documentsExact = false;
+			return;
+		}
+		const projectId = parsed.project.id;
+		if (rawProjectIds.has(projectId)) {
+			projectsExact = false;
+			documentsExact = false;
+			return;
+		}
+		rawProjectIds.add(projectId);
+		if (
+			!fitsHostBlob({
+				format: "anthropic-source-record-v1",
+				stream: "projects",
+				record_key: projectId,
+				payload: raw,
+			})
+		) {
+			projectsExact = false;
+			documentsExact = false;
+		}
+		if (Object.hasOwn(raw, "chat_messages")) {
+			ambiguousClassification = true;
+		}
+		// A missing, null or malformed child list is unknown, never empty.
+		if (!Array.isArray(raw.docs)) {
+			documentsExact = false;
+			return;
+		}
+		for (const rawDocument of raw.docs) {
+			const document = isPlainObject(rawDocument)
+				? parseProjectDocument(rawDocument, projectId)
+				: null;
+			const oversizedContent = ["content", "text", "body", "filedata"].some(
+				(key) =>
+					isPlainObject(rawDocument) &&
+					typeof rawDocument[key] === "string" &&
+					rawDocument[key].length > 10_000_000,
+			);
+			if (!document || oversizedContent || rawDocumentIds.has(document.id)) {
+				documentsExact = false;
+				continue;
+			}
+			rawDocumentIds.add(document.id);
+		}
+	};
 	const unrestrictedMessages = () => {
 		if (recoveryOnly || detailGaps?.length) {
 			return false;
@@ -1350,6 +1450,7 @@ export async function collectAnthropic({
 		return wantsMessages;
 	};
 	const accountRawConversation = (raw: unknown) => {
+		accountRawConversationSource(raw);
 		if (!wantsMessages) {
 			return;
 		}
@@ -1389,6 +1490,18 @@ export async function collectAnthropic({
 			}
 			rawMessageIds.add(message.id);
 		}
+	};
+	const markDelivered = (
+		delivered: Set<string>,
+		id: string,
+		kind: "c" | "p" | "d",
+	) => {
+		if (delivered.has(id)) {
+			if (kind === "c") conversationsExact = false;
+			else if (kind === "p") projectsExact = false;
+			else documentsExact = false;
+		}
+		delivered.add(id);
 	};
 	const emitMessage = async (
 		message: NonNullable<ReturnType<typeof parseMessage>>,
@@ -1436,6 +1549,7 @@ export async function collectAnthropic({
 		 * an empty account, so conversations and messages are skipped. */
 		conversationsSourceMissing = false,
 	): Promise<void> {
+		let profileVerified = false;
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
 			source: SourceRecordEnvelope;
@@ -1516,20 +1630,35 @@ export async function collectAnthropic({
 					},
 				);
 			}
-			await emitRecord(ACCOUNT_PROFILE_STREAM, {
-				id: organizationId,
-				organization_id: organizationId,
-				full_name: profile.fullName,
-				plan:
-					browserProfileAppliesToExport &&
-					profile.metadataStatus !== "mismatch" &&
-					profile.metadataStatus !== "ambiguous" &&
-					profile.fullName !== null
-						? browserProfile.plan
-						: null,
-				name_source: profile.nameSource,
-				metadata_status: profile.metadataStatus,
-			});
+			profileVerified =
+				profile.metadataStatus === "valid" &&
+				browserProfileAppliesToExport &&
+				profile.fullName !== null &&
+				organizationId.length > 0 &&
+				userFiles.length === 1;
+			await emitRecord(
+				ACCOUNT_PROFILE_STREAM,
+				{
+					id: organizationId,
+					organization_id: organizationId,
+					full_name: profile.fullName,
+					plan:
+						browserProfileAppliesToExport &&
+						profile.metadataStatus !== "mismatch" &&
+						profile.metadataStatus !== "ambiguous" &&
+						profile.fullName !== null
+							? browserProfile.plan
+							: null,
+					name_source: profile.nameSource,
+					metadata_status: profile.metadataStatus,
+				},
+				{
+					beforeEmit: () => {
+						deliveredProfiles += 1;
+						return Promise.resolve();
+					},
+				},
+			);
 		}
 		if (wantsConversations) {
 			for (const { record: conversation, source } of selectedConversations) {
@@ -1539,14 +1668,26 @@ export async function collectAnthropic({
 						CONVERSATIONS_STREAM,
 						{ ...conversation, blob_ref: blob.blob_ref },
 						{
-							beforeEmit: () => emit(blob.event),
+							beforeEmit: () => {
+								markDelivered(deliveredConversationIds, conversation.id, "c");
+								return emit(blob.event);
+							},
 						},
 					);
 				} else
-					await emitRecord(CONVERSATIONS_STREAM, {
-						...conversation,
-						blob_ref: OMITTED_SOURCE_BLOB_REF,
-					});
+					await emitRecord(
+						CONVERSATIONS_STREAM,
+						{
+							...conversation,
+							blob_ref: OMITTED_SOURCE_BLOB_REF,
+						},
+						{
+							beforeEmit: () => {
+								markDelivered(deliveredConversationIds, conversation.id, "c");
+								return Promise.resolve();
+							},
+						},
+					);
 			}
 		}
 		if (wantsMessages) {
@@ -1568,20 +1709,37 @@ export async function collectAnthropic({
 						PROJECTS_STREAM,
 						{ ...project, blob_ref: blob.blob_ref },
 						{
-							beforeEmit: () => emit(blob.event),
+							beforeEmit: () => {
+								markDelivered(deliveredProjectIds, project.id, "p");
+								return emit(blob.event);
+							},
 						},
 					);
 				} else
-					await emitRecord(PROJECTS_STREAM, {
-						...project,
-						blob_ref: OMITTED_SOURCE_BLOB_REF,
-					});
+					await emitRecord(
+						PROJECTS_STREAM,
+						{
+							...project,
+							blob_ref: OMITTED_SOURCE_BLOB_REF,
+						},
+						{
+							beforeEmit: () => {
+								markDelivered(deliveredProjectIds, project.id, "p");
+								return Promise.resolve();
+							},
+						},
+					);
 			}
 		}
 		if (wantsDocuments) {
 			for (const doc of parsed.projectDocuments) {
 				if (oversizedProjectIds.has(doc.project_id)) continue;
-				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
+				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc, {
+					beforeEmit: () => {
+						markDelivered(deliveredDocumentIds, doc.id, "d");
+						return Promise.resolve();
+					},
+				});
 			}
 		}
 		// A dropped parent item also drops its child items (a conversation's
@@ -1690,6 +1848,73 @@ export async function collectAnthropic({
 		) {
 			await emit(
 				buildFullScanCoverageMessage(MESSAGES_STREAM, rawMessageIds.size),
+			);
+		}
+		const sameIds = (
+			raw: ReadonlySet<string>,
+			delivered: ReadonlySet<string>,
+		) =>
+			raw.size === delivered.size && [...raw].every((id) => delivered.has(id));
+		const archiveProven =
+			archiveComplete &&
+			!ambiguousClassification &&
+			oversizedConversationIds.size === 0 &&
+			oversizedProjectIds.size === 0;
+		// Coverage is self-measured from raw source items and the records the
+		// runtime actually accepted; it is emitted once, after the stream's
+		// last record.
+		const conversationsProven =
+			wantsConversations &&
+			unrestrictedStream(CONVERSATIONS_STREAM) &&
+			archiveProven &&
+			conversationsBoundary &&
+			conversationsExact &&
+			!skipped.has(CONVERSATIONS_STREAM) &&
+			sameIds(rawCoverageConversationIds, deliveredConversationIds);
+		const projectsProven =
+			wantsProjects &&
+			unrestrictedStream(PROJECTS_STREAM) &&
+			archiveProven &&
+			projectsExact &&
+			!skipped.has(PROJECTS_STREAM) &&
+			(rawProjectIds.size > 0 || projectsExplicitEmpty) &&
+			sameIds(rawProjectIds, deliveredProjectIds);
+		const documentsProven =
+			wantsDocuments &&
+			projectsProven &&
+			unrestrictedStream(PROJECT_DOCUMENTS_STREAM) &&
+			documentsExact &&
+			!skipped.has(PROJECT_DOCUMENTS_STREAM) &&
+			sameIds(rawDocumentIds, deliveredDocumentIds);
+		const profileProven =
+			requested.has(ACCOUNT_PROFILE_STREAM) &&
+			unrestrictedStream(ACCOUNT_PROFILE_STREAM) &&
+			archiveComplete &&
+			profileVerified &&
+			!skipped.has(ACCOUNT_PROFILE_STREAM) &&
+			deliveredProfiles === 1;
+		if (profileProven) {
+			await emit(buildFullScanCoverageMessage(ACCOUNT_PROFILE_STREAM, 1));
+		}
+		if (conversationsProven) {
+			await emit(
+				buildFullScanCoverageMessage(
+					CONVERSATIONS_STREAM,
+					rawCoverageConversationIds.size,
+				),
+			);
+		}
+		if (projectsProven) {
+			await emit(
+				buildFullScanCoverageMessage(PROJECTS_STREAM, rawProjectIds.size),
+			);
+		}
+		if (documentsProven) {
+			await emit(
+				buildFullScanCoverageMessage(
+					PROJECT_DOCUMENTS_STREAM,
+					rawDocumentIds.size,
+				),
 			);
 		}
 		const syncedAt = nowIso();
@@ -1821,19 +2046,40 @@ export async function collectAnthropic({
 						CONVERSATIONS_STREAM,
 						{ ...parsed.conversation, blob_ref: blob.blob_ref },
 						{
-							beforeEmit: () => emit(blob.event),
+							beforeEmit: () => {
+								markDelivered(
+									deliveredConversationIds,
+									parsed.conversation.id,
+									"c",
+								);
+								return emit(blob.event);
+							},
 						},
 					);
 				} else
-					await emitRecord(CONVERSATIONS_STREAM, {
-						...parsed.conversation,
-						blob_ref: OMITTED_SOURCE_BLOB_REF,
-					});
+					await emitRecord(
+						CONVERSATIONS_STREAM,
+						{
+							...parsed.conversation,
+							blob_ref: OMITTED_SOURCE_BLOB_REF,
+						},
+						{
+							beforeEmit: () => {
+								markDelivered(
+									deliveredConversationIds,
+									parsed.conversation.id,
+									"c",
+								);
+								return Promise.resolve();
+							},
+						},
+					);
 			}
 		};
 		const processConversationJson = async (rawText: string) => {
 			// This recovery path omits source buffering; it cannot prove full extent.
 			completeMessages = false;
+			conversationsExact = false;
 			const fields = topLevelRawFields(
 				rawText,
 				new Set([
@@ -1923,6 +2169,7 @@ export async function collectAnthropic({
 						: {}),
 					onOversizedObject: async (prefix, value) => {
 						completeMessages = false;
+						conversationsExact = false;
 						if (value.serializedLowerBoundUnits <= HOST_BLOB_MAX_BYTES + 1024) {
 							const raw = await readValueText(
 								value.startOffset,
@@ -2291,7 +2538,10 @@ export async function collectAnthropic({
 					name === "users.json" ||
 					(name.startsWith("projects/") && name.endsWith(".json")),
 			);
+			archiveComplete = completeMessages;
+			for (const file of projectFiles) accountRawProject(file.json);
 			if (streamedArchive?.conversationsEntry) {
+				conversationsBoundary = true;
 				const parsedProjects = parseExport(
 					[],
 					projectFiles.map((file) => file.json),
@@ -2311,11 +2561,13 @@ export async function collectAnthropic({
 				return "done";
 			}
 			if (Array.isArray(conversationsJson)) {
+				conversationsBoundary = true;
 				for (const raw of conversationsJson) {
 					accountRawConversation(raw);
 				}
 			} else {
 				completeMessages = false;
+				archiveComplete = false;
 			}
 			const parsed = parseExport(
 				conversationsJson,
@@ -2387,7 +2639,7 @@ export async function collectAnthropic({
 		const partIndices = conversationParts
 			.map((part) => part.part)
 			.sort((a, b) => a - b);
-		completeMessages =
+		archiveComplete = completeMessages =
 			manifest.version === "1.0" &&
 			Number.isSafeInteger(manifest.total_files) &&
 			manifest.total_files === dataFiles.length &&
@@ -2436,12 +2688,19 @@ export async function collectAnthropic({
 					)
 				) {
 					completeMessages = false;
+					conversationsExact = false;
 				}
 			}
 			const classified = classifyManifestPartEntries(
 				result.category,
 				result.entries,
 			);
+			if (
+				result.category === "projects" &&
+				classified.emptyEntryNames.length > 0
+			) {
+				projectsExplicitEmpty = true;
+			}
 			rawConversations.push(...classified.conversations);
 			rawProjects.push(...classified.projects);
 			rawUserProfiles.push(...classified.userProfiles);
@@ -2532,8 +2791,15 @@ export async function collectAnthropic({
 		) {
 			completeMessages = false;
 		}
+		if (unclassified.length > 0 || outOfScopeByCategory.size > 0) {
+			archiveComplete = false;
+		}
+		conversationsBoundary = conversationsSourceFound;
 		for (const raw of rawConversations) {
 			accountRawConversation(raw);
+		}
+		for (const raw of rawProjects) {
+			accountRawProject(raw);
 		}
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
 		await emitParsed(
