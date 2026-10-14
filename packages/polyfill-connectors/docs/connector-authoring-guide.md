@@ -608,17 +608,21 @@ The [authoring loop](../../../AUTHORING.md#local-authoring-loop) gives the curre
 To write the machine-readable claim, add `--json connectors/<key>/evidence/claim.json` to the `scenario-verify` command:
 
 ```bash
+mkdir -p connectors/<key>/evidence
 node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts <key> <path-to-local-scenario.json> --json connectors/<key>/evidence/claim.json
 ```
 
-`--json` uses the path relative to the process working directory. From the repository root, this writes to `connectors/<key>/evidence/claim.json`, alongside the connector. Run from `packages/polyfill-connectors/` only if you also pass `../../connectors/<key>/evidence/claim.json`.
+The scaffold does not create `connectors/<key>/evidence/`, and the verifier does not create it either, so the `mkdir -p` is required. If the write fails, the verifier prints a warning and keeps its replay exit code. Confirm that `claim.json` exists and review its content; do not infer the write from the exit code.
 
-The file uses schema `pdpp.connector-claim/1`. It includes capture and verification timestamps, claim and limitations, stream coverage, run/driver counts, source and declaration digests, and only the scenario filename. Review generated content before committing. Commit this claim file only; scenario JSON, HAR, storage state, and diagnostic dumps are local-only and can contain account data or credentials.
+`--json` uses the path relative to the process working directory. From the repository root, this writes to `connectors/<key>/evidence/claim.json`, alongside the connector. To run from `packages/polyfill-connectors/` instead, run `mkdir -p ../../connectors/<key>/evidence` and pass `--json ../../connectors/<key>/evidence/claim.json` to `bin/scenario-verify.ts`.
+
+The file uses schema `pdpp.connector-claim/1`. It holds the claim and its limitations, capture and verification timestamps, the coverage labels earned (for example `empty_state_run` or `state_seeded_second_run_with_changed_requests`), the run count, the names of the drivers used (not a driver count), captured and verified source and declaration digests, and only the scenario filename. It does not hold per-stream coverage. The `streams exercised` summary prints only to the local verifier's stdout. Review generated content before committing. Commit this claim file only; scenario JSON, HAR, storage state, and diagnostic dumps are local-only and can contain account data or credentials.
 
 **Path and freshness convention**
 
 - Keep exactly one committed claim at `connectors/<key>/evidence/claim.json`: the latest claim. Overwrite it when you re-verify; do not add timestamped claim files.
 - Re-generate it when connector source or its manifest changes materially. CI compares the claim's `captured_with` source and declaration digests with the PR's connector source and manifest. Matching digests are reported as BOUND; differing digests are STALE.
+- Re-verifying an existing scenario refreshes `verified_at` and `verified_subject`, but keeps `captured_with` from the original capture. If connector source or manifest changed after that capture, the claim stays STALE. Capture again with `scenario-record` and verify the new scenario to bind the claim to the changed code.
 - No claim file means no established replay claim. That is an honest state: CI reports `evidence: none` and does not fail because evidence is missing.
 
 **What CI does with it**
