@@ -1349,7 +1349,6 @@ export async function collectAnthropic({
 	const deliveredConversationIds = new Set<string>();
 	const deliveredProjectIds = new Set<string>();
 	const deliveredDocumentIds = new Set<string>();
-	let deliveredProfiles = 0;
 	const unrestrictedStream = (stream: string) => {
 		if (recoveryOnly || detailGaps?.length) {
 			return false;
@@ -1549,7 +1548,6 @@ export async function collectAnthropic({
 		 * an empty account, so conversations and messages are skipped. */
 		conversationsSourceMissing = false,
 	): Promise<void> {
-		let profileVerified = false;
 		const selectedConversations: Array<{
 			record: (typeof parsed.conversations)[number];
 			source: SourceRecordEnvelope;
@@ -1630,35 +1628,23 @@ export async function collectAnthropic({
 					},
 				);
 			}
-			profileVerified =
-				profile.metadataStatus === "valid" &&
-				browserProfileAppliesToExport &&
-				profile.fullName !== null &&
-				organizationId.length > 0 &&
-				userFiles.length === 1;
-			await emitRecord(
-				ACCOUNT_PROFILE_STREAM,
-				{
-					id: organizationId,
-					organization_id: organizationId,
-					full_name: profile.fullName,
-					plan:
-						browserProfileAppliesToExport &&
-						profile.metadataStatus !== "mismatch" &&
-						profile.metadataStatus !== "ambiguous" &&
-						profile.fullName !== null
-							? browserProfile.plan
-							: null,
-					name_source: profile.nameSource,
-					metadata_status: profile.metadataStatus,
-				},
-				{
-					beforeEmit: () => {
-						deliveredProfiles += 1;
-						return Promise.resolve();
-					},
-				},
-			);
+			// Delivered with the old mapping, but never proven complete: users.json
+			// carries no raw field that ties its roster entry to the requested
+			// organization, so a name match cannot establish identity or ownership.
+			await emitRecord(ACCOUNT_PROFILE_STREAM, {
+				id: organizationId,
+				organization_id: organizationId,
+				full_name: profile.fullName,
+				plan:
+					browserProfileAppliesToExport &&
+					profile.metadataStatus !== "mismatch" &&
+					profile.metadataStatus !== "ambiguous" &&
+					profile.fullName !== null
+						? browserProfile.plan
+						: null,
+				name_source: profile.nameSource,
+				metadata_status: profile.metadataStatus,
+			});
 		}
 		if (wantsConversations) {
 			for (const { record: conversation, source } of selectedConversations) {
@@ -1886,16 +1872,6 @@ export async function collectAnthropic({
 			documentsExact &&
 			!skipped.has(PROJECT_DOCUMENTS_STREAM) &&
 			sameIds(rawDocumentIds, deliveredDocumentIds);
-		const profileProven =
-			requested.has(ACCOUNT_PROFILE_STREAM) &&
-			unrestrictedStream(ACCOUNT_PROFILE_STREAM) &&
-			archiveComplete &&
-			profileVerified &&
-			!skipped.has(ACCOUNT_PROFILE_STREAM) &&
-			deliveredProfiles === 1;
-		if (profileProven) {
-			await emit(buildFullScanCoverageMessage(ACCOUNT_PROFILE_STREAM, 1));
-		}
 		if (conversationsProven) {
 			await emit(
 				buildFullScanCoverageMessage(
@@ -2633,12 +2609,19 @@ export async function collectAnthropic({
 			return;
 		}
 
-		const conversationParts = dataFiles.filter(
-			(part) => part.category === "conversations",
+		// Each category numbers its own parts from 0; a missing prefix, gap or
+		// repeated index in any category leaves that category unproven.
+		const partitionsContiguous = [
+			"conversations",
+			"projects",
+			"light_metadata",
+		].every((category) =>
+			dataFiles
+				.filter((part) => part.category === category)
+				.map((part) => part.part)
+				.sort((a, b) => a - b)
+				.every((part, index) => part === index),
 		);
-		const partIndices = conversationParts
-			.map((part) => part.part)
-			.sort((a, b) => a - b);
 		archiveComplete = completeMessages =
 			manifest.version === "1.0" &&
 			Number.isSafeInteger(manifest.total_files) &&
@@ -2655,7 +2638,7 @@ export async function collectAnthropic({
 				dataFiles.length &&
 			new Set(dataFiles.map((part) => part.filename)).size ===
 				dataFiles.length &&
-			partIndices.every((part, index) => part === index) &&
+			partitionsContiguous &&
 			results.every(
 				(result) =>
 					result.completeJsonBoundary === true &&

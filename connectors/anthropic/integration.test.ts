@@ -1612,18 +1612,26 @@ test("collectAnthropic: multi-part manifest with no recognized category part -> 
 });
 
 function manifestFetchStub(
-	parts: Array<{ category: string; token: string }>,
+	parts: Array<{ category: string; token: string; part?: number }>,
 ): FetchStub {
+	// Claude numbers parts within each category (`<category>-000.zip`), so the
+	// default index counts per category, as in the observed layout.
+	const seen = new Map<string, number>();
 	const manifest = {
 		version: "1.0",
 		total_files: parts.length,
-		data_files: parts.map((p, i) => ({
-			batch_index: 0,
-			category: p.category,
-			part: i,
-			filename: `${p.category}-00${i}.zip`,
-			export_url: `https://claude.ai/export/org-1/download/${p.token}`,
-		})),
+		data_files: parts.map((p, i) => {
+			const next = seen.get(p.category) ?? 0;
+			seen.set(p.category, next + 1);
+			const part = p.part ?? next;
+			return {
+				batch_index: 0,
+				category: p.category,
+				part,
+				filename: `${p.category}-00${i}.zip`,
+				export_url: `https://claude.ai/export/org-1/download/${p.token}`,
+			};
+		}),
 	};
 	return (url) => {
 		if (url.includes("/api/organizations") && !url.includes("export_data")) {
@@ -2989,11 +2997,26 @@ async function runFullCompletion(
 		detailGaps?: BrowserCollectContext["detailGaps"];
 		unknownEntry?: boolean;
 		skipUsers?: boolean;
+		/** Manifest mode: replace the generated parts with these exact ones. */
+		partitions?: Array<{
+			category: string;
+			part: number;
+			entries: Array<{ name: string; content: unknown }>;
+		}>;
+		/** Awaited before each RECORD reaches the sink; may defer or reject. */
+		recordGate?: (
+			message: EmittedMessage,
+			protocolMessages: readonly EmittedMessage[],
+		) => Promise<void>;
 	} = {},
 ) {
-	const conversations = input.conversations ?? CONVERSATIONS_JSON;
+	// An explicitly supplied null/undefined is a malformed raw input, not a
+	// request for the default fixture.
+	const conversations =
+		"conversations" in input ? input.conversations : CONVERSATIONS_JSON;
 	const projects = input.projects ?? [FULL_PROJECT];
-	const users = input.users ?? [{ full_name: "Browser Owner" }];
+	const users =
+		"users" in input ? input.users : [{ full_name: "Browser Owner" }];
 	const streams = input.streams ?? [
 		"account_profile",
 		"conversations",
@@ -3009,8 +3032,9 @@ async function runFullCompletion(
 		})),
 		...(input.unknownEntry ? [{ name: "future.json", content: [] }] : []),
 	];
-	const parts: Array<{
+	const generatedParts: Array<{
 		category: string;
+		part?: number;
 		entries: Array<{ name: string; content: unknown }>;
 	}> = [
 		{
@@ -3044,9 +3068,11 @@ async function runFullCompletion(
 					},
 				]),
 	];
+	const parts = input.partitions ?? generatedParts;
 	const tokens = parts.map((part, index) => ({
 		category: part.category,
 		token: `tok-${index}`,
+		...("part" in part && part.part !== undefined ? { part: part.part } : {}),
 	}));
 	const context = makeContext({
 		streams,
@@ -3062,9 +3088,16 @@ async function runFullCompletion(
 	if (input.recoveryOnly !== undefined)
 		context.ctx.recoveryOnly = input.recoveryOnly;
 	if (input.detailGaps) context.ctx.detailGaps = input.detailGaps;
+	const gate = input.recordGate;
 	const runtime = makeEmitRecord({
 		requested: context.ctx.requested,
-		emit: context.ctx.emit,
+		emit: gate
+			? async (message) => {
+					if (message.type === "RECORD")
+						await gate(message, context.protocolMessages);
+					return context.ctx.emit(message);
+				}
+			: context.ctx.emit,
 		emittedAt: context.ctx.emittedAt,
 		validateRecord,
 		isTombstone: undefined,
@@ -3139,11 +3172,13 @@ function assertSelfMapped(
 for (const mode of ["buffered", "streaming", "manifest"] as const) {
 	test(`full completion ${mode}: every stream proves its measured whole boundary`, async () => {
 		const run = await runFullCompletion(mode);
-		assertSelfMapped(run, "account_profile", 1);
 		assertSelfMapped(run, "conversations", 1);
 		assertSelfMapped(run, "projects", 1);
 		assertSelfMapped(run, "project_documents", 2);
-		assert.equal(run.proofs.length, 4);
+		assert.equal(run.proofFor("account_profile").length, 0);
+		assert.equal(run.proofs.length, 3);
+		// The profile RECORD itself is unchanged by withholding its completion.
+		assert.equal(run.recordsOf("account_profile").length, 1);
 	});
 	test(`full completion ${mode}: explicit empty document lists prove zero documents`, async () => {
 		const run = await runFullCompletion(mode, {
@@ -3305,4 +3340,292 @@ test("full completion: messages evidence keeps its guarantees beside the other s
 	});
 	assert.equal(malformed.proofFor("messages").length, 0);
 	assert.equal(malformed.proofFor("conversations").length, 0);
+});
+
+// ─── Review R1/R2 counterexamples: profile identity and partition identity
+
+const ALL_PLUS_MESSAGES = [
+	"account_profile",
+	"conversations",
+	"messages",
+	"projects",
+	"project_documents",
+];
+const FINAL_RECORD_COUNTS = {
+	conversations: 1,
+	messages: 1,
+	projects: 1,
+	project_documents: 2,
+} as const;
+
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
+	for (const [label, users] of [
+		["a roster with no raw identity", [{ full_name: "Browser Owner" }]],
+		[
+			"a same-name roster entry for another identity",
+			[{ uuid: "someone-else", full_name: "Browser Owner" }],
+		],
+		[
+			"a raw user id that no export field ties to the requested organization",
+			[{ uuid: "user-1", full_name: "Browser Owner" }],
+		],
+		[
+			"an explicit null users wrapper beside a top-level name",
+			{ users: null, full_name: "Browser Owner" },
+		],
+		[
+			"a non-array users wrapper beside a top-level name",
+			{ users: "Browser Owner", full_name: "Browser Owner" },
+		],
+	] as const) {
+		test(`full completion ${mode}: ${label} withholds account_profile completion on every stream`, async () => {
+			const run = await runFullCompletion(mode, {
+				users,
+				streams: ALL_PLUS_MESSAGES,
+			});
+			assert.equal(run.proofFor("account_profile").length, 0);
+			// Old record behavior is preserved: the profile record is still delivered.
+			const [record] = run.recordsOf("account_profile");
+			assert.equal(record?.data.full_name, "Browser Owner");
+			assert.equal(record?.data.metadata_status, "valid");
+			// The other streams keep their own measured proofs.
+			assertSelfMapped(run, "conversations", 1);
+			assertSelfMapped(run, "messages", 1);
+			assertSelfMapped(run, "projects", 1);
+			assertSelfMapped(run, "project_documents", 2);
+			assert.equal(run.proofs.length, 4);
+		});
+	}
+	for (const [label, options] of [
+		["null conversations file", { conversations: null }],
+		["object conversations file", { conversations: {} }],
+		["string conversations file", { conversations: "[]" }],
+	] as const) {
+		test(`full completion ${mode}: ${label} gives no conversation or message proof`, async () => {
+			const run = await runFullCompletion(mode, {
+				...options,
+				streams: ALL_PLUS_MESSAGES,
+			});
+			assert.equal(run.proofFor("conversations").length, 0);
+			assert.equal(run.proofFor("messages").length, 0);
+			assert.equal(run.proofFor("account_profile").length, 0);
+		});
+	}
+	for (const [label, users] of [
+		["null users file", null],
+		["string users file", "Browser Owner"],
+		["numeric users file", 7],
+	] as const) {
+		test(`full completion ${mode}: ${label} gives no account_profile proof`, async () => {
+			const run = await runFullCompletion(mode, {
+				users,
+				streams: ALL_PLUS_MESSAGES,
+			});
+			assert.equal(run.proofFor("account_profile").length, 0);
+		});
+	}
+	test(`full completion ${mode}: a null project file gives no projects proof`, async () => {
+		const run = await runFullCompletion(mode, {
+			projects: [null],
+			streams: ALL_PLUS_MESSAGES,
+		});
+		assert.equal(run.proofFor("projects").length, 0);
+		assert.equal(run.proofFor("project_documents").length, 0);
+	});
+
+	for (const stream of Object.keys(FINAL_RECORD_COUNTS) as Array<
+		keyof typeof FINAL_RECORD_COUNTS
+	>) {
+		test(`full completion ${mode}: ${stream} proof waits for the final RECORD to be accepted`, async () => {
+			let seen = 0;
+			let proofsWhenFinalRecordHeld = -1;
+			const run = await runFullCompletion(mode, {
+				streams: ALL_PLUS_MESSAGES,
+				recordGate: async (message, protocolMessages) => {
+					if (message.type !== "RECORD" || message.stream !== stream) return;
+					seen += 1;
+					if (seen !== FINAL_RECORD_COUNTS[stream]) return;
+					await new Promise((resolve) => setTimeout(resolve, 5));
+					proofsWhenFinalRecordHeld = protocolMessages.filter(
+						(m) => m.type === "DETAIL_COVERAGE" && m.stream === stream,
+					).length;
+				},
+			});
+			assert.equal(seen, FINAL_RECORD_COUNTS[stream]);
+			assert.equal(proofsWhenFinalRecordHeld, 0);
+			assertSelfMapped(run, stream, FINAL_RECORD_COUNTS[stream]);
+		});
+		test(`full completion ${mode}: ${stream} proof is withheld when the final RECORD is rejected`, async () => {
+			let seen = 0;
+			let observed: readonly EmittedMessage[] = [];
+			await assert.rejects(
+				runFullCompletion(mode, {
+					streams: ALL_PLUS_MESSAGES,
+					recordGate: async (message, protocolMessages) => {
+						observed = protocolMessages;
+						if (message.type !== "RECORD" || message.stream !== stream) return;
+						seen += 1;
+						if (seen === FINAL_RECORD_COUNTS[stream]) {
+							await new Promise((resolve) => setTimeout(resolve, 1));
+							throw new Error("sink rejected final record");
+						}
+					},
+				}),
+				/sink rejected final record/,
+			);
+			assert.equal(
+				observed.filter(
+					(m) => m.type === "DETAIL_COVERAGE" && m.stream === stream,
+				).length,
+				0,
+			);
+		});
+	}
+}
+
+// Manifest partition identity. Each category numbers its own parts from 0.
+const CONV_ENTRY = [
+	{ name: "conversations.json", content: CONVERSATIONS_JSON },
+];
+const projectEntry = (index: number, project: unknown = FULL_PROJECT) => [
+	{ name: `projects/p${index}.json`, content: project },
+];
+const OWNER_USERS = [
+	{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+];
+const conversationsPart = (part = 0) => ({
+	category: "conversations",
+	part,
+	entries: CONV_ENTRY,
+});
+
+async function runPartitions(
+	partitions: Array<{
+		category: string;
+		part: number;
+		entries: Array<{ name: string; content: unknown }>;
+	}>,
+) {
+	return runFullCompletion("manifest", {
+		partitions,
+		streams: ALL_PLUS_MESSAGES,
+	});
+}
+
+function assertNoProofs(run: Awaited<ReturnType<typeof runPartitions>>) {
+	assert.deepEqual(
+		run.proofs.map((proof) => proof.stream),
+		[],
+	);
+}
+
+test("manifest partitions: a lone projects part 1 holding [] does not prove empty projects or documents", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{
+				category: "projects",
+				part: 1,
+				entries: [{ name: "projects.json", content: [] }],
+			},
+		]),
+	);
+});
+test("manifest partitions: a missing projects part 0 withholds proofs even beside a valid part 1", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 1, entries: projectEntry(0) },
+		]),
+	);
+});
+test("manifest partitions: two distinct projects files both labelled part 0 withhold proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{
+				category: "projects",
+				part: 0,
+				entries: projectEntry(1, {
+					uuid: "proj-2",
+					name: "Other",
+					docs: [{ uuid: "doc-9", filename: "z.md", content: "z" }],
+				}),
+			},
+		]),
+	);
+});
+test("manifest partitions: a projects gap (0 and 2) withholds proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{
+				category: "projects",
+				part: 2,
+				entries: projectEntry(1, { uuid: "proj-2", docs: [] }),
+			},
+		]),
+	);
+});
+test("manifest partitions: light_metadata part 1 without part 0 gives no profile or other proof", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{ category: "light_metadata", part: 1, entries: OWNER_USERS },
+		]),
+	);
+});
+test("manifest partitions: duplicate light_metadata part 0 withholds proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+			{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+			{
+				category: "light_metadata",
+				part: 0,
+				entries: [
+					{ name: "users.json", content: [{ full_name: "Browser Owner" }] },
+				],
+			},
+		]),
+	);
+});
+test("manifest partitions: duplicate or missing conversations parts still withhold proofs", async () => {
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(0),
+			conversationsPart(0),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+		]),
+	);
+	assertNoProofs(
+		await runPartitions([
+			conversationsPart(1),
+			{ category: "projects", part: 0, entries: projectEntry(0) },
+		]),
+	);
+});
+test("manifest partitions: contiguous multi-part projects from 0 keep their proofs", async () => {
+	const run = await runPartitions([
+		conversationsPart(),
+		{ category: "projects", part: 0, entries: projectEntry(0) },
+		{
+			category: "projects",
+			part: 1,
+			entries: projectEntry(1, {
+				uuid: "proj-2",
+				name: "Second",
+				docs: [{ uuid: "doc-9", filename: "z.md", content: "z" }],
+			}),
+		},
+		{ category: "light_metadata", part: 0, entries: OWNER_USERS },
+	]);
+	assertSelfMapped(run, "conversations", 1);
+	assertSelfMapped(run, "projects", 2);
+	assertSelfMapped(run, "project_documents", 3);
+	assertSelfMapped(run, "messages", 1);
 });
