@@ -322,10 +322,19 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 							data: { __typename: "Playlist", uri: `spotify:playlist:${id}` },
 						},
 					});
-					const filler = { item: { data: { __typename: "Album" } } };
 					const items =
 						offset === 0
-							? [playlist("pl1"), ...Array.from({ length: 199 }, () => filler)]
+							? [
+									playlist("pl1"),
+									...Array.from({ length: 199 }, (_, index) => ({
+										item: {
+											data: {
+												__typename: "Album",
+												uri: `spotify:album:album-${offset}-${index}`,
+											},
+										},
+									})),
+								]
 							: [playlist("pl2")];
 					return new Response(
 						JSON.stringify({
@@ -536,7 +545,10 @@ async function collectWithInPageFetch(
 		operationName: string,
 		variables: Record<string, unknown>,
 	) => unknown,
-	onFailure?: (messages: EmittedMessage[]) => void,
+	onFailure?: (result: {
+		emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
+		messages: EmittedMessage[];
+	}) => void,
 ): Promise<{
 	emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
 	messages: EmittedMessage[];
@@ -608,7 +620,7 @@ async function collectWithInPageFetch(
 				),
 			});
 		} catch (error) {
-			onFailure?.(messages);
+			onFailure?.({ emittedRecords, messages });
 			throw error;
 		}
 		return { emittedRecords, messages };
@@ -622,15 +634,24 @@ async function assertRejectedWithoutCompletionAuthority(
 	requestedNames: string[],
 	graphql: Parameters<typeof collectWithInPageFetch>[1],
 ): Promise<void> {
-	let failure: EmittedMessage[] | undefined;
+	let failure:
+		| {
+				emittedRecords: Array<{
+					stream: string;
+					data: Record<string, unknown>;
+				}>;
+				messages: EmittedMessage[];
+		  }
+		| undefined;
 	await assert.rejects(() =>
-		collectWithInPageFetch(requestedNames, graphql, (messages) => {
-			failure = messages;
+		collectWithInPageFetch(requestedNames, graphql, (result) => {
+			failure = result;
 		}),
 	);
 	assert.ok(failure);
+	assert.deepEqual(failure.emittedRecords, []);
 	assert.equal(
-		failure.some(
+		failure.messages.some(
 			(message) =>
 				message.type === "STATE" || message.type === "DETAIL_COVERAGE",
 		),
@@ -706,7 +727,7 @@ test("spotify browser parser rejects repeated full library pages", async () => {
 	);
 });
 
-test("spotify browser parser rejects repeated full playlist pages", async () => {
+test("spotify browser parser preserves identical playlist pages at distinct offsets", async () => {
 	const playlistItem = {
 		addedAt: { isoString: "2024-01-01T00:00:00Z" },
 		itemV2: {
@@ -719,7 +740,7 @@ test("spotify browser parser rejects repeated full playlist pages", async () => 
 		},
 	};
 	const items = Array.from({ length: 100 }, () => playlistItem);
-	await assertRejectedWithoutCompletionAuthority(
+	const { emittedRecords, messages } = await collectWithInPageFetch(
 		["playlist_items"],
 		(operationName, variables) => {
 			if (operationName === "libraryV3") {
@@ -754,6 +775,21 @@ test("spotify browser parser rejects repeated full playlist pages", async () => 
 				},
 			};
 		},
+	);
+	const playlistItems = emittedRecords.filter(
+		(record) => record.stream === "playlist_items",
+	);
+	assert.equal(playlistItems.length, 500);
+	assert.equal(playlistItems[0]?.data.id, "pl1:0");
+	assert.equal(playlistItems.at(-1)?.data.id, "pl1:499");
+	assert.ok(
+		messages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "playlist_items" &&
+				message.considered === 500 &&
+				message.covered === 500,
+		),
 	);
 });
 

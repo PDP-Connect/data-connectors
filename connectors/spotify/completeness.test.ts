@@ -19,6 +19,7 @@ const HASHES = {
 };
 
 type FailedCollectionCapture = {
+	emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
 	messages: EmittedMessage[];
 };
 
@@ -71,6 +72,7 @@ async function collectSavedTracks(
 		pathname?: string;
 		requested?: string[];
 		profileEnrichment?: unknown;
+		profileEnrichmentStatus?: number;
 		onFailure?: (result: FailedCollectionCapture) => void;
 	} = {},
 ) {
@@ -154,7 +156,7 @@ async function collectSavedTracks(
 		}
 		if (url.startsWith("https://spclient.wg.spotify.com/user-profile-view/")) {
 			return new Response(JSON.stringify(options.profileEnrichment ?? {}), {
-				status: 200,
+				status: options.profileEnrichmentStatus ?? 200,
 			});
 		}
 		if (url === "https://api-partner.spotify.com/pathfinder/v2/query") {
@@ -200,7 +202,7 @@ async function collectSavedTracks(
 				),
 			});
 		} catch (error) {
-			options.onFailure?.({ messages });
+			options.onFailure?.({ emittedRecords, messages });
 			throw error;
 		}
 		return { bundleRequests, emittedRecords, messages, operations, requests };
@@ -230,6 +232,7 @@ async function assertRejectedWithoutAuthority(
 	);
 	const { failure } = capture;
 	assert.ok(failure);
+	assert.deepEqual(failure.emittedRecords, []);
 	assert.equal(
 		failure.messages.some(
 			(message) =>
@@ -351,6 +354,55 @@ test("playlist library pagination continues after a short page while totalCount 
 	);
 });
 
+test("library pagination accepts Spotify pagingInfo offsets bound to each request", async () => {
+	const result = await collectSavedTracks(
+		(offset, _index, operationName) => {
+			assert.equal(operationName, "libraryV3");
+			return {
+				data: {
+					me: {
+						libraryV3: {
+							pagingInfo: { offset },
+							totalCount: 0,
+							items: [],
+						},
+					},
+				},
+			};
+		},
+		{ requested: ["playlists"] },
+	);
+	assert.equal(result.operations[0]?.variables.offset, 0);
+	assert.ok(
+		result.messages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "playlists",
+		),
+	);
+});
+
+test("a verified empty playlist inventory gives exact zero coverage for both streams", async () => {
+	const result = await collectSavedTracks(
+		(_offset, _index, operationName) => {
+			assert.equal(operationName, "libraryV3");
+			return {
+				data: {
+					me: { libraryV3: { pagingInfo: { offset: 0 }, totalCount: 0, items: [] } },
+				},
+			};
+		},
+		{ requested: ["playlists", "playlist_items"] },
+	);
+	assert.deepEqual(result.emittedRecords, []);
+	for (const stream of ["playlists", "playlist_items"]) {
+		const coverage = result.messages.find(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === stream,
+		);
+		assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null, 0);
+		assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null, 0);
+	}
+});
+
 test("missing playlist library or playlist detail objects cannot prove an empty list", async () => {
 	await assertRejectedWithoutAuthority(
 		(_offset, _index, operationName) =>
@@ -381,6 +433,78 @@ test("missing playlist library or playlist detail objects cannot prove an empty 
 				},
 			};
 		},
+		{ requested: ["playlists"] },
+	);
+});
+
+test("repeated identities in excluded library rows cannot prove an empty playlist inventory", async () => {
+	await assertRejectedWithoutAuthority(
+		(offset, _index, operationName) => {
+			assert.equal(operationName, "libraryV3");
+			const album = {
+				item: {
+					data: {
+						__typename: "Album",
+						uri: "spotify:album:album-1",
+						name: offset === 0 ? "Album" : "Album updated",
+					},
+				},
+			};
+			return {
+				data: {
+					me: {
+						libraryV3: { offset, totalCount: 2, items: [album] },
+					},
+				},
+			};
+		},
+		{ requested: ["playlists"] },
+	);
+	await assertRejectedWithoutAuthority(
+		() => ({
+			data: {
+				me: {
+					libraryV3: {
+						offset: 0,
+						totalCount: 2,
+						items: ["first", "second"].map(() => ({
+							item: {
+								data: {
+									__typename: "Album",
+									uri: "spotify:album:album-1",
+								},
+							},
+						})),
+					},
+				},
+			},
+		}),
+		{ requested: ["playlists"] },
+	);
+});
+
+test("playlist rows cannot alias a different Spotify resource URI with the same ID", async () => {
+	await assertRejectedWithoutAuthority(
+		() => ({
+			data: {
+				me: {
+					libraryV3: {
+						offset: 0,
+						totalCount: 1,
+						items: [
+							{
+								item: {
+									data: {
+										__typename: "Playlist",
+										uri: "spotify:album:pl1",
+									},
+								},
+							},
+						],
+					},
+				},
+			},
+		}),
 		{ requested: ["playlists"] },
 	);
 });
@@ -448,6 +572,112 @@ test("playlist item traversal continues after a short page while its total remai
 	);
 });
 
+test("playlists-only collection requires terminal evidence for each child count", async () => {
+	await assertRejectedWithoutAuthority(
+		(_offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") {
+				return {
+					data: {
+						me: {
+							libraryV3: {
+								offset: 0,
+								totalCount: 1,
+								items: [
+									{
+										item: {
+											data: {
+												__typename: "Playlist",
+												uri: "spotify:playlist:pl1",
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				};
+			}
+			assert.equal(operationName, "fetchPlaylist");
+			return {
+				data: {
+					playlistV2: {
+						uri: String(variables?.uri),
+						name: "Playlist",
+						ownerV2: { data: { uri: "spotify:user:owner", name: "Owner" } },
+						content: { offset: 0, items: [] },
+						images: { items: [] },
+					},
+				},
+			};
+		},
+		{ requested: ["playlists"] },
+	);
+});
+
+test("playlist pagination preserves identical track occurrences at distinct offsets", async () => {
+	const offsets: unknown[] = [];
+	const result = await collectSavedTracks(
+		(offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") {
+				return {
+					data: {
+						me: {
+							libraryV3: {
+								offset: 0,
+								totalCount: 1,
+								items: [
+									{
+										item: {
+											data: {
+												__typename: "Playlist",
+												uri: "spotify:playlist:pl1",
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				};
+			}
+			assert.equal(operationName, "fetchPlaylist");
+			offsets.push(offset);
+			return {
+				data: {
+					playlistV2: {
+						uri: String(variables?.uri),
+						name: "Playlist",
+						content: {
+							offset,
+							totalCount: 2,
+							items: [
+								{
+									itemV2: {
+										data: {
+											__typename: "Track",
+											uri: "spotify:track:repeat",
+											name: "Repeat",
+											artists: { items: [] },
+										},
+									},
+								},
+							],
+						},
+					},
+				},
+			};
+		},
+		{ requested: ["playlist_items"] },
+	);
+	assert.deepEqual(offsets, [0, 1]);
+	assert.deepEqual(
+		result.emittedRecords
+			.filter((record) => record.stream === "playlist_items")
+			.map((record) => record.data.id),
+		["pl1:0", "pl1:1"],
+	);
+});
+
 test("playlist item completion combines terminal evidence across every playlist", async () => {
 	const result = await collectSavedTracks(
 		(_offset, _index, operationName, variables) => {
@@ -511,6 +741,56 @@ test("playlist item completion combines terminal evidence across every playlist"
 			.length,
 		1,
 	);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE" && message.stream === "playlist_items",
+	);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null, 1);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null, 1);
+});
+
+test("an empty child playlist emits exact zero playlist-item coverage", async () => {
+	const result = await collectSavedTracks(
+		(_offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") {
+				return {
+					data: {
+						me: {
+							libraryV3: {
+								offset: 0,
+								totalCount: 1,
+								items: [
+									{
+										item: {
+											data: {
+												__typename: "Playlist",
+												uri: "spotify:playlist:empty-child",
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				};
+			}
+			assert.equal(operationName, "fetchPlaylist");
+			return {
+				data: {
+					playlistV2: {
+						uri: String(variables?.uri),
+						content: { offset: 0, totalCount: 0, items: [] },
+					},
+				},
+			};
+		},
+		{ requested: ["playlist_items"] },
+	);
+	assert.deepEqual(result.emittedRecords, []);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE" && message.stream === "playlist_items",
+	);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null, 0);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null, 0);
 });
 
 test("saved-track traversal cannot infer a terminal boundary from short pages without source end evidence", async () => {
@@ -528,6 +808,34 @@ test("saved-track short and empty pages without totals cannot prove completion",
 	for (const items of [[], [savedTrack("one")]]) {
 		await assertRejectedWithoutAuthority(() => savedResponse(items));
 	}
+});
+
+test("a fully covered nonempty saved-track scan emits STATE after exact coverage", async () => {
+	const result = await collectSavedTracks(() => savedResponse([savedTrack("full")], 1));
+	assert.equal(result.emittedRecords.filter((record) => record.stream === "saved_tracks").length, 1);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE" && message.stream === "saved_tracks",
+	);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null, 1);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null, 1);
+	assert.equal(
+		result.messages.filter((message) => message.type === "STATE" && message.stream === "saved_tracks").length,
+		1,
+	);
+});
+
+test("a verified empty saved-track scan emits exact zero coverage and STATE", async () => {
+	const result = await collectSavedTracks(() => savedResponse([], 0));
+	assert.deepEqual(result.emittedRecords, []);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE" && message.stream === "saved_tracks",
+	);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null, 0);
+	assert.equal(coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null, 0);
+	assert.equal(
+		result.messages.filter((message) => message.type === "STATE" && message.stream === "saved_tracks").length,
+		1,
+	);
 });
 
 test("saved tracks reject duplicate stable identities within a page", async () => {
@@ -577,6 +885,31 @@ test("saved tracks reject repeated identities across pages even when the page ch
 	);
 });
 
+test("saved-track URI and source IDs that disagree withhold the row and STATE", async () => {
+	const result = await collectSavedTracks(() =>
+		savedResponse(
+			[savedTrack("source-id", { uri: "spotify:track:uri-id" })],
+			1,
+		),
+	);
+	assert.equal(
+		result.emittedRecords.some((record) => record.stream === "saved_tracks"),
+		false,
+	);
+	assert.equal(
+		result.messages.some((message) => message.type === "STATE"),
+		false,
+	);
+	const coverage = result.messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "saved_tracks",
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+		0,
+	);
+});
+
 test("saved tracks reject a response offset that does not match the request", async () => {
 	await assertRejectedWithoutAuthority(() => {
 		const response = savedResponse([savedTrack("offset-mismatch")], 1) as {
@@ -610,6 +943,42 @@ test("library rows require a recognized type and folders veto root-only coverage
 			{ requested: ["playlists"] },
 		);
 	}
+});
+
+test("known Spotify pseudo-playlists count in inventory proof without becoming playlists", async () => {
+	const result = await collectSavedTracks(
+		() => ({
+			data: {
+				me: {
+					libraryV3: {
+						offset: 0,
+						totalCount: 1,
+						items: [
+							{
+								item: {
+									data: {
+										__typename: "PseudoPlaylist",
+										uri: "spotify:collection:tracks",
+									},
+								},
+							},
+						],
+					},
+				},
+			},
+		}),
+		{ requested: ["playlists"] },
+	);
+	assert.equal(
+		result.messages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "playlists" &&
+				message.considered === 0 &&
+				message.covered === 0,
+		),
+		true,
+	);
 });
 
 test("playlist item rows reject unrecognized types instead of silently skipping them", async () => {
@@ -655,8 +1024,8 @@ test("playlist item rows reject unrecognized types instead of silently skipping 
 	);
 });
 
-test("malformed playlist item fields veto row coverage", async () => {
-	await assertRejectedWithoutAuthority(
+test("playlist item positions retain source slots occupied by episodes", async () => {
+	const result = await collectSavedTracks(
 		(_offset, _index, operationName, variables) => {
 			if (operationName === "libraryV3") {
 				return {
@@ -685,9 +1054,10 @@ test("malformed playlist item fields veto row coverage", async () => {
 					playlistV2: {
 						uri: String(variables?.uri),
 						content: {
-							totalCount: 1,
 							offset: variables?.offset,
+							totalCount: 3,
 							items: [
+								{ itemV2: { data: { __typename: "Episode" } } },
 								{
 									itemV2: {
 										data: {
@@ -695,10 +1065,10 @@ test("malformed playlist item fields veto row coverage", async () => {
 											uri: "spotify:track:t1",
 											name: "Track",
 											artists: { items: [] },
-											trackDuration: { totalMilliseconds: "180000" },
 										},
 									},
 								},
+								{ itemV2: { data: { __typename: "PodcastEpisode" } } },
 							],
 						},
 					},
@@ -707,9 +1077,101 @@ test("malformed playlist item fields veto row coverage", async () => {
 		},
 		{ requested: ["playlist_items"] },
 	);
+	const items = result.emittedRecords.filter(
+		(record) => record.stream === "playlist_items",
+	);
+	assert.equal(items.length, 1);
+	assert.equal(items[0]?.data.id, "pl1:1");
+	assert.equal(items[0]?.data.position, 1);
 });
 
-test("malformed saved-track mapped fields veto coverage instead of becoming empty values", async () => {
+test("malformed playlist item fields withhold the whole row before coverage", async () => {
+	for (const mutate of [
+		(track: Record<string, unknown>) => {
+			track.trackDuration = { totalMilliseconds: "180000" };
+		},
+		(track: Record<string, unknown>) => {
+			track.artists = [];
+		},
+		(_track: Record<string, unknown>, item: Record<string, unknown>) => {
+			item.addedBy = [];
+		},
+	]) {
+		const result = await collectSavedTracks(
+			(_offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") {
+					return {
+						data: {
+							me: {
+								libraryV3: {
+									offset: 0,
+									totalCount: 1,
+									items: [
+										{
+											item: {
+												data: {
+													__typename: "Playlist",
+													uri: "spotify:playlist:pl1",
+												},
+											},
+										},
+									],
+								},
+							},
+						},
+					};
+				}
+				const item: Record<string, unknown> = {
+					itemV2: {
+						data: {
+							__typename: "Track",
+							uri: "spotify:track:t1",
+							name: "Track",
+							artists: { items: [] },
+							trackDuration: { totalMilliseconds: 180000 },
+						},
+					},
+				};
+				const track = (item.itemV2 as { data: Record<string, unknown> }).data;
+				mutate(track, item);
+				return {
+					data: {
+						playlistV2: {
+							uri: String(variables?.uri),
+							content: {
+								totalCount: 1,
+								offset: variables?.offset,
+								items: [item],
+							},
+						},
+					},
+				};
+			},
+			{ requested: ["playlist_items"] },
+		);
+		assert.equal(
+			result.emittedRecords.some(
+				(record) => record.stream === "playlist_items",
+			),
+			false,
+		);
+		const coverage = result.messages.find(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "playlist_items",
+		);
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null,
+			1,
+		);
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+			0,
+		);
+	}
+});
+
+test("malformed saved-track mapped fields withhold the whole row before coverage", async () => {
 	const malformedRows = [
 		(row: ReturnType<typeof savedTrack>) => {
 			row.track.data.duration = { totalMilliseconds: "180000" };
@@ -727,12 +1189,85 @@ test("malformed saved-track mapped fields veto coverage instead of becoming empt
 		(row: ReturnType<typeof savedTrack>) => {
 			row.addedAt = { isoString: 42 };
 		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.duration = [];
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.artists = [];
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.albumOfTrack = [];
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.albumOfTrack = { artists: [] };
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.contentRating = [];
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.externalIds = [];
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			Object.assign(row, { addedAt: [] });
+		},
 	];
 	for (const mutate of malformedRows) {
-		const row = savedTrack("malformed");
-		mutate(row);
-		await assertRejectedWithoutAuthority(() => savedResponse([row], 1));
+		const malformed = savedTrack("malformed");
+		mutate(malformed);
+		const result = await collectSavedTracks(() =>
+			savedResponse([savedTrack("covered"), malformed], 2),
+		);
+		assert.deepEqual(
+			result.emittedRecords.map((record) => record.data.id),
+			["covered"],
+		);
+		const coverage = result.messages.find(
+			(message) => message.type === "DETAIL_COVERAGE",
+		);
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null,
+			2,
+		);
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+			1,
+		);
+		assert.ok(
+			!result.messages.some(
+				(message) =>
+					message.type === "STATE" && message.stream === "saved_tracks",
+			),
+		);
 	}
+});
+
+test("unavailable mapped saved-track fields withhold the whole row and reduce coverage", async () => {
+	const malformed = savedTrack("unavailable");
+	malformed.track.data.duration = [];
+	const result = await collectSavedTracks(() =>
+		savedResponse([savedTrack("covered"), malformed], 2),
+	);
+	assert.deepEqual(
+		result.emittedRecords.map((record) => record.data.id),
+		["covered"],
+	);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null,
+		2,
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+		1,
+	);
+	assert.ok(
+		!result.messages.some(
+			(message) =>
+				message.type === "STATE" && message.stream === "saved_tracks",
+		),
+	);
 });
 
 test("saved-track traversal continues after a nonempty short page while totalCount remains", async () => {
@@ -776,18 +1311,36 @@ test("malformed saved-track response cannot become empty success or advance a ch
 	}));
 });
 
-test("saved-track row identity uses one source ID resolver and shape failures veto coverage", async () => {
+test("schema-invalid saved rows are withheld from the whole record and coverage", async () => {
 	const invalid = savedTrack("bad-shape");
 	invalid.track.data.name = "x".repeat(1001);
-	await assertRejectedWithoutAuthority(() =>
-		savedResponse(
-			[savedTrack("uri-id", { uri: "spotify:track:uri-id" }), invalid],
-			2,
+	const result = await collectSavedTracks(() =>
+		savedResponse([savedTrack("valid"), invalid], 2),
+	);
+	assert.deepEqual(
+		result.emittedRecords.map((record) => record.data.id),
+		["valid"],
+	);
+	const coverage = result.messages.find(
+		(message) => message.type === "DETAIL_COVERAGE",
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null,
+		2,
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+		1,
+	);
+	assert.ok(
+		!result.messages.some(
+			(message) =>
+				message.type === "STATE" && message.stream === "saved_tracks",
 		),
 	);
 });
 
-test("saved track with no available identity is retained but cannot advance full-scan state", async () => {
+test("saved track with no available identity is withheld from emission and coverage", async () => {
 	const result = await collectSavedTracks(() =>
 		savedResponse(
 			[
@@ -804,8 +1357,7 @@ test("saved track with no available identity is retained but cannot advance full
 			1,
 		),
 	);
-	assert.equal(result.emittedRecords[0]?.data.id, null);
-	assert.equal(result.emittedRecords[0]?.data.identity_unresolved, true);
+	assert.equal(result.emittedRecords.length, 0);
 	assert.ok(
 		!result.messages.some(
 			(message) =>
@@ -911,15 +1463,23 @@ test("profile collection preserves an explicitly empty source image URL", async 
 				},
 			};
 		},
-		{ requested: ["profile"] },
+		{
+			requested: ["profile"],
+			profileEnrichment: {
+				uri: "spotify:user:synthetic-user",
+				followers_count: null,
+				following_count: null,
+				image_url: null,
+			},
+		},
 	);
 	assert.deepEqual(result.emittedRecords[0]?.data.images, [
 		{ url: "", width: null, height: null },
 	]);
 });
 
-test("malformed profile image data is unavailable rather than an empty image list", async () => {
-	await assertRejectedWithoutAuthority(
+test("malformed profile image data withholds the whole row and coverage", async () => {
+	const result = await collectSavedTracks(
 		() => ({
 			data: {
 				me: { profile: { username: "synthetic-user", imageUrl: 42 } },
@@ -927,10 +1487,26 @@ test("malformed profile image data is unavailable rather than an empty image lis
 		}),
 		{ requested: ["profile"] },
 	);
+	assert.equal(
+		result.emittedRecords.some((record) => record.stream === "profile"),
+		false,
+	);
+	const coverage = result.messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null,
+		1,
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+		0,
+	);
 });
 
-test("malformed profile enrichment counts cannot become valid null counts", async () => {
-	await assertRejectedWithoutAuthority(
+test("malformed profile enrichment counts withhold the whole row and coverage", async () => {
+	const result = await collectSavedTracks(
 		() => ({
 			data: {
 				me: {
@@ -950,6 +1526,89 @@ test("malformed profile enrichment counts cannot become valid null counts", asyn
 			},
 		},
 	);
+	assert.equal(
+		result.emittedRecords.some((record) => record.stream === "profile"),
+		false,
+	);
+	const coverage = result.messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+		0,
+	);
+});
+
+test("profile enrichment for a different identity withholds the whole row", async () => {
+	const result = await collectSavedTracks(
+		() => ({
+			data: {
+				me: {
+					profile: {
+						username: "synthetic-user",
+						uri: "spotify:user:synthetic-user",
+					},
+				},
+			},
+		}),
+		{
+			requested: ["profile"],
+			profileEnrichment: {
+				uri: "spotify:user:other-user",
+				followers_count: 42,
+				following_count: 10,
+			},
+		},
+	);
+	assert.equal(
+		result.emittedRecords.some((record) => record.stream === "profile"),
+		false,
+	);
+	const coverage = result.messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+		0,
+	);
+});
+
+test("an unsuccessful profile enrichment response withholds the whole row", async () => {
+	const result = await collectSavedTracks(
+		() => ({
+			data: {
+				me: {
+					profile: {
+						username: "synthetic-user",
+						uri: "spotify:user:synthetic-user",
+					},
+				},
+			},
+		}),
+		{
+			requested: ["profile"],
+			profileEnrichmentStatus: 503,
+			profileEnrichment: {
+				uri: "spotify:user:synthetic-user",
+				followers_count: 42,
+				following_count: 10,
+			},
+		},
+	);
+	assert.equal(
+		result.emittedRecords.some((record) => record.stream === "profile"),
+		false,
+	);
+	const coverage = result.messages.find(
+		(message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+	);
+	assert.equal(
+		coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+		0,
+	);
 });
 
 test("malformed playlist detail fields veto coverage", async () => {
@@ -963,8 +1622,23 @@ test("malformed playlist detail fields veto coverage", async () => {
 		(detail: Record<string, unknown>) => {
 			detail.images = { items: [{ sources: "malformed" }] };
 		},
+		(detail: Record<string, unknown>) => {
+			detail.ownerV2 = false;
+		},
+		(detail: Record<string, unknown>) => {
+			detail.images = [];
+		},
+		(detail: Record<string, unknown>) => {
+			detail.public = [];
+		},
+		(detail: Record<string, unknown>) => {
+			detail.collaborative = [];
+		},
+		(detail: Record<string, unknown>) => {
+			detail.revisionId = [];
+		},
 	]) {
-		await assertRejectedWithoutAuthority(
+		const result = await collectSavedTracks(
 			(_offset, _index, operationName, variables) => {
 				if (operationName === "libraryV3") {
 					return {
@@ -1000,6 +1674,22 @@ test("malformed playlist detail fields veto coverage", async () => {
 				return { data: { playlistV2: detail } };
 			},
 			{ requested: ["playlists"] },
+		);
+		assert.equal(
+			result.emittedRecords.some((record) => record.stream === "playlists"),
+			false,
+		);
+		const coverage = result.messages.find(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "playlists",
+		);
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.considered : null,
+			1,
+		);
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+			0,
 		);
 	}
 });
