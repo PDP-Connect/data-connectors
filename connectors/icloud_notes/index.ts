@@ -115,6 +115,40 @@ const RESULTS_LIMIT = 200;
 const NOTES_READINESS_ATTEMPTS = 3;
 const NOTES_READINESS_BUDGET_MS = 20_000;
 const NOTES_READINESS_OPERATION_TIMEOUT_MS = 5_000;
+const READINESS_DEADLINE = Symbol("icloud readiness deadline");
+const READINESS_OPERATION_TIMEOUT = Symbol(
+	"icloud readiness operation timeout",
+);
+
+async function withinReadinessBudget<T>(
+	startOperation: () => Promise<T>,
+	deadline: number,
+): Promise<T> {
+	const remaining = deadline - Date.now();
+	if (remaining <= 0) throw READINESS_DEADLINE;
+	const timeoutMs = Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, remaining);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const value = await Promise.race([
+			startOperation(),
+			new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() =>
+						reject(
+							timeoutMs === remaining
+								? READINESS_DEADLINE
+								: READINESS_OPERATION_TIMEOUT,
+						),
+					timeoutMs,
+				);
+			}),
+		]);
+		if (Date.now() >= deadline) throw READINESS_DEADLINE;
+		return value;
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
 
 interface ProgressExtra {
 	intentional_exclusions?: number;
@@ -656,11 +690,20 @@ async function requireNotesPage(page: Page): Promise<string> {
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) break;
 		if (typeof page.waitForLoadState === "function") {
-			await page
-				.waitForLoadState("load", {
-					timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, remaining),
-				})
-				.catch(() => {});
+			try {
+				await withinReadinessBudget(
+					() =>
+						page.waitForLoadState("load", {
+							timeout: Math.min(
+								NOTES_READINESS_OPERATION_TIMEOUT_MS,
+								remaining,
+							),
+						}),
+					deadline,
+				);
+			} catch (error) {
+				if (error === READINESS_DEADLINE) break;
+			}
 		}
 		const afterWaitHref = page.url();
 		if (!isICloudNotesUrl(afterWaitHref)) {
@@ -673,25 +716,38 @@ async function requireNotesPage(page: Page): Promise<string> {
 			readyState: string;
 			blocked: boolean;
 		} | null = null;
+		let probeTimedOut = false;
 		try {
-			pageState = await page.evaluate(() => {
-				const blockedNodes = document.querySelectorAll(
-					'form[action*="signin" i], input#account_name_text_field, iframe[src*="captcha" i], [data-testid="error-page"]',
-				);
-				let blocked = false;
-				for (let index = 0; index < blockedNodes.length; index += 1) {
-					if (blockedNodes[index]?.getClientRects().length) blocked = true;
-				}
-				return {
-					href: window.location.href,
-					readyState: document.readyState,
-					blocked,
-				};
-			});
-		} catch {
+			pageState = await withinReadinessBudget(
+				() =>
+					page.evaluate(() => {
+						const blockedNodes = document.querySelectorAll(
+							'form[action*="signin" i], input#account_name_text_field, iframe[src*="captcha" i], [data-testid="error-page"]',
+						);
+						let blocked = false;
+						for (let index = 0; index < blockedNodes.length; index += 1) {
+							if (blockedNodes[index]?.getClientRects().length) blocked = true;
+						}
+						return {
+							href: window.location.href,
+							readyState: document.readyState,
+							blocked,
+						};
+					}),
+				deadline,
+			);
+		} catch (error) {
+			if (error === READINESS_DEADLINE) probeTimedOut = true;
 			// Navigation can detach the execution context briefly. Recheck route,
 			// then reload only while the owner page is still inside Notes.
 		}
+		const afterProbeHref = page.url();
+		if (!isICloudNotesUrl(afterProbeHref)) {
+			throw new Error(
+				"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
+			);
+		}
+		if (probeTimedOut || Date.now() >= deadline) break;
 		if (pageState?.blocked) {
 			throw new Error(
 				"icloud_page_blocked: sign-in, captcha, or error UI is visible",
@@ -704,19 +760,35 @@ async function requireNotesPage(page: Page): Promise<string> {
 		}
 		if (
 			pageState?.readyState === "complete" &&
-			pageState.href === afterWaitHref
+			pageState.href === afterWaitHref &&
+			Date.now() < deadline
 		) {
 			return afterWaitHref;
 		}
 		if (attempt + 1 >= NOTES_READINESS_ATTEMPTS) break;
 		const reloadBudget = deadline - Date.now();
 		if (reloadBudget <= 0) break;
-		await page
-			.reload({
-				waitUntil: "domcontentloaded",
-				timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, reloadBudget),
-			})
-			.catch(() => null);
+		const beforeReloadHref = page.url();
+		if (!isICloudNotesUrl(beforeReloadHref)) {
+			throw new Error(
+				"icloud_wrong_page: navigation left the iCloud Notes route before readiness recovery reload",
+			);
+		}
+		try {
+			await withinReadinessBudget(
+				() =>
+					page.reload({
+						waitUntil: "domcontentloaded",
+						timeout: Math.min(
+							NOTES_READINESS_OPERATION_TIMEOUT_MS,
+							reloadBudget,
+						),
+					}),
+				deadline,
+			);
+		} catch (error) {
+			if (error === READINESS_DEADLINE) break;
+		}
 	}
 	throw new Error(
 		"icloud_readiness_exhausted: the Notes page did not become ready within the bounded recovery budget; collection was not started",

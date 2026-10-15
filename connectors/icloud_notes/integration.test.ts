@@ -106,6 +106,9 @@ function makeFakePage(
 		blocked?: boolean;
 		readyStateAfterWait?: string;
 		failReadinessEvaluations?: number;
+		onReadinessEvaluationPending?: (resolve: () => void) => void;
+		onReadinessEvaluationFailure?: () => void;
+		onValidate?: () => void;
 		reloadReadyState?: string;
 		reloadUrl?: string;
 		onReload?: () => void;
@@ -148,8 +151,22 @@ function makeFakePage(
 	const queryCallIndex: Record<string, number> = { folders: 0, notes: 0 };
 	const evaluate = (_fn: unknown, arg: unknown): Promise<unknown> => {
 		if (arg === undefined) {
+			const onReadinessEvaluationPending =
+				readiness.onReadinessEvaluationPending;
+			if (onReadinessEvaluationPending !== undefined) {
+				return new Promise((resolve) => {
+					onReadinessEvaluationPending(() =>
+						resolve({
+							href: currentUrl,
+							readyState,
+							blocked: readiness.blocked ?? false,
+						}),
+					);
+				});
+			}
 			if (readinessEvaluationFailures > 0) {
 				readinessEvaluationFailures -= 1;
+				readiness.onReadinessEvaluationFailure?.();
 				return Promise.reject(
 					new Error("transient document evaluation failure"),
 				);
@@ -161,6 +178,7 @@ function makeFakePage(
 			});
 		}
 		if (arg === VALIDATE_URL) {
+			readiness.onValidate?.();
 			return Promise.resolve({ status: 200, json: VALIDATE_RESPONSE });
 		}
 		const { evalUrl } = (arg ?? {}) as { evalUrl?: string };
@@ -1408,20 +1426,77 @@ test("collectAllStreams: readiness exhaustion and navigation away fail closed", 
 	assert.equal(blockedHarness.protocolMessages.length, 0);
 
 	const navigationHarness = makeRecordingEmit(validateRecord);
+	let navigationReloads = 0;
+	const navigationPage = makeFakePage(
+		[folderQueryResponse(), noteQueryResponse()],
+		undefined,
+		{
+			failReadinessEvaluations: 1,
+			onReadinessEvaluationFailure: () => {
+				(navigationPage as Page & { setUrl: (url: string) => void }).setUrl(
+					"https://www.icloud.com/mail",
+				);
+			},
+			onReload: () => {
+				navigationReloads += 1;
+			},
+		},
+	) as Page & { setUrl: (url: string) => void };
+	await assert.rejects(
+		collectAllStreams(makeCtx(navigationPage, navigationHarness, ["notes"])),
+		/icloud_wrong_page/,
+	);
+	assert.equal(
+		navigationReloads,
+		0,
+		"recovery must not reload after navigation leaves Notes during evaluation",
+	);
+	assert.equal(navigationHarness.protocolMessages.length, 0);
+});
+
+test("collectAllStreams: pending readiness evaluations are bounded and cannot start collection", {
+	timeout: 20_000,
+}, async () => {
+	let validations = 0;
+	let queries = 0;
+	const finishPendingEvaluations: Array<() => void> = [];
+	const harness = makeRecordingEmit(validateRecord);
 	await assert.rejects(
 		collectAllStreams(
 			makeCtx(
-				makeFakePage([folderQueryResponse(), noteQueryResponse()], undefined, {
-					failReadinessEvaluations: 1,
-					reloadUrl: "https://www.icloud.com/mail",
-				}),
-				navigationHarness,
+				makeFakePage(
+					[folderQueryResponse(), noteQueryResponse()],
+					() => {
+						queries += 1;
+					},
+					{
+						onReadinessEvaluationPending: (resolve) => {
+							finishPendingEvaluations.push(resolve);
+						},
+						onValidate: () => {
+							validations += 1;
+						},
+					},
+				),
+				harness,
 				["notes"],
 			),
 		),
-		/icloud_wrong_page/,
+		/icloud_readiness_exhausted/,
 	);
-	assert.equal(navigationHarness.protocolMessages.length, 0);
+	assert.ok(
+		finishPendingEvaluations.length > 0,
+		"readiness must start a probe before it can exhaust its budget",
+	);
+	for (const finish of finishPendingEvaluations) finish();
+	assert.equal(validations, 0, "validate must not run after readiness timeout");
+	assert.equal(queries, 0, "queries must not run after readiness timeout");
+	assert.equal(harness.emitted.length, 0, "no records should be emitted");
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+		"no stream state should be emitted",
+	);
 });
 
 test("collectAllStreams: navigation change vetoes a terminal query response", async () => {
