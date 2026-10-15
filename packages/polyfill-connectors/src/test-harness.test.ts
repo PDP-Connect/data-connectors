@@ -227,15 +227,20 @@ test("runConnectorProtocolSubprocess: non-browser fixture completes START to DON
 	// The skip count goes to the run log; the owner sees plain text.
 	assert.equal(
 		result.stderr.trim(),
-		'[runtime-diagnostic] shape_check_skipped {"records":1}',
+		'[runtime-diagnostic] stream_completion_withheld {"streams":"items"}\n' +
+			'[runtime-diagnostic] shape_check_skipped {"records":1}',
 	);
 
-	const types = result.messages.map((m) => m.type);
+	// The fixture's STATE follows a refused row in the same stream, so the
+	// stream integrity rule withholds it and sends its notice instead.
+	const types = result.messages.map((m) =>
+		m.type === "SKIP_RESULT" ? `SKIP_RESULT:${m.reason}` : m.type,
+	);
 	assert.deepEqual(types, [
 		"PROGRESS",
 		"RECORD",
-		"SKIP_RESULT",
-		"STATE",
+		"SKIP_RESULT:shape_check_failed",
+		"SKIP_RESULT:stream_incomplete_checkpoint_withheld",
 		"PROGRESS",
 		"DONE",
 	]);

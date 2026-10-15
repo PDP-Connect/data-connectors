@@ -80,6 +80,7 @@ import {
 } from "./browser-window.ts";
 import { connectorDiagnostic } from "./connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
+import type { FieldOmission } from "./field-reader.ts";
 import {
 	type CaptureSession,
 	createCaptureSession,
@@ -102,6 +103,17 @@ import {
 	type ProbeSessionArgs,
 	type SessionCheckpointFn,
 } from "./session-establish.ts";
+import {
+	createStreamIntegrity,
+	FIELDS_UNAVAILABLE_REASON,
+	type StreamIntegrity,
+} from "./stream-integrity.ts";
+
+export {
+	type ResumeSafeBasis,
+	resumeSafeSkip,
+} from "./stream-integrity.ts";
+
 import {
 	assertValidConnectorErrorCode,
 	TerminalError,
@@ -196,6 +208,15 @@ interface EmitRecordOptions {
 	skipResourceFilter?: boolean;
 	/** Runs after all record gates and immediately before a retained RECORD. */
 	beforeEmit?: () => Promise<void>;
+	/**
+	 * Mapped fields the connector could not read for this row (see
+	 * `field-reader.ts` `emitRow`). A non-empty list makes the runtime withhold
+	 * the whole row: no RECORD is sent, not even a partial one, because ingest
+	 * replaces whole records. It emits `SKIP_RESULT{reason:
+	 * "record_fields_unavailable"}` with the key and field names, and the
+	 * stream becomes incomplete for the run (see `stream-integrity.ts`).
+	 */
+	omissions?: readonly FieldOmission[];
 }
 
 interface BaseCollectContext {
@@ -556,6 +577,34 @@ function makeShapeCheckSkip(
 		reason: "shape_check_failed",
 		message,
 		diagnostics: { id: data.id, issues, record: data },
+	};
+}
+
+/**
+ * Build the SKIP_RESULT for a row withheld because a mapped field could not
+ * be read. The row is not emitted at all (ingest replaces whole records, so a
+ * partial row would erase stored values; see stream-integrity.ts). The
+ * diagnostics name the key and the omitted fields with reasons, never field
+ * values, and state that the key was enumerated: the row exists at the
+ * source and must not be read as absent.
+ */
+function makeFieldsUnavailableSkip(
+	stream: string,
+	data: RecordData,
+	omissions: readonly FieldOmission[],
+): Extract<EmittedMessage, { type: "SKIP_RESULT" }> {
+	const key = data.id == null ? null : String(data.id);
+	return {
+		type: "SKIP_RESULT",
+		stream,
+		reason: FIELDS_UNAVAILABLE_REASON,
+		message: `${String(key)}: withheld, unreadable ${omissions.map((o) => `${o.field} (${o.reason})`).join("; ")}`,
+		diagnostics: {
+			key,
+			key_enumerated: key !== null,
+			row_withheld: true,
+			omissions: omissions.map(({ field, reason }) => ({ field, reason })),
+		},
 	};
 }
 
@@ -1251,6 +1300,8 @@ export function runConnector(config: RunConnectorConfig): void {
 			...extra,
 		});
 
+	const integrity = createStreamIntegrity();
+
 	const reportStreamFailure: NonNullable<
 		BaseCollectContext["reportStreamFailure"]
 	> = async (stream, message, options = {}): Promise<void> => {
@@ -1267,13 +1318,14 @@ export function runConnector(config: RunConnectorConfig): void {
 		}
 		const retryable = options.retryable === true;
 		reportedStreamFailure ??= { message: normalizedMessage, retryable, stream };
-		await emit({
+		for (const out of integrity.gate({
 			type: "SKIP_RESULT",
 			stream,
 			reason: "stream_collection_failed",
 			message: normalizedMessage,
 			recovery_hint: { action: "retry_by_runtime", retryable },
-		});
+		}))
+			await emit(out);
 	};
 
 	// Kick off the run. The outer catch distinguishes TerminalError (which
@@ -1365,6 +1417,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			validateRecord,
 			isTombstone,
 			timeRangeFieldFor,
+			integrity,
 		});
 		observedCounters = emitRecord.counters;
 		const emittedAt = nowIso();
@@ -1380,13 +1433,20 @@ export function runConnector(config: RunConnectorConfig): void {
 						message: `${msg.type} for ${msg.stream} not saved: a record at or after the time range's end was withheld in this run, so the next run resumes from the previous checkpoint`,
 					})
 				: emit(msg);
+		// Every connector message passes the stream integrity rule first: a
+		// stream that lost a row in this run cannot checkpoint, delete, or claim
+		// full coverage (see stream-integrity.ts).
+		const emitConnectorMessage = async (msg: EmittedMessage): Promise<void> => {
+			for (const out of integrity.gate(msg))
+				await emitWithBoundedCheckpoints(out);
+		};
 
 		const baseCtx: BaseCollectContext = {
 			scope: startMsg.scope,
 			state: startMsg.state ?? {},
 			requested,
 			credentials,
-			emit: emitWithBoundedCheckpoints,
+			emit: emitConnectorMessage,
 			emitRecord: emitRecord.emit,
 			isRecordSelected: emitRecord.isSelected,
 			assist,
@@ -1452,6 +1512,11 @@ export function runConnector(config: RunConnectorConfig): void {
 			);
 			return;
 		}
+		const withheld = integrity.withheldStreams();
+		if (withheld.length > 0)
+			connectorDiagnostic("runtime", "stream_completion_withheld", {
+				streams: withheld.join(","),
+			});
 		await finalizeRun(emitRecord.counters, progress, emit);
 		flushAndExit(0);
 	}
@@ -1614,6 +1679,8 @@ export function makeEmitRecord(deps: {
 	validateRecord: ValidateRecord | undefined;
 	isTombstone: ((stream: string, data: RecordData) => boolean) | undefined;
 	timeRangeFieldFor: (stream: string) => ConsentTimeField | null;
+	/** Shared with the run's message gate; a private one when omitted. */
+	integrity?: StreamIntegrity;
 }): {
 	emit: (
 		stream: string,
@@ -1631,6 +1698,7 @@ export function makeEmitRecord(deps: {
 		totalAnomalous: number;
 	};
 	withheldAtOrAfterUntil: ReadonlySet<string>;
+	integrity: StreamIntegrity;
 } {
 	const {
 		requested,
@@ -1639,6 +1707,7 @@ export function makeEmitRecord(deps: {
 		validateRecord,
 		isTombstone,
 		timeRangeFieldFor,
+		integrity = createStreamIntegrity(),
 	} = deps;
 	// `totalAnomalous` counts records RETAINED despite unmodeled values; it is a
 	// subset of totalEmitted, not a sibling of totalSkipped.
@@ -1691,28 +1760,81 @@ export function makeEmitRecord(deps: {
 		return "record";
 	};
 
-	const emitRecord = (
+	/**
+	 * True when a row with unreadable fields is still provably outside the
+	 * run's scope: its id is readable and outside the resource filter, or its
+	 * consent time is readable and outside the time range. Such a row is not
+	 * a loss. A row whose id or consent time is itself unreadable stays in
+	 * scope (fail closed).
+	 */
+	const provablyOutOfScope = (
+		stream: string,
+		data: RecordData,
+		options: EmitRecordOptions,
+	): boolean => {
+		const omitted = new Set((options.omissions ?? []).map((o) => o.field));
+		if (data.id == null || omitted.has("id")) return false;
+		if (requested.get(stream)?.time_range) {
+			const consent = timeRangeFieldFor(stream);
+			if (
+				consent === null ||
+				omitted.has(consent.field) ||
+				data[consent.field] == null
+			)
+				return false;
+		}
+		return selectRecord(stream, data, options) === "skip";
+	};
+
+	const emitRecord = async (
 		stream: string,
 		data: RecordData,
 		options: EmitRecordOptions = {},
 	): Promise<void> => {
+		// A row the connector could not fully read is refused, never emitted
+		// with substitute values, unless it is provably out of scope.
+		if (options.omissions?.length) {
+			if (provablyOutOfScope(stream, data, options)) return;
+			counters.totalSkipped += 1;
+			integrity.refuseRecord(
+				stream,
+				data.id == null ? null : String(data.id),
+				"fields_unavailable",
+			);
+			return emit(makeFieldsUnavailableSkip(stream, data, options.omissions));
+		}
+		// A record without an id cannot be stored or matched; before this rule
+		// it was dropped with no trace.
+		if (data.id == null) {
+			counters.totalSkipped += 1;
+			integrity.refuseRecord(stream, null, "missing_id");
+			return emit(
+				makeShapeCheckSkip(stream, data, [
+					{ path: "id", message: "record has no id" },
+				]),
+			);
+		}
 		const selection = selectRecord(stream, data, options);
-		if (selection === "skip" || data.id == null) return Promise.resolve();
+		if (selection === "skip") return;
 		if (selection === "tombstone") {
-			counters.totalEmitted += 1;
-			return emit({
+			for (const out of integrity.gate({
 				type: "RECORD",
 				stream,
 				key: String(data.id),
 				data: { id: data.id },
 				emitted_at: emittedAt,
 				op: "delete",
-			});
+			})) {
+				if (out.type === "RECORD") counters.totalEmitted += 1;
+				await emit(out);
+			}
+			return;
 		}
 
 		const validation = validateRecord?.(stream, data);
 		if (validation && !validation.ok) {
 			counters.totalSkipped += 1;
+			integrity.refuseRecord(stream, String(data.id), "shape_check_failed");
 			return emit(makeShapeCheckSkip(stream, data, validation.issues));
 		}
 		// Present only when the record was RETAINED despite carrying a value the
@@ -1749,6 +1871,7 @@ export function makeEmitRecord(deps: {
 			selectRecord(stream, data, options) !== "skip",
 		counters,
 		withheldAtOrAfterUntil,
+		integrity,
 	};
 }
 
