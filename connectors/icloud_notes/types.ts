@@ -28,11 +28,6 @@ export interface CloudKitRecord {
 	modified?: { timestamp?: number };
 }
 
-export interface CloudKitQueryResponse {
-	records?: CloudKitRecord[];
-	continuationMarker?: string;
-}
-
 export interface CloudKitValidateResponse {
 	dsInfo?: {
 		dsid?: string | number;

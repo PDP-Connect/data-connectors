@@ -29,10 +29,10 @@ test("decodeBase64Text: decodes a base64 UTF-8 string", () => {
 	assert.equal(decodeBase64Text(encoded), "Grocery list");
 });
 
-test("decodeBase64Text: null for absent/empty/non-string input", () => {
+test("decodeBase64Text: null for absent or non-string input and preserves an empty source value", () => {
 	assert.equal(decodeBase64Text(undefined), null);
 	assert.equal(decodeBase64Text(null), null);
-	assert.equal(decodeBase64Text(""), null);
+	assert.equal(decodeBase64Text(""), "");
 	assert.equal(decodeBase64Text(42), null);
 });
 
@@ -46,6 +46,7 @@ test("epochMsToIso: null for zero, negative, non-finite, or non-number input", (
 	assert.equal(epochMsToIso(0), null);
 	assert.equal(epochMsToIso(-5), null);
 	assert.equal(epochMsToIso(Number.NaN), null);
+	assert.equal(epochMsToIso(Number.MAX_VALUE), null);
 	assert.equal(epochMsToIso("2023-01-01"), null);
 	assert.equal(epochMsToIso(undefined), null);
 });
@@ -169,6 +170,7 @@ test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes sche
 		title: "Grocery list",
 		snippet: "milk, eggs, bread",
 		folder_id: "folder-xyz-789",
+		folder_name: "folder-xyz-789",
 		is_pinned: true,
 		created_at: "2023-11-14T22:13:20.000Z",
 		modified_at: "2023-11-16T02:00:00.000Z",
@@ -188,6 +190,7 @@ test("buildNoteRecord: null title/snippet/folder_id/text_content and false flags
 	assert.equal(built.title, null);
 	assert.equal(built.snippet, null);
 	assert.equal(built.folder_id, null);
+	assert.equal(built.folder_name, null);
 	assert.equal(built.is_pinned, false);
 	assert.equal(built.has_attachments, false);
 	assert.equal(built.text_content, null);
@@ -245,12 +248,16 @@ test("buildFolderRecord: null when recordName is absent", () => {
 	);
 });
 
-test("buildFolderRecord: null when TitleEncrypted is absent (no name to report)", () => {
-	assert.equal(
+test("buildFolderRecord: absent and empty decoded names fall back to recordName", () => {
+	assert.deepEqual(
+		buildFolderRecord({ recordName: "folder-no-title", fields: {} }),
+		{ id: "folder-no-title", name: "folder-no-title" },
+	);
+	assert.deepEqual(
 		buildFolderRecord({
-			recordName: "folder-no-title",
-			fields: {},
-		} as CloudKitRecord),
-		null,
+			recordName: "folder-empty-title",
+			fields: { TitleEncrypted: { value: b64("") } },
+		}),
+		{ id: "folder-empty-title", name: "folder-empty-title" },
 	);
 });

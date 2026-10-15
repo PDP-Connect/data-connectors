@@ -82,24 +82,146 @@ function noteQueryResponse(overrides: { continuationMarker?: string } = {}) {
  *  `page.evaluate(fn, { evalUrl, evalBody })` / `page.evaluate(fn, url)`
  *  calls are shaped. `queryResponses` is consumed in order for calls to
  *  QUERY_URL, letting a test script pagination. */
-function makeFakePage(queryResponses: unknown[]): Page {
-	let queryCallIndex = 0;
-	const evaluate = (
-		_fn: unknown,
-		arg: unknown,
-	): Promise<{ status: number; json: unknown }> => {
+function makeFakePage(
+	queryResponses: unknown[],
+	onQuery?: () => void,
+	readiness: { readyState?: string; blocked?: boolean } = {},
+): Page {
+	const streams: Record<string, unknown[]> = { folders: [], notes: [] };
+	let currentUrl = "https://www.icloud.com/notes";
+	for (const candidate of queryResponses) {
+		if (
+			typeof candidate === "object" &&
+			candidate !== null &&
+			"stream" in candidate &&
+			"response" in candidate
+		) {
+			const spec = candidate as { stream: string; response: unknown };
+			streams[spec.stream]?.push(spec.response);
+			continue;
+		}
+		const possibleResponse =
+			typeof candidate === "object" && candidate !== null && "json" in candidate
+				? (candidate as { json: unknown }).json
+				: candidate;
+		const firstRecord =
+			typeof possibleResponse === "object" &&
+			possibleResponse !== null &&
+			"records" in possibleResponse &&
+			Array.isArray((possibleResponse as { records?: unknown }).records)
+				? (possibleResponse as { records: unknown[] }).records[0]
+				: null;
+		const recordType =
+			typeof firstRecord === "object" &&
+			firstRecord !== null &&
+			"recordType" in firstRecord
+				? (firstRecord as { recordType?: unknown }).recordType
+				: null;
+		streams[recordType === "Folder" ? "folders" : "notes"]?.push(candidate);
+	}
+	const queryCallIndex: Record<string, number> = { folders: 0, notes: 0 };
+	const evaluate = (_fn: unknown, arg: unknown): Promise<unknown> => {
+		if (arg === undefined) {
+			return Promise.resolve({
+				href: currentUrl,
+				readyState: readiness.readyState ?? "complete",
+				blocked: readiness.blocked ?? false,
+			});
+		}
 		if (arg === VALIDATE_URL) {
 			return Promise.resolve({ status: 200, json: VALIDATE_RESPONSE });
 		}
 		const { evalUrl } = (arg ?? {}) as { evalUrl?: string };
 		if (evalUrl === QUERY_URL) {
-			const response = queryResponses[queryCallIndex] ?? { records: [] };
-			queryCallIndex += 1;
+			const body = (arg ?? {}) as {
+				evalBody?: {
+					query?: {
+						recordType?: string;
+						filterBy?: Array<{
+							fieldName?: string;
+							fieldValue?: { value?: string; type?: string };
+						}>;
+						sortBy?: Array<{ fieldName?: string; ascending?: boolean }>;
+					};
+					zoneID?: { zoneName?: string };
+					resultsLimit?: number;
+					continuationMarker?: string;
+				};
+			};
+			const evalBody = body.evalBody;
+			assert.equal(evalBody?.query?.recordType, "SearchIndexes");
+			assert.equal(evalBody?.query?.filterBy?.[0]?.fieldName, "indexName");
+			assert.equal(evalBody?.query?.filterBy?.[0]?.fieldValue?.type, "STRING");
+			assert.equal(evalBody?.zoneID?.zoneName, "Notes");
+			assert.equal(evalBody?.resultsLimit, 200);
+			const indexName = evalBody?.query?.filterBy?.[0]?.fieldValue?.value;
+			const stream = indexName === "parentless" ? "folders" : "notes";
+			assert.equal(indexName, stream === "folders" ? "parentless" : "recents");
+			assert.deepEqual(
+				evalBody?.query?.sortBy,
+				stream === "notes"
+					? [{ fieldName: "modTime", ascending: false }]
+					: undefined,
+			);
+			const streamResponses = streams[stream] ?? [];
+			const index = queryCallIndex[stream] ?? 0;
+			assert.ok(
+				index < streamResponses.length,
+				`unexpected extra ${stream} request`,
+			);
+			const response = streamResponses[index];
+			const priorResponse = streamResponses[index - 1];
+			const priorJson =
+				typeof priorResponse === "object" &&
+				priorResponse !== null &&
+				"json" in priorResponse
+					? (priorResponse as { json: unknown }).json
+					: priorResponse;
+			const expectedMarker =
+				typeof priorJson === "object" &&
+				priorJson !== null &&
+				"continuationMarker" in priorJson
+					? (priorJson as { continuationMarker?: unknown }).continuationMarker
+					: undefined;
+			assert.equal(evalBody?.continuationMarker, expectedMarker);
+			queryCallIndex[stream] = index + 1;
+			onQuery?.();
+			if (
+				typeof response === "object" &&
+				response !== null &&
+				"status" in response &&
+				"json" in response
+			) {
+				return Promise.resolve(response as { status: number; json: unknown });
+			}
 			return Promise.resolve({ status: 200, json: response });
 		}
 		return Promise.resolve({ status: 0, json: null });
 	};
-	return { evaluate } as unknown as Page;
+	return {
+		evaluate,
+		url: () => currentUrl,
+		setUrl: (url: string) => {
+			currentUrl = url;
+		},
+	} as unknown as Page;
+}
+
+/** Notes collection always performs a same-run folders projection request. */
+function makeNotePage(noteResponses: unknown[], onQuery?: () => void): Page {
+	return makeFakePage(
+		[
+			{ stream: "folders", response: { records: [] } },
+			...noteResponses.map((response) =>
+				typeof response === "object" &&
+				response !== null &&
+				"stream" in response
+					? response
+					: { stream: "notes", response },
+			),
+		],
+		onQuery,
+	);
 }
 
 function makeCtx(
@@ -135,7 +257,7 @@ function makeCtx(
 
 test("collectAllStreams: only requested streams emit records (scope filtering)", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const page = makeFakePage([noteQueryResponse()]);
+	const page = makeNotePage([noteQueryResponse()]);
 	const ctx = makeCtx(page, harness, ["notes"]);
 
 	await collectAllStreams(ctx);
@@ -198,7 +320,7 @@ test("collectAllStreams: no records fail schema validation for well-formed Cloud
 
 test("collectAllStreams: two runs, second run's fingerprint cursor suppresses an unchanged note", async () => {
 	const firstHarness = makeRecordingEmit(validateRecord);
-	const firstPage = makeFakePage([noteQueryResponse()]);
+	const firstPage = makeNotePage([noteQueryResponse()]);
 	const firstCtx = makeCtx(firstPage, firstHarness, ["notes"]);
 	await collectAllStreams(firstCtx);
 
@@ -209,7 +331,7 @@ test("collectAllStreams: two runs, second run's fingerprint cursor suppresses an
 	assert.equal(firstHarness.emitted.length, 1, "first run emits the note");
 
 	const secondHarness = makeRecordingEmit(validateRecord);
-	const secondPage = makeFakePage([noteQueryResponse()]);
+	const secondPage = makeNotePage([noteQueryResponse()]);
 	const secondCtx = makeCtx(secondPage, secondHarness, ["notes"], {
 		notes: firstState.cursor,
 	});
@@ -224,7 +346,7 @@ test("collectAllStreams: two runs, second run's fingerprint cursor suppresses an
 
 test("collectAllStreams: a note whose content changed between runs re-emits", async () => {
 	const firstHarness = makeRecordingEmit(validateRecord);
-	const firstPage = makeFakePage([noteQueryResponse()]);
+	const firstPage = makeNotePage([noteQueryResponse()]);
 	const firstCtx = makeCtx(firstPage, firstHarness, ["notes"]);
 	await collectAllStreams(firstCtx);
 	const firstState = firstHarness.protocolMessages.find(
@@ -238,7 +360,7 @@ test("collectAllStreams: a note whose content changed between runs re-emits", as
 	).fields.TitleEncrypted = { value: b64("Updated title") };
 
 	const secondHarness = makeRecordingEmit(validateRecord);
-	const secondPage = makeFakePage([changedResponse]);
+	const secondPage = makeNotePage([changedResponse]);
 	const secondCtx = makeCtx(secondPage, secondHarness, ["notes"], {
 		notes: firstState.cursor,
 	});
@@ -254,7 +376,7 @@ test("collectAllStreams: a note whose content changed between runs re-emits", as
 
 test("collectAllStreams: paginates notes via continuationMarker", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const page = makeFakePage([
+	const page = makeNotePage([
 		noteQueryResponse({ continuationMarker: "page-2" }),
 		{
 			records: [
@@ -276,11 +398,342 @@ test("collectAllStreams: paginates notes via continuationMarker", async () => {
 	assert.deepEqual(new Set(ids), new Set(["note-1", "note-2"]));
 });
 
+test("collectAllStreams: refuses malformed successful envelopes and does not checkpoint them", async () => {
+	for (const stream of ["folders", "notes"] as const) {
+		for (const malformed of [
+			null,
+			{},
+			{ error: "temporarilyUnavailable" },
+			{ records: null },
+			{ records: [], continuationMarker: "" },
+		]) {
+			const harness = makeRecordingEmit(validateRecord);
+			const page = makeFakePage(
+				stream === "notes"
+					? [
+							{ stream: "folders", response: { records: [] } },
+							{ stream, response: malformed },
+						]
+					: [{ stream, response: malformed }],
+			);
+			await collectAllStreams(makeCtx(page, harness, [stream]));
+			assert.equal(harness.emitted.length, 0);
+			assert.equal(
+				harness.protocolMessages.some(
+					(message) => message.type === "STATE" && message.stream === stream,
+				),
+				false,
+				`${stream} malformed envelope ${JSON.stringify(malformed)} must not commit state`,
+			);
+			assert.ok(
+				harness.protocolMessages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" &&
+						message.stream === stream &&
+						message.reason === "icloud_invalid_query_response",
+				),
+				"malformed envelopes must leave a durable stream gap",
+			);
+		}
+	}
+});
+
+test("collectAllStreams: a failed folder query does not prevent notes collection", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = makeFakePage([
+		{
+			stream: "folders",
+			response: { status: 200, json: { error: "temporarilyUnavailable" } },
+		},
+		noteQueryResponse(),
+	]);
+	await collectAllStreams(makeCtx(page, harness, ["folders", "notes"]));
+	assert.deepEqual(
+		harness.emitted.map((record) => record.stream),
+		["notes"],
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" && message.stream === "folders",
+		),
+	);
+});
+
+test("collectAllStreams: a later note-page failure salvages its prefix without pruning prior state", async () => {
+	const previous = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([noteQueryResponse()]), previous, ["notes"]),
+	);
+	const priorState = previous.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "notes",
+	);
+	assert.ok(priorState && priorState.type === "STATE");
+	const harness = makeRecordingEmit(validateRecord);
+	const prefix = noteQueryResponse({ continuationMarker: "page-2" });
+	(
+		prefix.records[0] as { fields: Record<string, unknown> }
+	).fields.TitleEncrypted = {
+		value: b64("Changed prefix row"),
+	};
+	const failure = { status: 503, json: null };
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([
+				{ stream: "notes", response: prefix },
+				{ stream: "notes", response: failure },
+			]),
+			harness,
+			["notes"],
+			{ notes: priorState.cursor },
+		),
+	);
+	assert.equal(
+		harness.emitted.length,
+		1,
+		"a valid changed prefix row is salvaged",
+	);
+	assert.equal(harness.emitted[0]?.data.title, "Changed prefix row");
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+		"a partial scan leaves the previous cursor intact instead of pruning unseen IDs",
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+		),
+	);
+});
+
+test("collectAllStreams: repeated continuation markers stop as a gap", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([
+				noteQueryResponse({ continuationMarker: "same-page" }),
+				noteQueryResponse({ continuationMarker: "same-page" }),
+			]),
+			harness,
+			["notes"],
+		),
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "icloud_no_progress",
+		),
+	);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+		"a repeated page cannot advance or prune the cursor",
+	);
+});
+
+test("collectAllStreams: note records keep empty title values and reject non-Note rows", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([
+				{
+					stream: "notes",
+					response: {
+						records: [
+							{ recordName: "folder-like", recordType: "Folder", fields: {} },
+							{
+								recordName: "note-empty-title",
+								recordType: "Note",
+								fields: { TitleEncrypted: { value: b64("") } },
+							},
+						],
+					},
+				},
+			]),
+			harness,
+			["notes"],
+		),
+	);
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.data.id, "note-empty-title");
+	assert.equal(harness.emitted[0]?.data.title, "");
+});
+
+test("collectAllStreams: folder query follows its continuation pages", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const folder = (id: string) => ({
+		recordName: id,
+		recordType: "Folder",
+		fields: {},
+	});
+	await collectAllStreams(
+		makeCtx(
+			makeFakePage([
+				{ records: [folder("folder-1")], continuationMarker: "folders-2" },
+				{ records: [folder("folder-2")] },
+			]),
+			harness,
+			["folders"],
+		),
+	);
+	assert.deepEqual(
+		new Set(harness.emitted.map((record) => record.data.id)),
+		new Set(["folder-1", "folder-2"]),
+	);
+});
+
+test("collectAllStreams: notes collection loads and projects folder names even when folders are not requested", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const folder = {
+		records: [
+			{
+				recordName: "folder-work",
+				recordType: "Folder",
+				fields: { TitleEncrypted: { value: b64("Work") } },
+			},
+		],
+	};
+	await collectAllStreams(
+		makeCtx(makeFakePage([folder, noteQueryResponse()]), harness, ["notes"]),
+	);
+	assert.deepEqual(
+		harness.emitted.map((record) => record.stream),
+		["notes"],
+	);
+	assert.equal(harness.emitted[0]?.data.folder_name, "Work");
+});
+
+test("collectAllStreams: drains notes beyond the old 200-page cap", async () => {
+	const pages = Array.from({ length: 201 }, (_, index) => ({
+		records: [
+			{
+				recordName: `note-${index}`,
+				recordType: "Note",
+				fields: { TitleEncrypted: { value: b64(`Synthetic ${index}`) } },
+			},
+		],
+		...(index < 200 ? { continuationMarker: `page-${index + 1}` } : {}),
+	}));
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(makeCtx(makeNotePage(pages), harness, ["notes"]));
+	assert.equal(harness.emitted.length, 201);
+	assert.equal(harness.skipped.length, 0);
+});
+
+test("collectAllStreams: rejected schema rows produce an omission gap and cannot prune state", async () => {
+	const prior = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([noteQueryResponse()]), prior, ["notes"]),
+	);
+	const priorState = prior.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "notes",
+	);
+	assert.ok(priorState && priorState.type === "STATE");
+	const longTitle = "x".repeat(2001);
+	const response = {
+		records: [
+			{
+				recordName: "note-oversized",
+				recordType: "Note",
+				fields: { TitleEncrypted: { value: b64(longTitle) } },
+			},
+		],
+	};
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([response]), harness, ["notes"], {
+			notes: priorState.cursor,
+		}),
+	);
+	assert.equal(harness.emitted.length, 0);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "icloud_omitted_rows",
+		),
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+		"discarded rows veto the completion checkpoint",
+	);
+});
+
+test("collectAllStreams: wrong page cannot start a CloudKit scan", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = makeNotePage([noteQueryResponse()]) as Page & {
+		setUrl: (url: string) => void;
+	};
+	page.setUrl("https://www.icloud.com/mail");
+	await assert.rejects(
+		collectAllStreams(makeCtx(page, harness, ["notes"])),
+		/icloud_wrong_page/,
+	);
+	assert.equal(harness.protocolMessages.length, 0);
+});
+
+test("collectAllStreams: unloaded and blocked pages veto collection", async () => {
+	await Promise.all(
+		(
+			[
+				[{ readyState: "loading" }, /icloud_page_unloaded/],
+				[{ blocked: true }, /icloud_page_blocked/],
+			] as const
+		).map(async ([readiness, reason]) => {
+			const harness = makeRecordingEmit(validateRecord);
+			await assert.rejects(
+				collectAllStreams(
+					makeCtx(makeFakePage([], undefined, readiness), harness, ["notes"]),
+				),
+				reason,
+			);
+			assert.equal(harness.protocolMessages.length, 0);
+		}),
+	);
+});
+
+test("collectAllStreams: navigation change vetoes a terminal query response", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let page!: Page & { setUrl: (url: string) => void };
+	page = makeNotePage([noteQueryResponse()], () => {
+		page.setUrl("https://www.icloud.com/mail");
+	}) as Page & { setUrl: (url: string) => void };
+	await collectAllStreams(makeCtx(page, harness, ["notes"]));
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "icloud_navigation_changed",
+		),
+	);
+});
+
 test("collectAllStreams: throws when the CloudKit config cannot be resolved (auth not live)", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const page = {
-		evaluate: (): Promise<{ status: number; json: unknown }> =>
-			Promise.resolve({ status: 401, json: null }),
+		evaluate: (_fn: unknown, arg: unknown): Promise<unknown> =>
+			Promise.resolve(
+				arg === undefined
+					? {
+							href: "https://www.icloud.com/notes",
+							readyState: "complete",
+							blocked: false,
+						}
+					: { status: 401, json: null },
+			),
+		url: () => "https://www.icloud.com/notes",
 	} as unknown as Page;
 	const ctx = makeCtx(page, harness, ["notes"]);
 
@@ -353,7 +806,10 @@ test("iCloud sign-in keeps one Patchright tab and collection reuses the authenti
 		assert.equal(new URL(page.url()).origin, "https://www.icloud.com");
 		const harness = makeRecordingEmit(validateRecord);
 		await collectAllStreams(makeCtx(page, harness, []));
-		assert.ok(validateCalls >= 3);
+		assert.ok(
+			validateCalls >= 2,
+			"session establishment probes the page; an empty stream selection makes no collection request",
+		);
 		assert.equal(context.pages().length, 1);
 		await context.close();
 	} finally {

@@ -13744,7 +13744,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13781,10 +13781,10 @@
 				"streams": [
 					{
 						"name": "notes",
-						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index.",
+						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index. The legacy folder-name projection depends on the folders stream; collection fetches that dependency even when only notes are requested.",
 						"display": {
 							"label": "Your iCloud notes",
-							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder assignment, attachment flag, and created/modified timestamps."
+							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder name and assignment, attachment flag, and created/modified timestamps."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -13802,6 +13802,10 @@
 								},
 								"folder_id": {
 									"type": ["string", "null"]
+								},
+								"folder_name": {
+									"type": ["string", "null"],
+									"description": "Folder display name from the same folder snapshot; falls back to folder_id when CloudKit has no matching folder row."
 								},
 								"is_pinned": {
 									"type": "boolean"
@@ -13896,7 +13900,11 @@
 					}
 				],
 				"reason_display_messages": {
-					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+					"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
+					"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
+					"icloud_omitted_rows": "Some iCloud Notes rows could not be stored. This stream was not marked complete.",
+					"icloud_folder_projection_incomplete": "Some folder names could not be loaded. Notes were not marked complete.",
+					"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete."
 				}
 			}
 		},

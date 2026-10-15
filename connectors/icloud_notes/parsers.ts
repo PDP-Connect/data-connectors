@@ -28,9 +28,10 @@ import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
 // ─── Base64 / timestamp helpers ─────────────────────────────────────────
 
 /** Decode a CloudKit base64 field value (titles, snippets) to UTF-8 text.
- *  Returns null for absent/unparseable input — never throws. */
+ *  Returns null for absent/non-string input — never throws. Empty strings
+ *  decode to empty strings and remain source data. */
 export function decodeBase64Text(value: unknown): string | null {
-	if (typeof value !== "string" || value.length === 0) {
+	if (typeof value !== "string") {
 		return null;
 	}
 	try {
@@ -46,7 +47,8 @@ export function epochMsToIso(value: unknown): string | null {
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
 		return null;
 	}
-	return new Date(value).toISOString();
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 // ─── Heuristic note-body text extraction (ported from legacy) ──────────
@@ -135,6 +137,15 @@ function fieldValue(
 	return fields?.[name]?.value;
 }
 
+/** The one CloudKit identity rule shared by validation, pagination progress,
+ *  and emission. Empty strings remain source values, but cannot identify a
+ *  stored record and therefore become an explicit omission at collection. */
+export function resolveCloudKitRecordId(record: CloudKitRecord): string | null {
+	return typeof record.recordName === "string" && record.recordName.length > 0
+		? record.recordName
+		: null;
+}
+
 /** CloudKit `Folder` reference field: `{ value: { recordName } }`. Also
  *  covers the legacy connector's `Folders[0]` fallback for notes whose
  *  parent is expressed as an array reference field instead of a single one. */
@@ -168,6 +179,7 @@ export interface NoteRecord {
 	title: string | null;
 	snippet: string | null;
 	folder_id: string | null;
+	folder_name: string | null;
 	is_pinned: boolean;
 	created_at: string | null;
 	modified_at: string | null;
@@ -189,21 +201,26 @@ export function isDeletedNote(record: CloudKitRecord): boolean {
 
 /** Build a `notes` stream record from a raw CloudKit `Note` record. Per the
  *  capability map's field mapping, `folder_id` is the CloudKit `recordName`
- *  of the parent folder (a foreign key into the `folders` stream), not a
- *  resolved display name — unlike the legacy connector, which resolved to a
- *  title string. */
-export function buildNoteRecord(record: CloudKitRecord): NoteRecord | null {
-	const recordName = record.recordName;
-	if (!recordName) {
+ *  of the parent folder (a foreign key into the `folders` stream). The
+ *  adjacent `folder_name` projection preserves the legacy resolved title. */
+export function buildNoteRecord(
+	record: CloudKitRecord,
+	folderNames: ReadonlyMap<string, string> = new Map(),
+): NoteRecord | null {
+	const recordName = resolveCloudKitRecordId(record);
+	if (recordName === null) {
 		return null;
 	}
 	const fields = record.fields;
 	const attachments = fieldValue(fields, "Attachments");
+	const folderId = folderRecordName(fields);
 	return {
 		id: recordName,
 		title: decodeBase64Text(fieldValue(fields, "TitleEncrypted")),
 		snippet: decodeBase64Text(fieldValue(fields, "SnippetEncrypted")),
-		folder_id: folderRecordName(fields),
+		folder_id: folderId,
+		folder_name:
+			folderId === null ? null : (folderNames.get(folderId) ?? folderId),
 		is_pinned:
 			fieldValue(fields, "IsPinned") === 1 ||
 			fieldValue(fields, "IsPinned") === true,
@@ -220,17 +237,17 @@ export function buildNoteRecord(record: CloudKitRecord): NoteRecord | null {
 
 /** Build a `folders` stream record from a raw CloudKit `Folder` record.
  *  Per the capability map, `name` comes from `TitleEncrypted` (legacy
- *  `title`); CloudKit's folder record carries no other stable, documented
- *  field beyond `recordName`/title, matching the field list the legacy
- *  schema (`connectors/apple/schemas/icloud_notes.folders.json`) declares. */
+ *  `title`); an absent or empty title follows legacy `title || recordName`.
+ *  CloudKit's folder record carries no other stable, documented field beyond
+ *  `recordName`/title. */
 export function buildFolderRecord(record: CloudKitRecord): FolderRecord | null {
-	const recordName = record.recordName;
-	if (!recordName) {
+	const recordName = resolveCloudKitRecordId(record);
+	if (recordName === null) {
 		return null;
 	}
 	const name = decodeBase64Text(fieldValue(record.fields, "TitleEncrypted"));
-	if (name === null) {
-		return null;
-	}
-	return { id: recordName, name };
+	return {
+		id: recordName,
+		name: name === null || name.length === 0 ? recordName : name,
+	};
 }

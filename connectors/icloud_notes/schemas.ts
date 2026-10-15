@@ -32,6 +32,7 @@ export const noteSchema = z.object({
 	title: titleSchema,
 	snippet: snippetSchema,
 	folder_id: recordIdSchema.nullable(),
+	folder_name: pdppSafeText.nullable(),
 	is_pinned: z.boolean(),
 	created_at: isoDateTimeSchema,
 	modified_at: isoDateTimeSchema,
