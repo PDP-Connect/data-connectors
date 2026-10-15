@@ -20,7 +20,9 @@ import { test } from "node:test";
 import {
 	collectAllOrderRefs,
 	extractOrders,
+	extractOrdersWithCoverage,
 	hasNextOrdersPage,
+	hasVerifiedOrdersEnd,
 	parseDomOrderCards,
 	parseOrderRef,
 } from "./parsers.ts";
@@ -220,4 +222,77 @@ test("hasNextOrdersPage falls back to cursor-format keys when no paginated key e
 
 test("hasNextOrdersPage is false when no orders list connection exists", () => {
 	assert.equal(hasNextOrdersPage({ ROOT_QUERY: {} }), false);
+});
+
+test("Shopify row normalization preserves numeric IDs, numeric strings, and empty source strings", () => {
+	const cache = synthCache({
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{}}': {
+				nodes: [{ __ref: "Order:0" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
+		"Order:0": {
+			id: 0,
+			createdAt: "",
+			displayStatus: "",
+			shop: { __ref: "Shop:empty" },
+			effectiveTotalPrice: { amount: "0", currencyCode: "" },
+			totalItemCount: "0",
+			lineItems: { nodes: [{ __ref: "ProductVariant:empty" }] },
+		},
+		"Shop:empty": { name: "" },
+		"ProductVariant:empty": { productTitle: "" },
+	});
+	const [order] = extractOrders(cache);
+	assert.deepEqual(order, {
+		currency: "",
+		detailUrl: "https://shop.app/account/order-history",
+		id: "0",
+		itemCount: 0,
+		lineItemTitles: [""],
+		merchantName: "",
+		orderNumber: "0",
+		placedAt: "",
+		status: "",
+		totalCents: 0,
+	});
+});
+
+test("invalid empty numeric source fields are discarded for omission accounting, not coerced to zero", () => {
+	const cache = synthCache({
+		ROOT_QUERY: {
+			'deliveriesOrdersList:{"filter":{}}': {
+				nodes: [{ __ref: "Order:1" }],
+				pageInfo: { hasNextPage: false },
+			},
+		},
+		"Order:1": {
+			id: "gid://shopify/Order/1",
+			effectiveTotalPrice: { amount: "", currencyCode: "USD" },
+			totalItemCount: "",
+		},
+	});
+	assert.deepEqual(extractOrdersWithCoverage(cache), {
+		orders: [],
+		discoveredRows: 1,
+		discardedRows: 1,
+	});
+});
+
+test("every Shop order connection needs explicit terminal pageInfo", () => {
+	const missing = { ROOT_QUERY: {
+		'deliveriesOrdersList:{"filter":{}}': { nodes: [] },
+	} };
+	assert.equal(hasNextOrdersPage(missing), true, "unknown pageInfo keeps the walk open");
+	assert.equal(hasVerifiedOrdersEnd(missing), false, "missing pageInfo is not terminal evidence");
+	const mixed = { ROOT_QUERY: {
+		'deliveriesOrdersList:{"filter":{}}': { nodes: [], pageInfo: { hasNextPage: false } },
+		'deliveriesOrdersList({"first":10})': { nodes: [], pageInfo: { hasNextPage: true } },
+	} };
+	assert.equal(hasNextOrdersPage(mixed), true, "a second connection still advertising a next page vetoes end");
+	assert.equal(hasVerifiedOrdersEnd(mixed), false);
+	assert.equal(hasVerifiedOrdersEnd({ ROOT_QUERY: {
+		'deliveriesOrdersList:{"filter":{}}': { nodes: [], pageInfo: { hasNextPage: false } },
+	} }), true);
 });

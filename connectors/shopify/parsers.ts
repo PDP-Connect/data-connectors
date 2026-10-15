@@ -206,25 +206,41 @@ export function hasNextOrdersPage(cache: ApolloCache): boolean {
 	if (!isRecord(root)) {
 		return false;
 	}
-	const paginatedKey = Object.keys(root).find((k) =>
-		PAGINATED_LIST_KEY_RE.test(k),
+	const connections = Object.entries(root).filter(([key]) =>
+		PAGINATED_LIST_KEY_RE.test(key) || CURSOR_LIST_KEY_RE.test(key),
 	);
-	if (paginatedKey) {
-		const connection = root[paginatedKey];
-		if (isRecord(connection) && isRecord(connection.pageInfo)) {
-			return Boolean(connection.pageInfo.hasNextPage);
-		}
-	}
-	return Object.keys(root)
-		.filter((k) => CURSOR_LIST_KEY_RE.test(k))
-		.some((k) => {
-			const connection = root[k];
-			return (
-				isRecord(connection) &&
-				isRecord(connection.pageInfo) &&
-				Boolean(connection.pageInfo.hasNextPage)
-			);
-		});
+	if (connections.length === 0) return false;
+	return connections.some(([, value]) =>
+		!isRecord(value) || !isRecord(value.pageInfo) || value.pageInfo.hasNextPage !== false,
+	);
+}
+
+/** A positive end requires every observed connection to declare no continuation. */
+export function hasVerifiedOrdersEnd(cache: ApolloCache): boolean {
+	const root = cache.ROOT_QUERY;
+	if (!isRecord(root)) return false;
+	const connections = Object.entries(root).filter(([key]) =>
+		PAGINATED_LIST_KEY_RE.test(key) || CURSOR_LIST_KEY_RE.test(key),
+	);
+	return connections.length > 0 && connections.every(([, value]) =>
+		isRecord(value) && isRecord(value.pageInfo) && value.pageInfo.hasNextPage === false,
+	);
+}
+
+/** Known source totals must reconcile with the deduplicated observed order refs. */
+export function hasOrderCountMismatch(cache: ApolloCache): boolean {
+	const root = cache.ROOT_QUERY;
+	if (!isRecord(root)) return false;
+	const refs = collectAllOrderRefs(cache);
+	return Object.entries(root).some(([key, value]) => {
+		if (!PAGINATED_LIST_KEY_RE.test(key) && !CURSOR_LIST_KEY_RE.test(key)) return false;
+		if (!isRecord(value)) return true;
+	const raw = value.totalCount ?? (isRecord(value.pageInfo) ? value.pageInfo.totalCount : undefined);
+		if (typeof raw !== "number" && typeof raw !== "string") return false;
+		if (typeof raw === "string" && raw.trim().length === 0) return true;
+		const expected = Number(raw);
+		return Number.isFinite(expected) && Number.isInteger(expected) && expected !== refs.length;
+	});
 }
 
 function resolveMerchantName(
@@ -237,7 +253,19 @@ function resolveMerchantName(
 	}
 	const shop = readEntry(cache, shopField.__ref);
 	const name = shop?.name;
-	return typeof name === "string" && name.length > 0 ? name : null;
+	return typeof name === "string" ? name : null;
+}
+
+/** The one source ID normalization path used by parsing and coverage checks. */
+export function resolveOrderId(value: unknown): string | null {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" && Number.isFinite(value)) return String(value);
+	return null;
+}
+
+function isNumericScalar(value: unknown): value is number | string {
+	if (typeof value === "number") return Number.isFinite(value);
+	return typeof value === "string" && value.trim().length > 0 && Number.isFinite(Number(value));
 }
 
 /**
@@ -285,7 +313,7 @@ function resolveLineItemTitles(
 		}
 		const lineItem = readEntry(cache, node.__ref);
 		const title = lineItem?.productTitle;
-		if (typeof title === "string" && title.length > 0) {
+		if (typeof title === "string") {
 			titles.push(title);
 		}
 	}
@@ -305,15 +333,24 @@ export function parseOrderRef(
 	ref: string,
 ): ParsedOrder | null {
 	const order = readEntry(cache, ref);
-	if (!order || typeof order.id !== "string" || order.id.length === 0) {
+	const id = resolveOrderId(order?.id);
+	if (!order || id === null) {
 		return null;
 	}
+	const sourcePrice = order.effectiveTotalPrice ?? order.totalPriceAfterOfferApplied;
+	if (isRecord(sourcePrice) && sourcePrice.amount !== null && sourcePrice.amount !== undefined &&
+		!isNumericScalar(sourcePrice.amount)) return null;
+	if (order.totalItemCount !== null && order.totalItemCount !== undefined &&
+		!isNumericScalar(order.totalItemCount)) return null;
 
 	const { currency, totalCents } = resolveTotalCents(order);
 	const lineItemTitles = resolveLineItemTitles(cache, order);
-	const itemCount =
-		typeof order.totalItemCount === "number"
-			? order.totalItemCount
+	const sourceItemCount = order.totalItemCount;
+	const parsedItemCount = typeof sourceItemCount === "number" || typeof sourceItemCount === "string"
+		? Number(sourceItemCount)
+		: Number.NaN;
+	const itemCount = Number.isFinite(parsedItemCount)
+			? parsedItemCount
 			: lineItemTitles.length > 0
 				? lineItemTitles.length
 				: null;
@@ -321,11 +358,11 @@ export function parseOrderRef(
 	return {
 		currency,
 		detailUrl: SHOP_ORDER_HISTORY_URL,
-		id: order.id,
+		id,
 		itemCount,
 		lineItemTitles,
 		merchantName: resolveMerchantName(cache, order),
-		orderNumber: order.id,
+		orderNumber: id,
 		placedAt: typeof order.createdAt === "string" ? order.createdAt : null,
 		status:
 			typeof order.displayStatus === "string" ? order.displayStatus : null,
@@ -343,4 +380,37 @@ export function extractOrders(cache: ApolloCache): ParsedOrder[] {
 		}
 	}
 	return orders;
+}
+
+export interface ExtractedOrders {
+	orders: ParsedOrder[];
+	discoveredRows: number;
+	discardedRows: number;
+}
+
+/** Reconcile every observed connection row with the rows the parser can emit. */
+export function extractOrdersWithCoverage(cache: ApolloCache): ExtractedOrders {
+	const refs = collectAllOrderRefs(cache);
+	const root = cache.ROOT_QUERY;
+	const connectionEntries = isRecord(root)
+		? Object.entries(root).filter(([key]) =>
+			PAGINATED_LIST_KEY_RE.test(key) || CURSOR_LIST_KEY_RE.test(key),
+		)
+		: [];
+	const malformedRows = connectionEntries.reduce((count, [, value]) => {
+		const nodes = isRecord(value) ? value.nodes : null;
+		if (!Array.isArray(nodes)) return count;
+		return count + nodes.filter((node) =>
+			!isApolloRef(node) || !node.__ref.startsWith("Order:"),
+		).length;
+	}, 0);
+	const orders = refs.flatMap((ref) => {
+		const order = parseOrderRef(cache, ref);
+		return order ? [order] : [];
+	});
+	return {
+		orders,
+		discoveredRows: refs.length + malformedRows,
+		discardedRows: refs.length - orders.length + malformedRows,
+	};
 }
