@@ -622,9 +622,9 @@ test("outcome proof: a 110 MiB sparse Timeline export separates streaming from w
 		const heapLimitMiB = 128;
 		const timeoutMs = 30_000;
 		type OracleOutcome = {
-			error?: Error & { code?: string };
+			error: (Error & { code?: string }) | undefined;
 			exitCode: number;
-			message?: { status?: string; error?: string };
+			message: { status?: string; error?: string } | undefined;
 			timedOut: boolean;
 		};
 		const runOracle = (
