@@ -1540,6 +1540,20 @@ const historyCards = (videoIds: string[]) =>
 		)
 		.join("")}</ytd-item-section-renderer>`;
 
+type HistoryResponseAfterReadListEnd = {
+	readNumber: number;
+	requested: string;
+	next: string | null;
+	initialRequest?: boolean;
+	duringJson?: {
+		requested: string;
+		next: string | null;
+		initialRequest?: boolean;
+		jsonDelayMs?: number;
+	};
+	jsonDelayMs?: number;
+};
+
 /** Runs the connector's real page functions against parsed HTML, one page per URL. */
 class DocumentPage {
 	url = "";
@@ -1557,21 +1571,7 @@ class DocumentPage {
 	private readonly historyResponseOnReadListEnd:
 		| { readNumber: number; requested: string; next: string | null }
 		| undefined;
-	private readonly historyResponseAfterReadListEnd:
-		| {
-				readNumber: number;
-				requested: string;
-				next: string | null;
-				initialRequest?: boolean;
-				duringJson?: {
-					requested: string;
-					next: string | null;
-					initialRequest?: boolean;
-					jsonDelayMs?: number;
-				};
-				jsonDelayMs?: number;
-			}
-		| undefined;
+	private readonly historyResponsesAfterReadListEnd: HistoryResponseAfterReadListEnd[];
 	private readListEndCount = 0;
 	private pendingHistoryScroll = false;
 	constructor(
@@ -1591,19 +1591,7 @@ class DocumentPage {
 				requested: string;
 				next: string | null;
 			};
-			historyResponseAfterReadListEnd?: {
-				readNumber: number;
-				requested: string;
-				next: string | null;
-				initialRequest?: boolean;
-				duringJson?: {
-					requested: string;
-					next: string | null;
-					initialRequest?: boolean;
-					jsonDelayMs?: number;
-				};
-				jsonDelayMs?: number;
-			};
+		historyResponsesAfterReadListEnd?: HistoryResponseAfterReadListEnd[];
 		} = {},
 	) {
 		this.pageFor = pageFor;
@@ -1611,8 +1599,8 @@ class DocumentPage {
 		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
 		this.historyResponsesOnGoto = options.historyResponsesOnGoto ?? [];
 		this.historyResponseOnReadListEnd = options.historyResponseOnReadListEnd;
-		this.historyResponseAfterReadListEnd =
-			options.historyResponseAfterReadListEnd;
+		this.historyResponsesAfterReadListEnd =
+			options.historyResponsesAfterReadListEnd ?? [];
 	}
 	on(_event: "response", listener: (response: never) => void): this {
 		this.responseListeners.add(listener);
@@ -1745,19 +1733,23 @@ class DocumentPage {
 		});
 		if (
 			fn.name === "readListEnd" &&
-			this.readListEndCount ===
-				this.historyResponseAfterReadListEnd?.readNumber
+			this.historyResponsesAfterReadListEnd.some(
+				(response) => response.readNumber === this.readListEndCount,
+			)
 		) {
-			const response = this.historyResponseAfterReadListEnd;
-			this.emitHistoryResponse(response.requested, response.next, {
-				...(response.initialRequest !== undefined
-					? { initialRequest: response.initialRequest }
-					: {}),
-				...(response.jsonDelayMs !== undefined
-					? { jsonDelayMs: response.jsonDelayMs }
-					: {}),
-				...(response.duringJson ? { duringJson: response.duringJson } : {}),
-			});
+			for (const response of this.historyResponsesAfterReadListEnd)
+				if (response.readNumber === this.readListEndCount)
+					this.emitHistoryResponse(response.requested, response.next, {
+						...(response.initialRequest !== undefined
+							? { initialRequest: response.initialRequest }
+							: {}),
+						...(response.jsonDelayMs !== undefined
+							? { jsonDelayMs: response.jsonDelayMs }
+							: {}),
+						...(response.duringJson
+							? { duringJson: response.duringJson }
+							: {}),
+					});
 		}
 		if (
 			fn.toString().includes("scrollable=Array.from(document.querySelectorAll")
@@ -1776,33 +1768,39 @@ async function collectFromDocuments(
 ) {
 	const records = new Map<string, Record<string, unknown>[]>();
 	const messages: Record<string, unknown>[] = [];
-	await collectYoutubeBrowser({
-		page: new DocumentPage(
-			(url) => {
-				const html = pageFor(url);
-				return url.includes("/feed/history") && !html.includes("avatar-btn")
-					? `${SIGNED_IN}${html}`
-					: html;
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		await collectYoutubeBrowser({
+			page: new DocumentPage(
+				(url) => {
+					const html = pageFor(url);
+					return url.includes("/feed/history") && !html.includes("avatar-btn")
+						? `${SIGNED_IN}${html}`
+						: html;
+				},
+				forcedReadiness,
+				pageOptions,
+			) as never,
+			requested: new Map(streams.map((name) => [name, { name }])) as never,
+			state,
+			emitRecord: async (stream, data) => {
+				records.set(stream, [...(records.get(stream) ?? []), data]);
 			},
-			forcedReadiness,
-			pageOptions,
-		) as never,
-		requested: new Map(streams.map((name) => [name, { name }])) as never,
-		state,
-		emitRecord: async (stream, data) => {
-			records.set(stream, [...(records.get(stream) ?? []), data]);
-		},
-		emit: async (message) => {
-			messages.push(message as Record<string, unknown>);
-		},
-		reportStreamFailure: failureReporter(messages),
-		progress: async () => undefined,
-	});
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
+			reportStreamFailure: failureReporter(messages),
+			progress: async () => undefined,
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
 	const outcome = (stream: string) =>
 		messages
 			.filter((message) => message.stream === stream)
 			.map((message) => message.reason ?? message.type);
-	return { records, messages, outcome };
+	return { records, messages, outcome, diagnostics };
 }
 
 test("finding 1: a matching source total without a terminal marker still fails", async () => {
@@ -2086,18 +2084,20 @@ test("final history refresh rechecks a response that arrives while its flush is 
 		undefined,
 		{},
 		{
-			historyResponseAfterReadListEnd: {
-				readNumber: 3,
-				requested: "initial-history-request",
-				next: null,
-				initialRequest: true,
-				duringJson: {
-					requested: "invalidating-history-request",
-					next: "continuation-D",
+			historyResponsesAfterReadListEnd: [
+				{
+					readNumber: 3,
+					requested: "initial-history-request",
+					next: null,
 					initialRequest: true,
-					jsonDelayMs: 30,
+					duringJson: {
+						requested: "invalidating-history-request",
+						next: "continuation-D",
+						initialRequest: true,
+						jsonDelayMs: 30,
+					},
 				},
-			},
+			],
 		},
 	);
 	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
@@ -2106,6 +2106,89 @@ test("final history refresh rechecks a response that arrives while its flush is 
 			(message) =>
 				message.type === "STATE" &&
 				(message.cursor as Record<string, unknown>)?.complete === true,
+		),
+		false,
+	);
+});
+
+test("a response arriving during the final page evaluation invalidates that end snapshot", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { messages, outcome, diagnostics } = await collectFromDocuments(
+		() => `${historyCards(videoIds)}${historyBootstrap(videoIds)}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponsesAfterReadListEnd: [
+				{
+					// Calls 1–2 are bootstrap reads, call 3 is the main-loop end
+					// check, and call 4 is the final refresh. DocumentPage emits
+					// after readListEnd returns but before evaluate resolves.
+					readNumber: 4,
+					requested: "initial-history-request",
+					next: "continuation-D",
+					initialRequest: true,
+				},
+			],
+		},
+	);
+	assert.deepEqual(
+		outcome("watch_history"),
+		["stream_collection_failed", "STATE"],
+	);
+	const coverageLine = diagnostics.find(
+		(line) =>
+			line.startsWith("[youtube-diagnostic] coverage ") &&
+			line.includes('"stream":"watch_history"'),
+	);
+	assert.ok(coverageLine);
+	const coverage = JSON.parse(
+		coverageLine.slice("[youtube-diagnostic] coverage ".length),
+	) as Record<string, unknown>;
+	assert.equal(coverage.stop_reason, "final-proof-invalidated");
+	assert.equal(coverage.incomplete, true);
+	assert.equal(
+		messages.some(
+			(message) =>
+				message.type === "STATE" &&
+				message.stream === "watch_history" &&
+				(message.cursor as Record<string, unknown>)?.complete === true,
+		),
+		false,
+	);
+});
+
+test("history end remains unproven when responses invalidate all final refresh retries", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { messages, outcome, diagnostics } = await collectFromDocuments(
+		() => `${historyCards(videoIds)}${historyBootstrap(videoIds)}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponsesAfterReadListEnd: [4, 5, 6].map((readNumber) => ({
+				readNumber,
+				requested: `history-request-${readNumber}`,
+				next: `continuation-${readNumber}`,
+				initialRequest: true,
+			})),
+		},
+	);
+	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+	const coverageLine = diagnostics.find(
+		(line) =>
+			line.startsWith("[youtube-diagnostic] coverage ") &&
+			line.includes('"stream":"watch_history"'),
+	);
+	assert.ok(coverageLine);
+	const coverage = JSON.parse(
+		coverageLine.slice("[youtube-diagnostic] coverage ".length),
+	) as Record<string, unknown>;
+	assert.equal(coverage.stop_reason, "history-evidence-changed-during-final-refresh");
+	assert.equal(coverage.incomplete, true);
+	assert.equal(
+		messages.some(
+			(message) => message.type === "STATE" && message.stream === "watch_history",
 		),
 		false,
 	);
