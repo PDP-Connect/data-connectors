@@ -98,3 +98,24 @@ SHA-256 of the local site, connector entrypoints, checker, and dependency lockfi
 | `browser-connector.ts` | `02e65bd04a0c26c5bf6ef8d042d96376a7ddcb7477bd6df72d9859a75341aa5b` |
 | `check-capture-privacy.py` | `30f7016d03fd7a9693b29ff22377a7b4679b54ea20d9ce64455d591cf1bc4475` |
 | `packages/polyfill-connectors/package-lock.json` | `37ebf87ef4563cbc70919a4e626541dd6cd61cd0819f4e14c1311a63b151bb89` |
+
+## Frozen compatibility check
+
+The focused `Scenario Compatibility` workflow replays these unchanged bytes with the current validator and `scenario-verify`. Its first corpus is pinned to bootstrap commit `c0c6f1e4faa7015cf6447230b0c17a5f9769b09b`; the accepted claims in `scenario-compatibility-baseline.json` record the real replay outcomes from that capture. Later runs read the fixture and expected outcomes from the PR base or push-before commit, then require the checked-out copies to match those bytes. A missing or partial old corpus fails closed. The check does not record again, start the reference site or CDP browser, or contact a provider. Browser verification replays the committed HAR in headless Chromium through the existing verifier isolation path. Its expected result remains `diagnostic_replay`, with empty coverage and no entrypoint digest; it is not canonical provider or browser-integration proof.
+
+The separate 20-minute workflow job covers changes under `src/scenario/`, the record/verify commands, the CLI marker, contract/fixture/checker files, its own scripts/workflow, and dependency inputs. It compares full PR base/head or push before/after commits, includes both names for renames and deleted paths, and fails closed on invalid refs. A stable gate rejects failed admission and any skipped focused check when changes are relevant. The near-20-minute full test job is unchanged.
+
+The focused test checks capture/source SHA-256 pins before and after replay and runs the structural privacy scanner's self-test and six-file scan. It also checks that same-version root metadata remains accepted, a strict same-version required-field mutation turns the historical scenario red, and altered operations, record hashes, final state, protocol trace, HAR, or storage data are rejected. It replays the legacy HTTP scenario with `capture.captured_at` removed and requires the claim key to stay absent. A successful process exit is not accepted unless a fresh, parseable claim artifact exists; stale paths are refused and the current best-effort claim-write failure is covered.
+
+Format `/1` remains explicitly supported. After a future version bump, the old corpus can remain supported and replayed. A deliberate drop must change `format_disposition` to `dropped` in the baseline metadata, include `format_migration`, and pass the old-input rejection assertions. The frozen old bytes remain in the test and cannot be silently regenerated or skipped. No multi-version runtime was added.
+
+After the dependencies and Patchright Chromium are installed by the commands above, the focused local check is:
+
+```sh
+SCENARIO_COMPAT_BASE_SHA=c0c6f1e4faa7015cf6447230b0c17a5f9769b09b \
+SCENARIO_COMPAT_TMPDIR="$HOME/.tmp/scenario-compat" \
+PLAYWRIGHT_BROWSERS_PATH="$HOME/.tmp/scenario-compat-browsers" \
+node --import tsx --test scripts/scenario-compatibility-admission.test.mjs scripts/scenario-compatibility.test.mjs
+```
+
+Keep `SCENARIO_COMPAT_TMPDIR` short enough for the existing replay UDS socket path limit. The check asserts this before launching replay. Both local and workflow commands use task-owned directories, leave `HOME` unchanged, and remove replay outputs after the check.
