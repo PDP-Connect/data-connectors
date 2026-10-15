@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP iCloud Notes Connector (manifest v0.1.24)
+ * PDPP iCloud Notes Connector (manifest v0.1.23)
  *
  * Greenfield PDPP Collection Profile connector, ported from the legacy CG
  * script `connectors/apple/icloud-notes-playwright.js` (read-only prior
@@ -67,11 +67,9 @@
  * account run is separate and only occurs when a signed-in profile exists.
  *
  * CHANGES
- *   v0.1.24 (2026-10-15) — account for each mapped field's readability and
- *     accept collection from an open Notes subroute.
- *   v0.1.23 (2026-10-15) — validate CloudKit query pages, salvage valid
- *     prefixes on partial failure, drain both streams with continuation
- *     guards, and include same-run folder names in notes projection.
+ *   v0.1.23 (2026-10-15) — account for mapped-field readability, accept
+ *     open Notes subroutes, add bounded readiness recovery, validate
+ *     CloudKit pages, and include same-run folder names in notes projection.
  *   v0.1.1 (2026-09-24) — owner sign-in assistance now uses a
  *     connector-local `ensureSession` with auto-resume once CloudKit validate
  *     proves the iCloud session is live.
@@ -140,7 +138,15 @@ type OmittedRowDiagnostic = {
 };
 
 interface QueryFailure {
-	reason: string;
+	reason:
+		| "icloud_auth_failed"
+		| "icloud_http_error"
+		| "icloud_invalid_query_response"
+		| "icloud_navigation_changed"
+		| "icloud_no_progress"
+		| "icloud_omitted_rows"
+		| "icloud_rate_limited"
+		| "icloud_readiness_exhausted";
 	message: string;
 	retryable: boolean;
 	pageCount: number;
@@ -153,6 +159,20 @@ interface QueryFailure {
 	fieldOmissions?: FieldOmission[];
 	omittedRowDiagnostics?: OmittedRowDiagnostic[];
 }
+
+const QUERY_FAILURE_REASON_CODES: Record<
+	QueryFailure["reason"],
+	QueryFailure["reason"]
+> = {
+	icloud_auth_failed: "icloud_auth_failed",
+	icloud_http_error: "icloud_http_error",
+	icloud_invalid_query_response: "icloud_invalid_query_response",
+	icloud_navigation_changed: "icloud_navigation_changed",
+	icloud_no_progress: "icloud_no_progress",
+	icloud_omitted_rows: "icloud_omitted_rows",
+	icloud_rate_limited: "icloud_rate_limited",
+	icloud_readiness_exhausted: "icloud_readiness_exhausted",
+};
 
 interface QueryWalk {
 	records: CloudKitRecord[];
@@ -376,14 +396,14 @@ function queryFailure(
 	stream: StreamName,
 	pageCount: number,
 ): QueryFailure {
-	const reason =
+	const reason: QueryFailure["reason"] =
 		status === 429
 			? "icloud_rate_limited"
 			: status === 401 || status === 403
 				? "icloud_auth_failed"
 				: status === 200
 					? "icloud_invalid_query_response"
-					: `icloud_http_${status}`;
+					: "icloud_http_error";
 	return {
 		reason,
 		message: `iCloud Notes ${stream} query did not return a valid page (HTTP ${status || "network error"}); the stream was not checkpointed.`,
@@ -575,12 +595,11 @@ async function emitStreamFailure(
 	await emit({
 		type: "SKIP_RESULT",
 		stream,
-		reason: failure.reason,
+		reason: QUERY_FAILURE_REASON_CODES[failure.reason],
 		message: failure.message,
-		recovery_hint: {
-			action: failure.retryable ? "retry_by_runtime" : "not_retriable",
-			retryable: failure.retryable,
-		},
+		recovery_hint: failure.retryable
+			? { action: "retry_by_runtime", retryable: true }
+			: { action: "not_retriable", retryable: false },
 		diagnostics: {
 			page_count: failure.pageCount,
 			...(failure.rowsSeen === undefined
