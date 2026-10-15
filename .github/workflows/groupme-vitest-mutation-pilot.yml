@@ -17,6 +17,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 24.21.0
@@ -27,29 +30,34 @@ jobs:
         run: |
           set -u
           mkdir -p reports/mutation/evidence
+          if [ "${PILOT_ARM_TIMED:-0}" != "1" ]; then
+            export PILOT_ARM_TIMED=1
+            /usr/bin/time -v -o reports/mutation/evidence/pilot-step.time bash "$BASH_SOURCE" "$@"
+            exit $?
+          fi
           : > reports/mutation/evidence/timing.jsonl
           step_start="$(date +%s%3N)"
           printf '{"event":"step-start","unixMs":%s}\n' "$step_start" > reports/mutation/evidence/step-state.jsonl
-          merge_parents="$(git show -s --format=%P HEAD)"
-          set -- $merge_parents
-          [ "$#" -eq 2 ] && [ "$1" = "$PILOT_PR_BASE" ] && [ "$2" = "$PILOT_PR_HEAD" ] || { echo "checkout is not the exact PR merge composition" >&2; exit 1; }
-          printf 'merge=%s\nbase=%s\nhead=%s\nnode=%s\nnpm=%s\n' "$(git rev-parse HEAD)" "$PILOT_PR_BASE" "$PILOT_PR_HEAD" "$(node --version)" "$(npm --version)" > reports/mutation/evidence/versions.txt
-          printf '%s\n' "$merge_parents" > reports/mutation/evidence/merge-parents.txt
-          sha256sum connectors/groupme/index.ts package-lock.json tools/groupme-mutation-pilot/package.json tools/groupme-mutation-pilot/package-lock.json tools/groupme-mutation-pilot/vitest.config.ts tools/groupme-mutation-pilot/stryker.config.mjs tools/groupme-mutation-pilot/stryker.owner-canary.config.mjs tools/groupme-mutation-pilot/stryker.instrumented-baseline.config.mjs .github/workflows/groupme-vitest-mutation-pilot.yml .github/workflows/polyfill-connectors.yml > reports/mutation/evidence/source-config-hashes.txt
+          checkout_sha="$(git rev-parse HEAD)"
+          [ "$checkout_sha" = "$PILOT_PR_HEAD" ] || { echo "checkout is not the exact PR head" >&2; exit 1; }
+          git cat-file -e "$PILOT_PR_BASE^{commit}"
+          merge_base="$(git merge-base "$PILOT_PR_BASE" "$PILOT_PR_HEAD")"
+          printf 'checkout=%s\nbase=%s\nhead=%s\nmerge-base=%s\nnode=%s\nnpm=%s\n' "$checkout_sha" "$PILOT_PR_BASE" "$PILOT_PR_HEAD" "$merge_base" "$(node --version)" "$(npm --version)" > reports/mutation/evidence/versions.txt
+          printf 'checkout=%s\nbase=%s\nhead=%s\nmerge-base=%s\n' "$checkout_sha" "$PILOT_PR_BASE" "$PILOT_PR_HEAD" "$merge_base" > reports/mutation/evidence/checkout-composition.txt
+          sha256sum connectors/groupme/index.ts package-lock.json tools/groupme-mutation-pilot/package.json tools/groupme-mutation-pilot/package-lock.json tools/groupme-mutation-pilot/vitest.config.ts tools/groupme-mutation-pilot/stryker.config.mjs tools/groupme-mutation-pilot/stryker.owner-canary.config.mjs tools/groupme-mutation-pilot/stryker.instrumented-baseline.config.mjs tools/groupme-mutation-pilot/owner-canary-proof.mjs tools/groupme-mutation-pilot/owner-canary-proof.test.mjs tools/groupme-mutation-pilot/validate-evidence.mjs .github/workflows/groupme-vitest-mutation-pilot.yml .github/workflows/polyfill-connectors.yml > reports/mutation/evidence/source-config-hashes.txt
           sha256sum connectors/groupme/*.test.ts connectors/groupme/*.vitest.ts >> reports/mutation/evidence/source-config-hashes.txt
           printf '%s\n' connectors/groupme/*.test.ts > reports/mutation/evidence/node-test-files.txt
           printf '%s\n' connectors/groupme/*.vitest.ts > reports/mutation/evidence/vitest-test-files.txt
-          printf 'Node %s; npm %s; Stryker concurrency=2; Vitest pool=threads maxWorkers=1 maxConcurrency=1 bail=0. Stryker Vitest 10.0.0 also sets those Vitest settings; disableBail=true maps bail to 0. GNU time records command user/sys CPU and maxRSS; maxRSS is not process-tree aggregate peak.\n' "$(node --version)" "$(npm --version)" > reports/mutation/evidence/resource-settings.txt
+          printf 'Node %s; npm %s; Vitest %s resolved at %s; Stryker concurrency=2; Vitest pool=threads maxWorkers=1 maxConcurrency=1 bail=0. Stryker Vitest 10.0.0 uses those Vitest settings; disableBail=true maps bail to 0. GNU /usr/bin/time records whole-command user+system CPU and maxRSS, the maximum individual process high-water mark (not aggregate process-tree peak).\n' "$(node --version)" "$(npm --version)" "$(node -p 'require("./tools/groupme-mutation-pilot/node_modules/vitest/package.json").version')" "$(node -p 'require.resolve("vitest")')" > reports/mutation/evidence/resource-settings.txt
           nproc >> reports/mutation/evidence/resource-settings.txt
-          cat /sys/fs/cgroup/cpu.max >> reports/mutation/evidence/resource-settings.txt 2>/dev/null || true
-          cat /sys/fs/cgroup/memory.max >> reports/mutation/evidence/resource-settings.txt 2>/dev/null || true
 
           run_phase() {
             name="$1"
             shift
             start="$(date +%s%3N)"
             printf '{"event":"phase-start","phase":"%s","unixMs":%s}\n' "$name" "$start" >> reports/mutation/evidence/step-state.jsonl
-            if /usr/bin/time -v -o "reports/mutation/evidence/${name}.time" "$@" > "reports/mutation/evidence/${name}.stdout" 2> "reports/mutation/evidence/${name}.stderr"; then
+            printf 'PHASE_START phase=%s unixMs=%s\n' "$name" "$start"
+            if /usr/bin/time -v -o "reports/mutation/evidence/${name}.time" "$@" > >(tee "reports/mutation/evidence/${name}.stdout") 2> >(tee "reports/mutation/evidence/${name}.stderr" >&2); then
               code=0
             else
               code=$?
@@ -57,6 +65,8 @@ jobs:
             end="$(date +%s%3N)"
             printf '{"phase":"%s","exitCode":%s,"wallMs":%s}\n' "$name" "$code" "$((end-start))" >> reports/mutation/evidence/timing.jsonl
             printf '{"event":"phase-complete","phase":"%s","exitCode":%s,"unixMs":%s}\n' "$name" "$code" "$end" >> reports/mutation/evidence/step-state.jsonl
+            if [ "$code" -ne 0 ]; then printf 'PHASE_FAILURE phase=%s exitCode=%s unixMs=%s\n' "$name" "$code" "$end"; fi
+            printf 'PHASE_COMPLETE phase=%s exitCode=%s unixMs=%s wallMs=%s\n' "$name" "$code" "$end" "$((end-start))"
             return "$code"
           }
 
@@ -80,7 +90,7 @@ jobs:
           step_end="$(date +%s%3N)"
           printf '{"phase":"pilot-step-end-to-end","exitCode":%s,"wallMs":%s}\n' "$failure" "$((step_end-step_start))" >> reports/mutation/evidence/timing.jsonl
           printf '{"event":"step-complete","exitCode":%s,"unixMs":%s}\n' "$failure" "$step_end" >> reports/mutation/evidence/step-state.jsonl
-          printf 'No standalone build. Stryker mutation phase wall/CPU/RSS includes startup, instrumentation, dry-run, planning, mutant execution, and reporting; event-recorder separates dry-run test net/overhead time. Step end-to-end also includes installs, baseline runs, and owner-only command-runner canary. GNU time maxRSS is not aggregate process-tree peak. GitHub job time adds checkout, Node setup, and artifact upload.\n' > reports/mutation/evidence/measurement-boundary.txt
+          printf 'No standalone build. GNU /usr/bin/time measures each command boundary and the whole pilot step; user+system CPU and maxRSS cover the command process, with maxRSS meaning the maximum individual process high-water mark, not aggregate process-tree peak. The Stryker mutation phase includes startup, instrumentation, dry-run, planning, mutant execution, and reporting; event-recorder separates dry-run test net/overhead time. Step end-to-end also includes installs, baseline runs, and owner-only command-runner canary. GitHub job time adds checkout, Node setup, and artifact upload.\n' > reports/mutation/evidence/measurement-boundary.txt
           if [ "$failure" -ne 0 ]; then exit 1; fi
       - name: Validate test parity and mutation evidence
         run: |
@@ -89,6 +99,7 @@ jobs:
           grep -Fx '# pass 219' reports/mutation/evidence/baseline-node.stdout
           grep -Fx '# fail 0' reports/mutation/evidence/baseline-node.stdout
           grep -Fx '# skipped 2' reports/mutation/evidence/baseline-node.stdout
+          node --test tools/groupme-mutation-pilot/owner-canary-proof.test.mjs
           node tools/groupme-mutation-pilot/validate-evidence.mjs
       - name: Upload mutation evidence
         if: always()

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { assertOwnerCanaryProof } from "./owner-canary-proof.mjs";
 
 const evidence = "reports/mutation/evidence";
 const ownerName =
@@ -66,6 +67,10 @@ const normalizeStatus = (status) =>
 	status;
 const testKey = (file, name) =>
 	`${path.basename(file).replace(".vitest.ts", ".test.ts")}#${name}`;
+const testIdentityForRunnerId = (id) => {
+	const test = tests.get(id);
+	return test ? testKey(test.file, test.name) : `unresolved:${id}`;
+};
 const reportTests = (result) =>
 	new Map(
 		result.testResults.flatMap((file) =>
@@ -81,18 +86,27 @@ function canonicalIdentity(mutant) {
 		path.isAbsolute(file) ? path.relative(process.cwd(), file) : file
 	).replaceAll("\\", "/");
 	const { start, end } = mutant.location;
+	// Stryker reporter events expose zero-based source ranges, while its JSON
+	// report uses one-based coordinates. Normalize events before hashing.
+	const eventCoordinates = mutant.fileName !== undefined;
+	const coordinate = (point) => ({
+		line: point.line + Number(eventCoordinates),
+		column: point.column + Number(eventCoordinates),
+	});
+	const normalizedStart = coordinate(start);
+	const normalizedEnd = coordinate(end);
 	const original = source.slice(
-		offset(start.line, start.column),
-		offset(end.line, end.column),
+		offset(normalizedStart.line, normalizedStart.column),
+		offset(normalizedEnd.line, normalizedEnd.column),
 	);
 	return createHash("sha256")
 		.update(
 			JSON.stringify([
 				relativeFile,
-				start.line,
-				start.column,
-				end.line,
-				end.column,
+				normalizedStart.line,
+				normalizedStart.column,
+				normalizedEnd.line,
+				normalizedEnd.column,
 				mutant.mutatorName,
 				original,
 				mutant.replacement.replace(/\r\n/g, "\n"),
@@ -100,18 +114,21 @@ function canonicalIdentity(mutant) {
 		)
 		.digest("hex");
 }
-function event(suffix) {
-	const files = readdirSync("reports/mutation/events").filter((file) =>
-		file.endsWith(`${suffix}.json`),
-	);
-	assert.equal(files.length, 1, `expected one ${suffix} event`);
-	return readJson(`reports/mutation/events/${files[0]}`);
+function events(suffix, subdirectory = "") {
+	const directory = path.join("reports/mutation/events", subdirectory);
+	return readdirSync(directory)
+		.filter((file) => file.endsWith(`${suffix}.json`))
+		.map((file) => readJson(path.join(directory, file)));
+}
+function event(suffix, subdirectory = "") {
+	const matches = events(suffix, subdirectory);
+	assert.equal(matches.length, 1, `expected one ${suffix} event`);
+	return matches[0];
 }
 
 // Write complete raw-status manifests before gates so a rejected run stays diagnosable.
 const manifest = mutants
 	.map((mutant) => ({
-		id: mutant.id,
 		canonicalIdentity: canonicalIdentity(mutant),
 		file: mutant.file.replaceAll("\\", "/"),
 		location: mutant.location,
@@ -123,14 +140,13 @@ const manifest = mutants
 		replacement: mutant.replacement.replace(/\r\n/g, "\n"),
 		status: mutant.status,
 		static: mutant.static ?? null,
-		coveredBy: mutant.coveredBy ?? [],
+		coveredBy: (mutant.coveredBy ?? []).map(testIdentityForRunnerId).sort(),
 		testsCompleted: mutant.testsCompleted ?? null,
-		killedBy: mutant.killedBy ?? [],
+		killedBy: (mutant.killedBy ?? []).map(testIdentityForRunnerId).sort(),
 	}))
 	.sort((a, b) => a.canonicalIdentity.localeCompare(b.canonicalIdentity));
 const population = manifest.map(
 	({
-		id,
 		canonicalIdentity,
 		file,
 		location,
@@ -138,7 +154,6 @@ const population = manifest.map(
 		original,
 		replacement,
 	}) => ({
-		mutantId: id,
 		canonicalIdentity,
 		file,
 		location,
@@ -147,6 +162,18 @@ const population = manifest.map(
 		replacement,
 	}),
 );
+const runnerIdMap = mutants
+	.map((mutant) => ({
+		canonicalIdentity: canonicalIdentity(mutant),
+		runnerId: mutant.id,
+	}))
+	.sort((a, b) => a.canonicalIdentity.localeCompare(b.canonicalIdentity));
+const testRunnerIdMap = [...tests.entries()]
+	.map(([runnerId, test]) => ({
+		runnerId,
+		testIdentity: testKey(test.file, test.name),
+	}))
+	.sort((a, b) => a.testIdentity.localeCompare(b.testIdentity));
 const populationJson = `${JSON.stringify(population, null, 2)}\n`;
 const populationSha256 = createHash("sha256")
 	.update(populationJson)
@@ -163,10 +190,16 @@ writeFileSync(
 	`${evidence}/canonical-mutants.sha256`,
 	`${manifestSha256}  canonical-mutants.json\n`,
 );
+writeJson(`${evidence}/mutant-runner-id-map.json`, runnerIdMap);
+writeJson(`${evidence}/test-runner-id-map.json`, testRunnerIdMap);
 writeJson(`${evidence}/mutation-summary.json`, {
 	generated: mutants.length,
 	counts,
-	unknownStatuses: unknownStatuses.map(({ id, status }) => ({ id, status })),
+	populationKind: report.config.mutate,
+	unknownStatuses: unknownStatuses.map((mutant) => ({
+		canonicalIdentity: canonicalIdentity(mutant),
+		status: mutant.status,
+	})),
 	canonicalPopulationSha256: populationSha256,
 	canonicalManifestSha256: manifestSha256,
 	validation: "pending",
@@ -175,6 +208,13 @@ writeJson(`${evidence}/mutation-summary.json`, {
 assert.deepEqual(report.config.mutate, [
 	"connectors/groupme/index.ts:1487-1495",
 	"connectors/groupme/index.ts:1528-1529",
+]);
+assert.deepEqual(ownerReport.config.mutate, [
+	"connectors/groupme/index.ts:1491-1491",
+]);
+assert.deepEqual(ownerReport.config.mutator.excludedMutations, [
+	"ConditionalExpression",
+	"LogicalOperator",
 ]);
 assert.equal(report.config.coverageAnalysis, "perTest");
 assert.equal(report.config.concurrency, 2);
@@ -205,34 +245,34 @@ assert.equal(instrumented.numPendingTests, 2);
 assert.equal(instrumented.testResults.length, 14);
 const oracleTests = reportTests(baseline);
 const instrumentedTests = reportTests(instrumented);
+assert.equal(oracleTests.size, 221);
+assert.equal(instrumentedTests.size, 221);
+assert.equal(
+	[...instrumentedTests.values()].filter((status) => status === "passed")
+		.length,
+	219,
+);
+assert.equal(
+	[...instrumentedTests.values()].filter((status) => status === "pending")
+		.length,
+	2,
+);
 assert.deepEqual(
 	[...instrumentedTests].sort(),
 	[...oracleTests].sort(),
 	"native Vitest JSON under Stryker instrumentation must match all 221 oracle identities/statuses",
 );
-const dryRun = event("onDryRunCompleted");
+const dryRun = event("onDryRunCompleted", "main");
 assert.equal(dryRun.result.status, "complete");
-const executed = new Map(
-	dryRun.result.tests.map((test) => [
-		testKey(test.fileName ?? test.id.split("#")[0], test.name),
-		normalizeStatus(test.status),
-	]),
-);
-const expectedExecuted = new Map(
-	[...oracleTests].filter(([, status]) => status === "passed"),
-);
-assert.deepEqual(
-	[...executed].sort(),
-	[...expectedExecuted].sort(),
-	"Stryker events identify 219 executed leaves; its Vitest runner omits skipped tasks with no result",
-);
+assert.deepEqual(dryRun.result.tests, [
+	{ id: "all", name: "All tests", status: 0 },
+]);
+// Stryker's command-runner event reports one aggregate command result. The
+// native Vitest JSON written by that instrumented command carries leaf IDs
+// and statuses, so use it for parity and retain the event as phase evidence.
 writeJson(
 	`${evidence}/instrumented-baseline-identities.json`,
 	[...instrumentedTests].map(([id, status]) => ({ id, status })),
-);
-writeJson(
-	`${evidence}/stryker-dry-run-executed-identities.json`,
-	dryRun.result.tests,
 );
 const ownerBaselineTests = ownerBaseline.testResults
 	.flatMap((file) => file.assertionResults)
@@ -241,6 +281,13 @@ assert.equal(ownerBaseline.numPassedTests, 1);
 assert.equal(ownerBaseline.numFailedTests, 0);
 assert.equal(ownerBaselineTests.length, 1);
 assert.equal(ownerBaselineTests[0].status, "passed");
+assert.equal(
+	instrumentedTests.get(
+		testKey("connectors/groupme/incremental-frontier.vitest.ts", ownerName),
+	),
+	"passed",
+	"the full unactivated instrumented baseline must pass the owner test",
+);
 
 const activationRisk = mutants.filter((mutant) => mutant.static !== false);
 assert.equal(
@@ -281,7 +328,14 @@ const canary = mutants.filter(
 	(mutant) =>
 		mutant.file === "connectors/groupme/index.ts" &&
 		mutant.location.start.line === 1491 &&
+		mutant.location.start.column === 23 &&
+		mutant.location.end.line === 1491 &&
+		mutant.location.end.column === 56 &&
 		mutant.mutatorName === "EqualityOperator" &&
+		source.slice(
+			offset(mutant.location.start.line, mutant.location.start.column),
+			offset(mutant.location.end.line, mutant.location.end.column),
+		) === "curr.created_at < prev.created_at" &&
 		mutant.replacement === "curr.created_at >= prev.created_at",
 );
 assert.equal(canary.length, 1);
@@ -294,7 +348,7 @@ const owner = [...tests.entries()].find(
 assert.ok(owner);
 assert.ok(canary[0].coveredBy.includes(owner[0]));
 assert.ok(canary[0].killedBy.includes(owner[0]));
-const plan = event("onMutationTestingPlanReady").mutantPlans.find(
+const plan = event("onMutationTestingPlanReady", "main").mutantPlans.find(
 	(item) => item.mutant.id === canary[0].id,
 );
 assert.ok(plan);
@@ -312,45 +366,114 @@ const ownerCanary = ownerMutants.filter(
 	(mutant) =>
 		mutant.file === "connectors/groupme/index.ts" &&
 		mutant.location.start.line === 1491 &&
+		mutant.location.start.column === 23 &&
+		mutant.location.end.line === 1491 &&
+		mutant.location.end.column === 56 &&
 		mutant.mutatorName === "EqualityOperator" &&
+		source.slice(
+			offset(mutant.location.start.line, mutant.location.start.column),
+			offset(mutant.location.end.line, mutant.location.end.column),
+		) === "curr.created_at < prev.created_at" &&
 		mutant.replacement === canary[0].replacement,
 );
+const ownerSelectedMutants = ownerMutants.filter(
+	(mutant) => mutant.status !== "Ignored",
+);
+assert.equal(ownerSelectedMutants.length, 2);
+assert.ok(
+	ownerSelectedMutants.every(
+		(mutant) => mutant.mutatorName === "EqualityOperator",
+	),
+	"owner-only Stryker run selected an unrelated mutation kind",
+);
 assert.equal(ownerCanary.length, 1);
-assert.equal(canonicalIdentity(ownerCanary[0]), canonicalIdentity(canary[0]));
-assert.equal(ownerCanary[0].status, "Killed");
-assert.ok(ownerCanary[0].statusReason.includes(ownerName));
-assert.ok(ownerCanary[0].statusReason.includes(expectedMessage));
-assert.ok(ownerCanary[0].statusReason.includes("false !== true"));
+const ownerCanaryPlan = event(
+	"onMutationTestingPlanReady",
+	"owner-canary",
+).mutantPlans.find((item) => item.mutant.id === ownerCanary[0].id);
+assert.ok(ownerCanaryPlan, "native Stryker plan omitted the owner canary");
+assert.equal(ownerCanaryPlan.plan, "Run");
+assert.equal(
+	canonicalIdentity(ownerCanaryPlan.runOptions.activeMutant),
+	canonicalIdentity(ownerCanary[0]),
+	"native Stryker plan must activate this exact canonical mutant",
+);
+const ownerCanaryResult = events("onMutantTested", "owner-canary").find(
+	(result) => result.id === ownerCanary[0].id,
+);
+assert.ok(
+	ownerCanaryResult,
+	"native Stryker event omitted the active owner canary result",
+);
+assertOwnerCanaryProof({
+	expectedIdentity: canonicalIdentity(canary[0]),
+	actualIdentity: canonicalIdentity(ownerCanary[0]),
+	activeIdentity: canonicalIdentity(ownerCanaryPlan.runOptions.activeMutant),
+	mutation: ownerCanary[0],
+	plan: ownerCanaryPlan,
+	result: ownerCanaryResult,
+	ownerName,
+	expectedMessage,
+	failureLocation: "incremental-frontier.vitest.ts:654",
+});
 
 writeJson(`${evidence}/mutation-summary.json`, {
 	generated: mutants.length,
 	counts,
 	validation: "passed",
+	populationKind: report.config.mutate,
 	canonicalPopulationSha256: populationSha256,
 	canonicalPopulationHashInput:
-		"SHA-256 of pretty JSON plus LF; sorted records match A's canonical-population format",
+		"SHA-256 of pretty JSON plus LF over sorted canonical tuples, without runner IDs",
 	canonicalManifestSha256: manifestSha256,
 	canary: {
 		id: canary[0].id,
 		canonicalIdentity: canonicalIdentity(canary[0]),
+		file: canary[0].file,
+		location: canary[0].location,
+		mutatorName: canary[0].mutatorName,
+		original: source.slice(
+			offset(canary[0].location.start.line, canary[0].location.start.column),
+			offset(canary[0].location.end.line, canary[0].location.end.column),
+		),
+		replacement: canary[0].replacement,
 		status: canary[0].status,
-		coveredBy: canary[0].coveredBy,
-		killedBy: canary[0].killedBy,
+		coveredBy: canary[0].coveredBy.map(testIdentityForRunnerId).sort(),
+		killedBy: canary[0].killedBy.map(testIdentityForRunnerId).sort(),
 		activation: plan.runOptions.mutantActivation,
 	},
 	ownerOnlyInstrumentedCanary: {
+		populationKind: ownerReport.config.mutate,
 		canonicalIdentity: canonicalIdentity(ownerCanary[0]),
+		file: ownerCanary[0].file,
+		location: ownerCanary[0].location,
+		mutatorName: ownerCanary[0].mutatorName,
+		original: source.slice(
+			offset(
+				ownerCanary[0].location.start.line,
+				ownerCanary[0].location.start.column,
+			),
+			offset(
+				ownerCanary[0].location.end.line,
+				ownerCanary[0].location.end.column,
+			),
+		),
+		replacement: ownerCanary[0].replacement,
 		status: ownerCanary[0].status,
 		statusReason: ownerCanary[0].statusReason,
+		activation: ownerCanaryPlan.runOptions.mutantActivation,
+		activeMutantId: ownerCanaryPlan.runOptions.activeMutant.id,
 		activationMode:
-			"built-in command runner sets ACTIVE_MUTANT in a fresh Vitest CLI process selected by anchored owner title",
+			"Stryker applies the active mutation in its sandbox; the anchored Vitest title pattern selects the owner test",
 	},
 	selectedAndCompletionCounts:
 		"coveredBy lists selected identities; testsCompleted is only an aggregate count, not completed identity evidence.",
 	instrumentedBaseline: {
 		exact221IdentityStatusParity: true,
-		eventExecutedLeaves: executed.size,
-		eventOmittedSkippedLeaves: 2,
+		strykerDryRunCommandStatus: dryRun.result.status,
+		strykerDryRunCommandResults: dryRun.result.tests.length,
+		leafIdentitiesFrom:
+			"native Vitest JSON emitted by the instrumented command",
 	},
 	ranges: {
 		first: "ascending-order predicate, 1487-1495",

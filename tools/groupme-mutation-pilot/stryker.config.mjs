@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import path from "node:path";
+
 export default {
 	mutate: [
 		"connectors/groupme/index.ts:1487-1495",
@@ -17,7 +19,7 @@ export default {
 		fileName: "reports/mutation/groupme-vitest-mutation.json",
 	},
 	eventReporter: {
-		baseDir: "reports/mutation/events",
+		baseDir: path.resolve(process.cwd(), "reports/mutation/events/main"),
 	},
 	concurrency: 2,
 	timeoutMS: 120000,

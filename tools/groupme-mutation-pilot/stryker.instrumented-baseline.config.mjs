@@ -9,7 +9,7 @@ export default {
 	...base,
 	testRunner: "command",
 	commandRunner: {
-		command: `tools/groupme-mutation-pilot/node_modules/.bin/vitest run --config tools/groupme-mutation-pilot/vitest.config.ts --reporter=json --outputFile=${workspace}/reports/mutation/evidence/vitest-instrumented-unactivated.json`,
+		command: `node node_modules/vitest/vitest.mjs run --config tools/groupme-mutation-pilot/vitest.config.ts --reporter=json --outputFile=${workspace}/reports/mutation/evidence/vitest-instrumented-unactivated.json`,
 	},
 	coverageAnalysis: "off",
 	dryRunOnly: true,
