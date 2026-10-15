@@ -4129,7 +4129,8 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.49",
+				"version": "0.2.50",
+				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
 					"icon": "icon.svg",
@@ -4152,6 +4153,11 @@
 					}
 				},
 				"capabilities": {
+					"host_blob_write": {
+						"version": 1,
+						"max_blob_bytes": 33554432,
+						"streams": ["messages"]
+					},
 					"human_interaction": ["manual_action"],
 					"refresh_policy": {
 						"recommended_mode": "automatic",
@@ -4274,10 +4280,8 @@
 								},
 								"content": {
 									"type": ["string", "null"],
-									"x_pdpp_role": "primary-title"
-								},
-								"content_loss": {
-									"type": ["string", "null"]
+									"x_pdpp_role": "primary-title",
+									"description": "Full message text. Lossless encoding: each code unit PDPP text cannot store (U+0000 NUL, other C0/C1 controls, lone surrogates) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX the decoder would read as an escape is written \\u005C. To decode, replace each \\uXXXX whose code unit is U+005C or PDPP-unsafe with that code unit. All other text is unchanged. Text over 1048576 characters is not truncated: content is null and blob_ref holds the full text (a JSON string, application/json; JSON.parse returns the exact source text, with no escape encoding)."
 								},
 								"content_type": {
 									"type": ["string", "null"]
@@ -4303,6 +4307,24 @@
 								},
 								"on_current_branch": {
 									"type": "boolean"
+								},
+								"blob_ref": {
+									"type": "object",
+									"properties": {
+										"blob_id": {
+											"type": "string"
+										},
+										"mime_type": {
+											"type": "string"
+										},
+										"size_bytes": {
+											"type": "integer"
+										},
+										"sha256": {
+											"type": "string"
+										}
+									},
+									"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 								}
 							},
 							"required": ["id", "conversation_id"]

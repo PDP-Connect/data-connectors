@@ -78,14 +78,26 @@ import {
 	buildMemoryRecord,
 	buildSharedConversationRecord,
 	type ConversationDetail,
-	extractMessage,
+	extractMessageWithBlob,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
 	minUpdateTimeIso,
 	reconcileEmittedBranchMessages,
 	tsToIso,
 } from "./parsers.ts";
+import {
+	blobSpoolDir,
+	type PreparedMessageBlob,
+	prepareMessageBlob,
+	spoolMessageBlob,
+} from "./message-blob.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
+import {
+	isSourceUnrepresentable,
+	optionalSkipKeysFor,
+	SOURCE_UNREPRESENTABLE_OUTCOME,
+	type SourceUnrepresentableOutcome,
+} from "./source-unrepresentable.ts";
 import type {
 	ChatGptApi,
 	ChatGptAuth,
@@ -2298,15 +2310,17 @@ export interface StreamDeps {
 	sleep?: (milliseconds: number) => Promise<void>;
 	detailGaps?: CollectContext["detailGaps"];
 	emit: CollectContext["emit"];
-	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	emitRecord: (
+		stream: string,
+		data: RecordData,
+		options?: { beforeEmit?: () => Promise<void> },
+	) => Promise<void>;
 	/** Mirrors the runtime's resource/time selection gate before metadata is built. */
 	isRecordSelected?: CollectContext["isRecordSelected"];
 	/** Message IDs already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
 	/** parent_id each message was emitted with this run; the stream is append-only. */
 	emittedMessageParentsThisRun?: Map<string, string | null>;
-	/** content_loss each message was emitted with this run; the emitted record is the truth. */
-	emittedMessageLossThisRun?: Map<string, string | null>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -2781,9 +2795,10 @@ export async function processConversationDetail(
 		currentBranch.map((entry, index) => [entry.nodeId, index]),
 	);
 	// `alreadyEmitted` rows were emitted earlier in this run. They still count
-	// toward loss accounting and conversation metadata; only the record emit is
-	// skipped, so a repeat detail cannot hide a loss or blank the branch tip.
+	// toward unrepresentable-content accounting and conversation metadata; only
+	// the record emit is skipped, so a repeat detail cannot blank the branch tip.
 	const candidates: {
+		blob: PreparedMessageBlob | null;
 		nodeId: string;
 		msg: RecordData;
 		onBranch: boolean;
@@ -2796,26 +2811,26 @@ export async function processConversationDetail(
 	let filteredAsDuplicate = 0;
 	let filteredAsNonMessage = 0;
 	let rejectedByShapeAnywhere = 0;
-	// Loss is judged by the record that was EMITTED. A repeat that arrives clean
-	// after a lossy emission cannot repair it under append-only, so a retry can
-	// still help; a repeat that arrives lossy after a clean emission changes
-	// nothing because the clean record stands.
-	let lossyContentMessages = 0;
-	let repairableLossMessages = 0;
+	// Messages whose full text must be a Core blob this host cannot store.
+	let withheldForBlob = 0;
+	// Messages the source cannot represent: the unknown-shape fallback cut, or
+	// text over the host blob limit (see source-unrepresentable.ts).
+	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+	let unrepresentableMessages = 0;
 	let currentNodeFilteredReason:
 		| "selection"
 		| "shape"
+		| "blob_unavailable"
 		| "duplicate"
 		| "non_message"
 		| null = null;
 	const alreadyEmittedIds = deps.emittedMessageIdsThisRun ?? new Set<string>();
 	const emittedParents =
 		deps.emittedMessageParentsThisRun ?? new Map<string, string | null>();
-	const emittedLoss =
-		deps.emittedMessageLossThisRun ?? new Map<string, string | null>();
 	for (const [nodeId, node] of Object.entries(mapping)) {
 		const onBranch = currentBranchIds.has(nodeId);
-		const msg = extractMessage(nodeId, node, c.id, onBranch);
+		const extracted = extractMessageWithBlob(nodeId, node, c.id, onBranch);
+		const msg = extracted.record;
 		if (!msg?.role) {
 			if (onBranch) {
 				filteredBranchCount += 1;
@@ -2842,6 +2857,30 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
+		// Text over the inline cap is stored whole as a Core blob, never truncated.
+		// A host with no blob store (PageShim) cannot carry it: withhold the
+		// message and gap the conversation (retryable on a host that can). Text
+		// over the host blob limit fits no host: withhold it as
+		// source-unrepresentable (see source-unrepresentable.ts).
+		let blob: PreparedMessageBlob | null = null;
+		if (extracted.blobText !== null) {
+			const spoolAvailable = blobSpoolDir() !== null;
+			blob = spoolAvailable ? prepareMessageBlob(extracted.blobText) : null;
+			if (!blob) {
+				if (spoolAvailable) {
+					unrepresentableMessages += 1;
+				} else {
+					withheldForBlob += 1;
+				}
+				if (onBranch) {
+					filteredBranchCount += 1;
+					if (nodeId === currentNode)
+						currentNodeFilteredReason = "blob_unavailable";
+				}
+				continue;
+			}
+			msg.blob_ref = blob.blob_ref;
+		}
 		const validation = validateRecord("messages", msg);
 		if (validation && !validation.ok) {
 			rejectedByShapeAnywhere += 1;
@@ -2853,17 +2892,10 @@ export async function processConversationDetail(
 			continue;
 		}
 		const alreadyEmitted = messageId !== null && alreadyEmittedIds.has(messageId);
-		const effectiveLoss =
-			alreadyEmitted && messageId !== null && emittedLoss.has(messageId)
-				? (emittedLoss.get(messageId) ?? null)
-				: msg.content_loss;
-		if (effectiveLoss !== null) {
-			lossyContentMessages += 1;
-			if (alreadyEmitted && msg.content_loss === null) {
-				repairableLossMessages += 1;
-			}
+		if (extracted.sourceUnrepresentable) {
+			unrepresentableMessages += 1;
 		}
-		candidates.push({ nodeId, msg, onBranch, alreadyEmitted });
+		candidates.push({ blob, nodeId, msg, onBranch, alreadyEmitted });
 		if (messageId) candidateIds.add(messageId);
 	}
 
@@ -2940,23 +2972,31 @@ export async function processConversationDetail(
 		if (messageId) {
 			alreadyEmittedIds.add(messageId);
 			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
-			emittedLoss.set(messageId, (msg.content_loss as string | null) ?? null);
 		}
-		await deps.emitRecord("messages", msg);
+		const spool = candidate.blob ? blobSpoolDir() : null;
+		const blobEvent =
+			candidate.blob && spool && messageId
+				? spoolMessageBlob(spool, messageId, candidate.blob)
+				: null;
+		await deps.emitRecord(
+			"messages",
+			msg,
+			blobEvent ? { beforeEmit: () => deps.emit(blobEvent) } : undefined,
+		);
 	}
 	const branchStructurallyIncomplete = await emitBranchReconciliation(
 		mapping,
 		currentNode,
 		emittedBranchCount,
 	);
-	// A schema-rejected node or a lossy body means the emitted messages are not
-	// the source's full conversation. Say so durably instead of letting the
-	// caller count the conversation as hydrated.
+	// A schema-rejected node or a message this host cannot store means the
+	// emitted messages are not the source's full conversation. Say so durably
+	// instead of letting the caller count the conversation as hydrated.
 	const incompleteReason: ConversationDetailIncompleteReason | null =
 		rejectedByShapeAnywhere > 0
 			? "message_shape_rejected"
-			: repairableLossMessages > 0
-				? "message_content_lossy"
+			: withheldForBlob > 0
+				? "message_blob_unavailable"
 				: branchStructurallyIncomplete || emittedParentConflict
 					? "branch_structurally_incomplete"
 					: null;
@@ -2988,8 +3028,9 @@ export async function processConversationDetail(
 	if (incompleteReason) {
 		return { complete: false, reason: incompleteReason };
 	}
-	if (lossyContentMessages > 0) {
-		return { complete: false, permanent: true };
+	if (unrepresentableMessages > 0) {
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+		return SOURCE_UNREPRESENTABLE_OUTCOME;
 	}
 	return { complete: true };
 }
@@ -5303,10 +5344,11 @@ interface ConversationDetailCoverage {
 	backlogGapKey?: string;
 	gapKeys: Array<string | number>;
 	hydratedKeys: Array<string | number>;
-	// Conversations whose content was lost by a deterministic local limit. The
-	// loss rides on the records; a refetch cannot undo it, so these are neither
-	// hydrated nor gapped but explicitly skipped.
-	permanentLossKeys: Array<string | number>;
+	// Conversations the source cannot represent (source-unrepresentable.ts). A
+	// refetch cannot undo it, so these are neither hydrated nor gapped but
+	// explicitly skipped.
+	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+	sourceUnrepresentableKeys: Array<string | number>;
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -5403,17 +5445,16 @@ export type ConversationDetailIncompleteReason =
 	| "branch_structurally_incomplete"
 	| "detail_http_error"
 	| "detail_mapping_missing"
-	| "message_content_lossy"
+	| "message_blob_unavailable"
 	| "message_shape_rejected";
 
 /** What `processConversationDetail` proved about one conversation's messages. */
 export type ConversationDetailOutcome =
 	| { complete: true }
 	| { complete: false; reason: ConversationDetailIncompleteReason }
-	// Content was lost by a deterministic local limit: a refetch returns the same
-	// bytes. The loss is recorded on the emitted records (`content_loss`), so no
-	// retryable gap is owed and the conversation is never refetched for it.
-	| { complete: false; permanent: true };
+	// The source cannot represent a body (unknown-shape fallback cut): a refetch
+	// returns the same bytes, so no retryable gap is owed.
+	| SourceUnrepresentableOutcome;
 
 /**
  * Retryable gap for a conversation whose detail arrived but whose messages are
@@ -5644,7 +5685,8 @@ function makeConversationDetailCoverage(
 		requiredKeys,
 		hydratedKeys: coverage.hydratedKeys,
 		gapKeys: coverage.gapKeys,
-		optionalSkipKeys: coverage.permanentLossKeys,
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+		optionalSkipKeys: optionalSkipKeysFor(coverage.sourceUnrepresentableKeys),
 		considered: requiredKeys.length,
 		covered: coverage.hydratedKeys.length,
 	});
@@ -5687,7 +5729,6 @@ export async function runMessagesAndConversationsWithDetail(
 				...deps,
 				emittedMessageIdsThisRun: new Set<string>(),
 				emittedMessageParentsThisRun: new Map<string, string | null>(),
-				emittedMessageLossThisRun: new Map<string, string | null>(),
 			};
 	const random = pacing.random ?? Math.random;
 	const sleep = pacing.sleep ?? sleepMs;
@@ -5714,7 +5755,8 @@ export async function runMessagesAndConversationsWithDetail(
 	const coverage: ConversationDetailCoverage = {
 		gapKeys: [],
 		hydratedKeys: [],
-		permanentLossKeys: [],
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+		sourceUnrepresentableKeys: [],
 	};
 	// Cumulative served-429 density signal. Each `rate_limited` cooldown the lane
 	// surfaces (one per served 429, success-after-backoff included) bumps the
@@ -6576,8 +6618,9 @@ export async function runMessagesAndConversationsWithDetail(
 				if (detailOutcome.complete) {
 					hydratedKeys.add(c.id);
 					coverage.hydratedKeys.push(c.id);
-				} else if ("permanent" in detailOutcome) {
-					coverage.permanentLossKeys.push(c.id);
+				} else if (isSourceUnrepresentable(detailOutcome)) {
+					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+					coverage.sourceUnrepresentableKeys.push(c.id);
 				} else {
 					// processConversationDetail already emitted the DETAIL_GAP.
 					gapKeys.add(c.id);
@@ -6840,11 +6883,12 @@ async function recoverPendingConversationDetailGapPage(
 			pacing,
 		);
 		const hydrated = new Set(coverage.hydratedKeys.map(String));
-		// A permanent loss is already recorded on the emitted records and a refetch
-		// returns the same bytes, so its stale retryable gap is settled, not owed.
+		// A source-unrepresentable body cannot change on refetch, so its stale
+		// retryable gap is settled, not owed.
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 		const settled = new Set([
 			...hydrated,
-			...coverage.permanentLossKeys.map(String),
+			...coverage.sourceUnrepresentableKeys.map(String),
 		]);
 		for (const { gap, conversation } of recoveryItems) {
 			if (!settled.has(conversation.id)) {
@@ -6992,7 +7036,6 @@ export async function runConversationsAndMessagesStreams(
 		...deps,
 		emittedMessageIdsThisRun: new Set<string>(),
 		emittedMessageParentsThisRun: new Map<string, string | null>(),
-		emittedMessageLossThisRun: new Map<string, string | null>(),
 		batchFallbackLog: deps.batchFallbackLog ?? { logged: false },
 		searchRecovery: listingRecovery,
 	};
@@ -7201,7 +7244,8 @@ async function emitMessagesCoverageAndState(
 			? [
 					...coverage.hydratedKeys,
 					...coverage.gapKeys,
-					...coverage.permanentLossKeys,
+					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+					...coverage.sourceUnrepresentableKeys,
 					coverage.backlogGapKey,
 				]
 			: messageDetailConversations.map((c) => c.id);

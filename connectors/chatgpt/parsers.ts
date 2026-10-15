@@ -92,8 +92,8 @@ export function flattenTreeCurrentBranch(
 /**
  * `String.prototype.trim` also strips VT (U+000B) and FF (U+000C), which are
  * forbidden control characters. Trimming them away before the safe-text pass
- * would lose them with no `content_loss` marker, so trim only the whitespace
- * that is not a forbidden control.
+ * would lose them before the escape pass, so trim only the whitespace that is
+ * not a forbidden control.
  */
 const EDGE_WHITESPACE =
 	/^[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+|[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+$/g;
@@ -284,8 +284,8 @@ function extractUserEditableContext(content: ChatGptContent): string | null {
 }
 
 // Fallback for unrecognized shape — prefer an explicit handler. Stringify so
-// *something* lands rather than null; extractContentWithLoss truncates it to
-// keep rows sane and reports that truncation.
+// *something* lands rather than null; extractContentParts truncates it to
+// keep rows sane and flags it `sourceUnrepresentable`.
 const FALLBACK_MAX_CHARS = 5000;
 
 function extractFallback(content: ChatGptContent): string | null {
@@ -318,96 +318,79 @@ const CONTENT_EXTRACTORS: Readonly<
 	user_editable_context: extractUserEditableContext,
 };
 
-/** Why a message body is not the source's full text (null = nothing lost). */
-export type ContentLoss =
-	| "control_chars_escaped"
-	| "truncated"
-	| "truncated,control_chars_escaped"
-	| "unsafe_text_dropped";
-
 // Candidate code units that may fail PDPP-safe text: C0/C1 controls, lone
-// surrogates and noncharacters. Each candidate is re-checked against the real
-// validator so the escape set never drifts from `pdppSafeText`.
-const UNSAFE_CANDIDATE =
-	/[\u0000-\u001f\u007f-\u009f\ud800-\udfff\ufdd0-\ufdef\ufffe\uffff]/g;
+// surrogates and noncharacters. The `u` flag keeps valid surrogate pairs whole.
+// Each candidate is re-checked against the real validator so the escape set
+// never drifts from `pdppSafeText`. The first alternative finds a source
+// backslash that starts something the decoder would read as an escape.
+const ESCAPE_SCAN =
+	/\\u([0-9a-fA-F]{4})|[\u0000-\u001f\u007f-\u009f\ud800-\udfff\ufdd0-\ufdef\ufffe\uffff]/gu;
+const ESCAPE_TOKEN = /\\u([0-9a-fA-F]{4})/g;
+const BACKSLASH_UNIT = 0x5c;
 
 function isSafeText(s: string): boolean {
 	return pdppSafeText.safeParse(s).success;
 }
 
-/**
- * Make extracted full text PDPP-safe without discarding it: each code unit the
- * validator rejects becomes a visible `\uXXXX` escape. Returns the escaped text
- * and whether any escape was needed. A body that still fails after escaping
- * (not expected) becomes null with the "dropped" marker so the loss is explicit.
- */
-function toSafeFullContent(s: string | null): {
-	text: string | null;
-	escaped: boolean;
-	dropped: boolean;
-} {
-	if (s === null) {
-		return { text: null, escaped: false, dropped: false };
-	}
-	if (isSafeText(s)) {
-		return { text: s, escaped: false, dropped: false };
-	}
-	const text = s.replace(UNSAFE_CANDIDATE, (ch) =>
-		isSafeText(ch)
-			? ch
-			: `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`,
+/** Code units the encoding writes as `\uXXXX`: PDPP-unsafe ones and backslash. */
+function isEscapedUnit(unit: number): boolean {
+	return (
+		unit === BACKSLASH_UNIT || !isSafeText(String.fromCharCode(unit))
 	);
-	if (!isSafeText(text)) {
-		return { text: null, escaped: false, dropped: true };
-	}
-	return { text, escaped: true, dropped: false };
 }
 
-// The messages schema caps `content` at `largeText.max(1_048_576)` chars
-// (schemas.ts). A safe-but-oversized body (e.g. a pasted multi-megabyte log)
-// passes control-char sanitization yet fails that cap, producing a terminal
-// shape_check_failed SKIP that makes the whole message non-backfillable. We
-// truncate the head in-band instead so the record still lands with readable
-// content and the recovery path is self-describing. Kept conservatively under
-// the schema cap to leave headroom for the marker and any future field tweak.
-const CONTENT_MAX_CHARS = 1_048_576;
-const OVERSIZE_HEADROOM = 1024;
-// Names the recovery path inline. The message id + conversation_id on the
-// record let a backfill re-fetch the full body from the conversation detail
-// endpoint, so no content is permanently lost.
-const OVERSIZE_TRUNCATION_MARKER =
-	"\n\n[…truncated by PDPP: original message content exceeded 1048576 characters; " +
-	"re-fetch the full body from the conversation detail by message id]";
+function escapeSequence(unit: number): string {
+	return `\\u${unit.toString(16).toUpperCase().padStart(4, "0")}`;
+}
 
 /**
- * Truncate a safe (already control-sanitized) body to the messages-schema
- * `content` cap, keeping the head and appending a self-describing marker.
- * Returns the input unchanged when it already fits. The truncation point is a
- * code-unit boundary that never splits a surrogate pair, so the result stays
- * valid PDPP-safe text.
+ * Lossless, deterministic PDPP-safe encoding of message text (documented on the
+ * `messages.content` field in the manifest). Each code unit the validator
+ * rejects (NUL, C0/C1 controls, lone surrogates) becomes `\uXXXX`. A source
+ * backslash that begins a `\uXXXX` the decoder would read as an escape is
+ * itself written `\u005C`, so decoding is unambiguous. All other text,
+ * including ordinary backslashes, is unchanged.
  */
-function toBoundedContent(s: string | null): {
+function encodePdppSafeText(s: string): string {
+	if (!s.includes("\\") && isSafeText(s)) {
+		return s;
+	}
+	return s.replace(ESCAPE_SCAN, (match, hex: string | undefined) => {
+		if (hex === undefined) {
+			return isEscapedUnit(match.charCodeAt(0))
+				? escapeSequence(match.charCodeAt(0))
+				: match;
+		}
+		return isEscapedUnit(Number.parseInt(hex, 16))
+			? `${escapeSequence(BACKSLASH_UNIT)}${match.slice(1)}`
+			: match;
+	});
+}
+
+/** Inverse of the content encoding: restores the exact source text. */
+export function decodeEscapedText(s: string): string {
+	return s.replace(ESCAPE_TOKEN, (match, hex: string) => {
+		const unit = Number.parseInt(hex, 16);
+		return isEscapedUnit(unit) ? String.fromCharCode(unit) : match;
+	});
+}
+
+// The messages schema caps inline `content` at `largeText.max(1_048_576)`
+// chars (schemas.ts). A longer body is not truncated: the caller moves the full
+// text into a Core blob and the record carries `blob_ref` with null `content`.
+const CONTENT_MAX_CHARS = 1_048_576;
+
+export interface ExtractedContent {
+	/** Source text before escaping; what a blob stores for an oversize body. */
+	raw: string | null;
+	/**
+	 * True only when the unknown-shape fallback cut the body: those bytes are
+	 * gone for good and the record cannot carry them (see
+	 * source-unrepresentable.ts).
+	 */
+	sourceUnrepresentable: boolean;
+	/** PDPP-safe full text: controls escaped losslessly, never truncated. */
 	text: string | null;
-	truncated: boolean;
-} {
-	if (s === null || s.length <= CONTENT_MAX_CHARS) {
-		return { text: s, truncated: false };
-	}
-	let head =
-		CONTENT_MAX_CHARS - OVERSIZE_HEADROOM - OVERSIZE_TRUNCATION_MARKER.length;
-	if (head < 0) {
-		head = 0;
-	}
-	// Avoid slicing through a surrogate pair: if the last kept code unit is a
-	// high surrogate (U+D800–U+DBFF), drop it so we never emit a lone surrogate.
-	const last = head > 0 ? s.charCodeAt(head - 1) : 0;
-	if (last >= 0xd8_00 && last <= 0xdb_ff) {
-		head -= 1;
-	}
-	return {
-		text: s.slice(0, head) + OVERSIZE_TRUNCATION_MARKER,
-		truncated: true,
-	};
 }
 
 /**
@@ -416,49 +399,35 @@ function toBoundedContent(s: string | null): {
  * silently returned null for everything else (67% of records). Each branch
  * returns a string; we return null only if the payload is truly empty.
  *
- * Two safe-landing passes run after extraction so a single pathological
- * message never becomes a terminal shape_check_failed SKIP, and neither pass
- * is silent: control chars are escaped (not nulled) and oversize bodies are
- * truncated in-band, each reported through `loss` so the record carries a
- * `content_loss` marker.
+ * Control characters are escaped losslessly (a representation, not a loss).
+ * The only lossy path is the unknown-shape fallback, reported through
+ * `sourceUnrepresentable`.
  */
-export function extractContentWithLoss(content: ChatGptContent | undefined): {
-	text: string | null;
-	loss: ContentLoss | null;
-} {
+export function extractContentParts(
+	content: ChatGptContent | undefined,
+): ExtractedContent {
 	if (!content || typeof content !== "object") {
-		return { text: null, loss: null };
+		return { raw: null, sourceUnrepresentable: false, text: null };
 	}
 	const type = content.content_type;
 	const handler = type ? CONTENT_EXTRACTORS[type] : undefined;
 	let raw = handler ? handler(content) : extractFallback(content);
-	// The fallback cap is a loss like any other: account for it here, before
-	// the text is shortened, so the record carries `content_loss`.
-	const fallbackTruncated =
+	const sourceUnrepresentable =
 		!handler && raw !== null && raw.length > FALLBACK_MAX_CHARS;
-	if (fallbackTruncated && raw !== null) {
+	if (sourceUnrepresentable && raw !== null) {
 		raw = `${raw.slice(0, FALLBACK_MAX_CHARS)}…`;
 	}
-	const safe = toSafeFullContent(raw);
-	const bounded = toBoundedContent(safe.text);
-	const truncated = bounded.truncated || fallbackTruncated;
-	let loss: ContentLoss | null = null;
-	if (safe.dropped) {
-		loss = "unsafe_text_dropped";
-	} else if (truncated && safe.escaped) {
-		loss = "truncated,control_chars_escaped";
-	} else if (truncated) {
-		loss = "truncated";
-	} else if (safe.escaped) {
-		loss = "control_chars_escaped";
-	}
-	return { text: bounded.text, loss };
+	return {
+		raw,
+		sourceUnrepresentable,
+		text: raw === null ? null : encodePdppSafeText(raw),
+	};
 }
 
 export function extractContent(
 	content: ChatGptContent | undefined,
 ): string | null {
-	return extractContentWithLoss(content).text;
+	return extractContentParts(content).text;
 }
 
 // ─── Tool calls ─────────────────────────────────────────────────────────
@@ -502,39 +471,61 @@ export function extractToolCalls(m: ChatGptMessage | undefined): unknown[] {
 
 // ─── Message record ─────────────────────────────────────────────────────
 
+export interface ExtractedMessage {
+	/** Full text to store as a Core blob; null when `content` fits inline. */
+	blobText: string | null;
+	record: RecordData | null;
+	/** See `ExtractedContent.sourceUnrepresentable`. */
+	sourceUnrepresentable: boolean;
+}
+
+export function extractMessageWithBlob(
+	nodeId: string,
+	node: ChatGptNode,
+	conversationId: string,
+	onCurrentBranch: boolean,
+): ExtractedMessage {
+	const m = node.message;
+	if (!m) {
+		return { blobText: null, record: null, sourceUnrepresentable: false };
+	}
+	const { raw, sourceUnrepresentable, text } = extractContentParts(m.content);
+	const oversize = text !== null && text.length > CONTENT_MAX_CHARS;
+	return {
+		blobText: oversize ? raw : null,
+		sourceUnrepresentable,
+		record: {
+			id: nodeId,
+			conversation_id: conversationId,
+			parent_id: node.parent ?? null,
+			children_ids: node.children ?? [],
+			role: m.author?.role ?? null,
+			content: oversize ? null : text || null,
+			content_type: m.content?.content_type ?? null,
+			model_slug: m.metadata?.model_slug ?? null,
+			create_time: tsToIso(m.create_time),
+			finish_reason:
+				m.end_turn === false
+					? "tool_calls"
+					: (m.metadata?.finish_details?.type ?? null),
+			citations: m.metadata?.citations ?? [],
+			tool_calls: extractToolCalls(m),
+			attachment_ids: (m.metadata?.attachments ?? [])
+				.map((a) => a.id)
+				.filter(Boolean),
+			on_current_branch: onCurrentBranch,
+		},
+	};
+}
+
 export function extractMessage(
 	nodeId: string,
 	node: ChatGptNode,
 	conversationId: string,
 	onCurrentBranch: boolean,
 ): RecordData | null {
-	const m = node.message;
-	if (!m) {
-		return null;
-	}
-	const { text: content, loss } = extractContentWithLoss(m.content);
-	return {
-		id: nodeId,
-		conversation_id: conversationId,
-		parent_id: node.parent ?? null,
-		children_ids: node.children ?? [],
-		role: m.author?.role ?? null,
-		content: content || null,
-		content_loss: loss,
-		content_type: m.content?.content_type ?? null,
-		model_slug: m.metadata?.model_slug ?? null,
-		create_time: tsToIso(m.create_time),
-		finish_reason:
-			m.end_turn === false
-				? "tool_calls"
-				: (m.metadata?.finish_details?.type ?? null),
-		citations: m.metadata?.citations ?? [],
-		tool_calls: extractToolCalls(m),
-		attachment_ids: (m.metadata?.attachments ?? [])
-			.map((a) => a.id)
-			.filter(Boolean),
-		on_current_branch: onCurrentBranch,
-	};
+	return extractMessageWithBlob(nodeId, node, conversationId, onCurrentBranch)
+		.record;
 }
 
 // ─── Memories ───────────────────────────────────────────────────────────

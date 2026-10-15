@@ -70,6 +70,16 @@ export const conversationSchema = z.object({
 	gizmo_id: idSchema.nullable(),
 });
 
+const blobRefSchema = z
+	.object({
+		blob_id: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+		mime_type: z.literal("application/json"),
+		size_bytes: z.number().int().min(1).max(33_554_432),
+		sha256: z.string().regex(/^[0-9a-f]{64}$/),
+	})
+	.strict()
+	.refine((ref) => ref.blob_id === `sha256:${ref.sha256}`);
+
 // ─── messages ───────────────────────────────────────────────────────────
 
 export const messageSchema = z.object({
@@ -80,9 +90,6 @@ export const messageSchema = z.object({
 	// role can be user / assistant / system / tool / etc.
 	role: pdppSafeText.max(40).nullable(),
 	content: largeText.nullable(),
-	// Set when `content` is not the source's full text (escaped control chars,
-	// truncated, or dropped); null when nothing was lost.
-	content_loss: pdppSafeText.max(80).nullable(),
 	// content_type is like "text" / "code" / "multimodal_text" / etc.
 	content_type: pdppSafeText.max(60).nullable(),
 	model_slug: pdppSafeText.max(80).nullable(),
@@ -92,6 +99,9 @@ export const messageSchema = z.object({
 	tool_calls: z.array(z.unknown()),
 	attachment_ids: z.array(idSchema),
 	on_current_branch: z.boolean(),
+	// Present only when the full text exceeds the inline cap: `content` is then
+	// null and the text is a Core blob (a JSON string, application/json).
+	blob_ref: blobRefSchema.optional(),
 });
 
 // ─── memories ───────────────────────────────────────────────────────────

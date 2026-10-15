@@ -50,6 +50,10 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
 import {
@@ -2706,6 +2710,21 @@ function detailGaps(messages: readonly unknown[]): Array<Record<string, unknown>
 	);
 }
 
+function unknownShapeNode(
+	parent: string | null,
+	children: string[],
+	role = "user",
+): ChatGptNode {
+	return {
+		parent,
+		children,
+		message: {
+			author: { role },
+			content: { content_type: "unknown_future_shape", text: "x".repeat(6000) },
+		},
+	} as ChatGptNode;
+}
+
 function userNode(
 	parent: string | null,
 	children: string[],
@@ -2774,7 +2793,7 @@ test("processConversationDetail: a schema-rejected branch node emits a DETAIL_GA
 	assert.equal(outcome.complete, false);
 });
 
-test("processConversationDetail: lossy message content keeps the escaped text and is not complete", async () => {
+test("processConversationDetail: control characters are emitted escaped, unmarked and the conversation is complete", async () => {
 	const { deps, emitted, messages } = makeHarness();
 	const outcome = await processConversationDetail(
 		deps,
@@ -2790,12 +2809,12 @@ test("processConversationDetail: lossy message content keeps the escaped text an
 	);
 	const msg = emitted.find((r) => r.stream === "messages");
 	assert.equal(msg?.data.content, "bell\\u0000char");
-	assert.equal(msg?.data.content_loss, "control_chars_escaped");
+	assert.equal("content_loss" in (msg?.data ?? {}), false);
 	assert.equal(detailGaps(messages).length, 0);
-	assert.deepEqual(outcome, { complete: false, permanent: true });
+	assert.deepEqual(outcome, { complete: true });
 });
 
-test("processConversationDetail: a repeat detail in the same run keeps loss accounting and conversation metadata", async () => {
+test("processConversationDetail: a repeat detail in the same run keeps unrepresentable-content accounting and conversation metadata", async () => {
 	const { deps, emitted, messages } = makeHarness();
 	deps.emittedMessageIdsThisRun = new Set<string>();
 	const lossy = (): ChatGptFetchResult => ({
@@ -2804,7 +2823,7 @@ test("processConversationDetail: a repeat detail in the same run keeps loss acco
 			current_node: "a1",
 			mapping: {
 				a0: userNode(null, ["a1"], "first"),
-				a1: userNode("a0", [], "bell\x00char", "assistant"),
+				a1: unknownShapeNode("a0", [], "assistant"),
 			},
 		},
 	});
@@ -2824,9 +2843,9 @@ test("processConversationDetail: a repeat detail in the same run keeps loss acco
 	assert.equal(
 		second.complete,
 		false,
-		"a lossy conversation stays incomplete on a repeat detail",
+		"an unrepresentable conversation stays incomplete on a repeat detail",
 	);
-	assert.equal(detailGaps(messages).length, 0, "permanent loss owes no gap");
+	assert.equal(detailGaps(messages).length, 0, "a permanent unrepresentable body owes no gap");
 	assert.equal(emitted.filter((r) => r.stream === "messages").length, 2);
 	const conversations = emitted.filter((r) => r.stream === "conversations");
 	assert.equal(conversations.length, 2);
@@ -2887,7 +2906,7 @@ test("processConversationDetail: a declared current_node absent from the mapping
 	assert.equal(outcome.complete, false);
 });
 
-test("processConversationDetail: an oversize unknown content shape is reported as truncated and the detail is not complete", async () => {
+test("processConversationDetail: an oversize unknown content shape is the permanent source-unrepresentable case", async () => {
 	const { deps, emitted, messages } = makeHarness();
 	const outcome = await processConversationDetail(
 		deps,
@@ -2915,7 +2934,7 @@ test("processConversationDetail: an oversize unknown content shape is reported a
 		makeEmitConversation(deps),
 	);
 	const msg = emitted.find((r) => r.stream === "messages");
-	assert.equal(msg?.data.content_loss, "truncated");
+	assert.equal("content_loss" in (msg?.data ?? {}), false);
 	assert.equal(detailGaps(messages).length, 0);
 	assert.deepEqual(outcome, { complete: false, permanent: true });
 });
@@ -3041,13 +3060,10 @@ test("processConversationDetail: detail=200 with at least one message — no emp
 	);
 });
 
-test("runConversationsAndMessagesStreams: unsafe message content is kept escaped and marked lossy, message still emits with a gap (no shape-skip)", async () => {
-	// SLVP-ideal behavior: a message whose text contains U+0000 or other forbidden
-	// control characters must NOT be dropped or made non-backfillable.
-	// extractContent escapes the forbidden char at extraction time and marks the
-	// record `content_loss`; the record passes the schema, both messages emit, no
-	// SKIP_RESULT is generated, and the conversation is NOT counted hydrated: a
-	// retryable DETAIL_GAP keeps the lossy body owed.
+test("runConversationsAndMessagesStreams: unsafe message content is emitted escaped and unmarked, and the conversation is hydrated (no gap, no skip key)", async () => {
+	// A message whose text contains U+0000 or other forbidden control characters
+	// is emitted with the control char escaped losslessly: a representation, not
+	// a loss. No marker, no gap, no skip key; the conversation is hydrated.
 	const unsafeNodeId = "unsafe-message";
 	const safeNodeId = "safe-message";
 	const listItem = makeConvo({
@@ -3155,26 +3171,11 @@ test("runConversationsAndMessagesStreams: unsafe message content is kept escaped
 		"binary-ish\\u0000payload",
 		"unsafe content keeps its text with the control char escaped",
 	);
-	assert.equal(unsafeRecord?.data.content_loss, "control_chars_escaped");
+	assert.equal("content_loss" in (unsafeRecord?.data ?? {}), false);
 	const lossyGaps = harness.protocolMessages.filter(
 		(m) => m.type === "DETAIL_GAP",
 	);
-	assert.equal(lossyGaps.length, 0, "permanent loss owes no refetch gap");
-	const coverageMsg = harness.protocolMessages.find(
-		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "messages",
-	);
-	assert.deepEqual(
-		(coverageMsg as { hydrated_keys?: unknown[] } | undefined)?.hydrated_keys ??
-			[],
-		[],
-		"a lossy conversation is not counted as hydrated",
-	);
-	assert.deepEqual(
-		(coverageMsg as { optional_skip_keys?: unknown[] } | undefined)
-			?.optional_skip_keys,
-		["convo-with-binary-text"],
-		"the permanent loss is declared explicitly, not hidden",
-	);
+	assert.equal(lossyGaps.length, 0, "an escaped control char owes no gap");
 	const safeRecord = messageRecords.find((r) => r.data.id === safeNodeId);
 	assert.equal(
 		safeRecord?.data.content,
@@ -3196,10 +3197,9 @@ test("runConversationsAndMessagesStreams: unsafe message content is kept escaped
 		state_stream: "conversations",
 		stream: "messages",
 		required_keys: ["convo-with-binary-text"],
-		hydrated_keys: [],
+		hydrated_keys: ["convo-with-binary-text"],
 		considered: 1,
-		covered: 0,
-		optional_skip_keys: ["convo-with-binary-text"],
+		covered: 1,
 	});
 
 	const stateEvents = harness.events.filter(
@@ -12528,28 +12528,32 @@ test("processConversationDetail: a repeat detail never changes an already-emitte
 	);
 });
 
-test("processConversationDetail: deterministic content loss is recorded on the record and schedules no refetch", async () => {
-	const { deps, emitted, messages } = makeHarness();
-	const outcome = await processConversationDetail(
-		deps,
-		makeConvo({ current_node: "a0" }),
-		{
-			status: 200,
-			json: {
-				current_node: "a0",
-				mapping: { a0: userNode(null, [], "bell\x00char") },
-			},
-		},
-		makeEmitConversation(deps),
-	);
-	const msg = emitted.find((r) => r.stream === "messages");
-	assert.equal(msg?.data.content_loss, "control_chars_escaped");
+test("processConversationDetail: only the unknown-shape fallback cut uses the stopgap; control chars do not", async () => {
+	const run = async (
+		node: ChatGptNode,
+	): Promise<{
+		gaps: number;
+		outcome: Awaited<ReturnType<typeof processConversationDetail>>;
+	}> => {
+		const { deps, messages } = makeHarness();
+		const outcome = await processConversationDetail(
+			deps,
+			makeConvo({ current_node: "a0" }),
+			{ status: 200, json: { current_node: "a0", mapping: { a0: node } } },
+			makeEmitConversation(deps),
+		);
+		return { gaps: detailGaps(messages).length, outcome };
+	};
+	const control = await run(userNode(null, [], "bell\x00char"));
+	assert.deepEqual(control.outcome, { complete: true });
+	assert.equal(control.gaps, 0);
+	const fallback = await run(unknownShapeNode(null, []));
+	assert.deepEqual(fallback.outcome, { complete: false, permanent: true });
 	assert.equal(
-		detailGaps(messages).length,
+		fallback.gaps,
 		0,
 		"a refetch returns the same bytes, so no retryable gap is owed",
 	);
-	assert.deepEqual(outcome, { complete: false, permanent: true });
 });
 
 test("runConversationsAndMessagesStreams: persistently lossy conversations do not starve new conversations under a capped run", async () => {
@@ -12560,7 +12564,7 @@ test("runConversationsAndMessagesStreams: persistently lossy conversations do no
 		status: 200,
 		json: {
 			current_node: "a0",
-			mapping: { a0: userNode(null, [], "bell\x00char") },
+			mapping: { a0: unknownShapeNode(null, []) },
 		},
 	};
 	const fetched: string[] = [];
@@ -12660,76 +12664,6 @@ test("runConversationsAndMessagesStreams: persistently lossy conversations do no
 	);
 });
 
-test("processConversationDetail: a same-run lossy-to-clean repeat is not certified hydrated", async () => {
-	const { deps, emitted, messages } = makeHarness();
-	deps.emittedMessageIdsThisRun = new Set<string>();
-	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
-	deps.emittedMessageLossThisRun = new Map<string, string | null>();
-	const detail = (text: string): ChatGptFetchResult => ({
-		status: 200,
-		json: {
-			current_node: "a0",
-			mapping: { a0: userNode(null, [], text) },
-		},
-	});
-	await processConversationDetail(
-		deps,
-		makeConvo({ current_node: "a0" }),
-		detail("bell\x00char"),
-		makeEmitConversation(deps),
-	);
-	const second = await processConversationDetail(
-		deps,
-		makeConvo({ current_node: "a0" }),
-		detail("bell char"),
-		makeEmitConversation(deps),
-	);
-	const records = emitted.filter((r) => r.stream === "messages");
-	assert.equal(records.length, 1, "append-only: the clean repeat is not emitted");
-	assert.equal(records[0]?.data.content_loss, "control_chars_escaped");
-	assert.equal(
-		second.complete,
-		false,
-		"the emitted record is still the lossy one",
-	);
-	assert.equal(
-		detailGaps(messages).length,
-		1,
-		"the clean source can repair it, so a retryable gap is owed",
-	);
-});
-
-test("processConversationDetail: a same-run clean-to-lossy repeat is accounted by the clean emitted record", async () => {
-	const { deps, emitted, messages } = makeHarness();
-	deps.emittedMessageIdsThisRun = new Set<string>();
-	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
-	deps.emittedMessageLossThisRun = new Map<string, string | null>();
-	const detail = (text: string): ChatGptFetchResult => ({
-		status: 200,
-		json: {
-			current_node: "a0",
-			mapping: { a0: userNode(null, [], text) },
-		},
-	});
-	await processConversationDetail(
-		deps,
-		makeConvo({ current_node: "a0" }),
-		detail("bell char"),
-		makeEmitConversation(deps),
-	);
-	const second = await processConversationDetail(
-		deps,
-		makeConvo({ current_node: "a0" }),
-		detail("bell\x00char"),
-		makeEmitConversation(deps),
-	);
-	const records = emitted.filter((r) => r.stream === "messages");
-	assert.equal(records.length, 1);
-	assert.equal(records[0]?.data.content_loss, null);
-	assert.deepEqual(second, { complete: true });
-	assert.equal(detailGaps(messages).length, 0);
-});
-
 test("runConversationsAndMessagesStreams: a stale retryable gap for permanently lossy content is recovered, not refetched forever", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const item = makeConvo({ id: "lossy-old", current_node: "a0" });
@@ -12746,7 +12680,7 @@ test("runConversationsAndMessagesStreams: a stale retryable gap for permanently 
 				status: 200,
 				json: {
 					current_node: "a0",
-					mapping: { a0: userNode(null, [], "bell\x00char") },
+					mapping: { a0: unknownShapeNode(null, []) },
 				},
 			});
 		},
@@ -12779,4 +12713,134 @@ test("runConversationsAndMessagesStreams: a stale retryable gap for permanently 
 		harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP").length,
 		0,
 	);
+});
+
+// ─── oversize message text → Core blob ────────────────────────────────
+
+const INLINE_CAP = 1_048_576;
+
+async function withBlobSpool<T>(
+	spool: string | null,
+	body: () => Promise<T>,
+): Promise<T> {
+	const previous = process.env.PDPP_BLOB_SPOOL_DIR;
+	if (spool === null) delete process.env.PDPP_BLOB_SPOOL_DIR;
+	else process.env.PDPP_BLOB_SPOOL_DIR = spool;
+	try {
+		return await body();
+	} finally {
+		if (previous === undefined) delete process.env.PDPP_BLOB_SPOOL_DIR;
+		else process.env.PDPP_BLOB_SPOOL_DIR = previous;
+	}
+}
+
+async function detailWithText(text: string) {
+	const { deps, emitted, messages } = makeHarness();
+	const outcome = await processConversationDetail(
+		deps,
+		makeConvo({ current_node: "a1" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a1",
+				mapping: {
+					a0: userNode(null, ["a1"], "first"),
+					a1: userNode("a0", [], text, "assistant"),
+				},
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	return { emitted, messages, outcome };
+}
+
+test("processConversationDetail: oversize text is spooled whole as a blob and referenced by blob_ref", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "chatgpt-blob-"));
+	try {
+		// Mixed content: NUL, a surrogate pair straddling a chunk boundary region,
+		// and enough length to pass the inline cap.
+		const source = `${"ab\u0000😀".repeat(INLINE_CAP / 3)}tail\\u0000`;
+		assert.ok(source.length > INLINE_CAP);
+		const { emitted, messages, outcome } = await withBlobSpool(dir, () =>
+			detailWithText(source),
+		);
+		assert.deepEqual(outcome, { complete: true });
+		assert.equal(detailGaps(messages).length, 0);
+		const record = emitted.find(
+			(r) => r.stream === "messages" && r.data.id === "a1",
+		);
+		assert.equal(record?.data.content, null);
+		assert.equal("content_loss" in (record?.data ?? {}), false);
+		const ref = record?.data.blob_ref as {
+			blob_id: string;
+			mime_type: string;
+			sha256: string;
+			size_bytes: number;
+		};
+		const blobMessage = messages.find(
+			(m): m is Extract<EmittedMessage, { type: "BLOB" }> => m.type === "BLOB",
+		);
+		assert.ok(blobMessage, "a BLOB message is emitted");
+		assert.equal(blobMessage.stream, "messages");
+		assert.equal(blobMessage.key, "a1");
+		assert.equal(blobMessage.sha256, ref.sha256);
+		assert.equal(blobMessage.size_bytes, ref.size_bytes);
+		assert.equal(ref.blob_id, `sha256:${ref.sha256}`);
+		assert.equal(ref.mime_type, "application/json");
+		const bytes = readFileSync(join(dir, blobMessage.file));
+		assert.equal(bytes.length, ref.size_bytes);
+		assert.equal(createHash("sha256").update(bytes).digest("hex"), ref.sha256);
+		assert.equal(
+			bytes.toString("utf8"),
+			JSON.stringify(source),
+			"chunked encoding equals the one-shot JSON encoding",
+		);
+		assert.equal(
+			JSON.parse(bytes.toString("utf8")),
+			source,
+			"the blob decodes to the exact source text, no truncation",
+		);
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
+});
+
+test("processConversationDetail: oversize text on a host with no blob store withholds the message and gaps it, never truncates", async () => {
+	const { emitted, messages, outcome } = await withBlobSpool(null, () =>
+		detailWithText("y".repeat(INLINE_CAP + 1)),
+	);
+	assert.equal(
+		emitted.filter((r) => r.stream === "messages" && r.data.id === "a1").length,
+		0,
+	);
+	assert.equal(messages.filter((m) => m.type === "BLOB").length, 0);
+	const gaps = detailGaps(messages);
+	assert.equal(gaps.length, 1);
+	assert.equal(gaps[0]?.retryable, true);
+	assert.equal(
+		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		"message_blob_unavailable",
+	);
+	assert.deepEqual(outcome, {
+		complete: false,
+		reason: "message_blob_unavailable",
+	});
+});
+
+test("processConversationDetail: text over the 32 MiB host blob limit is the permanent source-unrepresentable case", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "chatgpt-blob-"));
+	try {
+		const { emitted, messages, outcome } = await withBlobSpool(dir, () =>
+			detailWithText("y".repeat(33_554_433)),
+		);
+		assert.equal(readdirSync(dir).length, 0, "nothing is spooled");
+		assert.equal(
+			emitted.filter((r) => r.stream === "messages" && r.data.id === "a1").length,
+			0,
+		);
+		assert.equal(detailGaps(messages).length, 0);
+		assert.deepEqual(outcome, { complete: false, permanent: true });
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
 });

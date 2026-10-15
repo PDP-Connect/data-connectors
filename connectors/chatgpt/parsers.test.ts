@@ -15,7 +15,9 @@ import {
 	buildSharedConversationRecord,
 	countBranchMessages,
 	extractContent,
-	extractContentWithLoss,
+	extractContentParts,
+	decodeEscapedText,
+	extractMessageWithBlob,
 	extractMessage,
 	extractToolCalls,
 	flattenTreeCurrentBranch,
@@ -255,21 +257,25 @@ test("extractContent: content with other forbidden control char (VT U+000B) keep
 	);
 });
 
-test("extractContentWithLoss: forbidden controls at the edges are escaped and reported, not trimmed away", () => {
+test("extractContentParts: forbidden controls at the edges are escaped, not trimmed away, and carry no loss signal", () => {
 	assert.deepEqual(
-		extractContentWithLoss({
+		extractContentParts({
 			content_type: "text",
 			parts: ["\u000Bhello\u000C"],
 		}),
-		{ text: "\\u000Bhello\\u000C", loss: "control_chars_escaped" },
+		{
+			text: "\\u000Bhello\\u000C",
+			raw: "\u000Bhello\u000C",
+			sourceUnrepresentable: false,
+		},
 	);
-	assert.deepEqual(
-		extractContentWithLoss({ content_type: "text", parts: ["\u000B\u000C"] }),
-		{ text: "\\u000B\\u000C", loss: "control_chars_escaped" },
+	assert.equal(
+		extractContentParts({ content_type: "text", parts: ["\u000B\u000C"] }).text,
+		"\\u000B\\u000C",
 	);
-	assert.deepEqual(
-		extractContentWithLoss({ content_type: "text", parts: ["  hello \n"] }),
-		{ text: "hello", loss: null },
+	assert.equal(
+		extractContentParts({ content_type: "text", parts: ["  hello \n"] }).text,
+		"hello",
 	);
 });
 
@@ -284,27 +290,101 @@ function textNode(text: string): ChatGptNode {
 	} as ChatGptNode;
 }
 
-test("extractMessage: control-rich text is kept escaped and marked content_loss", () => {
+test("extractMessage: control-rich text is emitted escaped with no loss marker, no gap signal and no undeclared key", () => {
 	const rec = extractMessage("n1", textNode("a\x00b"), "c1", true);
 	assert.equal(rec?.content, "a\\u0000b");
-	assert.equal(rec?.content_loss, "control_chars_escaped");
+	assert.equal("content_loss" in (rec ?? {}), false);
+	assert.equal("blob_ref" in (rec ?? {}), false);
 	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
 });
 
-test("extractMessage: oversize text is marked content_loss truncated", () => {
-	const rec = extractMessage(
+test("decodeEscapedText: NUL and other controls round-trip losslessly", () => {
+	for (const source of [
+		"a\x00b",
+		"\x00",
+		"\x01\x0B\x0C\x1F\x7F\x80\x9F",
+		"tail NUL\x00",
+		"lone \ud800 surrogate",
+		"valid pair \u{1F600} next to \x00",
+	]) {
+		const rec = extractMessage("n1", textNode(source), "c1", true);
+		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			decodeEscapedText(rec?.content as string),
+			source.trim(),
+			JSON.stringify(source),
+		);
+	}
+});
+
+test("decodeEscapedText: text that already spells an escape stays distinguishable from a real control char", () => {
+	// A literal backslash-u0000 in the source must not decode to NUL.
+	for (const source of [
+		"literal \\u0000 text",
+		"literal \\u005C text",
+		"two slashes \\\\u0001",
+		"mix \\u0000 and real \x00",
+		"harmless \\u00e9 stays as typed",
+	]) {
+		const rec = extractMessage("n1", textNode(source), "c1", true);
+		assert.equal(
+			decodeEscapedText(rec?.content as string),
+			source,
+			JSON.stringify(source),
+		);
+	}
+	// Text that needs no escaping is untouched.
+	const plain = extractMessage("n1", textNode("harmless \\u00e9"), "c1", true);
+	assert.equal(plain?.content, "harmless \\u00e9");
+});
+
+test("decodeEscapedText: round-trips arbitrary strings over a hostile alphabet", () => {
+	const alphabet = ["\\", "u", "0", "5", "C", "c", "a", "\x00", "\x01", "x", "\n", "\ud800", "\u{1F600}"];
+	let seed = 12_345;
+	const next = (): number => {
+		seed = (seed * 1_103_515_245 + 12_345) & 0x7f_ff_ff_ff;
+		return seed;
+	};
+	for (let i = 0; i < 2000; i += 1) {
+		const length = 1 + (next() % 14);
+		let source = "x";
+		for (let j = 0; j < length; j += 1) {
+			source += alphabet[next() % alphabet.length];
+		}
+		source += "x";
+		const rec = extractMessage("n1", textNode(source), "c1", true);
+		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			decodeEscapedText(rec?.content as string),
+			source,
+			JSON.stringify(source),
+		);
+	}
+});
+
+test("extractMessage: oversize text is not truncated; its full text is handed to a blob", () => {
+	const source = "y".repeat(CONTENT_CAP * 2);
+	const { record, blobText } = extractMessageWithBlob(
 		"n1",
-		textNode("y".repeat(CONTENT_CAP * 2)),
+		textNode(source),
 		"c1",
 		true,
 	);
-	assert.equal(rec?.content_loss, "truncated");
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(blobText, source);
+	assert.equal(record?.content, null);
+	assert.equal("content_loss" in (record ?? {}), false);
 });
 
-test("extractMessage: clean text has content_loss null", () => {
-	const rec = extractMessage("n1", textNode("hello"), "c1", true);
-	assert.equal(rec?.content_loss, null);
+test("extractMessage: clean text has no content_loss key and no blob", () => {
+	const { record, blobText } = extractMessageWithBlob(
+		"n1",
+		textNode("hello"),
+		"c1",
+		true,
+	);
+	assert.equal("content_loss" in (record ?? {}), false);
+	assert.equal(record?.content, "hello");
+	assert.equal(blobText, null);
 });
 
 test("extractContent: content with only allowed whitespace (\\t \\n \\r) is preserved", () => {
@@ -339,78 +419,82 @@ test("extractContent: body exactly at the 1 MB cap is preserved verbatim", () =>
 	assert.equal(out?.length, CONTENT_CAP);
 });
 
-test("extractContent: oversized (>1 MB) safe body truncates in-band under the cap with a recovery marker", () => {
-	const oversized = "y".repeat(CONTENT_CAP * 3); // ~3 MB, well over the cap
+test("extractContent: an oversized (>1 MB) safe body is returned whole, never truncated", () => {
+	const oversized = "y".repeat(CONTENT_CAP * 3);
 	const out = extractContent({ content_type: "text", parts: [oversized] });
-	assert.ok(
-		typeof out === "string",
-		"oversized content must still produce a string, not null",
-	);
-	assert.ok(
-		(out?.length ?? 0) <= CONTENT_CAP,
-		"truncated content must fit the schema cap",
-	);
-	assert.ok(
-		out?.startsWith("yyy"),
-		"the head of the original body is preserved",
-	);
-	assert.ok(
-		out?.includes("truncated by PDPP"),
-		"a self-describing recovery marker is appended",
-	);
-	assert.ok(
-		out?.includes("conversation detail"),
-		"marker names the backfill path",
-	);
+	assert.equal(out, oversized);
 });
 
-test("extractContent: oversized truncation never splits a surrogate pair (stays PDPP-safe)", () => {
-	// Fill right up to the boundary with astral code points (each is a surrogate
-	// pair, length 2) so the truncation point is forced onto a pair edge.
-	const emoji = "😀"; // U+1F600, two UTF-16 code units
-	const oversized = emoji.repeat(CONTENT_CAP); // length 2 * CONTENT_CAP, > cap
-	const out = extractContent({ content_type: "text", parts: [oversized] });
-	assert.ok(typeof out === "string");
-	// No lone surrogate at the truncation seam: the kept body must round-trip
-	// through pdppSafeText (which rejects forbidden control chars; a lone
-	// surrogate would not be a control char, so additionally assert no half-pair
-	// by checking the last code unit before the marker is not a high surrogate).
-	const headOnly =
-		out?.slice(0, out?.indexOf("\n\n[…truncated") ?? out.length) ?? "";
-	const lastUnit =
-		headOnly.length > 0 ? headOnly.charCodeAt(headOnly.length - 1) : 0;
-	assert.ok(
-		!(lastUnit >= 0xd8_00 && lastUnit <= 0xdb_ff),
-		"no dangling high surrogate at the seam",
-	);
-});
-
-test("messages schema: oversized message record passes validation instead of shape_check_failed", () => {
-	// End-to-end proof of the lane goal: a message whose raw body is >1 MB must
-	// NOT become a terminal shape_check_failed SKIP_RESULT. Build the full record
-	// via extractMessage and run it through the exact validator the runtime uses.
-	const oversizedNode: ChatGptNode = {
-		parent: "u1",
-		children: [],
-		message: {
-			author: { role: "assistant" },
-			content: { content_type: "text", parts: ["z".repeat(CONTENT_CAP * 2)] },
-			create_time: 1_700_000_000,
-			metadata: { model_slug: "gpt-4o" },
-		},
-	};
-	const rec = extractMessage("oversized-node", oversizedNode, "conv1", true);
-	assert.ok(rec, "extractMessage must produce a record");
-	const result = validateRecord("messages", rec as Record<string, unknown>);
+test("extractContentParts: oversize astral text keeps every surrogate pair", () => {
+	const oversized = "😀".repeat(CONTENT_CAP);
 	assert.equal(
-		result.ok,
-		true,
-		"oversized message must pass the messages schema (no terminal shape_check_failed)",
+		extractContentParts({ content_type: "text", parts: [oversized] }).raw,
+		oversized,
 	);
-	assert.ok(
-		typeof rec?.content === "string" &&
-			(rec.content as string).includes("truncated by PDPP"),
-	);
+});
+
+test("extractContentParts: only the unknown-shape fallback truncation is source-unrepresentable", () => {
+	const unknown = (size: number) => ({
+		content_type: "unknown_future_shape",
+		text: "x".repeat(size),
+	});
+	assert.equal(extractContentParts(unknown(6000)).sourceUnrepresentable, true);
+	assert.equal(extractContentParts(unknown(100)).sourceUnrepresentable, false);
+	for (const content of [
+		{ content_type: "text", parts: ["a\x00b"] },
+		{ content_type: "text", parts: ["z".repeat(CONTENT_CAP * 2)] },
+		{ content_type: "text", parts: ["plain"] },
+	]) {
+		assert.equal(extractContentParts(content).sourceUnrepresentable, false);
+	}
+});
+
+test("messages schema: a message with a blob_ref and null content validates", () => {
+	const sha256 = "a".repeat(64);
+	const base = extractMessage("n1", textNode("hello"), "c1", true) ?? {};
+	const ok = validateRecord("messages", {
+		...base,
+		content: null,
+		blob_ref: {
+			blob_id: `sha256:${sha256}`,
+			mime_type: "application/json",
+			size_bytes: 5,
+			sha256,
+		},
+	});
+	assert.equal(ok.ok, true);
+	const bad = validateRecord("messages", {
+		...base,
+		content: null,
+		blob_ref: { blob_id: "nope" },
+	});
+	assert.equal(bad.ok, false);
+});
+
+test("messages manifest: no content_loss, a declared blob_ref, and the content encoding is documented", () => {
+	const manifest = JSON.parse(
+		readFileSync(join(__dirname, "manifest.json"), "utf8"),
+	) as {
+		capabilities: { host_blob_write?: { streams: string[] } };
+		protocol_capabilities?: string[];
+		streams: Array<{
+			name: string;
+			schema: {
+				properties: Record<string, { description?: string }>;
+			};
+		}>;
+	};
+	const messages = manifest.streams.find((s) => s.name === "messages");
+	assert.ok(messages);
+	assert.equal("content_loss" in messages.schema.properties, false);
+	assert.ok("blob_ref" in messages.schema.properties);
+	assert.deepEqual(manifest.capabilities.host_blob_write?.streams, ["messages"]);
+	assert.deepEqual(manifest.protocol_capabilities, ["BLOB"]);
+	const description = messages.schema.properties.content?.description ?? "";
+	assert.match(description, /U\+0000|NUL/);
+	assert.match(description, /\\uXXXX/);
+	assert.match(description, /\\u005C/);
+	assert.match(description, /blob_ref/);
 });
 
 // ─── extractToolCalls ──────────────────────────────────────────────────
