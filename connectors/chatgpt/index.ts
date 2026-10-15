@@ -71,6 +71,12 @@ import { createRepairBudget } from "../../packages/polyfill-connectors/src/repai
 import { RunBudget } from "../../packages/polyfill-connectors/src/run-budget.ts";
 import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
+	blobSpoolDir,
+	type MessageBlobRef,
+	measureMessageBlob,
+	spoolMessageBlob,
+} from "./message-blob.ts";
+import {
 	buildAccountPlanRecord,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
@@ -78,7 +84,8 @@ import {
 	buildMemoryRecord,
 	buildSharedConversationRecord,
 	type ConversationDetail,
-	extractMessage,
+	extractMessageWithBlob,
+	extractRawMessageText,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
 	minUpdateTimeIso,
@@ -86,6 +93,12 @@ import {
 	tsToIso,
 } from "./parsers.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
+import {
+	isSourceUnrepresentable,
+	optionalSkipKeysFor,
+	SOURCE_UNREPRESENTABLE_OUTCOME,
+	type SourceUnrepresentableOutcome,
+} from "./source-unrepresentable.ts";
 import type {
 	ChatGptApi,
 	ChatGptAuth,
@@ -2289,6 +2302,31 @@ async function runChatGptSideEffectProbe({
 
 // ─── Per-stream helpers ────────────────────────────────────────────────
 
+/**
+ * Messages whose text exists but cannot be stored, by reason. The record is
+ * emitted with `content` and `blob_ref` absent (a field-level omission): no gap,
+ * no skip key, and nothing withheld. The run discloses the aggregate count.
+ */
+export interface OmittedMessageContentTally {
+	/** Over the inline cap on a host with no blob spool (PageShim). */
+	host_blob_unavailable: number;
+	/** JSON-encoded text over the 32 MiB blob cap, which no host can store. */
+	exceeds_host_blob_cap: number;
+}
+
+export function createOmittedMessageContentTally(): OmittedMessageContentTally {
+	return { host_blob_unavailable: 0, exceeds_host_blob_cap: 0 };
+}
+
+function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
+	const total = tally.host_blob_unavailable + tally.exceeds_host_blob_cap;
+	if (total === 0) return;
+	chatGptDiagnostic(
+		`message_content_omitted: ${total} message(s) were emitted without content because the text cannot be stored ` +
+			`(host_blob_unavailable=${tally.host_blob_unavailable}, exceeds_host_blob_cap=${tally.exceeds_host_blob_cap})`,
+	);
+}
+
 /** Per-run dependency bag threaded through every emit-path helper. Mirrors
  *  the amazon/chase pattern: one stable bag so collect() becomes pure
  *  orchestration and the helpers are individually testable. */
@@ -2298,11 +2336,19 @@ export interface StreamDeps {
 	sleep?: (milliseconds: number) => Promise<void>;
 	detailGaps?: CollectContext["detailGaps"];
 	emit: CollectContext["emit"];
-	emitRecord: (stream: string, data: RecordData) => Promise<void>;
+	emitRecord: (
+		stream: string,
+		data: RecordData,
+		options?: { beforeEmit?: () => Promise<void> },
+	) => Promise<void>;
 	/** Mirrors the runtime's resource/time selection gate before metadata is built. */
 	isRecordSelected?: CollectContext["isRecordSelected"];
 	/** Message IDs already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
+	/** Run-scoped count of messages emitted without `content` (see OmittedMessageContentTally). */
+	omittedMessageContent?: OmittedMessageContentTally;
+	/** parent_id each message was emitted with this run; the stream is append-only. */
+	emittedMessageParentsThisRun?: Map<string, string | null>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
 	// to seed its density tracker, so the run carries pre-detail source pressure
@@ -2639,21 +2685,21 @@ export async function runAccountPlanStream(
  * counting on-branch messages matched the declared count for 5,815 exactly and
  * NEVER exceeded it, so equality is the right contract and a shortfall is real.
  *
- * Emitted as a record-level PROGRESS diagnostic, the same as `empty_detail`.
- * It is not a DETAIL_GAP: the fetch SUCCEEDED and the conversation is genuinely
- * hydrated. Re-fetching returns the same truncated graph, so a retryable gap
- * would spin forever. It is not a SKIP_RESULT either: a stream-level skip tells
- * the host the whole `messages` stream is unavailable, and Desktop then drops
- * every message of the run because of one conversation. The honest report is
- * "we reached it, and what it gave us is internally inconsistent".
+ * Each finding is reported as a record-level diagnostic, the same as
+ * `empty_detail`, and returns true so the caller records a durable
+ * `branch_structurally_incomplete` DETAIL_GAP: a successful fetch of a graph
+ * that declares missing earlier history is not a hydrated conversation. It is
+ * not a SKIP_RESULT: a stream-level skip tells the host the whole `messages`
+ * stream is unavailable, and Desktop then drops every message of the run
+ * because of one conversation.
  */
 async function emitBranchReconciliation(
 	mapping: Record<string, ChatGptNode>,
 	currentNode: string | null | undefined,
 	emittedBranchCount: number,
-): Promise<void> {
+): Promise<boolean> {
 	if (!currentNode) {
-		return;
+		return false;
 	}
 	// Measured at the payload boundary, independently of what was emitted: does
 	// the graph contain the tip it claims to be on?
@@ -2661,19 +2707,27 @@ async function emitBranchReconciliation(
 		chatGptDiagnostic(
 			`branch_tip_missing: a conversation declares a current_node its mapping does not contain; the branch is truncated (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		);
-		return;
+		return true;
 	}
 	// Walk the declared parent chain to its end. A chain that ends on a node
 	// whose `parent` names an id the mapping lacks was cut short upstream — the
 	// branch continues in the provider's data but not in ours.
 	const danglingParent = findDanglingBranchParent(mapping, currentNode);
+	if (danglingParent === BRANCH_PARENT_CYCLE) {
+		chatGptDiagnostic(
+			`branch_cycle: a conversation's current-branch parent links form a cycle; the branch has no root (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
+		);
+		return true;
+	}
 	if (danglingParent !== null) {
 		// The diagnostic carries no conversation or node id (the same form as
 		// `empty_detail`).
 		chatGptDiagnostic(
 			`branch_truncated: a conversation has a current-branch node whose parent is absent from the mapping; earlier messages on this branch were not delivered (emitted_on_branch=${emittedBranchCount}, node_count=${Object.keys(mapping).length})`,
 		);
+		return true;
 	}
+	return false;
 }
 
 /**
@@ -2693,7 +2747,9 @@ function findDanglingBranchParent(
 ): string | null {
 	const visited = new Set<string>();
 	let id: string | null | undefined = currentNode;
-	while (id && !visited.has(id) && mapping[id]) {
+	while (id && mapping[id]) {
+		// A revisited node means the parent links loop and never reach a root.
+		if (visited.has(id)) return BRANCH_PARENT_CYCLE;
 		visited.add(id);
 		const parent: string | null | undefined = mapping[id]?.parent;
 		if (parent && !mapping[parent]) {
@@ -2703,6 +2759,9 @@ function findDanglingBranchParent(
 	}
 	return null;
 }
+
+/** Sentinel for `findDanglingBranchParent`: not a real node id. */
+const BRANCH_PARENT_CYCLE = "\u0000branch-parent-cycle";
 
 /**
  * Process a single fetched conversation detail payload: emit the merged
@@ -2728,7 +2787,7 @@ export async function processConversationDetail(
 		c: ConversationListItem,
 		detail: ConversationDetail | null,
 	) => Promise<void>,
-): Promise<void> {
+): Promise<ConversationDetailOutcome> {
 	const processingStarted = performance.now();
 	const reportProcessingTime = (): void => {
 		(
@@ -2747,10 +2806,14 @@ export async function processConversationDetail(
 		chatGptDiagnostic(
 			`${detail.status === 200 ? "missing_mapping" : "http_error"}: a conversation detail returned http ${detail.status}`,
 		);
-		// Fall back to list-only conversation record.
+		// Fall back to list-only conversation record. The record is not
+		// hydrated: the retryable gap keeps the missing messages owed.
 		reportProcessingTime();
 		await emitConversation(c, null);
-		return;
+		const reason =
+			detail.status === 200 ? "detail_mapping_missing" : "detail_http_error";
+		await deps.emit(makeIncompleteConversationDetailGap(c, reason));
+		return { complete: false, reason };
 	}
 	const { mapping } = detail.json;
 	const currentNode = detail.json.current_node || c.current_node;
@@ -2759,14 +2822,29 @@ export async function processConversationDetail(
 	const branchOrder = new Map(
 		currentBranch.map((entry, index) => [entry.nodeId, index]),
 	);
-	const candidates: { nodeId: string; msg: RecordData; onBranch: boolean }[] =
-		[];
+	// `alreadyEmitted` rows were emitted earlier in this run. They still count
+	// toward unrepresentable-content accounting and conversation metadata; only
+	// the record emit is skipped, so a repeat detail cannot blank the branch tip.
+	const candidates: {
+		blob: { ref: MessageBlobRef; spoolDir: string } | null;
+		nodeId: string;
+		msg: RecordData;
+		onBranch: boolean;
+		alreadyEmitted: boolean;
+	}[] = [];
 	const candidateIds = new Set<string>();
 	let filteredBranchCount = 0;
 	let filteredBySelection = 0;
 	let filteredByShape = 0;
 	let filteredAsDuplicate = 0;
 	let filteredAsNonMessage = 0;
+	let rejectedByShapeAnywhere = 0;
+	const omitted =
+		deps.omittedMessageContent ?? createOmittedMessageContentTally();
+	// Messages the source cannot represent: the unknown-shape fallback cut (see
+	// source-unrepresentable.ts).
+	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+	let unrepresentableMessages = 0;
 	let currentNodeFilteredReason:
 		| "selection"
 		| "shape"
@@ -2774,9 +2852,12 @@ export async function processConversationDetail(
 		| "non_message"
 		| null = null;
 	const alreadyEmittedIds = deps.emittedMessageIdsThisRun ?? new Set<string>();
+	const emittedParents =
+		deps.emittedMessageParentsThisRun ?? new Map<string, string | null>();
 	for (const [nodeId, node] of Object.entries(mapping)) {
 		const onBranch = currentBranchIds.has(nodeId);
-		const msg = extractMessage(nodeId, node, c.id, onBranch);
+		const extracted = extractMessageWithBlob(nodeId, node, c.id, onBranch);
+		const msg = extracted.record;
 		if (!msg?.role) {
 			if (onBranch) {
 				filteredBranchCount += 1;
@@ -2787,10 +2868,7 @@ export async function processConversationDetail(
 		}
 
 		const messageId = typeof msg.id === "string" ? msg.id : null;
-		if (
-			messageId &&
-			(alreadyEmittedIds.has(messageId) || candidateIds.has(messageId))
-		) {
+		if (messageId && candidateIds.has(messageId)) {
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredAsDuplicate += 1;
@@ -2806,8 +2884,34 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
+		const alreadyEmitted =
+			messageId !== null && alreadyEmittedIds.has(messageId);
+		// Text over the inline cap is stored whole as a Core blob, never truncated.
+		// Text no host can store (no blob spool, or over the 32 MiB blob cap) is
+		// omitted as a FIELD: the record is emitted with `content` and `blob_ref`
+		// absent and the run counts it. A message emitted earlier in this run is
+		// not emitted again, so it is neither measured nor counted again.
+		let blob: { ref: MessageBlobRef; spoolDir: string } | null = null;
+		let omission: keyof OmittedMessageContentTally | null = null;
+		if (extracted.oversize && !alreadyEmitted) {
+			const spoolDir = blobSpoolDir();
+			// The text is measured here and dropped; the spool step re-derives it.
+			const ref =
+				spoolDir === null
+					? null
+					: measureMessageBlob(extractRawMessageText(node) ?? "");
+			if (spoolDir !== null && ref !== null) {
+				blob = { ref, spoolDir };
+				msg.blob_ref = ref;
+			} else {
+				delete msg.content;
+				omission =
+					spoolDir === null ? "host_blob_unavailable" : "exceeds_host_blob_cap";
+			}
+		}
 		const validation = validateRecord("messages", msg);
 		if (validation && !validation.ok) {
+			rejectedByShapeAnywhere += 1;
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredByShape += 1;
@@ -2815,7 +2919,11 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
-		candidates.push({ nodeId, msg, onBranch });
+		if (extracted.sourceUnrepresentable) {
+			unrepresentableMessages += 1;
+		}
+		if (omission) omitted[omission] += 1;
+		candidates.push({ blob, nodeId, msg, onBranch, alreadyEmitted });
 		if (messageId) candidateIds.add(messageId);
 	}
 
@@ -2838,6 +2946,24 @@ export async function processConversationDetail(
 		if (retained && reconciled) {
 			retained.msg.parent_id = reconciled.parent_id;
 		}
+	}
+	// `messages` is append_only: a record already emitted keeps its payload. A
+	// repeat detail whose repair would relink it keeps the emitted parent and
+	// reports the conversation as structurally incomplete instead.
+	let emittedParentConflict = false;
+	for (const candidate of retainedBranch) {
+		const id = typeof candidate.msg.id === "string" ? candidate.msg.id : null;
+		if (!id || !candidate.alreadyEmitted || !emittedParents.has(id)) continue;
+		const emittedParent = emittedParents.get(id) ?? null;
+		if (candidate.msg.parent_id !== emittedParent) {
+			candidate.msg.parent_id = emittedParent;
+			emittedParentConflict = true;
+		}
+	}
+	if (emittedParentConflict) {
+		chatGptDiagnostic(
+			"branch_parent_changed: a repeat detail would relink an already-emitted message; the emitted parent_id was kept",
+		);
 	}
 	const emittedCurrentNode = reconciledBranch.currentNode;
 	const emittedBranchCount = reconciledBranch.count;
@@ -2867,16 +2993,55 @@ export async function processConversationDetail(
 				`current_node_filtered=${currentNodeFilteredReason ?? "no"})`,
 		);
 	}
-	let emittedMessageCount = 0;
 	for (const candidate of candidates) {
 		const { msg } = candidate;
+		if (candidate.alreadyEmitted) continue;
 		const messageId = typeof msg.id === "string" ? msg.id : null;
-		if (messageId) alreadyEmittedIds.add(messageId);
-		emittedMessageCount += 1;
-		await deps.emitRecord("messages", msg);
+		if (messageId) {
+			alreadyEmittedIds.add(messageId);
+			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
+		}
+		const { blob } = candidate;
+		const sourceNode = mapping[candidate.nodeId];
+		// The blob is spooled only after the runtime's selection and validation
+		// gates pass (beforeEmit), so a suppressed record leaves no orphan file,
+		// and the text is re-derived here rather than held per candidate.
+		await deps.emitRecord(
+			"messages",
+			msg,
+			blob && messageId && sourceNode
+				? {
+						beforeEmit: () =>
+							deps.emit(
+								spoolMessageBlob(
+									blob.spoolDir,
+									messageId,
+									extractRawMessageText(sourceNode) ?? "",
+									blob.ref,
+								),
+							),
+					}
+				: undefined,
+		);
 	}
-	await emitBranchReconciliation(mapping, currentNode, emittedBranchCount);
-	if (emittedMessageCount === 0) {
+	const branchStructurallyIncomplete = await emitBranchReconciliation(
+		mapping,
+		currentNode,
+		emittedBranchCount,
+	);
+	// A schema-rejected node means the emitted messages are not the source's
+	// full conversation. Say so durably instead of letting the caller count the
+	// conversation as hydrated.
+	const incompleteReason: ConversationDetailIncompleteReason | null =
+		rejectedByShapeAnywhere > 0
+			? "message_shape_rejected"
+			: branchStructurallyIncomplete || emittedParentConflict
+				? "branch_structurally_incomplete"
+				: null;
+	if (incompleteReason) {
+		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
+	}
+	if (candidates.length === 0) {
 		// Completeness guard. A 200-with-mapping detail whose graph contains NO
 		// message-bearing node leaves a bare conversation row with zero messages
 		// and, without this, no signal at all — indistinguishable downstream from
@@ -2898,6 +3063,14 @@ export async function processConversationDetail(
 			`empty_detail: a conversation returned http 200 with a mapping but no message-bearing nodes (node_count=${Object.keys(mapping).length})`,
 		);
 	}
+	if (incompleteReason) {
+		return { complete: false, reason: incompleteReason };
+	}
+	if (unrepresentableMessages > 0) {
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+		return SOURCE_UNREPRESENTABLE_OUTCOME;
+	}
+	return { complete: true };
 }
 
 const PAGINATION_SAFETY_LIMIT = 5000;
@@ -3687,7 +3860,23 @@ async function walkConversationSearch(
 	const requestedSince =
 		deps.requested.get("conversations")?.time_range?.since ??
 		deps.requested.get("messages")?.time_range?.since;
+	// Every next cursor must be the expected successor of the one before it.
+	// A jump leaves the rows between unread, so the walk cannot claim the end.
+	let contiguous = true;
 	const complete = (): ConversationListResult => {
+		if (!contiguous) {
+			emitConversationListUnstable(
+				deps,
+				"ChatGPT conversation search skipped cursor positions, so the list was not read contiguously",
+				{ cursor },
+			);
+			return {
+				items: [...conversationsById.values()],
+				truncated: true,
+				backfillItems: [...conversationsById.values()],
+				backfill: conversationBackfillAt(conversationsById.values(), cursor),
+			};
+		}
 		if (resumeBackfill && !resumeBoundarySeen) {
 			emitConversationListUnstable(
 				deps,
@@ -3979,6 +4168,13 @@ async function walkConversationSearch(
 				return {
 					...complete(),
 				};
+		}
+		const readCount = Math.max(0, ...attempts.map((items) => items.length));
+		if (
+			nextCursor !== cursor + pageSize &&
+			(readCount === 0 || nextCursor !== cursor + readCount)
+		) {
+			contiguous = false;
 		}
 		cursor = nextCursor;
 		if (cursor > PAGINATION_SAFETY_LIMIT) {
@@ -5186,6 +5382,11 @@ interface ConversationDetailCoverage {
 	backlogGapKey?: string;
 	gapKeys: Array<string | number>;
 	hydratedKeys: Array<string | number>;
+	// Conversations the source cannot represent (source-unrepresentable.ts). A
+	// refetch cannot undo it, so these are neither hydrated nor gapped but
+	// explicitly skipped.
+	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+	sourceUnrepresentableKeys: Array<string | number>;
 }
 
 function sleepMs(ms: number): Promise<void> {
@@ -5276,6 +5477,45 @@ function conversationListItemFromGap(
 		return null;
 	}
 	return { ...(hint as Record<string, unknown>), id } as ConversationListItem;
+}
+
+export type ConversationDetailIncompleteReason =
+	| "branch_structurally_incomplete"
+	| "detail_http_error"
+	| "detail_mapping_missing"
+	| "message_shape_rejected";
+
+/** What `processConversationDetail` proved about one conversation's messages. */
+export type ConversationDetailOutcome =
+	| { complete: true }
+	| { complete: false; reason: ConversationDetailIncompleteReason }
+	// The source cannot represent a body (unknown-shape fallback cut): a refetch
+	// returns the same bytes, so no retryable gap is owed.
+	| SourceUnrepresentableOutcome;
+
+/**
+ * Retryable gap for a conversation whose detail arrived but whose messages are
+ * not the source's full content. The next run re-fetches it; until the same
+ * conversation comes back clean the gap stays pending.
+ */
+function makeIncompleteConversationDetailGap(
+	c: ConversationListItem,
+	reason: ConversationDetailIncompleteReason,
+): DetailGapMessage {
+	// `reason` is a closed protocol enum; `retry_exhausted` arms no source
+	// cooldown (this is not source pressure). The specific cause rides in the
+	// locator so recovery and reviewers can tell the defect classes apart.
+	return buildDetailGap({
+		stream: "messages",
+		recordKey: c.id,
+		reason: "retry_exhausted",
+		locator: {
+			kind: "chatgpt.conversation",
+			conversation_id: c.id,
+			incomplete_reason: reason,
+			list_item: safeConversationListItemHint(c),
+		},
+	});
 }
 
 function makeConversationDetailGap(
@@ -5482,6 +5722,8 @@ function makeConversationDetailCoverage(
 		requiredKeys,
 		hydratedKeys: coverage.hydratedKeys,
 		gapKeys: coverage.gapKeys,
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+		optionalSkipKeys: optionalSkipKeysFor(coverage.sourceUnrepresentableKeys),
 		considered: requiredKeys.length,
 		covered: coverage.hydratedKeys.length,
 	});
@@ -5520,7 +5762,11 @@ export async function runMessagesAndConversationsWithDetail(
 	let completedDetails = 0;
 	const detailDeps = deps.emittedMessageIdsThisRun
 		? deps
-		: { ...deps, emittedMessageIdsThisRun: new Set<string>() };
+		: {
+				...deps,
+				emittedMessageIdsThisRun: new Set<string>(),
+				emittedMessageParentsThisRun: new Map<string, string | null>(),
+			};
 	const random = pacing.random ?? Math.random;
 	const sleep = pacing.sleep ?? sleepMs;
 	const providerBudget = pacing.providerBudget ?? deps.providerBudget ?? null;
@@ -5546,6 +5792,8 @@ export async function runMessagesAndConversationsWithDetail(
 	const coverage: ConversationDetailCoverage = {
 		gapKeys: [],
 		hydratedKeys: [],
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+		sourceUnrepresentableKeys: [],
 	};
 	// Cumulative served-429 density signal. Each `rate_limited` cooldown the lane
 	// surfaces (one per served 429, success-after-backoff included) bumps the
@@ -6387,7 +6635,7 @@ export async function runMessagesAndConversationsWithDetail(
 					detailMs,
 					detail.providerFetchMs ?? detailMs,
 				);
-				await processConversationDetail(
+				const detailOutcome = await processConversationDetail(
 					detailDeps,
 					c,
 					detail,
@@ -6404,8 +6652,17 @@ export async function runMessagesAndConversationsWithDetail(
 				// Reset the progress-based give-up counter: any successful fetch proves the
 				// account is alive, so N consecutive no-progress waits restarts from 0.
 				consecutiveWaitOutsWithoutSuccess = 0;
-				hydratedKeys.add(c.id);
-				coverage.hydratedKeys.push(c.id);
+				if (detailOutcome.complete) {
+					hydratedKeys.add(c.id);
+					coverage.hydratedKeys.push(c.id);
+				} else if (isSourceUnrepresentable(detailOutcome)) {
+					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+					coverage.sourceUnrepresentableKeys.push(c.id);
+				} else {
+					// processConversationDetail already emitted the DETAIL_GAP.
+					gapKeys.add(c.id);
+					coverage.gapKeys.push(c.id);
+				}
 				// Count this hydration against the bounded-run cap. Done after a successful
 				// fetch so deferred/failed conversations never consume the size budget; the
 				// next `reason()` check (this pass or the forward pass sharing the budget)
@@ -6663,8 +6920,15 @@ async function recoverPendingConversationDetailGapPage(
 			pacing,
 		);
 		const hydrated = new Set(coverage.hydratedKeys.map(String));
+		// A source-unrepresentable body cannot change on refetch, so its stale
+		// retryable gap is settled, not owed.
+		// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+		const settled = new Set([
+			...hydrated,
+			...coverage.sourceUnrepresentableKeys.map(String),
+		]);
 		for (const { gap, conversation } of recoveryItems) {
-			if (!hydrated.has(conversation.id)) {
+			if (!settled.has(conversation.id)) {
 				continue;
 			}
 			await deps.emit({
@@ -6682,7 +6946,7 @@ async function recoverPendingConversationDetailGapPage(
 		// per-key gap remains owed OR the recovery run capped (signalled by a fresh
 		// backlog key), so the rewritten backlog is attacked next run.
 		stoppedWithPending =
-			hydrated.size < recoveryItems.length ||
+			settled.size < recoveryItems.length ||
 			coverage.backlogGapKey !== undefined;
 		if (stoppedWithPending) {
 			return { recovered, stoppedWithPending };
@@ -6803,11 +7067,30 @@ export async function runConversationsAndMessagesStreams(
 	state: CollectContext["state"],
 	options: { detailPacing?: ConversationDetailPacingOptions } = {},
 ): Promise<void> {
+	const omittedMessageContent =
+		deps.omittedMessageContent ?? createOmittedMessageContentTally();
+	try {
+		await walkConversationsAndMessages(
+			{ ...deps, omittedMessageContent },
+			state,
+			options,
+		);
+	} finally {
+		reportOmittedMessageContent(omittedMessageContent);
+	}
+}
+
+async function walkConversationsAndMessages(
+	deps: StreamDeps,
+	state: CollectContext["state"],
+	options: { detailPacing?: ConversationDetailPacingOptions } = {},
+): Promise<void> {
 	const listingRecovery =
 		deps.searchRecovery ?? conversationSearchRecovery(deps);
 	const runDeps: StreamDeps = {
 		...deps,
 		emittedMessageIdsThisRun: new Set<string>(),
+		emittedMessageParentsThisRun: new Map<string, string | null>(),
 		batchFallbackLog: deps.batchFallbackLog ?? { logged: false },
 		searchRecovery: listingRecovery,
 	};
@@ -7013,7 +7296,13 @@ async function emitMessagesCoverageAndState(
 		// so the commit gate passes with a bounded row count instead of one
 		// required key per conversation.
 		const requiredKeys: Array<string | number> = coverage.backlogGapKey
-			? [...coverage.hydratedKeys, ...coverage.gapKeys, coverage.backlogGapKey]
+			? [
+					...coverage.hydratedKeys,
+					...coverage.gapKeys,
+					// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
+					...coverage.sourceUnrepresentableKeys,
+					coverage.backlogGapKey,
+				]
 			: messageDetailConversations.map((c) => c.id);
 		await deps.emit(makeConversationDetailCoverage(requiredKeys, coverage));
 	}
@@ -7083,10 +7372,10 @@ function emitConversationsState(
  * serialize them into a SKIP_RESULT diagnostic. Guard here so
  * "Invalid time value" points at the offending row instead of killing the run.
  */
-function makeEmitRecord(
+export function makeEmitRecord(
 	baseEmitRecord: CollectContext["emitRecord"],
-): (stream: string, data: RecordData) => Promise<void> {
-	return (stream: string, data: RecordData): Promise<void> => {
+): CollectContext["emitRecord"] {
+	return (stream, data, options): Promise<void> => {
 		if (data?.id !== null && data?.id !== undefined) {
 			try {
 				JSON.stringify(data);
@@ -7098,7 +7387,9 @@ function makeEmitRecord(
 				return Promise.resolve();
 			}
 		}
-		return baseEmitRecord(stream, data);
+		// Forward the options: `beforeEmit` is what emits a message's BLOB event
+		// after the runtime's gates and before its RECORD.
+		return baseEmitRecord(stream, data, options);
 	};
 }
 
