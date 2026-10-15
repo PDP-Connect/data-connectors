@@ -23,9 +23,9 @@
  *   - `added_at` / `played_at` are ISO-8601 datetimes where present; saved
  *     tracks can lack a save date and retain that source row with null.
  *   - `isrc` is the 12-char ISRC code or null.
- *   - `time_range` (top_artists) is one of Spotify's three fixed windows.
- *   - recently_played `id` is the composite `"<trackId>:<playedAtMs>"` the
- *     builder constructs — validated by RECENTLY_PLAYED_ID_RE.
+ *   - top ranking `time_range` is one of Spotify's two supported windows.
+ *   - recently played contexts use the context URI as the source identity and
+ *     retain the last-played timestamp and track URI when available.
  *   - `uri` fields preserve values from web-player GraphQL payloads. Saved
  *     track URIs can be empty or absent in legacy-compatible source rows.
  *   - `images` normalizes web-player image URLs to `[{url, width, height}]`;
@@ -162,12 +162,30 @@ export const playlistItemsSchema = z.object({
  * top_artists stream: one record per top artist, per time window.
  */
 export const topArtistsSchema = z.object({
-	id: spotifyIdSchema.optional(),
-	name: nameSchema,
+	id: spotifyIdSchema,
+	uri: spotifyUriSchema.nullable(),
+	name: pdppSafeText.max(1000),
 	genres: z.array(pdppSafeText.max(200)),
 	popularity: z.number().int().min(0).max(100).nullable(),
 	followers: z.number().int().min(0).nullable(),
-	time_range: z.enum(["short_term", "medium_term", "long_term"]),
+	time_range: z.enum(["short_term", "long_term"]),
+});
+
+export const topTracksSchema = z.object({
+	id: spotifyIdSchema,
+	uri: spotifyUriSchema.nullable(),
+	name: pdppSafeText.max(1000),
+	artist_names: artistNamesSchema,
+	album_name: pdppSafeText.max(1000).nullable(),
+	duration_ms: z.number().int().min(0).nullable(),
+	time_range: z.enum(["short_term", "long_term"]),
+});
+
+export const recentlyPlayedContextsSchema = z.object({
+	id: spotifyUriSchema,
+	uri: spotifyUriSchema,
+	last_played_time: z.number().int().min(0),
+	last_played_track_uri: spotifyUriSchema.nullable(),
 });
 
 /**
@@ -194,6 +212,8 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	playlist_items: playlistItemsSchema,
 	saved_tracks: savedTracksSchema,
 	top_artists: topArtistsSchema,
+	top_tracks: topTracksSchema,
+	recently_played_contexts: recentlyPlayedContextsSchema,
 	recently_played: recentlyPlayedSchema,
 	profile: profileSchema,
 };

@@ -614,7 +614,10 @@
 		"manifest": {
 			"connector_key": "spotify",
 			"reason_display_messages": {
-				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync."
+				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+				"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
+				"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+				"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
 			}
 		}
 	},

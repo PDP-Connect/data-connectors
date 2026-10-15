@@ -100,13 +100,267 @@ interface BrowserData {
 	playlistUris: string[];
 	playlists: Record<string, unknown>[];
 	profile: Record<string, unknown> | null;
+	recently_played_contexts: Record<string, unknown>[];
+	recent_context_pages: unknown[];
 	saved_tracks: Record<string, unknown>[];
+	top_artists: Record<string, unknown>[];
+	top_artist_pages: unknown[];
+	top_tracks: Record<string, unknown>[];
+	top_track_pages: unknown[];
 	sourceCounts: Partial<
 		Record<
-			"playlists" | "playlist_items" | "saved_tracks" | "profile",
+			| "playlists"
+			| "playlist_items"
+			| "saved_tracks"
+			| "profile"
+			| "recently_played_contexts"
+			| "top_artists"
+			| "top_tracks",
 			{ considered: number; covered: number }
 		>
 	>;
+}
+
+type TopTimeRange = "short_term" | "long_term";
+
+type FieldRead<T> =
+	| { kind: "READ"; value: T }
+	| { kind: "EXPLICIT_EMPTY"; value: T }
+	| { kind: "UNAVAILABLE"; reason: string };
+
+function readText(value: unknown, field: string): FieldRead<string | null> {
+	if (value === null) {
+		return { kind: "EXPLICIT_EMPTY", value: null };
+	}
+	if (value === undefined) {
+		return { kind: "UNAVAILABLE", reason: `${field}_missing` };
+	}
+	return typeof value === "string" && value.length > 0
+		? { kind: "READ", value }
+		: { kind: "UNAVAILABLE", reason: `${field}_malformed` };
+}
+
+function readCount(value: unknown, field: string): FieldRead<number | null> {
+	if (value === null) {
+		return { kind: "EXPLICIT_EMPTY", value: null };
+	}
+	if (value === undefined) {
+		return { kind: "UNAVAILABLE", reason: `${field}_missing` };
+	}
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? { kind: "READ", value }
+		: { kind: "UNAVAILABLE", reason: `${field}_malformed` };
+}
+
+function readStringList(value: unknown, field: string): FieldRead<string[]> {
+	if (value === null) {
+		return { kind: "EXPLICIT_EMPTY", value: [] };
+	}
+	if (value === undefined) {
+		return { kind: "UNAVAILABLE", reason: `${field}_missing` };
+	}
+	if (
+		!Array.isArray(value) ||
+		value.some((entry) => typeof entry !== "string" || entry.length === 0)
+	) {
+		return { kind: "UNAVAILABLE", reason: `${field}_malformed` };
+	}
+	return value.length === 0
+		? { kind: "EXPLICIT_EMPTY", value }
+		: { kind: "READ", value };
+}
+
+function readPath(record: unknown, ...path: string[]): unknown {
+	let value = record;
+	for (const key of path) {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) {
+			return undefined;
+		}
+		value = (value as Record<string, unknown>)[key];
+	}
+	return value;
+}
+
+function readNestedText(
+	record: unknown,
+	containerKey: string,
+	fieldKey: string,
+	field: string,
+): FieldRead<string | null> {
+	const container = readPath(record, containerKey);
+	if (container === null) {
+		return { kind: "EXPLICIT_EMPTY", value: null };
+	}
+	if (container === undefined) {
+		return { kind: "UNAVAILABLE", reason: `${field}_container_missing` };
+	}
+	if (typeof container !== "object" || Array.isArray(container)) {
+		return { kind: "UNAVAILABLE", reason: `${field}_container_malformed` };
+	}
+	return readText((container as Record<string, unknown>)[fieldKey], field);
+}
+
+function readNestedCount(
+	record: unknown,
+	containerKey: string,
+	fieldKey: string,
+	field: string,
+): FieldRead<number | null> {
+	const container = readPath(record, containerKey);
+	if (container === null) {
+		return { kind: "EXPLICIT_EMPTY", value: null };
+	}
+	if (container === undefined) {
+		return { kind: "UNAVAILABLE", reason: `${field}_container_missing` };
+	}
+	if (typeof container !== "object" || Array.isArray(container)) {
+		return { kind: "UNAVAILABLE", reason: `${field}_container_malformed` };
+	}
+	return readCount((container as Record<string, unknown>)[fieldKey], field);
+}
+
+function fieldValue<T>(read: FieldRead<T>): T | null {
+	return read.kind === "UNAVAILABLE" ? null : read.value;
+}
+
+function covered(...reads: FieldRead<unknown>[]): boolean {
+	return reads.every((read) => read.kind !== "UNAVAILABLE");
+}
+
+export function parseRecentContextRows(payloads: unknown[]): {
+	rows: Record<string, unknown>[];
+	considered: number;
+	withheld: number;
+} {
+	const rows: Record<string, unknown>[] = [];
+	let considered = 0;
+	let withheld = 0;
+	const identities = new Set<string>();
+	for (const payload of payloads) {
+		const items = readPath(payload, "playContexts");
+		if (!Array.isArray(items)) throw new Error("spotify_recently_played_malformed");
+		for (const item of items) {
+			considered += 1;
+			const uri = readText(readPath(item, "uri"), "context_uri");
+			const time = readCount(readPath(item, "lastPlayedTime"), "last_played_time");
+			const trackUri = readText(
+				readPath(item, "lastPlayedTrackUri"),
+				"last_played_track_uri",
+			);
+			const contextUri = fieldValue(uri);
+			const playedAt = fieldValue(time);
+			if (!covered(uri, time, trackUri) || contextUri === null || playedAt === null) {
+				withheld += 1;
+				continue;
+			}
+			if (identities.has(contextUri)) {
+				withheld += 1;
+				continue;
+			}
+			identities.add(contextUri);
+			rows.push({
+				id: contextUri,
+				uri: contextUri,
+				last_played_time: playedAt,
+				last_played_track_uri: fieldValue(trackUri),
+			});
+		}
+	}
+	return { rows, considered, withheld };
+}
+
+export function parseTopRows(payloads: unknown[], stream: "top_artists" | "top_tracks", timeRange: TopTimeRange): {
+	rows: Record<string, unknown>[];
+	considered: number;
+	withheld: number;
+} {
+	const rows: Record<string, unknown>[] = [];
+	let considered = 0;
+	let withheld = 0;
+	const identities = new Set<string>();
+	const pageKey = stream === "top_artists" ? "topArtists" : "topTracks";
+	let expectedTotal: number | null = null;
+	for (const payload of payloads) {
+		const page = readPath(payload, "data", "me", "profile", pageKey);
+		const items = readPath(page, "items");
+		if (!Array.isArray(items)) throw new Error(`spotify_top_content_${stream}_malformed`);
+		const total = readCount(readPath(page, "totalCount"), "total_count");
+		if (total.kind === "UNAVAILABLE" || total.value === null) {
+			throw new Error(`spotify_top_content_${stream}_count_unverified`);
+		}
+		if (expectedTotal !== null && total.value !== expectedTotal) {
+			throw new Error(`spotify_top_content_${stream}_count_changed`);
+		}
+		expectedTotal = total.value;
+		for (const item of items) {
+			considered += 1;
+			const wrapper = item;
+			const entity = readPath(wrapper, "data") ?? wrapper;
+			const uri = readText(readPath(entity, "uri") ?? readPath(entity, "_uri"), "uri");
+			const rawIdValue = readPath(entity, "id");
+			const rawId = rawIdValue === undefined
+				? { kind: "EXPLICIT_EMPTY" as const, value: null }
+				: readText(rawIdValue, "id");
+			const sourceId = fieldValue(rawId);
+			const uriId = fieldValue(uri)?.split(":").at(-1) ?? null;
+			const id = sourceId ?? uriId;
+			const name = readText(
+				readPath(entity, "name") ?? readPath(entity, "profile", "name"),
+				"name",
+			);
+			const fields: FieldRead<unknown>[] = [uri, rawId, name];
+			let extra: Record<string, unknown>;
+			if (stream === "top_artists") {
+				const genres = readStringList(readPath(entity, "genres"), "genres");
+				const followers = readNestedCount(entity, "stats", "followers", "followers");
+				const popularity = readCount(readPath(entity, "popularity"), "popularity");
+				fields.push(genres, followers, popularity);
+				extra = {
+					genres: fieldValue(genres),
+					followers: fieldValue(followers),
+					popularity: fieldValue(popularity),
+				};
+			} else {
+				const artistContainer = readPath(entity, "artists");
+				const artistItems = readPath(entity, "artists", "items");
+				const artistNames = artistContainer === null
+					? { kind: "EXPLICIT_EMPTY" as const, value: [] }
+					: Array.isArray(artistItems)
+						? readStringList(artistItems.map((artist) => readPath(artist, "profile", "name") ?? readPath(artist, "name")), "artist_names")
+						: artistContainer === undefined
+							? { kind: "UNAVAILABLE" as const, reason: "artist_names_container_missing" }
+							: artistItems === null
+								? { kind: "EXPLICIT_EMPTY" as const, value: [] }
+								: { kind: "UNAVAILABLE" as const, reason: "artist_names_malformed" };
+				const albumName = readNestedText(entity, "albumOfTrack", "name", "album_name");
+				const duration = readNestedCount(entity, "trackDuration", "totalMilliseconds", "duration_ms");
+				fields.push(artistNames, albumName, duration);
+				extra = {
+					artist_names: fieldValue(artistNames),
+					album_name: fieldValue(albumName),
+					duration_ms: fieldValue(duration),
+				};
+			}
+			const itemName = fieldValue(name);
+			if (
+				!covered(...fields) ||
+				!id ||
+				!itemName ||
+				(sourceId !== null && uriId !== null && sourceId !== uriId)
+			) {
+				withheld += 1;
+				continue;
+			}
+			const identity = `${id}\u0000${timeRange}`;
+			if (identities.has(identity)) {
+				withheld += 1;
+				continue;
+			}
+			identities.add(identity);
+			rows.push({ id, uri: fieldValue(uri), name: itemName, ...extra, time_range: timeRange });
+		}
+	}
+	return { rows, considered, withheld };
 }
 
 type BrowserCollectResult = BrowserData;
@@ -369,7 +623,7 @@ async function collectSpotifyWebData(
 	requestedStreams: string[],
 ): Promise<BrowserCollectResult> {
 	await openSpotify(page);
-	return await page.evaluate(async (requested) => {
+	const evaluated = await page.evaluate(async (requested) => {
 		const wanted = new Set(requested);
 		const result: BrowserData = {
 			completion: {},
@@ -377,7 +631,13 @@ async function collectSpotifyWebData(
 			playlistUris: [],
 			playlists: [],
 			playlist_items: [],
+			recently_played_contexts: [],
+			recent_context_pages: [],
 			saved_tracks: [],
+			top_artists: [],
+			top_artist_pages: [],
+			top_tracks: [],
+			top_track_pages: [],
 			sourceCounts: {},
 		};
 		const navigation = new URL(window.location.href);
@@ -747,6 +1007,10 @@ async function collectSpotifyWebData(
 		async function queryHashes(): Promise<Record<string, string>> {
 			const needed = new Set<string>();
 			if (wanted.has("profile")) needed.add("profileAttributes");
+			if (wanted.has("recently_played_contexts")) needed.add("profileAttributes");
+			if (wanted.has("top_artists") || wanted.has("top_tracks")) {
+				needed.add("userTopContent");
+			}
 			if (wanted.has("playlists") || wanted.has("playlist_items")) {
 				needed.add("libraryV3");
 				needed.add("fetchPlaylist");
@@ -1762,8 +2026,173 @@ async function collectSpotifyWebData(
 			};
 		}
 
+		if (wanted.has("recently_played_contexts")) {
+			const attrs = await gql("profileAttributes", {});
+			const profile = attrs?.data?.me?.profile;
+			if (typeof profile?.username !== "string" || profile.username.length === 0) {
+				throw new Error("spotify_recently_played_owner_unavailable");
+			}
+			const pageSize = 50;
+			const maxPages = 20;
+			const pageSignatures = new Set<string>();
+			const identities = new Set<string>();
+			let offset = 0;
+			let terminal = false;
+			for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+				const params = new URLSearchParams({
+					format: "json",
+					offset: String(offset),
+					limit: String(pageSize),
+					filter: "default,collection-new-episodes",
+					market: "from_token",
+				});
+				const response = await fetch(
+					`https://spclient.wg.spotify.com/recently-played/v3/user/${encodeURIComponent(profile.username)}/recently-played?${params}`,
+					{
+						headers: {
+							authorization: `Bearer ${access}`,
+							"app-platform": "WebPlayer",
+							accept: "application/json",
+						},
+					},
+				);
+				if (!response.ok) {
+					throw new Error(`spotify_retryable_status_${response.status}`);
+				}
+				const payload: unknown = await response.json();
+				const contexts = (payload as { playContexts?: unknown })?.playContexts;
+				if (!Array.isArray(contexts)) {
+					throw new Error("spotify_recently_played_malformed");
+				}
+				const signature = pageSignature(contexts);
+				if (contexts.length > 0 && pageSignatures.has(signature)) {
+					throw new Error("spotify_recently_played_pagination_no_progress");
+				}
+				pageSignatures.add(signature);
+				for (const item of contexts) {
+					const uri = (item as Record<string, unknown> | null)?.uri;
+					const time = (item as Record<string, unknown> | null)?.lastPlayedTime;
+					if (typeof uri === "string" && Number.isSafeInteger(time)) {
+						const identity = `${uri}\\u0000${String(time)}`;
+						if (identities.has(identity)) {
+							throw new Error("spotify_recently_played_repeated_identity");
+						}
+						identities.add(identity);
+					}
+				}
+				result.recent_context_pages.push(payload);
+				if (contexts.length < pageSize) {
+					terminal = true;
+					break;
+				}
+				const nextOffset = offset + contexts.length;
+				if (nextOffset <= offset) {
+					throw new Error("spotify_recently_played_pagination_no_progress");
+				}
+				offset = nextOffset;
+			}
+			result.sourceCounts.recently_played_contexts = {
+				considered: identities.size,
+				covered: 0,
+			};
+			if (!terminal) {
+				result.sourceCounts.recently_played_contexts.covered = 0;
+			}
+		}
+
+		if (wanted.has("top_artists") || wanted.has("top_tracks")) {
+			const pageSize = 50;
+			const maxItems = 100;
+			for (const timeRange of ["SHORT_TERM", "LONG_TERM"] as const) {
+				for (const stream of ["top_artists", "top_tracks"] as const) {
+					if (!wanted.has(stream)) continue;
+					const key = stream === "top_artists" ? "topArtists" : "topTracks";
+					const pages = stream === "top_artists" ? result.top_artist_pages : result.top_track_pages;
+					const seenPages = new Set<string>();
+					let offset = 0;
+					let expectedTotal: number | null = null;
+					while (offset < maxItems) {
+						const limit = Math.min(pageSize, maxItems - offset);
+						const data = await gql("userTopContent", {
+							includeTopArtists: stream === "top_artists",
+							topArtistsInput: { offset, limit, sortBy: "AFFINITY", timeRange },
+							includeTopTracks: stream === "top_tracks",
+							topTracksInput: { offset, limit, sortBy: "AFFINITY", timeRange },
+						});
+						const page = data?.data?.me?.profile?.[key];
+						const items = page?.items;
+						const total = count(page?.totalCount);
+						if (!Array.isArray(items) || total === null) {
+							throw new Error(`spotify_top_content_${stream}_malformed`);
+						}
+						if (expectedTotal !== null && total !== expectedTotal) {
+							throw new Error(`spotify_top_content_${stream}_count_changed`);
+						}
+						expectedTotal = total;
+						if (items.length > limit || items.length > Math.max(0, total - offset)) {
+							throw new Error(`spotify_top_content_${stream}_invalid_page_size`);
+						}
+						const signature = pageSignature(items);
+						if (items.length > 0 && seenPages.has(signature)) {
+							throw new Error(`spotify_top_content_${stream}_pagination_no_progress`);
+						}
+						seenPages.add(signature);
+						pages.push({ timeRange, payload: data });
+						const nextOffset = offset + items.length;
+						if (nextOffset >= total || nextOffset >= maxItems) break;
+						if (items.length === 0) {
+							throw new Error(`spotify_top_content_${stream}_pagination_stalled`);
+						}
+						if (nextOffset <= offset) {
+							throw new Error(`spotify_top_content_${stream}_pagination_no_progress`);
+						}
+						offset = nextOffset;
+					}
+				}
+			}
+		}
+
 		return result;
 	}, requestedStreams);
+	if (requestedStreams.includes("recently_played_contexts")) {
+		const recent = parseRecentContextRows(evaluated.recent_context_pages ?? []);
+		evaluated.recently_played_contexts = recent.rows;
+		evaluated.sourceCounts.recently_played_contexts = {
+			considered: recent.considered,
+			covered: recent.rows.length,
+		};
+	}
+	evaluated.top_artists ??= [];
+	evaluated.top_tracks ??= [];
+	for (const timeRange of ["short_term", "long_term"] as const) {
+		const artistPages = (evaluated.top_artist_pages ?? [])
+			.filter((entry) =>
+				readPath(entry, "timeRange") === timeRange.toUpperCase(),
+			)
+			.map((entry) => readPath(entry, "payload"));
+		const trackPages = (evaluated.top_track_pages ?? [])
+			.filter((entry) =>
+				readPath(entry, "timeRange") === timeRange.toUpperCase(),
+			)
+			.map((entry) => readPath(entry, "payload"));
+		if (requestedStreams.includes("top_artists")) {
+			const parsed = parseTopRows(artistPages, "top_artists", timeRange);
+			evaluated.top_artists.push(...parsed.rows);
+			const counts = evaluated.sourceCounts.top_artists ?? { considered: 0, covered: 0 };
+			counts.considered += parsed.considered;
+			counts.covered += parsed.rows.length;
+			evaluated.sourceCounts.top_artists = counts;
+		}
+		if (requestedStreams.includes("top_tracks")) {
+			const parsed = parseTopRows(trackPages, "top_tracks", timeRange);
+			evaluated.top_tracks.push(...parsed.rows);
+			const counts = evaluated.sourceCounts.top_tracks ?? { considered: 0, covered: 0 };
+			counts.considered += parsed.considered;
+			counts.covered += parsed.rows.length;
+			evaluated.sourceCounts.top_tracks = counts;
+		}
+	}
+	return evaluated;
 }
 
 async function emitRecordsWithCoverage(
@@ -1839,6 +2268,26 @@ export async function spotifyCollect({
 				});
 			}
 		}
+	}
+	for (const [stream, records] of [
+		["recently_played_contexts", data.recently_played_contexts],
+		["top_artists", data.top_artists],
+		["top_tracks", data.top_tracks],
+	] as const) {
+		if (!requested.has(stream)) continue;
+		const validRecords = records.filter((record) =>
+			validateRecord(stream, record).ok,
+		);
+		const invalidCount = records.length - validRecords.length;
+		const counts = data.sourceCounts[stream] ?? {
+			considered: records.length,
+			covered: records.length,
+		};
+		if (invalidCount > 0) {
+			records.splice(0, records.length, ...validRecords);
+			counts.covered = Math.max(0, counts.covered - invalidCount);
+		}
+		data.sourceCounts[stream] = counts;
 	}
 	const libraryExpectation = {
 		stream: requested.has("playlists") ? "playlists" : "playlist_items",
@@ -1958,18 +2407,44 @@ export async function spotifyCollect({
 			});
 		}
 	}
-	for (const stream of ["top_artists", "recently_played"] as const) {
-		if (requested.has(stream)) {
+	for (const stream of [
+		"recently_played_contexts",
+		"top_artists",
+		"top_tracks",
+	] as const) {
+		if (!requested.has(stream)) continue;
+		const counts = data.sourceCounts[stream] ?? { considered: 0, covered: 0 };
+		await emitRecordsWithCoverage(
+			stream,
+			data[stream],
+			counts,
+			emit,
+			emitRecord,
+		);
+		if (counts.covered < counts.considered) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: "spotify_browser_stage1_deferred",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message:
-					"Spotify browser connector stage 1 preserves profile, playlists, playlist items, and saved tracks; this Web API-only stream is deferred.",
+				reason: "spotify_source_row_unavailable",
+				message: "One or more rows had unavailable mapped fields; each affected row was withheld whole.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+		}
+		if (stream === "recently_played_contexts") {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_recent_context_boundary_unverified",
+				message: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+		} else {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "spotify_ranked_list_capped",
+				message: "The connector requests at most 100 ranking rows per time window; rows beyond that bound are unobserved, so no full-scan state was saved.",
+				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			});
 		}
 	}
