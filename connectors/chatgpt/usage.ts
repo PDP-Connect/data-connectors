@@ -372,7 +372,11 @@ export async function chatGptUsageFetchInBrowser(
 						total: h.count(j.total),
 						// Project listings page by cursor; the main list ignores these.
 						cursor: h.cursor(j.cursor),
-						has_more: j.cursor !== null && j.cursor !== undefined,
+						// An explicit has_more wins; otherwise a cursor means more.
+						has_more:
+							typeof j.has_more === "boolean"
+								? j.has_more
+								: j.cursor !== null && j.cursor !== undefined,
 					};
 				}
 				case "shared_conversation_ids": {
@@ -514,7 +518,11 @@ export async function chatGptUsageFetchInBrowser(
 						file_count: items ? files : null,
 						project_ids: ids,
 						cursor: h.cursor(j.cursor),
-						has_more: j.cursor !== null && j.cursor !== undefined,
+						// An explicit has_more wins; otherwise a cursor means more.
+						has_more:
+							typeof j.has_more === "boolean"
+								? j.has_more
+								: j.cursor !== null && j.cursor !== undefined,
 					};
 				}
 				case "task_stats": {
@@ -534,7 +542,11 @@ export async function chatGptUsageFetchInBrowser(
 						task_count: tasks ? tasks.length : null,
 						by_status: Object.fromEntries(byStatus),
 						cursor: h.cursor(j.cursor),
-						has_more: j.cursor !== null && j.cursor !== undefined,
+						// An explicit has_more wins; otherwise a cursor means more.
+						has_more:
+							typeof j.has_more === "boolean"
+								? j.has_more
+								: j.cursor !== null && j.cursor !== undefined,
 					};
 				}
 				default:
@@ -626,6 +638,41 @@ export async function chatGptUsageFetchInBrowser(
 	} finally {
 		clearTimeout(timeout);
 	}
+}
+
+// ─── Fixture capture ───────────────────────────────────────────────────
+
+const CAPTURE_SAFE_QUERY_KEYS = new Set([
+	"offset",
+	"limit",
+	"order",
+	"is_archived",
+	"include_memory_entries",
+]);
+
+/**
+ * Label and path under which a projected usage read may be captured as a
+ * fixture: provider ids in the path become `{conversation_id}` /
+ * `{gizmo_id}`, and query values other than paging/flags (cursors) become
+ * `{redacted}`. Raw ids must not reach fixture file names, labels or
+ * metadata.
+ */
+export function usageCaptureRoute(path: string): string {
+	const q = path.indexOf("?");
+	const base = q === -1 ? path : path.slice(0, q);
+	const query = q === -1 ? "" : path.slice(q + 1);
+	const route = base
+		.replace(/^\/conversation\/[^/]+$/, "/conversation/{conversation_id}")
+		.replace(
+			/^\/gizmos\/(?!snorlax\/)[^/]+\/conversations$/,
+			"/gizmos/{gizmo_id}/conversations",
+		);
+	if (!query) return route;
+	const params = query.split("&").map((kv) => {
+		const key = kv.split("=")[0] ?? "";
+		return CAPTURE_SAFE_QUERY_KEYS.has(key) ? kv : `${key}={redacted}`;
+	});
+	return `${route}?${params.join("&")}`;
 }
 
 // ─── Opaque references ─────────────────────────────────────────────────
@@ -1024,6 +1071,8 @@ export interface ProjectListingCoverage {
 	projects: number;
 	pages: number;
 	failed: number;
+	/** The run-wide project or page budget left projects or pages unread. */
+	truncated: boolean;
 	/** Conversations found only through a project listing. */
 	conversations_added: number;
 }

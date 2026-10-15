@@ -25,7 +25,8 @@
  *     111 of 1,335 on one account): `/gizmos/{id}/conversations?cursor=0`,
  *     then `?cursor=<cursor>` until none, per sidebar project (~10 items per
  *     page). Unioned with the main list by id. A failing project is counted
- *     in `usage_summary.coverage.project_listing`, not fatal.
+ *     in `usage_summary.coverage.project_listing`, not fatal. Run-wide
+ *     budget: 100 projects and 400 project pages (`truncated` beyond).
  *   List, project and detail requests share one limiter: at most 4 in flight.
  *
  *   Then detail, `/conversations/batch` (10 ids per request, up to 3 in
@@ -38,8 +39,8 @@
  *   Owner account (live, 2026-10-15): ~13 main-list pages (+ up to 3 empty
  *   pages in flight when the short page lands), 1 archived page, 1 shares
  *   page, ~51 project pages over 11 projects, 1-2 sidebar pages, 3 batch
- *   reads and 7 other profile reads: ~80 requests. Without project pages
- *   the run took 33 s end to end in the CLI.
+ *   reads and 7 other profile reads: ~80 requests, 39 s end to end in the
+ *   CLI (1,363 conversations, 117 of them only in project listings).
  *
  * Full detail (opt-in):
  *   - Protocol scope on `conversation_usage`: `resources` (record ids) reads
@@ -310,6 +311,40 @@ interface ProjectPass {
 	projects: number;
 	pages: number;
 	failed: number;
+	/** True when the run-wide project or page budget left projects or pages unread. */
+	truncated: boolean;
+}
+
+/** Run-wide budget for project listings (the per-project cap is PROJECT_MAX_PAGES). */
+export const PROJECT_LISTING_MAX_PROJECTS = 100;
+export const PROJECT_LISTING_MAX_PAGES = 400;
+
+/**
+ * Decide what a cursor page means. Terminal when the page says so (explicit
+ * `has_more: false`, no cursor) or is empty. A cursor already used is also
+ * terminal, so nothing is fetched twice: done when it echoes the cursor just
+ * used (a last page that repeats its own cursor) or the page brought nothing
+ * new; partial when it points back to an earlier page after new items (a
+ * loop that may hide more).
+ */
+export function nextCursorStep(
+	j: Record<string, unknown>,
+	seen: ReadonlySet<string>,
+	current: string | null,
+	pageItems: number,
+	newItems: number,
+): { next: string } | { done: "ok" | "partial" } {
+	if (pageItems === 0 || j.has_more !== true) return { done: "ok" };
+	const next =
+		typeof j.cursor === "string"
+			? j.cursor
+			: typeof j.cursor === "number"
+				? String(j.cursor)
+				: null;
+	if (next === null) return { done: "partial" };
+	if (seen.has(next))
+		return { done: next === current || newItems === 0 ? "ok" : "partial" };
+	return { next };
 }
 
 /**
@@ -318,18 +353,28 @@ interface ProjectPass {
  * account), while `/gizmos/{id}/conversations?cursor=0`, followed by
  * `?cursor=<cursor>` until none is returned, lists them (~10 per page).
  * Items are reduced in the page like the main list. A project whose walk
- * fails counts in `failed`; its pages read so far are kept.
+ * fails counts in `failed`; its pages read so far are kept. At most
+ * PROJECT_LISTING_MAX_PROJECTS projects and PROJECT_LISTING_MAX_PAGES pages
+ * are read per run; anything beyond sets `truncated`.
  */
-async function walkProjectConversations(
+export async function walkProjectConversations(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
 	limit: Limiter,
 	sidebar: PagedRead,
+	budget: { maxProjects: number; maxPages: number } = {
+		maxProjects: PROJECT_LISTING_MAX_PROJECTS,
+		maxPages: PROJECT_LISTING_MAX_PAGES,
+	},
 ): Promise<ProjectPass> {
-	const ids = sidebar.value?.project_ids ?? [];
+	const all = sidebar.value?.project_ids ?? [];
+	const ids = all.slice(0, budget.maxProjects);
+	let truncated = all.length > ids.length;
 	let pages = 0;
+	let claimed = 0;
 	let failed = 0;
 	const items: UsageListItem[] = [];
+	const seenIds = new Set<string>();
 	const walkOne = async (projectId: string): Promise<void> => {
 		const seenCursors = new Set<string>();
 		let cursor = "0";
@@ -338,6 +383,11 @@ async function walkProjectConversations(
 				failed += 1;
 				return;
 			}
+			if (claimed >= budget.maxPages) {
+				truncated = true;
+				return;
+			}
+			claimed += 1;
 			seenCursors.add(cursor);
 			const path = `/gizmos/${encodeURIComponent(projectId)}/conversations?cursor=${encodeURIComponent(cursor)}`;
 			const r = await limit(() =>
@@ -349,20 +399,28 @@ async function walkProjectConversations(
 				return;
 			}
 			pages += 1;
+			let added = 0;
 			for (const c of parsed.items) {
+				if (seenIds.has(c.id)) continue;
+				seenIds.add(c.id);
+				added += 1;
 				// The project itself is the gizmo when the item does not say so.
 				items.push(
 					c.gizmo_id || c.template_id ? c : { ...c, gizmo_id: projectId },
 				);
 			}
-			const j = r.kind === "ok" && isRecord(r.json) ? r.json : {};
-			if (j.has_more !== true) return;
-			const next = typeof j.cursor === "string" ? j.cursor : null;
-			if (next === null || seenCursors.has(next)) {
-				failed += 1;
+			const step = nextCursorStep(
+				r.kind === "ok" && isRecord(r.json) ? r.json : {},
+				seenCursors,
+				cursor,
+				parsed.raw_count,
+				added,
+			);
+			if ("done" in step) {
+				if (step.done === "partial") failed += 1;
 				return;
 			}
-			cursor = next;
+			cursor = step.next;
 		}
 		failed += 1;
 	};
@@ -373,6 +431,7 @@ async function walkProjectConversations(
 		projects: ids.length,
 		pages,
 		failed,
+		truncated,
 	};
 }
 
@@ -551,7 +610,10 @@ interface PagedCounts {
 	project_ids: string[];
 }
 
-type PagedRead = { value: PagedCounts | null; status: ProfileSourceStatus };
+export type PagedRead = {
+	value: PagedCounts | null;
+	status: ProfileSourceStatus;
+};
 
 /**
  * Follow a `{..., cursor}` listing for at most PROFILE_MAX_PAGES pages,
@@ -572,11 +634,13 @@ async function readPagedCounts(
 		project_ids: [],
 	};
 	let cursor: string | null = null;
+	const seen = new Set<string>();
 	for (let page = 0; page < maxPages; page += 1) {
 		const url: string =
 			cursor === null
 				? path
 				: `${path}${path.includes("?") ? "&" : "?"}cursor=${encodeURIComponent(cursor)}`;
+		if (cursor !== null) seen.add(cursor);
 		const r = await fetchProjected(deps, hooks, url, projection);
 		const j = r.kind === "ok" && isRecord(r.json) ? r.json : null;
 		const n =
@@ -595,6 +659,7 @@ async function readPagedCounts(
 		}
 		acc.count += n;
 		if (typeof j.file_count === "number") acc.files += j.file_count;
+		const projectsBefore = acc.project_ids.length;
 		if (Array.isArray(j.project_ids)) {
 			for (const id of j.project_ids) {
 				if (
@@ -611,9 +676,14 @@ async function readPagedCounts(
 					acc.by_status[k] = (acc.by_status[k] ?? 0) + v;
 			}
 		}
-		if (j.has_more !== true) return { value: acc, status: "ok" };
-		if (typeof j.cursor !== "string") return { value: acc, status: "partial" };
-		cursor = j.cursor;
+		// Tasks carry no ids to compare, so an echoed cursor counts as done.
+		const fresh =
+			projection === "project_sidebar"
+				? acc.project_ids.length - projectsBefore
+				: 0;
+		const step = nextCursorStep(j, seen, cursor, n, fresh);
+		if ("done" in step) return { value: acc, status: step.done };
+		cursor = step.next;
 	}
 	return { value: acc, status: "partial" };
 }
@@ -719,26 +789,52 @@ async function runAccountProfile(
 
 // ─── conversation_usage + usage_summary ───────────────────────────────
 
-/** List-derived part of a conversation_usage record; it gates the hold-over of detail. */
-const LIST_FIELDS = [
-	"id",
-	"create_time",
-	"update_time",
-	"is_archived",
-	"is_pinned",
-	"is_shared",
-	"is_temporary_chat",
-	"is_do_not_remember",
-	"is_automation",
-	"in_workspace",
-	"gizmo_kind",
-	"gizmo_ref",
+/**
+ * Fields a detail read fills. They are carried from the run that read them
+ * while the conversation's content has not changed (same update_time),
+ * whatever happens to its flags (pinned, archived, shared) meanwhile.
+ */
+const DETAIL_FIELDS = [
+	"detail",
+	"detail_status",
+	"message_counts",
+	"turn_count",
+	"branch_count",
+	"nodes_total",
+	"models",
+	"features",
+	"user_attachments",
+	"user_images",
+	"user_chars_total",
+	"user_chars_max",
+	"assistant_chars_total",
+	"first_message_at",
+	"last_message_at",
 ] as const;
 
-function listFingerprint(record: RecordData): string {
-	return recordFingerprint(
-		Object.fromEntries(LIST_FIELDS.map((k) => [k, record[k] ?? null])),
-	);
+/** Upper bound on carried detail entries kept in STATE. */
+const MAX_CARRIED_DETAIL = 5000;
+
+interface CarriedDetail {
+	/** update_time of the conversation when its detail was read. */
+	u: string | null;
+	/** The detail fields as emitted then. */
+	d: Record<string, unknown>;
+}
+
+function readCarried(v: unknown): Map<string, CarriedDetail> {
+	const out = new Map<string, CarriedDetail>();
+	if (!isRecord(v)) return out;
+	for (const [k, e] of Object.entries(v)) {
+		if (
+			isRecord(e) &&
+			(typeof e.u === "string" || e.u === null) &&
+			isRecord(e.d) &&
+			e.d.detail_status === "fetched"
+		)
+			out.set(k, { u: e.u, d: e.d });
+	}
+	return out;
 }
 
 function stringMap(v: unknown): Map<string, string> {
@@ -750,16 +846,23 @@ function stringMap(v: unknown): Map<string, string> {
 }
 
 /**
- * Emit conversation_usage records behind a fingerprint gate. A record with no
- * detail this run whose list fields match the run that last read its detail
- * is held back: the earlier, richer record is still accurate, and emitting
- * this one would replace its detail with nulls.
+ * Emit conversation_usage records behind a fingerprint gate.
+ *
+ * Detail carry-forward: a conversation not read in detail this run, whose
+ * detail an earlier run read at the same update_time, is emitted with that
+ * earlier detail and today's list fields, so a flag change (pin, archive,
+ * shares unreadable) never wipes valid detail.
+ *
+ * `complete` is false when the conversation list was not read completely.
+ * Then nothing is pruned: prior fingerprints and carried detail of
+ * conversations not seen this run stay in STATE for the next run.
  */
 async function emitConversationUsage(
 	deps: StreamDeps,
 	state: CollectContext["state"],
 	stateless: boolean,
 	records: readonly RecordData[],
+	complete: boolean,
 ): Promise<void> {
 	if (stateless) {
 		for (const r of records) await deps.emitRecord("conversation_usage", r);
@@ -769,27 +872,36 @@ async function emitConversationUsage(
 		? state.conversation_usage
 		: {};
 	const cursor = openCarryForwardCursor(stringMap(prior.fingerprints));
-	const priorDetailed = stringMap(prior.detailed);
-	const detailed: Record<string, string> = {};
-	for (const r of records) {
-		const id = String(r.id);
-		const listFp = listFingerprint(r);
-		const priorFp = cursor.prior(id);
-		if (
-			r.detail_status !== "fetched" &&
-			priorFp !== undefined &&
-			priorDetailed.get(id) === listFp
-		) {
-			cursor.note(id, priorFp);
-			detailed[id] = listFp;
-			continue;
+	const priorCarried = readCarried(prior.detailed);
+	const carried = new Map<string, CarriedDetail>();
+	for (const base of records) {
+		const id = String(base.id);
+		const update =
+			typeof base.update_time === "string" ? base.update_time : null;
+		const was = priorCarried.get(id);
+		const r: RecordData =
+			base.detail_status !== "fetched" && was && was.u === update
+				? { ...base, ...was.d }
+				: base;
+		if (r.detail_status === "fetched") {
+			carried.set(id, {
+				u: update,
+				d: Object.fromEntries(DETAIL_FIELDS.map((k) => [k, r[k] ?? null])),
+			});
 		}
 		const fp = recordFingerprint(r);
-		if (fp !== priorFp) await deps.emitRecord("conversation_usage", r);
+		if (fp !== cursor.prior(id)) await deps.emitRecord("conversation_usage", r);
 		cursor.note(id, fp);
-		if (r.detail_status === "fetched") detailed[id] = listFp;
 	}
-	cursor.dropUnseenIds();
+	if (complete) {
+		cursor.dropUnseenIds();
+	} else {
+		const seen = new Set(records.map((r) => String(r.id)));
+		for (const [id, c] of priorCarried) if (!seen.has(id)) carried.set(id, c);
+	}
+	const detailed: Record<string, CarriedDetail> = {};
+	for (const [id, c] of [...carried].slice(0, MAX_CARRIED_DETAIL))
+		detailed[id] = c;
 	await deps.emit({
 		type: "STATE",
 		stream: "conversation_usage",
@@ -945,6 +1057,7 @@ async function runConversationUsage(
 			state,
 			stateless,
 			built.map((b) => b.record),
+			!truncated,
 		);
 	}
 
@@ -961,6 +1074,7 @@ async function runConversationUsage(
 					projects: projectPass.projects,
 					pages: projectPass.pages,
 					failed: projectPass.failed,
+					truncated: projectPass.truncated,
 					conversations_added: projectAdded,
 				},
 			},

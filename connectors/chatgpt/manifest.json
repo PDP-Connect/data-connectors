@@ -1304,6 +1304,10 @@
 										"type": "integer",
 										"minimum": 0
 									},
+									"truncated": {
+										"type": "boolean",
+										"description": "True when the run-wide budget (100 projects, 400 project pages) left projects or pages unread."
+									},
 									"conversations_added": {
 										"type": "integer",
 										"minimum": 0
@@ -1314,6 +1318,7 @@
 									"projects",
 									"pages",
 									"failed",
+									"truncated",
 									"conversations_added"
 								],
 								"additionalProperties": false

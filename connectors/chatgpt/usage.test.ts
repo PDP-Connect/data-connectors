@@ -10,6 +10,7 @@ import { runInThisContext } from "node:vm";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import type { StreamDeps } from "./index.ts";
+import { createChatGptApi } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
 	ChatGptApi,
@@ -30,6 +31,7 @@ import {
 	sha256Hex,
 	type UsageListItem,
 	type UsageSummaryConversation,
+	usageCaptureRoute,
 	usageRef,
 } from "./usage.ts";
 import {
@@ -37,10 +39,13 @@ import {
 	CHATGPT_USAGE_STATELESS_ENV,
 	createLimiter,
 	DEFAULT_DETAIL_SAMPLE,
+	nextCursorStep,
+	type PagedRead,
 	resolveUsageDetailPlan,
 	runUsageStreams,
 	type UsageFetchErrorClass,
 	type UsageStreamHooks,
+	walkProjectConversations,
 } from "./usage-stream.ts";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__");
@@ -154,6 +159,10 @@ interface SiteOptions {
 	total?: number;
 	/** Per-project conversation pages (one array per cursor page) or "fail". */
 	projects?: Record<string, Array<Array<Record<string, unknown>>> | "fail">;
+	/** The last project page repeats its own cursor instead of ending. */
+	projectEcho?: boolean;
+	/** /shared_conversations answers 500 (is_shared becomes null). */
+	sharesDown?: boolean;
 }
 
 function listRoute(opts: SiteOptions): Route {
@@ -210,17 +219,19 @@ function siteRoutes(opts: SiteOptions = {}): Record<string, Route> {
 				: json({ detail: "CANARY not found" }, 404);
 		},
 		"/shared_conversations": () =>
-			json({
-				items: [
-					{
-						id: "share-CANARY",
-						conversation_id: CANARY_ID,
-						title: "CANARY share title",
-						share_url: "https://chatgpt.com/share/CANARY",
-					},
-				],
-				total: 1,
-			}),
+			opts.sharesDown
+				? json({ detail: "down" }, 500)
+				: json({
+						items: [
+							{
+								id: "share-CANARY",
+								conversation_id: CANARY_ID,
+								title: "CANARY share title",
+								share_url: "https://chatgpt.com/share/CANARY",
+							},
+						],
+						total: 1,
+					}),
 		"/me": () => json(ENDPOINTS.me),
 		"/accounts/check/v4-2023-04-27": () => json(ACCOUNTS_CHECK),
 		"/settings/beta_features": () => json(ENDPOINTS.beta_features),
@@ -241,7 +252,7 @@ function siteRoutes(opts: SiteOptions = {}): Record<string, Route> {
 			return json({
 				items: pages[i] ?? [],
 				// Numeric cursor, as `?cursor=0` suggests; null on the last page.
-				cursor: i + 1 < pages.length ? i + 1 : null,
+				cursor: i + 1 < pages.length ? i + 1 : opts.projectEcho ? i : null,
 			});
 		},
 		"/tasks": () => json(ENDPOINTS.tasks),
@@ -776,6 +787,7 @@ function summaryFor(timezone: string | null) {
 				projects: 1,
 				pages: 1,
 				failed: 0,
+				truncated: false,
 				conversations_added: 0,
 			},
 		},
@@ -840,6 +852,7 @@ test("usage_summary aggregates list fields exactly and labels the detail sample"
 			projects: 1,
 			pages: 1,
 			failed: 0,
+			truncated: false,
 			conversations_added: 0,
 		},
 		detail_fetched: 2,
@@ -1516,6 +1529,7 @@ test("project conversations missing from the main list are added from per-projec
 		projects: 2,
 		pages: 3,
 		failed: 0,
+		truncated: false,
 		conversations_added: 20,
 	});
 	assert.equal(sub(summary, "totals").project_conversations, 20);
@@ -1556,6 +1570,7 @@ test("a failing project listing is counted, not fatal", async () => {
 		projects: 2,
 		pages: 1,
 		failed: 1,
+		truncated: false,
 		conversations_added: 1,
 	});
 	assert.equal(
@@ -1579,6 +1594,272 @@ test("an unreadable sidebar lists no projects and still builds the summary", asy
 		projects: 0,
 		pages: 0,
 		failed: 0,
+		truncated: false,
 		conversations_added: 0,
 	});
+});
+
+// ─── Review regressions ───────────────────────────────────────────────────
+
+test("usage capture routes carry no provider id or cursor", () => {
+	assert.equal(
+		usageCaptureRoute(`/conversation/${CANARY_ID}`),
+		"/conversation/{conversation_id}",
+	);
+	assert.equal(
+		usageCaptureRoute(
+			"/gizmos/g-p-CANARYPROJECTA/conversations?cursor=CANARY9",
+		),
+		"/gizmos/{gizmo_id}/conversations?cursor={redacted}",
+	);
+	assert.equal(
+		usageCaptureRoute("/gizmos/snorlax/sidebar?cursor=cursor-CANARY_page2"),
+		"/gizmos/snorlax/sidebar?cursor={redacted}",
+	);
+	assert.equal(
+		usageCaptureRoute("/conversations?offset=100&limit=100&order=updated"),
+		"/conversations?offset=100&limit=100&order=updated",
+	);
+});
+
+test("fixture capture of projected usage reads never names a raw id (index.ts capture path)", async () => {
+	installFakeSite(
+		siteRoutes({ projects: { "g-p-CANARYPROJECTA": [[projectItem(1)]] } }),
+	);
+	const captured: unknown[] = [];
+	const capture = {
+		captureHttp: (label: string, _body: unknown, meta: unknown) => {
+			captured.push({ label, meta });
+		},
+	} as unknown as Parameters<typeof createChatGptApi>[0]["capture"];
+	const fakePage = {
+		evaluate: ((fn: unknown, arg?: unknown): Promise<unknown> => {
+			if (isProjectedArg(arg))
+				return (fn as typeof chatGptUsageFetchInBrowser)(arg);
+			if (typeof fn === "function" && arg === undefined)
+				return Promise.resolve("https://chatgpt.com/");
+			return Promise.resolve({ accessToken: "fake", deviceId: "fake" });
+		}) as never,
+		goto: () => Promise.resolve(null),
+		waitForFunction: () => Promise.reject(new Error("no bootstrap")),
+	};
+	const api = createChatGptApi({
+		capture,
+		page: fakePage as never,
+	});
+	await api.fetch(`/conversation/${CANARY_ID}`, {
+		projection: "conversation_usage",
+	});
+	await api.fetch("/gizmos/g-p-CANARYPROJECTA/conversations?cursor=0", {
+		projection: "conversation_list",
+	});
+	assert.equal(captured.length, 2);
+	const text = JSON.stringify(captured);
+	assert.ok(!text.includes(CANARY_ID), text);
+	assert.ok(!text.includes("g-p-"), text);
+	assert.match(text, /\{conversation_id\}/);
+	assert.match(text, /\{gizmo_id\}/);
+});
+
+function isProjectedArg(arg: unknown): arg is ChatGptUsageFetchArgs {
+	return typeof arg === "object" && arg !== null && "projection" in arg;
+}
+
+test("an incomplete list keeps prior STATE instead of narrowing it", async () => {
+	const first = runHarness(["conversation_usage"], {
+		site: { conversations: many(250) },
+	});
+	await first.run();
+	const state1 = first.harness.protocolMessages.find(
+		(m) => m.type === "STATE",
+	) as { cursor: Record<string, Record<string, unknown>> } | undefined;
+	assert.ok(state1);
+	assert.equal(Object.keys(state1.cursor.fingerprints ?? {}).length, 250);
+	const detailed1 = Object.keys(state1.cursor.detailed ?? {});
+	assert.equal(detailed1.length, DEFAULT_DETAIL_SAMPLE);
+
+	const second = runHarness(["conversation_usage"], {
+		site: { conversations: many(250), failListPages: [1] },
+		state: { conversation_usage: state1.cursor },
+	});
+	await second.run();
+	const state2 = second.harness.protocolMessages.find(
+		(m) => m.type === "STATE",
+	) as { cursor: Record<string, Record<string, unknown>> } | undefined;
+	assert.ok(state2);
+	// Only page 0 was read, yet every prior fingerprint and carried detail stays.
+	assert.equal(Object.keys(state2.cursor.fingerprints ?? {}).length, 250);
+	assert.deepEqual(
+		Object.keys(state2.cursor.detailed ?? {}).sort(),
+		[...detailed1].sort(),
+	);
+	assert.ok(
+		second.harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+	);
+});
+
+test("detail read earlier survives a flag change and unreadable shares", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "all";
+	const first = runHarness(["conversation_usage"], {
+		site: { conversations: many(10) },
+	});
+	await first.run();
+	const state1 = first.harness.protocolMessages.find(
+		(m) => m.type === "STATE",
+	) as { cursor: Record<string, unknown> } | undefined;
+	assert.ok(state1);
+
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "1";
+	const pinned = many(10).map((c, i) =>
+		i === 7 ? { ...c, pinned_time: "2026-10-15T00:00:00Z" } : c,
+	);
+	const second = runHarness(["conversation_usage"], {
+		site: { conversations: pinned, sharesDown: true },
+		state: { conversation_usage: state1.cursor },
+	});
+	await second.run();
+	const emitted = records(second.harness, "conversation_usage");
+	// Every record changed (is_shared is now null), and none lost its detail.
+	assert.equal(emitted.length, 10);
+	for (const r of emitted) {
+		assert.equal(r.is_shared, null);
+		assert.equal(r.detail_status, "fetched");
+		assert.ok(r.message_counts !== null);
+	}
+	const seventh = emitted.find((r) => r.id === usageRef("c", rawConvId(7)));
+	assert.equal(seventh?.is_pinned, true);
+	assert.equal(seventh?.detail, "selected");
+});
+
+test("cursor steps honour explicit ends, empty pages and repeated cursors", () => {
+	const seen = new Set(["a", "b"]);
+	assert.deepEqual(
+		nextCursorStep({ has_more: true, cursor: "c" }, seen, "b", 5, 5),
+		{
+			next: "c",
+		},
+	);
+	assert.deepEqual(
+		nextCursorStep({ has_more: false, cursor: "c" }, seen, "b", 5, 5),
+		{
+			done: "ok",
+		},
+	);
+	assert.deepEqual(
+		nextCursorStep({ has_more: true, cursor: "c" }, seen, "b", 0, 0),
+		{
+			done: "ok",
+		},
+	);
+	// The last page echoes its own cursor: done, nothing refetched.
+	assert.deepEqual(
+		nextCursorStep({ has_more: true, cursor: "b" }, seen, "b", 5, 5),
+		{
+			done: "ok",
+		},
+	);
+	// Back to an earlier page after new items: a loop that may hide more.
+	assert.deepEqual(
+		nextCursorStep({ has_more: true, cursor: "a" }, seen, "b", 5, 5),
+		{
+			done: "partial",
+		},
+	);
+	assert.deepEqual(
+		nextCursorStep({ has_more: true, cursor: "a" }, seen, "b", 5, 0),
+		{
+			done: "ok",
+		},
+	);
+	assert.deepEqual(nextCursorStep({ has_more: true }, seen, "b", 5, 5), {
+		done: "partial",
+	});
+});
+
+test("a project whose last page echoes its cursor is complete, not failed", async () => {
+	const pageOne = Array.from({ length: 10 }, (_, k) => projectItem(5 + k));
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		site: {
+			conversations: many(5),
+			projects: { "g-p-CANARYPROJECTA": [pageOne, [projectItem(15)]] },
+			projectEcho: true,
+		},
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	const listing = sub(sub(summary, "coverage"), "project_listing");
+	assert.equal(listing.failed, 0);
+	assert.equal(listing.conversations_added, 11);
+	assert.equal(
+		calls.filter((c) => c.path.startsWith("/gizmos/g-p-CANARYPROJECTA/"))
+			.length,
+		2,
+	);
+});
+
+test("an explicit has_more:false stops a profile pager without refetching", async () => {
+	const { run, harness, calls } = runHarness(["account_profile"], {
+		routes: {
+			...siteRoutes(),
+			"/tasks": () =>
+				json({
+					...(ENDPOINTS.tasks as Record<string, unknown>),
+					cursor: "t2",
+					has_more: false,
+				}),
+		},
+	});
+	await run();
+	const [p] = records(harness, "account_profile");
+	assert.equal(p?.scheduled_task_count, 3);
+	assert.equal(sub(p, "source_status").tasks, "ok");
+	assert.equal(calls.filter((c) => c.path.startsWith("/tasks")).length, 1);
+});
+
+test("the project listing stops at the run-wide project and page budget", async () => {
+	const projects: Record<string, Array<Array<Record<string, unknown>>>> = {
+		"g-p-P1": [[projectItem(1)], [projectItem(2)]],
+		"g-p-P2": [[projectItem(3)], [projectItem(4)]],
+		"g-p-P3": [[projectItem(5)]],
+	};
+	const { api } = fakeApi(siteRoutes({ projects }));
+	const deps = {
+		api,
+		emit: () => Promise.resolve(),
+		emitRecord: () => Promise.resolve(),
+		progress: () => Promise.resolve(),
+		requested: new Map(),
+	} as unknown as StreamDeps;
+	const sidebar: PagedRead = {
+		status: "ok",
+		value: {
+			count: 3,
+			files: 0,
+			by_status: {},
+			project_ids: Object.keys(projects),
+		},
+	};
+	const hooks: UsageStreamHooks = {
+		classifyError: () => "other",
+		accountsCheckPath: "/accounts/check/v4-2023-04-27",
+	};
+	const pass = await walkProjectConversations(
+		deps,
+		hooks,
+		createLimiter(1),
+		sidebar,
+		{ maxProjects: 2, maxPages: 3 },
+	);
+	assert.equal(pass.projects, 2);
+	assert.equal(pass.pages, 3);
+	assert.equal(pass.truncated, true);
+	assert.equal(pass.failed, 0);
+	const unbounded = await walkProjectConversations(
+		deps,
+		hooks,
+		createLimiter(4),
+		sidebar,
+	);
+	assert.equal(unbounded.truncated, false);
+	assert.equal(unbounded.items.length, 5);
 });

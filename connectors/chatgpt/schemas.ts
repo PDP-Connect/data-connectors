@@ -366,6 +366,7 @@ export const usageSummarySchema = z
 						projects: count,
 						pages: count,
 						failed: count,
+						truncated: z.boolean(),
 						conversations_added: count,
 					})
 					.strict(),
