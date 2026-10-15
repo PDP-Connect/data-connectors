@@ -133,6 +133,7 @@
 		},
 		{
 			"name": "messages",
+			"required": true,
 			"description": "Messages within conversations, flattened from ChatGPT's tree structure to the current-branch path. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor. The filtered message count is reported through PROGRESS.",
 			"display": {
 				"label": "Your messages",
