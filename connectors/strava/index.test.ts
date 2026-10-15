@@ -304,15 +304,24 @@ test("a scoped import reports rows with no local day instead of completing", asy
 				["11385479492"],
 			);
 			const skips = messagesOf(result, "SKIP_RESULT");
-			assert.deepEqual(
-				skips.map((m) => [m.reason, m.message]),
+			assert.deepEqual(skips.map((m) => [m.reason, m.message]).slice(0, 1), [
 				[
-					[
-						"stream_collection_failed",
-						"2 row(s) in activities.csv have no local start day, so they cannot be placed in the requested time range and were not saved.",
-					],
+					"stream_collection_failed",
+					"2 row(s) in activities.csv have no local start day, so they cannot be placed in the requested time range and were not saved.",
 				],
+			]);
+			// A failed stream's STATE is not saved (Collection Profile certified
+			// failure); the runtime withholds it at the source and says so.
+			assert.deepEqual(
+				skips
+					.slice(1)
+					.map((m) => [
+						m.reason,
+						(m.diagnostics as { withheld?: string }).withheld,
+					]),
+				[["stream_incomplete_checkpoint_withheld", "STATE"]],
 			);
+			assert.equal(messagesOf(result, "STATE").length, 0);
 			const done = messagesOf(result, "DONE")[0];
 			assert.equal(done?.status, "failed");
 			const progress = messagesOf(result, "PROGRESS");
