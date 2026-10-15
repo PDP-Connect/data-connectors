@@ -1,0 +1,17 @@
+TAP version 13
+1..2
+ok 1 - repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError
+not ok 2 - unrelated import failure
+  ---
+  type: test
+  location: /repo/connectors/groupme/index.test.ts:9:1
+  failureType: testCodeFailure
+  error: Cannot find module './index.ts'
+  code: ERR_MODULE_NOT_FOUND
+  ...
+# tests 2
+# pass 1
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0

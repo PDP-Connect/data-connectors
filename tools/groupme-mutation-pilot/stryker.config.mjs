@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { resolve } from "node:path";
+
 const mode = process.env.MUTATION_MODE;
 
 if (mode !== "a1" && mode !== "a2") {
@@ -9,18 +11,24 @@ if (mode !== "a1" && mode !== "a2") {
 
 const config = {
 	commandRunner: {
-		command:
-			"node --import tsx --test --test-reporter=tap connectors/groupme/attachment-detail-coverage.test.ts connectors/groupme/attachments-stream.test.ts connectors/groupme/auth-probe.test.ts connectors/groupme/blob-security.test.ts connectors/groupme/carry-forward-projection.test.ts connectors/groupme/collection.test.ts connectors/groupme/completeness-anchor.test.ts connectors/groupme/incremental-frontier.test.ts connectors/groupme/index.test.ts connectors/groupme/production-dedup.test.ts connectors/groupme/schemas.test.ts connectors/groupme/setup-contract.test.ts connectors/groupme/skip-result-boundary-claim-contract.test.ts connectors/groupme/stream-coverage.test.ts",
+		command: "node tools/groupme-mutation-pilot/run-tests.mjs",
 	},
 	concurrency: 2,
 	coverageAnalysis: "off",
+	ignorePatterns: ["reports/**", "coverage/**", ".stryker-tmp/**"],
 	jsonReporter: {
-		fileName: `reports/groupme-${mode}.json`,
+		fileName: resolve(
+			process.env.PILOT_REPORT_DIR ?? "reports",
+			`groupme-${mode}.json`,
+		),
 	},
-	mutate: [
-		"connectors/groupme/index.ts:1487-1495",
-		"connectors/groupme/index.ts:1528-1529",
-	],
+	mutate:
+		process.env.MUTATION_CANARY_CONTROL === "1"
+			? ["connectors/groupme/index.ts:1491-1491"]
+			: [
+					"connectors/groupme/index.ts:1487-1495",
+					"connectors/groupme/index.ts:1528-1529",
+				],
 	reporters: ["json"],
 	testRunner: "command",
 	thresholds: {

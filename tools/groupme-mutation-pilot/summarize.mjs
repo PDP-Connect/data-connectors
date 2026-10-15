@@ -4,116 +4,203 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import {
+	buildReportManifest,
+	classifyFailureCause,
+	expectedCanary,
+	hasExpectedCanaryFailure,
+	isExpectedCanary,
+	validateBaselineTap,
+} from "./report-integrity.mjs";
 
-const modes = process.argv.slice(2);
-if (!modes.length || modes.some((mode) => !["a1", "a2"].includes(mode))) {
+const [mode] = process.argv.slice(2);
+if (!new Set(["a1", "a2"]).has(mode) || process.argv.length !== 3) {
 	throw new Error("Usage: node summarize.mjs a1|a2");
 }
 
-const summaries = [];
-const canaryOwnerName =
-	"repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError";
-for (const mode of modes) {
-	const reportPath = resolve(`reports/groupme-${mode}.json`);
-	const report = JSON.parse(readFileSync(reportPath, "utf8"));
-	const counts = Object.create(null);
-	const mutants = [];
-	for (const [file, result] of Object.entries(report.files ?? {})) {
-		for (const mutant of result.mutants ?? []) {
-			counts[mutant.status] = (counts[mutant.status] ?? 0) + 1;
-			const { start, end } = mutant.location;
-			const source = result.source.replaceAll("\r\n", "\n");
-			const lines = source.split("\n");
-			const lineOffset = (line, column) =>
-				lines
-					.slice(0, line - 1)
-					.reduce((total, part) => total + part.length + 1, 0) + column;
-			const originalText = source.slice(
-				lineOffset(start.line, start.column - 1),
-				lineOffset(end.line, end.column - 1),
-			);
-			const canonicalIdentity = createHash("sha256")
-				.update(
-					JSON.stringify([
-						file.replaceAll("\\", "/"),
-						start.line,
-						start.column,
-						end.line,
-						end.column,
-						mutant.mutatorName,
-						originalText,
-						mutant.replacement ?? "",
-					]),
-				)
-				.digest("hex");
-			mutants.push({
-				id: mutant.id,
-				canonicalIdentity,
-				file,
-				location: mutant.location,
-				mutatorName: mutant.mutatorName,
-				description: mutant.description,
-				originalText,
-				replacement: mutant.replacement,
-				status: mutant.status,
-				testsCompleted: mutant.testsCompleted ?? null,
-				attribution: mutant.killedBy ?? mutant.coveredBy ?? null,
-				canaryOwnerNameInFailureOutput:
-					mutant.statusReason?.includes(canaryOwnerName) ?? false,
-			});
-		}
-	}
-	const canary = mutants.filter(
-		(mutant) =>
-			mutant.file.endsWith("connectors/groupme/index.ts") &&
-			mutant.location.start.line === 1491 &&
-			mutant.mutatorName === "EqualityOperator" &&
-			mutant.originalText.includes(" < ") &&
-			mutant.replacement.includes(" >= "),
-	);
-	const leafTestAttributionCount = mutants.filter((mutant) => {
-		const ids = mutant.attribution;
-		return Array.isArray(ids) && ids.some((id) => id !== "all");
-	}).length;
-	summaries.push({
-		mode,
-		reportSha256: createHash("sha256")
-			.update(readFileSync(reportPath))
-			.digest("hex"),
-		generated: mutants.length,
-		counts,
-		testsCompletedSum: mutants.reduce(
-			(sum, mutant) => sum + (mutant.testsCompleted ?? 0),
-			0,
-		),
-		commandRunnerSyntheticAllAttributionCount: mutants.filter((mutant) =>
-			(mutant.attribution ?? []).includes?.("all"),
-		).length,
-		leafTestAttributionCount,
-		canaryOwnerName,
-		canary,
-		survivorSample: mutants
-			.filter((mutant) => mutant.status === "Survived")
-			.slice(0, 12),
+const reportsPath = resolve(process.env.PILOT_REPORT_DIR ?? "reports");
+const reportPath = resolve(reportsPath, `groupme-${mode}.json`);
+const baselinePath = resolve(reportsPath, `${mode}.instrumented-baseline.tap`);
+const timingPath = resolve(reportsPath, "timing.jsonl");
+const report = JSON.parse(readFileSync(reportPath, "utf8"));
+const manifestData = buildReportManifest(report);
+const baselineTap = readFileSync(baselinePath, "utf8");
+const manifest = manifestData.manifest;
+const canary = Object.entries(report.files ?? {}).flatMap(([file, result]) =>
+	(result.mutants ?? [])
+		.filter((mutant) => isExpectedCanary({ ...mutant, file, source: result.source }))
+		.map((mutant) => ({
+			canonicalIdentity: manifest.find((entry) => entry.mutantId === mutant.id)
+				?.canonicalIdentity,
+			mutantId: mutant.id,
+			status: mutant.status,
+			failureCause: classifyFailureCause(mutant),
+			testsCompleted: mutant.testsCompleted ?? null,
+			statusReason: mutant.statusReason ?? null,
+			expectedAssertionFailure: hasExpectedCanaryFailure(
+				{ ...mutant, file, source: result.source },
+				String(mutant.statusReason ?? ""),
+			),
+		})),
+);
+const baseline = validateBaselineTap(baselineTap);
+const timingEvents = readFileSync(timingPath, "utf8")
+	.split("\n")
+	.filter(Boolean)
+	.map((line) => JSON.parse(line));
+const buildEvents = timingEvents.filter(
+	(event) => event.event === "emitted-graph-build" && event.mode === mode,
+);
+const buildValid =
+	mode === "a1" ||
+	(buildEvents.length === 1 &&
+		buildEvents[0].buildCommandInvocations === 1 &&
+		buildEvents[0].instrumentationHeaderPresent === true &&
+		buildEvents[0].runtimeTypeScriptImportCount === 0);
+const generated = manifest.length;
+const statusCountSum = Object.values(manifestData.counts).reduce(
+	(sum, value) => sum + value,
+	0,
+);
+const killedFailureCauses = Object.groupBy(
+	manifest.filter((mutant) => mutant.status === "Killed"),
+	(mutant) => mutant.failureCause,
+);
+const survivorSample = [];
+const sampledMutators = new Set();
+for (const mutant of manifest.filter((entry) => entry.status === "Survived")) {
+	if (sampledMutators.has(mutant.mutatorName)) continue;
+	sampledMutators.add(mutant.mutatorName);
+	survivorSample.push({
+		canonicalIdentity: mutant.canonicalIdentity,
+		file: mutant.file,
+		location: mutant.location,
+		mutatorName: mutant.mutatorName,
+		originalText: mutant.originalText,
+		replacement: mutant.replacement,
+		testsCompleted: mutant.testsCompleted,
+		triage: "review equivalence, reachability and oracle strength",
 	});
+	if (survivorSample.length === 12) break;
 }
+const range2Mutants = manifest.filter(
+	(entry) =>
+		entry.file.endsWith("connectors/groupme/index.ts") &&
+		entry.location.start.line >= 1528 &&
+		entry.location.end.line <= 1529,
+);
+const runValid =
+	generated > 0 &&
+	generated === statusCountSum &&
+	baseline.valid &&
+	buildValid &&
+	canary.length === 1 &&
+	canary[0].status === "Killed" &&
+	canary[0].expectedAssertionFailure;
+const reportSha256 = createHash("sha256")
+	.update(readFileSync(reportPath))
+	.digest("hex");
+const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+const manifestSha256 = createHash("sha256").update(manifestText).digest("hex");
+const canonicalMutants = manifest.map(
+	({
+		mutantId,
+		canonicalIdentity,
+		file,
+		location,
+		mutatorName,
+		originalText,
+		replacement,
+	}) => ({
+		mutantId,
+		canonicalIdentity,
+		file,
+		location,
+		mutatorName,
+		originalText,
+		replacement,
+	}),
+);
+const canonicalMutantsText = `${JSON.stringify(canonicalMutants, null, 2)}\n`;
+const canonicalPopulationSha256 = createHash("sha256")
+	.update(canonicalMutantsText)
+	.digest("hex");
+const summary = {
+	mode,
+	valid: runValid,
+	reportSha256,
+	generated,
+	statusCountSum,
+	counts: manifestData.counts,
+	killedFailureCauseCounts: Object.fromEntries(
+		Object.entries(killedFailureCauses).map(([cause, mutants]) => [
+			cause,
+			mutants.length,
+		]),
+	),
+	manifestSha256,
+	manifestPath: `reports/groupme-${mode}.mutants.json`,
+	canonicalPopulationSha256,
+	canonicalPopulationPath: `reports/groupme-${mode}.canonical-mutants.json`,
+	mutantPopulation: {
+		kind:
+			process.env.MUTATION_CANARY_CONTROL === "1"
+				? "bounded canary-only local control"
+				: "fixed full pilot ranges",
+		ranges: report.config?.mutate ?? null,
+		operators: "Stryker default operators; no exclusions or sampling",
+		seed: null,
+		range2Interpretation:
+			"helper/progress-message-literal mutants only; no loop-entry or page-cap fault claim",
+		range2Mutants,
+		cursorOrderInterpretation:
+			"the exact descending-fixture mutant is a fixture-specific negative-page kill, not an equivalent always-true helper",
+		pageCap:
+			"neither: this default-operator population does not insert a numeric page cap",
+	},
+	baseline: {
+		...baseline,
+		sha256: createHash("sha256").update(baselineTap).digest("hex"),
+		path: `reports/${mode}.instrumented-baseline.tap`,
+	},
+	testsCompletedSum: manifestData.testsCompletedSum,
+	testsCompletedSumLabel: "synthetic command-runner results; not leaf tests",
+	commandRunnerSyntheticAllAttributionCount:
+		manifestData.syntheticCommandMutants,
+	unmappedAttributions: manifestData.unmappedAttributions,
+	leafTestAttributionSupported: false,
+	leafTestAttributionCount: 0,
+	canaryContract: {
+		file: expectedCanary.file,
+		line: expectedCanary.line,
+		mutatorName: expectedCanary.mutatorName,
+		originalText: expectedCanary.originalText,
+		replacement: expectedCanary.replacement,
+		ownerName: expectedCanary.ownerName,
+		assertionMessage: expectedCanary.assertionMessage,
+	},
+	canary,
+	buildCommand: { valid: buildValid, events: buildEvents },
+	survivorSample,
+	survivorSampleRule:
+		"up to twelve survivors, first sorted canonical identity per distinct mutator; concrete patch retained for human equivalence/reachability/oracle triage",
+	manifestStatusComplete: generated === statusCountSum,
+};
 
+writeFileSync(resolve(reportsPath, `groupme-${mode}.mutants.json`), manifestText, {
+	mode: 0o600,
+});
 writeFileSync(
-	resolve(`reports/summary-${modes.join("-")}.json`),
-	`${JSON.stringify({ modes: summaries }, null, 2)}\n`,
+	resolve(reportsPath, `groupme-${mode}.canonical-mutants.json`),
+	canonicalMutantsText,
 	{ mode: 0o600 },
 );
-for (const summary of summaries) {
-	const expectedCanary = summary.canary.some(
-		(mutant) =>
-			mutant.status === "Killed" &&
-			(mutant.testsCompleted ?? 0) > 0 &&
-			mutant.canaryOwnerNameInFailureOutput,
-	);
-	console.log(
-		`${summary.mode}: generated=${summary.generated}, statuses=${JSON.stringify(summary.counts)}, canaryKilledByExpectedTAPFailure=${expectedCanary}, leafTestAttribution=${summary.leafTestAttributionCount}, reportSha256=${summary.reportSha256}`,
-	);
-	if (!expectedCanary) {
-		process.exitCode = 1;
-	}
-}
+writeFileSync(
+	resolve(reportsPath, `summary-${mode}.json`),
+	`${JSON.stringify(summary, null, 2)}\n`,
+	{ mode: 0o600 },
+);
+console.log(
+	`${mode}: valid=${runValid}, generated=${generated}, counts=${JSON.stringify(manifestData.counts)}, canaryExpectedAssertionFailure=${canary[0]?.expectedAssertionFailure ?? false}, manifestSha256=${manifestSha256}, reportSha256=${reportSha256}`,
+);
+if (!runValid) process.exitCode = 1;
