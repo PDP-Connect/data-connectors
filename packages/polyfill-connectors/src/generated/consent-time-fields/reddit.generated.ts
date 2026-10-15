@@ -17,10 +17,15 @@ export const CONSENT_TIME_FIELDS: Readonly<
 > = {
 	reddit: {
 		comments: { field: "created_utc", format: "date-time" },
+		comments_stats: { field: "created_utc", format: "date-time" },
 		downvoted: { field: "created_utc", format: "date-time" },
+		downvoted_stats: { field: "created_utc", format: "date-time" },
 		hidden: { field: "created_utc", format: "date-time" },
+		hidden_stats: { field: "created_utc", format: "date-time" },
 		saved: { field: "created_utc", format: "date-time" },
 		submitted: { field: "created_utc", format: "date-time" },
+		submitted_stats: { field: "created_utc", format: "date-time" },
 		upvoted: { field: "created_utc", format: "date-time" },
+		upvoted_stats: { field: "created_utc", format: "date-time" },
 	},
 };
