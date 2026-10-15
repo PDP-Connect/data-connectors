@@ -16,7 +16,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
-import { connectorEntrypoint, packageRoot } from "./connector-paths.ts";
+import {
+	connectorEntrypoint,
+	manifestPath,
+	packageRoot,
+} from "./connector-paths.ts";
 import {
 	consentTimeFieldResolver,
 	makeEmitRecord,
@@ -621,12 +625,7 @@ async function bundleFixture(
 		options.expectedSlice ??
 		renderSlice(
 			connectorDirectory,
-			JSON.parse(
-				readFileSync(
-					join(repoRoot, "connectors", connectorDirectory, "manifest.json"),
-					"utf8",
-				),
-			),
+			JSON.parse(readFileSync(manifestPath(connectorDirectory), "utf8")),
 		);
 	const esbuild = await import("esbuild");
 	// Inside node_modules so the bundle's external packages resolve.
