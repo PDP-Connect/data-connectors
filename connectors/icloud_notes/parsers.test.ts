@@ -4,8 +4,7 @@
 /**
  * Unit tests for the pure iCloud Notes parsers. All fixture byte blobs in
  * this file are synthetically constructed (labelled below), not derived
- * from a real capture — no live-account run has occurred for this
- * connector yet.
+ * from a real capture; live-account evidence stays outside source fixtures.
  */
 
 import assert from "node:assert/strict";
@@ -19,6 +18,7 @@ import {
 	extractCleanText,
 	extractNoteText,
 	isDeletedNote,
+	readFolderRecord,
 	readNoteRecord,
 } from "./parsers.ts";
 import type { CloudKitRecord } from "./types.ts";
@@ -227,6 +227,27 @@ test("readNoteRecord: absent mapped fields remain unavailable", () => {
 	);
 });
 
+test("readNoteRecord: CloudKit sparse optional fields use legacy empty defaults", () => {
+	const result = readNoteRecord({
+		recordName: "note-sparse-defaults",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: b64("Sparse note") },
+			TextDataEncrypted: { value: "" },
+		},
+	});
+	assert.deepEqual(result.unavailableFields, []);
+	assert.equal(result.record?.title, "Sparse note");
+	assert.equal(result.record?.snippet, null);
+	assert.equal(result.record?.folder_id, null);
+	assert.equal(result.record?.folder_name, null);
+	assert.equal(result.record?.is_pinned, false);
+	assert.equal(result.record?.created_at, null);
+	assert.equal(result.record?.modified_at, null);
+	assert.equal(result.record?.has_attachments, false);
+	assert.equal(result.record?.text_content, null);
+});
+
 test("readNoteRecord: an unresolved folder reference leaves folder_name unavailable", () => {
 	const result = readNoteRecord(
 		{
@@ -364,10 +385,19 @@ test("buildFolderRecord: null when recordName is absent", () => {
 	);
 });
 
-test("buildFolderRecord: absent title is unavailable, explicit empty title falls back", () => {
+test("readFolderRecord: absent and explicit empty titles fall back to recordName", () => {
+	const absent = readFolderRecord({
+		recordName: "folder-no-title",
+		recordType: "Folder",
+		fields: {},
+	});
+	assert.deepEqual(absent, {
+		record: { id: "folder-no-title", name: "folder-no-title" },
+		unavailableFields: [],
+	});
 	assert.deepEqual(
 		buildFolderRecord({ recordName: "folder-no-title", fields: {} }),
-		{ id: "folder-no-title", name: null },
+		{ id: "folder-no-title", name: "folder-no-title" },
 	);
 	assert.deepEqual(
 		buildFolderRecord({

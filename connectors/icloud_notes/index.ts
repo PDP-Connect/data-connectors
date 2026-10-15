@@ -475,12 +475,15 @@ async function walkQueryPages(
 			pageProgress += 1;
 			records.push(value);
 		}
-		await progress(`Fetched iCloud Notes ${stream} page`, {
-			phase: "page",
-			page_index: pageCount,
-			item_count: parsed.records.length,
-			total_seen: records.length,
-		});
+		await progress(
+			`Fetched iCloud Notes ${stream} page: ${parsed.records.length} source row(s), ${records.length} unique row(s) total`,
+			{
+				phase: "page",
+				page_index: pageCount,
+				item_count: parsed.records.length,
+				total_seen: records.length,
+			},
+		);
 		if (parsed.nextMarker !== null && seenMarkers.has(parsed.nextMarker)) {
 			return {
 				records,

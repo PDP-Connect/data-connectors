@@ -600,6 +600,49 @@ test("collectAllStreams: note records keep empty title values and reject non-Not
 	assert.equal(harness.emitted[0]?.data.title, "");
 });
 
+test("collectAllStreams: sparse CloudKit optional fields emit their defaults and cover the row", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = makeNotePage([
+		{
+			records: [
+				{
+					recordName: "note-sparse-defaults",
+					recordType: "Note",
+					fields: {
+						TitleEncrypted: { value: b64("Sparse note") },
+						TextDataEncrypted: { value: "" },
+					},
+				},
+			],
+		},
+	]);
+	await collectAllStreams(makeCtx(page, harness, ["notes"]));
+
+	assert.deepEqual(harness.emitted, [
+		{
+			stream: "notes",
+			data: {
+				id: "note-sparse-defaults",
+				title: "Sparse note",
+				snippet: null,
+				folder_id: null,
+				folder_name: null,
+				is_pinned: false,
+				created_at: null,
+				modified_at: null,
+				has_attachments: false,
+				text_content: null,
+			},
+		},
+	]);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		"a valid sparse row and verified query end must cover notes",
+	);
+});
+
 test("collectAllStreams: folder query follows its continuation pages", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const folder = (id: string) => ({
@@ -811,7 +854,7 @@ test("collectAllStreams: unreadable mapped fields are reported and veto both str
 	);
 });
 
-test("collectAllStreams: absent mapped values are unavailable and veto notes STATE", async () => {
+test("collectAllStreams: absent required title/body fields withhold the note row", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	await collectAllStreams(
 		makeCtx(
@@ -873,19 +916,16 @@ test("collectAllStreams: absent mapped values are unavailable and veto notes STA
 			{
 				row_index: 0,
 				omissions: [
-					...[
-						"created_at",
-						"has_attachments",
-						"is_pinned",
-						"modified_at",
-						"snippet",
-						"text_content",
-						"title",
-					].map((field) => ({
-						field,
+					{
+						field: "text_content",
 						reason: "missing_field",
 						source_shape: { type: "missing" },
-					})),
+					},
+					{
+						field: "title",
+						reason: "missing_field",
+						source_shape: { type: "missing" },
+					},
 				],
 			},
 		],

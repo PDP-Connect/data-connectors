@@ -217,11 +217,15 @@ function unavailable<T>(
 function fieldValue(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 	name: string,
+	missing: FieldRead<unknown> = unavailable("missing_field", undefined, {
+		type: "missing",
+	}),
 ): FieldRead<unknown> {
-	// CloudKit omits sparse optional keys. Omission is not an explicit empty
-	// value: callers need that distinction to leave the row uncovered.
+	// CloudKit Notes records are sparse: optional keys at their default are
+	// omitted. Callers supply that documented empty/default state per field;
+	// required fields keep the unavailable default below.
 	if (!fields || !Object.hasOwn(fields, name)) {
-		return unavailable("missing_field", undefined, { type: "missing" });
+		return missing;
 	}
 	const field: unknown = fields[name];
 	if (
@@ -245,8 +249,11 @@ function readableValue<T>(field: FieldRead<T>, empty: T): T {
 function textField(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 	name: string,
+	missing: FieldRead<string | null> = unavailable("missing_field", undefined, {
+		type: "missing",
+	}),
 ): FieldRead<string | null> {
-	const raw = fieldValue(fields, name);
+	const raw = fieldValue(fields, name, missing);
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null) return explicitEmpty(null);
 	if (typeof raw.value !== "string")
@@ -264,7 +271,9 @@ function referenceField(
 			? fieldValue(fields, "Folder")
 			: null;
 	if (direct === null) {
-		const list = fieldValue(fields, "Folders");
+		// The legacy reader checked Folder then Folders[0] and returned null
+		// when neither was present. Both absent is therefore the sparse default.
+		const list = fieldValue(fields, "Folders", explicitEmpty(null));
 		if (list.kind === "UNAVAILABLE") return list;
 		if (list.value === null) return explicitEmpty(null);
 		if (!Array.isArray(list.value))
@@ -303,7 +312,9 @@ function booleanField(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 	name: string,
 ): FieldRead<boolean | null> {
-	const raw = fieldValue(fields, name);
+	// The legacy collector interpreted an omitted Notes boolean as false; the
+	// live CloudKit rows show sparse `IsPinned` fields, not malformed values.
+	const raw = fieldValue(fields, name, explicitEmpty(false));
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null) return explicitEmpty(false);
 	if (raw.value === true || raw.value === 1) return read(true);
@@ -314,7 +325,7 @@ function booleanField(
 function deletedField(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 ): FieldRead<boolean> {
-	const raw = fieldValue(fields, "Deleted");
+	const raw = fieldValue(fields, "Deleted", explicitEmpty(false));
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null) return explicitEmpty(false);
 	if (raw.value === true || raw.value === 1) return read(true);
@@ -349,6 +360,11 @@ function recordTimestamp(
 function attachmentsField(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 ): FieldRead<boolean | null> {
+	// Legacy Notes mapping used `Array.isArray(value) && value.length > 0`,
+	// so an omitted sparse attachment list has the default false value.
+	if (!fields || !Object.hasOwn(fields, "Attachments")) {
+		return explicitEmpty(false);
+	}
 	const raw = fieldValue(fields, "Attachments");
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null) return explicitEmpty(false);
@@ -377,14 +393,11 @@ function timestampField(
 	fallback: unknown,
 	fallbackPresent: boolean,
 ): FieldRead<string | null> {
-	const raw = fieldValue(fields, name);
+	// CreationDate/ModificationDate are optional; legacy used record metadata
+	// when present and otherwise returned null when the CloudKit key was absent.
+	const raw = fieldValue(fields, name, explicitEmpty(null));
 	if (raw.kind === "UNAVAILABLE") {
-		if (raw.reason !== "missing_field") return raw;
-		if (!fallbackPresent) return raw;
-		const fallbackIso = epochMsToIso(fallback);
-		return fallbackIso === null
-			? unavailable("invalid_fallback_timestamp", fallback)
-			: read(fallbackIso);
+		return raw;
 	}
 	if (raw.value === null) {
 		if (!fallbackPresent) return explicitEmpty(null);
@@ -400,6 +413,8 @@ function timestampField(
 function bodyTextField(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 ): FieldRead<string | null> {
+	// TextDataEncrypted is required content: missing is a gap, while a present
+	// null/empty body is explicit empty and a malformed body remains unavailable.
 	const raw = fieldValue(fields, "TextDataEncrypted");
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null || raw.value === "") return explicitEmpty(null);
@@ -495,8 +510,12 @@ export function readNoteRecord(
 		};
 	}
 	const fields = record.fields;
+	// `0bb607c:connectors/icloud_notes/parsers.ts` records the legacy mapping:
+	// sparse snippet -> null, missing folder -> null, and sparse timestamps ->
+	// null (or CloudKit record metadata). Keep title and body required so an
+	// absent content field is not confused with an explicit null/empty value.
 	const title = textField(fields, "TitleEncrypted");
-	const snippet = textField(fields, "SnippetEncrypted");
+	const snippet = textField(fields, "SnippetEncrypted", explicitEmpty(null));
 	const folderId = referenceField(fields);
 	const isPinned = booleanField(fields, "IsPinned");
 	const createdMetadata = recordTimestamp(record, "created");
@@ -598,7 +617,9 @@ export function readFolderRecord(
 			],
 		};
 	}
-	const title = textField(record.fields, "TitleEncrypted");
+	// Legacy folders fall back to recordName when the sparse title is absent or
+	// empty; only a present malformed title makes the row unavailable.
+	const title = textField(record.fields, "TitleEncrypted", explicitEmpty(null));
 	const name =
 		title.kind === "UNAVAILABLE"
 			? unavailable<string | null>(title.reason, undefined, title.source_shape)
