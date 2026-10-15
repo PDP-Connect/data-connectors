@@ -88,7 +88,11 @@ export function normalizeInstant(value: unknown): string | null {
  * of hiding it.
  */
 function safeText(value: unknown, max: number): string | null {
-	return typeof value === "string" ? safeTextPreview(value, max).preview : null;
+	// safeTextPreview appends one ellipsis character when it cuts, so cut one
+	// short to stay inside the schema's bound.
+	return typeof value === "string"
+		? safeTextPreview(value, max - 1).preview
+		: null;
 }
 
 /** A question or answer body: present, absent, or unreadable (with a reason). */

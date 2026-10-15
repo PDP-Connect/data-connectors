@@ -96,7 +96,7 @@ interface ConversationsCursor {
 interface ThreadSync {
 	update_time: string | null;
 	create_time: string | null;
-	entry_count: number | null;
+	entry_count: number;
 	complete: true;
 }
 
@@ -399,6 +399,8 @@ function errorMessage(error: unknown): string {
 interface ListWalk {
 	readonly threads: ListedThread[];
 	readonly unreadable: number;
+	/** List pages this walk requested; one page is a single atomic answer. */
+	readonly pages: number;
 }
 
 /**
@@ -436,16 +438,20 @@ async function walkList(ctx: BrowserCollectContext): Promise<ListWalk> {
 			}
 		}
 		if (parsed.page.items.length === 0 || !parsed.page.hasNextPage) {
-			return { threads, unreadable };
+			return { threads, unreadable, pages: pageIndex + 1 };
 		}
 		offset += parsed.page.items.length;
 	}
 }
 
-/** Thread ids and their update times, order-insensitive, for comparing walks. */
+/**
+ * The set of thread ids a walk saw, order-insensitive. Update times are left
+ * out on purpose: a thread answered between walks changes its time but not
+ * the membership the walk has to prove.
+ */
 function walkSignature(walk: ListWalk): string {
 	return walk.threads
-		.map((thread) => `${thread.id}@${thread.updateTime ?? ""}`)
+		.map((thread) => thread.id)
 		.sort()
 		.join("|");
 }
@@ -454,12 +460,12 @@ function walkSignature(walk: ListWalk): string {
  * The library list, proven stable. The list is ordered by recent activity
  * and paged by offset, so a thread answered while the walk runs moves to the
  * top and can shift another past the walk unseen. One page is atomic; a
- * longer list is walked until two consecutive walks agree on every thread
- * and its update time, or the run fails without a checkpoint.
+ * walk that needed more than one page is repeated until two consecutive
+ * walks see the same threads, or the run fails without a checkpoint.
  */
 async function stableList(ctx: BrowserCollectContext): Promise<ListWalk> {
 	let walk = await walkList(ctx);
-	if (walk.threads.length + walk.unreadable <= PAGE_SIZE) {
+	if (walk.pages <= 1) {
 		return walk;
 	}
 	for (let attempt = 0; attempt < MAX_LIST_WALKS; attempt += 1) {
@@ -482,14 +488,17 @@ function readThreadSync(value: unknown): ThreadSync | null {
 	const record = value as Record<string, unknown>;
 	const text = (field: unknown): string | null =>
 		typeof field === "string" ? field : null;
-	if (record.complete !== true || typeof record.update_time !== "string") {
+	if (
+		record.complete !== true ||
+		typeof record.update_time !== "string" ||
+		typeof record.entry_count !== "number"
+	) {
 		return null;
 	}
 	return {
 		update_time: record.update_time,
 		create_time: text(record.create_time),
-		entry_count:
-			typeof record.entry_count === "number" ? record.entry_count : null,
+		entry_count: record.entry_count,
 		complete: true,
 	};
 }
@@ -595,32 +604,36 @@ function threadLocatorSlug(locator: unknown): string | null {
 		: null;
 }
 
-interface RecoveryResult {
-	/** Threads whose pending gap was recovered this run, by id. */
-	readonly recovered: Map<string, { createTime: string | null }>;
-	/** Pending gaps still owed, by thread id. */
-	readonly pending: Map<string, string>;
-}
-
 /**
- * The recovery pass: every pending `messages` gap this connector wrote is
- * re-read from its locator before the forward walk. A thread that now reads
- * completely gets its messages and a DETAIL_GAP_RECOVERED; one that still
- * fails stays pending.
+ * A recovery-only run: every pending `messages` gap this connector wrote is
+ * re-read from its locator, without walking the list. A thread that now reads
+ * completely gets its messages and a DETAIL_GAP_RECOVERED for each of its
+ * pending gaps; one that still fails stays pending. Nothing is checkpointed
+ * here, so the next ordinary run still reads the thread in full against the
+ * list's entry count before remembering it. Its conversation record was
+ * emitted by the run that wrote the gap.
  */
-async function recoverDetailGaps(
+async function recoverDetailGapsOnly(
 	ctx: BrowserCollectContext,
 	threadDelayMs: number,
-): Promise<RecoveryResult> {
-	const recovered = new Map<string, { createTime: string | null }>();
-	const pending = new Map<string, string>();
+): Promise<void> {
+	const gapsByThread = new Map<
+		string,
+		{ slug: string | null; gapIds: string[] }
+	>();
 	for (const gap of ctx.detailGaps) {
 		if (gap.stream !== "messages" || typeof gap.record_key !== "string") {
 			continue;
 		}
-		const conversationId = gap.record_key;
-		pending.set(conversationId, gap.gap_id);
-		const slug = threadLocatorSlug(gap.detail_locator);
+		const entry = gapsByThread.get(gap.record_key) ?? {
+			slug: null,
+			gapIds: [],
+		};
+		entry.slug ??= threadLocatorSlug(gap.detail_locator);
+		entry.gapIds.push(gap.gap_id);
+		gapsByThread.set(gap.record_key, entry);
+	}
+	for (const [conversationId, { slug, gapIds }] of gapsByThread) {
 		if (slug === null) {
 			continue;
 		}
@@ -632,17 +645,32 @@ async function recoverDetailGaps(
 		for (const message of read.messages) {
 			await ctx.emitRecord("messages", { ...message });
 		}
-		await ctx.emit({
-			type: "DETAIL_GAP_RECOVERED",
-			reference_only: true,
-			gap_id: gap.gap_id,
-			stream: "messages",
-			record_key: conversationId,
-		});
-		pending.delete(conversationId);
-		recovered.set(conversationId, { createTime: read.createTime });
+		for (const gapId of gapIds) {
+			await ctx.emit({
+				type: "DETAIL_GAP_RECOVERED",
+				reference_only: true,
+				gap_id: gapId,
+				stream: "messages",
+				record_key: conversationId,
+			});
+		}
 	}
-	return { recovered, pending };
+}
+
+/** Pending `messages` gap ids by thread, for the forward walk to resolve. */
+function pendingGapsByThread(
+	ctx: BrowserCollectContext,
+): Map<string, string[]> {
+	const pending = new Map<string, string[]>();
+	for (const gap of ctx.detailGaps) {
+		if (gap.stream === "messages" && typeof gap.record_key === "string") {
+			pending.set(gap.record_key, [
+				...(pending.get(gap.record_key) ?? []),
+				gap.gap_id,
+			]);
+		}
+	}
+	return pending;
 }
 
 export async function collectPerplexity(
@@ -659,17 +687,18 @@ export async function collectPerplexity(
 		return;
 	}
 
-	// 0. Recover gaps a previous run left, then stop if that is all this run
-	// is for.
-	const recovery = wantsMessages
-		? await recoverDetailGaps(ctx, threadDelayMs)
-		: {
-				recovered: new Map<string, { createTime: string | null }>(),
-				pending: new Map<string, string>(),
-			};
+	// 0. A recovery-only run re-reads pending gaps from their locators and
+	// stops before any list fetch. An ordinary run resolves them in the
+	// forward walk, where each thread is read against the list's entry count.
 	if (ctx.recoveryOnly === true) {
+		if (wantsMessages) {
+			await recoverDetailGapsOnly(ctx, threadDelayMs);
+		}
 		return;
 	}
+	const pending = wantsMessages
+		? pendingGapsByThread(ctx)
+		: new Map<string, string[]>();
 
 	// 1. The library list, proven complete and stable. `total_threads` is not
 	// used: live list items carry a number unrelated to the library size.
@@ -703,7 +732,7 @@ export async function collectPerplexity(
 			thread.updateTime !== null &&
 			known.update_time === thread.updateTime &&
 			known.entry_count === thread.entryCount &&
-			!recovery.pending.has(thread.id);
+			!pending.has(thread.id);
 		if (unchanged) {
 			synced[thread.id] = known;
 			skippedUnchanged.push(thread.id);
@@ -715,9 +744,8 @@ export async function collectPerplexity(
 			continue;
 		}
 
-		const recoveredNow = recovery.recovered.get(thread.id);
 		let read: ThreadRead | null = null;
-		if (wantsMessages && recoveredNow === undefined && thread.slug !== null) {
+		if (wantsMessages && thread.slug !== null) {
 			read = await readThread(
 				ctx.page,
 				thread.slug,
@@ -727,7 +755,6 @@ export async function collectPerplexity(
 			await politeDelay(threadDelayMs);
 		}
 		const createTime =
-			recoveredNow?.createTime ??
 			(read?.kind === "read" ? read.createTime : null) ??
 			known?.create_time ??
 			null;
@@ -737,19 +764,6 @@ export async function collectPerplexity(
 			});
 		}
 		if (!wantsMessages) {
-			continue;
-		}
-		if (recoveredNow !== undefined) {
-			// Messages were emitted by the recovery pass this run.
-			hydrated.push(thread.id);
-			if (thread.complete && thread.updateTime !== null) {
-				synced[thread.id] = {
-					update_time: thread.updateTime,
-					create_time: recoveredNow.createTime,
-					entry_count: thread.entryCount,
-					complete: true,
-				};
-			}
 			continue;
 		}
 		if (read?.kind === "read") {
@@ -762,7 +776,11 @@ export async function collectPerplexity(
 		}
 		if (read?.kind === "read" && read.complete) {
 			hydrated.push(thread.id);
-			if (thread.complete && thread.updateTime !== null) {
+			if (
+				thread.complete &&
+				thread.updateTime !== null &&
+				thread.entryCount !== null
+			) {
 				synced[thread.id] = {
 					update_time: thread.updateTime,
 					create_time: read.createTime,
@@ -770,12 +788,11 @@ export async function collectPerplexity(
 					complete: true,
 				};
 			}
-			const pendingGap = recovery.pending.get(thread.id);
-			if (pendingGap !== undefined) {
+			for (const gapId of pending.get(thread.id) ?? []) {
 				await ctx.emit({
 					type: "DETAIL_GAP_RECOVERED",
 					reference_only: true,
-					gap_id: pendingGap,
+					gap_id: gapId,
 					stream: "messages",
 					record_key: thread.id,
 				});
@@ -791,7 +808,7 @@ export async function collectPerplexity(
 					: read.incomplete > 0
 						? { class: "answer_still_generating" }
 						: { class: "entry_unreadable" };
-		if (!recovery.pending.has(thread.id)) {
+		if (!pending.has(thread.id)) {
 			await emitDetailGap(ctx, {
 				stream: "messages",
 				parentStream: "conversations",
