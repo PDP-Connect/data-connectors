@@ -16,6 +16,8 @@ on:
     branches: [main]
     paths:
       - "packages/polyfill-connectors/**"
+      - "package.json"
+      - "scripts/groupme-mutation/**"
       - "connectors/**"
       - ".github/workflows/polyfill-connectors.yml"
   pull_request: {}
@@ -36,6 +38,8 @@ jobs:
       contents: read
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
+      harness: ${{ steps.filter.outputs.harness }}
+      groupme: ${{ steps.filter.outputs.groupme }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -62,6 +66,9 @@ jobs:
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
           fi
+
+          if echo "$CHANGED" | grep -qE '^(scripts/groupme-mutation/|package\.json$|\.github/workflows/polyfill-connectors\.yml$)'; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
+          if echo "$CHANGED" | grep -q '^connectors/groupme/index\.ts$'; then echo "groupme=true" >> "$GITHUB_OUTPUT"; else echo "groupme=false" >> "$GITHUB_OUTPUT"; fi
 
   verify:
     name: verify + test
@@ -256,9 +263,62 @@ jobs:
             fi
           done
 
+  groupme-mutation:
+    name: GroupMe mutation evidence
+    needs: [changes, verify]
+    if: always() && (needs.changes.outputs.harness == 'true' || needs.changes.outputs.groupme == 'true') && (needs.verify.result == 'success' || needs.verify.result == 'skipped') && (github.event_name == 'pull_request' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts
+
+      - name: Qualify harness and calibrated mutations
+        if: needs.changes.outputs.harness == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPORT: ${{ runner.temp }}/groupme-mutation-qualification.json
+        run: |
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          npm run groupme-mutation -- --mode qualify --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT"
+
+      - name: Run diff-selected GroupMe mutations
+        if: needs.changes.outputs.groupme == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPORT: ${{ runner.temp }}/groupme-mutation-diff.json
+        run: |
+          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          npm run groupme-mutation -- --mode diff --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT"
+
+      - name: Upload mutation reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: groupme-mutation-${{ github.run_id }}
+          path: ${{ runner.temp }}/groupme-mutation-*.json
+          if-no-files-found: warn
+          retention-days: 14
+
   gate:
     name: Polyfill Connectors Gate
-    needs: [changes, verify]
+    needs: [changes, verify, groupme-mutation]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -266,9 +326,11 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          MUTATION_RESULT: ${{ needs.groupme-mutation.result }}
         run: |
           echo "changes: $CHANGES_RESULT"
           echo "verify:  $VERIFY_RESULT"
+          echo "mutation: $MUTATION_RESULT"
 
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "::error::changes job did not succeed (result: $CHANGES_RESULT) — cannot trust downstream skip/run decisions"
@@ -279,6 +341,14 @@ jobs:
             success|skipped) ;;
             *)
               echo "::error::verify reported '$VERIFY_RESULT' — expected 'success' or 'skipped'"
+              exit 1
+              ;;
+          esac
+
+          case "$MUTATION_RESULT" in
+            success|skipped) ;;
+            *)
+              echo "::error::GroupMe mutation evidence reported '$MUTATION_RESULT' — expected 'success' or 'skipped'"
               exit 1
               ;;
           esac
