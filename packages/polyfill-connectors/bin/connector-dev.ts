@@ -5,9 +5,8 @@
 /**
  * connector-dev — the "run and watch it work" developer command.
  *
- * Runs ONE connector exactly the way production runs it: spawn the
- * connector's own entrypoint (`node --import tsx connectors/<name>/index.ts`)
- * and drive the Collection Profile protocol (START on stdin, JSONL
+ * Runs ONE connector's own entrypoint in a subprocess and drives the
+ * Collection Profile protocol (START on stdin, JSONL
  * RECORD/STATE/SKIP_RESULT/PROGRESS/INTERACTION/ASSISTANCE/DONE on stdout)
  * over stdio — the exact spawn shape `runConnectorProtocolSubprocess`
  * (src/test-harness.ts) uses to prove connectors in tests, and the same
@@ -15,6 +14,10 @@
  * `getConnectorPaths`/`readManifest` (src/orchestrator.ts). No parallel
  * runner: this file adds live human-readable streaming and a mechanical
  * run-summary artifact on top of that path, it does not reimplement it.
+ * The dev subprocess uses Node's native TypeScript stripping. Production
+ * connector artifacts use their own bundles. Native stripping keeps
+ * serialized `page.evaluate` callbacks free of tsx's Node-only `__name`
+ * helper without changing browser page globals.
  *
  * Deliberately does NOT start the embedded personal server or register a
  * manifest the way `orchestrate.ts run` does — this is a local dev loop for
@@ -130,6 +133,7 @@ import {
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "../src/connector-paths.ts";
+
 import { diagnoseRun, renderDiagnosis } from "../src/failure-diagnosis.ts";
 import {
 	handleInteraction,
@@ -847,7 +851,7 @@ export function runAndStream(
 	const answers = options.answers ?? {};
 	const isTty = options.isTty ?? Boolean(process.stdin.isTTY);
 	return new Promise((resolvePromise, rejectPromise) => {
-		const child = spawn(process.execPath, ["--import", "tsx", entrypoint], {
+		const child = spawn(process.execPath, [entrypoint], {
 			cwd: PACKAGE_ROOT,
 			env: {
 				...process.env,
