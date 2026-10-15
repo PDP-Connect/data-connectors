@@ -834,7 +834,7 @@
     },
     "not_derivable": [],
     "semantic_notes": [
-      "playlist_items remains a separate child stream keyed by <playlist_id>:<position>; positions count Track entries in source order, matching the legacy filtered ordering.",
+      "playlist_items remains a separate child stream keyed by <playlist_id>:<position>; positions preserve every source slot in order, including slots occupied by non-Track entries.",
       "The connector uses the authenticated web-player libraryV3 and fetchPlaylist GraphQL operations. It validates response shape, playlist identity, totals, row shapes, and terminal evidence before emitting coverage.",
       "legacy tracks_total is the number of collected Track entries per playlist. Provider content.totalCount can include non-Track entries and is used only to prove traversal exhaustion."
     ],
@@ -853,13 +853,13 @@
       "uri": "saved_tracks.uri (exact `_uri` or `uri` value returned by fetchLibraryTracks; empty or absent URI is retained as source data)",
       "explicit": "saved_tracks.explicit (derived from fetchLibraryTracks track contentRating.label; null when that evidence is absent)",
       "album.artists": "saved_tracks.album_artist_names[] (album-level artist names returned by fetchLibraryTracks, distinct from track-level artists)",
-      "identity_unresolved": "true when the saved row has no URI-derived or source-provided track ID; id remains null rather than being invented"
+      "identity_unresolved": "false for emitted rows; rows without a URI-derived or source-provided track ID are withheld"
     },
     "not_derivable": [],
     "semantic_notes": [
       "The implementation uses the authenticated Spotify web-player GraphQL fetchLibraryTracks query, not the public Web API /me/tracks endpoint. popularity and isrc remain null because this query does not provide them.",
-      "Rows with no save date or URI are retained. added_at is nullable; source track id is used when the URI is absent; rows with neither carry id:null and identity_unresolved:true and do not advance full_scan_at.",
-      "Every page requires a valid items array and ends only at a verified empty response, a short page with unknown total, or a matching total. Missing totals remain unknown; malformed rows, count mismatch, repeated pages, and unresolved identities veto complete coverage."
+      "Rows with no save date remain eligible, and added_at is nullable. A source track ID identifies a row when its URI is absent; a row with neither identifier is withheld, so no identity_unresolved row is emitted.",
+      "Every page requires a valid items array and consistent totals. Completion requires reaching a verified total; a short or empty page with an unknown total is rejected. Malformed rows, count mismatches, repeated pages, duplicate identities, and unavailable mapped fields withhold complete coverage."
     ],
     "status": "derivable"
   },
@@ -878,7 +878,7 @@
     "not_derivable": [],
     "semantic_notes": [
       "The profile stream uses profileAttributes GraphQL for the username, display name, and URI, then user-profile-view/v3/profile/{username} for follower/following counts and fallback image data. Enrichment is accepted only when its URI matches the GraphQL identity.",
-      "A missing enrichment response leaves follower/following counts null and uses the GraphQL image when available; it does not invent values or fail the profile row.",
+      "Profile enrichment is required for coverage. If enrichment is unavailable or does not match the GraphQL identity, the profile row is withheld instead of emitted with partial follower or following data.",
       "PROOF-GATE GAP: no signed-in Spotify profile was available for a live run in this environment; synthetic fixtures and unit tests only."
     ],
     "status": "derivable"
