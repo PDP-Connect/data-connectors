@@ -19,12 +19,15 @@
  * Streams: `conversations` (one record per thread, mutable_state, cursor
  * `update_time`) and `messages` (the question and the answer of every entry,
  * append_only, child of `conversations`). The list walk must prove it ended
- * (an empty page, a short page, or `has_next_page: false`) before either
- * stream is reported complete, and the walk is cross-checked against the
- * `total_threads` the list itself reports.
+ * (an empty page, a short page, or the last item's `has_next_page: false`)
+ * before either stream is reported complete. `total_threads` on list items
+ * is NOT the library size (a live 4-thread account reported 99 on every
+ * item), so nothing is cross-checked against it.
  *
  * Tested surfaces (as of 2026-10-12, from the live recon notes):
  *   - a small Pro-tier library; threads with one entry each
+ *   - zoneless microsecond list timestamps (read as UTC; the entries of the
+ *     same threads carry `+00:00`, so the server clock is UTC)
  *   - answers built from `blocks[]` (`ask_text`, `web_results`)
  *
  * Known untested:
@@ -80,7 +83,6 @@ interface PageRequest {
 /** The `conversations` STATE cursor. */
 interface ConversationsCursor {
 	last_update_time: string | null;
-	total_threads: number | null;
 }
 
 /** One thread's remembered detail state, so unchanged threads can be skipped. */
@@ -347,7 +349,6 @@ export async function collectPerplexity(
 	// 1. The library list, paged by offset until it proves it ended.
 	const listed: ListedThread[] = [];
 	let unreadableThreads = 0;
-	let totalThreads: number | null = null;
 	let offset = 0;
 	for (let pageIndex = 0; ; pageIndex += 1) {
 		if (pageIndex >= MAX_LIST_PAGES) {
@@ -371,26 +372,18 @@ export async function collectPerplexity(
 			}
 			listed.push(thread);
 		}
-		totalThreads = parsed.page.totalThreads ?? totalThreads;
 		if (parsed.page.items.length < PAGE_SIZE || !parsed.page.hasNextPage) {
 			break;
 		}
 		offset += parsed.page.items.length;
 	}
 
-	// 2. Cross-check the walk against the count the list itself reports, and
-	// never report success with zero threads when the list said there were.
-	const counted = listed.length + unreadableThreads;
-	if (totalThreads !== null && counted !== totalThreads) {
-		throw new Error(
-			`perplexity_list_incomplete: the walk accounted for ${counted} thread(s) but the library reports ${totalThreads}`,
-		);
-	}
-	if (totalThreads !== null && totalThreads > 0 && listed.length === 0) {
-		throw new Error(
-			"perplexity_list_unreadable: the library reports threads but none could be read",
-		);
-	}
+	// 2. Nothing is cross-checked against `total_threads`: live list items
+	// carry a number unrelated to the library size (a 4-thread account
+	// reported 99 on every item). The walk's own end proof above — an empty
+	// page, a short page, or the last item's `has_next_page: false` — is the
+	// only completeness evidence; unreadable items are reported below
+	// instead of failing the run.
 	if (unreadableThreads > 0) {
 		await ctx.reportStreamFailure?.(
 			"conversations",
@@ -543,7 +536,6 @@ export async function collectPerplexity(
 			stream: "conversations",
 			cursor: {
 				last_update_time: lastUpdateTime,
-				total_threads: totalThreads,
 			} satisfies ConversationsCursor,
 		});
 	}

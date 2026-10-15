@@ -15,10 +15,12 @@
  *
  * Everything unrecognised fails closed. A body of the wrong shape is a page
  * failure, never an empty page; a thread item or entry that cannot be placed
- * (no id, no slug, no zoned timestamp) is counted as unreadable by the caller
- * instead of being emitted with guesses. Free text goes through `pdppSafeText`
- * before it can reach a record, and timestamps without an explicit zone are
- * refused rather than guessed at.
+ * (no id, no slug, no readable timestamp) is counted as unreadable by the
+ * caller instead of being emitted with guesses. Free text goes through
+ * `pdppSafeText` before it can reach a record. Timestamps must be ISO-8601
+ * date-times; the list's arrive with no zone at all, and since the entries of
+ * the same threads carry `+00:00` the server clock is UTC, so a missing zone
+ * is read as UTC. Any other shape is refused rather than guessed at.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -40,12 +42,17 @@ const CONTENT_MAX_CHARS = 1_000_000;
 // ─── shared value readers ───────────────────────────────────────────────
 
 /**
- * A timestamp with an explicit zone (`Z`, `+00:00`, `+0000`), returned as a
- * UTC instant `YYYY-MM-DDTHH:MM:SSZ`. A zoneless value is null: inventing a
- * clock for it would be a guess, and cursor ordering must not rest on one.
+ * An ISO-8601 date-time, returned as a UTC instant `YYYY-MM-DDTHH:MM:SSZ`.
+ * The zone may be `Z` or an explicit offset (`+00:00`, `+0000`). The list's
+ * timestamps arrive with NO zone at all (`2026-10-02T09:15:00.999999`,
+ * microseconds), while the entries of the very same threads carry `+00:00`:
+ * the server clock is UTC, so a zoneless value is read as UTC rather than
+ * refused. Anything that is not an ISO date-time — a date without a time, a
+ * space-separated stamp, a number — is null. A cursor must never rest on a
+ * wilder guess than that.
  */
 const ZONED_TIME_RE =
-	/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
+	/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
 
 export function normalizeInstant(value: unknown): string | null {
 	if (typeof value !== "string") {
@@ -56,10 +63,14 @@ export function normalizeInstant(value: unknown): string | null {
 		return null;
 	}
 	const [, date, time, zone] = match;
-	if (date === undefined || time === undefined || zone === undefined) {
+	if (date === undefined || time === undefined) {
 		return null;
 	}
-	const offset = zone === "Z" ? "Z" : `${zone.slice(0, 3)}:${zone.slice(-2)}`;
+	// A missing zone is the list's zoneless clock, which is UTC.
+	const offset =
+		zone === undefined || zone === "Z"
+			? "Z"
+			: `${zone.slice(0, 3)}:${zone.slice(-2)}`;
 	const instant = new Date(`${date}T${time}${offset}`);
 	if (Number.isNaN(instant.getTime())) {
 		return null;
@@ -167,7 +178,10 @@ export function conversationRecord(
 /**
  * Parse one list response body. The body must be a JSON array; the list ends
  * when the page is empty or its LAST item says `has_next_page: false`.
- * Anything else is a shape failure, not an empty page.
+ * Anything else is a shape failure, not an empty page. `total_threads` is
+ * deliberately unread: live list items carry a number unrelated to the
+ * library size (a 4-thread account reported 99 on every item), so only the
+ * walk's own end proof counts.
  */
 export function parseThreadListPage(
 	body: string,
@@ -187,7 +201,7 @@ export function parseThreadListPage(
 	if (payload.length === 0) {
 		return {
 			ok: true,
-			page: { items: [], hasNextPage: false, totalThreads: null },
+			page: { items: [], hasNextPage: false },
 		};
 	}
 	const last = payload[payload.length - 1];
@@ -197,14 +211,9 @@ export function parseThreadListPage(
 			message: "The thread list page carried no usable has_next_page.",
 		};
 	}
-	let totalThreads: number | null = null;
-	const first = payload[0];
-	if (isRecord(first)) {
-		totalThreads = nonNegativeInt(first.total_threads);
-	}
 	return {
 		ok: true,
-		page: { items: payload, hasNextPage: last.has_next_page, totalThreads },
+		page: { items: payload, hasNextPage: last.has_next_page },
 	};
 }
 

@@ -47,8 +47,6 @@ export interface ThreadListPage {
 	readonly items: readonly unknown[];
 	/** `has_next_page` of the page's LAST item; an empty page is a complete list. */
 	readonly hasNextPage: boolean;
-	/** `total_threads` of the page's first item, when it carried one. */
-	readonly totalThreads: number | null;
 }
 
 /** One thread-detail response, already proven to carry an entries array. */
