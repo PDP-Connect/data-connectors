@@ -1,0 +1,81 @@
+{
+  "status": "COMPLETED",
+  "entries": [
+    {
+      "uuid": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2",
+      "backend_uuid": "ffffffff-ffff-4fff-8fff-fffffffffff2",
+      "context_uuid": "cccccccc-cccc-4ccc-8ccc-ccccccccccc2",
+      "frontend_uuid": "dddddddd-dddd-4ddd-8ddd-ddddddddddd2",
+      "thread_title": "Synthetic thread two",
+      "thread_url_slug": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+      "query_str": "How does an answer read when there is no whole-answer block?",
+      "entry_created_datetime": "2026-10-01T16:30:00Z",
+      "entry_updated_datetime": "2026-10-01T16:30:09Z",
+      "updated_datetime": "2026-10-01T16:30:09Z",
+      "display_model": "sonar",
+      "user_selected_model": "sonar",
+      "mode": "academic",
+      "search_focus": "scholar",
+      "search_mode": "academic",
+      "query_language": "en",
+      "author_id": "00000000-0000-4000-8000-000000000001",
+      "author_username": "synthetic-owner",
+      "status": "COMPLETED",
+      "privacy_state": "private",
+      "thread_access": 2,
+      "related_queries": [],
+      "sources": {},
+      "read_write_token": "kkkkkkkk-kkkk-4kkk-8kkk-kkkkkkkkkkk2",
+      "blocks": [
+        {
+          "intended_usage": "web_results",
+          "web_result_block": {
+            "web_results": [
+              {
+                "name": "Synthetic source three",
+                "url": "https://example.net/synthetic-3",
+                "snippet": "A third synthetic page.",
+                "timestamp": "2026-09-29T00:00:00Z",
+                "is_attachment": false,
+                "is_image": false
+              },
+              { "name": 7, "url": "not a url" },
+              "not-a-result"
+            ]
+          }
+        },
+        {
+          "intended_usage": "ask_text_2_markdown",
+          "markdown_block": {
+            "answer": "Section two.",
+            "chunks": ["Section two."],
+            "progress": "COMPLETE",
+            "chunk_starting_offset": 24
+          }
+        },
+        {
+          "intended_usage": "ask_text_0_markdown",
+          "markdown_block": {
+            "answer": "Section zero.",
+            "chunks": ["Section zero."],
+            "progress": "COMPLETE",
+            "chunk_starting_offset": 0
+          }
+        },
+        {
+          "intended_usage": "ask_text_1_markdown",
+          "markdown_block": {
+            "answer": "Section one.",
+            "chunks": ["Section one."],
+            "progress": "COMPLETE",
+            "chunk_starting_offset": 13
+          }
+        }
+      ]
+    }
+  ],
+  "has_next_page": false,
+  "next_cursor": null,
+  "thread_metadata": { "title": "Synthetic thread two" },
+  "background_entries": []
+}
