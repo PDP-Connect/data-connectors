@@ -5,15 +5,17 @@
  * Syntax-aware count of full-inventory completion claims in one source file,
  * for `full-inventory-coverage-guard.test.ts`. A claim is either:
  *
- *   - `full_scan`: a call of `buildFullScanCoverageMessage`, however it is
- *     reached (named import, alias `import { x as y }`, `const y = x`, or a
- *     namespace member `ns.buildFullScanCoverageMessage(...)`), whatever the
- *     spacing before the parenthesis;
- *   - `self_coverage`: a DETAIL_COVERAGE built by hand whose `stream` and
- *     checkpoint stream are the same expression: a
- *     `buildDetailCoverageMessage({ stream: x, stateStream: x, ... })` call
- *     or an object literal `{ type: "DETAIL_COVERAGE", stream: x,
- *     state_stream: x, ... }`.
+ *   - `full_scan`: a call of `buildFullScanCoverageMessage`;
+ *   - `self_coverage`: a DETAIL_COVERAGE whose `stream` and checkpoint stream
+ *     are the same value, built through `buildDetailCoverageMessage({...})`,
+ *     emitted through `emitDetailCoverage(ctx, {...})`, or written as an
+ *     object literal `{ type: "DETAIL_COVERAGE", stream, state_stream }`.
+ *
+ * Helpers are recognised however they are reached: a named import, an import
+ * alias, a `const` re-binding (of a name or of a namespace member), or a
+ * namespace member call. Literal values are compared as AST values, so quote
+ * style and spacing do not matter. Source that does not parse cleanly throws:
+ * a partial count could hide a claim.
  *
  * `fullInventoryCoverage` is the one path that requires an `enumerated`
  * proof; these are the paths that do not.
@@ -32,7 +34,13 @@ interface AstNode {
 }
 
 const FULL_SCAN = "buildFullScanCoverageMessage";
-const DETAIL = "buildDetailCoverageMessage";
+const BUILD_DETAIL = "buildDetailCoverageMessage";
+const EMIT_DETAIL = "emitDetailCoverage";
+const HELPERS: ReadonlySet<string> = new Set([
+	FULL_SCAN,
+	BUILD_DETAIL,
+	EMIT_DETAIL,
+]);
 
 function isNode(value: unknown): value is AstNode {
 	return (
@@ -54,6 +62,7 @@ function visit(node: unknown, fn: (n: AstNode) => void): void {
 			key !== "loc" &&
 			key !== "start" &&
 			key !== "end" &&
+			key !== "errors" &&
 			typeof value === "object"
 		)
 			visit(value, fn);
@@ -66,26 +75,39 @@ function nameOf(node: unknown): string | null {
 	return null;
 }
 
-function propertyText(
-	object: AstNode,
-	keyName: string,
-	source: string,
-): string | null {
-	const properties = Array.isArray(object.properties) ? object.properties : [];
-	for (const property of properties) {
-		if (!isNode(property) || property.type !== "ObjectProperty") continue;
-		if (nameOf(property.key) !== keyName) continue;
-		const value = property.value;
-		if (!isNode(value)) return null;
-		const start = Number(value.start);
-		const end = Number(value.end);
-		return source.slice(start, end).replace(/\s+/g, "");
+/**
+ * A comparable value for an expression: a string literal's value (or a
+ * template literal with no expressions), otherwise the source text with
+ * spacing removed.
+ */
+function comparableOf(node: unknown, source: string): string | null {
+	if (!isNode(node)) return null;
+	if (node.type === "StringLiteral") return `str:${String(node.value)}`;
+	if (node.type === "TemplateLiteral") {
+		const expressions = Array.isArray(node.expressions) ? node.expressions : [];
+		const quasis = Array.isArray(node.quasis) ? node.quasis : [];
+		if (expressions.length === 0 && quasis.length === 1) {
+			const cooked = (quasis[0] as { value?: { cooked?: unknown } }).value
+				?.cooked;
+			if (typeof cooked === "string") return `str:${cooked}`;
+		}
 	}
-	return null;
+	return `src:${source.slice(Number(node.start), Number(node.end)).replace(/\s+/g, "")}`;
+}
+
+function property(object: AstNode, keyName: string): unknown {
+	const properties = Array.isArray(object.properties) ? object.properties : [];
+	for (const entry of properties)
+		if (
+			isNode(entry) &&
+			entry.type === "ObjectProperty" &&
+			nameOf(entry.key) === keyName
+		)
+			return entry.value;
+	return undefined;
 }
 
 export function scanFullInventoryClaims(source: string): ClaimCounts {
-	const counts: ClaimCounts = { full_scan: 0, self_coverage: 0 };
 	let ast: unknown;
 	try {
 		ast = parse(source, {
@@ -93,64 +115,78 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			plugins: ["typescript"],
 			sourceType: "module",
 		});
-	} catch {
-		// Unparseable: count the plain text so it can never hide a claim.
-		counts.full_scan = source.split(FULL_SCAN).length - 1;
-		return counts;
+	} catch (error) {
+		throw new Error(
+			`full-inventory claim scan: source could not be parsed (${String(error)})`,
+		);
 	}
-	const aliases = new Map<string, string>([
-		[FULL_SCAN, FULL_SCAN],
-		[DETAIL, DETAIL],
-	]);
+	const errors = (ast as { errors?: unknown[] }).errors ?? [];
+	if (errors.length > 0)
+		throw new Error(
+			`full-inventory claim scan: source could not be parsed (${String(errors[0])})`,
+		);
+
+	const counts: ClaimCounts = { full_scan: 0, self_coverage: 0 };
+	const aliases = new Map<string, string>(
+		[...HELPERS].map((helper) => [helper, helper]),
+	);
 	const namespaces = new Set<string>();
-	// Imports and simple re-bindings first, so call sites resolve aliases.
 	visit(ast, (node) => {
 		if (node.type === "ImportSpecifier") {
 			const imported = nameOf(node.imported);
 			const local = nameOf(node.local);
-			if (imported && local && (imported === FULL_SCAN || imported === DETAIL))
+			if (imported && local && HELPERS.has(imported))
 				aliases.set(local, imported);
 		} else if (node.type === "ImportNamespaceSpecifier") {
 			const local = nameOf(node.local);
 			if (local) namespaces.add(local);
 		}
 	});
-	visit(ast, (node) => {
-		if (node.type !== "VariableDeclarator") return;
-		const target = nameOf(node.id);
-		const from = nameOf(node.init);
-		const resolved = from === null ? undefined : aliases.get(from);
-		if (target && resolved) aliases.set(target, resolved);
-	});
-	const calleeName = (callee: unknown): string | null => {
-		if (!isNode(callee)) return null;
-		if (callee.type === "Identifier")
-			return aliases.get(String(callee.name)) ?? null;
-		if (callee.type === "MemberExpression") {
-			const property = nameOf(callee.property);
-			if (property === FULL_SCAN || property === DETAIL) return property;
+	/** The helper an expression names: an alias, or a namespace member. */
+	const helperOf = (expression: unknown): string | null => {
+		if (!isNode(expression)) return null;
+		if (expression.type === "Identifier")
+			return aliases.get(String(expression.name)) ?? null;
+		if (expression.type === "MemberExpression") {
+			const member = nameOf(expression.property);
+			if (member && HELPERS.has(member)) return member;
 		}
 		return null;
 	};
+	// Re-bindings, repeated until stable so a chain of consts resolves.
+	for (let changed = true; changed; ) {
+		changed = false;
+		visit(ast, (node) => {
+			if (node.type !== "VariableDeclarator") return;
+			const target = nameOf(node.id);
+			const helper = helperOf(node.init);
+			if (target && helper && aliases.get(target) !== helper) {
+				aliases.set(target, helper);
+				changed = true;
+			}
+		});
+	}
+	const isSelfClaim = (object: unknown, stateKey: string): boolean => {
+		if (!isNode(object) || object.type !== "ObjectExpression") return false;
+		const stream = comparableOf(property(object, "stream"), source);
+		const state = comparableOf(property(object, stateKey), source);
+		return stream !== null && stream === state;
+	};
 	visit(ast, (node) => {
 		if (node.type === "CallExpression") {
-			const callee = calleeName(node.callee);
-			if (callee === FULL_SCAN) counts.full_scan += 1;
-			else if (callee === DETAIL) {
-				const args = Array.isArray(node.arguments) ? node.arguments : [];
-				const first = args[0];
-				if (isNode(first) && first.type === "ObjectExpression") {
-					const stream = propertyText(first, "stream", source);
-					const state = propertyText(first, "stateStream", source);
-					if (stream !== null && stream === state) counts.self_coverage += 1;
-				}
-			}
+			const helper = helperOf(node.callee);
+			const args = Array.isArray(node.arguments) ? node.arguments : [];
+			if (helper === FULL_SCAN) counts.full_scan += 1;
+			else if (helper === BUILD_DETAIL && isSelfClaim(args[0], "stateStream"))
+				counts.self_coverage += 1;
+			else if (helper === EMIT_DETAIL && isSelfClaim(args[1], "stateStream"))
+				counts.self_coverage += 1;
 		} else if (node.type === "ObjectExpression") {
-			const type = propertyText(node, "type", source);
-			if (type !== '"DETAIL_COVERAGE"') return;
-			const stream = propertyText(node, "stream", source);
-			const state = propertyText(node, "state_stream", source);
-			if (stream !== null && stream === state) counts.self_coverage += 1;
+			if (
+				comparableOf(property(node, "type"), source) !== "str:DETAIL_COVERAGE"
+			)
+				return;
+			if (isSelfClaim(node, "state_stream")) counts.self_coverage += 1;
 		}
 	});
 	return counts;

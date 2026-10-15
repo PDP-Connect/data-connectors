@@ -23,23 +23,37 @@ import {
 } from "./full-inventory-claim-scan.ts";
 
 const BASELINE: Readonly<Record<string, ClaimCounts>> = {
+	"connectors/amazon/index.ts": { full_scan: 0, self_coverage: 3 },
 	"connectors/anthropic/index.ts": { full_scan: 4, self_coverage: 0 },
 	"connectors/anthropic_live/index.ts": { full_scan: 2, self_coverage: 0 },
-	"connectors/apple_contacts/index.ts": { full_scan: 1, self_coverage: 0 },
+	"connectors/apple_contacts/index.ts": { full_scan: 1, self_coverage: 2 },
 	"connectors/chase/index.ts": { full_scan: 1, self_coverage: 2 },
 	"connectors/chatgpt/index.ts": { full_scan: 3, self_coverage: 2 },
 	"connectors/doordash/index.ts": { full_scan: 0, self_coverage: 2 },
 	"connectors/github/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/gmail/index.ts": { full_scan: 1, self_coverage: 2 },
+	"connectors/google_calendar/index.ts": { full_scan: 0, self_coverage: 1 },
+	"connectors/google_contacts/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/google_maps/index.ts": { full_scan: 1, self_coverage: 2 },
+	"connectors/google_maps_data_portability/index.ts": {
+		full_scan: 0,
+		self_coverage: 2,
+	},
+	"connectors/google_messages/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/groupme/index.ts": { full_scan: 4, self_coverage: 0 },
+	"connectors/heb/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/jellyfin/index.ts": { full_scan: 1, self_coverage: 1 },
 	"connectors/linkedin/index.ts": { full_scan: 0, self_coverage: 1 },
+	"connectors/meta/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/signal/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/slack/index.ts": { full_scan: 6, self_coverage: 2 },
+	"connectors/spotify/index.ts": { full_scan: 0, self_coverage: 2 },
+	"connectors/steam/index.ts": { full_scan: 0, self_coverage: 6 },
 	"connectors/uber/index.ts": { full_scan: 0, self_coverage: 1 },
+	"connectors/usaa/index.ts": { full_scan: 0, self_coverage: 5 },
 	"connectors/venmo/index.ts": { full_scan: 0, self_coverage: 3 },
 	"connectors/whatsapp/index.ts": { full_scan: 0, self_coverage: 3 },
+	"connectors/ynab/index.ts": { full_scan: 0, self_coverage: 2 },
 };
 
 function sourceFiles(dir: string): string[] {
@@ -135,7 +149,38 @@ const SCAN_CASES: ReadonlyArray<[string, string, ClaimCounts]> = [
 		'// buildFullScanCoverageMessage("a", 1)\nconst text = "buildFullScanCoverageMessage(";',
 		COUNT(0, 0),
 	],
+	// review b360011 core#2: ordinary claims the first scanner missed.
+	[
+		"review b360011 core#2: a single-quoted self DETAIL_COVERAGE literal",
+		"emit({ type: 'DETAIL_COVERAGE', reference_only: true, stream: 'items', state_stream: 'items', required_keys: [], hydrated_keys: [], considered: 1, covered: 1 });",
+		COUNT(0, 1),
+	],
+	[
+		"review b360011 core#2: a self claim through emitDetailCoverage",
+		'import { emitDetailCoverage } from "x";\nemitDetailCoverage(ctx, { stream: s, stateStream: s, requiredKeys: [], hydratedKeys: [], considered: n, covered: n });',
+		COUNT(0, 1),
+	],
+	[
+		"review b360011 core#2: a namespace member re-bound to a const",
+		'import * as runtime from "x";\nconst claim = runtime.buildFullScanCoverageMessage;\nclaim("a", 1);',
+		COUNT(1, 0),
+	],
+	[
+		"review b360011 core#2: a namespace emitDetailCoverage self claim",
+		'import * as runtime from "x";\nruntime.emitDetailCoverage(ctx, { stream: "a", stateStream: "a", requiredKeys: [], hydratedKeys: [] });',
+		COUNT(0, 1),
+	],
 ];
+
+test("review b360011 core#2: unparseable production source fails the scan instead of counting part of it", () => {
+	assert.throws(
+		() =>
+			scanFullInventoryClaims(
+				"const x = {\nbuildDetailCoverageMessage({ stream: s, stateStream: s",
+			),
+		/could not be parsed/,
+	);
+});
 
 for (const [name, source, expected] of SCAN_CASES) {
 	test(`full-inventory claim scan: ${name}`, () => {
