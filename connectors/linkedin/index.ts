@@ -768,30 +768,6 @@ export async function collectLinkedIn(
 	if (wantsConnections && connectionsResult) {
 		const { elements, terminationReason } = connectionsResult;
 		const connectionsComplete = terminationReason === "verified_end";
-		if (!connectionsComplete) {
-			const pageBudget = terminationReason === "page_budget";
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "connections",
-				reason: pageBudget
-					? "older_connections_deferred_page_budget"
-					: terminationReason === "page_error"
-						? "linkedin_connections_page_failed"
-						: "linkedin_connections_page_malformed",
-				recovery_hint: connectionRecoveryHint(terminationReason),
-				message:
-					"LinkedIn connections listing did not provide verified end-of-list evidence",
-				diagnostics: {
-					termination_reason: terminationReason,
-					observed_count: connectionsResult.observed,
-					total: connectionsResult.total,
-					missing_urn_count: connectionsResult.missingUrnCount,
-					...(connectionsResult.error
-						? { error: connectionsResult.error }
-						: {}),
-				},
-			});
-		}
 		const memberUrns = elements
 			.map((e) => e.connectedMember)
 			.filter((u): u is string => typeof u === "string" && u.trim().length > 0);
@@ -850,6 +826,20 @@ export async function collectLinkedIn(
 						? "connectionEnrichmentIncomplete"
 						: "connectionFieldsUnreadable",
 				diagnostics: {
+					termination_reason: terminationReason,
+					observed_count: connectionsResult.observed,
+					total: connectionsResult.total,
+					missing_urn_count: connectionsResult.missingUrnCount,
+					...(!connectionsComplete
+						? {
+							page_reason: terminationReason === "page_budget"
+								? "older_connections_deferred_page_budget"
+								: terminationReason === "page_error"
+									? "linkedin_connections_page_failed"
+									: "linkedin_connections_page_malformed",
+						}
+						: {}),
+					...(connectionsResult.error ? { error: connectionsResult.error } : {}),
 					unresolved_count: unresolved,
 					malformed_count: resolution.malformedCount,
 				},
@@ -896,21 +886,17 @@ const ROW_GAP_REASON: Record<RowGapReason, string> = {
 };
 
 /**
- * Emit a stream's rows and its one completeness decision. Only covered rows
- * are emitted: an uncovered row is withheld whole, because a partial upsert
- * would erase stored values. DETAIL_COVERAGE is emitted only when the
- * enumeration has a verified end, and it is complete only when every
- * considered row is covered. A withheld row stays considered, so any withheld
- * or omitted row adds one retryable gap that names the rows and unavailable
- * fields by reason: the stream is never complete, and nothing is replaced or
- * deleted, on this run.
+ * LinkedIn is UPSERT-ONLY: covered rows may be emitted, but enumeration
+ * never authorizes replacement. Keep field/row diagnostics and incomplete
+ * coverage evidence, and emit exactly one canonical gap even for a readable
+ * empty stream or a walk whose existing detector reports a verified end.
  */
 async function emitRows(
 	sink: StreamSink,
 	stream: string,
 	rows: StreamRows<Record<string, unknown>>,
 	options: {
-		diagnostics?: Record<string, number>;
+		diagnostics?: Record<string, unknown>;
 		enumerated: boolean;
 		gapReason: RowGapReason;
 	},
@@ -920,34 +906,26 @@ async function emitRows(
 	for (const record of rows.records) {
 		await sink.emitRecord(stream, record);
 	}
-	if (options.enumerated) {
+	if (options.enumerated && rows.covered < rows.considered) {
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 	}
-	if (rows.covered < rows.considered) {
-		await sink.emit({
-			type: "SKIP_RESULT",
-			stream,
-			reason: ROW_GAP_REASON[gapReason],
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message: `Some LinkedIn ${stream} entries had fields this run could not read`,
-			diagnostics: {
-				considered: rows.considered,
-				covered: rows.covered,
-				omitted_rows: rows.omittedRows,
-				unavailable_fields: rows.unavailableFields,
-				...options.diagnostics,
-			},
-		});
-	}
-}
-
-function connectionRecoveryHint(
-	terminationReason: ConnectionsResult["terminationReason"],
-): { action: string; retryable: boolean } {
-	if (terminationReason === "page_budget") {
-		return { action: "retry_on_connector_upgrade", retryable: false };
-	}
-	return { action: "retry_by_runtime", retryable: true };
+	await sink.emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "linkedin_enumeration_unproven",
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		message: `LinkedIn ${stream} enumeration is unproven; covered entries are upserted only`,
+		diagnostics: {
+			...(rows.covered < rows.considered
+				? { source_reason: ROW_GAP_REASON[gapReason] }
+				: {}),
+			considered: rows.considered,
+			covered: rows.covered,
+			omitted_rows: rows.omittedRows,
+			unavailable_fields: rows.unavailableFields,
+			...options.diagnostics,
+		},
+	});
 }
 
 function coverageMessage(
@@ -972,9 +950,10 @@ async function emitUnavailableSection(
 	await emit({
 		type: "SKIP_RESULT",
 		stream,
-		reason: "linkedin_profile_section_unavailable",
+		reason: "linkedin_enumeration_unproven",
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
-		message: "LinkedIn did not return a readable profile section",
+		message: "LinkedIn enumeration is unproven; the profile section was unreadable",
+		diagnostics: { source_reason: "linkedin_profile_section_unavailable" },
 	});
 }
 

@@ -362,6 +362,7 @@
 		}
 	],
 	"reason_display_messages": {
+		"linkedin_enumeration_unproven": "LinkedIn cannot verify the full inventory; readable entries are saved without replacing or deleting existing entries",
 		"absent": "LinkedIn did not provide this field",
 		"malformed": "LinkedIn returned this field in an unreadable format",
 		"invalid_value": "LinkedIn returned a value outside the expected format",

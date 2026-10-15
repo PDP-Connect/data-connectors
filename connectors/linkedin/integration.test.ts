@@ -4,7 +4,7 @@
 /**
  * Integration tests for the LinkedIn connector's `collect()` layer —
  * proves the Collection Profile contract (scope filtering, RECORD then
- * STATE/DETAIL_COVERAGE ordering) without a real browser or a live
+ * UPSERT-ONLY coverage gaps) without a real browser or a live
  * LinkedIn session.
  *
  * No browser is spun up. `page.goto`/`page.evaluate` are replaced by a
@@ -308,6 +308,10 @@ function claimsFullCoverage(
 	);
 }
 
+function diagnosticsOf(skip: { diagnostics?: unknown }): Record<string, unknown> {
+	return (skip.diagnostics ?? {}) as Record<string, unknown>;
+}
+
 /** Field names a SKIP_RESULT reports as unavailable. */
 function unavailableFieldsOf(skip: { diagnostics?: unknown }): string[] {
 	const fields = (skip.diagnostics as { unavailable_fields?: unknown } | undefined)
@@ -577,14 +581,7 @@ test("collectLinkedIn: full run emits a validated record for every requested str
 	)?.data;
 	assert.equal(connectionRecord?.id, "urn:li:fsd_profile:conn-1");
 	assert.equal(connectionRecord?.full_name, "Jamie Lee");
-	assert.ok(
-		recording.protocolMessages.some(
-			(message) =>
-				message.type === "DETAIL_COVERAGE" &&
-				message.stream === "connections",
-		),
-		"a verified end-of-list must authorize full connection inventory coverage",
-	);
+	assert.equal(claimsFullCoverage(recording, "connections"), false);
 });
 
 test("collectLinkedIn: requesting only 'profile' still fetches connections for connection_count, without emitting connections records", async () => {
@@ -616,7 +613,7 @@ test("collectLinkedIn: neither 'profile' nor 'connections' requested — no conn
 	);
 });
 
-test("collectLinkedIn: DETAIL_COVERAGE for a stream is emitted after that stream's records", async () => {
+test("collectLinkedIn: canonical gap for a stream is emitted after that stream's records", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const ctx = buildCtx(["skills"], recording);
 
@@ -628,11 +625,11 @@ test("collectLinkedIn: DETAIL_COVERAGE for a stream is emitted after that stream
 	const coverageIndex = recording.events.findIndex(
 		(e) =>
 			e.kind === "message" &&
-			e.message.type === "DETAIL_COVERAGE" &&
+			e.message.type === "SKIP_RESULT" &&
 			e.message.stream === "skills",
 	);
 	assert.ok(recordIndex >= 0, "expected a skills RECORD event");
-	assert.ok(coverageIndex >= 0, "expected a skills DETAIL_COVERAGE event");
+	assert.ok(coverageIndex >= 0, "expected a skills SKIP_RESULT event");
 	assert.ok(
 		recordIndex < coverageIndex,
 		"RECORD must be emitted before the coverage message that summarizes it",
@@ -663,7 +660,7 @@ test("collectLinkedIn: dash failure keeps /me profile fields and reports unavail
 	]);
 	assert.ok(
 		skipResults(recording).some(
-			(skip) => skip.reason === "linkedin_dash_profile_unavailable",
+			(skip) => diagnosticsOf(skip).source_reason === "linkedin_dash_profile_unavailable",
 		),
 	);
 });
@@ -688,7 +685,7 @@ test("collectLinkedIn: a basic empty dash profile cannot prove profile coverage"
 		skipResults(recording).some(
 			(skip) =>
 				skip.stream === "profile" &&
-				skip.reason === "linkedin_profile_fields_unavailable",
+				diagnosticsOf(skip).source_reason === "linkedin_profile_fields_unavailable",
 		),
 	);
 });
@@ -763,7 +760,7 @@ test("collectLinkedIn: a truncated decorated section does not claim complete cov
 		assert.ok(
 			skipResults(recording).some(
 				(skip) => skip.stream === "skills" &&
-					skip.reason === "linkedin_profile_section_unavailable",
+					diagnosticsOf(skip).source_reason === "linkedin_profile_section_unavailable",
 			),
 		);
 	}
@@ -806,7 +803,7 @@ test("collectLinkedIn: incomplete nested position paging withholds the experienc
 	assert.ok(
 		skipResults(recording).some(
 			(skip) => skip.stream === "experience" &&
-				skip.reason === "linkedin_fields_unreadable",
+				diagnosticsOf(skip).source_reason === "linkedin_fields_unreadable",
 		),
 	);
 });
@@ -868,10 +865,13 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 		"a malformed listing page is not verified end-of-list evidence",
 	);
 	const malformedSkip = skipResults(recording).find(
-		(skip) => skip.reason === "linkedin_connections_page_malformed",
+		(skip) => diagnosticsOf(skip).page_reason === "linkedin_connections_page_malformed",
 	);
 	assert.ok(malformedSkip);
-	assert.deepEqual(malformedSkip.diagnostics, {
+	assert.deepEqual(Object.fromEntries(
+		["termination_reason", "observed_count", "total", "missing_urn_count"]
+			.map((key) => [key, diagnosticsOf(malformedSkip)[key]]),
+	), {
 		termination_reason: "malformed_page",
 		observed_count: 0,
 		total: 99,
@@ -1025,10 +1025,13 @@ test("collectLinkedIn: error-ended connections walk withholds full-scan coverage
 		false,
 	);
 	const failedSkip = skipResults(recording).find(
-		(skip) => skip.reason === "linkedin_connections_page_failed",
+		(skip) => diagnosticsOf(skip).page_reason === "linkedin_connections_page_failed",
 	);
 	assert.ok(failedSkip);
-	assert.deepEqual(failedSkip.diagnostics, {
+	assert.deepEqual(Object.fromEntries(
+		["termination_reason", "observed_count", "total", "missing_urn_count", "error"]
+			.map((key) => [key, diagnosticsOf(failedSkip)[key]]),
+	), {
 		termination_reason: "page_error",
 		observed_count: 40,
 		total: null,
@@ -1115,7 +1118,7 @@ test("collectLinkedIn: unreadable nested sections do not prove empty coverage", 
 			skipResults(recording).some(
 				(skip) =>
 					skip.stream === stream &&
-					skip.reason === "linkedin_profile_section_unavailable",
+					diagnosticsOf(skip).source_reason === "linkedin_profile_section_unavailable",
 			),
 		);
 	}
@@ -1156,7 +1159,7 @@ test("collectLinkedIn: empty sections on the basic-profile fallback are unavaila
 		);
 		assert.ok(
 			skipResults(recording).some(
-				(skip) => skip.stream === stream && skip.reason === "linkedin_profile_section_unavailable",
+				(skip) => skip.stream === stream && diagnosticsOf(skip).source_reason === "linkedin_profile_section_unavailable",
 			),
 		);
 	}
@@ -1281,7 +1284,7 @@ test("collectLinkedIn: malformed mapped experience and education values stay unc
 			skipResults(recording).some(
 				(skip) =>
 					skip.stream === stream &&
-					skip.reason === "linkedin_fields_unreadable" &&
+					diagnosticsOf(skip).source_reason === "linkedin_fields_unreadable" &&
 					unavailableFieldsOf(skip).includes("start_date"),
 			),
 		);
@@ -1348,14 +1351,11 @@ test("collectLinkedIn: malformed profile mappings stay unavailable without crash
 			(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 				message.type === "DETAIL_COVERAGE" && message.stream === "experience",
 		);
-		if (Array.isArray(malformedGroups.elements)) {
-			assert.equal(experienceCoverage?.covered, 0);
-		} else {
-			assert.equal(experienceCoverage, undefined);
-		}
+		assert.equal(claimsFullCoverage(recording, "experience"), false);
+		if (experienceCoverage) assert.equal(experienceCoverage.covered, 0);
 		assert.ok(
 			skipResults(recording).some(
-				(skip) => skip.stream === "profile" && skip.reason === "linkedin_profile_fields_unavailable",
+				(skip) => skip.stream === "profile" && diagnosticsOf(skip).source_reason === "linkedin_profile_fields_unavailable",
 			),
 		);
 	}));
@@ -1388,7 +1388,7 @@ test("collectLinkedIn: malformed current-position and location values veto profi
 
 	assert.ok(
 		skipResults(recording).some(
-			(skip) => skip.reason === "linkedin_profile_fields_unavailable",
+			(skip) => diagnosticsOf(skip).source_reason === "linkedin_profile_fields_unavailable",
 		),
 	);
 	// The group's own experience row is uncovered (malformed title), so both
@@ -1400,7 +1400,7 @@ test("collectLinkedIn: malformed current-position and location values veto profi
 	]);
 });
 
-test("collectLinkedIn: readable empty sections prove an empty inventory", async () => {
+test("collectLinkedIn: readable empty sections still cannot authorize replacement", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const route = (path: string): unknown => {
 		if (path.startsWith("/voyager/api/me")) {
@@ -1436,10 +1436,10 @@ test("collectLinkedIn: readable empty sections prove an empty inventory", async 
 			): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 				message.type === "DETAIL_COVERAGE" && message.stream === stream,
 		);
-		assert.equal(coverage?.considered, 0);
-		assert.equal(coverage?.covered, 0);
+		assert.equal(coverage, undefined);
+		assert.equal(claimsFullCoverage(recording, stream), false);
 	}
-	assert.equal(skipResults(recording).length, 0);
+	assert.equal(skipResults(recording).length, 4);
 });
 
 test("collectLinkedIn: skill/language malformed rows preserve values and omit rows without source identity", async () => {
@@ -1560,7 +1560,7 @@ test("collectLinkedIn: connection rows without URNs and unresolved enrichment ar
 	assert.equal(coverage, undefined, "an omitted source row vetoes full coverage");
 	assert.ok(
 		skipResults(recording).some(
-			(skip) => skip.reason === "linkedin_connections_page_malformed",
+			(skip) => diagnosticsOf(skip).page_reason === "linkedin_connections_page_malformed",
 		),
 	);
 	assert.ok(
@@ -1671,8 +1671,8 @@ test("collectLinkedIn: batch array enrichment admits source-backed last-name-onl
 		(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			message.type === "DETAIL_COVERAGE" && message.stream === "connections",
 	);
-	assert.equal(coverage?.considered, 1);
-	assert.equal(coverage?.covered, 1);
+	assert.equal(coverage, undefined);
+	assert.equal(claimsFullCoverage(recording, "connections"), false);
 });
 
 test("collectLinkedIn: singleton enrichment preserves source-backed blanks in map and array forms", async () => {
@@ -1728,4 +1728,117 @@ test("collectLinkedIn: no live session (me endpoint fails) throws a non-retryabl
 		/linkedin_session_dead/,
 	);
 	assert.equal(recording.emitted.length, 0);
+});
+
+const ALL_STREAMS = [
+	"profile", "experience", "education", "skills", "languages", "connections",
+];
+
+function assertUpsertOnly(
+	recording: ReturnType<typeof makeRecordingEmit>,
+	expectedCounts: Record<string, number>,
+): void {
+	assert.equal(recording.skipped.length, 0);
+	assert.equal(
+		recording.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+	assert.equal(JSON.stringify(recording.events).includes('"op":"delete"'), false);
+	assert.equal(skipResults(recording).length, ALL_STREAMS.length);
+	for (const stream of ALL_STREAMS) {
+		assert.equal(claimsFullCoverage(recording, stream), false, stream);
+		const gaps = skipResults(recording).filter((gap) => gap.stream === stream);
+		assert.equal(gaps.length, 1, stream);
+		assert.equal(gaps[0]?.reason, "linkedin_enumeration_unproven", stream);
+		assert.deepEqual(gaps[0]?.recovery_hint, {
+			action: "retry_by_runtime", retryable: true,
+		});
+		assert.equal(
+			recording.emitted.filter((row) => row.stream === stream).length,
+			expectedCounts[stream] ?? 0,
+			stream,
+		);
+	}
+}
+
+test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration counterexamples", async (t) => {
+	const sectionKeys = [
+		"profilePositionGroups", "profileEducations", "profileSkills", "profileLanguages",
+	] as const;
+	const fullCounts = Object.fromEntries(ALL_STREAMS.map((stream) => [stream, 1]));
+	const skill = { entityUrn: "urn:li:skill:1", name: "A" };
+	const next = [{ rel: "next", href: "/voyager/api/identity/dash/profiles?start=1" }];
+	for (const fixture of [
+		"full", "empty", "truncated", "nested-empty", "nested-one", "next-empty", "next-one",
+	]) {
+		await t.test(fixture, async () => {
+			const profile: Record<string, unknown> = structuredClone(DASH_PROFILE_RESPONSE.elements[0] ?? {});
+			let connections: unknown = CONNECTIONS_PAGE_1;
+			let expectedCounts = { ...fullCounts };
+			if (fixture === "empty") {
+				for (const key of sectionKeys) {
+					profile[key] = { elements: [], paging: { start: 0, count: 1, total: 0 } };
+				}
+				connections = { elements: [], paging: { start: 0, count: 40, total: 0 } };
+				expectedCounts = { profile: 1 };
+			} else if (fixture === "truncated") {
+				for (const key of sectionKeys) {
+					const section = profile[key] as { elements: unknown[] };
+					profile[key] = { ...section, paging: { start: 0, count: 1, total: 2 } };
+				}
+				connections = { ...CONNECTIONS_PAGE_1, paging: { start: 0, count: 40, total: 2 } };
+				expectedCounts = { connections: 1 };
+			} else if (fixture.startsWith("nested-")) {
+				const one = fixture === "nested-one";
+				profile.profileSkills = {
+					elements: [{
+						elements: one ? [skill] : [],
+						paging: { start: 0, count: 1, total: one ? 2 : 1 },
+					}],
+					paging: { start: 0, count: 1, total: 1 },
+				};
+				expectedCounts.skills = one ? 1 : 0;
+			} else if (fixture.startsWith("next-")) {
+				const one = fixture === "next-one";
+				profile.profileSkills = {
+					elements: one ? [skill] : [],
+					paging: { start: 0, count: 1, total: one ? 1 : 0, links: next },
+				};
+				connections = {
+					elements: one ? CONNECTIONS_PAGE_1.elements : [],
+					paging: { start: 0, count: 40, total: one ? 1 : 0, links: next },
+				};
+				expectedCounts.skills = one ? 1 : 0;
+				expectedCounts.connections = one ? 1 : 0;
+			}
+			const recording = makeRecordingEmit(validateRecord);
+			const ctx = buildCtx(ALL_STREAMS, recording);
+			// Bypass the legacy fixture helper: preserve the exact nested and
+			// continuation payloads, including contradictory provider totals.
+			ctx.page = makeFakePage((path) => {
+				if (path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")) {
+					return { elements: [profile] };
+				}
+				if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+					return connections;
+				}
+				return routeVoyagerPath(path);
+			});
+			await collectLinkedIn({
+				...ctx,
+				emitRecord: async (...args) => {
+					for (const arg of args) {
+						if (typeof arg === "object" && arg !== null && "op" in arg) {
+							assert.notEqual(arg.op, "delete");
+						}
+					}
+					return ctx.emitRecord(...args);
+				},
+			});
+			assertUpsertOnly(recording, expectedCounts);
+			if (fixture === "nested-one" || fixture === "next-one") {
+				assert.equal(recording.emitted.find((row) => row.stream === "skills")?.data.id, skill.entityUrn);
+			}
+		});
+	}
 });

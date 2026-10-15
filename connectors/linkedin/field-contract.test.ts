@@ -4,13 +4,11 @@
 /**
  * The field-reading contract, end to end through `collectLinkedIn`.
  *
- * PDPP LinkedIn replaces the legacy collector, so a stream reported complete
- * authorizes deleting stored rows. A stream may be complete only when its
- * enumeration ended verifiably AND every mapped field of every row was read
- * (or the source said it is empty). These tests feed every mapped source
- * path, and every container on the way to it, a malformed value, and assert
- * that the run does not crash, that the stream is not complete, and that the
- * affected field is left out of its row instead of being emitted as `null`.
+ * LinkedIn is deliberately upsert-only until the shared enumeration-proof
+ * primitive lands. These tests focus on field readability: every mapped
+ * source path and container receives a malformed value, and the run must not
+ * crash or emit a row with an unreadable field. Fully readable rows still
+ * emit, but no fixture can authorize full-inventory replacement.
  *
  * The second half pins every concrete counterexample from the three review
  * rounds of this port.
@@ -190,8 +188,8 @@ interface Routes {
 	resolve?: (path: string) => Json;
 }
 
-/** Default test collections represent complete sections; paging-specific
- *  tests leave their explicit evidence untouched. */
+/** Default test collections have a verified end; paging-specific tests leave
+ *  their explicit evidence untouched. The connector still stays upsert-only. */
 function completeCollectionsForFixture(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(completeCollectionsForFixture);
 	if (typeof value !== "object" || value === null) return value;
@@ -331,7 +329,7 @@ interface StreamOutcome {
 	rejected: number;
 }
 
-/** Complete: one DETAIL_COVERAGE with covered === considered, and no gap. */
+/** True only if the connector emits a completion claim for this stream. */
 function outcomeOf(recording: Recording, stream: string): StreamOutcome {
 	const coverage = recording.protocolMessages.filter(
 		(
@@ -816,17 +814,18 @@ function fixtureWith(injection: Injection): Record<Root, Json> {
 	return fixture;
 }
 
-// ─── Control: the full fixture is complete ───────────────────────────────
+// ─── Control: the full fixture stays readable and upsert-only ────────────
 
-test("contract control: every stream of the fully readable fixture is complete", async () => {
+test("contract control: every stream emits its fully readable rows without claiming completeness", async () => {
 	const recording = await collect(routesFor(baseFixture()));
 	for (const stream of ALL_STREAMS) {
 		const outcome = outcomeOf(recording, stream);
 		assert.equal(
 			outcome.complete,
-			true,
-			`${stream}: ${JSON.stringify(outcome)}`,
+			false,
+			`${stream} unexpectedly claims completeness: ${JSON.stringify(outcome)}`,
 		);
+		assert.ok(outcome.records.length > 0, `${stream}: no readable records emitted`);
 	}
 	const [profile] = outcomeOf(recording, "profile").records;
 	assert.deepEqual(profile, {
@@ -998,14 +997,14 @@ const EMPTY_VALUE_CASES: ReadonlyArray<{
 ];
 
 for (const emptyCase of EMPTY_VALUE_CASES) {
-	test(`contract: ${emptyCase.stream}.${emptyCase.field} = ${JSON.stringify(emptyCase.value)} is a real value and stays complete`, async () => {
+	test(`contract: ${emptyCase.stream}.${emptyCase.field} = ${JSON.stringify(emptyCase.value)} is readable while the stream stays upsert-only`, async () => {
 		const fixture = baseFixture();
 		setPath(fixture[emptyCase.root], emptyCase.path, emptyCase.value);
 		const outcome = outcomeOf(
 			await collect(routesFor(fixture)),
 			emptyCase.stream,
 		);
-		assert.equal(outcome.complete, true, JSON.stringify(outcome));
+		assert.equal(outcome.complete, false, JSON.stringify(outcome));
 		const row = outcome.records.find((record) => record.id === emptyCase.rowId);
 		assert.ok(row, "row emitted");
 		assert.deepEqual(row[emptyCase.field], emptyCase.expected);
@@ -1081,7 +1080,7 @@ test("r1: an empty first decoration falls through to the next decoration", async
 				? { elements: [{}] }
 				: { elements: [completeCollectionsForFixture(fixture.dash)] },
 	});
-	assert.equal(outcomeOf(recording, "profile").complete, true);
+	assert.equal(outcomeOf(recording, "profile").complete, false);
 });
 
 test("r1: primitive section rows and an unreadable nested collection are not covered", async () => {
@@ -1119,7 +1118,7 @@ test("r1: resolver keeps source-backed blank names and rejects a numeric name", 
 	const fixture = baseFixture();
 	fixture.resolved = { firstName: "", headline: "", lastName: "" };
 	const blanks = outcomeOf(await collect(routesFor(fixture)), "connections");
-	assert.equal(blanks.complete, true, JSON.stringify(blanks));
+	assert.equal(blanks.complete, false, JSON.stringify(blanks));
 	assert.deepEqual(blanks.records[0], {
 		connected_at: "2023-11-14T22:13:20.000Z",
 		full_name: "",
@@ -1197,7 +1196,7 @@ test("r2: unreadable position containers do not throw and keep streams incomplet
 		);
 		assert.equal(outcomeOf(recording, "profile").complete, false);
 		assert.equal(outcomeOf(recording, "experience").complete, false);
-		assert.equal(outcomeOf(recording, "skills").complete, true);
+		assert.equal(outcomeOf(recording, "skills").complete, false);
 	}
 });
 
@@ -1222,7 +1221,7 @@ test("r3: malformed name, headline and picture with no fallback keep the profile
 	const profile = outcomeOf(recording, "profile");
 	assert.equal(profile.complete, false);
 	assertWithheld(profile, ["full_name", "headline", "profile_picture_url"]);
-	assert.equal(outcomeOf(recording, "connections").complete, true);
+	assert.equal(outcomeOf(recording, "connections").complete, false);
 });
 
 test("r3: preferredGeoPlace without a country code is read, not dropped", async () => {
@@ -1234,7 +1233,7 @@ test("r3: preferredGeoPlace without a country code is read, not dropped", async 
 		"profile",
 	);
 	assert.equal(profile.records[0]?.location, "Paris");
-	assert.equal(profile.complete, true);
+	assert.equal(profile.complete, false);
 });
 
 test("r3: education rows with unreadable or missing logo content are not covered", async () => {
