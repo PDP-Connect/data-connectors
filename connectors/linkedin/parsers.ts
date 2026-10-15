@@ -98,16 +98,17 @@ export function endDateOf(node: VoyagerDateBearing | undefined): string | null {
 export function vectorImageUrl(
 	image: VoyagerVectorImage | undefined,
 ): string | null {
-	const artifacts = image?.artifacts ?? [];
+	const artifacts = Array.isArray(image?.artifacts) ? image.artifacts : [];
 	if (artifacts.length === 0) {
 		return null;
 	}
 	const largest = artifacts.at(-1);
 	const segment = largest?.fileIdentifyingUrlPathSegment;
-	if (!segment) {
+	if (typeof segment !== "string" || segment.length === 0) {
 		return null;
 	}
-	return `${image?.rootUrl ?? ""}${segment}`;
+	const rootUrl = typeof image?.rootUrl === "string" ? image.rootUrl : "";
+	return `${rootUrl}${segment}`;
 }
 
 // ─── Ids ────────────────────────────────────────────────────────────────
@@ -221,6 +222,211 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function optionalStringFieldsAreReadable(
+	row: Record<string, unknown>,
+	fields: readonly string[],
+): boolean {
+	return fields.every(
+		(field) =>
+			!Object.hasOwn(row, field) ||
+			row[field] === null ||
+			typeof row[field] === "string",
+	);
+}
+
+function datePointIsReadable(value: unknown): boolean {
+	if (value === null) return true;
+	if (!isRecord(value)) return false;
+	return ["month", "year"].every(
+		(field) =>
+			!Object.hasOwn(value, field) ||
+			(typeof value[field] === "number" && Number.isFinite(value[field])),
+	);
+}
+
+function dateRangeIsReadable(value: unknown): boolean {
+	if (value === null) return true;
+	if (!isRecord(value)) return false;
+	return ["start", "end", "startDate", "endDate"].every(
+		(field) => !Object.hasOwn(value, field) || datePointIsReadable(value[field]),
+	);
+}
+
+function dateFieldsAreReadable(row: Record<string, unknown>): boolean {
+	return (
+		["dateRange", "timePeriod"].every(
+			(field) => !Object.hasOwn(row, field) || dateRangeIsReadable(row[field]),
+		) &&
+		["startDate", "endDate"].every(
+			(field) => !Object.hasOwn(row, field) || datePointIsReadable(row[field]),
+		)
+	);
+}
+
+function optionalNameObjectIsReadable(value: unknown): boolean {
+	return (
+		value === null ||
+		(isRecord(value) &&
+			Object.hasOwn(value, "name") &&
+			optionalStringFieldsAreReadable(value, ["name"]))
+	);
+}
+
+const POSITION_GROUP_FIELDS = [
+	"company",
+	"dateRange",
+	"description",
+	"endDate",
+	"entityUrn",
+	"geoLocationName",
+	"locationName",
+	"name",
+	"profilePositionInPositionGroup",
+	"startDate",
+	"title",
+] as const;
+
+const POSITION_GROUP_STRING_FIELDS = [
+	"description",
+	"entityUrn",
+	"geoLocationName",
+	"locationName",
+	"name",
+	"title",
+] as const;
+
+const POSITION_FIELDS = [
+	"companyName",
+	"dateRange",
+	"description",
+	"employmentType",
+	"endDate",
+	"entityUrn",
+	"geoLocationName",
+	"locationName",
+	"startDate",
+	"title",
+] as const;
+
+const POSITION_STRING_FIELDS = [
+	"companyName",
+	"description",
+	"entityUrn",
+	"geoLocationName",
+	"locationName",
+	"title",
+] as const;
+
+function isReadablePosition(value: unknown): value is VoyagerPosition {
+	return (
+		isRecord(value) &&
+		hasKnownSourceField(value, POSITION_FIELDS) &&
+		optionalStringFieldsAreReadable(value, POSITION_STRING_FIELDS) &&
+		dateFieldsAreReadable(value) &&
+		(!Object.hasOwn(value, "employmentType") ||
+			optionalNameObjectIsReadable(value.employmentType))
+	);
+}
+
+function isReadablePositionGroupBase(value: unknown): value is VoyagerPositionGroup {
+	if (!isRecord(value)) return false;
+	const hasGroupValue = POSITION_GROUP_STRING_FIELDS.some((field) =>
+		Object.hasOwn(value, field),
+	);
+	const hasCompanyValue =
+		Object.hasOwn(value, "company") &&
+		(value.company === null ||
+			(isRecord(value.company) && Object.hasOwn(value.company, "name")));
+	const hasDateValue = ["dateRange", "timePeriod", "startDate", "endDate"].some(
+		(field) => Object.hasOwn(value, field),
+	);
+	const nested = value.profilePositionInPositionGroup;
+	const hasPositionValue =
+		isRecord(nested) && Array.isArray(nested.elements) && nested.elements.length > 0;
+	return (
+		(hasGroupValue || hasCompanyValue || hasDateValue || hasPositionValue) &&
+		hasKnownSourceField(value, POSITION_GROUP_FIELDS) &&
+		optionalStringFieldsAreReadable(value, POSITION_GROUP_STRING_FIELDS) &&
+		dateFieldsAreReadable(value) &&
+		(!Object.hasOwn(value, "company") ||
+			optionalNameObjectIsReadable(value.company))
+	);
+}
+
+/** True only when every field used to derive a position-group record can be
+ *  read without coercion. Shared by profile coverage and experience parsing. */
+export function isReadablePositionGroup(
+	value: unknown,
+): value is VoyagerPositionGroup {
+	if (!isReadablePositionGroupBase(value)) return false;
+	if (!Object.hasOwn(value, "profilePositionInPositionGroup")) return true;
+	const nested = value.profilePositionInPositionGroup;
+	return (
+		isRecord(nested) &&
+		Array.isArray(nested.elements) &&
+		nested.elements.every(isReadablePosition)
+	);
+}
+
+function locationBranchIsReadable(
+	profile: Record<string, unknown>,
+	key: "location" | "geoLocation",
+): boolean {
+	if (!Object.hasOwn(profile, key)) return true;
+	const branch = profile[key];
+	if (branch === null) return true;
+	if (!isRecord(branch)) return false;
+	if (key === "location") {
+		if (!optionalStringFieldsAreReadable(branch, ["preferredGeoPlace"])) {
+			return false;
+		}
+		if (!Object.hasOwn(branch, "basicLocation")) return true;
+		const basicLocation = branch.basicLocation;
+		return (
+			basicLocation === null ||
+			(isRecord(basicLocation) &&
+				Object.hasOwn(basicLocation, "countryCode") &&
+				optionalStringFieldsAreReadable(basicLocation, ["countryCode"]))
+		);
+	}
+	if (!Object.hasOwn(branch, "geo")) return true;
+	const geo = branch.geo;
+	return (
+		geo === null ||
+		(isRecord(geo) &&
+			Object.hasOwn(geo, "defaultLocalizedName") &&
+			optionalStringFieldsAreReadable(geo, ["defaultLocalizedName"]))
+	);
+}
+
+/** Matches the location branches consumed by locationNameOf(). */
+export function isReadableProfileLocation(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	const hasSource = Object.hasOwn(value, "location") || Object.hasOwn(value, "geoLocation");
+	const location = value.location;
+	const geoLocation = value.geoLocation;
+	const hasLocationValue =
+		location === null ||
+		(isRecord(location) &&
+			(Object.hasOwn(location, "preferredGeoPlace") ||
+				location.basicLocation === null ||
+				(isRecord(location.basicLocation) &&
+					Object.hasOwn(location.basicLocation, "countryCode"))));
+	const hasGeoLocationValue =
+		geoLocation === null ||
+		(isRecord(geoLocation) &&
+			(geoLocation.geo === null ||
+				(isRecord(geoLocation.geo) &&
+					Object.hasOwn(geoLocation.geo, "defaultLocalizedName"))));
+	return (
+		hasSource &&
+		((Object.hasOwn(value, "location") && hasLocationValue) ||
+			(Object.hasOwn(value, "geoLocation") && hasGeoLocationValue)) &&
+		locationBranchIsReadable(value, "location") &&
+		locationBranchIsReadable(value, "geoLocation")
+	);
+}
+
 function nonEmpty(s: string | undefined | null): string | null {
 	if (typeof s !== "string") {
 		return null;
@@ -255,15 +461,26 @@ export function profileUrlFor(publicIdentifier: string): string {
  * cheap to keep and a different account/decoration could still expose it.
  */
 export function locationNameOf(profile: VoyagerProfileElement): string | null {
-	const countryCode = profile.location?.basicLocation?.countryCode;
-	if (countryCode) {
+	const location = isRecord(profile.location) ? profile.location : null;
+	const basicLocation = isRecord(location?.basicLocation)
+		? location.basicLocation
+		: null;
+	const countryCode = basicLocation?.countryCode;
+	const preferredGeoPlace = location?.preferredGeoPlace;
+	if (typeof countryCode === "string" && countryCode.length > 0) {
 		return nonEmpty(
-			[profile.location?.preferredGeoPlace, countryCode]
+			[typeof preferredGeoPlace === "string" ? preferredGeoPlace : null, countryCode]
 				.filter(Boolean)
 				.join(", "),
 		);
 	}
-	return nonEmpty(profile.geoLocation?.geo?.defaultLocalizedName);
+	const geoLocation = isRecord(profile.geoLocation) ? profile.geoLocation : null;
+	const geo = isRecord(geoLocation?.geo) ? geoLocation.geo : null;
+	return nonEmpty(
+		typeof geo?.defaultLocalizedName === "string"
+			? geo.defaultLocalizedName
+			: null,
+	);
 }
 
 /**
@@ -312,12 +529,18 @@ export function buildProfileRecord(
 	miniProfile: VoyagerMiniProfile | undefined,
 	connectionCount: number | null,
 ): ProfileRecord {
-	const positionGroups = profile.profilePositionGroups?.elements ?? [];
-	const current = positionGroups.find((group) => endDateOf(group) === null);
+	const positionGroups = Array.isArray(profile.profilePositionGroups?.elements)
+		? profile.profilePositionGroups.elements
+		: [];
+	const current = positionGroups.find(
+		(group) => isReadablePositionGroup(group) && endDateOf(group) === null,
+	);
+	const rawPositions = current?.profilePositionInPositionGroup?.elements;
+	const positions = Array.isArray(rawPositions)
+		? rawPositions.filter(isReadablePosition)
+		: [];
 	const currentPosition =
-		current?.profilePositionInPositionGroup?.elements?.find(
-			(pos) => endDateOf(pos) === null,
-		) ?? current?.profilePositionInPositionGroup?.elements?.[0];
+		positions.find((pos) => endDateOf(pos) === null) ?? positions[0];
 
 	return {
 		connection_count: connectionCount,
@@ -379,26 +602,25 @@ export function buildExperienceRecordsWithOmissions(
 			addOmission(omissions, "malformed_row");
 			continue;
 		}
-		const group = rawGroup as VoyagerPositionGroup;
-		if (
-			!hasKnownSourceField(rawGroup, [
-				"company",
-				"dateRange",
-				"description",
-				"endDate",
-				"entityUrn",
-				"geoLocationName",
-				"locationName",
-				"name",
-				"profilePositionInPositionGroup",
-				"startDate",
-				"title",
-			])
-		) {
+		const hasNestedCollection = Object.hasOwn(
+			rawGroup,
+			"profilePositionInPositionGroup",
+		);
+		const rawNested = hasNestedCollection
+			? rawGroup.profilePositionInPositionGroup
+			: undefined;
+		if (!isReadablePositionGroupBase(rawGroup)) {
 			considered += 1;
-			addOmission(omissions, "malformed_row");
+			addOmission(
+				omissions,
+				hasNestedCollection &&
+					(!isRecord(rawNested) || !Array.isArray(rawNested.elements))
+					? "unreadable_nested_collection"
+					: "malformed_row",
+			);
 			continue;
 		}
+		const group = rawGroup as VoyagerPositionGroup;
 
 		let rawPositions: unknown[] = [];
 		if (Object.hasOwn(rawGroup, "profilePositionInPositionGroup")) {
@@ -416,28 +638,11 @@ export function buildExperienceRecordsWithOmissions(
 			considered += rawPositions.length;
 			for (let positionIndex = 0; positionIndex < rawPositions.length; positionIndex += 1) {
 				const rawPosition = rawPositions[positionIndex];
-				if (!isRecord(rawPosition)) {
+				if (!isReadablePosition(rawPosition)) {
 					addOmission(omissions, "malformed_row");
 					continue;
 				}
-				const pos = rawPosition as VoyagerPosition;
-				if (
-					!hasKnownSourceField(rawPosition, [
-						"companyName",
-						"dateRange",
-						"description",
-						"employmentType",
-						"endDate",
-						"entityUrn",
-						"geoLocationName",
-						"locationName",
-						"startDate",
-						"title",
-					])
-				) {
-					addOmission(omissions, "malformed_row");
-					continue;
-				}
+				const pos = rawPosition;
 				records.push({
 					company: nonEmpty(pos.companyName) ?? groupCompanyName,
 					description: nonEmpty(pos.description),
@@ -482,6 +687,45 @@ function educationLogoUrlOf(edu: VoyagerEducation): string | null {
 	return vectorImageUrl(image);
 }
 
+const EDUCATION_FIELDS = [
+	"dateRange",
+	"degreeName",
+	"endDate",
+	"entityUrn",
+	"fieldOfStudy",
+	"grade",
+	"school",
+	"schoolLogo",
+	"schoolName",
+	"startDate",
+] as const;
+
+const EDUCATION_STRING_FIELDS = [
+	"degreeName",
+	"entityUrn",
+	"fieldOfStudy",
+	"grade",
+	"schoolName",
+] as const;
+
+function isReadableEducation(value: unknown): value is VoyagerEducation {
+	if (
+		!isRecord(value) ||
+		!hasKnownSourceField(value, EDUCATION_FIELDS) ||
+		!optionalStringFieldsAreReadable(value, EDUCATION_STRING_FIELDS) ||
+		!dateFieldsAreReadable(value)
+	) {
+		return false;
+	}
+	if (!Object.hasOwn(value, "school")) return true;
+	const school = value.school;
+	return (
+		school === null ||
+		(isRecord(school) &&
+			optionalStringFieldsAreReadable(school, ["name"]))
+	);
+}
+
 export function buildEducationRecords(
 	profile: VoyagerProfileElement,
 ): EducationRecord[] {
@@ -504,28 +748,11 @@ export function buildEducationRecordsWithOmissions(
 	for (let index = 0; index < items.length; index += 1) {
 		considered += 1;
 		const rawEducation: unknown = items[index];
-		if (!isRecord(rawEducation)) {
+		if (!isReadableEducation(rawEducation)) {
 			addOmission(omissions, "malformed_row");
 			continue;
 		}
-		if (
-			!hasKnownSourceField(rawEducation, [
-				"dateRange",
-				"degreeName",
-				"endDate",
-				"entityUrn",
-				"fieldOfStudy",
-				"grade",
-				"school",
-				"schoolLogo",
-				"schoolName",
-				"startDate",
-			])
-		) {
-			addOmission(omissions, "malformed_row");
-			continue;
-		}
-		const edu = rawEducation as VoyagerEducation;
+		const edu = rawEducation;
 		records.push({
 			degree: nonEmpty(edu.degreeName),
 			end_date: endDateOf(edu),

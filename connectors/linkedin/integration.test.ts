@@ -817,6 +817,34 @@ test("collectLinkedIn: mismatched paging start vetoes connection completeness", 
 	);
 });
 
+test("collectLinkedIn: a short reported full page cannot prove connection end", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return {
+				elements: Array.from({ length: 20 }, (_, index) => ({
+					connectedMember: `urn:li:profile:short-page-${index}`,
+				})),
+				paging: { count: 20, start: 0 },
+			};
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
+
+	const profile = recording.emitted.find((event) => event.stream === "profile");
+	assert.equal(profile?.data.connection_count, null);
+	assert.equal(
+		recording.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "connections",
+		),
+		false,
+		"a page whose advertised size differs from the request is not end evidence",
+	);
+});
+
 test("collectLinkedIn: error-ended connections walk withholds full-scan coverage", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	let page = 0;
@@ -958,6 +986,47 @@ test("collectLinkedIn: unreadable nested sections do not prove empty coverage", 
 	}
 });
 
+test("collectLinkedIn: empty sections on the basic-profile fallback are unavailable, not empty", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) return { _error: "http_404" };
+		if (path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")) {
+			return {
+				elements: [
+					{
+						firstName: "Basic",
+						lastName: "Fallback",
+						profilePositionGroups: { elements: [] },
+						profileEducations: { elements: [] },
+						profileSkills: { elements: [] },
+						profileLanguages: { elements: [] },
+					},
+				],
+			};
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(
+		buildCtx(["experience", "education", "skills", "languages"], recording, route),
+	);
+
+	for (const stream of ["experience", "education", "skills", "languages"]) {
+		assert.equal(
+			recording.protocolMessages.some(
+				(message) => message.type === "DETAIL_COVERAGE" && message.stream === stream,
+			),
+			false,
+			`${stream} on a basic profile cannot prove an empty inventory`,
+		);
+		assert.ok(
+			skipResults(recording).some(
+				(skip) => skip.stream === stream && skip.reason === "linkedin_profile_section_unavailable",
+			),
+		);
+	}
+});
+
 test("collectLinkedIn: unreadable experience and education rows stay uncovered", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const progressMessages: string[] = [];
@@ -1021,6 +1090,179 @@ test("collectLinkedIn: unreadable experience and education rows stay uncovered",
 		progressMessages.some((message) =>
 			message.includes("unreadable_nested_collection=1"),
 		),
+	);
+});
+
+test("collectLinkedIn: malformed mapped experience and education values stay uncovered", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const progressMessages: string[] = [];
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) {
+			return {
+				elements: [
+					{
+						profilePositionGroups: {
+							elements: [
+								{ title: 42 },
+								{
+									profilePositionInPositionGroup: {
+										elements: [{ title: "Readable", dateRange: { start: 17 } }],
+									},
+								},
+							],
+						},
+						profileEducations: {
+							elements: [
+								{ schoolName: { text: "Unreadable school" } },
+								{ schoolName: "Readable", dateRange: { start: { year: "2020" } } },
+							],
+						},
+					},
+				],
+			};
+		}
+		return { _error: "http_404" };
+	};
+	const ctx = buildCtx(["experience", "education"], recording, route);
+	await collectLinkedIn({
+		...ctx,
+		progress: async (message) => {
+			progressMessages.push(message);
+		},
+	});
+
+	for (const stream of ["experience", "education"]) {
+		const coverage = recording.protocolMessages.find(
+			(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+				message.type === "DETAIL_COVERAGE" && message.stream === stream,
+		);
+		assert.equal(coverage?.considered, 2);
+		assert.equal(coverage?.covered, 0);
+		assert.equal(
+			recording.emitted.some((event) => event.stream === stream),
+			false,
+		);
+	}
+	assert.equal(
+		progressMessages.filter((message) => message.includes("malformed_row=2")).length,
+		2,
+	);
+});
+
+test("collectLinkedIn: malformed profile mappings stay unavailable without crashing section collection", async () => {
+	await Promise.all([
+		{ elements: {} },
+		{
+			elements: [
+				{ profilePositionInPositionGroup: { elements: {} } },
+			],
+		},
+		{
+			elements: [
+				{ profilePositionInPositionGroup: { elements: [] } },
+			],
+		},
+	].map(async (malformedGroups) => {
+		const recording = makeRecordingEmit(validateRecord);
+		const route = (path: string): unknown => {
+			if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+			if (path.includes("decorationId=")) {
+				return {
+					elements: [
+						{
+							firstName: "Decoration",
+							lastName: "Member",
+							profilePositionGroups: malformedGroups,
+							industry: null,
+							geoLocation: { geo: { defaultLocalizedName: 42 } },
+							summary: null,
+							profileEducations: { elements: [] },
+							profileSkills: { elements: [] },
+							profileLanguages: { elements: [] },
+						},
+					],
+				};
+			}
+			if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+				return { elements: [], paging: { total: 0 } };
+			}
+			return { _error: "http_404" };
+		};
+		await assert.doesNotReject(
+			collectLinkedIn(
+				buildCtx(
+					["profile", "experience", "education", "skills", "languages"],
+					recording,
+					route,
+				),
+			),
+		);
+		const profile = recording.emitted.find((event) => event.stream === "profile");
+		assert.equal(profile?.data.full_name, "Decoration Member");
+		assert.equal(
+			recording.protocolMessages.some(
+				(message) => message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+			),
+			false,
+		);
+		const experienceCoverage = recording.protocolMessages.find(
+			(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "experience",
+		);
+		if (Array.isArray(malformedGroups.elements)) {
+			assert.equal(experienceCoverage?.covered, 0);
+		} else {
+			assert.equal(experienceCoverage, undefined);
+		}
+		assert.ok(
+			skipResults(recording).some(
+				(skip) => skip.stream === "profile" && skip.reason === "linkedin_profile_fields_unavailable",
+			),
+		);
+	}));
+});
+
+test("collectLinkedIn: malformed current-position and location values veto profile coverage", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) {
+			return {
+				elements: [
+					{
+						firstName: "Decoration",
+						lastName: "Member",
+						profilePositionGroups: { elements: [{ title: 42 }] },
+						industry: null,
+						geoLocation: { geo: { defaultLocalizedName: 42 } },
+						summary: null,
+					},
+				],
+			};
+		}
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: [], paging: { total: 0 } };
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["profile"], recording, route));
+
+	const profile = recording.emitted.find((event) => event.stream === "profile");
+	assert.equal(profile?.data.full_name, "Decoration Member");
+	assert.equal(
+		recording.protocolMessages.some(
+			(message) => message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+		),
+		false,
+	);
+	const profileSkip = skipResults(recording).find(
+		(skip) => skip.reason === "linkedin_profile_fields_unavailable",
+	);
+	assert.ok(profileSkip);
+	assert.deepEqual(
+		(profileSkip.diagnostics as { unavailable_fields?: string[] }).unavailable_fields,
+		["current_company", "current_position_title", "location"],
 	);
 });
 

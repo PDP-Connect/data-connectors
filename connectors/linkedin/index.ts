@@ -90,6 +90,8 @@ import {
 	buildLanguageRecordsWithOmissions,
 	buildProfileRecord,
 	buildSkillRecordsWithOmissions,
+	isReadablePositionGroup,
+	isReadableProfileLocation,
 	type OmissionSummary,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -236,16 +238,7 @@ function unavailableProfileFields(
 		const groupsReadable =
 			isObjectRecord(groups) &&
 			Array.isArray(groups.elements) &&
-			groups.elements.every((group) => {
-				if (!isObjectRecord(group)) return false;
-				if (!Object.hasOwn(group, "profilePositionInPositionGroup")) return true;
-				const nested = group.profilePositionInPositionGroup;
-				return (
-					isObjectRecord(nested) &&
-					Array.isArray(nested.elements) &&
-					nested.elements.every(isObjectRecord)
-				);
-			});
+			groups.elements.every(isReadablePositionGroup);
 		if (!groupsReadable) {
 			unavailable.push("current_company", "current_position_title");
 		}
@@ -260,10 +253,7 @@ function unavailableProfileFields(
 			unavailable.push("industry");
 		}
 
-		const locationIsReadable = ["location", "geoLocation"].some((key) => {
-			if (!Object.hasOwn(raw, key)) return false;
-			return raw[key] === null || isObjectRecord(raw[key]);
-		});
+		const locationIsReadable = isReadableProfileLocation(raw);
 		if (!locationIsReadable) unavailable.push("location");
 
 		if (
@@ -408,7 +398,7 @@ async function fetchConnections(
 			reportedCount !== undefined &&
 			(!Number.isSafeInteger(reportedCount) ||
 				reportedCount < 0 ||
-				reportedCount > CONNECTIONS_PAGE_SIZE)
+				reportedCount !== CONNECTIONS_PAGE_SIZE)
 		) {
 			return finish("malformed_page");
 		}
@@ -822,7 +812,10 @@ export async function collectLinkedIn(
 	}
 
 	if (wantsExperience) {
-		const section = dashProfile?.profilePositionGroups?.elements;
+		const section =
+			dashProfileResult.source === "decoration"
+				? dashProfile?.profilePositionGroups?.elements
+				: undefined;
 		if (Array.isArray(section)) {
 			const { considered, covered, omissions, records } =
 				buildExperienceRecordsWithOmissions(dashProfile ?? {});
@@ -851,7 +844,10 @@ export async function collectLinkedIn(
 	}
 
 	if (wantsEducation) {
-		const section = dashProfile?.profileEducations?.elements;
+		const section =
+			dashProfileResult.source === "decoration"
+				? dashProfile?.profileEducations?.elements
+				: undefined;
 		if (Array.isArray(section)) {
 			const { considered, covered, omissions, records } =
 				buildEducationRecordsWithOmissions(dashProfile ?? {});
@@ -880,7 +876,10 @@ export async function collectLinkedIn(
 	}
 
 	if (wantsSkills) {
-		const section = dashProfile?.profileSkills?.elements;
+		const section =
+			dashProfileResult.source === "decoration"
+				? dashProfile?.profileSkills?.elements
+				: undefined;
 		if (Array.isArray(section)) {
 			const { considered, covered, omissions, records } =
 				buildSkillRecordsWithOmissions(dashProfile ?? {});
@@ -909,7 +908,10 @@ export async function collectLinkedIn(
 	}
 
 	if (wantsLanguages) {
-		const section = dashProfile?.profileLanguages?.elements;
+		const section =
+			dashProfileResult.source === "decoration"
+				? dashProfile?.profileLanguages?.elements
+				: undefined;
 		if (Array.isArray(section)) {
 			const { considered, covered, omissions, records } =
 				buildLanguageRecordsWithOmissions(dashProfile ?? {});
