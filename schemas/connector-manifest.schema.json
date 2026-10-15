@@ -10,9 +10,30 @@
       "properties": {
         "bindings": { "$ref": "#/$defs/bindings" }
       }
+    },
+    "streams": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/streamCheckpointDependency" }
     }
   },
   "$defs": {
+    "streamCheckpointDependency": {
+      "description": "Collection Profile Checkpoint dependency: a stream names one checkpoint parent with state_stream, or one or more with parent_streams, never both. That each named parent is another stream of the same manifest is checked by the generator (packages/polyfill-connectors/scripts/consent-time-fields-render.mjs), which fails closed.",
+      "type": "object",
+      "properties": {
+        "state_stream": { "type": "string", "minLength": 1 },
+        "parent_streams": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "not": {
+        "properties": { "state_stream": true, "parent_streams": true },
+        "required": ["state_stream", "parent_streams"]
+      }
+    },
     "bindings": {
       "type": "object",
       "propertyNames": { "$ref": "#/$defs/bindingMapKey" },

@@ -1623,27 +1623,52 @@ async function parseStart(
  * resolves every stream to `null`. A built artifact is bound to its own
  * connector (see scripts/consent-slice-resolution.mjs); any other name throws.
  */
+type CheckpointParents = Readonly<Record<string, readonly string[]>>;
+
 /**
  * The connector's declared checkpoint dependencies, known before the first
- * message. A shipped connector's come from its manifest (generated table);
- * a connector with no shipped manifest may pass them in config.
+ * message. Fails closed: a connector that ships a manifest (it has a
+ * consent-time-field entry, or the build is bound to it) must have a
+ * generated checkpoint-parents entry — `{}` means it declares none — and may
+ * not pass `checkpointParents` in config. Only a connector with no shipped
+ * manifest (a test fixture) takes them from config, or has none.
  */
-export function checkpointParentsFor(
-	name: string,
-	configured?: Readonly<Record<string, readonly string[]>>,
-): Readonly<Record<string, readonly string[]>> {
-	const key = name.replaceAll("-", "_");
-	const declared = Object.hasOwn(CHECKPOINT_PARENTS, key)
-		? CHECKPOINT_PARENTS[key]
-		: undefined;
-	if (declared) {
+export function resolveCheckpointParents(
+	key: string,
+	tables: {
+		readonly parents: Readonly<Record<string, CheckpointParents>>;
+		readonly shipped: ReadonlySet<string>;
+	},
+	configured?: CheckpointParents,
+): CheckpointParents {
+	if (tables.shipped.has(key)) {
 		if (configured !== undefined)
 			throw new Error(
-				`runConnector: ${name} has a shipped manifest; remove checkpointParents and declare state_stream / parent_streams there`,
+				`runConnector: ${key} has a shipped manifest; remove checkpointParents and declare state_stream / parent_streams there`,
+			);
+		const declared = Object.hasOwn(tables.parents, key)
+			? tables.parents[key]
+			: undefined;
+		if (declared === undefined)
+			throw new Error(
+				`runConnector: ${key} ships a manifest but has no checkpoint-parents entry; regenerate src/generated/consent-time-fields*`,
 			);
 		return declared;
 	}
 	return configured ?? {};
+}
+
+export function checkpointParentsFor(
+	name: string,
+	configured?: CheckpointParents,
+): CheckpointParents {
+	const shipped = new Set(Object.keys(CONSENT_TIME_FIELDS));
+	if (CONSENT_BOUND_CONNECTOR !== null) shipped.add(CONSENT_BOUND_CONNECTOR);
+	return resolveCheckpointParents(
+		name.replaceAll("-", "_"),
+		{ parents: CHECKPOINT_PARENTS, shipped },
+		configured,
+	);
 }
 
 export function consentTimeFieldResolver(

@@ -554,3 +554,24 @@ test("new-reader compatibility: the committed pre-binding-instances schema fixtu
     assert.equal(validate(manifest), true, `${path}: expected the new schema to still accept this unmodified manifest`);
   }
 });
+
+// ─── Checkpoint dependencies (state_stream / parent_streams) ────────────
+
+test("checkpoint dependencies: well-formed state_stream and parent_streams validate", () => {
+  assert.equal(validate({ streams: [{ name: "a" }, { name: "b", state_stream: "a" }] }), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ streams: [{ name: "a" }, { name: "c" }, { name: "b", parent_streams: ["a", "c"] }] }), true, JSON.stringify(validate.errors));
+});
+
+test("checkpoint dependencies: malformed or contradictory declarations are rejected", () => {
+  for (const stream of [
+    { name: "b", parent_streams: "a" },
+    { name: "b", parent_streams: [] },
+    { name: "b", parent_streams: [""] },
+    { name: "b", parent_streams: ["a", "a"] },
+    { name: "b", state_stream: "" },
+    { name: "b", state_stream: ["a"] },
+    { name: "b", state_stream: "a", parent_streams: ["a"] },
+  ]) {
+    assert.equal(validate({ streams: [{ name: "a" }, stream] }), false, JSON.stringify(stream));
+  }
+});
