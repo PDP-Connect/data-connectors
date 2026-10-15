@@ -103,15 +103,16 @@ function trimKeepingControls(s: string): string {
 
 // ─── extractContent per-content_type helpers ──────────────────────────
 //
-// Memory bound of extraction. The extractors below build the whole body: one
-// array of per-part strings (references to the already-fetched source strings,
-// plus short wrappers), one joined string, and, when edge whitespace is trimmed,
-// one more copy. Transient memory is therefore O(body), at most about 2x the
-// body that was already fetched with the response, and every copy is dropped
-// when the extraction returns. It is NOT cut short at the inline cap: a blob
-// needs the full text, and the cap decision uses `escapedLengthExceeds` on the
-// result. Nothing retains the text afterwards; a blob-backed message
-// re-extracts it once to measure and once to spool (see message-blob.ts).
+// Memory bound of extraction. The extractors below build the whole body: an
+// array with one entry per part, a joined string, and, when edge whitespace is
+// trimmed, possibly another copy. Transient memory is O(source payload size +
+// part count); the constants depend on the part format and the JS engine's
+// string representation (references, ropes, flattening), so no tighter factor
+// is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
+// full text, and the cap decision uses `escapedLengthExceeds` on the result.
+// Oversize text is not retained per candidate (a blob-backed message re-extracts
+// it once to measure and once to spool, see message-blob.ts); inline content is
+// retained by design, at most the inline cap per message.
 
 /**
  * Stringify one `parts[]` entry from text / multimodal_text bodies. Returns
@@ -473,19 +474,49 @@ export function extractContent(
 // ─── Tool calls ─────────────────────────────────────────────────────────
 
 /**
+ * Encode every string inside a tool_calls value with pdpp-safe-escape-v1, at any
+ * depth: array items, object values, and object keys (a key holding a forbidden
+ * code unit is escaped like any other string). Numbers, booleans and null are
+ * unchanged. One rule for every entry, whether synthesized here or copied from
+ * the source's `metadata.tool_calls`.
+ */
+export function encodeToolCallStrings(value: unknown): unknown {
+	if (typeof value === "string") return encodePdppSafeText(value);
+	if (Array.isArray(value)) return value.map(encodeToolCallStrings);
+	if (typeof value === "object" && value !== null) {
+		const out: Record<string, unknown> = {};
+		for (const [key, inner] of Object.entries(value)) {
+			out[encodePdppSafeText(key)] = encodeToolCallStrings(inner);
+		}
+		return out;
+	}
+	return value;
+}
+
+/**
  * Derive tool_calls for a message. ChatGPT does not emit an OpenAI-API-style
  * `tool_calls` array on assistant messages; instead, the model "addresses" a
  * tool via `message.recipient` (e.g. "python", "browser.search", "bio") and
  * the content body carries the call. Synthesize a normalized array.
  *
  * `contentExternal` is true when the message's `content` is blob-backed or
- * omitted. The call then carries `text_ref: "content"` instead of a second
- * inline copy of the body, so a multi-megabyte body is stored once at most.
- * An inline `text` uses the same pdpp-safe-escape-v1 encoding as `content`.
+ * omitted. The synthesized call then carries `text_ref: "content"` instead of
+ * `text`, so a multi-megabyte body is stored once at most. A synthesized call
+ * has exactly one of `text` and `text_ref`.
+ *
+ * Every string in the result is pdpp-safe-escape-v1 encoded (see
+ * `encodeToolCallStrings`).
  */
 export function extractToolCalls(
 	m: ChatGptMessage | undefined,
 	contentExternal = false,
+): unknown[] {
+	return encodeToolCallStrings(synthesizeToolCalls(m, contentExternal)) as unknown[];
+}
+
+function synthesizeToolCalls(
+	m: ChatGptMessage | undefined,
+	contentExternal: boolean,
 ): unknown[] {
 	// Some API shapes do include an explicit list.
 	if (Array.isArray(m?.metadata?.tool_calls) && m.metadata.tool_calls.length) {
@@ -506,12 +537,13 @@ export function extractToolCalls(
 			if (contentExternal) {
 				call.text_ref = "content";
 			} else {
-				call.text = encodePdppSafeText(m.content.text);
+				call.text = m.content.text;
 			}
 		}
 		if (m?.metadata?.invoked_plugin) {
 			call.invoked_plugin = m.metadata.invoked_plugin;
 		}
+		assertSynthesizedCall(call);
 		return [call];
 	}
 	// Plugin invocation metadata without an explicit tool_calls array.
@@ -519,6 +551,13 @@ export function extractToolCalls(
 		return [{ invoked_plugin: m.metadata.invoked_plugin }];
 	}
 	return [];
+}
+
+/** The synthesized-call invariant: `text_ref` is "content" and excludes `text`. */
+export function assertSynthesizedCall(call: ToolCallSynthetic): void {
+	if (call.text_ref !== undefined && (call.text_ref !== "content" || call.text !== undefined)) {
+		throw new Error('synthesized tool call: text_ref must be "content" and exclude text');
+	}
 }
 
 // ─── Message record ─────────────────────────────────────────────────────

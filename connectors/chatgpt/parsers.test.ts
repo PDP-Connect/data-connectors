@@ -19,6 +19,7 @@ import {
 	decodeEscapedText,
 	extractMessageWithBlob,
 	extractMessage,
+	assertSynthesizedCall,
 	extractRawMessageText,
 	encodePdppSafeText,
 	escapedLengthExceeds,
@@ -1332,14 +1333,92 @@ test("extractMessage: an oversize tool-recipient body is referenced, not duplica
 	]);
 });
 
-test("messages schema: a tool call with text_ref must say \"content\" and carry no text", () => {
-	const base = extractMessage("n1", textNode("hello"), "c1", true) ?? {};
-	const ok = (tool_calls: unknown[]) =>
-		validateRecord("messages", { ...base, tool_calls }).ok;
-	assert.equal(ok([{ recipient: "python", text_ref: "content" }]), true);
-	assert.equal(ok([{ recipient: "python", text_ref: "elsewhere" }]), false);
-	assert.equal(ok([{ text_ref: "content", text: "dup" }]), false);
-	assert.equal(ok([{ recipient: "python", text: "inline" }]), true);
+test("synthesized tool call: text_ref must be \"content\" and exclude text", () => {
+	assertSynthesizedCall({ recipient: "python", text_ref: "content" });
+	assertSynthesizedCall({ recipient: "python", text: "inline" });
+	assert.throws(() => assertSynthesizedCall({ text_ref: "content", text: "dup" }));
+	assert.throws(() =>
+		assertSynthesizedCall({ text_ref: "elsewhere" as "content" }),
+	);
+});
+
+test("messages schema: an arbitrary source tool call with text_ref and text is kept, encoded, and not rejected", () => {
+	const node = {
+		parent: null,
+		children: [],
+		message: {
+			author: { role: "assistant" },
+			content: { content_type: "text", parts: ["hi"] },
+			metadata: {
+				tool_calls: [{ text_ref: "source-id", text: "bo\x00dy" }],
+			},
+		},
+	} as ChatGptNode;
+	const rec = extractMessage("n1", node, "c1", true);
+	assert.deepEqual(rec?.tool_calls, [
+		{ text_ref: "source-id", text: "bo\\u0000dy" },
+	]);
+	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+});
+
+function decodeToolCallStrings(value: unknown): unknown {
+	if (typeof value === "string") return referenceDecode(value);
+	if (Array.isArray(value)) return value.map(decodeToolCallStrings);
+	if (typeof value === "object" && value !== null) {
+		return Object.fromEntries(
+			Object.entries(value).map(([k, v]) => [
+				referenceDecode(k),
+				decodeToolCallStrings(v),
+			]),
+		);
+	}
+	return value;
+}
+
+test("tool_calls: every nested string and key from a source call is encoded and round-trips through the declared decoder", async () => {
+	const source = [
+		{
+			name: "fn\x00",
+			"k\ud800ey": "v",
+			arguments: {
+				code: "a\x00b \ud800 \\u0000 literal",
+				list: ["\x01", { deep: "x\x7fy", n: 3, ok: true, none: null }],
+			},
+		},
+		"bare\x00string",
+	];
+	const node = {
+		parent: null,
+		children: [],
+		message: {
+			author: { role: "assistant" },
+			content: { content_type: "text", parts: ["hi"] },
+			metadata: { tool_calls: source },
+		},
+	} as ChatGptNode;
+	const rec = extractMessage("n1", node, "c1", true);
+	const { pdppSafeText } = await import(
+		"@pdpp/connector-protocol/pdpp-safe-text"
+	);
+	const strings: string[] = [];
+	const collect = (v: unknown): void => {
+		if (typeof v === "string") strings.push(v);
+		else if (Array.isArray(v)) v.forEach(collect);
+		else if (typeof v === "object" && v !== null) {
+			for (const [k, inner] of Object.entries(v)) {
+				strings.push(k);
+				collect(inner);
+			}
+		}
+	};
+	collect(rec?.tool_calls);
+	assert.ok(strings.length >= 8);
+	for (const str of strings) {
+		assert.equal(pdppSafeText.safeParse(str).success, true, JSON.stringify(str));
+		assert.equal(/[\ud800-\udfff]/u.test(str), false, "no lone surrogate");
+	}
+	assert.deepEqual(decodeToolCallStrings(rec?.tool_calls), source);
+	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
 });
 
 test("extractMessage: an inline tool-recipient body with controls is escaped in tool_calls and round-trips", () => {
@@ -1370,7 +1449,7 @@ test("extractMessage: an inline tool-recipient body with controls is escaped in 
 	};
 	assert.equal(
 		manifest.streams.find((s) => s.name === "messages")?.schema.properties
-			.tool_calls.items.properties.text.x_pdpp_text_encoding,
+			.tool_calls.x_pdpp_text_encoding,
 		"pdpp-safe-escape-v1",
 	);
 });
