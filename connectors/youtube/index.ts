@@ -36,12 +36,17 @@ export { readPageReadiness } from "./page-evidence.ts";
 
 const HOME = "https://www.youtube.com/";
 const HISTORY_LIMIT = 50;
+// Restarting history must rediscover its anchor from the top of the page. Bound
+// each run to 10,000 retained entries and at most 500 one-scroll fetch rounds.
+// At 800 ms per round the scroll wait is capped at 400 seconds; a missing anchor
+// or a stalled continuation fails without advancing the checkpoint.
+const HISTORY_SCAN_LIMIT = 10_000;
+const HISTORY_MAX_SCROLL_ROUNDS = 500;
 const PAGE_HYDRATION_WAIT_MS = 2_000;
 const SCROLLS = {
 	subscriptions: 3,
 	playlists: 5,
 	playlist_items: 20,
-	history: 4,
 } as const;
 const LIST_CONTINUATION_SELECTORS: Record<ListKind, string> = {
 	history: "ytd-item-section-renderer ytd-continuation-item-renderer",
@@ -382,7 +387,6 @@ interface StreamReporter {
 
 const END_NOT_OBSERVED_MESSAGE =
 	"YouTube did not show the end of this list, so the list may be incomplete.";
-const HISTORY_CAP_MESSAGE = `The watch history read stopped at the ${HISTORY_LIMIT}-item limit before the end of the list.`;
 
 function createStreamReporter(ctx: BrowserContext): StreamReporter {
 	const failed = new Set<string>();
@@ -542,9 +546,17 @@ async function readPlaylistIndex(
 
 interface VideoReadResult extends ListRead<BrowserVideo> {
 	readonly verifiedEmpty: boolean;
-	/** The read stopped at the connector's own item limit. */
-	readonly cappedAtLimit: boolean;
+	/** The saved history anchor was present in this run's readable list. */
+	readonly resumeAnchorFound: boolean;
+	/** The read can save positive anchor progress without claiming an end. */
+	readonly partialCheckpointAllowed: boolean;
 }
+
+type HistoryCursor = {
+	last_seen_video_id?: string;
+	position?: number;
+	complete?: boolean;
+};
 
 async function readVideoList(
 	page: BrowserCollectContext["page"],
@@ -552,6 +564,7 @@ async function readVideoList(
 	rounds: number,
 	mode: "playlist" | "history",
 	capture?: BrowserCollectContext["capture"],
+	historyCursor?: HistoryCursor,
 ): Promise<VideoReadResult> {
 	await page.goto(url, { waitUntil: "domcontentloaded" });
 	await page.waitForTimeout(PAGE_HYDRATION_WAIT_MS);
@@ -574,9 +587,7 @@ async function readVideoList(
 	if (state === "empty") {
 		const end = await page.evaluate(readListEnd, {
 			kind: mode,
-			sessionPresent:
-				mode !== "playlist" ||
-				(await page.evaluate(hasYoutubeSessionOnCurrentPage)),
+			sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
 		});
 		const evidence = exhaustionEvidence(end, 0, false);
 		return {
@@ -584,21 +595,25 @@ async function readVideoList(
 			exhausted: evidence.kind !== "unproven",
 			evidence,
 			verifiedEmpty: evidence.kind === "page-data-empty",
-			cappedAtLimit: false,
+			resumeAnchorFound: !historyCursor?.last_seen_video_id,
+			partialCheckpointAllowed: false,
 		};
 	}
 	const seen = new Set<string>();
 	const out: BrowserVideo[] = [];
 	let continuationRemoved = false;
 	let noChangeRounds = 0;
+	let resumeAnchorFound = !historyCursor?.last_seen_video_id;
 	const selector =
 		mode === "history"
 			? "yt-lockup-view-model"
 			: "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer";
-	for (let round = 0; round <= rounds; round += 1) {
+	const maxRounds = mode === "history" ? HISTORY_MAX_SCROLL_ROUNDS : rounds;
+	for (let round = 0; round <= maxRounds; round += 1) {
 		const previousCount = out.length;
 		const batch = await page.evaluate(readVideos, mode);
 		for (const video of batch) {
+			if (mode === "history" && out.length >= HISTORY_SCAN_LIMIT) break;
 			const key = videoIdentity(video);
 			if (!seen.has(key)) {
 				seen.add(key);
@@ -606,9 +621,22 @@ async function readVideoList(
 			}
 		}
 		noChangeRounds = out.length === previousCount ? noChangeRounds + 1 : 0;
-		if (mode === "history" && out.length >= HISTORY_LIMIT) break;
+		let rowsAfterAnchor = out;
+		if (mode === "history" && historyCursor?.last_seen_video_id) {
+			const anchorIndex = out.findIndex(
+				(video) => videoIdentity(video) === historyCursor.last_seen_video_id,
+			);
+			resumeAnchorFound = anchorIndex >= 0;
+			rowsAfterAnchor = anchorIndex < 0 ? [] : out.slice(anchorIndex + 1);
+		}
+		if (
+			mode === "history" &&
+			(resumeAnchorFound && rowsAfterAnchor.length >= HISTORY_LIMIT ||
+				out.length >= HISTORY_SCAN_LIMIT)
+		)
+			break;
 		if (noChangeRounds >= 2) break;
-		if (round < rounds)
+		if (round < maxRounds)
 			continuationRemoved =
 				(await scroll(
 					page,
@@ -619,16 +647,23 @@ async function readVideoList(
 				)) || continuationRemoved;
 	}
 	if (out.length === 0) throw new Error("youtube_video_parse_mismatch");
-	// The history limit is a cap the connector chose, not the end of the list.
-	// Reaching it exactly can still be the end, so source evidence decides, unless
-	// the cap discarded rows that were read.
-	const cappedAtLimit = mode === "history" && out.length >= HISTORY_LIMIT;
-	const discardedRows = mode === "history" && out.length > HISTORY_LIMIT;
+	const anchorIndex =
+		mode === "history" && historyCursor?.last_seen_video_id
+			? out.findIndex(
+					(video) => videoIdentity(video) === historyCursor.last_seen_video_id,
+				)
+			: -1;
+	resumeAnchorFound = !historyCursor?.last_seen_video_id || anchorIndex >= 0;
+	const rowsAfterAnchor =
+		mode === "history"
+			? out.slice(anchorIndex + 1)
+			: out;
+	const items =
+		mode === "history" ? rowsAfterAnchor.slice(0, HISTORY_LIMIT) : out;
+	const unEmittedRows = Math.max(0, rowsAfterAnchor.length - items.length);
 	const pageEnd = await page.evaluate(readListEnd, {
 		kind: mode,
-		sessionPresent:
-			mode !== "playlist" ||
-			(await page.evaluate(hasYoutubeSessionOnCurrentPage)),
+		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
 	});
 	await capture?.captureDom(
 		page,
@@ -638,20 +673,29 @@ async function readVideoList(
 				? "youtube-watch-history-after-scroll"
 				: "youtube-playlist-items-after-scroll",
 	);
-	const evidenceReadCount =
-		mode === "history" ? Math.min(out.length, HISTORY_LIMIT) : out.length;
 	const evidence = exhaustionEvidence(
 		pageEnd,
-		evidenceReadCount,
-		continuationRemoved && !discardedRows,
-		discardedRows ? out.length - HISTORY_LIMIT : 0,
+		out.length,
+		continuationRemoved,
+		unEmittedRows,
 	);
+	const exhausted = resumeAnchorFound && unEmittedRows === 0 && evidence.kind !== "unproven";
+	const partialCheckpointAllowed =
+		mode === "history" &&
+		resumeAnchorFound &&
+		items.length > 0 &&
+		pageEnd.pageBlocked === false &&
+		(Boolean(historyCursor?.last_seen_video_id) ||
+			unEmittedRows > 0 ||
+			pageEnd.domHasContinuation ||
+			(items.length === HISTORY_LIMIT && pageEnd.dataHasContinuation));
 	return {
-		items: mode === "history" ? out.slice(0, HISTORY_LIMIT) : out,
-		exhausted: evidence.kind !== "unproven",
-		evidence,
+		items,
+		exhausted,
+		evidence: exhausted ? evidence : { kind: "unproven", page: pageEnd },
 		verifiedEmpty: false,
-		cappedAtLimit,
+		resumeAnchorFound,
+		partialCheckpointAllowed,
 	};
 }
 
@@ -669,8 +713,9 @@ function readWatchHistoryList(
 	url: string,
 	rounds: number,
 	capture?: BrowserCollectContext["capture"],
+	historyCursor?: HistoryCursor,
 ): Promise<VideoReadResult> {
-	return readVideoList(page, url, rounds, "history", capture);
+	return readVideoList(page, url, rounds, "history", capture, historyCursor);
 }
 
 async function readableVideos(
@@ -679,17 +724,25 @@ async function readableVideos(
 	url: string,
 	rounds: number,
 	stream: string,
+	historyCursor?: HistoryCursor,
 ): Promise<VideoReadResult | null> {
 	try {
 		const result =
 			stream === "watch_history"
-				? await readWatchHistoryList(ctx.page, url, rounds, ctx.capture)
+				? await readWatchHistoryList(
+						ctx.page,
+						url,
+						rounds,
+						ctx.capture,
+						historyCursor,
+					)
 				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
-		if (!result.exhausted)
-			await streams.fail(
-				stream,
-				result.cappedAtLimit ? HISTORY_CAP_MESSAGE : undefined,
-			);
+		if (
+			!result.exhausted &&
+			(stream !== "watch_history" ||
+				!result.partialCheckpointAllowed)
+		)
+			await streams.fail(stream);
 		return result;
 	} catch (error) {
 		const preciseReason =
@@ -706,11 +759,15 @@ type BrowserContext = Pick<
 	BrowserCollectContext,
 	| "page"
 	| "requested"
+	| "collectionMode"
 	| "emitRecord"
 	| "emit"
 	| "progress"
 	| "reportStreamFailure"
-> & { capture?: BrowserCollectContext["capture"] };
+> & {
+	state?: BrowserCollectContext["state"];
+	capture?: BrowserCollectContext["capture"];
+};
 
 async function emitCoverageProgress(
 	ctx: Pick<BrowserContext, "progress">,
@@ -1080,12 +1137,17 @@ export async function collectYoutubeBrowser(
 			});
 			return;
 		}
+		const priorCursor =
+			ctx.collectionMode === "full_refresh"
+				? undefined
+				: (ctx.state?.watch_history as HistoryCursor | undefined);
 		const result = await readableVideos(
 			ctx,
 			streams,
 			`${HOME}feed/history`,
-			SCROLLS.history,
+			HISTORY_MAX_SCROLL_ROUNDS,
 			"watch_history",
+			priorCursor,
 		);
 		if (result) {
 			const { items } = result;
@@ -1104,13 +1166,15 @@ export async function collectYoutubeBrowser(
 					? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
 					: new Date(capturedAt);
 			for (const [position, video] of items.entries()) {
+				const absolutePosition =
+					(priorCursor?.position ?? -1) + position + 1;
 				const watchedDate = resolveWatchedDate(
 					video.watched_date_label ?? null,
 					dateReference,
 				);
 				await emit("watch_history", {
 					id: id(`history|${videoIdentity(video)}`),
-					position,
+					position: absolutePosition,
 					watched_date: watchedDate,
 					watched_date_label: video.watched_date_label ?? null,
 					video_id: video.video_id,
@@ -1123,8 +1187,28 @@ export async function collectYoutubeBrowser(
 					description: video.description,
 				});
 			}
-			if (result.verifiedEmpty)
+			if (result.verifiedEmpty) {
 				await emitVerifiedEmptyState(ctx, "watch_history", capturedAt);
+			} else if (
+				items.length > 0 &&
+				(result.exhausted || result.partialCheckpointAllowed)
+			) {
+				const last = items.at(-1)!;
+				const evidence = result.exhausted
+					? result.evidence.kind
+					: "youtube_history_last_seen_anchor";
+				await ctx.emit({
+					type: "STATE",
+					stream: "watch_history",
+					cursor: {
+						last_seen_video_id: videoIdentity(last),
+						position:
+							(priorCursor?.position ?? -1) + items.length,
+						complete: result.exhausted,
+						evidence,
+					},
+				});
+			}
 		}
 	}
 	await emitCoverageProgress(ctx, "youtube", coverage.values());

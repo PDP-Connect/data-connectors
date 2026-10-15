@@ -1119,7 +1119,7 @@
     },
     "not_derivable": [],
     "semantic_notes": [
-      "Browser fixture tests prove day-only dates and top-50 page order. The old Takeout derivability test is retained under connectors/youtube_takeout. Vana must update its projection binding from watched_at sorting to position ordering before the cutover; this repository does not ship that projection. Authenticated live browser proof remains outstanding."
+      "Browser fixture tests prove day-only dates, page order, and bounded 50-record batches resumed by the last-seen video identity. The Vana projection still selects the legacy top 50 most recent items. The old Takeout derivability test is retained under connectors/youtube_takeout. Vana must update its projection binding from watched_at sorting to position ordering before the cutover; this repository does not ship that projection. Authenticated live browser proof remains outstanding."
     ],
     "status": "in_progress"
   }

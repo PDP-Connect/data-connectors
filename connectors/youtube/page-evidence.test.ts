@@ -614,3 +614,60 @@ test("a blocked page vetoes every kind of end evidence", () => {
 		"a missing block fact is not a clear page",
 	);
 });
+
+test("only an authenticated selected history empty message proves a zero-row end", () => {
+	const data = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								sectionListRenderer: {
+									contents: [
+										{
+											itemSectionRenderer: {
+												contents: [
+													{
+														messageRenderer: {
+															text: { runs: [{ text: "No watch history" }] },
+														},
+													},
+												],
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		},
+	};
+	const { document, window } = parseHTML(
+		`<script>var ytInitialData = ${JSON.stringify(data)};</script>`,
+	);
+	const globals = globalThis as Record<string, unknown>;
+	globals.document = document;
+	globals.window = window;
+	setPageLocation(window, "https://www.youtube.com/feed/history");
+	try {
+		const end = readListEnd({ kind: "history", sessionPresent: true });
+		assert.equal(end.verifiedEmpty, true);
+		assert.equal(end.pageBlocked, false);
+		assert.equal(enumerationEnded(end, 0), true);
+
+		const signedOut = readListEnd({
+			kind: "history",
+			sessionPresent: false,
+		});
+		assert.equal(signedOut.verifiedEmpty, false);
+		assert.equal(signedOut.pageBlocked, true);
+		assert.equal(enumerationEnded(signedOut, 0), false);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+});

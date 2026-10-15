@@ -253,7 +253,7 @@ const PAGE_DATA_HELPERS = String.raw`
 	const regionFacts = (data, playlistIndex) => {
 		const region = listRegion(data);
 		if (region === null) return null;
-		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, likedVideosEmpty: false };
+		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, likedVideosEmpty: false, historyEmpty: false };
 		const visit = (value) => {
 			if (Array.isArray(value)) {
 				for (const child of value) visit(child);
@@ -296,6 +296,10 @@ const PAGE_DATA_HELPERS = String.raw`
 			const section = Array.isArray(sections) && sections.length === 1 ? sections[0]?.itemSectionRenderer : null;
 			const sectionContents = section?.contents;
 			facts.likedVideosEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
+				isObject(sectionContents[0]?.messageRenderer) &&
+				isRecognizedEmptyText(textFragments(sectionContents[0].messageRenderer).join(" ")) &&
+				!facts.items && !facts.continuation && !facts.loading && !facts.rejectedMessage;
+			facts.historyEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
 				isObject(sectionContents[0]?.messageRenderer) &&
 				isRecognizedEmptyText(textFragments(sectionContents[0].messageRenderer).join(" ")) &&
 				!facts.items && !facts.continuation && !facts.loading && !facts.rejectedMessage;
@@ -382,7 +386,9 @@ const LIST_END_FUNCTION = `(request) => {
 					? onLikedVideosPage() && !document.querySelector("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer") && facts.every((f) => f.likedVideosEmpty)
 					: kind === "subscriptions"
 						? onSubscriptionsPage() && facts.every((f) => f.selectedTabContent && f.lists > 0 && f.emptyMessage && f.emptyLists === f.lists && f.items === 0 && !f.continuation && !f.loading && !f.rejectedMessage)
-						: false),
+						: kind === "history"
+							? sessionPresent && !hasPageWall() && !hasDomLoading() && onTargetRoute(kind) && facts.every((f) => f.historyEmpty)
+							: false),
 	};
 }`;
 

@@ -41,6 +41,7 @@ runConnector({
 					},
 				};
 				const html =
+					'<button id="avatar-btn">Account</button>' +
 					row("Sep 21, 2026", "olderVideo") +
 					row("Sep 22, 2026", "inRangeVideo") +
 					row("Unknown", "unknownVideo") +

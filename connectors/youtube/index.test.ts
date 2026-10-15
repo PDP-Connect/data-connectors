@@ -107,6 +107,7 @@ class FixturePage {
 		return { jsonValue: async () => state, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function): Promise<unknown> {
+		if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
 		if (fn.name === "readListEnd") {
 			const empty =
 				this.lastWaitState === "empty" || this.lastWaitState === "json-empty";
@@ -159,6 +160,41 @@ class FixturePage {
 		if (fn.name === "readVideos") return [{ ...VIDEO }];
 		return undefined;
 	}
+}
+
+function historyFixturePage(
+	videos: Record<string, unknown>[],
+	end: Partial<{
+		dataReadable: boolean;
+		dataItemCount: number;
+		dataHasContinuation: boolean;
+		domHasContinuation: boolean;
+		declaredTotal: number | null;
+		domItemCount: number | null;
+		domHasEndMarker: boolean;
+		verifiedEmpty: boolean;
+		pageBlocked: boolean;
+	}> = {},
+): FixturePage {
+	const page = new FixturePage();
+	page.evaluate = async (fn: Function) => {
+		if (fn.name === "readVideos") return videos;
+		if (fn.name === "readListEnd")
+			return {
+				dataReadable: true,
+				dataItemCount: videos.length,
+				dataHasContinuation: false,
+				domHasContinuation: false,
+				declaredTotal: null,
+				domItemCount: videos.length,
+				domHasEndMarker: false,
+				verifiedEmpty: false,
+				pageBlocked: false,
+				...end,
+			};
+		return undefined;
+	};
+	return page;
 }
 
 test("profile skips report a redacted branch code for each unreadable page", async () => {
@@ -299,17 +335,17 @@ test("date resolver keeps day precision and rejects unknown labels", () => {
 	assert.equal(resolveWatchedDate("Unknown", now), null);
 });
 
-test("history is the first 50 visible records in page order with no timestamp cursor", async () => {
-	const page = new FixturePage();
-	page.evaluate = async (fn: Function) =>
-		fn.name === "readVideos"
-			? Array.from({ length: 60 }, (_, i) => ({
+test("history emits at most 50 new records per run and checkpoints its last-seen anchor", async () => {
+	const page = historyFixturePage(
+		Array.from({ length: 60 }, (_, i) => ({
 					...VIDEO,
 					video_id: `video${i}`,
 					video_url: `https://www.youtube.com/watch?v=video${i}`,
-				}))
-			: undefined;
+				})),
+		{ dataHasContinuation: true, domHasContinuation: true },
+	);
 	const history: Record<string, unknown>[] = [];
+	const messages: Record<string, unknown>[] = [];
 	const progress: string[] = [];
 	const diagnostics: string[] = [];
 	setConnectorDiagnosticSink((line) => diagnostics.push(line));
@@ -322,7 +358,9 @@ test("history is the first 50 visible records in page order with no timestamp cu
 			emitRecord: async (_stream, data) => {
 				history.push(data);
 			},
-			emit: async () => undefined,
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
 			reportStreamFailure: async () => undefined,
 			progress: async (message) => {
 				progress.push(message);
@@ -336,6 +374,17 @@ test("history is the first 50 visible records in page order with no timestamp cu
 	assert.equal(history[49]?.video_id, "video49");
 	assert.equal(history[49]?.position, 49);
 	assert.equal("watched_at" in history[0]!, false);
+	assert.deepEqual(
+		messages.filter((message) => message.type === "STATE").map((message) => message.cursor),
+		[
+			{
+				last_seen_video_id: "video49",
+				position: 49,
+				complete: false,
+				evidence: "youtube_history_last_seen_anchor",
+			},
+		],
+	);
 
 	const prefix = "[youtube-diagnostic] coverage ";
 	const coverageLines = diagnostics.filter((line) => line.startsWith(prefix));
@@ -360,15 +409,203 @@ test("history is the first 50 visible records in page order with no timestamp cu
 	);
 });
 
+test("history resumes after the last seen video checkpoint", async () => {
+	const videos = Array.from({ length: 110 }, (_, i) => ({
+		...VIDEO,
+		video_id: `video${i}`,
+		video_url: `https://www.youtube.com/watch?v=video${i}`,
+	}));
+	const run = async (state: Record<string, unknown> = {}) => {
+		const records: Record<string, unknown>[] = [];
+		const messages: Record<string, unknown>[] = [];
+		const failures: string[] = [];
+		await collectYoutubeBrowser({
+			page: historyFixturePage(videos, {
+				dataHasContinuation: true,
+				domHasContinuation: true,
+			}) as never,
+			requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+			state,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
+			reportStreamFailure: async (_stream, message) => {
+				failures.push(message);
+			},
+			progress: async () => undefined,
+		});
+		return { records, messages, failures };
+	};
+
+	const first = await run();
+	const firstState = first.messages.find((message) => message.type === "STATE")
+		?.cursor as Record<string, unknown>;
+	assert.deepEqual(first.failures, []);
+	assert.deepEqual(
+		first.records.map((record) => record.video_id),
+		Array.from({ length: 50 }, (_, i) => `video${i}`),
+	);
+	assert.equal(firstState.last_seen_video_id, "video49");
+	assert.equal(firstState.complete, false);
+
+	const second = await run({ watch_history: firstState });
+	const secondState = second.messages.find((message) => message.type === "STATE")
+		?.cursor as Record<string, unknown>;
+	assert.deepEqual(second.failures, []);
+	assert.deepEqual(
+		second.records.map((record) => record.video_id),
+		Array.from({ length: 50 }, (_, i) => `video${i + 50}`),
+	);
+	assert.equal(secondState.last_seen_video_id, "video99");
+	assert.equal(secondState.position, 99);
+	assert.equal(secondState.complete, false);
+});
+
+test("history checkpoints positive resumed rows without claiming an unproven end", async () => {
+	const videos = Array.from({ length: 41 }, (_, i) => ({
+		...VIDEO,
+		video_id: `video${i}`,
+		video_url: `https://www.youtube.com/watch?v=video${i}`,
+	}));
+	const messages: Record<string, unknown>[] = [];
+	const failures: string[] = [];
+	await collectYoutubeBrowser({
+		page: historyFixturePage(videos, { declaredTotal: 100 }) as never,
+		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+		state: {
+			watch_history: { last_seen_video_id: "video9", position: 9 },
+		},
+		emitRecord: async () => undefined,
+		emit: async (message) => {
+			messages.push(message as Record<string, unknown>);
+		},
+		reportStreamFailure: async (_stream, message) => {
+			failures.push(message);
+		},
+		progress: async () => undefined,
+	});
+
+	const checkpoint = messages.find((message) => message.type === "STATE")
+		?.cursor as Record<string, unknown>;
+	assert.deepEqual(failures, []);
+	assert.equal(checkpoint.last_seen_video_id, "video40");
+	assert.equal(checkpoint.position, 40);
+	assert.equal(checkpoint.complete, false);
+	assert.equal(checkpoint.evidence, "youtube_history_last_seen_anchor");
+});
+
+test("history no-progress after a checkpoint reports a gap and does not checkpoint", async () => {
+	const videos = Array.from({ length: 50 }, (_, i) => ({
+		...VIDEO,
+		video_id: `video${i}`,
+		video_url: `https://www.youtube.com/watch?v=video${i}`,
+	}));
+	const messages: Record<string, unknown>[] = [];
+	const failures: string[] = [];
+	const records: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: historyFixturePage(videos, {
+			dataHasContinuation: true,
+			domHasContinuation: true,
+		}) as never,
+		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+		state: {
+			watch_history: { last_seen_video_id: "video49", position: 49 },
+		},
+		emitRecord: async (_stream, data) => {
+			records.push(data);
+		},
+		emit: async (message) => {
+			messages.push(message as Record<string, unknown>);
+		},
+		reportStreamFailure: async (_stream, message) => {
+			failures.push(message);
+		},
+		progress: async () => undefined,
+	});
+
+	assert.equal(failures.length, 1);
+	assert.deepEqual(records, []);
+	assert.equal(messages.some((message) => message.type === "STATE"), false);
+});
+
+test("history source-end evidence completes the checkpoint", async () => {
+	const videos = Array.from({ length: 3 }, (_, i) => ({
+		...VIDEO,
+		video_id: `video${i}`,
+		video_url: `https://www.youtube.com/watch?v=video${i}`,
+	}));
+	const messages: Record<string, unknown>[] = [];
+	const failures: string[] = [];
+	await collectYoutubeBrowser({
+		page: historyFixturePage(videos) as never,
+		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+		emitRecord: async () => undefined,
+		emit: async (message) => {
+			messages.push(message as Record<string, unknown>);
+		},
+		reportStreamFailure: async (_stream, message) => {
+			failures.push(message);
+		},
+		progress: async () => undefined,
+	});
+
+	assert.deepEqual(failures, []);
+	assert.deepEqual(
+		messages.filter((message) => message.type === "STATE").map((message) => message.cursor),
+		[{ last_seen_video_id: "video2", position: 2, complete: true, evidence: "readable-data" }],
+	);
+});
+
+test("a blocked history page vetoes completion and emits no checkpoint", async () => {
+	const messages: Record<string, unknown>[] = [];
+	const failures: string[] = [];
+	await collectYoutubeBrowser({
+		page: historyFixturePage([VIDEO], {
+			pageBlocked: true,
+			domHasEndMarker: true,
+		}) as never,
+		requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+		emitRecord: async () => undefined,
+		emit: async (message) => {
+			messages.push(message as Record<string, unknown>);
+		},
+		reportStreamFailure: async (_stream, message) => {
+			failures.push(message);
+		},
+		progress: async () => undefined,
+	});
+
+	assert.equal(failures.length, 1);
+	assert.equal(messages.some((message) => message.type === "STATE"), false);
+});
+
 test("repeated history videos keep the first page occurrence and one primary key", async () => {
 	const page = new FixturePage();
-	page.evaluate = async (fn: Function) =>
-		fn.name === "readVideos"
-			? [
-					{ ...VIDEO, watched_date_label: "Today" },
-					{ ...VIDEO, watched_date_label: "Yesterday" },
-				]
-			: undefined;
+	page.evaluate = async (fn: Function) => {
+		if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
+		if (fn.name === "readVideos")
+			return [
+				{ ...VIDEO, watched_date_label: "Today" },
+				{ ...VIDEO, watched_date_label: "Yesterday" },
+			];
+		if (fn.name === "readListEnd")
+			return {
+				dataReadable: true,
+				dataItemCount: 1,
+				dataHasContinuation: false,
+				domHasContinuation: false,
+				declaredTotal: 1,
+				domItemCount: 1,
+				domHasEndMarker: true,
+				verifiedEmpty: false,
+				pageBlocked: false,
+			};
+		return undefined;
+	};
 	const history: Record<string, unknown>[] = [];
 	await collectYoutubeBrowser({
 		page: page as never,
@@ -1003,7 +1240,11 @@ class DocumentPage {
 		return { jsonValue: async () => value, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function, arg?: unknown) {
-		return this.inPage(() => fn(arg));
+		return this.inPage(() => {
+			if (fn.name === "hasYoutubeSessionOnCurrentPage")
+				return Boolean(document.querySelector("button#avatar-btn"));
+			return fn(arg);
+		});
 	}
 }
 
@@ -1015,7 +1256,15 @@ async function collectFromDocuments(
 	const records = new Map<string, Record<string, unknown>[]>();
 	const messages: Record<string, unknown>[] = [];
 	await collectYoutubeBrowser({
-		page: new DocumentPage(pageFor, forcedReadiness) as never,
+		page: new DocumentPage(
+			(url) => {
+				const html = pageFor(url);
+				return url.includes("/feed/history") && !html.includes("avatar-btn")
+					? `${SIGNED_IN}${html}`
+					: html;
+			},
+			forcedReadiness,
+		) as never,
 		requested: new Map(streams.map((name) => [name, { name }])) as never,
 		emitRecord: async (stream, data) => {
 			records.set(stream, [...(records.get(stream) ?? []), data]);
@@ -1104,7 +1353,7 @@ test("finding 1: a list with a next page still pending fails with stream_collect
 	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
 });
 
-test("finding 1: reading to the history limit is a cap that fails the stream, not the end of the list", async () => {
+test("reading to the history limit checkpoints progress without claiming the list ended", async () => {
 	const sourceItems = Array.from({ length: 60 }, () => ({
 		lockupViewModel: {},
 	}));
@@ -1119,8 +1368,12 @@ test("finding 1: reading to the history limit is a cap that fails the stream, no
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
-	assert.match(String(messages[0]?.message), /stopped at the 50-item limit/);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
+	assert.equal(
+		(messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>)
+			?.complete,
+		false,
+	);
 });
 
 test("history rows beyond the emitted cap veto completion even with a page end marker", async () => {
@@ -1134,13 +1387,18 @@ test("history rows beyond the emitted cap veto completion even with a page end m
 			(_, n) =>
 				`<yt-lockup-view-model><a href="/watch?v=vid${String(n).padStart(8, "0")}"></a><h3>V${n}</h3></yt-lockup-view-model>`,
 		).join("");
-		const { records, outcome } = await collectFromDocuments(
+		const { records, messages, outcome } = await collectFromDocuments(
 			() =>
 				`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${withEndMarker ? END_OF_LIST : ""}`,
 			["watch_history"],
 		);
 		assert.equal(records.get("watch_history")?.length, 50);
-		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+		assert.deepEqual(outcome("watch_history"), ["STATE"]);
+		assert.equal(
+			(messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>)
+				?.complete,
+			false,
+		);
 	}
 });
 
@@ -1205,7 +1463,7 @@ test("exactly 50 data-backed history rows can end without an end marker", async 
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
-	assert.deepEqual(outcome("watch_history"), []);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
 });
 
 test("delayed DOM rows beyond readable data do not prove completion", async () => {
@@ -1587,10 +1845,10 @@ test("round 3: exactly 50 complete history items with source-end evidence comple
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
-	assert.deepEqual(outcome("watch_history"), []);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
 });
 
-test("round 3: exactly 50 history items with a next page still pending fail the stream", async () => {
+test("exactly 50 history items with a next page pending checkpoint partial progress", async () => {
 	const ids = Array.from(
 		{ length: 50 },
 		(_, n) => `vid${String(n).padStart(8, "0")}`,
@@ -1607,5 +1865,5 @@ test("round 3: exactly 50 history items with a next page still pending fail the 
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
 });
