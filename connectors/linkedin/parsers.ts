@@ -6,170 +6,91 @@
 // so the field-mapping logic (the part most likely to drift when LinkedIn
 // reshapes Voyager) is unit-testable without a browser.
 //
-// Ground truth: connectors/linkedin/linkedin-playwright.js (legacy). The
-// dual timePeriod/dateRange handling below is carried over verbatim from
-// `extractTimePeriod`/`extractYears` in that file — LinkedIn has shipped
-// both the legacy REST shape (`timePeriod.startDate/endDate`) and the dash
-// shape (`dateRange.start/end`) across different decoration IDs, sometimes
-// for the same account.
+// Every output field is declared below with its source path(s) in priority
+// order and read through field-read.ts. A row is covered only when every
+// mapped field is `read` or `empty`; see that file for the contract.
+//
+// Ground truth: connectors/linkedin/linkedin-playwright.js (legacy). LinkedIn
+// has shipped both the legacy REST date shape (`timePeriod.startDate/endDate`)
+// and the dash shape (`dateRange.start/end`) across decoration IDs, sometimes
+// for the same account, plus the same fields inline on the node.
 
-import type {
-	VoyagerConnectionElement,
-	VoyagerDateBearing,
-	VoyagerDatePoint,
-	VoyagerEducation,
-	VoyagerLanguage,
-	VoyagerMiniProfile,
-	VoyagerPosition,
-	VoyagerPositionGroup,
-	VoyagerProfileElement,
-	VoyagerResolvedProfile,
-	VoyagerSkill,
-	VoyagerSkillCategory,
-	VoyagerVectorImage,
-} from "./types.ts";
-
-const ENDORSEMENT_COUNT_RE = /^\d+$/u;
-
-// ─── D4 partial dates ────────────────────────────────────────────────────
-
-/**
- * D4: a partial date is a string at source precision (`YYYY`, `YYYY-MM`, or
- * `YYYY-MM-DD`). LinkedIn's Voyager date points never carry a day, only
- * month + year (or year alone) — so this never produces `YYYY-MM-DD`, but
- * the function is shaped to the general D4 rule rather than hardcoding
- * month-precision.
- */
-export function partialDateFromPoint(
-	point: VoyagerDatePoint | undefined,
-): string | null {
-	if (
-		!point ||
-		typeof point.year !== "number" ||
-		!Number.isFinite(point.year)
-	) {
-		return null;
-	}
-	const year = String(point.year).padStart(4, "0");
-	if (
-		typeof point.month === "number" &&
-		point.month >= 1 &&
-		point.month <= 12
-	) {
-		return `${year}-${String(point.month).padStart(2, "0")}`;
-	}
-	return year;
-}
-
-/** Resolve a node's date-range regardless of which of the two Voyager shapes
- *  (dash `dateRange` vs legacy `timePeriod`) is present, falling back to date
- *  fields inline on the node itself (oldest legacy shape). Mirrors legacy
- *  `extractTimePeriod`'s `obj.dateRange || obj` fallback chain. */
-function resolveDateRange(node: VoyagerDateBearing | undefined): {
-	end: VoyagerDatePoint | undefined;
-	start: VoyagerDatePoint | undefined;
-} {
-	if (!node) {
-		return { end: undefined, start: undefined };
-	}
-	const range = node.dateRange ?? node.timePeriod ?? node;
-	return {
-		end: range.end ?? range.endDate ?? node.endDate,
-		start: range.start ?? range.startDate ?? node.startDate,
-	};
-}
-
-export function startDateOf(
-	node: VoyagerDateBearing | undefined,
-): string | null {
-	return partialDateFromPoint(resolveDateRange(node).start);
-}
-
-/** `null` end date means "current" (Present) at the LinkedIn semantic layer.
- *  D4 forbids inventing a day/time, and there is no separate "is current"
- *  boolean in the manifest contract — `end_date: null` on a stream where
- *  `start_date` is set is the honest representation of an ongoing role. */
-export function endDateOf(node: VoyagerDateBearing | undefined): string | null {
-	return partialDateFromPoint(resolveDateRange(node).end);
-}
-
-// ─── Image URLs ─────────────────────────────────────────────────────────
-
-export function vectorImageUrl(
-	image: VoyagerVectorImage | undefined,
-): string | null {
-	const artifacts = Array.isArray(image?.artifacts) ? image.artifacts : [];
-	if (artifacts.length === 0) {
-		return null;
-	}
-	const largest = artifacts.at(-1);
-	const segment = largest?.fileIdentifyingUrlPathSegment;
-	if (typeof segment !== "string" || segment.length === 0) {
-		return null;
-	}
-	const rootUrl = typeof image?.rootUrl === "string" ? image.rootUrl : "";
-	return `${rootUrl}${segment}`;
-}
-
-// ─── Ids ────────────────────────────────────────────────────────────────
-
-/** Voyager entity URNs are the only stable per-entity id Voyager exposes for
- *  nested profile sub-entities; a positional/derived id would not survive
- *  reordering. Falls back to a positional id only when Voyager omits the
- *  URN (observed on some decoration versions for position-group children). */
-export function subEntityId(
-	entityUrn: string | undefined,
-	fallbackPrefix: string,
-	index: number,
-): string {
-	return entityUrn && entityUrn.length > 0
-		? entityUrn
-		: `${fallbackPrefix}-${index}`;
-}
+import {
+	addOmittedRow,
+	addRow,
+	andThen,
+	assembleRow,
+	at,
+	type Checkable,
+	count,
+	EMPTY,
+	emptyStreamRows,
+	epochMillis,
+	type FieldRead,
+	type FieldReads,
+	firstOf,
+	isRecord,
+	partialDate,
+	type RowSpec,
+	read,
+	type StreamRows,
+	textAt,
+	unavailable,
+	vectorImageUrl,
+} from "./field-read.ts";
+import {
+	connectionsSchema,
+	educationSchema,
+	experienceSchema,
+	languagesSchema,
+	profileSchema,
+	skillsSchema,
+} from "./schemas.ts";
 
 // ─── Record shapes ──────────────────────────────────────────────────────
+// A field typed `T | null` may also be absent: absent means unavailable.
 
 export interface ProfileRecord {
-	connection_count: number | null;
-	current_company: string | null;
-	current_position_title: string | null;
-	full_name: string | null;
-	headline: string | null;
+	connection_count?: number | null;
+	current_company?: string | null;
+	current_position_title?: string | null;
+	full_name?: string | null;
+	headline?: string | null;
 	id: string;
-	industry: string | null;
-	location: string | null;
-	profile_picture_url: string | null;
-	public_url: string | null;
-	summary: string | null;
+	industry?: string | null;
+	location?: string | null;
+	profile_picture_url?: string | null;
+	public_url?: string | null;
+	summary?: string | null;
 	[field: string]: unknown;
 }
 
 export interface ExperienceRecord {
-	company: string | null;
-	description: string | null;
-	employment_type: string | null;
-	end_date: string | null;
+	company?: string | null;
+	description?: string | null;
+	employment_type?: string | null;
+	end_date?: string | null;
 	id: string;
-	location: string | null;
-	start_date: string | null;
-	title: string | null;
+	location?: string | null;
+	start_date?: string | null;
+	title?: string | null;
 	[field: string]: unknown;
 }
 
 export interface EducationRecord {
-	degree: string | null;
-	end_date: string | null;
-	field_of_study: string | null;
-	grade: string | null;
+	degree?: string | null;
+	end_date?: string | null;
+	field_of_study?: string | null;
+	grade?: string | null;
 	id: string;
-	logo_url: string | null;
-	school: string | null;
-	start_date: string | null;
+	logo_url?: string | null;
+	school?: string | null;
+	start_date?: string | null;
 	[field: string]: unknown;
 }
 
 export interface SkillRecord {
-	endorsement_count: number | null;
+	endorsement_count?: number | null;
 	id: string;
 	name: string;
 	[field: string]: unknown;
@@ -178,271 +99,104 @@ export interface SkillRecord {
 export interface LanguageRecord {
 	id: string;
 	name: string;
-	proficiency: string | null;
+	proficiency?: string | null;
 	[field: string]: unknown;
 }
 
 export interface ConnectionRecord {
-	connected_at: string | null;
-	full_name: string | null;
-	headline: string | null;
+	connected_at?: string | null;
+	full_name?: string | null;
+	headline?: string | null;
 	id: string;
-	profile_url: string | null;
+	profile_url?: string | null;
 	[field: string]: unknown;
 }
 
-export interface OmissionSummary {
-	count: number;
-	omittedCount: number;
-	omittedReasons: Record<string, number>;
-	reasons: Record<string, number>;
+// ─── Shared field readers ────────────────────────────────────────────────
+
+type Path = readonly string[];
+
+/** Date sources in priority order: dash `dateRange`, legacy `timePeriod`,
+ *  then the oldest shape with the points inline on the node. */
+const DATE_SOURCES: Readonly<Record<"start" | "end", readonly Path[]>> = {
+	end: [
+		["dateRange", "end"],
+		["dateRange", "endDate"],
+		["timePeriod", "end"],
+		["timePeriod", "endDate"],
+		["end"],
+		["endDate"],
+	],
+	start: [
+		["dateRange", "start"],
+		["dateRange", "startDate"],
+		["timePeriod", "start"],
+		["timePeriod", "startDate"],
+		["start"],
+		["startDate"],
+	],
+};
+
+/** D4 partial date. No date anywhere is `empty`; for `end` that means an
+ *  ongoing role or course. A malformed point is never read as "ongoing". */
+export function dateOf(
+	node: unknown,
+	edge: "start" | "end",
+): FieldRead<string> {
+	return firstOf(
+		DATE_SOURCES[edge].map((path) => andThen(at(node, path), partialDate)),
+		"empty",
+	);
 }
 
-export interface RecordsWithOmissions<T> {
-	considered: number;
-	covered: number;
-	omissions: OmissionSummary;
-	records: T[];
+function optionalText(node: unknown, ...paths: Path[]): FieldRead<string> {
+	return firstOf(
+		paths.map((path) => textAt(node, path)),
+		"empty",
+	);
 }
 
-function addOmission(
-	summary: OmissionSummary,
-	reason: string,
-	omitted = true,
-): void {
-	summary.count += 1;
-	summary.reasons[reason] = (summary.reasons[reason] ?? 0) + 1;
-	if (omitted) {
-		summary.omittedCount += 1;
-		summary.omittedReasons[reason] = (summary.omittedReasons[reason] ?? 0) + 1;
+function imageAt(node: unknown, path: Path): FieldRead<string> {
+	return andThen(at(node, path), vectorImageUrl);
+}
+
+/** A `{ elements: [...] }` collection. Only an array is readable: a missing,
+ *  `null`, or wrong-typed collection never reads as an empty list. */
+export function collectionAt(node: unknown, key: string): FieldRead<unknown[]> {
+	const elements = at(node, [key, "elements"]);
+	if (elements.kind === "read" && Array.isArray(elements.value)) {
+		return read(elements.value);
 	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function optionalStringFieldsAreReadable(
-	row: Record<string, unknown>,
-	fields: readonly string[],
-): boolean {
-	return fields.every(
-		(field) =>
-			!Object.hasOwn(row, field) ||
-			row[field] === null ||
-			typeof row[field] === "string",
+	return unavailable(
+		elements.kind === "unavailable" && elements.reason === "absent"
+			? "absent"
+			: "malformed",
 	);
 }
 
-function datePointIsReadable(value: unknown): boolean {
-	if (value === null) return true;
-	if (!isRecord(value)) return false;
-	return ["month", "year"].every(
-		(field) =>
-			!Object.hasOwn(value, field) ||
-			(typeof value[field] === "number" && Number.isFinite(value[field])),
-	);
-}
-
-function dateRangeIsReadable(value: unknown): boolean {
-	if (value === null) return true;
-	if (!isRecord(value)) return false;
-	return ["start", "end", "startDate", "endDate"].every(
-		(field) => !Object.hasOwn(value, field) || datePointIsReadable(value[field]),
-	);
-}
-
-function dateFieldsAreReadable(row: Record<string, unknown>): boolean {
-	return (
-		["dateRange", "timePeriod"].every(
-			(field) => !Object.hasOwn(row, field) || dateRangeIsReadable(row[field]),
-		) &&
-		["startDate", "endDate"].every(
-			(field) => !Object.hasOwn(row, field) || datePointIsReadable(row[field]),
-		)
-	);
-}
-
-function optionalNameObjectIsReadable(value: unknown): boolean {
-	return (
-		value === null ||
-		(isRecord(value) &&
-			Object.hasOwn(value, "name") &&
-			optionalStringFieldsAreReadable(value, ["name"]))
-	);
-}
-
-const POSITION_GROUP_FIELDS = [
-	"company",
-	"dateRange",
-	"description",
-	"endDate",
-	"entityUrn",
-	"geoLocationName",
-	"locationName",
-	"name",
-	"profilePositionInPositionGroup",
-	"startDate",
-	"title",
-] as const;
-
-const POSITION_GROUP_STRING_FIELDS = [
-	"description",
-	"entityUrn",
-	"geoLocationName",
-	"locationName",
-	"name",
-	"title",
-] as const;
-
-const POSITION_FIELDS = [
-	"companyName",
-	"dateRange",
-	"description",
-	"employmentType",
-	"endDate",
-	"entityUrn",
-	"geoLocationName",
-	"locationName",
-	"startDate",
-	"title",
-] as const;
-
-const POSITION_STRING_FIELDS = [
-	"companyName",
-	"description",
-	"entityUrn",
-	"geoLocationName",
-	"locationName",
-	"title",
-] as const;
-
-function isReadablePosition(value: unknown): value is VoyagerPosition {
-	return (
-		isRecord(value) &&
-		hasKnownSourceField(value, POSITION_FIELDS) &&
-		optionalStringFieldsAreReadable(value, POSITION_STRING_FIELDS) &&
-		dateFieldsAreReadable(value) &&
-		(!Object.hasOwn(value, "employmentType") ||
-			optionalNameObjectIsReadable(value.employmentType))
-	);
-}
-
-function isReadablePositionGroupBase(value: unknown): value is VoyagerPositionGroup {
-	if (!isRecord(value)) return false;
-	const hasGroupValue = POSITION_GROUP_STRING_FIELDS.some((field) =>
-		Object.hasOwn(value, field),
-	);
-	const hasCompanyValue =
-		Object.hasOwn(value, "company") &&
-		(value.company === null ||
-			(isRecord(value.company) && Object.hasOwn(value.company, "name")));
-	const hasDateValue = ["dateRange", "timePeriod", "startDate", "endDate"].some(
-		(field) => Object.hasOwn(value, field),
-	);
-	const nested = value.profilePositionInPositionGroup;
-	const hasPositionValue =
-		isRecord(nested) && Array.isArray(nested.elements) && nested.elements.length > 0;
-	return (
-		(hasGroupValue || hasCompanyValue || hasDateValue || hasPositionValue) &&
-		hasKnownSourceField(value, POSITION_GROUP_FIELDS) &&
-		optionalStringFieldsAreReadable(value, POSITION_GROUP_STRING_FIELDS) &&
-		dateFieldsAreReadable(value) &&
-		(!Object.hasOwn(value, "company") ||
-			optionalNameObjectIsReadable(value.company))
-	);
-}
-
-/** True only when every field used to derive a position-group record can be
- *  read without coercion. Shared by profile coverage and experience parsing. */
-export function isReadablePositionGroup(
-	value: unknown,
-): value is VoyagerPositionGroup {
-	if (!isReadablePositionGroupBase(value)) return false;
-	if (!Object.hasOwn(value, "profilePositionInPositionGroup")) return true;
-	const nested = value.profilePositionInPositionGroup;
-	return (
-		isRecord(nested) &&
-		Array.isArray(nested.elements) &&
-		nested.elements.every(isReadablePosition)
-	);
-}
-
-function locationBranchIsReadable(
-	profile: Record<string, unknown>,
-	key: "location" | "geoLocation",
-): boolean {
-	if (!Object.hasOwn(profile, key)) return true;
-	const branch = profile[key];
-	if (branch === null) return true;
-	if (!isRecord(branch)) return false;
-	if (key === "location") {
-		if (!optionalStringFieldsAreReadable(branch, ["preferredGeoPlace"])) {
-			return false;
-		}
-		if (!Object.hasOwn(branch, "basicLocation")) return true;
-		const basicLocation = branch.basicLocation;
-		return (
-			basicLocation === null ||
-			(isRecord(basicLocation) &&
-				Object.hasOwn(basicLocation, "countryCode") &&
-				optionalStringFieldsAreReadable(basicLocation, ["countryCode"]))
-		);
+/** Row id: the Voyager entity URN, else a positional id. Voyager omits the
+ *  URN on some decoration versions; a malformed URN is unreadable. */
+function idOf(node: unknown, prefix: string, index: number): FieldRead<string> {
+	const urn = at(node, ["entityUrn"]);
+	if (urn.kind === "read") {
+		if (typeof urn.value !== "string") return unavailable("malformed");
+		if (urn.value.length > 0) return read(urn.value);
 	}
-	if (!Object.hasOwn(branch, "geo")) return true;
-	const geo = branch.geo;
-	return (
-		geo === null ||
-		(isRecord(geo) &&
-			Object.hasOwn(geo, "defaultLocalizedName") &&
-			optionalStringFieldsAreReadable(geo, ["defaultLocalizedName"]))
-	);
+	if (urn.kind === "unavailable" && urn.reason !== "absent") return urn;
+	return read(`${prefix}-${index}`);
 }
 
-/** Matches the location branches consumed by locationNameOf(). */
-export function isReadableProfileLocation(value: unknown): boolean {
-	if (!isRecord(value)) return false;
-	const hasSource = Object.hasOwn(value, "location") || Object.hasOwn(value, "geoLocation");
-	const location = value.location;
-	const geoLocation = value.geoLocation;
-	const hasLocationValue =
-		location === null ||
-		(isRecord(location) &&
-			(Object.hasOwn(location, "preferredGeoPlace") ||
-				location.basicLocation === null ||
-				(isRecord(location.basicLocation) &&
-					Object.hasOwn(location.basicLocation, "countryCode"))));
-	const hasGeoLocationValue =
-		geoLocation === null ||
-		(isRecord(geoLocation) &&
-			(geoLocation.geo === null ||
-				(isRecord(geoLocation.geo) &&
-					Object.hasOwn(geoLocation.geo, "defaultLocalizedName"))));
-	return (
-		hasSource &&
-		((Object.hasOwn(value, "location") && hasLocationValue) ||
-			(Object.hasOwn(value, "geoLocation") && hasGeoLocationValue)) &&
-		locationBranchIsReadable(value, "location") &&
-		locationBranchIsReadable(value, "geoLocation")
-	);
-}
-
-function nonEmpty(s: string | undefined | null): string | null {
-	if (typeof s !== "string") {
-		return null;
-	}
-	const trimmed = s.trim();
-	return trimmed.length > 0 ? trimmed : null;
-}
-
-function joinFullName(
-	first: string | undefined,
-	last: string | undefined,
-): string | null {
-	const hasFirst = typeof first === "string";
-	const hasLast = typeof last === "string";
-	if (!hasFirst && !hasLast) return null;
-	return `${hasFirst ? first : ""} ${hasLast ? last : ""}`.trim();
+/** "First Last". Unreadable when either part is; empty when both are. */
+function joinName(
+	first: FieldRead<string>,
+	last: FieldRead<string>,
+): FieldRead<string> {
+	if (first.kind === "unavailable") return first;
+	if (last.kind === "unavailable") return last;
+	if (first.kind === "empty" && last.kind === "empty") return EMPTY;
+	const firstText = first.kind === "read" ? first.value : "";
+	const lastText = last.kind === "read" ? last.value : "";
+	return read(`${firstText} ${lastText}`.trim());
 }
 
 /** Public profile permalink from the public identifier — the only stable
@@ -451,520 +205,518 @@ export function profileUrlFor(publicIdentifier: string): string {
 	return `https://www.linkedin.com/in/${publicIdentifier}/`;
 }
 
+function profileUrlRead(identifier: FieldRead<string>): FieldRead<string> {
+	return andThen(identifier, (id) =>
+		id.length === 0 ? EMPTY : read(profileUrlFor(id)),
+	);
+}
+
+function rowSpec(
+	schema: Checkable & { shape: Readonly<Record<string, Checkable>> },
+	required: readonly string[],
+	content?: readonly string[],
+): RowSpec {
+	return {
+		schema,
+		shape: schema.shape,
+		required,
+		...(content ? { content } : {}),
+	};
+}
+
+// ─── profile ─────────────────────────────────────────────────────────────
+
+export type DashProfileSource = "decoration" | "basic" | "unavailable";
+
+export interface ProfileSources {
+	/** The dash profile element, or null when no profile was returned. */
+	dash: unknown;
+	/** Whether `dash` came from a full decoration or the basic fallback. */
+	dashSource: DashProfileSource;
+	/** The `/voyager/api/me` body. */
+	me: unknown;
+	publicIdentifier: string;
+	/** From the connections walk: `read` only on a verified end. */
+	connectionCount: FieldRead<number>;
+}
+
 /**
- * A live-account capture (2026-09-22) never populated
- * `location.basicLocation`/`preferredGeoPlace` — real accounts observed so
- * far always resolve via the `geoLocation.geo.defaultLocalizedName`
- * fallback below, which is the proven-correct source. The
- * `basicLocation`/`preferredGeoPlace` branch is kept as a tolerant
- * fallback (matches legacy inference) rather than removed, since it's
- * cheap to keep and a different account/decoration could still expose it.
+ * Location of the owner. The `location` branch joins `preferredGeoPlace` and
+ * `basicLocation.countryCode` when either is readable. The live account
+ * (2026-09-22) had neither and resolved through
+ * `geoLocation.geo.defaultLocalizedName`. The live `location.countryCode`
+ * (no `basicLocation` wrapper) is not mapped.
  */
-export function locationNameOf(profile: VoyagerProfileElement): string | null {
-	const location = isRecord(profile.location) ? profile.location : null;
-	const basicLocation = isRecord(location?.basicLocation)
-		? location.basicLocation
-		: null;
-	const countryCode = basicLocation?.countryCode;
-	const preferredGeoPlace = location?.preferredGeoPlace;
-	if (typeof countryCode === "string" && countryCode.length > 0) {
-		return nonEmpty(
-			[typeof preferredGeoPlace === "string" ? preferredGeoPlace : null, countryCode]
-				.filter(Boolean)
+function locationRead(dash: unknown): FieldRead<string> {
+	const parts = [
+		textAt(dash, ["location", "preferredGeoPlace"]),
+		textAt(dash, ["location", "basicLocation", "countryCode"]),
+	];
+	const failed = parts.find(
+		(part) => part.kind === "unavailable" && part.reason !== "absent",
+	);
+	let locationBranch: FieldRead<string>;
+	if (failed) {
+		locationBranch = failed;
+	} else if (parts.some((part) => part.kind === "read")) {
+		locationBranch = read(
+			parts
+				.flatMap((part) => (part.kind === "read" ? [part.value] : []))
+				.filter((part) => part.length > 0)
 				.join(", "),
 		);
+	} else if (parts.some((part) => part.kind === "empty")) {
+		locationBranch = EMPTY;
+	} else {
+		locationBranch = unavailable("absent");
 	}
-	const geoLocation = isRecord(profile.geoLocation) ? profile.geoLocation : null;
-	const geo = isRecord(geoLocation?.geo) ? geoLocation.geo : null;
-	return nonEmpty(
-		typeof geo?.defaultLocalizedName === "string"
-			? geo.defaultLocalizedName
-			: null,
+	return firstOf(
+		[
+			locationBranch,
+			textAt(dash, ["geoLocation", "geo", "defaultLocalizedName"]),
+		],
+		"unavailable",
 	);
 }
 
 /**
- * Profile picture URL, mirroring legacy `linkedin-playwright.js`'s
- * `profilePictureUrl` IIFE: prefer the dash profile's own
- * `profilePicture.displayImageReference.vectorImage`, fall back to `/me`'s
- * `miniProfile.picture` (which appears either under the typed
- * `com.linkedin.common.VectorImage` key or bare, depending on decoration
- * version — both handled by `vectorImageUrl` reading `artifacts`/`rootUrl`
- * directly off whichever object is passed in).
+ * Current company and title. The current group is the first one with no end
+ * date; within it, the first position with no end date, else the first
+ * position. Every end date read on the way must be readable: an unreadable
+ * end could hide the current role.
  */
-export function profilePictureUrlOf(
-	profile: VoyagerProfileElement,
-	miniProfile: VoyagerMiniProfile | undefined,
-): string | null {
-	const dashUrl = vectorImageUrl(
-		profile.profilePicture?.displayImageReference?.vectorImage,
-	);
-	if (dashUrl) {
-		return dashUrl;
+function currentPositionReads(dash: unknown): {
+	company: FieldRead<string>;
+	title: FieldRead<string>;
+} {
+	const failedBoth = (outcome: FieldRead<never>) => ({
+		company: outcome,
+		title: outcome,
+	});
+	const groups = collectionAt(dash, "profilePositionGroups");
+	if (groups.kind !== "read") return failedBoth(groups as FieldRead<never>);
+	let current: Record<string, unknown> | null = null;
+	for (const group of groups.value) {
+		if (!isRecord(group)) return failedBoth(unavailable("malformed"));
+		const end = dateOf(group, "end");
+		if (end.kind === "unavailable") return failedBoth(end);
+		if (end.kind === "empty") {
+			current = group;
+			break;
+		}
 	}
-	const miniPic = miniProfile?.picture;
-	return vectorImageUrl(
-		miniPic?.["com.linkedin.common.VectorImage"] ?? miniPic,
-	);
+	if (!current) return failedBoth(EMPTY);
+
+	const company = optionalText(current, ["company", "name"], ["name"]);
+	const positions = nestedPositions(current);
+	if (positions.kind !== "read") {
+		return { company, title: positions as FieldRead<never> };
+	}
+	let chosen: unknown = positions.value[0];
+	for (const position of positions.value) {
+		if (!isRecord(position))
+			return { company, title: unavailable("malformed") };
+		const end = dateOf(position, "end");
+		if (end.kind === "unavailable") return { company, title: end };
+		if (end.kind === "empty") {
+			chosen = position;
+			break;
+		}
+	}
+	const title =
+		chosen === undefined
+			? optionalText(current, ["title"])
+			: firstOf(
+					[textAt(chosen, ["title"]), textAt(current, ["title"])],
+					"empty",
+				);
+	return { company, title };
 }
 
 /**
- * Build the profile record. `publicIdentifier` is the id — it is the only
- * stable cross-run identifier Voyager exposes for the owner's own profile
- * (an internal numeric/URN id is not surfaced consistently across the `/me`
- * and dash-profile decorations observed in legacy prior art).
- *
- * `connectionCount` is supplied by the caller (index.ts), not derived here:
- * Voyager reports it only via the separate `relationships/dash/connections`
- * `paging.total` field the legacy connector reads after its own connections
- * fetch completes (`profileResult.connections = totalAvailable || ...`), not
- * anywhere on the profile/`/me` payloads this function receives. `null`
- * when the caller didn't request/couldn't fetch connections this run —
- * never guessed from an unrelated field.
+ * Field reads for the owner's profile. Name, headline, and picture fall back
+ * to `/me`. Fields only a full decoration carries (summary, industry,
+ * location, current position) are unavailable from the basic fallback.
+ * These dash-only fields must be present, even as `null`: the decoration
+ * omitting them is not proof of an empty value.
  */
-export function buildProfileRecord(
-	publicIdentifier: string,
-	profile: VoyagerProfileElement,
-	fallbackHeadline: string | undefined,
-	miniProfile: VoyagerMiniProfile | undefined,
-	connectionCount: number | null,
-): ProfileRecord {
-	const positionGroups = Array.isArray(profile.profilePositionGroups?.elements)
-		? profile.profilePositionGroups.elements
-		: [];
-	const current = positionGroups.find(
-		(group) => isReadablePositionGroup(group) && endDateOf(group) === null,
-	);
-	const rawPositions = current?.profilePositionInPositionGroup?.elements;
-	const positions = Array.isArray(rawPositions)
-		? rawPositions.filter(isReadablePosition)
-		: [];
-	const currentPosition =
-		positions.find((pos) => endDateOf(pos) === null) ?? positions[0];
+export function profileFieldReads(src: ProfileSources): FieldReads {
+	const hasDash = isRecord(src.dash);
+	const dashText = (path: Path): FieldRead<string> =>
+		hasDash ? textAt(src.dash, path) : unavailable("source_unavailable");
+	const decorated = hasDash && src.dashSource === "decoration";
+	const decoration = <T>(reader: () => FieldRead<T>): FieldRead<T> =>
+		decorated ? reader() : unavailable("source_unavailable");
+	const current = decorated
+		? currentPositionReads(src.dash)
+		: {
+				company: unavailable("source_unavailable"),
+				title: unavailable("source_unavailable"),
+			};
 
 	return {
-		connection_count: connectionCount,
-		current_company:
-			nonEmpty(current?.company?.name) ?? nonEmpty(current?.name),
-		current_position_title:
-			nonEmpty(currentPosition?.title) ?? nonEmpty(current?.title),
-		full_name: joinFullName(
-			nonEmpty(profile.firstName) ?? miniProfile?.firstName,
-			nonEmpty(profile.lastName) ?? miniProfile?.lastName,
+		connection_count: src.connectionCount,
+		current_company: current.company,
+		current_position_title: current.title,
+		full_name: joinName(
+			firstOf(
+				[dashText(["firstName"]), textAt(src.me, ["miniProfile", "firstName"])],
+				"unavailable",
+			),
+			firstOf(
+				[dashText(["lastName"]), textAt(src.me, ["miniProfile", "lastName"])],
+				"unavailable",
+			),
 		),
-		headline: nonEmpty(profile.headline) ?? nonEmpty(fallbackHeadline),
-		id: publicIdentifier,
-		industry: nonEmpty(profile.industry?.name),
-		location: locationNameOf(profile),
-		profile_picture_url: profilePictureUrlOf(profile, miniProfile),
-		public_url: profileUrlFor(publicIdentifier),
-		summary: nonEmpty(profile.summary),
+		headline: firstOf(
+			[dashText(["headline"]), textAt(src.me, ["miniProfile", "occupation"])],
+			"unavailable",
+		),
+		id: read(src.publicIdentifier),
+		industry: decoration(() =>
+			firstOf([textAt(src.dash, ["industry", "name"])], "unavailable"),
+		),
+		location: decoration(() => locationRead(src.dash)),
+		profile_picture_url: firstOf(
+			[
+				hasDash
+					? imageAt(src.dash, [
+							"profilePicture",
+							"displayImageReference",
+							"vectorImage",
+						])
+					: unavailable("source_unavailable"),
+				imageAt(src.me, [
+					"miniProfile",
+					"picture",
+					"com.linkedin.common.VectorImage",
+				]),
+				imageAt(src.me, ["miniProfile", "picture"]),
+			],
+			"empty",
+		),
+		public_url: read(profileUrlFor(src.publicIdentifier)),
+		summary: decoration(() =>
+			firstOf([textAt(src.dash, ["summary"])], "unavailable"),
+		),
+	};
+}
+
+const PROFILE_ROW = rowSpec(profileSchema, ["id"]);
+
+/** The profile stream: one row, keyed by public identifier. */
+export function buildProfileRows(
+	src: ProfileSources,
+): StreamRows<ProfileRecord> {
+	const rows = emptyStreamRows<ProfileRecord>();
+	addRow(rows, assembleRow(PROFILE_ROW, profileFieldReads(src)));
+	return rows;
+}
+
+// ─── experience ──────────────────────────────────────────────────────────
+
+const EXPERIENCE_CONTENT = [
+	"company",
+	"description",
+	"employment_type",
+	"end_date",
+	"location",
+	"start_date",
+	"title",
+] as const;
+const EXPERIENCE_ROW = rowSpec(experienceSchema, ["id"], EXPERIENCE_CONTENT);
+
+/** A group's nested positions. No nested collection is a group without
+ *  sub-positions; a present but unreadable one is malformed. */
+function nestedPositions(group: Record<string, unknown>): FieldRead<unknown[]> {
+	if (!Object.hasOwn(group, "profilePositionInPositionGroup")) return read([]);
+	return collectionAt(group, "profilePositionInPositionGroup");
+}
+
+function positionReads(
+	position: unknown,
+	group: unknown,
+	groupIndex: number,
+	positionIndex: number,
+): FieldReads {
+	return {
+		// A position without its own company name takes its group's.
+		company: firstOf(
+			[
+				textAt(position, ["companyName"]),
+				textAt(group, ["company", "name"]),
+				textAt(group, ["name"]),
+			],
+			"empty",
+		),
+		description: optionalText(position, ["description"]),
+		employment_type: optionalText(position, ["employmentType", "name"]),
+		end_date: dateOf(position, "end"),
+		id: idOf(position, `exp-${groupIndex}`, positionIndex),
+		location: optionalText(position, ["locationName"], ["geoLocationName"]),
+		start_date: dateOf(position, "start"),
+		title: optionalText(position, ["title"]),
+	};
+}
+
+function groupReads(group: unknown, groupIndex: number): FieldReads {
+	return {
+		company: optionalText(group, ["company", "name"], ["name"]),
+		description: optionalText(group, ["description"]),
+		// A position group carries no employment type; only positions do.
+		employment_type: EMPTY,
+		end_date: dateOf(group, "end"),
+		id: idOf(group, "exp-group", groupIndex),
+		location: optionalText(group, ["locationName"], ["geoLocationName"]),
+		start_date: dateOf(group, "start"),
+		title: optionalText(group, ["title"]),
 	};
 }
 
 /**
  * D3: `profilePositionGroups` nests sub-positions under a company grouping.
- * A group with sub-positions expands to one experience record per position
- * (a person can hold multiple titles at one company); a group with none
- * expands to one record for the group itself (the common case).
+ * A group with sub-positions expands to one experience row per position (a
+ * person can hold multiple titles at one company); a group with none expands
+ * to one row for the group itself.
  */
-export function buildExperienceRecords(
-	profile: VoyagerProfileElement,
-): ExperienceRecord[] {
-	return buildExperienceRecordsWithOmissions(profile).records;
-}
-
-function hasKnownSourceField(
-	row: Record<string, unknown>,
-	fields: readonly string[],
-): boolean {
-	return fields.some((field) => Object.hasOwn(row, field));
-}
-
-export function buildExperienceRecordsWithOmissions(
-	profile: VoyagerProfileElement,
-): RecordsWithOmissions<ExperienceRecord> {
-	const groups = profile.profilePositionGroups?.elements ?? [];
-	const records: ExperienceRecord[] = [];
-	const omissions: OmissionSummary = {
-		count: 0,
-		omittedCount: 0,
-		omittedReasons: {},
-		reasons: {},
-	};
-	let considered = 0;
-	let covered = 0;
-
-	for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
-		const rawGroup: unknown = groups[groupIndex];
-		if (!isRecord(rawGroup)) {
-			considered += 1;
-			addOmission(omissions, "malformed_row");
-			continue;
+export function buildExperienceRows(
+	groups: readonly unknown[],
+): StreamRows<ExperienceRecord> {
+	const rows = emptyStreamRows<ExperienceRecord>();
+	groups.forEach((group, groupIndex) => {
+		if (!isRecord(group)) {
+			addOmittedRow(rows, "malformed_row");
+			return;
 		}
-		const hasNestedCollection = Object.hasOwn(
-			rawGroup,
-			"profilePositionInPositionGroup",
-		);
-		const rawNested = hasNestedCollection
-			? rawGroup.profilePositionInPositionGroup
-			: undefined;
-		if (!isReadablePositionGroupBase(rawGroup)) {
-			considered += 1;
-			addOmission(
-				omissions,
-				hasNestedCollection &&
-					(!isRecord(rawNested) || !Array.isArray(rawNested.elements))
-					? "unreadable_nested_collection"
-					: "malformed_row",
+		const positions = nestedPositions(group);
+		if (positions.kind !== "read") {
+			addOmittedRow(rows, "unreadable_nested_collection");
+			return;
+		}
+		if (positions.value.length === 0) {
+			addRow(rows, assembleRow(EXPERIENCE_ROW, groupReads(group, groupIndex)));
+			return;
+		}
+		positions.value.forEach((position, positionIndex) => {
+			if (!isRecord(position)) {
+				addOmittedRow(rows, "malformed_row");
+				return;
+			}
+			addRow(
+				rows,
+				assembleRow(
+					EXPERIENCE_ROW,
+					positionReads(position, group, groupIndex, positionIndex),
+				),
 			);
-			continue;
-		}
-		const group = rawGroup as VoyagerPositionGroup;
-
-		let rawPositions: unknown[] = [];
-		if (Object.hasOwn(rawGroup, "profilePositionInPositionGroup")) {
-			const nested = rawGroup.profilePositionInPositionGroup;
-			if (!isRecord(nested) || !Array.isArray(nested.elements)) {
-				considered += 1;
-				addOmission(omissions, "unreadable_nested_collection");
-				continue;
-			}
-			rawPositions = nested.elements;
-		}
-		const groupCompanyName = nonEmpty(group.company?.name ?? group.name);
-
-		if (rawPositions.length > 0) {
-			considered += rawPositions.length;
-			for (let positionIndex = 0; positionIndex < rawPositions.length; positionIndex += 1) {
-				const rawPosition = rawPositions[positionIndex];
-				if (!isReadablePosition(rawPosition)) {
-					addOmission(omissions, "malformed_row");
-					continue;
-				}
-				const pos = rawPosition;
-				records.push({
-					company: nonEmpty(pos.companyName) ?? groupCompanyName,
-					description: nonEmpty(pos.description),
-					employment_type: nonEmpty(pos.employmentType?.name),
-					end_date: endDateOf(pos),
-					id: subEntityId(pos.entityUrn, `exp-${groupIndex}`, positionIndex),
-					location: nonEmpty(pos.locationName ?? pos.geoLocationName),
-					start_date: startDateOf(pos),
-					title: nonEmpty(pos.title),
-				});
-				covered += 1;
-			}
-			continue;
-		}
-
-		considered += 1;
-		records.push({
-			company: groupCompanyName,
-			description: nonEmpty(group.description),
-			employment_type: null,
-			end_date: endDateOf(group),
-			id: subEntityId(group.entityUrn, "exp-group", groupIndex),
-			location: nonEmpty(group.locationName ?? group.geoLocationName),
-			start_date: startDateOf(group),
-			title: nonEmpty(group.title),
 		});
-		covered += 1;
-	}
-
-	return { considered, covered, omissions, records };
+	});
+	return rows;
 }
 
-/** School logo URL, mirroring legacy `linkedin-playwright.js`'s `logoUrl`
- *  IIFE: try `school.logo.vectorImage`, then the typed
- *  `school.logo["com.linkedin.common.VectorImage"]` key, then the older
- *  `schoolLogo.vectorImage` shape. */
-function educationLogoUrlOf(edu: VoyagerEducation): string | null {
-	const image =
-		edu.school?.logo?.vectorImage ??
-		edu.school?.logo?.["com.linkedin.common.VectorImage"] ??
-		edu.schoolLogo?.vectorImage;
-	return vectorImageUrl(image);
-}
+// ─── education ───────────────────────────────────────────────────────────
 
-const EDUCATION_FIELDS = [
-	"dateRange",
-	"degreeName",
-	"endDate",
-	"entityUrn",
-	"fieldOfStudy",
+const EDUCATION_CONTENT = [
+	"degree",
+	"end_date",
+	"field_of_study",
 	"grade",
+	"logo_url",
 	"school",
-	"schoolLogo",
-	"schoolName",
-	"startDate",
+	"start_date",
 ] as const;
+const EDUCATION_ROW = rowSpec(educationSchema, ["id"], EDUCATION_CONTENT);
 
-const EDUCATION_STRING_FIELDS = [
-	"degreeName",
-	"entityUrn",
-	"fieldOfStudy",
-	"grade",
-	"schoolName",
-] as const;
-
-function isReadableEducation(value: unknown): value is VoyagerEducation {
-	if (
-		!isRecord(value) ||
-		!hasKnownSourceField(value, EDUCATION_FIELDS) ||
-		!optionalStringFieldsAreReadable(value, EDUCATION_STRING_FIELDS) ||
-		!dateFieldsAreReadable(value)
-	) {
-		return false;
-	}
-	if (!Object.hasOwn(value, "school")) return true;
-	const school = value.school;
-	return (
-		school === null ||
-		(isRecord(school) &&
-			optionalStringFieldsAreReadable(school, ["name"]))
-	);
-}
-
-export function buildEducationRecords(
-	profile: VoyagerProfileElement,
-): EducationRecord[] {
-	return buildEducationRecordsWithOmissions(profile).records;
-}
-
-export function buildEducationRecordsWithOmissions(
-	profile: VoyagerProfileElement,
-): RecordsWithOmissions<EducationRecord> {
-	const items = profile.profileEducations?.elements ?? [];
-	const records: EducationRecord[] = [];
-	const omissions: OmissionSummary = {
-		count: 0,
-		omittedCount: 0,
-		omittedReasons: {},
-		reasons: {},
+function educationReads(education: unknown, index: number): FieldReads {
+	return {
+		degree: optionalText(education, ["degreeName"]),
+		end_date: dateOf(education, "end"),
+		field_of_study: optionalText(education, ["fieldOfStudy"]),
+		grade: optionalText(education, ["grade"]),
+		id: idOf(education, "edu", index),
+		// Legacy `logoUrl` order: the dash `school.logo` (bare, then typed
+		// key), then the older `schoolLogo`.
+		logo_url: firstOf(
+			[
+				imageAt(education, ["school", "logo", "vectorImage"]),
+				imageAt(education, [
+					"school",
+					"logo",
+					"com.linkedin.common.VectorImage",
+				]),
+				imageAt(education, ["schoolLogo", "vectorImage"]),
+			],
+			"empty",
+		),
+		school: optionalText(education, ["schoolName"], ["school", "name"]),
+		start_date: dateOf(education, "start"),
 	};
-	let considered = 0;
-	let covered = 0;
-	for (let index = 0; index < items.length; index += 1) {
-		considered += 1;
-		const rawEducation: unknown = items[index];
-		if (!isReadableEducation(rawEducation)) {
-			addOmission(omissions, "malformed_row");
-			continue;
+}
+
+export function buildEducationRows(
+	items: readonly unknown[],
+): StreamRows<EducationRecord> {
+	const rows = emptyStreamRows<EducationRecord>();
+	items.forEach((education, index) => {
+		if (!isRecord(education)) {
+			addOmittedRow(rows, "malformed_row");
+			return;
 		}
-		const edu = rawEducation;
-		records.push({
-			degree: nonEmpty(edu.degreeName),
-			end_date: endDateOf(edu),
-			field_of_study: nonEmpty(edu.fieldOfStudy),
-			grade: nonEmpty(edu.grade),
-			id: subEntityId(edu.entityUrn, "edu", index),
-			logo_url: educationLogoUrlOf(edu),
-			school: nonEmpty(edu.schoolName) ?? nonEmpty(edu.school?.name),
-			start_date: startDateOf(edu),
-		});
-		covered += 1;
-	}
-	return { considered, covered, omissions, records };
+		addRow(rows, assembleRow(EDUCATION_ROW, educationReads(education, index)));
+	});
+	return rows;
+}
+
+// ─── skills ──────────────────────────────────────────────────────────────
+
+const SKILL_ROW = rowSpec(skillsSchema, ["id", "name"]);
+
+function skillReads(skill: unknown): FieldReads {
+	return {
+		endorsement_count: firstOf(
+			[
+				andThen(at(skill, ["endorsementCount"]), count),
+				andThen(at(skill, ["endorsements"]), count),
+			],
+			"empty",
+		),
+		id: textAt(skill, ["entityUrn"]),
+		name: textAt(skill, ["name"]),
+	};
 }
 
 /**
- * `profileSkills.elements` can be either a flat list of skills or a list of
- * categories each containing skills, depending on decoration version —
- * mirrors legacy `linkedin-playwright.js`'s dual handling. Both shapes are
- * flattened to one record per skill.
+ * `profileSkills.elements` is either a flat list of skills or a list of
+ * categories holding skills under `skills` (or `elements`), depending on
+ * decoration version. Both shapes flatten to one row per skill. An empty
+ * category contributes no rows.
  */
-export function buildSkillRecords(
-	profile: VoyagerProfileElement,
-): SkillRecord[] {
-	return buildSkillRecordsWithOmissions(profile).records;
-}
-
-export function buildSkillRecordsWithOmissions(
-	profile: VoyagerProfileElement,
-): RecordsWithOmissions<SkillRecord> {
-	const rawSkills = profile.profileSkills?.elements ?? [];
-	const records: SkillRecord[] = [];
-	const omissions: OmissionSummary = {
-		count: 0,
-		omittedCount: 0,
-		omittedReasons: {},
-		reasons: {},
-	};
-	let considered = 0;
-	let covered = 0;
-
-	for (const entry of rawSkills as readonly unknown[]) {
+export function buildSkillRows(
+	entries: readonly unknown[],
+): StreamRows<SkillRecord> {
+	const rows = emptyStreamRows<SkillRecord>();
+	for (const entry of entries) {
 		if (!isRecord(entry)) {
-			considered += 1;
-			addOmission(omissions, "malformed_row");
+			addOmittedRow(rows, "malformed_row");
 			continue;
 		}
-		const category = entry as VoyagerSkillCategory;
-		const hasSkills = Object.hasOwn(category, "skills");
-		const hasElements = Object.hasOwn(category, "elements");
-		if (hasSkills || hasElements) {
-			const childRows = hasSkills ? category.skills : category.elements;
-			if (!Array.isArray(childRows)) {
-				considered += 1;
-				addOmission(omissions, "unreadable_nested_collection");
+		const childKey = Object.hasOwn(entry, "skills")
+			? "skills"
+			: Object.hasOwn(entry, "elements")
+				? "elements"
+				: null;
+		if (childKey === null) {
+			addRow(rows, assembleRow(SKILL_ROW, skillReads(entry)));
+			continue;
+		}
+		const children = at(entry, [childKey]);
+		if (children.kind !== "read" || !Array.isArray(children.value)) {
+			addOmittedRow(rows, "unreadable_nested_collection");
+			continue;
+		}
+		for (const skill of children.value) {
+			if (!isRecord(skill)) {
+				addOmittedRow(rows, "malformed_row");
 				continue;
 			}
-			if (childRows.length === 0) continue;
-			for (const rawSkill of childRows) {
-				considered += 1;
-				if (!isRecord(rawSkill)) {
-					addOmission(omissions, "malformed_row");
-					continue;
-				}
-				const sk = rawSkill as VoyagerSkill;
-				if (typeof sk.name !== "string") {
-					addOmission(omissions, "missing_name");
-				} else if (sk.entityUrn) {
-					if (sk.name.trim().length === 0) {
-						addOmission(omissions, "blank_name_preserved", false);
-					}
-					if (
-						(sk.endorsementCount ?? sk.endorsements) !== undefined &&
-						endorsementCountOf(sk) === null
-					) {
-						addOmission(omissions, "invalid_endorsement_count", false);
-					} else {
-						covered += 1;
-					}
-					records.push({
-						endorsement_count: endorsementCountOf(sk),
-						id: sk.entityUrn,
-						name: sk.name,
-					});
-				} else {
-					addOmission(omissions, "missing_entity_urn");
-				}
-			}
+			addRow(rows, assembleRow(SKILL_ROW, skillReads(skill)));
+		}
+	}
+	return rows;
+}
+
+// ─── languages ───────────────────────────────────────────────────────────
+
+const LANGUAGE_ROW = rowSpec(languagesSchema, ["id", "name"]);
+
+export function buildLanguageRows(
+	items: readonly unknown[],
+): StreamRows<LanguageRecord> {
+	const rows = emptyStreamRows<LanguageRecord>();
+	for (const language of items) {
+		if (!isRecord(language)) {
+			addOmittedRow(rows, "malformed_row");
 			continue;
 		}
-		considered += 1;
-		if (typeof category.name !== "string") {
-			addOmission(omissions, "missing_name");
-		} else if (category.entityUrn) {
-			if (category.name.trim().length === 0) {
-				addOmission(omissions, "blank_name_preserved", false);
-			}
-			if (
-				(category.endorsementCount ?? category.endorsements) !== undefined &&
-				endorsementCountOf(category) === null
-			) {
-				addOmission(omissions, "invalid_endorsement_count", false);
-			} else {
-				covered += 1;
-			}
-			records.push({
-				endorsement_count: endorsementCountOf(category),
-				id: category.entityUrn,
-				name: category.name,
-			});
-		} else {
-			addOmission(omissions, "missing_entity_urn");
-		}
+		addRow(
+			rows,
+			assembleRow(LANGUAGE_ROW, {
+				id: textAt(language, ["entityUrn"]),
+				name: textAt(language, ["name"]),
+				proficiency: optionalText(language, ["proficiency"]),
+			}),
+		);
 	}
-
-	return { considered, covered, omissions, records };
+	return rows;
 }
 
-function endorsementCountOf(
-	sk: VoyagerSkill | VoyagerSkillCategory,
-): number | null {
-	const count = sk.endorsementCount ?? sk.endorsements;
-	if (typeof count === "number") {
-		return Number.isSafeInteger(count) && count >= 0 ? count : null;
-	}
-	if (typeof count === "string" && ENDORSEMENT_COUNT_RE.test(count.trim())) {
-		const parsed = Number(count.trim());
-		return Number.isSafeInteger(parsed) ? parsed : null;
-	}
-	return null;
-}
+// ─── connections ─────────────────────────────────────────────────────────
 
-export function buildLanguageRecords(
-	profile: VoyagerProfileElement,
-): LanguageRecord[] {
-	return buildLanguageRecordsWithOmissions(profile).records;
-}
+const CONNECTION_ROW = rowSpec(connectionsSchema, ["id"]);
 
-export function buildLanguageRecordsWithOmissions(
-	profile: VoyagerProfileElement,
-): RecordsWithOmissions<LanguageRecord> {
-	const items = profile.profileLanguages?.elements ?? [];
-	const records: LanguageRecord[] = [];
-	const omissions: OmissionSummary = {
-		count: 0,
-		omittedCount: 0,
-		omittedReasons: {},
-		reasons: {},
-	};
-	let covered = 0;
-	for (const rawLanguage of items as readonly unknown[]) {
-		if (!isRecord(rawLanguage)) {
-			addOmission(omissions, "malformed_row");
-			continue;
-		}
-		const lang = rawLanguage as VoyagerLanguage;
-		if (typeof lang.name !== "string") {
-			addOmission(omissions, "missing_name");
-		} else if (lang.entityUrn) {
-			const validProficiency =
-				lang.proficiency === undefined || typeof lang.proficiency === "string";
-			if (validProficiency) {
-				covered += 1;
-			} else {
-				addOmission(omissions, "invalid_proficiency", false);
-			}
-			if (lang.name.trim().length === 0) {
-				addOmission(omissions, "blank_name_preserved", false);
-			}
-			records.push({
-				id: lang.entityUrn,
-				name: lang.name,
-				proficiency:
-					typeof lang.proficiency === "string" ? lang.proficiency : null,
-			});
-		} else {
-			addOmission(omissions, "missing_entity_urn");
-		}
-	}
-	return { considered: items.length, covered, omissions, records };
-}
-
-/** LinkedIn's connection `createdAt` is epoch milliseconds; 0/absent means
- *  "not reported", never "epoch". D4: timestamps are ISO-8601. */
-export function connectedAtOf(createdAt: number | undefined): string | null {
-	if (
-		typeof createdAt !== "number" ||
-		!Number.isFinite(createdAt) ||
-		createdAt <= 0
-	) {
-		return null;
-	}
-	return new Date(createdAt).toISOString();
-}
-
-export function buildConnectionRecord(
-	element: VoyagerConnectionElement,
-	resolved: VoyagerResolvedProfile | undefined,
-): ConnectionRecord | null {
-	const memberUrn = element.connectedMember;
-	if (typeof memberUrn !== "string" || memberUrn.trim().length === 0) {
-		return null;
-	}
-	const publicId = resolved?.publicIdentifier;
+/** The fields a resolved member profile supplies to a connection row. */
+export function connectionEnrichmentReads(profile: unknown): FieldReads {
 	return {
-		connected_at: connectedAtOf(element.createdAt),
-		full_name: joinFullName(resolved?.firstName, resolved?.lastName),
-		headline:
-			typeof resolved?.headline === "string"
-				? resolved.headline
-				: nonEmpty(resolved?.occupation),
-		id: memberUrn,
-		profile_url: publicId ? profileUrlFor(publicId) : null,
+		full_name: joinName(
+			optionalText(profile, ["firstName"]),
+			optionalText(profile, ["lastName"]),
+		),
+		headline: optionalText(profile, ["headline"], ["occupation"]),
+		profile_url: profileUrlRead(optionalText(profile, ["publicIdentifier"])),
 	};
+}
+
+/** True when every enrichment field of a resolved profile is readable. */
+export function connectionEnrichmentIsReadable(profile: unknown): boolean {
+	return Object.values(connectionEnrichmentReads(profile)).every(
+		(outcome) => outcome.kind !== "unavailable",
+	);
+}
+
+/**
+ * One connection row. `resolved` is the member's profile from the batch
+ * resolution, or undefined when it could not be resolved: the edge is still
+ * real and is emitted, with its enrichment fields unavailable.
+ */
+export function connectionReads(
+	element: unknown,
+	resolved: unknown,
+): FieldReads {
+	const enrichment =
+		resolved === undefined
+			? {
+					full_name: unavailable("enrichment_unresolved"),
+					headline: unavailable("enrichment_unresolved"),
+					profile_url: unavailable("enrichment_unresolved"),
+				}
+			: connectionEnrichmentReads(resolved);
+	return {
+		connected_at: firstOf(
+			[andThen(at(element, ["createdAt"]), epochMillis)],
+			"empty",
+		),
+		id: textAt(element, ["connectedMember"]),
+		...enrichment,
+	};
+}
+
+export function buildConnectionRows(
+	elements: readonly unknown[],
+	resolvedProfileOf: (memberUrn: string) => unknown,
+): StreamRows<ConnectionRecord> {
+	const rows = emptyStreamRows<ConnectionRecord>();
+	for (const element of elements) {
+		const member = textAt(element, ["connectedMember"]);
+		addRow(
+			rows,
+			assembleRow(
+				CONNECTION_ROW,
+				connectionReads(
+					element,
+					member.kind === "read" ? resolvedProfileOf(member.value) : undefined,
+				),
+			),
+		);
+	}
+	return rows;
 }

@@ -4,88 +4,151 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-	buildConnectionRecord,
-	buildEducationRecords,
-	buildExperienceRecords,
-	buildLanguageRecords,
-	buildProfileRecord,
-	buildSkillRecords,
-	connectedAtOf,
-	endDateOf,
-	locationNameOf,
-	partialDateFromPoint,
-	profileUrlFor,
-	startDateOf,
-	subEntityId,
+	assembleRow,
+	at,
+	EMPTY,
+	epochMillis,
+	type FieldRead,
+	firstOf,
+	partialDate,
+	read,
+	unavailable,
 	vectorImageUrl,
+} from "./field-read.ts";
+import {
+	buildConnectionRows,
+	buildEducationRows,
+	buildExperienceRows,
+	buildLanguageRows,
+	buildProfileRows,
+	buildSkillRows,
+	dateOf,
+	type ProfileSources,
+	profileFieldReads,
+	profileUrlFor,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
-import type { VoyagerProfileElement } from "./types.ts";
+
+const readValue = <T>(outcome: FieldRead<T>): T | undefined =>
+	outcome.kind === "read" ? outcome.value : undefined;
+
+// ─── The reading contract ────────────────────────────────────────────────
+
+test("at: absent key, explicit null, and wrong container type are distinct", () => {
+	assert.deepEqual(at({ a: { b: "x" } }, ["a", "b"]), read("x"));
+	assert.deepEqual(at({ a: {} }, ["a", "b"]), unavailable("absent"));
+	assert.deepEqual(at({ a: null }, ["a", "b"]), EMPTY);
+	assert.deepEqual(at({ a: 42 }, ["a", "b"]), unavailable("malformed"));
+	assert.deepEqual(at({ a: ["b"] }, ["a", "b"]), unavailable("malformed"));
+});
+
+test("firstOf: first read wins; a malformed source without a read is unavailable", () => {
+	assert.deepEqual(
+		firstOf([unavailable("malformed"), read("fallback")], "empty"),
+		read("fallback"),
+	);
+	assert.deepEqual(
+		firstOf([unavailable("malformed"), EMPTY], "empty"),
+		unavailable("malformed"),
+	);
+	assert.deepEqual(
+		firstOf([unavailable("absent"), EMPTY], "unavailable"),
+		EMPTY,
+	);
+	assert.deepEqual(
+		firstOf([unavailable("absent")], "unavailable"),
+		unavailable("absent"),
+	);
+	assert.deepEqual(firstOf([unavailable("absent")], "empty"), EMPTY);
+});
+
+test("assembleRow: unavailable fields are left out and the row is not covered", () => {
+	const shape = { id: { safeParse: () => ({ success: true }) } };
+	const spec = {
+		required: ["id"],
+		schema: { safeParse: () => ({ success: true }) },
+		shape,
+	};
+	const outcome = assembleRow(spec, {
+		id: read("row-1"),
+		note: EMPTY,
+		title: unavailable("malformed"),
+	});
+	assert.deepEqual(outcome, {
+		kind: "emitted",
+		record: { id: "row-1", note: null },
+		unavailable: [{ field: "title", reason: "malformed" }],
+	});
+	assert.deepEqual(assembleRow(spec, { id: unavailable("malformed") }), {
+		kind: "omitted",
+		reason: "id_malformed",
+	});
+});
 
 // ─── D4 partial dates ────────────────────────────────────────────────────
 
-test("partialDateFromPoint: year + month -> YYYY-MM", () => {
-	assert.equal(partialDateFromPoint({ month: 3, year: 2021 }), "2021-03");
+test("partialDate: year + month -> YYYY-MM, year only -> YYYY", () => {
+	assert.deepEqual(partialDate({ month: 3, year: 2021 }), read("2021-03"));
+	assert.deepEqual(partialDate({ month: 1, year: 1999 }), read("1999-01"));
+	assert.deepEqual(partialDate({ year: 2021 }), read("2021"));
+	assert.deepEqual(partialDate({ month: null, year: 2021 }), read("2021"));
 });
 
-test("partialDateFromPoint: year only -> YYYY", () => {
-	assert.equal(partialDateFromPoint({ year: 2021 }), "2021");
+test("partialDate: a point without a readable year or with an invalid month is malformed, never dropped to less precision", () => {
+	for (const point of [
+		{ month: 5 },
+		{ year: "2020" },
+		{ year: 2020.5 },
+		{ year: 0 },
+		{ month: 13, year: 2020 },
+		{ month: 0, year: 2020 },
+		{ month: "5", year: 2020 },
+		42,
+	]) {
+		assert.deepEqual(
+			partialDate(point),
+			unavailable("malformed"),
+			JSON.stringify(point),
+		);
+	}
 });
 
-test("partialDateFromPoint: pads single-digit month", () => {
-	assert.equal(partialDateFromPoint({ month: 1, year: 1999 }), "1999-01");
-});
-
-test("partialDateFromPoint: missing year -> null (never invents a date)", () => {
-	assert.equal(partialDateFromPoint({ month: 5 }), null);
-	assert.equal(partialDateFromPoint(undefined), null);
-});
-
-test("partialDateFromPoint: out-of-range month is dropped, not invented", () => {
-	assert.equal(partialDateFromPoint({ month: 13, year: 2020 }), "2020");
-	assert.equal(partialDateFromPoint({ month: 0, year: 2020 }), "2020");
-});
-
-// startDateOf / endDateOf: dash `dateRange` vs legacy `timePeriod` vs inline
-
-test("startDateOf: reads dash dateRange.start", () => {
-	assert.equal(
-		startDateOf({ dateRange: { start: { month: 6, year: 2019 } } }),
-		"2019-06",
+test("dateOf: reads dash dateRange, legacy timePeriod, and inline points", () => {
+	assert.deepEqual(
+		dateOf({ dateRange: { start: { month: 6, year: 2019 } } }, "start"),
+		read("2019-06"),
+	);
+	assert.deepEqual(
+		dateOf({ timePeriod: { startDate: { month: 6, year: 2019 } } }, "start"),
+		read("2019-06"),
+	);
+	assert.deepEqual(
+		dateOf({ startDate: { year: 2015 } }, "start"),
+		read("2015"),
+	);
+	assert.deepEqual(dateOf({ start: { year: 2015 } }, "start"), read("2015"));
+	assert.deepEqual(
+		dateOf({ dateRange: { end: { month: 12, year: 2022 } } }, "end"),
+		read("2022-12"),
 	);
 });
 
-test("startDateOf: reads legacy timePeriod.startDate", () => {
-	assert.equal(
-		startDateOf({ timePeriod: { startDate: { month: 6, year: 2019 } } }),
-		"2019-06",
+test("dateOf: no end anywhere means ongoing (empty); a malformed end anywhere is unavailable", () => {
+	assert.deepEqual(
+		dateOf({ dateRange: { start: { year: 2019 } } }, "end"),
+		EMPTY,
 	);
-});
-
-test("startDateOf: reads inline startDate (oldest legacy shape)", () => {
-	assert.equal(startDateOf({ startDate: { year: 2015 } }), "2015");
-});
-
-test("endDateOf: null end (no end field) means Present -> null", () => {
-	assert.equal(endDateOf({ dateRange: { start: { year: 2019 } } }), null);
-});
-
-test("endDateOf: dash dateRange.end present -> partial date", () => {
-	assert.equal(
-		endDateOf({ dateRange: { end: { month: 12, year: 2022 } } }),
-		"2022-12",
+	assert.deepEqual(
+		dateOf({ dateRange: { start: { year: 2019 } }, end: 42 }, "end"),
+		unavailable("malformed"),
 	);
+	assert.deepEqual(dateOf({ dateRange: 42 }, "end"), unavailable("malformed"));
 });
 
-test("startDateOf/endDateOf: undefined node -> null, not a throw", () => {
-	assert.equal(startDateOf(undefined), null);
-	assert.equal(endDateOf(undefined), null);
-});
+// ─── Images and timestamps ───────────────────────────────────────────────
 
-// ─── vectorImageUrl ───────────────────────────────────────────────────────
-
-test("vectorImageUrl: builds URL from largest artifact", () => {
-	assert.equal(
+test("vectorImageUrl: builds URL from the largest artifact", () => {
+	assert.deepEqual(
 		vectorImageUrl({
 			artifacts: [
 				{ fileIdentifyingUrlPathSegment: "small.jpg" },
@@ -93,30 +156,39 @@ test("vectorImageUrl: builds URL from largest artifact", () => {
 			],
 			rootUrl: "https://media.example/",
 		}),
-		"https://media.example/large.jpg",
+		read("https://media.example/large.jpg"),
 	);
 });
 
-test("vectorImageUrl: no artifacts -> null", () => {
-	assert.equal(vectorImageUrl({ artifacts: [] }), null);
-	assert.equal(vectorImageUrl(undefined), null);
-});
-
-// ─── subEntityId ──────────────────────────────────────────────────────────
-
-test("subEntityId: prefers entityUrn when present", () => {
-	assert.equal(
-		subEntityId("urn:li:fsd_profilePosition:123", "exp", 0),
-		"urn:li:fsd_profilePosition:123",
+test("vectorImageUrl: no artifacts key is absent, an empty list is empty, an unreadable artifact is malformed", () => {
+	assert.deepEqual(vectorImageUrl({}), unavailable("absent"));
+	assert.deepEqual(vectorImageUrl({ artifacts: [] }), EMPTY);
+	assert.deepEqual(vectorImageUrl({ artifacts: 42 }), unavailable("malformed"));
+	assert.deepEqual(
+		vectorImageUrl({ artifacts: [{}] }),
+		unavailable("malformed"),
+	);
+	assert.deepEqual(
+		vectorImageUrl({
+			artifacts: [{ fileIdentifyingUrlPathSegment: "a" }],
+			rootUrl: 1,
+		}),
+		unavailable("malformed"),
 	);
 });
 
-test("subEntityId: falls back to positional id when urn absent", () => {
-	assert.equal(subEntityId(undefined, "exp-0", 2), "exp-0-2");
-	assert.equal(subEntityId("", "exp-0", 2), "exp-0-2");
+test("epochMillis: ISO-8601; zero is not reported; malformed or out of range never throws", () => {
+	assert.deepEqual(
+		epochMillis(1_700_000_000_000),
+		read("2023-11-14T22:13:20.000Z"),
+	);
+	assert.deepEqual(epochMillis(0), EMPTY);
+	assert.deepEqual(epochMillis(-5), unavailable("malformed"));
+	assert.deepEqual(epochMillis("bad"), unavailable("malformed"));
+	assert.deepEqual(epochMillis(1e20), unavailable("malformed"));
 });
 
-// ─── profileUrlFor / locationNameOf ───────────────────────────────────────
+// ─── profile ─────────────────────────────────────────────────────────────
 
 test("profileUrlFor: builds the canonical public profile URL", () => {
 	assert.equal(
@@ -125,9 +197,82 @@ test("profileUrlFor: builds the canonical public profile URL", () => {
 	);
 });
 
-test("locationNameOf: prefers preferredGeoPlace + countryCode when present", () => {
+function profileSources(
+	dash: Record<string, unknown>,
+	me: Record<string, unknown> = {},
+): ProfileSources {
+	return {
+		connectionCount: read(0),
+		dash: {
+			industry: null,
+			location: null,
+			profilePositionGroups: { elements: [] },
+			summary: null,
+			...dash,
+		},
+		dashSource: "decoration",
+		me,
+		publicIdentifier: "alexrivera",
+	};
+}
+
+test("buildProfileRows: maps core fields and derives current position from the open-ended group", () => {
+	const rows = buildProfileRows(
+		profileSources({
+			firstName: "Alex",
+			geoLocation: {
+				geo: {
+					defaultLocalizedName: "San Francisco, California, United States",
+				},
+			},
+			headline: "Staff Engineer at Acme",
+			industry: { name: "Software Development" },
+			lastName: "Rivera",
+			profilePositionGroups: {
+				elements: [
+					{
+						company: { name: "Acme" },
+						dateRange: { start: { month: 3, year: 2021 } },
+						profilePositionInPositionGroup: {
+							elements: [
+								{
+									companyName: "Acme",
+									dateRange: { start: { month: 3, year: 2021 } },
+									title: "Staff Engineer",
+								},
+							],
+						},
+					},
+				],
+			},
+			summary: "Builds reliable data infrastructure.",
+		}),
+	);
+	assert.equal(rows.covered, 1);
+	const [record] = rows.records;
+	assert.deepEqual(record, {
+		connection_count: 0,
+		current_company: "Acme",
+		current_position_title: "Staff Engineer",
+		full_name: "Alex Rivera",
+		headline: "Staff Engineer at Acme",
+		id: "alexrivera",
+		industry: "Software Development",
+		location: "San Francisco, California, United States",
+		profile_picture_url: null,
+		public_url: "https://www.linkedin.com/in/alexrivera/",
+		summary: "Builds reliable data infrastructure.",
+	});
+	assert.equal(validateRecord("profile", record).ok, true);
+});
+
+test("profileFieldReads: location joins preferredGeoPlace and countryCode, else geoLocation", () => {
+	const location = (dash: Record<string, unknown>) =>
+		readValue(
+			profileFieldReads(profileSources(dash)).location as FieldRead<string>,
+		);
 	assert.equal(
-		locationNameOf({
+		location({
 			location: {
 				basicLocation: { countryCode: "US" },
 				preferredGeoPlace: "San Francisco Bay Area",
@@ -135,513 +280,394 @@ test("locationNameOf: prefers preferredGeoPlace + countryCode when present", () 
 		}),
 		"San Francisco Bay Area, US",
 	);
-});
-
-test("locationNameOf: falls back to geoLocation default name", () => {
+	assert.equal(location({ location: { preferredGeoPlace: "Paris" } }), "Paris");
 	assert.equal(
-		locationNameOf({
+		location({
 			geoLocation: { geo: { defaultLocalizedName: "Austin, Texas" } },
+			location: { countryCode: "US", postalCode: "78701" },
 		}),
 		"Austin, Texas",
 	);
 });
 
-test("locationNameOf: neither present -> null", () => {
-	assert.equal(locationNameOf({}), null);
-});
-
-// ─── buildProfileRecord ────────────────────────────────────────────────────
-
-test("buildProfileRecord: maps core fields and derives current position from open-ended group", () => {
-	const profile: VoyagerProfileElement = {
-		firstName: "Alex",
-		geoLocation: {
-			geo: { defaultLocalizedName: "San Francisco, California, United States" },
-		},
-		headline: "Staff Engineer at Acme",
-		industry: { name: "Software Development" },
-		lastName: "Rivera",
-		profilePositionGroups: {
-			elements: [
-				{
-					company: { name: "Acme" },
-					dateRange: { start: { month: 3, year: 2021 } },
-					profilePositionInPositionGroup: {
-						elements: [
-							{
-								companyName: "Acme",
-								dateRange: { start: { month: 3, year: 2021 } },
-								title: "Staff Engineer",
-							},
-						],
-					},
-				},
-			],
-		},
-		summary: "Builds reliable data infrastructure.",
-	};
-
-	const record = buildProfileRecord(
-		"alexrivera",
-		profile,
-		undefined,
-		undefined,
-		null,
-	);
-	assert.equal(record.id, "alexrivera");
-	assert.equal(record.full_name, "Alex Rivera");
-	assert.equal(record.headline, "Staff Engineer at Acme");
-	assert.equal(record.current_company, "Acme");
-	assert.equal(record.current_position_title, "Staff Engineer");
-	assert.equal(record.public_url, "https://www.linkedin.com/in/alexrivera/");
-	assert.equal(record.industry, "Software Development");
-	assert.equal(record.location, "San Francisco, California, United States");
-	assert.equal(record.connection_count, null);
-	assert.equal(record.profile_picture_url, null);
-
-	const result = validateRecord("profile", record);
-	assert.equal(result.ok, true, JSON.stringify(result));
-});
-
-test("buildProfileRecord: industry is null when the real observed shape (industry.name) is absent (never guessed)", () => {
-	const record = buildProfileRecord(
-		"alexrivera",
-		{},
-		undefined,
-		undefined,
-		null,
-	);
-	assert.equal(record.industry, null);
-});
-
-test("buildProfileRecord: falls back to /me occupation when dash headline absent", () => {
-	const record = buildProfileRecord(
-		"alexrivera",
-		{},
-		"Engineer at Acme",
-		undefined,
-		null,
-	);
-	assert.equal(record.headline, "Engineer at Acme");
-});
-
-test("buildProfileRecord: falls back per name component when the dash name is partial", () => {
-	const record = buildProfileRecord(
-		"anon-member",
-		{ firstName: "", lastName: "DashLast" },
-		undefined,
-		{ firstName: "MeFirst", lastName: "MeLast" },
-		null,
-	);
-	assert.equal(record.full_name, "MeFirst DashLast");
-});
-
-test("buildProfileRecord: passes through the caller-supplied connection count", () => {
-	const record = buildProfileRecord(
-		"alexrivera",
-		{},
-		undefined,
-		undefined,
-		842,
-	);
-	assert.equal(record.connection_count, 842);
-});
-
-test("buildProfileRecord: profile_picture_url prefers the dash profile's own image over /me's miniProfile", () => {
-	const record = buildProfileRecord(
-		"alexrivera",
-		{
-			profilePicture: {
-				displayImageReference: {
-					vectorImage: {
-						artifacts: [{ fileIdentifyingUrlPathSegment: "dash.jpg" }],
-						rootUrl: "https://media.example/dash/",
-					},
-				},
-			},
-		},
-		undefined,
-		{
-			picture: {
-				artifacts: [{ fileIdentifyingUrlPathSegment: "me.jpg" }],
-				rootUrl: "https://media.example/me/",
-			},
-		},
-		null,
-	);
-	assert.equal(
-		record.profile_picture_url,
-		"https://media.example/dash/dash.jpg",
-	);
-});
-
-test("buildProfileRecord: profile_picture_url falls back to /me miniProfile picture (typed VectorImage key) when the dash profile has none", () => {
-	const record = buildProfileRecord(
-		"alexrivera",
-		{},
-		undefined,
-		{
-			picture: {
-				"com.linkedin.common.VectorImage": {
-					artifacts: [{ fileIdentifyingUrlPathSegment: "me.jpg" }],
-					rootUrl: "https://media.example/me/",
-				},
-			},
-		},
-		null,
-	);
-	assert.equal(record.profile_picture_url, "https://media.example/me/me.jpg");
-});
-
-test("buildProfileRecord: profile_picture_url falls back to /me miniProfile picture (bare shape) when the dash profile has none", () => {
-	const record = buildProfileRecord(
-		"alexrivera",
-		{},
-		undefined,
-		{
-			picture: {
-				artifacts: [{ fileIdentifyingUrlPathSegment: "me-bare.jpg" }],
-				rootUrl: "https://media.example/me-bare/",
-			},
-		},
-		null,
-	);
-	assert.equal(
-		record.profile_picture_url,
-		"https://media.example/me-bare/me-bare.jpg",
-	);
-});
-
-test("buildProfileRecord: profile_picture_url is null when neither source has an image (never guessed)", () => {
-	const record = buildProfileRecord("alexrivera", {}, undefined, {}, null);
-	assert.equal(record.profile_picture_url, null);
-});
-
-// ─── buildExperienceRecords (D3: group expands to N positions) ────────────
-
-test("buildExperienceRecords: group with sub-positions expands 1:1", () => {
-	const profile: VoyagerProfileElement = {
-		profilePositionGroups: {
-			elements: [
-				{
-					company: { name: "Acme" },
-					profilePositionInPositionGroup: {
-						elements: [
-							{
-								companyName: "Acme",
-								dateRange: { end: { year: 2022 }, start: { year: 2019 } },
-								description: "Led backend team.",
-								employmentType: { name: "Full-time" },
-								title: "Senior Engineer",
-							},
-							{
-								companyName: "Acme",
-								dateRange: { start: { year: 2022 } },
-								title: "Staff Engineer",
-							},
-						],
-					},
-				},
-			],
-		},
-	};
-	const records = buildExperienceRecords(profile);
-	assert.equal(records.length, 2);
-	assert.equal(records[0]?.title, "Senior Engineer");
-	assert.equal(records[0]?.start_date, "2019");
-	assert.equal(records[0]?.end_date, "2022");
-	assert.equal(records[0]?.employment_type, "Full-time");
-	assert.equal(records[1]?.title, "Staff Engineer");
-	assert.equal(records[1]?.end_date, null);
-	assert.equal(
-		records[1]?.employment_type,
-		null,
-		"employmentType absent on this position -> null, never guessed",
-	);
-
-	for (const record of records) {
-		const result = validateRecord("experience", record);
-		assert.equal(result.ok, true, JSON.stringify(result));
+test("profileFieldReads: dash-only fields the decoration omits are unavailable, not null", () => {
+	const reads = profileFieldReads({
+		...profileSources({}),
+		dash: { firstName: "Alex" },
+	});
+	for (const field of ["industry", "location", "summary", "current_company"]) {
+		assert.equal(reads[field]?.kind, "unavailable", field);
 	}
 });
 
-test("buildExperienceRecords: group without sub-positions expands to one record", () => {
-	const profile: VoyagerProfileElement = {
-		profilePositionGroups: {
-			elements: [
-				{
-					dateRange: { start: { month: 1, year: 2018 } },
-					locationName: "Remote",
-					name: "SoloCo",
-					title: "Founder",
+test("profileFieldReads: headline and name parts fall back to /me; an empty dash string is a value", () => {
+	const reads = profileFieldReads(
+		profileSources(
+			{ firstName: "", lastName: "DashLast" },
+			{
+				miniProfile: {
+					firstName: "MeFirst",
+					lastName: "MeLast",
+					occupation: "Engineer at Acme",
 				},
-			],
-		},
-	};
-	const records = buildExperienceRecords(profile);
-	assert.equal(records.length, 1);
-	assert.equal(records[0]?.company, "SoloCo");
-	assert.equal(records[0]?.title, "Founder");
-	assert.equal(records[0]?.start_date, "2018-01");
-	assert.equal(records[0]?.location, "Remote");
-});
-
-test("buildExperienceRecords: no position groups -> empty array, not a throw", () => {
-	assert.deepEqual(buildExperienceRecords({}), []);
-});
-
-// ─── buildEducationRecords ─────────────────────────────────────────────────
-
-test("buildEducationRecords: maps school/degree/field/dates/grade/logo", () => {
-	const profile: VoyagerProfileElement = {
-		profileEducations: {
-			elements: [
-				{
-					dateRange: { end: { year: 2017 }, start: { year: 2013 } },
-					degreeName: "B.S.",
-					fieldOfStudy: "Computer Science",
-					grade: "3.9 GPA",
-					school: {
-						logo: {
-							vectorImage: {
-								artifacts: [{ fileIdentifyingUrlPathSegment: "logo.png" }],
-								rootUrl: "https://media.example/school/",
-							},
-						},
-					},
-					schoolName: "State University",
-				},
-			],
-		},
-	};
-	const records = buildEducationRecords(profile);
-	assert.equal(records.length, 1);
-	assert.equal(records[0]?.school, "State University");
-	assert.equal(records[0]?.degree, "B.S.");
-	assert.equal(records[0]?.field_of_study, "Computer Science");
-	assert.equal(records[0]?.start_date, "2013");
-	assert.equal(records[0]?.end_date, "2017");
-	assert.equal(records[0]?.grade, "3.9 GPA");
-	assert.equal(records[0]?.logo_url, "https://media.example/school/logo.png");
-
-	const result = validateRecord("education", records[0]);
-	assert.equal(result.ok, true, JSON.stringify(result));
-});
-
-test("buildEducationRecords: grade/logo_url are null when absent (never guessed)", () => {
-	const profile: VoyagerProfileElement = {
-		profileEducations: {
-			elements: [{ schoolName: "State University" }],
-		},
-	};
-	const records = buildEducationRecords(profile);
-	assert.equal(records[0]?.grade, null);
-	assert.equal(records[0]?.logo_url, null);
-
-	const result = validateRecord("education", records[0]);
-	assert.equal(result.ok, true, JSON.stringify(result));
-});
-
-test("buildEducationRecords: logo_url falls back through the typed VectorImage key, then schoolLogo", () => {
-	const withTypedKey = buildEducationRecords({
-		profileEducations: {
-			elements: [
-				{
-					school: {
-						logo: {
-							"com.linkedin.common.VectorImage": {
-								artifacts: [{ fileIdentifyingUrlPathSegment: "typed.png" }],
-								rootUrl: "https://media.example/typed/",
-							},
-						},
-					},
-					schoolName: "Typed-Key School",
-				},
-			],
-		},
-	});
+			},
+		),
+	);
 	assert.equal(
-		withTypedKey[0]?.logo_url,
+		readValue(reads.headline as FieldRead<string>),
+		"Engineer at Acme",
+	);
+	assert.equal(readValue(reads.full_name as FieldRead<string>), "DashLast");
+});
+
+test("profileFieldReads: profile picture prefers the dash image, then /me typed, then /me bare", () => {
+	const picture = (
+		dash: Record<string, unknown>,
+		me: Record<string, unknown>,
+	) => profileFieldReads(profileSources(dash, me)).profile_picture_url;
+	const image = (segment: string) => ({
+		artifacts: [{ fileIdentifyingUrlPathSegment: segment }],
+		rootUrl: "https://media.example/",
+	});
+	assert.deepEqual(
+		picture(
+			{
+				profilePicture: {
+					displayImageReference: { vectorImage: image("dash.jpg") },
+				},
+			},
+			{ miniProfile: { picture: image("me.jpg") } },
+		),
+		read("https://media.example/dash.jpg"),
+	);
+	assert.deepEqual(
+		picture(
+			{},
+			{
+				miniProfile: {
+					picture: { "com.linkedin.common.VectorImage": image("typed.jpg") },
+				},
+			},
+		),
+		read("https://media.example/typed.jpg"),
+	);
+	assert.deepEqual(
+		picture({}, { miniProfile: { picture: image("bare.jpg") } }),
+		read("https://media.example/bare.jpg"),
+	);
+	assert.deepEqual(picture({}, {}), EMPTY);
+});
+
+test("profileFieldReads: the basic fallback cannot supply decoration-only fields", () => {
+	const reads = profileFieldReads({
+		...profileSources({ firstName: "Alex", lastName: "Rivera" }),
+		dashSource: "basic",
+	});
+	assert.equal(readValue(reads.full_name as FieldRead<string>), "Alex Rivera");
+	for (const field of [
+		"industry",
+		"location",
+		"summary",
+		"current_company",
+		"current_position_title",
+	]) {
+		assert.deepEqual(reads[field], unavailable("source_unavailable"), field);
+	}
+});
+
+// ─── experience (D3: group expands to N positions) ───────────────────────
+
+test("buildExperienceRows: group with sub-positions expands 1:1", () => {
+	const rows = buildExperienceRows([
+		{
+			company: { name: "Acme" },
+			profilePositionInPositionGroup: {
+				elements: [
+					{
+						companyName: "Acme",
+						dateRange: { end: { year: 2022 }, start: { year: 2019 } },
+						description: "Led backend team.",
+						employmentType: { name: "Full-time" },
+						title: "Senior Engineer",
+					},
+					{
+						dateRange: { start: { year: 2022 } },
+						title: "Staff Engineer",
+					},
+				],
+			},
+		},
+	]);
+	assert.equal(rows.considered, 2);
+	assert.equal(rows.covered, 2);
+	const [senior, staff] = rows.records;
+	assert.equal(senior?.title, "Senior Engineer");
+	assert.equal(senior?.start_date, "2019");
+	assert.equal(senior?.end_date, "2022");
+	assert.equal(senior?.employment_type, "Full-time");
+	assert.equal(
+		staff?.company,
+		"Acme",
+		"a position without its own company takes the group's",
+	);
+	assert.equal(staff?.end_date, null);
+	assert.equal(
+		staff?.employment_type,
+		null,
+		"absent employmentType is empty, never guessed",
+	);
+	for (const record of rows.records) {
+		assert.equal(validateRecord("experience", record).ok, true);
+	}
+});
+
+test("buildExperienceRows: group without sub-positions expands to one row", () => {
+	const rows = buildExperienceRows([
+		{
+			dateRange: { start: { month: 1, year: 2018 } },
+			locationName: "Remote",
+			name: "SoloCo",
+			title: "Founder",
+		},
+	]);
+	assert.equal(rows.covered, 1);
+	assert.equal(rows.records[0]?.company, "SoloCo");
+	assert.equal(rows.records[0]?.title, "Founder");
+	assert.equal(rows.records[0]?.start_date, "2018-01");
+	assert.equal(rows.records[0]?.location, "Remote");
+	assert.equal(rows.records[0]?.id, "exp-group-0");
+});
+
+test("buildExperienceRows: an empty section is an empty inventory", () => {
+	assert.deepEqual(buildExperienceRows([]).records, []);
+	assert.equal(buildExperienceRows([]).considered, 0);
+});
+
+test("buildExperienceRows: a readable row with one malformed field is emitted without it and not covered", () => {
+	const rows = buildExperienceRows([
+		{ title: "Former role", start: { year: 2010 }, end: 42 },
+	]);
+	assert.equal(rows.considered, 1);
+	assert.equal(rows.covered, 0);
+	assert.deepEqual(rows.records[0], {
+		company: null,
+		description: null,
+		employment_type: null,
+		id: "exp-group-0",
+		location: null,
+		start_date: "2010",
+		title: "Former role",
+	});
+	assert.deepEqual(rows.unavailableFields, { end_date: { malformed: 1 } });
+});
+
+// ─── education ───────────────────────────────────────────────────────────
+
+test("buildEducationRows: maps school/degree/field/dates/grade/logo", () => {
+	const rows = buildEducationRows([
+		{
+			dateRange: { end: { year: 2017 }, start: { year: 2013 } },
+			degreeName: "B.S.",
+			fieldOfStudy: "Computer Science",
+			grade: "3.9 GPA",
+			school: {
+				logo: {
+					vectorImage: {
+						artifacts: [{ fileIdentifyingUrlPathSegment: "logo.png" }],
+						rootUrl: "https://media.example/school/",
+					},
+				},
+			},
+			schoolName: "State University",
+		},
+	]);
+	assert.equal(rows.covered, 1);
+	assert.deepEqual(rows.records[0], {
+		degree: "B.S.",
+		end_date: "2017",
+		field_of_study: "Computer Science",
+		grade: "3.9 GPA",
+		id: "edu-0",
+		logo_url: "https://media.example/school/logo.png",
+		school: "State University",
+		start_date: "2013",
+	});
+	assert.equal(validateRecord("education", rows.records[0]).ok, true);
+});
+
+test("buildEducationRows: absent grade and logo are empty (never guessed)", () => {
+	const rows = buildEducationRows([{ schoolName: "State University" }]);
+	assert.equal(rows.covered, 1);
+	assert.equal(rows.records[0]?.grade, null);
+	assert.equal(rows.records[0]?.logo_url, null);
+});
+
+test("buildEducationRows: logo falls back through the typed VectorImage key, then schoolLogo", () => {
+	const logo = (row: Record<string, unknown>) =>
+		buildEducationRows([{ schoolName: "School", ...row }]).records[0]?.logo_url;
+	assert.equal(
+		logo({
+			school: {
+				logo: {
+					"com.linkedin.common.VectorImage": {
+						artifacts: [{ fileIdentifyingUrlPathSegment: "typed.png" }],
+						rootUrl: "https://media.example/typed/",
+					},
+				},
+			},
+		}),
 		"https://media.example/typed/typed.png",
 	);
-
-	const withSchoolLogo = buildEducationRecords({
-		profileEducations: {
-			elements: [
-				{
-					schoolLogo: {
-						vectorImage: {
-							artifacts: [{ fileIdentifyingUrlPathSegment: "legacy.png" }],
-							rootUrl: "https://media.example/legacy/",
-						},
-					},
-					schoolName: "Legacy-Shape School",
-				},
-			],
-		},
-	});
 	assert.equal(
-		withSchoolLogo[0]?.logo_url,
+		logo({
+			schoolLogo: {
+				vectorImage: {
+					artifacts: [{ fileIdentifyingUrlPathSegment: "legacy.png" }],
+					rootUrl: "https://media.example/legacy/",
+				},
+			},
+		}),
 		"https://media.example/legacy/legacy.png",
 	);
 });
 
-// ─── buildSkillRecords (dual flat/category shape) ──────────────────────────
-
-test("buildSkillRecords: flat skill list", () => {
-	const profile: VoyagerProfileElement = {
-		profileSkills: {
-			elements: [
-				{
-					entityUrn: "urn:skill:distributed-systems",
-					endorsementCount: 12,
-					name: "Distributed Systems",
-				},
-				{
-					entityUrn: "urn:skill:typescript",
-					endorsementCount: 0,
-					name: "TypeScript",
-				},
-			],
-		},
-	};
-	const records = buildSkillRecords(profile);
-	assert.equal(records.length, 2);
-	assert.equal(records[0]?.name, "Distributed Systems");
-	assert.equal(records[0]?.endorsement_count, 12);
-	assert.equal(records[1]?.endorsement_count, 0);
-});
-
-test("buildSkillRecords: categorized skill list flattens to one record per skill", () => {
-	const profile: VoyagerProfileElement = {
-		profileSkills: {
-			elements: [
-				{
-					name: "Tools & Technologies",
-					skills: [
-						{
-							entityUrn: "urn:skill:kubernetes",
-							endorsements: 5,
-							name: "Kubernetes",
-						},
-						{ entityUrn: "urn:skill:docker", name: "Docker" },
-					],
-				},
-			],
-		},
-	};
-	const records = buildSkillRecords(profile);
-	assert.equal(records.length, 2);
-	assert.equal(records[0]?.name, "Kubernetes");
-	assert.equal(records[0]?.endorsement_count, 5);
-	assert.equal(records[1]?.name, "Docker");
-	assert.equal(records[1]?.endorsement_count, null);
-});
-
-test("buildSkillRecords: skips entries with no usable name", () => {
-	const profile: VoyagerProfileElement = {
-		profileSkills: {
-			elements: [{ entityUrn: "urn:skill:unnamed", endorsementCount: 3 }],
-		},
-	};
-	assert.deepEqual(buildSkillRecords(profile), []);
-});
-
-// ─── buildLanguageRecords ───────────────────────────────────────────────────
-
-test("buildLanguageRecords: maps name + proficiency", () => {
-	const profile: VoyagerProfileElement = {
-		profileLanguages: {
-			elements: [
-				{
-					entityUrn: "urn:language:spanish",
-					name: "Spanish",
-					proficiency: "Professional working proficiency",
-				},
-				{ entityUrn: "urn:language:french", name: "French" },
-			],
-		},
-	};
-	const records = buildLanguageRecords(profile);
-	assert.equal(records.length, 2);
-	assert.equal(records[0]?.name, "Spanish");
-	assert.equal(records[0]?.proficiency, "Professional working proficiency");
-	assert.equal(records[1]?.proficiency, null);
-
-	for (const record of records) {
-		const result = validateRecord("languages", record);
-		assert.equal(result.ok, true, JSON.stringify(result));
+test("buildEducationRows: a row with no readable content is omitted, not an all-null row", () => {
+	for (const row of [{ schoolLogo: 42 }, { school: {} }, {}]) {
+		const rows = buildEducationRows([row]);
+		assert.equal(rows.considered, 1, JSON.stringify(row));
+		assert.equal(rows.covered, 0, JSON.stringify(row));
+		assert.deepEqual(rows.records, [], JSON.stringify(row));
+		assert.deepEqual(rows.omittedRows, { no_readable_content: 1 });
 	}
 });
 
-test("buildLanguageRecords: no languages -> empty array", () => {
-	assert.deepEqual(buildLanguageRecords({}), []);
-});
+// ─── skills (flat and categorized) ───────────────────────────────────────
 
-// ─── connectedAtOf / buildConnectionRecord ─────────────────────────────────
-
-test("connectedAtOf: epoch milliseconds -> ISO-8601", () => {
-	assert.equal(connectedAtOf(1_700_000_000_000), "2023-11-14T22:13:20.000Z");
-});
-
-test("connectedAtOf: zero/absent/negative -> null, never epoch", () => {
-	assert.equal(connectedAtOf(0), null);
-	assert.equal(connectedAtOf(undefined), null);
-	assert.equal(connectedAtOf(-5), null);
-});
-
-test("buildConnectionRecord: resolved profile -> full enrichment", () => {
-	const record = buildConnectionRecord(
+test("buildSkillRows: flat skill list", () => {
+	const rows = buildSkillRows([
 		{
-			connectedMember: "urn:li:fsd_profile:abc123",
-			createdAt: 1_700_000_000_000,
+			endorsementCount: 12,
+			entityUrn: "urn:skill:ds",
+			name: "Distributed Systems",
 		},
+		{ endorsementCount: 0, entityUrn: "urn:skill:ts", name: "TypeScript" },
+	]);
+	assert.equal(rows.covered, 2);
+	assert.equal(rows.records[0]?.name, "Distributed Systems");
+	assert.equal(rows.records[0]?.endorsement_count, 12);
+	assert.equal(rows.records[1]?.endorsement_count, 0);
+});
+
+test("buildSkillRows: categorized list flattens to one row per skill", () => {
+	const rows = buildSkillRows([
 		{
+			name: "Tools & Technologies",
+			skills: [
+				{ endorsements: 5, entityUrn: "urn:skill:k8s", name: "Kubernetes" },
+				{ entityUrn: "urn:skill:docker", name: "Docker" },
+			],
+		},
+	]);
+	assert.equal(rows.considered, 2);
+	assert.equal(rows.covered, 2);
+	assert.equal(rows.records[0]?.endorsement_count, 5);
+	assert.equal(rows.records[1]?.name, "Docker");
+	assert.equal(rows.records[1]?.endorsement_count, null);
+});
+
+test("buildSkillRows: a skill without a name is omitted and uncovered", () => {
+	const rows = buildSkillRows([
+		{ endorsementCount: 3, entityUrn: "urn:skill:unnamed" },
+	]);
+	assert.deepEqual(rows.records, []);
+	assert.deepEqual(rows.omittedRows, { name_absent: 1 });
+	assert.equal(rows.considered, 1);
+	assert.equal(rows.covered, 0);
+});
+
+// ─── languages ───────────────────────────────────────────────────────────
+
+test("buildLanguageRows: maps name + proficiency", () => {
+	const rows = buildLanguageRows([
+		{
+			entityUrn: "urn:language:spanish",
+			name: "Spanish",
+			proficiency: "Professional working proficiency",
+		},
+		{ entityUrn: "urn:language:french", name: "French" },
+	]);
+	assert.equal(rows.covered, 2);
+	assert.equal(
+		rows.records[0]?.proficiency,
+		"Professional working proficiency",
+	);
+	assert.equal(rows.records[1]?.proficiency, null);
+	for (const record of rows.records) {
+		assert.equal(validateRecord("languages", record).ok, true);
+	}
+});
+
+test("buildLanguageRows: no languages is an empty inventory", () => {
+	assert.deepEqual(buildLanguageRows([]).records, []);
+});
+
+// ─── connections ─────────────────────────────────────────────────────────
+
+test("buildConnectionRows: resolved profile gives full enrichment", () => {
+	const rows = buildConnectionRows(
+		[
+			{
+				connectedMember: "urn:li:fsd_profile:abc123",
+				createdAt: 1_700_000_000_000,
+			},
+		],
+		() => ({
 			firstName: "Jamie",
 			headline: "PM at Acme",
 			lastName: "Lee",
 			publicIdentifier: "jamielee",
-		},
+		}),
 	);
-	assert.ok(record);
-	assert.equal(record?.id, "urn:li:fsd_profile:abc123");
-	assert.equal(record?.full_name, "Jamie Lee");
-	assert.equal(record?.headline, "PM at Acme");
-	assert.equal(record?.profile_url, "https://www.linkedin.com/in/jamielee/");
-	assert.equal(record?.connected_at, "2023-11-14T22:13:20.000Z");
-
-	const result = validateRecord("connections", record);
-	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.equal(rows.covered, 1);
+	assert.deepEqual(rows.records[0], {
+		connected_at: "2023-11-14T22:13:20.000Z",
+		full_name: "Jamie Lee",
+		headline: "PM at Acme",
+		id: "urn:li:fsd_profile:abc123",
+		profile_url: "https://www.linkedin.com/in/jamielee/",
+	});
+	assert.equal(validateRecord("connections", rows.records[0]).ok, true);
 });
 
-test("buildConnectionRecord: source-backed blank names remain blank", () => {
-	const record = buildConnectionRecord(
-		{ connectedMember: "urn:li:fsd_profile:blank-name" },
-		{ firstName: " ", lastName: "" },
+test("buildConnectionRows: source-backed blank names stay blank", () => {
+	const rows = buildConnectionRows(
+		[{ connectedMember: "urn:li:fsd_profile:blank-name" }],
+		() => ({ firstName: " ", lastName: "" }),
 	);
-	assert.equal(record?.full_name, "");
-	assert.equal(
-		validateRecord("connections", record ?? {}).ok,
-		true,
-	);
+	assert.equal(rows.records[0]?.full_name, "");
+	assert.equal(rows.covered, 1);
 });
 
-test("buildConnectionRecord: unresolved profile -> null enrichment fields, edge still emitted", () => {
-	const record = buildConnectionRecord(
-		{ connectedMember: "urn:li:fsd_profile:xyz789" },
-		undefined,
+test("buildConnectionRows: an unresolved member keeps the edge, leaves enrichment out, and is not covered", () => {
+	const rows = buildConnectionRows(
+		[{ connectedMember: "urn:li:fsd_profile:xyz789" }],
+		() => undefined,
 	);
-	assert.ok(record);
-	assert.equal(record?.id, "urn:li:fsd_profile:xyz789");
-	assert.equal(record?.full_name, null);
-	assert.equal(record?.headline, null);
-	assert.equal(record?.profile_url, null);
-	assert.equal(record?.connected_at, null);
-
-	const result = validateRecord("connections", record);
-	assert.equal(result.ok, true, JSON.stringify(result));
+	assert.deepEqual(rows.records[0], {
+		connected_at: null,
+		id: "urn:li:fsd_profile:xyz789",
+	});
+	assert.equal(rows.covered, 0);
+	assert.deepEqual(rows.unavailableFields, {
+		full_name: { enrichment_unresolved: 1 },
+		headline: { enrichment_unresolved: 1 },
+		profile_url: { enrichment_unresolved: 1 },
+	});
+	assert.equal(validateRecord("connections", rows.records[0]).ok, true);
 });
 
-test("buildConnectionRecord: missing connectedMember -> null (cannot key the edge)", () => {
-	assert.equal(buildConnectionRecord({}, undefined), null);
+test("buildConnectionRows: a row without a member URN cannot be keyed and is omitted", () => {
+	const rows = buildConnectionRows([{}], () => undefined);
+	assert.deepEqual(rows.records, []);
+	assert.deepEqual(rows.omittedRows, { id_absent: 1 });
 });

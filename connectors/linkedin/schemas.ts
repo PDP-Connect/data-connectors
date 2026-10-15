@@ -14,8 +14,13 @@
  *
  * `id` shapes are intentionally loose (`z.string().min(1).max(200)`)
  * because Voyager entity ids mix URNs (`urn:li:fsd_profilePosition:...`)
- * and positional fallback ids (`exp-0-1`) — see `subEntityId` in
+ * and positional fallback ids (`exp-0-1`) — see `idOf` in
  * parsers.ts. Connections use the member URN directly.
+ *
+ * Every non-key field is nullable AND optional. `null` means the source says
+ * the field is empty; an absent field means this run could not read it (a
+ * field-level omission, see field-read.ts). An absent field never counts
+ * toward coverage.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -30,9 +35,10 @@ const idSchema = z.string().min(1).max(200);
 const partialDateNullable = z
 	.string()
 	.regex(PARTIAL_DATE_RE, "must be YYYY or YYYY-MM")
-	.nullable();
-const isoDateTimeNullable = z.iso.datetime().nullable();
-const urlNullable = z.url().max(4096).nullable();
+	.nullable()
+	.optional();
+const isoDateTimeNullable = z.iso.datetime().nullable().optional();
+const urlNullable = z.url().max(4096).nullable().optional();
 
 /**
  * profile stream (manifest required: id). One record: the owner's own
@@ -40,17 +46,17 @@ const urlNullable = z.url().max(4096).nullable();
  * Voyager's `/me` and dash-profile decorations both expose consistently).
  */
 export const profileSchema = z.object({
-	connection_count: z.number().int().min(0).nullable(),
-	current_company: pdppSafeText.max(500).nullable(),
-	current_position_title: pdppSafeText.max(500).nullable(),
-	full_name: pdppSafeText.max(300).nullable(),
-	headline: pdppSafeText.max(1000).nullable(),
+	connection_count: z.number().int().min(0).nullable().optional(),
+	current_company: pdppSafeText.max(500).nullable().optional(),
+	current_position_title: pdppSafeText.max(500).nullable().optional(),
+	full_name: pdppSafeText.max(300).nullable().optional(),
+	headline: pdppSafeText.max(1000).nullable().optional(),
 	id: idSchema,
-	industry: pdppSafeText.max(300).nullable(),
-	location: pdppSafeText.max(300).nullable(),
+	industry: pdppSafeText.max(300).nullable().optional(),
+	location: pdppSafeText.max(300).nullable().optional(),
 	profile_picture_url: urlNullable,
 	public_url: urlNullable,
-	summary: pdppSafeText.max(65_000).nullable(),
+	summary: pdppSafeText.max(65_000).nullable().optional(),
 });
 
 /**
@@ -59,27 +65,27 @@ export const profileSchema = z.object({
  * sub-positions expand to one record. `end_date: null` means current.
  */
 export const experienceSchema = z.object({
-	company: pdppSafeText.max(500).nullable(),
-	description: pdppSafeText.max(65_000).nullable(),
-	employment_type: pdppSafeText.max(200).nullable(),
+	company: pdppSafeText.max(500).nullable().optional(),
+	description: pdppSafeText.max(65_000).nullable().optional(),
+	employment_type: pdppSafeText.max(200).nullable().optional(),
 	end_date: partialDateNullable,
 	id: idSchema,
-	location: pdppSafeText.max(300).nullable(),
+	location: pdppSafeText.max(300).nullable().optional(),
 	start_date: partialDateNullable,
-	title: pdppSafeText.max(500).nullable(),
+	title: pdppSafeText.max(500).nullable().optional(),
 });
 
 /**
  * education stream (manifest required: id). One record per school.
  */
 export const educationSchema = z.object({
-	degree: pdppSafeText.max(500).nullable(),
+	degree: pdppSafeText.max(500).nullable().optional(),
 	end_date: partialDateNullable,
-	field_of_study: pdppSafeText.max(500).nullable(),
-	grade: pdppSafeText.max(200).nullable(),
+	field_of_study: pdppSafeText.max(500).nullable().optional(),
+	grade: pdppSafeText.max(200).nullable().optional(),
 	id: idSchema,
 	logo_url: urlNullable,
-	school: pdppSafeText.max(500).nullable(),
+	school: pdppSafeText.max(500).nullable().optional(),
 	start_date: partialDateNullable,
 });
 
@@ -87,7 +93,7 @@ export const educationSchema = z.object({
  * skills stream (manifest required: id, name). One record per skill.
  */
 export const skillsSchema = z.object({
-	endorsement_count: z.number().int().min(0).nullable(),
+	endorsement_count: z.number().int().min(0).nullable().optional(),
 	id: idSchema,
 	name: pdppSafeText.max(300),
 });
@@ -98,7 +104,7 @@ export const skillsSchema = z.object({
 export const languagesSchema = z.object({
 	id: idSchema,
 	name: pdppSafeText.max(200),
-	proficiency: pdppSafeText.max(200).nullable(),
+	proficiency: pdppSafeText.max(200).nullable().optional(),
 });
 
 /**
@@ -110,8 +116,8 @@ export const languagesSchema = z.object({
  */
 export const connectionsSchema = z.object({
 	connected_at: isoDateTimeNullable,
-	full_name: pdppSafeText.max(300).nullable(),
-	headline: pdppSafeText.max(1000).nullable(),
+	full_name: pdppSafeText.max(300).nullable().optional(),
+	headline: pdppSafeText.max(1000).nullable().optional(),
 	id: z.string().min(1).max(300),
 	profile_url: urlNullable,
 });

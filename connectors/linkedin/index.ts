@@ -74,7 +74,6 @@ import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/brows
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
-	buildFullScanCoverageMessage,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	type ProbeSessionArgs,
@@ -84,15 +83,24 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import {
-	buildConnectionRecord,
-	buildEducationRecordsWithOmissions,
-	buildExperienceRecordsWithOmissions,
-	buildLanguageRecordsWithOmissions,
-	buildProfileRecord,
-	buildSkillRecordsWithOmissions,
-	isReadablePositionGroup,
-	isReadableProfileLocation,
-	type OmissionSummary,
+	type FieldRead,
+	firstOf,
+	isRecord,
+	read,
+	type StreamRows,
+	textAt,
+	unavailable,
+} from "./field-read.ts";
+import {
+	buildConnectionRows,
+	buildEducationRows,
+	buildExperienceRows,
+	buildLanguageRows,
+	buildProfileRows,
+	buildSkillRows,
+	collectionAt,
+	connectionEnrichmentIsReadable,
+	type DashProfileSource,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -189,12 +197,6 @@ function isFetchError<T>(
 	);
 }
 
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-type DashProfileSource = "decoration" | "basic" | "unavailable";
-
 interface DashProfileResult {
 	profile: VoyagerProfileElement | null;
 	source: DashProfileSource;
@@ -216,55 +218,6 @@ function hasRecognizedProfileField(profile: Record<string, unknown>): boolean {
 		"publicIdentifier",
 		"summary",
 	].some((key) => Object.hasOwn(profile, key));
-}
-
-function unavailableProfileFields(
-	profile: VoyagerProfileElement | null,
-	source: DashProfileSource,
-	connectionCount: number | null,
-): string[] {
-	const unavailable: string[] = [];
-	const raw = profile as unknown as Record<string, unknown> | null;
-	if (source !== "decoration" || !raw) {
-		unavailable.push(
-			"current_company",
-			"current_position_title",
-			"industry",
-			"location",
-			"summary",
-		);
-	} else {
-		const groups = raw.profilePositionGroups;
-		const groupsReadable =
-			isObjectRecord(groups) &&
-			Array.isArray(groups.elements) &&
-			groups.elements.every(isReadablePositionGroup);
-		if (!groupsReadable) {
-			unavailable.push("current_company", "current_position_title");
-		}
-
-		const industry = raw.industry;
-		if (
-			!Object.hasOwn(raw, "industry") ||
-			(industry !== null &&
-				(!isObjectRecord(industry) ||
-					!(industry.name === null || typeof industry.name === "string")))
-		) {
-			unavailable.push("industry");
-		}
-
-		const locationIsReadable = isReadableProfileLocation(raw);
-		if (!locationIsReadable) unavailable.push("location");
-
-		if (
-			!Object.hasOwn(raw, "summary") ||
-			!(raw.summary === null || typeof raw.summary === "string")
-		) {
-			unavailable.push("summary");
-		}
-	}
-	if (connectionCount === null) unavailable.push("connection_count");
-	return unavailable;
 }
 
 /** Session liveness: an authenticated `/voyager/api/me` call succeeds. Used
@@ -302,7 +255,7 @@ async function fetchDashProfile(
 		if (!isFetchError(result) && Array.isArray(result.elements)) {
 			for (const candidate of result.elements) {
 				if (
-					isObjectRecord(candidate) &&
+					isRecord(candidate) &&
 					hasRecognizedProfileField(candidate)
 				) {
 					return {
@@ -321,7 +274,7 @@ async function fetchDashProfile(
 		"dash-profile-basic",
 	);
 	if (!isFetchError(basic) && Array.isArray(basic.elements)) {
-		const profile = basic.elements.find(isObjectRecord);
+		const profile = basic.elements.find(isRecord);
 		if (profile) {
 			return { profile: profile as VoyagerProfileElement, source: "basic" };
 		}
@@ -383,7 +336,7 @@ async function fetchConnections(
 			return finish("page_error", result._error);
 		}
 		const paging = result.paging;
-		if (paging !== undefined && !isObjectRecord(paging)) {
+		if (paging !== undefined && !isRecord(paging)) {
 			return finish("malformed_page");
 		}
 		const reportedStart = paging?.start;
@@ -420,7 +373,7 @@ async function fetchConnections(
 		observed += page_elements.length;
 		if (
 			page_elements.length > CONNECTIONS_PAGE_SIZE ||
-			page_elements.some((element) => !isObjectRecord(element))
+			page_elements.some((element) => !isRecord(element))
 		) {
 			return finish("malformed_page");
 		}
@@ -500,7 +453,7 @@ async function resolveConnectionProfiles(
 	let batchIndex = 0;
 	let singletonIndex = 0;
 	const accept = (urn: string, value: unknown, requested: Set<string>) => {
-		if (!requested.has(urn) || !isObjectRecord(value)) return;
+		if (!requested.has(urn) || !isRecord(value)) return;
 		const profileFields = [
 			"firstName",
 			"headline",
@@ -511,9 +464,7 @@ async function resolveConnectionProfiles(
 		const presentFields = profileFields.filter((field) =>
 			Object.hasOwn(value, field),
 		);
-		const malformed = presentFields.some(
-			(field) => typeof value[field] !== "string",
-		);
+		const malformed = !connectionEnrichmentIsReadable(value);
 		if (malformed) malformedUrns.add(urn);
 		if (presentFields.length === 0) return;
 		const profile = value as VoyagerResolvedProfile;
@@ -529,13 +480,13 @@ async function resolveConnectionProfiles(
 		value: VoyagerProfilesByIdResponse,
 		requested: Set<string>,
 	) => {
-		if (isObjectRecord(value.results)) {
+		if (isRecord(value.results)) {
 			for (const [urn, profile] of Object.entries(value.results)) {
 				accept(urn, profile, requested);
 			}
 		}
 		for (const profile of Array.isArray(value.elements) ? value.elements : []) {
-			if (!isObjectRecord(profile)) continue;
+			if (!isRecord(profile)) continue;
 			const urn = profile.entityUrn ?? profile.dashEntityUrn;
 			if (typeof urn === "string") accept(urn, profile, requested);
 		}
@@ -558,7 +509,7 @@ async function resolveConnectionProfiles(
 
 		if (
 			isFetchError(result) ||
-			!(isObjectRecord(result.results) || Array.isArray(result.elements))
+			!(isRecord(result.results) || Array.isArray(result.elements))
 		) {
 			consecutiveFailures += 1;
 			if (consecutiveFailures <= 2) {
@@ -573,7 +524,7 @@ async function resolveConnectionProfiles(
 					);
 					if (
 						!isFetchError(singleton) &&
-						(isObjectRecord(singleton.results) ||
+						(isRecord(singleton.results) ||
 							Array.isArray(singleton.elements))
 					) {
 						acceptBatch(singleton, new Set([urn]));
@@ -597,7 +548,7 @@ async function resolveConnectionProfiles(
 			singletonIndex += 1;
 			if (
 				!isFetchError(singleton) &&
-				(isObjectRecord(singleton.results) || Array.isArray(singleton.elements))
+				(isRecord(singleton.results) || Array.isArray(singleton.elements))
 			) {
 				acceptBatch(singleton, new Set([urn]));
 			}
@@ -723,43 +674,44 @@ export async function collectLinkedIn(
 	if (isFetchError(meResult)) {
 		throw new Error(`linkedin_profile_fetch_failed: ${meResult._error}`);
 	}
-	const publicIdentifier =
-		meResult.miniProfile?.publicIdentifier ?? meResult.publicIdentifier;
-	if (!publicIdentifier) {
+	const publicIdentifier = firstOf(
+		[
+			textAt(meResult, ["miniProfile", "publicIdentifier"]),
+			textAt(meResult, ["publicIdentifier"]),
+		],
+		"unavailable",
+	);
+	if (publicIdentifier.kind !== "read" || publicIdentifier.value.length === 0) {
 		throw new Error(
 			"linkedin_profile_fetch_failed: no publicIdentifier on /voyager/api/me response",
 		);
 	}
 
 	const wantsProfileFields = requested.has("profile");
-	const wantsExperience = requested.has("experience");
-	const wantsEducation = requested.has("education");
-	const wantsSkills = requested.has("skills");
-	const wantsLanguages = requested.has("languages");
 	const wantsConnections = requested.has("connections");
+	const wantedSections = PROFILE_SECTIONS.filter((section) =>
+		requested.has(section.stream),
+	);
 
 	let dashProfileResult: DashProfileResult = {
 		profile: null,
 		source: "unavailable",
 	};
-	if (
-		wantsProfileFields ||
-		wantsExperience ||
-		wantsEducation ||
-		wantsSkills ||
-		wantsLanguages
-	) {
-		dashProfileResult = await fetchDashProfile(page, publicIdentifier, capture);
+	if (wantsProfileFields || wantedSections.length > 0) {
+		dashProfileResult = await fetchDashProfile(
+			page,
+			publicIdentifier.value,
+			capture,
+		);
 	}
 	const dashProfile = dashProfileResult.profile;
 
 	// `profile.connection_count` is only available from the connections
-	// listing's `paging.total` (legacy: `profileResult.connections =
-	// totalAvailable || connectionRecords.length`, set AFTER the connections
-	// fetch completes) — nowhere on /me or the dash profile payload. Fetch the
-	// connections listing here, before emitting `profile`, whenever either
-	// stream is requested, and reuse the same walk for the `connections`
-	// stream below rather than fetching twice.
+	// listing (legacy: `profileResult.connections = totalAvailable ||
+	// connectionRecords.length`, set AFTER the connections fetch completes) —
+	// nowhere on /me or the dash profile payload. Walk the listing here, before
+	// emitting `profile`, whenever either stream is requested, and reuse the
+	// same walk for the `connections` stream below.
 	let connectionsResult: ConnectionsResult | null = null;
 	if (wantsProfileFields || wantsConnections) {
 		await progress("Fetching LinkedIn connections", { stream: "connections" });
@@ -768,175 +720,49 @@ export async function collectLinkedIn(
 	// A partial walk never supplies an exact connection_count. Even when the
 	// server gave a total earlier in the walk, completion still needs positive
 	// end-of-list evidence.
-	const connectionCount =
-		connectionsResult === null ||
-		connectionsResult.terminationReason !== "verified_end"
-			? null
-			: connectionsResult.elements.length;
+	const connectionCount: FieldRead<number> =
+		connectionsResult?.terminationReason === "verified_end"
+			? read(connectionsResult.elements.length)
+			: unavailable("walk_unverified");
+
+	const sink: StreamSink = { emit, emitRecord, progress };
 
 	if (wantsProfileFields) {
-		const unavailableFields = unavailableProfileFields(
-			dashProfile,
-			dashProfileResult.source,
-			connectionCount,
-		);
-		if (unavailableFields.length > 0) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "profile",
-				reason:
+		await emitRows(
+			sink,
+			"profile",
+			buildProfileRows({
+				connectionCount,
+				dash: dashProfile,
+				dashSource: dashProfileResult.source,
+				me: meResult,
+				publicIdentifier: publicIdentifier.value,
+			}),
+			{
+				enumerated: true,
+				gapReason:
 					dashProfileResult.source === "unavailable"
 						? "linkedin_dash_profile_unavailable"
 						: "linkedin_profile_fields_unavailable",
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
-				message: "Some LinkedIn profile fields were not readable this run",
-				diagnostics: { unavailable_fields: unavailableFields },
-			});
-		}
-		const record = buildProfileRecord(
-			publicIdentifier,
-			dashProfile ?? {},
-			meResult.miniProfile?.occupation,
-			meResult.miniProfile,
-			connectionCount,
+			},
 		);
-		const profileValid = validateRecord("profile", record).ok;
-		if (profileValid) {
-			await emitRecord("profile", record);
-		} else {
-			await reportInvalidRecords("profile", 1, progress);
-		}
-		if (unavailableFields.length === 0 && profileValid) {
-			await emit(buildFullScanCoverageMessage("profile", 1));
-		}
 	}
 
-	if (wantsExperience) {
-		const section =
+	for (const section of wantedSections) {
+		// Only a full decoration carries the profile sections; an empty list
+		// from the basic fallback is not evidence of an empty section.
+		const items =
 			dashProfileResult.source === "decoration"
-				? dashProfile?.profilePositionGroups?.elements
-				: undefined;
-		if (Array.isArray(section)) {
-			const { considered, covered, omissions, records } =
-				buildExperienceRecordsWithOmissions(dashProfile ?? {});
-			await reportOmissions("experience", omissions, progress);
-			const validRecords = records.filter(
-				(record) => validateRecord("experience", record).ok,
-			);
-			await reportInvalidRecords(
-				"experience",
-				records.length - validRecords.length,
-				progress,
-			);
-			for (const record of validRecords) {
-				await emitRecord("experience", record);
-			}
-			await emit(
-				coverageMessage(
-					"experience",
-					considered,
-					Math.min(covered, validRecords.length),
-				),
-			);
-		} else {
-			await emitUnavailableSection("experience", emit);
+				? collectionAt(dashProfile, section.key)
+				: unavailable("source_unavailable");
+		if (items.kind !== "read") {
+			await emitUnavailableSection(section.stream, emit);
+			continue;
 		}
-	}
-
-	if (wantsEducation) {
-		const section =
-			dashProfileResult.source === "decoration"
-				? dashProfile?.profileEducations?.elements
-				: undefined;
-		if (Array.isArray(section)) {
-			const { considered, covered, omissions, records } =
-				buildEducationRecordsWithOmissions(dashProfile ?? {});
-			await reportOmissions("education", omissions, progress);
-			const validRecords = records.filter(
-				(record) => validateRecord("education", record).ok,
-			);
-			await reportInvalidRecords(
-				"education",
-				records.length - validRecords.length,
-				progress,
-			);
-			for (const record of validRecords) {
-				await emitRecord("education", record);
-			}
-			await emit(
-				coverageMessage(
-					"education",
-					considered,
-					Math.min(covered, validRecords.length),
-				),
-			);
-		} else {
-			await emitUnavailableSection("education", emit);
-		}
-	}
-
-	if (wantsSkills) {
-		const section =
-			dashProfileResult.source === "decoration"
-				? dashProfile?.profileSkills?.elements
-				: undefined;
-		if (Array.isArray(section)) {
-			const { considered, covered, omissions, records } =
-				buildSkillRecordsWithOmissions(dashProfile ?? {});
-			await reportOmissions("skills", omissions, progress);
-			const validRecords = records.filter(
-				(record) => validateRecord("skills", record).ok,
-			);
-			await reportInvalidRecords(
-				"skills",
-				records.length - validRecords.length,
-				progress,
-			);
-			for (const record of validRecords) {
-				await emitRecord("skills", record);
-			}
-			await emit(
-				coverageMessage(
-					"skills",
-					considered,
-					Math.min(covered, validRecords.length),
-				),
-			);
-		} else {
-			await emitUnavailableSection("skills", emit);
-		}
-	}
-
-	if (wantsLanguages) {
-		const section =
-			dashProfileResult.source === "decoration"
-				? dashProfile?.profileLanguages?.elements
-				: undefined;
-		if (Array.isArray(section)) {
-			const { considered, covered, omissions, records } =
-				buildLanguageRecordsWithOmissions(dashProfile ?? {});
-			await reportOmissions("languages", omissions, progress);
-			const validRecords = records.filter(
-				(record) => validateRecord("languages", record).ok,
-			);
-			await reportInvalidRecords(
-				"languages",
-				records.length - validRecords.length,
-				progress,
-			);
-			for (const record of validRecords) {
-				await emitRecord("languages", record);
-			}
-			await emit(
-				coverageMessage(
-					"languages",
-					considered,
-					Math.min(covered, validRecords.length),
-				),
-			);
-		} else {
-			await emitUnavailableSection("languages", emit);
-		}
+		await emitRows(sink, section.stream, section.build(items.value), {
+			enumerated: true,
+			gapReason: "linkedin_fields_unreadable",
+		});
 	}
 
 	if (wantsConnections && connectionsResult) {
@@ -981,11 +807,10 @@ export async function collectLinkedIn(
 			capture,
 		);
 		const resolvedProfiles = resolution.profiles;
-
-		const omittedWithoutUrn = connectionsResult.missingUrnCount;
 		const unresolved = memberUrns.filter(
 			(urn) => !resolvedProfiles.get(urn)?.complete,
 		).length;
+		const omittedWithoutUrn = connectionsResult.missingUrnCount;
 		if (omittedWithoutUrn > 0) {
 			await progress(
 				`LinkedIn connections omitted rows: missing_connected_member_urn=${omittedWithoutUrn}`,
@@ -1005,17 +830,6 @@ export async function collectLinkedIn(
 					total: memberUrns.length,
 				},
 			);
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "connections",
-				reason: "linkedin_connection_enrichment_incomplete",
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
-				message: "Some LinkedIn connections could not be enriched this run",
-				diagnostics: {
-					unresolved_count: unresolved,
-					malformed_count: resolution.malformedCount,
-				},
-			});
 		}
 		if (resolution.malformedCount > 0) {
 			await progress(
@@ -1027,44 +841,90 @@ export async function collectLinkedIn(
 				},
 			);
 		}
-
-		const builtRecords = elements.map((element) => ({
-			element,
-			record: buildConnectionRecord(
-				element,
-				element.connectedMember
-					? resolvedProfiles.get(element.connectedMember)?.profile
-					: undefined,
+		await emitRows(
+			sink,
+			"connections",
+			buildConnectionRows(
+				elements,
+				(urn) => resolvedProfiles.get(urn)?.profile,
 			),
-		}));
-		const validRecords = builtRecords.filter(
-			(
-				item,
-			): item is {
-				element: VoyagerConnectionElement;
-				record: NonNullable<typeof item.record>;
-			} =>
-				item.record !== null && validateRecord("connections", item.record).ok,
+			{
+				enumerated: connectionsComplete,
+				gapReason:
+					unresolved > 0
+						? "linkedin_connection_enrichment_incomplete"
+						: "linkedin_fields_unreadable",
+				diagnostics: {
+					unresolved_count: unresolved,
+					malformed_count: resolution.malformedCount,
+				},
+			},
 		);
-		const invalidRecordCount = builtRecords.filter(
-			(item) =>
-				item.record !== null && !validateRecord("connections", item.record).ok,
-		).length;
-		await reportInvalidRecords("connections", invalidRecordCount, progress);
+	}
+}
 
-		let covered = 0;
-		for (const { element, record } of validRecords) {
-			await emitRecord("connections", record);
-			if (
-				element.connectedMember &&
-				resolvedProfiles.get(element.connectedMember)?.complete
-			) {
-				covered += 1;
-			}
-		}
-		if (connectionsComplete) {
-			await emit(coverageMessage("connections", elements.length, covered));
-		}
+/** Profile sections read from the dash profile, one stream each. */
+const PROFILE_SECTIONS: ReadonlyArray<{
+	build: (items: readonly unknown[]) => StreamRows<Record<string, unknown>>;
+	key: string;
+	stream: string;
+}> = [
+	{
+		build: buildExperienceRows,
+		key: "profilePositionGroups",
+		stream: "experience",
+	},
+	{ build: buildEducationRows, key: "profileEducations", stream: "education" },
+	{ build: buildSkillRows, key: "profileSkills", stream: "skills" },
+	{ build: buildLanguageRows, key: "profileLanguages", stream: "languages" },
+];
+
+interface StreamSink {
+	emit: BrowserCollectContext["emit"];
+	emitRecord: BrowserCollectContext["emitRecord"];
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
+}
+
+/**
+ * Emit a stream's rows and its one completeness decision. Every row is
+ * emitted (upsert: keep what was readable). DETAIL_COVERAGE is emitted only
+ * when the enumeration has a verified end, and it is complete only when every
+ * considered row is covered. Any uncovered row adds one retryable gap that
+ * names the omitted rows and unavailable fields by reason, so the stream is
+ * never replaced on this run.
+ */
+async function emitRows(
+	sink: StreamSink,
+	stream: string,
+	rows: StreamRows<Record<string, unknown>>,
+	options: {
+		diagnostics?: Record<string, number>;
+		enumerated: boolean;
+		gapReason: string;
+	},
+): Promise<void> {
+	await reportRowIssues(stream, rows, sink.progress);
+	for (const record of rows.records) {
+		await sink.emitRecord(stream, record);
+	}
+	if (options.enumerated) {
+		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
+	}
+	if (rows.covered < rows.considered) {
+		await sink.emit({
+			type: "SKIP_RESULT",
+			stream,
+			reason: options.gapReason,
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			message: `Some LinkedIn ${stream} entries had fields this run could not read`,
+			diagnostics: {
+				considered: rows.considered,
+				covered: rows.covered,
+				omitted_rows: rows.omittedRows,
+				unavailable_fields: rows.unavailableFields,
+				...options.diagnostics,
+			},
+		});
 	}
 }
 
@@ -1096,51 +956,28 @@ async function emitUnavailableSection(
 	});
 }
 
-async function reportOmissions(
+async function reportRowIssues(
 	stream: string,
-	omissions: OmissionSummary,
+	rows: StreamRows<unknown>,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 ): Promise<void> {
-	if (omissions.count === 0) {
-		return;
-	}
-	const omittedRows = Object.entries(omissions.omittedReasons)
-		.map(([reason, omitted]) => `${reason}=${omitted}`)
-		.join(",");
-	if (omissions.omittedCount > 0) {
-		await progress(`LinkedIn ${stream} omitted rows: ${omittedRows}`, {
-			stream,
-			count: omissions.omittedCount,
-		});
-	}
-	const preservedIssues = Object.entries(omissions.reasons)
-		.filter(([reason]) => !(reason in omissions.omittedReasons))
-		.map(([reason, count]) => `${reason}=${count}`)
-		.join(",");
-	if (preservedIssues) {
+	const omitted = Object.entries(rows.omittedRows);
+	if (omitted.length > 0) {
 		await progress(
-			`LinkedIn ${stream} preserved malformed rows: ${preservedIssues}`,
-			{
-				stream,
-				count: omissions.count - omissions.omittedCount,
-			},
+			`LinkedIn ${stream} omitted rows: ${omitted.map(([reason, n]) => `${reason}=${n}`).join(",")}`,
+			{ stream, count: omitted.reduce((sum, [, n]) => sum + n, 0) },
 		);
 	}
-}
-
-async function reportInvalidRecords(
-	stream: string,
-	count: number,
-	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
-): Promise<void> {
-	if (count === 0) return;
-	await progress(
-		`LinkedIn ${stream} omitted rows: invalid_record_shape=${count}`,
-		{
-			stream,
-			count,
-		},
+	const fields = Object.entries(rows.unavailableFields).flatMap(
+		([field, reasons]) =>
+			Object.entries(reasons).map(([reason, n]) => `${field}:${reason}=${n}`),
 	);
+	if (fields.length > 0) {
+		await progress(`LinkedIn ${stream} omitted fields: ${fields.join(",")}`, {
+			stream,
+			count: rows.records.length,
+		});
+	}
 }
 
 if (isMainModule(import.meta.url)) {

@@ -170,6 +170,16 @@ test("connections schema accepts an unresolved connection (all enrichment null)"
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("schemas accept an unreadable field left out, but never a missing key or required name", () => {
+	// field-read.ts leaves an unavailable field out of the row.
+	assert.ok(
+		connectionsSchema.safeParse({ id: "urn:li:fsd_profile:xyz789" }).success,
+	);
+	assert.ok(profileSchema.safeParse({ id: "alexrivera" }).success);
+	assert.equal(connectionsSchema.safeParse({ full_name: "A" }).success, false);
+	assert.equal(skillsSchema.safeParse({ id: "urn:skill:1" }).success, false);
+});
+
 test("profile schema rejects a non-URL public_url (parser captured a label)", () => {
 	assert.equal(
 		profileSchema.safeParse({ ...PROFILE_RECORD, public_url: "Alex Rivera" })
