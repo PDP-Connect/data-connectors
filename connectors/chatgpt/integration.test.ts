@@ -51,11 +51,11 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
 	RetryExhaustedError,
 	retryHttp,
@@ -88,9 +88,10 @@ import {
 	chatGptBackendFetchInBrowser,
 	classifyChatGptBatchFailure,
 	classifyChatGptSourcePressure,
-	consumeChatGptProviderRetryBudget,
 	collectChatGpt,
+	consumeChatGptProviderRetryBudget,
 	createChatGptApi,
+	createOmittedMessageContentTally,
 	estimateChatGptDetailMinutesRemaining,
 	normalizeChatGptTerminalError,
 	processConversationDetail,
@@ -111,7 +112,6 @@ import {
 	runSharedConversationsStream,
 	type StreamDeps,
 	setChatGptDiagnosticSink,
-	createOmittedMessageContentTally,
 	shouldKeepRetryingChatGptDetail,
 	summarizeChatGptSideEffectProbe,
 } from "./index.ts";
@@ -2704,7 +2704,9 @@ test("processConversationDetail: detail=200 with missing mapping — list-only f
 	);
 });
 
-function detailGaps(messages: readonly unknown[]): Array<Record<string, unknown>> {
+function detailGaps(
+	messages: readonly unknown[],
+): Array<Record<string, unknown>> {
 	return messages.filter(
 		(m): m is Record<string, unknown> =>
 			typeof m === "object" &&
@@ -2758,7 +2760,8 @@ test("processConversationDetail: a missing mapping emits a retryable messages DE
 	assert.equal(gaps[0]?.record_key, "convo-abc");
 	assert.equal(gaps[0]?.reason, "retry_exhausted");
 	assert.equal(
-		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		(gaps[0]?.detail_locator as { incomplete_reason?: string } | undefined)
+			?.incomplete_reason,
 		"detail_mapping_missing",
 	);
 	assert.equal(gaps[0]?.retryable, true);
@@ -2790,7 +2793,8 @@ test("processConversationDetail: a schema-rejected branch node emits a DETAIL_GA
 	assert.equal(gaps[0]?.record_key, "convo-abc");
 	assert.equal(gaps[0]?.reason, "retry_exhausted");
 	assert.equal(
-		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		(gaps[0]?.detail_locator as { incomplete_reason?: string } | undefined)
+			?.incomplete_reason,
 		"message_shape_rejected",
 	);
 	assert.equal(outcome.complete, false);
@@ -2848,7 +2852,11 @@ test("processConversationDetail: a repeat detail in the same run keeps unreprese
 		false,
 		"an unrepresentable conversation stays incomplete on a repeat detail",
 	);
-	assert.equal(detailGaps(messages).length, 0, "a permanent unrepresentable body owes no gap");
+	assert.equal(
+		detailGaps(messages).length,
+		0,
+		"a permanent unrepresentable body owes no gap",
+	);
 	assert.equal(emitted.filter((r) => r.stream === "messages").length, 2);
 	const conversations = emitted.filter((r) => r.stream === "conversations");
 	assert.equal(conversations.length, 2);
@@ -2874,7 +2882,9 @@ test("processConversationDetail: a branch whose parent chain dangles emits a DET
 			status: 200,
 			json: {
 				current_node: "a1",
-				mapping: { a1: userNode("missing-earlier-turn", [], "last", "assistant") },
+				mapping: {
+					a1: userNode("missing-earlier-turn", [], "last", "assistant"),
+				},
 			},
 		},
 		makeEmitConversation(deps),
@@ -2882,7 +2892,8 @@ test("processConversationDetail: a branch whose parent chain dangles emits a DET
 	const gaps = detailGaps(messages);
 	assert.equal(gaps.length, 1);
 	assert.equal(
-		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		(gaps[0]?.detail_locator as { incomplete_reason?: string } | undefined)
+			?.incomplete_reason,
 		"branch_structurally_incomplete",
 	);
 	assert.deepEqual(outcome, {
@@ -12439,7 +12450,8 @@ test("runConversationsAndMessagesStreams: a cursor jump in the walk is not a con
 	);
 	assert.ok(
 		harness.protocolMessages.some(
-			(m) => m.type === "SKIP_RESULT" && m.reason === "conversation_list_unstable",
+			(m) =>
+				m.type === "SKIP_RESULT" && m.reason === "conversation_list_unstable",
 		),
 		"a non-contiguous walk reports the list as unstable",
 	);
@@ -12474,7 +12486,8 @@ test("processConversationDetail: a parent cycle is structurally incomplete, neve
 	const gaps = detailGaps(messages);
 	assert.equal(gaps.length, 1);
 	assert.equal(
-		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
+		(gaps[0]?.detail_locator as { incomplete_reason?: string } | undefined)
+			?.incomplete_reason,
 		"branch_structurally_incomplete",
 	);
 });
@@ -12514,19 +12527,25 @@ test("processConversationDetail: a repeat detail never changes an already-emitte
 	assert.equal(a2Emits[0]?.data.parent_id, "a0");
 	const conversations = emitted.filter((r) => r.stream === "conversations");
 	const a2InMapping = (
-		conversations[1]?.data as { mapping?: Record<string, { parent?: string }> }
-	).mapping?.a2;
+		conversations[1]?.data as
+			| { mapping?: Record<string, { parent?: string }> }
+			| undefined
+	)?.mapping?.a2;
 	assert.equal(
 		a2InMapping?.parent ?? "a0",
 		"a0",
 		"the conversation record keeps the emitted parent",
 	);
-	assert.equal(second.complete, false, "the changed link is reported, not repaired");
+	assert.equal(
+		second.complete,
+		false,
+		"the changed link is reported, not repaired",
+	);
 	assert.ok(
 		detailGaps(messages).some(
 			(g) =>
-				(g.detail_locator as { incomplete_reason?: string }).incomplete_reason ===
-				"branch_structurally_incomplete",
+				(g.detail_locator as { incomplete_reason?: string })
+					.incomplete_reason === "branch_structurally_incomplete",
 		),
 	);
 });
@@ -12963,7 +12982,9 @@ test("runConversationsAndMessagesStreams: capped runs on a host with no blob sto
 			state as CollectContext["state"],
 			{ detailPacing: { random: () => 0, sleep: () => undefined } },
 		);
-		const gaps = harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP");
+		const gaps = harness.protocolMessages.filter(
+			(m) => m.type === "DETAIL_GAP",
+		);
 		allGaps.push(...gaps);
 		pending = gaps.map((m, index) => ({
 			...(m as object),
@@ -12991,7 +13012,8 @@ test("runConversationsAndMessagesStreams: capped runs on a host with no blob sto
 			]);
 			assert.ok(
 				third.emitted.some(
-					(r) => r.stream === "messages" && r.data.conversation_id === "fresh-1",
+					(r) =>
+						r.stream === "messages" && r.data.conversation_id === "fresh-1",
 				),
 				`fresh-1 starved; fetched=${fetched.join(",")}`,
 			);
@@ -13005,16 +13027,16 @@ test("runConversationsAndMessagesStreams: capped runs on a host with no blob sto
 		1,
 		"an omitted-content conversation is fetched once, not every run",
 	);
-	assert.equal(
-		fetched.filter((p) => p.endsWith("big-2")).length,
-		1,
-	);
+	assert.equal(fetched.filter((p) => p.endsWith("big-2")).length, 1);
 	const omittedLines = diagnostics.filter((l) =>
 		l.startsWith("message_content_omitted:"),
 	);
 	assert.equal(omittedLines.length, 2, "runs 1 and 2 each disclose one");
 	for (const line of omittedLines) {
-		assert.match(line, /1 message\(s\).*host_blob_unavailable=1, exceeds_host_blob_cap=0/);
+		assert.match(
+			line,
+			/1 message\(s\).*host_blob_unavailable=1, exceeds_host_blob_cap=0/,
+		);
 	}
 });
 
@@ -13027,7 +13049,12 @@ test("runConversationsAndMessagesStreams: capped runs on a host with no blob sto
  */
 async function collectWithOversizeMessage(
 	messagesScope: { name: string; resources?: string[] },
-	bigNode: ChatGptNode = userNode("a0", [], "q".repeat(INLINE_CAP + 5), "assistant"),
+	bigNode: ChatGptNode = userNode(
+		"a0",
+		[],
+		"q".repeat(INLINE_CAP + 5),
+		"assistant",
+	),
 ): Promise<{
 	events: Array<{ kind: "BLOB" | "RECORD"; key: string }>;
 	records: Array<Record<string, unknown>>;
@@ -13082,7 +13109,8 @@ async function collectWithOversizeMessage(
 		["messages", messagesScope],
 	]);
 	const emit = (msg: EmittedMessage): Promise<void> => {
-		if (msg.type === "BLOB") events.push({ kind: "BLOB", key: String(msg.key) });
+		if (msg.type === "BLOB")
+			events.push({ kind: "BLOB", key: String(msg.key) });
 		if (msg.type === "RECORD" && msg.stream === "messages") {
 			events.push({ kind: "RECORD", key: String(msg.key) });
 			records.push(msg.data as Record<string, unknown>);
@@ -13144,7 +13172,10 @@ test("collectChatGpt: a message the stream selection suppresses emits no BLOB ev
 			collectWithOversizeMessage({ name: "messages", resources: ["a0"] }),
 		);
 		assert.deepEqual(events, [{ kind: "RECORD", key: "a0" }]);
-		assert.equal(records.some((r) => r.id === "a1"), false);
+		assert.equal(
+			records.some((r) => r.id === "a1"),
+			false,
+		);
 		assert.deepEqual(readdirSync(dir), [], "no orphan spool file");
 	} finally {
 		rmSync(dir, { force: true, recursive: true });

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	assertSynthesizedCall,
 	buildAccountPlanRecord,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
@@ -14,19 +15,18 @@ import {
 	buildMemoryRecord,
 	buildSharedConversationRecord,
 	countBranchMessages,
+	decodeEscapedText,
+	encodePdppSafeText,
+	encodeToolCallStrings,
+	escapedLengthExceeds,
 	extractContent,
 	extractContentParts,
-	decodeEscapedText,
-	extractMessageWithBlob,
 	extractMessage,
-	assertSynthesizedCall,
+	extractMessageWithBlob,
 	extractRawMessageText,
-	encodePdppSafeText,
-	escapedLengthExceeds,
-	isEscapedUnit,
-	encodeToolCallStrings,
 	extractToolCalls,
 	flattenTreeCurrentBranch,
+	isEscapedUnit,
 	maxUpdateTimeIso,
 	reconcileEmittedBranchMessages,
 	resolveGizmoIsPublic,
@@ -344,7 +344,21 @@ test("decodeEscapedText: text that already spells an escape stays distinguishabl
 });
 
 test("decodeEscapedText: round-trips arbitrary strings over a hostile alphabet", () => {
-	const alphabet = ["\\", "u", "0", "5", "C", "c", "a", "\x00", "\x01", "x", "\n", "\ud800", "\u{1F600}"];
+	const alphabet = [
+		"\\",
+		"u",
+		"0",
+		"5",
+		"C",
+		"c",
+		"a",
+		"\x00",
+		"\x01",
+		"x",
+		"\n",
+		"\ud800",
+		"\u{1F600}",
+	];
 	let seed = 12_345;
 	const next = (): number => {
 		seed = (seed * 1_103_515_245 + 12_345) & 0x7f_ff_ff_ff;
@@ -490,7 +504,9 @@ test("messages manifest: no content_loss, a declared blob_ref, and the content e
 	assert.ok(messages);
 	assert.equal("content_loss" in messages.schema.properties, false);
 	assert.ok("blob_ref" in messages.schema.properties);
-	assert.deepEqual(manifest.capabilities.host_blob_write?.streams, ["messages"]);
+	assert.deepEqual(manifest.capabilities.host_blob_write?.streams, [
+		"messages",
+	]);
 	assert.deepEqual(manifest.protocol_capabilities, ["BLOB"]);
 	const description = messages.schema.properties.content?.description ?? "";
 	assert.match(description, /U\+0000|NUL/);
@@ -1210,14 +1226,19 @@ test("pdpp-safe-escape-v1: noncharacters on every plane are valid text and pass 
 		"@pdpp/connector-protocol/pdpp-safe-text"
 	);
 	const nonchars: string[] = [];
-	for (let cp = 0xfdd0; cp <= 0xfdef; cp += 1) nonchars.push(String.fromCodePoint(cp));
+	for (let cp = 0xfdd0; cp <= 0xfdef; cp += 1)
+		nonchars.push(String.fromCodePoint(cp));
 	for (let plane = 0; plane <= 0x10; plane += 1) {
 		nonchars.push(String.fromCodePoint(plane * 0x1_0000 + 0xfffe));
 		nonchars.push(String.fromCodePoint(plane * 0x1_0000 + 0xffff));
 	}
 	for (const ch of nonchars) {
 		const source = `x${ch}y`;
-		assert.equal(pdppSafeText.safeParse(source).success, true, "validator accepts it");
+		assert.equal(
+			pdppSafeText.safeParse(source).success,
+			true,
+			"validator accepts it",
+		);
 		assert.equal(encodePdppSafeText(source), source, "so it is not escaped");
 		const rec = extractMessage("n1", textNode(source), "c1", true);
 		assert.equal(rec?.content, source);
@@ -1272,15 +1293,24 @@ test("messages schema: blob_ref requires null content; content may be absent but
 		size_bytes: 9,
 		sha256,
 	};
-	const base = { ...(extractMessage("n1", textNode("hello"), "c1", true) ?? {}) };
-	assert.equal(validateRecord("messages", { ...base, content: null, blob_ref }).ok, true);
+	const base = {
+		...(extractMessage("n1", textNode("hello"), "c1", true) ?? {}),
+	};
+	assert.equal(
+		validateRecord("messages", { ...base, content: null, blob_ref }).ok,
+		true,
+	);
 	assert.equal(
 		validateRecord("messages", { ...base, content: "text", blob_ref }).ok,
 		false,
 		"a blob-backed message cannot also carry inline content",
 	);
 	const { content: _content, ...withoutContent } = base;
-	assert.equal(validateRecord("messages", withoutContent).ok, true, "content absent");
+	assert.equal(
+		validateRecord("messages", withoutContent).ok,
+		true,
+		"content absent",
+	);
 	assert.equal(
 		validateRecord("messages", { ...withoutContent, blob_ref }).ok,
 		false,
@@ -1334,10 +1364,12 @@ test("extractMessage: an oversize tool-recipient body is referenced, not duplica
 	]);
 });
 
-test("synthesized tool call: text_ref must be \"content\" and exclude text", () => {
+test('synthesized tool call: text_ref must be "content" and exclude text', () => {
 	assertSynthesizedCall({ recipient: "python", text_ref: "content" });
 	assertSynthesizedCall({ recipient: "python", text: "inline" });
-	assert.throws(() => assertSynthesizedCall({ text_ref: "content", text: "dup" }));
+	assert.throws(() =>
+		assertSynthesizedCall({ text_ref: "content", text: "dup" }),
+	);
 	assert.throws(() =>
 		assertSynthesizedCall({ text_ref: "elsewhere" as "content" }),
 	);
@@ -1415,7 +1447,11 @@ test("tool_calls: every nested string and key from a source call is encoded and 
 	collect(rec?.tool_calls);
 	assert.ok(strings.length >= 8);
 	for (const str of strings) {
-		assert.equal(pdppSafeText.safeParse(str).success, true, JSON.stringify(str));
+		assert.equal(
+			pdppSafeText.safeParse(str).success,
+			true,
+			JSON.stringify(str),
+		);
 		assert.equal(/[\ud800-\udfff]/u.test(str), false, "no lone surrogate");
 	}
 	assert.deepEqual(decodeToolCallStrings(rec?.tool_calls), source);
@@ -1434,7 +1470,7 @@ test("extractMessage: an inline tool-recipient body with controls is escaped in 
 		},
 	} as ChatGptNode;
 	const rec = extractMessage("n1", node, "c1", true);
-	const call = (rec?.tool_calls as Array<{ text?: string }>)[0];
+	const call = (rec?.tool_calls as Array<{ text?: string }> | undefined)?.[0];
 	assert.ok(call?.text);
 	assert.equal(call.text.includes("\x00"), false);
 	assert.equal(call.text, encodePdppSafeText(text));
@@ -1445,28 +1481,37 @@ test("extractMessage: an inline tool-recipient body with controls is escaped in 
 	) as {
 		streams: Array<{
 			name: string;
-			schema: { properties: Record<string, any> };
+			schema: { properties: Record<string, Record<string, unknown>> };
 		}>;
 	};
 	assert.equal(
 		manifest.streams.find((s) => s.name === "messages")?.schema.properties
-			.tool_calls.x_pdpp_text_encoding,
+			.tool_calls?.x_pdpp_text_encoding,
 		"pdpp-safe-escape-v1",
 	);
 });
 
-test("encodeToolCallStrings: an own \"__proto__\" key from JSON.parse is kept as data, at the root and nested", () => {
+test('encodeToolCallStrings: an own "__proto__" key from JSON.parse is kept as data, at the root and nested', () => {
 	const sourceJson =
 		'[{"__proto__":{"text":"x\\u0000y"},"k":"v"},{"a":{"__proto__":1,"b":"q\\u0001"}},{"__proto__":"s\\u007f"}]';
 	const source = JSON.parse(sourceJson) as unknown[];
-	assert.ok(Object.hasOwn(source[0] as object, "__proto__"), "fixture is JSON-parsed");
-	const encoded = encodeToolCallStrings(source) as Array<Record<string, unknown>>;
+	assert.ok(
+		Object.hasOwn(source[0] as object, "__proto__"),
+		"fixture is JSON-parsed",
+	);
+	const encoded = encodeToolCallStrings(source) as Array<
+		Record<string, unknown>
+	>;
 	assert.equal(
 		JSON.stringify(encoded),
 		'[{"__proto__":{"text":"x\\\\u0000y"},"k":"v"},{"a":{"__proto__":1,"b":"q\\\\u0001"}},{"__proto__":"s\\\\u007F"}]',
 	);
 	assert.ok(Object.hasOwn(encoded[0] as object, "__proto__"));
-	assert.equal(Object.getPrototypeOf(encoded[0]), Object.prototype, "prototype is untouched");
+	assert.equal(
+		Object.getPrototypeOf(encoded[0]),
+		Object.prototype,
+		"prototype is untouched",
+	);
 	assert.equal(
 		JSON.stringify(decodeToolCallStrings(encoded)),
 		JSON.stringify(source),
@@ -1516,7 +1561,10 @@ test("encodeToolCallStrings: nesting far deeper than the call stack is encoded w
 });
 
 test("encodeToolCallStrings: array holes stay holes and an explicit undefined stays an own element", () => {
-	const holes = (length: number, present: Record<number, unknown>): unknown[] => {
+	const holes = (
+		length: number,
+		present: Record<number, unknown>,
+	): unknown[] => {
 		const a = new Array<unknown>(length);
 		for (const [i, v] of Object.entries(present)) a[Number(i)] = v;
 		return a;
@@ -1542,14 +1590,22 @@ test("encodeToolCallStrings: array holes stay holes and an explicit undefined st
 		assert.equal(encoded.length, source.length, name);
 		for (let i = 0; i < source.length; i += 1) {
 			assert.equal(Object.hasOwn(encoded, i), own.includes(i), `${name}[${i}]`);
-			assert.equal(Object.hasOwn(source, i), own.includes(i), `${name} fixture`);
+			assert.equal(
+				Object.hasOwn(source, i),
+				own.includes(i),
+				`${name} fixture`,
+			);
 		}
 	}
-	const nested = (encodeToolCallStrings([holes(2, { 1: "x\x01" })]) as unknown[][])[0];
+	const nested = (
+		encodeToolCallStrings([holes(2, { 1: "x\x01" })]) as unknown[][]
+	)[0];
 	assert.equal(nested?.length, 2);
 	assert.equal(Object.hasOwn(nested ?? [], 0), false);
 	assert.equal(nested?.[1], "x\\u0001");
-	const encodedUndefined = encodeToolCallStrings(holes(3, { 0: undefined, 2: "c" })) as unknown[];
+	const encodedUndefined = encodeToolCallStrings(
+		holes(3, { 0: undefined, 2: "c" }),
+	) as unknown[];
 	assert.equal(Object.hasOwn(encodedUndefined, 0), true);
 	assert.equal(encodedUndefined[0], undefined);
 });

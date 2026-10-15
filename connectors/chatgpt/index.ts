@@ -71,6 +71,12 @@ import { createRepairBudget } from "../../packages/polyfill-connectors/src/repai
 import { RunBudget } from "../../packages/polyfill-connectors/src/run-budget.ts";
 import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
+	blobSpoolDir,
+	type MessageBlobRef,
+	measureMessageBlob,
+	spoolMessageBlob,
+} from "./message-blob.ts";
+import {
 	buildAccountPlanRecord,
 	buildConversationRecord,
 	buildCustomInstructionsRecord,
@@ -86,12 +92,6 @@ import {
 	reconcileEmittedBranchMessages,
 	tsToIso,
 } from "./parsers.ts";
-import {
-	blobSpoolDir,
-	type MessageBlobRef,
-	measureMessageBlob,
-	spoolMessageBlob,
-} from "./message-blob.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
 import {
 	isSourceUnrepresentable,
@@ -2884,7 +2884,8 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
-		const alreadyEmitted = messageId !== null && alreadyEmittedIds.has(messageId);
+		const alreadyEmitted =
+			messageId !== null && alreadyEmittedIds.has(messageId);
 		// Text over the inline cap is stored whole as a Core blob, never truncated.
 		// Text no host can store (no blob spool, or over the 32 MiB blob cap) is
 		// omitted as a FIELD: the record is emitted with `content` and `blob_ref`

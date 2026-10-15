@@ -338,6 +338,7 @@ const CONTENT_EXTRACTORS: Readonly<
 // alternative finds a source backslash that starts something the decoder would
 // read as an escape.
 const ESCAPE_SCAN =
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: the escaped set is exactly these control code units.
 	/\\u([0-9a-fA-F]{4})|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ud800-\udfff]/gu;
 const ESCAPE_TOKEN = /\\u([0-9a-fA-F]{4})/g;
 const BACKSLASH_UNIT = 0x5c;
@@ -514,7 +515,9 @@ export function encodeToolCallStrings(value: unknown): unknown {
 		if (Array.isArray(from)) {
 			// forEach skips holes and keeps an explicit undefined, so the
 			// destination (created with the source length) has the same holes.
-			from.forEach((inner, index) => place(index, inner));
+			from.forEach((inner, index) => {
+				place(index, inner);
+			});
 		} else {
 			for (const [key, inner] of Object.entries(from)) place(key, inner);
 		}
@@ -540,7 +543,9 @@ export function extractToolCalls(
 	m: ChatGptMessage | undefined,
 	contentExternal = false,
 ): unknown[] {
-	return encodeToolCallStrings(synthesizeToolCalls(m, contentExternal)) as unknown[];
+	return encodeToolCallStrings(
+		synthesizeToolCalls(m, contentExternal),
+	) as unknown[];
 }
 
 function synthesizeToolCalls(
@@ -584,8 +589,13 @@ function synthesizeToolCalls(
 
 /** The synthesized-call invariant: `text_ref` is "content" and excludes `text`. */
 export function assertSynthesizedCall(call: ToolCallSynthetic): void {
-	if (call.text_ref !== undefined && (call.text_ref !== "content" || call.text !== undefined)) {
-		throw new Error('synthesized tool call: text_ref must be "content" and exclude text');
+	if (
+		call.text_ref !== undefined &&
+		(call.text_ref !== "content" || call.text !== undefined)
+	) {
+		throw new Error(
+			'synthesized tool call: text_ref must be "content" and exclude text',
+		);
 	}
 }
 

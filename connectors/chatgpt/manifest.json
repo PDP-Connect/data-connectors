@@ -24,7 +24,11 @@
 			},
 			"browser": {
 				"required": true,
-				"features": ["page_navigation", "page_script_evaluation", "page_condition_wait"]
+				"features": [
+					"page_navigation",
+					"page_script_evaluation",
+					"page_condition_wait"
+				]
 			}
 		}
 	},
@@ -611,7 +615,11 @@
 			"incremental": true,
 			"query": {
 				"search": {
-					"lexical_fields": ["plan_type", "plan_display_name", "subscription_plan"]
+					"lexical_fields": [
+						"plan_type",
+						"plan_display_name",
+						"subscription_plan"
+					]
 				},
 				"range_filters": {
 					"account_created_at": ["gte", "gt", "lte", "lt"],
