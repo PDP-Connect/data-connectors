@@ -12,6 +12,7 @@ import {
 	readPageReadiness,
 	resolveWatchedDate,
 } from "./index.ts";
+import { readListEnd } from "./page-evidence.ts";
 import { validateRecord } from "./schemas.ts";
 
 const VIDEO = {
@@ -108,6 +109,7 @@ class FixturePage {
 				domHasContinuation: false,
 				declaredTotal: null,
 				domItemCount: null,
+				hiddenUnavailableNotice: { present: false, count: null },
 				domHasEndMarker: false,
 				verifiedEmpty: empty,
 			};
@@ -920,8 +922,13 @@ const playlistPageData = (itemCount: number, continuation = false) =>
 class DocumentPage {
 	url = "";
 	private readonly pageFor: (url: string) => string;
-	constructor(pageFor: (url: string) => string) {
+	private readonly forcedReadiness: "content" | "empty" | undefined;
+	constructor(
+		pageFor: (url: string) => string,
+		forcedReadiness?: "content" | "empty",
+	) {
 		this.pageFor = pageFor;
+		this.forcedReadiness = forcedReadiness;
 	}
 	async goto(url: string) {
 		this.url = url;
@@ -951,7 +958,7 @@ class DocumentPage {
 		}
 	}
 	async waitForFunction(fn: Function, arg: unknown) {
-		const value = this.inPage(() => fn(arg));
+		const value = this.forcedReadiness ?? this.inPage(() => fn(arg));
 		if (!value) throw new Error("page read timed out");
 		return { jsonValue: async () => value, dispose: async () => undefined };
 	}
@@ -963,11 +970,12 @@ class DocumentPage {
 async function collectFromDocuments(
 	pageFor: (url: string) => string,
 	streams: string[],
+	forcedReadiness?: "content" | "empty",
 ) {
 	const records = new Map<string, Record<string, unknown>[]>();
 	const messages: Record<string, unknown>[] = [];
 	await collectYoutubeBrowser({
-		page: new DocumentPage(pageFor) as never,
+		page: new DocumentPage(pageFor, forcedReadiness) as never,
 		requested: new Map(streams.map((name) => [name, { name }])) as never,
 		emitRecord: async (stream, data) => {
 			records.set(stream, [...(records.get(stream) ?? []), data]);
@@ -1071,6 +1079,116 @@ test("finding 1: reading to the history limit is a cap that fails the stream, no
 	assert.equal(records.get("watch_history")?.length, 50);
 	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
 	assert.match(String(messages[0]?.message), /stopped at the 50-item limit/);
+});
+
+test("history rows beyond the emitted cap veto completion even with a page end marker", async () => {
+	const cases = [false, true];
+	for (const withEndMarker of cases) {
+		const sourceItems = Array.from({ length: 30 }, () => ({ lockupViewModel: {} }));
+		const rows = Array.from(
+			{ length: 60 },
+			(_, n) =>
+				`<yt-lockup-view-model><a href="/watch?v=vid${String(n).padStart(8, "0")}"></a><h3>V${n}</h3></yt-lockup-view-model>`,
+		).join("");
+		const { records, outcome } = await collectFromDocuments(
+			() =>
+				`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${withEndMarker ? END_OF_LIST : ""}`,
+			["watch_history"],
+		);
+		assert.equal(records.get("watch_history")?.length, 50);
+		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+	}
+});
+
+test("playlist declared total mismatch needs an unavailable-videos notice", async () => {
+	for (const withNotice of [false, true]) {
+		const rows = Array.from(
+			{ length: 4 },
+			(_, n) =>
+				`<ytd-playlist-video-renderer><a href="/watch?v=vid${String(n).padStart(8, "0")}&list=PL1"></a><h3>V${n}</h3></ytd-playlist-video-renderer>`,
+		).join("");
+		const data = pageData(tabbedData({
+			playlistVideoListRenderer: {
+				contents: Array.from({ length: 4 }, (_, n) => ({
+					playlistVideoRenderer: { videoId: `vid${String(n).padStart(8, "0")}` },
+				})),
+			},
+		}));
+		const { records, outcome } = await collectFromDocuments(
+			() => `${rows}${headerTotal("5 videos")}${data}${withNotice ? `<div>Unavailable videos are hidden</div>` : ""}${END_OF_LIST}`,
+			["likes"],
+		);
+		assert.equal(records.get("likes")?.length, 4);
+		assert.deepEqual(
+			outcome("likes"),
+			withNotice ? [] : ["stream_collection_failed"],
+		);
+	}
+});
+
+test("exactly 50 data-backed history rows can end without an end marker", async () => {
+	const ids = Array.from({ length: 50 }, (_, n) => `vid${String(n).padStart(8, "0")}`);
+	const rows = ids
+		.map((id, n) => `<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>V${n}</h3></yt-lockup-view-model>`)
+		.join("");
+	const { records, outcome } = await collectFromDocuments(
+		() => `<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}`,
+		["watch_history"],
+	);
+	assert.equal(records.get("watch_history")?.length, 50);
+	assert.deepEqual(outcome("watch_history"), []);
+});
+
+test("delayed DOM rows beyond readable data do not prove completion", async () => {
+	const rows = Array.from(
+		{ length: 2 },
+		(_, n) => `<ytd-playlist-video-renderer><a href="/watch?v=vid${String(n).padStart(8, "0")}&list=PL1"></a><h3>V${n}</h3></ytd-playlist-video-renderer>`,
+	).join("");
+	const { records, outcome } = await collectFromDocuments(
+		() => `${rows}${playlistPageData(1)}`,
+		["likes"],
+	);
+	assert.equal(records.get("likes")?.length, 2);
+	assert.deepEqual(outcome("likes"), ["stream_collection_failed"]);
+});
+
+test("verified empty list evidence is vetoed by current DOM rows or continuation", async () => {
+	for (const currentDom of [
+		`<ytd-channel-renderer><a id="main-link" href="/@creator"></a><ytd-channel-name><yt-formatted-string id="text">Creator</yt-formatted-string></ytd-channel-name></ytd-channel-renderer>`,
+		`<ytd-expanded-shelf-contents-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-expanded-shelf-contents-renderer>`,
+	]) {
+		withBrowserGlobals(
+			`${currentDom}${pageData(tabbedData({ sectionListRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No subscriptions" } } }, { richGridRenderer: { contents: [] } }] } }))}`,
+			() => assert.equal(readListEnd("subscriptions").verifiedEmpty, true),
+		);
+		const { outcome } = await collectFromDocuments(
+			() => `${currentDom}${pageData(tabbedData({ sectionListRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No subscriptions" } } }, { richGridRenderer: { contents: [] } }] } }))}`,
+			["subscriptions"],
+			"empty",
+		);
+		assert.deepEqual(outcome("subscriptions"), ["stream_collection_failed"]);
+	}
+});
+
+test("verified empty video evidence is vetoed by current DOM rows or continuation", async () => {
+	for (const currentDom of [playlistRow, `<ytd-playlist-video-list-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-playlist-video-list-renderer>`]) {
+		withBrowserGlobals(
+			`${currentDom}${pageData(tabbedData({
+				messageRenderer: { text: { simpleText: "No videos" } },
+				playlistVideoListRenderer: { contents: [] },
+			}))}`,
+			() => assert.equal(readListEnd("playlist").verifiedEmpty, true),
+		);
+		const { outcome } = await collectFromDocuments(
+			() => `${currentDom}${pageData(tabbedData({
+				messageRenderer: { text: { simpleText: "No videos" } },
+				playlistVideoListRenderer: { contents: [] },
+			}))}`,
+			["likes"],
+			"empty",
+		);
+		assert.deepEqual(outcome("likes"), ["stream_collection_failed"]);
+	}
 });
 
 const SIDEBAR_EMPTY = { richGridRenderer: { contents: [] } };

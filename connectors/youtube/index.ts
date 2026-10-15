@@ -421,6 +421,7 @@ type ExhaustionEvidence = {
 		| "continuation-removed"
 		| "explicit-end-marker"
 		| "page-data-empty"
+		| "readable-data"
 		| "unproven";
 	readonly page: ListEnd | null;
 };
@@ -435,12 +436,26 @@ function exhaustionEvidence(
 	page: ListEnd | null,
 	renderedCount: number,
 	continuationRemoved: boolean,
+	discardedRows = 0,
 ): ExhaustionEvidence {
-	if (page?.verifiedEmpty) return { kind: "page-data-empty", page };
-	if (!page || !enumerationEnded(page, renderedCount, continuationRemoved))
+	if (
+		!page ||
+		!enumerationEnded(page, renderedCount, continuationRemoved, discardedRows)
+	)
 		return { kind: "unproven", page };
+	if (page.domHasEndMarker) return { kind: "explicit-end-marker", page };
+	if (continuationRemoved) return { kind: "continuation-removed", page };
+	if (
+		page.dataReadable &&
+		!page.dataHasContinuation &&
+		!page.domHasContinuation &&
+		page.dataItemCount > 0 &&
+		renderedCount >= page.dataItemCount
+	)
+		return { kind: "readable-data", page };
+	if (page.verifiedEmpty) return { kind: "page-data-empty", page };
 	return {
-		kind: continuationRemoved ? "continuation-removed" : "explicit-end-marker",
+		kind: "unproven",
 		page,
 	};
 }
@@ -555,18 +570,17 @@ async function readVideoList(
 	);
 	if (state === "empty") {
 		const end = await page.evaluate(readListEnd, mode);
-		if (!end.verifiedEmpty) throw new Error("youtube_empty_list_unproven");
+		const evidence = exhaustionEvidence(end, 0, false);
 		return {
 			items: [],
-			exhausted: true,
-			evidence: { kind: "page-data-empty", page: end },
-			verifiedEmpty: true,
+			exhausted: evidence.kind !== "unproven",
+			evidence,
+			verifiedEmpty: evidence.kind === "page-data-empty",
 			cappedAtLimit: false,
 		};
 	}
 	const seen = new Set<string>();
 	const out: BrowserVideo[] = [];
-	let renderedCount = 0;
 	let continuationRemoved = false;
 	let noChangeRounds = 0;
 	const selector =
@@ -576,7 +590,6 @@ async function readVideoList(
 	for (let round = 0; round <= rounds; round += 1) {
 		const previousCount = out.length;
 		const batch = await page.evaluate(readVideos, mode);
-		renderedCount = batch.length;
 		for (const video of batch) {
 			const key = videoIdentity(video);
 			if (!seen.has(key)) {
@@ -614,11 +627,12 @@ async function readVideoList(
 				: "youtube-playlist-items-after-scroll",
 	);
 	const evidenceReadCount =
-		mode === "history" ? Math.min(out.length, HISTORY_LIMIT) : renderedCount;
+		mode === "history" ? Math.min(out.length, HISTORY_LIMIT) : out.length;
 	const evidence = exhaustionEvidence(
 		pageEnd,
 		evidenceReadCount,
 		continuationRemoved && !discardedRows,
+		discardedRows ? out.length - HISTORY_LIMIT : 0,
 	);
 	return {
 		items: mode === "history" ? out.slice(0, HISTORY_LIMIT) : out,

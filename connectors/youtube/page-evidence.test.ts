@@ -16,6 +16,7 @@ const NO_EVIDENCE: ListEnd = {
 	domHasContinuation: false,
 	declaredTotal: null,
 	domItemCount: null,
+	hiddenUnavailableNotice: { present: false, count: null },
 	domHasEndMarker: false,
 	verifiedEmpty: false,
 };
@@ -126,6 +127,36 @@ test("enumeration ends only on positive page terminal evidence", () => {
 		false,
 		"rows hidden by the connector's own limit",
 	);
+	assert.equal(
+		ended({ dataReadable: true, dataItemCount: 60, domHasEndMarker: true }, 50),
+		false,
+		"source rows beyond the emitted count veto even an end marker",
+	);
+	assert.equal(
+		ended({ dataHasContinuation: true, domHasEndMarker: true }, 3, true),
+		false,
+		"a continuation vetoes every positive signal",
+	);
+	assert.equal(
+		ended({ verifiedEmpty: true, domItemCount: 1 }, 0),
+		false,
+		"empty data is vetoed by current DOM rows",
+	);
+	assert.equal(
+		ended({ declaredTotal: 5, domHasEndMarker: true, hiddenUnavailableNotice: { present: true, count: 1 } }, 4),
+		true,
+		"a matching hidden unavailable row explains the declared total",
+	);
+	assert.equal(
+		ended({ declaredTotal: 6, domHasEndMarker: true, hiddenUnavailableNotice: { present: true, count: 1 } }, 4),
+		false,
+		"the notice count must cover the total mismatch",
+	);
+	assert.equal(
+		ended({ declaredTotal: 5, domHasEndMarker: true, hiddenUnavailableNotice: { present: true, count: null } }, 4),
+		true,
+		"an uncounted hidden unavailable notice can explain the mismatch",
+	);
 });
 
 test("a page-data region with no recognized entry is not readable evidence", () => {
@@ -186,7 +217,7 @@ test("readListEnd reads the header total, continuation and row count from the pa
 		},
 	};
 	const { document, window } = parseHTML(
-		`<div class="yt-content-metadata-view-model__metadata-text">1,204 videos</div><script>var ytInitialData = ${JSON.stringify(data)};</script><ytd-channel-renderer></ytd-channel-renderer>`,
+		`<div class="yt-content-metadata-view-model__metadata-text">1,204 videos</div><div>1 unavailable video is hidden</div><script>var ytInitialData = ${JSON.stringify(data)};</script><ytd-channel-renderer></ytd-channel-renderer>`,
 	);
 	const globals = globalThis as Record<string, unknown>;
 	globals.document = document;
@@ -198,11 +229,13 @@ test("readListEnd reads the header total, continuation and row count from the pa
 			dataHasContinuation: true,
 			domHasContinuation: false,
 			declaredTotal: 1204,
-			domItemCount: null,
+			domItemCount: 0,
+			hiddenUnavailableNotice: { present: true, count: 1 },
 			domHasEndMarker: false,
 			verifiedEmpty: false,
 		});
 		assert.equal(readListEnd("history").declaredTotal, null);
+		assert.equal(readListEnd("history").domItemCount, 0);
 		assert.equal(readListEnd("subscriptions").domItemCount, 1);
 	} finally {
 		globals.document = undefined;
