@@ -936,6 +936,87 @@ test("collectAllStreams: absent required title/body fields withhold the note row
 	assert.equal(diagnosticField(skip, "deleted_note_rows"), 0);
 });
 
+test("collectAllStreams: malformed Deleted controls withhold rows and preserve seeded state", async () => {
+	const previous = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(makeNotePage([noteQueryResponse()]), previous, ["notes"]),
+	);
+	const previousState = previous.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "notes",
+	);
+	assert.ok(previousState && previousState.type === "STATE");
+	const seed = { notes: previousState.cursor };
+
+	const harness = makeRecordingEmit(validateRecord);
+	const malformedNotes = {
+		records: [
+			{
+				recordName: "note-deleted-wrapper-malformed",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64("Wrapper malformed") },
+					Deleted: {},
+				}),
+			},
+			{
+				recordName: "note-deleted-value-malformed",
+				recordType: "Note",
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64("Value malformed") },
+					Deleted: { value: "bad" },
+				}),
+			},
+		],
+	};
+	const ctx = makeCtx(makeNotePage([malformedNotes]), harness, ["notes"], seed);
+	await collectAllStreams(ctx);
+
+	assert.equal(
+		harness.emitted.length,
+		0,
+		"malformed control rows must not emit",
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+		"an unavailable deletion status must veto notes STATE",
+	);
+	assert.deepEqual(ctx.state, seed, "the prior cursor must remain untouched");
+	const skip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "icloud_omitted_rows");
+	assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
+		{
+			row_index: 0,
+			field_count: 1,
+			field_omissions: [
+				{
+					field: "deleted",
+					reason: "malformed_field_wrapper",
+					source_shape: { type: "object", keys: [] },
+				},
+			],
+			row_reason: "unavailable_fields",
+		},
+		{
+			row_index: 1,
+			field_count: 1,
+			field_omissions: [
+				{
+					field: "deleted",
+					reason: "expected_deleted_flag",
+					source_shape: { type: "string", length: 3 },
+				},
+			],
+			row_reason: "unavailable_fields",
+		},
+	]);
+});
+
 test("collectAllStreams: notes-only folder projection reports unreadable referenced names", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const page = makeFakePage([

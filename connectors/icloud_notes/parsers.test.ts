@@ -17,7 +17,7 @@ import {
 	epochMsToIso,
 	extractCleanText,
 	extractNoteText,
-	isDeletedNote,
+	readDeletedNote,
 	readFolderRecord,
 	readNoteRecord,
 } from "./parsers.ts";
@@ -126,17 +126,49 @@ test("extractNoteText: null for input that isn't valid base64-decodable bytes at
 
 // ─── isDeletedNote ───────────────────────────────────────────────────────
 
-test("isDeletedNote: true only when Deleted.value === 1", () => {
-	assert.equal(
-		isDeletedNote({ fields: { Deleted: { value: 1 } } } as CloudKitRecord),
-		true,
+test("readDeletedNote: sparse absence is false, malformed present values stay unavailable", () => {
+	assert.deepEqual(
+		readDeletedNote({ fields: { Deleted: { value: 1 } } } as CloudKitRecord),
+		{ kind: "READ", value: true },
 	);
-	assert.equal(
-		isDeletedNote({ fields: { Deleted: { value: 0 } } } as CloudKitRecord),
-		false,
+	assert.deepEqual(
+		readDeletedNote({ fields: { Deleted: { value: 0 } } } as CloudKitRecord),
+		{ kind: "READ", value: false },
 	);
-	assert.equal(isDeletedNote({ fields: {} } as CloudKitRecord), false);
-	assert.equal(isDeletedNote({} as CloudKitRecord), false);
+	assert.deepEqual(readDeletedNote({ fields: {} } as CloudKitRecord), {
+		kind: "EXPLICIT_EMPTY",
+		value: false,
+	});
+	assert.deepEqual(readDeletedNote({} as CloudKitRecord), {
+		kind: "EXPLICIT_EMPTY",
+		value: false,
+	});
+	assert.deepEqual(
+		readDeletedNote({ fields: { Deleted: {} } } as CloudKitRecord),
+		{
+			kind: "UNAVAILABLE",
+			reason: "malformed_field_wrapper",
+			source_shape: { type: "object", keys: [] },
+		},
+	);
+	assert.deepEqual(
+		readDeletedNote({
+			fields: { Deleted: { value: "bad" } },
+		} as CloudKitRecord),
+		{
+			kind: "UNAVAILABLE",
+			reason: "expected_deleted_flag",
+			source_shape: { type: "string", length: 3 },
+		},
+	);
+	assert.deepEqual(
+		readDeletedNote({ fields: { Deleted: { value: null } } } as CloudKitRecord),
+		{
+			kind: "UNAVAILABLE",
+			reason: "expected_deleted_flag",
+			source_shape: { type: "null" },
+		},
+	);
 });
 
 // ─── buildNoteRecord ─────────────────────────────────────────────────────

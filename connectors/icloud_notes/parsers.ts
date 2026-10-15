@@ -325,9 +325,19 @@ function booleanField(
 function deletedField(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 ): FieldRead<boolean> {
+	// CloudKit represents fields as entries in a record's fields dictionary;
+	// the Web Services Reference gives that dictionary an empty default and
+	// CKRecord.objectForKey returns nil for an absent key. The legacy Notes
+	// collector treated only Deleted.value === 1 as deleted, so a sparse
+	// absent Deleted field maps to false. Present null/malformed values stay
+	// unavailable instead of selecting the permissive live-note branch.
+	// Sources: https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/Types.html
+	// https://developer.apple.com/documentation/cloudkit/ckrecord/objectforkey%3A
 	const raw = fieldValue(fields, "Deleted", explicitEmpty(false));
 	if (raw.kind === "UNAVAILABLE") return raw;
-	if (raw.value === null) return explicitEmpty(false);
+	if (raw.kind === "EXPLICIT_EMPTY" && raw.value === false) {
+		return explicitEmpty(false);
+	}
 	if (raw.value === true || raw.value === 1) return read(true);
 	if (raw.value === false || raw.value === 0) return read(false);
 	return unavailable("expected_deleted_flag", raw.value);
@@ -477,11 +487,9 @@ export interface FolderRecord {
 	name: string | null;
 }
 
-/** True when CloudKit marked this record row deleted (`Deleted.value === 1`).
- *  Callers must skip deleted note rows before building a record. */
-export function isDeletedNote(record: CloudKitRecord): boolean {
-	const value = deletedField(record.fields);
-	return value.kind === "READ" && value.value;
+/** Read deletion state without collapsing an unavailable control flag to live. */
+export function readDeletedNote(record: CloudKitRecord): FieldRead<boolean> {
+	return deletedField(record.fields);
 }
 
 /** Build a `notes` stream record from a raw CloudKit `Note` record. Per the

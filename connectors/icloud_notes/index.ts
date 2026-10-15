@@ -99,7 +99,7 @@ import { runConnector } from "../../packages/polyfill-connectors/src/connector-r
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import type { FieldOmission as ParsedFieldOmission } from "./parsers.ts";
 import {
-	isDeletedNote,
+	readDeletedNote,
 	readFolderRecord,
 	readNoteRecord,
 	resolveCloudKitRecordId,
@@ -928,12 +928,29 @@ export async function collectAllStreams(
 		for (const record of walk.records) {
 			if (record.recordType !== "Note") continue;
 			noteRowsSeen += 1;
-			if (isDeletedNote(record)) {
+			const deletion = readDeletedNote(record);
+			if (deletion.kind !== "UNAVAILABLE" && deletion.value) {
 				deletedNoteRows += 1;
 				continue;
 			}
 			const rowIndex = noteRowIndex;
 			noteRowIndex += 1;
+			if (deletion.kind === "UNAVAILABLE") {
+				const omission: FieldOmission = {
+					field: "deleted",
+					reason: deletion.reason,
+					source_shape: deletion.source_shape,
+				};
+				fieldOmissions.push(omission);
+				omitted += 1;
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: 1,
+					field_omissions: [omission],
+					row_reason: "unavailable_fields",
+				});
+				continue;
+			}
 			const result = readNoteRecord(record, folderNames, {
 				unavailableFolderIds,
 				folderScanComplete,
