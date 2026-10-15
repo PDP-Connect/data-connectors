@@ -899,8 +899,84 @@ test("a pending gap is recovered from its locator, and recovery-only stops there
 	const library = perplexityLibrary({ total: 1 });
 	await withBrowser(library.serve, async () => {
 		const h = harness(ALL_STREAMS, page());
+		const gap = {
+			status: "pending",
+			stream: "messages",
+			record_key: threadId(1),
+			detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+		};
 		Object.assign(h.ctx, {
 			recoveryOnly: true,
+			detailGaps: [
+				{ ...gap, gap_id: "gap-1" },
+				{ ...gap, gap_id: "gap-2" },
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		// Two gaps for one thread: its messages once, both gaps resolved.
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 2);
+		const recovered = h.messages
+			.filter((m) => m.type === "DETAIL_GAP_RECOVERED")
+			.map((m) => (m as { gap_id?: string }).gap_id);
+		assert.deepEqual(recovered, ["gap-1", "gap-2"]);
+		assert.equal(
+			library.requests.some(
+				(r) => r.url.pathname === "/rest/thread/list_ask_threads",
+			),
+			false,
+			"recovery-only never walks the list",
+		);
+		assert.equal(
+			h.messages.some((m) => m.type === "STATE"),
+			false,
+			"recovery-only checkpoints nothing",
+		);
+	});
+});
+
+test("an ordinary run resolves a pending gap in the forward walk, parent first", async () => {
+	const library = perplexityLibrary({ total: 1 });
+	await withBrowser(library.serve, async () => {
+		const order: string[] = [];
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
+			detailGaps: [
+				{
+					gap_id: "gap-1",
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+				},
+			],
+		});
+		const emitRecord = h.ctx.emitRecord;
+		const emit = h.ctx.emit;
+		h.ctx.emitRecord = async (stream, data) => {
+			order.push(stream);
+			await emitRecord(stream, data);
+		};
+		h.ctx.emit = async (message) => {
+			if (message.type === "DETAIL_GAP_RECOVERED") order.push("recovered");
+			await emit(message);
+		};
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(order, [
+			"conversations",
+			"messages",
+			"messages",
+			"recovered",
+		]);
+	});
+});
+
+test("a pending gap whose thread is still short stays pending and is not remembered", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), query_count: 2 }],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
 			detailGaps: [
 				{
 					gap_id: "gap-1",
@@ -912,18 +988,111 @@ test("a pending gap is recovered from its locator, and recovery-only stops there
 			],
 		});
 		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
-		assert.equal(h.records.filter((r) => r.stream === "messages").length, 2);
-		const recovered = h.messages.find(
-			(m) => m.type === "DETAIL_GAP_RECOVERED",
-		) as { gap_id?: string; record_key?: string } | undefined;
-		assert.equal(recovered?.gap_id, "gap-1");
-		assert.equal(recovered?.record_key, threadId(1));
 		assert.equal(
-			library.requests.some(
-				(r) => r.url.pathname === "/rest/thread/list_ask_threads",
-			),
+			h.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
 			false,
-			"recovery-only never walks the list",
 		);
+		const cursor = stateCursor(h.messages, "messages") as {
+			synced: Record<string, unknown>;
+		};
+		assert.deepEqual(cursor.synced, {});
 	});
+});
+
+test("a two-page walk whose second page repeats a shifted thread is re-walked", async () => {
+	const all = Array.from({ length: PAGE_SIZE + 1 }, (_, i) => i + 1);
+	// Walk 1: thread 21 was pushed back by new activity, page 2 repeats thread 20.
+	const library = scriptedLibrary({
+		listPage: (offset, walk) => {
+			if (walk === 1 && offset === PAGE_SIZE)
+				return listItems([PAGE_SIZE], false);
+			const slice = all.slice(offset, offset + PAGE_SIZE);
+			return listItems(slice, offset + PAGE_SIZE < all.length);
+		},
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(["conversations"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(h.records.length, PAGE_SIZE + 1);
+	});
+});
+
+test("a thread answered between walks does not make the list unstable", async () => {
+	const all = Array.from({ length: PAGE_SIZE + 2 }, (_, i) => i + 1);
+	const library = scriptedLibrary({
+		listPage: (offset, walk) =>
+			all.slice(offset, offset + PAGE_SIZE).map((n, index, slice) => ({
+				...threadItem(
+					n,
+					index < slice.length - 1 || offset + PAGE_SIZE < all.length,
+				),
+				...(n === 1 ? { last_query_datetime: listStamp(100 + walk) } : {}),
+			})),
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(["conversations"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(h.records.length, PAGE_SIZE + 2);
+	});
+});
+
+test("a thread with no entry count is read but never remembered", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), query_count: null }],
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.equal(h.records.filter((r) => r.stream === "messages").length, 2);
+		const cursor = stateCursor(h.messages, "messages") as {
+			synced: Record<string, unknown>;
+		};
+		assert.deepEqual(cursor.synced, {});
+	});
+});
+
+test("an over-long title is cut inside the schema bound", async () => {
+	const library = scriptedLibrary({
+		listPage: () => [{ ...threadItem(1, false), title: "t".repeat(600) }],
+	});
+	await withBrowser(library.serve, async () => {
+		// The harness validates every record against the schema.
+		const h = harness(["conversations"], page());
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const title = h.records[0]?.data.title;
+		assert.equal(typeof title, "string");
+		assert.ok(String(title).length <= 500);
+	});
+});
+
+test("the manifest's record contracts match the schemas", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			schema: {
+				required: string[];
+				properties: Record<
+					string,
+					{ type?: unknown; items?: { required?: string[] } }
+				>;
+			};
+		}>;
+	};
+	for (const stream of manifest.streams) {
+		assert.deepEqual(
+			[...stream.schema.required].sort(),
+			Object.keys(stream.schema.properties).sort(),
+			`${stream.name}: every field is required, as the zod schema requires it`,
+		);
+	}
+	const messages = manifest.streams.find(
+		(stream) => stream.name === "messages",
+	);
+	assert.equal(messages?.schema.properties.role?.type, "string");
+	assert.deepEqual(messages?.schema.properties.citations?.items?.required, [
+		"title",
+		"url",
+	]);
 });
