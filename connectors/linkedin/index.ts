@@ -73,7 +73,7 @@ import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
-	buildFullScanCoverageMessage,
+	buildDetailCoverageMessage,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	type ProbeSessionArgs,
@@ -81,14 +81,24 @@ import {
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	emitRow,
+	type FieldRead,
+	fieldValue,
+	type RowRead,
+	readField,
+	unavailableField,
+	v,
+} from "../../packages/polyfill-connectors/src/field-reader.ts";
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import {
-	buildConnectionRecord,
-	buildEducationRecords,
-	buildExperienceRecords,
-	buildLanguageRecords,
-	buildProfileRecord,
-	buildSkillRecords,
+	buildConnectionRow,
+	buildEducationRows,
+	buildExperienceRows,
+	buildLanguageRows,
+	buildProfileRow,
+	buildSkillRows,
+	readCollection,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -226,8 +236,10 @@ async function fetchDashProfile(
 }
 
 interface ConnectionsResult {
-	elements: { connectedMember?: string; createdAt?: number }[];
-	total: number | null;
+	elements: unknown[];
+	/** A page failed to load or parse, so the walk did not reach the end. */
+	failed: boolean;
+	total: FieldRead<number>;
 	truncated: boolean;
 }
 
@@ -246,9 +258,9 @@ async function fetchConnections(
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
 ): Promise<ConnectionsResult> {
-	const elements: { connectedMember?: string; createdAt?: number }[] = [];
+	const elements: unknown[] = [];
 	let start = 0;
-	let total: number | null = null;
+	let total: FieldRead<number> = { kind: "explicit_empty" };
 
 	while (start < CONNECTIONS_MAX) {
 		const result = await voyagerFetch<VoyagerConnectionsResponse>(
@@ -258,21 +270,31 @@ async function fetchConnections(
 			`connections-page-${String(start).padStart(4, "0")}`,
 		);
 		if (isFetchError(result)) {
-			break;
+			return { elements, failed: true, total, truncated: false };
 		}
-		total = result.paging?.total ?? total;
-		const page_elements = result.elements ?? [];
-		if (page_elements.length === 0) {
-			break;
+		const pageTotal = readField(
+			result,
+			["paging", "total"],
+			v.number({ integer: true, min: 0 }),
+			{ absent: "empty" },
+		);
+		if (pageTotal.kind !== "explicit_empty") total = pageTotal;
+		const pageElements = readCollection({ page: result }, "page");
+		if (pageElements.kind === "unavailable") {
+			return { elements, failed: true, total, truncated: false };
 		}
-		elements.push(...page_elements);
+		const rows = pageElements.kind === "read" ? pageElements.value : [];
+		if (rows.length === 0) {
+			return { elements, failed: false, total, truncated: false };
+		}
+		elements.push(...rows);
 		await progress("Fetched LinkedIn connections page", {
 			count: elements.length,
 			stream: "connections",
-			...(total !== null ? { total } : {}),
+			...(total.kind === "read" ? { total: total.value } : {}),
 		});
-		if (page_elements.length < CONNECTIONS_PAGE_SIZE) {
-			return { elements, total, truncated: false };
+		if (rows.length < CONNECTIONS_PAGE_SIZE) {
+			return { elements, failed: false, total, truncated: false };
 		}
 		start += CONNECTIONS_PAGE_SIZE;
 		await politeDelay(PAGE_DELAY_MS);
@@ -280,6 +302,7 @@ async function fetchConnections(
 
 	return {
 		elements,
+		failed: false,
 		total,
 		truncated: start >= CONNECTIONS_MAX && elements.length > 0,
 	};
@@ -322,19 +345,21 @@ async function resolveConnectionProfiles(
 		}
 		consecutiveFailures = 0;
 
+		// Every resolved entry is kept as the source sent it; the row builder
+		// decides whether its fields are readable.
 		if (result.results) {
 			for (const [key, profile] of Object.entries(result.results)) {
-				if (profile && (profile.firstName || profile.publicIdentifier)) {
-					resolved.set(key, profile);
-				}
+				if (profile !== undefined) resolved.set(key, profile);
 			}
 		}
 		if (result.elements) {
 			for (const profile of result.elements) {
-				const urn = profile.entityUrn ?? profile.dashEntityUrn;
-				if (urn && (profile.firstName || profile.publicIdentifier)) {
-					resolved.set(urn, profile);
-				}
+				const urn = readField(
+					profile,
+					[["entityUrn"], ["dashEntityUrn"]],
+					v.string({ nonEmpty: true }),
+				);
+				if (urn.kind === "read") resolved.set(urn.value, profile);
 			}
 		}
 
@@ -420,7 +445,7 @@ export async function ensureLinkedInSession(
 export async function collectLinkedIn(
 	ctx: BrowserCollectContext,
 ): Promise<void> {
-	const { capture, emit, emitRecord, page, progress, requested } = ctx;
+	const { capture, emit, page, progress, requested } = ctx;
 
 	await page
 		.goto(LINKEDIN_FEED_URL, {
@@ -447,63 +472,54 @@ export async function collectLinkedIn(
 	if (isFetchError(meResult)) {
 		throw new Error(`linkedin_profile_fetch_failed: ${meResult._error}`);
 	}
-	const publicIdentifier =
-		meResult.miniProfile?.publicIdentifier ?? meResult.publicIdentifier;
-	if (!publicIdentifier) {
+	const identity = readField(
+		meResult,
+		[["miniProfile", "publicIdentifier"], ["publicIdentifier"]],
+		v.string({ nonEmpty: true }),
+	);
+	if (identity.kind !== "read") {
 		throw new Error(
-			"linkedin_profile_fetch_failed: no publicIdentifier on /voyager/api/me response",
+			`linkedin_profile_fetch_failed: no readable publicIdentifier on /voyager/api/me response (${identity.kind === "unavailable" ? identity.reason : "null"})`,
 		);
 	}
+	const publicIdentifier = identity.value;
 
 	const wantsProfileFields = requested.has("profile");
-	const wantsExperience = requested.has("experience");
-	const wantsEducation = requested.has("education");
-	const wantsSkills = requested.has("skills");
-	const wantsLanguages = requested.has("languages");
 	const wantsConnections = requested.has("connections");
+	const wantsProfileCollections = PROFILE_COLLECTION_STREAMS.some(
+		({ stream }) => requested.has(stream),
+	);
 
 	let dashProfile: VoyagerProfileElement | null = null;
-	if (
-		wantsProfileFields ||
-		wantsExperience ||
-		wantsEducation ||
-		wantsSkills ||
-		wantsLanguages
-	) {
+	if (wantsProfileFields || wantsProfileCollections) {
 		dashProfile = await fetchDashProfile(page, publicIdentifier, capture);
 	}
 
 	// `profile.connection_count` is only available from the connections
-	// listing's `paging.total` (legacy: `profileResult.connections =
-	// totalAvailable || connectionRecords.length`, set AFTER the connections
-	// fetch completes) — nowhere on /me or the dash profile payload. Fetch the
-	// connections listing here, before emitting `profile`, whenever either
-	// stream is requested, and reuse the same walk for the `connections`
-	// stream below rather than fetching twice.
+	// listing (legacy: `profileResult.connections = totalAvailable ||
+	// connectionRecords.length`, set AFTER the connections fetch completes) —
+	// nowhere on /me or the dash profile payload. Fetch the connections
+	// listing here, before emitting `profile`, whenever either stream is
+	// requested, and reuse the same walk for the `connections` stream below.
 	let connectionsResult: ConnectionsResult | null = null;
 	if (wantsProfileFields || wantsConnections) {
 		await progress("Fetching LinkedIn connections", { stream: "connections" });
 		connectionsResult = await fetchConnections(page, progress, capture);
 	}
-	// `elements.length` is only the true total when the walk completed
-	// (not truncated by CONNECTIONS_MAX) — a truncated count is a floor,
-	// not a fact, and must not be reported as connection_count.
-	const connectionCount =
-		connectionsResult === null || connectionsResult.truncated
-			? (connectionsResult?.total ?? null)
-			: (connectionsResult.total ?? connectionsResult.elements.length);
 
 	if (wantsProfileFields) {
 		if (dashProfile) {
-			const record = buildProfileRecord(
-				publicIdentifier,
-				dashProfile,
-				meResult.miniProfile?.occupation,
-				meResult.miniProfile,
-				connectionCount,
+			await emitRow(
+				ctx,
+				"profile",
+				buildProfileRow(
+					publicIdentifier,
+					dashProfile,
+					meResult,
+					connectionCountOf(connectionsResult),
+				),
 			);
-			await emitRecord("profile", record);
-			await emit(buildFullScanCoverageMessage("profile", 1));
+			await emitFullScanCoverage(emit, "profile", 1, 1);
 		} else {
 			await emit({
 				type: "SKIP_RESULT",
@@ -516,64 +532,70 @@ export async function collectLinkedIn(
 		}
 	}
 
-	if (wantsExperience) {
-		const records = dashProfile ? buildExperienceRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("experience", record);
+	for (const { stream, collection, build } of PROFILE_COLLECTION_STREAMS) {
+		if (!requested.has(stream)) continue;
+		const items = dashProfile
+			? readCollection(dashProfile, collection)
+			: unavailableField<unknown[]>("dash profile unavailable");
+		if (items.kind === "unavailable") {
+			// No coverage claim: an unread collection is not an empty one.
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "linkedin_profile_collection_unreadable",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message: `LinkedIn did not return a readable ${collection} list`,
+				diagnostics: { collection, reason: items.reason },
+			} satisfies EmittedMessage);
+			continue;
 		}
-		await emit(buildFullScanCoverageMessage("experience", records.length));
-	}
-
-	if (wantsEducation) {
-		const records = dashProfile ? buildEducationRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("education", record);
-		}
-		await emit(buildFullScanCoverageMessage("education", records.length));
-	}
-
-	if (wantsSkills) {
-		const records = dashProfile ? buildSkillRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("skills", record);
-		}
-		await emit(buildFullScanCoverageMessage("skills", records.length));
-	}
-
-	if (wantsLanguages) {
-		const records = dashProfile ? buildLanguageRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("languages", record);
-		}
-		await emit(buildFullScanCoverageMessage("languages", records.length));
+		const rows = build(items.kind === "read" ? items.value : []);
+		const covered = await emitRows(ctx, stream, rows);
+		await emitFullScanCoverage(emit, stream, rows.length, covered);
 	}
 
 	if (wantsConnections && connectionsResult) {
-		const { elements, truncated } = connectionsResult;
-		const memberUrns = elements
-			.map((e) => e.connectedMember)
-			.filter((u): u is string => Boolean(u));
+		const { elements, failed, truncated } = connectionsResult;
+		const memberUrns = elements.flatMap((element) => {
+			const urn = readField(
+				element,
+				"connectedMember",
+				v.string({ nonEmpty: true }),
+			);
+			return urn.kind === "read" ? [urn.value] : [];
+		});
 		const resolvedProfiles = await resolveConnectionProfiles(
 			page,
 			memberUrns,
 			progress,
 			capture,
 		);
-
-		let covered = 0;
-		for (const element of elements) {
-			const record = buildConnectionRecord(
+		const rows = elements.map((element) => {
+			const urn = readField(
 				element,
-				element.connectedMember
-					? resolvedProfiles.get(element.connectedMember)
-					: undefined,
+				"connectedMember",
+				v.string({ nonEmpty: true }),
 			);
-			if (record) {
-				await emitRecord("connections", record);
-				covered += 1;
-			}
+			return buildConnectionRow(
+				element,
+				urn.kind === "read" ? resolvedProfiles.get(urn.value) : undefined,
+			);
+		});
+		const covered = await emitRows(ctx, "connections", rows);
+
+		if (failed) {
+			// The walk stopped before LinkedIn's end of list: the rows read are
+			// kept, and no coverage claim is made.
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "connections",
+				reason: "linkedin_connections_page_unreadable",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message: `A LinkedIn connections page failed after ${String(elements.length)} connections`,
+			} satisfies EmittedMessage);
+		} else {
+			await emitFullScanCoverage(emit, "connections", elements.length, covered);
 		}
-		await emit(buildFullScanCoverageMessage("connections", covered));
 
 		if (truncated) {
 			await emit({
@@ -592,6 +614,81 @@ export async function collectLinkedIn(
 			} satisfies EmittedMessage);
 		}
 	}
+}
+
+/** Dash-profile collections that map one element to one record. */
+const PROFILE_COLLECTION_STREAMS: ReadonlyArray<{
+	build: (items: readonly unknown[]) => RowRead[];
+	collection: string;
+	stream: string;
+}> = [
+	{
+		stream: "experience",
+		collection: "profilePositionGroups",
+		build: buildExperienceRows,
+	},
+	{
+		stream: "education",
+		collection: "profileEducations",
+		build: buildEducationRows,
+	},
+	{ stream: "skills", collection: "profileSkills", build: buildSkillRows },
+	{
+		stream: "languages",
+		collection: "profileLanguages",
+		build: buildLanguageRows,
+	},
+];
+
+/**
+ * `elements.length` is the true total only when the walk reached the end.
+ * A failed walk, or a capped one without a provider total, leaves the count
+ * unknown — never a floor reported as a fact.
+ */
+function connectionCountOf(
+	result: ConnectionsResult | null,
+): FieldRead<number> {
+	if (result === null)
+		return unavailableField("connections listing not fetched");
+	if (result.failed) return unavailableField("connections walk failed");
+	if (result.total.kind !== "explicit_empty") return result.total;
+	return result.truncated
+		? unavailableField(
+				`connections walk stopped at the ${String(CONNECTIONS_MAX)} cap with no provider total`,
+			)
+		: fieldValue(result.elements.length);
+}
+
+async function emitRows(
+	ctx: Pick<BrowserCollectContext, "emitRecord">,
+	stream: string,
+	rows: readonly RowRead[],
+): Promise<number> {
+	let covered = 0;
+	for (const row of rows) if (await emitRow(ctx, stream, row)) covered += 1;
+	return covered;
+}
+
+/**
+ * A full-scan coverage report whose `covered` counts only rows that were
+ * read completely; `considered` is every row LinkedIn listed.
+ */
+function emitFullScanCoverage(
+	emit: BrowserCollectContext["emit"],
+	stream: string,
+	considered: number,
+	covered: number,
+): Promise<void> {
+	return emit(
+		buildDetailCoverageMessage({
+			stream,
+			stateStream: stream,
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered,
+			covered,
+		}),
+	);
 }
 
 if (isMainModule(import.meta.url)) {

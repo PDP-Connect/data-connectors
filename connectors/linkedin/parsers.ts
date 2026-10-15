@@ -7,199 +7,188 @@
 // reshapes Voyager) is unit-testable without a browser.
 //
 // Ground truth: connectors/linkedin/linkedin-playwright.js (legacy). The
-// dual timePeriod/dateRange handling below is carried over verbatim from
+// dual timePeriod/dateRange handling below is carried over from
 // `extractTimePeriod`/`extractYears` in that file — LinkedIn has shipped
 // both the legacy REST shape (`timePeriod.startDate/endDate`) and the dash
 // shape (`dateRange.start/end`) across different decoration IDs, sometimes
 // for the same account.
+//
+// Every source field is read with `readField` (field-reader.ts), so a value
+// Voyager sent in a shape this connector cannot read makes the row
+// uncovered instead of turning into `null`. Voyager drops unset fields from
+// its JSON rather than sending `null`, so an absent OPTIONAL field reads as
+// empty (`absent: "empty"`); an absent collection, identity, or required
+// field stays unavailable.
 
-import type {
-	VoyagerConnectionElement,
-	VoyagerDateBearing,
-	VoyagerDatePoint,
-	VoyagerEducation,
-	VoyagerLanguage,
-	VoyagerMiniProfile,
-	VoyagerPosition,
-	VoyagerProfileElement,
-	VoyagerResolvedProfile,
-	VoyagerSkill,
-	VoyagerSkillCategory,
-	VoyagerVectorImage,
-} from "./types.ts";
+import {
+	buildRow,
+	type FieldRead,
+	type FieldValidator,
+	fieldValue,
+	firstReadable,
+	mapField,
+	type ReadFieldOptions,
+	type RowRead,
+	readField,
+	unavailableField,
+	v,
+} from "../../packages/polyfill-connectors/src/field-reader.ts";
 
-// ─── D4 partial dates ────────────────────────────────────────────────────
+const OPTIONAL: ReadFieldOptions<never> = { absent: "empty" };
+const text = v.string();
+const nonEmptyText = v.string({ nonEmpty: true });
+
+// ─── Validators for Voyager shapes ──────────────────────────────────────
+
+function isObject(raw: unknown): raw is Record<string, unknown> {
+	return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+}
 
 /**
- * D4: a partial date is a string at source precision (`YYYY`, `YYYY-MM`, or
- * `YYYY-MM-DD`). LinkedIn's Voyager date points never carry a day, only
- * month + year (or year alone) — so this never produces `YYYY-MM-DD`, but
- * the function is shaped to the general D4 rule rather than hardcoding
- * month-precision.
+ * D4: a partial date is a string at source precision (`YYYY` or `YYYY-MM`).
+ * Voyager date points carry a year and sometimes a month, never a day. A
+ * point without a readable year, or with a month outside 1–12, is malformed.
  */
-export function partialDateFromPoint(
-	point: VoyagerDatePoint | undefined,
-): string | null {
-	if (
-		!point ||
-		typeof point.year !== "number" ||
-		!Number.isFinite(point.year)
-	) {
-		return null;
-	}
-	const year = String(point.year).padStart(4, "0");
-	if (
-		typeof point.month === "number" &&
-		point.month >= 1 &&
-		point.month <= 12
-	) {
-		return `${year}-${String(point.month).padStart(2, "0")}`;
-	}
-	return year;
+export const voyagerDatePoint: FieldValidator<string> = v.custom(
+	"Voyager date point",
+	(raw) => {
+		if (!isObject(raw)) return { kind: "malformed", problem: "not an object" };
+		const year = readField(
+			raw,
+			"year",
+			v.number({ integer: true, min: 1, max: 9999 }),
+		);
+		if (year.kind !== "read")
+			return { kind: "malformed", problem: "no readable year" };
+		const month = readField(
+			raw,
+			"month",
+			v.number({ integer: true, min: 1, max: 12 }),
+			OPTIONAL,
+		);
+		if (month.kind === "unavailable")
+			return { kind: "malformed", problem: `month: ${month.reason}` };
+		const yyyy = String(year.value).padStart(4, "0");
+		return {
+			kind: "value",
+			value:
+				month.kind === "read"
+					? `${yyyy}-${String(month.value).padStart(2, "0")}`
+					: yyyy,
+		};
+	},
+);
+
+/**
+ * A Voyager VectorImage: `rootUrl` + the largest artifact's path segment.
+ * An empty artifact list is an image with no renditions (empty). Anything
+ * else that does not compose into an http(s) URL is malformed.
+ */
+export const voyagerVectorImageUrl: FieldValidator<string> = v.custom(
+	"Voyager VectorImage",
+	(raw) => {
+		if (!isObject(raw)) return { kind: "malformed", problem: "not an object" };
+		const artifacts = readField(raw, "artifacts", v.arrayOf(v.object()));
+		if (artifacts.kind !== "read")
+			return {
+				kind: "malformed",
+				problem:
+					artifacts.kind === "unavailable"
+						? artifacts.reason
+						: "artifacts is null",
+			};
+		const largest = artifacts.value.at(-1);
+		if (largest === undefined) return { kind: "empty" };
+		const segment = readField(
+			largest,
+			"fileIdentifyingUrlPathSegment",
+			nonEmptyText,
+		);
+		if (segment.kind !== "read")
+			return { kind: "malformed", problem: "artifact has no path segment" };
+		const root = readField(raw, "rootUrl", text, OPTIONAL);
+		if (root.kind === "unavailable")
+			return { kind: "malformed", problem: `rootUrl: ${root.reason}` };
+		const composed = `${root.kind === "read" ? root.value : ""}${segment.value}`;
+		const url = v.url().check(composed);
+		return url.kind === "value"
+			? url
+			: { kind: "malformed", problem: `composed image URL: ${composed}` };
+	},
+);
+
+/** A Voyager collection: `{ elements: [...] }`. Elements are read per row. */
+export function readCollection(
+	source: unknown,
+	key: string,
+): FieldRead<unknown[]> {
+	return readField(
+		source,
+		[key, "elements"],
+		v.custom<unknown[]>("array", (raw) =>
+			Array.isArray(raw)
+				? { kind: "value", value: raw }
+				: { kind: "malformed", problem: "elements is not an array" },
+		),
+	);
 }
 
-/** Resolve a node's date-range regardless of which of the two Voyager shapes
- *  (dash `dateRange` vs legacy `timePeriod`) is present, falling back to date
- *  fields inline on the node itself (oldest legacy shape). Mirrors legacy
- *  `extractTimePeriod`'s `obj.dateRange || obj` fallback chain. */
-function resolveDateRange(node: VoyagerDateBearing | undefined): {
-	end: VoyagerDatePoint | undefined;
-	start: VoyagerDatePoint | undefined;
-} {
-	if (!node) {
-		return { end: undefined, start: undefined };
-	}
-	const range = node.dateRange ?? node.timePeriod ?? node;
-	return {
-		end: range.end ?? range.endDate ?? node.endDate,
-		start: range.start ?? range.startDate ?? node.startDate,
-	};
+// ─── Shared field reads ─────────────────────────────────────────────────
+
+const START_PATHS = [
+	["dateRange", "start"],
+	["dateRange", "startDate"],
+	["timePeriod", "start"],
+	["timePeriod", "startDate"],
+	["startDate"],
+] as const;
+const END_PATHS = [
+	["dateRange", "end"],
+	["dateRange", "endDate"],
+	["timePeriod", "end"],
+	["timePeriod", "endDate"],
+	["endDate"],
+] as const;
+
+export function startDateOf(node: unknown): FieldRead<string> {
+	return readField(node, START_PATHS, voyagerDatePoint, OPTIONAL);
 }
 
-export function startDateOf(
-	node: VoyagerDateBearing | undefined,
-): string | null {
-	return partialDateFromPoint(resolveDateRange(node).start);
+/** An empty end date means "current" (Present) at the LinkedIn semantic
+ *  layer. D4 forbids inventing a day/time; `end_date: null` on a record
+ *  where `start_date` is set is the honest representation of an ongoing role. */
+export function endDateOf(node: unknown): FieldRead<string> {
+	return readField(node, END_PATHS, voyagerDatePoint, OPTIONAL);
 }
-
-/** `null` end date means "current" (Present) at the LinkedIn semantic layer.
- *  D4 forbids inventing a day/time, and there is no separate "is current"
- *  boolean in the manifest contract — `end_date: null` on a stream where
- *  `start_date` is set is the honest representation of an ongoing role. */
-export function endDateOf(node: VoyagerDateBearing | undefined): string | null {
-	return partialDateFromPoint(resolveDateRange(node).end);
-}
-
-// ─── Image URLs ─────────────────────────────────────────────────────────
-
-export function vectorImageUrl(
-	image: VoyagerVectorImage | undefined,
-): string | null {
-	const artifacts = image?.artifacts ?? [];
-	if (artifacts.length === 0) {
-		return null;
-	}
-	const largest = artifacts.at(-1);
-	const segment = largest?.fileIdentifyingUrlPathSegment;
-	if (!segment) {
-		return null;
-	}
-	return `${image?.rootUrl ?? ""}${segment}`;
-}
-
-// ─── Ids ────────────────────────────────────────────────────────────────
 
 /** Voyager entity URNs are the only stable per-entity id Voyager exposes for
- *  nested profile sub-entities; a positional/derived id would not survive
- *  reordering. Falls back to a positional id only when Voyager omits the
- *  URN (observed on some decoration versions for position-group children). */
+ *  nested profile sub-entities. A positional id is used only when Voyager
+ *  omits the URN (observed on some decoration versions for position-group
+ *  children); a URN of the wrong type is unreadable, not omitted. */
 export function subEntityId(
-	entityUrn: string | undefined,
+	node: unknown,
 	fallbackPrefix: string,
 	index: number,
-): string {
-	return entityUrn && entityUrn.length > 0
-		? entityUrn
-		: `${fallbackPrefix}-${index}`;
+): FieldRead<string> {
+	const urn = readField(node, "entityUrn", nonEmptyText, OPTIONAL);
+	return urn.kind === "explicit_empty"
+		? fieldValue(`${fallbackPrefix}-${String(index)}`)
+		: urn;
 }
 
-// ─── Record shapes ──────────────────────────────────────────────────────
-
-export interface ProfileRecord {
-	connection_count: number | null;
-	current_company: string | null;
-	current_position_title: string | null;
-	full_name: string | null;
-	headline: string | null;
-	id: string;
-	industry: string | null;
-	location: string | null;
-	profile_picture_url: string | null;
-	public_url: string | null;
-	summary: string | null;
-	[field: string]: unknown;
-}
-
-export interface ExperienceRecord {
-	company: string | null;
-	description: string | null;
-	employment_type: string | null;
-	end_date: string | null;
-	id: string;
-	location: string | null;
-	start_date: string | null;
-	title: string | null;
-	[field: string]: unknown;
-}
-
-export interface EducationRecord {
-	degree: string | null;
-	end_date: string | null;
-	field_of_study: string | null;
-	grade: string | null;
-	id: string;
-	logo_url: string | null;
-	school: string | null;
-	start_date: string | null;
-	[field: string]: unknown;
-}
-
-export interface SkillRecord {
-	endorsement_count: number | null;
-	id: string;
-	name: string;
-	[field: string]: unknown;
-}
-
-export interface LanguageRecord {
-	id: string;
-	name: string;
-	proficiency: string | null;
-	[field: string]: unknown;
-}
-
-export interface ConnectionRecord {
-	connected_at: string | null;
-	full_name: string | null;
-	headline: string | null;
-	id: string;
-	profile_url: string | null;
-	[field: string]: unknown;
-}
-
-function nonEmpty(s: string | undefined | null): string | null {
-	if (typeof s !== "string") {
-		return null;
-	}
-	const trimmed = s.trim();
-	return trimmed.length > 0 ? trimmed : null;
-}
-
-function joinFullName(
-	first: string | undefined,
-	last: string | undefined,
-): string | null {
-	return nonEmpty(`${first ?? ""} ${last ?? ""}`.trim());
+/** Join name parts that were read. Empty parts add no stray space. */
+function joinedName(
+	first: FieldRead<string>,
+	last: FieldRead<string>,
+): FieldRead<string> {
+	if (first.kind === "unavailable" || last.kind === "unavailable")
+		return firstReadable(first, last);
+	const parts = [first, last].flatMap((part) =>
+		part.kind === "read" && part.value.length > 0 ? [part.value] : [],
+	);
+	return parts.length === 0
+		? { kind: "explicit_empty" }
+		: fieldValue(parts.join(" "));
 }
 
 /** Public profile permalink from the public identifier — the only stable
@@ -208,269 +197,407 @@ export function profileUrlFor(publicIdentifier: string): string {
 	return `https://www.linkedin.com/in/${publicIdentifier}/`;
 }
 
-/**
- * A live-account capture (2026-09-22) never populated
- * `location.basicLocation`/`preferredGeoPlace` — real accounts observed so
- * far always resolve via the `geoLocation.geo.defaultLocalizedName`
- * fallback below, which is the proven-correct source. The
- * `basicLocation`/`preferredGeoPlace` branch is kept as a tolerant
- * fallback (matches legacy inference) rather than removed, since it's
- * cheap to keep and a different account/decoration could still expose it.
- */
-export function locationNameOf(profile: VoyagerProfileElement): string | null {
-	const countryCode = profile.location?.basicLocation?.countryCode;
-	if (countryCode) {
-		return nonEmpty(
-			[profile.location?.preferredGeoPlace, countryCode]
-				.filter(Boolean)
-				.join(", "),
-		);
-	}
-	return nonEmpty(profile.geoLocation?.geo?.defaultLocalizedName);
-}
+// ─── Profile ────────────────────────────────────────────────────────────
 
 /**
- * Profile picture URL, mirroring legacy `linkedin-playwright.js`'s
- * `profilePictureUrl` IIFE: prefer the dash profile's own
- * `profilePicture.displayImageReference.vectorImage`, fall back to `/me`'s
- * `miniProfile.picture` (which appears either under the typed
- * `com.linkedin.common.VectorImage` key or bare, depending on decoration
- * version — both handled by `vectorImageUrl` reading `artifacts`/`rootUrl`
- * directly off whichever object is passed in).
+ * Location, in the order the sources are trusted: `basicLocation`'s country
+ * with `preferredGeoPlace`, then `geoLocation.geo.defaultLocalizedName`
+ * (the source every live account observed so far resolves through), then a
+ * bare `preferredGeoPlace`. Each source is read; a malformed one with no
+ * readable alternative leaves the field unavailable.
  */
+export function locationOf(profile: unknown): FieldRead<string> {
+	const country = readField(
+		profile,
+		["location", "basicLocation", "countryCode"],
+		nonEmptyText,
+		OPTIONAL,
+	);
+	const place = readField(
+		profile,
+		["location", "preferredGeoPlace"],
+		nonEmptyText,
+		OPTIONAL,
+	);
+	const withCountry = mapField(country, (code) =>
+		place.kind === "read"
+			? fieldValue(`${place.value}, ${code}`)
+			: place.kind === "unavailable"
+				? place
+				: fieldValue(code),
+	);
+	const geo = readField(
+		profile,
+		["geoLocation", "geo", "defaultLocalizedName"],
+		text,
+		OPTIONAL,
+	);
+	return firstReadable(withCountry, geo, place);
+}
+
+/** Profile picture: the dash profile's own image, else `/me`'s mini profile
+ *  picture (under the typed `com.linkedin.common.VectorImage` key or bare). */
 export function profilePictureUrlOf(
-	profile: VoyagerProfileElement,
-	miniProfile: VoyagerMiniProfile | undefined,
-): string | null {
-	const dashUrl = vectorImageUrl(
-		profile.profilePicture?.displayImageReference?.vectorImage,
-	);
-	if (dashUrl) {
-		return dashUrl;
-	}
-	const miniPic = miniProfile?.picture;
-	return vectorImageUrl(
-		miniPic?.["com.linkedin.common.VectorImage"] ?? miniPic,
+	profile: unknown,
+	miniProfile: unknown,
+): FieldRead<string> {
+	return firstReadable(
+		readField(
+			profile,
+			["profilePicture", "displayImageReference", "vectorImage"],
+			voyagerVectorImageUrl,
+			OPTIONAL,
+		),
+		readField(
+			miniProfile,
+			[["picture", "com.linkedin.common.VectorImage"], ["picture"]],
+			voyagerVectorImageUrl,
+			OPTIONAL,
+		),
 	);
 }
 
 /**
- * Build the profile record. `publicIdentifier` is the id — it is the only
- * stable cross-run identifier Voyager exposes for the owner's own profile
- * (an internal numeric/URN id is not surfaced consistently across the `/me`
- * and dash-profile decorations observed in legacy prior art).
- *
- * `connectionCount` is supplied by the caller (index.ts), not derived here:
- * Voyager reports it only via the separate `relationships/dash/connections`
- * `paging.total` field the legacy connector reads after its own connections
- * fetch completes (`profileResult.connections = totalAvailable || ...`), not
- * anywhere on the profile/`/me` payloads this function receives. `null`
- * when the caller didn't request/couldn't fetch connections this run —
- * never guessed from an unrelated field.
+ * The current role: the first position group with no end date, and in it
+ * the first position with no end date (else its first position). If any
+ * group's end date is unreadable, which group is current is unknown.
  */
-export function buildProfileRecord(
-	publicIdentifier: string,
-	profile: VoyagerProfileElement,
-	fallbackHeadline: string | undefined,
-	miniProfile: VoyagerMiniProfile | undefined,
-	connectionCount: number | null,
-): ProfileRecord {
-	const positionGroups = profile.profilePositionGroups?.elements ?? [];
-	const current = positionGroups.find((group) => endDateOf(group) === null);
-	const currentPosition =
-		current?.profilePositionInPositionGroup?.elements?.find(
-			(pos) => endDateOf(pos) === null,
-		) ?? current?.profilePositionInPositionGroup?.elements?.[0];
-
+function currentRoleOf(profile: unknown): {
+	company: FieldRead<string>;
+	title: FieldRead<string>;
+} {
+	const groups = readCollection(profile, "profilePositionGroups");
+	if (groups.kind !== "read") {
+		const unknown =
+			groups.kind === "unavailable"
+				? groups
+				: ({ kind: "explicit_empty" } as const);
+		return { company: unknown, title: unknown };
+	}
+	for (const group of groups.value) {
+		const end = endDateOf(group);
+		if (end.kind === "unavailable") return { company: end, title: end };
+		if (end.kind === "read") continue;
+		const positions = readCollection(group, "profilePositionInPositionGroup");
+		let position: unknown;
+		if (positions.kind === "read") {
+			for (const candidate of positions.value) {
+				const positionEnd = endDateOf(candidate);
+				if (positionEnd.kind === "unavailable")
+					return { company: positionEnd, title: positionEnd };
+				if (positionEnd.kind === "explicit_empty") {
+					position = candidate;
+					break;
+				}
+			}
+			position ??= positions.value[0];
+		} else if (positions.kind === "unavailable")
+			return { company: positions, title: positions };
+		return {
+			company: firstReadable(
+				readField(group, [["company", "name"], ["name"]], text, OPTIONAL),
+			),
+			title: firstReadable(
+				position === undefined
+					? { kind: "explicit_empty" }
+					: readField(position, "title", text, OPTIONAL),
+				readField(group, "title", text, OPTIONAL),
+			),
+		};
+	}
 	return {
-		connection_count: connectionCount,
-		current_company: nonEmpty(current?.company?.name ?? current?.name),
-		current_position_title: nonEmpty(currentPosition?.title ?? current?.title),
-		full_name: joinFullName(profile.firstName, profile.lastName),
-		headline: nonEmpty(profile.headline) ?? nonEmpty(fallbackHeadline),
-		id: publicIdentifier,
-		industry: nonEmpty(profile.industry?.name),
-		location: locationNameOf(profile),
-		profile_picture_url: profilePictureUrlOf(profile, miniProfile),
-		public_url: profileUrlFor(publicIdentifier),
-		summary: nonEmpty(profile.summary),
+		company: { kind: "explicit_empty" },
+		title: { kind: "explicit_empty" },
 	};
+}
+
+/**
+ * Build the profile row. `publicIdentifier` is the id — the only stable
+ * cross-run identifier Voyager exposes for the owner's own profile.
+ *
+ * `connectionCount` is supplied by the caller: Voyager reports it only via
+ * the separate connections listing, which index.ts walks.
+ */
+export function buildProfileRow(
+	publicIdentifier: string,
+	profile: unknown,
+	me: unknown,
+	connectionCount: FieldRead<number>,
+) {
+	const miniProfile = readField(me, "miniProfile", v.object(), OPTIONAL);
+	const mini = miniProfile.kind === "read" ? miniProfile.value : undefined;
+	const role = currentRoleOf(profile);
+	return buildRow({
+		connection_count: connectionCount,
+		current_company: role.company,
+		current_position_title: role.title,
+		full_name: joinedName(
+			readField(profile, "firstName", text, OPTIONAL),
+			readField(profile, "lastName", text, OPTIONAL),
+		),
+		headline: firstReadable(
+			readField(profile, "headline", text, OPTIONAL),
+			readField(mini, "occupation", text, OPTIONAL),
+		),
+		id: fieldValue(publicIdentifier),
+		industry: readField(profile, ["industry", "name"], text, OPTIONAL),
+		location: locationOf(profile),
+		profile_picture_url: firstReadable(
+			miniProfile.kind === "unavailable"
+				? miniProfile
+				: { kind: "explicit_empty" },
+			profilePictureUrlOf(profile, mini),
+		),
+		public_url: fieldValue(profileUrlFor(publicIdentifier)),
+		summary: readField(profile, "summary", text, OPTIONAL),
+	});
+}
+
+// ─── Experience ─────────────────────────────────────────────────────────
+
+function experienceRow(
+	node: unknown,
+	id: FieldRead<string>,
+	groupCompany: FieldRead<string>,
+	isPosition: boolean,
+) {
+	return buildRow(
+		{
+			company: isPosition
+				? firstReadable(
+						readField(node, "companyName", text, OPTIONAL),
+						groupCompany,
+					)
+				: groupCompany,
+			description: readField(node, "description", text, OPTIONAL),
+			employment_type: isPosition
+				? readField(node, ["employmentType", "name"], text, OPTIONAL)
+				: { kind: "explicit_empty" },
+			end_date: endDateOf(node),
+			id,
+			location: readField(
+				node,
+				[["locationName"], ["geoLocationName"]],
+				text,
+				OPTIONAL,
+			),
+			start_date: startDateOf(node),
+			title: readField(node, "title", text, OPTIONAL),
+		},
+		{ requireAnyOf: ["title", "company"] },
+	);
 }
 
 /**
  * D3: `profilePositionGroups` nests sub-positions under a company grouping.
- * A group with sub-positions expands to one experience record per position
- * (a person can hold multiple titles at one company); a group with none
- * expands to one record for the group itself (the common case).
+ * A group with sub-positions expands to one row per position (a person can
+ * hold multiple titles at one company); a group with none expands to one
+ * row for the group itself.
  */
-export function buildExperienceRecords(
-	profile: VoyagerProfileElement,
-): ExperienceRecord[] {
-	const groups = profile.profilePositionGroups?.elements ?? [];
-	const records: ExperienceRecord[] = [];
-
-	groups.forEach((group, groupIndex) => {
-		const positions = group.profilePositionInPositionGroup?.elements ?? [];
-		const groupCompanyName = nonEmpty(group.company?.name ?? group.name);
-
-		if (positions.length > 0) {
-			positions.forEach((pos: VoyagerPosition, posIndex) => {
-				records.push({
-					company: nonEmpty(pos.companyName) ?? groupCompanyName,
-					description: nonEmpty(pos.description),
-					employment_type: nonEmpty(pos.employmentType?.name),
-					end_date: endDateOf(pos),
-					id: subEntityId(pos.entityUrn, `exp-${groupIndex}`, posIndex),
-					location: nonEmpty(pos.locationName ?? pos.geoLocationName),
-					start_date: startDateOf(pos),
-					title: nonEmpty(pos.title),
-				});
-			});
-			return;
+export function buildExperienceRows(groups: readonly unknown[]) {
+	const rows: RowRead[] = [];
+	for (const [groupIndex, group] of groups.entries()) {
+		const groupCompany = readField(
+			group,
+			[["company", "name"], ["name"]],
+			text,
+			OPTIONAL,
+		);
+		const positions = readField(
+			group,
+			["profilePositionInPositionGroup", "elements"],
+			v.custom<unknown[]>("array", (raw) =>
+				Array.isArray(raw)
+					? { kind: "value", value: raw }
+					: { kind: "malformed", problem: "elements is not an array" },
+			),
+			OPTIONAL,
+		);
+		if (positions.kind === "unavailable") {
+			// The group's positions cannot be read, so its rows cannot be known.
+			rows.push(
+				buildRow(
+					{ id: subEntityId(group, "exp-group", groupIndex) },
+					{ dependsOn: { positions } },
+				),
+			);
+			continue;
 		}
-
-		records.push({
-			company: groupCompanyName,
-			description: nonEmpty(group.description),
-			employment_type: null,
-			end_date: endDateOf(group),
-			id: subEntityId(group.entityUrn, "exp-group", groupIndex),
-			location: nonEmpty(group.locationName ?? group.geoLocationName),
-			start_date: startDateOf(group),
-			title: nonEmpty(group.title),
-		});
-	});
-
-	return records;
+		if (positions.kind === "read" && positions.value.length > 0) {
+			for (const [posIndex, position] of positions.value.entries())
+				rows.push(
+					experienceRow(
+						position,
+						subEntityId(position, `exp-${String(groupIndex)}`, posIndex),
+						groupCompany,
+						true,
+					),
+				);
+			continue;
+		}
+		rows.push(
+			experienceRow(
+				group,
+				subEntityId(group, "exp-group", groupIndex),
+				groupCompany,
+				false,
+			),
+		);
+	}
+	return rows;
 }
 
-/** School logo URL, mirroring legacy `linkedin-playwright.js`'s `logoUrl`
- *  IIFE: try `school.logo.vectorImage`, then the typed
- *  `school.logo["com.linkedin.common.VectorImage"]` key, then the older
+// ─── Education ──────────────────────────────────────────────────────────
+
+/** School logo: `school.logo.vectorImage`, the typed
+ *  `school.logo["com.linkedin.common.VectorImage"]` key, or the older
  *  `schoolLogo.vectorImage` shape. */
-function educationLogoUrlOf(edu: VoyagerEducation): string | null {
-	const image =
-		edu.school?.logo?.vectorImage ??
-		edu.school?.logo?.["com.linkedin.common.VectorImage"] ??
-		edu.schoolLogo?.vectorImage;
-	return vectorImageUrl(image);
+const LOGO_PATHS = [
+	["school", "logo", "vectorImage"],
+	["school", "logo", "com.linkedin.common.VectorImage"],
+	["schoolLogo", "vectorImage"],
+] as const;
+
+export function buildEducationRows(items: readonly unknown[]) {
+	return items.map((edu, index) =>
+		buildRow(
+			{
+				degree: readField(edu, "degreeName", text, OPTIONAL),
+				end_date: endDateOf(edu),
+				field_of_study: readField(edu, "fieldOfStudy", text, OPTIONAL),
+				grade: readField(edu, "grade", text, OPTIONAL),
+				id: subEntityId(edu, "edu", index),
+				logo_url: readField(edu, LOGO_PATHS, voyagerVectorImageUrl, OPTIONAL),
+				school: readField(
+					edu,
+					[["schoolName"], ["school", "name"]],
+					text,
+					OPTIONAL,
+				),
+				start_date: startDateOf(edu),
+			},
+			{ requireAnyOf: ["school"] },
+		),
+	);
 }
 
-export function buildEducationRecords(
-	profile: VoyagerProfileElement,
-): EducationRecord[] {
-	const items = profile.profileEducations?.elements ?? [];
-	return items.map((edu: VoyagerEducation, index) => ({
-		degree: nonEmpty(edu.degreeName),
-		end_date: endDateOf(edu),
-		field_of_study: nonEmpty(edu.fieldOfStudy),
-		grade: nonEmpty(edu.grade),
-		id: subEntityId(edu.entityUrn, "edu", index),
-		logo_url: educationLogoUrlOf(edu),
-		school: nonEmpty(edu.schoolName ?? edu.school?.name),
-		start_date: startDateOf(edu),
-	}));
+// ─── Skills ─────────────────────────────────────────────────────────────
+
+const ENDORSEMENTS = v.number({ integer: true, min: 0 });
+
+function skillRow(node: unknown, index: number) {
+	return buildRow({
+		endorsement_count: readField(
+			node,
+			[["endorsementCount"], ["endorsements"]],
+			ENDORSEMENTS,
+			OPTIONAL,
+		),
+		id: subEntityId(node, "skill", index),
+		name: readField(node, "name", nonEmptyText),
+	});
 }
 
 /**
- * `profileSkills.elements` can be either a flat list of skills or a list of
- * categories each containing skills, depending on decoration version —
- * mirrors legacy `linkedin-playwright.js`'s dual handling. Both shapes are
- * flattened to one record per skill.
+ * `profileSkills.elements` is either a flat list of skills or a list of
+ * categories each holding skills, depending on decoration version. Both
+ * shapes flatten to one row per skill. A skill with no readable name is an
+ * uncovered row, not a silently dropped one.
  */
-export function buildSkillRecords(
-	profile: VoyagerProfileElement,
-): SkillRecord[] {
-	const rawSkills = profile.profileSkills?.elements ?? [];
-	const records: SkillRecord[] = [];
+export function buildSkillRows(entries: readonly unknown[]) {
+	const rows: RowRead[] = [];
 	let index = 0;
-
-	for (const entry of rawSkills) {
-		const category = entry as VoyagerSkillCategory;
-		const categorySkills = category.skills ?? category.elements ?? [];
-		if (categorySkills.length > 0) {
-			for (const sk of categorySkills) {
-				const name = nonEmpty(sk.name);
-				if (name) {
-					records.push({
-						endorsement_count: endorsementCountOf(sk),
-						id: subEntityId(sk.entityUrn, "skill", index),
-						name,
-					});
-				}
+	for (const entry of entries) {
+		const nested = readField(
+			entry,
+			[["skills"], ["elements"]],
+			v.custom<unknown[]>("array", (raw) =>
+				Array.isArray(raw)
+					? { kind: "value", value: raw }
+					: { kind: "malformed", problem: "not an array" },
+			),
+			OPTIONAL,
+		);
+		if (nested.kind === "read" && nested.value.length > 0) {
+			for (const skill of nested.value) {
+				rows.push(skillRow(skill, index));
 				index += 1;
 			}
 			continue;
 		}
-		const name = nonEmpty(category.name);
-		if (name) {
-			records.push({
-				endorsement_count: endorsementCountOf(category),
-				id: subEntityId(category.entityUrn, "skill", index),
-				name,
-			});
+		if (nested.kind === "unavailable") {
+			rows.push(
+				buildRow(
+					{ id: subEntityId(entry, "skill", index) },
+					{ dependsOn: { skills: nested } },
+				),
+			);
+			index += 1;
+			continue;
 		}
+		rows.push(skillRow(entry, index));
 		index += 1;
 	}
-
-	return records;
+	return rows;
 }
 
-function endorsementCountOf(
-	sk: VoyagerSkill | VoyagerSkillCategory,
-): number | null {
-	const count = sk.endorsementCount ?? sk.endorsements;
-	return typeof count === "number" && Number.isFinite(count) && count >= 0
-		? count
-		: null;
+// ─── Languages ──────────────────────────────────────────────────────────
+
+export function buildLanguageRows(items: readonly unknown[]) {
+	return items.map((lang, index) =>
+		buildRow({
+			id: subEntityId(lang, "lang", index),
+			name: readField(lang, "name", nonEmptyText),
+			proficiency: readField(lang, "proficiency", text, OPTIONAL),
+		}),
+	);
 }
 
-export function buildLanguageRecords(
-	profile: VoyagerProfileElement,
-): LanguageRecord[] {
-	const items = profile.profileLanguages?.elements ?? [];
-	return items
-		.map((lang: VoyagerLanguage, index) => {
-			const name = nonEmpty(lang.name);
-			if (!name) {
-				return null;
-			}
-			return {
-				id: subEntityId(lang.entityUrn, "lang", index),
-				name,
-				proficiency: nonEmpty(lang.proficiency),
-			};
-		})
-		.filter((r): r is LanguageRecord => r !== null);
-}
+// ─── Connections ────────────────────────────────────────────────────────
 
-/** LinkedIn's connection `createdAt` is epoch milliseconds; 0/absent means
- *  "not reported", never "epoch". D4: timestamps are ISO-8601. */
-export function connectedAtOf(createdAt: number | undefined): string | null {
-	if (
-		typeof createdAt !== "number" ||
-		!Number.isFinite(createdAt) ||
-		createdAt <= 0
-	) {
-		return null;
-	}
-	return new Date(createdAt).toISOString();
-}
+/** LinkedIn's connection `createdAt` is epoch milliseconds; `0` or absent
+ *  means "not reported", never the epoch. D4: timestamps are ISO-8601. */
+const CONNECTED_AT = v.epochMillis({ emptyAt: [0], min: 1 });
 
-export function buildConnectionRecord(
-	element: VoyagerConnectionElement,
-	resolved: VoyagerResolvedProfile | undefined,
-): ConnectionRecord | null {
-	const memberUrn = element.connectedMember;
-	if (!memberUrn) {
-		return null;
-	}
-	const publicId = resolved?.publicIdentifier;
-	return {
-		connected_at: connectedAtOf(element.createdAt),
-		full_name: joinFullName(resolved?.firstName, resolved?.lastName),
-		headline: nonEmpty(resolved?.headline ?? resolved?.occupation),
-		id: memberUrn,
-		profile_url: publicId ? profileUrlFor(publicId) : null,
-	};
+/**
+ * One connection row, keyed by the connected member's URN. Name, headline
+ * and profile URL come from the batch profile resolution; a member whose
+ * profile could not be resolved this run is an uncovered row, so a stored
+ * copy with those fields is not overwritten by nulls.
+ */
+export function buildConnectionRow(element: unknown, resolved: unknown) {
+	const resolvedProfile: FieldRead<Record<string, unknown>> = isObject(resolved)
+		? fieldValue(resolved)
+		: unavailableField(
+				resolved === undefined
+					? "member profile not resolved this run"
+					: "resolved member profile is not an object",
+			);
+	const profile =
+		resolvedProfile.kind === "read" ? resolvedProfile.value : undefined;
+	const publicId = readField(
+		profile,
+		"publicIdentifier",
+		nonEmptyText,
+		OPTIONAL,
+	);
+	return buildRow(
+		{
+			connected_at: readField(element, "createdAt", CONNECTED_AT, OPTIONAL),
+			full_name: joinedName(
+				readField(profile, "firstName", text, OPTIONAL),
+				readField(profile, "lastName", text, OPTIONAL),
+			),
+			headline: firstReadable(
+				readField(profile, "headline", text, OPTIONAL),
+				readField(profile, "occupation", text, OPTIONAL),
+			),
+			id: readField(element, "connectedMember", nonEmptyText),
+			profile_url: mapField(publicId, (id) => fieldValue(profileUrlFor(id))),
+		},
+		{
+			dependsOn: { profile: resolvedProfile },
+			requireAnyOf: ["full_name", "profile_url"],
+		},
+	);
 }

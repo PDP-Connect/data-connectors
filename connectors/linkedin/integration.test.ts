@@ -156,9 +156,11 @@ function requestedMap(names: string[]): Map<string, StreamScope> {
  * executes end to end rather than being bypassed by a path-level stub of
  * `voyagerFetch` itself.
  */
-function makeFakePage(): Page {
+function makeFakePage(
+	route: (path: string) => unknown = routeVoyagerPath,
+): Page {
 	const fakeFetch = (path: string) => {
-		const body = routeVoyagerPath(path);
+		const body = route(path);
 		return Promise.resolve({
 			json: () => Promise.resolve(body),
 			ok: true,
@@ -219,6 +221,7 @@ function evaluateVoyagerMe(liveSession: () => boolean) {
 function buildCtx(
 	requestedNames: string[],
 	recording: ReturnType<typeof makeRecordingEmit>,
+	route: (path: string) => unknown = routeVoyagerPath,
 ): BrowserCollectContext {
 	return {
 		assist: async (): Promise<never> => {
@@ -232,7 +235,7 @@ function buildCtx(
 		emit: recording.emit,
 		emitRecord: recording.emitRecord,
 		emittedAt: EMITTED_AT,
-		page: makeFakePage(),
+		page: makeFakePage(route),
 		progress: async () => undefined,
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested: requestedMap(requestedNames),
@@ -550,4 +553,177 @@ test("collectLinkedIn: no live session (me endpoint fails) throws a non-retryabl
 		/linkedin_session_dead/,
 	);
 	assert.equal(recording.emitted.length, 0);
+});
+
+// ─── Completion claims under the stream integrity rule ──────────────────
+
+function coverageFor(
+	recording: ReturnType<typeof makeRecordingEmit>,
+	stream: string,
+) {
+	return recording.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === stream,
+	);
+}
+
+function skipReasons(
+	recording: ReturnType<typeof makeRecordingEmit>,
+	stream: string,
+): string[] {
+	return recording.protocolMessages.flatMap((m) =>
+		m.type === "SKIP_RESULT" && m.stream === stream ? [m.reason] : [],
+	);
+}
+
+/** Serve the canned profile with one planted malformed education row. */
+function withPlantedEducation(path: string): unknown {
+	if (!path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity"))
+		return routeVoyagerPath(path);
+	const [profile] = DASH_PROFILE_RESPONSE.elements;
+	return {
+		elements: [
+			{
+				...profile,
+				profileEducations: {
+					elements: [
+						...(profile?.profileEducations.elements ?? []),
+						{
+							schoolName: "College",
+							schoolLogo: { vectorImage: { artifacts: 42 } },
+						},
+					],
+				},
+			},
+		],
+	};
+}
+
+test("collectLinkedIn: a planted malformed row is refused, and education cannot claim full coverage", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	await collectLinkedIn(
+		buildCtx(["education", "skills"], recording, withPlantedEducation),
+	);
+
+	assert.equal(
+		recording.emitted.filter((r) => r.stream === "education").length,
+		1,
+		"the readable school is still emitted",
+	);
+	assert.deepEqual(
+		recording.skipped.map((s) => [s.stream, s.issues.map((i) => i.path)]),
+		[["education", ["logo_url"]]],
+	);
+	const coverage = coverageFor(recording, "education");
+	assert.ok(coverage?.type === "DETAIL_COVERAGE");
+	assert.deepEqual(
+		[coverage.considered, coverage.covered],
+		[2, 1],
+		"the connector already counts the withheld row as not covered",
+	);
+
+	const skills = coverageFor(recording, "skills");
+	assert.ok(skills?.type === "DETAIL_COVERAGE");
+	assert.deepEqual(
+		[skills.considered, skills.covered],
+		[1, 1],
+		"an untouched stream still proves full coverage",
+	);
+});
+
+test("collectLinkedIn: a profile without its collections never claims them empty", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const basicOnly = (path: string): unknown =>
+		path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")
+			? { elements: [{ firstName: "Anon", lastName: "Member" }] }
+			: routeVoyagerPath(path);
+	await collectLinkedIn(
+		buildCtx(
+			["experience", "education", "skills", "languages"],
+			recording,
+			basicOnly,
+		),
+	);
+
+	for (const stream of ["experience", "education", "skills", "languages"]) {
+		assert.equal(coverageFor(recording, stream), undefined, stream);
+		assert.deepEqual(
+			skipReasons(recording, stream),
+			["linkedin_profile_collection_unreadable"],
+			stream,
+		);
+	}
+});
+
+test("collectLinkedIn: a failed connections page keeps the rows read and makes no coverage claim", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const fullFirstPage = {
+		elements: Array.from({ length: 40 }, (_, i) => ({
+			connectedMember: `urn:li:fsd_profile:conn-${String(i)}`,
+		})),
+	};
+	const resolvedAll = {
+		results: Object.fromEntries(
+			fullFirstPage.elements.map((e, i) => [
+				e.connectedMember,
+				{ firstName: `F${String(i)}`, publicIdentifier: `p${String(i)}` },
+			]),
+		),
+	};
+	const secondPageFails = (path: string): unknown => {
+		if (path.includes("/relationships/dash/connections"))
+			return path.includes("start=0") ? fullFirstPage : { _error: "http_500" };
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids="))
+			return resolvedAll;
+		return routeVoyagerPath(path);
+	};
+	await collectLinkedIn(buildCtx(["connections"], recording, secondPageFails));
+
+	assert.equal(recording.emitted.length, 40);
+	assert.equal(coverageFor(recording, "connections"), undefined);
+	assert.deepEqual(skipReasons(recording, "connections"), [
+		"linkedin_connections_page_unreadable",
+	]);
+});
+
+/** A school name the reader accepts but the output schema rejects (max 500). */
+function withSchemaRejectedEducation(path: string): unknown {
+	if (!path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity"))
+		return routeVoyagerPath(path);
+	const [profile] = DASH_PROFILE_RESPONSE.elements;
+	return {
+		elements: [
+			{
+				...profile,
+				profileEducations: {
+					elements: [
+						...(profile?.profileEducations.elements ?? []),
+						{ schoolName: "x".repeat(600) },
+					],
+				},
+			},
+		],
+	};
+}
+
+test("collectLinkedIn: the runtime veto corrects a full-coverage claim the connector could not know was false", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	await collectLinkedIn(
+		buildCtx(["education"], recording, withSchemaRejectedEducation),
+	);
+
+	assert.deepEqual(
+		recording.skipped.map((s) => s.stream),
+		["education"],
+		"the output schema refused the planted row",
+	);
+	const coverage = coverageFor(recording, "education");
+	assert.ok(coverage?.type === "DETAIL_COVERAGE");
+	assert.deepEqual(
+		[coverage.considered, coverage.covered],
+		[2, 1],
+		"the connector claimed 2 of 2; the runtime corrected it",
+	);
+	assert.deepEqual(skipReasons(recording, "education"), [
+		"stream_incomplete_checkpoint_withheld",
+	]);
 });

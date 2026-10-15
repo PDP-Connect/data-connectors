@@ -14785,6 +14785,8 @@
 				],
 				"reason_display_messages": {
 					"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+					"linkedin_connections_page_unreadable": "A page of LinkedIn connections didn't load; the rest will be collected on a future run",
+					"linkedin_profile_collection_unreadable": "LinkedIn didn't return this part of the profile in a readable form; it will be collected on a future run",
 					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
 				}
 			}
