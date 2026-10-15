@@ -434,9 +434,12 @@ test("WhatsApp connector's collect() rejects an export past the message-count ca
 				type: "START",
 			},
 		});
+		// The runtime adds its own `stream_incomplete_checkpoint_withheld` notice
+		// after a reported skip (stream-integrity.ts); count only the connector's.
 		const skips = result.messages.filter(
 			(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-				message.type === "SKIP_RESULT",
+				message.type === "SKIP_RESULT" &&
+				message.reason !== "stream_incomplete_checkpoint_withheld",
 		);
 		assert.equal(skips.length, 1);
 		assert.equal(skips[0]?.reason, "import_exceeds_bounded_read_policy");

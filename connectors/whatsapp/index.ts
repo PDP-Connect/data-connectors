@@ -33,6 +33,7 @@ import {
 	buildDetailCoverageMessage,
 	type EmittedMessage,
 	type ProgressExtra,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
@@ -857,12 +858,21 @@ async function emitAttachmentRecords(
 		}
 	}
 	if (skipped > 0) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "attachments",
-			reason: "media_exceeds_bounded_read_policy",
-			message: `${skipped} media file(s) in WhatsApp export ${exportOrdinal} of ${exportTotal} exceeded the archive read policy and were not imported.`,
-		});
+		// Resume-safe: the `attachments` STATE is a fingerprint set keyed by an
+		// id hashed from the media bytes. An unreadable file never reaches
+		// shouldEmit, so it is never in the set, and every run re-parses every
+		// export, so the next run weighs the file again.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "attachments",
+					reason: "media_exceeds_bounded_read_policy",
+					message: `${skipped} media file(s) in WhatsApp export ${exportOrdinal} of ${exportTotal} exceeded the archive read policy and were not imported.`,
+				},
+				"cursor_excludes_loss",
+			),
+		);
 	}
 	// `covered` excludes media the read policy dropped. The runtime's coverage
 	// contract is explicit that a weighed-but-dropped item belongs to neither the
