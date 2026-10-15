@@ -171,8 +171,16 @@ jobs:
             testFiles: Object.keys(report.testFiles).length,
             rangeInterpretation: {
               'connectors/groupme/index.ts:1487-1495': 'ascending-order predicate and its surrounding expression; concrete canary is the less-than to greater-than-or-equal replacement',
-              'connectors/groupme/index.ts:1528-1529': 'progress-string AST only; does not include the for-loop entry or a page-cap insertion site',
+              'connectors/groupme/index.ts:1528-1529': 'helper/progress-message-literal only; does not include the for-loop entry or a page-cap insertion site',
               pageCapCoverage: 'none claimed; default operators do not insert a page-count ceiling',
+            },
+            canaryContract: {
+              operator: 'EqualityOperator',
+              location: 'connectors/groupme/index.ts:1491',
+              patch: 'curr.created_at < prev.created_at -> curr.created_at >= prev.created_at',
+              owner: 'connectors/groupme/incremental-frontier.test.ts:628: repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError',
+              expectedFailedAssertion: 'connectors/groupme/incremental-frontier.test.ts:653-659',
+              expectedMessage: 'a non-ascending forward page must fail, not be silently trusted',
             },
             canonicalMutantManifest,
             activationRisk: activationRisk.map(({ id, mutatorName, location, static, coveredBy, status }) => ({ id, mutatorName, location, static: static ?? null, coveredBy, status })),
