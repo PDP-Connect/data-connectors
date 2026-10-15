@@ -23,3 +23,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		training_status: { field: "date", format: "date" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	garmin_browser: {},
+};

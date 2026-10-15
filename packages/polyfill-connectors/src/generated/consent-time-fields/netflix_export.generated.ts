@@ -19,3 +19,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		viewing_activity: { field: "watched_at", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	netflix_export: {},
+};

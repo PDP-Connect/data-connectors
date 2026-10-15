@@ -543,9 +543,10 @@ export async function emitRow<F extends FieldReads>(
  *   - `offset`: `start`, optional `count`, `total`, and any continuation
  *     marker (a next link or cursor) from the enumeration's pages. `start` is
  *     the offset of the FIRST page the walk read.
- *   - `cursor`: a cursor walk that began at the first page, with the LAST
- *     page's raw end signal: `has_more` and `next_cursor`, plus `total` when
- *     the source reports one.
+ *   - `cursor`: every page of a cursor walk, in order, as the source sent
+ *     it: the cursor the walk REQUESTED for that page (`null`/absent for the
+ *     first page) and the page's own `has_more` and `next_cursor`, plus
+ *     `total` when the source reports one.
  */
 export type PagingEvidence =
 	| {
@@ -557,10 +558,16 @@ export type PagingEvidence =
 	  }
 	| {
 			readonly kind: "cursor";
-			readonly has_more: unknown;
-			readonly next_cursor?: unknown;
+			readonly pages: readonly CursorPage[];
 			readonly total?: unknown;
 	  };
+
+/** One page of a cursor walk: what was requested, and the page's own signal. */
+export interface CursorPage {
+	readonly has_more: unknown;
+	readonly next_cursor?: unknown;
+	readonly requested_cursor?: unknown;
+}
 
 /**
  * A per-source declaration that the source returns the whole collection in
@@ -603,8 +610,13 @@ function continues(marker: unknown): boolean {
  *     to the number of items, `count` (if sent) is a count, and there is no
  *     continuation;
  *   - a cursor walk whose last page says explicitly that nothing follows
- *     (`has_more === false`, no `next_cursor`), and whose `total`, if sent,
- *     equals the number of items;
+ *     (`has_more === false`, no `next_cursor`), whose `total`, if sent,
+ *     equals the number of items, and which is proven whole by either
+ *     (a) a contiguous chain: the first page was requested with no cursor,
+ *     each later page was requested with the previous page's `next_cursor`,
+ *     and every page but the last said `has_more: true`; or (b) a `total`
+ *     equal to the number of items. A last-page signal alone is never proof:
+ *     a resumed walk's final page carries the same signal;
  *   - a declared unpaged container.
  *
  * Anything else is INCOMPLETE with a value-free reason. A full-inventory
@@ -625,14 +637,32 @@ export function enumerated<T>(
 	if (evidence.kind === "unpaged")
 		return { kind: "complete", items, basis: "declared_unpaged" };
 	if (evidence.kind === "cursor") {
-		if (evidence.has_more !== false)
+		const pages = Array.isArray(evidence.pages) ? evidence.pages : [];
+		const last = pages.at(-1);
+		if (last === undefined) return incomplete("no pages of the walk");
+		if (last.has_more !== false)
 			return incomplete("the last page does not say has_more is false");
-		if (continues(evidence.next_cursor))
+		if (continues(last.next_cursor))
 			return incomplete("the last page still carries a next cursor");
-		if (evidence.total !== undefined && evidence.total !== null) {
+		const hasTotal = evidence.total !== undefined && evidence.total !== null;
+		if (hasTotal) {
 			if (!isCount(evidence.total)) return incomplete("total is not a count");
 			if (evidence.total !== items.length)
 				return incomplete("total does not equal the items read");
+			return { kind: "complete", items, basis: "paging_verified" };
+		}
+		if (continues(pages[0]?.requested_cursor))
+			return incomplete("the walk did not start at the first page");
+		for (const [index, page] of pages.entries()) {
+			if (index === 0) continue;
+			const previous = pages[index - 1];
+			if (previous?.has_more !== true)
+				return incomplete("a page before the last did not say has_more");
+			if (
+				!continues(previous.next_cursor) ||
+				page.requested_cursor !== previous.next_cursor
+			)
+				return incomplete("the walk's cursors are not a contiguous chain");
 		}
 		return { kind: "complete", items, basis: "paging_verified" };
 	}

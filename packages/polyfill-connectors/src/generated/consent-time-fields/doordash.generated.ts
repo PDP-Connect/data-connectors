@@ -20,3 +20,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		orders: { field: "order_date", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	doordash: {},
+};

@@ -29,3 +29,13 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		usage: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	claude_code: {
+		attachments: ["sessions"],
+		memory_notes: ["sessions"],
+		messages: ["sessions"],
+	},
+};

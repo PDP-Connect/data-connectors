@@ -23,3 +23,11 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		threads: { field: "first_message_date", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	gmail: {
+		message_bodies: ["messages"],
+	},
+};

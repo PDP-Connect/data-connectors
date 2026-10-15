@@ -22,6 +22,7 @@ import {
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
+	type CursorPage,
 	type Enumeration,
 	emitRow,
 	enumerated,
@@ -139,6 +140,7 @@ async function searchAll(
 	streamName: string,
 ): Promise<Enumeration<unknown>> {
 	const results: unknown[] = [];
+	const pages: CursorPage[] = [];
 	let cursor: string | undefined;
 	let pageIndex = 0;
 	for (;;) {
@@ -165,6 +167,11 @@ async function searchAll(
 		if (!Array.isArray(json.results))
 			throw new Error("notion_search_results_unreadable");
 		results.push(...json.results);
+		pages.push({
+			requested_cursor: cursor ?? null,
+			has_more: json.has_more,
+			next_cursor: json.next_cursor,
+		});
 		await progress("Fetched Notion search page", {
 			stream: streamName,
 			phase: "page",
@@ -174,13 +181,9 @@ async function searchAll(
 			cursor_present: Boolean(json.has_more && json.next_cursor),
 		});
 		if (json.has_more !== true) {
-			// The walk began at the first page; whether it reached the end is
-			// decided from this last page's own signal, not from stopping here.
-			return enumerated(results, {
-				kind: "cursor",
-				has_more: json.has_more,
-				next_cursor: json.next_cursor,
-			});
+			// Whether the walk is whole is decided from every page's own signal
+			// and the chain of requested cursors, not from stopping here.
+			return enumerated(results, { kind: "cursor", pages });
 		}
 		// `has_more` is the provider's claim that another page exists. A missing
 		// cursor contradicts that claim, so stopping here would silently hide the

@@ -22,3 +22,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		usage_limits: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	anthropic_live: {},
+};

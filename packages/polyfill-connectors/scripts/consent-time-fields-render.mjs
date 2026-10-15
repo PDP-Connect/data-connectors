@@ -62,6 +62,40 @@ function consentTimeField(connector, stream) {
 	return null;
 }
 
+/**
+ * A stream's declared checkpoint parents: its `state_stream`, or its
+ * `parent_streams`. The runtime's stream integrity rule needs them before
+ * the first STATE (a child's loss must hold its parent's checkpoint), and a
+ * built artifact has no manifest beside it, so they ride in this module.
+ */
+function checkpointParents(stream) {
+	if (typeof stream.state_stream === "string" && stream.state_stream)
+		return [stream.state_stream];
+	if (Array.isArray(stream.parent_streams))
+		return stream.parent_streams.filter(
+			(parent) => typeof parent === "string" && parent,
+		);
+	return [];
+}
+
+function renderParents(connector, manifest) {
+	const entries = (manifest.streams ?? [])
+		.filter((stream) => typeof stream.name === "string")
+		.map((stream) => [stream.name, checkpointParents(stream)])
+		.filter(([, declared]) => declared.length > 0)
+		.sort(([a], [b]) => a.localeCompare(b));
+	if (entries.length === 0) return `\t${key(connector)}: {},`;
+	const lines = entries.map(
+		([stream, declared]) =>
+			`\t\t${key(stream)}: [${declared.map((parent) => JSON.stringify(parent)).join(", ")}],`,
+	);
+	return `\t${key(connector)}: {\n${lines.join("\n")}\n\t},`;
+}
+
+const PARENTS_TYPE = `Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+>`;
+
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
 const key = (name) => (IDENTIFIER.test(name) ? name : JSON.stringify(name));
 
@@ -117,6 +151,13 @@ export const CONSENT_BOUND_CONNECTOR: string | null = null;
 export const CONSENT_TIME_FIELDS: ${TABLE_TYPE} = {
 ${body}
 };
+
+export const CHECKPOINT_PARENTS: ${PARENTS_TYPE} = {
+${[...connectors]
+	.sort(([a], [b]) => a.localeCompare(b))
+	.map(([connector, manifest]) => renderParents(connector, manifest))
+	.join("\n")}
+};
 `;
 }
 
@@ -148,6 +189,10 @@ ${boundConnectorDeclaration(connector)}
 
 export const CONSENT_TIME_FIELDS: ${TABLE_TYPE} = {
 ${renderConnector(connector, manifest)}
+};
+
+export const CHECKPOINT_PARENTS: ${PARENTS_TYPE} = {
+${renderParents(connector, manifest)}
 };
 `;
 }

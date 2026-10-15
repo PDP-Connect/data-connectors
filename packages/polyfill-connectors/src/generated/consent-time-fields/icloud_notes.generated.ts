@@ -20,3 +20,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		notes: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	icloud_notes: {},
+};

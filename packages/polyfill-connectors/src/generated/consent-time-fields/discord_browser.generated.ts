@@ -22,3 +22,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		servers: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	discord_browser: {},
+};

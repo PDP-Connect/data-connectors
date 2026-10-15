@@ -21,3 +21,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		transactions: { field: "date_created", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	venmo: {},
+};
