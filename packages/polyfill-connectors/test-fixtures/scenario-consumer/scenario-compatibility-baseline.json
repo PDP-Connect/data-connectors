@@ -1,0 +1,41 @@
+{
+  "bootstrap_commit": "c0c6f1e4faa7015cf6447230b0c17a5f9769b09b",
+  "format": "pdpp.connector-scenario/1",
+  "format_disposition": "supported",
+  "captures": {
+    "scenario-http.json": "12e6397d53f1e52dba497b21d549fb5051771fc5cc8db58b4139f8f3ef44def8",
+    "scenario-browser.json": "ec84aaf45ba8d3920171a2b6134f4bbf5e657efa4166bcacdef0bc1da1ed5d74",
+    "scenario-browser.run1.har": "4d22b21ec7399ce4a0edd31c23918e5efc2dcf3fe4c68008b7d1bde4c9a142a0",
+    "scenario-browser.run2.har": "80873b8ce90dcb8d31f2be4b2747d1f7e1c94a385fe3d89cf958ab26faffc01f",
+    "scenario-browser.run1.storage-state.json": "dcbfcdab9989eddcd68fdfe131c719283e1960b866b600a3d36d6daff254f32b",
+    "scenario-browser.run2.storage-state.json": "dcbfcdab9989eddcd68fdfe131c719283e1960b866b600a3d36d6daff254f32b"
+  },
+  "capture_sources": {
+    "data.ts": "5f8780e84eeb0252df92c96a7f9d08b8faf0fabc1d86ea20a7c1985c2cc3b8a3",
+    "site.ts": "6f7508a683761c5d4be0c80585f631643021b0a9f92cafebb81ab8ce7ddbd9d1",
+    "http-connector.ts": "3e778739607d08f331ddf7ceee19bafebc3e6ab4858bc03878b86f6d8837c3a8",
+    "browser-connector.ts": "02e65bd04a0c26c5bf6ef8d042d96376a7ddcb7477bd6df72d9859a75341aa5b"
+  },
+  "claims": {
+    "scenario-http.json": {
+      "claim": "diagnostic_replay",
+      "driver": "recorded-http",
+      "runs": 2,
+      "coverage": ["empty_state_run", "state_seeded_second_run_with_changed_requests"],
+      "scenario_status": "candidate oracle",
+      "captured_with": {"source_digest": null, "declaration_digest": null},
+      "verified_subject": {"source_digest": null, "declaration_digest": null},
+      "entrypoint_digest": "absent"
+    },
+    "scenario-browser.json": {
+      "claim": "diagnostic_replay",
+      "driver": "recorded-browser",
+      "runs": 2,
+      "coverage": [],
+      "scenario_status": "candidate oracle",
+      "captured_with": {"source_digest": null, "declaration_digest": null},
+      "verified_subject": {"source_digest": null, "declaration_digest": null},
+      "entrypoint_digest": "absent"
+    }
+  }
+}

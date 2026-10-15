@@ -1,0 +1,89 @@
+name: Scenario Compatibility
+
+on:
+  pull_request: {}
+  push: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scenario-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Scenario compatibility admission
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.admission.outputs.relevant }}
+      baseline: ${{ steps.admission.outputs.baseline }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Determine full-event compatibility scope
+        id: admission
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node packages/polyfill-connectors/scripts/scenario-compatibility-admission.mjs
+
+  compatibility:
+    name: Frozen scenario compatibility
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Prepare task-local browser and replay directories
+        run: |
+          mkdir -p "$HOME/.tmp/scenario-compat-browsers" "$HOME/.tmp/scenario-compat"
+          chmod 700 "$HOME/.tmp/scenario-compat-browsers" "$HOME/.tmp/scenario-compat"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$HOME/.tmp/scenario-compat-browsers" >> "$GITHUB_ENV"
+          echo "SCENARIO_COMPAT_TMPDIR=$HOME/.tmp/scenario-compat" >> "$GITHUB_ENV"
+      - name: Install pinned workspace dependencies
+        env:
+          PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install Patchright Chromium explicitly
+        working-directory: packages/polyfill-connectors
+        run: ../../node_modules/.bin/patchright install --with-deps chromium
+      - name: Check immutable captures and replay current verifier offline
+        working-directory: packages/polyfill-connectors
+        env:
+          SCENARIO_COMPAT_BASE_SHA: ${{ needs.changes.outputs.baseline }}
+        run: node --import tsx --test scripts/scenario-compatibility-admission.test.mjs scripts/scenario-compatibility.test.mjs
+      - name: Remove task-local replay files
+        if: always()
+        run: rm -rf "$HOME/.tmp/scenario-compat" "$HOME/.tmp/scenario-compat-browsers"
+
+  gate:
+    name: Scenario Compatibility Gate
+    needs: [changes, compatibility]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Require successful admission and the focused result when relevant
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+        run: node packages/polyfill-connectors/scripts/scenario-compatibility-gate.mjs
