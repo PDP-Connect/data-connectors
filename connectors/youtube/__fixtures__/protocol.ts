@@ -17,9 +17,7 @@ runConnector({
 		try {
 			const page = await browser.newPage();
 			await page.route("https://www.youtube.com/**", async (route) => {
-				if (
-					new URL(route.request().url()).pathname === "/youtubei/v1/browse"
-				) {
+				if (new URL(route.request().url()).pathname === "/youtubei/v1/browse") {
 					await route.fulfill({
 						status: 200,
 						contentType: "application/json",
@@ -43,9 +41,20 @@ runConnector({
 										selected: true,
 										content: {
 											sectionListRenderer: {
-												contents: [1, 2, 3, 4].map(() => ({
-													lockupViewModel: {},
-												})),
+												contents: [
+													{
+														itemSectionRenderer: {
+															contents: [
+																"olderVideo",
+																"inRangeVideo",
+																"unknownVideo",
+																"endVideo",
+															].map((videoId) => ({
+																videoRenderer: { videoId },
+															})),
+														},
+													},
+												],
 											},
 										},
 									},
@@ -60,7 +69,7 @@ runConnector({
 					row("Sep 22, 2026", "inRangeVideo") +
 					row("Unknown", "unknownVideo") +
 					row("Sep 23, 2026", "endVideo") +
-					`<script>var ytInitialData = ${JSON.stringify(pageData)}; fetch("/youtubei/v1/browse", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ browseId: "FEhistory" }) });</script>`;
+					`<script>var ytInitialData = ${JSON.stringify(pageData)};</script>`;
 				await route.fulfill({
 					contentType: "text/html",
 					body: `<html><body><div id="contents">${html}<div id="message">No more videos</div></div></body></html>`,

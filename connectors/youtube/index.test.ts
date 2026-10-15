@@ -68,7 +68,6 @@ function failureReporter(messages: Record<string, unknown>[]) {
 
 class FixturePage {
 	url = "";
-	private historyContinuation = false;
 	private readonly responseListeners = new Set<(response: never) => void>();
 	private readonly waitStates: Array<
 		"content" | "empty" | "json-empty" | "unreadable"
@@ -81,9 +80,6 @@ class FixturePage {
 	off(_event: "response", listener: (response: never) => void): this {
 		this.responseListeners.delete(listener);
 		return this;
-	}
-	setHistoryContinuation(value: boolean): void {
-		this.historyContinuation = value;
 	}
 	private readonly ownAccount: {
 		channel_url: string | null;
@@ -101,20 +97,6 @@ class FixturePage {
 	}
 	async goto(url: string) {
 		this.url = url;
-		if (url.includes("/feed/history")) {
-			const continuationItems = this.historyContinuation
-				? [{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }]
-				: [];
-			const response = {
-				url: () => "https://www.youtube.com/youtubei/v1/browse",
-				request: () => ({ postDataJSON: () => ({ browseId: "FEhistory" }) }),
-				status: () => 200,
-				json: async () => ({
-					onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems } }],
-				}),
-			};
-			for (const listener of this.responseListeners) listener(response as never);
-		}
 	}
 	locator() {
 		return {
@@ -135,15 +117,24 @@ class FixturePage {
 	}
 	async evaluate(fn: Function, arg?: unknown): Promise<unknown> {
 		if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
-		if (fn.name === "readListEnd" || (typeof arg === "object" && arg !== null && "kind" in arg)) {
+		if (
+			fn.name === "readListEnd" ||
+			(typeof arg === "object" && arg !== null && "kind" in arg)
+		) {
 			const empty =
 				this.lastWaitState === "empty" || this.lastWaitState === "json-empty";
-			const request = typeof arg === "object" && arg !== null
-				? (arg as { latestHistoryResponse?: unknown })
-				: {};
+			const kind =
+				typeof arg === "object" && arg !== null && "kind" in arg
+					? (arg as { kind: string }).kind
+					: "";
+			const readable = !empty && kind !== "history";
+			const request =
+				typeof arg === "object" && arg !== null
+					? (arg as { latestHistoryResponse?: unknown })
+					: {};
 			return {
-				dataReadable: !empty,
-				dataItemCount: empty ? 0 : 1,
+				dataReadable: readable,
+				dataItemCount: readable ? 1 : 0,
 				dataHasContinuation: !empty,
 				domHasContinuation: false,
 				declaredTotal: null,
@@ -196,7 +187,10 @@ class FixturePage {
 		) {
 			if (typeof arg === "object" && arg !== null && "offset" in arg) {
 				const request = arg as { offset: number; limit: number };
-				if (this.lastWaitState === "empty" || this.lastWaitState === "json-empty")
+				if (
+					this.lastWaitState === "empty" ||
+					this.lastWaitState === "json-empty"
+				)
 					return { offset: request.offset, totalRows: 0, rows: [] };
 				return {
 					offset: request.offset,
@@ -225,11 +219,11 @@ function historyFixturePage(
 	}> = {},
 ): FixturePage {
 	const page = new FixturePage();
-	page.setHistoryContinuation(
-		end.dataHasContinuation === true || end.domHasContinuation === true,
-	);
 	page.evaluate = async (fn: Function, arg?: unknown) => {
-		if (fn.name === "readVideos" || (typeof arg === "object" && arg !== null && "offset" in arg)) {
+		if (
+			fn.name === "readVideos" ||
+			(typeof arg === "object" && arg !== null && "offset" in arg)
+		) {
 			if (typeof arg === "object" && arg !== null && "offset" in arg) {
 				const request = arg as { offset: number; limit: number };
 				return {
@@ -240,7 +234,10 @@ function historyFixturePage(
 			}
 			return videos;
 		}
-		if (fn.name === "readListEnd" || (typeof arg === "object" && arg !== null && "kind" in arg))
+		if (
+			fn.name === "readListEnd" ||
+			(typeof arg === "object" && arg !== null && "kind" in arg)
+		)
 			return {
 				dataReadable: true,
 				dataItemCount: videos.length,
@@ -252,7 +249,9 @@ function historyFixturePage(
 				verifiedEmpty: false,
 				pageBlocked: false,
 				latestHistoryResponse:
-					typeof arg === "object" && arg !== null && "latestHistoryResponse" in arg
+					typeof arg === "object" &&
+					arg !== null &&
+					"latestHistoryResponse" in arg
 						? (arg as { latestHistoryResponse: unknown }).latestHistoryResponse
 						: null,
 				...end,
@@ -347,7 +346,10 @@ test("profile account-header skips do not suppress later requested streams", asy
 	assert.ok(
 		skips.slice(1).some((skip) => skip.reason === "stream_collection_failed"),
 	);
-	assert.equal(skips.some((skip) => skip.type === "STATE"), true);
+	assert.equal(
+		skips.some((skip) => skip.type === "STATE"),
+		true,
+	);
 	assert.equal(records.get("subscriptions")?.length, 1);
 	assert.equal(records.get("watch_history")?.length, 1);
 });
@@ -404,10 +406,10 @@ test("date resolver keeps day precision and rejects unknown labels", () => {
 test("history streams beyond one batch and checkpoints its accounted prefix", async () => {
 	const page = historyFixturePage(
 		Array.from({ length: 60 }, (_, i) => ({
-					...VIDEO,
-					video_id: `video${i}`,
-					video_url: `https://www.youtube.com/watch?v=video${i}`,
-				})),
+			...VIDEO,
+			video_id: `video${i}`,
+			video_url: `https://www.youtube.com/watch?v=video${i}`,
+		})),
 		{},
 	);
 	const history: Record<string, unknown>[] = [];
@@ -441,7 +443,9 @@ test("history streams beyond one batch and checkpoints its accounted prefix", as
 	assert.equal(history[59]?.position, 59);
 	assert.equal("watched_at" in history[0]!, false);
 	assert.deepEqual(
-		messages.filter((message) => message.type === "STATE").map((message) => message.cursor),
+		messages
+			.filter((message) => message.type === "STATE")
+			.map((message) => message.cursor),
 		[
 			{
 				version: 2,
@@ -498,7 +502,9 @@ test("history resumes after the last seen video checkpoint", async () => {
 		const failures: string[] = [];
 		await collectYoutubeBrowser({
 			page: historyFixturePage(videos) as never,
-			requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+			requested: new Map([
+				["watch_history", { name: "watch_history" }],
+			]) as never,
 			state,
 			emitRecord: async (_stream, data) => {
 				records.push(data);
@@ -526,8 +532,9 @@ test("history resumes after the last seen video checkpoint", async () => {
 	assert.equal(firstState.complete, true);
 
 	const second = await run({ watch_history: firstState });
-	const secondState = second.messages.find((message) => message.type === "STATE")
-		?.cursor as Record<string, unknown>;
+	const secondState = second.messages.find(
+		(message) => message.type === "STATE",
+	)?.cursor as Record<string, unknown>;
 	assert.deepEqual(second.failures, []);
 	assert.deepEqual(
 		second.records.map((record) => record.video_id),
@@ -643,11 +650,15 @@ test("history source-end evidence completes the checkpoint", async () => {
 
 test("a blocked history page vetoes completion and emits no checkpoint", async () => {
 	const { messages, outcome } = await collectFromDocuments(
-		() => `${SIGNED_IN}<a href="https://accounts.google.com/ServiceLogin">Sign in</a>${historyRow}${END_OF_LIST}`,
+		() =>
+			`${SIGNED_IN}<a href="https://accounts.google.com/ServiceLogin">Sign in</a>${historyRow}${END_OF_LIST}`,
 		["watch_history"],
 	);
 	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
-	assert.equal(messages.some((message) => message.type === "STATE"), false);
+	assert.equal(
+		messages.some((message) => message.type === "STATE"),
+		false,
+	);
 });
 
 test("history reconciliation emits a re-watched row beyond the head window", async () => {
@@ -665,45 +676,82 @@ test("history reconciliation emits a re-watched row beyond the head window", asy
 		...firstOrder.filter((id) => id !== "v70"),
 	];
 	const rows = movedOrder
-		.map((id) => `<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>${id}</h3></yt-lockup-view-model>`)
+		.map(
+			(id) =>
+				`<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>${id}</h3></yt-lockup-view-model>`,
+		)
 		.join("");
-	const sourceItems = movedOrder.map((contentId) => ({ lockupViewModel: { contentId } }));
+	const sourceItems = movedOrder.map((contentId) => ({
+		lockupViewModel: { contentId },
+	}));
 	const { records, messages } = await collectFromDocuments(
-		() => `<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${END_OF_LIST}`,
+		() =>
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${END_OF_LIST}`,
 		["watch_history"],
 		undefined,
 		{ watch_history: cursor },
 	);
 
-	assert.equal(records.get("watch_history")?.some((record) => record.video_id === "v70"), true);
-	const state = messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>;
+	assert.equal(
+		records.get("watch_history")?.some((record) => record.video_id === "v70"),
+		true,
+	);
+	const state = messages.find((message) => message.type === "STATE")
+		?.cursor as Record<string, unknown>;
 	assert.equal(state?.complete, true);
 });
 
 test("history anchor re-watch is reconciled instead of skipped", async () => {
-	const order = ["v49", ...Array.from({ length: 90 }, (_, index) => `v${index}`).filter((id) => id !== "v49")];
+	const order = [
+		"v49",
+		...Array.from({ length: 90 }, (_, index) => `v${index}`).filter(
+			(id) => id !== "v49",
+		),
+	];
 	const rows = order
-		.map((id) => `<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>${id}</h3></yt-lockup-view-model>`)
+		.map(
+			(id) =>
+				`<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>${id}</h3></yt-lockup-view-model>`,
+		)
 		.join("");
-	const sourceItems = order.map((contentId) => ({ lockupViewModel: { contentId } }));
+	const sourceItems = order.map((contentId) => ({
+		lockupViewModel: { contentId },
+	}));
 	const { records } = await collectFromDocuments(
-		() => `<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${END_OF_LIST}`,
+		() =>
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${END_OF_LIST}`,
 		["watch_history"],
 		undefined,
-		{ watch_history: { last_seen_video_id: "v49", position: 49, complete: false } },
+		{
+			watch_history: {
+				last_seen_video_id: "v49",
+				position: 49,
+				complete: false,
+			},
+		},
 	);
 
-	assert.equal(records.get("watch_history")?.some((record) => record.video_id === "v49"), true);
+	assert.equal(
+		records.get("watch_history")?.some((record) => record.video_id === "v49"),
+		true,
+	);
 });
 
 test("a normal target-list continuation is not a blocked page", () => {
-	const rows = Array.from({ length: 55 }, (_, index) =>
-		`<yt-lockup-view-model><a href="/watch?v=v${index}"></a></yt-lockup-view-model>`,
+	const rows = Array.from(
+		{ length: 55 },
+		(_, index) =>
+			`<yt-lockup-view-model><a href="/watch?v=v${index}"></a></yt-lockup-view-model>`,
 	).join("");
 	const sourceItems = Array.from({ length: 55 }, (_, index) => ({
 		lockupViewModel: { contentId: `v${index}` },
 	}));
-	const html = `${SIGNED_IN}<ytd-item-section-renderer>${rows}<ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...sourceItems, { continuationItemRenderer: { token: "next" } }] } }))}`;
+	const continuationItem = {
+		continuationItemRenderer: {
+			continuationEndpoint: { continuationCommand: { token: "next" } },
+		},
+	};
+	const html = `${SIGNED_IN}<ytd-item-section-renderer>${rows}<ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...sourceItems, continuationItem] } }))}`;
 	let end: ReturnType<typeof readListEnd> | undefined;
 	withBrowserGlobals(
 		html,
@@ -718,19 +766,24 @@ test("a normal target-list continuation is not a blocked page", () => {
 });
 
 test("a real continuation permits a safe incomplete checkpoint", async () => {
-	const rows = Array.from({ length: 55 }, (_, index) =>
-		`<yt-lockup-view-model><a href="/watch?v=cont${index}"></a><h3>cont${index}</h3></yt-lockup-view-model>`,
+	const rows = Array.from(
+		{ length: 55 },
+		(_, index) =>
+			`<yt-lockup-view-model><a href="/watch?v=cont${index}"></a><h3>cont${index}</h3></yt-lockup-view-model>`,
 	).join("");
 	const sourceItems = Array.from({ length: 55 }, (_, index) => ({
 		lockupViewModel: { contentId: `cont${index}` },
 	}));
 	const { records, messages, outcome } = await collectFromDocuments(
 		() =>
-			`${SIGNED_IN}<ytd-item-section-renderer>${rows}<ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...sourceItems, { continuationItemRenderer: { token: "next" } }] } }))}`,
+			`${SIGNED_IN}<ytd-item-section-renderer>${rows}<ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...sourceItems, { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }] } }))}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 55);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.deepEqual(outcome("watch_history"), [
+		"stream_collection_failed",
+		"STATE",
+	]);
 	const state = messages.find((message) => message.type === "STATE")
 		?.cursor as Record<string, unknown>;
 	assert.equal(state.complete, false);
@@ -746,50 +799,90 @@ test("a parsed suffix cannot checkpoint across a malformed history card", async 
 		lockupViewModel: { contentId: `v${index}` },
 	}));
 	const { messages } = await collectFromDocuments(
-		() => `<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}`,
+		() =>
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}`,
 		["watch_history"],
 		undefined,
-		{ watch_history: { last_seen_video_id: "v2", position: 2, complete: false } },
+		{
+			watch_history: { last_seen_video_id: "v2", position: 2, complete: false },
+		},
 	);
 
-	const state = messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>;
+	const state = messages.find((message) => message.type === "STATE")
+		?.cursor as Record<string, unknown>;
 	assert.equal(state?.complete, false);
 	assert.equal(state?.backfill_anchor_id, "v4");
-	assert.equal(messages.some((message) => message.reason === "stream_collection_failed"), true);
+	assert.equal(
+		messages.some((message) => message.reason === "stream_collection_failed"),
+		true,
+	);
 });
 
-test("a proven end on a resumed cursor completes with no unread suffix", async () => {
-	const rows = Array.from({ length: 3 }, (_, index) =>
-		`<yt-lockup-view-model><a href="/watch?v=v${index}"></a></yt-lockup-view-model>`,
+test("a complete HTML bootstrap ends a resumed cursor with no unread suffix", async () => {
+	const rows = Array.from(
+		{ length: 3 },
+		(_, index) =>
+			`<yt-lockup-view-model><a href="/watch?v=v${index}"></a></yt-lockup-view-model>`,
 	).join("");
-	const sourceItems = Array.from({ length: 3 }, (_, index) => ({
-		lockupViewModel: { contentId: `v${index}` },
-	}));
 	const { records, messages } = await collectFromDocuments(
-		() => `<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${END_OF_LIST}`,
+		() =>
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${historyBootstrap(["v0", "v1", "v2"])}`,
 		["watch_history"],
 		undefined,
-		{ watch_history: { last_seen_video_id: "v2", position: 2, complete: false } },
+		{
+			watch_history: { last_seen_video_id: "v2", position: 2, complete: false },
+		},
 	);
 
-	const state = messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>;
+	const state = messages.find((message) => message.type === "STATE")
+		?.cursor as Record<string, unknown>;
 	assert.equal(
 		records
 			.get("watch_history")
 			?.some(
-				(record) =>
-					typeof record.position === "number" && record.position > 2,
+				(record) => typeof record.position === "number" && record.position > 2,
 			),
 		false,
 	);
 	assert.equal(state?.complete, true);
 });
 
+test("a repeated bootstrap continuation reports a gap and never completes", async () => {
+	const ids = ["aaaaaaaaaaa"];
+	const { messages, outcome } = await collectFromDocuments(
+		() => `${historyCards(ids)}${historyBootstrap(ids, "bootstrap-C")}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: "bootstrap-C" },
+			],
+		},
+	);
+	assert.deepEqual(outcome("watch_history"), [
+		"stream_collection_failed",
+		"STATE",
+	]);
+	assert.equal(
+		(
+			messages.find((message) => message.type === "STATE")?.cursor as Record<
+				string,
+				unknown
+			>
+		)?.complete,
+		false,
+	);
+});
+
 test("repeated history videos keep the first page occurrence and one primary key", async () => {
 	const page = new FixturePage();
 	page.evaluate = async (fn: Function, arg?: unknown) => {
 		if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
-		if (fn.name === "readVideos" || (typeof arg === "object" && arg !== null && "offset" in arg)) {
+		if (
+			fn.name === "readVideos" ||
+			(typeof arg === "object" && arg !== null && "offset" in arg)
+		) {
 			const request = arg as { offset: number; limit: number };
 			return {
 				offset: request.offset,
@@ -800,7 +893,10 @@ test("repeated history videos keep the first page occurrence and one primary key
 				].slice(request.offset, request.offset + request.limit),
 			};
 		}
-		if (fn.name === "readListEnd" || (typeof arg === "object" && arg !== null && "kind" in arg))
+		if (
+			fn.name === "readListEnd" ||
+			(typeof arg === "object" && arg !== null && "kind" in arg)
+		)
 			return {
 				dataReadable: true,
 				dataItemCount: 2,
@@ -812,7 +908,9 @@ test("repeated history videos keep the first page occurrence and one primary key
 				verifiedEmpty: false,
 				pageBlocked: false,
 				latestHistoryResponse:
-					typeof arg === "object" && arg !== null && "latestHistoryResponse" in arg
+					typeof arg === "object" &&
+					arg !== null &&
+					"latestHistoryResponse" in arg
 						? (arg as { latestHistoryResponse: unknown }).latestHistoryResponse
 						: null,
 			};
@@ -1404,18 +1502,68 @@ const playlistPageData = (itemCount: number, continuation = false) =>
 		}),
 	);
 
+const historyBootstrap = (videoIds: string[], continuation?: string) =>
+	pageData(
+		tabbedData({
+			sectionListRenderer: {
+				contents: [
+					{
+						itemSectionRenderer: {
+							contents: [
+								...videoIds.map((videoId) => ({
+									lockupViewModel: { contentId: videoId },
+								})),
+								...(continuation
+									? [
+											{
+												continuationItemRenderer: {
+													continuationEndpoint: {
+														continuationCommand: { token: continuation },
+													},
+												},
+											},
+										]
+									: []),
+							],
+						},
+					},
+				],
+			},
+		}),
+	);
+
+const historyCards = (videoIds: string[]) =>
+	`<ytd-item-section-renderer>${videoIds
+		.map(
+			(videoId) =>
+				`<yt-lockup-view-model><a href="/watch?v=${videoId}"></a><h3>Seen</h3></yt-lockup-view-model>`,
+		)
+		.join("")}</ytd-item-section-renderer>`;
+
 /** Runs the connector's real page functions against parsed HTML, one page per URL. */
 class DocumentPage {
 	url = "";
 	private readonly responseListeners = new Set<(response: never) => void>();
 	private readonly pageFor: (url: string) => string;
 	private readonly forcedReadiness: "content" | "empty" | undefined;
+	private readonly historyResponsesOnScroll: Array<{
+		requested: string;
+		next: string | null;
+	}>;
+	private pendingHistoryScroll = false;
 	constructor(
 		pageFor: (url: string) => string,
 		forcedReadiness?: "content" | "empty",
+		options: {
+			historyResponsesOnScroll?: Array<{
+				requested: string;
+				next: string | null;
+			}>;
+		} = {},
 	) {
 		this.pageFor = pageFor;
 		this.forcedReadiness = forcedReadiness;
+		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
 	}
 	on(_event: "response", listener: (response: never) => void): this {
 		this.responseListeners.add(listener);
@@ -1427,20 +1575,25 @@ class DocumentPage {
 	}
 	async goto(url: string) {
 		this.url = url;
-		if (url.includes("/feed/history")) this.emitHistoryResponse();
 	}
-	private emitHistoryResponse(): void {
-		const html = this.pageFor(this.url);
-		const hasContinuation = html.includes("continuationItemRenderer");
-		const continuationItems = hasContinuation
-			? [{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }]
+	private emitHistoryResponse(requested: string, next: string | null): void {
+		const continuationItems = next
+			? [
+					{
+						continuationItemRenderer: {
+							continuationEndpoint: { continuationCommand: { token: next } },
+						},
+					},
+				]
 			: [];
 		const response = {
 			url: () => "https://www.youtube.com/youtubei/v1/browse",
-			request: () => ({ postDataJSON: () => ({ browseId: "FEhistory" }) }),
+			request: () => ({ postDataJSON: () => ({ continuation: requested }) }),
 			status: () => 200,
 			json: async () => ({
-				onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems } }],
+				onResponseReceivedActions: [
+					{ appendContinuationItemsAction: { continuationItems } },
+				],
 			}),
 		};
 		for (const listener of this.responseListeners) listener(response as never);
@@ -1453,7 +1606,10 @@ class DocumentPage {
 		};
 	}
 	async waitForTimeout() {
-		/* no renderer delay */
+		if (!this.pendingHistoryScroll) return;
+		this.pendingHistoryScroll = false;
+		const response = this.historyResponsesOnScroll.shift();
+		if (response) this.emitHistoryResponse(response.requested, response.next);
 	}
 	private inPage<T>(run: () => T): T {
 		const { document, window } = parseHTML(this.pageFor(this.url));
@@ -1479,11 +1635,16 @@ class DocumentPage {
 		return { jsonValue: async () => value, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function, arg?: unknown) {
-		return this.inPage(() => {
+		const value = this.inPage(() => {
 			if (fn.name === "hasYoutubeSessionOnCurrentPage")
 				return Boolean(document.querySelector("button#avatar-btn"));
 			return fn(arg);
 		});
+		if (
+			fn.toString().includes("scrollable=Array.from(document.querySelectorAll")
+		)
+			this.pendingHistoryScroll = true;
+		return value;
 	}
 }
 
@@ -1492,6 +1653,7 @@ async function collectFromDocuments(
 	streams: string[],
 	forcedReadiness?: "content" | "empty",
 	state: Record<string, unknown> = {},
+	pageOptions: ConstructorParameters<typeof DocumentPage>[2] = {},
 ) {
 	const records = new Map<string, Record<string, unknown>[]>();
 	const messages: Record<string, unknown>[] = [];
@@ -1504,6 +1666,7 @@ async function collectFromDocuments(
 					: html;
 			},
 			forcedReadiness,
+			pageOptions,
 		) as never,
 		requested: new Map(streams.map((name) => [name, { name }])) as never,
 		state,
@@ -1547,7 +1710,10 @@ test("finding 1: source entries left unread do not prove completion without a ne
 	]);
 	assert.equal(records.get("watch_history")?.length, 1);
 	assert.equal(records.get("subscriptions")?.length, 1);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.deepEqual(outcome("watch_history"), [
+		"stream_collection_failed",
+		"STATE",
+	]);
 	assert.deepEqual(outcome("subscriptions"), ["stream_collection_failed"]);
 });
 
@@ -1583,7 +1749,7 @@ test("playlist item collection continues when playlist header details are unread
 test("finding 1: a list with a next page still pending fails with stream_collection_failed", async () => {
 	const pages = (url: string) =>
 		url.includes("feed/history")
-			? `${historyRow}<ytd-continuation-item-renderer></ytd-continuation-item-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }, { continuationItemRenderer: {} }] } }))}`
+			? `${historyRow}<ytd-continuation-item-renderer></ytd-continuation-item-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }, { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }] } }))}`
 			: `${playlistRow}${headerTotal("5 videos")}<ytd-continuation-item-renderer></ytd-continuation-item-renderer>${playlistPageData(1, true)}`;
 	const { records, outcome } = await collectFromDocuments(pages, [
 		"watch_history",
@@ -1591,7 +1757,10 @@ test("finding 1: a list with a next page still pending fails with stream_collect
 	]);
 	assert.equal(records.get("likes")?.length, 1);
 	assert.deepEqual(outcome("likes"), ["stream_collection_failed"]);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.deepEqual(outcome("watch_history"), [
+		"stream_collection_failed",
+		"STATE",
+	]);
 });
 
 test("history streams all loaded rows and uses latest target response for end evidence", async () => {
@@ -1611,8 +1780,12 @@ test("history streams all loaded rows and uses latest target response for end ev
 	assert.equal(records.get("watch_history")?.length, 60);
 	assert.deepEqual(outcome("watch_history"), ["STATE"]);
 	assert.equal(
-		(messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>)
-		?.complete,
+		(
+			messages.find((message) => message.type === "STATE")?.cursor as Record<
+				string,
+				unknown
+			>
+		)?.complete,
 		true,
 	);
 });
@@ -1620,9 +1793,16 @@ test("history streams all loaded rows and uses latest target response for end ev
 test("latest history response can prove end despite stale bootstrap row counts", async () => {
 	const cases = [false, true];
 	for (const withEndMarker of cases) {
-		const sourceItems = Array.from({ length: 30 }, () => ({
-			lockupViewModel: {},
-		}));
+		const sourceItems = [
+			...Array.from({ length: 30 }, () => ({ lockupViewModel: {} })),
+			{
+				continuationItemRenderer: {
+					continuationEndpoint: {
+						continuationCommand: { token: "bootstrap-C" },
+					},
+				},
+			},
+		];
 		const rows = Array.from(
 			{ length: 60 },
 			(_, n) =>
@@ -1632,15 +1812,119 @@ test("latest history response can prove end despite stale bootstrap row counts",
 			() =>
 				`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${withEndMarker ? END_OF_LIST : ""}`,
 			["watch_history"],
+			undefined,
+			{},
+			{
+				historyResponsesOnScroll: [{ requested: "bootstrap-C", next: null }],
+			},
 		);
 		assert.equal(records.get("watch_history")?.length, 60);
 		assert.deepEqual(outcome("watch_history"), ["STATE"]);
 		assert.equal(
-			(messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>)
-			?.complete,
+			(
+				messages.find((message) => message.type === "STATE")?.cursor as Record<
+					string,
+					unknown
+				>
+			)?.complete,
 			true,
 		);
 	}
+});
+
+test("HTML history bootstrap with one complete page proves end without a browse fetch", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { records, messages, outcome } = await collectFromDocuments(
+		() => `${historyCards(videoIds)}${historyBootstrap(videoIds)}`,
+		["watch_history"],
+		undefined,
+		{},
+		{},
+	);
+	assert.equal(records.get("watch_history")?.length, videoIds.length);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
+	assert.equal(
+		(
+			messages.find((message) => message.type === "STATE")?.cursor as Record<
+				string,
+				unknown
+			>
+		)?.complete,
+		true,
+	);
+});
+
+test("HTML history bootstrap accounts for legacy videoRenderer rows", async () => {
+	const videoId = "legacyvid01";
+	const html = `<ytd-item-section-renderer><ytd-video-renderer><a href="/watch?v=${videoId}"></a><h3>Legacy row</h3></ytd-video-renderer></ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [{ videoRenderer: { videoId } }] } }] } }))}`;
+	const { records, messages, outcome } = await collectFromDocuments(
+		() => html,
+		["watch_history"],
+	);
+	assert.equal(records.get("watch_history")?.length, 1);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
+	assert.equal(
+		(
+			messages.find((message) => message.type === "STATE")?.cursor as Record<
+				string,
+				unknown
+			>
+		)?.complete,
+		true,
+	);
+});
+
+test("HTML history continuation chain is correlated and terminal response beats stale bootstrap token", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { records, messages, outcome } = await collectFromDocuments(
+		() =>
+			`${historyCards(videoIds)}${historyBootstrap(videoIds, "bootstrap-C")}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponsesOnScroll: [{ requested: "bootstrap-C", next: null }],
+		},
+	);
+	assert.equal(records.get("watch_history")?.length, videoIds.length);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
+	assert.equal(
+		(
+			messages.find((message) => message.type === "STATE")?.cursor as Record<
+				string,
+				unknown
+			>
+		)?.complete,
+		true,
+	);
+});
+
+test("second unchanged scroll rechecks newly arrived terminal continuation evidence", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { records, messages, outcome } = await collectFromDocuments(
+		() =>
+			`${historyCards(videoIds)}${historyBootstrap(videoIds, "bootstrap-C")}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: "continuation-D" },
+				{ requested: "continuation-D", next: null },
+			],
+		},
+	);
+	assert.equal(records.get("watch_history")?.length, videoIds.length);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
+	assert.equal(
+		(
+			messages.find((message) => message.type === "STATE")?.cursor as Record<
+				string,
+				unknown
+			>
+		)?.complete,
+		true,
+	);
 });
 
 test("playlist total mismatch cannot be excused by unrelated DOM text", async () => {
@@ -2014,17 +2298,23 @@ test("round 2: source entries left unread with no header total fail the stream",
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 1);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.deepEqual(outcome("watch_history"), [
+		"stream_collection_failed",
+		"STATE",
+	]);
 });
 
 test("round 2: a next page in the source data with no rendered control is not an end", async () => {
 	const { records, outcome } = await collectFromDocuments(
 		() =>
-			`${historyRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }, { continuationItemRenderer: {} }] } }))}`,
+			`${historyRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }, { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }] } }))}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 1);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.deepEqual(outcome("watch_history"), [
+		"stream_collection_failed",
+		"STATE",
+	]);
 });
 
 test("round 2: no stream is ever reported as a bounded browser snapshot", async () => {
@@ -2102,9 +2392,12 @@ test("exactly 50 history items with a next page pending checkpoint partial progr
 		.join("");
 	const { records, outcome } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...ids.map((contentId) => ({ lockupViewModel: { contentId } })), { continuationItemRenderer: {} }] } }))}`,
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [...ids.map((contentId) => ({ lockupViewModel: { contentId } })), { continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "next" } } } }] } }))}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
-	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.deepEqual(outcome("watch_history"), [
+		"stream_collection_failed",
+		"STATE",
+	]);
 });

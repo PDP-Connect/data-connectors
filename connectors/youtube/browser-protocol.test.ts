@@ -25,7 +25,7 @@ const pages: Record<string, string> = {
 	"/playlist?list=LL": card,
 	"/playlist?list=WL": card,
 	"/feed/history":
-		'<button id="avatar-btn">Account</button><ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Yesterday</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=abc123XYZ0"></a><h3 title="Real title"></h3><span class="yt-content-metadata-view-model__metadata-text">1.2K views</span></yt-lockup-view-model></ytd-item-section-renderer><script>fetch("/youtubei/v1/browse", {method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({browseId:"FEhistory"})})</script>',
+		'<button id="avatar-btn">Account</button><ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Yesterday</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=abc123XYZ0"></a><h3 title="Real title"></h3><span class="yt-content-metadata-view-model__metadata-text">1.2K views</span></yt-lockup-view-model></ytd-item-section-renderer><script>var ytInitialData = {"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"selected":true,"content":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":{"contents":[{"videoRenderer":{"videoId":"abc123XYZ0"}}]}}]}}}}]}}};</script>',
 };
 
 test("routed browser collection emits seven schema-valid streams without a Takeout file", async () => {
@@ -177,21 +177,9 @@ test("history waits for delayed client DOM before recording", async () => {
 	try {
 		const page = await browser.newPage();
 		await page.route("https://www.youtube.com/**", async (route) => {
-			if (new URL(route.request().url()).pathname === "/youtubei/v1/browse") {
-				await route.fulfill({
-					status: 200,
-					contentType: "application/json",
-					body: JSON.stringify({
-						onResponseReceivedActions: [
-							{ appendContinuationItemsAction: { continuationItems: [] } },
-						],
-					}),
-				});
-				return;
-			}
 			await route.fulfill({
 				contentType: "text/html",
-				body: `<html><body><button id="avatar-btn">Account</button><script>fetch('/youtubei/v1/browse', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({browseId:'FEhistory'})}); setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Sep 22, 2026</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=delayed123"></a><h3 title="Delayed title"></h3></yt-lockup-view-model></ytd-item-section-renderer>'), 75)</script></body></html>`,
+				body: `<html><body><button id="avatar-btn">Account</button><script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Sep 22, 2026</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=delayed123"></a><h3 title="Delayed title"></h3></yt-lockup-view-model></ytd-item-section-renderer>'), 75)</script></body></html>`,
 			});
 		});
 		const records: Record<string, unknown>[] = [];
@@ -219,10 +207,7 @@ test("history waits for delayed client DOM before recording", async () => {
 		assert.deepEqual(failures, [["watch_history", { retryable: true }]]);
 		assert.equal(skips.length, 1);
 		assert.equal(skips[0]?.type, "STATE");
-		assert.equal(
-			(skips[0]?.cursor as Record<string, unknown>).complete,
-			false,
-		);
+		assert.equal((skips[0]?.cursor as Record<string, unknown>).complete, false);
 	} finally {
 		await browser.close();
 	}

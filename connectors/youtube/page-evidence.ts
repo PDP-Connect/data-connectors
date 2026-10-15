@@ -31,6 +31,9 @@ export interface ListEndRequest {
 export interface HistoryResponseEvidence {
 	readonly recognized: boolean;
 	readonly hasContinuation: boolean;
+	readonly itemCount?: number;
+	/** Total entries added by correlated continuation responses so far. */
+	readonly continuationItemCount?: number;
 	readonly requestedContinuation: string | null;
 	readonly nextContinuation: string | null;
 	readonly repeatedContinuation: boolean;
@@ -43,6 +46,11 @@ export interface ListEnd {
 	readonly dataItemCount: number;
 	/** That region had a next-page continuation at page load. */
 	readonly dataHasContinuation: boolean;
+	/** Bounded continuation tokens from the selected history list at page load. */
+	readonly historyBootstrapContinuationTokens?: readonly string[];
+	/** Recognized entry count inside that selected history list. */
+	readonly historyBootstrapItemCount?: number;
+	readonly historyBootstrapRendererCounts?: Readonly<Record<string, number>>;
 	/** The rendered page still shows a next-page continuation. */
 	readonly domHasContinuation: boolean;
 	/** The "N videos" total the page header declares (playlist pages only). */
@@ -80,14 +88,27 @@ export function readHistoryResponseEvidence(
 ): HistoryResponseEvidence {
 	const tokens = new Set<string>();
 	let recognized = false;
+	let hasContinuation = false;
+	let itemCount = 0;
+	let bounded = true;
+	let visited = 0;
 	const visit = (node: unknown): void => {
+		visited += 1;
+		if (visited > 10000) {
+			bounded = false;
+			return;
+		}
 		if (Array.isArray(node)) {
-			for (const child of node) visit(child);
+			for (const child of node) {
+				if (!bounded) break;
+				visit(child);
+			}
 			return;
 		}
 		const object = asObject(node);
 		if (!object) return;
 		for (const [key, child] of Object.entries(object)) {
+			if (ITEM_KEYS_FOR_HISTORY.has(key)) itemCount += 1;
 			if (
 				key === "appendContinuationItemsAction" ||
 				key === "reloadContinuationItemsCommand" ||
@@ -96,33 +117,65 @@ export function readHistoryResponseEvidence(
 			)
 				recognized = true;
 			if (key === "continuationItemRenderer" && asObject(child)) {
+				hasContinuation = true;
 				const renderer = asObject(child);
 				const endpoint = asObject(renderer?.continuationEndpoint);
 				const command = asObject(endpoint?.continuationCommand);
-				if (typeof command?.token === "string") tokens.add(command.token);
 				const direct = asObject(renderer?.continuationCommand);
-				if (typeof direct?.token === "string") tokens.add(direct.token);
+				const token =
+					typeof command?.token === "string"
+						? command.token
+						: typeof direct?.token === "string"
+							? direct.token
+							: null;
+				if (token && token.length <= 4096) tokens.add(token);
+				else bounded = false;
 			}
 			if (key === "nextContinuationData") {
+				hasContinuation = true;
 				const continuation = asObject(child)?.continuation;
-				if (typeof continuation === "string") tokens.add(continuation);
+				if (
+					typeof continuation === "string" &&
+					continuation.length > 0 &&
+					continuation.length <= 4096
+				)
+					tokens.add(continuation);
+				else bounded = false;
 			}
-			if (key === "continuations" && Array.isArray(child) && child.length > 0)
+			if (key === "continuations" && Array.isArray(child) && child.length > 0) {
 				recognized = true;
+				hasContinuation = true;
+			}
 			visit(child);
+			if (!bounded) break;
 		}
 	};
 	visit(value);
+	if (tokens.size > 8) bounded = false;
 	const nextContinuation = tokens.values().next().value ?? null;
 	return {
-		recognized,
-		hasContinuation: tokens.size > 0,
+		recognized: recognized && bounded,
+		hasContinuation,
+		itemCount,
 		requestedContinuation,
 		nextContinuation,
 		repeatedContinuation:
 			nextContinuation !== null && previouslyRequested.has(nextContinuation),
 	};
 }
+
+const ITEM_KEYS_FOR_HISTORY = new Set([
+	"videoRenderer",
+	"gridVideoRenderer",
+	"playlistVideoRenderer",
+	"playlistPanelVideoRenderer",
+	"compactVideoRenderer",
+	"videoWithContextRenderer",
+	"richItemRenderer",
+	"lockupViewModel",
+	"shortsLockupViewModel",
+	"reelItemRenderer",
+]);
 
 /**
  * True only when the source proves exhaustion: a verified empty list has no
@@ -145,9 +198,11 @@ export function enumerationEnded(
 	const dataHasContinuation = historyResponseIsCurrent
 		? latestHistoryResponse.hasContinuation
 		: end.dataHasContinuation;
+	const historySourceItemCount =
+		end.dataItemCount + (latestHistoryResponse?.continuationItemCount ?? 0);
 	const knownRowsExceedEmitted =
 		(end.domItemCount !== null && end.domItemCount > renderedCount) ||
-		(!historyResponseIsCurrent && end.dataReadable && end.dataItemCount > renderedCount);
+		(end.dataReadable && historySourceItemCount > renderedCount);
 	const renderedRowsMissingFromData =
 		!historyResponseIsCurrent &&
 		end.dataReadable &&
@@ -322,6 +377,55 @@ const PAGE_DATA_HELPERS = String.raw`
 		const selected = renderers.filter((renderer) => renderer.selected === true);
 		return selected.length === 1 && isObject(selected[0].content) ? selected[0].content : null;
 	};
+	const historyBootstrapFacts = (data) => {
+		const region = listRegion(data);
+		const section = isObject(region?.sectionListRenderer) ? region.sectionListRenderer : null;
+		if (!section) return null;
+		const pending = [section];
+		const seen = new Set();
+		const tokens = new Set();
+		let items = 0;
+		const rendererCounts = {};
+		let hasContinuation = false;
+		let visited = 0;
+		let bounded = true;
+		while (pending.length) {
+			const node = pending.pop();
+			if (Array.isArray(node)) {
+				for (const child of node) pending.push(child);
+				continue;
+			}
+			if (!isObject(node) || seen.has(node)) continue;
+			seen.add(node);
+			visited += 1;
+			if (visited > 10000) { bounded = false; break; }
+			for (const [key, child] of Object.entries(node)) {
+				if (ITEM_KEYS.includes(key)) { items += 1; rendererCounts[key] = (rendererCounts[key] ?? 0) + 1; continue; }
+				if (key === "continuationItemRenderer" && isObject(child)) {
+					hasContinuation = true;
+					const command = child.continuationEndpoint?.continuationCommand ?? child.continuationCommand;
+					if (typeof command?.token === "string" && command.token.length > 0 && command.token.length <= 4096) tokens.add(command.token);
+					else bounded = false;
+				}
+				if (key === "nextContinuationData") {
+					hasContinuation = true;
+					if (typeof child?.continuation === "string" && child.continuation.length > 0 && child.continuation.length <= 4096) tokens.add(child.continuation);
+					else bounded = false;
+				}
+				if (key === "continuations" && Array.isArray(child)) {
+					if (child.length > 0) hasContinuation = true;
+					for (const continuation of child) {
+						const token = continuation?.nextContinuationData?.continuation;
+						if (typeof token === "string" && token.length > 0 && token.length <= 4096) tokens.add(token);
+						else bounded = false;
+					}
+				}
+				if (isObject(child) || Array.isArray(child)) pending.push(child);
+			}
+		}
+		if (tokens.size > 8) bounded = false;
+		return { items, rendererCounts, tokens: bounded ? Array.from(tokens) : [], hasContinuation, bounded };
+	};
 	const hasSelectedTabContent = (data) => {
 		const contents = isObject(data) ? data.contents : null;
 		if (!isObject(contents)) return false;
@@ -396,6 +500,14 @@ const PAGE_DATA_HELPERS = String.raw`
 		}
 		return candidates.map((data) => regionFacts(data, playlistIndex)).filter((facts) => facts !== null);
 	};
+	const historyDataFacts = () => {
+		const candidates = [window.ytInitialData];
+		for (const script of Array.from(document.querySelectorAll("script"))) {
+			const parsed = readJsonText(script.textContent ?? "");
+			if (parsed) candidates.push(parsed);
+		}
+		return candidates.map(historyBootstrapFacts).filter((facts) => facts !== null);
+	};
 `;
 
 const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
@@ -418,6 +530,7 @@ const LIST_END_FUNCTION = `(request) => {
 	const kind = typeof request === "string" ? request : request.kind;
 	const sessionPresent = typeof request === "string" ? true : request.sessionPresent !== false;
 	const facts = pageDataFacts(kind === "playlist-index");
+	const historyFacts = kind === "history" ? historyDataFacts() : [];
 	let declaredTotal = null;
 	if (kind === "playlist") {
 		const nodes = document.querySelectorAll(".yt-content-metadata-view-model__metadata-text, .ytContentMetadataViewModelMetadataText");
@@ -429,7 +542,13 @@ const LIST_END_FUNCTION = `(request) => {
 		}
 	}
 	let domItemCount = null;
-	if (kind === "history") domItemCount = document.querySelectorAll("yt-lockup-view-model").length;
+	if (kind === "history") {
+		domItemCount = Array.from(document.querySelectorAll(
+			"ytd-item-section-renderer yt-lockup-view-model, ytd-item-section-renderer ytd-video-renderer",
+		)).filter((node) =>
+			!node.matches("ytd-video-renderer") || !node.querySelector("yt-lockup-view-model"),
+		).length;
+	}
 	if (kind === "playlist")
 		domItemCount = document.querySelectorAll("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer").length;
 	if (kind === "subscriptions") domItemCount = document.querySelectorAll("ytd-channel-renderer").length;
@@ -452,9 +571,20 @@ const LIST_END_FUNCTION = `(request) => {
 	return {
 		// A region with no recognized entry (an error, an unrelated payload) shows
 		// neither a last page nor a next page, so it is not readable evidence.
-		dataReadable: facts.some((f) => f.items > 0),
-		dataItemCount: facts.reduce((most, f) => Math.max(most, f.items), 0),
-		dataHasContinuation: facts.some((f) => f.continuation),
+		dataReadable: kind === "history"
+			? historyFacts.some((f) => f.bounded && f.items > 0)
+			: facts.some((f) => f.items > 0),
+		dataItemCount: kind === "history"
+			? historyFacts.reduce((most, f) => Math.max(most, f.items), 0)
+			: facts.reduce((most, f) => Math.max(most, f.items), 0),
+		dataHasContinuation: kind === "history"
+			? historyFacts.some((f) => f.hasContinuation)
+			: facts.some((f) => f.continuation),
+		...(kind === "history" ? {
+			historyBootstrapContinuationTokens: historyFacts.flatMap((f) => f.tokens).slice(0, 8),
+			historyBootstrapItemCount: historyFacts.reduce((most, f) => Math.max(most, f.items), 0),
+			historyBootstrapRendererCounts: historyFacts.reduce((most, f) => f.items > most.items ? f : most, { items: 0, rendererCounts: {} }).rendererCounts,
+		} : {}),
 		domHasContinuation: Boolean(document.querySelector(continuationSelector)),
 		declaredTotal,
 		domItemCount,
