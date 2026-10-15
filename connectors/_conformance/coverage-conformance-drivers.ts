@@ -1451,6 +1451,11 @@ export const KNOWN_UNEXERCISED_COVERAGE: ReadonlySet<string> = new Set([
 	"oura_browser.sleep",
 	"oura_browser.readiness",
 	"oura_browser.activity",
+	// Perplexity: auth-walled www.perplexity.ai browser-session collection
+	// behind a Cloudflare check, with no credential-free coverage driver yet.
+	// Development tier; its tests drive the collector against a synthetic
+	// library instead.
+	"perplexity.conversations",
 	"slack.channels",
 	"slack.channel_memberships",
 	"slack.channel_stats",
