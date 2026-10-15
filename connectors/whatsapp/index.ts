@@ -31,6 +31,7 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
 	buildDetailCoverageMessage,
+	declaredBoundSkip,
 	type EmittedMessage,
 	type ProgressExtra,
 	resumeSafeSkip,
@@ -370,12 +371,14 @@ async function parseZipExportFile(
 	} catch (err) {
 		if (err instanceof WhatsAppZipPolicyRejection) {
 			closeSource();
-			await emit({
-				message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: exceeds the safe archive read policy (${err.message}).`,
-				reason: "import_exceeds_bounded_read_policy",
-				stream: skipStream,
-				type: "SKIP_RESULT",
-			});
+			await emit(
+				declareExportSkip({
+					message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: exceeds the safe archive read policy (${err.message}).`,
+					reason: "import_exceeds_bounded_read_policy",
+					stream: skipStream,
+					type: "SKIP_RESULT",
+				}),
+			);
 			return { closeSource: () => undefined, source: null };
 		}
 		closeSource();
@@ -383,12 +386,14 @@ async function parseZipExportFile(
 	}
 	if (!artifact) {
 		closeSource();
-		await emit({
-			message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: not a supported chat export.`,
-			reason: "unsupported_export",
-			stream: skipStream,
-			type: "SKIP_RESULT",
-		});
+		await emit(
+			declareExportSkip({
+				message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: not a supported chat export.`,
+				reason: "unsupported_export",
+				stream: skipStream,
+				type: "SKIP_RESULT",
+			}),
+		);
 		return { closeSource: () => undefined, source: null };
 	}
 	return {
@@ -578,8 +583,35 @@ async function skipParseExport(
 	skipStream: string,
 	closeSource: () => void = () => undefined,
 ): Promise<ParseExportOutcome> {
-	await emit({ message, reason, stream: skipStream, type: "SKIP_RESULT" });
+	await emit(
+		declareExportSkip({
+			message,
+			reason,
+			stream: skipStream,
+			type: "SKIP_RESULT",
+		}),
+	);
 	return { closeSource, result: null };
+}
+
+/**
+ * Declare a whole-export skip so the run's STATE still passes.
+ *
+ *   - `unsupported_export`: the file parsed as no WhatsApp chat export, so it
+ *     is not a source this connector reads (`unsupported_input`).
+ *   - any other export skip (`import_exceeds_bounded_read_policy`,
+ *     `empty_export`): resume-safe, `cursor_excludes_loss`. Every run
+ *     re-parses every export file (the read ignores STATE), and the STATE is
+ *     a fingerprint set written after `pruneRequestedCursors` drops every id
+ *     this run did not see, so no row of the skipped export stays in it and
+ *     the next run that can read the file emits its rows again.
+ */
+function declareExportSkip(
+	msg: Extract<EmittedMessage, { type: "SKIP_RESULT" }>,
+): Extract<EmittedMessage, { type: "SKIP_RESULT" }> {
+	return msg.reason === "unsupported_export"
+		? declaredBoundSkip(msg, "unsupported_input")
+		: resumeSafeSkip(msg, "cursor_excludes_loss");
 }
 
 async function parseZipExportOutcome(

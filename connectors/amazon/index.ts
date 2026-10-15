@@ -35,6 +35,7 @@ import {
 	emitDetailCoverage,
 	nowIso,
 	politeDelay,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -2020,20 +2021,29 @@ async function runYear(
 	// Bounded per-year coverage evidence: a year that silently drops order rows
 	// with an unparseable order date must not look complete. One count-only
 	// SKIP_RESULT per year (no raw order ids) instead of a per-item flood.
+	// Resume-safe: applyYearCompletionState leaves this year's `years` entry
+	// at its previous checkpoint when rows were dropped, and dropped rows never
+	// reach the fingerprint or hydrated-order maps, so the `orders` STATE that
+	// follows does not move past them.
 	if (unparseableDateCount > 0) {
-		await deps.emit({
-			type: "SKIP_RESULT",
-			stream: "orders",
-			reason: "unparseable_order_date",
-			message: `Amazon year ${year}: dropped ${unparseableDateCount} order row${
-				unparseableDateCount === 1 ? "" : "s"
-			} with unparseable dates (of ${yearOrderCount} seen)`,
-			diagnostics: {
-				dropped: unparseableDateCount,
-				total_seen: yearOrderCount,
-				year,
-			},
-		});
+		await deps.emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "orders",
+					reason: "unparseable_order_date",
+					message: `Amazon year ${year}: dropped ${unparseableDateCount} order row${
+						unparseableDateCount === 1 ? "" : "s"
+					} with unparseable dates (of ${yearOrderCount} seen)`,
+					diagnostics: {
+						dropped: unparseableDateCount,
+						total_seen: yearOrderCount,
+						year,
+					},
+				},
+				"cursor_at_or_before_loss",
+			),
+		);
 	}
 	// A truncated year is reported to the owner as a deferred remainder, never
 	// left to read as a finished year. `..._deferred` is load-bearing: the
@@ -2041,14 +2051,26 @@ async function runYear(
 	// a deferred-matching reason maps to the `deferred` axis instead of
 	// `terminal_gap` — the remaining orders are postponed by a page budget, not
 	// permanently unreachable.
+	// Resume-safe: applyYearCompletionState returns early for a truncated year,
+	// so the `orders` STATE that follows keeps this year's previous `years`
+	// entry and the unread pages were never fingerprinted.
 	if (walk.truncated) {
-		await deps.emit({
-			type: "SKIP_RESULT",
-			stream: "orders",
-			reason: "older_pages_deferred_page_budget",
-			message: `Amazon year ${year}: stopped at the ${PAGE_LIMIT}-page limit with more orders still listed`,
-			diagnostics: { page_limit: PAGE_LIMIT, total_seen: yearOrderCount, year },
-		});
+		await deps.emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "orders",
+					reason: "older_pages_deferred_page_budget",
+					message: `Amazon year ${year}: stopped at the ${PAGE_LIMIT}-page limit with more orders still listed`,
+					diagnostics: {
+						page_limit: PAGE_LIMIT,
+						total_seen: yearOrderCount,
+						year,
+					},
+				},
+				"cursor_at_or_before_loss",
+			),
+		);
 	}
 	return {
 		orderCount: yearOrderCount,

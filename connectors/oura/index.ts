@@ -31,6 +31,7 @@ import {
 import {
 	type CollectContext,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
@@ -320,9 +321,10 @@ function sinceFor(
 	const priorDay = streamState?.last_day;
 	const scopeReq = requested.get(stream);
 	const rawScopeSince = scopeReq?.time_range?.since;
-	const scopeSince = rawScopeSince && !Number.isNaN(Date.parse(rawScopeSince))
-		? new Date(Date.parse(rawScopeSince)).toISOString().slice(0, 10)
-		: undefined;
+	const scopeSince =
+		rawScopeSince && !Number.isNaN(Date.parse(rawScopeSince))
+			? new Date(Date.parse(rawScopeSince)).toISOString().slice(0, 10)
+			: undefined;
 	return priorDay || scopeSince || null;
 }
 
@@ -361,21 +363,31 @@ async function runStream<T extends OuraRow>(
 	}
 
 	if (truncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: streamName,
-			reason: "older_pages_deferred_page_budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			// The ceiling reported here is the one actually enforced, not the module
-			// default — otherwise a lowered cap would disclose a limit the walk
-			// never applied.
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
-			diagnostics: {
-				page_limit: maxPages,
-				total_seen: rows.length,
-				unread_pages: 1,
-			},
-		});
+		// Resume-safe: the STATE below keeps `priorDay` when `truncated`, so the
+		// next run starts at the same `start_date` and reads the unread pages.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: streamName,
+					reason: "older_pages_deferred_page_budget",
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+					// The ceiling reported here is the one actually enforced, not the
+					// module default — otherwise a lowered cap would disclose a limit
+					// the walk never applied.
+					message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+					diagnostics: {
+						page_limit: maxPages,
+						total_seen: rows.length,
+						unread_pages: 1,
+					},
+				},
+				"cursor_at_or_before_loss",
+			),
+		);
 	}
 
 	await emit({
@@ -430,18 +442,28 @@ async function collectSleep(
 	const streamState = state[streamName] as { last_day?: string } | undefined;
 	const priorDay: string | null = streamState?.last_day || null;
 	if (truncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: streamName,
-			reason: "older_pages_deferred_page_budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
-			diagnostics: {
-				page_limit: maxPages,
-				total_seen: sessions.rows.length,
-				unread_pages: 1,
-			},
-		});
+		// Resume-safe: the STATE right below re-saves `priorDay`, so the next
+		// run starts at the same `start_date` and reads the unread pages.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: streamName,
+					reason: "older_pages_deferred_page_budget",
+					recovery_hint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+					message: `Oura ${streamName} stopped at the ${String(maxPages)}-page limit with more days still listed`,
+					diagnostics: {
+						page_limit: maxPages,
+						total_seen: sessions.rows.length,
+						unread_pages: 1,
+					},
+				},
+				"cursor_at_or_before_loss",
+			),
+		);
 		await emit({
 			type: "STATE",
 			stream: streamName,

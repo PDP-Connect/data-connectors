@@ -42,6 +42,7 @@ import {
 	type CollectContext,
 	emitDetailCoverage,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -406,16 +407,24 @@ export async function collectGoogleContacts(
 		peopleCursor.dropUnseenIds();
 	}
 	if (result.truncated) {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream: "people",
-			reason: "older_pages_deferred_page_budget",
-			// The ceiling reported here is the one actually enforced, not the module
-			// default — otherwise a lowered cap would disclose a limit the walk
-			// never applied.
-			message: `Google Contacts stopped at the ${String(maxPages)}-page limit with more people listed`,
-			diagnostics: { page_limit: maxPages, unread_pages: 1 },
-		});
+		// Resume-safe: a truncated walk returns the sync token it started from
+		// (or none), never the new one (syncPeoplePages), so the STATE below
+		// replays the same delta or full listing next run.
+		await ctx.emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "people",
+					reason: "older_pages_deferred_page_budget",
+					// The ceiling reported here is the one actually enforced, not the
+					// module default — otherwise a lowered cap would disclose a limit
+					// the walk never applied.
+					message: `Google Contacts stopped at the ${String(maxPages)}-page limit with more people listed`,
+					diagnostics: { page_limit: maxPages, unread_pages: 1 },
+				},
+				"cursor_at_or_before_loss",
+			),
+		);
 	}
 	const nextPeopleState: PeopleState = {
 		...(result.nextSyncToken
