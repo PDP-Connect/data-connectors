@@ -25,9 +25,9 @@ import type { RunRecord } from "./observation.ts";
 import { redactStderrTail } from "./reference-implementation-stand-in/runtime/stderr-redact.ts";
 
 export interface RunSummarySkipResult {
-	stream: string;
-	reason: string;
 	diagnostics?: unknown;
+	reason: string;
+	stream: string;
 }
 
 export interface RunSummaryStream {
@@ -124,8 +124,8 @@ export interface RunSummary {
 	 * written before this field existed.
 	 */
 	run_record?: RunRecord;
-	skips: number;
 	skip_results: readonly RunSummarySkipResult[];
+	skips: number;
 	started_at: string;
 	streams: Record<string, RunSummaryStream>;
 	tool_version: string;
@@ -248,6 +248,7 @@ function summarizeDoneError(
 const SAFE_DIAGNOSTIC_LABEL_KEYS = new Set([
 	"field",
 	"reason",
+	"row_reason",
 	"type",
 	"kind",
 	"code",
@@ -255,7 +256,7 @@ const SAFE_DIAGNOSTIC_LABEL_KEYS = new Set([
 	"name",
 ]);
 const DIAGNOSTIC_COUNT_KEY =
-	/^(?:count|total|page_count|(?:[a-z][a-z0-9_]*_)?(?:count|rows|total))$/;
+	/^(?:count|total|length|row_index|rows_seen|source_rows_seen|note_rows_seen|page_count|(?:[a-z][a-z0-9_]*_)?(?:count|rows|total))$/;
 const MAX_DIAGNOSTIC_DEPTH = 8;
 const MAX_DIAGNOSTIC_ENTRIES = 100;
 const DIAGNOSTIC_LABEL = /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/;
@@ -281,11 +282,16 @@ function sanitizeDiagnosticValue(
 	key: string | undefined,
 	depth: number,
 ): unknown {
-	if (depth > MAX_DIAGNOSTIC_DEPTH) return { type: "truncated" };
+	if (depth > MAX_DIAGNOSTIC_DEPTH) {
+		return { type: "truncated" };
+	}
 	if (typeof value === "string") {
-		if (key === "keys") return safeDiagnosticLabel(value);
-		if (key && SAFE_DIAGNOSTIC_LABEL_KEYS.has(key))
+		if (key === "keys") {
 			return safeDiagnosticLabel(value);
+		}
+		if (key && SAFE_DIAGNOSTIC_LABEL_KEYS.has(key)) {
+			return safeDiagnosticLabel(value);
+		}
 		return { type: "string", length: value.length };
 	}
 	if (typeof value === "number") {
@@ -293,14 +299,20 @@ function sanitizeDiagnosticValue(
 			? value
 			: { type: "number" };
 	}
-	if (typeof value === "boolean") return { type: "boolean" };
-	if (value === null) return { type: "null" };
+	if (typeof value === "boolean") {
+		return { type: "boolean" };
+	}
+	if (value === null) {
+		return { type: "null" };
+	}
 	if (Array.isArray(value)) {
 		return value
 			.slice(0, MAX_DIAGNOSTIC_ENTRIES)
 			.map((entry) => sanitizeDiagnosticValue(entry, key, depth + 1));
 	}
-	if (typeof value !== "object") return { type: typeof value };
+	if (typeof value !== "object") {
+		return { type: typeof value };
+	}
 
 	const entries = Object.entries(value).slice(0, MAX_DIAGNOSTIC_ENTRIES);
 	const output: Record<string, unknown> = {};
@@ -312,8 +324,9 @@ function sanitizeDiagnosticValue(
 			depth + 1,
 		);
 	}
-	if (Object.keys(value).length > MAX_DIAGNOSTIC_ENTRIES)
+	if (Object.keys(value).length > MAX_DIAGNOSTIC_ENTRIES) {
 		output.truncated_keys = Object.keys(value).length - MAX_DIAGNOSTIC_ENTRIES;
+	}
 	return output;
 }
 

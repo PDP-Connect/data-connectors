@@ -116,15 +116,17 @@ export function extractCleanText(decompressed: Uint8Array): string | null {
  *  is not documented and has been observed to vary. Returns null if the
  *  input can't be decoded under any tried format or contains no
  *  extractable prose. */
-export function extractNoteText(base64Data: unknown): string | null {
-	if (typeof base64Data !== "string" || base64Data.length === 0) {
-		return null;
-	}
+type NoteTextExtraction =
+	| { kind: "READ"; value: string }
+	| { kind: "EXPLICIT_EMPTY" }
+	| { kind: "UNAVAILABLE"; reason: "body_text_unreadable" };
+
+function readCompressedNoteText(base64Data: string): NoteTextExtraction {
 	let bytes: Buffer;
 	try {
 		bytes = Buffer.from(base64Data, "base64");
 	} catch {
-		return null;
+		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 	}
 	for (const format of DECOMPRESS_FORMATS) {
 		const decompressed = decompressBytes(bytes, format);
@@ -132,11 +134,15 @@ export function extractNoteText(base64Data: unknown): string | null {
 			continue;
 		}
 		const text = extractCleanText(decompressed);
-		if (text) {
-			return text;
-		}
+		return text ? { kind: "READ", value: text } : { kind: "EXPLICIT_EMPTY" };
 	}
-	return null;
+	return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+}
+
+export function extractNoteText(base64Data: unknown): string | null {
+	if (typeof base64Data !== "string" || base64Data.length === 0) return null;
+	const result = readCompressedNoteText(base64Data);
+	return result.kind === "READ" ? result.value : null;
 }
 
 // ─── CloudKit field access ───────────────────────────────────────────────
@@ -144,11 +150,27 @@ export function extractNoteText(base64Data: unknown): string | null {
 export type FieldRead<T> =
 	| { kind: "READ"; value: T }
 	| { kind: "EXPLICIT_EMPTY"; value: T }
-	| { kind: "UNAVAILABLE"; reason: string };
+	| {
+			kind: "UNAVAILABLE";
+			reason: string;
+			source_shape: SourceValueShape;
+	  };
+
+export interface SourceValueShape {
+	type: string;
+	keys?: string[];
+	length?: number;
+}
+
+export interface FieldOmission {
+	field: string;
+	reason: string;
+	source_shape: SourceValueShape;
+}
 
 export interface RecordRead<T> {
 	record: T | null;
-	unavailableFields: Array<{ field: string; reason: string }>;
+	unavailableFields: FieldOmission[];
 }
 
 function read<T>(value: T): FieldRead<T> {
@@ -159,8 +181,37 @@ function explicitEmpty<T>(value: T): FieldRead<T> {
 	return { kind: "EXPLICIT_EMPTY", value };
 }
 
-function unavailable<T>(reason: string): FieldRead<T> {
-	return { kind: "UNAVAILABLE", reason };
+function sourceValueShape(value: unknown): SourceValueShape {
+	if (value === null) return { type: "null" };
+	if (Array.isArray(value)) return { type: "array", length: value.length };
+	if (value === undefined) return { type: "undefined" };
+	if (typeof value === "string")
+		return { type: "string", length: value.length };
+	if (typeof value === "object") {
+		return { type: "object", keys: Object.keys(value).sort().slice(0, 32) };
+	}
+	return { type: typeof value };
+}
+
+const NO_SOURCE_VALUE = Symbol("no-source-value");
+
+function unavailable<T>(
+	reason: string,
+	sourceValue: unknown | typeof NO_SOURCE_VALUE = NO_SOURCE_VALUE,
+	shapeOverride?: SourceValueShape,
+): FieldRead<T> {
+	return {
+		kind: "UNAVAILABLE",
+		reason,
+		...(shapeOverride
+			? { source_shape: shapeOverride }
+			: {
+					source_shape:
+						sourceValue === NO_SOURCE_VALUE
+							? { type: "unknown" }
+							: sourceValueShape(sourceValue),
+				}),
+	};
 }
 
 function fieldValue(
@@ -170,7 +221,7 @@ function fieldValue(
 	// CloudKit omits sparse optional keys. Omission is not an explicit empty
 	// value: callers need that distinction to leave the row uncovered.
 	if (!fields || !Object.hasOwn(fields, name)) {
-		return unavailable("missing_field");
+		return unavailable("missing_field", undefined, { type: "missing" });
 	}
 	const field: unknown = fields[name];
 	if (
@@ -181,7 +232,7 @@ function fieldValue(
 			typeof (field as { type?: unknown }).type !== "string") ||
 		!Object.hasOwn(field, "value")
 	) {
-		return unavailable("malformed_field_wrapper");
+		return unavailable("malformed_field_wrapper", field);
 	}
 	const value = (field as { value: unknown }).value;
 	return value === null ? explicitEmpty(null) : read(value);
@@ -198,9 +249,10 @@ function textField(
 	const raw = fieldValue(fields, name);
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null) return explicitEmpty(null);
-	if (typeof raw.value !== "string") return unavailable("expected_base64_text");
+	if (typeof raw.value !== "string")
+		return unavailable("expected_base64_text", raw.value);
 	const value = decodeBase64Text(raw.value);
-	if (value === null) return unavailable("invalid_base64_text");
+	if (value === null) return unavailable("invalid_base64_text", raw.value);
 	return value.length === 0 ? explicitEmpty("") : read(value);
 }
 
@@ -216,7 +268,7 @@ function referenceField(
 		if (list.kind === "UNAVAILABLE") return list;
 		if (list.value === null) return explicitEmpty(null);
 		if (!Array.isArray(list.value))
-			return unavailable("expected_folder_reference_list");
+			return unavailable("expected_folder_reference_list", list.value);
 		if (list.value.length === 0) return explicitEmpty(null);
 		const first: unknown = list.value[0];
 		if (
@@ -226,7 +278,7 @@ function referenceField(
 			typeof (first as { recordName?: unknown }).recordName !== "string" ||
 			(first as { recordName: string }).recordName.length === 0
 		) {
-			return unavailable("malformed_folder_reference");
+			return unavailable("malformed_folder_reference", first);
 		}
 		return read((first as { recordName: string }).recordName);
 	}
@@ -240,7 +292,7 @@ function referenceField(
 				"string" ||
 			(directValue.value as { recordName: string }).recordName.length === 0
 		) {
-			return unavailable("malformed_folder_reference");
+			return unavailable("malformed_folder_reference", directValue.value);
 		}
 		return read((directValue.value as { recordName: string }).recordName);
 	}
@@ -256,7 +308,7 @@ function booleanField(
 	if (raw.value === null) return explicitEmpty(false);
 	if (raw.value === true || raw.value === 1) return read(true);
 	if (raw.value === false || raw.value === 0) return read(false);
-	return unavailable("expected_boolean_flag");
+	return unavailable("expected_boolean_flag", raw.value);
 }
 
 function deletedField(
@@ -267,7 +319,7 @@ function deletedField(
 	if (raw.value === null) return explicitEmpty(false);
 	if (raw.value === true || raw.value === 1) return read(true);
 	if (raw.value === false || raw.value === 0) return read(false);
-	return unavailable("expected_deleted_flag");
+	return unavailable("expected_deleted_flag", raw.value);
 }
 
 function recordTimestamp(
@@ -300,14 +352,21 @@ function attachmentsField(
 	const raw = fieldValue(fields, "Attachments");
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null) return explicitEmpty(false);
-	if (!Array.isArray(raw.value)) return unavailable("expected_attachment_list");
+	if (!Array.isArray(raw.value))
+		return unavailable("expected_attachment_list", raw.value);
 	if (
 		raw.value.some(
 			(item) =>
 				typeof item !== "object" || item === null || Array.isArray(item),
 		)
 	) {
-		return unavailable("malformed_attachment_reference");
+		return unavailable(
+			"malformed_attachment_reference",
+			raw.value.find(
+				(item) =>
+					typeof item !== "object" || item === null || Array.isArray(item),
+			),
+		);
 	}
 	return raw.value.length === 0 ? explicitEmpty(false) : read(true);
 }
@@ -324,16 +383,18 @@ function timestampField(
 		if (!fallbackPresent) return raw;
 		const fallbackIso = epochMsToIso(fallback);
 		return fallbackIso === null
-			? unavailable("invalid_fallback_timestamp")
+			? unavailable("invalid_fallback_timestamp", fallback)
 			: read(fallbackIso);
 	}
 	if (raw.value === null) {
 		if (!fallbackPresent) return explicitEmpty(null);
 		const iso = epochMsToIso(fallback);
-		return iso === null ? unavailable("invalid_fallback_timestamp") : read(iso);
+		return iso === null
+			? unavailable("invalid_fallback_timestamp", fallback)
+			: read(iso);
 	}
 	const iso = epochMsToIso(raw.value);
-	return iso === null ? unavailable("invalid_timestamp") : read(iso);
+	return iso === null ? unavailable("invalid_timestamp", raw.value) : read(iso);
 }
 
 function bodyTextField(
@@ -342,18 +403,26 @@ function bodyTextField(
 	const raw = fieldValue(fields, "TextDataEncrypted");
 	if (raw.kind === "UNAVAILABLE") return raw;
 	if (raw.value === null || raw.value === "") return explicitEmpty(null);
-	if (typeof raw.value !== "string") return unavailable("expected_base64_body");
-	if (!isBase64(raw.value)) return unavailable("invalid_base64_body");
-	const text = extractNoteText(raw.value);
-	return text === null ? unavailable("body_text_unreadable") : read(text);
+	if (typeof raw.value !== "string")
+		return unavailable("expected_base64_body", raw.value);
+	if (!isBase64(raw.value))
+		return unavailable("invalid_base64_body", raw.value);
+	const extraction = readCompressedNoteText(raw.value);
+	if (extraction.kind === "UNAVAILABLE")
+		return unavailable(extraction.reason, raw.value);
+	return extraction.kind === "EXPLICIT_EMPTY"
+		? explicitEmpty(null)
+		: read(extraction.value);
 }
 
 function collectUnavailableFields(
 	fields: Record<string, FieldRead<unknown>>,
-): Array<{ field: string; reason: string }> {
+): FieldOmission[] {
 	return Object.entries(fields)
 		.flatMap(([field, result]) =>
-			result.kind === "UNAVAILABLE" ? [{ field, reason: result.reason }] : [],
+			result.kind === "UNAVAILABLE"
+				? [{ field, reason: result.reason, source_shape: result.source_shape }]
+				: [],
 		)
 		.sort((left, right) =>
 			left.field === right.field
@@ -416,7 +485,13 @@ export function readNoteRecord(
 	if (recordName === null) {
 		return {
 			record: null,
-			unavailableFields: [{ field: "id", reason: "missing_record_id" }],
+			unavailableFields: [
+				{
+					field: "id",
+					reason: "missing_record_id",
+					source_shape: { type: "missing" },
+				},
+			],
 		};
 	}
 	const fields = record.fields;
@@ -442,7 +517,11 @@ export function readNoteRecord(
 	const textContent = bodyTextField(fields);
 	let folderName: FieldRead<string | null>;
 	if (folderId.kind === "UNAVAILABLE") {
-		folderName = unavailable("folder_reference_unavailable");
+		folderName = unavailable(
+			"folder_reference_unavailable",
+			undefined,
+			folderId.source_shape,
+		);
 	} else if (folderId.value === null) {
 		folderName = explicitEmpty(null);
 	} else {
@@ -450,12 +529,13 @@ export function readNoteRecord(
 		if (resolved !== undefined) {
 			folderName = read(resolved);
 		} else if (options.unavailableFolderIds?.has(folderId.value)) {
-			folderName = unavailable("folder_name_unavailable");
+			folderName = unavailable("folder_name_unavailable", folderId.value);
 		} else {
 			folderName = unavailable(
 				options.folderScanComplete === true
 					? "folder_name_unresolved"
 					: "folder_projection_incomplete",
+				folderId.value,
 			);
 		}
 	}
@@ -509,13 +589,19 @@ export function readFolderRecord(
 	if (recordName === null) {
 		return {
 			record: null,
-			unavailableFields: [{ field: "id", reason: "missing_record_id" }],
+			unavailableFields: [
+				{
+					field: "id",
+					reason: "missing_record_id",
+					source_shape: { type: "missing" },
+				},
+			],
 		};
 	}
 	const title = textField(record.fields, "TitleEncrypted");
 	const name =
 		title.kind === "UNAVAILABLE"
-			? unavailable<string | null>(title.reason)
+			? unavailable<string | null>(title.reason, undefined, title.source_shape)
 			: title.value === null || title.value.length === 0
 				? explicitEmpty(recordName)
 				: title;
@@ -526,7 +612,13 @@ export function readFolderRecord(
 		},
 		unavailableFields:
 			name.kind === "UNAVAILABLE"
-				? [{ field: "name", reason: name.reason }]
+				? [
+						{
+							field: "name",
+							reason: name.reason,
+							source_shape: name.source_shape,
+						},
+					]
 				: [],
 	};
 }

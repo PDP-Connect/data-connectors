@@ -20,6 +20,17 @@ runConnector({
 			message: "one row withheld",
 			diagnostics: {
 				omitted_rows: 1,
+				source_rows_seen: 3,
+				note_rows_seen: 2,
+				deleted_note_rows: 1,
+				omitted_row_diagnostics: [
+					{
+						row_index: 3,
+						field_count: 1,
+						field_omissions: [],
+						row_reason: "unavailable_fields",
+					},
+				],
 				field_omissions: [
 					{
 						field: "TextDataEncrypted",

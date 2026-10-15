@@ -463,7 +463,7 @@ test("collectAllStreams: refuses malformed successful envelopes and does not che
 	}
 });
 
-test("collectAllStreams: a failed folder query does not prevent notes collection", async () => {
+test("collectAllStreams: a failed folder query leaves notes withheld without a folder projection", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const page = makeFakePage([
 		{
@@ -473,15 +473,26 @@ test("collectAllStreams: a failed folder query does not prevent notes collection
 		noteQueryResponse(),
 	]);
 	await collectAllStreams(makeCtx(page, harness, ["folders", "notes"]));
-	assert.deepEqual(
-		harness.emitted.map((record) => record.stream),
-		["notes"],
-	);
+	assert.equal(harness.emitted.length, 0);
 	assert.ok(
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" && message.stream === "folders",
 		),
+	);
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.stream === "notes" &&
+				message.reason === "icloud_omitted_rows",
+		),
+	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
 	);
 });
 
@@ -687,27 +698,9 @@ test("collectAllStreams: unreadable mapped fields are reported and veto both str
 	await collectAllStreams(makeCtx(page, harness, ["folders", "notes"]));
 	assert.equal(
 		harness.emitted.length,
-		4,
-		"rows with partial readability are still emitted",
+		0,
+		"rows with any unreadable mapped field must be withheld entirely",
 	);
-	const unreadableFolder = harness.emitted.find(
-		(row) =>
-			row.stream === "folders" && row.data.id === "folder-unreadable-title",
-	);
-	assert.equal(unreadableFolder?.data.name, null);
-	assert.equal(
-		harness.emitted.find(
-			(row) =>
-				row.stream === "folders" &&
-				row.data.id === "folder-invalid-title-encoding",
-		)?.data.name,
-		null,
-	);
-	const unreadableNote = harness.emitted.find(
-		(row) => row.stream === "notes" && row.data.id === "note-unreadable-fields",
-	);
-	assert.equal(unreadableNote?.data.title, null);
-	assert.equal(unreadableNote?.data.is_pinned, null);
 
 	for (const stream of ["folders", "notes"] as const) {
 		assert.equal(
@@ -730,6 +723,77 @@ test("collectAllStreams: unreadable mapped fields are reported and veto both str
 		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
 	);
 	assert.ok(noteSkip && noteSkip.type === "SKIP_RESULT");
+	const noteRows = diagnosticField(noteSkip, "omitted_row_diagnostics") as {
+		row_index: number;
+		field_omissions: { field: string; reason: string; source_shape: unknown }[];
+	}[];
+	assert.deepEqual(
+		noteRows.map((row) => ({
+			row_index: row.row_index,
+			omissions: row.field_omissions.map(({ field, reason, source_shape }) => ({
+				field,
+				reason,
+				source_shape,
+			})),
+		})),
+		[
+			{
+				row_index: 0,
+				omissions: [
+					{
+						field: "created_at",
+						reason: "malformed_field_wrapper",
+						source_shape: { type: "object", keys: [] },
+					},
+					{
+						field: "folder_name",
+						reason: "folder_name_unavailable",
+						source_shape: { type: "string", length: 23 },
+					},
+					{
+						field: "has_attachments",
+						reason: "expected_attachment_list",
+						source_shape: { type: "string", length: 10 },
+					},
+					{
+						field: "is_pinned",
+						reason: "expected_boolean_flag",
+						source_shape: { type: "object", keys: [] },
+					},
+					{
+						field: "snippet",
+						reason: "malformed_field_wrapper",
+						source_shape: { type: "object", keys: ["type", "value"] },
+					},
+					{
+						field: "text_content",
+						reason: "expected_base64_body",
+						source_shape: { type: "number" },
+					},
+					{
+						field: "title",
+						reason: "invalid_base64_text",
+						source_shape: { type: "string", length: 3 },
+					},
+				],
+			},
+			{
+				row_index: 1,
+				omissions: [
+					{
+						field: "folder_id",
+						reason: "malformed_folder_reference",
+						source_shape: { type: "object", keys: ["recordName"] },
+					},
+					{
+						field: "folder_name",
+						reason: "folder_reference_unavailable",
+						source_shape: { type: "object", keys: ["recordName"] },
+					},
+				],
+			},
+		],
+	);
 	assert.deepEqual(
 		(diagnosticField(noteSkip, "field_omissions") as { field: string }[])
 			.map((omission) => omission.field)
@@ -766,7 +830,11 @@ test("collectAllStreams: absent mapped values are unavailable and veto notes STA
 			["notes"],
 		),
 	);
-	assert.equal(harness.emitted[0]?.data.title, null);
+	assert.equal(
+		harness.emitted.length,
+		0,
+		"a row with an unavailable mapped field must be withheld entirely",
+	);
 	assert.equal(
 		harness.protocolMessages.some(
 			(message) => message.type === "STATE" && message.stream === "notes",
@@ -788,6 +856,44 @@ test("collectAllStreams: absent mapped values are unavailable and veto notes STA
 				omission.field === "title" && omission.reason === "missing_field",
 		),
 	);
+	const omittedRows = diagnosticField(skip, "omitted_row_diagnostics") as {
+		row_index: number;
+		field_omissions: { field: string; reason: string; source_shape: unknown }[];
+	}[];
+	assert.deepEqual(
+		omittedRows.map((row) => ({
+			row_index: row.row_index,
+			omissions: row.field_omissions.map(({ field, reason, source_shape }) => ({
+				field,
+				reason,
+				source_shape,
+			})),
+		})),
+		[
+			{
+				row_index: 0,
+				omissions: [
+					...[
+						"created_at",
+						"has_attachments",
+						"is_pinned",
+						"modified_at",
+						"snippet",
+						"text_content",
+						"title",
+					].map((field) => ({
+						field,
+						reason: "missing_field",
+						source_shape: { type: "missing" },
+					})),
+				],
+			},
+		],
+	);
+	assert.equal(diagnosticField(skip, "rows_seen"), 1);
+	assert.equal(diagnosticField(skip, "source_rows_seen"), 1);
+	assert.equal(diagnosticField(skip, "note_rows_seen"), 1);
+	assert.equal(diagnosticField(skip, "deleted_note_rows"), 0);
 });
 
 test("collectAllStreams: notes-only folder projection reports unreadable referenced names", async () => {
@@ -824,12 +930,11 @@ test("collectAllStreams: notes-only folder projection reports unreadable referen
 	]);
 	await collectAllStreams(makeCtx(page, harness, ["notes"]));
 
-	assert.equal(harness.emitted.length, 1);
 	assert.equal(
-		harness.emitted[0]?.data.folder_id,
-		"folder-projection-unreadable",
+		harness.emitted.length,
+		0,
+		"an unresolved folder projection makes the whole note row uncovered",
 	);
-	assert.equal(harness.emitted[0]?.data.folder_name, null);
 	assert.equal(
 		harness.protocolMessages.some(
 			(message) => message.type === "STATE" && message.stream === "notes",
@@ -841,7 +946,14 @@ test("collectAllStreams: notes-only folder projection reports unreadable referen
 	);
 	assert.ok(skip && skip.type === "SKIP_RESULT");
 	assert.deepEqual(diagnosticField(skip, "field_omissions"), [
-		{ field: "folder_name", reason: "folder_name_unavailable" },
+		{
+			field: "folder_name",
+			reason: "folder_name_unavailable",
+			source_shape: {
+				type: "string",
+				length: "folder-projection-unreadable".length,
+			},
+		},
 	]);
 });
 

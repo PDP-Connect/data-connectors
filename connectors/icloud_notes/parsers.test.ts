@@ -279,6 +279,30 @@ test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable"
 	);
 });
 
+test("readNoteRecord: compressed attachment-only body is explicitly empty text", () => {
+	const attachmentOnlyBody = gzipSync(Buffer.from([0x01, 0x02, 0x03, 0x04]));
+	const result = readNoteRecord({
+		recordName: "note-attachment-only",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: b64("Image") },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [{ recordName: "attachment-1" }] },
+			TextDataEncrypted: { value: attachmentOnlyBody.toString("base64") },
+		},
+	});
+	assert.equal(result.record?.has_attachments, true);
+	assert.equal(result.record?.text_content, null);
+	assert.ok(
+		!result.unavailableFields.some(({ field }) => field === "text_content"),
+		"valid compressed data with no prose is an explicit empty text field",
+	);
+});
+
 test("buildNoteRecord: falls back to Folders[0] when Folder is absent", () => {
 	const record: CloudKitRecord = {
 		recordName: "note-folders-array",

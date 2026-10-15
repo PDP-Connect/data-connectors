@@ -190,9 +190,43 @@ test("connector-dev CLI: prints and persists sanitized SKIP_RESULT diagnostics w
 		]);
 
 		assert.equal(result.code, 0, `expected exit 0; stderr=${result.stderr}`);
-		assert.match(
-			result.stdout,
-			/skip-result-diagnostics \{"stream":"notes","reason":"icloud_omitted_rows","diagnostics":\{"omitted_rows":1,"field_omissions":\[\{"field":"TextDataEncrypted","reason":"body_text_unreadable","source_shape":\{"type":"object","keys":\["data","format"\]\},"value":\{"type":"string","length":21\}\}\]\}\}/,
+		const diagnosticLine = result.stdout
+			.split("\n")
+			.find((line) => line.trimStart().startsWith("skip-result-diagnostics "));
+		assert.ok(diagnosticLine, "CLI must print the SKIP_RESULT diagnostics line");
+		assert.deepEqual(
+			JSON.parse(
+				diagnosticLine.slice(diagnosticLine.indexOf("skip-result-diagnostics ") + 23),
+			),
+			{
+			stream: "notes",
+			reason: "icloud_omitted_rows",
+			diagnostics: {
+				omitted_rows: 1,
+				source_rows_seen: 3,
+				note_rows_seen: 2,
+				deleted_note_rows: 1,
+				omitted_row_diagnostics: [
+					{
+						row_index: 3,
+						field_count: 1,
+						field_omissions: [],
+						row_reason: "unavailable_fields",
+					},
+				],
+				field_omissions: [
+					{
+						field: "TextDataEncrypted",
+						reason: "body_text_unreadable",
+						source_shape: {
+							type: "object",
+							keys: ["data", "format"],
+						},
+						value: { type: "string", length: 21 },
+					},
+				],
+			},
+			},
 		);
 		assert.doesNotMatch(result.stdout, /PRIVATE_NOTE_SENTINEL/);
 
@@ -203,6 +237,17 @@ test("connector-dev CLI: prints and persists sanitized SKIP_RESULT diagnostics w
 				reason: "icloud_omitted_rows",
 				diagnostics: {
 					omitted_rows: 1,
+					source_rows_seen: 3,
+					note_rows_seen: 2,
+					deleted_note_rows: 1,
+					omitted_row_diagnostics: [
+						{
+							row_index: 3,
+							field_count: 1,
+							field_omissions: [],
+							row_reason: "unavailable_fields",
+						},
+					],
 					field_omissions: [
 						{
 							field: "TextDataEncrypted",

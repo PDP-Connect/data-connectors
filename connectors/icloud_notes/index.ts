@@ -97,6 +97,7 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import type { FieldOmission as ParsedFieldOmission } from "./parsers.ts";
 import {
 	isDeletedNote,
 	readFolderRecord,
@@ -125,15 +126,26 @@ export const ICLOUD_NOTES_RETRYABLE_PATTERN =
 	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited/i;
 
 type StreamName = "folders" | "notes";
-type FieldOmission = { field: string; reason: string };
+type FieldOmission = ParsedFieldOmission;
+type OmittedRowDiagnostic = {
+	row_index: number;
+	field_count: number;
+	field_omissions: FieldOmission[];
+	row_reason?: string;
+};
 
 interface QueryFailure {
 	reason: string;
 	message: string;
 	retryable: boolean;
 	pageCount: number;
+	rowsSeen?: number;
+	sourceRowsSeen?: number;
+	noteRowsSeen?: number;
+	deletedNoteRows?: number;
 	omittedRows?: number;
 	fieldOmissions?: FieldOmission[];
+	omittedRowDiagnostics?: OmittedRowDiagnostic[];
 }
 
 interface QueryWalk {
@@ -562,12 +574,27 @@ async function emitStreamFailure(
 		},
 		diagnostics: {
 			page_count: failure.pageCount,
+			...(failure.rowsSeen === undefined
+				? {}
+				: { rows_seen: failure.rowsSeen }),
+			...(failure.sourceRowsSeen === undefined
+				? {}
+				: { source_rows_seen: failure.sourceRowsSeen }),
+			...(failure.noteRowsSeen === undefined
+				? {}
+				: { note_rows_seen: failure.noteRowsSeen }),
+			...(failure.deletedNoteRows === undefined
+				? {}
+				: { deleted_note_rows: failure.deletedNoteRows }),
 			...(failure.omittedRows === undefined
 				? {}
 				: { omitted_rows: failure.omittedRows }),
 			...(failure.fieldOmissions === undefined
 				? {}
 				: { field_omissions: failure.fieldOmissions }),
+			...(failure.omittedRowDiagnostics === undefined
+				? {}
+				: { omitted_row_diagnostics: failure.omittedRowDiagnostics }),
 		},
 	});
 }
@@ -639,7 +666,8 @@ function omittedRowsFailure(
 	stream: StreamName,
 	count: number,
 	pageCount: number,
-	fieldOmissions: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
+	fieldOmissions: readonly FieldOmission[] = [],
+	omittedRowDiagnostics: readonly OmittedRowDiagnostic[] = [],
 ): QueryFailure {
 	return {
 		reason: "icloud_omitted_rows",
@@ -647,31 +675,33 @@ function omittedRowsFailure(
 		retryable: false,
 		pageCount,
 		omittedRows: count,
-		...(fieldOmissions.size === 0
+		...(fieldOmissions.length === 0
 			? {}
-			: {
-					fieldOmissions: [...fieldOmissions]
-						.flatMap(([field, reasons]) =>
-							[...reasons].map((reason) => ({ field, reason })),
-						)
-						.sort((left, right) =>
-							left.field === right.field
-								? left.reason.localeCompare(right.reason)
-								: left.field.localeCompare(right.field),
-						),
-				}),
+			: { fieldOmissions: fieldOmissions.slice() }),
+		...(omittedRowDiagnostics.length === 0
+			? {}
+			: { omittedRowDiagnostics: omittedRowDiagnostics.slice() }),
 	};
 }
 
 function addFieldOmissions(
-	target: Map<string, Set<string>>,
+	target: FieldOmission[],
 	omissions: readonly FieldOmission[],
 ): void {
-	for (const { field, reason } of omissions) {
-		const reasons = target.get(field) ?? new Set<string>();
-		reasons.add(reason);
-		target.set(field, reasons);
+	for (const omission of omissions) {
+		if (
+			!target.some(
+				(current) => JSON.stringify(current) === JSON.stringify(omission),
+			)
+		) {
+			target.push(omission);
+		}
 	}
+	target.sort((left, right) =>
+		left.field === right.field
+			? left.reason.localeCompare(right.reason)
+			: left.field.localeCompare(right.field),
+	);
 }
 
 function withFieldOmissions(
@@ -679,28 +709,36 @@ function withFieldOmissions(
 	stream: StreamName,
 	count: number,
 	pageCount: number,
-	fieldOmissions: ReadonlyMap<string, ReadonlySet<string>>,
+	fieldOmissions: readonly FieldOmission[],
+	omittedRowDiagnostics: readonly OmittedRowDiagnostic[] = [],
 ): QueryFailure | undefined {
-	if (count === 0 && fieldOmissions.size === 0) return failure;
+	if (
+		count === 0 &&
+		fieldOmissions.length === 0 &&
+		omittedRowDiagnostics.length === 0
+	)
+		return failure;
 	const rowFailure = omittedRowsFailure(
 		stream,
 		count,
 		pageCount,
 		fieldOmissions,
+		omittedRowDiagnostics,
 	);
 	if (!failure) return rowFailure;
-	const mergedFieldOmissions = new Map<string, Set<string>>();
+	const mergedFieldOmissions: FieldOmission[] = [];
 	addFieldOmissions(mergedFieldOmissions, failure.fieldOmissions ?? []);
-	for (const [field, reasons] of fieldOmissions) {
-		const current = mergedFieldOmissions.get(field) ?? new Set<string>();
-		for (const reason of reasons) current.add(reason);
-		mergedFieldOmissions.set(field, current);
-	}
+	addFieldOmissions(mergedFieldOmissions, fieldOmissions);
+	const mergedRowDiagnostics = [
+		...(failure.omittedRowDiagnostics ?? []),
+		...omittedRowDiagnostics,
+	];
 	const mergedFailure = omittedRowsFailure(
 		stream,
 		(failure.omittedRows ?? 0) + count,
 		pageCount,
 		mergedFieldOmissions,
+		mergedRowDiagnostics,
 	);
 	return {
 		...failure,
@@ -708,6 +746,9 @@ function withFieldOmissions(
 		...(mergedFailure.fieldOmissions === undefined
 			? {}
 			: { fieldOmissions: mergedFailure.fieldOmissions }),
+		...(mergedFailure.omittedRowDiagnostics === undefined
+			? {}
+			: { omittedRowDiagnostics: mergedFailure.omittedRowDiagnostics }),
 	};
 }
 
@@ -747,22 +788,45 @@ export async function collectAllStreams(
 			progress,
 		);
 		let omitted = 0;
-		const fieldOmissions = new Map<string, Set<string>>();
+		let folderRowIndex = 0;
+		const fieldOmissions: FieldOmission[] = [];
+		const omittedRowDiagnostics: OmittedRowDiagnostic[] = [];
 		for (const record of folderWalk.records) {
 			if (record.recordType !== "Folder") continue;
+			const rowIndex = folderRowIndex;
+			folderRowIndex += 1;
 			const result = readFolderRecord(record);
 			addFieldOmissions(fieldOmissions, result.unavailableFields);
 			const built = result.record;
 			if (built === null) {
 				omitted += 1;
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: result.unavailableFields.length,
+					field_omissions: result.unavailableFields,
+					row_reason: "record_identity_unavailable",
+				});
 				continue;
 			}
 			if (result.unavailableFields.length > 0) {
 				omitted += 1;
 				unavailableFolderIds.add(built.id);
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: result.unavailableFields.length,
+					field_omissions: result.unavailableFields,
+				});
 			}
 			if (!validateRecord("folders", built).ok) {
-				if (result.unavailableFields.length === 0) omitted += 1;
+				if (result.unavailableFields.length === 0) {
+					omitted += 1;
+					omittedRowDiagnostics.push({
+						row_index: rowIndex,
+						field_count: 0,
+						field_omissions: [],
+						row_reason: "record_schema_invalid",
+					});
+				}
 				continue;
 			}
 			if (built.name !== null) folderNames.set(built.id, built.name);
@@ -783,19 +847,25 @@ export async function collectAllStreams(
 				if (record.recordType !== "Folder") continue;
 				const result = readFolderRecord(record);
 				const built = result.record;
-				if (built === null || !validateRecord("folders", built).ok) continue;
+				if (
+					built === null ||
+					result.unavailableFields.length > 0 ||
+					!validateRecord("folders", built).ok
+				)
+					continue;
 				if (cursor.shouldEmit(built)) {
 					await emitRecord("folders", built);
 				}
 				if (result.unavailableFields.length === 0) covered += 1;
 			}
-			const failure =
+			let failure =
 				withFieldOmissions(
 					folderWalk.failure,
 					"folders",
 					omitted,
 					folderWalk.pageCount,
 					fieldOmissions,
+					omittedRowDiagnostics,
 				) ??
 				(!remainsInICloudNotes(page.url(), pageUrl)
 					? {
@@ -806,6 +876,7 @@ export async function collectAllStreams(
 							pageCount: folderWalk.pageCount,
 						}
 					: null);
+			if (failure) failure = { ...failure, rowsSeen: folderRowIndex };
 			if (failure) {
 				await emitStreamFailure(emit, "folders", failure);
 			} else if (
@@ -846,27 +917,63 @@ export async function collectAllStreams(
 		});
 		let covered = 0;
 		let omitted = 0;
-		const fieldOmissions = new Map<string, Set<string>>();
+		let noteRowIndex = 0;
+		let noteRowsSeen = 0;
+		let deletedNoteRows = 0;
+		const fieldOmissions: FieldOmission[] = [];
+		const omittedRowDiagnostics: OmittedRowDiagnostic[] = [];
 		for (const record of walk.records) {
-			if (record.recordType !== "Note" || isDeletedNote(record)) continue;
+			if (record.recordType !== "Note") continue;
+			noteRowsSeen += 1;
+			if (isDeletedNote(record)) {
+				deletedNoteRows += 1;
+				continue;
+			}
+			const rowIndex = noteRowIndex;
+			noteRowIndex += 1;
 			const result = readNoteRecord(record, folderNames, {
 				unavailableFolderIds,
 				folderScanComplete,
 			});
 			addFieldOmissions(fieldOmissions, result.unavailableFields);
 			const built = result.record;
-			if (built === null || !validateRecord("notes", built).ok) {
+			if (built === null) {
 				omitted += 1;
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: result.unavailableFields.length,
+					field_omissions: result.unavailableFields,
+					row_reason:
+						built === null
+							? "record_identity_unavailable"
+							: "record_schema_invalid",
+				});
+				continue;
+			}
+			if (result.unavailableFields.length > 0) {
+				omitted += 1;
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: result.unavailableFields.length,
+					field_omissions: result.unavailableFields,
+					row_reason: "unavailable_fields",
+				});
+				continue;
+			}
+			if (!validateRecord("notes", built).ok) {
+				omitted += 1;
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: 0,
+					field_omissions: [],
+					row_reason: "record_schema_invalid",
+				});
 				continue;
 			}
 			if (cursor.shouldEmit(built)) {
 				await emitRecord("notes", built);
 			}
-			if (result.unavailableFields.length === 0) {
-				covered += 1;
-			} else {
-				omitted += 1;
-			}
+			covered += 1;
 		}
 		let failure =
 			withFieldOmissions(
@@ -875,10 +982,26 @@ export async function collectAllStreams(
 				omitted,
 				walk.pageCount,
 				fieldOmissions,
+				omittedRowDiagnostics,
 			) ??
 			(omitted > 0
-				? omittedRowsFailure("notes", omitted, walk.pageCount, fieldOmissions)
+				? omittedRowsFailure(
+						"notes",
+						omitted,
+						walk.pageCount,
+						fieldOmissions,
+						omittedRowDiagnostics,
+					)
 				: null);
+		if (failure) {
+			failure = {
+				...failure,
+				rowsSeen: noteRowIndex,
+				sourceRowsSeen: walk.records.length,
+				noteRowsSeen,
+				deletedNoteRows,
+			};
+		}
 		if (!failure && !remainsInICloudNotes(page.url(), pageUrl)) {
 			failure = {
 				reason: "icloud_navigation_changed",
