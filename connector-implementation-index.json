@@ -13744,7 +13744,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.22",
+				"version": "0.1.23",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13781,10 +13781,10 @@
 				"streams": [
 					{
 						"name": "notes",
-						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index.",
+						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index. The legacy folder-name projection depends on the folders stream; collection fetches that dependency even when only notes are requested.",
 						"display": {
 							"label": "Your iCloud notes",
-							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder assignment, attachment flag, and created/modified timestamps."
+							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder name and assignment, attachment flag, and created/modified timestamps."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -13803,8 +13803,13 @@
 								"folder_id": {
 									"type": ["string", "null"]
 								},
+								"folder_name": {
+									"type": ["string", "null"],
+									"description": "Folder display name from the same folder snapshot; null when there is no folder reference or the referenced folder could not be resolved. Unresolved names are reported in the stream omission details and do not count as covered."
+								},
 								"is_pinned": {
-									"type": "boolean"
+									"type": ["boolean", "null"],
+									"description": "Whether the note is pinned, or null when CloudKit's flag could not be read. Unreadable fields are named in the stream omission gap and do not count as covered."
 								},
 								"created_at": {
 									"type": ["string", "null"],
@@ -13816,7 +13821,8 @@
 									"x_pdpp_role": "event-time"
 								},
 								"has_attachments": {
-									"type": "boolean"
+									"type": ["boolean", "null"],
+									"description": "Whether attachments exist, or null when CloudKit's attachment field could not be read. Unreadable fields are named in the stream omission gap and do not count as covered."
 								},
 								"text_content": {
 									"type": ["string", "null"],
@@ -13873,7 +13879,8 @@
 									"type": "string"
 								},
 								"name": {
-									"type": "string",
+									"type": ["string", "null"],
+									"description": "Folder title, recordName fallback for a valid empty title, or null when the title field could not be read. Unreadable fields are named in the stream omission gap and do not count as covered.",
 									"x_pdpp_role": "primary-title"
 								}
 							},
@@ -13896,7 +13903,14 @@
 					}
 				],
 				"reason_display_messages": {
-					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+					"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
+					"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
+					"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
+					"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
+					"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
+					"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
+					"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
+					"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
 				}
 			}
 		},

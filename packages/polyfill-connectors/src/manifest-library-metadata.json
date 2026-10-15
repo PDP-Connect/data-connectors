@@ -405,7 +405,14 @@
 		"manifest": {
 			"connector_key": "icloud-notes",
 			"reason_display_messages": {
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
+				"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
+				"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
+				"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
+				"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
+				"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
+				"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
+				"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
 			}
 		}
 	},

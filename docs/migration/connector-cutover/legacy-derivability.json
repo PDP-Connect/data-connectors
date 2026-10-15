@@ -517,29 +517,30 @@
     "connector_key": "icloud_notes",
     "streams": ["notes"],
     "derivable": {
-      "notes[].recordName": "notes.id (parsers.ts:203)",
-      "notes[].title": "notes.title (parsers.ts:204, decodeBase64Text(TitleEncrypted))",
-      "notes[].snippet": "notes.snippet (parsers.ts:205)",
-      "notes[].isPinned": "notes.is_pinned (parsers.ts:207-209)",
-      "notes[].createdDate": "notes.created_at (parsers.ts:210-212)",
-      "notes[].modifiedDate": "notes.modified_at (parsers.ts:213-215)",
-      "notes[].hasAttachments": "notes.has_attachments (parsers.ts:216)",
-      "notes[].textContent": "notes.text_content (parsers.ts:217)"
+      "notes[].recordName": "notes.id (parsers.ts:210)",
+      "notes[].title": "notes.title (parsers.ts:219, decodeBase64Text(TitleEncrypted))",
+      "notes[].snippet": "notes.snippet (parsers.ts:220)",
+      "notes[].isPinned": "notes.is_pinned (parsers.ts:224-226)",
+      "notes[].createdDate": "notes.created_at (parsers.ts:227-229)",
+      "notes[].modifiedDate": "notes.modified_at (parsers.ts:230-232)",
+      "notes[].hasAttachments": "notes.has_attachments (parsers.ts:233)",
+      "notes[].textContent": "notes.text_content (parsers.ts:234)",
+      "notes[].folder": "notes.folder_name (same-run folders projection; falls back to folder_id when unresolved)"
     },
     "not_derivable": [],
     "semantic_notes": [
-      "notes[].folder (legacy: resolved folder TITLE STRING) -> notes.folder_id (modern: CloudKit recordName / foreign key). Deliberate, documented semantic difference (parsers.ts:190-193): a consumer must now join notes.folder_id -> folders.id to get the display name legacy gave directly.",
+      "notes.folder_id remains the CloudKit recordName foreign key; notes.folder_name is the legacy display-name projection. Notes collection fetches folders as an explicit same-run dependency even when the folders stream is not requested. An unresolved folder name falls back to folder_id, matching legacy behavior.",
       "total, userName (D3 envelope) correctly dropped."
     ],
-    "status": "semantic_difference"
+    "status": "derivable"
   },
   {
     "scope": "icloud_notes.folders",
     "connector_key": "icloud_notes",
     "streams": ["folders"],
     "derivable": {
-      "folders[].recordName": "folders.id (parsers.ts:227-235)",
-      "folders[].title|name": "folders.name (parsers.ts:231)"
+      "folders[].recordName": "folders.id (parsers.ts:244)",
+      "folders[].title|name": "folders.name (parsers.ts:248-251)"
     },
     "not_derivable": [],
     "semantic_notes": [
