@@ -27,13 +27,13 @@ const threadSlug = (n: number) => `bbbbbbbb-0000-4000-8000-${pad(n)}`;
 const entryId = (n: number) => `eeeeeeee-0000-4000-8000-${pad(n)}`;
 const stamp = (n: number) =>
 	new Date(Date.UTC(2026, 9, 1, 9) + n * 3_600_000).toISOString();
+/** The list's real clock: microseconds and no zone at all. */
+const listStamp = (n: number) => `${stamp(n).slice(0, 23)}000`;
+/** Entry timestamps: microseconds plus an explicit UTC offset. */
+const entryStamp = (n: number) => `${stamp(n).slice(0, 23)}000+00:00`;
 
 /** One synthetic list item, shaped exactly like the recon's list item. */
-function threadItem(
-	n: number,
-	total: number,
-	hasNext: boolean,
-): Record<string, unknown> {
+function threadItem(n: number, hasNext: boolean): Record<string, unknown> {
 	return {
 		uuid: `aaaaaaaa-0000-4000-8000-${pad(n)}`,
 		context_uuid: threadId(n),
@@ -45,10 +45,12 @@ function threadItem(
 		search_focus: "internet",
 		sources: [],
 		query_count: 1,
-		last_query_datetime: stamp(n),
+		last_query_datetime: listStamp(n),
 		thread_access: 1,
 		thread_number: n,
-		total_threads: total,
+		// The real site's total_threads is unrelated to the item count (a
+		// 4-thread account reported 99 on every item); the walk ignores it.
+		total_threads: 99,
 		has_next_page: hasNext,
 		status: "COMPLETED",
 		thread_status: "COMPLETED",
@@ -66,8 +68,8 @@ function threadDetail(n: number): string {
 				uuid: entryId(n),
 				context_uuid: threadId(n),
 				query_str: `Synthetic question ${n}?`,
-				entry_created_datetime: stamp(n),
-				entry_updated_datetime: stamp(n),
+				entry_created_datetime: entryStamp(n),
+				entry_updated_datetime: entryStamp(n),
 				display_model: "sonar",
 				blocks: [
 					{
@@ -131,11 +133,7 @@ function perplexityLibrary(options: {
 			const slice = Array.from(
 				{ length: Math.min(PAGE_SIZE, options.total - offset) },
 				(_, index) =>
-					threadItem(
-						offset + index + 1,
-						options.total,
-						offset + index + 1 < options.total,
-					),
+					threadItem(offset + index + 1, offset + index + 1 < options.total),
 			);
 			return Response.json(slice);
 		}
@@ -425,7 +423,8 @@ test("both streams prove their boundary and checkpoint their cursors", async () 
 		assert.equal((coverage.hydrated_keys as string[]).length, 3);
 
 		const conversationsCursor = stateCursor(h.messages, "conversations");
-		assert.equal(conversationsCursor.total_threads, 3);
+		// The cursor carries no thread count: `total_threads` is not the
+		// library size on the real site, and the walk proves its own end.
 		assert.equal(
 			conversationsCursor.last_update_time,
 			stamp(3).slice(0, 19) + "Z",
@@ -531,7 +530,7 @@ test("a list body of the wrong shape fails the run, not the stream", async () =>
 	});
 });
 
-test("a library that reports threads but reads none is a failure", async () => {
+test("a library whose only item cannot be read reports it and completes", async () => {
 	const serve: typeof fetch = async () =>
 		Response.json([
 			{
@@ -543,10 +542,14 @@ test("a library that reports threads but reads none is a failure", async () => {
 		]);
 	await withBrowser(serve, async () => {
 		const h = harness(ALL_STREAMS, page());
-		await assert.rejects(
-			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
-			/perplexity_list_unreadable/,
-		);
+		// `total_threads` must not gate completeness: the walk proved its own
+		// end (the last item said has_next_page: false), so the run
+		// completes, reports the unreadable thread, and emits no records.
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		assert.deepEqual(h.records, []);
+		assert.equal(h.failures.length, 1);
+		assert.equal(h.failures[0]?.stream, "conversations");
+		assert.equal(h.failures[0]?.retryable, false);
 	});
 });
 
@@ -560,7 +563,6 @@ test("an empty library is proven empty, with zero records and a null cursor", as
 		assert.equal(detailCoverage(h.messages, "conversations").considered, 0);
 		assert.equal(detailCoverage(h.messages, "messages").covered, 0);
 		const cursor = stateCursor(h.messages, "conversations");
-		assert.equal(cursor.total_threads, null);
 		assert.equal(cursor.last_update_time, null);
 	});
 });

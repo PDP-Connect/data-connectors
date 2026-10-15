@@ -23,26 +23,28 @@ function fixture(name: string): string {
 	);
 }
 
-test("a library list page parses with its end marker and total", () => {
+test("a library list page parses with its end marker, ignoring total_threads", () => {
 	const parsed = parseThreadListPage(fixture("thread-list-page-more.json"));
 	assert.equal(parsed.ok, true);
 	if (!parsed.ok) return;
 	assert.equal(parsed.page.items.length, 2);
 	assert.equal(parsed.page.hasNextPage, true);
-	assert.equal(parsed.page.totalThreads, 4);
 
 	const final = parseThreadListPage(fixture("thread-list-page-final.json"));
 	assert.equal(final.ok, true);
 	if (!final.ok) return;
 	assert.equal(final.page.hasNextPage, false);
-	assert.equal(final.page.totalThreads, 4);
+	// Both fixtures carry `total_threads: 99` on every item although the
+	// library holds four threads: the live site's number is unrelated to the
+	// item count, so the page must not surface it at all.
+	assert.equal("totalThreads" in final.page, false);
 });
 
 test("an empty list page is a complete list, not a failure", () => {
 	const parsed = parseThreadListPage("[]");
 	assert.deepEqual(parsed, {
 		ok: true,
-		page: { items: [], hasNextPage: false, totalThreads: null },
+		page: { items: [], hasNextPage: false },
 	});
 });
 
@@ -81,7 +83,8 @@ test("a thread item becomes a listed thread, and never carries the token", () =>
 	);
 	assert.equal(validateRecord("conversations", { ...record }).ok, true);
 
-	// An offset timestamp normalises to the same UTC instant.
+	// The second item's zoneless microsecond clock reads as UTC: the
+	// entries of the same threads carry `+00:00`, so the server clock is UTC.
 	const second = parseListedThread(page.page.items[1]);
 	assert.equal(second?.updateTime, "2026-10-01T16:30:00Z");
 });
@@ -103,7 +106,7 @@ test("a thread item without an id is unreadable, and one without a slug still li
 	assert.equal(spaced?.slug, null);
 });
 
-test("timestamps must state a zone; nothing else is guessed", () => {
+test("timestamps normalise to UTC, including the list's zoneless clock", () => {
 	assert.equal(
 		normalizeInstant("2026-10-02T09:15:00Z"),
 		"2026-10-02T09:15:00Z",
@@ -120,8 +123,27 @@ test("timestamps must state a zone; nothing else is guessed", () => {
 		normalizeInstant("2026-10-02T04:15:00-0500"),
 		"2026-10-02T09:15:00Z",
 	);
-	assert.equal(normalizeInstant("2026-10-02T09:15:00"), null);
+	// The list's real format: microseconds and NO zone. The entries of the
+	// same threads carry `+00:00`, so the server clock is UTC and the
+	// zoneless value is read as UTC — refusing it would null every
+	// conversation's update_time and empty the cursor.
+	assert.equal(
+		normalizeInstant("2026-10-02T09:15:00.999999"),
+		"2026-10-02T09:15:00Z",
+	);
+	// Entry timestamps: microseconds plus an offset.
+	assert.equal(
+		normalizeInstant("2026-10-02T09:15:00.123456+00:00"),
+		"2026-10-02T09:15:00Z",
+	);
+	assert.equal(
+		normalizeInstant("2026-10-02T09:15:04.999999+05:30"),
+		"2026-10-02T03:45:04Z",
+	);
+	// Everything that is not an ISO date-time is still refused.
 	assert.equal(normalizeInstant("Mon, 10/2/2026"), null);
+	assert.equal(normalizeInstant("2026-10-02 09:15:00"), null);
+	assert.equal(normalizeInstant("2026-10-02"), null);
 	assert.equal(normalizeInstant(1789885800), null);
 	assert.equal(normalizeInstant(null), null);
 });
