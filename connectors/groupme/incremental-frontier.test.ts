@@ -1160,9 +1160,40 @@ test("interrupted run via collect(): STATE (including cursors) is withheld end-t
 		return { ctx, messages: harness.protocolMessages };
 	}
 
+	// A group that reports more messages than the walk returns: the connector
+	// reports the shortfall, and the runtime withholds the STATE (the
+	// connector's forward cursor would otherwise pass the 9 unread messages).
+	// FOLLOW-UP (groupme): the forward-only cursor must not advance past a
+	// reported shortfall (provider_reports_more_messages_than_walked); keep
+	// it at the prior position or record the gap, then declare the skip.
+	const shortRestore = stubFetchByPath({
+		"/v3/groups": [group()],
+		"/v3/groups/group-1/messages": { count: 1, messages: [groupMessage()] },
+	});
+	const short = makeCtx({});
+	try {
+		await collect(short.ctx);
+	} finally {
+		shortRestore();
+	}
+	assert.equal(
+		short.messages.some(
+			(m) => m.type === "STATE" && m.stream === "group_messages",
+		),
+		false,
+		"a walk short of the provider's count must not checkpoint",
+	);
+	assert.ok(
+		short.messages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "provider_reports_more_messages_than_walked",
+		),
+	);
+
 	// Run 1: clean cold-start backward walk, seeds a real cursor.
 	const seedRestore = stubFetchByPath({
-		"/v3/groups": [group()],
+		"/v3/groups": [group({ messages_count: 1 })],
 		"/v3/groups/group-1/messages": { count: 1, messages: [groupMessage()] },
 	});
 	const run1 = makeCtx({});
