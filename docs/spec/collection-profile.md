@@ -1322,7 +1322,8 @@ runtime can present a hint as an instruction or act on it.
 
 ### 5.6 `DETAIL_GAP` and `DETAIL_COVERAGE`
 
-`DETAIL_GAP` records a retryable failure for one detail record.
+`DETAIL_GAP` records a failure to hydrate one detail record. The failure is
+either retryable or permanent.
 
 ```json
 {
@@ -1339,10 +1340,23 @@ runtime can present a hint as an instruction or act on it.
 ```
 
 `reference_only: true`, `status: "pending"`, `stream`, `record_key`, `reason`,
-`retryable: true`, and `detail_locator` are REQUIRED. `record_key` is a string
-or number. `detail_locator.kind` is REQUIRED. It MUST contain no secret.
-Portable reasons are `rate_limited`,
+`retryable`, and `detail_locator` are REQUIRED. `retryable` is a boolean.
+`record_key` is a string or number. `detail_locator.kind` is REQUIRED. It MUST
+contain no secret.
+
+A retryable gap has `retryable: true`. Its portable reasons are `rate_limited`,
 `retry_exhausted`, `temporary_unavailable`, and `upstream_pressure`.
+
+A permanent gap has `retryable: false`. It reports a detail record that the
+connector can never hydrate in full from the source in its current form, for
+example content in a shape the connector cannot represent. Its portable reason
+is `source_unrepresentable`. A connector MUST NOT report a transient failure as
+a permanent gap. A runtime MUST reject a gap that pairs `retryable: true` with
+`source_unrepresentable`, or `retryable: false` with a retryable reason.
+
+`status` is `"pending"` for both forms. This version defines no other gap
+status. A runtime MUST NOT schedule, request, or offer a refetch of a gap with
+`retryable: false`.
 `parent_stream` is REQUIRED when the detail stream has more than one declared
 parent. It MAY be omitted when the manifest gives the stream exactly one
 parent.
@@ -1367,6 +1381,8 @@ one checkpoint-parent boundary.
 number. Each key array MUST contain no duplicate. Every hydrated or gap key
 MUST also be a required key. A gap key counts as accounted only when the runtime
 observed a matching `DETAIL_GAP` for the same stream, key, and parent boundary.
+This holds for retryable and permanent gaps alike. A key accounted by a
+permanent gap is accounted but not hydrated.
 
 A `parent_streams` stream emits at most one final coverage message for each
 declared parent boundary evaluated in a run. It emits the message after the
