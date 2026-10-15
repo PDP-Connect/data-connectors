@@ -1,0 +1,177 @@
+{
+	"_comment": "Synthetic, not captured. Shapes follow a live probe of the endpoints on 2026-10-15 (key names and value types only; no values were copied). Every free-text or identifying value contains the token CANARY (or is a planted id) so tests can assert none reaches usage output.",
+	"me": {
+		"object": "user",
+		"id": "user-CANARYUSERID0001",
+		"email": "canary.person@example.com",
+		"name": "CANARY Person",
+		"picture": "https://example.com/CANARY-avatar.png",
+		"created": 1673776800,
+		"phone_number": "+48600CANARY",
+		"mfa_flag_enabled": true,
+		"has_payg_project_spend_limit": false,
+		"amr": ["CANARY-amr"],
+		"claimed_domain_org_id": null,
+		"groups": [],
+		"email_domain_type": "social",
+		"ads_segment_id": 7,
+		"orgs": {
+			"object": "list",
+			"data": [
+				{
+					"object": "organization",
+					"id": "org-CANARYORG",
+					"role": "owner",
+					"personal": true,
+					"is_default": true,
+					"title": "CANARY Org title",
+					"name": "user-CANARYUSERID0001",
+					"description": "CANARY Org description"
+				},
+				{
+					"object": "organization",
+					"id": "org-CANARYORG2",
+					"role": "reader",
+					"personal": false,
+					"is_default": false,
+					"title": "CANARY Team org",
+					"name": "CANARY team",
+					"description": "CANARY second org"
+				}
+			]
+		},
+		"client_id": "app_CANARYCLIENT",
+		"is_test_user": false,
+		"country": "PL",
+		"region": "CANARY Region",
+		"region_code": "14",
+		"first_name": "CANARY"
+	},
+	"beta_features": {
+		"browsing": true,
+		"canvas": true,
+		"agent_mode": false,
+		"deep_research": true,
+		"context_connector_gdrive": false,
+		"codex_cloud": true,
+		"CANARY Weird Key": true,
+		"voice_name": "CANARY voice"
+	},
+	"user_system_messages": {
+		"object": "user_system_message_detail",
+		"enabled": true,
+		"about_user_message": "CANARY about me",
+		"about_model_message": "",
+		"name_user_message": "CANARY Name",
+		"role_user_message": "",
+		"traits_model_message": "CANARY traits",
+		"other_user_message": "",
+		"personality_type_selection": "CANARY personality",
+		"disabled_tools": ["CANARY_tool"],
+		"traits_enabled": false,
+		"personality_traits": { "CANARY": "trait" }
+	},
+	"memories": {
+		"memories": [
+			{
+				"id": "mem-CANARY1",
+				"content": "CANARY memory text one",
+				"status": "warm",
+				"created_timestamp": 1760000000
+			},
+			{
+				"id": "mem-CANARY2",
+				"content": "CANARY memory text two",
+				"status": "warm",
+				"created_timestamp": 1760000100
+			}
+		],
+		"memory_max_tokens": 10000,
+		"memory_num_tokens": 321
+	},
+	"snorlax_sidebar_page1": {
+		"items": [
+			{
+				"gizmo": {
+					"gizmo": {
+						"id": "g-p-CANARYPROJECTA",
+						"display": { "name": "CANARY project A" }
+					}
+				},
+				"files": [
+					{ "name": "CANARY-file-1.pdf" },
+					{ "name": "CANARY-file-2.pdf" }
+				],
+				"conversations": { "items": [{ "title": "CANARY project chat" }] }
+			}
+		],
+		"cursor": "cursor-CANARY_page2"
+	},
+	"snorlax_sidebar_page2": {
+		"items": [
+			{
+				"gizmo": {
+					"gizmo": {
+						"id": "g-p-CANARYPROJECTB",
+						"display": { "name": "CANARY project B" }
+					}
+				},
+				"files": []
+			}
+		],
+		"cursor": null
+	},
+	"tasks": {
+		"tasks": [
+			{
+				"status": "active",
+				"created_at": "2026-09-01T08:00:00Z",
+				"title": "CANARY task title",
+				"prompt": "CANARY task prompt"
+			},
+			{
+				"status": "active",
+				"created_at": "2026-09-02T08:00:00Z",
+				"title": "CANARY second task",
+				"prompt": "CANARY second prompt"
+			},
+			{
+				"status": "CANARY Free Text Status",
+				"created_at": "2026-09-03T08:00:00Z",
+				"title": "CANARY third task",
+				"prompt": "CANARY third prompt"
+			}
+		],
+		"cursor": null
+	},
+	"conversation_list_item": {
+		"id": "PLACEHOLDER",
+		"title": "CANARY conversation title",
+		"create_time": "2026-10-01T08:00:00.000000Z",
+		"update_time": "2026-10-01T09:00:00.000000Z",
+		"latest_assistant_turn_created_at": "2026-10-01T09:00:00.000000Z",
+		"pinned_time": null,
+		"mapping": null,
+		"current_node": "node-CANARY",
+		"conversation_template_id": null,
+		"gizmo_id": null,
+		"is_archived": false,
+		"is_starred": false,
+		"is_temporary_chat": false,
+		"is_do_not_remember": false,
+		"memory_scope": "global_enabled",
+		"context_scopes": null,
+		"context_scopes_v2": null,
+		"workspace_id": null,
+		"async_status": null,
+		"safe_urls": ["https://CANARY.example/page"],
+		"blocked_urls": [],
+		"conversation_origin": null,
+		"trial_conversation_type": null,
+		"is_automation_conversation": false,
+		"snippet": "CANARY snippet of a message",
+		"summary_metadata": null,
+		"sugar_item_id": null,
+		"sugar_item_visible": false
+	}
+}

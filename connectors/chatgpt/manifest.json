@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.53",
+	"version": "0.2.54",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
@@ -636,15 +636,323 @@
 			"freshness_strategy": "scheduled_window"
 		},
 		{
+			"name": "account_profile",
+			"required": false,
+			"description": "The signed-in ChatGPT account described with no text: creation time and tenure, country and region codes, billing currency, MFA, subscription facts not in account_plan (complimentary, trial, delinquency, purchase platform), data residency, enabled beta features, whether custom instructions and personality are set, memory count and token use, project, project file and scheduled task counts. Each source is read independently and its outcome is reported.",
+			"compaction_fingerprint": {
+				"exclude_keys": []
+			},
+			"display": {
+				"label": "Your ChatGPT account profile",
+				"detail": "When the account was created and how long you have had it, your country and region code (or the network country, labelled, when the account has none), billing currency, whether MFA is on, subscription facts such as a complimentary or trial plan, data residency, which beta features are switched on, whether custom instructions, memory and a personality are set (not their contents), how many memories, projects, project files and scheduled tasks you have. Your email, name, phone, picture, ids, region name, organisation names and all text are not collected. Plan, renewal and cancellation dates are in the account plan stream. Singleton."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"const": "account_profile"
+					},
+					"account_created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "Earliest of the user creation time (/me) and the account creation time (accounts/check)."
+					},
+					"tenure_months": {
+						"type": ["integer", "null"],
+						"minimum": 0,
+						"description": "Whole months from account_created_at to collection time."
+					},
+					"country": {
+						"type": ["string", "null"],
+						"pattern": "^[A-Z]{2}$",
+						"description": "ISO country code from the account profile; the network country when the profile has none (see geography_source).",
+						"x_pdpp_role": "secondary"
+					},
+					"region_code": {
+						"type": ["string", "null"],
+						"pattern": "^[A-Z0-9]{1,3}$",
+						"description": "Subdivision code from the account profile. The region name is not collected."
+					},
+					"geography_source": {
+						"type": ["string", "null"],
+						"enum": ["account_profile", "network", null]
+					},
+					"network_country": {
+						"type": ["string", "null"],
+						"pattern": "^[A-Z]{2}$",
+						"description": "Country of the network the browser used at collection time (Cloudflare trace). Fallback only; not the account's country."
+					},
+					"billing_currency": {
+						"type": ["string", "null"],
+						"pattern": "^[A-Z]{3}$"
+					},
+					"mfa_enabled": {
+						"type": ["boolean", "null"]
+					},
+					"email_domain_type": {
+						"type": ["string", "null"],
+						"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$",
+						"description": "Kind of email domain (for example social). The address is not collected."
+					},
+					"org_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"has_non_personal_org": {
+						"type": ["boolean", "null"]
+					},
+					"workspace_type": {
+						"type": ["string", "null"],
+						"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+					},
+					"is_deactivated": {
+						"type": ["boolean", "null"]
+					},
+					"data_residency_region": {
+						"type": ["string", "null"],
+						"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+					},
+					"compute_residency_region": {
+						"type": ["string", "null"],
+						"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+					},
+					"is_gratis": {
+						"type": ["boolean", "null"],
+						"description": "The active subscription is complimentary."
+					},
+					"is_trial": {
+						"type": ["boolean", "null"]
+					},
+					"trial_state": {
+						"type": ["string", "null"],
+						"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+					},
+					"has_previously_paid_subscription": {
+						"type": ["boolean", "null"]
+					},
+					"last_expired_subscription_was_gratis": {
+						"type": ["boolean", "null"]
+					},
+					"purchase_origin_platform": {
+						"type": ["string", "null"],
+						"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+					},
+					"is_delinquent": {
+						"type": ["boolean", "null"]
+					},
+					"in_grace_period": {
+						"type": ["boolean", "null"]
+					},
+					"account_feature_flag_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"enabled_beta_features": {
+						"type": ["array", "null"],
+						"maxItems": 256,
+						"items": {
+							"type": "string",
+							"pattern": "^[a-z0-9_]{1,64}$"
+						},
+						"description": "Keys of the beta settings that are switched on."
+					},
+					"beta_feature_flag_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"custom_instructions_enabled": {
+						"type": ["boolean", "null"]
+					},
+					"custom_instructions_about_user_set": {
+						"type": ["boolean", "null"]
+					},
+					"custom_instructions_response_style_set": {
+						"type": ["boolean", "null"]
+					},
+					"custom_instructions_name_set": {
+						"type": ["boolean", "null"]
+					},
+					"custom_instructions_role_set": {
+						"type": ["boolean", "null"]
+					},
+					"custom_instructions_traits_set": {
+						"type": ["boolean", "null"]
+					},
+					"custom_instructions_other_set": {
+						"type": ["boolean", "null"]
+					},
+					"personality_set": {
+						"type": ["boolean", "null"]
+					},
+					"traits_enabled": {
+						"type": ["boolean", "null"]
+					},
+					"disabled_tools_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"memory_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"memory_tokens_used": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"memory_tokens_max": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"project_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"project_file_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"scheduled_task_count": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
+					"scheduled_tasks_by_status": {
+						"type": ["object", "null"],
+						"propertyNames": {
+							"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+						},
+						"additionalProperties": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"source_status": {
+						"type": "object",
+						"properties": {
+							"me": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							},
+							"accounts_check": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							},
+							"beta_features": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							},
+							"custom_instructions": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							},
+							"memories": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							},
+							"projects": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							},
+							"tasks": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							},
+							"network": {
+								"type": "string",
+								"enum": ["ok", "not_available", "failed", "partial"]
+							}
+						},
+						"required": [
+							"me",
+							"accounts_check",
+							"beta_features",
+							"custom_instructions",
+							"memories",
+							"projects",
+							"tasks",
+							"network"
+						],
+						"additionalProperties": false,
+						"description": "Per-source outcome. A source that is not ok leaves its fields null; partial means a paged source stopped early."
+					}
+				},
+				"required": [
+					"id",
+					"account_created_at",
+					"tenure_months",
+					"country",
+					"region_code",
+					"geography_source",
+					"network_country",
+					"billing_currency",
+					"mfa_enabled",
+					"email_domain_type",
+					"org_count",
+					"has_non_personal_org",
+					"workspace_type",
+					"is_deactivated",
+					"data_residency_region",
+					"compute_residency_region",
+					"is_gratis",
+					"is_trial",
+					"trial_state",
+					"has_previously_paid_subscription",
+					"last_expired_subscription_was_gratis",
+					"purchase_origin_platform",
+					"is_delinquent",
+					"in_grace_period",
+					"account_feature_flag_count",
+					"enabled_beta_features",
+					"beta_feature_flag_count",
+					"custom_instructions_enabled",
+					"custom_instructions_about_user_set",
+					"custom_instructions_response_style_set",
+					"custom_instructions_name_set",
+					"custom_instructions_role_set",
+					"custom_instructions_traits_set",
+					"custom_instructions_other_set",
+					"personality_set",
+					"traits_enabled",
+					"disabled_tools_count",
+					"memory_count",
+					"memory_tokens_used",
+					"memory_tokens_max",
+					"project_count",
+					"project_file_count",
+					"scheduled_task_count",
+					"scheduled_tasks_by_status",
+					"source_status"
+				],
+				"additionalProperties": false
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": true,
+			"query": {
+				"range_filters": {
+					"account_created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true
+				}
+			},
+			"coverage_strategy": "singleton_presence",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
 			"name": "conversation_usage",
 			"required": false,
-			"description": "Per-conversation usage metadata with no text: timestamps, archive/star/share flags, custom GPT or project membership (as opaque references), message counts by role, models used, tool and feature use counts, branch count and character counts.",
+			"description": "Per-conversation usage metadata with no text. For every conversation, from the conversation list: timestamps, archive/star/pin/share flags, temporary, do-not-remember and automation flags, custom GPT or project membership (as opaque references). For the conversations read in detail (by default the 30 most recently updated; all of them, or a chosen set, on request): message counts by role, models used, tool and feature use counts, branch count and character counts.",
 			"compaction_fingerprint": {
 				"exclude_keys": []
 			},
 			"display": {
 				"label": "How you use ChatGPT, per conversation",
-				"detail": "For each conversation: when it was created and last updated, whether it is archived, starred or shared, whether it ran in a custom GPT or a project, how many messages you and ChatGPT sent, which models answered, which tools were used (search, code, images, canvas, deep research, memory, files, voice) and how long your messages were, as numbers. No titles, message text, file names, GPT names or ids are collected; conversations and GPTs are identified only by one-way references."
+				"detail": "For each conversation: when it was created, last updated and last answered, whether it is archived, starred, pinned, shared, temporary or automated, and whether it ran in a custom GPT or a project. For your most recent conversations (and any you choose) also how many messages you and ChatGPT sent, which models answered, which tools were used (search, code, images, canvas, deep research, memory, files, voice) and how long your messages were, as numbers. No titles, message text, file names, GPT names or ids are collected; conversations and GPTs are identified only by one-way references."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -664,15 +972,33 @@
 						"type": ["string", "null"],
 						"format": "date-time"
 					},
+					"latest_assistant_turn_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "When ChatGPT last answered in the conversation, from the conversation list."
+					},
 					"is_archived": {
 						"type": ["boolean", "null"]
 					},
 					"is_starred": {
 						"type": ["boolean", "null"]
 					},
+					"is_pinned": {
+						"type": ["boolean", "null"]
+					},
 					"is_shared": {
 						"type": ["boolean", "null"],
 						"description": "True when the conversation has a share link; null when shares could not be read."
+					},
+					"is_temporary_chat": {
+						"type": ["boolean", "null"]
+					},
+					"is_do_not_remember": {
+						"type": ["boolean", "null"]
+					},
+					"is_automation": {
+						"type": ["boolean", "null"],
+						"description": "True for conversations started by a scheduled task or other automation."
 					},
 					"in_workspace": {
 						"type": ["boolean", "null"]
@@ -687,10 +1013,15 @@
 						"pattern": "^g_[0-9a-f]{32}$",
 						"description": "Opaque one-way reference to the custom GPT or project. Not the GPT id."
 					},
+					"detail": {
+						"type": "string",
+						"enum": ["sampled", "selected", "not_read"],
+						"description": "Why the per-message fields were or were not read. sampled: one of the most recently updated conversations a default run reads (30). selected: named by the run's scope (resources or a time window) or a full-detail run. not_read: list fields only; per-message fields are null. A conversation read on an earlier run is not re-sent with nulls while its list fields are unchanged."
+					},
 					"detail_status": {
 						"type": "string",
 						"enum": ["fetched", "not_fetched", "unavailable", "failed"],
-						"description": "Whether the per-message fields below were read. not_fetched: list-only mode, detail cap or deferral."
+						"description": "Outcome of the detail read: fetched, unavailable (403/404), failed, or not_fetched (not targeted this run, or a deferral stopped the run first)."
 					},
 					"default_model_slug": {
 						"type": ["string", "null"],
@@ -856,12 +1187,18 @@
 					"id",
 					"create_time",
 					"update_time",
+					"latest_assistant_turn_at",
 					"is_archived",
 					"is_starred",
+					"is_pinned",
 					"is_shared",
+					"is_temporary_chat",
+					"is_do_not_remember",
+					"is_automation",
 					"in_workspace",
 					"gizmo_kind",
 					"gizmo_ref",
+					"detail",
 					"detail_status",
 					"default_model_slug",
 					"message_counts",
@@ -892,7 +1229,8 @@
 					"create_time": ["gte", "gt", "lte", "lt"],
 					"update_time": ["gte", "gt", "lte", "lt"],
 					"first_message_at": ["gte", "gt", "lte", "lt"],
-					"last_message_at": ["gte", "gt", "lte", "lt"]
+					"last_message_at": ["gte", "gt", "lte", "lt"],
+					"latest_assistant_turn_at": ["gte", "gt", "lte", "lt"]
 				},
 				"aggregations": {
 					"count": true,
@@ -905,13 +1243,13 @@
 		{
 			"name": "usage_summary",
 			"required": false,
-			"description": "Aggregate ChatGPT usage with no text: conversations and messages per month, active days, longest streak, model mix, feature use, custom GPT and project counts, hour-of-day and day-of-week histograms, account creation month, data residency, memory and custom-instruction flags, timezone, browser language and network country.",
+			"description": "Aggregate ChatGPT usage with no text. Exact, from every conversation's list entry: totals and flags, custom GPT and project share, conversations per month, active days, longest streak, first and last activity, hour-of-day and day-of-week of conversation starts. Sample-based and labelled as such: message counts, model mix and feature use over the most recently updated conversations.",
 			"compaction_fingerprint": {
 				"exclude_keys": []
 			},
 			"display": {
 				"label": "Your ChatGPT usage summary",
-				"detail": "Totals and monthly counts of conversations and messages, active days and longest streak, which models answered how often, how many conversations used each tool, how many custom GPTs and projects you used, when in the day and week you use ChatGPT, when the account was created (month), whether memory and custom instructions are on (not their contents), your timezone, browser language and the country of the network used at collection time. Plan details are in the account plan stream. No text, titles or ids are collected. Singleton."
+				"detail": "How many conversations you have and how many are archived, starred, pinned, shared, temporary or automated; how much you use custom GPTs and projects; conversations per month, active days and longest streak; when in the day and week you start conversations; and, for your most recent conversations only, how many messages were sent, which models answered and which tools were used. Account and settings facts are in the account profile stream; plan details in the account plan stream. No text, titles or ids are collected. Singleton."
 			},
 			"semantics": "mutable_state",
 			"schema": {
@@ -931,12 +1269,29 @@
 						"type": "string",
 						"enum": ["browser", "default_utc"]
 					},
+					"activity_basis": {
+						"type": "string",
+						"const": "conversation_timestamps",
+						"description": "Activity (days, months, streak, first/last) is read from each conversation's start, last update and last answer, not from individual messages."
+					},
 					"coverage": {
 						"type": "object",
 						"properties": {
 							"conversations_listed": {
 								"type": "integer",
 								"minimum": 0
+							},
+							"archived_listing": {
+								"type": "string",
+								"enum": ["read", "not_available"]
+							},
+							"list_pages": {
+								"type": "integer",
+								"minimum": 0
+							},
+							"detail_mode": {
+								"type": "string",
+								"enum": ["sample", "all", "selected", "none"]
 							},
 							"detail_fetched": {
 								"type": "integer",
@@ -950,21 +1305,20 @@
 								"type": "integer",
 								"minimum": 0
 							},
-							"detail_not_fetched": {
+							"detail_not_read": {
 								"type": "integer",
 								"minimum": 0
-							},
-							"detail_complete": {
-								"type": "boolean"
 							}
 						},
 						"required": [
 							"conversations_listed",
+							"archived_listing",
+							"list_pages",
+							"detail_mode",
 							"detail_fetched",
 							"detail_unavailable",
 							"detail_failed",
-							"detail_not_fetched",
-							"detail_complete"
+							"detail_not_read"
 						],
 						"additionalProperties": false
 					},
@@ -976,9 +1330,14 @@
 						"type": ["string", "null"],
 						"format": "date-time"
 					},
+					"history_span_days": {
+						"type": ["integer", "null"],
+						"minimum": 0
+					},
 					"active_days": {
 						"type": "integer",
-						"minimum": 0
+						"minimum": 0,
+						"description": "Days on which a conversation started, was last updated or last answered. Exact over every conversation; misses days in the middle of a long conversation."
 					},
 					"longest_streak_days": {
 						"type": "integer",
@@ -999,9 +1358,14 @@
 								"type": "integer",
 								"minimum": 0
 							},
+							"pinned": {
+								"type": "integer",
+								"minimum": 0
+							},
 							"shared": {
 								"type": ["integer", "null"],
-								"minimum": 0
+								"minimum": 0,
+								"description": "Null when shares could not be read."
 							},
 							"in_workspace": {
 								"type": "integer",
@@ -1014,6 +1378,134 @@
 							"project_conversations": {
 								"type": "integer",
 								"minimum": 0
+							},
+							"temporary_conversations": {
+								"type": "integer",
+								"minimum": 0
+							},
+							"automation_conversations": {
+								"type": "integer",
+								"minimum": 0
+							},
+							"do_not_remember_conversations": {
+								"type": "integer",
+								"minimum": 0
+							},
+							"custom_gpts_used": {
+								"type": "integer",
+								"minimum": 0
+							},
+							"projects_used": {
+								"type": "integer",
+								"minimum": 0
+							}
+						},
+						"required": [
+							"conversations",
+							"archived",
+							"starred",
+							"pinned",
+							"shared",
+							"in_workspace",
+							"custom_gpt_conversations",
+							"project_conversations",
+							"temporary_conversations",
+							"automation_conversations",
+							"do_not_remember_conversations",
+							"custom_gpts_used",
+							"projects_used"
+						],
+						"additionalProperties": false
+					},
+					"custom_gpt_share": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 1,
+						"description": "Share of conversations that ran in a custom GPT."
+					},
+					"project_share": {
+						"type": ["number", "null"],
+						"minimum": 0,
+						"maximum": 1,
+						"description": "Share of conversations that ran in a project."
+					},
+					"months": {
+						"type": "array",
+						"maxItems": 1200,
+						"items": {
+							"type": "object",
+							"properties": {
+								"month": {
+									"type": "string",
+									"pattern": "^\\d{4}-\\d{2}$"
+								},
+								"conversations_created": {
+									"type": "integer",
+									"minimum": 0
+								},
+								"conversations_last_active": {
+									"type": "integer",
+									"minimum": 0
+								},
+								"active_days": {
+									"type": "integer",
+									"minimum": 0
+								}
+							},
+							"required": [
+								"month",
+								"conversations_created",
+								"conversations_last_active",
+								"active_days"
+							],
+							"additionalProperties": false
+						}
+					},
+					"hour_of_day": {
+						"type": "array",
+						"minItems": 24,
+						"maxItems": 24,
+						"items": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"description": "Conversations started per local hour (0-23)."
+					},
+					"day_of_week": {
+						"type": "array",
+						"minItems": 7,
+						"maxItems": 7,
+						"items": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"description": "Conversations started per local weekday, Monday first."
+					},
+					"detail_sample": {
+						"type": ["object", "null"],
+						"properties": {
+							"basis": {
+								"type": "string",
+								"const": "most_recently_updated"
+							},
+							"n_conversations": {
+								"type": "integer",
+								"minimum": 0
+							},
+							"n_read": {
+								"type": "integer",
+								"minimum": 0
+							},
+							"complete": {
+								"type": "boolean"
+							},
+							"window_start": {
+								"type": ["string", "null"],
+								"format": "date-time"
+							},
+							"window_end": {
+								"type": ["string", "null"],
+								"format": "date-time"
 							},
 							"user_messages": {
 								"type": "integer",
@@ -1043,23 +1535,125 @@
 								"type": "integer",
 								"minimum": 0
 							},
-							"custom_gpts_used": {
-								"type": "integer",
+							"messages_per_conversation": {
+								"type": "object",
+								"properties": {
+									"mean": {
+										"type": ["number", "null"],
+										"minimum": 0
+									},
+									"median": {
+										"type": ["integer", "null"],
+										"minimum": 0
+									}
+								},
+								"required": ["mean", "median"],
+								"additionalProperties": false
+							},
+							"user_messages_per_conversation": {
+								"type": "object",
+								"properties": {
+									"mean": {
+										"type": ["number", "null"],
+										"minimum": 0
+									},
+									"median": {
+										"type": ["integer", "null"],
+										"minimum": 0
+									}
+								},
+								"required": ["mean", "median"],
+								"additionalProperties": false
+							},
+							"user_chars_mean_per_message": {
+								"type": ["integer", "null"],
 								"minimum": 0
 							},
-							"projects_used": {
-								"type": "integer",
-								"minimum": 0
+							"models": {
+								"type": "array",
+								"maxItems": 500,
+								"items": {
+									"type": "object",
+									"properties": {
+										"slug": {
+											"type": "string",
+											"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+										},
+										"assistant_messages": {
+											"type": "integer",
+											"minimum": 0
+										}
+									},
+									"required": ["slug", "assistant_messages"],
+									"additionalProperties": false
+								}
+							},
+							"feature_conversations": {
+								"type": "object",
+								"properties": {
+									"web_search": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"code_interpreter": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"image_generation": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"canvas": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"deep_research": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"memory_update": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"file_search": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"reasoning": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"voice": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"other_tool": {
+										"type": "integer",
+										"minimum": 0
+									}
+								},
+								"required": [
+									"web_search",
+									"code_interpreter",
+									"image_generation",
+									"canvas",
+									"deep_research",
+									"memory_update",
+									"file_search",
+									"reasoning",
+									"voice",
+									"other_tool"
+								],
+								"additionalProperties": false
 							}
 						},
 						"required": [
-							"conversations",
-							"archived",
-							"starred",
-							"shared",
-							"in_workspace",
-							"custom_gpt_conversations",
-							"project_conversations",
+							"basis",
+							"n_conversations",
+							"n_read",
+							"complete",
+							"window_start",
+							"window_end",
 							"user_messages",
 							"assistant_messages",
 							"tool_messages",
@@ -1067,314 +1661,14 @@
 							"user_images",
 							"user_chars_total",
 							"regenerated_or_edited_conversations",
-							"custom_gpts_used",
-							"projects_used"
+							"messages_per_conversation",
+							"user_messages_per_conversation",
+							"user_chars_mean_per_message",
+							"models",
+							"feature_conversations"
 						],
-						"additionalProperties": false
-					},
-					"user_message_chars": {
-						"type": "object",
-						"properties": {
-							"total": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"mean_per_message": {
-								"type": ["integer", "null"],
-								"minimum": 0
-							},
-							"median_of_conversation_max": {
-								"type": ["integer", "null"],
-								"minimum": 0
-							}
-						},
-						"required": [
-							"total",
-							"mean_per_message",
-							"median_of_conversation_max"
-						],
-						"additionalProperties": false
-					},
-					"models": {
-						"type": "array",
-						"maxItems": 500,
-						"items": {
-							"type": "object",
-							"properties": {
-								"slug": {
-									"type": "string",
-									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
-								},
-								"assistant_messages": {
-									"type": "integer",
-									"minimum": 0
-								}
-							},
-							"required": ["slug", "assistant_messages"],
-							"additionalProperties": false
-						}
-					},
-					"feature_conversations": {
-						"type": "object",
-						"properties": {
-							"web_search": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"code_interpreter": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"image_generation": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"canvas": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"deep_research": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"memory_update": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"file_search": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"reasoning": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"voice": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"other_tool": {
-								"type": "integer",
-								"minimum": 0
-							}
-						},
-						"required": [
-							"web_search",
-							"code_interpreter",
-							"image_generation",
-							"canvas",
-							"deep_research",
-							"memory_update",
-							"file_search",
-							"reasoning",
-							"voice",
-							"other_tool"
-						],
-						"additionalProperties": false
-					},
-					"months": {
-						"type": "array",
-						"maxItems": 1200,
-						"items": {
-							"type": "object",
-							"properties": {
-								"month": {
-									"type": "string",
-									"pattern": "^\\d{4}-\\d{2}$"
-								},
-								"conversations_created": {
-									"type": "integer",
-									"minimum": 0
-								},
-								"user_messages": {
-									"type": "integer",
-									"minimum": 0
-								},
-								"assistant_messages": {
-									"type": "integer",
-									"minimum": 0
-								},
-								"active_days": {
-									"type": "integer",
-									"minimum": 0
-								},
-								"models": {
-									"type": "array",
-									"maxItems": 500,
-									"items": {
-										"type": "object",
-										"properties": {
-											"slug": {
-												"type": "string",
-												"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
-											},
-											"assistant_messages": {
-												"type": "integer",
-												"minimum": 0
-											}
-										},
-										"required": ["slug", "assistant_messages"],
-										"additionalProperties": false
-									}
-								},
-								"feature_conversations": {
-									"type": "object",
-									"properties": {
-										"web_search": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"code_interpreter": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"image_generation": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"canvas": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"deep_research": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"memory_update": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"file_search": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"reasoning": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"voice": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"other_tool": {
-											"type": "integer",
-											"minimum": 0
-										}
-									},
-									"required": [
-										"web_search",
-										"code_interpreter",
-										"image_generation",
-										"canvas",
-										"deep_research",
-										"memory_update",
-										"file_search",
-										"reasoning",
-										"voice",
-										"other_tool"
-									],
-									"additionalProperties": false
-								}
-							},
-							"required": [
-								"month",
-								"conversations_created",
-								"user_messages",
-								"assistant_messages",
-								"active_days",
-								"models",
-								"feature_conversations"
-							],
-							"additionalProperties": false
-						}
-					},
-					"hour_of_day": {
-						"type": "array",
-						"items": {
-							"type": "integer",
-							"minimum": 0
-						},
-						"minItems": 24,
-						"maxItems": 24
-					},
-					"day_of_week": {
-						"type": "array",
-						"items": {
-							"type": "integer",
-							"minimum": 0
-						},
-						"minItems": 7,
-						"maxItems": 7,
-						"description": "Monday first."
-					},
-					"account": {
-						"type": "object",
-						"properties": {
-							"created_month": {
-								"type": ["string", "null"],
-								"pattern": "^\\d{4}-\\d{2}$"
-							},
-							"data_residency_region": {
-								"type": ["string", "null"],
-								"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
-							},
-							"compute_residency_region": {
-								"type": ["string", "null"],
-								"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
-							}
-						},
-						"required": [
-							"created_month",
-							"data_residency_region",
-							"compute_residency_region"
-						],
-						"additionalProperties": false
-					},
-					"settings": {
-						"type": "object",
-						"properties": {
-							"memory_count": {
-								"type": ["integer", "null"],
-								"minimum": 0
-							},
-							"memory_num_tokens": {
-								"type": ["integer", "null"],
-								"minimum": 0
-							},
-							"memory_max_tokens": {
-								"type": ["integer", "null"],
-								"minimum": 0
-							},
-							"custom_instructions_enabled": {
-								"type": ["boolean", "null"]
-							},
-							"custom_instructions_about_user_set": {
-								"type": ["boolean", "null"]
-							},
-							"custom_instructions_response_style_set": {
-								"type": ["boolean", "null"]
-							},
-							"setting_flags": {
-								"type": ["object", "null"],
-								"propertyNames": {
-									"pattern": "^[a-z0-9_]{1,64}$"
-								},
-								"additionalProperties": {
-									"type": "boolean"
-								},
-								"maxProperties": 64
-							}
-						},
-						"required": [
-							"memory_count",
-							"memory_num_tokens",
-							"memory_max_tokens",
-							"custom_instructions_enabled",
-							"custom_instructions_about_user_set",
-							"custom_instructions_response_style_set",
-							"setting_flags"
-						],
-						"additionalProperties": false
+						"additionalProperties": false,
+						"description": "SAMPLE-BASED, not account-wide: message counts, model mix and feature use over the n_conversations most recently updated conversations, whose last activity falls between window_start and window_end. Null when no sample was read."
 					},
 					"locale": {
 						"type": "object",
@@ -1382,14 +1676,9 @@
 							"browser_language": {
 								"type": ["string", "null"],
 								"maxLength": 35
-							},
-							"network_country": {
-								"type": ["string", "null"],
-								"pattern": "^[A-Z]{2}$",
-								"description": "ISO 3166-1 country of the network the page used at collection time (Cloudflare trace). Not a billing or account country; a VPN changes it."
 							}
 						},
-						"required": ["browser_language", "network_country"],
+						"required": ["browser_language"],
 						"additionalProperties": false
 					}
 				},
@@ -1397,20 +1686,20 @@
 					"id",
 					"timezone",
 					"timezone_source",
+					"activity_basis",
 					"coverage",
 					"first_activity_at",
 					"last_activity_at",
+					"history_span_days",
 					"active_days",
 					"longest_streak_days",
 					"totals",
-					"user_message_chars",
-					"models",
-					"feature_conversations",
+					"custom_gpt_share",
+					"project_share",
 					"months",
 					"hour_of_day",
 					"day_of_week",
-					"account",
-					"settings",
+					"detail_sample",
 					"locale"
 				],
 				"additionalProperties": false
@@ -1505,6 +1794,9 @@
 			"id": "usage_metadata",
 			"label": "Usage metadata only, no conversation text",
 			"streams": [
+				{
+					"name": "account_profile"
+				},
 				{
 					"name": "usage_summary"
 				},

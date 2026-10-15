@@ -132,10 +132,15 @@ export interface ChatGptFetchResult {
  */
 export type ChatGptUsageProjection =
 	| "conversation_usage"
+	| "conversation_list"
 	| "shared_conversation_ids"
 	| "memory_stats"
 	| "custom_instructions_flags"
-	| "settings_flags"
+	| "me_profile"
+	| "account_check_facts"
+	| "beta_features"
+	| "project_sidebar"
+	| "task_stats"
 	| "client_context";
 
 export interface ChatGptApi {

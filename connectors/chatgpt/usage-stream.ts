@@ -2,89 +2,167 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Collection for `conversation_usage` (one record per conversation) and
- * `usage_summary` (one aggregate record). See usage.ts for the privacy
- * contract.
+ * Collection for the text-free usage streams: `account_profile` (one record),
+ * `conversation_usage` (one record per conversation) and `usage_summary`
+ * (one aggregate record). See usage.ts for the privacy contract: every read
+ * below goes through `chatGptUsageFetchInBrowser`, which reduces the body
+ * inside the page, so no text reaches the connector process.
  *
- * Request plan, in order:
- *   1. Conversation list (`/conversations/search`), the same walk the
- *      conversations stream uses. Metadata only.
- *   2. `/shared_conversations` pages, projected in the page to conversation
- *      ids, for the `is_shared` flag.
- *   3. Conversation detail, `/conversations/batch` (10 ids per request) with
- *      a `/conversation/{id}` fallback. This is the only content-bearing read:
- *      the page reduces each body to counts before it returns.
- *      `PDPP_CHATGPT_USAGE_MAX_DETAIL_FETCHES=0` skips it (list-only mode).
- *   4. Summary only: `/accounts/check`, `/memories`, `/user_system_messages`,
- *      `/settings/user` (all projected in the page) and the page's
- *      timezone, language and network country.
+ * Request plan for a default run (all three streams):
  *
- * Every record is rebuilt each run (no incremental cursor). A fingerprint
- * gate suppresses byte-identical re-emits on hosts that persist STATE.
+ *   In parallel from the start:
+ *   - account_profile: /me, /accounts/check, /settings/beta_features,
+ *     /user_system_messages, /memories, /gizmos/snorlax/sidebar (cursor
+ *     pages, at most 5), /tasks (cursor pages, at most 5), /cdn-cgi/trace.
+ *     Each source is optional: a failure leaves its fields null and is named
+ *     in `source_status`.
+ *   - Conversation list: `/conversations?offset=N&limit=100&order=updated`,
+ *     then the same with `&is_archived=true`, plus `/shared_conversations`
+ *     for the `is_shared` flag. The list response's `total` is not reliable,
+ *     so a pass stops at the first page with fewer than 100 items. At most
+ *     4 list/detail requests are in flight at once (shared limiter).
+ *
+ *   Then detail, `/conversations/batch` (10 ids per request, up to 3 in
+ *   flight) with a `/conversation/{id}` fallback, for a SAMPLE: the 30 most
+ *   recently updated conversations. Everything in usage_summary except
+ *   `detail_sample` comes from list fields of every conversation and is
+ *   exact; `detail_sample` (message counts, model mix, feature use) is
+ *   labelled as sample-based with its window.
+ *
+ *   For 1,334 conversations: 14 list pages (plus up to 3 empty pages already
+ *   in flight when the short page lands) + 1 archived page + 1 shares page +
+ *   3 batch reads + 8 profile reads ≈ 27–30 requests. With 4 list pages in
+ *   flight at ~3.5 s each the list takes 4–5 rounds (~14–18 s); profile
+ *   reads (~2.2 s, bounded by /memories) overlap it and the sample (~1–3 s)
+ *   follows it.
+ *
+ * Full detail (opt-in):
+ *   - Protocol scope on `conversation_usage`: `resources` (record ids) reads
+ *     detail for exactly those conversations; `time_range` reads detail for
+ *     every conversation created inside the window. Both are defined START
+ *     scope fields; no new protocol field is used.
+ *   - Dev override `PDPP_CHATGPT_USAGE_DETAIL`: `all`, `none`, or an integer
+ *     sample size. The Vana CLI strips PDPP_* variables from the connector
+ *     process, so this does not reach CLI runs.
+ *
+ * Records not read in detail this run carry `detail: "not_read"` and null
+ * detail fields. A conversation whose detail was read on an earlier run and
+ * whose list fields have not changed since is NOT re-emitted with nulls: its
+ * earlier record stays current (STATE keeps a per-conversation list
+ * fingerprint for this).
  */
 
 import type {
 	CollectContext,
-	EmittedMessage,
 	RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { buildFullScanCoverageMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import {
+	openCarryForwardCursor,
+	openFingerprintCursor,
+	recordFingerprint,
+} from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import type { StreamDeps } from "./index.ts";
 import { tsToIso } from "./parsers.ts";
-import type { ChatGptFetchResult, ConversationListItem } from "./types.ts";
+import { validateRecord } from "./schemas.ts";
+import type { ChatGptFetchResult } from "./types.ts";
 import {
+	type AccountProfileSource,
+	buildAccountProfileRecord,
 	buildConversationUsageRecord,
 	buildUsageSummaryRecord,
 	type ChatGptUsageProjection,
+	type ConversationListPage,
 	type ConversationUsageProjection,
+	type DetailBasis,
+	type DetailMode,
 	type DetailStatus,
-	readAccountUsageFacts,
+	lastActivityOf,
+	type ProfileSourceStatus,
 	readClientContext,
+	readConversationListPage,
 	readConversationUsageProjection,
-	readSettingsFlags,
-	type UsageAccountInput,
-	type UsageClientContext,
-	type UsageSettingsInput,
+	type UsageListItem,
+	type UsageSummaryConversation,
+	usageRef,
 } from "./usage.ts";
 
-export const USAGE_STREAMS = ["conversation_usage", "usage_summary"] as const;
+export const USAGE_STREAMS = [
+	"account_profile",
+	"conversation_usage",
+	"usage_summary",
+] as const;
 
-export const CHATGPT_USAGE_MAX_DETAIL_FETCHES_ENV =
-	"PDPP_CHATGPT_USAGE_MAX_DETAIL_FETCHES";
+/** Dev override for the detail plan: `all`, `none` or a sample size. */
+export const CHATGPT_USAGE_DETAIL_ENV = "PDPP_CHATGPT_USAGE_DETAIL";
 /** Set by hosts that never persist STATE (PageShim): emit without fingerprints. */
 export const CHATGPT_USAGE_STATELESS_ENV = "PDPP_CHATGPT_USAGE_STATELESS";
 
+export const DEFAULT_DETAIL_SAMPLE = 30;
+export const LIST_PAGE_LIMIT = 100;
+const LIST_MAX_PAGES = 300;
+const LIST_WORKERS = 4;
+const REQUESTS_IN_FLIGHT = 4;
 const DETAIL_BATCH_SIZE = 10;
+const DETAIL_WORKERS = 3;
 const SHARED_PAGE_LIMIT = 100;
 const SHARED_MAX_PAGES = 50;
+const PROFILE_MAX_PAGES = 5;
 
 export type UsageFetchErrorClass = "auth" | "forbidden" | "deferred" | "other";
 
 export interface UsageStreamHooks {
-	/** Full conversation list walk; `truncated` means the list is not proven complete. */
-	listConversations: (
-		deps: StreamDeps,
-	) => Promise<{ items: ConversationListItem[]; truncated: boolean }>;
 	classifyError: (err: unknown) => UsageFetchErrorClass;
 	/** The accounts/check path the account_plan stream reads. */
 	accountsCheckPath: string;
+	/** Clock seam (epoch ms) for tenure; defaults to Date.now. */
+	now?: () => number;
 }
 
-export function resolveUsageMaxDetailFetches(
+export type UsageDetailPlan =
+	| { kind: "sample"; size: number }
+	| { kind: "all" }
+	| { kind: "none" };
+
+export function resolveUsageDetailPlan(
 	env: NodeJS.ProcessEnv = process.env,
-): number {
-	const raw = env[CHATGPT_USAGE_MAX_DETAIL_FETCHES_ENV]?.trim();
-	if (raw === undefined || raw === "") return Number.POSITIVE_INFINITY;
-	const n = Number(raw);
-	return Number.isInteger(n) && n >= 0 ? n : Number.POSITIVE_INFINITY;
+): UsageDetailPlan {
+	const raw = env[CHATGPT_USAGE_DETAIL_ENV]?.trim().toLowerCase();
+	if (raw === "all") return { kind: "all" };
+	if (raw === "none" || raw === "0") return { kind: "none" };
+	const n = raw ? Number(raw) : Number.NaN;
+	return {
+		kind: "sample",
+		size: Number.isInteger(n) && n > 0 ? n : DEFAULT_DETAIL_SAMPLE,
+	};
 }
+
+// ─── Request plumbing ──────────────────────────────────────────────────
 
 type Projected =
 	| { kind: "ok"; json: unknown }
 	| { kind: "status"; status: number }
 	| { kind: "error"; cls: UsageFetchErrorClass; err: unknown };
+
+type Limiter = <T>(fn: () => Promise<T>) => Promise<T>;
+
+/** At most `n` calls in flight; a finished call hands its slot to the next waiter. */
+export function createLimiter(n: number): Limiter {
+	let active = 0;
+	const waiting: Array<() => void> = [];
+	return async <T>(fn: () => Promise<T>): Promise<T> => {
+		if (active < n) active += 1;
+		else await new Promise<void>((resolve) => waiting.push(resolve));
+		try {
+			return await fn();
+		} finally {
+			const next = waiting.shift();
+			if (next) next();
+			else active -= 1;
+		}
+	};
+}
 
 async function fetchProjected(
 	deps: StreamDeps,
@@ -105,33 +183,134 @@ async function fetchProjected(
 	return { kind: "ok", json: res.json };
 }
 
-/** Optional side read: any failure other than auth yields null. */
-async function optionalProjected(
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+	typeof v === "object" && v !== null && !Array.isArray(v);
+
+function sourceStatusOf(r: Projected): ProfileSourceStatus {
+	if (r.kind === "ok") return isRecord(r.json) ? "ok" : "failed";
+	if (r.kind === "status")
+		return r.status === 403 || r.status === 404 ? "not_available" : "failed";
+	return r.cls === "forbidden" ? "not_available" : "failed";
+}
+
+function isUnavailable(r: Projected): boolean {
+	return (
+		(r.kind === "status" &&
+			(r.status === 403 || r.status === 404 || r.status === 422)) ||
+		(r.kind === "error" && r.cls === "forbidden")
+	);
+}
+
+// ─── Conversation list ────────────────────────────────────────────────
+
+type ListOutcome =
+	| "complete"
+	| "not_available"
+	| "capped"
+	| "deferred"
+	| "parse_error"
+	| "failed";
+
+interface ListPass {
+	items: UsageListItem[];
+	pages: number;
+	outcome: ListOutcome;
+}
+
+/**
+ * Walk one `/conversations` listing with up to LIST_WORKERS pages in flight.
+ * The provider's `total` is not trusted: the walk ends at the first page that
+ * returns fewer than LIST_PAGE_LIMIT items. A failed page before that point
+ * makes the pass incomplete; failures on pages past the end are ignored.
+ */
+export async function walkConversationList(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
-	path: string,
-	projection: ChatGptUsageProjection,
-): Promise<Record<string, unknown> | null> {
-	const r = await fetchProjected(deps, hooks, path, projection);
-	return r.kind === "ok" &&
-		typeof r.json === "object" &&
-		r.json !== null &&
-		!Array.isArray(r.json)
-		? (r.json as Record<string, unknown>)
-		: null;
+	limit: Limiter,
+	opts: { archived: boolean; workers?: number },
+): Promise<ListPass> {
+	const pages = new Map<number, ConversationListPage>();
+	const failures = new Map<number, ListOutcome>();
+	let next = 0;
+	let endAt = Number.POSITIVE_INFINITY;
+	let wallClockStop = false;
+	const firstFailure = (): number =>
+		failures.size > 0 ? Math.min(...failures.keys()) : Number.POSITIVE_INFINITY;
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const i = next;
+			if (i > endAt || i >= firstFailure() || i >= LIST_MAX_PAGES) return;
+			if (deps.runBudget?.reason() === "max_wall_clock") {
+				wallClockStop = true;
+				return;
+			}
+			next += 1;
+			const path = `/conversations?offset=${i * LIST_PAGE_LIMIT}&limit=${LIST_PAGE_LIMIT}&order=updated${opts.archived ? "&is_archived=true" : ""}`;
+			const r = await limit(() =>
+				fetchProjected(deps, hooks, path, "conversation_list"),
+			);
+			const page = r.kind === "ok" ? readConversationListPage(r.json) : null;
+			if (!page) {
+				failures.set(
+					i,
+					i === 0 && isUnavailable(r)
+						? "not_available"
+						: r.kind === "error" && r.cls === "deferred"
+							? "deferred"
+							: r.kind === "ok"
+								? "parse_error"
+								: "failed",
+				);
+				continue;
+			}
+			pages.set(i, page);
+			if (page.raw_count < LIST_PAGE_LIMIT) endAt = Math.min(endAt, i);
+		}
+	};
+	await Promise.all(
+		Array.from({ length: opts.workers ?? LIST_WORKERS }, () => worker()),
+	);
+	const failedAt = firstFailure();
+	const ordered: ConversationListPage[] = [];
+	for (let i = 0; i <= Math.min(endAt, failedAt - 1, LIST_MAX_PAGES - 1); i++) {
+		const page = pages.get(i);
+		if (!page) break;
+		ordered.push(page);
+	}
+	const seen = new Set<string>();
+	const items: UsageListItem[] = [];
+	for (const page of ordered) {
+		for (const item of page.items) {
+			if (seen.has(item.id)) continue;
+			seen.add(item.id);
+			items.push(item);
+		}
+	}
+	const outcome: ListOutcome =
+		failedAt <= endAt
+			? (failures.get(failedAt) ?? "failed")
+			: endAt !== Number.POSITIVE_INFINITY
+				? "complete"
+				: wallClockStop
+					? "deferred"
+					: "capped";
+	return { items, pages: pages.size, outcome };
 }
 
 async function readSharedIds(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
+	limit: Limiter,
 ): Promise<Set<string> | null> {
 	const ids = new Set<string>();
 	for (let page = 0; page < SHARED_MAX_PAGES; page += 1) {
-		const r = await fetchProjected(
-			deps,
-			hooks,
-			`/shared_conversations?offset=${page * SHARED_PAGE_LIMIT}&limit=${SHARED_PAGE_LIMIT}&order=created`,
-			"shared_conversation_ids",
+		const r = await limit(() =>
+			fetchProjected(
+				deps,
+				hooks,
+				`/shared_conversations?offset=${page * SHARED_PAGE_LIMIT}&limit=${SHARED_PAGE_LIMIT}&order=created`,
+				"shared_conversation_ids",
+			),
 		);
 		if (r.kind === "status" && r.status === 404) return ids;
 		if (r.kind !== "ok") return null;
@@ -154,186 +333,412 @@ async function readSharedIds(
 	return null;
 }
 
+// ─── Detail ───────────────────────────────────────────────────────────
+
 interface DetailOutcome {
 	projection: ConversationUsageProjection | null;
 	status: DetailStatus;
 }
 
 /**
- * Read detail projections for `ids`, newest first, until the cap or a
- * provider deferral. Returns per-id outcomes; ids not reached are absent.
+ * Read detail projections for `ids` in batches of DETAIL_BATCH_SIZE, up to
+ * DETAIL_WORKERS batches in flight. A batch that is not served falls back to
+ * single reads for that chunk and later chunks. A provider deferral stops
+ * further requests; ids not reached are absent from the result.
  */
 async function readDetails(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
+	limit: Limiter,
 	ids: readonly string[],
-	cap: number,
 ): Promise<{ outcomes: Map<string, DetailOutcome>; deferred: boolean }> {
 	const outcomes = new Map<string, DetailOutcome>();
-	const target = ids.slice(0, Math.min(ids.length, cap));
+	const chunks: string[][] = [];
+	for (let i = 0; i < ids.length; i += DETAIL_BATCH_SIZE) {
+		chunks.push(ids.slice(i, i + DETAIL_BATCH_SIZE));
+	}
 	let batchUsable = true;
 	let deferred = false;
-	for (let i = 0; i < target.length && !deferred; i += DETAIL_BATCH_SIZE) {
-		if (deps.runBudget?.reason() === "max_wall_clock") {
-			deferred = true;
-			break;
-		}
-		const chunk = target.slice(i, i + DETAIL_BATCH_SIZE);
-		if (batchUsable) {
-			const r = await fetchProjected(
-				deps,
-				hooks,
-				"/conversations/batch",
-				"conversation_usage",
-				{ method: "POST", body: { conversation_ids: chunk } },
-			);
-			if (r.kind === "error" && r.cls === "deferred") {
-				deferred = true;
-				break;
-			}
-			if (r.kind === "ok" && Array.isArray(r.json)) {
-				for (const raw of r.json) {
-					const p = readConversationUsageProjection(raw);
-					if (p?.conversation_id && chunk.includes(p.conversation_id)) {
-						outcomes.set(p.conversation_id, {
-							projection: p,
-							status: "fetched",
-						});
-					}
-				}
-			} else {
-				// The batch endpoint is not served for this account; read singly.
-				batchUsable = false;
-			}
-		}
-		for (const id of chunk) {
-			if (outcomes.has(id) || deferred) continue;
-			const r = await fetchProjected(
+	let nextChunk = 0;
+	let done = 0;
+	const stop = (): boolean => {
+		if (deps.runBudget?.reason() === "max_wall_clock") deferred = true;
+		return deferred;
+	};
+	const readOne = async (id: string): Promise<void> => {
+		const r = await limit(() =>
+			fetchProjected(
 				deps,
 				hooks,
 				`/conversation/${encodeURIComponent(id)}`,
 				"conversation_usage",
-			);
-			if (r.kind === "error" && r.cls === "deferred") {
-				deferred = true;
-				break;
+			),
+		);
+		if (r.kind === "error" && r.cls === "deferred") {
+			deferred = true;
+			return;
+		}
+		const p = r.kind === "ok" ? readConversationUsageProjection(r.json) : null;
+		outcomes.set(id, {
+			projection: p,
+			status: p ? "fetched" : isUnavailable(r) ? "unavailable" : "failed",
+		});
+	};
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const chunk = chunks[nextChunk];
+			if (!chunk || stop()) return;
+			nextChunk += 1;
+			if (batchUsable) {
+				const r = await limit(() =>
+					fetchProjected(
+						deps,
+						hooks,
+						"/conversations/batch",
+						"conversation_usage",
+						{ method: "POST", body: { conversation_ids: chunk } },
+					),
+				);
+				if (r.kind === "error" && r.cls === "deferred") {
+					deferred = true;
+					return;
+				}
+				if (r.kind === "ok" && Array.isArray(r.json)) {
+					for (const raw of r.json) {
+						const p = readConversationUsageProjection(raw);
+						if (p?.conversation_id && chunk.includes(p.conversation_id)) {
+							outcomes.set(p.conversation_id, {
+								projection: p,
+								status: "fetched",
+							});
+						}
+					}
+				} else {
+					// The batch endpoint is not served for this account; read singly.
+					batchUsable = false;
+				}
 			}
-			const p =
-				r.kind === "ok" ? readConversationUsageProjection(r.json) : null;
-			outcomes.set(id, {
-				projection: p,
-				status: p
-					? "fetched"
-					: (r.kind === "status" && (r.status === 404 || r.status === 403)) ||
-							(r.kind === "error" && r.cls === "forbidden")
-						? "unavailable"
-						: "failed",
+			for (const id of chunk) {
+				if (outcomes.has(id) || stop()) continue;
+				await readOne(id);
+			}
+			done += chunk.length;
+			await deps.emit({
+				type: "PROGRESS",
+				stream: deps.requested.has("conversation_usage")
+					? "conversation_usage"
+					: "usage_summary",
+				message: `Reading usage details: ${Math.min(done, ids.length)} of ${ids.length}`,
 			});
 		}
-		await deps.emit({
-			type: "PROGRESS",
-			stream: deps.requested.has("conversation_usage")
-				? "conversation_usage"
-				: "usage_summary",
-			message: `Reading usage details: ${Math.min(i + DETAIL_BATCH_SIZE, target.length)} of ${target.length}`,
-		});
-	}
+	};
+	await Promise.all(
+		Array.from({ length: Math.min(DETAIL_WORKERS, chunks.length) }, () =>
+			worker(),
+		),
+	);
 	return { outcomes, deferred };
 }
 
-async function readSummaryInputs(
-	deps: StreamDeps,
-	hooks: UsageStreamHooks,
-): Promise<{
-	settings: UsageSettingsInput;
-	client: UsageClientContext;
-	account: UsageAccountInput;
-}> {
-	// Sequential on purpose: each is one paced request through the shared budget.
-	const account = await fetchProjectedRaw(deps, hooks, hooks.accountsCheckPath);
-	const memory = await optionalProjected(
-		deps,
-		hooks,
-		"/memories?include_memory_entries=true",
-		"memory_stats",
-	);
-	const instructions = await optionalProjected(
-		deps,
-		hooks,
-		"/user_system_messages",
-		"custom_instructions_flags",
-	);
-	const settings = await optionalProjected(
-		deps,
-		hooks,
-		"/settings/user",
-		"settings_flags",
-	);
-	const client = await optionalProjected(
-		deps,
-		hooks,
-		"/cdn-cgi/trace",
-		"client_context",
-	);
-	const num = (v: unknown): number | null =>
-		typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
-	const bool = (v: unknown): boolean | null =>
-		typeof v === "boolean" ? v : null;
-	return {
-		account: readAccountUsageFacts(account),
-		client: readClientContext(client),
-		settings: {
-			memory_count: num(memory?.memory_count),
-			memory_num_tokens: num(memory?.memory_num_tokens),
-			memory_max_tokens: num(memory?.memory_max_tokens),
-			custom_instructions_enabled: bool(instructions?.enabled),
-			custom_instructions_about_user_set: bool(instructions?.about_user_set),
-			custom_instructions_response_style_set: bool(
-				instructions?.response_style_set,
-			),
-			setting_flags: readSettingsFlags(settings),
-		},
-	};
+// ─── account_profile ──────────────────────────────────────────────────
+
+interface SourceRead {
+	json: Record<string, unknown> | null;
+	status: ProfileSourceStatus;
 }
 
-/**
- * accounts/check carries no free text the summary needs projecting away
- * beyond what readAccountUsageFacts already drops, and the account_plan
- * stream already reads it unprojected; reuse that path as-is.
- */
-async function fetchProjectedRaw(
+async function readSource(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
 	path: string,
-): Promise<unknown> {
-	try {
-		const res = await deps.api.fetch(path);
-		return res.status === 200 ? res.json : null;
-	} catch (err) {
-		if (hooks.classifyError(err) === "auth") throw err;
-		return null;
-	}
+	projection: ChatGptUsageProjection,
+): Promise<SourceRead> {
+	const r = await fetchProjected(deps, hooks, path, projection);
+	const status = sourceStatusOf(r);
+	return {
+		json:
+			status === "ok" && r.kind === "ok"
+				? (r.json as SourceRead["json"])
+				: null,
+		status,
+	};
 }
 
-function emitForStreams(
+interface PagedCounts {
+	count: number;
+	files: number;
+	by_status: Record<string, number>;
+}
+
+/**
+ * Follow a `{..., cursor}` listing for at most PROFILE_MAX_PAGES pages,
+ * summing the in-page counts. A later page that fails, a cursor that is not
+ * a plain token, or the page cap returns what was counted as "partial".
+ */
+async function readPagedCounts(
 	deps: StreamDeps,
-	streams: readonly string[],
-	build: (stream: string) => EmittedMessage,
-): Promise<void> {
-	return Promise.all(streams.map((s) => deps.emit(build(s)))).then(
-		() => undefined,
-	);
+	hooks: UsageStreamHooks,
+	path: string,
+	projection: "project_sidebar" | "task_stats",
+): Promise<{ value: PagedCounts | null; status: ProfileSourceStatus }> {
+	const acc: PagedCounts = { count: 0, files: 0, by_status: {} };
+	let cursor: string | null = null;
+	for (let page = 0; page < PROFILE_MAX_PAGES; page += 1) {
+		const url: string =
+			cursor === null
+				? path
+				: `${path}${path.includes("?") ? "&" : "?"}cursor=${encodeURIComponent(cursor)}`;
+		const r = await fetchProjected(deps, hooks, url, projection);
+		const j = r.kind === "ok" && isRecord(r.json) ? r.json : null;
+		const n =
+			j === null
+				? null
+				: projection === "project_sidebar"
+					? j.item_count
+					: j.task_count;
+		if (j === null || typeof n !== "number") {
+			return page === 0
+				? {
+						value: null,
+						status: r.kind === "ok" ? "failed" : sourceStatusOf(r),
+					}
+				: { value: acc, status: "partial" };
+		}
+		acc.count += n;
+		if (typeof j.file_count === "number") acc.files += j.file_count;
+		if (isRecord(j.by_status)) {
+			for (const [k, v] of Object.entries(j.by_status)) {
+				if (typeof v === "number")
+					acc.by_status[k] = (acc.by_status[k] ?? 0) + v;
+			}
+		}
+		if (j.has_more !== true) return { value: acc, status: "ok" };
+		if (typeof j.cursor !== "string") return { value: acc, status: "partial" };
+		cursor = j.cursor;
+	}
+	return { value: acc, status: "partial" };
 }
 
-export async function runUsageStreams(
+async function runAccountProfile(
 	deps: StreamDeps,
 	state: CollectContext["state"],
 	hooks: UsageStreamHooks,
+	client: Promise<Record<string, unknown> | null>,
+	stateless: boolean,
 ): Promise<void> {
-	const streams = USAGE_STREAMS.filter((s) => deps.requested.has(s));
-	if (streams.length === 0) return;
+	await deps.emit({
+		type: "PROGRESS",
+		stream: "account_profile",
+		message: "Reading account profile",
+	});
+	const [me, account, beta, instructions, memory, projects, tasks, ctx] =
+		await Promise.all([
+			readSource(deps, hooks, "/me", "me_profile"),
+			readSource(deps, hooks, hooks.accountsCheckPath, "account_check_facts"),
+			readSource(deps, hooks, "/settings/beta_features", "beta_features"),
+			readSource(
+				deps,
+				hooks,
+				"/user_system_messages",
+				"custom_instructions_flags",
+			),
+			readSource(
+				deps,
+				hooks,
+				"/memories?include_memory_entries=true",
+				"memory_stats",
+			),
+			readPagedCounts(
+				deps,
+				hooks,
+				"/gizmos/snorlax/sidebar",
+				"project_sidebar",
+			),
+			readPagedCounts(deps, hooks, "/tasks", "task_stats"),
+			client,
+		]);
+	const clientContext = readClientContext(ctx);
+	const accountStatus: ProfileSourceStatus =
+		account.status === "ok" && account.json?.found !== true
+			? "failed"
+			: account.status;
+	const sources: Record<AccountProfileSource, ProfileSourceStatus> = {
+		me: me.status,
+		accounts_check: accountStatus,
+		beta_features: beta.status,
+		custom_instructions: instructions.status,
+		memories: memory.status,
+		projects: projects.status,
+		tasks: tasks.status,
+		network:
+			ctx === null
+				? "failed"
+				: clientContext.network_country
+					? "ok"
+					: "not_available",
+	};
+	const backendSources = Object.entries(sources).filter(
+		([k]) => k !== "network",
+	);
+	if (!backendSources.some(([, s]) => s === "ok" || s === "partial")) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "account_profile",
+			reason: "http_error",
+			message: "No account profile source answered this run",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			diagnostics: { ...sources },
+		});
+		return;
+	}
+	const record = buildAccountProfileRecord({
+		me: me.json,
+		account: accountStatus === "ok" ? account.json : null,
+		betaFeatures: beta.json,
+		instructions: instructions.json,
+		memory: memory.json,
+		projects: projects.value
+			? { count: projects.value.count, files: projects.value.files }
+			: null,
+		tasks: tasks.value
+			? { count: tasks.value.count, by_status: tasks.value.by_status }
+			: null,
+		client: clientContext,
+		sources,
+		nowMs: (hooks.now ?? Date.now)(),
+	});
+	const validation = validateRecord("account_profile", record);
+	if (!validation.ok) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "account_profile",
+			reason: "shape_check_failed",
+			message: "The account profile did not match its schema",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+		});
+		return;
+	}
+	await emitGated(deps, state, "account_profile", stateless, [record]);
+	await deps.emit(buildFullScanCoverageMessage("account_profile", 1));
+}
+
+// ─── conversation_usage + usage_summary ───────────────────────────────
+
+/** List-derived part of a conversation_usage record; it gates the hold-over of detail. */
+const LIST_FIELDS = [
+	"id",
+	"create_time",
+	"update_time",
+	"latest_assistant_turn_at",
+	"is_archived",
+	"is_starred",
+	"is_pinned",
+	"is_shared",
+	"is_temporary_chat",
+	"is_do_not_remember",
+	"is_automation",
+	"in_workspace",
+	"gizmo_kind",
+	"gizmo_ref",
+] as const;
+
+function listFingerprint(record: RecordData): string {
+	return recordFingerprint(
+		Object.fromEntries(LIST_FIELDS.map((k) => [k, record[k] ?? null])),
+	);
+}
+
+function stringMap(v: unknown): Map<string, string> {
+	const out = new Map<string, string>();
+	if (!isRecord(v)) return out;
+	for (const [k, s] of Object.entries(v))
+		if (typeof s === "string") out.set(k, s);
+	return out;
+}
+
+/**
+ * Emit conversation_usage records behind a fingerprint gate. A record with no
+ * detail this run whose list fields match the run that last read its detail
+ * is held back: the earlier, richer record is still accurate, and emitting
+ * this one would replace its detail with nulls.
+ */
+async function emitConversationUsage(
+	deps: StreamDeps,
+	state: CollectContext["state"],
+	stateless: boolean,
+	records: readonly RecordData[],
+): Promise<void> {
+	if (stateless) {
+		for (const r of records) await deps.emitRecord("conversation_usage", r);
+		return;
+	}
+	const prior = isRecord(state.conversation_usage)
+		? state.conversation_usage
+		: {};
+	const cursor = openCarryForwardCursor(stringMap(prior.fingerprints));
+	const priorDetailed = stringMap(prior.detailed);
+	const detailed: Record<string, string> = {};
+	for (const r of records) {
+		const id = String(r.id);
+		const listFp = listFingerprint(r);
+		const priorFp = cursor.prior(id);
+		if (
+			r.detail_status !== "fetched" &&
+			priorFp !== undefined &&
+			priorDetailed.get(id) === listFp
+		) {
+			cursor.note(id, priorFp);
+			detailed[id] = listFp;
+			continue;
+		}
+		const fp = recordFingerprint(r);
+		if (fp !== priorFp) await deps.emitRecord("conversation_usage", r);
+		cursor.note(id, fp);
+		if (r.detail_status === "fetched") detailed[id] = listFp;
+	}
+	cursor.dropUnseenIds();
+	await deps.emit({
+		type: "STATE",
+		stream: "conversation_usage",
+		cursor: {
+			fetched_at: new Date().toISOString(),
+			fingerprints: cursor.toState(),
+			detailed,
+		},
+	});
+}
+
+function listSkipReason(
+	outcome: ListOutcome,
+):
+	| "pagination_cap_truncated"
+	| "parse_error"
+	| "upstream_pressure"
+	| "conversation_list_unstable" {
+	switch (outcome) {
+		case "capped":
+			return "pagination_cap_truncated";
+		case "parse_error":
+			return "parse_error";
+		case "deferred":
+			return "upstream_pressure";
+		default:
+			return "conversation_list_unstable";
+	}
+}
+
+async function runConversationUsage(
+	deps: StreamDeps,
+	state: CollectContext["state"],
+	hooks: UsageStreamHooks,
+	client: Promise<Record<string, unknown> | null> | null,
+	stateless: boolean,
+): Promise<void> {
 	const wantRecords = deps.requested.has("conversation_usage");
 	const wantSummary = deps.requested.has("usage_summary");
+	const streams = (["conversation_usage", "usage_summary"] as const).filter(
+		(s) => deps.requested.has(s),
+	);
 	const primary = streams[0] ?? "usage_summary";
 	await deps.emit({
 		type: "PROGRESS",
@@ -341,128 +746,154 @@ export async function runUsageStreams(
 		message: "Listing conversations for usage metadata",
 	});
 
-	// 1. List. The shared walk reports on "conversations"/"messages"; this run
-	// may not have requested those, so its reports are re-labelled or held.
-	const heldReasons: string[] = [];
-	const listed = await hooks.listConversations({
-		...deps,
-		requested: new Map(),
-		emit: (message: EmittedMessage) => {
-			const stream = (message as { stream?: unknown }).stream;
-			if (stream !== "conversations" && stream !== "messages") {
-				return deps.emit(message);
-			}
-			if (message.type === "SKIP_RESULT") {
-				heldReasons.push(String((message as { reason?: unknown }).reason));
-				return Promise.resolve();
-			}
-			if (message.type === "PROGRESS") {
-				return deps.emit({ ...message, stream: primary } as EmittedMessage);
-			}
-			return Promise.resolve();
-		},
-	});
-	const items = [...listed.items].sort((a, b) =>
-		(tsToIso(b.update_time) ?? "").localeCompare(tsToIso(a.update_time) ?? ""),
+	// 1. Lists and shares, sharing one in-flight limit.
+	const limit = createLimiter(REQUESTS_IN_FLIGHT);
+	const [main, archived, sharedIds] = await Promise.all([
+		walkConversationList(deps, hooks, limit, { archived: false }),
+		walkConversationList(deps, hooks, limit, { archived: true, workers: 1 }),
+		readSharedIds(deps, hooks, limit),
+	]);
+	const archivedRead = archived.outcome === "complete";
+	const truncated =
+		main.outcome !== "complete" ||
+		!(archivedRead || archived.outcome === "not_available");
+	const listOutcome =
+		main.outcome !== "complete" ? main.outcome : archived.outcome;
+	const byId = new Map<string, UsageListItem>();
+	for (const c of [...main.items, ...(archivedRead ? archived.items : [])]) {
+		if (!byId.has(c.id)) byId.set(c.id, c);
+	}
+	const items = [...byId.values()].sort(
+		(a, b) => (lastActivityOf(b) ?? 0) - (lastActivityOf(a) ?? 0),
 	);
+	await deps.emit({
+		type: "PROGRESS",
+		stream: primary,
+		message: `Listed ${items.length} conversations`,
+	});
 
-	// conversation_usage alone under a time window: details outside it would be
-	// dropped by the runtime, so do not fetch them.
-	const window = wantSummary
-		? undefined
-		: deps.requested.get("conversation_usage")?.time_range;
-	const inWindow = (c: ConversationListItem): boolean => {
-		if (!window) return true;
-		const created = tsToIso(c.create_time);
-		return created !== null && !isOutsideTimeRange(window, created);
-	};
+	// 2. Which conversations to read in detail.
+	const plan = resolveUsageDetailPlan();
+	const scope = deps.requested.get("conversation_usage");
+	const resources =
+		scope?.resources && scope.resources.length > 0
+			? new Set(scope.resources)
+			: null;
+	const window = scope?.time_range;
+	const selected = new Set<string>();
+	if (wantRecords && (resources || window)) {
+		for (const c of items) {
+			if (resources && !resources.has(usageRef("c", c.id))) continue;
+			if (window) {
+				const created = tsToIso(c.create_time);
+				if (created === null || isOutsideTimeRange(window, created)) continue;
+			}
+			selected.add(c.id);
+		}
+	}
+	const scoped = resources !== null || window !== undefined;
+	const sample = new Set<string>(
+		plan.kind === "sample" && (wantSummary || !scoped)
+			? items.slice(0, plan.size).map((c) => c.id)
+			: [],
+	);
+	if (plan.kind === "all") for (const c of items) selected.add(c.id);
+	const detailMode: DetailMode =
+		plan.kind === "all"
+			? "all"
+			: scoped && wantRecords
+				? "selected"
+				: plan.kind === "none"
+					? "none"
+					: "sample";
+	const targets = items
+		.map((c) => c.id)
+		.filter((id) => sample.has(id) || selected.has(id));
 
-	// 2. Shares (flag only).
-	const sharedIds = await readSharedIds(deps, hooks);
-
-	// 3. Details.
-	const cap = resolveUsageMaxDetailFetches();
-	const wanted = items.filter(inWindow).map((c) => c.id);
+	// 3. Detail.
 	const { outcomes, deferred } =
-		cap > 0
-			? await readDetails(deps, hooks, wanted, cap)
+		targets.length > 0
+			? await readDetails(deps, hooks, limit, targets)
 			: { outcomes: new Map<string, DetailOutcome>(), deferred: false };
 
-	const built = items.map((c) => {
+	const built: UsageSummaryConversation[] = items.map((c) => {
 		const o = outcomes.get(c.id);
+		const detail: DetailBasis = selected.has(c.id)
+			? "selected"
+			: sample.has(c.id)
+				? "sampled"
+				: "not_read";
 		const projection = o?.projection ?? null;
 		return {
+			list: c,
 			projection,
+			inSample: sample.has(c.id),
 			record: buildConversationUsageRecord({
 				listItem: c,
 				projection,
+				detail,
 				detailStatus: o?.status ?? "not_fetched",
 				sharedIds,
 			}),
 		};
 	});
 
-	const stateless = process.env[CHATGPT_USAGE_STATELESS_ENV] === "1";
 	if (wantRecords) {
-		await emitGated(
+		await emitConversationUsage(
 			deps,
 			state,
-			"conversation_usage",
 			stateless,
 			built.map((b) => b.record),
 		);
 	}
 
-	if (wantSummary && !listed.truncated) {
-		const inputs = await readSummaryInputs(deps, hooks);
+	if (wantSummary && !truncated) {
 		const summary = buildUsageSummaryRecord({
 			conversations: built,
-			...inputs,
+			client: readClientContext(client ? await client : null),
+			coverage: {
+				archived_listing: archivedRead ? "read" : "not_available",
+				list_pages: main.pages + archived.pages,
+				detail_mode: detailMode,
+			},
+			sampleComplete: [...sample].every((id) => outcomes.has(id)),
 		});
 		await emitGated(deps, state, "usage_summary", stateless, [summary]);
 	}
 
 	// Completeness. A truncated list proves nothing about the account as a
 	// whole, so the summary is withheld rather than built from part of it.
-	if (listed.truncated) {
-		// Literal set so every emitted reason has a manifest display message.
-		const held = heldReasons[0];
-		const reason =
-			held === "pagination_cap_truncated"
-				? "pagination_cap_truncated"
-				: held === "parse_error"
-					? "parse_error"
-					: held === "upstream_pressure"
-						? "upstream_pressure"
-						: "conversation_list_unstable";
-		await emitForStreams(deps, streams, (stream) => ({
-			type: "SKIP_RESULT",
-			stream,
-			reason,
-			message:
-				stream === "usage_summary"
-					? "The conversation list was not read completely, so no summary was built this run"
-					: "The conversation list was not read completely; retry this stream",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-		}));
+	if (truncated) {
+		const reason = listSkipReason(listOutcome);
+		await Promise.all(
+			streams.map((stream) =>
+				deps.emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason,
+					message:
+						stream === "usage_summary"
+							? "The conversation list was not read completely, so no summary was built this run"
+							: "The conversation list was not read completely; retry this stream",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+				}),
+			),
+		);
 		return;
 	}
-	const unread = wanted.filter((id) => !outcomes.has(id)).length;
-	const failed = [...outcomes.values()].filter(
-		(o) => o.status === "failed",
-	).length;
-	if ((deferred || unread > 0) && cap > 0) {
-		await emitForStreams(deps, streams, (stream) => ({
+	// A sample that stopped early is labelled in the summary (`complete:
+	// false`); an explicit selection that stopped early is a partial stream.
+	const unreadSelected = [...selected].filter((id) => !outcomes.has(id)).length;
+	if (wantRecords && unreadSelected > 0) {
+		await deps.emit({
 			type: "SKIP_RESULT",
-			stream,
+			stream: "conversation_usage",
 			reason: deferred ? "upstream_pressure" : "detail_fetch_capped",
-			message: `Usage details were read for ${outcomes.size} of ${wanted.length} conversations`,
+			message: `Usage details were read for ${selected.size - unreadSelected} of ${selected.size} selected conversations`,
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			diagnostics: { unread, failed },
-		}));
-		return;
-	}
-	if (wantRecords) {
+			diagnostics: { unread: unreadSelected },
+		});
+	} else if (wantRecords) {
 		await deps.emit(
 			buildFullScanCoverageMessage("conversation_usage", items.length),
 		);
@@ -470,6 +901,45 @@ export async function runUsageStreams(
 	if (wantSummary) {
 		await deps.emit(buildFullScanCoverageMessage("usage_summary", 1));
 	}
+}
+
+// ─── Entry ────────────────────────────────────────────────────────────
+
+export async function runUsageStreams(
+	deps: StreamDeps,
+	state: CollectContext["state"],
+	hooks: UsageStreamHooks,
+): Promise<void> {
+	const wantProfile = deps.requested.has("account_profile");
+	const wantUsage =
+		deps.requested.has("conversation_usage") ||
+		deps.requested.has("usage_summary");
+	if (!wantProfile && !wantUsage) return;
+	const stateless = process.env[CHATGPT_USAGE_STATELESS_ENV] === "1";
+	// One trace/timezone read serves both the profile and the summary.
+	const client =
+		wantProfile || deps.requested.has("usage_summary")
+			? fetchProjected(deps, hooks, "/cdn-cgi/trace", "client_context").then(
+					(r) => (r.kind === "ok" && isRecord(r.json) ? r.json : null),
+					// Optional context: an auth failure here surfaces on the next
+					// backend read instead of as an unhandled rejection.
+					() => null,
+				)
+			: null;
+	await Promise.all([
+		wantProfile
+			? runAccountProfile(
+					deps,
+					state,
+					hooks,
+					client ?? Promise.resolve(null),
+					stateless,
+				)
+			: Promise.resolve(),
+		wantUsage
+			? runConversationUsage(deps, state, hooks, client, stateless)
+			: Promise.resolve(),
+	]);
 }
 
 async function emitGated(

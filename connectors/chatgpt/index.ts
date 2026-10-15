@@ -158,7 +158,7 @@ function scrubChatGptTerminalDiagnostic(message: string): string {
 			"$1[redacted]",
 		)
 		.replace(
-			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts|settings|cdn-cgi)(?:[/?]|$))[^\s)"'<>]*/giu,
+			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts|settings|cdn-cgi|me|tasks)(?:[/?]|$))[^\s)"'<>]*/giu,
 			"[redacted-path]",
 		)
 		.replace(/\s+/g, " ")
@@ -7521,14 +7521,17 @@ export async function collectChatGpt(
 	if (requested.has("conversations") || requested.has("messages")) {
 		await runConversationsAndMessagesStreams(deps, state);
 	}
-	if (requested.has("conversation_usage") || requested.has("usage_summary")) {
+	if (
+		requested.has("account_profile") ||
+		requested.has("conversation_usage") ||
+		requested.has("usage_summary")
+	) {
 		await runUsageStreams(deps, state, chatGptUsageHooks);
 	}
 }
 
-/** Wires the usage streams (usage-stream.ts) to this file's list walk and errors. */
+/** Wires the usage streams (usage-stream.ts) to this file's error classes. */
 export const chatGptUsageHooks: UsageStreamHooks = {
-	listConversations: (deps) => listConversationsSinceCursor(deps, null),
 	classifyError: (err) => {
 		if (
 			err instanceof ChatGptPlannedProviderBudgetDeferredError ||

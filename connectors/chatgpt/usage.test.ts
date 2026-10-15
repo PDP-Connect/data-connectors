@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInThisContext } from "node:vm";
+import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import type { StreamDeps } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -14,23 +15,31 @@ import type {
 	ChatGptApi,
 	ChatGptFetchResult,
 	ChatGptUsageProjection,
-	ConversationListItem,
 } from "./types.ts";
 import {
+	type AccountProfileInput,
+	buildAccountProfileRecord,
 	buildConversationUsageRecord,
 	buildUsageSummaryRecord,
 	type ChatGptUsageFetchArgs,
 	type ConversationUsageProjection,
 	chatGptUsageFetchInBrowser,
 	gizmoKind,
+	readConversationListPage,
 	readConversationUsageProjection,
 	sha256Hex,
+	type UsageListItem,
+	type UsageSummaryConversation,
 	usageRef,
 } from "./usage.ts";
 import {
-	CHATGPT_USAGE_MAX_DETAIL_FETCHES_ENV,
+	CHATGPT_USAGE_DETAIL_ENV,
 	CHATGPT_USAGE_STATELESS_ENV,
+	createLimiter,
+	DEFAULT_DETAIL_SAMPLE,
+	resolveUsageDetailPlan,
 	runUsageStreams,
+	type UsageFetchErrorClass,
 	type UsageStreamHooks,
 } from "./usage-stream.ts";
 
@@ -41,7 +50,9 @@ const readFixture = (name: string): Record<string, unknown> =>
 const CANARY_CONVERSATION = readFixture("usage-conversation-canary.json");
 const CANARY_ID = "c0ffee00-0000-4000-8000-00000000ca1a";
 const ACCOUNTS_CHECK = readFixture("accounts-check.json");
+const ENDPOINTS = readFixture("usage-account-endpoints-canary.json");
 const AUTH = { accessToken: "tok-CANARY-bearer", deviceId: "dev-CANARY" };
+const NOW_MS = Date.UTC(2026, 9, 15, 12);
 
 /** Fails if any planted canary, raw id, IP or secret reaches `value`. */
 function assertNoLeak(value: unknown, label: string): void {
@@ -50,10 +61,14 @@ function assertNoLeak(value: unknown, label: string): void {
 		"canary",
 		CANARY_ID,
 		"00000000-0000-4000-8000-000000000001", // accounts-check account id
+		"00000000-0000-4000-8000-0000000000aa", // accounts-check subscription id
 		"user-redacted",
+		"example.com",
 		"203.0.113.7",
 		"tok-",
 		"g-p-",
+		"conv-",
+		"+48",
 	]) {
 		assert.ok(
 			!text.includes(needle.toLowerCase()),
@@ -64,11 +79,11 @@ function assertNoLeak(value: unknown, label: string): void {
 
 // ─── A fake chatgpt.com for the in-page function ──────────────────────────
 
-type Route = (init: RequestInit | undefined) => Response;
+type Route = (init: RequestInit | undefined, url: URL) => Response;
 const realFetch = globalThis.fetch;
 afterEach(() => {
 	globalThis.fetch = realFetch;
-	delete process.env[CHATGPT_USAGE_MAX_DETAIL_FETCHES_ENV];
+	delete process.env[CHATGPT_USAGE_DETAIL_ENV];
 	delete process.env[CHATGPT_USAGE_STATELESS_ENV];
 });
 
@@ -79,70 +94,145 @@ function json(body: unknown, status = 200): Response {
 	});
 }
 
+/**
+ * Routes match on the path (no query) first, then on a `prefix*` key. The
+ * handler gets the full URL so it can read offset/cursor parameters.
+ */
 function installFakeSite(routes: Record<string, Route>): string[] {
 	const seen: string[] = [];
 	globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
-		const url = String(input);
-		seen.push(url);
-		const path = url
-			.replace("https://chatgpt.com/backend-api", "")
-			.replace("https://chatgpt.com", "");
+		const url = new URL(String(input));
+		seen.push(url.pathname + url.search);
+		const path = url.pathname.replace(/^\/backend-api/, "");
 		const exact = routes[path];
 		const prefix = Object.keys(routes).find(
 			(k) => k.endsWith("*") && path.startsWith(k.slice(0, -1)),
 		);
 		const route = exact ?? (prefix ? routes[prefix] : undefined);
-		return Promise.resolve(route ? route(init) : json({ detail: "nf" }, 404));
+		try {
+			return Promise.resolve(
+				route ? route(init, url) : json({ detail: "nf" }, 404),
+			);
+		} catch (err) {
+			return Promise.reject(err);
+		}
 	}) as typeof fetch;
 	return seen;
 }
 
-const DEFAULT_ROUTES: Record<string, Route> = {
-	[`/conversation/${CANARY_ID}`]: () => json(CANARY_CONVERSATION),
-	"/conversations/batch": (init) => {
-		const ids = (
-			JSON.parse(String(init?.body)) as { conversation_ids: string[] }
-		).conversation_ids;
-		return json(
-			ids.filter((id) => id === CANARY_ID).map(() => CANARY_CONVERSATION),
-		);
-	},
-	"/shared_conversations*": () =>
-		json({
-			items: [
-				{
-					id: "share-CANARY",
-					conversation_id: CANARY_ID,
-					title: "CANARY share title",
-					share_url: "https://chatgpt.com/share/CANARY",
-				},
-			],
-			total: 1,
-		}),
-	"/memories*": () =>
-		json({
-			memories: [{ id: "m1", content: "CANARY memory text" }],
-			memory_num_tokens: 50,
-			memory_max_tokens: 10_000,
-		}),
-	"/user_system_messages": () =>
-		json({
-			enabled: true,
-			about_user_message: "CANARY about me",
-			about_model_message: "",
-		}),
-	"/settings/user": () =>
-		json({
-			settings: {
-				sunshine: true,
-				training_allowed: false,
-				voice_name: "CANARY voice",
-				"Weird Key CANARY": true,
-			},
-		}),
-	"/cdn-cgi/trace": () =>
-		new Response("fl=1\nh=chatgpt.com\nip=203.0.113.7\nloc=PL\ntls=TLSv1.3\n"),
-};
+const BASE = Date.UTC(2026, 9, 14, 20) / 1000;
+const rawConvId = (i: number): string =>
+	`00000000-0000-4000-9000-${String(i).padStart(12, "0")}`;
+
+/** A raw /conversations list item. i = 0 is the most recently updated. */
+function rawListItem(
+	i: number,
+	extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+	const updated = BASE - i * 3600;
+	return {
+		...(ENDPOINTS.conversation_list_item as Record<string, unknown>),
+		id: rawConvId(i),
+		title: `CANARY title ${i}`,
+		create_time: new Date((updated - 600) * 1000).toISOString(),
+		update_time: new Date(updated * 1000).toISOString(),
+		latest_assistant_turn_created_at: new Date(updated * 1000).toISOString(),
+		...extra,
+	};
+}
+
+/** A detail body for a list conversation: the canary conversation under that id. */
+function detailFor(id: string): Record<string, unknown> {
+	return { ...CANARY_CONVERSATION, conversation_id: id, id };
+}
+
+interface SiteOptions {
+	conversations?: Array<Record<string, unknown>>;
+	archived?: Array<Record<string, unknown>> | "unavailable";
+	/** List page indexes (offset / 100) that answer 500. */
+	failListPages?: number[];
+	total?: number;
+}
+
+function listRoute(opts: SiteOptions): Route {
+	return (_init, url) => {
+		const offset = Number(url.searchParams.get("offset") ?? 0);
+		const limit = Number(url.searchParams.get("limit") ?? 28);
+		if (limit > 100) return json({ detail: "le 100" }, 422);
+		const archived = url.searchParams.get("is_archived") === "true";
+		if (archived && opts.archived === "unavailable")
+			return json({ detail: "CANARY no" }, 404);
+		if (!archived && opts.failListPages?.includes(offset / 100))
+			return json({ detail: "CANARY boom" }, 500);
+		const all = archived
+			? ((opts.archived as Array<Record<string, unknown>> | undefined) ?? [])
+			: (opts.conversations ?? []);
+		return json({
+			items: all.slice(offset, offset + limit),
+			// Deliberately wrong, as observed live: total is not the real total.
+			total: opts.total ?? offset + 101,
+			limit,
+			offset,
+			has_missing_conversations: false,
+		});
+	};
+}
+
+function siteRoutes(opts: SiteOptions = {}): Record<string, Route> {
+	const conversations = opts.conversations ?? [
+		rawListItem(0, { id: CANARY_ID, gizmo_id: "g-p-CANARYPROJECT123" }),
+		rawListItem(1, { gizmo_id: "g-CANARYGPT" }),
+	];
+	const known = new Set(
+		[
+			...conversations,
+			...(Array.isArray(opts.archived) ? opts.archived : []),
+		].map((c) => c.id),
+	);
+	return {
+		"/conversations": listRoute({ ...opts, conversations }),
+		"/conversations/batch": (init) => {
+			const ids = (
+				JSON.parse(String(init?.body)) as { conversation_ids: string[] }
+			).conversation_ids;
+			return json(ids.filter((id) => known.has(id)).map(detailFor));
+		},
+		"/conversation/*": (_init, url) => {
+			const id = url.pathname.split("/").pop() ?? "";
+			return known.has(id)
+				? json(detailFor(id))
+				: json({ detail: "CANARY not found" }, 404);
+		},
+		"/shared_conversations": () =>
+			json({
+				items: [
+					{
+						id: "share-CANARY",
+						conversation_id: CANARY_ID,
+						title: "CANARY share title",
+						share_url: "https://chatgpt.com/share/CANARY",
+					},
+				],
+				total: 1,
+			}),
+		"/me": () => json(ENDPOINTS.me),
+		"/accounts/check/v4-2023-04-27": () => json(ACCOUNTS_CHECK),
+		"/settings/beta_features": () => json(ENDPOINTS.beta_features),
+		"/user_system_messages": () => json(ENDPOINTS.user_system_messages),
+		"/memories": () => json(ENDPOINTS.memories),
+		"/gizmos/snorlax/sidebar": (_init, url) =>
+			json(
+				url.searchParams.get("cursor") === "cursor-CANARY_page2"
+					? ENDPOINTS.snorlax_sidebar_page2
+					: ENDPOINTS.snorlax_sidebar_page1,
+			),
+		"/tasks": () => json(ENDPOINTS.tasks),
+		"/cdn-cgi/trace": () =>
+			new Response(
+				"fl=1\nh=chatgpt.com\nip=203.0.113.7\nloc=DE\ntls=TLSv1.3\n",
+			),
+	};
+}
 
 function inPage(
 	path: string,
@@ -159,10 +249,10 @@ function inPage(
 	});
 }
 
-// ─── In-page projection ───────────────────────────────────────────────────
+// ─── In-page projections ──────────────────────────────────────────────────
 
 test("conversation projection keeps counts, models and features and drops every text", async () => {
-	installFakeSite(DEFAULT_ROUTES);
+	installFakeSite(siteRoutes());
 	const res = await inPage(`/conversation/${CANARY_ID}`, "conversation_usage");
 	assert.equal(res.status, 200);
 	// The raw id is still inside the page result (it is hashed node-side);
@@ -213,10 +303,7 @@ test("conversation projection keeps counts, models and features and drops every 
 });
 
 test("batch projection maps every element and a non-200 returns no body", async () => {
-	installFakeSite({
-		...DEFAULT_ROUTES,
-		"/conversation/missing": () => json({ detail: "CANARY not found" }, 404),
-	});
+	installFakeSite(siteRoutes());
 	const batch = await inPage("/conversations/batch", "conversation_usage", {
 		method: "POST",
 		body: { conversation_ids: [CANARY_ID, "other-id"] },
@@ -228,15 +315,132 @@ test("batch projection maps every element and a non-200 returns no body", async 
 	assert.equal(missing.json, null);
 });
 
-test("side projections return flags and counts only", async () => {
-	installFakeSite(DEFAULT_ROUTES);
+test("list projection keeps timestamps and flags and drops title, snippet and urls", async () => {
+	installFakeSite(
+		siteRoutes({
+			conversations: [
+				rawListItem(0, {
+					pinned_time: "2026-10-02T00:00:00Z",
+					gizmo_id: "g-p-CANARYPROJECT123",
+					conversation_template_id: "g-p-CANARYPROJECT123",
+					is_temporary_chat: true,
+					is_automation_conversation: true,
+					workspace_id: "ws-CANARY",
+				}),
+				rawListItem(1),
+			],
+		}),
+	);
+	const res = await inPage(
+		"/conversations?offset=0&limit=100&order=updated",
+		"conversation_list",
+	);
+	const raw = res.json as { items: Array<Record<string, unknown>> };
+	assert.equal(raw.items.length, 2);
+	assert.deepEqual(Object.keys(raw.items[0] ?? {}).sort(), [
+		"create_time",
+		"gizmo_id",
+		"id",
+		"in_workspace",
+		"is_archived",
+		"is_automation",
+		"is_do_not_remember",
+		"is_pinned",
+		"is_starred",
+		"is_temporary_chat",
+		"latest_assistant_turn_at",
+		"template_id",
+		"update_time",
+	]);
+	const page = readConversationListPage(res.json);
+	assert.ok(page);
+	assert.equal(page.raw_count, 2);
+	const [first, second] = page.items;
+	assert.equal(first?.is_pinned, true);
+	assert.equal(second?.is_pinned, false);
+	assert.equal(first?.in_workspace, true);
+	assert.equal(first?.is_temporary_chat, true);
+	assert.equal(first?.is_automation, true);
+	assert.equal(first?.update_time, BASE);
+	assertNoLeak(
+		raw.items.map(({ id: _i, gizmo_id: _g, template_id: _t, ...r }) => r),
+		"list page",
+	);
+});
+
+test("/me is reduced to creation time, MFA, domain type, country codes and org counts", async () => {
+	installFakeSite(siteRoutes());
+	const res = await inPage("/me", "me_profile");
+	assert.deepEqual(res.json, {
+		created: 1673776800,
+		mfa_enabled: true,
+		email_domain_type: "social",
+		country: "PL",
+		region_code: "14",
+		org_count: 2,
+		has_non_personal_org: true,
+	});
+	assertNoLeak(res.json, "me projection");
+});
+
+test("/me drops a country or region code that is not a plain code", async () => {
+	installFakeSite({
+		"/me": () =>
+			json({
+				...(ENDPOINTS.me as Record<string, unknown>),
+				country: "Poland",
+				region_code: "CANARY Region",
+				email_domain_type: "Some Domain CANARY",
+			}),
+	});
+	const res = await inPage("/me", "me_profile");
+	const j = res.json as Record<string, unknown>;
+	assert.equal(j.country, null);
+	assert.equal(j.region_code, null);
+	assert.equal(j.email_domain_type, "other");
+});
+
+test("accounts/check is reduced to plan facts the account_plan stream does not carry", async () => {
+	installFakeSite(siteRoutes());
+	const res = await inPage(
+		"/accounts/check/v4-2023-04-27",
+		"account_check_facts",
+	);
+	assert.deepEqual(res.json, {
+		found: true,
+		created_time: Date.parse("2023-01-15T10:00:00.000Z") / 1000,
+		workspace_type: null,
+		is_deactivated: false,
+		is_trial: false,
+		trial_state: null,
+		has_previously_paid_subscription: true,
+		last_expired_subscription_was_gratis: false,
+		data_residency_region: "no_constraint",
+		compute_residency_region: "no_constraint",
+		feature_flag_count: 2,
+		is_gratis: false,
+		billing_currency: "USD",
+		is_delinquent: false,
+		in_grace_period: false,
+		purchase_origin_platform: "chatgpt_web",
+	});
+	assertNoLeak(res.json, "accounts/check projection");
+});
+
+test("beta features keep only enabled slug keys; side endpoints keep counts and flags", async () => {
+	installFakeSite(siteRoutes());
+	const beta = await inPage("/settings/beta_features", "beta_features");
+	assert.deepEqual(beta.json, {
+		flag_count: 7,
+		enabled: ["browsing", "canvas", "codex_cloud", "deep_research"],
+	});
 	const memories = await inPage(
 		"/memories?include_memory_entries=true",
 		"memory_stats",
 	);
 	assert.deepEqual(memories.json, {
-		memory_count: 1,
-		memory_num_tokens: 50,
+		memory_count: 2,
+		memory_num_tokens: 321,
 		memory_max_tokens: 10_000,
 	});
 	const ci = await inPage("/user_system_messages", "custom_instructions_flags");
@@ -244,10 +448,27 @@ test("side projections return flags and counts only", async () => {
 		enabled: true,
 		about_user_set: true,
 		response_style_set: false,
+		name_set: true,
+		role_set: false,
+		traits_set: true,
+		other_set: false,
+		personality_set: true,
+		traits_enabled: false,
+		disabled_tools_count: 1,
 	});
-	const settings = await inPage("/settings/user", "settings_flags");
-	assert.deepEqual(settings.json, {
-		flags: { sunshine: true, training_allowed: false },
+	const sidebar = await inPage("/gizmos/snorlax/sidebar", "project_sidebar");
+	assert.deepEqual(sidebar.json, {
+		item_count: 1,
+		file_count: 2,
+		cursor: "cursor-CANARY_page2",
+		has_more: true,
+	});
+	const tasks = await inPage("/tasks", "task_stats");
+	assert.deepEqual(tasks.json, {
+		task_count: 3,
+		by_status: { active: 2, other: 1 },
+		cursor: null,
+		has_more: false,
 	});
 	const shares = await inPage(
 		"/shared_conversations?offset=0",
@@ -258,9 +479,8 @@ test("side projections return flags and counts only", async () => {
 		total: 1,
 	});
 	const client = await inPage("/cdn-cgi/trace", "client_context");
-	const ctx = client.json as Record<string, unknown>;
-	assert.equal(ctx.network_country, "PL");
-	assertNoLeak([memories, ci, settings, client], "side projections");
+	assert.equal((client.json as Record<string, unknown>).network_country, "DE");
+	assertNoLeak([beta, memories, ci, tasks, client], "side projections");
 });
 
 test("client context reports no country when the trace is unreachable or unknown", async () => {
@@ -275,21 +495,27 @@ test("client context reports no country when the trace is unreachable or unknown
 });
 
 test("the in-page function is self-contained (survives toString re-evaluation)", async () => {
-	installFakeSite(DEFAULT_ROUTES);
+	installFakeSite(siteRoutes());
 	// PageShim evaluates `(${fn.toString()})(args)`; this proves no closure
 	// over module scope is needed.
 	assert.doesNotMatch(String(chatGptUsageFetchInBrowser), /__name/);
 	const rebuilt = runInThisContext(
 		`(${chatGptUsageFetchInBrowser.toString()})`,
 	) as typeof chatGptUsageFetchInBrowser;
-	const res = await rebuilt({
-		auth: AUTH,
-		method: "GET",
-		path: `/conversation/${CANARY_ID}`,
-		projection: "conversation_usage",
-		timeoutMs: 5000,
-	});
+	const call = (path: string, projection: ChatGptUsageProjection) =>
+		rebuilt({ auth: AUTH, method: "GET", path, projection, timeoutMs: 5000 });
+	const res = await call(`/conversation/${CANARY_ID}`, "conversation_usage");
 	assert.equal(readConversationUsageProjection(res.json)?.counts.user, 2);
+	const facts = await call(
+		"/accounts/check/v4-2023-04-27",
+		"account_check_facts",
+	);
+	assert.equal((facts.json as Record<string, unknown>).billing_currency, "USD");
+	const list = await call(
+		"/conversations?offset=0&limit=100",
+		"conversation_list",
+	);
+	assert.equal(readConversationListPage(list.json)?.items.length, 2);
 });
 
 // ─── Records ──────────────────────────────────────────────────────────────
@@ -314,16 +540,21 @@ test("gizmo kind distinguishes projects and custom GPTs", () => {
 
 const listItem = (
 	id: string,
-	extra: Partial<ConversationListItem> = {},
-): ConversationListItem => ({
+	extra: Partial<UsageListItem> = {},
+): UsageListItem => ({
 	id,
-	title: "CANARY list title",
 	create_time: 1_760_000_000,
 	update_time: 1_760_000_720,
+	latest_assistant_turn_at: 1_760_000_720,
+	is_pinned: false,
+	gizmo_id: null,
+	template_id: null,
 	is_archived: false,
 	is_starred: null,
-	workspace_id: null,
-	gizmo_id: null,
+	is_temporary_chat: false,
+	is_do_not_remember: false,
+	is_automation: false,
+	in_workspace: false,
 	...extra,
 });
 
@@ -340,8 +571,12 @@ async function projectionOf(
 test("conversation_usage record validates and carries no title, id or text", async () => {
 	const projection = await projectionOf(CANARY_CONVERSATION);
 	const record = buildConversationUsageRecord({
-		listItem: listItem(CANARY_ID),
+		listItem: listItem(CANARY_ID, {
+			gizmo_id: "g-p-CANARYPROJECT123",
+			is_starred: true,
+		}),
 		projection,
+		detail: "sampled",
 		detailStatus: "fetched",
 		sharedIds: new Set([CANARY_ID]),
 	});
@@ -350,29 +585,39 @@ test("conversation_usage record validates and carries no title, id or text", asy
 	assert.equal(record.is_shared, true);
 	assert.equal(record.is_starred, true);
 	assert.equal(record.turn_count, 2);
+	assert.equal(record.detail, "sampled");
 	assert.equal(record.id, usageRef("c", CANARY_ID));
 	assertNoLeak(record, "conversation_usage record");
 });
 
-test("a list-only record has null detail fields and still validates", () => {
+test("a not-read record has null detail fields, keeps list fields and validates", () => {
 	const record = buildConversationUsageRecord({
-		listItem: listItem(CANARY_ID, { gizmo_id: "g-CANARYGPT" }),
+		listItem: listItem(CANARY_ID, {
+			template_id: "g-p-CANARYPROJECT",
+			is_pinned: true,
+			is_temporary_chat: true,
+		}),
 		projection: null,
+		detail: "not_read",
 		detailStatus: "not_fetched",
 		sharedIds: null,
 	});
 	assert.equal(validateRecord("conversation_usage", record).ok, true);
-	assert.equal(record.gizmo_kind, "custom_gpt");
+	assert.equal(record.gizmo_kind, "project");
+	assert.equal(record.is_pinned, true);
+	assert.equal(record.is_temporary_chat, true);
 	assert.equal(record.message_counts, null);
+	assert.equal(record.models, null);
 	assert.equal(record.is_shared, null);
 	assert.equal(record.create_time, "2025-10-09T08:53:20.000Z");
-	assertNoLeak(record, "list-only record");
+	assertNoLeak(record, "not-read record");
 });
 
 test("the schema rejects a record that smuggles a title or free-text slug", () => {
 	const record = buildConversationUsageRecord({
 		listItem: listItem(CANARY_ID),
 		projection: null,
+		detail: "not_read",
 		detailStatus: "not_fetched",
 		sharedIds: null,
 	});
@@ -391,29 +636,14 @@ test("the schema rejects a record that smuggles a title or free-text slug", () =
 
 // ─── Summary ──────────────────────────────────────────────────────────────
 
-const SETTINGS = {
-	memory_count: 1,
-	memory_num_tokens: 50,
-	memory_max_tokens: 10_000,
-	custom_instructions_enabled: true,
-	custom_instructions_about_user_set: true,
-	custom_instructions_response_style_set: false,
-	setting_flags: { sunshine: true },
-};
-const ACCOUNT = {
-	created_at: "2023-01-15T10:00:00.000Z",
-	data_residency_region: "no_constraint",
-	compute_residency_region: "no_constraint",
-};
-
 function syntheticProjection(
-	userTimes: number[],
+	userMessages: number,
 	model: string,
 ): ConversationUsageProjection {
 	return {
 		conversation_id: "x",
-		create_time: userTimes[0] ?? null,
-		update_time: userTimes.at(-1) ?? null,
+		create_time: null,
+		update_time: null,
 		is_archived: false,
 		is_starred: false,
 		gizmo_id: null,
@@ -421,17 +651,17 @@ function syntheticProjection(
 		in_workspace: false,
 		default_model_slug: null,
 		has_mapping: true,
-		nodes_total: userTimes.length * 2,
+		nodes_total: userMessages * 2,
 		branch_count: 1,
 		counts: {
-			user: userTimes.length,
-			assistant: userTimes.length,
+			user: userMessages,
+			assistant: userMessages,
 			tool: 0,
 			system: 0,
 			other: 0,
 			hidden: 0,
 		},
-		models: [{ slug: model, assistant_messages: userTimes.length }],
+		models: [{ slug: model, assistant_messages: userMessages }],
 		features: {
 			web_search: 1,
 			code_interpreter: 0,
@@ -446,118 +676,159 @@ function syntheticProjection(
 		},
 		user_attachments: 0,
 		user_images: 0,
-		user_chars_total: 10 * userTimes.length,
+		user_chars_total: 10 * userMessages,
 		user_chars_max: 10,
 		assistant_chars_total: 100,
-		first_message_at: userTimes[0] ?? null,
-		last_message_at: userTimes.at(-1) ?? null,
-		events: userTimes.flatMap(
-			(t): Array<[number, 0 | 1, string | null]> => [
-				[t, 0, null],
-				[t + 1, 1, model],
-			],
-		),
+		first_message_at: null,
+		last_message_at: null,
+		events: [],
 	};
 }
 
 function summaryFor(timezone: string | null) {
-	// 2026-01-31 23:30 UTC (= 2026-02-01 00:30 in Warsaw), then 2026-02-01 and
-	// 2026-02-02 at 12:00 UTC: a three-day streak in UTC across two months.
-	const times = [
-		Date.UTC(2026, 0, 31, 23, 30) / 1000,
-		Date.UTC(2026, 1, 1, 12) / 1000,
-		Date.UTC(2026, 1, 2, 12) / 1000,
-	];
-	const a = syntheticProjection(times, "gpt-4o");
-	const b = syntheticProjection([Date.UTC(2026, 1, 10, 8) / 1000], "o3");
-	const rec = (
+	// conv-a starts 2026-01-31 23:30 UTC (= 2026-02-01 00:30 in Warsaw) and
+	// is last touched 2026-02-02 12:00; conv-b lives on 2026-02-01 12:00;
+	// conv-c (not read) on 2025-12-05.
+	const at = (y: number, m: number, d: number, h: number, min = 0) =>
+		Date.UTC(y, m, d, h, min) / 1000;
+	const conv = (
 		id: string,
-		p: ConversationUsageProjection,
-		gizmo: string | null,
-	) =>
-		buildConversationUsageRecord({
-			listItem: listItem(id, { create_time: p.create_time, gizmo_id: gizmo }),
-			projection: p,
-			detailStatus: "fetched",
-			sharedIds: new Set(),
-		});
+		item: Partial<UsageListItem>,
+		projection: ConversationUsageProjection | null,
+		inSample: boolean,
+	): UsageSummaryConversation => {
+		const list = listItem(id, item);
+		return {
+			list,
+			projection,
+			inSample,
+			record: buildConversationUsageRecord({
+				listItem: list,
+				projection,
+				detail: inSample ? "sampled" : "not_read",
+				detailStatus: projection ? "fetched" : "not_fetched",
+				sharedIds: new Set(),
+			}),
+		};
+	};
 	return buildUsageSummaryRecord({
 		conversations: [
-			{ record: rec("conv-a", a, "g-p-1"), projection: a },
-			{ record: rec("conv-b", b, "g-2"), projection: b },
-			{
-				record: buildConversationUsageRecord({
-					listItem: listItem("conv-c", {
-						create_time: Date.UTC(2025, 11, 5) / 1000,
-					}),
-					projection: null,
-					detailStatus: "not_fetched",
-					sharedIds: new Set(),
-				}),
-				projection: null,
-			},
+			conv(
+				"conv-a",
+				{
+					create_time: at(2026, 0, 31, 23, 30),
+					update_time: at(2026, 1, 2, 12),
+					latest_assistant_turn_at: at(2026, 1, 2, 12),
+					gizmo_id: "g-p-1",
+				},
+				syntheticProjection(3, "gpt-4o"),
+				true,
+			),
+			conv(
+				"conv-b",
+				{
+					create_time: at(2026, 1, 1, 12),
+					update_time: at(2026, 1, 1, 12, 5),
+					latest_assistant_turn_at: null,
+					gizmo_id: "g-2",
+					is_temporary_chat: true,
+				},
+				syntheticProjection(1, "o3"),
+				true,
+			),
+			conv(
+				"conv-c",
+				{
+					create_time: at(2025, 11, 5, 8),
+					update_time: at(2025, 11, 5, 8),
+					latest_assistant_turn_at: null,
+					is_archived: true,
+				},
+				null,
+				false,
+			),
 		],
-		settings: SETTINGS,
 		client: { timezone, browser_language: "pl-PL", network_country: "PL" },
-		account: ACCOUNT,
+		coverage: {
+			archived_listing: "read",
+			list_pages: 2,
+			detail_mode: "sample",
+		},
+		sampleComplete: true,
 	});
 }
 
-test("usage_summary aggregates months, streaks, models and histograms in UTC", () => {
+test("usage_summary aggregates list fields exactly and labels the detail sample", () => {
 	const s = summaryFor("UTC");
 	assert.equal(validateRecord("usage_summary", s).ok, true);
 	assert.equal(s.timezone, "UTC");
+	assert.equal(s.activity_basis, "conversation_timestamps");
 	const totals = s.totals as Record<string, number>;
 	assert.equal(totals.conversations, 3);
-	assert.equal(totals.user_messages, 4);
+	assert.equal(totals.archived, 1);
+	assert.equal(totals.temporary_conversations, 1);
 	assert.equal(totals.custom_gpts_used, 1);
 	assert.equal(totals.projects_used, 1);
 	assert.equal(totals.shared, 0);
-	// Detail days: Jan 31, Feb 1, Feb 2, Feb 10; list-only conv-c: Dec 5.
-	assert.equal(s.active_days, 5);
+	assert.equal(s.custom_gpt_share, 0.333);
+	// Days: Jan 31, Feb 2 (conv-a), Feb 1 (conv-b), Dec 5 (conv-c).
+	assert.equal(s.active_days, 4);
 	assert.equal(s.longest_streak_days, 3);
-	const months = s.months as Array<Record<string, unknown>>;
+	assert.equal(s.first_activity_at, "2025-12-05T08:00:00.000Z");
+	assert.equal(s.last_activity_at, "2026-02-02T12:00:00.000Z");
 	assert.deepEqual(
-		months.map((m) => [m.month, m.user_messages, m.active_days]),
+		(s.months as Array<Record<string, unknown>>).map((m) => [
+			m.month,
+			m.conversations_created,
+			m.conversations_last_active,
+			m.active_days,
+		]),
 		[
-			["2025-12", 0, 1],
-			["2026-01", 1, 1],
-			["2026-02", 3, 3],
+			["2025-12", 1, 1, 1],
+			["2026-01", 1, 0, 1],
+			["2026-02", 1, 2, 2],
 		],
 	);
-	assert.deepEqual(s.models, [
+	const hours = s.hour_of_day as number[];
+	assert.equal(hours[23], 1);
+	assert.equal(hours[12], 1);
+	assert.equal(hours[8], 1);
+	const sample = s.detail_sample as Record<string, unknown>;
+	assert.equal(sample.basis, "most_recently_updated");
+	assert.equal(sample.n_conversations, 2);
+	assert.equal(sample.n_read, 2);
+	assert.equal(sample.user_messages, 4);
+	assert.equal(sample.window_start, "2026-02-01T12:05:00.000Z");
+	assert.equal(sample.window_end, "2026-02-02T12:00:00.000Z");
+	assert.deepEqual(sample.models, [
 		{ slug: "gpt-4o", assistant_messages: 3 },
 		{ slug: "o3", assistant_messages: 1 },
 	]);
-	const hours = s.hour_of_day as number[];
-	assert.equal(hours[12], 2);
-	assert.equal(hours[23], 1);
-	assert.equal(hours[8], 1);
+	assert.deepEqual(sample.messages_per_conversation, { mean: 4, median: 4 });
 	assert.deepEqual(s.coverage, {
 		conversations_listed: 3,
+		archived_listing: "read",
+		list_pages: 2,
+		detail_mode: "sample",
 		detail_fetched: 2,
 		detail_unavailable: 0,
 		detail_failed: 0,
-		detail_not_fetched: 1,
-		detail_complete: false,
-	});
-	assert.deepEqual(s.account, {
-		created_month: "2023-01",
-		data_residency_region: "no_constraint",
-		compute_residency_region: "no_constraint",
+		detail_not_read: 1,
 	});
 });
 
 test("usage_summary buckets in the page's timezone", () => {
 	const s = summaryFor("Europe/Warsaw");
 	assert.equal(s.timezone_source, "browser");
-	const months = s.months as Array<Record<string, unknown>>;
-	// 23:30 UTC on Jan 31 is 00:30 on Feb 1 in Warsaw: January has no messages.
+	// 23:30 UTC on Jan 31 is 00:30 on Feb 1 in Warsaw: January has nothing.
 	assert.deepEqual(
-		months.map((m) => [m.month, m.user_messages]),
+		(s.months as Array<Record<string, unknown>>).map((m) => [
+			m.month,
+			m.conversations_created,
+		]),
 		[
-			["2025-12", 0],
-			["2026-02", 4],
+			["2025-12", 1],
+			["2026-02", 2],
 		],
 	);
 	assert.equal((s.hour_of_day as number[])[0], 1);
@@ -571,6 +842,77 @@ test("an unknown timezone falls back to UTC and says so", () => {
 	assert.equal(validateRecord("usage_summary", s).ok, true);
 });
 
+// ─── account_profile record ───────────────────────────────────────────────
+
+const ALL_OK = {
+	me: "ok",
+	accounts_check: "ok",
+	beta_features: "ok",
+	custom_instructions: "ok",
+	memories: "ok",
+	projects: "ok",
+	tasks: "ok",
+	network: "ok",
+} as const;
+
+function profileInput(
+	over: Partial<AccountProfileInput> = {},
+): AccountProfileInput {
+	return {
+		me: {
+			created: Date.UTC(2023, 1, 20) / 1000,
+			mfa_enabled: true,
+			email_domain_type: "social",
+			country: "PL",
+			region_code: "14",
+			org_count: 1,
+			has_non_personal_org: false,
+		},
+		account: {
+			found: true,
+			created_time: Date.UTC(2023, 0, 15, 10) / 1000,
+			billing_currency: "PLN",
+			is_gratis: false,
+		},
+		betaFeatures: { flag_count: 3, enabled: ["canvas", "Bad Key", "browsing"] },
+		instructions: { enabled: true, about_user_set: true },
+		memory: { memory_count: 4, memory_num_tokens: 50, memory_max_tokens: 100 },
+		projects: { count: 2, files: 3 },
+		tasks: { count: 2, by_status: { active: 2, "Bad Status": 1 } },
+		client: { timezone: "UTC", browser_language: "en", network_country: "DE" },
+		sources: { ...ALL_OK },
+		nowMs: NOW_MS,
+		...over,
+	};
+}
+
+test("account_profile takes the earliest creation time and prefers the account country", () => {
+	const r = buildAccountProfileRecord(profileInput());
+	assert.equal(validateRecord("account_profile", r).ok, true);
+	assert.equal(r.account_created_at, "2023-01-15T10:00:00.000Z");
+	// 2023-01-15 → 2026-10-15: 45 whole months.
+	assert.equal(r.tenure_months, 45);
+	assert.equal(r.country, "PL");
+	assert.equal(r.geography_source, "account_profile");
+	assert.equal(r.network_country, "DE");
+	assert.equal(r.billing_currency, "PLN");
+	assert.deepEqual(r.enabled_beta_features, ["browsing", "canvas"]);
+	assert.deepEqual(r.scheduled_tasks_by_status, { active: 2 });
+	assert.equal(r.project_file_count, 3);
+});
+
+test("account_profile falls back to the network country and labels it", () => {
+	const r = buildAccountProfileRecord(
+		profileInput({ me: null, sources: { ...ALL_OK, me: "failed" } }),
+	);
+	assert.equal(validateRecord("account_profile", r).ok, true);
+	assert.equal(r.country, "DE");
+	assert.equal(r.geography_source, "network");
+	assert.equal(r.region_code, null);
+	assert.equal(r.mfa_enabled, null);
+	assert.equal((r.source_status as Record<string, string>).me, "failed");
+});
+
 // ─── The run ──────────────────────────────────────────────────────────────
 
 interface FakeApiCall {
@@ -578,73 +920,74 @@ interface FakeApiCall {
 	projection: ChatGptUsageProjection | undefined;
 }
 
-function fakeApi(routes: Record<string, Route>): {
-	api: ChatGptApi;
-	calls: FakeApiCall[];
-} {
+/** Paths whose fetch throws, by class, to exercise error classification. */
+type Throwing = Record<string, UsageFetchErrorClass>;
+
+function fakeApi(
+	routes: Record<string, Route>,
+	throwing: Throwing = {},
+): { api: ChatGptApi; calls: FakeApiCall[]; inFlightMax: () => number } {
 	const calls: FakeApiCall[] = [];
+	let inFlight = 0;
+	let max = 0;
+	installFakeSite(routes);
 	const api: ChatGptApi = {
 		auth: () => Promise.resolve(AUTH),
 		async fetch(path, opts = {}) {
 			calls.push({ path, projection: opts.projection });
-			if (opts.projection) {
-				installFakeSite(routes);
-				try {
-					return await chatGptUsageFetchInBrowser({
-						auth: AUTH,
-						method: opts.method ?? "GET",
-						body: opts.body,
-						path,
-						projection: opts.projection,
-						timeoutMs: 5000,
-					});
-				} finally {
-					globalThis.fetch = realFetch;
-				}
+			const bare = path.split("?")[0] ?? path;
+			const cls = throwing[bare];
+			if (cls) throw new Error(`fake ${cls}`);
+			if (!opts.projection) return { status: 404, json: null };
+			inFlight += 1;
+			max = Math.max(max, inFlight);
+			try {
+				// Yield so concurrent callers overlap the way page.evaluate does.
+				await new Promise((r) => setTimeout(r, 1));
+				return await chatGptUsageFetchInBrowser({
+					auth: AUTH,
+					method: opts.method ?? "GET",
+					body: opts.body,
+					path,
+					projection: opts.projection,
+					timeoutMs: 5000,
+				});
+			} finally {
+				inFlight -= 1;
 			}
-			if (path.startsWith("/accounts/check")) {
-				return { status: 200, json: ACCOUNTS_CHECK };
-			}
-			return { status: 404, json: null };
 		},
 	};
-	return { api, calls };
+	return { api, calls, inFlightMax: () => max };
 }
 
 function runHarness(
 	streams: string[],
 	opts: {
-		items?: ConversationListItem[];
-		truncated?: boolean;
+		site?: SiteOptions;
 		routes?: Record<string, Route>;
-		timeRange?: { since?: string };
+		throwing?: Throwing;
+		scope?: Record<string, unknown>;
+		state?: CollectContext["state"];
 	} = {},
 ) {
 	const harness = makeRecordingEmit(validateRecord);
-	const { api, calls } = fakeApi(opts.routes ?? DEFAULT_ROUTES);
-	const items = opts.items ?? [
-		listItem(CANARY_ID),
-		listItem("conv-missing", { gizmo_id: "g-CANARYGPT" }),
-	];
+	const { api, calls, inFlightMax } = fakeApi(
+		opts.routes ?? siteRoutes(opts.site),
+		opts.throwing,
+	);
 	const hooks: UsageStreamHooks = {
-		listConversations: async (deps) => {
-			await deps.emit({
-				type: "PROGRESS",
-				stream: "conversations",
-				message: "Listing your conversations",
-			});
-			if (opts.truncated) {
-				await deps.emit({
-					type: "SKIP_RESULT",
-					stream: "conversations",
-					reason: "conversation_list_unstable",
-					message: "unstable",
-				});
-			}
-			return { items, truncated: opts.truncated === true };
+		classifyError: (err) => {
+			const m = err instanceof Error ? err.message : "";
+			return m === "fake deferred"
+				? "deferred"
+				: m === "fake forbidden"
+					? "forbidden"
+					: m === "fake auth"
+						? "auth"
+						: "other";
 		},
-		classifyError: () => "other",
 		accountsCheckPath: "/accounts/check/v4-2023-04-27",
+		now: () => NOW_MS,
 	};
 	const deps: StreamDeps = {
 		api,
@@ -654,150 +997,246 @@ function runHarness(
 		requested: new Map(
 			streams.map((name) => [
 				name,
-				opts.timeRange ? { name, time_range: opts.timeRange } : { name },
+				name === "conversation_usage" && opts.scope
+					? { name, ...opts.scope }
+					: { name },
 			]),
 		),
 	};
 	return {
-		run: () => runUsageStreams(deps, {}, hooks),
+		run: () => runUsageStreams(deps, opts.state ?? {}, hooks),
 		harness,
 		calls,
+		inFlightMax,
 	};
 }
 
-const CONTENT_PATH =
-	/^\/(conversation\/|conversations\/batch|memories|user_system_messages|shared_conversations|settings)/;
+const PROJECTED_PATH =
+	/^\/(conversation|conversations|me|accounts|settings|user_system_messages|memories|gizmos|tasks|shared_conversations|cdn-cgi)(?:[/?]|$)/;
 
-test("a full run emits valid records and a summary with no canary anywhere", async () => {
+const records = (h: ReturnType<typeof makeRecordingEmit>, stream: string) =>
+	h.emitted.filter((e) => e.stream === stream).map((e) => e.data);
+
+/** A nested object field of a record; fails the test when it is missing. */
+function sub(
+	r: Record<string, unknown> | undefined,
+	key: string,
+): Record<string, unknown> {
+	const v = r?.[key];
+	assert.ok(typeof v === "object" && v !== null, `missing ${key}`);
+	return v as Record<string, unknown>;
+}
+
+const many = (n: number) => Array.from({ length: n }, (_, i) => rawListItem(i));
+
+test("a full run of all three streams emits valid records and leaks no canary anywhere", async () => {
 	const { run, harness, calls } = runHarness([
+		"account_profile",
 		"conversation_usage",
 		"usage_summary",
 	]);
 	await run();
 	assert.deepEqual(harness.skipped, []);
-	const records = harness.emitted.filter(
-		(e) => e.stream === "conversation_usage",
-	);
-	assert.equal(records.length, 2);
-	const byStatus = Object.fromEntries(
-		records.map((r) => [r.data.detail_status, r.data]),
-	);
-	assert.equal(byStatus.fetched?.gizmo_kind, "project");
-	assert.equal(byStatus.fetched?.is_shared, true);
-	assert.equal(byStatus.unavailable?.gizmo_kind, "custom_gpt");
-	const [summary] = harness.emitted.filter((e) => e.stream === "usage_summary");
+	const usage = records(harness, "conversation_usage");
+	assert.equal(usage.length, 2);
+	const canary = usage.find((r) => r.id === usageRef("c", CANARY_ID));
+	assert.equal(canary?.gizmo_kind, "project");
+	assert.equal(canary?.is_shared, true);
+	assert.equal(canary?.detail, "sampled");
+	const [summary] = records(harness, "usage_summary");
 	assert.ok(summary);
-	assert.deepEqual(summary.data.locale, {
-		browser_language: (summary.data.locale as Record<string, unknown>)
-			.browser_language,
-		network_country: "PL",
-	});
-	assert.deepEqual(summary.data.settings, {
-		memory_count: 1,
-		memory_num_tokens: 50,
-		memory_max_tokens: 10_000,
-		custom_instructions_enabled: true,
-		custom_instructions_about_user_set: true,
-		custom_instructions_response_style_set: false,
-		setting_flags: { sunshine: true, training_allowed: false },
-	});
-	assert.equal(
-		(summary.data.account as Record<string, unknown>).created_month,
-		"2023-01",
-	);
-	// Every text-bearing endpoint went through an in-page projection.
-	for (const call of calls.filter((c) => CONTENT_PATH.test(c.path))) {
+	const [profile] = records(harness, "account_profile");
+	assert.ok(profile);
+	assert.equal(profile.country, "PL");
+	assert.equal(profile.region_code, "14");
+	assert.equal(profile.geography_source, "account_profile");
+	assert.equal(profile.network_country, "DE");
+	assert.equal(profile.billing_currency, "USD");
+	assert.equal(profile.memory_count, 2);
+	assert.equal(profile.project_count, 2);
+	assert.equal(profile.project_file_count, 2);
+	assert.equal(profile.scheduled_task_count, 3);
+	assert.equal(profile.custom_instructions_name_set, true);
+	assert.equal(profile.account_created_at, "2023-01-15T10:00:00.000Z");
+	assert.deepEqual(profile.source_status, ALL_OK);
+	// Every endpoint went through an in-page projection; search is never used.
+	for (const call of calls) {
+		assert.ok(PROJECTED_PATH.test(call.path), call.path);
 		assert.ok(call.projection, `${call.path} was read without a projection`);
+		assert.ok(!call.path.startsWith("/conversations/search"), call.path);
 	}
 	// Records, protocol messages (PROGRESS, SKIP, STATE, coverage): nothing leaks.
 	assertNoLeak(harness.emitted, "emitted records");
 	assertNoLeak(harness.protocolMessages, "protocol messages");
-	const coverage = harness.protocolMessages.filter(
-		(m) => m.type === "DETAIL_COVERAGE",
-	);
-	assert.equal(coverage.length, 2);
-	// The shared walk's "conversations" reports were re-labelled, not leaked
-	// onto an unrequested stream.
-	assert.ok(
-		harness.protocolMessages.every(
-			(m) => (m as { stream?: string }).stream !== "conversations",
-		),
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "DETAIL_COVERAGE").length,
+		3,
 	);
 });
 
-test("conversation_usage alone reads no memories, settings or instructions", async () => {
-	const { run, calls } = runHarness(["conversation_usage"]);
+test("the list walk pages until a short page, ignoring the provider total", async () => {
+	const { run, harness, calls, inFlightMax } = runHarness(["usage_summary"], {
+		site: { conversations: many(250), total: 101 },
+	});
 	await run();
-	assert.ok(
-		!calls.some((c) =>
-			/^\/(memories|user_system_messages|settings|accounts|cdn-cgi)/.test(
-				c.path,
-			),
-		),
-		JSON.stringify(calls.map((c) => c.path)),
-	);
-});
-
-test("list-only mode reads no conversation content at all", async () => {
-	process.env[CHATGPT_USAGE_MAX_DETAIL_FETCHES_ENV] = "0";
-	const { run, harness, calls } = runHarness([
-		"conversation_usage",
-		"usage_summary",
-	]);
-	await run();
-	assert.ok(!calls.some((c) => /^\/conversations?\//.test(c.path)));
-	const records = harness.emitted.filter(
-		(e) => e.stream === "conversation_usage",
-	);
-	assert.ok(records.every((r) => r.data.detail_status === "not_fetched"));
-	const [summary] = harness.emitted.filter((e) => e.stream === "usage_summary");
+	const [summary] = records(harness, "usage_summary");
 	assert.ok(summary);
 	assert.equal(
-		(summary.data.coverage as Record<string, unknown>).detail_complete,
-		false,
+		(summary.coverage as Record<string, unknown>).conversations_listed,
+		250,
 	);
-	assertNoLeak(harness.emitted, "list-only records");
+	const listOffsets = calls
+		.filter(
+			(c) => /^\/conversations\?/.test(c.path) && !c.path.includes("archived"),
+		)
+		.map((c) =>
+			Number(new URL(`https://x${c.path}`).searchParams.get("offset")),
+		);
+	// Pages 0..2 hold the data (page 2 is short); at most the in-flight width
+	// of extra pages past it is requested.
+	assert.ok(listOffsets.includes(200));
+	assert.ok(Math.max(...listOffsets) <= 200 + 3 * 100, String(listOffsets));
+	// Four list/detail requests share one limiter; the trace read is outside it.
+	assert.ok(inFlightMax() <= 5, `in flight ${inFlightMax()}`);
 });
 
-test("a detail cap reads the newest conversations first and reports the rest", async () => {
-	process.env[CHATGPT_USAGE_MAX_DETAIL_FETCHES_ENV] = "1";
-	const { run, harness } = runHarness(["conversation_usage"], {
-		items: [
-			listItem("older", { update_time: 1_700_000_000 }),
-			listItem(CANARY_ID, { update_time: 1_760_000_720 }),
-		],
+test("an exact multiple of the page size ends on the empty page", async () => {
+	const { run, harness } = runHarness(["usage_summary"], {
+		site: { conversations: many(200) },
 	});
 	await run();
-	const statuses = harness.emitted.map((e) => e.data.detail_status).sort();
-	assert.deepEqual(statuses, ["fetched", "not_fetched"]);
-	const skip = harness.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "coverage").conversations_listed, 200);
 	assert.equal(
-		(skip as { reason?: string } | undefined)?.reason,
-		"detail_fetch_capped",
-	);
-});
-
-test("an unserved batch endpoint falls back to single reads", async () => {
-	const { run, harness, calls } = runHarness(["conversation_usage"], {
-		routes: {
-			...DEFAULT_ROUTES,
-			"/conversations/batch": () => json({ detail: "nope" }, 404),
-		},
-	});
-	await run();
-	assert.ok(calls.some((c) => c.path === `/conversation/${CANARY_ID}`));
-	assert.ok(harness.emitted.some((e) => e.data.detail_status === "fetched"));
-});
-
-test("a truncated list withholds the summary and marks both streams partial", async () => {
-	const { run, harness } = runHarness(["conversation_usage", "usage_summary"], {
-		truncated: true,
-	});
-	await run();
-	assert.equal(
-		harness.emitted.filter((e) => e.stream === "usage_summary").length,
+		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
 		0,
 	);
+});
+
+test("the default run reads detail only for the 30 most recently updated conversations", async () => {
+	const { run, harness, calls } = runHarness(
+		["conversation_usage", "usage_summary"],
+		{ site: { conversations: many(120) } },
+	);
+	await run();
+	assert.equal(resolveUsageDetailPlan({}).kind, "sample");
+	const batches = calls.filter((c) => c.path === "/conversations/batch");
+	assert.equal(batches.length, DEFAULT_DETAIL_SAMPLE / 10);
+	assert.ok(!calls.some((c) => c.path.startsWith("/conversation/")));
+	const usage = records(harness, "conversation_usage");
+	assert.equal(usage.length, 120);
+	const sampled = usage.filter((r) => r.detail === "sampled");
+	assert.equal(sampled.length, 30);
+	const newest = new Set(
+		Array.from({ length: 30 }, (_, i) => usageRef("c", rawConvId(i))),
+	);
+	assert.ok(sampled.every((r) => newest.has(String(r.id))));
+	const notRead = usage.filter((r) => r.detail === "not_read");
+	assert.ok(
+		notRead.every((r) => r.models === null && r.message_counts === null),
+	);
+	assert.ok(notRead.every((r) => r.detail_status === "not_fetched"));
+	const [summary] = records(harness, "usage_summary");
+	const sample = summary?.detail_sample as Record<string, unknown>;
+	assert.equal(sample.n_conversations, 30);
+	assert.equal(sample.n_read, 30);
+	assert.equal(sample.complete, true);
+	assert.equal(sample.window_end, new Date(BASE * 1000).toISOString());
+	assert.equal(
+		sample.window_start,
+		new Date((BASE - 29 * 3600) * 1000).toISOString(),
+	);
+	assert.equal(sub(summary, "coverage").detail_mode, "sample");
+	// No partial marker: an unread conversation is by design, not a gap.
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
+});
+
+test("the dev override reads every conversation or none", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "all";
+	const all = runHarness(["conversation_usage", "usage_summary"], {
+		site: { conversations: many(45) },
+	});
+	await all.run();
+	assert.ok(
+		records(all.harness, "conversation_usage").every(
+			(r) => r.detail === "selected" && r.detail_status === "fetched",
+		),
+	);
+	const [s] = records(all.harness, "usage_summary");
+	assert.equal(sub(s, "coverage").detail_mode, "all");
+
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
+	const none = runHarness(["conversation_usage", "usage_summary"]);
+	await none.run();
+	assert.ok(
+		!none.calls.some((c) => /^\/conversations?\/[a-z0-9]/.test(c.path)),
+	);
+	const [n] = records(none.harness, "usage_summary");
+	assert.equal(n?.detail_sample, null);
+	assert.equal(sub(n, "coverage").detail_mode, "none");
+});
+
+test("scope resources on conversation_usage read detail for exactly those conversations", async () => {
+	const want = [rawConvId(70), rawConvId(90)];
+	const { run, harness, calls } = runHarness(["conversation_usage"], {
+		site: { conversations: many(100) },
+		scope: { resources: want.map((id) => usageRef("c", id)) },
+	});
+	await run();
+	const batch = calls.filter((c) => c.path === "/conversations/batch");
+	assert.equal(batch.length, 1);
+	const read = records(harness, "conversation_usage").filter(
+		(r) => r.detail_status === "fetched",
+	);
+	assert.deepEqual(
+		read.map((r) => r.detail),
+		["selected", "selected"],
+	);
+});
+
+test("a time window on conversation_usage alone reads every conversation inside it and nothing else", async () => {
+	const since = new Date((BASE - 4.5 * 3600) * 1000).toISOString();
+	const { run, harness } = runHarness(["conversation_usage"], {
+		site: { conversations: many(60) },
+		scope: { time_range: { since } },
+	});
+	await run();
+	const read = records(harness, "conversation_usage").filter(
+		(r) => r.detail_status === "fetched",
+	);
+	// Created at update - 10 min: conversations 0..4 fall after `since`.
+	assert.equal(read.length, 5);
+	assert.ok(read.every((r) => r.detail === "selected"));
+});
+
+test("archived conversations are listed in a second pass; an unserved archive listing is labelled", async () => {
+	const archived = [rawListItem(500, { is_archived: true })];
+	const a = runHarness(["usage_summary"], {
+		site: { conversations: many(3), archived },
+	});
+	await a.run();
+	const [s] = records(a.harness, "usage_summary");
+	assert.equal(sub(s, "totals").archived, 1);
+	assert.equal(sub(s, "totals").conversations, 4);
+	assert.equal(sub(s, "coverage").archived_listing, "read");
+
+	const b = runHarness(["usage_summary"], {
+		site: { conversations: many(3), archived: "unavailable" },
+	});
+	await b.run();
+	const [t] = records(b.harness, "usage_summary");
+	assert.equal(sub(t, "coverage").archived_listing, "not_available");
+});
+
+test("a failed list page withholds the summary and marks both streams partial", async () => {
+	const { run, harness } = runHarness(["conversation_usage", "usage_summary"], {
+		site: { conversations: many(250), failListPages: [1] },
+	});
+	await run();
+	assert.equal(records(harness, "usage_summary").length, 0);
 	const skips = harness.protocolMessages.filter(
 		(m) => m.type === "SKIP_RESULT",
 	);
@@ -813,23 +1252,178 @@ test("a truncated list withholds the summary and marks both streams partial", as
 			["usage_summary", "conversation_list_unstable"],
 		],
 	);
+	// Only the pages before the failure are used.
+	assert.equal(records(harness, "conversation_usage").length, 100);
 });
 
-test("a time window on conversation_usage alone skips details outside it", async () => {
-	const { run, calls } = runHarness(["conversation_usage"], {
-		timeRange: { since: "2026-01-01T00:00:00Z" },
+test("an unserved batch endpoint falls back to single reads", async () => {
+	const { run, harness, calls } = runHarness(["conversation_usage"], {
+		routes: {
+			...siteRoutes(),
+			"/conversations/batch": () => json({ detail: "nope" }, 404),
+		},
 	});
 	await run();
-	assert.ok(!calls.some((c) => c.path.startsWith("/conversation")));
+	assert.ok(calls.some((c) => c.path === `/conversation/${CANARY_ID}`));
+	assert.ok(
+		records(harness, "conversation_usage").some(
+			(r) => r.detail_status === "fetched",
+		),
+	);
+});
+
+test("a deferred sample is labelled incomplete without failing the summary", async () => {
+	const { run, harness } = runHarness(["usage_summary"], {
+		site: { conversations: many(40) },
+		throwing: { "/conversations/batch": "deferred" },
+	});
+	await run();
+	const [s] = records(harness, "usage_summary");
+	const sample = s?.detail_sample as Record<string, unknown>;
+	assert.equal(sample.complete, false);
+	assert.equal(sample.n_read, 0);
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
+});
+
+test("one failing profile endpoint leaves its fields null and names it, the rest still arrive", async () => {
+	const { run, harness } = runHarness(["account_profile"], {
+		routes: {
+			...siteRoutes(),
+			"/me": () => json({ detail: "CANARY down" }, 500),
+			"/tasks": () => json({ detail: "nf" }, 404),
+			"/settings/beta_features": () => new Response("not json CANARY"),
+		},
+		throwing: { "/memories": "other" },
+	});
+	await run();
+	assert.deepEqual(harness.skipped, []);
+	const [p] = records(harness, "account_profile");
+	assert.ok(p);
+	assert.deepEqual(p.source_status, {
+		...ALL_OK,
+		me: "failed",
+		tasks: "not_available",
+		beta_features: "failed",
+		memories: "failed",
+	});
+	assert.equal(p.mfa_enabled, null);
+	assert.equal(p.memory_count, null);
+	assert.equal(p.scheduled_task_count, null);
+	assert.equal(p.enabled_beta_features, null);
+	// /me failed: the country comes from the network and says so.
+	assert.equal(p.country, "DE");
+	assert.equal(p.geography_source, "network");
+	assert.equal(p.billing_currency, "USD");
+	assert.equal(p.project_count, 2);
+	assertNoLeak(harness.protocolMessages, "protocol messages");
+});
+
+test("a profile with no answering source is skipped, not emitted empty", async () => {
+	const down: Route = () => json({ detail: "down" }, 503);
+	const { run, harness } = runHarness(["account_profile"], {
+		routes: Object.fromEntries(Object.keys(siteRoutes()).map((k) => [k, down])),
+	});
+	await run();
+	assert.equal(records(harness, "account_profile").length, 0);
+	const skip = harness.protocolMessages.find((m) => m.type === "SKIP_RESULT");
+	assert.equal((skip as { reason?: string } | undefined)?.reason, "http_error");
+});
+
+test("account_profile alone reads no conversation list or detail", async () => {
+	const { run, calls } = runHarness(["account_profile"]);
+	await run();
+	assert.ok(
+		!calls.some((c) => /^\/(conversations?|shared_conversations)/.test(c.path)),
+		JSON.stringify(calls.map((c) => c.path)),
+	);
+	// All profile sources were read, sidebar across its two cursor pages.
+	assert.equal(
+		calls.filter((c) => c.path.startsWith("/gizmos/snorlax/sidebar")).length,
+		2,
+	);
+});
+
+test("conversation_usage alone reads no profile endpoint", async () => {
+	const { run, calls } = runHarness(["conversation_usage"]);
+	await run();
+	assert.ok(
+		!calls.some((c) =>
+			/^\/(me|memories|user_system_messages|settings|accounts|cdn-cgi|tasks|gizmos)/.test(
+				c.path,
+			),
+		),
+		JSON.stringify(calls.map((c) => c.path)),
+	);
+});
+
+test("a conversation read on an earlier run is not re-emitted with nulls when it leaves the sample", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "all";
+	const first = runHarness(["conversation_usage"], {
+		site: { conversations: many(40) },
+	});
+	await first.run();
+	const stateMsg = first.harness.protocolMessages.find(
+		(m) => m.type === "STATE",
+	) as { cursor?: Record<string, unknown> } | undefined;
+	assert.ok(stateMsg?.cursor);
+	assert.equal(
+		Object.keys(stateMsg.cursor.detailed as Record<string, string>).length,
+		40,
+	);
+
+	delete process.env[CHATGPT_USAGE_DETAIL_ENV];
+	const second = runHarness(["conversation_usage"], {
+		site: { conversations: many(40) },
+		state: { conversation_usage: stateMsg.cursor },
+	});
+	await second.run();
+	// The 30 sampled are byte-identical to run 1 except the `detail` marker;
+	// the 10 not sampled are held back rather than downgraded.
+	const emitted = records(second.harness, "conversation_usage");
+	assert.ok(emitted.every((r) => r.detail_status === "fetched"));
+	const state2 = second.harness.protocolMessages.find(
+		(m) => m.type === "STATE",
+	) as { cursor?: Record<string, unknown> } | undefined;
+	assert.equal(
+		Object.keys(state2?.cursor?.detailed as Record<string, string>).length,
+		40,
+	);
+	assert.equal(
+		Object.keys(state2?.cursor?.fingerprints as Record<string, string>).length,
+		40,
+	);
 });
 
 test("the stateless host mode emits without fingerprint STATE", async () => {
 	process.env[CHATGPT_USAGE_STATELESS_ENV] = "1";
-	const { run, harness } = runHarness(["usage_summary"]);
+	const { run, harness } = runHarness(["usage_summary", "account_profile"]);
 	await run();
 	assert.equal(
 		harness.protocolMessages.filter((m) => m.type === "STATE").length,
 		0,
 	);
-	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted.length, 2);
+});
+
+test("the limiter never runs more than its width and hands slots on in order", async () => {
+	const limit = createLimiter(2);
+	let active = 0;
+	let peak = 0;
+	const order: number[] = [];
+	await Promise.all(
+		[0, 1, 2, 3, 4].map((i) =>
+			limit(async () => {
+				active += 1;
+				peak = Math.max(peak, active);
+				await new Promise((r) => setTimeout(r, 2));
+				order.push(i);
+				active -= 1;
+			}),
+		),
+	);
+	assert.equal(peak, 2);
+	assert.deepEqual(order.sort(), [0, 1, 2, 3, 4]);
 });
