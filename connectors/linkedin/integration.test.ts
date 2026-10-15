@@ -1810,6 +1810,7 @@ test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration count
 				};
 				expectedCounts.skills = one ? 1 : 0;
 				expectedCounts.connections = one ? 1 : 0;
+				delete expectedCounts.profile;
 			}
 			const recording = makeRecordingEmit(validateRecord);
 			const ctx = buildCtx(ALL_STREAMS, recording);
@@ -1836,6 +1837,12 @@ test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration count
 				},
 			});
 			assertUpsertOnly(recording, expectedCounts);
+			if (fixture === "next-empty" || fixture === "next-one") {
+				assert.ok(
+					withheldFieldsOf(recording, "profile").includes("connection_count"),
+					"an advertised continuation makes the exact connection count unavailable",
+				);
+			}
 			if (fixture === "nested-one" || fixture === "next-one") {
 				assert.equal(recording.emitted.find((row) => row.stream === "skills")?.data.id, skill.entityUrn);
 			}

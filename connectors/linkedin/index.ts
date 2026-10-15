@@ -286,6 +286,7 @@ interface ConnectionsResult {
 	missingUrnCount: number;
 	terminationReason:
 		| "verified_end"
+		| "continuation_advertised"
 		| "page_error"
 		| "malformed_page"
 		| "repeated_page"
@@ -295,9 +296,10 @@ interface ConnectionsResult {
 
 /** Walk the owner's connections list and retain why the walk stopped.
  *  Empty and short pages, or a page that reaches a verified provider total,
- *  prove the list end. Fetch errors, malformed pages, and the local page cap
- *  do not. `paging.total` was absent from the observed live response, so a
- *  complete walk commonly uses its observed row count. */
+ *  prove the list end only when the provider does not also advertise a next
+ *  page. A continuation link vetoes those local end signals. Fetch errors,
+ *  malformed pages, and the local page cap do not prove the list end.
+ *  `paging.total` was absent from the observed live response. */
 async function fetchConnections(
 	page: Page,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
@@ -381,7 +383,11 @@ async function fetchConnections(
 		if (reportedCount !== undefined && page_elements.length > reportedCount) {
 			return finish("malformed_page");
 		}
+		const continuationAdvertised =
+			paging?.links !== undefined &&
+			(!Array.isArray(paging.links) || paging.links.length > 0);
 		if (page_elements.length === 0) {
+			if (continuationAdvertised) return finish("continuation_advertised");
 			return total === null || elements.length === total
 				? finish("verified_end")
 				: finish("malformed_page");
@@ -424,6 +430,7 @@ async function fetchConnections(
 			stream: "connections",
 			...(total === null ? {} : { total }),
 		});
+		if (continuationAdvertised) return finish("continuation_advertised");
 		if (total !== null && elements.length === total) {
 			return finish("verified_end");
 		}
@@ -834,6 +841,8 @@ export async function collectLinkedIn(
 						? {
 							page_reason: terminationReason === "page_budget"
 								? "older_connections_deferred_page_budget"
+								: terminationReason === "continuation_advertised"
+									? "linkedin_connections_continuation_advertised"
 								: terminationReason === "page_error"
 									? "linkedin_connections_page_failed"
 									: "linkedin_connections_page_malformed",

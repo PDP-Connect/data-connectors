@@ -470,6 +470,7 @@
 				"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
 				"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
 				"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+				"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
 				"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
 				"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 				"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",

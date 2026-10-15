@@ -173,7 +173,7 @@ export interface VoyagerConnectionElement {
 
 export interface VoyagerConnectionsResponse {
 	elements?: VoyagerConnectionElement[];
-	paging?: { count?: number; start?: number; total?: number };
+	paging?: { count?: number; links?: unknown; start?: number; total?: number };
 }
 
 export interface VoyagerResolvedProfile {
