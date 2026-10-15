@@ -3935,11 +3935,11 @@ async function walkConversationSearch(
 	const emitListLoss = (
 		skip: Extract<EmittedMessage, { type: "SKIP_RESULT" }>,
 	): void => {
-		// A non-retryable skip is already a declared bound; it needs no basis.
-		const bound =
-			typeof skip.recovery_hint === "object" &&
-			skip.recovery_hint.retryable === false;
-		const basis = bound ? null : listLossBasis();
+		// Every caller returns the truncated backfill-at-`cursor` result right
+		// after this, so the basis holds whatever the skip's `retryable`: a
+		// non-retryable parse_error (missing list key) or the pagination cap
+		// still leaves a cursor that replays the unread rows.
+		const basis = listLossBasis();
 		deps.emit(basis === null ? skip : resumeSafeSkip(skip, basis));
 	};
 	const deferred = (): ConversationListResult => ({
@@ -4227,7 +4227,10 @@ async function walkConversationSearch(
 		}
 		cursor = nextCursor;
 		if (cursor > PAGINATION_SAFETY_LIMIT) {
-			deps.emit({
+			// See listLossBasis: the result below saves a backfill at this cursor
+			// with the watermark pinned, so the next run resumes the unread tail.
+			// Not a configured_limit: the tail past the cap IS collected later.
+			emitListLoss({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",

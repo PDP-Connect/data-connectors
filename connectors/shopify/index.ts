@@ -67,6 +67,7 @@ import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
+	declaredBoundSkip,
 	type EnsureSessionArgs,
 	politeDelay,
 	type RecordData,
@@ -654,7 +655,11 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	});
 
 	if (truncated) {
-		await emit({
+		// Declared bound: `truncated` comes only from walkOrdersCache's
+		// MAX_SCROLL_ROUNDS ceiling, a fixed per-run scroll budget. Orders past
+		// it are out of collection by design; dropUnseenIds keeps them out of
+		// the fingerprint cursor, so it never hides them from a later run.
+		await emit(declaredBoundSkip({
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
 			reason: "older_pages_deferred_page_budget",
@@ -666,7 +671,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 				total_seen: orders.length,
 				unread_pages: 1,
 			},
-		});
+		}, "configured_limit"));
 	}
 
 	await emit({

@@ -66,6 +66,7 @@ import {
 	type ProbeSessionArgs,
 	politeDelay,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -1068,12 +1069,21 @@ export async function runConversationStreams(
 
 	if (changed.length > batch.length) {
 		for (const plan of plans) {
-			await skip(
-				ctx,
-				plan.stream,
-				"anthropic_live_backlog_deferred",
-				`Read ${batch.length} of ${changed.length} changed conversations; the rest remain for the next run.`,
-				true,
+			// Resume-safe: `batch` is the oldest-first prefix of `changed`
+			// (sorted by compareKeys), so each plan's readThrough stops at or
+			// before every deferred conversation, needs() selects them again
+			// next run, and emittedThrough is not advanced on this path.
+			await ctx.emit(
+				resumeSafeSkip(
+					{
+						type: "SKIP_RESULT",
+						stream: plan.stream,
+						reason: "anthropic_live_backlog_deferred",
+						message: `Read ${batch.length} of ${changed.length} changed conversations; the rest remain for the next run.`,
+						recovery_hint: { action: "retry_by_runtime", retryable: true },
+					},
+					"cursor_at_or_before_loss",
+				),
 			);
 		}
 	} else if (messages) {

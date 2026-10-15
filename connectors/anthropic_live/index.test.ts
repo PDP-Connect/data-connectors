@@ -187,6 +187,9 @@ test("the list is paged and a backlog over the per-run cap is deferred", async (
 			reason: "anthropic_live_backlog_deferred",
 			message: `Read ${MAX_CONVERSATIONS_PER_RUN} of ${total} changed conversations; the rest remain for the next run.`,
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			// The cursor stops before the deferred conversations, so the
+			// runtime lets this stream's STATE pass (stream-integrity.ts).
+			diagnostics: { resume_safe: "cursor_at_or_before_loss" },
 		},
 	]);
 	// The cursor sits at the newest conversation read, so the next run resumes.

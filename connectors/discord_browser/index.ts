@@ -80,7 +80,10 @@ import type {
 	EnsureSessionArgs,
 	RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	resumeSafeSkip,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	apiGetExpression,
 	DISCORD_ORIGIN,
@@ -721,62 +724,74 @@ function readMessagesState(value: unknown): Required<MessagesState> {
 	return { queue, servers };
 }
 
+type SkipResultMessage = Extract<
+	Parameters<DiscordCollectContext["emit"]>[0],
+	{ type: "SKIP_RESULT" }
+>;
+
 async function emitStop(
 	ctx: DiscordCollectContext,
 	stream: Stream,
 	stop: RunStop,
+	afterMessagesWalk = false,
 ): Promise<void> {
+	const msg = stopSkip(stream, stop);
+	// A stop after the messages walk is followed by that stream's STATE. The
+	// walk writes a server's cursor only when it completed (searchServer
+	// "complete", collectDiscordBrowser), so every interrupted or unreached
+	// server keeps its previous cursor and the next run reads it again.
+	await ctx.emit(
+		afterMessagesWalk ? resumeSafeSkip(msg, "cursor_at_or_before_loss") : msg,
+	);
+}
+
+function stopSkip(stream: Stream, stop: RunStop): SkipResultMessage {
 	switch (stop) {
 		case "sign_in_required":
-			await ctx.emit({
+			return {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "discord_sign_in_required",
 				recovery_hint: { action: "refresh_credentials", retryable: false },
 				message: "Discord asked for a new login, so the run stopped.",
-			});
-			return;
+			};
 		case "verification_required":
-			await ctx.emit({
+			return {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "discord_verification_required",
 				recovery_hint: { action: "manual_action_required", retryable: false },
 				message:
 					"Discord asked for a captcha or an account check, or refused the request, so the run stopped without retrying.",
-			});
-			return;
+			};
 		case "rate_limited":
-			await ctx.emit({
+			return {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "discord_rate_limited",
 				recovery_hint: { action: "upstream_unblock", retryable: false },
 				message: "Discord asked the run to slow down, so it stopped.",
-			});
-			return;
+			};
 		case "headers_unavailable":
-			await ctx.emit({
+			return {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "discord_client_request_not_seen",
 				recovery_hint: { action: "unknown", retryable: false },
 				message:
 					"The Discord app did not send a request of its own in time, so nothing was read.",
-			});
-			return;
+			};
 		case "request_limit":
-			await ctx.emit({
+			return {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "discord_run_limit_reached",
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message:
 					"This run reached its request limit. The next run reads the range again from the newest message.",
-			});
-			return;
+			};
 		case "source_unreadable":
-			await ctx.emit({
+			return {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "discord_source_unreadable",
@@ -786,17 +801,16 @@ async function emitStop(
 				},
 				message:
 					"Discord answered in a form this connector does not recognise, so nothing more was read.",
-			});
-			return;
+			};
 		default:
-			await ctx.emit({
+			return {
 				type: "SKIP_RESULT",
 				stream,
 				reason: "discord_collection_interrupted",
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
 				message:
 					"Discord stopped answering or the page changed part way through.",
-			});
+			};
 	}
 }
 
@@ -811,23 +825,37 @@ async function emitDeferred(
 		await ctx.emit({ type: "PROGRESS", stream: MESSAGES, message });
 		return;
 	}
+	// Both skips precede the `messages` STATE. A server's cursor is replaced
+	// only by a completed walk (collectDiscordBrowser: `outcome.kind ===
+	// "complete"`), so a skipped, capped or unreached server keeps its
+	// previous cursor and the next run reads what this run left.
 	if (kind === "limit") {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream: MESSAGES,
-			reason: "discord_run_limit_reached",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message,
-		});
+		await ctx.emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: MESSAGES,
+					reason: "discord_run_limit_reached",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+					message,
+				},
+				"cursor_at_or_before_loss",
+			),
+		);
 		return;
 	}
-	await ctx.emit({
-		type: "SKIP_RESULT",
-		stream: MESSAGES,
-		reason: "discord_servers_skipped",
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
-		message,
-	});
+	await ctx.emit(
+		resumeSafeSkip(
+			{
+				type: "SKIP_RESULT",
+				stream: MESSAGES,
+				reason: "discord_servers_skipped",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message,
+			},
+			"cursor_at_or_before_loss",
+		),
+	);
 }
 
 async function emitUnreadable(
@@ -868,10 +896,15 @@ export async function collectDiscordBrowser(
 		});
 	};
 	/** End the run: every requested stream not finished reports why. */
-	const stopRun = async (stop: RunStop): Promise<void> => {
+	const stopRun = async (
+		stop: RunStop,
+		afterMessagesWalk = false,
+	): Promise<void> => {
 		connectorDiagnostic("discord_browser", "run_stopped", { stop });
 		for (const stream of requested) {
-			if (!finished.has(stream)) await emitStop(ctx, stream, stop);
+			if (!finished.has(stream)) {
+				await emitStop(ctx, stream, stop, afterMessagesWalk);
+			}
 		}
 	};
 
@@ -1078,7 +1111,8 @@ export async function collectDiscordBrowser(
 	const waiting = queue.filter((id) => cursors[id] === undefined).length;
 
 	if (stop) {
-		await stopRun(stop);
+		// Only `messages` is unfinished here; its STATE follows below.
+		await stopRun(stop, true);
 	} else {
 		if (skippedServers > 0) {
 			await emitDeferred(
