@@ -14421,7 +14421,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.25",
+				"version": "0.3.26",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14497,7 +14497,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "From the connections listing's reported total, not the profile payload itself. Null when the connections listing wasn't fetched or reported no total."
+									"description": "Exact number of connections observed only after a verified end-of-list. Null when paging ends on an error, malformed page, or page budget."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],
@@ -14784,7 +14784,43 @@
 					}
 				],
 				"reason_display_messages": {
+					"linkedin_enumeration_unproven": "LinkedIn cannot verify the full inventory; readable entries are saved without replacing or deleting existing entries",
+					"absent": "LinkedIn did not provide this field",
+					"malformed": "LinkedIn returned this field in an unreadable format",
+					"invalid_value": "LinkedIn returned a value outside the expected format",
+					"source_unavailable": "LinkedIn did not return the source needed for this field",
+					"enrichment_unresolved": "LinkedIn could not resolve a connection's profile details",
+					"walk_unverified": "LinkedIn did not provide enough paging evidence to verify the full list",
+					"source_row_uncovered": "LinkedIn could not verify the source row for this derived field",
+					"withheld_unreadable_fields": "LinkedIn withheld an entry because one or more fields were unreadable",
+					"unreadable_nested_collection": "LinkedIn returned an unreadable nested collection",
+					"malformed_row": "LinkedIn returned an entry in an unreadable format",
+					"no_readable_content": "LinkedIn returned an entry with no readable content",
+					"invalid_record_shape": "LinkedIn returned an entry outside the expected record shape",
+					"id_absent": "LinkedIn did not provide the entry identifier",
+					"id_malformed": "LinkedIn returned the entry identifier in an unreadable format",
+					"id_invalid_value": "LinkedIn returned an entry identifier outside the expected format",
+					"id_source_unavailable": "LinkedIn did not return the source for the entry identifier",
+					"id_enrichment_unresolved": "LinkedIn could not resolve the connection identifier to a profile",
+					"id_walk_unverified": "LinkedIn did not verify the entry identifier in a complete list",
+					"id_source_row_uncovered": "LinkedIn could not verify the source row for the entry identifier",
+					"id_empty": "LinkedIn returned an empty entry identifier",
+					"name_absent": "LinkedIn did not provide the entry name",
+					"name_malformed": "LinkedIn returned the entry name in an unreadable format",
+					"name_invalid_value": "LinkedIn returned an entry name outside the expected format",
+					"name_source_unavailable": "LinkedIn did not return the source for the entry name",
+					"name_enrichment_unresolved": "LinkedIn could not resolve the connection name",
+					"name_walk_unverified": "LinkedIn did not verify the entry name in a complete list",
+					"name_source_row_uncovered": "LinkedIn could not verify the source row for the entry name",
+					"name_empty": "LinkedIn returned an empty entry name",
 					"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+					"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
+					"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
+					"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+					"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
+					"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
+					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
+					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
 					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
 				}
 			}

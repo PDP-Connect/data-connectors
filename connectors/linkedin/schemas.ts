@@ -14,8 +14,13 @@
  *
  * `id` shapes are intentionally loose (`z.string().min(1).max(200)`)
  * because Voyager entity ids mix URNs (`urn:li:fsd_profilePosition:...`)
- * and positional fallback ids (`exp-0-1`) — see `subEntityId` in
+ * and positional fallback ids (`exp-0-1`) — see `idOf` in
  * parsers.ts. Connections use the member URN directly.
+ *
+ * Every field is present on an emitted record: a Personal Server upsert
+ * replaces the whole record, so a row with an unreadable field is withheld,
+ * never emitted partial (see field-read.ts). `null` means the source says the
+ * field is empty.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -89,7 +94,7 @@ export const educationSchema = z.object({
 export const skillsSchema = z.object({
 	endorsement_count: z.number().int().min(0).nullable(),
 	id: idSchema,
-	name: pdppSafeText.min(1).max(300),
+	name: pdppSafeText.max(300),
 });
 
 /**
@@ -97,16 +102,17 @@ export const skillsSchema = z.object({
  */
 export const languagesSchema = z.object({
 	id: idSchema,
-	name: pdppSafeText.min(1).max(200),
+	name: pdppSafeText.max(200),
 	proficiency: pdppSafeText.max(200).nullable(),
 });
 
 /**
  * connections stream (D7: new stream). One record per connection, keyed by
  * the connected member's URN. `full_name`/`headline`/`profile_url` are
- * `null` when the batch profile-resolution pass failed for that member
- * (rate limit, restricted profile) — the connection edge itself is still
- * real and worth keeping, per "fail null, never fail wrong".
+ * `null` only when the resolved profile says so. When resolution fails for a
+ * member (rate limit, restricted profile), the edge is withheld for this run
+ * and reported as a retryable gap: emitting it with `null` enrichment would
+ * erase the stored name and headline.
  */
 export const connectionsSchema = z.object({
 	connected_at: isoDateTimeNullable,
