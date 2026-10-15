@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 const mode = process.env.MUTATION_MODE;
 
 if (mode !== "a1" && mode !== "a2") {

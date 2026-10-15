@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -13,8 +16,8 @@ mkdirSync(reportsPath, { recursive: true });
 const commands = {
 	baseline:
 		"node --import tsx --test --test-reporter=tap connectors/groupme/attachment-detail-coverage.test.ts connectors/groupme/attachments-stream.test.ts connectors/groupme/auth-probe.test.ts connectors/groupme/blob-security.test.ts connectors/groupme/carry-forward-projection.test.ts connectors/groupme/collection.test.ts connectors/groupme/completeness-anchor.test.ts connectors/groupme/incremental-frontier.test.ts connectors/groupme/index.test.ts connectors/groupme/production-dedup.test.ts connectors/groupme/schemas.test.ts connectors/groupme/setup-contract.test.ts connectors/groupme/skip-result-boundary-claim-contract.test.ts connectors/groupme/stream-coverage.test.ts",
-	a1: "node tools/groupme-mutation-pilot/node_modules/@stryker-mutator/core/bin/stryker.js run --configFile tools/groupme-mutation-pilot/stryker.config.mjs",
-	a2: "node tools/groupme-mutation-pilot/node_modules/@stryker-mutator/core/bin/stryker.js run --configFile tools/groupme-mutation-pilot/stryker.config.mjs",
+	a1: "node tools/groupme-mutation-pilot/node_modules/@stryker-mutator/core/bin/stryker.js run tools/groupme-mutation-pilot/stryker.config.mjs",
+	a2: "node tools/groupme-mutation-pilot/node_modules/@stryker-mutator/core/bin/stryker.js run tools/groupme-mutation-pilot/stryker.config.mjs",
 };
 const label = mode === "baseline" ? "baseline" : mode;
 const started = performance.now();
