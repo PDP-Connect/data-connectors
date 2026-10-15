@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.51",
+	"version": "0.2.52",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
@@ -177,7 +177,8 @@
 						"type": "array"
 					},
 					"tool_calls": {
-						"type": "array"
+						"type": "array",
+						"description": "Tool calls. A call synthesized from a tool-addressed assistant message carries its body in text. When the message content is blob-backed (blob_ref) or omitted, the call carries text_ref \"content\" instead of text: the body is the content field, not repeated here."
 					},
 					"attachment_ids": {
 						"type": "array"

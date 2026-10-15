@@ -102,6 +102,16 @@ function trimKeepingControls(s: string): string {
 }
 
 // ─── extractContent per-content_type helpers ──────────────────────────
+//
+// Memory bound of extraction. The extractors below build the whole body: one
+// array of per-part strings (references to the already-fetched source strings,
+// plus short wrappers), one joined string, and, when edge whitespace is trimmed,
+// one more copy. Transient memory is therefore O(body), at most about 2x the
+// body that was already fetched with the response, and every copy is dropped
+// when the extraction returns. It is NOT cut short at the inline cap: a blob
+// needs the full text, and the cap decision uses `escapedLengthExceeds` on the
+// result. Nothing retains the text afterwards; a blob-backed message
+// re-extracts it once to measure and once to spool (see message-blob.ts).
 
 /**
  * Stringify one `parts[]` entry from text / multimodal_text bodies. Returns
@@ -467,8 +477,15 @@ export function extractContent(
  * `tool_calls` array on assistant messages; instead, the model "addresses" a
  * tool via `message.recipient` (e.g. "python", "browser.search", "bio") and
  * the content body carries the call. Synthesize a normalized array.
+ *
+ * `contentExternal` is true when the message's `content` is blob-backed or
+ * omitted. The call then carries `text_ref: "content"` instead of a second
+ * inline copy of the body, so a multi-megabyte body is stored once at most.
  */
-export function extractToolCalls(m: ChatGptMessage | undefined): unknown[] {
+export function extractToolCalls(
+	m: ChatGptMessage | undefined,
+	contentExternal = false,
+): unknown[] {
 	// Some API shapes do include an explicit list.
 	if (Array.isArray(m?.metadata?.tool_calls) && m.metadata.tool_calls.length) {
 		return m.metadata.tool_calls;
@@ -485,7 +502,11 @@ export function extractToolCalls(m: ChatGptMessage | undefined): unknown[] {
 			call.language = m.content.language;
 		}
 		if (typeof m?.content?.text === "string") {
-			call.text = m.content.text;
+			if (contentExternal) {
+				call.text_ref = "content";
+			} else {
+				call.text = m.content.text;
+			}
 		}
 		if (m?.metadata?.invoked_plugin) {
 			call.invoked_plugin = m.metadata.invoked_plugin;
@@ -549,7 +570,7 @@ export function extractMessageWithBlob(
 					? "tool_calls"
 					: (m.metadata?.finish_details?.type ?? null),
 			citations: m.metadata?.citations ?? [],
-			tool_calls: extractToolCalls(m),
+			tool_calls: extractToolCalls(m, oversize),
 			attachment_ids: (m.metadata?.attachments ?? [])
 				.map((a) => a.id)
 				.filter(Boolean),

@@ -13027,6 +13027,7 @@ test("runConversationsAndMessagesStreams: capped runs on a host with no blob sto
  */
 async function collectWithOversizeMessage(
 	messagesScope: { name: string; resources?: string[] },
+	bigNode: ChatGptNode = userNode("a0", [], "q".repeat(INLINE_CAP + 5), "assistant"),
 ): Promise<{
 	events: Array<{ kind: "BLOB" | "RECORD"; key: string }>;
 	records: Array<Record<string, unknown>>;
@@ -13040,7 +13041,7 @@ async function collectWithOversizeMessage(
 		current_node: "a1",
 		mapping: {
 			a0: userNode(null, ["a1"], "first"),
-			a1: userNode("a0", [], "q".repeat(INLINE_CAP + 5), "assistant"),
+			a1: bigNode,
 		},
 	};
 	const fakePage = {
@@ -13145,6 +13146,71 @@ test("collectChatGpt: a message the stream selection suppresses emits no BLOB ev
 		assert.deepEqual(events, [{ kind: "RECORD", key: "a0" }]);
 		assert.equal(records.some((r) => r.id === "a1"), false);
 		assert.deepEqual(readdirSync(dir), [], "no orphan spool file");
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
+});
+
+// A tool-addressed assistant message synthesizes tool_calls[].text from the
+// body. It must not repeat a body that went to a blob or was omitted.
+function toolNode(text: string): ChatGptNode {
+	return {
+		parent: "a0",
+		children: [],
+		message: {
+			author: { role: "assistant" },
+			recipient: "python",
+			content: { content_type: "code", language: "python", text },
+		},
+	} as ChatGptNode;
+}
+
+test("collectChatGpt: a tool-recipient message keeps its body out of tool_calls when content is a blob, omitted, or over the cap", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "chatgpt-collect-tool-"));
+	try {
+		const cases: Array<{
+			name: string;
+			spool: string | null;
+			size: number;
+			blob: boolean;
+		}> = [
+			{ name: "blob host", spool: dir, size: INLINE_CAP + 5, blob: true },
+			{ name: "no-spool host", spool: null, size: INLINE_CAP + 5, blob: false },
+			{ name: "over the cap", spool: dir, size: 33_554_433, blob: false },
+		];
+		for (const c of cases) {
+			const { events, records } = await withBlobSpool(c.spool, () =>
+				collectWithOversizeMessage(
+					{ name: "messages" },
+					toolNode("p".repeat(c.size)),
+				),
+			);
+			const record = records.find((r) => r.id === "a1");
+			assert.ok(record, `${c.name}: record emitted`);
+			assert.deepEqual(
+				record.tool_calls,
+				[
+					{
+						recipient: "python",
+						content_type: "code",
+						language: "python",
+						text_ref: "content",
+					},
+				],
+				c.name,
+			);
+			assert.ok(
+				JSON.stringify(record).length < 10_000,
+				`${c.name}: the record stays small`,
+			);
+			assert.equal(record.content === null, c.blob, c.name);
+			assert.equal("content" in record, c.blob, c.name);
+			assert.equal(
+				events.some((e) => e.kind === "BLOB" && e.key === "a1"),
+				c.blob,
+				c.name,
+			);
+		}
 	} finally {
 		rmSync(dir, { force: true, recursive: true });
 	}

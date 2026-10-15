@@ -1286,3 +1286,58 @@ test("messages schema: blob_ref requires null content; content may be absent but
 	);
 	assert.equal(validateRecord("messages", { ...base, content: null }).ok, true);
 });
+
+test("extractMessage: a tool-recipient body stays inline in tool_calls when content is inline", () => {
+	const node = {
+		parent: null,
+		children: [],
+		message: {
+			author: { role: "assistant" },
+			recipient: "python",
+			content: { content_type: "code", language: "python", text: "print(1)" },
+		},
+	} as ChatGptNode;
+	const rec = extractMessage("n1", node, "c1", true);
+	assert.deepEqual(rec?.tool_calls, [
+		{
+			recipient: "python",
+			content_type: "code",
+			language: "python",
+			text: "print(1)",
+		},
+	]);
+	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+});
+
+test("extractMessage: an oversize tool-recipient body is referenced, not duplicated into tool_calls", () => {
+	const text = "p".repeat(CONTENT_CAP + 1);
+	const node = {
+		parent: null,
+		children: [],
+		message: {
+			author: { role: "assistant" },
+			recipient: "python",
+			content: { content_type: "code", language: "python", text },
+		},
+	} as ChatGptNode;
+	const { record, oversize } = extractMessageWithBlob("n1", node, "c1", true);
+	assert.equal(oversize, true);
+	assert.deepEqual(record?.tool_calls, [
+		{
+			recipient: "python",
+			content_type: "code",
+			language: "python",
+			text_ref: "content",
+		},
+	]);
+});
+
+test("messages schema: a tool call with text_ref must say \"content\" and carry no text", () => {
+	const base = extractMessage("n1", textNode("hello"), "c1", true) ?? {};
+	const ok = (tool_calls: unknown[]) =>
+		validateRecord("messages", { ...base, tool_calls }).ok;
+	assert.equal(ok([{ recipient: "python", text_ref: "content" }]), true);
+	assert.equal(ok([{ recipient: "python", text_ref: "elsewhere" }]), false);
+	assert.equal(ok([{ text_ref: "content", text: "dup" }]), false);
+	assert.equal(ok([{ recipient: "python", text: "inline" }]), true);
+});

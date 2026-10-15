@@ -100,7 +100,17 @@ export const messageSchema = z
 		create_time: looseTimestamp.nullable(),
 		finish_reason: pdppSafeText.max(60).nullable(),
 		citations: z.array(z.unknown()),
-		tool_calls: z.array(z.unknown()),
+		// A synthesized call may carry `text_ref: "content"` instead of `text` when
+		// the body lives in the message's blob (or was omitted); never both.
+		tool_calls: z.array(z.unknown()).refine(
+			(calls) =>
+				calls.every((call) => {
+					if (typeof call !== "object" || call === null) return true;
+					if (!("text_ref" in call)) return true;
+					return call.text_ref === "content" && !("text" in call);
+				}),
+			{ message: 'text_ref must be "content" and exclude text' },
+		),
 		attachment_ids: z.array(idSchema),
 		on_current_branch: z.boolean(),
 		// Present only when the full text exceeds the inline cap: `content` is then
