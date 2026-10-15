@@ -6,6 +6,7 @@ import test from "node:test";
 import {
 	buildRow,
 	emitRow,
+	enumerated,
 	type FieldOmission,
 	type FieldPath,
 	type FieldRead,
@@ -535,3 +536,107 @@ test("buildRow: a row whose sparse optional fields are absent emits their declar
 		"without a declaration the row fails closed",
 	);
 });
+
+// ─── enumerated: an array alone is never a full inventory ───────────────
+
+const ENUMERATION_CASES: ReadonlyArray<{
+	readonly evidence: Parameters<typeof enumerated>[1];
+	readonly expect: "complete" | "incomplete";
+	readonly items: readonly unknown[];
+	readonly name: string;
+}> = [
+	// The two counterexamples from the LinkedIn #406 review.
+	{
+		name: "one item of a total of two is not complete",
+		items: ["x"],
+		evidence: { kind: "offset", start: 0, count: 1, total: 2 },
+		expect: "incomplete",
+	},
+	{
+		name: "an empty page while the source reports one row is not complete",
+		items: [],
+		evidence: { kind: "offset", start: 0, count: 10, total: 1 },
+		expect: "incomplete",
+	},
+	{
+		name: "no evidence at all is not complete",
+		items: ["x"],
+		evidence: undefined,
+		expect: "incomplete",
+	},
+	{
+		name: "offset paging from 0 whose total equals the items is complete",
+		items: ["x", "y"],
+		evidence: { kind: "offset", start: 0, count: 40, total: 2 },
+		expect: "complete",
+	},
+	{
+		name: "a verified empty collection is complete",
+		items: [],
+		evidence: { kind: "offset", start: 0, total: 0 },
+		expect: "complete",
+	},
+	{
+		name: "a walk that does not start at 0 is not complete",
+		items: ["x"],
+		evidence: { kind: "offset", start: 40, total: 1 },
+		expect: "incomplete",
+	},
+	{
+		name: "a reported continuation is not complete",
+		items: ["x"],
+		evidence: { kind: "offset", start: 0, total: 1, continuation: "/next" },
+		expect: "incomplete",
+	},
+	{
+		name: "a total that is not a count is not complete",
+		items: ["x"],
+		evidence: { kind: "offset", start: 0, total: "1" },
+		expect: "incomplete",
+	},
+	{
+		name: "a malformed count is not complete",
+		items: ["x"],
+		evidence: { kind: "offset", start: 0, count: -1, total: 1 },
+		expect: "incomplete",
+	},
+	{
+		name: "a cursor walk whose last page says has_more false is complete",
+		items: ["x"],
+		evidence: { kind: "cursor", has_more: false, next_cursor: null },
+		expect: "complete",
+	},
+	{
+		name: "a missing has_more is not an end",
+		items: ["x"],
+		evidence: { kind: "cursor", has_more: undefined, next_cursor: null },
+		expect: "incomplete",
+	},
+	{
+		name: "has_more false with a next cursor contradicts itself",
+		items: ["x"],
+		evidence: { kind: "cursor", has_more: false, next_cursor: "abc" },
+		expect: "incomplete",
+	},
+	{
+		name: "a cursor walk whose total disagrees with the items is not complete",
+		items: ["x"],
+		evidence: { kind: "cursor", has_more: false, total: 2 },
+		expect: "incomplete",
+	},
+	{
+		name: "a declared unpaged container is complete",
+		items: ["x"],
+		evidence: { kind: "unpaged", basis: "source_returns_whole_collection" },
+		expect: "complete",
+	},
+];
+
+for (const c of ENUMERATION_CASES) {
+	test(`enumerated: ${c.name}`, () => {
+		const result = enumerated(c.items, c.evidence);
+		assert.equal(result.kind, c.expect, JSON.stringify(result));
+		assert.deepEqual(result.items, c.items, "the items read are kept");
+		if (result.kind === "incomplete") assert.ok(result.reason.length > 0);
+	});
+}
