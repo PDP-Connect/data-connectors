@@ -4,30 +4,68 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import type { Page, Response } from "playwright";
+import type { Frame, Page, Response } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { classifyAdsDialogInPage, collectAllStreams } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
 const FAST_POSTS_CLOCK = { sleep: async (): Promise<void> => undefined };
-const FAST_ADS_CLOCK = { now: () => 0, sleep: async (): Promise<void> => undefined };
+const FAST_ADS_CLOCK = {
+	now: () => 0,
+	sleep: async (): Promise<void> => undefined,
+};
 const FAST_PROFILE_CLOCK = { sleep: async (): Promise<void> => undefined };
 
 function setup(streams: string[], followingPages: unknown[] = []) {
 	const harness = makeRecordingEmit(validateRecord);
 	const failures: string[] = [];
 	const requestListeners = new Set<(request: unknown) => void>();
-	const page: Partial<Page> = {
+	const responseListeners = new Set<(response: unknown) => void>();
+	const navigationListeners = new Set<(frame: unknown) => void>();
+	let currentUrl = "https://www.instagram.com/testuser/";
+	let currentNavigationRequest: unknown = null;
+	let page: Partial<Page>;
+	const mainFrame = {
+		page: () => page as Page,
+		url: () => currentUrl,
+	};
+	const emitNavigation = (): void => {
+		currentUrl = "https://www.instagram.com/testuser/";
+		currentNavigationRequest = {
+			frame: () => mainFrame,
+			isNavigationRequest: () => true,
+			redirectedFrom: () => null,
+			url: () => currentUrl,
+		};
+		for (const listener of requestListeners) listener(currentNavigationRequest);
+		for (const listener of responseListeners) {
+			listener({
+				request: () => currentNavigationRequest,
+				status: () => 200,
+				url: () => currentUrl,
+			});
+		}
+		for (const listener of navigationListeners) listener(mainFrame);
+	};
+	page = {
 		url: () => "https://www.instagram.com/testuser/",
-		goto: () => Promise.resolve(null),
+		goto: () => {
+			emitNavigation();
+			return Promise.resolve(null);
+		},
+		mainFrame: () => mainFrame as Frame,
 		waitForResponse: () => Promise.reject(new Error("no response")),
 		on: ((event: string, listener: (value: unknown) => void) => {
 			if (event === "request") requestListeners.add(listener);
+			if (event === "response") responseListeners.add(listener);
+			if (event === "framenavigated") navigationListeners.add(listener);
 			return page as Page;
 		}) as Page["on"],
 		off: ((event: string, listener: (value: unknown) => void) => {
 			if (event === "request") requestListeners.delete(listener);
+			if (event === "response") responseListeners.delete(listener);
+			if (event === "framenavigated") navigationListeners.delete(listener);
 			return page as Page;
 		}) as Page["off"],
 		waitForFunction: () => Promise.reject(new Error("no control")),
@@ -76,6 +114,7 @@ function setup(streams: string[], followingPages: unknown[] = []) {
 	};
 	return {
 		ctx,
+		emitNavigation,
 		emitRequest: (request: unknown) => {
 			for (const listener of requestListeners) listener(request);
 		},
@@ -86,7 +125,13 @@ function setup(streams: string[], followingPages: unknown[] = []) {
 
 test("completion rule: unavailable posts and child likes report retryable stream failures", async () => {
 	const { ctx, failures, harness } = setup(["posts", "post_likes"]);
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["posts", "post_likes"]);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -98,7 +143,13 @@ test("completion rule: a context without stream failure reporting cannot return 
 	const { ctx } = setup(["posts"]);
 	delete ctx.reportStreamFailure;
 	await assert.rejects(
-		collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK),
+		collectAllStreams(
+			ctx,
+			async () => undefined,
+			FAST_POSTS_CLOCK,
+			FAST_ADS_CLOCK,
+			FAST_PROFILE_CLOCK,
+		),
 		(error: unknown) =>
 			error instanceof Error &&
 			"code" in error &&
@@ -108,8 +159,71 @@ test("completion rule: a context without stream failure reporting cannot return 
 
 test("completion rule: missing ads controls report a retryable stream failure", async () => {
 	const { ctx, failures, harness } = setup(["ads"]);
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["ads"]);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
+
+test("completion rule: ads cannot claim empty after a positive source count disappears", async () => {
+	const { ctx, failures, harness } = setup(["ads"]);
+	const page = ctx.page as Partial<Page>;
+	const classifierCalls = new Map<string, number>();
+	const samples = new Map<string, unknown[]>([
+		[
+			"No advertisers",
+			[
+				{ hasPositiveSourceTotal: true, kind: "loading" },
+				{ kind: "verified_empty" },
+			],
+		],
+		["No ad topics", [{ kind: "verified_empty" }]],
+		["No categories", [{ kind: "verified_empty" }]],
+	]);
+	page.waitForFunction = (() =>
+		Promise.resolve(true)) as unknown as Page["waitForFunction"];
+	page.evaluate = ((fn: unknown, arg?: unknown) => {
+		if (arg && typeof arg === "object" && "emptyMessage" in arg) {
+			const message = String(arg.emptyMessage);
+			classifierCalls.set(message, (classifierCalls.get(message) ?? 0) + 1);
+			const sequence = samples.get(message) ?? [];
+			return Promise.resolve(sequence.shift() ?? { kind: "verified_empty" });
+		}
+		const source = String(fn);
+		if (
+			source.includes("advertiser") ||
+			source.includes("Manage info") ||
+			source.includes("Categories used to reach you")
+		) {
+			return Promise.resolve(true);
+		}
+		return Promise.resolve(false);
+	}) as Page["evaluate"];
+	let now = 0;
+	const clock = {
+		now: () => now,
+		sleep: async (ms: number): Promise<void> => {
+			now += ms;
+		},
+	};
+
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		clock,
+		FAST_PROFILE_CLOCK,
+	);
+	assert.deepEqual(failures, ["ads"]);
+	assert.ok((classifierCalls.get("No advertisers") ?? 0) > 0);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
 		false,
@@ -130,7 +244,13 @@ test("completion rule: a page script error during ads scraping fails only the ad
 			new Error("page.evaluate: Execution context was destroyed"),
 		);
 	}) as Page["evaluate"];
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["ads"]);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -165,12 +285,41 @@ const failedFollowingPages = [
 		label: "contradictory next page",
 		page: { json: { users: [], has_more: true }, status: 200 },
 	},
+	{
+		label: "contradictory terminal cursor",
+		page: {
+			json: { users: [], has_more: false, next_max_id: "next" },
+			status: 200,
+		},
+	},
+	{
+		label: "string continuation flag",
+		page: { json: { users: [], has_more: "true" }, status: 200 },
+	},
+	{
+		label: "number continuation flag",
+		page: { json: { users: [], has_more: 1 }, status: 200 },
+	},
+	{
+		label: "null continuation flag",
+		page: { json: { users: [], has_more: null }, status: 200 },
+	},
+	{
+		label: "missing terminal flag",
+		page: { json: { users: [], next_max_id: null }, status: 200 },
+	},
 ];
 
 for (const { label, page } of failedFollowingPages) {
 	test(`completion rule: following ${label} cannot complete as empty`, async () => {
 		const { ctx, failures, harness } = setup(["following"], [page]);
-		await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+		await collectAllStreams(
+			ctx,
+			async () => undefined,
+			FAST_POSTS_CLOCK,
+			FAST_ADS_CLOCK,
+			FAST_PROFILE_CLOCK,
+		);
 		assert.deepEqual(failures, ["following"]);
 		assert.equal(
 			harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -178,6 +327,31 @@ for (const { label, page } of failedFollowingPages) {
 		);
 	});
 }
+
+test("completion rule: malformed following continuation flag on a later page cannot complete the prefix", async () => {
+	const { ctx, failures, harness } = setup(
+		["following"],
+		[
+			{
+				json: { users: [{ id: "f1", username: "alice" }], has_more: true, next_max_id: "next" },
+				status: 200,
+			},
+			{ json: { users: [], has_more: "false" }, status: 200 },
+		],
+	);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
+	assert.deepEqual(failures, ["following"]);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+	);
+});
 
 test("completion rule: a page evaluation error during following fails only following", async () => {
 	const { ctx, failures, harness } = setup(["following"]);
@@ -191,9 +365,18 @@ test("completion rule: a page evaluation error during following fails only follo
 		}
 		return baseEvaluate(fn as never, arg as never);
 	}) as Page["evaluate"];
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["following"]);
-	assert.deepEqual(harness.emitted.map((record) => record.stream), []);
+	assert.deepEqual(
+		harness.emitted.map((record) => record.stream),
+		[],
+	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
 		false,
@@ -205,7 +388,7 @@ test("completion rule: a page evaluation error on a later following page keeps t
 		["following"],
 		[
 			{
-				json: { users: [{ id: "f1", username: "alice" }], next_max_id: "next" },
+				json: { users: [{ id: "f1", username: "alice" }], has_more: true, next_max_id: "next" },
 				status: 200,
 			},
 		],
@@ -214,14 +397,25 @@ test("completion rule: a page evaluation error on a later following page keeps t
 	const baseEvaluate = page.evaluate as Page["evaluate"];
 	let followingCalls = 0;
 	page.evaluate = ((fn: unknown, arg?: unknown) => {
-		if (arg && typeof arg === "object" && "path" in arg && followingCalls++ > 0) {
+		if (
+			arg &&
+			typeof arg === "object" &&
+			"path" in arg &&
+			followingCalls++ > 0
+		) {
 			return Promise.reject(
 				new Error("page.evaluate: Execution context was destroyed"),
 			);
 		}
 		return baseEvaluate(fn as never, arg as never);
 	}) as Page["evaluate"];
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["following"]);
 	assert.deepEqual(
 		harness.emitted.map((record) => `${record.stream}:${record.data.username}`),
@@ -246,9 +440,15 @@ test("completion rule: a non-meta error inside the posts walk fails posts and po
 		Promise.resolve(response as Response)) as Page["waitForResponse"];
 	// The walk paces itself with `delay` after each non-terminal page; any
 	// error raised there is not a meta_posts_* proof failure.
-	await collectAllStreams(ctx, async () => {
+	await collectAllStreams(
+		ctx,
+		async () => {
 		throw new Error("page.evaluate: Execution context was destroyed");
-	}, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+		},
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["posts", "post_likes"]);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -259,9 +459,15 @@ test("completion rule: a non-meta error inside the posts walk fails posts and po
 test("completion rule: explicit empty following payload completes without a failure", async () => {
 	const { ctx, failures, harness } = setup(
 		["following"],
-		[{ json: { users: [], next_max_id: null, status: "ok" }, status: 200 }],
+		[{ json: { users: [], has_more: false, next_max_id: null, status: "ok" }, status: 200 }],
 	);
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, []);
 	assert.deepEqual(harness.emitted, []);
 	assert.equal(
@@ -281,13 +487,19 @@ test("completion rule: following without a terminal second page fails and keeps 
 		["following"],
 		[
 			{
-				json: { users: [{ id: "f1", username: "alice" }], next_max_id: "next" },
+				json: { users: [{ id: "f1", username: "alice" }], has_more: true, next_max_id: "next" },
 				status: 200,
 			},
 			{ json: null, status: 0 },
 		],
 	);
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["following"]);
 	assert.deepEqual(
 		harness.emitted.map((record) => record.stream),
@@ -307,7 +519,7 @@ function nonterminalPostsResponse(
 		username: "testuser",
 	};
 	const request = {
-		frame: () => ({ page: () => page }),
+		frame: () => page.mainFrame?.() as never,
 		headers: () => ({ "x-fb-friendly-name": operation }),
 		method: () => "POST",
 		postData: () =>
@@ -329,7 +541,10 @@ function nonterminalPostsResponse(
 }
 
 test("completion rule: a capped posts walk reports both requested streams as failed", async () => {
-	const { ctx, emitRequest, failures, harness } = setup(["posts", "post_likes"]);
+	const { ctx, emitNavigation, emitRequest, failures, harness } = setup([
+		"posts",
+		"post_likes",
+	]);
 	let pendingResolve: ((response: Response) => void) | null = null;
 	let pageNumber = 0;
 	const respond = (): void => {
@@ -348,15 +563,24 @@ test("completion rule: a capped posts walk reports both requested streams as fai
 			pendingResolve = resolve;
 		})) as Page["waitForResponse"];
 	ctx.page.goto = (() => {
+		emitNavigation();
 		respond();
 		return Promise.resolve(null);
 	}) as Page["goto"];
 	const evaluate = ctx.page.evaluate;
 	ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
 		if (String(fn).includes("scrollTo")) respond();
-		return evaluate?.(fn as never, arg as never) as ReturnType<Page["evaluate"]>;
+		return evaluate?.(fn as never, arg as never) as ReturnType<
+			Page["evaluate"]
+		>;
 	}) as Page["evaluate"];
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["posts", "post_likes"]);
 	assert.deepEqual(
 		harness.protocolMessages
@@ -372,7 +596,9 @@ test("completion rule: a capped posts walk reports both requested streams as fai
 });
 
 test("completion rule: a capped posts walk keeps emitted records and fails only requested streams", async () => {
-	const { ctx, emitRequest, failures, harness } = setup(["posts"]);
+	const { ctx, emitNavigation, emitRequest, failures, harness } = setup([
+		"posts",
+	]);
 	let pageNumber = 0;
 	let pendingResolve: ((response: Response) => void) | null = null;
 	const respond = (): void => {
@@ -391,15 +617,24 @@ test("completion rule: a capped posts walk keeps emitted records and fails only 
 			pendingResolve = resolve;
 		})) as Page["waitForResponse"];
 	ctx.page.goto = (() => {
+		emitNavigation();
 		respond();
 		return Promise.resolve(null);
 	}) as Page["goto"];
 	const evaluate = ctx.page.evaluate;
 	ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
 		if (String(fn).includes("scrollTo")) respond();
-		return evaluate?.(fn as never, arg as never) as ReturnType<Page["evaluate"]>;
+		return evaluate?.(fn as never, arg as never) as ReturnType<
+			Page["evaluate"]
+		>;
 	}) as Page["evaluate"];
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["posts"]);
 	assert.deepEqual(
 		harness.emitted.map((record) => record.stream),
@@ -417,13 +652,20 @@ test("completion rule: a capped following walk keeps its users and reports follo
 		pages.push({
 			json: {
 				users: [{ id: `f${index}`, username: `user${index}` }],
+				has_more: true,
 				next_max_id: `cursor${index}`,
 			},
 			status: 200,
 		});
 	}
 	const { ctx, failures, harness } = setup(["following"], pages);
-	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	await collectAllStreams(
+		ctx,
+		async () => undefined,
+		FAST_POSTS_CLOCK,
+		FAST_ADS_CLOCK,
+		FAST_PROFILE_CLOCK,
+	);
 	assert.deepEqual(failures, ["following"]);
 	assert.ok(
 		harness.emitted.filter((record) => record.stream === "following").length >

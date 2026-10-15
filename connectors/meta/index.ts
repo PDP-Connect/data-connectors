@@ -135,7 +135,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
-import type { Page, Request } from "playwright";
+import type { Frame, Page, Request } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
@@ -239,7 +239,9 @@ export async function probeMetaSession({
 	context,
 	page,
 }: ProbeSessionArgs): Promise<boolean> {
-	return (await hasSessionCookie(context)) && (await hasAuthenticatedWebInfo(page));
+	return (
+		(await hasSessionCookie(context)) && (await hasAuthenticatedWebInfo(page))
+	);
 }
 
 export async function ensureMetaSession({
@@ -472,7 +474,9 @@ const PROFILE_CAPTURE_INITIAL_DELAY_MS = 3_000;
 const PROFILE_CAPTURE_POLL_INTERVAL_MS = 1_000;
 const PROFILE_CAPTURE_MAX_POLLS = 30;
 
-type ProfilePageResponse = Parameters<typeof isProfilePageGraphQLResponse>[0] & {
+type ProfilePageResponse = Parameters<
+	typeof isProfilePageGraphQLResponse
+>[0] & {
 	json: () => Promise<unknown>;
 	status: () => number;
 };
@@ -503,7 +507,8 @@ export async function fetchProfilePageUser(
 ): Promise<InstagramProfilePageUser | null> {
 	const matchingResponses: ProfilePageResponse[] = [];
 	const onResponse = (response: ProfilePageResponse): void => {
-		if (isProfilePageGraphQLResponse(response)) matchingResponses.push(response);
+		if (isProfilePageGraphQLResponse(response))
+			matchingResponses.push(response);
 	};
 	page.on("response", onResponse);
 	let response: ProfilePageResponse | null = null;
@@ -575,20 +580,29 @@ type CompleteTimelineConnection = InstagramTimelineConnection & {
  * `page.captureNetwork`/`getCapturedResponse` pattern, using Playwright's own
  * `waitForResponse` instead of that bespoke shim.
  */
-type PostsTimelineRequest = Pick<Request, "headers" | "method" | "postData" | "url"> & {
-	frame?: () => { page?: () => Page };
+type PostsTimelineRequest = Pick<
+	Request,
+	"headers" | "method" | "postData" | "url"
+> & {
+	frame: () => Frame;
 };
 
-function isPostsTimelineRequest(request: PostsTimelineRequest, page: Page): boolean {
+function isPostsTimelineRequest(
+	request: PostsTimelineRequest,
+	page: Page,
+): boolean {
 	let responsePage: Page | undefined;
+	let requestFrame: Frame;
 	try {
-		responsePage = request.frame?.().page?.();
+		requestFrame = request.frame();
+		responsePage = requestFrame.page();
 	} catch {
 		return false;
 	}
 	const operation = request.postData() ?? "";
 	return (
-		(responsePage === undefined || responsePage === page) &&
+		responsePage === page &&
+		requestFrame === page.mainFrame() &&
 		request.url().includes("/graphql/") &&
 		request.method() === "POST" &&
 		/(?:PolarisProfilePostsQuery|PolarisProfilePostsTabContentQuery_connection|ProfilePostsQuery|UserMediaQuery)/.test(
@@ -609,11 +623,7 @@ function postsRequestVariables(request: PostsTimelineRequest): unknown {
 	}
 	try {
 		const parsed = JSON.parse(body) as unknown;
-		if (
-			parsed &&
-			typeof parsed === "object" &&
-			"variables" in parsed
-		) {
+		if (parsed && typeof parsed === "object" && "variables" in parsed) {
 			return parsed.variables;
 		}
 		return parsed;
@@ -675,10 +685,12 @@ function postsRequestTargetsOwner(
 	const userIds = valuesForVariableKeys(variables, POSTS_USER_ID_VARIABLES);
 	const expectedUsername = username.toLowerCase();
 	const matchingUsername = usernames.some(
-		(value) => typeof value === "string" && value.toLowerCase() === expectedUsername,
+		(value) =>
+			typeof value === "string" && value.toLowerCase() === expectedUsername,
 	);
 	const mismatchingUsername = usernames.some(
-		(value) => typeof value !== "string" || value.toLowerCase() !== expectedUsername,
+		(value) =>
+			typeof value !== "string" || value.toLowerCase() !== expectedUsername,
 	);
 	const matchingUserId = Boolean(
 		userId && userIds.some((value) => String(value) === userId),
@@ -927,29 +939,105 @@ export async function fetchAllPosts(
 	let lastConsumedIndex = -1;
 	let initialPageIndex = -1;
 	let walkGeneration = 0;
+	let documentGeneration = 0;
+	let acceptedDocumentGeneration: number | null = null;
+	let intendedNavigationUrl: string | null = null;
+	let attemptNavigationRequests = new Set<Request>();
+	let intendedNavigationResponseSeen = false;
 	let expectedContinuationCursor: string | null = null;
 	let legacyInitialCapture: Promise<unknown | null> | null = null;
 	const legacyCaptureController = new AbortController();
-	const requestGenerations = new WeakMap<Request, number>();
+	const requestGenerations = new WeakMap<
+		Request,
+		{ document: number; walk: number }
+	>();
 	const pageEvents = page as Page & {
 		off?: (event: "response", listener: (response: unknown) => void) => void;
 		on?: (event: "response", listener: (response: unknown) => void) => void;
 	};
+	const onFrameNavigated = (frame: Frame): void => {
+		if (frame !== page.mainFrame()) return;
+		documentGeneration += 1;
+		acceptedDocumentGeneration = null;
+		if (intendedNavigationUrl === null || !intendedNavigationResponseSeen) return;
+		try {
+			const intended = new URL(intendedNavigationUrl);
+			const committed = new URL(frame.url());
+			if (
+				committed.origin === intended.origin &&
+				committed.pathname === intended.pathname
+			) {
+				acceptedDocumentGeneration = documentGeneration;
+			}
+		} catch {
+			acceptedDocumentGeneration = null;
+		}
+	};
 	const onRequest = (request: Request): void => {
+		if (intendedNavigationUrl !== null) {
+			try {
+				if (request.isNavigationRequest()) {
+					const requestUrl = new URL(request.url());
+					const intendedUrl = new URL(intendedNavigationUrl);
+					const redirectedFrom = request.redirectedFrom();
+					if (
+						request.frame() === page.mainFrame() &&
+						((requestUrl.origin === intendedUrl.origin &&
+							requestUrl.pathname === intendedUrl.pathname) ||
+							(redirectedFrom !== null &&
+								attemptNavigationRequests.has(redirectedFrom)))
+					) {
+						attemptNavigationRequests.add(request);
+					}
+				}
+			} catch {
+				// Requests without an inspectable main-frame navigation cannot bind a document.
+			}
+		}
 		if (
+			acceptedDocumentGeneration !== null &&
 			isPostsTimelineRequest(request, page) &&
 			postsRequestTargetsOwner(request, username, expectedUserId)
 		) {
-			requestGenerations.set(request, walkGeneration);
+			requestGenerations.set(request, {
+				document: acceptedDocumentGeneration,
+				walk: walkGeneration,
+			});
 		}
 	};
 	const responseMatchesCursor = (
 		response: PostsTimelineResponse,
 		cursor: string | null,
 	): boolean => postsRequestHasCursor(response.request(), cursor);
-	const responseIsCurrentWalk = (response: PostsTimelineResponse): boolean =>
-		requestGenerations.get(response.request() as Request) === walkGeneration;
+	const responseIsCurrentWalk = (response: PostsTimelineResponse): boolean => {
+		const generation = requestGenerations.get(response.request() as Request);
+		return (
+			generation?.walk === walkGeneration &&
+			generation.document === acceptedDocumentGeneration
+		);
+	};
 	const onResponse = (response: unknown): void => {
+		try {
+			const navigationResponse = response as {
+				request: () => Request;
+				status: () => number;
+				url: () => string;
+			};
+			if (
+				intendedNavigationUrl !== null &&
+				attemptNavigationRequests.has(navigationResponse.request())
+			) {
+				const responseUrl = new URL(navigationResponse.url());
+				const intendedUrl = new URL(intendedNavigationUrl);
+				intendedNavigationResponseSeen =
+					navigationResponse.status() >= 200 &&
+					navigationResponse.status() < 300 &&
+					responseUrl.origin === intendedUrl.origin &&
+					responseUrl.pathname === intendedUrl.pathname;
+			}
+		} catch {
+			// Non-Response events cannot identify the current navigation document.
+		}
 		if (
 			isPostsTimelineResponse(
 				response as Parameters<typeof isPostsTimelineResponse>[0],
@@ -969,9 +1057,11 @@ export async function fetchAllPosts(
 	const observesRequests = typeof page.on === "function";
 	pageEvents.on?.("response", onResponse);
 	if (observesRequests) page.on("request", onRequest);
+	page.on("framenavigated", onFrameNavigated);
 	const stopObserving = (): void => {
 		pageEvents.off?.("response", onResponse);
 		if (observesRequests) page.off("request", onRequest);
+		page.off("framenavigated", onFrameNavigated);
 	};
 
 	let walk: Awaited<ReturnType<typeof walkPagesWithCeiling>>;
@@ -1022,6 +1112,10 @@ export async function fetchAllPosts(
 									// isolated; a delayed response from a failed attempt cannot
 									// certify the successful retry.
 									walkGeneration += 1;
+									intendedNavigationUrl = `${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`;
+									acceptedDocumentGeneration = null;
+									attemptNavigationRequests = new Set();
+									intendedNavigationResponseSeen = false;
 									initialResponses.length = 0;
 									lastConsumedIndex = matchingResponses.length - 1;
 								},
@@ -1049,9 +1143,8 @@ export async function fetchAllPosts(
 					}
 					let awaited = await responsePromise;
 					if (!awaited && pageNumber === 1) {
-						awaited = (await legacyInitialCapture) as
-							| PostsTimelineResponse
-							| null;
+						awaited =
+							(await legacyInitialCapture) as PostsTimelineResponse | null;
 						if (!awaited) {
 							const fallbackResponse = page
 								.waitForResponse(
@@ -1082,9 +1175,7 @@ export async function fetchAllPosts(
 					}
 					response =
 						queued() ??
-						(awaited && responseIsCurrentWalk(awaited)
-							? awaited
-							: undefined);
+						(awaited && responseIsCurrentWalk(awaited) ? awaited : undefined);
 					if (!response) {
 						return false;
 					}
@@ -1307,7 +1398,9 @@ export async function fetchAllFollowing(
 						!followingUserId(user),
 				) ||
 				(json.next_max_id != null && typeof json.next_max_id !== "string") ||
-				(json.has_more === true && !json.next_max_id)
+				typeof json.has_more !== "boolean" ||
+				(json.has_more === true && !json.next_max_id) ||
+				(json.has_more === false && Boolean(json.next_max_id))
 			) {
 				throw new Error(
 					"meta_following_page_unavailable: following response did not prove a successful page",
@@ -1344,9 +1437,9 @@ const NON_TOPIC_RE = /^(?:special topic|see less)$/i;
 
 type AdsDialogClassification =
 	| { complete: boolean; items: string[]; kind: "data" }
-	| { kind: "loading" }
-	| { kind: "verified_empty" }
-	| { kind: "unavailable" };
+	| { hasPositiveSourceTotal?: true; kind: "loading" }
+	| { hasPositiveSourceTotal?: true; kind: "verified_empty" }
+	| { hasPositiveSourceTotal?: true; kind: "unavailable" };
 
 type AdsSettleClock = {
 	now: () => number;
@@ -1412,6 +1505,27 @@ export function classifyAdsDialogInPage(args: {
 	);
 	if (!dialog) return { kind: "unavailable" };
 	const text = visibleText(dialog);
+	const [readPositiveInteger] = [
+		(raw: string | null): number | null => {
+			const trimmed = raw?.trim();
+			if (!trimmed || !/^\d+$/.test(trimmed)) return null;
+			const value = Number(trimmed);
+			return Number.isSafeInteger(value) ? value : null;
+		},
+	] as const;
+	const hasPositiveSourceTotal = Array.from(
+		dialog.querySelectorAll('[role="list"], [role="listitem"]'),
+	).some(
+		(element) =>
+			(readPositiveInteger(element.getAttribute("aria-setsize")) ?? 0) > 0 ||
+			(readPositiveInteger(element.getAttribute("aria-rowcount")) ?? 0) > 0,
+	);
+	const loading: AdsDialogClassification = hasPositiveSourceTotal
+		? { hasPositiveSourceTotal: true, kind: "loading" }
+		: { kind: "loading" };
+	const unavailable: AdsDialogClassification = hasPositiveSourceTotal
+		? { hasPositiveSourceTotal: true, kind: "unavailable" }
+		: { kind: "unavailable" };
 	const [styleVisible] = [
 		(element: Element): boolean => {
 			for (
@@ -1441,7 +1555,7 @@ export function classifyAdsDialogInPage(args: {
 		).some(styleVisible) ||
 		/\b(?:loading|please wait)\b/i.test(text)
 	) {
-		return { kind: "loading" };
+		return loading;
 	}
 	if (
 		Array.from(dialog.querySelectorAll('[role="alert"]')).some(visible) ||
@@ -1449,16 +1563,8 @@ export function classifyAdsDialogInPage(args: {
 			text,
 		)
 	) {
-		return { kind: "unavailable" };
+		return unavailable;
 	}
-	const [readPositiveInteger] = [
-		(raw: string | null): number | null => {
-			const trimmed = raw?.trim();
-			if (!trimmed || !/^\d+$/.test(trimmed)) return null;
-			const value = Number(trimmed);
-			return Number.isSafeInteger(value) ? value : null;
-		},
-	] as const;
 	const uiOnlyPattern = args.uiOnlyPatternSource
 		? new RegExp(args.uiOnlyPatternSource, "i")
 		: null;
@@ -1495,24 +1601,24 @@ export function classifyAdsDialogInPage(args: {
 			);
 		},
 	);
-	if (lists.length === 0) return { kind: "unavailable" };
+	if (lists.length === 0) return unavailable;
 	for (const currentList of lists) {
 		const listItems: string[] = [];
 		const advertisedCounts = [
 			readPositiveInteger(currentList.getAttribute("aria-setsize")),
 			readPositiveInteger(currentList.getAttribute("aria-rowcount")),
-			...Array.from(
-				currentList.querySelectorAll('[role="listitem"]'),
-			).flatMap((row) => [
+			...Array.from(currentList.querySelectorAll('[role="listitem"]')).flatMap(
+				(row) => [
 				readPositiveInteger(row.getAttribute("aria-setsize")),
 				readPositiveInteger(row.getAttribute("aria-rowcount")),
-			]),
+				],
+			),
 		].filter((count): count is number => count !== null);
 		const visibleRows = Array.from(
 			currentList.querySelectorAll('[role="listitem"]'),
 		).filter(visible);
 		for (const row of visibleRows) {
-			if (hasHiddenRealText(row)) return { kind: "loading" };
+			if (hasHiddenRealText(row)) return loading;
 			const fullText = visibleText(row);
 			if (!fullText) continue;
 			const hasControl = Array.from(row.querySelectorAll(controlSelector)).some(
@@ -1547,11 +1653,11 @@ export function classifyAdsDialogInPage(args: {
 				(row) => !visible(row) && hasHiddenRealText(row),
 			)
 		) {
-			return { kind: "loading" };
+			return loading;
 		}
 		if (listItems.length === 0) {
 			if (advertisedCounts.some((count) => count > 0)) {
-				return { kind: "loading" };
+				return loading;
 			}
 			if (lists.length > 1) sawUnknownList = true;
 			continue;
@@ -1601,8 +1707,8 @@ export function classifyAdsDialogInPage(args: {
 	const hasHiddenRowEvidence = Array.from(
 		dialog.querySelectorAll('[role="listitem"]'),
 	).some((row) => !visible(row) && normalize(row.textContent ?? "") !== "");
-	if (hasHiddenRowEvidence) return { kind: "loading" };
-	if (sawUnknownList) return { kind: "unavailable" };
+	if (hasHiddenRowEvidence) return loading;
+	if (sawUnknownList) return unavailable;
 
 	const expected = normalize(args.emptyMessage).toLowerCase();
 	const hasExactVisibleMessage =
@@ -1611,9 +1717,8 @@ export function classifyAdsDialogInPage(args: {
 			(element) =>
 				visible(element) && visibleText(element).toLowerCase() === expected,
 		);
-	return hasExactVisibleMessage
-		? { kind: "verified_empty" }
-		: { kind: "unavailable" };
+	if (hasExactVisibleMessage && hasPositiveSourceTotal) return loading;
+	return hasExactVisibleMessage ? { kind: "verified_empty" } : unavailable;
 }
 
 /**
@@ -1660,9 +1765,13 @@ async function waitForStableAdsDialog(
 	let firstSeenAt = 0;
 	let lastSignature: string | null = null;
 	let sawData = false;
+	let sawPositiveSourceTotal = false;
 	while (clock.now() < deadline) {
 		const classification = await page.evaluate(classifyAdsDialogInPage, args);
 		sawData ||= classification.kind === "data";
+		sawPositiveSourceTotal ||=
+			classification.kind !== "data" &&
+			classification.hasPositiveSourceTotal === true;
 		if (classification.kind === "loading") {
 			firstSeenAt = 0;
 			lastSignature = null;
@@ -1674,7 +1783,8 @@ async function waitForStableAdsDialog(
 			} else if (clock.now() - firstSeenAt >= ADS_EMPTY_LIST_SETTLE_MS) {
 				// Rows seen earlier contradict a later empty message, so the
 				// empty message cannot prove the list empty.
-				return classification.kind === "verified_empty" && sawData
+				return classification.kind === "verified_empty" &&
+					(sawData || sawPositiveSourceTotal)
 					? { kind: "unavailable" }
 					: classification;
 			}
@@ -2225,8 +2335,7 @@ export async function collectAllStreams(
 				? { data: { data: { user: trustedProfileUser } } }
 				: null,
 		);
-		const profile =
-			profileRecord(user, counts, trustedProfileUser) ?? identity;
+		const profile = profileRecord(user, counts, trustedProfileUser) ?? identity;
 		await emitRecord("profile", profile as RecordData);
 		if (!profileEnrichmentIsComplete(trustedProfileUser)) {
 			await reportCollectionFailure(

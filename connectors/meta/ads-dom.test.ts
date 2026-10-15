@@ -191,10 +191,20 @@ for (const { attribute, args, name } of [
 				`<section role="dialog"><div role="list" ${attribute}="2"></div><p>${args.emptyMessage}</p></section>`,
 				args,
 			),
-			{ kind: "loading" },
+			{ hasPositiveSourceTotal: true, kind: "loading" },
 		);
 	});
 }
+
+test("classifyAdsDialogInPage: positive source total remains explicit empty-proof veto evidence", () => {
+	assert.deepEqual(
+		classify(
+			`<section role="dialog"><div role="list" aria-setsize="2"></div><p>No advertisers</p></section>`,
+			advertisersArgs,
+		),
+		{ hasPositiveSourceTotal: true, kind: "loading" },
+	);
+});
 
 test("classifyAdsDialogInPage: hidden empty messages do not prove empty", () => {
 	assert.deepEqual(
@@ -533,7 +543,7 @@ test("classifyAdsDialogInPage: hidden unresolved item text keeps the surface loa
 			`,
 			advertisersArgs,
 		),
-		{ kind: "loading" },
+		{ hasPositiveSourceTotal: true, kind: "loading" },
 	);
 });
 

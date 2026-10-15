@@ -57,7 +57,11 @@ function legacyPostsDecision(raw: unknown): PostsDecision {
 	return edges.length === 0 ? "empty" : "data";
 }
 
-type ChallengeDom = "captcha" | "email" | "verification_code" | "challenge_form";
+type ChallengeDom =
+	| "captcha"
+	| "email"
+	| "verification_code"
+	| "challenge_form";
 
 // Text and controls the fake page exposes to the serialized in-page detector.
 const CHALLENGE_DOMS: Record<
@@ -80,6 +84,7 @@ function makePostsPage(options: {
 	challengeUrl?: string;
 	challengeDom?: ChallengeDom;
 	oldNavigationResponse?: Exclude<ScriptedPostsPage, null>;
+	oldDocumentRequestDuringGoto?: Exclude<ScriptedPostsPage, null>;
 	/** Ordinary profile text with no challenge controls (username, bio). */
 	profileText?: string;
 	exposeEmit?: (
@@ -90,8 +95,15 @@ function makePostsPage(options: {
 	const queue = [...options.postsScript];
 	const responseListeners = new Set<(response: unknown) => void>();
 	const requestListeners = new Set<(request: unknown) => void>();
+	const navigationListeners = new Set<(frame: unknown) => void>();
 	let pendingResolve: ((value: unknown) => void) | null = null;
 	let pendingPredicate: ((value: unknown) => boolean) | null = null;
+	let currentNavigationRequest: unknown = null;
+	let frameUrl = options.challengeUrl ?? "https://www.instagram.com/testuser/";
+	const mainFrame = {
+		page: () => page,
+		url: () => frameUrl,
+	};
 
 	const page = {
 		evaluate: (fn: unknown): Promise<unknown> => {
@@ -101,17 +113,29 @@ function makePostsPage(options: {
 			return Promise.resolve(undefined);
 		},
 		goto: (): Promise<null> => {
+			emitNavigationRequest();
+			if (options.oldDocumentRequestDuringGoto) {
+				frameUrl = "https://www.instagram.com/testuser/";
+				for (const listener of navigationListeners) listener(mainFrame);
+				emitResponse(options.oldDocumentRequestDuringGoto);
+			}
 			if (options.oldNavigationResponse) {
 				emitResponse(options.oldNavigationResponse, false);
 			}
+			emitNavigationResponse();
+			frameUrl = "https://www.instagram.com/testuser/";
+			for (const listener of navigationListeners) listener(mainFrame);
 			resolveNextResponse();
 			return Promise.resolve(null);
 		},
+		mainFrame: () => mainFrame,
 		off: (event: string, listener: (response: unknown) => void): void => {
 			if (event === "response") {
 				responseListeners.delete(listener);
 			} else if (event === "request") {
 				requestListeners.delete(listener);
+			} else if (event === "framenavigated") {
+				navigationListeners.delete(listener);
 			}
 		},
 		on: (event: string, listener: (response: unknown) => void): void => {
@@ -119,6 +143,8 @@ function makePostsPage(options: {
 				responseListeners.add(listener);
 			} else if (event === "request") {
 				requestListeners.add(listener);
+			} else if (event === "framenavigated") {
+				navigationListeners.add(listener);
 			}
 		},
 		url: () => options.challengeUrl ?? "https://www.instagram.com/testuser/",
@@ -175,7 +201,7 @@ function makePostsPage(options: {
 				}),
 			}).toString();
 		const request = {
-			frame: () => ({ page: () => page }),
+			frame: () => mainFrame,
 			headers: () => ({ "x-fb-friendly-name": operationName }),
 			method: () => scripted.method ?? "POST",
 			postData: () => postData,
@@ -185,11 +211,31 @@ function makePostsPage(options: {
 			json: () => Promise.resolve(scripted.json),
 			request: () =>
 				scripted.fromCurrentPage === false
-					? { ...request, frame: () => ({ page: () => ({} as Page) }) }
+					? { ...request, frame: () => ({ page: () => ({}) as Page }) }
 					: request,
 			status: () => scripted.status,
 			url: () => scripted.url ?? "https://www.instagram.com/graphql/query/",
 		};
+	}
+
+	function emitNavigationRequest(): void {
+		const request = {
+			frame: () => mainFrame,
+			isNavigationRequest: () => true,
+			redirectedFrom: () => null,
+			url: () => "https://www.instagram.com/testuser/",
+		};
+		currentNavigationRequest = request;
+		for (const listener of requestListeners) listener(request);
+	}
+
+	function emitNavigationResponse(): void {
+		const response = {
+			request: () => currentNavigationRequest,
+			status: () => 200,
+			url: () => "https://www.instagram.com/testuser/",
+		};
+		for (const listener of responseListeners) listener(response);
 	}
 
 	function emitResponse(
@@ -239,6 +285,7 @@ async function pdppPostsDecision(
 		challengeDom?: ChallengeDom;
 		challengeUrl?: string;
 		oldNavigationResponse?: Exclude<ScriptedPostsPage, null>;
+		oldDocumentRequestDuringGoto?: Exclude<ScriptedPostsPage, null>;
 		profileText?: string;
 	} = {},
 ): Promise<PostsDecision> {
@@ -317,6 +364,17 @@ test("fetchAllPosts: terminal empty is complete only when legacy would also be e
 test("fetchAllPosts: same-tab response from an earlier navigation cannot prove empty", async () => {
 	const pdpp = await pdppPostsDecision([null], {
 		oldNavigationResponse: {
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+		},
+	});
+
+	assert.equal(pdpp, "not-proven");
+});
+
+test("fetchAllPosts: old document request during navigation cannot prove empty", async () => {
+	const pdpp = await pdppPostsDecision([null], {
+		oldDocumentRequestDuringGoto: {
 			json: timelineEnvelope([], { has_next_page: false }),
 			status: 200,
 		},
@@ -581,10 +639,9 @@ test("fetchAllPosts: fallback scroll acquires the initial response after legacy 
 			postsScript: [
 				null,
 				{
-					json: timelineEnvelope(
-						[{ node: { id: "fallback-post" } }],
-						{ has_next_page: false },
-					),
+					json: timelineEnvelope([{ node: { id: "fallback-post" } }], {
+						has_next_page: false,
+					}),
 					status: 200,
 				},
 			],

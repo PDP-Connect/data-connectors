@@ -143,6 +143,14 @@ function makeFakePage(options: {
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
 	const responseListeners = new Set<(response: unknown) => void>();
 	const requestListeners = new Set<(request: unknown) => void>();
+	const navigationListeners = new Set<(frame: unknown) => void>();
+	let frameUrl = "https://www.instagram.com/testuser/";
+	let currentNavigationRequest: unknown = null;
+	let page: Page;
+	const mainFrame = {
+		page: () => page,
+		url: () => frameUrl,
+	};
 	let nextPostsCursor: string | null = null;
 	const resolveReadiness = (ready: boolean): Promise<unknown> =>
 		ready
@@ -195,10 +203,10 @@ function makeFakePage(options: {
 			...(cursor ? { after: cursor } : {}),
 		};
 		const request = {
-			frame: () => ({
-				page: () =>
-					scripted.fromCurrentPage === false ? ({} as Page) : page,
-			}),
+			frame: () =>
+				scripted.fromCurrentPage === false
+					? { page: () => ({}) as Page, url: () => frameUrl }
+					: mainFrame,
 			headers: () => ({ "x-fb-friendly-name": operationName }),
 			method: () => "POST",
 			postData: () =>
@@ -219,16 +227,21 @@ function makeFakePage(options: {
 			next(null);
 			return;
 		}
-		const connection = (scripted.json as {
-			data?: { xdt_api__v1__feed__user_timeline_graphql_connection?: {
+		const connection = (
+			scripted.json as {
+				data?: {
+					xdt_api__v1__feed__user_timeline_graphql_connection?: {
 				page_info?: { end_cursor?: string | null };
-			} };
-		})?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+					};
+				};
+			}
+		)?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
 		nextPostsCursor = connection?.page_info?.end_cursor ?? null;
 		next(response);
 	};
 
-	const page = {
+	page = {
+		mainFrame: () => mainFrame,
 		url: () =>
 			options.challengePage
 				? "https://www.instagram.com/challenge/"
@@ -240,25 +253,45 @@ function makeFakePage(options: {
 			) {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
+			frameUrl = url ?? "https://www.instagram.com/testuser/";
+			currentNavigationRequest = {
+				frame: () => mainFrame,
+				isNavigationRequest: () => true,
+				redirectedFrom: () => null,
+				url: () => frameUrl,
+			};
+			for (const listener of requestListeners) listener(currentNavigationRequest);
+			for (const listener of responseListeners) {
+				listener({
+					request: () => currentNavigationRequest,
+					status: () => 200,
+					url: () => frameUrl,
+				});
+			}
+			for (const listener of navigationListeners) listener(mainFrame);
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
 		off: (
-			event: "request" | "response",
+			event: "request" | "response" | "framenavigated",
 			listener: (value: unknown) => void,
 		): void => {
 			if (event === "response") {
 				responseListeners.delete(listener as (response: unknown) => void);
+			} else if (event === "framenavigated") {
+				navigationListeners.delete(listener);
 			} else {
 				requestListeners.delete(listener);
 			}
 		},
 		on: (
-			event: "request" | "response",
+			event: "request" | "response" | "framenavigated",
 			listener: (value: unknown) => void,
 		): void => {
 			if (event === "response") {
 				responseListeners.add(listener as (response: unknown) => void);
+			} else if (event === "framenavigated") {
+				navigationListeners.add(listener);
 			} else {
 				requestListeners.add(listener);
 			}
@@ -1341,6 +1374,7 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						has_more: true,
 						next_max_id: "page2",
 						users: [{ pk: "f1", username: "followed1" }],
 					},
@@ -1348,6 +1382,7 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 				},
 				{
 					json: {
+						has_more: false,
 						next_max_id: null,
 						users: [{ pk: "f2", username: "followed2" }],
 					},
@@ -1393,6 +1428,7 @@ test("collectAllStreams: following accepts the record builder's id fallback when
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						has_more: false,
 						next_max_id: null,
 						users: [{ id: "", pk: "fallback-id", username: "followed1" }],
 					},
@@ -1425,6 +1461,7 @@ test("collectAllStreams: following hitting the page ceiling reports a stream fai
 	fetchScript["/api/v1/friendships/u1/following/"] = [
 		{
 			json: {
+				has_more: true,
 				next_max_id: "always-more",
 				users: [{ pk: "f1", username: "followed1" }],
 			},
@@ -1616,6 +1653,7 @@ test("collectAllStreams: an HTTP 503 on a later following page emits earlier pag
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						has_more: true,
 						next_max_id: "page2",
 						users: [{ pk: "f1", username: "followed1" }],
 					},
@@ -1656,6 +1694,7 @@ test("collectAllStreams: a browser error on a later following page keeps earlier
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						has_more: true,
 						next_max_id: "page2",
 						users: [{ pk: "f1", username: "followed1" }],
 					},
