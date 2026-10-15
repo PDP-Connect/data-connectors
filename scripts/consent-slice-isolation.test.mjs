@@ -36,6 +36,14 @@ const stream = (field) => ({
   schema: { properties: { [field]: { type: "string", format: "date-time" } } },
 });
 
+const RUNTIME = {
+  sliced:
+    "import { CONSENT_BOUND_CONNECTOR, CONSENT_TIME_FIELDS } from './generated/consent-time-fields.generated.ts';\nexport const table = CONSENT_TIME_FIELDS;\nexport const bound = CONSENT_BOUND_CONNECTOR;\n",
+  legacy:
+    "import { CONSENT_TIME_FIELDS } from './generated/consent-time-fields.generated.ts';\nexport const table = CONSENT_TIME_FIELDS;\n",
+};
+const BOUND_EXPORT = /^export const CONSENT_BOUND_CONNECTOR.*\n\n/m;
+
 function makeRepo({ layout = "sliced" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "consent-slice-isolation-"));
   const git = (...args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
@@ -66,7 +74,9 @@ function makeRepo({ layout = "sliced" } = {}) {
       name,
       JSON.parse(readFileSync(join(dir, `connectors/${name}/manifest.json`), "utf8")),
     ]);
-    write(AGGREGATE, renderAggregate(manifests));
+    // A pre-slice aggregate has no bound-identity export.
+    const aggregate = renderAggregate(manifests);
+    write(AGGREGATE, layout === "sliced" ? aggregate : aggregate.replace(BOUND_EXPORT, ""));
     if (layout !== "sliced") return;
     for (const [name, manifest] of manifests) write(slicePath(name), renderSlice(name, manifest));
   }
@@ -90,15 +100,14 @@ function makeRepo({ layout = "sliced" } = {}) {
     "vendor/pdpp-reference-contract/source.ts": "reference contract\n",
     "packages/polyfill-connectors/package.json": "{}\n",
     "packages/polyfill-connectors/package-lock.json": "{}\n",
-    "packages/polyfill-connectors/src/runtime.ts":
-      "import { CONSENT_TIME_FIELDS } from './generated/consent-time-fields.generated.ts';\nexport const table = CONSENT_TIME_FIELDS;\n",
+    "packages/polyfill-connectors/src/connector-runtime.ts": RUNTIME[layout],
     "scripts/connector-publish-allowlist.mjs": `export const CONNECTOR_PUBLISH_INVENTORY = ${JSON.stringify(
       CONNECTORS.map((name) => ({ manifest: name, connectorKey: name, exclusionReason: null })),
     )};\n`,
     // PageShim: the runtime shared by every bundle, and gamma's entry.
     "scripts/pageshim/attach-to-artifact.mjs": "attach\n",
     "scripts/pageshim/build.mjs": "build\n",
-    "scripts/pageshim/runtime.ts": "export * from '../../packages/polyfill-connectors/src/runtime.ts';\n",
+    "scripts/pageshim/runtime.ts": "export * from '../../packages/polyfill-connectors/src/connector-runtime.ts';\n",
     "scripts/pageshim/shims/anthropic-export.ts": "shim\n",
     "scripts/pageshim/shims/buffer.js": "shim\n",
     "scripts/pageshim/shims/path.js": "shim\n",
@@ -109,7 +118,7 @@ function makeRepo({ layout = "sliced" } = {}) {
   for (const name of ["alpha", "beta"]) {
     write(
       `connectors/${name}/index.ts`,
-      "import { table } from '../../packages/polyfill-connectors/src/runtime.ts';\nexport { table };\n",
+      "import { table } from '../../packages/polyfill-connectors/src/connector-runtime.ts';\nexport { table };\n",
     );
   }
   for (const name of ["gamma", "delta"]) write(`connectors/${name}/index.ts`, `export const ${name} = true;\n`);
@@ -307,6 +316,58 @@ test("a tree whose builder imports the resolution policy but lacks the policy fi
     for (const name of CONNECTORS) repo.remove(slicePath(name));
     const commit = repo.commit("only the builder import remains");
     await assert.rejects(repo.hash(commit, "alpha"), /slice layout|consent-time-field/i);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+// Residue of the slice layout that is not the policy file, the renderer or a
+// slice. Each variant restores the old builder wiring and removes the policy
+// file, the renderer and every slice, then leaves exactly one marker behind.
+const OLD_BUILDER = "builder\n";
+const RENDERER_IMPORT_BUILDER =
+  "import { renderSlice } from '../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs';\nbuilder\n";
+const BOUND_AGGREGATE_EXPORT =
+  "export const CONSENT_BOUND_CONNECTOR: string | null = null;\n\n";
+
+function stripToLegacy(repo) {
+  repo.remove(RESOLUTION);
+  repo.remove(RENDERER);
+  for (const name of CONNECTORS) repo.remove(slicePath(name));
+  repo.write("scripts/build-connector-oci-artifact.mjs", OLD_BUILDER);
+  repo.write("scripts/pageshim/build.mjs", "build\n");
+  repo.write("packages/polyfill-connectors/src/connector-runtime.ts", RUNTIME.legacy);
+  repo.write(AGGREGATE, readFileSync(join(repo.dir, AGGREGATE), "utf8").replace(BOUND_EXPORT, ""));
+}
+
+const RESIDUES = {
+  "the runtime's bound-identity import": (repo) =>
+    repo.write("packages/polyfill-connectors/src/connector-runtime.ts", RUNTIME.sliced),
+  "the aggregate's bound-identity export": (repo) => {
+    const text = readFileSync(join(repo.dir, AGGREGATE), "utf8");
+    repo.write(AGGREGATE, text.replace("export const CONSENT_TIME_FIELDS", `${BOUND_AGGREGATE_EXPORT}export const CONSENT_TIME_FIELDS`));
+  },
+  "a builder's renderer import": (repo) =>
+    repo.write("scripts/build-connector-oci-artifact.mjs", RENDERER_IMPORT_BUILDER),
+};
+for (const [residue, restore] of Object.entries(RESIDUES)) {
+  test(`a tree with only ${residue} left is rejected, not hashed as legacy`, async () => {
+    const repo = makeRepo();
+    try {
+      stripToLegacy(repo);
+      restore(repo);
+      await assert.rejects(repo.hash(repo.commit(`only ${residue}`), "alpha"), /slice layout/i);
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a tree stripped of the whole slice layout hashes as legacy", async () => {
+  const repo = makeRepo();
+  try {
+    stripToLegacy(repo);
+    await assert.doesNotReject(repo.hash(repo.commit("coherent legacy"), "alpha"));
   } finally {
     rmSync(repo.dir, { recursive: true, force: true });
   }

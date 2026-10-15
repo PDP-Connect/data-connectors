@@ -57,6 +57,7 @@ const PAGE_SHIM_SHARED_INPUTS = [
 // so the PageShim builder's import of it is not an artifact input. The slice
 // bytes are what an artifact carries.
 const CONSENT_SLICE_DIRECTORY = "packages/polyfill-connectors/src/generated/consent-time-fields";
+const CONSENT_RUNTIME = "packages/polyfill-connectors/src/connector-runtime.ts";
 const CONSENT_BUILDERS = ["scripts/build-connector-oci-artifact.mjs", "scripts/pageshim/build.mjs"];
 const CONSENT_RENDERER = "packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 const STATIC_LOCAL_IMPORT = /^\s*(?:import|export)\s+(?!type\b)(?:[^\n]*\n)*?[^\n]*?\sfrom\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
@@ -195,7 +196,8 @@ async function consentRendererAtCommit(commit, options) {
 /**
  * A tree is either coherent legacy (no part of the slice layout) or the slice
  * layout. Without the resolution policy file, any other layout part (the
- * renderer, a slice, or a builder that imports the policy) means a broken
+ * renderer, a slice, the bound identity in the runtime or aggregate, or a
+ * builder that imports the policy or renderer) means a broken
  * checkout; hashing it as legacy would bundle the aggregate where the builders
  * cannot, so it is refused.
  */
@@ -208,8 +210,16 @@ function rejectPartialSliceLayout(commit, options) {
   }).trim();
   if (slices) found.push(`${slices.split("\n").length} file(s) under ${CONSENT_SLICE_DIRECTORY}`);
   for (const builder of CONSENT_BUILDERS) {
-    const source = readFileAtCommit(commit, builder, options);
-    if (source !== null && source.toString().includes("consent-slice-resolution")) found.push(`${builder} imports the policy`);
+    const source = readFileAtCommit(commit, builder, options)?.toString() ?? "";
+    if (source.includes("consent-slice-resolution") || source.includes("consent-time-fields-render")) {
+      found.push(`${builder} imports the slice policy or renderer`);
+    }
+  }
+  // The runtime and the aggregate carry the bound identity only in the slice layout.
+  for (const path of [CONSENT_RUNTIME, CONSENT_AGGREGATE]) {
+    if (readFileAtCommit(commit, path, options)?.toString().includes("CONSENT_BOUND_CONNECTOR")) {
+      found.push(`${path} carries the bound identity`);
+    }
   }
   if (found.length) {
     throw new ArtifactInputError(
