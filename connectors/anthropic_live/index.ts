@@ -57,6 +57,7 @@
 
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
+import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
 	buildFullScanCoverageMessage,
@@ -77,7 +78,9 @@ import {
 	buildConversationRecord,
 	buildMessageRecord,
 	buildUsageLimitRecords,
+	omissionsOf,
 } from "./parsers.ts";
+import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
 	RawConversation,
@@ -934,6 +937,12 @@ export async function runConversationStreams(
 	});
 	let changed: ListedConversation[] = [];
 	let batch: ListedConversation[] = [];
+	// Text fields left absent for passing the inline cap, counted for one
+	// aggregate disclosure (no ids, no titles).
+	const omitted = {
+		conversationFields: 0,
+		messageText: 0,
+	};
 	try {
 		const listedItems = await listConversations(ctx, orgPath, listFloor(plans));
 		changed = listedItems
@@ -989,6 +998,7 @@ export async function runConversationStreams(
 					detail ? detail.messages.length : null,
 				);
 				if (record && inWindow(conversations, record)) {
+					omitted.conversationFields += omissionsOf(record).exceedsInlineCap;
 					await ctx.emitRecord(CONVERSATIONS_STREAM, record);
 				}
 			}
@@ -1003,6 +1013,7 @@ export async function runConversationStreams(
 					}
 					const record = buildMessageRecord(message.raw, item.id, detail.model);
 					if (record && inWindow(messages, record)) {
+						omitted.messageText += omissionsOf(record).noBlobStore;
 						await ctx.emitRecord(MESSAGES_STREAM, record);
 					}
 				}
@@ -1026,6 +1037,33 @@ export async function runConversationStreams(
 			});
 		}
 		return;
+	} finally {
+		for (const [stream, count, reason, what] of [
+			[
+				CONVERSATIONS_STREAM,
+				omitted.conversationFields,
+				"exceeds_inline_cap",
+				"had a value too large to store; the record was imported without that value",
+			],
+			[
+				MESSAGES_STREAM,
+				omitted.messageText,
+				"host_blob_store_unavailable",
+				"had text too large for this connector to store; the record was imported without the text",
+			],
+		] as const) {
+			if (count === 0) continue;
+			connectorDiagnostic("anthropic_live", "items_too_large", {
+				stream,
+				count,
+				reason,
+				max_units: INLINE_TEXT_MAX_UNITS,
+			});
+			await ctx.progress(
+				`${count} ${count === 1 ? "item" : "items"} of ${stream} ${what}`,
+				{ stream, count },
+			);
+		}
 	}
 
 	if (changed.length > batch.length) {
