@@ -23,6 +23,7 @@ import {
 	readFileSync,
 	rmdirSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +65,7 @@ const lastStatePathFor = (connector: string): string =>
  *  not, and for any test that fails before reaching its own cleanup. */
 const RUN_DIR_CONNECTORS = [
 	"connector-dev-cli-fixture",
+	"connector-dev-name-eval-fixture",
 	"connector-dev-credentials-fixture",
 	"connector-dev-done-then-exit1-fixture",
 	"connector-dev-env-echo-fixture",
@@ -171,6 +173,114 @@ test("connector-dev CLI: succeeding fixture streams RECORD/PROGRESS/STATE lines,
 		assert.ok(summary.duration_ms >= 0);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev runs nested named page.evaluate functions without __name globals", () => {
+	const fixtureDir = mkdtempSync(
+		join(PACKAGE_ROOT, "bin", ".connector-dev-name-eval-"),
+	);
+	const summaryPath = join(fixtureDir, "summary.json");
+	const entrypoint = join(fixtureDir, "connector.ts");
+	const importedModule = join(fixtureDir, "nested-evaluate.ts");
+	const start = `${JSON.stringify({
+		type: "START",
+		scope: { streams: [{ name: "items" }] },
+	})}\n`;
+	try {
+		writeFileSync(
+			importedModule,
+			`export async function evaluateFromImportedModule(page: { evaluate: (callback: () => unknown) => Promise<unknown> }) {
+	return await page.evaluate(() => {
+		function nestedImportedFunction() {
+			return Number(document.querySelector("#answer")?.textContent) + 1;
+		}
+		return { answer: nestedImportedFunction(), helperAbsent: !Object.hasOwn(globalThis, "__name") };
+	});
+}
+`,
+		);
+		writeFileSync(
+			entrypoint,
+			`import assert from "node:assert/strict";
+import { chromium } from "patchright";
+import { runConnector } from "../../src/connector-runtime.ts";
+import { evaluateFromImportedModule } from "./nested-evaluate.ts";
+
+runConnector({
+	name: "connector-dev-name-eval-fixture",
+	validateRecord: (_stream, data) => ({ ok: true, data }),
+	async collect({ emit, emitRecord }) {
+		const browser = await chromium.launch({ headless: true });
+		const context = await browser.newContext();
+		try {
+			await context.route("**/*", (route) => route.abort());
+			const page = await context.newPage();
+			await page.goto("about:blank");
+			await page.setContent('<p id="answer">41</p>');
+			const direct = await page.evaluate(() => {
+				function nestedDirectFunction() {
+					return Number(document.querySelector("#answer")?.textContent) + 1;
+				}
+				return { answer: nestedDirectFunction(), helperAbsent: !Object.hasOwn(globalThis, "__name") };
+			});
+			const imported = await evaluateFromImportedModule(page);
+			assert.deepEqual(direct, { answer: 42, helperAbsent: true });
+			assert.deepEqual(imported, { answer: 42, helperAbsent: true });
+			await emitRecord("items", { id: "nested-evaluate-succeeded" });
+			await emit({ type: "STATE", stream: "items", cursor: { complete: true } });
+		} finally {
+			await context.close();
+			await browser.close();
+		}
+	},
+});
+`,
+		);
+		const result = runCli([
+			"connector-dev-name-eval-fixture",
+			"--entrypoint",
+			entrypoint,
+			"--streams",
+			"items",
+			"--no-capture",
+			"--summary-out",
+			summaryPath,
+		]);
+
+		assert.equal(result.code, 0, `expected exit 0; stderr=${result.stderr}`);
+		assert.match(result.stdout, /RECORD\s+\[items] 1 record\(s\) so far/);
+		assert.match(result.stdout, /STATUS succeeded/);
+		const summary = JSON.parse(readFileSync(summaryPath, "utf8")) as RunSummary;
+		assert.equal(summary.streams.items?.records, 1);
+		assert.equal(summary.streams.items?.state_emitted, true);
+		assert.equal(summary.done.status, "succeeded");
+
+		const oldRunner = spawnSync(
+			process.execPath,
+			["--import", "tsx", entrypoint],
+			{
+				cwd: PACKAGE_ROOT,
+				env: {
+					...process.env,
+					PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+				},
+				encoding: "utf8",
+				input: start,
+				timeout: 30_000,
+			},
+		);
+		assert.match(
+			`${oldRunner.stdout}\n${oldRunner.stderr}`,
+			/ReferenceError: __name is not defined/,
+		);
+	} finally {
+		rmSync(fixtureDir, { recursive: true, force: true });
+		rmSync(join(PACKAGE_ROOT, "runs", "connector-dev-name-eval-fixture"), {
+			force: true,
+			recursive: true,
+		});
 	}
 });
 
