@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.25)
+ * PDPP LinkedIn Connector (v0.3.26)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -85,8 +85,8 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import {
 	buildConnectionRecord,
-	buildEducationRecords,
-	buildExperienceRecords,
+	buildEducationRecordsWithOmissions,
+	buildExperienceRecordsWithOmissions,
 	buildLanguageRecordsWithOmissions,
 	buildProfileRecord,
 	buildSkillRecordsWithOmissions,
@@ -191,6 +191,92 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+type DashProfileSource = "decoration" | "basic" | "unavailable";
+
+interface DashProfileResult {
+	profile: VoyagerProfileElement | null;
+	source: DashProfileSource;
+}
+
+function hasRecognizedProfileField(profile: Record<string, unknown>): boolean {
+	return [
+		"firstName",
+		"geoLocation",
+		"headline",
+		"industry",
+		"lastName",
+		"location",
+		"profileEducations",
+		"profileLanguages",
+		"profilePicture",
+		"profilePositionGroups",
+		"profileSkills",
+		"publicIdentifier",
+		"summary",
+	].some((key) => Object.hasOwn(profile, key));
+}
+
+function unavailableProfileFields(
+	profile: VoyagerProfileElement | null,
+	source: DashProfileSource,
+	connectionCount: number | null,
+): string[] {
+	const unavailable: string[] = [];
+	const raw = profile as unknown as Record<string, unknown> | null;
+	if (source !== "decoration" || !raw) {
+		unavailable.push(
+			"current_company",
+			"current_position_title",
+			"industry",
+			"location",
+			"summary",
+		);
+	} else {
+		const groups = raw.profilePositionGroups;
+		const groupsReadable =
+			isObjectRecord(groups) &&
+			Array.isArray(groups.elements) &&
+			groups.elements.every((group) => {
+				if (!isObjectRecord(group)) return false;
+				if (!Object.hasOwn(group, "profilePositionInPositionGroup")) return true;
+				const nested = group.profilePositionInPositionGroup;
+				return (
+					isObjectRecord(nested) &&
+					Array.isArray(nested.elements) &&
+					nested.elements.every(isObjectRecord)
+				);
+			});
+		if (!groupsReadable) {
+			unavailable.push("current_company", "current_position_title");
+		}
+
+		const industry = raw.industry;
+		if (
+			!Object.hasOwn(raw, "industry") ||
+			(industry !== null &&
+				(!isObjectRecord(industry) ||
+					!(industry.name === null || typeof industry.name === "string")))
+		) {
+			unavailable.push("industry");
+		}
+
+		const locationIsReadable = ["location", "geoLocation"].some((key) => {
+			if (!Object.hasOwn(raw, key)) return false;
+			return raw[key] === null || isObjectRecord(raw[key]);
+		});
+		if (!locationIsReadable) unavailable.push("location");
+
+		if (
+			!Object.hasOwn(raw, "summary") ||
+			!(raw.summary === null || typeof raw.summary === "string")
+		) {
+			unavailable.push("summary");
+		}
+	}
+	if (connectionCount === null) unavailable.push("connection_count");
+	return unavailable;
+}
+
 /** Session liveness: an authenticated `/voyager/api/me` call succeeds. Used
  *  both as the runtime's `probeSession` and as collect()'s own pre-flight —
  *  a session can die between probe and collect on a long-running host. */
@@ -214,7 +300,7 @@ async function fetchDashProfile(
 	page: Page,
 	publicIdentifier: string,
 	capture?: CaptureSession | null,
-): Promise<VoyagerProfileElement | null> {
+): Promise<DashProfileResult> {
 	const publicIdStr = encodeURIComponent(publicIdentifier);
 	for (const decorationId of PROFILE_DECORATION_IDS) {
 		const result = await voyagerFetch<VoyagerDashProfilesResponse>(
@@ -223,14 +309,17 @@ async function fetchDashProfile(
 			capture,
 			`dash-profile-${decorationId.split("-").pop()}`,
 		);
-		if (
-			!isFetchError(result) &&
-			Array.isArray(result.elements) &&
-			result.elements.length > 0
-		) {
-			const profile = result.elements[0];
-			if (isObjectRecord(profile)) {
-				return profile;
+		if (!isFetchError(result) && Array.isArray(result.elements)) {
+			for (const candidate of result.elements) {
+				if (
+					isObjectRecord(candidate) &&
+					hasRecognizedProfileField(candidate)
+				) {
+					return {
+						profile: candidate as VoyagerProfileElement,
+						source: "decoration",
+					};
+				}
 			}
 		}
 		await politeDelay(300);
@@ -241,25 +330,25 @@ async function fetchDashProfile(
 		capture,
 		"dash-profile-basic",
 	);
-	if (
-		!isFetchError(basic) &&
-		Array.isArray(basic.elements) &&
-		basic.elements.length > 0
-	) {
-		const profile = basic.elements[0];
-		return isObjectRecord(profile) ? profile : null;
+	if (!isFetchError(basic) && Array.isArray(basic.elements)) {
+		const profile = basic.elements.find(isObjectRecord);
+		if (profile) {
+			return { profile: profile as VoyagerProfileElement, source: "basic" };
+		}
 	}
-	return null;
+	return { profile: null, source: "unavailable" };
 }
 
 interface ConnectionsResult {
 	elements: VoyagerConnectionElement[];
 	error?: string;
 	observed: number;
+	missingUrnCount: number;
 	terminationReason:
 		| "verified_end"
 		| "page_error"
 		| "malformed_page"
+		| "repeated_page"
 		| "page_budget";
 	total: number | null;
 }
@@ -275,14 +364,19 @@ async function fetchConnections(
 	capture?: CaptureSession | null,
 ): Promise<ConnectionsResult> {
 	const elements: VoyagerConnectionElement[] = [];
+	const seenUrns = new Set<string>();
+	const seenPageFingerprints = new Set<string>();
 	let start = 0;
+	let observed = 0;
+	let missingUrnCount = 0;
 	let total: number | null = null;
 	const finish = (
 		terminationReason: ConnectionsResult["terminationReason"],
 		error?: string,
 	): ConnectionsResult => ({
 		elements,
-		observed: elements.length,
+		observed,
+		missingUrnCount,
 		terminationReason,
 		total,
 		...(error ? { error } : {}),
@@ -298,11 +392,34 @@ async function fetchConnections(
 		if (isFetchError(result)) {
 			return finish("page_error", result._error);
 		}
-		const reportedTotal = result.paging?.total;
+		const paging = result.paging;
+		if (paging !== undefined && !isObjectRecord(paging)) {
+			return finish("malformed_page");
+		}
+		const reportedStart = paging?.start;
+		if (
+			reportedStart !== undefined &&
+			(!Number.isSafeInteger(reportedStart) || reportedStart !== start)
+		) {
+			return finish("malformed_page");
+		}
+		const reportedCount = paging?.count;
+		if (
+			reportedCount !== undefined &&
+			(!Number.isSafeInteger(reportedCount) ||
+				reportedCount < 0 ||
+				reportedCount > CONNECTIONS_PAGE_SIZE)
+		) {
+			return finish("malformed_page");
+		}
+		const reportedTotal = paging?.total;
 		if (
 			reportedTotal !== undefined &&
 			(!Number.isSafeInteger(reportedTotal) || reportedTotal < 0)
 		) {
+			return finish("malformed_page");
+		}
+		if (total !== null && reportedTotal !== undefined && reportedTotal !== total) {
 			return finish("malformed_page");
 		}
 		total = reportedTotal ?? total;
@@ -310,10 +427,17 @@ async function fetchConnections(
 			return finish("malformed_page");
 		}
 		const page_elements = result.elements;
-		if (page_elements.some((element) => !isObjectRecord(element))) {
+		observed += page_elements.length;
+		if (
+			page_elements.length > CONNECTIONS_PAGE_SIZE ||
+			page_elements.some((element) => !isObjectRecord(element))
+		) {
 			return finish("malformed_page");
 		}
-		if (total !== null && elements.length + page_elements.length > total) {
+		if (
+			reportedCount !== undefined &&
+			page_elements.length > reportedCount
+		) {
 			return finish("malformed_page");
 		}
 		if (page_elements.length === 0) {
@@ -321,7 +445,36 @@ async function fetchConnections(
 				? finish("verified_end")
 				: finish("malformed_page");
 		}
-		elements.push(...page_elements);
+		const fingerprint = JSON.stringify(
+			page_elements.map((element) => [element.connectedMember, element.createdAt]),
+		);
+		if (seenPageFingerprints.has(fingerprint)) {
+			return finish("repeated_page");
+		}
+		seenPageFingerprints.add(fingerprint);
+		let duplicateMember = false;
+		let missingUrn = false;
+		for (const element of page_elements) {
+			const urn = element.connectedMember;
+			if (typeof urn !== "string" || urn.trim().length === 0) {
+				missingUrnCount += 1;
+				missingUrn = true;
+				continue;
+			}
+			if (seenUrns.has(urn)) {
+				duplicateMember = true;
+				continue;
+			}
+			seenUrns.add(urn);
+			elements.push(element);
+		}
+		if (duplicateMember) {
+			return finish("repeated_page");
+		}
+		if (missingUrn) return finish("malformed_page");
+		if (total !== null && elements.length > total) {
+			return finish("malformed_page");
+		}
 		await progress("Fetched LinkedIn connections page", {
 			count: elements.length,
 			stream: "connections",
@@ -350,17 +503,60 @@ async function resolveConnectionProfiles(
 	memberUrns: string[],
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
-): Promise<Map<string, VoyagerResolvedProfile>> {
-	const resolved = new Map<string, VoyagerResolvedProfile>();
+	): Promise<ConnectionProfileResolution> {
+	const resolved = new Map<string, ResolvedConnectionProfile>();
+	const malformedUrns = new Set<string>();
 	let consecutiveFailures = 0;
 	let batchIndex = 0;
 	let singletonIndex = 0;
+	const accept = (urn: string, value: unknown, requested: Set<string>) => {
+		if (!requested.has(urn) || !isObjectRecord(value)) return;
+		const profileFields = [
+			"firstName",
+			"headline",
+			"lastName",
+			"occupation",
+			"publicIdentifier",
+		] as const;
+		const presentFields = profileFields.filter((field) =>
+			Object.hasOwn(value, field),
+		);
+		const malformed = presentFields.some(
+			(field) => typeof value[field] !== "string",
+		);
+		if (malformed) malformedUrns.add(urn);
+		if (presentFields.length === 0) return;
+		const profile = value as VoyagerResolvedProfile;
+		const prior = resolved.get(urn);
+		if (!prior || (!prior.complete && !malformed)) {
+			resolved.set(urn, {
+				profile,
+				complete: !malformed,
+			});
+		}
+	};
+	const acceptBatch = (
+		value: VoyagerProfilesByIdResponse,
+		requested: Set<string>,
+	) => {
+		if (isObjectRecord(value.results)) {
+			for (const [urn, profile] of Object.entries(value.results)) {
+				accept(urn, profile, requested);
+			}
+		}
+		for (const profile of Array.isArray(value.elements) ? value.elements : []) {
+			if (!isObjectRecord(profile)) continue;
+			const urn = profile.entityUrn ?? profile.dashEntityUrn;
+			if (typeof urn === "string") accept(urn, profile, requested);
+		}
+	};
 
 	for (let i = 0; i < memberUrns.length; i += RESOLVE_BATCH_SIZE) {
 		if (consecutiveFailures >= 5) {
 			break;
 		}
 		const batch = memberUrns.slice(i, i + RESOLVE_BATCH_SIZE);
+		const requested = new Set(batch);
 		const urnList = batch.map((u) => encodeURIComponent(u)).join(",");
 		const result = await voyagerFetch<VoyagerProfilesByIdResponse>(
 			page,
@@ -390,31 +586,7 @@ async function resolveConnectionProfiles(
 						(isObjectRecord(singleton.results) ||
 							Array.isArray(singleton.elements))
 					) {
-						if (isObjectRecord(singleton.results)) {
-							for (const [key, profile] of Object.entries(singleton.results)) {
-								if (
-									isObjectRecord(profile) &&
-									(profile.firstName || profile.publicIdentifier)
-								) {
-									resolved.set(key, profile);
-								}
-							}
-						}
-						for (const profile of Array.isArray(singleton.elements)
-							? singleton.elements
-							: []) {
-							if (!isObjectRecord(profile)) {
-								continue;
-							}
-							const urn = profile.entityUrn ?? profile.dashEntityUrn;
-							if (
-								typeof urn === "string" &&
-								urn.length > 0 &&
-								(profile.firstName || profile.publicIdentifier)
-							) {
-								resolved.set(urn, profile);
-							}
-						}
+						acceptBatch(singleton, new Set([urn]));
 					}
 					await politeDelay(PAGE_DELAY_MS);
 				}
@@ -423,31 +595,23 @@ async function resolveConnectionProfiles(
 			continue;
 		}
 		consecutiveFailures = 0;
-
-		if (isObjectRecord(result.results)) {
-			for (const [key, profile] of Object.entries(result.results)) {
-				if (
-					isObjectRecord(profile) &&
-					(profile.firstName || profile.publicIdentifier)
-				) {
-					resolved.set(key, profile);
-				}
+		acceptBatch(result, requested);
+		for (const urn of batch) {
+			if (resolved.get(urn)?.complete) continue;
+			const singleton = await voyagerFetch<VoyagerProfilesByIdResponse>(
+				page,
+				`/voyager/api/identity/dash/profiles?ids=List(${encodeURIComponent(urn)})`,
+				capture,
+				`resolve-single-${String(singletonIndex).padStart(3, "0")}`,
+			);
+			singletonIndex += 1;
+			if (
+				!isFetchError(singleton) &&
+				(isObjectRecord(singleton.results) || Array.isArray(singleton.elements))
+			) {
+				acceptBatch(singleton, new Set([urn]));
 			}
-		}
-		if (Array.isArray(result.elements)) {
-			for (const profile of result.elements) {
-				if (!isObjectRecord(profile)) {
-					continue;
-				}
-				const urn = profile.entityUrn ?? profile.dashEntityUrn;
-				if (
-					typeof urn === "string" &&
-					urn.length > 0 &&
-					(profile.firstName || profile.publicIdentifier)
-				) {
-					resolved.set(urn, profile);
-				}
-			}
+			await politeDelay(PAGE_DELAY_MS);
 		}
 
 		await progress("Resolved LinkedIn connection profiles", {
@@ -458,7 +622,17 @@ async function resolveConnectionProfiles(
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
-	return resolved;
+	return { profiles: resolved, malformedCount: malformedUrns.size };
+}
+
+interface ResolvedConnectionProfile {
+	profile: VoyagerResolvedProfile;
+	complete: boolean;
+}
+
+interface ConnectionProfileResolution {
+	profiles: Map<string, ResolvedConnectionProfile>;
+	malformedCount: number;
 }
 
 export async function hasLinkedInSessionCookie(
@@ -574,7 +748,10 @@ export async function collectLinkedIn(
 	const wantsLanguages = requested.has("languages");
 	const wantsConnections = requested.has("connections");
 
-	let dashProfile: VoyagerProfileElement | null = null;
+	let dashProfileResult: DashProfileResult = {
+		profile: null,
+		source: "unavailable",
+	};
 	if (
 		wantsProfileFields ||
 		wantsExperience ||
@@ -582,8 +759,9 @@ export async function collectLinkedIn(
 		wantsSkills ||
 		wantsLanguages
 	) {
-		dashProfile = await fetchDashProfile(page, publicIdentifier, capture);
+		dashProfileResult = await fetchDashProfile(page, publicIdentifier, capture);
 	}
+	const dashProfile = dashProfileResult.profile;
 
 	// `profile.connection_count` is only available from the connections
 	// listing's `paging.total` (legacy: `profileResult.connections =
@@ -607,22 +785,22 @@ export async function collectLinkedIn(
 			: connectionsResult.elements.length;
 
 	if (wantsProfileFields) {
-		if (!dashProfile) {
+		const unavailableFields = unavailableProfileFields(
+			dashProfile,
+			dashProfileResult.source,
+			connectionCount,
+		);
+		if (unavailableFields.length > 0) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "profile",
-				reason: "linkedin_dash_profile_unavailable",
+				reason:
+					dashProfileResult.source === "unavailable"
+						? "linkedin_dash_profile_unavailable"
+						: "linkedin_profile_fields_unavailable",
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
-				message: "Dash profile unavailable; /me fields were retained",
-				diagnostics: {
-					unavailable_fields: [
-						"current_company",
-						"current_position_title",
-						"industry",
-						"location",
-						"summary",
-					],
-				},
+				message: "Some LinkedIn profile fields were not readable this run",
+				diagnostics: { unavailable_fields: unavailableFields },
 			});
 		}
 		const record = buildProfileRecord(
@@ -638,7 +816,7 @@ export async function collectLinkedIn(
 		} else {
 			await reportInvalidRecords("profile", 1, progress);
 		}
-		if (dashProfile && profileValid) {
+		if (unavailableFields.length === 0 && profileValid) {
 			await emit(buildFullScanCoverageMessage("profile", 1));
 		}
 	}
@@ -646,7 +824,9 @@ export async function collectLinkedIn(
 	if (wantsExperience) {
 		const section = dashProfile?.profilePositionGroups?.elements;
 		if (Array.isArray(section)) {
-			const records = buildExperienceRecords(dashProfile ?? {});
+			const { considered, covered, omissions, records } =
+				buildExperienceRecordsWithOmissions(dashProfile ?? {});
+			await reportOmissions("experience", omissions, progress);
 			const validRecords = records.filter(
 				(record) => validateRecord("experience", record).ok,
 			);
@@ -659,7 +839,11 @@ export async function collectLinkedIn(
 				await emitRecord("experience", record);
 			}
 			await emit(
-				coverageMessage("experience", records.length, validRecords.length),
+				coverageMessage(
+					"experience",
+					considered,
+					Math.min(covered, validRecords.length),
+				),
 			);
 		} else {
 			await emitUnavailableSection("experience", emit);
@@ -669,7 +853,9 @@ export async function collectLinkedIn(
 	if (wantsEducation) {
 		const section = dashProfile?.profileEducations?.elements;
 		if (Array.isArray(section)) {
-			const records = buildEducationRecords(dashProfile ?? {});
+			const { considered, covered, omissions, records } =
+				buildEducationRecordsWithOmissions(dashProfile ?? {});
+			await reportOmissions("education", omissions, progress);
 			const validRecords = records.filter(
 				(record) => validateRecord("education", record).ok,
 			);
@@ -682,7 +868,11 @@ export async function collectLinkedIn(
 				await emitRecord("education", record);
 			}
 			await emit(
-				coverageMessage("education", records.length, validRecords.length),
+				coverageMessage(
+					"education",
+					considered,
+					Math.min(covered, validRecords.length),
+				),
 			);
 		} else {
 			await emitUnavailableSection("education", emit);
@@ -749,7 +939,8 @@ export async function collectLinkedIn(
 
 	if (wantsConnections && connectionsResult) {
 		const { elements, terminationReason } = connectionsResult;
-		if (terminationReason !== "verified_end") {
+		const connectionsComplete = terminationReason === "verified_end";
+		if (!connectionsComplete) {
 			const pageBudget = terminationReason === "page_budget";
 			await emit({
 				type: "SKIP_RESULT",
@@ -771,30 +962,27 @@ export async function collectLinkedIn(
 					termination_reason: terminationReason,
 					observed_count: connectionsResult.observed,
 					total: connectionsResult.total,
+					missing_urn_count: connectionsResult.missingUrnCount,
 					...(connectionsResult.error
 						? { error: connectionsResult.error }
 						: {}),
 				},
 			});
-			return;
 		}
 		const memberUrns = elements
 			.map((e) => e.connectedMember)
 			.filter((u): u is string => typeof u === "string" && u.trim().length > 0);
-		const resolvedProfiles = await resolveConnectionProfiles(
+		const resolution = await resolveConnectionProfiles(
 			page,
 			memberUrns,
 			progress,
 			capture,
 		);
+		const resolvedProfiles = resolution.profiles;
 
-		const omittedWithoutUrn = elements.filter(
-			(element) =>
-				typeof element.connectedMember !== "string" ||
-				element.connectedMember.trim().length === 0,
-		).length;
+		const omittedWithoutUrn = connectionsResult.missingUrnCount;
 		const unresolved = memberUrns.filter(
-			(urn) => !resolvedProfiles.has(urn),
+			(urn) => !resolvedProfiles.get(urn)?.complete,
 		).length;
 		if (omittedWithoutUrn > 0) {
 			await progress(
@@ -815,6 +1003,27 @@ export async function collectLinkedIn(
 					total: memberUrns.length,
 				},
 			);
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "connections",
+				reason: "linkedin_connection_enrichment_incomplete",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				message: "Some LinkedIn connections could not be enriched this run",
+				diagnostics: {
+					unresolved_count: unresolved,
+					malformed_count: resolution.malformedCount,
+				},
+			});
+		}
+		if (resolution.malformedCount > 0) {
+			await progress(
+				`LinkedIn connections omitted malformed enrichment: malformed_enrichment=${resolution.malformedCount}`,
+				{
+					stream: "connections",
+					count: resolution.malformedCount,
+					total: memberUrns.length,
+				},
+			);
 		}
 
 		const builtRecords = elements.map((element) => ({
@@ -822,7 +1031,7 @@ export async function collectLinkedIn(
 			record: buildConnectionRecord(
 				element,
 				element.connectedMember
-					? resolvedProfiles.get(element.connectedMember)
+					? resolvedProfiles.get(element.connectedMember)?.profile
 					: undefined,
 			),
 		}));
@@ -846,12 +1055,14 @@ export async function collectLinkedIn(
 			await emitRecord("connections", record);
 			if (
 				element.connectedMember &&
-				resolvedProfiles.has(element.connectedMember)
+				resolvedProfiles.get(element.connectedMember)?.complete
 			) {
 				covered += 1;
 			}
 		}
-		await emit(coverageMessage("connections", elements.length, covered));
+		if (connectionsComplete) {
+			await emit(coverageMessage("connections", elements.length, covered));
+		}
 	}
 }
 

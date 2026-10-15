@@ -438,9 +438,11 @@
 			"connector_key": "linkedin",
 			"reason_display_messages": {
 				"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+				"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
 				"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
 				"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
 				"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
+				"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
 			}
 		}

@@ -502,6 +502,14 @@ test("collectLinkedIn: full run emits a validated record for every requested str
 	)?.data;
 	assert.equal(connectionRecord?.id, "urn:li:fsd_profile:conn-1");
 	assert.equal(connectionRecord?.full_name, "Jamie Lee");
+	assert.ok(
+		recording.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "connections",
+		),
+		"a verified end-of-list must authorize full connection inventory coverage",
+	);
 });
 
 test("collectLinkedIn: requesting only 'profile' still fetches connections for connection_count, without emitting connections records", async () => {
@@ -597,6 +605,106 @@ test("collectLinkedIn: dash failure keeps /me profile fields and reports unavail
 	);
 });
 
+test("collectLinkedIn: a basic empty dash profile cannot prove profile coverage", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) return { _error: "http_404" };
+		if (path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")) {
+			return { elements: [{}] };
+		}
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: [], paging: { total: 0 } };
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["profile"], recording, route));
+
+	const profile = recording.emitted.find((event) => event.stream === "profile");
+	assert.equal(profile?.data.full_name, "Anon Member");
+	assert.equal(profile?.data.headline, "Staff Engineer at Acme");
+	assert.equal(
+		recording.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+		),
+		false,
+	);
+	assert.ok(
+		skipResults(recording).some(
+			(skip) =>
+				skip.stream === "profile" &&
+				skip.reason === "linkedin_profile_fields_unavailable",
+		),
+	);
+});
+
+test("collectLinkedIn: an empty decoration does not block a later usable decoration", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	let decorationAttempts = 0;
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) {
+			decorationAttempts += 1;
+			return decorationAttempts === 1
+				? { elements: [{}] }
+				: {
+						elements: [
+							{ firstName: "Decoration", lastName: "Two" },
+						],
+					};
+		}
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: [], paging: { total: 0 } };
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["profile"], recording, route));
+
+	const profile = recording.emitted.find((event) => event.stream === "profile");
+	assert.equal(profile?.data.full_name, "Decoration Two");
+	assert.equal(decorationAttempts, 2);
+});
+
+test("collectLinkedIn: failed connection paging vetoes profile coverage", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) return DASH_PROFILE_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { _error: "http_503" };
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["profile"], recording, route));
+
+	const profile = recording.emitted.find((event) => event.stream === "profile");
+	assert.equal(profile?.data.connection_count, null);
+	assert.equal(
+		recording.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" && message.stream === "profile",
+		),
+		false,
+	);
+	assert.ok(
+		skipResults(recording).some(
+			(skip) => {
+				const fields = (
+					skip.diagnostics as unknown as
+						| { unavailable_fields?: unknown }
+						| undefined
+				)?.unavailable_fields;
+				return (
+					skip.stream === "profile" &&
+					Array.isArray(fields) &&
+					fields.includes("connection_count")
+				);
+			},
+		),
+	);
+});
+
 test("collectLinkedIn: malformed connections page withholds coverage and exact count", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const route = (path: string): unknown => {
@@ -621,7 +729,7 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 		recording.events.some(
 			(event) =>
 				event.kind === "message" &&
-				event.message.type === "DETAIL_COVERAGE" &&
+			event.message.type === "DETAIL_COVERAGE" &&
 				event.message.stream === "connections",
 		),
 		false,
@@ -635,7 +743,78 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 		termination_reason: "malformed_page",
 		observed_count: 0,
 		total: 99,
+		missing_urn_count: 0,
 	});
+});
+
+test("collectLinkedIn: repeated connection pages cannot prove a count or emit duplicate edges", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			const start = Number(
+				new URL(path, "https://www.linkedin.com").searchParams.get("start"),
+			);
+			return {
+				elements: Array.from({ length: 40 }, (_, index) => ({
+					connectedMember: `urn:li:profile:${index}`,
+				})),
+				paging: { count: 40, start, total: 80 },
+			};
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
+			const ids = decodeURIComponent(
+				path.split("ids=List(")[1]?.split(")")[0] ?? "",
+			).split(",");
+			return {
+				results: Object.fromEntries(
+					ids.map((id) => [id, { firstName: `Member ${id.split(":").at(-1)}` }]),
+				),
+			};
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
+
+	const profile = recording.emitted.find((event) => event.stream === "profile");
+	assert.equal(profile?.data.connection_count, null);
+	const connections = recording.emitted.filter(
+		(event) => event.stream === "connections",
+	);
+	const ids = connections.map((event) => event.data.id);
+	assert.equal(ids.length, 40);
+	assert.equal(new Set(ids).size, ids.length);
+	assert.equal(
+		recording.protocolMessages.some(
+			(message) =>
+			message.type === "DETAIL_COVERAGE" &&
+				message.stream === "connections",
+		),
+		false,
+	);
+});
+
+test("collectLinkedIn: mismatched paging start vetoes connection completeness", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: [], paging: { count: 40, start: 40, total: 0 } };
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
+
+	const profile = recording.emitted.find((event) => event.stream === "profile");
+	assert.equal(profile?.data.connection_count, null);
+	assert.equal(
+		recording.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "connections",
+		),
+		false,
+	);
 });
 
 test("collectLinkedIn: error-ended connections walk withholds full-scan coverage", async () => {
@@ -656,20 +835,28 @@ test("collectLinkedIn: error-ended connections walk withholds full-scan coverage
 				: { _error: "http_503" };
 		}
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
-			return { results: {} };
+			const ids = decodeURIComponent(
+				path.split("ids=List(")[1]?.split(")")[0] ?? "",
+			).split(",");
+			return {
+				results: Object.fromEntries(
+					ids.map((id) => [id, { firstName: "Member" }]),
+				),
+			};
 		}
 		return { _error: "http_404" };
 	};
 	await collectLinkedIn(buildCtx(["connections"], recording, route));
 	assert.equal(
 		recording.emitted.filter((event) => event.stream === "connections").length,
-		0,
+		40,
+		"valid rows before a failed page remain available as partial records",
 	);
 	assert.equal(
 		recording.events.some(
 			(event) =>
 				event.kind === "message" &&
-				event.message.type === "DETAIL_COVERAGE" &&
+			event.message.type === "DETAIL_COVERAGE" &&
 				event.message.stream === "connections",
 		),
 		false,
@@ -682,6 +869,7 @@ test("collectLinkedIn: error-ended connections walk withholds full-scan coverage
 		termination_reason: "page_error",
 		observed_count: 40,
 		total: null,
+		missing_urn_count: 0,
 		error: "http_503",
 	});
 });
@@ -768,6 +956,72 @@ test("collectLinkedIn: unreadable nested sections do not prove empty coverage", 
 			),
 		);
 	}
+});
+
+test("collectLinkedIn: unreadable experience and education rows stay uncovered", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const progressMessages: string[] = [];
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) {
+			return {
+				elements: [
+					{
+						profileEducations: { elements: [17] },
+						profilePositionGroups: {
+							elements: [
+								17,
+								{
+									company: { name: "Synthetic company" },
+									profilePositionInPositionGroup: { elements: {} },
+								},
+							],
+						},
+					},
+				],
+			};
+		}
+		return { _error: "http_404" };
+	};
+	const ctx = buildCtx(["experience", "education"], recording, route);
+	await collectLinkedIn({
+		...ctx,
+		progress: async (message) => {
+			progressMessages.push(message);
+		},
+	});
+
+	assert.equal(
+		recording.emitted.filter((event) => event.stream === "experience").length,
+		0,
+	);
+	assert.equal(
+		recording.emitted.filter((event) => event.stream === "education").length,
+		0,
+	);
+	const coverage = recording.protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			message.type === "DETAIL_COVERAGE",
+	);
+	assert.deepEqual(
+		coverage.map(({ stream, considered, covered }) => ({
+			stream,
+			considered,
+			covered,
+		})),
+		[
+			{ stream: "experience", considered: 2, covered: 0 },
+			{ stream: "education", considered: 1, covered: 0 },
+		],
+	);
+	assert.ok(
+		progressMessages.some((message) => message.includes("malformed_row=1")),
+	);
+	assert.ok(
+		progressMessages.some((message) =>
+			message.includes("unreadable_nested_collection=1"),
+		),
+	);
 });
 
 test("collectLinkedIn: readable empty sections prove an empty inventory", async () => {
@@ -925,8 +1179,12 @@ test("collectLinkedIn: connection rows without URNs and unresolved enrichment ar
 		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			message.type === "DETAIL_COVERAGE" && message.stream === "connections",
 	);
-	assert.equal(coverage?.considered, 2);
-	assert.equal(coverage?.covered, 0);
+	assert.equal(coverage, undefined, "an omitted source row vetoes full coverage");
+	assert.ok(
+		skipResults(recording).some(
+			(skip) => skip.reason === "linkedin_connections_page_malformed",
+		),
+	);
 	assert.ok(
 		progressMessages.some((message) =>
 			message.includes("missing_connected_member_urn=1"),
@@ -936,6 +1194,142 @@ test("collectLinkedIn: connection rows without URNs and unresolved enrichment ar
 		progressMessages.some((message) =>
 			message.includes("enrichment unresolved: 1"),
 		),
+	);
+});
+
+test("collectLinkedIn: partial batches retry missing URNs and validate sourced string fields", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const progressMessages: string[] = [];
+	const urns = [
+		"urn:li:profile:blank",
+		"urn:li:profile:malformed",
+		"urn:li:profile:missing",
+	];
+	const singletonRequests: string[] = [];
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: urns.map((connectedMember) => ({ connectedMember })) };
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
+			const ids = decodeURIComponent(
+				path.split("ids=List(")[1]?.split(")")[0] ?? "",
+			).split(",");
+			if (ids.length > 1) {
+				return {
+					results: {
+						[urns[0] as string]: {
+							firstName: "",
+							headline: "",
+							lastName: "",
+						},
+						[urns[1] as string]: { firstName: 123 },
+					},
+				};
+			}
+			singletonRequests.push(ids[0] ?? "");
+			if (ids[0] === urns[1]) {
+				return { results: { [urns[1] as string]: { firstName: 123 } } };
+			}
+			return { elements: [{ entityUrn: urns[2], lastName: "Only" }] };
+		}
+		return { _error: "http_404" };
+	};
+	const ctx = buildCtx(["connections"], recording, route);
+	await collectLinkedIn({
+		...ctx,
+		progress: async (message) => {
+			progressMessages.push(message);
+		},
+	});
+
+	assert.deepEqual(singletonRequests, [urns[1], urns[2]]);
+	const connections = recording.emitted.filter(
+		(event) => event.stream === "connections",
+	);
+	assert.deepEqual(
+		connections.map((event) => [
+			event.data.id,
+			event.data.full_name,
+			event.data.headline,
+		]),
+		[
+			[urns[0], "", ""],
+			[urns[1], null, null],
+			[urns[2], "Only", null],
+		],
+	);
+	const coverage = recording.protocolMessages.find(
+		(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "connections",
+	);
+	assert.equal(coverage?.considered, 3);
+	assert.equal(coverage?.covered, 2);
+	assert.ok(
+		progressMessages.some((message) =>
+			message.includes("malformed_enrichment=1"),
+		),
+	);
+});
+
+test("collectLinkedIn: batch array enrichment admits source-backed last-name-only values", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const urn = "urn:li:profile:last-name-only";
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: [{ connectedMember: urn }] };
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
+			return { elements: [{ entityUrn: urn, lastName: "Only" }] };
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["connections"], recording, route));
+
+	const record = recording.emitted.find((event) => event.stream === "connections");
+	assert.equal(record?.data.full_name, "Only");
+	const coverage = recording.protocolMessages.find(
+		(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "connections",
+	);
+	assert.equal(coverage?.considered, 1);
+	assert.equal(coverage?.covered, 1);
+});
+
+test("collectLinkedIn: singleton enrichment preserves source-backed blanks in map and array forms", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const urns = ["urn:li:profile:blank-map", "urn:li:profile:blank-array"];
+	const singletonRequests: string[] = [];
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: urns.map((connectedMember) => ({ connectedMember })) };
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
+			const ids = decodeURIComponent(
+				path.split("ids=List(")[1]?.split(")")[0] ?? "",
+			).split(",");
+			if (ids.length > 1) return { _error: "http_503" };
+			singletonRequests.push(ids[0] ?? "");
+			if (ids[0] === urns[0]) {
+				return { results: { [urns[0] as string]: { firstName: "" } } };
+			}
+			return { elements: [{ entityUrn: urns[1], lastName: "" }] };
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["connections"], recording, route));
+
+	assert.deepEqual(singletonRequests, urns);
+	assert.deepEqual(
+		recording.emitted
+			.filter((event) => event.stream === "connections")
+			.map((event) => [event.data.id, event.data.full_name]),
+		[
+			[urns[0], ""],
+			[urns[1], ""],
+		],
 	);
 });
 

@@ -21,6 +21,7 @@ import type {
 	VoyagerLanguage,
 	VoyagerMiniProfile,
 	VoyagerPosition,
+	VoyagerPositionGroup,
 	VoyagerProfileElement,
 	VoyagerResolvedProfile,
 	VoyagerSkill,
@@ -347,29 +348,112 @@ export function buildProfileRecord(
 export function buildExperienceRecords(
 	profile: VoyagerProfileElement,
 ): ExperienceRecord[] {
+	return buildExperienceRecordsWithOmissions(profile).records;
+}
+
+function hasKnownSourceField(
+	row: Record<string, unknown>,
+	fields: readonly string[],
+): boolean {
+	return fields.some((field) => Object.hasOwn(row, field));
+}
+
+export function buildExperienceRecordsWithOmissions(
+	profile: VoyagerProfileElement,
+): RecordsWithOmissions<ExperienceRecord> {
 	const groups = profile.profilePositionGroups?.elements ?? [];
 	const records: ExperienceRecord[] = [];
+	const omissions: OmissionSummary = {
+		count: 0,
+		omittedCount: 0,
+		omittedReasons: {},
+		reasons: {},
+	};
+	let considered = 0;
+	let covered = 0;
 
-	groups.forEach((group, groupIndex) => {
-		const positions = group.profilePositionInPositionGroup?.elements ?? [];
+	for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+		const rawGroup: unknown = groups[groupIndex];
+		if (!isRecord(rawGroup)) {
+			considered += 1;
+			addOmission(omissions, "malformed_row");
+			continue;
+		}
+		const group = rawGroup as VoyagerPositionGroup;
+		if (
+			!hasKnownSourceField(rawGroup, [
+				"company",
+				"dateRange",
+				"description",
+				"endDate",
+				"entityUrn",
+				"geoLocationName",
+				"locationName",
+				"name",
+				"profilePositionInPositionGroup",
+				"startDate",
+				"title",
+			])
+		) {
+			considered += 1;
+			addOmission(omissions, "malformed_row");
+			continue;
+		}
+
+		let rawPositions: unknown[] = [];
+		if (Object.hasOwn(rawGroup, "profilePositionInPositionGroup")) {
+			const nested = rawGroup.profilePositionInPositionGroup;
+			if (!isRecord(nested) || !Array.isArray(nested.elements)) {
+				considered += 1;
+				addOmission(omissions, "unreadable_nested_collection");
+				continue;
+			}
+			rawPositions = nested.elements;
+		}
 		const groupCompanyName = nonEmpty(group.company?.name ?? group.name);
 
-		if (positions.length > 0) {
-			positions.forEach((pos: VoyagerPosition, posIndex) => {
+		if (rawPositions.length > 0) {
+			considered += rawPositions.length;
+			for (let positionIndex = 0; positionIndex < rawPositions.length; positionIndex += 1) {
+				const rawPosition = rawPositions[positionIndex];
+				if (!isRecord(rawPosition)) {
+					addOmission(omissions, "malformed_row");
+					continue;
+				}
+				const pos = rawPosition as VoyagerPosition;
+				if (
+					!hasKnownSourceField(rawPosition, [
+						"companyName",
+						"dateRange",
+						"description",
+						"employmentType",
+						"endDate",
+						"entityUrn",
+						"geoLocationName",
+						"locationName",
+						"startDate",
+						"title",
+					])
+				) {
+					addOmission(omissions, "malformed_row");
+					continue;
+				}
 				records.push({
 					company: nonEmpty(pos.companyName) ?? groupCompanyName,
 					description: nonEmpty(pos.description),
 					employment_type: nonEmpty(pos.employmentType?.name),
 					end_date: endDateOf(pos),
-					id: subEntityId(pos.entityUrn, `exp-${groupIndex}`, posIndex),
+					id: subEntityId(pos.entityUrn, `exp-${groupIndex}`, positionIndex),
 					location: nonEmpty(pos.locationName ?? pos.geoLocationName),
 					start_date: startDateOf(pos),
 					title: nonEmpty(pos.title),
 				});
-			});
-			return;
+				covered += 1;
+			}
+			continue;
 		}
 
+		considered += 1;
 		records.push({
 			company: groupCompanyName,
 			description: nonEmpty(group.description),
@@ -380,9 +464,10 @@ export function buildExperienceRecords(
 			start_date: startDateOf(group),
 			title: nonEmpty(group.title),
 		});
-	});
+		covered += 1;
+	}
 
-	return records;
+	return { considered, covered, omissions, records };
 }
 
 /** School logo URL, mirroring legacy `linkedin-playwright.js`'s `logoUrl`
@@ -400,17 +485,60 @@ function educationLogoUrlOf(edu: VoyagerEducation): string | null {
 export function buildEducationRecords(
 	profile: VoyagerProfileElement,
 ): EducationRecord[] {
+	return buildEducationRecordsWithOmissions(profile).records;
+}
+
+export function buildEducationRecordsWithOmissions(
+	profile: VoyagerProfileElement,
+): RecordsWithOmissions<EducationRecord> {
 	const items = profile.profileEducations?.elements ?? [];
-	return items.map((edu: VoyagerEducation, index) => ({
-		degree: nonEmpty(edu.degreeName),
-		end_date: endDateOf(edu),
-		field_of_study: nonEmpty(edu.fieldOfStudy),
-		grade: nonEmpty(edu.grade),
-		id: subEntityId(edu.entityUrn, "edu", index),
-		logo_url: educationLogoUrlOf(edu),
-		school: nonEmpty(edu.schoolName) ?? nonEmpty(edu.school?.name),
-		start_date: startDateOf(edu),
-	}));
+	const records: EducationRecord[] = [];
+	const omissions: OmissionSummary = {
+		count: 0,
+		omittedCount: 0,
+		omittedReasons: {},
+		reasons: {},
+	};
+	let considered = 0;
+	let covered = 0;
+	for (let index = 0; index < items.length; index += 1) {
+		considered += 1;
+		const rawEducation: unknown = items[index];
+		if (!isRecord(rawEducation)) {
+			addOmission(omissions, "malformed_row");
+			continue;
+		}
+		if (
+			!hasKnownSourceField(rawEducation, [
+				"dateRange",
+				"degreeName",
+				"endDate",
+				"entityUrn",
+				"fieldOfStudy",
+				"grade",
+				"school",
+				"schoolLogo",
+				"schoolName",
+				"startDate",
+			])
+		) {
+			addOmission(omissions, "malformed_row");
+			continue;
+		}
+		const edu = rawEducation as VoyagerEducation;
+		records.push({
+			degree: nonEmpty(edu.degreeName),
+			end_date: endDateOf(edu),
+			field_of_study: nonEmpty(edu.fieldOfStudy),
+			grade: nonEmpty(edu.grade),
+			id: subEntityId(edu.entityUrn, "edu", index),
+			logo_url: educationLogoUrlOf(edu),
+			school: nonEmpty(edu.schoolName) ?? nonEmpty(edu.school?.name),
+			start_date: startDateOf(edu),
+		});
+		covered += 1;
+	}
+	return { considered, covered, omissions, records };
 }
 
 /**
@@ -446,14 +574,17 @@ export function buildSkillRecordsWithOmissions(
 			continue;
 		}
 		const category = entry as VoyagerSkillCategory;
-		let categorySkills: readonly unknown[] = [];
-		if (Array.isArray(category.skills)) {
-			categorySkills = category.skills;
-		} else if (Array.isArray(category.elements)) {
-			categorySkills = category.elements;
-		}
-		if (categorySkills.length > 0) {
-			for (const rawSkill of categorySkills) {
+		const hasSkills = Object.hasOwn(category, "skills");
+		const hasElements = Object.hasOwn(category, "elements");
+		if (hasSkills || hasElements) {
+			const childRows = hasSkills ? category.skills : category.elements;
+			if (!Array.isArray(childRows)) {
+				considered += 1;
+				addOmission(omissions, "unreadable_nested_collection");
+				continue;
+			}
+			if (childRows.length === 0) continue;
+			for (const rawSkill of childRows) {
 				considered += 1;
 				if (!isRecord(rawSkill)) {
 					addOmission(omissions, "malformed_row");
