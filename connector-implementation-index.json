@@ -16576,6 +16576,19 @@
 					"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
 					"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
 					"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site — please report this rather than retrying."
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "perplexity",
+						"login_url": "https://www.perplexity.ai/",
+						"login_message": "Sign in to Perplexity, then return here.",
+						"collect_export": "collectPerplexity",
+						"probe_export": "probePerplexitySession",
+						"summary": {
+							"singular": "item",
+							"plural": "items"
+						}
+					}
 				}
 			}
 		},
