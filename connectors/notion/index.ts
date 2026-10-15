@@ -17,12 +17,14 @@
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import {
-	buildDetailCoverageMessage,
+	fullInventoryCoverage,
 	politeDelay,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
+	type Enumeration,
 	emitRow,
+	enumerated,
 	type RowRead,
 } from "../../packages/polyfill-connectors/src/field-reader.ts";
 import { notionPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
@@ -57,8 +59,8 @@ interface ProgressExtra {
 }
 
 interface NotionSearchResponse {
-	has_more?: boolean;
-	next_cursor?: string | null;
+	has_more?: unknown;
+	next_cursor?: unknown;
 	results: unknown;
 }
 
@@ -135,7 +137,7 @@ async function searchAll(
 	filter: NotionSearchFilter | undefined,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	streamName: string,
-): Promise<unknown[]> {
+): Promise<Enumeration<unknown>> {
 	const results: unknown[] = [];
 	let cursor: string | undefined;
 	let pageIndex = 0;
@@ -172,7 +174,13 @@ async function searchAll(
 			cursor_present: Boolean(json.has_more && json.next_cursor),
 		});
 		if (json.has_more !== true) {
-			break;
+			// The walk began at the first page; whether it reached the end is
+			// decided from this last page's own signal, not from stopping here.
+			return enumerated(results, {
+				kind: "cursor",
+				has_more: json.has_more,
+				next_cursor: json.next_cursor,
+			});
 		}
 		// `has_more` is the provider's claim that another page exists. A missing
 		// cursor contradicts that claim, so stopping here would silently hide the
@@ -186,7 +194,6 @@ async function searchAll(
 		pageIndex += 1;
 		await politeDelay(POLITE_DELAY_MS);
 	}
-	return results;
 }
 
 interface RunStreamArgs {
@@ -215,7 +222,8 @@ async function runStream(args: RunStreamArgs): Promise<void> {
 		stream: streamName,
 		phase: "start",
 	});
-	const items = await searchAll(token, filter, progress, streamName);
+	const enumeration = await searchAll(token, filter, progress, streamName);
+	const { items } = enumeration;
 	const streamState = state[streamName] as
 		| { last_edited_time?: string }
 		| undefined;
@@ -248,33 +256,19 @@ async function runStream(args: RunStreamArgs): Promise<void> {
 		total_seen: items.length,
 		cursor_present: Boolean(latest || prior),
 	});
-	// The search result is the complete enumeration boundary for this stream.
-	// Emit measured full-scan evidence even when it is empty; record counts alone
-	// cannot distinguish a verified empty workspace from missing coverage proof.
-	//
-	// `considered` is that boundary (`items.length`, measured at the enumeration
-	// site); `covered` is the independently tallied count above, so a page the
-	// schema rejected reads a real `partial` instead of being silently absorbed.
-	// `buildFullScanCoverageMessage` is deliberately NOT used: it forces
-	// `covered === considered`, which cannot express a dropped page.
+	// Full-inventory completion needs proof that the search was walked to its
+	// end: Notion's last page must say `has_more: false` with no next cursor
+	// (see `enumerated`). Without it, fullInventoryCoverage emits a retryable
+	// skip instead of coverage, and the runtime then withholds this STATE.
+	// `covered` may be below the item count (a withheld or refused page),
+	// which reads as partial.
 	//
 	// Deletion-safe by construction: Notion reports a deleted page IN-BAND as
 	// `archived: true` rather than omitting it, so a deletion stays inside the
-	// boundary, is validated like any other row, and counts as covered. The
-	// runtime turns it into a tombstone (`isTombstone`, below). An upstream
-	// deletion is therefore a covered fact, never a coverage gap — which is what
-	// keeps this proof from firing on PDPP's deliberate retention of records the
-	// provider has since removed.
-	await emit(
-		buildDetailCoverageMessage({
-			stream: streamName,
-			stateStream: streamName,
-			requiredKeys: [],
-			hydratedKeys: [],
-			considered: items.length,
-			covered,
-		}),
-	);
+	// boundary and counts as covered; the runtime turns it into a tombstone
+	// (`isTombstone`, below).
+	for (const message of fullInventoryCoverage(streamName, enumeration, covered))
+		await emit(message);
 	await emit({
 		type: "STATE",
 		stream: streamName,

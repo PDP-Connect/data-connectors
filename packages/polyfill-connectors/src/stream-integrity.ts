@@ -17,14 +17,17 @@
  *      resource or time-range scope is not in scope, so it is no loss.
  *   2. The connector reports the stream failed:
  *      `SKIP_RESULT{reason: "stream_collection_failed"}`.
- *   3. The connector reports any other skip that is not a declared bound
- *      (below), for example a retryable `source_unreadable`.
+ *   3. The connector reports any other skip, whatever its `recovery_hint`
+ *      or `continuation`, for example `source_unreadable`. Only the reasons
+ *      listed under NOT A LOSS (below) are exempt.
  *
  * What the runtime then does to outgoing messages:
  *
  *   - `STATE` whose `stream` is the stream, or a checkpoint parent of it:
  *     not sent after a rule-1 or rule-2 loss, nor after a rule-3 skip that
- *     carries no resume-safe declaration. The previous checkpoint stays, so
+ *     carries no typed declaration (a resume-safe basis or a declared bound,
+ *     both below). `recovery_hint.retryable: false` is not a declaration, and
+ *     neither is a `continuation` by itself. The previous checkpoint stays, so
  *     the next run reads the lost rows again. Under rule 1 the connector
  *     believed the row was stored, so its cursor may already be past it.
  *     Under rule 2 the Collection Profile's certified-failure rule already
@@ -35,8 +38,13 @@
  *     basis, why the cursor it saves still replays what the skip lost (see
  *     `ResumeSafeBasis`). Only then does that stream's `STATE` pass. The
  *     runtime cannot verify the basis; it is a reviewed claim at the call
- *     site, made by the code that owns the cursor. Rules 1 and 2 have no
- *     declaration path.
+ *     site, made by the code that owns the cursor.
+ *     A rule-3 skip may instead carry a DECLARED BOUND
+ *     (`declaredBoundSkip(msg, bound)`, on the wire as
+ *     `diagnostics.declared_bound`): the skipped part is out of collection
+ *     by design (`configured_limit`, `unsupported_input`; see
+ *     `DeclaredBound`). That also lets `STATE` pass.
+ *     Rules 1 and 2 have no declaration path.
  *   - `RECORD{op: "delete"}` for the stream (any rule): not sent. A row that
  *     could not be read in this run must not be deleted as "unseen".
  *   - `DETAIL_GAP_RECOVERED` for a key the runtime refused in this run (or
@@ -72,20 +80,18 @@
  * repair is in the connector (read the field, or declare its documented
  * absence semantics) or at the source.
  *
- * DECLARED BOUNDS (do not make a stream incomplete)
+ * NOT A LOSS
  *
- * A `SKIP_RESULT` is a declared bound, not a loss, when it is one of:
+ * These SKIP_RESULT reasons do not make a stream lose rows:
  *
- *   - `reason: "scope_not_supported"`: the Collection Profile's declaration
+ *   - `scope_not_supported`: the Collection Profile's own typed declaration
  *     that a scope element is not honored for that stream or resource.
- *   - a typed `continuation`: the Collection Profile's proof that one bounded
- *     page completed and the runtime owns the next page.
- *   - `recovery_hint.retryable === false` (and not `stream_collection_failed`):
- *     the connector declares on the wire that running again cannot recover
- *     the skipped part (for example, a deliberate page budget). Withholding a
- *     checkpoint would gain nothing, and the bound stays visible to the owner
- *     and to review at the call site.
  *   - `shape_check_unmodeled_value`: a record that was kept, not skipped.
+ *   - `stream_incomplete_checkpoint_withheld`: the runtime's own notice.
+ *
+ * Every other skip is a loss under rule 3. A typed declaration (resume-safe
+ * basis or declared bound) only decides whether `STATE` may pass; deletes and
+ * full-coverage claims stay blocked, because the stream was not fully read.
  *
  * A record-level refusal (rule 1) has no declaration path: the connector
  * cannot mark a lost row as acceptable. To leave a row out on purpose, do not
@@ -193,6 +199,22 @@ export function resumeSafeSkip(
 	msg: SkipResult,
 	basis: ResumeSafeBasis,
 ): SkipResult {
+	return withDiagnostic(msg, "resume_safe", basis);
+}
+
+/** The declared basis on a SKIP_RESULT, if it is one of the closed set. */
+export function resumeSafeBasisOf(msg: SkipResult): ResumeSafeBasis | null {
+	const basis = diagnosticOf(msg, "resume_safe");
+	return typeof basis === "string" && RESUME_SAFE_BASES.has(basis)
+		? (basis as ResumeSafeBasis)
+		: null;
+}
+
+function withDiagnostic(
+	msg: SkipResult,
+	key: "declared_bound" | "resume_safe",
+	value: string,
+): SkipResult {
 	const diagnostics =
 		typeof msg.diagnostics === "object" &&
 		msg.diagnostics !== null &&
@@ -201,35 +223,69 @@ export function resumeSafeSkip(
 			: msg.diagnostics === undefined
 				? {}
 				: { connector: msg.diagnostics };
-	return { ...msg, diagnostics: { ...diagnostics, resume_safe: basis } };
+	return { ...msg, diagnostics: { ...diagnostics, [key]: value } };
 }
 
-/** The declared basis on a SKIP_RESULT, if it is one of the closed set. */
-export function resumeSafeBasisOf(msg: SkipResult): ResumeSafeBasis | null {
+function diagnosticOf(msg: SkipResult, key: string): unknown {
 	const diagnostics = msg.diagnostics;
 	if (typeof diagnostics !== "object" || diagnostics === null) return null;
-	const basis: unknown = Reflect.get(diagnostics, "resume_safe");
-	return typeof basis === "string" && RESUME_SAFE_BASES.has(basis)
-		? (basis as ResumeSafeBasis)
-		: null;
+	return Reflect.get(diagnostics, key);
 }
 
 /** Bound on keys listed in one withheld notice; the count is always exact. */
 const WITHHELD_KEYS_LISTED = 50;
 
-const DECLARED_BOUND_REASONS: ReadonlySet<string> = new Set([
+/**
+ * SKIP_RESULT reasons that are not a loss at all: the Collection Profile's
+ * typed `scope_not_supported` declaration, a kept-with-drift record report,
+ * and the runtime's own withheld notice. Nothing else is exempt by reason,
+ * by `recovery_hint.retryable`, or by carrying a `continuation`.
+ */
+const NOT_A_LOSS_REASONS: ReadonlySet<string> = new Set([
 	"scope_not_supported",
 	"shape_check_unmodeled_value",
 	CHECKPOINT_WITHHELD_REASON,
 ]);
 
-/** True when a `SKIP_RESULT` declares a bound rather than reporting a loss. */
-export function isDeclaredBound(msg: SkipResult): boolean {
-	if (msg.reason === "stream_collection_failed") return false;
-	if (DECLARED_BOUND_REASONS.has(msg.reason)) return true;
-	if (msg.continuation !== undefined) return true;
-	const hint = msg.recovery_hint;
-	return typeof hint === "object" && hint.retryable === false;
+/** True when a `SKIP_RESULT` is not a loss (see `NOT_A_LOSS_REASONS`). */
+export function isNotALoss(msg: SkipResult): boolean {
+	return NOT_A_LOSS_REASONS.has(msg.reason);
+}
+
+/**
+ * A typed declaration that a skip is a deliberate bound, not an accident:
+ *
+ *   - `configured_limit`: collection stops at a documented limit (a page
+ *     budget, an item cap); rows past it are not collected by design and the
+ *     owner sees the skip.
+ *   - `unsupported_input`: the skipped input is not a source this connector
+ *     reads (for example, a file in an import folder that is not an export).
+ *
+ * Declare it with `declaredBoundSkip` at the call site. Like a resume-safe
+ * declaration it lets the stream's STATE pass; the skip still blocks deletes
+ * and full-coverage claims, because the stream is not fully read.
+ */
+export type DeclaredBound = "configured_limit" | "unsupported_input";
+
+const DECLARED_BOUNDS: ReadonlySet<string> = new Set<DeclaredBound>([
+	"configured_limit",
+	"unsupported_input",
+]);
+
+/** Declare on a SKIP_RESULT that it is a deliberate bound (see `DeclaredBound`). */
+export function declaredBoundSkip(
+	msg: SkipResult,
+	bound: DeclaredBound,
+): SkipResult {
+	return withDiagnostic(msg, "declared_bound", bound);
+}
+
+/** The declared bound on a SKIP_RESULT, if it is one of the closed set. */
+export function declaredBoundOf(msg: SkipResult): DeclaredBound | null {
+	const bound = diagnosticOf(msg, "declared_bound");
+	return typeof bound === "string" && DECLARED_BOUNDS.has(bound)
+		? (bound as DeclaredBound)
+		: null;
 }
 
 interface StreamLoss {
@@ -447,11 +503,14 @@ export function createStreamIntegrity(): StreamIntegrity {
 	const gate = (msg: EmittedMessage): EmittedMessage[] => {
 		switch (msg.type) {
 			case "SKIP_RESULT": {
-				if (!isDeclaredBound(msg)) {
+				if (!isNotALoss(msg)) {
 					const loss = lossFor(msg.stream);
 					loss.skipReasons.add(msg.reason);
 					if (msg.reason === "stream_collection_failed") loss.failed = true;
-					else if (resumeSafeBasisOf(msg) === null)
+					else if (
+						resumeSafeBasisOf(msg) === null &&
+						declaredBoundOf(msg) === null
+					)
 						loss.undeclaredSkips.add(msg.reason);
 				}
 				return [msg];
