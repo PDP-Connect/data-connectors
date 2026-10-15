@@ -7,10 +7,14 @@
 // maps to null when the runtime cannot compare bounds with its consent field
 // (absent, a string with no format, an integer, or a date field not yet
 // enabled), so a bounded run reports scope_not_supported for it.
+// Built connector artifacts never import this file: the builders resolve it to
+// the connector's own slice under ./consent-time-fields/.
 // Regenerate with `node --experimental-strip-types
 // scripts/generate-consent-time-fields.ts` from packages/polyfill-connectors.
 
 import type { ConsentTimeField } from "../time-range.ts";
+
+export const CONSENT_BOUND_CONNECTOR: string | null = null;
 
 export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>

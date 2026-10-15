@@ -7,6 +7,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  CONSENT_AGGREGATE,
+  CONSENT_RESOLUTION_MODULE,
+  consentSlicePath,
+  consentSliceProblem,
+} from "./consent-slice-resolution.mjs";
 
 const PACKAGE_ROOT = "packages/polyfill-connectors";
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
@@ -46,6 +52,11 @@ const PAGE_SHIM_SHARED_INPUTS = [
 	"scripts/pageshim/shims/process.js",
 	"scripts/pageshim/shims/url.js",
 ];
+// Rendering policy for the consent slices, as it exists at the commit being
+// compared. It decides whether a slice is current; it is not itself shipped,
+// so the PageShim builder's import of it is not an artifact input. The slice
+// bytes are what an artifact carries.
+const CONSENT_RENDERER = "packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 const STATIC_LOCAL_IMPORT = /^\s*(?:import|export)\s+(?!type\b)(?:[^\n]*\n)*?[^\n]*?\sfrom\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const SIDE_EFFECT_LOCAL_IMPORT = /^\s*import\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const DYNAMIC_LOCAL_IMPORT = /\bimport\s*\(\s*(["'])(\.{1,2}\/[^"]*?)\1/g;
@@ -104,8 +115,8 @@ function resolveLocalImport(commit, from, specifier, options) {
   );
 }
 
-function addLocalImportClosure(commit, entryPath, files, options, excluded = new Set()) {
-  const pending = [entryPath];
+function addLocalImportClosure(commit, entryPath, files, options, excluded = new Set(), remap = (path) => path) {
+  const pending = [remap(entryPath)];
   const visited = new Set();
   while (pending.length) {
     const path = pending.pop();
@@ -120,7 +131,7 @@ function addLocalImportClosure(commit, entryPath, files, options, excluded = new
       files.set(path, source);
     }
     for (const specifier of localImportSpecifiers(source)) {
-      pending.push(resolveLocalImport(commit, path, specifier, options));
+      pending.push(remap(resolveLocalImport(commit, path, specifier, options)));
     }
   }
 }
@@ -160,6 +171,49 @@ async function pageShimEligibilityAtCommit(commit, profile, options) {
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+async function consentRendererAtCommit(commit, options) {
+  const source = readFileAtCommit(commit, CONSENT_RENDERER, options);
+  if (source === null) {
+    throw new ArtifactInputError(
+      `cannot read ${CONSENT_RENDERER} at ${commit}; cannot tell whether the consent-time-field slice is current`,
+    );
+  }
+  const dir = mkdtempSync(join(tmpdir(), "consent-time-fields-render-"));
+  try {
+    const file = join(dir, "consent-time-fields-render.mjs");
+    writeFileSync(file, source);
+    return await import(pathToFileURL(file).href);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * How a connector's import of the consent-time-field aggregate resolves at
+ * `commit`, or null before the slice layout existed. The Core and PageShim
+ * builders bundle the connector's own slice in its place
+ * (scripts/consent-slice-resolution.mjs), so the hash covers that slice and
+ * not the aggregate. A checkout that has the layout but lacks or has a stale
+ * slice fails here; it never falls back to hashing the aggregate. A commit
+ * before the layout still bundled the aggregate, so it keeps hashing it.
+ */
+async function consentSliceRemap(commit, manifest, profile, options) {
+  if (readFileAtCommit(commit, CONSENT_RESOLUTION_MODULE, options) === null) return null;
+  const slice = consentSlicePath(manifest);
+  const { renderSlice } = await consentRendererAtCommit(commit, options);
+  const expected = renderSlice(manifest, profile);
+  let checked = false;
+  return (path) => {
+    if (path !== CONSENT_AGGREGATE) return path;
+    if (!checked) {
+      const problem = consentSliceProblem(slice, readFileAtCommit(commit, slice, options), expected);
+      if (problem) throw new ArtifactInputError(`${problem} (at ${commit})`);
+      checked = true;
+    }
+    return slice;
+  };
 }
 
 function readManifestAtCommit(commit, path, options) {
@@ -274,7 +328,13 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
   for (const [path, bytes] of await sourceSliceInputs(commit, profile, options)) {
     files.set(path, bytes);
   }
-  addLocalImportClosure(commit, `connectors/${manifest}/index.ts`, files, options);
+  // Policy files exist only in the slice layout; absent, nothing is hashed for
+  // them so a commit from before the layout keeps its identity.
+  const consentRemap = await consentSliceRemap(commit, manifest, profile, options);
+  if (consentRemap) {
+    files.set(CONSENT_RESOLUTION_MODULE, readFileAtCommit(commit, CONSENT_RESOLUTION_MODULE, options));
+  }
+  addLocalImportClosure(commit, `connectors/${manifest}/index.ts`, files, options, new Set(), consentRemap ?? undefined);
 
   // A PageShim bundle is a connector-specific artifact input. Detect it from
   // the entry file at the commit being compared so enabling a new target, and
@@ -296,9 +356,9 @@ export async function artifactInputHash({ commit, manifest, cwd = process.cwd() 
       // packaging step; encode that prior state so it compares as a real
       // change when the first packaged bundle is introduced.
       if (content === null) files.set(path, Buffer.from("\0absent"));
-      else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs"]));
+      else addLocalImportClosure(commit, path, files, options, new Set(["scripts/pageshim/capabilities.mjs", CONSENT_RENDERER]), consentRemap ?? undefined);
     }
-    if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options);
+    if (pageShimEntryBytes !== null) addLocalImportClosure(commit, pageShimEntry, files, options, new Set(), consentRemap ?? undefined);
   }
 
   const hash = createHash("sha256");

@@ -3,12 +3,18 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { connectorEntrypoint, packageRoot } from "./connector-paths.ts";
 import {
@@ -47,6 +53,12 @@ const connectors = readPolyfillManifests()
 		);
 	});
 
+function connectorKeys(): string[] {
+	return readPolyfillManifests()
+		.map(({ file }) => file.replace(/\.json$/u, ""))
+		.sort((a, b) => a.localeCompare(b));
+}
+
 /**
  * True when the manifest declares a `date-time` consent field for the stream.
  * A string with no format is not eligible (Collection Profile §5.1).
@@ -83,27 +95,45 @@ async function bounded(
 	return messages;
 }
 
-test("consent-time-fields.generated.ts matches the manifests on disk", () => {
+test("the generated consent-time-field modules match the manifests on disk", () => {
 	const scratch = mkdtempSync(join(tmpdir(), "consent-time-fields-drift-"));
 	try {
-		const out = join(scratch, "consent-time-fields.generated.ts");
 		execFileSync(
 			"node",
 			[
 				"--experimental-strip-types",
 				join(packageRoot, "scripts/generate-consent-time-fields.ts"),
-				out,
+				scratch,
 			],
 			{ cwd: packageRoot, stdio: "pipe" },
 		);
+		const tracked = join(packageRoot, "src/generated");
+		const regenerate =
+			"regenerate with `node --experimental-strip-types scripts/generate-consent-time-fields.ts`";
 		assert.equal(
-			readFileSync(out, "utf8"),
-			readFileSync(
-				join(packageRoot, "src/generated/consent-time-fields.generated.ts"),
-				"utf8",
-			),
-			"regenerate with `node --experimental-strip-types scripts/generate-consent-time-fields.ts`",
+			readFileSync(join(scratch, "consent-time-fields.generated.ts"), "utf8"),
+			readFileSync(join(tracked, "consent-time-fields.generated.ts"), "utf8"),
+			regenerate,
 		);
+		// One slice per manifest, no extra, each current.
+		const expected = readdirSync(join(scratch, "consent-time-fields")).sort();
+		assert.deepEqual(
+			readdirSync(join(tracked, "consent-time-fields")).sort(),
+			expected,
+			regenerate,
+		);
+		assert.deepEqual(
+			expected,
+			connectorKeys().map((key) => `${key}.generated.ts`),
+			"one slice per connector manifest",
+		);
+		for (const name of expected) {
+			assert.equal(
+				readFileSync(join(scratch, "consent-time-fields", name), "utf8"),
+				readFileSync(join(tracked, "consent-time-fields", name), "utf8"),
+				`${name}: ${regenerate}`,
+			);
+		}
 	} finally {
 		rmSync(scratch, { force: true, recursive: true });
 	}
@@ -566,4 +596,183 @@ test("claude_code end to end: a bounded run keeps in-range sessions and messages
 	} finally {
 		rmSync(home, { force: true, recursive: true });
 	}
+});
+
+// ---- built artifacts ------------------------------------------------------
+// A built connector bundles its own consent slice and is bound to that
+// connector. These tests bundle the real runtime with the same esbuild plugin
+// the Core and PageShim builders use.
+
+const repoRoot = join(packageRoot, "../..");
+const renderModulePath = join(
+	packageRoot,
+	"scripts/consent-time-fields-render.mjs",
+);
+
+async function bundleFixture(
+	connectorDirectory: string,
+	options: { expectedSlice?: string } = {},
+) {
+	const { consentSlicePlugin } = await import(
+		pathToFileURL(join(repoRoot, "scripts/consent-slice-resolution.mjs")).href
+	);
+	const { renderSlice } = await import(pathToFileURL(renderModulePath).href);
+	const expectedSlice =
+		options.expectedSlice ??
+		renderSlice(
+			connectorDirectory,
+			JSON.parse(
+				readFileSync(
+					join(repoRoot, "connectors", connectorDirectory, "manifest.json"),
+					"utf8",
+				),
+			),
+		);
+	const esbuild = await import("esbuild");
+	// Inside node_modules so the bundle's external packages resolve.
+	const outdir = mkdtempSync(join(repoRoot, "node_modules", ".consent-slice-"));
+	try {
+		const result = await esbuild.build({
+			absWorkingDir: repoRoot,
+			bundle: true,
+			entryPoints: [
+				join(packageRoot, "src/__fixtures__/manifest-consent-time.ts"),
+			],
+			format: "esm",
+			logLevel: "silent",
+			metafile: true,
+			outfile: join(outdir, "bundle.mjs"),
+			packages: "external",
+			platform: "node",
+			plugins: [
+				consentSlicePlugin({
+					connectorDirectory,
+					expectedSlice,
+					repoRoot,
+				}),
+			],
+		});
+		return { entrypoint: join(outdir, "bundle.mjs"), outdir, result };
+	} catch (error) {
+		rmSync(outdir, { force: true, recursive: true });
+		throw error;
+	}
+}
+
+function runBundle(
+	entrypoint: string,
+	name: string,
+	stream: string,
+	data: Record<string, unknown>,
+	timeRange: { since?: string; until?: string },
+) {
+	return runConnectorProtocolSubprocess({
+		cwd: repoRoot,
+		entrypoint,
+		env: {
+			PDPP_TEST_CONNECTOR_NAME: name,
+			PDPP_TEST_RECORDS: JSON.stringify([{ data, stream }]),
+		},
+		start: {
+			scope: { streams: [{ name: stream, time_range: timeRange }] },
+			type: "START",
+		},
+	});
+}
+
+test("a bundle resolves the consent table to its connector's slice alone", async () => {
+	const { outdir, result } = await bundleFixture("reddit");
+	try {
+		const consentInputs = Object.keys(result.metafile.inputs).filter((input) =>
+			input.includes("consent-time-fields"),
+		);
+		assert.deepEqual(consentInputs, [
+			"packages/polyfill-connectors/src/generated/consent-time-fields/reddit.generated.ts",
+		]);
+	} finally {
+		rmSync(outdir, { force: true, recursive: true });
+	}
+});
+
+test("a bundle bound to a connector applies that connector's manifest fields", async () => {
+	const { entrypoint, outdir } = await bundleFixture("reddit");
+	try {
+		const run = async (created: string) =>
+			(
+				await runBundle(
+					entrypoint,
+					"reddit",
+					"submitted",
+					{ created_utc: created, id: "p1" },
+					{ since: SINCE, until: UNTIL },
+				)
+			).messages.filter((m) => m.type === "RECORD").length;
+		assert.equal(await run(IN_RANGE), 1);
+		assert.equal(await run(BEFORE), 0);
+	} finally {
+		rmSync(outdir, { force: true, recursive: true });
+	}
+});
+
+test("a bundle bound to one connector refuses another connector's name", async () => {
+	const { entrypoint, outdir } = await bundleFixture("reddit");
+	try {
+		for (const name of ["amazon", "reddit-extra"]) {
+			await assert.rejects(
+				runBundle(
+					entrypoint,
+					name,
+					"submitted",
+					{ created_utc: IN_RANGE, id: "p1" },
+					{ since: SINCE, until: UNTIL },
+				),
+				/bound to reddit/u,
+				`name ${JSON.stringify(name)} must not pass as an unshipped fixture`,
+			);
+		}
+	} finally {
+		rmSync(outdir, { force: true, recursive: true });
+	}
+});
+
+test("a bound bundle accepts the hyphenated spelling of its connector's name", async () => {
+	const { entrypoint, outdir } = await bundleFixture("strava_browser");
+	try {
+		for (const name of ["strava-browser", "strava_browser"]) {
+			const result = await runBundle(
+				entrypoint,
+				name,
+				"activities",
+				{ id: "a1", start_date_local: "2026-09-20" },
+				{ since: "2026-09-16", until: "2026-10-01" },
+			);
+			assert.equal(
+				result.messages.filter((m) => m.type === "RECORD").length,
+				1,
+				name,
+			);
+		}
+		await assert.rejects(
+			runBundle(entrypoint, "strava", "activities", { id: "a1" }, {}),
+			/bound to strava_browser/u,
+		);
+	} finally {
+		rmSync(outdir, { force: true, recursive: true });
+	}
+});
+
+test("a bundle build fails when the connector has no slice", async () => {
+	await assert.rejects(
+		bundleFixture("no_such_connector", { expectedSlice: "" }),
+		/consent-time-field slice .*no_such_connector.*is missing/u,
+	);
+});
+
+test("a bundle build fails when the slice is stale", async () => {
+	await assert.rejects(
+		bundleFixture("reddit", {
+			expectedSlice: "// what a changed manifest would generate\n",
+		}),
+		/consent-time-field slice .*reddit.*is stale/u,
+	);
 });
