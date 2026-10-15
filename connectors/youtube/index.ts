@@ -104,10 +104,14 @@ class HistoryResponseTracker {
 	private readonly page: BrowserCollectContext["page"];
 	private readonly tokens = new Set<string>();
 	private readonly requestedTokens = new Set<string>();
-	private readonly preSeedResponses: Response[] = [];
+	private readonly preSeedResponses: Array<{
+		response: Response;
+		version: number;
+	}> = [];
 	private seeded = false;
 	private preSeedOverflow = false;
 	private evidenceVersion = 0;
+	private processedVersion = 0;
 	private latestResponse: HistoryResponseEvidence | null = null;
 	private continuationItemCount = 0;
 	private bootstrapReadable = false;
@@ -124,17 +128,17 @@ class HistoryResponseTracker {
 	private pending = Promise.resolve();
 	private readonly onResponse = (response: Response): void => {
 		if (!response.url().includes("/youtubei/v1/browse")) return;
-		this.evidenceVersion += 1;
+		const version = ++this.evidenceVersion;
 		if (!this.seeded) {
 			if (
 				this.preSeedResponses.length <
 				HistoryResponseTracker.MAX_PRESEED_RESPONSES
 			)
-				this.preSeedResponses.push(response);
+				this.preSeedResponses.push({ response, version });
 			else this.preSeedOverflow = true;
 			return;
 		}
-		this.enqueue(response);
+		this.enqueue(response, version);
 	};
 
 	constructor(page: BrowserCollectContext["page"]) {
@@ -152,8 +156,8 @@ class HistoryResponseTracker {
 			if (token.length > 0 && token.length <= 4096) this.tokens.add(token);
 		this.bootstrapTokenCount = this.tokens.size;
 		this.seeded = true;
-		for (const response of this.preSeedResponses.splice(0))
-			this.enqueue(response);
+		for (const queued of this.preSeedResponses.splice(0))
+			this.enqueue(queued.response, queued.version);
 	}
 
 	get diagnostics() {
@@ -187,6 +191,10 @@ class HistoryResponseTracker {
 		return !this.preSeedOverflow;
 	}
 
+	get allArrivalsProcessed(): boolean {
+		return this.processedVersion === this.evidenceVersion;
+	}
+
 	async flush(): Promise<void> {
 		await this.pending;
 	}
@@ -195,10 +203,17 @@ class HistoryResponseTracker {
 		this.page.off("response", this.onResponse);
 	}
 
-	private enqueue(response: Response): void {
+	private enqueue(response: Response, version: number): void {
 		this.pending = this.pending
-			.then(() => this.inspect(response))
-			.catch(() => undefined);
+			.then(async () => {
+				try {
+					await this.inspect(response);
+				} catch {
+					// Keep the response chain alive when one body cannot be inspected.
+				} finally {
+					this.processedVersion = Math.max(this.processedVersion, version);
+				}
+			});
 	}
 
 	private async inspect(response: Response): Promise<void> {
@@ -1229,14 +1244,21 @@ async function readHistoryVideoList(
 	let stableEnd = false;
 	for (let refresh = 0; refresh < 3; refresh += 1) {
 		await responseTracker.flush();
-		const versionBeforeRead = responseTracker.version;
+		if (!responseTracker.allArrivalsProcessed) continue;
+		const snapshot = {
+			version: responseTracker.version,
+			latest: responseTracker.latest,
+		};
 		currentEnd = await page.evaluate(readListEndInBrowser, {
 			kind: "history" as const,
 			sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
-			latestHistoryResponse: responseTracker.latest,
+			latestHistoryResponse: snapshot.latest,
 		});
 		await responseTracker.flush();
-		if (responseTracker.version === versionBeforeRead) {
+		if (
+			responseTracker.version === snapshot.version &&
+			responseTracker.allArrivalsProcessed
+		) {
 			stableEnd = true;
 			break;
 		}

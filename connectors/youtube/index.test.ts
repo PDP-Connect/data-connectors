@@ -1557,6 +1557,21 @@ class DocumentPage {
 	private readonly historyResponseOnReadListEnd:
 		| { readNumber: number; requested: string; next: string | null }
 		| undefined;
+	private readonly historyResponseAfterReadListEnd:
+		| {
+				readNumber: number;
+				requested: string;
+				next: string | null;
+				initialRequest?: boolean;
+				duringJson?: {
+					requested: string;
+					next: string | null;
+					initialRequest?: boolean;
+					jsonDelayMs?: number;
+				};
+				jsonDelayMs?: number;
+			}
+		| undefined;
 	private readListEndCount = 0;
 	private pendingHistoryScroll = false;
 	constructor(
@@ -1576,6 +1591,19 @@ class DocumentPage {
 				requested: string;
 				next: string | null;
 			};
+			historyResponseAfterReadListEnd?: {
+				readNumber: number;
+				requested: string;
+				next: string | null;
+				initialRequest?: boolean;
+				duringJson?: {
+					requested: string;
+					next: string | null;
+					initialRequest?: boolean;
+					jsonDelayMs?: number;
+				};
+				jsonDelayMs?: number;
+			};
 		} = {},
 	) {
 		this.pageFor = pageFor;
@@ -1583,6 +1611,8 @@ class DocumentPage {
 		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
 		this.historyResponsesOnGoto = options.historyResponsesOnGoto ?? [];
 		this.historyResponseOnReadListEnd = options.historyResponseOnReadListEnd;
+		this.historyResponseAfterReadListEnd =
+			options.historyResponseAfterReadListEnd;
 	}
 	on(_event: "response", listener: (response: never) => void): this {
 		this.responseListeners.add(listener);
@@ -1597,7 +1627,20 @@ class DocumentPage {
 		for (const response of this.historyResponsesOnGoto.splice(0))
 			this.emitHistoryResponse(response.requested, response.next);
 	}
-	private emitHistoryResponse(requested: string, next: string | null): void {
+	private emitHistoryResponse(
+		requested: string,
+		next: string | null,
+		options: {
+			jsonDelayMs?: number;
+			initialRequest?: boolean;
+			duringJson?: {
+				requested: string;
+				next: string | null;
+				initialRequest?: boolean;
+				jsonDelayMs?: number;
+			};
+		} = {},
+	): void {
 		const continuationItems = next
 			? [
 					{
@@ -1609,13 +1652,40 @@ class DocumentPage {
 			: [];
 		const response = {
 			url: () => "https://www.youtube.com/youtubei/v1/browse",
-			request: () => ({ postDataJSON: () => ({ continuation: requested }) }),
-			status: () => 200,
-			json: async () => ({
-				onResponseReceivedActions: [
-					{ appendContinuationItemsAction: { continuationItems } },
-				],
+			request: () => ({
+				postDataJSON: () => options.initialRequest
+					? { browseId: "FEhistory" }
+					: { continuation: requested },
 			}),
+			status: () => 200,
+			json: async () => {
+				if (options.jsonDelayMs)
+					await new Promise((resolve) =>
+						setTimeout(resolve, options.jsonDelayMs),
+					);
+				if (options.duringJson) {
+					await new Promise((resolve) =>
+						setTimeout(resolve, options.duringJson?.jsonDelayMs ?? 0),
+					);
+					this.emitHistoryResponse(
+						options.duringJson.requested,
+						options.duringJson.next,
+						{
+							...(options.duringJson.initialRequest !== undefined
+								? { initialRequest: options.duringJson.initialRequest }
+								: {}),
+							...(options.duringJson.jsonDelayMs !== undefined
+								? { jsonDelayMs: options.duringJson.jsonDelayMs }
+								: {}),
+						},
+					);
+				}
+				return {
+					onResponseReceivedActions: [
+						{ appendContinuationItemsAction: { continuationItems } },
+					],
+				};
+			},
 		};
 		for (const listener of this.responseListeners) listener(response as never);
 	}
@@ -1673,6 +1743,22 @@ class DocumentPage {
 				return Boolean(document.querySelector("button#avatar-btn"));
 			return fn(arg);
 		});
+		if (
+			fn.name === "readListEnd" &&
+			this.readListEndCount ===
+				this.historyResponseAfterReadListEnd?.readNumber
+		) {
+			const response = this.historyResponseAfterReadListEnd;
+			this.emitHistoryResponse(response.requested, response.next, {
+				...(response.initialRequest !== undefined
+					? { initialRequest: response.initialRequest }
+					: {}),
+				...(response.jsonDelayMs !== undefined
+					? { jsonDelayMs: response.jsonDelayMs }
+					: {}),
+				...(response.duringJson ? { duringJson: response.duringJson } : {}),
+			});
+		}
 		if (
 			fn.toString().includes("scrollable=Array.from(document.querySelectorAll")
 		)
@@ -1978,6 +2064,39 @@ test("history completion is revoked when the final refresh receives a continuati
 				readNumber: 3,
 				requested: "bootstrap-C",
 				next: "continuation-D",
+			},
+		},
+	);
+	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.equal(
+		messages.some(
+			(message) =>
+				message.type === "STATE" &&
+				(message.cursor as Record<string, unknown>)?.complete === true,
+		),
+		false,
+	);
+});
+
+test("final history refresh rechecks a response that arrives while its flush is pending", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { messages, outcome } = await collectFromDocuments(
+		() => `${historyCards(videoIds)}${historyBootstrap(videoIds)}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponseAfterReadListEnd: {
+				readNumber: 3,
+				requested: "initial-history-request",
+				next: null,
+				initialRequest: true,
+				duringJson: {
+					requested: "invalidating-history-request",
+					next: "continuation-D",
+					initialRequest: true,
+					jsonDelayMs: 30,
+				},
 			},
 		},
 	);
