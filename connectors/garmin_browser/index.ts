@@ -17,6 +17,7 @@ import {
 	type EnsureSessionArgs,
 	politeDelay,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -1340,15 +1341,24 @@ export async function collectGarminBrowser(
 				? "source_limit_reached"
 				: null;
 		if (reason) {
-			await ctx.emit({
-				type: "SKIP_RESULT",
-				stream,
-				reason: SKIP_REASON[reason],
-				recovery_hint: hintFor(reason),
-				message:
-					walk.failure?.message ??
-					"Read as much as one run allows; the next run continues from the saved day.",
-			});
+			// Resume-safe: walkDays and walkWindows return on a failure or a spent budget before
+			// mark() and advance() touch the day or window not read, so next_day, backfill.next_day
+			// and retry_next stay at it (or at the previous checkpoint, inside the overlap), and a
+			// kept day not read again stays in `retry`. Segments not reached keep their saved place.
+			await ctx.emit(
+				resumeSafeSkip(
+					{
+						type: "SKIP_RESULT",
+						stream,
+						reason: SKIP_REASON[reason],
+						recovery_hint: hintFor(reason),
+						message:
+							walk.failure?.message ??
+							"Read as much as one run allows; the next run continues from the saved day.",
+					},
+					"cursor_at_or_before_loss",
+				),
+			);
 		}
 		if (walk.progressed > 0 || !walk.failure) {
 			await ctx.emit({ type: "STATE", stream, cursor: { ...plan.cursor } });

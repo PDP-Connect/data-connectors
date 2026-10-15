@@ -336,6 +336,7 @@ test("malformed middle line preserves later records and durable gap on rerun", a
 		line_number: 2,
 		byte_offset: Buffer.byteLength(prefix),
 		reason: "malformed_jsonl_line",
+		resume_safe: "cursor_records_loss",
 	});
 	const second = await run({ ...source, state: first.states });
 	assert.equal(second.records.length, 0);
@@ -1441,6 +1442,7 @@ test("null mid-file declares a gap and keeps UUID keys stable after source repai
 		line_number: 2,
 		byte_offset: Buffer.byteLength(prefix),
 		reason: "non_object_jsonl_record",
+		resume_safe: "cursor_records_loss",
 	});
 	const firstKeys = first.records
 		.filter((record) => record.stream === "messages")
@@ -1577,7 +1579,10 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				"the sessions and children passes must report one file gap per stream",
 			);
 			assert.ok(gaps[0]?.type === "SKIP_RESULT");
-			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			assert.deepEqual(gaps[0].diagnostics, {
+				...expectedGap,
+				resume_safe: "cursor_at_or_before_loss",
+			});
 			const before = initial.states[stream] as {
 				file_cursors: Record<string, unknown>;
 			};
@@ -1779,7 +1784,10 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				"each requested transcript stream must declare one directory gap across discovery passes",
 			);
 			assert.ok(gaps[0]?.type === "SKIP_RESULT");
-			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			assert.deepEqual(gaps[0].diagnostics, {
+				...expectedGap,
+				resume_safe: "cursor_at_or_before_loss",
+			});
 			assert.ok(
 				denied.messages.indexOf(gaps[0]) <
 					denied.messages.findIndex(
@@ -1840,7 +1848,10 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 			);
 			assert.equal(gaps.length, 1);
 			assert.ok(gaps[0]?.type === "SKIP_RESULT");
-			assert.deepEqual(gaps[0].diagnostics, expectedGap);
+			assert.deepEqual(gaps[0].diagnostics, {
+				...expectedGap,
+				resume_safe: "cursor_at_or_before_loss",
+			});
 			const cursor = retried.states[stream] as {
 				file_cursors: Record<string, unknown>;
 				session_aggregates?: Record<string, unknown>;
@@ -1970,7 +1981,10 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 					(gap) => gap.reason === "malformed_jsonl_line",
 				);
 				assert.equal(gaps.length, 1);
-				assert.deepEqual(gaps[0]?.diagnostics, lineGap);
+				assert.deepEqual(gaps[0]?.diagnostics, {
+					...lineGap,
+					resume_safe: "cursor_records_loss",
+				});
 			}
 		};
 		assertLineGap(initial);
@@ -1998,6 +2012,7 @@ for (const transcriptStreams of [["sessions", "messages"], ["messages"]]) {
 				path: deniedDir,
 				reason: "source_directory_read_error",
 				error_code: "EACCES",
+				resume_safe: "cursor_at_or_before_loss",
 			});
 		}
 		const repeatedDenied = await run({
@@ -2144,7 +2159,11 @@ test("transcript symlinks report targets without following outside sources and r
 				gaps.some(
 					(gap) =>
 						JSON.stringify(gap.diagnostics) ===
-						JSON.stringify({ path, target_path }),
+						JSON.stringify({
+							path,
+							target_path,
+							resume_safe: "cursor_at_or_before_loss",
+						}),
 				),
 			);
 		assert.ok(
@@ -2269,7 +2288,11 @@ test("dangling transcript and session-directory symlinks report gaps on every ru
 				);
 				assert.ok(gap);
 				assert.equal(gap.reason, "symlink_skipped");
-				assert.deepEqual(gap.diagnostics, { path, target_path });
+				assert.deepEqual(gap.diagnostics, {
+					path,
+					target_path,
+					resume_safe: "cursor_at_or_before_loss",
+				});
 			}
 		}
 	};

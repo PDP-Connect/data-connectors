@@ -12455,13 +12455,23 @@ test("runConversationsAndMessagesStreams: a cursor jump in the walk is not a con
 		),
 		"a non-contiguous walk reports the list as unstable",
 	);
-	const state = harness.protocolMessages.find(
-		(m): m is Extract<EmittedMessage, { type: "STATE" }> => m.type === "STATE",
+	// The connector's backfill would resume at the end of the walk, past the
+	// skipped middle, so the skip carries no resume-safe declaration and the
+	// runtime withholds the STATE: the previous checkpoint (none) stays and the
+	// next run reads the whole list again.
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "STATE"),
+		false,
+		"a walk that skipped cursor positions saves no cursor",
 	);
-	assert.notEqual(
-		(state?.cursor as { backfill?: unknown } | undefined)?.backfill,
-		undefined,
-		"the walk stays incomplete, so the backfill is kept",
+	assert.ok(
+		harness.protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.stream === "conversations" &&
+				m.reason === "stream_incomplete_checkpoint_withheld",
+		),
+		"the runtime reports the withheld checkpoint",
 	);
 });
 

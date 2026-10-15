@@ -77,6 +77,7 @@ import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/conn
 import {
 	type EmittedMessage,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -395,12 +396,22 @@ async function emitMessageRows({
 		}
 	}
 	if (skippedNullDate > 0) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "messages",
-			reason: "message_date_unusable",
-			message: `Skipped ${skippedNullDate} message(s) with a missing or unusable date; they cannot be placed on the date cursor without fabricating a timestamp.`,
-		});
+		// Every row skipped here was selected by queryMessageRows' WHERE
+		// `m.date > ? OR m.date IS NULL` without a finite numeric date: NULL
+		// matches `IS NULL`, and TEXT/BLOB/+Infinity sort above any finite
+		// `since`. `last_apple_date` only advances from emitted (finite) rows,
+		// so the next run selects these rows again whatever the cursor says.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "messages",
+					reason: "message_date_unusable",
+					message: `Skipped ${skippedNullDate} message(s) with a missing or unusable date; they cannot be placed on the date cursor without fabricating a timestamp.`,
+				},
+				"read_ignores_cursor_for_loss",
+			),
+		);
 	}
 	return latestApple;
 }
@@ -822,13 +833,20 @@ if (isMainModule(import.meta.url)) {
 				await progress("Reading chat participants", { stream: "participants" });
 				const emitted = await emitParticipantRows({ db, emitRecord });
 				if (emitted === 0 && !tableExists(db, "chat_handle_join")) {
-					await emit({
-						type: "SKIP_RESULT",
-						stream: "participants",
-						reason: "chat_handle_join_table_missing",
-						message:
-							"This chat.db does not expose a chat_handle_join table; group-chat participant modeling is unavailable on this schema version.",
-					});
+					// queryParticipantRows is a full scan that never reads the
+					// `synced_at` cursor, so the next run reads every row again.
+					await emit(
+						resumeSafeSkip(
+							{
+								type: "SKIP_RESULT",
+								stream: "participants",
+								reason: "chat_handle_join_table_missing",
+								message:
+									"This chat.db does not expose a chat_handle_join table; group-chat participant modeling is unavailable on this schema version.",
+							},
+							"read_ignores_cursor_for_loss",
+						),
+					);
 				}
 				await emit({
 					type: "STATE",
@@ -858,13 +876,20 @@ if (isMainModule(import.meta.url)) {
 					progress,
 				});
 				if (emitted === 0 && !hasAttachmentTables) {
-					await emit({
-						type: "SKIP_RESULT",
-						stream: "attachments",
-						reason: "attachment_tables_missing",
-						message:
-							"This chat.db does not expose attachment/message_attachment_join tables; attachment hydration is unavailable on this schema version.",
-					});
+					// queryAttachmentRows is a full scan that never reads the
+					// `synced_at` cursor, so the next run reads every row again.
+					await emit(
+						resumeSafeSkip(
+							{
+								type: "SKIP_RESULT",
+								stream: "attachments",
+								reason: "attachment_tables_missing",
+								message:
+									"This chat.db does not expose attachment/message_attachment_join tables; attachment hydration is unavailable on this schema version.",
+							},
+							"read_ignores_cursor_for_loss",
+						),
+					);
 				}
 				await emit({
 					type: "STATE",
