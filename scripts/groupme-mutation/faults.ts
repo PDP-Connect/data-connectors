@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 export type GroupMeFault = {
 	id: "page-ceiling" | "ascending-order-weakening";
 	target: "connectors/groupme/index.ts";
