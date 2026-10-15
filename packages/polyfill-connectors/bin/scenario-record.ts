@@ -289,9 +289,57 @@ import {
 	type RawTraceMessage,
 } from "../src/scenario/verify.ts";
 import { assertKnownMessageType } from "../src/scenario/wire-registry.ts";
+import {
+	type RecordCliEnvelope,
+	SCENARIO_CLI_JSON_SCHEMA,
+	writeCliJsonResult,
+	writeCliText,
+} from "./scenario-cli-json.ts";
 
 const REPO_ENV_LOCAL = join(REPO_ROOT, ".env.local");
 dotenvConfig({ path: REPO_ENV_LOCAL, quiet: true });
+
+function hasJsonMode(argv: readonly string[]): boolean {
+	const valueFlags = new Set([
+		"--answer",
+		"--answers",
+		"--entrypoint",
+		"--out",
+		"--runs",
+		"--streams",
+		"--timeout",
+	]);
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		if (arg === "--json" || arg?.startsWith("--json=")) {
+			return true;
+		}
+		if (arg && valueFlags.has(arg)) {
+			i += 1;
+		}
+	}
+	return false;
+}
+
+const JSON_MODE = hasJsonMode(process.argv.slice(2));
+let jsonResult: RecordCliEnvelope = {
+	schema: SCENARIO_CLI_JSON_SCHEMA,
+	command: "scenario-record",
+	status: "failure",
+	exit_code: 1,
+	result: {
+		kind: "record",
+		outcome: "failed",
+		failure_code: "recording_failed",
+		runs: null,
+		scenario_path: null,
+		capture_complete: null,
+	},
+};
+
+function writeHumanOutput(text: string): void {
+	writeCliText(text, JSON_MODE);
+}
 
 // A `.env.local` placed next to the package (rather than at the repo root this
 // file actually loads from) is a silent misconfiguration: credentials never
@@ -765,7 +813,46 @@ function usageAndExit(code: number): never {
 	process.stderr.write(
 		`Known connectors: ${KNOWN_CONNECTOR_NAMES.join(", ")}\n`,
 	);
+	if (JSON_MODE) {
+		jsonResult = {
+			schema: SCENARIO_CLI_JSON_SCHEMA,
+			command: "scenario-record",
+			status: "usage_error",
+			exit_code: code === 2 ? 2 : 1,
+			result: {
+				kind: "record",
+				outcome: "failed",
+				failure_code: "invalid_arguments",
+				runs: null,
+				scenario_path: null,
+				capture_complete: null,
+			},
+		};
+		writeCliJsonResult(jsonResult);
+	}
 	process.exit(code);
+}
+
+function printHelp(): void {
+	writeHumanOutput(
+		"Usage: scenario-record <connector> [options]\n" +
+			"\n" +
+			"Options:\n" +
+			"  --help                         Show this help and exit.\n" +
+			"  --json                         Write one versioned JSON result to stdout.\n" +
+			"  --runs 1|2                     Number of runs (default: 2).\n" +
+			"  --out <path>                   Scenario output path (default: timestamped runs/<connector>/ path).\n" +
+			"  --entrypoint <path>            Local/test connector entrypoint override.\n" +
+			"  --answer <key>=<value>         Answer a prompt; repeatable. --answers takes precedence for duplicate keys.\n" +
+			"  --answers <json-file>          Read prompt answers from a JSON object.\n" +
+			"  --persist-otp                  Persist OTP answers verbatim (default: redacted).\n" +
+			"  --streams <name,name,...>      Restrict runs to these streams.\n" +
+			"  --timeout <seconds>            Inactivity timeout (default: 300; positive integer).\n" +
+			"  --record-har                   Capture browser HTTP traffic and storage state.\n" +
+			"\n" +
+			"Exit codes: 0 complete capture; 1 recording failure/incomplete capture; 2 usage error.\n" +
+			"With --json, diagnostics go to stderr and stdout contains one JSON result.\n",
+	);
 }
 
 interface MutableArgs {
@@ -940,13 +1027,16 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 				continue;
 			}
 		}
+		if (arg === "--json") {
+			continue;
+		}
 		if (arg === "--persist-otp") {
 			parsed.persistOtp = true;
 			// Justification requirement (P2-1): verbatim OTP persistence is an
 			// explicit, printed opt-in decision the caller must own — never a
 			// silent flag flip. Printed immediately at parse time so it appears
 			// even if the run later fails before reaching any summary output.
-			process.stdout.write(
+			writeHumanOutput(
 				"persisting OTP verbatim: caller asserts single-use/expired semantics for this provider\n",
 			);
 			continue;
@@ -2251,7 +2341,7 @@ async function captureRuns(
 	// Read once per capture: both runs must hash under the SAME projection, and
 	// `scenario-verify` reads the same declaration when it recomputes.
 	const excludedComparisonFields = readExcludedComparisonFields(args.connector);
-	process.stdout.write(
+	writeHumanOutput(
 		`RECORDING ${args.connector} — run 1 (full refresh, state=null)\n`,
 	);
 	const run1StartedAt = new Date().toISOString();
@@ -2308,7 +2398,7 @@ async function captureRuns(
 	}
 
 	if (complete && args.runs === 2) {
-		process.stdout.write(
+		writeHumanOutput(
 			`RECORDING ${args.connector} — run 2 (incremental, ${summarizeSeededState(run1.finalState)})\n`,
 		);
 		const run2StartedAt = new Date().toISOString();
@@ -2589,12 +2679,12 @@ function printCaptureSummary(outPath: string, built: BuiltScenario): void {
 		? scenario.normalizers.map((n) => n.param).join(", ")
 		: "(none)";
 
-	process.stdout.write(`\nwrote scenario to: ${outPath}\n`);
-	process.stdout.write(`runs captured: ${runs.length}\n`);
-	process.stdout.write(`interactions recorded: ${interactionCount}\n`);
-	process.stdout.write(`user_interactions recorded: ${userInteractionCount}\n`);
-	process.stdout.write(`normalizers: ${normalizerText}\n`);
-	process.stdout.write(`complete: ${String(capture.complete)}\n`);
+	writeHumanOutput(`\nwrote scenario to: ${outPath}\n`);
+	writeHumanOutput(`runs captured: ${runs.length}\n`);
+	writeHumanOutput(`interactions recorded: ${interactionCount}\n`);
+	writeHumanOutput(`user_interactions recorded: ${userInteractionCount}\n`);
+	writeHumanOutput(`normalizers: ${normalizerText}\n`);
+	writeHumanOutput(`complete: ${String(capture.complete)}\n`);
 	// P1-2 (repair wave 3A, formerly FIX 3's "non-loopback honesty"):
 	// `non_loopback_contact_observed` observes non-loopback contact, not a
 	// verified provider identity — the printed line must not imply more than
@@ -2605,18 +2695,18 @@ function printCaptureSummary(outPath: string, built: BuiltScenario): void {
 		evidenceClass === "non_loopback_contact_observed"
 			? "non_loopback_contact_observed (remote contact proven; provider authority policy not yet enforced - derived-from-real is withheld until it is)"
 			: evidenceClass;
-	process.stdout.write(
+	writeHumanOutput(
 		`evidence_class: ${evidenceClassLine} — ${evidenceReason}\n`,
 	);
-	process.stdout.write(
+	writeHumanOutput(
 		`provider_contact: authorities=[${providerContact.authorities.join(", ")}] completed_requests=${String(
 			providerContact.completed_requests,
 		)} loopback_only=${String(providerContact.loopback_only)} observed=${String(providerContact.observed)}\n`,
 	);
-	process.stdout.write(
+	writeHumanOutput(
 		`declaration_digest: ${declarationDigest ?? "(none — no bound manifest, e.g. --entrypoint override)"}\n`,
 	);
-	process.stdout.write(
+	writeHumanOutput(
 		`source_digest: ${sourceDigest ?? "(none — no bound connector directory, e.g. --entrypoint override)"}\n`,
 	);
 }
@@ -2642,23 +2732,23 @@ function printBrowserCaptureSummary(
 		return;
 	}
 	const scenarioDir = dirname(outPath);
-	process.stdout.write("\nbrowser HAR capture:\n");
+	writeHumanOutput("\nbrowser HAR capture:\n");
 	for (const { run, index } of browserRuns) {
 		const network = run.environment?.network;
 		if (network?.driver !== "recorded-browser") {
 			continue;
 		}
-		process.stdout.write(
+		writeHumanOutput(
 			`  run ${String(index + 1)}: HAR=${join(scenarioDir, network.har_path)} ` +
 				`(${String(network.har_entry_count)} entries) storageState=${join(scenarioDir, network.storage_state_path)}\n`,
 		);
 	}
-	process.stdout.write(
+	writeHumanOutput(
 		"  redacted from the HAR: Cookie/Set-Cookie headers, Authorization headers, x-csrf-token/x-xsrf-token headers, " +
 			"HAR cookies[] entries (both request and response sides), and form-encoded POST fields whose name looks like a " +
 			"credential (password/secret/token/otp/pin) — header/cookie NAMES are kept, values replaced with a placeholder.\n",
 	);
-	process.stdout.write(
+	writeHumanOutput(
 		"  NOT redacted: response/request BODY content (JSON bodies, non-form POST data) and the storageState file, " +
 			"which is deliberately UNREDACTED (a session cookie's value IS the credential replay needs) — see " +
 			"src/browser-launch.ts's `storageStateRecording` doc comment. Treat both HAR and storageState files as " +
@@ -2711,7 +2801,7 @@ function reportFilesystemInputForRecord(args: CliArgs): boolean {
 		return true;
 	}
 	if (!process.env[declared.envVar]?.trim()) {
-		process.stdout.write(
+		writeHumanOutput(
 			`filesystem input: ${declared.envVar} not set - the connector will read its default location, ` +
 				`and scenario-verify will require ${declared.envVar} pointing at the same input\n`,
 		);
@@ -2719,7 +2809,7 @@ function reportFilesystemInputForRecord(args: CliArgs): boolean {
 	}
 	try {
 		const input = resolveFilesystemInput(args.connector, declared, process.env);
-		process.stdout.write(
+		writeHumanOutput(
 			`filesystem input: ${input.envVar}=${input.path} (${String(input.acceptedFileCount)} input file(s))\n`,
 		);
 		return true;
@@ -2733,7 +2823,26 @@ function reportFilesystemInputForRecord(args: CliArgs): boolean {
 }
 
 async function main(): Promise<void> {
-	const args = parseArgs(process.argv.slice(2));
+	const argv = process.argv.slice(2);
+	if (argv.includes("--help")) {
+		printHelp();
+		jsonResult = {
+			schema: SCENARIO_CLI_JSON_SCHEMA,
+			command: "scenario-record",
+			status: "success",
+			exit_code: 0,
+			result: {
+				kind: "record",
+				outcome: "help",
+				failure_code: null,
+				runs: null,
+				scenario_path: null,
+				capture_complete: null,
+			},
+		};
+		return;
+	}
+	const args = parseArgs(argv);
 	let resolved: ResolvedConnector;
 	try {
 		resolved = resolveConnector(args);
@@ -2743,6 +2852,7 @@ async function main(): Promise<void> {
 		// failure (e.g. Unknown connector, above).
 		const message = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`[scenario-record] FATAL: ${message}\n`);
+		jsonResult.result.failure_code = "recording_failed";
 		process.exitCode = 1;
 		return;
 	}
@@ -2765,8 +2875,9 @@ async function main(): Promise<void> {
 	// this repair wave is about (never silently claiming a stronger isolation
 	// guarantee than what actually happened) also covers the one CLI that
 	// intentionally has none.
-	process.stdout.write("recording network: live (unisolated by design)\n");
+	writeHumanOutput("recording network: live (unisolated by design)\n");
 	if (!reportFilesystemInputForRecord(args)) {
+		jsonResult.result.failure_code = "recording_failed";
 		process.exitCode = 1;
 		return;
 	}
@@ -2816,12 +2927,26 @@ async function main(): Promise<void> {
 			outPath,
 			`${JSON.stringify(built.scenario, null, 2)}\n`,
 		);
+		jsonResult = {
+			schema: SCENARIO_CLI_JSON_SCHEMA,
+			command: "scenario-record",
+			status: captureResult.complete ? "success" : "failure",
+			exit_code: captureResult.complete ? 0 : 1,
+			result: {
+				kind: "record",
+				outcome: captureResult.complete ? "complete" : "incomplete",
+				failure_code: captureResult.complete ? null : "recording_failed",
+				runs: captureResult.runs.length,
+				scenario_path: outPath,
+				capture_complete: captureResult.complete,
+			},
+		};
 
 		printCaptureSummary(outPath, built);
 		printBrowserCaptureSummary(outPath, built.scenario.runs);
 
 		if (captureResult.complete) {
-			process.stdout.write(
+			writeHumanOutput(
 				`\nrecorded_replay candidate scenario captured ${capturedAt} (candidate oracle - see docs/reference/connector-evidence-claims.md)\n`,
 			);
 			process.exitCode = 0;
@@ -2849,20 +2974,32 @@ async function main(): Promise<void> {
 // ...])`, so `process.argv[1]` is that exact path in every case that
 // matters — this guard changes nothing for them.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-	main().catch((err: unknown) => {
-		// FIX 2: a watchdog kill is a diagnosed verdict — the subprocess was
-		// observed to be genuinely inactive for the whole window — not a crash
-		// in this CLI's own code, so it prints plainly (no stack), mirroring
-		// `bin/scenario-verify.ts`'s `ScenarioValidationError` plain-verdict
-		// pattern at this same catch site.
-		if (err instanceof WatchdogTimeoutError) {
-			process.stderr.write(`${err.message}\n`);
+	main()
+		.then(() => {
+			if (JSON_MODE) {
+				writeCliJsonResult(jsonResult);
+			}
+		})
+		.catch((err: unknown) => {
+			// FIX 2: a watchdog kill is a diagnosed verdict — the subprocess was
+			// observed to be genuinely inactive for the whole window — not a crash
+			// in this CLI's own code, so it prints plainly (no stack), mirroring
+			// `bin/scenario-verify.ts`'s `ScenarioValidationError` plain-verdict
+			// pattern at this same catch site.
+			if (err instanceof WatchdogTimeoutError) {
+				process.stderr.write(`${err.message}\n`);
+				process.exitCode = 1;
+				if (JSON_MODE) {
+					writeCliJsonResult(jsonResult);
+				}
+				return;
+			}
+			const message =
+				err instanceof Error ? (err.stack ?? err.message) : String(err);
+			process.stderr.write(`[scenario-record] FATAL: ${message}\n`);
 			process.exitCode = 1;
-			return;
-		}
-		const message =
-			err instanceof Error ? (err.stack ?? err.message) : String(err);
-		process.stderr.write(`[scenario-record] FATAL: ${message}\n`);
-		process.exitCode = 1;
-	});
+			if (JSON_MODE) {
+				writeCliJsonResult(jsonResult);
+			}
+		});
 }

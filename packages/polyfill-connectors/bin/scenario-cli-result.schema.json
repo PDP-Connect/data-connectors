@@ -1,0 +1,83 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "pdpp.connector-scenario-cli-result/1",
+	"title": "Scenario CLI result",
+	"oneOf": [
+		{
+			"type": "object",
+			"additionalProperties": true,
+			"required": ["schema", "command", "status", "exit_code", "result"],
+			"properties": {
+				"schema": { "const": "pdpp.connector-scenario-cli-result/1" },
+				"command": { "const": "scenario-record" },
+				"status": { "enum": ["success", "failure", "usage_error"] },
+				"exit_code": { "enum": [0, 1, 2] },
+				"result": {
+					"type": "object",
+					"additionalProperties": true,
+					"required": [
+						"kind",
+						"outcome",
+						"failure_code",
+						"runs",
+						"scenario_path",
+						"capture_complete"
+					],
+					"properties": {
+						"kind": { "const": "record" },
+						"outcome": { "enum": ["complete", "incomplete", "failed", "help"] },
+						"failure_code": {
+							"enum": ["invalid_arguments", "recording_failed", null]
+						},
+						"runs": { "type": ["integer", "null"], "minimum": 0 },
+						"scenario_path": { "type": ["string", "null"] },
+						"capture_complete": { "type": ["boolean", "null"] }
+					}
+				}
+			}
+		},
+		{
+			"type": "object",
+			"additionalProperties": true,
+			"required": ["schema", "command", "status", "exit_code", "result"],
+			"properties": {
+				"schema": { "const": "pdpp.connector-scenario-cli-result/1" },
+				"command": { "const": "scenario-verify" },
+				"status": { "enum": ["success", "failure", "usage_error"] },
+				"exit_code": { "enum": [0, 1, 2] },
+				"result": {
+					"type": "object",
+					"additionalProperties": true,
+					"required": [
+						"kind",
+						"outcome",
+						"failure_code",
+						"runs",
+						"failure_count",
+						"claim",
+						"claim_artifact_written"
+					],
+					"properties": {
+						"kind": { "const": "verify" },
+						"outcome": {
+							"enum": ["passed", "mismatch", "rejected", "failed", "help"]
+						},
+						"failure_code": {
+							"enum": [
+								"invalid_arguments",
+								"invalid_scenario",
+								"replay_mismatch",
+								"verification_failed",
+								null
+							]
+						},
+						"runs": { "type": ["integer", "null"], "minimum": 0 },
+						"failure_count": { "type": ["integer", "null"], "minimum": 0 },
+						"claim": { "enum": ["recorded_replay", "diagnostic_replay", null] },
+						"claim_artifact_written": { "type": ["boolean", "null"] }
+					}
+				}
+			}
+		}
+	]
+}

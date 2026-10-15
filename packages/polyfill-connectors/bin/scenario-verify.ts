@@ -184,8 +184,52 @@ import {
 	assertValidInteractionMessage,
 	driverEvidenceSatisfied,
 } from "../src/scenario/wire-registry.ts";
+import {
+	SCENARIO_CLI_JSON_SCHEMA,
+	type VerifyCliEnvelope,
+	writeCliJsonResult,
+	writeCliText,
+} from "./scenario-cli-json.ts";
 
 dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
+
+function hasJsonMode(argv: readonly string[]): boolean {
+	const valueFlags = new Set(["--dump-records", "--entrypoint", "--timeout"]);
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i];
+		if (arg === "--json") {
+			return true;
+		}
+		if (arg?.startsWith("--json=")) {
+			return true;
+		}
+		if (arg && valueFlags.has(arg)) {
+			i += 1;
+		}
+	}
+	return false;
+}
+
+const JSON_MODE = hasJsonMode(process.argv.slice(2));
+let jsonResult: VerifyCliEnvelope = {
+	schema: SCENARIO_CLI_JSON_SCHEMA,
+	command: "scenario-verify",
+	status: "failure",
+	exit_code: 1,
+	result: {
+		kind: "verify",
+		outcome: "failed",
+		failure_code: "verification_failed",
+		runs: null,
+		failure_count: null,
+		claim: null,
+		claim_artifact_written: null,
+	},
+};
+
+function writeHumanOutput(text: string): void {
+	writeCliText(text, JSON_MODE);
+}
 
 export interface CliArgs {
 	connector: string;
@@ -257,7 +301,44 @@ function usageAndExit(code: number): never {
 			"  mismatching stream, not just the mismatched ones (for diffing two\n" +
 			"  replays).\n",
 	);
+	if (JSON_MODE) {
+		jsonResult = {
+			schema: SCENARIO_CLI_JSON_SCHEMA,
+			command: "scenario-verify",
+			status: "usage_error",
+			exit_code: code === 2 ? 2 : 1,
+			result: {
+				kind: "verify",
+				outcome: "rejected",
+				failure_code: "invalid_arguments",
+				runs: null,
+				failure_count: null,
+				claim: null,
+				claim_artifact_written: null,
+			},
+		};
+		writeCliJsonResult(jsonResult);
+	}
 	process.exit(code);
+}
+
+function printHelp(): void {
+	writeHumanOutput(
+		"Usage: scenario-verify <connector> <scenario-path> [options]\n" +
+			"\n" +
+			"Options:\n" +
+			"  --help                           Show this help and exit.\n" +
+			"  --entrypoint <path>              Local/test connector entrypoint override.\n" +
+			"  --require-capture-source         Reject source or declaration digest drift (default: off).\n" +
+			"  --json <claim-path>              Write the existing pdpp.connector-claim/1 file on pass and enable one JSON result on stdout.\n" +
+			"  --timeout <seconds>              Inactivity timeout (default: 300; positive integer).\n" +
+			"  --dump-records <dir>             Dump mismatched records; overrides PDPP_SCENARIO_DUMP_DIR.\n" +
+			"  --dump-all-records               With dumping active, include every record in a mismatching stream.\n" +
+			"\n" +
+			"Exit codes: 0 replay passed; 1 invalid scenario or replay failure; 2 usage error.\n" +
+			"With --json, diagnostics go to stderr and stdout contains one versioned JSON result.\n" +
+			"The claim file remains pdpp.connector-claim/1; it is separate from the CLI result schema.\n",
+	);
 }
 
 const POSITIVE_INTEGER_RE = /^\d+$/;
@@ -563,7 +644,7 @@ function reportCaptureSourceDigests(
 	scenario: ConnectorScenario,
 ): CaptureSourceDigestObservation {
 	if (args.entrypoint) {
-		process.stdout.write(
+		writeHumanOutput(
 			"source binding: unbound diagnostic replay (no digests) — --entrypoint override\n",
 		);
 		return {
@@ -614,14 +695,14 @@ function reportCaptureSourceDigests(
 		declarationDiffers || sourceDiffers
 			? ", differs - replaying against changed code"
 			: "";
-	process.stdout.write(
+	writeHumanOutput(
 		`captured_with source: ${formatDigestForReport(capturedSource)}, verified subject source: ${formatDigestForReport(currentSource)}${differsSuffix}\n`,
 	);
 	if (capturedDeclaration !== undefined || currentDeclaration !== undefined) {
 		const declDiffersSuffix = declarationDiffers
 			? ", differs - manifest changed since capture"
 			: "";
-		process.stdout.write(
+		writeHumanOutput(
 			`captured_with declaration: ${formatDigestForReport(capturedDeclaration)}, verified subject declaration: ${formatDigestForReport(currentDeclaration)}${declDiffersSuffix}\n`,
 		);
 	}
@@ -717,12 +798,12 @@ export function assertNoPostRunSourceMutation(
 		return false;
 	}
 	if (declarationMutated) {
-		process.stdout.write(
+		writeHumanOutput(
 			`POST-RUN INTEGRITY: manifest declaration changed DURING this run — pre-flight ${formatDigestForReport(digestObservation.preflightDeclarationDigest)}, post-run ${formatDigestForReport(postRunDeclaration)} (manifests/${args.connector}.json was mutated after being hashed and before/during replay)\n`,
 		);
 	}
 	if (sourceMutated) {
-		process.stdout.write(
+		writeHumanOutput(
 			`POST-RUN INTEGRITY: connector source changed DURING this run — pre-flight ${formatDigestForReport(digestObservation.preflightSourceDigest)}, post-run ${formatDigestForReport(postRunSource)} (connectors/${args.connector}/ was mutated after being hashed and before/during replay — recorded_replay is withheld, the claim would no longer describe the code that actually ran)\n`,
 		);
 	}
@@ -1625,7 +1706,7 @@ function streamNamesFromScenario(
 function printFailures(failures: readonly VerifyFailure[]): void {
 	for (const f of failures) {
 		const streamTag = f.stream ? ` [${f.stream}]` : "";
-		process.stdout.write(
+		writeHumanOutput(
 			`    - run ${String(f.runIndex)}${streamTag} ${f.kind}: ${f.detail}\n`,
 		);
 	}
@@ -1696,12 +1777,12 @@ function writeMismatchDumps(
 			mode: 0o600,
 		});
 		chmodSync(filePath, 0o600);
-		process.stdout.write(
+		writeHumanOutput(
 			`  dumped ${String(records.length)} mismatched record(s) to ${filePath}\n`,
 		);
 	}
 	if (dirCreated) {
-		process.stdout.write(
+		writeHumanOutput(
 			"  WARNING: dump directory contains collected personal data - do not commit or share it\n",
 		);
 	}
@@ -1820,9 +1901,9 @@ function writeClaimRecord(
 	capturedAt: string,
 	digestObservation: CaptureSourceDigestObservation,
 	filesystemInput: ResolvedFilesystemInput | undefined,
-): void {
+): boolean | null {
 	if (!args.jsonPath) {
-		return;
+		return null;
 	}
 	// `ClaimDecision` carries limitations only on the withheld branch — the
 	// type makes "recorded_replay with caveats" unrepresentable, and this
@@ -1870,10 +1951,12 @@ function writeClaimRecord(
 		writeFileSync(args.jsonPath, `${JSON.stringify(record, null, 2)}\n`, {
 			mode: 0o600,
 		});
+		return true;
 	} catch (err) {
 		process.stderr.write(
 			`[scenario-verify] could not write --json ${args.jsonPath}: ${err instanceof Error ? err.message : String(err)}\n`,
 		);
+		return false;
 	}
 }
 
@@ -1896,7 +1979,7 @@ function printStreamCoverageLine(
 	const missing = declared.filter((name) => !exercised.has(name));
 	const missingSuffix =
 		missing.length > 0 ? ` (missing: ${missing.join(", ")})` : "";
-	process.stdout.write(
+	writeHumanOutput(
 		`streams exercised: ${String(exercised.size)} of ${String(declared.length)} declared${missingSuffix}\n`,
 	);
 }
@@ -1957,7 +2040,7 @@ function printReplayTimeBanner(
 ): void {
 	const line = replayTimeBannerLine(declaredDrivers);
 	if (line) {
-		process.stdout.write(`${line}\n`);
+		writeHumanOutput(`${line}\n`);
 	}
 }
 
@@ -2031,9 +2114,36 @@ function resolveDeclaredFilesystemInputForVerify(
 }
 
 async function main(): Promise<void> {
-	const args = parseArgs(process.argv.slice(2));
+	const argv = process.argv.slice(2);
+	if (argv.includes("--help")) {
+		printHelp();
+		jsonResult = {
+			schema: SCENARIO_CLI_JSON_SCHEMA,
+			command: "scenario-verify",
+			status: "success",
+			exit_code: 0,
+			result: {
+				kind: "verify",
+				outcome: "help",
+				failure_code: null,
+				runs: null,
+				failure_count: null,
+				claim: null,
+				claim_artifact_written: null,
+			},
+		};
+		return;
+	}
+	const args = parseArgs(argv);
 	const connectorPath = resolveConnectorPath(args);
-	const scenario = loadScenario(args.scenarioPath);
+	let scenario: ConnectorScenario;
+	try {
+		scenario = loadScenario(args.scenarioPath);
+	} catch (err) {
+		jsonResult.result.failure_code = "invalid_scenario";
+		jsonResult.result.outcome = "rejected";
+		throw err;
+	}
 
 	// Manifest-declared filesystem input (upload-style connectors), resolved
 	// and presence-guarded in the pre-flight tier below — see
@@ -2053,14 +2163,29 @@ async function main(): Promise<void> {
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
+		jsonResult = {
+			schema: SCENARIO_CLI_JSON_SCHEMA,
+			command: "scenario-verify",
+			status: "failure",
+			exit_code: 1,
+			result: {
+				kind: "verify",
+				outcome: "rejected",
+				failure_code: "verification_failed",
+				runs: scenario.runs.length,
+				failure_count: null,
+				claim: null,
+				claim_artifact_written: null,
+			},
+		};
 		process.exitCode = 1;
 		return;
 	}
 
-	process.stdout.write(
+	writeHumanOutput(
 		`VERIFYING ${args.connector} against ${args.scenarioPath}\n`,
 	);
-	process.stdout.write(`  runs: ${String(scenario.runs.length)}\n`);
+	writeHumanOutput(`  runs: ${String(scenario.runs.length)}\n`);
 	// FIX 5: prints the declared driver(s) — "recorded-http" and/or
 	// "recorded-browser" for every run this build's recorders produce, or
 	// "(none declared)" for a legacy scenario with no `environment` field at
@@ -2074,7 +2199,7 @@ async function main(): Promise<void> {
 				),
 		),
 	];
-	process.stdout.write(
+	writeHumanOutput(
 		`  driver: ${declaredDrivers.length > 0 ? declaredDrivers.join(", ") : "(none declared)"}\n`,
 	);
 	// A recorded-browser run's traffic is already fully captured (HAR), so
@@ -2084,7 +2209,7 @@ async function main(): Promise<void> {
 	// DISPLAY (e.g. an interactive recording shell re-running verify) can see
 	// why a headed launch was not attempted.
 	if (declaredDrivers.includes("recorded-browser")) {
-		process.stdout.write(
+		writeHumanOutput(
 			"  browser replay: forced headless (PDPP_BROWSER_HEADLESS=1); DISPLAY/WAYLAND_DISPLAY not forwarded to the replay subprocess\n",
 		);
 	}
@@ -2101,6 +2226,9 @@ async function main(): Promise<void> {
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
+		jsonResult.result.failure_code = "verification_failed";
+		jsonResult.result.outcome = "rejected";
+		jsonResult.result.runs = scenario.runs.length;
 		process.exitCode = 1;
 		return;
 	}
@@ -2121,9 +2249,9 @@ async function main(): Promise<void> {
 	const isolationLine = isolationCapability.available
 		? "network isolation: os-namespace"
 		: `network isolation: process-local only (${isolationCapability.reason})`;
-	process.stdout.write(`  ${isolationLine}\n`);
+	writeHumanOutput(`  ${isolationLine}\n`);
 	if (filesystemInput !== undefined) {
-		process.stdout.write(
+		writeHumanOutput(
 			`  filesystem input: ${filesystemInput.envVar}=${filesystemInput.path} ` +
 				`(${String(filesystemInput.acceptedFileCount)} input file(s); ` +
 				`${isolationCapability.available ? "bound read-only" : "NOT bound - isolation inactive"})\n`,
@@ -2477,6 +2605,9 @@ async function main(): Promise<void> {
 		const message =
 			err instanceof Error ? (err.stack ?? err.message) : String(err);
 		process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
+		jsonResult.result.failure_code = "verification_failed";
+		jsonResult.result.outcome = "failed";
+		jsonResult.result.runs = scenario.runs.length;
 		process.exitCode = 1;
 		cleanupScenarioEvidenceWorkspace(isolationWorkspace);
 		return;
@@ -2497,7 +2628,7 @@ async function main(): Promise<void> {
 
 	for (let runIndex = 0; runIndex < scenario.runs.length; runIndex += 1) {
 		const runFailures = result.failures.filter((f) => f.runIndex === runIndex);
-		process.stdout.write(
+		writeHumanOutput(
 			`  run ${String(runIndex)}: ${runFailures.length === 0 ? "PASS" : "FAIL"}\n`,
 		);
 		if (runFailures.length > 0) {
@@ -2513,13 +2644,13 @@ async function main(): Promise<void> {
 		(sum, run) => sum + (run.user_interactions?.length ?? 0),
 		0,
 	);
-	process.stdout.write(
+	writeHumanOutput(
 		`\n  interactions replayed: ${String(result.metrics.interactionCount)}\n`,
 	);
-	process.stdout.write(
+	writeHumanOutput(
 		`  user_interactions replayed: ${String(userInteractionCount)}\n`,
 	);
-	process.stdout.write(
+	writeHumanOutput(
 		`  normalizers: ${String(result.metrics.normalizerCount)}\n`,
 	);
 	// FIX 1 — protocol-trace oracle: backward-compat print line. A scenario
@@ -2531,7 +2662,7 @@ async function main(): Promise<void> {
 	const tracedRunCount = scenario.runs.filter(
 		(run) => run.expected.protocol_trace !== undefined,
 	).length;
-	process.stdout.write(
+	writeHumanOutput(
 		tracedRunCount > 0
 			? `  protocol trace: captured (${String(tracedRunCount)} of ${String(scenario.runs.length)} run(s))\n`
 			: "  protocol trace: not captured (legacy scenario)\n",
@@ -2549,14 +2680,29 @@ async function main(): Promise<void> {
 	);
 
 	if (!result.pass) {
-		process.stdout.write(
+		writeHumanOutput(
 			`\nFAIL — ${result.failures.length} failure(s) across ${scenario.runs.length} run(s)\n`,
 		);
 		process.exitCode = 1;
+		jsonResult = {
+			schema: SCENARIO_CLI_JSON_SCHEMA,
+			command: "scenario-verify",
+			status: "failure",
+			exit_code: 1,
+			result: {
+				kind: "verify",
+				outcome: "mismatch",
+				failure_code: "replay_mismatch",
+				runs: scenario.runs.length,
+				failure_count: result.failures.length,
+				claim: null,
+				claim_artifact_written: null,
+			},
+		};
 		return;
 	}
 
-	printCoverageReport(
+	const coverageReport = printCoverageReport(
 		args,
 		scenario,
 		isolationLine,
@@ -2570,6 +2716,21 @@ async function main(): Promise<void> {
 		clockTraceExhaustedTotal,
 	);
 	process.exitCode = 0;
+	jsonResult = {
+		schema: SCENARIO_CLI_JSON_SCHEMA,
+		command: "scenario-verify",
+		status: "success",
+		exit_code: 0,
+		result: {
+			kind: "verify",
+			outcome: "passed",
+			failure_code: null,
+			runs: scenario.runs.length,
+			failure_count: 0,
+			claim: coverageReport.claim,
+			claim_artifact_written: coverageReport.claimArtifactWritten,
+		},
+	};
 }
 
 /**
@@ -2608,7 +2769,10 @@ function printCoverageReport(
 	}>,
 	apiRequestFallbackMatchTotal: number,
 	clockTraceExhaustedTotal: number,
-): void {
+): {
+	claim: "recorded_replay" | "diagnostic_replay";
+	claimArtifactWritten: boolean | null;
+} {
 	const capturedAt = scenario.capture.captured_at;
 	// state_seeded_second_run_with_changed_requests (formerly named
 	// incremental_two_run — renamed per the evidence-claims re-review: the old
@@ -2779,28 +2943,26 @@ function printCoverageReport(
 		// re-enables it once that review confirms the repair: once reachable
 		// again, it restates the (by-then-proven) preconditions inline instead
 		// of making the reader go read claims.ts.
-		process.stdout.write(
+		writeHumanOutput(
 			`\nrecorded_replay: PASS (captured ${capturedAt}; preconditions: trusted absolute launcher path, ` +
 				"every ro-bind submount verified read-only, no pre-existing sockets under writable-bound paths)\n",
 		);
 	} else {
-		process.stdout.write(
-			`\ndiagnostic_replay: PASS (captured ${capturedAt})\n`,
-		);
-		process.stdout.write("recorded_replay: WITHHELD\n");
-		process.stdout.write("limitations:\n");
+		writeHumanOutput(`\ndiagnostic_replay: PASS (captured ${capturedAt})\n`);
+		writeHumanOutput("recorded_replay: WITHHELD\n");
+		writeHumanOutput("limitations:\n");
 		for (const limitation of decision.limitations) {
-			process.stdout.write(`  - ${limitation}\n`);
+			writeHumanOutput(`  - ${limitation}\n`);
 		}
 	}
-	process.stdout.write(`claim: ${decision.claim}\n`);
-	process.stdout.write("scenario status: candidate oracle\n");
-	process.stdout.write(
+	writeHumanOutput(`claim: ${decision.claim}\n`);
+	writeHumanOutput("scenario status: candidate oracle\n");
+	writeHumanOutput(
 		`coverage: ${coverage.length > 0 ? coverage.join(", ") : "(none)"}\n`,
 	);
-	process.stdout.write(`${isolationLine}\n`);
+	writeHumanOutput(`${isolationLine}\n`);
 	printStreamCoverageLine(args, scenario);
-	writeClaimRecord(
+	const claimArtifactWritten = writeClaimRecord(
 		args,
 		scenario,
 		decision,
@@ -2829,8 +2991,9 @@ function printCoverageReport(
 			note =
 				"note: multiple runs present but the later run's requests are identical to run 1's - incremental behavior was not demonstrated, so state_seeded_second_run_with_changed_requests is not claimed\n";
 		}
-		process.stdout.write(note);
+		writeHumanOutput(note);
 	}
+	return { claim: decision.claim, claimArtifactWritten };
 }
 
 // Only run when this module is the process entrypoint (`tsx bin/scenario-
@@ -2846,67 +3009,108 @@ function printCoverageReport(
 // ...])`, so `process.argv[1]` is that exact path in every case that
 // matters — this guard changes nothing for them.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-	main().catch((err: unknown) => {
-		// A validation rejection is a user-facing pre-flight verdict, not a
-		// crash: print its message plainly, no stack. Observed live: an
-		// operator passed a run-summary file (the other artifact living in
-		// runs/) and got a stack trace for what the validator had already
-		// precisely diagnosed.
-		if (err instanceof ScenarioValidationError) {
-			process.stderr.write(`[scenario-verify] ${err.message}\n`);
-			if (err.message.includes("pdpp.run-summary/1")) {
-				process.stderr.write(
-					"hint: that file is a run summary written by connector-dev, not a scenario.\n",
-				);
-				// Observed live: the summary was the ONLY file in runs/<connector>/
-				// because no scenario had ever been recorded - so point at what
-				// exists, or at the command that creates what doesn't.
-				try {
-					const retryArgs = parseArgs(process.argv.slice(2));
-					const dir = dirname(resolve(retryArgs.scenarioPath));
-					const scenarios = readdirSync(dir).filter((f) =>
-						f.endsWith("-scenario.json"),
-					);
-					if (scenarios.length > 0) {
-						process.stderr.write(`hint: scenario files in ${dir}:\n`);
-						for (const f of scenarios.sort().slice(-3)) {
-							process.stderr.write(`        ${join(dir, f)}\n`);
-						}
-					} else {
-						process.stderr.write(
-							"hint: no scenario files exist there yet - record one first:\n" +
-								`        pnpm exec tsx bin/scenario-record.ts ${retryArgs.connector}\n`,
-						);
-					}
-				} catch {
-					// Best-effort guidance only - the validation verdict above stands alone.
-				}
+	main()
+		.then(() => {
+			if (JSON_MODE) {
+				writeCliJsonResult(jsonResult);
 			}
+		})
+		.catch((err: unknown) => {
+			// A validation rejection is a user-facing pre-flight verdict, not a
+			// crash: print its message plainly, no stack. Observed live: an
+			// operator passed a run-summary file (the other artifact living in
+			// runs/) and got a stack trace for what the validator had already
+			// precisely diagnosed.
+			if (err instanceof ScenarioValidationError) {
+				process.stderr.write(`[scenario-verify] ${err.message}\n`);
+				jsonResult = {
+					schema: SCENARIO_CLI_JSON_SCHEMA,
+					command: "scenario-verify",
+					status: "failure",
+					exit_code: 1,
+					result: {
+						kind: "verify",
+						outcome: "rejected",
+						failure_code: "invalid_scenario",
+						runs: null,
+						failure_count: null,
+						claim: null,
+						claim_artifact_written: null,
+					},
+				};
+				if (err.message.includes("pdpp.run-summary/1")) {
+					process.stderr.write(
+						"hint: that file is a run summary written by connector-dev, not a scenario.\n",
+					);
+					// Observed live: the summary was the ONLY file in runs/<connector>/
+					// because no scenario had ever been recorded - so point at what
+					// exists, or at the command that creates what doesn't.
+					try {
+						const retryArgs = parseArgs(process.argv.slice(2));
+						const dir = dirname(resolve(retryArgs.scenarioPath));
+						const scenarios = readdirSync(dir).filter((f) =>
+							f.endsWith("-scenario.json"),
+						);
+						if (scenarios.length > 0) {
+							process.stderr.write(`hint: scenario files in ${dir}:\n`);
+							for (const f of scenarios.sort().slice(-3)) {
+								process.stderr.write(`        ${join(dir, f)}\n`);
+							}
+						} else {
+							process.stderr.write(
+								"hint: no scenario files exist there yet - record one first:\n" +
+									`        pnpm exec tsx bin/scenario-record.ts ${retryArgs.connector}\n`,
+							);
+						}
+					} catch {
+						// Best-effort guidance only - the validation verdict above stands alone.
+					}
+				}
+				process.exitCode = 1;
+				if (JSON_MODE) {
+					writeCliJsonResult(jsonResult);
+				}
+				return;
+			}
+			// FIX 2: a watchdog kill is a diagnosed verdict — the subprocess was
+			// observed to be genuinely inactive for the whole window — not a crash
+			// in this CLI's own code, so it prints plainly (no stack), the same
+			// plain-verdict treatment `ScenarioValidationError` gets just above.
+			if (err instanceof WatchdogTimeoutError) {
+				process.stderr.write(`${err.message}\n`);
+				process.exitCode = 1;
+				jsonResult.result.failure_code = "verification_failed";
+				jsonResult.result.outcome = "failed";
+				if (JSON_MODE) {
+					writeCliJsonResult(jsonResult);
+				}
+				return;
+			}
+			// Same plain-verdict treatment as ScenarioValidationError/
+			// WatchdogTimeoutError above — see browser-har-replay.ts's
+			// `BrowserReplayEvidenceError` doc comment: a missing/unusable HAR or
+			// storage-state file is a diagnosed pre-flight verdict naming exactly
+			// what's missing, not a crash in this CLI's own code.
+			if (err instanceof BrowserReplayEvidenceError) {
+				process.stderr.write(`[scenario-verify] ${err.message}\n`);
+				process.exitCode = 1;
+				jsonResult.result.failure_code = "invalid_scenario";
+				jsonResult.result.outcome = "rejected";
+				if (JSON_MODE) {
+					writeCliJsonResult(jsonResult);
+				}
+				return;
+			}
+			const message =
+				err instanceof Error ? (err.stack ?? err.message) : String(err);
+			process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
 			process.exitCode = 1;
-			return;
-		}
-		// FIX 2: a watchdog kill is a diagnosed verdict — the subprocess was
-		// observed to be genuinely inactive for the whole window — not a crash
-		// in this CLI's own code, so it prints plainly (no stack), the same
-		// plain-verdict treatment `ScenarioValidationError` gets just above.
-		if (err instanceof WatchdogTimeoutError) {
-			process.stderr.write(`${err.message}\n`);
-			process.exitCode = 1;
-			return;
-		}
-		// Same plain-verdict treatment as ScenarioValidationError/
-		// WatchdogTimeoutError above — see browser-har-replay.ts's
-		// `BrowserReplayEvidenceError` doc comment: a missing/unusable HAR or
-		// storage-state file is a diagnosed pre-flight verdict naming exactly
-		// what's missing, not a crash in this CLI's own code.
-		if (err instanceof BrowserReplayEvidenceError) {
-			process.stderr.write(`[scenario-verify] ${err.message}\n`);
-			process.exitCode = 1;
-			return;
-		}
-		const message =
-			err instanceof Error ? (err.stack ?? err.message) : String(err);
-		process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
-		process.exitCode = 1;
-	});
+			if (jsonResult.result.failure_code !== "invalid_scenario") {
+				jsonResult.result.failure_code = "verification_failed";
+				jsonResult.result.outcome = "failed";
+			}
+			if (JSON_MODE) {
+				writeCliJsonResult(jsonResult);
+			}
+		});
 }
