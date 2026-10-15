@@ -1,0 +1,251 @@
+name: GroupMe Vitest mutation pilot
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "connectors/groupme/**"
+      - "tools/groupme-mutation-pilot/**"
+      - ".github/workflows/groupme-vitest-mutation-pilot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  groupme-vitest-mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+      - name: Install, verify baseline, and run bounded mutation campaign
+        run: |
+          set -u
+          mkdir -p reports/mutation/evidence
+          : > reports/mutation/evidence/timing.jsonl
+          step_start="$(date +%s%3N)"
+          printf 'head=%s\nnode=%s\nnpm=%s\n' "$(git rev-parse HEAD)" "$(node --version)" "$(npm --version)" > reports/mutation/evidence/versions.txt
+          sha256sum connectors/groupme/index.ts package-lock.json tools/groupme-mutation-pilot/package.json tools/groupme-mutation-pilot/package-lock.json tools/groupme-mutation-pilot/vitest.config.ts tools/groupme-mutation-pilot/stryker.config.mjs .github/workflows/groupme-vitest-mutation-pilot.yml > reports/mutation/evidence/source-config-hashes.txt
+          sha256sum connectors/groupme/*.test.ts connectors/groupme/*.vitest.ts >> reports/mutation/evidence/source-config-hashes.txt
+          printf '%s\n' connectors/groupme/*.test.ts > reports/mutation/evidence/node-test-files.txt
+          printf '%s\n' connectors/groupme/*.vitest.ts > reports/mutation/evidence/vitest-test-files.txt
+
+          run_phase() {
+            name="$1"
+            shift
+            start="$(date +%s%3N)"
+            if "$@" > "reports/mutation/evidence/${name}.stdout" 2> "reports/mutation/evidence/${name}.stderr"; then
+              code=0
+            else
+              code=$?
+            fi
+            end="$(date +%s%3N)"
+            printf '{"phase":"%s","exitCode":%s,"wallMs":%s}\n' "$name" "$code" "$((end-start))" >> reports/mutation/evidence/timing.jsonl
+            return "$code"
+          }
+
+          failure=0
+          if ! run_phase install-root npm ci --ignore-scripts; then failure=1; fi
+          if ! run_phase install-vitest-pilot npm ci --prefix tools/groupme-mutation-pilot --ignore-scripts; then failure=1; fi
+          if [ "$failure" -eq 0 ]; then
+            ln -s ../tools/groupme-mutation-pilot/node_modules/vitest node_modules/vitest
+            if ! run_phase baseline-node node --import tsx --test --test-reporter=tap connectors/groupme/*.test.ts; then failure=1; fi
+            if ! run_phase baseline-vitest tools/groupme-mutation-pilot/node_modules/.bin/vitest run --config tools/groupme-mutation-pilot/vitest.config.ts --reporter=json --outputFile=reports/mutation/evidence/vitest-baseline.json; then failure=1; fi
+          fi
+          if [ "$failure" -eq 0 ]; then
+            canary_start="$(date +%s%3N)"
+            source_hash_before="$(sha256sum connectors/groupme/index.ts | cut -d' ' -f1)"
+            cp connectors/groupme/index.ts reports/mutation/evidence/index.ts.canary-backup
+            restore_canary_source() {
+              cp reports/mutation/evidence/index.ts.canary-backup connectors/groupme/index.ts
+            }
+            trap restore_canary_source EXIT
+            node --input-type=module <<'NODE'
+            import assert from 'node:assert/strict';
+            import { readFileSync, writeFileSync } from 'node:fs';
+            const path = 'connectors/groupme/index.ts';
+            const source = readFileSync(path, 'utf8');
+            const original = 'curr.created_at < prev.created_at';
+            assert.equal(source.split(original).length - 1, 1, 'canary source expression must occur once');
+            writeFileSync(path, source.replace(original, 'curr.created_at >= prev.created_at'));
+            NODE
+            set +e
+            tools/groupme-mutation-pilot/node_modules/.bin/vitest run --config tools/groupme-mutation-pilot/vitest.config.ts connectors/groupme/incremental-frontier.vitest.ts --testNamePattern='repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError' --reporter=json --outputFile=reports/mutation/evidence/canary-owner-failure.json > reports/mutation/evidence/canary-owner-failure.stdout 2> reports/mutation/evidence/canary-owner-failure.stderr
+            canary_exit="$?"
+            set -e
+            restore_canary_source
+            trap - EXIT
+            source_hash_after="$(sha256sum connectors/groupme/index.ts | cut -d' ' -f1)"
+            rm reports/mutation/evidence/index.ts.canary-backup
+            canary_end="$(date +%s%3N)"
+            printf '{"phase":"canary-owner-fault-probe","exitCode":%s,"wallMs":%s}\n' "$canary_exit" "$((canary_end-canary_start))" >> reports/mutation/evidence/timing.jsonl
+            printf '{"sourceSha256Before":"%s","sourceSha256After":"%s","vitestExitCode":%s}\n' "$source_hash_before" "$source_hash_after" "$canary_exit" > reports/mutation/evidence/canary-owner-failure-receipt.json
+            if [ "$canary_exit" -ne 1 ] || [ "$source_hash_before" != "$source_hash_after" ]; then failure=1; fi
+          fi
+          if [ "$failure" -eq 0 ]; then
+            if ! run_phase mutation tools/groupme-mutation-pilot/node_modules/.bin/stryker run tools/groupme-mutation-pilot/stryker.config.mjs --logLevel info; then failure=1; fi
+          fi
+
+          step_end="$(date +%s%3N)"
+          printf '{"phase":"pilot-step-end-to-end","exitCode":%s,"wallMs":%s}\n' "$failure" "$((step_end-step_start))" >> reports/mutation/evidence/timing.jsonl
+          printf 'Standalone project build: not run. Stryker instrumentation/compilation is included in mutation wall time.\nPilot-step end-to-end includes installs, baselines, and mutation run; GitHub job wall time also includes checkout, Node setup, and artifact upload.\n' > reports/mutation/evidence/measurement-boundary.txt
+          if [ "$failure" -ne 0 ]; then exit 1; fi
+      - name: Validate test parity and mutation evidence
+        run: |
+          set -euo pipefail
+          grep -Fx '# tests 221' reports/mutation/evidence/baseline-node.stdout
+          grep -Fx '# pass 219' reports/mutation/evidence/baseline-node.stdout
+          grep -Fx '# fail 0' reports/mutation/evidence/baseline-node.stdout
+          grep -Fx '# skipped 2' reports/mutation/evidence/baseline-node.stdout
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+
+          const baseline = JSON.parse(readFileSync('reports/mutation/evidence/vitest-baseline.json', 'utf8'));
+          assert.equal(baseline.numTotalTests, 221);
+          assert.equal(baseline.numPassedTests, 219);
+          assert.equal(baseline.numFailedTests, 0);
+          assert.equal(baseline.numPendingTests, 2);
+          assert.equal(baseline.testResults.length, 14);
+
+          const report = JSON.parse(readFileSync('reports/mutation/groupme-vitest-mutation.json', 'utf8'));
+          const testById = new Map(Object.entries(report.testFiles).flatMap(([file, value]) => value.tests.map((test) => [test.id, { file, name: test.name }])));
+          const mutants = Object.entries(report.files).flatMap(([file, value]) => value.mutants.map((mutant) => ({ file, ...mutant })));
+          const baselineByTest = new Map(baseline.testResults.flatMap((file) => file.assertionResults.map((test) => [`${file.name.split('/').at(-1).replace('.vitest.ts', '.test.ts')}#${test.fullName}`, test.status])));
+          const counts = Object.fromEntries(['Killed', 'Survived', 'Timeout', 'CompileError', 'RuntimeError', 'NoCoverage', 'Ignored'].map((status) => [status, mutants.filter((mutant) => mutant.status === status).length]));
+          const activationRisk = mutants.filter((mutant) => !['NoCoverage', 'Ignored'].includes(mutant.status) && (mutant.coveredBy?.length ?? 0) > 0 && mutant.static !== false);
+          const selectedCompletionMismatch = mutants.filter((mutant) => ['Killed', 'Survived'].includes(mutant.status) && mutant.testsCompleted !== (mutant.coveredBy ?? []).filter((id) => {
+            const test = testById.get(id);
+            if (!test) return false;
+            const sourceTest = `${test.file.split('/').at(-1).replace('.vitest.ts', '.test.ts')}#${test.name}`;
+            return baselineByTest.get(sourceTest) !== 'skipped';
+          }).length);
+          const ownerName = 'repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError';
+          const canaries = mutants.filter((mutant) => mutant.file === 'connectors/groupme/index.ts' && mutant.location.start.line === 1491 && mutant.mutatorName === 'EqualityOperator' && mutant.replacement === 'curr.created_at >= prev.created_at');
+          const [canary] = canaries;
+          const owner = [...testById.entries()].find(([, test]) => test.file.endsWith('/incremental-frontier.vitest.ts') && test.name === ownerName);
+          const sourceText = readFileSync('connectors/groupme/index.ts', 'utf8').replace(/\r\n/g, '\n');
+          const offset = (line, column) => sourceText.split('\n').slice(0, line - 1).reduce((sum, value) => sum + value.length + 1, 0) + column - 1;
+          const canonicalIdentity = (mutant) => {
+            const { start, end } = mutant.location;
+            const original = sourceText.slice(offset(start.line, start.column), offset(end.line, end.column));
+            const tuple = [mutant.file.replaceAll('\\', '/'), start.line, start.column, end.line, end.column, mutant.mutatorName, original.replace(/\r\n/g, '\n'), mutant.replacement.replace(/\r\n/g, '\n')];
+            return createHash('sha256').update(JSON.stringify(tuple)).digest('hex');
+          };
+          const originalText = (mutant) => {
+            const { start, end } = mutant.location;
+            return sourceText.slice(offset(start.line, start.column), offset(end.line, end.column)).replace(/\r\n/g, '\n');
+          };
+          const canonicalMutantManifest = mutants.map((mutant) => ({
+            canonicalIdentity: canonicalIdentity(mutant),
+            id: mutant.id,
+            file: mutant.file.replaceAll('\\', '/'),
+            location: mutant.location,
+            mutatorName: mutant.mutatorName,
+            original: originalText(mutant),
+            replacement: mutant.replacement.replace(/\r\n/g, '\n'),
+            status: mutant.status,
+            static: mutant.static ?? null,
+            selectedTestIds: mutant.coveredBy ?? [],
+            selectedTests: (mutant.coveredBy ?? []).map((id) => {
+              const test = testById.get(id);
+              return test ? { id, file: test.file, name: test.name } : { id, file: null, name: null };
+            }),
+            testsCompleted: mutant.testsCompleted,
+            killedByTestIds: mutant.killedBy ?? [],
+            killedByTests: (mutant.killedBy ?? []).map((id) => {
+              const test = testById.get(id);
+              return test ? { id, file: test.file, name: test.name } : { id, file: null, name: null };
+            }),
+          })).sort((a, b) => a.canonicalIdentity.localeCompare(b.canonicalIdentity));
+          const canaryOwnerFault = JSON.parse(readFileSync('reports/mutation/evidence/canary-owner-failure.json', 'utf8'));
+          const canaryOwnerFailedTest = canaryOwnerFault.testResults.flatMap((file) => file.assertionResults).filter((test) => test.fullName === ownerName);
+          const canaryOwnerFailureMessage = canaryOwnerFailedTest[0]?.failureMessages?.join('\n') ?? '';
+
+          const evidence = {
+            counts,
+            generated: mutants.length,
+            testFiles: Object.keys(report.testFiles).length,
+            rangeInterpretation: {
+              'connectors/groupme/index.ts:1487-1495': 'ascending-order predicate and its surrounding expression; concrete canary is the less-than to greater-than-or-equal replacement',
+              'connectors/groupme/index.ts:1528-1529': 'progress-string AST only; does not include the for-loop entry or a page-cap insertion site',
+              pageCapCoverage: 'none claimed; default operators do not insert a page-count ceiling',
+            },
+            canonicalMutantManifest,
+            activationRisk: activationRisk.map(({ id, mutatorName, location, static, coveredBy, status }) => ({ id, mutatorName, location, static: static ?? null, coveredBy, status })),
+            selectedCompletionMismatch: selectedCompletionMismatch.map(({ id, status, testsCompleted, coveredBy }) => ({ id, status, testsCompleted, coveredBy })),
+            unexpectedStatuses: mutants.filter((mutant) => !(mutant.status in counts)).map(({ id, status }) => ({ id, status })),
+            selectedAndCompleted: mutants.map((mutant) => ({
+              id: mutant.id,
+              canonicalIdentity: canonicalIdentity(mutant),
+              mutatorName: mutant.mutatorName,
+              location: mutant.location,
+              replacement: mutant.replacement,
+              status: mutant.status,
+              static: mutant.static ?? null,
+              selectedTests: (mutant.coveredBy ?? []).map((id) => {
+                const test = testById.get(id);
+                if (!test) return { id, name: null, baselineStatus: 'unmapped' };
+                const sourceTest = `${test.file.split('/').at(-1).replace('.vitest.ts', '.test.ts')}#${test.name}`;
+                const baselineStatus = baselineByTest.get(sourceTest);
+                return { id, ...test, baselineStatus: baselineStatus ?? 'unmapped' };
+              }),
+              selectedTestCount: mutant.coveredBy?.length ?? 0,
+              expectedRunnableSelectedCount: (mutant.coveredBy ?? []).filter((id) => {
+                const test = testById.get(id);
+                const sourceTest = `${test.file.split('/').at(-1).replace('.vitest.ts', '.test.ts')}#${test.name}`;
+                return baselineByTest.get(sourceTest) !== 'skipped';
+              }).length,
+              testsCompleted: mutant.testsCompleted,
+              killedBy: (mutant.killedBy ?? []).map((id) => ({ id, ...testById.get(id) })),
+            })),
+            canary: canary ? { id: canary.id, replacement: canary.replacement, status: canary.status, testsCompleted: canary.testsCompleted, coveredBy: canary.coveredBy, killedBy: canary.killedBy, owner: owner ? { id: owner[0], ...owner[1] } : null } : null,
+            canaryOwnerFaultProbe: { numFailedTests: canaryOwnerFault.numFailedTests, ownerFailure: canaryOwnerFailureMessage },
+          };
+          writeFileSync('reports/mutation/evidence/mutation-summary.json', `${JSON.stringify(evidence, null, 2)}\n`);
+          writeFileSync('reports/mutation/evidence/canonical-mutants.json', `${JSON.stringify(canonicalMutantManifest, null, 2)}\n`);
+
+          assert.equal(Object.values(counts).reduce((sum, count) => sum + count, 0) + evidence.unexpectedStatuses.length, mutants.length, 'all mutation statuses must reconcile');
+          const manifestIdentities = canonicalMutantManifest.map((mutant) => mutant.canonicalIdentity);
+          assert.deepEqual(manifestIdentities, [...manifestIdentities].sort(), 'canonical mutant manifest must be sorted by identity');
+          assert.equal(new Set(manifestIdentities).size, mutants.length, 'canonical mutant identities must be complete and unique');
+          assert.equal(evidence.unexpectedStatuses.length, 0, 'every mutant status must be an accounted status');
+          const canaryFaultReceipt = JSON.parse(readFileSync('reports/mutation/evidence/canary-owner-failure-receipt.json', 'utf8'));
+          assert.equal(canaryFaultReceipt.sourceSha256Before, canaryFaultReceipt.sourceSha256After, 'canary source must be restored byte-for-byte');
+          assert.equal(canaryFaultReceipt.vitestExitCode, 1, 'the canary fault probe must fail its assertion');
+          assert.equal(canaryOwnerFault.numFailedTests, 1, 'only the expected owner test must fail in the canary fault probe');
+          assert.equal(canaryOwnerFailedTest.length, 1, 'the expected canary owner must appear as an executed failed test');
+          assert.equal(canaryOwnerFailedTest[0].status, 'failed');
+          assert.ok(canaryOwnerFailedTest[0].failureMessages.some((message) => message.includes('a non-ascending forward page must fail, not be silently trusted')));
+          assert.ok(canaryOwnerFailureMessage.includes('a non-ascending forward page must fail, not be silently trusted'), 'the expected assertion message must fail under the concrete canary patch');
+          assert.ok(canaryOwnerFailureMessage.includes('false !== true'), 'the expected assertion must observe failed=false under the concrete canary patch');
+          assert.ok(mutants.length > 0, 'the fixed source ranges must generate mutants');
+          const runnable = mutants.filter((mutant) => !['NoCoverage', 'Ignored', 'Timeout'].includes(mutant.status));
+          assert.ok(runnable.every((mutant) => Number.isInteger(mutant.testsCompleted) && mutant.testsCompleted > 0), 'zero completed-test results invalidate a runnable mutant');
+          assert.ok(runnable.every((mutant) => Array.isArray(mutant.coveredBy) && mutant.coveredBy.length > 0), 'every runnable mutant must retain selected-test attribution');
+          assert.ok(runnable.every((mutant) => mutant.coveredBy.every((id) => testById.has(id))), 'every selected test id must map to the report test table');
+          assert.ok(evidence.selectedAndCompleted.every((mutant) => mutant.selectedTests.every((test) => ['passed', 'skipped'].includes(test.baselineStatus))), 'selected tests must map to baseline identities and statuses');
+          assert.equal(selectedCompletionMismatch.length, 0, 'completed tests must match non-skipped perTest selections for killed and survived mutants');
+          assert.equal(activationRisk.length, 0, 'static or unknown-static filtered mutants are untrusted under core 10.0.0 #6145');
+          assert.ok(mutants.every((mutant) => !['CompileError', 'RuntimeError', 'Error'].includes(mutant.status)), 'activation or harness errors invalidate this run');
+          assert.equal(canaries.length, 1, 'the concrete canary patch must be generated exactly once');
+          assert.ok(owner, 'the named canary owner must exist in the runner test map');
+          assert.equal(canary.status, 'Killed');
+          assert.ok(canary.testsCompleted > 0);
+          assert.ok(canary.coveredBy.includes(owner[0]), 'the canary owner must be selected for this mutant');
+          assert.ok(canary.killedBy.includes(owner[0]), 'the named canary owner assertion must kill the concrete mutant');
+          const canaryEvidence = evidence.selectedAndCompleted.find((mutant) => mutant.id === canary.id);
+          const canaryOwnerSelected = canaryEvidence?.selectedTests.find((test) => test.id === owner[0]);
+          assert.equal(canaryOwnerSelected?.baselineStatus, 'passed', 'the canary owner must map to the passing baseline test');
+          assert.equal(canary.testsCompleted, canaryEvidence.expectedRunnableSelectedCount, 'the canary must complete all selected non-skipped tests');
+          NODE
+      - name: Upload mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: groupme-vitest-mutation-pilot-${{ github.run_id }}
+          path: reports/mutation/
+          if-no-files-found: error
