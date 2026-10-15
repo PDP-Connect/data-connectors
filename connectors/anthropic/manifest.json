@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-	"version": "0.2.44",
+	"version": "0.2.45",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "Claude (Anthropic)",
 	"brand": {
@@ -38,7 +38,7 @@
 		"host_blob_write": {
 			"version": 1,
 			"max_blob_bytes": 33554432,
-			"streams": ["conversations", "projects"]
+			"streams": ["conversations", "projects", "messages", "project_documents"]
 		},
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
@@ -140,6 +140,7 @@
 					},
 					"blob_ref": {
 						"type": "object",
+						"description": "The raw source envelope as a Core blob. Absent when the envelope is over the host blob cap (33554432 bytes); the typed record and its children are still complete.",
 						"properties": {
 							"blob_id": { "type": "string" },
 							"mime_type": { "type": "string" },
@@ -202,7 +203,19 @@
 					},
 					"content": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"description": "Full message text. Text over 10000000 characters is not truncated: content is null and blob_ref holds the full text. Absent only when the text is over the host blob cap (33554432 bytes of JSON encoding)."
+					},
+					"blob_ref": {
+						"type": "object",
+						"description": "Present only when the message text is over 10000000 characters: a Core blob holding the full text as a JSON string (application/json; JSON.parse returns the exact source text).",
+						"properties": {
+							"blob_id": { "type": "string" },
+							"mime_type": { "type": "string" },
+							"size_bytes": { "type": "integer" },
+							"sha256": { "type": "string" }
+						},
+						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					},
 					"model": {
 						"type": ["string", "null"]
@@ -324,6 +337,7 @@
 					},
 					"blob_ref": {
 						"type": "object",
+						"description": "The raw source envelope as a Core blob. Absent when the envelope is over the host blob cap (33554432 bytes); the typed record and its children are still complete.",
 						"properties": {
 							"blob_id": { "type": "string" },
 							"mime_type": { "type": "string" },
@@ -333,7 +347,7 @@
 						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					}
 				},
-				"required": ["id", "name", "blob_ref"]
+				"required": ["id", "name"]
 			},
 			"primary_key": ["id"],
 			"consent_time_field": "create_time",
@@ -382,7 +396,19 @@
 						"x_pdpp_role": "primary-title"
 					},
 					"content": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"description": "Full document text. Text over 10000000 characters is not truncated: content is null and blob_ref holds the full text. Absent only when the text is over the host blob cap (33554432 bytes of JSON encoding)."
+					},
+					"blob_ref": {
+						"type": "object",
+						"description": "Present only when the document text is over 10000000 characters: a Core blob holding the full text as a JSON string (application/json; JSON.parse returns the exact source text).",
+						"properties": {
+							"blob_id": { "type": "string" },
+							"mime_type": { "type": "string" },
+							"size_bytes": { "type": "integer" },
+							"sha256": { "type": "string" }
+						},
+						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					},
 					"create_time": {
 						"type": ["string", "null"],

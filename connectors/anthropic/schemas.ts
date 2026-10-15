@@ -63,7 +63,9 @@ export const conversationsSchema = z.object({
 	model: z.string().min(1).max(128).nullable(),
 	message_count: z.number().int().min(0).nullable(),
 	is_starred: z.boolean().nullable(),
-	blob_ref: blobRefSchema,
+	// Absent when the raw source envelope passes the host blob cap.
+	// TODO(pdpp-host-blob-cap): raw envelopes over max_blob_bytes are omitted; revisit if the protocol raises the cap or adds multi-part blobs.
+	blob_ref: blobRefSchema.optional(),
 });
 
 /**
@@ -78,7 +80,12 @@ export const messagesSchema = z.object({
 	conversation_id: idSchema,
 	role: z.string().min(1).max(64).nullable(),
 	parent_id: idSchema.nullable(),
-	content: pdppSafeText.max(10_000_000).nullable(),
+	// Full message text up to the inline cap. Longer text is not cut: `content`
+	// is null and `blob_ref` holds the full text (a JSON string, application/
+	// json). Text whose encoding passes the host blob cap has `content` and
+	// `blob_ref` both absent.
+	content: pdppSafeText.max(10_000_000).nullable().optional(),
+	blob_ref: blobRefSchema.optional(),
 	model: z.string().min(1).max(128).nullable(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
@@ -121,7 +128,9 @@ export const projectsSchema = z.object({
 			})
 			.strict(),
 	),
-	blob_ref: blobRefSchema,
+	// Absent when the raw source envelope passes the host blob cap.
+	// TODO(pdpp-host-blob-cap): raw envelopes over max_blob_bytes are omitted; revisit if the protocol raises the cap or adds multi-part blobs.
+	blob_ref: blobRefSchema.optional(),
 });
 
 /**
@@ -144,7 +153,9 @@ export const projectDocumentsSchema = z.object({
 	id: idSchema,
 	project_id: idSchema,
 	filename: pdppSafeText.max(1024).nullable(),
-	content: pdppSafeText.max(10_000_000).nullable(),
+	// Same rule as messages.content: over the inline cap the text is a blob.
+	content: pdppSafeText.max(10_000_000).nullable().optional(),
+	blob_ref: blobRefSchema.optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
 });

@@ -14,6 +14,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
 	accountProfileSchema,
@@ -205,4 +206,85 @@ test("validateRecord routes all five streams and passes unknown streams through"
 		true,
 	);
 	assert.equal(validateRecord("unknown_stream", { x: 1 }).ok, true);
+});
+
+test("conversations and projects validate with the raw-envelope blob_ref absent", () => {
+	const { blob_ref: _conversationBlob, ...conversation } = CONVERSATION_RECORD;
+	const { blob_ref: _projectBlob, ...project } = PROJECT_RECORD;
+	assert.equal(validateRecord("conversations", conversation).ok, true);
+	assert.equal(validateRecord("projects", project).ok, true);
+});
+
+test("messages and project_documents validate with content absent, and with a blob_ref instead of inline text", () => {
+	const { content: _messageContent, ...message } = MESSAGE_RECORD;
+	const { content: _documentContent, ...document } = PROJECT_DOCUMENT_RECORD;
+	assert.equal(validateRecord("messages", message).ok, true);
+	assert.equal(validateRecord("project_documents", document).ok, true);
+	assert.equal(
+		validateRecord("messages", {
+			...message,
+			content: null,
+			blob_ref: BLOB_REF,
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("project_documents", {
+			...document,
+			content: null,
+			blob_ref: BLOB_REF,
+		}).ok,
+		true,
+	);
+});
+
+test("a malformed blob_ref is still rejected", () => {
+	assert.equal(
+		validateRecord("messages", {
+			...MESSAGE_RECORD,
+			blob_ref: { ...BLOB_REF, blob_id: "sha256:nope" },
+		}).ok,
+		false,
+	);
+});
+
+test("the manifest declares the same blob fields and blob streams as the schemas", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	);
+	assert.deepEqual(manifest.capabilities.host_blob_write.streams.sort(), [
+		"conversations",
+		"messages",
+		"project_documents",
+		"projects",
+	]);
+	assert.equal(
+		manifest.capabilities.host_blob_write.max_blob_bytes,
+		33_554_432,
+	);
+	const byName = new Map(
+		manifest.streams.map(
+			(stream: { name: string; schema: Record<string, unknown> }) => [
+				stream.name,
+				stream.schema as {
+					properties: Record<string, unknown>;
+					required: string[];
+				},
+			],
+		),
+	);
+	for (const name of [
+		"conversations",
+		"messages",
+		"projects",
+		"project_documents",
+	]) {
+		const schema = byName.get(name) as {
+			properties: Record<string, unknown>;
+			required: string[];
+		};
+		assert.ok(schema.properties.blob_ref, `${name} declares blob_ref`);
+		assert.equal(schema.required.includes("blob_ref"), false, name);
+		assert.equal(schema.required.includes("content"), false, name);
+	}
 });

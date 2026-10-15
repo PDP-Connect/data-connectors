@@ -57,6 +57,7 @@ after(() => {
 });
 
 const { collectAnthropic } = await import("./index.ts");
+const { BufferMeter } = await import("./oversize-conversation.ts");
 const { validateRecord } = await import("./schemas.ts");
 const { consentTimeFieldResolver, makeEmitRecord } = await import(
 	"../../packages/polyfill-connectors/src/connector-runtime.ts"
@@ -233,6 +234,11 @@ const ORG_RESPONSE = [
 	{ uuid: "org-1", capabilities: ["chat", "claude_pro"] },
 	{ uuid: "org-2", capabilities: ["api"] },
 ];
+
+/** Nine million characters: under the inline text cap, so four of them make a
+ * conversation envelope over the 32 MiB host blob cap without any message
+ * being oversize. */
+const ENVELOPE_PAD = "x".repeat(9_000_000);
 
 const CONVERSATIONS_JSON = [
 	{
@@ -556,11 +562,14 @@ test("collectAnthropic: time window filters conversations and messages but retai
 	);
 });
 
-test("collectAnthropic: excluded oversized source is never spooled; selected oversized source keeps its typed records with a stand-in blob, a PROGRESS note and a DETAIL_GAP; no stream is skipped", async () => {
+test("collectAnthropic: excluded oversized source is never spooled; selected oversized source keeps its typed records with no raw blob, an aggregate note and no gap; no stream is skipped", async () => {
 	const hugeConversation = {
 		uuid: "conv-huge",
 		name: "Excluded source",
-		chat_messages: [{ uuid: "msg-huge", text: "x".repeat(33_554_432) }],
+		chat_messages: [0, 1, 2, 3].map((index) => ({
+			uuid: `msg-huge-${index}`,
+			text: ENVELOPE_PAD,
+		})),
 	};
 	const zipBytes = await buildZipBytes(undefined, [
 		hugeConversation,
@@ -628,42 +637,39 @@ test("collectAnthropic: excluded oversized source is never spooled; selected ove
 			.filter((r) => r.stream === "messages")
 			.map((r) => r.data.conversation_id)
 			.sort(),
-		["conv-1", "conv-huge"],
+		["conv-1", "conv-huge", "conv-huge", "conv-huge", "conv-huge"],
 	);
 	assert.equal(
 		selected.emitted.filter((r) => r.stream === "projects").length,
 		1,
 	);
-	// conv-1, conv-huge (stand-in) and proj-1 each get one blob.
+	// conv-1 and proj-1 get a raw blob. conv-huge's envelope is over the host
+	// cap, so it has no blob and its record has no blob_ref.
 	const blobs = selected.protocolMessages.filter(
 		(message): message is Extract<EmittedMessage, { type: "BLOB" }> =>
 			message.type === "BLOB",
 	);
-	assert.equal(blobs.length, 3);
+	assert.deepEqual(blobs.map((blob) => blob.key).sort(), ["conv-1", "proj-1"]);
 	assert.equal(
 		readdirSync(blobSpoolDir).filter((file) => !beforeSelected.has(file))
 			.length,
-		3,
+		2,
 	);
-	const standIn = blobs.find((blob) => blob.key === "conv-huge");
-	assert.ok(standIn);
-	assert.ok(standIn.size_bytes < 1024, "the stand-in blob is small");
-	assert.deepEqual(
-		JSON.parse(readFileSync(join(blobSpoolDir, standIn.file), "utf8")).payload,
-		{
-			source_omitted: {
-				reason: "exceeds_host_blob_limit",
-				max_bytes: 33_554_432,
-			},
-		},
+	const hugeRecord = selected.emitted.find(
+		(r) => r.stream === "conversations" && r.data.id === "conv-huge",
 	);
-	assert.deepEqual(
-		gapsOf(selected.protocolMessages).map((g) => [
-			g.stream,
-			g.record_key,
-			g.retryable,
-		]),
-		[["conversations", "conv-huge", true]],
+	assert.ok(hugeRecord);
+	assert.equal("blob_ref" in hugeRecord.data, false);
+	assert.equal(
+		validateRecord("conversations", hugeRecord.data).ok,
+		true,
+		"a record without blob_ref validates against its own schema",
+	);
+	assert.deepEqual(gapsOf(selected.protocolMessages), []);
+	assert.ok(
+		selected.protocolMessages.every(
+			(m) => m.type !== "DETAIL_COVERAGE" || !("optional_skip_keys" in m),
+		),
 	);
 	// An oversized item never reaches the host, so no stream is skipped:
 	// a SKIP_RESULT would make Desktop drop all conversations.
@@ -687,6 +693,7 @@ test("collectAnthropic: excluded oversized source is never spooled; selected ove
 				line.startsWith("[anthropic-diagnostic] export_items_too_large ") &&
 				line.includes('"stream":"conversations"') &&
 				line.includes('"count":1') &&
+				line.includes('"reason":"source_envelope_exceeds_host_blob_cap"') &&
 				line.includes('"max_bytes":'),
 		),
 		diagnostics.join("\n"),
@@ -2828,15 +2835,21 @@ for (const mode of ["buffered", "streaming"] as const) {
 		});
 		assert.equal(proofs.length, 0);
 	});
-	test(`collectAnthropic: completion evidence ${mode} refuses oversized parent`, async () => {
-		const { proofs } = await runCompletionExport(mode, [
+	test(`collectAnthropic: completion evidence ${mode} still proves messages beside an oversized parent`, async () => {
+		const { proofs, records } = await runCompletionExport(mode, [
 			{
 				uuid: "huge",
 				name: "x".repeat(33_554_432),
 				chat_messages: [{ uuid: "child" }],
 			},
 		]);
-		assert.equal(proofs.length, 0);
+		assert.deepEqual(
+			records.map((record) => record.data.id),
+			["child"],
+		);
+		assert.equal(proofs.length, 1);
+		assert.equal(proofs[0]?.considered, 1);
+		assert.equal(proofs[0]?.covered, 1);
 	});
 }
 
@@ -4151,35 +4164,121 @@ async function runOldFormat(
 		streams?: string[];
 		streaming?: boolean;
 		entriesValidated?: boolean;
+		since?: string;
+		resources?: Record<string, string[]>;
+		/** Observes every chunk read from the export entry. */
+		onRead?: (
+			name: string,
+			offset: number,
+			length: number,
+			text: string,
+		) => void;
+		bufferMeter?: InstanceType<typeof BufferMeter>;
+		/** Wraps the collect call only (not the test's own fixture building). */
+		aroundCollect?: <T>(run: () => Promise<T>) => Promise<T>;
 	} = {},
 ) {
 	const bytes = await buildManifestPartZip(files);
 	const context = makeContext({
 		streams: options.streams ?? ALL_EXPORT_STREAMS,
+		...(options.since ? { since: options.since } : {}),
+		...(options.resources ? { resources: options.resources } : {}),
 		fetchStub: oldFormatFetchStub({ exportRequests: 0 }),
 	});
 	serveDownload(context.page, bytes);
 	const texts = new Map(
 		files.map((file) => [file.name, JSON.stringify(file.content)]),
 	);
-	await collectAnthropic({
-		...context.ctx,
-		...(options.streaming
-			? {
-					readZipEntryChunk: (name: string, offset: number, length: number) =>
-						Promise.resolve(
-							texts.get(name)?.slice(offset, offset + length) ?? "",
-						),
-					entriesValidated: options.entriesValidated ?? true,
-				}
-			: {}),
-	});
+	const around = options.aroundCollect ?? ((run) => run());
+	await around(() =>
+		collectAnthropic({
+			...context.ctx,
+			...(options.bufferMeter ? { bufferMeter: options.bufferMeter } : {}),
+			...(options.streaming
+				? {
+						readZipEntryChunk: (
+							name: string,
+							offset: number,
+							length: number,
+						) => {
+							const text =
+								texts.get(name)?.slice(offset, offset + length) ?? "";
+							options.onRead?.(name, offset, length, text);
+							return Promise.resolve(text);
+						},
+						entriesValidated: options.entriesValidated ?? true,
+					}
+				: {}),
+		}),
+	);
 	return context;
+}
+
+/**
+ * Measures the largest string the connector builds while collecting: the
+ * longest `Array.prototype.join` result and the longest `JSON.parse` input.
+ * A connector that buffers a whole parent shows its size here.
+ */
+function stringBuildMeter() {
+	const peak = { join: 0, parse: 0 };
+	const around = async <T>(run: () => Promise<T>): Promise<T> => {
+		const realJoin = Array.prototype.join;
+		const realParse = JSON.parse;
+		Array.prototype.join = function (this: unknown[], separator?: string) {
+			const out = realJoin.call(this, separator);
+			if (out.length > peak.join) peak.join = out.length;
+			return out;
+		};
+		JSON.parse = ((
+			text: string,
+			reviver?: Parameters<typeof JSON.parse>[1],
+		) => {
+			if (typeof text === "string" && text.length > peak.parse)
+				peak.parse = text.length;
+			return realParse(text, reviver);
+		}) as typeof JSON.parse;
+		try {
+			return await run();
+		} finally {
+			Array.prototype.join = realJoin;
+			JSON.parse = realParse;
+		}
+	};
+	return { peak, around };
+}
+
+/** The event right after `blob` is the record that names it. */
+function assertBlobPrecedesRecord(
+	events: ReturnType<typeof makeContext>["events"],
+	blob: { stream: string; key: unknown },
+) {
+	const at = events.findIndex(
+		(event) =>
+			event.kind === "message" &&
+			event.message.type === "BLOB" &&
+			event.message.stream === blob.stream &&
+			event.message.key === blob.key,
+	);
+	const next = events[at + 1];
+	assert.ok(
+		at >= 0 &&
+			next?.kind === "record" &&
+			next.stream === blob.stream &&
+			(next.data as { id?: unknown }).id === blob.key,
+		`${blob.stream}/${String(blob.key)} must be followed by its record`,
+	);
+}
+
+function coverageOf(messages: EmittedMessage[], stream: string) {
+	return messages.filter(
+		(m): m is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+			m.type === "DETAIL_COVERAGE" && m.stream === stream,
+	);
 }
 
 for (const streaming of [false, true]) {
 	const mode = streaming ? "streaming" : "buffered";
-	test(`collectAnthropic: ${mode} oversized conversation keeps the parent and its messages and reports an explicit gap`, async () => {
+	test(`collectAnthropic: ${mode} conversation with over-cap message text keeps every record, omits only that text, and still proves`, async () => {
 		const { emitted, protocolMessages } = await runOldFormat(
 			[
 				{
@@ -4220,65 +4319,165 @@ for (const streaming of [false, true]) {
 				.sort(),
 			["conv-1", "conv-huge"],
 		);
-		assert.deepEqual(
-			emitted
-				.filter(
-					(r) =>
-						r.stream === "messages" && r.data.conversation_id === "conv-huge",
-				)
-				.map((r) => r.data.id)
-				.sort(),
-			["msg-huge-1", "msg-huge-2"],
+		const hugeMessages = emitted.filter(
+			(r) => r.stream === "messages" && r.data.conversation_id === "conv-huge",
 		);
-		assert.deepEqual(
-			gapsOf(protocolMessages).map((g) => [g.stream, g.record_key]),
-			[["conversations", "conv-huge"]],
-		);
-		assert.deepEqual(skipsOf(protocolMessages), []);
+		assert.deepEqual(hugeMessages.map((r) => r.data.id).sort(), [
+			"msg-huge-1",
+			"msg-huge-2",
+		]);
+		// The text cannot be a blob (its encoding is over the host cap), so the
+		// field is absent: never cut, never replaced.
+		const hugeFirst = hugeMessages.find((r) => r.data.id === "msg-huge-1");
+		assert.ok(hugeFirst);
+		assert.equal("content" in hugeFirst.data, false);
+		assert.equal("blob_ref" in hugeFirst.data, false);
+		assert.equal(validateRecord("messages", hugeFirst.data).ok, true);
 		assert.equal(
-			protocolMessages.filter((m) => m.type === "DETAIL_COVERAGE").length,
-			0,
-			"an incomplete source must not be reported as a full scan",
+			hugeMessages.find((r) => r.data.id === "msg-huge-2")?.data.content,
+			"short reply",
+		);
+		assert.deepEqual(gapsOf(protocolMessages), []);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+		assert.ok(
+			diagnostics.some(
+				(line) =>
+					line.startsWith("[anthropic-diagnostic] export_items_too_large ") &&
+					line.includes('"stream":"messages"') &&
+					line.includes('"reason":"content_exceeds_host_blob_cap"') &&
+					line.includes('"count":1'),
+			),
+			diagnostics.join("\n"),
+		);
+		// Every key is emitted, so every key is accounted: proofs stand.
+		const messageCount = emitted.filter((r) => r.stream === "messages").length;
+		assert.equal(coverageOf(protocolMessages, "conversations").length, 1);
+		assert.equal(coverageOf(protocolMessages, "messages").length, 1);
+		assert.equal(
+			coverageOf(protocolMessages, "messages")[0]?.considered,
+			messageCount,
+		);
+		assert.equal(
+			coverageOf(protocolMessages, "conversations")[0]?.considered,
+			2,
 		);
 	});
 }
 
-test("collectAnthropic: oversized project keeps the project and its documents and reports an explicit gap", async () => {
-	const { emitted, protocolMessages } = await runOldFormat(
-		[
-			{ name: "conversations.json", content: CONVERSATIONS_JSON },
-			{
-				name: "projects/proj-huge.json",
-				content: {
-					uuid: "proj-huge",
-					name: "Huge project",
-					created_at: "2026-01-01T00:00:00.000Z",
-					docs: [
-						{ uuid: "doc-huge", filename: "big.md", content: HUGE_TEXT },
-						{ uuid: "doc-small", filename: "small.md", content: "ok" },
+for (const streaming of [false, true]) {
+	const mode = streaming ? "streaming" : "buffered";
+	test(`collectAnthropic: ${mode} message and document text over 10M characters is a blob, not a truncation`, async () => {
+		// ASCII source characters plus escapes (NUL, a lone surrogate) so the
+		// test reader's offsets in UTF-16 units equal the entry's byte size.
+		const longText = `${"a".repeat(6_000_000)}\u0000\ud800${"z".repeat(6_000_000)}end`;
+		const { emitted, events, protocolMessages } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						{
+							uuid: "conv-long",
+							created_at: "2026-01-01T00:00:00.000Z",
+							chat_messages: [
+								{ uuid: "msg-long", sender: "human", text: longText },
+							],
+						},
 					],
 				},
-			},
-		],
-		{ streams: ["projects", "project_documents"] },
-	);
-	assert.deepEqual(
-		emitted.filter((r) => r.stream === "projects").map((r) => r.data.id),
-		["proj-huge"],
-	);
-	assert.deepEqual(
-		emitted
-			.filter((r) => r.stream === "project_documents")
-			.map((r) => r.data.id)
-			.sort(),
-		["doc-huge", "doc-small"],
-	);
-	assert.deepEqual(
-		gapsOf(protocolMessages).map((g) => [g.stream, g.record_key]),
-		[["projects", "proj-huge"]],
-	);
-	assert.deepEqual(skipsOf(protocolMessages), []);
-});
+				{
+					name: "projects/proj-long.json",
+					content: {
+						uuid: "proj-long",
+						name: "Long",
+						docs: [{ uuid: "doc-long", filename: "a.md", content: longText }],
+					},
+				},
+			],
+			{ streaming },
+		);
+		for (const [stream, id] of [
+			["messages", "msg-long"],
+			["project_documents", "doc-long"],
+		] as const) {
+			const record = emitted.find((r) => r.stream === stream);
+			assert.ok(record, stream);
+			assert.equal(record.data.id, id);
+			assert.equal(record.data.content, null);
+			const blob = protocolMessages.find(
+				(m): m is Extract<EmittedMessage, { type: "BLOB" }> =>
+					m.type === "BLOB" && m.stream === stream,
+			);
+			assert.ok(blob, `${stream} blob`);
+			assert.equal(blob.key, id);
+			const bytes = readFileSync(join(blobSpoolDir, blob.file));
+			assert.equal(JSON.parse(bytes.toString("utf8")), longText);
+			const ref = record.data.blob_ref as Record<string, unknown>;
+			assert.equal(
+				ref.sha256,
+				createHash("sha256").update(bytes).digest("hex"),
+			);
+			assert.equal(ref.size_bytes, bytes.length);
+			assert.equal(ref.blob_id, `sha256:${ref.sha256}`);
+			// The BLOB descriptor is emitted immediately before its record.
+			assertBlobPrecedesRecord(events, blob);
+		}
+		// The project record's raw_docs copy leaves the long text to the
+		// document record instead of cutting it.
+		const project = emitted.find((r) => r.stream === "projects");
+		const rawDocs = project?.data.raw_docs as Array<Record<string, unknown>>;
+		assert.equal("content" in (rawDocs[0] ?? {}), false);
+		for (const stream of ["messages", "project_documents"])
+			assert.equal(coverageOf(protocolMessages, stream).length, 1, stream);
+		assert.deepEqual(gapsOf(protocolMessages), []);
+	});
+}
+
+for (const streaming of [false, true]) {
+	const mode = streaming ? "streaming" : "buffered";
+	test(`collectAnthropic: ${mode} oversized project keeps the project and its documents, omits only the raw envelope and text, and still proves`, async () => {
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{ name: "conversations.json", content: CONVERSATIONS_JSON },
+				{
+					name: "projects/proj-huge.json",
+					content: {
+						uuid: "proj-huge",
+						name: "Huge project",
+						created_at: "2026-01-01T00:00:00.000Z",
+						docs: [
+							{ uuid: "doc-huge", filename: "big.md", content: HUGE_TEXT },
+							{ uuid: "doc-small", filename: "small.md", content: "ok" },
+						],
+					},
+				},
+			],
+			{ streams: ["projects", "project_documents"], streaming },
+		);
+		const project = emitted.find((r) => r.stream === "projects");
+		assert.equal(project?.data.id, "proj-huge");
+		assert.equal("blob_ref" in (project?.data ?? {}), false);
+		assert.equal(validateRecord("projects", project?.data ?? {}).ok, true);
+		assert.deepEqual(
+			emitted
+				.filter((r) => r.stream === "project_documents")
+				.map((r) => r.data.id)
+				.sort(),
+			["doc-huge", "doc-small"],
+		);
+		const hugeDoc = emitted.find(
+			(r) => r.stream === "project_documents" && r.data.id === "doc-huge",
+		);
+		assert.equal("content" in (hugeDoc?.data ?? {}), false);
+		assert.equal(
+			validateRecord("project_documents", hugeDoc?.data ?? {}).ok,
+			true,
+		);
+		assert.deepEqual(gapsOf(protocolMessages), []);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+		assert.equal(coverageOf(protocolMessages, "projects").length, 1);
+		assert.equal(coverageOf(protocolMessages, "project_documents").length, 1);
+	});
+}
 
 for (const streaming of [false, true]) {
 	for (const [label, conversations] of [
@@ -4330,6 +4529,348 @@ for (const streaming of [false, true]) {
 	}
 }
 
+// ─── Oversized parents: identity anywhere, bounded streaming, real blob ────
+
+const LINE_PAD = "y".repeat(100_000);
+const READ_CHUNK_UNITS = 120 * 1024;
+
+/** A conversation whose `chat_messages` comes BEFORE its identity fields.
+ * `count` messages of 100,000 characters each; newest first, so ordering has
+ * to be restored. */
+function messagesFirstParent(
+	id: string,
+	updatedAt: string,
+	count: number,
+): Record<string, unknown> {
+	return {
+		chat_messages: Array.from({ length: count }, (_, index) => ({
+			uuid: `${id}-m${String(count - index).padStart(4, "0")}`,
+			sender: index % 2 === 0 ? "assistant" : "human",
+			created_at: new Date(
+				Date.UTC(2026, 0, 20) + (count - index) * 1000,
+			).toISOString(),
+			text: LINE_PAD,
+		})),
+		name: "Late identity",
+		updated_at: updatedAt,
+		created_at: "2026-01-20T00:00:00.000Z",
+		uuid: id,
+	};
+}
+
+function blobsOf(messages: EmittedMessage[]) {
+	return messages.filter(
+		(m): m is Extract<EmittedMessage, { type: "BLOB" }> => m.type === "BLOB",
+	);
+}
+
+test("collectAnthropic: a streamed oversized parent whose identity follows its messages is kept; its full envelope is streamed into one real blob and its messages are emitted in order", async () => {
+	// 200 x 100,000 = 20M units: over the 16 Mi buffering limit, under 32 MiB.
+	const parent = messagesFirstParent(
+		"late-id",
+		"2026-02-01T00:00:00.000Z",
+		200,
+	);
+	const reads: number[] = [];
+	const meter = new BufferMeter();
+	const { emitted, events, protocolMessages } = await runOldFormat(
+		[{ name: "conversations.json", content: [parent, CONVERSATIONS_JSON[0]] }],
+		{
+			streams: ["conversations", "messages"],
+			streaming: true,
+			bufferMeter: meter,
+			onRead: (_name, _offset, _length, text) => reads.push(text.length),
+		},
+	);
+	assert.deepEqual(
+		emitted
+			.filter((r) => r.stream === "conversations")
+			.map((r) => r.data.id)
+			.sort(),
+		["conv-1", "late-id"],
+	);
+	const messageIds = emitted
+		.filter(
+			(r) => r.stream === "messages" && r.data.conversation_id === "late-id",
+		)
+		.map((r) => r.data.id);
+	assert.equal(messageIds.length, 200);
+	assert.deepEqual(messageIds, [...messageIds].sort(), "created_at order");
+	const record = emitted.find(
+		(r) => r.stream === "conversations" && r.data.id === "late-id",
+	);
+	assert.equal(record?.data.message_count, 200);
+	assert.equal(record?.data.update_time, "2026-02-01T00:00:00.000Z");
+	// One real blob holding the whole raw envelope.
+	const blob = blobsOf(protocolMessages).find((b) => b.key === "late-id");
+	assert.ok(blob);
+	const bytes = readFileSync(join(blobSpoolDir, blob.file));
+	assert.ok(bytes.length > 16 * 1024 * 1024 && bytes.length <= 33_554_432);
+	const envelope = JSON.parse(bytes.toString("utf8"));
+	assert.equal(envelope.format, "anthropic-source-record-v1");
+	assert.equal(envelope.stream, "conversations");
+	assert.equal(envelope.record_key, "late-id");
+	assert.deepEqual(envelope.payload, parent);
+	const ref = record?.data.blob_ref as Record<string, unknown>;
+	assert.equal(ref.size_bytes, bytes.length);
+	assert.equal(ref.sha256, createHash("sha256").update(bytes).digest("hex"));
+	assert.equal(blob.size_bytes, bytes.length);
+	assert.equal(blob.sha256, ref.sha256);
+	// The BLOB is emitted immediately before its RECORD.
+	assertBlobPrecedesRecord(events, blob);
+	// Bounded: no read above one chunk, and the reader held about one message,
+	// not the 20M-unit parent.
+	assert.ok(Math.max(...reads) <= READ_CHUNK_UNITS);
+	assert.ok(meter.peakUnits < 1_000_000, `peak ${meter.peakUnits}`);
+	assert.deepEqual(gapsOf(protocolMessages), []);
+	assert.equal(coverageOf(protocolMessages, "conversations").length, 1);
+	assert.equal(coverageOf(protocolMessages, "messages").length, 1);
+});
+
+test("collectAnthropic: the streamed path builds no string larger than one message, whatever the parent's size", async () => {
+	const run = async (count: number) => {
+		const meter = new BufferMeter();
+		const strings = stringBuildMeter();
+		const reads: number[] = [];
+		const { emitted } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						messagesFirstParent(`p${count}`, "2026-02-01T00:00:00.000Z", count),
+					],
+				},
+			],
+			{
+				streams: ["conversations", "messages"],
+				streaming: true,
+				bufferMeter: meter,
+				aroundCollect: strings.around,
+				onRead: (_n, _o, _l, text) => reads.push(text.length),
+			},
+		);
+		assert.equal(emitted.filter((r) => r.stream === "messages").length, count);
+		assert.ok(Math.max(...reads) <= READ_CHUNK_UNITS);
+		return { meter: meter.peakUnits, ...strings.peak };
+	};
+	// 18M units (envelope fits one blob) and 54M units (envelope over the cap).
+	const small = await run(180);
+	const large = await run(540);
+	for (const peak of [small, large]) {
+		assert.ok(peak.meter < 1_000_000, `reader peak ${peak.meter}`);
+		assert.ok(peak.join < 1_000_000, `largest join ${peak.join}`);
+		assert.ok(peak.parse < 1_000_000, `largest JSON.parse ${peak.parse}`);
+	}
+	assert.ok(
+		Math.abs(large.meter - small.meter) <= 64,
+		`reader peak ${small.meter} (18M-unit parent) vs ${large.meter} (54M-unit parent)`,
+	);
+});
+
+for (const streaming of [false, true]) {
+	const mode = streaming ? "streaming" : "buffered";
+	test(`collectAnthropic: ${mode} conversation with an envelope over the host cap is emitted without blob_ref, discloses one aggregate count, and every stream still proves`, async () => {
+		// 360 x 100,000 = 36M units: the envelope is over 32 MiB.
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						messagesFirstParent("big-id", "2026-02-01T00:00:00.000Z", 360),
+						CONVERSATIONS_JSON[0],
+					],
+				},
+				{ name: "projects/proj-1.json", content: PROJECT_JSON },
+			],
+			{
+				streams: ["conversations", "messages", "projects", "project_documents"],
+				streaming,
+			},
+		);
+		const big = emitted.find(
+			(r) => r.stream === "conversations" && r.data.id === "big-id",
+		);
+		assert.ok(big);
+		assert.equal("blob_ref" in big.data, false);
+		assert.equal(validateRecord("conversations", big.data).ok, true);
+		assert.equal(
+			emitted.filter(
+				(r) => r.stream === "messages" && r.data.conversation_id === "big-id",
+			).length,
+			360,
+		);
+		// conv-1 and proj-1 still get their blobs; big-id gets none.
+		assert.deepEqual(
+			blobsOf(protocolMessages)
+				.map((b) => b.key)
+				.sort(),
+			["conv-1", "proj-1"],
+		);
+		assert.deepEqual(gapsOf(protocolMessages), []);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+		assert.ok(
+			protocolMessages.every(
+				(m) => m.type !== "DETAIL_COVERAGE" || !("optional_skip_keys" in m),
+			),
+		);
+		const note = protocolMessages.filter(
+			(m) =>
+				m.type === "PROGRESS" &&
+				/too large to keep a raw copy/.test((m as { message: string }).message),
+		);
+		assert.equal(note.length, 1);
+		assertUserFacingProgress(protocolMessages);
+		assert.ok(
+			diagnostics.some(
+				(line) =>
+					line.startsWith("[anthropic-diagnostic] export_items_too_large ") &&
+					line.includes('"stream":"conversations"') &&
+					line.includes('"reason":"source_envelope_exceeds_host_blob_cap"') &&
+					line.includes('"count":1'),
+			),
+			diagnostics.join("\n"),
+		);
+		// Every key is emitted, so every stream proves; the proof is about keys.
+		for (const stream of [
+			"conversations",
+			"messages",
+			"projects",
+			"project_documents",
+		])
+			assert.equal(coverageOf(protocolMessages, stream).length, 1, stream);
+		assert.equal(
+			coverageOf(protocolMessages, "conversations")[0]?.considered,
+			2,
+		);
+		assert.equal(
+			coverageOf(protocolMessages, "messages")[0]?.considered,
+			emitted.filter((r) => r.stream === "messages").length,
+		);
+	});
+
+	test(`collectAnthropic: ${mode} project with an envelope over the host cap leaves every other stream, messages included, proven`, async () => {
+		const docs = [0, 1, 2, 3].map((index) => ({
+			uuid: `big-doc-${index}`,
+			filename: `d${index}.md`,
+			content: ENVELOPE_PAD,
+		}));
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{ name: "conversations.json", content: CONVERSATIONS_JSON },
+				{
+					name: "projects/proj-big.json",
+					content: { uuid: "proj-big", name: "Big", docs },
+				},
+				{ name: "projects/proj-1.json", content: PROJECT_JSON },
+			],
+			{
+				streams: ["conversations", "messages", "projects", "project_documents"],
+				streaming,
+			},
+		);
+		const big = emitted.find(
+			(r) => r.stream === "projects" && r.data.id === "proj-big",
+		);
+		assert.ok(big);
+		assert.equal("blob_ref" in big.data, false);
+		assert.equal(validateRecord("projects", big.data).ok, true);
+		assert.deepEqual(
+			blobsOf(protocolMessages)
+				.map((b) => b.key)
+				.sort(),
+			["conv-1", "proj-1"],
+		);
+		assert.deepEqual(gapsOf(protocolMessages), []);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+		for (const stream of [
+			"conversations",
+			"messages",
+			"projects",
+			"project_documents",
+		])
+			assert.equal(coverageOf(protocolMessages, stream).length, 1, stream);
+		assert.equal(coverageOf(protocolMessages, "projects")[0]?.considered, 2);
+	});
+}
+
+test("collectAnthropic: a time window selects an oversized parent by its late updated_at, and never drops it silently", async () => {
+	const files = [
+		{
+			name: "conversations.json",
+			content: [
+				// 36M units each: over the host cap, where identity used to be read
+				// from a 64 KiB prefix only.
+				messagesFirstParent("inside", "2026-02-01T00:00:00.000Z", 360),
+				messagesFirstParent("outside", "2025-01-01T00:00:00.000Z", 360),
+			],
+		},
+	];
+	const { emitted } = await runOldFormat(files, {
+		streams: ["conversations", "messages"],
+		streaming: true,
+		since: "2026-01-15T00:00:00.000Z",
+	});
+	assert.deepEqual(
+		emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id),
+		["inside"],
+	);
+	assert.equal(
+		emitted.filter(
+			(r) => r.stream === "messages" && r.data.conversation_id === "inside",
+		).length,
+		360,
+	);
+	assert.equal(
+		emitted.filter(
+			(r) => r.stream === "messages" && r.data.conversation_id === "outside",
+		).length,
+		0,
+	);
+});
+
+test("collectAnthropic: an oversized parent with no identity anywhere is dropped and its streams skipped", async () => {
+	const { chat_messages } = messagesFirstParent(
+		"x",
+		"2026-02-01T00:00:00.000Z",
+		180,
+	);
+	const { emitted, protocolMessages } = await runOldFormat(
+		[{ name: "conversations.json", content: [{ chat_messages }] }],
+		{ streams: ["conversations", "messages"], streaming: true },
+	);
+	assert.equal(emitted.length, 0);
+	assert.deepEqual(
+		skipsOf(protocolMessages)
+			.map((s) => [s.stream, s.reason])
+			.sort(),
+		[
+			["conversations", "export_items_unparseable"],
+			["messages", "export_items_unparseable"],
+		],
+	);
+});
+
+test("collectAnthropic: the streamed path takes uuid, updated_at and name from after a large chat_messages in the buffered range too", async () => {
+	// Under the 16 Mi limit the object is buffered; same answer.
+	const parent = messagesFirstParent(
+		"small-late",
+		"2026-02-01T00:00:00.000Z",
+		3,
+	);
+	const { emitted } = await runOldFormat(
+		[{ name: "conversations.json", content: [parent] }],
+		{
+			streams: ["conversations", "messages"],
+			streaming: true,
+			since: "2026-01-15T00:00:00.000Z",
+		},
+	);
+	assert.deepEqual(
+		emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id),
+		["small-late"],
+	);
+});
+
 test("collectAnthropic: organization selection prefers chat, then claude_pro, then the first organization", async () => {
 	const requestedOrgs: string[] = [];
 	const run = async (orgs: unknown[]) => {
@@ -4359,5 +4900,20 @@ test("collectAnthropic: organization selection prefers chat, then claude_pro, th
 		{ uuid: "org-api", capabilities: ["api"] },
 		{ uuid: "org-max", capabilities: ["claude_max"] },
 	]);
-	assert.deepEqual(requestedOrgs, ["org-pro", "org-api"]);
+	// A chat-capable organization beats a claude_pro one, whatever the order.
+	await run([
+		{ uuid: "org-pro", capabilities: ["claude_pro"] },
+		{ uuid: "org-chat", capabilities: ["chat", "claude_max"] },
+		{ uuid: "org-api", capabilities: ["api"] },
+	]);
+	await run([
+		{ uuid: "org-chat", capabilities: ["chat"] },
+		{ uuid: "org-pro", capabilities: ["claude_pro"] },
+	]);
+	assert.deepEqual(requestedOrgs, [
+		"org-pro",
+		"org-api",
+		"org-chat",
+		"org-chat",
+	]);
 });

@@ -71,6 +71,34 @@ function safeText(v: unknown, max: number): PdppSafeText | null {
 	return result.success ? result.data : null;
 }
 
+/** Longest text kept inline in a record. A longer text is not truncated: the
+ * record carries it as a Core blob (see `oversizeTextOf`). */
+export const INLINE_TEXT_MAX_UNITS = 10_000_000;
+
+const OVERSIZE_TEXT = Symbol("anthropic.oversizeText");
+
+/** The full source text of a record whose text passed the inline cap, or null.
+ * The record's own text field is null then; the caller moves the text into a
+ * blob. Not enumerable, so it never reaches an emitted record by accident. */
+export function oversizeTextOf(record: object): string | null {
+	const text = (record as { [OVERSIZE_TEXT]?: string })[OVERSIZE_TEXT];
+	return typeof text === "string" ? text : null;
+}
+
+function withOversizeText<T extends object>(record: T, text: string): T {
+	Object.defineProperty(record, OVERSIZE_TEXT, { value: text });
+	return record;
+}
+
+/** Inline text for a record field, or null when the text passes the inline
+ * cap (never a truncated prefix). */
+function inlineText(v: unknown): PdppSafeText | null {
+	const s = str(v);
+	return s === null || s.length > INLINE_TEXT_MAX_UNITS
+		? null
+		: safeText(s, s.length);
+}
+
 function bool(v: unknown): boolean | null {
 	return typeof v === "boolean" ? v : null;
 }
@@ -204,12 +232,13 @@ export function parseMessage(
 	if (id === null) {
 		return null;
 	}
-	return {
+	const text = flattenMessageText(raw);
+	const record: MessageRecord = {
 		id,
 		conversation_id: conversationId,
 		role: str(raw.sender),
 		parent_id: str(raw.parent_message_uuid),
-		content: safeText(flattenMessageText(raw), 10_000_000),
+		content: inlineText(text),
 		// The export's per-message payload carries no model field (confirmed
 		// by claude-export-ingest.cjs's normalizeMessage, which does not read
 		// one); left null rather than guessed.
@@ -218,6 +247,9 @@ export function parseMessage(
 		update_time: isoOrNull(raw.updated_at),
 		attachments: parseAttachments(raw.attachments),
 	};
+	return text.length > INLINE_TEXT_MAX_UNITS
+		? withOversizeText(record, text)
+		: record;
 }
 
 /**
@@ -309,170 +341,6 @@ export interface ParseJsonArrayChunkOptions {
 			serializedLowerBoundUnits: number;
 		},
 	) => Promise<void> | void;
-}
-
-export function topLevelStringFields(
-	text: string,
-	fields: ReadonlySet<string>,
-): Map<string, string> {
-	let i = 0;
-	const whitespace = () => {
-		while (/[ \t\r\n]/.test(text[i] ?? "")) i++;
-	};
-	const stringEnd = (start: number): number => {
-		let escaped = false;
-		for (let at = start + 1; at < text.length; at++) {
-			const char = text[at];
-			if (escaped) escaped = false;
-			else if (char === "\\") escaped = true;
-			else if (char === '"') return at + 1;
-		}
-		return text.length;
-	};
-	const valueEnd = (start: number): number => {
-		const first = text[start];
-		if (first === '"') return stringEnd(start);
-		if (first !== "{" && first !== "[") {
-			let at = start;
-			while (at < text.length && !",}] \t\r\n".includes(text[at] ?? "")) at++;
-			return at;
-		}
-		const stack = [first === "{" ? "}" : "]"];
-		let inString = false;
-		let escaped = false;
-		for (let at = start + 1; at < text.length; at++) {
-			const char = text[at];
-			if (inString) {
-				if (escaped) escaped = false;
-				else if (char === "\\") escaped = true;
-				else if (char === '"') inString = false;
-				continue;
-			}
-			if (char === '"') inString = true;
-			else if (char === "{") stack.push("}");
-			else if (char === "[") stack.push("]");
-			else if (char === "}" || char === "]") {
-				if (stack.pop() !== char) return text.length;
-				if (stack.length === 0) return at + 1;
-			}
-		}
-		return text.length;
-	};
-
-	whitespace();
-	if (text[i] !== "{") return new Map();
-	i++;
-	const found = new Map<string, string>();
-	for (;;) {
-		whitespace();
-		if (text[i] === "}") return found;
-		if (text[i] !== '"') return found;
-		const keyEnd = stringEnd(i);
-		let key: unknown;
-		try {
-			key = JSON.parse(text.slice(i, keyEnd));
-		} catch {
-			return found;
-		}
-
-		i = keyEnd;
-		whitespace();
-		if (text[i] !== ":") return found;
-		i++;
-		whitespace();
-		const end = valueEnd(i);
-		if (typeof key === "string" && fields.has(key) && text[i] === '"') {
-			try {
-				const value: unknown = JSON.parse(text.slice(i, end));
-				if (typeof value === "string") found.set(key, value);
-				else found.delete(key);
-			} catch {
-				found.delete(key);
-			}
-		}
-		i = end;
-		whitespace();
-		if (text[i] !== ",") return found;
-		i++;
-	}
-}
-
-export function topLevelRawFields(
-	text: string,
-	fields: ReadonlySet<string>,
-): Map<string, string> {
-	let i = 0;
-	const whitespace = () => {
-		while (/[ \t\r\n]/.test(text[i] ?? "")) i++;
-	};
-	const stringEnd = (start: number): number => {
-		let escaped = false;
-		for (let at = start + 1; at < text.length; at++) {
-			const char = text[at];
-			if (escaped) escaped = false;
-			else if (char === "\\") escaped = true;
-			else if (char === '"') return at + 1;
-		}
-		return text.length;
-	};
-	const valueEnd = (start: number): number => {
-		const first = text[start];
-		if (first === '"') return stringEnd(start);
-		if (first !== "{" && first !== "[") {
-			let at = start;
-			while (at < text.length && !",}] \t\r\n".includes(text[at] ?? "")) at++;
-			return at;
-		}
-		const stack = [first === "{" ? "}" : "]"];
-		let inString = false;
-		let escaped = false;
-		for (let at = start + 1; at < text.length; at++) {
-			const char = text[at];
-			if (inString) {
-				if (escaped) escaped = false;
-				else if (char === "\\") escaped = true;
-				else if (char === '"') inString = false;
-				continue;
-			}
-			if (char === '"') inString = true;
-			else if (char === "{") stack.push("}");
-			else if (char === "[") stack.push("]");
-			else if (char === "}" || char === "]") {
-				if (stack.pop() !== char) return text.length;
-				if (stack.length === 0) return at + 1;
-			}
-		}
-		return text.length;
-	};
-	whitespace();
-	if (text[i] !== "{") return new Map();
-	i++;
-	const found = new Map<string, string>();
-	for (;;) {
-		whitespace();
-		if (text[i] === "}") return found;
-		if (text[i] !== '"') return found;
-		const keyEnd = stringEnd(i);
-		let key: unknown;
-		try {
-			key = JSON.parse(text.slice(i, keyEnd));
-		} catch {
-			return found;
-		}
-		i = keyEnd;
-		whitespace();
-		if (text[i] !== ":") return found;
-		i++;
-		whitespace();
-		const start = i;
-		const end = valueEnd(start);
-		if (typeof key === "string" && fields.has(key))
-			found.set(key, text.slice(start, end));
-		i = end;
-		whitespace();
-		if (text[i] !== ",") return found;
-		i++;
-	}
 }
 
 /** Parse one top-level JSON array from bounded UTF-16 chunks. The parser
@@ -888,14 +756,17 @@ export function parseProjectDocument(
 		str(raw.filename) ?? str(raw.file_name) ?? str(raw.name) ?? str(raw.title);
 	const content =
 		str(raw.content) ?? str(raw.text) ?? str(raw.body) ?? str(raw.filedata);
-	return {
+	const record: ProjectDocumentRecord = {
 		id,
 		project_id: projectId,
 		filename: safeText(filename, 1024),
-		content: safeText(content, 10_000_000),
+		content: inlineText(content),
 		create_time: isoOrNull(raw.created_at),
 		update_time: isoOrNull(raw.updated_at),
 	};
+	return content !== null && content.length > INLINE_TEXT_MAX_UNITS
+		? withOversizeText(record, content)
+		: record;
 }
 
 /**
@@ -974,7 +845,9 @@ export function parseProject(raw: unknown): {
 			raw_docs: docsRaw.filter(isRecord).map((doc) => {
 				const uuid = safeText(doc.uuid, 128);
 				const filename = safeText(doc.filename, 1024);
-				const content = safeText(doc.content, 10_000_000);
+				// Text over the inline cap lives in the document's own record
+				// (as a blob); it is left out here, never cut.
+				const content = inlineText(doc.content);
 				const createdAt = safeText(doc.created_at, 128);
 				const updatedAt = safeText(doc.updated_at, 128);
 				return {
