@@ -19,6 +19,13 @@ const history = JSON.parse(fixture("history-issue.json")) as {
 	items: unknown[];
 };
 let profileLoads = 0;
+const page = (requestedUrl: string, html: string) => ({
+	requestedUrl,
+	currentUrl: requestedUrl,
+	html,
+});
+const withOwner = (html: string) =>
+	`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>${html}`;
 
 function graph(start: string, end: string): string {
 	let html = '<h2 class="f4 text-normal mb-2">1 contribution</h2>';
@@ -45,8 +52,11 @@ runConnector({
 				state,
 			},
 			{
-				fetchPublicJson: async (url) =>
-					url.includes("events")
+				fetchPublicJson: async (url) => ({
+					requestedUrl: url,
+					responseUrl: url,
+					status: 200,
+					data: url.includes("events")
 						? events
 						: url.includes("type%3Apr")
 							? { items: [], total_count: 0, incomplete_results: false }
@@ -55,19 +65,27 @@ runConnector({
 									total_count: history.items.length,
 									incomplete_results: false,
 								},
+				}),
 				now: () => new Date("2026-01-01T00:00:00Z"),
 				openPage: async (url) => {
 					if (url.includes("?from=")) {
 						const year = Number(/from=(\d{4})/u.exec(url)?.[1]);
-						return graph(`${year}-01-01`, `${year}-12-31`);
+						return page(
+							url,
+							withOwner(graph(`${year}-01-01`, `${year}-12-31`)),
+						);
 					}
-					if (url.includes("tab=repositories")) return repository;
+					if (url.includes("tab=repositories"))
+						return page(url, withOwner(repository));
 					if (url.includes("tab=stars"))
-						return '<main><div id="user-starred-repos"></div><p>sample-user hasn\'t starred any repositories yet</p></main>';
-					if (url.endsWith("github.com/")) return profile;
+						return page(
+							url,
+							'<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="user-starred-repos"></div><p>sample-user hasn\'t starred any repositories yet</p></main>',
+						);
+					if (url.endsWith("github.com/")) return page(url, profile);
 					return ++profileLoads === 1
-						? profile
-						: graph("2025-01-02", "2026-01-01");
+						? page(url, profile)
+						: page(url, withOwner(graph("2025-01-02", "2026-01-01")));
 				},
 				sleep: async () => {},
 			},

@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { z } from "zod";
+import type {
+	RecordData,
+	ValidateRecord,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
+import { resolveGitHubRecordId } from "./identity.ts";
 
 const repository = z.object({
 	name: z.string(),
@@ -92,36 +97,31 @@ const schemas = {
 		),
 		contributionsLastYear: z.number().nullable(),
 	}),
-	repositories: z.object({ id: z.string(), repositories: z.array(repository) }),
-	starred: z.object({ id: z.string(), starred: z.array(starred) }),
-	events: z.object({
-		id: z.string(),
-		events: z.array(event),
-		fetchedAt: z.string(),
-		windowDescription: z.string(),
-	}),
-	contributions: z.object({
-		id: z.string(),
-		days: z.array(
-			z.object({
-				date: z.string(),
-				count: z.number(),
-				level: z.number().nullable(),
-			}),
-		),
-		fetchedAt: z.string(),
-		totalContributionsLastYear: z.number(),
-		yearTotals: z.array(z.object({ year: z.number(), total: z.number() })),
-		monthlyTotals: z.array(z.object({ month: z.string(), count: z.number() })),
-		topDay: z.object({ date: z.string(), count: z.number() }).nullable(),
-	}),
-	history: z.object({
-		id: z.string(),
-		pullRequests: z.array(historyItem),
-		issues: z.array(historyItem),
-		fetchedAt: z.string(),
-		windowDescription: z.string(),
-	}),
+	repositories: repository.extend({ id: z.string() }),
+	starred: starred.extend({ id: z.string() }),
+	events: event,
+	contributions: z.discriminatedUnion("recordType", [
+		z.object({
+			recordType: z.literal("day"),
+			id: z.string(),
+			date: z.string(),
+			count: z.number(),
+			level: z.number().nullable(),
+		}),
+		z.object({
+			recordType: z.literal("summary"),
+			id: z.string(),
+			username: z.string(),
+			fetchedAt: z.string(),
+			totalContributionsLastYear: z.number(),
+			yearTotals: z.array(z.object({ year: z.number(), total: z.number() })),
+			monthlyTotals: z.array(
+				z.object({ month: z.string(), count: z.number() }),
+			),
+			topDay: z.object({ date: z.string(), count: z.number() }).nullable(),
+		}),
+	]),
+	history: historyItem,
 };
 
 export const SCHEMAS = {
@@ -133,4 +133,22 @@ export const SCHEMAS = {
 	history: schemas.history,
 };
 
-export const validateRecord = makeValidateRecord(SCHEMAS);
+const validateSchema = makeValidateRecord(SCHEMAS);
+
+export const validateRecord: ValidateRecord = (stream, data) => {
+	const expectedId = resolveGitHubRecordId(stream, data);
+	if (expectedId !== null && data.id !== expectedId) {
+		return {
+			ok: false,
+			issues: [{ path: "id", message: "does not match source identity" }],
+		};
+	}
+	return validateSchema(stream, data);
+};
+
+export function resolveRecordId(
+	stream: string,
+	record: RecordData,
+): string | null {
+	return resolveGitHubRecordId(stream, record);
+}

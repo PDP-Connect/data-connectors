@@ -7,12 +7,15 @@ import { openContributionPage } from "./index.ts";
 
 function delayedPage(readyHtml: string) {
 	let html = "<main>Loading contribution calendar</main>";
+	let currentUrl = "";
 	const calls: string[] = [];
 	const page = {
-		goto: async (_url: string, options: { waitUntil: string }) => {
+		goto: async (url: string, options: { waitUntil: string }) => {
 			assert.equal(options.waitUntil, "domcontentloaded");
+			currentUrl = url;
 			calls.push("goto");
 		},
+		url: () => currentUrl,
 		waitForFunction: async (
 			predicate: unknown,
 			argument: { minimumDays: number; selector: string },
@@ -21,8 +24,7 @@ function delayedPage(readyHtml: string) {
 			assert.equal(typeof predicate, "function");
 			assert.deepEqual(argument, {
 				minimumDays: 365,
-				selector:
-					"td.ContributionCalendar-day[data-date], rect.day[data-date]",
+				selector: "td.ContributionCalendar-day[data-date], rect.day[data-date]",
 			});
 			assert.equal(options.timeout, 8_000);
 			calls.push("waitForCalendar");
@@ -47,7 +49,9 @@ test("contribution page waits for late calendar cells before reading HTML", asyn
 		"https://github.com/sample-user",
 	);
 
-	assert.equal(html, readyHtml);
+	assert.equal(html.html, readyHtml);
+	assert.equal(html.requestedUrl, "https://github.com/sample-user");
+	assert.equal(html.currentUrl, html.requestedUrl);
 	assert.deepEqual(fixture.calls, [
 		"goto",
 		"waitForCalendar",
@@ -59,8 +63,13 @@ test("contribution page waits for late calendar cells before reading HTML", asyn
 test("contribution wait timeout returns HTML for the collector to reject as incomplete", async () => {
 	const partialHtml = "<main>Calendar did not render</main>";
 	const calls: string[] = [];
+	let currentUrl = "";
 	const page = {
-		goto: async () => calls.push("goto"),
+		goto: async (url: string) => {
+			currentUrl = url;
+			calls.push("goto");
+		},
+		url: () => currentUrl,
 		waitForFunction: async () => {
 			calls.push("waitForCalendar");
 			throw new Error("timeout");
@@ -76,6 +85,6 @@ test("contribution wait timeout returns HTML for the collector to reject as inco
 		"https://github.com/sample-user",
 	);
 
-	assert.equal(html, partialHtml);
+	assert.equal(html.html, partialHtml);
 	assert.deepEqual(calls, ["goto", "waitForCalendar", "content"]);
 });

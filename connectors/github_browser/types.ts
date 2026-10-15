@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { BrowserPageObservation } from "./page-evidence.ts";
 
 export type GitHubBrowserCollectContext = Pick<
 	BrowserCollectContext,
@@ -9,10 +10,15 @@ export type GitHubBrowserCollectContext = Pick<
 >;
 
 export interface BrowserServices {
-	fetchPublicJson(url: string): Promise<unknown>;
+	fetchPublicJson(url: string): Promise<{
+		readonly requestedUrl: string;
+		readonly responseUrl: string;
+		readonly status: number;
+		readonly data: unknown;
+	}>;
 	now(): Date;
-	openPage(url: string): Promise<string>;
-	openContributionPage?(url: string): Promise<string>;
+	openPage(url: string): Promise<BrowserPageObservation>;
+	openContributionPage?(url: string): Promise<BrowserPageObservation>;
 	sleep(ms: number): Promise<void>;
 }
 
@@ -46,6 +52,7 @@ export interface LegacyProfile {
 }
 
 export interface LegacyRepository {
+	id: string;
 	description: string;
 	forks: number;
 	language: string;
@@ -58,6 +65,7 @@ export interface LegacyRepository {
 }
 
 export interface LegacyStarredRepository {
+	id: string;
 	description: string;
 	fullName: string;
 	language: string | null;
@@ -82,6 +90,7 @@ export interface LegacyEvent {
 }
 
 export interface LegacyContributionDay {
+	id: string;
 	count: number;
 	date: string;
 	level: number | null;

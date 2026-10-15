@@ -11,7 +11,9 @@ import {
 	parseLegacyEvent,
 	parseProfileHtml,
 	parseRepositoriesHtml,
+	parseRepositoriesPage,
 	parseStarredHtml,
+	parseStarredPage,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -24,7 +26,7 @@ const fixture = (name: string): Promise<string> =>
 function calendarDays(
 	startDate: string,
 	endDate: string,
-): Array<{ count: number; date: string; level: number }> {
+): Array<{ id: string; count: number; date: string; level: number }> {
 	const days = [];
 	for (
 		let date = new Date(`${startDate}T00:00:00Z`);
@@ -33,7 +35,17 @@ function calendarDays(
 	) {
 		days.push({ count: 1, date: date.toISOString().slice(0, 10), level: 1 });
 	}
-	return days;
+	return days.map((day) => ({ ...day, id: day.date }));
+}
+
+function inventoryObservation(
+	stream: "repositories" | "starred",
+	html: string,
+	pageNumber: number,
+) {
+	const tab = stream === "repositories" ? "repositories" : "stars";
+	const url = `https://github.com/sample-user?page=${pageNumber}&tab=${tab}`;
+	return { requestedUrl: url, currentUrl: url, html };
 }
 
 test("synthetic browser HTML retains legacy profile and repository fields", async () => {
@@ -53,19 +65,39 @@ test("synthetic browser HTML retains legacy profile and repository fields", asyn
 	assert.equal(repositories[0]?.name, "demo");
 	assert.equal(repositories[0]?.stars, 12);
 	assert.equal(
-		validateRecord("repositories", {
-			id: "sample-user:repositories",
-			repositories,
-		}).ok,
+		validateRecord("repositories", { ...(repositories[0] ?? {}) } as Parameters<
+			typeof validateRecord
+		>[1]).ok,
 		true,
 	);
+});
+
+test("inventory parsing accounts for rejected rows and preserves empty source strings", () => {
+	const repositories = parseRepositoriesPage(
+		'<main><ul id="user-repositories-list"><li><h3><a href="/sample-user/demo">demo</a></h3><p itemprop="description"></p><span itemprop="programmingLanguage"></span></li><li><h3>Missing link</h3></li></ul></main>',
+	);
+	assert.equal(repositories.rawRows, 2);
+	assert.equal(repositories.rejectedRows, 1);
+	assert.equal(repositories.rows[0]?.description, "");
+	assert.equal(repositories.rows[0]?.language, "");
+
+	const starred = parseStarredPage(
+		'<main><ul><li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3><span itemprop="programmingLanguage"></span></li></ul></main>',
+	);
+	assert.equal(starred.rows[0]?.language, "");
 });
 
 test("repository and starred pages require list or explicit empty evidence", () => {
 	for (const stream of ["repositories", "starred"] as const) {
 		assert.equal(
-			inspectInventoryPage("<main>Sign in</main>", stream, "sample-user", 1, 0)
-				.valid,
+			inspectInventoryPage(
+				inventoryObservation(stream, "<main>Sign in</main>", 1),
+				stream,
+				"sample-user",
+				1,
+				0,
+				0,
+			).valid,
 			false,
 		);
 		const empty =
@@ -74,32 +106,47 @@ test("repository and starred pages require list or explicit empty evidence", () 
 				: "sample-user hasn't starred any repositories yet";
 		assert.deepEqual(
 			inspectInventoryPage(
-				`<main>${empty}</main>`,
+				inventoryObservation(
+					stream,
+					`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main>${empty}</main>`,
+					1,
+				),
 				stream,
 				"sample-user",
 				1,
 				0,
+				0,
 			),
-			{ valid: true, nextUrl: null },
+			{ valid: true, nextUrl: null, reason: "terminal_list" },
 		);
 		const list =
 			stream === "repositories"
 				? "user-repositories-list"
 				: "user-starred-repos";
-		const html = `<main><ul id="${list}"></ul><a class="next_page" rel="next" href="/sample-user?tab=${stream === "repositories" ? "repositories" : "stars"}&after=cursor">Next</a></main>`;
-		assert.equal(
-			inspectInventoryPage(html, stream, "sample-user", 1, 1).nextUrl?.includes(
-				"after=cursor",
-			),
-			true,
-		);
+		const html = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><ul id="${list}"></ul><a class="next_page" rel="next" href="/sample-user?page=2&tab=${stream === "repositories" ? "repositories" : "stars"}&after=cursor">Next</a></main>`;
 		assert.equal(
 			inspectInventoryPage(
-				html.replace("/sample-user?", "/other-user?"),
+				inventoryObservation(stream, html, 1),
 				stream,
 				"sample-user",
 				1,
 				1,
+				0,
+			).nextUrl?.includes("after=cursor"),
+			true,
+		);
+		assert.equal(
+			inspectInventoryPage(
+				inventoryObservation(
+					stream,
+					html.replace("/sample-user?", "/other-user?"),
+					1,
+				),
+				stream,
+				"sample-user",
+				1,
+				1,
+				0,
 			).valid,
 			false,
 		);
@@ -110,8 +157,19 @@ test("current GitHub starred empty state confirms an empty inventory", async () 
 	const html = await fixture("starred-empty-current-github.html");
 	assert.deepEqual(parseStarredHtml(html), []);
 	assert.deepEqual(
-		inspectInventoryPage(html, "starred", "sample-user", 1, 0),
-		{ valid: true, nextUrl: null },
+		inspectInventoryPage(
+			inventoryObservation(
+				"starred",
+				`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>${html}`,
+				1,
+			),
+			"starred",
+			"sample-user",
+			1,
+			0,
+			0,
+		),
+		{ valid: true, nextUrl: null, reason: "terminal_list" },
 	);
 });
 
@@ -162,7 +220,11 @@ test("contributions reject absent prior views instead of emitting a silent parti
 				current,
 				{ days: [], total: 0, year: 2025 },
 				{ days: [], total: 0, year: 2024 },
-				{ days: calendarDays("2023-01-01", "2023-12-31"), total: 40, year: 2023 },
+				{
+					days: calendarDays("2023-01-01", "2023-12-31"),
+					total: 40,
+					year: 2023,
+				},
 			],
 			"2026-01-01T00:00:00Z",
 		),
@@ -233,12 +295,9 @@ test("browser events recover legacy details from nested GitHub event payloads", 
 	assert.equal(pullRequest?.url, "https://github.com/sample-user/demo/pull/4");
 	assert.equal(pullRequest?.branch, "feature/parity");
 	assert.equal(
-		validateRecord("events", {
-			id: "sample-user:events",
-			events: [pullRequest],
-			fetchedAt: "2026-01-02T00:00:00Z",
-			windowDescription: "Recent events",
-		}).ok,
+		validateRecord("events", { ...(pullRequest ?? {}) } as Parameters<
+			typeof validateRecord
+		>[1]).ok,
 		true,
 	);
 
@@ -269,7 +328,11 @@ test("browser events recover legacy details from nested GitHub event payloads", 
 		repo: { name: "sample-user/demo" },
 		payload: {
 			action: "published",
-			release: { name: "", tag_name: "v2.0.0", html_url: "https://example.test/release" },
+			release: {
+				name: "",
+				tag_name: "v2.0.0",
+				html_url: "https://example.test/release",
+			},
 		},
 		public: true,
 	});

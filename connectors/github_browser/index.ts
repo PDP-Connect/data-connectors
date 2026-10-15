@@ -10,6 +10,7 @@ import {
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { collectGitHubBrowser } from "./collector.ts";
+import type { BrowserPageObservation } from "./page-evidence.ts";
 import { probeGitHubBrowserSession } from "./probe.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -21,8 +22,22 @@ const CONTRIBUTION_CALENDAR_WAIT_TIMEOUT_MS = 8_000;
 export async function openContributionPage(
 	page: BrowserCollectContext["page"],
 	url: string,
-): Promise<string> {
-	await page.goto(url, { waitUntil: "domcontentloaded" });
+): Promise<BrowserPageObservation> {
+	let navigated = false;
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			await page.goto(url, { waitUntil: "domcontentloaded" });
+			navigated = true;
+			break;
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	if (!navigated)
+		throw lastError instanceof Error
+			? lastError
+			: new Error("github_browser_navigation_failed");
 	try {
 		const ready = await page.waitForFunction(
 			({ minimumDays, selector }) =>
@@ -38,7 +53,38 @@ export async function openContributionPage(
 	} catch {
 		// Leave incomplete pages for the collector's completeness check to skip.
 	}
-	return await page.content();
+	return {
+		requestedUrl: url,
+		currentUrl: page.url(),
+		html: await page.content(),
+	};
+}
+
+async function openGitHubPage(
+	page: BrowserCollectContext["page"],
+	url: string,
+): Promise<BrowserPageObservation> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			await page.goto(url, { waitUntil: "domcontentloaded" });
+			await page
+				.waitForFunction(() => document.readyState === "complete", undefined, {
+					timeout: 4_000,
+				})
+				.catch(() => undefined);
+			return {
+				requestedUrl: url,
+				currentUrl: page.url(),
+				html: await page.content(),
+			};
+		} catch (error) {
+			lastError = error;
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error("github_browser_navigation_failed");
 }
 
 async function ensureSession({
@@ -81,20 +127,25 @@ export async function collect({
 	"emit" | "emitRecord" | "page" | "progress" | "requested" | "state"
 >): Promise<void> {
 	const services = {
-		fetchPublicJson: async (url: string): Promise<unknown> =>
+		fetchPublicJson: async (url: string) =>
 			page.evaluate(async (target) => {
 				const response = await fetch(target, {
-					headers: { Accept: "application/vnd.github+json" },
+					headers: {
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+					},
 				});
 				if (!response.ok)
 					throw new Error(`github_browser_http_${response.status}`);
-				return await response.json();
+				return {
+					requestedUrl: target,
+					responseUrl: response.url,
+					status: response.status,
+					data: await response.json(),
+				};
 			}, url),
 		now: () => new Date(),
-		openPage: async (url: string) => {
-			await page.goto(url, { waitUntil: "domcontentloaded" });
-			return await page.content();
-		},
+		openPage: async (url: string) => openGitHubPage(page, url),
 		openContributionPage: async (url: string) =>
 			openContributionPage(page, url),
 		sleep: async (ms: number) =>

@@ -4,6 +4,8 @@
 import { parseHTML } from "linkedom";
 import { z } from "zod";
 import { eventRecord } from "../github/parsers.ts";
+import type { BrowserPageObservation } from "./page-evidence.ts";
+import { inspectInventoryEnd } from "./page-evidence.ts";
 import type {
 	LegacyContributionDay,
 	LegacyContributions,
@@ -42,7 +44,7 @@ function toInt(raw: string): number {
 }
 
 function githubUrl(href: string | null | undefined): string | null {
-	if (!href) return null;
+	if (href === null || href === undefined || href === "") return null;
 	try {
 		const url = new URL(href, "https://github.com");
 		return url.hostname === "github.com" ? url.href : null;
@@ -52,7 +54,7 @@ function githubUrl(href: string | null | undefined): string | null {
 }
 
 function repositoryName(href: string | null): string | null {
-	if (!href) return null;
+	if (href === null) return null;
 	try {
 		const parts = new URL(href, "https://github.com").pathname
 			.split("/")
@@ -115,7 +117,7 @@ export function parseProfileHtml(
 			return {
 				description: text(item.querySelector("p.pinned-item-desc")),
 				fullName,
-				language: language || null,
+				language,
 				stars: toInt(stars),
 				url: `https://github.com/${fullName}`,
 			};
@@ -128,7 +130,7 @@ export function parseProfileHtml(
 		.map((link) => {
 			const href = link.getAttribute("href") ?? "";
 			const login = href.replace(/^\//u, "").split("/")[0] ?? "";
-			if (!login) return null;
+			if (login === "") return null;
 			const image = link.querySelector("img");
 			return {
 				avatarUrl: image?.getAttribute("src") ?? null,
@@ -198,37 +200,66 @@ export function parseProfileHtml(
 }
 
 export function parseRepositoriesHtml(html: string): LegacyRepository[] {
+	return parseRepositoriesPage(html).rows;
+}
+
+export function parseRepositoriesPage(html: string): {
+	rows: LegacyRepository[];
+	rejectedRows: number;
+	rawRows: number;
+} {
 	const { document } = parseHTML(html);
 	const records: LegacyRepository[] = [];
-	for (const row of document.querySelectorAll("#user-repositories-list li")) {
+	let rejectedRows = 0;
+	const sourceRows = document.querySelectorAll("#user-repositories-list li");
+	for (const row of sourceRows) {
 		const link = row.querySelector("h3 a");
 		const url = githubUrl(link?.getAttribute("href"));
-		if (!link || !url) continue;
-		const topics = Array.from(row.querySelectorAll("a.topic-tag"))
-			.map((topic) => text(topic))
-			.filter(Boolean);
+		if (!link || url === null) {
+			rejectedRows += 1;
+			continue;
+		}
+		const topics = Array.from(row.querySelectorAll("a.topic-tag")).map(
+			(topic) => text(topic),
+		);
 		records.push({
 			description: text(row.querySelector('p[itemprop="description"]')),
 			forks: toInt(text(row.querySelector('a[href$="/forks"]'))),
 			language: text(row.querySelector('[itemprop="programmingLanguage"]')),
+			id: url,
 			name: text(link),
 			stars: toInt(text(row.querySelector('a[href$="/stargazers"]'))),
 			topics,
 			updatedAt:
 				row.querySelector("relative-time")?.getAttribute("datetime") ?? null,
 			url,
-			visibility: text(row.querySelector("span.Label")) || "Public",
+			visibility: text(row.querySelector("span.Label")),
 		});
 	}
-	return records;
+	return { rows: records, rejectedRows, rawRows: sourceRows.length };
 }
 
 export function parseStarredHtml(html: string): LegacyStarredRepository[] {
+	return parseStarredPage(html).rows;
+}
+
+export function parseStarredPage(html: string): {
+	rows: LegacyStarredRepository[];
+	rejectedRows: number;
+	rawRows: number;
+} {
 	const { document } = parseHTML(html);
 	const records = new Map<string, LegacyStarredRepository>();
-	for (const row of document.querySelectorAll(
-		"#user-starred-repos li, #user-profile-frame li, main li",
-	)) {
+	let rejectedRows = 0;
+	const list = document.querySelector(
+		"#user-starred-repos, #user-profile-frame",
+	);
+	const sourceRows = list
+		? list.querySelectorAll("li")
+		: Array.from(document.querySelectorAll("main li")).filter((row) =>
+				row.querySelector("h3 a[href], a[href*='/']"),
+			);
+	for (const row of sourceRows) {
 		let repo: string | null = null;
 		let repoLink: Element | null = null;
 		for (const link of row.querySelectorAll("h3 a[href], a[href]")) {
@@ -239,9 +270,15 @@ export function parseStarredHtml(html: string): LegacyStarredRepository[] {
 				break;
 			}
 		}
-		if (!repo || !repoLink) continue;
+		if (repo === null || repoLink === null) {
+			if (row.querySelector("h3 a[href], a[href*='/']")) rejectedRows += 1;
+			continue;
+		}
 		const url = `https://github.com/${repo}`;
-		if (records.has(url)) continue;
+		if (records.has(url)) {
+			rejectedRows += 1;
+			continue;
+		}
 		const language = text(
 			row.querySelector(
 				'[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]',
@@ -249,29 +286,38 @@ export function parseStarredHtml(html: string): LegacyStarredRepository[] {
 		);
 		records.set(url, {
 			description: text(row.querySelector("p")),
-			fullName: text(repoLink) || repo,
-			language: language || null,
+			fullName: text(repoLink),
+			id: url,
+			language,
 			stars: toInt(text(row.querySelector('a[href$="/stargazers"]'))),
 			updatedAt:
 				row.querySelector("relative-time")?.getAttribute("datetime") ?? null,
 			url,
 		});
 	}
-	return [...records.values()];
+	return {
+		rows: [...records.values()],
+		rejectedRows,
+		rawRows: sourceRows.length,
+	};
 }
 
 export function inspectInventoryPage(
-	html: string,
+	page: BrowserPageObservation,
 	stream: "repositories" | "starred",
 	username: string,
-	page: number,
-	rowCount: number,
-): { valid: boolean; nextUrl: string | null } {
-	const { document } = parseHTML(html);
+	pageNumber: number,
+	parsedRows: number,
+	rejectedRows: number,
+	noProgress = false,
+): { valid: boolean; nextUrl: string | null; reason: string } {
+	const { document } = parseHTML(page.html);
 	const list =
 		stream === "repositories"
 			? document.querySelector("#user-repositories-list")
-			: document.querySelector("#user-starred-repos, #user-profile-frame");
+			: document.querySelector(
+					"#user-starred-repos, #user-profile-frame, main",
+				);
 	const emptyText = document.querySelector("main")?.textContent ?? "";
 	const explicitEmpty =
 		stream === "repositories"
@@ -281,41 +327,59 @@ export function inspectInventoryPage(
 			: /(?:hasn['’]t starred any|has no starred|you don['’]t have any starred) repositories yet/iu.test(
 					emptyText,
 				);
-	const next = document.querySelector('a.next_page[rel="next"]');
-	if (rowCount === 0 && (!explicitEmpty || page !== 1))
-		return { valid: false, nextUrl: null };
-	if (rowCount > 0 && !list) return { valid: false, nextUrl: null };
-	if (!next) return { valid: rowCount > 0 || explicitEmpty, nextUrl: null };
-	const href = next.getAttribute("href");
-	if (!href || rowCount === 0) return { valid: false, nextUrl: null };
-	let url: URL;
-	try {
-		url = new URL(href, "https://github.com");
-	} catch {
-		return { valid: false, nextUrl: null };
+	const next =
+		stream === "starred"
+			? document.querySelector(
+					'a.next_page[rel="next"], a[rel="next"][href*="page="]',
+				)
+			: document.querySelector('a.next_page[rel="next"]');
+	const href = next?.getAttribute("href") ?? null;
+	let nextUrl: string | null = null;
+	if (href !== null) {
+		try {
+			nextUrl = new URL(href, "https://github.com").href;
+		} catch {
+			nextUrl = href;
+		}
 	}
-	const expectedTab = stream === "repositories" ? "repositories" : "stars";
-	const valid =
-		url.origin === "https://github.com" &&
-		url.pathname === `/${username}` &&
-		url.searchParams.get("tab") === expectedTab;
+	const result = inspectInventoryEnd({
+		page,
+		username,
+		stream,
+		pageNumber,
+		parsedRows,
+		rejectedRows,
+		noProgress,
+		explicitEmpty,
+		hasRecognizedList: list !== null,
+		nextUrl,
+	});
 	return {
-		valid,
-		nextUrl: valid ? url.href : null,
+		valid: result.complete || result.reason === "remaining_continuation",
+		nextUrl: result.nextUrl,
+		reason: result.reason,
 	};
 }
 
 export function parseContributionHtml(html: string): {
 	days: LegacyContributionDay[];
+	rejectedDays: number;
+	rawDays: number;
 	total: number;
 } {
 	const { document } = parseHTML(html);
 	const days: LegacyContributionDay[] = [];
-	for (const cell of document.querySelectorAll(
+	let rejectedDays = 0;
+	const cells = document.querySelectorAll(
 		"td.ContributionCalendar-day[data-date], rect.day[data-date]",
-	)) {
+	);
+	const seenDates = new Set<string>();
+	for (const cell of cells) {
 		const date = cell.getAttribute("data-date");
-		if (!date) continue;
+		if (date === null || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
+			rejectedDays += 1;
+			continue;
+		}
 		const dataCount = cell.getAttribute("data-count");
 		let count: number | null =
 			dataCount !== null && /^\d+$/u.test(dataCount) ? Number(dataCount) : null;
@@ -324,20 +388,31 @@ export function parseContributionHtml(html: string): {
 			const tooltip = id
 				? document.querySelector(`tool-tip[for="${id}"]`)
 				: null;
-			const match = /([\d,]+|No)\s+contribution/iu.exec(
-				text(tooltip) || cell.getAttribute("aria-label") || "",
-			);
+			const tooltipText =
+				tooltip === null
+					? (cell.getAttribute("aria-label") ?? "")
+					: text(tooltip);
+			const match = /([\d,]+|No)\s+contribution/iu.exec(tooltipText);
 			if (match?.[1])
 				count = /^no$/iu.test(match[1])
 					? 0
 					: Number(match[1].replaceAll(",", ""));
 		}
-		if (count === null || !Number.isSafeInteger(count)) continue;
+		if (count === null || !Number.isSafeInteger(count)) {
+			rejectedDays += 1;
+			continue;
+		}
+		if (seenDates.has(date)) {
+			rejectedDays += 1;
+			continue;
+		}
+		seenDates.add(date);
 		const rawLevel = cell.getAttribute("data-level");
 		const level = rawLevel === null ? null : Number(rawLevel);
 		days.push({
 			count,
 			date,
+			id: date,
 			level: level !== null && Number.isFinite(level) ? level : null,
 		});
 	}
@@ -346,6 +421,8 @@ export function parseContributionHtml(html: string): {
 	);
 	return {
 		days,
+		rejectedDays,
+		rawDays: cells.length,
 		total: headingMatch?.[1]
 			? toInt(headingMatch[1])
 			: days.reduce((total, day) => total + day.count, 0),
@@ -371,6 +448,8 @@ export function buildContributionSnapshot(
 	rollingStart.setUTCDate(rollingStart.getUTCDate() - 364);
 	const rollingStartDate = rollingStart.toISOString().slice(0, 10);
 	for (const [index, graph] of graphs.entries()) {
+		if (new Set(graph.days.map((day) => day.date)).size !== graph.days.length)
+			return null;
 		const actualDates = new Set(graph.days.map((day) => day.date));
 		let date = index === 0 ? rollingStartDate : `${graph.year}-01-01`;
 		const endDate = index === 0 ? fetchedDate : `${graph.year}-12-31`;
@@ -538,8 +617,7 @@ export function parseLegacyEvent(raw: unknown): LegacyEvent | null {
 			break;
 		case "ReleaseEvent":
 			extras.action = stringValue(payload.action);
-			extras.title =
-				stringValue(release.name) ?? stringValue(release.tag_name);
+			extras.title = stringValue(release.name) ?? stringValue(release.tag_name);
 			extras.body = stringValue(release.body)?.slice(0, 280) ?? null;
 			extras.url = stringValue(release.html_url);
 			break;

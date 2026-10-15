@@ -9,6 +9,22 @@ import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connecto
 import { collectGitHubBrowser } from "./collector.ts";
 import { validateRecord } from "./schemas.ts";
 
+const pageObservation = (requestedUrl: string, html: string) => ({
+	requestedUrl,
+	currentUrl: requestedUrl,
+	html,
+});
+
+const apiObservation = (requestedUrl: string, data: unknown) => ({
+	requestedUrl,
+	responseUrl: requestedUrl,
+	status: 200,
+	data,
+});
+const profilePlaceholder =
+	'<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><span class="p-name">Sample User</span>';
+const withOwner = (html: string) => `${profilePlaceholder}${html}`;
+
 const readFixture = (name: string): Promise<string> =>
 	readFile(
 		new URL(`./__fixtures__/synthetic/${name}`, import.meta.url),
@@ -34,18 +50,31 @@ test("collector uses the contribution page loader that waits for rendered calend
 	const rollingStart = new Date(now);
 	rollingStart.setUTCDate(rollingStart.getUTCDate() - 364);
 	const services = {
-		fetchPublicJson: async () => [],
+		fetchPublicJson: async (url: string) => apiObservation(url, []),
 		now: () => now,
 		openPage: async (url: string) =>
-			url === "https://github.com/"
-				? '<meta name="user-login" content="sample-user">'
-				: "<main>Calendar still loading</main>",
+			pageObservation(
+				url,
+				url === "https://github.com/"
+					? profilePlaceholder
+					: "<main>Calendar still loading</main>",
+			),
 		openContributionPage: async (url: string) => {
 			contributionPageLoads.push(url);
-			const year = Number(/from=(\d{4})/u.exec(url)?.[1] ?? now.getUTCFullYear());
-			return year === now.getUTCFullYear()
-				? calendar(rollingStart.toISOString().slice(0, 10), now.toISOString().slice(0, 10))
-				: calendar(`${year}-01-01`, `${year}-12-31`);
+			const year = Number(
+				/from=(\d{4})/u.exec(url)?.[1] ?? now.getUTCFullYear(),
+			);
+			return pageObservation(
+				url,
+				withOwner(
+					year === now.getUTCFullYear()
+						? calendar(
+								rollingStart.toISOString().slice(0, 10),
+								now.toISOString().slice(0, 10),
+							)
+						: calendar(`${year}-01-01`, `${year}-12-31`),
+				),
+			);
 		},
 		sleep: async () => {},
 	};
@@ -69,10 +98,16 @@ test("collector uses the contribution page loader that waits for rendered calend
 	);
 
 	assert.equal(contributionPageLoads.length, 4);
-	assert.deepEqual(records.map(({ stream }) => stream), ["contributions"]);
-	assert.equal(validateRecord("contributions", records[0]?.data ?? {}).ok, true);
+	assert.ok(records.length > 0);
+	assert.ok(
+		records.every(
+			({ stream, data }) =>
+				stream === "contributions" && validateRecord(stream, data).ok,
+		),
+	);
 	assert.deepEqual(messages, [
 		{ type: "STATE", stream: "contributions" },
+		{ type: "DETAIL_COVERAGE", stream: "contributions" },
 	]);
 });
 
@@ -88,18 +123,21 @@ test("browser collection emits valid records and state for each selected legacy 
 	const messages: Array<{ type: string; stream: string | undefined }> = [];
 	const state: Record<string, unknown> = {};
 	const service = {
-		fetchPublicJson: async (url: string): Promise<unknown> =>
-			url.includes("events")
-				? events
-				: url.includes("type%3Apr")
-					? { items: [], total_count: 0, incomplete_results: false }
-					: {
-							...(history as object),
-							total_count: (history as { items: unknown[] }).items.length,
-							incomplete_results: false,
-						},
+		fetchPublicJson: async (url: string) =>
+			apiObservation(
+				url,
+				url.includes("events")
+					? events
+					: url.includes("type%3Apr")
+						? { items: [], total_count: 0, incomplete_results: false }
+						: {
+								...(history as object),
+								total_count: (history as { items: unknown[] }).items.length,
+								incomplete_results: false,
+							},
+			),
 		now: () => new Date("2026-01-01T00:00:00Z"),
-		openPage: async (url: string): Promise<string> => {
+		openPage: async (url: string) => {
 			const graphHtml = (startDate: string, endDate: string): string => {
 				let html = contributionHeader;
 				for (
@@ -113,19 +151,25 @@ test("browser collection emits valid records and state for each selected legacy 
 			};
 			if (url.includes("?from=")) {
 				const year = Number(/from=(\d{4})/u.exec(url)?.[1]);
-				return graphHtml(`${year}-01-01`, `${year}-12-31`);
+				return pageObservation(
+					url,
+					withOwner(graphHtml(`${year}-01-01`, `${year}-12-31`)),
+				);
 			}
-			return url.includes("tab=repositories")
-				? repositories
+			const html = url.includes("tab=repositories")
+				? withOwner(repositories)
 				: url.includes("tab=stars")
-					? '<main><div id="user-starred-repos"></div><p>sample-user hasn\'t starred any repositories yet</p></main>'
+					? withOwner(
+							'<main><div id="user-starred-repos"></div><p>sample-user hasn\'t starred any repositories yet</p></main>',
+						)
 					: url.endsWith("github.com/")
 						? profile
 						: url === "https://github.com/sample-user"
 							? ++profilePageLoads === 1
 								? profile
-								: graphHtml("2025-01-02", "2026-01-01")
-							: contributionFixture;
+								: withOwner(graphHtml("2025-01-02", "2026-01-01"))
+							: withOwner(contributionFixture);
+			return pageObservation(url, html);
 		},
 		sleep: async () => {},
 	};
@@ -161,18 +205,35 @@ test("browser collection emits valid records and state for each selected legacy 
 		streams: Array<{
 			name: string;
 			primary_key: string[];
-			schema: { required: string[]; properties: Record<string, unknown> };
+			schema: {
+				required?: string[];
+				properties?: Record<string, unknown>;
+				oneOf?: Array<{
+					required?: string[];
+					properties?: Record<string, unknown>;
+				}>;
+			};
 		}>;
 	};
 	for (const { stream, data } of records) {
-		assert.equal(data.id, `sample-user:${stream}`);
+		assert.equal(typeof data.id, "string");
 		const spec = manifest.streams.find(({ name }) => name === stream);
 		assert.deepEqual(spec?.primary_key, ["id"]);
-		assert.ok(spec?.schema.required.includes("id"));
-		assert.ok(spec?.schema.properties.id);
+		assert.ok(
+			spec?.schema.required?.includes("id") ||
+				spec?.schema.oneOf?.some((variant) => variant.required?.includes("id")),
+		);
+		assert.ok(
+			spec?.schema.properties?.id ||
+				spec?.schema.oneOf?.some((variant) => variant.properties?.id),
+		);
 		assert.equal(
 			new Ajv()
-				.addKeyword({ keyword: "x_pdpp_role", schemaType: "string", valid: true })
+				.addKeyword({
+					keyword: "x_pdpp_role",
+					schemaType: "string",
+					valid: true,
+				})
 				.compile(spec?.schema)(data),
 			true,
 			`${stream} matches manifest schema`,
@@ -180,21 +241,13 @@ test("browser collection emits valid records and state for each selected legacy 
 	}
 	assert.deepEqual(
 		new Set(records.map(({ stream }) => stream)),
-		new Set([
-			"profile",
-			"repositories",
-			"starred",
-			"events",
-			"contributions",
-			"history",
-		]),
+		new Set(["profile", "repositories", "events", "contributions", "history"]),
 	);
 	assert.equal(messages.filter(({ type }) => type === "STATE").length, 6);
-	assert.equal(
-		Array.isArray(
-			records.find(({ stream }) => stream === "history")?.data.pullRequests,
+	assert.ok(
+		records.some(
+			({ stream, data }) => stream === "history" && data.type === "issue",
 		),
-		true,
 	);
 });
 
@@ -212,21 +265,28 @@ test("collector skips contribution snapshots when any year view is unavailable",
 		const messages: Array<{ type: string }> = [];
 		await collectGitHubBrowser(
 			{
-				emit: async (message) => { messages.push({ type: message.type }); },
-				emitRecord: async (_stream, record) => { records.push(record); },
+				emit: async (message) => {
+					messages.push({ type: message.type });
+				},
+				emitRecord: async (_stream, record) => {
+					records.push(record);
+				},
 				progress: async () => {},
 				requested: new Set(["contributions"]),
 				state: {},
 			},
 			{
-				fetchPublicJson: async () => [],
+				fetchPublicJson: async (url: string) => apiObservation(url, []),
 				now: () => new Date("2026-01-01T00:00:00Z"),
 				openPage: async (url) =>
-					url === "https://github.com/"
-						? profile
-						: url.includes("?from=")
-							? "<main>Unavailable</main>"
-							: currentHtml,
+					pageObservation(
+						url,
+						url === "https://github.com/"
+							? profile
+							: url.includes("?from=")
+								? "<main>Unavailable</main>"
+								: currentHtml,
+					),
 				sleep: async () => {},
 			},
 		);
@@ -235,7 +295,10 @@ test("collector skips contribution snapshots when any year view is unavailable",
 	const missingPrior = await run(current);
 	assert.equal(missingPrior.records.length, 0);
 	assert.ok(missingPrior.messages.some(({ type }) => type === "SKIP_RESULT"));
-	assert.equal(missingPrior.messages.some(({ type }) => type === "STATE"), false);
+	assert.equal(
+		missingPrior.messages.some(({ type }) => type === "STATE"),
+		false,
+	);
 	const missingCurrent = await run("<main>Unavailable</main>");
 	assert.equal(missingCurrent.records.length, 0);
 	assert.ok(missingCurrent.messages.some(({ type }) => type === "SKIP_RESULT"));
@@ -266,17 +329,15 @@ test("real runtime emits START-selected six RECORDs before DONE", async () => {
 	);
 	assert.deepEqual(
 		new Set(records.map((message) => message.stream)),
-		new Set(streams),
+		new Set(["profile", "repositories", "events", "contributions", "history"]),
 	);
-	assert.equal(records.length, 6);
 	for (const message of records) {
 		if (message.type !== "RECORD") continue;
-		assert.equal(message.key, `sample-user:${message.stream}`);
 		assert.equal(message.data.id, message.key);
 	}
 	const done = result.messages.at(-1);
 	assert.equal(done?.type, "DONE");
-	if (done?.type === "DONE") assert.equal(done.records_emitted, 6);
+	if (done?.type === "DONE") assert.equal(done.records_emitted, records.length);
 });
 
 test("inventory follows next link and rejects an unproven empty page", async () => {
@@ -302,15 +363,20 @@ test("inventory follows next link and rejects an unproven empty page", async () 
 				state: {},
 			},
 			{
-				fetchPublicJson: async () => ({}),
+				fetchPublicJson: async (url: string) => apiObservation(url, {}),
 				now: () => new Date("2026-01-01"),
 				sleep: async () => {},
 				openPage: async (url) => {
 					visited.push(url);
-					if (url.endsWith("github.com/")) return profile;
-					return url.includes("page=1")
-						? `${row}<a class="next_page" rel="next" href="/sample-user?tab=repositories&page=2">Next</a>`
-						: secondPage;
+					if (url.endsWith("github.com/")) return pageObservation(url, profile);
+					return pageObservation(
+						url,
+						withOwner(
+							url.includes("page=1")
+								? `${row}<a class="next_page" rel="next" href="/sample-user?page=2&tab=repositories">Next</a>`
+								: secondPage,
+						),
+					);
 				},
 			},
 		);
@@ -319,7 +385,11 @@ test("inventory follows next link and rejects an unproven empty page", async () 
 	assert.ok(visited.some((url) => url.includes("page=2")));
 	assert.equal(emitted.length, 1);
 	await run("<main>Sign in to GitHub</main>");
-	assert.equal(emitted.length, 0);
+	assert.equal(
+		emitted.length,
+		1,
+		"the valid first-page row remains ingested on a later-page failure",
+	);
 	assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
 	assert.ok(!messages.some((message) => message.type === "STATE"));
 });
@@ -344,13 +414,196 @@ test("incomplete or contradictory history search cannot emit a completed snapsho
 				state: {},
 			},
 			{
-				fetchPublicJson: async () => response,
+				fetchPublicJson: async (url: string) => apiObservation(url, response),
 				now: () => new Date("2026-01-01"),
-				openPage: async () => profile,
+				openPage: async (url: string) => pageObservation(url, profile),
 				sleep: async () => {},
 			},
 		);
 		assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
 		assert.ok(!messages.some((message) => message.type === "STATE"));
 	}
+});
+
+test("starred inventory follows the legacy /stars route and main-list fallback", async () => {
+	const profile = await readFixture("profile.html");
+	const visits: string[] = [];
+	const messages: Array<{ type: string; stream?: string }> = [];
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const first = withOwner(
+		`<main><ul><li><h3><a href="/sample-owner/first">sample-owner/first</a></h3></li></ul><a rel="next" href="/stars/sample-user?page=2">Next</a></main>`,
+	);
+	const second = withOwner(
+		'<main><ul><li><h3><a href="/sample-owner/second">sample-owner/second</a></h3></li></ul></main>',
+	);
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push(message);
+			},
+			emitRecord: async (stream, data) => {
+				records.push({ stream, data });
+			},
+			progress: async () => {},
+			requested: new Set(["starred"]),
+			state: {},
+		},
+		{
+			fetchPublicJson: async (url: string) => apiObservation(url, []),
+			now: () => new Date("2026-01-01T00:00:00Z"),
+			openPage: async (url) => {
+				visits.push(url);
+				if (url === "https://github.com/") return pageObservation(url, profile);
+				return pageObservation(url, url.includes("page=2") ? second : first);
+			},
+			sleep: async () => {},
+		},
+	);
+
+	assert.ok(
+		visits.some((url) => url === "https://github.com/stars/sample-user?page=2"),
+	);
+	assert.equal(records.length, 2);
+	assert.equal(messages.filter(({ type }) => type === "STATE").length, 1);
+});
+
+test("three full event pages prove the declared 300-event window", async () => {
+	const profile = await readFixture("profile.html");
+	const fixtureEvents = JSON.parse(await readFixture("events.json")) as Array<
+		Record<string, unknown>
+	>;
+	const sourceEvent = fixtureEvents[0];
+	assert.ok(sourceEvent);
+	const pages = Array.from({ length: 3 }, (_, page) =>
+		Array.from({ length: 100 }, (_, index) => ({
+			...sourceEvent,
+			id: `${page}-${index}`,
+		})),
+	);
+	let page = 0;
+	const messages: Array<{ type: string; stream?: string }> = [];
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const state: Record<string, Record<string, unknown>> = {};
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push(message);
+			},
+			emitRecord: async (stream, data) => {
+				records.push({ stream, data });
+			},
+			progress: async () => {},
+			requested: new Set(["events"]),
+			state,
+		},
+		{
+			fetchPublicJson: async (url: string) =>
+				apiObservation(url, pages[page++]),
+			now: () => new Date("2026-01-01T00:00:00Z"),
+			openPage: async (url) => pageObservation(url, profile),
+			sleep: async () => {},
+		},
+	);
+
+	assert.equal(page, 3);
+	assert.equal(records.length, 300);
+	assert.equal(state.events?.bounded_window, true);
+	assert.equal(state.events?.window_limit, 300);
+	assert.ok(messages.some((message) => message.type === "DETAIL_COVERAGE"));
+	assert.equal(messages.filter(({ type }) => type === "STATE").length, 1);
+});
+
+test("history accepts exactly 1,000 unique items at a full terminal page", async () => {
+	const profile = await readFixture("profile.html");
+	let issuePage = 0;
+	const messages: Array<{ type: string; stream?: string }> = [];
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const state: Record<string, Record<string, unknown>> = {};
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push(message);
+			},
+			emitRecord: async (stream, data) => {
+				records.push({ stream, data });
+			},
+			progress: async () => {},
+			requested: new Set(["history"]),
+			state,
+		},
+		{
+			fetchPublicJson: async (url) => {
+				if (url.includes("type%3Apr"))
+					return apiObservation(url, {
+						items: [],
+						total_count: 0,
+						incomplete_results: false,
+					});
+				const page = issuePage++;
+				return apiObservation(url, {
+					items: Array.from({ length: 100 }, (_, index) => ({
+						id: page * 100 + index + 1,
+						number: page * 100 + index + 1,
+						repository_url:
+							"https://api.github.com/repos/sample-owner/sample-repo",
+					})),
+					total_count: 1000,
+					incomplete_results: false,
+				});
+			},
+			now: () => new Date("2026-01-01T00:00:00Z"),
+			openPage: async (url) => pageObservation(url, profile),
+			sleep: async () => {},
+		},
+	);
+
+	assert.equal(issuePage, 10);
+	assert.equal(records.length, 1000);
+	assert.ok(records.every(({ stream }) => stream === "history"));
+	assert.equal(state.history?.bounded_window, true);
+	assert.equal(state.history?.window_limit_per_type, 1000);
+	assert.equal(messages.filter(({ type }) => type === "STATE").length, 1);
+});
+
+test("an events failure is isolated and does not prevent later requested streams", async () => {
+	const profile = await readFixture("profile.html");
+	let historyRequested = false;
+	const messages: Array<{ type: string; stream?: string }> = [];
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push(message);
+			},
+			emitRecord: async () => {},
+			progress: async () => {},
+			requested: new Set(["events", "history"]),
+			state: {},
+		},
+		{
+			fetchPublicJson: async (url) => {
+				if (url.includes("events")) throw new Error("synthetic event failure");
+				historyRequested = true;
+				return apiObservation(url, {
+					items: [],
+					total_count: 0,
+					incomplete_results: false,
+				});
+			},
+			now: () => new Date("2026-01-01T00:00:00Z"),
+			openPage: async (url) => pageObservation(url, profile),
+			sleep: async () => {},
+		},
+	);
+
+	assert.equal(historyRequested, true);
+	assert.ok(
+		messages.some(
+			({ type, stream }) => type === "SKIP_RESULT" && stream === "events",
+		),
+	);
+	assert.ok(
+		messages.some(
+			({ type, stream }) => type === "STATE" && stream === "history",
+		),
+	);
 });
