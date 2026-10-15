@@ -103,17 +103,45 @@ test("scanConversation reports a non-array chat_messages and an absent one", asy
 	await assert.rejects(scan('{"uuid":"a"'), /invalid conversation object/);
 });
 
-test("scanConversation cuts a very long title at a safe boundary instead of dropping the object", async () => {
-	const name = `${"é".repeat(70_000)}`;
-	const result = await scan(
-		JSON.stringify({ name, uuid: "u", chat_messages: [] }),
-		50_000,
+test("scanConversation never keeps a prefix: a value over the capture limit is reported, not cut", async () => {
+	const name = "é".repeat(5000);
+	const text = JSON.stringify({
+		name,
+		summary: "short",
+		uuid: "u",
+		chat_messages: [],
+	});
+	const small = await scanConversation(
+		chunked(text, 999),
+		0,
+		FIELDS,
+		new BufferMeter(),
+		1000,
 	);
-	const kept = result.fields.get("name");
-	assert.equal(typeof kept, "string");
-	assert.ok((kept as string).length >= 4000);
-	assert.ok(name.startsWith(kept as string));
-	assert.equal(result.fields.get("uuid"), "u");
+	assert.equal(small.fields.has("name"), false);
+	assert.deepEqual([...small.overCap], ["name"]);
+	assert.equal(small.fields.get("summary"), "short");
+	assert.equal(small.fields.get("uuid"), "u");
+	// Within the limit the whole value is kept.
+	const whole = await scanConversation(
+		chunked(text, 999),
+		0,
+		FIELDS,
+		new BufferMeter(),
+		6000,
+	);
+	assert.equal(whole.fields.get("name"), name);
+	assert.equal(whole.overCap.size, 0);
+	// A later in-limit value of the same key replaces the over-limit one.
+	const replaced = await scanConversation(
+		chunked(`{"name":"${"x".repeat(2000)}","name":"ok"}`, 100),
+		0,
+		FIELDS,
+		new BufferMeter(),
+		1000,
+	);
+	assert.equal(replaced.fields.get("name"), "ok");
+	assert.equal(replaced.overCap.size, 0);
 });
 
 test("scanConversation holds one message at a time: the peak buffer does not grow with the parent", async () => {

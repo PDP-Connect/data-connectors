@@ -37,6 +37,10 @@ export interface ScannedConversation {
 	/** Last string or boolean value of each wanted top-level field. A field
 	 * whose last value is anything else is absent. */
 	fields: Map<string, unknown>;
+	/** Wanted fields whose last value is a string longer than the capture
+	 * limit. The value is not kept, and never cut to a prefix: it is far over
+	 * the inline cap, so a caller leaves the field absent. */
+	overCap: Set<string>;
 	hasDocs: boolean;
 	chatMessages: "array" | "other" | "absent";
 	/** Elements of `chat_messages`, objects only, in file order. */
@@ -47,47 +51,26 @@ export interface ScannedConversation {
 	nonObjectMessages: number;
 }
 
-/** Raw characters kept of one captured string. A longer value is decoded from
- * its first characters only; every field this reader captures is bounded far
- * below this once parsed. */
-export const CAPTURED_STRING_MAX_UNITS = 64 * 1024;
+/** Raw characters kept of one captured string. A JSON string of N characters
+ * is at most 6N raw units and its escaped text at least N, so a string with
+ * more raw units than six inline caps is certainly over the inline cap. Below
+ * this the whole value is kept and decided exactly; above it only the fact is
+ * kept. Fields this reader captures are tiny in practice. */
+export const CAPTURED_STRING_MAX_UNITS = 6 * 10_000_000;
 const KEY_MAX_UNITS = 256;
 
 const WHITESPACE = new Set([0x20, 0x09, 0x0a, 0x0d]);
-
-/** Decode a captured raw JSON string, cutting an over-long value at a safe
- * boundary (not inside an escape sequence). */
-function decodeCapturedString(raw: string, truncated: boolean): unknown {
-	let body = raw;
-	if (truncated) {
-		let cut = body.length;
-		for (let i = 1; i < body.length; ) {
-			if (body[i] === "\\") {
-				const width = body[i + 1] === "u" ? 6 : 2;
-				if (i + width > body.length) {
-					cut = i;
-					break;
-				}
-				i += width;
-			} else i += 1;
-		}
-		body = `${body.slice(0, cut)}"`;
-	}
-	try {
-		return JSON.parse(body);
-	} catch {
-		return undefined;
-	}
-}
 
 export async function scanConversation(
 	chunks: AsyncIterable<string>,
 	startOffset: number,
 	wanted: ReadonlySet<string>,
 	meter: BufferMeter,
+	captureLimit: number = CAPTURED_STRING_MAX_UNITS,
 ): Promise<ScannedConversation> {
 	const result: ScannedConversation = {
 		fields: new Map(),
+		overCap: new Set(),
 		hasDocs: false,
 		chatMessages: "absent",
 		messageKeys: [],
@@ -124,7 +107,7 @@ export async function scanConversation(
 	let capture = false;
 	let captureParts: string[] = [];
 	let captureUnits = 0;
-	let captureTruncated = false;
+	let captureOverCap = false;
 	let inMessages = false;
 
 	// Current `chat_messages` element.
@@ -169,22 +152,25 @@ export async function scanConversation(
 			const raw = captureParts.join("");
 			captureParts = [];
 			let value: unknown;
-			if (kind === Kind.String) {
-				value = decodeCapturedString(raw, captureTruncated);
-			} else {
-				try {
-					value = JSON.parse(raw);
-				} catch {
-					value = undefined;
-				}
+			try {
+				value = captureOverCap ? undefined : JSON.parse(raw);
+			} catch {
+				value = undefined;
 			}
-			if (typeof value === "string" || typeof value === "boolean")
+			if (captureOverCap) {
+				result.fields.delete(key);
+				result.overCap.add(key);
+			} else if (typeof value === "string" || typeof value === "boolean") {
 				result.fields.set(key, value);
-			else result.fields.delete(key);
+				result.overCap.delete(key);
+			} else {
+				result.fields.delete(key);
+				result.overCap.delete(key);
+			}
 		}
 		capture = false;
 		captureUnits = 0;
-		captureTruncated = false;
+		captureOverCap = false;
 		inMessages = false;
 		phase = Phase.AfterValue;
 	};
@@ -196,15 +182,17 @@ export async function scanConversation(
 		let elemStart = elementActive ? 0 : -1;
 		const flushCapture = (end: number) => {
 			if (capStart < 0) return;
-			const room = CAPTURED_STRING_MAX_UNITS - captureUnits;
 			const part = chunk.slice(capStart, end);
-			if (part.length > room) captureTruncated = true;
-			const kept = part.slice(0, Math.max(room, 0));
-			if (kept) {
-				captureParts.push(kept);
-				captureUnits += kept.length;
-			}
 			capStart = -1;
+			if (captureOverCap) return;
+			if (captureUnits + part.length > captureLimit) {
+				captureOverCap = true;
+				captureParts = [];
+				captureUnits = 0;
+				return;
+			}
+			captureParts.push(part);
+			captureUnits += part.length;
 		};
 		const flushElement = (end: number) => {
 			if (elemStart < 0) return;
@@ -284,7 +272,10 @@ export async function scanConversation(
 						// field absent.
 						if (capture) {
 							capture = false;
-							if (key !== null) result.fields.delete(key);
+							if (key !== null) {
+								result.fields.delete(key);
+								result.overCap.delete(key);
+							}
 						}
 					} else {
 						kind = Kind.Primitive;

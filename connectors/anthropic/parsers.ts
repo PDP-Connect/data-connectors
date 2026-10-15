@@ -38,10 +38,16 @@
  */
 
 import {
-	nullablePdppSafeText,
 	type PdppSafeText,
 	pdppSafeText,
 } from "@pdpp/connector-protocol/pdpp-safe-text";
+import {
+	encodePdppSafeText,
+	escapedLengthExceeds,
+	INLINE_TEXT_MAX_UNITS,
+} from "./safe-escape.ts";
+
+export { INLINE_TEXT_MAX_UNITS };
 
 // ─── Raw export shapes (unknown-in, narrowed defensively) ──────────────────
 
@@ -54,32 +60,75 @@ function str(v: unknown): string | null {
 }
 
 /**
- * Sanitize an extracted nullable text field. A control-rich payload (a real
- * conversation was observed, this lane, with a message body zod's
- * pdppSafeText rejects) becomes null rather than throwing and aborting the
- * whole export — matching connectors/chatgpt/parsers.ts's established
- * `toSafeFullContent` convention (D4: unparseable -> null, never guessed,
- * never a crash).
+ * Fields left absent from records, counted so the run can report one aggregate
+ * (see `omittedFieldCountOf`). A field is left absent only when its text is
+ * over the inline cap; it is never cut to a prefix.
  */
-function safeText(v: unknown, max: number): PdppSafeText | null {
+interface OmissionTally {
+	fields: number;
+}
+
+const NO_FIELDS: ReadonlySet<string> = new Set();
+
+const OMITTED_FIELDS = Symbol("anthropic.omittedFields");
+
+/** How many text fields of `record` were left absent for passing the inline
+ * cap. Not enumerable, so it never reaches an emitted record. */
+export function omittedFieldCountOf(record: object): number {
+	const count = (record as { [OMITTED_FIELDS]?: number })[OMITTED_FIELDS];
+	return typeof count === "number" ? count : 0;
+}
+
+function withTally<T extends object>(record: T, tally: OmissionTally): T {
+	if (tally.fields > 0)
+		Object.defineProperty(record, OMITTED_FIELDS, { value: tally.fields });
+	return record;
+}
+
+/** The record without its undefined (absent) fields. */
+function compact<T extends object>(
+	record: {
+		[K in keyof T]: T[K] | undefined;
+	},
+): T {
+	const out = record as Record<string, unknown>;
+	for (const key of Object.keys(out))
+		if (out[key] === undefined) delete out[key];
+	return out as T;
+}
+
+/**
+ * A source text field in the `pdpp-safe-escape-v1` encoding: lossless, so
+ * control characters and lone surrogates are represented, not dropped. Null
+ * when the source has no text. Undefined (field absent, tallied) when the
+ * escaped text is over the inline cap: a prefix is never emitted.
+ */
+function encodedField(
+	v: unknown,
+	tally: OmissionTally,
+): PdppSafeText | null | undefined {
 	const s = str(v);
 	if (s === null) {
 		return null;
 	}
-	const truncated = s.length > max ? s.slice(0, max) : s;
-	const result = nullablePdppSafeText.safeParse(truncated);
-	return result.success ? result.data : null;
+	if (escapedLengthExceeds(s).exceeds) {
+		tally.fields += 1;
+		return undefined;
+	}
+	const result = pdppSafeText.safeParse(encodePdppSafeText(s));
+	if (result.success) {
+		return result.data;
+	}
+	tally.fields += 1;
+	return undefined;
 }
-
-/** Longest text kept inline in a record. A longer text is not truncated: the
- * record carries it as a Core blob (see `oversizeTextOf`). */
-export const INLINE_TEXT_MAX_UNITS = 10_000_000;
 
 const OVERSIZE_TEXT = Symbol("anthropic.oversizeText");
 
-/** The full source text of a record whose text passed the inline cap, or null.
- * The record's own text field is null then; the caller moves the text into a
- * blob. Not enumerable, so it never reaches an emitted record by accident. */
+/** The full RAW source text of a record whose escaped text passes the inline
+ * cap, or null. The record's own text field is null then; the caller moves the
+ * raw text into a blob (a JSON string, no escaping). Not enumerable, so it
+ * never reaches an emitted record by accident. */
 export function oversizeTextOf(record: object): string | null {
 	const text = (record as { [OVERSIZE_TEXT]?: string })[OVERSIZE_TEXT];
 	return typeof text === "string" ? text : null;
@@ -90,13 +139,26 @@ function withOversizeText<T extends object>(record: T, text: string): T {
 	return record;
 }
 
-/** Inline text for a record field, or null when the text passes the inline
- * cap (never a truncated prefix). */
-function inlineText(v: unknown): PdppSafeText | null {
+/**
+ * Body text of a record that may carry it as a blob. Within the inline cap it
+ * is the encoded text; over it, `content` is null and the raw text rides along
+ * for the caller to store as a blob.
+ */
+function bodyText(v: unknown): {
+	content: PdppSafeText | null;
+	overflow: string | null;
+} {
 	const s = str(v);
-	return s === null || s.length > INLINE_TEXT_MAX_UNITS
-		? null
-		: safeText(s, s.length);
+	if (s === null) {
+		return { content: null, overflow: null };
+	}
+	if (escapedLengthExceeds(s).exceeds) {
+		return { content: null, overflow: s };
+	}
+	const result = pdppSafeText.safeParse(encodePdppSafeText(s));
+	return result.success
+		? { content: result.data, overflow: null }
+		: { content: null, overflow: s };
 }
 
 function bool(v: unknown): boolean | null {
@@ -124,7 +186,7 @@ export function isoOrNull(v: unknown): string | null {
 // the amazon connector's established convention (connectors/amazon/types.ts).
 export interface ConversationRecord {
 	id: string;
-	title: PdppSafeText | null;
+	title?: PdppSafeText | null;
 	create_time: string | null;
 	update_time: string | null;
 	project_id: string | null;
@@ -199,19 +261,23 @@ function parseAttachments(raw: unknown): Record<string, unknown>[] | null {
 	if (!Array.isArray(raw)) {
 		return null;
 	}
-	const safeJson = (value: unknown): boolean => {
-		if (typeof value === "string") return pdppSafeText.safeParse(value).success;
-		if (value === null || typeof value === "boolean") return true;
-		if (typeof value === "number") return Number.isFinite(value);
-		if (Array.isArray(value)) return value.every(safeJson);
-		return (
-			isRecord(value) &&
-			Object.entries(value).every(
-				([key, item]) => pdppSafeText.safeParse(key).success && safeJson(item),
-			)
-		);
+	// Every string key and value is in the pdpp-safe-escape-v1 encoding, so
+	// an attachment with control characters is represented, not dropped.
+	const encode = (value: unknown): unknown => {
+		if (typeof value === "string") return encodePdppSafeText(value);
+		if (Array.isArray(value)) return value.map(encode);
+		if (isRecord(value))
+			return Object.fromEntries(
+				Object.entries(value).map(([key, item]) => [
+					encodePdppSafeText(key),
+					encode(item),
+				]),
+			);
+		return value;
 	};
-	return raw.filter(isRecord).filter(safeJson);
+	return raw
+		.filter(isRecord)
+		.map((item) => encode(item) as Record<string, unknown>);
 }
 
 /**
@@ -232,13 +298,13 @@ export function parseMessage(
 	if (id === null) {
 		return null;
 	}
-	const text = flattenMessageText(raw);
+	const body = bodyText(flattenMessageText(raw));
 	const record: MessageRecord = {
 		id,
 		conversation_id: conversationId,
 		role: str(raw.sender),
 		parent_id: str(raw.parent_message_uuid),
-		content: inlineText(text),
+		content: body.content,
 		// The export's per-message payload carries no model field (confirmed
 		// by claude-export-ingest.cjs's normalizeMessage, which does not read
 		// one); left null rather than guessed.
@@ -247,9 +313,9 @@ export function parseMessage(
 		update_time: isoOrNull(raw.updated_at),
 		attachments: parseAttachments(raw.attachments),
 	};
-	return text.length > INLINE_TEXT_MAX_UNITS
-		? withOversizeText(record, text)
-		: record;
+	return body.overflow === null
+		? record
+		: withOversizeText(record, body.overflow);
 }
 
 /**
@@ -289,28 +355,50 @@ export function parseConversation(raw: unknown): {
 	return { conversation, messages };
 }
 
+/**
+ * `overCap` names top-level string fields of an object read incrementally
+ * whose value was far over the inline cap and so was not kept (see
+ * oversize-conversation.ts). Such a title is left absent and counted; an
+ * identity field that large makes the parent unparseable.
+ */
 export function parseConversationHeader(
 	raw: unknown,
 	messageCount: number,
+	overCap: ReadonlySet<string> = NO_FIELDS,
 ): ConversationRecord | null {
 	if (!isRecord(raw)) return null;
-	const id = str(raw.uuid) ?? str(raw.id);
+	if (overCap.has("uuid")) return null;
+	const id = str(raw.uuid) ?? (overCap.has("id") ? null : str(raw.id));
 	if (id === null) {
 		return null;
 	}
-	const title = str(raw.name) ?? str(raw.summary);
-	return {
-		id,
-		title: safeText(title, 4000),
-		create_time: isoOrNull(raw.created_at),
-		update_time: isoOrNull(raw.updated_at),
-		project_id: str(raw.project_uuid),
-		// The export carries no per-conversation model field (confirmed by
-		// claude-export-ingest.cjs's normalizeConversation); left null.
-		model: null,
-		message_count: messageCount,
-		is_starred: bool(raw.is_starred),
-	};
+	const tally: OmissionTally = { fields: 0 };
+	let title: PdppSafeText | null | undefined;
+	if (str(raw.name) !== null) title = encodedField(raw.name, tally);
+	else if (overCap.has("name")) {
+		tally.fields += 1;
+		title = undefined;
+	} else if (str(raw.summary) !== null)
+		title = encodedField(raw.summary, tally);
+	else if (overCap.has("summary")) {
+		tally.fields += 1;
+		title = undefined;
+	} else title = null;
+	return withTally(
+		compact<ConversationRecord>({
+			id,
+			title,
+			create_time: isoOrNull(raw.created_at),
+			update_time: isoOrNull(raw.updated_at),
+			project_id: str(raw.project_uuid),
+			// The export carries no per-conversation model field (confirmed by
+			// claude-export-ingest.cjs's normalizeConversation); left null.
+			model: null,
+			message_count: messageCount,
+			is_starred: bool(raw.is_starred),
+		}),
+		tally,
+	);
 }
 
 export interface JsonArrayChunkEntry {
@@ -702,16 +790,16 @@ export function createPipelinedJsonEntryReader(
 
 export interface ProjectRecord {
 	id: string;
-	name: PdppSafeText;
-	description: PdppSafeText | null;
+	name?: PdppSafeText;
+	description?: PdppSafeText | null;
 	create_time: string | null;
 	update_time: string | null;
 	is_archived: boolean | null;
-	prompt_template: PdppSafeText | null;
+	prompt_template?: PdppSafeText | null;
 	creator: { uuid?: string; full_name?: string } | null;
 	is_private: boolean | null;
 	is_starter_project: boolean | null;
-	archived_at: string | null;
+	archived_at?: string | null;
 	raw_docs: Array<{
 		uuid?: string;
 		filename?: string;
@@ -725,7 +813,7 @@ export interface ProjectRecord {
 export interface ProjectDocumentRecord {
 	id: string;
 	project_id: string;
-	filename: PdppSafeText | null;
+	filename?: PdppSafeText | null;
 	content: PdppSafeText | null;
 	create_time: string | null;
 	update_time: string | null;
@@ -756,17 +844,22 @@ export function parseProjectDocument(
 		str(raw.filename) ?? str(raw.file_name) ?? str(raw.name) ?? str(raw.title);
 	const content =
 		str(raw.content) ?? str(raw.text) ?? str(raw.body) ?? str(raw.filedata);
-	const record: ProjectDocumentRecord = {
-		id,
-		project_id: projectId,
-		filename: safeText(filename, 1024),
-		content: inlineText(content),
-		create_time: isoOrNull(raw.created_at),
-		update_time: isoOrNull(raw.updated_at),
-	};
-	return content !== null && content.length > INLINE_TEXT_MAX_UNITS
-		? withOversizeText(record, content)
-		: record;
+	const tally: OmissionTally = { fields: 0 };
+	const body = bodyText(content);
+	const record = withTally(
+		compact<ProjectDocumentRecord>({
+			id,
+			project_id: projectId,
+			filename: encodedField(filename, tally),
+			content: body.content,
+			create_time: isoOrNull(raw.created_at),
+			update_time: isoOrNull(raw.updated_at),
+		}),
+		tally,
+	);
+	return body.overflow === null
+		? record
+		: withOversizeText(record, body.overflow);
 }
 
 /**
@@ -796,7 +889,6 @@ export function parseProject(raw: unknown): {
 	if (id === null) {
 		return null;
 	}
-	const name = str(raw.name) ?? "Untitled project";
 	const docsRaw = Array.isArray(raw.docs) ? raw.docs : [];
 	const documents = docsRaw
 		.map((d) => parseProjectDocument(d, id))
@@ -804,61 +896,58 @@ export function parseProject(raw: unknown): {
 	const creator = isRecord(raw.creator) ? raw.creator : null;
 	const creatorUuid = creator === null ? null : str(creator.uuid);
 	const creatorFullName = creator === null ? null : str(creator.full_name);
-	const creatorFullNameSafe = safeText(creatorFullName, 2000);
-
-	// `name` is required (non-nullable in schemas.ts) — a control-rich name
-	// cannot become null like an optional field. Fall back to the same
-	// "Untitled project" sentinel already used for a missing name, rather
-	// than crash the whole export over one project's unsafe title (D4-
-	// adjacent: a required field that fails sanitization degrades to a safe
-	// placeholder, never a thrown error).
-	const safeName = pdppSafeText.safeParse(
-		name.length > 2000 ? name.slice(0, 2000) : name,
-	);
+	const tally: OmissionTally = { fields: 0 };
+	const creatorFullNameSafe = encodedField(creatorFullName, tally);
+	// `name` is required, so a project with no name gets the same placeholder
+	// as before. A name over the inline cap is left absent, never cut.
+	const name = encodedField(str(raw.name) ?? "Untitled project", tally);
 
 	return {
-		project: {
-			id,
-			name: safeName.success
-				? safeName.data
-				: pdppSafeText.parse("Untitled project"),
-			description: safeText(str(raw.description), 65_000),
-			create_time: isoOrNull(raw.created_at),
-			update_time: isoOrNull(raw.updated_at),
-			// archived_at's presence/absence IS the archived signal in the export
-			// (matches legacy normalizeProject's `Boolean(p?.archived_at)` exactly)
-			// — a definite false, not an unknown, when the key is absent or null.
-			is_archived: raw.archived_at != null,
-			prompt_template: safeText(str(raw.prompt_template), 65_000),
-			creator:
-				creator !== null
-					? {
-							...(creatorUuid !== null ? { uuid: creatorUuid } : {}),
-							...(creatorFullNameSafe !== null
-								? { full_name: creatorFullNameSafe }
-								: {}),
-						}
-					: null,
-			is_private: bool(raw.is_private),
-			is_starter_project: bool(raw.is_starter_project),
-			archived_at: safeText(raw.archived_at, 128),
-			raw_docs: docsRaw.filter(isRecord).map((doc) => {
-				const uuid = safeText(doc.uuid, 128);
-				const filename = safeText(doc.filename, 1024);
-				// Text over the inline cap lives in the document's own record
-				// (as a blob); it is left out here, never cut.
-				const content = inlineText(doc.content);
-				const createdAt = safeText(doc.created_at, 128);
-				const updatedAt = safeText(doc.updated_at, 128);
-				return {
-					...(uuid !== null ? { uuid } : {}),
-					...(filename !== null ? { filename } : {}),
-					...(content !== null ? { content } : {}),
-					...(createdAt !== null ? { created_at: createdAt } : {}),
-					...(updatedAt !== null ? { updated_at: updatedAt } : {}),
-				};
+		project: withTally(
+			compact<ProjectRecord>({
+				id,
+				name: name ?? undefined,
+				description: encodedField(str(raw.description), tally),
+				create_time: isoOrNull(raw.created_at),
+				update_time: isoOrNull(raw.updated_at),
+				// archived_at's presence/absence IS the archived signal in the export
+				// (matches legacy normalizeProject's `Boolean(p?.archived_at)` exactly)
+				// — a definite false, not an unknown, when the key is absent or null.
+				is_archived: raw.archived_at != null,
+				prompt_template: encodedField(str(raw.prompt_template), tally),
+				creator:
+					creator !== null
+						? {
+								...(creatorUuid !== null ? { uuid: creatorUuid } : {}),
+								...(typeof creatorFullNameSafe === "string"
+									? { full_name: creatorFullNameSafe }
+									: {}),
+							}
+						: null,
+				is_private: bool(raw.is_private),
+				is_starter_project: bool(raw.is_starter_project),
+				archived_at: encodedField(raw.archived_at, tally),
+				raw_docs: docsRaw.filter(isRecord).map((doc) => {
+					// Copies of the document's own fields. Text over the inline cap
+					// lives in the document's record (as a blob) and is left out
+					// here, never cut; the document record reports the omission.
+					const copy: OmissionTally = { fields: 0 };
+					const uuid = encodedField(doc.uuid, copy);
+					const filename = encodedField(doc.filename, copy);
+					const content = encodedField(doc.content, copy);
+					const createdAt = encodedField(doc.created_at, copy);
+					const updatedAt = encodedField(doc.updated_at, copy);
+					return {
+						...(typeof uuid === "string" ? { uuid } : {}),
+						...(typeof filename === "string" ? { filename } : {}),
+						...(typeof content === "string" ? { content } : {}),
+						...(typeof createdAt === "string" ? { created_at: createdAt } : {}),
+						...(typeof updatedAt === "string" ? { updated_at: updatedAt } : {}),
+					};
+				}),
 			}),
-		},
+			tally,
+		),
 		documents,
 	};
 }

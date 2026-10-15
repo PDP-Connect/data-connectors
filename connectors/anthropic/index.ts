@@ -183,6 +183,7 @@ import {
 	createPipelinedJsonEntryReader,
 	JSON_ENTRY_READ_CHUNK_UNITS,
 	type ManifestPartFile,
+	omittedFieldCountOf,
 	oversizeTextOf,
 	type ParsedExport,
 	parseClassifiedExport,
@@ -196,6 +197,7 @@ import {
 	resolveExportedProfile,
 	type SourceRecordEnvelope,
 } from "./parsers.ts";
+import { encodePdppSafeText } from "./safe-escape.ts";
 import { validateRecord } from "./schemas.ts";
 import {
 	type SpooledBlob,
@@ -350,6 +352,8 @@ export type AnthropicZipEntryChunkReader = (
 const ENVELOPE_OMITTED_REASON = "source_envelope_exceeds_host_blob_cap";
 const TEXT_ABSENT_CAP_REASON = "content_exceeds_host_blob_cap";
 const TEXT_ABSENT_NO_HOST_BLOB_REASON = "host_blob_store_unavailable";
+/** A text field passed the inline cap on a record that has no blob for it. */
+const FIELD_ABSENT_REASON = "exceeds_inline_cap";
 
 /** The buffered source envelope as a blob, or null when it passes the host
  * blob cap. */
@@ -1506,6 +1510,14 @@ export async function collectAnthropic({
 		messages: { cap: 0, host: 0 },
 		project_documents: { cap: 0, host: 0 },
 	};
+	// Text fields left absent for passing the inline cap (never cut to a
+	// prefix); counted per stream as records are emitted.
+	const omittedFields = {
+		conversations: 0,
+		projects: 0,
+		messages: 0,
+		project_documents: 0,
+	};
 	/**
 	 * Emit one record whose text may pass the inline cap. The text is never
 	 * truncated: over the inline cap `content` is null and the full text is a
@@ -1518,10 +1530,12 @@ export async function collectAnthropic({
 		afterSelected: () => void,
 	) => {
 		const text = oversizeTextOf(record);
+		const omitted = omittedFieldCountOf(record);
 		if (text === null) {
 			await emitRecord(stream, record, {
 				beforeEmit: () => {
 					afterSelected();
+					omittedFields[stream] += omitted;
 					return Promise.resolve();
 				},
 			});
@@ -1542,6 +1556,7 @@ export async function collectAnthropic({
 			{
 				beforeEmit: () => {
 					afterSelected();
+					omittedFields[stream] += omitted;
 					return blob ? emit(blob.event) : Promise.resolve();
 				},
 			},
@@ -1563,12 +1578,14 @@ export async function collectAnthropic({
 		blob: SpooledBlob | null,
 		onSelected: () => void,
 	) => {
+		const omitted = omittedFieldCountOf(record);
 		await emitRecord(
 			stream,
 			blob ? { ...record, blob_ref: blob.blob_ref } : record,
 			{
 				beforeEmit: () => {
 					onSelected();
+					omittedFields[stream] += omitted;
 					return blob ? emit(blob.event) : Promise.resolve();
 				},
 			},
@@ -1628,6 +1645,19 @@ export async function collectAnthropic({
 				TEXT_ABSENT_NO_HOST_BLOB_REASON,
 				"too large for this device to store; the {record} imported without the text",
 			],
+			...(
+				[
+					CONVERSATIONS_STREAM,
+					PROJECTS_STREAM,
+					MESSAGES_STREAM,
+					PROJECT_DOCUMENTS_STREAM,
+				] as const
+			).map((stream): [string, number, string, string] => [
+				stream,
+				omittedFields[stream],
+				FIELD_ABSENT_REASON,
+				"had a value too large to store; the {record} imported without that value",
+			]),
 		];
 		for (const [stream, count, reason, what] of rows) {
 			if (count === 0) continue;
@@ -1649,6 +1679,10 @@ export async function collectAnthropic({
 		omittedEnvelopes.projects = 0;
 		absentText.messages = { cap: 0, host: 0 };
 		absentText.project_documents = { cap: 0, host: 0 };
+		omittedFields.conversations = 0;
+		omittedFields.projects = 0;
+		omittedFields.messages = 0;
+		omittedFields.project_documents = 0;
 	};
 
 	// The conversations cursor from STATE. The run updates it when it drops a
@@ -1748,13 +1782,17 @@ export async function collectAnthropic({
 			await emitRecord(ACCOUNT_PROFILE_STREAM, {
 				id: organizationId,
 				organization_id: organizationId,
-				full_name: profile.fullName,
+				full_name:
+					profile.fullName === null
+						? null
+						: encodePdppSafeText(profile.fullName),
 				plan:
 					browserProfileAppliesToExport &&
 					profile.metadataStatus !== "mismatch" &&
 					profile.metadataStatus !== "ambiguous" &&
-					profile.fullName !== null
-						? browserProfile.plan
+					profile.fullName !== null &&
+					browserProfile.plan !== null
+						? encodePdppSafeText(browserProfile.plan)
 						: null,
 				name_source: profile.nameSource,
 				metadata_status: profile.metadataStatus,
@@ -2071,10 +2109,16 @@ export async function collectAnthropic({
 				bufferMeter,
 			);
 			const header = Object.fromEntries(scan.fields);
-			const conversation = parseConversationHeader(header, scan.messageCount);
+			const conversation = parseConversationHeader(
+				header,
+				scan.messageCount,
+				scan.overCap,
+			);
 			const chatMessagesIsArray = scan.chatMessages === "array";
 			accountConversationIdentity(
-				chatMessagesIsArray ? parseConversationHeader(header, 0) : null,
+				chatMessagesIsArray
+					? parseConversationHeader(header, 0, scan.overCap)
+					: null,
 				scan.hasDocs,
 			);
 			const messagesAccounted = accountMessageParent(

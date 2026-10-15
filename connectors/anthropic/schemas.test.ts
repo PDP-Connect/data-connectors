@@ -288,3 +288,119 @@ test("the manifest declares the same blob fields and blob streams as the schemas
 		assert.equal(schema.required.includes("content"), false, name);
 	}
 });
+
+test("the schemas accept pdpp-safe-escape-v1 text and the former caps no longer apply", () => {
+	const escaped = "a\\u0000b\\u007Fc\\u005Cu0001";
+	assert.equal(
+		validateRecord("conversations", {
+			...CONVERSATION_RECORD,
+			title: `${escaped}${"t".repeat(5000)}`,
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("messages", { ...MESSAGE_RECORD, content: escaped }).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("projects", {
+			...PROJECT_RECORD,
+			name: "n".repeat(3000),
+			description: "d".repeat(70_000),
+			prompt_template: "p".repeat(70_000),
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("project_documents", {
+			...PROJECT_DOCUMENT_RECORD,
+			filename: "f".repeat(2000),
+		}).ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("account_profile", {
+			id: "o",
+			organization_id: "o",
+			full_name: escaped,
+			plan: "p".repeat(3000),
+			name_source: "none",
+			metadata_status: "absent",
+		}).ok,
+		true,
+	);
+	// Unescaped control characters are still not PDPP text.
+	assert.equal(
+		validateRecord("messages", { ...MESSAGE_RECORD, content: "a\u0000b" }).ok,
+		false,
+	);
+	// The inline cap itself still holds.
+	assert.equal(
+		validateRecord("conversations", {
+			...CONVERSATION_RECORD,
+			title: "t".repeat(10_000_001),
+		}).ok,
+		false,
+	);
+});
+
+test("the manifest declares pdpp-safe-escape-v1 on exactly the fields the parsers encode", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	);
+	const declared: string[] = [];
+	const walk = (node: unknown, path: string) => {
+		if (typeof node !== "object" || node === null) return;
+		if (Array.isArray(node)) {
+			for (const [index, item] of node.entries())
+				walk(item, `${path}[${index}]`);
+			return;
+		}
+		const record = node as Record<string, unknown>;
+		if (record.x_pdpp_text_encoding !== undefined) {
+			assert.equal(record.x_pdpp_text_encoding, "pdpp-safe-escape-v1", path);
+			declared.push(path);
+		}
+		for (const [key, value] of Object.entries(record))
+			walk(value, `${path}.${key}`);
+	};
+	for (const stream of manifest.streams) walk(stream.schema, stream.name);
+	assert.deepEqual(declared.sort(), [
+		"account_profile.properties.full_name",
+		"account_profile.properties.plan",
+		"conversations.properties.title",
+		"messages.properties.attachments",
+		"messages.properties.content",
+		"project_documents.properties.content",
+		"project_documents.properties.filename",
+		"projects.properties.archived_at",
+		"projects.properties.creator.properties.full_name",
+		"projects.properties.description",
+		"projects.properties.name",
+		"projects.properties.prompt_template",
+		"projects.properties.raw_docs.items.properties.content",
+		"projects.properties.raw_docs.items.properties.created_at",
+		"projects.properties.raw_docs.items.properties.filename",
+		"projects.properties.raw_docs.items.properties.updated_at",
+		"projects.properties.raw_docs.items.properties.uuid",
+	]);
+	const byName = new Map(
+		manifest.streams.map(
+			(stream: {
+				name: string;
+				schema: { properties: Record<string, unknown> };
+			}) => [stream.name, stream.schema.properties],
+		),
+	);
+	for (const name of ["messages", "project_documents"]) {
+		const blob = (byName.get(name) as Record<string, Record<string, unknown>>)
+			.blob_ref;
+		assert.equal(blob?.x_pdpp_blob_projects_field, "content", name);
+		assert.equal(blob?.x_pdpp_blob_codec, "json-string-v1", name);
+	}
+	for (const name of ["conversations", "projects"]) {
+		const blob = (byName.get(name) as Record<string, Record<string, unknown>>)
+			.blob_ref;
+		assert.equal(blob?.x_pdpp_blob_projects_field, undefined, name);
+	}
+});

@@ -25,6 +25,13 @@
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
+import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
+
+// Text fields below carry the pdpp-safe-escape-v1 encoding (see
+// safe-escape.ts), so control characters are represented, not dropped. The
+// only length limit is the inline cap, measured on the escaped text; a value
+// over it is left absent (or, for message and document content, is a blob).
+const encodedText = pdppSafeText.max(INLINE_TEXT_MAX_UNITS);
 
 // Module-scoped regex (Biome useTopLevelRegex). Manifest declares date-time
 // format; accept an ISO-8601 datetime prefix.
@@ -56,7 +63,7 @@ const blobRefSchema = z
  */
 export const conversationsSchema = z.object({
 	id: idSchema,
-	title: pdppSafeText.max(4000).nullable(),
+	title: encodedText.nullable().optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
 	project_id: idSchema.nullable(),
@@ -84,7 +91,7 @@ export const messagesSchema = z.object({
 	// is null and `blob_ref` holds the full text (a JSON string, application/
 	// json). Text whose encoding passes the host blob cap has `content` and
 	// `blob_ref` both absent.
-	content: pdppSafeText.max(10_000_000).nullable().optional(),
+	content: encodedText.nullable().optional(),
 	blob_ref: blobRefSchema.optional(),
 	model: z.string().min(1).max(128).nullable(),
 	create_time: isoDateTimeNullable,
@@ -104,19 +111,19 @@ export const messagesSchema = z.object({
  */
 export const projectsSchema = z.object({
 	id: idSchema,
-	name: pdppSafeText.max(2000),
-	description: pdppSafeText.max(65_000).nullable(),
+	name: encodedText,
+	description: encodedText.nullable().optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
 	is_archived: z.boolean().nullable(),
-	prompt_template: pdppSafeText.max(65_000).nullable(),
+	prompt_template: encodedText.nullable().optional(),
 	creator: z
 		.object({ uuid: z.string().optional(), full_name: z.string().optional() })
 		.strict()
 		.nullable(),
 	is_private: z.boolean().nullable(),
 	is_starter_project: z.boolean().nullable(),
-	archived_at: z.string().nullable(),
+	archived_at: z.string().nullable().optional(),
 	raw_docs: z.array(
 		z
 			.object({
@@ -152,9 +159,9 @@ export const projectsSchema = z.object({
 export const projectDocumentsSchema = z.object({
 	id: idSchema,
 	project_id: idSchema,
-	filename: pdppSafeText.max(1024).nullable(),
+	filename: encodedText.nullable().optional(),
 	// Same rule as messages.content: over the inline cap the text is a blob.
-	content: pdppSafeText.max(10_000_000).nullable().optional(),
+	content: encodedText.nullable().optional(),
 	blob_ref: blobRefSchema.optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
@@ -163,8 +170,8 @@ export const projectDocumentsSchema = z.object({
 export const accountProfileSchema = z.object({
 	id: idSchema,
 	organization_id: idSchema,
-	full_name: pdppSafeText.max(2000).nullable(),
-	plan: pdppSafeText.max(2000).nullable(),
+	full_name: encodedText.nullable(),
+	plan: encodedText.nullable(),
 	name_source: z.enum(["browser_menu", "users_json", "none"]),
 	metadata_status: z.enum([
 		"valid",

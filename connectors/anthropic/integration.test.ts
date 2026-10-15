@@ -59,6 +59,7 @@ after(() => {
 const { collectAnthropic } = await import("./index.ts");
 const { BufferMeter } = await import("./oversize-conversation.ts");
 const { validateRecord } = await import("./schemas.ts");
+const { decodeEscapedText } = await import("./safe-escape.ts");
 const { consentTimeFieldResolver, makeEmitRecord } = await import(
 	"../../packages/polyfill-connectors/src/connector-runtime.ts"
 );
@@ -4429,6 +4430,198 @@ for (const streaming of [false, true]) {
 		for (const stream of ["messages", "project_documents"])
 			assert.equal(coverageOf(protocolMessages, stream).length, 1, stream);
 		assert.deepEqual(gapsOf(protocolMessages), []);
+	});
+}
+
+// ASCII controls only: the test reader slices by UTF-16 unit, so the entry
+// size must equal its unit length.
+const CONTROL_TEXT = "a\u0000b\u0007c\u001fd\u007fe\ud800g\\u0001h";
+
+for (const streaming of [false, true]) {
+	const mode = streaming ? "streaming" : "buffered";
+	test(`collectAnthropic: ${mode} control characters are represented in every converted field and decode to the source`, async () => {
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						{
+							uuid: "conv-ctl",
+							name: CONTROL_TEXT,
+							created_at: "2026-01-01T00:00:00.000Z",
+							chat_messages: [
+								{
+									uuid: "msg-ctl",
+									sender: "human",
+									text: CONTROL_TEXT,
+									attachments: [{ file_name: CONTROL_TEXT }],
+								},
+							],
+						},
+					],
+				},
+				{
+					name: "projects/proj-ctl.json",
+					content: {
+						uuid: "proj-ctl",
+						name: CONTROL_TEXT,
+						description: CONTROL_TEXT,
+						prompt_template: CONTROL_TEXT,
+						creator: { uuid: "u", full_name: CONTROL_TEXT },
+						docs: [
+							{
+								uuid: "doc-ctl",
+								filename: CONTROL_TEXT,
+								content: CONTROL_TEXT,
+							},
+						],
+					},
+				},
+			],
+			{ streaming },
+		);
+		const get = (stream: string, id: string) =>
+			emitted.find((r) => r.stream === stream && r.data.id === id)?.data;
+		const decode = (value: unknown) => decodeEscapedText(String(value));
+		const conversation = get("conversations", "conv-ctl");
+		assert.ok(conversation, "the conversation is emitted, not dropped");
+		assert.equal(decode(conversation.title), CONTROL_TEXT);
+		const message = get("messages", "msg-ctl");
+		assert.ok(message, "the message is emitted, not dropped");
+		assert.equal(decode(message.content), CONTROL_TEXT);
+		assert.ok(
+			String(message.content).includes("\\u0000"),
+			"the wire text is escaped, not raw",
+		);
+		assert.equal(
+			decode(
+				(message.attachments as Array<Record<string, unknown>>)[0]?.file_name,
+			),
+			CONTROL_TEXT,
+		);
+		const project = get("projects", "proj-ctl");
+		assert.ok(project);
+		for (const field of ["name", "description", "prompt_template"])
+			assert.equal(decode(project[field]), CONTROL_TEXT, field);
+		assert.equal(
+			decode((project.creator as { full_name: string }).full_name),
+			CONTROL_TEXT,
+		);
+		const doc = get("project_documents", "doc-ctl");
+		assert.ok(doc);
+		assert.equal(decode(doc.filename), CONTROL_TEXT);
+		assert.equal(decode(doc.content), CONTROL_TEXT);
+		// The raw envelope blob still holds the exact source.
+		const blob = blobsOf(protocolMessages).find((b) => b.key === "conv-ctl");
+		assert.ok(blob);
+		assert.equal(
+			JSON.parse(readFileSync(join(blobSpoolDir, blob.file), "utf8")).payload
+				.name,
+			CONTROL_TEXT,
+		);
+		for (const stream of [
+			"conversations",
+			"messages",
+			"projects",
+			"project_documents",
+		])
+			assert.equal(coverageOf(protocolMessages, stream).length, 1, stream);
+	});
+
+	test(`collectAnthropic: ${mode} a field over the inline cap is absent with one aggregate count, nothing is cut, and every stream still proves`, async () => {
+		// 3M NULs are 18M escaped units: over the 10M inline cap.
+		const nuls = "\u0000".repeat(3_000_000);
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						{
+							uuid: "conv-cap",
+							name: nuls,
+							created_at: "2026-01-01T00:00:00.000Z",
+							chat_messages: [{ uuid: "msg-cap", sender: "human", text: "hi" }],
+						},
+					],
+				},
+				{
+					name: "projects/proj-cap.json",
+					content: {
+						uuid: "proj-cap",
+						name: "Cap",
+						description: nuls,
+						docs: [{ uuid: "doc-cap", filename: nuls, content: "ok" }],
+					},
+				},
+			],
+			{ streaming },
+		);
+		const conversation = emitted.find((r) => r.stream === "conversations");
+		assert.ok(conversation);
+		assert.equal("title" in conversation.data, false);
+		const project = emitted.find((r) => r.stream === "projects");
+		assert.ok(project);
+		assert.equal("description" in project.data, false);
+		assert.equal(project.data.name, "Cap");
+		const doc = emitted.find((r) => r.stream === "project_documents");
+		assert.ok(doc);
+		assert.equal("filename" in doc.data, false);
+		assert.equal(doc.data.content, "ok");
+		for (const stream of ["conversations", "projects", "project_documents"]) {
+			assert.ok(
+				diagnostics.some(
+					(line) =>
+						line.startsWith("[anthropic-diagnostic] export_items_too_large ") &&
+						line.includes(`"stream":"${stream}"`) &&
+						line.includes('"reason":"exceeds_inline_cap"') &&
+						line.includes('"count":1'),
+				),
+				`${stream}: ${diagnostics.join("\n")}`,
+			);
+		}
+		assert.deepEqual(gapsOf(protocolMessages), []);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+		for (const stream of [
+			"conversations",
+			"messages",
+			"projects",
+			"project_documents",
+		])
+			assert.equal(coverageOf(protocolMessages, stream).length, 1, stream);
+		assertUserFacingProgress(protocolMessages);
+	});
+
+	test(`collectAnthropic: ${mode} text that is small raw but over the cap once escaped is a blob of the RAW text`, async () => {
+		// 2.1M NULs: 2.1M raw units, 12.6M escaped.
+		const raw = `${"\u0000".repeat(2_100_000)}end`;
+		const { emitted, protocolMessages, events } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						{
+							uuid: "conv-raw",
+							created_at: "2026-01-01T00:00:00.000Z",
+							chat_messages: [{ uuid: "msg-raw", sender: "human", text: raw }],
+						},
+					],
+				},
+			],
+			{ streams: ["conversations", "messages"], streaming },
+		);
+		const message = emitted.find((r) => r.stream === "messages");
+		assert.ok(message);
+		assert.equal(message.data.content, null);
+		const blob = blobsOf(protocolMessages).find((b) => b.stream === "messages");
+		assert.ok(blob);
+		const bytes = readFileSync(join(blobSpoolDir, blob.file), "utf8");
+		assert.equal(
+			JSON.parse(bytes),
+			raw,
+			"the blob is the JSON string of the source text",
+		);
+		assert.equal(bytes, JSON.stringify(raw));
+		assertBlobPrecedesRecord(events, blob);
 	});
 }
 
