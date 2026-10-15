@@ -109,7 +109,6 @@ class FixturePage {
 				domHasContinuation: false,
 				declaredTotal: null,
 				domItemCount: null,
-				hiddenUnavailableNotice: { present: false, count: null },
 				domHasEndMarker: false,
 				verifiedEmpty: empty,
 			};
@@ -1100,13 +1099,20 @@ test("history rows beyond the emitted cap veto completion even with a page end m
 	}
 });
 
-test("playlist declared total mismatch needs an unavailable-videos notice", async () => {
-	for (const withNotice of [false, true]) {
+test("playlist total mismatch cannot be excused by unrelated DOM text", async () => {
+	const phrase = "100 unavailable videos are hidden";
+	for (const placement of ["none", "notice", "title", "description", "sidebar"]) {
 		const rows = Array.from(
 			{ length: 4 },
 			(_, n) =>
 				`<ytd-playlist-video-renderer><a href="/watch?v=vid${String(n).padStart(8, "0")}&list=PL1"></a><h3>V${n}</h3></ytd-playlist-video-renderer>`,
 		).join("");
+		const rowsWithPhrase =
+			placement === "title"
+				? rows.replace("<h3>V0</h3>", `<h3>${phrase}</h3>`)
+				: placement === "description"
+					? rows.replace("<h3>V0</h3>", `<h3>V0</h3><div id="description">${phrase}</div>`)
+					: rows;
 		const data = pageData(tabbedData({
 			playlistVideoListRenderer: {
 				contents: Array.from({ length: 4 }, (_, n) => ({
@@ -1115,14 +1121,11 @@ test("playlist declared total mismatch needs an unavailable-videos notice", asyn
 			},
 		}));
 		const { records, outcome } = await collectFromDocuments(
-			() => `${rows}${headerTotal("5 videos")}${data}${withNotice ? `<div>Unavailable videos are hidden</div>` : ""}${END_OF_LIST}`,
+			() => `${rowsWithPhrase}${headerTotal("5 videos")}${data}${placement === "notice" ? `<div>Unavailable videos are hidden</div>` : placement === "sidebar" ? `<ytd-guide-renderer><span>${phrase}</span></ytd-guide-renderer>` : ""}${END_OF_LIST}`,
 			["likes"],
 		);
 		assert.equal(records.get("likes")?.length, 4);
-		assert.deepEqual(
-			outcome("likes"),
-			withNotice ? [] : ["stream_collection_failed"],
-		);
+		assert.deepEqual(outcome("likes"), ["stream_collection_failed"], placement);
 	}
 });
 

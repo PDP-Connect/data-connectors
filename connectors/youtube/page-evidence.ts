@@ -33,11 +33,6 @@ export interface ListEnd {
 	readonly declaredTotal: number | null;
 	/** Rendered items before the connector's own row limit (kinds with one). */
 	readonly domItemCount: number | null;
-	/** YouTube says unavailable videos are omitted from the rendered list. */
-	readonly hiddenUnavailableNotice: {
-		readonly present: boolean;
-		readonly count: number | null;
-	};
 	/** The target list's own rendered end marker is present. */
 	readonly domHasEndMarker: boolean;
 	/** The target page data explicitly says the list is empty. */
@@ -67,12 +62,6 @@ export function enumerationEnded(
 		end.domItemCount > end.dataItemCount;
 	const declaredMismatch =
 		end.declaredTotal !== null && end.declaredTotal !== renderedCount;
-	const hiddenRowsAccountForMismatch =
-		end.hiddenUnavailableNotice.present &&
-		end.declaredTotal !== null &&
-		end.declaredTotal >= renderedCount &&
-		(end.hiddenUnavailableNotice.count === null ||
-			end.declaredTotal - renderedCount <= end.hiddenUnavailableNotice.count);
 	if (
 		discardedRows > 0 ||
 		end.domHasContinuation ||
@@ -82,7 +71,7 @@ export function enumerationEnded(
 		(end.verifiedEmpty &&
 			(renderedCount > 0 ||
 				(end.domItemCount !== null && end.domItemCount > 0))) ||
-		(declaredMismatch && !hiddenRowsAccountForMismatch)
+		declaredMismatch
 	)
 		return false;
 	if (end.domHasEndMarker || continuationFollowed) return true;
@@ -273,21 +262,6 @@ const LIST_END_FUNCTION = `(kind) => {
 	const endText = Array.from(document.querySelectorAll("#contents #message, .ytd-item-section-renderer #message"))
 		.map((node) => node.textContent ?? "")
 		.join(" ");
-	const unavailableText = Array.from(document.querySelectorAll("*"))
-		.map((node) => node.childElementCount === 0 ? node.textContent ?? "" : "")
-		.join(" ");
-	const unavailableMatch = /([\\d,]+)\\s+unavailable videos?\\s+(?:(?:are|is)\\s+)?hidden/i.exec(unavailableText);
-	const unavailableMarkerCount = document.querySelectorAll(
-		"ytd-unavailable-video-renderer, [class*='unavailable-video'], [data-unavailable-video]",
-	).length;
-	const hiddenUnavailableNotice = {
-		present: /unavailable videos?\\s+(?:(?:are|is)\\s+)?hidden/i.test(unavailableText) || unavailableMarkerCount > 0,
-		count: unavailableMatch
-			? Number(unavailableMatch[1].replace(/,/g, ""))
-			: unavailableMarkerCount > 0
-				? unavailableMarkerCount
-				: null,
-	};
 	const continuationSelector = kind === "subscriptions"
 		? "ytd-expanded-shelf-contents-renderer ytd-continuation-item-renderer"
 		: kind === "playlist-index"
@@ -304,7 +278,6 @@ const LIST_END_FUNCTION = `(kind) => {
 		domHasContinuation: Boolean(document.querySelector(continuationSelector)),
 		declaredTotal,
 		domItemCount,
-		hiddenUnavailableNotice,
 		domHasEndMarker: /(?:no more (?:videos|items)|end of (?:the )?list|you(?:'|’)ve reached the end)/i.test(endText),
 		verifiedEmpty: facts.length > 0 && facts.every((f) =>
 			f.items === 0 &&
