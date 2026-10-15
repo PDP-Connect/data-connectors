@@ -80,7 +80,7 @@ import {
 } from "./browser-window.ts";
 import { connectorDiagnostic } from "./connector-diagnostic.ts";
 import { flushAndExitAfterRuntimeAck } from "./connector-exit.ts";
-import type { FieldOmission } from "./field-reader.ts";
+import type { Enumeration, FieldOmission } from "./field-reader.ts";
 import {
 	type CaptureSession,
 	createCaptureSession,
@@ -110,6 +110,8 @@ import {
 } from "./stream-integrity.ts";
 
 export {
+	type DeclaredBound,
+	declaredBoundSkip,
 	type ResumeSafeBasis,
 	resumeSafeSkip,
 } from "./stream-integrity.ts";
@@ -743,6 +745,10 @@ export function buildDetailCoverageMessage(
  *
  * The caller owns when to emit, and MUST emit only on a successful
  * enumeration — a fetch or parse failure never proves an empty boundary.
+ *
+ * @deprecated for full-inventory streams: an item count is not proof that
+ * the list was whole. Use `fullInventoryCoverage` with an `enumerated(...)`
+ * proof. `full-inventory-coverage-guard.test.ts` freezes the existing callers.
  */
 export function buildFullScanCoverageMessage(
 	stream: string,
@@ -756,6 +762,51 @@ export function buildFullScanCoverageMessage(
 		considered,
 		covered: considered,
 	});
+}
+
+export const INVENTORY_NOT_PROVEN_REASON = "inventory_not_proven_complete";
+
+/**
+ * The completion claim for a full-inventory stream (manifest
+ * `coverage_strategy: "full_inventory"`), where rows the source no longer
+ * lists are read as deleted. It claims full coverage only from a COMPLETE
+ * enumeration (see `enumerated` in field-reader.ts). An INCOMPLETE one
+ * yields a retryable SKIP_RESULT instead, which also withholds the stream's
+ * STATE and deletes under the stream integrity rule; the rows that were read
+ * still count as emitted.
+ *
+ * `covered` is the number of enumerated items the run accounted for
+ * (emitted, or suppressed as unchanged); it defaults to every item.
+ */
+export function fullInventoryCoverage(
+	stream: string,
+	enumeration: Enumeration<unknown>,
+	covered: number = enumeration.items.length,
+): EmittedMessage[] {
+	if (enumeration.kind === "incomplete")
+		return [
+			{
+				type: "SKIP_RESULT",
+				stream,
+				reason: INVENTORY_NOT_PROVEN_REASON,
+				message: `The ${stream} list read in this run is not proven complete: ${enumeration.reason}.`,
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				diagnostics: {
+					items_read: enumeration.items.length,
+					reason: enumeration.reason,
+				},
+			},
+		];
+	return [
+		buildDetailCoverageMessage({
+			stream,
+			stateStream: stream,
+			requiredKeys: [],
+			hydratedKeys: [],
+			considered: enumeration.items.length,
+			covered: Math.min(covered, enumeration.items.length),
+		}),
+	];
 }
 
 /**

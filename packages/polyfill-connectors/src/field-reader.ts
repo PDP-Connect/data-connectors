@@ -534,3 +534,117 @@ export async function emitRow<F extends FieldReads>(
 	await ctx.emitRecord(stream, row.data, { omissions: row.omissions });
 	return false;
 }
+
+// ─── Enumerations ───────────────────────────────────────────────────────
+
+/**
+ * Raw paging evidence for one enumeration, exactly as the source sent it.
+ *
+ *   - `offset`: `start`, optional `count`, `total`, and any continuation
+ *     marker (a next link or cursor) from the enumeration's pages. `start` is
+ *     the offset of the FIRST page the walk read.
+ *   - `cursor`: a cursor walk that began at the first page, with the LAST
+ *     page's raw end signal: `has_more` and `next_cursor`, plus `total` when
+ *     the source reports one.
+ */
+export type PagingEvidence =
+	| {
+			readonly kind: "offset";
+			readonly start: unknown;
+			readonly count?: unknown;
+			readonly total: unknown;
+			readonly continuation?: unknown;
+	  }
+	| {
+			readonly kind: "cursor";
+			readonly has_more: unknown;
+			readonly next_cursor?: unknown;
+			readonly total?: unknown;
+	  };
+
+/**
+ * A per-source declaration that the source returns the whole collection in
+ * one unpaged container (no paging fields exist to check). Declare it only
+ * from the source's documented or captured shape, at the call site.
+ */
+export interface UnpagedContainer {
+	readonly kind: "unpaged";
+	readonly basis: "source_returns_whole_collection";
+}
+
+/** Whether a list of items is the source's whole inventory. */
+export type Enumeration<T> =
+	| {
+			readonly kind: "complete";
+			readonly items: readonly T[];
+			readonly basis: "declared_unpaged" | "paging_verified";
+	  }
+	| {
+			readonly kind: "incomplete";
+			readonly items: readonly T[];
+			readonly reason: string;
+	  };
+
+function isCount(raw: unknown): raw is number {
+	return typeof raw === "number" && Number.isInteger(raw) && raw >= 0;
+}
+
+/** A continuation marker is absent only when it is missing, null or "". */
+function continues(marker: unknown): boolean {
+	return marker !== undefined && marker !== null && marker !== "";
+}
+
+/**
+ * Decide whether `items` is a complete inventory. An array alone is never
+ * proof: a page can be the first of several, or empty while the source
+ * reports rows. COMPLETE needs one of:
+ *
+ *   - offset paging that is coherent: `start` is 0, `total` is a count equal
+ *     to the number of items, `count` (if sent) is a count, and there is no
+ *     continuation;
+ *   - a cursor walk whose last page says explicitly that nothing follows
+ *     (`has_more === false`, no `next_cursor`), and whose `total`, if sent,
+ *     equals the number of items;
+ *   - a declared unpaged container.
+ *
+ * Anything else is INCOMPLETE with a value-free reason. A full-inventory
+ * stream must not claim completion (or delete what it did not see) from an
+ * INCOMPLETE enumeration; see `fullInventoryCoverage` in the runtime.
+ */
+export function enumerated<T>(
+	items: readonly T[],
+	evidence?: PagingEvidence | UnpagedContainer,
+): Enumeration<T> {
+	const incomplete = (reason: string): Enumeration<T> => ({
+		kind: "incomplete",
+		items,
+		reason,
+	});
+	if (evidence === undefined)
+		return incomplete("no paging evidence and no declared unpaged container");
+	if (evidence.kind === "unpaged")
+		return { kind: "complete", items, basis: "declared_unpaged" };
+	if (evidence.kind === "cursor") {
+		if (evidence.has_more !== false)
+			return incomplete("the last page does not say has_more is false");
+		if (continues(evidence.next_cursor))
+			return incomplete("the last page still carries a next cursor");
+		if (evidence.total !== undefined && evidence.total !== null) {
+			if (!isCount(evidence.total)) return incomplete("total is not a count");
+			if (evidence.total !== items.length)
+				return incomplete("total does not equal the items read");
+		}
+		return { kind: "complete", items, basis: "paging_verified" };
+	}
+	if (!isCount(evidence.start)) return incomplete("start is not a count");
+	if (evidence.start !== 0)
+		return incomplete("the enumeration does not start at offset 0");
+	if (!isCount(evidence.total)) return incomplete("total is not a count");
+	if (evidence.count !== undefined && !isCount(evidence.count))
+		return incomplete("count is not a count");
+	if (continues(evidence.continuation))
+		return incomplete("the source reports a continuation");
+	if (evidence.total !== items.length)
+		return incomplete("total does not equal the items read");
+	return { kind: "complete", items, basis: "paging_verified" };
+}

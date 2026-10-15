@@ -52,6 +52,7 @@ function page(
 
 async function runWithPages(
 	pages: readonly unknown[],
+	end: Record<string, unknown> = { has_more: false, next_cursor: null },
 ): Promise<EmittedMessage[]> {
 	const harnessDir = await mkdtemp(join(tmpdir(), "pdpp-notion-fields-"));
 	const wrapperPath = join(harnessDir, "notion-wrapper.mjs");
@@ -62,8 +63,7 @@ globalThis.fetch = async (_input, init) => {
   const body = JSON.parse(init?.body ?? "{}");
   const isPage = body.filter?.value === "page";
   return new Response(JSON.stringify({
-    has_more: false,
-    next_cursor: null,
+    ...${JSON.stringify(end)},
     results: isPage ? ${JSON.stringify(pages)} : []
   }), { status: 200, headers: { "content-type": "application/json" } });
 };
@@ -154,6 +154,32 @@ test("a clean run still saves the pages cursor", async () => {
 	assert.deepEqual(
 		pagesStates(messages).map((m) => (m.type === "STATE" ? m.cursor : null)),
 		[{ last_edited_time: "2026-08-13T00:00:00.000Z" }],
+	);
+});
+
+test("a search page that does not say it is the last proves no full inventory", async () => {
+	// Before enumerated(), a missing has_more ended the walk and the pages
+	// stream claimed full coverage of what it had, so unlisted pages would
+	// read as deleted.
+	const messages = await runWithPages(
+		[page(NEW_ID, "2026-08-13T00:00:00.000Z")],
+		{ next_cursor: null },
+	);
+	assert.equal(
+		messages.some((m) => m.type === "DETAIL_COVERAGE" && m.stream === "pages"),
+		false,
+	);
+	assert.deepEqual(
+		messages.flatMap((m) =>
+			m.type === "SKIP_RESULT" && m.stream === "pages" ? [m.reason] : [],
+		),
+		["inventory_not_proven_complete", "stream_incomplete_checkpoint_withheld"],
+	);
+	assert.deepEqual(pagesStates(messages), []);
+	assert.equal(
+		messages.filter((m) => m.type === "RECORD").length,
+		1,
+		"the page read is still stored",
 	);
 });
 

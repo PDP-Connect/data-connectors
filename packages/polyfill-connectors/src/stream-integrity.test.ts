@@ -9,6 +9,7 @@ import { buildRow, readField, v } from "./field-reader.ts";
 import {
 	CHECKPOINT_WITHHELD_REASON,
 	createStreamIntegrity,
+	declaredBoundSkip,
 	resumeSafeSkip,
 } from "./stream-integrity.ts";
 import { runConnectorProtocolSubprocess } from "./test-harness.ts";
@@ -232,40 +233,44 @@ test("runtime: a loss in one stream does not block another stream's STATE", asyn
 	]);
 });
 
-test("runtime: declared bounds do not withhold STATE", async () => {
-	const declaredBounds = [
-		{
-			type: "SKIP_RESULT",
-			stream: "items",
-			reason: "older_pages_deferred_page_budget",
-			message: "deliberate page budget",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-		},
+const PAGE_BUDGET = {
+	type: "SKIP_RESULT",
+	stream: "items",
+	reason: "older_pages_deferred_page_budget",
+	message: "deliberate page budget",
+	recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+} as const;
+
+const RUNTIME_CONTINUATION = {
+	type: "SKIP_RESULT",
+	stream: "items",
+	reason: "historical_backfill_pending",
+	message: "next page owned by the runtime",
+	recovery_hint: { action: "retry_by_runtime", retryable: true },
+	continuation: {
+		boundary: "b",
+		slice_start: 0,
+		slice_end: 1,
+		considered: 1,
+		covered: 1,
+		remaining: true,
+		owner: "runtime",
+	},
+} as const;
+
+test("runtime: only typed declarations let STATE pass after a skip", async () => {
+	const passing = [
 		{
 			type: "SKIP_RESULT",
 			stream: "items",
 			reason: "scope_not_supported",
 			message: "resource filter not honored",
 		},
-		{
-			type: "SKIP_RESULT",
-			stream: "items",
-			reason: "historical_backfill_pending",
-			message: "next page owned by the runtime",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			continuation: {
-				boundary: "b",
-				slice_start: "s",
-				slice_end: "e",
-				considered: 1,
-				covered: 1,
-				remaining: true,
-				owner: "runtime",
-			},
-		},
+		declaredBoundSkip(PAGE_BUDGET, "configured_limit"),
+		resumeSafeSkip(RUNTIME_CONTINUATION, "cursor_at_or_before_loss"),
 	];
 	const runs = await Promise.all(
-		declaredBounds.map((declared) =>
+		passing.map((declared) =>
 			wire([
 				good("a"),
 				{ op: "emit", msg: declared },
@@ -274,7 +279,7 @@ test("runtime: declared bounds do not withhold STATE", async () => {
 		),
 	);
 	for (const [index, messages] of runs.entries()) {
-		const reason = declaredBounds[index]?.reason;
+		const reason = passing[index]?.reason;
 		assert.deepEqual(
 			summary(messages),
 			[
@@ -286,6 +291,54 @@ test("runtime: declared bounds do not withhold STATE", async () => {
 			String(reason),
 		);
 	}
+});
+
+test("runtime: retryable:false alone, a bare continuation, or an unknown bound is no declaration", async () => {
+	const undeclared = [
+		PAGE_BUDGET,
+		RUNTIME_CONTINUATION,
+		{ ...PAGE_BUDGET, diagnostics: { declared_bound: "because" } },
+	];
+	const runs = await Promise.all(
+		undeclared.map((skip) =>
+			wire([
+				good("a"),
+				{ op: "emit", msg: skip },
+				{ op: "emit", msg: STATE("items") },
+			]),
+		),
+	);
+	for (const [index, messages] of runs.entries()) {
+		const reason = undeclared[index]?.reason;
+		assert.deepEqual(
+			summary(messages),
+			[
+				"RECORD:items:a",
+				`SKIP_RESULT:items:${String(reason)}`,
+				`SKIP_RESULT:items:${CHECKPOINT_WITHHELD_REASON}`,
+				"DONE:succeeded",
+			],
+			String(index),
+		);
+	}
+});
+
+test("a declared bound still blocks deletes and full-coverage claims", () => {
+	const integrity = createStreamIntegrity();
+	integrity.gate(declaredBoundSkip(PAGE_BUDGET, "configured_limit"));
+	assert.deepEqual(integrity.gate(STATE("items")), [STATE("items")]);
+	const out = integrity.gate({
+		type: "RECORD",
+		stream: "items",
+		key: "unseen",
+		data: { id: "unseen" },
+		emitted_at: "2026-10-15T00:00:00.000Z",
+		op: "delete",
+	});
+	assert.deepEqual(
+		out.map((m) => (m.type === "SKIP_RESULT" ? m.reason : m.type)),
+		[CHECKPOINT_WITHHELD_REASON],
+	);
 });
 
 test("runtime: a stream failure withholds STATE", async () => {
