@@ -13,12 +13,15 @@ type RawEnvelope = Record<string, unknown>;
 type PostsDecision = "data" | "empty" | "not-proven";
 
 type ScriptedPostsPage = {
+	after?: string | null;
 	fromCurrentPage?: boolean;
 	json: unknown;
 	method?: string;
 	operationName?: string;
+	ownerId?: string;
 	postData?: string;
 	status: number;
+	username?: string;
 	url?: string;
 } | null;
 
@@ -76,6 +79,7 @@ const CHALLENGE_DOMS: Record<
 function makePostsPage(options: {
 	challengeUrl?: string;
 	challengeDom?: ChallengeDom;
+	oldNavigationResponse?: Exclude<ScriptedPostsPage, null>;
 	/** Ordinary profile text with no challenge controls (username, bio). */
 	profileText?: string;
 	exposeEmit?: (
@@ -85,6 +89,7 @@ function makePostsPage(options: {
 }): Page {
 	const queue = [...options.postsScript];
 	const responseListeners = new Set<(response: unknown) => void>();
+	const requestListeners = new Set<(request: unknown) => void>();
 	let pendingResolve: ((value: unknown) => void) | null = null;
 	let pendingPredicate: ((value: unknown) => boolean) | null = null;
 
@@ -96,17 +101,24 @@ function makePostsPage(options: {
 			return Promise.resolve(undefined);
 		},
 		goto: (): Promise<null> => {
+			if (options.oldNavigationResponse) {
+				emitResponse(options.oldNavigationResponse, false);
+			}
 			resolveNextResponse();
 			return Promise.resolve(null);
 		},
 		off: (event: string, listener: (response: unknown) => void): void => {
 			if (event === "response") {
 				responseListeners.delete(listener);
+			} else if (event === "request") {
+				requestListeners.delete(listener);
 			}
 		},
 		on: (event: string, listener: (response: unknown) => void): void => {
 			if (event === "response") {
 				responseListeners.add(listener);
+			} else if (event === "request") {
+				requestListeners.add(listener);
 			}
 		},
 		url: () => options.challengeUrl ?? "https://www.instagram.com/testuser/",
@@ -153,25 +165,42 @@ function makePostsPage(options: {
 	function buildResponse(scripted: Exclude<ScriptedPostsPage, null>): unknown {
 		const operationName = scripted.operationName ?? "PolarisProfilePostsQuery";
 		const postData =
-			scripted.postData ?? `fb_api_req_friendly_name=${operationName}`;
+			scripted.postData ??
+			new URLSearchParams({
+				fb_api_req_friendly_name: operationName,
+				variables: JSON.stringify({
+					after: scripted.after ?? null,
+					user_id: scripted.ownerId ?? "u1",
+					username: scripted.username ?? "testuser",
+				}),
+			}).toString();
+		const request = {
+			frame: () => ({ page: () => page }),
+			headers: () => ({ "x-fb-friendly-name": operationName }),
+			method: () => scripted.method ?? "POST",
+			postData: () => postData,
+			url: () => scripted.url ?? "https://www.instagram.com/graphql/query/",
+		};
 		return {
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({
-				frame: () => ({
-					page: () =>
-						scripted.fromCurrentPage === false ? ({} as Page) : page,
-				}),
-				headers: () => ({ "x-fb-friendly-name": operationName }),
-				method: () => scripted.method ?? "POST",
-				postData: () => postData,
-			}),
+			request: () =>
+				scripted.fromCurrentPage === false
+					? { ...request, frame: () => ({ page: () => ({} as Page) }) }
+					: request,
 			status: () => scripted.status,
 			url: () => scripted.url ?? "https://www.instagram.com/graphql/query/",
 		};
 	}
 
-	function emitResponse(scripted: Exclude<ScriptedPostsPage, null>): void {
+	function emitResponse(
+		scripted: Exclude<ScriptedPostsPage, null>,
+		includeRequest = true,
+	): void {
 		const response = buildResponse(scripted);
+		if (includeRequest) {
+			const request = (response as { request: () => unknown }).request();
+			for (const listener of requestListeners) listener(request);
+		}
 		for (const listener of responseListeners) {
 			listener(response);
 		}
@@ -189,6 +218,10 @@ function makePostsPage(options: {
 			return;
 		}
 		const response = buildResponse(scripted);
+		const request = (response as { request: () => unknown }).request();
+		for (const listener of requestListeners) {
+			listener(request);
+		}
 		for (const listener of responseListeners) {
 			listener(response);
 		}
@@ -205,6 +238,7 @@ async function pdppPostsDecision(
 	options: {
 		challengeDom?: ChallengeDom;
 		challengeUrl?: string;
+		oldNavigationResponse?: Exclude<ScriptedPostsPage, null>;
 		profileText?: string;
 	} = {},
 ): Promise<PostsDecision> {
@@ -278,6 +312,41 @@ test("fetchAllPosts: terminal empty is complete only when legacy would also be e
 
 	assert.equal(legacyPostsDecision(raw), "empty");
 	assert.equal(pdpp, "empty");
+});
+
+test("fetchAllPosts: same-tab response from an earlier navigation cannot prove empty", async () => {
+	const pdpp = await pdppPostsDecision([null], {
+		oldNavigationResponse: {
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+		},
+	});
+
+	assert.equal(pdpp, "not-proven");
+});
+
+test("fetchAllPosts: response for another owner cannot prove empty", async () => {
+	const pdpp = await pdppPostsDecision([
+		{
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+			username: "different-user",
+		},
+	]);
+
+	assert.equal(pdpp, "not-proven");
+});
+
+test("fetchAllPosts: continuation-only empty response cannot prove the initial page empty", async () => {
+	const pdpp = await pdppPostsDecision([
+		{
+			after: "continuation-cursor",
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+		},
+	]);
+
+	assert.equal(pdpp, "not-proven");
 });
 
 test("fetchAllPosts: posts parity matrix keeps PDPP empty inside the legacy empty boundary", async () => {
@@ -545,6 +614,7 @@ test("fetchAllPosts: walks an empty first page when it advertises a next page", 
 					status: 200,
 				},
 				{
+					after: "next",
 					json: timelineEnvelope(
 						[{ node: { id: "page-2", taken_at: 1_700_000_001 } }],
 						{ has_next_page: false },
@@ -580,7 +650,7 @@ test("fetchAllPosts: unrecordable source edges fail instead of silently completi
 					},
 				],
 			}),
-			"testuser",
+				"testuser",
 			null,
 			async () => undefined,
 			NO_DELAY,
@@ -672,6 +742,7 @@ test("fetchAllPosts: a page the client fetches during the polite delay is walked
 					status: 200,
 				},
 				{
+					after: "after-b",
 					json: timelineEnvelope(
 						[{ node: { id: "c1", taken_at: 1_700_000_001 } }],
 						{ has_next_page: false },
@@ -688,6 +759,7 @@ test("fetchAllPosts: a page the client fetches during the polite delay is walked
 			if (delays === 1) {
 				// Instagram's own scroll sentinel fetched page 2 while we waited.
 				emitDuringDelay({
+					after: "after-a",
 					json: timelineEnvelope(
 						[{ node: { id: "b1", taken_at: 1_700_000_002 } }],
 						{ end_cursor: "after-b", has_next_page: true },
@@ -863,7 +935,7 @@ for (const profileText of [
 				],
 				profileText,
 			}),
-			"challenge_runner",
+			"testuser",
 			null,
 			async () => undefined,
 			NO_DELAY,

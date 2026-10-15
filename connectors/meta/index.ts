@@ -135,7 +135,7 @@
  */
 
 import { isMainModule } from "@pdpp/connector-protocol";
-import type { Page } from "playwright";
+import type { Page, Request } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
@@ -155,6 +155,7 @@ import {
 	FOLLOWING_MAX_PAGES,
 	FOLLOWING_PAGE_LIMIT,
 	followingRecord,
+	followingUserId,
 	postLikeRecords,
 	postRecord,
 	profileCountsFromGraphQL,
@@ -214,8 +215,13 @@ async function hasAuthenticatedWebInfo(page: Page): Promise<boolean> {
 	return Boolean(user && profileRecord(user));
 }
 
-async function safeGoto(page: Page, url: string): Promise<boolean> {
+async function safeGoto(
+	page: Page,
+	url: string,
+	beforeAttempt?: () => void,
+): Promise<boolean> {
 	for (let attempt = 0; attempt < NAVIGATION_ATTEMPTS; attempt += 1) {
+		beforeAttempt?.();
 		try {
 			await page.goto(url, {
 				timeout: 30_000,
@@ -569,19 +575,11 @@ type CompleteTimelineConnection = InstagramTimelineConnection & {
  * `page.captureNetwork`/`getCapturedResponse` pattern, using Playwright's own
  * `waitForResponse` instead of that bespoke shim.
  */
-function isPostsTimelineResponse(
-	response: {
-		request: () => {
-			frame?: () => { page?: () => Page };
-			headers: () => Record<string, string>;
-			method: () => string;
-			postData: () => string | null;
-		};
-		url: () => string;
-	},
-	page: Page,
-): boolean {
-	const request = response.request();
+type PostsTimelineRequest = Pick<Request, "headers" | "method" | "postData" | "url"> & {
+	frame?: () => { page?: () => Page };
+};
+
+function isPostsTimelineRequest(request: PostsTimelineRequest, page: Page): boolean {
 	let responsePage: Page | undefined;
 	try {
 		responsePage = request.frame?.().page?.();
@@ -591,11 +589,138 @@ function isPostsTimelineResponse(
 	const operation = request.postData() ?? "";
 	return (
 		(responsePage === undefined || responsePage === page) &&
-		response.url().includes("/graphql/") &&
+		request.url().includes("/graphql/") &&
 		request.method() === "POST" &&
 		/(?:PolarisProfilePostsQuery|PolarisProfilePostsTabContentQuery_connection|ProfilePostsQuery|UserMediaQuery)/.test(
 			operation,
 		)
+	);
+}
+
+function postsRequestVariables(request: PostsTimelineRequest): unknown {
+	const body = request.postData() ?? "";
+	const rawVariables = new URLSearchParams(body).get("variables");
+	if (rawVariables !== null) {
+		try {
+			return JSON.parse(rawVariables) as unknown;
+		} catch {
+			return null;
+		}
+	}
+	try {
+		const parsed = JSON.parse(body) as unknown;
+		if (
+			parsed &&
+			typeof parsed === "object" &&
+			"variables" in parsed
+		) {
+			return parsed.variables;
+		}
+		return parsed;
+	} catch {
+		return null;
+	}
+}
+
+function valuesForVariableKeys(
+	value: unknown,
+	keys: ReadonlySet<string>,
+): Array<string | number | null> {
+	if (!value || typeof value !== "object") return [];
+	if (Array.isArray(value)) {
+		return value.flatMap((child) => valuesForVariableKeys(child, keys));
+	}
+	const values: Array<string | number | null> = [];
+	for (const [key, child] of Object.entries(value)) {
+		if (keys.has(key.toLowerCase())) {
+			if (
+				typeof child === "string" ||
+				typeof child === "number" ||
+				child === null
+			) {
+				values.push(child);
+			}
+		} else {
+			values.push(...valuesForVariableKeys(child, keys));
+		}
+	}
+	return values;
+}
+
+const POSTS_USERNAME_VARIABLES = new Set([
+	"username",
+	"user_name",
+	"target_username",
+]);
+const POSTS_USER_ID_VARIABLES = new Set([
+	"user_id",
+	"target_user_id",
+	"page_id",
+]);
+const POSTS_CURSOR_VARIABLES = new Set([
+	"after",
+	"cursor",
+	"max_id",
+	"end_cursor",
+	"next_max_id",
+]);
+
+function postsRequestTargetsOwner(
+	request: PostsTimelineRequest,
+	username: string,
+	userId: string | undefined,
+): boolean {
+	const variables = postsRequestVariables(request);
+	const usernames = valuesForVariableKeys(variables, POSTS_USERNAME_VARIABLES);
+	const userIds = valuesForVariableKeys(variables, POSTS_USER_ID_VARIABLES);
+	const expectedUsername = username.toLowerCase();
+	const matchingUsername = usernames.some(
+		(value) => typeof value === "string" && value.toLowerCase() === expectedUsername,
+	);
+	const mismatchingUsername = usernames.some(
+		(value) => typeof value !== "string" || value.toLowerCase() !== expectedUsername,
+	);
+	const matchingUserId = Boolean(
+		userId && userIds.some((value) => String(value) === userId),
+	);
+	const mismatchingUserId = Boolean(
+		userId && userIds.some((value) => String(value) !== userId),
+	);
+	return (
+		!mismatchingUsername &&
+		!mismatchingUserId &&
+		(matchingUsername || matchingUserId)
+	);
+}
+
+function postsRequestHasCursor(
+	request: PostsTimelineRequest,
+	expectedCursor: string | null,
+): boolean {
+	const cursorValues = valuesForVariableKeys(
+		postsRequestVariables(request),
+		POSTS_CURSOR_VARIABLES,
+	);
+	const nonemptyCursors = cursorValues.filter(
+		(value) => value !== null && value !== "",
+	);
+	if (expectedCursor === null) return nonemptyCursors.length === 0;
+	return (
+		nonemptyCursors.length > 0 &&
+		nonemptyCursors.every((value) => String(value) === expectedCursor)
+	);
+}
+
+function isPostsTimelineResponse(
+	response: {
+		request: () => PostsTimelineRequest;
+		url: () => string;
+	},
+	page: Page,
+): boolean {
+	return (
+		response.url().includes("/graphql/") &&
+		isPostsTimelineRequest(response.request(), page)
 	);
 }
 
@@ -783,6 +908,7 @@ export async function fetchAllPosts(
 	) => Promise<void>,
 	delay: (ms: number) => Promise<void> = politeDelay,
 	postsClock: PostsClock = realPostsClock,
+	expectedUserId?: string,
 ): Promise<{
 	edges: InstagramTimelineEdge[];
 	sourceEdgeCount: number;
@@ -796,15 +922,33 @@ export async function fetchAllPosts(
 	let terminalResponse: unknown = null;
 	let initialPageWasTerminal = false;
 	let unrecordableSourceEdges = 0;
-	const matchingResponses: unknown[] = [];
+	const matchingResponses: PostsTimelineResponse[] = [];
+	const initialResponses: PostsTimelineResponse[] = [];
 	let lastConsumedIndex = -1;
 	let initialPageIndex = -1;
+	let walkGeneration = 0;
+	let expectedContinuationCursor: string | null = null;
 	let legacyInitialCapture: Promise<unknown | null> | null = null;
 	const legacyCaptureController = new AbortController();
+	const requestGenerations = new WeakMap<Request, number>();
 	const pageEvents = page as Page & {
 		off?: (event: "response", listener: (response: unknown) => void) => void;
 		on?: (event: "response", listener: (response: unknown) => void) => void;
 	};
+	const onRequest = (request: Request): void => {
+		if (
+			isPostsTimelineRequest(request, page) &&
+			postsRequestTargetsOwner(request, username, expectedUserId)
+		) {
+			requestGenerations.set(request, walkGeneration);
+		}
+	};
+	const responseMatchesCursor = (
+		response: PostsTimelineResponse,
+		cursor: string | null,
+	): boolean => postsRequestHasCursor(response.request(), cursor);
+	const responseIsCurrentWalk = (response: PostsTimelineResponse): boolean =>
+		requestGenerations.get(response.request() as Request) === walkGeneration;
 	const onResponse = (response: unknown): void => {
 		if (
 			isPostsTimelineResponse(
@@ -812,33 +956,58 @@ export async function fetchAllPosts(
 				page,
 			)
 		) {
-			matchingResponses.push(response);
+			const timelineResponse = response as PostsTimelineResponse;
+			if (responseIsCurrentWalk(timelineResponse)) {
+				matchingResponses.push(timelineResponse);
+				if (responseMatchesCursor(timelineResponse, null)) {
+					initialResponses.push(timelineResponse);
+				}
+			}
 		}
 	};
 	const observesResponses = typeof pageEvents.on === "function";
+	const observesRequests = typeof page.on === "function";
 	pageEvents.on?.("response", onResponse);
+	if (observesRequests) page.on("request", onRequest);
+	const stopObserving = (): void => {
+		pageEvents.off?.("response", onResponse);
+		if (observesRequests) page.off("request", onRequest);
+	};
 
 	let walk: Awaited<ReturnType<typeof walkPagesWithCeiling>>;
 	try {
 		walk = await walkPagesWithCeiling({
 			fetchPage: async (pageNumber) => {
 				if (pageNumber === 1) {
-					// Responses captured before navigation belong to an earlier visit.
-					lastConsumedIndex = matchingResponses.length - 1;
+					expectedContinuationCursor = null;
 				}
-				// The client can fetch a page on its own (for example during the
-				// polite delay). Consume pages in arrival order so none is skipped.
-				const queued = (): PostsTimelineResponse | undefined =>
-					observesResponses
-						? (matchingResponses[lastConsumedIndex + 1] as
-								| PostsTimelineResponse
-								| undefined)
-						: undefined;
+				const expectedCursor =
+					pageNumber === 1 ? null : expectedContinuationCursor;
+				const queued = (): PostsTimelineResponse | undefined => {
+					if (!observesResponses) return undefined;
+					for (
+						let index = lastConsumedIndex + 1;
+						index < matchingResponses.length;
+						index += 1
+					) {
+						const candidate = matchingResponses[index];
+						if (candidate && responseMatchesCursor(candidate, expectedCursor)) {
+							return candidate;
+						}
+					}
+					return undefined;
+				};
 				let response = pageNumber === 1 ? undefined : queued();
 				if (response === undefined) {
 					const responsePromise: Promise<PostsTimelineResponse | null> = page
 						.waitForResponse(
-							(candidate) => isPostsTimelineResponse(candidate, page),
+							(candidate) =>
+								isPostsTimelineResponse(candidate, page) &&
+								responseIsCurrentWalk(candidate as PostsTimelineResponse) &&
+								responseMatchesCursor(
+									candidate as PostsTimelineResponse,
+									expectedCursor,
+								),
 							{ timeout: 15_000 },
 						)
 						.then((response) => response as PostsTimelineResponse)
@@ -848,6 +1017,14 @@ export async function fetchAllPosts(
 							!(await safeGoto(
 								page,
 								`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
+								() => {
+									// Requests and responses from each navigation attempt are
+									// isolated; a delayed response from a failed attempt cannot
+									// certify the successful retry.
+									walkGeneration += 1;
+									initialResponses.length = 0;
+									lastConsumedIndex = matchingResponses.length - 1;
+								},
 							))
 						) {
 							throw new Error(
@@ -855,7 +1032,7 @@ export async function fetchAllPosts(
 							);
 						}
 						legacyInitialCapture = waitForLegacyPostsCapture(
-							matchingResponses,
+							initialResponses,
 							postsClock,
 							legacyCaptureController.signal,
 						);
@@ -878,7 +1055,13 @@ export async function fetchAllPosts(
 						if (!awaited) {
 							const fallbackResponse = page
 								.waitForResponse(
-									(candidate) => isPostsTimelineResponse(candidate, page),
+									(candidate) =>
+										isPostsTimelineResponse(candidate, page) &&
+										responseIsCurrentWalk(candidate as PostsTimelineResponse) &&
+										responseMatchesCursor(
+											candidate as PostsTimelineResponse,
+											expectedCursor,
+										),
 									{ timeout: 15_000 },
 								)
 								.catch(() => null);
@@ -897,7 +1080,14 @@ export async function fetchAllPosts(
 					if (!awaited) {
 						return false;
 					}
-					response = queued() ?? awaited;
+					response =
+						queued() ??
+						(awaited && responseIsCurrentWalk(awaited)
+							? awaited
+							: undefined);
+					if (!response) {
+						return false;
+					}
 				}
 				const consumedIndex = matchingResponses.indexOf(response);
 				if (consumedIndex >= 0) {
@@ -944,6 +1134,15 @@ export async function fetchAllPosts(
 					total_seen: edges.length,
 				});
 				const pageInfo = connection?.page_info;
+				if (
+					pageInfo?.has_next_page === true &&
+					(typeof pageInfo.end_cursor !== "string" || !pageInfo.end_cursor)
+				) {
+					throw new Error(
+						"meta_posts_cursor_unavailable: continuing timeline page had no cursor",
+					);
+				}
+				expectedContinuationCursor = pageInfo?.end_cursor ?? null;
 				if (pageInfo?.has_next_page === false) {
 					sawTerminalPage = true;
 					terminalResponse = response;
@@ -957,7 +1156,7 @@ export async function fetchAllPosts(
 		});
 	} catch (error) {
 		legacyCaptureController.abort();
-		pageEvents.off?.("response", onResponse);
+		stopObserving();
 		throw sawValidResponse && edges.length > 0
 			? new PartialWalkFailure(error, edges)
 			: error;
@@ -967,7 +1166,7 @@ export async function fetchAllPosts(
 	}
 
 	if (!sawValidResponse) {
-		pageEvents.off?.("response", onResponse);
+		stopObserving();
 		throw new Error(
 			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
 		);
@@ -984,7 +1183,7 @@ export async function fetchAllPosts(
 				)
 			: null;
 		if (lastResponse && !settledConnection) {
-			pageEvents.off?.("response", onResponse);
+			stopObserving();
 			throw new Error(
 				"meta_posts_timeline_unavailable: matching timeline response was not a successful complete page",
 			);
@@ -1004,7 +1203,7 @@ export async function fetchAllPosts(
 					(connection) => (connection?.edges.length ?? 0) > 0,
 				)
 			) {
-				pageEvents.off?.("response", onResponse);
+				stopObserving();
 				throw new Error(
 					"meta_posts_timeline_contradictory: an empty timeline response followed posts the source had already returned",
 				);
@@ -1037,7 +1236,7 @@ export async function fetchAllPosts(
 			}
 		}
 	}
-	pageEvents.off?.("response", onResponse);
+	stopObserving();
 	if (unrecordableSourceEdges > 0) {
 		throw new Error(
 			"meta_posts_unrecordable_edges: posts timeline included source edges without recordable post ids",
@@ -1105,7 +1304,7 @@ export async function fetchAllFollowing(
 						!user ||
 						typeof user !== "object" ||
 						!user.username ||
-						!(user.id ?? user.pk),
+						!followingUserId(user),
 				) ||
 				(json.next_max_id != null && typeof json.next_max_id !== "string") ||
 				(json.has_more === true && !json.next_max_id)
@@ -1299,6 +1498,16 @@ export function classifyAdsDialogInPage(args: {
 	if (lists.length === 0) return { kind: "unavailable" };
 	for (const currentList of lists) {
 		const listItems: string[] = [];
+		const advertisedCounts = [
+			readPositiveInteger(currentList.getAttribute("aria-setsize")),
+			readPositiveInteger(currentList.getAttribute("aria-rowcount")),
+			...Array.from(
+				currentList.querySelectorAll('[role="listitem"]'),
+			).flatMap((row) => [
+				readPositiveInteger(row.getAttribute("aria-setsize")),
+				readPositiveInteger(row.getAttribute("aria-rowcount")),
+			]),
+		].filter((count): count is number => count !== null);
 		const visibleRows = Array.from(
 			currentList.querySelectorAll('[role="listitem"]'),
 		).filter(visible);
@@ -1341,6 +1550,9 @@ export function classifyAdsDialogInPage(args: {
 			return { kind: "loading" };
 		}
 		if (listItems.length === 0) {
+			if (advertisedCounts.some((count) => count > 0)) {
+				return { kind: "loading" };
+			}
 			if (lists.length > 1) sawUnknownList = true;
 			continue;
 		}
@@ -2036,6 +2248,7 @@ export async function collectAllStreams(
 				progress,
 				delay,
 				postsClock,
+				identity.id,
 			);
 		} catch (error) {
 			// Any failure of the timeline walk (a rejected page evaluation, a
@@ -2087,6 +2300,7 @@ export async function collectAllStreams(
 	if (wantsFollowing && identity) {
 		await progress("Fetching Instagram following list");
 		let followingResult: Awaited<ReturnType<typeof fetchAllFollowing>>;
+		let followingComplete = false;
 		try {
 			followingResult = await fetchAllFollowing(
 				page,
@@ -2095,6 +2309,7 @@ export async function collectAllStreams(
 				progress,
 				delay,
 			);
+			followingComplete = !followingResult.truncated;
 		} catch (error) {
 			// Same rule as posts: every enumeration failure, including a rejected
 			// page evaluation, must reach reportStreamFailure for following, and
@@ -2120,6 +2335,10 @@ export async function collectAllStreams(
 				"following",
 				`Instagram following stopped at the ${FOLLOWING_MAX_PAGES}-page limit (${users.length} accounts) with more pages still listed.`,
 			);
+		} else if (followingComplete) {
+			// A no-cursor heartbeat records the positive terminal-page proof for
+			// this full enumeration, including a valid empty following list.
+			await emit({ cursor: {}, stream: "following", type: "STATE" });
 		}
 	}
 

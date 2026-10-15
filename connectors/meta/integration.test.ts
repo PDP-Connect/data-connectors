@@ -88,6 +88,9 @@ type ScriptedPostsPage = {
 	status: number;
 	operationName?: string;
 	fromCurrentPage?: boolean;
+	requestUsername?: string;
+	requestUserId?: string;
+	requestCursor?: string | null;
 } | null;
 
 /** Build a fake Playwright Page whose `evaluate` serves scripted JSON
@@ -139,6 +142,8 @@ function makeFakePage(options: {
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
 	const responseListeners = new Set<(response: unknown) => void>();
+	const requestListeners = new Set<(request: unknown) => void>();
+	let nextPostsCursor: string | null = null;
 	const resolveReadiness = (ready: boolean): Promise<unknown> =>
 		ready
 			? Promise.resolve(true)
@@ -183,20 +188,30 @@ function makeFakePage(options: {
 			return;
 		}
 		const operationName = scripted.operationName ?? "PolarisProfilePostsQuery";
+		const cursor = scripted.requestCursor ?? nextPostsCursor;
+		const variables = {
+			user_id: scripted.requestUserId ?? "u1",
+			username: scripted.requestUsername ?? "testuser",
+			...(cursor ? { after: cursor } : {}),
+		};
+		const request = {
+			frame: () => ({
+				page: () =>
+					scripted.fromCurrentPage === false ? ({} as Page) : page,
+			}),
+			headers: () => ({ "x-fb-friendly-name": operationName }),
+			method: () => "POST",
+			postData: () =>
+				`fb_api_req_friendly_name=${operationName}&variables=${encodeURIComponent(JSON.stringify(variables))}`,
+			url: () => "https://www.instagram.com/graphql/query",
+		};
 		const response = {
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({
-				frame: () => ({
-					page: () =>
-						scripted.fromCurrentPage === false ? ({} as Page) : page,
-				}),
-				headers: () => ({ "x-fb-friendly-name": operationName }),
-				method: () => "POST",
-				postData: () => `fb_api_req_friendly_name=${operationName}`,
-			}),
+			request: () => request,
 			status: () => scripted.status,
 			url: () => "https://www.instagram.com/graphql/query",
 		};
+		for (const listener of requestListeners) listener(request);
 		for (const listener of responseListeners) {
 			listener(response);
 		}
@@ -204,6 +219,12 @@ function makeFakePage(options: {
 			next(null);
 			return;
 		}
+		const connection = (scripted.json as {
+			data?: { xdt_api__v1__feed__user_timeline_graphql_connection?: {
+				page_info?: { end_cursor?: string | null };
+			} };
+		})?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
+		nextPostsCursor = connection?.page_info?.end_cursor ?? null;
 		next(response);
 	};
 
@@ -222,14 +243,24 @@ function makeFakePage(options: {
 			resolveNextPostsPage();
 			return Promise.resolve(null);
 		},
-		off: (event: "response", listener: (response: unknown) => void): void => {
+		off: (
+			event: "request" | "response",
+			listener: (value: unknown) => void,
+		): void => {
 			if (event === "response") {
-				responseListeners.delete(listener);
+				responseListeners.delete(listener as (response: unknown) => void);
+			} else {
+				requestListeners.delete(listener);
 			}
 		},
-		on: (event: "response", listener: (response: unknown) => void): void => {
+		on: (
+			event: "request" | "response",
+			listener: (value: unknown) => void,
+		): void => {
 			if (event === "response") {
-				responseListeners.add(listener);
+				responseListeners.add(listener as (response: unknown) => void);
+			} else {
+				requestListeners.add(listener);
 			}
 		},
 		waitForResponse: (predicate: unknown, _opts?: unknown): Promise<unknown> =>
@@ -1347,6 +1378,44 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 		),
 		false,
 	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "following",
+		),
+		true,
+	);
+});
+
+test("collectAllStreams: following accepts the record builder's id fallback when id is empty", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {
+			"/api/v1/friendships/u1/following/": [
+				{
+					json: {
+						next_max_id: null,
+						users: [{ id: "", pk: "fallback-id", username: "followed1" }],
+					},
+					status: 200,
+				},
+			],
+		},
+		harness,
+		requestedStreams: ["following"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	assert.deepEqual(
+		harness.emitted.map((record) => record.data.id),
+		["fallback-id"],
+	);
+	assert.deepEqual(streamFailures(harness), []);
 });
 
 test("collectAllStreams: following hitting the page ceiling reports a stream failure instead of silently truncating", async () => {
@@ -1397,7 +1466,10 @@ const timelinePage = (
 		data: {
 			xdt_api__v1__feed__user_timeline_graphql_connection: {
 				edges: [{ node: { id, taken_at: 100 } }],
-				page_info: { has_next_page: hasNextPage },
+				page_info: {
+					...(hasNextPage ? { end_cursor: `cursor-${id}` } : {}),
+					has_next_page: hasNextPage,
+				},
 			},
 		},
 	},
@@ -1794,6 +1866,34 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
 		false,
 	);
+});
+
+test("collectAllStreams: positive advertiser source count vetoes stale empty copy", async () => {
+	const harness = await collectAdsInChromium({
+		ads: htmlPage(
+			advertisersControl(
+				'<div role="dialog"><div role="list" aria-setsize="2"></div><p>No advertisers</p></div>',
+			),
+			categoriesControl(
+				insertDialog(
+					'<div role="dialog"><div role="list" aria-setsize="0"></div><p>No categories</p></div>',
+				),
+			),
+		),
+		adTopics: htmlPage(
+			'<div role="dialog"><div role="list" aria-setsize="0"></div><p>No ad topics</p></div>',
+		),
+	});
+
+	assert.deepEqual(adsCoverage(harness), {
+		hydrated_keys: ["ad_topics", "targeting_categories"],
+		reference_only: true,
+		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
+		state_stream: "ads",
+		stream: "ads",
+		type: "DETAIL_COVERAGE",
+	});
+	assertAdsStreamFailure(harness, "advertisers");
 });
 
 test("collectAllStreams: nonempty ads without source total emits records but fails completion", async () => {

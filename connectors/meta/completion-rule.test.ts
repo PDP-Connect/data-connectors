@@ -17,10 +17,19 @@ const FAST_PROFILE_CLOCK = { sleep: async (): Promise<void> => undefined };
 function setup(streams: string[], followingPages: unknown[] = []) {
 	const harness = makeRecordingEmit(validateRecord);
 	const failures: string[] = [];
+	const requestListeners = new Set<(request: unknown) => void>();
 	const page: Partial<Page> = {
 		url: () => "https://www.instagram.com/testuser/",
 		goto: () => Promise.resolve(null),
 		waitForResponse: () => Promise.reject(new Error("no response")),
+		on: ((event: string, listener: (value: unknown) => void) => {
+			if (event === "request") requestListeners.add(listener);
+			return page as Page;
+		}) as Page["on"],
+		off: ((event: string, listener: (value: unknown) => void) => {
+			if (event === "request") requestListeners.delete(listener);
+			return page as Page;
+		}) as Page["off"],
 		waitForFunction: () => Promise.reject(new Error("no control")),
 		evaluate: ((fn: unknown, arg?: unknown) => {
 			if (String(fn).includes("PolarisViewer")) {
@@ -65,7 +74,14 @@ function setup(streams: string[], followingPages: unknown[] = []) {
 		},
 		state: {},
 	};
-	return { ctx, failures, harness };
+	return {
+		ctx,
+		emitRequest: (request: unknown) => {
+			for (const listener of requestListeners) listener(request);
+		},
+		failures,
+		harness,
+	};
 }
 
 test("completion rule: unavailable posts and child likes report retryable stream failures", async () => {
@@ -252,6 +268,12 @@ test("completion rule: explicit empty following payload completes without a fail
 		harness.protocolMessages.some((message) => message.type === "SKIP_RESULT"),
 		false,
 	);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "following",
+		),
+		true,
+	);
 });
 
 test("completion rule: following without a terminal second page fails and keeps its first page", async () => {
@@ -273,13 +295,32 @@ test("completion rule: following without a terminal second page fails and keeps 
 	);
 });
 
-function nonterminalPostsResponse(edges: unknown[]): Response {
+function nonterminalPostsResponse(
+	edges: unknown[],
+	after: string | null,
+	page: Page,
+): Response {
+	const operation = "PolarisProfilePostsQuery";
+	const variables = {
+		...(after ? { after } : {}),
+		user_id: "u1",
+		username: "testuser",
+	};
+	const request = {
+		frame: () => ({ page: () => page }),
+		headers: () => ({ "x-fb-friendly-name": operation }),
+		method: () => "POST",
+		postData: () =>
+			`fb_api_req_friendly_name=${operation}&variables=${encodeURIComponent(JSON.stringify(variables))}`,
+		url: () => "https://www.instagram.com/graphql/query",
+	};
 	return {
+		request: () => request,
 		json: async () => ({
 			data: {
 				xdt_api__v1__feed__user_timeline_graphql_connection: {
 					edges,
-					page_info: { has_next_page: true },
+					page_info: { end_cursor: "next", has_next_page: true },
 				},
 			},
 		}),
@@ -288,11 +329,33 @@ function nonterminalPostsResponse(edges: unknown[]): Response {
 }
 
 test("completion rule: a capped posts walk reports both requested streams as failed", async () => {
-	const { ctx, failures, harness } = setup(["posts", "post_likes"]);
+	const { ctx, emitRequest, failures, harness } = setup(["posts", "post_likes"]);
+	let pendingResolve: ((response: Response) => void) | null = null;
+	let pageNumber = 0;
+	const respond = (): void => {
+		const response = nonterminalPostsResponse(
+			[],
+			pageNumber === 0 ? null : "next",
+			ctx.page,
+		);
+		pageNumber += 1;
+		emitRequest(response.request());
+		pendingResolve?.(response);
+		pendingResolve = null;
+	};
 	ctx.page.waitForResponse = (() =>
-		Promise.resolve(
-			nonterminalPostsResponse([]),
-		)) as Page["waitForResponse"];
+		new Promise<Response>((resolve) => {
+			pendingResolve = resolve;
+		})) as Page["waitForResponse"];
+	ctx.page.goto = (() => {
+		respond();
+		return Promise.resolve(null);
+	}) as Page["goto"];
+	const evaluate = ctx.page.evaluate;
+	ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
+		if (String(fn).includes("scrollTo")) respond();
+		return evaluate?.(fn as never, arg as never) as ReturnType<Page["evaluate"]>;
+	}) as Page["evaluate"];
 	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
 	assert.deepEqual(failures, ["posts", "post_likes"]);
 	assert.deepEqual(
@@ -309,13 +372,33 @@ test("completion rule: a capped posts walk reports both requested streams as fai
 });
 
 test("completion rule: a capped posts walk keeps emitted records and fails only requested streams", async () => {
-	const { ctx, failures, harness } = setup(["posts"]);
+	const { ctx, emitRequest, failures, harness } = setup(["posts"]);
+	let pageNumber = 0;
+	let pendingResolve: ((response: Response) => void) | null = null;
+	const respond = (): void => {
+		const response = nonterminalPostsResponse(
+			pageNumber === 0 ? [{ node: { id: "p1", taken_at: 1_700_000_000 } }] : [],
+			pageNumber === 0 ? null : "next",
+			ctx.page,
+		);
+		pageNumber += 1;
+		emitRequest(response.request());
+		pendingResolve?.(response);
+		pendingResolve = null;
+	};
 	ctx.page.waitForResponse = (() =>
-		Promise.resolve(
-			nonterminalPostsResponse([
-				{ node: { id: "p1", taken_at: 1_700_000_000 } },
-			]),
-		)) as Page["waitForResponse"];
+		new Promise<Response>((resolve) => {
+			pendingResolve = resolve;
+		})) as Page["waitForResponse"];
+	ctx.page.goto = (() => {
+		respond();
+		return Promise.resolve(null);
+	}) as Page["goto"];
+	const evaluate = ctx.page.evaluate;
+	ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
+		if (String(fn).includes("scrollTo")) respond();
+		return evaluate?.(fn as never, arg as never) as ReturnType<Page["evaluate"]>;
+	}) as Page["evaluate"];
 	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
 	assert.deepEqual(failures, ["posts"]);
 	assert.deepEqual(

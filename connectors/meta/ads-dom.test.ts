@@ -161,6 +161,41 @@ test("classifyAdsDialogInPage: visible explicit empty message is verified empty"
 	);
 });
 
+for (const { attribute, args, name } of [
+	{ attribute: "aria-setsize", args: advertisersArgs, name: "advertisers" },
+	{ attribute: "aria-rowcount", args: advertisersArgs, name: "advertisers" },
+	{
+		attribute: "aria-setsize",
+		args: { emptyMessage: "No ad topics" },
+		name: "ad topics",
+	},
+	{
+		attribute: "aria-rowcount",
+		args: { emptyMessage: "No ad topics" },
+		name: "ad topics",
+	},
+	{
+		attribute: "aria-setsize",
+		args: { emptyMessage: "No categories", requiredAffordance: "Remove" },
+		name: "categories",
+	},
+	{
+		attribute: "aria-rowcount",
+		args: { emptyMessage: "No categories", requiredAffordance: "Remove" },
+		name: "categories",
+	},
+]) {
+	test(`classifyAdsDialogInPage: positive ${attribute} vetoes ${name} empty copy`, () => {
+		assert.deepEqual(
+			classify(
+				`<section role="dialog"><div role="list" ${attribute}="2"></div><p>${args.emptyMessage}</p></section>`,
+				args,
+			),
+			{ kind: "loading" },
+		);
+	});
+}
+
 test("classifyAdsDialogInPage: hidden empty messages do not prove empty", () => {
 	assert.deepEqual(
 		classify(

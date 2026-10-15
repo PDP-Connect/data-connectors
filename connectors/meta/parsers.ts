@@ -249,7 +249,7 @@ export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
 export function followingRecord(
 	user: InstagramFollowingUser,
 ): FollowingRecord | null {
-	const id = user.pk || user.id || null;
+	const id = followingUserId(user);
 	const username = user.username ?? null;
 	if (!id || !username) {
 		return null;
@@ -262,6 +262,10 @@ export function followingRecord(
 		is_verified: user.is_verified ?? null,
 		profile_pic_url: user.profile_pic_url ?? null,
 	};
+}
+
+export function followingUserId(user: InstagramFollowingUser): string | null {
+	return user.pk || user.id || null;
 }
 
 /** Stable id for an `ads` record: the native id when the source provides
