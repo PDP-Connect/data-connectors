@@ -33,16 +33,16 @@ export const noteSchema = z.object({
 	snippet: snippetSchema,
 	folder_id: recordIdSchema.nullable(),
 	folder_name: pdppSafeText.nullable(),
-	is_pinned: z.boolean(),
+	is_pinned: z.boolean().nullable(),
 	created_at: isoDateTimeSchema,
 	modified_at: isoDateTimeSchema,
-	has_attachments: z.boolean(),
+	has_attachments: z.boolean().nullable(),
 	text_content: bodyTextSchema,
 });
 
 export const folderSchema = z.object({
 	id: recordIdSchema,
-	name: pdppSafeText.min(1).max(500),
+	name: pdppSafeText.min(1).max(500).nullable(),
 });
 
 /** Map stream name -> schema. Single source of truth for what streams this

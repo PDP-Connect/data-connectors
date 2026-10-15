@@ -31,7 +31,7 @@ import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
  *  Returns null for absent/non-string input — never throws. Empty strings
  *  decode to empty strings and remain source data. */
 export function decodeBase64Text(value: unknown): string | null {
-	if (typeof value !== "string") {
+	if (typeof value !== "string" || !isBase64(value)) {
 		return null;
 	}
 	try {
@@ -41,10 +41,21 @@ export function decodeBase64Text(value: unknown): string | null {
 	}
 }
 
+function isBase64(value: string): boolean {
+	if (value.length === 0) return true;
+	if (value.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+		return false;
+	}
+	const decoded = Buffer.from(value, "base64");
+	return (
+		decoded.toString("base64").replace(/=+$/, "") === value.replace(/=+$/, "")
+	);
+}
+
 /** CloudKit timestamps are epoch milliseconds. Returns null for anything
- *  that isn't a positive finite number. */
+ *  that isn't a non-negative finite number representable by Date. */
 export function epochMsToIso(value: unknown): string | null {
-	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
 		return null;
 	}
 	const date = new Date(value);
@@ -130,11 +141,225 @@ export function extractNoteText(base64Data: unknown): string | null {
 
 // ─── CloudKit field access ───────────────────────────────────────────────
 
+export type FieldRead<T> =
+	| { kind: "READ"; value: T }
+	| { kind: "EXPLICIT_EMPTY"; value: T }
+	| { kind: "UNAVAILABLE"; reason: string };
+
+export interface RecordRead<T> {
+	record: T | null;
+	unavailableFields: Array<{ field: string; reason: string }>;
+}
+
+function read<T>(value: T): FieldRead<T> {
+	return { kind: "READ", value };
+}
+
+function explicitEmpty<T>(value: T): FieldRead<T> {
+	return { kind: "EXPLICIT_EMPTY", value };
+}
+
+function unavailable<T>(reason: string): FieldRead<T> {
+	return { kind: "UNAVAILABLE", reason };
+}
+
 function fieldValue(
 	fields: Record<string, CloudKitFieldValue> | undefined,
 	name: string,
-): unknown {
-	return fields?.[name]?.value;
+): FieldRead<unknown> {
+	// CloudKit omits sparse optional keys. Omission is not an explicit empty
+	// value: callers need that distinction to leave the row uncovered.
+	if (!fields || !Object.hasOwn(fields, name)) {
+		return unavailable("missing_field");
+	}
+	const field: unknown = fields[name];
+	if (
+		typeof field !== "object" ||
+		field === null ||
+		Array.isArray(field) ||
+		(Object.hasOwn(field, "type") &&
+			typeof (field as { type?: unknown }).type !== "string") ||
+		!Object.hasOwn(field, "value")
+	) {
+		return unavailable("malformed_field_wrapper");
+	}
+	const value = (field as { value: unknown }).value;
+	return value === null ? explicitEmpty(null) : read(value);
+}
+
+function readableValue<T>(field: FieldRead<T>, empty: T): T {
+	return field.kind === "UNAVAILABLE" ? empty : field.value;
+}
+
+function textField(
+	fields: Record<string, CloudKitFieldValue> | undefined,
+	name: string,
+): FieldRead<string | null> {
+	const raw = fieldValue(fields, name);
+	if (raw.kind === "UNAVAILABLE") return raw;
+	if (raw.value === null) return explicitEmpty(null);
+	if (typeof raw.value !== "string") return unavailable("expected_base64_text");
+	const value = decodeBase64Text(raw.value);
+	if (value === null) return unavailable("invalid_base64_text");
+	return value.length === 0 ? explicitEmpty("") : read(value);
+}
+
+function referenceField(
+	fields: Record<string, CloudKitFieldValue> | undefined,
+): FieldRead<string | null> {
+	const direct =
+		fields && Object.hasOwn(fields, "Folder")
+			? fieldValue(fields, "Folder")
+			: null;
+	if (direct === null) {
+		const list = fieldValue(fields, "Folders");
+		if (list.kind === "UNAVAILABLE") return list;
+		if (list.value === null) return explicitEmpty(null);
+		if (!Array.isArray(list.value))
+			return unavailable("expected_folder_reference_list");
+		if (list.value.length === 0) return explicitEmpty(null);
+		const first: unknown = list.value[0];
+		if (
+			typeof first !== "object" ||
+			first === null ||
+			Array.isArray(first) ||
+			typeof (first as { recordName?: unknown }).recordName !== "string" ||
+			(first as { recordName: string }).recordName.length === 0
+		) {
+			return unavailable("malformed_folder_reference");
+		}
+		return read((first as { recordName: string }).recordName);
+	}
+	const directValue = direct;
+	if (directValue.kind === "UNAVAILABLE") return directValue;
+	if (directValue.value !== null) {
+		if (
+			typeof directValue.value !== "object" ||
+			Array.isArray(directValue.value) ||
+			typeof (directValue.value as { recordName?: unknown }).recordName !==
+				"string" ||
+			(directValue.value as { recordName: string }).recordName.length === 0
+		) {
+			return unavailable("malformed_folder_reference");
+		}
+		return read((directValue.value as { recordName: string }).recordName);
+	}
+	return explicitEmpty(null);
+}
+
+function booleanField(
+	fields: Record<string, CloudKitFieldValue> | undefined,
+	name: string,
+): FieldRead<boolean | null> {
+	const raw = fieldValue(fields, name);
+	if (raw.kind === "UNAVAILABLE") return raw;
+	if (raw.value === null) return explicitEmpty(false);
+	if (raw.value === true || raw.value === 1) return read(true);
+	if (raw.value === false || raw.value === 0) return read(false);
+	return unavailable("expected_boolean_flag");
+}
+
+function deletedField(
+	fields: Record<string, CloudKitFieldValue> | undefined,
+): FieldRead<boolean> {
+	const raw = fieldValue(fields, "Deleted");
+	if (raw.kind === "UNAVAILABLE") return raw;
+	if (raw.value === null) return explicitEmpty(false);
+	if (raw.value === true || raw.value === 1) return read(true);
+	if (raw.value === false || raw.value === 0) return read(false);
+	return unavailable("expected_deleted_flag");
+}
+
+function recordTimestamp(
+	record: CloudKitRecord,
+	key: "created" | "modified",
+): { present: boolean; value: unknown } {
+	if (!Object.hasOwn(record, key) || record[key] === undefined) {
+		return { present: false, value: undefined };
+	}
+	const metadata: unknown = record[key];
+	if (
+		typeof metadata !== "object" ||
+		metadata === null ||
+		Array.isArray(metadata)
+	) {
+		return { present: true, value: undefined };
+	}
+	if (!Object.hasOwn(metadata, "timestamp")) {
+		return { present: false, value: undefined };
+	}
+	return {
+		present: true,
+		value: (metadata as { timestamp: unknown }).timestamp,
+	};
+}
+
+function attachmentsField(
+	fields: Record<string, CloudKitFieldValue> | undefined,
+): FieldRead<boolean | null> {
+	const raw = fieldValue(fields, "Attachments");
+	if (raw.kind === "UNAVAILABLE") return raw;
+	if (raw.value === null) return explicitEmpty(false);
+	if (!Array.isArray(raw.value)) return unavailable("expected_attachment_list");
+	if (
+		raw.value.some(
+			(item) =>
+				typeof item !== "object" || item === null || Array.isArray(item),
+		)
+	) {
+		return unavailable("malformed_attachment_reference");
+	}
+	return raw.value.length === 0 ? explicitEmpty(false) : read(true);
+}
+
+function timestampField(
+	fields: Record<string, CloudKitFieldValue> | undefined,
+	name: string,
+	fallback: unknown,
+	fallbackPresent: boolean,
+): FieldRead<string | null> {
+	const raw = fieldValue(fields, name);
+	if (raw.kind === "UNAVAILABLE") {
+		if (raw.reason !== "missing_field") return raw;
+		if (!fallbackPresent) return raw;
+		const fallbackIso = epochMsToIso(fallback);
+		return fallbackIso === null
+			? unavailable("invalid_fallback_timestamp")
+			: read(fallbackIso);
+	}
+	if (raw.value === null) {
+		if (!fallbackPresent) return explicitEmpty(null);
+		const iso = epochMsToIso(fallback);
+		return iso === null ? unavailable("invalid_fallback_timestamp") : read(iso);
+	}
+	const iso = epochMsToIso(raw.value);
+	return iso === null ? unavailable("invalid_timestamp") : read(iso);
+}
+
+function bodyTextField(
+	fields: Record<string, CloudKitFieldValue> | undefined,
+): FieldRead<string | null> {
+	const raw = fieldValue(fields, "TextDataEncrypted");
+	if (raw.kind === "UNAVAILABLE") return raw;
+	if (raw.value === null || raw.value === "") return explicitEmpty(null);
+	if (typeof raw.value !== "string") return unavailable("expected_base64_body");
+	if (!isBase64(raw.value)) return unavailable("invalid_base64_body");
+	const text = extractNoteText(raw.value);
+	return text === null ? unavailable("body_text_unreadable") : read(text);
+}
+
+function collectUnavailableFields(
+	fields: Record<string, FieldRead<unknown>>,
+): Array<{ field: string; reason: string }> {
+	return Object.entries(fields)
+		.flatMap(([field, result]) =>
+			result.kind === "UNAVAILABLE" ? [{ field, reason: result.reason }] : [],
+		)
+		.sort((left, right) =>
+			left.field === right.field
+				? left.reason.localeCompare(right.reason)
+				: left.field.localeCompare(right.field),
+		);
 }
 
 /** The one CloudKit identity rule shared by validation, pagination progress,
@@ -146,31 +371,6 @@ export function resolveCloudKitRecordId(record: CloudKitRecord): string | null {
 		: null;
 }
 
-/** CloudKit `Folder` reference field: `{ value: { recordName } }`. Also
- *  covers the legacy connector's `Folders[0]` fallback for notes whose
- *  parent is expressed as an array reference field instead of a single one. */
-function folderRecordName(
-	fields: Record<string, CloudKitFieldValue> | undefined,
-): string | null {
-	const direct = fieldValue(fields, "Folder");
-	if (
-		direct &&
-		typeof direct === "object" &&
-		"recordName" in direct &&
-		typeof (direct as { recordName?: unknown }).recordName === "string"
-	) {
-		return (direct as { recordName: string }).recordName;
-	}
-	const list = fieldValue(fields, "Folders");
-	if (Array.isArray(list) && list.length > 0) {
-		const first = list[0] as { recordName?: unknown } | undefined;
-		if (first && typeof first.recordName === "string") {
-			return first.recordName;
-		}
-	}
-	return null;
-}
-
 // ─── Record builders ────────────────────────────────────────────────────
 
 export interface NoteRecord {
@@ -180,74 +380,157 @@ export interface NoteRecord {
 	snippet: string | null;
 	folder_id: string | null;
 	folder_name: string | null;
-	is_pinned: boolean;
+	is_pinned: boolean | null;
 	created_at: string | null;
 	modified_at: string | null;
-	has_attachments: boolean;
+	has_attachments: boolean | null;
 	text_content: string | null;
 }
 
 export interface FolderRecord {
 	[field: string]: unknown;
 	id: string;
-	name: string;
+	name: string | null;
 }
 
 /** True when CloudKit marked this record row deleted (`Deleted.value === 1`).
  *  Callers must skip deleted note rows before building a record. */
 export function isDeletedNote(record: CloudKitRecord): boolean {
-	return fieldValue(record.fields, "Deleted") === 1;
+	const value = deletedField(record.fields);
+	return value.kind === "READ" && value.value;
 }
 
 /** Build a `notes` stream record from a raw CloudKit `Note` record. Per the
  *  capability map's field mapping, `folder_id` is the CloudKit `recordName`
  *  of the parent folder (a foreign key into the `folders` stream). The
  *  adjacent `folder_name` projection preserves the legacy resolved title. */
+export function readNoteRecord(
+	record: CloudKitRecord,
+	folderNames: ReadonlyMap<string, string> = new Map(),
+	options: {
+		unavailableFolderIds?: ReadonlySet<string>;
+		folderScanComplete?: boolean;
+	} = {},
+): RecordRead<NoteRecord> {
+	const recordName = resolveCloudKitRecordId(record);
+	if (recordName === null) {
+		return {
+			record: null,
+			unavailableFields: [{ field: "id", reason: "missing_record_id" }],
+		};
+	}
+	const fields = record.fields;
+	const title = textField(fields, "TitleEncrypted");
+	const snippet = textField(fields, "SnippetEncrypted");
+	const folderId = referenceField(fields);
+	const isPinned = booleanField(fields, "IsPinned");
+	const createdMetadata = recordTimestamp(record, "created");
+	const modifiedMetadata = recordTimestamp(record, "modified");
+	const created = timestampField(
+		fields,
+		"CreationDate",
+		createdMetadata.value,
+		createdMetadata.present,
+	);
+	const modified = timestampField(
+		fields,
+		"ModificationDate",
+		modifiedMetadata.value,
+		modifiedMetadata.present,
+	);
+	const hasAttachments = attachmentsField(fields);
+	const textContent = bodyTextField(fields);
+	let folderName: FieldRead<string | null>;
+	if (folderId.kind === "UNAVAILABLE") {
+		folderName = unavailable("folder_reference_unavailable");
+	} else if (folderId.value === null) {
+		folderName = explicitEmpty(null);
+	} else {
+		const resolved = folderNames.get(folderId.value);
+		if (resolved !== undefined) {
+			folderName = read(resolved);
+		} else if (options.unavailableFolderIds?.has(folderId.value)) {
+			folderName = unavailable("folder_name_unavailable");
+		} else {
+			folderName = unavailable(
+				options.folderScanComplete === true
+					? "folder_name_unresolved"
+					: "folder_projection_incomplete",
+			);
+		}
+	}
+
+	const reads: Record<string, FieldRead<unknown>> = {
+		title,
+		snippet,
+		folder_id: folderId,
+		folder_name: folderName,
+		is_pinned: isPinned,
+		created_at: created,
+		modified_at: modified,
+		has_attachments: hasAttachments,
+		text_content: textContent,
+	};
+	const unavailableFields = collectUnavailableFields(reads);
+	return {
+		record: {
+			id: recordName,
+			title: readableValue(title, null),
+			snippet: readableValue(snippet, null),
+			folder_id: readableValue(folderId, null),
+			folder_name: readableValue(folderName, null),
+			is_pinned: readableValue(isPinned, null),
+			created_at: readableValue(created, null),
+			modified_at: readableValue(modified, null),
+			has_attachments: readableValue(hasAttachments, null),
+			text_content: readableValue(textContent, null),
+		},
+		unavailableFields,
+	};
+}
+
 export function buildNoteRecord(
 	record: CloudKitRecord,
 	folderNames: ReadonlyMap<string, string> = new Map(),
 ): NoteRecord | null {
-	const recordName = resolveCloudKitRecordId(record);
-	if (recordName === null) {
-		return null;
-	}
-	const fields = record.fields;
-	const attachments = fieldValue(fields, "Attachments");
-	const folderId = folderRecordName(fields);
-	return {
-		id: recordName,
-		title: decodeBase64Text(fieldValue(fields, "TitleEncrypted")),
-		snippet: decodeBase64Text(fieldValue(fields, "SnippetEncrypted")),
-		folder_id: folderId,
-		folder_name:
-			folderId === null ? null : (folderNames.get(folderId) ?? folderId),
-		is_pinned:
-			fieldValue(fields, "IsPinned") === 1 ||
-			fieldValue(fields, "IsPinned") === true,
-		created_at:
-			epochMsToIso(fieldValue(fields, "CreationDate")) ??
-			epochMsToIso(record.created?.timestamp),
-		modified_at:
-			epochMsToIso(fieldValue(fields, "ModificationDate")) ??
-			epochMsToIso(record.modified?.timestamp),
-		has_attachments: Array.isArray(attachments) && attachments.length > 0,
-		text_content: extractNoteText(fieldValue(fields, "TextDataEncrypted")),
-	};
+	return readNoteRecord(record, folderNames, { folderScanComplete: true })
+		.record;
 }
 
 /** Build a `folders` stream record from a raw CloudKit `Folder` record.
  *  Per the capability map, `name` comes from `TitleEncrypted` (legacy
- *  `title`); an absent or empty title follows legacy `title || recordName`.
+ *  `title`); an explicitly empty title follows legacy `title || recordName`.
  *  CloudKit's folder record carries no other stable, documented field beyond
  *  `recordName`/title. */
-export function buildFolderRecord(record: CloudKitRecord): FolderRecord | null {
+export function readFolderRecord(
+	record: CloudKitRecord,
+): RecordRead<FolderRecord> {
 	const recordName = resolveCloudKitRecordId(record);
 	if (recordName === null) {
-		return null;
+		return {
+			record: null,
+			unavailableFields: [{ field: "id", reason: "missing_record_id" }],
+		};
 	}
-	const name = decodeBase64Text(fieldValue(record.fields, "TitleEncrypted"));
+	const title = textField(record.fields, "TitleEncrypted");
+	const name =
+		title.kind === "UNAVAILABLE"
+			? unavailable<string | null>(title.reason)
+			: title.value === null || title.value.length === 0
+				? explicitEmpty(recordName)
+				: title;
 	return {
-		id: recordName,
-		name: name === null || name.length === 0 ? recordName : name,
+		record: {
+			id: recordName,
+			name: readableValue(name, null),
+		},
+		unavailableFields:
+			name.kind === "UNAVAILABLE"
+				? [{ field: "name", reason: name.reason }]
+				: [],
 	};
+}
+
+export function buildFolderRecord(record: CloudKitRecord): FolderRecord | null {
+	return readFolderRecord(record).record;
 }

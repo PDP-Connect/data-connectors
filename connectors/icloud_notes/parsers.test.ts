@@ -19,6 +19,7 @@ import {
 	extractCleanText,
 	extractNoteText,
 	isDeletedNote,
+	readNoteRecord,
 } from "./parsers.ts";
 import type { CloudKitRecord } from "./types.ts";
 
@@ -33,6 +34,7 @@ test("decodeBase64Text: null for absent or non-string input and preserves an emp
 	assert.equal(decodeBase64Text(undefined), null);
 	assert.equal(decodeBase64Text(null), null);
 	assert.equal(decodeBase64Text(""), "");
+	assert.equal(decodeBase64Text("!!!"), null);
 	assert.equal(decodeBase64Text(42), null);
 });
 
@@ -42,8 +44,8 @@ test("epochMsToIso: converts a positive epoch-ms number to ISO-8601", () => {
 	assert.equal(epochMsToIso(1_700_000_000_000), "2023-11-14T22:13:20.000Z");
 });
 
-test("epochMsToIso: null for zero, negative, non-finite, or non-number input", () => {
-	assert.equal(epochMsToIso(0), null);
+test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number input", () => {
+	assert.equal(epochMsToIso(0), "1970-01-01T00:00:00.000Z");
 	assert.equal(epochMsToIso(-5), null);
 	assert.equal(epochMsToIso(Number.NaN), null);
 	assert.equal(epochMsToIso(Number.MAX_VALUE), null);
@@ -163,14 +165,14 @@ test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes sche
 		},
 	};
 
-	const built = buildNoteRecord(record);
+	const built = buildNoteRecord(record, new Map([["folder-xyz-789", "Work"]]));
 	assert.ok(built);
 	assert.deepEqual(built, {
 		id: "note-abc-123",
 		title: "Grocery list",
 		snippet: "milk, eggs, bread",
 		folder_id: "folder-xyz-789",
-		folder_name: "folder-xyz-789",
+		folder_name: "Work",
 		is_pinned: true,
 		created_at: "2023-11-14T22:13:20.000Z",
 		modified_at: "2023-11-16T02:00:00.000Z",
@@ -179,11 +181,20 @@ test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes sche
 	});
 });
 
-test("buildNoteRecord: null title/snippet/folder_id/text_content and false flags for a minimal record", () => {
+test("buildNoteRecord: explicit empty CloudKit values map to empty output values", () => {
 	const record: CloudKitRecord = {
 		recordName: "note-minimal",
 		recordType: "Note",
-		fields: {},
+		fields: {
+			TitleEncrypted: { value: null },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: { value: "" },
+		},
 	};
 	const built = buildNoteRecord(record);
 	assert.ok(built);
@@ -194,6 +205,78 @@ test("buildNoteRecord: null title/snippet/folder_id/text_content and false flags
 	assert.equal(built.is_pinned, false);
 	assert.equal(built.has_attachments, false);
 	assert.equal(built.text_content, null);
+});
+
+test("readNoteRecord: absent mapped fields remain unavailable", () => {
+	const result = readNoteRecord({
+		recordName: "note-missing-fields",
+		recordType: "Note",
+		fields: {},
+	});
+	assert.equal(result.record?.title, null);
+	assert.ok(
+		result.unavailableFields.some(
+			({ field, reason }) => field === "title" && reason === "missing_field",
+		),
+	);
+	assert.ok(
+		result.unavailableFields.some(
+			({ field, reason }) =>
+				field === "text_content" && reason === "missing_field",
+		),
+	);
+});
+
+test("readNoteRecord: an unresolved folder reference leaves folder_name unavailable", () => {
+	const result = readNoteRecord(
+		{
+			recordName: "note-unresolved-folder",
+			recordType: "Note",
+			fields: {
+				TitleEncrypted: { value: null },
+				SnippetEncrypted: { value: null },
+				Folder: { value: { recordName: "folder-not-in-snapshot" } },
+				IsPinned: { value: null },
+				CreationDate: { value: null },
+				ModificationDate: { value: null },
+				Attachments: { value: [] },
+				TextDataEncrypted: { value: "" },
+			},
+		},
+		new Map(),
+		{ folderScanComplete: true },
+	);
+	assert.equal(result.record?.folder_name, null);
+	assert.ok(
+		result.unavailableFields.some(
+			({ field, reason }) =>
+				field === "folder_name" && reason === "folder_name_unresolved",
+		),
+	);
+});
+
+test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable", () => {
+	const result = readNoteRecord({
+		recordName: "note-undecodable-body",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: null },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: { value: b64("synthetic undecodable body") },
+		},
+	});
+	assert.equal(result.record?.text_content, null);
+	assert.ok(
+		result.unavailableFields.some(
+			({ field, reason }) =>
+				field === "text_content" && reason === "body_text_unreadable",
+		),
+	);
 });
 
 test("buildNoteRecord: falls back to Folders[0] when Folder is absent", () => {
@@ -212,7 +295,16 @@ test("buildNoteRecord: falls back to created/modified.timestamp when field-level
 	const record: CloudKitRecord = {
 		recordName: "note-timestamp-fallback",
 		recordType: "Note",
-		fields: {},
+		fields: {
+			TitleEncrypted: { value: null },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: { value: "" },
+		},
 		created: { timestamp: 1_700_000_000_000 },
 		modified: { timestamp: 1_700_100_000_000 },
 	};
@@ -248,10 +340,10 @@ test("buildFolderRecord: null when recordName is absent", () => {
 	);
 });
 
-test("buildFolderRecord: absent and empty decoded names fall back to recordName", () => {
+test("buildFolderRecord: absent title is unavailable, explicit empty title falls back", () => {
 	assert.deepEqual(
 		buildFolderRecord({ recordName: "folder-no-title", fields: {} }),
-		{ id: "folder-no-title", name: "folder-no-title" },
+		{ id: "folder-no-title", name: null },
 	);
 	assert.deepEqual(
 		buildFolderRecord({

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP iCloud Notes Connector (manifest v0.1.23)
+ * PDPP iCloud Notes Connector (manifest v0.1.24)
  *
  * Greenfield PDPP Collection Profile connector, ported from the legacy CG
  * script `connectors/apple/icloud-notes-playwright.js` (read-only prior
@@ -54,8 +54,8 @@
  *
  * Folder projection: `folder_id` remains the CloudKit recordName foreign
  * key. `folder_name` carries the legacy display name, resolved from the
- * folders stream fetched as a notes projection dependency. If no matching
- * folder row is present, it uses the source folder ID as the legacy fallback.
+ * folders stream fetched as a notes projection dependency. A note row is
+ * uncovered when a referenced folder does not resolve to a readable name.
  *
  * KNOWN LIMITATION: note body text (`text_content`) comes from a
  * byte-heuristic decode of `TextDataEncrypted`
@@ -67,6 +67,8 @@
  * account run is separate and only occurs when a signed-in profile exists.
  *
  * CHANGES
+ *   v0.1.24 (2026-10-15) — account for each mapped field's readability and
+ *     accept collection from an open Notes subroute.
  *   v0.1.23 (2026-10-15) — validate CloudKit query pages, salvage valid
  *     prefixes on partial failure, drain both streams with continuation
  *     guards, and include same-run folder names in notes projection.
@@ -96,9 +98,9 @@ import type {
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
-	buildFolderRecord,
-	buildNoteRecord,
 	isDeletedNote,
+	readFolderRecord,
+	readNoteRecord,
 	resolveCloudKitRecordId,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -123,6 +125,7 @@ export const ICLOUD_NOTES_RETRYABLE_PATTERN =
 	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited/i;
 
 type StreamName = "folders" | "notes";
+type FieldOmission = { field: string; reason: string };
 
 interface QueryFailure {
 	reason: string;
@@ -130,6 +133,7 @@ interface QueryFailure {
 	retryable: boolean;
 	pageCount: number;
 	omittedRows?: number;
+	fieldOmissions?: FieldOmission[];
 }
 
 interface QueryWalk {
@@ -235,6 +239,24 @@ async function resolveCloudKitConfig(
 
 function queryUrl(config: CloudKitConfigLive): string {
 	return `${config.ckBaseUrl}/database/1/com.apple.notes/production/private/records/query?dsid=${config.dsid}`;
+}
+
+function isICloudNotesUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return (
+			url.protocol === "https:" &&
+			(url.hostname === "www.icloud.com" || url.hostname === "icloud.com") &&
+			/^\/notes(?:\/|$)/.test(url.pathname)
+		);
+	} catch {
+		return false;
+	}
+}
+
+function remainsInICloudNotes(current: string, initial: string): boolean {
+	if (!isICloudNotesUrl(current) || !isICloudNotesUrl(initial)) return false;
+	return new URL(current).origin === new URL(initial).origin;
 }
 
 async function cloudKitQuery(
@@ -370,7 +392,7 @@ async function walkQueryPages(
 	let marker: string | undefined;
 	let pageCount = 0;
 	while (true) {
-		if (page.url() !== pageUrl) {
+		if (!remainsInICloudNotes(page.url(), pageUrl)) {
 			return {
 				records,
 				complete: false,
@@ -395,7 +417,7 @@ async function walkQueryPages(
 		});
 		const response = await cloudKitQuery(page, url, requestBody);
 		pageCount += 1;
-		if (page.url() !== pageUrl) {
+		if (!remainsInICloudNotes(page.url(), pageUrl)) {
 			return {
 				records,
 				complete: false,
@@ -543,6 +565,9 @@ async function emitStreamFailure(
 			...(failure.omittedRows === undefined
 				? {}
 				: { omitted_rows: failure.omittedRows }),
+			...(failure.fieldOmissions === undefined
+				? {}
+				: { field_omissions: failure.fieldOmissions }),
 		},
 	});
 }
@@ -562,6 +587,9 @@ function widenProgress(
 }
 
 async function requireNotesPage(page: Page): Promise<string> {
+	if (typeof page.waitForLoadState === "function") {
+		await page.waitForLoadState("load", { timeout: 15_000 }).catch(() => {});
+	}
 	let current: URL;
 	try {
 		current = new URL(page.url());
@@ -599,11 +627,7 @@ async function requireNotesPage(page: Page): Promise<string> {
 			"icloud_page_blocked: sign-in, captcha, or error UI is visible",
 		);
 	}
-	const isNotesRoute =
-		(current.hostname === "www.icloud.com" ||
-			current.hostname === "icloud.com") &&
-		(current.pathname === "/notes" || current.pathname === "/notes/");
-	if (current.protocol !== "https:" || !isNotesRoute) {
+	if (!isICloudNotesUrl(current.href)) {
 		throw new Error(
 			"icloud_wrong_page: collection requires the iCloud Notes route",
 		);
@@ -615,13 +639,75 @@ function omittedRowsFailure(
 	stream: StreamName,
 	count: number,
 	pageCount: number,
+	fieldOmissions: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
 ): QueryFailure {
 	return {
 		reason: "icloud_omitted_rows",
-		message: `iCloud Notes could not represent ${count} ${stream} row(s) within the declared schema; the stream was not checkpointed.`,
+		message: `iCloud Notes could not fully read or represent ${count} ${stream} row(s); the stream was not checkpointed.`,
 		retryable: false,
 		pageCount,
 		omittedRows: count,
+		...(fieldOmissions.size === 0
+			? {}
+			: {
+					fieldOmissions: [...fieldOmissions]
+						.flatMap(([field, reasons]) =>
+							[...reasons].map((reason) => ({ field, reason })),
+						)
+						.sort((left, right) =>
+							left.field === right.field
+								? left.reason.localeCompare(right.reason)
+								: left.field.localeCompare(right.field),
+						),
+				}),
+	};
+}
+
+function addFieldOmissions(
+	target: Map<string, Set<string>>,
+	omissions: readonly FieldOmission[],
+): void {
+	for (const { field, reason } of omissions) {
+		const reasons = target.get(field) ?? new Set<string>();
+		reasons.add(reason);
+		target.set(field, reasons);
+	}
+}
+
+function withFieldOmissions(
+	failure: QueryFailure | undefined,
+	stream: StreamName,
+	count: number,
+	pageCount: number,
+	fieldOmissions: ReadonlyMap<string, ReadonlySet<string>>,
+): QueryFailure | undefined {
+	if (count === 0 && fieldOmissions.size === 0) return failure;
+	const rowFailure = omittedRowsFailure(
+		stream,
+		count,
+		pageCount,
+		fieldOmissions,
+	);
+	if (!failure) return rowFailure;
+	const mergedFieldOmissions = new Map<string, Set<string>>();
+	addFieldOmissions(mergedFieldOmissions, failure.fieldOmissions ?? []);
+	for (const [field, reasons] of fieldOmissions) {
+		const current = mergedFieldOmissions.get(field) ?? new Set<string>();
+		for (const reason of reasons) current.add(reason);
+		mergedFieldOmissions.set(field, current);
+	}
+	const mergedFailure = omittedRowsFailure(
+		stream,
+		(failure.omittedRows ?? 0) + count,
+		pageCount,
+		mergedFieldOmissions,
+	);
+	return {
+		...failure,
+		omittedRows: (failure.omittedRows ?? 0) + count,
+		...(mergedFailure.fieldOmissions === undefined
+			? {}
+			: { fieldOmissions: mergedFailure.fieldOmissions }),
 	};
 }
 
@@ -637,7 +723,7 @@ export async function collectAllStreams(
 	if (!config) {
 		throw new Error("icloud_auth_failed: could not resolve CloudKit config");
 	}
-	if (page.url() !== pageUrl) {
+	if (!remainsInICloudNotes(page.url(), pageUrl)) {
 		throw new Error(
 			"icloud_navigation_changed: page changed while resolving CloudKit owner",
 		);
@@ -645,8 +731,9 @@ export async function collectAllStreams(
 	const url = queryUrl(config);
 	const needsFolders = requested.has("folders") || requested.has("notes");
 	let folderWalk: QueryWalk | null = null;
-	let folderProjectionComplete = false;
+	let folderScanComplete = false;
 	const folderNames = new Map<string, string>();
+	const unavailableFolderIds = new Set<string>();
 
 	if (needsFolders) {
 		await progress("Fetching iCloud Notes folders");
@@ -660,17 +747,32 @@ export async function collectAllStreams(
 			progress,
 		);
 		let omitted = 0;
+		const fieldOmissions = new Map<string, Set<string>>();
 		for (const record of folderWalk.records) {
 			if (record.recordType !== "Folder") continue;
-			const built = buildFolderRecord(record);
-			if (built === null || !validateRecord("folders", built).ok) {
+			const result = readFolderRecord(record);
+			addFieldOmissions(fieldOmissions, result.unavailableFields);
+			const built = result.record;
+			if (built === null) {
 				omitted += 1;
 				continue;
 			}
-			folderNames.set(built.id, built.name);
+			if (result.unavailableFields.length > 0) {
+				omitted += 1;
+				unavailableFolderIds.add(built.id);
+			}
+			if (!validateRecord("folders", built).ok) {
+				if (result.unavailableFields.length === 0) omitted += 1;
+				continue;
+			}
+			if (built.name !== null) folderNames.set(built.id, built.name);
 		}
-		folderProjectionComplete =
-			hasBoundEndProof(folderWalk, pageUrl, config, "folders") && omitted === 0;
+		folderScanComplete = hasBoundEndProof(
+			folderWalk,
+			pageUrl,
+			config,
+			"folders",
+		);
 
 		if (requested.has("folders")) {
 			const cursor = openFingerprintCursor(state.folders, {
@@ -679,31 +781,36 @@ export async function collectAllStreams(
 			let covered = 0;
 			for (const record of folderWalk.records) {
 				if (record.recordType !== "Folder") continue;
-				const built = buildFolderRecord(record);
+				const result = readFolderRecord(record);
+				const built = result.record;
 				if (built === null || !validateRecord("folders", built).ok) continue;
 				if (cursor.shouldEmit(built)) {
 					await emitRecord("folders", built);
 				}
-				covered += 1;
+				if (result.unavailableFields.length === 0) covered += 1;
 			}
 			const failure =
-				folderWalk.failure ??
-				(omitted > 0
-					? omittedRowsFailure("folders", omitted, folderWalk.pageCount)
-					: page.url() !== pageUrl
-						? {
-								reason: "icloud_navigation_changed",
-								message:
-									"The iCloud Notes page changed before the folders stream could be checkpointed.",
-								retryable: true,
-								pageCount: folderWalk.pageCount,
-							}
-						: null);
+				withFieldOmissions(
+					folderWalk.failure,
+					"folders",
+					omitted,
+					folderWalk.pageCount,
+					fieldOmissions,
+				) ??
+				(!remainsInICloudNotes(page.url(), pageUrl)
+					? {
+							reason: "icloud_navigation_changed",
+							message:
+								"The iCloud Notes page changed before the folders stream could be checkpointed.",
+							retryable: true,
+							pageCount: folderWalk.pageCount,
+						}
+					: null);
 			if (failure) {
 				await emitStreamFailure(emit, "folders", failure);
 			} else if (
 				hasBoundEndProof(folderWalk, pageUrl, config, "folders") &&
-				page.url() === pageUrl
+				remainsInICloudNotes(page.url(), pageUrl)
 			) {
 				cursor.dropUnseenIds();
 				await emit({
@@ -739,9 +846,15 @@ export async function collectAllStreams(
 		});
 		let covered = 0;
 		let omitted = 0;
+		const fieldOmissions = new Map<string, Set<string>>();
 		for (const record of walk.records) {
 			if (record.recordType !== "Note" || isDeletedNote(record)) continue;
-			const built = buildNoteRecord(record, folderNames);
+			const result = readNoteRecord(record, folderNames, {
+				unavailableFolderIds,
+				folderScanComplete,
+			});
+			addFieldOmissions(fieldOmissions, result.unavailableFields);
+			const built = result.record;
 			if (built === null || !validateRecord("notes", built).ok) {
 				omitted += 1;
 				continue;
@@ -749,23 +862,24 @@ export async function collectAllStreams(
 			if (cursor.shouldEmit(built)) {
 				await emitRecord("notes", built);
 			}
-			covered += 1;
+			if (result.unavailableFields.length === 0) {
+				covered += 1;
+			} else {
+				omitted += 1;
+			}
 		}
 		let failure =
-			walk.failure ??
+			withFieldOmissions(
+				walk.failure,
+				"notes",
+				omitted,
+				walk.pageCount,
+				fieldOmissions,
+			) ??
 			(omitted > 0
-				? omittedRowsFailure("notes", omitted, walk.pageCount)
+				? omittedRowsFailure("notes", omitted, walk.pageCount, fieldOmissions)
 				: null);
-		if (!failure && !folderProjectionComplete) {
-			failure = {
-				reason: "icloud_folder_projection_incomplete",
-				message:
-					"The notes stream was read, but its same-run folder-name dependency was incomplete; it was not checkpointed.",
-				retryable: true,
-				pageCount: folderWalk?.pageCount ?? 0,
-			};
-		}
-		if (!failure && page.url() !== pageUrl) {
+		if (!failure && !remainsInICloudNotes(page.url(), pageUrl)) {
 			failure = {
 				reason: "icloud_navigation_changed",
 				message:

@@ -38,6 +38,20 @@ function b64(s: string): string {
 	return Buffer.from(s, "utf-8").toString("base64");
 }
 
+function readableEmptyNoteFields(overrides: Record<string, unknown> = {}) {
+	return {
+		TitleEncrypted: { value: null },
+		SnippetEncrypted: { value: null },
+		Folder: { value: null },
+		IsPinned: { value: null },
+		CreationDate: { value: null },
+		ModificationDate: { value: null },
+		Attachments: { value: [] },
+		TextDataEncrypted: { value: "" },
+		...overrides,
+	};
+}
+
 const VALIDATE_RESPONSE = {
 	dsInfo: { dsid: DSID, fullName: "Test User" },
 	webservices: { ckdatabasews: { url: CK_BASE } },
@@ -68,6 +82,8 @@ function noteQueryResponse(overrides: { continuationMarker?: string } = {}) {
 					IsPinned: { value: 0 },
 					CreationDate: { value: 1_700_000_000_000 },
 					ModificationDate: { value: 1_700_000_000_000 },
+					Attachments: { value: [] },
+					TextDataEncrypted: { value: "" },
 				},
 			},
 		],
@@ -211,7 +227,7 @@ function makeFakePage(
 function makeNotePage(noteResponses: unknown[], onQuery?: () => void): Page {
 	return makeFakePage(
 		[
-			{ stream: "folders", response: { records: [] } },
+			{ stream: "folders", response: folderQueryResponse() },
 			...noteResponses.map((response) =>
 				typeof response === "object" &&
 				response !== null &&
@@ -253,6 +269,15 @@ function makeCtx(
 		},
 		state,
 	};
+}
+
+function diagnosticField(
+	message: { diagnostics?: unknown },
+	name: string,
+): unknown {
+	const diagnostics = message.diagnostics;
+	if (typeof diagnostics !== "object" || diagnostics === null) return undefined;
+	return (diagnostics as Record<string, unknown>)[name];
 }
 
 test("collectAllStreams: only requested streams emit records (scope filtering)", async () => {
@@ -383,9 +408,9 @@ test("collectAllStreams: paginates notes via continuationMarker", async () => {
 				{
 					recordName: "note-2",
 					recordType: "Note",
-					fields: {
+					fields: readableEmptyNoteFields({
 						TitleEncrypted: { value: b64("Second note") },
-					},
+					}),
 				},
 			],
 		},
@@ -547,7 +572,9 @@ test("collectAllStreams: note records keep empty title values and reject non-Not
 							{
 								recordName: "note-empty-title",
 								recordType: "Note",
-								fields: { TitleEncrypted: { value: b64("") } },
+								fields: readableEmptyNoteFields({
+									TitleEncrypted: { value: b64("") },
+								}),
 							},
 						],
 					},
@@ -567,7 +594,7 @@ test("collectAllStreams: folder query follows its continuation pages", async () 
 	const folder = (id: string) => ({
 		recordName: id,
 		recordType: "Folder",
-		fields: {},
+		fields: { TitleEncrypted: { value: null } },
 	});
 	await collectAllStreams(
 		makeCtx(
@@ -606,13 +633,227 @@ test("collectAllStreams: notes collection loads and projects folder names even w
 	assert.equal(harness.emitted[0]?.data.folder_name, "Work");
 });
 
+test("collectAllStreams: unreadable mapped fields are reported and veto both stream checkpoints", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = makeFakePage([
+		{
+			stream: "folders",
+			response: {
+				records: [
+					{
+						recordName: "folder-unreadable-title",
+						recordType: "Folder",
+						fields: { TitleEncrypted: { value: 42 } },
+					},
+					{
+						recordName: "folder-invalid-title-encoding",
+						recordType: "Folder",
+						fields: { TitleEncrypted: { value: "!!!" } },
+					},
+				],
+			},
+		},
+		{
+			stream: "notes",
+			response: {
+				records: [
+					{
+						recordName: "note-unreadable-fields",
+						recordType: "Note",
+						fields: readableEmptyNoteFields({
+							TitleEncrypted: { value: "!!!" },
+							SnippetEncrypted: {
+								type: 42,
+								value: b64("synthetic snippet"),
+							},
+							Folder: { value: { recordName: "folder-unreadable-title" } },
+							IsPinned: { value: {} },
+							Attachments: { value: "unreadable" },
+							CreationDate: {},
+							TextDataEncrypted: { value: 42 },
+						}),
+					},
+					{
+						recordName: "note-unreadable-folder-reference",
+						recordType: "Note",
+						fields: readableEmptyNoteFields({
+							Folder: { value: { recordName: 42 } },
+						}),
+					},
+				],
+			},
+		},
+	]);
+	await collectAllStreams(makeCtx(page, harness, ["folders", "notes"]));
+	assert.equal(
+		harness.emitted.length,
+		4,
+		"rows with partial readability are still emitted",
+	);
+	const unreadableFolder = harness.emitted.find(
+		(row) =>
+			row.stream === "folders" && row.data.id === "folder-unreadable-title",
+	);
+	assert.equal(unreadableFolder?.data.name, null);
+	assert.equal(
+		harness.emitted.find(
+			(row) =>
+				row.stream === "folders" &&
+				row.data.id === "folder-invalid-title-encoding",
+		)?.data.name,
+		null,
+	);
+	const unreadableNote = harness.emitted.find(
+		(row) => row.stream === "notes" && row.data.id === "note-unreadable-fields",
+	);
+	assert.equal(unreadableNote?.data.title, null);
+	assert.equal(unreadableNote?.data.is_pinned, null);
+
+	for (const stream of ["folders", "notes"] as const) {
+		assert.equal(
+			harness.protocolMessages.some(
+				(message) => message.type === "STATE" && message.stream === stream,
+			),
+			false,
+			`${stream} unreadable mapped fields must veto STATE`,
+		);
+		const skip = harness.protocolMessages.find(
+			(message) => message.type === "SKIP_RESULT" && message.stream === stream,
+		);
+		assert.ok(skip && skip.type === "SKIP_RESULT");
+		assert.ok(
+			Array.isArray(diagnosticField(skip, "field_omissions")),
+			`${stream} must report the omitted field names`,
+		);
+	}
+	const noteSkip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(noteSkip && noteSkip.type === "SKIP_RESULT");
+	assert.deepEqual(
+		(diagnosticField(noteSkip, "field_omissions") as { field: string }[])
+			.map((omission) => omission.field)
+			.filter((field, index, fields) => fields.indexOf(field) === index),
+		[
+			"created_at",
+			"folder_id",
+			"folder_name",
+			"has_attachments",
+			"is_pinned",
+			"snippet",
+			"text_content",
+			"title",
+		],
+	);
+});
+
+test("collectAllStreams: absent mapped values are unavailable and veto notes STATE", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeNotePage([
+				{
+					records: [
+						{
+							recordName: "note-missing-title",
+							recordType: "Note",
+							fields: { Folder: { value: null } },
+						},
+					],
+				},
+			]),
+			harness,
+			["notes"],
+		),
+	);
+	assert.equal(harness.emitted[0]?.data.title, null);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+	);
+	const skip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.ok(
+		(
+			diagnosticField(skip, "field_omissions") as {
+				field: string;
+				reason: string;
+			}[]
+		).some(
+			(omission) =>
+				omission.field === "title" && omission.reason === "missing_field",
+		),
+	);
+});
+
+test("collectAllStreams: notes-only folder projection reports unreadable referenced names", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const page = makeFakePage([
+		{
+			stream: "folders",
+			response: {
+				records: [
+					{
+						recordName: "folder-projection-unreadable",
+						recordType: "Folder",
+						fields: { TitleEncrypted: { value: 42 } },
+					},
+				],
+			},
+		},
+		{
+			stream: "notes",
+			response: {
+				records: [
+					{
+						recordName: "note-with-unreadable-folder-name",
+						recordType: "Note",
+						fields: readableEmptyNoteFields({
+							Folder: {
+								value: { recordName: "folder-projection-unreadable" },
+							},
+						}),
+					},
+				],
+			},
+		},
+	]);
+	await collectAllStreams(makeCtx(page, harness, ["notes"]));
+
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(
+		harness.emitted[0]?.data.folder_id,
+		"folder-projection-unreadable",
+	);
+	assert.equal(harness.emitted[0]?.data.folder_name, null);
+	assert.equal(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		false,
+	);
+	const skip = harness.protocolMessages.find(
+		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
+	);
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.deepEqual(diagnosticField(skip, "field_omissions"), [
+		{ field: "folder_name", reason: "folder_name_unavailable" },
+	]);
+});
+
 test("collectAllStreams: drains notes beyond the old 200-page cap", async () => {
 	const pages = Array.from({ length: 201 }, (_, index) => ({
 		records: [
 			{
 				recordName: `note-${index}`,
 				recordType: "Note",
-				fields: { TitleEncrypted: { value: b64(`Synthetic ${index}`) } },
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64(`Synthetic ${index}`) },
+				}),
 			},
 		],
 		...(index < 200 ? { continuationMarker: `page-${index + 1}` } : {}),
@@ -638,7 +879,9 @@ test("collectAllStreams: rejected schema rows produce an omission gap and cannot
 			{
 				recordName: "note-oversized",
 				recordType: "Note",
-				fields: { TitleEncrypted: { value: b64(longTitle) } },
+				fields: readableEmptyNoteFields({
+					TitleEncrypted: { value: b64(longTitle) },
+				}),
 			},
 		],
 	};
@@ -676,6 +919,26 @@ test("collectAllStreams: wrong page cannot start a CloudKit scan", async () => {
 		/icloud_wrong_page/,
 	);
 	assert.equal(harness.protocolMessages.length, 0);
+});
+
+test("collectAllStreams: an open note subroute is still the Notes app", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let page: Page & {
+		setUrl: (url: string) => void;
+	};
+	page = makeNotePage([noteQueryResponse()], () => {
+		page.setUrl("https://www.icloud.com/notes");
+	}) as Page & { setUrl: (url: string) => void };
+	page.setUrl("https://www.icloud.com/notes/note/synthetic-note-id");
+
+	await collectAllStreams(makeCtx(page, harness, ["notes"]));
+
+	assert.ok(
+		harness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		"the open note route should permit collection after the full query completes",
+	);
 });
 
 test("collectAllStreams: unloaded and blocked pages veto collection", async () => {
