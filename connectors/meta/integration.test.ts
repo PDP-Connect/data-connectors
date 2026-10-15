@@ -42,6 +42,7 @@ import { validateRecord } from "./schemas.ts";
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
 const NO_DELAY = (): Promise<void> => Promise.resolve();
 const TEST_POSTS_CLOCK = { sleep: async (): Promise<void> => undefined };
+const TEST_PROFILE_CLOCK = { sleep: async (): Promise<void> => undefined };
 const makeVirtualAdsClock = (): {
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
@@ -114,6 +115,7 @@ function makeFakePage(options: {
 	scrollFailure?: boolean;
 	categoryEmptyMessage?: boolean;
 	challengePage?: boolean;
+	profilePageUser?: unknown;
 	webInfoUser?: unknown;
 }): {
 	calls: string[];
@@ -143,10 +145,33 @@ function makeFakePage(options: {
 			: Promise.reject(new Error("Timeout while waiting for fake DOM"));
 
 	const resolveNextPostsPage = (): void => {
+		const profilePageUser = options.profilePageUser;
+		const profileResponse = profilePageUser
+			? {
+					json: () =>
+						Promise.resolve({ data: { data: { user: profilePageUser } } }),
+					request: () => ({
+						headers: () => ({ "x-fb-friendly-name": "ProfilePageQuery" }),
+						method: () => "POST",
+						postData: () => "fb_api_req_friendly_name=ProfilePageQuery",
+					}),
+					status: () => 200,
+					url: () => "https://www.instagram.com/graphql/query",
+				}
+			: null;
+		if (profileResponse) {
+			for (const listener of responseListeners) listener(profileResponse);
+		}
 		const next = pendingPostsResolve;
 		pendingPostsResolve = null;
 		if (!next) {
 			return;
+		}
+		if (profileResponse) {
+			if (pendingPostsPredicate?.(profileResponse)) {
+				next(profileResponse);
+				return;
+			}
 		}
 		const scripted = postsQueue.shift();
 		if (scripted === undefined || scripted === null) {
@@ -431,7 +456,6 @@ const WEB_INFO_USER = {
 	full_name: "Test User",
 	id: "u1",
 	is_private: false,
-	is_verified: false,
 	username: "testuser",
 };
 
@@ -452,6 +476,7 @@ function makeCtx(args: {
 	};
 	fetchScript: Record<string, ScriptedFetch[]>;
 	harness: ReturnType<typeof makeRecordingEmit>;
+	profilePageUser?: unknown;
 	postsScript?: ScriptedPostsPage[];
 	requestedStreams: string[];
 	webInfoUser?: unknown;
@@ -460,6 +485,7 @@ function makeCtx(args: {
 		...args.pageOptions,
 		fetchScript: args.fetchScript,
 		...(args.postsScript ? { postsScript: args.postsScript } : {}),
+		...(args.profilePageUser ? { profilePageUser: args.profilePageUser } : {}),
 		webInfoUser:
 			args.webInfoUser === undefined ? WEB_INFO_USER : args.webInfoUser,
 	});
@@ -509,6 +535,14 @@ test("collectAllStreams: unrequested streams emit nothing", async () => {
 	const { calls, ctx } = makeCtx({
 		fetchScript: {},
 		harness,
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 3,
+			username: "testuser",
+		},
 		requestedStreams: ["profile"],
 	});
 
@@ -517,6 +551,7 @@ test("collectAllStreams: unrequested streams emit nothing", async () => {
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -548,18 +583,27 @@ test("collectAllStreams: requesting posts+post_likes but not profile emits no pr
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.ok(!harness.emitted.some((e) => e.stream === "profile"));
 });
 
-// ─── Invariant 2: profile emits the web_info-derived record ────────────
+// ─── Invariant 2: profile emits only with observed profile-page evidence ─
 
-test("collectAllStreams: profile stream emits one record from web_info", async () => {
+test("collectAllStreams: profile stream emits only with complete profile-page enrichment", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
 		harness,
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 3,
+			username: "testuser",
+		},
 		requestedStreams: ["profile"],
 	});
 
@@ -568,15 +612,45 @@ test("collectAllStreams: profile stream emits one record from web_info", async (
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.data.id, "u1");
 	assert.equal(harness.emitted[0]?.data.username, "testuser");
+	assert.equal(harness.emitted[0]?.data.follower_count, 12);
+	assert.equal(harness.emitted[0]?.data.is_verified, false);
 	assert.equal(harness.skipped.length, 0);
 });
 
-test("collectAllStreams: no logged-in user in web_info is a terminal error", async () => {
+test("collectAllStreams: missing profile enrichment emits a partial record with a stream gap", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {},
+		harness,
+		profilePageUser: {
+			follower_count: 12,
+			id: "u1",
+			is_verified: false,
+			username: "testuser",
+		},
+		requestedStreams: ["profile"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.data.follower_count, 12);
+	assert.deepEqual(streamFailures(harness), ["profile"]);
+});
+
+test("collectAllStreams: no authenticated web_info reports a profile gap", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -585,7 +659,15 @@ test("collectAllStreams: no logged-in user in web_info is a terminal error", asy
 		webInfoUser: null,
 	});
 
-	await assert.rejects(collectAllStreams(ctx), /meta_profile_unavailable/);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+	assert.deepEqual(streamFailures(harness), ["profile"]);
+	assert.equal(harness.emitted.length, 0);
 });
 
 // ─── Invariant 3: posts + post_likes split from one paginated walk ──────
@@ -1560,18 +1642,21 @@ test("collectAllStreams: a first-page following failure emits nothing and report
 
 // ─── Invariant 5: ads merges three DOM-scraped lists with a kind discriminator ──
 
-test("collectAllStreams: ads stream merges advertisers/topics/categories with kind discriminator", async () => {
+test("collectAllStreams: ads completes independently when profile web_info is unavailable", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	const { page, waitConditions } = makeFakePage({
+	const { calls, page, waitConditions } = makeFakePage({
 		categoriesAvailable: true,
 		categoryComplete: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
 		dialogComplete: [true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
-		webInfoUser: WEB_INFO_USER,
+		webInfoUser: null,
 	});
-	const requested = new Map([["ads", { name: "ads" }]]);
+	const requested = new Map([
+		["profile", { name: "profile" }],
+		["ads", { name: "ads" }],
+	]);
 	const harnessCtx: BrowserCollectContext = {
 		assist: async (): Promise<never> => {
 			throw new Error("not implemented");
@@ -1617,7 +1702,8 @@ test("collectAllStreams: ads stream merges advertisers/topics/categories with ki
 			condition.includes("Categories used to reach you"),
 		),
 	);
-	assert.equal(harness.skipped.length, 0);
+	assert.deepEqual(streamFailures(harness), ["profile"]);
+	assert.equal(calls.includes("/accounts/web_info/"), true);
 	assert.deepEqual(
 		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
 		{
@@ -2956,7 +3042,16 @@ test("scrapeTargetingCategories does not complete while category rows are still 
 		(page) => scrapeTargetingCategories(page),
 	);
 
-	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+	assert.deepEqual(result, {
+		items: [
+			{ description: null, name: "Category A" },
+			{ description: null, name: "Category B" },
+			{ description: null, name: "Category C" },
+		],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "targeting_categories",
+	});
 });
 
 test("scrapeTargetingCategories ignores hidden empty categories marker", async () => {
@@ -3210,7 +3305,7 @@ test("collectAllStreams: verified empty ad topics alone reports an ads stream fa
 
 // ─── Invariant 6: shape-check catches a drifted record ──────────────────
 
-test("collectAllStreams: a profile record missing username lands in SKIP_RESULT, not RECORD", async () => {
+test("collectAllStreams: profile missing username reports a stream gap without emitting", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	// id present but username absent → profileRecord() itself returns null and
 	// nothing is emitted, so this proves the null-guard rather than schema
@@ -3222,7 +3317,15 @@ test("collectAllStreams: a profile record missing username lands in SKIP_RESULT,
 		webInfoUser: { id: "u1" },
 	});
 
-	await assert.rejects(collectAllStreams(ctx), /meta_profile_unavailable/);
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
+	);
+	assert.deepEqual(streamFailures(harness), ["profile"]);
+	assert.equal(harness.emitted.length, 0);
 });
 
 test("pageShowsLoginOrChallengeControls ignores ordinary profile text and finds real challenge controls", async () => {

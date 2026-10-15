@@ -22,15 +22,12 @@
  *
  * Streams (docs/migration/connector-cutover/capability-map.json D6), all
  * confirmed live 2026-09-22 against an authenticated account:
- *   profile      `/accounts/web_info/` — an HTML document with the owner's
- *                profile embedded in a `<script type="application/json"
- *                data-sjs>` PolarisViewer tuple. Does NOT carry
- *                follower_count/following_count/media_count (confirmed
- *                absent) — see `types.ts`'s `InstagramWebInfoUser` doc.
- *                Those three counts are filled separately from a passively
- *                observed profile-page GraphQL response
- *                (`fetchProfileCounts`/`profileCountsFromGraphQL`), null when
- *                that response isn't observed within the timeout.
+ *   profile      `/accounts/web_info/` supplies authenticated identity and
+ *                basic fields. A profile navigation then passively captures
+ *                one of the three legacy profile GraphQL operations and
+ *                polls for its user. Counts and verified status come only
+ *                from that observed user; missing enrichment emits a partial
+ *                record plus a stream failure.
  *   posts        the owner's own timeline feed connection
  *                (`xdt_api__v1__feed__user_timeline_graphql_connection`),
  *                observed passively off the real `POST /graphql/query`
@@ -98,6 +95,9 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.25 — restores legacy profile capture, stream-gap reporting, initial
+ *     posts polling/fallback scroll, authenticated readiness, bounded
+ *     navigation retries, and expansion-first category collection.
  *   v0.4.11 (2026-09-30) — requires exact empty evidence for ads surfaces and
  *     a successful terminal empty response for posts completion.
  *   v0.4.4 (2026-09-24) — keep the read-only session-cookie readiness probe
@@ -112,9 +112,8 @@
  *     the post_likes primary key to (post_id, liker_ordinal).
  *   v0.3.3 (2026-09-22) — fills profile.follower_count/following_count/
  *     post_count from a passively observed profile-page GraphQL response
- *     (`fetchProfileCounts`), the same query the legacy connector captured
- *     for these fields; null when the response isn't observed within the
- *     timeout, never guessed.
+ *     using the same query the legacy connector captured for these fields;
+ *     null when the response isn't observed within the timeout, never guessed.
  *   v0.3.1 (2026-09-22) — fixed two live-only defects found on first live
  *     run: (1) `about:blank` origin on the session-cookie-already-live fast
  *     path made every in-page fetch fail closed (`ensureInstagramOrigin`,
@@ -159,6 +158,7 @@ import {
 	postLikeRecords,
 	postRecord,
 	profileCountsFromGraphQL,
+	profileEnrichmentIsComplete,
 	profileRecord,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
@@ -166,6 +166,7 @@ import type {
 	InstagramFollowingPage,
 	InstagramFollowingUser,
 	InstagramProfilePageEnvelope,
+	InstagramProfilePageUser,
 	InstagramTimelineConnection,
 	InstagramTimelineEdge,
 	InstagramWebInfoUser,
@@ -174,6 +175,7 @@ import type {
 const INSTAGRAM_ORIGIN = "https://www.instagram.com";
 const ACCOUNTS_CENTER_ORIGIN = "https://accountscenter.instagram.com";
 const SESSION_COOKIE_RE = /sessionid|ds_user_id/;
+const NAVIGATION_ATTEMPTS = 3;
 const POSTS_MAX_PAGES = 100;
 const ADS_REQUIRED_SURFACES = [
 	"advertisers",
@@ -207,10 +209,31 @@ async function hasSessionCookie(
 	);
 }
 
+async function hasAuthenticatedWebInfo(page: Page): Promise<boolean> {
+	const user = await fetchWebInfoUser(page);
+	return Boolean(user && profileRecord(user));
+}
+
+async function safeGoto(page: Page, url: string): Promise<boolean> {
+	for (let attempt = 0; attempt < NAVIGATION_ATTEMPTS; attempt += 1) {
+		try {
+			await page.goto(url, {
+				timeout: 30_000,
+				waitUntil: "domcontentloaded",
+			});
+			return true;
+		} catch {
+			// Retry transient navigation failures within the fixed attempt budget.
+		}
+	}
+	return false;
+}
+
 export async function probeMetaSession({
 	context,
+	page,
 }: ProbeSessionArgs): Promise<boolean> {
-	return hasSessionCookie(context);
+	return (await hasSessionCookie(context)) && (await hasAuthenticatedWebInfo(page));
 }
 
 export async function ensureMetaSession({
@@ -242,12 +265,7 @@ async function manualLoginHandoff({
 	EnsureSessionArgs,
 	"assist" | "completeAssistance" | "context" | "page" | "sendInteraction"
 >): Promise<void> {
-	await page
-		.goto(`${INSTAGRAM_ORIGIN}/accounts/login/`, {
-			timeout: 30_000,
-			waitUntil: "domcontentloaded",
-		})
-		.catch((): undefined => undefined);
+	await safeGoto(page, `${INSTAGRAM_ORIGIN}/accounts/login/`);
 
 	await manualBrowserLogin({
 		assist,
@@ -256,15 +274,20 @@ async function manualLoginHandoff({
 		message:
 			"Log in to Instagram. The connector will continue automatically once the session is live.",
 		page,
-		probe: () => hasSessionCookie(context),
-		readinessProbe: () => hasSessionCookie(context),
+		probe: async () =>
+			(await hasSessionCookie(context)) &&
+			(await hasAuthenticatedWebInfo(page)),
+		readinessProbe: async () =>
+			(await hasSessionCookie(context)) &&
+			(await hasAuthenticatedWebInfo(page)),
 		readinessProbeOnHandoffPage: true,
 		reason: "login",
 		sendInteraction,
 		timeoutSeconds: 1800,
 	});
 
-	const live = await hasSessionCookie(context);
+	const live =
+		(await hasSessionCookie(context)) && (await hasAuthenticatedWebInfo(page));
 	if (!live) {
 		throw new Error(
 			"meta_login_manual_incomplete: session cookie not present after handoff",
@@ -293,15 +316,7 @@ async function ensureInstagramOrigin(page: Page): Promise<boolean> {
 		// An unnavigated page (`about:blank`) has no parseable origin — fall
 		// through and navigate rather than treating it as a fault.
 	}
-	try {
-		await page.goto(`${INSTAGRAM_ORIGIN}/`, {
-			timeout: 30_000,
-			waitUntil: "domcontentloaded",
-		});
-		return true;
-	} catch {
-		return false;
-	}
+	return safeGoto(page, `${INSTAGRAM_ORIGIN}/`);
 }
 
 async function instagramFetch<T>(
@@ -355,7 +370,8 @@ export async function fetchWebInfoUser(
 	if (!(await ensureInstagramOrigin(page))) {
 		return null;
 	}
-	return (await page.evaluate(async (origin) => {
+	try {
+		return (await page.evaluate(async (origin) => {
 		try {
 			const response = await fetch(`${origin}/accounts/web_info/`, {
 				credentials: "include",
@@ -414,62 +430,104 @@ export async function fetchWebInfoUser(
 		} catch {
 			return null;
 		}
-	}, INSTAGRAM_ORIGIN)) as InstagramWebInfoUser | null;
+		}, INSTAGRAM_ORIGIN)) as InstagramWebInfoUser | null;
+	} catch {
+		return null;
+	}
 }
 
 // ─── Profile counts (profile-page GraphQL) ────────────────────────────────
 
-function isProfilePageGraphQLResponse(response: {
-	request: () => { method: () => string };
+export function isProfilePageGraphQLResponse(response: {
+	request: () => {
+		method: () => string;
+		postData?: () => string | null;
+		headers?: () => Record<string, string>;
+	};
 	url: () => string;
 }): boolean {
+	const request = response.request();
+	const operation =
+		request.postData?.() ?? request.headers?.()["x-fb-friendly-name"] ?? "";
 	return (
 		response.url().includes("/graphql/") &&
-		response.request().method() === "POST"
+		request.method() === "POST" &&
+		/(?:PolarisProfilePageContentQuery|ProfilePageQuery|UserByUsernameQuery)/.test(
+			operation,
+		)
 	);
 }
 
+type ProfileCaptureClock = { sleep: (ms: number) => Promise<void> };
+const realProfileCaptureClock: ProfileCaptureClock = {
+	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+const PROFILE_CAPTURE_INITIAL_DELAY_MS = 3_000;
+const PROFILE_CAPTURE_POLL_INTERVAL_MS = 1_000;
+const PROFILE_CAPTURE_MAX_POLLS = 30;
+
+type ProfilePageResponse = Parameters<typeof isProfilePageGraphQLResponse>[0] & {
+	json: () => Promise<unknown>;
+	status: () => number;
+};
+
+export async function waitForLegacyProfileCapture(
+	matchingResponses: readonly ProfilePageResponse[],
+	clock: ProfileCaptureClock = realProfileCaptureClock,
+): Promise<ProfilePageResponse | null> {
+	await clock.sleep(PROFILE_CAPTURE_INITIAL_DELAY_MS);
+	for (let attempt = 0; attempt < PROFILE_CAPTURE_MAX_POLLS; attempt += 1) {
+		const latest = matchingResponses.at(-1);
+		if (latest) return latest;
+		await clock.sleep(PROFILE_CAPTURE_POLL_INTERVAL_MS);
+	}
+	return matchingResponses.at(-1) ?? null;
+}
+
 /**
- * `follower_count`/`following_count`/`media_count` are not on `web_info`
- * (see {@link fetchWebInfoUser}) but the profile page's own render issues a
- * `PolarisProfilePageContentQuery`/`ProfilePageQuery`/`UserByUsernameQuery`
- * GraphQL request carrying them (legacy
- * `connectors/meta/instagram-playwright.js:614-619` captured this same
- * request by URL/body pattern). Passively observed the same way
- * {@link fetchAllPosts} observes the posts timeline query: navigate to the
- * profile page and race a `waitForResponse` against the navigation. Returns
- * all-null counts (via {@link profileCountsFromGraphQL}) rather than
- * guessing when the request is not observed within the timeout — a
- * best-effort enrichment, not a required source.
+ * Profile fields come from one of the three legacy profile operations. A
+ * missing or malformed user is an incomplete enrichment, not a complete
+ * record with guessed nulls.
  */
-export async function fetchProfileCounts(
+export async function fetchProfilePageUser(
 	page: Page,
 	username: string,
 	capture: CaptureSession | null,
-): Promise<ReturnType<typeof profileCountsFromGraphQL>> {
-	const responsePromise = page
-		.waitForResponse(isProfilePageGraphQLResponse, { timeout: 15_000 })
-		.catch(() => null);
-	await page
-		.goto(`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`, {
-			timeout: 30_000,
-			waitUntil: "domcontentloaded",
-		})
-		.catch((): undefined => undefined);
-	const response = await responsePromise;
-	if (!response) {
-		return profileCountsFromGraphQL(null);
+	clock: ProfileCaptureClock = realProfileCaptureClock,
+): Promise<InstagramProfilePageUser | null> {
+	const matchingResponses: ProfilePageResponse[] = [];
+	const onResponse = (response: ProfilePageResponse): void => {
+		if (isProfilePageGraphQLResponse(response)) matchingResponses.push(response);
+	};
+	page.on("response", onResponse);
+	let response: ProfilePageResponse | null = null;
+	try {
+		if (
+			!(await safeGoto(
+				page,
+				`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
+			))
+		) {
+			return null;
+		}
+		response = await waitForLegacyProfileCapture(matchingResponses, clock);
+	} finally {
+		page.off("response", onResponse);
 	}
+	if (!response) {
+		return null;
+	}
+	if (response.status() < 200 || response.status() >= 300) return null;
 	let envelope: InstagramProfilePageEnvelope | null = null;
 	try {
 		envelope = (await response.json()) as InstagramProfilePageEnvelope;
 	} catch {
 		envelope = null;
 	}
-	capture?.captureHttp("profile-counts", envelope, {
+	capture?.captureHttp("profile-page-user", envelope, {
 		status: response.status(),
 	});
-	return profileCountsFromGraphQL(envelope);
+	return envelope?.data?.data?.user ?? null;
 }
 
 // ─── Posts (timeline feed connection) ─────────────────────────────────────
@@ -778,31 +836,29 @@ export async function fetchAllPosts(
 						: undefined;
 				let response = pageNumber === 1 ? undefined : queued();
 				if (response === undefined) {
-					const responsePromise = page
+					const responsePromise: Promise<PostsTimelineResponse | null> = page
 						.waitForResponse(
 							(candidate) => isPostsTimelineResponse(candidate, page),
 							{ timeout: 15_000 },
 						)
+						.then((response) => response as PostsTimelineResponse)
 						.catch(() => null);
 					if (pageNumber === 1) {
-						try {
-							await page.goto(
+						if (
+							!(await safeGoto(
+								page,
 								`${INSTAGRAM_ORIGIN}/${encodeURIComponent(username)}/`,
-								{
-									timeout: 30_000,
-									waitUntil: "domcontentloaded",
-								},
-							);
-							legacyInitialCapture = waitForLegacyPostsCapture(
-								matchingResponses,
-								postsClock,
-								legacyCaptureController.signal,
-							);
-						} catch {
+							))
+						) {
 							throw new Error(
 								"meta_posts_navigation_failed: profile timeline did not load",
 							);
 						}
+						legacyInitialCapture = waitForLegacyPostsCapture(
+							matchingResponses,
+							postsClock,
+							legacyCaptureController.signal,
+						);
 					} else {
 						try {
 							await page.evaluate(() =>
@@ -814,7 +870,30 @@ export async function fetchAllPosts(
 							);
 						}
 					}
-					const awaited = await responsePromise;
+					let awaited = await responsePromise;
+					if (!awaited && pageNumber === 1) {
+						awaited = (await legacyInitialCapture) as
+							| PostsTimelineResponse
+							| null;
+						if (!awaited) {
+							const fallbackResponse = page
+								.waitForResponse(
+									(candidate) => isPostsTimelineResponse(candidate, page),
+									{ timeout: 15_000 },
+								)
+								.catch(() => null);
+							try {
+								await page.evaluate(() =>
+									window.scrollTo(0, document.body.scrollHeight),
+								);
+							} catch {
+								throw new Error(
+									"meta_posts_navigation_failed: initial timeline fallback scroll failed",
+								);
+							}
+							awaited = await fallbackResponse;
+						}
+					}
 					if (!awaited) {
 						return false;
 					}
@@ -1433,12 +1512,7 @@ export async function scrapeAdvertisers(
 	page: Page,
 	clock: AdsSettleClock = realAdsSettleClock,
 ): Promise<ReachedScrape<string>> {
-	try {
-		await page.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
-			timeout: 30_000,
-			waitUntil: "domcontentloaded",
-		});
-	} catch {
+	if (!(await safeGoto(page, `${ACCOUNTS_CENTER_ORIGIN}/ads/`))) {
 		return {
 			items: [],
 			reached: false,
@@ -1507,12 +1581,7 @@ export async function scrapeAdTopics(
 	page: Page,
 	clock: AdsSettleClock = realAdsSettleClock,
 ): Promise<ReachedScrape<string>> {
-	try {
-		await page.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/ad_topics/`, {
-			timeout: 30_000,
-			waitUntil: "domcontentloaded",
-		});
-	} catch {
+	if (!(await safeGoto(page, `${ACCOUNTS_CENTER_ORIGIN}/ads/ad_topics/`))) {
 		return {
 			items: [],
 			reached: false,
@@ -1553,12 +1622,7 @@ export async function scrapeTargetingCategories(
 	page: Page,
 	clock: AdsSettleClock = realAdsSettleClock,
 ): Promise<ReachedScrape<{ description: string | null; name: string }>> {
-	try {
-		await page.goto(`${ACCOUNTS_CENTER_ORIGIN}/ads/`, {
-			timeout: 30_000,
-			waitUntil: "domcontentloaded",
-		});
-	} catch {
+	if (!(await safeGoto(page, `${ACCOUNTS_CENTER_ORIGIN}/ads/`))) {
 		return {
 			items: [],
 			reached: false,
@@ -1650,30 +1714,10 @@ export async function scrapeTargetingCategories(
 		emptyMessage: "No categories",
 		requiredAffordance: "Remove",
 	} satisfies Parameters<typeof classifyAdsDialogInPage>[0];
-	const initialCategories = await waitForStableAdsDialog(
-		page,
+	const beforeExpansion = await page.evaluate(
+		classifyAdsDialogInPage,
 		classificationArgs,
-		clock,
 	);
-	if (initialCategories?.kind === "verified_empty") {
-		await closeDialog(page);
-		return {
-			items: [],
-			reached: true,
-			step: "reached_empty",
-			surface: "targeting_categories",
-		};
-	}
-	if (initialCategories?.kind !== "data") {
-		await closeDialog(page);
-		return {
-			items: [],
-			reached: false,
-			step: "destination_list_not_found",
-			surface: "targeting_categories",
-		};
-	}
-
 	const clickedViewAll = await page.evaluate(() => {
 		const [visible] = [
 			(element: Element): boolean => {
@@ -1749,12 +1793,23 @@ export async function scrapeTargetingCategories(
 				(btn) => visible(btn) && (btn.textContent ?? "").trim() === "View all",
 			);
 		}));
-	const finalCategories = clickedViewAll
+	const finalCategories = viewAllExpanded
 		? await waitForStableAdsDialog(page, classificationArgs, clock)
-		: initialCategories;
-	// Rows were already seen, so an empty message after expansion contradicts
-	// them and cannot prove the list complete.
-	if (!viewAllExpanded || finalCategories?.kind !== "data") {
+		: null;
+	if (
+		finalCategories?.kind === "verified_empty" &&
+		beforeExpansion?.kind !== "data" &&
+		beforeExpansion?.kind !== "loading"
+	) {
+		await closeDialog(page);
+		return {
+			items: [],
+			reached: true,
+			step: "reached_empty",
+			surface: "targeting_categories",
+		};
+	}
+	if (finalCategories?.kind !== "data") {
 		await closeDialog(page);
 		return {
 			items: [],
@@ -1843,7 +1898,6 @@ export async function scrapeTargetingCategories(
 		items: categories.items,
 		reached:
 			categories.reached &&
-			viewAllExpanded &&
 			categories.items.length > 0 &&
 			categories.items.length === finalCategories.items.length &&
 			finalCategories.complete,
@@ -1914,6 +1968,7 @@ export async function collectAllStreams(
 	delay: (ms: number) => Promise<void> = politeDelay,
 	postsClock: PostsClock = realPostsClock,
 	adsClock: AdsSettleClock = realAdsSettleClock,
+	profileClock: ProfileCaptureClock = realProfileCaptureClock,
 ): Promise<void> {
 	const { capture, emit, emitRecord, page, progress, requested } = ctx;
 
@@ -1923,34 +1978,60 @@ export async function collectAllStreams(
 	const wantsFollowing = requested.has("following");
 	const wantsAds = requested.has("ads");
 
-	await progress("Fetching Instagram profile");
-	const user = await fetchWebInfoUser(page);
-	if (!user) {
-		throw new Error(
-			"meta_profile_unavailable: Instagram web_info returned no logged-in user",
+	const needsInstagramIdentity =
+		wantsProfile || wantsPosts || wantsPostLikes || wantsFollowing;
+	const user = needsInstagramIdentity ? await fetchWebInfoUser(page) : null;
+	const identity = user ? profileRecord(user) : null;
+	if (needsInstagramIdentity && !identity) {
+		const unavailable = ["profile", "posts", "post_likes", "following"].filter(
+			(stream) => requested.has(stream),
 		);
+		for (const stream of unavailable) {
+			await reportCollectionFailure(
+				ctx,
+				stream,
+				"Instagram authenticated profile data was unavailable; this stream was not proven complete.",
+			);
+		}
 	}
-	const identity = profileRecord(user);
-	if (!identity) {
-		throw new Error("meta_profile_unavailable: profile missing id/username");
-	}
-	const userId = identity.id;
 
-	let profile = identity;
-	if (wantsProfile) {
+	if (wantsProfile && user && identity) {
 		await progress("Fetching Instagram profile counts");
-		const counts = await fetchProfileCounts(page, identity.username, capture);
-		profile = profileRecord(user, counts) ?? identity;
+		const profileUser = await fetchProfilePageUser(
+			page,
+			identity.username,
+			capture,
+			profileClock,
+		);
+		const profileUserMatchesIdentity = Boolean(
+			profileUser?.id === identity.id &&
+			profileUser.username?.toLowerCase() === identity.username.toLowerCase(),
+		);
+		const trustedProfileUser = profileUserMatchesIdentity ? profileUser : null;
+		const counts = profileCountsFromGraphQL(
+			trustedProfileUser
+				? { data: { data: { user: trustedProfileUser } } }
+				: null,
+		);
+		const profile =
+			profileRecord(user, counts, trustedProfileUser) ?? identity;
 		await emitRecord("profile", profile as RecordData);
+		if (!profileEnrichmentIsComplete(trustedProfileUser)) {
+			await reportCollectionFailure(
+				ctx,
+				"profile",
+				"Instagram profile enrichment was incomplete; the emitted profile is a partial record.",
+			);
+		}
 	}
 
-	if (wantsPosts || wantsPostLikes) {
+	if ((wantsPosts || wantsPostLikes) && identity) {
 		await progress("Fetching Instagram posts");
 		let postsResult: Awaited<ReturnType<typeof fetchAllPosts>> | null = null;
 		try {
 			postsResult = await fetchAllPosts(
-				page,
-				profile.username,
+					page,
+					identity.username,
 				capture,
 				progress,
 				delay,
@@ -2003,13 +2084,13 @@ export async function collectAllStreams(
 		}
 	}
 
-	if (wantsFollowing) {
+	if (wantsFollowing && identity) {
 		await progress("Fetching Instagram following list");
 		let followingResult: Awaited<ReturnType<typeof fetchAllFollowing>>;
 		try {
 			followingResult = await fetchAllFollowing(
 				page,
-				userId,
+				identity.id,
 				capture,
 				progress,
 				delay,

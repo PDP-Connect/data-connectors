@@ -574,6 +574,34 @@ test("scrapeTargetingCategories: waits for rows appended after visible View all"
 	assert.ok(clock.nowValue >= 3_000);
 });
 
+test("scrapeTargetingCategories: expands before classifying hidden category rows", async () => {
+	const { document, page } = makeDomPage(
+		`
+		<div role="tab">Manage info</div>
+		<div role="tabpanel"><a>Categories used to reach you</a></div>
+		<section role="dialog">
+			<div role="list" aria-setsize="1">
+				<div role="listitem" aria-posinset="1"><span style="display:none">Music</span><button>Remove</button></div>
+			</div>
+			<button id="view-all">View all</button>
+		</section>
+	`,
+		{
+			onViewAllClick: () => {
+				document.querySelector("span")?.setAttribute("style", "display:inline");
+				document.querySelector("#view-all")?.remove();
+			},
+		},
+	);
+
+	assert.deepEqual(await scrapeTargetingCategories(page, makeClock()), {
+		items: [{ description: null, name: "Music" }],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
 test("scrapeTargetingCategories: an empty message after View all cannot erase categories already seen", async () => {
 	const { document, page } = makeDomPage(
 		`

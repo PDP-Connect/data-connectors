@@ -12,6 +12,7 @@ import type {
 	FollowingRecord,
 	InstagramFollowingUser,
 	InstagramProfilePageEnvelope,
+	InstagramProfilePageUser,
 	InstagramTimelineEdge,
 	InstagramWebInfoUser,
 	PostLikeRecord,
@@ -140,6 +141,24 @@ export function profileCountsFromGraphQL(
 	};
 }
 
+/** The legacy profile read is complete only when the observed profile user
+ *  carries its three counts and the verified flag. Missing values are gaps,
+ *  not evidence that the corresponding fields are empty. */
+export function profileEnrichmentIsComplete(
+	user: InstagramProfilePageUser | null | undefined,
+): boolean {
+	return (
+		user !== null &&
+		user !== undefined &&
+		Boolean(user.id) &&
+		Boolean(user.username) &&
+		nonNegativeIntOrNull(user.follower_count) !== null &&
+		nonNegativeIntOrNull(user.following_count) !== null &&
+		nonNegativeIntOrNull(user.media_count) !== null &&
+		typeof user.is_verified === "boolean"
+	);
+}
+
 /**
  * `/accounts/web_info/` (the only observed source for identity fields) does
  * not carry follower_count, following_count, or media_count — confirmed
@@ -155,25 +174,29 @@ export function profileRecord(
 		following_count: number | null;
 		post_count: number | null;
 	} = { follower_count: null, following_count: null, post_count: null },
+	profileUser?: InstagramProfilePageUser | null,
 ): ProfileRecord | null {
-	const id = user.id ?? user.fbid ?? null;
-	const username = user.username ?? null;
+	const id = profileUser?.id || user.id || user.fbid || null;
+	const username = profileUser?.username || user.username || null;
 	if (!id || !username) {
 		return null;
 	}
 	return {
 		id,
 		username,
-		full_name: nullIfEmpty(user.full_name),
-		bio: nullIfEmpty(user.biography),
-		profile_pic_url: nullIfEmpty(user.profile_pic_url),
-		external_url: nullIfEmpty(user.external_url),
+		full_name: nullIfEmpty(profileUser?.full_name ?? user.full_name),
+		bio: nullIfEmpty(profileUser?.biography ?? user.biography),
+		profile_pic_url: nullIfEmpty(
+			profileUser?.profile_pic_url ?? user.profile_pic_url,
+		),
+		external_url: nullIfEmpty(profileUser?.external_url ?? user.external_url),
 		follower_count: counts.follower_count,
 		following_count: counts.following_count,
 		post_count: counts.post_count,
-		is_private: user.is_private ?? null,
-		is_verified: user.is_verified ?? null,
-		is_business: user.is_business_account ?? null,
+		is_private: profileUser?.is_private ?? user.is_private ?? null,
+		is_verified: profileUser?.is_verified ?? null,
+		is_business:
+			profileUser?.is_business_account ?? user.is_business_account ?? null,
 	};
 }
 
@@ -226,7 +249,7 @@ export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
 export function followingRecord(
 	user: InstagramFollowingUser,
 ): FollowingRecord | null {
-	const id = user.pk ?? user.id ?? null;
+	const id = user.pk || user.id || null;
 	const username = user.username ?? null;
 	if (!id || !username) {
 		return null;

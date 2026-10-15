@@ -11,10 +11,8 @@
  * `/accounts/web_info/`'s embedded PolarisViewer.data payload (confirmed
  * live 2026-09-22 against an authenticated session). Notably absent:
  * follower_count, following_count, media_count — this endpoint does not
- * carry them. `is_verified` was not observed as a top-level field either
- * (Instagram's own web UI derives the verified badge from
- * `active_meta_verified_benefits`, not a boolean here); left optional and
- * unpopulated pending evidence of where a reliable verified flag comes from.
+ * carry them. `is_verified` is not read from this source. The profile-page
+ * GraphQL user supplies the verified flag when it is observed.
  */
 export interface InstagramWebInfoUser {
 	biography?: string | null;
@@ -25,7 +23,6 @@ export interface InstagramWebInfoUser {
 	is_business_account?: boolean | null;
 	is_private?: boolean | null;
 	is_professional_account?: boolean | null;
-	is_verified?: boolean | null;
 	profile_pic_url?: string | null;
 	username?: string | null;
 }
@@ -100,16 +97,21 @@ export interface InstagramFetchResult<T> {
 	status: number;
 }
 
-/** The subset of the profile-page GraphQL user node
- * (`PolarisProfilePageContentQuery` / `ProfilePageQuery` /
- * `UserByUsernameQuery`) this connector reads: follower/following/media
- * counts that `/accounts/web_info/` does not carry. Legacy
- * `connectors/meta/instagram-playwright.js:656-679` mapped these same three
- * fields from this query's captured response. */
+/** The profile-page GraphQL user fields exported by the legacy profile
+ * collector and carried by the profile stream. */
 export interface InstagramProfilePageUser {
+	biography?: string | null;
+	external_url?: string | null;
 	follower_count?: number | null;
-	following_count?: number | null;
+	full_name?: string | null;
+	id?: string | null;
+	is_business_account?: boolean | null;
+	is_private?: boolean | null;
+	is_verified?: boolean | null;
 	media_count?: number | null;
+	profile_pic_url?: string | null;
+	username?: string | null;
+	following_count?: number | null;
 }
 
 /** Envelope wrapping {@link InstagramProfilePageUser} as observed live:

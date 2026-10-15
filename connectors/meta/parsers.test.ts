@@ -15,6 +15,7 @@ import {
 	postLikeRecords,
 	postRecord,
 	profileCountsFromGraphQL,
+	profileEnrichmentIsComplete,
 	profileRecord,
 	stableAdId,
 } from "./parsers.ts";
@@ -97,7 +98,6 @@ test("profileRecord: maps web_info fields per the live-observed shape (2026-09-2
 		id: "123",
 		is_business_account: false,
 		is_private: true,
-		is_verified: false,
 		profile_pic_url: "https://cdn.example.com/pic.jpg",
 		username: "janedoe",
 	};
@@ -110,7 +110,7 @@ test("profileRecord: maps web_info fields per the live-observed shape (2026-09-2
 		id: "123",
 		is_business: false,
 		is_private: true,
-		is_verified: false,
+		is_verified: null,
 		post_count: null,
 		profile_pic_url: "https://cdn.example.com/pic.jpg",
 		username: "janedoe",
@@ -161,6 +161,74 @@ test("profileRecord: fills counts from the second arg when provided", () => {
 	assert.equal(record?.follower_count, 1234);
 	assert.equal(record?.following_count, 56);
 	assert.equal(record?.post_count, 78);
+});
+
+test("profileRecord: takes verified status only from the observed profile-page user", () => {
+	const webInfoUser: InstagramWebInfoUser = {
+		id: "123",
+		username: "person",
+	};
+	assert.equal(profileRecord(webInfoUser)?.is_verified, null);
+	assert.equal(
+		profileRecord(
+			webInfoUser,
+			{ follower_count: 1, following_count: 2, post_count: 3 },
+			{ is_verified: false },
+		)?.is_verified,
+		false,
+	);
+});
+
+test("profileRecord: overlays the captured GraphQL user fields", () => {
+	const record = profileRecord(
+		{ id: "web-id", username: "web-user", full_name: "Web name" },
+		{ follower_count: 4, following_count: 5, post_count: 6 },
+		{
+			biography: "GraphQL bio",
+			external_url: "https://example.test/profile",
+			full_name: "GraphQL name",
+			id: "graph-id",
+			is_verified: true,
+			profile_pic_url: "https://example.test/image.jpg",
+			username: "graph-user",
+		},
+	);
+	assert.deepEqual(
+		{
+			bio: record?.bio,
+			external_url: record?.external_url,
+			full_name: record?.full_name,
+			id: record?.id,
+			is_verified: record?.is_verified,
+			profile_pic_url: record?.profile_pic_url,
+			username: record?.username,
+		},
+		{
+			bio: "GraphQL bio",
+			external_url: "https://example.test/profile",
+			full_name: "GraphQL name",
+			id: "graph-id",
+			is_verified: true,
+			profile_pic_url: "https://example.test/image.jpg",
+			username: "graph-user",
+		},
+	);
+});
+
+test("profileEnrichmentIsComplete: requires counts and verified status from the captured user", () => {
+	assert.equal(profileEnrichmentIsComplete(null), false);
+	assert.equal(
+		profileEnrichmentIsComplete({
+			id: "fixture-id",
+			follower_count: 1,
+			following_count: 2,
+			media_count: 3,
+			is_verified: false,
+			username: "fixture-user",
+		}),
+		true,
+	);
+	assert.equal(profileEnrichmentIsComplete({ follower_count: 1 }), false);
 });
 
 // ─── profileCountsFromGraphQL ───────────────────────────────────────────
@@ -404,6 +472,17 @@ test("followingRecord: maps accounts[] fields per the capability-map field_map",
 
 test("followingRecord: returns null when username is missing", () => {
 	assert.equal(followingRecord({ pk: "1" }), null);
+});
+
+test("followingRecord: falls back to id when pk is empty", () => {
+	assert.deepEqual(followingRecord({ id: "valid-id", pk: "", username: "person" }), {
+		id: "valid-id",
+		username: "person",
+		full_name: null,
+		is_private: null,
+		is_verified: null,
+		profile_pic_url: null,
+	});
 });
 
 // ─── dedupeFollowingByUsername ──────────────────────────────────────────

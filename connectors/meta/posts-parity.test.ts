@@ -506,6 +506,33 @@ test("fetchAllPosts: header-only posts operation is not legacy timeline evidence
 	assert.equal(pdpp, "not-proven");
 });
 
+test("fetchAllPosts: fallback scroll acquires the initial response after legacy polling", async () => {
+	const result = await fetchAllPosts(
+		makePostsPage({
+			postsScript: [
+				null,
+				{
+					json: timelineEnvelope(
+						[{ node: { id: "fallback-post" } }],
+						{ has_next_page: false },
+					),
+					status: 200,
+				},
+			],
+		}),
+		"testuser",
+		null,
+		async () => undefined,
+		NO_DELAY,
+		FAST_POSTS_CLOCK,
+	);
+
+	assert.deepEqual(
+		result.edges.map((edge) => edge.node.id),
+		["fallback-post"],
+	);
+});
+
 test("fetchAllPosts: walks an empty first page when it advertises a next page", async () => {
 	const result = await fetchAllPosts(
 		makePostsPage({

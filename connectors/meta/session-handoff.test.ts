@@ -5,7 +5,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BrowserContext, Page } from "playwright";
 import type { EnsureSessionArgs } from "../../packages/polyfill-connectors/src/session-establish.ts";
-import { ensureMetaSession } from "./index.ts";
+import { ensureMetaSession, probeMetaSession } from "./index.ts";
+
+test("probeMetaSession requires authenticated web_info identity after cookie readiness", async () => {
+	let authenticated = false;
+	const context = Object.assign({} as BrowserContext, {
+		cookies: async () => [{ name: "sessionid", value: "synthetic-cookie" }],
+	});
+	const page = Object.assign({} as Page, {
+		evaluate: async () =>
+			authenticated ? { id: "fixture-id", username: "fixture-user" } : null,
+		url: () => "https://www.instagram.com/",
+	});
+
+	assert.equal(await probeMetaSession({ context, page }), false);
+	authenticated = true;
+	assert.equal(await probeMetaSession({ context, page }), true);
+});
 
 test("ensureMetaSession: read-only readiness probe stays in the sign-in tab", async () => {
 	const gotoUrls: string[] = [];
@@ -20,6 +36,11 @@ test("ensureMetaSession: read-only readiness probe stays in the sign-in tab", as
 	});
 	const page = Object.assign({} as Page, {
 		context: () => context,
+		url: () => "https://www.instagram.com/",
+		evaluate: async (fn: unknown) =>
+			String(fn).includes("PolarisViewer")
+				? { id: "u1", username: "fixture-user" }
+				: null,
 		goto: async (url: string) => {
 			gotoUrls.push(url);
 			return null;
