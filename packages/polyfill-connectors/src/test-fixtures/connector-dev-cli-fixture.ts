@@ -35,11 +35,13 @@ runConnector({
 		await emitRecord("items", { id: "item-1", ok: true });
 		await emitRecord("items", { id: "item-2", ok: true });
 		await emitRecord("items", { id: "item-3", ok: true });
-		await emitRecord("items", { id: "item-bad", ok: false });
+		// The checkpoint precedes the bad row: a STATE sent after a refused
+		// row in the same stream is withheld by the stream integrity rule.
 		await emit({
 			type: "STATE",
 			stream: "items",
 			cursor: { last_id: "item-3" },
 		});
+		await emitRecord("items", { id: "item-bad", ok: false });
 	},
 });
