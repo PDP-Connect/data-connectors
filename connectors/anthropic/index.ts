@@ -359,11 +359,13 @@ const FIELD_ABSENT_REASON = "exceeds_inline_cap";
  * blob cap. */
 function spoolSourceRecord(
 	source: SourceRecordEnvelope,
+	maxBytes = HOST_BLOB_MAX_BYTES,
 ): Promise<SpooledBlob | null> {
 	return spoolEnvelopeText(
 		source.stream,
 		source.record_key,
 		JSON.stringify(source),
+		maxBytes,
 	);
 }
 
@@ -1293,12 +1295,20 @@ export async function collectAnthropic({
 	entriesValidated,
 	storeSourceRecords = true,
 	bufferMeter = new BufferMeter(),
+	testOverrides,
 }: BrowserCollectContext & {
 	readZipEntryChunk?: AnthropicZipEntryChunkReader;
 	entriesValidated?: boolean;
 	storeSourceRecords?: boolean;
 	/** Records the largest text the oversize-parent reader held at once. */
 	bufferMeter?: BufferMeter;
+	/** Per-collection test seam. Production calls use the real limits and delay. */
+	testOverrides?: {
+		maxBufferedObjectUnits?: number;
+		maxBlobBytes?: number;
+		inlineTextMaxUnits?: number;
+		initialDelayMs?: number;
+	};
 }): Promise<void> {
 	if (requested.size === 0) {
 		return;
@@ -1310,7 +1320,8 @@ export async function collectAnthropic({
 			timeout: 30_000,
 		})
 		.catch((): undefined => undefined);
-	await politeDelay(1500);
+	const initialDelayMs = testOverrides?.initialDelayMs ?? 1500;
+	if (initialDelayMs > 0) await politeDelay(initialDelayMs);
 	const browserProfile = await readBrowserProfile(page);
 
 	const wantsConversations = requested.has(CONVERSATIONS_STREAM);
@@ -1549,7 +1560,12 @@ export async function collectAnthropic({
 		if (!storeSourceRecords) {
 			absentText[stream].host += 1;
 		} else if (isRecordSelected?.(stream, record) !== false) {
-			blob = await spoolJsonText(stream, record.id, text);
+			blob = await spoolJsonText(
+				stream,
+				record.id,
+				text,
+				testOverrides?.maxBlobBytes,
+			);
 			// TODO(pdpp-host-blob-cap): text over max_blob_bytes is omitted; revisit if the protocol raises the cap or adds multi-part blobs.
 			if (!blob) absentText[stream].cap += 1;
 		}
@@ -1804,7 +1820,7 @@ export async function collectAnthropic({
 		if (wantsConversations) {
 			for (const { record: conversation, source } of selectedConversations) {
 				const blob = await spoolEnvelope(CONVERSATIONS_STREAM, () =>
-					spoolSourceRecord(source),
+					spoolSourceRecord(source, testOverrides?.maxBlobBytes),
 				);
 				await emitSourceRecord(CONVERSATIONS_STREAM, conversation, blob, () =>
 					markDelivered(deliveredConversationIds, conversation.id, "c"),
@@ -1824,7 +1840,7 @@ export async function collectAnthropic({
 		if (wantsProjects) {
 			for (const { record: project, source } of selectedProjects) {
 				const blob = await spoolEnvelope(PROJECTS_STREAM, () =>
-					spoolSourceRecord(source),
+					spoolSourceRecord(source, testOverrides?.maxBlobBytes),
 				);
 				await emitSourceRecord(PROJECTS_STREAM, project, blob, () =>
 					markDelivered(deliveredProjectIds, project.id, "p"),
@@ -2078,7 +2094,7 @@ export async function collectAnthropic({
 				isRecordSelected?.(CONVERSATIONS_STREAM, parsed.conversation)
 			) {
 				const blob = await spoolEnvelope(CONVERSATIONS_STREAM, () =>
-					spoolSourceRecord(source),
+					spoolSourceRecord(source, testOverrides?.maxBlobBytes),
 				);
 				await emitSourceRecord(
 					CONVERSATIONS_STREAM,
@@ -2111,6 +2127,7 @@ export async function collectAnthropic({
 				value.startOffset,
 				CONVERSATION_SCAN_FIELDS,
 				bufferMeter,
+				testOverrides?.inlineTextMaxUnits,
 			);
 			const header = Object.fromEntries(scan.fields);
 			const conversation = parseConversationHeader(
@@ -2167,6 +2184,7 @@ export async function collectAnthropic({
 						CONVERSATIONS_STREAM,
 						conversation.id,
 						chunks(value.startOffset, value.endOffset),
+						testOverrides?.maxBlobBytes,
 					),
 				);
 				await emitSourceRecord(CONVERSATIONS_STREAM, conversation, blob, () =>
@@ -2183,7 +2201,11 @@ export async function collectAnthropic({
 				{
 					validatedEntry: Boolean(entriesValidated),
 					...(entriesValidated
-						? { maxBufferedObjectUnits: OVERSIZE_PARENT_UNITS }
+						? {
+							maxBufferedObjectUnits:
+								testOverrides?.maxBufferedObjectUnits ??
+								OVERSIZE_PARENT_UNITS,
+						}
 						: {}),
 					onOversizedObject: async (_prefix, value) => {
 						await processOversizedConversation(value);

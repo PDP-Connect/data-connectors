@@ -58,15 +58,22 @@ class BlobWriter {
 	private started = false;
 	private overflow = false;
 
-	constructor(stream: string, key: string) {
+	constructor(
+		stream: string,
+		key: string,
+		maxBytes = HOST_BLOB_MAX_BYTES,
+	) {
 		this.stream = stream;
 		this.key = key;
+		this.maxBytes = maxBytes;
 		this.path = join(spoolDirectory(), this.file);
 	}
 
+	private readonly maxBytes: number;
+
 	write(bytes: Buffer): boolean {
 		if (this.overflow) return false;
-		if (this.size + bytes.length > HOST_BLOB_MAX_BYTES) {
+		if (this.size + bytes.length > this.maxBytes) {
 			this.overflow = true;
 			return false;
 		}
@@ -159,10 +166,11 @@ export async function spoolEnvelopeText(
 	stream: string,
 	key: string,
 	envelopeJson: string,
+	maxBytes = HOST_BLOB_MAX_BYTES,
 ): Promise<SpooledBlob | null> {
-	if (Buffer.byteLength(envelopeJson, "utf8") > HOST_BLOB_MAX_BYTES)
+	if (Buffer.byteLength(envelopeJson, "utf8") > maxBytes)
 		return null;
-	const writer = new BlobWriter(stream, key);
+	const writer = new BlobWriter(stream, key, maxBytes);
 	const utf8 = new Utf8Chunks();
 	for (let start = 0; start < envelopeJson.length; start += TEXT_CHUNK_CHARS) {
 		const bytes = utf8.push(
@@ -187,8 +195,9 @@ export async function spoolEnvelopeFromChunks(
 	stream: "conversations" | "projects",
 	key: string,
 	payloadChunks: AsyncIterable<string>,
+	maxBytes = HOST_BLOB_MAX_BYTES,
 ): Promise<SpooledBlob | null> {
-	const writer = new BlobWriter(stream, key);
+	const writer = new BlobWriter(stream, key, maxBytes);
 	const utf8 = new Utf8Chunks();
 	const prefix = `{"format":"anthropic-source-record-v1","stream":${JSON.stringify(stream)},"record_key":${JSON.stringify(key)},"payload":`;
 	if (!writer.write(Buffer.from(prefix, "utf8"))) {
@@ -214,8 +223,9 @@ export async function spoolJsonText(
 	stream: string,
 	key: string,
 	text: string,
+	maxBytes = HOST_BLOB_MAX_BYTES,
 ): Promise<SpooledBlob | null> {
-	const writer = new BlobWriter(stream, key);
+	const writer = new BlobWriter(stream, key, maxBytes);
 	for (const chunk of jsonTextChunks(text)) {
 		if (!writer.write(chunk)) {
 			await writer.discard();

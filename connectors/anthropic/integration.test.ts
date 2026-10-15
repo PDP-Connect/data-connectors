@@ -68,6 +68,12 @@ const { makeRecordingEmit } = await import(
 );
 type BrowserCollectContext =
 	import("../../packages/polyfill-connectors/src/connector-runtime.ts").BrowserCollectContext;
+type AnthropicTestOverrides = {
+	maxBufferedObjectUnits?: number;
+	maxBlobBytes?: number;
+	inlineTextMaxUnits?: number;
+	initialDelayMs?: number;
+};
 
 // ─── Fake page: runs evaluate() callbacks locally against a fetch stub ────
 
@@ -160,10 +166,11 @@ function makeContext(overrides: {
 	/** Streams that get since/until; default every stream. */
 	timeRangeStreams?: string[];
 	state?: Record<string, unknown>;
+	testOverrides?: AnthropicTestOverrides;
 	fetchStub: FetchStub;
 }): {
 	page: FakePage;
-	ctx: BrowserCollectContext;
+	ctx: BrowserCollectContext & { testOverrides: AnthropicTestOverrides };
 	emitted: ReturnType<typeof makeRecordingEmit>["emitted"];
 	events: ReturnType<typeof makeRecordingEmit>["events"];
 	protocolMessages: EmittedMessage[];
@@ -196,7 +203,9 @@ function makeContext(overrides: {
 		isTombstone: undefined,
 		timeRangeFieldFor: consentTimeFieldResolver("anthropic"),
 	});
-	const ctx: BrowserCollectContext = {
+	const ctx: BrowserCollectContext & {
+		testOverrides: AnthropicTestOverrides;
+	} = {
 		assist: () => {
 			throw new Error("assist not expected in this test");
 		},
@@ -221,6 +230,10 @@ function makeContext(overrides: {
 		state: overrides.state ?? {},
 		context: {} as BrowserCollectContext["context"],
 		page: page as unknown as Page,
+		testOverrides: {
+			initialDelayMs: 0,
+			...overrides.testOverrides,
+		},
 	};
 	return {
 		ctx,
@@ -4187,6 +4200,7 @@ async function runOldFormat(
 			text: string,
 		) => void;
 		bufferMeter?: InstanceType<typeof BufferMeter>;
+		testOverrides?: AnthropicTestOverrides;
 		/** Wraps the collect call only (not the test's own fixture building). */
 		aroundCollect?: <T>(run: () => Promise<T>) => Promise<T>;
 	} = {},
@@ -4196,6 +4210,7 @@ async function runOldFormat(
 		streams: options.streams ?? ALL_EXPORT_STREAMS,
 		...(options.since ? { since: options.since } : {}),
 		...(options.resources ? { resources: options.resources } : {}),
+		...(options.testOverrides ? { testOverrides: options.testOverrides } : {}),
 		fetchStub: oldFormatFetchStub({ exportRequests: 0 }),
 	});
 	serveDownload(context.page, bytes);
@@ -4206,6 +4221,7 @@ async function runOldFormat(
 	await around(() =>
 		collectAnthropic({
 			...context.ctx,
+			testOverrides: context.ctx.testOverrides,
 			...(options.bufferMeter ? { bufferMeter: options.bufferMeter } : {}),
 			...(options.streaming
 				? {
@@ -4770,11 +4786,11 @@ function blobsOf(messages: EmittedMessage[]) {
 }
 
 test("collectAnthropic: a streamed oversized parent whose identity follows its messages is kept; its full envelope is streamed into one real blob and its messages are emitted in order", async () => {
-	// 200 x 100,000 = 20M units: over the 16 Mi buffering limit, under 32 MiB.
+	// Cross the injected 64 Ki unit buffer and verify the complete source blob.
 	const parent = messagesFirstParent(
 		"late-id",
 		"2026-02-01T00:00:00.000Z",
-		200,
+		3,
 	);
 	const reads: number[] = [];
 	const meter = new BufferMeter();
@@ -4783,6 +4799,10 @@ test("collectAnthropic: a streamed oversized parent whose identity follows its m
 		{
 			streams: ["conversations", "messages"],
 			streaming: true,
+			testOverrides: {
+				maxBufferedObjectUnits: 64 * 1024,
+				maxBlobBytes: 512 * 1024,
+			},
 			bufferMeter: meter,
 			onRead: (_name, _offset, _length, text) => reads.push(text.length),
 		},
@@ -4799,18 +4819,18 @@ test("collectAnthropic: a streamed oversized parent whose identity follows its m
 			(r) => r.stream === "messages" && r.data.conversation_id === "late-id",
 		)
 		.map((r) => r.data.id);
-	assert.equal(messageIds.length, 200);
+	assert.equal(messageIds.length, 3);
 	assert.deepEqual(messageIds, [...messageIds].sort(), "created_at order");
 	const record = emitted.find(
 		(r) => r.stream === "conversations" && r.data.id === "late-id",
 	);
-	assert.equal(record?.data.message_count, 200);
+	assert.equal(record?.data.message_count, 3);
 	assert.equal(record?.data.update_time, "2026-02-01T00:00:00.000Z");
 	// One real blob holding the whole raw envelope.
 	const blob = blobsOf(protocolMessages).find((b) => b.key === "late-id");
 	assert.ok(blob);
 	const bytes = readFileSync(join(blobSpoolDir, blob.file));
-	assert.ok(bytes.length > 16 * 1024 * 1024 && bytes.length <= 33_554_432);
+	assert.ok(bytes.length > 256 * 1024 && bytes.length <= 512 * 1024);
 	const envelope = JSON.parse(bytes.toString("utf8"));
 	assert.equal(envelope.format, "anthropic-source-record-v1");
 	assert.equal(envelope.stream, "conversations");
@@ -4875,13 +4895,13 @@ test("collectAnthropic: the streamed path builds no string larger than one messa
 for (const streaming of [false, true]) {
 	const mode = streaming ? "streaming" : "buffered";
 	test(`collectAnthropic: ${mode} conversation with an envelope over the host cap is emitted without blob_ref, discloses one aggregate count, and every stream still proves`, async () => {
-		// 360 x 100,000 = 36M units: the envelope is over 32 MiB.
+		// Cross the injected buffer and blob limits with a small fixture.
 		const { emitted, protocolMessages } = await runOldFormat(
 			[
 				{
 					name: "conversations.json",
 					content: [
-						messagesFirstParent("big-id", "2026-02-01T00:00:00.000Z", 360),
+						messagesFirstParent("big-id", "2026-02-01T00:00:00.000Z", 4),
 						CONVERSATIONS_JSON[0],
 					],
 				},
@@ -4890,6 +4910,10 @@ for (const streaming of [false, true]) {
 			{
 				streams: ["conversations", "messages", "projects", "project_documents"],
 				streaming,
+				testOverrides: {
+					maxBufferedObjectUnits: 64 * 1024,
+					maxBlobBytes: 256 * 1024,
+				},
 			},
 		);
 		const big = emitted.find(
@@ -4902,7 +4926,7 @@ for (const streaming of [false, true]) {
 			emitted.filter(
 				(r) => r.stream === "messages" && r.data.conversation_id === "big-id",
 			).length,
-			360,
+			4,
 		);
 		// conv-1 and proj-1 still get their blobs; big-id gets none.
 		assert.deepEqual(
@@ -4957,7 +4981,7 @@ for (const streaming of [false, true]) {
 		const docs = [0, 1, 2, 3].map((index) => ({
 			uuid: `big-doc-${index}`,
 			filename: `d${index}.md`,
-			content: ENVELOPE_PAD,
+			content: "x".repeat(75_000),
 		}));
 		const { emitted, protocolMessages } = await runOldFormat(
 			[
@@ -4971,6 +4995,10 @@ for (const streaming of [false, true]) {
 			{
 				streams: ["conversations", "messages", "projects", "project_documents"],
 				streaming,
+				testOverrides: {
+					maxBufferedObjectUnits: 64 * 1024,
+					maxBlobBytes: 256 * 1024,
+				},
 			},
 		);
 		const big = emitted.find(
@@ -5003,10 +5031,8 @@ test("collectAnthropic: a time window selects an oversized parent by its late up
 		{
 			name: "conversations.json",
 			content: [
-				// 36M units each: over the host cap, where identity used to be read
-				// from a 64 KiB prefix only.
-				messagesFirstParent("inside", "2026-02-01T00:00:00.000Z", 360),
-				messagesFirstParent("outside", "2025-01-01T00:00:00.000Z", 360),
+				messagesFirstParent("inside", "2026-02-01T00:00:00.000Z", 4),
+				messagesFirstParent("outside", "2025-01-01T00:00:00.000Z", 4),
 			],
 		},
 	];
@@ -5014,6 +5040,10 @@ test("collectAnthropic: a time window selects an oversized parent by its late up
 		streams: ["conversations", "messages"],
 		streaming: true,
 		since: "2026-01-15T00:00:00.000Z",
+		testOverrides: {
+			maxBufferedObjectUnits: 64 * 1024,
+			maxBlobBytes: 256 * 1024,
+		},
 	});
 	assert.deepEqual(
 		emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id),
@@ -5023,7 +5053,7 @@ test("collectAnthropic: a time window selects an oversized parent by its late up
 		emitted.filter(
 			(r) => r.stream === "messages" && r.data.conversation_id === "inside",
 		).length,
-		360,
+		4,
 	);
 	assert.equal(
 		emitted.filter(
@@ -5037,11 +5067,15 @@ test("collectAnthropic: an oversized parent with no identity anywhere is dropped
 	const { chat_messages } = messagesFirstParent(
 		"x",
 		"2026-02-01T00:00:00.000Z",
-		180,
+		2,
 	);
 	const { emitted, protocolMessages } = await runOldFormat(
 		[{ name: "conversations.json", content: [{ chat_messages }] }],
-		{ streams: ["conversations", "messages"], streaming: true },
+		{
+			streams: ["conversations", "messages"],
+			streaming: true,
+			testOverrides: { maxBufferedObjectUnits: 64 * 1024 },
+		},
 	);
 	assert.equal(emitted.length, 0);
 	assert.deepEqual(
@@ -5176,10 +5210,10 @@ for (const streaming of [false, true]) {
 }
 
 test("collectAnthropic: an oversized parent whose chat_messages is replaced by a later duplicate key matches the buffered parser", async () => {
-	// The first array is ~20M units (so the parent is read incrementally); the
-	// later key replaces it. JSON.parse, and so the buffered parser, keeps the last.
+	// The first array is about 200 Ki units, so the parent is read incrementally.
+	// The later key replaces it. JSON.parse, and so the buffered parser, keeps the last.
 	const bigArray = JSON.stringify(
-		messagesFirstParent("dup", "2026-02-01T00:00:00.000Z", 200).chat_messages,
+		messagesFirstParent("dup", "2026-02-01T00:00:00.000Z", 2).chat_messages,
 	);
 	for (const [label, later, messages] of [
 		["null", "null", 0],
@@ -5191,7 +5225,14 @@ test("collectAnthropic: an oversized parent whose chat_messages is replaced by a
 		const text = `{"chat_messages":${bigArray},"uuid":"dup","updated_at":"2026-02-01T00:00:00.000Z","created_at":"2026-01-20T00:00:00.000Z","chat_messages":${later}}`;
 		const { emitted, protocolMessages } = await runOldFormat(
 			[{ name: "conversations.json", content: new RawJson(`[${text}]`) }],
-			{ streams: ["conversations", "messages"], streaming: true },
+			{
+				streams: ["conversations", "messages"],
+				streaming: true,
+				testOverrides: {
+					maxBufferedObjectUnits: 64 * 1024,
+					maxBlobBytes: 256 * 1024,
+				},
+			},
 		);
 		assert.deepEqual(
 			emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id),
@@ -5224,9 +5265,9 @@ test("collectAnthropic: an oversized parent whose chat_messages is replaced by a
 });
 
 test("collectAnthropic: a streamed title exactly at the inline cap is kept, one unit over is absent", async () => {
-	const cap = 10_000_000;
+	const cap = 64 * 1024;
 	const run = async (length: number) => {
-		const parent = messagesFirstParent("edge", "2026-02-01T00:00:00.000Z", 80);
+		const parent = messagesFirstParent("edge", "2026-02-01T00:00:00.000Z", 1);
 		return runOldFormat(
 			[
 				{
@@ -5234,7 +5275,14 @@ test("collectAnthropic: a streamed title exactly at the inline cap is kept, one 
 					content: [{ ...parent, name: "A".repeat(length) }],
 				},
 			],
-			{ streams: ["conversations", "messages"], streaming: true },
+			{
+				streams: ["conversations", "messages"],
+				streaming: true,
+				testOverrides: {
+					maxBufferedObjectUnits: 32 * 1024,
+					inlineTextMaxUnits: cap,
+				},
+			},
 		);
 	};
 	const atCap = await run(cap);
