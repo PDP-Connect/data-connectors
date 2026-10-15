@@ -9,7 +9,7 @@
 	},
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.25",
+	"version": "0.1.26",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",
@@ -207,7 +207,10 @@
 				"type": "object",
 				"properties": {
 					"id": {
-						"type": "string"
+						"type": ["string", "null"]
+					},
+					"identity_unresolved": {
+						"type": "boolean"
 					},
 					"name": {
 						"type": "string",
@@ -243,7 +246,7 @@
 						"type": "array"
 					}
 				},
-				"required": ["id", "name"]
+				"required": ["id", "identity_unresolved", "name"]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "added_at",
@@ -253,7 +256,7 @@
 				"resources": true
 			},
 			"required": true,
-			"incremental": true,
+			"incremental": false,
 			"query": {
 				"search": {
 					"lexical_fields": ["name", "album_name"]
@@ -266,12 +269,12 @@
 					"added_at": ["gte", "gt", "lte", "lt"]
 				}
 			},
-			"coverage_strategy": "checkpoint_window",
+			"coverage_strategy": "full_inventory",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
 			"name": "profile",
-			"description": "The authenticated Spotify account's own profile, from GET /me.",
+			"description": "The authenticated Spotify account's profile from the web player.",
 			"display": {
 				"label": "Your Spotify profile",
 				"detail": "Account id, display name, follower count."

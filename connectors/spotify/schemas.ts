@@ -5,39 +5,37 @@
  * Zod schemas for Spotify stream records. Shape-check-before-emit per
  * docs/reference/connector-authoring-guide.md §3.
  *
- * Ground truth: the four `emitRecord(...)` object literals in index.ts
- * (collectPlaylists, collectSavedTracks, collectTopArtists,
- * collectRecentlyPlayed). Schemas mirror the *emitted* shape:
+ * Ground truth: the record builders in index.ts. Collection uses logged-in
+ * Spotify web-player GraphQL responses and user-profile-view enrichment.
+ * Schemas mirror the emitted shape:
  *
- *   - Spotify resource ids are base-62 strings (22 chars in practice, but the
- *     schema bounds them rather than fixing the length). `id`, `owner_id`,
- *     `track_id` follow SPOTIFY_ID_RE.
+ *   - Spotify resource ids are usually base-62 strings. User ids and legacy
+ *     source variants can contain other characters, so each field uses the
+ *     narrowest constraint supported by its source contract.
  *   - `name` / `track_name` / `album_name` / `description` and each element of
  *     `artist_names` are free-form human text → `pdppSafeText`.
  *   - Several id/name fields are read off optional source interface members
- *     (`p.name`, `t.id`, `a.id`, ...). When the API omits them the builder
+ *     (`p.name`, `t.id`, `a.id`, ...). When the source omits them the builder
  *     assigns `undefined`, which JSON drops. The schema marks those fields
  *     `.optional()` (in addition to `.nullable()` where the builder uses `??
  *     null`) so a legitimately-absent value validates, while a present value of
  *     the wrong shape is still rejected.
- *   - `added_at` / `played_at` are ISO-8601 datetimes (required cursor inputs).
+ *   - `added_at` / `played_at` are ISO-8601 datetimes where present; saved
+ *     tracks can lack a save date and retain that source row with null.
  *   - `isrc` is the 12-char ISRC code or null.
  *   - `time_range` (top_artists) is one of Spotify's three fixed windows.
  *   - recently_played `id` is the composite `"<trackId>:<playedAtMs>"` the
  *     builder constructs — validated by RECENTLY_PLAYED_ID_RE.
- *   - `uri` fields are Spotify's `spotify:<type>:<id>` URIs, already present on
- *     the same Web API objects the connector fetches (playlist/track/user).
- *   - `images` is the Web API's own `[{url, width, height}]` array (width/height
- *     nullable); forwarded verbatim, empty array when the API sends none.
- *   - playlists.followers is `playlist.followers.total` from GET
- *     /playlists/{id}?fields=followers.total, because GET /me/playlists
- *     returns simplified playlist objects without follower counts.
+ *   - `uri` fields preserve values from web-player GraphQL payloads. Saved
+ *     track URIs can be empty or absent in legacy-compatible source rows.
+ *   - `images` normalizes web-player image URLs to `[{url, width, height}]`;
+ *     width and height are null because that payload does not provide them.
+ *   - Playlist follower counts come from authenticated fetchPlaylist data.
  *   - saved_tracks.album_artist_names is the *album's* artist list
- *     (`track.album.artists[].name`), distinct from `artist_names` (the
+ *     (`albumOfTrack.artists.items[].profile.name`), distinct from `artist_names` (the
  *     track's own artists) — both arrays can differ for compilations/features.
- *   - profile.following is the followed-artist total from GET
- *     /me/following?type=artist (`.artists.total`) — the closest documented
- *     "following" signal the Web API exposes; see index.ts collectProfile.
+ *   - profile.following is the `following_count` returned by user-profile-view
+ *     enrichment when its URI matches the authenticated GraphQL identity.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
@@ -61,16 +59,13 @@ const artistNamesSchema = z.array(pdppSafeText.max(1000));
 const isoDateTimeSchema = z
 	.string()
 	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
-// Spotify URIs are `spotify:<type>:<base-62 id>` (spec: developer.spotify.com
-// /documentation/web-api/concepts/spotify-uris-ids).
 const SPOTIFY_URI_RE = /^spotify:[a-z]+:[0-9A-Za-z]{1,40}$/;
 const spotifyUriSchema = z
 	.string()
 	.regex(SPOTIFY_URI_RE, "must be a Spotify URI");
-// The Web API image object: { url, width, height } with width/height nullable
-// (some image sources omit dimensions).
+// Normalized web-player image data; this source provides the URL without dimensions.
 const spotifyImageSchema = z.object({
-	url: z.string().min(1).max(2000),
+	url: z.string().max(2000),
 	width: z.number().int().min(0).nullable(),
 	height: z.number().int().min(0).nullable(),
 });
@@ -83,7 +78,7 @@ const spotifyImagesSchema = z.array(spotifyImageSchema);
 export const playlistsSchema = z.object({
 	id: spotifyIdSchema,
 	name: nameSchema,
-	owner_id: spotifyIdSchema.nullable(),
+	owner_id: z.string().min(1).max(80).nullable(),
 	owner_name: pdppSafeText.max(1000).nullable(),
 	public: z.boolean().nullable(),
 	collaborative: z.boolean().nullable(),
@@ -100,34 +95,35 @@ export const playlistsSchema = z.object({
  * Cursor: added_at.
  */
 export const savedTracksSchema = z.object({
-	id: spotifyIdSchema.optional(),
+	id: z.string().min(1).max(200).nullable(),
+	identity_unresolved: z.boolean(),
 	name: nameSchema,
 	artist_names: artistNamesSchema,
 	album_name: pdppSafeText.max(1000).nullable(),
 	duration_ms: z.number().int().min(0).nullable(),
 	popularity: z.number().int().min(0).max(100).nullable(),
-	added_at: isoDateTimeSchema,
+	added_at: isoDateTimeSchema.nullable(),
 	isrc: z
 		.string()
 		.regex(ISRC_RE, "isrc must be a 12-char ISRC code")
 		.nullable(),
-	uri: spotifyUriSchema.nullable(),
+	uri: z.string().max(2000).nullable(),
 	explicit: z.boolean().nullable(),
 	album_artist_names: artistNamesSchema,
 });
 
 /**
- * profile stream: one singleton record for the authenticated user, from
- * GET /me.
+ * profile stream: one singleton record for the authenticated user, from the
+ * web-player profileAttributes query and same-account profile-view enrichment.
  */
 export const profileSchema = z.object({
-	// Unlike track/playlist/artist ids, a Spotify user id (from GET /me) is not
+	// Unlike track/playlist/artist ids, a Spotify user id is not
 	// guaranteed base-62: legacy accounts can carry ids derived from an email
 	// or a linked Facebook account, so this only bounds length.
 	id: z.string().min(1).max(80),
 	display_name: pdppSafeText.max(1000).nullable(),
 	followers: z.number().int().min(0).nullable(),
-	// `spotify:user:<id>` — GET /me's own uri does not require the base-62 id
+	// `spotify:user:<id>` — a user's URI does not require the base-62 id
 	// shape (see id's own comment), so this only checks the `spotify:user:`
 	// prefix rather than reusing spotifyUriSchema's stricter id segment.
 	uri: z
@@ -135,9 +131,8 @@ export const profileSchema = z.object({
 		.regex(/^spotify:user:.+$/, "must be a Spotify user URI")
 		.nullable(),
 	images: spotifyImagesSchema,
-	// Followed-artist total from GET /me/following?type=artist — the closest
-	// documented "following" signal the Web API exposes (see index.ts comment
-	// on collectProfile). Null when the extra call fails or is skipped.
+	// Same-account user-profile-view following_count. Null when enrichment is
+	// unavailable or its URI does not match the authenticated identity.
 	following: z.number().int().min(0).nullable(),
 });
 
@@ -155,7 +150,7 @@ export const profileSchema = z.object({
 export const playlistItemsSchema = z.object({
 	id: z.string().min(1).max(120),
 	playlist_id: spotifyIdSchema,
-	track_id: spotifyIdSchema.nullable(),
+	track_id: z.string().min(1).max(200).nullable(),
 	uri: z.string().max(2000).nullable(),
 	position: z.number().int().min(0),
 	added_at: isoDateTimeSchema.nullable(),

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Spotify Connector (v0.1.2)
+ * PDPP Spotify Connector (v0.1.26)
  *
  * Uses a logged-in open.spotify.com browser session and Spotify web-player
  * GraphQL endpoints. This keeps the legacy Desktop UX and avoids pasted public
@@ -22,6 +22,11 @@ import {
 	emitDetailCoverage,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	hasSpotifyEndProof,
+	hasSpotifyTerminalBoundary,
+	type SpotifyEndEvidence,
+} from "./completion-evidence.ts";
 import { validateRecord } from "./schemas.ts";
 
 const API = "https://api.spotify.com/v1";
@@ -66,12 +71,10 @@ export interface SpotifyPlaylist {
 	followers?: { total?: number | null } | null;
 	id: string;
 	images?: SpotifyImage[] | null;
-	items?: { total?: number | null };
 	name?: string;
 	owner?: { id?: string; display_name?: string };
 	public?: boolean | null;
 	snapshot_id?: string | null;
-	tracks?: { total?: number | null };
 	uri?: string;
 }
 
@@ -90,21 +93,23 @@ interface SpotifyProfile {
 }
 
 interface BrowserData {
+	completion: Partial<
+		Record<"playlists" | "playlist_items" | "saved_tracks", SpotifyEndEvidence>
+	>;
 	playlist_items: Record<string, unknown>[];
+	playlistUris: string[];
 	playlists: Record<string, unknown>[];
 	profile: Record<string, unknown> | null;
 	saved_tracks: Record<string, unknown>[];
+	sourceCounts: Partial<
+		Record<
+			"playlists" | "playlist_items" | "saved_tracks",
+			{ considered: number; covered: number }
+		>
+	>;
 }
 
-/** Non-fatal collection problem; `event` is the diagnostic event name. */
-interface BrowserWarning {
-	event: "missing_query_hashes" | "saved_track_missing_added_at";
-	fields: Record<string, string>;
-}
-
-interface BrowserCollectResult extends BrowserData {
-	warnings: BrowserWarning[];
-}
+type BrowserCollectResult = BrowserData;
 
 /**
  * Spotify's `after` filter is strictly exclusive. Replaying the one-ms
@@ -183,8 +188,11 @@ export function createSpotifyCycleDetector(initialPath: string): {
 function spotifyImages(
 	images: SpotifyImage[] | null | undefined,
 ): Array<{ height: number | null; url: string; width: number | null }> {
-	return (images || [])
-		.filter((img): img is SpotifyImage & { url: string } => Boolean(img.url))
+	return (images ?? [])
+		.filter(
+			(img): img is SpotifyImage & { url: string } =>
+				typeof img.url === "string",
+		)
 		.map((img) => ({
 			url: img.url,
 			width: img.width ?? null,
@@ -194,6 +202,7 @@ function spotifyImages(
 
 export function spotifyPlaylistRecord(
 	p: SpotifyPlaylist,
+	collectedTrackCount: number | null,
 ): Record<string, unknown> {
 	return {
 		id: p.id,
@@ -202,7 +211,7 @@ export function spotifyPlaylistRecord(
 		owner_name: p.owner?.display_name ?? null,
 		public: p.public ?? null,
 		collaborative: p.collaborative ?? null,
-		track_count: p.items?.total ?? p.tracks?.total ?? null,
+		track_count: collectedTrackCount,
 		snapshot_id: p.snapshot_id ?? null,
 		description: p.description ?? null,
 		uri: p.uri ?? null,
@@ -226,7 +235,7 @@ export function spotifyPlaylistItemRecord(
 		added_at: item.added_at ?? null,
 		added_by: item.added_by?.id ?? null,
 		name: t?.name,
-		artist_names: (t?.artists || []).map((a) => a.name),
+		artist_names: (t?.artists ?? []).map((a) => a.name),
 		album_name: t?.album?.name ?? null,
 		duration_ms: t?.duration_ms ?? null,
 	};
@@ -362,31 +371,49 @@ async function collectSpotifyWebData(
 	await openSpotify(page);
 	return await page.evaluate(async (requested) => {
 		const wanted = new Set(requested);
-		const warnings: BrowserWarning[] = [];
 		const result: BrowserData = {
+			completion: {},
 			profile: null,
+			playlistUris: [],
 			playlists: [],
 			playlist_items: [],
 			saved_tracks: [],
+			sourceCounts: {},
 		};
+		const navigation = new URL(window.location.href);
+		if (
+			navigation.origin !== "https://open.spotify.com" ||
+			navigation.pathname !== "/" ||
+			navigation.search !== "" ||
+			navigation.hash !== ""
+		) {
+			throw new Error("spotify_page_not_player");
+		}
+		const navigationProof = navigation.toString();
 		const webVersion = "1.2.56.244.g7bfe3dc8";
 		let clientId: string | null = null;
 
 		function idFromUri(uri: unknown): string | null {
 			if (typeof uri !== "string") return null;
 			const parts = uri.split(":");
-			return parts.length >= 3 ? parts[parts.length - 1] || null : null;
+			const id = parts.length >= 3 ? parts[parts.length - 1] : null;
+			return typeof id === "string" && id.length > 0 ? id : null;
+		}
+
+		function spotifyTrackId(uri: unknown, sourceId: unknown): string | null {
+			const uriId = idFromUri(uri);
+			if (uriId !== null) return uriId;
+			return typeof sourceId === "string" && sourceId.length > 0
+				? sourceId
+				: null;
 		}
 
 		function imageRecords(
 			images: any,
 		): Array<{ height: null; url: string; width: null }> {
-			return (images?.items || [])
+			return (images?.items ?? [])
 				.map((img: any) => img?.sources?.[0]?.url)
-				.filter(
-					(url: unknown): url is string =>
-						typeof url === "string" && url.length > 0,
-				)
+				.filter((url: unknown): url is string => typeof url === "string")
 				.map((url: string) => ({ url, width: null, height: null }));
 		}
 
@@ -396,12 +423,22 @@ async function collectSpotifyWebData(
 				: null;
 		}
 
+		function sourceArtistNames(value: unknown): string[] | null {
+			if (!Array.isArray(value)) return null;
+			const names: string[] = [];
+			for (const entry of value) {
+				if (typeof entry !== "object" || entry === null) return null;
+				const profile = (entry as Record<string, unknown>).profile;
+				if (typeof profile !== "object" || profile === null) return null;
+				const name = (profile as Record<string, unknown>).name;
+				if (typeof name !== "string") return null;
+				names.push(name);
+			}
+			return names;
+		}
+
 		function pageSignature(items: unknown[]): string {
-			return JSON.stringify({
-				count: items.length,
-				first: items.slice(0, 3),
-				last: items.slice(-3),
-			});
+			return JSON.stringify(items);
 		}
 
 		async function accessToken(): Promise<string> {
@@ -500,71 +537,142 @@ async function collectSpotifyWebData(
 		}
 
 		async function queryHashes(): Promise<Record<string, string>> {
-			const needed = [
-				"fetchLibraryTracks",
-				"fetchPlaylist",
-				"libraryV3",
-				"profileAttributes",
-			];
-			const found: Record<string, string> = {};
+			const needed = new Set<string>();
+			if (wanted.has("profile")) needed.add("profileAttributes");
+			if (wanted.has("playlists") || wanted.has("playlist_items")) {
+				needed.add("libraryV3");
+				needed.add("fetchPlaylist");
+			}
+			if (wanted.has("saved_tracks")) needed.add("fetchLibraryTracks");
+			const maxBundles = 60;
+			const maxBundleBytes = 64 * 1024 * 1024;
 			const hashPattern =
 				/new\s+\w+\.\w+\("(\w+)","(?:query|mutation)","([a-f0-9]{64})"/g;
-			const extract = (text: string) => {
-				const re = new RegExp(hashPattern.source, "g");
-				let m = re.exec(text);
-				while (m !== null) {
-					const operation = m[1];
-					const hash = m[2];
-					if (operation && hash && needed.includes(operation))
-						found[operation] = hash;
-					m = re.exec(text);
-				}
-			};
-			const complete = () => needed.every((name) => found[name]);
-			try {
-				const names = await caches.keys();
-				const pcName = names.find((name) => name.includes("workbox-precache"));
-				if (pcName) {
-					const cache = await caches.open(pcName);
-					for (const req of (await cache.keys())
-						.filter((req) => req.url.endsWith(".js"))
-						.slice(0, 20)) {
-						const resp = await cache.match(req);
-						if (resp) extract(await resp.text());
-						if (complete()) return found;
+			const complete = (found: Record<string, string>) =>
+				[...needed].every((name) => typeof found[name] === "string");
+			async function scan(): Promise<Record<string, string>> {
+				const found: Record<string, string> = {};
+				let bundlesRead = 0;
+				let bytesRead = 0;
+				const extract = (text: string) => {
+					const re = new RegExp(hashPattern.source, "g");
+					let match = re.exec(text);
+					while (match !== null) {
+						const operation = match[1];
+						const hash = match[2];
+						if (operation && hash && needed.has(operation))
+							found[operation] = hash;
+						match = re.exec(text);
 					}
-				}
-			} catch {}
-			const scripts = [
-				...Array.from(document.querySelectorAll("script[src]")).map(
-					(s) => (s as HTMLScriptElement).src,
-				),
-				...performance
-					.getEntriesByType("resource")
-					.filter(
-						(e) =>
-							(e as PerformanceResourceTiming).initiatorType === "script" &&
-							e.name.endsWith(".js"),
+				};
+				const read = async (response: Response | undefined | null) => {
+					if (
+						!response ||
+						bundlesRead >= maxBundles ||
+						bytesRead >= maxBundleBytes
 					)
-					.map((e) => e.name),
-			].filter(
-				(url, index, all) =>
-					url.includes("spotify") && all.indexOf(url) === index,
-			);
-			for (const url of scripts) {
+						return;
+					bundlesRead += 1;
+					const remainingBytes = maxBundleBytes - bytesRead;
+					const declaredLength = response.headers.get("content-length");
+					const declaredBytes =
+						declaredLength === null ? -1 : Number(declaredLength);
+					if (Number.isFinite(declaredBytes) && declaredBytes > remainingBytes)
+						return;
+					const reader = response.body?.getReader();
+					if (!reader) return;
+					const chunks: Uint8Array[] = [];
+					let bytes = 0;
+					while (true) {
+						const part = await reader.read();
+						if (part.done) break;
+						bytes += part.value.byteLength;
+						if (bytes > remainingBytes) {
+							await reader.cancel();
+							return;
+						}
+						chunks.push(part.value);
+					}
+					const joined = new Uint8Array(bytes);
+					let offset = 0;
+					for (const chunk of chunks) {
+						joined.set(chunk, offset);
+						offset += chunk.byteLength;
+					}
+					bytesRead += bytes;
+					extract(new TextDecoder().decode(joined));
+				};
 				try {
-					const resp = await fetch(url);
-					if (resp.ok) extract(await resp.text());
-					if (complete()) return found;
+					const names = await caches.keys();
+					for (const cacheName of names.filter((name) =>
+						name.includes("workbox-precache"),
+					)) {
+						const cache = await caches.open(cacheName);
+						const entries = (await cache.keys())
+							.filter((req) => req.url.endsWith(".js"))
+							.map((req, index) => ({ req, index }));
+						const sized = await Promise.all(
+							entries.map(async (entry) => {
+								const response = await cache.match(entry.req);
+								const contentLength = response?.headers.get("content-length");
+								const size =
+									contentLength === null || contentLength === undefined
+										? -1
+										: Number(contentLength);
+								return {
+									...entry,
+									response,
+									size: Number.isFinite(size) ? size : -1,
+								};
+							}),
+						);
+						sized.sort((a, b) => b.size - a.size || a.index - b.index);
+						for (const entry of sized) {
+							await read(entry.response);
+							if (complete(found)) return found;
+							if (bundlesRead >= maxBundles || bytesRead >= maxBundleBytes)
+								break;
+						}
+					}
 				} catch {}
+				if (complete(found)) return found;
+				const scripts = [
+					...Array.from(document.querySelectorAll("script[src]")).map(
+						(s) => (s as HTMLScriptElement).src,
+					),
+					...performance
+						.getEntriesByType("resource")
+						.filter(
+							(e) =>
+								(e as PerformanceResourceTiming).initiatorType === "script" &&
+								e.name.endsWith(".js"),
+						)
+						.map((e) => e.name),
+				].filter(
+					(url, index, all) =>
+						url.includes("spotify") && all.indexOf(url) === index,
+				);
+				for (const url of scripts) {
+					if (bundlesRead >= maxBundles || bytesRead >= maxBundleBytes) break;
+					try {
+						const response = await fetch(url);
+						if (response.ok) await read(response);
+						if (complete(found)) return found;
+					} catch {}
+				}
+				return found;
 			}
-			const missing = needed.filter((name) => !found[name]);
-			if (missing.length > 0)
-				warnings.push({
-					event: "missing_query_hashes",
-					fields: { names: missing.join(", ") },
-				});
-			return found;
+			let found: Record<string, string> = {};
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				found = await scan();
+				if (complete(found)) return found;
+				if (attempt < 2)
+					await new Promise((resolve) => setTimeout(resolve, 3000));
+			}
+			const missing = [...needed].filter(
+				(name) => typeof found[name] !== "string",
+			);
+			throw new Error(`spotify_missing_hashes_${missing.join(",")}`);
 		}
 
 		const access = await accessToken();
@@ -636,7 +744,7 @@ async function collectSpotifyWebData(
 			const attrs = await gql("profileAttributes", {});
 			const pa = attrs?.data?.me?.profile;
 			if (!pa?.username) throw new Error("spotify_profile_unavailable");
-			const identityUri = pa.uri || `spotify:user:${pa.username}`;
+			const identityUri = pa.uri ?? `spotify:user:${pa.username}`;
 			let enrichment: any = null;
 			try {
 				const enriched = await fetch(
@@ -654,13 +762,16 @@ async function collectSpotifyWebData(
 			} catch {}
 			const sameAccount = enrichment?.uri === identityUri;
 			const imageUrl =
-				pa.imageUrl || (sameAccount ? enrichment?.image_url : null);
+				pa.imageUrl ?? (sameAccount ? enrichment?.image_url : null);
 			result.profile = {
 				id: pa.username,
 				display_name: pa.name ?? null,
 				followers: sameAccount ? count(enrichment?.followers_count) : null,
 				uri: identityUri,
-				images: imageUrl ? [{ url: imageUrl, width: null, height: null }] : [],
+				images:
+					typeof imageUrl === "string"
+						? [{ url: imageUrl, width: null, height: null }]
+						: [],
 				following: sameAccount ? count(enrichment?.following_count) : null,
 			};
 		}
@@ -670,6 +781,10 @@ async function collectSpotifyWebData(
 			let libraryOffset = 0;
 			const libraryLimit = 200;
 			const libraryPageSignatures = new Set<string>();
+			let libraryRawCount = 0;
+			let libraryExpectedCount: number | null = null;
+			let libraryPageCount = 0;
+			let libraryTerminal: SpotifyEndEvidence["terminal"] = null;
 			while (true) {
 				const libData = await gql("libraryV3", {
 					filters: [],
@@ -685,48 +800,120 @@ async function collectSpotifyWebData(
 					withCuration: false,
 				});
 				const library = libData?.data?.me?.libraryV3;
-				const pageItems = library?.items || [];
+				if (!library || !Array.isArray(library.items)) {
+					throw new Error("spotify_library_response_invalid");
+				}
+				const pageItems = library.items;
+				if (Object.hasOwn(library, "totalCount")) {
+					const parsedTotal = count(library.totalCount);
+					if (parsedTotal === null)
+						throw new Error("spotify_library_total_invalid");
+					if (
+						libraryExpectedCount !== null &&
+						libraryExpectedCount !== parsedTotal
+					) {
+						throw new Error("spotify_library_total_changed");
+					}
+					libraryExpectedCount = parsedTotal;
+				}
 				const signature = pageSignature(pageItems);
-				if (
-					pageItems.length >= libraryLimit &&
-					libraryPageSignatures.has(signature)
-				) {
+				if (pageItems.length > 0 && libraryPageSignatures.has(signature)) {
 					throw new Error("spotify_library_pagination_no_progress");
 				}
-				libraryPageSignatures.add(signature);
-				playlistUris.push(
-					...pageItems
-						.filter((item: any) => item.item?.data?.__typename === "Playlist")
-						.map(
-							(item: any) =>
-								item.item?.data?._uri || item.item?.data?.uri || "",
-						)
-						.filter(
-							(uri: unknown): uri is string =>
-								typeof uri === "string" && uri.length > 0,
-						),
-				);
-				const total = count(library?.totalCount);
-				if (pageItems.length === 0 && total !== null && libraryOffset < total) {
-					throw new Error("spotify_library_pagination_no_progress");
+				if (pageItems.length > 0) libraryPageSignatures.add(signature);
+				for (const item of pageItems) {
+					const data = item?.item?.data;
+					if (!data || typeof data !== "object") {
+						throw new Error("spotify_library_row_invalid");
+					}
+					if (data.__typename !== "Playlist") continue;
+					const uri = data._uri ?? data.uri;
+					if (typeof uri !== "string" || uri.length === 0) {
+						throw new Error("spotify_library_playlist_identity_missing");
+					}
+					playlistUris.push(uri);
 				}
+				libraryRawCount += pageItems.length;
+				libraryPageCount += 1;
 				const nextLibraryOffset = libraryOffset + pageItems.length;
 				if (
-					pageItems.length < libraryLimit ||
-					(total !== null && nextLibraryOffset >= total)
-				)
+					libraryExpectedCount !== null &&
+					nextLibraryOffset > libraryExpectedCount
+				) {
+					throw new Error("spotify_library_count_mismatch");
+				}
+				if (
+					libraryExpectedCount !== null &&
+					nextLibraryOffset === libraryExpectedCount
+				) {
+					libraryTerminal = "total_reached";
 					break;
+				}
+				if (pageItems.length < libraryLimit && libraryExpectedCount === null) {
+					libraryTerminal =
+						pageItems.length === 0 && libraryRawCount === 0
+							? "empty_verified"
+							: "short_page";
+					break;
+				}
+				if (pageItems.length === 0) {
+					throw new Error("spotify_library_pagination_no_progress");
+				}
 				if (nextLibraryOffset <= libraryOffset) {
 					throw new Error("spotify_library_pagination_no_progress");
 				}
 				libraryOffset = nextLibraryOffset;
 			}
+			if (
+				libraryExpectedCount !== null &&
+				libraryRawCount !== libraryExpectedCount
+			) {
+				throw new Error("spotify_library_count_mismatch");
+			}
+			const libraryProof: SpotifyEndEvidence = {
+				stream: wanted.has("playlists") ? "playlists" : "playlist_items",
+				operation: "libraryV3",
+				navigation: navigationProof,
+				owner: "spotify:user:me",
+				selector: "spotify:user:me:library",
+				firstOffset: 0,
+				lastOffset: libraryOffset,
+				pageCount: libraryPageCount,
+				rawCount: libraryRawCount,
+				expectedCount: libraryExpectedCount,
+				discardedCount: 0,
+				remaining: false,
+				terminal: libraryTerminal,
+			};
+			result.playlistUris = playlistUris;
+			if (wanted.has("playlists")) result.completion.playlists = libraryProof;
+			let childRawCount = 0;
+			let childExpectedCount = 0;
+			let childCountKnown = true;
+			let childPageCount = 0;
+			let childTrackCount = 0;
+			let childLastOffset = 0;
 			for (const uri of playlistUris) {
 				let offset = 0;
 				let position = 0;
-				let playlistId = idFromUri(uri);
+				const requestedPlaylistId = idFromUri(uri);
+				if (requestedPlaylistId === null) {
+					throw new Error("spotify_library_playlist_identity_missing");
+				}
+				let playlistName: unknown;
+				let ownerId: string | null = null;
+				let ownerName: unknown;
+				let description: unknown;
+				let uriValue: unknown = uri;
+				let followers: number | null = null;
+				let images: Array<{ height: null; url: string; width: null }> = [];
 				const playlistPageSignatures = new Set<string>();
+				let playlistRawCount = 0;
+				let playlistExpectedCount: number | null = null;
+				let playlistPageCount = 0;
 				while (true) {
+					const requestOffset = offset;
+					childLastOffset = requestOffset;
 					const plData = await gql("fetchPlaylist", {
 						uri,
 						offset,
@@ -734,70 +921,178 @@ async function collectSpotifyWebData(
 						enableWatchFeedEntrypoint: false,
 					});
 					const pl = plData?.data?.playlistV2;
-					if (!pl) break;
-					playlistId = idFromUri(pl.uri) || playlistId;
-					if (!playlistId) break;
-					const items = pl.content?.items || [];
+					if (
+						!pl ||
+						typeof pl.uri !== "string" ||
+						pl.uri !== uri ||
+						!pl.content ||
+						!Array.isArray(pl.content.items)
+					) {
+						throw new Error("spotify_playlist_response_invalid");
+					}
+					const items = pl.content.items;
+					if (Object.hasOwn(pl.content, "totalCount")) {
+						const parsedTotal = count(pl.content.totalCount);
+						if (parsedTotal === null)
+							throw new Error("spotify_playlist_total_invalid");
+						if (
+							playlistExpectedCount !== null &&
+							playlistExpectedCount !== parsedTotal
+						) {
+							throw new Error("spotify_playlist_total_changed");
+						}
+						playlistExpectedCount = parsedTotal;
+					}
 					const signature = pageSignature(items);
-					if (items.length >= 100 && playlistPageSignatures.has(signature)) {
+					if (items.length > 0 && playlistPageSignatures.has(signature)) {
 						throw new Error("spotify_playlist_pagination_no_progress");
 					}
-					playlistPageSignatures.add(signature);
-					if (offset === 0 && wanted.has("playlists")) {
-						result.playlists.push({
-							id: playlistId,
-							name: pl.name ?? undefined,
-							owner_id: idFromUri(pl.ownerV2?.data?.uri),
-							owner_name: pl.ownerV2?.data?.name ?? null,
-							public: null,
-							collaborative: null,
-							track_count: count(pl.content?.totalCount),
-							snapshot_id: null,
-							description: pl.description ?? null,
-							uri: pl.uri ?? uri,
-							followers: count(pl.followers),
-							images: imageRecords(pl.images),
-						});
+					if (items.length > 0) playlistPageSignatures.add(signature);
+					if (requestOffset === 0) {
+						const responseId = idFromUri(pl.uri);
+						if (responseId === null || responseId !== requestedPlaylistId) {
+							throw new Error("spotify_playlist_identity_mismatch");
+						}
+						playlistName = pl.name;
+						ownerId = idFromUri(pl.ownerV2?.data?.uri);
+						ownerName = pl.ownerV2?.data?.name;
+						description = pl.description;
+						uriValue = pl.uri;
+						followers = count(pl.followers);
+						images = imageRecords(pl.images);
 					}
-					if (wanted.has("playlist_items")) {
-						for (const item of items) {
-							const t = item.itemV2?.data;
-							if (t?.__typename !== "Track") continue;
+					for (const item of items) {
+						const t = item.itemV2?.data;
+						if (
+							!t ||
+							typeof t !== "object" ||
+							typeof t.__typename !== "string"
+						) {
+							throw new Error("spotify_playlist_row_invalid");
+						}
+						if (t.__typename !== "Track") continue;
+						const artistNames = sourceArtistNames(t.artists?.items);
+						if (artistNames === null) {
+							throw new Error("spotify_playlist_track_artists_invalid");
+						}
+						const trackId = spotifyTrackId(t.uri, t.id);
+						if (wanted.has("playlist_items")) {
 							result.playlist_items.push({
-								id: `${playlistId}:${position}`,
-								playlist_id: playlistId,
-								track_id: idFromUri(t.uri),
+								id: `${requestedPlaylistId}:${position}`,
+								playlist_id: requestedPlaylistId,
+								track_id: trackId,
 								uri: typeof t.uri === "string" ? t.uri : null,
 								position,
 								added_at: item.addedAt?.isoString ?? null,
 								added_by: item.addedBy?.data?.name ?? null,
 								name: t.name ?? undefined,
-								artist_names: (t.artists?.items || []).map(
-									(a: any) => a.profile?.name ?? "",
-								),
+								artist_names: artistNames,
 								album_name: t.albumOfTrack?.name ?? null,
 								duration_ms: count(t.trackDuration?.totalMilliseconds),
 							});
-							position += 1;
 						}
+						position += 1;
+						childTrackCount += 1;
 					}
-					const total = count(pl.content?.totalCount) ?? items.length;
-					if (items.length === 0 && offset < total) {
-						throw new Error("spotify_playlist_pagination_no_progress");
-					}
+					playlistRawCount += items.length;
+					playlistPageCount += 1;
 					const nextOffset = offset + items.length;
-					if (items.length < 100 || nextOffset >= total) break;
+					if (
+						playlistExpectedCount !== null &&
+						nextOffset > playlistExpectedCount
+					) {
+						throw new Error("spotify_playlist_count_mismatch");
+					}
+					if (
+						playlistExpectedCount !== null &&
+						nextOffset === playlistExpectedCount
+					) {
+						break;
+					}
+					if (items.length < 100 && playlistExpectedCount === null) {
+						break;
+					}
+					if (items.length === 0)
+						throw new Error("spotify_playlist_pagination_no_progress");
 					if (nextOffset <= offset) {
 						throw new Error("spotify_playlist_pagination_no_progress");
 					}
 					offset = nextOffset;
 				}
+				if (
+					playlistExpectedCount !== null &&
+					playlistRawCount !== playlistExpectedCount
+				) {
+					throw new Error("spotify_playlist_count_mismatch");
+				}
+				childRawCount += playlistRawCount;
+				childPageCount += playlistPageCount;
+				if (playlistExpectedCount === null) childCountKnown = false;
+				else childExpectedCount += playlistExpectedCount;
+				if (wanted.has("playlists")) {
+					result.playlists.push({
+						id: requestedPlaylistId,
+						name: playlistName,
+						owner_id: ownerId,
+						owner_name: ownerName ?? null,
+						public: null,
+						collaborative: null,
+						track_count: position,
+						snapshot_id: null,
+						description: description ?? null,
+						uri: uriValue,
+						followers,
+						images,
+					});
+				}
+			}
+			if (wanted.has("playlist_items")) {
+				result.completion.playlist_items =
+					playlistUris.length === 0
+						? { ...libraryProof, stream: "playlist_items" }
+						: {
+								stream: "playlist_items",
+								operation: "fetchPlaylist",
+								navigation: navigationProof,
+								owner: "spotify:user:me",
+								selector: playlistUris.join("\n"),
+								firstOffset: 0,
+								lastOffset: childLastOffset,
+								pageCount: childPageCount,
+								rawCount: childRawCount,
+								expectedCount: childCountKnown ? childExpectedCount : null,
+								discardedCount: 0,
+								remaining: false,
+								terminal:
+									childRawCount === 0
+										? "empty_verified"
+										: childCountKnown
+											? "total_reached"
+											: "short_page",
+							};
+			}
+			if (wanted.has("playlists")) {
+				result.sourceCounts.playlists = {
+					considered: playlistUris.length,
+					covered: result.playlists.length,
+				};
+			}
+			if (wanted.has("playlist_items")) {
+				result.sourceCounts.playlist_items = {
+					considered: childTrackCount,
+					covered: childTrackCount,
+				};
 			}
 		}
 
 		if (wanted.has("saved_tracks")) {
 			let offset = 0;
 			const savedTrackPageSignatures = new Set<string>();
+			let rawCount = 0;
+			let expectedCount: number | null = null;
+			let pageCount = 0;
+			let terminal: SpotifyEndEvidence["terminal"] = null;
+			let unresolvedIdentityCount = 0;
 			while (true) {
 				const data = await gql("fetchLibraryTracks", {
 					uri: "spotify:user:me:collection",
@@ -805,73 +1100,128 @@ async function collectSpotifyWebData(
 					limit: 100,
 				});
 				const tracks = data?.data?.me?.library?.tracks;
-				const items = tracks?.items || [];
+				if (!tracks || !Array.isArray(tracks.items)) {
+					throw new Error("spotify_saved_tracks_response_invalid");
+				}
+				const items = tracks.items;
+				if (Object.hasOwn(tracks, "totalCount")) {
+					const parsedTotal = count(tracks.totalCount);
+					if (parsedTotal === null)
+						throw new Error("spotify_saved_tracks_total_invalid");
+					if (expectedCount !== null && expectedCount !== parsedTotal) {
+						throw new Error("spotify_saved_tracks_total_changed");
+					}
+					expectedCount = parsedTotal;
+				}
 				const signature = pageSignature(items);
-				if (items.length >= 100 && savedTrackPageSignatures.has(signature)) {
+				if (items.length > 0 && savedTrackPageSignatures.has(signature)) {
 					throw new Error("spotify_saved_tracks_pagination_no_progress");
 				}
-				savedTrackPageSignatures.add(signature);
+				if (items.length > 0) savedTrackPageSignatures.add(signature);
 				for (const item of items) {
 					const t = item.track?.data;
-					const id = idFromUri(item.track?._uri || item.track?.uri);
-					if (!t || !id) continue;
-					const addedAt = item.addedAt?.isoString;
-					if (!addedAt) {
-						warnings.push({
-							event: "saved_track_missing_added_at",
-							fields: { track_id: id },
-						});
-						continue;
+					if (!t || typeof t !== "object" || typeof t.name !== "string") {
+						throw new Error("spotify_saved_tracks_row_invalid");
 					}
+					const trackUri = item.track?._uri ?? item.track?.uri;
+					const id = spotifyTrackId(trackUri, t.id);
+					const artistNames = sourceArtistNames(t.artists?.items);
+					if (artistNames === null) {
+						throw new Error("spotify_saved_tracks_artists_invalid");
+					}
+					const albumArtistNames = sourceArtistNames(
+						t.albumOfTrack?.artists?.items ?? [],
+					);
+					if (albumArtistNames === null) {
+						throw new Error("spotify_saved_tracks_album_artists_invalid");
+					}
+					const addedAt = item.addedAt?.isoString;
+					if (
+						addedAt !== undefined &&
+						addedAt !== null &&
+						typeof addedAt !== "string"
+					) {
+						throw new Error("spotify_saved_tracks_added_at_invalid");
+					}
+					if (id === null) unresolvedIdentityCount += 1;
 					result.saved_tracks.push({
 						id,
-						name: t.name ?? undefined,
-						artist_names: (t.artists?.items || []).map(
-							(a: any) => a.profile?.name ?? "",
-						),
+						identity_unresolved: id === null,
+						name: t.name,
+						artist_names: artistNames,
 						album_name: t.albumOfTrack?.name ?? null,
 						duration_ms: count(t.duration?.totalMilliseconds),
 						popularity: null,
-						added_at: addedAt,
+						added_at: addedAt ?? null,
 						isrc: null,
-						uri: item.track?._uri || item.track?.uri || null,
+						uri: typeof trackUri === "string" ? trackUri : null,
 						explicit:
 							typeof t.contentRating?.label === "string"
 								? t.contentRating.label === "EXPLICIT"
 								: null,
-						album_artist_names: (t.albumOfTrack?.artists?.items || []).map(
-							(a: any) => a.profile?.name ?? "",
-						),
+						album_artist_names: albumArtistNames,
 					});
 				}
-				const total = count(tracks?.totalCount) ?? items.length;
-				if (items.length === 0 && offset < total) {
-					throw new Error("spotify_saved_tracks_pagination_no_progress");
-				}
+				rawCount += items.length;
+				pageCount += 1;
 				const nextOffset = offset + items.length;
-				if (items.length < 100 || nextOffset >= total) break;
+				if (expectedCount !== null && nextOffset > expectedCount) {
+					throw new Error("spotify_saved_tracks_count_mismatch");
+				}
+				if (expectedCount !== null && nextOffset === expectedCount) {
+					terminal = "total_reached";
+					break;
+				}
+				if (items.length < 100 && expectedCount === null) {
+					terminal =
+						items.length === 0 && rawCount === 0
+							? "empty_verified"
+							: "short_page";
+					break;
+				}
+				if (items.length === 0)
+					throw new Error("spotify_saved_tracks_pagination_no_progress");
 				if (nextOffset <= offset) {
 					throw new Error("spotify_saved_tracks_pagination_no_progress");
 				}
 				offset = nextOffset;
 			}
+			if (expectedCount !== null && rawCount !== expectedCount) {
+				throw new Error("spotify_saved_tracks_count_mismatch");
+			}
+			result.sourceCounts.saved_tracks = {
+				considered: rawCount,
+				covered: rawCount - unresolvedIdentityCount,
+			};
+			result.completion.saved_tracks = {
+				stream: "saved_tracks",
+				operation: "fetchLibraryTracks",
+				navigation: navigationProof,
+				owner: "spotify:user:me:collection",
+				selector: "spotify:user:me:collection",
+				firstOffset: 0,
+				lastOffset: offset,
+				pageCount,
+				rawCount,
+				expectedCount,
+				discardedCount: unresolvedIdentityCount,
+				remaining: false,
+				terminal,
+			};
 		}
 
-		return { ...result, warnings };
+		return result;
 	}, requestedStreams);
 }
 
 async function emitRecordsWithCoverage(
 	stream: string,
 	records: Record<string, unknown>[],
+	counts: { considered: number; covered: number },
 	emit: (msg: EmittedMessage) => Promise<void>,
 	emitRecord: (stream: string, data: Record<string, unknown>) => Promise<void>,
 ): Promise<void> {
-	let covered = 0;
-	for (const record of records) {
-		if (validateRecord(stream, record).ok) covered += 1;
-		await emitRecord(stream, record);
-	}
+	for (const record of records) await emitRecord(stream, record);
 	await emitDetailCoverage(
 		{ emit },
 		{
@@ -879,8 +1229,8 @@ async function emitRecordsWithCoverage(
 			stateStream: stream,
 			requiredKeys: [],
 			hydratedKeys: [],
-			considered: records.length,
-			covered,
+			considered: counts.considered,
+			covered: counts.covered,
 		},
 	);
 }
@@ -898,7 +1248,84 @@ export async function spotifyCollect({
 	const requestedNames = [...requested.keys()];
 	await progress("Fetching Spotify data");
 	const data = await collectSpotifyWebData(page, requestedNames);
-
+	if (requested.has("profile")) {
+		if (!data.profile) throw new Error("spotify_profile_response_invalid");
+		if (!validateRecord("profile", data.profile).ok) {
+			throw new Error("spotify_profile_record_invalid");
+		}
+	}
+	for (const [stream, records] of [
+		["playlists", data.playlists],
+		["playlist_items", data.playlist_items],
+		["saved_tracks", data.saved_tracks],
+	] as const) {
+		if (
+			requested.has(stream) &&
+			records.some((record) => !validateRecord(stream, record).ok)
+		) {
+			connectorDiagnostic("spotify", "source_row_invalid", {
+				stream,
+				considered: String(
+					data.sourceCounts[stream]?.considered ?? records.length,
+				),
+				covered: String(data.sourceCounts[stream]?.covered ?? 0),
+			});
+			throw new Error(`spotify_${stream}_record_invalid`);
+		}
+	}
+	const libraryExpectation = {
+		stream: requested.has("playlists") ? "playlists" : "playlist_items",
+		operation: "libraryV3",
+		owner: "spotify:user:me",
+		selector: "spotify:user:me:library",
+	};
+	const playlistItemsExpectation =
+		data.playlistUris.length === 0
+			? { ...libraryExpectation, stream: "playlist_items" }
+			: {
+					stream: "playlist_items",
+					operation: "fetchPlaylist",
+					owner: "spotify:user:me",
+					selector: data.playlistUris.join("\n"),
+				};
+	const savedExpectation = {
+		stream: "saved_tracks",
+		operation: "fetchLibraryTracks",
+		owner: "spotify:user:me:collection",
+		selector: "spotify:user:me:collection",
+	};
+	if (
+		requested.has("playlists") &&
+		!hasSpotifyEndProof(data.completion.playlists, libraryExpectation)
+	) {
+		throw new Error("spotify_playlists_completion_unproven");
+	}
+	if (
+		requested.has("playlist_items") &&
+		!hasSpotifyEndProof(
+			data.completion.playlist_items,
+			playlistItemsExpectation,
+		)
+	) {
+		throw new Error("spotify_playlist_items_completion_unproven");
+	}
+	const savedProof = data.completion.saved_tracks;
+	const savedBoundaryProven =
+		requested.has("saved_tracks") &&
+		hasSpotifyEndProof(savedProof, savedExpectation);
+	const savedBoundaryWithUnresolvedIdentity =
+		requested.has("saved_tracks") &&
+		hasSpotifyTerminalBoundary(savedProof, savedExpectation) &&
+		(savedProof.discardedCount > 0 ||
+			(data.sourceCounts.saved_tracks?.covered ?? 0) <
+				(data.sourceCounts.saved_tracks?.considered ?? 0));
+	if (
+		requested.has("saved_tracks") &&
+		!savedBoundaryProven &&
+		!savedBoundaryWithUnresolvedIdentity
+	) {
+		throw new Error("spotify_saved_tracks_completion_unproven");
+	}
 	if (requested.has("profile") && data.profile) {
 		await emitRecord("profile", data.profile);
 		await emitDetailCoverage(
@@ -917,6 +1344,10 @@ export async function spotifyCollect({
 		await emitRecordsWithCoverage(
 			"playlists",
 			data.playlists,
+			data.sourceCounts.playlists ?? {
+				considered: data.playlists.length,
+				covered: data.playlists.length,
+			},
 			emit,
 			emitRecord,
 		);
@@ -925,6 +1356,10 @@ export async function spotifyCollect({
 		await emitRecordsWithCoverage(
 			"playlist_items",
 			data.playlist_items,
+			data.sourceCounts.playlist_items ?? {
+				considered: data.playlist_items.length,
+				covered: data.playlist_items.length,
+			},
 			emit,
 			emitRecord,
 		);
@@ -933,30 +1368,28 @@ export async function spotifyCollect({
 		await emitRecordsWithCoverage(
 			"saved_tracks",
 			data.saved_tracks,
+			data.sourceCounts.saved_tracks ?? {
+				considered: data.saved_tracks.length,
+				covered: data.saved_tracks.length,
+			},
 			emit,
 			emitRecord,
 		);
-		await emit({
-			type: "STATE",
-			stream: "saved_tracks",
-			cursor: { full_scan_at: new Date().toISOString() },
-		});
-	}
-	for (const warning of data.warnings) {
-		connectorDiagnostic("spotify", warning.event, warning.fields);
-	}
-	const skippedTracks = data.warnings.filter(
-		(warning) => warning.event === "saved_track_missing_added_at",
-	).length;
-	if (
-		data.warnings.some((warning) => warning.event === "missing_query_hashes")
-	) {
-		await progress("Some Spotify data could not be loaded");
-	}
-	if (skippedTracks > 0) {
-		await progress(
-			`Skipped ${skippedTracks} saved ${skippedTracks === 1 ? "track" : "tracks"} with no save date`,
-		);
+		if (savedBoundaryProven) {
+			await emit({
+				type: "STATE",
+				stream: "saved_tracks",
+				cursor: {
+					full_scan_at: new Date().toISOString(),
+					completion: {
+						operation: savedProof.operation,
+						pages: savedProof.pageCount,
+						rows: savedProof.rawCount,
+						terminal: savedProof.terminal,
+					},
+				},
+			});
+		}
 	}
 	for (const stream of ["top_artists", "recently_played"] as const) {
 		if (requested.has(stream)) {
