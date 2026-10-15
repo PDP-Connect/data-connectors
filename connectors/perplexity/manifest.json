@@ -11,10 +11,6 @@
 	"manifest_uri": "https://registry.pdpp.dev/connectors/perplexity",
 	"version": "0.1.0",
 	"display_name": "Perplexity (Browser Sign-In)",
-	"brand": {
-		"icon": "icon.svg",
-		"background_color": "#20808D"
-	},
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
