@@ -54,6 +54,7 @@ import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/conn
 import {
 	type CollectContext,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 	type StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -2587,18 +2588,35 @@ if (isMainModule(import.meta.url)) {
 					const key = JSON.stringify(gap);
 					if (reportedGaps.has(key)) continue;
 					reportedGaps.add(key);
+					// Resume safety comes from scanClaudeJsonl/scanLocalJsonl. An
+					// unterminated tail is never committed: committed_offset_bytes
+					// stops at the last LF, so the cursor resumes at the tail. A
+					// malformed or non-object LF-terminated line is committed, but
+					// the cursor records it in `jsonl_gaps` (retained on append) and
+					// pins its bytes in committed_prefix_sha256; any repair of the
+					// line changes that hash and forces a rebuild that reads it again.
+					// A file whose scan failed keeps its prior cursor (still before it).
+					const basis =
+						gap.reason === "truncated_jsonl_tail"
+							? "cursor_at_or_before_loss"
+							: "cursor_records_loss";
 					for (const stream of ["sessions", "messages", "attachments"]) {
 						if (requested.has(stream))
-							await emit({
-								type: "SKIP_RESULT",
-								stream,
-								reason: JSONL_GAP_SKIP_REASON[gap.reason],
-								message:
-									gap.reason === "truncated_jsonl_tail"
-										? "Claude Code deferred an unterminated JSONL tail; other source records were collected"
-										: "Claude Code skipped an invalid JSONL record; other source records were collected",
-								diagnostics: { ...gap },
-							});
+							await emit(
+								resumeSafeSkip(
+									{
+										type: "SKIP_RESULT",
+										stream,
+										reason: JSONL_GAP_SKIP_REASON[gap.reason],
+										message:
+											gap.reason === "truncated_jsonl_tail"
+												? "Claude Code deferred an unterminated JSONL tail; other source records were collected"
+												: "Claude Code skipped an invalid JSONL record; other source records were collected",
+										diagnostics: { ...gap },
+									},
+									basis,
+								),
+							);
 					}
 				}
 			};
@@ -2609,16 +2627,24 @@ if (isMainModule(import.meta.url)) {
 				if (!streams.some((stream) => requested.has(stream))) return;
 				for (const gap of Object.values(gaps)) {
 					reportedGaps.add(JSON.stringify(gap));
+					// tryScanTranscript failed for this path, so the caller keeps the
+					// prior file cursor (or none: read from byte 0) and drops its
+					// fresh mtime; the gap stays in `source_gaps` until a scan succeeds.
 					for (const stream of streams) {
 						if (requested.has(stream))
-							await emit({
-								type: "SKIP_RESULT",
-								stream,
-								reason: "source_read_error",
-								message:
-									"Claude Code could not read a transcript; its prior cursor is retained for retry",
-								diagnostics: { ...gap },
-							});
+							await emit(
+								resumeSafeSkip(
+									{
+										type: "SKIP_RESULT",
+										stream,
+										reason: "source_read_error",
+										message:
+											"Claude Code could not read a transcript; its prior cursor is retained for retry",
+										diagnostics: { ...gap },
+									},
+									"cursor_at_or_before_loss",
+								),
+							);
 					}
 				}
 			};
@@ -2646,14 +2672,22 @@ if (isMainModule(import.meta.url)) {
 					const key = `${path}\0${stream}`;
 					if (!requested.has(stream) || reportedDirectoryStreams.has(key))
 						continue;
-					await emit({
-						type: "SKIP_RESULT",
-						stream,
-						reason: "source_directory_read_error",
-						message:
-							"Claude Code could not enumerate a source directory; known file cursors are retained for retry",
-						diagnostics: gap,
-					});
+					// `failedDirectories` feeds retainUnavailable, which copies every
+					// prior file cursor and mtime under this path into the next STATE;
+					// files never seen before have no cursor and are read from byte 0.
+					await emit(
+						resumeSafeSkip(
+							{
+								type: "SKIP_RESULT",
+								stream,
+								reason: "source_directory_read_error",
+								message:
+									"Claude Code could not enumerate a source directory; known file cursors are retained for retry",
+								diagnostics: gap,
+							},
+							"cursor_at_or_before_loss",
+						),
+					);
 					reportedDirectoryStreams.add(key);
 					reportedGaps.add(JSON.stringify(gap));
 				}
@@ -2671,14 +2705,25 @@ if (isMainModule(import.meta.url)) {
 				}
 				for (const stream of ["sessions", "messages", "attachments"]) {
 					if (!requested.has(stream)) continue;
-					await emit({
-						type: "SKIP_RESULT",
-						stream,
-						reason: "symlink_skipped",
-						message:
-							"Claude Code skipped a symbolic link without reading its target",
-						diagnostics: { path, target_path: resolve(dirname(path), target) },
-					});
+					// `skippedSymlinks` feeds retainUnavailable: the next STATE keeps
+					// only prior cursors under this path (or none), never one that
+					// passes content behind the link.
+					await emit(
+						resumeSafeSkip(
+							{
+								type: "SKIP_RESULT",
+								stream,
+								reason: "symlink_skipped",
+								message:
+									"Claude Code skipped a symbolic link without reading its target",
+								diagnostics: {
+									path,
+									target_path: resolve(dirname(path), target),
+								},
+							},
+							"cursor_at_or_before_loss",
+						),
+					);
 					reportedGaps.add(`symlink:${path}`);
 				}
 			};

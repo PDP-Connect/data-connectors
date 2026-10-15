@@ -16,6 +16,7 @@ import {
 	type EnsureSessionArgs,
 	politeDelay,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -1014,15 +1015,24 @@ export async function collectWhoopBrowser(
 				? "source_limit_reached"
 				: null;
 		if (reason) {
-			await ctx.emit({
-				type: "SKIP_RESULT",
-				stream,
-				reason: SKIP_REASON[reason],
-				recovery_hint: hintFor(reason),
-				message:
-					failure?.message ??
-					`Read ${windows} windows; the next run continues from the saved point.`,
-			});
+			// Resume-safe: walk() moves `through` only after a whole window's cycles are delivered,
+			// and breaks on a failure or a spent budget before that, so `through` stays at the end of
+			// the last whole window (or at the previous checkpoint); stretches not reached keep the
+			// cursor planStream gave them, which never lies past the saved one.
+			await ctx.emit(
+				resumeSafeSkip(
+					{
+						type: "SKIP_RESULT",
+						stream,
+						reason: SKIP_REASON[reason],
+						recovery_hint: hintFor(reason),
+						message:
+							failure?.message ??
+							`Read ${windows} windows; the next run continues from the saved point.`,
+					},
+					"cursor_at_or_before_loss",
+				),
+			);
 		}
 		const plan = plans.get(stream);
 		if (plan && (windows > 0 || !failure)) {

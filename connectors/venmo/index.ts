@@ -75,6 +75,7 @@ import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
 	politeDelay,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
@@ -534,17 +535,27 @@ async function collectFriends(
 			? (priorFingerprints as Record<string, string>)
 			: cursor.toState();
 	if (truncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "friends",
-			reason: "friends_deferred_page_budget",
-			message: `Venmo friends stopped at the ${MAX_FRIENDS_PAGES}-page limit with more rows still listed`,
-			diagnostics: {
-				page_limit: MAX_FRIENDS_PAGES,
-				total_seen: friends.length,
-				unread_pages: 1,
-			},
-		});
+		// Resume-safe: the `friends` STATE below is a fingerprint set of rows
+		// already stored (the prior set unchanged, or this run's notes with no
+		// `dropUnseenIds`). It never notes an unread friend, and fetchAllFriends
+		// re-walks from offset 0 every run, so an unread friend whose content
+		// is not already stored is emitted when a later run reads it.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "friends",
+					reason: "friends_deferred_page_budget",
+					message: `Venmo friends stopped at the ${MAX_FRIENDS_PAGES}-page limit with more rows still listed`,
+					diagnostics: {
+						page_limit: MAX_FRIENDS_PAGES,
+						total_seen: friends.length,
+						unread_pages: 1,
+					},
+				},
+				"cursor_excludes_loss",
+			),
+		);
 	}
 	await emit({ type: "STATE", stream: "friends", cursor: { fingerprints } });
 	await emit(
@@ -590,17 +601,25 @@ export async function collectAllStreams(
 						.last_seen_date_created
 				: undefined;
 		if (truncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "transactions",
-				reason: "transactions_deferred_page_budget",
-				message: `Venmo transactions stopped at the ${MAX_TRANSACTION_PAGES}-page limit with more rows still listed`,
-				diagnostics: {
-					page_limit: MAX_TRANSACTION_PAGES,
-					total_seen: considered - 1,
-					unread_pages: 1,
-				},
-			});
+			// Resume-safe: collectTransactions never reads `last_seen_date_created`;
+			// every run re-walks `before_id` pages from the head, so the unread
+			// older pages are selected again whatever the saved cursor says.
+			await emit(
+				resumeSafeSkip(
+					{
+						type: "SKIP_RESULT",
+						stream: "transactions",
+						reason: "transactions_deferred_page_budget",
+						message: `Venmo transactions stopped at the ${MAX_TRANSACTION_PAGES}-page limit with more rows still listed`,
+						diagnostics: {
+							page_limit: MAX_TRANSACTION_PAGES,
+							total_seen: considered - 1,
+							unread_pages: 1,
+						},
+					},
+					"read_ignores_cursor_for_loss",
+				),
+			);
 		}
 		let nextLatestSeenAt = latestSeenAt;
 		if (truncated) {

@@ -83,6 +83,7 @@ import {
 	type EmittedMessage,
 	nowIso,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -460,24 +461,35 @@ async function emitMissingChannelDiagnostic(
 		0,
 		MAX_MISSING_CHANNEL_IDS_IN_DIAGNOSTIC,
 	);
-	await emit({
-		type: "SKIP_RESULT",
-		stream: "messages",
-		reason: SOURCE_PARTITION_MISSING_REASON,
-		message:
-			missingChannelIds.length === 1
-				? `Slack archive is missing previously observed channel ${visibleIds[0]}; message coverage is partial.`
-				: `Slack archive is missing ${String(missingChannelIds.length)} previously observed channels; message coverage is partial.`,
-		diagnostics: {
-			missing_channel_ids: visibleIds,
-			missing_count: missingChannelIds.length,
-			truncated: visibleIds.length < missingChannelIds.length,
-		},
-		recovery_hint: {
-			action: "retry_by_runtime",
-			retryable: true,
-		},
-	});
+	// Resume-safe: a missing channel contributes no accepted row, so
+	// selectCommittedChannelLastTs carries its `channel_last_ts` entry
+	// unchanged (or leaves it absent, which reads its full history next run;
+	// buildMessageRowsQuery never floors an uncursored channel at `last_ts`
+	// while any per-channel cursor exists). It also stays in
+	// `observed_channel_ids`, so the next run looks for it again.
+	await emit(
+		resumeSafeSkip(
+			{
+				type: "SKIP_RESULT",
+				stream: "messages",
+				reason: SOURCE_PARTITION_MISSING_REASON,
+				message:
+					missingChannelIds.length === 1
+						? `Slack archive is missing previously observed channel ${visibleIds[0]}; message coverage is partial.`
+						: `Slack archive is missing ${String(missingChannelIds.length)} previously observed channels; message coverage is partial.`,
+				diagnostics: {
+					missing_channel_ids: visibleIds,
+					missing_count: missingChannelIds.length,
+					truncated: visibleIds.length < missingChannelIds.length,
+				},
+				recovery_hint: {
+					action: "retry_by_runtime",
+					retryable: true,
+				},
+			},
+			"cursor_at_or_before_loss",
+		),
+	);
 }
 
 /**

@@ -66,6 +66,7 @@ import {
 	buildFullScanCoverageMessage,
 	type DetailGapMessage,
 	type EmittedMessage,
+	resumeSafeSkip,
 	runConnector,
 	type ValidateRecord,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -2744,14 +2745,22 @@ export async function runCurrentActivity(
 			message:
 				"Skipping recent activity: could not tell which account each row belongs to",
 		});
-		await deps.emit({
-			type: "SKIP_RESULT",
-			stream: "current_activity",
-			reason: "ambiguous_multi_account_overview",
-			message:
-				"Chase dashboard overview aggregates recent activity across multiple accounts and provides no per-row account attribution; current_activity collection requires a per-account activity surface (not yet wired)",
-			diagnostics: { account_count: filteredAccounts.length },
-		});
+		// Resume-safe: buildCursor() saves only `fetched_at` and the
+		// carry-forward fingerprint set (never pruned). No row was read on this
+		// path, so no fingerprint was noted, and the overview is re-read every run.
+		await deps.emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "current_activity",
+					reason: "ambiguous_multi_account_overview",
+					message:
+						"Chase dashboard overview aggregates recent activity across multiple accounts and provides no per-row account attribution; current_activity collection requires a per-account activity surface (not yet wired)",
+					diagnostics: { account_count: filteredAccounts.length },
+				},
+				"cursor_excludes_loss",
+			),
+		);
 		await deps.emit({
 			type: "STATE",
 			stream: "current_activity",
@@ -2793,17 +2802,27 @@ export async function runCurrentActivity(
 		// on this path. A future signal that positively confirms "no recent
 		// activity" (e.g. an explicit empty-state marker) could route here
 		// instead of selectors_pending and declare considered=covered=0.
-		await deps.emit({
-			type: "SKIP_RESULT",
-			stream: "current_activity",
-			reason: "selectors_pending",
-			message:
-				"No parseable current_activity rows found in the Chase dashboard overview DOM; either the dashboard rendered without the recent-activity table or the row markup has drifted — see captured fixture for this run",
-			diagnostics: {
-				account_count: 1,
-				...(surfaceDiagnostic ? { browser_surface: surfaceDiagnostic } : {}),
-			},
-		});
+		// Resume-safe: zero rows parsed means no fingerprint was noted, and
+		// buildCursor() saves only `fetched_at` plus the unpruned prior
+		// fingerprint set, so every row the next run parses is weighed again.
+		await deps.emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "current_activity",
+					reason: "selectors_pending",
+					message:
+						"No parseable current_activity rows found in the Chase dashboard overview DOM; either the dashboard rendered without the recent-activity table or the row markup has drifted — see captured fixture for this run",
+					diagnostics: {
+						account_count: 1,
+						...(surfaceDiagnostic
+							? { browser_surface: surfaceDiagnostic }
+							: {}),
+					},
+				},
+				"cursor_excludes_loss",
+			),
+		);
 	} else {
 		connectorDiagnostic("chase", "current_activity_emitted", {
 			stream: "current_activity",
@@ -3208,16 +3227,25 @@ if (isMainModule(import.meta.url)) {
 					// Surfaced, not swallowed: this may be a closed account (benign)
 					// or a discovery regression (not benign), and the connector does
 					// not guess which.
-					await emit({
-						type: "SKIP_RESULT",
-						stream: "transactions",
-						reason: "account_no_longer_discovered",
-						message:
-							"An account with a saved position is no longer listed on the dashboard",
-						diagnostics: {
-							dropped_account_count: droppedAccountCursors.length,
-						},
-					});
+					// Resume-safe: the dropped account's `per_account` entry is
+					// deleted below, so if it is discovered again chooseActivity()
+					// finds no cursor and exports "all" (parsers.ts). No other
+					// account's cursor changes on this path.
+					await emit(
+						resumeSafeSkip(
+							{
+								type: "SKIP_RESULT",
+								stream: "transactions",
+								reason: "account_no_longer_discovered",
+								message:
+									"An account with a saved position is no longer listed on the dashboard",
+								diagnostics: {
+									dropped_account_count: droppedAccountCursors.length,
+								},
+							},
+							"cursor_at_or_before_loss",
+						),
+					);
 					for (const accountId of droppedAccountCursors) {
 						delete deps.maxSeenByAccount[accountId];
 					}
