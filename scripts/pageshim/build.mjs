@@ -13,9 +13,8 @@
 //     package resolves to a stub whose exports throw when called. `path` and
 //     `url` resolve to small pure-JS versions, because connector modules call
 //     them at load time;
-//   - per-connector ports (CONNECTOR_PORTS): for one connector file, some
-//     imports resolve to a shim that maps them onto host methods instead of
-//     the throwing stub (anthropic: the export download and ZIP read).
+//   - a selected connector port profile can resolve imports from its declared
+//     importer to a shim that maps host methods instead of the throwing stub.
 //
 // attach-to-artifact.mjs packages an enabled bundle into the existing signed
 // connector artifact after the normal OCI build.
@@ -32,34 +31,11 @@ import * as esbuild from "esbuild";
 import { consentSlicePlugin } from "../consent-slice-resolution.mjs";
 import { renderSlice } from "../../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 import { isPageShimCapable } from "./capabilities.mjs";
+import { resolvePageShimPortProfile } from "./port-profile.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "..", "..");
 const require = createRequire(import.meta.url);
-
-/**
- * Per-connector ports. `modules`: for imports made by `importer` only, these
- * specifiers resolve to a shim that maps them onto the host (instead of the
- * throwing stub or the real module). `inject`: extra globals. Unlike
- * `modules`, esbuild applies them to every free reference in the whole
- * connector bundle, not only to code under `importer`.
- */
-const CONNECTOR_PORTS = {
-	anthropic: {
-		importer: join(REPO, "connectors", "anthropic", "index.ts"),
-		shim: join(HERE, "shims", "anthropic-export.ts"),
-		modules: [
-			"fs",
-			"fs/promises",
-			"os",
-			"crypto",
-			"../../packages/polyfill-connectors/src/bounded-zip-archive.ts",
-			"../../packages/polyfill-connectors/src/download-queue.ts",
-			"../../packages/polyfill-connectors/src/playwright-download.ts",
-		],
-		inject: [join(HERE, "shims", "buffer.js")],
-	},
-};
 
 const BROWSER_PACKAGES = [
 	"playwright",
@@ -98,11 +74,11 @@ ${keys.map((k) => `export const ${k} = mk(${JSON.stringify(`${spec}.${k}`)});`).
 const stubPlugin = (stubbed, port) => ({
 	name: "pageshim-stubs",
 	setup(build) {
-		if (port) {
+		if (port && !port.empty) {
 			build.onResolve({ filter: /.*/ }, (args) =>
-				args.importer === port.importer &&
+				args.importer === join(REPO, port.importer) &&
 				port.modules.includes(args.path.replace(/^node:/, ""))
-					? { path: port.shim }
+					? { path: join(REPO, port.shim) }
 					: undefined,
 			);
 		}
@@ -135,9 +111,9 @@ export async function buildPageshim({
 	bridgeCallTimeoutMs = 30_000,
 	entryPoint,
 	extraDefines = {},
+	includeMetafile = false,
 }) {
 	const stubbed = new Set();
-	const port = CONNECTOR_PORTS[connector];
 	const manifest = JSON.parse(
 		readFileSync(join(REPO, "connectors", connector, "manifest.json"), "utf8"),
 	);
@@ -146,13 +122,34 @@ export async function buildPageshim({
 	if (!isPageShimCapable(manifest) && !pageshim.entry) {
 		throw new Error(`PageShim does not provide the declared runtime bindings for ${connector}`);
 	}
+	const port = resolvePageShimPortProfile(connector, (path) => {
+		try {
+			return readFileSync(join(REPO, path));
+		} catch (error) {
+			if (error.code === "ENOENT") return null;
+			throw error;
+		}
+	});
 	const entry = pageshim.entry
 		? join(HERE, "entries", pageshim.entry)
 		: undefined;
 	const genericEntry = entry
 		? undefined
 		: genericPageshimEntry(connector, manifest, pageshim);
-	await esbuild.build({
+	const defines = {
+		"import.meta.url": '"file:///pageshim/bundle.js"',
+		PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: String(bridgeCallTimeoutMs),
+		...extraDefines,
+		// The export's `version` is the connector manifest's semver.
+		PAGESHIM_CONNECTOR_VERSION: JSON.stringify(manifest.version),
+		// The runtime reads each stream's consent_time_field by this name.
+		PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
+	};
+	const injected = [
+		"scripts/pageshim/shims/process.js",
+		...port.inject,
+	].map((path) => join(REPO, path));
+	const result = await esbuild.build({
 		...(entryPoint
 			? { entryPoints: [entryPoint] }
 			: entry
@@ -168,18 +165,8 @@ export async function buildPageshim({
 		logLevel: "warning",
 		// The host passes a frozen `process = {env: {}}`. Bundled Node code
 		// reads more than that, so every reference goes to a bundle-local copy.
-		inject: [join(HERE, "shims", "process.js"), ...(port?.inject ?? [])],
-		define: {
-			"import.meta.url": '"file:///pageshim/bundle.js"',
-			PAGESHIM_BRIDGE_CALL_TIMEOUT_MS: String(bridgeCallTimeoutMs),
-			...extraDefines,
-			// The export's `version` is the connector manifest's semver.
-			PAGESHIM_CONNECTOR_VERSION: JSON.stringify(
-				manifest.version,
-			),
-			// The runtime reads each stream's consent_time_field by this name.
-			PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
-		},
+		inject: injected,
+		define: defines,
 		plugins: [
 			// The same slice the Core build bundles for this connector; the
 			// runtime reads it through PAGESHIM_CONNECTOR_MANIFEST.
@@ -190,6 +177,7 @@ export async function buildPageshim({
 			}),
 			stubPlugin(stubbed, port),
 		],
+		metafile: includeMetafile,
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the
 		// run's promise must be that IIFE.
 		footer: {
@@ -203,6 +191,9 @@ export async function buildPageshim({
 		bytes: bytes.length,
 		gzipBytes: gzipSync(bytes).length,
 		stubbed: [...stubbed].sort(),
+		portProfile: port,
+		buildInputs: { inject: injected, defines, stubExportIntrospection: [...stubbed].sort() },
+		...(includeMetafile ? { metafile: result.metafile } : {}),
 	};
 }
 

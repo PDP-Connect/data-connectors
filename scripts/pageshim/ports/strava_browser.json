@@ -1,0 +1,8 @@
+{
+	"schemaVersion": 1,
+	"connector": "strava_browser",
+	"importer": null,
+	"shim": null,
+	"modules": [],
+	"inject": []
+}
