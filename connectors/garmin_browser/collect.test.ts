@@ -3843,6 +3843,51 @@ test("collect: at the cap, the list is cut once after the run: a kept day read a
 	});
 });
 
+test("collect: at the cap, a kept day whose read fails is never let go: the cap lets go a day this run read instead, and the saved list still holds the failed day", async () => {
+	assert.equal(MAX_RETRY_DAYS, 366);
+	// A full list, all inside the grant and above the floor, so only the retry segment reads it.
+	const kept = span("2025-06-01", "2026-06-01");
+	const fake = fakeGarmin(
+		except(
+			site((data) => summaryOn(data, "2026-09-16", "8432")),
+			isPath(`${DAILY}${kept.from}`),
+			response(503),
+		),
+	);
+	const h = await collect(fake, {
+		state: {
+			daily_summaries: { ...FULL, floor: "2025-01-01", retry: [kept] },
+		},
+		streams: ["daily_summaries"],
+		ranges: { daily_summaries: { since: "2025-01-01T00:00:00.000Z" } },
+	});
+	// The short forward read, one day of it unreadable, then the oldest kept day, whose read fails.
+	assert.deepEqual(pathsOf(fake, "daily_summaries").map(dayOf), [
+		...daysFrom("2026-09-15", TODAY),
+		kept.from,
+	]);
+	assertSkips(h, "collection_interrupted", RETRY, ["daily_summaries"]);
+	assert.deepEqual(progressLines(h), [
+		{
+			stream: "daily_summaries",
+			count: 1,
+			message: "1 record(s) unreadable.",
+		},
+		{
+			stream: "daily_summaries",
+			count: 1,
+			message:
+				"1 day(s) of unreadable records could not be kept for another try.",
+		},
+	]);
+	// The STATE passes the runtime's gate, and its list still selects the failed day: the cap let
+	// go the newly unreadable day this run read, not a kept day it never read again.
+	assert.deepEqual(statesOf(h), {
+		daily_summaries: { ...FULL, floor: "2025-01-01", retry: [kept] },
+	});
+	assertStateLast(h);
+});
+
 test("collect: full_refresh keeps the days still to read again, and reads them after its ninety days", async () => {
 	const fake = fakeGarmin(
 		site((data) => summaryOn(data, "2026-01-10", "8432")),

@@ -490,7 +490,9 @@ export interface DayCursor {
 }
 /**
  * The most days `retry` holds, and so the bound on reading kept days again until they read: past
- * it, the oldest are let go, and PROGRESS counts them. Kept days below a grant's start wait there
+ * it, the oldest are let go, and PROGRESS counts them. A kept day a run stopped before reading
+ * again (its read failed, or the run ran out of reads) is never let go by that run: the days that
+ * run joined the list are enough to let go instead. Kept days below a grant's start wait there
  * for a grant that reaches them, so under a start that moves on they count towards it until one
  * does.
  */
@@ -559,37 +561,39 @@ function subtract(spans: readonly Window[], cut: Window): Window[] {
 
 /**
  * The retry list in its one form: sorted, spans that overlap or touch merged, and at most
- * MAX_RETRY_DAYS days, the oldest let go first. `dropped` counts the days let go.
+ * MAX_RETRY_DAYS days, the oldest let go first, except the days of `keep`, which are never let go.
+ * `dropped` counts the days let go.
  */
-export function normaliseRetry(spans: readonly Window[]): {
+export function normaliseRetry(
+	spans: readonly Window[],
+	keep: readonly Window[] = [],
+): {
 	retry: Window[];
 	dropped: number;
 } {
-	const retry: Window[] = [];
+	const merged: Window[] = [];
 	const sorted = spans.toSorted((a, b) =>
 		a.from < b.from ? -1 : a.from > b.from ? 1 : 0,
 	);
 	for (const { from, to } of sorted) {
-		const last = retry.at(-1);
+		const last = merged.at(-1);
 		if (last && from <= addDays(last.to, 1)) {
 			if (to > last.to) last.to = to;
 		} else {
-			retry.push({ from, to });
+			merged.push({ from, to });
 		}
 	}
-	const total = retry.reduce((days, span) => days + spanDays(span), 0);
-	const dropped = Math.max(0, total - MAX_RETRY_DAYS);
-	for (let excess = dropped; excess > 0; ) {
-		const oldest = retry[0] as Window;
-		const days = spanDays(oldest);
-		if (days <= excess) {
-			retry.shift();
-			excess -= days;
-		} else {
-			oldest.from = addDays(oldest.from, excess);
-			excess = 0;
-		}
+	const total = merged.reduce((days, span) => days + spanDays(span), 0);
+	let excess = Math.max(0, total - MAX_RETRY_DAYS);
+	const cut: Window[] = [];
+	for (const span of keep.reduce(subtract, merged)) {
+		if (excess === 0) break;
+		const days = Math.min(spanDays(span), excess);
+		cut.push({ from: span.from, to: addDays(span.from, days - 1) });
+		excess -= days;
 	}
+	const retry = cut.reduce(subtract, merged);
+	const dropped = cut.reduce((days, span) => days + spanDays(span), 0);
 	return { retry, dropped };
 }
 
@@ -992,9 +996,12 @@ function mark(
 	cursor.retry = read.reduce((list, part) => subtract(list, part), spans);
 }
 
-/** Normalises and caps the retry list once a stream's reading is done. Answers how many days the cap let go. */
-function settle(cursor: DayCursor): number {
-	const { retry, dropped } = normaliseRetry(cursor.retry ?? []);
+/**
+ * Normalises and caps the retry list once a stream's reading is done, never letting go the kept
+ * days the walk stopped before (`unread`). Answers how many days the cap let go.
+ */
+function settle(cursor: DayCursor, unread: readonly Window[]): number {
+	const { retry, dropped } = normaliseRetry(cursor.retry ?? [], unread);
 	if (retry.length > 0) {
 		cursor.retry = retry;
 	} else {
@@ -1078,7 +1085,8 @@ async function deliver(
 
 /**
  * What a stream's reading came to. `progressed` counts days (or windows) read in full; `retried`,
- * those of them read again that still did not read cleanly.
+ * those of them read again that still did not read cleanly; `unread`, the kept days it stopped
+ * before reading again, which the cap must not let go.
  */
 interface Walk {
 	failure: Failure | null;
@@ -1086,6 +1094,7 @@ interface Walk {
 	progressed: number;
 	retried: number;
 	unreadable: number;
+	unread: Window[];
 }
 const walkFrom = (failure: Failure | null = null): Walk => ({
 	failure,
@@ -1093,7 +1102,30 @@ const walkFrom = (failure: Failure | null = null): Walk => ({
 	progressed: 0,
 	retried: 0,
 	unreadable: 0,
+	unread: [],
 });
+
+/** Ends a walk at `day` of segment `index`, not read: that day and every later kept day stay unread. */
+function stopAt(
+	walk: Walk,
+	segments: readonly Segment[],
+	index: number,
+	day: string,
+): Walk {
+	walk.unread = segments
+		.slice(index)
+		.flatMap((segment, k) =>
+			segment.kind !== "retry"
+				? []
+				: [
+						{
+							from: k === 0 && day > segment.from ? day : segment.from,
+							to: segment.to,
+						},
+					],
+		);
+	return walk;
+}
 
 /**
  * Whether the run has no read left for the next day or window of `segment`. Days the cursor has
@@ -1132,17 +1164,17 @@ interface StreamRun {
 async function walkDays(s: StreamRun, stream: DayStream): Promise<Walk> {
 	const { ctx, p, run, plan } = s;
 	const walk = walkFrom();
-	for (const segment of plan.segments) {
+	for (const [index, segment] of plan.segments.entries()) {
 		for (let day = segment.from; day <= segment.to; day = addDays(day, 1)) {
 			if (spent(walk, segment, p.maxDaysPerRun, p.maxRetryDaysPerRun)) {
-				return walk;
+				return stopAt(walk, plan.segments, index, day);
 			}
 			// Before each request, never after a stream's last.
 			await p.sleep(p.requestDelayMs);
 			const outcome = await fetchJson(ctx.page, dayPath(stream, day), p, run);
 			if (!outcome.ok) {
 				walk.failure = outcome;
-				return walk;
+				return stopAt(walk, plan.segments, index, day);
 			}
 			const built: Built =
 				outcome.json === null
@@ -1250,10 +1282,10 @@ async function readWindow(
 async function walkWindows(s: StreamRun, stream: RangeStream): Promise<Walk> {
 	const { p, plan } = s;
 	const walk = walkFrom();
-	for (const segment of plan.segments) {
+	for (const [index, segment] of plan.segments.entries()) {
 		for (let from = segment.from; from <= segment.to; ) {
 			if (spent(walk, segment, p.maxWindowsPerRun, p.maxRetryWindowsPerRun)) {
-				return walk;
+				return stopAt(walk, plan.segments, index, from);
 			}
 			const end = addDays(from, WINDOW_DAYS - 1);
 			const window = { from, to: end < segment.to ? end : segment.to };
@@ -1261,7 +1293,7 @@ async function walkWindows(s: StreamRun, stream: RangeStream): Promise<Walk> {
 			walk.unreadable += read.unreadable;
 			if (read.failure) {
 				walk.failure = read.failure;
-				return walk;
+				return stopAt(walk, plan.segments, index, from);
 			}
 			const keep = read.unreadable > 0;
 			tally(walk, segment, keep);
@@ -1313,11 +1345,11 @@ export async function collectGarminBrowser(
 		);
 		const s: StreamRun = { ctx, p, run, range, plan };
 		const walk: Walk = stop
-			? walkFrom(stop)
+			? stopAt(walkFrom(stop), plan.segments, 0, "")
 			: isDayStream(stream)
 				? await walkDays(s, stream)
 				: await walkWindows(s, stream);
-		const dropped = settle(plan.cursor);
+		const dropped = settle(plan.cursor, walk.unread);
 		// Counts, never an id, a date or a value.
 		if (walk.unreadable > 0) {
 			await ctx.emit({
@@ -1344,7 +1376,8 @@ export async function collectGarminBrowser(
 			// Resume-safe: walkDays and walkWindows return on a failure or a spent budget before
 			// mark() and advance() touch the day or window not read, so next_day, backfill.next_day
 			// and retry_next stay at it (or at the previous checkpoint, inside the overlap), and a
-			// kept day not read again stays in `retry`. Segments not reached keep their saved place.
+			// kept day not read again stays in `retry`: settle never lets go `walk.unread`, even at
+			// MAX_RETRY_DAYS. Segments not reached keep their saved place.
 			await ctx.emit(
 				resumeSafeSkip(
 					{
