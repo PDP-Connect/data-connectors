@@ -6,10 +6,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const SCOPES = [
-  "packages/polyfill-connectors/src/scenario/",
-  "packages/polyfill-connectors/src/connector-runtime.ts",
-  "packages/polyfill-connectors/src/browser-launch.ts",
-  "packages/polyfill-connectors/src/connector-paths.ts",
+  "packages/polyfill-connectors/src/",
   "packages/polyfill-connectors/bin/scenario-",
   "packages/polyfill-connectors/docs/scenario-consumer-contract.md",
   "packages/polyfill-connectors/test-fixtures/scenario-consumer/",

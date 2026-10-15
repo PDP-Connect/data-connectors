@@ -150,6 +150,51 @@ test("shared runtime, browser, path, and CLI helper edits are admitted through t
   }
 });
 
+test("connector exit and orchestrator edits or deletions require the focused check", () => {
+  const r = repo();
+  const sharedFiles = [
+    "packages/polyfill-connectors/src/connector-exit.ts",
+    "packages/polyfill-connectors/src/orchestrator.ts",
+  ];
+  for (const path of sharedFiles) {
+    r.write(path, "base");
+  }
+  const before = r.commit();
+
+  r.write(sharedFiles[0], "edited connector exit");
+  const edited = r.commit();
+  const editAdmission = invokeAdmission(r, { baseSha: before, headSha: edited });
+  assert.equal(editAdmission.relevant, true, "connector-exit-only edit must be admitted");
+  assert.equal(
+    invokeGate({ changesResult: "success", relevant: String(editAdmission.relevant), compatibilityResult: "skipped" })
+      .status,
+    1,
+    "a skipped focused check must fail after a connector-exit-only edit"
+  );
+
+  r.remove(sharedFiles[0]);
+  const deleted = r.commit();
+  const deleteAdmission = invokeAdmission(r, { baseSha: edited, headSha: deleted });
+  assert.equal(deleteAdmission.relevant, true, "connector-exit-only deletion must be admitted");
+  assert.equal(
+    invokeGate({ changesResult: "success", relevant: String(deleteAdmission.relevant), compatibilityResult: "skipped" })
+      .status,
+    1,
+    "a skipped focused check must fail after a connector-exit-only deletion"
+  );
+
+  r.write(sharedFiles[1], "edited orchestrator");
+  const helperEdited = r.commit();
+  const helperAdmission = invokeAdmission(r, { baseSha: deleted, headSha: helperEdited });
+  assert.equal(helperAdmission.relevant, true, "another shared src helper must be admitted");
+  assert.equal(
+    invokeGate({ changesResult: "success", relevant: String(helperAdmission.relevant), compatibilityResult: "skipped" })
+      .status,
+    1,
+    "a skipped focused check must fail after another shared src helper edit"
+  );
+});
+
 test("NUL-delimited admission handles renamed and deleted unusual scenario paths", () => {
   const r = repo();
   const unusual = "packages/polyfill-connectors/src/scenario/line\nbreak\tname.ts";
