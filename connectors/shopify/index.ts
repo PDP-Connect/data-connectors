@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.11)
+ * PDPP Shopify (Shop app) Connector (v0.2.28)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
@@ -47,6 +47,8 @@
  * normalization and schema validation.
  *
  * CHANGES
+ *   v0.2.28 (2026-10-15) — bound browser reads, withhold incomplete rows, and
+ *     require request-bound terminal evidence before pruning.
  *   v0.2.27 (2026-10-15) — restore bootstrap and continuation loading, bind
  *     end evidence to the current navigation, disclose omitted rows, and
  *     retain fingerprints when a scan is partial.
@@ -80,6 +82,7 @@ import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fi
 import {
 	collectAllOrderRefs,
 	extractOrdersWithCoverage,
+	hasDeclaredOrderTotal,
 	hasNextOrdersPage,
 	hasOrderCountMismatch,
 	hasOrdersConnection,
@@ -99,7 +102,49 @@ const MAX_UNCHANGED_BOOTSTRAP_ROUNDS = 3;
 const APOLLO_READINESS_TIMEOUT_MS = 8_000;
 const APOLLO_POLL_INTERVAL_MS = 200;
 const ORDER_HISTORY_READY_TIMEOUT_MS = 10_000;
+const DEFAULT_BROWSER_OPERATION_TIMEOUT_MS = 3_000;
+const DEFAULT_RUN_BUDGET_MS = 90_000;
+const SESSION_ESTABLISHMENT_BUDGET_MS = 75_000;
+const DIAGNOSTICS_TIMEOUT_MS = 100;
 export const ORDERS_STREAM = "orders";
+
+class ShopifyBrowserOperationTimeout extends Error {
+	readonly reason = "shopify_browser_operation_timeout";
+	readonly operation: string;
+
+	constructor(operation: string) {
+		super("shopify_browser_operation_timeout");
+		this.operation = operation;
+	}
+}
+
+async function withBrowserOperationBudget<T>(
+	operation: string,
+	read: () => Promise<T>,
+	deadlineAt: number,
+	operationTimeoutMs: number,
+): Promise<T> {
+	const remaining = deadlineAt - Date.now();
+	if (remaining <= 0) throw new ShopifyBrowserOperationTimeout("run_deadline");
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			Promise.resolve().then(read),
+			new Promise<T>((_resolve, reject) => {
+				timer = setTimeout(
+					() => reject(new ShopifyBrowserOperationTimeout(operation)),
+					Math.min(operationTimeoutMs, remaining),
+				);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+function isBrowserOperationTimeout(cause: unknown): cause is ShopifyBrowserOperationTimeout {
+	return cause instanceof ShopifyBrowserOperationTimeout;
+}
 
 export interface ShopSkipDiagnostics {
 	final_url_path: string;
@@ -189,6 +234,10 @@ export function shopSkipDiagnosticsInPage(): ShopSkipDiagnostics {
 
 /** Order-history or sign-in UI has replaced the document-loading shell. */
 export function isShopOrderHistoryReadyInPage(): boolean {
+	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
+		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
+		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+	});
 	const signIn = document.querySelector(
 		'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
 	);
@@ -198,15 +247,19 @@ export function isShopOrderHistoryReadyInPage(): boolean {
 	) || Boolean(document.querySelector(
 		'[data-test*="order"], [data-testid*="order"], .order-card, a[href*="/orders/"], a[href*="/order/"]',
 	));
-	return Boolean(signIn) || orderContext;
+	return Boolean(signIn) || orderContext || hasSignInCTA;
 }
 
 /** Page ownership/readability evidence used to bind cache proof to this navigation. */
 export function readShopOrderPageEvidenceInPage(): ShopOrderPageEvidence {
 	const url = new URL(location.href);
+	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
+		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
+		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+	});
 	const login = Boolean(document.querySelector(
 		'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
-	));
+	)) || hasSignInCTA;
 	const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
 	const orderContext = !login && (
 		headings.some((heading) => /orders?|order history/i.test(heading.textContent ?? "")) ||
@@ -223,18 +276,27 @@ export function readShopOrderPageEvidenceInPage(): ShopOrderPageEvidence {
 	const nextControls = controls.filter((control) =>
 		/^(?:next|load more|show more orders)$/i.test((control.textContent ?? "").trim()) ||
 		/^(?:next|load-more)$/i.test(control.getAttribute("data-testid") ?? ""),
-	);
+	).filter((control) => {
+		const rect = control.getBoundingClientRect();
+		const style = getComputedStyle(control);
+		const owner = control.closest('[data-testid*="order"], [data-test*="order"], [role="list"], ul, ol, .order-list');
+		return rect.width > 0 && rect.height > 0 && style.display !== "none" &&
+			style.visibility !== "hidden" && owner !== null;
+	});
 	const domHasContinuation = nextControls.some((control) =>
 		!control.hasAttribute("disabled") && control.getAttribute("aria-disabled") !== "true",
 	);
-	const domHasEndMarker = Array.from(document.querySelectorAll("body *")).some((element) => {
-		if (element.children.length > 0) return false;
+	const domHasEndMarker = Array.from(document.querySelectorAll<HTMLElement>("body *")).some((element) => {
+		const rect = element.getBoundingClientRect();
+		const style = getComputedStyle(element);
+		if (element.children.length > 0 || rect.width <= 0 || rect.height <= 0 ||
+			style.display === "none" || style.visibility === "hidden") return false;
+		const owner = element.closest('[data-testid*="order"], [data-test*="order"], [role="list"], ul, ol, .order-list');
+		if (!owner || owner.closest('[aria-busy="true"], [data-loading="true"]') || owner.querySelector('[aria-busy="true"], [data-loading="true"]')) return false;
 		return /^(?:you have reached the end|no more orders|end of order history)$/i.test(
 			(element.textContent ?? "").trim().replace(/\s+/g, " "),
 		);
-	}) || (nextControls.length > 0 && nextControls.every((control) =>
-		control.hasAttribute("disabled") || control.getAttribute("aria-disabled") === "true",
-	));
+	});
 	const domCardCount = new Set(
 		Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="shop.app"]')).flatMap((link) => {
 			const card = link.closest('.order-card, [data-testid*="order"], [data-test*="order"], div[class]') ?? link;
@@ -269,7 +331,7 @@ export async function waitForApolloCache({
 	pollIntervalMs,
 	now = Date.now,
 	wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-}: WaitForApolloCacheArgs): Promise<{ cache: ApolloCache | null; timedOut: boolean }> {
+}: WaitForApolloCacheArgs): Promise<{ cache: ApolloCache | null; timedOut: boolean; reason?: string }> {
 	const deadline = now() + timeoutMs;
 	while (true) {
 		const remainingBeforeRead = deadline - now();
@@ -284,8 +346,18 @@ export async function waitForApolloCache({
 		});
 		if (cache) return { cache, timedOut: false };
 		const remaining = deadline - now();
-		if (remaining <= 0) return { cache: null, timedOut: true };
-		await wait(Math.min(pollIntervalMs, remaining));
+		if (remaining <= 0) return { cache: null, timedOut: true, reason: "shopify_browser_operation_timeout" };
+		try {
+			await withBrowserOperationBudget(
+				"apollo_poll_wait", () => wait(Math.min(pollIntervalMs, remaining)),
+				Date.now() + remaining, remaining,
+			);
+		} catch (cause) {
+			if (isBrowserOperationTimeout(cause)) {
+				return { cache: null, timedOut: true, reason: cause.reason };
+			}
+			throw cause;
+		}
 	}
 }
 
@@ -384,9 +456,13 @@ export function readLiveApolloCacheInPage(): ApolloCache | null {
 	return null;
 }
 
-/** True only for the signed-in order-history route with an Apollo cache,
- *  no order refs, and a visible exact generic empty-state phrase. */
+/** True only with an authenticated viewer, an unfiltered terminal empty
+ *  orders request, and a visible exact generic empty-state phrase. */
 export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
+	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
+		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
+		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+	});
 	const allowedPhrases = new Set([
 		"no orders yet",
 		"no order history",
@@ -399,7 +475,7 @@ export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 		location.pathname !== "/account/order-history" ||
 		document.querySelector(
 			'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
-		)
+		) || hasSignInCTA
 	) {
 		return false;
 	}
@@ -455,23 +531,46 @@ export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 	}
 	const query = state?.ROOT_QUERY;
 	if (!query || typeof query !== "object" || Array.isArray(query)) return false;
-	const hasOrderRef = Object.entries(query).some(([key, value]) => {
-		if (!/^deliveriesOrdersList[:(]/.test(key)) return false;
+	const viewer = (query as Record<string, unknown>).viewer;
+	if (typeof viewer !== "object" || viewer === null || !("__ref" in viewer) || typeof viewer.__ref !== "string") return false;
+	const viewerEntity = state[viewer.__ref];
+	if (typeof viewerEntity !== "object" || viewerEntity === null || Array.isArray(viewerEntity)) return false;
+	const viewerId = (viewerEntity as Record<string, unknown>).id;
+	if (typeof viewerId !== "string" || viewerId.length === 0) return false;
+	const orderRequests = Object.entries(query).filter(([key]) =>
+		key.startsWith("deliveriesOrdersList:") || key.startsWith("deliveriesOrdersList("),
+	);
+	if (orderRequests.length === 0) return false;
+	for (const [key, value] of orderRequests) {
+		const argsText = key.startsWith("deliveriesOrdersList:")
+			? key.slice("deliveriesOrdersList:".length)
+			: key.slice("deliveriesOrdersList(".length, -1);
+		let args: unknown;
+		try {
+			args = JSON.parse(argsText);
+		} catch {
+			return false;
+		}
+		if (typeof args !== "object" || args === null || Array.isArray(args)) return false;
+		const request = args as Record<string, unknown>;
+		if (Object.keys(request).some((name) => !["filter", "sortBy", "sortKey", "first", "after"].includes(name))) return false;
+		if (request.filter !== undefined && request.filter !== null &&
+			(typeof request.filter !== "object" || request.filter === null || Array.isArray(request.filter) || Object.keys(request.filter).length > 0)) return false;
+		if (request.after !== undefined && request.after !== null) return false;
+		if (request.first !== undefined && (!Number.isInteger(request.first) || Number(request.first) <= 0)) return false;
 		if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-		const nodes = (value as { nodes?: unknown }).nodes;
-		return (
-			Array.isArray(nodes) &&
-			nodes.some(
-				(node) =>
-					typeof node === "object" &&
-					node !== null &&
-					"__ref" in node &&
-					typeof node.__ref === "string" &&
-					node.__ref.startsWith("Order:"),
-			)
-		);
-	});
-	if (hasOrderRef) return false;
+		const connection = value as Record<string, unknown>;
+		const pageInfo = connection.pageInfo;
+		if (!Array.isArray(connection.nodes) || connection.nodes.length !== 0 ||
+			typeof pageInfo !== "object" || pageInfo === null || Array.isArray(pageInfo) ||
+			(pageInfo as Record<string, unknown>).hasNextPage !== false) return false;
+		const totals: unknown[] = [];
+		if (Object.hasOwn(connection, "totalCount")) totals.push(connection.totalCount);
+		if (Object.hasOwn(pageInfo, "totalCount")) totals.push((pageInfo as Record<string, unknown>).totalCount);
+		if (totals.some((total) => total === undefined || total === null ||
+			((typeof total !== "number" && typeof total !== "string") ||
+				(typeof total === "string" && total.trim().length === 0) || Number(total) !== 0))) return false;
+	}
 	return Array.from(document.querySelectorAll("body *")).some((element) => {
 		if (element.children.length > 0) return false;
 		const rect = element.getBoundingClientRect();
@@ -544,6 +643,8 @@ export interface CacheWalkArgs {
 	readCache: () => Promise<ApolloCache | null>;
 	scroll: () => Promise<void>;
 	wait?: (ms: number) => Promise<void>;
+	browserOperationTimeoutMs?: number;
+	runDeadlineAt?: number;
 }
 
 export interface ShopOrderPageEvidence {
@@ -565,6 +666,12 @@ export interface CacheWalkResult {
 	reason: "terminal" | "page_blocked" | "no_progress" | "page_budget" | "end_unproven";
 	pageEvidence: ShopOrderPageEvidence | null;
 	domDiscardedRows: number;
+	coverage: {
+		discoveredRows: number;
+		discardedRows: number;
+		withheldRows: Array<{ fields: Array<{ field: string; reason: string }> }>;
+	};
+	countMismatch: boolean;
 }
 
 export async function walkOrdersCache(
@@ -576,12 +683,58 @@ export async function walkOrdersCache(
 		maxContinuationScrolls = MAX_CONTINUATION_SCROLLS,
 		wait = async () => undefined,
 	} = args;
+	const deadlineAt = args.runDeadlineAt ?? Date.now() + DEFAULT_RUN_BUDGET_MS;
+	const operationTimeoutMs = args.browserOperationTimeoutMs ?? DEFAULT_BROWSER_OPERATION_TIMEOUT_MS;
 	let cache = args.initialCache ?? null;
 	let pageEvidence: ShopOrderPageEvidence | null = null;
 	let boundPageIdentity: { url: string; navigation: string } | null = null;
 	const currentPageEvidence = (): ShopOrderPageEvidence | null => pageEvidence;
 	const currentBoundPageIdentity = (): { url: string; navigation: string } | null => boundPageIdentity;
 	const orders = new Map<string, ParsedOrder>();
+	const apolloIdentities = new Set<string>();
+	const unavailableDomOrders = new Map<string, Array<{ field: string; reason: string }>>();
+	const discoveredRows = new Set<string>();
+	const unavailableByRef = new Map<string, Array<{ field: string; reason: string }>>();
+	const unidentifiedIssues = new Map<string, Array<{ field: string; reason: string }>>();
+	let countMismatch = false;
+	const mergeCoverage = (snapshot: ApolloCache): void => {
+		const coverage = extractOrdersWithCoverage(snapshot);
+		for (const ref of collectAllOrderRefs(snapshot)) discoveredRows.add(`ref:${ref}`);
+		for (const ref of coverage.availableRefs) unavailableByRef.delete(ref);
+		for (const item of coverage.unavailableByRef) {
+			discoveredRows.add(`ref:${item.ref}`);
+			unavailableByRef.set(item.ref, item.fields);
+		}
+		for (const key of coverage.resolvedUnidentifiedKeys) unidentifiedIssues.delete(key);
+		for (const issue of coverage.unidentifiedRows) {
+			discoveredRows.add(`unidentified:${issue.key}`);
+			unidentifiedIssues.set(issue.key, issue.fields);
+		}
+		for (const order of coverage.orders) {
+			const identity = resolveOrderIdentity(order);
+			if (identity !== null) {
+				apolloIdentities.add(identity);
+				unavailableDomOrders.delete(identity);
+			}
+		}
+		merge(coverage.orders, true);
+		if (hasDeclaredOrderTotal(snapshot)) countMismatch = hasOrderCountMismatch(snapshot);
+	};
+	const coverageSummary = () => {
+		const withheldRows = [
+			...unavailableByRef.values(),
+			...unidentifiedIssues.values(),
+			...unavailableDomOrders.values(),
+		].map((fields) => ({ fields }));
+		for (let index = 0; index < domDiscardedRows; index += 1) {
+			withheldRows.push({ fields: [{ field: "order", reason: "unreadable_dom_card" }] });
+		}
+		return {
+			discoveredRows: discoveredRows.size + domDiscardedRows,
+			discardedRows: withheldRows.length,
+			withheldRows,
+		};
+	};
 	let domDiscardedRows = 0;
 	const merge = (found: readonly ParsedOrder[], replace = false) => {
 		for (const order of found) {
@@ -589,9 +742,26 @@ export async function walkOrdersCache(
 			if (id !== null && (replace || !orders.has(id))) orders.set(id, order);
 		}
 	};
-	merge(args.initialOrders ?? []);
+	const mergeDomOrder = (order: ParsedOrder): void => {
+		const identity = resolveOrderIdentity(order);
+		if (identity === null) {
+			domDiscardedRows += 1;
+			return;
+		}
+		if (apolloIdentities.has(identity)) return;
+		const missing = domUnavailableFields(order);
+		if (missing.length === 0) merge([order]);
+		else {
+			discoveredRows.add(`dom:${identity}`);
+			unavailableDomOrders.set(identity, missing);
+		}
+	};
+	if (args.initialCache) mergeCoverage(args.initialCache);
+	for (const order of args.initialOrders ?? []) mergeDomOrder(order);
 	const read = async (): Promise<boolean> => {
-		const before = await readPageEvidence?.();
+		const before = readPageEvidence
+			? await withBrowserOperationBudget("page_evidence_read", readPageEvidence, deadlineAt, operationTimeoutMs)
+			: undefined;
 		if (before) {
 			pageEvidence = before;
 			if (
@@ -599,8 +769,13 @@ export async function walkOrdersCache(
 				before.url !== ORDER_HISTORY_URL || before.navigation.length === 0
 			) return false;
 		}
-		const refreshed = await readCache().catch(() => null);
-		const after = await readPageEvidence?.();
+		const refreshed = await withBrowserOperationBudget("apollo_cache_read", readCache, deadlineAt, operationTimeoutMs).catch((cause: unknown) => {
+			if (isBrowserOperationTimeout(cause)) throw cause;
+			return null;
+		});
+		const after = readPageEvidence
+			? await withBrowserOperationBudget("page_evidence_read", readPageEvidence, deadlineAt, operationTimeoutMs)
+			: undefined;
 		if (after) {
 			pageEvidence = after;
 			if (
@@ -611,29 +786,34 @@ export async function walkOrdersCache(
 			) return false;
 			boundPageIdentity ??= { url: after.url, navigation: after.navigation };
 		}
-		cache = refreshed;
-		if (cache && hasOrdersConnection(cache)) merge(extractOrdersWithCoverage(cache).orders, true);
+		if (refreshed) {
+			cache = refreshed;
+			if (hasOrdersConnection(refreshed)) mergeCoverage(refreshed);
+		}
 		if (readDomOrders) {
-			const domOrders = await readDomOrders().catch(() => []);
+			const domOrders = await withBrowserOperationBudget("dom_order_read", readDomOrders, deadlineAt, operationTimeoutMs).catch((cause: unknown) => {
+				if (isBrowserOperationTimeout(cause)) throw cause;
+				return [];
+			});
 			domDiscardedRows = Math.max(
 				domDiscardedRows,
 				Math.max(0, (pageEvidence?.domCardCount ?? domOrders.length) - domOrders.length),
 			);
-			merge(domOrders);
+			for (const order of domOrders) mergeDomOrder(order);
 		}
 		return true;
 	};
 		if (!(await read())) {
-		return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "page_blocked", pageEvidence, domDiscardedRows };
+		return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "page_blocked", pageEvidence, domDiscardedRows, coverage: coverageSummary(), countMismatch };
 	}
 
 	let unchanged = 0;
 	let previousSignature = orderWalkSignature(cache, orders, pageEvidence);
 	for (let round = 0; round < maxBootstrapScrolls && unchanged < MAX_UNCHANGED_BOOTSTRAP_ROUNDS; round += 1) {
-		await scroll();
-		await wait(BOOTSTRAP_SCROLL_DELAY_MS);
+		await withBrowserOperationBudget("scroll", scroll, deadlineAt, operationTimeoutMs);
+		await withBrowserOperationBudget("bootstrap_wait", () => wait(BOOTSTRAP_SCROLL_DELAY_MS), deadlineAt, operationTimeoutMs);
 		if (!(await read())) {
-			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "page_blocked", pageEvidence, domDiscardedRows };
+			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "page_blocked", pageEvidence, domDiscardedRows, coverage: coverageSummary(), countMismatch };
 		}
 		const signature = orderWalkSignature(cache, orders, pageEvidence);
 		unchanged = signature === previousSignature ? unchanged + 1 : 0;
@@ -644,16 +824,16 @@ export async function walkOrdersCache(
 	let noProgress = 0;
 	while (cache && hasNextOrdersPage(cache) && continuationScrolls < maxContinuationScrolls) {
 		const before = orderWalkSignature(cache, orders, pageEvidence, false);
-		await scroll();
-		await wait(CONTINUATION_SCROLL_DELAY_MS);
+		await withBrowserOperationBudget("scroll", scroll, deadlineAt, operationTimeoutMs);
+		await withBrowserOperationBudget("continuation_wait", () => wait(CONTINUATION_SCROLL_DELAY_MS), deadlineAt, operationTimeoutMs);
 		continuationScrolls += 1;
 		if (!(await read())) {
-			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "page_blocked", pageEvidence, domDiscardedRows };
+			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "page_blocked", pageEvidence, domDiscardedRows, coverage: coverageSummary(), countMismatch };
 		}
 		const after = orderWalkSignature(cache, orders, pageEvidence, false);
 		noProgress = after === before ? noProgress + 1 : 0;
 		if (noProgress >= MAX_UNCHANGED_BOOTSTRAP_ROUNDS) {
-			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "no_progress", pageEvidence, domDiscardedRows };
+			return { cache, orders: [...orders.values()], truncated: true, complete: false, reason: "no_progress", pageEvidence, domDiscardedRows, coverage: coverageSummary(), countMismatch };
 		}
 	}
 	const finalPageEvidence = currentPageEvidence();
@@ -662,9 +842,16 @@ export async function walkOrdersCache(
 	const domEnd = Boolean(finalPageEvidence?.domHasEndMarker && !finalPageEvidence.domHasContinuation);
 	let verifiedEmptyEnd = false;
 	if (!cacheEnd && !domEnd && args.readVerifiedEmptyState) {
-		const before = await readPageEvidence?.();
-		const marker = await args.readVerifiedEmptyState().catch(() => false);
-		const after = await readPageEvidence?.();
+		const before = readPageEvidence
+			? await withBrowserOperationBudget("page_evidence_read", readPageEvidence, deadlineAt, operationTimeoutMs)
+			: undefined;
+		const marker = await withBrowserOperationBudget("verified_empty_read", args.readVerifiedEmptyState, deadlineAt, operationTimeoutMs).catch((cause: unknown) => {
+			if (isBrowserOperationTimeout(cause)) throw cause;
+			return false;
+		});
+		const after = readPageEvidence
+			? await withBrowserOperationBudget("page_evidence_read", readPageEvidence, deadlineAt, operationTimeoutMs)
+			: undefined;
 		verifiedEmptyEnd = marker && ((before === undefined && after === undefined) || (
 			before !== undefined && after !== undefined &&
 			before.url === after.url && before.navigation === after.navigation &&
@@ -674,8 +861,9 @@ export async function walkOrdersCache(
 			))
 		));
 	}
+	const coverage = coverageSummary();
 	const complete = (cacheEnd || domEnd || verifiedEmptyEnd) && !finalPageEvidence?.domHasContinuation &&
-		!(cache && hasNextOrdersPage(cache)) && !domDiscardedRows;
+		!(cache && hasNextOrdersPage(cache)) && !domDiscardedRows && coverage.discardedRows === 0 && !countMismatch;
 	const budgetHit = Boolean(cache && hasNextOrdersPage(cache) && continuationScrolls >= maxContinuationScrolls);
 	return {
 		cache,
@@ -685,7 +873,22 @@ export async function walkOrdersCache(
 		reason: complete ? "terminal" : budgetHit ? "page_budget" : "end_unproven",
 		pageEvidence: finalPageEvidence,
 		domDiscardedRows,
+		coverage,
+		countMismatch,
 	};
+}
+
+function domUnavailableFields(order: ParsedOrder): Array<{ field: string; reason: string }> {
+	const fields: Array<{ field: string; reason: string }> = [];
+	if (order.orderNumber === null) fields.push({ field: "order_number", reason: "not_present_in_dom" });
+	if (order.placedAt === null) fields.push({ field: "placed_at", reason: "not_present_in_dom" });
+	if (order.merchantName === null) fields.push({ field: "merchant_name", reason: "not_present_in_dom" });
+	if (order.totalCents === null) fields.push({ field: "total", reason: "not_present_in_dom" });
+	if (order.currency === null) fields.push({ field: "currency", reason: "not_present_in_dom" });
+	if (order.status === null) fields.push({ field: "status", reason: "not_present_in_dom" });
+	if (order.itemCount === null) fields.push({ field: "item_count", reason: "not_present_in_dom" });
+	if (order.lineItemTitles.length === 0) fields.push({ field: "line_item_titles", reason: "not_present_in_dom" });
+	return fields;
 }
 
 function orderWalkSignature(
@@ -738,17 +941,45 @@ export interface CollectShopifyArgs {
 	requested: BrowserCollectContext["requested"];
 	scroll: () => Promise<void>;
 	state: BrowserCollectContext["state"];
+	browserOperationTimeoutMs?: number;
+	runBudgetMs?: number;
+	runDeadlineAt?: number;
 }
 
 type OrderHistoryEvidence =
 	| { kind: "orders"; cache: ApolloCache | null; orders: ParsedOrder[] }
-	| { kind: "verified_empty"; cache: ApolloCache }
-	| { kind: "deadline_expired"; cache: ApolloCache | null };
+	| { kind: "verified_empty"; cache: ApolloCache; orders: ParsedOrder[] }
+	| { kind: "deadline_expired"; cache: ApolloCache | null; orders: ParsedOrder[] };
+
+function aggregateWithheldFields(
+	rows: Array<{ fields: Array<{ field: string; reason: string }> }>,
+): Array<{ field: string; reason: string; count: number }> {
+	const counts = new Map<string, number>();
+	for (const row of rows) {
+		for (const item of row.fields) {
+			const key = `${item.field}\u0000${item.reason}`;
+			counts.set(key, (counts.get(key) ?? 0) + 1);
+		}
+	}
+	return [...counts].map(([key, count]) => {
+		const [fieldName, reason] = key.split("\u0000");
+		return { field: fieldName ?? "unknown", reason: reason ?? "unavailable", count };
+	});
+}
+
+function schemaWithheldRows(
+	issues: readonly { path: string; message: string }[],
+): Array<{ fields: Array<{ field: string; reason: string }> }> {
+	const uniqueFields = new Set(issues.map((issue) => issue.path.split(".")[0] ?? "record"));
+	return [{
+		fields: [...uniqueFields].map((fieldName) => ({ field: fieldName, reason: "schema_validation_failed" })),
+	}];
+}
 
 /** Keep inspecting the hydrated page until records or stable empty evidence appear. */
 async function waitForOrderHistoryEvidence({
 	readCache, readDomOrders, readVerifiedEmptyState, timeoutMs, pollIntervalMs,
-	now, wait,
+	now, wait, runDeadlineAt, operationTimeoutMs,
 }: {
 	readCache: CollectShopifyArgs["readCache"];
 	readDomOrders: CollectShopifyArgs["readDomOrders"];
@@ -757,6 +988,8 @@ async function waitForOrderHistoryEvidence({
 	pollIntervalMs: number;
 	now: () => number;
 	wait: (ms: number) => Promise<void>;
+	runDeadlineAt: number;
+	operationTimeoutMs: number;
 }): Promise<OrderHistoryEvidence> {
 	const deadline = now() + timeoutMs;
 	let cache: ApolloCache | null = null;
@@ -767,7 +1000,10 @@ async function waitForOrderHistoryEvidence({
 		const readWithinDeadline = async <T>(reader: () => Promise<T>, fallback: T): Promise<T> => {
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			return Promise.race([
-				reader().catch(() => fallback),
+				reader().catch((cause: unknown) => {
+					if (isBrowserOperationTimeout(cause)) throw cause;
+					return fallback;
+				}),
 				new Promise<T>((resolve) => {
 					timer = setTimeout(() => resolve(fallback), Math.max(0, deadline - now()));
 				}),
@@ -779,6 +1015,8 @@ async function waitForOrderHistoryEvidence({
 		if (refreshed) cache = refreshed;
 		const cacheOrders = cache ? extractOrdersWithCoverage(cache).orders : [];
 		if (cacheOrders.length > 0) return { kind: "orders", cache, orders: cacheOrders };
+		const coverage = cache ? extractOrdersWithCoverage(cache) : null;
+		if (coverage && coverage.discoveredRows > 0) return { kind: "orders", cache, orders: coverage.orders };
 		const domOrders = readDomOrders
 			? await readWithinDeadline(readDomOrders, [] as ParsedOrder[])
 			: [];
@@ -788,13 +1026,16 @@ async function waitForOrderHistoryEvidence({
 			: false;
 		consecutiveEmptyReads = empty ? consecutiveEmptyReads + 1 : 0;
 		if (cache && consecutiveEmptyReads >= 2) {
-			return { kind: "verified_empty", cache };
+			return { kind: "verified_empty", cache, orders: [] };
 		}
 		const remaining = deadline - now();
 		if (remaining <= 0) break;
-		await wait(Math.min(pollIntervalMs, remaining));
+		await withBrowserOperationBudget(
+			"evidence_poll_wait", () => wait(Math.min(pollIntervalMs, remaining)),
+			runDeadlineAt, operationTimeoutMs,
+		);
 	}
-	return { kind: "deadline_expired", cache };
+	return { kind: "deadline_expired", cache, orders: cache ? extractOrdersWithCoverage(cache).orders : [] };
 }
 
 /** The connector's whole `orders` stream logic, independent of Playwright —
@@ -806,84 +1047,123 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	if (!requested.has(ORDERS_STREAM)) {
 		return;
 	}
+	const runDeadlineAt = args.runDeadlineAt ?? Date.now() + (args.runBudgetMs ?? DEFAULT_RUN_BUDGET_MS);
+	const operationTimeoutMs = args.browserOperationTimeoutMs ?? DEFAULT_BROWSER_OPERATION_TIMEOUT_MS;
+	let cachedDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
+	const refreshDiagnostics = (): void => {
+		if (!readSkipDiagnostics) return;
+		void withBrowserOperationBudget(
+			"diagnostics_read", readSkipDiagnostics, runDeadlineAt,
+			Math.min(operationTimeoutMs, DIAGNOSTICS_TIMEOUT_MS),
+		).then((diagnostics) => { cachedDiagnostics = diagnostics; }).catch(() => undefined);
+	};
+	const diagnostics = (): ShopSkipDiagnostics => ({
+		...cachedDiagnostics,
+		navigation_to_first_cache_attempt_ms: navigationStartedAt === undefined ? null : Math.max(0, Date.now() - navigationStartedAt),
+		navigation_to_cache_success_ms: null,
+	});
+	const emitBrowserTimeout = async (cause: ShopifyBrowserOperationTimeout): Promise<void> => {
+		await emit({
+			type: "SKIP_RESULT", stream: ORDERS_STREAM,
+			reason: "shopify_browser_operation_timeout",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			message: "Shop order-history browser read exceeded its time budget; retry to collect it.",
+			diagnostics: { ...diagnostics(), timed_out_operation: cause.operation },
+		});
+	};
 	if (args.orderHistoryReady === false) {
-		let pageDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
-		try {
-			pageDiagnostics = await readSkipDiagnostics?.() ?? EMPTY_SHOP_DIAGNOSTICS;
-		} catch {
-			// A page failure must not hide the bounded route-readiness outcome.
-		}
+		refreshDiagnostics();
 		await emit({
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
 			reason: "shopify_order_history_readiness_timeout",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `Shop order-history or sign-in UI did not become ready within ${String(ORDER_HISTORY_READY_TIMEOUT_MS)}ms.`,
-			diagnostics: {
-				...pageDiagnostics,
-				navigation_to_first_cache_attempt_ms: null,
-				navigation_to_cache_success_ms: null,
-			},
+			diagnostics: diagnostics(),
 		});
 		return;
+	}
+	refreshDiagnostics();
+	if (args.readPageEvidence) {
+		try {
+			const page = await withBrowserOperationBudget(
+				"page_evidence_read", args.readPageEvidence, runDeadlineAt, operationTimeoutMs,
+			);
+			if (page.blocked || !page.orderContext || page.url !== ORDER_HISTORY_URL) {
+				await emit({
+					type: "SKIP_RESULT", stream: ORDERS_STREAM,
+					reason: page.blocked ? "shopify_signed_out_or_blocked" : "shopify_order_history_unconfirmed",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+					message: "Shop did not show an authenticated order-history page.",
+					diagnostics: { ...diagnostics(), page_owner: page.url, page_navigation: page.navigation },
+				});
+				return;
+			}
+		} catch (cause) {
+			if (isBrowserOperationTimeout(cause)) {
+				await emitBrowserTimeout(cause);
+				return;
+			}
+		}
 	}
 
 	const cacheTiming = {
 		firstAttemptMs: navigationStartedAt === undefined ? null : Math.max(0, Date.now() - navigationStartedAt),
 		successMs: null as number | null,
 	};
-	const evidence = await waitForOrderHistoryEvidence({
-		readCache: async () => {
-			const cache = await readCache();
-			if (cache && cacheTiming.successMs === null && navigationStartedAt !== undefined) {
-				cacheTiming.successMs = Math.max(0, Date.now() - navigationStartedAt);
+	let evidence: OrderHistoryEvidence;
+	let walked: CacheWalkResult;
+	try {
+		evidence = await waitForOrderHistoryEvidence({
+			readCache: async () => {
+				const cache = await withBrowserOperationBudget("apollo_cache_read", readCache, runDeadlineAt, operationTimeoutMs);
+				if (cache && cacheTiming.successMs === null && navigationStartedAt !== undefined) {
+					cacheTiming.successMs = Math.max(0, Date.now() - navigationStartedAt);
+				}
+				return cache;
+			},
+			readDomOrders: readDomOrders ? async () => withBrowserOperationBudget("dom_order_read", readDomOrders, runDeadlineAt, operationTimeoutMs) : undefined,
+			readVerifiedEmptyState: args.readVerifiedEmptyState ? async () => withBrowserOperationBudget("verified_empty_read", args.readVerifiedEmptyState as () => Promise<boolean>, runDeadlineAt, operationTimeoutMs) : undefined,
+			timeoutMs: Math.min(args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS, Math.max(0, runDeadlineAt - Date.now())),
+			pollIntervalMs: args.cachePollIntervalMs ?? APOLLO_POLL_INTERVAL_MS,
+			now: args.evidenceNow ?? Date.now,
+			wait: args.evidenceWait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+			runDeadlineAt,
+			operationTimeoutMs,
+		});
+		walked = evidence.kind === "deadline_expired"
+			? {
+				cache: evidence.cache, orders: evidence.orders, truncated: false, complete: false,
+				reason: "end_unproven", pageEvidence: null, domDiscardedRows: 0,
+				coverage: { discoveredRows: 0, discardedRows: 0, withheldRows: [] },
+				countMismatch: false,
 			}
-			return cache;
-		},
-		readDomOrders,
-		readVerifiedEmptyState: args.readVerifiedEmptyState,
-		timeoutMs: args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS,
-		pollIntervalMs: args.cachePollIntervalMs ?? APOLLO_POLL_INTERVAL_MS,
-		now: args.evidenceNow ?? Date.now,
-		wait: args.evidenceWait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
-	});
-	const walked: CacheWalkResult = evidence.kind === "deadline_expired"
-		? {
-			cache: evidence.cache, orders: [], truncated: false, complete: false,
-			reason: "end_unproven", pageEvidence: null, domDiscardedRows: 0,
-		}
-		: await walkOrdersCache({
+			: await walkOrdersCache({
+		initialCache: evidence.cache,
+		initialOrders: evidence.orders,
+		browserOperationTimeoutMs: operationTimeoutMs,
+		runDeadlineAt,
 		readCache: async () => {
-			const refreshed = await readCache();
+			const refreshed = await withBrowserOperationBudget("apollo_cache_read", readCache, runDeadlineAt, operationTimeoutMs);
 			if (refreshed && cacheTiming.successMs === null && navigationStartedAt !== undefined) {
 				cacheTiming.successMs = Math.max(0, Date.now() - navigationStartedAt);
 			}
 			return refreshed;
 		},
-		...(readDomOrders ? { readDomOrders } : {}),
-		...(args.readPageEvidence ? { readPageEvidence: args.readPageEvidence } : {}),
-		...(args.readVerifiedEmptyState ? { readVerifiedEmptyState: args.readVerifiedEmptyState } : {}),
+		...(readDomOrders ? { readDomOrders: async () => withBrowserOperationBudget("dom_order_read", readDomOrders, runDeadlineAt, operationTimeoutMs) } : {}),
+		...(args.readPageEvidence ? { readPageEvidence: async () => withBrowserOperationBudget("page_evidence_read", args.readPageEvidence as () => Promise<ShopOrderPageEvidence>, runDeadlineAt, operationTimeoutMs) } : {}),
+		...(args.readVerifiedEmptyState ? { readVerifiedEmptyState: async () => withBrowserOperationBudget("verified_empty_read", args.readVerifiedEmptyState as () => Promise<boolean>, runDeadlineAt, operationTimeoutMs) } : {}),
 		scroll,
 		...(args.wait ? { wait: args.wait } : {}),
-	});
-	const diagnostics = async (): Promise<ShopSkipDiagnostics> => {
-		let pageDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
-		try {
-			pageDiagnostics = await readSkipDiagnostics?.() ?? EMPTY_SHOP_DIAGNOSTICS;
-		} catch {
-			// Diagnostics must not turn a useful skip into a connector crash.
-		}
-		return {
-			...pageDiagnostics,
-			navigation_to_first_cache_attempt_ms: cacheTiming.firstAttemptMs,
-			navigation_to_cache_success_ms: cacheTiming.successMs,
-		};
-	};
+		});
+	} catch (cause) {
+		if (!isBrowserOperationTimeout(cause)) throw cause;
+		await emitBrowserTimeout(cause);
+		return;
+	}
 	let { cache, truncated } = walked;
 	const orders = walked.orders;
-	const cacheCoverage = cache ? extractOrdersWithCoverage(cache) : {
-		orders: [], discoveredRows: 0, discardedRows: 0,
-	};
+	const cacheCoverage = walked.coverage;
 	if (evidence.kind === "deadline_expired") {
 		await emit({
 			type: "SKIP_RESULT",
@@ -893,7 +1173,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			message: cache
 				? `Shop order history did not expose loaded orders or a stable verified empty marker within ${String(args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS)}ms.`
 				: `Shop order history did not expose an Apollo cache, DOM orders, or verified empty evidence within ${String(args.cacheWaitTimeoutMs ?? APOLLO_READINESS_TIMEOUT_MS)}ms.`,
-			diagnostics: await diagnostics(),
+			diagnostics: diagnostics(),
 		});
 		return;
 	}
@@ -901,21 +1181,47 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 	const cursor = openFingerprintCursor(state[ORDERS_STREAM]);
 	const validRecords: RecordData[] = [];
 	let invalidShapeCount = 0;
+	const schemaIssues: Array<{ path: string; message: string }> = [];
 	for (const order of orders) {
 		const record = orderRecord(order);
 		const validation = validateRecord(ORDERS_STREAM, record);
 		if (!validation.ok) {
 			invalidShapeCount += 1;
+			schemaIssues.push(...validation.issues);
 			continue;
 		}
 		validRecords.push(record);
 	}
-	const discardedRows = cacheCoverage.discardedRows + walked.domDiscardedRows + invalidShapeCount;
+	const discardedRows = cacheCoverage.discardedRows + invalidShapeCount;
 	const pageComplete = walked.complete;
 	const pageBlocked = walked.reason === "page_blocked";
-	const mismatch = Boolean(cache && hasOrderCountMismatch(cache));
+	const mismatch = walked.countMismatch || Boolean(cache && hasOrderCountMismatch(cache));
+	const allWithheldRows = [
+		...cacheCoverage.withheldRows,
+		...schemaIssues.flatMap((issue) => schemaWithheldRows([issue])),
+		...(mismatch ? [{ fields: [{ field: "total_count", reason: "invalid_or_unreconciled" }] }] : []),
+	];
 	const complete = pageComplete && !truncated && !pageBlocked && !mismatch && discardedRows === 0;
-	if (!complete && (pageBlocked || !pageComplete || mismatch)) {
+	if (!complete && discardedRows > 0) {
+		await emit({
+			type: "SKIP_RESULT",
+			stream: ORDERS_STREAM,
+			reason: "shopify_order_rows_unresolved",
+			recovery_hint: { action: "retry_by_runtime", retryable: true },
+			message: "Shop order history contained rows that could not be read completely; retry to collect them.",
+			diagnostics: {
+				...diagnostics(),
+				discovered_rows: cacheCoverage.discoveredRows + invalidShapeCount,
+				valid_rows: pageBlocked ? 0 : validRecords.length,
+				discarded_rows: discardedRows,
+				withheld_fields: aggregateWithheldFields(allWithheldRows),
+				terminal_evidence: pageComplete,
+				page_owner: walked.pageEvidence?.url ?? null,
+				page_navigation: walked.pageEvidence?.navigation ?? null,
+				end_reason: walked.reason,
+			},
+		});
+	} else if (!complete && (pageBlocked || !pageComplete || mismatch)) {
 		await emit({
 			type: "SKIP_RESULT",
 			stream: ORDERS_STREAM,
@@ -925,28 +1231,11 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: "Shop order history could not be proven complete; retry to collect the remaining rows.",
 			diagnostics: {
-				...(await diagnostics()),
-				discovered_rows: cacheCoverage.discoveredRows,
+				...diagnostics(),
+				discovered_rows: cacheCoverage.discoveredRows + invalidShapeCount,
 				valid_rows: pageBlocked ? 0 : validRecords.length,
 				discarded_rows: discardedRows,
-				terminal_evidence: pageComplete,
-				page_owner: walked.pageEvidence?.url ?? null,
-				page_navigation: walked.pageEvidence?.navigation ?? null,
-				end_reason: walked.reason,
-			},
-		});
-	} else if (!complete && discardedRows > 0) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: ORDERS_STREAM,
-			reason: "shopify_order_rows_unresolved",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message: "Shop order history contained rows that could not be read completely; retry to collect them.",
-			diagnostics: {
-				...(await diagnostics()),
-				discovered_rows: cacheCoverage.discoveredRows,
-				valid_rows: pageBlocked ? 0 : validRecords.length,
-				discarded_rows: discardedRows,
+				withheld_fields: aggregateWithheldFields(allWithheldRows),
 				terminal_evidence: pageComplete,
 				page_owner: walked.pageEvidence?.url ?? null,
 				page_navigation: walked.pageEvidence?.navigation ?? null,
@@ -981,6 +1270,11 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 }
 
 export function hasShopOrderHistoryContextInPage(): boolean {
+	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
+		const ariaLabel = typeof element.getAttribute === "function" ? element.getAttribute("aria-label") : null;
+		const label = (ariaLabel ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
+		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+	});
 	if (
 		document.querySelector(
 			'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
@@ -988,6 +1282,7 @@ export function hasShopOrderHistoryContextInPage(): boolean {
 	) {
 		return false;
 	}
+	if (hasSignInCTA) return false;
 	const headings = Array.from(document.querySelectorAll("h1, h2, h3"));
 	return (
 		headings.some((heading) =>
@@ -1001,6 +1296,16 @@ export function hasShopOrderHistoryContextInPage(): boolean {
 	);
 }
 
+export function hasShopSignInWallInPage(): boolean {
+	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
+		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
+		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+	});
+	return hasSignInCTA || Boolean(document.querySelector(
+		'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
+	));
+}
+
 async function hasShopOrderHistorySession(page: Page): Promise<boolean> {
 	try {
 		const currentUrl = new URL(page.url());
@@ -1010,9 +1315,22 @@ async function hasShopOrderHistorySession(page: Page): Promise<boolean> {
 		) {
 			return false;
 		}
-		await page.waitForFunction(hasShopOrderHistoryContextInPage, undefined, {
-			timeout: 10_000,
-		});
+		await withBrowserOperationBudget(
+			"session_readiness_wait",
+			() => page.waitForFunction(isShopOrderHistoryReadyInPage, undefined, { timeout: 10_000 }),
+			Date.now() + 10_000,
+			10_000,
+		);
+		if (typeof page.evaluate === "function") {
+			const wall = await withBrowserOperationBudget(
+				"auth_wall_probe", () => page.evaluate(hasShopSignInWallInPage),
+				Date.now() + 1_000, 1_000,
+			);
+			return !wall && await withBrowserOperationBudget(
+				"order_history_context_probe", () => page.evaluate(hasShopOrderHistoryContextInPage),
+				Date.now() + 1_000, 1_000,
+			);
+		}
 		return true;
 	} catch {
 		return false;
@@ -1044,6 +1362,12 @@ export async function ensureShopifySession({
 	if (await hasShopOrderHistorySession(page)) {
 		return;
 	}
+	if (typeof page.evaluate === "function") {
+		const signedOutWall = await withBrowserOperationBudget(
+			"auth_wall_probe", () => page.evaluate(hasShopSignInWallInPage), Date.now() + 1_000, 1_000,
+		).catch(() => false);
+		if (signedOutWall) throw new Error("shopify_signed_out_or_blocked");
+	}
 
 	if (manualLogin) {
 		await manualLogin();
@@ -1061,7 +1385,7 @@ export async function ensureShopifySession({
 				hasShopOrderHistorySession(readinessPage),
 			readinessProbeOnHandoffPage: true,
 			sendInteraction,
-			timeoutSeconds: 1800,
+			timeoutSeconds: 45,
 		});
 	}
 
@@ -1073,20 +1397,28 @@ export async function ensureShopifySession({
 
 async function collect(ctx: BrowserCollectContext): Promise<void> {
 	const { page, emit, emitRecord, progress, requested, state } = ctx;
+	const runDeadlineAt = Date.now() + DEFAULT_RUN_BUDGET_MS;
 	const navigationStartedAt = Date.now();
-	await page
-		.goto(ORDER_HISTORY_URL, { waitUntil: "domcontentloaded", timeout: 30_000 })
-		.catch((): undefined => undefined);
-	const orderHistoryReady = await page.waitForFunction(
-		isShopOrderHistoryReadyInPage,
-		undefined,
-		{ timeout: ORDER_HISTORY_READY_TIMEOUT_MS },
+	await withBrowserOperationBudget(
+		"order_history_navigation",
+		() => page.goto(ORDER_HISTORY_URL, {
+			waitUntil: "domcontentloaded",
+			timeout: Math.min(30_000, Math.max(1, runDeadlineAt - Date.now())),
+		}),
+		runDeadlineAt,
+		30_000,
+	).catch(() => null);
+	const orderHistoryReady = await withBrowserOperationBudget(
+		"order_history_readiness_wait",
+		() => page.waitForFunction(isShopOrderHistoryReadyInPage, undefined, {
+			timeout: Math.min(ORDER_HISTORY_READY_TIMEOUT_MS, Math.max(1, runDeadlineAt - Date.now())),
+		}),
+		runDeadlineAt,
+		ORDER_HISTORY_READY_TIMEOUT_MS,
 	).then(() => true).catch(() => false);
-	// Capture the connector context before attempting cache reads. If the page
-	// closes before a later skip, the last safe structural snapshot still ships.
-	let latestDiagnostics = await page
-		.evaluate(shopSkipDiagnosticsInPage)
-		.catch(() => EMPTY_SHOP_DIAGNOSTICS);
+	// Diagnostics refresh in the background. A stalled page evaluation cannot
+	// block the typed readiness/operation failure emitted by collectShopify.
+	let latestDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
 
 	await collectShopify({
 		emit,
@@ -1095,6 +1427,7 @@ async function collect(ctx: BrowserCollectContext): Promise<void> {
 		requested,
 		state,
 		navigationStartedAt,
+		runDeadlineAt,
 		orderHistoryReady,
 		readCache: () => evaluateShopReaderInMainWorld(page, readLiveApolloCacheInPage),
 		readDomOrders: async () => parseDomOrderCards(await page.content()),
@@ -1121,7 +1454,12 @@ if (isMainModule(import.meta.url)) {
 		browser: {},
 		validateRecord,
 		async ensureSession(args: EnsureSessionArgs): Promise<void> {
-			await ensureShopifySession(args);
+			await withBrowserOperationBudget(
+				"session_establishment",
+				() => ensureShopifySession(args),
+				Date.now() + SESSION_ESTABLISHMENT_BUDGET_MS,
+				SESSION_ESTABLISHMENT_BUDGET_MS,
+			);
 		},
 		collect,
 	});

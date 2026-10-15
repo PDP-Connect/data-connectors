@@ -17249,7 +17249,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.27",
+				"version": "0.2.28",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -17357,6 +17357,8 @@
 					}
 				],
 				"reason_display_messages": {
+					"shopify_browser_operation_timeout": "Shop did not respond within the collection time budget. Retry the collection.",
+					"shopify_signed_out_or_blocked": "Sign in to Shop and open your order history before retrying.",
 					"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
 					"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
 					"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",

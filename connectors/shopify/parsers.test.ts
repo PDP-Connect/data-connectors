@@ -22,6 +22,7 @@ import {
 	extractOrders,
 	extractOrdersWithCoverage,
 	hasNextOrdersPage,
+	hasOrderCountMismatch,
 	hasVerifiedOrdersEnd,
 	parseDomOrderCards,
 	parseOrderRef,
@@ -146,9 +147,10 @@ test("extractOrders falls back to totalPriceAfterOfferApplied and derives itemCo
 });
 
 test("extractOrders rounds decimal-string amounts to integer cents without float drift", () => {
+	const sourceOrder = synthCache()["Order:1"] as Record<string, unknown>;
 	const cache = synthCache({
 		"Order:1": {
-			id: "gid://shopify/Order/1",
+			...sourceOrder,
 			effectiveTotalPrice: { amount: "19.999", currencyCode: "USD" },
 		},
 	});
@@ -158,7 +160,10 @@ test("extractOrders rounds decimal-string amounts to integer cents without float
 
 test("extractOrders returns null totalCents and currency when price is absent (never guesses)", () => {
 	const cache = synthCache({
-		"Order:1": { id: "gid://shopify/Order/1" },
+		"Order:1": {
+			id: "gid://shopify/Order/1", shop: { __ref: "Shop:acme" },
+			lineItems: { nodes: [] }, totalItemCount: null,
+		},
 	});
 	const [order] = extractOrders(cache);
 	assert.equal(order?.totalCents, null);
@@ -257,9 +262,17 @@ test("Shopify row normalization preserves numeric IDs, numeric strings, and empt
 		status: "",
 		totalCents: 0,
 	});
+	const coverage = extractOrdersWithCoverage(cache).fieldCoverage[0] ?? [];
+	assert.equal(coverage.length, 10, "each mapped field receives one coverage state");
+	assert.equal(coverage.find((entry) => entry.field === "placed_at")?.state, "EXPLICIT_EMPTY");
+	assert.equal(coverage.find((entry) => entry.field === "status")?.state, "EXPLICIT_EMPTY");
+	assert.equal(coverage.find((entry) => entry.field === "currency")?.state, "EXPLICIT_EMPTY");
+	assert.equal(coverage.find((entry) => entry.field === "merchant_name")?.state, "EXPLICIT_EMPTY");
+	assert.ok(coverage.every((entry) => entry.state !== "UNAVAILABLE"));
 });
 
 test("invalid empty numeric source fields are discarded for omission accounting, not coerced to zero", () => {
+	const validOrder = synthCache()["Order:1"] as Record<string, unknown>;
 	const cache = synthCache({
 		ROOT_QUERY: {
 			'deliveriesOrdersList:{"filter":{}}': {
@@ -268,16 +281,19 @@ test("invalid empty numeric source fields are discarded for omission accounting,
 			},
 		},
 		"Order:1": {
-			id: "gid://shopify/Order/1",
+			...validOrder,
 			effectiveTotalPrice: { amount: "", currencyCode: "USD" },
 			totalItemCount: "",
 		},
 	});
-	assert.deepEqual(extractOrdersWithCoverage(cache), {
-		orders: [],
-		discoveredRows: 1,
-		discardedRows: 1,
-	});
+	const result = extractOrdersWithCoverage(cache);
+	assert.equal(result.orders.length, 0);
+	assert.equal(result.discoveredRows, 1);
+	assert.equal(result.discardedRows, 1);
+	assert.deepEqual(result.withheldRows[0]?.fields.map(({ field, reason }) => ({ field, reason })), [
+		{ field: "total", reason: "malformed_value" },
+		{ field: "item_count", reason: "malformed_value" },
+	]);
 });
 
 test("every Shop order connection needs explicit terminal pageInfo", () => {
@@ -295,4 +311,104 @@ test("every Shop order connection needs explicit terminal pageInfo", () => {
 	assert.equal(hasVerifiedOrdersEnd({ ROOT_QUERY: {
 		'deliveriesOrdersList:{"filter":{}}': { nodes: [], pageInfo: { hasNextPage: false } },
 	} }), true);
+});
+
+test("a malformed mapped field withholds the full order and reports only field reasons", () => {
+	const cache = synthCache({
+		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': {
+			nodes: [{ __ref: "Order:1" }], pageInfo: { hasNextPage: false },
+		} },
+		"Order:1": {
+			id: "gid://shopify/Order/1",
+			createdAt: {},
+			displayStatus: false,
+			effectiveTotalPrice: "bad",
+			totalItemCount: 2,
+			shop: { __ref: "Shop:missing" },
+			lineItems: { nodes: [{ __ref: "ProductVariant:missing" }] },
+		},
+	});
+	const result = extractOrdersWithCoverage(cache);
+	assert.equal(result.orders.length, 0);
+	assert.equal(result.discardedRows, 1);
+	assert.deepEqual(result.withheldRows, [{
+		fields: [
+			{ field: "placed_at", reason: "malformed_value" },
+			{ field: "status", reason: "malformed_value" },
+			{ field: "total", reason: "malformed_value" },
+			{ field: "currency", reason: "malformed_value" },
+			{ field: "merchant_name", reason: "missing_reference" },
+			{ field: "line_item_titles", reason: "missing_or_malformed_reference" },
+		],
+	}]);
+	assert.equal(JSON.stringify(result.withheldRows).includes("gid://"), false);
+});
+
+test("an unreadable nodes body and invalid declared totals veto connection end", () => {
+	for (const nodes of [undefined, null, { 0: { __ref: "Order:1" } }]) {
+		const cache = synthCache({
+			ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': { nodes, pageInfo: { hasNextPage: false } } },
+		});
+		assert.equal(hasVerifiedOrdersEnd(cache), false);
+		assert.ok(extractOrdersWithCoverage(cache).discardedRows > 0);
+	}
+	for (const totalCount of [true, "not-a-number", Number.POSITIVE_INFINITY, 1.5, null, undefined]) {
+		const cache = synthCache({
+			ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': {
+				nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }],
+				pageInfo: { hasNextPage: false }, totalCount,
+			} },
+		});
+		assert.equal(hasOrderCountMismatch(cache), true);
+	}
+});
+
+test("cursor suffixes and filtered connections are not verified full-history end proof", () => {
+	const suffix = synthCache({
+		ROOT_QUERY: { 'deliveriesOrdersList({"first":10,"after":"middle"})': {
+			nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }], pageInfo: { hasNextPage: false },
+		} },
+	});
+	assert.equal(hasVerifiedOrdersEnd(suffix), false);
+	const accumulatedSuffix = synthCache({
+		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{},"after":"middle"}': {
+			nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }], pageInfo: { hasNextPage: false },
+		} },
+	});
+	assert.equal(hasVerifiedOrdersEnd(accumulatedSuffix), false);
+	const filtered = synthCache({
+		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{"status":"FULFILLED"}}': {
+			nodes: [{ __ref: "Order:1" }, { __ref: "Order:2" }], pageInfo: { hasNextPage: false },
+		} },
+	});
+	assert.equal(hasVerifiedOrdersEnd(filtered), false);
+});
+
+test("cursor history end requires a connected first-to-terminal request chain", () => {
+	const first = synthCache({
+		ROOT_QUERY: {
+			'deliveriesOrdersList({"first":10})': {
+				nodes: [{ __ref: "Order:1" }], totalCount: 2,
+				pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+			},
+			'deliveriesOrdersList({"first":10,"after":"cursor-1"})': {
+				nodes: [{ __ref: "Order:2" }], totalCount: 2,
+				pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
+			},
+		},
+	});
+	assert.equal(hasVerifiedOrdersEnd(first), true);
+	const disconnected = synthCache({
+		ROOT_QUERY: {
+			'deliveriesOrdersList({"first":10})': {
+				nodes: [{ __ref: "Order:1" }], totalCount: 2,
+				pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+			},
+			'deliveriesOrdersList({"first":10,"after":"other"})': {
+				nodes: [{ __ref: "Order:2" }], totalCount: 2,
+				pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
+			},
+		},
+	});
+	assert.equal(hasVerifiedOrdersEnd(disconnected), false);
 });

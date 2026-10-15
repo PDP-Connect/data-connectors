@@ -35,6 +35,7 @@ import {
 	waitForApolloCache,
 	readApolloCacheInPage,
 	readLiveApolloCacheInPage,
+	readShopOrderPageEvidenceInPage,
 	hasShopOrderHistoryContextInPage,
 	isShopOrderHistoryReadyInPage,
 	shopSkipDiagnosticsInPage,
@@ -228,18 +229,35 @@ test("Shop order-page signal rejects a login form even when the page has an orde
 });
 
 function makeCacheWithoutOrdersConnection(): ApolloCache {
-	return { ROOT_QUERY: { viewer: { __ref: "Customer:current" } } };
+	return {
+		ROOT_QUERY: { viewer: { __ref: "Customer:current" } },
+		"Customer:current": { id: "gid://shopify/Customer/current" },
+	};
+}
+
+function makeCacheWithVerifiedEmptyOrdersConnection(): ApolloCache {
+	return {
+		ROOT_QUERY: {
+			viewer: { __ref: "Customer:current" },
+			'deliveriesOrdersList:{"filter":{}}': {
+				nodes: [], pageInfo: { hasNextPage: false },
+			},
+		},
+		"Customer:current": { id: "gid://shopify/Customer/current" },
+	};
 }
 
 function makeCache(orderRefs: string[], hasNextPage: boolean): ApolloCache {
 	const entries: Record<string, unknown> = {
 		ROOT_QUERY: {
+			viewer: { __ref: "Customer:current" },
 			'deliveriesOrdersList:{"filter":{}}': {
 				nodes: orderRefs.map((ref) => ({ __ref: ref })),
 				pageInfo: { hasNextPage },
 			},
 		},
 	};
+	entries["Customer:current"] = { id: "gid://shopify/Customer/current" };
 	for (const ref of orderRefs) {
 		const id = ref.slice("Order:".length);
 		entries[ref] = {
@@ -251,6 +269,10 @@ function makeCache(orderRefs: string[], hasNextPage: boolean): ApolloCache {
 			totalItemCount: 1,
 			lineItems: { nodes: [] },
 		};
+	}
+	const root = entries.ROOT_QUERY;
+	if (typeof root === "object" && root !== null && !Array.isArray(root) && !("viewer" in root)) {
+		(root as Record<string, unknown>).viewer = { __ref: "Customer:current" };
 	}
 	entries["Shop:acme"] = { name: "Acme Goods" };
 	return entries;
@@ -423,7 +445,8 @@ test("verified empty Shop page requires route, live cache, no order refs, and vi
 		getComputedStyle: Object.getOwnPropertyDescriptor(globalThis, "getComputedStyle"),
 	};
 	const empty = { textContent: "No orders yet", children: [], getBoundingClientRect: () => ({ width: 10, height: 10 }) };
-	const root = { "__reactFiber$fixture": { memoizedProps: { client: { cache: { extract: () => makeCacheWithoutOrdersConnection() } } } } };
+	let cache = makeCacheWithVerifiedEmptyOrdersConnection();
+	const root = { "__reactFiber$fixture": { memoizedProps: { client: { cache: { extract: () => cache } } } } };
 	Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: "https://shop.app", pathname: "/account/order-history" } });
 	Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, value: () => ({ display: "block", visibility: "visible" }) });
 	Object.defineProperty(globalThis, "document", { configurable: true, value: {
@@ -432,6 +455,18 @@ test("verified empty Shop page requires route, live cache, no order refs, and vi
 	} });
 	try {
 		assert.equal(hasVerifiedEmptyOrderHistoryInPage(), true);
+		cache = makeCacheWithoutOrdersConnection();
+		assert.equal(hasVerifiedEmptyOrderHistoryInPage(), false, "a viewer and empty placeholder do not prove an orders request ran");
+		cache = {
+			ROOT_QUERY: {
+				viewer: { __ref: "Customer:current" },
+				'deliveriesOrdersList:{"filter":{"status":"OPEN"}}': {
+					nodes: [], pageInfo: { hasNextPage: false },
+				},
+			},
+			"Customer:current": { id: "gid://shopify/Customer/current" },
+		};
+		assert.equal(hasVerifiedEmptyOrderHistoryInPage(), false, "a filtered empty request does not prove full-history emptiness");
 		Object.defineProperty(globalThis, "location", { configurable: true, value: { origin: "https://shop.app", pathname: "/account/login" } });
 		assert.equal(hasVerifiedEmptyOrderHistoryInPage(), false);
 	} finally {
@@ -459,11 +494,11 @@ test("Shop page.evaluate readers work with a serialized Playwright function", as
 		assert.doesNotMatch(String(readLiveApolloCacheInPage), /__name/);
 		assert.doesNotMatch(String(hasVerifiedEmptyOrderHistoryInPage), /__name/);
 		assert.doesNotMatch(String(isShopOrderHistoryReadyInPage), /__name/);
-		await page.evaluate(installApolloFixtureInPage, { ROOT_QUERY: { viewer: {} } });
+		await page.evaluate(installApolloFixtureInPage, makeCacheWithVerifiedEmptyOrdersConnection());
 		assert.deepEqual(await page.evaluate(readApolloCacheInPage), {
-			ROOT_QUERY: { viewer: {} },
+			...makeCacheWithVerifiedEmptyOrdersConnection(),
 		});
-		assert.deepEqual(await page.evaluate(readLiveApolloCacheInPage), { ROOT_QUERY: { viewer: {} } });
+		assert.deepEqual(await page.evaluate(readLiveApolloCacheInPage), makeCacheWithVerifiedEmptyOrdersConnection());
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
 		assert.equal(await page.evaluate(isShopOrderHistoryReadyInPage), true);
 		const pageDiagnostics = await page.evaluate(shopSkipDiagnosticsInPage);
@@ -471,11 +506,9 @@ test("Shop page.evaluate readers work with a serialized Playwright function", as
 		assert.equal(pageDiagnostics.order_context_present, true);
 		assert.equal(pageDiagnostics.fiber_cache_present, true);
 		assert.equal(pageDiagnostics.ssr_cache_present, false);
-		await page.evaluate(installApolloFixtureInPage, {
-			ROOT_QUERY: { 'deliveriesOrdersList:{}': { nodes: [] } },
-		});
+		await page.evaluate(installApolloFixtureInPage, makeCache([], false));
 		assert.deepEqual(await page.evaluate(readLiveApolloCacheInPage), {
-			ROOT_QUERY: { 'deliveriesOrdersList:{}': { nodes: [] } },
+			...makeCache([], false),
 		});
 		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), true);
 		await page.evaluate(installApolloFixtureInPage, {
@@ -750,6 +783,8 @@ test("collectShopify does not poll Apollo when order-history readiness times out
 		requested: requestedMap(["orders"]),
 		state: {},
 		orderHistoryReady: false,
+		browserOperationTimeoutMs: 15,
+		runBudgetMs: 100,
 		readCache: async () => { cacheReads += 1; return null; },
 		readSkipDiagnostics: () => Promise.resolve({
 			final_url_path: "/account/order-history",
@@ -771,7 +806,7 @@ test("collectShopify does not poll Apollo when order-history readiness times out
 	assert.equal(skip.reason, "shopify_order_history_readiness_timeout");
 	assert.equal(cacheReads, 0);
 	assert.deepEqual(skip.diagnostics, {
-		final_url_path: "/account/order-history",
+		final_url_path: "",
 		sign_in_page_detected: false,
 		order_context_present: false,
 		fiber_cache_present: false,
@@ -782,7 +817,7 @@ test("collectShopify does not poll Apollo when order-history readiness times out
 	});
 });
 
-test("collectShopify falls back to parsed DOM orders when Apollo is missing", async () => {
+test("collectShopify withholds DOM-only rows when mapped fields are unavailable", async () => {
 	const { emit, emitRecord, emitted, protocolMessages } =
 		makeRecordingEmit(validateRecord);
 	await collectShopify({
@@ -806,11 +841,13 @@ test("collectShopify falls back to parsed DOM orders when Apollo is missing", as
 		}),
 		scroll: () => Promise.resolve(),
 	});
-	assert.equal(recordsOf(emitted, "orders").length, 1);
-	assert.equal(protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+	assert.equal(recordsOf(emitted, "orders").length, 0);
+	const skip = protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "shopify_order_rows_unresolved");
 });
 
-test("collectShopify uses DOM orders when Apollo is readable but contains no order refs", async () => {
+test("collectShopify withholds DOM orders with absent mapped fields when Apollo is empty", async () => {
 	const run = makeRecordingEmit(validateRecord);
 	await collectShopify({
 		emit: run.emit,
@@ -828,8 +865,10 @@ test("collectShopify uses DOM orders when Apollo is readable but contains no ord
 		}]),
 		scroll: () => Promise.resolve(),
 	});
-	assert.equal(recordsOf(run.emitted, "orders").length, 1);
-	assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
+	assert.equal(recordsOf(run.emitted, "orders").length, 0);
+	const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT", JSON.stringify(run.protocolMessages));
+	assert.equal(skip.reason, "shopify_order_rows_unresolved");
 });
 
 test("waitForApolloCache retries until cache readiness, bounded by its deadline", async () => {
@@ -865,6 +904,14 @@ test("waitForApolloCache retries until cache readiness, bounded by its deadline"
 	});
 	assert.equal(hung.timedOut, true);
 	assert.ok(Date.now() - startedAt < 500);
+	const hungWait = await waitForApolloCache({
+		readCache: async () => null,
+		timeoutMs: 20,
+		pollIntervalMs: 10,
+		wait: () => new Promise(() => undefined),
+	});
+	assert.equal(hungWait.timedOut, true);
+	assert.equal(hungWait.reason, "shopify_browser_operation_timeout");
 });
 
 test("collectShopify emits a clean empty STATE only with verified empty-history page evidence", async () => {
@@ -1028,9 +1075,8 @@ test("collectShopify keeps polling after first-viewport DOM rows so hydrated Apo
 	});
 	const ids = recordsOf(run.emitted, "orders").map((order) => order.id);
 	assert.ok(scrolls > 0, "the first DOM snapshot cannot short circuit bootstrap loading");
-	assert.deepEqual(ids.sort(), [
-		"gid://shopify/Order/1", "gid://shopify/Order/2", "https://shop.app/orders/dom-1",
-	].sort());
+	assert.deepEqual(ids.sort(), ["gid://shopify/Order/1", "gid://shopify/Order/2"]);
+	assert.ok(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"));
 });
 
 test("collectShopify reports rejected source rows and does not commit cursor state", async () => {
@@ -1108,7 +1154,9 @@ test("Shop record identity merges matching DOM and Apollo orders before validati
 test("a declared count mismatch is reported before records and prevents STATE", async () => {
 	const run = makeRecordingEmit(validateRecord);
 	const cache = makeCache(["Order:1"], false);
-	const connection = Object.values(cache.ROOT_QUERY as Record<string, unknown>)[0] as Record<string, unknown>;
+	const connection = (cache.ROOT_QUERY as Record<string, unknown>)[
+		'deliveriesOrdersList:{"filter":{}}'
+	] as Record<string, unknown>;
 	connection.totalCount = 2;
 	await collectShopify({
 		emit: run.emit, emitRecord: run.emitRecord,
@@ -1121,6 +1169,30 @@ test("a declared count mismatch is reported before records and prevents STATE", 
 	const recordIndex = run.events.findIndex((event) => event.kind === "record");
 	assert.ok(skipIndex >= 0 && skipIndex < recordIndex, "coverage veto precedes record emission");
 	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+});
+
+test("a count mismatch from a partial snapshot clears only after a later snapshot reconciles it", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	const partial = makeCache(["Order:1"], true);
+	const terminal = makeCache(["Order:1", "Order:2"], false);
+	const terminalConnection = (terminal.ROOT_QUERY as Record<string, unknown>)[
+		'deliveriesOrdersList:{"filter":{}}'
+	] as Record<string, unknown>;
+	terminalConnection.totalCount = 2;
+	const firstConnection = (partial.ROOT_QUERY as Record<string, unknown>)[
+		'deliveriesOrdersList:{"filter":{}}'
+	] as Record<string, unknown>;
+	firstConnection.totalCount = 2;
+	let reads = 0;
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => ++reads === 1 ? partial : terminal,
+		cacheWaitTimeoutMs: 0,
+		scroll: async () => undefined,
+	});
+	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), true);
+	assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
 });
 
 test("Shopify restores the 25-scroll bootstrap and 20 continuation ceilings", async () => {
@@ -1186,6 +1258,138 @@ test("collectShopify vetoes page-end evidence when navigation changes or another
 		assert.ok(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"));
 		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
 		if (blocked) assert.equal(recordsOf(run.emitted, "orders").length, 0);
+	}
+});
+
+test("a stalled diagnostics read cannot prevent a readiness failure from terminating", { timeout: 300 }, async () => {
+	const run = makeRecordingEmit(validateRecord);
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		orderHistoryReady: false,
+		readCache: async () => null,
+		readSkipDiagnostics: () => new Promise(() => undefined),
+		scroll: async () => undefined,
+	});
+	const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT", JSON.stringify(run.protocolMessages));
+	assert.equal(skip.reason, "shopify_order_history_readiness_timeout");
+});
+
+test("stalled post-readiness cache, page evidence, and scroll reads terminate with a typed skip", { timeout: 900 }, async () => {
+	const stuckReaders: Array<{
+		name: string;
+		configure: (args: Parameters<typeof collectShopify>[0]) => void;
+	}> = [
+		{ name: "cache", configure: (args) => { args.readCache = () => new Promise(() => undefined); } },
+		{ name: "page evidence", configure: (args) => { args.readPageEvidence = () => new Promise(() => undefined); } },
+		{ name: "scroll", configure: (args) => { args.scroll = () => new Promise(() => undefined); } },
+	];
+	for (const { name, configure } of stuckReaders) {
+		const run = makeRecordingEmit(validateRecord);
+		const args: Parameters<typeof collectShopify>[0] = {
+			emit: run.emit, emitRecord: run.emitRecord,
+			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+			readCache: async () => makeCache(["Order:1"], false),
+			readPageEvidence: async () => ({
+				url: "https://shop.app/account/order-history", navigation: "same",
+				orderContext: true, blocked: false, pageHeight: 100,
+				domHasContinuation: false, domHasEndMarker: false, domCardCount: 1,
+			}),
+			readDomOrders: async () => [],
+			scroll: async () => undefined,
+			cacheWaitTimeoutMs: 30,
+			browserOperationTimeoutMs: 15,
+			runBudgetMs: 100,
+		};
+		if (name === "cache") {
+			let reads = 0;
+			args.readCache = () => ++reads === 1 ? Promise.resolve(makeCache(["Order:1"], false)) : new Promise(() => undefined);
+		}
+		if (name === "scroll") {
+			args.readCache = async () => makeCache(["Order:1"], true);
+		}
+		configure(args);
+		await collectShopify(args);
+		const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+		assert.ok(skip && skip.type === "SKIP_RESULT", `${name} must fail closed`);
+		assert.equal(skip.reason, "shopify_browser_operation_timeout", `${name} reason`);
+		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+	}
+});
+
+test("coverage from readiness survives a smaller terminal snapshot", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	let reads = 0;
+	const first = makeCache(["Order:1", "Order:missing"], false);
+	first["Order:missing"] = { id: null };
+	const later = makeCache(["Order:1"], false);
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => ++reads === 1 ? first : later,
+		readDomOrders: async () => [],
+		cacheWaitTimeoutMs: 0,
+		scroll: async () => undefined,
+	});
+	const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "shopify_order_rows_unresolved");
+	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+});
+
+test("button-only signed-out order shell is not authenticated or empty", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://shop.app/**", (route) => route.fulfill({
+			status: 200, contentType: "text/html",
+			body: '<main><h1>Your orders</h1><button>Sign in to Shop</button><p>No orders yet</p><div id="root"></div></main>',
+		}));
+		await page.goto("https://shop.app/account/order-history");
+		await page.evaluate(installApolloFixtureInPage, {
+			ROOT_QUERY: { viewer: { __ref: "Customer:current" } },
+			"Customer:current": { id: "gid://shopify/Customer/current" },
+		});
+		assert.equal(await page.evaluate(hasShopOrderHistoryContextInPage), false);
+		assert.equal(await page.evaluate(isShopOrderHistoryReadyInPage), true, "auth wall is detected so it can fail fast");
+		assert.equal(await page.evaluate(readShopOrderPageEvidenceInPage).then((evidence) => evidence.blocked), true);
+		assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), false);
+		const run = makeRecordingEmit(validateRecord);
+		await collectShopify({
+			emit: run.emit, emitRecord: run.emitRecord,
+			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+			readCache: () => page.evaluate(readLiveApolloCacheInPage),
+			readPageEvidence: () => page.evaluate(readShopOrderPageEvidenceInPage),
+			readVerifiedEmptyState: () => page.evaluate(hasVerifiedEmptyOrderHistoryInPage),
+			scroll: async () => undefined,
+		});
+		const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+		assert.ok(skip && skip.type === "SKIP_RESULT");
+		assert.equal(skip.reason, "shopify_signed_out_or_blocked");
+		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("hidden or unrelated disabled controls do not prove an order-history end", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://shop.app/**", (route) => route.fulfill({
+			status: 200, contentType: "text/html",
+			body: '<main><h1>Orders</h1><section data-testid="orders-list"><div class="order-card"><a href="/orders/1">Order</a><span>$10.00</span><button disabled>Next</button></div></section><footer><span style="display:none">No more orders</span><button disabled>Next</button></footer></main>',
+		}));
+		await page.goto("https://shop.app/account/order-history");
+		const evidence = await page.evaluate(readShopOrderPageEvidenceInPage);
+		assert.equal(evidence.domHasEndMarker, false);
+		await page.setContent('<main><h1>Orders</h1><section data-testid="orders-list"><p>No more orders</p></section></main>');
+		assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).domHasEndMarker, true);
+		await page.setContent('<main><h1>Orders</h1><section data-testid="orders-list" aria-busy="true"><p>No more orders</p></section></main>');
+		assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).domHasEndMarker, false);
+	} finally {
+		await browser.close();
 	}
 });
 
