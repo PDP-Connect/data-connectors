@@ -18,6 +18,7 @@ on:
       - "packages/polyfill-connectors/**"
       - "package.json"
       - "scripts/groupme-mutation/**"
+      - ".github/scripts/groupme-mutation-admission.mjs"
       - "connectors/**"
       - ".github/workflows/polyfill-connectors.yml"
   pull_request: {}
@@ -40,6 +41,10 @@ jobs:
       relevant: ${{ steps.filter.outputs.relevant }}
       harness: ${{ steps.filter.outputs.harness }}
       groupme: ${{ steps.filter.outputs.groupme }}
+      mutation_required: ${{ steps.filter.outputs.mutation_required }}
+      base_sha: ${{ steps.filter.outputs.base_sha }}
+      head_sha: ${{ steps.filter.outputs.head_sha }}
+      merge_base_sha: ${{ steps.filter.outputs.merge_base_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,26 +54,11 @@ jobs:
       - name: Determine whether relevant paths changed
         id: filter
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ -n "$BASE_SHA" ]; then
-            MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-            CHANGED="$(git diff --name-only "$MERGE_BASE" "$HEAD_SHA")"
-          else
-            CHANGED="$(git diff --name-only HEAD~1 HEAD)"
-          fi
-
-          echo "$CHANGED"
-
-          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
-            echo "relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "relevant=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          if echo "$CHANGED" | grep -qE '^(scripts/groupme-mutation/|package\.json$|\.github/workflows/polyfill-connectors\.yml$)'; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
-          if echo "$CHANGED" | grep -q '^connectors/groupme/index\.ts$'; then echo "groupme=true" >> "$GITHUB_OUTPUT"; else echo "groupme=false" >> "$GITHUB_OUTPUT"; fi
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/scripts/groupme-mutation-admission.mjs
 
   verify:
     name: verify + test
@@ -100,7 +90,9 @@ jobs:
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-        run: npm ci --ignore-scripts
+        run: |
+          set -o pipefail
+          npm ci --ignore-scripts 2>&1 | tee "$RUNNER_TEMP/groupme-mutation-install.log"
 
       - name: Install Chromium for the capture-redaction proofs
         # `src/capture-trace-redaction.test.ts` launches a real browser: the
@@ -266,7 +258,7 @@ jobs:
   groupme-mutation:
     name: GroupMe mutation evidence
     needs: [changes, verify]
-    if: always() && (needs.changes.outputs.harness == 'true' || needs.changes.outputs.groupme == 'true') && (needs.verify.result == 'success' || needs.verify.result == 'skipped') && (github.event_name == 'pull_request' || github.event_name == 'push')
+    if: always() && needs.changes.outputs.mutation_required == 'true' && (needs.verify.result == 'success' || needs.verify.result == 'skipped') && (github.event_name == 'pull_request' || github.event_name == 'push')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -285,34 +277,38 @@ jobs:
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-        run: npm ci --ignore-scripts
+        run: |
+          set -o pipefail
+          npm ci --ignore-scripts 2>&1 | tee "$RUNNER_TEMP/groupme-mutation-install.log"
 
       - name: Qualify harness and calibrated mutations
         if: needs.changes.outputs.harness == 'true'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
+          MERGE_BASE: ${{ needs.changes.outputs.merge_base_sha }}
           REPORT: ${{ runner.temp }}/groupme-mutation-qualification.json
         run: |
-          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-          npm run groupme-mutation -- --mode qualify --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT"
+          set -o pipefail
+          npm run groupme-mutation -- --mode qualify --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT" 2>&1 | tee "$REPORT.log"
 
       - name: Run diff-selected GroupMe mutations
         if: needs.changes.outputs.groupme == 'true'
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
+          MERGE_BASE: ${{ needs.changes.outputs.merge_base_sha }}
           REPORT: ${{ runner.temp }}/groupme-mutation-diff.json
         run: |
-          MERGE_BASE="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-          npm run groupme-mutation -- --mode diff --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT"
+          set -o pipefail
+          npm run groupme-mutation -- --mode diff --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT" 2>&1 | tee "$REPORT.log"
 
       - name: Upload mutation reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: groupme-mutation-${{ github.run_id }}
-          path: ${{ runner.temp }}/groupme-mutation-*.json
+          path: ${{ runner.temp }}/groupme-mutation-*
           if-no-files-found: warn
           retention-days: 14
 
@@ -327,6 +323,8 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
           MUTATION_RESULT: ${{ needs.groupme-mutation.result }}
+          MUTATION_REQUIRED: ${{ needs.changes.outputs.mutation_required }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           echo "changes: $CHANGES_RESULT"
           echo "verify:  $VERIFY_RESULT"
@@ -345,12 +343,6 @@ jobs:
               ;;
           esac
 
-          case "$MUTATION_RESULT" in
-            success|skipped) ;;
-            *)
-              echo "::error::GroupMe mutation evidence reported '$MUTATION_RESULT' — expected 'success' or 'skipped'"
-              exit 1
-              ;;
-          esac
+          node .github/scripts/groupme-mutation-admission.mjs --gate
 
           echo "Polyfill Connectors Gate: verify succeeded or was correctly skipped as irrelevant."

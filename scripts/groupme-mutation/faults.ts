@@ -3,8 +3,6 @@ export type GroupMeFault = {
 	target: "connectors/groupme/index.ts";
 	preimage: string;
 	replacement: string;
-	siteStart: string;
-	siteEnd: string;
 	ownerTest: string;
 	ownerAssertion: string;
 };
@@ -28,8 +26,6 @@ export const GROUPME_FAULTS: readonly GroupMeFault[] = [
 		}
 		await progressWithSignals("Fetching group messages", {
 			stream: "group_messages",`,
-		siteStart: "async function collectGroupMessagesForwardFromCursor(",
-		siteEnd: "async function collectGroupMessagesBackwardToNaturalEnd(",
 		ownerTest:
 			">old-cap discriminator: a group's forward walk pages past 200 full pages with no truncation (mutation-killing)",
 		ownerAssertion: "no cap-truncation past 200 pages",
@@ -50,11 +46,10 @@ export const GROUPME_FAULTS: readonly GroupMeFault[] = [
 		replacement: `function isAscendingByCreatedAt(_messages: readonly GroupMeMessage[]): boolean {
 	return true;
 }`,
-		siteStart: "function isAscendingByCreatedAt(",
-		siteEnd: "\n}\n",
 		ownerTest:
 			"repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError",
-		ownerAssertion: "a non-ascending forward page must fail, not be silently trusted",
+		ownerAssertion:
+			"a non-ascending forward page must fail, not be silently trusted",
 	},
 ];
 
@@ -62,8 +57,6 @@ export const EQUALITY_CONTROL = {
 	target: "connectors/groupme/index.ts",
 	preimage: "curr.created_at < prev.created_at",
 	replacement: "curr.created_at <= prev.created_at",
-	siteStart: "function isAscendingByCreatedAt(",
-	siteEnd: "\n}\n",
 	ownerTest:
 		"repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError",
 };
