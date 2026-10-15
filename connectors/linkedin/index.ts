@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.3)
+ * PDPP LinkedIn Connector (v0.3.25)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -73,6 +73,7 @@ import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
+	buildDetailCoverageMessage,
 	buildFullScanCoverageMessage,
 	type EmittedMessage,
 	type EnsureSessionArgs,
@@ -86,12 +87,14 @@ import {
 	buildConnectionRecord,
 	buildEducationRecords,
 	buildExperienceRecords,
-	buildLanguageRecords,
+	buildLanguageRecordsWithOmissions,
 	buildProfileRecord,
-	buildSkillRecords,
+	buildSkillRecordsWithOmissions,
+	type OmissionSummary,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
+	VoyagerConnectionElement,
 	VoyagerConnectionsResponse,
 	VoyagerDashProfilesResponse,
 	VoyagerMeResponse,
@@ -163,13 +166,29 @@ async function voyagerFetch<T>(
 		endpoint,
 		status: result._status,
 	});
+	if (
+		typeof result._body !== "object" ||
+		result._body === null ||
+		Array.isArray(result._body)
+	) {
+		return { _error: "malformed_json_body" };
+	}
 	return result._body as VoyagerJsonResult<T>;
 }
 
 function isFetchError<T>(
 	result: VoyagerJsonResult<T>,
 ): result is { _error: string } {
-	return typeof (result as { _error?: unknown })._error === "string";
+	return (
+		typeof result === "object" &&
+		result !== null &&
+		"_error" in result &&
+		typeof result._error === "string"
+	);
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Session liveness: an authenticated `/voyager/api/me` call succeeds. Used
@@ -206,10 +225,13 @@ async function fetchDashProfile(
 		);
 		if (
 			!isFetchError(result) &&
-			result.elements &&
+			Array.isArray(result.elements) &&
 			result.elements.length > 0
 		) {
-			return result.elements[0] ?? null;
+			const profile = result.elements[0];
+			if (isObjectRecord(profile)) {
+				return profile;
+			}
 		}
 		await politeDelay(300);
 	}
@@ -219,36 +241,52 @@ async function fetchDashProfile(
 		capture,
 		"dash-profile-basic",
 	);
-	if (!isFetchError(basic) && basic.elements && basic.elements.length > 0) {
-		return basic.elements[0] ?? null;
+	if (
+		!isFetchError(basic) &&
+		Array.isArray(basic.elements) &&
+		basic.elements.length > 0
+	) {
+		const profile = basic.elements[0];
+		return isObjectRecord(profile) ? profile : null;
 	}
 	return null;
 }
 
 interface ConnectionsResult {
-	elements: { connectedMember?: string; createdAt?: number }[];
+	elements: VoyagerConnectionElement[];
+	error?: string;
+	observed: number;
+	terminationReason:
+		| "verified_end"
+		| "page_error"
+		| "malformed_page"
+		| "page_budget";
 	total: number | null;
-	truncated: boolean;
 }
 
-/** Paginate the owner's connections list. `paging.total` is coded as a
- *  fallback source for the running total (matching the legacy connector's
- *  inference), but a live-account capture (2026-09-22, 353 connections
- *  across 9 pages) never populated it on any page — this endpoint's real
- *  response carries only `{ count, start, links }` in `paging`. In
- *  practice the total is `elements.length` from a complete (non-truncated)
- *  walk; capped at `CONNECTIONS_MAX` (matches the legacy connector's cap)
- *  with `truncated` reported honestly when the cap — not the provider —
- *  stopped the walk, since a truncated walk's `elements.length` is not the
- *  true total either. */
+/** Walk the owner's connections list and retain why the walk stopped.
+ *  Empty and short pages, or a page that reaches a verified provider total,
+ *  prove the list end. Fetch errors, malformed pages, and the local page cap
+ *  do not. `paging.total` was absent from the observed live response, so a
+ *  complete walk commonly uses its observed row count. */
 async function fetchConnections(
 	page: Page,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
 ): Promise<ConnectionsResult> {
-	const elements: { connectedMember?: string; createdAt?: number }[] = [];
+	const elements: VoyagerConnectionElement[] = [];
 	let start = 0;
 	let total: number | null = null;
+	const finish = (
+		terminationReason: ConnectionsResult["terminationReason"],
+		error?: string,
+	): ConnectionsResult => ({
+		elements,
+		observed: elements.length,
+		terminationReason,
+		total,
+		...(error ? { error } : {}),
+	});
 
 	while (start < CONNECTIONS_MAX) {
 		const result = await voyagerFetch<VoyagerConnectionsResponse>(
@@ -258,39 +296,55 @@ async function fetchConnections(
 			`connections-page-${String(start).padStart(4, "0")}`,
 		);
 		if (isFetchError(result)) {
-			break;
+			return finish("page_error", result._error);
 		}
-		total = result.paging?.total ?? total;
-		const page_elements = result.elements ?? [];
+		const reportedTotal = result.paging?.total;
+		if (
+			reportedTotal !== undefined &&
+			(!Number.isSafeInteger(reportedTotal) || reportedTotal < 0)
+		) {
+			return finish("malformed_page");
+		}
+		total = reportedTotal ?? total;
+		if (!Array.isArray(result.elements)) {
+			return finish("malformed_page");
+		}
+		const page_elements = result.elements;
+		if (page_elements.some((element) => !isObjectRecord(element))) {
+			return finish("malformed_page");
+		}
+		if (total !== null && elements.length + page_elements.length > total) {
+			return finish("malformed_page");
+		}
 		if (page_elements.length === 0) {
-			break;
+			return total === null || elements.length === total
+				? finish("verified_end")
+				: finish("malformed_page");
 		}
 		elements.push(...page_elements);
 		await progress("Fetched LinkedIn connections page", {
 			count: elements.length,
 			stream: "connections",
-			...(total !== null ? { total } : {}),
+			...(total === null ? {} : { total }),
 		});
+		if (total !== null && elements.length === total) {
+			return finish("verified_end");
+		}
 		if (page_elements.length < CONNECTIONS_PAGE_SIZE) {
-			return { elements, total, truncated: false };
+			return total === null ? finish("verified_end") : finish("malformed_page");
 		}
 		start += CONNECTIONS_PAGE_SIZE;
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
-	return {
-		elements,
-		total,
-		truncated: start >= CONNECTIONS_MAX && elements.length > 0,
-	};
+	return finish(start >= CONNECTIONS_MAX ? "page_budget" : "malformed_page");
 }
 
 /** Batch-resolve connection member URNs to profile summaries (name,
  *  headline, public identifier) via the same dash/profiles endpoint used
- *  for the owner's own profile, keyed by `ids=List(...)`. Failures degrade
- *  to a smaller retry (never silently drop the whole batch) and, past two
- *  consecutive batch failures, stop resolving — the connection edges
- *  themselves are still emitted with null enrichment fields. */
+ *  for the owner's own profile. Failed batches receive singleton retries
+ *  after the first two consecutive batch failures; after five failures, the
+ *  remaining enrichment is left unresolved and reported. */
 async function resolveConnectionProfiles(
 	page: Page,
 	memberUrns: string[],
@@ -300,6 +354,7 @@ async function resolveConnectionProfiles(
 	const resolved = new Map<string, VoyagerResolvedProfile>();
 	let consecutiveFailures = 0;
 	let batchIndex = 0;
+	let singletonIndex = 0;
 
 	for (let i = 0; i < memberUrns.length; i += RESOLVE_BATCH_SIZE) {
 		if (consecutiveFailures >= 5) {
@@ -315,24 +370,81 @@ async function resolveConnectionProfiles(
 		);
 		batchIndex += 1;
 
-		if (isFetchError(result)) {
+		if (
+			isFetchError(result) ||
+			!(isObjectRecord(result.results) || Array.isArray(result.elements))
+		) {
 			consecutiveFailures += 1;
+			if (consecutiveFailures <= 2) {
+				for (const urn of batch) {
+					const label = `resolve-single-${String(singletonIndex).padStart(3, "0")}`;
+					singletonIndex += 1;
+					const singleton = await voyagerFetch<VoyagerProfilesByIdResponse>(
+						page,
+						`/voyager/api/identity/dash/profiles?ids=List(${encodeURIComponent(urn)})`,
+						capture,
+						label,
+					);
+					if (
+						!isFetchError(singleton) &&
+						(isObjectRecord(singleton.results) ||
+							Array.isArray(singleton.elements))
+					) {
+						if (isObjectRecord(singleton.results)) {
+							for (const [key, profile] of Object.entries(singleton.results)) {
+								if (
+									isObjectRecord(profile) &&
+									(profile.firstName || profile.publicIdentifier)
+								) {
+									resolved.set(key, profile);
+								}
+							}
+						}
+						for (const profile of Array.isArray(singleton.elements)
+							? singleton.elements
+							: []) {
+							if (!isObjectRecord(profile)) {
+								continue;
+							}
+							const urn = profile.entityUrn ?? profile.dashEntityUrn;
+							if (
+								typeof urn === "string" &&
+								urn.length > 0 &&
+								(profile.firstName || profile.publicIdentifier)
+							) {
+								resolved.set(urn, profile);
+							}
+						}
+					}
+					await politeDelay(PAGE_DELAY_MS);
+				}
+			}
 			await politeDelay(PAGE_DELAY_MS);
 			continue;
 		}
 		consecutiveFailures = 0;
 
-		if (result.results) {
+		if (isObjectRecord(result.results)) {
 			for (const [key, profile] of Object.entries(result.results)) {
-				if (profile && (profile.firstName || profile.publicIdentifier)) {
+				if (
+					isObjectRecord(profile) &&
+					(profile.firstName || profile.publicIdentifier)
+				) {
 					resolved.set(key, profile);
 				}
 			}
 		}
-		if (result.elements) {
+		if (Array.isArray(result.elements)) {
 			for (const profile of result.elements) {
+				if (!isObjectRecord(profile)) {
+					continue;
+				}
 				const urn = profile.entityUrn ?? profile.dashEntityUrn;
-				if (urn && (profile.firstName || profile.publicIdentifier)) {
+				if (
+					typeof urn === "string" &&
+					urn.length > 0 &&
+					(profile.firstName || profile.publicIdentifier)
+				) {
 					resolved.set(urn, profile);
 				}
 			}
@@ -410,7 +522,7 @@ export async function ensureLinkedInSession(
 		sendInteraction,
 		timeoutSeconds,
 	});
-	if (!ready || !(await checkApiAuth(page, capture))) {
+	if (!(ready && (await checkApiAuth(page, capture)))) {
 		throw new Error(
 			"linkedin_login_incomplete: no live Voyager session after owner handoff",
 		);
@@ -485,74 +597,190 @@ export async function collectLinkedIn(
 		await progress("Fetching LinkedIn connections", { stream: "connections" });
 		connectionsResult = await fetchConnections(page, progress, capture);
 	}
-	// `elements.length` is only the true total when the walk completed
-	// (not truncated by CONNECTIONS_MAX) — a truncated count is a floor,
-	// not a fact, and must not be reported as connection_count.
+	// A partial walk never supplies an exact connection_count. Even when the
+	// server gave a total earlier in the walk, completion still needs positive
+	// end-of-list evidence.
 	const connectionCount =
-		connectionsResult === null || connectionsResult.truncated
-			? (connectionsResult?.total ?? null)
-			: (connectionsResult.total ?? connectionsResult.elements.length);
+		connectionsResult === null ||
+		connectionsResult.terminationReason !== "verified_end"
+			? null
+			: connectionsResult.elements.length;
 
 	if (wantsProfileFields) {
-		if (dashProfile) {
-			const record = buildProfileRecord(
-				publicIdentifier,
-				dashProfile,
-				meResult.miniProfile?.occupation,
-				meResult.miniProfile,
-				connectionCount,
-			);
-			await emitRecord("profile", record);
-			await emit(buildFullScanCoverageMessage("profile", 1));
-		} else {
+		if (!dashProfile) {
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "profile",
 				reason: "linkedin_dash_profile_unavailable",
 				recovery_hint: { action: "retry_by_runtime", retryable: true },
-				message:
-					"Every dash profile decoration attempt failed; only /me was reachable",
+				message: "Dash profile unavailable; /me fields were retained",
+				diagnostics: {
+					unavailable_fields: [
+						"current_company",
+						"current_position_title",
+						"industry",
+						"location",
+						"summary",
+					],
+				},
 			});
+		}
+		const record = buildProfileRecord(
+			publicIdentifier,
+			dashProfile ?? {},
+			meResult.miniProfile?.occupation,
+			meResult.miniProfile,
+			connectionCount,
+		);
+		const profileValid = validateRecord("profile", record).ok;
+		if (profileValid) {
+			await emitRecord("profile", record);
+		} else {
+			await reportInvalidRecords("profile", 1, progress);
+		}
+		if (dashProfile && profileValid) {
+			await emit(buildFullScanCoverageMessage("profile", 1));
 		}
 	}
 
 	if (wantsExperience) {
-		const records = dashProfile ? buildExperienceRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("experience", record);
+		const section = dashProfile?.profilePositionGroups?.elements;
+		if (Array.isArray(section)) {
+			const records = buildExperienceRecords(dashProfile ?? {});
+			const validRecords = records.filter(
+				(record) => validateRecord("experience", record).ok,
+			);
+			await reportInvalidRecords(
+				"experience",
+				records.length - validRecords.length,
+				progress,
+			);
+			for (const record of validRecords) {
+				await emitRecord("experience", record);
+			}
+			await emit(
+				coverageMessage("experience", records.length, validRecords.length),
+			);
+		} else {
+			await emitUnavailableSection("experience", emit);
 		}
-		await emit(buildFullScanCoverageMessage("experience", records.length));
 	}
 
 	if (wantsEducation) {
-		const records = dashProfile ? buildEducationRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("education", record);
+		const section = dashProfile?.profileEducations?.elements;
+		if (Array.isArray(section)) {
+			const records = buildEducationRecords(dashProfile ?? {});
+			const validRecords = records.filter(
+				(record) => validateRecord("education", record).ok,
+			);
+			await reportInvalidRecords(
+				"education",
+				records.length - validRecords.length,
+				progress,
+			);
+			for (const record of validRecords) {
+				await emitRecord("education", record);
+			}
+			await emit(
+				coverageMessage("education", records.length, validRecords.length),
+			);
+		} else {
+			await emitUnavailableSection("education", emit);
 		}
-		await emit(buildFullScanCoverageMessage("education", records.length));
 	}
 
 	if (wantsSkills) {
-		const records = dashProfile ? buildSkillRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("skills", record);
+		const section = dashProfile?.profileSkills?.elements;
+		if (Array.isArray(section)) {
+			const { considered, covered, omissions, records } =
+				buildSkillRecordsWithOmissions(dashProfile ?? {});
+			await reportOmissions("skills", omissions, progress);
+			const validRecords = records.filter(
+				(record) => validateRecord("skills", record).ok,
+			);
+			await reportInvalidRecords(
+				"skills",
+				records.length - validRecords.length,
+				progress,
+			);
+			for (const record of validRecords) {
+				await emitRecord("skills", record);
+			}
+			await emit(
+				coverageMessage(
+					"skills",
+					considered,
+					Math.min(covered, validRecords.length),
+				),
+			);
+		} else {
+			await emitUnavailableSection("skills", emit);
 		}
-		await emit(buildFullScanCoverageMessage("skills", records.length));
 	}
 
 	if (wantsLanguages) {
-		const records = dashProfile ? buildLanguageRecords(dashProfile) : [];
-		for (const record of records) {
-			await emitRecord("languages", record);
+		const section = dashProfile?.profileLanguages?.elements;
+		if (Array.isArray(section)) {
+			const { considered, covered, omissions, records } =
+				buildLanguageRecordsWithOmissions(dashProfile ?? {});
+			await reportOmissions("languages", omissions, progress);
+			const validRecords = records.filter(
+				(record) => validateRecord("languages", record).ok,
+			);
+			await reportInvalidRecords(
+				"languages",
+				records.length - validRecords.length,
+				progress,
+			);
+			for (const record of validRecords) {
+				await emitRecord("languages", record);
+			}
+			await emit(
+				coverageMessage(
+					"languages",
+					considered,
+					Math.min(covered, validRecords.length),
+				),
+			);
+		} else {
+			await emitUnavailableSection("languages", emit);
 		}
-		await emit(buildFullScanCoverageMessage("languages", records.length));
 	}
 
 	if (wantsConnections && connectionsResult) {
-		const { elements, truncated } = connectionsResult;
+		const { elements, terminationReason } = connectionsResult;
+		if (terminationReason !== "verified_end") {
+			const pageBudget = terminationReason === "page_budget";
+			await emit({
+				type: "SKIP_RESULT",
+				stream: "connections",
+				reason: pageBudget
+					? "older_connections_deferred_page_budget"
+					: terminationReason === "page_error"
+						? "linkedin_connections_page_failed"
+						: "linkedin_connections_page_malformed",
+				recovery_hint: {
+					action: pageBudget
+						? "retry_on_connector_upgrade"
+						: "retry_by_runtime",
+					retryable: !pageBudget,
+				},
+				message:
+					"LinkedIn connections listing did not provide verified end-of-list evidence",
+				diagnostics: {
+					termination_reason: terminationReason,
+					observed_count: connectionsResult.observed,
+					total: connectionsResult.total,
+					...(connectionsResult.error
+						? { error: connectionsResult.error }
+						: {}),
+				},
+			});
+			return;
+		}
 		const memberUrns = elements
 			.map((e) => e.connectedMember)
-			.filter((u): u is string => Boolean(u));
+			.filter((u): u is string => typeof u === "string" && u.trim().length > 0);
 		const resolvedProfiles = await resolveConnectionProfiles(
 			page,
 			memberUrns,
@@ -560,38 +788,146 @@ export async function collectLinkedIn(
 			capture,
 		);
 
-		let covered = 0;
-		for (const element of elements) {
-			const record = buildConnectionRecord(
+		const omittedWithoutUrn = elements.filter(
+			(element) =>
+				typeof element.connectedMember !== "string" ||
+				element.connectedMember.trim().length === 0,
+		).length;
+		const unresolved = memberUrns.filter(
+			(urn) => !resolvedProfiles.has(urn),
+		).length;
+		if (omittedWithoutUrn > 0) {
+			await progress(
+				`LinkedIn connections omitted rows: missing_connected_member_urn=${omittedWithoutUrn}`,
+				{
+					stream: "connections",
+					count: omittedWithoutUrn,
+					total: elements.length,
+				},
+			);
+		}
+		if (unresolved > 0) {
+			await progress(
+				`LinkedIn connection enrichment unresolved: ${unresolved}`,
+				{
+					stream: "connections",
+					count: unresolved,
+					total: memberUrns.length,
+				},
+			);
+		}
+
+		const builtRecords = elements.map((element) => ({
+			element,
+			record: buildConnectionRecord(
 				element,
 				element.connectedMember
 					? resolvedProfiles.get(element.connectedMember)
 					: undefined,
-			);
-			if (record) {
-				await emitRecord("connections", record);
+			),
+		}));
+		const validRecords = builtRecords.filter(
+			(
+				item,
+			): item is {
+				element: VoyagerConnectionElement;
+				record: NonNullable<typeof item.record>;
+			} =>
+				item.record !== null && validateRecord("connections", item.record).ok,
+		);
+		const invalidRecordCount = builtRecords.filter(
+			(item) =>
+				item.record !== null && !validateRecord("connections", item.record).ok,
+		).length;
+		await reportInvalidRecords("connections", invalidRecordCount, progress);
+
+		let covered = 0;
+		for (const { element, record } of validRecords) {
+			await emitRecord("connections", record);
+			if (
+				element.connectedMember &&
+				resolvedProfiles.has(element.connectedMember)
+			) {
 				covered += 1;
 			}
 		}
-		await emit(buildFullScanCoverageMessage("connections", covered));
-
-		if (truncated) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream: "connections",
-				reason: "older_connections_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message: `LinkedIn connections stopped at the ${CONNECTIONS_MAX}-connection cap`,
-				diagnostics: {
-					connections_cap: CONNECTIONS_MAX,
-					total_seen: elements.length,
-				},
-			} satisfies EmittedMessage);
-		}
+		await emit(coverageMessage("connections", elements.length, covered));
 	}
+}
+
+function coverageMessage(
+	stream: string,
+	considered: number,
+	covered: number,
+): EmittedMessage {
+	return buildDetailCoverageMessage({
+		stream,
+		stateStream: stream,
+		requiredKeys: [],
+		hydratedKeys: [],
+		considered,
+		covered,
+	});
+}
+
+async function emitUnavailableSection(
+	stream: string,
+	emit: (message: EmittedMessage) => Promise<void>,
+): Promise<void> {
+	await emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "linkedin_profile_section_unavailable",
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		message: "LinkedIn did not return a readable profile section",
+	});
+}
+
+async function reportOmissions(
+	stream: string,
+	omissions: OmissionSummary,
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+): Promise<void> {
+	if (omissions.count === 0) {
+		return;
+	}
+	const omittedRows = Object.entries(omissions.omittedReasons)
+		.map(([reason, omitted]) => `${reason}=${omitted}`)
+		.join(",");
+	if (omissions.omittedCount > 0) {
+		await progress(`LinkedIn ${stream} omitted rows: ${omittedRows}`, {
+			stream,
+			count: omissions.omittedCount,
+		});
+	}
+	const preservedIssues = Object.entries(omissions.reasons)
+		.filter(([reason]) => !(reason in omissions.omittedReasons))
+		.map(([reason, count]) => `${reason}=${count}`)
+		.join(",");
+	if (preservedIssues) {
+		await progress(
+			`LinkedIn ${stream} preserved malformed rows: ${preservedIssues}`,
+			{
+				stream,
+				count: omissions.count - omissions.omittedCount,
+			},
+		);
+	}
+}
+
+async function reportInvalidRecords(
+	stream: string,
+	count: number,
+	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
+): Promise<void> {
+	if (count === 0) return;
+	await progress(
+		`LinkedIn ${stream} omitted rows: invalid_record_shape=${count}`,
+		{
+			stream,
+			count,
+		},
+	);
 }
 
 if (isMainModule(import.meta.url)) {

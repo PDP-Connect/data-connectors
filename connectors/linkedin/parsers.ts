@@ -28,6 +28,8 @@ import type {
 	VoyagerVectorImage,
 } from "./types.ts";
 
+const ENDORSEMENT_COUNT_RE = /^\d+$/u;
+
 // ─── D4 partial dates ────────────────────────────────────────────────────
 
 /**
@@ -187,6 +189,37 @@ export interface ConnectionRecord {
 	[field: string]: unknown;
 }
 
+export interface OmissionSummary {
+	count: number;
+	omittedCount: number;
+	omittedReasons: Record<string, number>;
+	reasons: Record<string, number>;
+}
+
+export interface RecordsWithOmissions<T> {
+	considered: number;
+	covered: number;
+	omissions: OmissionSummary;
+	records: T[];
+}
+
+function addOmission(
+	summary: OmissionSummary,
+	reason: string,
+	omitted = true,
+): void {
+	summary.count += 1;
+	summary.reasons[reason] = (summary.reasons[reason] ?? 0) + 1;
+	if (omitted) {
+		summary.omittedCount += 1;
+		summary.omittedReasons[reason] = (summary.omittedReasons[reason] ?? 0) + 1;
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function nonEmpty(s: string | undefined | null): string | null {
 	if (typeof s !== "string") {
 		return null;
@@ -199,7 +232,10 @@ function joinFullName(
 	first: string | undefined,
 	last: string | undefined,
 ): string | null {
-	return nonEmpty(`${first ?? ""} ${last ?? ""}`.trim());
+	const hasFirst = typeof first === "string";
+	const hasLast = typeof last === "string";
+	if (!hasFirst && !hasLast) return null;
+	return `${hasFirst ? first : ""} ${hasLast ? last : ""}`.trim();
 }
 
 /** Public profile permalink from the public identifier — the only stable
@@ -284,9 +320,14 @@ export function buildProfileRecord(
 
 	return {
 		connection_count: connectionCount,
-		current_company: nonEmpty(current?.company?.name ?? current?.name),
-		current_position_title: nonEmpty(currentPosition?.title ?? current?.title),
-		full_name: joinFullName(profile.firstName, profile.lastName),
+		current_company:
+			nonEmpty(current?.company?.name) ?? nonEmpty(current?.name),
+		current_position_title:
+			nonEmpty(currentPosition?.title) ?? nonEmpty(current?.title),
+		full_name: joinFullName(
+			nonEmpty(profile.firstName) ?? miniProfile?.firstName,
+			nonEmpty(profile.lastName) ?? miniProfile?.lastName,
+		),
 		headline: nonEmpty(profile.headline) ?? nonEmpty(fallbackHeadline),
 		id: publicIdentifier,
 		industry: nonEmpty(profile.industry?.name),
@@ -367,7 +408,7 @@ export function buildEducationRecords(
 		grade: nonEmpty(edu.grade),
 		id: subEntityId(edu.entityUrn, "edu", index),
 		logo_url: educationLogoUrlOf(edu),
-		school: nonEmpty(edu.schoolName ?? edu.school?.name),
+		school: nonEmpty(edu.schoolName) ?? nonEmpty(edu.school?.name),
 		start_date: startDateOf(edu),
 	}));
 }
@@ -381,67 +422,159 @@ export function buildEducationRecords(
 export function buildSkillRecords(
 	profile: VoyagerProfileElement,
 ): SkillRecord[] {
+	return buildSkillRecordsWithOmissions(profile).records;
+}
+
+export function buildSkillRecordsWithOmissions(
+	profile: VoyagerProfileElement,
+): RecordsWithOmissions<SkillRecord> {
 	const rawSkills = profile.profileSkills?.elements ?? [];
 	const records: SkillRecord[] = [];
-	let index = 0;
+	const omissions: OmissionSummary = {
+		count: 0,
+		omittedCount: 0,
+		omittedReasons: {},
+		reasons: {},
+	};
+	let considered = 0;
+	let covered = 0;
 
-	for (const entry of rawSkills) {
+	for (const entry of rawSkills as readonly unknown[]) {
+		if (!isRecord(entry)) {
+			considered += 1;
+			addOmission(omissions, "malformed_row");
+			continue;
+		}
 		const category = entry as VoyagerSkillCategory;
-		const categorySkills = category.skills ?? category.elements ?? [];
+		let categorySkills: readonly unknown[] = [];
+		if (Array.isArray(category.skills)) {
+			categorySkills = category.skills;
+		} else if (Array.isArray(category.elements)) {
+			categorySkills = category.elements;
+		}
 		if (categorySkills.length > 0) {
-			for (const sk of categorySkills) {
-				const name = nonEmpty(sk.name);
-				if (name) {
+			for (const rawSkill of categorySkills) {
+				considered += 1;
+				if (!isRecord(rawSkill)) {
+					addOmission(omissions, "malformed_row");
+					continue;
+				}
+				const sk = rawSkill as VoyagerSkill;
+				if (typeof sk.name !== "string") {
+					addOmission(omissions, "missing_name");
+				} else if (sk.entityUrn) {
+					if (sk.name.trim().length === 0) {
+						addOmission(omissions, "blank_name_preserved", false);
+					}
+					if (
+						(sk.endorsementCount ?? sk.endorsements) !== undefined &&
+						endorsementCountOf(sk) === null
+					) {
+						addOmission(omissions, "invalid_endorsement_count", false);
+					} else {
+						covered += 1;
+					}
 					records.push({
 						endorsement_count: endorsementCountOf(sk),
-						id: subEntityId(sk.entityUrn, "skill", index),
-						name,
+						id: sk.entityUrn,
+						name: sk.name,
 					});
+				} else {
+					addOmission(omissions, "missing_entity_urn");
 				}
-				index += 1;
 			}
 			continue;
 		}
-		const name = nonEmpty(category.name);
-		if (name) {
+		considered += 1;
+		if (typeof category.name !== "string") {
+			addOmission(omissions, "missing_name");
+		} else if (category.entityUrn) {
+			if (category.name.trim().length === 0) {
+				addOmission(omissions, "blank_name_preserved", false);
+			}
+			if (
+				(category.endorsementCount ?? category.endorsements) !== undefined &&
+				endorsementCountOf(category) === null
+			) {
+				addOmission(omissions, "invalid_endorsement_count", false);
+			} else {
+				covered += 1;
+			}
 			records.push({
 				endorsement_count: endorsementCountOf(category),
-				id: subEntityId(category.entityUrn, "skill", index),
-				name,
+				id: category.entityUrn,
+				name: category.name,
 			});
+		} else {
+			addOmission(omissions, "missing_entity_urn");
 		}
-		index += 1;
 	}
 
-	return records;
+	return { considered, covered, omissions, records };
 }
 
 function endorsementCountOf(
 	sk: VoyagerSkill | VoyagerSkillCategory,
 ): number | null {
 	const count = sk.endorsementCount ?? sk.endorsements;
-	return typeof count === "number" && Number.isFinite(count) && count >= 0
-		? count
-		: null;
+	if (typeof count === "number") {
+		return Number.isSafeInteger(count) && count >= 0 ? count : null;
+	}
+	if (typeof count === "string" && ENDORSEMENT_COUNT_RE.test(count.trim())) {
+		const parsed = Number(count.trim());
+		return Number.isSafeInteger(parsed) ? parsed : null;
+	}
+	return null;
 }
 
 export function buildLanguageRecords(
 	profile: VoyagerProfileElement,
 ): LanguageRecord[] {
+	return buildLanguageRecordsWithOmissions(profile).records;
+}
+
+export function buildLanguageRecordsWithOmissions(
+	profile: VoyagerProfileElement,
+): RecordsWithOmissions<LanguageRecord> {
 	const items = profile.profileLanguages?.elements ?? [];
-	return items
-		.map((lang: VoyagerLanguage, index) => {
-			const name = nonEmpty(lang.name);
-			if (!name) {
-				return null;
+	const records: LanguageRecord[] = [];
+	const omissions: OmissionSummary = {
+		count: 0,
+		omittedCount: 0,
+		omittedReasons: {},
+		reasons: {},
+	};
+	let covered = 0;
+	for (const rawLanguage of items as readonly unknown[]) {
+		if (!isRecord(rawLanguage)) {
+			addOmission(omissions, "malformed_row");
+			continue;
+		}
+		const lang = rawLanguage as VoyagerLanguage;
+		if (typeof lang.name !== "string") {
+			addOmission(omissions, "missing_name");
+		} else if (lang.entityUrn) {
+			const validProficiency =
+				lang.proficiency === undefined || typeof lang.proficiency === "string";
+			if (validProficiency) {
+				covered += 1;
+			} else {
+				addOmission(omissions, "invalid_proficiency", false);
 			}
-			return {
-				id: subEntityId(lang.entityUrn, "lang", index),
-				name,
-				proficiency: nonEmpty(lang.proficiency),
-			};
-		})
-		.filter((r): r is LanguageRecord => r !== null);
+			if (lang.name.trim().length === 0) {
+				addOmission(omissions, "blank_name_preserved", false);
+			}
+			records.push({
+				id: lang.entityUrn,
+				name: lang.name,
+				proficiency:
+					typeof lang.proficiency === "string" ? lang.proficiency : null,
+			});
+		} else {
+			addOmission(omissions, "missing_entity_urn");
+		}
+	}
+	return { considered: items.length, covered, omissions, records };
 }
 
 /** LinkedIn's connection `createdAt` is epoch milliseconds; 0/absent means
@@ -462,14 +595,17 @@ export function buildConnectionRecord(
 	resolved: VoyagerResolvedProfile | undefined,
 ): ConnectionRecord | null {
 	const memberUrn = element.connectedMember;
-	if (!memberUrn) {
+	if (typeof memberUrn !== "string" || memberUrn.trim().length === 0) {
 		return null;
 	}
 	const publicId = resolved?.publicIdentifier;
 	return {
 		connected_at: connectedAtOf(element.createdAt),
 		full_name: joinFullName(resolved?.firstName, resolved?.lastName),
-		headline: nonEmpty(resolved?.headline ?? resolved?.occupation),
+		headline:
+			typeof resolved?.headline === "string"
+				? resolved.headline
+				: nonEmpty(resolved?.occupation),
 		id: memberUrn,
 		profile_url: publicId ? profileUrlFor(publicId) : null,
 	};

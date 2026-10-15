@@ -78,16 +78,16 @@ export interface VoyagerEducation extends VoyagerDateBearing {
 }
 
 export interface VoyagerSkill {
+	endorsementCount?: number | string;
+	endorsements?: number | string;
 	entityUrn?: string;
-	endorsementCount?: number;
-	endorsements?: number;
 	name?: string;
 }
 
 export interface VoyagerSkillCategory {
 	elements?: VoyagerSkill[];
-	endorsementCount?: number;
-	endorsements?: number;
+	endorsementCount?: number | string;
+	endorsements?: number | string;
 	entityUrn?: string;
 	name?: string;
 	skills?: VoyagerSkill[];

@@ -89,7 +89,7 @@ export const educationSchema = z.object({
 export const skillsSchema = z.object({
 	endorsement_count: z.number().int().min(0).nullable(),
 	id: idSchema,
-	name: pdppSafeText.min(1).max(300),
+	name: pdppSafeText.max(300),
 });
 
 /**
@@ -97,7 +97,7 @@ export const skillsSchema = z.object({
  */
 export const languagesSchema = z.object({
 	id: idSchema,
-	name: pdppSafeText.min(1).max(200),
+	name: pdppSafeText.max(200),
 	proficiency: pdppSafeText.max(200).nullable(),
 });
 

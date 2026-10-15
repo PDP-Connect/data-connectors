@@ -225,6 +225,17 @@ test("buildProfileRecord: falls back to /me occupation when dash headline absent
 	assert.equal(record.headline, "Engineer at Acme");
 });
 
+test("buildProfileRecord: falls back per name component when the dash name is partial", () => {
+	const record = buildProfileRecord(
+		"anon-member",
+		{ firstName: "", lastName: "DashLast" },
+		undefined,
+		{ firstName: "MeFirst", lastName: "MeLast" },
+		null,
+	);
+	assert.equal(record.full_name, "MeFirst DashLast");
+});
+
 test("buildProfileRecord: passes through the caller-supplied connection count", () => {
 	const record = buildProfileRecord(
 		"alexrivera",
@@ -481,8 +492,16 @@ test("buildSkillRecords: flat skill list", () => {
 	const profile: VoyagerProfileElement = {
 		profileSkills: {
 			elements: [
-				{ endorsementCount: 12, name: "Distributed Systems" },
-				{ endorsementCount: 0, name: "TypeScript" },
+				{
+					entityUrn: "urn:skill:distributed-systems",
+					endorsementCount: 12,
+					name: "Distributed Systems",
+				},
+				{
+					entityUrn: "urn:skill:typescript",
+					endorsementCount: 0,
+					name: "TypeScript",
+				},
 			],
 		},
 	};
@@ -499,7 +518,14 @@ test("buildSkillRecords: categorized skill list flattens to one record per skill
 			elements: [
 				{
 					name: "Tools & Technologies",
-					skills: [{ endorsements: 5, name: "Kubernetes" }, { name: "Docker" }],
+					skills: [
+						{
+							entityUrn: "urn:skill:kubernetes",
+							endorsements: 5,
+							name: "Kubernetes",
+						},
+						{ entityUrn: "urn:skill:docker", name: "Docker" },
+					],
 				},
 			],
 		},
@@ -514,7 +540,9 @@ test("buildSkillRecords: categorized skill list flattens to one record per skill
 
 test("buildSkillRecords: skips entries with no usable name", () => {
 	const profile: VoyagerProfileElement = {
-		profileSkills: { elements: [{ endorsementCount: 3 }] },
+		profileSkills: {
+			elements: [{ entityUrn: "urn:skill:unnamed", endorsementCount: 3 }],
+		},
 	};
 	assert.deepEqual(buildSkillRecords(profile), []);
 });
@@ -525,8 +553,12 @@ test("buildLanguageRecords: maps name + proficiency", () => {
 	const profile: VoyagerProfileElement = {
 		profileLanguages: {
 			elements: [
-				{ name: "Spanish", proficiency: "Professional working proficiency" },
-				{ name: "French" },
+				{
+					entityUrn: "urn:language:spanish",
+					name: "Spanish",
+					proficiency: "Professional working proficiency",
+				},
+				{ entityUrn: "urn:language:french", name: "French" },
 			],
 		},
 	};
@@ -580,6 +612,18 @@ test("buildConnectionRecord: resolved profile -> full enrichment", () => {
 
 	const result = validateRecord("connections", record);
 	assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+test("buildConnectionRecord: source-backed blank names remain blank", () => {
+	const record = buildConnectionRecord(
+		{ connectedMember: "urn:li:fsd_profile:blank-name" },
+		{ firstName: " ", lastName: "" },
+	);
+	assert.equal(record?.full_name, "");
+	assert.equal(
+		validateRecord("connections", record ?? {}).ok,
+		true,
+	);
 });
 
 test("buildConnectionRecord: unresolved profile -> null enrichment fields, edge still emitted", () => {

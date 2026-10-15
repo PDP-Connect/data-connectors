@@ -14497,7 +14497,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "From the connections listing's reported total, not the profile payload itself. Null when the connections listing wasn't fetched or reported no total."
+									"description": "Exact number of connections observed only after a verified end-of-list. Null when paging ends on an error, malformed page, or page budget."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],
@@ -14785,6 +14785,9 @@
 				],
 				"reason_display_messages": {
 					"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+					"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
+					"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+					"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
 					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
 				}
 			}
