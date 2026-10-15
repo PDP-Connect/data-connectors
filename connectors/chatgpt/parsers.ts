@@ -481,6 +481,7 @@ export function extractContent(
  * `contentExternal` is true when the message's `content` is blob-backed or
  * omitted. The call then carries `text_ref: "content"` instead of a second
  * inline copy of the body, so a multi-megabyte body is stored once at most.
+ * An inline `text` uses the same pdpp-safe-escape-v1 encoding as `content`.
  */
 export function extractToolCalls(
 	m: ChatGptMessage | undefined,
@@ -505,7 +506,7 @@ export function extractToolCalls(
 			if (contentExternal) {
 				call.text_ref = "content";
 			} else {
-				call.text = m.content.text;
+				call.text = encodePdppSafeText(m.content.text);
 			}
 		}
 		if (m?.metadata?.invoked_plugin) {

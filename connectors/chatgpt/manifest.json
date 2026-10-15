@@ -178,7 +178,16 @@
 					},
 					"tool_calls": {
 						"type": "array",
-						"description": "Tool calls. A call synthesized from a tool-addressed assistant message carries its body in text. When the message content is blob-backed (blob_ref) or omitted, the call carries text_ref \"content\" instead of text: the body is the content field, not repeated here."
+						"items": {
+							"type": "object",
+							"properties": {
+								"text": {
+									"type": "string",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1"
+								}
+							}
+						},
+						"description": "Tool calls. A call synthesized from a tool-addressed assistant message carries its body in text, in the same pdpp-safe-escape-v1 encoding as content (decode it the same way). Calls copied from an explicit source tool_calls list are passed through as the source gave them. When the message content is blob-backed (blob_ref) or omitted, the call carries text_ref \"content\" instead of text: the body is the content field, not repeated here."
 					},
 					"attachment_ids": {
 						"type": "array"

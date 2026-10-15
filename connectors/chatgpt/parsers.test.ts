@@ -1341,3 +1341,36 @@ test("messages schema: a tool call with text_ref must say \"content\" and carry 
 	assert.equal(ok([{ text_ref: "content", text: "dup" }]), false);
 	assert.equal(ok([{ recipient: "python", text: "inline" }]), true);
 });
+
+test("extractMessage: an inline tool-recipient body with controls is escaped in tool_calls and round-trips", () => {
+	const text = "print('a\x00b')\x01 \\u0000 literal \ud800 lone";
+	const node = {
+		parent: null,
+		children: [],
+		message: {
+			author: { role: "assistant" },
+			recipient: "python",
+			content: { content_type: "code", language: "python", text },
+		},
+	} as ChatGptNode;
+	const rec = extractMessage("n1", node, "c1", true);
+	const call = (rec?.tool_calls as Array<{ text?: string }>)[0];
+	assert.ok(call?.text);
+	assert.equal(call.text.includes("\x00"), false);
+	assert.equal(call.text, encodePdppSafeText(text));
+	assert.equal(decodeEscapedText(call.text), text);
+	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	const manifest = JSON.parse(
+		readFileSync(join(__dirname, "manifest.json"), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			schema: { properties: Record<string, any> };
+		}>;
+	};
+	assert.equal(
+		manifest.streams.find((s) => s.name === "messages")?.schema.properties
+			.tool_calls.items.properties.text.x_pdpp_text_encoding,
+		"pdpp-safe-escape-v1",
+	);
+});
