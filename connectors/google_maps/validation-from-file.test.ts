@@ -562,13 +562,13 @@ test("validateGoogleMapsTimelineArtifactFromFile: a large sparse export never ca
 });
 
 test("outcome proof: a 110 MiB sparse Timeline export separates streaming from whole-buffer parsing at one heap limit", async () => {
-	// Deterministic child-process oracle, not an in-process memory-delta
+	// Deterministic worker-thread oracle, not an in-process memory-delta
 	// measurement (the prior in-process external-memory-delta test here was
 	// proven decorative by mutation testing -- it passed even when reverted
 	// to a whole-buffer readFile+JSON.parse implementation). Sparse: many
 	// small elements, not one huge one -- the realistic shape of a real
 	// multi-year export. Fixture construction happens in this (unconstrained)
-	// process; the child only receives the finished file's path and size, so
+	// process; the worker only receives the finished file's path and size, so
 	// its heap budget is spent solely on validation.
 	const TARGET_BYTES = 110 * 1024 * 1024;
 	const template = {
@@ -609,7 +609,7 @@ test("outcome proof: a 110 MiB sparse Timeline export separates streaming from w
 			`fixture must exceed the manifest cap, got ${fileSize} bytes`,
 		);
 
-		const { spawnSync } = await import("node:child_process");
+		const { Worker } = await import("node:worker_threads");
 		const childPath = new URL(
 			"./oversized-element-oracle.test.child.ts",
 			import.meta.url,
@@ -617,46 +617,84 @@ test("outcome proof: a 110 MiB sparse Timeline export separates streaming from w
 		// Keep a wide margin between the 110 MiB input and the heap ceiling.
 		// A 220 MiB ceiling was close enough for V8's string representation to
 		// let the whole-buffer mutation survive on some GitHub runners.
+		// A worker resource limit reports OOM without aborting the process or
+		// generating a core dump for this expected negative-control outcome.
 		const heapLimitMiB = 128;
-		const wholeBuffer = spawnSync(
-			process.execPath,
-			[
-				`--max-old-space-size=${heapLimitMiB}`,
-				"--import",
-				"tsx",
-				childPath.pathname,
-				path,
-				String(fileSize),
-				"whole-buffer",
-			],
-			{ encoding: "utf8", timeout: 30_000 },
+		const timeoutMs = 30_000;
+		type OracleOutcome = {
+			error?: Error & { code?: string };
+			exitCode: number;
+			message?: { status?: string; error?: string };
+			timedOut: boolean;
+		};
+		const runOracle = (
+			mode: "whole-buffer" | "validate",
+		): Promise<OracleOutcome> =>
+			new Promise((resolve, reject) => {
+				const worker = new Worker(childPath, {
+					argv: [path, String(fileSize), mode],
+					execArgv: ["--import", "tsx"],
+					resourceLimits: { maxOldGenerationSizeMb: heapLimitMiB },
+				});
+				let error: OracleOutcome["error"];
+				let message: OracleOutcome["message"];
+				let timedOut = false;
+				const timeout = setTimeout(() => {
+					timedOut = true;
+					void worker.terminate().catch(reject);
+				}, timeoutMs);
+				worker.on("message", (value: OracleOutcome["message"]) => {
+					message = value;
+				});
+				worker.once("error", (workerError: OracleOutcome["error"]) => {
+					error = workerError;
+				});
+				worker.once("exit", (exitCode) => {
+					clearTimeout(timeout);
+					resolve({ error, exitCode, message, timedOut });
+				});
+			});
+		const describeOutcome = (outcome: OracleOutcome): string =>
+			JSON.stringify({
+				...outcome,
+				error: outcome.error && {
+					code: outcome.error.code,
+					message: outcome.error.message,
+				},
+			});
+		const wholeBuffer = await runOracle("whole-buffer");
+		assert.equal(
+			wholeBuffer.timedOut,
+			false,
+			`whole-buffer oracle timed out after ${timeoutMs} ms; a timeout is not an OOM: ${describeOutcome(wholeBuffer)}`,
 		);
-		assert.notEqual(
-			wholeBuffer.status,
-			0,
-			`whole-buffer mutation unexpectedly survived the heap discriminator: status=${wholeBuffer.status} signal=${wholeBuffer.signal}`,
-		);
-		const result = spawnSync(
-			process.execPath,
-			[
-				`--max-old-space-size=${heapLimitMiB}`,
-				"--import",
-				"tsx",
-				childPath.pathname,
-				path,
-				String(fileSize),
-			],
-			{ encoding: "utf8", timeout: 30_000 },
+		assert.equal(
+			wholeBuffer.error?.code,
+			"ERR_WORKER_OUT_OF_MEMORY",
+			`expected whole-buffer oracle to exceed the worker heap limit with ERR_WORKER_OUT_OF_MEMORY, got: ${describeOutcome(wholeBuffer)}`,
 		);
 
+		const result = await runOracle("validate");
 		assert.equal(
-			result.status,
-			0,
-			`expected the child to exit cleanly, got status=${result.status} signal=${result.signal} stderr=${result.stderr}`,
+			result.timedOut,
+			false,
+			`validation oracle timed out after ${timeoutMs} ms: ${describeOutcome(result)}`,
 		);
-		assert.equal(result.signal, null);
-		const stdout = JSON.parse(result.stdout.trim());
-		assert.equal(stdout.status, "valid");
+		assert.equal(
+			result.error,
+			undefined,
+			`expected validation worker to complete without an error, got: ${describeOutcome(result)}`,
+		);
+		assert.equal(
+			result.exitCode,
+			0,
+			`expected validation worker to exit cleanly, got: ${describeOutcome(result)}`,
+		);
+		assert.equal(
+			result.message?.status,
+			"valid",
+			`expected validation worker to report valid, got: ${describeOutcome(result)}`,
+		);
 	} finally {
 		rmSync(dir, { force: true, recursive: true });
 	}
