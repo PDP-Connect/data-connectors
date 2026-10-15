@@ -818,6 +818,87 @@ async function extractPdfText(buffer: Buffer): Promise<string> {
 	return (await extractStatementPdfTextAndPages(buffer)).text;
 }
 
+export type PdfStatementParseStep =
+	| "extract_text"
+	| "resolve_closing"
+	| "match_template"
+	| "reconcile_statement"
+	| "shape_records";
+
+export type PdfStatementFailureStep =
+	| PdfStatementParseStep
+	| "emit_reconciliation_gap"
+	| "emit_template_gap"
+	| "emit_transaction";
+
+export interface PdfStatementShape {
+	column_count: number | null;
+	row_shape:
+		| "pdf_bytes"
+		| "statement_text"
+		| "transaction_table"
+		| "transaction_record"
+		| "reconciliation_result"
+		| "template_result";
+}
+
+export class PdfStatementParseError extends Error {
+	readonly step: PdfStatementParseStep;
+	readonly shape: PdfStatementShape;
+
+	constructor(step: PdfStatementParseStep, shape: PdfStatementShape) {
+		super("USAA statement PDF processing failed");
+		this.name = "PdfStatementParseError";
+		this.step = step;
+		this.shape = shape;
+	}
+}
+
+async function atParseStep<T>(
+	step: PdfStatementParseStep,
+	shape: PdfStatementShape,
+	action: () => T | Promise<T>,
+): Promise<T> {
+	try {
+		return await action();
+	} catch {
+		throw new PdfStatementParseError(step, shape);
+	}
+}
+
+function statementTextShape(text: string): PdfStatementShape {
+	const columns = new Set([
+		"amount",
+		"balance",
+		"credit",
+		"credits",
+		"date",
+		"debit",
+		"debits",
+		"description",
+		"posting",
+		"trans",
+		"transaction",
+		"transactions",
+	]);
+	const headerColumnCount = text.split(/\r?\n/).reduce((largest, line) => {
+		const words = line.toLowerCase().split(/\s+/);
+		const columnCount = words.filter((word) => columns.has(word)).length;
+		const hasDateAndDescription =
+			words.includes("date") && words.includes("description");
+		const hasAmountColumn = words.some((word) =>
+			["amount", "debit", "debits", "credit", "credits"].includes(word),
+		);
+		return hasDateAndDescription && hasAmountColumn
+			? Math.max(largest, columnCount)
+			: largest;
+	}, 0);
+	return {
+		column_count: headerColumnCount > 0 ? headerColumnCount : null,
+		row_shape: headerColumnCount > 0 ? "transaction_table" : "statement_text",
+	};
+}
+
 /**
  * Determine the statement's closing context: prefer the in-PDF closing date,
  * then the period supplied by the statement index (YYYY-MM), then current
@@ -914,9 +995,18 @@ export async function parsePdfStatement({
 	parseMeta: ParseMeta;
 	reconciliation: StatementReconciliation;
 }> {
-	const text = await extractPdfText(buffer);
-	const closing = resolveClosing(text, period);
-	const { chosen, best } = runEraParsers(text, closing);
+	const text = await atParseStep(
+		"extract_text",
+		{ column_count: null, row_shape: "pdf_bytes" },
+		() => extractPdfText(buffer),
+	);
+	const textShape = statementTextShape(text);
+	const closing = await atParseStep("resolve_closing", textShape, () =>
+		resolveClosing(text, period),
+	);
+	const { chosen, best } = await atParseStep("match_template", textShape, () =>
+		runEraParsers(text, closing),
+	);
 
 	// The completeness anchor. Computed here because this is the only place
 	// that holds BOTH the statement text (USAA's printed period totals) and
@@ -924,7 +1014,11 @@ export async function parsePdfStatement({
 	// no parser matched: a period whose balance moved but which yielded zero
 	// transactions is precisely the failure worth catching, and returning
 	// early without checking would hide it.
-	const reconciliation = reconcileStatementPeriod(text, best);
+	const reconciliation = await atParseStep(
+		"reconcile_statement",
+		{ ...textShape, row_shape: "statement_text" },
+		() => reconcileStatementPeriod(text, best),
+	);
 
 	if (!best.length) {
 		return {
@@ -937,11 +1031,16 @@ export async function parsePdfStatement({
 		};
 	}
 
-	const records = buildStatementRecords(best, {
-		accountId,
-		accountName,
-		period,
-	});
+	const records = await atParseStep(
+		"shape_records",
+		{ column_count: Object.keys(best[0] ?? {}).length, row_shape: "transaction_record" },
+		() =>
+			buildStatementRecords(best, {
+				accountId,
+				accountName,
+				period,
+			}),
+	);
 	return {
 		txns: records,
 		parseMeta: {

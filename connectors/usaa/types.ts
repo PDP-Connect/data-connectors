@@ -139,8 +139,16 @@ export interface DiagnosticCandidate {
 	text: string;
 }
 
+export interface DialogStructure {
+	input_type_counts: Record<string, number>;
+	role_counts: Record<string, number>;
+	sampled_nodes: number;
+	tag_counts: Record<string, number>;
+	truncated: boolean;
+}
+
 export interface PageDiagnostics {
-	dialog_html_preview?: string | null;
+	dialog_structure?: DialogStructure | null;
 	dialogs_open: number;
 	export_candidates: DiagnosticCandidate[];
 	has_utility_bar: boolean;

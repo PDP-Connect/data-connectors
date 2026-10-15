@@ -24,6 +24,7 @@ import {
 	runSingleLadderAttempt,
 	tryExportLadder,
 } from "./index.ts";
+import type { IndexRow, HydrationResultSuccess } from "./types.ts";
 
 type FieldName = "start" | "end";
 
@@ -651,4 +652,45 @@ test("PDF parse summary shows plain progress and keeps the template counters in 
 	assert.deepEqual(diagnostics, [
 		'[usaa-diagnostic] pdf_parse_complete {"transactions":0,"statements":0,"unknown_templates":0,"unreconciled":0}',
 	]);
+});
+
+test("PDF failure diagnostics identify the failing parse stage without exception text", async () => {
+	const messages: Array<Record<string, unknown>> = [];
+	const row: IndexRow = {
+		account_id: null,
+		account_reference: null,
+		date_delivered: "2026-04-13",
+		id: "synthetic-statement",
+		rowIndex: 0,
+		title: "April 2026 STATEMENT",
+	};
+	const hydration: HydrationResultSuccess = {
+		buffer: Buffer.from("synthetic-invalid-pdf"),
+		content: { pdf_text_sha256: null, pdf_page_count: null },
+		pdfPath: "synthetic-statement.pdf",
+		pdfSha256: "0".repeat(64),
+	};
+	await emitPdfStatementTransactions(
+		{
+			emit: async (message: Record<string, unknown>): Promise<void> => {
+				messages.push(message);
+			},
+			emitRecord: async (): Promise<void> => undefined,
+		} as EmitDeps,
+		[row],
+		new Map([[0, hydration]]),
+		[],
+	);
+	const failure = messages.find(
+		(message) => message.reason === "pdf_parse_failed",
+	);
+	assert.ok(failure);
+	assert.deepEqual(failure.diagnostics, {
+		error_class: "Error",
+		failure_code: "pdf_parse_failed",
+		step: "extract_text",
+		row_shape: "pdf_bytes",
+		column_count: null,
+	});
+	assert.doesNotMatch(JSON.stringify(failure), /synthetic-invalid-pdf/);
 });

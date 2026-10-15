@@ -1190,7 +1190,6 @@ function makeDialogNotOpenPage(callOrder: string[]): Page {
 	return Object.assign({} as Page, {
 		evaluate() {
 			return Promise.resolve({
-				dialog_html_preview: null,
 				dialogs_open: 0,
 				export_candidates: [],
 				has_utility_bar: false,
@@ -1358,7 +1357,6 @@ function makeSlowRenderingSelectPage(): {
 	const page = Object.assign({} as Page, {
 		evaluate() {
 			return Promise.resolve({
-				dialog_html_preview: null,
 				dialogs_open: 1,
 				export_candidates: [],
 				has_utility_bar: false,
@@ -1565,7 +1563,13 @@ test("emitExportFailure: the dialog-unexpected-shape phase is also a structure-c
 			export_candidates: [],
 			nav_candidates: [],
 			dialogs_open: 1,
-			dialog_html_preview: "<div>unexpected</div>",
+			dialog_structure: {
+				input_type_counts: {},
+				role_counts: { dialog: 1 },
+				sampled_nodes: 1,
+				tag_counts: { div: 1 },
+				truncated: false,
+			},
 		},
 	};
 	await emitExportFailure(deps, makeAccount(), diag);
@@ -1579,8 +1583,15 @@ test("emitExportFailure: the dialog-unexpected-shape phase is also a structure-c
 		"export_affordance_missing",
 		"an unrecognized export dialog is a structure-changed outcome",
 	);
-	const emittedDiag = skip.diagnostics as DiagnosticInfo & { outcome: string };
+	assert.ok(diag.diag);
+	assert.ok(skip.diagnostics && typeof skip.diagnostics === "object");
+	const emittedDiag = skip.diagnostics as {
+		outcome: string;
+		page: { dialog_structure?: unknown };
+	};
 	assert.equal(emittedDiag.outcome, "source_structure_changed");
+	assert.deepEqual(emittedDiag.page.dialog_structure, diag.diag.dialog_structure);
+	assert.doesNotMatch(JSON.stringify(skip), /Checking|accountId/);
 });
 
 test("emitExportFailure: a transient artifact-wait failure stays export_no_download (pressure outcome)", async () => {

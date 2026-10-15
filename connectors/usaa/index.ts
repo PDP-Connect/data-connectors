@@ -102,12 +102,16 @@ import {
 	fileUrlForPath,
 	hydrateStatementPdfs,
 	parsePdfStatement,
+	PdfStatementParseError,
+	type PdfStatementFailureStep,
+	type PdfStatementShape,
 } from "./statement-pdfs.ts";
 import { buildReconciliationDiagnostics } from "./statement-reconciliation.ts";
 import type {
 	BillingKv,
 	DashboardAccount,
 	DiagnosticCandidate,
+	DialogStructure,
 	DiagnosticInfo,
 	DocRow,
 	DownloadDiagnostics,
@@ -228,7 +232,6 @@ const KEY_TYPE_DELAY_MS = 30;
 const BACKFILL_17MO = PARSERS_BACKFILL_17MO;
 const INCREMENTAL_OVERLAP_MS = PARSERS_INCREMENTAL_OVERLAP_MS;
 const ID_TEXT_SNIP = 160;
-const HTML_PREVIEW_MAX = 600;
 
 // Pure helpers — hashId, currencyToCents, isoDate, mmddyyyy, parseCsv,
 // rowsToTransactions — live in ./parsers.ts.
@@ -667,6 +670,9 @@ function sanitizeDiagnosticInfo(diag: DiagnosticInfo): Record<string, unknown> {
 	if (diag.diag) {
 		sanitized.page = {
 			dialogs_open: diag.diag.dialogs_open,
+			...(diag.diag.dialog_structure
+				? { dialog_structure: diag.diag.dialog_structure }
+				: {}),
 			export_candidate_count: diag.diag.export_candidates.length,
 			has_utility_bar: diag.diag.has_utility_bar,
 			nav_candidate_count: diag.diag.nav_candidates.length,
@@ -779,10 +785,24 @@ type UsaaFailureCode =
 function failureDiagnostic(
 	failureCode: UsaaFailureCode,
 	error: unknown,
-): { error_class: "Error" | "unknown"; failure_code: UsaaFailureCode } {
+parseFailure?: { step: PdfStatementFailureStep; shape: PdfStatementShape },
+): {
+	error_class: "Error" | "unknown";
+	failure_code: UsaaFailureCode;
+	step?: PdfStatementFailureStep;
+	row_shape?: PdfStatementShape["row_shape"];
+	column_count?: number | null;
+} {
 	return {
 		error_class: error instanceof Error ? "Error" : "unknown",
 		failure_code: failureCode,
+		...(parseFailure
+			? {
+					step: parseFailure.step,
+					row_shape: parseFailure.shape.row_shape,
+					column_count: parseFailure.shape.column_count,
+				}
+			: {}),
 	};
 }
 
@@ -1316,6 +1336,51 @@ function capturePageDiagnostics(page: Page): Promise<PageDiagnostics | null> {
 					id: el.id || null,
 				}));
 			};
+			const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+			const dialogStructure: DialogStructure = {
+				input_type_counts: {},
+				role_counts: {},
+				sampled_nodes: 0,
+				tag_counts: {},
+				truncated: false,
+			};
+			let depthTruncated = false;
+			const dialogQueue: Array<{ element: HTMLElement; depth: number }> = dialog
+				? [{ element: dialog, depth: 0 }]
+				: [];
+			while (dialogQueue.length > 0 && dialogStructure.sampled_nodes < 32) {
+				const current = dialogQueue.shift();
+				if (!current) {
+					break;
+				}
+				dialogStructure.sampled_nodes += 1;
+				const { element, depth } = current;
+				const children = [...element.children].filter(
+					(child): child is HTMLElement => child instanceof HTMLElement,
+				);
+				const tag = element.tagName.toLowerCase();
+				dialogStructure.tag_counts[tag] =
+					(dialogStructure.tag_counts[tag] ?? 0) + 1;
+				const role = element.getAttribute("role");
+				if (role) {
+					dialogStructure.role_counts[role] =
+						(dialogStructure.role_counts[role] ?? 0) + 1;
+				}
+				if (
+					element instanceof HTMLInputElement ||
+					element instanceof HTMLButtonElement
+				) {
+					dialogStructure.input_type_counts[element.type] =
+						(dialogStructure.input_type_counts[element.type] ?? 0) + 1;
+				}
+				if (depth < 4) {
+					for (const child of children) {
+						dialogQueue.push({ element: child, depth: depth + 1 });
+					}
+				} else if (children.length > 0) {
+					depthTruncated = true;
+				}
+			}
 			return {
 				url: location.href,
 				title: document.title,
@@ -1331,6 +1396,12 @@ function capturePageDiagnostics(page: Page): Promise<PageDiagnostics | null> {
 					'a[href*="/my/credit-card"], a[role="tab"], [role="tab"]',
 				),
 				dialogs_open: document.querySelectorAll('[role="dialog"]').length,
+				dialog_structure: dialog
+					? {
+							...dialogStructure,
+							truncated: depthTruncated || dialogQueue.length > 0,
+						}
+					: null,
 			};
 		})
 		.catch((): PageDiagnostics | null => null);
@@ -1462,8 +1533,6 @@ async function locateExportPage(
 	return null;
 }
 
-const DIALOG_HTML_WS_RE = /\s+/g;
-
 async function emitExportClickFailedDiagnostic(
 	page: Page,
 	onDiagnostics: DriveExportOptions["onDiagnostics"],
@@ -1486,26 +1555,15 @@ async function emitDialogUnexpectedShapeDiagnostic(
 	onDiagnostics: NonNullable<DriveExportOptions["onDiagnostics"]>,
 ): Promise<void> {
 	const base = await capturePageDiagnostics(page);
-	const dialogHtml = await page
-		.locator('[role="dialog"]')
-		.first()
-		.innerHTML()
-		.catch((): string | null => null);
-	const preview = dialogHtml
-		? dialogHtml.replace(DIALOG_HTML_WS_RE, " ").slice(0, HTML_PREVIEW_MAX)
-		: null;
 	onDiagnostics({
 		phase: "export_dialog_unexpected_shape",
-		diag: base
-			? { ...base, dialog_html_preview: preview }
-			: {
+		diag: base ?? {
 					url: "",
 					title: "",
 					has_utility_bar: false,
 					export_candidates: [],
 					nav_candidates: [],
 					dialogs_open: 0,
-					dialog_html_preview: preview,
 				},
 	});
 }
@@ -3196,6 +3254,11 @@ async function processPdfStatementRow(
 	const period = (row.date_delivered || "").slice(0, 7) || null;
 	const acct = row.account_id ? accountById.get(row.account_id) : null;
 	const accountName = acct?.name ?? row.account_reference ?? null;
+	let failureStep: PdfStatementFailureStep = "extract_text";
+	let failureShape: PdfStatementShape = {
+		column_count: null,
+		row_shape: "pdf_bytes",
+	};
 	try {
 		const { txns, parseMeta, reconciliation } = await parsePdfStatement({
 			buffer: ok.buffer,
@@ -3203,6 +3266,11 @@ async function processPdfStatementRow(
 			accountName,
 			period,
 		});
+		failureStep = "emit_reconciliation_gap";
+		failureShape = {
+			column_count: Object.keys(reconciliation).length,
+			row_shape: "reconciliation_result",
+		};
 		// The completeness anchor: USAA's own printed period totals say what
 		// this period's transactions must sum to. Report a failed reconciliation
 		// BEFORE the empty-parse early return below, because "the balance moved
@@ -3221,6 +3289,11 @@ async function processPdfStatementRow(
 			});
 		}
 		if (!txns.length) {
+			failureStep = "emit_template_gap";
+			failureShape = {
+				column_count: Object.keys(parseMeta).length,
+				row_shape: "template_result",
+			};
 			counters.unknownTemplates += 1;
 			await deps.emit({
 				type: "SKIP_RESULT",
@@ -3238,6 +3311,11 @@ async function processPdfStatementRow(
 			// either source is suppressed on a re-parse whose body is identical
 			// modulo `fetched_at`. Re-parsing the same statement PDFs every run
 			// was appending a fresh version per transaction.
+			failureStep = "emit_transaction";
+			failureShape = {
+				column_count: Object.keys(t).length,
+				row_shape: "transaction_record",
+			};
 			if (!fingerprintCursor || fingerprintCursor.shouldEmit({ ...t })) {
 				await deps.emitRecord("transactions", { ...t });
 			}
@@ -3249,8 +3327,14 @@ async function processPdfStatementRow(
 			type: "SKIP_RESULT",
 			stream: "transactions",
 			reason: "pdf_parse_failed",
-			message: `PDF statement parse failed at row ${row.rowIndex + 1}; retry by runtime`,
-			diagnostics: failureDiagnostic("pdf_parse_failed", err),
+			message: `PDF statement processing failed at row ${row.rowIndex + 1}; retry by runtime`,
+			diagnostics: failureDiagnostic(
+				"pdf_parse_failed",
+				err,
+				err instanceof PdfStatementParseError
+					? { step: err.step, shape: err.shape }
+					: { step: failureStep, shape: failureShape },
+			),
 		});
 	}
 }
