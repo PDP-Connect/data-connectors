@@ -632,7 +632,7 @@ async function recoverDetailGapsOnly(
 		string,
 		{ slug: string | null; gapIds: string[] }
 	>();
-	for (const gap of ctx.detailGaps) {
+	for (const gap of startGaps(ctx)) {
 		if (gap.stream !== "messages" || typeof gap.record_key !== "string") {
 			continue;
 		}
@@ -668,12 +668,25 @@ async function recoverDetailGapsOnly(
 	}
 }
 
+/**
+ * The pending gaps START carried. Hosts that do not track gaps (the mobile
+ * PageShim host) leave the field out, which means none.
+ */
+function startGaps(
+	ctx: BrowserCollectContext,
+): readonly BrowserCollectContext["detailGaps"][number][] {
+	const gaps: unknown = (ctx as { detailGaps?: unknown }).detailGaps;
+	return Array.isArray(gaps)
+		? (gaps as BrowserCollectContext["detailGaps"][number][])
+		: [];
+}
+
 /** Pending `messages` gap ids by thread, for the forward walk to resolve. */
 function pendingGapsByThread(
 	ctx: BrowserCollectContext,
 ): Map<string, string[]> {
 	const pending = new Map<string, string[]>();
-	for (const gap of ctx.detailGaps) {
+	for (const gap of startGaps(ctx)) {
 		if (gap.stream === "messages" && typeof gap.record_key === "string") {
 			pending.set(gap.record_key, [
 				...(pending.get(gap.record_key) ?? []),
