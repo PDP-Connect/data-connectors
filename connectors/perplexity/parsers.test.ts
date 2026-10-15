@@ -13,6 +13,7 @@ import {
 	parseListedThread,
 	parseThreadDetailPage,
 	parseThreadListPage,
+	readContent,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -71,12 +72,12 @@ test("a thread item becomes a listed thread, and never carries the token", () =>
 	assert.equal(listed.title, "Synthetic thread one");
 	assert.equal(listed.mode, "web");
 	assert.equal(listed.model, "sonar-pro");
-	assert.equal(listed.updateTime, "2026-10-02T09:15:00Z");
+	assert.equal(listed.updateTime, "2026-10-02T09:15:00.999999Z");
 	assert.equal(listed.entryCount, 1);
 	assert.equal(listed.access, 1);
-	const record = conversationRecord(listed, "2026-10-02T09:15:00Z");
-	assert.equal(record.create_time, "2026-10-02T09:15:00Z");
-	assert.equal(record.update_time, "2026-10-02T09:15:00Z");
+	const record = conversationRecord(listed, "2026-10-02T09:15:00.000000Z");
+	assert.equal(record.create_time, "2026-10-02T09:15:00.000000Z");
+	assert.equal(record.update_time, "2026-10-02T09:15:00.999999Z");
 	assert.ok(
 		!("read_write_token" in record),
 		"the capability token must never be emitted",
@@ -86,7 +87,7 @@ test("a thread item becomes a listed thread, and never carries the token", () =>
 	// The second item's zoneless microsecond clock reads as UTC: the
 	// entries of the same threads carry `+00:00`, so the server clock is UTC.
 	const second = parseListedThread(page.page.items[1]);
-	assert.equal(second?.updateTime, "2026-10-01T16:30:00Z");
+	assert.equal(second?.updateTime, "2026-10-01T16:30:00.000000Z");
 });
 
 test("a thread item without an id is unreadable, and one without a slug still lists", () => {
@@ -106,40 +107,43 @@ test("a thread item without an id is unreadable, and one without a slug still li
 	assert.equal(spaced?.slug, null);
 });
 
-test("timestamps normalise to UTC, including the list's zoneless clock", () => {
+test("timestamps normalise to UTC with microseconds, including the list's zoneless clock", () => {
 	assert.equal(
 		normalizeInstant("2026-10-02T09:15:00Z"),
-		"2026-10-02T09:15:00Z",
+		"2026-10-02T09:15:00.000000Z",
 	);
 	assert.equal(
 		normalizeInstant("2026-10-02T09:15:00.500Z"),
-		"2026-10-02T09:15:00Z",
+		"2026-10-02T09:15:00.500000Z",
 	);
 	assert.equal(
 		normalizeInstant("2026-10-02T11:15:00+02:00"),
-		"2026-10-02T09:15:00Z",
+		"2026-10-02T09:15:00.000000Z",
 	);
 	assert.equal(
 		normalizeInstant("2026-10-02T04:15:00-0500"),
-		"2026-10-02T09:15:00Z",
+		"2026-10-02T09:15:00.000000Z",
 	);
 	// The list's real format: microseconds and NO zone. The entries of the
 	// same threads carry `+00:00`, so the server clock is UTC and the
-	// zoneless value is read as UTC — refusing it would null every
-	// conversation's update_time and empty the cursor.
+	// zoneless value is read as UTC.
 	assert.equal(
 		normalizeInstant("2026-10-02T09:15:00.999999"),
-		"2026-10-02T09:15:00Z",
+		"2026-10-02T09:15:00.999999Z",
 	);
 	// Entry timestamps: microseconds plus an offset.
 	assert.equal(
 		normalizeInstant("2026-10-02T09:15:00.123456+00:00"),
-		"2026-10-02T09:15:00Z",
+		"2026-10-02T09:15:00.123456Z",
 	);
 	assert.equal(
 		normalizeInstant("2026-10-02T09:15:04.999999+05:30"),
-		"2026-10-02T03:45:04Z",
+		"2026-10-02T03:45:04.999999Z",
 	);
+	// Two updates inside one second stay distinct and sort by time.
+	const early = normalizeInstant("2026-10-02T09:15:00.100000");
+	const late = normalizeInstant("2026-10-02T09:15:00.900000");
+	assert.ok(early !== null && late !== null && early < late);
 	// Everything that is not an ISO date-time is still refused.
 	assert.equal(normalizeInstant("Mon, 10/2/2026"), null);
 	assert.equal(normalizeInstant("2026-10-02 09:15:00"), null);
@@ -191,28 +195,28 @@ test("one entry splits into a question and an answer message", () => {
 		detail.page.entries[0],
 		"cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
 	);
-	assert.notEqual(parsed, null);
-	if (!parsed) return;
-	assert.equal(parsed.firstCreateTime, "2026-10-02T09:15:00Z");
-	assert.equal(parsed.user?.id, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1:user");
-	assert.equal(parsed.user?.role, "user");
-	assert.equal(parsed.user?.content, "What is a synthetic fixture?");
-	assert.equal(parsed.user?.create_time, "2026-10-02T09:15:00Z");
-	assert.equal(parsed.user?.model, null);
-	assert.deepEqual(parsed.user?.citations, []);
+	assert.equal(parsed.kind, "ok");
+	if (parsed.kind !== "ok") return;
+	assert.equal(parsed.firstCreateTime, "2026-10-02T09:15:00.123456Z");
+	assert.equal(parsed.user.id, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1:user");
+	assert.equal(parsed.user.role, "user");
+	assert.equal(parsed.user.content, "What is a synthetic fixture?");
+	assert.equal(parsed.user.create_time, "2026-10-02T09:15:00.123456Z");
+	assert.equal(parsed.user.model, null);
+	assert.deepEqual(parsed.user.citations, []);
 	assert.equal(
-		parsed.assistant?.id,
+		parsed.assistant.id,
 		"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1:assistant",
 	);
-	assert.equal(parsed.assistant?.role, "assistant");
+	assert.equal(parsed.assistant.role, "assistant");
 	assert.equal(
-		parsed.assistant?.content,
+		parsed.assistant.content,
 		"A **synthetic fixture** is invented data shaped like the real thing.",
 	);
 	// The answer carries the entry's update time: when the answer finished.
-	assert.equal(parsed.assistant?.create_time, "2026-10-02T09:15:04Z");
-	assert.equal(parsed.assistant?.model, "sonar-pro");
-	assert.deepEqual(parsed.assistant?.citations, [
+	assert.equal(parsed.assistant.create_time, "2026-10-02T09:15:04.654321Z");
+	assert.equal(parsed.assistant.model, "sonar-pro");
+	assert.deepEqual(parsed.assistant.citations, [
 		{ title: "Synthetic source one", url: "https://example.com/synthetic-1" },
 		{ title: "Synthetic source two", url: "https://example.org/synthetic-2" },
 	]);
@@ -223,7 +227,44 @@ test("one entry splits into a question and an answer message", () => {
 });
 
 test("an entry without a usable uuid cannot be keyed", () => {
-	assert.equal(entryMessages(null, "c1"), null);
-	assert.equal(entryMessages({ query_str: "x" }, "c1"), null);
-	assert.equal(entryMessages({ uuid: "" }, "c1"), null);
+	assert.equal(entryMessages(null, "c1").kind, "unreadable");
+	assert.equal(entryMessages({ query_str: "x" }, "c1").kind, "unreadable");
+	assert.equal(entryMessages({ uuid: "" }, "c1").kind, "unreadable");
+});
+
+test("an answer still being written is incomplete, not a record", () => {
+	const read = entryMessages(
+		{ uuid: "e1", status: "IN_PROGRESS", query_str: "q?", blocks: [] },
+		"c1",
+	);
+	assert.deepEqual(read, { kind: "incomplete", id: "e1" });
+});
+
+test("an unsafe answer is unreadable, never stored as null or as a partial join", () => {
+	const unsafe = entryMessages(
+		{
+			uuid: "e1",
+			status: "COMPLETED",
+			query_str: "q?",
+			blocks: [
+				{
+					intended_usage: "ask_text",
+					markdown_block: { answer: "bad\u0000text" },
+				},
+				{
+					intended_usage: "ask_text_0_markdown",
+					markdown_block: { answer: "a safe piece" },
+				},
+			],
+		},
+		"c1",
+	);
+	assert.equal(unsafe.kind, "unreadable");
+	const missing = entryMessages(
+		{ uuid: "e2", status: "COMPLETED", query_str: "q?", blocks: [] },
+		"c1",
+	);
+	assert.equal(missing.kind, "unreadable");
+	assert.equal(readContent("bad\u0000text").ok, false);
+	assert.deepEqual(readContent(""), { ok: true, text: null });
 });

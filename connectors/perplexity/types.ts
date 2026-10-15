@@ -11,7 +11,7 @@
 /** One web citation behind an assistant answer. */
 export interface Citation {
 	readonly title: string | null;
-	readonly url: string | null;
+	readonly url: string;
 }
 
 /** A `conversations` record: one thread from the owner's library list. */
@@ -53,12 +53,4 @@ export interface ThreadListPage {
 export interface ThreadDetailPage {
 	readonly entries: readonly unknown[];
 	readonly hasNextPage: boolean;
-}
-
-/** The two records one entry splits into, with its first creation time. */
-export interface EntryMessages {
-	readonly user: MessageRecord | null;
-	readonly assistant: MessageRecord | null;
-	/** The entry's creation time, the best proxy for the thread's create time. */
-	readonly firstCreateTime: string | null;
 }

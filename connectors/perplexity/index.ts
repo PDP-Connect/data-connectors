@@ -58,6 +58,7 @@ import {
 	parseThreadListPage,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
+import type { MessageRecord } from "./types.ts";
 
 const ORIGIN = "https://www.perplexity.ai";
 const HOME = `${ORIGIN}/`;
@@ -72,6 +73,8 @@ const THREAD_DELAY_MS = 250;
 /** Hard stops: a walk that never ends is a source bug, not a big library. */
 const MAX_LIST_PAGES = 500;
 const MAX_THREAD_PAGES = 200;
+/** Extra list walks allowed to see the library hold still. */
+const MAX_LIST_WALKS = 3;
 
 /** Headers the web app sends on these calls (observed, not invented). */
 interface PageRequest {
@@ -85,10 +88,16 @@ interface ConversationsCursor {
 	last_update_time: string | null;
 }
 
-/** One thread's remembered detail state, so unchanged threads can be skipped. */
+/**
+ * One thread's remembered detail state. A thread is remembered only after
+ * every entry was complete and read; it is skipped next run only while its
+ * update time (to the microsecond) and entry count are unchanged.
+ */
 interface ThreadSync {
 	update_time: string | null;
 	create_time: string | null;
+	entry_count: number | null;
+	complete: true;
 }
 
 /** The `messages` STATE cursor: one entry per listed thread. */
@@ -184,9 +193,14 @@ export async function ensurePerplexitySession(
 // ─── same-origin fetch through the page ──────────────────────────────────
 
 /**
- * One same-origin request from the signed-in page. Fails loudly on the two
- * boundaries that matter: a dead session (401/403 or the wrong origin) and
- * an upstream error, which the runtime classifies by message.
+ * One same-origin request from the signed-in page. The error message names
+ * the class so the run fails the right way, and never carries a body:
+ *   - `perplexity_auth_failed`: 401, or the page left perplexity.ai;
+ *   - `perplexity_challenge`: 403, or a non-JSON answer (Cloudflare's check
+ *     page). The session can still be valid while the browser is challenged;
+ *   - `perplexity_internal_api_<status>`: 429 and 5xx, which the runtime
+ *     retries;
+ *   - `perplexity_http_<status>`: any other refusal (404 for a gone thread).
  */
 async function pageJson(
 	page: BrowserCollectContext["page"],
@@ -214,17 +228,33 @@ async function pageJson(
 				...(arg.body === undefined ? {} : { body: arg.body }),
 				signal: controller.signal,
 			});
-			if (response.status === 401 || response.status === 403) {
-				throw new Error("perplexity_auth_failed");
+			const status = response.status;
+			if (status === 401) {
+				throw new Error("perplexity_auth_failed: HTTP 401");
+			}
+			if (status === 403) {
+				throw new Error("perplexity_challenge: HTTP 403");
+			}
+			if (status === 429 || status >= 500) {
+				throw new Error(`perplexity_internal_api_${String(status)}`);
 			}
 			if (!response.ok) {
-				throw new Error(`perplexity_internal_api_${response.status}`);
+				throw new Error(`perplexity_http_${String(status)}`);
+			}
+			const type = response.headers.get("content-type") ?? "";
+			if (!type.includes("json")) {
+				throw new Error("perplexity_challenge: the answer was not JSON");
 			}
 			return await response.text();
 		} finally {
 			clearTimeout(timeout);
 		}
 	}, request);
+}
+
+/** Errors that stop the whole run rather than one thread. */
+function stopsTheRun(message: string): boolean {
+	return /perplexity_(?:auth_failed|challenge|internal_api_)/.test(message);
 }
 
 async function fetchListPage(
@@ -263,12 +293,28 @@ async function fetchThreadPage(
 	});
 }
 
-/** Every entry of one thread, all pages, oldest first. */
+function entryUuid(entry: unknown): string | null {
+	if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+		return null;
+	}
+	const uuid = (entry as Record<string, unknown>).uuid;
+	return typeof uuid === "string" && uuid.length > 0 ? uuid : null;
+}
+
+/**
+ * Every entry of one thread, all pages, oldest first. Only `has_next_page`
+ * ends the walk: a short page that still says there is more is followed. A
+ * page that claims more but adds no new entry is a failure, not an end, and
+ * a thread that yields fewer entries than the list said it has is
+ * incomplete. Entries are de-duplicated by uuid.
+ */
 async function fetchThreadEntries(
 	page: BrowserCollectContext["page"],
 	slug: string,
+	expected: number | null,
 ): Promise<unknown[]> {
 	const entries: unknown[] = [];
+	const seen = new Set<string>();
 	let offset = 0;
 	for (let pageIndex = 0; ; pageIndex += 1) {
 		if (pageIndex >= MAX_THREAD_PAGES) {
@@ -276,31 +322,45 @@ async function fetchThreadEntries(
 				"perplexity_thread_unreadable: entries kept claiming another page",
 			);
 		}
-		const body = await fetchThreadPage(page, slug, offset);
-		const parsed = parseThreadDetailPage(body);
+		const parsed = parseThreadDetailPage(
+			await fetchThreadPage(page, slug, offset),
+		);
 		if (!parsed.ok) {
 			throw new Error(`perplexity_thread_unreadable: ${parsed.message}`);
 		}
-		entries.push(...parsed.page.entries);
-		if (
-			parsed.page.entries.length < ENTRY_PAGE_SIZE ||
-			!parsed.page.hasNextPage
-		) {
-			return entries;
+		let added = 0;
+		for (const entry of parsed.page.entries) {
+			const uuid = entryUuid(entry);
+			if (uuid !== null && seen.has(uuid)) {
+				continue;
+			}
+			if (uuid !== null) {
+				seen.add(uuid);
+			}
+			entries.push(entry);
+			added += 1;
 		}
-		const next = offset + parsed.page.entries.length;
-		if (next <= offset) {
+		if (!parsed.page.hasNextPage) {
+			break;
+		}
+		if (added === 0) {
 			throw new Error(
-				"perplexity_thread_unreadable: an entries page made no progress",
+				"perplexity_thread_unreadable: an entries page claimed more but added none",
 			);
 		}
-		offset = next;
+		offset += parsed.page.entries.length;
 	}
+	if (expected !== null && entries.length < expected) {
+		throw new Error(
+			`perplexity_thread_incomplete: the list reports ${String(expected)} entries, the thread returned ${String(entries.length)}`,
+		);
+	}
+	return entries;
 }
 
 // ─── collection ──────────────────────────────────────────────────────────
 
-/** The earlier of two normalized instants (`YYYY-MM-DDTHH:MM:SSZ` sorts by time). */
+/** The earlier of two normalized instants (fixed-width ISO sorts by time). */
 function earlier(
 	current: string | null,
 	candidate: string | null,
@@ -332,6 +392,259 @@ function bounded(message: string): string {
 	return message.slice(0, 240);
 }
 
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+interface ListWalk {
+	readonly threads: ListedThread[];
+	readonly unreadable: number;
+}
+
+/**
+ * One pass over the library list. The walk ends only on an empty page or on
+ * a last item that says `has_next_page: false`; a short page that says there
+ * is more is followed. A thread seen twice (the list moved under the walk)
+ * is kept once.
+ */
+async function walkList(ctx: BrowserCollectContext): Promise<ListWalk> {
+	const threads: ListedThread[] = [];
+	const seen = new Set<string>();
+	let unreadable = 0;
+	let offset = 0;
+	for (let pageIndex = 0; ; pageIndex += 1) {
+		if (pageIndex >= MAX_LIST_PAGES) {
+			throw new Error(
+				"perplexity_source_unreadable: the thread list kept claiming another page",
+			);
+		}
+		await ctx.progress(
+			`Reading your Perplexity library (threads ${String(offset + 1)} onward)`,
+			{ stream: "conversations" },
+		);
+		const parsed = parseThreadListPage(await fetchListPage(ctx.page, offset));
+		if (!parsed.ok) {
+			throw new Error(`perplexity_source_unreadable: ${parsed.message}`);
+		}
+		for (const item of parsed.page.items) {
+			const thread = parseListedThread(item);
+			if (thread === null) {
+				unreadable += 1;
+			} else if (!seen.has(thread.id)) {
+				seen.add(thread.id);
+				threads.push(thread);
+			}
+		}
+		if (parsed.page.items.length === 0 || !parsed.page.hasNextPage) {
+			return { threads, unreadable };
+		}
+		offset += parsed.page.items.length;
+	}
+}
+
+/** Thread ids and their update times, order-insensitive, for comparing walks. */
+function walkSignature(walk: ListWalk): string {
+	return walk.threads
+		.map((thread) => `${thread.id}@${thread.updateTime ?? ""}`)
+		.sort()
+		.join("|");
+}
+
+/**
+ * The library list, proven stable. The list is ordered by recent activity
+ * and paged by offset, so a thread answered while the walk runs moves to the
+ * top and can shift another past the walk unseen. One page is atomic; a
+ * longer list is walked until two consecutive walks agree on every thread
+ * and its update time, or the run fails without a checkpoint.
+ */
+async function stableList(ctx: BrowserCollectContext): Promise<ListWalk> {
+	let walk = await walkList(ctx);
+	if (walk.threads.length + walk.unreadable <= PAGE_SIZE) {
+		return walk;
+	}
+	for (let attempt = 0; attempt < MAX_LIST_WALKS; attempt += 1) {
+		const again = await walkList(ctx);
+		if (walkSignature(again) === walkSignature(walk)) {
+			return again;
+		}
+		walk = again;
+	}
+	throw new Error(
+		"perplexity_list_unstable: the library kept changing while it was read",
+	);
+}
+
+/** A remembered thread, read defensively from a prior STATE. */
+function readThreadSync(value: unknown): ThreadSync | null {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return null;
+	}
+	const record = value as Record<string, unknown>;
+	const text = (field: unknown): string | null =>
+		typeof field === "string" ? field : null;
+	if (record.complete !== true || typeof record.update_time !== "string") {
+		return null;
+	}
+	return {
+		update_time: record.update_time,
+		create_time: text(record.create_time),
+		entry_count:
+			typeof record.entry_count === "number" ? record.entry_count : null,
+		complete: true,
+	};
+}
+
+function previousSyncedThreads(
+	ctx: BrowserCollectContext,
+): Map<string, ThreadSync> {
+	const synced = new Map<string, ThreadSync>();
+	if (ctx.collectionMode === "full_refresh") {
+		return synced;
+	}
+	const cursor = ctx.state.messages;
+	const raw =
+		typeof cursor === "object" && cursor !== null && !Array.isArray(cursor)
+			? (cursor as Record<string, unknown>).synced
+			: undefined;
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return synced;
+	}
+	for (const [id, value] of Object.entries(raw)) {
+		const sync = readThreadSync(value);
+		if (sync !== null) {
+			synced.set(id, sync);
+		}
+	}
+	return synced;
+}
+
+/** One thread's detail, read before anything about it is emitted. */
+type ThreadRead =
+	| {
+			readonly kind: "read";
+			readonly messages: MessageRecord[];
+			readonly createTime: string | null;
+			/** Every entry was complete and readable, so the thread can be remembered. */
+			readonly complete: boolean;
+			readonly incomplete: number;
+			readonly unreadable: number;
+	  }
+	| { readonly kind: "failed"; readonly message: string };
+
+async function readThread(
+	page: BrowserCollectContext["page"],
+	slug: string,
+	conversationId: string,
+	expected: number | null,
+): Promise<ThreadRead> {
+	let entries: unknown[];
+	try {
+		entries = await fetchThreadEntries(page, slug, expected);
+	} catch (error) {
+		const message = errorMessage(error);
+		if (stopsTheRun(message)) {
+			throw error;
+		}
+		return { kind: "failed", message };
+	}
+	const messages: MessageRecord[] = [];
+	let createTime: string | null = null;
+	let incomplete = 0;
+	let unreadable = 0;
+	for (const entry of entries) {
+		const read = entryMessages(entry, conversationId);
+		if (read.kind === "incomplete") {
+			incomplete += 1;
+			continue;
+		}
+		if (read.kind === "unreadable") {
+			unreadable += 1;
+			connectorDiagnostic("perplexity", "entry_unreadable", {
+				thread: conversationId,
+				entry: read.id,
+				reason: read.reason,
+			});
+			continue;
+		}
+		messages.push(read.user, read.assistant);
+		createTime = earlier(createTime, read.firstCreateTime);
+	}
+	return {
+		kind: "read",
+		messages,
+		createTime,
+		complete: incomplete === 0 && unreadable === 0,
+		incomplete,
+		unreadable,
+	};
+}
+
+function threadLocatorSlug(locator: unknown): string | null {
+	if (
+		typeof locator !== "object" ||
+		locator === null ||
+		Array.isArray(locator)
+	) {
+		return null;
+	}
+	const record = locator as Record<string, unknown>;
+	return record.kind === "perplexity.thread" &&
+		typeof record.slug === "string" &&
+		record.slug.length > 0
+		? record.slug
+		: null;
+}
+
+interface RecoveryResult {
+	/** Threads whose pending gap was recovered this run, by id. */
+	readonly recovered: Map<string, { createTime: string | null }>;
+	/** Pending gaps still owed, by thread id. */
+	readonly pending: Map<string, string>;
+}
+
+/**
+ * The recovery pass: every pending `messages` gap this connector wrote is
+ * re-read from its locator before the forward walk. A thread that now reads
+ * completely gets its messages and a DETAIL_GAP_RECOVERED; one that still
+ * fails stays pending.
+ */
+async function recoverDetailGaps(
+	ctx: BrowserCollectContext,
+	threadDelayMs: number,
+): Promise<RecoveryResult> {
+	const recovered = new Map<string, { createTime: string | null }>();
+	const pending = new Map<string, string>();
+	for (const gap of ctx.detailGaps) {
+		if (gap.stream !== "messages" || typeof gap.record_key !== "string") {
+			continue;
+		}
+		const conversationId = gap.record_key;
+		pending.set(conversationId, gap.gap_id);
+		const slug = threadLocatorSlug(gap.detail_locator);
+		if (slug === null) {
+			continue;
+		}
+		const read = await readThread(ctx.page, slug, conversationId, null);
+		await politeDelay(threadDelayMs);
+		if (read.kind !== "read" || !read.complete) {
+			continue;
+		}
+		for (const message of read.messages) {
+			await ctx.emitRecord("messages", { ...message });
+		}
+		await ctx.emit({
+			type: "DETAIL_GAP_RECOVERED",
+			reference_only: true,
+			gap_id: gap.gap_id,
+			stream: "messages",
+			record_key: conversationId,
+		});
+		pending.delete(conversationId);
+		recovered.set(conversationId, { createTime: read.createTime });
+	}
+	return { recovered, pending };
+}
+
 export async function collectPerplexity(
 	ctx: BrowserCollectContext,
 	options: { threadDelayMs?: number } = {},
@@ -346,73 +659,52 @@ export async function collectPerplexity(
 		return;
 	}
 
-	// 1. The library list, paged by offset until it proves it ended.
-	const listed: ListedThread[] = [];
-	let unreadableThreads = 0;
-	let offset = 0;
-	for (let pageIndex = 0; ; pageIndex += 1) {
-		if (pageIndex >= MAX_LIST_PAGES) {
-			throw new Error(
-				"perplexity_source_unreadable: the thread list kept claiming another page",
-			);
-		}
-		await ctx.progress(
-			`Reading your Perplexity library (threads ${offset + 1} onward)`,
-			{ stream: "conversations" },
-		);
-		const parsed = parseThreadListPage(await fetchListPage(ctx.page, offset));
-		if (!parsed.ok) {
-			throw new Error(`perplexity_source_unreadable: ${parsed.message}`);
-		}
-		for (const item of parsed.page.items) {
-			const thread = parseListedThread(item);
-			if (thread === null) {
-				unreadableThreads += 1;
-				continue;
-			}
-			listed.push(thread);
-		}
-		if (parsed.page.items.length < PAGE_SIZE || !parsed.page.hasNextPage) {
-			break;
-		}
-		offset += parsed.page.items.length;
+	// 0. Recover gaps a previous run left, then stop if that is all this run
+	// is for.
+	const recovery = wantsMessages
+		? await recoverDetailGaps(ctx, threadDelayMs)
+		: {
+				recovered: new Map<string, { createTime: string | null }>(),
+				pending: new Map<string, string>(),
+			};
+	if (ctx.recoveryOnly === true) {
+		return;
 	}
 
-	// 2. Nothing is cross-checked against `total_threads`: live list items
-	// carry a number unrelated to the library size (a 4-thread account
-	// reported 99 on every item). The walk's own end proof above — an empty
-	// page, a short page, or the last item's `has_next_page: false` — is the
-	// only completeness evidence; unreadable items are reported below
-	// instead of failing the run.
+	// 1. The library list, proven complete and stable. `total_threads` is not
+	// used: live list items carry a number unrelated to the library size.
+	const { threads: listed, unreadable: unreadableThreads } =
+		await stableList(ctx);
 	if (unreadableThreads > 0) {
 		await ctx.reportStreamFailure?.(
 			"conversations",
-			`${unreadableThreads} Perplexity thread(s) could not be read from the library list and were skipped. Everything else was collected normally.`,
+			`${String(unreadableThreads)} Perplexity thread(s) could not be read from the library list and were skipped. Everything else was collected normally.`,
 			{ retryable: false },
 		);
 	}
 
-	// 3. Per thread: the detail read that fills create_time and the messages.
-	const fullRefresh = ctx.collectionMode === "full_refresh";
-	const previousState = ctx.state.messages as MessagesCursor | undefined;
-	const previousSynced = fullRefresh ? {} : (previousState?.synced ?? {});
+	// 2. Per thread: read its detail first, then emit the conversation, then
+	// its messages (or a gap), so a child never arrives before its parent.
+	const previousSynced = previousSyncedThreads(ctx);
 	const synced: Record<string, ThreadSync> = {};
 	const hydrated: string[] = [];
 	const skippedUnchanged: string[] = [];
 	const gapKeys: string[] = [];
+	let incompleteEntries = 0;
 	let unreadableEntries = 0;
 	let messagesRead = 0;
 
 	for (const thread of listed) {
-		// An unchanged thread whose entries are already complete is skipped;
-		// its remembered create_time keeps the conversation record whole.
-		const known = previousSynced[thread.id];
-		if (
+		const known = previousSynced.get(thread.id);
+		const unchanged =
 			wantsMessages &&
 			known !== undefined &&
+			thread.complete &&
 			thread.updateTime !== null &&
-			(known.update_time ?? "") >= thread.updateTime
-		) {
+			known.update_time === thread.updateTime &&
+			known.entry_count === thread.entryCount &&
+			!recovery.pending.has(thread.id);
+		if (unchanged) {
 			synced[thread.id] = known;
 			skippedUnchanged.push(thread.id);
 			if (wantsConversations) {
@@ -423,82 +715,116 @@ export async function collectPerplexity(
 			continue;
 		}
 
-		let createTime: string | null = null;
-		if (wantsMessages && thread.slug !== null) {
-			try {
-				const entries = await fetchThreadEntries(ctx.page, thread.slug);
-				for (const entryValue of entries) {
-					const parsed = entryMessages(entryValue, thread.id);
-					if (parsed === null) {
-						unreadableEntries += 1;
-						continue;
-					}
-					await ctx.emitRecord("messages", { ...parsed.user });
-					await ctx.emitRecord("messages", { ...parsed.assistant });
-					messagesRead += 2;
-					createTime = earlier(createTime, parsed.firstCreateTime);
-				}
-				hydrated.push(thread.id);
+		const recoveredNow = recovery.recovered.get(thread.id);
+		let read: ThreadRead | null = null;
+		if (wantsMessages && recoveredNow === undefined && thread.slug !== null) {
+			read = await readThread(
+				ctx.page,
+				thread.slug,
+				thread.id,
+				thread.entryCount,
+			);
+			await politeDelay(threadDelayMs);
+		}
+		const createTime =
+			recoveredNow?.createTime ??
+			(read?.kind === "read" ? read.createTime : null) ??
+			known?.create_time ??
+			null;
+		if (wantsConversations) {
+			await ctx.emitRecord("conversations", {
+				...conversationRecord(thread, createTime),
+			});
+		}
+		if (!wantsMessages) {
+			continue;
+		}
+		if (recoveredNow !== undefined) {
+			// Messages were emitted by the recovery pass this run.
+			hydrated.push(thread.id);
+			if (thread.complete && thread.updateTime !== null) {
 				synced[thread.id] = {
 					update_time: thread.updateTime,
-					create_time: createTime,
+					create_time: recoveredNow.createTime,
+					entry_count: thread.entryCount,
+					complete: true,
 				};
-				await politeDelay(threadDelayMs);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				if (message.includes("perplexity_auth_failed")) {
-					throw error;
-				}
-				gapKeys.push(thread.id);
-				if (wantsMessages) {
-					await emitDetailGap(ctx, {
-						stream: "messages",
-						parentStream: "conversations",
-						recordKey: thread.id,
-						reason: "temporary_unavailable",
-						locator: { kind: "perplexity.thread", slug: thread.slug },
-						error: { class: "thread_detail_failed", message: bounded(message) },
-					});
-				}
-				connectorDiagnostic("perplexity", "thread_detail_failed", {
-					thread: thread.id,
-					detail: bounded(message),
+			}
+			continue;
+		}
+		if (read?.kind === "read") {
+			for (const message of read.messages) {
+				await ctx.emitRecord("messages", { ...message });
+			}
+			messagesRead += read.messages.length;
+			incompleteEntries += read.incomplete;
+			unreadableEntries += read.unreadable;
+		}
+		if (read?.kind === "read" && read.complete) {
+			hydrated.push(thread.id);
+			if (thread.complete && thread.updateTime !== null) {
+				synced[thread.id] = {
+					update_time: thread.updateTime,
+					create_time: read.createTime,
+					entry_count: thread.entryCount,
+					complete: true,
+				};
+			}
+			const pendingGap = recovery.pending.get(thread.id);
+			if (pendingGap !== undefined) {
+				await ctx.emit({
+					type: "DETAIL_GAP_RECOVERED",
+					reference_only: true,
+					gap_id: pendingGap,
+					stream: "messages",
+					record_key: thread.id,
 				});
 			}
-		} else if (wantsMessages) {
-			gapKeys.push(thread.id);
+			continue;
+		}
+		gapKeys.push(thread.id);
+		const why =
+			read === null
+				? { class: "thread_has_no_slug" }
+				: read.kind === "failed"
+					? { class: "thread_detail_failed", message: bounded(read.message) }
+					: read.incomplete > 0
+						? { class: "answer_still_generating" }
+						: { class: "entry_unreadable" };
+		if (!recovery.pending.has(thread.id)) {
 			await emitDetailGap(ctx, {
 				stream: "messages",
 				parentStream: "conversations",
 				recordKey: thread.id,
 				reason: "temporary_unavailable",
-				locator: { kind: "perplexity.thread", slug: null },
-				error: { class: "thread_has_no_slug" },
+				locator: { kind: "perplexity.thread", slug: thread.slug },
+				error: why,
 			});
 		}
-
-		if (wantsConversations) {
-			await ctx.emitRecord("conversations", {
-				...conversationRecord(thread, createTime ?? known?.create_time ?? null),
-			});
-		}
+		connectorDiagnostic("perplexity", why.class, { thread: thread.id });
 	}
 
 	if (unreadableEntries > 0) {
 		await ctx.reportStreamFailure?.(
 			"messages",
-			`${unreadableEntries} Perplexity answer group(s) could not be read and were skipped. Everything else was collected normally.`,
+			`${String(unreadableEntries)} Perplexity answer(s) could not be read safely and were not stored. Everything else was collected normally.`,
 			{ retryable: false },
 		);
 	}
+	if (incompleteEntries > 0) {
+		await ctx.progress(
+			`${String(incompleteEntries)} Perplexity answer(s) were still being written and will be read next time`,
+			{ stream: "messages" },
+		);
+	}
 	if (messagesRead > 0) {
-		await ctx.progress(`Read ${messagesRead} Perplexity message(s)`, {
+		await ctx.progress(`Read ${String(messagesRead)} Perplexity message(s)`, {
 			stream: "messages",
 		});
 	}
 
-	// 4. Prove the boundaries, then checkpoint. The list walk ended above or
-	// the run is already failing, so reaching here means the walk completed.
+	// 3. Prove the boundaries, then checkpoint. Reaching here means the list
+	// walk ended on its own proof and stayed stable.
 	if (wantsConversations) {
 		await emitDetailCoverage(ctx, {
 			stream: "conversations",

@@ -22,7 +22,7 @@ const idSchema = z
 	.max(128)
 	.regex(/^\S+$/, "must not contain whitespace");
 
-/** A zoned ISO-8601 instant as the parsers emit it (`YYYY-MM-DDTHH:MM:SSZ`). */
+/** A UTC ISO-8601 instant as the parsers emit it (`YYYY-MM-DDTHH:MM:SS.ffffffZ`). */
 const instantSchema = z
 	.string()
 	.min(4)
@@ -58,7 +58,7 @@ const citationSchema = z.object({
 export const messageSchema = z.object({
 	id: idSchema,
 	conversation_id: idSchema,
-	role: z.enum(["user", "assistant"]).nullable(),
+	role: z.enum(["user", "assistant"]),
 	content: contentSchema.nullable(),
 	create_time: instantSchema.nullable(),
 	model: pdppSafeText.max(120).nullable(),
