@@ -196,8 +196,9 @@ export async function ensurePerplexitySession(
  * One same-origin request from the signed-in page. The error message names
  * the class so the run fails the right way, and never carries a body:
  *   - `perplexity_auth_failed`: 401, or the page left perplexity.ai;
- *   - `perplexity_challenge`: 403, or a non-JSON answer (Cloudflare's check
- *     page). The session can still be valid while the browser is challenged;
+ *   - `perplexity_challenge`: 403, a Cloudflare challenge page (HTML 403 or
+ *     503, or `cf-mitigated: challenge`), or any other non-JSON answer. The
+ *     session can still be valid while the browser is challenged;
  *   - `perplexity_internal_api_<status>`: 429 and 5xx, which the runtime
  *     retries;
  *   - `perplexity_http_<status>`: any other refusal (404 for a gone thread).
@@ -229,6 +230,17 @@ async function pageJson(
 				signal: controller.signal,
 			});
 			const status = response.status;
+			const type = response.headers.get("content-type") ?? "";
+			// Cloudflare answers a challenge with 403 or 503 and an HTML page
+			// (and marks it with cf-mitigated); that is not an outage to retry.
+			if (
+				response.headers.get("cf-mitigated") === "challenge" ||
+				(type.includes("text/html") && (status === 403 || status === 503))
+			) {
+				throw new Error(
+					`perplexity_challenge: HTTP ${String(status)} challenge page`,
+				);
+			}
 			if (status === 401) {
 				throw new Error("perplexity_auth_failed: HTTP 401");
 			}
@@ -241,7 +253,6 @@ async function pageJson(
 			if (!response.ok) {
 				throw new Error(`perplexity_http_${String(status)}`);
 			}
-			const type = response.headers.get("content-type") ?? "";
 			if (!type.includes("json")) {
 				throw new Error("perplexity_challenge: the answer was not JSON");
 			}
@@ -808,16 +819,18 @@ export async function collectPerplexity(
 					: read.incomplete > 0
 						? { class: "answer_still_generating" }
 						: { class: "entry_unreadable" };
-		if (!pending.has(thread.id)) {
-			await emitDetailGap(ctx, {
-				stream: "messages",
-				parentStream: "conversations",
-				recordKey: thread.id,
-				reason: "temporary_unavailable",
-				locator: { kind: "perplexity.thread", slug: thread.slug },
-				error: why,
-			});
-		}
+		// Every key in gap_keys gets a DETAIL_GAP in this run, including one
+		// whose gap is already pending from an earlier run: the commit gate
+		// credits a gap key only against a gap emitted alongside it, and the
+		// runtime folds a repeat into the existing pending gap.
+		await emitDetailGap(ctx, {
+			stream: "messages",
+			parentStream: "conversations",
+			recordKey: thread.id,
+			reason: "temporary_unavailable",
+			locator: { kind: "perplexity.thread", slug: thread.slug },
+			error: why,
+		});
 		connectorDiagnostic("perplexity", why.class, { thread: thread.id });
 	}
 
