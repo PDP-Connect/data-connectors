@@ -30,9 +30,7 @@ const instrumented = readJson(
 );
 const ownerBaseline = readJson(`${evidence}/vitest-owner-baseline.json`);
 const report = readJson("reports/mutation/groupme-vitest-mutation.json");
-const ownerReport = readJson(
-	"reports/mutation/groupme-owner-canary-command.json",
-);
+const ownerReport = readJson("reports/mutation/groupme-owner-canary.json");
 const mutants = Object.entries(report.files).flatMap(([file, result]) =>
 	result.mutants.map((mutant) => ({ file, ...mutant })),
 );
@@ -62,6 +60,11 @@ const tests = new Map(
 		result.tests.map((test) => [test.id, { file, name: test.name }]),
 	),
 );
+const ownerTests = new Map(
+	Object.entries(ownerReport.testFiles).flatMap(([file, result]) =>
+		result.tests.map((test) => [test.id, { file, name: test.name }]),
+	),
+);
 const normalizeStatus = (status) =>
 	({ 0: "passed", 1: "failed", 2: "pending", skipped: "pending" })[status] ??
 	status;
@@ -70,6 +73,12 @@ const testKey = (file, name) =>
 const testIdentityForRunnerId = (id) => {
 	const test = tests.get(id);
 	return test ? testKey(test.file, test.name) : `unresolved:${id}`;
+};
+const testIdentityForFilterId = (id) => {
+	const delimiter = id.indexOf("#");
+	return delimiter < 0
+		? `unresolved:${id}`
+		: testKey(id.slice(0, delimiter), id.slice(delimiter + 1));
 };
 const reportTests = (result) =>
 	new Map(
@@ -125,6 +134,11 @@ function event(suffix, subdirectory = "") {
 	assert.equal(matches.length, 1, `expected one ${suffix} event`);
 	return matches[0];
 }
+const readJsonLines = (file) =>
+	readFileSync(file, "utf8")
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
 
 // Write complete raw-status manifests before gates so a rejected run stays diagnosable.
 const manifest = mutants
@@ -212,6 +226,8 @@ assert.deepEqual(report.config.mutate, [
 assert.deepEqual(ownerReport.config.mutate, [
 	"connectors/groupme/index.ts:1491-1491",
 ]);
+assert.equal(ownerReport.config.testRunner, "vitest");
+assert.equal(ownerReport.config.coverageAnalysis, "perTest");
 assert.deepEqual(ownerReport.config.mutator.excludedMutations, [
 	"ConditionalExpression",
 	"LogicalOperator",
@@ -260,19 +276,40 @@ assert.equal(
 assert.deepEqual(
 	[...instrumentedTests].sort(),
 	[...oracleTests].sort(),
-	"native Vitest JSON under Stryker instrumentation must match all 221 oracle identities/statuses",
+	"supplemental command-runner Vitest JSON must match all 221 oracle identities/statuses",
 );
 const dryRun = event("onDryRunCompleted", "main");
 assert.equal(dryRun.result.status, "complete");
-assert.deepEqual(dryRun.result.tests, [
-	{ id: "all", name: "All tests", status: 0 },
-]);
-// Stryker's command-runner event reports one aggregate command result. The
-// native Vitest JSON written by that instrumented command carries leaf IDs
-// and statuses, so use it for parity and retain the event as phase evidence.
 writeJson(
 	`${evidence}/instrumented-baseline-identities.json`,
 	[...instrumentedTests].map(([id, status]) => ({ id, status })),
+);
+const nativeDryRunTests = new Map(
+	dryRun.result.tests.map((test) => [
+		testKey(test.fileName, test.id.slice(test.id.indexOf("#") + 1)),
+		normalizeStatus(test.status),
+	]),
+);
+const oraclePassedTests = new Map(
+	[...oracleTests].filter(([, status]) => status === "passed"),
+);
+assert.equal(nativeDryRunTests.size, 219);
+assert.equal(dryRun.result.tests.length, 219);
+assert.ok(
+	[...nativeDryRunTests.values()].every((status) => status === "passed"),
+	"native onDryRunCompleted must contain only passed executed leaves",
+);
+assert.deepEqual(
+	[...nativeDryRunTests].sort(),
+	[...oraclePassedTests].sort(),
+	"native onDryRunCompleted leaf identities/statuses must match all 219 passing oracle tests",
+);
+assert.equal(
+	[...nativeDryRunTests].find(([identity]) =>
+		identity.endsWith(`#${ownerName}`),
+	)?.[1],
+	"passed",
+	"native unactivated dry-run must pass the owner test",
 );
 const ownerBaselineTests = ownerBaseline.testResults
 	.flatMap((file) => file.assertionResults)
@@ -304,18 +341,25 @@ for (const mutant of mutants) {
 		(mutant.coveredBy ?? []).every((id) => tests.has(id)),
 		`unmapped selected test for mutant ${mutant.id}`,
 	);
-	if (["Killed", "Survived", "Timeout"].includes(mutant.status))
+	if (["Killed", "Survived"].includes(mutant.status))
 		assert.ok(
 			mutant.testsCompleted > 0,
 			`zero completed tests for mutant ${mutant.id}`,
 		);
 	if (["Killed", "Survived"].includes(mutant.status)) {
-		const expectedCount = mutant.coveredBy.filter((id) => {
+		const selected = mutant.coveredBy.map((id) => {
 			const test = tests.get(id);
-			return (
-				test && oracleTests.get(testKey(test.file, test.name)) !== "pending"
+			assert.ok(test, `unknown selected identity ${id}`);
+			const key = testKey(test.file, test.name);
+			assert.ok(
+				oracleTests.has(key),
+				`selected test is absent from oracle: ${key}`,
 			);
-		}).length;
+			return oracleTests.get(key);
+		});
+		const expectedCount = selected.filter(
+			(status) => status !== "pending",
+		).length;
 		assert.equal(
 			mutant.testsCompleted,
 			expectedCount,
@@ -348,6 +392,7 @@ const owner = [...tests.entries()].find(
 assert.ok(owner);
 assert.ok(canary[0].coveredBy.includes(owner[0]));
 assert.ok(canary[0].killedBy.includes(owner[0]));
+const ownerIdentity = testKey(owner[1].file, owner[1].name);
 const plan = event("onMutationTestingPlanReady", "main").mutantPlans.find(
 	(item) => item.mutant.id === canary[0].id,
 );
@@ -376,6 +421,15 @@ const ownerCanary = ownerMutants.filter(
 		) === "curr.created_at < prev.created_at" &&
 		mutant.replacement === canary[0].replacement,
 );
+const ownerCanaryOwner = [...ownerTests.entries()].find(
+	([, test]) =>
+		test.file.endsWith("/incremental-frontier.vitest.ts") &&
+		test.name === ownerName,
+);
+assert.ok(
+	ownerCanaryOwner,
+	"owner-scoped dry-run omitted the expected owner test",
+);
 const ownerSelectedMutants = ownerMutants.filter(
 	(mutant) => mutant.status !== "Ignored",
 );
@@ -398,6 +452,7 @@ assert.equal(
 	canonicalIdentity(ownerCanary[0]),
 	"native Stryker plan must activate this exact canonical mutant",
 );
+assert.equal(ownerCanaryPlan.runOptions.mutantActivation, "runtime");
 const ownerCanaryResult = events("onMutantTested", "owner-canary").find(
 	(result) => result.id === ownerCanary[0].id,
 );
@@ -405,16 +460,30 @@ assert.ok(
 	ownerCanaryResult,
 	"native Stryker event omitted the active owner canary result",
 );
+const nativeOwnerReceipts = readJsonLines(
+	`${evidence}/native-owner-results.jsonl`,
+);
+const nativeOwnerReceipt = nativeOwnerReceipts.find(
+	(receipt) => receipt.activeMutantId === ownerCanary[0].id,
+);
+assert.ok(
+	nativeOwnerReceipt,
+	"native Vitest did not record the selected owner's executed result",
+);
 assertOwnerCanaryProof({
 	expectedIdentity: canonicalIdentity(canary[0]),
 	actualIdentity: canonicalIdentity(ownerCanary[0]),
 	activeIdentity: canonicalIdentity(ownerCanaryPlan.runOptions.activeMutant),
 	mutation: ownerCanary[0],
 	plan: ownerCanaryPlan,
+	selectedTestIdentities: ownerCanaryPlan.runOptions.testFilter.map(
+		testIdentityForFilterId,
+	),
 	result: ownerCanaryResult,
-	ownerName,
+	receipt: nativeOwnerReceipt,
+	ownerIdentity,
+	ownerRunnerId: ownerCanaryOwner[0],
 	expectedMessage,
-	failureLocation: "incremental-frontier.vitest.ts:654",
 });
 
 writeJson(`${evidence}/mutation-summary.json`, {
@@ -442,7 +511,7 @@ writeJson(`${evidence}/mutation-summary.json`, {
 		killedBy: canary[0].killedBy.map(testIdentityForRunnerId).sort(),
 		activation: plan.runOptions.mutantActivation,
 	},
-	ownerOnlyInstrumentedCanary: {
+	nativeOwnerScopedCanary: {
 		populationKind: ownerReport.config.mutate,
 		canonicalIdentity: canonicalIdentity(ownerCanary[0]),
 		file: ownerCanary[0].file,
@@ -460,20 +529,24 @@ writeJson(`${evidence}/mutation-summary.json`, {
 		),
 		replacement: ownerCanary[0].replacement,
 		status: ownerCanary[0].status,
-		statusReason: ownerCanary[0].statusReason,
 		activation: ownerCanaryPlan.runOptions.mutantActivation,
 		activeMutantId: ownerCanaryPlan.runOptions.activeMutant.id,
-		activationMode:
-			"Stryker applies the active mutation in its sandbox; the anchored Vitest title pattern selects the owner test",
+		selectedOwner: ownerIdentity,
+		selectedTests: ownerCanaryPlan.runOptions.testFilter.map(
+			testIdentityForFilterId,
+		),
+		ownerResult: nativeOwnerReceipt,
 	},
 	selectedAndCompletionCounts:
 		"coveredBy lists selected identities; testsCompleted is only an aggregate count, not completed identity evidence.",
 	instrumentedBaseline: {
-		exact221IdentityStatusParity: true,
-		strykerDryRunCommandStatus: dryRun.result.status,
-		strykerDryRunCommandResults: dryRun.result.tests.length,
-		leafIdentitiesFrom:
-			"native Vitest JSON emitted by the instrumented command",
+		nativeDryRunPassedLeafCount: nativeDryRunTests.size,
+		nativeDryRunExactPassedIdentityStatusParity: true,
+		supplementalCommandRunnerIdentityStatusCount: instrumentedTests.size,
+		oracleSkippedLeaves: [...oracleTests].filter(
+			([, status]) => status === "pending",
+		).length,
+		strykerDryRunStatus: dryRun.result.status,
 	},
 	ranges: {
 		first: "ascending-order predicate, 1487-1495",

@@ -7,6 +7,7 @@ import { assertOwnerCanaryProof } from "./owner-canary-proof.mjs";
 
 const ownerName =
 	"repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError";
+const ownerIdentity = `connectors/groupme/incremental-frontier.test.ts#${ownerName}`;
 const expectedMessage =
 	"a non-ascending forward page must fail, not be silently trusted";
 const identity = "canonical-equality-mutant";
@@ -17,77 +18,104 @@ const valid = {
 	mutation: {
 		id: "mutant-1",
 		status: "Killed",
-		testsCompleted: 1,
-		statusReason: `${ownerName}\n${expectedMessage}\nfalse !== true\n❯ connectors/groupme/incremental-frontier.vitest.ts:654:11`,
+		testsCompleted: 6,
+		killedBy: ["owner-id"],
 	},
 	plan: {
 		plan: "Run",
-		mutant: { id: "mutant-1" },
 		runOptions: {
 			activeMutant: { id: "mutant-1" },
-			mutantActivation: "static",
+			mutantActivation: "runtime",
+			testFilter: ["owner-id"],
 		},
 	},
-	result: {
-		id: "mutant-1",
-		status: "Killed",
-		testsCompleted: 1,
-		statusReason: `${ownerName}\n${expectedMessage}\nfalse !== true\n❯ connectors/groupme/incremental-frontier.vitest.ts:654:11`,
+	selectedTestIdentities: [ownerIdentity],
+	result: { id: "mutant-1", status: "Killed", testsCompleted: 6 },
+	receipt: {
+		activeMutantId: "mutant-1",
+		file: "connectors/groupme/incremental-frontier.vitest.ts",
+		name: ownerName,
+		state: "fail",
+		errors: [
+			{
+				message: `${expectedMessage}\n\nfalse !== true`,
+				actual: "false",
+				expected: "true",
+				stack: "at incremental-frontier.vitest.ts:654:11",
+			},
+		],
 	},
-	ownerName,
+	ownerIdentity,
+	ownerRunnerId: "owner-id",
 	expectedMessage,
-	failureLocation: "incremental-frontier.vitest.ts:654",
 };
 
-test("accepts the exact active mutation killed by the owner's failed assertion", () => {
+test("accepts the native active-mutant owner failure receipt", () => {
 	assertOwnerCanaryProof(valid);
 });
 
-test("rejects the owner title followed by an unrelated failure", () => {
+test("rejects a title-only receipt followed by an unrelated assertion", () => {
 	assert.throws(() =>
 		assertOwnerCanaryProof({
 			...valid,
-			result: { ...valid.result, statusReason: `${ownerName}\nother failure` },
-		}),
-	);
-});
-
-test("rejects a failure from another test", () => {
-	assert.throws(() =>
-		assertOwnerCanaryProof({
-			...valid,
-			mutation: {
-				...valid.mutation,
-				statusReason: "unrelated setup test failed",
+			receipt: {
+				...valid.receipt,
+				errors: [{ message: "different assertion failed" }],
 			},
 		}),
 	);
 });
 
-test("rejects setup errors", () => {
+test("rejects an owner that passed under the active mutation", () => {
 	assert.throws(() =>
 		assertOwnerCanaryProof({
 			...valid,
-			result: {
-				...valid.result,
-				status: "Error",
-				statusReason: "setup failed",
-			},
+			receipt: { ...valid.receipt, state: "pass" },
 		}),
 	);
 });
 
-test("rejects a zero-test result", () => {
+test("rejects a failure from setup or a different test", () => {
+	for (const receipt of [
+		{ ...valid.receipt, file: "setup.ts" },
+		{ ...valid.receipt, name: "unrelated test" },
+	]) {
+		assert.throws(() => assertOwnerCanaryProof({ ...valid, receipt }));
+	}
+});
+
+test("rejects an unselected owner test", () => {
 	assert.throws(() =>
 		assertOwnerCanaryProof({
 			...valid,
-			mutation: { ...valid.mutation, testsCompleted: 0 },
+			selectedTestIdentities: ["other.ts#other"],
 		}),
 	);
 });
 
-test("rejects a canonical mutation mismatch", () => {
+test("rejects setup errors and zero completed tests", () => {
+	assert.throws(() =>
+		assertOwnerCanaryProof({
+			...valid,
+			receipt: { ...valid.receipt, state: "fail", errors: [] },
+		}),
+	);
+	assert.throws(() =>
+		assertOwnerCanaryProof({
+			...valid,
+			result: { ...valid.result, testsCompleted: 0 },
+		}),
+	);
+});
+
+test("rejects an active mutant identity mismatch", () => {
 	assert.throws(() =>
 		assertOwnerCanaryProof({ ...valid, activeIdentity: "different-mutant" }),
+	);
+	assert.throws(() =>
+		assertOwnerCanaryProof({
+			...valid,
+			receipt: { ...valid.receipt, activeMutantId: "different-mutant" },
+		}),
 	);
 });
