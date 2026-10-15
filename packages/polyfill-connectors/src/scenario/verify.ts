@@ -76,6 +76,7 @@ import type {
 	ScenarioStreamExpectation,
 	TraceValueDigest,
 } from "./format.ts";
+import { summarizeRunOutcome } from "./outcome.ts";
 import {
 	projectRecordForComparison,
 	readExcludedComparisonFields,
@@ -1403,12 +1404,10 @@ export function buildProtocolTrace(
 /**
  * Compares `actual` (the trace built from THIS replay run's real messages)
  * against `expected` (the scenario's recorded `protocol_trace`), reporting a
- * single `trace_mismatch` VerifyFailure naming the FIRST divergence — a
- * readable "expected X at index N, got Y" diff rather than a full structural
- * dump, since the whole array is already visible in the scenario file for
- * anyone who needs it. Length mismatches (one side ran out of entries before
- * the other) are reported the same way, comparing against `undefined` at the
- * first index past the shorter array's end.
+ * single `trace_mismatch` VerifyFailure naming the FIRST differing entry
+ * index. It does not print protocol payload fields. Length mismatches (one
+ * side ran out of entries before the other) use the first index past the
+ * shorter array's end.
  */
 function verifyTrace(
 	runIndex: number,
@@ -1424,7 +1423,7 @@ function verifyTrace(
 				{
 					kind: "trace_mismatch",
 					runIndex,
-					detail: `protocol_trace[${String(i)}] expected ${JSON.stringify(expectedEntry) ?? "undefined"}, got ${JSON.stringify(actualEntry) ?? "undefined"}`,
+					detail: `protocol_trace differs at entry ${String(i)}`,
 				},
 			];
 		}
@@ -1569,7 +1568,8 @@ export interface VerifyFailure {
 		 * validate.ts's `validateExpectationOps` rejects a scenario missing it
 		 * before replay ever starts) — see `verifyStreamOps`'s doc comment.
 		 */
-		| "record_op_mismatch";
+		| "record_op_mismatch"
+		| "outcome_changed";
 	runIndex: number;
 	stream?: string;
 }
@@ -1687,7 +1687,6 @@ function verifyStreamOps(
 	expected: ScenarioStreamExpectation,
 ): VerifyFailure[] {
 	const failures: VerifyFailure[] = [];
-	const actualIds = actual.map((r) => r.id);
 	for (let i = 0; i < Math.max(actual.length, expected.ops.length); i += 1) {
 		const actualOp = actual[i]?.op;
 		const expectedOp = expected.ops[i];
@@ -1696,7 +1695,7 @@ function verifyStreamOps(
 				kind: "record_op_mismatch",
 				runIndex,
 				stream,
-				detail: `record[${String(i)}] (id=${actualIds[i] ?? "?"}) expected op ${JSON.stringify(expectedOp)}, got ${JSON.stringify(actualOp)}`,
+				detail: `record[${String(i)}] op differs`,
 			});
 		}
 	}
@@ -1730,7 +1729,7 @@ function verifyStream(
 			kind: "ids",
 			runIndex,
 			stream,
-			detail: `expected ids ${JSON.stringify(expected.ids)}, got ${JSON.stringify(actualIds)}`,
+			detail: `record ids differ (expected ${String(expected.ids.length)}, got ${String(actualIds.length)})`,
 		});
 	}
 
@@ -1757,7 +1756,7 @@ function verifyStream(
 				kind: "record_hash",
 				runIndex,
 				stream,
-				detail: `record[${String(i)}] (id=${actualIds[i] ?? "?"}) expected sha256 ${String(expectedHash)}, got ${String(actualHash)}`,
+				detail: `record[${String(i)}] differs; fields=[${Object.keys(actualProjections[i] ?? {}).join(", ")}]`,
 			});
 		}
 		// Only a record this run actually emitted has an id/op/projected value
@@ -1954,6 +1953,7 @@ async function verifyRun(
 			: undefined;
 	if (
 		!recordedBrowserHasEvidence &&
+		run.expected.outcome === undefined &&
 		isVacuousShape &&
 		vacuousRunCarveOutSourceIndex === undefined
 	) {
@@ -2032,6 +2032,19 @@ async function verifyRun(
 	actualFinalStateByRun.set(runIndex, finalState);
 
 	const byStream = groupRecordsByStream(records);
+	if (run.expected.outcome !== undefined) {
+		const actualOutcome = summarizeRunOutcome(rawTraceMessages);
+		if (
+			hashCanonicalJson(actualOutcome ?? null) !==
+			hashCanonicalJson(run.expected.outcome)
+		) {
+			failures.push({
+				kind: "outcome_changed",
+				runIndex,
+				detail: `outcome changed: old=${JSON.stringify(run.expected.outcome)} new=${JSON.stringify(actualOutcome ?? null)}`,
+			});
+		}
+	}
 
 	// Stream-set exactness (FIX 2a): the actual set of streams the collector
 	// emitted at least one record for must equal the expected set IN EITHER
@@ -2094,7 +2107,7 @@ async function verifyRun(
 		failures.push({
 			kind: "final_state",
 			runIndex,
-			detail: `expected final_state ${JSON.stringify(run.expected.final_state)}, got ${JSON.stringify(finalState)}`,
+			detail: `final_state differs; fields=[${Object.keys(finalState as Record<string, unknown>).join(", ")}]`,
 		});
 	}
 

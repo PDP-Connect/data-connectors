@@ -721,6 +721,10 @@ test("scenario-verify subprocess strictness: an unrecognized message type fails 
 		);
 		assert.match(result.stdout, /run 0: FAIL/);
 		assert.match(result.stdout, /unrecognized type/);
+		assert.doesNotMatch(
+			`${result.stdout}\n${result.stderr}`,
+			/synthetic-secret-(?:payload|child-stderr)/,
+		);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}

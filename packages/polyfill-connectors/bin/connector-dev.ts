@@ -6,7 +6,7 @@
  * connector-dev — the "run and watch it work" developer command.
  *
  * Runs ONE connector exactly the way production runs it: spawn the
- * connector's own entrypoint (`node --import tsx connectors/<name>/index.ts`)
+ * connector's own entrypoint with Node's native TypeScript stripping
  * and drive the Collection Profile protocol (START on stdin, JSONL
  * RECORD/STATE/SKIP_RESULT/PROGRESS/INTERACTION/ASSISTANCE/DONE on stdout)
  * over stdio — the exact spawn shape `runConnectorProtocolSubprocess`
@@ -108,7 +108,6 @@
  *      this CLI itself reports the failure (see `renderMessage`/exit code).
  */
 
-import { spawn } from "node:child_process";
 import {
 	mkdirSync,
 	readdirSync,
@@ -135,6 +134,7 @@ import {
 	handleInteraction,
 	type InteractionMessage,
 } from "../src/interaction-handler.ts";
+import { spawnNativeTypeScriptEntrypoint } from "../src/native-typescript-child.ts";
 import {
 	createObservationIngest,
 	describeFact,
@@ -847,7 +847,7 @@ export function runAndStream(
 	const answers = options.answers ?? {};
 	const isTty = options.isTty ?? Boolean(process.stdin.isTTY);
 	return new Promise((resolvePromise, rejectPromise) => {
-		const child = spawn(process.execPath, ["--import", "tsx", entrypoint], {
+		const child = spawnNativeTypeScriptEntrypoint(entrypoint, {
 			cwd: PACKAGE_ROOT,
 			env: {
 				...process.env,
@@ -1689,7 +1689,7 @@ function diagnosticNextSteps(captureDir: string | undefined): string[] {
 	return lines;
 }
 
-// Only run when this module is the process entrypoint (`tsx bin/connector-
+// Only run when this module is the process entrypoint (`node --import tsx bin/connector-
 // dev.ts ...`), not when it's `import`ed for its pure/testable exports (see
 // bin/connector-dev.test.ts's direct unit-import of `resolveCaptureOnFailureEnv`/
 // `classifyFailureEnvironment` — before this guard, importing them for a

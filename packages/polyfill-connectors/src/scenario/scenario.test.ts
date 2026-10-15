@@ -365,7 +365,7 @@ test("tampered response body: a mutated recorded response makes the record hash 
 	assert.equal(result.pass, false);
 	const hashFailure = result.failures.find((f) => f.kind === "record_hash");
 	assert.ok(hashFailure, "expected a record_hash failure");
-	assert.match(hashFailure?.detail ?? "", /expected sha256/);
+	assert.match(hashFailure?.detail ?? "", /fields=\[id, name\]/);
 });
 
 test("onStreamMismatch: fires for a record_hash mismatch, carrying the mismatched record's id/op/hashes and the exact projected object that was hashed", async () => {
@@ -537,7 +537,7 @@ test("record op mutation: recorded delete replayed as upsert fails with record_o
 		opFailure,
 		`expected a record_op_mismatch failure; got ${JSON.stringify(result.failures)}`,
 	);
-	assert.match(opFailure?.detail ?? "", /expected op "delete", got "upsert"/);
+	assert.match(opFailure?.detail ?? "", /record\[0\] op differs/);
 });
 
 test("record op mutation: recorded upsert replayed as delete fails with record_op_mismatch", async () => {
@@ -551,7 +551,7 @@ test("record op mutation: recorded upsert replayed as delete fails with record_o
 		opFailure,
 		`expected a record_op_mismatch failure; got ${JSON.stringify(result.failures)}`,
 	);
-	assert.match(opFailure?.detail ?? "", /expected op "upsert", got "delete"/);
+	assert.match(opFailure?.detail ?? "", /record\[0\] op differs/);
 });
 
 test("record op: a scenario missing ops entirely is rejected by validateScenario — never reaches replay", () => {
@@ -1601,7 +1601,7 @@ test("protocol trace: dropping the SKIP_RESULT message fails replay with a trace
 		mismatch,
 		"expected a trace_mismatch failure when SKIP_RESULT is silently dropped",
 	);
-	assert.match(mismatch?.detail ?? "", /protocol_trace\[0\]/);
+	assert.match(mismatch?.detail ?? "", /protocol_trace differs at entry 0/);
 });
 
 test("protocol trace: altering the SKIP_RESULT's reason fails replay with a trace_mismatch", async () => {
@@ -2046,7 +2046,7 @@ test("protocol trace menagerie (f): changing a digested field's underlying value
 		mismatch,
 		"expected a trace_mismatch failure when a digested field's underlying value changes (digest mismatch)",
 	);
-	assert.match(mismatch?.detail ?? "", /gap_id_digest/);
+	assert.match(mismatch?.detail ?? "", /protocol_trace differs at entry 1/);
 });
 
 test("protocol trace menagerie: a malformed SKIP_RESULT (continuation present but boundary missing) makes trace building THROW, not silently drop", async () => {

@@ -677,6 +677,12 @@ export interface TraceValueDigest {
 export interface ScenarioRunExpected {
 	final_state: unknown;
 	/**
+	 * Optional oracle for a connector-declared outcome such as a stream cap or
+	 * an unreachable surface. Replays compare this value exactly and report an
+	 * outcome_changed failure when the outcome or reason code changes.
+	 */
+	outcome?: import("./outcome.ts").ScenarioRunOutcome;
+	/**
 	 * ADDITIVE — optional so every scenario captured before this field existed
 	 * still validates and replays exactly as before. When present, `verify.ts`
 	 * compares the ACTUAL run's normalized trace (built the same way

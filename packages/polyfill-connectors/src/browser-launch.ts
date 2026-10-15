@@ -27,7 +27,7 @@
  * or attach to an operator-visible remote CDP browser such as n.eko.
  */
 
-import { existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -134,7 +134,7 @@ export interface AcquireIsolatedBrowserOptions {
 	 * requests from (`context.routeFromHAR`) — `"omit"` would produce a HAR
 	 * that satisfies nothing downstream. A single embedded JSON file is also
 	 * the easiest shape for this module's own post-close redaction pass (see
-	 * `redactHarFileBestEffort`) to reason about: one file, one parse, no
+	 * `scrubHarFileOrThrow`) to reason about: one file, one parse, no
 	 * companion resource directory to also scrub. The cost is size and secret
 	 * exposure inside `content.text` — mitigated by the redaction pass
 	 * stripping `Set-Cookie`/`Authorization`/etc. headers but NOT by touching
@@ -462,15 +462,43 @@ const UNUSABLE_VIEWPORT_MESSAGE =
  * measurement is not evidence of a broken display, and a normal
  * headless/headed launch must be unaffected by this check.
  */
-async function failFastOnUnusableViewport(page: {
-	evaluate: <T>(fn: () => T) => Promise<T>;
-}): Promise<void> {
+export async function evaluateAfterNavigation<T>(
+	page: Pick<Page, "evaluate" | "waitForLoadState">,
+	evaluate: () => T,
+	deadlineMs = 8_000,
+): Promise<T> {
+	const now = (): number => Number(process.hrtime.bigint() / 1_000_000n);
+	const deadline = now() + deadlineMs;
+	let lastError: unknown;
+	while (now() < deadline) {
+		try {
+			return await page.evaluate(evaluate);
+		} catch (error) {
+			lastError = error;
+			if (
+				!(error instanceof Error) ||
+				!/execution context was destroyed|most likely because of a navigation|frame was detached/i.test(
+					error.message,
+				)
+			) {
+				throw error;
+			}
+			const remaining = Math.max(1, deadline - now());
+			await page
+				.waitForLoadState("domcontentloaded", { timeout: remaining })
+				.catch(() => {});
+		}
+	}
+	throw lastError ?? new Error("browser evaluation deadline elapsed");
+}
+
+async function failFastOnUnusableViewport(page: Page): Promise<void> {
 	let measurement: {
 		innerHeight: number | undefined;
 		innerWidth: number | undefined;
 	};
 	try {
-		measurement = await page.evaluate(() => {
+		measurement = await evaluateAfterNavigation(page, () => {
 			const browserWindow = (
 				globalThis as { window?: { innerWidth?: number; innerHeight?: number } }
 			).window;
@@ -582,24 +610,41 @@ export const CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE =
  * Error subclass thrown when `connectOverCdpWithRetry` gives up after
  * exhausting `maxAttempts` on the narrow attach-session race. Carries the
  * stable `code` so callers can pattern-match on a typed property instead of
- * the underlying race error's message text (which remains available via
- * `cause` for logs/diagnostics only).
+ * the underlying race error's message text. Its `cause` is retained with any
+ * credential-bearing CDP URL redacted before callers can log it.
  */
 export class CdpAttachSessionRaceExhaustedError extends Error {
 	readonly code: typeof CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE;
 
 	constructor(lastError: unknown) {
-		const lastMessage =
-			lastError instanceof Error ? lastError.message : String(lastError);
+		const lastMessage = redactCdpUrlsInText(
+			lastError instanceof Error ? lastError.message : String(lastError),
+		);
 		super(
 			`remote CDP attach exhausted its retry budget on the attach-session race: ${lastMessage}`,
 			{
-				cause: lastError,
+				cause: redactCdpError(lastError),
 			},
 		);
 		this.name = "CdpAttachSessionRaceExhaustedError";
 		this.code = CDP_ATTACH_SESSION_RACE_EXHAUSTED_CODE;
 	}
+}
+
+function redactCdpUrlsInText(message: string): string {
+	return message.replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, (url) =>
+		redactCdpUrl(url),
+	);
+}
+
+function redactCdpError(error: unknown): Error {
+	const message = redactCdpUrlsInText(
+		error instanceof Error ? error.message : String(error),
+	);
+	if (error instanceof Error && message === error.message) return error;
+	const safe = new Error(message);
+	if (error instanceof Error) safe.name = error.name;
+	return safe;
 }
 
 const REMOTE_CDP_ATTACH_MAX_ATTEMPTS = 4;
@@ -810,7 +855,14 @@ export async function connectOverCdpWithRetry<TBrowser>({
 			lastErr = err;
 			if (!isCdpAttachSessionRaceError(err)) {
 				// A different failure entirely (auth, unreachable endpoint, real
-				// browser crash) — fail fast with its original identity, untagged.
+				// browser crash) — fail fast, removing credential-bearing URLs
+				// before a caller logs the error.
+				if (err instanceof Error) {
+					const message = redactCdpUrlsInText(err.message);
+					if (message !== err.message) {
+						throw new Error(message, { cause: redactCdpError(err) });
+					}
+				}
 				throw err;
 			}
 			if (attempt === maxAttempts) {
@@ -953,7 +1005,7 @@ async function acquireRemoteCdpBrowser(
 	if (!context) {
 		await browser.close().catch(() => undefined);
 		throw new Error(
-			`acquireRemoteCdpBrowser(${profileName}): remote browser at ${cdpUrl} has no contexts; cannot attach`,
+			`acquireRemoteCdpBrowser(${profileName}): remote browser at ${redactCdpUrl(cdpUrl)} has no contexts; cannot attach`,
 		);
 	}
 	// Publish the CDP endpoint into process.env so `browser-handoff.ts` can
@@ -967,7 +1019,7 @@ async function acquireRemoteCdpBrowser(
 			parsed.port || (parsed.protocol === "https:" ? "443" : "80");
 	} catch (err) {
 		process.stderr.write(
-			`[browser-launch] could not parse remote CDP URL ${cdpUrl}: ${err instanceof Error ? err.message : String(err)}\n`,
+			`[browser-launch] could not parse remote CDP URL: ${err instanceof Error ? redactCdpUrlsInText(err.message) : "invalid URL"}\n`,
 		);
 	}
 	const { harRecording, storageStateRecording } = options;
@@ -1046,14 +1098,14 @@ async function acquireRemoteCdpBrowser(
 					await context.close();
 				} catch (err) {
 					process.stderr.write(
-						`[browser-launch] remote CDP HAR export failed profile=${profileName}: ${err instanceof Error ? err.message : String(err)}\n`,
+						`[browser-launch] remote CDP HAR export failed profile=${profileName}: ${redactCdpUrlsInText(err instanceof Error ? err.message : String(err))}\n`,
 					);
 				}
 				await embedDownloadBodiesInHarFile(
 					harRecording.path,
 					downloadBodies,
 				).catch(() => 0);
-				await redactHarFileBestEffort(harRecording.path);
+				await scrubHarFileOrThrow(harRecording.path);
 			}
 			try {
 				await browser.close();
@@ -1108,7 +1160,7 @@ export async function startRemoteCdpHarRecording({
 		});
 	} catch (err) {
 		process.stderr.write(
-			`[browser-launch] remote CDP HAR recording failed to start profile=${profileName}: ${err instanceof Error ? err.message : String(err)}; disconnecting\n`,
+			`[browser-launch] remote CDP HAR recording failed to start profile=${profileName}: ${redactCdpUrlsInText(err instanceof Error ? err.message : String(err))}; disconnecting\n`,
 		);
 		onFailure?.();
 		await browser.close().catch(() => undefined);
@@ -1144,13 +1196,16 @@ export function warnIfRecordingSharedRemoteBrowser(
 	}
 }
 
-function redactCdpUrl(rawUrl: string): string {
+export function redactCdpUrl(rawUrl: string): string {
 	try {
 		const url = new URL(rawUrl);
 		url.username = "";
 		url.password = "";
-		url.pathname = "/";
-		url.search = "";
+		for (const name of new Set(url.searchParams.keys())) {
+			if (SENSITIVE_QUERY_PARAMETER_RE.test(name)) {
+				url.searchParams.set(name, REDACTED_HAR_HEADER_PLACEHOLDER);
+			}
+		}
 		url.hash = "";
 		return url.toString();
 	} catch {
@@ -1158,7 +1213,7 @@ function redactCdpUrl(rawUrl: string): string {
 	}
 }
 
-// ─── HAR secret-hygiene pass (post-close, best-effort) ─────────────────────
+// ─── HAR secret-hygiene pass (post-close) ─────────────────────────────────
 //
 // Playwright's own `recordHar` has no redaction knob — it captures headers,
 // cookies, and bodies verbatim. This package's existing recorder
@@ -1192,6 +1247,25 @@ const REDACTED_HAR_HEADER_NAMES = new Set([
 ]);
 
 const REDACTED_HAR_HEADER_PLACEHOLDER = "[redacted-by-scenario-record]";
+const SENSITIVE_QUERY_PARAMETER_RE =
+	/(?:token|auth|session|code|key|sig|secret|password|passwd|pwd|credential|assertion|jwt|ticket|nonce|api[-_]?key|client[-_]?secret|access[-_]?key)/i;
+const AUTH_ENDPOINT_RE =
+	/(?:^|\/)(?:auth|authenticate|oauth|authorize|authorization|login|log-in|session|signin|sign-in|callback)(?:\/|$)/i;
+
+function redactUrlQuery(rawUrl: string): string {
+	try {
+		const url = new URL(rawUrl);
+		const redactAll = AUTH_ENDPOINT_RE.test(url.pathname);
+		for (const name of new Set(url.searchParams.keys())) {
+			if (redactAll || SENSITIVE_QUERY_PARAMETER_RE.test(name)) {
+				url.searchParams.set(name, REDACTED_HAR_HEADER_PLACEHOLDER);
+			}
+		}
+		return url.toString();
+	} catch {
+		return rawUrl;
+	}
+}
 
 interface HarNameValue {
 	name: string;
@@ -1200,12 +1274,14 @@ interface HarNameValue {
 
 interface HarPostDataParam {
 	name: string;
+	type?: string;
 	value?: string;
 }
 
 interface HarRequestOrResponse {
 	cookies?: HarNameValue[];
 	headers?: HarNameValue[];
+	url?: string;
 	postData?: { mimeType?: string; params?: HarPostDataParam[]; text?: string };
 }
 
@@ -1259,7 +1335,8 @@ function redactCookies(cookies: HarNameValue[]): HarNameValue[] {
  * `harRecording`'s doc comment on residual exposure for that
  * honestly-stated gap.
  */
-const CREDENTIAL_FORM_FIELD_RE = /pass(word|wd)?|secret|token|\botp\b|\bpin\b/i;
+const CREDENTIAL_FORM_FIELD_RE =
+	/pass(word|wd)?|\bpwd\b|secret|token|\botp\b|\bpin\b/i;
 
 type HarPostData = NonNullable<HarRequestOrResponse["postData"]>;
 
@@ -1267,8 +1344,10 @@ function looksLikeCredentialFormPost(postData: HarPostData): boolean {
 	if (!postData.params) {
 		return false;
 	}
-	return postData.params.some((param) =>
-		CREDENTIAL_FORM_FIELD_RE.test(param.name),
+	return postData.params.some(
+		(param) =>
+			param.type?.toLowerCase() === "password" ||
+			CREDENTIAL_FORM_FIELD_RE.test(param.name),
 	);
 }
 
@@ -1296,6 +1375,9 @@ function redactHarRequestOrResponse(
 	side: HarRequestOrResponse,
 ): HarRequestOrResponse {
 	const out: HarRequestOrResponse = { ...side };
+	if (side.url !== undefined) {
+		out.url = redactUrlQuery(side.url);
+	}
 	if (side.headers) {
 		out.headers = redactHeaders(side.headers);
 	}
@@ -1338,11 +1420,8 @@ export function redactHarDocument(har: HarDocument): HarDocument {
 
 /**
  * Reads the HAR JSON at `path`, applies `redactHarDocument`, and writes it
- * back 0600 — best-effort: a missing file (the honest "context.close()
- * never ran / HAR was never flushed" case — see `HarRecordingOutcome`'s doc
- * comment) or an unparseable file logs a warning and returns without
- * throwing, so a redaction-pass failure never turns into an unhandled
- * rejection that crashes the caller's `release()`. The mode is set
+ * back 0600. A missing, unparseable, or unwritable file throws so the caller
+ * cannot report an unscrubbed capture as redacted. The mode is set
  * EXPLICITLY (not left to Playwright's own create-time umask-dependent
  * default) — this package never trusts umask for a file that may hold real
  * captured data.
@@ -1353,27 +1432,34 @@ export function redactHarDocument(har: HarDocument): HarDocument {
  * `acquireIsolatedBrowser`'s `release()` runs, instead of a test double
  * re-implementing (and potentially drifting from) this logic.
  */
-export async function redactHarFileBestEffort(path: string): Promise<void> {
+function markHarScrubFailure(path: string): void {
+	try {
+		writeFileSync(`${path}.scrub-failed`, "", { mode: 0o600 });
+		chmodSync(`${path}.scrub-failed`, 0o600);
+	} catch {
+		// The scrub failure still propagates; the capture owner also treats an
+		// absent HAR as incomplete if this marker could not be written.
+	}
+}
+
+export async function scrubHarFileOrThrow(path: string): Promise<void> {
 	let raw: string;
 	try {
 		raw = await readFile(path, "utf8");
-	} catch {
-		// No file to redact — either recording was never enabled for real (a
-		// logic error upstream, since this is only called when it was) or
-		// context.close() never completed (crash/SIGKILL). Either way there is
-		// nothing to redact, and `harRecordingOutcome` is the honest signal for
-		// "no HAR exists" — this function does not duplicate that reporting.
-		return;
+	} catch (err) {
+		markHarScrubFailure(path);
+		throw new Error("HAR scrub failed: recorded HAR file is missing", {
+			cause: err,
+		});
 	}
 	let parsed: HarDocument;
 	try {
 		parsed = JSON.parse(raw) as HarDocument;
 	} catch (err) {
-		process.stderr.write(
-			`[browser-launch] HAR at ${path} was not valid JSON; leaving it UNREDACTED and unmodified. ` +
-				`Treat this file as sensitive until manually reviewed. (${err instanceof Error ? err.message : String(err)})\n`,
-		);
-		return;
+		markHarScrubFailure(path);
+		throw new Error("HAR scrub failed: captured HAR is not valid JSON", {
+			cause: err,
+		});
 	}
 	const redacted = redactHarDocument(parsed);
 	try {
@@ -1382,10 +1468,10 @@ export async function redactHarFileBestEffort(path: string): Promise<void> {
 		await writeFile(path, JSON.stringify(redacted), "utf8");
 		await chmod(path, 0o600);
 	} catch (err) {
-		process.stderr.write(
-			`[browser-launch] failed to write redacted HAR back to ${path}: ` +
-				`${err instanceof Error ? err.message : String(err)}. The file may still contain UNREDACTED secrets.\n`,
-		);
+		markHarScrubFailure(path);
+		throw new Error("HAR scrub failed: could not persist redacted HAR", {
+			cause: err,
+		});
 	}
 }
 
@@ -1687,7 +1773,7 @@ async function acquireIsolatedBrowserWithClock({
 			// the race can only ever make redaction correctly report "not
 			// written yet" on a violated call-order, never a false positive.
 			if (harRecording) {
-				await redactHarFileBestEffort(harRecording.path);
+				await scrubHarFileOrThrow(harRecording.path);
 			}
 		},
 		...(harRecording

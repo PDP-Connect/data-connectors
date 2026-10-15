@@ -803,6 +803,129 @@ test("generated installSequentialHarRoutes: serves a polled URL in recorded orde
 	);
 });
 
+test("generated installSequentialHarRoutes: replays the same endpoint across volatile query changes", async () => {
+	const route = await generatedSequentialRoute([
+		seqEntry({
+			url: "https://youtube.test/api/profile?key=synthetic-key&continuation=first",
+			status: 200,
+			body: '{"profile":"synthetic-first"}',
+			seconds: 1,
+		}),
+		seqEntry({
+			url: "https://youtube.test/api/profile?continuation=second&key=synthetic-key",
+			status: 200,
+			body: '{"profile":"synthetic-second"}',
+			seconds: 2,
+		}),
+	]);
+	assert.ok(route, "the synthetic HAR has a changing response group");
+	assert.deepEqual(
+		await route({
+			method: "GET",
+			postData: null,
+			url: "https://youtube.test/api/profile?key=replay-key&continuation=replay-first",
+		}),
+		{ body: '{"profile":"synthetic-first"}', kind: "fulfill", status: 200 },
+	);
+	assert.deepEqual(
+		await route({
+			method: "GET",
+			postData: null,
+			url: "https://youtube.test/api/profile?continuation=replay-second&key=replay-key",
+		}),
+		{ body: '{"profile":"synthetic-second"}', kind: "fulfill", status: 200 },
+	);
+});
+
+test("generated installSequentialHarRoutes: matches a single synthetic HAR entry despite volatile query values", async () => {
+	const route = await generatedSequentialRoute([
+		seqEntry({
+			url: "https://youtube.test/api/profile?key=synthetic-key&session=recorded-session",
+			status: 200,
+			body: '{"profile":"synthetic-profile"}',
+			seconds: 1,
+		}),
+	]);
+	assert.ok(
+		route,
+		"a single HAR entry still installs the generic fallback route",
+	);
+	assert.deepEqual(
+		await route({
+			method: "GET",
+			postData: null,
+			url: "https://youtube.test/api/profile?session=replay-session&key=replay-key",
+		}),
+		{ body: '{"profile":"synthetic-profile"}', kind: "fulfill", status: 200 },
+	);
+});
+
+test("generated installSequentialHarRoutes: matches a GET by endpoint and query overlap when an opaque query value changes", async () => {
+	const route = await generatedSequentialRoute([
+		seqEntry({
+			url: "https://example.test/api/profile?viewer_context=captured&hl=en",
+			status: 200,
+			body: '{"profile":true}',
+			seconds: 1,
+		}),
+	]);
+	assert.ok(route);
+	assert.deepEqual(
+		await route({
+			method: "GET",
+			postData: null,
+			url: "https://example.test/api/profile?viewer_context=replayed&hl=en",
+		}),
+		{ body: '{"profile":true}', kind: "fulfill", status: 200 },
+	);
+});
+
+test("generated installSequentialHarRoutes: matches the sole GET response for an endpoint when its query shape changes", async () => {
+	const route = await generatedSequentialRoute([
+		seqEntry({
+			url: "https://example.test/api/profile?viewer_context=captured",
+			status: 200,
+			body: '{"profile":true}',
+			seconds: 1,
+		}),
+	]);
+	assert.ok(route);
+	assert.deepEqual(
+		await route({
+			method: "GET",
+			postData: null,
+			url: "https://example.test/api/profile?replay_context=replayed",
+		}),
+		{ body: '{"profile":true}', kind: "fulfill", status: 200 },
+	);
+});
+
+test("generated installSequentialHarRoutes: volatile query identities replay by request identity instead of HAR order", async () => {
+	const route = await generatedSequentialRoute([
+		seqEntry({
+			url: "https://example.test/api/profile?continuation=first",
+			status: 200,
+			body: '{"cursor":"first"}',
+			seconds: 1,
+		}),
+		seqEntry({
+			url: "https://example.test/api/profile?continuation=second",
+			status: 200,
+			body: '{"cursor":"second"}',
+			seconds: 2,
+		}),
+	]);
+	assert.ok(route);
+	assert.deepEqual(
+		await route({
+			method: "GET",
+			postData: null,
+			url: "https://example.test/api/profile?continuation=second",
+		}),
+		{ body: '{"cursor":"second"}', kind: "fulfill", status: 200 },
+	);
+});
+
 test("generated installSequentialHarRoutes: two POSTs to one URL with different bodies are matched by body, not by order", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({

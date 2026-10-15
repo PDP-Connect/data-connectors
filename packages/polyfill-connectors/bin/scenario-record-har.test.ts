@@ -250,10 +250,13 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 		) as ConnectorScenario;
 		const network = browserNetwork(scenario, 0);
 		assert.equal(network.har_entry_count, 1);
-		assert.match(network.har_path, /^with-har\.scenario\.run1\.har$/);
+		assert.match(
+			network.har_path,
+			/^with-har\.scenario\.artifacts-[^/]+\/run1\.har$/,
+		);
 		assert.match(
 			network.storage_state_path,
-			/^with-har\.scenario\.run1\.storage-state\.json$/,
+			/^with-har\.scenario\.artifacts-[^/]+\/run1\.storage-state\.json$/,
 		);
 
 		const harFullPath = join(tmpDir, network.har_path);
@@ -266,6 +269,37 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 			existsSync(storageStateFullPath),
 			"storageState file should exist next to the scenario",
 		);
+		const firstHar = readFileSync(harFullPath);
+		const firstStorageState = readFileSync(storageStateFullPath);
+		const replacement = runRecordCli(
+			[
+				"har-stub",
+				"--entrypoint",
+				HAR_STUB_CONNECTOR_PATH,
+				"--runs",
+				"1",
+				"--out",
+				scenarioPath,
+				"--record-har",
+			],
+			{ PDPP_SCENARIO_STUB_BASE_URL: provider.url },
+		);
+		assert.equal(
+			replacement.code,
+			0,
+			`replacement failed: ${replacement.stderr}`,
+		);
+		const replacementScenario = JSON.parse(
+			readFileSync(scenarioPath, "utf8"),
+		) as ConnectorScenario;
+		const replacementNetwork = browserNetwork(replacementScenario, 0);
+		assert.notEqual(replacementNetwork.har_path, network.har_path);
+		assert.deepEqual(
+			readFileSync(harFullPath),
+			firstHar,
+			"old scenario artifacts remain intact until replacement commits",
+		);
+		assert.deepEqual(readFileSync(storageStateFullPath), firstStorageState);
 
 		// ── provider_contact counts the HAR's traffic too, not only recorded-
 		// http interactions[] (regression: before this fix, a complete
@@ -300,7 +334,10 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 
 		// stdout reports where the HAR landed and what was/was not redacted.
 		assert.match(result.stdout, /browser HAR capture:/);
-		assert.match(result.stdout, /run 1: HAR=.*with-har\.scenario\.run1\.har/);
+		assert.match(
+			result.stdout,
+			/run 1: HAR=.*with-har\.scenario\.artifacts-[^/]+\/run1\.har/,
+		);
 		assert.match(result.stdout, /redacted from the HAR:/);
 		assert.match(result.stdout, /NOT redacted:/);
 
@@ -395,6 +432,46 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 			"super-secret-session-value",
 			"storageState must remain usable for replay",
 		);
+	} finally {
+		await provider.close();
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record --record-har: a swallowed HAR scrub failure makes the capture incomplete", async () => {
+	const tmpDir = mkdtempSync(
+		join(tmpdir(), "scenario-record-har-scrub-failure-test-"),
+	);
+	const scenarioPath = join(tmpDir, "scrub-failed.scenario.json");
+	const provider = await startStubProvider();
+	try {
+		const result = runRecordCli(
+			[
+				"har-stub",
+				"--entrypoint",
+				HAR_STUB_CONNECTOR_PATH,
+				"--runs",
+				"1",
+				"--out",
+				scenarioPath,
+				"--record-har",
+			],
+			{
+				PDPP_SCENARIO_STUB_BASE_URL: provider.url,
+				PDPP_SCENARIO_TEST_BAD_HAR: "1",
+			},
+		);
+		assert.notEqual(result.code, 0);
+		assert.match(result.stderr, /HAR scrub failed; capture is not redacted/);
+		const scenario = JSON.parse(
+			readFileSync(scenarioPath, "utf8"),
+		) as ConnectorScenario;
+		assert.equal(scenario.capture.complete, false);
+		assert.equal(
+			scenario.runs[0]?.environment?.network?.driver,
+			"recorded-http",
+		);
+		assert.doesNotMatch(result.stdout, /redacted from the HAR/);
 	} finally {
 		await provider.close();
 		rmSync(tmpDir, { recursive: true, force: true });

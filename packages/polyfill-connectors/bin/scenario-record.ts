@@ -7,8 +7,9 @@
  * loop for the connector-verification scenario harness (src/scenario/*.ts).
  *
  * Runs a connector's own entrypoint as a real subprocess, exactly the way
- * `bin/connector-dev.ts` does (`node --import tsx connectors/<name>/index.ts`,
- * START on stdin, JSONL RECORD/STATE/DONE on stdout), but with the
+ * `bin/connector-dev.ts` does (Node's native TypeScript stripping for the
+ * connector entrypoint, START on stdin, JSONL RECORD/STATE/DONE on stdout),
+ * but with the
  * subprocess's `globalThis.fetch` patched via a `NODE_OPTIONS --import
  * <preload>` module (src/scenario/subprocess-fetch-preloads.ts's
  * `writeRecordPreload`) so every HTTP interaction it makes is captured. The
@@ -215,15 +216,16 @@
  * the whole run's evidence.
  */
 
-import { spawn } from "node:child_process";
 import {
 	appendFileSync,
 	chmodSync,
 	copyFileSync,
 	existsSync,
 	mkdirSync,
+	mkdtempSync,
 	readFileSync,
 	renameSync,
+	rmSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
@@ -246,6 +248,7 @@ import {
 	handleInteraction,
 	type InteractionMessage,
 } from "../src/interaction-handler.ts";
+import { spawnNativeTypeScriptEntrypoint } from "../src/native-typescript-child.ts";
 import {
 	getConnectorPaths,
 	KNOWN_CONNECTOR_NAMES,
@@ -266,6 +269,7 @@ import type {
 	ScenarioUserInteraction,
 } from "../src/scenario/format.ts";
 import { SCENARIO_FORMAT } from "../src/scenario/format.ts";
+import { summarizeRunOutcome } from "../src/scenario/outcome.ts";
 import {
 	type ExcludedFieldsByStream,
 	projectRecordForComparison,
@@ -523,27 +527,26 @@ interface PartialCaptureEvidence {
 	streamRecordCounts: Record<string, number>;
 }
 
-/** Human-readable label for one message — RECORD/STATE/PROGRESS name the
- *  stream they belong to; PROGRESS additionally carries a `message` string;
- *  DONE/INTERACTION are self-describing by type alone. Mirrors what
- *  `EmittedMessage` (connector-runtime-protocol.ts) actually puts on each
- *  variant — see this file's `ProtocolMessage` import doc comment for why
- *  these fields are read off the raw parsed JSON rather than a narrower
- *  type. */
+/** Payload-free label for partial-capture diagnostics. */
 function labelForMessage(msg: ProtocolMessage): string {
 	const raw = msg as unknown as {
-		message?: unknown;
 		stream?: unknown;
-		type: string;
 	};
-	const parts: string[] = [raw.type];
+	const parts: string[] = [];
 	if (typeof raw.stream === "string") {
 		parts.push(`stream=${raw.stream}`);
 	}
-	if (typeof raw.message === "string") {
-		parts.push(JSON.stringify(raw.message));
+	const diagnostic = msg as unknown as {
+		error?: { code?: unknown };
+		reason?: unknown;
+	};
+	if (typeof diagnostic.reason === "string") {
+		parts.push(`reason_code=${diagnostic.reason}`);
 	}
-	return parts.join(" ");
+	if (typeof diagnostic.error?.code === "string") {
+		parts.push(`error_code=${diagnostic.error.code}`);
+	}
+	return parts.length > 0 ? parts.join(" ") : "message";
 }
 
 /** Builds FIX 2's partial-evidence summary from whatever messages this run's
@@ -1459,38 +1462,27 @@ function runRecordSubprocess(args: {
 			transcriptRunNumber,
 		);
 
-		const child = spawn(
-			process.execPath,
-			["--import", "tsx", args.connectorPath],
-			{
-				cwd: PACKAGE_ROOT,
-				env: {
-					...subprocessEnv(),
-					NODE_OPTIONS: `--import ${preloadPath}`,
-					// See the identical setting (and its full rationale) in
-					// bin/scenario-verify.ts's runReplaySubprocess: tsx's
-					// persistent disk cache made its loader call Date.now()/
-					// new Date() a different number of times transforming this
-					// same connector module graph in record (this subprocess,
-					// unisolated) vs. replay (sandboxed, cold cache) — disabling
-					// it here makes both sides start from the same cold,
-					// per-process cache shape every time.
-					TSX_DISABLE_CACHE: "1",
-					PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
-						process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
-					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:
-						process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
-					...(args.harRecordPaths
-						? {
-								[HAR_RECORD_PATH_ENV]: args.harRecordPaths.harPath,
-								[STORAGE_STATE_RECORD_PATH_ENV]:
-									args.harRecordPaths.storageStatePath,
-							}
-						: {}),
-				},
-				stdio: ["pipe", "pipe", "pipe"],
+		const child = spawnNativeTypeScriptEntrypoint(args.connectorPath, {
+			cwd: PACKAGE_ROOT,
+			env: {
+				...subprocessEnv(),
+				NODE_OPTIONS: `--import ${preloadPath}`,
+				// The connector entrypoint runs through Node's native type
+				// stripping, while NODE_OPTIONS loads only the fetch recorder.
+				PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
+					process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
+				PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:
+					process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
+				...(args.harRecordPaths
+					? {
+							[HAR_RECORD_PATH_ENV]: args.harRecordPaths.harPath,
+							[STORAGE_STATE_RECORD_PATH_ENV]:
+								args.harRecordPaths.storageStatePath,
+						}
+					: {}),
 			},
-		);
+			stdio: ["pipe", "pipe", "pipe"],
+		});
 
 		const messages: ProtocolMessage[] = [];
 		const userInteractions: ScenarioUserInteraction[] = [];
@@ -1917,11 +1909,11 @@ async function recordOneRun(
 	// but with an honest "unrecognized type" message rather than "non-JSON
 	// line" (`result.protocolCorruptLine.cause` distinguishes the two).
 	if (result.protocolCorruptLine !== undefined) {
-		const { cause, line } = result.protocolCorruptLine;
+		const { cause } = result.protocolCorruptLine;
 		const reasonDetail =
 			cause === "non_json"
-				? `subprocess wrote a non-JSON line: ${JSON.stringify(line)}`
-				: `subprocess wrote a protocol message with an unrecognized type: ${JSON.stringify(line)}`;
+				? "subprocess wrote a non-JSON line"
+				: "subprocess wrote a protocol message with an unrecognized type";
 		return {
 			ok: false,
 			reason: `protocol-corrupt stdout: ${reasonDetail}`,
@@ -1935,12 +1927,10 @@ async function recordOneRun(
 		};
 	}
 	if (result.unansweredInteractions.length > 0) {
-		const names = result.unansweredInteractions.map(
-			(u) => `${u.kind} (request_id=${u.requestId}): ${u.message}`,
-		);
+		const names = result.unansweredInteractions.map((u) => u.kind);
 		return {
 			ok: false,
-			reason: `unanswered interaction prompt(s) — no --answer supplied and stdin is not a TTY: ${names.join("; ")}`,
+			reason: `unanswered interaction prompt(s) — count=${String(names.length)} kinds=[${names.join(", ")}]`,
 			interactions: result.interactions,
 			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
@@ -1969,7 +1959,7 @@ async function recordOneRun(
 	if (done?.status !== "succeeded") {
 		return {
 			ok: false,
-			reason: `connector run did not reach a succeeded DONE: ${JSON.stringify(done)}; stderr=${result.stderr}`,
+			reason: `connector run did not reach a succeeded DONE (status=${done?.status ?? "missing"})`,
 			interactions: result.interactions,
 			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
@@ -2182,19 +2172,25 @@ async function recordOneRunWithOptionalHar(
 			storageStatePath,
 		},
 	);
+	const harScrubFailed = existsSync(`${harPath}.scrub-failed`);
+	if (harScrubFailed) {
+		result.ok = false;
+		result.reason = "HAR scrub failed; capture is not redacted";
+	}
 	const [harOutcome, storageStateOutcome] = await Promise.all([
 		fileFlushOutcome(harPath),
 		fileFlushOutcome(storageStatePath),
 	]);
-	const harEntryCount = harOutcome.flushed
-		? countHarEntriesForRecord(harPath)
-		: 0;
+	const harEntryCount =
+		harOutcome.flushed && !harScrubFailed
+			? countHarEntriesForRecord(harPath)
+			: 0;
 	return {
 		result,
 		browserCapture: {
 			harPath,
 			storageStatePath,
-			harFlushed: harOutcome.flushed,
+			harFlushed: harOutcome.flushed && !harScrubFailed,
 			storageStateFlushed: storageStateOutcome.flushed,
 			harEntryCount,
 		},
@@ -2268,7 +2264,8 @@ async function captureRuns(
 
 	const runs: ScenarioRun[] = [];
 	const browserCaptures: Array<BrowserCaptureArtifact | undefined> = [];
-	let complete = run1.ok;
+	const run1Outcome = summarizeRunOutcome(run1.protocolTrace);
+	let complete = run1.ok || run1Outcome !== undefined;
 	const normalizerNames = new Set(run1.normalizerNames);
 
 	// FIX 5 — modality-neutral envelope, resolved honestly per run by
@@ -2296,6 +2293,7 @@ async function captureRuns(
 			records: expectedForRecords(run1.records, excludedComparisonFields),
 			final_state: run1.finalState,
 			protocol_trace: run1.protocolTrace,
+			...(run1Outcome === undefined ? {} : { outcome: run1Outcome }),
 		},
 		...(run1.userInteractions.length > 0
 			? { user_interactions: run1.userInteractions }
@@ -2307,7 +2305,7 @@ async function captureRuns(
 		process.stderr.write(`FAILED run 1: ${run1.reason ?? "unknown"}\n`);
 	}
 
-	if (complete && args.runs === 2) {
+	if (run1.ok && args.runs === 2) {
 		process.stdout.write(
 			`RECORDING ${args.connector} — run 2 (incremental, ${summarizeSeededState(run1.finalState)})\n`,
 		);
@@ -2325,6 +2323,8 @@ async function captureRuns(
 		for (const name of run2.normalizerNames) {
 			normalizerNames.add(name);
 		}
+		const run2Outcome = summarizeRunOutcome(run2.protocolTrace);
+		complete = complete && (run2.ok || run2Outcome !== undefined);
 		runs.push({
 			clock: { fixed_now: run2StartedAt, trace: run2.clockTrace },
 			environment: resolveRunEnvironment(
@@ -2342,14 +2342,14 @@ async function captureRuns(
 				records: expectedForRecords(run2.records, excludedComparisonFields),
 				final_state: run2.finalState,
 				protocol_trace: run2.protocolTrace,
+				...(run2Outcome === undefined ? {} : { outcome: run2Outcome }),
 			},
 			...(run2.userInteractions.length > 0
 				? { user_interactions: run2.userInteractions }
 				: {}),
 		});
 		browserCaptures.push(run2Capture);
-		if (!run2.ok) {
-			complete = false;
+		if (!run2.ok && run2Outcome === undefined) {
 			process.stderr.write(`FAILED run 2: ${run2.reason ?? "unknown"}\n`);
 		}
 	}
@@ -2385,29 +2385,14 @@ function moveFileCrossDeviceSafe(sourcePath: string, destPath: string): void {
 }
 
 /**
- * Moves each run's workspace-temp HAR/storageState (see
- * `recordOneRunWithOptionalHar`) to sit NEXT TO the final scenario file,
- * and rewrites that run's already-stamped `environment.network` (which
- * `captureRuns` populated with `finalHarPath`/`finalStorageStatePath`
- * PLACEHOLDER filenames, since `outPath` isn't known until here) to the
- * real relative filenames. `har_path`/`storage_state_path` MUST be relative
- * to the scenario file's own directory (format.ts's
- * `ScenarioBrowserNetworkDriver` doc comment) — both files are written
- * into `dirname(outPath)`, so a bare filename (no directory component)
- * satisfies that contract directly.
- *
- * Uses `moveFileCrossDeviceSafe` (above) rather than a bare `renameSync` —
- * see that function's doc comment for why a cross-filesystem move is a real
- * possibility here, not a theoretical one. Any failure OTHER than `EXDEV`
- * still propagates uncaught from this function — this is deliberately NOT
- * wrapped in a try/catch the way `redactHarFileBestEffort` is, because
- * unlike that function's caller (`release()`, which must never let HAR
- * bookkeeping crash a browser teardown), a failure moving the HAR here
- * means this run's `environment.network` is about to claim a `har_path`
- * that doesn't exist at the claimed location — exactly the failure
- * `resolveBrowserEvidence`'s pre-flight gate exists to catch, but catching
- * it HERE instead is strictly better: it fails at record time, immediately,
- * with a clear cause, instead of at some future replay attempt.
+ * Moves each run's workspace-temp HAR/storageState into a new sibling
+ * artifact directory, then atomically renames that directory into place.
+ * Scenario paths point into this immutable directory. The new JSON scenario
+ * is written after this function and atomically renamed last, so replacing a
+ * capture never leaves the old scenario pointing at partially replaced
+ * sidecars. Cross-device moves from the workspace temp directory use
+ * `moveFileCrossDeviceSafe`; any failure propagates before the scenario file
+ * is replaced.
  *
  * A run whose `environment.network.driver` is `recorded-http` (no
  * `browserCapture`, or one that never actually flushed usable HAR/
@@ -2429,22 +2414,38 @@ function finalizeBrowserCaptures(
 	// been created by a previous non-HAR capture.
 	mkdirSync(scenarioDir, { recursive: true });
 	const outBaseName = basename(outPath).replace(JSON_EXTENSION_RE, "");
-	runs.forEach((run, index) => {
+	const captures = runs.flatMap((run, index) => {
 		const capture = browserCaptures[index];
 		const network = run.environment?.network;
-		if (!(capture && network && network.driver === "recorded-browser")) {
-			return;
-		}
-		const harFileName = `${outBaseName}.run${String(index + 1)}.har`;
-		const storageStateFileName = `${outBaseName}.run${String(index + 1)}.storage-state.json`;
-		moveFileCrossDeviceSafe(capture.harPath, join(scenarioDir, harFileName));
-		moveFileCrossDeviceSafe(
-			capture.storageStatePath,
-			join(scenarioDir, storageStateFileName),
-		);
-		network.har_path = harFileName;
-		network.storage_state_path = storageStateFileName;
+		return capture && network?.driver === "recorded-browser"
+			? [{ capture, index, network }]
+			: [];
 	});
+	if (captures.length === 0) return;
+
+	// Sidecars are immutable and published together as one directory. The
+	// scenario JSON is renamed into place afterwards, so readers see either the
+	// old scenario with its old sidecars or the new scenario with its new ones.
+	const stagingDir = mkdtempSync(join(scenarioDir, `.tmp-${outBaseName}-`));
+	const artifactDirName = `${outBaseName}.artifacts-${basename(stagingDir).slice(`.tmp-${outBaseName}-`.length)}`;
+	const artifactDir = join(scenarioDir, artifactDirName);
+	try {
+		for (const { capture, index, network } of captures) {
+			const harFileName = `run${String(index + 1)}.har`;
+			const storageStateFileName = `run${String(index + 1)}.storage-state.json`;
+			moveFileCrossDeviceSafe(capture.harPath, join(stagingDir, harFileName));
+			moveFileCrossDeviceSafe(
+				capture.storageStatePath,
+				join(stagingDir, storageStateFileName),
+			);
+			network.har_path = join(artifactDirName, harFileName);
+			network.storage_state_path = join(artifactDirName, storageStateFileName);
+		}
+		renameSync(stagingDir, artifactDir);
+	} catch (error) {
+		rmSync(stagingDir, { force: true, recursive: true });
+		throw error;
+	}
 }
 
 interface BuiltScenario {
@@ -2837,17 +2838,16 @@ async function main(): Promise<void> {
 	}
 }
 
-// Only run when this module is the process entrypoint (`tsx bin/scenario-
+// Only run when this module is the process entrypoint (`node --import tsx bin/scenario-
 // record.ts ...`), not when it's `import`ed for its pure/testable exports —
 // mirrors `bin/connector-dev.ts`'s identical guard (see that file's doc
 // comment for the full rationale): before this guard,
 // `bin/scenario-cli.test.ts`'s direct unit-import of
 // `createInactivityWatchdog` ran the ENTIRE CLI as a side effect of module
 // load (including `usageAndExit(2)` on the test process's own argv). Every
-// existing subprocess-driven test already runs this file as the real
-// entrypoint via `spawnSync(..., ["--import", "tsx", RECORD_CLI_PATH,
-// ...])`, so `process.argv[1]` is that exact path in every case that
-// matters — this guard changes nothing for them.
+// existing subprocess-driven tests run this file as the real entrypoint via
+// `spawnSync(..., ["--import", "tsx", RECORD_CLI_PATH, ...]); the connector
+// child is launched with native TypeScript stripping.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	main().catch((err: unknown) => {
 		// FIX 2: a watchdog kill is a diagnosed verdict — the subprocess was

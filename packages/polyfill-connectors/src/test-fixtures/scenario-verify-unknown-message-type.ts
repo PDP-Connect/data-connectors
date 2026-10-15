@@ -14,8 +14,9 @@
  */
 
 process.stdout.write(
-	`${JSON.stringify({ type: "BOGUS_MESSAGE_TYPE", stream: "widgets" })}\n`,
+	`${JSON.stringify({ type: "BOGUS_MESSAGE_TYPE", stream: "widgets", data: "synthetic-secret-payload" })}\n`,
 );
+process.stderr.write("synthetic-secret-child-stderr\n");
 process.stdout.write(
 	`${JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 })}\n`,
 );

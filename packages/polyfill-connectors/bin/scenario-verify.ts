@@ -115,6 +115,7 @@ import {
 	packageRoot as PACKAGE_ROOT,
 	repoRoot as REPO_ROOT,
 } from "../src/connector-paths.ts";
+import { nativeTypeScriptEntrypointArgs } from "../src/native-typescript-child.ts";
 import {
 	getConnectorPaths,
 	KNOWN_CONNECTOR_NAMES,
@@ -845,19 +846,19 @@ function firstInteractionPromptMismatch(
 			? undefined
 			: {
 					field: "kind",
-					detail: `expected kind ${JSON.stringify(recorded.prompt.kind)}, got ${JSON.stringify(raw.kind)}`,
+					detail: "interaction field differs",
 				}) ??
 		(raw.message === recorded.prompt.message
 			? undefined
 			: {
 					field: "message",
-					detail: `expected message ${JSON.stringify(recorded.prompt.message)}, got ${JSON.stringify(raw.message)}`,
+					detail: "interaction field differs",
 				}) ??
 		(actualSchemaJson === recordedSchemaJson
 			? undefined
 			: {
 					field: "schema",
-					detail: `expected schema ${JSON.stringify(recorded.prompt.schema)}, got ${JSON.stringify(raw.schema)}`,
+					detail: "interaction field differs",
 				}) ??
 		(raw.timeout_seconds === recorded.prompt.timeout_seconds
 			? undefined
@@ -959,7 +960,7 @@ class StdoutProtocolAccumulator {
 		}
 		if (this.doneSeen) {
 			throw new SubprocessProtocolViolationError(
-				`scenario replay: subprocess wrote a protocol message after DONE was already observed: ${JSON.stringify(line)}`,
+				"scenario replay: subprocess wrote a protocol message after DONE was already observed",
 			);
 		}
 		let parsed: unknown;
@@ -967,7 +968,7 @@ class StdoutProtocolAccumulator {
 			parsed = JSON.parse(line);
 		} catch (err) {
 			throw new SubprocessProtocolViolationError(
-				`scenario replay: subprocess wrote a non-JSON stdout line: ${JSON.stringify(line)}`,
+				"scenario replay: subprocess wrote a non-JSON stdout line",
 				{ cause: err },
 			);
 		}
@@ -975,7 +976,7 @@ class StdoutProtocolAccumulator {
 			assertKnownMessageType(parsed);
 		} catch (err) {
 			throw new SubprocessProtocolViolationError(
-				`scenario replay: subprocess wrote a protocol message with an unrecognized type: ${JSON.stringify(line)}`,
+				"scenario replay: subprocess wrote a protocol message with an unrecognized type",
 				{ cause: err },
 			);
 		}
@@ -1026,18 +1027,13 @@ interface PartialCaptureEvidence {
 
 function labelForMessage(msg: ProtocolMessage): string {
 	const raw = msg as unknown as {
-		message?: unknown;
 		stream?: unknown;
-		type: string;
 	};
-	const parts: string[] = [raw.type];
+	const parts: string[] = [];
 	if (typeof raw.stream === "string") {
 		parts.push(`stream=${raw.stream}`);
 	}
-	if (typeof raw.message === "string") {
-		parts.push(JSON.stringify(raw.message));
-	}
-	return parts.join(" ");
+	return parts.length > 0 ? parts.join(" ") : "message";
 }
 
 function buildPartialCaptureEvidence(
@@ -1221,6 +1217,7 @@ export function createInactivityWatchdog(
  * `browserPreloadPath` branch).
  */
 function runReplaySubprocess(args: {
+	allowExpectedFailure?: boolean;
 	bridgeUrl?: string;
 	connectorPath: string;
 	/** Extra directories to bind read-only into the sandbox, beyond
@@ -1296,22 +1293,6 @@ function runReplaySubprocess(args: {
 				? {}
 				: { [args.filesystemInput.envVar]: args.filesystemInput.path }),
 			NODE_OPTIONS: `--import ${preloadPath}`,
-			// tsx's own module-transform result is cached (a persistent disk
-			// cache keyed by file content, falling back to a per-process
-			// in-memory Map only when this var is set — confirmed in
-			// node_modules/tsx/dist's own source). Left enabled, this
-			// subprocess's disk-cache HIT/MISS state (warm from a prior
-			// unisolated record run vs. cold under this sandboxed replay's
-			// redirected HOME/XDG_CACHE_HOME above) made tsx's loader call
-			// Date.now()/new Date() a DIFFERENT number of times transforming
-			// the identical connector module graph in record vs. replay — a
-			// real, found cause of clock-trace index drift (see
-			// writeReplayBridgePreload's armOnStartLine, subprocess-fetch-
-			// preloads.ts, for the other half of that fix). Disabling it here makes both
-			// subprocesses start from the same cold, per-process, never-
-			// persisted cache shape every time, matching the identical
-			// setting bin/scenario-record.ts sets for the record subprocess.
-			TSX_DISABLE_CACHE: "1",
 			PATCHRIGHT_SKIP_BROWSER_DOWNLOAD:
 				process.env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD ?? "",
 			PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD:
@@ -1346,7 +1327,7 @@ function runReplaySubprocess(args: {
 		];
 		const child = spawnWithNetworkIsolation(
 			process.execPath,
-			["--import", "tsx", args.connectorPath],
+			nativeTypeScriptEntrypointArgs(args.connectorPath),
 			{
 				cwd: PACKAGE_ROOT,
 				env: childEnv,
@@ -1424,7 +1405,7 @@ function runReplaySubprocess(args: {
 			if (!recorded) {
 				failHard(
 					new Error(
-						`scenario replay: connector emitted an INTERACTION (kind=${raw.kind}, message=${JSON.stringify(raw.message)}) ` +
+						"scenario replay: connector emitted an INTERACTION " +
 							`with no next recorded user_interactions entry left to answer it — the scenario's script is exhausted ` +
 							`(${String(nextInteractionCursor)} already consumed).`,
 					),
@@ -1561,29 +1542,30 @@ function runReplaySubprocess(args: {
 			// `failHard`/timeout paths (both of which already reject via a more
 			// specific error above); a nonzero `code` covers a normal but failing
 			// exit.
-			// A failing connector reports its actual error through a failed DONE on
-			// stdout (stderr is usually empty) — surface it, or the failure reads
-			// as a bare exit code with no cause (e.g. the egress-denial error text
-			// would otherwise never reach the operator).
+			// Child stderr and DONE payloads can contain provider data or secrets.
+			// Keep the diagnostic to process status and the DONE status.
 			const lastDone = [...protocol.messages]
 				.reverse()
 				.find((m) => m.type === "DONE");
-			const doneError =
-				lastDone && lastDone.status !== "succeeded"
-					? `; DONE=${JSON.stringify(lastDone)}`
-					: "";
+			const doneStatus =
+				lastDone && typeof lastDone.status === "string"
+					? `; DONE status=${lastDone.status}`
+					: "; DONE status=missing";
 			if (signal !== null) {
 				rejectPromise(
 					new Error(
-						`scenario replay: subprocess was terminated by signal ${signal}${doneError}; stderr=${stderr}`,
+						`scenario replay: subprocess was terminated by signal ${signal}${doneStatus}`,
 					),
 				);
 				return;
 			}
-			if (code !== 0) {
+			if (
+				code !== 0 &&
+				!(args.allowExpectedFailure === true && lastDone?.status === "failed")
+			) {
 				rejectPromise(
 					new Error(
-						`scenario replay: subprocess exited with nonzero code ${String(code)}${doneError}; stderr=${stderr}`,
+						`scenario replay: subprocess exited with nonzero code ${String(code)}${doneStatus}`,
 					),
 				);
 				return;
@@ -2194,6 +2176,7 @@ async function main(): Promise<void> {
 	// behavior is unchanged from the inline version.
 	const emitReplayResult = (
 		runIndex: number,
+		allowExpectedFailure: boolean,
 		replayResult: {
 			code: number | null;
 			messages: ProtocolMessage[];
@@ -2202,9 +2185,12 @@ async function main(): Promise<void> {
 		emit: RunCollectorEmit,
 	): void => {
 		const done = replayResult.messages.find((m) => m.type === "DONE");
-		if (done?.status !== "succeeded") {
+		if (
+			done?.status !== "succeeded" &&
+			!(allowExpectedFailure && done?.status === "failed")
+		) {
 			throw new Error(
-				`replay run ${String(runIndex)} did not reach a succeeded DONE: ${JSON.stringify(done)}; stderr=${replayResult.stderr}`,
+				`replay run ${String(runIndex)} did not reach a succeeded DONE (status=${done?.status ?? "missing"})`,
 			);
 		}
 		const { records, stateMessages } = messagesToRecordsAndState(
@@ -2309,6 +2295,8 @@ async function main(): Promise<void> {
 		};
 		try {
 			result = await runReplaySubprocess({
+				allowExpectedFailure:
+					scenario.runs[runIndex]?.expected.outcome !== undefined,
 				connectorPath,
 				preloadPath,
 				// The scenario's own evidence directory (holding har_path and
@@ -2369,7 +2357,12 @@ async function main(): Promise<void> {
 			}
 			rmSync(clockReportPath, { force: true });
 		}
-		emitReplayResult(runIndex, result, collectorArgs.emit);
+		emitReplayResult(
+			runIndex,
+			scenario.runs[runIndex]?.expected.outcome !== undefined,
+			result,
+			collectorArgs.emit,
+		);
 	};
 
 	const runCollector = async (
@@ -2411,6 +2404,8 @@ async function main(): Promise<void> {
 			};
 			try {
 				result = await runReplaySubprocess({
+					allowExpectedFailure:
+						scenario.runs[runIndex]?.expected.outcome !== undefined,
 					connectorPath,
 					bridgeUrl: bridge.url,
 					...(filesystemInput === undefined ? {} : { filesystemInput }),
@@ -2432,7 +2427,12 @@ async function main(): Promise<void> {
 				}
 				throw err;
 			}
-			emitReplayResult(runIndex, result, collectorArgs.emit);
+			emitReplayResult(
+				runIndex,
+				scenario.runs[runIndex]?.expected.outcome !== undefined,
+				result,
+				collectorArgs.emit,
+			);
 		} finally {
 			await bridge.close();
 			// Best-effort, same posture as runBrowserCollector's identical read.
@@ -2833,7 +2833,7 @@ function printCoverageReport(
 	}
 }
 
-// Only run when this module is the process entrypoint (`tsx bin/scenario-
+// Only run when this module is the process entrypoint (`node --import tsx bin/scenario-
 // verify.ts ...`), not when it's `import`ed for its pure/testable exports —
 // mirrors `bin/connector-dev.ts`'s identical guard and
 // `bin/scenario-record.ts`'s matching guard (see either file's doc comment
@@ -2841,10 +2841,9 @@ function printCoverageReport(
 // `bin/scenario-cli.test.ts`'s direct unit-import of
 // `createInactivityWatchdog` ran the ENTIRE CLI as a side effect of module
 // load (including `usageAndExit(2)` on the test process's own argv). Every
-// existing subprocess-driven test already runs this file as the real
-// entrypoint via `spawnSync(..., ["--import", "tsx", VERIFY_CLI_PATH,
-// ...])`, so `process.argv[1]` is that exact path in every case that
-// matters — this guard changes nothing for them.
+// existing subprocess-driven tests run this file as the real entrypoint via
+// `spawnSync(..., ["--import", "tsx", VERIFY_CLI_PATH, ...]); the connector
+// child is launched with native TypeScript stripping.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
 	main().catch((err: unknown) => {
 		// A validation rejection is a user-facing pre-flight verdict, not a

@@ -784,9 +784,8 @@ export function writeBrowserHarReplayPreload(
 	const src = `
 // Captured at the very top, before ANY patching below (including the
 // clock patch further down) — the one real reference this preload's own
-// pre-arm clock pass-through uses. Module loading (this file's own
-// remaining setup, tsx's own TS-transform work for the connector module
-// and its dependents) happens before a run is armed and must see the
+// pre-arm clock pass-through uses. Module loading and remaining setup happen
+// before a run is armed and must see the
 // real clock, identically to record, not the deterministic replay clock
 // below.
 // The clock trace is for the CONNECTOR's own clock reads. Patchright runs
@@ -899,8 +898,8 @@ if (FIXED_NOW_ISO) {
     let beyondTraceCount = 0;
     const advance = () => {
       // Before arming (armOnStartLine above), this is module-loading-era
-      // code (this preload's own remaining setup, tsx's own TS-transform
-      // work) — not part of the replayed run, so it must see the REAL
+      // code (this preload's own remaining setup) — not part of the replayed
+      // run, so it must see the REAL
       // clock, identically to record, rather than consuming trace entries
       // that belong to the connector's own calls.
       if (!clockArmed || untracedClockRead()) {
@@ -1158,6 +1157,20 @@ async function installSequentialHarRoutes(context) {
     const boundary = multipartBoundary(contentType);
     return String(method) + " " + String(url) + " " + sha256(boundary ? body.replaceAll(boundary, "") : body);
   };
+  const matchRequestKey = (method, url, postData, contentType) => {
+    const body = typeof postData === "string" ? postData : "";
+    const boundary = multipartBoundary(contentType);
+    let normalizedUrl = String(url);
+    try {
+      const parsedUrl = new URL(normalizedUrl);
+      for (const key of [...parsedUrl.searchParams.keys()]) {
+        if (/^(?:access_)?token$|^(?:auth|session|code|key|sig|signature|nonce|cursor|continuation|pagetoken|nextpagetoken|requestid)$/i.test(key)) parsedUrl.searchParams.delete(key);
+      }
+      parsedUrl.searchParams.sort();
+      normalizedUrl = parsedUrl.toString();
+    } catch {}
+    return String(method) + " " + normalizedUrl + " " + sha256(boundary ? body.replaceAll(boundary, "") : body);
+  };
   const headerValue = (headers, name) =>
     (headers ?? []).find((header) => String(header.name).toLowerCase() === name)?.value;
   const hasOpaqueBody = (entry) => {
@@ -1171,9 +1184,32 @@ async function installSequentialHarRoutes(context) {
     return String(entry.response?.status) + ":" + String(content?.encoding ?? "") + ":" + sha256(text);
   };
   const groups = new Map();
+  const entriesByKey = new Map();
+  const unmatchedQueryCursors = new Map();
+  const queriedGetEntriesByPath = new Map();
   for (const entry of har.log?.entries ?? []) {
     if (hasOpaqueBody(entry)) continue;
     const key = requestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text, headerValue(entry.request?.headers, "content-type"));
+    try {
+      const parsedUrl = new URL(String(entry.request?.url));
+      if (String(entry.request?.method).toUpperCase() === "GET" && parsedUrl.searchParams.size > 0) {
+        const pathKey = parsedUrl.origin + parsedUrl.pathname;
+        const matching = queriedGetEntriesByPath.get(pathKey);
+        if (matching) matching.push(entry);
+        else queriedGetEntriesByPath.set(pathKey, [entry]);
+      }
+    } catch {}
+    let hasVolatileQuery = false;
+    try {
+      const parsedUrl = new URL(String(entry.request?.url));
+      hasVolatileQuery = [...parsedUrl.searchParams.keys()].some((name) => /^(?:access_)?token$|^(?:auth|session|code|key|sig|signature|nonce|cursor|continuation|pagetoken|nextpagetoken|requestid)$/i.test(name));
+    } catch {}
+    if (hasVolatileQuery) {
+      const matchKey = matchRequestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text, headerValue(entry.request?.headers, "content-type"));
+      const matching = entriesByKey.get(matchKey);
+      if (matching) matching.push(entry);
+      else entriesByKey.set(matchKey, [entry]);
+    }
     const group = groups.get(key);
     if (group) group.push(entry);
     else groups.set(key, [entry]);
@@ -1184,13 +1220,8 @@ async function installSequentialHarRoutes(context) {
     const started = (entry) => Date.parse(String(entry.startedDateTime));
     sequences.set(key, { entries: [...group].sort((a, b) => started(a) - started(b)), next: 0 });
   }
-  if (sequences.size === 0) return;
-  await context.route("**/*", async (route) => {
-    const request = route.request();
-    const sequence = sequences.get(requestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]));
-    if (!sequence) return route.fallback();
-    const entry = sequence.entries[Math.min(sequence.next, sequence.entries.length - 1)];
-    sequence.next += 1;
+  if (entriesByKey.size === 0 && sequences.size === 0 && queriedGetEntriesByPath.size === 0) return;
+  const fulfillEntry = async (route, entry) => {
     if (!(entry.response?.status > 0)) return route.abort();
     const content = entry.response.content ?? {};
     const body = typeof content.text === "string"
@@ -1203,6 +1234,85 @@ async function installSequentialHarRoutes(context) {
       headers[header.name] = header.value;
     }
     await route.fulfill({ status: entry.response.status, headers, body });
+  };
+  await context.route("**/*", async (route) => {
+    const request = route.request();
+    const key = requestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]);
+    const sequence = sequences.get(key);
+    if (sequence) {
+      const entry = sequence.entries[Math.min(sequence.next, sequence.entries.length - 1)];
+      sequence.next += 1;
+      await fulfillEntry(route, entry);
+      return;
+    }
+    const entries = entriesByKey.get(matchRequestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]));
+    if (entries?.length) {
+      const exactEntry = entries.find((entry) => entry.request?.url === request.url());
+      if (exactEntry) {
+        await fulfillEntry(route, exactEntry);
+        return;
+      }
+      let bestEntry = null;
+      let bestScore = 0;
+      let tied = false;
+      for (const candidate of entries) {
+        const candidateUrl = new URL(String(candidate.request?.url));
+        const requestUrl = new URL(request.url());
+        let score = 0;
+        for (const [name, value] of requestUrl.searchParams) {
+          if (candidateUrl.searchParams.has(name)) score += candidateUrl.searchParams.getAll(name).includes(value) ? 2 : 1;
+        }
+        if (score > bestScore) {
+          bestEntry = candidate;
+          bestScore = score;
+          tied = false;
+        } else if (score > 0 && score === bestScore) tied = true;
+      }
+      if (bestEntry && !tied) {
+        await fulfillEntry(route, bestEntry);
+        return;
+      }
+      if (entries?.length) {
+        const cursor = unmatchedQueryCursors.get(matchRequestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"])) ?? 0;
+        unmatchedQueryCursors.set(matchRequestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]), cursor + 1);
+        await fulfillEntry(route, entries[Math.min(cursor, entries.length - 1)]);
+        return;
+      }
+    }
+    if (request.method().toUpperCase() === "GET") {
+      try {
+        const requestUrl = new URL(request.url());
+        const candidates = queriedGetEntriesByPath.get(requestUrl.origin + requestUrl.pathname) ?? [];
+        if (candidates.some((entry) => entry.request?.url === request.url())) return route.fallback();
+        if (candidates.length === 1) {
+          await fulfillEntry(route, candidates[0]);
+          return;
+        }
+        let bestEntry = null;
+        let bestScore = 0;
+        let tied = false;
+        for (const candidate of candidates) {
+          const candidateUrl = new URL(String(candidate.request?.url));
+          let score = 0;
+          for (const [name, value] of requestUrl.searchParams) {
+            if (!candidateUrl.searchParams.has(name)) continue;
+            score += candidateUrl.searchParams.getAll(name).includes(value) ? 2 : 1;
+          }
+          if (score > bestScore) {
+            bestEntry = candidate;
+            bestScore = score;
+            tied = false;
+          } else if (score > 0 && score === bestScore) {
+            tied = true;
+          }
+        }
+        if (bestEntry && !tied) {
+          await fulfillEntry(route, bestEntry);
+          return;
+        }
+      } catch {}
+    }
+    return route.fallback();
   });
 }
 // END installSequentialHarRoutes

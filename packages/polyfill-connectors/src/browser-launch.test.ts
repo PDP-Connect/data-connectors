@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -18,6 +19,7 @@ import {
 	configuredBrowserChannel,
 	connectOverCdpWithRetry,
 	decideContainerHeadedBrowserGate,
+	evaluateAfterNavigation,
 	fetchPageTargetWsUrl,
 	fileFlushOutcome,
 	HAR_RECORD_PATH_ENV,
@@ -25,13 +27,14 @@ import {
 	HeadedBrowserUnavailableError,
 	isCdpAttachSessionRaceError,
 	isDefinitivelyZeroViewport,
+	redactCdpUrl,
 	redactHarDocument,
-	redactHarFileBestEffort,
 	remoteCdpPageCleanupSkipReason,
 	resolveDeploymentBrowserHeadless,
 	resolvePageTargetWsUrl,
 	runCdpAttemptWithRaceGuard,
 	STORAGE_STATE_RECORD_PATH_ENV,
+	scrubHarFileOrThrow,
 	shouldCleanRemoteCdpPageTargets,
 	startRemoteCdpHarRecording,
 	type UnhandledRejectionHost,
@@ -44,6 +47,123 @@ const ENV_VARS = [
 	"PDPP_FORCE_CONTAINER",
 	"PDPP_ALLOW_HEADED_CONTAINER_BROWSER",
 ] as const;
+
+test("evaluateAfterNavigation: waits for a HAR redirect before retrying session setup evaluation", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-redirect-setup-"));
+	const browser = await chromium.launch({ headless: true });
+	t.after(async () => {
+		await browser.close();
+		await rm(dir, { recursive: true, force: true });
+	});
+	const harPath = join(dir, "redirect.har");
+	await writeFile(
+		harPath,
+		JSON.stringify({
+			log: {
+				version: "1.2",
+				creator: { name: "synthetic-fixture", version: "1" },
+				entries: [
+					{
+						startedDateTime: "2026-01-01T00:00:00.000Z",
+						time: 0,
+						request: {
+							method: "GET",
+							url: "https://setup.synthetic.test/start",
+							httpVersion: "HTTP/1.1",
+							headers: [],
+							queryString: [],
+							cookies: [],
+							headersSize: -1,
+							bodySize: 0,
+						},
+						response: {
+							status: 302,
+							statusText: "Found",
+							httpVersion: "HTTP/1.1",
+							headers: [
+								{
+									name: "location",
+									value: "https://setup.synthetic.test/ready",
+								},
+							],
+							cookies: [],
+							content: { size: 0, mimeType: "text/html", text: "" },
+							redirectURL: "https://setup.synthetic.test/ready",
+							headersSize: -1,
+							bodySize: 0,
+						},
+						cache: {},
+						timings: { send: 0, wait: 0, receive: 0 },
+					},
+					{
+						startedDateTime: "2026-01-01T00:00:01.000Z",
+						time: 0,
+						request: {
+							method: "GET",
+							url: "https://setup.synthetic.test/ready",
+							httpVersion: "HTTP/1.1",
+							headers: [],
+							queryString: [],
+							cookies: [],
+							headersSize: -1,
+							bodySize: 0,
+						},
+						response: {
+							status: 200,
+							statusText: "OK",
+							httpVersion: "HTTP/1.1",
+							headers: [{ name: "content-type", value: "text/html" }],
+							cookies: [],
+							content: {
+								size: 39,
+								mimeType: "text/html",
+								text: "<html><body>ready</body></html>",
+							},
+							redirectURL: "",
+							headersSize: -1,
+							bodySize: 0,
+						},
+						cache: {},
+						timings: { send: 0, wait: 0, receive: 0 },
+					},
+				],
+			},
+		}),
+	);
+	const context = await browser.newContext();
+	t.after(async () => context.close());
+	await context.routeFromHAR(harPath, { notFound: "abort" });
+	const page = await context.newPage();
+	await page.goto("https://setup.synthetic.test/start", {
+		waitUntil: "commit",
+	});
+	let attempts = 0;
+	let waitedForLoad = false;
+	const navigationRacePage = {
+		evaluate: async (callback: () => unknown) => {
+			attempts += 1;
+			if (attempts === 1) {
+				throw new Error(
+					"Execution context was destroyed, most likely because of a navigation",
+				);
+			}
+			return await page.evaluate(callback);
+		},
+		waitForLoadState: async (
+			...args: Parameters<typeof page.waitForLoadState>
+		) => {
+			waitedForLoad = true;
+			return await page.waitForLoadState(...args);
+		},
+	} as unknown as typeof page;
+	const ready = await evaluateAfterNavigation(
+		navigationRacePage,
+		() => document.body.textContent === "ready",
+	);
+	assert.equal(ready, true);
+	assert.equal(attempts, 2);
+	assert.equal(waitedForLoad, true);
+});
 
 function withEnv(values: Partial<Record<(typeof ENV_VARS)[number], string>>) {
 	const previous = new Map<string, string | undefined>();
@@ -1493,7 +1613,7 @@ test("isDefinitivelyZeroViewport: undefined measurements (unreadable) are NOT fl
 	);
 });
 
-// ─── HAR secret-hygiene pass (redactHarDocument / redactHarFileBestEffort) ─
+// ─── HAR secret-hygiene pass (redactHarDocument / scrubHarFileOrThrow) ────
 //
 // Pure-unit coverage of the actual redaction transform, independent of any
 // subprocess/CLI wiring. A synthetic HAR document exercises every field
@@ -1505,12 +1625,13 @@ function harWithOneEntry(overrides: {
 	requestHeaders?: Array<{ name: string; value: string }>;
 	requestPostData?: {
 		mimeType?: string;
-		params?: Array<{ name: string; value: string }>;
+		params?: Array<{ name: string; type?: string; value: string }>;
 		text?: string;
 	};
 	responseCookies?: Array<{ name: string; value: string }>;
 	responseContent?: { text: string };
 	responseHeaders?: Array<{ name: string; value: string }>;
+	requestUrl?: string;
 }) {
 	return {
 		log: {
@@ -1518,7 +1639,7 @@ function harWithOneEntry(overrides: {
 				{
 					request: {
 						method: "POST",
-						url: "https://provider.example.test/login",
+						url: overrides.requestUrl ?? "https://provider.example.test/login",
 						...(overrides.requestHeaders
 							? { headers: overrides.requestHeaders }
 							: {}),
@@ -1663,6 +1784,108 @@ test("redactHarDocument: blanks a credential-shaped form POST (password field) �
 	);
 });
 
+test("redactHarDocument: removes sensitive query values and all login endpoint query values", () => {
+	const har = harWithOneEntry({
+		requestUrl:
+			"https://provider.example.test/oauth/callback?code=synthetic-code&state=public-state&view=compact",
+	});
+	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
+	const url = redacted.log.entries[0]?.request.url;
+	assert.ok(url);
+	assert.doesNotMatch(url, /synthetic-code|public-state/);
+	assert.doesNotMatch(url, /compact/);
+	const authHar = harWithOneEntry({
+		requestUrl:
+			"https://provider.example.test/authenticate?next=%2Fhome&tenant=synthetic-tenant",
+	});
+	const authRedacted = redactHarDocument(authHar) as ReturnType<
+		typeof harWithOneEntry
+	>;
+	assert.doesNotMatch(
+		authRedacted.log.entries[0]?.request.url ?? "",
+		/home|synthetic-tenant/,
+	);
+	const apiHar = harWithOneEntry({
+		requestUrl:
+			"https://provider.example.test/api/data?access_token=synthetic-token&page=2",
+	});
+	const apiRedacted = redactHarDocument(apiHar) as ReturnType<
+		typeof harWithOneEntry
+	>;
+	const apiUrl = apiRedacted.log.entries[0]?.request.url ?? "";
+	assert.doesNotMatch(apiUrl, /synthetic-token/);
+	assert.match(apiUrl, /page=2/);
+});
+
+test("redactHarDocument: redacts pwd form fields", () => {
+	const har = harWithOneEntry({
+		requestPostData: {
+			mimeType: "application/x-www-form-urlencoded",
+			text: "user=synthetic-user&pwd=synthetic-password",
+			params: [
+				{ name: "user", value: "synthetic-user" },
+				{ name: "pwd", value: "synthetic-password" },
+			],
+		},
+	});
+	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
+	const postData = redacted.log.entries[0]?.request.postData;
+	assert.ok(postData);
+	assert.doesNotMatch(postData.text ?? "", /synthetic-password/);
+	assert.ok(
+		postData.params?.every((param) => param.value !== "synthetic-password"),
+	);
+});
+
+test("redactHarDocument: redacts fields marked type=password regardless of field name", () => {
+	const har = harWithOneEntry({
+		requestPostData: {
+			mimeType: "application/x-www-form-urlencoded",
+			params: [
+				{ name: "credential", type: "password", value: "synthetic-secret" },
+			],
+		},
+	});
+	const redacted = redactHarDocument(har);
+	assert.equal(
+		redacted.log?.entries?.[0]?.request?.postData?.params?.[0]?.value,
+		"[redacted-by-scenario-record]",
+	);
+});
+
+test("redactCdpUrl: removes userinfo and credential query values", () => {
+	const redacted = redactCdpUrl(
+		"wss://synthetic-user:synthetic-password@cdp.example.test/session?token=synthetic-token&view=compact",
+	);
+	assert.doesNotMatch(
+		redacted,
+		/synthetic-user|synthetic-password|synthetic-token/,
+	);
+	assert.match(redacted, /view=compact/);
+});
+
+test("connectOverCdpWithRetry: redacts credential URLs from both the error and its cause", async () => {
+	const raw =
+		"wss://operator:secret@browser.example/cdp?token=private&safe=visible";
+	let thrown: unknown;
+	try {
+		await connectOverCdpWithRetry<string>({
+			connect: () => Promise.reject(new Error(`failed to connect ${raw}`)),
+			profileName: "synthetic",
+			redactedUrl: "wss://browser.example/cdp?token=[redacted]",
+			maxAttempts: 1,
+			runAttempt: directAttempt,
+		});
+	} catch (error) {
+		thrown = error;
+	}
+	assert.ok(thrown instanceof Error);
+	const cause = thrown.cause;
+	assert.ok(cause instanceof Error);
+	assert.doesNotMatch(thrown.message, /operator|secret|private/);
+	assert.doesNotMatch(cause.message, /operator|secret|private/);
+});
+
 test("redactHarDocument: a non-credential form POST is left untouched", () => {
 	const har = harWithOneEntry({
 		requestPostData: {
@@ -1706,9 +1929,9 @@ test("redactHarDocument: a HAR with no log.entries is returned unchanged (no thr
 	assert.deepEqual(redactHarDocument({}), {});
 });
 
-// ─── redactHarFileBestEffort (file-level, best-effort) ─────────────────────
+// ─── scrubHarFileOrThrow (file-level strictness) ───────────────────────────
 
-test("redactHarFileBestEffort: redacts a real file on disk in place, 0600", async () => {
+test("scrubHarFileOrThrow: redacts a real file on disk in place, 0600", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-redact-test-"));
 	try {
 		const harPath = join(dir, "capture.har");
@@ -1721,7 +1944,7 @@ test("redactHarFileBestEffort: redacts a real file on disk in place, 0600", asyn
 			),
 			"utf8",
 		);
-		await redactHarFileBestEffort(harPath);
+		await scrubHarFileOrThrow(harPath);
 		const written = JSON.parse(await readFile(harPath, "utf8")) as ReturnType<
 			typeof harWithOneEntry
 		>;
@@ -1739,23 +1962,26 @@ test("redactHarFileBestEffort: redacts a real file on disk in place, 0600", asyn
 	}
 });
 
-test("redactHarFileBestEffort: a missing file is a silent no-op (does not throw)", async () => {
+test("scrubHarFileOrThrow: a missing file fails loudly", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-redact-missing-test-"));
 	try {
-		await assert.doesNotReject(() =>
-			redactHarFileBestEffort(join(dir, "does-not-exist.har")),
+		await assert.rejects(
+			() => scrubHarFileOrThrow(join(dir, "does-not-exist.har")),
+			/HAR scrub failed: recorded HAR file is missing/,
 		);
+		assert.ok(existsSync(join(dir, "does-not-exist.har.scrub-failed")));
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
 });
 
-test("redactHarFileBestEffort: an unparseable file is left unmodified and does not throw", async () => {
+test("scrubHarFileOrThrow: an unparseable file fails loudly and preserves bytes", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-redact-garbage-test-"));
 	try {
 		const harPath = join(dir, "garbage.har");
 		await writeFile(harPath, "not valid json {{{", "utf8");
-		await assert.doesNotReject(() => redactHarFileBestEffort(harPath));
+		await assert.rejects(() => scrubHarFileOrThrow(harPath), /HAR.*valid JSON/);
+		assert.ok(existsSync(`${harPath}.scrub-failed`));
 		const stillThere = await readFile(harPath, "utf8");
 		assert.equal(
 			stillThere,

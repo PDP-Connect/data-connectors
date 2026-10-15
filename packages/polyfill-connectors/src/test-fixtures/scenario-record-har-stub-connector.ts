@@ -12,7 +12,7 @@
  * HAR (real secret-shaped headers/cookies/postData) to the path
  * `bin/scenario-record.ts` publishes via `PDPP_SCENARIO_HAR_RECORD_PATH`
  * (src/browser-launch.ts's `HAR_RECORD_PATH_ENV`), then calls
- * `browser-launch.ts`'s EXPORTED, REAL `redactHarFileBestEffort` on it — the
+ * `browser-launch.ts`'s EXPORTED, REAL `scrubHarFileOrThrow` on it — the
  * exact same function `acquireIsolatedBrowser`'s `release()` calls for a
  * real browser context, not a re-implementation this fixture could drift
  * from. This is the faithful simulation boundary: everything Playwright
@@ -40,7 +40,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { redactHarFileBestEffort } from "../browser-launch.ts";
+import { scrubHarFileOrThrow } from "../browser-launch.ts";
 import type { RecordData, ValidateRecord } from "../connector-runtime.ts";
 import { runConnector } from "../connector-runtime.ts";
 
@@ -157,8 +157,20 @@ runConnector({
 			// Write the RAW, unredacted HAR first (this is what Playwright's own
 			// HarRecorder.flush() would produce), then call the real redaction
 			// pass — mirrors acquireIsolatedBrowser's release() ordering exactly.
-			writeFileSync(harPath, JSON.stringify(syntheticHar()), "utf8");
-			await redactHarFileBestEffort(harPath);
+			writeFileSync(
+				harPath,
+				process.env.PDPP_SCENARIO_TEST_BAD_HAR === "1"
+					? "{synthetic-invalid-har"
+					: JSON.stringify(syntheticHar()),
+				"utf8",
+			);
+			if (process.env.PDPP_SCENARIO_TEST_BAD_HAR === "1") {
+				// Mirrors the runtime's best-effort release catch: the recorder's
+				// marker check must still make the capture incomplete.
+				await scrubHarFileOrThrow(harPath).catch(() => undefined);
+			} else {
+				await scrubHarFileOrThrow(harPath);
+			}
 			// storageState is never redacted — see writeStorageStateBestEffort's
 			// doc comment in browser-launch.ts.
 			writeFileSync(

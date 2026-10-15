@@ -1183,9 +1183,12 @@ for (const kind of ["http-get", "https-request", "net-connect"] as const) {
 				false,
 				"the canary server must never receive a request — egress must be denied, not merely unmatched",
 			);
-			// The failure must name the specific escape, not just "something went wrong" —
-			// proves the ScenarioEgressDeniedError-style message reaches the CLI's output.
-			assert.match(verifyResult.stdout + verifyResult.stderr, /egress denied/i);
+			// Failure output stays payload-free; the nonzero status plus the
+			// unreachable canary proves the escape was denied.
+			assert.match(
+				verifyResult.stdout + verifyResult.stderr,
+				/DONE status=failed/,
+			);
 			t.diagnostic(
 				`verify stdout:\n${verifyResult.stdout}\nstderr:\n${verifyResult.stderr}`,
 			);
@@ -3345,7 +3348,7 @@ test("scenario-record --timeout: the watchdog DOES fire on a genuine hang, print
 		assert.match(recordResult.stderr, /observed so far: items=1 record\(s\)/);
 		assert.match(
 			recordResult.stderr,
-			/last message seen: RECORD stream=items \(\d+s ago\)/,
+			/last message seen: stream=items \(\d+s ago\)/,
 		);
 		assert.match(recordResult.stderr, /incomplete by rule \(killed mid-run\)/);
 		assert.ok(
@@ -3502,7 +3505,7 @@ test("scenario-verify --timeout: the watchdog DOES fire on a genuine hang during
 		assert.match(verifyResult.stderr, /observed so far: items=1 record\(s\)/);
 		assert.match(
 			verifyResult.stderr,
-			/last message seen: RECORD stream=items \(\d+s ago\)/,
+			/last message seen: stream=items \(\d+s ago\)/,
 		);
 		assert.match(verifyResult.stderr, /incomplete by rule \(killed mid-run\)/);
 		// Watchdog kills are diagnosed verdicts, not ordinary replay mismatches
@@ -4030,5 +4033,193 @@ test("scenario-verify: replay subprocess forces PLAYWRIGHT_BROWSERS_PATH and PDP
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 		rmSync(connectorPath, { force: true });
+	}
+});
+
+test("scenario-verify: replays a recorded stream outcome and reports outcome changed when fixed", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-expected-outcome-test-"));
+	const scenarioPath = join(tmpDir, "expected-outcome.scenario.json");
+	const fixturePath = join(
+		PACKAGE_ROOT,
+		"src",
+		"test-fixtures",
+		"scenario-expected-outcome-connector.ts",
+	);
+	try {
+		const recordResult = runRecordCli(
+			[
+				"expected-outcome",
+				"--entrypoint",
+				fixturePath,
+				"--runs",
+				"1",
+				"--out",
+				scenarioPath,
+			],
+			{ PDPP_SCENARIO_FIXTURE_FIXED: "0" },
+		);
+		assert.equal(recordResult.code, 0, `record failed: ${recordResult.stderr}`);
+		assert.doesNotMatch(
+			`${recordResult.stdout}\n${recordResult.stderr}`,
+			/synthetic-secret-(?:child-stderr|protocol-payload|done-payload)/,
+		);
+		const scenario = JSON.parse(
+			readFileSync(scenarioPath, "utf8"),
+		) as ConnectorScenario;
+		assert.equal(scenario.capture.complete, true);
+		assert.deepEqual(scenario.runs[0]?.expected.outcome?.stream_outcomes, [
+			{ outcome: "skip_result", reason_code: "stream_capped", stream: "items" },
+		]);
+
+		const replayResult = runVerifyCli(
+			["expected-outcome", "--entrypoint", fixturePath, scenarioPath],
+			{ PDPP_SCENARIO_FIXTURE_FIXED: "0" },
+		);
+		assert.equal(
+			replayResult.code,
+			0,
+			`unchanged outcome failed: ${replayResult.stdout} ${replayResult.stderr}`,
+		);
+		assert.match(replayResult.stdout, /run 0: PASS/);
+		assert.doesNotMatch(
+			`${replayResult.stdout}\n${replayResult.stderr}`,
+			/synthetic-secret-(?:child-stderr|protocol-payload|done-payload)/,
+		);
+		const changedReasonResult = runVerifyCli(
+			["expected-outcome", "--entrypoint", fixturePath, scenarioPath],
+			{
+				PDPP_SCENARIO_FIXTURE_FIXED: "0",
+				PDPP_SCENARIO_FIXTURE_REASON: "surface_unavailable",
+			},
+		);
+		assert.notEqual(changedReasonResult.code, 0);
+		assert.match(changedReasonResult.stdout, /outcome_changed/);
+		assert.match(
+			changedReasonResult.stdout,
+			/old=.*stream_capped.*new=.*surface_unavailable/,
+		);
+
+		const fixedResult = runVerifyCli(
+			["expected-outcome", "--entrypoint", fixturePath, scenarioPath],
+			{ PDPP_SCENARIO_FIXTURE_FIXED: "1" },
+		);
+		assert.notEqual(fixedResult.code, 0);
+		assert.match(fixedResult.stdout, /outcome_changed/);
+		assert.match(
+			fixedResult.stdout,
+			/outcome changed: old=.*stream_capped.*new=/,
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario record and verify children use native TS so nested page.evaluate callbacks have no __name helper", () => {
+	const fixtureDir = mkdtempSync(
+		join(packageScratchDir(), ".scenario-native-ts-"),
+	);
+	const scenarioPath = join(fixtureDir, "native-ts.scenario.json");
+	const entrypoint = join(fixtureDir, "connector.ts");
+	const importedModule = join(fixtureDir, "nested-evaluate.ts");
+	writeFileSync(
+		importedModule,
+		`export async function evaluateFromImportedModule(page: { evaluate: (callback: () => unknown) => Promise<unknown> }) {
+	return await page.evaluate(() => {
+		function nestedImportedFunction() {
+			return Number(document.querySelector("#answer")?.textContent) + 1;
+		}
+		return { answer: nestedImportedFunction(), helperAbsent: !Object.hasOwn(globalThis, "__name") };
+	});
+}
+`,
+	);
+	writeFileSync(
+		entrypoint,
+		`import assert from "node:assert/strict";
+import { chromium } from "patchright";
+import { runConnector } from "../../src/connector-runtime.ts";
+import { evaluateFromImportedModule } from "./nested-evaluate.ts";
+
+runConnector({
+	name: "scenario-native-ts-fixture",
+	validateRecord: (_stream, data) => ({ ok: true, data }),
+	async collect({ emitRecord }) {
+		const browser = await chromium.launch({ headless: true });
+		const context = await browser.newContext();
+		try {
+			const page = await context.newPage();
+			await page.goto("about:blank");
+			await page.setContent('<p id="answer">41</p>');
+			const direct = await page.evaluate(() => {
+				function nestedDirectFunction() {
+					return Number(document.querySelector("#answer")?.textContent) + 1;
+				}
+				return { answer: nestedDirectFunction(), helperAbsent: !Object.hasOwn(globalThis, "__name") };
+			});
+			const imported = await evaluateFromImportedModule(page);
+			assert.deepEqual(direct, { answer: 42, helperAbsent: true });
+			assert.deepEqual(imported, { answer: 42, helperAbsent: true });
+			await emitRecord("items", { id: "native-ts-evaluate" });
+		} finally {
+			await context.close();
+			await browser.close();
+		}
+	},
+});
+`,
+	);
+	const start = `${JSON.stringify({ type: "START", scope: { streams: [{ name: "items" }] } })}\n`;
+	try {
+		const recordResult = runRecordCli(
+			[
+				"native-ts",
+				"--entrypoint",
+				entrypoint,
+				"--runs",
+				"1",
+				"--out",
+				scenarioPath,
+			],
+			{},
+		);
+		assert.equal(
+			recordResult.code,
+			0,
+			`record failed: ${recordResult.stdout} ${recordResult.stderr}`,
+		);
+		const verifyResult = runVerifyCli([
+			"native-ts",
+			"--entrypoint",
+			entrypoint,
+			scenarioPath,
+		]);
+		assert.equal(
+			verifyResult.code,
+			0,
+			`verify failed: ${verifyResult.stdout} ${verifyResult.stderr}`,
+		);
+		assert.match(verifyResult.stdout, /run 0: PASS/);
+
+		const tsxResult = spawnSync(
+			process.execPath,
+			["--import", "tsx", entrypoint],
+			{
+				cwd: PACKAGE_ROOT,
+				env: {
+					...process.env,
+					PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+				},
+				encoding: "utf8",
+				input: start,
+				timeout: 30_000,
+			},
+		);
+		assert.match(
+			`${tsxResult.stdout}\n${tsxResult.stderr}`,
+			/ReferenceError: __name is not defined/,
+		);
+	} finally {
+		rmSync(fixtureDir, { recursive: true, force: true });
 	}
 });
