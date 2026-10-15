@@ -32,3 +32,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		workspace: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	slack: {
+		message_attachments: ["messages"],
+		reactions: ["messages"],
+	},
+};

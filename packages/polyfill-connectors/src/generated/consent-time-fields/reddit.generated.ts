@@ -29,3 +29,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		upvoted_stats: { field: "created_utc", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	reddit: {},
+};

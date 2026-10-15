@@ -25,3 +25,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		watch_later: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	youtube_takeout: {},
+};

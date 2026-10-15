@@ -23,3 +23,11 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		groups: { field: "created_at", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	groupme: {
+		attachments: ["group_messages", "direct_chat_messages"],
+	},
+};

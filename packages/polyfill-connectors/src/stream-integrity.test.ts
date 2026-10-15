@@ -28,6 +28,7 @@ type StreamRequest =
 async function wire(
 	steps: unknown[],
 	streams: StreamRequest[] = ["items"],
+	env: Record<string, string> = {},
 ): Promise<EmittedMessage[]> {
 	const result = await runConnectorProtocolSubprocess({
 		allowFailedDone: true,
@@ -35,7 +36,7 @@ async function wire(
 		entrypoint: fileURLToPath(
 			new URL("./__fixtures__/stream-integrity-connector.ts", import.meta.url),
 		),
-		env: { PDPP_TEST_STEPS: JSON.stringify(steps) },
+		env: { PDPP_TEST_STEPS: JSON.stringify(steps), ...env },
 		start: {
 			type: "START",
 			scope: {
@@ -872,4 +873,145 @@ test("coverage: after a refusal the report can never read complete, and a connec
 		covered: 1,
 	};
 	assert.deepEqual(integrity.gate(preValidated), [preValidated]);
+});
+
+// ─── Review 0c5c573 (core) regressions ──────────────────────────────────
+
+const DELETE = (stream: string, key: string): EmittedMessage => ({
+	type: "RECORD",
+	stream,
+	key,
+	data: { id: key },
+	emitted_at: "2026-10-15T00:00:00.000Z",
+	op: "delete",
+});
+
+const GAP = (stream: string, key: string, parent?: string): EmittedMessage => ({
+	type: "DETAIL_GAP",
+	reference_only: true,
+	status: "pending",
+	retryable: true,
+	reason: "temporary_unavailable",
+	stream,
+	record_key: key,
+	...(parent ? { parent_stream: parent } : {}),
+	detail_locator: { kind: "id", id: key },
+});
+
+test("review core#1: a pending DETAIL_GAP blocks a delete of that key, while the parent checkpoint may still advance", () => {
+	const integrity = createStreamIntegrity();
+	integrity.gate(GAP("details", "d1", "parents"));
+	const out = integrity.gate(DELETE("details", "d1"));
+	assert.equal(
+		out.some((m) => m.type === "RECORD"),
+		false,
+		"the gapped key must not be deleted",
+	);
+	assert.deepEqual(
+		out.map((m) => (m.type === "SKIP_RESULT" ? m.reason : m.type)),
+		[CHECKPOINT_WITHHELD_REASON],
+	);
+	assert.deepEqual(integrity.gate(DELETE("details", "d2")), [
+		DELETE("details", "d2"),
+	]);
+	assert.deepEqual(integrity.gate(STATE("parents")), [STATE("parents")]);
+});
+
+test("review core#2: a manifest-declared child loss blocks the parent STATE before any link is seen on the wire", () => {
+	const integrity = createStreamIntegrity({
+		checkpointParents: { details: ["parents"] },
+	});
+	integrity.refuseRecord("details", "d1", "shape_check_failed");
+	assert.equal(
+		integrity.gate(STATE("parents")).some((m) => m.type === "STATE"),
+		false,
+		"refuse(details) → STATE(parents) must not pass",
+	);
+	assert.deepEqual(integrity.gate(STATE("other")), [STATE("other")]);
+});
+
+test("review core#2: ancestry is the full closure, not one hop", () => {
+	const integrity = createStreamIntegrity({
+		checkpointParents: { details: ["parents"], parents: ["root"] },
+	});
+	integrity.refuseRecord("details", "d1", "shape_check_failed");
+	assert.equal(
+		integrity.gate(STATE("root")).some((m) => m.type === "STATE"),
+		false,
+		"a details loss must reach root through parents",
+	);
+	assert.deepEqual(integrity.gate(STATE("sibling")), [STATE("sibling")]);
+});
+
+test("review core#2 (wire): refuse(details), STATE(parents), then DETAIL_COVERAGE: the parent STATE is withheld", async () => {
+	const messages = await wire(
+		[
+			{ op: "record", stream: "details", data: { id: "d1", bad: true } },
+			{ op: "emit", msg: STATE("parents") },
+			{
+				op: "emit",
+				msg: {
+					type: "DETAIL_COVERAGE",
+					reference_only: true,
+					stream: "details",
+					state_stream: "parents",
+					required_keys: ["d1"],
+					hydrated_keys: ["d1"],
+				},
+			},
+		],
+		["parents", "details"],
+		{ PDPP_TEST_CHECKPOINT_PARENTS: JSON.stringify({ details: ["parents"] }) },
+	);
+	assert.equal(
+		messages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("review core#4: after a refusal, a 0/0 or considered-only coverage claim becomes unknown", () => {
+	for (const counts of [
+		{ considered: 0, covered: 0 },
+		{ considered: 3 },
+		{ covered: 3 },
+	]) {
+		const integrity = createStreamIntegrity();
+		integrity.refuseRecord("items", "b", "shape_check_failed");
+		const out = integrity.gate({
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream: "items",
+			state_stream: "items",
+			required_keys: [],
+			hydrated_keys: [],
+			...counts,
+		});
+		const coverage = out.find((m) => m.type === "DETAIL_COVERAGE");
+		assert.ok(coverage?.type === "DETAIL_COVERAGE", JSON.stringify(counts));
+		assert.equal("considered" in coverage, false, JSON.stringify(counts));
+		assert.equal("covered" in coverage, false, JSON.stringify(counts));
+	}
+});
+
+test("review core#5: a raw stream_collection_failed SKIP_RESULT ends the run failed, like reportStreamFailure", async () => {
+	const messages = await wire([
+		good("a"),
+		{
+			op: "emit",
+			msg: {
+				type: "SKIP_RESULT",
+				stream: "items",
+				reason: "stream_collection_failed",
+				message: "raw failure",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			},
+		},
+		{ op: "emit", msg: STATE("items") },
+	]);
+	assert.deepEqual(summary(messages), [
+		"RECORD:items:a",
+		"SKIP_RESULT:items:stream_collection_failed",
+		`SKIP_RESULT:items:${CHECKPOINT_WITHHELD_REASON}`,
+		"DONE:failed",
+	]);
 });

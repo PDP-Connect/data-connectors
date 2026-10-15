@@ -601,27 +601,94 @@ const ENUMERATION_CASES: ReadonlyArray<{
 		expect: "incomplete",
 	},
 	{
-		name: "a cursor walk whose last page says has_more false is complete",
-		items: ["x"],
-		evidence: { kind: "cursor", has_more: false, next_cursor: null },
+		name: "a cursor walk from the first page through a contiguous chain to an explicit end is complete",
+		items: ["x", "y"],
+		evidence: {
+			kind: "cursor",
+			pages: [
+				{ requested_cursor: null, has_more: true, next_cursor: "a" },
+				{ requested_cursor: "a", has_more: false, next_cursor: null },
+			],
+		},
 		expect: "complete",
 	},
 	{
-		name: "a missing has_more is not an end",
+		name: "review core#3: a resumed walk's genuine last page is not a full inventory",
 		items: ["x"],
-		evidence: { kind: "cursor", has_more: undefined, next_cursor: null },
+		evidence: {
+			kind: "cursor",
+			pages: [{ requested_cursor: "c90", has_more: false, next_cursor: null }],
+		},
+		expect: "incomplete",
+	},
+	{
+		name: "a chain whose request does not follow the previous next cursor is not complete",
+		items: ["x", "y"],
+		evidence: {
+			kind: "cursor",
+			pages: [
+				{ requested_cursor: null, has_more: true, next_cursor: "a" },
+				{ requested_cursor: "b", has_more: false, next_cursor: null },
+			],
+		},
+		expect: "incomplete",
+	},
+	{
+		name: "a page that says it was the last but was followed is not complete",
+		items: ["x", "y"],
+		evidence: {
+			kind: "cursor",
+			pages: [
+				{ requested_cursor: null, has_more: false, next_cursor: "a" },
+				{ requested_cursor: "a", has_more: false, next_cursor: null },
+			],
+		},
+		expect: "incomplete",
+	},
+	{
+		name: "a missing has_more on the last page is not an end",
+		items: ["x"],
+		evidence: {
+			kind: "cursor",
+			pages: [
+				{ requested_cursor: null, has_more: undefined, next_cursor: null },
+			],
+		},
 		expect: "incomplete",
 	},
 	{
 		name: "has_more false with a next cursor contradicts itself",
 		items: ["x"],
-		evidence: { kind: "cursor", has_more: false, next_cursor: "abc" },
+		evidence: {
+			kind: "cursor",
+			pages: [{ requested_cursor: null, has_more: false, next_cursor: "abc" }],
+		},
 		expect: "incomplete",
 	},
 	{
 		name: "a cursor walk whose total disagrees with the items is not complete",
 		items: ["x"],
-		evidence: { kind: "cursor", has_more: false, total: 2 },
+		evidence: {
+			kind: "cursor",
+			pages: [{ requested_cursor: null, has_more: false, next_cursor: null }],
+			total: 2,
+		},
+		expect: "incomplete",
+	},
+	{
+		name: "without a first-page chain, a total equal to the items read and an explicit end is complete",
+		items: ["x"],
+		evidence: {
+			kind: "cursor",
+			pages: [{ requested_cursor: "c90", has_more: false, next_cursor: null }],
+			total: 1,
+		},
+		expect: "complete",
+	},
+	{
+		name: "no pages at all is not complete",
+		items: [],
+		evidence: { kind: "cursor", pages: [] },
 		expect: "incomplete",
 	},
 	{
@@ -640,3 +707,10 @@ for (const c of ENUMERATION_CASES) {
 		if (result.kind === "incomplete") assert.ok(result.reason.length > 0);
 	});
 }
+
+test("review core#3: last-page metadata alone (the reviewer's trace) is not a full inventory", () => {
+	// The pre-repair evidence shape: only the final page's end signal.
+	const lastPageOnly = { kind: "cursor", has_more: false, next_cursor: null };
+	const result = enumerated(["tail"], lastPageOnly as never);
+	assert.equal(result.kind, "incomplete", JSON.stringify(result));
+});

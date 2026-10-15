@@ -86,6 +86,7 @@ import {
 	createCaptureSession,
 } from "./fixture-capture.ts";
 import {
+	CHECKPOINT_PARENTS,
 	CONSENT_BOUND_CONNECTOR,
 	CONSENT_TIME_FIELDS,
 } from "./generated/consent-time-fields.generated.ts";
@@ -402,6 +403,13 @@ interface BaseRunConnectorConfig {
 	 * its manifest's per-stream `consent_time_field` is the only authority.
 	 */
 	timeRangeField?: string | ((stream: string) => string);
+	/**
+	 * Checkpoint parents (data stream → its checkpoint streams) for a
+	 * connector with no shipped manifest, such as a test fixture. A shipped
+	 * connector's parents come from its manifest's `state_stream` /
+	 * `parent_streams` via the generated table, and setting this is an error.
+	 */
+	checkpointParents?: Readonly<Record<string, readonly string[]>>;
 	validateRecord?: ValidateRecord;
 }
 
@@ -1037,6 +1045,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		onDurableCommit,
 		retryablePattern = DEFAULT_RETRYABLE_PATTERN,
 		timeRangeField,
+		checkpointParents,
 		isTombstone,
 		auth,
 		authOptional = false,
@@ -1351,7 +1360,9 @@ export function runConnector(config: RunConnectorConfig): void {
 			...extra,
 		});
 
-	const integrity = createStreamIntegrity();
+	const integrity = createStreamIntegrity({
+		checkpointParents: checkpointParentsFor(name, checkpointParents),
+	});
 
 	const reportStreamFailure: NonNullable<
 		BaseCollectContext["reportStreamFailure"]
@@ -1488,6 +1499,19 @@ export function runConnector(config: RunConnectorConfig): void {
 		// stream that lost a row in this run cannot checkpoint, delete, or claim
 		// full coverage (see stream-integrity.ts).
 		const emitConnectorMessage = async (msg: EmittedMessage): Promise<void> => {
+			// A raw stream failure is the same terminal fact as
+			// reportStreamFailure(): the run must end failed, not succeeded.
+			if (
+				msg.type === "SKIP_RESULT" &&
+				msg.reason === "stream_collection_failed"
+			)
+				reportedStreamFailure ??= {
+					message: msg.message,
+					retryable:
+						typeof msg.recovery_hint === "object" &&
+						msg.recovery_hint.retryable === true,
+					stream: msg.stream,
+				};
 			for (const out of integrity.gate(msg))
 				await emitWithBoundedCheckpoints(out);
 		};
@@ -1599,6 +1623,29 @@ async function parseStart(
  * resolves every stream to `null`. A built artifact is bound to its own
  * connector (see scripts/consent-slice-resolution.mjs); any other name throws.
  */
+/**
+ * The connector's declared checkpoint dependencies, known before the first
+ * message. A shipped connector's come from its manifest (generated table);
+ * a connector with no shipped manifest may pass them in config.
+ */
+export function checkpointParentsFor(
+	name: string,
+	configured?: Readonly<Record<string, readonly string[]>>,
+): Readonly<Record<string, readonly string[]>> {
+	const key = name.replaceAll("-", "_");
+	const declared = Object.hasOwn(CHECKPOINT_PARENTS, key)
+		? CHECKPOINT_PARENTS[key]
+		: undefined;
+	if (declared) {
+		if (configured !== undefined)
+			throw new Error(
+				`runConnector: ${name} has a shipped manifest; remove checkpointParents and declare state_stream / parent_streams there`,
+			);
+		return declared;
+	}
+	return configured ?? {};
+}
+
 export function consentTimeFieldResolver(
 	name: string,
 	timeRangeField?: string | ((stream: string) => string),

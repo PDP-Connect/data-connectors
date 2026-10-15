@@ -20,3 +20,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		timeline_segments: { field: "start_time", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	google_maps: {},
+};

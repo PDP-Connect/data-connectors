@@ -33,3 +33,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		workouts: { field: "start_date", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	apple_health: {},
+};

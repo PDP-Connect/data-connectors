@@ -23,3 +23,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		projects: { field: "create_time", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	anthropic: {},
+};

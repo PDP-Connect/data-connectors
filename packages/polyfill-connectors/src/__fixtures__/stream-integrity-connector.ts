@@ -24,6 +24,13 @@ runConnector({
 	name: "stream_integrity_fixture",
 	// No shipped manifest, so the fixture names its consent time field here.
 	timeRangeField: "updated_at",
+	...(process.env.PDPP_TEST_CHECKPOINT_PARENTS
+		? {
+				checkpointParents: JSON.parse(
+					process.env.PDPP_TEST_CHECKPOINT_PARENTS,
+				) as Record<string, string[]>,
+			}
+		: {}),
 	validateRecord: (_stream, data) =>
 		data.bad === true
 			? {

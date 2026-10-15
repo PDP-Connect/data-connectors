@@ -5,30 +5,42 @@
  * Full-inventory completion must come from `fullInventoryCoverage` with an
  * `enumerated(...)` proof: on a full-inventory stream, rows the source no
  * longer lists are read as deleted, and an array alone does not show the
- * list was whole. `buildFullScanCoverageMessage` claims full coverage from a
- * bare count, so new callers are refused. The connectors below called it
- * before this guard existed; each is known debt and leaves the list when it
- * moves to `fullInventoryCoverage`.
+ * list was whole. The other ways to claim it — `buildFullScanCoverageMessage`
+ * (under any alias) and a hand-built self DETAIL_COVERAGE — are frozen here
+ * per file and per kind, counted by a syntax-aware scan
+ * (`full-inventory-claim-scan.ts`). The baseline may only shrink: a new call
+ * site fails, and a removed one must be removed from the baseline too.
  */
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import test from "node:test";
-import { connectorsDir } from "./connector-paths.ts";
+import { connectorsDir, repoRoot } from "./connector-paths.ts";
+import {
+	type ClaimCounts,
+	scanFullInventoryClaims,
+} from "./full-inventory-claim-scan.ts";
 
-const KNOWN_UNPROVEN_CALLERS = new Set([
-	"anthropic",
-	"anthropic_live",
-	"apple_contacts",
-	"chase",
-	"chatgpt",
-	"gmail",
-	"google_maps",
-	"groupme",
-	"jellyfin",
-	"slack",
-]);
+const BASELINE: Readonly<Record<string, ClaimCounts>> = {
+	"connectors/anthropic/index.ts": { full_scan: 4, self_coverage: 0 },
+	"connectors/anthropic_live/index.ts": { full_scan: 2, self_coverage: 0 },
+	"connectors/apple_contacts/index.ts": { full_scan: 1, self_coverage: 0 },
+	"connectors/chase/index.ts": { full_scan: 1, self_coverage: 2 },
+	"connectors/chatgpt/index.ts": { full_scan: 3, self_coverage: 2 },
+	"connectors/doordash/index.ts": { full_scan: 0, self_coverage: 2 },
+	"connectors/github/index.ts": { full_scan: 0, self_coverage: 1 },
+	"connectors/gmail/index.ts": { full_scan: 1, self_coverage: 2 },
+	"connectors/google_maps/index.ts": { full_scan: 1, self_coverage: 2 },
+	"connectors/groupme/index.ts": { full_scan: 4, self_coverage: 0 },
+	"connectors/jellyfin/index.ts": { full_scan: 1, self_coverage: 1 },
+	"connectors/linkedin/index.ts": { full_scan: 0, self_coverage: 1 },
+	"connectors/signal/index.ts": { full_scan: 0, self_coverage: 1 },
+	"connectors/slack/index.ts": { full_scan: 6, self_coverage: 2 },
+	"connectors/uber/index.ts": { full_scan: 0, self_coverage: 1 },
+	"connectors/venmo/index.ts": { full_scan: 0, self_coverage: 3 },
+	"connectors/whatsapp/index.ts": { full_scan: 0, self_coverage: 3 },
+};
 
 function sourceFiles(dir: string): string[] {
 	return readdirSync(dir).flatMap((name) => {
@@ -41,29 +53,92 @@ function sourceFiles(dir: string): string[] {
 	});
 }
 
-test("no new connector claims full coverage without an enumeration proof", () => {
-	const callers = new Set<string>();
-	for (const connector of readdirSync(connectorsDir)) {
-		const dir = join(connectorsDir, connector);
-		if (!statSync(dir).isDirectory()) continue;
-		for (const file of sourceFiles(dir))
-			if (readFileSync(file, "utf8").includes("buildFullScanCoverageMessage("))
-				callers.add(connector);
+test("full-inventory claims outside fullInventoryCoverage only shrink", () => {
+	const grown: string[] = [];
+	const shrunk: string[] = [];
+	const seen = new Set<string>();
+	for (const file of sourceFiles(connectorsDir)) {
+		const counts = scanFullInventoryClaims(readFileSync(file, "utf8"));
+		if (counts.full_scan === 0 && counts.self_coverage === 0) continue;
+		const path = relative(repoRoot, file);
+		seen.add(path);
+		const base = BASELINE[path] ?? { full_scan: 0, self_coverage: 0 };
+		for (const kind of ["full_scan", "self_coverage"] as const) {
+			if (counts[kind] > base[kind])
+				grown.push(
+					`${path} ${kind}: ${String(base[kind])} → ${String(counts[kind])}`,
+				);
+			else if (counts[kind] < base[kind])
+				shrunk.push(
+					`${path} ${kind}: ${String(base[kind])} → ${String(counts[kind])}`,
+				);
+		}
 	}
-	const unexpected = [...callers].filter(
-		(connector) => !KNOWN_UNPROVEN_CALLERS.has(connector),
-	);
+	for (const path of Object.keys(BASELINE))
+		if (!seen.has(path)) shrunk.push(`${path}: no claims left`);
 	assert.deepEqual(
-		unexpected,
+		grown,
 		[],
 		"use fullInventoryCoverage(stream, enumerated(items, evidence)) instead",
 	);
-	const retired = [...KNOWN_UNPROVEN_CALLERS].filter(
-		(connector) => !callers.has(connector),
-	);
-	assert.deepEqual(
-		retired,
-		[],
-		"remove connectors that no longer call buildFullScanCoverageMessage",
-	);
+	assert.deepEqual(shrunk, [], "lower the BASELINE to match (it only shrinks)");
 });
+
+const COUNT = (full_scan: number, self_coverage: number): ClaimCounts => ({
+	full_scan,
+	self_coverage,
+});
+
+const SCAN_CASES: ReadonlyArray<[string, string, ClaimCounts]> = [
+	[
+		"a plain call",
+		'import { buildFullScanCoverageMessage } from "x";\nbuildFullScanCoverageMessage("a", 1);',
+		COUNT(1, 0),
+	],
+	[
+		"an import alias",
+		'import { buildFullScanCoverageMessage as fullScan } from "x";\nfullScan("a", 1);',
+		COUNT(1, 0),
+	],
+	[
+		"whitespace and a newline before the parenthesis",
+		'import { buildFullScanCoverageMessage } from "x";\nbuildFullScanCoverageMessage \n ("a", 1);',
+		COUNT(1, 0),
+	],
+	[
+		"a namespace member",
+		'import * as runtime from "x";\nruntime.buildFullScanCoverageMessage("a", 1);',
+		COUNT(1, 0),
+	],
+	[
+		"a const re-binding",
+		'import { buildFullScanCoverageMessage } from "x";\nconst claim = buildFullScanCoverageMessage;\nclaim("a", 1);',
+		COUNT(1, 0),
+	],
+	[
+		"a self coverage built with buildDetailCoverageMessage",
+		'import { buildDetailCoverageMessage as d } from "x";\nd({ stream: s, stateStream: s, requiredKeys: [], hydratedKeys: [], considered: 1, covered: 1 });',
+		COUNT(0, 1),
+	],
+	[
+		"a self DETAIL_COVERAGE literal",
+		'emit({ type: "DETAIL_COVERAGE", reference_only: true, stream: "a", state_stream: "a", required_keys: [], hydrated_keys: [] });',
+		COUNT(0, 1),
+	],
+	[
+		"a detail coverage for another checkpoint is not a self claim",
+		'emit({ type: "DETAIL_COVERAGE", reference_only: true, stream: "details", state_stream: "parents", required_keys: [], hydrated_keys: [] });',
+		COUNT(0, 0),
+	],
+	[
+		"the name in a string or comment is not a call",
+		'// buildFullScanCoverageMessage("a", 1)\nconst text = "buildFullScanCoverageMessage(";',
+		COUNT(0, 0),
+	],
+];
+
+for (const [name, source, expected] of SCAN_CASES) {
+	test(`full-inventory claim scan: ${name}`, () => {
+		assert.deepEqual(scanFullInventoryClaims(source), expected);
+	});
+}

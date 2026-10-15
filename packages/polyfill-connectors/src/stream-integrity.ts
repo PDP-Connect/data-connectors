@@ -23,7 +23,8 @@
  *
  * What the runtime then does to outgoing messages:
  *
- *   - `STATE` whose `stream` is the stream, or a checkpoint parent of it:
+ *   - `STATE` whose `stream` is the stream, or any checkpoint ancestor of it
+ *     (the full chain of parents, see CHECKPOINT PARENTS):
  *     not sent after a rule-1 or rule-2 loss, nor after a rule-3 skip that
  *     carries no typed declaration (a resume-safe basis or a declared bound,
  *     both below). `recovery_hint.retryable: false` is not a declaration, and
@@ -53,10 +54,12 @@
  *   - `DETAIL_COVERAGE` for the stream: keys of refused records leave
  *     `hydrated_keys`, so they are unaccounted. `covered` is capped at
  *     `considered` minus the refused rows, so the report can never read
- *     complete after a loss. After a rule-3 skip, a report that reads full
- *     (`covered >= considered`, or `considered` with no `covered`) loses both
- *     counts and reads as unknown; a report that already shows a shortfall
- *     stays.
+ *     complete after a loss. After a refusal, a report missing either count,
+ *     or whose `considered` is below the refused rows (for example 0/0),
+ *     contradicts the run and loses both counts: it reads unknown. After a
+ *     rule-3 skip, a report that reads full (`covered >= considered`, or
+ *     `considered` with no `covered`) loses both counts too; a report that
+ *     already shows a shortfall stays.
  *   - `STREAM_EVIDENCE` for the stream: every refusal the connector could
  *     not see (schema, missing id) moves from `outcomes.emitted` to
  *     `outcomes.unaccounted`, with no assumption that it overlaps rows
@@ -120,19 +123,39 @@
  * `required_keys` but not in `hydrated_keys` (unaccounted, not missing), and
  * the stored copy from an earlier run stays as it was.
  *
- * DETAIL_GAP is not a loss here. The Collection Profile already counts a key
- * backed by a durable `DETAIL_GAP` as accounted, and the runtime's gap
- * recovery retries it, so the parent checkpoint may advance. A `DETAIL_GAP`
- * does tell the runtime which checkpoint parent a detail stream maps to.
+ * DETAIL_GAP AND CHECKPOINTS VERSUS DELETES
+ *
+ * A DETAIL_GAP is not a loss for checkpoints: the Collection Profile counts a
+ * key backed by a durable `DETAIL_GAP` as accounted, and the runtime's gap
+ * recovery retries it, so the parent checkpoint may advance. That exception
+ * is for checkpoints only. The gapped row was not read in this run, so a
+ * `RECORD{op: "delete"}` for a key with a pending DETAIL_GAP in that stream
+ * is never sent.
+ *
+ * A raw `SKIP_RESULT{reason: "stream_collection_failed"}` sent through
+ * `ctx.emit` ends the run failed, exactly like `reportStreamFailure()`.
  *
  * CHECKPOINT PARENTS
  *
  * `STATE.stream` names a checkpoint, which can differ from the data streams
- * it covers. The runtime learns a data stream's parent from the
- * `DETAIL_COVERAGE.state_stream` and `DETAIL_GAP.parent_stream` it sees in the
- * run; every stream is also its own checkpoint. A parent that the manifest
- * declares but the run never names on the wire before its `STATE` is not
- * known here.
+ * it covers. The dependencies are known before the first message: the
+ * manifest's `state_stream` / `parent_streams` for each stream (carried into a
+ * built artifact by the generated table, `CHECKPOINT_PARENTS`) seed the
+ * runtime at construction. A stream that declares neither is its own
+ * checkpoint, as the Collection Profile defines. Links the run names on the
+ * wire (`DETAIL_COVERAGE.state_stream`, `DETAIL_GAP.parent_stream`) are added.
+ * A loss blocks the STATE of every checkpoint reachable through any chain of
+ * parents; independent streams are not affected.
+ *
+ * TRUST BOUNDARY
+ *
+ * A resume-safe basis or a declared bound is a typed CLAIM by the code that
+ * owns the cursor; the runtime checks only that it is one of the closed set.
+ * Likewise `enumerated()` evaluates the evidence it is given, and an
+ * Enumeration value can be built by hand. These rules stop honest mistakes
+ * and make every claim visible on the wire and at its call site; they do not
+ * stop a connector that asserts a false basis. Already-sent messages are not
+ * recalled, so a periodic STATE must cover only work already stored.
  */
 
 import type {
@@ -335,10 +358,43 @@ const NOTICE_TEXT: Record<WithheldKind, string> = {
 		"gap recovery not recorded; the refused record's gap stays pending",
 };
 
-export function createStreamIntegrity(): StreamIntegrity {
+export interface StreamIntegrityOptions {
+	/**
+	 * The manifest's declared checkpoint dependencies, known before the first
+	 * message: data stream → its `state_stream` / `parent_streams`. A stream
+	 * that declares neither is its own checkpoint (Collection Profile
+	 * "Checkpoint dependency"). Links the run names on the wire are added.
+	 */
+	readonly checkpointParents?: Readonly<Record<string, readonly string[]>>;
+}
+
+const EMPTY_LOSS: StreamLoss = {
+	causes: new Map(),
+	failed: false,
+	refusedKeys: new Set(),
+	refused: 0,
+	skipReasons: new Set(),
+	unacknowledged: 0,
+	undeclaredSkips: new Set(),
+};
+
+export function createStreamIntegrity(
+	options: StreamIntegrityOptions = {},
+): StreamIntegrity {
 	const losses = new Map<string, StreamLoss>();
 	const parents = new Map<string, Set<string>>();
 	const notified = new Set<string>();
+	/** Keys with a pending DETAIL_GAP this run, per stream: never deleted. */
+	const gapKeys = new Map<string, Set<string>>();
+	for (const [stream, declared] of Object.entries(
+		options.checkpointParents ?? {},
+	))
+		for (const parent of declared)
+			if (parent !== stream) {
+				const set = parents.get(stream) ?? new Set<string>();
+				set.add(parent);
+				parents.set(stream, set);
+			}
 
 	const lossFor = (stream: string): StreamLoss => {
 		let loss = losses.get(stream);
@@ -374,11 +430,34 @@ export function createStreamIntegrity(): StreamIntegrity {
 			(loss.refused > 0 || loss.failed || loss.undeclaredSkips.size > 0)
 		);
 	};
-	/** Data streams whose loss blocks a checkpoint for `checkpoint`. */
+	/** True when `ancestor` is reachable from `stream` through parent links. */
+	const dependsOn = (stream: string, ancestor: string): boolean => {
+		const seen = new Set<string>();
+		const pending = [stream];
+		for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+			for (const parent of parents.get(next) ?? []) {
+				if (parent === ancestor) return true;
+				if (!seen.has(parent)) {
+					seen.add(parent);
+					pending.push(parent);
+				}
+			}
+		}
+		return false;
+	};
+	/**
+	 * Streams whose loss blocks a checkpoint for `checkpoint`: itself, and
+	 * every stream that depends on it through any chain of parents.
+	 */
 	const incompleteUnder = (checkpoint: string): string[] => {
 		const streams = blocksCheckpoint(checkpoint) ? [checkpoint] : [];
-		for (const [stream, set] of parents)
-			if (set.has(checkpoint) && blocksCheckpoint(stream)) streams.push(stream);
+		for (const stream of losses.keys())
+			if (
+				stream !== checkpoint &&
+				blocksCheckpoint(stream) &&
+				dependsOn(stream, checkpoint)
+			)
+				streams.push(stream);
 		return streams;
 	};
 
@@ -401,7 +480,9 @@ export function createStreamIntegrity(): StreamIntegrity {
 		if (notified.has(noticeKey)) return [];
 		notified.add(noticeKey);
 		const detail = incomplete.map((name) => {
-			const loss = lossFor(name);
+			// Read-only: reporting a withheld message must not itself record a
+			// loss (a gapped-key delete leaves the stream otherwise intact).
+			const loss = losses.get(name) ?? EMPTY_LOSS;
 			return {
 				stream: name,
 				refused_records: loss.refused,
@@ -460,6 +541,19 @@ export function createStreamIntegrity(): StreamIntegrity {
 				: considered === undefined || covered >= considered;
 		if (loss.skipReasons.size > 0 && readsFull)
 			return { ...rest, hydrated_keys };
+		// After a refusal, a report missing either count, or whose denominator
+		// cannot hold the refused rows, contradicts the run: it becomes
+		// unknown. Counts are never inferred.
+		if (
+			loss.refused > 0 &&
+			(covered === undefined ||
+				considered === undefined ||
+				considered < loss.refused)
+		) {
+			if (covered === undefined && considered === undefined && !keysChanged)
+				return null;
+			return { ...rest, hydrated_keys };
+		}
 		const corrected =
 			covered === undefined
 				? undefined
@@ -517,6 +611,9 @@ export function createStreamIntegrity(): StreamIntegrity {
 			}
 			case "DETAIL_GAP": {
 				linkParent(msg.stream, msg.parent_stream);
+				const keys = gapKeys.get(msg.stream) ?? new Set<string>();
+				keys.add(String(msg.record_key));
+				gapKeys.set(msg.stream, keys);
 				return [msg];
 			}
 			case "DETAIL_GAP_RECOVERED": {
@@ -559,7 +656,11 @@ export function createStreamIntegrity(): StreamIntegrity {
 					: notice(msg.stream, incomplete, "STATE");
 			}
 			case "RECORD": {
-				if (msg.op !== "delete" || !isIncomplete(msg.stream)) return [msg];
+				if (msg.op !== "delete") return [msg];
+				// A durable DETAIL_GAP lets the parent checkpoint advance, but the
+				// gapped row was not read: it must not be deleted as unseen.
+				const gapped = gapKeys.get(msg.stream)?.has(String(msg.key)) ?? false;
+				if (!(gapped || isIncomplete(msg.stream))) return [msg];
 				return notice(msg.stream, [msg.stream], "delete");
 			}
 			default:

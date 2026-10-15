@@ -19,3 +19,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		activities: { field: "start_date_local", format: "date" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	strava_browser: {},
+};
