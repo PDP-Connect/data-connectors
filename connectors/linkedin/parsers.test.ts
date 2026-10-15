@@ -265,8 +265,12 @@ function profileSources(
 				withCompleteCollections(child),
 			]),
 		);
-		return Array.isArray(collection.elements) && !Object.hasOwn(collection, "paging")
-			? { ...collection, paging: { start: 0, total: collection.elements.length } }
+		return Array.isArray(collection.elements) &&
+			!Object.hasOwn(collection, "paging")
+			? {
+					...collection,
+					paging: { start: 0, total: collection.elements.length },
+				}
 			: collection;
 	};
 	return {
@@ -309,7 +313,7 @@ test("buildProfileRows: maps core fields and derives current position from the o
 									title: "Staff Engineer",
 								},
 							],
-				paging: { start: 0, total: 1 },
+							paging: { start: 0, total: 1 },
 						},
 					},
 				],
@@ -387,6 +391,21 @@ test("profileFieldReads: headline and name parts fall back to /me; an empty dash
 		"Engineer at Acme",
 	);
 	assert.equal(readValue(reads.full_name as FieldRead<string>), "DashLast");
+});
+
+test("profileFieldReads: a malformed firstName cannot be laundered through lastName", () => {
+	for (const dash of [
+		{ firstName: 17, joinedName: "Readable Name", lastName: "Readable" },
+		{ firstName: "Readable", joinedName: "Readable Name", lastName: 17 },
+	]) {
+		const reads = profileFieldReads(profileSources(dash));
+		assert.deepEqual(reads.full_name, unavailable("malformed"));
+		const rows = buildProfileRows(profileSources(dash));
+		assert.deepEqual(rows.records, []);
+		assert.equal(rows.considered, 1);
+		assert.equal(rows.covered, 0);
+		assert.equal(rows.unavailableFields.full_name?.malformed, 1);
+	}
 });
 
 test("profileFieldReads: profile picture prefers the dash image, then /me typed, then /me bare", () => {
@@ -700,6 +719,58 @@ test("buildConnectionRows: resolved profile gives full enrichment", () => {
 		profile_url: "https://www.linkedin.com/in/jamielee/",
 	});
 	assert.equal(validateRecord("connections", rows.records[0]).ok, true);
+});
+
+test("buildConnectionRows: either malformed name part withholds the whole row", () => {
+	for (const resolved of [
+		{
+			firstName: 17,
+			joinedName: "Readable Name",
+			lastName: "Readable",
+			publicIdentifier: "profile-key",
+		},
+		{
+			firstName: "Readable",
+			joinedName: "Readable Name",
+			lastName: 17,
+			publicIdentifier: "profile-key",
+		},
+	]) {
+		const rows = buildConnectionRows(
+			[{ connectedMember: "urn:li:fsd_profile:member-key" }],
+			() => resolved,
+		);
+		assert.deepEqual(rows.records, []);
+		assert.equal(rows.considered, 1);
+		assert.equal(rows.covered, 0);
+		assert.equal(rows.unavailableFields.full_name?.malformed, 1);
+	}
+});
+
+test("buildExperienceRows: bare start is readable and a malformed bare end withholds the row", () => {
+	const readable = buildExperienceRows([
+		{ title: "Role", start: { year: 2010 } },
+	]);
+	assert.equal(readable.records[0]?.start_date, "2010");
+	assert.equal(readable.covered, 1);
+
+	const malformed = buildExperienceRows([
+		{ title: "Role", start: { year: 2010 }, end: 2020 },
+	]);
+	assert.deepEqual(malformed.records, []);
+	assert.equal(malformed.considered, 1);
+	assert.equal(malformed.covered, 0);
+	assert.equal(malformed.unavailableFields.end_date?.malformed, 1);
+});
+
+test("buildEducationRows: a malformed bare end withholds the whole row", () => {
+	const rows = buildEducationRows([
+		{ schoolName: "School", start: { year: 2010 }, end: { year: "string" } },
+	]);
+	assert.deepEqual(rows.records, []);
+	assert.equal(rows.considered, 1);
+	assert.equal(rows.covered, 0);
+	assert.equal(rows.unavailableFields.end_date?.malformed, 1);
 });
 
 test("buildConnectionRows: source-backed blank names stay blank", () => {
