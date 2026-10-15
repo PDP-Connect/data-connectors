@@ -624,7 +624,15 @@ test("collectAllStreams: note records keep empty title values and reject non-Not
 		["notes"],
 	);
 	ctx.progress = async (_message, extra) => {
-		if (extra?.phase === "emit") progress.push(extra);
+		if (
+			extra &&
+			"intentional_exclusions" in extra &&
+			typeof extra.intentional_exclusions === "number"
+		) {
+			progress.push({
+				intentional_exclusions: extra.intentional_exclusions,
+			});
+		}
 	};
 	await collectAllStreams(ctx);
 	assert.equal(harness.emitted.length, 1);
