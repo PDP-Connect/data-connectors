@@ -83,9 +83,8 @@ describe("GroupMe setup contract", () => {
 	});
 
 	it("live: accepts valid GROUPME_ACCESS_TOKEN via X-Access-Token header", {
-		skip: process.env.GROUPME_ACCESS_TOKEN
-			? false
-			: "GROUPME_ACCESS_TOKEN unset",
+		// Vitest accepts a boolean skip flag; Node's skip reason is unavailable here.
+		skip: !process.env.GROUPME_ACCESS_TOKEN,
 	}, async () => {
 		const token = process.env.GROUPME_ACCESS_TOKEN;
 		assert.ok(

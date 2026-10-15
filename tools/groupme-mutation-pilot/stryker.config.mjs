@@ -12,9 +12,12 @@ export default {
 		configFile: "tools/groupme-mutation-pilot/vitest.config.ts",
 		related: false,
 	},
-	reporters: ["clear-text", "json"],
+	reporters: ["clear-text", "json", "event-recorder"],
 	jsonReporter: {
 		fileName: "reports/mutation/groupme-vitest-mutation.json",
+	},
+	eventReporter: {
+		baseDir: "reports/mutation/events",
 	},
 	concurrency: 2,
 	timeoutMS: 120000,

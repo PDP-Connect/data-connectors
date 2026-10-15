@@ -16,9 +16,8 @@ import { describe, it } from "vitest";
 
 describe("GroupMe auth probe (live only)", () => {
 	it("verifies token connectivity to /users/me", {
-		skip: process.env.GROUPME_ACCESS_TOKEN
-			? false
-			: "GROUPME_ACCESS_TOKEN unset",
+		// Vitest accepts a boolean skip flag; Node's skip reason is unavailable here.
+		skip: !process.env.GROUPME_ACCESS_TOKEN,
 	}, async () => {
 		const token = process.env.GROUPME_ACCESS_TOKEN;
 		assert.ok(token, "GROUPME_ACCESS_TOKEN must be set");
