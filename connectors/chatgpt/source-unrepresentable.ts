@@ -8,11 +8,12 @@
  * `optional_skip_keys`, with no retryable DETAIL_GAP (a refetch returns the same
  * bytes).
  *
- * Only two cases use it, both permanent: the unknown-content-shape fallback
- * that cuts a body to FALLBACK_MAX_CHARS (`ExtractedContent.sourceUnrepresentable`),
- * and message text whose JSON encoding exceeds the host blob limit (32 MiB, so
- * no host can store it). Control characters and text up to the blob limit are
- * representable (escape encoding, Core blob) and must never come through here.
+ * Only one case uses it: the unknown-content-shape fallback that cuts a body to
+ * FALLBACK_MAX_CHARS (`ExtractedContent.sourceUnrepresentable`), where real
+ * source data is unrecoverable. Control characters, text up to the blob limit
+ * (escape encoding, Core blob), and text no host can store (a field-level
+ * omission: the record is emitted with `content` absent and the run counts it)
+ * must never come through here.
  *
  * TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
  */

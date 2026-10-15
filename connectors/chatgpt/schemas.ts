@@ -82,27 +82,38 @@ const blobRefSchema = z
 
 // ─── messages ───────────────────────────────────────────────────────────
 
-export const messageSchema = z.object({
-	id: idSchema,
-	conversation_id: idSchema,
-	parent_id: idSchema.nullable(),
-	children_ids: z.array(idSchema),
-	// role can be user / assistant / system / tool / etc.
-	role: pdppSafeText.max(40).nullable(),
-	content: largeText.nullable(),
-	// content_type is like "text" / "code" / "multimodal_text" / etc.
-	content_type: pdppSafeText.max(60).nullable(),
-	model_slug: pdppSafeText.max(80).nullable(),
-	create_time: looseTimestamp.nullable(),
-	finish_reason: pdppSafeText.max(60).nullable(),
-	citations: z.array(z.unknown()),
-	tool_calls: z.array(z.unknown()),
-	attachment_ids: z.array(idSchema),
-	on_current_branch: z.boolean(),
-	// Present only when the full text exceeds the inline cap: `content` is then
-	// null and the text is a Core blob (a JSON string, application/json).
-	blob_ref: blobRefSchema.optional(),
-});
+export const messageSchema = z
+	.object({
+		id: idSchema,
+		conversation_id: idSchema,
+		parent_id: idSchema.nullable(),
+		children_ids: z.array(idSchema),
+		// role can be user / assistant / system / tool / etc.
+		role: pdppSafeText.max(40).nullable(),
+		// A string is the text; null means the source had none, or the text is in
+		// `blob_ref`; ABSENT means the text exists but cannot be stored (no blob
+		// spool on this host, or over the 32 MiB blob cap).
+		content: largeText.nullable().optional(),
+		// content_type is like "text" / "code" / "multimodal_text" / etc.
+		content_type: pdppSafeText.max(60).nullable(),
+		model_slug: pdppSafeText.max(80).nullable(),
+		create_time: looseTimestamp.nullable(),
+		finish_reason: pdppSafeText.max(60).nullable(),
+		citations: z.array(z.unknown()),
+		tool_calls: z.array(z.unknown()),
+		attachment_ids: z.array(idSchema),
+		on_current_branch: z.boolean(),
+		// Present only when the full text exceeds the inline cap: `content` is then
+		// null and the text is a Core blob (a JSON string, application/json).
+		blob_ref: blobRefSchema.optional(),
+	})
+	.refine(
+		(message) => message.blob_ref === undefined || message.content === null,
+		{
+			message: "blob_ref requires content to be null",
+			path: ["content"],
+		},
+	);
 
 // ─── memories ───────────────────────────────────────────────────────────
 

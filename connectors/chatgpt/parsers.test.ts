@@ -19,6 +19,10 @@ import {
 	decodeEscapedText,
 	extractMessageWithBlob,
 	extractMessage,
+	extractRawMessageText,
+	encodePdppSafeText,
+	escapedLengthExceeds,
+	isEscapedUnit,
 	extractToolCalls,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
@@ -264,17 +268,16 @@ test("extractContentParts: forbidden controls at the edges are escaped, not trim
 			parts: ["\u000Bhello\u000C"],
 		}),
 		{
-			text: "\\u000Bhello\\u000C",
 			raw: "\u000Bhello\u000C",
 			sourceUnrepresentable: false,
 		},
 	);
 	assert.equal(
-		extractContentParts({ content_type: "text", parts: ["\u000B\u000C"] }).text,
+		extractContent({ content_type: "text", parts: ["\u000B\u000C"] }),
 		"\\u000B\\u000C",
 	);
 	assert.equal(
-		extractContentParts({ content_type: "text", parts: ["  hello \n"] }).text,
+		extractContentParts({ content_type: "text", parts: ["  hello \n"] }).raw,
 		"hello",
 	);
 });
@@ -364,19 +367,16 @@ test("decodeEscapedText: round-trips arbitrary strings over a hostile alphabet",
 
 test("extractMessage: oversize text is not truncated; its full text is handed to a blob", () => {
 	const source = "y".repeat(CONTENT_CAP * 2);
-	const { record, blobText } = extractMessageWithBlob(
-		"n1",
-		textNode(source),
-		"c1",
-		true,
-	);
-	assert.equal(blobText, source);
+	const node = textNode(source);
+	const { record, oversize } = extractMessageWithBlob("n1", node, "c1", true);
+	assert.equal(oversize, true);
+	assert.equal(extractRawMessageText(node), source);
 	assert.equal(record?.content, null);
 	assert.equal("content_loss" in (record ?? {}), false);
 });
 
 test("extractMessage: clean text has no content_loss key and no blob", () => {
-	const { record, blobText } = extractMessageWithBlob(
+	const { record, oversize } = extractMessageWithBlob(
 		"n1",
 		textNode("hello"),
 		"c1",
@@ -384,7 +384,7 @@ test("extractMessage: clean text has no content_loss key and no blob", () => {
 	);
 	assert.equal("content_loss" in (record ?? {}), false);
 	assert.equal(record?.content, "hello");
-	assert.equal(blobText, null);
+	assert.equal(oversize, false);
 });
 
 test("extractContent: content with only allowed whitespace (\\t \\n \\r) is preserved", () => {
@@ -1131,4 +1131,158 @@ test("maxUpdateTimeIso: picks largest ISO across the list", () => {
 
 test("maxUpdateTimeIso: empty list → null", () => {
 	assert.equal(maxUpdateTimeIso([]), null);
+});
+
+// ─── pdpp-safe-escape-v1: the contract a reader mirrors ────────────────────
+
+// A reader implements the decoder from the manifest text alone. This one uses
+// no connector code: the escaped set is written out from the declaration.
+function referenceDecode(encoded: string): string {
+	const escaped = (u: number): boolean =>
+		u === 0x5c ||
+		(u >= 0x00 && u <= 0x08) ||
+		u === 0x0b ||
+		u === 0x0c ||
+		(u >= 0x0e && u <= 0x1f) ||
+		(u >= 0x7f && u <= 0x9f) ||
+		(u >= 0xd800 && u <= 0xdfff);
+	return encoded.replace(/\\u([0-9A-Fa-f]{4})/g, (whole, hex: string) =>
+		escaped(Number.parseInt(hex, 16))
+			? String.fromCharCode(Number.parseInt(hex, 16))
+			: whole,
+	);
+}
+
+test("manifest declares the pdpp-safe-escape-v1 text encoding and the blob projection", () => {
+	const manifest = JSON.parse(
+		readFileSync(join(__dirname, "manifest.json"), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			schema: { properties: Record<string, Record<string, unknown>> };
+		}>;
+	};
+	const props = manifest.streams.find((s) => s.name === "messages")?.schema
+		.properties;
+	assert.equal(props?.content?.x_pdpp_text_encoding, "pdpp-safe-escape-v1");
+	assert.equal(props?.blob_ref?.x_pdpp_blob_projects_field, "content");
+	assert.equal(props?.blob_ref?.x_pdpp_blob_codec, "json-string-v1");
+});
+
+test("pdpp-safe-escape-v1: every UTF-16 code unit round-trips, through the connector and an independent reader", () => {
+	for (let unit = 0; unit <= 0xffff; unit += 1) {
+		const source = `a${String.fromCharCode(unit)}b`;
+		const encoded = encodePdppSafeText(source);
+		assert.equal(decodeEscapedText(encoded), source, `unit ${unit}`);
+		assert.equal(referenceDecode(encoded), source, `unit ${unit}`);
+		// A bare backslash is rewritten only when it starts a \uXXXX token.
+		if (unit !== 0x5c) {
+			assert.equal(
+				encoded === source,
+				!isEscapedUnit(unit),
+				`unit ${unit}: only escaped-set members are rewritten`,
+			);
+		}
+	}
+});
+
+test("pdpp-safe-escape-v1: the escaped set covers everything pdppSafeText rejects, and the output is always PDPP-safe", async () => {
+	const { pdppSafeText } = await import(
+		"@pdpp/connector-protocol/pdpp-safe-text"
+	);
+	for (let unit = 0; unit <= 0xffff; unit += 1) {
+		const ch = String.fromCharCode(unit);
+		if (!pdppSafeText.safeParse(ch).success) {
+			assert.equal(isEscapedUnit(unit), true, `validator rejects ${unit}`);
+		}
+		assert.equal(
+			pdppSafeText.safeParse(encodePdppSafeText(ch)).success,
+			true,
+			`encoded unit ${unit}`,
+		);
+	}
+});
+
+test("pdpp-safe-escape-v1: noncharacters on every plane are valid text and pass through unchanged", async () => {
+	const { pdppSafeText } = await import(
+		"@pdpp/connector-protocol/pdpp-safe-text"
+	);
+	const nonchars: string[] = [];
+	for (let cp = 0xfdd0; cp <= 0xfdef; cp += 1) nonchars.push(String.fromCodePoint(cp));
+	for (let plane = 0; plane <= 0x10; plane += 1) {
+		nonchars.push(String.fromCodePoint(plane * 0x1_0000 + 0xfffe));
+		nonchars.push(String.fromCodePoint(plane * 0x1_0000 + 0xffff));
+	}
+	for (const ch of nonchars) {
+		const source = `x${ch}y`;
+		assert.equal(pdppSafeText.safeParse(source).success, true, "validator accepts it");
+		assert.equal(encodePdppSafeText(source), source, "so it is not escaped");
+		const rec = extractMessage("n1", textNode(source), "c1", true);
+		assert.equal(rec?.content, source);
+		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	}
+});
+
+test("pdpp-safe-escape-v1: a valid surrogate pair is kept, a lone half is escaped", () => {
+	assert.equal(encodePdppSafeText("\u{1F600}"), "\u{1F600}");
+	assert.equal(encodePdppSafeText("\ud83d"), "\\uD83D");
+	assert.equal(encodePdppSafeText("\ude00"), "\\uDE00");
+	assert.equal(encodePdppSafeText("\ude00\ud83d"), "\\uDE00\\uD83D");
+	assert.equal(decodeEscapedText("\\uD83D\\uDE00"), "😀");
+});
+
+test("escapedLengthExceeds agrees with the escaped length at the cap boundary", () => {
+	const cap = 100;
+	for (const filler of ["x", "\x00", "\\u0000", "\ud800", "\u{1F600}"]) {
+		for (let n = 0; n < 40; n += 1) {
+			const raw = filler.repeat(n);
+			assert.equal(
+				escapedLengthExceeds(raw, cap).exceeds,
+				encodePdppSafeText(raw).length > cap,
+				`${JSON.stringify(filler)} x ${n}`,
+			);
+		}
+	}
+});
+
+test("escapedLengthExceeds stops scanning once the cap is passed", () => {
+	const cap = CONTENT_CAP;
+	// Escapes dominate: the scan must stop near cap/5 sites, not read all 1M.
+	const dense = "\x00".repeat(cap);
+	const result = escapedLengthExceeds(dense, cap);
+	assert.equal(result.exceeds, true);
+	assert.ok(
+		result.sitesVisited <= Math.ceil(cap / 5) + 1,
+		`visited ${result.sitesVisited} sites`,
+	);
+	// Longer than the cap before escaping: decided with no scan at all.
+	assert.deepEqual(escapedLengthExceeds("y".repeat(cap + 1), cap), {
+		exceeds: true,
+		sitesVisited: 0,
+	});
+});
+
+test("messages schema: blob_ref requires null content; content may be absent but not alongside a blob_ref", () => {
+	const sha256 = "b".repeat(64);
+	const blob_ref = {
+		blob_id: `sha256:${sha256}`,
+		mime_type: "application/json",
+		size_bytes: 9,
+		sha256,
+	};
+	const base = { ...(extractMessage("n1", textNode("hello"), "c1", true) ?? {}) };
+	assert.equal(validateRecord("messages", { ...base, content: null, blob_ref }).ok, true);
+	assert.equal(
+		validateRecord("messages", { ...base, content: "text", blob_ref }).ok,
+		false,
+		"a blob-backed message cannot also carry inline content",
+	);
+	const { content: _content, ...withoutContent } = base;
+	assert.equal(validateRecord("messages", withoutContent).ok, true, "content absent");
+	assert.equal(
+		validateRecord("messages", { ...withoutContent, blob_ref }).ok,
+		false,
+		"absent content is the unstorable case, never blob-backed",
+	);
+	assert.equal(validateRecord("messages", { ...base, content: null }).ok, true);
 });

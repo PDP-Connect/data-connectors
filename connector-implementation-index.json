@@ -4129,7 +4129,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.50",
+				"version": "0.2.51",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -4281,7 +4281,8 @@
 								"content": {
 									"type": ["string", "null"],
 									"x_pdpp_role": "primary-title",
-									"description": "Full message text. Lossless encoding: each code unit PDPP text cannot store (U+0000 NUL, other C0/C1 controls, lone surrogates) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX the decoder would read as an escape is written \\u005C. To decode, replace each \\uXXXX whose code unit is U+005C or PDPP-unsafe with that code unit. All other text is unchanged. Text over 1048576 characters is not truncated: content is null and blob_ref holds the full text (a JSON string, application/json; JSON.parse returns the exact source text, with no escape encoding)."
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "Full message text in the pdpp-safe-escape-v1 encoding. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
 								},
 								"content_type": {
 									"type": ["string", "null"]
@@ -4310,6 +4311,9 @@
 								},
 								"blob_ref": {
 									"type": "object",
+									"x_pdpp_blob_projects_field": "content",
+									"x_pdpp_blob_codec": "json-string-v1",
+									"description": "Present only when content is null because the text is over the inline cap. The blob (application/json) is the JSON string of the exact source text, with no pdpp-safe-escape-v1 escaping: JSON.parse(bytes) returns the source text for the content field.",
 									"properties": {
 										"blob_id": {
 											"type": "string"

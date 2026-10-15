@@ -6,7 +6,6 @@
 // browser-context auth, API client, and the collect() orchestrator live in
 // index.ts.
 
-import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type {
 	ChatGptContent,
@@ -318,24 +317,30 @@ const CONTENT_EXTRACTORS: Readonly<
 	user_editable_context: extractUserEditableContext,
 };
 
-// Candidate code units that may fail PDPP-safe text: C0/C1 controls, lone
-// surrogates and noncharacters. The `u` flag keeps valid surrogate pairs whole.
-// Each candidate is re-checked against the real validator so the escape set
-// never drifts from `pdppSafeText`. The first alternative finds a source
-// backslash that starts something the decoder would read as an escape.
+// The `pdpp-safe-escape-v1` text encoding (declared on `messages.content` in the
+// manifest). The escaped set is FIXED so a reader can mirror it without the
+// validator: U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F (the C0/C1
+// controls PDPP text forbids; tab, LF and CR are allowed) and lone surrogates
+// (not UTF-8 encodable). Noncharacters (U+FDD0.., U+xFFFE/xFFFF on every plane)
+// and valid surrogate pairs are ordinary scalar values and pass through. The
+// `u` flag keeps valid surrogate pairs whole so only lone ones match. The first
+// alternative finds a source backslash that starts something the decoder would
+// read as an escape.
 const ESCAPE_SCAN =
-	/\\u([0-9a-fA-F]{4})|[\u0000-\u001f\u007f-\u009f\ud800-\udfff\ufdd0-\ufdef\ufffe\uffff]/gu;
+	/\\u([0-9a-fA-F]{4})|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ud800-\udfff]/gu;
 const ESCAPE_TOKEN = /\\u([0-9a-fA-F]{4})/g;
 const BACKSLASH_UNIT = 0x5c;
 
-function isSafeText(s: string): boolean {
-	return pdppSafeText.safeParse(s).success;
-}
-
-/** Code units the encoding writes as `\uXXXX`: PDPP-unsafe ones and backslash. */
-function isEscapedUnit(unit: number): boolean {
+/** Code units the encoding writes as `\uXXXX`: forbidden controls, lone surrogates and backslash. */
+export function isEscapedUnit(unit: number): boolean {
 	return (
-		unit === BACKSLASH_UNIT || !isSafeText(String.fromCharCode(unit))
+		unit === BACKSLASH_UNIT ||
+		unit <= 0x08 ||
+		unit === 0x0b ||
+		unit === 0x0c ||
+		(unit >= 0x0e && unit <= 0x1f) ||
+		(unit >= 0x7f && unit <= 0x9f) ||
+		(unit >= 0xd8_00 && unit <= 0xdf_ff)
 	);
 }
 
@@ -343,28 +348,36 @@ function escapeSequence(unit: number): string {
 	return `\\u${unit.toString(16).toUpperCase().padStart(4, "0")}`;
 }
 
+/** Each position of `s` that the encoding rewrites, and the code unit it writes. */
+function* escapeSites(s: string): Generator<{ index: number; unit: number }> {
+	for (const match of s.matchAll(ESCAPE_SCAN)) {
+		const hex = match[1];
+		const index = match.index ?? 0;
+		if (hex === undefined) {
+			yield { index, unit: match[0].charCodeAt(0) };
+		} else if (isEscapedUnit(Number.parseInt(hex, 16))) {
+			yield { index, unit: BACKSLASH_UNIT };
+		}
+	}
+}
+
 /**
  * Lossless, deterministic PDPP-safe encoding of message text (documented on the
- * `messages.content` field in the manifest). Each code unit the validator
- * rejects (NUL, C0/C1 controls, lone surrogates) becomes `\uXXXX`. A source
- * backslash that begins a `\uXXXX` the decoder would read as an escape is
- * itself written `\u005C`, so decoding is unambiguous. All other text,
- * including ordinary backslashes, is unchanged.
+ * `messages.content` field in the manifest). Each escaped unit becomes `\uXXXX`
+ * (uppercase hex). A source backslash that begins a `\uXXXX` the decoder would
+ * read as an escape is itself written `\u005C`, so decoding is unambiguous. All
+ * other text, including ordinary backslashes, is unchanged.
  */
-function encodePdppSafeText(s: string): string {
-	if (!s.includes("\\") && isSafeText(s)) {
-		return s;
+export function encodePdppSafeText(s: string): string {
+	const parts: string[] = [];
+	let last = 0;
+	for (const { index, unit } of escapeSites(s)) {
+		parts.push(s.slice(last, index), escapeSequence(unit));
+		last = index + 1;
 	}
-	return s.replace(ESCAPE_SCAN, (match, hex: string | undefined) => {
-		if (hex === undefined) {
-			return isEscapedUnit(match.charCodeAt(0))
-				? escapeSequence(match.charCodeAt(0))
-				: match;
-		}
-		return isEscapedUnit(Number.parseInt(hex, 16))
-			? `${escapeSequence(BACKSLASH_UNIT)}${match.slice(1)}`
-			: match;
-	});
+	if (parts.length === 0) return s;
+	parts.push(s.slice(last));
+	return parts.join("");
 }
 
 /** Inverse of the content encoding: restores the exact source text. */
@@ -380,6 +393,27 @@ export function decodeEscapedText(s: string): string {
 // text into a Core blob and the record carries `blob_ref` with null `content`.
 const CONTENT_MAX_CHARS = 1_048_576;
 
+/**
+ * Whether the escaped form of `raw` is longer than `cap`, decided without
+ * building it. Each escape adds five characters, so the length is
+ * `raw.length + 5 * sites`; the scan stops once that passes `cap`, and a `raw`
+ * already longer than `cap` is not scanned at all.
+ */
+export function escapedLengthExceeds(
+	raw: string,
+	cap: number = CONTENT_MAX_CHARS,
+): { exceeds: boolean; sitesVisited: number } {
+	if (raw.length > cap) return { exceeds: true, sitesVisited: 0 };
+	let length = raw.length;
+	let sitesVisited = 0;
+	for (const _site of escapeSites(raw)) {
+		sitesVisited += 1;
+		length += 5;
+		if (length > cap) return { exceeds: true, sitesVisited };
+	}
+	return { exceeds: false, sitesVisited };
+}
+
 export interface ExtractedContent {
 	/** Source text before escaping; what a blob stores for an oversize body. */
 	raw: string | null;
@@ -389,25 +423,23 @@ export interface ExtractedContent {
 	 * source-unrepresentable.ts).
 	 */
 	sourceUnrepresentable: boolean;
-	/** PDPP-safe full text: controls escaped losslessly, never truncated. */
-	text: string | null;
 }
 
 /**
- * Extract a string from a ChatGPT message content object. ChatGPT has many
+ * Extract the source text of a ChatGPT message content object. ChatGPT has many
  * content_type shapes; the previous implementation only handled `text` and
  * silently returned null for everything else (67% of records). Each branch
  * returns a string; we return null only if the payload is truly empty.
  *
- * Control characters are escaped losslessly (a representation, not a loss).
  * The only lossy path is the unknown-shape fallback, reported through
- * `sourceUnrepresentable`.
+ * `sourceUnrepresentable`. Escaping is a separate, lazy step so an oversize
+ * body never gets an escaped copy.
  */
 export function extractContentParts(
 	content: ChatGptContent | undefined,
 ): ExtractedContent {
 	if (!content || typeof content !== "object") {
-		return { raw: null, sourceUnrepresentable: false, text: null };
+		return { raw: null, sourceUnrepresentable: false };
 	}
 	const type = content.content_type;
 	const handler = type ? CONTENT_EXTRACTORS[type] : undefined;
@@ -417,17 +449,15 @@ export function extractContentParts(
 	if (sourceUnrepresentable && raw !== null) {
 		raw = `${raw.slice(0, FALLBACK_MAX_CHARS)}…`;
 	}
-	return {
-		raw,
-		sourceUnrepresentable,
-		text: raw === null ? null : encodePdppSafeText(raw),
-	};
+	return { raw, sourceUnrepresentable };
 }
 
+/** PDPP-safe full text (see the encoding above); never truncated. */
 export function extractContent(
 	content: ChatGptContent | undefined,
 ): string | null {
-	return extractContentParts(content).text;
+	const { raw } = extractContentParts(content);
+	return raw === null ? null : encodePdppSafeText(raw);
 }
 
 // ─── Tool calls ─────────────────────────────────────────────────────────
@@ -472,11 +502,20 @@ export function extractToolCalls(m: ChatGptMessage | undefined): unknown[] {
 // ─── Message record ─────────────────────────────────────────────────────
 
 export interface ExtractedMessage {
-	/** Full text to store as a Core blob; null when `content` fits inline. */
-	blobText: string | null;
+	/**
+	 * True when the escaped text is over the inline cap: `record.content` is then
+	 * null and the caller decides blob, or omission of the field. The text is
+	 * re-derived on demand with `extractRawMessageText`, not carried here.
+	 */
+	oversize: boolean;
 	record: RecordData | null;
 	/** See `ExtractedContent.sourceUnrepresentable`. */
 	sourceUnrepresentable: boolean;
+}
+
+/** The source text of a message node, before escaping. */
+export function extractRawMessageText(node: ChatGptNode): string | null {
+	return extractContentParts(node.message?.content).raw;
 }
 
 export function extractMessageWithBlob(
@@ -487,12 +526,12 @@ export function extractMessageWithBlob(
 ): ExtractedMessage {
 	const m = node.message;
 	if (!m) {
-		return { blobText: null, record: null, sourceUnrepresentable: false };
+		return { oversize: false, record: null, sourceUnrepresentable: false };
 	}
-	const { raw, sourceUnrepresentable, text } = extractContentParts(m.content);
-	const oversize = text !== null && text.length > CONTENT_MAX_CHARS;
+	const { raw, sourceUnrepresentable } = extractContentParts(m.content);
+	const oversize = raw !== null && escapedLengthExceeds(raw).exceeds;
 	return {
-		blobText: oversize ? raw : null,
+		oversize,
 		sourceUnrepresentable,
 		record: {
 			id: nodeId,
@@ -500,7 +539,8 @@ export function extractMessageWithBlob(
 			parent_id: node.parent ?? null,
 			children_ids: node.children ?? [],
 			role: m.author?.role ?? null,
-			content: oversize ? null : text || null,
+			content:
+				oversize || raw === null ? null : encodePdppSafeText(raw) || null,
 			content_type: m.content?.content_type ?? null,
 			model_slug: m.metadata?.model_slug ?? null,
 			create_time: tsToIso(m.create_time),

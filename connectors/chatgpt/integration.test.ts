@@ -63,9 +63,10 @@ import {
 import type { Page } from "playwright";
 import type { AdaptiveLaneRunContext } from "../../packages/polyfill-connectors/src/adaptive-lane.ts";
 import { CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE } from "../../packages/polyfill-connectors/src/auto-login/chatgpt.ts";
-import type {
-	CollectContext,
-	EmittedMessage,
+import {
+	type CollectContext,
+	type EmittedMessage,
+	makeEmitRecord as makeRuntimeEmitRecord,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { ProviderBudgetController } from "../../packages/polyfill-connectors/src/provider-budget.ts";
 import {
@@ -88,6 +89,7 @@ import {
 	classifyChatGptBatchFailure,
 	classifyChatGptSourcePressure,
 	consumeChatGptProviderRetryBudget,
+	collectChatGpt,
 	createChatGptApi,
 	estimateChatGptDetailMinutesRemaining,
 	normalizeChatGptTerminalError,
@@ -109,6 +111,7 @@ import {
 	runSharedConversationsStream,
 	type StreamDeps,
 	setChatGptDiagnosticSink,
+	createOmittedMessageContentTally,
 	shouldKeepRetryingChatGptDetail,
 	summarizeChatGptSideEffectProbe,
 } from "./index.ts";
@@ -12805,41 +12808,343 @@ test("processConversationDetail: oversize text is spooled whole as a blob and re
 	}
 });
 
-test("processConversationDetail: oversize text on a host with no blob store withholds the message and gaps it, never truncates", async () => {
-	const { emitted, messages, outcome } = await withBlobSpool(null, () =>
-		detailWithText("y".repeat(INLINE_CAP + 1)),
+function messageRecord(
+	emitted: ReadonlyArray<{ stream: string; data: Record<string, unknown> }>,
+	id: string,
+): Record<string, unknown> | undefined {
+	return emitted.find((r) => r.stream === "messages" && r.data.id === id)?.data;
+}
+
+test("processConversationDetail: oversize text on a host with no blob store is a field-level omission, not a gap", async () => {
+	const { deps, emitted, messages } = makeHarness();
+	const tally = createOmittedMessageContentTally();
+	deps.omittedMessageContent = tally;
+	const outcome = await withBlobSpool(null, async () =>
+		processConversationDetail(
+			deps,
+			makeConvo({ current_node: "a1" }),
+			{
+				status: 200,
+				json: {
+					current_node: "a1",
+					mapping: {
+						a0: userNode(null, ["a1"], "first"),
+						a1: userNode("a0", [], "y".repeat(INLINE_CAP + 1), "assistant"),
+					},
+				},
+			},
+			makeEmitConversation(deps),
+		),
 	);
-	assert.equal(
-		emitted.filter((r) => r.stream === "messages" && r.data.id === "a1").length,
-		0,
-	);
+	const record = messageRecord(emitted, "a1");
+	assert.ok(record, "the message record is emitted");
+	assert.equal("content" in record, false, "content is absent, not null");
+	assert.equal("blob_ref" in record, false);
+	assert.equal(record.role, "assistant", "every other field is intact");
 	assert.equal(messages.filter((m) => m.type === "BLOB").length, 0);
-	const gaps = detailGaps(messages);
-	assert.equal(gaps.length, 1);
-	assert.equal(gaps[0]?.retryable, true);
-	assert.equal(
-		(gaps[0]?.detail_locator as { incomplete_reason?: string }).incomplete_reason,
-		"message_blob_unavailable",
-	);
-	assert.deepEqual(outcome, {
-		complete: false,
-		reason: "message_blob_unavailable",
+	assert.equal(detailGaps(messages).length, 0);
+	assert.deepEqual(outcome, { complete: true });
+	assert.deepEqual(tally, {
+		host_blob_unavailable: 1,
+		exceeds_host_blob_cap: 0,
 	});
 });
 
-test("processConversationDetail: text over the 32 MiB host blob limit is the permanent source-unrepresentable case", async () => {
+test("processConversationDetail: text over the 32 MiB host blob cap is a field-level omission on any host", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "chatgpt-blob-"));
 	try {
-		const { emitted, messages, outcome } = await withBlobSpool(dir, () =>
-			detailWithText("y".repeat(33_554_433)),
+		for (const text of [
+			// Over the cap before escaping.
+			"y".repeat(33_554_433),
+			// Under the cap as text, over it once JSON-encoded (6 bytes per NUL).
+			"\u0000".repeat(6_000_000),
+		]) {
+			const { deps, emitted, messages } = makeHarness();
+			const tally = createOmittedMessageContentTally();
+			deps.omittedMessageContent = tally;
+			const outcome = await withBlobSpool(dir, async () =>
+				processConversationDetail(
+					deps,
+					makeConvo({ current_node: "a1" }),
+					{
+						status: 200,
+						json: {
+							current_node: "a1",
+							mapping: {
+								a0: userNode(null, ["a1"], "first"),
+								a1: userNode("a0", [], text, "assistant"),
+							},
+						},
+					},
+					makeEmitConversation(deps),
+				),
+			);
+			assert.equal(readdirSync(dir).length, 0, "nothing is spooled");
+			const record = messageRecord(emitted, "a1");
+			assert.ok(record, "the message record is emitted");
+			assert.equal("content" in record, false);
+			assert.equal("blob_ref" in record, false);
+			assert.equal(messages.filter((m) => m.type === "BLOB").length, 0);
+			assert.equal(detailGaps(messages).length, 0);
+			assert.deepEqual(
+				outcome,
+				{ complete: true },
+				"not source-unrepresentable: no skip key is owed",
+			);
+			assert.deepEqual(tally, {
+				host_blob_unavailable: 0,
+				exceeds_host_blob_cap: 1,
+			});
+		}
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
+});
+
+test("runConversationsAndMessagesStreams: capped runs on a host with no blob store gap nothing, refetch nothing and keep walking forward", async () => {
+	const bigIds = ["big-1", "big-2"];
+	const bigItem = (id: string, updateTime: number): ConversationListItem =>
+		makeConvo({ id, current_node: "a0", update_time: updateTime });
+	const bigDetail: ChatGptFetchResult = {
+		status: 200,
+		json: {
+			current_node: "a0",
+			mapping: {
+				a0: userNode(null, [], "z".repeat(INLINE_CAP + 10), "assistant"),
+			},
+		},
+	};
+	const diagnostics: string[] = [];
+	setChatGptDiagnosticSink((line) => diagnostics.push(line));
+	const fetched: string[] = [];
+	let pending: Array<CollectContext["detailGaps"][number]> = [];
+	let state: Record<string, unknown> = {};
+	const allGaps: unknown[] = [];
+	const runOnce = async (
+		listItems: ConversationListItem[],
+	): Promise<ReturnType<typeof makeRecordingEmit>> => {
+		const harness = makeRecordingEmit(validateRecord);
+		const api: ChatGptApi = {
+			auth: (): Promise<never> => Promise.reject(new Error("unused")),
+			fetch: (path: string): Promise<ChatGptFetchResult> => {
+				if (path.startsWith("/conversations/search?")) {
+					const cursor = Number(
+						new URLSearchParams(path.split("?")[1]).get("cursor"),
+					);
+					return Promise.resolve({
+						status: 200,
+						json: {
+							items: cursor === 0 ? listItems : [],
+							has_missing_conversations: false,
+							total: listItems.length,
+						},
+					});
+				}
+				fetched.push(path);
+				return Promise.resolve(
+					bigIds.some((id) => path.endsWith(id))
+						? bigDetail
+						: makeDetailOkForConversation(path.split("/").pop() ?? ""),
+				);
+			},
+		};
+		await runConversationsAndMessagesStreams(
+			{
+				api,
+				detailGaps: pending,
+				emit: harness.emit,
+				emitRecord: harness.emitRecord,
+				progress: (): Promise<void> => Promise.resolve(),
+				requested: new Map(
+					["conversations", "messages"].map((name) => [name, { name }]),
+				),
+				runBudget: new ChatGptRunBudget({ maxFetches: 1 }),
+			},
+			state as CollectContext["state"],
+			{ detailPacing: { random: () => 0, sleep: () => undefined } },
 		);
-		assert.equal(readdirSync(dir).length, 0, "nothing is spooled");
-		assert.equal(
-			emitted.filter((r) => r.stream === "messages" && r.data.id === "a1").length,
-			0,
+		const gaps = harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP");
+		allGaps.push(...gaps);
+		pending = gaps.map((m, index) => ({
+			...(m as object),
+			gap_id: `g-${fetched.length}-${index}`,
+		})) as typeof pending;
+		for (const m of harness.protocolMessages) {
+			if (m.type === "STATE") {
+				state = { ...state, [m.stream]: (m as { cursor?: unknown }).cursor };
+			}
+		}
+		return harness;
+	};
+	try {
+		await withBlobSpool(null, async () => {
+			const first = await runOnce([bigItem("big-1", 1_700_000_100)]);
+			assert.ok(messageRecord(first.emitted, "a0"), "big-1 messages emitted");
+			await runOnce([
+				bigItem("big-2", 1_700_000_200),
+				bigItem("big-1", 1_700_000_100),
+			]);
+			const third = await runOnce([
+				makeConvo({ id: "fresh-1", update_time: 1_700_000_300 }),
+				bigItem("big-2", 1_700_000_200),
+				bigItem("big-1", 1_700_000_100),
+			]);
+			assert.ok(
+				third.emitted.some(
+					(r) => r.stream === "messages" && r.data.conversation_id === "fresh-1",
+				),
+				`fresh-1 starved; fetched=${fetched.join(",")}`,
+			);
+		});
+	} finally {
+		setChatGptDiagnosticSink(undefined);
+	}
+	assert.equal(allGaps.length, 0, "no run gaps an unstorable message");
+	assert.equal(
+		fetched.filter((p) => p.endsWith("big-1")).length,
+		1,
+		"an omitted-content conversation is fetched once, not every run",
+	);
+	assert.equal(
+		fetched.filter((p) => p.endsWith("big-2")).length,
+		1,
+	);
+	const omittedLines = diagnostics.filter((l) =>
+		l.startsWith("message_content_omitted:"),
+	);
+	assert.equal(omittedLines.length, 2, "runs 1 and 2 each disclose one");
+	for (const line of omittedLines) {
+		assert.match(line, /1 message\(s\).*host_blob_unavailable=1, exceeds_host_blob_cap=0/);
+	}
+});
+
+// ─── BLOB-before-RECORD through collectChatGpt's real emitRecord wrapper ──
+
+/**
+ * Runs the real `collectChatGpt` against a fake page. Its `emitRecord` is the
+ * runtime's real gate (selection, validation, `beforeEmit`) and the connector's
+ * own wrapper sits between them, as in production.
+ */
+async function collectWithOversizeMessage(
+	messagesScope: { name: string; resources?: string[] },
+): Promise<{
+	events: Array<{ kind: "BLOB" | "RECORD"; key: string }>;
+	records: Array<Record<string, unknown>>;
+}> {
+	const events: Array<{ kind: "BLOB" | "RECORD"; key: string }> = [];
+	const records: Array<Record<string, unknown>> = [];
+	const detail = {
+		title: "Big",
+		create_time: 1_700_000_000,
+		update_time: 1_700_000_100,
+		current_node: "a1",
+		mapping: {
+			a0: userNode(null, ["a1"], "first"),
+			a1: userNode("a0", [], "q".repeat(INLINE_CAP + 5), "assistant"),
+		},
+	};
+	const fakePage = {
+		evaluate: ((fn: unknown, arg?: unknown): Promise<unknown> => {
+			if (typeof fn === "function" && arg === undefined) {
+				return Promise.resolve("https://chatgpt.com/");
+			}
+			if (arg === undefined) {
+				return Promise.resolve({ accessToken: "tok", deviceId: "dev" });
+			}
+			const { path } = arg as { path: string };
+			if (path.startsWith("/conversations/search?")) {
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				return Promise.resolve({
+					status: 200,
+					json: {
+						items:
+							cursor === 0
+								? [makeConvo({ id: "big-convo", current_node: "a1" })]
+								: [],
+						has_missing_conversations: false,
+						total: 1,
+					},
+				});
+			}
+			if (path.endsWith("/big-convo")) {
+				return Promise.resolve({ status: 200, json: detail });
+			}
+			return Promise.resolve({ status: 404, json: null });
+		}) as Page["evaluate"],
+		goto: () => Promise.resolve(null),
+		waitForFunction: () => Promise.resolve(null),
+	};
+	const requested = new Map([
+		["conversations", { name: "conversations" }],
+		["messages", messagesScope],
+	]);
+	const emit = (msg: EmittedMessage): Promise<void> => {
+		if (msg.type === "BLOB") events.push({ kind: "BLOB", key: String(msg.key) });
+		if (msg.type === "RECORD" && msg.stream === "messages") {
+			events.push({ kind: "RECORD", key: String(msg.key) });
+			records.push(msg.data as Record<string, unknown>);
+		}
+		return Promise.resolve();
+	};
+	const gate = makeRuntimeEmitRecord({
+		requested,
+		emit,
+		emittedAt: "2026-01-01T00:00:00Z",
+		validateRecord,
+		isTombstone: undefined,
+		timeRangeFieldFor: () => null,
+	});
+	await collectChatGpt({
+		assist: () => Promise.reject(new Error("unused")),
+		capture: null,
+		completeAssistance: () => Promise.resolve(),
+		credentials: {},
+		detailGaps: [],
+		emit,
+		emitRecord: gate.emit,
+		emittedAt: "2026-01-01T00:00:00Z",
+		isRecordSelected: gate.isSelected,
+		page: fakePage as unknown as Page,
+		progress: () => Promise.resolve(),
+		requested,
+		state: {},
+	} as unknown as Parameters<typeof collectChatGpt>[0]);
+	return { events, records };
+}
+
+test("collectChatGpt: a blob-backed message emits its BLOB event immediately before its RECORD", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "chatgpt-collect-blob-"));
+	try {
+		const { events, records } = await withBlobSpool(dir, () =>
+			collectWithOversizeMessage({ name: "messages" }),
 		);
-		assert.equal(detailGaps(messages).length, 0);
-		assert.deepEqual(outcome, { complete: false, permanent: true });
+		assert.deepEqual(
+			events.filter((e) => e.key === "a1"),
+			[
+				{ kind: "BLOB", key: "a1" },
+				{ kind: "RECORD", key: "a1" },
+			],
+		);
+		const record = records.find((r) => r.id === "a1");
+		assert.equal(record?.content, null);
+		assert.ok(record?.blob_ref, "the record references the blob");
+		assert.equal(readdirSync(dir).length, 1, "the blob was spooled once");
+	} finally {
+		rmSync(dir, { force: true, recursive: true });
+	}
+});
+
+test("collectChatGpt: a message the stream selection suppresses emits no BLOB event and spools no file", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "chatgpt-collect-blob-"));
+	try {
+		const { events, records } = await withBlobSpool(dir, () =>
+			collectWithOversizeMessage({ name: "messages", resources: ["a0"] }),
+		);
+		assert.deepEqual(events, [{ kind: "RECORD", key: "a0" }]);
+		assert.equal(records.some((r) => r.id === "a1"), false);
+		assert.deepEqual(readdirSync(dir), [], "no orphan spool file");
 	} finally {
 		rmSync(dir, { force: true, recursive: true });
 	}

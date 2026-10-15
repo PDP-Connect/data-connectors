@@ -79,6 +79,7 @@ import {
 	buildSharedConversationRecord,
 	type ConversationDetail,
 	extractMessageWithBlob,
+	extractRawMessageText,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
 	minUpdateTimeIso,
@@ -87,8 +88,8 @@ import {
 } from "./parsers.ts";
 import {
 	blobSpoolDir,
-	type PreparedMessageBlob,
-	prepareMessageBlob,
+	type MessageBlobRef,
+	measureMessageBlob,
 	spoolMessageBlob,
 } from "./message-blob.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
@@ -2301,6 +2302,31 @@ async function runChatGptSideEffectProbe({
 
 // ─── Per-stream helpers ────────────────────────────────────────────────
 
+/**
+ * Messages whose text exists but cannot be stored, by reason. The record is
+ * emitted with `content` and `blob_ref` absent (a field-level omission): no gap,
+ * no skip key, and nothing withheld. The run discloses the aggregate count.
+ */
+export interface OmittedMessageContentTally {
+	/** Over the inline cap on a host with no blob spool (PageShim). */
+	host_blob_unavailable: number;
+	/** JSON-encoded text over the 32 MiB blob cap, which no host can store. */
+	exceeds_host_blob_cap: number;
+}
+
+export function createOmittedMessageContentTally(): OmittedMessageContentTally {
+	return { host_blob_unavailable: 0, exceeds_host_blob_cap: 0 };
+}
+
+function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
+	const total = tally.host_blob_unavailable + tally.exceeds_host_blob_cap;
+	if (total === 0) return;
+	chatGptDiagnostic(
+		`message_content_omitted: ${total} message(s) were emitted without content because the text cannot be stored ` +
+			`(host_blob_unavailable=${tally.host_blob_unavailable}, exceeds_host_blob_cap=${tally.exceeds_host_blob_cap})`,
+	);
+}
+
 /** Per-run dependency bag threaded through every emit-path helper. Mirrors
  *  the amazon/chase pattern: one stable bag so collect() becomes pure
  *  orchestration and the helpers are individually testable. */
@@ -2319,6 +2345,8 @@ export interface StreamDeps {
 	isRecordSelected?: CollectContext["isRecordSelected"];
 	/** Message IDs already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
+	/** Run-scoped count of messages emitted without `content` (see OmittedMessageContentTally). */
+	omittedMessageContent?: OmittedMessageContentTally;
 	/** parent_id each message was emitted with this run; the stream is append-only. */
 	emittedMessageParentsThisRun?: Map<string, string | null>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
@@ -2798,7 +2826,7 @@ export async function processConversationDetail(
 	// toward unrepresentable-content accounting and conversation metadata; only
 	// the record emit is skipped, so a repeat detail cannot blank the branch tip.
 	const candidates: {
-		blob: PreparedMessageBlob | null;
+		blob: { ref: MessageBlobRef; spoolDir: string } | null;
 		nodeId: string;
 		msg: RecordData;
 		onBranch: boolean;
@@ -2811,16 +2839,15 @@ export async function processConversationDetail(
 	let filteredAsDuplicate = 0;
 	let filteredAsNonMessage = 0;
 	let rejectedByShapeAnywhere = 0;
-	// Messages whose full text must be a Core blob this host cannot store.
-	let withheldForBlob = 0;
-	// Messages the source cannot represent: the unknown-shape fallback cut, or
-	// text over the host blob limit (see source-unrepresentable.ts).
+	const omitted =
+		deps.omittedMessageContent ?? createOmittedMessageContentTally();
+	// Messages the source cannot represent: the unknown-shape fallback cut (see
+	// source-unrepresentable.ts).
 	// TODO(pdpp-runtime-permanent-gap): replace with DETAIL_GAP{retryable:false, reason:"source_unrepresentable"} + gap_keys once the build loop's runtime change lands; then remove optional_skip_keys.
 	let unrepresentableMessages = 0;
 	let currentNodeFilteredReason:
 		| "selection"
 		| "shape"
-		| "blob_unavailable"
 		| "duplicate"
 		| "non_message"
 		| null = null;
@@ -2857,29 +2884,29 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
+		const alreadyEmitted = messageId !== null && alreadyEmittedIds.has(messageId);
 		// Text over the inline cap is stored whole as a Core blob, never truncated.
-		// A host with no blob store (PageShim) cannot carry it: withhold the
-		// message and gap the conversation (retryable on a host that can). Text
-		// over the host blob limit fits no host: withhold it as
-		// source-unrepresentable (see source-unrepresentable.ts).
-		let blob: PreparedMessageBlob | null = null;
-		if (extracted.blobText !== null) {
-			const spoolAvailable = blobSpoolDir() !== null;
-			blob = spoolAvailable ? prepareMessageBlob(extracted.blobText) : null;
-			if (!blob) {
-				if (spoolAvailable) {
-					unrepresentableMessages += 1;
-				} else {
-					withheldForBlob += 1;
-				}
-				if (onBranch) {
-					filteredBranchCount += 1;
-					if (nodeId === currentNode)
-						currentNodeFilteredReason = "blob_unavailable";
-				}
-				continue;
+		// Text no host can store (no blob spool, or over the 32 MiB blob cap) is
+		// omitted as a FIELD: the record is emitted with `content` and `blob_ref`
+		// absent and the run counts it. A message emitted earlier in this run is
+		// not emitted again, so it is neither measured nor counted again.
+		let blob: { ref: MessageBlobRef; spoolDir: string } | null = null;
+		let omission: keyof OmittedMessageContentTally | null = null;
+		if (extracted.oversize && !alreadyEmitted) {
+			const spoolDir = blobSpoolDir();
+			// The text is measured here and dropped; the spool step re-derives it.
+			const ref =
+				spoolDir === null
+					? null
+					: measureMessageBlob(extractRawMessageText(node) ?? "");
+			if (spoolDir !== null && ref !== null) {
+				blob = { ref, spoolDir };
+				msg.blob_ref = ref;
+			} else {
+				delete msg.content;
+				omission =
+					spoolDir === null ? "host_blob_unavailable" : "exceeds_host_blob_cap";
 			}
-			msg.blob_ref = blob.blob_ref;
 		}
 		const validation = validateRecord("messages", msg);
 		if (validation && !validation.ok) {
@@ -2891,10 +2918,10 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
-		const alreadyEmitted = messageId !== null && alreadyEmittedIds.has(messageId);
 		if (extracted.sourceUnrepresentable) {
 			unrepresentableMessages += 1;
 		}
+		if (omission) omitted[omission] += 1;
 		candidates.push({ blob, nodeId, msg, onBranch, alreadyEmitted });
 		if (messageId) candidateIds.add(messageId);
 	}
@@ -2973,15 +3000,27 @@ export async function processConversationDetail(
 			alreadyEmittedIds.add(messageId);
 			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
 		}
-		const spool = candidate.blob ? blobSpoolDir() : null;
-		const blobEvent =
-			candidate.blob && spool && messageId
-				? spoolMessageBlob(spool, messageId, candidate.blob)
-				: null;
+		const { blob } = candidate;
+		const sourceNode = mapping[candidate.nodeId];
+		// The blob is spooled only after the runtime's selection and validation
+		// gates pass (beforeEmit), so a suppressed record leaves no orphan file,
+		// and the text is re-derived here rather than held per candidate.
 		await deps.emitRecord(
 			"messages",
 			msg,
-			blobEvent ? { beforeEmit: () => deps.emit(blobEvent) } : undefined,
+			blob && messageId && sourceNode
+				? {
+						beforeEmit: () =>
+							deps.emit(
+								spoolMessageBlob(
+									blob.spoolDir,
+									messageId,
+									extractRawMessageText(sourceNode) ?? "",
+									blob.ref,
+								),
+							),
+					}
+				: undefined,
 		);
 	}
 	const branchStructurallyIncomplete = await emitBranchReconciliation(
@@ -2989,17 +3028,15 @@ export async function processConversationDetail(
 		currentNode,
 		emittedBranchCount,
 	);
-	// A schema-rejected node or a message this host cannot store means the
-	// emitted messages are not the source's full conversation. Say so durably
-	// instead of letting the caller count the conversation as hydrated.
+	// A schema-rejected node means the emitted messages are not the source's
+	// full conversation. Say so durably instead of letting the caller count the
+	// conversation as hydrated.
 	const incompleteReason: ConversationDetailIncompleteReason | null =
 		rejectedByShapeAnywhere > 0
 			? "message_shape_rejected"
-			: withheldForBlob > 0
-				? "message_blob_unavailable"
-				: branchStructurallyIncomplete || emittedParentConflict
-					? "branch_structurally_incomplete"
-					: null;
+			: branchStructurallyIncomplete || emittedParentConflict
+				? "branch_structurally_incomplete"
+				: null;
 	if (incompleteReason) {
 		await deps.emit(makeIncompleteConversationDetailGap(c, incompleteReason));
 	}
@@ -5445,7 +5482,6 @@ export type ConversationDetailIncompleteReason =
 	| "branch_structurally_incomplete"
 	| "detail_http_error"
 	| "detail_mapping_missing"
-	| "message_blob_unavailable"
 	| "message_shape_rejected";
 
 /** What `processConversationDetail` proved about one conversation's messages. */
@@ -7030,6 +7066,24 @@ export async function runConversationsAndMessagesStreams(
 	state: CollectContext["state"],
 	options: { detailPacing?: ConversationDetailPacingOptions } = {},
 ): Promise<void> {
+	const omittedMessageContent =
+		deps.omittedMessageContent ?? createOmittedMessageContentTally();
+	try {
+		await walkConversationsAndMessages(
+			{ ...deps, omittedMessageContent },
+			state,
+			options,
+		);
+	} finally {
+		reportOmittedMessageContent(omittedMessageContent);
+	}
+}
+
+async function walkConversationsAndMessages(
+	deps: StreamDeps,
+	state: CollectContext["state"],
+	options: { detailPacing?: ConversationDetailPacingOptions } = {},
+): Promise<void> {
 	const listingRecovery =
 		deps.searchRecovery ?? conversationSearchRecovery(deps);
 	const runDeps: StreamDeps = {
@@ -7317,10 +7371,10 @@ function emitConversationsState(
  * serialize them into a SKIP_RESULT diagnostic. Guard here so
  * "Invalid time value" points at the offending row instead of killing the run.
  */
-function makeEmitRecord(
+export function makeEmitRecord(
 	baseEmitRecord: CollectContext["emitRecord"],
-): (stream: string, data: RecordData) => Promise<void> {
-	return (stream: string, data: RecordData): Promise<void> => {
+): CollectContext["emitRecord"] {
+	return (stream, data, options): Promise<void> => {
 		if (data?.id !== null && data?.id !== undefined) {
 			try {
 				JSON.stringify(data);
@@ -7332,7 +7386,9 @@ function makeEmitRecord(
 				return Promise.resolve();
 			}
 		}
-		return baseEmitRecord(stream, data);
+		// Forward the options: `beforeEmit` is what emits a message's BLOB event
+		// after the runtime's gates and before its RECORD.
+		return baseEmitRecord(stream, data, options);
 	};
 }
 
