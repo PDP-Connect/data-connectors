@@ -29,6 +29,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { gzipSync } from "node:zlib";
 import * as esbuild from "esbuild";
+import { consentSlicePlugin } from "../consent-slice-resolution.mjs";
+import { renderSlice } from "../../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 import { isPageShimCapable } from "./capabilities.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -178,7 +180,16 @@ export async function buildPageshim({
 			// The runtime reads each stream's consent_time_field by this name.
 			PAGESHIM_CONNECTOR_MANIFEST: JSON.stringify(connector),
 		},
-		plugins: [stubPlugin(stubbed, port)],
+		plugins: [
+			// The same slice the Core build bundles for this connector; the
+			// runtime reads it through PAGESHIM_CONNECTOR_MANIFEST.
+			consentSlicePlugin({
+				repoRoot: REPO,
+				connectorDirectory: connector,
+				expectedSlice: renderSlice(connector, manifest),
+			}),
+			stubPlugin(stubbed, port),
+		],
 		// The host `return`s the LAST top-level `(async () => {` IIFE, so the
 		// run's promise must be that IIFE.
 		footer: {
