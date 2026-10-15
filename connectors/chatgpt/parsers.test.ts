@@ -24,6 +24,7 @@ import {
 	encodePdppSafeText,
 	escapedLengthExceeds,
 	isEscapedUnit,
+	encodeToolCallStrings,
 	extractToolCalls,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
@@ -1452,4 +1453,64 @@ test("extractMessage: an inline tool-recipient body with controls is escaped in 
 			.tool_calls.x_pdpp_text_encoding,
 		"pdpp-safe-escape-v1",
 	);
+});
+
+test("encodeToolCallStrings: an own \"__proto__\" key from JSON.parse is kept as data, at the root and nested", () => {
+	const sourceJson =
+		'[{"__proto__":{"text":"x\\u0000y"},"k":"v"},{"a":{"__proto__":1,"b":"q\\u0001"}},{"__proto__":"s\\u007f"}]';
+	const source = JSON.parse(sourceJson) as unknown[];
+	assert.ok(Object.hasOwn(source[0] as object, "__proto__"), "fixture is JSON-parsed");
+	const encoded = encodeToolCallStrings(source) as Array<Record<string, unknown>>;
+	assert.equal(
+		JSON.stringify(encoded),
+		'[{"__proto__":{"text":"x\\\\u0000y"},"k":"v"},{"a":{"__proto__":1,"b":"q\\\\u0001"}},{"__proto__":"s\\\\u007F"}]',
+	);
+	assert.ok(Object.hasOwn(encoded[0] as object, "__proto__"));
+	assert.equal(Object.getPrototypeOf(encoded[0]), Object.prototype, "prototype is untouched");
+	assert.equal(
+		JSON.stringify(decodeToolCallStrings(encoded)),
+		JSON.stringify(source),
+		"the independent decoder restores the source",
+	);
+	// And through the record path.
+	const node = {
+		parent: null,
+		children: [],
+		message: {
+			author: { role: "assistant" },
+			content: { content_type: "text", parts: ["hi"] },
+			metadata: { tool_calls: source },
+		},
+	} as ChatGptNode;
+	const rec = extractMessage("n1", node, "c1", true);
+	assert.equal(JSON.stringify(rec?.tool_calls), JSON.stringify(encoded));
+	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+});
+
+test("encodeToolCallStrings: nesting far deeper than the call stack is encoded without loss", () => {
+	const depth = 20_000;
+	let source: unknown = "a\x00b";
+	for (let i = 0; i < depth; i += 1) {
+		source = i % 2 === 0 ? [source] : { n: source, "k\x00": 1 };
+	}
+	const encoded = encodeToolCallStrings([source]);
+	// Walk both trees down iteratively and check shape and the leaf.
+	let from: unknown = [source];
+	let to: unknown = encoded;
+	let levels = 0;
+	while (typeof from === "object" && from !== null) {
+		assert.equal(Array.isArray(to), Array.isArray(from));
+		if (Array.isArray(from)) {
+			from = from[0];
+			to = (to as unknown[])[0];
+		} else {
+			assert.deepEqual(Object.keys(to as object), ["n", "k\\u0000"]);
+			from = (from as { n: unknown }).n;
+			to = (to as { n: unknown }).n;
+		}
+		levels += 1;
+	}
+	assert.equal(levels, depth + 1);
+	assert.equal(to, "a\\u0000b");
+	assert.equal(referenceDecode(to as string), "a\x00b");
 });

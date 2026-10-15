@@ -477,20 +477,47 @@ export function extractContent(
  * Encode every string inside a tool_calls value with pdpp-safe-escape-v1, at any
  * depth: array items, object values, and object keys (a key holding a forbidden
  * code unit is escaped like any other string). Numbers, booleans and null are
- * unchanged. One rule for every entry, whether synthesized here or copied from
- * the source's `metadata.tool_calls`.
+ * unchanged. The walk is iterative and builds own data properties. One rule for
+ * every entry, whether synthesized here or copied from the source's
+ * `metadata.tool_calls`.
  */
 export function encodeToolCallStrings(value: unknown): unknown {
 	if (typeof value === "string") return encodePdppSafeText(value);
-	if (Array.isArray(value)) return value.map(encodeToolCallStrings);
-	if (typeof value === "object" && value !== null) {
-		const out: Record<string, unknown> = {};
-		for (const [key, inner] of Object.entries(value)) {
-			out[encodePdppSafeText(key)] = encodeToolCallStrings(inner);
+	if (typeof value !== "object" || value === null) return value;
+	// Iterative, so nesting depth is not limited by the engine's call stack.
+	// Each container is created before its children are filled in.
+	const root = Array.isArray(value) ? [] : {};
+	const work: Array<{ from: object; to: object }> = [{ from: value, to: root }];
+	for (let item = work.pop(); item; item = work.pop()) {
+		const { from, to } = item;
+		const place = (key: string, inner: unknown): void => {
+			let placed: unknown = inner;
+			if (typeof inner === "string") {
+				placed = encodePdppSafeText(inner);
+			} else if (typeof inner === "object" && inner !== null) {
+				placed = Array.isArray(inner) ? [] : {};
+				work.push({ from: inner, to: placed as object });
+			}
+			if (Array.isArray(to)) {
+				to.push(placed);
+			} else {
+				// An own data property, so a "__proto__" key is kept as data and
+				// never reaches the prototype setter.
+				Object.defineProperty(to, encodePdppSafeText(key), {
+					configurable: true,
+					enumerable: true,
+					value: placed,
+					writable: true,
+				});
+			}
+		};
+		if (Array.isArray(from)) {
+			for (const inner of from) place("", inner);
+		} else {
+			for (const [key, inner] of Object.entries(from)) place(key, inner);
 		}
-		return out;
 	}
-	return value;
+	return root;
 }
 
 /**
