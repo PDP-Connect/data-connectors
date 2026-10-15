@@ -932,9 +932,14 @@ requires. A runtime MUST advertise its supported protocol version and
 capabilities before placement. It MUST reject a connector with an unsupported
 required capability before spawn.
 
-The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7)
-and `OBSERVATION` (since 0.2.0, Section 5.10). A connector that can emit one
-of these messages MUST declare that value. A runtime that does not advertise a
+The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7),
+`OBSERVATION` (since 0.2.0, Section 5.10), and `PERMANENT_DETAIL_GAP` (since
+0.2.0, Section 5.6). A connector that can emit one of these messages MUST
+declare that value. `PERMANENT_DETAIL_GAP` covers a `DETAIL_GAP` with
+`retryable: false`. A runtime advertises it only when it implements both gap
+forms, their reason and `retryable` validation, permanent-gap accounting in
+`DETAIL_COVERAGE`, and the rule that it never schedules, requests, or offers a
+refetch for a permanent gap. A runtime that does not advertise a
 declared capability MUST NOT start that connector. A runtime that implements
 profile version 0.2.0 MUST advertise and support `OBSERVATION`.
 
@@ -1340,7 +1345,12 @@ either retryable or permanent.
 ```
 
 `reference_only: true`, `status: "pending"`, `stream`, `record_key`, `reason`,
-`retryable`, and `detail_locator` are REQUIRED. `retryable` is a boolean.
+and `detail_locator` are REQUIRED. `retryable` is a boolean. A connector that
+declares `PERMANENT_DETAIL_GAP` (Section 3.4) MUST include `retryable` in every
+`DETAIL_GAP`. For a connector that does not declare it, a runtime MUST accept
+an omitted `retryable` when `reason` is one of the four retryable reasons below,
+and MUST treat the omission as `true`. An omitted `retryable` never means
+`false`. A runtime MUST reject a non-boolean `retryable`.
 `record_key` is a string or number. `detail_locator.kind` is REQUIRED. It MUST
 contain no secret.
 
@@ -1350,7 +1360,8 @@ A retryable gap has `retryable: true`. Its portable reasons are `rate_limited`,
 A permanent gap has `retryable: false`. It reports a detail record that the
 connector can never hydrate in full from the source in its current form, for
 example content in a shape the connector cannot represent. Its portable reason
-is `source_unrepresentable`. A connector MUST NOT report a transient failure as
+is `source_unrepresentable`. Only a connector that declares
+`PERMANENT_DETAIL_GAP` may emit a permanent gap. A connector MUST NOT report a transient failure as
 a permanent gap. A runtime MUST reject a gap that pairs `retryable: true` with
 `source_unrepresentable`, or `retryable: false` with a retryable reason.
 
@@ -1866,7 +1877,8 @@ support that exact version or apply an explicit compatibility rule that it
 advertises. A new optional message that an older fail-closed runtime would
 reject requires capability negotiation and a runtime-first rollout.
 
-Version 0.2.0 adds the `OBSERVATION` capability and message, the
+Version 0.2.0 adds the `OBSERVATION` capability and message, the optional
+`PERMANENT_DETAIL_GAP` capability for permanent detail gaps, the
 `diagnostic_descriptors` manifest member, `DONE.error.basis`, and Sections
 5.11 to 5.13. Every valid 0.1.0 exchange stays valid. A 0.2.0 runtime
 presents the recovery hints of 0.1.0 connectors through the gate of
