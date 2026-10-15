@@ -70,7 +70,7 @@ jobs:
             const original = 'curr.created_at < prev.created_at';
             assert.equal(source.split(original).length - 1, 1, 'canary source expression must occur once');
             writeFileSync(path, source.replace(original, 'curr.created_at >= prev.created_at'));
-            NODE
+          NODE
             set +e
             tools/groupme-mutation-pilot/node_modules/.bin/vitest run --config tools/groupme-mutation-pilot/vitest.config.ts connectors/groupme/incremental-frontier.vitest.ts --testNamePattern='repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError' --reporter=json --outputFile=reports/mutation/evidence/canary-owner-failure.json > reports/mutation/evidence/canary-owner-failure.stdout 2> reports/mutation/evidence/canary-owner-failure.stderr
             canary_exit="$?"
