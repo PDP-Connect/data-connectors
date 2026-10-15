@@ -9,12 +9,13 @@ export interface SpotifyEndEvidence {
 	selector: string;
 	firstOffset: number;
 	lastOffset: number;
+	responseOffset: number;
 	pageCount: number;
 	rawCount: number;
 	expectedCount: number | null;
 	discardedCount: number;
 	remaining: boolean;
-	terminal: "empty_verified" | "short_page" | "total_reached" | null;
+	terminal: "empty_verified" | "total_reached" | null;
 }
 
 export interface SpotifyEndExpectation {
@@ -54,6 +55,8 @@ export function hasSpotifyTerminalBoundary(
 		evidence.firstOffset !== 0 ||
 		!Number.isSafeInteger(evidence.lastOffset) ||
 		evidence.lastOffset < 0 ||
+		!Number.isSafeInteger(evidence.responseOffset) ||
+		evidence.responseOffset !== evidence.lastOffset ||
 		!Number.isSafeInteger(evidence.pageCount) ||
 		evidence.pageCount < 1 ||
 		!Number.isSafeInteger(evidence.rawCount) ||
@@ -68,10 +71,9 @@ export function hasSpotifyTerminalBoundary(
 			evidence.rawCount !== evidence.expectedCount) ||
 		evidence.remaining ||
 		(evidence.terminal !== "empty_verified" &&
-			evidence.terminal !== "short_page" &&
 			evidence.terminal !== "total_reached") ||
-		(evidence.terminal === "empty_verified" && evidence.rawCount !== 0) ||
-		(evidence.terminal === "short_page" && evidence.expectedCount !== null) ||
+		(evidence.terminal === "empty_verified" &&
+			(evidence.rawCount !== 0 || evidence.expectedCount !== 0)) ||
 		(evidence.terminal === "total_reached" && evidence.expectedCount === null)
 	) {
 		return false;

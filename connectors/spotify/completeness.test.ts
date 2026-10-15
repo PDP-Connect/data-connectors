@@ -18,6 +18,10 @@ const HASHES = {
 	profileAttributes: "d".repeat(64),
 };
 
+type FailedCollectionCapture = {
+	messages: EmittedMessage[];
+};
+
 function bundleFor(operations = Object.keys(HASHES)): string {
 	return operations
 		.map(
@@ -30,7 +34,10 @@ function bundleFor(operations = Object.keys(HASHES)): string {
 function savedTrack(
 	id: string,
 	options: { addedAt?: string | null; uri?: string } = {},
-) {
+): {
+	addedAt?: { isoString: unknown };
+	track: { uri?: unknown; data: Record<string, unknown> };
+} {
 	return {
 		...("addedAt" in options
 			? options.addedAt === null
@@ -63,6 +70,8 @@ async function collectSavedTracks(
 		cachedBundles?: Array<{ url: string; size: number; body: string }>;
 		pathname?: string;
 		requested?: string[];
+		profileEnrichment?: unknown;
+		onFailure?: (result: FailedCollectionCapture) => void;
 	} = {},
 ) {
 	const originalFetch = globalThis.fetch;
@@ -143,6 +152,11 @@ async function collectSavedTracks(
 				status: 200,
 			});
 		}
+		if (url.startsWith("https://spclient.wg.spotify.com/user-profile-view/")) {
+			return new Response(JSON.stringify(options.profileEnrichment ?? {}), {
+				status: 200,
+			});
+		}
 		if (url === "https://api-partner.spotify.com/pathfinder/v2/query") {
 			const body = JSON.parse(String(init?.body)) as {
 				operationName: string;
@@ -151,40 +165,44 @@ async function collectSavedTracks(
 			if (body.operationName === "fetchLibraryTracks")
 				requests.push(body.variables.offset);
 			operations.push({ name: body.operationName, variables: body.variables });
-			return new Response(
-				JSON.stringify(
-					graphql(
-						body.variables.offset,
-						operations.length,
-						body.operationName,
-						body.variables,
-					),
-				),
-				{ status: 200 },
+			const response = graphql(
+				body.variables.offset,
+				operations.length,
+				body.operationName,
+				body.variables,
 			);
+			return new Response(JSON.stringify(response), { status: 200 });
 		}
 		throw new Error(`unexpected synthetic request: ${url}`);
 	};
 	try {
-		await spotifyCollect({
-			emit: (message) => {
-				messages.push(message);
-				return Promise.resolve();
-			},
-			emitRecord: (stream, data) => {
-				emittedRecords.push({ stream, data });
-				return Promise.resolve();
-			},
-			page: {
-				goto: () => Promise.resolve(null),
-				evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
-					fn(arg),
-			} as never,
-			progress: () => Promise.resolve(),
-			requested: new Map<string, StreamScope>(
-				(options.requested ?? ["saved_tracks"]).map((name) => [name, { name }]),
-			),
-		});
+		try {
+			await spotifyCollect({
+				emit: (message) => {
+					messages.push(message);
+					return Promise.resolve();
+				},
+				emitRecord: (stream, data) => {
+					emittedRecords.push({ stream, data });
+					return Promise.resolve();
+				},
+				page: {
+					goto: () => Promise.resolve(null),
+					evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
+						fn(arg),
+				} as never,
+				progress: () => Promise.resolve(),
+				requested: new Map<string, StreamScope>(
+					(options.requested ?? ["saved_tracks"]).map((name) => [
+						name,
+						{ name },
+					]),
+				),
+			});
+		} catch (error) {
+			options.onFailure?.({ messages });
+			throw error;
+		}
 		return { bundleRequests, emittedRecords, messages, operations, requests };
 	} finally {
 		globalThis.fetch = originalFetch;
@@ -197,13 +215,42 @@ async function collectSavedTracks(
 	}
 }
 
-function savedResponse(items: unknown[], totalCount?: number): unknown {
+async function assertRejectedWithoutAuthority(
+	graphql: Parameters<typeof collectSavedTracks>[0],
+	options: Parameters<typeof collectSavedTracks>[1] = {},
+): Promise<void> {
+	const capture: { failure?: FailedCollectionCapture } = {};
+	await assert.rejects(() =>
+		collectSavedTracks(graphql, {
+			...options,
+			onFailure: (result) => {
+				capture.failure = result;
+			},
+		}),
+	);
+	const { failure } = capture;
+	assert.ok(failure);
+	assert.equal(
+		failure.messages.some(
+			(message) =>
+				message.type === "STATE" || message.type === "DETAIL_COVERAGE",
+		),
+		false,
+	);
+}
+
+function savedResponse(
+	items: unknown[],
+	totalCount?: number,
+	offset = 0,
+): unknown {
 	return {
 		data: {
 			me: {
 				library: {
 					tracks: {
 						items,
+						offset,
 						...(totalCount === undefined ? {} : { totalCount }),
 					},
 				},
@@ -263,6 +310,7 @@ test("playlist library pagination continues after a short page while totalCount 
 					data: {
 						me: {
 							libraryV3: {
+								offset,
 								totalCount: 2,
 								items: [
 									{
@@ -287,7 +335,7 @@ test("playlist library pagination continues after a short page while totalCount 
 						uri,
 						name: "Synthetic playlist",
 						ownerV2: { data: { uri: "spotify:user:owner", name: "Owner" } },
-						content: { totalCount: 0, items: [] },
+						content: { totalCount: 0, items: [], offset: variables?.offset },
 						images: { items: [] },
 					},
 				},
@@ -304,43 +352,36 @@ test("playlist library pagination continues after a short page while totalCount 
 });
 
 test("missing playlist library or playlist detail objects cannot prove an empty list", async () => {
-	await assert.rejects(
-		() =>
-			collectSavedTracks(
-				(_offset, _index, operationName) =>
-					operationName === "libraryV3" ? { data: { me: {} } } : {},
-				{ requested: ["playlists"] },
-			),
-		/spotify_library_response_invalid/,
+	await assertRejectedWithoutAuthority(
+		(_offset, _index, operationName) =>
+			operationName === "libraryV3" ? { data: { me: {} } } : {},
+		{ requested: ["playlists"] },
 	);
-	await assert.rejects(
-		() =>
-			collectSavedTracks(
-				(_offset, _index, operationName) => {
-					if (operationName !== "libraryV3") return { data: {} };
-					return {
-						data: {
-							me: {
-								libraryV3: {
-									totalCount: 1,
-									items: [
-										{
-											item: {
-												data: {
-													__typename: "Playlist",
-													uri: "spotify:playlist:pl1",
-												},
-											},
+	await assertRejectedWithoutAuthority(
+		(_offset, _index, operationName) => {
+			if (operationName !== "libraryV3") return { data: {} };
+			return {
+				data: {
+					me: {
+						libraryV3: {
+							offset: 0,
+							totalCount: 1,
+							items: [
+								{
+									item: {
+										data: {
+											__typename: "Playlist",
+											uri: "spotify:playlist:pl1",
 										},
-									],
+									},
 								},
-							},
+							],
 						},
-					};
+					},
 				},
-				{ requested: ["playlists"] },
-			),
-		/spotify_playlist_response_invalid/,
+			};
+		},
+		{ requested: ["playlists"] },
 	);
 });
 
@@ -353,6 +394,7 @@ test("playlist item traversal continues after a short page while its total remai
 					data: {
 						me: {
 							libraryV3: {
+								offset,
 								totalCount: 1,
 								items: [
 									{
@@ -389,6 +431,7 @@ test("playlist item traversal continues after a short page while its total remai
 						ownerV2: { data: { uri: "spotify:user:owner", name: "Owner" } },
 						content: {
 							totalCount: 2,
+							offset,
 							items: [item(offset === 0 ? "one" : "two")],
 						},
 					},
@@ -413,13 +456,14 @@ test("playlist item completion combines terminal evidence across every playlist"
 					data: {
 						me: {
 							libraryV3: {
+								offset: 0,
 								totalCount: 2,
 								items: ["first", "empty"].map((id) => ({
 									item: {
-									data: {
-										__typename: "Playlist",
-										uri: `spotify:playlist:${id}`,
-									},
+										data: {
+											__typename: "Playlist",
+											uri: `spotify:playlist:${id}`,
+										},
 									},
 								})),
 							},
@@ -450,8 +494,12 @@ test("playlist item completion combines terminal evidence across every playlist"
 						name: "Synthetic playlist",
 						content:
 							items.length === 0
-								? { items }
-								: { totalCount: items.length, items },
+								? { totalCount: 0, items, offset: variables?.offset }
+								: {
+										totalCount: items.length,
+										items,
+										offset: variables?.offset,
+									},
 					},
 				},
 			};
@@ -465,28 +513,233 @@ test("playlist item completion combines terminal evidence across every playlist"
 	);
 });
 
-test("saved-track traversal accepts unknown totals and follows short pages until its declared end", async () => {
+test("saved-track traversal cannot infer a terminal boundary from short pages without source end evidence", async () => {
 	const firstPage = Array.from({ length: 100 }, (_, index) =>
 		savedTrack(`row${index}`),
 	);
-	const result = await collectSavedTracks((offset) =>
+	await assertRejectedWithoutAuthority((offset) =>
 		offset === 0
 			? savedResponse(firstPage)
-			: savedResponse([savedTrack("tail")]),
+			: savedResponse([savedTrack("tail")], undefined, 100),
 	);
-	assert.deepEqual(result.requests, [0, 100]);
-	assert.equal(
-		result.emittedRecords.filter((record) => record.stream === "saved_tracks")
-			.length,
-		101,
+});
+
+test("saved-track short and empty pages without totals cannot prove completion", async () => {
+	for (const items of [[], [savedTrack("one")]]) {
+		await assertRejectedWithoutAuthority(() => savedResponse(items));
+	}
+});
+
+test("saved tracks reject duplicate stable identities within a page", async () => {
+	await assertRejectedWithoutAuthority(() =>
+		savedResponse(
+			[
+				savedTrack("same"),
+				{
+					...savedTrack("same"),
+					track: {
+						...savedTrack("same").track,
+						data: {
+							...savedTrack("same").track.data,
+							name: "Changed title",
+						},
+					},
+				},
+			],
+			2,
+		),
 	);
+});
+
+test("saved tracks reject repeated identities across pages even when the page changes", async () => {
+	const firstPage = Array.from({ length: 100 }, (_, index) =>
+		savedTrack(`row${index}`),
+	);
+	await assertRejectedWithoutAuthority((offset) =>
+		offset === 0
+			? savedResponse(firstPage, 101)
+			: savedResponse(
+					[
+						{
+							...savedTrack("row0"),
+							track: {
+								...savedTrack("row0").track,
+								data: {
+									...savedTrack("row0").track.data,
+									name: "Changed title",
+								},
+							},
+						},
+					],
+					101,
+					100,
+				),
+	);
+});
+
+test("saved tracks reject a response offset that does not match the request", async () => {
+	await assertRejectedWithoutAuthority(() => {
+		const response = savedResponse([savedTrack("offset-mismatch")], 1) as {
+			data: { me: { library: { tracks: Record<string, unknown> } } };
+		};
+		response.data.me.library.tracks.offset = 100;
+		return response;
+	});
+});
+
+test("saved tracks reject a terminal response without a returned offset", async () => {
+	await assertRejectedWithoutAuthority(() => {
+		const response = savedResponse([savedTrack("missing-offset")], 1) as {
+			data: { me: { library: { tracks: Record<string, unknown> } } };
+		};
+		delete response.data.me.library.tracks.offset;
+		return response;
+	});
+});
+
+test("library rows require a recognized type and folders veto root-only coverage", async () => {
+	for (const row of [
+		{ item: { data: {} } },
+		{ item: { data: { __typename: "FutureType" } } },
+		{ item: { data: { __typename: "Folder", uri: "spotify:folder:f1" } } },
+	] as const) {
+		await assertRejectedWithoutAuthority(
+			() => ({
+				data: { me: { libraryV3: { items: [row], totalCount: 1, offset: 0 } } },
+			}),
+			{ requested: ["playlists"] },
+		);
+	}
+});
+
+test("playlist item rows reject unrecognized types instead of silently skipping them", async () => {
+	await assertRejectedWithoutAuthority(
+		(_offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") {
+				return {
+					data: {
+						me: {
+							libraryV3: {
+								offset: 0,
+								totalCount: 1,
+								items: [
+									{
+										item: {
+											data: {
+												__typename: "Playlist",
+												uri: "spotify:playlist:pl1",
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				};
+			}
+			return {
+				data: {
+					playlistV2: {
+						uri: String(variables?.uri),
+						name: "List",
+						content: {
+							totalCount: 1,
+							offset: variables?.offset,
+							items: [{ itemV2: { data: { __typename: "FutureType" } } }],
+						},
+					},
+				},
+			};
+		},
+		{ requested: ["playlist_items"] },
+	);
+});
+
+test("malformed playlist item fields veto row coverage", async () => {
+	await assertRejectedWithoutAuthority(
+		(_offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") {
+				return {
+					data: {
+						me: {
+							libraryV3: {
+								offset: 0,
+								totalCount: 1,
+								items: [
+									{
+										item: {
+											data: {
+												__typename: "Playlist",
+												uri: "spotify:playlist:pl1",
+											},
+										},
+									},
+								],
+							},
+						},
+					},
+				};
+			}
+			return {
+				data: {
+					playlistV2: {
+						uri: String(variables?.uri),
+						content: {
+							totalCount: 1,
+							offset: variables?.offset,
+							items: [
+								{
+									itemV2: {
+										data: {
+											__typename: "Track",
+											uri: "spotify:track:t1",
+											name: "Track",
+											artists: { items: [] },
+											trackDuration: { totalMilliseconds: "180000" },
+										},
+									},
+								},
+							],
+						},
+					},
+				},
+			};
+		},
+		{ requested: ["playlist_items"] },
+	);
+});
+
+test("malformed saved-track mapped fields veto coverage instead of becoming empty values", async () => {
+	const malformedRows = [
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.duration = { totalMilliseconds: "180000" };
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.uri = 42 as unknown as string;
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.contentRating = { label: 42 };
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.track.data.albumOfTrack =
+				false as unknown as typeof row.track.data.albumOfTrack;
+		},
+		(row: ReturnType<typeof savedTrack>) => {
+			row.addedAt = { isoString: 42 };
+		},
+	];
+	for (const mutate of malformedRows) {
+		const row = savedTrack("malformed");
+		mutate(row);
+		await assertRejectedWithoutAuthority(() => savedResponse([row], 1));
+	}
 });
 
 test("saved-track traversal continues after a nonempty short page while totalCount remains", async () => {
 	const result = await collectSavedTracks((offset) =>
 		offset === 0
 			? savedResponse([savedTrack("one"), savedTrack("two")], 3)
-			: savedResponse([savedTrack("three")], 3),
+			: savedResponse([savedTrack("three")], 3, 2),
 	);
 	assert.deepEqual(result.requests, [0, 2]);
 	assert.equal(result.emittedRecords.length, 3);
@@ -518,27 +771,19 @@ test("saved tracks preserve rows with empty or absent source metadata without in
 });
 
 test("malformed saved-track response cannot become empty success or advance a checkpoint", async () => {
-	await assert.rejects(
-		() =>
-			collectSavedTracks(() => ({
-				data: { me: { library: { tracks: null } } },
-			})),
-		/spotify_saved_tracks_response_invalid/,
-	);
+	await assertRejectedWithoutAuthority(() => ({
+		data: { me: { library: { tracks: null } } },
+	}));
 });
 
 test("saved-track row identity uses one source ID resolver and shape failures veto coverage", async () => {
 	const invalid = savedTrack("bad-shape");
 	invalid.track.data.name = "x".repeat(1001);
-	await assert.rejects(
-		() =>
-			collectSavedTracks(() =>
-				savedResponse(
-					[savedTrack("uri-id", { uri: "spotify:track:uri-id" }), invalid],
-					2,
-				),
-			),
-		/spotify_saved_tracks_record_invalid/,
+	await assertRejectedWithoutAuthority(() =>
+		savedResponse(
+			[savedTrack("uri-id", { uri: "spotify:track:uri-id" }), invalid],
+			2,
+		),
 	);
 });
 
@@ -617,6 +862,38 @@ test("Spotify schemas accept legacy owner identifiers and source URI variants", 
 	);
 });
 
+test("Spotify datetime schema rejects impossible calendar values and trailing garbage", () => {
+	const valid = {
+		id: "track1",
+		identity_unresolved: false,
+		name: "Track",
+		artist_names: [],
+		album_name: null,
+		duration_ms: null,
+		popularity: null,
+		added_at: "2024-02-29T00:00:00Z",
+		isrc: null,
+		uri: null,
+		explicit: null,
+		album_artist_names: [],
+	};
+	assert.equal(validateRecord("saved_tracks", valid).ok, true);
+	assert.equal(
+		validateRecord("saved_tracks", {
+			...valid,
+			added_at: "2023-02-29T00:00:00Z",
+		}).ok,
+		false,
+	);
+	assert.equal(
+		validateRecord("saved_tracks", {
+			...valid,
+			added_at: "2024-02-29T00:00:00Zgarbage",
+		}).ok,
+		false,
+	);
+});
+
 test("profile collection preserves an explicitly empty source image URL", async () => {
 	const result = await collectSavedTracks(
 		(_offset, _index, operationName) => {
@@ -641,12 +918,96 @@ test("profile collection preserves an explicitly empty source image URL", async 
 	]);
 });
 
-test("a request made from a non-player navigation cannot prove an empty saved-track list", async () => {
-	await assert.rejects(
-		() =>
-			collectSavedTracks(() => savedResponse([], 0), { pathname: "/login" }),
-		/spotify_page_not_player/,
+test("malformed profile image data is unavailable rather than an empty image list", async () => {
+	await assertRejectedWithoutAuthority(
+		() => ({
+			data: {
+				me: { profile: { username: "synthetic-user", imageUrl: 42 } },
+			},
+		}),
+		{ requested: ["profile"] },
 	);
+});
+
+test("malformed profile enrichment counts cannot become valid null counts", async () => {
+	await assertRejectedWithoutAuthority(
+		() => ({
+			data: {
+				me: {
+					profile: {
+						username: "synthetic-user",
+						uri: "spotify:user:synthetic-user",
+					},
+				},
+			},
+		}),
+		{
+			requested: ["profile"],
+			profileEnrichment: {
+				uri: "spotify:user:synthetic-user",
+				followers_count: "42",
+				following_count: 10,
+			},
+		},
+	);
+});
+
+test("malformed playlist detail fields veto coverage", async () => {
+	for (const mutate of [
+		(detail: Record<string, unknown>) => {
+			detail.name = 42;
+		},
+		(detail: Record<string, unknown>) => {
+			detail.followers = "10";
+		},
+		(detail: Record<string, unknown>) => {
+			detail.images = { items: [{ sources: "malformed" }] };
+		},
+	]) {
+		await assertRejectedWithoutAuthority(
+			(_offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") {
+					return {
+						data: {
+							me: {
+								libraryV3: {
+									offset: 0,
+									totalCount: 1,
+									items: [
+										{
+											item: {
+												data: {
+													__typename: "Playlist",
+													uri: "spotify:playlist:p1",
+												},
+											},
+										},
+									],
+								},
+							},
+						},
+					};
+				}
+				const detail: Record<string, unknown> = {
+					uri: String(variables?.uri),
+					name: "Synthetic playlist",
+					ownerV2: { data: { uri: "spotify:user:owner", name: "Owner" } },
+					content: { offset: variables?.offset, totalCount: 0, items: [] },
+					followers: 10,
+					images: { items: [] },
+				};
+				mutate(detail);
+				return { data: { playlistV2: detail } };
+			},
+			{ requested: ["playlists"] },
+		);
+	}
+});
+
+test("a request made from a non-player navigation cannot prove an empty saved-track list", async () => {
+	await assertRejectedWithoutAuthority(() => savedResponse([], 0), {
+		pathname: "/login",
+	});
 });
 
 test("Spotify end proof requires the exact player navigation, owner, request, and terminal counts", () => {
@@ -658,6 +1019,7 @@ test("Spotify end proof requires the exact player navigation, owner, request, an
 		selector: "spotify:user:me:collection",
 		firstOffset: 0,
 		lastOffset: 100,
+		responseOffset: 100,
 		pageCount: 2,
 		rawCount: 101,
 		expectedCount: 101,

@@ -45,7 +45,6 @@ import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schem
 // Module-scoped regexes (Biome useTopLevelRegex).
 const SPOTIFY_ID_RE = /^[0-9A-Za-z]{1,40}$/; // base-62 resource id
 const ISRC_RE = /^[A-Za-z]{2}[0-9A-Za-z]{3}\d{7}$/; // ISO 3901 ISRC
-const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 // recently_played id is `${track.id}:${playedAtMs}` — base-62 id, colon, epoch ms.
 const RECENTLY_PLAYED_ID_RE = /^[0-9A-Za-z]{1,40}:\d{1,20}$/;
 
@@ -56,9 +55,7 @@ const spotifyIdSchema = z
 // drops the key). Allow optional alongside the free-text brand.
 const nameSchema = pdppSafeText.max(1000).optional();
 const artistNamesSchema = z.array(pdppSafeText.max(1000));
-const isoDateTimeSchema = z
-	.string()
-	.regex(ISO_DT_RE, "must be an ISO-8601 datetime");
+const isoDateTimeSchema = z.iso.datetime();
 const SPOTIFY_URI_RE = /^spotify:[a-z]+:[0-9A-Za-z]{1,40}$/;
 const spotifyUriSchema = z
 	.string()

@@ -103,7 +103,7 @@ interface BrowserData {
 	saved_tracks: Record<string, unknown>[];
 	sourceCounts: Partial<
 		Record<
-			"playlists" | "playlist_items" | "saved_tracks",
+			"playlists" | "playlist_items" | "saved_tracks" | "profile",
 			{ considered: number; covered: number }
 		>
 	>;
@@ -408,33 +408,161 @@ async function collectSpotifyWebData(
 				: null;
 		}
 
-		function imageRecords(
-			images: any,
-		): Array<{ height: null; url: string; width: null }> {
-			return (images?.items ?? [])
-				.map((img: any) => img?.sources?.[0]?.url)
-				.filter((url: unknown): url is string => typeof url === "string")
-				.map((url: string) => ({ url, width: null, height: null }));
+		type SourceFieldRead<T> =
+			| { kind: "READ"; value: T }
+			| { kind: "EXPLICIT_EMPTY"; value: T }
+			| { kind: "UNAVAILABLE"; reason: string };
+
+		function readField<T>(
+			value: unknown,
+			field: string,
+			isValid: (candidate: unknown) => candidate is T,
+			emptyValue: T,
+		): SourceFieldRead<T> {
+			if (value === undefined || value === null) {
+				return { kind: "EXPLICIT_EMPTY", value: emptyValue };
+			}
+			return isValid(value)
+				? { kind: "READ", value }
+				: { kind: "UNAVAILABLE", reason: `${field}_malformed` };
+		}
+
+		function requireField<T>(
+			read: SourceFieldRead<T>,
+			prefix = "spotify_saved_tracks",
+		): T {
+			if (read.kind === "UNAVAILABLE") {
+				throw new Error(`${prefix}_field_unavailable:${read.reason}`);
+			}
+			return read.value;
+		}
+
+		function readString(
+			value: unknown,
+			field: string,
+		): SourceFieldRead<string | null> {
+			return readField(
+				value,
+				field,
+				(candidate): candidate is string => typeof candidate === "string",
+				null,
+			);
+		}
+
+		function readCount(
+			value: unknown,
+			field: string,
+		): SourceFieldRead<number | null> {
+			return readField(
+				value,
+				field,
+				(candidate): candidate is number =>
+					typeof candidate === "number" &&
+					Number.isSafeInteger(candidate) &&
+					candidate >= 0,
+				null,
+			);
+		}
+
+		function readPageOffset(
+			page: unknown,
+			requestedOffset: number,
+			field: string,
+		): void {
+			if (!page || typeof page !== "object") {
+				throw new Error(`${field}_response_invalid`);
+			}
+			const responseOffset = (page as Record<string, unknown>).offset;
+			if (
+				!Number.isSafeInteger(responseOffset) ||
+				responseOffset !== requestedOffset
+			) {
+				throw new Error(`${field}_offset_unverified`);
+			}
 		}
 
 		function count(value: unknown): number | null {
-			return Number.isSafeInteger(value) && Number(value) >= 0
-				? Number(value)
+			return typeof value === "number" &&
+				Number.isSafeInteger(value) &&
+				value >= 0
+				? value
 				: null;
 		}
 
-		function sourceArtistNames(value: unknown): string[] | null {
-			if (!Array.isArray(value)) return null;
+		function imageRecords(
+			images: unknown,
+		): SourceFieldRead<Array<{ height: null; url: string; width: null }>> {
+			if (images === undefined || images === null) {
+				return { kind: "EXPLICIT_EMPTY", value: [] };
+			}
+			if (typeof images !== "object") {
+				return { kind: "UNAVAILABLE", reason: "playlist_images_malformed" };
+			}
+			const items = (images as Record<string, unknown>).items;
+			if (!Array.isArray(items)) {
+				return { kind: "UNAVAILABLE", reason: "playlist_images_malformed" };
+			}
+			const records: Array<{ height: null; url: string; width: null }> = [];
+			for (const image of items) {
+				if (typeof image !== "object" || image === null) {
+					return {
+						kind: "UNAVAILABLE",
+						reason: "playlist_image_row_malformed",
+					};
+				}
+				const sources = (image as Record<string, unknown>).sources;
+				if (!Array.isArray(sources)) {
+					return {
+						kind: "UNAVAILABLE",
+						reason: "playlist_image_sources_malformed",
+					};
+				}
+				if (sources.length === 0) continue;
+				const first = sources[0];
+				if (typeof first !== "object" || first === null) {
+					return {
+						kind: "UNAVAILABLE",
+						reason: "playlist_image_source_malformed",
+					};
+				}
+				const url = (first as Record<string, unknown>).url;
+				if (typeof url !== "string") {
+					return {
+						kind: "UNAVAILABLE",
+						reason: "playlist_image_url_malformed",
+					};
+				}
+				records.push({ url, width: null, height: null });
+			}
+			return records.length === 0
+				? { kind: "EXPLICIT_EMPTY", value: records }
+				: { kind: "READ", value: records };
+		}
+
+		function sourceArtistNames(
+			value: unknown,
+			field: string,
+		): SourceFieldRead<string[]> {
+			if (value === undefined || value === null) {
+				return { kind: "EXPLICIT_EMPTY", value: [] };
+			}
+			if (!Array.isArray(value))
+				return { kind: "UNAVAILABLE", reason: `${field}_malformed` };
 			const names: string[] = [];
 			for (const entry of value) {
-				if (typeof entry !== "object" || entry === null) return null;
+				if (typeof entry !== "object" || entry === null)
+					return { kind: "UNAVAILABLE", reason: `${field}_row_malformed` };
 				const profile = (entry as Record<string, unknown>).profile;
-				if (typeof profile !== "object" || profile === null) return null;
+				if (typeof profile !== "object" || profile === null)
+					return { kind: "UNAVAILABLE", reason: `${field}_profile_malformed` };
 				const name = (profile as Record<string, unknown>).name;
-				if (typeof name !== "string") return null;
+				if (typeof name !== "string")
+					return { kind: "UNAVAILABLE", reason: `${field}_name_malformed` };
 				names.push(name);
 			}
-			return names;
+			return names.length === 0
+				? { kind: "EXPLICIT_EMPTY", value: names }
+				: { kind: "READ", value: names };
 		}
 
 		function pageSignature(items: unknown[]): string {
@@ -743,8 +871,22 @@ async function collectSpotifyWebData(
 		if (wanted.has("profile")) {
 			const attrs = await gql("profileAttributes", {});
 			const pa = attrs?.data?.me?.profile;
-			if (!pa?.username) throw new Error("spotify_profile_unavailable");
-			const identityUri = pa.uri ?? `spotify:user:${pa.username}`;
+			if (!pa || typeof pa !== "object")
+				throw new Error("spotify_profile_unavailable");
+			const username = requireField(
+				readString(pa.username, "profile_username"),
+				"spotify_profile",
+			);
+			if (!username) throw new Error("spotify_profile_unavailable");
+			const profileName = requireField(
+				readString(pa.name, "profile_name"),
+				"spotify_profile",
+			);
+			const sourceUri = requireField(
+				readString(pa.uri, "profile_uri"),
+				"spotify_profile",
+			);
+			const identityUri = sourceUri ?? `spotify:user:${username}`;
 			let enrichment: any = null;
 			try {
 				const enriched = await fetch(
@@ -761,18 +903,43 @@ async function collectSpotifyWebData(
 				enrichment = await enriched.json();
 			} catch {}
 			const sameAccount = enrichment?.uri === identityUri;
-			const imageUrl =
-				pa.imageUrl ?? (sameAccount ? enrichment?.image_url : null);
+			const profileImage = requireField(
+				readString(pa.imageUrl, "profile_image_url"),
+				"spotify_profile",
+			);
+			const enrichmentImage = sameAccount
+				? requireField(
+						readString(enrichment?.image_url, "profile_enrichment_image_url"),
+						"spotify_profile",
+					)
+				: null;
+			const imageUrl = profileImage ?? enrichmentImage;
+			const followers = sameAccount
+				? requireField(
+						readCount(enrichment?.followers_count, "profile_followers"),
+						"spotify_profile",
+					)
+				: null;
+			const following = sameAccount
+				? requireField(
+						readCount(enrichment?.following_count, "profile_following"),
+						"spotify_profile",
+					)
+				: null;
 			result.profile = {
-				id: pa.username,
-				display_name: pa.name ?? null,
-				followers: sameAccount ? count(enrichment?.followers_count) : null,
+				id: username,
+				display_name: profileName,
+				followers,
 				uri: identityUri,
 				images:
-					typeof imageUrl === "string"
+					imageUrl !== null
 						? [{ url: imageUrl, width: null, height: null }]
 						: [],
-				following: sameAccount ? count(enrichment?.following_count) : null,
+				following,
+			};
+			result.sourceCounts.profile = {
+				considered: 1,
+				covered: sameAccount ? 1 : 0,
 			};
 		}
 
@@ -781,11 +948,13 @@ async function collectSpotifyWebData(
 			let libraryOffset = 0;
 			const libraryLimit = 200;
 			const libraryPageSignatures = new Set<string>();
+			const libraryIdentities = new Set<string>();
 			let libraryRawCount = 0;
 			let libraryExpectedCount: number | null = null;
 			let libraryPageCount = 0;
 			let libraryTerminal: SpotifyEndEvidence["terminal"] = null;
 			while (true) {
+				const requestOffset = libraryOffset;
 				const libData = await gql("libraryV3", {
 					filters: [],
 					order: null,
@@ -803,6 +972,7 @@ async function collectSpotifyWebData(
 				if (!library || !Array.isArray(library.items)) {
 					throw new Error("spotify_library_response_invalid");
 				}
+				readPageOffset(library, requestOffset, "spotify_library");
 				const pageItems = library.items;
 				if (Object.hasOwn(library, "totalCount")) {
 					const parsedTotal = count(library.totalCount);
@@ -823,14 +993,39 @@ async function collectSpotifyWebData(
 				if (pageItems.length > 0) libraryPageSignatures.add(signature);
 				for (const item of pageItems) {
 					const data = item?.item?.data;
-					if (!data || typeof data !== "object") {
+					if (
+						!data ||
+						typeof data !== "object" ||
+						typeof data.__typename !== "string" ||
+						data.__typename.length === 0
+					) {
 						throw new Error("spotify_library_row_invalid");
 					}
-					if (data.__typename !== "Playlist") continue;
+					if (data.__typename === "Folder") {
+						throw new Error("spotify_library_folder_untraversed");
+					}
+					if (data.__typename !== "Playlist") {
+						if (
+							[
+								"Album",
+								"Artist",
+								"Episode",
+								"Track",
+								"LikedSongs",
+								"YourEpisodes",
+							].includes(data.__typename)
+						)
+							continue;
+						throw new Error("spotify_library_row_type_unrecognized");
+					}
 					const uri = data._uri ?? data.uri;
 					if (typeof uri !== "string" || uri.length === 0) {
 						throw new Error("spotify_library_playlist_identity_missing");
 					}
+					if (libraryIdentities.has(uri)) {
+						throw new Error("spotify_library_identity_repeated");
+					}
+					libraryIdentities.add(uri);
 					playlistUris.push(uri);
 				}
 				libraryRawCount += pageItems.length;
@@ -850,11 +1045,7 @@ async function collectSpotifyWebData(
 					break;
 				}
 				if (pageItems.length < libraryLimit && libraryExpectedCount === null) {
-					libraryTerminal =
-						pageItems.length === 0 && libraryRawCount === 0
-							? "empty_verified"
-							: "short_page";
-					break;
+					throw new Error("spotify_library_terminal_unverified");
 				}
 				if (pageItems.length === 0) {
 					throw new Error("spotify_library_pagination_no_progress");
@@ -878,6 +1069,7 @@ async function collectSpotifyWebData(
 				selector: "spotify:user:me:library",
 				firstOffset: 0,
 				lastOffset: libraryOffset,
+				responseOffset: libraryOffset,
 				pageCount: libraryPageCount,
 				rawCount: libraryRawCount,
 				expectedCount: libraryExpectedCount,
@@ -930,6 +1122,7 @@ async function collectSpotifyWebData(
 					) {
 						throw new Error("spotify_playlist_response_invalid");
 					}
+					readPageOffset(pl.content, requestOffset, "spotify_playlist");
 					const items = pl.content.items;
 					if (Object.hasOwn(pl.content, "totalCount")) {
 						const parsedTotal = count(pl.content.totalCount);
@@ -953,13 +1146,38 @@ async function collectSpotifyWebData(
 						if (responseId === null || responseId !== requestedPlaylistId) {
 							throw new Error("spotify_playlist_identity_mismatch");
 						}
-						playlistName = pl.name;
-						ownerId = idFromUri(pl.ownerV2?.data?.uri);
-						ownerName = pl.ownerV2?.data?.name;
-						description = pl.description;
-						uriValue = pl.uri;
-						followers = count(pl.followers);
-						images = imageRecords(pl.images);
+						playlistName = requireField(
+							readString(pl.name, "playlist_name"),
+							"spotify_playlist",
+						);
+						const owner = pl.ownerV2?.data;
+						if (
+							owner !== undefined &&
+							owner !== null &&
+							typeof owner !== "object"
+						) {
+							throw new Error("spotify_playlist_field_unavailable:owner");
+						}
+						const ownerUri = readString(owner?.uri, "playlist_owner_uri");
+						const ownerNameRead = readString(
+							owner?.name,
+							"playlist_owner_name",
+						);
+						ownerId = idFromUri(requireField(ownerUri, "spotify_playlist"));
+						ownerName = requireField(ownerNameRead, "spotify_playlist");
+						description = requireField(
+							readString(pl.description, "playlist_description"),
+							"spotify_playlist",
+						);
+						uriValue = requireField(
+							readString(pl.uri, "playlist_uri"),
+							"spotify_playlist",
+						);
+						followers = requireField(
+							readCount(pl.followers, "playlist_followers"),
+							"spotify_playlist",
+						);
+						images = requireField(imageRecords(pl.images), "spotify_playlist");
 					}
 					for (const item of items) {
 						const t = item.itemV2?.data;
@@ -970,25 +1188,100 @@ async function collectSpotifyWebData(
 						) {
 							throw new Error("spotify_playlist_row_invalid");
 						}
-						if (t.__typename !== "Track") continue;
-						const artistNames = sourceArtistNames(t.artists?.items);
-						if (artistNames === null) {
-							throw new Error("spotify_playlist_track_artists_invalid");
+						if (t.__typename !== "Track") {
+							if (["Episode", "PodcastEpisode"].includes(t.__typename))
+								continue;
+							throw new Error("spotify_playlist_row_type_unrecognized");
 						}
-						const trackId = spotifyTrackId(t.uri, t.id);
+						const artistNames = requireField(
+							sourceArtistNames(t.artists?.items, "playlist_track_artists"),
+							"spotify_playlist",
+						);
+						const trackUri = requireField(
+							readString(t.uri, "playlist_track_uri"),
+							"spotify_playlist",
+						);
+						const trackName = requireField(
+							readString(t.name, "playlist_track_name"),
+							"spotify_playlist",
+						);
+						const album = t.albumOfTrack;
+						if (
+							album !== undefined &&
+							album !== null &&
+							typeof album !== "object"
+						) {
+							throw new Error("spotify_playlist_field_unavailable:album");
+						}
+						const albumName = requireField(
+							readString(album?.name, "playlist_album_name"),
+							"spotify_playlist",
+						);
+						const durationContainer = t.trackDuration;
+						if (
+							durationContainer !== undefined &&
+							durationContainer !== null &&
+							typeof durationContainer !== "object"
+						) {
+							throw new Error("spotify_playlist_field_unavailable:duration");
+						}
+						const duration = requireField(
+							readCount(
+								durationContainer?.totalMilliseconds,
+								"playlist_track_duration",
+							),
+							"spotify_playlist",
+						);
+						const addedAtContainer = item.addedAt;
+						if (
+							addedAtContainer !== undefined &&
+							addedAtContainer !== null &&
+							typeof addedAtContainer !== "object"
+						) {
+							throw new Error("spotify_playlist_field_unavailable:added_at");
+						}
+						const addedAtValue = requireField(
+							readString(addedAtContainer?.isoString, "playlist_added_at"),
+							"spotify_playlist",
+						);
+						if (
+							addedAtValue !== null &&
+							!Number.isFinite(Date.parse(addedAtValue))
+						) {
+							throw new Error(
+								"spotify_playlist_field_unavailable:playlist_added_at_malformed",
+							);
+						}
+						const addedBy = item.addedBy?.data;
+						if (
+							addedBy !== undefined &&
+							addedBy !== null &&
+							typeof addedBy !== "object"
+						) {
+							throw new Error("spotify_playlist_field_unavailable:added_by");
+						}
+						const addedByName = requireField(
+							readString(addedBy?.name, "playlist_added_by"),
+							"spotify_playlist",
+						);
+						const sourceTrackId = requireField(
+							readString(t.id, "playlist_track_id"),
+							"spotify_playlist",
+						);
+						const trackId = spotifyTrackId(trackUri, sourceTrackId);
 						if (wanted.has("playlist_items")) {
 							result.playlist_items.push({
 								id: `${requestedPlaylistId}:${position}`,
 								playlist_id: requestedPlaylistId,
 								track_id: trackId,
-								uri: typeof t.uri === "string" ? t.uri : null,
+								uri: trackUri,
 								position,
-								added_at: item.addedAt?.isoString ?? null,
-								added_by: item.addedBy?.data?.name ?? null,
-								name: t.name ?? undefined,
+								added_at: addedAtValue,
+								added_by: addedByName,
+								name: trackName ?? undefined,
 								artist_names: artistNames,
-								album_name: t.albumOfTrack?.name ?? null,
-								duration_ms: count(t.trackDuration?.totalMilliseconds),
+								album_name: albumName,
+								duration_ms: duration,
 							});
 						}
 						position += 1;
@@ -1058,17 +1351,14 @@ async function collectSpotifyWebData(
 								selector: playlistUris.join("\n"),
 								firstOffset: 0,
 								lastOffset: childLastOffset,
+								responseOffset: childLastOffset,
 								pageCount: childPageCount,
 								rawCount: childRawCount,
 								expectedCount: childCountKnown ? childExpectedCount : null,
 								discardedCount: 0,
 								remaining: false,
 								terminal:
-									childRawCount === 0
-										? "empty_verified"
-										: childCountKnown
-											? "total_reached"
-											: "short_page",
+									childRawCount === 0 ? "empty_verified" : "total_reached",
 							};
 			}
 			if (wanted.has("playlists")) {
@@ -1088,6 +1378,7 @@ async function collectSpotifyWebData(
 		if (wanted.has("saved_tracks")) {
 			let offset = 0;
 			const savedTrackPageSignatures = new Set<string>();
+			const savedTrackIdentities = new Set<string>();
 			let rawCount = 0;
 			let expectedCount: number | null = null;
 			let pageCount = 0;
@@ -1103,6 +1394,7 @@ async function collectSpotifyWebData(
 				if (!tracks || !Array.isArray(tracks.items)) {
 					throw new Error("spotify_saved_tracks_response_invalid");
 				}
+				readPageOffset(tracks, offset, "spotify_saved_tracks");
 				const items = tracks.items;
 				if (Object.hasOwn(tracks, "totalCount")) {
 					const parsedTotal = count(tracks.totalCount);
@@ -1123,42 +1415,132 @@ async function collectSpotifyWebData(
 					if (!t || typeof t !== "object" || typeof t.name !== "string") {
 						throw new Error("spotify_saved_tracks_row_invalid");
 					}
-					const trackUri = item.track?._uri ?? item.track?.uri;
-					const id = spotifyTrackId(trackUri, t.id);
-					const artistNames = sourceArtistNames(t.artists?.items);
-					if (artistNames === null) {
-						throw new Error("spotify_saved_tracks_artists_invalid");
-					}
-					const albumArtistNames = sourceArtistNames(
-						t.albumOfTrack?.artists?.items ?? [],
-					);
-					if (albumArtistNames === null) {
-						throw new Error("spotify_saved_tracks_album_artists_invalid");
-					}
-					const addedAt = item.addedAt?.isoString;
+					const uriSource = item.track?._uri ?? item.track?.uri;
+					const trackUri = requireField(readString(uriSource, "track_uri"));
+					const sourceTrackId = requireField(readString(t.id, "track_id"));
+					const id = spotifyTrackId(trackUri, sourceTrackId);
+					const artistContainer = t.artists;
 					if (
-						addedAt !== undefined &&
-						addedAt !== null &&
-						typeof addedAt !== "string"
+						artistContainer !== undefined &&
+						artistContainer !== null &&
+						typeof artistContainer !== "object"
 					) {
-						throw new Error("spotify_saved_tracks_added_at_invalid");
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:artists_malformed",
+						);
 					}
+					const artistNames = requireField(
+						sourceArtistNames(artistContainer?.items, "track_artists"),
+					);
+					const album = t.albumOfTrack;
+					if (
+						album !== undefined &&
+						album !== null &&
+						typeof album !== "object"
+					) {
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:album_malformed",
+						);
+					}
+					const albumArtistContainer = album?.artists;
+					if (
+						albumArtistContainer !== undefined &&
+						albumArtistContainer !== null &&
+						typeof albumArtistContainer !== "object"
+					) {
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:album_artists_malformed",
+						);
+					}
+					const albumArtistNames = requireField(
+						sourceArtistNames(albumArtistContainer?.items, "album_artists"),
+					);
+					const albumName = requireField(readString(album?.name, "album_name"));
+					const durationContainer = t.duration;
+					if (
+						durationContainer !== undefined &&
+						durationContainer !== null &&
+						typeof durationContainer !== "object"
+					) {
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:duration_malformed",
+						);
+					}
+					const duration = requireField(
+						readCount(durationContainer?.totalMilliseconds, "duration"),
+					);
+					const contentRating = t.contentRating;
+					if (
+						contentRating !== undefined &&
+						contentRating !== null &&
+						typeof contentRating !== "object"
+					) {
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:content_rating_malformed",
+						);
+					}
+					const contentLabel = requireField(
+						readString(contentRating?.label, "content_rating_label"),
+					);
+					if (
+						contentLabel !== null &&
+						contentLabel !== "" &&
+						contentLabel !== "EXPLICIT" &&
+						contentLabel !== "NONE"
+					) {
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:content_rating_label_unrecognized",
+						);
+					}
+					const addedAtContainer = item.addedAt;
+					if (
+						addedAtContainer !== undefined &&
+						addedAtContainer !== null &&
+						typeof addedAtContainer !== "object"
+					) {
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:added_at_malformed",
+						);
+					}
+					const addedAt = requireField(
+						readString(addedAtContainer?.isoString, "added_at"),
+					);
+					if (
+						addedAt !== null &&
+						!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
+							addedAt,
+						)
+					) {
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:added_at_malformed",
+						);
+					}
+					const name = requireField(readString(t.name, "track_name"));
+					if (name === null)
+						throw new Error(
+							"spotify_saved_tracks_field_unavailable:track_name_missing",
+						);
+					const rowIdentity = id;
+					if (rowIdentity !== null && savedTrackIdentities.has(rowIdentity)) {
+						throw new Error("spotify_saved_tracks_identity_repeated");
+					}
+					if (rowIdentity !== null) savedTrackIdentities.add(rowIdentity);
 					if (id === null) unresolvedIdentityCount += 1;
 					result.saved_tracks.push({
 						id,
 						identity_unresolved: id === null,
-						name: t.name,
+						name,
 						artist_names: artistNames,
-						album_name: t.albumOfTrack?.name ?? null,
-						duration_ms: count(t.duration?.totalMilliseconds),
+						album_name: albumName,
+						duration_ms: duration,
 						popularity: null,
-						added_at: addedAt ?? null,
+						added_at: addedAt,
 						isrc: null,
-						uri: typeof trackUri === "string" ? trackUri : null,
+						uri: trackUri,
 						explicit:
-							typeof t.contentRating?.label === "string"
-								? t.contentRating.label === "EXPLICIT"
-								: null,
+							contentLabel === null || contentLabel === ""
+								? null
+								: contentLabel === "EXPLICIT",
 						album_artist_names: albumArtistNames,
 					});
 				}
@@ -1173,11 +1555,7 @@ async function collectSpotifyWebData(
 					break;
 				}
 				if (items.length < 100 && expectedCount === null) {
-					terminal =
-						items.length === 0 && rawCount === 0
-							? "empty_verified"
-							: "short_page";
-					break;
+					throw new Error("spotify_saved_tracks_terminal_unverified");
 				}
 				if (items.length === 0)
 					throw new Error("spotify_saved_tracks_pagination_no_progress");
@@ -1201,6 +1579,7 @@ async function collectSpotifyWebData(
 				selector: "spotify:user:me:collection",
 				firstOffset: 0,
 				lastOffset: offset,
+				responseOffset: offset,
 				pageCount,
 				rawCount,
 				expectedCount,
@@ -1336,7 +1715,7 @@ export async function spotifyCollect({
 				requiredKeys: [],
 				hydratedKeys: [],
 				considered: 1,
-				covered: validateRecord("profile", data.profile).ok ? 1 : 0,
+				covered: data.sourceCounts.profile?.covered ?? 0,
 			},
 		);
 	}
