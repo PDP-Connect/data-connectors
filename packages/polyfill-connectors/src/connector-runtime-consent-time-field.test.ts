@@ -717,8 +717,8 @@ test("a bundle bound to a connector applies that connector's manifest fields", a
 test("a bundle bound to one connector refuses another connector's name", async () => {
 	const { entrypoint, outdir } = await bundleFixture("reddit");
 	try {
-		for (const name of ["amazon", "reddit-extra"]) {
-			await assert.rejects(
+		const refuses = (name: string) =>
+			assert.rejects(
 				runBundle(
 					entrypoint,
 					name,
@@ -729,7 +729,8 @@ test("a bundle bound to one connector refuses another connector's name", async (
 				/bound to reddit/u,
 				`name ${JSON.stringify(name)} must not pass as an unshipped fixture`,
 			);
-		}
+		await refuses("amazon");
+		await refuses("reddit-extra");
 	} finally {
 		rmSync(outdir, { force: true, recursive: true });
 	}
@@ -738,20 +739,18 @@ test("a bundle bound to one connector refuses another connector's name", async (
 test("a bound bundle accepts the hyphenated spelling of its connector's name", async () => {
 	const { entrypoint, outdir } = await bundleFixture("strava_browser");
 	try {
-		for (const name of ["strava-browser", "strava_browser"]) {
-			const result = await runBundle(
-				entrypoint,
-				name,
-				"activities",
-				{ id: "a1", start_date_local: "2026-09-20" },
-				{ since: "2026-09-16", until: "2026-10-01" },
-			);
-			assert.equal(
-				result.messages.filter((m) => m.type === "RECORD").length,
-				1,
-				name,
-			);
-		}
+		const keptRecords = async (name: string) =>
+			(
+				await runBundle(
+					entrypoint,
+					name,
+					"activities",
+					{ id: "a1", start_date_local: "2026-09-20" },
+					{ since: "2026-09-16", until: "2026-10-01" },
+				)
+			).messages.filter((m) => m.type === "RECORD").length;
+		assert.equal(await keptRecords("strava-browser"), 1, "strava-browser");
+		assert.equal(await keptRecords("strava_browser"), 1, "strava_browser");
 		await assert.rejects(
 			runBundle(entrypoint, "strava", "activities", { id: "a1" }, {}),
 			/bound to strava_browser/u,
