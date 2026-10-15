@@ -672,7 +672,7 @@
               "reason": "the browser exposes a day label, not a timestamp"
             }
           ],
-          "notes": "browser history is a day-granular top-50 snapshot in page order; watch_history.position preserves that order and there is no timestamp cursor",
+          "notes": "browser history is day-granular and drains in page-order batches of at most 50, resuming from the last-seen video identity; position preserves order and no watch timestamp is fabricated",
           "status": "contracted"
         }
       ]

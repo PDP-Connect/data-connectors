@@ -4,6 +4,8 @@
 
 /** Browser-first YouTube Collection Profile. The owner signs in in PDPP's browser. */
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import type { Request, Response } from "playwright";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -22,11 +24,15 @@ import {
 	readPlaylistLinks,
 	readSubscriptions,
 	readVideos,
+	type HistoryVideoPage,
 } from "./browser-dom.ts";
 import {
 	enumerationEnded,
+	readHistoryResponseEvidence,
 	type ListEnd,
 	type ListKind,
+	type ListEndRequest,
+	type HistoryResponseEvidence,
 	readListEnd,
 	readPageReadiness,
 } from "./page-evidence.ts";
@@ -35,13 +41,19 @@ import { validateRecord } from "./schemas.ts";
 export { readPageReadiness } from "./page-evidence.ts";
 
 const HOME = "https://www.youtube.com/";
-const HISTORY_LIMIT = 50;
+const HISTORY_READ_BATCH_SIZE = 50;
+const HISTORY_MAX_SCROLL_ROUNDS = 400;
+const HISTORY_DEDUP_WINDOW = 500;
+const HISTORY_TIME_BUDGET_MS = 180_000;
+const HISTORY_SCROLL_WAIT_MS = 1_000;
+const HISTORY_HEAD_REFRESH_ROUNDS = 3;
+const HISTORY_HEAD_REFRESH_ROWS =
+	HISTORY_READ_BATCH_SIZE * HISTORY_HEAD_REFRESH_ROUNDS;
 const PAGE_HYDRATION_WAIT_MS = 2_000;
 const SCROLLS = {
 	subscriptions: 3,
 	playlists: 5,
 	playlist_items: 20,
-	history: 4,
 } as const;
 const LIST_CONTINUATION_SELECTORS: Record<ListKind, string> = {
 	history: "ytd-item-section-renderer ytd-continuation-item-renderer",
@@ -60,7 +72,11 @@ type CoverageFact = {
 	emitted_count: number;
 	time_range_requested: boolean;
 	enumerated_count?: number;
-	limit?: number;
+	parsed_count?: number;
+	deduped_count?: number;
+	stop_reason?: string;
+	next_checkpoint?: string | null;
+	incomplete?: boolean;
 	skipped_unresolved_date_count?: number;
 };
 
@@ -74,6 +90,210 @@ function videoIdentity(video: BrowserVideo): string {
 	url.searchParams.delete("list");
 	url.searchParams.delete("index");
 	return url.href;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: null;
+}
+
+class HistoryResponseTracker {
+	private static readonly MAX_TRACKED_TOKENS = HISTORY_MAX_SCROLL_ROUNDS + 8;
+	private static readonly MAX_PRESEED_RESPONSES = 32;
+	private readonly page: BrowserCollectContext["page"];
+	private readonly tokens = new Set<string>();
+	private readonly requestedTokens = new Set<string>();
+	private readonly preSeedResponses: Array<{
+		response: Response;
+		version: number;
+	}> = [];
+	private seeded = false;
+	private preSeedOverflow = false;
+	private evidenceVersion = 0;
+	private processedVersion = 0;
+	private latestResponse: HistoryResponseEvidence | null = null;
+	private continuationItemCount = 0;
+	private bootstrapReadable = false;
+	private bootstrapItemCount = 0;
+	private bootstrapHasContinuation = false;
+	private bootstrapTokenCount = 0;
+	private bootstrapRendererCounts: Readonly<Record<string, number>> = {};
+	private browseResponseCount = 0;
+	private correlatedResponseCount = 0;
+	private uncorrelatedResponseCount = 0;
+	private non2xxResponseCount = 0;
+	private unrecognizedResponseCount = 0;
+	private latestStatus: number | null = null;
+	private pending = Promise.resolve();
+	private readonly onResponse = (response: Response): void => {
+		if (!response.url().includes("/youtubei/v1/browse")) return;
+		const version = ++this.evidenceVersion;
+		if (!this.seeded) {
+			if (
+				this.preSeedResponses.length <
+				HistoryResponseTracker.MAX_PRESEED_RESPONSES
+			)
+				this.preSeedResponses.push({ response, version });
+			else this.preSeedOverflow = true;
+			return;
+		}
+		this.enqueue(response, version);
+	};
+
+	constructor(page: BrowserCollectContext["page"]) {
+		this.page = page;
+		page.on("response", this.onResponse);
+	}
+
+	seed(tokens: readonly string[], page: ListEnd): void {
+		this.bootstrapReadable = page.dataReadable;
+		this.bootstrapItemCount =
+			page.historyBootstrapItemCount ?? page.dataItemCount;
+		this.bootstrapHasContinuation = page.dataHasContinuation;
+		this.bootstrapRendererCounts = page.historyBootstrapRendererCounts ?? {};
+		for (const token of tokens.slice(0, 8))
+			if (token.length > 0 && token.length <= 4096) this.tokens.add(token);
+		this.bootstrapTokenCount = this.tokens.size;
+		this.seeded = true;
+		for (const queued of this.preSeedResponses.splice(0))
+			this.enqueue(queued.response, queued.version);
+	}
+
+	get diagnostics() {
+		return {
+			bootstrapReadable: this.bootstrapReadable,
+			bootstrapItemCount: this.bootstrapItemCount,
+			bootstrapHasContinuation: this.bootstrapHasContinuation,
+			bootstrapTokenCount: this.bootstrapTokenCount,
+			bootstrapRendererCounts: this.bootstrapRendererCounts,
+			browseResponseCount: this.browseResponseCount,
+			correlatedResponseCount: this.correlatedResponseCount,
+			uncorrelatedResponseCount: this.uncorrelatedResponseCount,
+			non2xxResponseCount: this.non2xxResponseCount,
+			unrecognizedResponseCount: this.unrecognizedResponseCount,
+			latestStatus: this.latestStatus,
+			latestRecognized: this.latestResponse?.recognized ?? null,
+			latestHasContinuation: this.latestResponse?.hasContinuation ?? null,
+			preSeedOverflow: this.preSeedOverflow,
+		};
+	}
+
+	get latest(): HistoryResponseEvidence | null {
+		return this.latestResponse;
+	}
+
+	get version(): number {
+		return this.evidenceVersion;
+	}
+
+	get trackingComplete(): boolean {
+		return !this.preSeedOverflow;
+	}
+
+	get allArrivalsProcessed(): boolean {
+		return this.processedVersion === this.evidenceVersion;
+	}
+
+	async flush(): Promise<void> {
+		await this.pending;
+	}
+
+	dispose(): void {
+		this.page.off("response", this.onResponse);
+	}
+
+	private enqueue(response: Response, version: number): void {
+		this.pending = this.pending
+			.then(async () => {
+				try {
+					await this.inspect(response);
+				} catch {
+					// Keep the response chain alive when one body cannot be inspected.
+				} finally {
+					this.processedVersion = Math.max(this.processedVersion, version);
+				}
+			});
+	}
+
+	private async inspect(response: Response): Promise<void> {
+		if (!response.url().includes("/youtubei/v1/browse")) return;
+		this.browseResponseCount += 1;
+		let requestBody: Record<string, unknown> | null = null;
+		const request: Request = response.request();
+		try {
+			requestBody = recordValue(request.postDataJSON());
+		} catch {
+			this.uncorrelatedResponseCount += 1;
+			return;
+		}
+		const requestedContinuation =
+			typeof requestBody?.continuation === "string"
+				? requestBody.continuation
+				: null;
+		if (requestedContinuation && requestedContinuation.length > 4096) return;
+		const initialHistoryRequest = requestBody?.browseId === "FEhistory";
+		if (
+			!initialHistoryRequest &&
+			(!requestedContinuation || !this.tokens.has(requestedContinuation))
+		) {
+			this.uncorrelatedResponseCount += 1;
+			return;
+		}
+		this.correlatedResponseCount += 1;
+		this.latestStatus = response.status();
+		const repeatedRequest =
+			requestedContinuation !== null &&
+			this.requestedTokens.has(requestedContinuation);
+		if (
+			requestedContinuation &&
+			this.requestedTokens.size < HistoryResponseTracker.MAX_TRACKED_TOKENS
+		)
+			this.requestedTokens.add(requestedContinuation);
+		if (response.status() < 200 || response.status() >= 300) {
+			this.non2xxResponseCount += 1;
+			this.latestResponse = {
+				recognized: false,
+				hasContinuation: false,
+				requestedContinuation,
+				nextContinuation: null,
+				repeatedContinuation: false,
+			};
+			return;
+		}
+		let responseBody: unknown;
+		try {
+			responseBody = await response.json();
+		} catch {
+			this.unrecognizedResponseCount += 1;
+			this.latestResponse = {
+				recognized: false,
+				hasContinuation: false,
+				requestedContinuation,
+				nextContinuation: null,
+				repeatedContinuation: false,
+			};
+			return;
+		}
+		const evidence = readHistoryResponseEvidence(
+			responseBody,
+			requestedContinuation,
+			this.requestedTokens,
+		);
+		if (requestedContinuation && evidence.recognized)
+			this.continuationItemCount += evidence.itemCount ?? 0;
+		if (!evidence.recognized) this.unrecognizedResponseCount += 1;
+		this.latestResponse = {
+			...evidence,
+			continuationItemCount: this.continuationItemCount,
+			repeatedContinuation: evidence.repeatedContinuation || repeatedRequest,
+		};
+		if (
+			evidence.nextContinuation &&
+			this.tokens.size < HistoryResponseTracker.MAX_TRACKED_TOKENS
+		)
+			this.tokens.add(evidence.nextContinuation);
+	}
 }
 
 export function parseCount(value: string | null | undefined): number | null {
@@ -259,7 +479,7 @@ const EMPTY_STATE =
 async function waitForContent(
 	page: BrowserCollectContext["page"],
 	selector: string,
-	options: { playlistIndex?: boolean } = {},
+	options: { playlistIndex?: boolean; timeoutMs?: number } = {},
 ): Promise<"content" | "empty" | "unreadable"> {
 	try {
 		const handle = await page.waitForFunction(
@@ -269,7 +489,7 @@ async function waitForContent(
 				empty: EMPTY_STATE,
 				playlistIndex: options.playlistIndex ?? false,
 			},
-			{ timeout: 10_000 },
+			{ timeout: options.timeoutMs ?? 10_000 },
 		);
 		const state = (await handle.jsonValue()) as "content" | "empty";
 		await handle.dispose();
@@ -382,7 +602,6 @@ interface StreamReporter {
 
 const END_NOT_OBSERVED_MESSAGE =
 	"YouTube did not show the end of this list, so the list may be incomplete.";
-const HISTORY_CAP_MESSAGE = `The watch history read stopped at the ${HISTORY_LIMIT}-item limit before the end of the list.`;
 
 function createStreamReporter(ctx: BrowserContext): StreamReporter {
 	const failed = new Set<string>();
@@ -418,6 +637,7 @@ type ExhaustionEvidence = {
 	readonly kind:
 		| "continuation-removed"
 		| "explicit-end-marker"
+		| "latest-history-response"
 		| "page-data-empty"
 		| "readable-data"
 		| "unproven";
@@ -445,6 +665,11 @@ function exhaustionEvidence(
 	// marker or a vanished continuation with no rows can be a failed load.
 	if (renderedCount === 0)
 		return { kind: page.verifiedEmpty ? "page-data-empty" : "unproven", page };
+	if (
+		page.latestHistoryResponse?.recognized === true &&
+		!page.latestHistoryResponse.hasContinuation
+	)
+		return { kind: "latest-history-response", page };
 	if (page.domHasEndMarker) return { kind: "explicit-end-marker", page };
 	if (continuationRemoved) return { kind: "continuation-removed", page };
 	if (
@@ -542,41 +767,588 @@ async function readPlaylistIndex(
 
 interface VideoReadResult extends ListRead<BrowserVideo> {
 	readonly verifiedEmpty: boolean;
-	/** The read stopped at the connector's own item limit. */
-	readonly cappedAtLimit: boolean;
+	readonly partialCheckpointAllowed: boolean;
+	readonly stopReason?: string;
+	readonly scannedCount?: number;
+	readonly parsedCount?: number;
+	readonly dedupedCount?: number;
+	readonly lastAccounted?: BrowserVideo | null;
+	readonly checkpointAnchor?: string | null;
+	readonly checkpointPosition?: number;
+	readonly phase?: "backfill" | "head_reconciliation";
+	readonly headAnchorIds?: readonly string[];
+	readonly historyDiagnostics?: {
+		bootstrapReadable: boolean;
+		bootstrapItemCount: number;
+		bootstrapHasContinuation: boolean;
+		bootstrapTokenCount: number;
+		bootstrapRendererCounts: Readonly<Record<string, number>>;
+		browseResponseCount: number;
+		correlatedResponseCount: number;
+		uncorrelatedResponseCount: number;
+		non2xxResponseCount: number;
+		unrecognizedResponseCount: number;
+		latestStatus: number | null;
+		latestRecognized: boolean | null;
+		latestHasContinuation: boolean | null;
+		rowsAtStart: number;
+		rowsAtEnd: number;
+		scrollRounds: number;
+		unchangedRounds: number;
+		scrollGeometry: HistoryScrollGeometry | null;
+	};
+	readonly blocked?: boolean;
+	/** The read can save a fully accounted prefix without claiming an end. */
+}
+
+type HistoryTraversalDiagnostics = NonNullable<
+	VideoReadResult["historyDiagnostics"]
+>;
+
+function reportHistoryTraversal(history: HistoryTraversalDiagnostics): void {
+	connectorDiagnostic("youtube", "history_bootstrap", {
+		readable: history.bootstrapReadable,
+		items: history.bootstrapItemCount,
+		renderer_counts: JSON.stringify(history.bootstrapRendererCounts),
+		has_continuation: history.bootstrapHasContinuation,
+		tokens: history.bootstrapTokenCount,
+	});
+	connectorDiagnostic("youtube", "history_browse", {
+		total: history.browseResponseCount,
+		correlated: history.correlatedResponseCount,
+		uncorrelated: history.uncorrelatedResponseCount,
+		non_2xx: history.non2xxResponseCount,
+		unrecognized: history.unrecognizedResponseCount,
+	});
+	connectorDiagnostic("youtube", "history_latest", {
+		status: history.latestStatus,
+		recognized: history.latestRecognized,
+		has_continuation: history.latestHasContinuation,
+	});
+	connectorDiagnostic("youtube", "history_scroll", {
+		rows_start: history.rowsAtStart,
+		rows_end: history.rowsAtEnd,
+		rounds: history.scrollRounds,
+		unchanged: history.unchangedRounds,
+	});
+	connectorDiagnostic("youtube", "history_geometry", {
+		container: history.scrollGeometry?.containerFound ?? null,
+		height: history.scrollGeometry?.containerHeight ?? null,
+		client: history.scrollGeometry?.containerClientHeight ?? null,
+		top: history.scrollGeometry?.containerTop ?? null,
+		document: history.scrollGeometry?.documentHeight ?? null,
+		window: history.scrollGeometry?.windowHeight ?? null,
+		scroll_y: history.scrollGeometry?.windowScrollY ?? null,
+	});
+}
+
+type HistoryCursor = {
+	version?: 2;
+	phase?: "backfill" | "head_reconciliation";
+	backfill_anchor_id?: string;
+	head_anchor_ids?: string[];
+	last_seen_video_id?: string;
+	position?: number;
+	complete?: boolean;
+};
+
+type HistoryPageRequest = {
+	readonly mode: "history";
+	readonly offset: number;
+	readonly limit: number;
+};
+
+const readHistoryPageInBrowser = readVideos as unknown as (
+	request: HistoryPageRequest,
+) => HistoryVideoPage;
+const readPlaylistVideosInBrowser = readVideos as unknown as (
+	mode: "playlist",
+) => BrowserVideo[];
+const readListEndInBrowser = readListEnd as unknown as (
+	request: ListEndRequest,
+) => ListEnd;
+
+function decodeHistoryVideoPage(value: unknown): HistoryVideoPage | null {
+	const page = recordValue(value);
+	if (
+		!page ||
+		typeof page.offset !== "number" ||
+		typeof page.totalRows !== "number" ||
+		!Array.isArray(page.rows)
+	)
+		return null;
+	const rows: Array<BrowserVideo | null> = [];
+	for (const row of page.rows) {
+		if (row === null) {
+			rows.push(null);
+			continue;
+		}
+		const video = recordValue(row);
+		if (!video || typeof video.video_url !== "string") return null;
+		const stringOrNull = (field: unknown): string | null =>
+			typeof field === "string" ? field : null;
+		rows.push({
+			video_id: stringOrNull(video.video_id),
+			video_url: video.video_url,
+			video_title: stringOrNull(video.video_title),
+			channel_title: stringOrNull(video.channel_title),
+			channel_url: stringOrNull(video.channel_url),
+			duration_text: stringOrNull(video.duration_text),
+			thumbnail_url: stringOrNull(video.thumbnail_url),
+			watched_date_label: stringOrNull(video.watched_date_label),
+			views_text: stringOrNull(video.views_text),
+			description: stringOrNull(video.description),
+		});
+	}
+	return { offset: page.offset, totalRows: page.totalRows, rows };
+}
+
+type HistoryStreamRecord = (
+	video: BrowserVideo,
+	position: number,
+) => Promise<void>;
+
+type HistoryScrollGeometry = {
+	containerFound: boolean;
+	containerHeight: number | null;
+	containerClientHeight: number | null;
+	containerTop: number | null;
+	documentHeight: number | null;
+	windowHeight: number | null;
+	windowScrollY: number | null;
+};
+
+async function scrollHistoryOnce(
+	page: BrowserCollectContext["page"],
+	remainingMs: number,
+): Promise<HistoryScrollGeometry> {
+	const geometry = (await page.evaluate<HistoryScrollGeometry, string>(
+		(itemSelector) => {
+			const scrollable = Array.from(document.querySelectorAll("*"))
+				.filter(
+					(element) =>
+						element.scrollHeight > element.clientHeight + 8 &&
+						element.querySelector(itemSelector),
+				)
+				.sort(
+					(a, b) =>
+						b.scrollHeight - b.clientHeight - (a.scrollHeight - a.clientHeight),
+				)[0];
+			if (scrollable) scrollable.scrollBy(0, window.innerHeight * 2);
+			else window.scrollBy(0, window.innerHeight * 2);
+			return {
+				containerFound: Boolean(scrollable),
+				containerHeight: scrollable?.scrollHeight ?? null,
+				containerClientHeight: scrollable?.clientHeight ?? null,
+				containerTop: scrollable?.scrollTop ?? null,
+				documentHeight: document.documentElement?.scrollHeight ?? null,
+				windowHeight: window.innerHeight,
+				windowScrollY: window.scrollY,
+			};
+		},
+		"yt-lockup-view-model",
+	)) ?? {
+		containerFound: false,
+		containerHeight: null,
+		containerClientHeight: null,
+		containerTop: null,
+		documentHeight: null,
+		windowHeight: null,
+		windowScrollY: null,
+	};
+	await page.waitForTimeout(
+		Math.max(0, Math.min(HISTORY_SCROLL_WAIT_MS, remainingMs)),
+	);
+	return geometry;
+}
+
+async function readHistoryVideoList(
+	page: BrowserCollectContext["page"],
+	url: string,
+	capture: BrowserCollectContext["capture"] | undefined,
+	cursor: HistoryCursor | undefined,
+	collectionMode: BrowserCollectContext["collectionMode"],
+	emitRecord: HistoryStreamRecord,
+): Promise<VideoReadResult> {
+	const startedAt = performance.now();
+	const responseTracker = new HistoryResponseTracker(page);
+	await page.goto(url, {
+		waitUntil: "domcontentloaded",
+		timeout: HISTORY_TIME_BUDGET_MS,
+	});
+	let remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
+	if (remainingMs <= 0) {
+		responseTracker.dispose();
+		throw new Error("youtube_history_page_unreadable");
+	}
+	await page.waitForTimeout(Math.min(PAGE_HYDRATION_WAIT_MS, remainingMs));
+	remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
+	const state = await waitForContent(
+		page,
+		"ytd-item-section-renderer yt-lockup-view-model, ytd-item-section-renderer ytd-video-renderer",
+		{ timeoutMs: Math.max(1, Math.min(10_000, remainingMs)) },
+	);
+	if (state === "unreadable") {
+		responseTracker.dispose();
+		throw new Error("youtube_history_page_unreadable");
+	}
+	await capture?.captureDom(page, "youtube-watch-history");
+	let currentEnd = await page.evaluate(readListEndInBrowser, {
+		kind: "history" as const,
+		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+		latestHistoryResponse: responseTracker.latest,
+	});
+	responseTracker.seed(
+		currentEnd.historyBootstrapContinuationTokens ?? [],
+		currentEnd,
+	);
+	await responseTracker.flush();
+	currentEnd = await page.evaluate(readListEndInBrowser, {
+		kind: "history" as const,
+		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+		latestHistoryResponse: responseTracker.latest,
+	});
+	const headOnly =
+		cursor?.complete === true && collectionMode !== "full_refresh";
+	const rowsSeen = new Set<string>();
+	let resumeAnchor = !headOnly
+		? (cursor?.backfill_anchor_id ?? cursor?.last_seen_video_id ?? null)
+		: null;
+	let resumeAnchorFound = resumeAnchor === null;
+	let phase: "backfill" | "head_reconciliation" = resumeAnchor
+		? "head_reconciliation"
+		: "backfill";
+	let offset = 0;
+	let totalRows = 0;
+	let rowsAtStart = 0;
+	let scrollRounds = 0;
+	let unchangedRounds = 0;
+	let lastScrollGeometry: HistoryScrollGeometry | null = null;
+	let lastScrollPosition: number | null = null;
+	let scannedCount = 0;
+	let parsedCount = 0;
+	let dedupedCount = 0;
+	let lastAccounted: BrowserVideo | null = null;
+	let stopReason = "unproven-end";
+	let sourceEnded = false;
+	let verifiedEmpty = false;
+	let blocked = false;
+	let parseGap = false;
+	let headAnchorIds: string[] = [];
+	let evidence: ExhaustionEvidence = { kind: "unproven", page: null };
+	// Connector memory holds at most 500 recent identities, 408 requestable
+	// and 408 requested tokens (each <= 4 KiB), 32 pre-seed response handles,
+	// and one 50-row parse batch. Each response scan visits at most 10,000
+	// nodes; traversal is capped at 180 seconds and 400 scroll rounds.
+	const rememberIdentity = (key: string): void => {
+		rowsSeen.add(key);
+		if (rowsSeen.size > HISTORY_DEDUP_WINDOW)
+			rowsSeen.delete(rowsSeen.values().next().value!);
+	};
+
+	while (true) {
+		const elapsed = performance.now() - startedAt;
+		remainingMs = HISTORY_TIME_BUDGET_MS - elapsed;
+		if (remainingMs <= 0) {
+			stopReason = "time-budget";
+			break;
+		}
+		const request = {
+			mode: "history",
+			offset,
+			limit: HISTORY_READ_BATCH_SIZE,
+		} as const;
+		const rawBatch: unknown = await page.evaluate(
+			readHistoryPageInBrowser,
+			request,
+		);
+		const batch = decodeHistoryVideoPage(rawBatch);
+		if (!batch) {
+			stopReason = "unreadable-batch";
+			parseGap = true;
+			break;
+		}
+		totalRows = batch.totalRows;
+		if (offset === 0) {
+			rowsAtStart = batch.totalRows;
+			headAnchorIds = batch.rows
+				.slice(0, 3)
+				.flatMap((video) => (video ? [videoIdentity(video)] : []));
+		}
+		if (offset >= totalRows) {
+			await responseTracker.flush();
+			currentEnd = await page.evaluate(readListEndInBrowser, {
+				kind: "history" as const,
+				sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+				latestHistoryResponse: responseTracker.latest,
+			});
+			if (currentEnd.pageBlocked) {
+				blocked = true;
+				stopReason = "blocked-page";
+				break;
+			}
+			const latest = currentEnd.latestHistoryResponse;
+			if (latest?.repeatedContinuation) {
+				stopReason = "continuation-cycle";
+				break;
+			}
+			if (totalRows === 0) {
+				const emptyEvidence = exhaustionEvidence(currentEnd, 0, false);
+				if (emptyEvidence.kind === "page-data-empty") {
+					verifiedEmpty = true;
+					sourceEnded = true;
+					evidence = emptyEvidence;
+					stopReason = "source-end";
+					break;
+				}
+				stopReason = "empty-unproven";
+				break;
+			}
+			if (resumeAnchor && !resumeAnchorFound) {
+				// The saved boundary was deleted or moved out of this traversal.
+				// Restart from the head and reconcile every visible row; never treat
+				// a missing anchor as permission to skip an unknown prefix.
+				resumeAnchor = null;
+				resumeAnchorFound = true;
+				phase = "backfill";
+				offset = 0;
+				parsedCount = 0;
+				lastAccounted = null;
+				continue;
+			}
+			const end = exhaustionEvidence(currentEnd, parsedCount, false);
+			if (end.kind !== "unproven" && parsedCount === totalRows) {
+				sourceEnded = true;
+				evidence = end;
+				stopReason = "source-end";
+				break;
+			}
+			if (headOnly && scrollRounds >= HISTORY_HEAD_REFRESH_ROUNDS) {
+				stopReason = "head-reconciled";
+				break;
+			}
+			if (scrollRounds >= HISTORY_MAX_SCROLL_ROUNDS) {
+				stopReason = "scroll-budget";
+				break;
+			}
+			lastScrollGeometry = await scrollHistoryOnce(page, remainingMs);
+			const scrollPosition =
+				lastScrollGeometry.containerTop ?? lastScrollGeometry.windowScrollY;
+			scrollRounds += 1;
+			await responseTracker.flush();
+			const afterScrollRaw: unknown = await page.evaluate(
+				readHistoryPageInBrowser,
+				{
+					mode: "history" as const,
+					offset: 0,
+					limit: 1,
+				},
+			);
+			const afterScroll = decodeHistoryVideoPage(afterScrollRaw);
+			currentEnd = await page.evaluate(readListEndInBrowser, {
+				kind: "history" as const,
+				sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+				latestHistoryResponse: responseTracker.latest,
+			});
+			const latestAfterScroll = responseTracker.latest;
+			if (currentEnd.pageBlocked) {
+				blocked = true;
+				stopReason = "blocked-page";
+				break;
+			}
+			if (latestAfterScroll?.repeatedContinuation) {
+				stopReason = "continuation-cycle";
+				break;
+			}
+			if (afterScroll && parsedCount === afterScroll.totalRows) {
+				const refreshedEnd = exhaustionEvidence(currentEnd, parsedCount, false);
+				if (refreshedEnd.kind !== "unproven") {
+					sourceEnded = true;
+					evidence = refreshedEnd;
+					stopReason = "source-end";
+					break;
+				}
+			}
+			if (!afterScroll || afterScroll.totalRows <= totalRows) {
+				const scrollAdvanced =
+					scrollPosition !== null &&
+					lastScrollPosition !== null &&
+					scrollPosition > lastScrollPosition;
+				lastScrollPosition = scrollPosition;
+				if (scrollAdvanced) {
+					unchangedRounds = 0;
+					continue;
+				}
+				unchangedRounds += 1;
+				if (unchangedRounds >= 2) {
+					stopReason = "stalled";
+					break;
+				}
+			} else {
+				unchangedRounds = 0;
+				lastScrollPosition = scrollPosition;
+			}
+			continue;
+		}
+		const rows = batch.rows;
+		if (rows.length === 0) {
+			stopReason = "empty-batch";
+			parseGap = true;
+			break;
+		}
+		for (const video of rows) {
+			if (!video) {
+				parseGap = true;
+				stopReason = "parse-gap";
+				break;
+			}
+			const position = offset;
+			const key = videoIdentity(video);
+			if (resumeAnchor && !resumeAnchorFound && key !== resumeAnchor) {
+				if (rowsSeen.has(key)) {
+					dedupedCount += 1;
+				} else {
+					rememberIdentity(key);
+					await emitRecord(video, position);
+				}
+				parsedCount += 1;
+				scannedCount += 1;
+				offset += 1;
+				continue;
+			}
+			const matchingResumeAnchor = key === resumeAnchor;
+			if (matchingResumeAnchor) {
+				resumeAnchorFound = true;
+				phase = "backfill";
+			}
+			if (rowsSeen.has(key)) {
+				dedupedCount += 1;
+			} else {
+				rememberIdentity(key);
+				await emitRecord(video, position);
+			}
+			// Before a movable saved identity is found, every observed row belongs
+			// to head reconciliation. Upsert the full prefix; never infer delivery
+			// from its position above that identity.
+			lastAccounted = video;
+			parsedCount += 1;
+			scannedCount += 1;
+			offset += 1;
+		}
+		if (parseGap) break;
+		if (headOnly && offset >= HISTORY_HEAD_REFRESH_ROWS) {
+			stopReason = "head-reconciled";
+			break;
+		}
+	}
+	let stableEnd = false;
+	for (let refresh = 0; refresh < 3; refresh += 1) {
+		await responseTracker.flush();
+		if (!responseTracker.allArrivalsProcessed) continue;
+		const snapshot = {
+			version: responseTracker.version,
+			latest: responseTracker.latest,
+		};
+		currentEnd = await page.evaluate(readListEndInBrowser, {
+			kind: "history" as const,
+			sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+			latestHistoryResponse: snapshot.latest,
+		});
+		await responseTracker.flush();
+		if (
+			responseTracker.version === snapshot.version &&
+			responseTracker.allArrivalsProcessed
+		) {
+			stableEnd = true;
+			break;
+		}
+	}
+	responseTracker.dispose();
+	blocked ||= currentEnd.pageBlocked;
+	if (blocked) {
+		stopReason = "blocked-page";
+		sourceEnded = false;
+	}
+	if (sourceEnded) {
+		evidence = exhaustionEvidence(currentEnd, parsedCount, false);
+		if (
+			evidence.kind === "unproven" ||
+			(verifiedEmpty && evidence.kind !== "page-data-empty")
+		) {
+			sourceEnded = false;
+			verifiedEmpty = false;
+			stopReason = "final-proof-invalidated";
+		}
+	}
+	if (!stableEnd || !responseTracker.trackingComplete) {
+		sourceEnded = false;
+		verifiedEmpty = false;
+		evidence = { kind: "unproven", page: currentEnd };
+		stopReason = responseTracker.trackingComplete
+			? "history-evidence-changed-during-final-refresh"
+			: "history-response-buffer-overflow";
+	}
+	const hasSafePrefix = lastAccounted !== null;
+	const partialCheckpointAllowed =
+		!blocked &&
+		((hasSafePrefix &&
+			!sourceEnded &&
+			!parseGap &&
+			["time-budget", "scroll-budget"].includes(stopReason)) ||
+			(headOnly && stopReason === "head-reconciled"));
+	return {
+		items: [],
+		exhausted: sourceEnded && !blocked,
+		evidence,
+		verifiedEmpty: verifiedEmpty && !blocked,
+		partialCheckpointAllowed,
+		blocked,
+		stopReason,
+		scannedCount,
+		parsedCount,
+		dedupedCount,
+		lastAccounted,
+		checkpointAnchor:
+			stableEnd && responseTracker.trackingComplete && lastAccounted
+				? videoIdentity(lastAccounted)
+				: null,
+		phase: headOnly ? "head_reconciliation" : phase,
+		...(lastAccounted ? { checkpointPosition: Math.max(0, offset - 1) } : {}),
+		headAnchorIds,
+		historyDiagnostics: {
+			...responseTracker.diagnostics,
+			rowsAtStart,
+			rowsAtEnd: currentEnd.domItemCount ?? totalRows,
+			scrollRounds,
+			unchangedRounds,
+			scrollGeometry: lastScrollGeometry,
+		},
+	};
 }
 
 async function readVideoList(
 	page: BrowserCollectContext["page"],
 	url: string,
 	rounds: number,
-	mode: "playlist" | "history",
+	mode: "playlist",
 	capture?: BrowserCollectContext["capture"],
 ): Promise<VideoReadResult> {
 	await page.goto(url, { waitUntil: "domcontentloaded" });
 	await page.waitForTimeout(PAGE_HYDRATION_WAIT_MS);
 	const state = await waitForContent(
 		page,
-		mode === "history"
-			? "ytd-item-section-renderer yt-lockup-view-model"
-			: "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer",
+		"yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer",
 	);
 	if (state === "unreadable")
-		throw new Error(`youtube_${mode}_page_unreadable`);
+		throw new Error("youtube_playlist_page_unreadable");
 	await capture?.captureDom(
 		page,
-		url.includes("list=LL")
-			? "youtube-liked-videos"
-			: mode === "history"
-				? "youtube-watch-history"
-				: "youtube-playlist-items",
+		url.includes("list=LL") ? "youtube-liked-videos" : "youtube-playlist-items",
 	);
 	if (state === "empty") {
-		const end = await page.evaluate(readListEnd, {
-			kind: mode,
-			sessionPresent:
-				mode !== "playlist" ||
-				(await page.evaluate(hasYoutubeSessionOnCurrentPage)),
+		const end = await page.evaluate(readListEndInBrowser, {
+			kind: "playlist" as const,
+			sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
 		});
 		const evidence = exhaustionEvidence(end, 0, false);
 		return {
@@ -584,7 +1356,7 @@ async function readVideoList(
 			exhausted: evidence.kind !== "unproven",
 			evidence,
 			verifiedEmpty: evidence.kind === "page-data-empty",
-			cappedAtLimit: false,
+			partialCheckpointAllowed: false,
 		};
 	}
 	const seen = new Set<string>();
@@ -592,12 +1364,10 @@ async function readVideoList(
 	let continuationRemoved = false;
 	let noChangeRounds = 0;
 	const selector =
-		mode === "history"
-			? "yt-lockup-view-model"
-			: "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer";
+		"yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer";
 	for (let round = 0; round <= rounds; round += 1) {
 		const previousCount = out.length;
-		const batch = await page.evaluate(readVideos, mode);
+		const batch = await page.evaluate(readPlaylistVideosInBrowser, mode);
 		for (const video of batch) {
 			const key = videoIdentity(video);
 			if (!seen.has(key)) {
@@ -606,7 +1376,6 @@ async function readVideoList(
 			}
 		}
 		noChangeRounds = out.length === previousCount ? noChangeRounds + 1 : 0;
-		if (mode === "history" && out.length >= HISTORY_LIMIT) break;
 		if (noChangeRounds >= 2) break;
 		if (round < rounds)
 			continuationRemoved =
@@ -614,44 +1383,28 @@ async function readVideoList(
 					page,
 					1,
 					selector,
-					LIST_CONTINUATION_SELECTORS[mode],
-					mode === "history" ? 800 : 1_500,
+					LIST_CONTINUATION_SELECTORS.playlist,
+					1_500,
 				)) || continuationRemoved;
 	}
 	if (out.length === 0) throw new Error("youtube_video_parse_mismatch");
-	// The history limit is a cap the connector chose, not the end of the list.
-	// Reaching it exactly can still be the end, so source evidence decides, unless
-	// the cap discarded rows that were read.
-	const cappedAtLimit = mode === "history" && out.length >= HISTORY_LIMIT;
-	const discardedRows = mode === "history" && out.length > HISTORY_LIMIT;
-	const pageEnd = await page.evaluate(readListEnd, {
-		kind: mode,
-		sessionPresent:
-			mode !== "playlist" ||
-			(await page.evaluate(hasYoutubeSessionOnCurrentPage)),
+	const pageEnd = await page.evaluate(readListEndInBrowser, {
+		kind: "playlist" as const,
+		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
 	});
 	await capture?.captureDom(
 		page,
 		url.includes("list=LL")
 			? "youtube-liked-videos-after-scroll"
-			: mode === "history"
-				? "youtube-watch-history-after-scroll"
-				: "youtube-playlist-items-after-scroll",
+			: "youtube-playlist-items-after-scroll",
 	);
-	const evidenceReadCount =
-		mode === "history" ? Math.min(out.length, HISTORY_LIMIT) : out.length;
-	const evidence = exhaustionEvidence(
-		pageEnd,
-		evidenceReadCount,
-		continuationRemoved && !discardedRows,
-		discardedRows ? out.length - HISTORY_LIMIT : 0,
-	);
+	const evidence = exhaustionEvidence(pageEnd, out.length, continuationRemoved);
 	return {
-		items: mode === "history" ? out.slice(0, HISTORY_LIMIT) : out,
+		items: out,
 		exhausted: evidence.kind !== "unproven",
 		evidence,
 		verifiedEmpty: false,
-		cappedAtLimit,
+		partialCheckpointAllowed: false,
 	};
 }
 
@@ -667,10 +1420,19 @@ function readPlaylistVideoList(
 function readWatchHistoryList(
 	page: BrowserCollectContext["page"],
 	url: string,
-	rounds: number,
 	capture?: BrowserCollectContext["capture"],
+	historyCursor?: HistoryCursor,
+	collectionMode?: BrowserCollectContext["collectionMode"],
+	emitRecord?: HistoryStreamRecord,
 ): Promise<VideoReadResult> {
-	return readVideoList(page, url, rounds, "history", capture);
+	return readHistoryVideoList(
+		page,
+		url,
+		capture,
+		historyCursor,
+		collectionMode,
+		emitRecord ?? (async () => undefined),
+	);
 }
 
 async function readableVideos(
@@ -679,17 +1441,26 @@ async function readableVideos(
 	url: string,
 	rounds: number,
 	stream: string,
+	historyCursor?: HistoryCursor,
+	historyRecord?: HistoryStreamRecord,
 ): Promise<VideoReadResult | null> {
 	try {
 		const result =
 			stream === "watch_history"
-				? await readWatchHistoryList(ctx.page, url, rounds, ctx.capture)
+				? await readWatchHistoryList(
+						ctx.page,
+						url,
+						ctx.capture,
+						historyCursor,
+						ctx.collectionMode,
+						historyRecord,
+					)
 				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
-		if (!result.exhausted)
-			await streams.fail(
-				stream,
-				result.cappedAtLimit ? HISTORY_CAP_MESSAGE : undefined,
-			);
+		if (
+			!result.exhausted &&
+			(stream !== "watch_history" || !result.partialCheckpointAllowed)
+		)
+			await streams.fail(stream);
 		return result;
 	} catch (error) {
 		const preciseReason =
@@ -706,11 +1477,15 @@ type BrowserContext = Pick<
 	BrowserCollectContext,
 	| "page"
 	| "requested"
+	| "collectionMode"
 	| "emitRecord"
 	| "emit"
 	| "progress"
 	| "reportStreamFailure"
-> & { capture?: BrowserCollectContext["capture"] };
+> & {
+	state?: BrowserCollectContext["state"];
+	capture?: BrowserCollectContext["capture"];
+};
 
 async function emitCoverageProgress(
 	ctx: Pick<BrowserContext, "progress">,
@@ -724,6 +1499,13 @@ async function emitCoverageProgress(
 		connectorDiagnostic(connector, "coverage", { ...fact });
 	}
 	const saved = sorted.reduce((sum, fact) => sum + fact.emitted_count, 0);
+	const history = sorted.find((fact) => fact.stream === "watch_history");
+	if (history?.incomplete) {
+		await ctx.progress(
+			`YouTube: ${saved} items saved; watch history incomplete (${history.stop_reason ?? "unproven"}; ${history.parsed_count ?? 0} rows parsed, ${history.deduped_count ?? 0} repeated rows).`,
+		);
+		return;
+	}
 	await ctx.progress(
 		`Finished YouTube: ${saved} ${saved === 1 ? "item" : "items"} saved`,
 	);
@@ -1080,38 +1862,36 @@ export async function collectYoutubeBrowser(
 			});
 			return;
 		}
+		const priorCursor =
+			ctx.collectionMode === "full_refresh"
+				? undefined
+				: (ctx.state?.watch_history as HistoryCursor | undefined);
+		let dateReference: Date | null = null;
 		const result = await readableVideos(
 			ctx,
 			streams,
 			`${HOME}feed/history`,
-			SCROLLS.history,
+			0,
 			"watch_history",
-		);
-		if (result) {
-			const { items } = result;
-			const fact = coverage.get("watch_history");
-			if (fact) {
-				fact.enumerated_count = items.length;
-				fact.limit = HISTORY_LIMIT;
-				fact.skipped_unresolved_date_count = 0;
-			}
-			const browserDate = await page.evaluate(() => {
-				const now = new Date();
-				return [now.getFullYear(), now.getMonth(), now.getDate()];
-			});
-			const dateReference =
-				Array.isArray(browserDate) && browserDate.length === 3
-					? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
-					: new Date(capturedAt);
-			for (const [position, video] of items.entries()) {
-				const watchedDate = resolveWatchedDate(
-					video.watched_date_label ?? null,
-					dateReference,
-				);
+			priorCursor,
+			async (video, position) => {
+				if (!dateReference) {
+					const browserDate = await page.evaluate(() => {
+						const now = new Date();
+						return [now.getFullYear(), now.getMonth(), now.getDate()];
+					});
+					dateReference =
+						Array.isArray(browserDate) && browserDate.length === 3
+							? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
+							: new Date(capturedAt);
+				}
 				await emit("watch_history", {
 					id: id(`history|${videoIdentity(video)}`),
 					position,
-					watched_date: watchedDate,
+					watched_date: resolveWatchedDate(
+						video.watched_date_label ?? null,
+						dateReference,
+					),
 					watched_date_label: video.watched_date_label ?? null,
 					video_id: video.video_id,
 					video_url: video.video_url,
@@ -1122,9 +1902,62 @@ export async function collectYoutubeBrowser(
 					views_text: video.views_text ?? null,
 					description: video.description,
 				});
+			},
+		);
+		if (result) {
+			const fact = coverage.get("watch_history");
+			if (fact) {
+				fact.enumerated_count = result.scannedCount ?? 0;
+				fact.parsed_count = result.parsedCount ?? 0;
+				fact.deduped_count = result.dedupedCount ?? 0;
+				if (result.stopReason) fact.stop_reason = result.stopReason;
+				fact.incomplete = !result.exhausted;
+				fact.next_checkpoint = result.checkpointAnchor
+					? id(result.checkpointAnchor)
+					: null;
+				fact.skipped_unresolved_date_count = 0;
+				if (result.historyDiagnostics)
+					reportHistoryTraversal(result.historyDiagnostics);
 			}
-			if (result.verifiedEmpty)
+			if (result.verifiedEmpty) {
 				await emitVerifiedEmptyState(ctx, "watch_history", capturedAt);
+			} else if (
+				!result.blocked &&
+				(result.exhausted ||
+					(result.checkpointAnchor &&
+						(!priorCursor?.complete || result.partialCheckpointAllowed)))
+			) {
+				const complete =
+					result.exhausted ||
+					(priorCursor?.complete === true &&
+						result.stopReason === "head-reconciled");
+				const evidence = result.exhausted
+					? result.evidence.kind
+					: result.partialCheckpointAllowed
+						? "youtube_history_budget_yield"
+						: "youtube_history_safe_prefix_before_gap";
+				await ctx.emit({
+					type: "STATE",
+					stream: "watch_history",
+					cursor: {
+						version: 2,
+						scope: "watch_history",
+						phase: complete
+							? "head_reconciliation"
+							: (result.phase ?? "backfill"),
+						backfill_anchor_id:
+							result.checkpointAnchor ??
+							priorCursor?.backfill_anchor_id ??
+							priorCursor?.last_seen_video_id,
+						position: result.checkpointPosition ?? priorCursor?.position ?? 0,
+						head_anchor_ids:
+							result.headAnchorIds ?? priorCursor?.head_anchor_ids ?? [],
+						complete,
+						stop_reason: result.stopReason,
+						evidence,
+					},
+				});
+			}
 		}
 	}
 	await emitCoverageProgress(ctx, "youtube", coverage.values());

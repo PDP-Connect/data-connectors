@@ -25554,7 +25554,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.27",
+				"version": "0.2.30",
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -25958,10 +25958,10 @@
 					{
 						"name": "watch_history",
 						"required": false,
-						"description": "Most recent 50 visible browser history entries in page order; watch dates have day precision.",
+						"description": "The latest observed history entry per video, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
 						"display": {
 							"label": "Your watch history",
-							"detail": "The latest 50 visible videos in page order. A date is recorded when its section label can be resolved; no watch time is invented."
+							"detail": "Observed videos are upserted by video identity while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -25997,7 +25997,7 @@
 								"position": {
 									"type": "integer",
 									"minimum": 0,
-									"description": "Order on the browser history page, newest first."
+									"description": "Current zero-based position on the observed browser history page, newest first; position can change when videos are re-watched or history changes."
 								},
 								"watched_date": {
 									"type": ["string", "null"],
@@ -26020,7 +26020,7 @@
 							"fields": true,
 							"resources": true
 						},
-						"incremental": false,
+						"incremental": true,
 						"query": {
 							"search": {
 								"lexical_fields": ["description"],

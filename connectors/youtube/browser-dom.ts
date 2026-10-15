@@ -331,13 +331,35 @@ export function readPlaylistHeader(doc: Document = document): {
 	};
 }
 
+export interface HistoryVideoPage {
+	readonly offset: number;
+	readonly totalRows: number;
+	readonly rows: readonly (BrowserVideo | null)[];
+}
+
+interface HistoryVideoPageRequest {
+	readonly mode: "history";
+	readonly offset: number;
+	readonly limit: number;
+}
+
 export function readVideos(
 	mode: "playlist" | "history",
+	doc?: Document,
+): BrowserVideo[];
+export function readVideos(request: HistoryVideoPageRequest): HistoryVideoPage;
+export function readVideos(
+	modeOrRequest: "playlist" | "history" | HistoryVideoPageRequest,
 	doc: Document = document,
-): BrowserVideo[] {
+): BrowserVideo[] | HistoryVideoPage {
+	const pageRequest = typeof modeOrRequest === "object" ? modeOrRequest : null;
+	const mode: "playlist" | "history" = pageRequest
+		? pageRequest.mode
+		: (modeOrRequest as "playlist" | "history");
+	const source = pageRequest ? document : doc;
 	const groups: Array<{ root: ParentNode; label: string | null }> =
 		mode === "history"
-			? Array.from(doc.querySelectorAll("ytd-item-section-renderer")).map(
+			? Array.from(source.querySelectorAll("ytd-item-section-renderer")).map(
 					(root) => ({
 						root,
 						label:
@@ -348,97 +370,133 @@ export function readVideos(
 								?.textContent?.trim() || null,
 					}),
 				)
-			: [{ root: doc, label: null }];
-	const result: BrowserVideo[] = [];
-	for (const { root, label } of groups) {
+			: [{ root: source, label: null }];
+	const nodeGroups = groups.map(({ root, label }) => {
 		const nodes =
 			mode === "history"
-				? root.querySelectorAll("yt-lockup-view-model")
+				? Array.from(
+						root.querySelectorAll("yt-lockup-view-model, ytd-video-renderer"),
+					).filter(
+						(node) =>
+							!node.matches("ytd-video-renderer") ||
+							!node.querySelector("yt-lockup-view-model"),
+					)
 				: root.querySelectorAll(
 						"yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer",
 					);
-		for (const node of nodes) {
-			const link = node.querySelector<HTMLAnchorElement>(
-				'a.yt-lockup-view-model__content-image, a.ytLockupViewModelContentImage, a.yt-lockup-metadata-view-model__title, a.ytLockupMetadataViewModelTitle, a[href*="/watch?"], a[href*="/shorts/"]',
-			);
-			const href = link?.getAttribute("href");
-			if (!href) continue;
-			const video_url = new URL(href, "https://www.youtube.com").href;
-			if (new URL(video_url).origin !== "https://www.youtube.com") continue;
-			const contentHost = (node.getAttribute("class") ?? "").includes(
-				"content-id-",
-			)
-				? node
-				: node.querySelector('[class*="content-id-"]');
-			const classId = Array.from(contentHost?.classList ?? [])
-				.find((name) => name.startsWith("content-id-"))
-				?.slice(11);
-			const video_id =
-				classId ||
-				new URL(video_url).searchParams.get("v") ||
-				/\/shorts\/([\w-]+)/.exec(video_url)?.[1] ||
-				null;
-			const titleNode = node.querySelector(
-				"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title, a#video-title span, span#video-title, a#video-title yt-formatted-string",
-			);
-			const video_title =
-				titleNode?.getAttribute("title")?.trim() ||
-				titleNode?.textContent?.trim() ||
-				null;
-			const channelLink = node.querySelector<HTMLAnchorElement>(
-				'a[href*="/@"], a[href*="/channel/"]',
-			);
-			const avatar = node.querySelector('[aria-label^="Go to channel"]');
-			const spans = Array.from(
-				node.querySelectorAll(
-					".yt-content-metadata-view-model__metadata-text, .ytContentMetadataViewModelMetadataText",
-				),
-			);
-			const channel_title =
-				avatar
-					?.getAttribute("aria-label")
-					?.replace(/^Go to channel\s+/i, "")
-					.trim() ||
-				node
-					.querySelector("ytd-channel-name a, #channel-name a")
-					?.textContent?.trim() ||
-				spans[0]?.textContent?.trim() ||
-				null;
-			const views_text =
-				spans
-					.findLast((s) => /view/i.test(s.textContent ?? ""))
-					?.textContent?.trim() || null;
-			result.push({
-				video_id,
-				video_url,
-				video_title,
-				channel_title,
-				channel_url: channelLink?.getAttribute("href")
-					? new URL(
-							channelLink.getAttribute("href")!,
-							"https://www.youtube.com",
-						).href
-					: null,
-				duration_text:
-					node
-						.querySelector(
-							"ytd-thumbnail-overlay-time-status-renderer span, .ytBadgeShapeText, .badge-shape-wiz__text",
-						)
-						?.textContent?.trim() || null,
-				thumbnail_url:
-					node.querySelector<HTMLImageElement>(
-						"img.yt-core-image, ytd-thumbnail img, img#img",
-					)?.src ?? null,
-				watched_date_label: label,
-				views_text,
-				description:
-					node
-						.querySelector(
-							".yt-content-metadata-view-model__metadata-text-max-lines-2, .ytContentMetadataViewModelMetadataTextMaxLines2",
-						)
-						?.textContent?.trim() || null,
-			});
+		return { nodes, label };
+	});
+	const totalRows = nodeGroups.reduce(
+		(count, group) => count + group.nodes.length,
+		0,
+	);
+	const first = pageRequest ? Math.max(0, pageRequest.offset) : 0;
+	const last = pageRequest
+		? Math.min(totalRows, first + Math.max(1, pageRequest.limit))
+		: totalRows;
+	const result: Array<BrowserVideo | null> = [];
+	for (let globalIndex = first; globalIndex < last; globalIndex += 1) {
+		let localIndex = globalIndex;
+		let node: Element | null = null;
+		let label: string | null = null;
+		for (const group of nodeGroups) {
+			if (localIndex < group.nodes.length) {
+				node = group.nodes[localIndex] ?? null;
+				label = group.label;
+				break;
+			}
+			localIndex -= group.nodes.length;
 		}
+		if (!node) {
+			if (pageRequest) result.push(null);
+			continue;
+		}
+		const link = node.querySelector<HTMLAnchorElement>(
+			'a.yt-lockup-view-model__content-image, a.ytLockupViewModelContentImage, a.yt-lockup-metadata-view-model__title, a.ytLockupMetadataViewModelTitle, a[href*="/watch?"], a[href*="/shorts/"]',
+		);
+		const href = link?.getAttribute("href");
+		if (!href) {
+			if (pageRequest) result.push(null);
+			continue;
+		}
+		const video_url = new URL(href, "https://www.youtube.com").href;
+		if (new URL(video_url).origin !== "https://www.youtube.com") {
+			if (pageRequest) result.push(null);
+			continue;
+		}
+		const contentHost = (node.getAttribute("class") ?? "").includes(
+			"content-id-",
+		)
+			? node
+			: node.querySelector('[class*="content-id-"]');
+		const classId = Array.from(contentHost?.classList ?? [])
+			.find((name) => name.startsWith("content-id-"))
+			?.slice(11);
+		const video_id =
+			classId ||
+			new URL(video_url).searchParams.get("v") ||
+			/\/shorts\/([\w-]+)/.exec(video_url)?.[1] ||
+			null;
+		const titleNode = node.querySelector(
+			"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title, a#video-title span, span#video-title, a#video-title yt-formatted-string",
+		);
+		const video_title =
+			titleNode?.getAttribute("title")?.trim() ||
+			titleNode?.textContent?.trim() ||
+			null;
+		const channelLink = node.querySelector<HTMLAnchorElement>(
+			'a[href*="/@"], a[href*="/channel/"]',
+		);
+		const avatar = node.querySelector('[aria-label^="Go to channel"]');
+		const spans = Array.from(
+			node.querySelectorAll(
+				".yt-content-metadata-view-model__metadata-text, .ytContentMetadataViewModelMetadataText",
+			),
+		);
+		const channel_title =
+			avatar
+				?.getAttribute("aria-label")
+				?.replace(/^Go to channel\s+/i, "")
+				.trim() ||
+			node
+				.querySelector("ytd-channel-name a, #channel-name a")
+				?.textContent?.trim() ||
+			spans[0]?.textContent?.trim() ||
+			null;
+		const views_text =
+			spans
+				.findLast((s) => /view/i.test(s.textContent ?? ""))
+				?.textContent?.trim() || null;
+		result.push({
+			video_id,
+			video_url,
+			video_title,
+			channel_title,
+			channel_url: channelLink?.getAttribute("href")
+				? new URL(channelLink.getAttribute("href")!, "https://www.youtube.com")
+						.href
+				: null,
+			duration_text:
+				node
+					.querySelector(
+						"ytd-thumbnail-overlay-time-status-renderer span, .ytBadgeShapeText, .badge-shape-wiz__text",
+					)
+					?.textContent?.trim() || null,
+			thumbnail_url:
+				node.querySelector<HTMLImageElement>(
+					"img.yt-core-image, ytd-thumbnail img, img#img",
+				)?.src ?? null,
+			watched_date_label: label,
+			views_text,
+			description:
+				node
+					.querySelector(
+						".yt-content-metadata-view-model__metadata-text-max-lines-2, .ytContentMetadataViewModelMetadataTextMaxLines2",
+					)
+					?.textContent?.trim() || null,
+		});
 	}
-	return result;
+	return pageRequest
+		? { offset: first, totalRows, rows: result }
+		: result.filter((video): video is BrowserVideo => video !== null);
 }
