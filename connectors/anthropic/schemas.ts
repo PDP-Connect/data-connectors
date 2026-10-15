@@ -111,7 +111,9 @@ export const messagesSchema = z.object({
  */
 export const projectsSchema = z.object({
 	id: idSchema,
-	name: encodedText,
+	// Absent only when the name's escaped text is over the inline cap (see
+	// parseProject); a project with no name at all carries the placeholder.
+	name: encodedText.optional(),
 	description: encodedText.nullable().optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,

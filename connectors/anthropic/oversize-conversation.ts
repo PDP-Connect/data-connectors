@@ -14,9 +14,19 @@
  * working set is one message plus the small key list, whatever the parent's
  * size.
  *
- * `BufferMeter` records the largest text this module held at once. Tests use
- * it to prove the bound.
+ * A captured string field is decoded as it streams, and its escaped length
+ * (see safe-escape.ts) is bounded from below while it is read. Once that bound
+ * passes the inline cap the field is known to be over the cap, its text is
+ * dropped, and only the fact is kept. A field the scan keeps therefore holds at
+ * most the inline cap in units, and every kept field counts in
+ * `ScannedConversation.retainedUnits`.
+ *
+ * `BufferMeter` records the largest amount of text this module held at once:
+ * the kept header fields, the field or message being read, and the joined copy
+ * built to parse it. Tests use it to prove the bound.
  */
+
+import { escapedLengthExceeds, INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 
 export class BufferMeter {
 	peakUnits = 0;
@@ -37,10 +47,12 @@ export interface ScannedConversation {
 	/** Last string or boolean value of each wanted top-level field. A field
 	 * whose last value is anything else is absent. */
 	fields: Map<string, unknown>;
-	/** Wanted fields whose last value is a string longer than the capture
-	 * limit. The value is not kept, and never cut to a prefix: it is far over
-	 * the inline cap, so a caller leaves the field absent. */
+	/** Wanted fields whose last value is a string whose escaped text is over
+	 * the inline cap. The value is not kept, and never cut to a prefix: a
+	 * caller leaves the field absent. */
 	overCap: Set<string>;
+	/** Units of text held by `fields` (decoded string lengths). */
+	retainedUnits: number;
 	hasDocs: boolean;
 	chatMessages: "array" | "other" | "absent";
 	/** Elements of `chat_messages`, objects only, in file order. */
@@ -51,33 +63,58 @@ export interface ScannedConversation {
 	nonObjectMessages: number;
 }
 
-/** Raw characters kept of one captured string. A JSON string of N characters
- * is at most 6N raw units and its escaped text at least N, so a string with
- * more raw units than six inline caps is certainly over the inline cap. Below
- * this the whole value is kept and decided exactly; above it only the fact is
- * kept. Fields this reader captures are tiny in practice. */
-export const CAPTURED_STRING_MAX_UNITS = 6 * 10_000_000;
 const KEY_MAX_UNITS = 256;
 
 const WHITESPACE = new Set([0x20, 0x09, 0x0a, 0x0d]);
+/** A scalar that is not a string is a few characters; anything longer is not a
+ * boolean the caller wants. */
+const PRIMITIVE_MAX_UNITS = 64;
+const RAW_CONTROL = /[\u007f-\u009f]/g;
+const SIMPLE_ESCAPES = new Map<number, number>([
+	[0x22, 0x22],
+	[0x5c, 0x5c],
+	[0x2f, 0x2f],
+	[0x62, 0x08],
+	[0x66, 0x0c],
+	[0x6e, 0x0a],
+	[0x72, 0x0d],
+	[0x74, 0x09],
+]);
+
+/** Units the codec always escapes (the surrogate and backslash cases depend on
+ * context and are left to the exact check). */
+function isControlUnit(unit: number): boolean {
+	return (
+		(unit <= 0x1f && unit !== 0x09 && unit !== 0x0a && unit !== 0x0d) ||
+		(unit >= 0x7f && unit <= 0x9f)
+	);
+}
+
+function hexValue(code: number): number {
+	if (code >= 0x30 && code <= 0x39) return code - 0x30;
+	if (code >= 0x61 && code <= 0x66) return code - 0x61 + 10;
+	if (code >= 0x41 && code <= 0x46) return code - 0x41 + 10;
+	return -1;
+}
 
 export async function scanConversation(
 	chunks: AsyncIterable<string>,
 	startOffset: number,
 	wanted: ReadonlySet<string>,
 	meter: BufferMeter,
-	captureLimit: number = CAPTURED_STRING_MAX_UNITS,
+	inlineCap: number = INLINE_TEXT_MAX_UNITS,
 ): Promise<ScannedConversation> {
 	const result: ScannedConversation = {
 		fields: new Map(),
 		overCap: new Set(),
+		retainedUnits: 0,
 		hasDocs: false,
 		chatMessages: "absent",
 		messageKeys: [],
 		messageCount: 0,
 		nonObjectMessages: 0,
 	};
-	const invalid = () => {
+	const invalid = (): never => {
 		throw new Error("invalid conversation object while scanning");
 	};
 
@@ -105,10 +142,19 @@ export async function scanConversation(
 	let escaped = false;
 	let depth = 0;
 	let capture = false;
-	let captureParts: string[] = [];
-	let captureUnits = 0;
-	let captureOverCap = false;
 	let inMessages = false;
+	// The string field being decoded: kept text, a lower bound on its escaped
+	// length, and the escape state of the JSON string.
+	let strParts: string[] = [];
+	let strUnits = 0;
+	let strLower = 0;
+	let strOver = false;
+	let strEscape = false;
+	let strHexLeft = 0;
+	let strHex = 0;
+	let strRun = -1;
+	// A captured scalar that is not a string.
+	let primitiveToken = "";
 
 	// Current `chat_messages` element.
 	let elementActive = false;
@@ -117,9 +163,14 @@ export async function scanConversation(
 	let elementParts: string[] = [];
 	let elementUnits = 0;
 
-	const note = () => meter.note(captureUnits + elementUnits);
+	const note = (extraElementUnits = 0) =>
+		meter.note(
+			result.retainedUnits + strUnits + elementUnits + extraElementUnits,
+		);
 
 	const endElement = (endOffset: number) => {
+		// The parts and the joined copy are alive together.
+		note(elementUnits);
 		const text = elementParts.join("");
 		elementParts = [];
 		elementUnits = 0;
@@ -147,53 +198,106 @@ export async function scanConversation(
 		});
 	};
 
+	const dropField = (name: string) => {
+		const kept = result.fields.get(name);
+		if (typeof kept === "string") result.retainedUnits -= kept.length;
+		result.fields.delete(name);
+		result.overCap.delete(name);
+	};
+
+	const resetString = () => {
+		strParts = [];
+		strUnits = 0;
+		strLower = 0;
+		strOver = false;
+		strEscape = false;
+		strHexLeft = 0;
+		strHex = 0;
+		strRun = -1;
+	};
+
+	/** Add decoded text to the string field, unless it is already known to be
+	 * over the inline cap. */
+	const addDecoded = (text: string, controls: number) => {
+		if (strOver) return;
+		strUnits += text.length;
+		strLower += text.length + 5 * controls;
+		if (strLower > inlineCap) {
+			// Over the cap for certain: keep the fact, not the text.
+			strOver = true;
+			strParts = [];
+			strUnits = 0;
+			return;
+		}
+		strParts.push(text);
+	};
+
 	const finishValue = () => {
 		if (capture && key !== null) {
-			const raw = captureParts.join("");
-			captureParts = [];
-			let value: unknown;
-			try {
-				value = captureOverCap ? undefined : JSON.parse(raw);
-			} catch {
-				value = undefined;
-			}
-			if (captureOverCap) {
-				result.fields.delete(key);
-				result.overCap.add(key);
-			} else if (typeof value === "string" || typeof value === "boolean") {
-				result.fields.set(key, value);
-				result.overCap.delete(key);
+			dropField(key);
+			if (kind === Kind.String) {
+				if (strOver) {
+					result.overCap.add(key);
+				} else {
+					// Both copies are alive while joining.
+					note(strUnits);
+					const decoded = strParts.join("");
+					strParts = [];
+					if (escapedLengthExceeds(decoded, inlineCap).exceeds) {
+						result.overCap.add(key);
+					} else {
+						result.fields.set(key, decoded);
+						result.retainedUnits += decoded.length;
+					}
+				}
 			} else {
-				result.fields.delete(key);
-				result.overCap.delete(key);
+				let value: unknown;
+				try {
+					value =
+						primitiveToken.length > PRIMITIVE_MAX_UNITS
+							? undefined
+							: JSON.parse(primitiveToken);
+				} catch {
+					value = undefined;
+				}
+				if (typeof value === "boolean") result.fields.set(key, value);
 			}
 		}
+		resetString();
+		primitiveToken = "";
 		capture = false;
-		captureUnits = 0;
-		captureOverCap = false;
 		inMessages = false;
 		phase = Phase.AfterValue;
 	};
 
 	let offset = startOffset;
 	for await (const chunk of chunks) {
-		// Text kept from this chunk for the active capture or element.
-		let capStart = capture ? 0 : -1;
+		// Text kept from this chunk for the active string field or element.
+		strRun =
+			capture && kind === Kind.String && !strEscape && strHexLeft === 0
+				? 0
+				: -1;
 		let elemStart = elementActive ? 0 : -1;
-		const flushCapture = (end: number) => {
-			if (capStart < 0) return;
-			const part = chunk.slice(capStart, end);
-			capStart = -1;
-			if (captureOverCap) return;
-			if (captureUnits + part.length > captureLimit) {
-				captureOverCap = true;
-				captureParts = [];
-				captureUnits = 0;
+		let tokenStart = capture && kind === Kind.Primitive ? 0 : -1;
+		const flushRun = (end: number) => {
+			if (strRun < 0 || strOver) {
+				strRun = -1;
 				return;
 			}
-			captureParts.push(part);
-			captureUnits += part.length;
+			const part = chunk.slice(strRun, end);
+			strRun = -1;
+			if (part.length === 0) return;
+			addDecoded(part, part.match(RAW_CONTROL)?.length ?? 0);
 		};
+		const flushToken = (end: number) => {
+			if (tokenStart < 0) return;
+			if (primitiveToken.length <= PRIMITIVE_MAX_UNITS)
+				primitiveToken += chunk.slice(tokenStart, end);
+			tokenStart = -1;
+		};
+		/** One decoded character of a string field's escape sequence. */
+		const addUnit = (unit: number) =>
+			addDecoded(String.fromCharCode(unit), isControlUnit(unit) ? 1 : 0);
 		const flushElement = (end: number) => {
 			if (elemStart < 0) return;
 			const part = chunk.slice(elemStart, end);
@@ -249,54 +353,78 @@ export async function scanConversation(
 					if (key === "docs") result.hasDocs = true;
 					capture = key !== null && wanted.has(key);
 					inMessages = false;
+					resetString();
+					primitiveToken = "";
+					if (key === "chat_messages") {
+						// Last key wins for EVERY occurrence: whatever an earlier
+						// value left is gone before this one is looked at.
+						result.messageKeys = [];
+						result.messageCount = 0;
+						result.nonObjectMessages = 0;
+						result.chatMessages = code === 0x5b ? "array" : "other";
+					}
 					if (code === 0x22) {
 						kind = Kind.String;
 						inString = true;
 						escaped = false;
+						if (capture) strRun = i + 1;
 					} else if (code === 0x7b || code === 0x5b) {
 						kind = Kind.Container;
 						inString = false;
 						escaped = false;
 						depth = 1;
-						if (key === "chat_messages") {
-							if (code === 0x5b) {
-								inMessages = true;
-								// A repeated key replaces the earlier array.
-								result.chatMessages = "array";
-								result.messageKeys = [];
-								result.messageCount = 0;
-								result.nonObjectMessages = 0;
-							} else result.chatMessages = "other";
-						}
+						inMessages = key === "chat_messages" && code === 0x5b;
 						// Only a scalar is captured; a container value leaves the
 						// field absent.
 						if (capture) {
 							capture = false;
-							if (key !== null) {
-								result.fields.delete(key);
-								result.overCap.delete(key);
-							}
+							if (key !== null) dropField(key);
 						}
 					} else {
 						kind = Kind.Primitive;
+						if (capture) tokenStart = i;
 					}
-					if (capture) capStart = i;
 					phase = Phase.Value;
 					break;
 				}
 				case Phase.Value: {
 					if (kind === Kind.String) {
-						if (escaped) escaped = false;
-						else if (code === 0x5c) escaped = true;
-						else if (code === 0x22) {
-							flushCapture(i + 1);
+						if (!capture) {
+							if (escaped) escaped = false;
+							else if (code === 0x5c) escaped = true;
+							else if (code === 0x22) finishValue();
+							break;
+						}
+						if (strHexLeft > 0) {
+							const digit = hexValue(code);
+							if (digit < 0) invalid();
+							strHex = strHex * 16 + digit;
+							strHexLeft -= 1;
+							if (strHexLeft === 0) {
+								addUnit(strHex);
+								strRun = i + 1;
+							}
+						} else if (strEscape) {
+							strEscape = false;
+							if (code === 0x75) {
+								strHexLeft = 4;
+								strHex = 0;
+							} else {
+								addUnit(SIMPLE_ESCAPES.get(code) ?? invalid());
+								strRun = i + 1;
+							}
+						} else if (code === 0x5c) {
+							flushRun(i);
+							strEscape = true;
+						} else if (code === 0x22) {
+							flushRun(i);
 							finishValue();
 						}
 						break;
 					}
 					if (kind === Kind.Primitive) {
 						if (WHITESPACE.has(code) || code === 0x2c || code === 0x7d) {
-							flushCapture(i);
+							flushToken(i);
 							finishValue();
 							// The delimiter belongs to the object level.
 							i -= 1;
@@ -363,7 +491,8 @@ export async function scanConversation(
 					break;
 			}
 		}
-		flushCapture(chunk.length);
+		flushRun(chunk.length);
+		flushToken(chunk.length);
 		flushElement(chunk.length);
 		note();
 		offset += chunk.length;

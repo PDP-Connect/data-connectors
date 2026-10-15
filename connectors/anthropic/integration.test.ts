@@ -1069,6 +1069,18 @@ test("collectAnthropic: export never becomes ready within the poll budget -> ret
 // parsers.test.ts for the classifier's own unit tests) rather than the old
 // format's fixed conversations.json/projects/*.json entry names.
 
+/** A fixture entry given as exact JSON text, for shapes JSON.stringify cannot
+ * write (a repeated key). */
+class RawJson {
+	text: string;
+	constructor(text: string) {
+		this.text = text;
+	}
+}
+
+const entryText = (content: unknown): string =>
+	content instanceof RawJson ? content.text : JSON.stringify(content);
+
 async function buildManifestPartZip(
 	entries: {
 		name: string;
@@ -1078,7 +1090,7 @@ async function buildManifestPartZip(
 	const { deflateRawSync } = await import("node:zlib");
 	const files = entries.map((e) => ({
 		name: e.name,
-		content: Buffer.from(JSON.stringify(e.content)),
+		content: Buffer.from(entryText(e.content)),
 	}));
 	const localParts: Buffer[] = [];
 	const centralParts: Buffer[] = [];
@@ -4188,7 +4200,7 @@ async function runOldFormat(
 	});
 	serveDownload(context.page, bytes);
 	const texts = new Map(
-		files.map((file) => [file.name, JSON.stringify(file.content)]),
+		files.map((file) => [file.name, entryText(file.content)]),
 	);
 	const around = options.aroundCollect ?? ((run) => run());
 	await around(() =>
@@ -5061,6 +5073,185 @@ test("collectAnthropic: the streamed path takes uuid, updated_at and name from a
 	assert.deepEqual(
 		emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id),
 		["small-late"],
+	);
+});
+
+for (const streaming of [false, true]) {
+	const mode = streaming ? "streaming" : "buffered";
+	test(`collectAnthropic: ${mode} a project whose name is over the inline cap is delivered without name, counted, and proves with its documents`, async () => {
+		// 3M NULs are 18M escaped units: over the 10M inline cap.
+		const nuls = "\u0000".repeat(3_000_000);
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{ name: "conversations.json", content: CONVERSATIONS_JSON },
+				{
+					name: "projects/proj-name.json",
+					content: {
+						uuid: "proj-name",
+						name: nuls,
+						docs: [{ uuid: "doc-name", filename: "a.md", content: "kept" }],
+					},
+				},
+			],
+			{
+				streams: ["conversations", "messages", "projects", "project_documents"],
+				streaming,
+			},
+		);
+		const project = emitted.find((r) => r.stream === "projects");
+		assert.ok(project, "the project is delivered");
+		assert.equal(project.data.id, "proj-name");
+		assert.equal("name" in project.data, false);
+		assert.equal(validateRecord("projects", project.data).ok, true);
+		assert.equal(
+			emitted.find((r) => r.stream === "project_documents")?.data.content,
+			"kept",
+		);
+		assert.ok(
+			diagnostics.some(
+				(line) =>
+					line.startsWith("[anthropic-diagnostic] export_items_too_large ") &&
+					line.includes('"stream":"projects"') &&
+					line.includes('"reason":"exceeds_inline_cap"') &&
+					line.includes('"count":1'),
+			),
+			diagnostics.join("\n"),
+		);
+		assert.deepEqual(gapsOf(protocolMessages), []);
+		assert.deepEqual(skipsOf(protocolMessages), []);
+		for (const stream of ["projects", "project_documents"])
+			assert.equal(coverageOf(protocolMessages, stream).length, 1, stream);
+	});
+
+	test(`collectAnthropic: ${mode} an ambiguous parent (conversation with docs, project with chat_messages) withholds the messages proof, whichever parent streams were requested`, async () => {
+		const conversation = (extra: Record<string, unknown>) => ({
+			uuid: "amb",
+			created_at: "2026-01-01T00:00:00.000Z",
+			chat_messages: [{ uuid: "m", sender: "human", text: "ok" }],
+			...extra,
+		});
+		for (const streams of [
+			["messages"],
+			["conversations", "messages"],
+			["conversations", "messages", "projects", "project_documents"],
+		]) {
+			const run = (files: Array<{ name: string; content: unknown }>) =>
+				runOldFormat(files, { streams, streaming });
+			// Control: the same parent without docs proves messages.
+			const clean = await run([
+				{ name: "conversations.json", content: [conversation({})] },
+			]);
+			assert.equal(
+				coverageOf(clean.protocolMessages, "messages").length,
+				1,
+				`${streams.join(",")}: control`,
+			);
+			const withDocs = await run([
+				{ name: "conversations.json", content: [conversation({ docs: [] })] },
+			]);
+			assert.equal(
+				withDocs.emitted.filter((r) => r.stream === "messages").length,
+				1,
+				"the message is still delivered",
+			);
+			assert.equal(
+				coverageOf(withDocs.protocolMessages, "messages").length,
+				0,
+				`${streams.join(",")}: conversation with docs`,
+			);
+			const projectWithMessages = await run([
+				{ name: "conversations.json", content: [conversation({})] },
+				{
+					name: "projects/proj-amb.json",
+					content: { uuid: "proj-amb", name: "P", chat_messages: [] },
+				},
+			]);
+			assert.equal(
+				coverageOf(projectWithMessages.protocolMessages, "messages").length,
+				0,
+				`${streams.join(",")}: project with chat_messages`,
+			);
+		}
+	});
+}
+
+test("collectAnthropic: an oversized parent whose chat_messages is replaced by a later duplicate key matches the buffered parser", async () => {
+	// The first array is ~20M units (so the parent is read incrementally); the
+	// later key replaces it. JSON.parse, and so the buffered parser, keeps the last.
+	const bigArray = JSON.stringify(
+		messagesFirstParent("dup", "2026-02-01T00:00:00.000Z", 200).chat_messages,
+	);
+	for (const [label, later, messages] of [
+		["null", "null", 0],
+		["string", '"text"', 0],
+		["number", "7", 0],
+		["object", '{"uuid":"nested"}', 0],
+		["array", '[{"uuid":"kept","sender":"human","text":"hi"}]', 1],
+	] as const) {
+		const text = `{"chat_messages":${bigArray},"uuid":"dup","updated_at":"2026-02-01T00:00:00.000Z","created_at":"2026-01-20T00:00:00.000Z","chat_messages":${later}}`;
+		const { emitted, protocolMessages } = await runOldFormat(
+			[{ name: "conversations.json", content: new RawJson(`[${text}]`) }],
+			{ streams: ["conversations", "messages"], streaming: true },
+		);
+		assert.deepEqual(
+			emitted.filter((r) => r.stream === "conversations").map((r) => r.data.id),
+			["dup"],
+			label,
+		);
+		assert.equal(
+			emitted.filter((r) => r.stream === "messages").length,
+			messages,
+			`${label}: only the last chat_messages counts`,
+		);
+		assert.equal(
+			emitted.find((r) => r.stream === "conversations")?.data.message_count,
+			messages,
+			label,
+		);
+		// The buffered parser agrees on the child count.
+		const parsed = JSON.parse(text) as { chat_messages: unknown };
+		assert.equal(
+			Array.isArray(parsed.chat_messages) ? parsed.chat_messages.length : 0,
+			messages,
+		);
+		if (messages === 0)
+			assert.equal(
+				coverageOf(protocolMessages, "messages").length,
+				0,
+				`${label}: a non-array chat_messages is not proven`,
+			);
+	}
+});
+
+test("collectAnthropic: a streamed title exactly at the inline cap is kept, one unit over is absent", async () => {
+	const cap = 10_000_000;
+	const run = async (length: number) => {
+		const parent = messagesFirstParent("edge", "2026-02-01T00:00:00.000Z", 80);
+		return runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [{ ...parent, name: "A".repeat(length) }],
+				},
+			],
+			{ streams: ["conversations", "messages"], streaming: true },
+		);
+	};
+	const atCap = await run(cap);
+	assert.equal(
+		atCap.emitted.find((r) => r.stream === "conversations")?.data.title,
+		"A".repeat(cap),
+	);
+	const over = await run(cap + 1);
+	const conversation = over.emitted.find((r) => r.stream === "conversations");
+	assert.ok(conversation);
+	assert.equal("title" in conversation.data, false);
+	assert.ok(
+		diagnostics.some(
+			(line) =>
+				line.includes('"stream":"conversations"') &&
+				line.includes('"reason":"exceeds_inline_cap"'),
+		),
 	);
 });
 

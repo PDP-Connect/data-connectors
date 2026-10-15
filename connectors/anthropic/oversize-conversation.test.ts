@@ -171,7 +171,10 @@ test("scanConversation holds one message at a time: the peak buffer does not gro
 		Math.abs(large - small) <= 16,
 		`peak ${small} vs ${large} must not depend on the parent size`,
 	);
-	assert.ok(small < 200_000, `peak ${small} is about one message`);
+	assert.ok(
+		small < 300_000,
+		`peak ${small} is about one message, twice (joined)`,
+	);
 });
 
 test("spoolEnvelopeFromChunks writes the envelope verbatim, hashed and sized while streaming", async () => {
@@ -228,4 +231,179 @@ test("spoolJsonText round-trips exact text, NUL and lone surrogates included", a
 	const bytes = readFileSync(join(spoolDir, blob.event.file), "utf8");
 	assert.equal(JSON.parse(bytes), text);
 	assert.equal(bytes, JSON.stringify(text));
+});
+
+// ─── header memory, duplicate chat_messages, the inline boundary ────────────
+
+const { INLINE_TEXT_MAX_UNITS } = await import("./safe-escape.ts");
+const { parseConversationHeader } = await import("./parsers.ts");
+
+/** `count` copies of `piece`, as chunks of at most `size` units, never
+ * building the whole string. */
+async function* repeated(
+	piece: string,
+	count: number,
+	size = 100_000,
+): AsyncGenerator<string> {
+	const per = Math.max(1, Math.floor(size / piece.length));
+	for (let left = count; left > 0; left -= per)
+		yield piece.repeat(Math.min(per, left));
+}
+
+async function* concat(
+	...parts: Array<string | AsyncIterable<string>>
+): AsyncGenerator<string> {
+	for (const part of parts) {
+		if (typeof part === "string") yield part;
+		else yield* part;
+	}
+}
+
+const scanParts = (parts: AsyncIterable<string>, meter = new BufferMeter()) =>
+	scanConversation(parts, 0, FIELDS, meter);
+
+test("a field known to be over the inline cap stops being retained: near-60M headers hold at most the cap", async () => {
+	// A valid short uuid, a 59M name and a 59M summary, and tiny messages.
+	const meter = new BufferMeter();
+	const result = await scanParts(
+		concat(
+			'{"uuid":"u","name":"',
+			repeated("A", 59_000_000),
+			'","summary":"',
+			repeated("A", 59_000_000),
+			'","chat_messages":[{"uuid":"m"}]}',
+		),
+		meter,
+	);
+	assert.deepEqual([...result.overCap].sort(), ["name", "summary"]);
+	assert.equal(result.fields.has("name"), false);
+	assert.equal(result.fields.has("summary"), false);
+	assert.equal(result.fields.get("uuid"), "u");
+	assert.equal(result.retainedUnits, 1);
+	assert.equal(result.messageCount, 1);
+	// 118M units went by; no more than the inline cap (plus one chunk) was
+	// ever held, and none of it after the decision.
+	assert.ok(
+		meter.peakUnits <= INLINE_TEXT_MAX_UNITS + 300_000,
+		`peak ${meter.peakUnits}`,
+	);
+});
+
+test("the over-cap decision is incremental: escaped text stops being retained long before the field ends", async () => {
+	// 5M NULs are 30M raw units; each is 6 escaped units, so the 10M cap is
+	// passed after about 1.7M of them.
+	const meter = new BufferMeter();
+	const result = await scanParts(
+		concat(
+			'{"name":"',
+			repeated("\\u0000", 5_000_000, 60_000),
+			'","uuid":"u"}',
+		),
+		meter,
+	);
+	assert.deepEqual([...result.overCap], ["name"]);
+	assert.ok(meter.peakUnits < 2_500_000, `peak ${meter.peakUnits}`);
+});
+
+test("kept header fields count in the meter and in retainedUnits", async () => {
+	const meter = new BufferMeter();
+	const result = await scanParts(
+		concat(
+			'{"name":"',
+			repeated("A", 9_000_000),
+			'","summary":"',
+			repeated("B", 8_000_000),
+			'","uuid":"u"}',
+		),
+		meter,
+	);
+	assert.equal(result.fields.get("name")?.toString().length, 9_000_000);
+	assert.equal(result.retainedUnits, 9_000_000 + 8_000_000 + 1);
+	assert.ok(
+		meter.peakUnits >= 17_000_000,
+		`the meter counts what is retained (${meter.peakUnits})`,
+	);
+});
+
+test("the inline boundary is exact: cap-1, cap and cap+1, raw and escaped", async () => {
+	const cap = INLINE_TEXT_MAX_UNITS;
+	const kept = async (name: AsyncIterable<string>) => {
+		const result = await scanParts(concat('{"name":"', name, '","uuid":"u"}'));
+		return result.fields.has("name") && !result.overCap.has("name");
+	};
+	// Raw ASCII: escaped length equals the length.
+	assert.equal(await kept(repeated("A", cap - 1)), true);
+	assert.equal(await kept(repeated("A", cap)), true);
+	assert.equal(await kept(repeated("A", cap + 1)), false);
+	// One NUL (six escaped units) plus ASCII: escaped length cap-1, cap, cap+1.
+	assert.equal(await kept(concat(repeated("A", cap - 7), "\\u0000")), true);
+	assert.equal(await kept(concat(repeated("A", cap - 6), "\\u0000")), true);
+	assert.equal(await kept(concat(repeated("A", cap - 5), "\\u0000")), false);
+	// The same decisions as the buffered path.
+	for (const length of [cap - 1, cap, cap + 1]) {
+		const buffered = parseConversationHeader(
+			{ uuid: "u", name: "A".repeat(length) },
+			0,
+		);
+		assert.equal(buffered?.title !== undefined, length <= cap);
+	}
+});
+
+test("a name written as 10,000,000 JSON \\u0041 escapes (60,000,002 raw units) is kept; one more is not", async () => {
+	const cap = INLINE_TEXT_MAX_UNITS;
+	const atCap = await scanParts(
+		concat('{"name":"', repeated("\\u0041", cap, 600_000), '","uuid":"u"}'),
+	);
+	assert.equal(atCap.overCap.size, 0);
+	assert.equal(atCap.fields.get("name")?.toString().length, cap);
+	const over = await scanParts(
+		concat('{"name":"', repeated("\\u0041", cap + 1, 600_000), '","uuid":"u"}'),
+	);
+	assert.deepEqual([...over.overCap], ["name"]);
+	assert.equal(over.fields.has("name"), false);
+});
+
+test("a repeated chat_messages key: the last occurrence wins, whatever its type", async () => {
+	const first =
+		'[{"uuid":"old","created_at":"2026-01-01T00:00:00Z"},{"uuid":"old2"}]';
+	for (const second of [
+		"null",
+		'"text"',
+		"7",
+		"true",
+		'{"uuid":"x","chat_messages":[{"uuid":"nested"}]}',
+		"[]",
+		'[{"uuid":"new"}]',
+		first,
+	]) {
+		const text = `{"uuid":"c","chat_messages":${first},"name":"n","chat_messages":${second}}`;
+		const buffered = (JSON.parse(text) as { chat_messages: unknown })
+			.chat_messages;
+		const result = await scan(text, 5);
+		const expected = Array.isArray(buffered) ? buffered : null;
+		assert.equal(
+			result.chatMessages,
+			expected ? "array" : "other",
+			`second = ${second}`,
+		);
+		assert.equal(
+			result.messageCount,
+			expected?.length ?? 0,
+			`second = ${second}`,
+		);
+		assert.deepEqual(
+			result.messageKeys.map((key) =>
+				JSON.parse(text.slice(key.start, key.end)),
+			),
+			(expected ?? []).filter(
+				(item) => typeof item === "object" && item !== null,
+			),
+			`second = ${second}`,
+		);
+		assert.equal(result.nonObjectMessages, 0);
+	}
+	// A scalar replacement also forgets a non-object count from the first array.
+	const mixed = await scan('{"chat_messages":[1,"a"],"chat_messages":null}');
+	assert.equal(mixed.nonObjectMessages, 0);
+	assert.equal(mixed.messageCount, 0);
 });

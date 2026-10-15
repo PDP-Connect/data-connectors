@@ -168,9 +168,18 @@ test("conversations schema rejects a negative message_count", () => {
 	);
 });
 
-test("projects schema rejects a missing name (manifest-required field)", () => {
+test("projects schema accepts a record with no name: name is absent only when over the inline cap", () => {
 	const { name: _omit, ...withoutName } = PROJECT_RECORD;
-	assert.equal(projectsSchema.safeParse(withoutName).success, false);
+	assert.equal(projectsSchema.safeParse(withoutName).success, true);
+	assert.equal(validateRecord("projects", withoutName).ok, true);
+	// A name that is present is still bounded by the inline cap.
+	assert.equal(
+		projectsSchema.safeParse({
+			...PROJECT_RECORD,
+			name: "n".repeat(10_000_001),
+		}).success,
+		false,
+	);
 });
 
 test("project_documents schema accepts a contract-shaped record", () => {
@@ -392,6 +401,11 @@ test("the manifest declares pdpp-safe-escape-v1 on exactly the fields the parser
 			}) => [stream.name, stream.schema.properties],
 		),
 	);
+	const projects = manifest.streams.find(
+		(stream: { name: string }) => stream.name === "projects",
+	);
+	// name is absent only when it is over the inline cap, so it is optional.
+	assert.deepEqual(projects.schema.required, ["id"]);
 	for (const name of ["messages", "project_documents"]) {
 		const blob = (byName.get(name) as Record<string, Record<string, unknown>>)
 			.blob_ref;

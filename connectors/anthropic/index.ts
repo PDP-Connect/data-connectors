@@ -1371,11 +1371,13 @@ export async function collectAnthropic({
 		parent: ReturnType<typeof parseConversationHeader>,
 		hasDocs: boolean,
 	) => {
-		if (!wantsConversations) {
-			return;
-		}
+		// A conversation that also carries docs is ambiguous for every stream
+		// of this export, so it is noted whichever streams were requested.
 		if (hasDocs) {
 			ambiguousClassification = true;
+		}
+		if (!wantsConversations) {
+			return;
 		}
 		if (!parent || rawCoverageConversationIds.has(parent.id)) {
 			conversationsExact = false;
@@ -1392,6 +1394,10 @@ export async function collectAnthropic({
 		);
 	};
 	const accountRawProject = (raw: unknown) => {
+		// A project that also carries chat_messages is ambiguous the same way.
+		if (isPlainObject(raw) && Object.hasOwn(raw, "chat_messages")) {
+			ambiguousClassification = true;
+		}
 		if (!wantsProjects && !wantsDocuments) {
 			return;
 		}
@@ -1408,9 +1414,6 @@ export async function collectAnthropic({
 			return;
 		}
 		rawProjectIds.add(projectId);
-		if (Object.hasOwn(raw, "chat_messages")) {
-			ambiguousClassification = true;
-		}
 		// A missing, null or malformed child list is unknown, never empty.
 		if (!Array.isArray(raw.docs)) {
 			documentsExact = false;
@@ -1903,6 +1906,7 @@ export async function collectAnthropic({
 		if (
 			unrestrictedMessages() &&
 			completeMessages &&
+			!ambiguousClassification &&
 			!skipped.has(MESSAGES_STREAM) &&
 			rawMessageIds.size === deliveredMessageIds.size &&
 			[...rawMessageIds].every((id) => deliveredMessageIds.has(id))
@@ -2142,8 +2146,10 @@ export async function collectAnthropic({
 					for await (const part of chunks(key.start, key.end)) {
 						parts.push(part);
 						units += part.length;
-						bufferMeter.note(units);
+						bufferMeter.note(scan.retainedUnits + units);
 					}
+					// The parts and their joined copy are alive together.
+					bufferMeter.note(scan.retainedUnits + 2 * units);
 					const message = parseMessage(
 						JSON.parse(parts.join("")),
 						conversation.id,
