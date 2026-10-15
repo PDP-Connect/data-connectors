@@ -6,7 +6,6 @@
 // browser-context auth, API client, and the collect() orchestrator live in
 // index.ts.
 
-import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type {
 	ChatGptContent,
@@ -89,7 +88,31 @@ export function flattenTreeCurrentBranch(
 	});
 }
 
+/**
+ * `String.prototype.trim` also strips VT (U+000B) and FF (U+000C), which are
+ * forbidden control characters. Trimming them away before the safe-text pass
+ * would lose them before the escape pass, so trim only the whitespace that is
+ * not a forbidden control.
+ */
+const EDGE_WHITESPACE =
+	/^[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+|[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+$/g;
+
+function trimKeepingControls(s: string): string {
+	return s.replace(EDGE_WHITESPACE, "");
+}
+
 // ─── extractContent per-content_type helpers ──────────────────────────
+//
+// Memory bound of extraction. The extractors below build the whole body: an
+// array with one entry per part, a joined string, and, when edge whitespace is
+// trimmed, possibly another copy. Transient memory is O(source payload size +
+// part count); the constants depend on the part format and the JS engine's
+// string representation (references, ropes, flattening), so no tighter factor
+// is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
+// full text, and the cap decision uses `escapedLengthExceeds` on the result.
+// Oversize text is not retained per candidate (a blob-backed message re-extracts
+// it once to measure and once to spool, see message-blob.ts); inline content is
+// retained by design, at most the inline cap per message.
 
 /**
  * Stringify one `parts[]` entry from text / multimodal_text bodies. Returns
@@ -121,7 +144,7 @@ function stringifyContentPart(p: unknown): string {
 /** Canonical user/assistant text: `{ parts: ["...", {asset_pointer}...] }`. */
 function extractTextContent(content: ChatGptContent): string | null {
 	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = parts.map(stringifyContentPart).join("\n").trim();
+	const s = trimKeepingControls(parts.map(stringifyContentPart).join("\n"));
 	return s || null;
 }
 
@@ -132,7 +155,9 @@ function extractTextContent(content: ChatGptContent): string | null {
  */
 function extractMultimodalContent(content: ChatGptContent): string | null {
 	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = parts.map(stringifyContentPart).filter(Boolean).join("\n").trim();
+	const s = trimKeepingControls(
+		parts.map(stringifyContentPart).filter(Boolean).join("\n"),
+	);
 	return s || null;
 }
 
@@ -152,7 +177,9 @@ function extractCodeContent(content: ChatGptContent): string | null {
  */
 function extractThoughtsContent(content: ChatGptContent): string | null {
 	const thoughts = Array.isArray(content.thoughts) ? content.thoughts : [];
-	const s = thoughts.map(stringifyThought).filter(Boolean).join("\n\n").trim();
+	const s = trimKeepingControls(
+		thoughts.map(stringifyThought).filter(Boolean).join("\n\n"),
+	);
 	return s || null;
 }
 
@@ -189,7 +216,7 @@ function extractTetherBrowsingDisplay(content: ChatGptContent): string | null {
 	if (typeof content.result === "string" && content.result) {
 		pieces.push(content.result);
 	}
-	const s = pieces.join("\n\n").trim();
+	const s = trimKeepingControls(pieces.join("\n\n"));
 	return s || null;
 }
 
@@ -205,7 +232,7 @@ function extractTetherQuote(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	const s = pieces.join("\n").trim();
+	const s = trimKeepingControls(pieces.join("\n"));
 	return s || null;
 }
 
@@ -235,7 +262,7 @@ function extractModelEditableContext(content: ChatGptContent): string | null {
 	if (typeof content.repo_summary === "string" && content.repo_summary) {
 		pieces.push(content.repo_summary);
 	}
-	const s = pieces.join("\n\n").trim();
+	const s = trimKeepingControls(pieces.join("\n\n"));
 	return s || null;
 }
 
@@ -248,7 +275,7 @@ function extractSystemError(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	return pieces.join(": ").trim() || null;
+	return trimKeepingControls(pieces.join(": ")) || null;
 }
 
 /** User custom-instructions shape (observed on imported conversations). */
@@ -263,11 +290,12 @@ function extractUserEditableContext(content: ChatGptContent): string | null {
 	) {
 		pieces.push(content.user_instructions);
 	}
-	return pieces.join("\n\n").trim() || null;
+	return trimKeepingControls(pieces.join("\n\n")) || null;
 }
 
 // Fallback for unrecognized shape — prefer an explicit handler. Stringify so
-// *something* lands rather than null; truncate to keep rows sane.
+// *something* lands rather than null; extractContentParts truncates it to
+// keep rows sane and flags it `sourceUnrepresentable`.
 const FALLBACK_MAX_CHARS = 5000;
 
 function extractFallback(content: ChatGptContent): string | null {
@@ -276,9 +304,7 @@ function extractFallback(content: ChatGptContent): string | null {
 		if (!s || s === "{}" || s === "null") {
 			return null;
 		}
-		return s.length > FALLBACK_MAX_CHARS
-			? `${s.slice(0, FALLBACK_MAX_CHARS)}…`
-			: s;
+		return s;
 	} catch {
 		return null;
 	}
@@ -302,91 +328,230 @@ const CONTENT_EXTRACTORS: Readonly<
 	user_editable_context: extractUserEditableContext,
 };
 
-/**
- * Sanitize extracted full text without preview-truncating it. Control-rich
- * payloads become null so the message record still lands instead of failing
- * shape validation and becoming non-backfillable.
- */
-function toSafeFullContent(s: string | null): string | null {
-	if (s === null) {
-		return null;
-	}
-	return pdppSafeText.safeParse(s).success ? s : null;
+// The `pdpp-safe-escape-v1` text encoding (declared on `messages.content` in the
+// manifest). The escaped set is FIXED so a reader can mirror it without the
+// validator: U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F (the C0/C1
+// controls PDPP text forbids; tab, LF and CR are allowed) and lone surrogates
+// (not UTF-8 encodable). Noncharacters (U+FDD0.., U+xFFFE/xFFFF on every plane)
+// and valid surrogate pairs are ordinary scalar values and pass through. The
+// `u` flag keeps valid surrogate pairs whole so only lone ones match. The first
+// alternative finds a source backslash that starts something the decoder would
+// read as an escape.
+const ESCAPE_SCAN =
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: the escaped set is exactly these control code units.
+	/\\u([0-9a-fA-F]{4})|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ud800-\udfff]/gu;
+const ESCAPE_TOKEN = /\\u([0-9a-fA-F]{4})/g;
+const BACKSLASH_UNIT = 0x5c;
+
+/** Code units the encoding writes as `\uXXXX`: forbidden controls, lone surrogates and backslash. */
+export function isEscapedUnit(unit: number): boolean {
+	return (
+		unit === BACKSLASH_UNIT ||
+		unit <= 0x08 ||
+		unit === 0x0b ||
+		unit === 0x0c ||
+		(unit >= 0x0e && unit <= 0x1f) ||
+		(unit >= 0x7f && unit <= 0x9f) ||
+		(unit >= 0xd8_00 && unit <= 0xdf_ff)
+	);
 }
 
-// The messages schema caps `content` at `largeText.max(1_048_576)` chars
-// (schemas.ts). A safe-but-oversized body (e.g. a pasted multi-megabyte log)
-// passes control-char sanitization yet fails that cap, producing a terminal
-// shape_check_failed SKIP that makes the whole message non-backfillable. We
-// truncate the head in-band instead so the record still lands with readable
-// content and the recovery path is self-describing. Kept conservatively under
-// the schema cap to leave headroom for the marker and any future field tweak.
+function escapeSequence(unit: number): string {
+	return `\\u${unit.toString(16).toUpperCase().padStart(4, "0")}`;
+}
+
+/** Each position of `s` that the encoding rewrites, and the code unit it writes. */
+function* escapeSites(s: string): Generator<{ index: number; unit: number }> {
+	for (const match of s.matchAll(ESCAPE_SCAN)) {
+		const hex = match[1];
+		const index = match.index ?? 0;
+		if (hex === undefined) {
+			yield { index, unit: match[0].charCodeAt(0) };
+		} else if (isEscapedUnit(Number.parseInt(hex, 16))) {
+			yield { index, unit: BACKSLASH_UNIT };
+		}
+	}
+}
+
+/**
+ * Lossless, deterministic PDPP-safe encoding of message text (documented on the
+ * `messages.content` field in the manifest). Each escaped unit becomes `\uXXXX`
+ * (uppercase hex). A source backslash that begins a `\uXXXX` the decoder would
+ * read as an escape is itself written `\u005C`, so decoding is unambiguous. All
+ * other text, including ordinary backslashes, is unchanged.
+ */
+export function encodePdppSafeText(s: string): string {
+	const parts: string[] = [];
+	let last = 0;
+	for (const { index, unit } of escapeSites(s)) {
+		parts.push(s.slice(last, index), escapeSequence(unit));
+		last = index + 1;
+	}
+	if (parts.length === 0) return s;
+	parts.push(s.slice(last));
+	return parts.join("");
+}
+
+/** Inverse of the content encoding: restores the exact source text. */
+export function decodeEscapedText(s: string): string {
+	return s.replace(ESCAPE_TOKEN, (match, hex: string) => {
+		const unit = Number.parseInt(hex, 16);
+		return isEscapedUnit(unit) ? String.fromCharCode(unit) : match;
+	});
+}
+
+// The messages schema caps inline `content` at `largeText.max(1_048_576)`
+// chars (schemas.ts). A longer body is not truncated: the caller moves the full
+// text into a Core blob and the record carries `blob_ref` with null `content`.
 const CONTENT_MAX_CHARS = 1_048_576;
-const OVERSIZE_HEADROOM = 1024;
-// Names the recovery path inline. The message id + conversation_id on the
-// record let a backfill re-fetch the full body from the conversation detail
-// endpoint, so no content is permanently lost.
-const OVERSIZE_TRUNCATION_MARKER =
-	"\n\n[…truncated by PDPP: original message content exceeded 1048576 characters; " +
-	"re-fetch the full body from the conversation detail by message id]";
 
 /**
- * Truncate a safe (already control-sanitized) body to the messages-schema
- * `content` cap, keeping the head and appending a self-describing marker.
- * Returns the input unchanged when it already fits. The truncation point is a
- * code-unit boundary that never splits a surrogate pair, so the result stays
- * valid PDPP-safe text.
+ * Whether the escaped form of `raw` is longer than `cap`, decided without
+ * building it. Each escape adds five characters, so the length is
+ * `raw.length + 5 * sites`; the scan stops once that passes `cap`, and a `raw`
+ * already longer than `cap` is not scanned at all.
  */
-function toBoundedContent(s: string | null): string | null {
-	if (s === null || s.length <= CONTENT_MAX_CHARS) {
-		return s;
+export function escapedLengthExceeds(
+	raw: string,
+	cap: number = CONTENT_MAX_CHARS,
+): { exceeds: boolean; sitesVisited: number } {
+	if (raw.length > cap) return { exceeds: true, sitesVisited: 0 };
+	let length = raw.length;
+	let sitesVisited = 0;
+	for (const _site of escapeSites(raw)) {
+		sitesVisited += 1;
+		length += 5;
+		if (length > cap) return { exceeds: true, sitesVisited };
 	}
-	let head =
-		CONTENT_MAX_CHARS - OVERSIZE_HEADROOM - OVERSIZE_TRUNCATION_MARKER.length;
-	if (head < 0) {
-		head = 0;
-	}
-	// Avoid slicing through a surrogate pair: if the last kept code unit is a
-	// high surrogate (U+D800–U+DBFF), drop it so we never emit a lone surrogate.
-	const last = head > 0 ? s.charCodeAt(head - 1) : 0;
-	if (last >= 0xd8_00 && last <= 0xdb_ff) {
-		head -= 1;
-	}
-	return s.slice(0, head) + OVERSIZE_TRUNCATION_MARKER;
+	return { exceeds: false, sitesVisited };
+}
+
+export interface ExtractedContent {
+	/** Source text before escaping; what a blob stores for an oversize body. */
+	raw: string | null;
+	/**
+	 * True only when the unknown-shape fallback cut the body: those bytes are
+	 * gone for good and the record cannot carry them (see
+	 * source-unrepresentable.ts).
+	 */
+	sourceUnrepresentable: boolean;
 }
 
 /**
- * Extract a string from a ChatGPT message content object. ChatGPT has many
+ * Extract the source text of a ChatGPT message content object. ChatGPT has many
  * content_type shapes; the previous implementation only handled `text` and
  * silently returned null for everything else (67% of records). Each branch
  * returns a string; we return null only if the payload is truly empty.
  *
- * Two safe-landing passes run after extraction so a single pathological
- * message never becomes a terminal shape_check_failed SKIP: control-rich
- * payloads collapse to null (toSafeFullContent), and safe-but-oversized
- * payloads truncate in-band with a recovery marker (toBoundedContent).
+ * The only lossy path is the unknown-shape fallback, reported through
+ * `sourceUnrepresentable`. Escaping is a separate, lazy step so an oversize
+ * body never gets an escaped copy.
  */
-export function extractContent(
+export function extractContentParts(
 	content: ChatGptContent | undefined,
-): string | null {
+): ExtractedContent {
 	if (!content || typeof content !== "object") {
-		return null;
+		return { raw: null, sourceUnrepresentable: false };
 	}
 	const type = content.content_type;
 	const handler = type ? CONTENT_EXTRACTORS[type] : undefined;
-	const raw = handler ? handler(content) : extractFallback(content);
-	return toBoundedContent(toSafeFullContent(raw));
+	let raw = handler ? handler(content) : extractFallback(content);
+	const sourceUnrepresentable =
+		!handler && raw !== null && raw.length > FALLBACK_MAX_CHARS;
+	if (sourceUnrepresentable && raw !== null) {
+		raw = `${raw.slice(0, FALLBACK_MAX_CHARS)}…`;
+	}
+	return { raw, sourceUnrepresentable };
+}
+
+/** PDPP-safe full text (see the encoding above); never truncated. */
+export function extractContent(
+	content: ChatGptContent | undefined,
+): string | null {
+	const { raw } = extractContentParts(content);
+	return raw === null ? null : encodePdppSafeText(raw);
 }
 
 // ─── Tool calls ─────────────────────────────────────────────────────────
+
+/**
+ * Encode every string inside a tool_calls value with pdpp-safe-escape-v1, at any
+ * depth: array items, object values, and object keys (a key holding a forbidden
+ * code unit is escaped like any other string). Numbers, booleans and null are
+ * unchanged. The walk is iterative and builds own data properties. One rule for
+ * every entry, whether synthesized here or copied from the source's
+ * `metadata.tool_calls`.
+ */
+export function encodeToolCallStrings(value: unknown): unknown {
+	if (typeof value === "string") return encodePdppSafeText(value);
+	if (typeof value !== "object" || value === null) return value;
+	// Iterative, so nesting depth is not limited by the engine's call stack.
+	// Each container is created before its children are filled in.
+	const root = Array.isArray(value) ? new Array(value.length) : {};
+	const work: Array<{ from: object; to: object }> = [{ from: value, to: root }];
+	for (let item = work.pop(); item; item = work.pop()) {
+		const { from, to } = item;
+		const place = (key: string | number, inner: unknown): void => {
+			let placed: unknown = inner;
+			if (typeof inner === "string") {
+				placed = encodePdppSafeText(inner);
+			} else if (typeof inner === "object" && inner !== null) {
+				placed = Array.isArray(inner) ? new Array(inner.length) : {};
+				work.push({ from: inner, to: placed as object });
+			}
+			if (Array.isArray(to)) {
+				to[key as number] = placed;
+			} else {
+				// An own data property, so a "__proto__" key is kept as data and
+				// never reaches the prototype setter.
+				Object.defineProperty(to, encodePdppSafeText(String(key)), {
+					configurable: true,
+					enumerable: true,
+					value: placed,
+					writable: true,
+				});
+			}
+		};
+		if (Array.isArray(from)) {
+			// forEach skips holes and keeps an explicit undefined, so the
+			// destination (created with the source length) has the same holes.
+			from.forEach((inner, index) => {
+				place(index, inner);
+			});
+		} else {
+			for (const [key, inner] of Object.entries(from)) place(key, inner);
+		}
+	}
+	return root;
+}
 
 /**
  * Derive tool_calls for a message. ChatGPT does not emit an OpenAI-API-style
  * `tool_calls` array on assistant messages; instead, the model "addresses" a
  * tool via `message.recipient` (e.g. "python", "browser.search", "bio") and
  * the content body carries the call. Synthesize a normalized array.
+ *
+ * `contentExternal` is true when the message's `content` is blob-backed or
+ * omitted. The synthesized call then carries `text_ref: "content"` instead of
+ * `text`, so a multi-megabyte body is stored once at most. A synthesized call
+ * has exactly one of `text` and `text_ref`.
+ *
+ * Every string in the result is pdpp-safe-escape-v1 encoded (see
+ * `encodeToolCallStrings`).
  */
-export function extractToolCalls(m: ChatGptMessage | undefined): unknown[] {
+export function extractToolCalls(
+	m: ChatGptMessage | undefined,
+	contentExternal = false,
+): unknown[] {
+	return encodeToolCallStrings(
+		synthesizeToolCalls(m, contentExternal),
+	) as unknown[];
+}
+
+function synthesizeToolCalls(
+	m: ChatGptMessage | undefined,
+	contentExternal: boolean,
+): unknown[] {
 	// Some API shapes do include an explicit list.
 	if (Array.isArray(m?.metadata?.tool_calls) && m.metadata.tool_calls.length) {
 		return m.metadata.tool_calls;
@@ -403,11 +568,16 @@ export function extractToolCalls(m: ChatGptMessage | undefined): unknown[] {
 			call.language = m.content.language;
 		}
 		if (typeof m?.content?.text === "string") {
-			call.text = m.content.text;
+			if (contentExternal) {
+				call.text_ref = "content";
+			} else {
+				call.text = m.content.text;
+			}
 		}
 		if (m?.metadata?.invoked_plugin) {
 			call.invoked_plugin = m.metadata.invoked_plugin;
 		}
+		assertSynthesizedCall(call);
 		return [call];
 	}
 	// Plugin invocation metadata without an explicit tool_calls array.
@@ -417,7 +587,76 @@ export function extractToolCalls(m: ChatGptMessage | undefined): unknown[] {
 	return [];
 }
 
+/** The synthesized-call invariant: `text_ref` is "content" and excludes `text`. */
+export function assertSynthesizedCall(call: ToolCallSynthetic): void {
+	if (
+		call.text_ref !== undefined &&
+		(call.text_ref !== "content" || call.text !== undefined)
+	) {
+		throw new Error(
+			'synthesized tool call: text_ref must be "content" and exclude text',
+		);
+	}
+}
+
 // ─── Message record ─────────────────────────────────────────────────────
+
+export interface ExtractedMessage {
+	/**
+	 * True when the escaped text is over the inline cap: `record.content` is then
+	 * null and the caller decides blob, or omission of the field. The text is
+	 * re-derived on demand with `extractRawMessageText`, not carried here.
+	 */
+	oversize: boolean;
+	record: RecordData | null;
+	/** See `ExtractedContent.sourceUnrepresentable`. */
+	sourceUnrepresentable: boolean;
+}
+
+/** The source text of a message node, before escaping. */
+export function extractRawMessageText(node: ChatGptNode): string | null {
+	return extractContentParts(node.message?.content).raw;
+}
+
+export function extractMessageWithBlob(
+	nodeId: string,
+	node: ChatGptNode,
+	conversationId: string,
+	onCurrentBranch: boolean,
+): ExtractedMessage {
+	const m = node.message;
+	if (!m) {
+		return { oversize: false, record: null, sourceUnrepresentable: false };
+	}
+	const { raw, sourceUnrepresentable } = extractContentParts(m.content);
+	const oversize = raw !== null && escapedLengthExceeds(raw).exceeds;
+	return {
+		oversize,
+		sourceUnrepresentable,
+		record: {
+			id: nodeId,
+			conversation_id: conversationId,
+			parent_id: node.parent ?? null,
+			children_ids: node.children ?? [],
+			role: m.author?.role ?? null,
+			content:
+				oversize || raw === null ? null : encodePdppSafeText(raw) || null,
+			content_type: m.content?.content_type ?? null,
+			model_slug: m.metadata?.model_slug ?? null,
+			create_time: tsToIso(m.create_time),
+			finish_reason:
+				m.end_turn === false
+					? "tool_calls"
+					: (m.metadata?.finish_details?.type ?? null),
+			citations: m.metadata?.citations ?? [],
+			tool_calls: extractToolCalls(m, oversize),
+			attachment_ids: (m.metadata?.attachments ?? [])
+				.map((a) => a.id)
+				.filter(Boolean),
+			on_current_branch: onCurrentBranch,
+		},
+	};
+}
 
 export function extractMessage(
 	nodeId: string,
@@ -425,32 +664,8 @@ export function extractMessage(
 	conversationId: string,
 	onCurrentBranch: boolean,
 ): RecordData | null {
-	const m = node.message;
-	if (!m) {
-		return null;
-	}
-	const content = extractContent(m.content);
-	return {
-		id: nodeId,
-		conversation_id: conversationId,
-		parent_id: node.parent ?? null,
-		children_ids: node.children ?? [],
-		role: m.author?.role ?? null,
-		content: content || null,
-		content_type: m.content?.content_type ?? null,
-		model_slug: m.metadata?.model_slug ?? null,
-		create_time: tsToIso(m.create_time),
-		finish_reason:
-			m.end_turn === false
-				? "tool_calls"
-				: (m.metadata?.finish_details?.type ?? null),
-		citations: m.metadata?.citations ?? [],
-		tool_calls: extractToolCalls(m),
-		attachment_ids: (m.metadata?.attachments ?? [])
-			.map((a) => a.id)
-			.filter(Boolean),
-		on_current_branch: onCurrentBranch,
-	};
+	return extractMessageWithBlob(nodeId, node, conversationId, onCurrentBranch)
+		.record;
 }
 
 // ─── Memories ───────────────────────────────────────────────────────────
@@ -462,8 +677,11 @@ export function buildMemoryRecord(m: RawMemoryEntry): RecordData | null {
 	return {
 		id: m.id,
 		content: m.content || m.name || "",
-		created_at: tsToIso(m.created_timestamp),
-		updated_at: m.updated_at || null,
+		created_at:
+			tsToIso(m.created_at) ??
+			tsToIso(m.createdAt) ??
+			tsToIso(m.created_timestamp),
+		updated_at: m.updated_at || m.updatedAt || null,
 		type: m.type || null,
 	};
 }
