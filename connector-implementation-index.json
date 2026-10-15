@@ -19644,7 +19644,7 @@
 					},
 					{
 						"name": "top_artists",
-						"description": "Spotify's ranked top artists for short-term or long-term affinity windows; each sync replaces the ranking snapshot.",
+						"description": "Spotify's ranked top artists for short-term or long-term affinity windows. The connector fetches up to 100 items per window; a provider total above 100 fails the stream. It emits no tombstones for prior rankings, so stale rows can remain unless the host replaces full inventories.",
 						"display": {
 							"label": "Your top artists",
 							"detail": "Artists ranked by Spotify affinity for each time window."
@@ -19699,7 +19699,7 @@
 					},
 					{
 						"name": "top_tracks",
-						"description": "Spotify's ranked top tracks for short-term or long-term affinity windows; each sync replaces the ranking snapshot.",
+						"description": "Spotify's ranked top tracks for short-term or long-term affinity windows. The connector fetches up to 100 items per window; a provider total above 100 fails the stream. It emits no tombstones for prior rankings, so stale rows can remain unless the host replaces full inventories.",
 						"display": {
 							"label": "Your top tracks",
 							"detail": "Tracks ranked by Spotify affinity for each time window."

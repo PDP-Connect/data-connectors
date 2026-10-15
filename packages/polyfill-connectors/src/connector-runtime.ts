@@ -193,6 +193,8 @@ export function createConnectorFailure(
 type Credentials = Record<string, string>;
 
 interface EmitRecordOptions {
+	/** Canonical key for streams whose manifest primary key has multiple fields. */
+	recordKey?: string;
 	skipResourceFilter?: boolean;
 	/** Runs after all record gates and immediately before a retained RECORD. */
 	beforeEmit?: () => Promise<void>;
@@ -1658,7 +1660,8 @@ export function makeEmitRecord(deps: {
 	): "skip" | "tombstone" | "record" => {
 		if (data.id == null) return "skip";
 		const rs = resFilters.get(stream);
-		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
+		const recordKey = options.recordKey ?? String(data.id);
+		if (!options.skipResourceFilter && rs && !rs.has(recordKey))
 			return "skip";
 		const streamScope = requested.get(stream);
 		const consent = timeRangeFieldFor(stream);
@@ -1698,12 +1701,13 @@ export function makeEmitRecord(deps: {
 	): Promise<void> => {
 		const selection = selectRecord(stream, data, options);
 		if (selection === "skip" || data.id == null) return Promise.resolve();
+		const recordKey = options.recordKey ?? String(data.id);
 		if (selection === "tombstone") {
 			counters.totalEmitted += 1;
 			return emit({
 				type: "RECORD",
 				stream,
-				key: String(data.id),
+				key: recordKey,
 				data: { id: data.id },
 				emitted_at: emittedAt,
 				op: "delete",
@@ -1722,7 +1726,7 @@ export function makeEmitRecord(deps: {
 		const record: EmittedMessage = {
 			type: "RECORD",
 			stream,
-			key: String(data.id),
+			key: recordKey,
 			data,
 			emitted_at: emittedAt,
 		};

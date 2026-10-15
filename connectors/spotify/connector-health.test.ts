@@ -26,7 +26,7 @@ test("Spotify playlist records preserve the current items.total response field",
 	assert.equal(playlistsSchema.safeParse(record).success, true);
 });
 
-test("recently-played contexts emit only records newer than the millisecond cursor", () => {
+test("recently-played contexts include records tied to the millisecond cursor", () => {
 	assert.deepEqual(
 		recentlyPlayedContextsAfterCursor(
 			[
@@ -36,7 +36,10 @@ test("recently-played contexts emit only records newer than the millisecond curs
 			10,
 		),
 		{
-			contexts: [{ uri: "spotify:album:b", last_played_time: 11 }],
+			contexts: [
+				{ uri: "spotify:album:a", last_played_time: 10 },
+				{ uri: "spotify:album:b", last_played_time: 11 },
+			],
 			cursor: 11,
 		},
 	);

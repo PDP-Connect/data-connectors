@@ -197,6 +197,17 @@ test("top ranking schemas accept the two verified time windows", () => {
 	assert.equal(topTracksSchema.safeParse(TOP_TRACK_RECORD).success, true);
 });
 
+test("top ranking schemas accept a missing optional name", () => {
+	assert.equal(
+		topArtistsSchema.safeParse({ ...TOP_ARTIST_RECORD, name: undefined }).success,
+		true,
+	);
+	assert.equal(
+		topTracksSchema.safeParse({ ...TOP_TRACK_RECORD, name: undefined }).success,
+		true,
+	);
+});
+
 test("recently_played_contexts schema accepts a context record, not an individual play", () => {
 	const result = recentlyPlayedContextsSchema.safeParse(
 		RECENTLY_PLAYED_CONTEXT_RECORD,
