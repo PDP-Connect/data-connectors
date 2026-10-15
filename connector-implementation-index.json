@@ -16654,7 +16654,8 @@
 								"num_comments": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
-								"count": true
+								"count": true,
+								"group_by_time": ["created_utc"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
@@ -16773,7 +16774,8 @@
 								"score": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
-								"count": true
+								"count": true,
+								"group_by_time": ["created_utc"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
@@ -16972,7 +16974,8 @@
 								"num_comments": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
-								"count": true
+								"count": true,
+								"group_by_time": ["created_utc"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
@@ -17096,7 +17099,8 @@
 								"num_comments": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
-								"count": true
+								"count": true,
+								"group_by_time": ["created_utc"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
@@ -17220,7 +17224,8 @@
 								"num_comments": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
-								"count": true
+								"count": true,
+								"group_by_time": ["created_utc"]
 							}
 						},
 						"coverage_strategy": "full_inventory",
