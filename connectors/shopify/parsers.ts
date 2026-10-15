@@ -211,6 +211,8 @@ export function hasNextOrdersPage(cache: ApolloCache): boolean {
 		PAGINATED_LIST_KEY_RE.test(key) || CURSOR_LIST_KEY_RE.test(key),
 	);
 	if (connections.length === 0) return false;
+	const cursor = connections.filter(([key]) => CURSOR_LIST_KEY_RE.test(key));
+	if (cursor.length === connections.length && hasConnectedCursorChain(cursor)) return false;
 	return connections.some(([, value]) =>
 		!isReadableConnection(value) || value.pageInfo.hasNextPage !== false,
 	);
@@ -378,27 +380,38 @@ function parseOrderWithCoverage(cache: ApolloCache, ref: string): ParsedOrderCov
 	const statusValue = typeof status === "string" ? status : null;
 	const validPlacedAt = typeof placedAt === "string" && placedAt.length > 0 &&
 		SHOP_ISO_DATETIME_RE.test(placedAt) && Number.isFinite(Date.parse(placedAt));
-	fields.push(field("placed_at", placedAt === undefined || placedAt === null || placedAt === ""
-		? "EXPLICIT_EMPTY" : validPlacedAt ? "READ" : "UNAVAILABLE",
-		typeof placedAt === "string" && (placedAt.length === 0 || validPlacedAt) || placedAt === undefined || placedAt === null
-			? undefined : "malformed_value"));
-	fields.push(field("status", status === undefined || status === null || status === ""
-		? "EXPLICIT_EMPTY" : typeof status === "string" ? "READ" : "UNAVAILABLE",
-		typeof status === "string" || status === undefined || status === null ? undefined : "malformed_value"));
+	fields.push(field("placed_at", !Object.hasOwn(order, "createdAt")
+		? "UNAVAILABLE" : placedAt === null || placedAt === ""
+			? "EXPLICIT_EMPTY" : validPlacedAt ? "READ" : "UNAVAILABLE",
+		!Object.hasOwn(order, "createdAt") ? "missing_field" :
+			typeof placedAt === "string" && (placedAt.length === 0 || validPlacedAt) || placedAt === null
+				? undefined : "malformed_value"));
+	fields.push(field("status", !Object.hasOwn(order, "displayStatus")
+		? "UNAVAILABLE" : status === null || status === ""
+			? "EXPLICIT_EMPTY" : typeof status === "string" ? "READ" : "UNAVAILABLE",
+		!Object.hasOwn(order, "displayStatus") ? "missing_field" :
+		typeof status === "string" || status === null ? undefined : "malformed_value"));
 
+	const hasPriceField = Object.hasOwn(order, "effectiveTotalPrice") || Object.hasOwn(order, "totalPriceAfterOfferApplied");
 	const price = order.effectiveTotalPrice === undefined || order.effectiveTotalPrice === null
-		? order.totalPriceAfterOfferApplied
+		? Object.hasOwn(order, "totalPriceAfterOfferApplied")
+			? order.totalPriceAfterOfferApplied
+			: order.effectiveTotalPrice
 		: order.effectiveTotalPrice;
 	let totalCents: number | null = null;
 	let currency: string | null = null;
-	if (price === undefined || price === null) {
-		fields.push(field("total", "EXPLICIT_EMPTY"), field("currency", "EXPLICIT_EMPTY"));
+	if (!hasPriceField) {
+		fields.push(field("total", "UNAVAILABLE", "missing_field"), field("currency", "UNAVAILABLE", "missing_field"));
+	} else if (price === undefined || price === null) {
+		fields.push(field("total", price === null ? "EXPLICIT_EMPTY" : "UNAVAILABLE", price === null ? undefined : "missing_field"),
+			field("currency", price === null ? "EXPLICIT_EMPTY" : "UNAVAILABLE", price === null ? undefined : "missing_field"));
 	} else if (!isRecord(price)) {
 		fields.push(field("total", "UNAVAILABLE", "malformed_value"), field("currency", "UNAVAILABLE", "malformed_value"));
 	} else {
 		const amount = price.amount;
 		const parsed = typeof amount === "string" || typeof amount === "number" ? Number(amount) : Number.NaN;
-		if (amount === null) fields.push(field("total", "EXPLICIT_EMPTY"));
+		if (!Object.hasOwn(price, "amount")) fields.push(field("total", "UNAVAILABLE", "missing_field"));
+		else if (amount === null) fields.push(field("total", "EXPLICIT_EMPTY"));
 		else if (Number.isFinite(parsed) && (typeof amount !== "string" || amount.trim().length > 0)) {
 			totalCents = Math.round(parsed * CENTS_PER_UNIT);
 			fields.push(field("total", "READ"));
@@ -406,7 +419,8 @@ function parseOrderWithCoverage(cache: ApolloCache, ref: string): ParsedOrderCov
 			fields.push(field("total", "UNAVAILABLE", "malformed_value"));
 		}
 		const sourceCurrency = price.currencyCode;
-		if (sourceCurrency === null) fields.push(field("currency", "EXPLICIT_EMPTY"));
+		if (!Object.hasOwn(price, "currencyCode")) fields.push(field("currency", "UNAVAILABLE", "missing_field"));
+		else if (sourceCurrency === null) fields.push(field("currency", "EXPLICIT_EMPTY"));
 		else if (typeof sourceCurrency === "string") {
 			currency = sourceCurrency;
 			fields.push(field("currency", sourceCurrency.length === 0 ? "EXPLICIT_EMPTY" : "READ"));
@@ -416,8 +430,9 @@ function parseOrderWithCoverage(cache: ApolloCache, ref: string): ParsedOrderCov
 	}
 
 	let merchantName: string | null = null;
-	if (order.shop === null) fields.push(field("merchant_name", "EXPLICIT_EMPTY"));
-	else if (!isApolloRef(order.shop)) fields.push(field("merchant_name", "UNAVAILABLE", order.shop === undefined ? "missing_field" : "malformed_value"));
+	if (!Object.hasOwn(order, "shop")) fields.push(field("merchant_name", "UNAVAILABLE", "missing_field"));
+	else if (order.shop === null) fields.push(field("merchant_name", "EXPLICIT_EMPTY"));
+	else if (!isApolloRef(order.shop)) fields.push(field("merchant_name", "UNAVAILABLE", "malformed_value"));
 	else {
 		const shop = readEntry(cache, order.shop.__ref);
 		if (!shop) fields.push(field("merchant_name", "UNAVAILABLE", "missing_reference"));
@@ -425,14 +440,15 @@ function parseOrderWithCoverage(cache: ApolloCache, ref: string): ParsedOrderCov
 		else if (typeof shop.name === "string") {
 			merchantName = shop.name;
 			fields.push(field("merchant_name", shop.name.length === 0 ? "EXPLICIT_EMPTY" : "READ"));
-		} else fields.push(field("merchant_name", "UNAVAILABLE", shop.name === undefined ? "missing_field" : "malformed_value"));
+		} else fields.push(field("merchant_name", "UNAVAILABLE", Object.hasOwn(shop, "name") ? "malformed_value" : "missing_field"));
 	}
 
 	const lineItems = order.lineItems;
 	const nodes = isRecord(lineItems) ? lineItems.nodes : undefined;
 	const lineItemTitles: string[] = [];
-	if (lineItems === null) fields.push(field("line_item_titles", "EXPLICIT_EMPTY"));
-	else if (!isRecord(lineItems) || !Array.isArray(nodes)) fields.push(field("line_item_titles", "UNAVAILABLE", lineItems === undefined ? "missing_field" : "malformed_connection"));
+	if (!Object.hasOwn(order, "lineItems")) fields.push(field("line_item_titles", "UNAVAILABLE", "missing_field"));
+	else if (lineItems === null) fields.push(field("line_item_titles", "EXPLICIT_EMPTY"));
+	else if (!isRecord(lineItems) || !Array.isArray(nodes)) fields.push(field("line_item_titles", "UNAVAILABLE", "malformed_connection"));
 	else {
 		let unresolved = false;
 		for (const node of nodes) {
@@ -453,9 +469,10 @@ function parseOrderWithCoverage(cache: ApolloCache, ref: string): ParsedOrderCov
 
 	const sourceItemCount = order.totalItemCount;
 	let itemCount: number | null = null;
-	if (sourceItemCount === undefined || sourceItemCount === null) {
-		itemCount = lineItemTitles.length > 0 ? lineItemTitles.length : null;
-		fields.push(field("item_count", itemCount === null ? "EXPLICIT_EMPTY" : "READ"));
+	if (!Object.hasOwn(order, "totalItemCount")) {
+		fields.push(field("item_count", "UNAVAILABLE", "missing_field"));
+	} else if (sourceItemCount === null) {
+		fields.push(field("item_count", "EXPLICIT_EMPTY"));
 	} else {
 		const parsedCount = typeof sourceItemCount === "number" || typeof sourceItemCount === "string"
 			? Number(sourceItemCount) : Number.NaN;
@@ -512,7 +529,6 @@ export interface ExtractedOrders {
 	unavailableByRef: Array<{ ref: string; fields: Array<{ field: string; reason: string }> }>;
 	unidentifiedRows: Array<{ key: string; fields: Array<{ field: string; reason: string }> }>;
 	availableRefs: string[];
-	resolvedUnidentifiedKeys: string[];
 }
 
 /** Reconcile every observed connection row with the rows the parser can emit. */
@@ -527,7 +543,6 @@ export function extractOrdersWithCoverage(cache: ApolloCache): ExtractedOrders {
 	const withheldRows: ExtractedOrders["withheldRows"] = [];
 	const unavailableByRef: ExtractedOrders["unavailableByRef"] = [];
 	const unidentifiedRows: ExtractedOrders["unidentifiedRows"] = [];
-	const resolvedUnidentifiedKeys: string[] = [];
 	let malformedRowCount = 0;
 	for (const [key, value] of connectionEntries) {
 		if (!isReadableConnection(value)) {
@@ -537,14 +552,13 @@ export function extractOrdersWithCoverage(cache: ApolloCache): ExtractedOrders {
 			unidentifiedRows.push({ key: `${key}#connection`, ...issue });
 			continue;
 		}
-		resolvedUnidentifiedKeys.push(`${key}#connection`);
 		for (const [index, node] of value.nodes.entries()) {
 			if (!isApolloRef(node) || !node.__ref.startsWith("Order:")) {
 				malformedRowCount += 1;
 				const issue = { fields: [{ field: "order", reason: "malformed_reference" }] };
 				withheldRows.push(issue);
 				unidentifiedRows.push({ key: `${key}#node:${index}`, ...issue });
-			} else resolvedUnidentifiedKeys.push(`${key}#node:${index}`);
+			}
 		}
 	}
 	const orders: ParsedOrder[] = [];
@@ -572,6 +586,5 @@ export function extractOrdersWithCoverage(cache: ApolloCache): ExtractedOrders {
 		unavailableByRef,
 		unidentifiedRows,
 		availableRefs,
-		resolvedUnidentifiedKeys,
 	};
 }

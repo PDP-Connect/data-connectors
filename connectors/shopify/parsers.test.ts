@@ -54,6 +54,7 @@ function synthCache(overrides: Partial<ApolloCache> = {}): ApolloCache {
 			displayStatus: "IN_TRANSIT",
 			shop: { __ref: "Shop:acme" },
 			totalPriceAfterOfferApplied: { amount: "12.5", currencyCode: "USD" },
+			totalItemCount: 1,
 			lineItems: { nodes: [{ __ref: "ProductVariant:2a" }] },
 		},
 		"Shop:acme": { name: "Acme Goods" },
@@ -138,12 +139,12 @@ test("extractOrders parses every order reachable from ROOT_QUERY", () => {
 	assert.equal(first.detailUrl, "https://shop.app/account/order-history");
 });
 
-test("extractOrders falls back to totalPriceAfterOfferApplied and derives itemCount from line items when totalItemCount is absent", () => {
+test("extractOrders falls back to totalPriceAfterOfferApplied and reads totalItemCount", () => {
 	const orders = extractOrders(synthCache());
 	const second = orders.find((o) => o.id === "gid://shopify/Order/2");
 	assert.ok(second);
 	assert.equal(second.totalCents, 1250);
-	assert.equal(second.itemCount, 1, "falls back to lineItemTitles.length");
+	assert.equal(second.itemCount, 1, "reads the source totalItemCount");
 });
 
 test("extractOrders rounds decimal-string amounts to integer cents without float drift", () => {
@@ -158,10 +159,14 @@ test("extractOrders rounds decimal-string amounts to integer cents without float
 	assert.equal(order?.totalCents, 2000);
 });
 
-test("extractOrders returns null totalCents and currency when price is absent (never guesses)", () => {
+test("extractOrders preserves explicit empty total price fields", () => {
 	const cache = synthCache({
+		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{},"sortBy":"PLACED_AT"}': {
+			nodes: [{ __ref: "Order:1" }], pageInfo: { hasNextPage: false },
+		} },
 		"Order:1": {
-			id: "gid://shopify/Order/1", shop: { __ref: "Shop:acme" },
+			id: "gid://shopify/Order/1", createdAt: null, displayStatus: null,
+			shop: { __ref: "Shop:acme" }, effectiveTotalPrice: null,
 			lineItems: { nodes: [] }, totalItemCount: null,
 		},
 	});
@@ -344,6 +349,28 @@ test("a malformed mapped field withholds the full order and reports only field r
 	assert.equal(JSON.stringify(result.withheldRows).includes("gid://"), false);
 });
 
+test("missing mapped scalar fields withhold the whole order instead of becoming empty values", () => {
+	const cache = synthCache({
+		ROOT_QUERY: { 'deliveriesOrdersList:{"filter":{}}': {
+			nodes: [{ __ref: "Order:1" }], pageInfo: { hasNextPage: false },
+		} },
+		"Order:1": {
+			id: "gid://shopify/Order/1",
+			shop: { __ref: "Shop:acme" },
+			lineItems: { nodes: [] },
+		},
+	});
+	const result = extractOrdersWithCoverage(cache);
+	assert.equal(result.orders.length, 0, "partial cache data must not replace a stored whole record");
+	assert.deepEqual(result.withheldRows, [{ fields: [
+		{ field: "placed_at", reason: "missing_field" },
+		{ field: "status", reason: "missing_field" },
+		{ field: "total", reason: "missing_field" },
+		{ field: "currency", reason: "missing_field" },
+		{ field: "item_count", reason: "missing_field" },
+	] }]);
+});
+
 test("an unreadable nodes body and invalid declared totals veto connection end", () => {
 	for (const nodes of [undefined, null, { 0: { __ref: "Order:1" } }]) {
 		const cache = synthCache({
@@ -411,4 +438,19 @@ test("cursor history end requires a connected first-to-terminal request chain", 
 		},
 	});
 	assert.equal(hasVerifiedOrdersEnd(disconnected), false);
+});
+
+test("a connected cursor chain has no outstanding continuation after its terminal frontier", () => {
+	const cache = synthCache({ ROOT_QUERY: {
+		'deliveriesOrdersList({"first":10})': {
+			nodes: [{ __ref: "Order:1" }],
+			pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+		},
+		'deliveriesOrdersList({"first":10,"after":"cursor-1"})': {
+			nodes: [{ __ref: "Order:2" }],
+			pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
+		},
+	} });
+	assert.equal(hasVerifiedOrdersEnd(cache), true);
+	assert.equal(hasNextOrdersPage(cache), false, "historical first-page continuation is already fulfilled");
 });

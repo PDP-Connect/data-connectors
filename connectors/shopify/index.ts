@@ -697,6 +697,7 @@ export async function walkOrdersCache(
 	const unavailableByRef = new Map<string, Array<{ field: string; reason: string }>>();
 	const unidentifiedIssues = new Map<string, Array<{ field: string; reason: string }>>();
 	let countMismatch = false;
+	let freshCache: ApolloCache | null = null;
 	const mergeCoverage = (snapshot: ApolloCache): void => {
 		const coverage = extractOrdersWithCoverage(snapshot);
 		for (const ref of collectAllOrderRefs(snapshot)) discoveredRows.add(`ref:${ref}`);
@@ -705,7 +706,6 @@ export async function walkOrdersCache(
 			discoveredRows.add(`ref:${item.ref}`);
 			unavailableByRef.set(item.ref, item.fields);
 		}
-		for (const key of coverage.resolvedUnidentifiedKeys) unidentifiedIssues.delete(key);
 		for (const issue of coverage.unidentifiedRows) {
 			discoveredRows.add(`unidentified:${issue.key}`);
 			unidentifiedIssues.set(issue.key, issue.fields);
@@ -718,7 +718,10 @@ export async function walkOrdersCache(
 			}
 		}
 		merge(coverage.orders, true);
-		if (hasDeclaredOrderTotal(snapshot)) countMismatch = hasOrderCountMismatch(snapshot);
+		if (hasDeclaredOrderTotal(snapshot)) {
+			countMismatch = hasOrderCountMismatch(snapshot);
+			if (hasVerifiedOrdersEnd(snapshot) && !countMismatch) unidentifiedIssues.clear();
+		}
 	};
 	const coverageSummary = () => {
 		const withheldRows = [
@@ -786,6 +789,7 @@ export async function walkOrdersCache(
 			) return false;
 			boundPageIdentity ??= { url: after.url, navigation: after.navigation };
 		}
+		freshCache = refreshed;
 		if (refreshed) {
 			cache = refreshed;
 			if (hasOrdersConnection(refreshed)) mergeCoverage(refreshed);
@@ -838,7 +842,7 @@ export async function walkOrdersCache(
 	}
 	const finalPageEvidence = currentPageEvidence();
 	const finalBoundPageIdentity = currentBoundPageIdentity();
-	const cacheEnd = Boolean(cache && hasVerifiedOrdersEnd(cache));
+	const cacheEnd = Boolean(freshCache && hasVerifiedOrdersEnd(freshCache));
 	const domEnd = Boolean(finalPageEvidence?.domHasEndMarker && !finalPageEvidence.domHasContinuation);
 	let verifiedEmptyEnd = false;
 	if (!cacheEnd && !domEnd && args.readVerifiedEmptyState) {
@@ -862,7 +866,8 @@ export async function walkOrdersCache(
 		));
 	}
 	const coverage = coverageSummary();
-	const complete = (cacheEnd || domEnd || verifiedEmptyEnd) && !finalPageEvidence?.domHasContinuation &&
+	const cacheSnapshotIsCurrent = cache === null || freshCache !== null;
+	const complete = cacheSnapshotIsCurrent && (cacheEnd || domEnd || verifiedEmptyEnd) && !finalPageEvidence?.domHasContinuation &&
 		!(cache && hasNextOrdersPage(cache)) && !domDiscardedRows && coverage.discardedRows === 0 && !countMismatch;
 	const budgetHit = Boolean(cache && hasNextOrdersPage(cache) && continuationScrolls >= maxContinuationScrolls);
 	return {

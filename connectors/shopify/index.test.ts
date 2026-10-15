@@ -1195,6 +1195,81 @@ test("a count mismatch from a partial snapshot clears only after a later snapsho
 	assert.equal(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"), false);
 });
 
+test("a failed current cache read cannot reuse a terminal readiness snapshot for STATE", async () => {
+	for (const failure of ["null", "reject"] as const) {
+		const run = makeRecordingEmit(validateRecord);
+		const terminal = makeCache(["Order:1"], false);
+		let reads = 0;
+		await collectShopify({
+			emit: run.emit, emitRecord: run.emitRecord,
+			progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+			readCache: async () => {
+				reads += 1;
+				if (reads === 1) return terminal;
+				if (failure === "reject") throw new Error("ordinary cache read failure");
+				return null;
+			},
+			readPageEvidence: async () => ({
+				url: "https://shop.app/account/order-history", navigation: "same-nav",
+				orderContext: true, blocked: false, pageHeight: 100,
+				domHasContinuation: false, domHasEndMarker: true, domCardCount: 0,
+			}),
+			cacheWaitTimeoutMs: 0,
+			scroll: async () => undefined,
+		});
+		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false, `${failure} read cannot authorize terminal proof`);
+		assert.equal(recordsOf(run.emitted, "orders").length, 1, "readiness rows remain available as partial records");
+	}
+});
+
+test("a later smaller snapshot cannot erase an unidentified earlier row by reusing its node index", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	const first = makeCache(["Order:1"], false);
+	const firstConnection = (first.ROOT_QUERY as Record<string, Record<string, unknown>>)['deliveriesOrdersList:{"filter":{}}'];
+	assert.ok(firstConnection);
+	firstConnection.nodes = [null, { __ref: "Order:1" }];
+	const smaller = makeCache(["Order:1"], false);
+	let reads = 0;
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => ++reads === 1 ? first : smaller,
+		cacheWaitTimeoutMs: 0,
+		scroll: async () => undefined,
+	});
+	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false, "index reuse does not recover the lost row identity");
+	const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "shopify_order_rows_unresolved");
+});
+
+test("collectShopify completes a connected cursor chain at its terminal frontier", async () => {
+	const run = makeRecordingEmit(validateRecord);
+	const cache = makeCache(["Order:1", "Order:2"], false);
+	cache.ROOT_QUERY = {
+		'deliveriesOrdersList({"first":10})': {
+			nodes: [{ __ref: "Order:1" }],
+			totalCount: 2,
+			pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+		},
+		'deliveriesOrdersList({"first":10,"after":"cursor-1"})': {
+			nodes: [{ __ref: "Order:2" }],
+			totalCount: 2,
+			pageInfo: { hasNextPage: false, endCursor: "cursor-2" },
+		},
+	};
+	let scrolls = 0;
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => cache,
+		cacheWaitTimeoutMs: 0,
+		scroll: async () => { scrolls += 1; },
+	});
+	assert.equal(scrolls, 3, "bootstrap settles, then the terminal cursor frontier stops continuation scrolling");
+	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), true);
+});
+
 test("Shopify restores the 25-scroll bootstrap and 20 continuation ceilings", async () => {
 	let heightReads = 0;
 	let bootstrapScrolls = 0;
