@@ -1514,3 +1514,42 @@ test("encodeToolCallStrings: nesting far deeper than the call stack is encoded w
 	assert.equal(to, "a\\u0000b");
 	assert.equal(referenceDecode(to as string), "a\x00b");
 });
+
+test("encodeToolCallStrings: array holes stay holes and an explicit undefined stays an own element", () => {
+	const holes = (length: number, present: Record<number, unknown>): unknown[] => {
+		const a = new Array<unknown>(length);
+		for (const [i, v] of Object.entries(present)) a[Number(i)] = v;
+		return a;
+	};
+	const cases: Array<{ name: string; source: unknown[]; own: number[] }> = [
+		{ name: "leading", source: holes(3, { 1: "a\x00", 2: "b" }), own: [1, 2] },
+		{ name: "interior", source: holes(4, { 0: "a", 3: "b" }), own: [0, 3] },
+		{ name: "trailing", source: holes(3, { 0: "a" }), own: [0] },
+		{ name: "all holes", source: new Array<unknown>(5), own: [] },
+		{
+			name: "undefined beside a hole",
+			source: holes(3, { 0: undefined, 2: "c" }),
+			own: [0, 2],
+		},
+		{
+			name: "nested",
+			source: [holes(2, { 1: "x\x01" })],
+			own: [0],
+		},
+	];
+	for (const { name, source, own } of cases) {
+		const encoded = encodeToolCallStrings(source) as unknown[];
+		assert.equal(encoded.length, source.length, name);
+		for (let i = 0; i < source.length; i += 1) {
+			assert.equal(Object.hasOwn(encoded, i), own.includes(i), `${name}[${i}]`);
+			assert.equal(Object.hasOwn(source, i), own.includes(i), `${name} fixture`);
+		}
+	}
+	const nested = (encodeToolCallStrings([holes(2, { 1: "x\x01" })]) as unknown[][])[0];
+	assert.equal(nested?.length, 2);
+	assert.equal(Object.hasOwn(nested ?? [], 0), false);
+	assert.equal(nested?.[1], "x\\u0001");
+	const encodedUndefined = encodeToolCallStrings(holes(3, { 0: undefined, 2: "c" })) as unknown[];
+	assert.equal(Object.hasOwn(encodedUndefined, 0), true);
+	assert.equal(encodedUndefined[0], undefined);
+});

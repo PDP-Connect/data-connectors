@@ -486,24 +486,24 @@ export function encodeToolCallStrings(value: unknown): unknown {
 	if (typeof value !== "object" || value === null) return value;
 	// Iterative, so nesting depth is not limited by the engine's call stack.
 	// Each container is created before its children are filled in.
-	const root = Array.isArray(value) ? [] : {};
+	const root = Array.isArray(value) ? new Array(value.length) : {};
 	const work: Array<{ from: object; to: object }> = [{ from: value, to: root }];
 	for (let item = work.pop(); item; item = work.pop()) {
 		const { from, to } = item;
-		const place = (key: string, inner: unknown): void => {
+		const place = (key: string | number, inner: unknown): void => {
 			let placed: unknown = inner;
 			if (typeof inner === "string") {
 				placed = encodePdppSafeText(inner);
 			} else if (typeof inner === "object" && inner !== null) {
-				placed = Array.isArray(inner) ? [] : {};
+				placed = Array.isArray(inner) ? new Array(inner.length) : {};
 				work.push({ from: inner, to: placed as object });
 			}
 			if (Array.isArray(to)) {
-				to.push(placed);
+				to[key as number] = placed;
 			} else {
 				// An own data property, so a "__proto__" key is kept as data and
 				// never reaches the prototype setter.
-				Object.defineProperty(to, encodePdppSafeText(key), {
+				Object.defineProperty(to, encodePdppSafeText(String(key)), {
 					configurable: true,
 					enumerable: true,
 					value: placed,
@@ -512,7 +512,9 @@ export function encodeToolCallStrings(value: unknown): unknown {
 			}
 		};
 		if (Array.isArray(from)) {
-			for (const inner of from) place("", inner);
+			// forEach skips holes and keeps an explicit undefined, so the
+			// destination (created with the source length) has the same holes.
+			from.forEach((inner, index) => place(index, inner));
 		} else {
 			for (const [key, inner] of Object.entries(from)) place(key, inner);
 		}
