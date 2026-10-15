@@ -1,0 +1,74 @@
+name: GroupMe mutation pilot (diagnostic)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "connectors/groupme/**"
+      - "tools/groupme-mutation-pilot/**"
+      - ".github/workflows/groupme-mutation-pilot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  mutation-pilot:
+    name: Stryker command runner A1/A2 (diagnostic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Record runner versions and source pins
+        run: |
+          mkdir -p reports
+          node --version > reports/versions.txt
+          npm --version >> reports/versions.txt
+          git rev-parse HEAD > reports/head.txt
+          sha256sum connectors/groupme/index.ts package-lock.json \
+            tools/groupme-mutation-pilot/package-lock.json > reports/source-hashes.txt
+
+      - name: Install project and pilot dependencies
+        run: |
+          for target in project pilot; do
+            start=$(date +%s%3N)
+            if [ "$target" = project ]; then
+              npm ci --ignore-scripts
+            else
+              npm ci --prefix tools/groupme-mutation-pilot --ignore-scripts
+            fi
+            end=$(date +%s%3N)
+            printf '{"event":"dependency-install","target":"%s","durationMs":%s}\n' "$target" "$((end-start))" >> reports/timing.jsonl
+          done
+
+      - name: Run identical 14-file baseline
+        run: node tools/groupme-mutation-pilot/measure.mjs baseline
+
+      - name: Run A1 JIT TypeScript command runner
+        run: node tools/groupme-mutation-pilot/measure.mjs a1
+
+      - name: Require A1 canary activation and kill
+        run: node tools/groupme-mutation-pilot/summarize.mjs a1
+
+      - name: Run A2 compile-once buildCommand command runner
+        run: node tools/groupme-mutation-pilot/measure.mjs a2
+
+      - name: Require A2 canary activation and kill
+        run: node tools/groupme-mutation-pilot/summarize.mjs a2
+
+      - name: Hash reports and logs
+        if: always()
+        run: |
+          find reports -type f ! -name artifact-hashes.txt -print0 | sort -z | xargs -0 sha256sum > reports/artifact-hashes.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: groupme-mutation-pilot-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
