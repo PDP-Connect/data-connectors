@@ -3213,14 +3213,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/wholefoods/integration.test.ts",
-			line: 313,
+			line: 327,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "test drives/asserts one nutrition outcome record per legacy outcome via emitRecord()",
 		},
 		{
 			path: "connectors/wholefoods/integration.test.ts",
-			line: 634,
+			line: 652,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "test drives/asserts an ordered per-case side effect via emitRecord()",

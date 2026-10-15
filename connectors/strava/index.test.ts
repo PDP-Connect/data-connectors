@@ -414,6 +414,10 @@ test("a second run resumes from the cursor rather than re-reading everything", a
 	);
 });
 
+// FOLLOW-UP (strava): a file with an unreadable row is upsert-only for that
+// file and its cursor stays put. That is the runtime's current behavior and
+// the intended one; the connector should hold the cursor itself rather than
+// rely on the runtime withholding it.
 test("unreadable rows hold the checkpoint: the runtime withholds the advanced cursor", async () => {
 	const broken = "not-an-id,,,,,,,,,,,,,,,,,,";
 	await withImportDir(
