@@ -101,10 +101,20 @@ function noteQueryResponse(overrides: { continuationMarker?: string } = {}) {
 function makeFakePage(
 	queryResponses: unknown[],
 	onQuery?: () => void,
-	readiness: { readyState?: string; blocked?: boolean } = {},
+	readiness: {
+		readyState?: string;
+		blocked?: boolean;
+		readyStateAfterWait?: string;
+		failReadinessEvaluations?: number;
+		reloadReadyState?: string;
+		reloadUrl?: string;
+		onReload?: () => void;
+	} = {},
 ): Page {
 	const streams: Record<string, unknown[]> = { folders: [], notes: [] };
 	let currentUrl = "https://www.icloud.com/notes";
+	let readyState = readiness.readyState ?? "complete";
+	let readinessEvaluationFailures = readiness.failReadinessEvaluations ?? 0;
 	for (const candidate of queryResponses) {
 		if (
 			typeof candidate === "object" &&
@@ -138,9 +148,15 @@ function makeFakePage(
 	const queryCallIndex: Record<string, number> = { folders: 0, notes: 0 };
 	const evaluate = (_fn: unknown, arg: unknown): Promise<unknown> => {
 		if (arg === undefined) {
+			if (readinessEvaluationFailures > 0) {
+				readinessEvaluationFailures -= 1;
+				return Promise.reject(
+					new Error("transient document evaluation failure"),
+				);
+			}
 			return Promise.resolve({
 				href: currentUrl,
-				readyState: readiness.readyState ?? "complete",
+				readyState,
 				blocked: readiness.blocked ?? false,
 			});
 		}
@@ -217,6 +233,19 @@ function makeFakePage(
 	return {
 		evaluate,
 		url: () => currentUrl,
+		waitForLoadState: async () => {
+			if (readiness.readyStateAfterWait !== undefined) {
+				readyState = readiness.readyStateAfterWait;
+			}
+		},
+		reload: async () => {
+			readiness.onReload?.();
+			if (readiness.reloadReadyState !== undefined) {
+				readyState = readiness.reloadReadyState;
+			}
+			if (readiness.reloadUrl !== undefined) currentUrl = readiness.reloadUrl;
+			return null;
+		},
 		setUrl: (url: string) => {
 			currentUrl = url;
 		},
@@ -1266,7 +1295,7 @@ test("collectAllStreams: unloaded and blocked pages veto collection", async () =
 	await Promise.all(
 		(
 			[
-				[{ readyState: "loading" }, /icloud_page_unloaded/],
+				[{ readyState: "loading" }, /icloud_readiness_exhausted/],
 				[{ blocked: true }, /icloud_page_blocked/],
 			] as const
 		).map(async ([readiness, reason]) => {
@@ -1280,6 +1309,111 @@ test("collectAllStreams: unloaded and blocked pages veto collection", async () =
 			assert.equal(harness.protocolMessages.length, 0);
 		}),
 	);
+});
+
+test("collectAllStreams: readiness recovers after load and transient document evaluation failures", async () => {
+	const loadingHarness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeFakePage([folderQueryResponse(), noteQueryResponse()], undefined, {
+				readyState: "loading",
+				readyStateAfterWait: "complete",
+			}),
+			loadingHarness,
+			["notes"],
+		),
+	);
+	assert.ok(
+		loadingHarness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		"a page that finishes loading should proceed to collection",
+	);
+
+	let reloads = 0;
+	const transientHarness = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeFakePage([folderQueryResponse(), noteQueryResponse()], undefined, {
+				failReadinessEvaluations: 1,
+				onReload: () => {
+					reloads += 1;
+				},
+				reloadReadyState: "complete",
+			}),
+			transientHarness,
+			["notes"],
+		),
+	);
+	assert.equal(reloads, 1);
+	assert.ok(
+		transientHarness.protocolMessages.some(
+			(message) => message.type === "STATE" && message.stream === "notes",
+		),
+		"a stable Notes page after a transient evaluation failure should collect",
+	);
+});
+
+test("collectAllStreams: readiness exhaustion and navigation away fail closed", async () => {
+	let reloads = 0;
+	const loadingHarness = makeRecordingEmit(validateRecord);
+	await assert.rejects(
+		collectAllStreams(
+			makeCtx(
+				makeFakePage([folderQueryResponse(), noteQueryResponse()], undefined, {
+					readyState: "loading",
+					onReload: () => {
+						reloads += 1;
+					},
+				}),
+				loadingHarness,
+				["notes"],
+			),
+		),
+		/icloud_readiness_exhausted/,
+	);
+	assert.equal(reloads, 2, "only the configured bounded reloads should run");
+	assert.equal(loadingHarness.protocolMessages.length, 0);
+
+	let blockedReloads = 0;
+	const blockedHarness = makeRecordingEmit(validateRecord);
+	await assert.rejects(
+		collectAllStreams(
+			makeCtx(
+				makeFakePage([folderQueryResponse(), noteQueryResponse()], undefined, {
+					blocked: true,
+					onReload: () => {
+						blockedReloads += 1;
+					},
+				}),
+				blockedHarness,
+				["notes"],
+			),
+		),
+		/icloud_page_blocked/,
+	);
+	assert.equal(
+		blockedReloads,
+		0,
+		"blocked pages must never be reloaded past sign-in",
+	);
+	assert.equal(blockedHarness.protocolMessages.length, 0);
+
+	const navigationHarness = makeRecordingEmit(validateRecord);
+	await assert.rejects(
+		collectAllStreams(
+			makeCtx(
+				makeFakePage([folderQueryResponse(), noteQueryResponse()], undefined, {
+					failReadinessEvaluations: 1,
+					reloadUrl: "https://www.icloud.com/mail",
+				}),
+				navigationHarness,
+				["notes"],
+			),
+		),
+		/icloud_wrong_page/,
+	);
+	assert.equal(navigationHarness.protocolMessages.length, 0);
 });
 
 test("collectAllStreams: navigation change vetoes a terminal query response", async () => {

@@ -114,6 +114,9 @@ import type {
 
 const VALIDATE_URL = "https://setup.icloud.com/setup/ws/1/validate";
 const RESULTS_LIMIT = 200;
+const NOTES_READINESS_ATTEMPTS = 3;
+const NOTES_READINESS_BUDGET_MS = 20_000;
+const NOTES_READINESS_OPERATION_TIMEOUT_MS = 5_000;
 
 interface ProgressExtra {
 	intentional_exclusions?: number;
@@ -125,7 +128,7 @@ interface ProgressExtra {
 }
 
 export const ICLOUD_NOTES_RETRYABLE_PATTERN =
-	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited/i;
+	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited|icloud_readiness_exhausted/i;
 
 type StreamName = "folders" | "notes";
 type FieldOmission = ParsedFieldOmission;
@@ -623,52 +626,82 @@ function widenProgress(
 }
 
 async function requireNotesPage(page: Page): Promise<string> {
-	if (typeof page.waitForLoadState === "function") {
-		await page.waitForLoadState("load", { timeout: 15_000 }).catch(() => {});
-	}
-	let current: URL;
-	try {
-		current = new URL(page.url());
-	} catch {
-		throw new Error("icloud_wrong_page: current page URL is unavailable");
-	}
-	let pageState: { href: string; readyState: string; blocked: boolean };
-	try {
-		pageState = await page.evaluate(() => {
-			const blockedNodes = document.querySelectorAll(
-				'form[action*="signin" i], input#account_name_text_field, iframe[src*="captcha" i], [data-testid="error-page"]',
+	const deadline = Date.now() + NOTES_READINESS_BUDGET_MS;
+	for (let attempt = 0; attempt < NOTES_READINESS_ATTEMPTS; attempt += 1) {
+		const currentHref = page.url();
+		if (!isICloudNotesUrl(currentHref)) {
+			throw new Error(
+				"icloud_wrong_page: collection requires the iCloud Notes route",
 			);
-			let blocked = false;
-			for (let index = 0; index < blockedNodes.length; index += 1) {
-				if (blockedNodes[index]?.getClientRects().length) blocked = true;
-			}
-			return {
-				href: window.location.href,
-				readyState: document.readyState,
-				blocked,
-			};
-		});
-	} catch {
-		throw new Error(
-			"icloud_page_unloaded: the Notes page is not available for collection",
-		);
+		}
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) break;
+		if (typeof page.waitForLoadState === "function") {
+			await page
+				.waitForLoadState("load", {
+					timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, remaining),
+				})
+				.catch(() => {});
+		}
+		const afterWaitHref = page.url();
+		if (!isICloudNotesUrl(afterWaitHref)) {
+			throw new Error(
+				"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
+			);
+		}
+		let pageState: {
+			href: string;
+			readyState: string;
+			blocked: boolean;
+		} | null = null;
+		try {
+			pageState = await page.evaluate(() => {
+				const blockedNodes = document.querySelectorAll(
+					'form[action*="signin" i], input#account_name_text_field, iframe[src*="captcha" i], [data-testid="error-page"]',
+				);
+				let blocked = false;
+				for (let index = 0; index < blockedNodes.length; index += 1) {
+					if (blockedNodes[index]?.getClientRects().length) blocked = true;
+				}
+				return {
+					href: window.location.href,
+					readyState: document.readyState,
+					blocked,
+				};
+			});
+		} catch {
+			// Navigation can detach the execution context briefly. Recheck route,
+			// then reload only while the owner page is still inside Notes.
+		}
+		if (pageState?.blocked) {
+			throw new Error(
+				"icloud_page_blocked: sign-in, captcha, or error UI is visible",
+			);
+		}
+		if (pageState && !isICloudNotesUrl(pageState.href)) {
+			throw new Error(
+				"icloud_wrong_page: the document navigated away from iCloud Notes",
+			);
+		}
+		if (
+			pageState?.readyState === "complete" &&
+			pageState.href === afterWaitHref
+		) {
+			return afterWaitHref;
+		}
+		if (attempt + 1 >= NOTES_READINESS_ATTEMPTS) break;
+		const reloadBudget = deadline - Date.now();
+		if (reloadBudget <= 0) break;
+		await page
+			.reload({
+				waitUntil: "domcontentloaded",
+				timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, reloadBudget),
+			})
+			.catch(() => null);
 	}
-	if (pageState.readyState !== "complete" || pageState.href !== current.href) {
-		throw new Error(
-			"icloud_page_unloaded: the Notes page has not finished loading",
-		);
-	}
-	if (pageState.blocked) {
-		throw new Error(
-			"icloud_page_blocked: sign-in, captcha, or error UI is visible",
-		);
-	}
-	if (!isICloudNotesUrl(current.href)) {
-		throw new Error(
-			"icloud_wrong_page: collection requires the iCloud Notes route",
-		);
-	}
-	return current.href;
+	throw new Error(
+		"icloud_readiness_exhausted: the Notes page did not become ready within the bounded recovery budget; collection was not started",
+	);
 }
 
 function omittedRowsFailure(
