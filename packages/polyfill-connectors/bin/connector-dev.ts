@@ -150,7 +150,11 @@ import {
 	KNOWN_CONNECTOR_NAMES,
 	readManifest,
 } from "../src/orchestrator.ts";
-import { buildRunSummary, type RunSummary } from "../src/run-summary.ts";
+import {
+	buildRunSummary,
+	type RunSummary,
+	sanitizeSkipResult,
+} from "../src/run-summary.ts";
 
 dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
 
@@ -713,14 +717,9 @@ function renderMessage(message: EmittedMessage): void {
 			return;
 		}
 		case "SKIP_RESULT": {
-			const hint =
-				typeof message.recovery_hint === "object"
-					? message.recovery_hint.action
-					: message.recovery_hint;
-			// A hint is the connector's suggestion; this tool never acts on it.
-			printLine(
-				`  WARN     [${message.stream}] skip: ${message.reason} — ${message.message}${hint ? ` (connector's suggestion: ${hint})` : ""}`,
-			);
+			const diagnostic = sanitizeSkipResult(message);
+			printLine(`  WARN     [${diagnostic.stream}] skip: ${diagnostic.reason}`);
+			printLine(`  skip-result-diagnostics ${JSON.stringify(diagnostic)}`);
 			return;
 		}
 		case "DETAIL_GAP": {

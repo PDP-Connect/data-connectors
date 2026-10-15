@@ -22,6 +22,13 @@ import type {
 	EmittedMessage,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { RunRecord } from "./observation.ts";
+import { redactStderrTail } from "./reference-implementation-stand-in/runtime/stderr-redact.ts";
+
+export interface RunSummarySkipResult {
+	stream: string;
+	reason: string;
+	diagnostics?: unknown;
+}
 
 export interface RunSummaryStream {
 	/**
@@ -118,6 +125,7 @@ export interface RunSummary {
 	 */
 	run_record?: RunRecord;
 	skips: number;
+	skip_results: readonly RunSummarySkipResult[];
 	started_at: string;
 	streams: Record<string, RunSummaryStream>;
 	tool_version: string;
@@ -237,6 +245,96 @@ function summarizeDoneError(
 	};
 }
 
+const SAFE_DIAGNOSTIC_LABEL_KEYS = new Set([
+	"field",
+	"reason",
+	"type",
+	"kind",
+	"code",
+	"path",
+	"name",
+]);
+const DIAGNOSTIC_COUNT_KEY =
+	/^(?:count|total|page_count|(?:[a-z][a-z0-9_]*_)?(?:count|rows|total))$/;
+const MAX_DIAGNOSTIC_DEPTH = 8;
+const MAX_DIAGNOSTIC_ENTRIES = 100;
+const DIAGNOSTIC_LABEL = /^[A-Za-z][A-Za-z0-9_.:-]{0,79}$/;
+
+function safeDiagnosticLabel(value: string): string {
+	const redacted = redactStderrTail(value).text;
+	return DIAGNOSTIC_LABEL.test(redacted) ? redacted : "[REDACTED]";
+}
+
+function safeDiagnosticKey(value: string, index: number): string {
+	const redacted = redactStderrTail(value).text;
+	return DIAGNOSTIC_LABEL.test(redacted) ? redacted : `redacted_key_${index}`;
+}
+
+/**
+ * SKIP_RESULT.diagnostics is connector-authored and untrusted. Keep its
+ * structure and declared labels, but replace every other scalar with its
+ * shape. Label redaction uses the same runtime policy as stderr diagnostics;
+ * values are never copied into the durable summary or console line.
+ */
+function sanitizeDiagnosticValue(
+	value: unknown,
+	key: string | undefined,
+	depth: number,
+): unknown {
+	if (depth > MAX_DIAGNOSTIC_DEPTH) return { type: "truncated" };
+	if (typeof value === "string") {
+		if (key === "keys") return safeDiagnosticLabel(value);
+		if (key && SAFE_DIAGNOSTIC_LABEL_KEYS.has(key))
+			return safeDiagnosticLabel(value);
+		return { type: "string", length: value.length };
+	}
+	if (typeof value === "number") {
+		return key && DIAGNOSTIC_COUNT_KEY.test(key) && Number.isFinite(value)
+			? value
+			: { type: "number" };
+	}
+	if (typeof value === "boolean") return { type: "boolean" };
+	if (value === null) return { type: "null" };
+	if (Array.isArray(value)) {
+		return value
+			.slice(0, MAX_DIAGNOSTIC_ENTRIES)
+			.map((entry) => sanitizeDiagnosticValue(entry, key, depth + 1));
+	}
+	if (typeof value !== "object") return { type: typeof value };
+
+	const entries = Object.entries(value).slice(0, MAX_DIAGNOSTIC_ENTRIES);
+	const output: Record<string, unknown> = {};
+	for (const [entryKey, entryValue] of entries) {
+		const outputKey = safeDiagnosticKey(entryKey, Object.keys(output).length);
+		output[outputKey] = sanitizeDiagnosticValue(
+			entryValue,
+			entryKey,
+			depth + 1,
+		);
+	}
+	if (Object.keys(value).length > MAX_DIAGNOSTIC_ENTRIES)
+		output.truncated_keys = Object.keys(value).length - MAX_DIAGNOSTIC_ENTRIES;
+	return output;
+}
+
+export function sanitizeSkipResult(
+	message: Extract<EmittedMessage, { type: "SKIP_RESULT" }>,
+): RunSummarySkipResult {
+	return {
+		stream: safeDiagnosticLabel(message.stream),
+		reason: safeDiagnosticLabel(message.reason),
+		...(message.diagnostics === undefined
+			? {}
+			: {
+					diagnostics: sanitizeDiagnosticValue(
+						message.diagnostics,
+						undefined,
+						0,
+					),
+				}),
+	};
+}
+
 /**
  * Widen a stream's observed `emitted_at` window. Records arrive in emission
  * order per stream but interleave across streams, and `emitted_at` is
@@ -276,6 +374,7 @@ export function buildRunSummary(
 ): RunSummary {
 	const streams: Record<string, RunSummaryStream> = {};
 	let skips = 0;
+	const skipResults: RunSummarySkipResult[] = [];
 
 	for (const message of messages) {
 		if (message.type === "RECORD") {
@@ -286,6 +385,7 @@ export function buildRunSummary(
 			streamFor(message.stream, streams).state_emitted = true;
 		} else if (message.type === "SKIP_RESULT") {
 			skips += 1;
+			skipResults.push(sanitizeSkipResult(message));
 		}
 	}
 
@@ -315,6 +415,7 @@ export function buildRunSummary(
 		duration_ms: durationMs,
 		streams,
 		skips,
+		skip_results: skipResults,
 		done: buildDone(messages),
 		generated_by: "connector-dev",
 		provider_contact_observed: false,

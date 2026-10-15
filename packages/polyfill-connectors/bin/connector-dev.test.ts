@@ -68,6 +68,7 @@ const RUN_DIR_CONNECTORS = [
 	"connector-dev-done-then-exit1-fixture",
 	"connector-dev-env-echo-fixture",
 	"connector-dev-interaction-fixture",
+	"connector-dev-skip-diagnostics-fixture",
 	"connector-dev-scope-state-fixture",
 	"protocol-subprocess-fails-after-record",
 	"observation-hidden-element-fixture",
@@ -169,6 +170,54 @@ test("connector-dev CLI: succeeding fixture streams RECORD/PROGRESS/STATE lines,
 		assert.equal(summary.skips, 1);
 		assert.equal(summary.done.status, "succeeded");
 		assert.ok(summary.duration_ms >= 0);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev CLI: prints and persists sanitized SKIP_RESULT diagnostics without source values", () => {
+	const tmpDir = mkdtempSync(
+		join(tmpdir(), "connector-dev-skip-diagnostics-test-"),
+	);
+	const summaryPath = join(tmpDir, "summary.json");
+	try {
+		const result = runCli([
+			"connector-dev-skip-diagnostics-fixture",
+			"--entrypoint",
+			fixturePath("connector-dev-skip-diagnostics-fixture.ts"),
+			"--summary-out",
+			summaryPath,
+		]);
+
+		assert.equal(result.code, 0, `expected exit 0; stderr=${result.stderr}`);
+		assert.match(
+			result.stdout,
+			/skip-result-diagnostics \{"stream":"notes","reason":"icloud_omitted_rows","diagnostics":\{"omitted_rows":1,"field_omissions":\[\{"field":"TextDataEncrypted","reason":"body_text_unreadable","source_shape":\{"type":"object","keys":\["data","format"\]\},"value":\{"type":"string","length":21\}\}\]\}\}/,
+		);
+		assert.doesNotMatch(result.stdout, /PRIVATE_NOTE_SENTINEL/);
+
+		const summary = JSON.parse(readFileSync(summaryPath, "utf8")) as RunSummary;
+		assert.deepEqual(summary.skip_results, [
+			{
+				stream: "notes",
+				reason: "icloud_omitted_rows",
+				diagnostics: {
+					omitted_rows: 1,
+					field_omissions: [
+						{
+							field: "TextDataEncrypted",
+							reason: "body_text_unreadable",
+							source_shape: {
+								type: "object",
+								keys: ["data", "format"],
+							},
+							value: { type: "string", length: 21 },
+						},
+					],
+				},
+			},
+		]);
+		assert.doesNotMatch(JSON.stringify(summary), /PRIVATE_NOTE_SENTINEL/);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
