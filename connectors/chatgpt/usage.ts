@@ -26,8 +26,14 @@
  *   (limit max 100; `total` unreliable; item keys incl. pinned_time,
  *   conversation_template_id, gizmo_id, is_temporary_chat,
  *   is_do_not_remember, is_automation_conversation,
- *   latest_assistant_turn_created_at). /conversations/search was dropped: its
- *   items carry a message-text snippet.
+ *   latest_assistant_turn_created_at; on the owner's account
+ *   latest_assistant_turn_created_at, is_starred and the conversation-level
+ *   default_model_slug were null everywhere, so they are not emitted).
+ *   /conversations omits project conversations; they are listed from
+ *   /gizmos/{id}/conversations?cursor= (status and cursor paging verified
+ *   live; the item shape is assumed to mirror /conversations and is read
+ *   defensively). /conversations/search was dropped: its items carry a
+ *   message-text snippet.
  *   Seen in this repo's code or fixtures: /conversations/batch,
  *   /conversation/{id}, /shared_conversations, mapping/parent/children/
  *   current_node, author.role, author.name, recipient, content.content_type
@@ -315,7 +321,6 @@ export async function chatGptUsageFetchInBrowser(
 				gizmo_id: h.opaqueId(c.gizmo_id),
 				template_id: h.opaqueId(c.conversation_template_id),
 				is_archived: h.bool(c.is_archived),
-				is_starred: h.bool(c.is_starred),
 				is_temporary_chat: h.bool(c.is_temporary_chat),
 				is_do_not_remember: h.bool(c.is_do_not_remember),
 				is_automation: h.bool(c.is_automation_conversation),
@@ -346,6 +351,8 @@ export async function chatGptUsageFetchInBrowser(
 		},
 		/** Cursor for the next page, only when it is a plain opaque token. */
 		cursor(v: unknown): string | null {
+			if (typeof v === "number" && Number.isInteger(v) && v >= 0)
+				return String(v);
 			return typeof v === "string" && /^[A-Za-z0-9_\-=+/.:]{1,512}$/.test(v)
 				? v
 				: null;
@@ -363,6 +370,9 @@ export async function chatGptUsageFetchInBrowser(
 						items: items ? items.map((c) => h.listItem(c)) : null,
 						raw_count: items ? items.length : null,
 						total: h.count(j.total),
+						// Project listings page by cursor; the main list ignores these.
+						cursor: h.cursor(j.cursor),
+						has_more: j.cursor !== null && j.cursor !== undefined,
 					};
 				}
 				case "shared_conversation_ids": {
@@ -485,9 +495,13 @@ export async function chatGptUsageFetchInBrowser(
 				case "project_sidebar": {
 					const items = Array.isArray(j.items) ? j.items : null;
 					let files = 0;
+					const ids: string[] = [];
 					for (const item of items ?? []) {
 						if (!h.isObj(item)) continue;
 						const g = h.isObj(item.gizmo) ? item.gizmo : {};
+						const inner = h.isObj(g.gizmo) ? g.gizmo : {};
+						const id = h.opaqueId(inner.id) ?? h.opaqueId(g.id);
+						if (id) ids.push(id);
 						const list = Array.isArray(item.files)
 							? item.files
 							: Array.isArray(g.files)
@@ -498,6 +512,7 @@ export async function chatGptUsageFetchInBrowser(
 					return {
 						item_count: items ? items.length : null,
 						file_count: items ? files : null,
+						project_ids: ids,
 						cursor: h.cursor(j.cursor),
 						has_more: j.cursor !== null && j.cursor !== undefined,
 					};
@@ -845,7 +860,6 @@ export interface UsageListItem {
 	gizmo_id: string | null;
 	template_id: string | null;
 	is_archived: boolean | null;
-	is_starred: boolean | null;
 	is_temporary_chat: boolean | null;
 	is_do_not_remember: boolean | null;
 	is_automation: boolean | null;
@@ -877,7 +891,6 @@ export function readConversationListPage(
 			gizmo_id: idOrNull(c.gizmo_id),
 			template_id: idOrNull(c.template_id),
 			is_archived: boolOrNull(c.is_archived),
-			is_starred: boolOrNull(c.is_starred),
 			is_temporary_chat: boolOrNull(c.is_temporary_chat),
 			is_do_not_remember: boolOrNull(c.is_do_not_remember),
 			is_automation: boolOrNull(c.is_automation),
@@ -954,9 +967,7 @@ export function buildConversationUsageRecord({
 		id: usageRef("c", c.id),
 		create_time: tsToIso(c.create_time),
 		update_time: tsToIso(c.update_time),
-		latest_assistant_turn_at: tsToIso(c.latest_assistant_turn_at),
 		is_archived: c.is_archived,
-		is_starred: c.is_starred,
 		is_pinned: c.is_pinned,
 		is_shared: sharedIds ? sharedIds.has(c.id) : null,
 		is_temporary_chat: c.is_temporary_chat,
@@ -967,7 +978,6 @@ export function buildConversationUsageRecord({
 		gizmo_ref: gizmoId && kind !== "none" ? usageRef("g", gizmoId) : null,
 		detail,
 		detail_status: detailStatus,
-		default_model_slug: p?.default_model_slug ?? null,
 		message_counts: counts ? { ...counts } : null,
 		turn_count: counts ? counts.user : null,
 		branch_count: p ? p.branch_count : null,
@@ -1003,6 +1013,21 @@ export interface UsageSummaryConversation {
 	inSample: boolean;
 }
 
+/**
+ * Project conversations are missing from `/conversations`; they are listed
+ * per project from `/gizmos/{id}/conversations`. A failed project does not
+ * fail the summary; it is counted here.
+ */
+export interface ProjectListingCoverage {
+	/** Outcome of the sidebar read that names the projects. */
+	sidebar: "ok" | "not_available" | "failed" | "partial";
+	projects: number;
+	pages: number;
+	failed: number;
+	/** Conversations found only through a project listing. */
+	conversations_added: number;
+}
+
 export interface UsageSummaryInput {
 	conversations: readonly UsageSummaryConversation[];
 	client: UsageClientContext;
@@ -1010,6 +1035,7 @@ export interface UsageSummaryInput {
 		archived_listing: "read" | "not_available";
 		list_pages: number;
 		detail_mode: DetailMode;
+		project_listing: ProjectListingCoverage;
 	};
 	/** False when a provider deferral stopped the sample before every target was tried. */
 	sampleComplete: boolean;
@@ -1141,7 +1167,6 @@ export function buildUsageSummaryRecord(input: UsageSummaryInput): RecordData {
 	const totals = {
 		conversations: 0,
 		archived: 0,
-		starred: 0,
 		pinned: 0,
 		shared: 0,
 		in_workspace: 0,
@@ -1165,7 +1190,6 @@ export function buildUsageSummaryRecord(input: UsageSummaryInput): RecordData {
 		else if (status === "failed") coverage.detail_failed += 1;
 		else coverage.detail_not_read += 1;
 		if (c.is_archived === true) totals.archived += 1;
-		if (c.is_starred === true) totals.starred += 1;
 		if (c.is_pinned === true) totals.pinned += 1;
 		if (c.in_workspace === true) totals.in_workspace += 1;
 		if (c.is_temporary_chat === true) totals.temporary_conversations += 1;
@@ -1218,6 +1242,7 @@ export function buildUsageSummaryRecord(input: UsageSummaryInput): RecordData {
 			archived_listing: input.coverage.archived_listing,
 			list_pages: input.coverage.list_pages,
 			detail_mode: input.coverage.detail_mode,
+			project_listing: { ...input.coverage.project_listing },
 			...coverage,
 		},
 		first_activity_at: isoOrNull(first),
@@ -1400,9 +1425,8 @@ export function buildAccountProfileRecord(
 	const ci = input.instructions ?? {};
 	const mem = input.memory ?? {};
 	const beta = input.betaFeatures;
-	const created = [epochOrNull(me.created), epochOrNull(acct.created_time)]
-		.filter((t): t is number => t !== null)
-		.sort((a, b) => a - b)[0];
+	const userCreated = epochOrNull(me.created);
+	const accountCreated = epochOrNull(acct.created_time);
 	const meCountry = matchOrNull(me.country, COUNTRY);
 	const networkCountry = matchOrNull(input.client.network_country, COUNTRY);
 	const enabled = Array.isArray(beta?.enabled)
@@ -1418,10 +1442,19 @@ export function buildAccountProfileRecord(
 		: null;
 	return {
 		id: "account_profile",
-		account_created_at: created === undefined ? null : isoOrNull(created),
+		// Two different moments: /me.created is when the user signed up;
+		// accounts/check created_time is when the current (e.g. paid) account
+		// was created. account_plan.account_created_at carries the latter.
+		user_created_at: isoOrNull(userCreated),
+		chatgpt_account_created_at: isoOrNull(accountCreated),
 		tenure_months:
-			created === undefined ? null : wholeMonthsBetween(created, input.nowMs),
+			userCreated === null
+				? null
+				: wholeMonthsBetween(userCreated, input.nowMs),
 		country: meCountry ?? networkCountry,
+		// SUB-NATIONAL (e.g. a voivodeship/state code). Together with other
+		// fields it raises re-identification risk; whether to coarsen or drop
+		// it is a legal decision, not made here.
 		region_code: matchOrNull(me.region_code, REGION_CODE),
 		geography_source: meCountry
 			? "account_profile"

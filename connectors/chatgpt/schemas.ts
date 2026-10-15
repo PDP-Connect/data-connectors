@@ -224,12 +224,14 @@ const sourceStatus = z.enum(["ok", "not_available", "failed", "partial"]);
 export const accountProfileSchema = z
 	.object({
 		id: z.literal("account_profile"),
-		account_created_at: looseTimestamp.nullable(),
+		user_created_at: looseTimestamp.nullable(),
+		chatgpt_account_created_at: looseTimestamp.nullable(),
 		tenure_months: count.nullable(),
 		country: z
 			.string()
 			.regex(/^[A-Z]{2}$/)
 			.nullable(),
+		// Sub-national code: re-identification risk; coarsening is a legal call.
 		region_code: z
 			.string()
 			.regex(/^[A-Z0-9]{1,3}$/)
@@ -302,9 +304,7 @@ export const conversationUsageSchema = z
 		id: usageRef,
 		create_time: looseTimestamp.nullable(),
 		update_time: looseTimestamp.nullable(),
-		latest_assistant_turn_at: looseTimestamp.nullable(),
 		is_archived: z.boolean().nullable(),
-		is_starred: z.boolean().nullable(),
 		is_pinned: z.boolean().nullable(),
 		is_shared: z.boolean().nullable(),
 		is_temporary_chat: z.boolean().nullable(),
@@ -315,7 +315,6 @@ export const conversationUsageSchema = z
 		gizmo_ref: usageRef.nullable(),
 		detail: z.enum(["sampled", "selected", "not_read"]),
 		detail_status: z.enum(["fetched", "not_fetched", "unavailable", "failed"]),
-		default_model_slug: usageSlug.nullable(),
 		message_counts: z
 			.object({
 				user: count,
@@ -361,6 +360,15 @@ export const usageSummarySchema = z
 				archived_listing: z.enum(["read", "not_available"]),
 				list_pages: count,
 				detail_mode: z.enum(["sample", "all", "selected", "none"]),
+				project_listing: z
+					.object({
+						sidebar: sourceStatus,
+						projects: count,
+						pages: count,
+						failed: count,
+						conversations_added: count,
+					})
+					.strict(),
 				detail_fetched: count,
 				detail_unavailable: count,
 				detail_failed: count,
@@ -376,7 +384,6 @@ export const usageSummarySchema = z
 			.object({
 				conversations: count,
 				archived: count,
-				starred: count,
 				pinned: count,
 				shared: count.nullable(),
 				in_workspace: count,

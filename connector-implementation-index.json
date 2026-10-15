@@ -4884,7 +4884,7 @@
 					{
 						"name": "account_profile",
 						"required": false,
-						"description": "The signed-in ChatGPT account described with no text: creation time and tenure, country and region codes, billing currency, MFA, subscription facts not in account_plan (complimentary, trial, delinquency, purchase platform), data residency, enabled beta features, whether custom instructions and personality are set, memory count and token use, project, project file and scheduled task counts. Each source is read independently and its outcome is reported.",
+						"description": "The signed-in ChatGPT account described with no text: user and account creation times and tenure, country and sub-national region codes, billing currency, MFA, subscription facts not in account_plan (complimentary, trial, delinquency, purchase platform), data residency, enabled beta features, whether custom instructions and personality are set, memory count and token use, project, project file and scheduled task counts. Each source is read independently and its outcome is reported.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
@@ -4900,15 +4900,20 @@
 									"type": "string",
 									"const": "account_profile"
 								},
-								"account_created_at": {
+								"user_created_at": {
 									"type": ["string", "null"],
 									"format": "date-time",
-									"description": "Earliest of the user creation time (/me) and the account creation time (accounts/check)."
+									"description": "When the ChatGPT user signed up (/me created)."
+								},
+								"chatgpt_account_created_at": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"description": "When the current ChatGPT account (for example the paid account) was created (accounts/check created_time). Same source as account_plan.account_created_at; can be later than user_created_at."
 								},
 								"tenure_months": {
 									"type": ["integer", "null"],
 									"minimum": 0,
-									"description": "Whole months from account_created_at to collection time."
+									"description": "Whole months from user_created_at to collection time."
 								},
 								"country": {
 									"type": ["string", "null"],
@@ -4919,7 +4924,7 @@
 								"region_code": {
 									"type": ["string", "null"],
 									"pattern": "^[A-Z0-9]{1,3}$",
-									"description": "Subdivision code from the account profile. The region name is not collected."
+									"description": "SUB-NATIONAL subdivision code from the account profile (for example a state or voivodeship code). Raises re-identification risk together with other fields; whether to coarsen or drop it is pending legal review. The region name is not collected."
 								},
 								"geography_source": {
 									"type": ["string", "null"],
@@ -5125,7 +5130,8 @@
 							},
 							"required": [
 								"id",
-								"account_created_at",
+								"user_created_at",
+								"chatgpt_account_created_at",
 								"tenure_months",
 								"country",
 								"region_code",
@@ -5180,7 +5186,8 @@
 						"incremental": true,
 						"query": {
 							"range_filters": {
-								"account_created_at": ["gte", "gt", "lte", "lt"]
+								"user_created_at": ["gte", "gt", "lte", "lt"],
+								"chatgpt_account_created_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true
@@ -5192,13 +5199,13 @@
 					{
 						"name": "conversation_usage",
 						"required": false,
-						"description": "Per-conversation usage metadata with no text. For every conversation, from the conversation list: timestamps, archive/star/pin/share flags, temporary, do-not-remember and automation flags, custom GPT or project membership (as opaque references). For the conversations read in detail (by default the 30 most recently updated; all of them, or a chosen set, on request): message counts by role, models used, tool and feature use counts, branch count and character counts.",
+						"description": "Per-conversation usage metadata with no text. For every conversation, from the conversation list and the per-project conversation lists: timestamps, archive/pin/share flags, temporary, do-not-remember and automation flags, custom GPT or project membership (as opaque references). For the conversations read in detail (by default the 30 most recently updated; all of them, or a chosen set, on request): message counts by role, models used, tool and feature use counts, branch count and character counts.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
 						"display": {
 							"label": "How you use ChatGPT, per conversation",
-							"detail": "For each conversation: when it was created, last updated and last answered, whether it is archived, starred, pinned, shared, temporary or automated, and whether it ran in a custom GPT or a project. For your most recent conversations (and any you choose) also how many messages you and ChatGPT sent, which models answered, which tools were used (search, code, images, canvas, deep research, memory, files, voice) and how long your messages were, as numbers. No titles, message text, file names, GPT names or ids are collected; conversations and GPTs are identified only by one-way references."
+							"detail": "For each conversation: when it was created and last updated, whether it is archived, pinned, shared, temporary or automated, and whether it ran in a custom GPT or a project. For your most recent conversations (and any you choose) also how many messages you and ChatGPT sent, which models answered, which tools were used (search, code, images, canvas, deep research, memory, files, voice) and how long your messages were, as numbers. No titles, message text, file names, GPT names or ids are collected; conversations and GPTs are identified only by one-way references."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -5218,15 +5225,7 @@
 									"type": ["string", "null"],
 									"format": "date-time"
 								},
-								"latest_assistant_turn_at": {
-									"type": ["string", "null"],
-									"format": "date-time",
-									"description": "When ChatGPT last answered in the conversation, from the conversation list."
-								},
 								"is_archived": {
-									"type": ["boolean", "null"]
-								},
-								"is_starred": {
 									"type": ["boolean", "null"]
 								},
 								"is_pinned": {
@@ -5268,10 +5267,6 @@
 									"type": "string",
 									"enum": ["fetched", "not_fetched", "unavailable", "failed"],
 									"description": "Outcome of the detail read: fetched, unavailable (403/404), failed, or not_fetched (not targeted this run, or a deferral stopped the run first)."
-								},
-								"default_model_slug": {
-									"type": ["string", "null"],
-									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
 								},
 								"message_counts": {
 									"type": ["object", "null"],
@@ -5433,9 +5428,7 @@
 								"id",
 								"create_time",
 								"update_time",
-								"latest_assistant_turn_at",
 								"is_archived",
-								"is_starred",
 								"is_pinned",
 								"is_shared",
 								"is_temporary_chat",
@@ -5446,7 +5439,6 @@
 								"gizmo_ref",
 								"detail",
 								"detail_status",
-								"default_model_slug",
 								"message_counts",
 								"turn_count",
 								"branch_count",
@@ -5475,8 +5467,7 @@
 								"create_time": ["gte", "gt", "lte", "lt"],
 								"update_time": ["gte", "gt", "lte", "lt"],
 								"first_message_at": ["gte", "gt", "lte", "lt"],
-								"last_message_at": ["gte", "gt", "lte", "lt"],
-								"latest_assistant_turn_at": ["gte", "gt", "lte", "lt"]
+								"last_message_at": ["gte", "gt", "lte", "lt"]
 							},
 							"aggregations": {
 								"count": true,
@@ -5489,13 +5480,13 @@
 					{
 						"name": "usage_summary",
 						"required": false,
-						"description": "Aggregate ChatGPT usage with no text. Exact, from every conversation's list entry: totals and flags, custom GPT and project share, conversations per month, active days, longest streak, first and last activity, hour-of-day and day-of-week of conversation starts. Sample-based and labelled as such: message counts, model mix and feature use over the most recently updated conversations.",
+						"description": "Aggregate ChatGPT usage with no text. Exact, from every conversation's list entry: totals and flags (archived, pinned, shared, temporary, automation), custom GPT and project share, conversations per month, active days, longest streak, first and last activity, hour-of-day and day-of-week of conversation starts. Sample-based and labelled as such: message counts, model mix and feature use over the most recently updated conversations.",
 						"compaction_fingerprint": {
 							"exclude_keys": []
 						},
 						"display": {
 							"label": "Your ChatGPT usage summary",
-							"detail": "How many conversations you have and how many are archived, starred, pinned, shared, temporary or automated; how much you use custom GPTs and projects; conversations per month, active days and longest streak; when in the day and week you start conversations; and, for your most recent conversations only, how many messages were sent, which models answered and which tools were used. Account and settings facts are in the account profile stream; plan details in the account plan stream. No text, titles or ids are collected. Singleton."
+							"detail": "How many conversations you have and how many are archived, pinned, shared, temporary or automated; how much you use custom GPTs and projects; conversations per month, active days and longest streak; when in the day and week you start conversations; and, for your most recent conversations only, how many messages were sent, which models answered and which tools were used. Account and settings facts are in the account profile stream; plan details in the account plan stream. No text, titles or ids are collected. Singleton."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -5539,6 +5530,40 @@
 											"type": "string",
 											"enum": ["sample", "all", "selected", "none"]
 										},
+										"project_listing": {
+											"type": "object",
+											"description": "Project conversations are listed per project (they are missing from the main list). sidebar: outcome of the read that names the projects; failed: projects whose listing stopped early; conversations_added: conversations found only through a project.",
+											"properties": {
+												"sidebar": {
+													"type": "string",
+													"enum": ["ok", "not_available", "failed", "partial"]
+												},
+												"projects": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"pages": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"failed": {
+													"type": "integer",
+													"minimum": 0
+												},
+												"conversations_added": {
+													"type": "integer",
+													"minimum": 0
+												}
+											},
+											"required": [
+												"sidebar",
+												"projects",
+												"pages",
+												"failed",
+												"conversations_added"
+											],
+											"additionalProperties": false
+										},
 										"detail_fetched": {
 											"type": "integer",
 											"minimum": 0
@@ -5561,6 +5586,7 @@
 										"archived_listing",
 										"list_pages",
 										"detail_mode",
+										"project_listing",
 										"detail_fetched",
 										"detail_unavailable",
 										"detail_failed",
@@ -5597,10 +5623,6 @@
 											"minimum": 0
 										},
 										"archived": {
-											"type": "integer",
-											"minimum": 0
-										},
-										"starred": {
 											"type": "integer",
 											"minimum": 0
 										},
@@ -5649,7 +5671,6 @@
 									"required": [
 										"conversations",
 										"archived",
-										"starred",
 										"pinned",
 										"shared",
 										"in_workspace",

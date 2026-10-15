@@ -11,16 +11,22 @@
  * Request plan for a default run (all three streams):
  *
  *   In parallel from the start:
+ *   - /gizmos/snorlax/sidebar (cursor pages): one walk shared by the
+ *     profile's project counts and the project conversation listing.
  *   - account_profile: /me, /accounts/check, /settings/beta_features,
- *     /user_system_messages, /memories, /gizmos/snorlax/sidebar (cursor
- *     pages, at most 5), /tasks (cursor pages, at most 5), /cdn-cgi/trace.
- *     Each source is optional: a failure leaves its fields null and is named
- *     in `source_status`.
+ *     /user_system_messages, /memories, /tasks (cursor pages, at most 5),
+ *     /cdn-cgi/trace. Each source is optional: a failure leaves its fields
+ *     null and is named in `source_status`.
  *   - Conversation list: `/conversations?offset=N&limit=100&order=updated`,
  *     then the same with `&is_archived=true`, plus `/shared_conversations`
  *     for the `is_shared` flag. The list response's `total` is not reliable,
- *     so a pass stops at the first page with fewer than 100 items. At most
- *     4 list/detail requests are in flight at once (shared limiter).
+ *     so a pass stops at the first page with fewer than 100 items.
+ *   - Project conversations, which `/conversations` omits (verified live:
+ *     111 of 1,335 on one account): `/gizmos/{id}/conversations?cursor=0`,
+ *     then `?cursor=<cursor>` until none, per sidebar project (~10 items per
+ *     page). Unioned with the main list by id. A failing project is counted
+ *     in `usage_summary.coverage.project_listing`, not fatal.
+ *   List, project and detail requests share one limiter: at most 4 in flight.
  *
  *   Then detail, `/conversations/batch` (10 ids per request, up to 3 in
  *   flight) with a `/conversation/{id}` fallback, for a SAMPLE: the 30 most
@@ -29,12 +35,11 @@
  *   exact; `detail_sample` (message counts, model mix, feature use) is
  *   labelled as sample-based with its window.
  *
- *   For 1,334 conversations: 14 list pages (plus up to 3 empty pages already
- *   in flight when the short page lands) + 1 archived page + 1 shares page +
- *   3 batch reads + 8 profile reads ≈ 27–30 requests. With 4 list pages in
- *   flight at ~3.5 s each the list takes 4–5 rounds (~14–18 s); profile
- *   reads (~2.2 s, bounded by /memories) overlap it and the sample (~1–3 s)
- *   follows it.
+ *   Owner account (live, 2026-10-15): ~13 main-list pages (+ up to 3 empty
+ *   pages in flight when the short page lands), 1 archived page, 1 shares
+ *   page, ~51 project pages over 11 projects, 1-2 sidebar pages, 3 batch
+ *   reads and 7 other profile reads: ~80 requests. Without project pages
+ *   the run took 33 s end to end in the CLI.
  *
  * Full detail (opt-in):
  *   - Protocol scope on `conversation_usage`: `resources` (record ids) reads
@@ -109,6 +114,8 @@ const DETAIL_WORKERS = 3;
 const SHARED_PAGE_LIMIT = 100;
 const SHARED_MAX_PAGES = 50;
 const PROFILE_MAX_PAGES = 5;
+const SIDEBAR_MAX_PAGES = 20;
+const PROJECT_MAX_PAGES = 200;
 
 export type UsageFetchErrorClass = "auth" | "forbidden" | "deferred" | "other";
 
@@ -297,6 +304,78 @@ export async function walkConversationList(
 	return { items, pages: pages.size, outcome };
 }
 
+interface ProjectPass {
+	items: UsageListItem[];
+	sidebar: ProfileSourceStatus;
+	projects: number;
+	pages: number;
+	failed: number;
+}
+
+/**
+ * List the conversations of every project named by the sidebar. Verified
+ * live: `/conversations` omits project conversations (111 of 1,335 on one
+ * account), while `/gizmos/{id}/conversations?cursor=0`, followed by
+ * `?cursor=<cursor>` until none is returned, lists them (~10 per page).
+ * Items are reduced in the page like the main list. A project whose walk
+ * fails counts in `failed`; its pages read so far are kept.
+ */
+async function walkProjectConversations(
+	deps: StreamDeps,
+	hooks: UsageStreamHooks,
+	limit: Limiter,
+	sidebar: PagedRead,
+): Promise<ProjectPass> {
+	const ids = sidebar.value?.project_ids ?? [];
+	let pages = 0;
+	let failed = 0;
+	const items: UsageListItem[] = [];
+	const walkOne = async (projectId: string): Promise<void> => {
+		const seenCursors = new Set<string>();
+		let cursor = "0";
+		for (let page = 0; page < PROJECT_MAX_PAGES; page += 1) {
+			if (deps.runBudget?.reason() === "max_wall_clock") {
+				failed += 1;
+				return;
+			}
+			seenCursors.add(cursor);
+			const path = `/gizmos/${encodeURIComponent(projectId)}/conversations?cursor=${encodeURIComponent(cursor)}`;
+			const r = await limit(() =>
+				fetchProjected(deps, hooks, path, "conversation_list"),
+			);
+			const parsed = r.kind === "ok" ? readConversationListPage(r.json) : null;
+			if (!parsed) {
+				failed += 1;
+				return;
+			}
+			pages += 1;
+			for (const c of parsed.items) {
+				// The project itself is the gizmo when the item does not say so.
+				items.push(
+					c.gizmo_id || c.template_id ? c : { ...c, gizmo_id: projectId },
+				);
+			}
+			const j = r.kind === "ok" && isRecord(r.json) ? r.json : {};
+			if (j.has_more !== true) return;
+			const next = typeof j.cursor === "string" ? j.cursor : null;
+			if (next === null || seenCursors.has(next)) {
+				failed += 1;
+				return;
+			}
+			cursor = next;
+		}
+		failed += 1;
+	};
+	await Promise.all(ids.map((id) => walkOne(id)));
+	return {
+		items,
+		sidebar: sidebar.status,
+		projects: ids.length,
+		pages,
+		failed,
+	};
+}
+
 async function readSharedIds(
 	deps: StreamDeps,
 	hooks: UsageStreamHooks,
@@ -468,7 +547,11 @@ interface PagedCounts {
 	count: number;
 	files: number;
 	by_status: Record<string, number>;
+	/** Project gizmo ids (sidebar only). Raw ids; hashed or dropped before output. */
+	project_ids: string[];
 }
+
+type PagedRead = { value: PagedCounts | null; status: ProfileSourceStatus };
 
 /**
  * Follow a `{..., cursor}` listing for at most PROFILE_MAX_PAGES pages,
@@ -480,10 +563,16 @@ async function readPagedCounts(
 	hooks: UsageStreamHooks,
 	path: string,
 	projection: "project_sidebar" | "task_stats",
-): Promise<{ value: PagedCounts | null; status: ProfileSourceStatus }> {
-	const acc: PagedCounts = { count: 0, files: 0, by_status: {} };
+	maxPages = PROFILE_MAX_PAGES,
+): Promise<PagedRead> {
+	const acc: PagedCounts = {
+		count: 0,
+		files: 0,
+		by_status: {},
+		project_ids: [],
+	};
 	let cursor: string | null = null;
-	for (let page = 0; page < PROFILE_MAX_PAGES; page += 1) {
+	for (let page = 0; page < maxPages; page += 1) {
 		const url: string =
 			cursor === null
 				? path
@@ -506,6 +595,16 @@ async function readPagedCounts(
 		}
 		acc.count += n;
 		if (typeof j.file_count === "number") acc.files += j.file_count;
+		if (Array.isArray(j.project_ids)) {
+			for (const id of j.project_ids) {
+				if (
+					typeof id === "string" &&
+					/^[A-Za-z0-9_-]{1,128}$/.test(id) &&
+					!acc.project_ids.includes(id)
+				)
+					acc.project_ids.push(id);
+			}
+		}
 		if (isRecord(j.by_status)) {
 			for (const [k, v] of Object.entries(j.by_status)) {
 				if (typeof v === "number")
@@ -524,6 +623,7 @@ async function runAccountProfile(
 	state: CollectContext["state"],
 	hooks: UsageStreamHooks,
 	client: Promise<Record<string, unknown> | null>,
+	sidebar: Promise<PagedRead>,
 	stateless: boolean,
 ): Promise<void> {
 	await deps.emit({
@@ -548,12 +648,7 @@ async function runAccountProfile(
 				"/memories?include_memory_entries=true",
 				"memory_stats",
 			),
-			readPagedCounts(
-				deps,
-				hooks,
-				"/gizmos/snorlax/sidebar",
-				"project_sidebar",
-			),
+			sidebar,
 			readPagedCounts(deps, hooks, "/tasks", "task_stats"),
 			client,
 		]);
@@ -629,9 +724,7 @@ const LIST_FIELDS = [
 	"id",
 	"create_time",
 	"update_time",
-	"latest_assistant_turn_at",
 	"is_archived",
-	"is_starred",
 	"is_pinned",
 	"is_shared",
 	"is_temporary_chat",
@@ -732,6 +825,7 @@ async function runConversationUsage(
 	state: CollectContext["state"],
 	hooks: UsageStreamHooks,
 	client: Promise<Record<string, unknown> | null> | null,
+	sidebar: Promise<PagedRead>,
 	stateless: boolean,
 ): Promise<void> {
 	const wantRecords = deps.requested.has("conversation_usage");
@@ -748,10 +842,11 @@ async function runConversationUsage(
 
 	// 1. Lists and shares, sharing one in-flight limit.
 	const limit = createLimiter(REQUESTS_IN_FLIGHT);
-	const [main, archived, sharedIds] = await Promise.all([
+	const [main, archived, sharedIds, projectPass] = await Promise.all([
 		walkConversationList(deps, hooks, limit, { archived: false }),
 		walkConversationList(deps, hooks, limit, { archived: true, workers: 1 }),
 		readSharedIds(deps, hooks, limit),
+		sidebar.then((s) => walkProjectConversations(deps, hooks, limit, s)),
 	]);
 	const archivedRead = archived.outcome === "complete";
 	const truncated =
@@ -762,6 +857,12 @@ async function runConversationUsage(
 	const byId = new Map<string, UsageListItem>();
 	for (const c of [...main.items, ...(archivedRead ? archived.items : [])]) {
 		if (!byId.has(c.id)) byId.set(c.id, c);
+	}
+	let projectAdded = 0;
+	for (const c of projectPass.items) {
+		if (byId.has(c.id)) continue;
+		byId.set(c.id, c);
+		projectAdded += 1;
 	}
 	const items = [...byId.values()].sort(
 		(a, b) => (lastActivityOf(b) ?? 0) - (lastActivityOf(a) ?? 0),
@@ -855,6 +956,13 @@ async function runConversationUsage(
 				archived_listing: archivedRead ? "read" : "not_available",
 				list_pages: main.pages + archived.pages,
 				detail_mode: detailMode,
+				project_listing: {
+					sidebar: projectPass.sidebar,
+					projects: projectPass.projects,
+					pages: projectPass.pages,
+					failed: projectPass.failed,
+					conversations_added: projectAdded,
+				},
 			},
 			sampleComplete: [...sample].every((id) => outcomes.has(id)),
 		});
@@ -915,6 +1023,17 @@ export async function runUsageStreams(
 		deps.requested.has("conversation_usage") ||
 		deps.requested.has("usage_summary");
 	if (!wantProfile && !wantUsage) return;
+	// One sidebar walk serves the profile's project counts and the project
+	// conversation listing.
+	const sidebar = readPagedCounts(
+		deps,
+		hooks,
+		"/gizmos/snorlax/sidebar",
+		"project_sidebar",
+		SIDEBAR_MAX_PAGES,
+	);
+	// Both consumers await it; this keeps an early rejection from going unhandled.
+	sidebar.catch(() => undefined);
 	const stateless = process.env[CHATGPT_USAGE_STATELESS_ENV] === "1";
 	// One trace/timezone read serves both the profile and the summary.
 	const client =
@@ -933,11 +1052,12 @@ export async function runUsageStreams(
 					state,
 					hooks,
 					client ?? Promise.resolve(null),
+					sidebar,
 					stateless,
 				)
 			: Promise.resolve(),
 		wantUsage
-			? runConversationUsage(deps, state, hooks, client, stateless)
+			? runConversationUsage(deps, state, hooks, client, sidebar, stateless)
 			: Promise.resolve(),
 	]);
 }

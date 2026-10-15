@@ -152,6 +152,8 @@ interface SiteOptions {
 	/** List page indexes (offset / 100) that answer 500. */
 	failListPages?: number[];
 	total?: number;
+	/** Per-project conversation pages (one array per cursor page) or "fail". */
+	projects?: Record<string, Array<Array<Record<string, unknown>>> | "fail">;
 }
 
 function listRoute(opts: SiteOptions): Route {
@@ -183,10 +185,14 @@ function siteRoutes(opts: SiteOptions = {}): Record<string, Route> {
 		rawListItem(0, { id: CANARY_ID, gizmo_id: "g-p-CANARYPROJECT123" }),
 		rawListItem(1, { gizmo_id: "g-CANARYGPT" }),
 	];
+	const projectItems = Object.values(opts.projects ?? {}).flatMap((p) =>
+		p === "fail" ? [] : p.flat(),
+	);
 	const known = new Set(
 		[
 			...conversations,
 			...(Array.isArray(opts.archived) ? opts.archived : []),
+			...projectItems,
 		].map((c) => c.id),
 	);
 	return {
@@ -226,6 +232,18 @@ function siteRoutes(opts: SiteOptions = {}): Record<string, Route> {
 					? ENDPOINTS.snorlax_sidebar_page2
 					: ENDPOINTS.snorlax_sidebar_page1,
 			),
+		// Project conversations: /gizmos/{id}/conversations?cursor=N, ~10 per page.
+		"/gizmos/*": (_init, url) => {
+			const [, , id] = url.pathname.replace(/^\/backend-api/, "").split("/");
+			const pages = opts.projects?.[id ?? ""] ?? [[]];
+			if (pages === "fail") return json({ detail: "CANARY boom" }, 500);
+			const i = Number(url.searchParams.get("cursor") ?? 0);
+			return json({
+				items: pages[i] ?? [],
+				// Numeric cursor, as `?cursor=0` suggests; null on the last page.
+				cursor: i + 1 < pages.length ? i + 1 : null,
+			});
+		},
 		"/tasks": () => json(ENDPOINTS.tasks),
 		"/cdn-cgi/trace": () =>
 			new Response(
@@ -346,7 +364,6 @@ test("list projection keeps timestamps and flags and drops title, snippet and ur
 		"is_automation",
 		"is_do_not_remember",
 		"is_pinned",
-		"is_starred",
 		"is_temporary_chat",
 		"latest_assistant_turn_at",
 		"template_id",
@@ -460,6 +477,7 @@ test("beta features keep only enabled slug keys; side endpoints keep counts and 
 	assert.deepEqual(sidebar.json, {
 		item_count: 1,
 		file_count: 2,
+		project_ids: ["g-p-CANARYPROJECTA"],
 		cursor: "cursor-CANARY_page2",
 		has_more: true,
 	});
@@ -550,7 +568,6 @@ const listItem = (
 	gizmo_id: null,
 	template_id: null,
 	is_archived: false,
-	is_starred: null,
 	is_temporary_chat: false,
 	is_do_not_remember: false,
 	is_automation: false,
@@ -573,7 +590,6 @@ test("conversation_usage record validates and carries no title, id or text", asy
 	const record = buildConversationUsageRecord({
 		listItem: listItem(CANARY_ID, {
 			gizmo_id: "g-p-CANARYPROJECT123",
-			is_starred: true,
 		}),
 		projection,
 		detail: "sampled",
@@ -583,7 +599,9 @@ test("conversation_usage record validates and carries no title, id or text", asy
 	assert.equal(validateRecord("conversation_usage", record).ok, true);
 	assert.equal(record.gizmo_kind, "project");
 	assert.equal(record.is_shared, true);
-	assert.equal(record.is_starred, true);
+	assert.equal("is_starred" in record, false);
+	assert.equal("default_model_slug" in record, false);
+	assert.equal("latest_assistant_turn_at" in record, false);
 	assert.equal(record.turn_count, 2);
 	assert.equal(record.detail, "sampled");
 	assert.equal(record.id, usageRef("c", CANARY_ID));
@@ -628,7 +646,7 @@ test("the schema rejects a record that smuggles a title or free-text slug", () =
 	assert.equal(
 		validateRecord("conversation_usage", {
 			...record,
-			default_model_slug: "My Secret Model",
+			models: [{ slug: "My Secret Model", assistant_messages: 1 }],
 		}).ok,
 		false,
 	);
@@ -753,6 +771,13 @@ function summaryFor(timezone: string | null) {
 			archived_listing: "read",
 			list_pages: 2,
 			detail_mode: "sample",
+			project_listing: {
+				sidebar: "ok",
+				projects: 1,
+				pages: 1,
+				failed: 0,
+				conversations_added: 0,
+			},
 		},
 		sampleComplete: true,
 	});
@@ -810,6 +835,13 @@ test("usage_summary aggregates list fields exactly and labels the detail sample"
 		archived_listing: "read",
 		list_pages: 2,
 		detail_mode: "sample",
+		project_listing: {
+			sidebar: "ok",
+			projects: 1,
+			pages: 1,
+			failed: 0,
+			conversations_added: 0,
+		},
 		detail_fetched: 2,
 		detail_unavailable: 0,
 		detail_failed: 0,
@@ -886,12 +918,14 @@ function profileInput(
 	};
 }
 
-test("account_profile takes the earliest creation time and prefers the account country", () => {
+test("account_profile keeps the user and account creation times apart and prefers the account country", () => {
 	const r = buildAccountProfileRecord(profileInput());
 	assert.equal(validateRecord("account_profile", r).ok, true);
-	assert.equal(r.account_created_at, "2023-01-15T10:00:00.000Z");
-	// 2023-01-15 → 2026-10-15: 45 whole months.
-	assert.equal(r.tenure_months, 45);
+	assert.equal(r.user_created_at, "2023-02-20T00:00:00.000Z");
+	assert.equal(r.chatgpt_account_created_at, "2023-01-15T10:00:00.000Z");
+	assert.equal("account_created_at" in r, false);
+	// Tenure from the user creation time: 2023-02-20 → 2026-10-15 = 43 months.
+	assert.equal(r.tenure_months, 43);
 	assert.equal(r.country, "PL");
 	assert.equal(r.geography_source, "account_profile");
 	assert.equal(r.network_country, "DE");
@@ -1057,7 +1091,8 @@ test("a full run of all three streams emits valid records and leaks no canary an
 	assert.equal(profile.project_file_count, 2);
 	assert.equal(profile.scheduled_task_count, 3);
 	assert.equal(profile.custom_instructions_name_set, true);
-	assert.equal(profile.account_created_at, "2023-01-15T10:00:00.000Z");
+	assert.equal(profile.user_created_at, "2023-01-15T10:00:00.000Z");
+	assert.equal(profile.chatgpt_account_created_at, "2023-01-15T10:00:00.000Z");
 	assert.deepEqual(profile.source_status, ALL_OK);
 	// Every endpoint went through an in-page projection; search is never used.
 	for (const call of calls) {
@@ -1096,8 +1131,9 @@ test("the list walk pages until a short page, ignoring the provider total", asyn
 	// of extra pages past it is requested.
 	assert.ok(listOffsets.includes(200));
 	assert.ok(Math.max(...listOffsets) <= 200 + 3 * 100, String(listOffsets));
-	// Four list/detail requests share one limiter; the trace read is outside it.
-	assert.ok(inFlightMax() <= 5, `in flight ${inFlightMax()}`);
+	// Four list/detail requests share one limiter; the trace and sidebar reads
+	// (one each at a time) are outside it.
+	assert.ok(inFlightMax() <= 6, `in flight ${inFlightMax()}`);
 });
 
 test("an exact multiple of the page size ends on the empty page", async () => {
@@ -1351,7 +1387,7 @@ test("conversation_usage alone reads no profile endpoint", async () => {
 	await run();
 	assert.ok(
 		!calls.some((c) =>
-			/^\/(me|memories|user_system_messages|settings|accounts|cdn-cgi|tasks|gizmos)/.test(
+			/^\/(me|memories|user_system_messages|settings|accounts|cdn-cgi|tasks)/.test(
 				c.path,
 			),
 		),
@@ -1426,4 +1462,123 @@ test("the limiter never runs more than its width and hands slots on in order", a
 	);
 	assert.equal(peak, 2);
 	assert.deepEqual(order.sort(), [0, 1, 2, 3, 4]);
+});
+
+// ─── Project conversations (missing from /conversations) ──────────────────
+
+/** A project conversation item in a defensive shape: epoch numbers, no gizmo fields. */
+function projectItem(i: number): Record<string, unknown> {
+	const updated = BASE - i * 3600;
+	return {
+		id: rawConvId(i),
+		title: `CANARY project title ${i}`,
+		create_time: updated - 600,
+		update_time: updated,
+		snippet: "CANARY project snippet",
+	};
+}
+
+test("project conversations missing from the main list are added from per-project listings", async () => {
+	// Main list: conversations 0..4. Project A: 5..24 over two cursor pages,
+	// plus a duplicate of 0. Project B: one empty page.
+	const main = many(5);
+	const pageOne = [
+		projectItem(0),
+		...Array.from({ length: 9 }, (_, k) => projectItem(5 + k)),
+	];
+	const pageTwo = Array.from({ length: 11 }, (_, k) => projectItem(14 + k));
+	const { run, harness, calls } = runHarness(
+		["account_profile", "conversation_usage", "usage_summary"],
+		{
+			site: {
+				conversations: main,
+				projects: { "g-p-CANARYPROJECTA": [pageOne, pageTwo] },
+			},
+		},
+	);
+	await run();
+	const usage = records(harness, "conversation_usage");
+	assert.equal(usage.length, 25);
+	const fromProject = usage.find((r) => r.id === usageRef("c", rawConvId(20)));
+	assert.equal(fromProject?.gizmo_kind, "project");
+	assert.equal(fromProject?.gizmo_ref, usageRef("g", "g-p-CANARYPROJECTA"));
+	// Numeric epochs are read as well as ISO strings.
+	assert.equal(
+		fromProject?.update_time,
+		new Date((BASE - 20 * 3600) * 1000).toISOString(),
+	);
+	// The duplicate keeps its main-list entry (no project gizmo there).
+	const dup = usage.find((r) => r.id === usageRef("c", rawConvId(0)));
+	assert.equal(dup?.gizmo_kind, "none");
+	const [summary] = records(harness, "usage_summary");
+	assert.deepEqual(sub(summary, "coverage").project_listing, {
+		sidebar: "ok",
+		projects: 2,
+		pages: 3,
+		failed: 0,
+		conversations_added: 20,
+	});
+	assert.equal(sub(summary, "totals").project_conversations, 20);
+	// Cursor paging: cursor=0, then the returned cursor.
+	assert.deepEqual(
+		calls
+			.filter((c) => c.path.startsWith("/gizmos/g-p-CANARYPROJECTA/"))
+			.map((c) => c.path),
+		[
+			"/gizmos/g-p-CANARYPROJECTA/conversations?cursor=0",
+			"/gizmos/g-p-CANARYPROJECTA/conversations?cursor=1",
+		],
+	);
+	// One sidebar walk (two cursor pages) serves both the profile and the list.
+	assert.equal(
+		calls.filter((c) => c.path.startsWith("/gizmos/snorlax/sidebar")).length,
+		2,
+	);
+	assertNoLeak(harness.emitted, "records with project conversations");
+	assertNoLeak(harness.protocolMessages, "protocol messages");
+});
+
+test("a failing project listing is counted, not fatal", async () => {
+	const { run, harness } = runHarness(["usage_summary"], {
+		site: {
+			conversations: many(3),
+			projects: {
+				"g-p-CANARYPROJECTA": "fail",
+				"g-p-CANARYPROJECTB": [[projectItem(50)]],
+			},
+		},
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.ok(summary);
+	assert.deepEqual(sub(summary, "coverage").project_listing, {
+		sidebar: "ok",
+		projects: 2,
+		pages: 1,
+		failed: 1,
+		conversations_added: 1,
+	});
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
+});
+
+test("an unreadable sidebar lists no projects and still builds the summary", async () => {
+	const { run, harness } = runHarness(["usage_summary"], {
+		routes: {
+			...siteRoutes({ conversations: many(3) }),
+			"/gizmos/snorlax/sidebar": () => json({ detail: "down" }, 503),
+		},
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "coverage").conversations_listed, 3);
+	assert.deepEqual(sub(summary, "coverage").project_listing, {
+		sidebar: "failed",
+		projects: 0,
+		pages: 0,
+		failed: 0,
+		conversations_added: 0,
+	});
 });
