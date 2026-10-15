@@ -185,7 +185,9 @@ import {
 	driverEvidenceSatisfied,
 } from "../src/scenario/wire-registry.ts";
 import {
+	normalizeCliValueOptions,
 	SCENARIO_CLI_JSON_SCHEMA,
+	scanCliArguments,
 	type VerifyCliEnvelope,
 	writeCliJsonResult,
 	writeCliText,
@@ -193,24 +195,18 @@ import {
 
 dotenvConfig({ path: join(REPO_ROOT, ".env.local"), quiet: true });
 
-function hasJsonMode(argv: readonly string[]): boolean {
-	const valueFlags = new Set(["--dump-records", "--entrypoint", "--timeout"]);
-	for (let i = 0; i < argv.length; i += 1) {
-		const arg = argv[i];
-		if (arg === "--json") {
-			return true;
-		}
-		if (arg?.startsWith("--json=")) {
-			return true;
-		}
-		if (arg && valueFlags.has(arg)) {
-			i += 1;
-		}
-	}
-	return false;
-}
-
-const JSON_MODE = hasJsonMode(process.argv.slice(2));
+const VERIFY_VALUE_OPTIONS = new Set([
+	"--dump-records",
+	"--entrypoint",
+	"--json",
+	"--timeout",
+]);
+const VERIFY_ARGUMENTS = scanCliArguments(process.argv.slice(2), {
+	valueOptions: VERIFY_VALUE_OPTIONS,
+	numericValueOptions: new Set(["--timeout"]),
+	jsonOptionConsumesValue: true,
+});
+const JSON_MODE = VERIFY_ARGUMENTS.jsonMode;
 let jsonResult: VerifyCliEnvelope = {
 	schema: SCENARIO_CLI_JSON_SCHEMA,
 	command: "scenario-verify",
@@ -229,6 +225,23 @@ let jsonResult: VerifyCliEnvelope = {
 
 function writeHumanOutput(text: string): void {
 	writeCliText(text, JSON_MODE);
+}
+
+function markVerifyFailure(
+	outcome: VerifyCliEnvelope["result"]["outcome"],
+	failureCode: Exclude<VerifyCliEnvelope["result"]["failure_code"], null>,
+): void {
+	jsonResult = {
+		...jsonResult,
+		status: "failure",
+		exit_code: 1,
+		result: {
+			...jsonResult.result,
+			outcome,
+			failure_code: failureCode,
+		},
+	};
+	process.exitCode = 1;
 }
 
 export interface CliArgs {
@@ -328,14 +341,16 @@ function printHelp(): void {
 			"\n" +
 			"Options:\n" +
 			"  --help                           Show this help and exit.\n" +
-			"  --entrypoint <path>              Local/test connector entrypoint override.\n" +
+			"  --entrypoint <path>              Local/test connector entrypoint override (default: registry entrypoint).\n" +
 			"  --require-capture-source         Reject source or declaration digest drift (default: off).\n" +
-			"  --json <claim-path>              Write the existing pdpp.connector-claim/1 file on pass and enable one JSON result on stdout.\n" +
+			"  --json <claim-path>              Write pdpp.connector-claim/1 on pass and one CLI result to stdout (default: off).\n" +
 			"  --timeout <seconds>              Inactivity timeout (default: 300; positive integer).\n" +
-			"  --dump-records <dir>             Dump mismatched records; overrides PDPP_SCENARIO_DUMP_DIR.\n" +
-			"  --dump-all-records               With dumping active, include every record in a mismatching stream.\n" +
+			"  --dump-records <dir>             Dump mismatched records; overrides PDPP_SCENARIO_DUMP_DIR (default: env value or off).\n" +
+			"  --dump-all-records               With dumping active, include every record in a mismatching stream (default: off).\n" +
 			"\n" +
 			"Exit codes: 0 replay passed; 1 invalid scenario or replay failure; 2 usage error.\n" +
+			"Value options accept --name=value; repeating a value option uses the last value.\n" +
+			"--json <claim-path> is an existing claim-file option; its JSON result is a separate versioned stdout artifact.\n" +
 			"With --json, diagnostics go to stderr and stdout contains one versioned JSON result.\n" +
 			"The claim file remains pdpp.connector-claim/1; it is separate from the CLI result schema.\n",
 	);
@@ -370,6 +385,7 @@ function consumeTimeoutFlag(
 }
 
 export function parseArgs(argv: readonly string[]): CliArgs {
+	const args = normalizeCliValueOptions(argv, VERIFY_VALUE_OPTIONS);
 	let connector: string | undefined;
 	let scenarioPath: string | undefined;
 	let entrypoint: string | undefined;
@@ -379,11 +395,11 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 	let dumpRecordsDir: string | undefined;
 	let dumpAllRecords = false;
 	let i = 0;
-	while (i < argv.length) {
-		const arg = argv[i];
+	while (i < args.length) {
+		const arg = args[i];
 		i += 1;
 		if (arg === "--entrypoint") {
-			const value = argv[i];
+			const value = args[i];
 			i += 1;
 			if (!value) {
 				usageAndExit(2);
@@ -396,7 +412,7 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 			continue;
 		}
 		if (arg === "--json") {
-			const value = argv[i];
+			const value = args[i];
 			i += 1;
 			if (!value) {
 				usageAndExit(2);
@@ -405,11 +421,11 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 			continue;
 		}
 		if (arg === "--timeout") {
-			({ timeoutSeconds, nextIndex: i } = consumeTimeoutFlag(argv, i));
+			({ timeoutSeconds, nextIndex: i } = consumeTimeoutFlag(args, i));
 			continue;
 		}
 		if (arg === "--dump-records") {
-			const value = argv[i];
+			const value = args[i];
 			i += 1;
 			if (!value) {
 				usageAndExit(2);
@@ -2114,8 +2130,8 @@ function resolveDeclaredFilesystemInputForVerify(
 }
 
 async function main(): Promise<void> {
-	const argv = process.argv.slice(2);
-	if (argv.includes("--help")) {
+	const argv = VERIFY_ARGUMENTS.args;
+	if (VERIFY_ARGUMENTS.help) {
 		printHelp();
 		jsonResult = {
 			schema: SCENARIO_CLI_JSON_SCHEMA,
@@ -3016,6 +3032,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			}
 		})
 		.catch((err: unknown) => {
+			process.exitCode = 1;
 			// A validation rejection is a user-facing pre-flight verdict, not a
 			// crash: print its message plainly, no stack. Observed live: an
 			// operator passed a run-summary file (the other artifact living in
@@ -3078,9 +3095,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			// plain-verdict treatment `ScenarioValidationError` gets just above.
 			if (err instanceof WatchdogTimeoutError) {
 				process.stderr.write(`${err.message}\n`);
-				process.exitCode = 1;
-				jsonResult.result.failure_code = "verification_failed";
-				jsonResult.result.outcome = "failed";
+				markVerifyFailure("failed", "verification_failed");
 				if (JSON_MODE) {
 					writeCliJsonResult(jsonResult);
 				}
@@ -3093,9 +3108,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			// what's missing, not a crash in this CLI's own code.
 			if (err instanceof BrowserReplayEvidenceError) {
 				process.stderr.write(`[scenario-verify] ${err.message}\n`);
-				process.exitCode = 1;
-				jsonResult.result.failure_code = "invalid_scenario";
-				jsonResult.result.outcome = "rejected";
+				markVerifyFailure("rejected", "invalid_scenario");
 				if (JSON_MODE) {
 					writeCliJsonResult(jsonResult);
 				}
@@ -3104,10 +3117,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			const message =
 				err instanceof Error ? (err.stack ?? err.message) : String(err);
 			process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
-			process.exitCode = 1;
-			if (jsonResult.result.failure_code !== "invalid_scenario") {
-				jsonResult.result.failure_code = "verification_failed";
-				jsonResult.result.outcome = "failed";
+			if (jsonResult.result.failure_code === "invalid_scenario") {
+				markVerifyFailure("rejected", "invalid_scenario");
+			} else {
+				markVerifyFailure("failed", "verification_failed");
 			}
 			if (JSON_MODE) {
 				writeCliJsonResult(jsonResult);

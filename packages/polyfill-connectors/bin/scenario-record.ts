@@ -290,8 +290,10 @@ import {
 } from "../src/scenario/verify.ts";
 import { assertKnownMessageType } from "../src/scenario/wire-registry.ts";
 import {
+	normalizeCliValueOptions,
 	type RecordCliEnvelope,
 	SCENARIO_CLI_JSON_SCHEMA,
+	scanCliArguments,
 	writeCliJsonResult,
 	writeCliText,
 } from "./scenario-cli-json.ts";
@@ -299,29 +301,20 @@ import {
 const REPO_ENV_LOCAL = join(REPO_ROOT, ".env.local");
 dotenvConfig({ path: REPO_ENV_LOCAL, quiet: true });
 
-function hasJsonMode(argv: readonly string[]): boolean {
-	const valueFlags = new Set([
-		"--answer",
-		"--answers",
-		"--entrypoint",
-		"--out",
-		"--runs",
-		"--streams",
-		"--timeout",
-	]);
-	for (let i = 0; i < argv.length; i += 1) {
-		const arg = argv[i];
-		if (arg === "--json" || arg?.startsWith("--json=")) {
-			return true;
-		}
-		if (arg && valueFlags.has(arg)) {
-			i += 1;
-		}
-	}
-	return false;
-}
-
-const JSON_MODE = hasJsonMode(process.argv.slice(2));
+const RECORD_VALUE_OPTIONS = new Set([
+	"--answer",
+	"--answers",
+	"--entrypoint",
+	"--out",
+	"--runs",
+	"--streams",
+	"--timeout",
+]);
+const RECORD_ARGUMENTS = scanCliArguments(process.argv.slice(2), {
+	valueOptions: RECORD_VALUE_OPTIONS,
+	numericValueOptions: new Set(["--runs", "--timeout"]),
+});
+const JSON_MODE = RECORD_ARGUMENTS.jsonMode;
 let jsonResult: RecordCliEnvelope = {
 	schema: SCENARIO_CLI_JSON_SCHEMA,
 	command: "scenario-record",
@@ -339,6 +332,20 @@ let jsonResult: RecordCliEnvelope = {
 
 function writeHumanOutput(text: string): void {
 	writeCliText(text, JSON_MODE);
+}
+
+function markRecordFailure(): void {
+	jsonResult = {
+		...jsonResult,
+		status: "failure",
+		exit_code: 1,
+		result: {
+			...jsonResult.result,
+			outcome: "failed",
+			failure_code: "recording_failed",
+		},
+	};
+	process.exitCode = 1;
 }
 
 // A `.env.local` placed next to the package (rather than at the repo root this
@@ -839,18 +846,21 @@ function printHelp(): void {
 			"\n" +
 			"Options:\n" +
 			"  --help                         Show this help and exit.\n" +
-			"  --json                         Write one versioned JSON result to stdout.\n" +
+			"  --json                         Write one versioned JSON result to stdout (default: off).\n" +
 			"  --runs 1|2                     Number of runs (default: 2).\n" +
 			"  --out <path>                   Scenario output path (default: timestamped runs/<connector>/ path).\n" +
-			"  --entrypoint <path>            Local/test connector entrypoint override.\n" +
-			"  --answer <key>=<value>         Answer a prompt; repeatable. --answers takes precedence for duplicate keys.\n" +
-			"  --answers <json-file>          Read prompt answers from a JSON object.\n" +
+			"  --entrypoint <path>            Local/test connector entrypoint override (default: registry entrypoint).\n" +
+			"  --answer <key>=<value>         Answer a prompt; repeatable (default: none).\n" +
+			"  --answers <json-file>          Read prompt answers from a JSON object (default: none).\n" +
 			"  --persist-otp                  Persist OTP answers verbatim (default: redacted).\n" +
-			"  --streams <name,name,...>      Restrict runs to these streams.\n" +
+			"  --streams <name,name,...>      Restrict runs to these streams (default: all registered streams).\n" +
 			"  --timeout <seconds>            Inactivity timeout (default: 300; positive integer).\n" +
-			"  --record-har                   Capture browser HTTP traffic and storage state.\n" +
+			"  --record-har                   Capture browser HTTP traffic and storage state (default: off).\n" +
 			"\n" +
 			"Exit codes: 0 complete capture; 1 recording failure/incomplete capture; 2 usage error.\n" +
+			"Value options accept --name=value; repeated value options use the last value except --answer, which appends.\n" +
+			"For a repeated answer key, the last --answer wins; --answers overrides matching --answer values.\n" +
+			"In --json mode recording is non-interactive; unanswered prompts fail the capture. Use --answer or --answers.\n" +
 			"With --json, diagnostics go to stderr and stdout contains one JSON result.\n",
 	);
 }
@@ -1004,6 +1014,7 @@ function dispatchValueFlag(
 }
 
 export function parseArgs(argv: readonly string[]): CliArgs {
+	const args = normalizeCliValueOptions(argv, RECORD_VALUE_OPTIONS);
 	const parsed: MutableArgs = {
 		connector: undefined,
 		out: undefined,
@@ -1017,11 +1028,11 @@ export function parseArgs(argv: readonly string[]): CliArgs {
 		timeoutSeconds: DEFAULT_INACTIVITY_WINDOW_SECONDS,
 	};
 	let i = 0;
-	while (i < argv.length) {
-		const arg = argv[i];
+	while (i < args.length) {
+		const arg = args[i];
 		i += 1;
 		if (arg) {
-			const nextIndex = dispatchValueFlag(arg, argv, i, parsed);
+			const nextIndex = dispatchValueFlag(arg, args, i, parsed);
 			if (nextIndex !== undefined) {
 				i = nextIndex;
 				continue;
@@ -2823,8 +2834,8 @@ function reportFilesystemInputForRecord(args: CliArgs): boolean {
 }
 
 async function main(): Promise<void> {
-	const argv = process.argv.slice(2);
-	if (argv.includes("--help")) {
+	const argv = RECORD_ARGUMENTS.args;
+	if (RECORD_ARGUMENTS.help) {
 		printHelp();
 		jsonResult = {
 			schema: SCENARIO_CLI_JSON_SCHEMA,
@@ -2867,7 +2878,7 @@ async function main(): Promise<void> {
 		...parseAnswerFlags(args.answers),
 		...(args.answersFile ? loadAnswersFile(args.answersFile) : {}),
 	};
-	const isTty = Boolean(process.stdin.isTTY);
+	const isTty = Boolean(process.stdin.isTTY) && !JSON_MODE;
 
 	// FIX A (record side): recording deliberately does NOT use network
 	// isolation — it needs the live network to talk to the connector's real
@@ -2981,6 +2992,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			}
 		})
 		.catch((err: unknown) => {
+			markRecordFailure();
 			// FIX 2: a watchdog kill is a diagnosed verdict — the subprocess was
 			// observed to be genuinely inactive for the whole window — not a crash
 			// in this CLI's own code, so it prints plainly (no stack), mirroring
@@ -2988,7 +3000,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			// pattern at this same catch site.
 			if (err instanceof WatchdogTimeoutError) {
 				process.stderr.write(`${err.message}\n`);
-				process.exitCode = 1;
 				if (JSON_MODE) {
 					writeCliJsonResult(jsonResult);
 				}
@@ -2997,7 +3008,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			const message =
 				err instanceof Error ? (err.stack ?? err.message) : String(err);
 			process.stderr.write(`[scenario-record] FATAL: ${message}\n`);
-			process.exitCode = 1;
 			if (JSON_MODE) {
 				writeCliJsonResult(jsonResult);
 			}

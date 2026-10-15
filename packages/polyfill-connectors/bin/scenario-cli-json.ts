@@ -48,6 +48,74 @@ export interface VerifyCliEnvelope extends CliEnvelopeBase {
 
 export type ScenarioCliEnvelope = RecordCliEnvelope | VerifyCliEnvelope;
 
+export interface CliArgumentScan {
+	args: string[];
+	help: boolean;
+	jsonMode: boolean;
+}
+
+export function normalizeCliValueOptions(
+	argv: readonly string[],
+	valueOptions: ReadonlySet<string>,
+): string[] {
+	const normalized: string[] = [];
+	for (const arg of argv) {
+		if (arg?.startsWith("--")) {
+			const equalsIndex = arg.indexOf("=");
+			if (equalsIndex > 2) {
+				const name = arg.slice(0, equalsIndex);
+				if (valueOptions.has(name)) {
+					normalized.push(name, arg.slice(equalsIndex + 1));
+					continue;
+				}
+			}
+		}
+		normalized.push(arg);
+	}
+	return normalized;
+}
+
+export function scanCliArguments(
+	argv: readonly string[],
+	options: {
+		valueOptions: ReadonlySet<string>;
+		numericValueOptions: ReadonlySet<string>;
+		jsonOptionConsumesValue?: boolean;
+	},
+): CliArgumentScan {
+	const args = normalizeCliValueOptions(argv, options.valueOptions);
+	let help = false;
+	let jsonMode = false;
+	for (let i = 0; i < args.length; i += 1) {
+		const arg = args[i];
+		if (arg === "--help") {
+			help = true;
+			continue;
+		}
+		if (arg === "--json") {
+			jsonMode = true;
+			if (options.jsonOptionConsumesValue && i + 1 < args.length) {
+				i += 1;
+			}
+			continue;
+		}
+		if (!options.valueOptions.has(arg ?? "")) {
+			continue;
+		}
+		const value = args[i + 1];
+		if (options.numericValueOptions.has(arg ?? "")) {
+			if (value === "--help" || (value !== undefined && /^\d+$/.test(value))) {
+				i += 1;
+			}
+			continue;
+		}
+		if (value !== undefined) {
+			i += 1;
+		}
+	}
+	return { args, help, jsonMode };
+}
+
 export function writeCliText(text: string, jsonMode: boolean): void {
 	(jsonMode ? process.stderr : process.stdout).write(text);
 }
