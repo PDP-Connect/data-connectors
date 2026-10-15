@@ -3721,7 +3721,7 @@ test("collect: a run whose history maxDaysPerRun cuts short defers as before, th
 	});
 });
 
-test("collect: past MAX_RETRY_DAYS the oldest kept days are let go, and a second PROGRESS line counts the days, with no date", async () => {
+test("collect: past MAX_RETRY_DAYS only days this run read are let go: kept days outside the grant stay, and a second PROGRESS line counts the days, with no date", async () => {
 	assert.equal(MAX_RETRY_DAYS, 366);
 	const fake = fakeGarmin(
 		site((data) => {
@@ -3756,19 +3756,20 @@ test("collect: past MAX_RETRY_DAYS the oldest kept days are let go, and a second
 		},
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
+	// The never-read kept span is intact; the oldest day this run read and found unreadable goes.
 	assert.deepEqual(statesOf(h), {
 		daily_summaries: {
 			...FULL,
 			retry: [
-				span("2025-06-04", "2026-06-01"),
-				span("2026-09-16", "2026-09-18"),
+				span("2025-06-03", "2026-06-01"),
+				span("2026-09-17", "2026-09-18"),
 			],
 		},
 	});
 	assertStateLast(h);
 });
 
-test("collect: a range stream past MAX_RETRY_DAYS lets the oldest kept days go as well: its window joins whole, so the days let go outnumber the nights", async () => {
+test("collect: a range stream past MAX_RETRY_DAYS lets go only the window it read: kept days outside the grant stay, and the window goes whole, so the days let go outnumber the nights", async () => {
 	const fake = fakeGarmin(site((data) => nightOn(data, "2026-09-18", "5400")));
 	const h = await collect(fake, {
 		// A full list, outside the grant (whose first day is the floor): kept, never read.
@@ -3789,13 +3790,7 @@ test("collect: a range stream past MAX_RETRY_DAYS lets the oldest kept days go a
 	]);
 	assert.deepEqual(messagesOf(h, "SKIP_RESULT"), []);
 	assert.deepEqual(statesOf(h), {
-		sleep: {
-			...FULL,
-			retry: [
-				span("2025-06-29", "2026-06-01"),
-				span("2026-08-24", "2026-09-20"),
-			],
-		},
+		sleep: { ...FULL, retry: [span("2025-06-01", "2026-06-01")] },
 	});
 	assertStateLast(h);
 });
@@ -3886,6 +3881,47 @@ test("collect: at the cap, a kept day whose read fails is never let go: the cap 
 		daily_summaries: { ...FULL, floor: "2025-01-01", retry: [kept] },
 	});
 	assertStateLast(h);
+});
+
+// review b360011 decl#1: only days this run read may be let go. A saved retry span outside a
+// narrowed grant is not read, so it must survive the cap and be read once the grant widens again.
+test("review b360011 decl#1: a kept day outside a narrowed grant survives the cap, and a later widened run reads it", async () => {
+	assert.equal(MAX_RETRY_DAYS, 366);
+	const kept = span("2025-06-01", "2026-06-01");
+	const run1 = fakeGarmin(
+		site((data) => summaryOn(data, "2026-09-16", "8432")),
+	);
+	const h1 = await collect(run1, {
+		state: {
+			daily_summaries: { ...FULL, floor: "2025-01-01", retry: [kept] },
+		},
+		streams: ["daily_summaries"],
+		ranges: { daily_summaries: { since: "2026-06-24T00:00:00.000Z" } },
+	});
+	// The grant excludes every kept day: run 1 reads only the forward overlap.
+	assert.deepEqual(
+		pathsOf(run1, "daily_summaries").map(dayOf),
+		daysFrom("2026-09-15", TODAY),
+	);
+	const saved = statesOf(h1).daily_summaries as { retry?: unknown };
+	assert.deepEqual(
+		saved.retry,
+		[kept],
+		"the cap lets go the day this run read (2026-09-16), never an unread kept day",
+	);
+
+	// Run 2: the grant widens back and the June 1 source row is repaired.
+	const run2 = fakeGarmin(site(() => undefined));
+	const h2 = await collect(run2, {
+		state: { daily_summaries: saved },
+		streams: ["daily_summaries"],
+		ranges: { daily_summaries: { since: "2025-01-01T00:00:00.000Z" } },
+	});
+	assert.ok(
+		pathsOf(run2, "daily_summaries").map(dayOf).includes(kept.from),
+		"the widened run reads the kept day the narrowed run never read",
+	);
+	assert.ok(h2);
 });
 
 test("collect: full_refresh keeps the days still to read again, and reads them after its ninety days", async () => {

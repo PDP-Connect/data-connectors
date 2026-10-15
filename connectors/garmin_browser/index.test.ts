@@ -1493,3 +1493,22 @@ test("a goto to the app that times out fails ensureSession before the owner is a
 	);
 	assert.deepEqual(requests, []);
 });
+
+test("review b360011 decl#1: with the days a run read, normaliseRetry lets go only those, and returns any unread days it had to let go as forced", () => {
+	const year = span("2025-06-01", "2026-06-01");
+	// The read day goes; the unread kept year stays whole.
+	assert.deepEqual(
+		normaliseRetry([year, span("2026-09-16")], [span("2026-09-16")]),
+		{
+			retry: [year],
+			dropped: 1,
+		},
+	);
+	// Nothing read: the cap can only be met by letting unread days go, and they are returned as
+	// forced (for a declared bound), never counted as dropped in silence.
+	assert.deepEqual(normaliseRetry([year, span("2026-09-16")], []), {
+		retry: [span("2025-06-02", "2026-06-01"), span("2026-09-16")],
+		dropped: 0,
+		forced: [span("2025-06-01")],
+	});
+});
