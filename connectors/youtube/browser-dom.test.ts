@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
@@ -124,6 +125,32 @@ test("playlist links exclude LL and WL and keep native IDs", () => {
 	]);
 });
 
+test("current lockup view-model playlist cards expose only synthetic owner playlist links", () => {
+	const html = readFileSync(
+		new URL("./__fixtures__/real-shape/playlist-index-view-model.html", import.meta.url),
+		"utf8",
+	);
+	assert.deepEqual(
+		readPlaylistLinks(dom(html)),
+		[
+			{
+				id: "PL_SYNTHETIC_OWNER_001",
+				url: "https://www.youtube.com/playlist?list=PL_SYNTHETIC_OWNER_001",
+			},
+		],
+	);
+});
+
+test("current lockup playlist cards are retained when classic playlist cards also render", () => {
+	const doc = dom(`
+		<ytd-playlist-renderer><a href="/playlist?list=PL_SYNTHETIC_CLASSIC_001"></a></ytd-playlist-renderer>
+		<yt-lockup-view-model><a href="/playlist?list=PL_SYNTHETIC_LOCKUP_002"></a></yt-lockup-view-model>`);
+	assert.deepEqual(
+		readPlaylistLinks(doc).map((playlist) => playlist.id),
+		["PL_SYNTHETIC_CLASSIC_001", "PL_SYNTHETIC_LOCKUP_002"],
+	);
+});
+
 test("video and playlist URLs must resolve to YouTube", () => {
 	const doc = dom(
 		'<a href="https://other.example/playlist?list=PL1">outside</a><yt-lockup-view-model><a href="https://other.example/watch?v=abc123XYZ0"></a><h3 title="outside"></h3></yt-lockup-view-model>',
@@ -143,6 +170,17 @@ test("old and lockup playlist cards supply real video titles and URLs", () => {
 			["abc123XYZ0", "Old title"],
 			["xyz987ABC0", "New title"],
 		],
+	);
+});
+
+test("current Watch Later playlist renderer shape yields synthetic video rows", () => {
+	const html = readFileSync(
+		new URL("./__fixtures__/real-shape/watch-later-playlist-items.html", import.meta.url),
+		"utf8",
+	);
+	assert.deepEqual(
+		readVideos("playlist", dom(html)).map((video) => video.video_id),
+		["VIDEO_SYNTHETIC_001", "VIDEO_SYNTHETIC_002"],
 	);
 });
 

@@ -1,12 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
 	enumerationEnded,
 	type ListEnd,
 	readListEnd,
+	readPageReadiness,
 } from "./page-evidence.ts";
 
 const NO_EVIDENCE: ListEnd = {
@@ -177,6 +179,198 @@ test("an unrelated empty message without a list renderer cannot prove an empty p
 	globals.window = window;
 	try {
 		assert.equal(readListEnd("playlist").verifiedEmpty, false);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+});
+
+test("the selected liked-videos tab's recognized empty message proves an empty list", () => {
+	const data = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								sectionListRenderer: {
+									contents: [
+										{
+											itemSectionRenderer: {
+												contents: [
+													{
+														messageRenderer: {
+															text: {
+																runs: [{ text: "No videos in this playlist" }],
+															},
+														},
+												},
+													],
+												},
+											},
+										],
+								},
+							},
+						},
+					},
+				],
+			},
+		},
+	};
+	const { document, window } = parseHTML(
+		`<script>var ytInitialData = ${JSON.stringify(data)};</script>`,
+	);
+	const globals = globalThis as Record<string, unknown>;
+	globals.document = document;
+	globals.window = window;
+	try {
+		assert.equal(readListEnd("playlist").verifiedEmpty, true);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+});
+
+test("the selected playlist index is empty of owner playlists when only built-in lockups remain", () => {
+	const lockup = (id: string) => ({
+		content: {
+			lockupViewModel: {
+				contentId: id,
+				itemPlayback: {
+					inlinePlayerData: {
+						onSelect: {
+							innertubeCommand: { watchEndpoint: { playlistId: id } },
+						},
+					},
+				},
+			},
+		},
+	});
+	const data = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								richGridRenderer: {
+									contents: [
+										{ richItemRenderer: lockup("WL") },
+										{ richItemRenderer: lockup("LL") },
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		},
+	};
+	const { document, window } = parseHTML(
+		`<yt-lockup-view-model><a href="/playlist?list=WL"></a></yt-lockup-view-model><yt-lockup-view-model><a href="/playlist?list=LL"></a></yt-lockup-view-model><script>var ytInitialData = ${JSON.stringify(data)};</script>`,
+	);
+	const globals = globalThis as Record<string, unknown>;
+	globals.document = document;
+	globals.window = window;
+	try {
+		assert.equal(readListEnd("playlist-index").verifiedEmpty, true);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+});
+
+test("a rejected message inside a playlist index vetoes built-in-only empty evidence", () => {
+	const data = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [{
+					tabRenderer: {
+						selected: true,
+						content: {
+							richGridRenderer: {
+								contents: [{ messageRenderer: { text: { runs: [{ text: "Sign in to confirm you're not a bot" }] } } }],
+							},
+						},
+					},
+				}],
+			},
+		},
+	};
+	const { document, window } = parseHTML(
+		`<yt-lockup-view-model><a href="/playlist?list=WL"></a></yt-lockup-view-model><script>var ytInitialData = ${JSON.stringify(data)};</script>`,
+	);
+	const globals = globalThis as Record<string, unknown>;
+	globals.document = document;
+	globals.window = window;
+	try {
+		assert.equal(readPageReadiness({ content: "yt-lockup-view-model", empty: "ytd-message-renderer", playlistIndex: true }), "content");
+		assert.equal(readListEnd("playlist-index").verifiedEmpty, false);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+});
+
+test("current empty-liked and four-subscription source shapes prove their captured outcomes", () => {
+	const globals = globalThis as Record<string, unknown>;
+	for (const [file, kind, expectedCount] of [
+		["playlist-index-view-model.html", "playlist-index", 1],
+		["watch-later-playlist-items.html", "playlist", 2],
+	] as const) {
+		const page = parseHTML(
+			readFileSync(
+				new URL(`./__fixtures__/real-shape/${file}`, import.meta.url),
+				"utf8",
+			),
+		);
+		globals.document = page.document;
+		globals.window = page.window;
+		try {
+			const end = readListEnd(kind);
+			assert.equal(end.dataReadable, true);
+			assert.equal(end.dataItemCount, expectedCount);
+			assert.equal(end.domItemCount, expectedCount);
+			assert.equal(enumerationEnded(end, expectedCount), true);
+		} finally {
+			globals.document = undefined;
+			globals.window = undefined;
+		}
+	}
+
+	const liked = parseHTML(
+		readFileSync(
+			new URL("./__fixtures__/real-shape/liked-videos-empty-tab.html", import.meta.url),
+			"utf8",
+		),
+	);
+	globals.document = liked.document;
+	globals.window = liked.window;
+	try {
+		const end = readListEnd("playlist");
+		assert.equal(end.verifiedEmpty, true);
+		assert.equal(enumerationEnded(end, 0), true);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+
+	const subscriptions = parseHTML(
+		readFileSync(
+			new URL("./__fixtures__/real-shape/subscriptions-four-source-items.html", import.meta.url),
+			"utf8",
+		),
+	);
+	globals.document = subscriptions.document;
+	globals.window = subscriptions.window;
+	try {
+		const end = readListEnd("subscriptions");
+		assert.equal(end.dataReadable, true);
+		assert.equal(end.dataItemCount, 4);
+		assert.equal(end.domItemCount, 4);
+		assert.equal(enumerationEnded(end, 4), true);
 	} finally {
 		globals.document = undefined;
 		globals.window = undefined;

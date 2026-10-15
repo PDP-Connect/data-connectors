@@ -171,10 +171,19 @@ const PAGE_DATA_HELPERS = String.raw`
 		const chosen = selected.length === 1 ? selected : renderers.length === 1 ? renderers : [];
 		return chosen.length === 1 && isObject(chosen[0].content) ? chosen[0].content : null;
 	};
+	const hasSelectedTabContent = (data) => {
+		const contents = isObject(data) ? data.contents : null;
+		if (!isObject(contents)) return false;
+		const layout = contents.twoColumnBrowseResultsRenderer ?? contents.singleColumnBrowseResultsRenderer;
+		const tabs = isObject(layout) ? layout.tabs : undefined;
+		return Array.isArray(tabs) && tabs.some((tab) =>
+			isObject(tab) && isObject(tab.tabRenderer) && tab.tabRenderer.selected === true && isObject(tab.tabRenderer.content)
+		);
+	};
 	const regionFacts = (data, playlistIndex) => {
 		const region = listRegion(data);
 		if (region === null) return null;
-		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false };
+		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data) };
 		const visit = (value) => {
 			if (Array.isArray(value)) {
 				for (const child of value) visit(child);
@@ -190,6 +199,7 @@ const PAGE_DATA_HELPERS = String.raw`
 				if (key === "continuations" && Array.isArray(child) && child.length > 0) facts.continuation = true;
 				if (EMPTY_MESSAGE_KEYS.includes(key) && isObject(child)) {
 					if (isRecognizedEmptyText(textFragments(child).join(" "))) facts.emptyMessage = true;
+					else facts.rejectedMessage = true;
 					continue;
 				}
 				if (LIST_KEYS.includes(key) && isObject(child)) {
@@ -226,8 +236,8 @@ const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
 	const facts = pageDataFacts(Boolean(playlistIndex));
 	// Every readable copy of the page data must show no item, no next page and no
 	// non-empty list. Another list's empty payload cannot prove this one empty.
-	const holdsNothing = (f) => f.items === 0 && !f.continuation && f.emptyLists === f.lists;
-	const hasSourceEmptyMessage = facts.some((f) => f.emptyMessage || f.emptyLists > 0);
+	const holdsNothing = (f) => f.items === 0 && !f.continuation && !f.rejectedMessage && f.emptyLists === f.lists;
+	const hasSourceEmptyMessage = facts.some((f) => f.emptyMessage || (f.emptyLists > 0 && !f.rejectedMessage));
 	if (hasSourceEmptyMessage && facts.every(holdsNothing)) return "empty";
 	if (playlistIndex && document.querySelector("yt-lockup-view-model")) return "content";
 	if (Array.from(document.querySelectorAll(empty)).some((node) =>
@@ -282,9 +292,10 @@ const LIST_END_FUNCTION = `(kind) => {
 		verifiedEmpty: facts.length > 0 && facts.every((f) =>
 			f.items === 0 &&
 			!f.continuation &&
-			f.lists > 0 &&
-			f.emptyMessage &&
-			f.emptyLists === f.lists
+			!f.rejectedMessage &&
+			((f.lists > 0 && f.emptyMessage && f.emptyLists === f.lists) ||
+				(kind === "playlist-index" && f.lists > 0 && f.emptyLists === f.lists) ||
+				(f.selectedTabContent && f.emptyMessage))
 		),
 	};
 }`;

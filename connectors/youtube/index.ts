@@ -940,7 +940,7 @@ export async function collectYoutubeBrowser(
 				playlistLinks = result.items;
 				for (const stream of ["playlists", "playlist_items"]) {
 					if (!requested.has(stream)) continue;
-					if (state === "empty" && result.exhausted) {
+					if (result.items.length === 0 && result.exhausted) {
 						playlistIndexVerifiedEmpty = true;
 					} else if (playlistLinks.length === 0) {
 						playlistIndexReadable = false;

@@ -300,6 +300,70 @@ test("scrubbed live playlist DOM accepts modern lockups before scrolling", async
 	}
 });
 
+test("current empty lockup playlist index, liked message and subscription data complete without stream failures", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixture = (name: string) =>
+			readFileSync(new URL(`./__fixtures__/real-shape/${name}`, import.meta.url), "utf8");
+		const pages: Record<string, string> = {
+			"/feed/playlists": fixture("playlist-index-builtins-only.html"),
+			"/playlist?list=LL": fixture("liked-videos-empty-tab.html"),
+			"/feed/channels": fixture("subscriptions-four-source-items.html"),
+		};
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			const html = pages[`${url.pathname}${url.search}`];
+			await route.fulfill({
+				status: html ? 200 : 404,
+				contentType: "text/html",
+				body: html ?? "",
+			});
+		});
+		const fastPage = new Proxy(page, {
+			get(target, key) {
+				if (key === "waitForTimeout") return async () => undefined;
+				const value = Reflect.get(target, key);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const failures: Array<[string, string]> = [];
+		const messages: Array<Record<string, unknown>> = [];
+		const subscriptions: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: fastPage as never,
+			requested: new Map(
+				["playlists", "playlist_items", "likes", "subscriptions"].map((name) => [name, { name }]),
+			) as never,
+			emitRecord: async (stream, data) => {
+				if (stream === "subscriptions") subscriptions.push(data);
+			},
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
+			reportStreamFailure: async (stream, message) => {
+				failures.push([stream, message]);
+			},
+			progress: async () => undefined,
+		});
+		assert.deepEqual(failures, []);
+		assert.deepEqual(
+			messages
+				.filter((message) => message.type === "STATE")
+				.map((message) => [message.stream, (message.cursor as Record<string, unknown>).evidence])
+				.sort(([a], [b]) => String(a).localeCompare(String(b))),
+			[
+				["likes", "youtube_page_data_empty"],
+				["playlist_items", "youtube_page_data_empty"],
+				["playlists", "youtube_page_data_empty"],
+			],
+		);
+		assert.equal(subscriptions.length, 4);
+	} finally {
+		await browser.close();
+	}
+});
+
 test("history needs target-list empty evidence; a sign-in renderer still fails", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {

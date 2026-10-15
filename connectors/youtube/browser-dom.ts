@@ -247,7 +247,7 @@ export function readPlaylistLinks(
 	const seen = new Set<string>();
 	const playlistCards = Array.from(
 		doc.querySelectorAll(
-			"ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer",
+			"ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer, yt-lockup-view-model",
 		),
 	);
 	const cardLinks = playlistCards.flatMap((card) => {
