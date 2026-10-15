@@ -45,7 +45,9 @@ export function readOwnAccount(doc: Document = document): {
 			),
 	);
 	const menuItem = Array.from(
-		doc.querySelectorAll("ytd-multi-page-menu-renderer ytd-compact-link-renderer"),
+		doc.querySelectorAll(
+			"ytd-multi-page-menu-renderer ytd-compact-link-renderer",
+		),
 	).find((item) => {
 		const label = item
 			.querySelector("#label")
@@ -69,14 +71,14 @@ export function readOwnAccount(doc: Document = document): {
 	);
 	const href = handle?.startsWith("@")
 		? `/${handle}`
-		: link?.getAttribute("href") ?? menuLink?.getAttribute("href");
+		: (link?.getAttribute("href") ?? menuLink?.getAttribute("href"));
 	const email =
 		header.querySelector("#email, [id*='email']")?.textContent?.trim() || null;
 	const url = href ? new URL(href, "https://www.youtube.com") : null;
 	return {
 		channel_url:
 			url?.origin === "https://www.youtube.com" &&
-				!/\/(edit|create|monetization|studio)(?:[/?]|$)/.test(url.pathname)
+			!/\/(edit|create|monetization|studio)(?:[/?]|$)/.test(url.pathname)
 				? url.href
 				: null,
 		email,
@@ -145,15 +147,15 @@ export function readChannelAbout(doc: Document = document): {
 		.filter((node) => node.children.length === 0)
 		.map((node) => node.textContent?.trim() ?? "");
 	const statsText = statsRoot
-		? Array.from(statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"))
+		? Array.from(
+				statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"),
+			)
 				.filter((node) => node.children.length === 0)
 				.map((node) => node.textContent?.trim() ?? "")
 		: [];
 	const joined = text.find((value) => /^joined\s+/i.test(value));
 	const country =
-		about
-			?.querySelector('[id*="country"]')
-			?.textContent?.trim() || null;
+		about?.querySelector('[id*="country"]')?.textContent?.trim() || null;
 	return {
 		joined_at: joined?.replace(/^joined\s+/i, "") ?? null,
 		description:
@@ -164,12 +166,15 @@ export function readChannelAbout(doc: Document = document): {
 				?.textContent?.trim() || null,
 		country,
 		subscriber_count_text:
-			statsText.find((value) => /subscriber/i.test(value) && /\d/.test(value)) ??
-			null,
+			statsText.find(
+				(value) => /subscriber/i.test(value) && /\d/.test(value),
+			) ?? null,
 		view_count_text:
-			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ??
+			null,
 		video_count_text:
-			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ??
+			null,
 	};
 }
 
@@ -250,12 +255,29 @@ export function readPlaylistLinks(
 			"ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer, yt-lockup-view-model",
 		),
 	);
-	const cardLinks = playlistCards.flatMap((card) => {
-		const link = card.querySelector<HTMLAnchorElement>('a[href*="list="]');
-		return link ? [link] : [];
-	});
-	const links = cardLinks.length
-		? cardLinks
+	const links = playlistCards.length
+		? playlistCards.flatMap((card) => {
+				const link = Array.from(
+					card.querySelectorAll<HTMLAnchorElement>('a[href*="list="]'),
+				).find((anchor) => {
+					const url = new URL(
+						anchor.getAttribute("href") ?? "",
+						"https://www.youtube.com",
+					);
+					return (
+						url.origin === "https://www.youtube.com" &&
+						url.pathname === "/playlist" &&
+						Boolean(url.searchParams.get("list"))
+					);
+				});
+				if (!link) return [];
+				if (
+					card.matches("yt-lockup-view-model") &&
+					!card.querySelector("yt-collection-thumbnail-view-model")
+				)
+					return [];
+				return [link];
+			})
 		: Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="list="]'));
 	return links
 		.flatMap((a) => {
@@ -263,7 +285,11 @@ export function readPlaylistLinks(
 				a.getAttribute("href") ?? "",
 				"https://www.youtube.com",
 			);
-			if (url.origin !== "https://www.youtube.com") return [];
+			if (
+				url.origin !== "https://www.youtube.com" ||
+				url.pathname !== "/playlist"
+			)
+				return [];
 			const id = url.searchParams.get("list");
 			if (!id || id === "LL" || id === "WL" || seen.has(id)) return [];
 			seen.add(id);

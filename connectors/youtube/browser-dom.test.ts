@@ -8,8 +8,8 @@ import {
 	readChannelAbout,
 	readChannelPage,
 	readOwnAccount,
-	readSubscriptions,
 	readPlaylistLinks,
+	readSubscriptions,
 	readVideos,
 } from "./browser-dom.ts";
 
@@ -127,27 +127,41 @@ test("playlist links exclude LL and WL and keep native IDs", () => {
 
 test("current lockup view-model playlist cards expose only synthetic owner playlist links", () => {
 	const html = readFileSync(
-		new URL("./__fixtures__/real-shape/playlist-index-view-model.html", import.meta.url),
+		new URL(
+			"./__fixtures__/real-shape/playlist-index-view-model.html",
+			import.meta.url,
+		),
 		"utf8",
 	);
-	assert.deepEqual(
-		readPlaylistLinks(dom(html)),
-		[
-			{
-				id: "PL_SYNTHETIC_OWNER_001",
-				url: "https://www.youtube.com/playlist?list=PL_SYNTHETIC_OWNER_001",
-			},
-		],
-	);
+	assert.deepEqual(readPlaylistLinks(dom(html)), [
+		{
+			id: "PL_SYNTHETIC_OWNER_001",
+			url: "https://www.youtube.com/playlist?list=PL_SYNTHETIC_OWNER_001",
+		},
+	]);
 });
 
 test("current lockup playlist cards are retained when classic playlist cards also render", () => {
 	const doc = dom(`
 		<ytd-playlist-renderer><a href="/playlist?list=PL_SYNTHETIC_CLASSIC_001"></a></ytd-playlist-renderer>
-		<yt-lockup-view-model><a href="/playlist?list=PL_SYNTHETIC_LOCKUP_002"></a></yt-lockup-view-model>`);
+		<yt-lockup-view-model><a href="/playlist?list=PL_SYNTHETIC_LOCKUP_002"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model>`);
 	assert.deepEqual(
 		readPlaylistLinks(doc).map((playlist) => playlist.id),
 		["PL_SYNTHETIC_CLASSIC_001", "PL_SYNTHETIC_LOCKUP_002"],
+	);
+});
+
+test("modern video lockups with list parameters are excluded beside classic playlists", () => {
+	const html = readFileSync(
+		new URL(
+			"./__fixtures__/real-shape/playlist-index-video-lockup-mixed.html",
+			import.meta.url,
+		),
+		"utf8",
+	);
+	assert.deepEqual(
+		readPlaylistLinks(dom(html)).map((playlist) => playlist.id),
+		["PL_SYNTHETIC_CLASSIC_001"],
 	);
 });
 
@@ -175,7 +189,10 @@ test("old and lockup playlist cards supply real video titles and URLs", () => {
 
 test("current Watch Later playlist renderer shape yields synthetic video rows", () => {
 	const html = readFileSync(
-		new URL("./__fixtures__/real-shape/watch-later-playlist-items.html", import.meta.url),
+		new URL(
+			"./__fixtures__/real-shape/watch-later-playlist-items.html",
+			import.meta.url,
+		),
 		"utf8",
 	);
 	assert.deepEqual(

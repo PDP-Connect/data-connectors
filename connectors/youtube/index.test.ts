@@ -12,7 +12,7 @@ import {
 	readPageReadiness,
 	resolveWatchedDate,
 } from "./index.ts";
-import { readListEnd } from "./page-evidence.ts";
+import { enumerationEnded, readListEnd } from "./page-evidence.ts";
 import { validateRecord } from "./schemas.ts";
 
 const VIDEO = {
@@ -28,8 +28,16 @@ const VIDEO = {
 	description: "Snippet",
 };
 
-function withBrowserGlobals(html: string, run: () => void): void {
+function withBrowserGlobals(
+	html: string,
+	run: () => void,
+	url = "https://www.youtube.com/",
+): void {
 	const { document, window } = parseHTML(html);
+	Object.defineProperty(window, "location", {
+		configurable: true,
+		value: new URL(url),
+	});
 	const globals = globalThis as typeof globalThis & {
 		document?: Document;
 		window?: Window;
@@ -453,7 +461,7 @@ test("unreadable list DOM emits a skip instead of a successful zero-row snapshot
 	assert.equal(records.length, 0);
 });
 
-test("page readiness treats ytInitialData empty contents as positive empty evidence", () => {
+test("an empty grid without rendered built-in playlist links is not empty evidence", () => {
 	withBrowserGlobals(
 		`<script>var ytInitialData = {"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"richGridRenderer":{"contents":[]}}}}]}}};</script>`,
 		() => {
@@ -462,13 +470,13 @@ test("page readiness treats ytInitialData empty contents as positive empty evide
 					content: "yt-lockup-view-model",
 					empty: "ytd-message-renderer",
 				}),
-				"empty",
+				false,
 			);
 		},
 	);
 });
 
-test("page readiness treats explicit YouTube empty renderers in JSON as positive empty evidence", () => {
+test("an unbound empty message in page data is not target-list evidence", () => {
 	withBrowserGlobals(
 		`<script>var ytInitialData = {"contents":{"messageRenderer":{"text":{"runs":[{"text":"No videos yet"}]}}}};</script>`,
 		() => {
@@ -477,7 +485,7 @@ test("page readiness treats explicit YouTube empty renderers in JSON as positive
 					content: "yt-lockup-view-model",
 					empty: "ytd-message-renderer",
 				}),
-				"empty",
+				false,
 			);
 		},
 	);
@@ -823,10 +831,35 @@ test("browser navigation failures report each requested enumeration as retryable
 	);
 });
 
-test("empty-state JSON text may contain braces and escaped quotes", () => {
+test("LL empty-state JSON text may contain braces and escaped quotes", () => {
 	const data = {
 		contents: {
-			messageRenderer: { text: { simpleText: 'No videos } yet "saved"' } },
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								sectionListRenderer: {
+									contents: [
+										{
+											itemSectionRenderer: {
+												contents: [
+													{
+														messageRenderer: {
+															text: { simpleText: 'No videos } yet "saved"' },
+														},
+													},
+												],
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
 		},
 	};
 	withBrowserGlobals(
@@ -840,6 +873,7 @@ test("empty-state JSON text may contain braces and escaped quotes", () => {
 				"empty",
 			);
 		},
+		"https://www.youtube.com/playlist?list=LL",
 	);
 });
 
@@ -944,6 +978,10 @@ class DocumentPage {
 	}
 	private inPage<T>(run: () => T): T {
 		const { document, window } = parseHTML(this.pageFor(this.url));
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: new URL(this.url || "https://www.youtube.com/"),
+		});
 		(window as unknown as { scrollBy: () => void }).scrollBy = () => undefined;
 		const globals = globalThis as Record<string, unknown>;
 		const previous = { document: globals.document, window: globals.window };
@@ -1064,7 +1102,9 @@ test("finding 1: a list with a next page still pending fails with stream_collect
 });
 
 test("finding 1: reading to the history limit is a cap that fails the stream, not the end of the list", async () => {
-	const sourceItems = Array.from({ length: 60 }, () => ({ lockupViewModel: {} }));
+	const sourceItems = Array.from({ length: 60 }, () => ({
+		lockupViewModel: {},
+	}));
 	const rows = Array.from(
 		{ length: 60 },
 		(_, n) =>
@@ -1083,7 +1123,9 @@ test("finding 1: reading to the history limit is a cap that fails the stream, no
 test("history rows beyond the emitted cap veto completion even with a page end marker", async () => {
 	const cases = [false, true];
 	for (const withEndMarker of cases) {
-		const sourceItems = Array.from({ length: 30 }, () => ({ lockupViewModel: {} }));
+		const sourceItems = Array.from({ length: 30 }, () => ({
+			lockupViewModel: {},
+		}));
 		const rows = Array.from(
 			{ length: 60 },
 			(_, n) =>
@@ -1101,7 +1143,13 @@ test("history rows beyond the emitted cap veto completion even with a page end m
 
 test("playlist total mismatch cannot be excused by unrelated DOM text", async () => {
 	const phrase = "100 unavailable videos are hidden";
-	for (const placement of ["none", "notice", "title", "description", "sidebar"]) {
+	for (const placement of [
+		"none",
+		"notice",
+		"title",
+		"description",
+		"sidebar",
+	]) {
 		const rows = Array.from(
 			{ length: 4 },
 			(_, n) =>
@@ -1111,17 +1159,25 @@ test("playlist total mismatch cannot be excused by unrelated DOM text", async ()
 			placement === "title"
 				? rows.replace("<h3>V0</h3>", `<h3>${phrase}</h3>`)
 				: placement === "description"
-					? rows.replace("<h3>V0</h3>", `<h3>V0</h3><div id="description">${phrase}</div>`)
+					? rows.replace(
+							"<h3>V0</h3>",
+							`<h3>V0</h3><div id="description">${phrase}</div>`,
+						)
 					: rows;
-		const data = pageData(tabbedData({
-			playlistVideoListRenderer: {
-				contents: Array.from({ length: 4 }, (_, n) => ({
-					playlistVideoRenderer: { videoId: `vid${String(n).padStart(8, "0")}` },
-				})),
-			},
-		}));
+		const data = pageData(
+			tabbedData({
+				playlistVideoListRenderer: {
+					contents: Array.from({ length: 4 }, (_, n) => ({
+						playlistVideoRenderer: {
+							videoId: `vid${String(n).padStart(8, "0")}`,
+						},
+					})),
+				},
+			}),
+		);
 		const { records, outcome } = await collectFromDocuments(
-			() => `${rowsWithPhrase}${headerTotal("5 videos")}${data}${placement === "notice" ? `<div>Unavailable videos are hidden</div>` : placement === "sidebar" ? `<ytd-guide-renderer><span>${phrase}</span></ytd-guide-renderer>` : ""}${END_OF_LIST}`,
+			() =>
+				`${rowsWithPhrase}${headerTotal("5 videos")}${data}${placement === "notice" ? `<div>Unavailable videos are hidden</div>` : placement === "sidebar" ? `<ytd-guide-renderer><span>${phrase}</span></ytd-guide-renderer>` : ""}${END_OF_LIST}`,
 			["likes"],
 		);
 		assert.equal(records.get("likes")?.length, 4);
@@ -1130,12 +1186,19 @@ test("playlist total mismatch cannot be excused by unrelated DOM text", async ()
 });
 
 test("exactly 50 data-backed history rows can end without an end marker", async () => {
-	const ids = Array.from({ length: 50 }, (_, n) => `vid${String(n).padStart(8, "0")}`);
+	const ids = Array.from(
+		{ length: 50 },
+		(_, n) => `vid${String(n).padStart(8, "0")}`,
+	);
 	const rows = ids
-		.map((id, n) => `<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>V${n}</h3></yt-lockup-view-model>`)
+		.map(
+			(id, n) =>
+				`<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>V${n}</h3></yt-lockup-view-model>`,
+		)
 		.join("");
 	const { records, outcome } = await collectFromDocuments(
-		() => `<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}`,
+		() =>
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
@@ -1145,7 +1208,8 @@ test("exactly 50 data-backed history rows can end without an end marker", async 
 test("delayed DOM rows beyond readable data do not prove completion", async () => {
 	const rows = Array.from(
 		{ length: 2 },
-		(_, n) => `<ytd-playlist-video-renderer><a href="/watch?v=vid${String(n).padStart(8, "0")}&list=PL1"></a><h3>V${n}</h3></ytd-playlist-video-renderer>`,
+		(_, n) =>
+			`<ytd-playlist-video-renderer><a href="/watch?v=vid${String(n).padStart(8, "0")}&list=PL1"></a><h3>V${n}</h3></ytd-playlist-video-renderer>`,
 	).join("");
 	const { records, outcome } = await collectFromDocuments(
 		() => `${rows}${playlistPageData(1)}`,
@@ -1162,10 +1226,13 @@ test("verified empty list evidence is vetoed by current DOM rows or continuation
 	]) {
 		withBrowserGlobals(
 			`${currentDom}${pageData(tabbedData({ sectionListRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No subscriptions" } } }, { richGridRenderer: { contents: [] } }] } }))}`,
-			() => assert.equal(readListEnd("subscriptions").verifiedEmpty, true),
+			() =>
+				assert.equal(enumerationEnded(readListEnd("subscriptions"), 0), false),
+			"https://www.youtube.com/feed/channels",
 		);
 		const { outcome } = await collectFromDocuments(
-			() => `${currentDom}${pageData(tabbedData({ sectionListRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No subscriptions" } } }, { richGridRenderer: { contents: [] } }] } }))}`,
+			() =>
+				`${currentDom}${pageData(tabbedData({ sectionListRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No subscriptions" } } }, { richGridRenderer: { contents: [] } }] } }))}`,
 			["subscriptions"],
 			"empty",
 		);
@@ -1174,19 +1241,27 @@ test("verified empty list evidence is vetoed by current DOM rows or continuation
 });
 
 test("verified empty video evidence is vetoed by current DOM rows or continuation", async () => {
-	for (const currentDom of [playlistRow, `<ytd-playlist-video-list-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-playlist-video-list-renderer>`]) {
+	for (const currentDom of [
+		playlistRow,
+		`<ytd-playlist-video-list-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-playlist-video-list-renderer>`,
+	]) {
 		withBrowserGlobals(
-			`${currentDom}${pageData(tabbedData({
-				messageRenderer: { text: { simpleText: "No videos" } },
-				playlistVideoListRenderer: { contents: [] },
-			}))}`,
-			() => assert.equal(readListEnd("playlist").verifiedEmpty, true),
+			`${currentDom}${pageData(
+				tabbedData({
+					messageRenderer: { text: { simpleText: "No videos" } },
+					playlistVideoListRenderer: { contents: [] },
+				}),
+			)}`,
+			() => assert.equal(readListEnd("playlist").verifiedEmpty, false),
 		);
 		const { outcome } = await collectFromDocuments(
-			() => `${currentDom}${pageData(tabbedData({
-				messageRenderer: { text: { simpleText: "No videos" } },
-				playlistVideoListRenderer: { contents: [] },
-			}))}`,
+			() =>
+				`${currentDom}${pageData(
+					tabbedData({
+						messageRenderer: { text: { simpleText: "No videos" } },
+						playlistVideoListRenderer: { contents: [] },
+					}),
+				)}`,
 			["likes"],
 			"empty",
 		);
@@ -1250,15 +1325,15 @@ test("finding 2: an unrelated empty list cannot prove a non-empty target list em
 		false,
 		"other tab",
 	);
-	// A real empty target with a non-empty list elsewhere on the page still counts.
+	// An empty section is not a target-bound completion marker for arbitrary lists.
 	assert.equal(
 		ready(
 			pageData(
 				tabbedData(SIDEBAR_EMPTY, { secondaryContents: TARGET_NON_EMPTY }),
 			),
 		),
-		"empty",
-		"empty target, non-empty sidebar",
+		false,
+		"empty payload without a target end marker",
 	);
 });
 
@@ -1296,13 +1371,13 @@ test("finding 3: the playlist index counts only the playlists the connector enum
 		});
 		return state;
 	};
-	assert.equal(ready(`${BUILT_IN_LINKS}${NO_PLAYLISTS}`), "empty");
+	assert.notEqual(ready(`${BUILT_IN_LINKS}${NO_PLAYLISTS}`), "empty");
 	assert.equal(ready(BUILT_IN_LINKS), false);
 	assert.equal(
 		ready(`${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`),
 		"content",
 	);
-	// Built-in lists in the page data do not block the source's empty evidence.
+	// An empty-message section beside built-ins is not the playlist grid's end proof.
 	assert.equal(
 		ready(
 			`${BUILT_IN_LINKS}${pageData(
@@ -1321,7 +1396,7 @@ test("finding 3: the playlist index counts only the playlists the connector enum
 				}),
 			)}`,
 		),
-		"empty",
+		false,
 	);
 });
 
@@ -1329,31 +1404,62 @@ test("finding 3: readiness and readPlaylistLinks agree on which links are playli
 	const { readPlaylistLinks } = await import("./browser-dom.ts");
 	const cases = [
 		{ html: BUILT_IN_LINKS, ready: false, playlists: 0 },
-		{ html: `${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`, ready: true, playlists: 1 },
-		{ html: `<a href="https://evil.example/playlist?list=PL9">Elsewhere</a>`, ready: false, playlists: 0 },
-		{ html: `<a href="/playlist?list=PL1">A</a><a href="/playlist?list=PL1&amp;x=1">Again</a>`, ready: true, playlists: 1 },
-		{ html: `<yt-lockup-view-model>${BUILT_IN_LINKS}</yt-lockup-view-model>`, ready: true, playlists: 0 },
+		{
+			html: `${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`,
+			ready: true,
+			playlists: 1,
+		},
+		{
+			html: `<a href="https://evil.example/playlist?list=PL9">Elsewhere</a>`,
+			ready: false,
+			playlists: 0,
+		},
+		{
+			html: `<a href="/playlist?list=PL1">A</a><a href="/playlist?list=PL1&amp;x=1">Again</a>`,
+			ready: true,
+			playlists: 1,
+		},
+		{
+			html: `<yt-lockup-view-model>${BUILT_IN_LINKS}</yt-lockup-view-model>`,
+			ready: true,
+			playlists: 0,
+		},
 	];
 	for (const { html, ready, playlists } of cases) {
 		withBrowserGlobals(html, () => {
 			const readiness = readPageReadiness(PLAYLIST_INDEX);
-			assert.equal(
-				readiness === "content",
-				ready,
-				html,
-			);
+			assert.equal(readiness === "content", ready, html);
 			assert.equal(readPlaylistLinks().length, playlists, html);
 		});
 	}
 });
 
 test("built-in lists plus page-data empty evidence complete both playlist streams", async () => {
+	const builtIns = (id: "LL" | "WL") => ({
+		content: {
+			lockupViewModel: {
+				contentId: id,
+				contentType: "LOCKUP_CONTENT_TYPE_PLAYLIST",
+				rendererContext: {
+					commandContext: {
+						onTap: { innertubeCommand: { watchEndpoint: { playlistId: id } } },
+					},
+				},
+			},
+		},
+	});
 	const { records, messages, outcome } = await collectFromDocuments(
-		() => `${BUILT_IN_LINKS}${pageData(tabbedData({ richGridRenderer: { contents: [
-			{ lockupViewModel: { contentId: "WL" } },
-			{ lockupViewModel: { contentId: "LL" } },
-			{ messageRenderer: { text: { runs: [{ text: "No playlists yet" }] } } },
-		] } }))}`,
+		() =>
+			`<button id="avatar-btn"></button><div id="contents"><yt-lockup-view-model><a href="/playlist?list=WL"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model><yt-lockup-view-model><a href="/playlist?list=LL"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model></div>${pageData(
+				tabbedData({
+					richGridRenderer: {
+						contents: [
+							{ richItemRenderer: builtIns("WL") },
+							{ richItemRenderer: builtIns("LL") },
+						],
+					},
+				}),
+			)}`,
 		["playlists", "playlist_items"],
 	);
 	assert.equal(records.size, 0);
@@ -1448,10 +1554,7 @@ test("round 3: a page-data region with no recognized list does not prove complet
 	];
 	const runs = await Promise.all(
 		regions.map((data) =>
-			collectFromDocuments(
-				() => `${playlistRow}${pageData(data)}`,
-				["likes"],
-			),
+			collectFromDocuments(() => `${playlistRow}${pageData(data)}`, ["likes"]),
 		),
 	);
 	for (const { records, messages, outcome } of runs) {

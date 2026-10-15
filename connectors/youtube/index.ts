@@ -172,14 +172,17 @@ async function hasYoutubeSession(
 		)) !== "content"
 	)
 		return false;
-	return await page.evaluate(
-		() =>
-			Boolean(
-				document.querySelector(
-					'button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn, ytd-masthead button[aria-label*="Account"]',
-				),
-			) &&
-			!document.querySelector('a[href*="accounts.google.com/ServiceLogin"]'),
+	return page.evaluate(hasYoutubeSessionOnCurrentPage);
+}
+
+/** Reads the authenticated marker after a target page has finished rendering. */
+function hasYoutubeSessionOnCurrentPage(): boolean {
+	return (
+		Boolean(
+			document.querySelector(
+				'button#avatar-btn, ytd-topbar-menu-button-renderer #avatar-btn, ytd-masthead button[aria-label*="Account"]',
+			),
+		) && !document.querySelector('a[href*="accounts.google.com/ServiceLogin"]')
 	);
 }
 
@@ -222,9 +225,7 @@ async function scroll(
 	let unchangedRounds = 0;
 	for (let i = 0; i < rounds; i += 1) {
 		const before = await page.locator(selector).count();
-		const continuationBefore = await page
-			.locator(continuationSelector)
-			.count();
+		const continuationBefore = await page.locator(continuationSelector).count();
 		await page.evaluate((itemSelector) => {
 			const scrollable = Array.from(document.querySelectorAll("*"))
 				.filter(
@@ -242,13 +243,10 @@ async function scroll(
 		await page.waitForTimeout(settleMilliseconds);
 		const after = await page.locator(selector).count();
 		unchangedRounds = after === before ? unchangedRounds + 1 : 0;
-		const continuationAfter = await page
-			.locator(continuationSelector)
-			.count();
+		const continuationAfter = await page.locator(continuationSelector).count();
 		if (continuationBefore > 0 && continuationAfter === 0) {
 			await page.waitForTimeout(settleMilliseconds);
-			if ((await page.locator(continuationSelector).count()) === 0)
-				return true;
+			if ((await page.locator(continuationSelector).count()) === 0) return true;
 		}
 		if (unchangedRounds >= 2) break;
 	}
@@ -463,9 +461,7 @@ function exhaustionEvidence(
 async function readSubscriptionsList(
 	page: BrowserCollectContext["page"],
 	state: "content" | "empty",
-): Promise<
-	ListRead<Awaited<ReturnType<typeof readSubscriptions>>[number]>
-> {
+): Promise<ListRead<Awaited<ReturnType<typeof readSubscriptions>>[number]>> {
 	const selector = "ytd-channel-renderer";
 	const continuationRemoved =
 		state === "content"
@@ -521,10 +517,13 @@ async function readPlaylistIndex(
 			: await page.evaluate(
 					readPlaylistLinks as () => ReturnType<typeof readPlaylistLinks>,
 				);
-	const pageEnd = await page.evaluate<ListEnd, ListKind>(
-		readListEnd,
-		"playlist-index",
-	);
+	const pageEnd = await page.evaluate<
+		ListEnd,
+		{ kind: ListKind; sessionPresent: boolean }
+	>(readListEnd, {
+		kind: "playlist-index",
+		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+	});
 	const evidence = exhaustionEvidence(
 		pageEnd,
 		items.length,
@@ -569,7 +568,12 @@ async function readVideoList(
 				: "youtube-playlist-items",
 	);
 	if (state === "empty") {
-		const end = await page.evaluate(readListEnd, mode);
+		const end = await page.evaluate(readListEnd, {
+			kind: mode,
+			sessionPresent:
+				mode !== "playlist" ||
+				(await page.evaluate(hasYoutubeSessionOnCurrentPage)),
+		});
 		const evidence = exhaustionEvidence(end, 0, false);
 		return {
 			items: [],
@@ -608,8 +612,7 @@ async function readVideoList(
 					selector,
 					LIST_CONTINUATION_SELECTORS[mode],
 					mode === "history" ? 800 : 1_500,
-				)) ||
-				continuationRemoved;
+				)) || continuationRemoved;
 	}
 	if (out.length === 0) throw new Error("youtube_video_parse_mismatch");
 	// The history limit is a cap the connector chose, not the end of the list.
@@ -617,7 +620,12 @@ async function readVideoList(
 	// the cap discarded rows that were read.
 	const cappedAtLimit = mode === "history" && out.length >= HISTORY_LIMIT;
 	const discardedRows = mode === "history" && out.length > HISTORY_LIMIT;
-	const pageEnd = await page.evaluate(readListEnd, mode);
+	const pageEnd = await page.evaluate(readListEnd, {
+		kind: mode,
+		sessionPresent:
+			mode !== "playlist" ||
+			(await page.evaluate(hasYoutubeSessionOnCurrentPage)),
+	});
 	await capture?.captureDom(
 		page,
 		url.includes("list=LL")

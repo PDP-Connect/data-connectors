@@ -20,6 +20,12 @@ export type ListKind =
 	| "playlist-index"
 	| "subscriptions";
 
+export interface ListEndRequest {
+	readonly kind: ListKind;
+	/** The page-local session probe is false when auth was lost after navigation. */
+	readonly sessionPresent?: boolean;
+}
+
 export interface ListEnd {
 	/** The target page's own `ytInitialData` list region held recognized entries. */
 	readonly dataReadable: boolean;
@@ -112,14 +118,18 @@ const PAGE_DATA_HELPERS = String.raw`
 	const isRecognizedEmptyText = (text) =>
 		/(?:no|empty|haven't|has no|doesn't have).*(?:video|playlist|history|subscription|channel)|nothing to show|no content/i.test(text) &&
 		!/sign in|login|error|try again|unavailable|account|private|deleted|doesn't exist|not found/i.test(text);
-	const isEnumerablePlaylistLink = (anchor) => {
+	const playlistIdFromHref = (href) => {
 		try {
-			const url = new URL(anchor.getAttribute("href") ?? "", BASE);
+			const url = new URL(href ?? "", BASE);
 			const listId = url.searchParams.get("list");
-			return url.origin === BASE && Boolean(listId) && listId !== "LL" && listId !== "WL";
+			return url.origin === BASE && url.pathname === "/playlist" && listId ? listId : null;
 		} catch {
-			return false;
+			return null;
 		}
+	};
+	const isEnumerablePlaylistLink = (anchor) => {
+		const id = playlistIdFromHref(anchor.getAttribute("href"));
+		return Boolean(id && id !== "LL" && id !== "WL");
 	};
 	const EMPTY_MESSAGE_KEYS = ["messageRenderer", "backgroundPromoRenderer", "ytdMessageRenderer", "ytdBackgroundPromoRenderer"];
 	const LIST_KEYS = ["richGridRenderer", "gridRenderer", "playlistVideoListRenderer"];
@@ -129,7 +139,52 @@ const PAGE_DATA_HELPERS = String.raw`
 		"shortsLockupViewModel", "reelItemRenderer", "channelRenderer", "gridChannelRenderer",
 		"gridPlaylistRenderer", "playlistRenderer", "compactPlaylistRenderer",
 	];
-	const BUILT_IN_PLAYLIST = /"(?:contentId|playlistId)":"(?:LL|WL)"|playlist\?list=(?:LL|WL)(?![\w-])/;
+	const isBuiltInLockup = (value) => {
+		const find = (node) => {
+			if (Array.isArray(node)) return node.some(find);
+			if (!isObject(node)) return false;
+			const lockup = isObject(node.lockupViewModel) ? node.lockupViewModel : node;
+			if (typeof lockup.contentId === "string" && typeof lockup.contentType === "string") {
+				const id = lockup.contentId;
+			if ((id === "LL" || id === "WL") && /PLAYLIST/.test(lockup.contentType ?? "")) return true;
+			}
+			return Object.values(node).some(find);
+		};
+		return find(value);
+	};
+	const targetLocation = () => {
+		try { return new URL(window.location.href); } catch { return null; }
+	};
+	const onPlaylistIndexPage = () => targetLocation()?.pathname === "/feed/playlists";
+	const onLikedVideosPage = () => {
+		const url = targetLocation();
+		return url?.pathname === "/playlist" && url.searchParams.get("list") === "LL";
+	};
+	const onSubscriptionsPage = () => targetLocation()?.pathname === "/feed/channels";
+	const isVisible = (node) => {
+		if (node.closest('[hidden], [aria-hidden="true"]')) return false;
+		const style = typeof window.getComputedStyle === "function" ? window.getComputedStyle(node) : null;
+		if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return false;
+		return typeof node.getClientRects !== "function" || node.getClientRects().length > 0;
+	};
+	const hasVisibleMatch = (selector, root = document) => Array.from(root.querySelectorAll(selector)).some(isVisible);
+	const hasPageWall = () => hasVisibleMatch(
+		'a[href*="accounts.google.com/ServiceLogin"], ytd-consent-bump-v2-lightbox, ytd-consent-bump-v2, #consent-bump, tp-yt-paper-dialog[role="dialog"], ytd-popup-container tp-yt-paper-dialog, [aria-label*="sign in" i], #error-screen, ytd-error-screen, .yt-error-content, ytd-browse[page-subtype="error"]'
+	);
+	const hasDomLoading = (root = document) => {
+		if (root.querySelector("ytd-continuation-item-renderer")) return true;
+		return hasVisibleMatch('.yt-spinner, yt-spinner, tp-yt-paper-spinner, tp-yt-paper-spinner-lite, [aria-busy="true"], [aria-label*="loading" i], #spinner', root);
+	};
+	const hasOnlyBuiltInPlaylistCards = () => {
+		const cards = Array.from(document.querySelectorAll("yt-lockup-view-model, ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer"));
+		return cards.length > 0 && cards.every((card) => {
+			const id = Array.from(card.querySelectorAll('a[href*="list="]'))
+				.map((anchor) => playlistIdFromHref(anchor.getAttribute("href")))
+				.find(Boolean) ?? null;
+			return (id === "LL" || id === "WL") &&
+				(!card.matches("yt-lockup-view-model") || Boolean(card.querySelector("yt-collection-thumbnail-view-model")));
+		});
+	};
 	const readJsonText = (scriptText) => {
 		const markerIndex = scriptText.indexOf("ytInitialData");
 		if (markerIndex < 0) return null;
@@ -168,22 +223,22 @@ const PAGE_DATA_HELPERS = String.raw`
 		if (!Array.isArray(tabs)) return contents;
 		const renderers = tabs.map((tab) => (isObject(tab) ? tab.tabRenderer : null)).filter(isObject);
 		const selected = renderers.filter((renderer) => renderer.selected === true);
-		const chosen = selected.length === 1 ? selected : renderers.length === 1 ? renderers : [];
-		return chosen.length === 1 && isObject(chosen[0].content) ? chosen[0].content : null;
+		return selected.length === 1 && isObject(selected[0].content) ? selected[0].content : null;
 	};
 	const hasSelectedTabContent = (data) => {
 		const contents = isObject(data) ? data.contents : null;
 		if (!isObject(contents)) return false;
 		const layout = contents.twoColumnBrowseResultsRenderer ?? contents.singleColumnBrowseResultsRenderer;
 		const tabs = isObject(layout) ? layout.tabs : undefined;
-		return Array.isArray(tabs) && tabs.some((tab) =>
-			isObject(tab) && isObject(tab.tabRenderer) && tab.tabRenderer.selected === true && isObject(tab.tabRenderer.content)
-		);
+		if (!Array.isArray(tabs)) return false;
+		const selected = tabs.map((tab) => isObject(tab) ? tab.tabRenderer : null)
+			.filter((renderer) => isObject(renderer) && renderer.selected === true);
+		return selected.length === 1 && isObject(selected[0].content);
 	};
 	const regionFacts = (data, playlistIndex) => {
 		const region = listRegion(data);
 		if (region === null) return null;
-		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data) };
+		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, likedVideosEmpty: false };
 		const visit = (value) => {
 			if (Array.isArray(value)) {
 				for (const child of value) visit(child);
@@ -191,8 +246,12 @@ const PAGE_DATA_HELPERS = String.raw`
 			}
 			if (!isObject(value)) return;
 			for (const [key, child] of Object.entries(value)) {
+				if (
+					(key === "isLoading" && child === true) ||
+					/(?:loadingSpinnerRenderer|spinnerRenderer|loadingIndicator)$/i.test(key)
+				) facts.loading = true;
 				if (ITEM_KEYS.includes(key)) {
-					if (!(playlistIndex && BUILT_IN_PLAYLIST.test(JSON.stringify(child)))) facts.items += 1;
+					if (!(playlistIndex && isBuiltInLockup(child))) facts.items += 1;
 					continue;
 				}
 				if (key === "continuationItemRenderer" || key === "nextContinuationData") facts.continuation = true;
@@ -205,16 +264,27 @@ const PAGE_DATA_HELPERS = String.raw`
 				if (LIST_KEYS.includes(key) && isObject(child)) {
 					facts.lists += 1;
 					const contents = child.contents ?? child.items;
-					const onlyBuiltIns = playlistIndex && Array.isArray(contents) && contents.every((item) =>
-						BUILT_IN_PLAYLIST.test(JSON.stringify(item)) ||
-						(isObject(item) && Object.keys(item).some((name) => EMPTY_MESSAGE_KEYS.includes(name)))
-					);
-					if (Array.isArray(contents) && (contents.length === 0 || onlyBuiltIns) && !child.continuations) facts.emptyLists += 1;
+					const onlyBuiltIns = playlistIndex && Array.isArray(contents) && contents.length > 0 && contents.every(isBuiltInLockup);
+					if ((onlyBuiltIns || (!playlistIndex && Array.isArray(contents) && contents.length === 0)) &&
+						(!Array.isArray(child.continuations) || child.continuations.length === 0)) facts.emptyLists += 1;
 				}
 				visit(child);
 			}
 		};
 		visit(region);
+		if (playlistIndex) facts.playlistIndexEmpty = facts.selectedTabContent && facts.lists === 1 && facts.emptyLists === 1 && facts.items === 0 && !facts.continuation && !facts.loading;
+		if (!playlistIndex && facts.selectedTabContent) {
+			const layout = data.contents?.twoColumnBrowseResultsRenderer ?? data.contents?.singleColumnBrowseResultsRenderer;
+			const tabs = layout?.tabs;
+			const selected = Array.isArray(tabs) ? tabs.map((tab) => tab?.tabRenderer).filter((tab) => tab?.selected === true) : [];
+			const sections = selected.length === 1 ? selected[0].content?.sectionListRenderer?.contents : null;
+			const section = Array.isArray(sections) && sections.length === 1 ? sections[0]?.itemSectionRenderer : null;
+			const sectionContents = section?.contents;
+			facts.likedVideosEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
+				isObject(sectionContents[0]?.messageRenderer) &&
+				isRecognizedEmptyText(textFragments(sectionContents[0].messageRenderer).join(" ")) &&
+				!facts.items && !facts.continuation && !facts.loading && !facts.rejectedMessage;
+		}
 		return facts;
 	};
 	const pageDataFacts = (playlistIndex) => {
@@ -234,19 +304,18 @@ const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
 		: Boolean(document.querySelector(content));
 	if (hasEnumerableContent) return "content";
 	const facts = pageDataFacts(Boolean(playlistIndex));
-	// Every readable copy of the page data must show no item, no next page and no
-	// non-empty list. Another list's empty payload cannot prove this one empty.
-	const holdsNothing = (f) => f.items === 0 && !f.continuation && !f.rejectedMessage && f.emptyLists === f.lists;
-	const hasSourceEmptyMessage = facts.some((f) => f.emptyMessage || (f.emptyLists > 0 && !f.rejectedMessage));
-	if (hasSourceEmptyMessage && facts.every(holdsNothing)) return "empty";
+	if (playlistIndex && onPlaylistIndexPage() && !hasPageWall() && !hasDomLoading() && hasOnlyBuiltInPlaylistCards() && facts.length > 0 && facts.every((f) => f.playlistIndexEmpty)) return "empty";
+	if (!playlistIndex && onLikedVideosPage() && !hasPageWall() && facts.length > 0 && facts.every((f) => f.likedVideosEmpty)) return "empty";
 	if (playlistIndex && document.querySelector("yt-lockup-view-model")) return "content";
-	if (Array.from(document.querySelectorAll(empty)).some((node) =>
+	if (!playlistIndex && Array.from(document.querySelectorAll(empty)).some((node) =>
 		isRecognizedEmptyText(node.textContent ?? ""))) return "empty";
 	return false;
 }`;
 
-const LIST_END_FUNCTION = `(kind) => {
+const LIST_END_FUNCTION = `(request) => {
 	${PAGE_DATA_HELPERS}
+	const kind = typeof request === "string" ? request : request.kind;
+	const sessionPresent = typeof request === "string" ? true : request.sessionPresent !== false;
 	const facts = pageDataFacts(kind === "playlist-index");
 	let declaredTotal = null;
 	if (kind === "playlist") {
@@ -289,14 +358,14 @@ const LIST_END_FUNCTION = `(kind) => {
 		declaredTotal,
 		domItemCount,
 		domHasEndMarker: /(?:no more (?:videos|items)|end of (?:the )?list|you(?:'|’)ve reached the end)/i.test(endText),
-		verifiedEmpty: facts.length > 0 && facts.every((f) =>
-			f.items === 0 &&
-			!f.continuation &&
-			!f.rejectedMessage &&
-			((f.lists > 0 && f.emptyMessage && f.emptyLists === f.lists) ||
-				(kind === "playlist-index" && f.lists > 0 && f.emptyLists === f.lists) ||
-				(f.selectedTabContent && f.emptyMessage))
-		),
+		verifiedEmpty: sessionPresent && !hasPageWall() && !hasDomLoading() && facts.length > 0 &&
+			(kind === "playlist-index"
+				? onPlaylistIndexPage() && hasOnlyBuiltInPlaylistCards() && facts.every((f) => f.playlistIndexEmpty)
+				: kind === "playlist"
+					? onLikedVideosPage() && !document.querySelector("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer") && facts.every((f) => f.likedVideosEmpty)
+					: kind === "subscriptions"
+						? onSubscriptionsPage() && facts.every((f) => f.selectedTabContent && f.lists > 0 && f.emptyMessage && f.emptyLists === f.lists && f.items === 0 && !f.continuation && !f.loading && !f.rejectedMessage)
+						: false),
 	};
 }`;
 
@@ -315,7 +384,7 @@ export const readPageReadiness = new Function(
 
 /** Runs in the page after enumeration. Reads the source's own end evidence. */
 export const readListEnd = Object.defineProperty(
-	new Function("kind", `return (${LIST_END_FUNCTION})(kind);`),
+	new Function("request", `return (${LIST_END_FUNCTION})(request);`),
 	"name",
 	{ value: "readListEnd" },
-) as (kind: ListKind) => ListEnd;
+) as (request: ListKind | ListEndRequest) => ListEnd;

@@ -204,7 +204,10 @@ test("scrubbed live subscription DOM scrolls its app container and reports missi
 	try {
 		const page = await browser.newPage();
 		const html = readFileSync(
-			new URL("./__fixtures__/real-shape/subscriptions-before-scroll.html", import.meta.url),
+			new URL(
+				"./__fixtures__/real-shape/subscriptions-before-scroll.html",
+				import.meta.url,
+			),
 			"utf8",
 		);
 		await page.route("https://www.youtube.com/**", async (route) => {
@@ -215,7 +218,9 @@ test("scrubbed live subscription DOM scrolls its app container and reports missi
 		const messages: Record<string, unknown>[] = [];
 		await collectYoutubeBrowser({
 			page: page as never,
-			requested: new Map([["subscriptions", { name: "subscriptions" }]]) as never,
+			requested: new Map([
+				["subscriptions", { name: "subscriptions" }],
+			]) as never,
 			emitRecord: async (_stream, data) => {
 				records.push(data);
 			},
@@ -233,7 +238,10 @@ test("scrubbed live subscription DOM scrolls its app container and reports missi
 		assert.equal(records.length, 4);
 		assert.ok(scrollTop > 0, "the captured YouTube app container was scrolled");
 		assert.deepEqual(failures, ["subscriptions"]);
-		assert.equal(messages.some((message) => message.type === "STATE"), false);
+		assert.equal(
+			messages.some((message) => message.type === "STATE"),
+			false,
+		);
 		assert.equal(
 			await page.locator("ytd-continuation-item-renderer").count(),
 			0,
@@ -241,7 +249,10 @@ test("scrubbed live subscription DOM scrolls its app container and reports missi
 		const afterScrollPage = await browser.newPage();
 		await afterScrollPage.setContent(
 			readFileSync(
-				new URL("./__fixtures__/real-shape/subscriptions-after-scroll.html", import.meta.url),
+				new URL(
+					"./__fixtures__/real-shape/subscriptions-after-scroll.html",
+					import.meta.url,
+				),
 				"utf8",
 			),
 		);
@@ -259,7 +270,10 @@ test("scrubbed live playlist DOM accepts modern lockups before scrolling", async
 	try {
 		const page = await browser.newPage();
 		const html = readFileSync(
-			new URL("./__fixtures__/real-shape/playlist-index-before-scroll.html", import.meta.url),
+			new URL(
+				"./__fixtures__/real-shape/playlist-index-before-scroll.html",
+				import.meta.url,
+			),
 			"utf8",
 		);
 		await page.route("https://www.youtube.com/**", async (route) => {
@@ -280,14 +294,19 @@ test("scrubbed live playlist DOM accepts modern lockups before scrolling", async
 			progress: async () => undefined,
 		});
 		assert.ok(
-			(await page.evaluate(() => document.querySelector(".ytd-app")?.scrollTop ?? 0)) > 0,
+			(await page.evaluate(
+				() => document.querySelector(".ytd-app")?.scrollTop ?? 0,
+			)) > 0,
 			"the captured YouTube app container was scrolled",
 		);
 		assert.deepEqual(failures, ["playlists", "playlist_items"]);
 		const afterScrollPage = await browser.newPage();
 		await afterScrollPage.setContent(
 			readFileSync(
-				new URL("./__fixtures__/real-shape/playlist-index-after-scroll.html", import.meta.url),
+				new URL(
+					"./__fixtures__/real-shape/playlist-index-after-scroll.html",
+					import.meta.url,
+				),
 				"utf8",
 			),
 		);
@@ -305,7 +324,10 @@ test("current empty lockup playlist index, liked message and subscription data c
 	try {
 		const page = await browser.newPage();
 		const fixture = (name: string) =>
-			readFileSync(new URL(`./__fixtures__/real-shape/${name}`, import.meta.url), "utf8");
+			readFileSync(
+				new URL(`./__fixtures__/real-shape/${name}`, import.meta.url),
+				"utf8",
+			);
 		const pages: Record<string, string> = {
 			"/feed/playlists": fixture("playlist-index-builtins-only.html"),
 			"/playlist?list=LL": fixture("liked-videos-empty-tab.html"),
@@ -333,7 +355,9 @@ test("current empty lockup playlist index, liked message and subscription data c
 		await collectYoutubeBrowser({
 			page: fastPage as never,
 			requested: new Map(
-				["playlists", "playlist_items", "likes", "subscriptions"].map((name) => [name, { name }]),
+				["playlists", "playlist_items", "likes", "subscriptions"].map(
+					(name) => [name, { name }],
+				),
 			) as never,
 			emitRecord: async (stream, data) => {
 				if (stream === "subscriptions") subscriptions.push(data);
@@ -350,7 +374,10 @@ test("current empty lockup playlist index, liked message and subscription data c
 		assert.deepEqual(
 			messages
 				.filter((message) => message.type === "STATE")
-				.map((message) => [message.stream, (message.cursor as Record<string, unknown>).evidence])
+				.map((message) => [
+					message.stream,
+					(message.cursor as Record<string, unknown>).evidence,
+				])
 				.sort(([a], [b]) => String(a).localeCompare(String(b))),
 			[
 				["likes", "youtube_page_data_empty"],
@@ -364,7 +391,7 @@ test("current empty lockup playlist index, liked message and subscription data c
 	}
 });
 
-test("history needs target-list empty evidence; a sign-in renderer still fails", async () => {
+test("history empty messages without a supported target proof fail honestly", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const run = async (text: string, withTargetList = false) => {
@@ -415,7 +442,7 @@ test("history needs target-list empty evidence; a sign-in renderer still fails",
 			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
 		]);
 		assert.deepEqual(await run("You haven't watched any videos yet", true), [
-			["STATE", "watch_history", undefined],
+			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
 		]);
 		assert.deepEqual(await run("Sign in to see your watch history", true), [
 			["SKIP_RESULT", "watch_history", "stream_collection_failed"],

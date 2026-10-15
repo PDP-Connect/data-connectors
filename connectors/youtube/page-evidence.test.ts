@@ -22,6 +22,13 @@ const NO_EVIDENCE: ListEnd = {
 	verifiedEmpty: false,
 };
 
+function setPageLocation(window: object, url: string) {
+	Object.defineProperty(window, "location", {
+		configurable: true,
+		value: new URL(url),
+	});
+}
+
 test("enumeration ends only on positive page terminal evidence", () => {
 	const ended = (
 		end: Partial<ListEnd> | null,
@@ -35,7 +42,11 @@ test("enumeration ends only on positive page terminal evidence", () => {
 		);
 	assert.equal(ended(null, 3), false, "no evidence read");
 	assert.equal(ended({}, 3), false, "unreadable page data is not evidence");
-	assert.equal(ended({ declaredTotal: 3 }, 3), false, "a total is not an end marker");
+	assert.equal(
+		ended({ declaredTotal: 3 }, 3),
+		false,
+		"a total is not an end marker",
+	);
 	assert.equal(ended({ declaredTotal: 9 }, 3), false, "total not reached");
 	assert.equal(
 		ended({ dataReadable: true, dataItemCount: 3 }, 3),
@@ -157,6 +168,10 @@ test("a page-data region with no recognized entry is not readable evidence", () 
 	);
 	globals.document = document;
 	globals.window = window;
+	setPageLocation(
+		window,
+		"https://www.youtube.com/playlist?list=PL_SYNTHETIC_TARGET_001",
+	);
 	try {
 		assert.equal(readListEnd("playlist").dataReadable, false);
 	} finally {
@@ -177,6 +192,7 @@ test("an unrelated empty message without a list renderer cannot prove an empty p
 	);
 	globals.document = document;
 	globals.window = window;
+	setPageLocation(window, "https://www.youtube.com/playlist?list=LL");
 	try {
 		assert.equal(readListEnd("playlist").verifiedEmpty, false);
 	} finally {
@@ -205,11 +221,11 @@ test("the selected liked-videos tab's recognized empty message proves an empty l
 																runs: [{ text: "No videos in this playlist" }],
 															},
 														},
-												},
-													],
-												},
+													},
+												],
 											},
-										],
+										},
+									],
 								},
 							},
 						},
@@ -224,6 +240,7 @@ test("the selected liked-videos tab's recognized empty message proves an empty l
 	const globals = globalThis as Record<string, unknown>;
 	globals.document = document;
 	globals.window = window;
+	setPageLocation(window, "https://www.youtube.com/playlist?list=LL");
 	try {
 		assert.equal(readListEnd("playlist").verifiedEmpty, true);
 	} finally {
@@ -237,6 +254,7 @@ test("the selected playlist index is empty of owner playlists when only built-in
 		content: {
 			lockupViewModel: {
 				contentId: id,
+				contentType: "LOCKUP_CONTENT_TYPE_PLAYLIST",
 				itemPlayback: {
 					inlinePlayerData: {
 						onSelect: {
@@ -269,11 +287,12 @@ test("the selected playlist index is empty of owner playlists when only built-in
 		},
 	};
 	const { document, window } = parseHTML(
-		`<yt-lockup-view-model><a href="/playlist?list=WL"></a></yt-lockup-view-model><yt-lockup-view-model><a href="/playlist?list=LL"></a></yt-lockup-view-model><script>var ytInitialData = ${JSON.stringify(data)};</script>`,
+		`<yt-lockup-view-model><a href="/playlist?list=WL"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model><yt-lockup-view-model><a href="/playlist?list=LL"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model><script>var ytInitialData = ${JSON.stringify(data)};</script>`,
 	);
 	const globals = globalThis as Record<string, unknown>;
 	globals.document = document;
 	globals.window = window;
+	setPageLocation(window, "https://www.youtube.com/feed/playlists");
 	try {
 		assert.equal(readListEnd("playlist-index").verifiedEmpty, true);
 	} finally {
@@ -282,20 +301,107 @@ test("the selected playlist index is empty of owner playlists when only built-in
 	}
 });
 
+test("empty playlist index grid does not prove the owner has no playlists", () => {
+	assertFixtureUnproven("playlist-index-empty-grid.html", "playlist-index");
+});
+
+test("loading playlist index grid does not prove the owner has no playlists", () => {
+	assertFixtureUnproven("playlist-index-loading-grid.html", "playlist-index");
+});
+
+test("a sole unselected playlist tab does not prove the owner has no playlists", () => {
+	assertFixtureUnproven("playlist-index-unselected-tab.html", "playlist-index");
+});
+
+test("an unrelated empty LL section cannot prove a loading target section empty", () => {
+	assertFixtureUnproven(
+		"liked-videos-unrelated-empty-loading-target.html",
+		"playlist",
+	);
+});
+
+test("an auth or consent wall vetoes empty LL evidence", () => {
+	assertFixtureUnproven("liked-videos-consent-wall.html", "playlist");
+});
+
+test("a lost session vetoes empty LL evidence on the target page", () => {
+	const page = parseHTML(
+		readFileSync(
+			new URL(
+				"./__fixtures__/real-shape/liked-videos-empty-tab.html",
+				import.meta.url,
+			),
+			"utf8",
+		),
+	);
+	const globals = globalThis as Record<string, unknown>;
+	globals.document = page.document;
+	globals.window = page.window;
+	setPageLocation(page.window, "https://www.youtube.com/playlist?list=LL");
+	try {
+		assert.equal(
+			readListEnd({ kind: "playlist", sessionPresent: false }).verifiedEmpty,
+			false,
+		);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+});
+
+function assertFixtureUnproven(
+	file: string,
+	kind: "playlist-index" | "playlist",
+) {
+	const page = parseHTML(
+		readFileSync(
+			new URL(`./__fixtures__/real-shape/${file}`, import.meta.url),
+			"utf8",
+		),
+	);
+	const globals = globalThis as Record<string, unknown>;
+	globals.document = page.document;
+	globals.window = page.window;
+	setPageLocation(
+		page.window,
+		kind === "playlist-index"
+			? "https://www.youtube.com/feed/playlists"
+			: "https://www.youtube.com/playlist?list=LL",
+	);
+	try {
+		assert.equal(readListEnd(kind).verifiedEmpty, false);
+	} finally {
+		globals.document = undefined;
+		globals.window = undefined;
+	}
+}
+
 test("a rejected message inside a playlist index vetoes built-in-only empty evidence", () => {
 	const data = {
 		contents: {
 			twoColumnBrowseResultsRenderer: {
-				tabs: [{
-					tabRenderer: {
-						selected: true,
-						content: {
-							richGridRenderer: {
-								contents: [{ messageRenderer: { text: { runs: [{ text: "Sign in to confirm you're not a bot" }] } } }],
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								richGridRenderer: {
+									contents: [
+										{
+											messageRenderer: {
+												text: {
+													runs: [
+														{ text: "Sign in to confirm you're not a bot" },
+													],
+												},
+											},
+										},
+									],
+								},
 							},
 						},
 					},
-				}],
+				],
 			},
 		},
 	};
@@ -305,8 +411,16 @@ test("a rejected message inside a playlist index vetoes built-in-only empty evid
 	const globals = globalThis as Record<string, unknown>;
 	globals.document = document;
 	globals.window = window;
+	setPageLocation(window, "https://www.youtube.com/feed/playlists");
 	try {
-		assert.equal(readPageReadiness({ content: "yt-lockup-view-model", empty: "ytd-message-renderer", playlistIndex: true }), "content");
+		assert.equal(
+			readPageReadiness({
+				content: "yt-lockup-view-model",
+				empty: "ytd-message-renderer",
+				playlistIndex: true,
+			}),
+			"content",
+		);
 		assert.equal(readListEnd("playlist-index").verifiedEmpty, false);
 	} finally {
 		globals.document = undefined;
@@ -342,12 +456,16 @@ test("current empty-liked and four-subscription source shapes prove their captur
 
 	const liked = parseHTML(
 		readFileSync(
-			new URL("./__fixtures__/real-shape/liked-videos-empty-tab.html", import.meta.url),
+			new URL(
+				"./__fixtures__/real-shape/liked-videos-empty-tab.html",
+				import.meta.url,
+			),
 			"utf8",
 		),
 	);
 	globals.document = liked.document;
 	globals.window = liked.window;
+	setPageLocation(liked.window, "https://www.youtube.com/playlist?list=LL");
 	try {
 		const end = readListEnd("playlist");
 		assert.equal(end.verifiedEmpty, true);
@@ -359,7 +477,10 @@ test("current empty-liked and four-subscription source shapes prove their captur
 
 	const subscriptions = parseHTML(
 		readFileSync(
-			new URL("./__fixtures__/real-shape/subscriptions-four-source-items.html", import.meta.url),
+			new URL(
+				"./__fixtures__/real-shape/subscriptions-four-source-items.html",
+				import.meta.url,
+			),
 			"utf8",
 		),
 	);
