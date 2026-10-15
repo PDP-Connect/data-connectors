@@ -525,6 +525,7 @@ test("garmin_browser: every reason the connector can emit has its own copy, and 
 	);
 	assert.deepEqual(reasons.toSorted(), [
 		"collection_interrupted",
+		"retry_list_limit_reached",
 		"sign_in_required",
 		"source_limit_reached",
 		"source_unreadable",
