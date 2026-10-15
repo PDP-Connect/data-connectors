@@ -23,11 +23,10 @@
  * is read as UTC. Any other shape is refused rather than guessed at.
  */
 
-import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
+import { safeTextPreview } from "@pdpp/connector-protocol/safe-text-preview";
 import type {
 	Citation,
 	ConversationRecord,
-	EntryMessages,
 	MessageRecord,
 	ThreadDetailPage,
 	ThreadListPage,
@@ -42,7 +41,7 @@ const CONTENT_MAX_CHARS = 1_000_000;
 // ─── shared value readers ───────────────────────────────────────────────
 
 /**
- * An ISO-8601 date-time, returned as a UTC instant `YYYY-MM-DDTHH:MM:SSZ`.
+ * An ISO-8601 date-time, returned as a UTC instant `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
  * The zone may be `Z` or an explicit offset (`+00:00`, `+0000`). The list's
  * timestamps arrive with NO zone at all (`2026-10-02T09:15:00.999999`,
  * microseconds), while the entries of the very same threads carry `+00:00`:
@@ -52,7 +51,7 @@ const CONTENT_MAX_CHARS = 1_000_000;
  * wilder guess than that.
  */
 const ZONED_TIME_RE =
-	/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
+	/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$/;
 
 export function normalizeInstant(value: unknown): string | null {
 	if (typeof value !== "string") {
@@ -62,7 +61,7 @@ export function normalizeInstant(value: unknown): string | null {
 	if (!match) {
 		return null;
 	}
-	const [, date, time, zone] = match;
+	const [, date, time, fraction, zone] = match;
 	if (date === undefined || time === undefined) {
 		return null;
 	}
@@ -75,29 +74,46 @@ export function normalizeInstant(value: unknown): string | null {
 	if (Number.isNaN(instant.getTime())) {
 		return null;
 	}
-	return `${instant.toISOString().slice(0, 19)}Z`;
+	// Keep the source's microseconds, fixed width, so two updates inside the
+	// same second still compare as different and the strings sort by time.
+	// An offset shifts whole minutes only, so the fraction carries over as is.
+	const micros = (fraction ?? "").slice(0, 6).padEnd(6, "0");
+	return `${instant.toISOString().slice(0, 19)}.${micros}Z`;
 }
 
-/** Free text that must pass the PDPP printable-text invariant, or null. */ function safeText(
-	value: unknown,
-	max: number,
-): string | null {
+/**
+ * Short free text (titles, model names) through the protocol's own
+ * `safeTextPreview`: unsafe text is null, over-long text is cut on a code
+ * point boundary. Bodies use `readContent`, which reports unsafe text instead
+ * of hiding it.
+ */
+function safeText(value: unknown, max: number): string | null {
+	return typeof value === "string" ? safeTextPreview(value, max).preview : null;
+}
+
+/** A question or answer body: present, absent, or unreadable (with a reason). */
+export type ContentRead =
+	| { readonly ok: true; readonly text: string | null }
+	| { readonly ok: false; readonly reason: string };
+
+/**
+ * A question or answer body. Absent or empty is `text: null`; a body that is
+ * not a string or fails the PDPP safe-text invariant is `ok: false`, so the
+ * caller can account for it rather than emit a record with its content
+ * silently dropped.
+ */
+export function readContent(value: unknown): ContentRead {
+	if (value === undefined || value === null || value === "") {
+		return { ok: true, text: null };
+	}
 	if (typeof value !== "string") {
-		return null;
+		return { ok: false, reason: "body is not a string" };
 	}
-	if (!pdppSafeText.safeParse(value).success) {
-		return null;
+	const preview = safeTextPreview(value, CONTENT_MAX_CHARS);
+	if (preview.preview === null) {
+		return { ok: false, reason: preview.reason ?? "body is not safe text" };
 	}
-	return value.length <= max ? value : truncateHead(value, max);
-}
-
-const TRUNCATION_MARKER =
-	"\n\n[…truncated by PDPP: the original Perplexity text exceeded the stored length cap]";
-
-/** Keep the head of an over-long but otherwise safe body, and say so. */
-function truncateHead(value: string, max: number): string {
-	const keep = max - TRUNCATION_MARKER.length - 1;
-	return `${value.slice(0, keep)}${TRUNCATION_MARKER}`;
+	return { ok: true, text: preview.preview };
 }
 
 /** A non-empty bounded string with no whitespace or control characters. */
@@ -135,6 +151,8 @@ export interface ListedThread {
 	readonly updateTime: string | null;
 	readonly entryCount: number | null;
 	readonly access: number | null;
+	/** The list item says the thread's last answer finished (`status: "COMPLETED"`). */
+	readonly complete: boolean;
 }
 
 export function parseListedThread(item: unknown): ListedThread | null {
@@ -154,6 +172,7 @@ export function parseListedThread(item: unknown): ListedThread | null {
 		updateTime: normalizeInstant(item.last_query_datetime),
 		entryCount: nonNegativeInt(item.query_count),
 		access: wholeInt(item.thread_access),
+		complete: item.status === "COMPLETED",
 	};
 }
 
@@ -251,54 +270,52 @@ export function parseThreadDetailPage(
 }
 
 /**
- * The assistant's answer text. The `ask_text` block carries the whole answer;
- * the `ask_text_<n>_markdown` blocks are per-section duplicates of it, so
- * they are only joined, in n order, when there is no `ask_text` block.
+ * The assistant's answer. The `ask_text` block carries the whole answer; the
+ * `ask_text_<n>_markdown` blocks are consecutive pieces of the same text, so
+ * they are only joined, in n order, when there is no `ask_text` block. An
+ * unsafe `ask_text` is unreadable: it is never replaced by a partial join of
+ * the section blocks.
  */
-export function answerText(entry: Record<string, unknown>): string | null {
-	const blocks = entry.blocks;
-	if (!Array.isArray(blocks)) {
-		return null;
-	}
-	let whole: string | null = null;
-	const sections = new Map<number, string>();
+export function readAnswer(entry: Record<string, unknown>): ContentRead {
+	const blocks = Array.isArray(entry.blocks) ? entry.blocks : [];
+	const sections = new Map<number, unknown>();
 	for (const block of blocks) {
-		if (!isRecord(block)) {
-			continue;
-		}
-		const usage = block.intended_usage;
-		if (typeof usage !== "string") {
+		if (!isRecord(block) || typeof block.intended_usage !== "string") {
 			continue;
 		}
 		const payload = block.markdown_block;
-		if (!isRecord(payload) || typeof payload.answer !== "string") {
+		if (!isRecord(payload)) {
 			continue;
 		}
-		if (usage === "ask_text") {
-			whole = safeText(payload.answer, CONTENT_MAX_CHARS);
-			continue;
+		if (block.intended_usage === "ask_text") {
+			return readContent(payload.answer);
 		}
-		const section = /^ask_text_(\d+)_markdown$/.exec(usage);
-		if (section) {
-			const text = safeText(payload.answer, CONTENT_MAX_CHARS);
-			const index = Number(section[1]);
-			if (text !== null && !sections.has(index)) {
-				sections.set(index, text);
-			}
+		const section = /^ask_text_(\d+)_markdown$/.exec(block.intended_usage);
+		if (section?.[1] !== undefined && !sections.has(Number(section[1]))) {
+			sections.set(Number(section[1]), payload.answer);
 		}
 	}
-	if (whole !== null) {
-		return whole;
+	const parts: string[] = [];
+	for (const index of [...sections.keys()].sort(
+		(left, right) => left - right,
+	)) {
+		const part = readContent(sections.get(index));
+		if (!part.ok) {
+			return part;
+		}
+		if (part.text !== null) {
+			parts.push(part.text);
+		}
 	}
-	if (sections.size === 0) {
-		return null;
-	}
-	const joined = [...sections.keys()]
-		.sort((left, right) => left - right)
-		.map((index) => sections.get(index))
-		.filter((part): part is string => part !== undefined && part.length > 0)
-		.join("\n\n");
-	return joined.length > 0 ? safeText(joined, CONTENT_MAX_CHARS) : null;
+	return parts.length > 0
+		? readContent(parts.join("\n\n"))
+		: { ok: true, text: null };
+}
+
+/** The answer text, or null when there is none or it is unreadable. */
+export function answerText(entry: Record<string, unknown>): string | null {
+	const answer = readAnswer(entry);
+	return answer.ok ? answer.text : null;
 }
 
 /** The web results an entry's answer cited, as { title, url } pairs. */
@@ -347,24 +364,62 @@ function httpUrl(value: string): string | null {
 	}
 }
 
+/** One entry read from a thread response. */
+export type EntryRead =
+	| {
+			readonly kind: "ok";
+			readonly id: string;
+			readonly user: MessageRecord;
+			readonly assistant: MessageRecord;
+			/** The entry's creation time, the best proxy for the thread's create time. */
+			readonly firstCreateTime: string | null;
+	  }
+	/** The answer is still being written (`status` is not `COMPLETED`). */
+	| { readonly kind: "incomplete"; readonly id: string }
+	| {
+			readonly kind: "unreadable";
+			readonly id: string | null;
+			readonly reason: string;
+	  };
+
 /**
- * The two messages one entry splits into: the user's question and the
- * assistant's answer. Null when the entry has no usable uuid to key them.
- *
- * The question carries the entry's creation time; the answer carries the
- * entry's last update time, which is when the answer finished. `firstCreateTime`
- * is the entry's creation time, the thread's best available create time.
+ * Split one entry into the user's question and the assistant's answer. The
+ * question's time is the entry's creation time; the answer's is the entry's
+ * last update time, which is when the answer finished. An entry is only `ok`
+ * when it is complete and both bodies are present and safe; anything else is
+ * `incomplete` or `unreadable`, and the caller accounts for it.
  */
 export function entryMessages(
 	entryValue: unknown,
 	conversationId: string,
-): EntryMessages | null {
+): EntryRead {
 	if (!isRecord(entryValue)) {
-		return null;
+		return { kind: "unreadable", id: null, reason: "entry is not an object" };
 	}
 	const uuid = identifier(entryValue.uuid, 64);
 	if (!uuid) {
-		return null;
+		return { kind: "unreadable", id: null, reason: "entry has no uuid" };
+	}
+	if (entryValue.status !== "COMPLETED") {
+		return { kind: "incomplete", id: uuid };
+	}
+	const question = readContent(entryValue.query_str);
+	if (!question.ok || question.text === null) {
+		return {
+			kind: "unreadable",
+			id: uuid,
+			reason: question.ok
+				? "entry has no question"
+				: `question: ${question.reason}`,
+		};
+	}
+	const answer = readAnswer(entryValue);
+	if (!answer.ok || answer.text === null) {
+		return {
+			kind: "unreadable",
+			id: uuid,
+			reason: answer.ok ? "entry has no answer" : `answer: ${answer.reason}`,
+		};
 	}
 	const createTime = normalizeInstant(entryValue.entry_created_datetime);
 	const updateTime =
@@ -372,26 +427,27 @@ export function entryMessages(
 	const model =
 		safeText(entryValue.display_model, 120) ??
 		safeText(entryValue.user_selected_model, 120);
-	const citations = entryCitations(entryValue);
-	const question = safeText(entryValue.query_str, CONTENT_MAX_CHARS);
-	const answer = answerText(entryValue);
-	const user: MessageRecord = {
-		id: `${uuid}:user`,
-		conversation_id: conversationId,
-		role: "user",
-		content: question,
-		create_time: createTime,
-		model: null,
-		citations: [],
+	return {
+		kind: "ok",
+		id: uuid,
+		user: {
+			id: `${uuid}:user`,
+			conversation_id: conversationId,
+			role: "user",
+			content: question.text,
+			create_time: createTime,
+			model: null,
+			citations: [],
+		},
+		assistant: {
+			id: `${uuid}:assistant`,
+			conversation_id: conversationId,
+			role: "assistant",
+			content: answer.text,
+			create_time: updateTime,
+			model,
+			citations: entryCitations(entryValue),
+		},
+		firstCreateTime: createTime,
 	};
-	const assistant: MessageRecord = {
-		id: `${uuid}:assistant`,
-		conversation_id: conversationId,
-		role: "assistant",
-		content: answer,
-		create_time: updateTime,
-		model,
-		citations,
-	};
-	return { user, assistant, firstCreateTime: createTime };
 }

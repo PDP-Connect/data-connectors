@@ -99,7 +99,17 @@
 						"description": "The thread's access level code as the library carries it."
 					}
 				},
-				"required": ["id"]
+				"required": [
+					"id",
+					"title",
+					"slug",
+					"mode",
+					"model",
+					"create_time",
+					"update_time",
+					"entry_count",
+					"access"
+				]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "update_time",
@@ -148,7 +158,7 @@
 						"description": "The thread's context uuid, matching a conversations record."
 					},
 					"role": {
-						"type": ["string", "null"],
+						"type": "string",
 						"x_pdpp_role": "actor",
 						"enum": ["user", "assistant"]
 					},
@@ -168,10 +178,31 @@
 					},
 					"citations": {
 						"type": "array",
-						"description": "The web results the answer cited: [{ title, url }]. Empty for questions."
+						"description": "The web results the answer cited: [{ title, url }]. Empty for questions.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"title": {
+									"type": ["string", "null"]
+								},
+								"url": {
+									"type": "string",
+									"format": "uri"
+								}
+							},
+							"required": ["title", "url"]
+						}
 					}
 				},
-				"required": ["id", "conversation_id"]
+				"required": [
+					"id",
+					"conversation_id",
+					"role",
+					"content",
+					"create_time",
+					"model",
+					"citations"
+				]
 			},
 			"primary_key": ["id"],
 			"cursor_field": "create_time",
