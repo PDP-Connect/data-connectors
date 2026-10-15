@@ -4880,6 +4880,804 @@
 						},
 						"coverage_strategy": "singleton_presence",
 						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "conversation_usage",
+						"required": false,
+						"description": "Per-conversation usage metadata with no text: timestamps, archive/star/share flags, custom GPT or project membership (as opaque references), message counts by role, models used, tool and feature use counts, branch count and character counts.",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
+						"display": {
+							"label": "How you use ChatGPT, per conversation",
+							"detail": "For each conversation: when it was created and last updated, whether it is archived, starred or shared, whether it ran in a custom GPT or a project, how many messages you and ChatGPT sent, which models answered, which tools were used (search, code, images, canvas, deep research, memory, files, voice) and how long your messages were, as numbers. No titles, message text, file names, GPT names or ids are collected; conversations and GPTs are identified only by one-way references."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"pattern": "^c_[0-9a-f]{32}$",
+									"description": "Opaque one-way reference to the conversation (salted SHA-256 of its id). Not the ChatGPT conversation id."
+								},
+								"create_time": {
+									"type": ["string", "null"],
+									"format": "date-time",
+									"x_pdpp_role": "event-time"
+								},
+								"update_time": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"is_archived": {
+									"type": ["boolean", "null"]
+								},
+								"is_starred": {
+									"type": ["boolean", "null"]
+								},
+								"is_shared": {
+									"type": ["boolean", "null"],
+									"description": "True when the conversation has a share link; null when shares could not be read."
+								},
+								"in_workspace": {
+									"type": ["boolean", "null"]
+								},
+								"gizmo_kind": {
+									"type": "string",
+									"enum": ["none", "custom_gpt", "project", "other"],
+									"x_pdpp_role": "secondary"
+								},
+								"gizmo_ref": {
+									"type": ["string", "null"],
+									"pattern": "^g_[0-9a-f]{32}$",
+									"description": "Opaque one-way reference to the custom GPT or project. Not the GPT id."
+								},
+								"detail_status": {
+									"type": "string",
+									"enum": ["fetched", "not_fetched", "unavailable", "failed"],
+									"description": "Whether the per-message fields below were read. not_fetched: list-only mode, detail cap or deferral."
+								},
+								"default_model_slug": {
+									"type": ["string", "null"],
+									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+								},
+								"message_counts": {
+									"type": ["object", "null"],
+									"properties": {
+										"user": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"assistant": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"tool": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"system": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"other": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"hidden": {
+											"type": "integer",
+											"minimum": 0
+										}
+									},
+									"required": [
+										"user",
+										"assistant",
+										"tool",
+										"system",
+										"other",
+										"hidden"
+									],
+									"additionalProperties": false
+								},
+								"turn_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"branch_count": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"nodes_total": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"models": {
+									"type": ["array", "null"],
+									"maxItems": 500,
+									"items": {
+										"type": "object",
+										"properties": {
+											"slug": {
+												"type": "string",
+												"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+											},
+											"assistant_messages": {
+												"type": "integer",
+												"minimum": 0
+											}
+										},
+										"required": ["slug", "assistant_messages"],
+										"additionalProperties": false
+									}
+								},
+								"features": {
+									"type": ["object", "null"],
+									"properties": {
+										"web_search": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"code_interpreter": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"image_generation": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"canvas": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"deep_research": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"memory_update": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"file_search": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"reasoning": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"voice": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"other_tool": {
+											"type": "integer",
+											"minimum": 0
+										}
+									},
+									"required": [
+										"web_search",
+										"code_interpreter",
+										"image_generation",
+										"canvas",
+										"deep_research",
+										"memory_update",
+										"file_search",
+										"reasoning",
+										"voice",
+										"other_tool"
+									],
+									"additionalProperties": false
+								},
+								"user_attachments": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"user_images": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"user_chars_total": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"user_chars_max": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"assistant_chars_total": {
+									"type": ["integer", "null"],
+									"minimum": 0
+								},
+								"first_message_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"last_message_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								}
+							},
+							"required": [
+								"id",
+								"create_time",
+								"update_time",
+								"is_archived",
+								"is_starred",
+								"is_shared",
+								"in_workspace",
+								"gizmo_kind",
+								"gizmo_ref",
+								"detail_status",
+								"default_model_slug",
+								"message_counts",
+								"turn_count",
+								"branch_count",
+								"nodes_total",
+								"models",
+								"features",
+								"user_attachments",
+								"user_images",
+								"user_chars_total",
+								"user_chars_max",
+								"assistant_chars_total",
+								"first_message_at",
+								"last_message_at"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"consent_time_field": "create_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"create_time": ["gte", "gt", "lte", "lt"],
+								"update_time": ["gte", "gt", "lte", "lt"],
+								"first_message_at": ["gte", "gt", "lte", "lt"],
+								"last_message_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true,
+								"group_by_time": ["create_time", "update_time"]
+							}
+						},
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window"
+					},
+					{
+						"name": "usage_summary",
+						"required": false,
+						"description": "Aggregate ChatGPT usage with no text: conversations and messages per month, active days, longest streak, model mix, feature use, custom GPT and project counts, hour-of-day and day-of-week histograms, account creation month, data residency, memory and custom-instruction flags, timezone, browser language and network country.",
+						"compaction_fingerprint": {
+							"exclude_keys": []
+						},
+						"display": {
+							"label": "Your ChatGPT usage summary",
+							"detail": "Totals and monthly counts of conversations and messages, active days and longest streak, which models answered how often, how many conversations used each tool, how many custom GPTs and projects you used, when in the day and week you use ChatGPT, when the account was created (month), whether memory and custom instructions are on (not their contents), your timezone, browser language and the country of the network used at collection time. Plan details are in the account plan stream. No text, titles or ids are collected. Singleton."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"const": "usage_summary"
+								},
+								"timezone": {
+									"type": "string",
+									"maxLength": 64,
+									"description": "IANA timezone every month/day/hour bucket uses: the page's own, else UTC.",
+									"x_pdpp_role": "secondary"
+								},
+								"timezone_source": {
+									"type": "string",
+									"enum": ["browser", "default_utc"]
+								},
+								"coverage": {
+									"type": "object",
+									"properties": {
+										"conversations_listed": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_fetched": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_unavailable": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_failed": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_not_fetched": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"detail_complete": {
+											"type": "boolean"
+										}
+									},
+									"required": [
+										"conversations_listed",
+										"detail_fetched",
+										"detail_unavailable",
+										"detail_failed",
+										"detail_not_fetched",
+										"detail_complete"
+									],
+									"additionalProperties": false
+								},
+								"first_activity_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"last_activity_at": {
+									"type": ["string", "null"],
+									"format": "date-time"
+								},
+								"active_days": {
+									"type": "integer",
+									"minimum": 0
+								},
+								"longest_streak_days": {
+									"type": "integer",
+									"minimum": 0
+								},
+								"totals": {
+									"type": "object",
+									"properties": {
+										"conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"archived": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"starred": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"shared": {
+											"type": ["integer", "null"],
+											"minimum": 0
+										},
+										"in_workspace": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"custom_gpt_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"project_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"user_messages": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"assistant_messages": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"tool_messages": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"user_attachments": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"user_images": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"user_chars_total": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"regenerated_or_edited_conversations": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"custom_gpts_used": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"projects_used": {
+											"type": "integer",
+											"minimum": 0
+										}
+									},
+									"required": [
+										"conversations",
+										"archived",
+										"starred",
+										"shared",
+										"in_workspace",
+										"custom_gpt_conversations",
+										"project_conversations",
+										"user_messages",
+										"assistant_messages",
+										"tool_messages",
+										"user_attachments",
+										"user_images",
+										"user_chars_total",
+										"regenerated_or_edited_conversations",
+										"custom_gpts_used",
+										"projects_used"
+									],
+									"additionalProperties": false
+								},
+								"user_message_chars": {
+									"type": "object",
+									"properties": {
+										"total": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"mean_per_message": {
+											"type": ["integer", "null"],
+											"minimum": 0
+										},
+										"median_of_conversation_max": {
+											"type": ["integer", "null"],
+											"minimum": 0
+										}
+									},
+									"required": [
+										"total",
+										"mean_per_message",
+										"median_of_conversation_max"
+									],
+									"additionalProperties": false
+								},
+								"models": {
+									"type": "array",
+									"maxItems": 500,
+									"items": {
+										"type": "object",
+										"properties": {
+											"slug": {
+												"type": "string",
+												"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+											},
+											"assistant_messages": {
+												"type": "integer",
+												"minimum": 0
+											}
+										},
+										"required": ["slug", "assistant_messages"],
+										"additionalProperties": false
+									}
+								},
+								"feature_conversations": {
+									"type": "object",
+									"properties": {
+										"web_search": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"code_interpreter": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"image_generation": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"canvas": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"deep_research": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"memory_update": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"file_search": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"reasoning": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"voice": {
+											"type": "integer",
+											"minimum": 0
+										},
+										"other_tool": {
+											"type": "integer",
+											"minimum": 0
+										}
+									},
+									"required": [
+										"web_search",
+										"code_interpreter",
+										"image_generation",
+										"canvas",
+										"deep_research",
+										"memory_update",
+										"file_search",
+										"reasoning",
+										"voice",
+										"other_tool"
+									],
+									"additionalProperties": false
+								},
+								"months": {
+									"type": "array",
+									"maxItems": 1200,
+									"items": {
+										"type": "object",
+										"properties": {
+											"month": {
+												"type": "string",
+												"pattern": "^\\d{4}-\\d{2}$"
+											},
+											"conversations_created": {
+												"type": "integer",
+												"minimum": 0
+											},
+											"user_messages": {
+												"type": "integer",
+												"minimum": 0
+											},
+											"assistant_messages": {
+												"type": "integer",
+												"minimum": 0
+											},
+											"active_days": {
+												"type": "integer",
+												"minimum": 0
+											},
+											"models": {
+												"type": "array",
+												"maxItems": 500,
+												"items": {
+													"type": "object",
+													"properties": {
+														"slug": {
+															"type": "string",
+															"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+														},
+														"assistant_messages": {
+															"type": "integer",
+															"minimum": 0
+														}
+													},
+													"required": ["slug", "assistant_messages"],
+													"additionalProperties": false
+												}
+											},
+											"feature_conversations": {
+												"type": "object",
+												"properties": {
+													"web_search": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"code_interpreter": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"image_generation": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"canvas": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"deep_research": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"memory_update": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"file_search": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"reasoning": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"voice": {
+														"type": "integer",
+														"minimum": 0
+													},
+													"other_tool": {
+														"type": "integer",
+														"minimum": 0
+													}
+												},
+												"required": [
+													"web_search",
+													"code_interpreter",
+													"image_generation",
+													"canvas",
+													"deep_research",
+													"memory_update",
+													"file_search",
+													"reasoning",
+													"voice",
+													"other_tool"
+												],
+												"additionalProperties": false
+											}
+										},
+										"required": [
+											"month",
+											"conversations_created",
+											"user_messages",
+											"assistant_messages",
+											"active_days",
+											"models",
+											"feature_conversations"
+										],
+										"additionalProperties": false
+									}
+								},
+								"hour_of_day": {
+									"type": "array",
+									"items": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"minItems": 24,
+									"maxItems": 24
+								},
+								"day_of_week": {
+									"type": "array",
+									"items": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"minItems": 7,
+									"maxItems": 7,
+									"description": "Monday first."
+								},
+								"account": {
+									"type": "object",
+									"properties": {
+										"created_month": {
+											"type": ["string", "null"],
+											"pattern": "^\\d{4}-\\d{2}$"
+										},
+										"data_residency_region": {
+											"type": ["string", "null"],
+											"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+										},
+										"compute_residency_region": {
+											"type": ["string", "null"],
+											"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
+										}
+									},
+									"required": [
+										"created_month",
+										"data_residency_region",
+										"compute_residency_region"
+									],
+									"additionalProperties": false
+								},
+								"settings": {
+									"type": "object",
+									"properties": {
+										"memory_count": {
+											"type": ["integer", "null"],
+											"minimum": 0
+										},
+										"memory_num_tokens": {
+											"type": ["integer", "null"],
+											"minimum": 0
+										},
+										"memory_max_tokens": {
+											"type": ["integer", "null"],
+											"minimum": 0
+										},
+										"custom_instructions_enabled": {
+											"type": ["boolean", "null"]
+										},
+										"custom_instructions_about_user_set": {
+											"type": ["boolean", "null"]
+										},
+										"custom_instructions_response_style_set": {
+											"type": ["boolean", "null"]
+										},
+										"setting_flags": {
+											"type": ["object", "null"],
+											"propertyNames": {
+												"pattern": "^[a-z0-9_]{1,64}$"
+											},
+											"additionalProperties": {
+												"type": "boolean"
+											},
+											"maxProperties": 64
+										}
+									},
+									"required": [
+										"memory_count",
+										"memory_num_tokens",
+										"memory_max_tokens",
+										"custom_instructions_enabled",
+										"custom_instructions_about_user_set",
+										"custom_instructions_response_style_set",
+										"setting_flags"
+									],
+									"additionalProperties": false
+								},
+								"locale": {
+									"type": "object",
+									"properties": {
+										"browser_language": {
+											"type": ["string", "null"],
+											"maxLength": 35
+										},
+										"network_country": {
+											"type": ["string", "null"],
+											"pattern": "^[A-Z]{2}$",
+											"description": "ISO 3166-1 country of the network the page used at collection time (Cloudflare trace). Not a billing or account country; a VPN changes it."
+										}
+									},
+									"required": ["browser_language", "network_country"],
+									"additionalProperties": false
+								}
+							},
+							"required": [
+								"id",
+								"timezone",
+								"timezone_source",
+								"coverage",
+								"first_activity_at",
+								"last_activity_at",
+								"active_days",
+								"longest_streak_days",
+								"totals",
+								"user_message_chars",
+								"models",
+								"feature_conversations",
+								"months",
+								"hour_of_day",
+								"day_of_week",
+								"account",
+								"settings",
+								"locale"
+							],
+							"additionalProperties": false
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": true,
+						"query": {
+							"range_filters": {
+								"first_activity_at": ["gte", "gt", "lte", "lt"],
+								"last_activity_at": ["gte", "gt", "lte", "lt"]
+							},
+							"aggregations": {
+								"count": true
+							}
+						},
+						"coverage_strategy": "singleton_presence",
+						"freshness_strategy": "scheduled_window"
 					}
 				],
 				"profiles": [
@@ -4948,6 +5746,21 @@
 								"name": "account_plan"
 							}
 						]
+					},
+					{
+						"id": "usage_metadata",
+						"label": "Usage metadata only, no conversation text",
+						"streams": [
+							{
+								"name": "usage_summary"
+							},
+							{
+								"name": "conversation_usage"
+							},
+							{
+								"name": "account_plan"
+							}
+						]
 					}
 				],
 				"mobile": {
@@ -4962,6 +5775,7 @@
 					"branch_tip_missing": "A conversation points at a message we couldn't find, so part of it is missing",
 					"branch_truncated": "A conversation is missing earlier messages from its current thread",
 					"conversation_list_unstable": "ChatGPT's conversation list changed between checks, so try again",
+					"detail_fetch_capped": "We read usage details for some conversations only; the rest are read on a later run",
 					"empty_detail": "We opened this conversation but found no messages to import",
 					"http_error": "We hit a network problem talking to the service",
 					"missing_mapping": "We opened this conversation but it had no message data to read",

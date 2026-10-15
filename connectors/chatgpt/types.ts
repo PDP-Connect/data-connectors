@@ -126,6 +126,18 @@ export interface ChatGptFetchResult {
 	status: number;
 }
 
+/**
+ * In-page reductions applied by `chatGptUsageFetchInBrowser` (usage.ts)
+ * before a response leaves the page. Each returns counts, flags and slugs only.
+ */
+export type ChatGptUsageProjection =
+	| "conversation_usage"
+	| "shared_conversation_ids"
+	| "memory_stats"
+	| "custom_instructions_flags"
+	| "settings_flags"
+	| "client_context";
+
 export interface ChatGptApi {
 	auth: () => Promise<ChatGptAuth>;
 	fetch: (
@@ -134,6 +146,8 @@ export interface ChatGptApi {
 			method?: string;
 			body?: unknown;
 			laneContext?: AdaptiveLaneRunContext | undefined;
+			/** Reduce the body in the page; the raw body never reaches the connector. */
+			projection?: ChatGptUsageProjection | undefined;
 		},
 	) => Promise<ChatGptFetchResult>;
 	fetchBatch?: (ids: readonly string[]) => Promise<ChatGptFetchResult[]>;

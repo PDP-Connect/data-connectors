@@ -105,12 +105,15 @@ import type {
 	ChatGptFetchResult,
 	ChatGptJson,
 	ChatGptNode,
+	ChatGptUsageProjection,
 	ConversationListItem,
 	RawAccountsCheckBody,
 	RawCustomInstructionsBody,
 	RawMemoryEntry,
 	RawSharedConversation,
 } from "./types.ts";
+import { chatGptUsageFetchInBrowser } from "./usage.ts";
+import { runUsageStreams, type UsageStreamHooks } from "./usage-stream.ts";
 
 // schemas.js is a plain-JS Zod validator; cast at the boundary to the
 // runtime's ValidateRecord contract. The JS module's safeParse already
@@ -155,7 +158,7 @@ function scrubChatGptTerminalDiagnostic(message: string): string {
 			"$1[redacted]",
 		)
 		.replace(
-			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts)(?:[/?]|$))[^\s)"'<>]*/giu,
+			/\/(?:api\/|backend-api\/|(?:conversation|conversations|memories|gizmos|user_system_messages|custom_instructions|shared_conversations|accounts|settings|cdn-cgi)(?:[/?]|$))[^\s)"'<>]*/giu,
 			"[redacted-path]",
 		)
 		.replace(/\s+/g, " ")
@@ -1750,7 +1753,13 @@ export function createChatGptApi({
 			method,
 			body,
 			parseJson = true,
-		}: { method: string; body?: unknown; parseJson?: boolean },
+			projection,
+		}: {
+			method: string;
+			body?: unknown;
+			parseJson?: boolean;
+			projection?: ChatGptUsageProjection | undefined;
+		},
 	): Promise<ChatGptFetchResult> {
 		const timeoutMs = resolveChatGptBackendFetchTimeoutMs();
 		const measureProviderFetch =
@@ -1762,15 +1771,24 @@ export function createChatGptApi({
 			).__pdppPageshimDetailFetched === "function";
 		const evaluate = (a: ChatGptAuth): Promise<ChatGptFetchResult> =>
 			withTimeout(
-				page.evaluate(chatGptBackendFetchInBrowser, {
-					path,
-					method,
-					body,
-					parseJson,
-					...(measureProviderFetch ? { measureProviderFetch: true } : {}),
-					auth: a,
-					timeoutMs,
-				}),
+				projection
+					? page.evaluate(chatGptUsageFetchInBrowser, {
+							path,
+							method,
+							body,
+							projection,
+							auth: a,
+							timeoutMs,
+						})
+					: page.evaluate(chatGptBackendFetchInBrowser, {
+							path,
+							method,
+							body,
+							parseJson,
+							...(measureProviderFetch ? { measureProviderFetch: true } : {}),
+							auth: a,
+							timeoutMs,
+						}),
 				timeoutMs + CHATGPT_BACKEND_EVALUATE_TIMEOUT_BUFFER_MS,
 				`chatgpt_backend_fetch_evaluate_timeout after ${timeoutMs + CHATGPT_BACKEND_EVALUATE_TIMEOUT_BUFFER_MS}ms`,
 			);
@@ -1819,12 +1837,14 @@ export function createChatGptApi({
 			laneContext,
 			method,
 			parseJson,
+			projection,
 		}: {
 			body?: unknown;
 			captureResult: boolean;
 			laneContext?: AdaptiveLaneRunContext | undefined;
 			method: string;
 			parseJson: boolean;
+			projection?: ChatGptUsageProjection | undefined;
 		},
 	): Promise<ChatGptFetchResult> {
 		let plannedProviderBudgetDefer: ChatGptPlannedProviderBudgetDeferredError | null =
@@ -1910,7 +1930,12 @@ export function createChatGptApi({
 			},
 			request: async () => {
 				try {
-					const result = await fetchOnce(path, { method, body, parseJson });
+					const result = await fetchOnce(path, {
+						method,
+						body,
+						parseJson,
+						projection,
+					});
 					if (
 						captureResult &&
 						capture &&
@@ -1977,10 +2002,12 @@ export function createChatGptApi({
 				method = "GET",
 				body,
 				laneContext,
+				projection,
 			}: {
 				method?: string;
 				body?: unknown;
 				laneContext?: AdaptiveLaneRunContext | undefined;
+				projection?: ChatGptUsageProjection | undefined;
 			} = {},
 		): Promise<ChatGptFetchResult> {
 			return fetchWithRetry(path, {
@@ -1989,6 +2016,7 @@ export function createChatGptApi({
 				laneContext,
 				parseJson: true,
 				captureResult: true,
+				projection,
 			});
 		},
 		async fetchBatch(ids: readonly string[]): Promise<ChatGptFetchResult[]> {
@@ -7493,7 +7521,27 @@ export async function collectChatGpt(
 	if (requested.has("conversations") || requested.has("messages")) {
 		await runConversationsAndMessagesStreams(deps, state);
 	}
+	if (requested.has("conversation_usage") || requested.has("usage_summary")) {
+		await runUsageStreams(deps, state, chatGptUsageHooks);
+	}
 }
+
+/** Wires the usage streams (usage-stream.ts) to this file's list walk and errors. */
+export const chatGptUsageHooks: UsageStreamHooks = {
+	listConversations: (deps) => listConversationsSinceCursor(deps, null),
+	classifyError: (err) => {
+		if (
+			err instanceof ChatGptPlannedProviderBudgetDeferredError ||
+			err instanceof ChatGptRecoverableRetryExhaustedError
+		)
+			return "deferred";
+		const message = err instanceof Error ? err.message : "";
+		if (/^apiFetch got 401 /.test(message)) return "auth";
+		if (/^apiFetch got 403 /.test(message)) return "forbidden";
+		return "other";
+	},
+	accountsCheckPath: ACCOUNTS_CHECK_PATH,
+};
 
 // ─── Entry ─────────────────────────────────────────────────────────────
 
