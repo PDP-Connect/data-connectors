@@ -108,10 +108,14 @@ interface BrowserWarning {
 }
 
 interface BrowserCollectResult extends BrowserData {
+	top_artists_considered: number;
+	top_tracks_considered: number;
 	warnings: BrowserWarning[];
 }
 
 interface BrowserEvaluationResult extends BrowserData {
+	top_artists_considered: number;
+	top_tracks_considered: number;
 	recently_played_payload: unknown;
 	top_content_by_time_range: Partial<
 		Record<
@@ -120,10 +124,6 @@ interface BrowserEvaluationResult extends BrowserData {
 		>
 	>;
 }
-
-const RECENT_CONTEXT_PAGE_SIZE = 50;
-const TOP_CONTENT_PAGE_SIZE = 50;
-const TOP_CONTENT_MAX_ITEMS = 100;
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -147,18 +147,18 @@ export function parseRecentlyPlayedContexts(
 ): Record<string, unknown>[] {
 	const root = objectRecord(payload);
 	const contexts = Array.isArray(root?.playContexts) ? root.playContexts : [];
-	return contexts.flatMap((entry) => {
+	return contexts.map((entry) => {
 		const context = objectRecord(entry);
 		const uri = textValue(context?.uri);
 		const lastPlayedTime = safeCount(context?.lastPlayedTime);
-		if (!uri || lastPlayedTime === null) return [];
-		return [
-			{
-				uri,
-				last_played_time: lastPlayedTime,
-				last_played_track_uri: textValue(context?.lastPlayedTrackUri),
-			},
-		];
+		if (!uri || lastPlayedTime === null)
+			throw new Error("spotify_recently_played_unusable_context");
+		return {
+			id: uri,
+			uri,
+			last_played_time: lastPlayedTime,
+			last_played_track_uri: textValue(context?.lastPlayedTrackUri),
+		};
 	});
 }
 
@@ -519,9 +519,14 @@ async function collectSpotifyWebData(
 ): Promise<BrowserCollectResult> {
 	await openSpotify(page);
 	const evaluated = await page.evaluate(async ({ requested, priorContextTime }) => {
+		const RECENT_CONTEXT_PAGE_SIZE = 50;
+		const TOP_CONTENT_PAGE_SIZE = 50;
+		const TOP_CONTENT_MAX_ITEMS = 100;
 		const wanted = new Set(requested);
 		const warnings: BrowserWarning[] = [];
 		const result: BrowserEvaluationResult = {
+			top_artists_considered: 0,
+			top_tracks_considered: 0,
 			profile: null,
 			playlists: [],
 			playlist_items: [],
@@ -1065,7 +1070,7 @@ async function collectSpotifyWebData(
 				contexts.push(...contextsPage);
 				const reachedPrior = priorContextTime !== undefined && contextsPage.some((entry) => {
 					const playedAt = count((entry as { lastPlayedTime?: unknown })?.lastPlayedTime);
-					return playedAt !== null && playedAt <= priorContextTime;
+					return playedAt !== null && playedAt < priorContextTime;
 				});
 				if (contextsPage.length < RECENT_CONTEXT_PAGE_SIZE || reachedPrior) break;
 				const nextOffset = offset + contextsPage.length;
@@ -1124,10 +1129,11 @@ async function collectSpotifyWebData(
 							throw new Error(`spotify_top_content_${stream}_count_changed`);
 						if (stream === "top_artists") artistTotal = total;
 						else trackTotal = total;
-						if (total > TOP_CONTENT_MAX_ITEMS)
-							throw new Error(`spotify_top_content_${stream}_exceeds_limit`);
 						const limit = stream === "top_artists" ? artistLimit : trackLimit;
-						if (items.length > limit)
+						if (
+							items.length > limit ||
+							items.length > Math.max(0, total - offset)
+						)
 							throw new Error(`spotify_top_content_${stream}_invalid_page_size`);
 						const signatures =
 							stream === "top_artists" ? artistPageSignatures : trackPageSignatures;
@@ -1140,13 +1146,21 @@ async function collectSpotifyWebData(
 						const nextOffset = offset + items.length;
 						if (stream === "top_artists") {
 							artistOffset = nextOffset;
-							artistsDone = nextOffset >= total || items.length === 0;
+							artistsDone =
+								nextOffset >= total ||
+								nextOffset >= TOP_CONTENT_MAX_ITEMS ||
+								items.length === 0;
 						} else {
 							trackOffset = nextOffset;
-							tracksDone = nextOffset >= total || items.length === 0;
+							tracksDone =
+								nextOffset >= total ||
+								nextOffset >= TOP_CONTENT_MAX_ITEMS ||
+								items.length === 0;
 						}
 					}
 				}
+				result.top_artists_considered += artistTotal ?? 0;
+				result.top_tracks_considered += trackTotal ?? 0;
 				result.top_content_by_time_range[time_range] = pages;
 			}
 		}
@@ -1195,6 +1209,7 @@ async function emitRecordsWithCoverage(
 		options?: { recordKey?: string },
 	) => Promise<void>,
 	recordKey?: (record: Record<string, unknown>) => string,
+	considered = records.length,
 ): Promise<void> {
 	let covered = 0;
 	for (const record of records) {
@@ -1212,7 +1227,7 @@ async function emitRecordsWithCoverage(
 			stateStream: stream,
 			requiredKeys: [],
 			hydratedKeys: [],
-			considered: records.length,
+			considered,
 			covered,
 		},
 	);
@@ -1309,6 +1324,7 @@ export async function spotifyCollect({
 			emit,
 			emitRecord,
 			(record) => JSON.stringify([record.id, record.time_range]),
+			data.top_artists_considered,
 		);
 	}
 	if (requested.has("top_tracks")) {
@@ -1318,6 +1334,7 @@ export async function spotifyCollect({
 			emit,
 			emitRecord,
 			(record) => JSON.stringify([record.id, record.time_range]),
+			data.top_tracks_considered,
 		);
 	}
 	if (requested.has("recently_played_contexts")) {

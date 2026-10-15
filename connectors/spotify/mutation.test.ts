@@ -32,13 +32,14 @@ function readFixture(name: string): unknown {
 	);
 }
 
-test("recently-played fixture yields context records keyed by URI with millisecond cursors", () => {
+test("recently-played fixture yields context records identified by URI with millisecond cursors", () => {
 	assert.deepEqual(
 		parseRecentlyPlayedContexts(
 			readFixture("recently-played-contexts-response.json"),
 		),
 		[
 			{
+				id: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 				uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 				last_played_time: 1720000000123,
 				last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
@@ -54,9 +55,13 @@ test("recently-played parser accepts empty responses and rejects malformed conte
 		),
 		[],
 	);
-	assert.deepEqual(
-		parseRecentlyPlayedContexts({ playContexts: [{ uri: "spotify:album:x" }] }),
-		[],
+	assert.deepEqual(parseRecentlyPlayedContexts({ playContexts: [] }), []);
+	assert.throws(
+		() =>
+			parseRecentlyPlayedContexts({
+				playContexts: [{ uri: "spotify:album:x" }],
+			}),
+		/spotify_recently_played_unusable_context/u,
 	);
 });
 
@@ -303,6 +308,7 @@ const webFixture = {
 	saved_tracks: [],
 	recently_played_contexts: [
 		{
+			id: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 			uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 			last_played_time: 1720000000123,
 			last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
@@ -729,6 +735,9 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 });
 
 function installSpotifyBrowserGlobals(): () => void {
+	const originalNameHelper = (
+		globalThis as unknown as { __name?: (...args: unknown[]) => unknown }
+	).__name;
 	const originalWindow = globalThis.window;
 	const originalDocument = globalThis.document;
 	const originalCaches = globalThis.caches;
@@ -745,6 +754,9 @@ function installSpotifyBrowserGlobals(): () => void {
 	(globalThis as unknown as { performance: unknown }).performance = {
 		getEntriesByType: () => [],
 	};
+	(globalThis as unknown as { __name: (fn: unknown) => unknown }).__name = (
+		fn,
+	) => fn;
 	return () => {
 		(globalThis as unknown as { window: unknown }).window = originalWindow;
 		(globalThis as unknown as { document: unknown }).document =
@@ -752,6 +764,12 @@ function installSpotifyBrowserGlobals(): () => void {
 		(globalThis as unknown as { caches: unknown }).caches = originalCaches;
 		(globalThis as unknown as { performance: unknown }).performance =
 			originalPerformance;
+		if (originalNameHelper === undefined)
+			delete (globalThis as unknown as { __name?: unknown }).__name;
+		else
+			(
+				globalThis as unknown as { __name: (...args: unknown[]) => unknown }
+			).__name = originalNameHelper;
 	};
 }
 
@@ -778,8 +796,10 @@ async function collectWithInPageFetch(
 	) => unknown,
 	recentlyPlayedStatus = 200,
 	options: {
+		observedMessages?: EmittedMessage[];
 		recentlyPlayedPages?: unknown[][];
 		recentlyPlayedOffsets?: number[];
+		runtimeEmitRecord?: boolean;
 		state?: Record<string, unknown>;
 	} = {},
 ): Promise<{
@@ -792,7 +812,23 @@ async function collectWithInPageFetch(
 		stream: string;
 		data: Record<string, unknown>;
 	}> = [];
-	const messages: EmittedMessage[] = [];
+	const messages = options.observedMessages ?? [];
+	const requested = new Map<string, StreamScope>(
+		requestedNames.map((name) => [name, { name }]),
+	);
+	const runtimeEmitter = options.runtimeEmitRecord
+		? makeEmitRecord({
+				emit: (message) => {
+					messages.push(message);
+					return Promise.resolve();
+				},
+				emittedAt: "2026-10-15T00:00:00Z",
+				isTombstone: undefined,
+				requested,
+				timeRangeFieldFor: () => null,
+				validateRecord,
+			})
+		: undefined;
 	try {
 		globalThis.fetch = async (input, init) => {
 			const url = String(input);
@@ -860,24 +896,38 @@ async function collectWithInPageFetch(
 				messages.push(message);
 				return Promise.resolve();
 			},
-			emitRecord: (stream, data) => {
+			emitRecord: (stream, data, emitOptions) => {
+				if (runtimeEmitter)
+					return runtimeEmitter.emit(stream, data, emitOptions);
 				emittedRecords.push({ stream, data });
 				return Promise.resolve();
 			},
 			page: {
 				goto: () => Promise.resolve(null),
-				evaluate: (
-					fn: (arg: { requested: string[]; priorContextTime?: number }) => Promise<unknown>,
+				evaluate: async (
+					fn: (arg: {
+						requested: string[];
+						priorContextTime?: number;
+					}) => Promise<unknown>,
 					arg: { requested: string[]; priorContextTime?: number },
 				) =>
-					fn(arg),
+					new Function(`return (${String(fn)})`)()(
+						JSON.parse(JSON.stringify(arg)),
+					),
 			} as never,
 			progress: () => Promise.resolve(),
-			requested: new Map<string, StreamScope>(
-				requestedNames.map((name) => [name, { name }]),
-			),
+			requested,
 			...(options.state ? { state: options.state } : {}),
 		});
+		if (runtimeEmitter) {
+			emittedRecords.push(
+				...messages.flatMap((message) =>
+					message.type === "RECORD"
+						? [{ stream: message.stream, data: message.data }]
+						: [],
+				),
+			);
+		}
 		return { emittedRecords, messages };
 	} finally {
 		globalThis.fetch = originalFetch;
@@ -897,6 +947,7 @@ test("recently-played context endpoint parses the fixture and surfaces its 429 s
 		{
 			stream: "recently_played_contexts",
 			data: {
+				id: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 				uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 				last_played_time: 1720000000123,
 				last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
@@ -914,19 +965,114 @@ test("recently-played context endpoint parses the fixture and surfaces its 429 s
 	);
 });
 
+test("Spotify page.evaluate callbacks work after browser serialization", async () => {
+	const result = await collectWithInPageFetch(
+		["recently_played_contexts", "top_artists"],
+		(operationName, variables) => {
+			if (operationName === "profileAttributes")
+				return { data: { me: { profile: { username: "fixture-user" } } } };
+			assert.equal(operationName, "userTopContent");
+			assert.equal(typeof variables.topArtistsInput, "object");
+			return {
+				data: {
+					me: {
+						profile: {
+							topArtists: {
+								items: [],
+								totalCount: 0,
+							},
+						},
+					},
+				},
+			};
+		},
+	);
+	assert.equal(
+		result.messages.some((message) => message.type === "STATE"),
+		true,
+	);
+});
+
+test("recently-played contexts reach wire RECORDs through runtime emitRecord", async () => {
+	const result = await collectWithInPageFetch(
+		["recently_played_contexts"],
+		() => ({ data: { me: { profile: { username: "fixture-user" } } } }),
+		200,
+		{ runtimeEmitRecord: true },
+	);
+	assert.deepEqual(
+		result.messages.filter((message) => message.type === "RECORD"),
+		[
+			{
+				type: "RECORD",
+				stream: "recently_played_contexts",
+				key: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
+				data: {
+					id: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
+					uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
+					last_played_time: 1720000000123,
+					last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
+				},
+				emitted_at: "2026-10-15T00:00:00Z",
+			},
+		],
+	);
+});
+
+test("malformed recently-played entries fail before advancing the cursor", async () => {
+	const observedMessages: EmittedMessage[] = [];
+	await assert.rejects(
+		() =>
+			collectWithInPageFetch(
+				["recently_played_contexts"],
+				() => ({ data: { me: { profile: { username: "fixture-user" } } } }),
+				200,
+				{
+					observedMessages,
+					recentlyPlayedPages: [
+						[
+							{
+								uri: "spotify:album:valid",
+								lastPlayedTime: 2_000,
+							},
+							{ uri: "spotify:album:missing-time" },
+						],
+					],
+					state: {
+						recently_played_contexts: { last_played_time: 1_000 },
+					},
+				},
+			),
+		/spotify_recently_played_unusable_context/u,
+	);
+	assert.equal(
+		observedMessages.some(
+			(message) =>
+				message.type === "STATE" &&
+				message.stream === "recently_played_contexts",
+		),
+		false,
+	);
+});
+
 test("recently-played pagination crosses the prior watermark and retains tied contexts", async () => {
-	const newer = Array.from({ length: 50 }, (_, index) => ({
+	const newer = Array.from({ length: 49 }, (_, index) => ({
 		uri: `spotify:album:new-${index}`,
 		lastPlayedTime: 2_000 - index,
 		lastPlayedTrackUri: null,
 	}));
+	const boundaryTie = {
+		uri: "spotify:album:page-boundary-watermark-tie",
+		lastPlayedTime: 1_000,
+		lastPlayedTrackUri: null,
+	};
 	const tied = {
 		uri: "spotify:album:watermark-tie",
 		lastPlayedTime: 1_000,
 		lastPlayedTrackUri: null,
 	};
 	const pages = [
-		newer,
+		[...newer, boundaryTie],
 		[
 			tied,
 			tied,
@@ -952,12 +1098,23 @@ test("recently-played pagination crosses the prior watermark and retains tied co
 		},
 	);
 	assert.equal(response.emittedRecords.length, 51);
-	assert.ok(response.emittedRecords.some((record) => record.data.uri === tied.uri));
+	assert.ok(
+		response.emittedRecords.some((record) => record.data.uri === tied.uri),
+	);
+	assert.ok(
+		response.emittedRecords.some(
+			(record) => record.data.uri === boundaryTie.uri,
+		),
+	);
 	assert.equal(
-		response.emittedRecords.filter((record) => record.data.uri === tied.uri).length,
+		response.emittedRecords.filter((record) => record.data.uri === tied.uri)
+			.length,
 		1,
 	);
-	assert.equal(response.messages.filter((message) => message.type === "STATE").length, 1);
+	assert.equal(
+		response.messages.filter((message) => message.type === "STATE").length,
+		1,
+	);
 	assert.deepEqual(offsets, [0, 50]);
 });
 
@@ -1100,7 +1257,10 @@ test("Spotify top rankings paginate Pathfinder totalCount to completion", async 
 						return {
 							data:
 								stream === "top_artists"
-									? { uri: `spotify:artist:${id}`, profile: { name: `Artist ${id}` } }
+									? {
+											uri: `spotify:artist:${id}`,
+											profile: { name: `Artist ${id}` },
+										}
 									: { uri: `spotify:track:${id}`, artists: { items: [] } },
 						};
 					},
@@ -1111,33 +1271,61 @@ test("Spotify top rankings paginate Pathfinder totalCount to completion", async 
 		},
 	);
 	assert.equal(
-		result.emittedRecords.filter((record) => record.stream === "top_artists").length,
+		result.emittedRecords.filter((record) => record.stream === "top_artists")
+			.length,
 		120,
 	);
 	assert.equal(
-		result.emittedRecords.filter((record) => record.stream === "top_tracks").length,
+		result.emittedRecords.filter((record) => record.stream === "top_tracks")
+			.length,
 		110,
 	);
 	assert.deepEqual(offsets.get("top_artists:SHORT_TERM"), [0, 50]);
 	assert.deepEqual(offsets.get("top_tracks:LONG_TERM"), [0, 50]);
 });
 
-test("Spotify top rankings fail when the provider total exceeds the documented cap", async () => {
-	await assert.rejects(
-		() =>
-			collectWithInPageFetch(["top_artists"], () => ({
+test("Spotify top rankings cap at 100 per window and report partial coverage without failing", async () => {
+	const result = await collectWithInPageFetch(
+		["top_artists", "top_tracks"],
+		(operationName, variables) => {
+			assert.equal(operationName, "userTopContent");
+			const artistInput = variables.topArtistsInput as {
+				limit: number;
+				offset: number;
+			};
+			const artists = Array.from({ length: artistInput.limit }, (_, index) => {
+				const id = String(artistInput.offset + index).padStart(22, "0");
+				return {
+					data: {
+						uri: `spotify:artist:${id}`,
+						profile: { name: `Artist ${id}` },
+					},
+				};
+			});
+			return {
 				data: {
 					me: {
 						profile: {
-							topArtists: {
-								items: [],
-								totalCount: 101,
-							},
+							topArtists: { items: artists, totalCount: 101 },
+							topTracks: { items: [], totalCount: 0 },
 						},
 					},
 				},
-			})),
-		/spotify_top_content_top_artists_exceeds_limit/u,
+			};
+		},
+	);
+	assert.equal(
+		result.emittedRecords.filter((record) => record.stream === "top_artists")
+			.length,
+		200,
+	);
+	assert.deepEqual(
+		result.messages.flatMap((message) =>
+			message.type === "DETAIL_COVERAGE" && message.stream === "top_artists"
+				? [{ considered: message.considered, covered: message.covered }]
+				: [],
+		),
+		[{ considered: 202, covered: 200 }],
 	);
 });
 
@@ -1150,11 +1338,46 @@ test("Spotify top rankings reject a repeated Pathfinder page", async () => {
 			collectWithInPageFetch(["top_artists"], () => ({
 				data: {
 					me: {
-						profile: { topArtists: { items, totalCount: 60 } },
+						profile: { topArtists: { items, totalCount: 150 } },
 					},
 				},
 			})),
 		/spotify_top_content_top_artists_pagination_no_progress/u,
+	);
+});
+
+test("Spotify top rankings reject pages larger than the provider total", async () => {
+	await assert.rejects(
+		() =>
+			collectWithInPageFetch(["top_artists"], (operationName) => {
+				assert.equal(operationName, "userTopContent");
+				return {
+					data: {
+						me: {
+							profile: {
+								topArtists: {
+									totalCount: 1,
+									items: [
+										{
+											data: {
+												uri: "spotify:artist:one",
+												profile: { name: "Artist one" },
+											},
+										},
+										{
+											data: {
+												uri: "spotify:artist:two",
+												profile: { name: "Artist two" },
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				};
+			}),
+		/spotify_top_content_top_artists_invalid_page_size/u,
 	);
 });
 

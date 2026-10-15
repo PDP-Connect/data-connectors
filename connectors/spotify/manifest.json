@@ -328,13 +328,14 @@
 			"schema": {
 				"type": "object",
 				"properties": {
+					"id": { "type": "string", "x_pdpp_role": "primary-title" },
 					"uri": { "type": "string", "x_pdpp_role": "primary-title" },
 					"last_played_time": { "type": "integer", "minimum": 0, "x_pdpp_role": "event-time" },
 					"last_played_track_uri": { "type": ["string", "null"] }
 				},
-				"required": ["uri", "last_played_time"]
+				"required": ["id", "uri", "last_played_time"]
 			},
-			"primary_key": ["uri"],
+			"primary_key": ["id"],
 			"cursor_field": "last_played_time",
 			"selection": { "fields": true, "resources": true },
 			"required": false,
@@ -345,7 +346,7 @@
 		},
 		{
 			"name": "top_artists",
-			"description": "Spotify's ranked top artists for short-term or long-term affinity windows. The connector fetches up to 100 items per window; a provider total above 100 fails the stream. It emits no tombstones for prior rankings, so stale rows can remain unless the host replaces full inventories.",
+			"description": "Spotify's ranked top artists for short-term or long-term affinity windows. The connector emits up to the first 100 items per window and reports partial coverage when Spotify has more. It emits no tombstones for prior rankings, so stale rows can remain unless the host replaces full inventories.",
 			"display": {
 				"label": "Your top artists",
 				"detail": "Artists ranked by Spotify affinity for each time window."
@@ -369,12 +370,12 @@
 			"required": false,
 			"incremental": false,
 			"query": { "search": { "lexical_fields": ["name"] } },
-			"coverage_strategy": "full_inventory",
+			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
 		},
 		{
 			"name": "top_tracks",
-			"description": "Spotify's ranked top tracks for short-term or long-term affinity windows. The connector fetches up to 100 items per window; a provider total above 100 fails the stream. It emits no tombstones for prior rankings, so stale rows can remain unless the host replaces full inventories.",
+			"description": "Spotify's ranked top tracks for short-term or long-term affinity windows. The connector emits up to the first 100 items per window and reports partial coverage when Spotify has more. It emits no tombstones for prior rankings, so stale rows can remain unless the host replaces full inventories.",
 			"display": {
 				"label": "Your top tracks",
 				"detail": "Tracks ranked by Spotify affinity for each time window."
@@ -398,7 +399,7 @@
 			"required": false,
 			"incremental": false,
 			"query": { "search": { "lexical_fields": ["name", "album_name"] } },
-			"coverage_strategy": "full_inventory",
+			"coverage_strategy": "checkpoint_window",
 			"freshness_strategy": "manual_as_of"
 		}
 	]

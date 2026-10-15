@@ -102,11 +102,13 @@ const manifest = JSON.parse(
 		primary_key?: string[];
 		cursor_field?: string;
 		incremental?: boolean;
+		coverage_strategy?: string;
 		schema: { properties: Record<string, { enum?: string[] }> };
 	}>;
 };
 
 const RECENTLY_PLAYED_CONTEXT_RECORD = {
+	id: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 	uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
 	last_played_time: 1720000000123,
 	last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
@@ -279,7 +281,7 @@ test("Spotify manifest declares context cursor and ranking snapshot keys that ma
 	);
 	const recent = streams.get("recently_played_contexts");
 	assert.equal(manifest.version, "0.1.26");
-	assert.deepEqual(recent?.primary_key, ["uri"]);
+	assert.deepEqual(recent?.primary_key, ["id"]);
 	assert.equal(recent?.cursor_field, "last_played_time");
 	assert.equal(recent?.incremental, true);
 	assert.equal(
@@ -291,6 +293,7 @@ test("Spotify manifest declares context cursor and ranking snapshot keys that ma
 		const stream = streams.get(streamName);
 		assert.deepEqual(stream?.primary_key, ["id", "time_range"]);
 		assert.equal(stream?.incremental, false);
+		assert.equal(stream?.coverage_strategy, "checkpoint_window");
 		assert.deepEqual(stream?.schema.properties.time_range?.enum, [
 			"short_term",
 			"long_term",

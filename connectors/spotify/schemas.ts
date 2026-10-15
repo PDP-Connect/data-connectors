@@ -192,6 +192,7 @@ export const topTracksSchema = z.object({
  * Cursor: last_played_time (epoch ms).
  */
 export const recentlyPlayedContextsSchema = z.object({
+	id: z.string().min(1).max(2000),
 	uri: z.string().min(1).max(2000),
 	last_played_time: z.number().int().min(0),
 	last_played_track_uri: z.string().max(2000).nullable(),
