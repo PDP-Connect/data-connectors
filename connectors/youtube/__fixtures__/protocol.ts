@@ -17,6 +17,20 @@ runConnector({
 		try {
 			const page = await browser.newPage();
 			await page.route("https://www.youtube.com/**", async (route) => {
+				if (
+					new URL(route.request().url()).pathname === "/youtubei/v1/browse"
+				) {
+					await route.fulfill({
+						status: 200,
+						contentType: "application/json",
+						body: JSON.stringify({
+							onResponseReceivedActions: [
+								{ appendContinuationItemsAction: { continuationItems: [] } },
+							],
+						}),
+					});
+					return;
+				}
 				const row = (date: string, video: string) =>
 					`<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">${date}</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=${video}"></a><h3 title="Real title"></h3></yt-lockup-view-model></ytd-item-section-renderer>`;
 				// The page data lists all four videos and no next page: the source's end.
@@ -46,7 +60,7 @@ runConnector({
 					row("Sep 22, 2026", "inRangeVideo") +
 					row("Unknown", "unknownVideo") +
 					row("Sep 23, 2026", "endVideo") +
-					`<script>var ytInitialData = ${JSON.stringify(pageData)};</script>`;
+					`<script>var ytInitialData = ${JSON.stringify(pageData)}; fetch("/youtubei/v1/browse", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ browseId: "FEhistory" }) });</script>`;
 				await route.fulfill({
 					contentType: "text/html",
 					body: `<html><body><div id="contents">${html}<div id="message">No more videos</div></div></body></html>`,

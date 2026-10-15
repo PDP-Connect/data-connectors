@@ -24,6 +24,16 @@ export interface ListEndRequest {
 	readonly kind: ListKind;
 	/** The page-local session probe is false when auth was lost after navigation. */
 	readonly sessionPresent?: boolean;
+	/** Latest completed history-list response observed during this traversal. */
+	readonly latestHistoryResponse?: HistoryResponseEvidence | null;
+}
+
+export interface HistoryResponseEvidence {
+	readonly recognized: boolean;
+	readonly hasContinuation: boolean;
+	readonly requestedContinuation: string | null;
+	readonly nextContinuation: string | null;
+	readonly repeatedContinuation: boolean;
 }
 
 export interface ListEnd {
@@ -50,6 +60,68 @@ export interface ListEnd {
 	 * It vetoes every kind of end evidence.
 	 */
 	readonly pageBlocked: boolean;
+	/** Latest target-list response; bootstrap page data is not terminal evidence. */
+	readonly latestHistoryResponse: HistoryResponseEvidence | null;
+}
+
+type UnknownObject = Record<string, unknown>;
+
+function asObject(value: unknown): UnknownObject | null {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as UnknownObject)
+		: null;
+}
+
+/** Extract continuation facts from one response already correlated to history. */
+export function readHistoryResponseEvidence(
+	value: unknown,
+	requestedContinuation: string | null,
+	previouslyRequested: ReadonlySet<string>,
+): HistoryResponseEvidence {
+	const tokens = new Set<string>();
+	let recognized = false;
+	const visit = (node: unknown): void => {
+		if (Array.isArray(node)) {
+			for (const child of node) visit(child);
+			return;
+		}
+		const object = asObject(node);
+		if (!object) return;
+		for (const [key, child] of Object.entries(object)) {
+			if (
+				key === "appendContinuationItemsAction" ||
+				key === "reloadContinuationItemsCommand" ||
+				key === "twoColumnBrowseResultsRenderer" ||
+				key === "singleColumnBrowseResultsRenderer"
+			)
+				recognized = true;
+			if (key === "continuationItemRenderer" && asObject(child)) {
+				const renderer = asObject(child);
+				const endpoint = asObject(renderer?.continuationEndpoint);
+				const command = asObject(endpoint?.continuationCommand);
+				if (typeof command?.token === "string") tokens.add(command.token);
+				const direct = asObject(renderer?.continuationCommand);
+				if (typeof direct?.token === "string") tokens.add(direct.token);
+			}
+			if (key === "nextContinuationData") {
+				const continuation = asObject(child)?.continuation;
+				if (typeof continuation === "string") tokens.add(continuation);
+			}
+			if (key === "continuations" && Array.isArray(child) && child.length > 0)
+				recognized = true;
+			visit(child);
+		}
+	};
+	visit(value);
+	const nextContinuation = tokens.values().next().value ?? null;
+	return {
+		recognized,
+		hasContinuation: tokens.size > 0,
+		requestedContinuation,
+		nextContinuation,
+		repeatedContinuation:
+			nextContinuation !== null && previouslyRequested.has(nextContinuation),
+	};
 }
 
 /**
@@ -66,19 +138,29 @@ export function enumerationEnded(
 	discardedRows = 0,
 ): boolean {
 	if (!end || end.pageBlocked !== false) return false;
+	const latestHistoryResponse = end.latestHistoryResponse;
+	const historyResponseIsCurrent = latestHistoryResponse?.recognized === true;
+	if (historyResponseIsCurrent && latestHistoryResponse.repeatedContinuation)
+		return false;
+	const dataHasContinuation = historyResponseIsCurrent
+		? latestHistoryResponse.hasContinuation
+		: end.dataHasContinuation;
 	const knownRowsExceedEmitted =
 		(end.domItemCount !== null && end.domItemCount > renderedCount) ||
-		(end.dataReadable && end.dataItemCount > renderedCount);
+		(!historyResponseIsCurrent && end.dataReadable && end.dataItemCount > renderedCount);
 	const renderedRowsMissingFromData =
+		!historyResponseIsCurrent &&
 		end.dataReadable &&
 		end.domItemCount !== null &&
 		end.domItemCount > end.dataItemCount;
 	const declaredMismatch =
-		end.declaredTotal !== null && end.declaredTotal !== renderedCount;
+		!historyResponseIsCurrent &&
+		end.declaredTotal !== null &&
+		end.declaredTotal !== renderedCount;
 	if (
 		discardedRows > 0 ||
-		end.domHasContinuation ||
-		end.dataHasContinuation ||
+		(!historyResponseIsCurrent && end.domHasContinuation) ||
+		dataHasContinuation ||
 		knownRowsExceedEmitted ||
 		renderedRowsMissingFromData ||
 		(end.verifiedEmpty &&
@@ -87,6 +169,7 @@ export function enumerationEnded(
 		declaredMismatch
 	)
 		return false;
+	if (historyResponseIsCurrent) return true;
 	if (end.domHasEndMarker || continuationFollowed) return true;
 	if (
 		end.dataReadable &&
@@ -187,7 +270,6 @@ const PAGE_DATA_HELPERS = String.raw`
 		'a[href*="accounts.google.com/ServiceLogin"], ytd-consent-bump-v2-lightbox, ytd-consent-bump-v2, #consent-bump, tp-yt-paper-dialog[role="dialog"], ytd-popup-container tp-yt-paper-dialog, [aria-label*="sign in" i], #error-screen, ytd-error-screen, .yt-error-content, ytd-browse[page-subtype="error"]'
 	);
 	const hasDomLoading = (root = document) => {
-		if (root.querySelector("ytd-continuation-item-renderer")) return true;
 		return hasVisibleMatch('.yt-spinner, yt-spinner, tp-yt-paper-spinner, tp-yt-paper-spinner-lite, [aria-busy="true"], [aria-label*="loading" i], #spinner', root);
 	};
 	const hasOnlyBuiltInPlaylistCards = () => {
@@ -379,6 +461,10 @@ const LIST_END_FUNCTION = `(request) => {
 		domHasEndMarker: /(?:no more (?:videos|items)|end of (?:the )?list|you(?:'|’)ve reached the end)/i.test(endText),
 		pageBlocked: !sessionPresent || hasPageWall() || hasDomLoading() || !onTargetRoute(kind) ||
 			facts.some((f) => f.rejectedMessage || f.loading),
+		latestHistoryResponse:
+			kind === "history" && typeof request !== "string"
+				? request.latestHistoryResponse ?? null
+				: null,
 		verifiedEmpty: sessionPresent && !hasPageWall() && !hasDomLoading() && facts.length > 0 &&
 			(kind === "playlist-index"
 				? onPlaylistIndexPage() && hasOnlyBuiltInPlaylistCards() && facts.every((f) => f.playlistIndexEmpty)

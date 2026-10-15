@@ -4,6 +4,8 @@
 
 /** Browser-first YouTube Collection Profile. The owner signs in in PDPP's browser. */
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
+import type { Request, Response } from "playwright";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
@@ -22,11 +24,15 @@ import {
 	readPlaylistLinks,
 	readSubscriptions,
 	readVideos,
+	type HistoryVideoPage,
 } from "./browser-dom.ts";
 import {
 	enumerationEnded,
+	readHistoryResponseEvidence,
 	type ListEnd,
 	type ListKind,
+	type ListEndRequest,
+	type HistoryResponseEvidence,
 	readListEnd,
 	readPageReadiness,
 } from "./page-evidence.ts";
@@ -35,13 +41,13 @@ import { validateRecord } from "./schemas.ts";
 export { readPageReadiness } from "./page-evidence.ts";
 
 const HOME = "https://www.youtube.com/";
-const HISTORY_LIMIT = 50;
-// Restarting history must rediscover its anchor from the top of the page. Bound
-// each run to 10,000 retained entries and at most 500 one-scroll fetch rounds.
-// At 800 ms per round the scroll wait is capped at 400 seconds; a missing anchor
-// or a stalled continuation fails without advancing the checkpoint.
-const HISTORY_SCAN_LIMIT = 10_000;
-const HISTORY_MAX_SCROLL_ROUNDS = 500;
+const HISTORY_READ_BATCH_SIZE = 50;
+const HISTORY_MAX_SCROLL_ROUNDS = 400;
+const HISTORY_DEDUP_WINDOW = 500;
+const HISTORY_TIME_BUDGET_MS = 180_000;
+const HISTORY_SCROLL_WAIT_MS = 1_000;
+const HISTORY_HEAD_REFRESH_ROUNDS = 3;
+const HISTORY_HEAD_REFRESH_ROWS = HISTORY_READ_BATCH_SIZE * HISTORY_HEAD_REFRESH_ROUNDS;
 const PAGE_HYDRATION_WAIT_MS = 2_000;
 const SCROLLS = {
 	subscriptions: 3,
@@ -65,7 +71,11 @@ type CoverageFact = {
 	emitted_count: number;
 	time_range_requested: boolean;
 	enumerated_count?: number;
-	limit?: number;
+	parsed_count?: number;
+	deduped_count?: number;
+	stop_reason?: string;
+	next_checkpoint?: string | null;
+	incomplete?: boolean;
 	skipped_unresolved_date_count?: number;
 };
 
@@ -79,6 +89,100 @@ function videoIdentity(video: BrowserVideo): string {
 	url.searchParams.delete("list");
 	url.searchParams.delete("index");
 	return url.href;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: null;
+}
+
+class HistoryResponseTracker {
+	private readonly page: BrowserCollectContext["page"];
+	private readonly tokens = new Set<string>();
+	private readonly requestedTokens = new Set<string>();
+	private latestResponse: HistoryResponseEvidence | null = null;
+	private pending = Promise.resolve();
+	private readonly onResponse = (response: Response): void => {
+		this.pending = this.pending
+			.then(() => this.inspect(response))
+			.catch(() => undefined);
+	};
+
+	constructor(page: BrowserCollectContext["page"]) {
+		this.page = page;
+		page.on("response", this.onResponse);
+	}
+
+	get latest(): HistoryResponseEvidence | null {
+		return this.latestResponse;
+	}
+
+	async flush(): Promise<void> {
+		await this.pending;
+	}
+
+	dispose(): void {
+		this.page.off("response", this.onResponse);
+	}
+
+	private async inspect(response: Response): Promise<void> {
+		if (!response.url().includes("/youtubei/v1/browse")) return;
+		let requestBody: Record<string, unknown> | null = null;
+		const request: Request = response.request();
+		try {
+			requestBody = recordValue(request.postDataJSON());
+		} catch {
+			return;
+		}
+		const requestedContinuation =
+			typeof requestBody?.continuation === "string"
+				? requestBody.continuation
+				: null;
+		const initialHistoryRequest = requestBody?.browseId === "FEhistory";
+		if (
+			!initialHistoryRequest &&
+			(!requestedContinuation || !this.tokens.has(requestedContinuation))
+		)
+			return;
+		const repeatedRequest =
+			requestedContinuation !== null &&
+			this.requestedTokens.has(requestedContinuation);
+		if (requestedContinuation) this.requestedTokens.add(requestedContinuation);
+		if (response.status() < 200 || response.status() >= 300) {
+			this.latestResponse = {
+				recognized: false,
+				hasContinuation: false,
+				requestedContinuation,
+				nextContinuation: null,
+				repeatedContinuation: false,
+			};
+			return;
+		}
+		let responseBody: unknown;
+		try {
+			responseBody = await response.json();
+		} catch {
+			this.latestResponse = {
+				recognized: false,
+				hasContinuation: false,
+				requestedContinuation,
+				nextContinuation: null,
+				repeatedContinuation: false,
+			};
+			return;
+		}
+		const evidence = readHistoryResponseEvidence(
+			responseBody,
+			requestedContinuation,
+			this.requestedTokens,
+		);
+		this.latestResponse = {
+			...evidence,
+			repeatedContinuation: evidence.repeatedContinuation || repeatedRequest,
+		};
+		if (evidence.nextContinuation) this.tokens.add(evidence.nextContinuation);
+	}
 }
 
 export function parseCount(value: string | null | undefined): number | null {
@@ -264,7 +368,7 @@ const EMPTY_STATE =
 async function waitForContent(
 	page: BrowserCollectContext["page"],
 	selector: string,
-	options: { playlistIndex?: boolean } = {},
+	options: { playlistIndex?: boolean; timeoutMs?: number } = {},
 ): Promise<"content" | "empty" | "unreadable"> {
 	try {
 		const handle = await page.waitForFunction(
@@ -274,7 +378,7 @@ async function waitForContent(
 				empty: EMPTY_STATE,
 				playlistIndex: options.playlistIndex ?? false,
 			},
-			{ timeout: 10_000 },
+			{ timeout: options.timeoutMs ?? 10_000 },
 		);
 		const state = (await handle.jsonValue()) as "content" | "empty";
 		await handle.dispose();
@@ -546,56 +650,420 @@ async function readPlaylistIndex(
 
 interface VideoReadResult extends ListRead<BrowserVideo> {
 	readonly verifiedEmpty: boolean;
-	/** The saved history anchor was present in this run's readable list. */
-	readonly resumeAnchorFound: boolean;
-	/** The read can save positive anchor progress without claiming an end. */
 	readonly partialCheckpointAllowed: boolean;
+	readonly stopReason?: string;
+	readonly scannedCount?: number;
+	readonly parsedCount?: number;
+	readonly dedupedCount?: number;
+	readonly lastAccounted?: BrowserVideo | null;
+	readonly checkpointAnchor?: string | null;
+	readonly checkpointPosition?: number;
+	readonly phase?: "backfill" | "head_reconciliation";
+	readonly headAnchorIds?: readonly string[];
+	readonly blocked?: boolean;
+	/** The read can save a fully accounted prefix without claiming an end. */
 }
 
 type HistoryCursor = {
+	version?: 2;
+	phase?: "backfill" | "head_reconciliation";
+	backfill_anchor_id?: string;
+	head_anchor_ids?: string[];
 	last_seen_video_id?: string;
 	position?: number;
 	complete?: boolean;
 };
 
+type HistoryPageRequest = {
+	readonly mode: "history";
+	readonly offset: number;
+	readonly limit: number;
+};
+
+const readHistoryPageInBrowser = readVideos as unknown as (
+	request: HistoryPageRequest,
+) => HistoryVideoPage;
+const readPlaylistVideosInBrowser = readVideos as unknown as (
+	mode: "playlist",
+) => BrowserVideo[];
+const readListEndInBrowser = readListEnd as unknown as (
+	request: ListEndRequest,
+) => ListEnd;
+
+function decodeHistoryVideoPage(value: unknown): HistoryVideoPage | null {
+	const page = recordValue(value);
+	if (
+		!page ||
+		typeof page.offset !== "number" ||
+		typeof page.totalRows !== "number" ||
+		!Array.isArray(page.rows)
+	)
+		return null;
+	const rows: Array<BrowserVideo | null> = [];
+	for (const row of page.rows) {
+		if (row === null) {
+			rows.push(null);
+			continue;
+		}
+		const video = recordValue(row);
+		if (!video || typeof video.video_url !== "string") return null;
+		const stringOrNull = (field: unknown): string | null =>
+			typeof field === "string" ? field : null;
+		rows.push({
+			video_id: stringOrNull(video.video_id),
+			video_url: video.video_url,
+			video_title: stringOrNull(video.video_title),
+			channel_title: stringOrNull(video.channel_title),
+			channel_url: stringOrNull(video.channel_url),
+			duration_text: stringOrNull(video.duration_text),
+			thumbnail_url: stringOrNull(video.thumbnail_url),
+			watched_date_label: stringOrNull(video.watched_date_label),
+			views_text: stringOrNull(video.views_text),
+			description: stringOrNull(video.description),
+		});
+	}
+	return { offset: page.offset, totalRows: page.totalRows, rows };
+}
+
+type HistoryStreamRecord = (video: BrowserVideo, position: number) => Promise<void>;
+
+async function scrollHistoryOnce(
+	page: BrowserCollectContext["page"],
+	remainingMs: number,
+): Promise<void> {
+	await page.evaluate((itemSelector) => {
+		const scrollable = Array.from(document.querySelectorAll("*"))
+			.filter(
+				(element) =>
+					element.scrollHeight > element.clientHeight + 8 &&
+					element.querySelector(itemSelector),
+			)
+			.sort(
+				(a, b) =>
+					b.scrollHeight - b.clientHeight -
+					(a.scrollHeight - a.clientHeight),
+			)[0];
+		if (scrollable) scrollable.scrollBy(0, window.innerHeight * 2);
+		else window.scrollBy(0, window.innerHeight * 2);
+	}, "yt-lockup-view-model");
+	await page.waitForTimeout(
+		Math.max(0, Math.min(HISTORY_SCROLL_WAIT_MS, remainingMs)),
+	);
+}
+
+async function readHistoryVideoList(
+	page: BrowserCollectContext["page"],
+	url: string,
+	capture: BrowserCollectContext["capture"] | undefined,
+	cursor: HistoryCursor | undefined,
+	collectionMode: BrowserCollectContext["collectionMode"],
+	emitRecord: HistoryStreamRecord,
+): Promise<VideoReadResult> {
+	const startedAt = performance.now();
+	const responseTracker = new HistoryResponseTracker(page);
+	await page.goto(url, {
+		waitUntil: "domcontentloaded",
+		timeout: HISTORY_TIME_BUDGET_MS,
+	});
+	let remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
+	if (remainingMs <= 0) {
+		responseTracker.dispose();
+		throw new Error("youtube_history_page_unreadable");
+	}
+	await page.waitForTimeout(Math.min(PAGE_HYDRATION_WAIT_MS, remainingMs));
+	remainingMs = HISTORY_TIME_BUDGET_MS - (performance.now() - startedAt);
+	const state = await waitForContent(
+		page,
+		"ytd-item-section-renderer yt-lockup-view-model",
+		{ timeoutMs: Math.max(1, Math.min(10_000, remainingMs)) },
+	);
+	if (state === "unreadable") {
+		responseTracker.dispose();
+		throw new Error("youtube_history_page_unreadable");
+	}
+	await capture?.captureDom(page, "youtube-watch-history");
+	await responseTracker.flush();
+	const headOnly = cursor?.complete === true && collectionMode !== "full_refresh";
+	const rowsSeen = new Set<string>();
+	let resumeAnchor = !headOnly
+		? (cursor?.backfill_anchor_id ?? cursor?.last_seen_video_id ?? null)
+		: null;
+	let resumeAnchorFound = resumeAnchor === null;
+	let phase: "backfill" | "head_reconciliation" = resumeAnchor
+		? "head_reconciliation"
+		: "backfill";
+	let offset = 0;
+	let totalRows = 0;
+	let scrollRounds = 0;
+	let unchangedRounds = 0;
+	let scannedCount = 0;
+	let parsedCount = 0;
+	let dedupedCount = 0;
+	let lastAccounted: BrowserVideo | null = null;
+	let stopReason = "unproven-end";
+	let sourceEnded = false;
+	let verifiedEmpty = false;
+	let blocked = false;
+	let parseGap = false;
+	let headAnchorIds: string[] = [];
+	let currentEnd: ListEnd | null = null;
+	let evidence: ExhaustionEvidence = { kind: "unproven", page: null };
+	// Connector-retained memory is capped at 500 recent identities plus one
+	// 50-row parse batch. The browser may append at most 400 source pages.
+	const rememberIdentity = (key: string): void => {
+		rowsSeen.add(key);
+		if (rowsSeen.size > HISTORY_DEDUP_WINDOW)
+			rowsSeen.delete(rowsSeen.values().next().value!);
+	};
+
+	while (true) {
+		const elapsed = performance.now() - startedAt;
+		remainingMs = HISTORY_TIME_BUDGET_MS - elapsed;
+		if (remainingMs <= 0) {
+			stopReason = "time-budget";
+			break;
+		}
+		const request = {
+			mode: "history",
+			offset,
+			limit: HISTORY_READ_BATCH_SIZE,
+		} as const;
+		const rawBatch: unknown = await page.evaluate(readHistoryPageInBrowser, request);
+		const batch = decodeHistoryVideoPage(rawBatch);
+		if (!batch) {
+			stopReason = "unreadable-batch";
+			parseGap = true;
+			break;
+		}
+		totalRows = batch.totalRows;
+		if (offset === 0) {
+			headAnchorIds = batch.rows
+				.slice(0, 3)
+				.flatMap((video) => (video ? [videoIdentity(video)] : []));
+		}
+		if (offset >= totalRows) {
+			await responseTracker.flush();
+			currentEnd = await page.evaluate(
+				readListEndInBrowser,
+				{
+				kind: "history" as const,
+				sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+				latestHistoryResponse: responseTracker.latest,
+				},
+			);
+			if (currentEnd.pageBlocked) {
+				blocked = true;
+				stopReason = "blocked-page";
+				break;
+			}
+			const latest = currentEnd.latestHistoryResponse;
+			if (latest?.repeatedContinuation) {
+				stopReason = "continuation-cycle";
+				break;
+			}
+			if (totalRows === 0) {
+				const emptyEvidence = exhaustionEvidence(currentEnd, 0, false);
+				if (emptyEvidence.kind === "page-data-empty") {
+					verifiedEmpty = true;
+					sourceEnded = true;
+					evidence = emptyEvidence;
+					stopReason = "source-end";
+					break;
+				}
+				stopReason = "empty-unproven";
+				break;
+			}
+			if (resumeAnchor && !resumeAnchorFound) {
+				// The saved boundary was deleted or moved out of this traversal.
+				// Restart from the head and reconcile every visible row; never treat
+				// a missing anchor as permission to skip an unknown prefix.
+				resumeAnchor = null;
+				resumeAnchorFound = true;
+				phase = "backfill";
+				offset = 0;
+				parsedCount = 0;
+				lastAccounted = null;
+				continue;
+			}
+			const end = exhaustionEvidence(currentEnd, parsedCount, false);
+			if (
+				end.kind !== "unproven" &&
+				parsedCount === totalRows &&
+				latest?.recognized === true &&
+				!latest.hasContinuation
+			) {
+				sourceEnded = true;
+				evidence = end;
+				stopReason = "source-end";
+				break;
+			}
+			if (headOnly && scrollRounds >= HISTORY_HEAD_REFRESH_ROUNDS) {
+				stopReason = "head-reconciled";
+				break;
+			}
+			if (scrollRounds >= HISTORY_MAX_SCROLL_ROUNDS) {
+				stopReason = "scroll-budget";
+				break;
+			}
+			await scrollHistoryOnce(page, remainingMs);
+			scrollRounds += 1;
+			await responseTracker.flush();
+			const afterScrollRaw: unknown = await page.evaluate(
+				readHistoryPageInBrowser,
+				{
+				mode: "history" as const,
+				offset: 0,
+				limit: 1,
+				},
+			);
+			const afterScroll = decodeHistoryVideoPage(afterScrollRaw);
+			const latestAfterScroll = responseTracker.latest;
+			if (latestAfterScroll?.repeatedContinuation) {
+				stopReason = "continuation-cycle";
+				break;
+			}
+			if (!afterScroll || afterScroll.totalRows <= totalRows) {
+				unchangedRounds += 1;
+				if (unchangedRounds >= 2) {
+					stopReason = "stalled";
+					break;
+				}
+			} else {
+				unchangedRounds = 0;
+			}
+			continue;
+		}
+		const rows = batch.rows;
+		if (rows.length === 0) {
+			stopReason = "empty-batch";
+			parseGap = true;
+			break;
+		}
+		for (const video of rows) {
+			if (!video) {
+				parseGap = true;
+				stopReason = "parse-gap";
+				break;
+			}
+			const position = offset;
+			const key = videoIdentity(video);
+			if (resumeAnchor && !resumeAnchorFound && key !== resumeAnchor) {
+				if (rowsSeen.has(key)) {
+					dedupedCount += 1;
+				} else {
+					rememberIdentity(key);
+					await emitRecord(video, position);
+				}
+				parsedCount += 1;
+				scannedCount += 1;
+				offset += 1;
+				continue;
+			}
+			const matchingResumeAnchor = key === resumeAnchor;
+			if (matchingResumeAnchor) {
+				resumeAnchorFound = true;
+				phase = "backfill";
+			}
+			if (rowsSeen.has(key)) {
+				dedupedCount += 1;
+			} else {
+				rememberIdentity(key);
+				await emitRecord(video, position);
+			}
+			// Before a movable saved identity is found, every observed row belongs
+			// to head reconciliation. Upsert the full prefix; never infer delivery
+			// from its position above that identity.
+			lastAccounted = video;
+			parsedCount += 1;
+			scannedCount += 1;
+			offset += 1;
+		}
+		if (parseGap) break;
+		if (headOnly && offset >= HISTORY_HEAD_REFRESH_ROWS) {
+			stopReason = "head-reconciled";
+			break;
+		}
+	}
+	await responseTracker.flush();
+	currentEnd ??= await page.evaluate(
+		readListEndInBrowser,
+		{
+		kind: "history" as const,
+		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+		latestHistoryResponse: responseTracker.latest,
+		},
+	);
+	responseTracker.dispose();
+	blocked ||= currentEnd.pageBlocked;
+	if (blocked) {
+		stopReason = "blocked-page";
+		sourceEnded = false;
+	}
+	if (sourceEnded && !verifiedEmpty) {
+		evidence = exhaustionEvidence(currentEnd, parsedCount, false);
+	}
+	const hasSafePrefix = lastAccounted !== null;
+	const partialCheckpointAllowed =
+		!blocked &&
+		((hasSafePrefix &&
+			!sourceEnded &&
+			!parseGap &&
+			["time-budget", "scroll-budget"].includes(stopReason)) ||
+			(headOnly && stopReason === "head-reconciled"));
+	return {
+		items: [],
+		exhausted: sourceEnded && !blocked,
+		evidence,
+		verifiedEmpty: verifiedEmpty && !blocked,
+		partialCheckpointAllowed,
+		blocked,
+		stopReason,
+		scannedCount,
+		parsedCount,
+		dedupedCount,
+		lastAccounted,
+		checkpointAnchor: lastAccounted ? videoIdentity(lastAccounted) : null,
+		phase: headOnly ? "head_reconciliation" : phase,
+		...(lastAccounted
+			? { checkpointPosition: Math.max(0, offset - 1) }
+			: {}),
+		headAnchorIds,
+	};
+}
+
 async function readVideoList(
 	page: BrowserCollectContext["page"],
 	url: string,
 	rounds: number,
-	mode: "playlist" | "history",
+	mode: "playlist",
 	capture?: BrowserCollectContext["capture"],
-	historyCursor?: HistoryCursor,
 ): Promise<VideoReadResult> {
 	await page.goto(url, { waitUntil: "domcontentloaded" });
 	await page.waitForTimeout(PAGE_HYDRATION_WAIT_MS);
 	const state = await waitForContent(
 		page,
-		mode === "history"
-			? "ytd-item-section-renderer yt-lockup-view-model"
-			: "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer",
+		"yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer",
 	);
 	if (state === "unreadable")
-		throw new Error(`youtube_${mode}_page_unreadable`);
+		throw new Error("youtube_playlist_page_unreadable");
 	await capture?.captureDom(
 		page,
-		url.includes("list=LL")
-			? "youtube-liked-videos"
-			: mode === "history"
-				? "youtube-watch-history"
-				: "youtube-playlist-items",
+		url.includes("list=LL") ? "youtube-liked-videos" : "youtube-playlist-items",
 	);
 	if (state === "empty") {
-		const end = await page.evaluate(readListEnd, {
-			kind: mode,
+			const end = await page.evaluate(
+				readListEndInBrowser,
+			{
+			kind: "playlist" as const,
 			sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
-		});
+			},
+		);
 		const evidence = exhaustionEvidence(end, 0, false);
 		return {
 			items: [],
 			exhausted: evidence.kind !== "unproven",
 			evidence,
 			verifiedEmpty: evidence.kind === "page-data-empty",
-			resumeAnchorFound: !historyCursor?.last_seen_video_id,
 			partialCheckpointAllowed: false,
 		};
 	}
@@ -603,17 +1071,11 @@ async function readVideoList(
 	const out: BrowserVideo[] = [];
 	let continuationRemoved = false;
 	let noChangeRounds = 0;
-	let resumeAnchorFound = !historyCursor?.last_seen_video_id;
-	const selector =
-		mode === "history"
-			? "yt-lockup-view-model"
-			: "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer";
-	const maxRounds = mode === "history" ? HISTORY_MAX_SCROLL_ROUNDS : rounds;
-	for (let round = 0; round <= maxRounds; round += 1) {
+	const selector = "yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer";
+	for (let round = 0; round <= rounds; round += 1) {
 		const previousCount = out.length;
-		const batch = await page.evaluate(readVideos, mode);
+		const batch = await page.evaluate(readPlaylistVideosInBrowser, mode);
 		for (const video of batch) {
-			if (mode === "history" && out.length >= HISTORY_SCAN_LIMIT) break;
 			const key = videoIdentity(video);
 			if (!seen.has(key)) {
 				seen.add(key);
@@ -621,81 +1083,40 @@ async function readVideoList(
 			}
 		}
 		noChangeRounds = out.length === previousCount ? noChangeRounds + 1 : 0;
-		let rowsAfterAnchor = out;
-		if (mode === "history" && historyCursor?.last_seen_video_id) {
-			const anchorIndex = out.findIndex(
-				(video) => videoIdentity(video) === historyCursor.last_seen_video_id,
-			);
-			resumeAnchorFound = anchorIndex >= 0;
-			rowsAfterAnchor = anchorIndex < 0 ? [] : out.slice(anchorIndex + 1);
-		}
-		if (
-			mode === "history" &&
-			(resumeAnchorFound && rowsAfterAnchor.length >= HISTORY_LIMIT ||
-				out.length >= HISTORY_SCAN_LIMIT)
-		)
-			break;
 		if (noChangeRounds >= 2) break;
-		if (round < maxRounds)
+		if (round < rounds)
 			continuationRemoved =
 				(await scroll(
 					page,
 					1,
 					selector,
-					LIST_CONTINUATION_SELECTORS[mode],
-					mode === "history" ? 800 : 1_500,
+					LIST_CONTINUATION_SELECTORS.playlist,
+					1_500,
 				)) || continuationRemoved;
 	}
 	if (out.length === 0) throw new Error("youtube_video_parse_mismatch");
-	const anchorIndex =
-		mode === "history" && historyCursor?.last_seen_video_id
-			? out.findIndex(
-					(video) => videoIdentity(video) === historyCursor.last_seen_video_id,
-				)
-			: -1;
-	resumeAnchorFound = !historyCursor?.last_seen_video_id || anchorIndex >= 0;
-	const rowsAfterAnchor =
-		mode === "history"
-			? out.slice(anchorIndex + 1)
-			: out;
-	const items =
-		mode === "history" ? rowsAfterAnchor.slice(0, HISTORY_LIMIT) : out;
-	const unEmittedRows = Math.max(0, rowsAfterAnchor.length - items.length);
-	const pageEnd = await page.evaluate(readListEnd, {
-		kind: mode,
+	const pageEnd = await page.evaluate(
+		readListEndInBrowser,
+		{
+		kind: "playlist" as const,
 		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
-	});
+		},
+	);
 	await capture?.captureDom(
 		page,
-		url.includes("list=LL")
-			? "youtube-liked-videos-after-scroll"
-			: mode === "history"
-				? "youtube-watch-history-after-scroll"
-				: "youtube-playlist-items-after-scroll",
+		url.includes("list=LL") ? "youtube-liked-videos-after-scroll" : "youtube-playlist-items-after-scroll",
 	);
 	const evidence = exhaustionEvidence(
 		pageEnd,
 		out.length,
 		continuationRemoved,
-		unEmittedRows,
 	);
-	const exhausted = resumeAnchorFound && unEmittedRows === 0 && evidence.kind !== "unproven";
-	const partialCheckpointAllowed =
-		mode === "history" &&
-		resumeAnchorFound &&
-		items.length > 0 &&
-		pageEnd.pageBlocked === false &&
-		(Boolean(historyCursor?.last_seen_video_id) ||
-			unEmittedRows > 0 ||
-			pageEnd.domHasContinuation ||
-			(items.length === HISTORY_LIMIT && pageEnd.dataHasContinuation));
 	return {
-		items,
-		exhausted,
-		evidence: exhausted ? evidence : { kind: "unproven", page: pageEnd },
+		items: out,
+		exhausted: evidence.kind !== "unproven",
+		evidence,
 		verifiedEmpty: false,
-		resumeAnchorFound,
-		partialCheckpointAllowed,
+		partialCheckpointAllowed: false,
 	};
 }
 
@@ -711,11 +1132,19 @@ function readPlaylistVideoList(
 function readWatchHistoryList(
 	page: BrowserCollectContext["page"],
 	url: string,
-	rounds: number,
 	capture?: BrowserCollectContext["capture"],
 	historyCursor?: HistoryCursor,
+	collectionMode?: BrowserCollectContext["collectionMode"],
+	emitRecord?: HistoryStreamRecord,
 ): Promise<VideoReadResult> {
-	return readVideoList(page, url, rounds, "history", capture, historyCursor);
+	return readHistoryVideoList(
+		page,
+		url,
+		capture,
+		historyCursor,
+		collectionMode,
+		emitRecord ?? (async () => undefined),
+	);
 }
 
 async function readableVideos(
@@ -725,6 +1154,7 @@ async function readableVideos(
 	rounds: number,
 	stream: string,
 	historyCursor?: HistoryCursor,
+	historyRecord?: HistoryStreamRecord,
 ): Promise<VideoReadResult | null> {
 	try {
 		const result =
@@ -732,9 +1162,10 @@ async function readableVideos(
 				? await readWatchHistoryList(
 						ctx.page,
 						url,
-						rounds,
 						ctx.capture,
 						historyCursor,
+					ctx.collectionMode,
+					historyRecord,
 					)
 				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
 		if (
@@ -781,6 +1212,13 @@ async function emitCoverageProgress(
 		connectorDiagnostic(connector, "coverage", { ...fact });
 	}
 	const saved = sorted.reduce((sum, fact) => sum + fact.emitted_count, 0);
+	const history = sorted.find((fact) => fact.stream === "watch_history");
+	if (history?.incomplete) {
+		await ctx.progress(
+			`YouTube: ${saved} items saved; watch history incomplete (${history.stop_reason ?? "unproven"}; ${history.parsed_count ?? 0} rows parsed, ${history.deduped_count ?? 0} repeated rows).`,
+		);
+		return;
+	}
 	await ctx.progress(
 		`Finished YouTube: ${saved} ${saved === 1 ? "item" : "items"} saved`,
 	);
@@ -1141,41 +1579,32 @@ export async function collectYoutubeBrowser(
 			ctx.collectionMode === "full_refresh"
 				? undefined
 				: (ctx.state?.watch_history as HistoryCursor | undefined);
+		let dateReference: Date | null = null;
 		const result = await readableVideos(
 			ctx,
 			streams,
 			`${HOME}feed/history`,
-			HISTORY_MAX_SCROLL_ROUNDS,
+			0,
 			"watch_history",
 			priorCursor,
-		);
-		if (result) {
-			const { items } = result;
-			const fact = coverage.get("watch_history");
-			if (fact) {
-				fact.enumerated_count = items.length;
-				fact.limit = HISTORY_LIMIT;
-				fact.skipped_unresolved_date_count = 0;
-			}
-			const browserDate = await page.evaluate(() => {
-				const now = new Date();
-				return [now.getFullYear(), now.getMonth(), now.getDate()];
-			});
-			const dateReference =
-				Array.isArray(browserDate) && browserDate.length === 3
-					? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
-					: new Date(capturedAt);
-			for (const [position, video] of items.entries()) {
-				const absolutePosition =
-					(priorCursor?.position ?? -1) + position + 1;
-				const watchedDate = resolveWatchedDate(
-					video.watched_date_label ?? null,
-					dateReference,
-				);
+			async (video, position) => {
+				if (!dateReference) {
+					const browserDate = await page.evaluate(() => {
+						const now = new Date();
+						return [now.getFullYear(), now.getMonth(), now.getDate()];
+					});
+					dateReference =
+						Array.isArray(browserDate) && browserDate.length === 3
+							? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
+							: new Date(capturedAt);
+				}
 				await emit("watch_history", {
 					id: id(`history|${videoIdentity(video)}`),
-					position: absolutePosition,
-					watched_date: watchedDate,
+					position,
+					watched_date: resolveWatchedDate(
+						video.watched_date_label ?? null,
+						dateReference,
+					),
 					watched_date_label: video.watched_date_label ?? null,
 					video_id: video.video_id,
 					video_url: video.video_url,
@@ -1186,25 +1615,56 @@ export async function collectYoutubeBrowser(
 					views_text: video.views_text ?? null,
 					description: video.description,
 				});
+			},
+		);
+		if (result) {
+			const fact = coverage.get("watch_history");
+			if (fact) {
+				fact.enumerated_count = result.scannedCount ?? 0;
+				fact.parsed_count = result.parsedCount ?? 0;
+				fact.deduped_count = result.dedupedCount ?? 0;
+				if (result.stopReason) fact.stop_reason = result.stopReason;
+				fact.incomplete = !result.exhausted;
+				fact.next_checkpoint = result.checkpointAnchor
+					? id(result.checkpointAnchor)
+					: null;
+				fact.skipped_unresolved_date_count = 0;
 			}
 			if (result.verifiedEmpty) {
 				await emitVerifiedEmptyState(ctx, "watch_history", capturedAt);
 			} else if (
-				items.length > 0 &&
-				(result.exhausted || result.partialCheckpointAllowed)
+				!result.blocked &&
+				(result.exhausted ||
+					(result.checkpointAnchor &&
+						(!priorCursor?.complete || result.partialCheckpointAllowed)))
 			) {
-				const last = items.at(-1)!;
+				const complete =
+					result.exhausted ||
+					(priorCursor?.complete === true &&
+						result.stopReason === "head-reconciled");
 				const evidence = result.exhausted
 					? result.evidence.kind
-					: "youtube_history_last_seen_anchor";
+					: result.partialCheckpointAllowed
+						? "youtube_history_budget_yield"
+						: "youtube_history_safe_prefix_before_gap";
 				await ctx.emit({
 					type: "STATE",
 					stream: "watch_history",
 					cursor: {
-						last_seen_video_id: videoIdentity(last),
+						version: 2,
+						scope: "watch_history",
+						phase: complete
+							? "head_reconciliation"
+							: (result.phase ?? "backfill"),
+						backfill_anchor_id:
+							result.checkpointAnchor ??
+							priorCursor?.backfill_anchor_id ??
+							priorCursor?.last_seen_video_id,
 						position:
-							(priorCursor?.position ?? -1) + items.length,
-						complete: result.exhausted,
+							result.checkpointPosition ?? priorCursor?.position ?? 0,
+						head_anchor_ids: result.headAnchorIds ?? priorCursor?.head_anchor_ids ?? [],
+						complete,
+						stop_reason: result.stopReason,
 						evidence,
 					},
 				});
