@@ -14,7 +14,11 @@ import {
 } from "node:fs";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { validateBaselineTap } from "./report-integrity.mjs";
+import {
+	buildReportManifest,
+	resourceAccounting,
+	validateBaselineTap,
+} from "./report-integrity.mjs";
 
 const mode = process.argv[2];
 if (!new Set(["baseline", "a1", "a2"]).has(mode)) {
@@ -168,6 +172,16 @@ if (result.error) {
 		...initialState,
 		status: "failed to start",
 		error: result.error.message,
+		resources:
+			mode === "baseline"
+				? null
+				: resourceAccounting({
+						gnuTimeOutput: null,
+						statusCounts: null,
+						exitCode: null,
+						signal: null,
+						terminationSignal,
+					}),
 	};
 	writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, {
 		mode: 0o600,
@@ -195,18 +209,31 @@ if (result.error) {
 	}
 	let timeReceipt = null;
 	if (mode !== "baseline" && existsSync(timeReceiptPath)) {
-		timeReceipt = Object.fromEntries(
-			readFileSync(timeReceiptPath, "utf8")
-				.trim()
-				.split(",")
-				.map((field) => field.split("=")),
-		);
+		timeReceipt = readFileSync(timeReceiptPath, "utf8");
 	}
+	let reportStatusCounts = null;
+	if (mode !== "baseline" && existsSync(mutationReportPath)) {
+		try {
+			reportStatusCounts = buildReportManifest(
+				JSON.parse(readFileSync(mutationReportPath, "utf8")),
+			).counts;
+		} catch {}
+	}
+	const resources =
+		mode === "baseline"
+			? null
+			: resourceAccounting({
+					gnuTimeOutput: timeReceipt,
+					statusCounts: reportStatusCounts,
+					exitCode: result.exitCode,
+					signal: result.signal,
+					terminationSignal,
+				});
 	const finalStatus = terminationSignal
 		? "terminated; incomplete"
 		: result.exitCode === 0 &&
 				baseline?.valid &&
-				(mode === "baseline" || (existsSync(mutationReportPath) && timeReceipt))
+				(mode === "baseline" || existsSync(mutationReportPath))
 			? "completed"
 			: "failed";
 	const state = {
@@ -223,22 +250,14 @@ if (result.error) {
 		baseline,
 		mutationReportPresent:
 			mode === "baseline" ? null : existsSync(mutationReportPath),
-		resources: timeReceipt
-			? {
-					accounting:
-						"GNU /usr/bin/time child-process accounting at whole Stryker arm boundary",
-					...timeReceipt,
-					maxRssDefinition:
-						"GNU %M high-water maximum resident set size in KiB; maximum process, not aggregate process-tree RSS",
-				}
-			: null,
+		resources,
 	};
 	writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, {
 		mode: 0o600,
 	});
 	appendFileSync(
 		timingPath,
-		`${JSON.stringify({ event: mode === "baseline" ? "baseline-total" : "stryker-total", mode, durationMs, exitCode: result.exitCode, signal: result.signal, baselineValid: baseline?.valid ?? null, resources: timeReceipt })}\n`,
+		`${JSON.stringify({ event: mode === "baseline" ? "baseline-total" : "stryker-total", mode, durationMs, exitCode: result.exitCode, signal: result.signal, baselineValid: baseline?.valid ?? null, resources })}\n`,
 		{ mode: 0o600 },
 	);
 	if (finalStatus !== "completed") {

@@ -123,7 +123,7 @@ export function parseTap(text) {
 	}
 
 	const tapText = text.slice(versionStart);
-	const events = Parser.parse(tapText, { passes: true });
+	const events = Parser.parse(tapText, { passes: true, strict: true });
 	const summaries = Object.fromEntries(tapFields.map((field) => [field, null]));
 	const leaves = [];
 	const errors = [];
@@ -293,7 +293,7 @@ export function classifyFailureCause(mutant) {
 	const parsed = parseTap(reason);
 	if (parsed.valid) {
 		const failedLeaves = parsed.leaves.filter(
-			(leaf) => leaf.ok === false && leaf.skip !== true && leaf.todo !== true,
+			(leaf) => leaf.ok === false && !leaf.skip && !leaf.todo,
 		);
 		if (
 			failedLeaves.length > 0 &&
@@ -311,6 +311,102 @@ export function classifyFailureCause(mutant) {
 		return "load-or-setup-error";
 	}
 	return "unclassified-command-exit";
+}
+
+export function resourceAccounting({
+	gnuTimeOutput,
+	statusCounts,
+	exitCode,
+	signal,
+	terminationSignal,
+}) {
+	const entries = String(gnuTimeOutput ?? "")
+		.trim()
+		.split(",")
+		.filter(Boolean)
+		.map((field) => {
+			const separator = field.indexOf("=");
+			return separator < 0
+				? [field, null]
+				: [field.slice(0, separator), field.slice(separator + 1)];
+		});
+	const fields = Object.fromEntries(entries);
+	const required = [
+		"elapsedSeconds",
+		"userSeconds",
+		"systemSeconds",
+		"maxRssKiB",
+	];
+	const parsed = Object.fromEntries(
+		required.map((field) => {
+			const value = fields[field];
+			const number = value === undefined ? NaN : Number(value);
+			return [field, Number.isFinite(number) && number >= 0 ? number : null];
+		}),
+	);
+	const malformedFields = required.filter((field) => parsed[field] === null);
+	const duplicateFields = entries
+		.map(([field]) => field)
+		.filter((field, index, all) => all.indexOf(field) !== index);
+	const unexpectedFields = entries
+		.map(([field]) => field)
+		.filter((field) => !required.includes(field));
+	const statusCountsValid =
+		statusCounts &&
+		mutantStatuses.every(
+			(status) =>
+				Number.isInteger(statusCounts[status]) && statusCounts[status] >= 0,
+		) &&
+		Object.values(statusCounts).reduce((sum, count) => sum + count, 0) > 0;
+	const errors = statusCountsValid
+		? ["Timeout", "CompileError", "RuntimeError"].filter(
+				(status) => statusCounts[status] > 0,
+			)
+		: [];
+	const reasons = [];
+	if (malformedFields.length > 0) {
+		reasons.push(
+			`missing or unparseable GNU time fields: ${malformedFields.join(", ")}`,
+		);
+	}
+	if (
+		duplicateFields.length > 0 ||
+		unexpectedFields.length > 0 ||
+		entries.length !== required.length
+	) {
+		reasons.push("GNU time receipt fields are duplicated or unexpected");
+	}
+	if (!statusCountsValid)
+		reasons.push("mutation status report missing, empty or unparseable");
+	if (errors.length > 0) {
+		reasons.push(
+			`mutant statuses may terminate child trees: ${errors.join(", ")}`,
+		);
+	}
+	if (terminationSignal || signal || exitCode !== 0) {
+		reasons.push(
+			`arm process did not exit normally (exitCode=${exitCode}, signal=${signal ?? "none"}, terminationSignal=${terminationSignal ?? "none"})`,
+		);
+	}
+	const comparable = reasons.length === 0;
+	const userSeconds = parsed.userSeconds;
+	const systemSeconds = parsed.systemSeconds;
+	return {
+		wallSeconds: parsed.elapsedSeconds,
+		cpuAccounting: {
+			status: comparable ? "comparable" : "incomplete",
+			comparable,
+			reason: reasons.length > 0 ? reasons.join("; ") : null,
+			userSeconds: comparable ? userSeconds : null,
+			systemSeconds: comparable ? systemSeconds : null,
+			totalSeconds: comparable ? userSeconds + systemSeconds : null,
+			reportedUserSeconds: userSeconds,
+			reportedSystemSeconds: systemSeconds,
+		},
+		maxRssKiB: parsed.maxRssKiB,
+		maxRssDefinition:
+			"GNU %M high-water maximum resident set size in KiB; maximum process, not aggregate process-tree RSS",
+	};
 }
 
 function definitionMap(testFiles = {}) {
