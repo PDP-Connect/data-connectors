@@ -119,6 +119,7 @@ class FixturePage {
 				domItemCount: null,
 				domHasEndMarker: false,
 				verifiedEmpty: empty,
+				pageBlocked: false,
 			};
 		}
 		if (fn.name === "readOwnAccount") return this.ownAccount;
@@ -933,6 +934,8 @@ const historyRow = `<ytd-item-section-renderer><yt-lockup-view-model><a href="/w
 const channelRow = `<ytd-channel-renderer><a id="main-link" href="/@creator"></a><ytd-channel-name><yt-formatted-string id="text">Creator</yt-formatted-string></ytd-channel-name></ytd-channel-renderer>`;
 const END_OF_LIST = `<div id="contents"><div id="message">No more videos</div></div>`;
 const END_OF_PLAYLIST_INDEX = `<div id="contents"><div id="message">No more items</div></div>`;
+/** The page-local session probe needs the account avatar. */
+const SIGNED_IN = `<button id="avatar-btn"></button>`;
 const headerTotal = (text: string) =>
 	`<div class="yt-content-metadata-view-model__metadata-text">${text}</div>`;
 const playlistPageData = (itemCount: number, continuation = false) =>
@@ -1061,8 +1064,8 @@ test("finding 1: source entries left unread do not prove completion without a ne
 test("a playlist index and each playlist with explicit end markers complete", async () => {
 	const pages = (url: string) =>
 		url.includes("feed/playlists")
-			? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
-			: `<h1><yt-formatted-string>My list</yt-formatted-string></h1>${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`;
+			? `${SIGNED_IN}<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
+			: `${SIGNED_IN}<h1><yt-formatted-string>My list</yt-formatted-string></h1>${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`;
 	const { records, outcome } = await collectFromDocuments(pages, [
 		"playlists",
 		"playlist_items",
@@ -1077,8 +1080,8 @@ test("playlist item collection continues when playlist header details are unread
 	const { records, outcome } = await collectFromDocuments(
 		(url) =>
 			url.includes("feed/playlists")
-				? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
-				: `${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`,
+				? `${SIGNED_IN}<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
+				: `${SIGNED_IN}${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`,
 		["playlists", "playlist_items"],
 	);
 	assert.equal(records.get("playlists")?.length, undefined);

@@ -16,6 +16,8 @@
     "playlist-index-unselected-tab.html",
     "liked-videos-unrelated-empty-loading-target.html",
     "liked-videos-consent-wall.html",
+    "liked-videos-sign-in-wall.html",
+    "liked-videos-loading.html",
     "playlist-index-video-lockup-mixed.html"
   ],
   "scrubber": "packages/polyfill-connectors/bin/scrub-fixtures.ts",

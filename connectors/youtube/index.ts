@@ -441,6 +441,10 @@ function exhaustionEvidence(
 		!enumerationEnded(page, renderedCount, continuationRemoved, discardedRows)
 	)
 		return { kind: "unproven", page };
+	// Only page data that says the list is empty proves zero rows. An end
+	// marker or a vanished continuation with no rows can be a failed load.
+	if (renderedCount === 0)
+		return { kind: page.verifiedEmpty ? "page-data-empty" : "unproven", page };
 	if (page.domHasEndMarker) return { kind: "explicit-end-marker", page };
 	if (continuationRemoved) return { kind: "continuation-removed", page };
 	if (
@@ -896,7 +900,7 @@ export async function collectYoutubeBrowser(
 						"YouTube showed subscription content, but the connector could not parse any channel cards.",
 					);
 				} else if (state === "empty") {
-					if (result.exhausted)
+					if (result.evidence.kind === "page-data-empty")
 						await emitVerifiedEmptyState(ctx, "subscriptions", capturedAt);
 					else await streams.fail("subscriptions");
 				} else if (!result.exhausted) {
@@ -948,7 +952,10 @@ export async function collectYoutubeBrowser(
 				playlistLinks = result.items;
 				for (const stream of ["playlists", "playlist_items"]) {
 					if (!requested.has(stream)) continue;
-					if (result.items.length === 0 && result.exhausted) {
+					if (
+						result.items.length === 0 &&
+						result.evidence.kind === "page-data-empty"
+					) {
 						playlistIndexVerifiedEmpty = true;
 					} else if (playlistLinks.length === 0) {
 						playlistIndexReadable = false;

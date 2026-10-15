@@ -43,14 +43,21 @@ export interface ListEnd {
 	readonly domHasEndMarker: boolean;
 	/** The target page data explicitly says the list is empty. */
 	readonly verifiedEmpty: boolean;
+	/**
+	 * The page cannot show the target list: the session is lost, a sign-in,
+	 * consent or error wall shows, the page or its data is still loading, the
+	 * page is not the target route, or the page data holds a rejected message.
+	 * It vetoes every kind of end evidence.
+	 */
+	readonly pageBlocked: boolean;
 }
 
 /**
  * True only when the source proves exhaustion: a verified empty list has no
  * rows, a readable list has no data or DOM continuation and all source entries
  * were read, a followed continuation disappeared, or the page showed an
- * explicit end marker. Missing controls, mismatched totals and row growth
- * alone are not evidence.
+ * explicit end marker. A blocked page vetoes all of these. Missing controls,
+ * mismatched totals and row growth alone are not evidence.
  */
 export function enumerationEnded(
 	end: ListEnd | null | undefined,
@@ -58,7 +65,7 @@ export function enumerationEnded(
 	continuationFollowed = false,
 	discardedRows = 0,
 ): boolean {
-	if (!end) return false;
+	if (!end || end.pageBlocked !== false) return false;
 	const knownRowsExceedEmitted =
 		(end.domItemCount !== null && end.domItemCount > renderedCount) ||
 		(end.dataReadable && end.dataItemCount > renderedCount);
@@ -161,6 +168,14 @@ const PAGE_DATA_HELPERS = String.raw`
 		return url?.pathname === "/playlist" && url.searchParams.get("list") === "LL";
 	};
 	const onSubscriptionsPage = () => targetLocation()?.pathname === "/feed/channels";
+	const onTargetRoute = (kind) => {
+		const url = targetLocation();
+		if (kind === "history") return url?.pathname === "/feed/history";
+		if (kind === "playlist") return url?.pathname === "/playlist" && Boolean(url.searchParams.get("list"));
+		if (kind === "playlist-index") return onPlaylistIndexPage();
+		if (kind === "subscriptions") return onSubscriptionsPage();
+		return false;
+	};
 	const isVisible = (node) => {
 		if (node.closest('[hidden], [aria-hidden="true"]')) return false;
 		const style = typeof window.getComputedStyle === "function" ? window.getComputedStyle(node) : null;
@@ -272,7 +287,7 @@ const PAGE_DATA_HELPERS = String.raw`
 			}
 		};
 		visit(region);
-		if (playlistIndex) facts.playlistIndexEmpty = facts.selectedTabContent && facts.lists === 1 && facts.emptyLists === 1 && facts.items === 0 && !facts.continuation && !facts.loading;
+		if (playlistIndex) facts.playlistIndexEmpty = facts.selectedTabContent && facts.lists === 1 && facts.emptyLists === 1 && facts.items === 0 && !facts.continuation && !facts.loading && !facts.rejectedMessage;
 		if (!playlistIndex && facts.selectedTabContent) {
 			const layout = data.contents?.twoColumnBrowseResultsRenderer ?? data.contents?.singleColumnBrowseResultsRenderer;
 			const tabs = layout?.tabs;
@@ -358,6 +373,8 @@ const LIST_END_FUNCTION = `(request) => {
 		declaredTotal,
 		domItemCount,
 		domHasEndMarker: /(?:no more (?:videos|items)|end of (?:the )?list|you(?:'|’)ve reached the end)/i.test(endText),
+		pageBlocked: !sessionPresent || hasPageWall() || hasDomLoading() || !onTargetRoute(kind) ||
+			facts.some((f) => f.rejectedMessage || f.loading),
 		verifiedEmpty: sessionPresent && !hasPageWall() && !hasDomLoading() && facts.length > 0 &&
 			(kind === "playlist-index"
 				? onPlaylistIndexPage() && hasOnlyBuiltInPlaylistCards() && facts.every((f) => f.playlistIndexEmpty)

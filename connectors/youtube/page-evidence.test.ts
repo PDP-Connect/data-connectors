@@ -20,6 +20,7 @@ const NO_EVIDENCE: ListEnd = {
 	domItemCount: null,
 	domHasEndMarker: false,
 	verifiedEmpty: false,
+	pageBlocked: false,
 };
 
 function setPageLocation(window: object, url: string) {
@@ -320,8 +321,42 @@ test("an unrelated empty LL section cannot prove a loading target section empty"
 	);
 });
 
-test("an auth or consent wall vetoes empty LL evidence", () => {
-	assertFixtureUnproven("liked-videos-consent-wall.html", "playlist");
+test("each LL wall fixture is the verified empty baseline plus exactly one blocker", () => {
+	const fixture = (file: string) =>
+		readFileSync(
+			new URL(`./__fixtures__/real-shape/${file}`, import.meta.url),
+			"utf8",
+		);
+	const baseline = fixture("liked-videos-empty-tab.html");
+	const verifiedEmpty = (html: string) => {
+		const page = parseHTML(html);
+		const globals = globalThis as Record<string, unknown>;
+		globals.document = page.document;
+		globals.window = page.window;
+		setPageLocation(page.window, "https://www.youtube.com/playlist?list=LL");
+		try {
+			return readListEnd("playlist").verifiedEmpty;
+		} finally {
+			globals.document = undefined;
+			globals.window = undefined;
+		}
+	};
+	assert.equal(verifiedEmpty(baseline), true, "wall-free baseline");
+	for (const [file, blocker] of [
+		[
+			"liked-videos-consent-wall.html",
+			'<ytd-consent-bump-v2-lightbox><div role="dialog">Consent required</div></ytd-consent-bump-v2-lightbox>\n',
+		],
+		[
+			"liked-videos-sign-in-wall.html",
+			'<a href="https://accounts.google.com/ServiceLogin">Sign in</a>\n',
+		],
+		["liked-videos-loading.html", "<tp-yt-paper-spinner></tp-yt-paper-spinner>\n"],
+	] as const) {
+		const html = fixture(file);
+		assert.equal(html.replace(blocker, ""), baseline, `${file} adds only its blocker`);
+		assert.equal(verifiedEmpty(html), false, file);
+	}
 });
 
 test("a lost session vetoes empty LL evidence on the target page", () => {
@@ -430,9 +465,19 @@ test("a rejected message inside a playlist index vetoes built-in-only empty evid
 
 test("current empty-liked and four-subscription source shapes prove their captured outcomes", () => {
 	const globals = globalThis as Record<string, unknown>;
-	for (const [file, kind, expectedCount] of [
-		["playlist-index-view-model.html", "playlist-index", 1],
-		["watch-later-playlist-items.html", "playlist", 2],
+	for (const [file, kind, expectedCount, url] of [
+		[
+			"playlist-index-view-model.html",
+			"playlist-index",
+			1,
+			"https://www.youtube.com/feed/playlists",
+		],
+		[
+			"watch-later-playlist-items.html",
+			"playlist",
+			2,
+			"https://www.youtube.com/playlist?list=WL",
+		],
 	] as const) {
 		const page = parseHTML(
 			readFileSync(
@@ -442,6 +487,7 @@ test("current empty-liked and four-subscription source shapes prove their captur
 		);
 		globals.document = page.document;
 		globals.window = page.window;
+		setPageLocation(page.window, url);
 		try {
 			const end = readListEnd(kind);
 			assert.equal(end.dataReadable, true);
@@ -486,6 +532,7 @@ test("current empty-liked and four-subscription source shapes prove their captur
 	);
 	globals.document = subscriptions.document;
 	globals.window = subscriptions.window;
+	setPageLocation(subscriptions.window, "https://www.youtube.com/feed/channels");
 	try {
 		const end = readListEnd("subscriptions");
 		assert.equal(end.dataReadable, true);
@@ -536,6 +583,8 @@ test("readListEnd reads the header total, continuation and row count from the pa
 			domItemCount: 0,
 			domHasEndMarker: false,
 			verifiedEmpty: false,
+			// The parsed page has no YouTube route.
+			pageBlocked: true,
 		});
 		assert.equal(readListEnd("history").declaredTotal, null);
 		assert.equal(readListEnd("history").domItemCount, 0);
@@ -544,4 +593,24 @@ test("readListEnd reads the header total, continuation and row count from the pa
 		globals.document = undefined;
 		globals.window = undefined;
 	}
+});
+
+test("a blocked page vetoes every kind of end evidence", () => {
+	const blocked = { ...NO_EVIDENCE, pageBlocked: true };
+	assert.equal(enumerationEnded({ ...blocked, domHasEndMarker: true }, 2), false);
+	assert.equal(enumerationEnded(blocked, 2, true), false, "continuation removed");
+	assert.equal(
+		enumerationEnded({ ...blocked, dataReadable: true, dataItemCount: 2 }, 2),
+		false,
+	);
+	assert.equal(enumerationEnded({ ...blocked, verifiedEmpty: true }, 0), false);
+	const { pageBlocked: _omitted, ...unknown } = {
+		...NO_EVIDENCE,
+		domHasEndMarker: true,
+	};
+	assert.equal(
+		enumerationEnded(unknown as ListEnd, 2),
+		false,
+		"a missing block fact is not a clear page",
+	);
 });

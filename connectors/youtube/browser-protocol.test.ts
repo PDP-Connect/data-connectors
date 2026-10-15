@@ -751,3 +751,151 @@ test("profile ignores channel chrome counts while About metadata is loading", as
 		await browser.close();
 	}
 });
+
+async function collectRouted(
+	pages: Record<string, string>,
+	requested: string[],
+): Promise<{
+	failures: string[];
+	states: Array<[unknown, unknown]>;
+}> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			const html = pages[`${url.pathname}${url.search}`];
+			await route.fulfill({
+				status: html ? 200 : 404,
+				contentType: "text/html",
+				body: html ?? "",
+			});
+		});
+		const fastPage = new Proxy(page, {
+			get(target, key) {
+				if (key === "waitForTimeout") return async () => undefined;
+				const value = Reflect.get(target, key);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const failures: string[] = [];
+		const states: Array<[unknown, unknown]> = [];
+		await collectYoutubeBrowser({
+			page: fastPage as never,
+			requested: new Map(requested.map((name) => [name, { name }])) as never,
+			emitRecord: async () => undefined,
+			emit: async (message) => {
+				const m = message as Record<string, unknown>;
+				if (m.type === "STATE")
+					states.push([
+						m.stream,
+						(m.cursor as Record<string, unknown>).evidence,
+					]);
+			},
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+			progress: async () => undefined,
+		});
+		return { failures: failures.sort(), states };
+	} finally {
+		await browser.close();
+	}
+}
+
+const builtInWatchLaterCard =
+	'<yt-lockup-view-model><a href="/playlist?list=WL"><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></a></yt-lockup-view-model>';
+
+test("a rejected page-data message vetoes an otherwise empty playlist index", async () => {
+	const data = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								sectionListRenderer: {
+									contents: [
+										{
+											itemSectionRenderer: {
+												contents: [
+													{
+														richGridRenderer: {
+															contents: [
+																{
+																	richItemRenderer: {
+																		content: {
+																			lockupViewModel: {
+																				contentId: "WL",
+																				contentType:
+																					"LOCKUP_CONTENT_TYPE_PLAYLIST",
+																			},
+																		},
+																	},
+																},
+															],
+														},
+													},
+													{
+														messageRenderer: {
+															text: {
+																simpleText: "Something went wrong. Try again",
+															},
+														},
+													},
+												],
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		},
+	};
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/playlists": `<html><body><button id="avatar-btn"></button>${builtInWatchLaterCard}<script>var ytInitialData = ${JSON.stringify(data)};</script></body></html>`,
+		},
+		["playlists", "playlist_items"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["playlist_items", "playlists"]);
+});
+
+test("a DOM end marker behind a sign-in wall never proves a playlist index empty", async () => {
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/playlists": `<html><body>${builtInWatchLaterCard}<a href="https://accounts.google.com/ServiceLogin">Sign in</a><div id="contents"><div id="message">No more videos</div></div></body></html>`,
+		},
+		["playlists", "playlist_items"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["playlist_items", "playlists"]);
+});
+
+test("a vanished continuation with zero rows never proves a playlist index empty", async () => {
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/playlists": `<html><body><button id="avatar-btn"></button>${builtInWatchLaterCard}<ytd-rich-grid-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-rich-grid-renderer><script>window.scrollBy = () => document.querySelector("ytd-continuation-item-renderer")?.remove();</script></body></html>`,
+		},
+		["playlists", "playlist_items"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["playlist_items", "playlists"]);
+});
+
+test("a DOM end marker with zero rows never proves subscriptions empty", async () => {
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/channels":
+				'<html><body><button id="avatar-btn"></button><div id="contents"><ytd-message-renderer><div id="message">No more videos</div></ytd-message-renderer></div></body></html>',
+		},
+		["subscriptions"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["subscriptions"]);
+});
