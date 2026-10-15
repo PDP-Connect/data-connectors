@@ -572,32 +572,120 @@ test("collectAllStreams: repeated continuation markers stop as a gap", async () 
 
 test("collectAllStreams: note records keep empty title values and reject non-Note rows", async () => {
 	const harness = makeRecordingEmit(validateRecord);
-	await collectAllStreams(
-		makeCtx(
-			makeNotePage([
-				{
-					stream: "notes",
-					response: {
-						records: [
-							{ recordName: "folder-like", recordType: "Folder", fields: {} },
-							{
-								recordName: "note-empty-title",
-								recordType: "Note",
-								fields: readableEmptyNoteFields({
-									TitleEncrypted: { value: b64("") },
-								}),
-							},
-						],
-					},
+	const progress: { intentional_exclusions?: number }[] = [];
+	const ctx = makeCtx(
+		makeNotePage([
+			{
+				stream: "notes",
+				response: {
+					records: [
+						{ recordName: "folder-like", recordType: "Folder", fields: {} },
+						{
+							recordName: "note-empty-title",
+							recordType: "Note",
+							fields: readableEmptyNoteFields({
+								TitleEncrypted: { value: b64("") },
+							}),
+						},
+					],
 				},
-			]),
-			harness,
-			["notes"],
-		),
+			},
+		]),
+		harness,
+		["notes"],
 	);
+	ctx.progress = async (_message, extra) => {
+		if (extra?.phase === "emit") progress.push(extra);
+	};
+	await collectAllStreams(ctx);
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.data.id, "note-empty-title");
 	assert.equal(harness.emitted[0]?.data.title, "");
+	assert.deepEqual(progress.at(-1)?.intentional_exclusions, 1);
+});
+
+test("collectAllStreams: unknown recordType withholds both streams and preserves seeded state", async () => {
+	const previous = makeRecordingEmit(validateRecord);
+	await collectAllStreams(
+		makeCtx(
+			makeFakePage([
+				{ stream: "folders", response: folderQueryResponse() },
+				{ stream: "notes", response: noteQueryResponse() },
+			]),
+			previous,
+			["folders", "notes"],
+		),
+	);
+	const seed = Object.fromEntries(
+		previous.protocolMessages
+			.filter((message) => message.type === "STATE")
+			.map((message) => [message.stream, message.cursor]),
+	);
+	assert.deepEqual(Object.keys(seed).sort(), ["folders", "notes"]);
+
+	const harness = makeRecordingEmit(validateRecord);
+	const ctx = makeCtx(
+		makeFakePage([
+			{
+				stream: "folders",
+				response: {
+					records: [
+						{
+							recordName: "folder-unknown-type",
+							recordType: "",
+							fields: { TitleEncrypted: { value: b64("Work") } },
+						},
+					],
+				},
+			},
+			{
+				stream: "notes",
+				response: {
+					records: [
+						{
+							recordName: "note-missing-type",
+							fields: readableEmptyNoteFields({
+								TitleEncrypted: { value: b64("Unknown type") },
+							}),
+						},
+					],
+				},
+			},
+		]),
+		harness,
+		["folders", "notes"],
+		seed,
+	);
+	await collectAllStreams(ctx);
+
+	assert.equal(harness.emitted.length, 0);
+	assert.equal(
+		harness.protocolMessages.some((message) => message.type === "STATE"),
+		false,
+		"an unavailable record discriminator must veto both stream checkpoints",
+	);
+	assert.deepEqual(ctx.state, seed, "prior cursors must remain untouched");
+	for (const [stream, reason, shape] of [
+		["folders", "malformed_record_type", { type: "string", length: 0 }],
+		["notes", "missing_record_type", { type: "missing" }],
+	] as const) {
+		const skip = harness.protocolMessages.find(
+			(message) => message.type === "SKIP_RESULT" && message.stream === stream,
+		);
+		assert.ok(
+			skip && skip.type === "SKIP_RESULT",
+			`${stream} must be withheld`,
+		);
+		assert.equal(skip.reason, "icloud_omitted_rows");
+		assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
+			{
+				row_index: 0,
+				field_count: 1,
+				field_omissions: [{ field: "recordType", reason, source_shape: shape }],
+				row_reason: "unavailable_fields",
+			},
+		]);
+	}
 });
 
 test("collectAllStreams: sparse CloudKit optional fields emit their defaults and cover the row", async () => {

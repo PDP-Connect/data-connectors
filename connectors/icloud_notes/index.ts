@@ -99,6 +99,7 @@ import { runConnector } from "../../packages/polyfill-connectors/src/connector-r
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import type { FieldOmission as ParsedFieldOmission } from "./parsers.ts";
 import {
+	readCloudKitRecordType,
 	readDeletedNote,
 	readFolderRecord,
 	readNoteRecord,
@@ -115,6 +116,7 @@ const VALIDATE_URL = "https://setup.icloud.com/setup/ws/1/validate";
 const RESULTS_LIMIT = 200;
 
 interface ProgressExtra {
+	intentional_exclusions?: number;
 	item_count?: number;
 	page_index?: number;
 	phase?: string;
@@ -143,6 +145,7 @@ interface QueryFailure {
 	sourceRowsSeen?: number;
 	noteRowsSeen?: number;
 	deletedNoteRows?: number;
+	intentionalExclusions?: number;
 	omittedRows?: number;
 	fieldOmissions?: FieldOmission[];
 	omittedRowDiagnostics?: OmittedRowDiagnostic[];
@@ -343,7 +346,7 @@ function noteQueryBody(marker?: string): Record<string, unknown> {
 }
 
 function validCloudKitRecord(value: unknown): value is CloudKitRecord {
-	if (!isRecord(value) || typeof value.recordType !== "string") return false;
+	if (!isRecord(value)) return false;
 	if (typeof value.recordName !== "string") return false;
 	return value.fields === undefined || isRecord(value.fields);
 }
@@ -589,6 +592,9 @@ async function emitStreamFailure(
 			...(failure.deletedNoteRows === undefined
 				? {}
 				: { deleted_note_rows: failure.deletedNoteRows }),
+			...(failure.intentionalExclusions === undefined
+				? {}
+				: { intentional_exclusions: failure.intentionalExclusions }),
 			...(failure.omittedRows === undefined
 				? {}
 				: { omitted_rows: failure.omittedRows }),
@@ -792,10 +798,33 @@ export async function collectAllStreams(
 		);
 		let omitted = 0;
 		let folderRowIndex = 0;
+		let intentionalExclusions = 0;
 		const fieldOmissions: FieldOmission[] = [];
 		const omittedRowDiagnostics: OmittedRowDiagnostic[] = [];
 		for (const record of folderWalk.records) {
-			if (record.recordType !== "Folder") continue;
+			const recordType = readCloudKitRecordType(record);
+			if (recordType.kind === "UNAVAILABLE") {
+				const rowIndex = folderRowIndex;
+				folderRowIndex += 1;
+				const omission: FieldOmission = {
+					field: "recordType",
+					reason: recordType.reason,
+					source_shape: recordType.source_shape,
+				};
+				fieldOmissions.push(omission);
+				omitted += 1;
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: 1,
+					field_omissions: [omission],
+					row_reason: "unavailable_fields",
+				});
+				continue;
+			}
+			if (recordType.value !== "Folder") {
+				intentionalExclusions += 1;
+				continue;
+			}
 			const rowIndex = folderRowIndex;
 			folderRowIndex += 1;
 			const result = readFolderRecord(record);
@@ -834,12 +863,8 @@ export async function collectAllStreams(
 			}
 			if (built.name !== null) folderNames.set(built.id, built.name);
 		}
-		folderScanComplete = hasBoundEndProof(
-			folderWalk,
-			pageUrl,
-			config,
-			"folders",
-		);
+		folderScanComplete =
+			omitted === 0 && hasBoundEndProof(folderWalk, pageUrl, config, "folders");
 
 		if (requested.has("folders")) {
 			const cursor = openFingerprintCursor(state.folders, {
@@ -847,7 +872,9 @@ export async function collectAllStreams(
 			});
 			let covered = 0;
 			for (const record of folderWalk.records) {
-				if (record.recordType !== "Folder") continue;
+				const recordType = readCloudKitRecordType(record);
+				if (recordType.kind === "UNAVAILABLE" || recordType.value !== "Folder")
+					continue;
 				const result = readFolderRecord(record);
 				const built = result.record;
 				if (
@@ -879,7 +906,12 @@ export async function collectAllStreams(
 							pageCount: folderWalk.pageCount,
 						}
 					: null);
-			if (failure) failure = { ...failure, rowsSeen: folderRowIndex };
+			if (failure)
+				failure = {
+					...failure,
+					rowsSeen: folderRowIndex,
+					intentionalExclusions,
+				};
 			if (failure) {
 				await emitStreamFailure(emit, "folders", failure);
 			} else if (
@@ -896,6 +928,7 @@ export async function collectAllStreams(
 			await progress("Emitted iCloud Notes folders", {
 				phase: "emit",
 				item_count: folderWalk.records.length,
+				intentional_exclusions: intentionalExclusions,
 				total_seen: covered,
 			});
 		}
@@ -923,10 +956,33 @@ export async function collectAllStreams(
 		let noteRowIndex = 0;
 		let noteRowsSeen = 0;
 		let deletedNoteRows = 0;
+		let intentionalExclusions = 0;
 		const fieldOmissions: FieldOmission[] = [];
 		const omittedRowDiagnostics: OmittedRowDiagnostic[] = [];
 		for (const record of walk.records) {
-			if (record.recordType !== "Note") continue;
+			const recordType = readCloudKitRecordType(record);
+			if (recordType.kind === "UNAVAILABLE") {
+				const rowIndex = noteRowIndex;
+				noteRowIndex += 1;
+				const omission: FieldOmission = {
+					field: "recordType",
+					reason: recordType.reason,
+					source_shape: recordType.source_shape,
+				};
+				fieldOmissions.push(omission);
+				omitted += 1;
+				omittedRowDiagnostics.push({
+					row_index: rowIndex,
+					field_count: 1,
+					field_omissions: [omission],
+					row_reason: "unavailable_fields",
+				});
+				continue;
+			}
+			if (recordType.value !== "Note") {
+				intentionalExclusions += 1;
+				continue;
+			}
 			noteRowsSeen += 1;
 			const deletion = readDeletedNote(record);
 			if (deletion.kind !== "UNAVAILABLE" && deletion.value) {
@@ -1020,6 +1076,7 @@ export async function collectAllStreams(
 				sourceRowsSeen: walk.records.length,
 				noteRowsSeen,
 				deletedNoteRows,
+				intentionalExclusions,
 			};
 		}
 		if (!failure && !remainsInICloudNotes(page.url(), pageUrl)) {
@@ -1044,6 +1101,7 @@ export async function collectAllStreams(
 		await progress("Emitted iCloud Notes", {
 			phase: "emit",
 			item_count: walk.records.length,
+			intentional_exclusions: intentionalExclusions,
 			total_seen: covered,
 		});
 	}

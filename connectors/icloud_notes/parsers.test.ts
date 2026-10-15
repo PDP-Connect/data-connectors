@@ -17,11 +17,43 @@ import {
 	epochMsToIso,
 	extractCleanText,
 	extractNoteText,
+	readCloudKitRecordType,
 	readDeletedNote,
 	readFolderRecord,
 	readNoteRecord,
 } from "./parsers.ts";
 import type { CloudKitRecord } from "./types.ts";
+
+test("readCloudKitRecordType: only known discriminators route and unknown shapes stay unavailable", () => {
+	assert.deepEqual(readCloudKitRecordType({ recordType: "Note" }), {
+		kind: "READ",
+		value: "Note",
+	});
+	assert.deepEqual(readCloudKitRecordType({ recordType: "Folder" }), {
+		kind: "READ",
+		value: "Folder",
+	});
+	assert.deepEqual(readCloudKitRecordType({ recordType: "UnexpectedType" }), {
+		kind: "UNAVAILABLE",
+		reason: "unrecognized_record_type",
+		source_shape: { type: "string", length: 14 },
+	});
+	assert.deepEqual(readCloudKitRecordType({ recordType: "" }), {
+		kind: "UNAVAILABLE",
+		reason: "malformed_record_type",
+		source_shape: { type: "string", length: 0 },
+	});
+	assert.deepEqual(readCloudKitRecordType({ recordType: 17 }), {
+		kind: "UNAVAILABLE",
+		reason: "malformed_record_type",
+		source_shape: { type: "number" },
+	});
+	assert.deepEqual(readCloudKitRecordType({}), {
+		kind: "UNAVAILABLE",
+		reason: "missing_record_type",
+		source_shape: { type: "missing" },
+	});
+});
 
 // ─── decodeBase64Text ────────────────────────────────────────────────────
 

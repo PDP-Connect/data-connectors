@@ -173,6 +173,8 @@ export interface RecordRead<T> {
 	unavailableFields: FieldOmission[];
 }
 
+export type CloudKitRecordType = "Note" | "Folder";
+
 function read<T>(value: T): FieldRead<T> {
 	return { kind: "READ", value };
 }
@@ -212,6 +214,29 @@ function unavailable<T>(
 							: sourceValueShape(sourceValue),
 				}),
 	};
+}
+
+/** Record type controls whether a CloudKit result is routed, excluded, or
+ *  withheld. Only the two record types observed in these query results are
+ *  recognized; an unknown or malformed discriminator cannot prove that a
+ *  row is irrelevant. */
+export function readCloudKitRecordType(
+	record: CloudKitRecord,
+): FieldRead<CloudKitRecordType> {
+	if (!Object.hasOwn(record, "recordType") || record.recordType === undefined) {
+		return unavailable("missing_record_type", undefined, { type: "missing" });
+	}
+	if (record.recordType === "Note" || record.recordType === "Folder") {
+		return read(record.recordType);
+	}
+	const shape = sourceValueShape(record.recordType);
+	return unavailable(
+		typeof record.recordType === "string" && record.recordType.length > 0
+			? "unrecognized_record_type"
+			: "malformed_record_type",
+		record.recordType,
+		shape,
+	);
 }
 
 function fieldValue(

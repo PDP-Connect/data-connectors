@@ -22,7 +22,7 @@ export interface CloudKitRecordRef {
 
 export interface CloudKitRecord {
 	recordName?: string;
-	recordType?: string;
+	recordType?: unknown;
 	fields?: Record<string, CloudKitFieldValue>;
 	created?: { timestamp?: number };
 	modified?: { timestamp?: number };
