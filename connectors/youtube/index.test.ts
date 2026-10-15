@@ -12,6 +12,7 @@ import {
 	readPageReadiness,
 	resolveWatchedDate,
 } from "./index.ts";
+import { enumerationEnded, readListEnd } from "./page-evidence.ts";
 import { validateRecord } from "./schemas.ts";
 
 const VIDEO = {
@@ -27,8 +28,16 @@ const VIDEO = {
 	description: "Snippet",
 };
 
-function withBrowserGlobals(html: string, run: () => void): void {
+function withBrowserGlobals(
+	html: string,
+	run: () => void,
+	url = "https://www.youtube.com/",
+): void {
 	const { document, window } = parseHTML(html);
+	Object.defineProperty(window, "location", {
+		configurable: true,
+		value: new URL(url),
+	});
 	const globals = globalThis as typeof globalThis & {
 		document?: Document;
 		window?: Window;
@@ -62,6 +71,7 @@ class FixturePage {
 	private readonly waitStates: Array<
 		"content" | "empty" | "json-empty" | "unreadable"
 	>;
+	private lastWaitState: "content" | "empty" | "json-empty" = "content";
 	private readonly ownAccount: {
 		channel_url: string | null;
 		email: string | null;
@@ -80,7 +90,10 @@ class FixturePage {
 		this.url = url;
 	}
 	locator() {
-		return { first: () => ({ click: async () => undefined }) };
+		return {
+			first: () => ({ click: async () => undefined }),
+			count: async () => 0,
+		};
 	}
 	async waitForTimeout() {
 		/* fixture has no renderer delay */
@@ -88,11 +101,27 @@ class FixturePage {
 	async waitForFunction() {
 		const state = this.waitStates.shift() ?? "content";
 		if (state === "unreadable") throw new Error("fixture page read timed out");
+		this.lastWaitState = state;
 		if (state === "json-empty")
 			return { jsonValue: async () => "empty", dispose: async () => undefined };
 		return { jsonValue: async () => state, dispose: async () => undefined };
 	}
-	async evaluate(fn: Function): Promise<any> {
+	async evaluate(fn: Function): Promise<unknown> {
+		if (fn.name === "readListEnd") {
+			const empty =
+				this.lastWaitState === "empty" || this.lastWaitState === "json-empty";
+			return {
+				dataReadable: !empty,
+				dataItemCount: empty ? 0 : 1,
+				dataHasContinuation: !empty,
+				domHasContinuation: false,
+				declaredTotal: null,
+				domItemCount: null,
+				domHasEndMarker: false,
+				verifiedEmpty: empty,
+				pageBlocked: false,
+			};
+		}
 		if (fn.name === "readOwnAccount") return this.ownAccount;
 		if (fn.name === "readChannelPage")
 			return {
@@ -433,7 +462,7 @@ test("unreadable list DOM emits a skip instead of a successful zero-row snapshot
 	assert.equal(records.length, 0);
 });
 
-test("page readiness treats ytInitialData empty contents as positive empty evidence", () => {
+test("an empty grid without rendered built-in playlist links is not empty evidence", () => {
 	withBrowserGlobals(
 		`<script>var ytInitialData = {"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"content":{"richGridRenderer":{"contents":[]}}}}]}}};</script>`,
 		() => {
@@ -442,13 +471,13 @@ test("page readiness treats ytInitialData empty contents as positive empty evide
 					content: "yt-lockup-view-model",
 					empty: "ytd-message-renderer",
 				}),
-				"empty",
+				false,
 			);
 		},
 	);
 });
 
-test("page readiness treats explicit YouTube empty renderers in JSON as positive empty evidence", () => {
+test("an unbound empty message in page data is not target-list evidence", () => {
 	withBrowserGlobals(
 		`<script>var ytInitialData = {"contents":{"messageRenderer":{"text":{"runs":[{"text":"No videos yet"}]}}}};</script>`,
 		() => {
@@ -457,7 +486,7 @@ test("page readiness treats explicit YouTube empty renderers in JSON as positive
 					content: "yt-lockup-view-model",
 					empty: "ytd-message-renderer",
 				}),
-				"empty",
+				false,
 			);
 		},
 	);
@@ -803,10 +832,35 @@ test("browser navigation failures report each requested enumeration as retryable
 	);
 });
 
-test("empty-state JSON text may contain braces and escaped quotes", () => {
+test("LL empty-state JSON text may contain braces and escaped quotes", () => {
 	const data = {
 		contents: {
-			messageRenderer: { text: { simpleText: 'No videos } yet "saved"' } },
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								sectionListRenderer: {
+									contents: [
+										{
+											itemSectionRenderer: {
+												contents: [
+													{
+														messageRenderer: {
+															text: { simpleText: 'No videos } yet "saved"' },
+														},
+													},
+												],
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
 		},
 	};
 	withBrowserGlobals(
@@ -820,6 +874,7 @@ test("empty-state JSON text may contain braces and escaped quotes", () => {
 				"empty",
 			);
 		},
+		"https://www.youtube.com/playlist?list=LL",
 	);
 });
 
@@ -877,6 +932,10 @@ const tabbedData = (content: unknown, extra: Record<string, unknown> = {}) => ({
 const playlistRow = `<ytd-playlist-video-renderer><a href="/watch?v=abc123XYZ0&list=LL"></a><h3>Real video title</h3></ytd-playlist-video-renderer>`;
 const historyRow = `<ytd-item-section-renderer><yt-lockup-view-model><a href="/watch?v=aaaaaaaaaaa"></a><h3>Seen</h3></yt-lockup-view-model></ytd-item-section-renderer>`;
 const channelRow = `<ytd-channel-renderer><a id="main-link" href="/@creator"></a><ytd-channel-name><yt-formatted-string id="text">Creator</yt-formatted-string></ytd-channel-name></ytd-channel-renderer>`;
+const END_OF_LIST = `<div id="contents"><div id="message">No more videos</div></div>`;
+const END_OF_PLAYLIST_INDEX = `<div id="contents"><div id="message">No more items</div></div>`;
+/** The page-local session probe needs the account avatar. */
+const SIGNED_IN = `<button id="avatar-btn"></button>`;
 const headerTotal = (text: string) =>
 	`<div class="yt-content-metadata-view-model__metadata-text">${text}</div>`;
 const playlistPageData = (itemCount: number, continuation = false) =>
@@ -899,20 +958,33 @@ const playlistPageData = (itemCount: number, continuation = false) =>
 class DocumentPage {
 	url = "";
 	private readonly pageFor: (url: string) => string;
-	constructor(pageFor: (url: string) => string) {
+	private readonly forcedReadiness: "content" | "empty" | undefined;
+	constructor(
+		pageFor: (url: string) => string,
+		forcedReadiness?: "content" | "empty",
+	) {
 		this.pageFor = pageFor;
+		this.forcedReadiness = forcedReadiness;
 	}
 	async goto(url: string) {
 		this.url = url;
 	}
-	locator() {
-		return { first: () => ({ click: async () => undefined }) };
+	locator(selector: string) {
+		return {
+			first: () => ({ click: async () => undefined }),
+			count: async () =>
+				this.inPage(() => document.querySelectorAll(selector).length),
+		};
 	}
 	async waitForTimeout() {
 		/* no renderer delay */
 	}
 	private inPage<T>(run: () => T): T {
 		const { document, window } = parseHTML(this.pageFor(this.url));
+		Object.defineProperty(window, "location", {
+			configurable: true,
+			value: new URL(this.url || "https://www.youtube.com/"),
+		});
 		(window as unknown as { scrollBy: () => void }).scrollBy = () => undefined;
 		const globals = globalThis as Record<string, unknown>;
 		const previous = { document: globals.document, window: globals.window };
@@ -926,7 +998,7 @@ class DocumentPage {
 		}
 	}
 	async waitForFunction(fn: Function, arg: unknown) {
-		const value = this.inPage(() => fn(arg));
+		const value = this.forcedReadiness ?? this.inPage(() => fn(arg));
 		if (!value) throw new Error("page read timed out");
 		return { jsonValue: async () => value, dispose: async () => undefined };
 	}
@@ -938,11 +1010,12 @@ class DocumentPage {
 async function collectFromDocuments(
 	pageFor: (url: string) => string,
 	streams: string[],
+	forcedReadiness?: "content" | "empty",
 ) {
 	const records = new Map<string, Record<string, unknown>[]>();
 	const messages: Record<string, unknown>[] = [];
 	await collectYoutubeBrowser({
-		page: new DocumentPage(pageFor) as never,
+		page: new DocumentPage(pageFor, forcedReadiness) as never,
 		requested: new Map(streams.map((name) => [name, { name }])) as never,
 		emitRecord: async (stream, data) => {
 			records.set(stream, [...(records.get(stream) ?? []), data]);
@@ -960,23 +1033,23 @@ async function collectFromDocuments(
 	return { records, messages, outcome };
 }
 
-test("finding 1: a list whose source total matches what was read completes with no skip", async () => {
+test("finding 1: a matching source total without a terminal marker still fails", async () => {
 	const { records, outcome } = await collectFromDocuments(
 		() => `${playlistRow}${headerTotal("1 video")}${playlistPageData(1, true)}`,
 		["likes", "watch_later"],
 	);
 	assert.equal(records.get("likes")?.length, 1);
 	assert.equal(records.get("watch_later")?.length, 1);
-	assert.deepEqual(outcome("likes"), []);
-	assert.deepEqual(outcome("watch_later"), []);
+	assert.deepEqual(outcome("likes"), ["stream_collection_failed"]);
+	assert.deepEqual(outcome("watch_later"), ["stream_collection_failed"]);
 });
 
-test("finding 1: a list the source reports no next page for completes with no skip", async () => {
+test("finding 1: source entries left unread do not prove completion without a next-page token", async () => {
 	const pages = (url: string) =>
 		url.includes("feed/history")
-			? `${historyRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }] } }))}`
+			? `${historyRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: { contentId: "aaaaaaaaaaa" } }, { lockupViewModel: { contentId: "bbbbbbbbbbb" } }] } }))}`
 			: url.includes("feed/channels")
-				? `${channelRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ channelRenderer: { channelId: "UC1" } }] } }))}`
+				? `${channelRow}${pageData(tabbedData({ sectionListRenderer: { contents: [{ channelRenderer: { channelId: "UC1" } }, { channelRenderer: { channelId: "UC2" } }] } }))}`
 				: "";
 	const { records, outcome } = await collectFromDocuments(pages, [
 		"watch_history",
@@ -984,15 +1057,15 @@ test("finding 1: a list the source reports no next page for completes with no sk
 	]);
 	assert.equal(records.get("watch_history")?.length, 1);
 	assert.equal(records.get("subscriptions")?.length, 1);
-	assert.deepEqual(outcome("watch_history"), []);
-	assert.deepEqual(outcome("subscriptions"), []);
+	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+	assert.deepEqual(outcome("subscriptions"), ["stream_collection_failed"]);
 });
 
-test("finding 1: playlist index and every playlist read to their end complete with no skip", async () => {
+test("a playlist index and each playlist with explicit end markers complete", async () => {
 	const pages = (url: string) =>
 		url.includes("feed/playlists")
-			? `<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}`
-			: `<h1><yt-formatted-string>My list</yt-formatted-string></h1>${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}`;
+			? `${SIGNED_IN}<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
+			: `${SIGNED_IN}<h1><yt-formatted-string>My list</yt-formatted-string></h1>${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`;
 	const { records, outcome } = await collectFromDocuments(pages, [
 		"playlists",
 		"playlist_items",
@@ -1000,6 +1073,20 @@ test("finding 1: playlist index and every playlist read to their end complete wi
 	assert.equal(records.get("playlists")?.length, 1);
 	assert.equal(records.get("playlist_items")?.length, 1);
 	assert.deepEqual(outcome("playlists"), []);
+	assert.deepEqual(outcome("playlist_items"), []);
+});
+
+test("playlist item collection continues when playlist header details are unreadable", async () => {
+	const { records, outcome } = await collectFromDocuments(
+		(url) =>
+			url.includes("feed/playlists")
+				? `${SIGNED_IN}<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
+				: `${SIGNED_IN}${playlistRow}${headerTotal("1 video")}${playlistPageData(1)}${END_OF_LIST}`,
+		["playlists", "playlist_items"],
+	);
+	assert.equal(records.get("playlists")?.length, undefined);
+	assert.equal(records.get("playlist_items")?.length, 1);
+	assert.deepEqual(outcome("playlists"), ["stream_collection_failed"]);
 	assert.deepEqual(outcome("playlist_items"), []);
 });
 
@@ -1018,6 +1105,9 @@ test("finding 1: a list with a next page still pending fails with stream_collect
 });
 
 test("finding 1: reading to the history limit is a cap that fails the stream, not the end of the list", async () => {
+	const sourceItems = Array.from({ length: 60 }, () => ({
+		lockupViewModel: {},
+	}));
 	const rows = Array.from(
 		{ length: 60 },
 		(_, n) =>
@@ -1025,12 +1115,161 @@ test("finding 1: reading to the history limit is a cap that fails the stream, no
 	).join("");
 	const { records, messages, outcome } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ lockupViewModel: {} }] } }))}`,
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);
 	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
 	assert.match(String(messages[0]?.message), /stopped at the 50-item limit/);
+});
+
+test("history rows beyond the emitted cap veto completion even with a page end marker", async () => {
+	const cases = [false, true];
+	for (const withEndMarker of cases) {
+		const sourceItems = Array.from({ length: 30 }, () => ({
+			lockupViewModel: {},
+		}));
+		const rows = Array.from(
+			{ length: 60 },
+			(_, n) =>
+				`<yt-lockup-view-model><a href="/watch?v=vid${String(n).padStart(8, "0")}"></a><h3>V${n}</h3></yt-lockup-view-model>`,
+		).join("");
+		const { records, outcome } = await collectFromDocuments(
+			() =>
+				`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${withEndMarker ? END_OF_LIST : ""}`,
+			["watch_history"],
+		);
+		assert.equal(records.get("watch_history")?.length, 50);
+		assert.deepEqual(outcome("watch_history"), ["stream_collection_failed"]);
+	}
+});
+
+test("playlist total mismatch cannot be excused by unrelated DOM text", async () => {
+	const phrase = "100 unavailable videos are hidden";
+	for (const placement of [
+		"none",
+		"notice",
+		"title",
+		"description",
+		"sidebar",
+	]) {
+		const rows = Array.from(
+			{ length: 4 },
+			(_, n) =>
+				`<ytd-playlist-video-renderer><a href="/watch?v=vid${String(n).padStart(8, "0")}&list=PL1"></a><h3>V${n}</h3></ytd-playlist-video-renderer>`,
+		).join("");
+		const rowsWithPhrase =
+			placement === "title"
+				? rows.replace("<h3>V0</h3>", `<h3>${phrase}</h3>`)
+				: placement === "description"
+					? rows.replace(
+							"<h3>V0</h3>",
+							`<h3>V0</h3><div id="description">${phrase}</div>`,
+						)
+					: rows;
+		const data = pageData(
+			tabbedData({
+				playlistVideoListRenderer: {
+					contents: Array.from({ length: 4 }, (_, n) => ({
+						playlistVideoRenderer: {
+							videoId: `vid${String(n).padStart(8, "0")}`,
+						},
+					})),
+				},
+			}),
+		);
+		const { records, outcome } = await collectFromDocuments(
+			() =>
+				`${rowsWithPhrase}${headerTotal("5 videos")}${data}${placement === "notice" ? `<div>Unavailable videos are hidden</div>` : placement === "sidebar" ? `<ytd-guide-renderer><span>${phrase}</span></ytd-guide-renderer>` : ""}${END_OF_LIST}`,
+			["likes"],
+		);
+		assert.equal(records.get("likes")?.length, 4);
+		assert.deepEqual(outcome("likes"), ["stream_collection_failed"], placement);
+	}
+});
+
+test("exactly 50 data-backed history rows can end without an end marker", async () => {
+	const ids = Array.from(
+		{ length: 50 },
+		(_, n) => `vid${String(n).padStart(8, "0")}`,
+	);
+	const rows = ids
+		.map(
+			(id, n) =>
+				`<yt-lockup-view-model><a href="/watch?v=${id}"></a><h3>V${n}</h3></yt-lockup-view-model>`,
+		)
+		.join("");
+	const { records, outcome } = await collectFromDocuments(
+		() =>
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}`,
+		["watch_history"],
+	);
+	assert.equal(records.get("watch_history")?.length, 50);
+	assert.deepEqual(outcome("watch_history"), []);
+});
+
+test("delayed DOM rows beyond readable data do not prove completion", async () => {
+	const rows = Array.from(
+		{ length: 2 },
+		(_, n) =>
+			`<ytd-playlist-video-renderer><a href="/watch?v=vid${String(n).padStart(8, "0")}&list=PL1"></a><h3>V${n}</h3></ytd-playlist-video-renderer>`,
+	).join("");
+	const { records, outcome } = await collectFromDocuments(
+		() => `${rows}${playlistPageData(1)}`,
+		["likes"],
+	);
+	assert.equal(records.get("likes")?.length, 2);
+	assert.deepEqual(outcome("likes"), ["stream_collection_failed"]);
+});
+
+test("verified empty list evidence is vetoed by current DOM rows or continuation", async () => {
+	for (const currentDom of [
+		`<ytd-channel-renderer><a id="main-link" href="/@creator"></a><ytd-channel-name><yt-formatted-string id="text">Creator</yt-formatted-string></ytd-channel-name></ytd-channel-renderer>`,
+		`<ytd-expanded-shelf-contents-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-expanded-shelf-contents-renderer>`,
+	]) {
+		withBrowserGlobals(
+			`${currentDom}${pageData(tabbedData({ sectionListRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No subscriptions" } } }, { richGridRenderer: { contents: [] } }] } }))}`,
+			() =>
+				assert.equal(enumerationEnded(readListEnd("subscriptions"), 0), false),
+			"https://www.youtube.com/feed/channels",
+		);
+		const { outcome } = await collectFromDocuments(
+			() =>
+				`${currentDom}${pageData(tabbedData({ sectionListRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No subscriptions" } } }, { richGridRenderer: { contents: [] } }] } }))}`,
+			["subscriptions"],
+			"empty",
+		);
+		assert.deepEqual(outcome("subscriptions"), ["stream_collection_failed"]);
+	}
+});
+
+test("verified empty video evidence is vetoed by current DOM rows or continuation", async () => {
+	for (const currentDom of [
+		playlistRow,
+		`<ytd-playlist-video-list-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-playlist-video-list-renderer>`,
+	]) {
+		withBrowserGlobals(
+			`${currentDom}${pageData(
+				tabbedData({
+					messageRenderer: { text: { simpleText: "No videos" } },
+					playlistVideoListRenderer: { contents: [] },
+				}),
+			)}`,
+			() => assert.equal(readListEnd("playlist").verifiedEmpty, false),
+		);
+		const { outcome } = await collectFromDocuments(
+			() =>
+				`${currentDom}${pageData(
+					tabbedData({
+						messageRenderer: { text: { simpleText: "No videos" } },
+						playlistVideoListRenderer: { contents: [] },
+					}),
+				)}`,
+			["likes"],
+			"empty",
+		);
+		assert.deepEqual(outcome("likes"), ["stream_collection_failed"]);
+	}
 });
 
 const SIDEBAR_EMPTY = { richGridRenderer: { contents: [] } };
@@ -1089,15 +1328,15 @@ test("finding 2: an unrelated empty list cannot prove a non-empty target list em
 		false,
 		"other tab",
 	);
-	// A real empty target with a non-empty list elsewhere on the page still counts.
+	// An empty section is not a target-bound completion marker for arbitrary lists.
 	assert.equal(
 		ready(
 			pageData(
 				tabbedData(SIDEBAR_EMPTY, { secondaryContents: TARGET_NON_EMPTY }),
 			),
 		),
-		"empty",
-		"empty target, non-empty sidebar",
+		false,
+		"empty payload without a target end marker",
 	);
 });
 
@@ -1135,13 +1374,13 @@ test("finding 3: the playlist index counts only the playlists the connector enum
 		});
 		return state;
 	};
-	assert.equal(ready(`${BUILT_IN_LINKS}${NO_PLAYLISTS}`), "empty");
+	assert.notEqual(ready(`${BUILT_IN_LINKS}${NO_PLAYLISTS}`), "empty");
 	assert.equal(ready(BUILT_IN_LINKS), false);
 	assert.equal(
 		ready(`${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`),
 		"content",
 	);
-	// Built-in lists in the page data do not block the source's empty evidence.
+	// An empty-message section beside built-ins is not the playlist grid's end proof.
 	assert.equal(
 		ready(
 			`${BUILT_IN_LINKS}${pageData(
@@ -1160,32 +1399,70 @@ test("finding 3: the playlist index counts only the playlists the connector enum
 				}),
 			)}`,
 		),
-		"empty",
+		false,
 	);
 });
 
 test("finding 3: readiness and readPlaylistLinks agree on which links are playlists", async () => {
 	const { readPlaylistLinks } = await import("./browser-dom.ts");
-	for (const html of [
-		BUILT_IN_LINKS,
-		`${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`,
-		`<a href="https://evil.example/playlist?list=PL9">Elsewhere</a>`,
-		`<a href="/playlist?list=PL1">A</a><a href="/playlist?list=PL1&amp;x=1">Again</a>`,
-	]) {
+	const cases = [
+		{ html: BUILT_IN_LINKS, ready: false, playlists: 0 },
+		{
+			html: `${BUILT_IN_LINKS}<a href="/playlist?list=PL1">Mine</a>`,
+			ready: true,
+			playlists: 1,
+		},
+		{
+			html: `<a href="https://evil.example/playlist?list=PL9">Elsewhere</a>`,
+			ready: false,
+			playlists: 0,
+		},
+		{
+			html: `<a href="/playlist?list=PL1">A</a><a href="/playlist?list=PL1&amp;x=1">Again</a>`,
+			ready: true,
+			playlists: 1,
+		},
+		{
+			html: `<yt-lockup-view-model>${BUILT_IN_LINKS}</yt-lockup-view-model>`,
+			ready: true,
+			playlists: 0,
+		},
+	];
+	for (const { html, ready, playlists } of cases) {
 		withBrowserGlobals(html, () => {
 			const readiness = readPageReadiness(PLAYLIST_INDEX);
-			assert.equal(
-				readiness === "content",
-				readPlaylistLinks().length > 0,
-				html,
-			);
+			assert.equal(readiness === "content", ready, html);
+			assert.equal(readPlaylistLinks().length, playlists, html);
 		});
 	}
 });
 
-test("finding 3: an account with only built-in lists and a genuine empty state completes both playlist streams", async () => {
+test("built-in lists plus page-data empty evidence complete both playlist streams", async () => {
+	const builtIns = (id: "LL" | "WL") => ({
+		content: {
+			lockupViewModel: {
+				contentId: id,
+				contentType: "LOCKUP_CONTENT_TYPE_PLAYLIST",
+				rendererContext: {
+					commandContext: {
+						onTap: { innertubeCommand: { watchEndpoint: { playlistId: id } } },
+					},
+				},
+			},
+		},
+	});
 	const { records, messages, outcome } = await collectFromDocuments(
-		() => `${BUILT_IN_LINKS}${NO_PLAYLISTS}`,
+		() =>
+			`<button id="avatar-btn"></button><div id="contents"><yt-lockup-view-model><a href="/playlist?list=WL"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model><yt-lockup-view-model><a href="/playlist?list=LL"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model></div>${pageData(
+				tabbedData({
+					richGridRenderer: {
+						contents: [
+							{ richItemRenderer: builtIns("WL") },
+							{ richItemRenderer: builtIns("LL") },
+						],
+					},
+				}),
+			)}`,
 		["playlists", "playlist_items"],
 	);
 	assert.equal(records.size, 0);
@@ -1280,10 +1557,7 @@ test("round 3: a page-data region with no recognized list does not prove complet
 	];
 	const runs = await Promise.all(
 		regions.map((data) =>
-			collectFromDocuments(
-				() => `${playlistRow}${pageData(data)}`,
-				["likes"],
-			),
+			collectFromDocuments(() => `${playlistRow}${pageData(data)}`, ["likes"]),
 		),
 	);
 	for (const { records, messages, outcome } of runs) {
@@ -1309,7 +1583,7 @@ test("round 3: exactly 50 complete history items with source-end evidence comple
 		.join("");
 	const { records, outcome } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}`,
+			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: ids.map((contentId) => ({ lockupViewModel: { contentId } })) } }))}${END_OF_LIST}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 50);

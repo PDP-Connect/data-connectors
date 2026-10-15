@@ -45,7 +45,9 @@ export function readOwnAccount(doc: Document = document): {
 			),
 	);
 	const menuItem = Array.from(
-		doc.querySelectorAll("ytd-multi-page-menu-renderer ytd-compact-link-renderer"),
+		doc.querySelectorAll(
+			"ytd-multi-page-menu-renderer ytd-compact-link-renderer",
+		),
 	).find((item) => {
 		const label = item
 			.querySelector("#label")
@@ -69,14 +71,14 @@ export function readOwnAccount(doc: Document = document): {
 	);
 	const href = handle?.startsWith("@")
 		? `/${handle}`
-		: link?.getAttribute("href") ?? menuLink?.getAttribute("href");
+		: (link?.getAttribute("href") ?? menuLink?.getAttribute("href"));
 	const email =
 		header.querySelector("#email, [id*='email']")?.textContent?.trim() || null;
 	const url = href ? new URL(href, "https://www.youtube.com") : null;
 	return {
 		channel_url:
 			url?.origin === "https://www.youtube.com" &&
-				!/\/(edit|create|monetization|studio)(?:[/?]|$)/.test(url.pathname)
+			!/\/(edit|create|monetization|studio)(?:[/?]|$)/.test(url.pathname)
 				? url.href
 				: null,
 		email,
@@ -145,15 +147,15 @@ export function readChannelAbout(doc: Document = document): {
 		.filter((node) => node.children.length === 0)
 		.map((node) => node.textContent?.trim() ?? "");
 	const statsText = statsRoot
-		? Array.from(statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"))
+		? Array.from(
+				statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"),
+			)
 				.filter((node) => node.children.length === 0)
 				.map((node) => node.textContent?.trim() ?? "")
 		: [];
 	const joined = text.find((value) => /^joined\s+/i.test(value));
 	const country =
-		about
-			?.querySelector('[id*="country"]')
-			?.textContent?.trim() || null;
+		about?.querySelector('[id*="country"]')?.textContent?.trim() || null;
 	return {
 		joined_at: joined?.replace(/^joined\s+/i, "") ?? null,
 		description:
@@ -164,12 +166,15 @@ export function readChannelAbout(doc: Document = document): {
 				?.textContent?.trim() || null,
 		country,
 		subscriber_count_text:
-			statsText.find((value) => /subscriber/i.test(value) && /\d/.test(value)) ??
-			null,
+			statsText.find(
+				(value) => /subscriber/i.test(value) && /\d/.test(value),
+			) ?? null,
 		view_count_text:
-			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ??
+			null,
 		video_count_text:
-			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ??
+			null,
 	};
 }
 
@@ -188,7 +193,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 		.flatMap((node) => {
 			const title = node
 				.querySelector(
-					"ytd-channel-name yt-formatted-string#text, ytd-channel-name yt-formatted-string",
+					"ytd-channel-name#channel-title yt-formatted-string#text, ytd-channel-name yt-formatted-string#text, ytd-channel-name yt-formatted-string",
 				)
 				?.textContent?.trim();
 			const href = node
@@ -201,7 +206,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 			if (url.origin !== "https://www.youtube.com") return [];
 			const badgeArea = node.querySelector("ytd-channel-name");
 			const bell = node.querySelector<HTMLButtonElement>(
-				'ytd-subscription-notification-toggle-button-renderer-next button, [aria-label*="notifications"]',
+				'ytd-subscription-notification-toggle-button-renderer-next button, [aria-label*="All notifications"], yt-button-shape[aria-label*="notification"] button, [aria-label*="notifications"]',
 			);
 			const bellLabel = bell?.getAttribute("aria-label")?.toLowerCase() ?? "";
 			return [
@@ -224,7 +229,11 @@ export function readSubscriptions(doc: Document = document): Array<{
 							.querySelector("#metadata span#video-count")
 							?.textContent?.trim() || null,
 					is_verified: badgeArea
-						? Boolean(badgeArea.querySelector("badge-shape, .badge-shape"))
+						? Boolean(
+								badgeArea.querySelector(
+									"badge-shape, .badge-shape, ytd-badge-supported-renderer badge-shape",
+								),
+							)
 						: null,
 					notifications: /all notifications/.test(bellLabel)
 						? true
@@ -241,16 +250,46 @@ export function readPlaylistLinks(
 	doc: Document = document,
 ): Array<{ id: string; url: string }> {
 	const seen = new Set<string>();
-	const links = Array.from(
-		doc.querySelectorAll<HTMLAnchorElement>('a[href*="playlist?list="]'),
+	const playlistCards = Array.from(
+		doc.querySelectorAll(
+			"ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer, yt-lockup-view-model",
+		),
 	);
+	const links = playlistCards.length
+		? playlistCards.flatMap((card) => {
+				const link = Array.from(
+					card.querySelectorAll<HTMLAnchorElement>('a[href*="list="]'),
+				).find((anchor) => {
+					const url = new URL(
+						anchor.getAttribute("href") ?? "",
+						"https://www.youtube.com",
+					);
+					return (
+						url.origin === "https://www.youtube.com" &&
+						url.pathname === "/playlist" &&
+						Boolean(url.searchParams.get("list"))
+					);
+				});
+				if (!link) return [];
+				if (
+					card.matches("yt-lockup-view-model") &&
+					!card.querySelector("yt-collection-thumbnail-view-model")
+				)
+					return [];
+				return [link];
+			})
+		: Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="list="]'));
 	return links
 		.flatMap((a) => {
 			const url = new URL(
 				a.getAttribute("href") ?? "",
 				"https://www.youtube.com",
 			);
-			if (url.origin !== "https://www.youtube.com") return [];
+			if (
+				url.origin !== "https://www.youtube.com" ||
+				url.pathname !== "/playlist"
+			)
+				return [];
 			const id = url.searchParams.get("list");
 			if (!id || id === "LL" || id === "WL" || seen.has(id)) return [];
 			seen.add(id);
@@ -340,7 +379,7 @@ export function readVideos(
 				/\/shorts\/([\w-]+)/.exec(video_url)?.[1] ||
 				null;
 			const titleNode = node.querySelector(
-				"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title",
+				"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title, a#video-title span, span#video-title, a#video-title yt-formatted-string",
 			);
 			const video_title =
 				titleNode?.getAttribute("title")?.trim() ||

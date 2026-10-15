@@ -48,7 +48,7 @@ runConnector({
 					`<script>var ytInitialData = ${JSON.stringify(pageData)};</script>`;
 				await route.fulfill({
 					contentType: "text/html",
-					body: `<html><body>${html}</body></html>`,
+					body: `<html><body><div id="contents">${html}<div id="message">No more videos</div></div></body></html>`,
 				});
 			});
 			const fastPage = new Proxy(page, {

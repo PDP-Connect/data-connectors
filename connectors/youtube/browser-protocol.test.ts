@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -198,15 +199,213 @@ test("history waits for delayed client DOM before recording", async () => {
 	}
 });
 
-test("real page data with an empty renderer completes history; a sign-in renderer fails it", async () => {
+test("scrubbed live subscription DOM scrolls its app container and reports missing end evidence", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
-		const run = async (text: string) => {
+		const page = await browser.newPage();
+		const html = readFileSync(
+			new URL(
+				"./__fixtures__/real-shape/subscriptions-before-scroll.html",
+				import.meta.url,
+			),
+			"utf8",
+		);
+		await page.route("https://www.youtube.com/**", async (route) => {
+			await route.fulfill({ contentType: "text/html", body: html });
+		});
+		const records: Record<string, unknown>[] = [];
+		const failures: string[] = [];
+		const messages: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([
+				["subscriptions", { name: "subscriptions" }],
+			]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+			progress: async () => undefined,
+		});
+		const scrollTop = await page.evaluate(
+			() => document.querySelector(".ytd-app")?.scrollTop ?? 0,
+		);
+		assert.equal(records.length, 4);
+		assert.ok(scrollTop > 0, "the captured YouTube app container was scrolled");
+		assert.deepEqual(failures, ["subscriptions"]);
+		assert.equal(
+			messages.some((message) => message.type === "STATE"),
+			false,
+		);
+		assert.equal(
+			await page.locator("ytd-continuation-item-renderer").count(),
+			0,
+		);
+		const afterScrollPage = await browser.newPage();
+		await afterScrollPage.setContent(
+			readFileSync(
+				new URL(
+					"./__fixtures__/real-shape/subscriptions-after-scroll.html",
+					import.meta.url,
+				),
+				"utf8",
+			),
+		);
+		assert.equal(
+			await afterScrollPage.locator("ytd-channel-renderer").count(),
+			records.length,
+		);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("scrubbed live playlist DOM accepts modern lockups before scrolling", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const html = readFileSync(
+			new URL(
+				"./__fixtures__/real-shape/playlist-index-before-scroll.html",
+				import.meta.url,
+			),
+			"utf8",
+		);
+		await page.route("https://www.youtube.com/**", async (route) => {
+			await route.fulfill({ contentType: "text/html", body: html });
+		});
+		const failures: string[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([
+				["playlists", { name: "playlists" }],
+				["playlist_items", { name: "playlist_items" }],
+			]) as never,
+			emitRecord: async () => undefined,
+			emit: async () => undefined,
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+			progress: async () => undefined,
+		});
+		assert.ok(
+			(await page.evaluate(
+				() => document.querySelector(".ytd-app")?.scrollTop ?? 0,
+			)) > 0,
+			"the captured YouTube app container was scrolled",
+		);
+		assert.deepEqual(failures, ["playlists", "playlist_items"]);
+		const afterScrollPage = await browser.newPage();
+		await afterScrollPage.setContent(
+			readFileSync(
+				new URL(
+					"./__fixtures__/real-shape/playlist-index-after-scroll.html",
+					import.meta.url,
+				),
+				"utf8",
+			),
+		);
+		assert.equal(
+			await afterScrollPage.locator("yt-lockup-view-model").count(),
+			2,
+		);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("current empty lockup playlist index, liked message and subscription data complete without stream failures", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixture = (name: string) =>
+			readFileSync(
+				new URL(`./__fixtures__/real-shape/${name}`, import.meta.url),
+				"utf8",
+			);
+		const pages: Record<string, string> = {
+			"/feed/playlists": fixture("playlist-index-builtins-only.html"),
+			"/playlist?list=LL": fixture("liked-videos-empty-tab.html"),
+			"/feed/channels": fixture("subscriptions-four-source-items.html"),
+		};
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			const html = pages[`${url.pathname}${url.search}`];
+			await route.fulfill({
+				status: html ? 200 : 404,
+				contentType: "text/html",
+				body: html ?? "",
+			});
+		});
+		const fastPage = new Proxy(page, {
+			get(target, key) {
+				if (key === "waitForTimeout") return async () => undefined;
+				const value = Reflect.get(target, key);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const failures: Array<[string, string]> = [];
+		const messages: Array<Record<string, unknown>> = [];
+		const subscriptions: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: fastPage as never,
+			requested: new Map(
+				["playlists", "playlist_items", "likes", "subscriptions"].map(
+					(name) => [name, { name }],
+				),
+			) as never,
+			emitRecord: async (stream, data) => {
+				if (stream === "subscriptions") subscriptions.push(data);
+			},
+			emit: async (message) => {
+				messages.push(message as Record<string, unknown>);
+			},
+			reportStreamFailure: async (stream, message) => {
+				failures.push([stream, message]);
+			},
+			progress: async () => undefined,
+		});
+		assert.deepEqual(failures, []);
+		assert.deepEqual(
+			messages
+				.filter((message) => message.type === "STATE")
+				.map((message) => [
+					message.stream,
+					(message.cursor as Record<string, unknown>).evidence,
+				])
+				.sort(([a], [b]) => String(a).localeCompare(String(b))),
+			[
+				["likes", "youtube_page_data_empty"],
+				["playlist_items", "youtube_page_data_empty"],
+				["playlists", "youtube_page_data_empty"],
+			],
+		);
+		assert.equal(subscriptions.length, 4);
+	} finally {
+		await browser.close();
+	}
+});
+
+test("history empty messages without a supported target proof fail honestly", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const run = async (text: string, withTargetList = false) => {
 			const page = await browser.newPage();
 			await page.route("https://www.youtube.com/**", async (route) => {
+				const contents = {
+					...(withTargetList
+						? { playlistVideoListRenderer: { contents: [] } }
+						: {}),
+					messageRenderer: { text: { runs: [{ text }] } },
+				};
 				await route.fulfill({
 					contentType: "text/html",
-					body: `<html><body><script>var ytInitialData = ${JSON.stringify({ contents: { messageRenderer: { text: { runs: [{ text }] } } } })};</script></body></html>`,
+					body: `<html><body><script>var ytInitialData = ${JSON.stringify({ contents })};</script></body></html>`,
 				});
 			});
 			const records: Record<string, unknown>[] = [];
@@ -240,9 +439,12 @@ test("real page data with an empty renderer completes history; a sign-in rendere
 			]);
 		};
 		assert.deepEqual(await run("You haven't watched any videos yet"), [
-			["STATE", "watch_history", undefined],
+			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
 		]);
-		assert.deepEqual(await run("Sign in to see your watch history"), [
+		assert.deepEqual(await run("You haven't watched any videos yet", true), [
+			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
+		]);
+		assert.deepEqual(await run("Sign in to see your watch history", true), [
 			["SKIP_RESULT", "watch_history", "stream_collection_failed"],
 		]);
 	} finally {
@@ -548,4 +750,152 @@ test("profile ignores channel chrome counts while About metadata is loading", as
 	} finally {
 		await browser.close();
 	}
+});
+
+async function collectRouted(
+	pages: Record<string, string>,
+	requested: string[],
+): Promise<{
+	failures: string[];
+	states: Array<[unknown, unknown]>;
+}> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			const html = pages[`${url.pathname}${url.search}`];
+			await route.fulfill({
+				status: html ? 200 : 404,
+				contentType: "text/html",
+				body: html ?? "",
+			});
+		});
+		const fastPage = new Proxy(page, {
+			get(target, key) {
+				if (key === "waitForTimeout") return async () => undefined;
+				const value = Reflect.get(target, key);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		const failures: string[] = [];
+		const states: Array<[unknown, unknown]> = [];
+		await collectYoutubeBrowser({
+			page: fastPage as never,
+			requested: new Map(requested.map((name) => [name, { name }])) as never,
+			emitRecord: async () => undefined,
+			emit: async (message) => {
+				const m = message as Record<string, unknown>;
+				if (m.type === "STATE")
+					states.push([
+						m.stream,
+						(m.cursor as Record<string, unknown>).evidence,
+					]);
+			},
+			reportStreamFailure: async (stream) => {
+				failures.push(stream);
+			},
+			progress: async () => undefined,
+		});
+		return { failures: failures.sort(), states };
+	} finally {
+		await browser.close();
+	}
+}
+
+const builtInWatchLaterCard =
+	'<yt-lockup-view-model><a href="/playlist?list=WL"><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></a></yt-lockup-view-model>';
+
+test("a rejected page-data message vetoes an otherwise empty playlist index", async () => {
+	const data = {
+		contents: {
+			twoColumnBrowseResultsRenderer: {
+				tabs: [
+					{
+						tabRenderer: {
+							selected: true,
+							content: {
+								sectionListRenderer: {
+									contents: [
+										{
+											itemSectionRenderer: {
+												contents: [
+													{
+														richGridRenderer: {
+															contents: [
+																{
+																	richItemRenderer: {
+																		content: {
+																			lockupViewModel: {
+																				contentId: "WL",
+																				contentType:
+																					"LOCKUP_CONTENT_TYPE_PLAYLIST",
+																			},
+																		},
+																	},
+																},
+															],
+														},
+													},
+													{
+														messageRenderer: {
+															text: {
+																simpleText: "Something went wrong. Try again",
+															},
+														},
+													},
+												],
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		},
+	};
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/playlists": `<html><body><button id="avatar-btn"></button>${builtInWatchLaterCard}<script>var ytInitialData = ${JSON.stringify(data)};</script></body></html>`,
+		},
+		["playlists", "playlist_items"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["playlist_items", "playlists"]);
+});
+
+test("a DOM end marker behind a sign-in wall never proves a playlist index empty", async () => {
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/playlists": `<html><body>${builtInWatchLaterCard}<a href="https://accounts.google.com/ServiceLogin">Sign in</a><div id="contents"><div id="message">No more videos</div></div></body></html>`,
+		},
+		["playlists", "playlist_items"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["playlist_items", "playlists"]);
+});
+
+test("a vanished continuation with zero rows never proves a playlist index empty", async () => {
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/playlists": `<html><body><button id="avatar-btn"></button>${builtInWatchLaterCard}<ytd-rich-grid-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-rich-grid-renderer><script>window.scrollBy = () => document.querySelector("ytd-continuation-item-renderer")?.remove();</script></body></html>`,
+		},
+		["playlists", "playlist_items"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["playlist_items", "playlists"]);
+});
+
+test("a DOM end marker with zero rows never proves subscriptions empty", async () => {
+	const { failures, states } = await collectRouted(
+		{
+			"/feed/channels":
+				'<html><body><button id="avatar-btn"></button><div id="contents"><ytd-message-renderer><div id="message">No more videos</div></ytd-message-renderer></div></body></html>',
+		},
+		["subscriptions"],
+	);
+	assert.deepEqual(states, []);
+	assert.deepEqual(failures, ["subscriptions"]);
 });

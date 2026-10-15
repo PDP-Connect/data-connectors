@@ -20,6 +20,12 @@ export type ListKind =
 	| "playlist-index"
 	| "subscriptions";
 
+export interface ListEndRequest {
+	readonly kind: ListKind;
+	/** The page-local session probe is false when auth was lost after navigation. */
+	readonly sessionPresent?: boolean;
+}
+
 export interface ListEnd {
 	/** The target page's own `ytInitialData` list region held recognized entries. */
 	readonly dataReadable: boolean;
@@ -33,26 +39,66 @@ export interface ListEnd {
 	readonly declaredTotal: number | null;
 	/** Rendered items before the connector's own row limit (kinds with one). */
 	readonly domItemCount: number | null;
+	/** The target list's own rendered end marker is present. */
+	readonly domHasEndMarker: boolean;
+	/** The target page data explicitly says the list is empty. */
+	readonly verifiedEmpty: boolean;
+	/**
+	 * The page cannot show the target list: the session is lost, a sign-in,
+	 * consent or error wall shows, the page or its data is still loading, the
+	 * page is not the target route, or the page data holds a rejected message.
+	 * It vetoes every kind of end evidence.
+	 */
+	readonly pageBlocked: boolean;
 }
 
 /**
- * True only when the source shows the end of the list. Either the header total
- * equals what was read, or the page's own data had no next page and every item
- * in it was read. A header total that differs from the read count is not an end.
- * A missing next-page control, a timeout, an unreadable page, or row growth is
- * not evidence: the final source response is never observed.
+ * True only when the source proves exhaustion: a verified empty list has no
+ * rows, a readable list has no data or DOM continuation and all source entries
+ * were read, a followed continuation disappeared, or the page showed an
+ * explicit end marker. A blocked page vetoes all of these. Missing controls,
+ * mismatched totals and row growth alone are not evidence.
  */
 export function enumerationEnded(
 	end: ListEnd | null | undefined,
 	renderedCount: number,
+	continuationFollowed = false,
+	discardedRows = 0,
 ): boolean {
-	if (!end) return false;
-	if (end.domItemCount !== null && end.domItemCount > renderedCount)
+	if (!end || end.pageBlocked !== false) return false;
+	const knownRowsExceedEmitted =
+		(end.domItemCount !== null && end.domItemCount > renderedCount) ||
+		(end.dataReadable && end.dataItemCount > renderedCount);
+	const renderedRowsMissingFromData =
+		end.dataReadable &&
+		end.domItemCount !== null &&
+		end.domItemCount > end.dataItemCount;
+	const declaredMismatch =
+		end.declaredTotal !== null && end.declaredTotal !== renderedCount;
+	if (
+		discardedRows > 0 ||
+		end.domHasContinuation ||
+		end.dataHasContinuation ||
+		knownRowsExceedEmitted ||
+		renderedRowsMissingFromData ||
+		(end.verifiedEmpty &&
+			(renderedCount > 0 ||
+				(end.domItemCount !== null && end.domItemCount > 0))) ||
+		declaredMismatch
+	)
 		return false;
-	if (end.declaredTotal !== null) return end.declaredTotal === renderedCount;
-	if (!end.dataReadable || end.dataHasContinuation || end.domHasContinuation)
-		return false;
-	return renderedCount >= end.dataItemCount;
+	if (end.domHasEndMarker || continuationFollowed) return true;
+	if (
+		end.dataReadable &&
+		!end.dataHasContinuation &&
+		!end.domHasContinuation &&
+		end.dataItemCount > 0 &&
+		renderedCount >= end.dataItemCount &&
+		(end.domItemCount === null || renderedCount >= end.domItemCount)
+	)
+		return true;
+	if (end.verifiedEmpty) return renderedCount === 0;
+	return false;
 }
 
 const PAGE_DATA_HELPERS = String.raw`
@@ -79,14 +125,18 @@ const PAGE_DATA_HELPERS = String.raw`
 	const isRecognizedEmptyText = (text) =>
 		/(?:no|empty|haven't|has no|doesn't have).*(?:video|playlist|history|subscription|channel)|nothing to show|no content/i.test(text) &&
 		!/sign in|login|error|try again|unavailable|account|private|deleted|doesn't exist|not found/i.test(text);
-	const isEnumerablePlaylistLink = (anchor) => {
+	const playlistIdFromHref = (href) => {
 		try {
-			const url = new URL(anchor.getAttribute("href") ?? "", BASE);
+			const url = new URL(href ?? "", BASE);
 			const listId = url.searchParams.get("list");
-			return url.origin === BASE && Boolean(listId) && listId !== "LL" && listId !== "WL";
+			return url.origin === BASE && url.pathname === "/playlist" && listId ? listId : null;
 		} catch {
-			return false;
+			return null;
 		}
+	};
+	const isEnumerablePlaylistLink = (anchor) => {
+		const id = playlistIdFromHref(anchor.getAttribute("href"));
+		return Boolean(id && id !== "LL" && id !== "WL");
 	};
 	const EMPTY_MESSAGE_KEYS = ["messageRenderer", "backgroundPromoRenderer", "ytdMessageRenderer", "ytdBackgroundPromoRenderer"];
 	const LIST_KEYS = ["richGridRenderer", "gridRenderer", "playlistVideoListRenderer"];
@@ -96,7 +146,60 @@ const PAGE_DATA_HELPERS = String.raw`
 		"shortsLockupViewModel", "reelItemRenderer", "channelRenderer", "gridChannelRenderer",
 		"gridPlaylistRenderer", "playlistRenderer", "compactPlaylistRenderer",
 	];
-	const BUILT_IN_PLAYLIST = /"(?:contentId|playlistId)":"(?:LL|WL)"|playlist\?list=(?:LL|WL)(?![\w-])/;
+	const isBuiltInLockup = (value) => {
+		const find = (node) => {
+			if (Array.isArray(node)) return node.some(find);
+			if (!isObject(node)) return false;
+			const lockup = isObject(node.lockupViewModel) ? node.lockupViewModel : node;
+			if (typeof lockup.contentId === "string" && typeof lockup.contentType === "string") {
+				const id = lockup.contentId;
+			if ((id === "LL" || id === "WL") && /PLAYLIST/.test(lockup.contentType ?? "")) return true;
+			}
+			return Object.values(node).some(find);
+		};
+		return find(value);
+	};
+	const targetLocation = () => {
+		try { return new URL(window.location.href); } catch { return null; }
+	};
+	const onPlaylistIndexPage = () => targetLocation()?.pathname === "/feed/playlists";
+	const onLikedVideosPage = () => {
+		const url = targetLocation();
+		return url?.pathname === "/playlist" && url.searchParams.get("list") === "LL";
+	};
+	const onSubscriptionsPage = () => targetLocation()?.pathname === "/feed/channels";
+	const onTargetRoute = (kind) => {
+		const url = targetLocation();
+		if (kind === "history") return url?.pathname === "/feed/history";
+		if (kind === "playlist") return url?.pathname === "/playlist" && Boolean(url.searchParams.get("list"));
+		if (kind === "playlist-index") return onPlaylistIndexPage();
+		if (kind === "subscriptions") return onSubscriptionsPage();
+		return false;
+	};
+	const isVisible = (node) => {
+		if (node.closest('[hidden], [aria-hidden="true"]')) return false;
+		const style = typeof window.getComputedStyle === "function" ? window.getComputedStyle(node) : null;
+		if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return false;
+		return typeof node.getClientRects !== "function" || node.getClientRects().length > 0;
+	};
+	const hasVisibleMatch = (selector, root = document) => Array.from(root.querySelectorAll(selector)).some(isVisible);
+	const hasPageWall = () => hasVisibleMatch(
+		'a[href*="accounts.google.com/ServiceLogin"], ytd-consent-bump-v2-lightbox, ytd-consent-bump-v2, #consent-bump, tp-yt-paper-dialog[role="dialog"], ytd-popup-container tp-yt-paper-dialog, [aria-label*="sign in" i], #error-screen, ytd-error-screen, .yt-error-content, ytd-browse[page-subtype="error"]'
+	);
+	const hasDomLoading = (root = document) => {
+		if (root.querySelector("ytd-continuation-item-renderer")) return true;
+		return hasVisibleMatch('.yt-spinner, yt-spinner, tp-yt-paper-spinner, tp-yt-paper-spinner-lite, [aria-busy="true"], [aria-label*="loading" i], #spinner', root);
+	};
+	const hasOnlyBuiltInPlaylistCards = () => {
+		const cards = Array.from(document.querySelectorAll("yt-lockup-view-model, ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer"));
+		return cards.length > 0 && cards.every((card) => {
+			const id = Array.from(card.querySelectorAll('a[href*="list="]'))
+				.map((anchor) => playlistIdFromHref(anchor.getAttribute("href")))
+				.find(Boolean) ?? null;
+			return (id === "LL" || id === "WL") &&
+				(!card.matches("yt-lockup-view-model") || Boolean(card.querySelector("yt-collection-thumbnail-view-model")));
+		});
+	};
 	const readJsonText = (scriptText) => {
 		const markerIndex = scriptText.indexOf("ytInitialData");
 		if (markerIndex < 0) return null;
@@ -135,13 +238,22 @@ const PAGE_DATA_HELPERS = String.raw`
 		if (!Array.isArray(tabs)) return contents;
 		const renderers = tabs.map((tab) => (isObject(tab) ? tab.tabRenderer : null)).filter(isObject);
 		const selected = renderers.filter((renderer) => renderer.selected === true);
-		const chosen = selected.length === 1 ? selected : renderers.length === 1 ? renderers : [];
-		return chosen.length === 1 && isObject(chosen[0].content) ? chosen[0].content : null;
+		return selected.length === 1 && isObject(selected[0].content) ? selected[0].content : null;
+	};
+	const hasSelectedTabContent = (data) => {
+		const contents = isObject(data) ? data.contents : null;
+		if (!isObject(contents)) return false;
+		const layout = contents.twoColumnBrowseResultsRenderer ?? contents.singleColumnBrowseResultsRenderer;
+		const tabs = isObject(layout) ? layout.tabs : undefined;
+		if (!Array.isArray(tabs)) return false;
+		const selected = tabs.map((tab) => isObject(tab) ? tab.tabRenderer : null)
+			.filter((renderer) => isObject(renderer) && renderer.selected === true);
+		return selected.length === 1 && isObject(selected[0].content);
 	};
 	const regionFacts = (data, playlistIndex) => {
 		const region = listRegion(data);
 		if (region === null) return null;
-		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false };
+		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, likedVideosEmpty: false };
 		const visit = (value) => {
 			if (Array.isArray(value)) {
 				for (const child of value) visit(child);
@@ -149,25 +261,45 @@ const PAGE_DATA_HELPERS = String.raw`
 			}
 			if (!isObject(value)) return;
 			for (const [key, child] of Object.entries(value)) {
+				if (
+					(key === "isLoading" && child === true) ||
+					/(?:loadingSpinnerRenderer|spinnerRenderer|loadingIndicator)$/i.test(key)
+				) facts.loading = true;
 				if (ITEM_KEYS.includes(key)) {
-					if (!(playlistIndex && BUILT_IN_PLAYLIST.test(JSON.stringify(child)))) facts.items += 1;
+					if (!(playlistIndex && isBuiltInLockup(child))) facts.items += 1;
 					continue;
 				}
 				if (key === "continuationItemRenderer" || key === "nextContinuationData") facts.continuation = true;
 				if (key === "continuations" && Array.isArray(child) && child.length > 0) facts.continuation = true;
 				if (EMPTY_MESSAGE_KEYS.includes(key) && isObject(child)) {
 					if (isRecognizedEmptyText(textFragments(child).join(" "))) facts.emptyMessage = true;
+					else facts.rejectedMessage = true;
 					continue;
 				}
 				if (LIST_KEYS.includes(key) && isObject(child)) {
 					facts.lists += 1;
 					const contents = child.contents ?? child.items;
-					if (Array.isArray(contents) && contents.length === 0 && !child.continuations) facts.emptyLists += 1;
+					const onlyBuiltIns = playlistIndex && Array.isArray(contents) && contents.length > 0 && contents.every(isBuiltInLockup);
+					if ((onlyBuiltIns || (!playlistIndex && Array.isArray(contents) && contents.length === 0)) &&
+						(!Array.isArray(child.continuations) || child.continuations.length === 0)) facts.emptyLists += 1;
 				}
 				visit(child);
 			}
 		};
 		visit(region);
+		if (playlistIndex) facts.playlistIndexEmpty = facts.selectedTabContent && facts.lists === 1 && facts.emptyLists === 1 && facts.items === 0 && !facts.continuation && !facts.loading && !facts.rejectedMessage;
+		if (!playlistIndex && facts.selectedTabContent) {
+			const layout = data.contents?.twoColumnBrowseResultsRenderer ?? data.contents?.singleColumnBrowseResultsRenderer;
+			const tabs = layout?.tabs;
+			const selected = Array.isArray(tabs) ? tabs.map((tab) => tab?.tabRenderer).filter((tab) => tab?.selected === true) : [];
+			const sections = selected.length === 1 ? selected[0].content?.sectionListRenderer?.contents : null;
+			const section = Array.isArray(sections) && sections.length === 1 ? sections[0]?.itemSectionRenderer : null;
+			const sectionContents = section?.contents;
+			facts.likedVideosEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
+				isObject(sectionContents[0]?.messageRenderer) &&
+				isRecognizedEmptyText(textFragments(sectionContents[0].messageRenderer).join(" ")) &&
+				!facts.items && !facts.continuation && !facts.loading && !facts.rejectedMessage;
+		}
 		return facts;
 	};
 	const pageDataFacts = (playlistIndex) => {
@@ -182,23 +314,23 @@ const PAGE_DATA_HELPERS = String.raw`
 
 const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
 	${PAGE_DATA_HELPERS}
-	const hasContent = playlistIndex
+	const hasEnumerableContent = playlistIndex
 		? Array.from(document.querySelectorAll(content)).some(isEnumerablePlaylistLink)
 		: Boolean(document.querySelector(content));
-	if (hasContent) return "content";
-	if (Array.from(document.querySelectorAll(empty)).some((node) =>
-		isRecognizedEmptyText(node.textContent ?? ""))) return "empty";
+	if (hasEnumerableContent) return "content";
 	const facts = pageDataFacts(Boolean(playlistIndex));
-	// Every readable copy of the page data must show no item, no next page and no
-	// non-empty list. Another list's empty payload cannot prove this one empty.
-	const holdsNothing = (f) => f.items === 0 && !f.continuation && f.emptyLists === f.lists;
-	return facts.some((f) => f.emptyMessage || f.emptyLists > 0) && facts.every(holdsNothing)
-		? "empty"
-		: false;
+	if (playlistIndex && onPlaylistIndexPage() && !hasPageWall() && !hasDomLoading() && hasOnlyBuiltInPlaylistCards() && facts.length > 0 && facts.every((f) => f.playlistIndexEmpty)) return "empty";
+	if (!playlistIndex && onLikedVideosPage() && !hasPageWall() && facts.length > 0 && facts.every((f) => f.likedVideosEmpty)) return "empty";
+	if (playlistIndex && document.querySelector("yt-lockup-view-model")) return "content";
+	if (!playlistIndex && Array.from(document.querySelectorAll(empty)).some((node) =>
+		isRecognizedEmptyText(node.textContent ?? ""))) return "empty";
+	return false;
 }`;
 
-const LIST_END_FUNCTION = `(kind) => {
+const LIST_END_FUNCTION = `(request) => {
 	${PAGE_DATA_HELPERS}
+	const kind = typeof request === "string" ? request : request.kind;
+	const sessionPresent = typeof request === "string" ? true : request.sessionPresent !== false;
 	const facts = pageDataFacts(kind === "playlist-index");
 	let declaredTotal = null;
 	if (kind === "playlist") {
@@ -211,22 +343,46 @@ const LIST_END_FUNCTION = `(kind) => {
 		}
 	}
 	let domItemCount = null;
+	if (kind === "history") domItemCount = document.querySelectorAll("yt-lockup-view-model").length;
+	if (kind === "playlist")
+		domItemCount = document.querySelectorAll("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer").length;
 	if (kind === "subscriptions") domItemCount = document.querySelectorAll("ytd-channel-renderer").length;
 	if (kind === "playlist-index") {
 		const ids = new Set();
-		for (const anchor of Array.from(document.querySelectorAll('a[href*="playlist?list="]')))
+		for (const anchor of Array.from(document.querySelectorAll('a[href*="list="]')))
 			if (isEnumerablePlaylistLink(anchor)) ids.add(new URL(anchor.getAttribute("href") ?? "", BASE).searchParams.get("list"));
 		domItemCount = ids.size;
 	}
+	const endText = Array.from(document.querySelectorAll("#contents #message, .ytd-item-section-renderer #message"))
+		.map((node) => node.textContent ?? "")
+		.join(" ");
+	const continuationSelector = kind === "subscriptions"
+		? "ytd-expanded-shelf-contents-renderer ytd-continuation-item-renderer"
+		: kind === "playlist-index"
+			? "ytd-rich-grid-renderer ytd-continuation-item-renderer, ytd-grid-renderer ytd-continuation-item-renderer"
+			: kind === "history"
+				? "ytd-item-section-renderer ytd-continuation-item-renderer"
+				: "ytd-playlist-video-list-renderer ytd-continuation-item-renderer, #contents ytd-playlist-video-list-renderer ytd-continuation-item-renderer";
 	return {
 		// A region with no recognized entry (an error, an unrelated payload) shows
 		// neither a last page nor a next page, so it is not readable evidence.
 		dataReadable: facts.some((f) => f.items > 0),
 		dataItemCount: facts.reduce((most, f) => Math.max(most, f.items), 0),
 		dataHasContinuation: facts.some((f) => f.continuation),
-		domHasContinuation: Boolean(document.querySelector("ytd-continuation-item-renderer")),
+		domHasContinuation: Boolean(document.querySelector(continuationSelector)),
 		declaredTotal,
 		domItemCount,
+		domHasEndMarker: /(?:no more (?:videos|items)|end of (?:the )?list|you(?:'|’)ve reached the end)/i.test(endText),
+		pageBlocked: !sessionPresent || hasPageWall() || hasDomLoading() || !onTargetRoute(kind) ||
+			facts.some((f) => f.rejectedMessage || f.loading),
+		verifiedEmpty: sessionPresent && !hasPageWall() && !hasDomLoading() && facts.length > 0 &&
+			(kind === "playlist-index"
+				? onPlaylistIndexPage() && hasOnlyBuiltInPlaylistCards() && facts.every((f) => f.playlistIndexEmpty)
+				: kind === "playlist"
+					? onLikedVideosPage() && !document.querySelector("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer") && facts.every((f) => f.likedVideosEmpty)
+					: kind === "subscriptions"
+						? onSubscriptionsPage() && facts.every((f) => f.selectedTabContent && f.lists > 0 && f.emptyMessage && f.emptyLists === f.lists && f.items === 0 && !f.continuation && !f.loading && !f.rejectedMessage)
+						: false),
 	};
 }`;
 
@@ -245,7 +401,7 @@ export const readPageReadiness = new Function(
 
 /** Runs in the page after enumeration. Reads the source's own end evidence. */
 export const readListEnd = Object.defineProperty(
-	new Function("kind", `return (${LIST_END_FUNCTION})(kind);`),
+	new Function("request", `return (${LIST_END_FUNCTION})(request);`),
 	"name",
 	{ value: "readListEnd" },
-) as (kind: ListKind) => ListEnd;
+) as (request: ListKind | ListEndRequest) => ListEnd;
