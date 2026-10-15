@@ -23,13 +23,7 @@ const idSchema = z
 	.regex(/^\S+$/, "must not contain whitespace");
 
 /** A UTC ISO-8601 instant as the parsers emit it (`YYYY-MM-DDTHH:MM:SS.ffffffZ`). */
-const instantSchema = z
-	.string()
-	.min(4)
-	.max(40)
-	.refine((value) => !Number.isNaN(new Date(value).getTime()), {
-		message: "unparseable timestamp",
-	});
+const instantSchema = z.iso.datetime();
 
 /** Answer or question text. Bound to 1 MB; anything larger is suspicious. */
 const contentSchema = pdppSafeText.max(1_048_576);
@@ -52,7 +46,7 @@ export const conversationSchema = z.object({
 
 const citationSchema = z.object({
 	title: pdppSafeText.max(500).nullable(),
-	url: z.string().url().max(2048),
+	url: z.url().max(2048),
 });
 
 export const messageSchema = z.object({

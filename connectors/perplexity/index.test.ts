@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { Page } from "playwright";
+import { z } from "zod";
 import type {
 	BrowserCollectContext,
 	EmittedMessage,
@@ -18,7 +19,11 @@ import {
 	hasPerplexitySession,
 	PAGE_SIZE,
 } from "./index.ts";
-import { validateRecord } from "./schemas.ts";
+import {
+	conversationSchema,
+	messageSchema,
+	validateRecord,
+} from "./schemas.ts";
 
 const HOME = "https://www.perplexity.ai/";
 const pad = (n: number) => String(n).padStart(12, "0");
@@ -1095,4 +1100,149 @@ test("the manifest's record contracts match the schemas", () => {
 		"title",
 		"url",
 	]);
+});
+
+test("a pending gap whose thread still fails is gapped again in this run, matching gap_keys", async () => {
+	const library = perplexityLibrary({
+		total: 2,
+		failingSlugs: [threadSlug(1)],
+		failStatus: 404,
+	});
+	await withBrowser(library.serve, async () => {
+		const h = harness(ALL_STREAMS, page());
+		Object.assign(h.ctx, {
+			detailGaps: [
+				{
+					gap_id: "gap-1",
+					status: "pending",
+					stream: "messages",
+					record_key: threadId(1),
+					detail_locator: { kind: "perplexity.thread", slug: threadSlug(1) },
+				},
+			],
+		});
+		await collectPerplexity(h.ctx, { threadDelayMs: 0 });
+		const gapped = h.messages
+			.filter((m) => m.type === "DETAIL_GAP")
+			.map((m) => (m as { record_key?: string }).record_key);
+		assert.deepEqual(gapped, [threadId(1)]);
+		assert.deepEqual(detailCoverage(h.messages, "messages").gap_keys, gapped);
+		assert.equal(
+			h.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+	});
+});
+
+test("a Cloudflare 503 challenge page is a challenge, not a retryable outage", async () => {
+	const htmlChallenge: typeof fetch = async () =>
+		new Response("<html>Just a moment...</html>", {
+			status: 503,
+			headers: { "content-type": "text/html; charset=UTF-8" },
+		});
+	await withBrowser(htmlChallenge, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_challenge/,
+		);
+	});
+	const marked: typeof fetch = async () =>
+		new Response("{}", {
+			status: 503,
+			headers: {
+				"content-type": "application/json",
+				"cf-mitigated": "challenge",
+			},
+		});
+	await withBrowser(marked, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_challenge/,
+		);
+	});
+	// A plain JSON 503 is still an outage the runtime retries.
+	const outage: typeof fetch = async () =>
+		new Response("{}", {
+			status: 503,
+			headers: { "content-type": "application/json" },
+		});
+	await withBrowser(outage, async () => {
+		const h = harness(ALL_STREAMS, page());
+		await assert.rejects(
+			collectPerplexity(h.ctx, { threadDelayMs: 0 }),
+			/perplexity_internal_api_503/,
+		);
+	});
+});
+
+interface JsonFieldSchema {
+	type?: string | string[];
+	format?: string;
+	enum?: unknown[];
+	anyOf?: JsonFieldSchema[];
+	items?: JsonFieldSchema;
+	properties?: Record<string, JsonFieldSchema>;
+	required?: string[];
+}
+
+/** The comparable facts of one field: its types (null included), format and enum. */
+function fieldFacts(
+	schema: JsonFieldSchema | undefined,
+): Record<string, unknown> {
+	const parts = schema?.anyOf ?? (schema ? [schema] : []);
+	const valued = parts.find(({ type }) => type !== "null") ?? {};
+	return {
+		types: parts
+			.flatMap(({ type }) => (type === undefined ? [] : [type].flat()))
+			.sort(),
+		format: valued.format ?? null,
+		enum: valued.enum ?? null,
+		items:
+			valued.items?.properties === undefined
+				? null
+				: Object.fromEntries(
+						Object.entries(valued.items.properties).map(([key, value]) => [
+							key,
+							fieldFacts(value),
+						]),
+					),
+		itemsRequired: valued.items?.required
+			? [...valued.items.required].sort()
+			: null,
+	};
+}
+
+test("each manifest field matches its zod schema in type, format, nullability and enum", () => {
+	const manifest = JSON.parse(
+		readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+	) as { streams: Array<{ name: string; schema: JsonFieldSchema }> };
+	const zodSchemas: Record<string, z.ZodTypeAny> = {
+		conversations: conversationSchema,
+		messages: messageSchema,
+	};
+	for (const stream of manifest.streams) {
+		const zodSchema = zodSchemas[stream.name];
+		assert.ok(zodSchema, `${stream.name} has a zod schema`);
+		const zod = z.toJSONSchema(zodSchema, { io: "input" }) as JsonFieldSchema;
+		const keys = Object.keys(stream.schema.properties ?? {}).sort();
+		assert.deepEqual(
+			Object.keys(zod.properties ?? {}).sort(),
+			keys,
+			`${stream.name}: keys`,
+		);
+		for (const key of keys) {
+			assert.deepEqual(
+				fieldFacts(stream.schema.properties?.[key]),
+				fieldFacts(zod.properties?.[key]),
+				`${stream.name}.${key}`,
+			);
+		}
+		assert.deepEqual(
+			[...(stream.schema.required ?? [])].sort(),
+			[...(zod.required ?? [])].sort(),
+			`${stream.name}: required`,
+		);
+	}
 });
