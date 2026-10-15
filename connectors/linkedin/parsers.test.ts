@@ -4,9 +4,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	addRow,
 	assembleRow,
 	at,
 	EMPTY,
+	emptyStreamRows,
 	epochMillis,
 	type FieldRead,
 	firstOf,
@@ -62,7 +64,7 @@ test("firstOf: first read wins; a malformed source without a read is unavailable
 	assert.deepEqual(firstOf([unavailable("absent")], "empty"), EMPTY);
 });
 
-test("assembleRow: unavailable fields are left out and the row is not covered", () => {
+test("assembleRow: an unavailable field makes the row uncovered; addRow withholds it whole", () => {
 	const shape = { id: { safeParse: () => ({ success: true }) } };
 	const spec = {
 		required: ["id"],
@@ -75,9 +77,18 @@ test("assembleRow: unavailable fields are left out and the row is not covered", 
 		title: unavailable("malformed"),
 	});
 	assert.deepEqual(outcome, {
-		kind: "emitted",
+		kind: "assembled",
 		record: { id: "row-1", note: null },
 		unavailable: [{ field: "title", reason: "malformed" }],
+	});
+	const rows = emptyStreamRows();
+	addRow(rows, outcome);
+	assert.deepEqual(rows, {
+		considered: 1,
+		covered: 0,
+		omittedRows: { withheld_unreadable_fields: 1 },
+		records: [],
+		unavailableFields: { title: { malformed: 1 } },
 	});
 	assert.deepEqual(assembleRow(spec, { id: unavailable("malformed") }), {
 		kind: "omitted",
@@ -443,21 +454,14 @@ test("buildExperienceRows: an empty section is an empty inventory", () => {
 	assert.equal(buildExperienceRows([]).considered, 0);
 });
 
-test("buildExperienceRows: a readable row with one malformed field is emitted without it and not covered", () => {
+test("buildExperienceRows: a readable row with one malformed field is withheld whole and stays considered", () => {
 	const rows = buildExperienceRows([
 		{ title: "Former role", start: { year: 2010 }, end: 42 },
 	]);
 	assert.equal(rows.considered, 1);
 	assert.equal(rows.covered, 0);
-	assert.deepEqual(rows.records[0], {
-		company: null,
-		description: null,
-		employment_type: null,
-		id: "exp-group-0",
-		location: null,
-		start_date: "2010",
-		title: "Former role",
-	});
+	assert.deepEqual(rows.records, []);
+	assert.deepEqual(rows.omittedRows, { withheld_unreadable_fields: 1 });
 	assert.deepEqual(rows.unavailableFields, { end_date: { malformed: 1 } });
 });
 
@@ -648,22 +652,19 @@ test("buildConnectionRows: source-backed blank names stay blank", () => {
 	assert.equal(rows.covered, 1);
 });
 
-test("buildConnectionRows: an unresolved member keeps the edge, leaves enrichment out, and is not covered", () => {
+test("buildConnectionRows: an unresolved member is withheld whole, never emitted without its enrichment", () => {
 	const rows = buildConnectionRows(
 		[{ connectedMember: "urn:li:fsd_profile:xyz789" }],
 		() => undefined,
 	);
-	assert.deepEqual(rows.records[0], {
-		connected_at: null,
-		id: "urn:li:fsd_profile:xyz789",
-	});
+	assert.deepEqual(rows.records, []);
+	assert.equal(rows.considered, 1);
 	assert.equal(rows.covered, 0);
 	assert.deepEqual(rows.unavailableFields, {
 		full_name: { enrichment_unresolved: 1 },
 		headline: { enrichment_unresolved: 1 },
 		profile_url: { enrichment_unresolved: 1 },
 	});
-	assert.equal(validateRecord("connections", rows.records[0]).ok, true);
 });
 
 test("buildConnectionRows: a row without a member URN cannot be keyed and is omitted", () => {

@@ -886,12 +886,14 @@ interface StreamSink {
 }
 
 /**
- * Emit a stream's rows and its one completeness decision. Every row is
- * emitted (upsert: keep what was readable). DETAIL_COVERAGE is emitted only
- * when the enumeration has a verified end, and it is complete only when every
- * considered row is covered. Any uncovered row adds one retryable gap that
- * names the omitted rows and unavailable fields by reason, so the stream is
- * never replaced on this run.
+ * Emit a stream's rows and its one completeness decision. Only covered rows
+ * are emitted: an uncovered row is withheld whole, because a partial upsert
+ * would erase stored values. DETAIL_COVERAGE is emitted only when the
+ * enumeration has a verified end, and it is complete only when every
+ * considered row is covered. A withheld row stays considered, so any withheld
+ * or omitted row adds one retryable gap that names the rows and unavailable
+ * fields by reason: the stream is never complete, and nothing is replaced or
+ * deleted, on this run.
  */
 async function emitRows(
 	sink: StreamSink,

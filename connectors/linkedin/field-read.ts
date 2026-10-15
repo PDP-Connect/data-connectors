@@ -16,9 +16,8 @@
  * - `empty`: a valid source shape says there is nothing, by design (`null`,
  *   or an optional key the source omits when unset).
  * - `unavailable`: the source is malformed, a container is missing or of the
- *   wrong type, or the shape cannot be read. The field is left out of the
- *   emitted record (a field-level omission, as in the ChatGPT and Anthropic
- *   connectors) and the row is not covered.
+ *   wrong type, or the shape cannot be read. The row is not covered and is
+ *   withheld whole (see `addRow`); the gap names the field and its reason.
  *
  * Readers never touch a property of a value they have not checked first, so a
  * malformed payload cannot throw.
@@ -37,7 +36,9 @@ export type UnavailableReason =
 	/** A connection's profile could not be resolved this run. */
 	| "enrichment_unresolved"
 	/** The connections walk did not prove the end of the list. */
-	| "walk_unverified";
+	| "walk_unverified"
+	/** A derived field's source row is itself not covered. */
+	| "source_row_uncovered";
 
 export type FieldRead<T> =
 	| { readonly kind: "read"; readonly value: T }
@@ -232,7 +233,7 @@ export interface RowSpec {
 
 export type RowOutcome =
 	| {
-			readonly kind: "emitted";
+			readonly kind: "assembled";
 			readonly record: Record<string, unknown>;
 			readonly unavailable: ReadonlyArray<{
 				readonly field: string;
@@ -243,9 +244,9 @@ export type RowOutcome =
 
 /**
  * Turn per-field reads into a row. A `read` the schema rejects becomes
- * `invalid_value`. `read` fields carry their value, `empty` fields are
- * `null`, and `unavailable` fields are left out. The row is covered only when
- * the outcome lists no unavailable field.
+ * `invalid_value`. `read` fields carry their value and `empty` fields are
+ * `null`. The row is covered only when the outcome lists no unavailable
+ * field; only a covered row is checked against the whole output schema.
  */
 export function assembleRow(spec: RowSpec, reads: FieldReads): RowOutcome {
 	const settled: Record<string, FieldRead<unknown>> = {};
@@ -280,16 +281,17 @@ export function assembleRow(spec: RowSpec, reads: FieldReads): RowOutcome {
 		else if (outcome.kind === "empty") record[field] = null;
 		else missing.push({ field, reason: outcome.reason });
 	}
-	if (!spec.schema.safeParse(record).success) {
+	if (missing.length === 0 && !spec.schema.safeParse(record).success) {
 		return { kind: "omitted", reason: "invalid_record_shape" };
 	}
-	return { kind: "emitted", record, unavailable: missing };
+	return { kind: "assembled", record, unavailable: missing };
 }
 
 /**
  * A stream's rows and the evidence for its coverage. `considered` counts every
- * enumerated source row; `covered` counts emitted rows with no unavailable
- * field. Omitted rows and unavailable fields are tallied by reason.
+ * enumerated source row; `covered` counts the emitted rows, all of which have
+ * every field read or empty. Omitted and withheld rows, and the unavailable
+ * fields of withheld rows, are tallied by reason.
  */
 export interface StreamRows<T = Record<string, unknown>> {
 	considered: number;
@@ -314,17 +316,30 @@ export function addOmittedRow(rows: StreamRows<unknown>, reason: string): void {
 	rows.omittedRows[reason] = (rows.omittedRows[reason] ?? 0) + 1;
 }
 
+/** True when the row can be emitted: assembled with no unavailable field. */
+export function isCovered(outcome: RowOutcome): boolean {
+	return outcome.kind === "assembled" && outcome.unavailable.length === 0;
+}
+
+/**
+ * Count one source row. Only a covered row is emitted. A Personal Server
+ * upsert replaces the whole record, so a row with an unavailable field is
+ * WITHHELD entirely rather than emitted with the field missing (which would
+ * erase the stored value). A withheld row still counts as considered, so the
+ * stream cannot be complete and nothing is replaced or deleted on this run.
+ */
 export function addRow<T>(rows: StreamRows<T>, outcome: RowOutcome): void {
 	if (outcome.kind === "omitted") {
 		addOmittedRow(rows, outcome.reason);
 		return;
 	}
-	rows.considered += 1;
-	rows.records.push(outcome.record as T);
-	if (outcome.unavailable.length === 0) {
+	if (isCovered(outcome)) {
+		rows.considered += 1;
 		rows.covered += 1;
+		rows.records.push(outcome.record as T);
 		return;
 	}
+	addOmittedRow(rows, "withheld_unreadable_fields");
 	for (const { field, reason } of outcome.unavailable) {
 		const byReason = rows.unavailableFields[field] ?? {};
 		byReason[reason] = (byReason[reason] ?? 0) + 1;

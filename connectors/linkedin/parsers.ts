@@ -29,8 +29,10 @@ import {
 	type FieldRead,
 	type FieldReads,
 	firstOf,
+	isCovered,
 	isRecord,
 	partialDate,
+	type RowOutcome,
 	type RowSpec,
 	read,
 	type StreamRows,
@@ -282,8 +284,9 @@ function locationRead(dash: unknown): FieldRead<string> {
 /**
  * Current company and title. The current group is the first one with no end
  * date; within it, the first position with no end date, else the first
- * position. Every end date read on the way must be readable: an unreadable
- * end could hide the current role.
+ * position. Every group read on the way must have only covered experience
+ * rows, and its end date must be readable: an unreadable group could hide
+ * the current role.
  */
 function currentPositionReads(dash: unknown): {
 	company: FieldRead<string>;
@@ -296,8 +299,14 @@ function currentPositionReads(dash: unknown): {
 	const groups = collectionAt(dash, "profilePositionGroups");
 	if (groups.kind !== "read") return failedBoth(groups as FieldRead<never>);
 	let current: Record<string, unknown> | null = null;
-	for (const group of groups.value) {
+	for (const [groupIndex, group] of groups.value.entries()) {
 		if (!isRecord(group)) return failedBoth(unavailable("malformed"));
+		// A projection is only as readable as its source rows. A group whose
+		// experience rows are not covered (malformed, contentless, or with an
+		// unreadable field) cannot prove it is or is not the current role.
+		if (!experienceRowsOf(group, groupIndex).every(isCovered)) {
+			return failedBoth(unavailable("source_row_uncovered"));
+		}
 		const end = dateOf(group, "end");
 		if (end.kind === "unavailable") return failedBoth(end);
 		if (end.kind === "empty") {
@@ -483,35 +492,39 @@ export function buildExperienceRows(
 	groups: readonly unknown[],
 ): StreamRows<ExperienceRecord> {
 	const rows = emptyStreamRows<ExperienceRecord>();
-	groups.forEach((group, groupIndex) => {
-		if (!isRecord(group)) {
-			addOmittedRow(rows, "malformed_row");
-			return;
+	for (const [groupIndex, group] of groups.entries()) {
+		for (const outcome of experienceRowsOf(group, groupIndex)) {
+			addRow(rows, outcome);
 		}
-		const positions = nestedPositions(group);
-		if (positions.kind !== "read") {
-			addOmittedRow(rows, "unreadable_nested_collection");
-			return;
-		}
-		if (positions.value.length === 0) {
-			addRow(rows, assembleRow(EXPERIENCE_ROW, groupReads(group, groupIndex)));
-			return;
-		}
-		positions.value.forEach((position, positionIndex) => {
-			if (!isRecord(position)) {
-				addOmittedRow(rows, "malformed_row");
-				return;
-			}
-			addRow(
-				rows,
-				assembleRow(
-					EXPERIENCE_ROW,
-					positionReads(position, group, groupIndex, positionIndex),
-				),
-			);
-		});
-	});
+	}
 	return rows;
+}
+
+/** The experience row outcomes one source group yields: one per position,
+ *  or one for the group itself when it has no positions. */
+function experienceRowsOf(group: unknown, groupIndex: number): RowOutcome[] {
+	if (!isRecord(group)) return [{ kind: "omitted", reason: "malformed_row" }];
+	const positions = nestedPositions(group);
+	if (positions.kind !== "read") {
+		return [{ kind: "omitted", reason: "unreadable_nested_collection" }];
+	}
+	if (positions.value.length === 0) {
+		return [assembleRow(EXPERIENCE_ROW, groupReads(group, groupIndex))];
+	}
+	return positions.value.map((position, positionIndex): RowOutcome => {
+		if (!isRecord(position))
+			return { kind: "omitted", reason: "malformed_row" };
+		// Content must come from the position itself: a `{}` position would
+		// otherwise inherit its group's company and pass as a real row.
+		const own = positionReads(position, null, groupIndex, positionIndex);
+		if (!EXPERIENCE_CONTENT.some((field) => own[field]?.kind === "read")) {
+			return { kind: "omitted", reason: "no_readable_content" };
+		}
+		return assembleRow(
+			EXPERIENCE_ROW,
+			positionReads(position, group, groupIndex, positionIndex),
+		);
+	});
 }
 
 // ─── education ───────────────────────────────────────────────────────────
@@ -675,8 +688,8 @@ export function connectionEnrichmentIsReadable(profile: unknown): boolean {
 
 /**
  * One connection row. `resolved` is the member's profile from the batch
- * resolution, or undefined when it could not be resolved: the edge is still
- * real and is emitted, with its enrichment fields unavailable.
+ * resolution, or undefined when it could not be resolved: its enrichment
+ * fields are then unavailable, so the row is withheld (see `addRow`).
  */
 export function connectionReads(
 	element: unknown,

@@ -308,6 +308,9 @@ interface StreamOutcome {
 	} | null;
 	gaps: Array<Extract<EmittedMessage, { type: "SKIP_RESULT" }>>;
 	records: Array<Record<string, unknown>>;
+	/** Emit attempts the output schema rejected. A partial row would land
+	 *  here, not in `records`, so it must be counted too. */
+	rejected: number;
 }
 
 /** Complete: one DETAIL_COVERAGE with covered === considered, and no gap. */
@@ -337,7 +340,32 @@ function outcomeOf(recording: Recording, stream: string): StreamOutcome {
 		records: recording.emitted
 			.filter((record) => record.stream === stream)
 			.map((record) => record.data as Record<string, unknown>),
+		rejected: recording.skipped.filter((record) => record.stream === stream)
+			.length,
 	};
+}
+
+/** The stream emitted no row, and its gap names each unreadable field. A
+ *  withheld row is still considered, so the stream is never complete. */
+function assertWithheld(
+	outcome: StreamOutcome,
+	fields: readonly string[],
+	label = "",
+): void {
+	assert.equal(outcome.complete, false, `${label}: stream reported complete`);
+	const named = new Set(
+		outcome.gaps.flatMap((gap) =>
+			Object.keys(
+				(gap.diagnostics as { unavailable_fields?: object } | undefined)
+					?.unavailable_fields ?? {},
+			),
+		),
+	);
+	for (const field of fields) {
+		assert.ok(named.has(field), `${label}: gap does not name ${field}`);
+	}
+	assert.deepEqual(outcome.records, [], `${label}: uncovered row was emitted`);
+	assert.equal(outcome.rejected, 0, `${label}: a partial row was emitted`);
 }
 
 function setPath(root: Json, path: Path, value: Json): void {
@@ -415,7 +443,8 @@ const STRICT_CONTAINERS = new Set([
 function malformedContainer(path: Path): readonly Json[] {
 	const last = path.at(-1) as string;
 	const next = /^\d+$/u.test(last);
-	if (next) return [42, "x", [], true, null];
+	// `{}` and an unknown-key-only object are records with no readable content.
+	if (next) return [42, "x", [], true, null, {}, { unknownKey: 1 }];
 	if (last === "elements" || last === "skills")
 		return [42, "x", {}, true, null];
 	if (last === "artifacts") return [42, "x", {}, true];
@@ -832,16 +861,17 @@ for (const fieldCase of FIELD_CASES) {
 				`${where}: stream reported complete`,
 			);
 			assert.ok(outcome.gaps.length > 0, `${where}: no gap emitted`);
+			// A Personal Server upsert replaces the whole record, so a row with
+			// an unreadable field is withheld entirely, never emitted partial.
 			const row = outcome.records.find(
 				(record) => record.id === fieldCase.rowId,
 			);
-			if (row && fieldCase.field !== "id") {
-				assert.equal(
-					Object.hasOwn(row, fieldCase.field),
-					false,
-					`${where}: unreadable ${fieldCase.field} emitted as ${JSON.stringify(row[fieldCase.field])}`,
-				);
-			}
+			assert.equal(
+				row,
+				undefined,
+				`${where}: row with unreadable ${fieldCase.field} was emitted`,
+			);
+			assert.equal(outcome.rejected, 0, `${where}: a partial row was emitted`);
 		}
 	});
 }
@@ -1004,10 +1034,7 @@ test("r1: a repeated connections page withholds coverage and connection_count", 
 	assert.equal(outcomeOf(recording, "connections").complete, false);
 	const profile = outcomeOf(recording, "profile");
 	assert.equal(profile.complete, false);
-	assert.equal(
-		Object.hasOwn(profile.records[0] ?? {}, "connection_count"),
-		false,
-	);
+	assertWithheld(profile, ["connection_count"]);
 });
 
 test("r1: a basic-fallback {} profile is never complete, and its sections are unavailable", async () => {
@@ -1086,7 +1113,7 @@ test("r1: resolver keeps source-backed blank names and rejects a numeric name", 
 	fixture.resolved = { firstName: 123 };
 	const numeric = outcomeOf(await collect(routesFor(fixture)), "connections");
 	assert.equal(numeric.complete, false);
-	assert.equal(Object.hasOwn(numeric.records[0] ?? {}, "full_name"), false);
+	assertWithheld(numeric, ["full_name"]);
 });
 
 test("r2: numeric title and object schoolName rows are not covered", async () => {
@@ -1116,11 +1143,7 @@ test("r2: malformed current position and location keep the profile incomplete", 
 		"profile",
 	);
 	assert.equal(outcome.complete, false);
-	assert.equal(Object.hasOwn(outcome.records[0] ?? {}, "location"), false);
-	assert.equal(
-		Object.hasOwn(outcome.records[0] ?? {}, "current_position_title"),
-		false,
-	);
+	assertWithheld(outcome, ["location", "current_position_title"]);
 });
 
 test("r2: a full 20-row page at a smaller reported count is not an end", async () => {
@@ -1180,9 +1203,7 @@ test("r3: malformed name, headline and picture with no fallback keep the profile
 	);
 	const profile = outcomeOf(recording, "profile");
 	assert.equal(profile.complete, false);
-	for (const field of ["full_name", "headline", "profile_picture_url"]) {
-		assert.equal(Object.hasOwn(profile.records[0] ?? {}, field), false, field);
-	}
+	assertWithheld(profile, ["full_name", "headline", "profile_picture_url"]);
 	assert.equal(outcomeOf(recording, "connections").complete, true);
 });
 
@@ -1213,13 +1234,7 @@ test("r3: education rows with unreadable or missing logo content are not covered
 		);
 		const outcome = outcomeOf(recording, "education");
 		assert.equal(outcome.complete, false, JSON.stringify(row));
-		for (const record of outcome.records) {
-			assert.equal(
-				Object.hasOwn(record, "logo_url"),
-				false,
-				JSON.stringify(row),
-			);
-		}
+		assertWithheld(outcome, [], JSON.stringify(row));
 	}
 });
 
@@ -1234,10 +1249,8 @@ test("r3: an unreadable inline end date is never read as a current role", async 
 	);
 	const experience = outcomeOf(recording, "experience");
 	assert.equal(experience.complete, false);
-	assert.equal(Object.hasOwn(experience.records[0] ?? {}, "end_date"), false);
-	const profile = outcomeOf(recording, "profile");
-	assert.equal(profile.complete, false);
-	assert.notEqual(profile.records[0]?.current_position_title, "Former role");
+	assertWithheld(experience, ["end_date"]);
+	assertWithheld(outcomeOf(recording, "profile"), ["current_position_title"]);
 });
 
 test("r3: unreadable education end points are never read as ongoing", async () => {
@@ -1257,7 +1270,7 @@ test("r3: unreadable education end points are never read as ongoing", async () =
 		);
 		const outcome = outcomeOf(recording, "education");
 		assert.equal(outcome.complete, false, JSON.stringify(end));
-		assert.equal(Object.hasOwn(outcome.records[0] ?? {}, "end_date"), false);
+		assertWithheld(outcome, ["end_date"], JSON.stringify(end));
 	}
 });
 
@@ -1270,9 +1283,54 @@ test("r3: a malformed or out-of-range connection timestamp is reported, not eras
 			"connections",
 		);
 		assert.equal(outcome.complete, false, String(createdAt));
-		assert.equal(
-			Object.hasOwn(outcome.records[0] ?? {}, "connected_at"),
-			false,
-		);
+		assertWithheld(outcome, ["connected_at"], String(createdAt));
 	}
+});
+
+const CONTENTLESS_GROUPS: ReadonlyArray<readonly Json[]> = [
+	[{}],
+	[{ unknownKey: 1 }],
+	[{ profilePositionInPositionGroup: { elements: [] } }],
+	[{}, { company: { name: "Actual company" }, title: "Actual current role" }],
+];
+
+for (const streams of [["profile", "connections"], ALL_STREAMS]) {
+	test(`r5: a contentless position group never proves empty current_* (${streams.join(",")})`, async () => {
+		for (const groups of CONTENTLESS_GROUPS) {
+			const fixture = baseFixture();
+			setPath(fixture.dash, ["profilePositionGroups", "elements"], groups);
+			const recording = await collect(routesFor(fixture), streams);
+			const label = JSON.stringify(groups);
+			// Every other profile field is readable: only current_* can fail.
+			assertWithheld(
+				outcomeOf(recording, "profile"),
+				["current_company", "current_position_title"],
+				label,
+			);
+			if (streams.includes("experience")) {
+				assert.equal(outcomeOf(recording, "experience").complete, false, label);
+			}
+		}
+	});
+}
+
+test("withholding: an uncovered row is withheld whole; its readable siblings are emitted and the stream stays partial", async () => {
+	const fixture = baseFixture();
+	const educations = (
+		fixture.dash as { profileEducations: { elements: Json[] } }
+	).profileEducations.elements;
+	educations.push({ entityUrn: "urn:edu:2", grade: 42, schoolName: "Second" });
+	const outcome = outcomeOf(
+		await collect(routesFor(fixture), ["education"]),
+		"education",
+	);
+	assert.deepEqual(
+		outcome.records.map((record) => record.id),
+		["urn:edu:1"],
+	);
+	assert.deepEqual(outcome.coverage, { considered: 2, covered: 1 });
+	assert.equal(outcome.complete, false);
+	const diagnostics = outcome.gaps[0]?.diagnostics as Record<string, unknown>;
+	assert.deepEqual(diagnostics.unavailable_fields, { grade: { malformed: 1 } });
+	assert.deepEqual(diagnostics.omitted_rows, { withheld_unreadable_fields: 1 });
 });

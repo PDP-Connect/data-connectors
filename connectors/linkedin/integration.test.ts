@@ -46,7 +46,11 @@ const DASH_PROFILE_RESPONSE = {
 	elements: [
 		{
 			firstName: "Anon",
+			// Every profile field is readable, so the profile row is covered and
+			// emitted (an uncovered row is withheld whole).
+			geoLocation: { geo: { defaultLocalizedName: "Austin, Texas, United States" } },
 			headline: "Staff Engineer at Acme",
+			industry: { name: "Software Development" },
 			lastName: "Member",
 			profileEducations: {
 				elements: [
@@ -286,6 +290,33 @@ function unavailableFieldsOf(skip: { diagnostics?: unknown }): string[] {
 	const fields = (skip.diagnostics as { unavailable_fields?: unknown } | undefined)
 		?.unavailable_fields;
 	return fields && typeof fields === "object" ? Object.keys(fields).sort() : [];
+}
+
+/** Asserts the stream emitted no row (an uncovered row is withheld whole,
+ *  since a partial upsert would erase stored values) and returns the field
+ *  names its gaps report as unavailable. */
+function withheldFieldsOf(
+	recording: ReturnType<typeof makeRecordingEmit>,
+	stream: string,
+): string[] {
+	assert.deepEqual(
+		recording.emitted.filter((event) => event.stream === stream),
+		[],
+		`${stream}: an uncovered row was emitted`,
+	);
+	assert.deepEqual(
+		recording.skipped.filter((record) => record.stream === stream),
+		[],
+		`${stream}: a partial row was emitted`,
+	);
+	assert.equal(claimsFullCoverage(recording, stream), false);
+	return [
+		...new Set(
+			skipResults(recording)
+				.filter((skip) => skip.stream === stream)
+				.flatMap(unavailableFieldsOf),
+		),
+	].sort();
 }
 
 // ─── Session establishment ────────────────────────────────────────────────
@@ -598,22 +629,15 @@ test("collectLinkedIn: dash failure keeps /me profile fields and reports unavail
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	assert.equal(profile?.data.full_name, "Anon Member");
-	assert.equal(profile?.data.headline, "Staff Engineer at Acme");
-	assert.equal(
-		profile?.data.public_url,
-		"https://www.linkedin.com/in/anon-member/",
-	);
-	assert.equal(
-		profile?.data.profile_picture_url,
-		"https://media.example/me/me-fallback.jpg",
-	);
-	assert.equal(
-		claimsFullCoverage(recording, "profile"),
-		false,
-		"a profile with unavailable dash-backed fields must not claim full coverage",
-	);
+	// /me supplies name, headline and picture, but the dash-only fields are
+	// unreadable, so the profile row is withheld rather than emitted partial.
+	assert.deepEqual(withheldFieldsOf(recording, "profile"), [
+		"current_company",
+		"current_position_title",
+		"industry",
+		"location",
+		"summary",
+	]);
 	assert.ok(
 		skipResults(recording).some(
 			(skip) => skip.reason === "linkedin_dash_profile_unavailable",
@@ -636,10 +660,7 @@ test("collectLinkedIn: a basic empty dash profile cannot prove profile coverage"
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	assert.equal(profile?.data.full_name, "Anon Member");
-	assert.equal(profile?.data.headline, "Staff Engineer at Acme");
-	assert.equal(claimsFullCoverage(recording, "profile"), false);
+	assert.ok(withheldFieldsOf(recording, "profile").includes("summary"));
 	assert.ok(
 		skipResults(recording).some(
 			(skip) =>
@@ -660,7 +681,11 @@ test("collectLinkedIn: an empty decoration does not block a later usable decorat
 				? { elements: [{}] }
 				: {
 						elements: [
-							{ firstName: "Decoration", lastName: "Two" },
+							{
+								...DASH_PROFILE_RESPONSE.elements[0],
+								firstName: "Decoration",
+								lastName: "Two",
+							},
 						],
 					};
 		}
@@ -688,10 +713,9 @@ test("collectLinkedIn: failed connection paging vetoes profile coverage", async 
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	// An unverified walk leaves connection_count out of the row (unavailable),
-	// never `null` (which would claim "no connections").
-	assert.equal(Object.hasOwn(profile?.data ?? {}, "connection_count"), false);
+	// An unverified walk makes connection_count unreadable, so the profile is
+	// withheld: never emitted with a `null` count or without the field.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(claimsFullCoverage(recording, "profile"), false);
 	assert.ok(
 		skipResults(recording).some(
@@ -720,10 +744,9 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	// An unverified walk leaves connection_count out of the row (unavailable),
-	// never `null` (which would claim "no connections").
-	assert.equal(Object.hasOwn(profile?.data ?? {}, "connection_count"), false);
+	// An unverified walk makes connection_count unreadable, so the profile is
+	// withheld: never emitted with a `null` count or without the field.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.events.some(
 			(event) =>
@@ -775,10 +798,9 @@ test("collectLinkedIn: repeated connection pages cannot prove a count or emit du
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	// An unverified walk leaves connection_count out of the row (unavailable),
-	// never `null` (which would claim "no connections").
-	assert.equal(Object.hasOwn(profile?.data ?? {}, "connection_count"), false);
+	// An unverified walk makes connection_count unreadable, so the profile is
+	// withheld: never emitted with a `null` count or without the field.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	const connections = recording.emitted.filter(
 		(event) => event.stream === "connections",
 	);
@@ -806,10 +828,9 @@ test("collectLinkedIn: mismatched paging start vetoes connection completeness", 
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	// An unverified walk leaves connection_count out of the row (unavailable),
-	// never `null` (which would claim "no connections").
-	assert.equal(Object.hasOwn(profile?.data ?? {}, "connection_count"), false);
+	// An unverified walk makes connection_count unreadable, so the profile is
+	// withheld: never emitted with a `null` count or without the field.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.protocolMessages.some(
 			(message) =>
@@ -836,10 +857,9 @@ test("collectLinkedIn: a short reported full page cannot prove connection end", 
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	// An unverified walk leaves connection_count out of the row (unavailable),
-	// never `null` (which would claim "no connections").
-	assert.equal(Object.hasOwn(profile?.data ?? {}, "connection_count"), false);
+	// An unverified walk makes connection_count unreadable, so the profile is
+	// withheld: never emitted with a `null` count or without the field.
+	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.protocolMessages.some(
 			(message) =>
@@ -1144,11 +1164,9 @@ test("collectLinkedIn: malformed mapped experience and education values stay unc
 		);
 		assert.equal(coverage?.considered, 2);
 		assert.equal(coverage?.covered, 0);
-		// The row with no readable field is not emitted. The row with a
-		// readable title or school is emitted without its unreadable date.
-		const rows = recording.emitted.filter((event) => event.stream === stream);
-		assert.equal(rows.length, 1);
-		assert.equal(Object.hasOwn(rows[0]?.data ?? {}, "start_date"), false);
+		// The row with no readable field is omitted; the row with a readable
+		// title or school but an unreadable date is withheld whole.
+		assert.ok(withheldFieldsOf(recording, stream).includes("start_date"));
 		assert.ok(
 			skipResults(recording).some(
 				(skip) =>
@@ -1213,9 +1231,9 @@ test("collectLinkedIn: malformed profile mappings stay unavailable without crash
 				),
 			),
 		);
-		const profile = recording.emitted.find((event) => event.stream === "profile");
-		assert.equal(profile?.data.full_name, "Decoration Member");
-		assert.equal(claimsFullCoverage(recording, "profile"), false);
+		assert.ok(
+			withheldFieldsOf(recording, "profile").includes("current_position_title"),
+		);
 		const experienceCoverage = recording.protocolMessages.find(
 			(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 				message.type === "DETAIL_COVERAGE" && message.stream === "experience",
@@ -1258,20 +1276,18 @@ test("collectLinkedIn: malformed current-position and location values veto profi
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
-	const profile = recording.emitted.find((event) => event.stream === "profile");
-	assert.equal(profile?.data.full_name, "Decoration Member");
-	assert.equal(claimsFullCoverage(recording, "profile"), false);
-	const profileSkip = skipResults(recording).find(
-		(skip) => skip.reason === "linkedin_profile_fields_unavailable",
+	assert.ok(
+		skipResults(recording).some(
+			(skip) => skip.reason === "linkedin_profile_fields_unavailable",
+		),
 	);
-	assert.ok(profileSkip);
-	// The current group has no company source at all (explicit empty); only
-	// its malformed title and the malformed location are unreadable.
-	assert.deepEqual(unavailableFieldsOf(profileSkip), [
+	// The group's own experience row is uncovered (malformed title), so both
+	// projections from it are unreadable, as is the malformed location.
+	assert.deepEqual(withheldFieldsOf(recording, "profile"), [
+		"current_company",
 		"current_position_title",
 		"location",
 	]);
-	assert.equal(profile?.data.current_company, null);
 });
 
 test("collectLinkedIn: readable empty sections prove an empty inventory", async () => {
@@ -1418,11 +1434,13 @@ test("collectLinkedIn: connection rows without URNs and unresolved enrichment ar
 		},
 	});
 
-	const connections = recording.emitted.filter(
-		(event) => event.stream === "connections",
-	);
-	assert.equal(connections.length, 1);
-	assert.equal(connections[0]?.data.id, "urn:li:profile:unresolved");
+	// The unresolved edge is withheld: emitting it without enrichment would
+	// erase the stored name and headline.
+	assert.deepEqual(withheldFieldsOf(recording, "connections"), [
+		"full_name",
+		"headline",
+		"profile_url",
+	]);
 	const coverage = recording.protocolMessages.find(
 		(
 			message,
@@ -1505,8 +1523,7 @@ test("collectLinkedIn: partial batches retry missing URNs and validate sourced s
 		]),
 		[
 			[urns[0], "", ""],
-			// The numeric first name is unreadable, so full_name is left out.
-			[urns[1], undefined, null],
+			// urns[1] (numeric first name) is withheld whole.
 			[urns[2], "Only", null],
 		],
 	);
