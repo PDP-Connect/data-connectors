@@ -24,6 +24,7 @@ import {
 	buildLanguageRows,
 	buildProfileRows,
 	buildSkillRows,
+	collectionAt,
 	dateOf,
 	type ProfileSources,
 	profileFieldReads,
@@ -62,6 +63,49 @@ test("firstOf: first read wins; a malformed source without a read is unavailable
 		unavailable("absent"),
 	);
 	assert.deepEqual(firstOf([unavailable("absent")], "empty"), EMPTY);
+});
+
+test("collectionAt requires a verified first-page end and rejects contradictory paging", () => {
+	assert.deepEqual(
+		collectionAt({ skills: { elements: [] } }, "skills"),
+		unavailable("walk_unverified"),
+	);
+	assert.deepEqual(
+		collectionAt({ skills: { elements: [], paging: null } }, "skills"),
+		unavailable("malformed"),
+	);
+	assert.deepEqual(
+		collectionAt({ skills: { elements: [], paging: { start: 0 } } }, "skills"),
+		unavailable("walk_unverified"),
+	);
+	assert.deepEqual(
+		collectionAt(
+			{ skills: { elements: [], paging: { start: 1, total: 1 } } },
+			"skills",
+		),
+		unavailable("walk_unverified"),
+	);
+	assert.deepEqual(
+		collectionAt(
+			{ skills: { elements: ["one"], paging: { start: 0, total: 2 } } },
+			"skills",
+		),
+		unavailable("walk_unverified"),
+	);
+	assert.deepEqual(
+		collectionAt(
+			{ skills: { elements: ["one"], paging: { start: 0, total: 0 } } },
+			"skills",
+		),
+		unavailable("malformed"),
+	);
+	assert.deepEqual(
+		collectionAt(
+			{ skills: { elements: [], paging: { start: 0, total: 0 } } },
+			"skills",
+		),
+		read([]),
+	);
 });
 
 test("assembleRow: an unavailable field makes the row uncovered; addRow withholds it whole", () => {
@@ -212,15 +256,28 @@ function profileSources(
 	dash: Record<string, unknown>,
 	me: Record<string, unknown> = {},
 ): ProfileSources {
+	const withCompleteCollections = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(withCompleteCollections);
+		if (typeof value !== "object" || value === null) return value;
+		const collection = Object.fromEntries(
+			Object.entries(value).map(([key, child]) => [
+				key,
+				withCompleteCollections(child),
+			]),
+		);
+		return Array.isArray(collection.elements) && !Object.hasOwn(collection, "paging")
+			? { ...collection, paging: { start: 0, total: collection.elements.length } }
+			: collection;
+	};
 	return {
 		connectionCount: read(0),
-		dash: {
+		dash: withCompleteCollections({
 			industry: null,
 			location: null,
 			profilePositionGroups: { elements: [] },
 			summary: null,
 			...dash,
-		},
+		}) as Record<string, unknown>,
 		dashSource: "decoration",
 		me,
 		publicIdentifier: "alexrivera",
@@ -252,6 +309,7 @@ test("buildProfileRows: maps core fields and derives current position from the o
 									title: "Staff Engineer",
 								},
 							],
+				paging: { start: 0, total: 1 },
 						},
 					},
 				],
@@ -406,6 +464,7 @@ test("buildExperienceRows: group with sub-positions expands 1:1", () => {
 						title: "Staff Engineer",
 					},
 				],
+				paging: { start: 0, total: 2 },
 			},
 		},
 	]);

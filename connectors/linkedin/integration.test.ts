@@ -70,6 +70,7 @@ const DASH_PROFILE_RESPONSE = {
 						schoolName: "State University",
 					},
 				],
+				paging: { count: 1, start: 0, total: 1 },
 			},
 			profilePicture: {
 				displayImageReference: {
@@ -87,6 +88,7 @@ const DASH_PROFILE_RESPONSE = {
 						proficiency: "Professional working proficiency",
 					},
 				],
+				paging: { count: 1, start: 0, total: 1 },
 			},
 			profilePositionGroups: {
 				elements: [
@@ -101,9 +103,11 @@ const DASH_PROFILE_RESPONSE = {
 									title: "Staff Engineer",
 								},
 							],
+							paging: { count: 1, start: 0, total: 1 },
 						},
 					},
 				],
+				paging: { count: 1, start: 0, total: 1 },
 			},
 			profileSkills: {
 				elements: [
@@ -113,6 +117,7 @@ const DASH_PROFILE_RESPONSE = {
 						name: "Distributed Systems",
 					},
 				],
+				paging: { count: 1, start: 0, total: 1 },
 			},
 			summary: "Builds reliable data infrastructure.",
 		},
@@ -240,6 +245,19 @@ function buildCtx(
 	recording: ReturnType<typeof makeRecordingEmit>,
 	route: (path: string) => unknown = routeVoyagerPath,
 ): BrowserCollectContext {
+	const markFixtureCollectionsComplete = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(markFixtureCollectionsComplete);
+		if (typeof value !== "object" || value === null) return value;
+		const collection = Object.fromEntries(
+			Object.entries(value).map(([key, child]) => [
+				key,
+				markFixtureCollectionsComplete(child),
+			]),
+		);
+		return Array.isArray(collection.elements) && !Object.hasOwn(collection, "paging")
+			? { ...collection, paging: { start: 0, total: collection.elements.length } }
+			: collection;
+	};
 	return {
 		assist: async (): Promise<never> => {
 			throw new Error("assist not implemented in this test");
@@ -252,7 +270,12 @@ function buildCtx(
 		emit: recording.emit,
 		emitRecord: recording.emitRecord,
 		emittedAt: EMITTED_AT,
-		page: makeFakePage(route),
+		page: makeFakePage((path) => {
+			const response = route(path);
+			return path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")
+				? markFixtureCollectionsComplete(response)
+				: response;
+		}),
 		progress: async () => undefined,
 		requestDetailGapPage: async (): Promise<readonly never[]> => [],
 		requested: requestedMap(requestedNames),
@@ -699,6 +722,93 @@ test("collectLinkedIn: an empty decoration does not block a later usable decorat
 	const profile = recording.emitted.find((event) => event.stream === "profile");
 	assert.equal(profile?.data.full_name, "Decoration Two");
 	assert.equal(decorationAttempts, 2);
+});
+
+test("collectLinkedIn: a truncated decorated section does not claim complete coverage", async () => {
+	for (const elements of [
+		[],
+		[
+			{
+				entityUrn: "urn:li:skill:partial",
+				name: "Partial first page",
+			},
+		],
+	]) {
+		const recording = makeRecordingEmit(validateRecord);
+		const truncatedSkills = {
+			...DASH_PROFILE_RESPONSE,
+			elements: [
+				{
+					...DASH_PROFILE_RESPONSE.elements[0],
+					profileSkills: {
+						elements,
+						paging: { count: 10, start: 0, total: elements.length + 1 },
+					},
+				},
+			],
+		};
+		const route = (path: string): unknown => {
+			if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+			if (path.includes("decorationId=")) return truncatedSkills;
+			if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+				return { elements: [], paging: { total: 0 } };
+			}
+			return { _error: "http_404" };
+		};
+
+		await collectLinkedIn(buildCtx(["skills"], recording, route));
+
+		assert.equal(claimsFullCoverage(recording, "skills"), false);
+		assert.equal(recording.emitted.some((row) => row.stream === "skills"), false);
+		assert.ok(
+			skipResults(recording).some(
+				(skip) => skip.stream === "skills" &&
+					skip.reason === "linkedin_profile_section_unavailable",
+			),
+		);
+	}
+});
+
+test("collectLinkedIn: incomplete nested position paging withholds the experience row", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const profile = DASH_PROFILE_RESPONSE.elements[0];
+	const sourcePositions = profile?.profilePositionGroups.elements[0]
+		?.profilePositionInPositionGroup.elements;
+	assert.ok(sourcePositions);
+	const incompletePositions = {
+		...profile,
+		profilePositionGroups: {
+			elements: [
+				{
+					company: { name: "Acme" },
+					profilePositionInPositionGroup: {
+					elements: sourcePositions,
+						paging: { count: 10, start: 0, total: 2 },
+					},
+				},
+			],
+			paging: { count: 10, start: 0, total: 1 },
+		},
+	};
+	const route = (path: string): unknown => {
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.includes("decorationId=")) return { elements: [incompletePositions] };
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			return { elements: [], paging: { total: 0 } };
+		}
+		return { _error: "http_404" };
+	};
+
+	await collectLinkedIn(buildCtx(["experience"], recording, route));
+
+	assert.equal(claimsFullCoverage(recording, "experience"), false);
+	assert.equal(recording.emitted.some((row) => row.stream === "experience"), false);
+	assert.ok(
+		skipResults(recording).some(
+			(skip) => skip.stream === "experience" &&
+				skip.reason === "linkedin_fields_unreadable",
+		),
+	);
 });
 
 test("collectLinkedIn: failed connection paging vetoes profile coverage", async () => {

@@ -254,10 +254,7 @@ async function fetchDashProfile(
 		);
 		if (!isFetchError(result) && Array.isArray(result.elements)) {
 			for (const candidate of result.elements) {
-				if (
-					isRecord(candidate) &&
-					hasRecognizedProfileField(candidate)
-				) {
+				if (isRecord(candidate) && hasRecognizedProfileField(candidate)) {
 					return {
 						profile: candidate as VoyagerProfileElement,
 						source: "decoration",
@@ -362,7 +359,11 @@ async function fetchConnections(
 		) {
 			return finish("malformed_page");
 		}
-		if (total !== null && reportedTotal !== undefined && reportedTotal !== total) {
+		if (
+			total !== null &&
+			reportedTotal !== undefined &&
+			reportedTotal !== total
+		) {
 			return finish("malformed_page");
 		}
 		total = reportedTotal ?? total;
@@ -377,10 +378,7 @@ async function fetchConnections(
 		) {
 			return finish("malformed_page");
 		}
-		if (
-			reportedCount !== undefined &&
-			page_elements.length > reportedCount
-		) {
+		if (reportedCount !== undefined && page_elements.length > reportedCount) {
 			return finish("malformed_page");
 		}
 		if (page_elements.length === 0) {
@@ -389,7 +387,10 @@ async function fetchConnections(
 				: finish("malformed_page");
 		}
 		const fingerprint = JSON.stringify(
-			page_elements.map((element) => [element.connectedMember, element.createdAt]),
+			page_elements.map((element) => [
+				element.connectedMember,
+				element.createdAt,
+			]),
 		);
 		if (seenPageFingerprints.has(fingerprint)) {
 			return finish("repeated_page");
@@ -446,7 +447,7 @@ async function resolveConnectionProfiles(
 	memberUrns: string[],
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
-	): Promise<ConnectionProfileResolution> {
+): Promise<ConnectionProfileResolution> {
 	const resolved = new Map<string, ResolvedConnectionProfile>();
 	const malformedUrns = new Set<string>();
 	let consecutiveFailures = 0;
@@ -524,8 +525,7 @@ async function resolveConnectionProfiles(
 					);
 					if (
 						!isFetchError(singleton) &&
-						(isRecord(singleton.results) ||
-							Array.isArray(singleton.elements))
+						(isRecord(singleton.results) || Array.isArray(singleton.elements))
 					) {
 						acceptBatch(singleton, new Set([urn]));
 					}
@@ -742,8 +742,8 @@ export async function collectLinkedIn(
 				enumerated: true,
 				gapReason:
 					dashProfileResult.source === "unavailable"
-						? "linkedin_dash_profile_unavailable"
-						: "linkedin_profile_fields_unavailable",
+						? "dashProfileUnavailable"
+						: "profileFieldsUnavailable",
 			},
 		);
 	}
@@ -761,7 +761,7 @@ export async function collectLinkedIn(
 		}
 		await emitRows(sink, section.stream, section.build(items.value), {
 			enumerated: true,
-			gapReason: "linkedin_fields_unreadable",
+			gapReason: "profileSectionFieldsUnreadable",
 		});
 	}
 
@@ -778,12 +778,7 @@ export async function collectLinkedIn(
 					: terminationReason === "page_error"
 						? "linkedin_connections_page_failed"
 						: "linkedin_connections_page_malformed",
-				recovery_hint: {
-					action: pageBudget
-						? "retry_on_connector_upgrade"
-						: "retry_by_runtime",
-					retryable: !pageBudget,
-				},
+				recovery_hint: connectionRecoveryHint(terminationReason),
 				message:
 					"LinkedIn connections listing did not provide verified end-of-list evidence",
 				diagnostics: {
@@ -852,8 +847,8 @@ export async function collectLinkedIn(
 				enumerated: connectionsComplete,
 				gapReason:
 					unresolved > 0
-						? "linkedin_connection_enrichment_incomplete"
-						: "linkedin_fields_unreadable",
+						? "connectionEnrichmentIncomplete"
+						: "connectionFieldsUnreadable",
 				diagnostics: {
 					unresolved_count: unresolved,
 					malformed_count: resolution.malformedCount,
@@ -885,6 +880,21 @@ interface StreamSink {
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
 }
 
+type RowGapReason =
+	| "dashProfileUnavailable"
+	| "profileFieldsUnavailable"
+	| "profileSectionFieldsUnreadable"
+	| "connectionEnrichmentIncomplete"
+	| "connectionFieldsUnreadable";
+
+const ROW_GAP_REASON: Record<RowGapReason, string> = {
+	dashProfileUnavailable: "linkedin_dash_profile_unavailable",
+	profileFieldsUnavailable: "linkedin_profile_fields_unavailable",
+	profileSectionFieldsUnreadable: "linkedin_fields_unreadable",
+	connectionEnrichmentIncomplete: "linkedin_connection_enrichment_incomplete",
+	connectionFieldsUnreadable: "linkedin_fields_unreadable",
+};
+
 /**
  * Emit a stream's rows and its one completeness decision. Only covered rows
  * are emitted: an uncovered row is withheld whole, because a partial upsert
@@ -902,9 +912,10 @@ async function emitRows(
 	options: {
 		diagnostics?: Record<string, number>;
 		enumerated: boolean;
-		gapReason: string;
+		gapReason: RowGapReason;
 	},
 ): Promise<void> {
+	const { gapReason } = options;
 	await reportRowIssues(stream, rows, sink.progress);
 	for (const record of rows.records) {
 		await sink.emitRecord(stream, record);
@@ -916,7 +927,7 @@ async function emitRows(
 		await sink.emit({
 			type: "SKIP_RESULT",
 			stream,
-			reason: options.gapReason,
+			reason: ROW_GAP_REASON[gapReason],
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: `Some LinkedIn ${stream} entries had fields this run could not read`,
 			diagnostics: {
@@ -928,6 +939,15 @@ async function emitRows(
 			},
 		});
 	}
+}
+
+function connectionRecoveryHint(
+	terminationReason: ConnectionsResult["terminationReason"],
+): { action: string; retryable: boolean } {
+	if (terminationReason === "page_budget") {
+		return { action: "retry_on_connector_upgrade", retryable: false };
+	}
+	return { action: "retry_by_runtime", retryable: true };
 }
 
 function coverageMessage(

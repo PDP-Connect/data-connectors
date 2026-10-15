@@ -190,13 +190,31 @@ interface Routes {
 	resolve?: (path: string) => Json;
 }
 
+/** Default test collections represent complete sections; paging-specific
+ *  tests leave their explicit evidence untouched. */
+function completeCollectionsForFixture(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(completeCollectionsForFixture);
+	if (typeof value !== "object" || value === null) return value;
+	const collection = Object.fromEntries(
+		Object.entries(value).map(([key, child]) => [
+			key,
+			completeCollectionsForFixture(child),
+		]),
+	);
+	return Array.isArray(collection.elements) && !Object.hasOwn(collection, "paging")
+		? { ...collection, paging: { start: 0, total: collection.elements.length } }
+		: collection;
+}
+
 function routesFor(fixture: Record<Root, Json>): Routes {
 	return {
 		connections: (start) =>
 			start === 0
 				? fixture.page
 				: { elements: [], paging: { count: 40, start } },
-		dash: () => ({ elements: [fixture.dash] }),
+		// Field-contract cases focus on row shape; collections default to a
+		// verified complete inventory unless a test supplies paging evidence.
+		dash: () => ({ elements: [completeCollectionsForFixture(fixture.dash)] }),
 		me: fixture.me,
 		resolve: () => ({ results: { [MEMBER]: fixture.resolved } }),
 	};
@@ -1061,7 +1079,7 @@ test("r1: an empty first decoration falls through to the next decoration", async
 		dash: (decoration) =>
 			decoration?.endsWith("-93")
 				? { elements: [{}] }
-				: { elements: [fixture.dash] },
+				: { elements: [completeCollectionsForFixture(fixture.dash)] },
 	});
 	assert.equal(outcomeOf(recording, "profile").complete, true);
 });

@@ -162,18 +162,57 @@ function imageAt(node: unknown, path: Path): FieldRead<string> {
 	return andThen(at(node, path), vectorImageUrl);
 }
 
-/** A `{ elements: [...] }` collection. Only an array is readable: a missing,
- *  `null`, or wrong-typed collection never reads as an empty list. */
+/** Read a complete first-page collection. An array alone cannot prove that
+ *  the profile section was not truncated; require offset zero and a matching
+ *  provider total before using it to claim inventory coverage. */
 export function collectionAt(node: unknown, key: string): FieldRead<unknown[]> {
-	const elements = at(node, [key, "elements"]);
-	if (elements.kind === "read" && Array.isArray(elements.value)) {
-		return read(elements.value);
+	const collection = at(node, [key]);
+	if (collection.kind !== "read") {
+		return unavailable(
+			collection.kind === "unavailable" && collection.reason === "absent"
+				? "absent"
+				: "malformed",
+		);
 	}
-	return unavailable(
-		elements.kind === "unavailable" && elements.reason === "absent"
-			? "absent"
-			: "malformed",
-	);
+	if (
+		!isRecord(collection.value) ||
+		!Array.isArray(collection.value.elements)
+	) {
+		return unavailable("malformed");
+	}
+	if (!Object.hasOwn(collection.value, "paging")) {
+		return unavailable("walk_unverified");
+	}
+	const paging = collection.value.paging;
+	if (!isRecord(paging)) return unavailable("malformed");
+	const { count: pageCount, start, total } = paging;
+	if (
+		(start !== undefined &&
+			(typeof start !== "number" ||
+				!Number.isSafeInteger(start) ||
+				start < 0)) ||
+		(total !== undefined &&
+			(typeof total !== "number" ||
+				!Number.isSafeInteger(total) ||
+				total < 0)) ||
+		(pageCount !== undefined &&
+			(typeof pageCount !== "number" ||
+				!Number.isSafeInteger(pageCount) ||
+				pageCount < 0))
+	) {
+		return unavailable("malformed");
+	}
+	if (start !== 0 || total === undefined) return unavailable("walk_unverified");
+	if (total < collection.value.elements.length) {
+		return unavailable("malformed");
+	}
+	if (
+		(pageCount !== undefined && pageCount < collection.value.elements.length) ||
+		total !== collection.value.elements.length
+	) {
+		return unavailable("walk_unverified");
+	}
+	return read(collection.value.elements);
 }
 
 /** Row id: the Voyager entity URN, else a positional id. Voyager omits the
@@ -354,8 +393,9 @@ export function profileFieldReads(src: ProfileSources): FieldReads {
 	const dashText = (path: Path): FieldRead<string> =>
 		hasDash ? textAt(src.dash, path) : unavailable("source_unavailable");
 	const decorated = hasDash && src.dashSource === "decoration";
-	const decoration = <T>(reader: () => FieldRead<T>): FieldRead<T> =>
-		decorated ? reader() : unavailable("source_unavailable");
+	function decoration<T>(reader: () => FieldRead<T>): FieldRead<T> {
+		return decorated ? reader() : unavailable("source_unavailable");
+	}
 	const current = decorated
 		? currentPositionReads(src.dash)
 		: {
