@@ -56,6 +56,8 @@ const PAGE_SHIM_SHARED_INPUTS = [
 // compared. It decides whether a slice is current; it is not itself shipped,
 // so the PageShim builder's import of it is not an artifact input. The slice
 // bytes are what an artifact carries.
+const CONSENT_SLICE_DIRECTORY = "packages/polyfill-connectors/src/generated/consent-time-fields";
+const CONSENT_BUILDERS = ["scripts/build-connector-oci-artifact.mjs", "scripts/pageshim/build.mjs"];
 const CONSENT_RENDERER = "packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 const STATIC_LOCAL_IMPORT = /^\s*(?:import|export)\s+(?!type\b)(?:[^\n]*\n)*?[^\n]*?\sfrom\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
 const SIDE_EFFECT_LOCAL_IMPORT = /^\s*import\s*(["'])(\.{1,2}\/[^"]*?)\1/gm;
@@ -191,6 +193,32 @@ async function consentRendererAtCommit(commit, options) {
 }
 
 /**
+ * A tree is either coherent legacy (no part of the slice layout) or the slice
+ * layout. Without the resolution policy file, any other layout part (the
+ * renderer, a slice, or a builder that imports the policy) means a broken
+ * checkout; hashing it as legacy would bundle the aggregate where the builders
+ * cannot, so it is refused.
+ */
+function rejectPartialSliceLayout(commit, options) {
+  const found = [];
+  if (readFileAtCommit(commit, CONSENT_RENDERER, options) !== null) found.push(CONSENT_RENDERER);
+  const slices = execFileSync("git", ["ls-tree", "-r", "--name-only", commit, "--", CONSENT_SLICE_DIRECTORY], {
+    cwd: options.cwd,
+    encoding: "utf8",
+  }).trim();
+  if (slices) found.push(`${slices.split("\n").length} file(s) under ${CONSENT_SLICE_DIRECTORY}`);
+  for (const builder of CONSENT_BUILDERS) {
+    const source = readFileAtCommit(commit, builder, options);
+    if (source !== null && source.toString().includes("consent-slice-resolution")) found.push(`${builder} imports the policy`);
+  }
+  if (found.length) {
+    throw new ArtifactInputError(
+      `incomplete consent-time-field slice layout at ${commit}: ${CONSENT_RESOLUTION_MODULE} is missing but ${found.join(", ")} present; restore the layout or remove all of it`,
+    );
+  }
+}
+
+/**
  * How a connector's import of the consent-time-field aggregate resolves at
  * `commit`, or null before the slice layout existed. The Core and PageShim
  * builders bundle the connector's own slice in its place
@@ -200,7 +228,10 @@ async function consentRendererAtCommit(commit, options) {
  * before the layout still bundled the aggregate, so it keeps hashing it.
  */
 async function consentSliceRemap(commit, manifest, profile, options) {
-  if (readFileAtCommit(commit, CONSENT_RESOLUTION_MODULE, options) === null) return null;
+  if (readFileAtCommit(commit, CONSENT_RESOLUTION_MODULE, options) === null) {
+    rejectPartialSliceLayout(commit, options);
+    return null;
+  }
   const slice = consentSlicePath(manifest);
   const { renderSlice } = await consentRendererAtCommit(commit, options);
   const expected = renderSlice(manifest, profile);

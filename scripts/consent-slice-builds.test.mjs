@@ -52,8 +52,12 @@ test("the strava_browser PageShim bundle carries only its own consent slice", as
   await buildPageshim({ connector: "strava_browser", outfile, minify: false });
   const text = readFileSync(outfile, "utf8");
   assert.match(text, /\bstrava_browser:\s*\{/, "the bundle must carry its own consent table");
-  const others = [...text.matchAll(/^\s*(?:"?)([a-z][a-z0-9_]*)(?:"?):\s*\{\s*$/gm)]
-    .map((match) => match[1])
-    .filter((name) => ["anthropic_live", "chatgpt", "reddit", "amazon", "fitbit", "strava"].includes(name));
-  assert.deepEqual(others, [], "the bundle must not carry another connector's consent table");
+  // esbuild marks each bundled module with a `// <path>` line: the complete input graph.
+  const inputs = [...text.matchAll(/^\s*\/\/ (\S+\.(?:ts|tsx|js|mjs))$/gm)].map((match) => match[1]);
+  assert.ok(inputs.length > 10, "the bundle must list its input modules");
+  assert.deepEqual(
+    inputs.filter((path) => path.includes("consent-time-fields")),
+    [slice("strava_browser")],
+    "the bundle's only consent input is its own slice",
+  );
 });

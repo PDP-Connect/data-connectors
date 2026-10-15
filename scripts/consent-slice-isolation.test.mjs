@@ -117,6 +117,11 @@ function makeRepo({ layout = "sliced" } = {}) {
     write(RESOLUTION, real(RESOLUTION));
     write(RENDERER, real(RENDERER));
     // The real PageShim builder imports both.
+    // The real Core builder imports the resolution policy.
+    write(
+      "scripts/build-connector-oci-artifact.mjs",
+      "import { consentSlicePlugin } from './consent-slice-resolution.mjs';\nbuilder\n",
+    );
     write(
       "scripts/pageshim/build.mjs",
       "import '../consent-slice-resolution.mjs';\nimport '../../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs';\n",
@@ -266,6 +271,42 @@ test("a checkout that has the resolution policy but no slices does not fall back
     repo.write(RESOLUTION, real(RESOLUTION));
     repo.write(RENDERER, real(RENDERER));
     await assert.rejects(repo.hash(repo.commit("policy without slices"), "alpha"), /missing/);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+// A tree is either coherent legacy (nothing of the slice layout) or the slice
+// layout. A tree with part of the layout is a broken checkout, not a legacy one,
+// and must never hash as if the aggregate were bundled.
+const LAYOUT_PARTS = {
+  "the resolution policy": (repo) => repo.remove(RESOLUTION),
+  "the resolution policy and the renderer": (repo) => {
+    repo.remove(RESOLUTION);
+    repo.remove(RENDERER);
+  },
+};
+for (const [lost, damage] of Object.entries(LAYOUT_PARTS)) {
+  test(`a slice-layout tree that lost ${lost} is rejected, not hashed as legacy`, async () => {
+    const repo = makeRepo();
+    try {
+      damage(repo);
+      const commit = repo.commit(`lose ${lost}`);
+      await assert.rejects(repo.hash(commit, "alpha"), /slice layout|consent-time-field/i);
+    } finally {
+      rmSync(repo.dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a tree whose builder imports the resolution policy but lacks the policy file is rejected", async () => {
+  const repo = makeRepo();
+  try {
+    repo.remove(RESOLUTION);
+    repo.remove(RENDERER);
+    for (const name of CONNECTORS) repo.remove(slicePath(name));
+    const commit = repo.commit("only the builder import remains");
+    await assert.rejects(repo.hash(commit, "alpha"), /slice layout|consent-time-field/i);
   } finally {
     rmSync(repo.dir, { recursive: true, force: true });
   }
