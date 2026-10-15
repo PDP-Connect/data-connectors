@@ -2200,6 +2200,150 @@ test("partial search resumes its backfill after collecting new arrivals", async 
 	);
 });
 
+// A cursor jump leaves positions unread. A later early exit (malformed item,
+// HTTP error, provider deferral) must not certify a cursor past that hole:
+// the saved backfill resumes after the jump and the watermark filters the
+// skipped rows out of every later forward walk.
+for (const termination of [
+	"malformed_item",
+	"http_error",
+	"provider_deferred",
+] as const) {
+	test(`a cursor jump followed by a ${termination} exit does not lose the skipped middle on the next run`, async () => {
+		const year2025 = 1_735_800_000;
+		const year2023 = 1_680_000_000;
+		const year2020 = 1_590_000_000;
+		const newest = Array.from({ length: 30 }, (_, index) =>
+			makeConvo({ id: `newest-${index}`, update_time: year2025 - index }),
+		);
+		const older = Array.from({ length: 30 }, (_, index) =>
+			makeConvo({ id: `older-${index}`, update_time: year2023 - index }),
+		);
+		const middle = Array.from({ length: 60 }, (_, index) =>
+			makeConvo({
+				id: index === 0 ? "skipped-middle" : `middle-${index}`,
+				update_time: year2020 - index,
+			}),
+		);
+		let run = 1;
+		const api: ChatGptApi = {
+			auth: () => Promise.reject(new Error("auth unused")),
+			fetch: (path) => {
+				if (!path.startsWith("/conversations/search?")) {
+					// Message ids are node ids and emit once per run, so each
+					// conversation gets its own nodes.
+					const id = path.split("/").at(-1) ?? "";
+					return Promise.resolve({
+						status: 200,
+						json: {
+							id,
+							title: id,
+							create_time: 1_700_000_000,
+							update_time: 1_700_000_100,
+							current_node: `${id}-u1`,
+							mapping: {
+								[`${id}-root`]: { parent: null, children: [`${id}-u1`] },
+								[`${id}-u1`]: {
+									parent: `${id}-root`,
+									children: [],
+									message: {
+										author: { role: "user" },
+										create_time: 1_700_000_000,
+										content: { content_type: "text", parts: ["hello"] },
+									},
+								},
+							},
+						},
+					});
+				}
+				const cursor = Number(
+					new URLSearchParams(path.split("?")[1]).get("cursor"),
+				);
+				const page = (items: unknown[], next_cursor: number | null) =>
+					Promise.resolve({ status: 200, json: { items, next_cursor } });
+				if (run === 1) {
+					if (cursor === 0) return page(newest, 90);
+					if (cursor === 90) return page(older, 120);
+					if (termination === "malformed_item") {
+						return page(
+							[{ title: "no usable id", update_time: year2023 }],
+							150,
+						);
+					}
+					if (termination === "http_error") {
+						return Promise.resolve({ status: 500, json: null });
+					}
+					return Promise.reject(
+						new ChatGptPlannedProviderBudgetDeferredError(
+							"fixture deferral",
+							"max_wall_clock",
+						),
+					);
+				}
+				// Repaired, contiguous listing.
+				if (cursor === 0) return page(newest, 30);
+				if (cursor === 30) return page(middle.slice(0, 30), 60);
+				if (cursor === 60) return page(middle.slice(30), 90);
+				if (cursor === 90) return page(older, 120);
+				return page([], null);
+			},
+		};
+		const requested = new Map(
+			["conversations", "messages"].map((name) => [name, { name }]),
+		);
+		const first = makeRecordingEmit(validateRecord);
+		const deps: StreamDeps = {
+			api,
+			sleep: () => Promise.resolve(),
+			emit: first.emit,
+			emitRecord: first.emitRecord,
+			progress: () => Promise.resolve(),
+			requested,
+		} as StreamDeps;
+		const pacing = {
+			detailPacing: { random: () => 0, sleep: () => undefined },
+		};
+		await runConversationsAndMessagesStreams(deps, {}, pacing);
+		const persisted: Record<string, Record<string, unknown>> = {};
+		for (const message of first.protocolMessages) {
+			if (message.type === "STATE") {
+				persisted[message.stream] = message.cursor as Record<string, unknown>;
+			}
+		}
+		assert.deepEqual(
+			persisted,
+			{},
+			"a walk with an unread cursor hole must not save a checkpoint",
+		);
+
+		run = 2;
+		const second = makeRecordingEmit(validateRecord);
+		await runConversationsAndMessagesStreams(
+			{ ...deps, emit: second.emit, emitRecord: second.emitRecord },
+			persisted,
+			pacing,
+		);
+		assert.equal(
+			second.emitted.some(
+				(record) =>
+					record.stream === "conversations" &&
+					record.data.id === "skipped-middle",
+			),
+			true,
+			"the conversation under the skipped cursor positions is collected",
+		);
+		assert.equal(
+			second.emitted.some(
+				(record) =>
+					record.stream === "messages" &&
+					record.data.conversation_id === "skipped-middle",
+			),
+			true,
+			"the skipped conversation's messages are collected",
+		);
+	});
+}
+
 // ─── Invariant 1: emit order (current ChatGPT contract) ──────────────────
 // NOTE: unlike most connectors (accounts-before-transactions,
 // message_bodies-before-messages), ChatGPT emits messages first and the
