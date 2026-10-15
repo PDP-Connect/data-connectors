@@ -100,9 +100,14 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 
 class HistoryResponseTracker {
 	private static readonly MAX_TRACKED_TOKENS = HISTORY_MAX_SCROLL_ROUNDS + 8;
+	private static readonly MAX_PRESEED_RESPONSES = 32;
 	private readonly page: BrowserCollectContext["page"];
 	private readonly tokens = new Set<string>();
 	private readonly requestedTokens = new Set<string>();
+	private readonly preSeedResponses: Response[] = [];
+	private seeded = false;
+	private preSeedOverflow = false;
+	private evidenceVersion = 0;
 	private latestResponse: HistoryResponseEvidence | null = null;
 	private continuationItemCount = 0;
 	private bootstrapReadable = false;
@@ -118,9 +123,18 @@ class HistoryResponseTracker {
 	private latestStatus: number | null = null;
 	private pending = Promise.resolve();
 	private readonly onResponse = (response: Response): void => {
-		this.pending = this.pending
-			.then(() => this.inspect(response))
-			.catch(() => undefined);
+		if (!response.url().includes("/youtubei/v1/browse")) return;
+		this.evidenceVersion += 1;
+		if (!this.seeded) {
+			if (
+				this.preSeedResponses.length <
+				HistoryResponseTracker.MAX_PRESEED_RESPONSES
+			)
+				this.preSeedResponses.push(response);
+			else this.preSeedOverflow = true;
+			return;
+		}
+		this.enqueue(response);
 	};
 
 	constructor(page: BrowserCollectContext["page"]) {
@@ -137,6 +151,9 @@ class HistoryResponseTracker {
 		for (const token of tokens.slice(0, 8))
 			if (token.length > 0 && token.length <= 4096) this.tokens.add(token);
 		this.bootstrapTokenCount = this.tokens.size;
+		this.seeded = true;
+		for (const response of this.preSeedResponses.splice(0))
+			this.enqueue(response);
 	}
 
 	get diagnostics() {
@@ -154,11 +171,20 @@ class HistoryResponseTracker {
 			latestStatus: this.latestStatus,
 			latestRecognized: this.latestResponse?.recognized ?? null,
 			latestHasContinuation: this.latestResponse?.hasContinuation ?? null,
+			preSeedOverflow: this.preSeedOverflow,
 		};
 	}
 
 	get latest(): HistoryResponseEvidence | null {
 		return this.latestResponse;
+	}
+
+	get version(): number {
+		return this.evidenceVersion;
+	}
+
+	get trackingComplete(): boolean {
+		return !this.preSeedOverflow;
 	}
 
 	async flush(): Promise<void> {
@@ -167,6 +193,12 @@ class HistoryResponseTracker {
 
 	dispose(): void {
 		this.page.off("response", this.onResponse);
+	}
+
+	private enqueue(response: Response): void {
+		this.pending = this.pending
+			.then(() => this.inspect(response))
+			.catch(() => undefined);
 	}
 
 	private async inspect(response: Response): Promise<void> {
@@ -946,7 +978,6 @@ async function readHistoryVideoList(
 		throw new Error("youtube_history_page_unreadable");
 	}
 	await capture?.captureDom(page, "youtube-watch-history");
-	await responseTracker.flush();
 	let currentEnd = await page.evaluate(readListEndInBrowser, {
 		kind: "history" as const,
 		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
@@ -956,6 +987,12 @@ async function readHistoryVideoList(
 		currentEnd.historyBootstrapContinuationTokens ?? [],
 		currentEnd,
 	);
+	await responseTracker.flush();
+	currentEnd = await page.evaluate(readListEndInBrowser, {
+		kind: "history" as const,
+		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+		latestHistoryResponse: responseTracker.latest,
+	});
 	const headOnly =
 		cursor?.complete === true && collectionMode !== "full_refresh";
 	const rowsSeen = new Set<string>();
@@ -985,9 +1022,9 @@ async function readHistoryVideoList(
 	let headAnchorIds: string[] = [];
 	let evidence: ExhaustionEvidence = { kind: "unproven", page: null };
 	// Connector memory holds at most 500 recent identities, 408 requestable
-	// and 408 requested tokens (each <= 4 KiB), and one 50-row parse batch.
-	// Each response scan visits at most 10,000 nodes; traversal is capped at
-	// 180 seconds and 400 scroll rounds.
+	// and 408 requested tokens (each <= 4 KiB), 32 pre-seed response handles,
+	// and one 50-row parse batch. Each response scan visits at most 10,000
+	// nodes; traversal is capped at 180 seconds and 400 scroll rounds.
 	const rememberIdentity = (key: string): void => {
 		rowsSeen.add(key);
 		if (rowsSeen.size > HISTORY_DEDUP_WINDOW)
@@ -1189,20 +1226,45 @@ async function readHistoryVideoList(
 			break;
 		}
 	}
-	await responseTracker.flush();
-	currentEnd = await page.evaluate(readListEndInBrowser, {
-		kind: "history" as const,
-		sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
-		latestHistoryResponse: responseTracker.latest,
-	});
+	let stableEnd = false;
+	for (let refresh = 0; refresh < 3; refresh += 1) {
+		await responseTracker.flush();
+		const versionBeforeRead = responseTracker.version;
+		currentEnd = await page.evaluate(readListEndInBrowser, {
+			kind: "history" as const,
+			sessionPresent: await page.evaluate(hasYoutubeSessionOnCurrentPage),
+			latestHistoryResponse: responseTracker.latest,
+		});
+		await responseTracker.flush();
+		if (responseTracker.version === versionBeforeRead) {
+			stableEnd = true;
+			break;
+		}
+	}
 	responseTracker.dispose();
 	blocked ||= currentEnd.pageBlocked;
 	if (blocked) {
 		stopReason = "blocked-page";
 		sourceEnded = false;
 	}
-	if (sourceEnded && !verifiedEmpty) {
+	if (sourceEnded) {
 		evidence = exhaustionEvidence(currentEnd, parsedCount, false);
+		if (
+			evidence.kind === "unproven" ||
+			(verifiedEmpty && evidence.kind !== "page-data-empty")
+		) {
+			sourceEnded = false;
+			verifiedEmpty = false;
+			stopReason = "final-proof-invalidated";
+		}
+	}
+	if (!stableEnd || !responseTracker.trackingComplete) {
+		sourceEnded = false;
+		verifiedEmpty = false;
+		evidence = { kind: "unproven", page: currentEnd };
+		stopReason = responseTracker.trackingComplete
+			? "history-evidence-changed-during-final-refresh"
+			: "history-response-buffer-overflow";
 	}
 	const hasSafePrefix = lastAccounted !== null;
 	const partialCheckpointAllowed =
@@ -1224,7 +1286,10 @@ async function readHistoryVideoList(
 		parsedCount,
 		dedupedCount,
 		lastAccounted,
-		checkpointAnchor: lastAccounted ? videoIdentity(lastAccounted) : null,
+		checkpointAnchor:
+			stableEnd && responseTracker.trackingComplete && lastAccounted
+				? videoIdentity(lastAccounted)
+				: null,
 		phase: headOnly ? "head_reconciliation" : phase,
 		...(lastAccounted ? { checkpointPosition: Math.max(0, offset - 1) } : {}),
 		headAnchorIds,

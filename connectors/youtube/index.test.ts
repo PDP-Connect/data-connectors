@@ -1550,6 +1550,14 @@ class DocumentPage {
 		requested: string;
 		next: string | null;
 	}>;
+	private readonly historyResponsesOnGoto: Array<{
+		requested: string;
+		next: string | null;
+	}>;
+	private readonly historyResponseOnReadListEnd:
+		| { readNumber: number; requested: string; next: string | null }
+		| undefined;
+	private readListEndCount = 0;
 	private pendingHistoryScroll = false;
 	constructor(
 		pageFor: (url: string) => string,
@@ -1559,11 +1567,22 @@ class DocumentPage {
 				requested: string;
 				next: string | null;
 			}>;
+			historyResponsesOnGoto?: Array<{
+				requested: string;
+				next: string | null;
+			}>;
+			historyResponseOnReadListEnd?: {
+				readNumber: number;
+				requested: string;
+				next: string | null;
+			};
 		} = {},
 	) {
 		this.pageFor = pageFor;
 		this.forcedReadiness = forcedReadiness;
 		this.historyResponsesOnScroll = options.historyResponsesOnScroll ?? [];
+		this.historyResponsesOnGoto = options.historyResponsesOnGoto ?? [];
+		this.historyResponseOnReadListEnd = options.historyResponseOnReadListEnd;
 	}
 	on(_event: "response", listener: (response: never) => void): this {
 		this.responseListeners.add(listener);
@@ -1575,6 +1594,8 @@ class DocumentPage {
 	}
 	async goto(url: string) {
 		this.url = url;
+		for (const response of this.historyResponsesOnGoto.splice(0))
+			this.emitHistoryResponse(response.requested, response.next);
 	}
 	private emitHistoryResponse(requested: string, next: string | null): void {
 		const continuationItems = next
@@ -1635,6 +1656,18 @@ class DocumentPage {
 		return { jsonValue: async () => value, dispose: async () => undefined };
 	}
 	async evaluate(fn: Function, arg?: unknown) {
+		if (fn.name === "readListEnd") {
+			this.readListEndCount += 1;
+			if (
+				this.readListEndCount ===
+				this.historyResponseOnReadListEnd?.readNumber
+			) {
+				this.emitHistoryResponse(
+					this.historyResponseOnReadListEnd.requested,
+					this.historyResponseOnReadListEnd.next,
+				);
+			}
+		}
 		const value = this.inPage(() => {
 			if (fn.name === "hasYoutubeSessionOnCurrentPage")
 				return Boolean(document.querySelector("button#avatar-btn"));
@@ -1896,6 +1929,66 @@ test("HTML history continuation chain is correlated and terminal response beats 
 			>
 		)?.complete,
 		true,
+	);
+});
+
+test("history responses received during navigation are replayed after HTML tokens seed", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { records, messages, outcome } = await collectFromDocuments(
+		() =>
+			`${historyCards(videoIds)}${historyBootstrap(videoIds, "bootstrap-C")}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponsesOnGoto: [
+				{ requested: "bootstrap-C", next: "continuation-D" },
+			],
+			historyResponsesOnScroll: [
+				{ requested: "continuation-D", next: null },
+			],
+		},
+	);
+	assert.equal(records.get("watch_history")?.length, videoIds.length);
+	assert.deepEqual(outcome("watch_history"), ["STATE"]);
+	assert.equal(
+		(
+			messages.find((message) => message.type === "STATE")?.cursor as Record<
+				string,
+				unknown
+			>
+		)?.complete,
+		true,
+	);
+});
+
+test("history completion is revoked when the final refresh receives a continuation cycle", async () => {
+	const videoIds = ["aaaaaaaaaaa"];
+	const { messages, outcome } = await collectFromDocuments(
+		() =>
+			`${historyCards(videoIds)}${historyBootstrap(videoIds, "bootstrap-C")}`,
+		["watch_history"],
+		undefined,
+		{},
+		{
+			historyResponsesOnScroll: [
+				{ requested: "bootstrap-C", next: null },
+			],
+			historyResponseOnReadListEnd: {
+				readNumber: 3,
+				requested: "bootstrap-C",
+				next: "continuation-D",
+			},
+		},
+	);
+	assert.deepEqual(outcome("watch_history"), ["stream_collection_failed", "STATE"]);
+	assert.equal(
+		messages.some(
+			(message) =>
+				message.type === "STATE" &&
+				(message.cursor as Record<string, unknown>)?.complete === true,
+		),
+		false,
 	);
 });
 
