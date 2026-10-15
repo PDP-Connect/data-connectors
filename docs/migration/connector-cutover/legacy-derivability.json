@@ -821,10 +821,10 @@
       "name": "playlists.name",
       "description": "playlists.description",
       "owner": "playlists.owner_id + playlists.owner_name",
-      "tracks_total": "playlists.track_count",
-      "uri": "playlists.uri (Spotify Web API Simplified Playlist Object, field `uri`, from the existing GET /me/playlists list call; index.ts spotifyPlaylistRecord, schemas.ts playlistsSchema)",
-      "followers": "playlists.followers (Spotify Web API full Playlist Object, field `followers.total` — NOT present on the Simplified Playlist Object the list endpoint returns, so this requires one additional GET /playlists/{id}?fields=followers.total call per playlist, mirroring legacy connectors/spotify/spotify-playwright.js:737-757's own per-playlist fetchPlaylist call that read pl.followers; index.ts fetchPlaylistFollowers)",
-      "images": "playlists.images (Simplified Playlist Object field `images`, [{url, width, height}], from the same GET /me/playlists list call as uri)",
+      "tracks_total": "playlist_items count per playlist (Track entries collected from every fetchPlaylist page; playlists.track_count is derived from the emitted legacy-compatible Track rows, not provider content.totalCount)",
+      "uri": "playlists.uri (exact URI returned by libraryV3/fetchPlaylist; legacy Playlists source value)",
+      "followers": "playlists.followers (count returned by the authenticated fetchPlaylist GraphQL payload)",
+      "images": "playlists.images (all usable source image entries returned by the authenticated fetchPlaylist GraphQL payload)",
       "tracks[].added_at": "playlist_items.added_at",
       "tracks[].added_by": "playlist_items.added_by",
       "tracks[].name": "playlist_items.name",
@@ -835,9 +835,9 @@
     },
     "not_derivable": [],
     "semantic_notes": [
-      "lead_decision 'ADD spotify.playlist_items' has LANDED (schemas.ts:107, index.ts:246-496), resolving the scope's prior blocked_decision. Keyed by <playlist_id>:<position> (index.ts:247-250) rather than by track_id+position as the lead_decision's literal field list implied — functionally equivalent, all 5 named fields present as record fields.",
-      "IMPLEMENTED this cutover: uri/followers/images closed. followers required a genuine per-playlist detail fetch (N+1 calls, one per playlist, sequential through the shared rate-paced governor — no separate concurrency primitive) since the Web API's list endpoint does not carry it; a failed per-playlist fetch still emits the playlist record with followers: null (never withheld) but is excluded from the playlists stream's DETAIL_COVERAGE hydrated_keys, so a partial run is honestly reported rather than silently read as complete.",
-      "PROOF-GATE GAP: no live Spotify token is available in this environment; the followers/images/uri field names are taken from the Spotify Web API's documented Playlist Object schema (developer.spotify.com/documentation/web-api/reference/get-playlist, get-a-list-of-current-users-playlists), not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures and unit tests only."
+      "playlist_items remains a separate child stream keyed by <playlist_id>:<position>; positions preserve every source slot in order, including slots occupied by non-Track entries.",
+      "The connector uses the authenticated web-player libraryV3 and fetchPlaylist GraphQL operations. It validates response shape, playlist identity, totals, row shapes, and terminal evidence before emitting coverage.",
+      "legacy tracks_total is the number of collected Track entries per playlist. Provider content.totalCount can include non-Track entries and is used only to prove traversal exhaustion."
     ],
     "status": "derivable"
   },
@@ -851,15 +851,16 @@
       "artists[].name": "saved_tracks.artist_names[]",
       "album.name": "saved_tracks.album_name",
       "duration_ms": "saved_tracks.duration_ms",
-      "uri": "saved_tracks.uri (Spotify Web API Track Object field `uri`, from the existing GET /me/tracks call the connector already fetches; index.ts collectSavedTracks, schemas.ts savedTracksSchema)",
-      "explicit": "saved_tracks.explicit (Track Object field `explicit`, same GET /me/tracks response)",
-      "album.artists": "saved_tracks.album_artist_names[] (Track Object field `album.artists[].name` — the album-level artist list, distinct from the track-level `artists[].name` already mapped to artist_names; both arrays can differ for compilations/features)"
+      "uri": "saved_tracks.uri (exact `_uri` or `uri` value returned by fetchLibraryTracks; empty or absent URI is retained as source data)",
+      "explicit": "saved_tracks.explicit (derived from fetchLibraryTracks track contentRating.label; null when that evidence is absent)",
+      "album.artists": "saved_tracks.album_artist_names[] (album-level artist names returned by fetchLibraryTracks, distinct from track-level artists)",
+      "identity_unresolved": "false for emitted rows; rows without a URI-derived or source-provided track ID are withheld"
     },
     "not_derivable": [],
     "semantic_notes": [
-      "Modern adds id, popularity, isrc beyond the legacy field set — additive, does not offset anything.",
-      "IMPLEMENTED this cutover: uri/explicit/album_artist_names closed, no additional API call required — all three fields are already present on the Track Object returned by the GET /me/tracks call the saved_tracks stream already makes.",
-      "PROOF-GATE GAP: no live Spotify token is available in this environment; field names are taken from the Spotify Web API's documented Track Object / Saved Track Object schema (developer.spotify.com/documentation/web-api/reference/get-users-saved-tracks), not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures and unit tests only."
+      "The implementation uses the authenticated Spotify web-player GraphQL fetchLibraryTracks query, not the public Web API /me/tracks endpoint. popularity and isrc remain null because this query does not provide them.",
+      "Rows with no save date remain eligible, and added_at is nullable. A source track ID identifies a row when its URI is absent; a row with neither identifier is withheld, so no identity_unresolved row is emitted.",
+      "Every page requires a valid items array and consistent totals. Completion requires reaching a verified total; a short or empty page with an unknown total is rejected. Malformed rows, count mismatches, repeated pages, duplicate identities, and unavailable mapped fields withhold complete coverage."
     ],
     "status": "derivable"
   },
@@ -868,18 +869,18 @@
     "connector_key": "spotify",
     "streams": ["profile"],
     "derivable": {
-      "id": "profile.id (from GET /me)",
+      "id": "profile.id (profileAttributes GraphQL username)",
       "display_name": "profile.display_name",
       "followers": "profile.followers",
-      "uri": "profile.uri (Spotify Web API Private User Object field `uri`, from the existing GET /me call; index.ts spotifyProfileRecord, schemas.ts profileSchema)",
-      "images": "profile.images (Private User Object field `images`, [{url, width, height}], same GET /me call)",
-      "following": "profile.following (followed-ARTISTS total from GET /me/following?type=artist, `.artists.total` — one additional call. Spotify's /me endpoint has never exposed a following-COUNT field of any kind, confirmed by Spotify's own Web API reference; /me/following?type=artist is the closest documented signal, and only supports type=artist for a normal account, so this is the followed-artists total specifically, not an all-following total. An honest, narrower signal, not a fabricated one — see index.ts fetchFollowingCount.)"
+      "uri": "profile.uri (profileAttributes GraphQL URI, or spotify:user:<username> when absent)",
+      "images": "profile.images (profileAttributes imageUrl, falling back to same-account user-profile-view image_url)",
+      "following": "profile.following (same-account user-profile-view following_count)"
     },
     "not_derivable": [],
     "semantic_notes": [
-      "lead_decision 'ADD spotify.profile from /me' has LANDED (index.ts:511-522, schemas.ts:90) — the stream itself was entirely absent before; the 3 remaining gaps above are narrower sub-field gaps not literally named in the lead_decision text.",
-      "IMPLEMENTED this cutover: uri/images closed with no additional call (already on the GET /me response); following closed via one additional GET /me/following?type=artist call, honestly scoped to followed-artist count rather than a fabricated all-following total. A failed following fetch leaves the field null rather than guessing, and does not fail the profile record.",
-      "PROOF-GATE GAP: no live Spotify token is available in this environment; field names are taken from the Spotify Web API's documented Private User Object and Get Followed Artists schemas (developer.spotify.com/documentation/web-api/reference/get-current-users-profile, get-followed), not confirmed against a captured real response. Synthetic-but-shape-calibrated fixtures and unit tests only."
+      "The profile stream uses profileAttributes GraphQL for the username, display name, and URI, then user-profile-view/v3/profile/{username} for follower/following counts and fallback image data. Enrichment is accepted only when its URI matches the GraphQL identity.",
+      "Profile enrichment is required for coverage. If enrichment is unavailable or does not match the GraphQL identity, the profile row is withheld instead of emitted with partial follower or following data.",
+      "PROOF-GATE GAP: no signed-in Spotify profile was available for a live run in this environment; synthetic fixtures and unit tests only."
     ],
     "status": "derivable"
   },

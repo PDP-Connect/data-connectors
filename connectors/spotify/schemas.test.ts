@@ -38,6 +38,7 @@ const PLAYLIST_RECORD = {
 
 const SAVED_TRACK_RECORD = {
 	id: "11dFghVXANMlKmJXsNCbNl",
+	identity_unresolved: false,
 	name: "Cut To The Feeling",
 	artist_names: ["Carly Rae Jepsen"],
 	album_name: "Cut To The Feeling",
@@ -159,6 +160,17 @@ test("saved_tracks schema accepts a compilation with album artists distinct from
 		...SAVED_TRACK_RECORD,
 		artist_names: ["Carly Rae Jepsen"],
 		album_artist_names: ["Various Artists"],
+	});
+	assert.ok(result.success, JSON.stringify(result.error?.issues));
+});
+
+test("saved_tracks schema preserves a row with no URI identity or save date", () => {
+	const result = savedTracksSchema.safeParse({
+		...SAVED_TRACK_RECORD,
+		id: null,
+		identity_unresolved: true,
+		added_at: null,
+		uri: "",
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
@@ -343,6 +355,7 @@ test("saved_tracks schema: pre-existing fields are unchanged by the additive fie
 	};
 	const result = savedTracksSchema.safeParse({
 		...preExisting,
+		identity_unresolved: false,
 		uri: null,
 		explicit: null,
 		album_artist_names: [],

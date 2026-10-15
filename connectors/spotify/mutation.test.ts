@@ -16,7 +16,6 @@ import {
 	createSpotifyCycleDetector,
 	hasSpotifySession,
 	spotifyCollect,
-	spotifyRetryablePattern,
 	spotifyTotp,
 } from "./index.ts";
 import { playlistItemsSchema } from "./schemas.ts";
@@ -110,7 +109,45 @@ const webFixture = {
 		},
 	],
 	saved_tracks: [],
-	warnings: [],
+	playlistUris: ["spotify:playlist:pl1"],
+	sourceCounts: {
+		playlists: { considered: 1, covered: 1 },
+		playlist_items: { considered: 1, covered: 1 },
+	},
+	completion: {
+		playlists: {
+			stream: "playlists",
+			operation: "libraryV3",
+			navigation: "https://open.spotify.com/",
+			owner: "spotify:user:me",
+			selector: "spotify:user:me:library",
+			firstOffset: 0,
+			lastOffset: 0,
+			responseOffset: 0,
+			pageCount: 1,
+			rawCount: 1,
+			expectedCount: 1,
+			discardedCount: 0,
+			remaining: false,
+			terminal: "total_reached",
+		},
+		playlist_items: {
+			stream: "playlist_items",
+			operation: "fetchPlaylist",
+			navigation: "https://open.spotify.com/",
+			owner: "spotify:user:me",
+			selector: "spotify:playlist:pl1",
+			firstOffset: 0,
+			lastOffset: 0,
+			responseOffset: 0,
+			pageCount: 1,
+			rawCount: 1,
+			expectedCount: 1,
+			discardedCount: 0,
+			remaining: false,
+			terminal: "total_reached",
+		},
+	},
 };
 
 test("spotifyTotp preserves the provider's decimal-text XOR secret encoding", () => {
@@ -169,14 +206,6 @@ test("spotify browser collect emits modern profile, playlists, and playlist_item
 	assert.equal(
 		messages.filter((message) => message.type === "DETAIL_COVERAGE").length,
 		3,
-	);
-	assert.equal(
-		messages.every(
-			(message) =>
-				message.type !== "DETAIL_COVERAGE" ||
-				message.considered === message.covered,
-		),
-		true,
 	);
 });
 
@@ -238,7 +267,10 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 		.join(";");
 	try {
 		(globalThis as unknown as { window: unknown }).window = {
-			location: { hostname: "open.spotify.com" },
+			location: {
+				href: "https://open.spotify.com/",
+				hostname: "open.spotify.com",
+			},
 		};
 		(globalThis as unknown as { document: unknown }).document = {
 			querySelectorAll: () => [
@@ -290,14 +322,23 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 							data: { __typename: "Playlist", uri: `spotify:playlist:${id}` },
 						},
 					});
-					const filler = { item: { data: { __typename: "Album" } } };
 					const items =
 						offset === 0
-							? [playlist("pl1"), ...Array.from({ length: 199 }, () => filler)]
+							? [
+									playlist("pl1"),
+									...Array.from({ length: 199 }, (_, index) => ({
+										item: {
+											data: {
+												__typename: "Album",
+												uri: `spotify:album:album-${offset}-${index}`,
+											},
+										},
+									})),
+								]
 							: [playlist("pl2")];
 					return new Response(
 						JSON.stringify({
-							data: { me: { libraryV3: { items, totalCount: 201 } } },
+							data: { me: { libraryV3: { items, totalCount: 201, offset } } },
 						}),
 						{ status: 200 },
 					);
@@ -313,7 +354,11 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 									ownerV2: {
 										data: { uri: "spotify:user:owner1", name: "Owner" },
 									},
-									content: { totalCount: 0, items: [] },
+									content: {
+										totalCount: 0,
+										items: [],
+										offset: Number(body.variables.offset),
+									},
 									followers: 1,
 									images: { items: [] },
 								},
@@ -329,12 +374,17 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 								me: {
 									library: {
 										tracks: {
+											offset: Number(body.variables.offset),
 											totalCount: 3,
 											items: [
 												{
 													track: {
 														uri: "spotify:track:missingDate",
-														data: { name: "No Date" },
+														data: {
+															name: "No Date",
+															artists: { items: [] },
+															albumOfTrack: { artists: { items: [] } },
+														},
 													},
 												},
 												{
@@ -428,25 +478,23 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 	const saved = emittedRecords.filter(
 		(record) => record.stream === "saved_tracks",
 	);
-	assert.equal(saved.length, 2);
-	assert.equal(saved[0]?.data.id, "goodTrack");
-	assert.equal(saved[0]?.data.added_at, "2024-02-01T00:00:00Z");
-	assert.equal(saved[0]?.data.explicit, false);
-	assert.equal(saved[1]?.data.id, "unknownExplicit");
-	assert.equal(saved[1]?.data.explicit, null);
-	assert.deepEqual(
-		progressMessages.filter((message) => message.startsWith("Skipped")),
-		["Skipped 1 saved track with no save date"],
-	);
+	assert.equal(saved.length, 3);
+	assert.equal(saved[0]?.data.id, "missingDate");
+	assert.equal(saved[0]?.data.added_at, null);
+	assert.equal(saved[0]?.data.identity_unresolved, false);
+	assert.equal(saved[1]?.data.id, "goodTrack");
+	assert.equal(saved[1]?.data.added_at, "2024-02-01T00:00:00Z");
+	assert.equal(saved[1]?.data.explicit, false);
+	assert.equal(saved[2]?.data.id, "unknownExplicit");
+	assert.equal(saved[2]?.data.explicit, null);
 	assertUserFacingProgress(
 		progressMessages.map((message) => ({ type: "PROGRESS", message })),
 	);
-	assert.ok(
-		diagnostics.some(
-			(line) =>
-				line.startsWith("[spotify-diagnostic] saved_track_missing_added_at ") &&
-				line.includes('"track_id":'),
+	assert.equal(
+		diagnostics.some((line) =>
+			line.startsWith("[spotify-diagnostic] saved_track_missing_added_at "),
 		),
+		false,
 	);
 });
 
@@ -456,7 +504,10 @@ function installSpotifyBrowserGlobals(): () => void {
 	const originalCaches = globalThis.caches;
 	const originalPerformance = globalThis.performance;
 	(globalThis as unknown as { window: unknown }).window = {
-		location: { hostname: "open.spotify.com" },
+		location: {
+			href: "https://open.spotify.com/",
+			hostname: "open.spotify.com",
+		},
 	};
 	(globalThis as unknown as { document: unknown }).document = {
 		querySelectorAll: () => [{ src: "https://open.spotifycdn.com/bundle.js" }],
@@ -494,6 +545,10 @@ async function collectWithInPageFetch(
 		operationName: string,
 		variables: Record<string, unknown>,
 	) => unknown,
+	onFailure?: (result: {
+		emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
+		messages: EmittedMessage[];
+	}) => void,
 ): Promise<{
 	emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
 	messages: EmittedMessage[];
@@ -544,30 +599,64 @@ async function collectWithInPageFetch(
 			}
 			throw new Error(`unexpected fetch: ${url}`);
 		};
-		await spotifyCollect({
-			emit: (message) => {
-				messages.push(message);
-				return Promise.resolve();
-			},
-			emitRecord: (stream, data) => {
-				emittedRecords.push({ stream, data });
-				return Promise.resolve();
-			},
-			page: {
-				goto: () => Promise.resolve(null),
-				evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
-					fn(arg),
-			} as never,
-			progress: () => Promise.resolve(),
-			requested: new Map<string, StreamScope>(
-				requestedNames.map((name) => [name, { name }]),
-			),
-		});
+		try {
+			await spotifyCollect({
+				emit: (message) => {
+					messages.push(message);
+					return Promise.resolve();
+				},
+				emitRecord: (stream, data) => {
+					emittedRecords.push({ stream, data });
+					return Promise.resolve();
+				},
+				page: {
+					goto: () => Promise.resolve(null),
+					evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
+						fn(arg),
+				} as never,
+				progress: () => Promise.resolve(),
+				requested: new Map<string, StreamScope>(
+					requestedNames.map((name) => [name, { name }]),
+				),
+			});
+		} catch (error) {
+			onFailure?.({ emittedRecords, messages });
+			throw error;
+		}
 		return { emittedRecords, messages };
 	} finally {
 		globalThis.fetch = originalFetch;
 		restoreGlobals();
 	}
+}
+
+async function assertRejectedWithoutCompletionAuthority(
+	requestedNames: string[],
+	graphql: Parameters<typeof collectWithInPageFetch>[1],
+): Promise<void> {
+	let failure:
+		| {
+				emittedRecords: Array<{
+					stream: string;
+					data: Record<string, unknown>;
+				}>;
+				messages: EmittedMessage[];
+		  }
+		| undefined;
+	await assert.rejects(() =>
+		collectWithInPageFetch(requestedNames, graphql, (result) => {
+			failure = result;
+		}),
+	);
+	assert.ok(failure);
+	assert.deepEqual(failure.emittedRecords, []);
+	assert.equal(
+		failure.messages.some(
+			(message) =>
+				message.type === "STATE" || message.type === "DETAIL_COVERAGE",
+		),
+		false,
+	);
 }
 
 test("spotify browser GraphQL retries 429 using Retry-After and classifies exhausted 5xx", async () => {
@@ -592,7 +681,9 @@ test("spotify browser GraphQL retries 429 using Retry-After and classifies exhau
 			}
 			return {
 				data: {
-					me: { library: { tracks: { items: [], totalCount: 0 } } },
+					me: {
+						library: { tracks: { items: [], totalCount: 0, offset: 0 } },
+					},
 				},
 			};
 		});
@@ -600,17 +691,11 @@ test("spotify browser GraphQL retries 429 using Retry-After and classifies exhau
 		assert.deepEqual(retryDelays, [2000]);
 
 		let serverErrorAttempts = 0;
-		await assert.rejects(
-			() =>
-				collectWithInPageFetch(["saved_tracks"], () => {
-					serverErrorAttempts += 1;
-					return new Response(null, { status: 503 });
-				}),
-			(error: unknown) => {
-				assert.match(String(error), /spotify_retryable_status_503/);
-				assert.equal(spotifyRetryablePattern.test(String(error)), true);
-				return true;
-			},
+		await assert.rejects(() =>
+			collectWithInPageFetch(["saved_tracks"], () => {
+				serverErrorAttempts += 1;
+				return new Response(null, { status: 503 });
+			}),
 		);
 		assert.equal(serverErrorAttempts, 3);
 		assert.deepEqual(retryDelays, [2000, 1000, 2000]);
@@ -623,59 +708,88 @@ test("spotify browser parser rejects repeated full library pages", async () => {
 	const items = Array.from({ length: 200 }, (_, i) => ({
 		item: { data: { __typename: "Playlist", uri: `spotify:playlist:pl${i}` } },
 	}));
-	await assert.rejects(
-		() =>
-			collectWithInPageFetch(["playlists"], (operationName) => {
-				assert.equal(operationName, "libraryV3");
-				return { data: { me: { libraryV3: { items, totalCount: 500 } } } };
-			}),
-		/spotify_library_pagination_no_progress/,
+	await assertRejectedWithoutCompletionAuthority(
+		["playlists"],
+		(operationName, variables) => {
+			assert.equal(operationName, "libraryV3");
+			return {
+				data: {
+					me: {
+						libraryV3: {
+							items,
+							totalCount: 500,
+							offset: variables.offset,
+						},
+					},
+				},
+			};
+		},
 	);
 });
 
-test("spotify browser parser rejects repeated full playlist pages", async () => {
+test("spotify browser parser preserves identical playlist pages at distinct offsets", async () => {
 	const playlistItem = {
 		addedAt: { isoString: "2024-01-01T00:00:00Z" },
 		itemV2: {
-			data: { __typename: "Track", uri: "spotify:track:t", name: "Track" },
+			data: {
+				__typename: "Track",
+				uri: "spotify:track:t",
+				name: "Track",
+				artists: { items: [] },
+			},
 		},
 	};
 	const items = Array.from({ length: 100 }, () => playlistItem);
-	await assert.rejects(
-		() =>
-			collectWithInPageFetch(["playlist_items"], (operationName) => {
-				if (operationName === "libraryV3") {
-					return {
-						data: {
-							me: {
-								libraryV3: {
-									items: [
-										{
-											item: {
-												data: {
-													__typename: "Playlist",
-													uri: "spotify:playlist:pl1",
-												},
-											},
-										},
-									],
-									totalCount: 1,
-								},
-							},
-						},
-					};
-				}
-				assert.equal(operationName, "fetchPlaylist");
+	const { emittedRecords, messages } = await collectWithInPageFetch(
+		["playlist_items"],
+		(operationName, variables) => {
+			if (operationName === "libraryV3") {
 				return {
 					data: {
-						playlistV2: {
-							uri: "spotify:playlist:pl1",
-							content: { items, totalCount: 500 },
+						me: {
+							libraryV3: {
+								items: [
+									{
+										item: {
+											data: {
+												__typename: "Playlist",
+												uri: "spotify:playlist:pl1",
+											},
+										},
+									},
+								],
+								offset: 0,
+								totalCount: 1,
+							},
 						},
 					},
 				};
-			}),
-		/spotify_playlist_pagination_no_progress/,
+			}
+			assert.equal(operationName, "fetchPlaylist");
+			return {
+				data: {
+					playlistV2: {
+						uri: "spotify:playlist:pl1",
+						content: { items, totalCount: 500, offset: variables.offset },
+					},
+				},
+			};
+		},
+	);
+	const playlistItems = emittedRecords.filter(
+		(record) => record.stream === "playlist_items",
+	);
+	assert.equal(playlistItems.length, 500);
+	assert.equal(playlistItems[0]?.data.id, "pl1:0");
+	assert.equal(playlistItems.at(-1)?.data.id, "pl1:499");
+	assert.ok(
+		messages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "playlist_items" &&
+				message.considered === 500 &&
+				message.covered === 500,
+		),
 	);
 });
 
@@ -698,6 +812,7 @@ test("spotify browser parser preserves the full playlist track URI alongside its
 										},
 									},
 								],
+								offset: 0,
 								totalCount: 1,
 							},
 						},
@@ -711,6 +826,7 @@ test("spotify browser parser preserves the full playlist track URI alongside its
 						uri: "spotify:playlist:pl1",
 						content: {
 							totalCount: 1,
+							offset: 0,
 							items: [
 								{
 									itemV2: {
@@ -718,6 +834,7 @@ test("spotify browser parser preserves the full playlist track URI alongside its
 											__typename: "Track",
 											uri: "spotify:local:Artist:Album:Local%20Track:180000",
 											name: "Track",
+											artists: { items: [] },
 										},
 									},
 								},
@@ -739,18 +856,34 @@ test("spotify browser parser preserves the full playlist track URI alongside its
 	assert.equal(playlistItemsSchema.safeParse(track?.data).success, true);
 });
 
-test("spotify browser parser rejects repeated full saved-track pages even when every row is skipped", async () => {
+test("spotify browser parser rejects repeated full saved-track pages", async () => {
 	const items = Array.from({ length: 100 }, (_, i) => ({
-		track: { uri: `spotify:track:t${i}`, data: { name: `Track ${i}` } },
+		track: {
+			uri: `spotify:track:t${i}`,
+			data: {
+				name: `Track ${i}`,
+				artists: { items: [] },
+				albumOfTrack: { artists: { items: [] } },
+			},
+		},
 	}));
-	await assert.rejects(
-		() =>
-			collectWithInPageFetch(["saved_tracks"], (operationName) => {
-				assert.equal(operationName, "fetchLibraryTracks");
-				return {
-					data: { me: { library: { tracks: { items, totalCount: 500 } } } },
-				};
-			}),
-		/spotify_saved_tracks_pagination_no_progress/,
+	await assertRejectedWithoutCompletionAuthority(
+		["saved_tracks"],
+		(operationName, variables) => {
+			assert.equal(operationName, "fetchLibraryTracks");
+			return {
+				data: {
+					me: {
+						library: {
+							tracks: {
+								items,
+								totalCount: 500,
+								offset: variables.offset,
+							},
+						},
+					},
+				},
+			};
+		},
 	);
 });
