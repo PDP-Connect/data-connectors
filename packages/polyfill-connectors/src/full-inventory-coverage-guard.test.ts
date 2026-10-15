@@ -27,7 +27,6 @@ const KNOWN_UNPROVEN_CALLERS = new Set([
 	"google_maps",
 	"groupme",
 	"jellyfin",
-	"linkedin",
 	"slack",
 ]);
 
