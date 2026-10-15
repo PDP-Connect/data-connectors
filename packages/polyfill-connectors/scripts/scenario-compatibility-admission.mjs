@@ -7,12 +7,13 @@ import { pathToFileURL } from "node:url";
 
 const SCOPES = [
   "packages/polyfill-connectors/src/scenario/",
-  "packages/polyfill-connectors/bin/scenario-record.ts",
-  "packages/polyfill-connectors/bin/scenario-verify.ts",
-  "packages/polyfill-connectors/bin/scenario-cli-contract.json",
+  "packages/polyfill-connectors/src/connector-runtime.ts",
+  "packages/polyfill-connectors/src/browser-launch.ts",
+  "packages/polyfill-connectors/src/connector-paths.ts",
+  "packages/polyfill-connectors/bin/scenario-",
   "packages/polyfill-connectors/docs/scenario-consumer-contract.md",
   "packages/polyfill-connectors/test-fixtures/scenario-consumer/",
-  "packages/polyfill-connectors/scripts/scenario-compatibility-",
+  "packages/polyfill-connectors/scripts/scenario-compatibility",
   ".github/workflows/scenario-compatibility.yml",
   "package.json",
   "package-lock.json",
@@ -21,6 +22,7 @@ const SCOPES = [
 ];
 const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 const ZERO_SHA_RE = /^0{40}$/;
+const GIT_PATH_SEPARATOR = "\0";
 
 function git(args, cwd) {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -57,14 +59,21 @@ export function changedPaths({ eventName, baseSha, headSha, cwd }) {
   if (!validCommit(base, cwd)) {
     throw new Error("invalid comparison commit");
   }
-  const output = git(["diff", "--name-status", "-M", base, headSha], cwd);
+  const output = git(["diff", "--name-status", "-z", "-M", base, headSha], cwd);
   const paths = [];
-  for (const line of output ? output.split("\n") : []) {
-    const [status, oldPath, newPath] = line.split("\t");
+  const fields = output ? output.split(GIT_PATH_SEPARATOR) : [];
+  if (fields.at(-1) === "") {
+    fields.pop();
+  }
+  for (let index = 0; index < fields.length; ) {
+    const status = fields[index];
+    index += 1;
     if (status.startsWith("R") || status.startsWith("C")) {
-      paths.push(oldPath, newPath);
+      paths.push(fields[index], fields[index + 1]);
+      index += 2;
     } else {
-      paths.push(oldPath);
+      paths.push(fields[index]);
+      index += 1;
     }
   }
   return paths;

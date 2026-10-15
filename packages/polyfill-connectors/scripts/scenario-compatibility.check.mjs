@@ -12,6 +12,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -157,9 +158,9 @@ function isolatedEnv(tempRoot) {
   return env;
 }
 
-function command(args, tempRoot) {
+function command(args, tempRoot, packageRoot = PACKAGE_ROOT) {
   return spawnSync(process.execPath, ["--import", "tsx", "bin/scenario-verify.ts", ...args], {
-    cwd: PACKAGE_ROOT,
+    cwd: packageRoot,
     env: isolatedEnv(tempRoot),
     encoding: "utf8",
     maxBuffer: 8 * 1024 * 1024,
@@ -174,7 +175,22 @@ function newCaseRoot(root, label) {
   return dir;
 }
 
-function invokeVerify({ root, label, scenarioName, entrypointName, scenarioPath, claimPath }) {
+function writeScenarioVariant(root, label, scenarioName, scenario) {
+  const caseRoot = newCaseRoot(root, label);
+  const scenarioPath = join(caseRoot, scenarioName);
+  writeFileSync(scenarioPath, JSON.stringify(scenario));
+  return scenarioPath;
+}
+
+function invokeVerify({
+  root,
+  label,
+  scenarioName,
+  entrypointName,
+  scenarioPath,
+  claimPath,
+  packageRoot = PACKAGE_ROOT,
+}) {
   const caseRoot = newCaseRoot(root, label);
   const inputPath = scenarioPath ?? join(caseRoot, scenarioName);
   if (!scenarioPath) {
@@ -183,8 +199,16 @@ function invokeVerify({ root, label, scenarioName, entrypointName, scenarioPath,
   const outputPath = claimPath ?? join(caseRoot, "fresh-claim.json");
   assert.equal(requirePathExists(outputPath), false, `${label} must begin with a fresh claim path`);
   const result = command(
-    ["scenario-consumer", inputPath, "--entrypoint", join(FIXTURE_DIR, entrypointName), "--json", outputPath],
-    process.env.SCENARIO_COMPAT_TMPDIR
+    [
+      "scenario-consumer",
+      inputPath,
+      "--entrypoint",
+      join(packageRoot, "test-fixtures/scenario-consumer", entrypointName),
+      "--json",
+      outputPath,
+    ],
+    process.env.SCENARIO_COMPAT_TMPDIR,
+    packageRoot
   );
   return { result, caseRoot, outputPath, inputPath };
 }
@@ -216,6 +240,11 @@ function assertClaim(path, scenario, expectation) {
   return claim;
 }
 
+function withoutVerifiedAt(claim) {
+  const { verified_at: _verifiedAt, ...stableClaim } = claim;
+  return stableClaim;
+}
+
 function assertRejected(result, label) {
   assert.equal(result.error, undefined, `${label}: verifier process must start`);
   assert.equal(result.status, 1, `${label}: expected scenario rejection`);
@@ -223,9 +252,74 @@ function assertRejected(result, label) {
 
 function assertOfflineIsolation(result, label) {
   assert.ok(
-    result.stdout.includes("network isolation: os-namespace"),
+    `${result.stdout}\n${result.stderr}`.includes("network isolation: os-namespace"),
     `${label} must use the verifier's OS network namespace isolation`
   );
+}
+
+function assertActualValidatorMutation(root, scenarios) {
+  const overlay = join(root, "strict-validator-worktree");
+  let worktreeAdded = false;
+  try {
+    execFileSync("git", ["worktree", "add", "--detach", overlay, "HEAD"], {
+      cwd: REPO_ROOT,
+      stdio: "ignore",
+    });
+    worktreeAdded = true;
+    for (const [sourceRoot, destination] of [
+      [REPO_ROOT, join(overlay, "node_modules")],
+      [PACKAGE_ROOT, join(overlay, "packages/polyfill-connectors/node_modules")],
+    ]) {
+      const source = join(sourceRoot, "node_modules");
+      if (existsSync(source) && !existsSync(destination)) {
+        symlinkSync(source, destination, "dir");
+      }
+    }
+
+    const overlayPackageRoot = join(overlay, "packages/polyfill-connectors");
+    const validatorPath = join(overlayPackageRoot, "src/scenario/validate.ts");
+    const original = readFileSync(validatorPath, "utf8");
+    const insertionPoint =
+      "export function validateScenario(scenario: ConnectorScenario): void {\n\tvalidateFormat(scenario);";
+    const strictCheck =
+      "export function validateScenario(scenario: ConnectorScenario): void {\n" +
+      '\tif (!Object.hasOwn(scenario, "compatibility_probe")) {\n' +
+      '\t\tfail("compatibility_probe_required", "temporary same-format strictness control");\n' +
+      "\t}\n" +
+      "\tvalidateFormat(scenario);";
+    assert.equal(original.split(insertionPoint).length - 1, 1, "locate the validator's real format gate once");
+    writeFileSync(validatorPath, original.replace(insertionPoint, strictCheck));
+
+    for (const scenario of scenarios) {
+      const replay = invokeVerify({
+        root,
+        label: `overstrict-${scenario.entrypointName}`,
+        scenarioName: scenario.scenarioName,
+        entrypointName: scenario.entrypointName,
+        scenarioPath: scenario.scenarioPath,
+        packageRoot: overlayPackageRoot,
+      });
+      assertRejected(replay.result, `overstrict validator ${scenario.scenarioName}`);
+      const diagnostic = `${replay.result.stdout}\n${replay.result.stderr}`;
+      assert.ok(
+        diagnostic.includes("compatibility_probe_required"),
+        `${scenario.scenarioName}: actual validator mutation must reject for the injected requirement`
+      );
+      assert.equal(
+        diagnostic.includes("unsupported_format"),
+        false,
+        "the control must reach the injected same-format check"
+      );
+      assert.equal(requirePathExists(replay.outputPath), false, "rejected validation must not write a claim");
+    }
+  } finally {
+    if (worktreeAdded) {
+      execFileSync("git", ["worktree", "remove", "--force", overlay], {
+        cwd: REPO_ROOT,
+        stdio: "ignore",
+      });
+    }
+  }
 }
 
 test("frozen scenario compatibility, replay outcomes, and privacy controls", () => {
@@ -260,67 +354,58 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
   const browserScenario = JSON.parse(browserBytes.toString("utf8"));
   assert.equal(httpScenario.format, expected.format);
   assert.equal(browserScenario.format, expected.format);
-  const oldInputs = [httpScenario, browserScenario];
+  let replayHttp = httpScenario;
+  let replayBrowser = browserScenario;
+  let replayHttpPath;
+  let replayBrowserPath;
   if (expected.format_disposition === "dropped") {
     assert.notEqual(SCENARIO_FORMAT, expected.format, "old-format drop requires a deliberate format version bump");
     assert.ok(
       typeof expected.format_migration === "string" && expected.format_migration.trim().length > 0,
       "old-format drop needs a migration statement"
     );
-    for (const old of oldInputs) {
+    for (const [label, scenarioName, entrypointName] of [
+      ["http", "scenario-http.json", "http-connector.ts"],
+      ["browser", "scenario-browser.json", "browser-connector.ts"],
+    ]) {
+      const old = label === "http" ? httpScenario : browserScenario;
       assert.throws(
         () => validateScenario(old),
         (error) => error instanceof ScenarioValidationError && error.reason === "unsupported_format"
       );
+      const rejected = invokeVerify({
+        root,
+        label: `drop-old-${label}`,
+        scenarioName,
+        entrypointName,
+        scenarioPath: join(FIXTURE_DIR, scenarioName),
+      });
+      assertRejected(rejected.result, `old ${label} format`);
+      assert.ok(
+        `${rejected.result.stdout}\n${rejected.result.stderr}`.includes("unsupported_format"),
+        `old ${label} input must fail specifically as unsupported_format`
+      );
+      assert.equal(requirePathExists(rejected.outputPath), false, `old ${label} rejection must not write a claim`);
     }
-    const dropped = command(
-      [
-        "scenario-consumer",
-        join(FIXTURE_DIR, "scenario-http.json"),
-        "--entrypoint",
-        join(FIXTURE_DIR, "http-connector.ts"),
-      ],
-      taskRoot
+    replayHttp = structuredClone(httpScenario);
+    replayBrowser = structuredClone(browserScenario);
+    replayHttp.format = SCENARIO_FORMAT;
+    replayBrowser.format = SCENARIO_FORMAT;
+    replayHttpPath = writeScenarioVariant(root, "current-http-format", "scenario-http.json", replayHttp);
+    replayBrowserPath = writeScenarioVariant(root, "current-browser-format", "scenario-browser.json", replayBrowser);
+  } else {
+    assert.equal(
+      expected.format_disposition,
+      "supported",
+      "the frozen format must remain explicitly supported unless a reviewed bump drops it"
     );
-    assertRejected(dropped, "explicit old-format drop");
-    process.stdout.write(
-      `scenario compatibility: baseline=${baselineCommit === BOOTSTRAP ? "bootstrap" : "base"}; old-format=explicitly-dropped; controls=pass\n`
-    );
-    return;
   }
-  assert.equal(
-    expected.format_disposition,
-    "supported",
-    "the frozen format must remain explicitly supported unless a reviewed bump drops it"
-  );
 
-  validateScenario(httpScenario);
-  validateScenario(browserScenario);
-  const withRootMetadata = structuredClone(httpScenario);
-  withRootMetadata.compatibility_note = { revision: "informational" };
-  assert.doesNotThrow(() => validateScenario(withRootMetadata), "informational root metadata remains accepted");
-  const strictOverlay = (scenario) => {
-    validateScenario(scenario);
-    if (!Object.hasOwn(scenario, "compatibility_probe")) {
-      throw new Error("strict same-version field required");
-    }
-  };
-  const compatibilityAccepts = (validator) =>
-    oldInputs.every((scenario) => {
-      try {
-        validator(scenario);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-  assert.equal(compatibilityAccepts(validateScenario), true);
-  assert.equal(
-    compatibilityAccepts(strictOverlay),
-    false,
-    "strict same-version field overlay must turn historical compatibility RED"
-  );
-  const legacy = structuredClone(httpScenario);
+  validateScenario(replayHttp);
+  validateScenario(replayBrowser);
+  const replayHttpInputPath = replayHttpPath ?? join(FIXTURE_DIR, "scenario-http.json");
+  const replayBrowserInputPath = replayBrowserPath ?? join(FIXTURE_DIR, "scenario-browser.json");
+  const legacy = structuredClone(replayHttp);
   omitCaptureTimestamp(legacy);
   assert.doesNotThrow(() => validateScenario(legacy), "legacy scenario without capture.captured_at remains accepted");
 
@@ -329,22 +414,83 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
     label: "http",
     scenarioName: "scenario-http.json",
     entrypointName: "http-connector.ts",
+    scenarioPath: replayHttpPath,
   });
   assert.equal(http.result.error, undefined, "HTTP verifier process must start");
-  assert.equal(http.result.status, 0, "frozen HTTP replay must pass");
+  assert.equal(http.result.status, 0, "supported HTTP replay must pass");
   assertOfflineIsolation(http.result, "HTTP replay");
-  assertClaim(http.outputPath, httpScenario, expected.claims["scenario-http.json"]);
+  const httpClaim = assertClaim(http.outputPath, replayHttp, expected.claims["scenario-http.json"]);
 
   const browser = invokeVerify({
     root,
     label: "browser",
     scenarioName: "scenario-browser.json",
     entrypointName: "browser-connector.ts",
+    scenarioPath: replayBrowserPath,
   });
   assert.equal(browser.result.error, undefined, "browser verifier process must start");
-  assert.equal(browser.result.status, 0, "frozen HAR replay must pass");
+  assert.equal(browser.result.status, 0, "supported HAR replay must pass");
   assertOfflineIsolation(browser.result, "HAR replay");
-  assertClaim(browser.outputPath, browserScenario, expected.claims["scenario-browser.json"]);
+  const browserClaim = assertClaim(browser.outputPath, replayBrowser, expected.claims["scenario-browser.json"]);
+
+  assertActualValidatorMutation(root, [
+    {
+      scenarioName: "scenario-http.json",
+      entrypointName: "http-connector.ts",
+      scenarioPath: replayHttpInputPath,
+    },
+    {
+      scenarioName: "scenario-browser.json",
+      entrypointName: "browser-connector.ts",
+      scenarioPath: replayBrowserInputPath,
+    },
+  ]);
+
+  for (const [label, scenario, scenarioName, entrypointName, expectation, originalReplay, originalClaim] of [
+    [
+      "http",
+      replayHttp,
+      "scenario-http.json",
+      "http-connector.ts",
+      expected.claims["scenario-http.json"],
+      http,
+      httpClaim,
+    ],
+    [
+      "browser",
+      replayBrowser,
+      "scenario-browser.json",
+      "browser-connector.ts",
+      expected.claims["scenario-browser.json"],
+      browser,
+      browserClaim,
+    ],
+  ]) {
+    const withRootMetadata = structuredClone(scenario);
+    Object.assign(withRootMetadata, {
+      informational_note: "consumer annotation",
+      consumer_revision: 7,
+      consumer_flag: true,
+      consumer_labels: ["ci", { source: "fixture" }],
+      consumer_metadata: { nested: [null, 3, false, { label: "extra" }] },
+    });
+    writeFileSync(originalReplay.inputPath, JSON.stringify(withRootMetadata));
+    const replay = invokeVerify({
+      root,
+      label: `metadata-replay-${label}`,
+      scenarioName,
+      entrypointName,
+      scenarioPath: originalReplay.inputPath,
+    });
+    assert.equal(replay.result.status, 0, `${label} replay accepts heterogeneous root metadata`);
+    assertOfflineIsolation(replay.result, `${label} metadata replay`);
+    const metadataClaim = assertClaim(replay.outputPath, withRootMetadata, expectation);
+    assert.deepEqual(
+      withoutVerifiedAt(metadataClaim),
+      withoutVerifiedAt(originalClaim),
+      `${label} root metadata must preserve every stable claim field`
+    );
+  }
 
   const legacyCase = newCaseRoot(root, "legacy");
   omitCaptureTimestamp(legacy);
@@ -371,7 +517,7 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
   );
   assert.ok(Number.isFinite(Date.parse(legacyClaim.verified_at)));
 
-  const badOp = structuredClone(httpScenario);
+  const badOp = structuredClone(replayHttp);
   const [stream] = Object.keys(badOp.runs[0].expected.records);
   badOp.runs[0].expected.records[stream].ops[0] = "invalid-operation";
   assert.throws(() => validateScenario(badOp), ScenarioValidationError, "corrupt meaningful operation must reject");
@@ -401,7 +547,7 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
       },
     ],
   ]) {
-    const corrupted = structuredClone(httpScenario);
+    const corrupted = structuredClone(replayHttp);
     mutate(corrupted);
     const caseRoot = newCaseRoot(root, label);
     const scenarioPath = join(caseRoot, "scenario-http.json");
@@ -420,7 +566,7 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
   const harPath = join(badHarRoot, "scenario-browser.run1.har");
   writeFileSync(harPath, "{");
   const badHarScenario = join(badHarRoot, "scenario-browser.json");
-  copyFileSync(join(FIXTURE_DIR, "scenario-browser.json"), badHarScenario);
+  writeFileSync(badHarScenario, JSON.stringify(replayBrowser));
   const badHar = invokeVerify({
     root,
     label: "bad-har-replay",
@@ -433,7 +579,7 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
   const badStorageRoot = newCaseRoot(root, "bad-storage");
   writeFileSync(join(badStorageRoot, "scenario-browser.run1.storage-state.json"), "{");
   const badStorageScenario = join(badStorageRoot, "scenario-browser.json");
-  copyFileSync(join(FIXTURE_DIR, "scenario-browser.json"), badStorageScenario);
+  writeFileSync(badStorageScenario, JSON.stringify(replayBrowser));
   const badStorage = invokeVerify({
     root,
     label: "bad-storage-replay",
@@ -446,7 +592,7 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
   const usage = command(
     [
       "scenario-consumer",
-      join(FIXTURE_DIR, "scenario-http.json"),
+      replayHttpInputPath,
       "--entrypoint",
       join(FIXTURE_DIR, "http-connector.ts"),
       "--timeout",
@@ -456,16 +602,29 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
   );
   assert.equal(usage.status, 2, "invalid CLI usage retains exit 2");
 
-  const formatBad = structuredClone(httpScenario);
+  const formatBad = structuredClone(replayHttp);
   formatBad.format = "pdpp.connector-scenario/999";
   const formatCase = newCaseRoot(root, "bad-format");
   const formatPath = join(formatCase, "bad-format.json");
+  const formatClaimPath = join(formatCase, "fresh-claim.json");
   writeFileSync(formatPath, JSON.stringify(formatBad));
   const badFormat = command(
-    ["scenario-consumer", formatPath, "--entrypoint", join(FIXTURE_DIR, "http-connector.ts")],
+    [
+      "scenario-consumer",
+      formatPath,
+      "--entrypoint",
+      join(FIXTURE_DIR, "http-connector.ts"),
+      "--json",
+      formatClaimPath,
+    ],
     taskRoot
   );
   assertRejected(badFormat, "unsupported format");
+  assert.ok(
+    `${badFormat.stdout}\n${badFormat.stderr}`.includes("unsupported_format"),
+    "wrong format must fail specifically as unsupported_format"
+  );
+  assert.equal(requirePathExists(formatClaimPath), false, "unsupported format must not write a success claim");
 
   const stalePath = join(root, "stale-claim.json");
   writeFileSync(stalePath, "stale");
@@ -476,6 +635,7 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
         label: "stale",
         scenarioName: "scenario-http.json",
         entrypointName: "http-connector.ts",
+        scenarioPath: replayHttpPath,
         claimPath: stalePath,
       }),
     FRESH_CLAIM_PATH_RE
@@ -484,7 +644,7 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
   const outputDirectory = join(writeFailureRoot, "claim-output");
   mkdirSync(outputDirectory);
   const writeFailureScenario = join(writeFailureRoot, "scenario-http.json");
-  copyFileSync(join(FIXTURE_DIR, "scenario-http.json"), writeFailureScenario);
+  writeFileSync(writeFailureScenario, JSON.stringify(replayHttp));
   const writeFailure = command(
     [
       "scenario-consumer",
@@ -511,6 +671,6 @@ test("frozen scenario compatibility, replay outcomes, and privacy controls", () 
     "frozen capture bytes changed during compatibility checks"
   );
   process.stdout.write(
-    `scenario compatibility: baseline=${baselineCommit === BOOTSTRAP ? "bootstrap" : "base"}; captures=${CAPTURE_NAMES.length}; replay=2 pass; controls=pass\n`
+    `scenario compatibility: baseline=${baselineCommit === BOOTSTRAP ? "bootstrap" : "base"}; captures=${CAPTURE_NAMES.length}; replay=2 pass; metadata=2 pass; overstrict_mutation=2 rejected; controls=pass\n`
   );
 });
