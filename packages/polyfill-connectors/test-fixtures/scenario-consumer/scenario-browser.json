@@ -1,0 +1,168 @@
+{
+  "format": "pdpp.connector-scenario/1",
+  "connector": {
+    "id": "scenario-consumer",
+    "tool_version": "scenario-record/1"
+  },
+  "capture": {
+    "captured_at": "2026-10-15T18:47:06.729Z",
+    "evidence_class": "synthetic-spike",
+    "privacy_class": "local-only",
+    "recorder_version": "scenario-record-v1",
+    "complete": true,
+    "provider_contact": {
+      "authorities": [
+        "http://127.0.0.1:41731"
+      ],
+      "completed_requests": 5,
+      "loopback_only": true,
+      "observed": true
+    }
+  },
+  "runs": [
+    {
+      "clock": {
+        "fixed_now": "2026-10-15T18:47:04.865Z",
+        "trace": [
+          1792090025097,
+          1792090025102,
+          1792090025667,
+          1792090025687,
+          1792090025688
+        ]
+      },
+      "environment": {
+        "network": {
+          "driver": "recorded-browser",
+          "har_path": "scenario-browser.run1.har",
+          "storage_state_path": "scenario-browser.run1.storage-state.json",
+          "har_entry_count": 3
+        }
+      },
+      "start": {
+        "scope": {
+          "streams": [
+            {
+              "name": "items"
+            },
+            {
+              "name": "extras"
+            }
+          ]
+        },
+        "state": null
+      },
+      "interactions": [],
+      "expected": {
+        "records": {
+          "items": {
+            "count": 4,
+            "ids": [
+              "item-1",
+              "item-2",
+              "item-3",
+              "obsolete-item"
+            ],
+            "ops": [
+              "upsert",
+              "upsert",
+              "upsert",
+              "delete"
+            ],
+            "record_sha256s": [
+              "4f86bf3961e253792a4dff250c0b6dfe598b529ab8d96df3711ccf745dedf5cc",
+              "85c15b9ca029f597e2abaa04813989c360132d2853dc0cc44a9f0eaf0e1bf4ec",
+              "f4230c188c6688b17a43320725dbc9e95564997f8e32d30f6e7e2052af3951a1",
+              "d7377cb1ecc498eecc298c3b790e590b44e7dd6825de6f6517b84594cc6356c7"
+            ]
+          }
+        },
+        "final_state": {
+          "items": {
+            "since": "item-3"
+          }
+        },
+        "protocol_trace": [
+          {
+            "kind": "done",
+            "status": "succeeded",
+            "records_emitted": 4
+          }
+        ]
+      }
+    },
+    {
+      "clock": {
+        "fixed_now": "2026-10-15T18:47:05.815Z",
+        "trace": [
+          1792090026041,
+          1792090026047,
+          1792090026595,
+          1792090026611,
+          1792090026611
+        ]
+      },
+      "environment": {
+        "network": {
+          "driver": "recorded-browser",
+          "har_path": "scenario-browser.run2.har",
+          "storage_state_path": "scenario-browser.run2.storage-state.json",
+          "har_entry_count": 2
+        }
+      },
+      "start": {
+        "scope": {
+          "streams": [
+            {
+              "name": "items"
+            },
+            {
+              "name": "extras"
+            }
+          ]
+        },
+        "state": {
+          "items": {
+            "since": "item-3"
+          }
+        },
+        "state_from_run": 0
+      },
+      "interactions": [],
+      "expected": {
+        "records": {
+          "items": {
+            "count": 3,
+            "ids": [
+              "item-3",
+              "item-1",
+              "item-4"
+            ],
+            "ops": [
+              "upsert",
+              "delete",
+              "upsert"
+            ],
+            "record_sha256s": [
+              "8938f49fd5862b317c2a8984670c4d4f707597bc0a33fdca285ffc62c66f300d",
+              "73f2e882f976463dad9b352f8873034a734642ba445ed9f7c04376dd4d974d2a",
+              "4dcecbd536e193fac346921eef3e734afa7c0e1897eaba185d8bca05342bbdce"
+            ]
+          }
+        },
+        "final_state": {
+          "items": {
+            "since": "item-4"
+          }
+        },
+        "protocol_trace": [
+          {
+            "kind": "done",
+            "status": "succeeded",
+            "records_emitted": 3
+          }
+        ]
+      }
+    }
+  ]
+}
