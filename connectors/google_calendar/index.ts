@@ -35,6 +35,7 @@ import {
 	type CollectContext,
 	emitDetailCoverage,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -263,20 +264,28 @@ async function persistCalendarEventsResult(args: {
 		cursor.dropUnseenIds();
 	}
 	if (result.truncated) {
-		await ctx.emit({
-			type: "SKIP_RESULT",
-			stream: "events",
-			reason: "older_pages_deferred_page_budget",
-			// The ceiling reported here is the one actually enforced, not the
-			// module default — otherwise a lowered cap would disclose a limit the
-			// walk never applied.
-			message: `Google Calendar ${calendarId}: stopped at the ${String(maxPages)}-page limit with more events listed`,
-			diagnostics: {
-				calendar_id: calendarId,
-				page_limit: maxPages,
-				unread_pages: 1,
-			},
-		});
+		// Resume-safe: a truncated walk returns the sync token it started from
+		// (or none), never the new one (pageThroughEvents), so this calendar's
+		// entry in the `events` STATE replays the same delta or full listing.
+		await ctx.emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "events",
+					reason: "older_pages_deferred_page_budget",
+					// The ceiling reported here is the one actually enforced, not the
+					// module default — otherwise a lowered cap would disclose a limit
+					// the walk never applied.
+					message: `Google Calendar ${calendarId}: stopped at the ${String(maxPages)}-page limit with more events listed`,
+					diagnostics: {
+						calendar_id: calendarId,
+						page_limit: maxPages,
+						unread_pages: 1,
+					},
+				},
+				"cursor_at_or_before_loss",
+			),
+		);
 	}
 	nextEventsState[calendarId] = {
 		...(result.nextSyncToken ? { sync_token: result.nextSyncToken } : {}),

@@ -47,6 +47,7 @@ import {
 	emitDetailCoverage,
 	nowIso,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -1062,18 +1063,28 @@ if (isMainModule(import.meta.url)) {
 				// group vCards that never became records. It is reported as a
 				// SKIP_RESULT here, where the full `emit` is in scope.
 				const groupVerdict = groupAnchorVerdict(groupAnchor);
+				// Resume-safe: a later book's `contact_groups` STATE is only
+				// `{ fetched_at }`, which no read consults. Every run re-reads the
+				// full group snapshot (full-boundary sync or loadFullGroupSnapshot
+				// in collectAddressBook), so the next run sees these groups again.
 				if (groupVerdict.status === "short") {
-					await emit({
-						type: "SKIP_RESULT",
-						stream: "contact_groups",
-						reason: "group_inventory_short",
-						message: "The address book holds groups this run did not record",
-						diagnostics: {
-							considered: groupVerdict.considered,
-							covered: groupVerdict.covered,
-							missing: groupVerdict.missing,
-						},
-					});
+					await emit(
+						resumeSafeSkip(
+							{
+								type: "SKIP_RESULT",
+								stream: "contact_groups",
+								reason: "group_inventory_short",
+								message:
+									"The address book holds groups this run did not record",
+								diagnostics: {
+									considered: groupVerdict.considered,
+									covered: groupVerdict.covered,
+									missing: groupVerdict.missing,
+								},
+							},
+							"read_ignores_cursor_for_loss",
+						),
+					);
 				}
 				// deriveGroups has no drop/filter path: every derived group is
 				// unconditionally emitted, so considered === covered === the exact

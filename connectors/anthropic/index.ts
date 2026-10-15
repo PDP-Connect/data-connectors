@@ -173,6 +173,7 @@ import {
 	nowIso,
 	type ProbeSessionArgs,
 	politeDelay,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { attachDownloadQueue } from "../../packages/polyfill-connectors/src/download-queue.ts";
@@ -1169,6 +1170,18 @@ function archiveEntriesMatch(
 
 // ─── Retryable SKIP_RESULT helpers ───────────────────────────────────────
 
+/**
+ * Why the conversations STATE that emitParsed saves after skipping a stream
+ * still replays what the skip lost. That cursor holds only export bookkeeping
+ * (`consumed_export`, `last_export_requested_at`) and, for a skipped stream,
+ * no `synced_at` (which no read consults); no field of it selects rows.
+ * Every later read parses a whole export archive (the consumed one again, or
+ * a fresh full export once the request interval allows), so the lost items
+ * are read again whatever the cursor says. The other streams save no STATE
+ * once skipped.
+ */
+const EXPORT_SKIP_RESUME_BASIS = "read_ignores_cursor_for_loss" as const;
+
 async function emitPendingSkip(
 	emit: (msg: EmittedMessage) => Promise<void>,
 	requested: Map<string, unknown>,
@@ -1877,18 +1890,24 @@ export async function collectAnthropic({
 					continue;
 				}
 				skipped.add(stream);
-				await emit({
-					type: "SKIP_RESULT",
-					stream,
-					reason: "export_conversations_missing",
-					message:
-						"The Claude export has no recognized conversations entry, so " +
-						`${stream} was not imported and was not checkpointed.`,
-					recovery_hint: {
-						action: "retry_on_connector_upgrade",
-						retryable: false,
-					},
-				});
+				// Resume-safe: see EXPORT_SKIP_RESUME_BASIS.
+				await emit(
+					resumeSafeSkip(
+						{
+							type: "SKIP_RESULT",
+							stream,
+							reason: "export_conversations_missing",
+							message:
+								"The Claude export has no recognized conversations entry, so " +
+								`${stream} was not imported and was not checkpointed.`,
+							recovery_hint: {
+								action: "retry_on_connector_upgrade",
+								retryable: false,
+							},
+						},
+						EXPORT_SKIP_RESUME_BASIS,
+					),
+				);
 			}
 		}
 		for (const [streams, count] of dropGroups) {
@@ -1906,17 +1925,23 @@ export async function collectAnthropic({
 					continue;
 				}
 				skipped.add(stream);
-				await emit({
-					type: "SKIP_RESULT",
-					stream,
-					reason: "export_items_unparseable",
-					recovery_hint: {
-						action: "retry_on_connector_upgrade",
-						retryable: false,
-					},
-					message: `${count} ${parent} item(s) in the export could not be parsed, so ${stream} is incomplete and was not checkpointed.`,
-					diagnostics: { dropped_count: count },
-				});
+				// Resume-safe: see EXPORT_SKIP_RESUME_BASIS.
+				await emit(
+					resumeSafeSkip(
+						{
+							type: "SKIP_RESULT",
+							stream,
+							reason: "export_items_unparseable",
+							recovery_hint: {
+								action: "retry_on_connector_upgrade",
+								retryable: false,
+							},
+							message: `${count} ${parent} item(s) in the export could not be parsed, so ${stream} is incomplete and was not checkpointed.`,
+							diagnostics: { dropped_count: count },
+						},
+						EXPORT_SKIP_RESUME_BASIS,
+					),
+				);
 			}
 		}
 		if (
@@ -2202,10 +2227,10 @@ export async function collectAnthropic({
 					validatedEntry: Boolean(entriesValidated),
 					...(entriesValidated
 						? {
-							maxBufferedObjectUnits:
-								testOverrides?.maxBufferedObjectUnits ??
-								OVERSIZE_PARENT_UNITS,
-						}
+								maxBufferedObjectUnits:
+									testOverrides?.maxBufferedObjectUnits ??
+									OVERSIZE_PARENT_UNITS,
+							}
 						: {}),
 					onOversizedObject: async (_prefix, value) => {
 						await processOversizedConversation(value);

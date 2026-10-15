@@ -60,7 +60,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { CollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import {
+	resumeSafeSkip,
+	runConnector,
+} from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { isOutsideTimeRange } from "../../packages/polyfill-connectors/src/time-range.ts";
 import {
 	ACTIVITIES_CSV,
@@ -434,7 +437,7 @@ async function collectActivities(
 	}
 
 	if (reason) {
-		await emit({
+		const skip: Parameters<typeof resumeSafeSkip>[0] = {
 			type: "SKIP_RESULT",
 			stream: ACTIVITIES_STREAM,
 			reason: COLLECTION_SKIP_REASON[reason],
@@ -447,7 +450,15 @@ async function collectActivities(
 				? `${ACTIVITIES_CSV} ended mid-row, so an unknown number of activities were not read.`
 				: `${String(unreadable)} row(s) in ${ACTIVITIES_CSV} had no usable activity id or date and were not read.`,
 			diagnostics: { unreadable_rows: unreadable, truncated },
-		});
+		};
+		// A truncated file saves `last_start_time: since` (the STATE below), the
+		// previous checkpoint, so the next import reads every row past it again.
+		// Unreadable rows alone advance the cursor to cursorLatest: a dated row
+		// with a bad id, readable after an upgrade, may sit at or before it, so
+		// that skip stays undeclared and the runtime withholds STATE.
+		await emit(
+			truncated ? resumeSafeSkip(skip, "cursor_at_or_before_loss") : skip,
+		);
 	}
 
 	if (unplaced > 0) {
