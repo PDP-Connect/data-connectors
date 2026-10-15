@@ -28,7 +28,93 @@ export const mutantStatuses = Object.freeze([
 	"Ignored",
 ]);
 
+const pilotRanges = Object.freeze([
+	"connectors/groupme/index.ts:1487-1495",
+	"connectors/groupme/index.ts:1528-1529",
+]);
+const canaryRanges = Object.freeze(["connectors/groupme/index.ts:1491-1491"]);
+
+export function mutationPopulationKind(ranges) {
+	const normalized = Array.isArray(ranges) ? [...ranges].sort() : [];
+	if (JSON.stringify(normalized) === JSON.stringify([...canaryRanges])) {
+		return "bounded canary-only control";
+	}
+	if (JSON.stringify(normalized) === JSON.stringify([...pilotRanges].sort())) {
+		return "fixed full pilot ranges";
+	}
+	throw new Error(`Unknown mutation ranges: ${JSON.stringify(ranges)}`);
+}
+
+export function canonicalPopulationSha256(manifest) {
+	const identities = manifest.map((mutant) => mutant.canonicalIdentity).sort();
+	return createHash("sha256")
+		.update(`${JSON.stringify(identities)}\n`)
+		.digest("hex");
+}
+
 const tapFields = ["tests", "pass", "fail", "cancelled", "skipped", "todo"];
+
+function inspectParserEvents(events, leaves, errors) {
+	const plans = events
+		.filter(([type]) => type === "plan")
+		.map(([, value]) => value);
+	const completions = events
+		.filter(([type]) => type === "complete")
+		.map(([, value]) => value);
+	const assertions = events
+		.filter(([type]) => type === "assert")
+		.map(([, value]) => value);
+	if (
+		plans.length !== 1 ||
+		completions.length !== 1 ||
+		events.some(([type]) => type === "tapError" || type === "bailout")
+	) {
+		errors.push(
+			"TAP parser scope must have one plan and completion without errors or bailout",
+		);
+	}
+	for (const assertion of assertions) {
+		if (assertion.tapError)
+			errors.push("TAP assertion contains a parser error");
+		if (assertion.closingTestPoint !== true) leaves.push(assertion);
+	}
+	const plan = plans[0];
+	const complete = completions[0];
+	if (plan && complete) {
+		if (
+			!Number.isInteger(plan.start) ||
+			!Number.isInteger(plan.end) ||
+			plan.start !== 1 ||
+			plan.end !== assertions.length ||
+			complete.count !== assertions.length ||
+			complete.plan?.start !== plan.start ||
+			complete.plan?.end !== plan.end ||
+			complete.bailout ||
+			complete.failures?.some((failure) => failure.tapError)
+		) {
+			errors.push(
+				"TAP plan and completion counts do not match parsed assertions",
+			);
+		}
+		const parsedCounts = {
+			pass: assertions.filter((assertion) => assertion.ok).length,
+			fail: assertions.filter((assertion) => !assertion.ok).length,
+			skipped: assertions.filter((assertion) => Boolean(assertion.skip)).length,
+			todo: assertions.filter((assertion) => Boolean(assertion.todo)).length,
+		};
+		if (
+			complete.pass !== parsedCounts.pass ||
+			complete.fail !== parsedCounts.fail ||
+			complete.skip !== parsedCounts.skipped ||
+			complete.todo !== parsedCounts.todo
+		) {
+			errors.push("TAP completion totals do not match parsed assertions");
+		}
+	}
+	for (const [, childEvents] of events.filter(([type]) => type === "child")) {
+		inspectParserEvents(childEvents, leaves, errors);
+	}
+}
 
 export function parseTap(text) {
 	const versionStart = text.search(/^TAP version \d+\r?$/m);
@@ -38,48 +124,46 @@ export function parseTap(text) {
 
 	const tapText = text.slice(versionStart);
 	const events = Parser.parse(tapText, { passes: true });
-	const summaries = Object.fromEntries(
-		tapFields.map((field) => {
-			const match = tapText.match(new RegExp(`^# ${field} (\\d+)$`, "m"));
-			return [field, match ? Number(match[1]) : null];
-		}),
-	);
+	const summaries = Object.fromEntries(tapFields.map((field) => [field, null]));
 	const leaves = [];
-	let hasVersion = false;
-	let hasRootPlan = false;
-	let hasRootComplete = false;
-
-	const collect = (eventList, isRoot = false) => {
-		for (const [type, value] of eventList) {
-			if (isRoot && type === "version") hasVersion = true;
-			if (isRoot && type === "plan") hasRootPlan = true;
-			if (isRoot && type === "complete") hasRootComplete = true;
-			if (type === "child") {
-				collect(value);
-			} else if (type === "assert" && value.closingTestPoint !== true) {
-				leaves.push(value);
-			}
-		}
+	const errors = [];
+	const comments = events
+		.filter(([type]) => type === "comment")
+		.map(([, value]) => String(value).trim());
+	for (const field of tapFields) {
+		const matches = comments
+			.map((comment) => comment.match(new RegExp(`^# ${field} (\\d+)$`)))
+			.filter(Boolean);
+		if (matches.length === 1) summaries[field] = Number(matches[0][1]);
+		else errors.push(`TAP summary must contain exactly one ${field} total`);
+	}
+	const hasVersion = events.filter(([type]) => type === "version").length === 1;
+	inspectParserEvents(events, leaves, errors);
+	const computed = {
+		tests: leaves.length,
+		pass: leaves.filter((leaf) => leaf.ok && !leaf.skip && !leaf.todo).length,
+		fail: leaves.filter((leaf) => !leaf.ok && !leaf.skip && !leaf.todo).length,
+		cancelled: leaves.filter((leaf) =>
+			/cancel/i.test(String(leaf.diag?.failureType ?? "")),
+		).length,
+		skipped: leaves.filter((leaf) => Boolean(leaf.skip)).length,
+		todo: leaves.filter((leaf) => Boolean(leaf.todo)).length,
 	};
-	collect(events, true);
+	if (tapFields.some((field) => summaries[field] !== computed[field])) {
+		errors.push("Node TAP summary totals do not match computed leaf outcomes");
+	}
 
-	const valid =
-		hasVersion &&
-		hasRootPlan &&
-		hasRootComplete &&
-		summaries.tests !== null &&
-		summaries.pass !== null &&
-		summaries.fail !== null &&
-		summaries.cancelled !== null &&
-		summaries.skipped !== null &&
-		summaries.todo !== null &&
-		leaves.length > 0;
+	const valid = hasVersion && leaves.length > 0 && errors.length === 0;
 
 	return {
 		valid,
-		reason: valid ? null : "incomplete TAP stream or no leaf tests",
+		reason: valid
+			? null
+			: (errors[0] ?? "incomplete TAP stream or no leaf tests"),
 		summaries,
+		computed,
 		leaves,
+		errors,
 	};
 }
 
@@ -101,7 +185,9 @@ export function validateBaselineTap(text, expectedTests = 221) {
 		ownerSeen;
 	return {
 		valid,
-		reason: valid ? null : "baseline is not the pinned 221/219/0/2 leaf population",
+		reason: valid
+			? null
+			: "baseline is not the pinned 221/219/0/2 leaf population",
 		...summary,
 		ownerSeen,
 		parsedLeafCount: parsed.leaves.length,
@@ -115,8 +201,7 @@ function canonicalIdentity(mutant) {
 	const lineOffset = (line, column) =>
 		lines
 			.slice(0, line - 1)
-			.reduce((total, part) => total + part.length + 1, 0) +
-		column;
+			.reduce((total, part) => total + part.length + 1, 0) + column;
 	const originalText = mutant.source
 		.replaceAll("\r\n", "\n")
 		.slice(
@@ -152,7 +237,11 @@ export function isExpectedCanary(mutant) {
 	);
 }
 
-export function hasExpectedCanaryFailure(mutant, tapOutput, expectedTests = 221) {
+export function hasExpectedCanaryFailure(
+	mutant,
+	tapOutput,
+	expectedTests = 221,
+) {
 	if (!isExpectedCanary(mutant) || mutant.status !== "Killed") return false;
 	const parsed = parseTap(tapOutput);
 	if (
@@ -172,17 +261,21 @@ export function hasExpectedCanaryFailure(mutant, tapOutput, expectedTests = 221)
 	const diag = owner.diag ?? {};
 	const location = String(diag.location ?? "");
 	const stack = String(diag.stack ?? "");
-	const filePattern = /(?:^|[/\\])connectors[/\\]groupme[/\\]incremental-frontier\.test\.(?:ts|js):/;
+	const filePattern =
+		/(?:^|[/\\])connectors[/\\]groupme[/\\]incremental-frontier\.test\.(?:ts|js):/;
 	const assertionSite = new RegExp(
 		`incremental-frontier\\.test\\.(?:ts|js):(?:${expectedCanary.assertionLineStart}|${Array.from(
-			{ length: expectedCanary.assertionLineEnd - expectedCanary.assertionLineStart },
+			{
+				length:
+					expectedCanary.assertionLineEnd - expectedCanary.assertionLineStart,
+			},
 			(_, index) => expectedCanary.assertionLineStart + index + 1,
 		).join("|")}):`,
 	);
 	return (
 		owner.ok === false &&
-		owner.skip !== true &&
-		owner.todo !== true &&
+		!owner.skip &&
+		!owner.todo &&
 		diag.code === "ERR_ASSERTION" &&
 		diag.operator === "strictEqual" &&
 		diag.expected === true &&
@@ -231,7 +324,9 @@ function definitionMap(testFiles = {}) {
 }
 
 export function buildReportManifest(report) {
-	const counts = Object.fromEntries(mutantStatuses.map((status) => [status, 0]));
+	const counts = Object.fromEntries(
+		mutantStatuses.map((status) => [status, 0]),
+	);
 	const definitions = definitionMap(report.testFiles);
 	const manifest = [];
 	let syntheticCommandMutants = 0;
@@ -239,9 +334,15 @@ export function buildReportManifest(report) {
 
 	for (const [file, result] of Object.entries(report.files ?? {})) {
 		for (const mutant of result.mutants ?? []) {
-			const canonical = canonicalIdentity({ ...mutant, file, source: result.source });
+			const canonical = canonicalIdentity({
+				...mutant,
+				file,
+				source: result.source,
+			});
 			if (!Object.hasOwn(counts, mutant.status)) {
-				throw new Error(`Unknown or uncompleted mutant status: ${mutant.status}`);
+				throw new Error(
+					`Unknown or uncompleted mutant status: ${mutant.status}`,
+				);
 			}
 			counts[mutant.status] += 1;
 			const attribution = mutant.killedBy ?? mutant.coveredBy ?? [];
@@ -273,9 +374,14 @@ export function buildReportManifest(report) {
 	manifest.sort((left, right) =>
 		left.canonicalIdentity.localeCompare(right.canonicalIdentity),
 	);
-	const statusCountSum = Object.values(counts).reduce((sum, value) => sum + value, 0);
+	const statusCountSum = Object.values(counts).reduce(
+		(sum, value) => sum + value,
+		0,
+	);
 	if (statusCountSum !== manifest.length) {
-		throw new Error("Mutant status counts do not reconcile with the complete manifest");
+		throw new Error(
+			"Mutant status counts do not reconcile with the complete manifest",
+		);
 	}
 	return {
 		manifest,

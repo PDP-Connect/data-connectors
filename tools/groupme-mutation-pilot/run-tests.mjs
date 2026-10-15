@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn } from "node:child_process";
-import { appendFileSync, createWriteStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, createWriteStream, mkdirSync } from "node:fs";
 import { basename, resolve } from "node:path";
 
 const tests = [
@@ -28,7 +29,9 @@ const args =
 				"--enable-source-maps",
 				"--test",
 				"--test-reporter=tap",
-				...tests.map((name) => `reports/a2-emitted/connectors/groupme/${name}.test.js`),
+				...tests.map(
+					(name) => `reports/a2-emitted/connectors/groupme/${name}.test.js`,
+				),
 			]
 		: [
 				"--import",
@@ -40,7 +43,18 @@ const args =
 
 const capturePath = process.env.MUTATION_CAPTURE_BASELINE;
 const isUnactivated = !process.env.__STRYKER_ACTIVE_MUTANT__;
-const capture = capturePath && isUnactivated ? createWriteStream(capturePath) : null;
+const capture =
+	capturePath && isUnactivated ? createWriteStream(capturePath) : null;
+const activeMutantId = process.env.__STRYKER_ACTIVE_MUTANT__;
+const rawTapDir = process.env.MUTATION_RAW_TAP_DIR;
+const rawTapPath =
+	activeMutantId && rawTapDir
+		? `${rawTapDir}/${createHash("sha256").update(activeMutantId).digest("hex")}.tap`
+		: null;
+if (rawTapPath) mkdirSync(rawTapDir, { recursive: true });
+const mutantTap = rawTapPath
+	? createWriteStream(rawTapPath, { mode: 0o600 })
+	: null;
 const child = spawn(process.execPath, args, {
 	cwd: process.cwd(),
 	env: process.env,
@@ -49,30 +63,49 @@ const child = spawn(process.execPath, args, {
 child.stdout.on("data", (chunk) => {
 	process.stdout.write(chunk);
 	capture?.write(chunk);
+	mutantTap?.write(chunk);
 });
 child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 child.on("error", (error) => {
 	capture?.end();
+	mutantTap?.end();
 	console.error(error);
 	process.exitCode = 1;
 });
 child.on("close", (code, signal) => {
-	capture?.end();
-	if (capture) {
-		const timingFile = process.env.MUTATION_TIMING_FILE;
-		if (timingFile) {
+	const finish = () => {
+		if (mutantTap && process.env.MUTATION_RAW_TAP_INDEX) {
 			appendFileSync(
-				resolve(timingFile),
-				`${JSON.stringify({
-					event: "instrumented-unactivated-baseline",
-					mode,
-					path: basename(capturePath),
-					exitCode: code,
-					signal,
-				})}\n`,
+				process.env.MUTATION_RAW_TAP_INDEX,
+				`${JSON.stringify({ mutantId: activeMutantId, path: rawTapPath, exitCode: code, signal })}\n`,
 				{ mode: 0o600 },
 			);
 		}
+		if (capture) {
+			const timingFile = process.env.MUTATION_TIMING_FILE;
+			if (timingFile) {
+				appendFileSync(
+					resolve(timingFile),
+					`${JSON.stringify({
+						event: "instrumented-unactivated-baseline",
+						mode,
+						path: basename(capturePath),
+						exitCode: code,
+						signal,
+					})}\n`,
+					{ mode: 0o600 },
+				);
+			}
+		}
+		process.exitCode = code ?? 1;
+	};
+	const streams = [capture, mutantTap].filter(Boolean);
+	if (streams.length === 0) finish();
+	else {
+		let remaining = streams.length;
+		for (const stream of streams)
+			stream.end(() => {
+				if (--remaining === 0) finish();
+			});
 	}
-	process.exitCode = code ?? 1;
 });

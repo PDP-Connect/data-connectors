@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
 	buildReportManifest,
+	canonicalPopulationSha256,
 	classifyFailureCause,
 	expectedCanary,
 	hasExpectedCanaryFailure,
 	isExpectedCanary,
+	mutationPopulationKind,
 	validateBaselineTap,
 } from "./report-integrity.mjs";
 
@@ -23,25 +25,66 @@ const reportPath = resolve(reportsPath, `groupme-${mode}.json`);
 const baselinePath = resolve(reportsPath, `${mode}.instrumented-baseline.tap`);
 const timingPath = resolve(reportsPath, "timing.jsonl");
 const report = JSON.parse(readFileSync(reportPath, "utf8"));
+const populationKind = mutationPopulationKind(report.config?.mutate);
 const manifestData = buildReportManifest(report);
 const baselineTap = readFileSync(baselinePath, "utf8");
 const manifest = manifestData.manifest;
+const rawTapIndexPath = resolve(reportsPath, `${mode}-mutant-tap-index.jsonl`);
+const rawTapIndex = readFileSync(rawTapIndexPath, "utf8")
+	.split("\n")
+	.filter(Boolean)
+	.map((line) => JSON.parse(line));
+const eventDir = resolve(reportsPath, "stryker-events");
+const nativeEventFiles = readdirSync(eventDir)
+	.filter((name) => name.endsWith(".json"))
+	.sort()
+	.map((name) => ({
+		name,
+		at: statSync(resolve(eventDir, name)).mtime.toISOString(),
+		event: JSON.parse(readFileSync(resolve(eventDir, name), "utf8")),
+	}));
+const nativeEvents = nativeEventFiles.map(({ event }) => event);
 const canary = Object.entries(report.files ?? {}).flatMap(([file, result]) =>
 	(result.mutants ?? [])
-		.filter((mutant) => isExpectedCanary({ ...mutant, file, source: result.source }))
-		.map((mutant) => ({
-			canonicalIdentity: manifest.find((entry) => entry.mutantId === mutant.id)
-				?.canonicalIdentity,
-			mutantId: mutant.id,
-			status: mutant.status,
-			failureCause: classifyFailureCause(mutant),
-			testsCompleted: mutant.testsCompleted ?? null,
-			statusReason: mutant.statusReason ?? null,
-			expectedAssertionFailure: hasExpectedCanaryFailure(
-				{ ...mutant, file, source: result.source },
-				String(mutant.statusReason ?? ""),
-			),
-		})),
+		.filter((mutant) =>
+			isExpectedCanary({ ...mutant, file, source: result.source }),
+		)
+		.map((mutant) => {
+			const matchingEvents = nativeEventFiles.filter(
+				({ name, event }) =>
+					name.includes("onMutantTested") &&
+					event.id === mutant.id &&
+					event.status === mutant.status,
+			);
+			const matchingTaps = rawTapIndex.filter(
+				(entry) => entry.mutantId === mutant.id,
+			);
+			const tapEntry = matchingTaps[0];
+			const tapPath = tapEntry && resolve(tapEntry.path);
+			const tapText = tapPath ? readFileSync(tapPath, "utf8") : "";
+			return {
+				canonicalIdentity: manifest.find(
+					(entry) => entry.mutantId === mutant.id,
+				)?.canonicalIdentity,
+				mutantId: mutant.id,
+				status: mutant.status,
+				failureCause: classifyFailureCause(mutant),
+				testsCompleted: mutant.testsCompleted ?? null,
+				statusReason: mutant.statusReason ?? null,
+				nativeEventMatches: matchingEvents.length,
+				rawTapMatches: matchingTaps.length,
+				rawTapPath: tapEntry?.path ?? null,
+				expectedAssertionFailure: Boolean(
+					matchingEvents.length === 1 &&
+						matchingTaps.length === 1 &&
+						tapEntry.exitCode !== 0 &&
+						hasExpectedCanaryFailure(
+							{ ...mutant, file, source: result.source },
+							tapText,
+						),
+				),
+			};
+		}),
 );
 const baseline = validateBaselineTap(baselineTap);
 const timingEvents = readFileSync(timingPath, "utf8")
@@ -104,7 +147,6 @@ const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
 const manifestSha256 = createHash("sha256").update(manifestText).digest("hex");
 const canonicalMutants = manifest.map(
 	({
-		mutantId,
 		canonicalIdentity,
 		file,
 		location,
@@ -112,7 +154,6 @@ const canonicalMutants = manifest.map(
 		originalText,
 		replacement,
 	}) => ({
-		mutantId,
 		canonicalIdentity,
 		file,
 		location,
@@ -122,9 +163,7 @@ const canonicalMutants = manifest.map(
 	}),
 );
 const canonicalMutantsText = `${JSON.stringify(canonicalMutants, null, 2)}\n`;
-const canonicalPopulationSha256 = createHash("sha256")
-	.update(canonicalMutantsText)
-	.digest("hex");
+const populationSha256 = canonicalPopulationSha256(canonicalMutants);
 const summary = {
 	mode,
 	valid: runValid,
@@ -140,13 +179,10 @@ const summary = {
 	),
 	manifestSha256,
 	manifestPath: `reports/groupme-${mode}.mutants.json`,
-	canonicalPopulationSha256,
+	canonicalPopulationSha256: populationSha256,
 	canonicalPopulationPath: `reports/groupme-${mode}.canonical-mutants.json`,
 	mutantPopulation: {
-		kind:
-			process.env.MUTATION_CANARY_CONTROL === "1"
-				? "bounded canary-only local control"
-				: "fixed full pilot ranges",
+		kind: populationKind,
 		ranges: report.config?.mutate ?? null,
 		operators: "Stryker default operators; no exclusions or sampling",
 		seed: null,
@@ -180,6 +216,9 @@ const summary = {
 		assertionMessage: expectedCanary.assertionMessage,
 	},
 	canary,
+	nativeEventCount: nativeEvents.length,
+	nativeEvents: nativeEventFiles.map(({ name, at }) => ({ name, at })),
+	rawTapIndexPath: `reports/${mode}-mutant-tap-index.jsonl`,
 	buildCommand: { valid: buildValid, events: buildEvents },
 	survivorSample,
 	survivorSampleRule:
@@ -187,9 +226,13 @@ const summary = {
 	manifestStatusComplete: generated === statusCountSum,
 };
 
-writeFileSync(resolve(reportsPath, `groupme-${mode}.mutants.json`), manifestText, {
-	mode: 0o600,
-});
+writeFileSync(
+	resolve(reportsPath, `groupme-${mode}.mutants.json`),
+	manifestText,
+	{
+		mode: 0o600,
+	},
+);
 writeFileSync(
 	resolve(reportsPath, `groupme-${mode}.canonical-mutants.json`),
 	canonicalMutantsText,

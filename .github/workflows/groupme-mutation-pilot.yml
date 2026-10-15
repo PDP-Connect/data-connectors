@@ -77,6 +77,7 @@ jobs:
         run: node tools/groupme-mutation-pilot/measure.mjs baseline
 
       - name: Run ${{ matrix.mode }} Stryker command-runner pilot
+        timeout-minutes: 16
         run: node tools/groupme-mutation-pilot/measure.mjs ${{ matrix.mode }}
 
       - name: Require complete manifest, baseline and canary assertion

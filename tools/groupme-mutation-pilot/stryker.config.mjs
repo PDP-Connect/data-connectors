@@ -22,6 +22,12 @@ const config = {
 			`groupme-${mode}.json`,
 		),
 	},
+	eventReporter: {
+		baseDir: resolve(
+			process.env.PILOT_REPORT_DIR ?? "reports",
+			"stryker-events",
+		),
+	},
 	mutate:
 		process.env.MUTATION_CANARY_CONTROL === "1"
 			? ["connectors/groupme/index.ts:1491-1491"]
@@ -29,7 +35,7 @@ const config = {
 					"connectors/groupme/index.ts:1487-1495",
 					"connectors/groupme/index.ts:1528-1529",
 				],
-	reporters: ["json"],
+	reporters: ["event-recorder", "json"],
 	testRunner: "command",
 	thresholds: {
 		break: 0,
