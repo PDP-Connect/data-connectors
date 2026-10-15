@@ -4,20 +4,21 @@
 /**
  * Schema tests for the Spotify connector. Parsing is inline in index.ts (no
  * parsers.ts), so these assert the schema against literal records shaped
- * exactly as the four `emitRecord(...)` literals build them — the
- * authoritative emitted shape. All four streams are exercised, including the
- * composite recently_played id and the time_range enum on top_artists.
+ * exactly as the collector builds them. The context key/cursor and ranking
+ * window keys are also checked against the manifest contract.
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
 	playlistItemsSchema,
 	playlistsSchema,
 	profileSchema,
-	recentlyPlayedSchema,
+	recentlyPlayedContextsSchema,
 	savedTracksSchema,
 	topArtistsSchema,
+	topTracksSchema,
 	validateRecord,
 } from "./schemas.ts";
 
@@ -56,7 +57,17 @@ const TOP_ARTIST_RECORD = {
 	genres: ["pop", "pop dance"],
 	popularity: 100,
 	followers: 89_000_000,
-	time_range: "medium_term",
+	time_range: "short_term",
+};
+
+const TOP_TRACK_RECORD = {
+	id: "11dFghVXANMlKmJXsNCbNl",
+	uri: "spotify:track:11dFghVXANMlKmJXsNCbNl",
+	name: "Cut To The Feeling",
+	artist_names: ["Carly Rae Jepsen"],
+	album_name: "Cut To The Feeling",
+	duration_ms: 207_959,
+	time_range: "short_term",
 };
 
 const PLAYLIST_ITEM_RECORD = {
@@ -82,14 +93,23 @@ const PROFILE_RECORD = {
 	following: 7,
 };
 
-const RECENTLY_PLAYED_RECORD = {
-	id: "11dFghVXANMlKmJXsNCbNl:1714588925000",
-	track_id: "11dFghVXANMlKmJXsNCbNl",
-	track_name: "Cut To The Feeling",
-	artist_names: ["Carly Rae Jepsen"],
-	album_name: "Cut To The Feeling",
-	played_at: "2024-05-01T18:22:05.000Z",
-	context_type: "playlist",
+const manifest = JSON.parse(
+	readFileSync(new URL("./manifest.json", import.meta.url), "utf8"),
+) as {
+	version: string;
+	streams: Array<{
+		name: string;
+		primary_key?: string[];
+		cursor_field?: string;
+		incremental?: boolean;
+		schema: { properties: Record<string, { enum?: string[] }> };
+	}>;
+};
+
+const RECENTLY_PLAYED_CONTEXT_RECORD = {
+	uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
+	last_played_time: 1720000000123,
+	last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
 };
 
 test("playlists schema accepts a representative emitted record", () => {
@@ -163,8 +183,8 @@ test("saved_tracks schema accepts a compilation with album artists distinct from
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("top_artists schema accepts each of the three time windows", () => {
-	for (const time_range of ["short_term", "medium_term", "long_term"]) {
+test("top ranking schemas accept the two verified time windows", () => {
+	for (const time_range of ["short_term", "long_term"]) {
 		const result = topArtistsSchema.safeParse({
 			...TOP_ARTIST_RECORD,
 			time_range,
@@ -174,10 +194,13 @@ test("top_artists schema accepts each of the three time windows", () => {
 			`${time_range}: ${JSON.stringify(result.error?.issues)}`,
 		);
 	}
+	assert.equal(topTracksSchema.safeParse(TOP_TRACK_RECORD).success, true);
 });
 
-test("recently_played schema accepts a representative emitted record", () => {
-	const result = recentlyPlayedSchema.safeParse(RECENTLY_PLAYED_RECORD);
+test("recently_played_contexts schema accepts a context record, not an individual play", () => {
+	const result = recentlyPlayedContextsSchema.safeParse(
+		RECENTLY_PLAYED_CONTEXT_RECORD,
+	);
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
@@ -197,11 +220,11 @@ test("saved_tracks schema rejects a malformed ISRC (parse leak into isrc field)"
 	);
 });
 
-test("recently_played schema rejects a non-composite id (id builder regression)", () => {
+test("recently_played_contexts schema rejects a malformed time cursor", () => {
 	assert.equal(
-		recentlyPlayedSchema.safeParse({
-			...RECENTLY_PLAYED_RECORD,
-			id: "11dFghVXANMlKmJXsNCbNl",
+		recentlyPlayedContextsSchema.safeParse({
+			...RECENTLY_PLAYED_CONTEXT_RECORD,
+			last_played_time: -1,
 		}).success,
 		false,
 	);
@@ -219,12 +242,49 @@ test("validateRecord routes by stream and passes unknown streams through", () =>
 	assert.equal(validateRecord("saved_tracks", SAVED_TRACK_RECORD).ok, true);
 	assert.equal(validateRecord("top_artists", TOP_ARTIST_RECORD).ok, true);
 	assert.equal(
-		validateRecord("recently_played", RECENTLY_PLAYED_RECORD).ok,
+		validateRecord("recently_played_contexts", RECENTLY_PLAYED_CONTEXT_RECORD)
+			.ok,
+		true,
+	);
+	assert.equal(
+		validateRecord("top_tracks", {
+			id: "x",
+			uri: null,
+			name: "T",
+			artist_names: [],
+			album_name: null,
+			duration_ms: 1,
+			time_range: "short_term",
+		}).ok,
 		true,
 	);
 	assert.equal(validateRecord("playlist_items", PLAYLIST_ITEM_RECORD).ok, true);
 	assert.equal(validateRecord("profile", PROFILE_RECORD).ok, true);
-	assert.equal(validateRecord("top_tracks", { id: "x" }).ok, true);
+});
+
+test("Spotify manifest declares context cursor and ranking snapshot keys that match the emitted schemas", () => {
+	const streams = new Map(
+		manifest.streams.map((stream) => [stream.name, stream]),
+	);
+	const recent = streams.get("recently_played_contexts");
+	assert.equal(manifest.version, "0.1.26");
+	assert.deepEqual(recent?.primary_key, ["uri"]);
+	assert.equal(recent?.cursor_field, "last_played_time");
+	assert.equal(recent?.incremental, true);
+	assert.equal(
+		recentlyPlayedContextsSchema.safeParse(RECENTLY_PLAYED_CONTEXT_RECORD)
+			.success,
+		true,
+	);
+	for (const streamName of ["top_artists", "top_tracks"]) {
+		const stream = streams.get(streamName);
+		assert.deepEqual(stream?.primary_key, ["id", "time_range"]);
+		assert.equal(stream?.incremental, false);
+		assert.deepEqual(stream?.schema.properties.time_range?.enum, [
+			"short_term",
+			"long_term",
+		]);
+	}
 });
 
 test("playlist_items schema accepts a representative emitted record", () => {

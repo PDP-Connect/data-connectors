@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Spotify Connector (v0.1.2)
+ * PDPP Spotify Connector (v0.1.26)
  *
  * Uses a logged-in open.spotify.com browser session and Spotify web-player
  * GraphQL endpoints. This keeps the legacy Desktop UX and avoids pasted public
@@ -89,11 +89,16 @@ interface SpotifyProfile {
 	uri?: string;
 }
 
+type TopTimeRange = "short_term" | "long_term";
+
 interface BrowserData {
 	playlist_items: Record<string, unknown>[];
 	playlists: Record<string, unknown>[];
 	profile: Record<string, unknown> | null;
+	recently_played_contexts: Record<string, unknown>[];
 	saved_tracks: Record<string, unknown>[];
+	top_artists: Record<string, unknown>[];
+	top_tracks: Record<string, unknown>[];
 }
 
 /** Non-fatal collection problem; `event` is the diagnostic event name. */
@@ -106,22 +111,141 @@ interface BrowserCollectResult extends BrowserData {
 	warnings: BrowserWarning[];
 }
 
-/**
- * Spotify's `after` filter is strictly exclusive. Replaying the one-ms
- * boundary keeps same-timestamp plays recoverable; the composite record id
- * makes that replay idempotent at the runtime boundary.
- */
-export function recentlyPlayedAfterCursor(
-	lastPlayedAtUnix: number | undefined,
-): number | undefined {
-	if (
-		lastPlayedAtUnix === undefined ||
-		!Number.isFinite(lastPlayedAtUnix) ||
-		lastPlayedAtUnix <= 0
-	) {
-		return;
+interface BrowserEvaluationResult extends BrowserData {
+	recently_played_payload: unknown;
+	top_content_by_time_range: Partial<Record<TopTimeRange, unknown>>;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: null;
+}
+
+function textValue(value: unknown): string | null {
+	return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function safeCount(value: unknown): number | null {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? value
+		: null;
+}
+
+/** Parse Spotify's recently-played context response without treating contexts as individual plays. */
+export function parseRecentlyPlayedContexts(
+	payload: unknown,
+): Record<string, unknown>[] {
+	const root = objectRecord(payload);
+	const contexts = Array.isArray(root?.playContexts) ? root.playContexts : [];
+	return contexts.flatMap((entry) => {
+		const context = objectRecord(entry);
+		const uri = textValue(context?.uri);
+		const lastPlayedTime = safeCount(context?.lastPlayedTime);
+		if (!uri || lastPlayedTime === null) return [];
+		return [
+			{
+				uri,
+				last_played_time: lastPlayedTime,
+				last_played_track_uri: textValue(context?.lastPlayedTrackUri),
+			},
+		];
+	});
+}
+
+/** Parse the varying Pathfinder wrapper defensively: entities may be direct or nested under `data`. */
+export function parseTopContent(
+	payload: unknown,
+	timeRange: TopTimeRange,
+): {
+	top_artists: Record<string, unknown>[];
+	top_tracks: Record<string, unknown>[];
+} {
+	const root = objectRecord(payload);
+	const me = objectRecord(objectRecord(root?.data)?.me);
+	const profile = objectRecord(me?.profile);
+	function pageItems(
+		key: "topArtists" | "topTracks",
+	): Record<string, unknown>[] {
+		const page = objectRecord(profile?.[key]);
+		return Array.isArray(page?.items)
+			? page.items.flatMap((item) => {
+					const wrapper = objectRecord(item);
+					const entity = objectRecord(wrapper?.data) ?? wrapper;
+					if (!entity) return [];
+					const uri = textValue(entity.uri) ?? textValue(entity._uri);
+					const id = uri?.split(":").at(-1) ?? textValue(entity.id);
+					if (!id) return [];
+					const artists = objectRecord(entity.artists);
+					const artistItems = Array.isArray(artists?.items)
+						? artists.items
+						: [];
+					const artistNames = artistItems.flatMap((artist) => {
+						const artistRecord = objectRecord(artist);
+						const artistProfile = objectRecord(artistRecord?.profile);
+						const name =
+							textValue(artistProfile?.name) ?? textValue(artistRecord?.name);
+						return name ? [name] : [];
+					});
+					const stats = objectRecord(entity.stats);
+					const album = objectRecord(entity.albumOfTrack);
+					const duration = objectRecord(entity.trackDuration);
+					const artist = key === "topArtists";
+					return [
+						{
+							id,
+							uri,
+							name:
+								textValue(entity.name) ??
+								textValue(objectRecord(entity.profile)?.name),
+							...(artist
+								? {
+										genres: Array.isArray(entity.genres)
+											? entity.genres.filter(
+													(value): value is string => typeof value === "string",
+												)
+											: [],
+										followers: safeCount(stats?.followers),
+										popularity: safeCount(entity.popularity),
+									}
+								: {
+										artist_names: artistNames,
+										album_name: textValue(album?.name),
+										duration_ms: safeCount(duration?.totalMilliseconds),
+									}),
+							time_range: timeRange,
+						},
+					];
+				})
+			: [];
 	}
-	return Math.floor(lastPlayedAtUnix) - 1;
+	return {
+		top_artists: pageItems("topArtists"),
+		top_tracks: pageItems("topTracks"),
+	};
+}
+
+export function recentlyPlayedContextsAfterCursor(
+	contexts: Record<string, unknown>[],
+	lastPlayedTime: number | undefined,
+): { contexts: Record<string, unknown>[]; cursor: number } {
+	const prior =
+		Number.isSafeInteger(lastPlayedTime) && (lastPlayedTime ?? 0) >= 0
+			? (lastPlayedTime ?? 0)
+			: 0;
+	let cursor = prior;
+	const fresh = contexts.filter((context) => {
+		const time = context.last_played_time;
+		if (
+			typeof time !== "number" ||
+			!Number.isSafeInteger(time) ||
+			time <= prior
+		)
+			return false;
+		cursor = Math.max(cursor, time);
+		return true;
+	});
+	return { contexts: fresh, cursor };
 }
 
 /**
@@ -360,17 +484,23 @@ async function collectSpotifyWebData(
 	requestedStreams: string[],
 ): Promise<BrowserCollectResult> {
 	await openSpotify(page);
-	return await page.evaluate(async (requested) => {
+	const evaluated = await page.evaluate(async (requested) => {
 		const wanted = new Set(requested);
 		const warnings: BrowserWarning[] = [];
-		const result: BrowserData = {
+		const result: BrowserEvaluationResult = {
 			profile: null,
 			playlists: [],
 			playlist_items: [],
+			recently_played_contexts: [],
+			recently_played_payload: null,
 			saved_tracks: [],
+			top_artists: [],
+			top_tracks: [],
+			top_content_by_time_range: {},
 		};
 		const webVersion = "1.2.56.244.g7bfe3dc8";
 		let clientId: string | null = null;
+		let username: string | null = null;
 
 		function idFromUri(uri: unknown): string | null {
 			if (typeof uri !== "string") return null;
@@ -505,8 +635,12 @@ async function collectSpotifyWebData(
 				"fetchPlaylist",
 				"libraryV3",
 				"profileAttributes",
+				"userTopContent",
 			];
-			const found: Record<string, string> = {};
+			const found: Record<string, string> = {
+				userTopContent:
+					"61b7353d3625780022dbc63d459eb64cd609e7e5e2a820f9160d65030efe2e15",
+			};
 			const hashPattern =
 				/new\s+\w+\.\w+\("(\w+)","(?:query|mutation)","([a-f0-9]{64})"/g;
 			const extract = (text: string) => {
@@ -632,37 +766,42 @@ async function collectSpotifyWebData(
 			throw new Error("spotify_retryable_status_unknown");
 		}
 
-		if (wanted.has("profile")) {
+		if (wanted.has("profile") || wanted.has("recently_played_contexts")) {
 			const attrs = await gql("profileAttributes", {});
 			const pa = attrs?.data?.me?.profile;
 			if (!pa?.username) throw new Error("spotify_profile_unavailable");
-			const identityUri = pa.uri || `spotify:user:${pa.username}`;
-			let enrichment: any = null;
-			try {
-				const enriched = await fetch(
-					`https://spclient.wg.spotify.com/user-profile-view/v3/profile/${encodeURIComponent(pa.username)}`,
-					{
-						headers: {
-							authorization: `Bearer ${access}`,
-							"client-token": client,
-							accept: "application/json",
-							"app-platform": "WebPlayer",
+			username = pa.username;
+			if (wanted.has("profile")) {
+				const identityUri = pa.uri || `spotify:user:${pa.username}`;
+				let enrichment: any = null;
+				try {
+					const enriched = await fetch(
+						`https://spclient.wg.spotify.com/user-profile-view/v3/profile/${encodeURIComponent(pa.username)}`,
+						{
+							headers: {
+								authorization: `Bearer ${access}`,
+								"client-token": client,
+								accept: "application/json",
+								"app-platform": "WebPlayer",
+							},
 						},
-					},
-				);
-				enrichment = await enriched.json();
-			} catch {}
-			const sameAccount = enrichment?.uri === identityUri;
-			const imageUrl =
-				pa.imageUrl || (sameAccount ? enrichment?.image_url : null);
-			result.profile = {
-				id: pa.username,
-				display_name: pa.name ?? null,
-				followers: sameAccount ? count(enrichment?.followers_count) : null,
-				uri: identityUri,
-				images: imageUrl ? [{ url: imageUrl, width: null, height: null }] : [],
-				following: sameAccount ? count(enrichment?.following_count) : null,
-			};
+					);
+					enrichment = await enriched.json();
+				} catch {}
+				const sameAccount = enrichment?.uri === identityUri;
+				const imageUrl =
+					pa.imageUrl || (sameAccount ? enrichment?.image_url : null);
+				result.profile = {
+					id: pa.username,
+					display_name: pa.name ?? null,
+					followers: sameAccount ? count(enrichment?.followers_count) : null,
+					uri: identityUri,
+					images: imageUrl
+						? [{ url: imageUrl, width: null, height: null }]
+						: [],
+					following: sameAccount ? count(enrichment?.following_count) : null,
+				};
+			}
 		}
 
 		if (wanted.has("playlists") || wanted.has("playlist_items")) {
@@ -857,8 +996,75 @@ async function collectSpotifyWebData(
 			}
 		}
 
+		if (wanted.has("recently_played_contexts")) {
+			const params = new URLSearchParams({
+				format: "json",
+				offset: "0",
+				limit: "50",
+				filter: "default,collection-new-episodes",
+				market: "from_token",
+			});
+			const response = await fetch(
+				`https://spclient.wg.spotify.com/recently-played/v3/user/${encodeURIComponent(username ?? "")}/recently-played?${params}`,
+				{
+					headers: {
+						authorization: `Bearer ${access}`,
+						"app-platform": "WebPlayer",
+						accept: "application/json",
+					},
+				},
+			);
+			if (!response.ok)
+				throw new Error(`spotify_retryable_status_${response.status}`);
+			result.recently_played_payload = await response.json();
+		}
+
+		if (wanted.has("top_artists") || wanted.has("top_tracks")) {
+			for (const timeRange of ["SHORT_TERM", "LONG_TERM"] as const) {
+				const data = await gql("userTopContent", {
+					includeTopArtists: wanted.has("top_artists"),
+					topArtistsInput: {
+						offset: 0,
+						limit: 10,
+						sortBy: "AFFINITY",
+						timeRange,
+					},
+					includeTopTracks: wanted.has("top_tracks"),
+					topTracksInput: {
+						offset: 0,
+						limit: 4,
+						sortBy: "AFFINITY",
+						timeRange,
+					},
+				});
+				const time_range = timeRange.toLowerCase() as TopTimeRange;
+				result.top_content_by_time_range[time_range] = data;
+			}
+		}
+
 		return { ...result, warnings };
 	}, requestedStreams);
+	const {
+		recently_played_payload,
+		top_content_by_time_range = {},
+		...collected
+	} = evaluated;
+	if (
+		requestedStreams.includes("recently_played_contexts") &&
+		recently_played_payload !== undefined
+	) {
+		collected.recently_played_contexts = parseRecentlyPlayedContexts(
+			recently_played_payload,
+		);
+	}
+	for (const timeRange of ["short_term", "long_term"] as const) {
+		const payload = top_content_by_time_range[timeRange];
+		if (payload === undefined) continue;
+		const parsed = parseTopContent(payload, timeRange);
+		collected.top_artists.push(...parsed.top_artists);
+		collected.top_tracks.push(...parsed.top_tracks);
+	}
+	return collected;
 }
 
 async function emitRecordsWithCoverage(
@@ -891,10 +1097,12 @@ export async function spotifyCollect({
 	page,
 	progress,
 	requested,
+	state = {},
 }: Pick<
 	BrowserCollectContext,
 	"emit" | "emitRecord" | "page" | "progress" | "requested"
->): Promise<void> {
+> &
+	Partial<Pick<BrowserCollectContext, "state">>): Promise<void> {
 	const requestedNames = [...requested.keys()];
 	await progress("Fetching Spotify data");
 	const data = await collectSpotifyWebData(page, requestedNames);
@@ -958,20 +1166,43 @@ export async function spotifyCollect({
 			`Skipped ${skippedTracks} saved ${skippedTracks === 1 ? "track" : "tracks"} with no save date`,
 		);
 	}
-	for (const stream of ["top_artists", "recently_played"] as const) {
-		if (requested.has(stream)) {
-			await emit({
-				type: "SKIP_RESULT",
-				stream,
-				reason: "spotify_browser_stage1_deferred",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message:
-					"Spotify browser connector stage 1 preserves profile, playlists, playlist items, and saved tracks; this Web API-only stream is deferred.",
-			});
-		}
+	if (requested.has("top_artists")) {
+		await emitRecordsWithCoverage(
+			"top_artists",
+			data.top_artists,
+			emit,
+			emitRecord,
+		);
+	}
+	if (requested.has("top_tracks")) {
+		await emitRecordsWithCoverage(
+			"top_tracks",
+			data.top_tracks,
+			emit,
+			emitRecord,
+		);
+	}
+	if (requested.has("recently_played_contexts")) {
+		const priorCursor = state.recently_played_contexts;
+		const priorTime =
+			typeof priorCursor === "object" && priorCursor !== null
+				? Number((priorCursor as Record<string, unknown>).last_played_time ?? 0)
+				: 0;
+		const { contexts: newContexts, cursor } = recentlyPlayedContextsAfterCursor(
+			data.recently_played_contexts,
+			priorTime,
+		);
+		await emitRecordsWithCoverage(
+			"recently_played_contexts",
+			newContexts,
+			emit,
+			emitRecord,
+		);
+		await emit({
+			type: "STATE",
+			stream: "recently_played_contexts",
+			cursor: { last_played_time: cursor },
+		});
 	}
 }
 

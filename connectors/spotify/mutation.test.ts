@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { Page } from "playwright";
 import {
@@ -15,11 +16,90 @@ import type {
 import {
 	createSpotifyCycleDetector,
 	hasSpotifySession,
+	parseRecentlyPlayedContexts,
+	parseTopContent,
 	spotifyCollect,
 	spotifyRetryablePattern,
 	spotifyTotp,
 } from "./index.ts";
 import { playlistItemsSchema } from "./schemas.ts";
+
+function readFixture(name: string): unknown {
+	return JSON.parse(
+		readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url), "utf8"),
+	);
+}
+
+test("recently-played fixture yields context records keyed by URI with millisecond cursors", () => {
+	assert.deepEqual(
+		parseRecentlyPlayedContexts(
+			readFixture("recently-played-contexts-response.json"),
+		),
+		[
+			{
+				uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
+				last_played_time: 1720000000123,
+				last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
+			},
+		],
+	);
+});
+
+test("recently-played parser accepts empty responses and rejects malformed contexts", () => {
+	assert.deepEqual(
+		parseRecentlyPlayedContexts(
+			readFixture("recently-played-contexts-empty-response.json"),
+		),
+		[],
+	);
+	assert.deepEqual(
+		parseRecentlyPlayedContexts({ playContexts: [{ uri: "spotify:album:x" }] }),
+		[],
+	);
+});
+
+test("top-content fixture parses wrapped artist and track entities with the requested window", () => {
+	const records = parseTopContent(
+		readFixture("top-content-response.json"),
+		"short_term",
+	);
+	assert.deepEqual(records.top_artists, [
+		{
+			id: "06HL4z0CvFAxyc27GXpf02",
+			uri: "spotify:artist:06HL4z0CvFAxyc27GXpf02",
+			name: "Taylor Swift",
+			genres: ["pop"],
+			followers: 89000000,
+			popularity: null,
+			time_range: "short_term",
+		},
+	]);
+	assert.deepEqual(records.top_tracks, [
+		{
+			id: "11dFghVXANMlKmJXsNCbNl",
+			uri: "spotify:track:11dFghVXANMlKmJXsNCbNl",
+			name: "Cut To The Feeling",
+			artist_names: ["Carly Rae Jepsen"],
+			album_name: "Cut To The Feeling",
+			duration_ms: 207959,
+			time_range: "short_term",
+		},
+	]);
+});
+
+test("top-content parser accepts empty pages and identifies the fixture 429 path", () => {
+	assert.deepEqual(
+		parseTopContent(
+			readFixture("top-content-empty-response.json"),
+			"long_term",
+		),
+		{ top_artists: [], top_tracks: [] },
+	);
+	assert.equal(
+		(readFixture("spotify-429-response.json") as { error: string }).error,
+		"API rate limit exceeded",
+	);
+});
 
 function makeContext(
 	webResult: Record<string, unknown>,
@@ -61,6 +141,7 @@ function makeContext(
 			} as never,
 			progress: () => Promise.resolve(),
 			requested,
+			state: {},
 		},
 	};
 }
@@ -110,6 +191,34 @@ const webFixture = {
 		},
 	],
 	saved_tracks: [],
+	recently_played_contexts: [
+		{
+			uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
+			last_played_time: 1720000000123,
+			last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
+		},
+	],
+	top_artists: [
+		{
+			id: "06HL4z0CvFAxyc27GXpf02",
+			name: "Taylor Swift",
+			genres: ["pop"],
+			popularity: 99,
+			followers: 100,
+			time_range: "short_term",
+		},
+	],
+	top_tracks: [
+		{
+			id: "11dFghVXANMlKmJXsNCbNl",
+			uri: "spotify:track:11dFghVXANMlKmJXsNCbNl",
+			name: "Track A",
+			artist_names: ["Artist A"],
+			album_name: "Album A",
+			duration_ms: 1000,
+			time_range: "short_term",
+		},
+	],
 	warnings: [],
 };
 
@@ -180,20 +289,33 @@ test("spotify browser collect emits modern profile, playlists, and playlist_item
 	);
 });
 
-test("spotify browser collect skips Web API-only streams during stage 1", async () => {
-	const { ctx, messages } = makeContext(
-		{ ...webFixture, profile: null, playlists: [], playlist_items: [] },
-		["top_artists", "recently_played"],
-	);
+test("Spotify browser collect emits top-ranking snapshots and the recently-played cursor", async () => {
+	const { ctx, emittedRecords, messages } = makeContext(webFixture, [
+		"top_artists",
+		"top_tracks",
+		"recently_played_contexts",
+	]);
 
 	await spotifyCollect(ctx);
 
 	assert.deepEqual(
-		messages
-			.filter((message) => message.type === "SKIP_RESULT")
-			.map((message) => message.stream)
-			.sort(),
-		["recently_played", "top_artists"],
+		emittedRecords.map((record) => record.stream),
+		["top_artists", "top_tracks", "recently_played_contexts"],
+	);
+	assert.deepEqual(
+		messages.filter((message) => message.type === "SKIP_RESULT"),
+		[],
+	);
+	assert.ok(
+		messages.some(
+			(message) =>
+				message.type === "STATE" &&
+				message.stream === "recently_played_contexts" &&
+				typeof message.cursor === "object" &&
+				message.cursor !== null &&
+				"last_played_time" in message.cursor &&
+				message.cursor.last_played_time === 1720000000123,
+		),
 	);
 });
 
@@ -483,6 +605,10 @@ function spotifyWebFixtureBundle(): string {
 		["fetchPlaylist", "b".repeat(64)],
 		["libraryV3", "c".repeat(64)],
 		["profileAttributes", "d".repeat(64)],
+		[
+			"userTopContent",
+			"61b7353d3625780022dbc63d459eb64cd609e7e5e2a820f9160d65030efe2e15",
+		],
 	]
 		.map(([name, hash]) => `new a.b("${name}","query","${hash}"`)
 		.join(";");
@@ -494,6 +620,7 @@ async function collectWithInPageFetch(
 		operationName: string,
 		variables: Record<string, unknown>,
 	) => unknown,
+	recentlyPlayedStatus = 200,
 ): Promise<{
 	emittedRecords: Array<{ stream: string; data: Record<string, unknown> }>;
 	messages: EmittedMessage[];
@@ -542,6 +669,25 @@ async function collectWithInPageFetch(
 					? result
 					: new Response(JSON.stringify(result), { status: 200 });
 			}
+			if (url.startsWith("https://spclient.wg.spotify.com/recently-played/")) {
+				const parsedUrl = new URL(url);
+				assert.equal(
+					parsedUrl.pathname,
+					"/recently-played/v3/user/fixture-user/recently-played",
+				);
+				assert.equal(parsedUrl.searchParams.get("limit"), "50");
+				assert.equal(
+					new Headers(init?.headers).get("app-platform"),
+					"WebPlayer",
+				);
+				const body =
+					recentlyPlayedStatus === 200
+						? readFixture("recently-played-contexts-response.json")
+						: readFixture("spotify-429-response.json");
+				return new Response(JSON.stringify(body), {
+					status: recentlyPlayedStatus,
+				});
+			}
 			throw new Error(`unexpected fetch: ${url}`);
 		};
 		await spotifyCollect({
@@ -569,6 +715,35 @@ async function collectWithInPageFetch(
 		restoreGlobals();
 	}
 }
+
+test("recently-played context endpoint parses the fixture and surfaces its 429 status", async () => {
+	const success = await collectWithInPageFetch(
+		["recently_played_contexts"],
+		(operationName) => {
+			assert.equal(operationName, "profileAttributes");
+			return { data: { me: { profile: { username: "fixture-user" } } } };
+		},
+	);
+	assert.deepEqual(success.emittedRecords, [
+		{
+			stream: "recently_played_contexts",
+			data: {
+				uri: "spotify:album:4aawyAB9vmqN3uQ7FjRGTy",
+				last_played_time: 1720000000123,
+				last_played_track_uri: "spotify:track:2takcwOaAZWiXQijPHIx7B",
+			},
+		},
+	]);
+	await assert.rejects(
+		() =>
+			collectWithInPageFetch(
+				["recently_played_contexts"],
+				() => ({ data: { me: { profile: { username: "fixture-user" } } } }),
+				429,
+			),
+		/spotify_retryable_status_429/u,
+	);
+});
 
 test("spotify browser GraphQL retries 429 using Retry-After and classifies exhausted 5xx", async () => {
 	const originalSetTimeout = globalThis.setTimeout;
@@ -614,6 +789,64 @@ test("spotify browser GraphQL retries 429 using Retry-After and classifies exhau
 		);
 		assert.equal(serverErrorAttempts, 3);
 		assert.deepEqual(retryDelays, [2000, 1000, 2000]);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+	}
+});
+
+test("Spotify top streams call Pathfinder for both verified windows and tolerate an initial 429", async () => {
+	const originalSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+		originalSetTimeout(callback, 0);
+		return 0 as unknown as ReturnType<typeof setTimeout>;
+	}) as typeof globalThis.setTimeout;
+	try {
+		const calls: Array<{
+			operationName: string;
+			variables: Record<string, unknown>;
+		}> = [];
+		let rateLimitOnce = true;
+		const result = await collectWithInPageFetch(
+			["top_artists", "top_tracks"],
+			(operationName, variables) => {
+				calls.push({ operationName, variables });
+				if (rateLimitOnce) {
+					rateLimitOnce = false;
+					return new Response(null, {
+						status: 429,
+						headers: { "retry-after": "0" },
+					});
+				}
+				return {
+					data: {
+						me: {
+							profile: {
+								topArtists: { items: [], totalCount: 0 },
+								topTracks: { items: [], totalCount: 0 },
+							},
+						},
+					},
+				};
+			},
+		);
+		assert.deepEqual(result.emittedRecords, []);
+		assert.deepEqual(
+			calls.map(
+				({ variables }) =>
+					(variables.topArtistsInput as { timeRange: string }).timeRange,
+			),
+			["SHORT_TERM", "SHORT_TERM", "LONG_TERM"],
+		);
+		assert.ok(
+			calls.every(({ operationName }) => operationName === "userTopContent"),
+		);
+		assert.ok(
+			calls.every(
+				({ variables }) =>
+					variables.includeTopArtists === true &&
+					variables.includeTopTracks === true,
+			),
+		);
 	} finally {
 		globalThis.setTimeout = originalSetTimeout;
 	}

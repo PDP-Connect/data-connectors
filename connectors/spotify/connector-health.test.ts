@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-	recentlyPlayedAfterCursor,
+	recentlyPlayedContextsAfterCursor,
 	type SpotifyPlaylist,
 	spotifyNextPath,
 	spotifyPlaylistItemRecord,
@@ -26,10 +26,20 @@ test("Spotify playlist records preserve the current items.total response field",
 	assert.equal(playlistsSchema.safeParse(record).success, true);
 });
 
-test("Spotify recently-played cursor replays the strict boundary for idempotent recovery", () => {
-	assert.equal(recentlyPlayedAfterCursor(1_700_000_000_000), 1_699_999_999_999);
-	assert.equal(recentlyPlayedAfterCursor(0), undefined);
-	assert.equal(recentlyPlayedAfterCursor(undefined), undefined);
+test("recently-played contexts emit only records newer than the millisecond cursor", () => {
+	assert.deepEqual(
+		recentlyPlayedContextsAfterCursor(
+			[
+				{ uri: "spotify:album:a", last_played_time: 10 },
+				{ uri: "spotify:album:b", last_played_time: 11 },
+			],
+			10,
+		),
+		{
+			contexts: [{ uri: "spotify:album:b", last_played_time: 11 }],
+			cursor: 11,
+		},
+	);
 });
 
 test("Spotify next-page handling stays on the API origin and rejects no-progress links", () => {

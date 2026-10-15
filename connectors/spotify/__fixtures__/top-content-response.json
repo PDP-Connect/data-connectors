@@ -1,0 +1,39 @@
+{
+  "data": {
+    "me": {
+      "profile": {
+        "topArtists": {
+          "__typename": "ArtistPageV2",
+          "items": [
+            {
+              "data": {
+                "__typename": "Artist",
+                "uri": "spotify:artist:06HL4z0CvFAxyc27GXpf02",
+                "profile": {"name": "Taylor Swift"},
+                "genres": ["pop"],
+                "stats": {"followers": 89000000}
+              }
+            }
+          ],
+          "totalCount": 1
+        },
+        "topTracks": {
+          "__typename": "TrackPageV2",
+          "items": [
+            {
+              "data": {
+                "__typename": "Track",
+                "uri": "spotify:track:11dFghVXANMlKmJXsNCbNl",
+                "name": "Cut To The Feeling",
+                "artists": {"items": [{"profile": {"name": "Carly Rae Jepsen"}}]},
+                "albumOfTrack": {"name": "Cut To The Feeling"},
+                "trackDuration": {"totalMilliseconds": 207959}
+              }
+            }
+          ],
+          "totalCount": 1
+        }
+      }
+    }
+  }
+}

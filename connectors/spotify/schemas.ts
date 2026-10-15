@@ -22,9 +22,7 @@
  *     the wrong shape is still rejected.
  *   - `added_at` / `played_at` are ISO-8601 datetimes (required cursor inputs).
  *   - `isrc` is the 12-char ISRC code or null.
- *   - `time_range` (top_artists) is one of Spotify's three fixed windows.
- *   - recently_played `id` is the composite `"<trackId>:<playedAtMs>"` the
- *     builder constructs — validated by RECENTLY_PLAYED_ID_RE.
+ *   - `time_range` on top rankings is one of the two verified windows.
  *   - `uri` fields are Spotify's `spotify:<type>:<id>` URIs, already present on
  *     the same Web API objects the connector fetches (playlist/track/user).
  *   - `images` is the Web API's own `[{url, width, height}]` array (width/height
@@ -48,8 +46,6 @@ import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schem
 const SPOTIFY_ID_RE = /^[0-9A-Za-z]{1,40}$/; // base-62 resource id
 const ISRC_RE = /^[A-Za-z]{2}[0-9A-Za-z]{3}\d{7}$/; // ISO 3901 ISRC
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
-// recently_played id is `${track.id}:${playedAtMs}` — base-62 id, colon, epoch ms.
-const RECENTLY_PLAYED_ID_RE = /^[0-9A-Za-z]{1,40}:\d{1,20}$/;
 
 const spotifyIdSchema = z
 	.string()
@@ -170,28 +166,35 @@ export const playlistItemsSchema = z.object({
  * top_artists stream: one record per top artist, per time window.
  */
 export const topArtistsSchema = z.object({
-	id: spotifyIdSchema.optional(),
+	id: spotifyIdSchema,
+	uri: z.string().max(2000).nullable().optional(),
 	name: nameSchema,
 	genres: z.array(pdppSafeText.max(200)),
 	popularity: z.number().int().min(0).max(100).nullable(),
 	followers: z.number().int().min(0).nullable(),
-	time_range: z.enum(["short_term", "medium_term", "long_term"]),
+	time_range: z.enum(["short_term", "long_term"]),
+});
+
+/** top_tracks stream: ranked snapshot, replaced on each sync for each time window. */
+export const topTracksSchema = z.object({
+	id: spotifyIdSchema,
+	uri: z.string().max(2000).nullable(),
+	name: nameSchema,
+	artist_names: artistNamesSchema,
+	album_name: pdppSafeText.max(1000).nullable(),
+	duration_ms: z.number().int().min(0).nullable(),
+	time_range: z.enum(["short_term", "long_term"]),
 });
 
 /**
- * recently_played stream: one record per play-history entry.
- * Cursor: played_at (epoch ms). `id` is the composite track:ms key.
+ * recently_played_contexts stream: one record per recently played context,
+ * with the context's last played track. This endpoint does not return plays.
+ * Cursor: last_played_time (epoch ms).
  */
-export const recentlyPlayedSchema = z.object({
-	id: z
-		.string()
-		.regex(RECENTLY_PLAYED_ID_RE, "id must be <trackId>:<playedAtMs>"),
-	track_id: spotifyIdSchema.optional(),
-	track_name: nameSchema,
-	artist_names: artistNamesSchema,
-	album_name: pdppSafeText.max(1000).nullable(),
-	played_at: isoDateTimeSchema,
-	context_type: z.string().min(1).max(64).nullable(),
+export const recentlyPlayedContextsSchema = z.object({
+	uri: z.string().min(1).max(2000),
+	last_played_time: z.number().int().min(0),
+	last_played_track_uri: z.string().max(2000).nullable(),
 });
 
 /**
@@ -202,7 +205,8 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	playlist_items: playlistItemsSchema,
 	saved_tracks: savedTracksSchema,
 	top_artists: topArtistsSchema,
-	recently_played: recentlyPlayedSchema,
+	top_tracks: topTracksSchema,
+	recently_played_contexts: recentlyPlayedContextsSchema,
 	profile: profileSchema,
 };
 
