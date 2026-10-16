@@ -56,6 +56,7 @@ runConnector({
 					requestedUrl: url,
 					responseUrl: url,
 					status: 200,
+					link: null,
 					data: url.includes("events")
 						? events
 						: url.includes("type%3Apr")

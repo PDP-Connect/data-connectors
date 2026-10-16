@@ -695,35 +695,6 @@ export function buildDetailCoverageMessage(
  * The caller owns when to emit, and MUST emit only on a successful
  * enumeration — a fetch or parse failure never proves an empty boundary.
  */
-/**
- * Full-inventory authority is supplied by the connector's source enumeration.
- * Counts alone never establish the complete flag. An incomplete aggregate must
- * be withheld by the caller before invoking this helper.
- */
-export function fullInventoryCoverage(
-	stream: string,
-	enumeration: {
-		kind: "enumerated";
-		complete: boolean;
-		considered: number;
-		covered: number;
-	},
-): EmittedMessage {
-	const { considered, covered } = enumeration;
-	if (enumeration.kind === "enumerated" && enumeration.complete &&
-		Number.isSafeInteger(considered) && considered >= 0 &&
-		Number.isSafeInteger(covered) && covered === considered) {
-		return buildFullScanCoverageMessage(stream, considered);
-	}
-	return {
-		type: "SKIP_RESULT",
-		stream,
-		reason: "inventory_not_proven_complete",
-		recovery_hint: { action: "retry_by_runtime", retryable: true },
-		diagnostics: { enumeration },
-	};
-}
-
 export function buildFullScanCoverageMessage(
 	stream: string,
 	considered: number,

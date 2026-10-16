@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { Ajv } from "ajv";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { collectGitHubBrowser } from "./collector.ts";
 import { validateRecord } from "./schemas.ts";
@@ -192,7 +191,7 @@ test("real runtime preserves selected aggregate contracts before DONE", async ()
 	);
 	assert.deepEqual(
 		new Set(records.map((message) => message.stream)),
-		new Set(["repositories", "history"]),
+		new Set(["profile", "repositories", "events", "history"]),
 	);
 	for (const message of records) {
 		if (message.type !== "RECORD") continue;

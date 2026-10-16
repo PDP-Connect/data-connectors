@@ -15,6 +15,8 @@ export interface BrowserServices {
 		readonly responseUrl: string;
 		readonly status: number;
 		readonly data: unknown;
+		/** Observed HTTP Link header; undefined means headers were not captured. */
+		readonly link?: string | null | undefined;
 	}>;
 	now(): Date;
 	openPage(url: string): Promise<BrowserPageObservation>;

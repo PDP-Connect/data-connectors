@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { collectGitHubBrowser } from "./collector.ts";
-import { inspectInventoryPage, parseContributionHtml } from "./parsers.ts";
-import { fullInventoryCoverage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { parseContributionHtml } from "./parsers.ts";
+import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import type { BrowserServices } from "./types.ts";
 
 const owner = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>';
@@ -107,16 +107,16 @@ for (const evidence of ["match", "mismatch", "absent"] as const) {
   else { assert.equal(result.records.length, 1); assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE")); }
  });
 }
-// No captured profile list totals or REST event end metadata exist. A profile
-// repository counter cannot certify pinned/org/achievement lists; a short REST
-// array cannot certify an end. Do not invent positive evidence for these streams.
+// Singleton presence never certifies embedded lists, regardless of counters.
 for (const count of ["8", "999", "1.2k"]) {
  test(`profile: unrelated counter ${count} cannot certify embedded lists`, async () => {
   const html = (await fixture("profile-current-github.html")).replace(">8<", `>${count}<`);
-  assertIncomplete(await run("profile", { openPage: async url => page(url, html) }), "profile");
+  const result = await run("profile", { openPage: async url => page(url, html) });
+  assert.equal(result.records.length, 1);
+  assert.equal(result.messages.some(m => m.type === "DETAIL_COVERAGE" || m.op === "delete"), false);
  });
 }
-for (const length of [0, 1, 100]) {
+for (const length of [1, 100]) {
  test(`events: REST page length ${length} is not source end evidence`, async () => {
   const event = JSON.parse(await fixture("events.json"))[0];
   assertIncomplete(await run("events", { fetchPublicJson: async url => ({

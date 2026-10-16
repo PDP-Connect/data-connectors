@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-	fullInventoryCoverage,
 	type EmittedMessage,
 	type RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import {
 	type BrowserPageObservation,
 	hasExpectedOwner,
@@ -78,7 +78,7 @@ export async function collectGitHubBrowser(
 			data = { id: snapshotId(stream), [stream]: rows.map(({ id: _id, ...row }) => row) };
 		else if (stream === "events") data = {
 			id: snapshotId(stream), events: rows, fetchedAt,
-			windowDescription: "GitHub public events API retention window (up to 300 events).",
+			windowDescription: "GitHub public events API retention window (up to 300 events from the past 90 days).",
 		};
 		else if (stream === "history") data = {
 			id: snapshotId(stream), issues: rows.filter((row) => row.type === "issue"),
@@ -124,8 +124,12 @@ export async function collectGitHubBrowser(
 		reason: string,
 		counts?: CoverageCounts,
 	): Promise<void> => {
-		// All six streams are aggregate snapshots: never replace a previously
-		// complete snapshot with a partial list, including on request failure.
+		if (stream === "profile") {
+			await context.emit({ type: "SKIP_RESULT", stream, reason, message: reason,
+				recovery_hint: { action: "retry_by_runtime", retryable: true } });
+			return;
+		}
+		// Inventory snapshots are withheld until their source window is complete.
 		await context.emit(fullInventoryCoverage(stream, {
 			kind: "enumerated", complete: false,
 			considered: counts?.considered ?? 0, covered: counts?.covered ?? 0,
@@ -178,11 +182,12 @@ export async function collectGitHubBrowser(
 				});
 				return;
 			}
-			if (!parsed.complete) {
-				await incomplete("profile", "unreadable_fields", { considered: 1, covered: 0 });
-				return;
-			}
-			await incomplete("profile", "source_inventory_evidence_unavailable", { considered: 1, covered: 0 });
+			// Singleton presence only. Embedded lists are best-effort, not inventories.
+			// Never issue self coverage or derive deletes from these fields.
+			if (await flush("profile")) {
+				context.state.profile = { fetched_at: services.now().toISOString() };
+				await context.emit({ type: "STATE", stream: "profile", cursor: context.state.profile });
+			} else await incomplete("profile", "invalid_snapshot_shape");
 		});
 	}
 
@@ -254,14 +259,14 @@ export async function collectGitHubBrowser(
 					if (await emitEntity("events", event)) covered += 1;
 					else valid = false;
 				}
-				if (response.data.length < 100) {
-					// A short REST array is not an explicit source end signal.
-					break;
+				if (response.data.length === 0 || apiWindowEnded(response.link)) {
+					if (valid) await complete("events", { considered, covered });
+					else await incomplete("events", "invalid_or_duplicate_rows", { considered, covered });
+					return;
 				}
 			}
 			const counts = { considered, covered };
-			// The REST array carries neither an exact total nor explicit page-info.
-			// Keep parsing all retained fields, but never publish a partial snapshot.
+			// Neither a short page nor our loop limit establishes the source end.
 			await incomplete("events", !valid ? "invalid_or_duplicate_rows" : "end_not_proven", counts);
 		});
 	}
@@ -389,15 +394,11 @@ export async function collectGitHubBrowser(
 			const covered = issueResult.covered + prResult.covered;
 			if (
 				!issueResult.complete ||
-				!prResult.complete ||
-				issueResult.capped ||
-				prResult.capped
+				!prResult.complete
 			) {
 				await incomplete(
 					"history",
-					issueResult.capped || prResult.capped
-						? "search_cap_reached"
-						: "search_incomplete",
+					"search_incomplete",
 					{ considered, covered },
 				);
 				return;
@@ -409,8 +410,7 @@ export async function collectGitHubBrowser(
 					window: "github_author_search",
 					window_limit_per_type: HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT,
 					bounded_window:
-						issueResult.considered >= HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT ||
-						prResult.considered >= HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT,
+						issueResult.capped || prResult.capped,
 				},
 			);
 		});
@@ -461,11 +461,14 @@ export async function collectGitHubBrowser(
 				else invalid = true;
 			}
 			if (invalid) break;
-			const exhaustedPageLimit = page === HISTORY_PAGE_LIMIT;
-			if (expectedTotal === seen.size || body.items.length < HISTORY_PAGE_SIZE || exhaustedPageLimit) {
-				completeType = expectedTotal === seen.size;
+			// The API caps this search window, not the underlying authored history.
+			// Short pages and our page budget are never completion evidence.
+			if (expectedTotal === seen.size ||
+				(capped && (apiWindowEnded(response.link) || seen.size === HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT))) {
+				completeType = true;
 				break;
 			}
+			if (body.items.length === 0 || apiWindowEnded(response.link)) break;
 			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);
 		}
 		return { complete: completeType, capped, considered, covered };
@@ -507,4 +510,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: null;
+}
+
+// undefined means the adapter did not observe headers; null means an observed
+// absent Link header. Only the latter is GitHub source-end evidence.
+function apiWindowEnded(link: string | null | undefined): boolean {
+	if (link === undefined) return false;
+	if (link === null) return true;
+	return !/;\s*rel\s*=\s*(?:"[^"]*\bnext\b[^"]*"|next\b)/iu.test(link);
 }

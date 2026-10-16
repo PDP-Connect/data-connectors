@@ -95,3 +95,22 @@ test("r4 a starred row with chrome, forks and a license line is complete and par
 	assert.equal(validateRecord("starred", { id: "sample-user:starred", starred: parsed.rows.map(({ id: _id, ...rest }) => rest) }).ok, true);
 });
 
+
+test("r4 live-shaped profile remains a singleton and empty stars have source evidence", async () => {
+ const html = profile();
+ assert.equal(parseProfilePage(html, profileUrl).row?.username, "sample-user");
+ const starsUrl = profileUrl + "?page=1&tab=stars";
+ assert.equal(inspectInventoryPage(page(starsUrl, owner + emptyStarred + terminal), "starred", "sample-user", 1, 0, 0).complete, true);
+ const records: unknown[] = [];
+ const services: BrowserServices = {
+  openPage: async url => page(url, html),
+  fetchPublicJson: async url => ({ requestedUrl: url, responseUrl: url, status: 200, data: [] }),
+  now: () => new Date("2026-01-01"), sleep: async () => {},
+ };
+ await collectGitHubBrowser({
+  requested: new Set(["profile"]), state: {}, progress: async () => {},
+  emit: async message => { assert.notEqual(message.type, "DETAIL_COVERAGE"); },
+  emitRecord: async (_stream, data) => { records.push(data); },
+ }, services);
+ assert.equal(records.length, 1);
+});

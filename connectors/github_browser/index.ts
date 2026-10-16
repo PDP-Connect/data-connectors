@@ -150,6 +150,7 @@ export async function collect({
 					requestedUrl: target,
 					responseUrl: response.url,
 					status: response.status,
+					link: response.headers.get("Link"),
 					data: await response.json(),
 				};
 			}, url),
