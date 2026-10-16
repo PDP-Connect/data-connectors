@@ -591,11 +591,6 @@ async function finishPoints(
 	if (!summary.complete) {
 		return;
 	}
-	await ctx.emit({
-		type: "STATE",
-		stream: "timeline_points",
-		cursor: { last_timestamp: summary.latestPoint },
-	});
 	// Artifact reconciliation, NOT an account-completeness claim. The denominator
 	// is every point element the parser produced from the uploaded file —
 	// accounted-for plus unaccountable — measured at the parse site. The numerator
@@ -618,6 +613,13 @@ async function finishPoints(
 				considered: pointsConsidered,
 				unaccounted: summary.pointsUnaccounted,
 			},
+		});
+	} else {
+		// A known loss must be registered before any checkpoint decision.
+		await ctx.emit({
+			type: "STATE",
+			stream: "timeline_points",
+			cursor: { last_timestamp: summary.latestPoint },
 		});
 	}
 	await ctx.emit(
@@ -652,11 +654,6 @@ async function finishSegments(
 			{ stream: "timeline_segments" },
 		);
 	}
-	await ctx.emit({
-		type: "STATE",
-		stream: "timeline_segments",
-		cursor: { last_start_time: summary.latestSegment },
-	});
 	// Same artifact reconciliation as `finishPoints`. `buildFullScanCoverageMessage`
 	// is deliberately NOT used when an element went unaccounted: it forces
 	// `covered === considered`, which would re-hide the very drop this counts.
@@ -684,6 +681,12 @@ async function finishSegments(
 		);
 		return;
 	}
+	// The loss branch returns without checkpointing this stream.
+	await ctx.emit({
+		type: "STATE",
+		stream: "timeline_segments",
+		cursor: { last_start_time: summary.latestSegment },
+	});
 	await ctx.emit(
 		buildFullScanCoverageMessage("timeline_segments", summary.segmentCount),
 	);
