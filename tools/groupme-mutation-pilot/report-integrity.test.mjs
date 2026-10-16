@@ -244,3 +244,146 @@ test("missing or malformed GNU time and status receipts keep CPU not comparable"
 	});
 	assert.equal(emptyStatusReport.cpuAccounting.status, "incomplete");
 });
+
+for (const nested of [false, true]) {
+	const scope = nested ? "nested" : "root";
+	const wrap = (tap) =>
+		nested
+			? `TAP version 13\n# Subtest: nested canary\n${tap
+					.replace(/^TAP version \d+\r?\n/, "")
+					.trimEnd()
+					.split("\n")
+					.map((line) => `    ${line}`)
+					.join("\n")}\nnot ok 1 - nested canary\n1..1\n# tests 4\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 2\n# todo 0\n`
+			: tap;
+	const tap = fixture("canary-killed.tap");
+	const downgraded = tap.replace(
+		"TAP version 13\n",
+		"TAP version 13\npragma -strict\n",
+	);
+	test(`${scope} expected assertion failure remains valid with strict enabled`, () => {
+		const output = wrap(
+			tap.replace("TAP version 13\n", "TAP version 13\npragma +strict\n"),
+		);
+		assert.equal(parseTap(output).valid, true);
+		assert.equal(hasExpectedCanaryFailure(canary(), output, 4), true);
+	});
+	for (const [label, output] of [
+		["strict downgrade", downgraded],
+		[
+			"downgrade with duplicate plan",
+			downgraded.replace("1..4\n", "1..4\n1..4\n"),
+		],
+		[
+			"downgrade with trailing bailout",
+			`${downgraded}Bail out! after the plan\n`,
+		],
+		[
+			"downgrade with trailing assertion",
+			`${downgraded}not ok 5 - trailing assertion\n`,
+		],
+		["unexpected trailing extra", `${tap}unexpected non-TAP output\n`],
+	]) {
+		test(`${scope} TAP rejects ${label}`, () => {
+			assert.equal(parseTap(wrap(output)).valid, false);
+			assert.equal(hasExpectedCanaryFailure(canary(), wrap(output), 4), false);
+		});
+	}
+}
+
+const completeStatusCounts = {
+	Killed: 1,
+	Survived: 0,
+	Timeout: 0,
+	CompileError: 0,
+	RuntimeError: 0,
+	NoCoverage: 0,
+	Ignored: 0,
+};
+const validTimeFields = {
+	elapsedSeconds: "12.5",
+	userSeconds: "8.25",
+	systemSeconds: "1.5",
+	maxRssKiB: "2048",
+};
+
+for (const field of Object.keys(validTimeFields)) {
+	for (const [label, malformed] of [
+		["missing equals", field],
+		["empty value", `${field}=`],
+		["whitespace value", `${field}= \t `],
+	]) {
+		test(`GNU time rejects ${field} with ${label} independently of status counts`, () => {
+			const result = resourceAccounting({
+				gnuTimeOutput: Object.entries(validTimeFields)
+					.map(([name, value]) =>
+						name === field ? malformed : `${name}=${value}`,
+					)
+					.join(","),
+				statusCounts: completeStatusCounts,
+				exitCode: 0,
+				signal: null,
+				terminationSignal: null,
+			});
+			assert.equal(result.cpuAccounting.status, "incomplete");
+			assert.equal(result.cpuAccounting.comparable, false);
+			assert.equal(result.cpuAccounting.totalSeconds, null);
+			assert.match(
+				result.cpuAccounting.reason,
+				new RegExp(`unparseable GNU time fields: ${field}`),
+			);
+			assert.doesNotMatch(
+				result.cpuAccounting.reason,
+				/status report|did not exit normally/,
+			);
+			const value = {
+				elapsedSeconds: result.wallSeconds,
+				userSeconds: result.cpuAccounting.reportedUserSeconds,
+				systemSeconds: result.cpuAccounting.reportedSystemSeconds,
+				maxRssKiB: result.maxRssKiB,
+			}[field];
+			assert.equal(value, null);
+		});
+	}
+}
+
+test("explicit GNU time zeroes remain comparable with complete status counts", () => {
+	const result = resourceAccounting({
+		gnuTimeOutput: "elapsedSeconds=0,userSeconds=0,systemSeconds=0,maxRssKiB=0",
+		statusCounts: completeStatusCounts,
+		exitCode: 0,
+		signal: null,
+		terminationSignal: null,
+	});
+	assert.equal(result.cpuAccounting.status, "comparable");
+	assert.equal(result.cpuAccounting.totalSeconds, 0);
+	assert.equal(result.wallSeconds, 0);
+	assert.equal(result.maxRssKiB, 0);
+	assert.match(
+		result.maxRssDefinition,
+		/maximum process, not aggregate process-tree RSS/,
+	);
+});
+
+test("abnormal exits keep CPU incomplete with valid GNU time and complete status counts", () => {
+	for (const abnormal of [
+		{ exitCode: 1 },
+		{ signal: "SIGTERM" },
+		{ terminationSignal: "SIGINT" },
+	]) {
+		const result = resourceAccounting({
+			gnuTimeOutput:
+				"elapsedSeconds=12.5,userSeconds=8.25,systemSeconds=1.5,maxRssKiB=2048",
+			statusCounts: completeStatusCounts,
+			exitCode: 0,
+			signal: null,
+			terminationSignal: null,
+			...abnormal,
+		});
+		assert.equal(result.cpuAccounting.status, "incomplete");
+		assert.equal(result.cpuAccounting.totalSeconds, null);
+		assert.equal(result.wallSeconds, 12.5);
+		assert.equal(result.maxRssKiB, 2048);
+		assert.match(result.cpuAccounting.reason, /did not exit normally/);
+	}
+});

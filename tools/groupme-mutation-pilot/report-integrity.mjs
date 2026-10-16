@@ -67,10 +67,16 @@ function inspectParserEvents(events, leaves, errors) {
 	if (
 		plans.length !== 1 ||
 		completions.length !== 1 ||
-		events.some(([type]) => type === "tapError" || type === "bailout")
+		events.some(
+			([type, value, enabled]) =>
+				type === "tapError" ||
+				type === "bailout" ||
+				(type === "pragma" && value === "strict" && enabled === false) ||
+				(type === "extra" && String(value).trim() !== ""),
+		)
 	) {
 		errors.push(
-			"TAP parser scope must have one plan and completion without errors or bailout",
+			"TAP parser scope must have one plan and completion without errors, bailout, strict downgrade or extra output",
 		);
 	}
 	for (const assertion of assertions) {
@@ -340,7 +346,10 @@ export function resourceAccounting({
 	const parsed = Object.fromEntries(
 		required.map((field) => {
 			const value = fields[field];
-			const number = value === undefined ? NaN : Number(value);
+			const number =
+				typeof value === "string" && value.trim() !== ""
+					? Number(value)
+					: NaN;
 			return [field, Number.isFinite(number) && number >= 0 ? number : null];
 		}),
 	);
