@@ -1714,6 +1714,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "guardGithubPagination(): next request depends on the prior page's cursor/offset/response",
 		},
 		{
+			path: "connectors/github_browser/deferred-inventory.test.ts",
+			line: 116,
+			column: 15,
+			category: "test_assertion_sequencing",
+			note: "Run each counter variant of the busy-paginator case before asserting it is withheld.",
+		},
+		{
 			path: "connectors/github_browser/collector.ts",
 			line: 197,
 			column: 3,

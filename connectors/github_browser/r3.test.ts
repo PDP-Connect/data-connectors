@@ -196,9 +196,9 @@ test("source helper rejects incomplete or inconsistent enumerations", () => {
  assert.equal(fullInventoryCoverage("test", {kind: "enumerated", complete: true, considered: 0, covered: 0}).type, "DETAIL_COVERAGE");
 });
 
-test("contribution source totals are independent of loading layout diagnostics", () => {
+test("contribution source totals are void while the heading is loading", () => {
  const html = '<h2 id="js-contribution-activity-description" aria-busy="true">3 contributions</h2><td class="ContributionCalendar-day" data-date="2026-01-01" data-count="3" data-level="2"></td>';
- assert.equal(parseContributionHtml(html).complete, true);
+ assert.equal(parseContributionHtml(html).complete, false);
 });
 
 const starRows = '<div id="user-starred-repos"><ul><li><h3><a href="/sample-user/demo">sample-user/demo</a></h3><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div>';

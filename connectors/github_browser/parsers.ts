@@ -143,11 +143,14 @@ function insideOverlay(node: Element, scope: Element): boolean {
 	return overlay !== null && overlay !== scope && scope.contains(overlay);
 }
 
+const PENDING_SELECTOR =
+	'[aria-busy="true"], [data-loading="true"], .AnimatedEllipsis, .loading, .skeleton, .Skeleton, .placeholder, include-fragment';
+
 function isUnreadable(node: Element): boolean {
 	return (
-		node.closest('[aria-busy="true"], .loading, .skeleton, .Skeleton, .placeholder, include-fragment') !== null ||
+		node.closest(PENDING_SELECTOR) !== null ||
 		Array.from(
-			node.querySelectorAll('[aria-busy="true"], .AnimatedEllipsis, .loading, .skeleton, .Skeleton, .placeholder, include-fragment'),
+			node.querySelectorAll(PENDING_SELECTOR),
 		).some((marker) => !insideOverlay(marker, node)) ||
 		/^(?:loading(?:\.{3}|…)?|unavailable|failed to load)$/iu.test(text(node))
 	);
@@ -395,9 +398,10 @@ function starredList(document: Document): Element | null {
  */
 function contributionHeading(document: Document): Element | null {
 	return (
-		document.querySelector("h2#js-contribution-activity-description") ??
+		Array.from(document.querySelectorAll("h2#js-contribution-activity-description")).find(
+			(heading) => heading.closest(OVERLAY_SELECTOR) === null) ??
 		Array.from(document.querySelectorAll("h2.f4.text-normal.mb-2")).find(
-			(heading) => /\bcontributions?\b/iu.test(text(heading)),
+			(heading) => heading.closest(OVERLAY_SELECTOR) === null && /\bcontributions?\b/iu.test(text(heading)),
 		) ??
 		null
 	);
@@ -807,14 +811,19 @@ export function inspectInventoryPage(
 			link.closest('footer, [role="contentinfo"]') === null;
 		return (profileTab || allStars) && (!siteChrome(link, list) || headerTab);
 	});
-	const counters = tabs.flatMap(link => Array.from(link.querySelectorAll(counterSelector)));
+	// A rendered counter alone is not proof when its owning navigation is pending.
+	const counterComponents = tabs.map(link => link.closest('nav, [role="navigation"], .UnderlineNav') ?? link);
+	const countersReady = counterComponents.every(node => !isUnreadable(node));
+	const counters = tabs.flatMap(link => Array.from(link.querySelectorAll(counterSelector)))
+		.filter(node => node.closest(OVERLAY_SELECTOR) === null);
+
 	const values = counters.map(node => {
 		const raw = text(node);
 		return /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(raw) &&
 			Number.isSafeInteger(Number(raw.replaceAll(",", ""))) ? Number(raw.replaceAll(",", "")) : null;
 	}).filter((value): value is number => value !== null); // Approximate counters supply no exact evidence.
 	const counterAmbiguous = new Set(values).size > 1;
-	const total = counterAmbiguous ? null : values[0] ?? null;
+	const total = !countersReady || counterAmbiguous ? null : values[0] ?? null;
 	// Select only pagination inside the list or directly following its wrapper.
 	// Nested .pagination within .paginate-container is one component, not two.
 	const selector = ".paginate-container, .pagination";
@@ -835,11 +844,13 @@ export function inspectInventoryPage(
 	const paginators = Array.from(candidates).filter(node =>
 		!Array.from(candidates).some(other => other !== node && other.contains(node)));
 	const pagination = paginators.length === 1 ? paginators[0] : null;
-	const nextControls = Array.from(pagination?.querySelectorAll('[rel~="next"], .next_page') ?? []);
+	const nextControls = Array.from(pagination?.querySelectorAll('[rel~="next"], .next_page') ?? [])
+		.filter(node => node.closest(OVERLAY_SELECTOR) === null);
 	const next = nextControls[0] ?? null;
 	const disabled = next?.matches('[disabled], [aria-disabled="true"], .disabled') ?? false;
 	const nextUrl = next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
-	const foreignPagination = Array.from(pagination?.querySelectorAll("a[href]") ?? []).some(link => {
+	const foreignPagination = Array.from(pagination?.querySelectorAll("a[href]") ?? []).filter(link =>
+		link.closest(OVERLAY_SELECTOR) === null).some(link => {
 		const href = githubUrl(link.getAttribute("href"));
 		if (href === null) return true;
 		const url = new URL(href);
@@ -850,16 +861,18 @@ export function inspectInventoryPage(
 	});
 	const ambiguous = counterAmbiguous || foreignPagination || paginators.length > 1 || nextControls.length > 1 ||
 		(next !== null && !disabled && nextUrl === null);
+	const renderComplete = list !== null && !isUnreadable(list) && countersReady &&
+		paginators.every(node => !isUnreadable(node));
 	const terminal = pagination !== null && (disabled || next === null);
 	const result = inspectInventoryEnd({
 		page, username, stream, pageNumber, parsedRows, rejectedRows, noProgress,
-		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete: list !== null && !isUnreadable(list),
+		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete,
 		hasUnknownContinuation: ambiguous,
 		terminalProof: total !== null ? (total === parsedRows ? "exact_count" : null)
 			: terminal ? "disabled_next" : null,
 		nextUrl,
 	});
-	const trusted = result.reason !== "wrong_navigation" && result.reason !== "wrong_owner";
+	const trusted = countersReady && result.reason !== "wrong_navigation" && result.reason !== "wrong_owner";
 	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
 	return { valid: result.complete || result.reason === "remaining_continuation",
 		complete: result.complete, total, exactTotals, totalConflict: trusted && counterAmbiguous,
@@ -877,12 +890,15 @@ export function parseContributionHtml(html: string): {
 	const { document } = parseHTML(html);
 	const days: LegacyContributionDay[] = [];
 	let rejectedDays = 0;
-	const cells = document.querySelectorAll(
+	const cells = Array.from(document.querySelectorAll(
 		"td.ContributionCalendar-day, rect.day",
-	);
+	)).filter(node => node.closest(OVERLAY_SELECTOR) === null);
 	const unreadableFields: string[] = [];
-	if (Array.from(cells).some((cell) => isUnreadable(cell)) ||
-		Array.from(document.querySelectorAll(".ContributionCalendar, .js-calendar-graph, .js-yearly-contributions")).some(isUnreadable))
+	const calendars = new Set([
+		...Array.from(document.querySelectorAll(".ContributionCalendar, .ContributionCalendar-grid, .js-calendar-graph, .js-yearly-contributions")),
+		...cells.map(cell => cell.closest("table, svg") ?? cell),
+	].filter(node => node.closest(OVERLAY_SELECTOR) === null));
+	if (cells.some(isUnreadable) || Array.from(calendars).some(isUnreadable))
 		unreadableFields.push("calendar");
 	const seenDates = new Set<string>();
 	for (const cell of cells) {
@@ -931,15 +947,17 @@ export function parseContributionHtml(html: string): {
 			level,
 		});
 	}
+	const heading = contributionHeading(document);
+	if (heading !== null && isUnreadable(heading)) unreadableFields.push("total");
 	const headingMatch = /([\d,]+)\s+contribution/iu.exec(
-		text(contributionHeading(document)),
+		sourceText(heading) ?? "",
 	);
 	return {
 		days,
 		rejectedDays,
 		rawDays: cells.length,
-		complete: headingMatch?.[1] !== undefined && Number(headingMatch[1].replaceAll(",", "")) === days.reduce((sum, day) => sum + day.count, 0),
-		unreadableFields: headingMatch?.[1] ? unreadableFields : [...unreadableFields, "total"],
+		complete: unreadableFields.length === 0 && rejectedDays === 0 && headingMatch?.[1] !== undefined && Number(headingMatch[1].replaceAll(",", "")) === days.reduce((sum, day) => sum + day.count, 0),
+		unreadableFields: headingMatch?.[1] || unreadableFields.includes("total") ? unreadableFields : [...unreadableFields, "total"],
 		total: headingMatch?.[1]
 			? toInt(headingMatch[1])
 			: days.reduce((total, day) => total + day.count, 0),

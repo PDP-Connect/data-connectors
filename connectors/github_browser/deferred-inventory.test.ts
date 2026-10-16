@@ -88,4 +88,38 @@ for (const stream of ["repositories", "starred"] as const) {
   assert.deepEqual(proof.exactTotals, [3, 4]);
   assert.equal(proof.totalConflict, true);
  });
+
+ for (const marker of [
+  'aria-busy="true"', 'data-loading="true"', 'class="loading"',
+  'class="AnimatedEllipsis"', 'class="skeleton"', 'class="Skeleton"', 'class="placeholder"',
+  "deferred",
+ ]) {
+  for (const value of [null, "1.2k", "1"] as const) {
+   test(`${stream}: pending sibling paginator with counter ${value}: ${marker}`, async () => {
+    const pending = marker === "deferred" ? '<div class="pagination"><include-fragment src="/pagination"></include-fragment></div>'
+     : `<div class="pagination"><div ${marker}></div></div>`;
+    const html = owner + (value === null ? "" : count(value)) + wrap(row("demo")) + pending;
+    incomplete(await run(() => html));
+    const proof = inspectInventoryPage(page(`https://github.com/sample-user?tab=${tab}&page=1`, html), stream, "sample-user", 1, 1, 0);
+    assert.equal(proof.reason, "render_incomplete");
+    assert.deepEqual(proof.exactTotals, value === "1" ? [1] : []);
+   });
+  }
+  test(`${stream}: pending counter navigation voids ready exact count: ${marker}`, async () => {
+   const nav = marker === "deferred" ? `<nav>${count("1")}<include-fragment></include-fragment></nav>`
+    : `<nav>${count("1")}<div ${marker}></div></nav>`;
+   incomplete(await run(() => owner + nav + wrap(row("demo")) + terminal));
+  });
+ }
+ test(`${stream}: busy paginator root with deferred fragment is withheld`, async () => {
+  for (const value of [null, "1.2k"]) {
+   incomplete(await run(() => owner + (value === null ? "" : count(value)) + wrap(row("demo")) +
+    '<div class="pagination" aria-busy="true"><include-fragment src="/pagination"></include-fragment></div>'));
+  }
+ });
+ test(`${stream}: loading menus in paginator and counter navigation do not veto evidence`, async () => {
+  const overlay = '<div role="menu"><include-fragment aria-busy="true"></include-fragment><a rel="next" href="/foreign">Next</a><span class="Counter">999</span></div>';
+  const result = await run(() => owner + `<nav>${count("1")}${overlay}</nav>` + wrap(row("demo")) + terminal.replace("</div>", overlay + "</div>"));
+  assert.equal(result.records.length, 1);
+ });
 }
