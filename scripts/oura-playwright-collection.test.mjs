@@ -678,3 +678,38 @@ test("without a contact email the registration API is skipped", async () => {
   assert.equal(state.registrations.length, 0);
   assert.ok(state.domCalls.length > 0);
 });
+
+test("a failed navigation to the OAuth authorize URL logs a fixed class, not the URL", async () => {
+  // Load only the navigation helpers; the rest of the script starts the flow.
+  const helpersEnd = script.indexOf("const currentUrl = async () => {");
+  assert.ok(helpersEnd > script.indexOf("const safeGoto = async"));
+  const output = [];
+  const capture = (...args) => output.push(args.map(String).join(" "));
+  const authorizeUrl = "https://moi.ouraring.com/oauth/v2/ext/oauth-authorize"
+    + "?state=SENTINEL_STATE&code_challenge=SENTINEL_CHALLENGE";
+  let gotoCalls = 0;
+  const context = vm.createContext({
+    page: {
+      goto: async () => {
+        gotoCalls += 1;
+        throw new Error(`page.goto: net::ERR_FAILED at ${authorizeUrl}`);
+      },
+      sleep: async () => {},
+    },
+    console: Object.fromEntries(["log", "error", "warn", "info", "debug"].map((m) => [m, capture])),
+    setTimeout,
+    clearTimeout,
+  });
+  vm.runInContext(`${script.slice(0, helpersEnd)}\nglobalThis.testSafeGoto = safeGoto;`, context);
+
+  assert.equal(await context.testSafeGoto(authorizeUrl, { attempts: 2, timeout: 100, betweenMs: 1 }), false);
+  assert.equal(gotoCalls, 2);
+  assert.deepEqual(output, [
+    "[oura] Navigation failed: class=navigation_error attempt=1/2",
+    "[oura] Navigation failed: class=navigation_error attempt=2/2",
+  ]);
+  const logged = output.join("\n");
+  for (const secret of ["SENTINEL_STATE", "SENTINEL_CHALLENGE", "state=", "code_challenge", "https://"]) {
+    assert.ok(!logged.includes(secret), `console must omit ${secret}`);
+  }
+});
