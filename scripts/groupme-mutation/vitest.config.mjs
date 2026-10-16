@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -15,10 +15,15 @@ export const pins = {
 	vitest: "4.1.12",
 	vite: "8.3.2",
 };
+const installCommand =
+	"npm ci --prefix scripts/groupme-mutation/tools --ignore-scripts --no-audit --no-fund";
 for (const [name, version] of Object.entries(pins)) {
-	const installed = JSON.parse(
-		readFileSync(join(toolsRoot, "node_modules", name, "package.json"), "utf8"),
-	);
+	const manifest = join(toolsRoot, "node_modules", name, "package.json");
+	if (!existsSync(manifest))
+		throw new Error(
+			`Isolated GroupMe mutation tool ${name} is not installed. Run from the repository root: ${installCommand}`,
+		);
+	const installed = JSON.parse(readFileSync(manifest, "utf8"));
 	if (installed.name !== name || installed.version !== version) {
 		throw new Error("Unexpected isolated tool version: " + name);
 	}
@@ -44,7 +49,7 @@ export default defineConfig({
 		alias: [{ find: /^vitest$/, replacement: resolveTool("vitest") }],
 	},
 	test: {
-		// Future in-place port target. This slice runs only a temporary smoke fixture.
+		// Migrated native files are listed in vitest-files.mjs and passed explicitly.
 		include: ["connectors/groupme/*.test.ts"],
 		pool: "forks",
 		isolate: true,

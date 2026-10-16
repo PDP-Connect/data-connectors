@@ -676,6 +676,53 @@ test("CI admission uses the full push range, both rename paths, and fails closed
 	assert.notEqual(gate(false, "failure").status, 0);
 });
 
+test("helper, config and isolated-lock changes admit ordinary verification; docs-only does not", async (t) => {
+	const admit = async (name: string) => {
+		const fixture = await gitFixture(t, { README: "base\n" });
+		await mkdir(path.dirname(path.join(fixture.repo, name)), {
+			recursive: true,
+		});
+		await writeFile(path.join(fixture.repo, name), "changed\n");
+		git(fixture.repo, "add", "--all");
+		git(fixture.repo, "commit", "-qm", `change ${name}`);
+		const result = spawnSync(
+			process.execPath,
+			[path.resolve(".github/scripts/groupme-mutation-admission.mjs")],
+			{
+				cwd: fixture.repo,
+				encoding: "utf8",
+				env: {
+					...process.env,
+					EVENT_NAME: "push",
+					BEFORE_SHA: fixture.base,
+					HEAD_SHA: git(fixture.repo, "rev-parse", "HEAD"),
+					GITHUB_WORKSPACE: fixture.repo,
+				},
+			},
+		);
+		assert.equal(result.status, 0, result.stderr);
+		return JSON.parse(result.stdout) as {
+			relevant: boolean;
+			harness: boolean;
+			mutationRequired: boolean;
+		};
+	};
+	for (const name of [
+		"scripts/groupme-mutation/tools/package-lock.json",
+		"scripts/groupme-mutation/vitest.config.mjs",
+		".github/scripts/groupme-mutation-admission.mjs",
+		"package.json",
+	]) {
+		const admitted = await admit(name);
+		assert.equal(admitted.harness, true, name);
+		assert.equal(admitted.relevant, true, name);
+		assert.equal(admitted.mutationRequired, true, name);
+	}
+	const docsOnly = await admit("docs/notes.md");
+	assert.equal(docsOnly.relevant, false);
+	assert.equal(docsOnly.mutationRequired, false);
+});
+
 if (process.env.GROUPME_MUTATION_COLD_HOME_CHILD !== "1") {
 	test("package entrypoint reaches the runner with a fresh home and no .tmp", async (t) => {
 		const freshHome = await mkdtemp(

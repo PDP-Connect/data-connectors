@@ -8,9 +8,16 @@
  * fail-closed contract and why this is not a merge gate.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, type SpawnOptions } from "node:child_process";
 import { join } from "node:path";
 import { isMainModule } from "@pdpp/connector-protocol";
+import {
+	commandsFor,
+	keyOf,
+	partitionTests,
+	runCommands,
+} from "../../../../scripts/groupme-mutation/dispatch.mjs";
+import { nativeFiles } from "../../../../scripts/groupme-mutation/vitest-files.mjs";
 import {
 	connectorsDir as CONNECTORS_ROOT,
 	packageRoot as PACKAGE_ROOT,
@@ -25,7 +32,31 @@ export function testFileArgument(testFile: string): string {
 	return testFile;
 }
 
-function main(): void {
+// Same dispatcher as the full suite: native GroupMe files run under Vitest once,
+// every other selected file under node:test. A selection may omit native roster
+// entries, so only the roster entries it actually selects are validated.
+export async function relatedCommands(testFiles: string[]) {
+	const selected = testFiles.map(testFileArgument);
+	// Empty selection keeps its existing no-op policy; it is not ordinary discovery.
+	if (selected.length === 0) return [];
+	const selectedKeys = new Set(
+		selected.map((file) => keyOf(file, PACKAGE_ROOT)),
+	);
+	const roster = nativeFiles.filter((key) => selectedKeys.has(key));
+	return commandsFor(
+		partitionTests(selected, roster, PACKAGE_ROOT),
+		PACKAGE_ROOT,
+	);
+}
+
+export async function runRelatedTests(
+	testFiles: string[],
+	options: SpawnOptions = {},
+) {
+	return runCommands(await relatedCommands(testFiles), options);
+}
+
+async function main(): Promise<void> {
 	const [baseRef] = process.argv.slice(2);
 	if (!baseRef) {
 		console.error("usage: pnpm test:related <base-ref>");
@@ -61,23 +92,20 @@ function main(): void {
 		return;
 	}
 
-	execFileSync(
-		"node",
-		[
-			"--test",
-			"--import",
-			"tsx",
-			"--test-concurrency=2",
-			"--test-timeout=120000",
-			...targets.map(testFileArgument),
-		],
-		{
-			cwd: PACKAGE_ROOT,
-			stdio: "inherit",
-		},
-	);
+	const result = await runRelatedTests(targets);
+	if (result.error) {
+		console.error(result.error);
+	}
+	if (result.signal) {
+		process.kill(process.pid, result.signal);
+	} else {
+		process.exitCode = result.code ?? 1;
+	}
 }
 
 if (isMainModule(import.meta.url)) {
-	main();
+	main().catch((error: unknown) => {
+		console.error(error);
+		process.exitCode = 1;
+	});
 }

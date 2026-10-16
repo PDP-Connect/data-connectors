@@ -112,6 +112,10 @@ jobs:
       - name: Install isolated mutation tools
         run: npm ci --prefix scripts/groupme-mutation/tools --ignore-scripts --no-audit --no-fund
 
+      - name: Test GroupMe mutation helpers
+        # Root helper tests fall outside the package's scripts/**/*.test.mjs glob.
+        run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs
+
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
         run: npm run verify

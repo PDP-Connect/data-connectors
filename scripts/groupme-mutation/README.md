@@ -1,5 +1,15 @@
 # GroupMe mutation evidence
 
+## Local prerequisite
+
+The Stryker and Vitest pins live in an isolated tool tree. Install it once from the repository root before running the helper tests, the native Vitest lane, or `npm run test` in `packages/polyfill-connectors`:
+
+```sh
+npm ci --prefix scripts/groupme-mutation/tools --ignore-scripts --no-audit --no-fund
+```
+
+Missing or wrong-version tools fail closed with that command in the error message.
+
 `npm run groupme-mutation -- --mode diff --base <sha> --head <sha> --merge-base <sha>` runs the independent GroupMe oracle against registered changes in `connectors/groupme/index.ts`. The focused incremental-frontier file runs for every selected mutation. A recognized owner assertion is repeated in a fresh process; a focused pass runs all `connectors/groupme/*.test.ts` files. Each selected required fault must be killed twice; survival or unconfirmed evidence fails the run. Other failures are reported as infrastructure or selection outcomes, not kills.
 
 `--mode qualify` is a separate calibration lane. It requires repeatable kills for the page-ceiling and ascending-order production faults, and a repeated, executed timestamp-equality survivor. A tsx/V8 probe also proves that a called function with an unentered nested comparison is distinct from an executed comparison. The timestamp-equality control is never selected by ordinary diff mode. Reports include the commands, SHAs, source hashes, injected diff, leaf events, coverage reachability, durations, and restore results. Reports are written under `~/.tmp` by default. A run with no applicable mutation reports `no-mutation-proof`; it is not a score.

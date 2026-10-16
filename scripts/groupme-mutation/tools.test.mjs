@@ -89,7 +89,10 @@ test("missing and wrong isolated versions cannot fall back to root dependencies"
 			repo,
 		);
 		assert.notEqual(result.status, 0);
-		assert.match(result.stderr, /ENOENT/);
+		assert.match(
+			result.stderr,
+			/is not installed\. Run from the repository root: npm ci --prefix scripts\/groupme-mutation\/tools/,
+		);
 		const dir = join(temp, "tools/node_modules/@stryker-mutator/core");
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(

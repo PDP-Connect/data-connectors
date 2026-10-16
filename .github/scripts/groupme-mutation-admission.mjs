@@ -26,12 +26,6 @@ function commitSha(value, label) {
 
 function pathFlags(changed) {
 	const allPaths = changed.flatMap(({ paths }) => paths);
-	const relevant = allPaths.some(
-		(file) =>
-			file.startsWith("connectors/") ||
-			file.startsWith("packages/polyfill-connectors/") ||
-			file === ".github/workflows/polyfill-connectors.yml",
-	);
 	const harness = allPaths.some(
 		(file) =>
 			file.startsWith("scripts/groupme-mutation/") ||
@@ -39,6 +33,15 @@ function pathFlags(changed) {
 			file === "package.json" ||
 			file === ".github/workflows/polyfill-connectors.yml",
 	);
+	// Harness changes must also admit ordinary verification, or they skip it.
+	const relevant =
+		harness ||
+		allPaths.some(
+			(file) =>
+				file.startsWith("connectors/") ||
+				file.startsWith("packages/polyfill-connectors/") ||
+				file === ".github/workflows/polyfill-connectors.yml",
+		);
 	const groupme = allPaths.includes(target);
 	return { relevant, harness, groupme, mutationRequired: harness || groupme };
 }

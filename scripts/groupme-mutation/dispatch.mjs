@@ -14,10 +14,19 @@ export const patterns = [
 	"src/**/*.test.ts",
 ];
 
+export function keyOf(file, cwd, root = repoRoot) {
+	return relative(root, resolve(cwd, file)).split(sep).join("/");
+}
+
 export function partitionTests(discovered, roster, cwd, root = repoRoot) {
+	// An empty ordinary discovery would otherwise pass with zero commands.
+	if (discovered.length === 0)
+		throw new Error(
+			"No ordinary test files discovered; refusing to report success with zero tests",
+		);
 	const byPath = new Map();
 	for (const file of discovered) {
-		const key = relative(root, resolve(cwd, file)).split(sep).join("/");
+		const key = keyOf(file, cwd, root);
 		if (key.startsWith("../") || key === "..")
 			throw new Error("Test outside repository: " + file);
 		if (excluded.has(key)) continue;
