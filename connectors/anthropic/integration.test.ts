@@ -5505,7 +5505,7 @@ for (const [label, children] of [
 	});
 }
 
-for (const mode of ["buffered", "streaming"] as const) {
+for (const mode of ["buffered", "streaming", "manifest"] as const) {
 	for (const [label, children] of [
 		["missing list", undefined],
 		["malformed list", null],
@@ -5564,6 +5564,91 @@ for (const mode of ["buffered", "streaming"] as const) {
 			conversations: [{ uuid: "empty-parent", chat_messages: [] }],
 			projects: [],
 		});
+		assert.deepEqual(skipsOf(run.protocolMessages), []);
+		assert.equal(
+			run.protocolMessages.some(
+				(message) =>
+					message.type === "STATE" &&
+					message.stream === "messages" &&
+					"synced_at" in (message.cursor as Record<string, unknown>),
+			),
+			true,
+		);
+	});
+}
+
+for (const [label, children] of [
+	["malformed list", null],
+	["non-object child", [null]],
+	["unparseable child", [{ text: "missing identity" }]],
+] as const) {
+	test(`manifest omission: ${label} with a project discriminator names its parent`, async () => {
+		const run = await runFullCompletion("manifest", {
+			streams: ["conversations", "messages"],
+			conversations: [
+				{
+					uuid: "partial-parent",
+					name: "Partial",
+					chat_messages: children,
+					docs: [],
+				},
+				{
+					uuid: "valid-parent",
+					chat_messages: [
+						{ uuid: "valid-message", sender: "human", text: "kept" },
+					],
+				},
+			],
+			projects: [],
+		});
+		assert.deepEqual(
+			run.recordsOf("messages").map((record) => record.data.id),
+			["valid-message"],
+		);
+		assert.ok(
+			run
+				.recordsOf("conversations")
+				.some((record) => record.data.id === "valid-parent"),
+		);
+		const skips = skipsOf(run.protocolMessages);
+		assert.equal(skips.length, 1);
+		assert.equal(skips[0]?.stream, "messages");
+		assert.equal(skips[0]?.reason, "export_conversation_incomplete");
+		assert.equal(
+			(skips[0]?.diagnostics as Record<string, unknown>)?.conversation_id,
+			"partial-parent",
+		);
+		for (const stream of ["messages", "conversations"])
+			assert.equal(coverageOf(run.protocolMessages, stream).length, 0);
+		assert.equal(
+			run.protocolMessages.some(
+				(message) =>
+					message.type === "STATE" &&
+					message.stream === "messages" &&
+					"synced_at" in (message.cursor as Record<string, unknown>),
+			),
+			false,
+		);
+	});
+}
+
+for (const children of [undefined, null]) {
+	test(`manifest omission: projects-category ${children === null ? "null" : "missing"} child list stays a project`, async () => {
+		const run = await runFullCompletion("manifest", {
+			streams: ["conversations", "messages", "projects", "project_documents"],
+			projects: [
+				{
+					uuid: "real-project",
+					name: "Project",
+					docs: [],
+					chat_messages: children,
+				},
+			],
+		});
+		assert.deepEqual(
+			run.recordsOf("projects").map((record) => record.data.id),
+			["real-project"],
+		);
 		assert.deepEqual(skipsOf(run.protocolMessages), []);
 		assert.equal(
 			run.protocolMessages.some(

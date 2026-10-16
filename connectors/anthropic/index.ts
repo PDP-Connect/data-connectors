@@ -2789,10 +2789,25 @@ export async function collectAnthropic({
 		const outOfScopeByCategory = new Map<string, number>();
 		let unaccountedEntries = false;
 		for (const result of results) {
+			const accountedMalformedConversations = new Set<unknown>();
 			// A competing project discriminator must not hide an explicit
 			// malformed conversation child list from completeness accounting.
 			for (const entry of result.entries) {
 				const items = Array.isArray(entry.json) ? entry.json : [entry.json];
+				if (result.category === "conversations") {
+					for (const item of items) {
+						if (
+							isPlainObject(item) &&
+							Object.hasOwn(item, "chat_messages") &&
+							!Array.isArray(item.chat_messages)
+						) {
+							// Report the named omission before shape classification can
+							// divert this conversation to projects or leave it unmatched.
+							await accountRawConversation(item);
+							accountedMalformedConversations.add(item);
+						}
+					}
+				}
 				if (
 					items.some(
 						(item) =>
@@ -2825,7 +2840,8 @@ export async function collectAnthropic({
 			// another category's measured boundary or prove an empty stream.
 			if (result.category === "conversations") {
 				for (const raw of classified.conversations) {
-					await accountRawConversation(raw);
+					if (!accountedMalformedConversations.has(raw))
+						await accountRawConversation(raw);
 				}
 			} else if (classified.conversations.length > 0) {
 				conversationsExact = false;
