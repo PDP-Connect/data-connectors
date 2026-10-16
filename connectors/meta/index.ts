@@ -167,7 +167,7 @@ import {
 	profileRecord,
 	profileSourceFieldsAreReadable,
 } from "./parsers.ts";
-import { adsSchema, followingSchema, profileSchema, validateRecord } from "./schemas.ts";
+import { adsSchema, followingSchema, postLikesSchema, postsSchema, profileSchema, validateRecord } from "./schemas.ts";
 import type {
 	InstagramFollowingPage,
 	InstagramFollowingUser,
@@ -256,7 +256,7 @@ export async function ensureMetaSession({
 	page,
 	sendInteraction,
 }: EnsureSessionArgs): Promise<void> {
-	if (await hasSessionCookie(context)) {
+	if (await probeMetaSession({ context, page })) {
 		return;
 	}
 	await manualLoginHandoff({
@@ -595,7 +595,7 @@ function inventoryResponseOwnerMatches(body: unknown, owner: ValidatedOwner, req
 }
 
 
-function timelineOwnerMatches(data: unknown, connection: InstagramTimelineConnection, owner: ValidatedOwner): boolean {
+function timelineOwnerMatches(data: unknown, connection: InstagramTimelineConnection, owner: ValidatedOwner, requireOwner = true): boolean {
 	const viewer = data && typeof data === "object" ? (data as Record<string, unknown>).xdt_viewer : null;
 	const containers = [data, connection, viewer && typeof viewer === "object" ? viewer : null] as Array<Record<string, unknown> | null | undefined>;
 	const identities = containers.flatMap(value => value
@@ -605,15 +605,19 @@ function timelineOwnerMatches(data: unknown, connection: InstagramTimelineConnec
 	// A matching envelope cannot override another explicitly different owner.
 	if (identities.length > 0) {
 		const mediaIdentities = (connection.edges ?? []).flatMap(edge => {
-			const node = edge.node as unknown as Record<string, unknown>;
+			const node = edge?.node as unknown as Record<string, unknown> | null;
+			if (!node || typeof node !== "object") return [];
 			return [node.owner, node.user].filter(identity => identity !== undefined && identity !== null);
 		});
 		return [...identities, ...mediaIdentities].every(identity => responseOwnerMatches(identity, owner));
 	}
 	// A nonempty timeline may carry its owner on each media node instead.
 	const edges = connection.edges;
-	return Array.isArray(edges) && edges.length > 0 &&
-		edges.every(edge => inventoryResponseOwnerMatches(edge.node, owner));
+	return Array.isArray(edges) && (!requireOwner || edges.length > 0) &&
+		edges.every(edge => {
+			if (!edge?.node || typeof edge.node !== "object") return !requireOwner;
+			return inventoryResponseOwnerMatches(edge.node, owner, requireOwner);
+		});
 }
 
 // ─── Posts (timeline feed connection) ─────────────────────────────────────
@@ -638,6 +642,7 @@ interface TimelineEnvelope {
 type CompleteTimelineConnection = InstagramTimelineConnection & {
 	edges: InstagramTimelineEdge[];
 	ownerBound?: boolean;
+	ownerConflict?: boolean;
 };
 
 /**
@@ -921,16 +926,14 @@ async function readTimelineConnection(response: {
 		const pageInfo = connection?.page_info;
 		if (
 			!connection ||
-			!Array.isArray(edges) ||
-			edges.some(
-				(edge) => !edge || typeof edge.node !== "object" || edge.node === null,
-			)
+			!Array.isArray(edges)
 		) {
 			return null;
 		}
 		return {
 			...connection,
 			ownerBound: owner ? timelineOwnerMatches(body.data, connection, owner) : false,
+			ownerConflict: owner ? !timelineOwnerMatches(body.data, connection, owner, false) : false,
 			edges,
 			page_info: pageInfo ?? null,
 		};
@@ -1245,6 +1248,7 @@ export async function fetchAllPosts(
 						"meta_posts_timeline_unavailable: matching timeline response was not a successful complete page",
 					);
 				}
+				if (connection.ownerConflict) throw new Error("meta_posts_owner_conflict");
 				sawValidResponse = true;
 				sourceEdgeCount += connection.edges.length;
 				capture?.captureHttp(
@@ -1356,6 +1360,10 @@ export async function fetchAllPosts(
 				);
 			}
 		}
+		if (settledConnection?.ownerConflict) {
+			stopObserving();
+			throw new PartialWalkFailure(new Error("meta_posts_owner_conflict"), edges);
+		}
 		if (settledConnection) {
 			ownerBound &&= settledConnection.ownerBound === true;
 			edges.length = 0;
@@ -1450,6 +1458,7 @@ export async function fetchAllFollowing(
 					"meta_following_page_unavailable: following response did not prove a successful page",
 				);
 			}
+			if (ownerConflict) throw new Error("meta_following_owner_conflict");
 			const pageUsers: InstagramFollowingUser[] = [];
 			let unreadable = false;
 			for (const user of json.users) {
@@ -2479,7 +2488,7 @@ export function sourceInventoryComplete(
 export function postLikesAreComplete(edge: InstagramTimelineEdge): boolean {
 	const likers = edge.node.facepile_top_likers;
 	if (!Array.isArray(likers)) return edge.node.like_count === 0;
-	const ids = likers.map(liker => liker.id || liker.pk);
+	const ids = likers.map(liker => liker?.id || liker?.pk);
 	if (ids.some(id => typeof id !== "string" || id.length === 0)) return false;
 	return sourceInventoryComplete(new Set(ids).size, edge.node.like_count, false);
 }
@@ -2534,22 +2543,34 @@ async function reportCollectionFailure(
 async function emitPostRecords(
 	ctx: BrowserCollectContext,
 	edges: readonly InstagramTimelineEdge[],
-): Promise<void> {
+): Promise<{ posts: number; likes: number; postsReadable: boolean; likesReadable: boolean }> {
+	const result = { posts: 0, likes: 0, postsReadable: true, likesReadable: true };
 	if (ctx.requested.has("posts")) {
 		for (const edge of edges) {
-			const record = postRecord(edge);
-			if (record) {
-				await ctx.emitRecord("posts", record as RecordData);
-			}
+			let record: ReturnType<typeof postRecord> = null;
+			try {
+				record = postRecord(edge);
+				if (!record || !postsSchema.safeParse(record).success) record = null;
+			} catch { /* Reject only this malformed post. */ }
+			if (!record) { result.postsReadable = false; continue; }
+			await ctx.emitRecord("posts", record as RecordData);
+			result.posts += 1;
 		}
 	}
 	if (ctx.requested.has("post_likes")) {
 		for (const edge of edges) {
-			for (const like of postLikeRecords(edge)) {
+			let likes: ReturnType<typeof postLikeRecords> = [];
+			try {
+				likes = postLikeRecords(edge, () => { result.likesReadable = false; });
+			} catch { result.likesReadable = false; }
+			for (const like of likes) {
+				if (!postLikesSchema.safeParse(like).success) { result.likesReadable = false; continue; }
 				await ctx.emitRecord("post_likes", like as RecordData);
+				result.likes += 1;
 			}
 		}
 	}
+	return result;
 }
 
 async function emitFollowingRecords(
@@ -2680,14 +2701,13 @@ export async function collectAllStreams(
 				readable = false;
 				if (error instanceof PartialWalkFailure) edges = [...error.partial];
 			}
-			await emitPostRecords(ctx, edges);
+			const emitted = await emitPostRecords(ctx, edges);
 			const postsComplete = readable && ownerBound && sourceInventoryComplete(edges.length, observedPostCount, sourceEnd);
 			const postsWhy = readable ? undefined : "the posts read failed before the source's end";
-			if (wantsPosts) await queueInventoryResult(ctx, "posts", edges.length, postsComplete, postsWhy);
+			if (wantsPosts) await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable, postsWhy);
 			if (wantsPostLikes) {
-				const likes = edges.flatMap(postLikeRecords);
-				await queueInventoryResult(ctx, "post_likes", likes.length,
-					postsComplete && edges.every(postLikesAreComplete), postsWhy);
+				await queueInventoryResult(ctx, "post_likes", emitted.likes,
+					postsComplete && emitted.likesReadable && edges.every(postLikesAreComplete), postsWhy);
 			}
 		}
 

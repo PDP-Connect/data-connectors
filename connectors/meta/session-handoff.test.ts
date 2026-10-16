@@ -27,9 +27,9 @@ test("ensureMetaSession: read-only readiness probe stays in the sign-in tab", as
 	const gotoUrls: string[] = [];
 	const assistanceStatuses: string[] = [];
 	let liveSession = false;
+	let readinessReads = 0;
 	const context = Object.assign({} as BrowserContext, {
-		cookies: async () =>
-			liveSession ? [{ name: "sessionid", value: "token" }] : [],
+		cookies: async () => [{ name: "sessionid", value: "stale-until-assistance" }],
 		newPage: async () => {
 			throw new Error("Meta readiness must stay in the sign-in tab");
 		},
@@ -37,10 +37,11 @@ test("ensureMetaSession: read-only readiness probe stays in the sign-in tab", as
 	const page = Object.assign({} as Page, {
 		context: () => context,
 		url: () => "https://www.instagram.com/",
-		evaluate: async (fn: unknown) =>
-			String(fn).includes("PolarisViewer")
-				? { id: "u1", username: "fixture-user" }
-				: null,
+		evaluate: async (fn: unknown) => {
+			if (!String(fn).includes("PolarisViewer")) return null;
+			readinessReads += 1;
+			return liveSession ? { id: "u1", username: "fixture-user" } : null;
+		},
 		goto: async (url: string) => {
 			gotoUrls.push(url);
 			return null;
@@ -68,6 +69,7 @@ test("ensureMetaSession: read-only readiness probe stays in the sign-in tab", as
 
 	await ensureMetaSession(args);
 
+	assert.ok(readinessReads >= 2, "stale-cookie readiness is re-probed after assistance");
 	assert.deepEqual(assistanceStatuses, ["resolved"]);
 	assert.deepEqual(gotoUrls, ["https://www.instagram.com/accounts/login/"]);
 });

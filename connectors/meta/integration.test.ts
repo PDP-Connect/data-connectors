@@ -600,6 +600,7 @@ function makeCtx(args: {
 const EMPTY_POSTS: ScriptedPostsPage = {
 	json: {
 		data: {
+			user: {id: "u1", username: "testuser"},
 			xdt_api__v1__feed__user_timeline_graphql_connection: {
 				edges: [],
 				page_info: { has_next_page: false },
@@ -728,7 +729,7 @@ test("collectAllStreams: missing profile enrichment emits a partial record with 
 
 	assert.equal(harness.emitted.length, 1);
 	assert.equal(harness.emitted[0]?.data.follower_count, 12);
-	assert.deepEqual(streamFailures(harness), ["profile"]);
+	assert.deepEqual(unprovenInventories(harness), ["profile"]);
 });
 
 test("collectAllStreams: no authenticated web_info reports a profile gap", async () => {
@@ -762,6 +763,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 			{
 				json: {
 					data: {
+						user: {id: "u1", username: "testuser"},
 						xdt_api__v1__feed__user_timeline_graphql_connection: {
 							edges: [
 								{
@@ -801,6 +803,7 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
@@ -870,6 +873,7 @@ test("collectAllStreams: an unrequested posts stream never emits STATE", async (
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(
@@ -949,6 +953,7 @@ test("collectAllStreams: posts pagination walks a scroll-triggered second page",
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const posts = harness.emitted.filter((e) => e.stream === "posts");
@@ -973,6 +978,7 @@ test("collectAllStreams: posts request never observed emits a stream skip, not e
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -993,6 +999,7 @@ test("collectAllStreams: a terminal empty posts fixture completes with zero reco
 			"utf8",
 		),
 	);
+	json.data.user = {id: "u1", username: "testuser"};
 	const { ctx } = makeCtx({
 		fetchScript: {},
 		harness,
@@ -1033,6 +1040,7 @@ test("collectAllStreams: populated posts fixture emits records and completes onl
 			"utf8",
 		),
 	);
+	fixture.data.user = {id: "u1", username: "testuser"};
 	const withoutEnd = structuredClone(fixture);
 	delete withoutEnd.data.xdt_api__v1__feed__user_timeline_graphql_connection
 		.page_info;
@@ -1053,6 +1061,7 @@ test("collectAllStreams: populated posts fixture emits records and completes onl
 			NO_DELAY,
 			TEST_POSTS_CLOCK,
 			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
 		);
 
 		assert.equal(
@@ -1088,6 +1097,7 @@ test("collectAllStreams: failed posts fixture cannot complete as empty", async (
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.ok(
 		harness.protocolMessages.some(
@@ -1122,6 +1132,7 @@ test("collectAllStreams: status fail with empty timeline edges cannot complete",
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -1154,6 +1165,7 @@ test("collectAllStreams: an HTTP error carrying empty edges is skipped", async (
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -1191,6 +1203,7 @@ test("collectAllStreams: empty responses from unrelated operations or pages are 
 				NO_DELAY,
 				TEST_POSTS_CLOCK,
 				makeVirtualAdsClock(),
+				TEST_PROFILE_CLOCK,
 			);
 			assert.equal(
 				harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -1233,6 +1246,7 @@ test("collectAllStreams: an empty nonterminal timeline does not complete posts",
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -1245,18 +1259,19 @@ test("collectAllStreams: an empty nonterminal timeline does not complete posts",
 	);
 });
 
-test("collectAllStreams: a login challenge neither proves nor vetoes an empty timeline; the source's end signal decides", async () => {
+test("collectAllStreams: a login challenge vetoes completion even with same-owner exact-zero evidence", async () => {
 	const ended = JSON.parse(
 		await readFile(
 			new URL("./fixtures/posts.empty.json", import.meta.url),
 			"utf8",
 		),
 	);
+	ended.data.user = {id: "u1", username: "testuser"};
 	const unended = structuredClone(ended);
 	delete unended.data.xdt_api__v1__feed__user_timeline_graphql_connection
 		.page_info;
 	for (const { json, complete } of [
-		{ json: ended, complete: true },
+		{ json: ended, complete: false },
 		{ json: unended, complete: false },
 	]) {
 		const harness = makeRecordingEmit(validateRecord);
@@ -1264,6 +1279,7 @@ test("collectAllStreams: a login challenge neither proves nor vetoes an empty ti
 			fetchScript: {},
 			harness,
 			pageOptions: { challengePage: true },
+			profilePageUser: {id: "u1", username: "testuser", media_count: 0},
 			postsScript: [{ json, status: 200 }],
 			requestedStreams: ["posts"],
 		});
@@ -1273,6 +1289,7 @@ test("collectAllStreams: a login challenge neither proves nor vetoes an empty ti
 			NO_DELAY,
 			TEST_POSTS_CLOCK,
 			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
 		);
 		assert.equal(
 			harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -1427,6 +1444,7 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						owner: {id: "u1", username: "testuser"},
 						has_more: true,
 						next_max_id: "page2",
 						users: [{ pk: "f1", username: "followed1" }],
@@ -1435,6 +1453,7 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 				},
 				{
 					json: {
+						owner: {id: "u1", username: "testuser"},
 						has_more: false,
 						next_max_id: null,
 						users: [{ pk: "f2", username: "followed2" }],
@@ -1452,6 +1471,7 @@ test("collectAllStreams: following paginates to completion with no truncation SK
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const following = harness.emitted.filter((e) => e.stream === "following");
@@ -1498,6 +1518,7 @@ test("collectAllStreams: following accepts the record builder's id fallback when
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1532,6 +1553,7 @@ test("collectAllStreams: following hitting the page ceiling keeps its rows and i
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
@@ -1617,6 +1639,7 @@ test("collectAllStreams: a posts timeout after a valid page emits that page, the
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1653,6 +1676,7 @@ test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, 
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1682,6 +1706,7 @@ test("collectAllStreams: a browser error while advancing posts keeps the earlier
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1706,6 +1731,7 @@ test("collectAllStreams: a first-page posts failure emits nothing and skips the 
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(harness.emitted.filter((e) => e.stream === "posts").length, 0);
@@ -1737,6 +1763,7 @@ test("collectAllStreams: an HTTP 503 on a later following page emits earlier pag
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1779,6 +1806,7 @@ test("collectAllStreams: a browser error on a later following page keeps earlier
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -1808,6 +1836,7 @@ test("collectAllStreams: a first-page following failure emits nothing and skips 
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(
@@ -1863,6 +1892,7 @@ test("collectAllStreams: ads completes independently when profile web_info is un
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const ads = harness.emitted.filter((e) => e.stream === "ads");
@@ -1925,6 +1955,7 @@ test("collectAllStreams: ads all reached with empty lists stays unproven without
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.equal(harness.emitted.length, 0);
@@ -1997,6 +2028,7 @@ test("collectAllStreams: nonempty ads without source total emits records but is 
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(harness.emitted.map((record) => record.data.kind).sort(), [
@@ -2186,6 +2218,7 @@ test("collectAllStreams: ads missing a surface keeps its rows and skips only the
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	// An unreachable optional section never fails the run: the ads rows that
@@ -2209,6 +2242,7 @@ test("collectAllStreams: an unreachable ads section does not fail the run or the
 			"/api/v1/friendships/u1/following/": [
 				{
 					json: {
+						owner: {id: "u1", username: "testuser"},
 						has_more: false,
 						next_max_id: null,
 						users: [{ pk: "f1", username: "followed1" }],
@@ -2231,6 +2265,7 @@ test("collectAllStreams: an unreachable ads section does not fail the run or the
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	// The run reports no stream failure, so the runtime ends it DONE succeeded.
@@ -2302,6 +2337,7 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
@@ -2357,6 +2393,7 @@ test("collectAllStreams: successful category clicks without a destination list e
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
@@ -2392,6 +2429,7 @@ test("collectAllStreams: ads navigation failure reports only a bounded surface s
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	const skip = harness.protocolMessages.find(
@@ -2526,6 +2564,7 @@ async function collectAdsInChromium(pages: {
 			NO_DELAY,
 			TEST_POSTS_CLOCK,
 			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
 		);
 		return harness;
 	} finally {

@@ -62,7 +62,8 @@ export function isoFromTakenAt(
 		return null;
 	}
 	const ms = raw > 1e12 ? raw : raw * 1000;
-	return new Date(ms).toISOString();
+	const date = new Date(ms);
+	return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 /** Best available image URL for a post: single-image posts carry
@@ -218,7 +219,10 @@ export function profileRecord(
 }
 
 export function postRecord(edge: InstagramTimelineEdge): PostRecord | null {
-	const node = edge.node;
+	const node = edge?.node;
+	if (!node || typeof node !== "object") return null;
+	const timestamp = node.taken_at ?? node.taken_at_timestamp;
+	if (timestamp != null && isoFromTakenAt(node.taken_at, node.taken_at_timestamp) === null) return null;
 	const id = node.id ?? node.pk ?? node.media_id ?? node.code ?? null;
 	if (!id) {
 		return null;
@@ -240,15 +244,17 @@ export function postRecord(edge: InstagramTimelineEdge): PostRecord | null {
  *  bounded top-likers sample per post (no full-likers listing endpoint is
  *  reachable from a logged-in web session) — see the connector header for
  *  the honest coverage note this implies. */
-export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
+export function postLikeRecords(edge: InstagramTimelineEdge, onUnreadable?: () => void): PostLikeRecord[] {
 	const node = edge.node;
 	const postId = node.id ?? node.pk ?? node.media_id ?? node.code ?? null;
 	if (!postId) {
 		return [];
 	}
 	const likers = node.facepile_top_likers ?? [];
+	if (!Array.isArray(likers)) { onUnreadable?.(); return []; }
 	const out: PostLikeRecord[] = [];
 	for (const [liker_ordinal, liker] of likers.entries()) {
+		if (!liker || typeof liker !== "object") { onUnreadable?.(); continue; }
 		const userId = liker.id || liker.pk || "";
 		out.push({
 			liker_ordinal,

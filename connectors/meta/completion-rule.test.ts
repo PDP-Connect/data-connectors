@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import "./ads-dom.test.ts";
+import "./session-handoff.test.ts";
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -826,6 +827,7 @@ async function sourceRun(options: {
  likeCount?: number | undefined; duplicate?: boolean;
  owner?: unknown; empty?: boolean; profile?: boolean; challenge?: "dom" | "body" | "late" | undefined; profileOwner?: unknown;
  extraStreams?: string[]; envelopeOwner?: unknown; nodeOwner?: unknown;
+ nodes?: Record<string, unknown>[]; reached?: string[];
  viewerOwner?: unknown; followingIdentity?: Record<string, unknown> | undefined;
 }) {
  const following = options.empty ? [] : [{ pk: "f1", username: "one" }];
@@ -838,7 +840,7 @@ async function sourceRun(options: {
  const {ctx, emitNavigation, emitRequest, emitResponse} = result;
  ctx.reportStreamFailure = async () => { assert.fail("enrichment must not report a fatal stream failure"); };
  let challenge = options.challenge === "dom";
- ctx.progress = async message => { if (options.challenge === "late" && message === "Fetching Instagram following list") challenge = true; };
+ ctx.progress = async message => { options.reached?.push(message); if (options.challenge === "late" && message === "Fetching Instagram following list") challenge = true; };
  const evaluate = ctx.page.evaluate;
  ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
   if (arg && typeof arg === "object" && "path" in arg) {
@@ -864,7 +866,7 @@ async function sourceRun(options: {
     facepile_top_likers: [{id: "l1", username: "liker", profile_pic_url: ""}]}};
    const response = nonterminalPostsResponse(options.duplicate ? [edge, edge] : [edge], null, ctx.page);
    response.json = async () => ({...(options.challenge === "body" ? {challenge: {url: "/challenge/"}} : {}), data: {...(options.envelopeOwner !== undefined ? {user: options.envelopeOwner} : {}), ...(options.viewerOwner !== undefined ? {xdt_viewer: {user: options.viewerOwner}} : {}), xdt_api__v1__feed__user_timeline_graphql_connection: {
-    ...(owner == null ? {} : {owner}), edges: options.empty ? [] : options.duplicate ? [edge, edge] : [edge],
+    ...(owner == null ? {} : {owner}), edges: options.nodes ? options.nodes.map(node => ({node})) : options.empty ? [] : options.duplicate ? [edge, edge] : [edge],
     ...(options.pageInfo !== undefined ? {page_info: options.pageInfo} : {}),
    }}});
    emitRequest(response.request());
@@ -943,7 +945,7 @@ for (const stream of ["posts", "following"] as const) {
    test(`response owner evidence gates ${stream}, owner=${JSON.stringify(owner)}, exact=${exact}`, async () => {
     const harness = await sourceRun({stream, owner, total: exact ? 1 : undefined,
      pageInfo: {has_next_page: false}, followingEnd: false});
-    assert.equal(harness.emitted.length, 1);
+    assert.equal(harness.emitted.length, owner === null ? 1 : 0);
     const complete = stream === "following" && owner === null && exact;
     assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), complete);
     assert.equal(harness.protocolMessages.some(m => m.type === "DETAIL_COVERAGE"), complete);
@@ -996,13 +998,13 @@ for (const nodeOwner of [{id: "u1", username: "testuser"}, {id: "other"}]) {
 test("matching timeline owner cannot override mismatched envelope owner", async () => {
  const harness = await sourceRun({stream: "posts", envelopeOwner: {id: "other"}, total: 1, pageInfo: {has_next_page: false}});
  assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
- assert.equal(harness.emitted.length, 1);
+ assert.equal(harness.emitted.length, 0);
 });
 
 test("matching envelope cannot override mismatched media owner", async () => {
  const harness = await sourceRun({stream: "posts", nodeOwner: {id: "other"}, total: 1, pageInfo: {has_next_page: false}});
  assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
- assert.equal(harness.emitted.length, 1);
+ assert.equal(harness.emitted.length, 0);
 });
 
 for (const {name, total, identity, challenge, complete} of [
@@ -1016,7 +1018,7 @@ for (const {name, total, identity, challenge, complete} of [
  test(`owner-less following: ${name}`, async () => {
   const harness = await sourceRun({stream: "following", owner: null, total,
    followingIdentity: identity, challenge, duplicate: true, followingEnd: false});
-  assert.equal(harness.emitted.length, 1, "deduplicated rows retained");
+  assert.equal(harness.emitted.length, identity ? 0 : 1, "only non-conflicting rows retained");
   assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), complete);
   assert.equal(harness.protocolMessages.some(m => m.type === "DETAIL_COVERAGE"), complete);
   assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" &&
@@ -1046,3 +1048,72 @@ for (const {name, total, viewerOwner, envelopeOwner, challenge, complete} of [
   }
  });
 }
+
+for (const later of [false, true]) {
+ for (const kind of ["date", "liker"] as const) {
+  test(`malformed ${kind} row later=${later} preserves readable rows and later streams`, async () => {
+   const good = {id: "good", taken_at: 1_700_000_000, like_count: 1,
+    facepile_top_likers: [{id: "good-liker", username: "good"}]};
+   const bad = kind === "date" ? {id: "bad", taken_at: 1e20} :
+    {id: "bad", like_count: 3, facepile_top_likers: [null, {id: "retained", username: "retained"}, {id: 12}]};
+   const reached: string[] = [];
+   const harness = await sourceRun({stream: "posts", extraStreams: ["post_likes", "following", "ads"],
+    nodes: later ? [good, bad] : [bad, good], total: 2, pageInfo: {has_next_page: false}, followingEnd: false, reached});
+   assert.ok(harness.emitted.some(r => r.stream === "posts" && r.data.id === "good"));
+   assert.ok(harness.emitted.some(r => r.stream === "post_likes" && r.data.user_id === "good-liker"));
+   if (kind === "date") assert.equal(harness.emitted.some(r => r.stream === "posts" && r.data.id === "bad"), false);
+   else assert.ok(harness.emitted.some(r => r.stream === "post_likes" && r.data.user_id === "retained"));
+   const affected = kind === "date" ? "posts" : "post_likes";
+   assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === affected &&
+    m.reason === "inventory_not_proven_complete" && isRetryable(m)));
+   assert.equal(harness.protocolMessages.some(m => m.type === "STATE" && m.stream === affected), false);
+   assert.ok(harness.emitted.some(r => r.stream === "following"));
+   assert.ok(reached.includes("Fetching Instagram ad preferences"));
+   assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === "ads"), "ads reaches its result boundary");
+  });
+ }
+}
+test("conflicting timeline owner rejects child likes", async () => {
+ const harness = await sourceRun({stream: "post_likes", owner: {id: "other"}, total: 1,
+  likeCount: 1, pageInfo: {has_next_page: false}});
+ assert.equal(harness.emitted.length, 0);
+ assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
+});
+
+test("following conflict on later page retains only the validated prefix", async () => {
+ const {ctx, harness} = setup(["following"], [
+  {status: 200, json: {owner: {id: "u1"}, users: [{id: "good", username: "good"}], has_more: true, next_max_id: "next"}},
+  {status: 200, json: {owner: {id: "other"}, users: [{id: "bad", username: "bad"}], has_more: false}},
+ ]);
+ await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+ assert.deepEqual(harness.emitted.map(r => r.data.id), ["good"]);
+ assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
+ assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && isRetryable(m)));
+});
+test("posts conflict on later page retains only the validated prefix and its likes", async () => {
+ const {ctx, harness, emitRequest, emitNavigation} = setup(["posts", "post_likes"]);
+ let pending: ((response: Response) => void) | null = null;
+ let pageNumber = 0;
+ const respond = () => {
+  const first = pageNumber++ === 0;
+  const id = first ? "good" : "bad";
+  const response = nonterminalPostsResponse([], first ? null : "next", ctx.page);
+  response.json = async () => ({data: {xdt_api__v1__feed__user_timeline_graphql_connection: {
+   owner: {id: first ? "u1" : "other"},
+   edges: [{node: {id, like_count: 1, facepile_top_likers: [{id: id + "-liker"}]}}],
+   page_info: {has_next_page: first, end_cursor: first ? "next" : null},
+  }}});
+  emitRequest(response.request()); pending?.(response); pending = null;
+ };
+ ctx.page.waitForResponse = (() => new Promise<Response>(resolve => {pending = resolve;})) as Page["waitForResponse"];
+ ctx.page.goto = (() => {emitNavigation(); if (pending) respond(); return Promise.resolve(null);}) as Page["goto"];
+ const evaluate = ctx.page.evaluate;
+ ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
+  if (String(fn).includes("scrollTo")) respond();
+  return evaluate(fn as never, arg as never);
+ }) as Page["evaluate"];
+ await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+ assert.deepEqual(harness.emitted.map(r => r.stream === "posts" ? r.data.id : r.data.post_id), ["good", "good"]);
+ assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
+ for (const stream of ["posts", "post_likes"]) assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream && isRetryable(m)));
+});
