@@ -314,3 +314,29 @@ for (const counter of [false, true]) {
   assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
  });
 }
+
+for (const [label, primary, fallback, restExpected, completes] of [
+ ["unreadable primary conflicts survive readable fallback", starCount(1) + starCount(2), starRows + terminal, false, false],
+ ["unreadable fallback conflicts survive REST end", starRows, starCount(1) + starCount(2), true, false],
+ ["agreeing unreadable primary totals allow complete fallback", starCount(1) + starCount(1), starRows + starCount(1) + terminal, false, true],
+ ["agreeing unreadable fallback totals allow REST end", starRows, starCount(1) + starCount(1), true, true],
+] as const) {
+ test(`starred evidence accumulator: ${label}`, async () => {
+  let restCalled = false;
+  const result = await run("starred", {
+   openPage: async url => page(url, owner + (url.includes("/stars/") ? fallback : primary)),
+   fetchPublicJson: async url => {
+    restCalled = true;
+    return { requestedUrl: url, responseUrl: url, status: 200, data: [restRepo], link: null };
+   },
+  });
+  assert.equal(restCalled, restExpected);
+  if (!completes) assertIncomplete(result, "starred");
+  else {
+   assert.equal((result.records[0]?.starred as unknown[]).length, 1);
+   assert.notEqual(result.state.starred, result.prior);
+   assert.ok(result.messages.some(message => message.type === "STATE"));
+   assert.ok(result.messages.some(message => message.type === "DETAIL_COVERAGE"));
+  }
+ });
+}

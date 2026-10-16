@@ -779,7 +779,7 @@ export function inspectInventoryPage(
 	parsedRows: number,
 	rejectedRows: number,
 	noProgress = false,
-): { valid: boolean; complete: boolean; total: number | null; nextUrl: string | null; reason: string } {
+): { valid: boolean; complete: boolean; total: number | null; exactTotals: number[]; totalConflict: boolean; nextUrl: string | null; reason: string } {
 	const { document } = parseHTML(page.html);
 	const tab = stream === "repositories" ? "repositories" : "stars";
 	const list = stream === "repositories" ? document.querySelector("#user-repositories-list") : starredList(document);
@@ -859,8 +859,11 @@ export function inspectInventoryPage(
 			: terminal ? "disabled_next" : null,
 		nextUrl,
 	});
+	const trusted = result.reason !== "wrong_navigation" && result.reason !== "wrong_owner";
+	const exactTotals = trusted ? values.filter((value): value is number => value !== null) : [];
 	return { valid: result.complete || result.reason === "remaining_continuation",
-		complete: result.complete, total, nextUrl: result.nextUrl, reason: result.reason };
+		complete: result.complete, total, exactTotals, totalConflict: trusted && counterAmbiguous,
+		nextUrl: result.nextUrl, reason: result.reason };
 }
 
 export function parseContributionHtml(html: string): {

@@ -5,6 +5,7 @@ import type {
 	EmittedMessage,
 	RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { InventoryEvidence } from "./inventory-evidence.ts";
 import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import {
 	type BrowserPageObservation,
@@ -196,12 +197,9 @@ export async function collectGitHubBrowser(
 		await runIsolated(stream, async () => {
 			const seen = new Set<string>();
 			let covered = 0;
-			let expectedTotal: number | null = null;
-			const exactTotals = new Set<number>();
-			const retainTotal = (proof: ReturnType<typeof inspectInventoryPage>): void => {
-				if (proof.total !== null && proof.reason !== "wrong_navigation" && proof.reason !== "wrong_owner")
-					exactTotals.add(proof.total);
-			};
+			const evidence = new InventoryEvidence();
+			let endProven = false;
+			let failure: string | null = "page_limit_reached";
 			let entriesComplete = true;
 			let rejected = 0;
 			let url = inventoryUrl(username, stream, 1);
@@ -209,14 +207,14 @@ export async function collectGitHubBrowser(
 				let page = await services.openPage(url);
 				let parsed = inventoryRows(stream, page.html);
 				let proof = inspectInventoryPage(page, stream, username, pageNumber, new Set([...seen, ...parsed.rows.map(row => row.id)]).size, rejected + parsed.rejectedRows);
-				retainTotal(proof);
+				evidence.add(proof);
 				if (stream === "starred" && pageNumber === 1 && (proof.reason === "terminal_unverified" || proof.reason === "unreadable_list")) {
 					const primary = { parsed, proof };
 					url = `${GITHUB}/stars/${username}?page=1`;
 					page = await services.openPage(url);
 					parsed = inventoryRows(stream, page.html);
 					proof = inspectInventoryPage(page, stream, username, pageNumber, parsed.rows.length, parsed.rejectedRows);
-					retainTotal(proof);
+					evidence.add(proof);
 					// An unreadable alternate route must not discard a readable primary list.
 					if (proof.reason === "unreadable_list" && primary.proof.reason === "terminal_unverified") {
 						parsed = primary.parsed;
@@ -233,32 +231,26 @@ export async function collectGitHubBrowser(
 					seen.add(row.id);
 					if (await emitEntity(stream, row)) covered += 1;
 				}
-				if (exactTotals.size > 1) {
-					await incomplete(stream, "source_total_changed"); return;
+				if (proof.nextUrl !== null) {
+					url = proof.nextUrl;
+					continue;
 				}
-				expectedTotal = exactTotals.values().next().value ?? null;
-				const totalMatches = expectedTotal !== null && expectedTotal === seen.size;
-				if (proof.nextUrl === null && expectedTotal !== null && !totalMatches) {
-					await incomplete(stream, "total_mismatch", { considered: expectedTotal, covered }); return;
-				}
-				if (entriesComplete && rejected === 0 && proof.nextUrl === null &&
+				failure = proof.reason;
+				if (entriesComplete && rejected === 0 &&
 					(proof.complete || proof.reason === "terminal_unverified") && covered === seen.size) {
-					if (totalMatches || (proof.complete && expectedTotal === null)) {
-						await complete(stream, { considered: seen.size, covered }); return;
-					}
-					if (stream === "starred") {
-						const rest = await inspectStarredRest(services, username, seen);
-						if (rest === null) await complete(stream, { considered: seen.size, covered });
-						else await incomplete(stream, rest, { considered: seen.size, covered });
-						return;
+					failure = null;
+					endProven = proof.complete;
+					if (!endProven && proof.total === null && stream === "starred") {
+						failure = await inspectStarredRest(services, username, seen, evidence);
+						endProven = failure === null;
 					}
 				}
-				if (proof.nextUrl === null) {
-					await incomplete(stream, proof.reason, { considered: expectedTotal ?? seen.size, covered }); return;
-				}
-				url = proof.nextUrl;
+				break;
 			}
-			await incomplete(stream, "page_limit_reached", { considered: expectedTotal ?? seen.size, covered });
+			const reason = evidence.decide(seen.size, endProven, failure);
+			const counts = { considered: evidence.expectedTotal ?? seen.size, covered };
+			if (reason === null) await complete(stream, counts);
+			else await incomplete(stream, reason, counts);
 		});
 	}
 
@@ -552,6 +544,7 @@ async function inspectStarredRest(
 	services: BrowserServices,
 	username: string,
 	browserRepos: ReadonlySet<string>,
+	evidence: InventoryEvidence,
 ): Promise<string | null> {
 	const seen = new Set<string>();
 	for (let page = 1; page <= INVENTORY_PAGE_LIMIT; page += 1) {
@@ -568,6 +561,7 @@ async function inspectStarredRest(
 			seen.add(repo.html_url as string);
 		}
 		if ((page === 1 && response.data.length === 0) || apiWindowEnded(response.link)) {
+			evidence.addEnumeration(seen.size);
 			if (seen.size !== browserRepos.size) return "total_mismatch";
 			if (Array.from(seen).some(repo => !browserRepos.has(repo))) return "repository_mismatch";
 			return null;
