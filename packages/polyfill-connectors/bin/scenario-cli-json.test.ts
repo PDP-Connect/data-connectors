@@ -124,7 +124,7 @@ server.listen(0, "127.0.0.1", () => console.log("PORT " + server.address().port)
 	});
 }
 
-function writeInteractionConnector(path: string): void {
+function writeInteractionConnector(path: string, requestId = "prompt-1"): void {
 	writeFileSync(
 		path,
 		`import { createInterface } from "node:readline";
@@ -134,7 +134,7 @@ input.on("line", (line) => {
   if (message.type === "START") {
     process.stdout.write(JSON.stringify({
       type: "INTERACTION",
-      request_id: "prompt-1",
+      request_id: ${JSON.stringify(requestId)},
       kind: "otp",
       message: ${JSON.stringify(INTERACTION_PROMPT_SENTINEL)},
       timeout_seconds: 1,
@@ -238,7 +238,50 @@ function readCliContractMarker(invokedBinPath: string): string | null {
 	);
 }
 
+// This test checker supports only the published schema's small keyword subset.
+// Check all schema branches, including absent properties and unmatched oneOfs.
+function assertSupportedSchema(schema: unknown, path: string): void {
+	assert.ok(
+		schema !== null && typeof schema === "object" && !Array.isArray(schema),
+		`${path}: schema object`,
+	);
+	const rule = schema as Record<string, unknown>;
+	const supported = new Set([
+		"$schema",
+		"$id",
+		"title",
+		"description",
+		"type",
+		"const",
+		"enum",
+		"minimum",
+		"required",
+		"properties",
+		"additionalProperties",
+		"oneOf",
+	]);
+	for (const key of Object.keys(rule)) {
+		assert.ok(supported.has(key), `${path}: unsupported schema keyword ${key}`);
+	}
+	assert.ok(
+		rule.additionalProperties === undefined ||
+			typeof rule.additionalProperties === "boolean",
+		`${path}: schema-valued additionalProperties is unsupported`,
+	);
+	if (Array.isArray(rule.oneOf)) {
+		for (const child of rule.oneOf) {
+			assertSupportedSchema(child, path);
+		}
+	}
+	if (rule.properties && typeof rule.properties === "object") {
+		for (const [key, child] of Object.entries(rule.properties)) {
+			assertSupportedSchema(child, `${path}.${key}`);
+		}
+	}
+}
+
 function validateJsonSchema(schema: unknown, value: unknown, path = "$"): void {
+	assertSupportedSchema(schema, path);
 	assert.equal(typeof schema, "object", `${path}: schema object`);
 	assert.notEqual(schema, null, `${path}: schema object`);
 	const rule = schema as Record<string, unknown>;
@@ -352,8 +395,8 @@ function readEnvelope(run: CliRun): JsonEnvelope {
 		"JSON result ends with a newline",
 	);
 	assert.equal(
-		run.stdout.split("\n").filter((line) => line.length > 0).length,
-		1,
+		run.stdout.split("\n").length,
+		2,
 		`stdout must contain one JSON result only: ${run.stdout}`,
 	);
 	const result: unknown = JSON.parse(run.stdout);
@@ -381,12 +424,183 @@ function readEnvelope(run: CliRun): JsonEnvelope {
 	return envelope;
 }
 
+test("schema checker rejects malformed shapes and permits additive result fields", () => {
+	const envelope = readEnvelope(runCli(RECORD_CLI_PATH, ["--json", "--help"]));
+	const schema: unknown = JSON.parse(readFileSync(RESULT_SCHEMA_PATH, "utf8"));
+	assert.doesNotThrow(() =>
+		validateJsonSchema(schema, {
+			...envelope,
+			result: { ...envelope.result, future_detail: { count: 1 } },
+		}),
+	);
+	const missing = { ...envelope.result };
+	delete missing.capture_complete;
+	for (const invalid of [
+		{ ...envelope, schema: "pdpp.connector-scenario-cli/1" },
+		{ ...envelope, status: "unknown" },
+		{ ...envelope, exit_code: 3 },
+		{ ...envelope, result: [] },
+		{ ...envelope, result: missing },
+		{ ...envelope, result: { ...envelope.result, kind: "verify" } },
+		{ ...envelope, result: { ...envelope.result, runs: -1 } },
+		{ ...envelope, result: { ...envelope.result, capture_complete: "true" } },
+	]) {
+		assert.throws(() => validateJsonSchema(schema, invalid));
+	}
+	assert.throws(() => validateJsonSchema({ oneOf: [{}, {}] }, envelope),
+		/matches exactly one/);
+	assert.throws(() => validateJsonSchema({
+		oneOf: [{ const: "match" }, { const: "other", pattern: "^other$" }],
+	}, "match"), /unsupported schema keyword pattern/);
+	assert.throws(() => validateJsonSchema({
+		properties: { absent: { maxLength: 1 } },
+	}, {}), /unsupported schema keyword maxLength/);
+});
+
+test("literal option-looking claim paths remain owned by --json", async (t) => {
+	const tempDir = createTempDir();
+	let site: StubSite | undefined;
+	t.after(async () => {
+		await site?.close();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+	site = await startStubSite(tempDir);
+	const scenarioPath = join(tempDir, "scenario.json");
+	const env = { PDPP_SCENARIO_STUB_BASE_URL: site.url };
+	const recorded = runCli(RECORD_CLI_PATH, [
+		"scenario-cli-stub-connector", "--entrypoint", STUB_CONNECTOR_PATH,
+		"--runs=1", "--out", scenarioPath, "--json",
+	], env);
+	assert.equal(recorded.code, 0, recorded.stderr);
+	await site.close();
+	for (const literal of ["--timeout=1", "--timeout=--help"]) {
+		for (const equals of [false, true]) {
+			await t.test(JSON.stringify({ literal, equals }), () => {
+				const claimPath = join(tempDir, literal);
+				rmSync(claimPath, { force: true });
+				const run = runCli(VERIFY_CLI_PATH, [
+					"scenario-cli-stub-connector", scenarioPath,
+					"--entrypoint", STUB_CONNECTOR_PATH,
+					...(equals ? [`--json=${literal}`] : ["--json", literal]),
+				], env, tempDir);
+				const envelope = readEnvelope(run);
+				assertVerifyEnvelope(envelope);
+				assertResultStatus(envelope, 0);
+				assert.equal(envelope.result.outcome, "passed", run.stderr);
+				assert.equal(envelope.result.claim_artifact_written, true);
+				assert.equal(
+					JSON.parse(readFileSync(claimPath, "utf8")).schema,
+					"pdpp.connector-claim/1",
+				);
+				assert.equal(existsSync(join(tempDir, "--timeout")), false);
+			});
+		}
+	}
+
+	await t.test("identity rejection retains verification_failed", () => {
+		const claimPath = join(tempDir, "identity-claim.json");
+		const run = runCli(VERIFY_CLI_PATH, [
+			"different-connector", scenarioPath, "--entrypoint", STUB_CONNECTOR_PATH,
+			"--json", claimPath,
+		]);
+		const envelope = readEnvelope(run);
+		assertVerifyEnvelope(envelope);
+		assertResultStatus(envelope, 1);
+		assert.equal(envelope.result.outcome, "rejected");
+		assert.equal(envelope.result.failure_code, "verification_failed");
+		assert.equal(envelope.result.runs, 1);
+		assert.match(run.stderr, /does not match scenario.connector.id/);
+		assert.equal(existsSync(claimPath), false);
+	});
+
+	await t.test("controlled verifier cleanup failure is a terminal failure", () => {
+		const preloadPath = join(tempDir, "verify-cleanup-failure.cjs");
+		const cleanupPathFile = join(tempDir, "verify-cleanup-path.txt");
+		const claimPath = join(tempDir, "failed-claim.json");
+		writeCleanupFailurePreload(preloadPath);
+		const oldClaim = "stale claim must remain untouched\n";
+		writeFileSync(claimPath, oldClaim);
+		const run = runCli(VERIFY_CLI_PATH, [
+			"scenario-cli-stub-connector", scenarioPath,
+			"--entrypoint", STUB_CONNECTOR_PATH, "--json", claimPath,
+		], {
+			...env,
+			NODE_OPTIONS: `--require=${preloadPath}`,
+			PDPP_TEST_CLEANUP_PATH: cleanupPathFile,
+			TMPDIR: tempDir,
+		});
+		const leakedWorkspace = readFileSync(cleanupPathFile, "utf8");
+		rmSync(leakedWorkspace, { recursive: true, force: true });
+		const envelope = readEnvelope(run);
+		assertVerifyEnvelope(envelope);
+		assertResultStatus(envelope, 1);
+		assert.equal(envelope.result.outcome, "failed");
+		assert.equal(envelope.result.failure_code, "verification_failed");
+		assert.match(run.stderr, /controlled evidence cleanup failure/);
+		assert.equal(readFileSync(claimPath, "utf8"), oldClaim);
+	});
+});
+
+test("recorder preserves literal option-looking output and answer values", async (t) => {
+	for (const option of ["--out", "--answer", "--answers"]) {
+		for (const equals of [false, true]) {
+			await t.test(JSON.stringify({ option, equals }), () => {
+				const tempDir = createTempDir();
+				try {
+					const entrypointPath = join(tempDir, "interaction.mjs");
+					const requestId = option === "--answer" ? "--timeout" : "prompt-1";
+					writeInteractionConnector(entrypointPath, requestId);
+					const answer = "approved=literal";
+					const literal =
+						option === "--out"
+							? "--timeout=--help"
+							: option === "--answer"
+								? `--timeout=${answer}`
+								: "--timeout=1";
+					const out = option === "--out" ? literal : "scenario.json";
+					if (option === "--answers") {
+						writeFileSync(
+							join(tempDir, literal),
+							JSON.stringify({ [requestId]: answer }),
+						);
+					}
+					const run = runCli(RECORD_CLI_PATH, [
+						"scenario-cli-stub-connector", "--entrypoint", entrypointPath,
+						"--runs=1", "--json", "--persist-otp",
+						...(option === "--out" ? [] : ["--out", out]),
+						...(option === "--out" ? ["--answer", `${requestId}=${answer}`] : []),
+						...(equals ? [`${option}=${literal}`] : [option, literal]),
+					], {}, tempDir);
+					const envelope = readEnvelope(run);
+					assertRecordEnvelope(envelope);
+					assertResultStatus(envelope, 0);
+					assert.equal(envelope.result.outcome, "complete", run.stderr);
+					assert.equal(envelope.result.scenario_path, join(tempDir, out));
+					const scenario = JSON.parse(
+						readFileSync(join(tempDir, out), "utf8"),
+					);
+					assert.equal(
+						scenario.runs[0].user_interactions[0].response.value,
+						answer,
+					);
+					assert.equal(existsSync(join(tempDir, "--timeout")), false);
+				} finally {
+					rmSync(tempDir, { recursive: true, force: true });
+				}
+			});
+		}
+	}
+});
+
 test("version metadata and result schema resolve beside the invoked bins from another cwd", (t) => {
 	const tempDir = createTempDir();
 	t.after(() => rmSync(tempDir, { recursive: true, force: true }));
 	assert.deepEqual(JSON.parse(readFileSync(CLI_MARKER_PATH, "utf8")), {
-		contract: readCliContractMarker(RECORD_CLI_PATH),
+		contract: "pdpp.connector-scenario-cli/1",
 	});
+	for (const cli of [RECORD_CLI_PATH, VERIFY_CLI_PATH]) {
+		assert.equal(readCliContractMarker(cli), "pdpp.connector-scenario-cli/1");
+	}
 	assert.equal(
 		readCliContractMarker(join(tempDir, "scenario-record.ts")),
 		null,
@@ -403,6 +617,31 @@ test("version metadata and result schema resolve beside the invoked bins from an
 
 test("JSON mode survives malformed numeric values and value tokens are not mistaken for help", () => {
 	for (const [cli, args, command] of [
+		[
+			RECORD_CLI_PATH,
+			["scenario-cli-stub-connector", "--runs=--help", "--json"],
+			"scenario-record",
+		],
+		[
+			VERIFY_CLI_PATH,
+			[
+				"scenario-cli-stub-connector",
+				"missing.json",
+				"--timeout",
+				"--json=claim.json",
+			],
+			"scenario-verify",
+		],
+		[
+			VERIFY_CLI_PATH,
+			[
+				"scenario-cli-stub-connector",
+				"missing.json",
+				"--timeout=--help",
+				"--json=claim.json",
+			],
+			"scenario-verify",
+		],
 		[
 			RECORD_CLI_PATH,
 			["scenario-cli-stub-connector", "--runs", "--json"],
@@ -645,7 +884,10 @@ function assertVerifyEnvelope(envelope: JsonEnvelope): void {
 		);
 	} else if (envelope.result.outcome === "rejected") {
 		assertResultStatus(envelope, 1);
-		assert.equal(envelope.result.failure_code, "invalid_scenario");
+		assert.ok(
+			envelope.result.failure_code === "invalid_scenario" ||
+				envelope.result.failure_code === "verification_failed",
+		);
 	} else {
 		assertResultStatus(envelope, 1);
 		assert.equal(envelope.result.failure_code, "verification_failed");

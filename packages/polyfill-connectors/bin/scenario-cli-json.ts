@@ -59,7 +59,14 @@ export function normalizeCliValueOptions(
 	valueOptions: ReadonlySet<string>,
 ): string[] {
 	const normalized: string[] = [];
-	for (const arg of argv) {
+	for (let i = 0; i < argv.length; i += 1) {
+		const arg = argv[i] ?? "";
+		// A separated value belongs to its option before any equals expansion.
+		if (valueOptions.has(arg) && i + 1 < argv.length) {
+			normalized.push(arg, argv[i + 1] ?? "");
+			i += 1;
+			continue;
+		}
 		if (arg?.startsWith("--")) {
 			const equalsIndex = arg.indexOf("=");
 			if (equalsIndex > 2) {
@@ -83,27 +90,37 @@ export function scanCliArguments(
 		jsonOptionConsumesValue?: boolean;
 	},
 ): CliArgumentScan {
-	const args = normalizeCliValueOptions(argv, options.valueOptions);
+	// Scan raw tokens: inline values and consumed strings cannot become flags.
+	// Keep argv raw for parseArgs, which performs the only equals expansion.
+	const args = [...argv];
 	let help = false;
 	let jsonMode = false;
 	for (let i = 0; i < args.length; i += 1) {
-		const arg = args[i];
+		const token = args[i] ?? "";
+		const equalsIndex = token.indexOf("=");
+		const hasInlineValue =
+			equalsIndex > 2 && options.valueOptions.has(token.slice(0, equalsIndex));
+		const arg = hasInlineValue ? token.slice(0, equalsIndex) : token;
 		if (arg === "--help") {
 			help = true;
 			continue;
 		}
 		if (arg === "--json") {
 			jsonMode = true;
-			if (options.jsonOptionConsumesValue && i + 1 < args.length) {
+			if (
+				options.jsonOptionConsumesValue &&
+				!hasInlineValue &&
+				i + 1 < args.length
+			) {
 				i += 1;
 			}
 			continue;
 		}
-		if (!options.valueOptions.has(arg ?? "")) {
+		if (hasInlineValue || !options.valueOptions.has(arg)) {
 			continue;
 		}
 		const value = args[i + 1];
-		if (options.numericValueOptions.has(arg ?? "")) {
+		if (options.numericValueOptions.has(arg)) {
 			if (value === "--help" || (value !== undefined && /^\d+$/.test(value))) {
 				i += 1;
 			}
