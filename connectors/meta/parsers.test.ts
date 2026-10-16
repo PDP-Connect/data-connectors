@@ -33,7 +33,7 @@ for (const field of ["follower_count", "following_count", "media_count"] as cons
  test(`profile fractional ${field} is not an invented integer`, () => {
   const user = { id: "u1", username: "alice", follower_count: 1, following_count: 2, media_count: 3, is_verified: false, [field]: 1.5 };
   assert.equal(profileEnrichmentIsComplete(user), false);
-  const counts = profileCountsFromGraphQL({ data: { data: { user } } });
+  const counts = profileCountsFromGraphQL({ data: { user } });
   assert.equal(counts[field === "media_count" ? "post_count" : field], null);
  });
 }
@@ -257,12 +257,10 @@ test("profileEnrichmentIsComplete: requires counts and verified status from the 
 test("profileCountsFromGraphQL: maps follower_count/following_count/media_count->post_count", () => {
 	const counts = profileCountsFromGraphQL({
 		data: {
-			data: {
-				user: {
-					follower_count: 4200,
-					following_count: 310,
-					media_count: 88,
-				},
+			user: {
+				follower_count: 4200,
+				following_count: 310,
+				media_count: 88,
 			},
 		},
 	});
@@ -289,7 +287,7 @@ test("profileCountsFromGraphQL: all-null when undefined", () => {
 	});
 });
 
-test("profileCountsFromGraphQL: all-null when data.data.user is missing", () => {
+test("profileCountsFromGraphQL: all-null when data.user is missing", () => {
 	assert.deepEqual(profileCountsFromGraphQL({ data: {} }), {
 		follower_count: null,
 		following_count: null,
@@ -299,7 +297,7 @@ test("profileCountsFromGraphQL: all-null when data.data.user is missing", () => 
 
 test("profileCountsFromGraphQL: null for individual fields that are absent, not zero", () => {
 	const counts = profileCountsFromGraphQL({
-		data: { data: { user: { follower_count: 10 } } },
+		data: { user: { follower_count: 10 } },
 	});
 	assert.equal(counts.follower_count, 10);
 	assert.equal(counts.following_count, null);
@@ -309,12 +307,10 @@ test("profileCountsFromGraphQL: null for individual fields that are absent, not 
 test("profileCountsFromGraphQL: rejects negative or non-finite counts as null (never guessed)", () => {
 	const counts = profileCountsFromGraphQL({
 		data: {
-			data: {
-				user: {
-					follower_count: -1,
-					following_count: Number.NaN,
-					media_count: 0,
-				},
+			user: {
+				follower_count: -1,
+				following_count: Number.NaN,
+				media_count: 0,
 			},
 		},
 	});

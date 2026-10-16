@@ -718,7 +718,7 @@ for (const malformed of [
      headers: () => ({}), method: () => "POST",
      postData: () => "fb_api_req_friendly_name=ProfilePageQuery",
     }),
-    json: async () => ({ data: { data: { user: observed } } }),
+    json: async () => ({ data: { user: observed } }),
    });
    return Promise.resolve(null);
   }) as Page["goto"];

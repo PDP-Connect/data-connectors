@@ -114,14 +114,13 @@ export interface InstagramProfilePageUser {
 	following_count?: number | null;
 }
 
-/** Envelope wrapping {@link InstagramProfilePageUser} as observed live:
- * `{ data: { data: { user: {...} } } }` (legacy capture shape, confirmed by
- * `instagram-playwright.js:656` reading `profileData?.data?.data?.user`). */
+/** Body of the profile-page GraphQL response as `response.json()` returns it,
+ * confirmed live 2026-10-16: `{ data: { user: {...}, viewer: {...} } }`. The
+ * legacy collector's capture shim wrapped each body in a second `data`
+ * (`profileData?.data?.data?.user`); the raw body has no such wrapper. */
 export interface InstagramProfilePageEnvelope {
 	data?: {
-		data?: {
-			user?: InstagramProfilePageUser | null;
-		} | null;
+		user?: InstagramProfilePageUser | null;
 	} | null;
 }
 

@@ -40,6 +40,27 @@ test("profile response matching accepts only the three legacy profile operations
 	);
 });
 
+test("profile response matching accepts the live /api/graphql path and rejects unrelated paths", () => {
+	const response = (url: string): Response =>
+		({
+			...profileResponse("PolarisProfilePageContentQuery", {}),
+			url: () => url,
+		}) as Response;
+	for (const url of [
+		"https://www.instagram.com/api/graphql",
+		"https://www.instagram.com/api/graphql?x=1",
+		"https://www.instagram.com/graphql/query",
+	]) {
+		assert.equal(isProfilePageGraphQLResponse(response(url)), true, url);
+	}
+	for (const url of [
+		"https://www.instagram.com/api/v1/web/get_profile_pic_props/",
+		"https://www.instagram.com/api/graphqlx",
+	]) {
+		assert.equal(isProfilePageGraphQLResponse(response(url)), false, url);
+	}
+});
+
 test("profile capture polls after navigation and extracts the captured user", async () => {
 	const user = {
 		id: "fixture-id",
@@ -50,18 +71,16 @@ test("profile capture polls after navigation and extracts the captured user", as
 		username: "fixture-user",
 	};
 	const response = profileResponse("ProfilePageQuery", {
-		data: { data: { user } },
+		data: { user },
 	});
 	const earlierResponse = profileResponse("UserByUsernameQuery", {
 		data: {
-			data: {
-				user: {
-					follower_count: 1,
-					following_count: 2,
-					is_verified: true,
-					media_count: 3,
-					username: "older-user",
-				},
+			user: {
+				follower_count: 1,
+				following_count: 2,
+				is_verified: true,
+				media_count: 3,
+				username: "older-user",
 			},
 		},
 	});
@@ -104,7 +123,7 @@ test("profile navigation retries transient failures within the three-attempt bou
 		username: "fixture-user",
 	};
 	const response = profileResponse("UserByUsernameQuery", {
-		data: { data: { user } },
+		data: { user },
 	});
 	let attempts = 0;
 	const listeners = new Set<(response: Response) => void>();

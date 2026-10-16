@@ -81,8 +81,13 @@
  *     waited for matching selectors. v0.4.2 waits for each intended
  *     control/list. v0.4.3 adds bounded failure-step diagnostics, but no
  *     retained sanitized trace identifies which step failed in the latest
- *     partial ads run; a live retest is still needed to confirm whether
- *     layout drift contributes.
+ *     partial ads run. A live run on 2026-10-16 found the drift: advertisers
+ *     open from the "Manage info" tab ("Advertisers using your activity or
+ *     information") and load through "See more"; the ad-topics dialog words
+ *     its empty state "You don't currently have any activity-based topics";
+ *     the live dialogs carry no ARIA totals. A list without totals counts as
+ *     complete only after its own "See more"/"View all" control was clicked
+ *     until it was gone and every click loaded rows.
  *     Empty ARIA lists count as reached only when the matching visible
  *     source-authored empty message is present in the active dialog.
  *   - Tested surface: single-account, EN locale, personal (non-business)
@@ -457,8 +462,10 @@ export function isProfilePageGraphQLResponse(response: {
 	const request = response.request();
 	const operation =
 		request.postData?.() ?? request.headers?.()["x-fb-friendly-name"] ?? "";
+	// The profile query is served from `/api/graphql` (confirmed live
+	// 2026-10-16, no trailing slash), the posts query from `/graphql/query`.
 	return (
-		response.url().includes("/graphql/") &&
+		/\/graphql(?:[/?]|$)/.test(response.url()) &&
 		request.method() === "POST" &&
 		/(?:PolarisProfilePageContentQuery|ProfilePageQuery|UserByUsernameQuery)/.test(
 			operation,
@@ -538,7 +545,7 @@ export async function fetchProfilePageUser(
 	capture?.captureHttp("profile-page-user", envelope, {
 		status: response.status(),
 	});
-	return envelope?.data?.data?.user ?? null;
+	return envelope?.data?.user ?? null;
 }
 
 // ─── Posts (timeline feed connection) ─────────────────────────────────────
@@ -1439,7 +1446,12 @@ export async function fetchAllFollowing(
 
 // ─── Ads (Accounts Center DOM scrape) ──────────────────────────────────────
 
-const NON_TOPIC_RE = /^(?:special topic|see less)$/i;
+// Interface rows of the ad-topics dialog: "Special topics" and "See less",
+// each followed by its own description (confirmed live 2026-10-16).
+const NON_TOPIC_RE = /^(?:special topics?|see less)(?:\s|$)/i;
+const AD_TOPICS_EMPTY_MESSAGES = [
+	"You don't currently have any activity-based topics",
+] as const;
 
 type AdsDialogClassification =
 	| { complete: boolean; items: string[]; kind: "data" }
@@ -1459,8 +1471,17 @@ const realAdsSettleClock: AdsSettleClock = {
 
 /** Classify a visible Accounts Center list without treating a blank shell as empty. */
 export function classifyAdsDialogInPage(args: {
+	/** Further exact copy the source uses for an empty list (live ad topics). */
+	alternateEmptyMessages?: readonly string[];
 	emptyMessage: string;
+	/** The scraper expanded the list until its own expansion control was gone, so
+	 *  a list with no ARIA totals is the whole list the source offers. Supplied
+	 *  totals still must agree. */
+	expansionExhausted?: true;
 	requiredAffordance?: string;
+	/** Rows are themselves controls (live advertiser rows), so their text
+	 *  counts even though it sits inside a control. */
+	rowsAreControls?: true;
 	uiOnlyPatternSource?: string;
 }): AdsDialogClassification {
 	const [normalize] = [
@@ -1610,6 +1631,7 @@ export function classifyAdsDialogInPage(args: {
 	if (lists.length === 0) return unavailable;
 	for (const currentList of lists) {
 		const listItems: string[] = [];
+		let knownUiRows = 0;
 		const advertisedCounts = [
 			readPositiveInteger(currentList.getAttribute("aria-setsize")),
 			readPositiveInteger(currentList.getAttribute("aria-rowcount")),
@@ -1635,20 +1657,24 @@ export function classifyAdsDialogInPage(args: {
 				const hasAffordance = Array.from(
 					row.querySelectorAll(controlSelector),
 				).some(
+					// Exact: the "Removed categories" link is interface, not a
+					// category's own Remove control.
 					(control) =>
-						visible(control) &&
-						visibleText(control).includes(requiredAffordance),
+						visible(control) && visibleText(control) === requiredAffordance,
 				);
 				if (!hasAffordance) {
-					if (hasControl) sawUnknownList = true;
+					if (isKnownUiText(fullText)) knownUiRows += 1;
+					else if (hasControl) sawUnknownList = true;
 					continue;
 				}
 			}
 			const itemText =
-				uiOnlyPattern && hasControl ? visibleText(row, true) : fullText;
+				uiOnlyPattern && hasControl && args.rowsAreControls !== true
+					? visibleText(row, true)
+					: fullText;
 			if (!itemText || (uiOnlyPattern?.test(itemText) ?? false)) {
-				if (hasControl && !isKnownUiText(fullText) && !isKnownUiText(itemText))
-					sawUnknownList = true;
+				if (isKnownUiText(fullText) || isKnownUiText(itemText)) knownUiRows += 1;
+				else if (hasControl) sawUnknownList = true;
 				continue;
 			}
 			listItems.push(itemText);
@@ -1665,7 +1691,9 @@ export function classifyAdsDialogInPage(args: {
 			if (advertisedCounts.some((count) => count > 0)) {
 				return loading;
 			}
-			if (lists.length > 1) sawUnknownList = true;
+			// A list of only recognized interface rows is chrome, not an
+			// unrecognized section.
+			if (lists.length > 1 && knownUiRows === 0) sawUnknownList = true;
 			continue;
 		}
 		const rowPositions = Array.from(
@@ -1686,10 +1714,11 @@ export function classifyAdsDialogInPage(args: {
 						.slice()
 						.sort((a, b) => a - b)
 						.every((position, index) => position === index + 1);
-		allListsComplete &&=
-			sourceTotal !== null &&
-			sourceTotal === listItems.length &&
-			positionsProveComplete;
+		const totalProvesComplete =
+			advertisedCounts.length === 0
+				? args.expansionExhausted === true
+				: sourceTotal !== null && sourceTotal === listItems.length;
+		allListsComplete &&= totalProvesComplete && positionsProveComplete;
 	}
 	if (items.length > 0) {
 		return {
@@ -1706,12 +1735,20 @@ export function classifyAdsDialogInPage(args: {
 	if (hasHiddenRowEvidence) return loading;
 	if (sawUnknownList) return unavailable;
 
-	const expected = normalize(args.emptyMessage).toLowerCase();
+	const [canonical] = [
+		(value: string): string =>
+			normalize(value).replace(/[\u2018\u2019]/g, "'").toLowerCase(),
+	] as const;
+	const expectedMessages = [
+		args.emptyMessage,
+		...(args.alternateEmptyMessages ?? []),
+	].map(canonical);
 	const hasExactVisibleMessage =
-		visibleText(dialog).toLowerCase() === expected ||
+		expectedMessages.includes(canonical(visibleText(dialog))) ||
 		Array.from(dialog.querySelectorAll("*")).some(
 			(element) =>
-				visible(element) && visibleText(element).toLowerCase() === expected,
+				visible(element) &&
+				expectedMessages.includes(canonical(visibleText(element))),
 		);
 	if (hasExactVisibleMessage && hasPositiveSourceTotal) return loading;
 	return hasExactVisibleMessage ? { kind: "verified_empty" } : unavailable;
@@ -1727,10 +1764,12 @@ async function scrapeDialogListItems(
 	emptyMessage: string,
 	uiOnlyPattern?: RegExp,
 	clock: AdsSettleClock = realAdsSettleClock,
+	extra: Partial<Parameters<typeof classifyAdsDialogInPage>[0]> = {},
 ): Promise<{ items: string[]; reached: boolean; step: AdsSurfaceStep | null }> {
 	const result = await waitForStableAdsDialog(
 		page,
 		{
+			...extra,
 			emptyMessage,
 			...(uiOnlyPattern ? { uiOnlyPatternSource: uiOnlyPattern.source } : {}),
 		},
@@ -1838,20 +1877,42 @@ export async function scrapeAdvertisers(
 			surface: "advertisers",
 		};
 	}
-	const buttonReady = await waitForAdsCondition(page, () =>
-		Boolean(
-			document.querySelector(
-				'[role="button"][aria-label*="advertiser" i], button[aria-label*="advertiser" i]',
-			),
-		),
-	);
-	if (!buttonReady) {
+	// Accounts Center moved the advertisers list: the bare advertisers button
+	// is gone and the list opens from the "Manage info" tab (confirmed live
+	// 2026-10-16). Either entry point proves the page rendered.
+	const entryReady = await page
+		.waitForFunction(
+			([tabLabel]: readonly [string]) =>
+				Boolean(
+					document.querySelector(
+						'[role="button"][aria-label*="advertiser" i], button[aria-label*="advertiser" i]',
+					),
+				) ||
+				Array.from(document.querySelectorAll('[role="tab"]')).some((tab) =>
+					(tab.textContent ?? "").includes(tabLabel),
+				),
+			["Manage info"] as const,
+			{ timeout: 8_000 },
+		)
+		.then(() => true)
+		.catch(() => false);
+	if (!entryReady) {
 		return {
 			items: [],
 			reached: false,
 			step: "control_not_found",
 			surface: "advertisers",
 		};
+	}
+	const hasLegacyButton = await page.evaluate(() =>
+		Boolean(
+			document.querySelector(
+				'[role="button"][aria-label*="advertiser" i], button[aria-label*="advertiser" i]',
+			),
+		),
+	);
+	if (!hasLegacyButton) {
+		return scrapeAdvertisersFromManageInfo(page, clock);
 	}
 
 	const clicked = await page.evaluate(() => {
@@ -1892,6 +1953,197 @@ export async function scrapeAdvertisers(
 	return { ...result, surface: "advertisers" };
 }
 
+const ADS_SEE_MORE_RE = /^see more$/i;
+const ADS_MAX_EXPANSIONS = 50;
+const ADS_EXPANSION_WAIT_MS = 10_000;
+
+/** Visible expansion control of the open dialog, optionally clicked. The
+ *  advertisers dialog shows a few rows and a "See more" control that loads
+ *  the rest in one step (confirmed live 2026-10-16). `dataRows` excludes the
+ *  row that holds the control itself. */
+function inspectDialogExpansion(args: { click: boolean; label: string }): {
+	clicked: boolean;
+	dataRows: number;
+	present: boolean;
+	visible: boolean;
+} {
+	const [visible] = [
+		(element: Element): boolean => {
+			if (!element.isConnected) return false;
+			for (
+				let current: Element | null = element;
+				current;
+				current = current.parentElement
+			) {
+				const style = getComputedStyle(current);
+				if (
+					style.display === "none" ||
+					style.visibility === "hidden" ||
+					style.visibility === "collapse" ||
+					style.opacity === "0"
+				) {
+					return false;
+				}
+			}
+			const rect = element.getBoundingClientRect();
+			return rect.width > 0 && rect.height > 0;
+		},
+	] as const;
+	const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
+		(candidate) =>
+			visible(candidate) && candidate.querySelector('[role="list"]') !== null,
+	);
+	if (!dialog)
+		return { clicked: false, dataRows: 0, present: false, visible: false };
+	const label = args.label.toLowerCase();
+	const controls = Array.from(
+		dialog.querySelectorAll('a, button, [role="button"], [role="link"]'),
+	).filter(
+		(control) =>
+			(control.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase() ===
+			label,
+	);
+	const shown = controls.find(visible) as HTMLElement | undefined;
+	let clicked = false;
+	if (args.click && shown) {
+		shown.click();
+		clicked = true;
+	}
+	return {
+		clicked,
+		dataRows: Array.from(dialog.querySelectorAll('[role="listitem"]')).filter(
+			(row) => !controls.some((control) => row.contains(control)),
+		).length,
+		present: controls.length > 0,
+		visible: shown !== undefined,
+	};
+}
+
+/**
+ * Click the dialog's expansion control until it is gone. True only when each
+ * click loaded more rows, the control then went away (or was never offered),
+ * and nothing stalled: the list holds every row the source offers.
+ */
+async function expandAdsDialog(
+	page: Page,
+	label: string,
+	clock: AdsSettleClock,
+): Promise<boolean> {
+	let clickedOnce = false;
+	let stalled = false;
+	const walk = await walkPagesWithCeiling({
+		fetchPage: async () => {
+			const before = await page.evaluate(inspectDialogExpansion, {
+				click: true,
+				label,
+			});
+			if (!before.clicked) return false;
+			clickedOnce = true;
+			const deadline = clock.now() + ADS_EXPANSION_WAIT_MS;
+			await page
+				.waitForFunction(
+					([name, rowsBefore]: readonly [string, number]) => {
+						const dialog = Array.from(
+							document.querySelectorAll('[role="dialog"]'),
+						).find((candidate) => candidate.querySelector('[role="list"]'));
+						if (!dialog) return false;
+						const controls = Array.from(
+							dialog.querySelectorAll('a, button, [role="button"], [role="link"]'),
+						).filter(
+							(control) =>
+								(control.textContent ?? "")
+									.replace(/\s+/g, " ")
+									.trim()
+									.toLowerCase() === name,
+						);
+						return (
+							Array.from(dialog.querySelectorAll('[role="listitem"]')).filter(
+								(row) => !controls.some((control) => row.contains(control)),
+							).length > rowsBefore
+						);
+					},
+					[label.toLowerCase(), before.dataRows] as const,
+					{ timeout: Math.max(1, deadline - clock.now()) },
+				)
+				.catch((): undefined => undefined);
+			const after = await page.evaluate(inspectDialogExpansion, {
+				click: false,
+				label,
+			});
+			if (after.dataRows <= before.dataRows) {
+				stalled = true;
+				return false;
+			}
+			return after.visible;
+		},
+		maxPages: ADS_MAX_EXPANSIONS,
+	});
+	if (walk.truncated || stalled) return false;
+	const final = await page.evaluate(inspectDialogExpansion, {
+		click: false,
+		label,
+	});
+	return !final.visible && (clickedOnce || !final.present);
+}
+
+/** Advertisers via Manage info → "Advertisers using your activity or
+ *  information", the dialog every live Accounts Center now serves. */
+async function scrapeAdvertisersFromManageInfo(
+	page: Page,
+	clock: AdsSettleClock,
+): Promise<ReachedScrape<string>> {
+	const failed = (step: AdsSurfaceStep): ReachedScrape<string> => ({
+		items: [],
+		reached: false,
+		step,
+		surface: "advertisers",
+	});
+	const clickedTab = await page.evaluate(() => {
+		const tab = Array.from(document.querySelectorAll('[role="tab"]')).find(
+			(candidate) => (candidate.textContent ?? "").includes("Manage info"),
+		) as HTMLElement | undefined;
+		tab?.click();
+		return tab !== undefined;
+	});
+	if (!clickedTab) return failed("control_not_found");
+	const linkReady = await waitForAdsCondition(page, () =>
+		Array.from(
+			document.querySelectorAll(
+				'[role="tabpanel"] a, [role="tabpanel"] [role="link"], [role="tabpanel"] [role="button"]',
+			),
+		).some((link) =>
+			(link.textContent ?? "").includes("Advertisers using your activity"),
+		),
+	);
+	if (!linkReady) return failed("control_not_found");
+	const clickedLink = await page.evaluate(() => {
+		const link = Array.from(
+			document.querySelectorAll(
+				'[role="tabpanel"] a, [role="tabpanel"] [role="link"], [role="tabpanel"] [role="button"]',
+			),
+		).find((candidate) =>
+			(candidate.textContent ?? "").includes("Advertisers using your activity"),
+		) as HTMLElement | undefined;
+		link?.click();
+		return link !== undefined;
+	});
+	if (!clickedLink) return failed("control_not_found");
+	if (!(await waitForAdsList(page))) {
+		await closeDialog(page);
+		return failed("destination_list_not_found");
+	}
+	const exhausted = await expandAdsDialog(page, "See more", clock);
+	const result = await scrapeDialogListItems(
+		page,
+		"No advertisers",
+		ADS_SEE_MORE_RE,
+		clock,
+		{ rowsAreControls: true, ...(exhausted ? { expansionExhausted: true as const } : {}) },
+	);
+	await closeDialog(page);
+	return { ...result, surface: "advertisers" };
+}
+
 const ADS_EMPTY_LIST_SETTLE_MS = 2_500;
 const ADS_DIALOG_TIMEOUT_MS = 12_000;
 
@@ -1921,6 +2173,7 @@ export async function scrapeAdTopics(
 		"No ad topics",
 		NON_TOPIC_RE,
 		clock,
+		{ alternateEmptyMessages: AD_TOPICS_EMPTY_MESSAGES },
 	);
 	return {
 		items: result.items,
@@ -2111,8 +2364,17 @@ export async function scrapeTargetingCategories(
 				(btn) => visible(btn) && (btn.textContent ?? "").trim() === "View all",
 			);
 		}));
+	// Clicking "View all" until it is gone shows every category the source
+	// offers; the live dialog carries no ARIA totals to prove that otherwise.
 	const finalCategories = viewAllExpanded
-		? await waitForStableAdsDialog(page, classificationArgs, clock)
+		? await waitForStableAdsDialog(
+				page,
+				{
+					...classificationArgs,
+					...(clickedViewAll ? { expansionExhausted: true as const } : {}),
+				},
+				clock,
+			)
 		: null;
 	if (
 		finalCategories?.kind === "verified_empty" &&
@@ -2183,7 +2445,7 @@ export async function scrapeTargetingCategories(
 			if (
 				!removeBtn ||
 				!visible(removeBtn) ||
-				!(removeBtn.textContent ?? "").includes("Remove")
+				(removeBtn.textContent ?? "").trim() !== "Remove"
 			) {
 				continue;
 			}
@@ -2314,6 +2576,9 @@ export async function collectAllStreams(
 		}
 	}
 
+	// The owner's own post count, when the profile page proved one. An empty
+	// timeline that contradicts it is not evidence of zero posts.
+	let observedPostCount: number | null = null;
 	if (wantsProfile && user && identity) {
 		await progress("Fetching Instagram profile counts");
 		const profileUser = await fetchProfilePageUser(
@@ -2330,9 +2595,10 @@ export async function collectAllStreams(
 		const trustedProfileUser = profileUserMatchesIdentity ? profileUser : null;
 		const counts = profileCountsFromGraphQL(
 			trustedProfileUser
-				? { data: { data: { user: trustedProfileUser } } }
+				? { data: { user: trustedProfileUser } }
 				: null,
 		);
+		observedPostCount = counts.post_count;
 		const readableSources = profileSourceFieldsAreReadable(user) &&
 			profileSourceFieldsAreReadable(trustedProfileUser);
 		const profile = profileRecord(user, counts, trustedProfileUser) ?? identity;
@@ -2396,7 +2662,21 @@ export async function collectAllStreams(
 					);
 				}
 			}
-			if (sourceEdgeCount === 0 && !truncated) {
+			if (
+				sourceEdgeCount === 0 &&
+				observedPostCount !== null &&
+				observedPostCount > 0
+			) {
+				for (const stream of ["posts", "post_likes"].filter((name) =>
+					requested.has(name),
+				)) {
+					await reportCollectionFailure(
+						ctx,
+						stream,
+						"Instagram reported posts on the profile but the timeline returned none; the empty list was not proven.",
+					);
+				}
+			} else if (sourceEdgeCount === 0 && !truncated) {
 				if (wantsPosts) {
 					await emit({ cursor: {}, stream: "posts", type: "STATE" });
 				}

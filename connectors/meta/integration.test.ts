@@ -162,7 +162,7 @@ function makeFakePage(options: {
 		const profileResponse = profilePageUser
 			? {
 					json: () =>
-						Promise.resolve({ data: { data: { user: profilePageUser } } }),
+						Promise.resolve({ data: { user: profilePageUser } }),
 					request: () => ({
 						headers: () => ({ "x-fb-friendly-name": "ProfilePageQuery" }),
 						method: () => "POST",
@@ -3035,7 +3035,7 @@ test("scrapeAdTopics accepts a visible exact empty marker", async () => {
 
 // ─── scrapeTargetingCategories ───────────────────────────────────────────
 
-test("scrapeTargetingCategories keeps hidden View all without new rows unavailable", async () => {
+test("scrapeTargetingCategories treats a View all that hides itself without new rows as exhausted", async () => {
 	const result = await withAccountsCenterPage(
 		htmlPage(
 			'<button role="button">View all</button>',
@@ -3050,8 +3050,8 @@ test("scrapeTargetingCategories keeps hidden View all without new rows unavailab
 
 	assert.deepEqual(result, {
 		items: [{ description: null, name: "Category" }],
-		reached: false,
-		step: "destination_list_not_found",
+		reached: true,
+		step: null,
 		surface: "targeting_categories",
 	});
 });
@@ -3069,7 +3069,7 @@ const expandedCategoriesPage = (
 			});`),
 	);
 
-test("scrapeTargetingCategories collects visible removable rows across all expanded dialog lists but cannot complete without a source total", async () => {
+test("scrapeTargetingCategories collects visible removable rows across all expanded dialog lists and completes once View all is exhausted", async () => {
 	const result = await withAccountsCenterPage(
 		expandedCategoriesPage("", ""),
 		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
@@ -3080,8 +3080,8 @@ test("scrapeTargetingCategories collects visible removable rows across all expan
 			{ description: null, name: "Category A" },
 			{ description: null, name: "Category B" },
 		],
-		reached: false,
-		step: "destination_list_not_found",
+		reached: true,
+		step: null,
 		surface: "targeting_categories",
 	});
 });
@@ -3115,7 +3115,7 @@ const appendedAfterViewAllPage = (listAttributes: string): string =>
 			});`),
 	);
 
-test("scrapeTargetingCategories waits for rows appended after View all hides", async () => {
+test("scrapeTargetingCategories waits for rows appended after View all hides, then completes without a source total", async () => {
 	const result = await withAccountsCenterPage(
 		appendedAfterViewAllPage(""),
 		(page) => scrapeTargetingCategories(page),
@@ -3127,8 +3127,8 @@ test("scrapeTargetingCategories waits for rows appended after View all hides", a
 			{ description: null, name: "Category B" },
 			{ description: null, name: "Category C" },
 		],
-		reached: false,
-		step: "destination_list_not_found",
+		reached: true,
+		step: null,
 		surface: "targeting_categories",
 	});
 });
@@ -3164,7 +3164,7 @@ test("scrapeTargetingCategories returns unavailable when the dialog list is repl
 	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
 });
 
-test("scrapeTargetingCategories does not complete while category rows are still busy", async () => {
+test("scrapeTargetingCategories waits out a busy dialog before completing after View all", async () => {
 	const result = await withAccountsCenterPage(
 		htmlPage(
 			categoriesControl(`
@@ -3187,8 +3187,8 @@ test("scrapeTargetingCategories does not complete while category rows are still 
 			{ description: null, name: "Category B" },
 			{ description: null, name: "Category C" },
 		],
-		reached: false,
-		step: "destination_list_not_found",
+		reached: true,
+		step: null,
 		surface: "targeting_categories",
 	});
 });
@@ -3501,3 +3501,178 @@ test("pageShowsLoginOrChallengeControls ignores ordinary profile text and finds 
 		await browser.close();
 	}
 });
+
+// ─── Live-shaped Accounts Center pages and the profile post-count guard ───
+// Structure observed live 2026-10-16; every name and count is synthetic.
+
+const LIVE_AD_TOPICS_PAGE = (emptyMessage: string): string =>
+	htmlPage(
+		`<div role="dialog">
+			<h2>Ad topics</h2>
+			<h3>Your activity-based topics</h3>
+			${emptyMessage}
+			<h3>Special topics</h3>
+			<div role="list"><div role="listitem"><div role="button"><div><div>Special topics</div><div>Quickly manage if you want to see ads about special topics.</div></div></div></div></div>
+			<h3>Your ad topic choices</h3>
+			<div role="list"><div role="listitem"><div role="button"><div><div>See less</div><div>You haven't chosen any topics to see less of.</div></div></div></div></div>
+		</div>`,
+	);
+
+test("scrapeAdTopics proves the live empty page: interface rows are chrome and the source says there are no activity-based topics", async () => {
+	const result = await withAccountsCenterPage(
+		LIVE_AD_TOPICS_PAGE(
+			"<p>You don't currently have any activity-based topics</p>",
+		),
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: true,
+		step: "reached_empty",
+		surface: "ad_topics",
+	});
+});
+
+test("scrapeAdTopics does not call the live page empty without the source's empty message", async () => {
+	const result = await withAccountsCenterPage(LIVE_AD_TOPICS_PAGE(""), (page) =>
+		scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.equal(result.reached, false);
+	assert.deepEqual(result.items, []);
+});
+
+const manageInfoAdvertisersPage = (seeMoreScript: string): string => {
+	const rows = (from: number, to: number): string =>
+		Array.from(
+			{ length: to - from + 1 },
+			(_, index) =>
+				`<div role="listitem"><div role="button">Advertiser ${from + index}</div></div>`,
+		).join("");
+	const dialog = `<div role="dialog"><div role="list">${rows(1, 4)}<div role="listitem"><div role="button" id="see-more">See more</div></div></div></div>`;
+	return htmlPage(`
+		<div role="tab">Manage info</div>
+		<div role="tabpanel"><div role="button" id="advertisers-link">Advertisers using your activity or information</div></div>
+		<script>
+			document.querySelector('#advertisers-link').addEventListener('click', () => {
+				document.body.insertAdjacentHTML('beforeend', '${dialog}');
+				document.querySelector('#see-more').addEventListener('click', () => {
+					${seeMoreScript.replace("ROWS", rows(5, 10))}
+				});
+			});
+		</script>`);
+};
+
+test("scrapeAdvertisers opens the live Manage info dialog, expands See more and completes without an ARIA total", async () => {
+	const result = await withAccountsCenterPage(
+		manageInfoAdvertisersPage(`
+			document.querySelector('#see-more').closest('[role="listitem"]').remove();
+			setTimeout(() => document.querySelector('[role="list"]').insertAdjacentHTML('beforeend', 'ROWS'), 300);`),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: Array.from({ length: 10 }, (_, index) => `Advertiser ${index + 1}`),
+		reached: true,
+		step: null,
+		surface: "advertisers",
+	});
+});
+
+test("scrapeAdvertisers stays incomplete when See more stops loading rows", async () => {
+	const result = await withAccountsCenterPage(
+		manageInfoAdvertisersPage(""),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.equal(result.reached, false);
+	assert.equal(result.step, "destination_list_not_found");
+});
+
+test("scrapeAdvertisers reports a missing advertisers link on the Manage info tab", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			'<div role="tab">Manage info</div><div role="tabpanel"><div role="button">Something else</div></div>',
+		),
+		(page) => scrapeAdvertisers(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [],
+		reached: false,
+		step: "control_not_found",
+		surface: "advertisers",
+	});
+});
+
+test("scrapeTargetingCategories completes the live View all screen: the earlier screen stays hidden and Removed categories is interface", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div id="first-screen" role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', () => {
+					document.querySelector('#first-screen').style.display = 'none';
+					document.querySelector('#dialog-view-all').style.display = 'none';
+					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem"><div role="button">Removed categories</div></div></div>');
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [{ description: "Based on activity", name: "Category A" }],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
+for (const { label, mediaCount, proven } of [
+	{ label: "a profile that reports posts", mediaCount: 3, proven: false },
+	{ label: "a profile that reports zero posts", mediaCount: 0, proven: true },
+]) {
+	test(`collectAllStreams: an empty timeline for ${label} ${proven ? "completes" : "is not proven empty"}`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			fetchScript: {},
+			harness,
+			postsScript: [EMPTY_POSTS],
+			profilePageUser: {
+				follower_count: 12,
+				following_count: 8,
+				id: "u1",
+				is_verified: false,
+				media_count: mediaCount,
+				username: "testuser",
+			},
+			requestedStreams: ["profile", "posts", "post_likes"],
+		});
+
+		await collectAllStreams(
+			ctx,
+			NO_DELAY,
+			TEST_POSTS_CLOCK,
+			makeVirtualAdsClock(),
+			TEST_PROFILE_CLOCK,
+		);
+
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(
+				harness.protocolMessages.some(
+					(message) => message.type === "STATE" && message.stream === stream,
+				),
+				proven,
+				`${stream} STATE`,
+			);
+			assert.equal(
+				harness.protocolMessages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" && message.stream === stream,
+				),
+				!proven,
+				`${stream} SKIP_RESULT`,
+			);
+		}
+	});
+}

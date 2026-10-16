@@ -133,7 +133,7 @@ export function profileCountsFromGraphQL(
 	following_count: number | null;
 	post_count: number | null;
 } {
-	const user = envelope?.data?.data?.user;
+	const user = envelope?.data?.user;
 	return {
 		follower_count: nonNegativeIntOrNull(user?.follower_count),
 		following_count: nonNegativeIntOrNull(user?.following_count),
