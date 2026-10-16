@@ -179,6 +179,9 @@ async function emitRequestedSkip(
 
 interface LoadSummary {
 	complete: boolean;
+	/** Positive source evidence, separate from records surviving parsing. */
+	recognizedArray: boolean;
+	sourceElementSeen: boolean;
 	latestPoint: string | undefined;
 	latestSegment: string | undefined;
 	pointCount: number;
@@ -412,8 +415,10 @@ async function processStreamEvent(
 	event: GoogleMapsStreamEvent,
 ): Promise<void> {
 	if (event.kind === "shape") {
+		load.summary.recognizedArray = true;
 		return;
 	}
+	load.summary.sourceElementSeen = true;
 	const parsed = parseGoogleMapsExportElement(event.format, event.value);
 	// THE ARTIFACT BOUNDARY. One `element` event is exactly one element the
 	// uploaded file contained, counted here — before the parser's verdict — so
@@ -496,6 +501,8 @@ async function loadExports(
 	const segmentSince = state.timeline_segments?.last_start_time;
 	const summary: LoadSummary = {
 		complete: discovery.complete,
+		recognizedArray: false,
+		sourceElementSeen: false,
 		latestPoint: pointSince,
 		latestSegment: segmentSince,
 		pointCount: 0,
@@ -584,11 +591,6 @@ async function finishPoints(
 	if (!summary.complete) {
 		return;
 	}
-	await ctx.emit({
-		type: "STATE",
-		stream: "timeline_points",
-		cursor: { last_timestamp: summary.latestPoint },
-	});
 	// Artifact reconciliation, NOT an account-completeness claim. The denominator
 	// is every point element the parser produced from the uploaded file —
 	// accounted-for plus unaccountable — measured at the parse site. The numerator
@@ -611,6 +613,13 @@ async function finishPoints(
 				considered: pointsConsidered,
 				unaccounted: summary.pointsUnaccounted,
 			},
+		});
+	} else {
+		// A known loss must be registered before any checkpoint decision.
+		await ctx.emit({
+			type: "STATE",
+			stream: "timeline_points",
+			cursor: { last_timestamp: summary.latestPoint },
 		});
 	}
 	await ctx.emit(
@@ -645,11 +654,6 @@ async function finishSegments(
 			{ stream: "timeline_segments" },
 		);
 	}
-	await ctx.emit({
-		type: "STATE",
-		stream: "timeline_segments",
-		cursor: { last_start_time: summary.latestSegment },
-	});
 	// Same artifact reconciliation as `finishPoints`. `buildFullScanCoverageMessage`
 	// is deliberately NOT used when an element went unaccounted: it forces
 	// `covered === considered`, which would re-hide the very drop this counts.
@@ -677,6 +681,12 @@ async function finishSegments(
 		);
 		return;
 	}
+	// The loss branch returns without checkpointing this stream.
+	await ctx.emit({
+		type: "STATE",
+		stream: "timeline_segments",
+		cursor: { last_start_time: summary.latestSegment },
+	});
 	await ctx.emit(
 		buildFullScanCoverageMessage("timeline_segments", summary.segmentCount),
 	);
@@ -694,7 +704,17 @@ runConnector({
 		const requestedSegments = ctx.requested.has("timeline_segments");
 		const summary = await loadExports(ctx, importDir, typedState);
 
-		if (requestedPoints && summary.complete && summary.pointCount === 0) {
+		// Only a fully read, recognized source with no elements proves empty.
+		// Zero surviving records alone could mean missing or unaccounted input.
+		const provenEmpty =
+			summary.complete && summary.recognizedArray && !summary.sourceElementSeen;
+
+		if (
+			requestedPoints &&
+			summary.complete &&
+			summary.pointCount === 0 &&
+			!provenEmpty
+		) {
 			await ctx.emit({
 				type: "SKIP_RESULT",
 				stream: "timeline_points",
@@ -703,7 +723,12 @@ runConnector({
 					"Google Maps Timeline point records were not found in the configured import directory",
 			});
 		}
-		if (requestedSegments && summary.complete && summary.segmentCount === 0) {
+		if (
+			requestedSegments &&
+			summary.complete &&
+			summary.segmentCount === 0 &&
+			!provenEmpty
+		) {
 			await ctx.emit({
 				type: "SKIP_RESULT",
 				stream: "timeline_segments",

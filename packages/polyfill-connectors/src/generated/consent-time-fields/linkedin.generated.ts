@@ -24,3 +24,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		skills: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	linkedin: {},
+};

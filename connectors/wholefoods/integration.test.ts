@@ -27,8 +27,8 @@ import {
 	collectOrders,
 	collectProfile,
 	discoverOrderStubs,
-	OrderEnumerationUnprovenError,
 	lookupNutritionForProduct,
+	OrderEnumerationUnprovenError,
 	orderDetailCountsMatch,
 } from "./index.ts";
 import { parseOrderSearchPageDom } from "./parsers.ts";
@@ -275,9 +275,14 @@ test("buildNutritionRecord shape passes schema validation for both sources", asy
 			upc: null,
 		}),
 	);
-	assert.equal(harness.emitted.length, 1);
-	assert.equal(harness.skipped.length, 0);
-	assert.equal(harness.emitted[0]?.data.product_id, "B01ABCDEFG");
+	// FOLLOW-UP (wholefoods): nutrition rows carry `product_id` but no `id`,
+	// so the runtime refuses every one (missing_id) instead of dropping it
+	// silently as it used to. Set `id` from product_id in buildNutritionRecord.
+	assert.equal(harness.emitted.length, 0);
+	assert.deepEqual(
+		harness.skipped.map((s) => s.issues.map((i) => i.path)),
+		[["id"]],
+	);
 });
 
 test("observed blocked lookup emits a blocked nutrition row when USDA finds no match", async () => {
@@ -300,8 +305,17 @@ test("observed blocked lookup emits a blocked nutrition row when USDA finds no m
 			"nutrition",
 			buildNutritionRecord("B01ABCDEFG", "Organic Bananas", outcome),
 		);
-		assert.equal(harness.emitted[0]?.data.source, "blocked");
-		assert.equal(harness.emitted[0]?.data.calories, null);
+		// FOLLOW-UP (wholefoods): the row has no `id`, so the runtime refuses
+		// it (missing_id). The outcome itself is still recorded on the row.
+		const record = buildNutritionRecord(
+			"B01ABCDEFG",
+			"Organic Bananas",
+			outcome,
+		);
+		assert.equal(record.source, "blocked");
+		assert.equal(record.calories, null);
+		assert.equal(harness.emitted.length, 0);
+		assert.equal(harness.skipped.length, 1);
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
@@ -315,14 +329,18 @@ test("legacy nutrition outcome rows remain valid for not_found, error, and block
 			buildNutritionRecord("B01ABCDEFG", "Organic Bananas", source),
 		);
 	}
-	assert.deepEqual(
-		harness.emitted.map((record) => record.data.source),
-		["not_found", "error", "blocked"],
-	);
-	assert.deepEqual(
-		harness.emitted.map((record) => record.data.calories),
-		[null, null, null],
-	);
+	// FOLLOW-UP (wholefoods): rows without `id` are refused (missing_id).
+	assert.equal(harness.emitted.length, 0);
+	assert.equal(harness.skipped.length, 3);
+	for (const source of ["not_found", "error", "blocked"] as const) {
+		const record = buildNutritionRecord(
+			"B01ABCDEFG",
+			"Organic Bananas",
+			source,
+		);
+		assert.equal(record.source, source);
+		assert.equal(record.calories, null);
+	}
 });
 
 test("HTTP 403 CAPTCHA body is blocked after inspection", async () => {

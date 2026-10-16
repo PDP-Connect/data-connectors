@@ -55,6 +55,8 @@ import {
 	nowIso,
 	type ProviderBudgetProgress,
 	type RecordData,
+	type ResumeSafeBasis,
+	resumeSafeSkip,
 	runConnector,
 	type TerminalErrorDetails,
 	type ValidateRecord,
@@ -3865,10 +3867,16 @@ async function walkConversationSearch(
 	let contiguous = true;
 	const complete = (): ConversationListResult => {
 		if (!contiguous) {
+			// Not declared resume-safe. The backfill below resumes at the END of
+			// the walk, so the rows under the skipped cursor positions are not
+			// replayed by it; only the update-time watermark could find them again,
+			// and that holds only if the list is newest-first, which this endpoint
+			// does not guarantee. The runtime keeps the previous checkpoint.
 			emitConversationListUnstable(
 				deps,
 				"ChatGPT conversation search skipped cursor positions, so the list was not read contiguously",
 				{ cursor },
+				null,
 			);
 			return {
 				items: [...conversationsById.values()],
@@ -3878,10 +3886,15 @@ async function walkConversationSearch(
 			};
 		}
 		if (resumeBackfill && !resumeBoundarySeen) {
+			// The saved backfill keeps the unconfirmed boundary (time and IDs) and
+			// moves its hint one page earlier, and the watermark is no newer than
+			// the prior one (oldestAvailableConversationCursor in
+			// emit*State), so later runs replay until the boundary is seen again.
 			emitConversationListUnstable(
 				deps,
 				"ChatGPT conversation search did not re-observe the saved backfill boundary",
 				{ cursor, boundary_ids: resumeBackfill.boundary_ids },
+				"cursor_records_loss",
 			);
 			return {
 				items: [...conversationsById.values()],
@@ -3903,6 +3916,51 @@ async function walkConversationSearch(
 		};
 	};
 	const maxPageAttempts = 3;
+	// The resume-safe basis for a retryable skip that stops the walk at
+	// `cursor`, valid for the truncated result returned right after it. That
+	// result saves `conversationBackfillAt(conversationsById, cursor)`, which
+	// the next run replays from one page before `cursor`, and the STATE pins
+	// the watermark at or before the prior one (oldestAvailableConversationCursor
+	// in emitMessagesCoverageAndState / emitConversationsState). Exception:
+	// with nothing collected and `cursor > 0` the backfill has no boundary IDs,
+	// so readConversationBackfill drops it next run. On a fresh walk that is
+	// still safe (the next forward walk starts at the top with the same or an
+	// older watermark), but on a resumed backfill it would drop the saved
+	// continuation, so that case is not declared and the runtime keeps the
+	// previous checkpoint. `deferred()` keeps the resumed backfill in that
+	// case instead, so a provider deferral passes `keepsResumeBackfill`.
+	// After a cursor jump (`contiguous === false`) nothing is declared: the
+	// saved backfill resumes after the jump and the watermark filters the
+	// skipped rows from later forward walks, so no later run reads them.
+	const listLossBasis = (
+		keepsResumeBackfill = false,
+	): ResumeSafeBasis | null =>
+		contiguous &&
+		(keepsResumeBackfill ||
+			resumeBackfill === undefined ||
+			cursor === 0 ||
+			conversationsById.size > 0)
+			? "cursor_at_or_before_loss"
+			: null;
+	const emitListLoss = (
+		skip: Extract<EmittedMessage, { type: "SKIP_RESULT" }>,
+	): void => {
+		// Every caller returns the truncated backfill-at-`cursor` result right
+		// after this, so the basis holds whatever the skip's `retryable`: a
+		// non-retryable parse_error (missing list key) or the pagination cap
+		// still leaves a cursor that replays the unread rows.
+		// The list feeds both streams and both save the same backfill, so the
+		// loss is reported on each requested one. Otherwise an undeclared loss
+		// would withhold only the conversations checkpoint.
+		const basis = listLossBasis();
+		for (const stream of ["conversations", "messages"] as const) {
+			if (!deps.requested.has(stream)) continue;
+			const streamSkip = { ...skip, stream };
+			deps.emit(
+				basis === null ? streamSkip : resumeSafeSkip(streamSkip, basis),
+			);
+		}
+	};
 	const deferred = (): ConversationListResult => ({
 		items: [...conversationsById.values()],
 		truncated: true,
@@ -3922,7 +3980,12 @@ async function walkConversationSearch(
 			return await pages.fetch(cursor, attempt);
 		} catch (error) {
 			if (!isConversationSearchDeferred(error)) throw error;
-			await emitConversationSearchDeferred(deps, error, cursor);
+			await emitConversationSearchDeferred(
+				deps,
+				error,
+				cursor,
+				listLossBasis(true),
+			);
 			return null;
 		}
 	};
@@ -3949,7 +4012,8 @@ async function walkConversationSearch(
 			});
 			page += 1;
 			if (!classified.ok) {
-				deps.emit(classified.skip);
+				// See listLossBasis.
+				emitListLoss(classified.skip);
 				return {
 					items: [...conversationsById.values()],
 					truncated: true,
@@ -3997,19 +4061,16 @@ async function walkConversationSearch(
 				items.push(item);
 			}
 			if (malformedItem) {
-				for (const stream of ["conversations", "messages"] as const) {
-					if (deps.requested.has(stream)) {
-						deps.emit({
-							type: "SKIP_RESULT",
-							stream,
-							reason: "parse_error",
-							message:
-								"conversations search returned an item without a usable id",
-							recovery_hint: { action: "retry_by_runtime", retryable: true },
-							diagnostics: { page },
-						});
-					}
-				}
+				// See listLossBasis: this page is not added, so the backfill
+				// replays it.
+				emitListLoss({
+					type: "SKIP_RESULT",
+					stream: "conversations",
+					reason: "parse_error",
+					message: "conversations search returned an item without a usable id",
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+					diagnostics: { page },
+				});
 				return {
 					items: [...conversationsById.values()],
 					truncated: true,
@@ -4017,10 +4078,13 @@ async function walkConversationSearch(
 				};
 			}
 			if (pageItems.length > pageSize) {
+				// See listLossBasis: this page is not added, so the backfill
+				// replays it.
 				emitConversationListUnstable(
 					deps,
 					"ChatGPT conversation search returned more than one cursor page",
 					{ cursor, item_count: items.length },
+					listLossBasis(),
 				);
 				return {
 					items: [...conversationsById.values()],
@@ -4086,6 +4150,8 @@ async function walkConversationSearch(
 			}
 		}
 		if (cursorDisagreed) {
+			// See listLossBasis: the backfill replays from this cursor, so the
+			// rows behind either disagreeing continuation are read again.
 			emitConversationListUnstable(
 				deps,
 				"ChatGPT conversation search returned disagreeing cursor probes",
@@ -4094,6 +4160,7 @@ async function walkConversationSearch(
 					checks: attempts.length,
 					item_counts: attempts.map((items) => items.length),
 				},
+				listLossBasis(),
 			);
 			return {
 				items: [...conversationsById.values()],
@@ -4113,7 +4180,8 @@ async function walkConversationSearch(
 			});
 			page += 1;
 			if (!classified.ok) {
-				deps.emit(classified.skip);
+				// See listLossBasis.
+				emitListLoss(classified.skip);
 				return {
 					items: [...conversationsById.values()],
 					truncated: true,
@@ -4178,7 +4246,10 @@ async function walkConversationSearch(
 		}
 		cursor = nextCursor;
 		if (cursor > PAGINATION_SAFETY_LIMIT) {
-			deps.emit({
+			// See listLossBasis: the result below saves a backfill at this cursor
+			// with the watermark pinned, so the next run resumes the unread tail.
+			// Not a configured_limit: the tail past the cap IS collected later.
+			emitListLoss({
 				type: "SKIP_RESULT",
 				stream: "conversations",
 				reason: "pagination_cap_truncated",
@@ -4240,12 +4311,13 @@ async function emitConversationSearchDeferred(
 		| ChatGptPlannedProviderBudgetDeferredError
 		| ChatGptRecoverableRetryExhaustedError,
 	cursor: number,
+	resumeSafe: ResumeSafeBasis | null,
 ): Promise<void> {
 	await Promise.all(
 		["conversations", "messages"]
 			.filter((stream) => deps.requested.has(stream))
-			.map((stream) =>
-				deps.emit({
+			.map((stream) => {
+				const skip: Extract<EmittedMessage, { type: "SKIP_RESULT" }> = {
 					type: "SKIP_RESULT",
 					stream,
 					reason: "upstream_pressure",
@@ -4258,8 +4330,16 @@ async function emitConversationSearchDeferred(
 								? error.reason
 								: error.class,
 					},
-				}),
-			),
+				};
+				// The walk then returns `deferred()`: a backfill at this unread
+				// cursor, or the resumed backfill (or position 0) when nothing was
+				// collected, and the STATE pins the watermark at or before the
+				// prior one (oldestAvailableConversationCursor). The walk checks
+				// that basis (listLossBasis); `null` keeps the previous checkpoint.
+				return deps.emit(
+					resumeSafe === null ? skip : resumeSafeSkip(skip, resumeSafe),
+				);
+			}),
 	);
 }
 
@@ -4824,23 +4904,29 @@ function conversationSearchNextCursor(
 	return itemCount > 0 ? cursor + pageSize : null;
 }
 
+/**
+ * `resumeSafe` is the basis the calling walk site verified for the cursor it
+ * saves next, or `null` when that cursor can pass the unread rows.
+ */
 function emitConversationListUnstable(
 	deps: StreamDeps,
 	message: string,
 	diagnostics: Record<string, unknown>,
+	resumeSafe: ResumeSafeBasis | null,
 ): void {
 	for (const stream of ["conversations", "messages"] as const) {
 		if (!deps.requested.has(stream)) {
 			continue;
 		}
-		deps.emit({
+		const skip: Extract<EmittedMessage, { type: "SKIP_RESULT" }> = {
 			type: "SKIP_RESULT",
 			stream,
 			reason: "conversation_list_unstable",
 			message: `${message}; retry this stream`,
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			diagnostics,
-		});
+		};
+		deps.emit(resumeSafe === null ? skip : resumeSafeSkip(skip, resumeSafe));
 	}
 }
 

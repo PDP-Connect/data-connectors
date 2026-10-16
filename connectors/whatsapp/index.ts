@@ -31,8 +31,10 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import {
 	buildDetailCoverageMessage,
+	declaredBoundSkip,
 	type EmittedMessage,
 	type ProgressExtra,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
@@ -369,12 +371,14 @@ async function parseZipExportFile(
 	} catch (err) {
 		if (err instanceof WhatsAppZipPolicyRejection) {
 			closeSource();
-			await emit({
-				message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: exceeds the safe archive read policy (${err.message}).`,
-				reason: "import_exceeds_bounded_read_policy",
-				stream: skipStream,
-				type: "SKIP_RESULT",
-			});
+			await emit(
+				declareExportSkip({
+					message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: exceeds the safe archive read policy (${err.message}).`,
+					reason: "import_exceeds_bounded_read_policy",
+					stream: skipStream,
+					type: "SKIP_RESULT",
+				}),
+			);
 			return { closeSource: () => undefined, source: null };
 		}
 		closeSource();
@@ -382,12 +386,14 @@ async function parseZipExportFile(
 	}
 	if (!artifact) {
 		closeSource();
-		await emit({
-			message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: not a supported chat export.`,
-			reason: "unsupported_export",
-			stream: skipStream,
-			type: "SKIP_RESULT",
-		});
+		await emit(
+			declareExportSkip({
+				message: `Skipped WhatsApp export ${exportOrdinal} of ${exportTotal}: not a supported chat export.`,
+				reason: "unsupported_export",
+				stream: skipStream,
+				type: "SKIP_RESULT",
+			}),
+		);
 		return { closeSource: () => undefined, source: null };
 	}
 	return {
@@ -577,8 +583,35 @@ async function skipParseExport(
 	skipStream: string,
 	closeSource: () => void = () => undefined,
 ): Promise<ParseExportOutcome> {
-	await emit({ message, reason, stream: skipStream, type: "SKIP_RESULT" });
+	await emit(
+		declareExportSkip({
+			message,
+			reason,
+			stream: skipStream,
+			type: "SKIP_RESULT",
+		}),
+	);
 	return { closeSource, result: null };
+}
+
+/**
+ * Declare a whole-export skip so the run's STATE still passes.
+ *
+ *   - `unsupported_export`: the file parsed as no WhatsApp chat export, so it
+ *     is not a source this connector reads (`unsupported_input`).
+ *   - any other export skip (`import_exceeds_bounded_read_policy`,
+ *     `empty_export`): resume-safe, `cursor_excludes_loss`. Every run
+ *     re-parses every export file (the read ignores STATE), and the STATE is
+ *     a fingerprint set written after `pruneRequestedCursors` drops every id
+ *     this run did not see, so no row of the skipped export stays in it and
+ *     the next run that can read the file emits its rows again.
+ */
+function declareExportSkip(
+	msg: Extract<EmittedMessage, { type: "SKIP_RESULT" }>,
+): Extract<EmittedMessage, { type: "SKIP_RESULT" }> {
+	return msg.reason === "unsupported_export"
+		? declaredBoundSkip(msg, "unsupported_input")
+		: resumeSafeSkip(msg, "cursor_excludes_loss");
 }
 
 async function parseZipExportOutcome(
@@ -857,12 +890,21 @@ async function emitAttachmentRecords(
 		}
 	}
 	if (skipped > 0) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "attachments",
-			reason: "media_exceeds_bounded_read_policy",
-			message: `${skipped} media file(s) in WhatsApp export ${exportOrdinal} of ${exportTotal} exceeded the archive read policy and were not imported.`,
-		});
+		// Resume-safe: the `attachments` STATE is a fingerprint set keyed by an
+		// id hashed from the media bytes. An unreadable file never reaches
+		// shouldEmit, so it is never in the set, and every run re-parses every
+		// export, so the next run weighs the file again.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "attachments",
+					reason: "media_exceeds_bounded_read_policy",
+					message: `${skipped} media file(s) in WhatsApp export ${exportOrdinal} of ${exportTotal} exceeded the archive read policy and were not imported.`,
+				},
+				"cursor_excludes_loss",
+			),
+		);
 	}
 	// `covered` excludes media the read policy dropped. The runtime's coverage
 	// contract is explicit that a weighed-but-dropped item belongs to neither the

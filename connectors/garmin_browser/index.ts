@@ -14,9 +14,11 @@ import type { Page } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
+	declaredBoundSkip,
 	type EnsureSessionArgs,
 	politeDelay,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -312,12 +314,14 @@ export const ensureSession = makeEnsureSession();
 // ── Classification (Node side) ─────────────────────────────────────────────
 type Reason =
 	| "collection_interrupted"
+	| "retry_list_limit_reached"
 	| "sign_in_required"
 	| "source_limit_reached"
 	| "source_unreadable";
 /** A bare object literal, so the reason scan resolves SKIP_REASON[x]. */
 const SKIP_REASON: Record<Reason, string> = {
 	collection_interrupted: "collection_interrupted",
+	retry_list_limit_reached: "retry_list_limit_reached",
 	sign_in_required: "sign_in_required",
 	source_limit_reached: "source_limit_reached",
 	source_unreadable: "source_unreadable",
@@ -330,7 +334,27 @@ function hintFor(reason: Reason): { action: string; retryable: boolean } {
 	if (reason === "source_unreadable") {
 		return { action: "retry_on_connector_upgrade", retryable: false };
 	}
+	if (reason === "retry_list_limit_reached") {
+		return { action: "not_retriable", retryable: false };
+	}
 	return { action: "retry_by_runtime", retryable: true };
+}
+
+/** The one place a SKIP_RESULT is built, so SKIP_REASON stays the whole vocabulary. */
+function skipFor(
+	stream: string,
+	reason: Reason,
+	message: string,
+	diagnostics?: Record<string, unknown>,
+): Parameters<typeof resumeSafeSkip>[0] {
+	return {
+		type: "SKIP_RESULT",
+		stream,
+		reason: SKIP_REASON[reason],
+		recovery_hint: hintFor(reason),
+		message,
+		...(diagnostics === undefined ? {} : { diagnostics }),
+	};
 }
 type Failure = {
 	ok: false;
@@ -489,7 +513,9 @@ export interface DayCursor {
 }
 /**
  * The most days `retry` holds, and so the bound on reading kept days again until they read: past
- * it, the oldest are let go, and PROGRESS counts them. Kept days below a grant's start wait there
+ * it, the oldest are let go, and PROGRESS counts them. A kept day a run stopped before reading
+ * again (its read failed, or the run ran out of reads) is never let go by that run: the days that
+ * run joined the list are enough to let go instead. Kept days below a grant's start wait there
  * for a grant that reaches them, so under a start that moves on they count towards it until one
  * does.
  */
@@ -559,37 +585,61 @@ function subtract(spans: readonly Window[], cut: Window): Window[] {
 /**
  * The retry list in its one form: sorted, spans that overlap or touch merged, and at most
  * MAX_RETRY_DAYS days, the oldest let go first. `dropped` counts the days let go.
+ *
+ * With `evictable` (the days a run read in full), only those days may be let go: a kept day the
+ * run did not read (one it stopped before, or one outside a narrowed grant) is never let go in
+ * silence. If the cap cannot be met from read days alone, the oldest unread days are let go and
+ * returned in `forced`, for the caller to disclose as a declared bound. Without `evictable`
+ * (reading a saved cursor) any day may be let go, as before.
  */
-export function normaliseRetry(spans: readonly Window[]): {
+export function normaliseRetry(
+	spans: readonly Window[],
+	evictable?: readonly Window[],
+): {
 	retry: Window[];
 	dropped: number;
+	forced?: Window[];
 } {
-	const retry: Window[] = [];
+	const merged: Window[] = [];
 	const sorted = spans.toSorted((a, b) =>
 		a.from < b.from ? -1 : a.from > b.from ? 1 : 0,
 	);
 	for (const { from, to } of sorted) {
-		const last = retry.at(-1);
+		const last = merged.at(-1);
 		if (last && from <= addDays(last.to, 1)) {
 			if (to > last.to) last.to = to;
 		} else {
-			retry.push({ from, to });
+			merged.push({ from, to });
 		}
 	}
-	const total = retry.reduce((days, span) => days + spanDays(span), 0);
-	const dropped = Math.max(0, total - MAX_RETRY_DAYS);
-	for (let excess = dropped; excess > 0; ) {
-		const oldest = retry[0] as Window;
-		const days = spanDays(oldest);
-		if (days <= excess) {
-			retry.shift();
+	const total = merged.reduce((days, span) => days + spanDays(span), 0);
+	let excess = Math.max(0, total - MAX_RETRY_DAYS);
+	const cutOldest = (from: readonly Window[]): Window[] => {
+		const cut: Window[] = [];
+		for (const span of from) {
+			if (excess === 0) break;
+			const days = Math.min(spanDays(span), excess);
+			cut.push({ from: span.from, to: addDays(span.from, days - 1) });
 			excess -= days;
-		} else {
-			oldest.from = addDays(oldest.from, excess);
-			excess = 0;
 		}
+		return cut;
+	};
+	if (evictable === undefined) {
+		const cut = cutOldest(merged);
+		return {
+			retry: cut.reduce(subtract, merged),
+			dropped: cut.reduce((days, span) => days + spanDays(span), 0),
+		};
 	}
-	return { retry, dropped };
+	const unreadKept = evictable.reduce(subtract, merged);
+	const readKept = unreadKept.reduce(subtract, merged);
+	const cut = cutOldest(readKept);
+	const forced = cutOldest(cut.reduce(subtract, unreadKept));
+	return {
+		retry: [...cut, ...forced].reduce(subtract, merged),
+		dropped: cut.reduce((days, span) => days + spanDays(span), 0),
+		...(forced.length > 0 ? { forced } : {}),
+	};
 }
 
 /** `spans` from the first day at or after `day` on, then round from the oldest to the day before it. */
@@ -991,16 +1041,27 @@ function mark(
 	cursor.retry = read.reduce((list, part) => subtract(list, part), spans);
 }
 
-/** Normalises and caps the retry list once a stream's reading is done. Answers how many days the cap let go. */
-function settle(cursor: DayCursor): number {
-	const { retry, dropped } = normaliseRetry(cursor.retry ?? []);
+/**
+ * Normalises and caps the retry list once a stream's reading is done. Only days this run read
+ * (`read`) may be let go; see normaliseRetry. Answers how many read days the cap let go, and any
+ * unread spans it had to let go anyway (`forced`), which the caller discloses.
+ */
+function settle(
+	cursor: DayCursor,
+	read: readonly Window[],
+): { dropped: number; forced: Window[] } {
+	const {
+		retry,
+		dropped,
+		forced = [],
+	} = normaliseRetry(cursor.retry ?? [], read);
 	if (retry.length > 0) {
 		cursor.retry = retry;
 	} else {
 		delete cursor.retry;
 		delete cursor.retry_next;
 	}
-	return dropped;
+	return { dropped, forced };
 }
 
 /** Moves the cursor past a day read in full; past a day read again, it moves only `retry_next`. */
@@ -1077,7 +1138,8 @@ async function deliver(
 
 /**
  * What a stream's reading came to. `progressed` counts days (or windows) read in full; `retried`,
- * those of them read again that still did not read cleanly.
+ * those of them read again that still did not read cleanly; `read`, every day or window it read
+ * in full, the only days the cap may let go.
  */
 interface Walk {
 	failure: Failure | null;
@@ -1085,6 +1147,7 @@ interface Walk {
 	progressed: number;
 	retried: number;
 	unreadable: number;
+	read: Window[];
 }
 const walkFrom = (failure: Failure | null = null): Walk => ({
 	failure,
@@ -1092,6 +1155,7 @@ const walkFrom = (failure: Failure | null = null): Walk => ({
 	progressed: 0,
 	retried: 0,
 	unreadable: 0,
+	read: [],
 });
 
 /**
@@ -1152,6 +1216,7 @@ async function walkDays(s: StreamRun, stream: DayStream): Promise<Walk> {
 			tally(walk, segment, unreadable);
 			// An unreadable day advances too: PROGRESS counts it, and the retry list keeps it.
 			mark(plan.cursor, { from: day, to: day }, unreadable, plan.held);
+			walk.read.push({ from: day, to: day });
 			advance(plan.cursor, segment, day);
 		}
 	}
@@ -1265,6 +1330,7 @@ async function walkWindows(s: StreamRun, stream: RangeStream): Promise<Walk> {
 			const keep = read.unreadable > 0;
 			tally(walk, segment, keep);
 			mark(plan.cursor, window, keep, plan.held);
+			walk.read.push(window);
 			for (let day = window.from; day <= window.to; day = addDays(day, 1)) {
 				advance(plan.cursor, segment, day);
 			}
@@ -1316,7 +1382,7 @@ export async function collectGarminBrowser(
 			: isDayStream(stream)
 				? await walkDays(s, stream)
 				: await walkWindows(s, stream);
-		const dropped = settle(plan.cursor);
+		const { dropped, forced } = settle(plan.cursor, walk.read);
 		// Counts, never an id, a date or a value.
 		if (walk.unreadable > 0) {
 			await ctx.emit({
@@ -1334,21 +1400,44 @@ export async function collectGarminBrowser(
 				message: `${dropped} day(s) of unreadable records could not be kept for another try.`,
 			});
 		}
+		if (forced.length > 0) {
+			// The cap could not be met from days this run read: the oldest unread kept days are let
+			// go. That is a deliberate limit (MAX_RETRY_DAYS), so it is declared as a bound and names
+			// the spans, never let go in silence under the resume-safe claim below.
+			await ctx.emit(
+				declaredBoundSkip(
+					skipFor(
+						stream,
+						"retry_list_limit_reached",
+						`Kept days past the ${MAX_RETRY_DAYS}-day retry limit were let go without another try.`,
+						{ dropped_unread_spans: forced },
+					),
+					"configured_limit",
+				),
+			);
+		}
 		const reason: Reason | null = walk.failure
 			? walk.failure.reason
 			: walk.deferred
 				? "source_limit_reached"
 				: null;
 		if (reason) {
-			await ctx.emit({
-				type: "SKIP_RESULT",
-				stream,
-				reason: SKIP_REASON[reason],
-				recovery_hint: hintFor(reason),
-				message:
-					walk.failure?.message ??
-					"Read as much as one run allows; the next run continues from the saved day.",
-			});
+			// Resume-safe: walkDays and walkWindows return on a failure or a spent budget before
+			// mark() and advance() touch the day or window not read, so next_day, backfill.next_day
+			// and retry_next stay at it (or at the previous checkpoint, inside the overlap), and a
+			// kept day not read again stays in `retry`: settle lets go only days in `walk.read`, even at
+			// MAX_RETRY_DAYS. Segments not reached keep their saved place.
+			await ctx.emit(
+				resumeSafeSkip(
+					skipFor(
+						stream,
+						reason,
+						walk.failure?.message ??
+							"Read as much as one run allows; the next run continues from the saved day.",
+					),
+					"cursor_at_or_before_loss",
+				),
+			);
 		}
 		if (walk.progressed > 0 || !walk.failure) {
 			await ctx.emit({ type: "STATE", stream, cursor: { ...plan.cursor } });

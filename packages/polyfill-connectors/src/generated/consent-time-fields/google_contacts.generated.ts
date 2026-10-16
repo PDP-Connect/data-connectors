@@ -20,3 +20,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		people: { field: "updated", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	google_contacts: {},
+};

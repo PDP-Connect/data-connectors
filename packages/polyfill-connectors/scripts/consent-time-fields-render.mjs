@@ -62,6 +62,83 @@ function consentTimeField(connector, stream) {
 	return null;
 }
 
+/**
+ * A manifest's declared checkpoint dependencies: data stream → its
+ * `state_stream` (one parent) or `parent_streams` (one or more). The
+ * runtime's stream integrity rule needs them before the first STATE (a
+ * child's loss must hold its parent's checkpoint), and a built artifact has
+ * no manifest beside it, so they ride in this module.
+ *
+ * Fails closed (throws, so generation fails): a broken declaration must never
+ * become a missing edge. The two forms are exclusive, as the Collection
+ * Profile's Checkpoint dependency section requires. `state_stream` must be a
+ * nonempty string, `parent_streams` a nonempty array of unique nonempty
+ * strings, and every named parent must be another stream of this manifest.
+ */
+export function checkpointParentsOf(manifest, connector = "manifest") {
+	const streams = (manifest.streams ?? []).filter(
+		(stream) => typeof stream?.name === "string",
+	);
+	const names = new Set(streams.map((stream) => stream.name));
+	const fail = (stream, problem) => {
+		throw new Error(
+			`${connector}: stream ${JSON.stringify(stream.name)} ${problem}`,
+		);
+	};
+	const parents = {};
+	for (const stream of streams) {
+		const hasState = Object.hasOwn(stream, "state_stream");
+		const hasParents = Object.hasOwn(stream, "parent_streams");
+		if (hasState && hasParents)
+			fail(stream, "declares both state_stream and parent_streams");
+		let declared = [];
+		if (hasState) {
+			if (typeof stream.state_stream !== "string" || !stream.state_stream)
+				fail(stream, "has a state_stream that is not a nonempty string");
+			declared = [stream.state_stream];
+		} else if (hasParents) {
+			const list = stream.parent_streams;
+			if (
+				!Array.isArray(list) ||
+				list.length === 0 ||
+				list.some((parent) => typeof parent !== "string" || !parent) ||
+				new Set(list).size !== list.length
+			)
+				fail(
+					stream,
+					"has parent_streams that is not a nonempty array of unique nonempty strings",
+				);
+			declared = [...list];
+		}
+		for (const parent of declared) {
+			if (parent === stream.name) fail(stream, "names itself as a parent");
+			if (!names.has(parent))
+				fail(
+					stream,
+					`names checkpoint parent ${JSON.stringify(parent)}, which is not a stream of this manifest`,
+				);
+		}
+		if (declared.length > 0) parents[stream.name] = declared;
+	}
+	return parents;
+}
+
+function renderParents(connector, manifest) {
+	const entries = Object.entries(checkpointParentsOf(manifest, connector)).sort(
+		([a], [b]) => a.localeCompare(b),
+	);
+	if (entries.length === 0) return `\t${key(connector)}: {},`;
+	const lines = entries.map(
+		([stream, declared]) =>
+			`\t\t${key(stream)}: [${declared.map((parent) => JSON.stringify(parent)).join(", ")}],`,
+	);
+	return `\t${key(connector)}: {\n${lines.join("\n")}\n\t},`;
+}
+
+const PARENTS_TYPE = `Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+>`;
+
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
 const key = (name) => (IDENTIFIER.test(name) ? name : JSON.stringify(name));
 
@@ -117,6 +194,13 @@ export const CONSENT_BOUND_CONNECTOR: string | null = null;
 export const CONSENT_TIME_FIELDS: ${TABLE_TYPE} = {
 ${body}
 };
+
+export const CHECKPOINT_PARENTS: ${PARENTS_TYPE} = {
+${[...connectors]
+	.sort(([a], [b]) => a.localeCompare(b))
+	.map(([connector, manifest]) => renderParents(connector, manifest))
+	.join("\n")}
+};
 `;
 }
 
@@ -148,6 +232,10 @@ ${boundConnectorDeclaration(connector)}
 
 export const CONSENT_TIME_FIELDS: ${TABLE_TYPE} = {
 ${renderConnector(connector, manifest)}
+};
+
+export const CHECKPOINT_PARENTS: ${PARENTS_TYPE} = {
+${renderParents(connector, manifest)}
 };
 `;
 }

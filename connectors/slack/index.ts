@@ -80,9 +80,11 @@ import {
 	type CollectContext,
 	type DetailGapMessage,
 	type DetailGapStartEntry,
+	declaredBoundSkip,
 	type EmittedMessage,
 	nowIso,
 	type RecordData,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
@@ -460,24 +462,35 @@ async function emitMissingChannelDiagnostic(
 		0,
 		MAX_MISSING_CHANNEL_IDS_IN_DIAGNOSTIC,
 	);
-	await emit({
-		type: "SKIP_RESULT",
-		stream: "messages",
-		reason: SOURCE_PARTITION_MISSING_REASON,
-		message:
-			missingChannelIds.length === 1
-				? `Slack archive is missing previously observed channel ${visibleIds[0]}; message coverage is partial.`
-				: `Slack archive is missing ${String(missingChannelIds.length)} previously observed channels; message coverage is partial.`,
-		diagnostics: {
-			missing_channel_ids: visibleIds,
-			missing_count: missingChannelIds.length,
-			truncated: visibleIds.length < missingChannelIds.length,
-		},
-		recovery_hint: {
-			action: "retry_by_runtime",
-			retryable: true,
-		},
-	});
+	// Resume-safe: a missing channel contributes no accepted row, so
+	// selectCommittedChannelLastTs carries its `channel_last_ts` entry
+	// unchanged (or leaves it absent, which reads its full history next run;
+	// buildMessageRowsQuery never floors an uncursored channel at `last_ts`
+	// while any per-channel cursor exists). It also stays in
+	// `observed_channel_ids`, so the next run looks for it again.
+	await emit(
+		resumeSafeSkip(
+			{
+				type: "SKIP_RESULT",
+				stream: "messages",
+				reason: SOURCE_PARTITION_MISSING_REASON,
+				message:
+					missingChannelIds.length === 1
+						? `Slack archive is missing previously observed channel ${visibleIds[0]}; message coverage is partial.`
+						: `Slack archive is missing ${String(missingChannelIds.length)} previously observed channels; message coverage is partial.`,
+				diagnostics: {
+					missing_channel_ids: visibleIds,
+					missing_count: missingChannelIds.length,
+					truncated: visibleIds.length < missingChannelIds.length,
+				},
+				recovery_hint: {
+					action: "retry_by_runtime",
+					retryable: true,
+				},
+			},
+			"cursor_at_or_before_loss",
+		),
+	);
 }
 
 /**
@@ -583,31 +596,39 @@ async function emitUnprovenChannelDiagnostic(
 			0,
 			MAX_MISSING_CHANNEL_IDS_IN_DIAGNOSTIC,
 		);
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "messages",
-			reason: "channel_history_out_of_member_scope",
-			message:
-				`${String(outOfScope.length)} public Slack channel(s) were never walked because this account is not a member ` +
-				"of them. This is a setting you control: set the connector's Slack option MEMBER_ONLY to false and run a " +
-				"full archive to collect every channel the workspace lists for you, including channels you have left and " +
-				"channels that have been archived. Their messages are not lost — they have simply never been requested.",
-			diagnostics: {
-				inventory_count: inventory.size,
-				finalized_count: finalized.size,
-				out_of_scope_count: outOfScope.length,
-				out_of_scope_channel_ids: visibleIds,
-				truncated: visibleIds.length < outOfScope.length,
-				collect_by_setting: "SLACK_MEMBER_ONLY=false",
-			},
-			recovery_hint: {
-				// `not_retriable` (not a free-form token) — RECOVERY_ACTIONS is a closed
-				// set in the runtime's gap normalizer; an unrecognized action is
-				// silently replaced by a regex guess over the reason/message text.
-				action: "not_retriable",
-				retryable: false,
-			},
-		});
+		// Declared bound: `opts.MEMBER_ONLY` (SLACK_MEMBER_ONLY) is the owner's
+		// documented setting; with it on, non-member public channels are not
+		// collected by design (partitionUnprovenChannels / memberOnlySkipsChannel).
+		await emit(
+			declaredBoundSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "messages",
+					reason: "channel_history_out_of_member_scope",
+					message:
+						`${String(outOfScope.length)} public Slack channel(s) were never walked because this account is not a member ` +
+						"of them. This is a setting you control: set the connector's Slack option MEMBER_ONLY to false and run a " +
+						"full archive to collect every channel the workspace lists for you, including channels you have left and " +
+						"channels that have been archived. Their messages are not lost — they have simply never been requested.",
+					diagnostics: {
+						inventory_count: inventory.size,
+						finalized_count: finalized.size,
+						out_of_scope_count: outOfScope.length,
+						out_of_scope_channel_ids: visibleIds,
+						truncated: visibleIds.length < outOfScope.length,
+						collect_by_setting: "SLACK_MEMBER_ONLY=false",
+					},
+					recovery_hint: {
+						// `not_retriable` (not a free-form token) — RECOVERY_ACTIONS is a closed
+						// set in the runtime's gap normalizer; an unrecognized action is
+						// silently replaced by a regex guess over the reason/message text.
+						action: "not_retriable",
+						retryable: false,
+					},
+				},
+				"configured_limit",
+			),
+		);
 	}
 }
 
@@ -3746,21 +3767,30 @@ export async function runOptionalStream(
 		// text — a typed marker can't silently drift out of sync with the throw
 		// site the way a regex copy-pasted across files can.
 		const isAuthFailure = e instanceof SlackApiAuthError;
-		await emit({
-			type: "SKIP_RESULT",
-			stream,
-			reason: OPTIONAL_STREAM_FAILED_REASON,
-			message: `Slack: ${stream} failed and was skipped (optional stream): ${message}`,
-			recovery_hint: isAuthFailure
-				? { action: "refresh_credentials", retryable: false }
-				: {
-						action: "retry_by_runtime",
-						retryable: SLACK_API_RETRYABLE_FAILURE_RE.test(message),
-					},
-			...(isAuthFailure && e.slackApiErrorCode
-				? { diagnostics: { slack_api_error_code: e.slackApiErrorCode } }
-				: {}),
-		});
+		// Resume-safe whatever the failure: each optional stream re-fetches its
+		// whole list from the Web API every run, and its STATE is only a
+		// `synced_at` marker (emitStateCheckpoints; none of the four is in
+		// FINGERPRINTED_STREAMS), so the next run reads every lost row again.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream,
+					reason: OPTIONAL_STREAM_FAILED_REASON,
+					message: `Slack: ${stream} failed and was skipped (optional stream): ${message}`,
+					recovery_hint: isAuthFailure
+						? { action: "refresh_credentials", retryable: false }
+						: {
+								action: "retry_by_runtime",
+								retryable: SLACK_API_RETRYABLE_FAILURE_RE.test(message),
+							},
+					...(isAuthFailure && e.slackApiErrorCode
+						? { diagnostics: { slack_api_error_code: e.slackApiErrorCode } }
+						: {}),
+				},
+				"read_ignores_cursor_for_loss",
+			),
+		);
 	}
 }
 

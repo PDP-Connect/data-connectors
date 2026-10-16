@@ -21,3 +21,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		sleep: { field: "date", format: "date" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	fitbit: {},
+};

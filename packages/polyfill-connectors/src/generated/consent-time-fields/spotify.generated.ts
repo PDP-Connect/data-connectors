@@ -25,3 +25,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		top_tracks: null,
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	spotify: {},
+};

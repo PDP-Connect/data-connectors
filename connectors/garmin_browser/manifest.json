@@ -7,7 +7,7 @@
 	},
 	"connector_key": "garmin-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/garmin-browser",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"display_name": "Garmin (Browser Sign-In)",
 	"runtime_requirements": {
 		"bindings": {
@@ -489,6 +489,7 @@
 	"reason_display_messages": {
 		"collection_interrupted": "Garmin Connect stopped answering partway through, so some records are missing. The next run continues from where this one stopped.",
 		"sign_in_required": "Garmin Connect needs you to sign in again before this can continue.",
+		"retry_list_limit_reached": "Some days Garmin could not read were kept for another try longer than the retry limit allows, so they will not be tried again.",
 		"source_limit_reached": "This run read as much Garmin history as one run allows. The next run continues from where this one stopped.",
 		"source_unreadable": "Garmin Connect answered with something this connector doesn't recognise, so nothing more was read. Garmin may have changed its site; please report this rather than retrying."
 	}

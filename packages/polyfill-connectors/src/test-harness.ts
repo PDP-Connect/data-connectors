@@ -18,6 +18,11 @@
  * and you get pass-through mode for tests where the shape-check isn't
  * what's under test (e.g. pure scope-filter gates).
  *
+ * It also applies the runtime's stream integrity rule
+ * (`stream-integrity.ts`): once a record of a stream is refused, `.emit`
+ * records the runtime's withheld notice instead of that stream's `STATE`,
+ * `delete` or full-coverage claim — exactly what production sends.
+ *
  * This module has no side effects at import time. It exports only
  * factories and pure helpers.
  */
@@ -31,6 +36,11 @@ import type {
 	RecordData,
 	ValidateRecord,
 } from "./connector-runtime.ts";
+import type { FieldOmission } from "./field-reader.ts";
+import {
+	createStreamIntegrity,
+	type StreamIntegrityOptions,
+} from "./stream-integrity.ts";
 
 const VM_RSS_STATUS_RE = /VmRSS:\s*(\d+)\s*kB/;
 
@@ -70,7 +80,13 @@ export interface RecordingEmit {
 	emitRecord: (
 		stream: string,
 		data: RecordData,
-		options?: { beforeEmit?: () => Promise<void> } | "id" | "name",
+		options?:
+			| {
+					beforeEmit?: () => Promise<void>;
+					omissions?: readonly FieldOmission[];
+			  }
+			| "id"
+			| "name",
 	) => Promise<void>;
 	emitted: EmittedRecord[];
 	/** Unified time-ordered trace of every emit() and emitRecord() call,
@@ -144,36 +160,74 @@ export interface ConnectorSubprocessOptions {
  * for tests where the helper is a pure function and the shape-check
  * isn't the point (e.g. scope-filter gates, ordering invariants on
  * synthetic data that intentionally omits fields).
+ *
+ * Pass the connector's checkpoint dependency graph in `integrityOptions`
+ * (using `checkpointParentsFor` from connector-runtime when resolving a
+ * shipped connector) to mirror production before any wire-level links.
  */
 export function makeRecordingEmit(
 	validateRecord?: ValidateRecord,
+	integrityOptions: StreamIntegrityOptions = {},
 ): RecordingEmit {
 	const emitted: EmittedRecord[] = [];
 	const skipped: SkippedRecord[] = [];
 	const protocolMessages: EmittedMessage[] = [];
 	const events: RecordedEvent[] = [];
 
+	const integrity = createStreamIntegrity(integrityOptions);
+
 	const emit = (msg: EmittedMessage): Promise<void> => {
-		protocolMessages.push(msg);
-		events.push({ kind: "message", message: msg });
+		for (const out of integrity.gate(msg)) {
+			protocolMessages.push(out);
+			events.push({ kind: "message", message: out });
+		}
 		return Promise.resolve();
 	};
 
-	const emitRecord = async (
+	const refuse = (
 		stream: string,
 		data: RecordData,
-		options?: { beforeEmit?: () => Promise<void> } | "id" | "name",
-	): Promise<void> => {
+		issues: Array<{ message: string; path: string }>,
+		cause: "fields_unavailable" | "missing_id" | "shape_check_failed",
+	): void => {
+		integrity.refuseRecord(
+			stream,
+			data.id == null ? null : String(data.id),
+			cause,
+		);
+		skipped.push({ stream, issues });
+		events.push({ kind: "record-skipped", stream, issues, skipped: true });
+	};
+
+	const emitRecord: RecordingEmit["emitRecord"] = async (
+		stream,
+		data,
+		options,
+	) => {
+		if (typeof options === "object" && options.omissions?.length) {
+			refuse(
+				stream,
+				data,
+				options.omissions.map((o) => ({ path: o.field, message: o.reason })),
+				"fields_unavailable",
+			);
+			return;
+		}
 		if (validateRecord) {
+			// Mirrors the runtime: a record with no key is refused, not dropped.
+			const key = options === "name" ? (data.name ?? data.id) : data.id;
+			if (key == null) {
+				refuse(
+					stream,
+					data,
+					[{ path: "id", message: "record has no id" }],
+					"missing_id",
+				);
+				return;
+			}
 			const result = validateRecord(stream, data);
 			if (!result.ok) {
-				skipped.push({ stream, issues: result.issues });
-				events.push({
-					kind: "record-skipped",
-					stream,
-					issues: result.issues,
-					skipped: true,
-				});
+				refuse(stream, data, result.issues, "shape_check_failed");
 				return;
 			}
 		}

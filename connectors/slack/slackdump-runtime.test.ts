@@ -812,8 +812,8 @@ test("slack connector emits a bounded source-partition diagnostic when a prior c
 		const db = new DatabaseSync(join(archiveDir, "slackdump.sqlite"));
 		try {
 			createSlackArchiveSchema(db);
-			insertChannel(db, "C_PRESENT", "present");
-			insertMessage(db, "C_PRESENT", "1714032849.123456", "still present");
+			insertChannel(db, "CPRESENT", "present");
+			insertMessage(db, "CPRESENT", "1714032849.123456", "still present");
 		} finally {
 			db.close();
 		}
@@ -836,10 +836,10 @@ test("slack connector emits a bounded source-partition diagnostic when a prior c
 					messages: {
 						last_ts: "1714032800.000000",
 						channel_last_ts: {
-							C_MISSING: "1714032800.000000",
-							C_PRESENT: "1714032800.000000",
+							CMISSING: "1714032800.000000",
+							CPRESENT: "1714032800.000000",
 						},
-						observed_channel_ids: ["C_MISSING", "C_PRESENT"],
+						observed_channel_ids: ["CMISSING", "CPRESENT"],
 					},
 				},
 			},
@@ -855,7 +855,7 @@ test("slack connector emits a bounded source-partition diagnostic when a prior c
 		assert.deepEqual(
 			(gap.diagnostics as { missing_channel_ids?: string[] })
 				.missing_channel_ids,
-			["C_MISSING"],
+			["CMISSING"],
 		);
 		assert.deepEqual(gap.recovery_hint, {
 			action: "retry_by_runtime",
@@ -864,7 +864,7 @@ test("slack connector emits a bounded source-partition diagnostic when a prior c
 		assert.match(gap.message, /coverage is partial/);
 
 		const cursor = messagesState(result);
-		assert.deepEqual(cursor.observed_channel_ids, ["C_MISSING", "C_PRESENT"]);
+		assert.deepEqual(cursor.observed_channel_ids, ["CMISSING", "CPRESENT"]);
 	} finally {
 		await rm(artifactRoot, { recursive: true, force: true });
 	}
@@ -984,8 +984,8 @@ test("slack connector does not emit a missing-partition diagnostic when prior ch
 		const db = new DatabaseSync(join(archiveDir, "slackdump.sqlite"));
 		try {
 			createSlackArchiveSchema(db);
-			insertChannel(db, "C_PRESENT", "present");
-			insertMessage(db, "C_PRESENT", "1714032849.123456", "still present");
+			insertChannel(db, "CPRESENT", "present");
+			insertMessage(db, "CPRESENT", "1714032849.123456", "still present");
 		} finally {
 			db.close();
 		}
@@ -1007,8 +1007,8 @@ test("slack connector does not emit a missing-partition diagnostic when prior ch
 				state: {
 					messages: {
 						last_ts: "1714032800.000000",
-						channel_last_ts: { C_PRESENT: "1714032800.000000" },
-						observed_channel_ids: ["C_PRESENT"],
+						channel_last_ts: { CPRESENT: "1714032800.000000" },
+						observed_channel_ids: ["CPRESENT"],
 					},
 				},
 			},
@@ -1022,7 +1022,7 @@ test("slack connector does not emit a missing-partition diagnostic when prior ch
 			),
 			false,
 		);
-		assert.deepEqual(messagesState(result).observed_channel_ids, ["C_PRESENT"]);
+		assert.deepEqual(messagesState(result).observed_channel_ids, ["CPRESENT"]);
 	} finally {
 		await rm(artifactRoot, { recursive: true, force: true });
 	}

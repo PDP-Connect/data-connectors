@@ -332,6 +332,11 @@ test("collectAllStreams: zero observed orders reports SKIP_RESULT doordash_order
 	assert.ok(skipReasons.includes("doordash_orders_response_not_observed"));
 	for (const m of harness.protocolMessages) {
 		if (m.type !== "SKIP_RESULT") continue;
+		// After a loss skip the runtime corrects the stream's full-reading
+		// DETAIL_COVERAGE and says so in its own notice (stream-integrity.ts);
+		// that notice carries the runtime's retry hint, not the connector's.
+		if (m.reason === "stream_incomplete_checkpoint_withheld") continue;
+		assert.equal(m.reason, "doordash_orders_response_not_observed");
 		assert.deepEqual(
 			(m as { recovery_hint?: unknown }).recovery_hint,
 			{ action: "retry_on_connector_upgrade", retryable: false },

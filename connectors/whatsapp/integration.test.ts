@@ -392,14 +392,25 @@ test("WhatsApp connector reports unsupported scoped imports on a declared stream
 				type: "START",
 			},
 		});
+		// The skip is a declared `unsupported_input` bound, so STATE passes. The
+		// runtime still turns the 0/0 coverage report that follows a reported
+		// skip into "unknown" and says so in its own notice (stream-integrity.ts);
+		// count only the connector's skips.
 		const skips = result.messages.filter(
 			(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-				message.type === "SKIP_RESULT",
+				message.type === "SKIP_RESULT" &&
+				message.reason !== "stream_incomplete_checkpoint_withheld",
 		);
 		assert.equal(skips.length, 1);
 		assert.equal(skips[0]?.stream, "messages");
 		assert.equal(skips[0]?.reason, "unsupported_export");
 		assert.doesNotMatch(skips[0]?.message ?? "", /not-a-chat/);
+		assert.ok(
+			result.messages.some(
+				(message) => message.type === "STATE" && message.stream === "messages",
+			),
+			"a non-export file does not withhold the messages checkpoint",
+		);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
 	}
@@ -434,9 +445,12 @@ test("WhatsApp connector's collect() rejects an export past the message-count ca
 				type: "START",
 			},
 		});
+		// The runtime adds its own `stream_incomplete_checkpoint_withheld` notice
+		// after a reported skip (stream-integrity.ts); count only the connector's.
 		const skips = result.messages.filter(
 			(message): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-				message.type === "SKIP_RESULT",
+				message.type === "SKIP_RESULT" &&
+				message.reason !== "stream_incomplete_checkpoint_withheld",
 		);
 		assert.equal(skips.length, 1);
 		assert.equal(skips[0]?.reason, "import_exceeds_bounded_read_policy");

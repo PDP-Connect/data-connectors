@@ -140,6 +140,7 @@ import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/conn
 import {
 	type CollectContext,
 	emitDetailCoverage,
+	resumeSafeSkip,
 	runConnector,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
@@ -760,12 +761,21 @@ export async function collect({
 
 	const parsed = outcome.parsed ?? [];
 	if (outcome.truncated && outcome.truncated.length > 0) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "messages",
-			reason: "gmcli_per_chat_limit_reached",
-			message: `${String(outcome.truncated.length)} conversation(s) reached the per-chat message limit; older history in those conversations was not fetched this run. Increase GMCLI_MESSAGES_PER_CHAT_LIMIT and re-run to fetch more.`,
-		});
+		// Resume-safe: the `messages` STATE below is only the carry-forward
+		// fingerprint set of messages this connector fetched (openFingerprintCursor,
+		// no position or watermark). The unfetched older messages are never noted
+		// in it, so whenever a later run fetches them they are emitted.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "messages",
+					reason: "gmcli_per_chat_limit_reached",
+					message: `${String(outcome.truncated.length)} conversation(s) reached the per-chat message limit; older history in those conversations was not fetched this run. Increase GMCLI_MESSAGES_PER_CHAT_LIMIT and re-run to fetch more.`,
+				},
+				"cursor_excludes_loss",
+			),
+		);
 	}
 	// Whole conversations dropped by the GMCLI_MAX_CHATS cap are a distinct
 	// gap from a per-chat message-limit truncation above: those chats
@@ -782,12 +792,20 @@ export async function collect({
 	// comment) — the message is phrased "at least N", never a precise count,
 	// since the chats-list probe itself is bounded and cannot see past it.
 	if (outcome.chatsTruncated) {
-		await emit({
-			type: "SKIP_RESULT",
-			stream: "messages",
-			reason: "gmcli_chat_scan_limit_reached",
-			message: `Only the ${String(outcome.chatsTruncated.scannedCount)} most recently active conversations were scanned this run; at least ${String(outcome.chatsTruncated.atLeastTotalCount)} conversation(s) exist in total. Increase GMCLI_MAX_CHATS and re-run to scan more.`,
-		});
+		// Resume-safe for the same reason as above: the fingerprint-set STATE
+		// never notes a message from an unscanned conversation, so a later run
+		// that scans it emits its messages.
+		await emit(
+			resumeSafeSkip(
+				{
+					type: "SKIP_RESULT",
+					stream: "messages",
+					reason: "gmcli_chat_scan_limit_reached",
+					message: `Only the ${String(outcome.chatsTruncated.scannedCount)} most recently active conversations were scanned this run; at least ${String(outcome.chatsTruncated.atLeastTotalCount)} conversation(s) exist in total. Increase GMCLI_MAX_CHATS and re-run to scan more.`,
+				},
+				"cursor_excludes_loss",
+			),
+		);
 	}
 	if (!requested.has("messages")) {
 		return;

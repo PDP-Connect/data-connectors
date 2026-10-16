@@ -39,13 +39,15 @@ const ENTRYPOINT = connectorEntrypoint("google_maps");
 async function runImport(
 	importRoot: string,
 	streams: readonly string[] = ["timeline_points"],
+	state: Record<string, unknown> = {},
 ): Promise<EmittedMessage[]> {
-	return (await runImportWithStderr(importRoot, streams)).messages;
+	return (await runImportWithStderr(importRoot, streams, state)).messages;
 }
 
 async function runImportWithStderr(
 	importRoot: string,
 	streams: readonly string[] = ["timeline_points"],
+	state: Record<string, unknown> = {},
 ): Promise<{ messages: EmittedMessage[]; stderr: string }> {
 	const result = await runConnectorProtocolSubprocess({
 		cwd: PACKAGE_ROOT,
@@ -58,7 +60,7 @@ async function runImportWithStderr(
 		},
 		start: {
 			scope: { streams: streams.map((name) => ({ name })) },
-			state: {},
+			state,
 			type: "START",
 		},
 	});
@@ -379,3 +381,64 @@ test("progress is plain English and the old phase/pass detail moves to diagnosti
 		await rm(importRoot, { force: true, recursive: true });
 	}
 });
+
+for (const stream of ["timeline_points", "timeline_segments"]) {
+	test(`${stream} retains its cursor until an older unaccounted element is repaired`, async () => {
+		const importRoot = await mkdtemp(join(tmpdir(), "pdpp-gm-repaired-older-"));
+		const older = "2024-06-05T12:45:22.000Z";
+		const newer = "2024-06-05T13:45:22.000Z";
+		const prior = "2024-06-04T00:00:00.000Z";
+		const isPoint = stream === "timeline_points";
+		const cursorKey = isPoint ? "last_timestamp" : "last_start_time";
+		const previousState = { [stream]: { [cursorKey]: prior } };
+		const source = (repaired: boolean) =>
+			isPoint
+				? {
+						locations: [
+							{ timestampMs: String(Date.parse(newer)), latitudeE7: 377_749_000, longitudeE7: -1_224_194_000 },
+							{ ...(repaired ? { timestampMs: String(Date.parse(older)) } : {}), latitudeE7: 377_800_000, longitudeE7: -1_224_100_000 },
+						],
+					}
+				: {
+						semanticSegments: [
+							{ activity: { activityType: "WALKING" }, duration: { startTimestamp: newer } },
+							{ activity: { activityType: "CYCLING" }, ...(repaired ? { duration: { startTimestamp: older } } : {}) },
+						],
+					};
+		const path = join(importRoot, isPoint ? "Records.json" : "Timeline.json");
+		try {
+			await writeFile(path, JSON.stringify(source(false)));
+			const first = await runImport(importRoot, [stream], previousState);
+			const skipIndex = first.findIndex(
+				(m) => m.type === "SKIP_RESULT" && m.stream === stream && m.reason === "element_unaccounted",
+			);
+			assert.ok(skipIndex >= 0, "known loss must be reported");
+			assert.equal(first.filter((m) => m.type === "RECORD" && m.stream === stream).length, 1, "retain the valid newer record");
+			const coverage = coverageFor(first, stream);
+			assert.equal(coverage.considered, 2);
+			assert.equal(coverage.covered, 1);
+			assert.ok(first.indexOf(coverage) > skipIndex, "register loss before declaring coverage");
+
+			// Replay precisely the persisted cursor, including any erroneous advance.
+			const persisted = { ...previousState };
+			for (const message of first) {
+				if (message.type === "STATE" && message.stream === stream) {
+					persisted[stream] = message.cursor as Record<string, string>;
+				}
+			}
+			await writeFile(path, JSON.stringify(source(true)));
+			const second = await runImport(importRoot, [stream], persisted);
+			assert.ok(second.some(
+				(m) => m.type === "RECORD" && m.stream === stream &&
+					m.data[isPoint ? "timestamp" : "start_time"] === older,
+			), "the repaired older element must remain reachable on the next run");
+			assert.equal(first.some((m) => m.type === "STATE" && m.stream === stream), false, "known loss must not checkpoint");
+			assert.ok(second.some((m) => m.type === "STATE" && m.stream === stream), "a repaired artifact may checkpoint");
+			const repairedCoverage = coverageFor(second, stream);
+			assert.equal(repairedCoverage.considered, 2);
+			assert.equal(repairedCoverage.covered, 2);
+		} finally {
+			await rm(importRoot, { force: true, recursive: true });
+		}
+	});
+}

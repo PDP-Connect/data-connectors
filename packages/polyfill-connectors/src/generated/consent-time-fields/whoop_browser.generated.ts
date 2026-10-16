@@ -22,3 +22,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		workouts: { field: "start_at", format: "date-time" },
 	},
 };
+
+export const CHECKPOINT_PARENTS: Readonly<
+	Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+	whoop_browser: {},
+};

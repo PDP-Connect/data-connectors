@@ -12,7 +12,7 @@ import type {
   RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
-import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { resumeSafeSkip, runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
 const HOME = "https://cloud.ouraring.com/";
@@ -403,13 +403,16 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       );
     }
     if (endDate < requestedEnd) {
-      await ctx.emit({
+      // Resume-safe: fetchWindow never moves `completedThrough` past
+      // `endDate`, so the STATE below saves `next_day <= endDate + 1`, the
+      // first deferred day, and startDateFor resumes there.
+      await ctx.emit(resumeSafeSkip({
         type: "SKIP_RESULT", stream, reason: "oura_browser_window_deferred",
         message: `Oura ${stream} stopped at ${endDate}; later days remain for the next run.`,
         // Deferred work, not unavailable data: the STATE cursor below resumes at
         // the next day, so the host must treat this stream as retryable.
         recovery_hint: { action: "retry_by_runtime", retryable: true },
-      });
+      }, "cursor_at_or_before_loss"));
     }
     await ctx.emit({
       type: "STATE",

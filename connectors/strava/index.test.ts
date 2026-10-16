@@ -304,15 +304,24 @@ test("a scoped import reports rows with no local day instead of completing", asy
 				["11385479492"],
 			);
 			const skips = messagesOf(result, "SKIP_RESULT");
-			assert.deepEqual(
-				skips.map((m) => [m.reason, m.message]),
+			assert.deepEqual(skips.map((m) => [m.reason, m.message]).slice(0, 1), [
 				[
-					[
-						"stream_collection_failed",
-						"2 row(s) in activities.csv have no local start day, so they cannot be placed in the requested time range and were not saved.",
-					],
+					"stream_collection_failed",
+					"2 row(s) in activities.csv have no local start day, so they cannot be placed in the requested time range and were not saved.",
 				],
+			]);
+			// A failed stream's STATE is not saved (Collection Profile certified
+			// failure); the runtime withholds it at the source and says so.
+			assert.deepEqual(
+				skips
+					.slice(1)
+					.map((m) => [
+						m.reason,
+						(m.diagnostics as { withheld?: string }).withheld,
+					]),
+				[["stream_incomplete_checkpoint_withheld", "STATE"]],
 			);
+			assert.equal(messagesOf(result, "STATE").length, 0);
 			const done = messagesOf(result, "DONE")[0];
 			assert.equal(done?.status, "failed");
 			const progress = messagesOf(result, "PROGRESS");
@@ -358,8 +367,18 @@ test("unreadable rows are their own outcome, distinct from empty and from trunca
 			assert.equal(recordsOf(result, "activities").length, 1);
 
 			const skips = messagesOf(result, "SKIP_RESULT");
-			assert.equal(skips.length, 1);
-			assert.equal(skips[0]?.reason, "records_unreadable");
+			// The unreadable-rows skip is a loss with no resume-safe declaration
+			// (see index.ts), so the runtime withholds STATE and says so.
+			assert.deepEqual(
+				skips.map((m) => [
+					m.reason,
+					(m.diagnostics as { withheld?: string } | undefined)?.withheld,
+				]),
+				[
+					["records_unreadable", undefined],
+					["stream_incomplete_checkpoint_withheld", "STATE"],
+				],
+			);
 
 			const progress = messagesOf(result, "PROGRESS");
 			assertUserFacingProgress(progress);
@@ -395,18 +414,21 @@ test("a second run resumes from the cursor rather than re-reading everything", a
 	);
 });
 
-test("unreadable rows do NOT stall the cursor — they fail identically next run", async () => {
+// FOLLOW-UP (strava): a file with an unreadable row is upsert-only for that
+// file and its cursor stays put. That is the runtime's current behavior and
+// the intended one; the connector should hold the cursor itself rather than
+// rely on the runtime withholding it.
+test("unreadable rows hold the checkpoint: the runtime withholds the advanced cursor", async () => {
 	const broken = "not-an-id,,,,,,,,,,,,,,,,,,";
 	await withImportDir(
 		{ "activities.csv": `${HEADER}\n${ROW_RUN}\n${broken}\n` },
 		async (dir) => {
-			const state = messagesOf(await run(dir), "STATE").at(-1) as
-				| { cursor?: Record<string, unknown> }
-				| undefined;
-			// Holding here would stall for ever: those rows are unreadable on every
-			// future import too, so the connector would re-read the whole archive
-			// each time and "the second run resumes" would never be true.
-			assert.equal(state?.cursor?.last_start_time, "2024-05-20T13:05:32");
+			// The connector would advance the cursor past the unreadable rows,
+			// but a dated row with a bad id may sit at or before that cursor, so
+			// the skip carries no resume-safe declaration and the runtime keeps
+			// the previous checkpoint (stream-integrity.ts rule 3). The next
+			// import re-reads the archive; ids are stable, so it upserts.
+			assert.equal(messagesOf(await run(dir), "STATE").length, 0);
 		},
 	);
 });
