@@ -37,7 +37,10 @@ import type {
 	ValidateRecord,
 } from "./connector-runtime.ts";
 import type { FieldOmission } from "./field-reader.ts";
-import { createStreamIntegrity } from "./stream-integrity.ts";
+import {
+	createStreamIntegrity,
+	type StreamIntegrityOptions,
+} from "./stream-integrity.ts";
 
 const VM_RSS_STATUS_RE = /VmRSS:\s*(\d+)\s*kB/;
 
@@ -157,16 +160,21 @@ export interface ConnectorSubprocessOptions {
  * for tests where the helper is a pure function and the shape-check
  * isn't the point (e.g. scope-filter gates, ordering invariants on
  * synthetic data that intentionally omits fields).
+ *
+ * Pass the connector's checkpoint dependency graph in `integrityOptions`
+ * (using `checkpointParentsFor` from connector-runtime when resolving a
+ * shipped connector) to mirror production before any wire-level links.
  */
 export function makeRecordingEmit(
 	validateRecord?: ValidateRecord,
+	integrityOptions: StreamIntegrityOptions = {},
 ): RecordingEmit {
 	const emitted: EmittedRecord[] = [];
 	const skipped: SkippedRecord[] = [];
 	const protocolMessages: EmittedMessage[] = [];
 	const events: RecordedEvent[] = [];
 
-	const integrity = createStreamIntegrity();
+	const integrity = createStreamIntegrity(integrityOptions);
 
 	const emit = (msg: EmittedMessage): Promise<void> => {
 		for (const out of integrity.gate(msg)) {

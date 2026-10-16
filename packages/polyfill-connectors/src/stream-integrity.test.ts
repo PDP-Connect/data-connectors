@@ -1109,3 +1109,36 @@ test("empty coverage passes without loss but cannot override a reported skip", (
 		);
 	}
 });
+
+test("recording harness: predeclared checkpoint parents match production before a wire link", async () => {
+	const { makeRecordingEmit } = await import("./test-harness.ts");
+	const checkpointParents = { details: ["parents"], parents: ["root"] };
+	const recorder = makeRecordingEmit(
+		() => ({ ok: false, issues: [{ path: "title", message: "unreadable" }] }),
+		{ checkpointParents },
+	);
+	await recorder.emitRecord("details", { id: "d1" });
+	await recorder.emit(STATE("parents"));
+	await recorder.emit(STATE("root"));
+	await recorder.emit(STATE("other"));
+	assert.deepEqual(
+		recorder.protocolMessages
+			.filter((m) => m.type === "STATE")
+			.map((m) => m.stream),
+		["other"],
+	);
+	const production = await wire(
+		[
+			{ op: "record", stream: "details", data: { id: "d1", bad: true } },
+			{ op: "emit", msg: STATE("parents") },
+			{ op: "emit", msg: STATE("root") },
+			{ op: "emit", msg: STATE("other") },
+		],
+		["details", "parents", "root", "other"],
+		{ PDPP_TEST_CHECKPOINT_PARENTS: JSON.stringify(checkpointParents) },
+	);
+	assert.deepEqual(
+		production.filter((m) => m.type === "STATE"),
+		recorder.protocolMessages.filter((m) => m.type === "STATE"),
+	);
+});
