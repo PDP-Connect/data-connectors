@@ -28,7 +28,34 @@ const credentialSource = (start, end) => {
   return script.slice(startAt, endAt);
 };
 
-const credentialHarness = (page) => {
+const captureConsole = (output) => {
+  const capture = (...args) => output.push(args.map(String).join(" "));
+  return Object.fromEntries(["log", "error", "warn", "info", "debug"].map((m) => [m, capture]));
+};
+
+const CANARIES = {
+  state: "CANARY_STATE_s7",
+  challenge: "CANARY_CHALLENGE_c7",
+  code: "CANARY_AUTHCODE_a7",
+  verifier: "CANARY_VERIFIER_v7",
+  accessToken: "CANARY_ACCESS_t7",
+  refreshToken: "CANARY_REFRESH_r7",
+  clientSecret: "CANARY_CLIENTSECRET_k7",
+};
+const ALL_CANARIES = Object.values(CANARIES);
+const CANARY_TEXT = `${ALL_CANARIES.join(" ")} https://moi.ouraring.com/oauth/v2/ext/oauth-authorize`
+  + `?state=${CANARIES.state}&code_challenge=${CANARIES.challenge} client_secret=${CANARIES.clientSecret} code_verifier=${CANARIES.verifier}`;
+const canaryError = () => new Error(CANARY_TEXT);
+
+const assertNoOauthMaterial = (captured, what) => {
+  const text = typeof captured === "string" ? captured : JSON.stringify(captured);
+  for (const needle of [...ALL_CANARIES, "state=", "code_challenge", "code_verifier", "client_secret"]) {
+    assert.ok(!text.includes(needle), `${what} must omit ${needle}: ${text.slice(0, 300)}`);
+  }
+  assert.ok(!/https:\/\/[^\s"]*\?/.test(text), `${what} must omit URLs with a query`);
+};
+
+const credentialHarness = (page, output = []) => {
   const source = [
     "let currentStep = null;",
     "const STEPS = { portalApp: 'portal_app', token: 'token' };",
@@ -39,15 +66,19 @@ const credentialHarness = (page) => {
     "  error.telemetryError = { errorClass, code, reason, step };",
     "  return error;",
     "};",
+    credentialSource("const inferErrorClass =", "const buildResult ="),
     credentialSource("const PORTAL_API_ATTEMPTS =", "const VEIL_SOURCE ="),
     "const evaluateSettled = (source) => page.evaluate(source);",
     credentialSource("const PORTAL_FETCH_SOURCE =", "const portalApi ="),
     credentialSource("const portalApi =", "// The authorization-code flow"),
     credentialSource("const findApiApplication =", "// One step of submitting"),
     credentialSource("const requestTokens =", "// On Oura's consent screen"),
-    "globalThis.connector = { portalApi, findApiApplication, requestTokens };",
+    "const probeToken = async () => ({ status: 200 });",
+    "const writeCachedToken = async () => {};",
+    credentialSource("const tokenFromCache =", "/**\n * Returns a working API access token."),
+    "globalThis.connector = { portalApi, findApiApplication, requestTokens, tokenFromCache };",
   ].join("\n");
-  const context = vm.createContext({ URLSearchParams, page, console: { error: () => {} } });
+  const context = vm.createContext({ URLSearchParams, page, console: captureConsole(output), Date });
   vm.runInContext(source, context, { filename: "oura-playwright-credentials.js" });
   return context.connector;
 };
@@ -577,7 +608,7 @@ test("the veil draws at once when the root exists and stays off other hosts", ()
 
 // createApiApplicationWithUser over a fake portal: the registration API, the
 // applications list and the Create New form, with the DOM calls recorded.
-const createAppHarness = ({ registrationStatus, appAfter }) => {
+const createAppHarness = ({ registrationStatus, appAfter, detail = [{ loc: ["body", "tos"] }], output = [] }) => {
   const app = {
     client_id: "client-1",
     application_name: "Personal access",
@@ -602,7 +633,7 @@ const createAppHarness = ({ registrationStatus, appAfter }) => {
           if (path.endsWith("/registration")) {
             state.registrations.push(JSON.parse(init.body));
             if (registrationStatus >= 200 && registrationStatus < 300) state.created = true;
-            return { ok: registrationStatus < 300, status: registrationStatus, text: async () => JSON.stringify({ detail: [{ loc: ["body", "tos"] }] }) };
+            return { ok: registrationStatus < 300, status: registrationStatus, text: async () => JSON.stringify({ detail }) };
           }
           return { ok: true, status: 200, text: async () => JSON.stringify(state.created ? [app] : []) };
         },
@@ -638,7 +669,7 @@ const createAppHarness = ({ registrationStatus, appAfter }) => {
     credentialSource("const isUsableApp =", "// ── OAuth2 authorization-code flow"),
     "globalThis.connector = { createApiApplicationWithUser };",
   ].join("\n");
-  const context = vm.createContext({ page, console: { error: () => {} } });
+  const context = vm.createContext({ page, console: captureConsole(output) });
   vm.runInContext(source, context, { filename: "oura-playwright-create-app.js" });
   return { connector: context.connector, state };
 };
@@ -713,3 +744,115 @@ test("a failed navigation to the OAuth authorize URL logs a fixed class, not the
     assert.ok(!logged.includes(secret), `console must omit ${secret}`);
   }
 });
+
+test("a rejected token transport reports only a fixed code, in logs, errors and status", async () => {
+  const output = [];
+  const page = { httpFetch: async () => { throw canaryError(); } };
+  const { requestTokens } = credentialHarness(page, output);
+  let error;
+  await assert.rejects(
+    () => requestTokens(
+      { grant_type: "authorization_code", code: CANARIES.code, code_verifier: CANARIES.verifier },
+      "client-id",
+      CANARIES.clientSecret,
+    ),
+    (caught) => { error = caught; return caught?.telemetryError?.code === "token_request_failed"; },
+  );
+  assertNoOauthMaterial(error.message, "thrown message");
+  assertNoOauthMaterial(error.telemetryError, "telemetry error");
+  assertNoOauthMaterial(output, "console");
+  assert.match(error.telemetryError.reason, /transport error \((navigation_error|network_error|auth_failed|timeout|unexpected)\)/);
+});
+
+test("a successful token response logs a fixed line, not keys, scope or expiry", async () => {
+  const output = [];
+  const page = {
+    httpFetch: async () => ({
+      ok: true,
+      status: 200,
+      json: { access_token: CANARIES.accessToken, refresh_token: CANARIES.refreshToken, scope: CANARY_TEXT, expires_in: 100, [CANARY_TEXT]: 1 },
+    }),
+  };
+  const { requestTokens } = credentialHarness(page, output);
+  await requestTokens({ grant_type: "authorization_code", code: CANARIES.code }, "client-id", CANARIES.clientSecret);
+  assert.deepEqual(output, ["[oura] Token received (authorization_code)"]);
+});
+
+test("a token error body outside the OAuth error codes is not echoed", async () => {
+  const page = { httpFetch: async () => ({ ok: false, status: 400, json: { error: CANARY_TEXT.replace(/[^a-z_]/g, "_").toLowerCase().slice(0, 30) } }) };
+  const { requestTokens } = credentialHarness(page);
+  await assert.rejects(
+    () => requestTokens({ grant_type: "authorization_code", code: CANARIES.code }, "client-id", CANARIES.clientSecret),
+    (caught) => /failed: HTTP 400$/.test(caught.telemetryError.reason),
+  );
+});
+
+test("a refresh failure logs a fixed code, whether it was thrown or rejected by the transport", async () => {
+  for (const httpFetch of [
+    async () => { throw canaryError(); },
+    async () => ({ ok: false, status: 400, json: { error: "invalid_grant", error_description: CANARY_TEXT } }),
+  ]) {
+    const output = [];
+    const { tokenFromCache } = credentialHarness({ httpFetch }, output);
+    const token = await tokenFromCache({
+      accessToken: CANARIES.accessToken,
+      refreshToken: CANARIES.refreshToken,
+      clientId: "client-id",
+      clientSecret: CANARIES.clientSecret,
+      expiresAt: 0,
+    });
+    assert.equal(token, null);
+    assertNoOauthMaterial(output, "console");
+    assert.equal(output.length, 1);
+    assert.match(output[0], /^\[oura\] Token refresh failed \(token_request_failed\)$/);
+  }
+});
+
+test("a registration response body is neither copied nor logged", async () => {
+  const output = [];
+  const { connector } = createAppHarness({ registrationStatus: 422, appAfter: "form", detail: CANARY_TEXT, output });
+  await connector.createApiApplicationWithUser("owner@example.com");
+  assertNoOauthMaterial(output, "console");
+  assert.ok(output.some((line) => line.includes("registration API did not create the app (HTTP 422)")));
+});
+
+// Runs the whole connector against a page whose every browser/host call
+// throws text carrying OAuth material, capturing every output boundary.
+const runWholeConnector = async (pageOverrides = {}, { native = false } = {}) => {
+  const output = [];
+  const data = [];
+  const fail = async () => { throw canaryError(); };
+  const base = {
+    sleep: async () => {},
+    goto: async () => {},
+    setData: async (key, value) => { data.push({ key, value }); },
+    setProgress: async (value) => { data.push({ key: "progress", value }); },
+    evaluate: fail,
+    httpFetch: fail,
+    addInitScript: fail,
+    ...(native ? { setCover: fail, takeCoverActions: fail } : {}),
+    ...pageOverrides,
+  };
+  const page = new Proxy(base, { get: (target, prop) => (prop in target ? target[prop] : (typeof prop === "string" && !/^(then|setCover|takeCoverActions|requestedScopes)$/.test(prop) ? async () => undefined : undefined)) });
+  const context = vm.createContext({
+    page, console: captureConsole(output), setTimeout, clearTimeout, Date, URL, URLSearchParams, TextEncoder, crypto: globalThis.crypto,
+  });
+  const result = await vm.runInContext(script, context, { filename: "oura-playwright-whole.js" });
+  return { output, data, result };
+};
+
+for (const native of [false, true]) {
+  test(`whole connector (${native ? "native cover" : "desktop"}): opaque host failures stay out of every output`, async () => {
+    const { output, data, result } = await runWholeConnector({}, { native });
+    assertNoOauthMaterial(output, "console");
+    assertNoOauthMaterial(data, "page.setData");
+    assertNoOauthMaterial(result, "result");
+    const [error] = result.errors;
+    assert.equal(error.code, "unexpected");
+    assert.equal(error.reason, "Unexpected error in the Oura connector.");
+    assert.equal(data.find((entry) => entry.key === "error")?.value, "Unexpected error in the Oura connector.");
+    const expected = native ? /Could not read the cover \(\w+\)/ : /Overlay could not be drawn \(\w+\)/;
+    assert.ok(output.some((line) => expected.test(line)), output.join("\n"));
+    if (!native) assert.ok(output.some((line) => /Document-start veil not installed \(\w+\)/.test(line)), output.join("\n"));
+  });
+}

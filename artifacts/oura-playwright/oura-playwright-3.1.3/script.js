@@ -211,6 +211,17 @@ const inferErrorClass = (message, fallback = "runtime_error") => {
   return fallback;
 };
 
+// Exceptions from the host, the page or the network can carry request URLs,
+// OAuth parameters or response bodies, so their text never reaches a log,
+// result or status. Only this fixed class does.
+const safeErrorTag = (err) => inferErrorClass(String((err && err.message) || err), "unexpected");
+
+const OAUTH_ERROR_CODES = new Set([
+  "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+  "unsupported_grant_type", "invalid_scope", "access_denied", "server_error",
+  "temporarily_unavailable",
+]);
+
 const buildResult = ({ requestedScopes, scopes, errors, exportSummary }) => ({
   requestedScopes: [...requestedScopes],
   timestamp: new Date().toISOString(),
@@ -1020,7 +1031,7 @@ const showOverlay = async (state, instruction, options = {}) => {
       overlayInstalledFor = url;
     }
   } catch (error) {
-    console.error(`[oura] Overlay could not be drawn: ${error?.message || error}`);
+    console.error(`[oura] Overlay could not be drawn (${safeErrorTag(error)})`);
     result = null;
   }
   if (result === "shown") {
@@ -1152,7 +1163,7 @@ const applyCoverActions = async () => {
   try {
     actions = (await page.takeCoverActions()) || [];
   } catch (error) {
-    console.error(`[oura] Could not read the cover: ${error?.message || error}`);
+    console.error(`[oura] Could not read the cover (${safeErrorTag(error)})`);
   }
   for (const action of actions) {
     if (action?.type === "manual") {
@@ -1299,7 +1310,7 @@ const showNativeCover = async (state, instruction, { now = false } = {}) => {
   try {
     result = await page.setCover(next);
   } catch (error) {
-    console.error(`[oura] Cover could not be drawn: ${error?.message || error}`);
+    console.error(`[oura] Cover could not be drawn (${safeErrorTag(error)})`);
   }
   if (result === "manual") cover.manual = true;
   if (result === "shown") {
@@ -1658,19 +1669,14 @@ const registerApiApplication = async (contactEmail) => {
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
             body: ${JSON.stringify(JSON.stringify(applicationRegistration(contactEmail)))},
           });
-          let detail = null;
-          if (!resp.ok) {
-            const text = await resp.text();
-            try { detail = JSON.stringify(JSON.parse(text).detail).slice(0, 300); } catch (e) { detail = null; }
-          }
-          return { ok: resp.ok, status: resp.status, attempts, detail };
+          return { ok: resp.ok, status: resp.status, attempts };
         } catch (err) {
-          return { ok: false, status: 0, detail: 'request failed' };
+          return { ok: false, status: 0 };
         }
       })()
     `);
   } catch {
-    return { ok: false, status: 0, detail: "page call failed" };
+    return { ok: false, status: 0 };
   }
 };
 
@@ -1694,7 +1700,7 @@ const createApiApplicationWithUser = async (contactEmail) => {
       if (clientId) return clientId;
       console.error("[oura] The registration API answered OK but no usable app is listed; trying the Create New form");
     } else {
-      console.error(`[oura] The registration API did not create the app (HTTP ${registered.status}${registered.detail ? `: ${registered.detail}` : ""}); trying the Create New form`);
+      console.error(`[oura] The registration API did not create the app (HTTP ${Number(registered.status) || 0}); trying the Create New form`);
     }
   } else {
     console.error("[oura] No contact email for the registration API; trying the Create New form");
@@ -1842,7 +1848,7 @@ const buildAuthorizeUrl = (clientId, state, codeChallenge, signInMethod) =>
 
 /**
  * Posts a grant to Oura's token endpoint. Returns a cache entry, or throws a
- * fatal auth error. Token values are never logged; only response keys are.
+ * fatal auth error. Token values and response contents are never logged.
  */
 const requestTokens = async (grant, clientId, clientSecret) => {
   currentStep = STEPS.token;
@@ -1855,7 +1861,9 @@ const requestTokens = async (grant, clientId, clientSecret) => {
   // spent code and gets invalid_grant. A non-simple header forces a
   // preflight, which Oura fails, so the in-page POST never leaves and the
   // native request is the only one. Desktop's Node fetch ignores it.
-  const resp = await page.httpFetch(TOKEN_URL, {
+  let resp;
+  try {
+    resp = await page.httpFetch(TOKEN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -1864,12 +1872,20 @@ const requestTokens = async (grant, clientId, clientSecret) => {
     },
     body: body.toString(),
     timeout: 20000,
-  });
-  const json = resp.json || {};
+    });
+  } catch (error) {
+    throw makeFatalRunError(
+      "auth_failed",
+      CODES.tokenRequestFailed,
+      `Oura token request (${grant.grant_type}) failed: transport error (${safeErrorTag(error)})`,
+      STEPS.token,
+    );
+  }
+  const json = (resp && resp.json) || {};
   if (!resp.ok || !json.access_token) {
-    const reason = typeof json.error === "string" && /^[a-z_]{1,40}$/.test(json.error)
+    const reason = OAUTH_ERROR_CODES.has(json.error)
       ? json.error
-      : `HTTP ${resp.status}`;
+      : `HTTP ${Number(resp && resp.status) || 0}`;
     throw makeFatalRunError(
       "auth_failed",
       CODES.tokenRequestFailed,
@@ -1877,10 +1893,7 @@ const requestTokens = async (grant, clientId, clientSecret) => {
       STEPS.token,
     );
   }
-  console.error(
-    `[oura] Token response (${grant.grant_type}): keys=${Object.keys(json).join(",")} ` +
-    `scope=${json.scope || "(none)"} expires_in=${json.expires_in}`,
-  );
+  console.error(`[oura] Token received (${grant.grant_type})`);
   return {
     accessToken: json.access_token,
     refreshToken: json.refresh_token || grant.refresh_token || null,
@@ -2115,7 +2128,7 @@ const tokenFromCache = async (cached) => {
       const { status } = await probeToken(refreshed.accessToken);
       if (status !== 401 && status !== 403) return refreshed.accessToken;
     } catch (error) {
-      console.error(`[oura] Token refresh failed: ${error?.message || error}`);
+      console.error(`[oura] Token refresh failed (${error?.telemetryError?.code || safeErrorTag(error)})`);
     }
   }
 
@@ -2356,7 +2369,7 @@ const fetchCollection = async (accessToken, endpoint, startDate, endDate) => {
         data,
         pages,
         status: resp?.status || 0,
-        error: resp?.error || `HTTP ${resp?.status || "unknown"}`,
+        error: resp?.error ? `request failed (${safeErrorTag({ message: resp.error })})` : `HTTP ${resp?.status || "unknown"}`,
       };
     }
 
@@ -2464,7 +2477,7 @@ const mapActivity = (rawActivity) =>
   // cover natively (NATIVE_COVER) and never needs it.
   if (!NATIVE_COVER && typeof page.addInitScript === "function") {
     try { await page.addInitScript(VEIL_SOURCE); } catch (error) {
-      console.error(`[oura] Document-start veil not installed: ${error?.message || error}`);
+      console.error(`[oura] Document-start veil not installed (${safeErrorTag(error)})`);
     }
   }
   const collections = {};
@@ -2639,7 +2652,7 @@ const mapActivity = (rawActivity) =>
       makeConnectorError(
         inferErrorClass(error?.message || String(error)),
         CODES.unexpected,
-        error?.message || String(error),
+        "Unexpected error in the Oura connector.",
         "fatal",
         { step: currentStep },
       );
