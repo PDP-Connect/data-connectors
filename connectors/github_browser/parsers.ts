@@ -716,7 +716,7 @@ export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryR
 	if (list === null || isUnreadable(list)) unreadableFields.push("list");
 	if (sourceRows.length > 0 && listEmptyStates(list, sourceRows).length > 0) unreadableFields.push("emptyStateWithRows");
 	rejectedRows += unaccountedRepositories(list, sourceRows, true);
-	return { rows, rejectedRows, entriesComplete: list !== null && rejectedRows === 0 && !unreadableFields.includes("emptyStateWithRows"), rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
+	return { rows, rejectedRows, entriesComplete: list !== null && !unreadableFields.includes("list") && rejectedRows === 0 && !unreadableFields.includes("emptyStateWithRows"), rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
 }
 
 export function parseStarredHtml(html: string): StarredRow[] {
@@ -768,7 +768,7 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 	if (list === null || isUnreadable(list)) unreadableFields.push("list");
 	if (sourceRows.length > 0 && listEmptyStates(list, sourceRows).length > 0) unreadableFields.push("emptyStateWithRows");
 	rejectedRows += unaccountedRepositories(list, sourceRows, true);
-	return { rows, rejectedRows, entriesComplete: list !== null && rejectedRows === 0 && !unreadableFields.includes("emptyStateWithRows"), rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
+	return { rows, rejectedRows, entriesComplete: list !== null && !unreadableFields.includes("list") && rejectedRows === 0 && !unreadableFields.includes("emptyStateWithRows"), rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
 }
 
 export function inspectInventoryPage(
@@ -812,8 +812,8 @@ export function inspectInventoryPage(
 		const raw = text(node);
 		return /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(raw) &&
 			Number.isSafeInteger(Number(raw.replaceAll(",", ""))) ? Number(raw.replaceAll(",", "")) : null;
-	});
-	const counterAmbiguous = values.length > 0 && (values.includes(null) || new Set(values).size !== 1);
+	}).filter((value): value is number => value !== null); // Approximate counters supply no exact evidence.
+	const counterAmbiguous = new Set(values).size > 1;
 	const total = counterAmbiguous ? null : values[0] ?? null;
 	// Select only pagination inside the list or directly following its wrapper.
 	// Nested .pagination within .paginate-container is one component, not two.
@@ -853,7 +853,7 @@ export function inspectInventoryPage(
 	const terminal = pagination !== null && (disabled || next === null);
 	const result = inspectInventoryEnd({
 		page, username, stream, pageNumber, parsedRows, rejectedRows, noProgress,
-		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete: true,
+		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete: list !== null && !isUnreadable(list),
 		hasUnknownContinuation: ambiguous,
 		terminalProof: total !== null ? (total === parsedRows ? "exact_count" : null)
 			: terminal ? "disabled_next" : null,

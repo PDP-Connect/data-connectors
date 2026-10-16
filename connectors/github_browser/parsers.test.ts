@@ -648,10 +648,14 @@ test("owner repository tab counters remain authoritative inside the site header"
 		valid: true, complete: true, total: 0, exactTotals: [0], totalConflict: false, nextUrl: null, reason: "terminal_list",
 	});
 	assert.equal(inspect(header(tab("0") + tab("0"))).complete, true);
-	for (const contents of [tab("0") + tab("1"), tab("1k"), tab("Loading")]) {
+	assert.equal(inspect(header(tab("0") + tab("1"))).totalConflict, true);
+	assert.equal(inspect(header(tab("0") + tab("1"))).reason, "unknown_continuation");
+	for (const contents of [tab("1k"), tab("Loading")]) {
 		const proof = inspect(header(contents));
 		assert.equal(proof.total, null);
-		assert.equal(proof.reason, "unknown_continuation");
+		assert.deepEqual(proof.exactTotals, []);
+		assert.equal(proof.totalConflict, false);
+		assert.equal(proof.reason, "terminal_unverified");
 	}
 	for (const navigation of [
 		header(tab("0", "/other-user?tab=repositories")),
@@ -685,11 +689,17 @@ test("All stars totals are exact, owner-bound, unfiltered and reconciled with pr
 	assert.equal(inspect(allStars("0") + allStars("0") + profileTab("0")).complete, true);
 	for (const navigation of [
 		allStars("0") + allStars("1"), allStars("0") + profileTab("1"),
-		allStars("1k"), allStars("Loading"),
 	]) {
 		const proof = inspect(navigation);
 		assert.equal(proof.total, null);
 		assert.equal(proof.reason, "unknown_continuation");
+	}
+	for (const navigation of [allStars("1k"), allStars("Loading")]) {
+		const proof = inspect(navigation);
+		assert.equal(proof.total, null);
+		assert.deepEqual(proof.exactTotals, []);
+		assert.equal(proof.totalConflict, false);
+		assert.equal(proof.reason, "terminal_unverified");
 	}
 	for (const navigation of [
 		allStars("0", "/stars/other-user"),

@@ -59,6 +59,8 @@ export function inspectInventoryEnd(
 		return { complete: false, nextUrl: null, reason: "wrong_owner" };
 	if (!evidence.hasRecognizedList)
 		return { complete: false, nextUrl: null, reason: "unreadable_list" };
+	if (!evidence.renderComplete)
+		return { complete: false, nextUrl: null, reason: "render_incomplete" };
 	if (evidence.hasUnknownContinuation)
 		return { complete: false, nextUrl: null, reason: "unknown_continuation" };
 	if (evidence.nextUrl !== null) {

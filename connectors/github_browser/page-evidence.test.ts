@@ -80,9 +80,9 @@ test("inventory end evidence is bound to the exact owner request and navigation"
 
 test("source end proof rejects entry loss, absent lists and ambiguous evidence", () => {
  assert.equal(inspectInventoryEnd(inventoryEvidence({
-  noProgress: true, renderComplete: false,
+  noProgress: true, renderComplete: true,
  })).complete, true);
- for (const overrides of [{ rejectedRows: 1 }, { hasRecognizedList: false }, { hasUnknownContinuation: true }])
+ for (const overrides of [{ renderComplete: false }, { rejectedRows: 1 }, { hasRecognizedList: false }, { hasUnknownContinuation: true }])
   assert.equal(inspectInventoryEnd(inventoryEvidence(overrides)).complete, false);
  assert.equal(inspectInventoryEnd(inventoryEvidence({ terminalProof: null, explicitEmpty: true })).complete, false);
 });
