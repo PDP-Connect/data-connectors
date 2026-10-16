@@ -497,6 +497,27 @@ test("stream integrity withholds checkpoint after undeclared retryable source un
 	assertStateWithheld(integrity.gate(STATE("items")), "items");
 });
 
+test("stream integrity withholds own checkpoint after a bare-continuation source unreadable skip", () => {
+	const integrity = createStreamIntegrity();
+	assert.deepEqual(integrity.gate(STATE("items")), [STATE("items")]);
+	const unreadable = skip("items", true);
+	assert.ok(unreadable.type === "SKIP_RESULT");
+	integrity.gate({
+		...unreadable,
+		continuation: {
+			boundary: "page-budget",
+			considered: 1,
+			covered: 1,
+			owner: "runtime",
+			remaining: true,
+			slice_end: 1,
+			slice_start: 0,
+		},
+	});
+	assert.deepEqual(integrity.gate(STATE("other")), [STATE("other")]);
+	assertStateWithheld(integrity.gate(STATE("items")), "items");
+});
+
 test("stream integrity preserves unrelated checkpoints and clean checkpoints", () => {
 	const integrity = createStreamIntegrity();
 	integrity.refuseRecord("items", "row-key", "fields_unavailable");
