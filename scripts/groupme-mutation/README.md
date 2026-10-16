@@ -45,7 +45,9 @@ Survivors and timeouts are listed in `summary.json`. They do not change the exit
 
 In the report directory: `summary.json` (outcome, selection, canary proof, counts, survivors, timeouts), `selection.json`, `stryker.log`, `mutation.json` (Stryker's JSON report), `index.html`, `events/` (Stryker's event-recorder files: plan, tested, report), and `owner-receipt.jsonl`.
 
-The runner reconciles the planned, tested, and reported mutant identities and fails on any mismatch or unknown status. It records wall time only, not CPU or RSS.
+The runner reconciles planned, tested, and reported IDs and statuses, and compares location, replacement and mutator identity wherever lifecycle events supply them. ID-only events remain valid. Every reported Killed result needs a positive completed-test count and nonempty killedBy IDs that resolve to reported tests; the canary additionally needs its native owner assertion receipt. Timeouts and infrastructure statuses are not kills.
+
+This proves consistency relative to the official plan, not independent generation completeness. No independent generated population is available in these inputs: omissions shared by plan, tested events and report are not detectable. Whether the official plan includes every generated or ignored mutant, and exact lifecycle/artifact conformance, remain unverified pending real campaign review. This adapter does not generate a second mutation population. It records wall time only, not CPU or RSS.
 
 ## CI
 

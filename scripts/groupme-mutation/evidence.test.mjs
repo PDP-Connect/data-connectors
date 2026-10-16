@@ -302,3 +302,45 @@ test("the canary anchor occurs exactly once in the real production source", () =
 		/exactly once/,
 	);
 });
+
+for (const [label, alter] of [
+	["zero completed tests", (m) => { m.testsCompleted = 0; }],
+	["empty killedBy", (m) => { m.killedBy = []; }],
+	["missing killedBy", (m) => { delete m.killedBy; }],
+	["unknown killedBy", (m) => { m.killedBy = ["missing-test"]; }],
+]) {
+	test("non-canary kill rejects " + label, () => {
+		const input = invocation();
+		const mutant = input.report.files[canary.file].mutants[1];
+		mutant.status = "Killed";
+		mutant.testsCompleted = 1;
+		mutant.killedBy = ["owner-test-id"];
+		input.events.find((e) => e.name === "onMutantTested" && e.data.id === mutant.id).data.status = "Killed";
+		alter(mutant);
+		assert.throws(() => verifyInvocation(input), /tests|kill|Killed/i);
+	});
+}
+
+for (const field of ["replacement", "location", "mutatorName"]) {
+	for (const origin of ["plan", "tested"]) {
+		test("non-canary rejects contradictory " + origin + " " + field, () => {
+			const input = invocation();
+			const original = input.report.files[canary.file].mutants[1];
+			const data = origin === "plan"
+				? input.events.find((e) => e.name === "onMutationTestingPlanReady").data.mutantPlans[1].mutant
+				: input.events.find((e) => e.name === "onMutantTested" && e.data.id === original.id).data;
+			data[field] = field === "location" ? location(999, 1, 2) : "contradiction";
+			assert.throws(() => verifyInvocation(input), /identity|replacement|location|mutator/i);
+		});
+	}
+}
+
+test("non-canary complete killed evidence is accepted", () => {
+	const input = invocation();
+	const mutant = input.report.files[canary.file].mutants[1];
+	mutant.status = "Killed";
+	mutant.testsCompleted = 1;
+	mutant.killedBy = ["owner-test-id"];
+	input.events.find((e) => e.name === "onMutantTested" && e.data.id === mutant.id).data.status = "Killed";
+	assert.equal(verifyInvocation(input).population.counts.Killed, 2);
+});

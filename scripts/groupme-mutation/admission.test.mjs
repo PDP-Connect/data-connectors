@@ -143,7 +143,7 @@ test("helper, config and isolated-lock changes admit ordinary verification; docs
 	assert.equal(output.mutationRequired, false);
 });
 
-test("both supported GroupMe production files admit the mutation run; other GroupMe files do not", async (t) => {
+test("both supported GroupMe production files admit the mutation run; unsupported production also admits", async (t) => {
 	for (const name of [index, schemas]) {
 		const change = await commitChange(t, name, "changed\n");
 		const { output } = admit(change.repo, {
@@ -162,9 +162,56 @@ test("both supported GroupMe production files admit the mutation run; other Grou
 		BEFORE_SHA: other.base,
 		HEAD_SHA: other.head,
 	});
-	assert.equal(output.groupme, false);
-	assert.equal(output.mutationRequired, false);
+	assert.equal(output.groupme, true);
+	assert.equal(output.mutationRequired, true);
 });
+for (const [label, from, to] of [
+	["add", null, "connectors/groupme/collection.ts"],
+	["modify", "connectors/groupme/collection.ts", null],
+	["delete", "connectors/groupme/collection.ts", ""],
+	["rename", "connectors/groupme/collection.ts", "connectors/groupme/moved.ts"],
+	["production to test", "connectors/groupme/collection.ts", "connectors/groupme/collection.test.ts"],
+	["test to production", "connectors/groupme/collection.test.ts", "connectors/groupme/collection.ts"],
+]) {
+	test("unsupported production admission: " + label, async (t) => {
+		const { repo, base } = await fixture(t, from ? { [from]: "registered\n" } : { README: "base\n" });
+		if (!from) {
+			await mkdir(dirname(join(repo, to)), { recursive: true });
+			await writeFile(join(repo, to), "new production\n");
+		} else if (to === "") git(repo, "rm", "-q", from);
+		else if (to) git(repo, "mv", from, to);
+		else await writeFile(join(repo, from), "changed\n");
+		git(repo, "add", "--all");
+		git(repo, "commit", "-qm", label);
+		const { output, result } = admit(repo, {
+			BEFORE_SHA: base,
+			HEAD_SHA: git(repo, "rev-parse", "HEAD"),
+		});
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(output.relevant, true);
+		assert.equal(output.groupme, true);
+		assert.equal(output.mutationRequired, true);
+	});
+}
+
+test("GroupMe nonproduction paths do not admit mutation", async (t) => {
+	for (const name of [
+		"connectors/groupme/collection.test.ts",
+		"connectors/groupme/types.d.ts",
+		"connectors/groupme/__fixtures__/sample.ts",
+		"connectors/groupme/fixtures/sample.ts",
+		"connectors/groupme/tests/sample.ts",
+		"connectors/groupme/docs/sample.ts",
+		"connectors/groupme/README.md",
+	]) {
+		const change = await commitChange(t, name, "changed\n");
+		const { output } = admit(change.repo, { BEFORE_SHA: change.base, HEAD_SHA: change.head });
+		assert.equal(output.relevant, true, name);
+		assert.equal(output.groupme, false, name);
+		assert.equal(output.mutationRequired, false, name);
+	}
+});
+
 
 test("optional evidence is visible but never blocks; required evidence must succeed when admitted", () => {
 	const gate = (env) =>

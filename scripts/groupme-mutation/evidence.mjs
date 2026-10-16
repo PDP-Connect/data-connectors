@@ -97,6 +97,23 @@ export function verifyInvocation({
 		if (event.status !== byId.get(id).status)
 			throw new Error("tested and reported status differ for mutant " + id);
 
+	// ID-only lifecycle events remain valid; supplied identities must agree.
+	const point = (p) => [p?.line, p?.column];
+	const checkIdentity = (actual, expected, label) => {
+		for (const key of ["mutatorName", "replacement"]) {
+			if (Object.hasOwn(actual, key) && actual[key] !== expected[key])
+				throw new Error(label + " identity " + key + " differs for mutant " + expected.id);
+		}
+		if (Object.hasOwn(actual, "location") &&
+			JSON.stringify([point(actual.location?.start), point(actual.location?.end)]) !==
+			JSON.stringify([point(expected.location?.start), point(expected.location?.end)]))
+			throw new Error(label + " identity location differs for mutant " + expected.id);
+	};
+	for (const [id, mutant] of byId) {
+		checkIdentity(planned.get(id).mutant, mutant, "planned");
+		checkIdentity(tested.get(id), mutant, "tested");
+	}
+
 	const canaryMatches = [...byId.values()].filter(
 		(mutant) =>
 			mutant.file === canary.file &&
@@ -122,8 +139,22 @@ export function verifyInvocation({
 		throw new Error("canary completed no tests");
 
 	const testById = new Map();
-	for (const [file, { tests }] of Object.entries(report.testFiles))
-		for (const test of tests) testById.set(test.id, { file, name: test.name });
+	for (const [file, { tests }] of Object.entries(report.testFiles)) {
+		for (const test of tests) {
+			if (testById.has(test.id)) throw new Error("duplicate reported killer test " + test.id);
+			testById.set(test.id, { file, name: test.name });
+		}
+	}
+	for (const mutant of byId.values()) {
+		if (mutant.status !== "Killed") continue;
+		if (!Number.isInteger(mutant.testsCompleted) || mutant.testsCompleted <= 0)
+			throw new Error("Killed mutant completed no valid tests: " + mutant.id);
+		if (!Array.isArray(mutant.killedBy) || mutant.killedBy.length === 0)
+			throw new Error("Killed mutant has no killedBy tests: " + mutant.id);
+		for (const id of mutant.killedBy) {
+			if (!testById.has(id)) throw new Error("Killed mutant names an unreported test: " + mutant.id);
+		}
+	}
 	const killers = (canaryMutant.killedBy ?? []).map((id) => {
 		const test = testById.get(id);
 		if (!test) throw new Error("canary killedBy names an unreported test");

@@ -6,11 +6,17 @@ import { appendFileSync } from "node:fs";
 
 const repo = process.env.GITHUB_WORKSPACE ?? process.cwd();
 const event = process.env.EVENT_NAME;
-// Production files the official mutation run supports; see scripts/groupme-mutation/select.mjs.
-const supportedTargets = new Set([
-	"connectors/groupme/index.ts",
-	"connectors/groupme/schemas.ts",
-]);
+// Admit all production paths so the selector can visibly reject unsupported ones.
+// Keep this predicate aligned with scripts/groupme-mutation/select.mjs.
+function production(path) {
+	return (
+		path.startsWith("connectors/groupme/") &&
+		path.endsWith(".ts") &&
+		!path.endsWith(".test.ts") &&
+		!path.endsWith(".d.ts") &&
+		!/(?:^|\/)(?:__fixtures__|fixtures|tests|docs)(?:\/|$)/.test(path)
+	);
+}
 const zeroSha = /^0+$/;
 
 function git(args) {
@@ -54,7 +60,7 @@ function pathFlags(changed) {
 				file.startsWith("packages/polyfill-connectors/") ||
 				file === ".github/workflows/polyfill-connectors.yml",
 		);
-	const groupme = allPaths.some((file) => supportedTargets.has(file));
+	const groupme = allPaths.some(production);
 	return { relevant, harness, groupme, mutationRequired: harness || groupme };
 }
 
