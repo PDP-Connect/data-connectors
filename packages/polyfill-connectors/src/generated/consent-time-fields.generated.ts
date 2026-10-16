@@ -239,9 +239,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		sleep: null,
 	},
 	oura_browser: {
-		activity: null,
-		readiness: null,
-		sleep: null,
+		activity: { field: "day", format: "date" },
+		readiness: { field: "day", format: "date" },
+		sleep: { field: "day", format: "date" },
 	},
 	pocket: {
 		items: { field: "time_added", format: "date-time" },

@@ -108,6 +108,7 @@ async function hostMain({
 	timerScale,
 	clockNowMs,
 	includeScopeEntries,
+	omitScopeEntries,
 	thinHost,
 }) {
 	window.__pageshimEnv = env || {};
@@ -212,6 +213,7 @@ async function hostMain({
 	};
 	if (Object.keys(impl).join() !== methods.join())
 		throw new Error("harness shim drifted from SHIM_METHODS");
+	if (omitScopeEntries) delete impl.requestedScopeEntries;
 	const page = new Proxy(impl, {
 		get(t, k) {
 			if (typeof k === "symbol" || k === "then") return undefined;
@@ -468,6 +470,8 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
+ * @param {number} [o.failStateWriteAt] reject this one-based STATE attempt before acknowledgement or commit
+ * @param {boolean} [o.failFinalStatusWrite] reject Complete/Partial status before storing it
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {(args: {url:string,loggedIn:boolean,call:number}) => string|undefined} [o.fixtures.failGoto] return an error to emulate a PageShim navigation failure
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
@@ -493,10 +497,13 @@ export async function runHarness({
 	timerScale = 1,
 	stateAckDelayMs = 0,
 	failResultWrite = false,
+	failStateWriteAt = 0,
+	failFinalStatusWrite = false,
 	resultStreamNeverAck = false,
 	readBridgeLatencyMs = 0,
 	clockNowMs,
 	legacyScopeBridge = false,
+	missingScopeEntries = false,
 	acceptLegacyResult,
 	observeBridge,
 }) {
@@ -506,9 +513,11 @@ export async function runHarness({
 	const pageNavigations = [];
 	const data = {};
 	const states = { ...initialState };
-	const stagedStates = {};
+	const pendingStates = {};
 	const stateMessages = [];
+	let stateWriteAttempts = 0;
 	let failedResultWrite = false;
+	let acceptedLegacyResult = false;
 	let eventOrder = 0;
 	let stateAckOrder = 0;
 	let resultDoneAttemptOrder = 0;
@@ -599,13 +608,13 @@ export async function runHarness({
 						if (resultStreamNeverAck) return new Promise(() => {});
 						if (a[0] === "result:done") resultDoneAttemptOrder = ++eventOrder;
 						const ack = await streamHost.setData(a[0], a[1]);
-						if (a[0] === "result:done")
+						if (a[0] === "result:done") {
 							resultWriteOrder = resultDoneAttemptOrder;
+							Object.assign(states, pendingStates);
+						}
 						return ack;
 					}
 					if (a[0] === "result") {
-						await streamHost.setData("result", a[1]);
-						resultWriteOrder = ++eventOrder;
 						const nextResult = a[1] == null ? null : JSON.parse(a[1]);
 						if (
 							failResultWrite &&
@@ -616,7 +625,16 @@ export async function runHarness({
 							failedResultWrite = true;
 							return { __shimError: "synthetic result write failed" };
 						}
+						await streamHost.setData("result", a[1]);
+						resultWriteOrder = ++eventOrder;
+						// Accepted replacements really overwrite the payload; committed
+						// cursors are not rolled back if a later result is empty/fatal.
 						result = nextResult;
+						acceptedLegacyResult = nextResult !== null &&
+							Array.isArray(nextResult.errors) &&
+							!nextResult.errors.some((error) => error.disposition === "fatal");
+						if (acceptedLegacyResult)
+							Object.assign(states, pendingStates);
 					} else if (a[0] === "STATE") {
 						if (
 							!scopes.some(
@@ -626,6 +644,8 @@ export async function runHarness({
 							)
 						)
 							return { __shimError: "invalid PDPP STATE message" };
+						if (++stateWriteAttempts === failStateWriteAt)
+							return { __shimError: "synthetic STATE write failed" };
 						if (stateAckDelayMs > 0)
 							await new Promise((resolve) =>
 								setTimeout(resolve, stateAckDelayMs),
@@ -633,7 +653,17 @@ export async function runHarness({
 						const message = JSON.parse(JSON.stringify(a[1]));
 						stateAckOrder = ++eventOrder;
 						stateMessages.push(message);
-						stagedStates[message.stream] = message.cursor;
+						// Thin-host STATE stays staged until result:done. Legacy results
+						// arrive first, so their subsequent acknowledged STATE can commit.
+						pendingStates[message.stream] = message.cursor;
+						if (acceptedLegacyResult)
+							states[message.stream] = message.cursor;
+					} else if (
+						failFinalStatusWrite &&
+						a[0] === "status" &&
+						/^(Complete!|Partial:)/.test(String(a[1]))
+					) {
+						return { __shimError: "synthetic final status write failed" };
 					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
@@ -785,22 +815,11 @@ export async function runHarness({
 			timerScale,
 			clockNowMs,
 			includeScopeEntries: !legacyScopeBridge,
+			omitScopeEntries: missingScopeEntries,
 			thinHost: resultStreaming,
 		});
 		sampling = false;
 		await sampler;
-		if (
-			ret?.ok &&
-			data.error == null &&
-			(result || streamHost.doneValue)
-		) {
-			for (const [scope, cursor] of Object.entries(stagedStates)) {
-				if (result && !Object.hasOwn(result, scope)) continue;
-				const errors = result?.errors ?? streamHost.doneValue?.errors ?? [];
-				if (errors.some((error) => error.scope === scope)) continue;
-				states[scope] = cursor;
-			}
-		}
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
 		return {
 			ret,

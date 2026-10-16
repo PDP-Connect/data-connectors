@@ -16,8 +16,8 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
 > = {
 	oura_browser: {
-		activity: null,
-		readiness: null,
-		sleep: null,
+		activity: { field: "day", format: "date" },
+		readiness: { field: "day", format: "date" },
+		sleep: { field: "day", format: "date" },
 	},
 };
