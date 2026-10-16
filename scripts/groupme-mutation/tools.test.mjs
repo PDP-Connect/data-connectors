@@ -40,7 +40,17 @@ test("exact isolated pins and conservative native configuration", () => {
 	assert.equal(stryker.disableBail, true);
 	assert.equal(stryker.vitest.related, false);
 	assert.deepEqual(stryker.thresholds, { break: 0 });
-	assert.deepEqual(stryker.reporters, ["json", "clear-text", "html"]);
+	assert.deepEqual(stryker.reporters, [
+		"json",
+		"html",
+		"event-recorder",
+		"clear-text",
+	]);
+	// Relative so Stryker's sandbox copy sets vitest's root; see run.ts for the tool root.
+	assert.equal(
+		stryker.vitest.configFile,
+		"scripts/groupme-mutation/vitest.config.mjs",
+	);
 	assert.equal(config.test.pool, "forks");
 	assert.equal(config.test.isolate, true);
 	assert.equal(config.test.sequence.concurrent, false);

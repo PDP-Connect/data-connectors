@@ -33,6 +33,11 @@ export function partitionTests(discovered, roster, cwd, root = repoRoot) {
 		if (byPath.has(key)) throw new Error("Duplicate discovered test: " + key);
 		byPath.set(key, file);
 	}
+	// A selection made only of excluded files would otherwise run zero commands and pass.
+	if (byPath.size === 0)
+		throw new Error(
+			"Selected test files are all excluded; refusing to report success with zero tests",
+		);
 	const native = new Set();
 	for (const key of roster) {
 		if (

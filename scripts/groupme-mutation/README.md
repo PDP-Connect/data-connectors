@@ -1,50 +1,78 @@
 # GroupMe mutation evidence
 
-## Local prerequisite
+One official Stryker run per admitted change: Stryker 10.0.0 with default operators, `@stryker-mutator/vitest-runner` 10.0.0, Vitest 4.1.12, and `perTest` coverage. The pins live in `tools/package.json`; `vitest.config.mjs` refuses to load if they differ.
 
-The Stryker and Vitest pins live in an isolated tool tree. Install it once from the repository root before running the helper tests, the native Vitest lane, or `npm run test` in `packages/polyfill-connectors`:
+## Scope
+
+- Mutated files: `connectors/groupme/index.ts` and `connectors/groupme/schemas.ts`. Ranges come from the zero-context diff between the merge-base and HEAD.
+- A changed GroupMe production file outside that list makes the run `unsupported`. No mutation runs.
+- Tests, fixtures, docs, and other connectors are not mutated. A supported file renamed or deleted produces no mutants.
+- No blanket exclusions, no score threshold, and no custom operators.
+
+## Run
 
 ```sh
 npm ci --prefix scripts/groupme-mutation/tools --ignore-scripts --no-audit --no-fund
+npm run groupme-mutation -- --mode diff --base <sha> --head <sha> --merge-base <sha> [--report <dir>]
 ```
 
-Missing or wrong-version tools fail closed with that command in the error message.
+- `--head` must be the checked-out `HEAD`, and tracked files must be clean. Otherwise the runner refuses before mutating anything.
+- `--report` must not exist. The default is `~/.tmp/groupme-mutation/<head12>-<uuid>`.
+- The run takes about one minute for the canary alone and about one minute for the 18-mutant slice on this machine. The inner Stryker timeout is 15 minutes.
 
-`npm run groupme-mutation -- --mode diff --base <sha> --head <sha> --merge-base <sha>` runs the independent GroupMe oracle against registered changes in `connectors/groupme/index.ts`. The focused incremental-frontier file runs for every selected mutation. A recognized owner assertion is repeated in a fresh process; a focused pass runs all `connectors/groupme/*.test.ts` files. Each selected required fault must be killed twice; survival or unconfirmed evidence fails the run. Other failures are reported as infrastructure or selection outcomes, not kills.
+## The canary
 
-`--mode qualify` is a separate calibration lane. It requires repeatable kills for the page-ceiling and ascending-order production faults, and a repeated, executed timestamp-equality survivor. A tsx/V8 probe also proves that a called function with an unentered nested comparison is distinct from an executed comparison. The timestamp-equality control is never selected by ordinary diff mode. Reports include the commands, SHAs, source hashes, injected diff, leaf events, coverage reachability, durations, and restore results. Reports are written under `~/.tmp` by default. A run with no applicable mutation reports `no-mutation-proof`; it is not a score.
+Every run includes one known-killable production mutation: `curr.created_at < prev.created_at` becomes `<=` in `isAscendingByCreatedAt`. The runner finds it by text at `HEAD`, not by line number. It counts as proven only if all of these hold for the same invocation:
 
-The scope is intentionally narrow. Google's changed-code study reduced the median generated mutants from 820 to seven and did not present sampled survival as a whole-suite score ([Divan research, lines 86–90](https://github.com/tnunamak/divan/blob/main/test-suite-excellence/contested-test-practices-coverage-gates-mocking-tdd-retries-and-test-per-change-rules-have-named-defenders-on-both-sides.md#L86-L90)). A local Azizam audit found kills that did not reproduce, including import failures counted as kills ([Divan audit, lines 59–63](https://github.com/tnunamak/divan/blob/main/test-case-studies/azizam-mutation-run-of-2383-mutants-across-10-gateway-modules-scored-44-to-93-percent-and-survivors-cluster-in-unpinned-wire-ids-unasserted-reasons-fail-closed-branches-and-untested-locks.md#L59-L63)). The five-project review also found weak oracles recur, while emphasizing that several cost measurements were local and unmeasured elsewhere ([Divan synthesis, lines 17–28 and 53–55](https://github.com/tnunamak/divan/blob/main/test-case-studies/the-costliest-test-anti-patterns-across-our-five-projects-are-fsync-bound-per-test-state-browser-lane-duplication-and-ungated-tests-while-weak-oracles-and-unbounded-waits-recur-everywhere-unmeasured.md#L17-L28)). These findings support bounded feedback and exact reproduction, not a portable adequacy score.
+1. The Stryker plan activated this mutant at runtime.
+2. Stryker's JSON report marks it `Killed`, and its `killedBy` resolves to the owner test in a native GroupMe file: `ordinary resume: equal timestamps with advancing IDs collect and advance across pages`.
+3. The owner test's receipt from this run shows its own assertion failed for this mutant (`actual` `true`, `expected` `false`, owner message).
 
-## Survivor triage (2026-10-16, pinned PR407 input)
+Missing tests, zero completed tests, compile or runtime errors, timeouts, static activation, a foreign runner, or a receipt from another mutant all leave the canary unproven.
 
-Source: `PDP-Connect/data-connectors@197685ece729da65e9388b17f49f9dd223abf3f3`; all locations below are in `connectors/groupme/index.ts` at that SHA. The owner independently reproduced the same default-Stryker population twice: **18 mutants, 11 Killed / 5 Survived / 2 Timeout** in lines 1487–1495 and 1528–1529. This bounded correction preserves the existing tests, default operators, and production bytes. It adds two black-box tests in `incremental-frontier.test.ts`; it does not introduce a mutation engine or exclusions.
+## Outcomes
 
-| Canonical source location | Operator / original → replacement | Local status after tests | Evidence / bounded disposition |
+| Status | Exit | Meaning |
+| --- | --- | --- |
+| `proven` | 0 | Canary proven. Changed-code proof is `mutation` (with counts) or `none` (no mutants in the selected ranges). |
+| `unproven` | 1 | Stryker finished but the canary did not verify. The reason is printed. |
+| `incomplete` | 1 | Stryker signalled, timed out, or exited nonzero. This is infrastructure, not a kill. |
+| `unsupported` | 1 | A changed GroupMe production file is outside scope. No mutation ran. |
+
+Survivors and timeouts are listed in `summary.json`. They do not change the exit code. Timeouts are never counted as kills. Canary-only runs do not prove changed code.
+
+## Artifacts
+
+In the report directory: `summary.json` (outcome, selection, canary proof, counts, survivors, timeouts), `selection.json`, `stryker.log`, `mutation.json` (Stryker's JSON report), `index.html`, `events/` (Stryker's event-recorder files: plan, tested, report), and `owner-receipt.jsonl`.
+
+The runner reconciles the planned, tested, and reported mutant identities and fails on any mismatch or unknown status. It records wall time only, not CPU or RSS.
+
+## CI
+
+The `GroupMe mutation evidence` job in `.github/workflows/polyfill-connectors.yml` runs this command on the PR head. It is visible and red on failure, uploads its artifacts on every run, and is recorded by the gate as `MUTATION_ENFORCEMENT: optional`. It is not required. Promotion is one switch to `required`, which the root makes after hosted CI reproduces the local evidence.
+
+## Pitfall that produced a false survivor
+
+Stryker runs the vitest config from its sandbox copy. With an absolute `configFile`, the first probe reported `static` coverage and every canary mutant survived, even though the owner test fails when the same mutation is applied to the checkout by hand. A sandbox-relative `configFile` restored `runtime` activation and per-test kills on the same mutants. The canary exists to catch this class of failure.
+
+## Survivor triage: 18-mutant slice
+
+Measured with this runner on `index.ts` lines 1487–1495 and 1528–1529 at `ba0611…`. The slice was selected through a disposable scratch commit that appends a marker comment to those lines, so the diff selects the same ranges. The branch's production bytes are unchanged. Result: 18 planned, 18 tested, 18 reported. Killed 13, Survived 3, Timeout 2.
+
+| Mutant (line:col) | Operator and replacement | Status | Disposition |
 | --- | --- | --- | --- |
-| 1488:18–37 | Comparison boundary: `i < messages.length` → `i <= messages.length` | Survived (26/26 pass) | For an ordinary JSON array, the sole extra iteration reads `messages[messages.length]` as undefined; the unchanged `prev && curr` short-circuits. This includes null-containing arrays, not only valid messages. Equivalence is bounded to actual arrays: the caller does not validate array shape, so arbitrary malformed array-like JSON objects remain an unresolved boundary. |
-| 1491:7–19 | Conditional replacement: `prev && curr` → `true` | Survived (26/26 pass); malformed boundary unresolved | Dense non-null message objects make the guard redundant. That precondition is not runtime-enforced. A JSON page `[validMessage, null]` reaches this code: original skips that comparison and later fails in record conversion; replacement throws during comparison. Earlier emission/diagnostics can differ. No global equivalence or malformed-input exclusion is claimed, and no incidental partial-emission expectation was added merely to obtain a kill. |
-| 1491:7–19 | Logical replacement: `prev && curr` → `prev \|\| curr` (parenthesized before the remaining `&&`) | Survived (26/26 pass); malformed boundary unresolved | Same dense-valid-object equivalence and unvalidated-null boundary as the previous row. One null adjacent to a valid object can make the replacement dereference null before emission; the existing failed-pass contract does not define which partial records must precede that failure. A supported malformed-page contract remains to be decided. |
-| 1491:23–56 | Comparison boundary: `curr.created_at < prev.created_at` → `curr.created_at <= prev.created_at` | **Killed twice by the new assertion** | Canonical identity `f35ad3e88cc73e70e0da84911160880647ccf1b11a76d224f7209bc24362d098`. Test `ordinary resume: equal timestamps with advancing IDs collect and advance across pages` serves 100 + 2 messages sharing one timestamp and distinct advancing IDs. Original collects all 102, observes forward cursors `m-old-cursor` then `m-tie-99`, and advances to `m-tie-101`. Exact replacement fails `equal timestamps with advancing IDs must not fail the forward walk` (actual true, expected false); the other 25 tests pass. |
-| 1529:29–54 | String literal: `"Fetching group messages"` → `""` | **Killed twice by a new UX assertion** | Test `ordinary resume: forward-fetch progress remains nonblank without pinning copy` captures the real forward-fetch callback by phase and after_id, checks it ran, and requires nonblank user-facing text. There is no exact-copy requirement: valid wording can change. Empty text is observable UX loss, not a message/cursor correctness fault; it is not blanket-ignored. Exact replacement fails `forward-fetch progress must contain a user-facing message`; the other 25 tests pass. |
+| 1488:18–37 | `i < messages.length` → `i <= messages.length` | Survived | Equivalent for JSON arrays: `messages[messages.length]` is `undefined`, so `prev && curr` is false and nothing changes. A non-array JSON object with an own key equal to its length can differ. Both versions then fail before any record is emitted, though the error type differs. Argued by reading the code, not tested. |
+| 1491:7–19 | `prev && curr` → `true` | Survived | Unresolved malformed-input boundary. Equivalent when page elements are objects. By reading the code (not executed), a JSON `null` element makes the original skip the comparison, emit earlier valid records, and fail at conversion. The mutant fails during the order check, before any emission. Both fail the walk; they differ in partial emission. The partial-emission contract is undecided, so no test pins it. |
+| 1491:7–19 | `prev && curr` → `prev \|\| curr` | Survived | Same unresolved null boundary as the row above. |
+| 1488:18–37 | `i < messages.length` → `i >= messages.length` | Timeout | Not a kill. On a one-message page the loop never ends. Stryker's timeout is nontermination evidence. |
+| 1488:39–45 | `i += 1` → `i -= 1` | Timeout | Not a kill. The index descends forever. |
 
-Runtime evidence is in the allowed production source, not its TypeScript interfaces: `makeRequest` (849–901) applies HTTP handling then `JSON.parse(raw.body)` and returns `json.response` without schema validation; `fetchMessagesPage` (910–929) only normalizes 304 to an empty array. The forward caller (1572–1607) takes `resp.messages || []`, checks length/order, then emits. `emitInScopeGroupMessages` (1459–1478) and `toGroupMessageRecord` (1014–1041) dereference each message. JSON arrays cannot encode sparse holes, but can encode null elements; neither null entries nor non-array shapes are rejected before the order check. `runCollectionPass` (1941–1974) converts these ordinary failures to `failed: true`, and the existing interrupted-run test covers withheld STATE. These facts do not prove equivalent partial emissions for malformed pages.
+Killed mutants, one line each, by the tests that fail them:
+- The canary `<=` at 1491:23–56 is killed only by `ordinary resume: equal timestamps with advancing IDs collect and advance across pages`.
+- The `>=` at 1491:23–56 is killed by five tests, including the same owner.
+- The empty progress string at 1529:29–54 is killed by `ordinary resume: forward-fetch progress remains nonblank without pinning copy`.
+- The other 10 kills are killed by existing tests, including the >200-page regression `>old-cap discriminator: …` and the forward-walk cursor and non-progress tests.
 
-### Local receipts and limits
+No domain-specific fault is kept. Generic operators express every changed-code mutant in this slice. The >200-page regression stays in the native suite.
 
-Every run below uses the available offline check ID `cbl-groupme-incremental`, with mocked HTTP and the existing test setup. No check timed out. Exact mutant edits were applied to the production source one at a time and restored, not simulated by a helper or a syntax/import failure.
-
-- Baseline: `check_493a6332-acff-49ad-9ebe-1befd51408a9`, exit 0, 24/24.
-- New tests on original source: `check_0411da7d-0481-441c-adb5-bd829b8f4c06`, exit 0, 26/26.
-- Exact timestamp mutant: `check_1f3cc5da-0c6f-4acb-a8e1-0fb114499cd4` and `check_4f391061-be80-4c48-b406-7145f781bee7`, exit 1, 25/26 each; named assertion above.
-- Timestamp restoration: `check_8b8454a4-07dc-4069-8f4e-a8f05eb8144f`, exit 0, 26/26.
-- Exact empty-progress mutant: `check_896112fd-3bf4-4449-a926-7d0983fae900` and `check_ab6a2644-30a1-4418-b67d-5d9cbd204b5b`, exit 1, 25/26 each; named assertion above.
-- Loop-bound survivor: `check_a635d94c-e54c-4def-b920-1ba2a903dae7`; true-guard survivor: `check_54c82dd7-d533-493c-8737-9495d828df54`; OR-guard survivor: `check_fe1fedbe-29c2-452c-8b0e-1c91d99985dc`. Each exits 0, 26/26.
-
-Thus the **five locally rerun survivors are 2 assertion-killed / 3 survived / 0 timeout**, with both kills repeated. Combining those changes with the owner's earlier results would give 13 Killed / 3 Survived / 2 Timeout for the 18-member population, but that is **not a fresh full-campaign result**. The two inherited Timeouts represent nontermination evidence, not assertion kills; they were not rerun here. No global adequacy score or blanket operator ignore is justified, and the malformed-input boundaries above remain unresolved.
-
-The existing production `>old-cap discriminator` regression remains intact and passes: it fetches 202 pages and considers 20,101 messages. Ordinary default mutations can change cursor/order logic but do not synthesize a novel 200-page cap, so the page-cap regression must remain independently covered. Its pre-existing local-copy FAIL-BEFORE companion was not changed and is not counted here as a real production mutation kill.
-
-The earlier qualification paragraph's timestamp-equality-survivor expectation predates this correction and is now stale. Its runner was deliberately not changed in this task; the later official integration rewrite must reconcile it. Official Stryker/CI reproduction remains required before a required gate is justified. Slopgate is not an available bridge check and was **not run**; the focused unit pass is not a substitute. No full mutation campaign, full-suite/typecheck/lint, live-provider check, CI, dependency/workflow change, or publication was performed.
-
-Production SHA-256 before injection and after a full post-restoration reread: `ba0611145451efc4780b1cdd6225ca733ea3003b7de4e95bf6c0ef8a7b0cc2a8` (102,594 UTF-8 bytes, exact full-file equality). The final diff contains only the test and this document. The final bridge report carries the final check receipt, raw check diagnostics/artifact references, and complete patch.
+**Global claim:** not made. The two null-boundary survivors are unresolved, and the loop-guard survivor is equivalent only for JSON arrays. Responses are not runtime-validated, so TypeScript types do not settle these cases.

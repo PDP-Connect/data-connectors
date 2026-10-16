@@ -1,10 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { resolveTool } from "./vitest.config.mjs";
 
+// run.ts passes the changed ranges as --mutate and the per-run directory through env.
+const runDir =
+	process.env.GROUPME_MUTATION_RUN_DIR ?? "reports/groupme-mutation";
+
 export default {
-	// A later reviewed selector supplies explicit changed-code ranges.
+	// Always supplied by run.ts; an empty list selects nothing and is never a proof.
 	mutate: [],
 	testRunner: "vitest",
 	plugins: [resolveTool("@stryker-mutator/vitest-runner")],
@@ -13,11 +17,13 @@ export default {
 	timeoutMS: 120000,
 	disableBail: true,
 	vitest: {
-		configFile: fileURLToPath(new URL("./vitest.config.mjs", import.meta.url)),
+		// Relative to the sandbox root, so the sandbox copy (not the checkout) sets vitest's root.
+		configFile: "scripts/groupme-mutation/vitest.config.mjs",
 		related: false,
 	},
-	reporters: ["json", "clear-text", "html"],
-	jsonReporter: { fileName: "reports/groupme-mutation/mutation.json" },
-	htmlReporter: { fileName: "reports/groupme-mutation/index.html" },
+	reporters: ["json", "html", "event-recorder", "clear-text"],
+	jsonReporter: { fileName: join(runDir, "mutation.json") },
+	htmlReporter: { fileName: join(runDir, "index.html") },
+	eventReporter: { baseDir: join(runDir, "events") },
 	thresholds: { break: 0 },
 };

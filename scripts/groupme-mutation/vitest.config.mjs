@@ -5,10 +5,13 @@ import { createRequire } from "node:module";
 import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const toolsRoot = fileURLToPath(new URL("./tools/", import.meta.url));
-const requireTool = createRequire(
-	new URL("./tools/package.json", import.meta.url),
-);
+// Stryker runs this config from its sandbox, which ignores node_modules; run.ts passes the
+// real tool root through the environment so the pins are still checked, not copied.
+export const toolsRoot =
+	process.env.GROUPME_MUTATION_TOOLS_ROOT ??
+	fileURLToPath(new URL("./tools/", import.meta.url));
+// Resolve from the tool root itself: a sandboxed copy of this config has no tools tree.
+const requireTool = createRequire(join(toolsRoot, "package.json"));
 export const pins = {
 	"@stryker-mutator/core": "10.0.0",
 	"@stryker-mutator/vitest-runner": "10.0.0",
@@ -25,7 +28,9 @@ for (const [name, version] of Object.entries(pins)) {
 		);
 	const installed = JSON.parse(readFileSync(manifest, "utf8"));
 	if (installed.name !== name || installed.version !== version) {
-		throw new Error("Unexpected isolated tool version: " + name);
+		throw new Error(
+			`Unexpected isolated tool version: ${name} ${installed.version} (expected ${version}). Run from the repository root: ${installCommand}`,
+		);
 	}
 }
 export function resolveTool(specifier, packageName = specifier) {
@@ -51,6 +56,10 @@ export default defineConfig({
 	test: {
 		// Migrated native files are listed in vitest-files.mjs and passed explicitly.
 		include: ["connectors/groupme/*.test.ts"],
+		// Inert unless Stryker runs a mutant; see vitest-owner-receipt.mjs.
+		setupFiles: [
+			fileURLToPath(new URL("./vitest-owner-receipt.mjs", import.meta.url)),
+		],
 		pool: "forks",
 		isolate: true,
 		minWorkers: 1,

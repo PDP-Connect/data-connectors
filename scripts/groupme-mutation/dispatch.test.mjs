@@ -80,6 +80,12 @@ test("native roster forms an exact disjoint union and uses isolated explicit fil
 		...parts.native,
 	]);
 });
+test("a selection made only of the excluded GitHub file fails instead of passing with zero commands", () => {
+	assert.throws(
+		() => partitionTests(["../../connectors/github/index.test.ts"], [], cwd),
+		/all excluded/,
+	);
+});
 test("wholly empty ordinary discovery fails instead of passing with zero commands", () => {
 	assert.throws(
 		() => partitionTests([], [], cwd),
@@ -207,7 +213,7 @@ test("CI installs isolated tools before verification without changing mutation g
 	assert.ok(install < ci.indexOf("run: npm run test"));
 	// Root helper tests sit outside the package glob, so CI must name them.
 	const helperTests = ci.indexOf(
-		"run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs",
+		"run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs scripts/groupme-mutation/changes.test.mjs scripts/groupme-mutation/evidence.test.mjs scripts/groupme-mutation/admission.test.mjs",
 	);
 	assert.ok(
 		helperTests > install && helperTests < ci.indexOf("run: npm run verify"),

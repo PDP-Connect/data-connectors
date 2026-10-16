@@ -217,3 +217,46 @@ test("does not mutate caller input", () => {
 	select(records);
 	assert.equal(JSON.stringify(records), before);
 });
+test("a supported file renamed outside the target is deleted, not scoped out", () => {
+	const result = select([
+		change("connectors/github/moved.ts", "", "R", { oldPath: index }),
+	]);
+	assert.equal(result.disposition, "no-applicable");
+	assert.deepEqual(result.mutate, []);
+	assert.deepEqual(result.files, [
+		{
+			path: "connectors/github/moved.ts",
+			status: "R",
+			oldPath: index,
+			disposition: "deleted",
+			ranges: [],
+			unsupportedPaths: [],
+		},
+	]);
+});
+test("a rename-out with edits still removes the target and selects nothing", () => {
+	const result = select([
+		change("outside/x.ts", added(3, 2), "R", { oldPath: index }),
+	]);
+	assert.equal(result.files[0].disposition, "deleted");
+	assert.deepEqual(result.mutate, []);
+});
+test("a copy out of the target leaves the still-existing target scoped out", () => {
+	const result = select([
+		change("outside/x.ts", added(3, 2), "C", { oldPath: index }),
+	]);
+	assert.equal(result.files[0].disposition, "scoped-out");
+});
+test("'@@' in a path header does not make a hunkless change look like a deletion", () => {
+	const diff = "diff --git a/x @@ b/x @@\nold mode 100644\nnew mode 100755\n";
+	assert.equal(
+		select([change(index, diff)]).files[0].disposition,
+		"no-applicable",
+	);
+});
+test("'@@' in a path header does not hide a real deletion-only hunk or add a target", () => {
+	const diff = "diff --git a/x @@ b/x\n@@ -2 +1,0 @@\n-gone\n";
+	const result = select([change(index, diff)]);
+	assert.equal(result.files[0].disposition, "deletion-only");
+	assert.deepEqual(result.mutate, []);
+});

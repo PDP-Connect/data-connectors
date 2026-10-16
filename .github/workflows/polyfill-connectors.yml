@@ -114,7 +114,7 @@ jobs:
 
       - name: Test GroupMe mutation helpers
         # Root helper tests fall outside the package's scripts/**/*.test.mjs glob.
-        run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs
+        run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs scripts/groupme-mutation/changes.test.mjs scripts/groupme-mutation/evidence.test.mjs scripts/groupme-mutation/admission.test.mjs
 
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
@@ -263,16 +263,22 @@ jobs:
           done
 
   groupme-mutation:
+    # INITIAL EVIDENCE, NOT REQUIRED. Visible as its own check and red when the canary or
+    # the reconciled population fails; the gate below records it as optional. Promotion to
+    # required is a root decision after hosted CI reproduces the local evidence.
     name: GroupMe mutation evidence
     needs: [changes, verify]
     if: always() && needs.changes.outputs.mutation_required == 'true' && (needs.verify.result == 'success' || needs.verify.result == 'skipped') && (github.event_name == 'pull_request' || github.event_name == 'push')
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Mutated ranges name checked-out lines, so HEAD must be the PR head commit,
+          # not the default merge commit.
+          ref: ${{ needs.changes.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -288,24 +294,18 @@ jobs:
           set -o pipefail
           npm ci --ignore-scripts 2>&1 | tee "$RUNNER_TEMP/groupme-mutation-install.log"
 
-      - name: Qualify harness and calibrated mutations
-        if: needs.changes.outputs.harness == 'true'
-        env:
-          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
-          HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
-          MERGE_BASE: ${{ needs.changes.outputs.merge_base_sha }}
-          REPORT: ${{ runner.temp }}/groupme-mutation-qualification.json
-        run: |
-          set -o pipefail
-          npm run groupme-mutation -- --mode qualify --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT" 2>&1 | tee "$REPORT.log"
+      - name: Install isolated mutation tools
+        # Before the runner: it refuses to start without the pinned Stryker and Vitest tree.
+        run: npm ci --prefix scripts/groupme-mutation/tools --ignore-scripts --no-audit --no-fund
 
-      - name: Run diff-selected GroupMe mutations
-        if: needs.changes.outputs.groupme == 'true'
+      - name: Run the official GroupMe mutation invocation
+        # One Stryker run: changed production ranges plus the canary, native Vitest only.
+        # The report directory must not exist; the artifact glob below includes it and its log.
         env:
           BASE_SHA: ${{ needs.changes.outputs.base_sha }}
           HEAD_SHA: ${{ needs.changes.outputs.head_sha }}
           MERGE_BASE: ${{ needs.changes.outputs.merge_base_sha }}
-          REPORT: ${{ runner.temp }}/groupme-mutation-diff.json
+          REPORT: ${{ runner.temp }}/groupme-mutation-evidence
         run: |
           set -o pipefail
           npm run groupme-mutation -- --mode diff --base "$BASE_SHA" --head "$HEAD_SHA" --merge-base "$MERGE_BASE" --report "$REPORT" 2>&1 | tee "$REPORT.log"
@@ -336,6 +336,8 @@ jobs:
           VERIFY_RESULT: ${{ needs.verify.result }}
           MUTATION_RESULT: ${{ needs.groupme-mutation.result }}
           MUTATION_REQUIRED: ${{ needs.changes.outputs.mutation_required }}
+          # Keep at "optional" until the root promotes the mutation evidence to required.
+          MUTATION_ENFORCEMENT: optional
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           echo "changes: $CHANGES_RESULT"

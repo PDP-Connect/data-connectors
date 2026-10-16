@@ -105,7 +105,7 @@ function parseHunks(diff, status) {
 		}
 	}
 	finish();
-	return ranges;
+	return { ranges, sawHunk };
 }
 function coalesce(ranges) {
 	const merged = [];
@@ -148,7 +148,8 @@ export function selectMutationRanges(records) {
 			if (removedPaths.has(oldPath)) fail("duplicate rename source");
 			removedPaths.add(oldPath);
 		}
-		const ranges = coalesce(parseHunks(diff, status));
+		const parsed = parseHunks(diff, status);
+		const ranges = coalesce(parsed.ranges);
 		const unsupportedPaths = [...new Set([oldPath, path])]
 			.filter((p) => production(p) && !supported.has(p))
 			.sort(compare);
@@ -156,9 +157,12 @@ export function selectMutationRanges(records) {
 		if (unsupportedPaths.length) disposition = "unsupported";
 		else if (status === "D")
 			disposition = supported.has(path) ? "deleted" : "scoped-out";
+		// A rename that leaves the supported target removes it from HEAD's target set.
+		else if (status === "R" && supported.has(oldPath) && !supported.has(path))
+			disposition = "deleted";
 		else if (!supported.has(path)) disposition = "scoped-out";
-		else if (!ranges.length)
-			disposition = diff.includes("@@") ? "deletion-only" : "no-applicable";
+		else if (!parsed.sawHunk) disposition = "no-applicable";
+		else if (!ranges.length) disposition = "deletion-only";
 		else disposition = "selected";
 		files.push({
 			path,

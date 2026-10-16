@@ -6,7 +6,11 @@ import { appendFileSync } from "node:fs";
 
 const repo = process.env.GITHUB_WORKSPACE ?? process.cwd();
 const event = process.env.EVENT_NAME;
-const target = "connectors/groupme/index.ts";
+// Production files the official mutation run supports; see scripts/groupme-mutation/select.mjs.
+const supportedTargets = new Set([
+	"connectors/groupme/index.ts",
+	"connectors/groupme/schemas.ts",
+]);
 const zeroSha = /^0+$/;
 
 function git(args) {
@@ -22,6 +26,14 @@ function commitSha(value, label) {
 		throw new Error(`${label} must be a nonzero full commit SHA`);
 	git(["cat-file", "-e", `${value}^{commit}`]);
 	return value;
+}
+
+// "optional" is visible but never blocks the gate; "required" is the promotion switch.
+export function mutationGate({ enforcement, required, mutationResult }) {
+	if (enforcement === "optional") return true;
+	return required
+		? mutationResult === "success"
+		: mutationResult === "success" || mutationResult === "skipped";
 }
 
 function pathFlags(changed) {
@@ -42,23 +54,28 @@ function pathFlags(changed) {
 				file.startsWith("packages/polyfill-connectors/") ||
 				file === ".github/workflows/polyfill-connectors.yml",
 		);
-	const groupme = allPaths.includes(target);
+	const groupme = allPaths.some((file) => supportedTargets.has(file));
 	return { relevant, harness, groupme, mutationRequired: harness || groupme };
 }
 
 try {
 	let result;
 	if (process.argv[2] === "--gate") {
+		const enforcement = process.env.MUTATION_ENFORCEMENT ?? "optional";
+		if (enforcement !== "optional" && enforcement !== "required")
+			throw new Error(`unknown MUTATION_ENFORCEMENT '${enforcement}'`);
 		const required = process.env.MUTATION_REQUIRED === "true";
 		const mutationResult = process.env.MUTATION_RESULT;
-		const accepted = required
-			? mutationResult === "success"
-			: mutationResult === "success" || mutationResult === "skipped";
-		result = { required, mutationResult, accepted };
+		const accepted = mutationGate({ enforcement, required, mutationResult });
+		result = { enforcement, required, mutationResult, accepted };
 		process.stdout.write(`${JSON.stringify(result)}\n`);
 		if (!accepted)
 			throw new Error(
 				`mutation gate rejected result '${mutationResult}' (required=${required})`,
+			);
+		if (mutationResult !== "success" && mutationResult !== "skipped")
+			process.stdout.write(
+				`::warning::GroupMe mutation evidence is '${mutationResult}' and is not a required check yet\n`,
 			);
 	} else if (event !== "push" && event !== "pull_request") {
 		result = {
