@@ -838,7 +838,7 @@ test("collectShopify withholds DOM-only rows when mapped fields are unavailable"
 		readPageEvidence: () => Promise.resolve({
 			url: "https://shop.app/account/order-history", navigation: "synthetic-nav",
 			orderContext: true, blocked: false, pageHeight: 100,
-			domHasContinuation: false, domHasEndMarker: true, domCardCount: 1,
+			domHasContinuation: false, domCardCount: 1,
 		}),
 		scroll: () => Promise.resolve(),
 	});
@@ -1052,7 +1052,7 @@ test("collectShopify discloses a no-progress continuation and withholds STATE", 
 		skip,
 		"a walk that repeats the same page while continuation remains must disclose a gap",
 	);
-	assert.equal(skip.reason, "shopify_order_history_unconfirmed");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
 	assert.equal(protocolMessages.some((message) => message.type === "STATE"), false);
 });
 
@@ -1142,7 +1142,7 @@ test("Shop record identity merges matching DOM and Apollo orders before validati
 		readPageEvidence: async () => ({
 			url: "https://shop.app/account/order-history", navigation: "same-nav",
 			orderContext: true, blocked: false, pageHeight: 100,
-			domHasContinuation: false, domHasEndMarker: true, domCardCount: 1,
+			domHasContinuation: false, domCardCount: 1,
 		}),
 		cacheWaitTimeoutMs: 0,
 		scroll: async () => undefined,
@@ -1213,7 +1213,7 @@ test("a failed current cache read cannot reuse a terminal readiness snapshot for
 			readPageEvidence: async () => ({
 				url: "https://shop.app/account/order-history", navigation: "same-nav",
 				orderContext: true, blocked: false, pageHeight: 100,
-				domHasContinuation: false, domHasEndMarker: true, domCardCount: 0,
+				domHasContinuation: false, domCardCount: 0,
 			}),
 			cacheWaitTimeoutMs: 0,
 			scroll: async () => undefined,
@@ -1280,7 +1280,7 @@ test("Shopify restores the 25-scroll bootstrap and 20 continuation ceilings", as
 		readPageEvidence: async () => ({
 			url: "https://shop.app/account/order-history", navigation: "nav",
 			orderContext: true, blocked: false, pageHeight: ++heightReads,
-			domHasContinuation: false, domHasEndMarker: false, domCardCount: 0,
+			domHasContinuation: false, domCardCount: 0,
 		}),
 		maxBootstrapScrolls: 25,
 		scroll: async () => { bootstrapScrolls += 1; },
@@ -1311,13 +1311,13 @@ test("collectShopify vetoes page-end evidence when navigation changes or another
 		{ blocked: true, readPageEvidence: async () => ({
 			url: "https://shop.app/account/login", navigation: "wrong-route",
 			orderContext: false, blocked: true, pageHeight: 100,
-			domHasContinuation: false, domHasEndMarker: true, domCardCount: 0,
+			domHasContinuation: false, domCardCount: 0,
 		}) },
 		{ blocked: true, readPageEvidence: letSwitchingEvidence() },
 		{ blocked: false, readPageEvidence: async () => ({
 			url: "https://shop.app/account/order-history", navigation: "same-route",
 			orderContext: true, blocked: false, pageHeight: 100,
-			domHasContinuation: true, domHasEndMarker: true, domCardCount: 1,
+			domHasContinuation: true, domCardCount: 1,
 		}) },
 	];
 	for (const { readPageEvidence, blocked } of cases) {
@@ -1370,7 +1370,7 @@ test("stalled post-readiness cache, page evidence, and scroll reads terminate wi
 			readPageEvidence: async () => ({
 				url: "https://shop.app/account/order-history", navigation: "same",
 				orderContext: true, blocked: false, pageHeight: 100,
-				domHasContinuation: false, domHasEndMarker: false, domCardCount: 1,
+				domHasContinuation: false, domCardCount: 1,
 			}),
 			readDomOrders: async () => [],
 			scroll: async () => undefined,
@@ -1449,7 +1449,7 @@ test("button-only signed-out order shell is not authenticated or empty", async (
 	}
 });
 
-test("hidden or unrelated disabled controls do not prove an order-history end", async () => {
+test("hidden or unrelated disabled controls are not a continuation, and an end-of-list line is not an end", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -1458,26 +1458,48 @@ test("hidden or unrelated disabled controls do not prove an order-history end", 
 			body: '<main><h1>Orders</h1><section data-testid="orders-list"><div class="order-card"><a href="/orders/1">Order</a><span>$10.00</span><button disabled>Next</button></div></section><footer><span style="display:none">No more orders</span><button disabled>Next</button></footer></main>',
 		}));
 		await page.goto("https://shop.app/account/order-history");
-		const evidence = await page.evaluate(readShopOrderPageEvidenceInPage);
-		assert.equal(evidence.domHasEndMarker, false);
-		await page.setContent('<main><h1>Orders</h1><section data-testid="orders-list"><p>No more orders</p></section></main>');
-		assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).domHasEndMarker, true);
-		await page.setContent('<main><h1>Orders</h1><section data-testid="orders-list" aria-busy="true"><p>No more orders</p></section></main>');
-		assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).domHasEndMarker, false);
+		assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).domHasContinuation, false);
+		await page.setContent('<main><h1>Orders</h1><section data-testid="orders-list"><button>Next</button></section></main>');
+		assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).domHasContinuation, true);
 	} finally {
 		await browser.close();
 	}
+
+	// A visible "no more orders" line, with Shop's own response not proving the
+	// end (a filtered request), never completes the inventory.
+	const run = makeRecordingEmit(validateRecord);
+	const filtered = makeCache(["Order:1"], false);
+	const root = filtered.ROOT_QUERY as Record<string, unknown>;
+	root['deliveriesOrdersList:{"filter":{"status":"paid"}}'] = root['deliveriesOrdersList:{"filter":{}}'];
+	delete root['deliveriesOrdersList:{"filter":{}}'];
+	await collectShopify({
+		emit: run.emit, emitRecord: run.emitRecord,
+		progress: async () => undefined, requested: requestedMap(["orders"]), state: {},
+		readCache: async () => filtered,
+		readPageEvidence: async () => ({
+			url: "https://shop.com/account/order-history", navigation: "nav-1",
+			orderContext: true, blocked: false, pageHeight: 100,
+			domHasContinuation: false, domCardCount: 0,
+		}),
+		scroll: async () => undefined,
+	});
+	assert.equal(recordsOf(run.emitted, "orders").length, 1);
+	const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+	assert.ok(skip && skip.type === "SKIP_RESULT");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+	assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
 });
 
 function letSwitchingEvidence(): () => Promise<{
 	url: string; navigation: string; orderContext: boolean; blocked: boolean;
-	pageHeight: number; domHasContinuation: boolean; domHasEndMarker: boolean; domCardCount: number;
+	pageHeight: number; domHasContinuation: boolean; domCardCount: number;
 }> {
 	let reads = 0;
 	return async () => ({
 		url: "https://shop.app/account/order-history", navigation: ++reads < 3 ? "nav-1" : "nav-2",
 		orderContext: true, blocked: false, pageHeight: 100,
-		domHasContinuation: false, domHasEndMarker: true, domCardCount: 1,
+		domHasContinuation: false, domCardCount: 1,
 	});
 }
 

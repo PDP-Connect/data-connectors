@@ -3,13 +3,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.29)
+ * PDPP Shopify (Shop app) Connector (v0.2.30)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
  * connector reads the live Apollo Client cache (reached by walking the React
  * fiber tree from the DOM root), falls back to `window.__APOLLO_STATE__`, and
  * parses visible order cards if Apollo does not expose the order connection.
+ * shop.app now redirects to shop.com, which has no reachable Apollo cache and
+ * renders orders as keyless buttons; there the orders come from the order
+ * screen's own `POST /web/api/order-history` replies (order-history-api.ts),
+ * and the same parsers and end-of-list proof apply to them.
  *
  * Ported from the legacy Playwright connector under
  * docs/migration/connector-cutover/CONTRACTS.md D10. The legacy source
@@ -47,6 +51,11 @@
  * normalization and schema validation.
  *
  * CHANGES
+ *   v0.2.30 (2026-10-16) — read shop.com order history from Shop's own
+ *     order-history endpoint; stop treating the signed-in "Sign in & security"
+ *     link as a sign-in wall; claim completeness only from Shop's own
+ *     end-of-list evidence and report anything less as
+ *     inventory_not_proven_complete.
  *   v0.2.29 (2026-10-16) — recognize shop.com redirects and preserve order identities.
  *   v0.2.28 (2026-10-15) — bound browser reads, withhold incomplete rows, and
  *     require request-bound terminal evidence before pruning.
@@ -89,10 +98,12 @@ import {
 	hasOrderCountMismatch,
 	hasOrdersConnection,
 	hasVerifiedOrdersEnd,
+	isShopOrderHistoryPageUrl,
 	isShopOrigin,
 	parseDomOrderCards,
 	resolveOrderId,
 } from "./parsers.ts";
+import { createOrderHistoryApiReader, fetchOrderHistoryPageInPage } from "./order-history-api.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache, ParsedOrder } from "./types.ts";
 
@@ -245,7 +256,10 @@ export function shopSkipDiagnosticsInPage(): ShopSkipDiagnostics {
 export function isShopOrderHistoryReadyInPage(): boolean {
 	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
 		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
-		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+		// A sign-in prompt, not an account link that merely starts with the same words
+		// (the signed-in sidebar has "Sign in & security").
+		if (typeof element.getClientRects === "function" && element.getClientRects().length === 0) return false;
+		return /^(?:(?:sign|log)[\s-]?in(?:\s+to\s+[^&]+)?|continue to (?:sign|log) in)$/i.test(label);
 	});
 	const signIn = document.querySelector(
 		'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
@@ -264,7 +278,8 @@ export function readShopOrderPageEvidenceInPage(): ShopOrderPageEvidence {
 	const url = new URL(location.href);
 	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
 		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
-		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+		if (typeof element.getClientRects === "function" && element.getClientRects().length === 0) return false;
+		return /^(?:(?:sign|log)[\s-]?in(?:\s+to\s+[^&]+)?|continue to (?:sign|log) in)$/i.test(label);
 	});
 	const login = Boolean(document.querySelector(
 		'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
@@ -295,17 +310,6 @@ export function readShopOrderPageEvidenceInPage(): ShopOrderPageEvidence {
 	const domHasContinuation = nextControls.some((control) =>
 		!control.hasAttribute("disabled") && control.getAttribute("aria-disabled") !== "true",
 	);
-	const domHasEndMarker = Array.from(document.querySelectorAll<HTMLElement>("body *")).some((element) => {
-		const rect = element.getBoundingClientRect();
-		const style = getComputedStyle(element);
-		if (element.children.length > 0 || rect.width <= 0 || rect.height <= 0 ||
-			style.display === "none" || style.visibility === "hidden") return false;
-		const owner = element.closest('[data-testid*="order"], [data-test*="order"], [role="list"], ul, ol, .order-list');
-		if (!owner || owner.closest('[aria-busy="true"], [data-loading="true"]') || owner.querySelector('[aria-busy="true"], [data-loading="true"]')) return false;
-		return /^(?:you have reached the end|no more orders|end of order history)$/i.test(
-			(element.textContent ?? "").trim().replace(/\s+/g, " "),
-		);
-	});
 	const domCardCount = new Set(
 		Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]')).flatMap((link) => {
 			try {
@@ -321,13 +325,12 @@ export function readShopOrderPageEvidenceInPage(): ShopOrderPageEvidence {
 		}),
 	).size;
 	return {
-		url: `${url.origin}${url.pathname}${url.search}`,
+		url: `${url.origin}${url.pathname}`,
 		navigation: String(performance.timeOrigin),
 		orderContext,
 		blocked: login || blockedText || (url.origin !== "https://shop.app" && url.origin !== "https://shop.com") || url.pathname !== "/account/order-history",
 		pageHeight: Math.max(document.body?.scrollHeight ?? 0, document.documentElement?.scrollHeight ?? 0),
 		domHasContinuation,
-		domHasEndMarker,
 		domCardCount,
 	};
 }
@@ -476,7 +479,8 @@ export function readLiveApolloCacheInPage(): ApolloCache | null {
 export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
 		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
-		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+		if (typeof element.getClientRects === "function" && element.getClientRects().length === 0) return false;
+		return /^(?:(?:sign|log)[\s-]?in(?:\s+to\s+[^&]+)?|continue to (?:sign|log) in)$/i.test(label);
 	});
 	const allowedPhrases = new Set([
 		"no orders yet",
@@ -669,7 +673,6 @@ export interface ShopOrderPageEvidence {
 	blocked: boolean;
 	pageHeight: number;
 	domHasContinuation: boolean;
-	domHasEndMarker: boolean;
 	domCardCount: number;
 }
 
@@ -784,7 +787,7 @@ export async function walkOrdersCache(
 			pageEvidence = before;
 			if (
 				before.blocked || !before.orderContext ||
-				before.url !== ORDER_HISTORY_URL || before.navigation.length === 0
+				!isShopOrderHistoryPageUrl(before.url) || before.navigation.length === 0
 			) return false;
 		}
 		const refreshed = await withBrowserOperationBudget("apollo_cache_read", readCache, deadlineAt, operationTimeoutMs).catch((cause: unknown) => {
@@ -797,7 +800,7 @@ export async function walkOrdersCache(
 		if (after) {
 			pageEvidence = after;
 			if (
-				after.blocked || !after.orderContext || after.url !== ORDER_HISTORY_URL ||
+				after.blocked || !after.orderContext || !isShopOrderHistoryPageUrl(after.url) ||
 				before?.navigation !== after.navigation || before?.url !== after.url ||
 				(boundPageIdentity !== null &&
 					(boundPageIdentity.url !== after.url || boundPageIdentity.navigation !== after.navigation))
@@ -858,9 +861,8 @@ export async function walkOrdersCache(
 	const finalPageEvidence = currentPageEvidence();
 	const finalBoundPageIdentity = currentBoundPageIdentity();
 	const cacheEnd = Boolean(freshCache && hasVerifiedOrdersEnd(freshCache));
-	const domEnd = Boolean(finalPageEvidence?.domHasEndMarker && !finalPageEvidence.domHasContinuation);
 	let verifiedEmptyEnd = false;
-	if (!cacheEnd && !domEnd && args.readVerifiedEmptyState) {
+	if (!cacheEnd && args.readVerifiedEmptyState) {
 		const before = readPageEvidence
 			? await withBrowserOperationBudget("page_evidence_read", readPageEvidence, deadlineAt, operationTimeoutMs)
 			: undefined;
@@ -874,7 +876,7 @@ export async function walkOrdersCache(
 		verifiedEmptyEnd = marker && ((before === undefined && after === undefined) || (
 			before !== undefined && after !== undefined &&
 			before.url === after.url && before.navigation === after.navigation &&
-			after.url === ORDER_HISTORY_URL && !after.blocked && after.orderContext &&
+			isShopOrderHistoryPageUrl(after.url) && !after.blocked && after.orderContext &&
 			(finalBoundPageIdentity === null || (
 				finalBoundPageIdentity.url === after.url && finalBoundPageIdentity.navigation === after.navigation
 			))
@@ -882,7 +884,7 @@ export async function walkOrdersCache(
 	}
 	const coverage = coverageSummary();
 	const cacheSnapshotIsCurrent = cache === null || freshCache !== null;
-	const complete = cacheSnapshotIsCurrent && (cacheEnd || domEnd || verifiedEmptyEnd) && !finalPageEvidence?.domHasContinuation &&
+	const complete = cacheSnapshotIsCurrent && (cacheEnd || verifiedEmptyEnd) && !finalPageEvidence?.domHasContinuation &&
 		!(cache && hasNextOrdersPage(cache)) && !domDiscardedRows && coverage.discardedRows === 0 && !countMismatch;
 	const budgetHit = Boolean(cache && hasNextOrdersPage(cache) && continuationScrolls >= maxContinuationScrolls);
 	return {
@@ -1109,7 +1111,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			const page = await withBrowserOperationBudget(
 				"page_evidence_read", args.readPageEvidence, runDeadlineAt, operationTimeoutMs,
 			);
-			if (page.blocked || !page.orderContext || page.url !== ORDER_HISTORY_URL) {
+			if (page.blocked || !page.orderContext || !isShopOrderHistoryPageUrl(page.url)) {
 				await emit({
 					type: "SKIP_RESULT", stream: ORDERS_STREAM,
 					reason: page.blocked ? "shopify_signed_out_or_blocked" : "shopify_order_history_unconfirmed",
@@ -1247,7 +1249,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			stream: ORDERS_STREAM,
 			reason: truncated && walked.reason === "page_budget"
 				? "older_pages_deferred_page_budget"
-				: "shopify_order_history_unconfirmed",
+				: "inventory_not_proven_complete",
 			recovery_hint: { action: "retry_by_runtime", retryable: true },
 			message: "Shop order history could not be proven complete; retry to collect the remaining rows.",
 			diagnostics: {
@@ -1293,7 +1295,8 @@ export function hasShopOrderHistoryContextInPage(): boolean {
 	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
 		const ariaLabel = typeof element.getAttribute === "function" ? element.getAttribute("aria-label") : null;
 		const label = (ariaLabel ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
-		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+		if (typeof element.getClientRects === "function" && element.getClientRects().length === 0) return false;
+		return /^(?:(?:sign|log)[\s-]?in(?:\s+to\s+[^&]+)?|continue to (?:sign|log) in)$/i.test(label);
 	});
 	if (
 		document.querySelector(
@@ -1319,7 +1322,8 @@ export function hasShopOrderHistoryContextInPage(): boolean {
 export function hasShopSignInWallInPage(): boolean {
 	const hasSignInCTA = Array.from(document.querySelectorAll<HTMLElement>("button, a, [role=button]")).some((element) => {
 		const label = (element.getAttribute("aria-label") ?? element.textContent ?? "").trim().replace(/\s+/g, " ");
-		return /^(?:sign[\s-]?in|log[\s-]?in|continue to (?:sign|log) in)(?:\b|$)/i.test(label);
+		if (typeof element.getClientRects === "function" && element.getClientRects().length === 0) return false;
+		return /^(?:(?:sign|log)[\s-]?in(?:\s+to\s+[^&]+)?|continue to (?:sign|log) in)$/i.test(label);
 	});
 	return hasSignInCTA || Boolean(document.querySelector(
 		'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
@@ -1415,7 +1419,10 @@ export async function ensureShopifySession({
 	}
 }
 
-async function collect(ctx: BrowserCollectContext): Promise<void> {
+export async function collect(
+	ctx: BrowserCollectContext,
+	options: { wait?: (ms: number) => Promise<void> } = {},
+): Promise<void> {
 	const { page, emit, emitRecord, progress, requested, state } = ctx;
 	const runDeadlineAt = Date.now() + DEFAULT_RUN_BUDGET_MS;
 	const navigationStartedAt = Date.now();
@@ -1439,6 +1446,9 @@ async function collect(ctx: BrowserCollectContext): Promise<void> {
 	// Diagnostics refresh in the background. A stalled page evaluation cannot
 	// block the typed readiness/operation failure emitted by collectShopify.
 	let latestDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
+	const orderHistoryApi = createOrderHistoryApiReader({
+		fetchPage: (request) => page.evaluate(fetchOrderHistoryPageInPage, request),
+	});
 
 	await collectShopify({
 		emit,
@@ -1449,7 +1459,10 @@ async function collect(ctx: BrowserCollectContext): Promise<void> {
 		navigationStartedAt,
 		runDeadlineAt,
 		orderHistoryReady,
-		readCache: () => evaluateShopReaderInMainWorld(page, readLiveApolloCacheInPage),
+		// shop.com serves orders from its own JSON endpoint, with no reachable
+		// Apollo cache; shop.app still has one, so it remains the fallback.
+		readCache: async () =>
+			(await orderHistoryApi.read()) ?? evaluateShopReaderInMainWorld(page, readLiveApolloCacheInPage),
 		readDomOrders: async () => parseDomOrderCards(await page.content()),
 		readPageEvidence: () => evaluateShopReaderInMainWorld(page, readShopOrderPageEvidenceInPage),
 		readSkipDiagnostics: async () => {
@@ -1460,11 +1473,13 @@ async function collect(ctx: BrowserCollectContext): Promise<void> {
 			}
 			return latestDiagnostics;
 		},
-		readVerifiedEmptyState: () => evaluateShopReaderInMainWorld(page, hasVerifiedEmptyOrderHistoryInPage),
+		readVerifiedEmptyState: async () =>
+			orderHistoryApi.provesEmptyHistory() ||
+			evaluateShopReaderInMainWorld(page, hasVerifiedEmptyOrderHistoryInPage),
 		scroll: async () => {
 			await page.evaluate(scrollToBottomInPage);
 		},
-		wait: politeDelay,
+		wait: options.wait ?? politeDelay,
 	});
 }
 

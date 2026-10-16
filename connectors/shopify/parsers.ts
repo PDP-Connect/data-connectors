@@ -24,6 +24,16 @@ export function isShopOrigin(origin: string): boolean {
 	return origin === "https://shop.app" || origin === "https://shop.com";
 }
 
+/** The signed-in order-history page on either Shop origin, ignoring tracking parameters. */
+export function isShopOrderHistoryPageUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return isShopOrigin(url.origin) && url.pathname === "/account/order-history";
+	} catch {
+		return false;
+	}
+}
+
 /** Preserve historical shop.app identities when Shop changes its serving domain. */
 export function canonicalShopUrl(value: string): string {
 	try {
