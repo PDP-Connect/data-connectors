@@ -24,15 +24,22 @@ import {
 } from "./full-inventory-claim-scan.ts";
 
 const BASELINE: Readonly<Record<string, ClaimCounts>> = {
-	"connectors/amazon/index.ts": { full_scan: 0, self_coverage: 3 },
+	// Recounted after the scanner learned const aliases and fails closed on unresolved identities (PR #418); these claims predate the recount and were not individually audited here.
+	"connectors/_conformance/coverage-conformance-drivers.ts": {
+		full_scan: 0,
+		self_coverage: 1,
+	},
+	"connectors/amazon/index.ts": { full_scan: 0, self_coverage: 4 },
 	"connectors/anthropic/index.ts": { full_scan: 4, self_coverage: 0 },
 	"connectors/anthropic_live/index.ts": { full_scan: 2, self_coverage: 0 },
 	"connectors/apple_contacts/index.ts": { full_scan: 1, self_coverage: 2 },
-	"connectors/chase/index.ts": { full_scan: 1, self_coverage: 2 },
+	"connectors/chase/index.ts": { full_scan: 1, self_coverage: 3 },
 	"connectors/chatgpt/index.ts": { full_scan: 3, self_coverage: 2 },
 	"connectors/doordash/index.ts": { full_scan: 0, self_coverage: 2 },
+	"connectors/garmin_browser/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/github/index.ts": { full_scan: 0, self_coverage: 1 },
-	"connectors/gmail/index.ts": { full_scan: 1, self_coverage: 2 },
+	"connectors/gmail/index.ts": { full_scan: 1, self_coverage: 6 },
+	"connectors/github_browser/parsers.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/google_calendar/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/google_contacts/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/google_maps/index.ts": { full_scan: 1, self_coverage: 2 },
@@ -41,21 +48,22 @@ const BASELINE: Readonly<Record<string, ClaimCounts>> = {
 		self_coverage: 2,
 	},
 	"connectors/google_messages/index.ts": { full_scan: 0, self_coverage: 1 },
-	"connectors/groupme/index.ts": { full_scan: 4, self_coverage: 0 },
+	"connectors/groupme/index.ts": { full_scan: 4, self_coverage: 2 },
 	"connectors/heb/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/jellyfin/index.ts": { full_scan: 1, self_coverage: 1 },
 	"connectors/linkedin/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/meta/index.ts": { full_scan: 0, self_coverage: 1 },
 	"connectors/signal/index.ts": { full_scan: 0, self_coverage: 1 },
-	"connectors/slack/index.ts": { full_scan: 6, self_coverage: 2 },
+	"connectors/slack/index.ts": { full_scan: 6, self_coverage: 3 },
 	"connectors/spotify/index.ts": { full_scan: 0, self_coverage: 2 },
 	"connectors/steam/index.ts": { full_scan: 0, self_coverage: 6 },
+	"connectors/strava_browser/index.ts": { full_scan: 0, self_coverage: 2 },
 	"connectors/uber/index.ts": { full_scan: 0, self_coverage: 1 },
 	// 6th claim: emitStatementCoverage passes computeStatementCoverage().coverage
 	// (statement-coverage.ts, stream === stateStream) as a factored config the
 	// pre-#418-triage scanner could not see. Its denominator is the enumerated
 	// documents index and required === hydrated ∪ gap by construction.
-	"connectors/usaa/index.ts": { full_scan: 0, self_coverage: 6 },
+	"connectors/usaa/index.ts": { full_scan: 0, self_coverage: 7 },
 	"connectors/venmo/index.ts": { full_scan: 0, self_coverage: 3 },
 	"connectors/whatsapp/index.ts": { full_scan: 0, self_coverage: 3 },
 	"connectors/ynab/index.ts": { full_scan: 0, self_coverage: 2 },
@@ -109,6 +117,71 @@ const COUNT = (full_scan: number, self_coverage: number): ClaimCounts => ({
 });
 
 const SCAN_CASES: ReadonlyArray<[string, string, ClaimCounts]> = [
+	[
+		"constant/identity aliases: const raw type alias",
+		'const type = "DETAIL_COVERAGE" as const; emit({ type, reference_only: true, stream: "items", state_stream: "items", required_keys: [], hydrated_keys: [], considered: 1, covered: 1 });',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: literal and const identity",
+		'const state = "items"; emitDetailCoverage(ctx, { stream: "items", stateStream: state, requiredKeys: [], hydratedKeys: [], considered: 1, covered: 1 });',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: distinct const identities",
+		'const stream = "items"; const state = "parents" as const; emitDetailCoverage(ctx, { stream, stateStream: state });',
+		COUNT(0, 0),
+	],
+	[
+		"constant/identity aliases: unresolved identity pair",
+		"emitDetailCoverage(ctx, { stream: itemStream, stateStream: checkpointStream });",
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: mutable identity",
+		'let state = "parents"; emitDetailCoverage(ctx, { stream: "items", stateStream: state });',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: identity alias chain",
+		'const parent = "parents"; const state = parent; emitDetailCoverage(ctx, { stream: "items", stateStream: state });',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: shadowed identity",
+		'const state = "parents"; function report(state: string) { emitDetailCoverage(ctx, { stream: "items", stateStream: state }); }',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: different const raw type",
+		'const type = "STATUS" as const; emit({ type, stream: "items", state_stream: "items" });',
+		COUNT(0, 0),
+	],
+	[
+		"constant/identity aliases: unresolved raw type",
+		'emit({ type: getType(), stream: "items", state_stream: "items" });',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: mutable raw type",
+		'let type = "STATUS"; emit({ type, stream: "items", state_stream: "items" });',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: aliased raw message",
+		'const type = "DETAIL_COVERAGE"; const message = { type, stream: "items", state_stream: "items" }; const alias = message; emit(alias);',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: spread raw message",
+		'const type = "DETAIL_COVERAGE" as const; emit({ type, ...proof });',
+		COUNT(0, 1),
+	],
+	[
+		"constant/identity aliases: spread overriding raw type",
+		'emit({ type: "STATUS", stream: "items", state_stream: "items", ...proof });',
+		COUNT(0, 1),
+	],
 	[
 		"an inline self-coverage proof",
 		'emitDetailCoverage(ctx, { stream: "items", stateStream: "items", requiredKeys: [], hydratedKeys: [], considered: 1, covered: 1 });',

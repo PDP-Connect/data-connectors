@@ -76,23 +76,21 @@ function nameOf(node: unknown): string | null {
 }
 
 /**
- * A comparable value for an expression: a string literal's value (or a
- * template literal with no expressions), otherwise the source text with
- * spacing removed.
+ * Only literal initializers, optionally asserted as const, prove an identity.
+ * Other assertions, templates, alias chains and mutable bindings are unknown.
  */
-function comparableOf(node: unknown, source: string): string | null {
+function literalOf(node: unknown): string | null {
 	if (!isNode(node)) return null;
-	if (node.type === "StringLiteral") return `str:${String(node.value)}`;
-	if (node.type === "TemplateLiteral") {
-		const expressions = Array.isArray(node.expressions) ? node.expressions : [];
-		const quasis = Array.isArray(node.quasis) ? node.quasis : [];
-		if (expressions.length === 0 && quasis.length === 1) {
-			const cooked = (quasis[0] as { value?: { cooked?: unknown } }).value
-				?.cooked;
-			if (typeof cooked === "string") return `str:${cooked}`;
-		}
-	}
-	return `src:${source.slice(Number(node.start), Number(node.end)).replace(/\s+/g, "")}`;
+	if (
+		node.type === "TSAsExpression" &&
+		isNode(node.typeAnnotation) &&
+		node.typeAnnotation.type === "TSTypeReference" &&
+		nameOf(node.typeAnnotation.typeName) === "const"
+	)
+		return isNode(node.expression) && node.expression.type === "StringLiteral"
+			? String(node.expression.value)
+			: null;
+	return node.type === "StringLiteral" ? String(node.value) : null;
 }
 
 function property(object: AstNode, keyName: string): unknown {
@@ -138,6 +136,7 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 		scope: Scope;
 		init?: unknown;
 		value?: string | null;
+		literal?: string | null;
 	}
 	const root: Scope = { hoists: true, bindings: new Map() };
 	const scopes = new WeakMap<AstNode, Scope>();
@@ -244,7 +243,11 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			const name = nameOf(node.id);
 			if (name) {
 				// The initializer resolves where it was declared, including for var.
-				const binding: Binding = { scope, init: node.init };
+				const binding: Binding = {
+					scope,
+					init: node.init,
+					literal: parent?.kind === "const" ? literalOf(node.init) : null,
+				};
 				targetScope.bindings.set(name, binding);
 				bindings.push(binding);
 			} else bindPattern(node.id, targetScope);
@@ -309,6 +312,28 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			expression,
 			isNode(expression) ? (scopes.get(expression) ?? root) : root,
 		);
+	const identityOf = (expression: unknown): string | null => {
+		if (!isNode(expression)) return null;
+		const literal = literalOf(expression);
+		if (literal !== null) return literal;
+		if (expression.type !== "Identifier") return null;
+		for (
+			let scope: Scope | undefined = scopes.get(expression) ?? root;
+			scope;
+			scope = scope.parent
+		) {
+			const binding = scope.bindings.get(String(expression.name));
+			if (binding) return binding.literal ?? null;
+		}
+		return null;
+	};
+	// A spread or computed key can overwrite any apparent literal property.
+	const hasUnknownProperties = (object: AstNode): boolean =>
+		(Array.isArray(object.properties) ? object.properties : []).some(
+			(entry) =>
+				isNode(entry) &&
+				(entry.type === "SpreadElement" || Boolean(entry.computed)),
+		);
 	const isSelfClaim = (object: unknown, stateKey: string): boolean => {
 		// A factored or computed config may claim self coverage. Without a
 		// complete proof of its runtime properties, count it conservatively
@@ -316,18 +341,15 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 		if (!isNode(object) || object.type !== "ObjectExpression") return true;
 		// Spreads can supply or overwrite either identity, including when
 		// explicit stream/state properties otherwise appear to differ.
-		const properties = Array.isArray(object.properties)
-			? object.properties
-			: [];
+		if (hasUnknownProperties(object)) return true;
 		if (
-			properties.some(
-				(entry) => isNode(entry) && entry.type === "SpreadElement",
-			)
+			property(object, "stream") === undefined ||
+			property(object, stateKey) === undefined
 		)
-			return true;
-		const stream = comparableOf(property(object, "stream"), source);
-		const state = comparableOf(property(object, stateKey), source);
-		return stream !== null && stream === state;
+			return false;
+		const stream = identityOf(property(object, "stream"));
+		const state = identityOf(property(object, stateKey));
+		return stream === null || state === null || stream === state;
 	};
 	visit(ast, (node) => {
 		if (node.type === "CallExpression") {
@@ -339,8 +361,13 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			else if (helper === EMIT_DETAIL && isSelfClaim(args[1], "stateStream"))
 				counts.self_coverage += 1;
 		} else if (node.type === "ObjectExpression") {
+			const typeProperty = property(node, "type");
+			if (typeProperty === undefined) return;
+			const type = identityOf(typeProperty);
 			if (
-				comparableOf(property(node, "type"), source) !== "str:DETAIL_COVERAGE"
+				!hasUnknownProperties(node) &&
+				type !== null &&
+				type !== "DETAIL_COVERAGE"
 			)
 				return;
 			if (isSelfClaim(node, "state_stream")) counts.self_coverage += 1;
