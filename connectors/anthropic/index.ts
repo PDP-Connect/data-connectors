@@ -187,6 +187,7 @@ import {
 	createPipelinedJsonEntryReader,
 	JSON_ENTRY_READ_CHUNK_UNITS,
 	type ManifestPartFile,
+	messageOmissionTimestamp,
 	omittedFieldCountOf,
 	oversizeTextOf,
 	type ParsedExport,
@@ -1349,6 +1350,29 @@ export async function collectAnthropic({
 		const updatedAt = Date.parse(value);
 		return Number.isFinite(updatedAt) && updatedAt >= windowSinceMs;
 	};
+	// A sibling conversation scope must not widen messages' omission window.
+	// Prefer the child's raw time, then the parent's. Unknown dates cannot
+	// prove an omission out of scope.
+	const messagesWindow = requested.get(MESSAGES_STREAM)?.time_range;
+	const messagesSinceMs = Date.parse(messagesWindow?.since ?? "");
+	const messagesUntilMs = Date.parse(messagesWindow?.until ?? "");
+	const messageOmissionAffectsScope = (
+		childTime: number | null,
+		parent: Record<string, unknown>,
+	): boolean => {
+		const time =
+			childTime ??
+			[parent.updated_at, parent.created_at]
+				.map((value) =>
+					typeof value === "string" ? Date.parse(value) : Number.NaN,
+				)
+				.find(Number.isFinite);
+		return (
+			time === undefined ||
+			((!Number.isFinite(messagesSinceMs) || time >= messagesSinceMs) &&
+				(!Number.isFinite(messagesUntilMs) || time <= messagesUntilMs))
+		);
+	};
 	if ((wantsConversations || wantsProjects) && !isRecordSelected) {
 		throw new Error(
 			"Anthropic host blob collection requires the runtime record selector",
@@ -1513,15 +1537,20 @@ export async function collectAnthropic({
 			Array.isArray(chat_messages),
 		);
 		if (!parent) return;
-		let omittedMessages = !Array.isArray(chat_messages);
+		let omittedMessages =
+			!Array.isArray(chat_messages) && messageOmissionAffectsScope(null, raw);
 		if (messagesAccounted && Array.isArray(chat_messages)) {
 			for (const child of chat_messages) {
 				const message = parseMessage(child, parent.id);
 				accountMessageChild(message);
-				if (!message) omittedMessages = true;
+				if (
+					!message &&
+					messageOmissionAffectsScope(messageOmissionTimestamp(child), raw)
+				)
+					omittedMessages = true;
 			}
 		}
-		if (omittedMessages && isWithinTimeWindow(raw.updated_at))
+		if (omittedMessages)
 			await reportConversationOmission(parent.id, [MESSAGES_STREAM]);
 	};
 	const markDelivered = (
@@ -2213,15 +2242,28 @@ export async function collectAnthropic({
 				conversation,
 				chatMessagesIsArray,
 			);
-			if (messagesAccounted && scan.nonObjectMessages > 0)
+			if (messagesAccounted && scan.omittedMessageTimes.length > 0)
 				completeMessages = false;
+			// The scan already saw every child. Account omissions before the
+			// coarse parent gate, without rereading out-of-window messages.
+			if (
+				wantsMessages &&
+				((!chatMessagesIsArray && messageOmissionAffectsScope(null, header)) ||
+					scan.omittedMessageTimes.some((time) =>
+						messageOmissionAffectsScope(time, header),
+					))
+			)
+				await reportConversationOmission(
+					conversation?.id ?? null,
+					[MESSAGES_STREAM],
+					value.startOffset,
+				);
 			if (!isWithinTimeWindow(header.updated_at)) return;
 			if (!conversation) {
 				droppedConversations += 1;
 				return;
 			}
 			if (wantsMessages) {
-				let omittedMessages = !chatMessagesIsArray || scan.nonObjectMessages > 0;
 				const ordered = [...scan.messageKeys].sort(
 					(a, b) => a.sortTime - b.sortTime || a.index - b.index,
 				);
@@ -2241,14 +2283,7 @@ export async function collectAnthropic({
 					);
 					if (messagesAccounted) accountMessageChild(message);
 					if (message) await emitMessage(message);
-					else omittedMessages = true;
 				}
-				if (omittedMessages)
-					await reportConversationOmission(
-						conversation.id,
-						[MESSAGES_STREAM],
-						value.startOffset,
-					);
 			}
 			if (
 				wantsConversations &&

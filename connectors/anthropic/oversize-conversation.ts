@@ -26,6 +26,7 @@
  * built to parse it. Tests use it to prove the bound.
  */
 
+import { messageIdentity, messageOmissionTimestamp } from "./parsers.ts";
 import { escapedLengthExceeds, INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 
 /** A syntax failure, carrying only the identity scanned before the failure. */
@@ -72,6 +73,8 @@ export interface ScannedConversation {
 	messageCount: number;
 	/** Elements that are not JSON objects. */
 	nonObjectMessages: number;
+	/** Bounded timestamps for omitted children; null means no usable time. */
+	omittedMessageTimes: Array<number | null>;
 }
 
 const KEY_MAX_UNITS = 256;
@@ -124,6 +127,7 @@ export async function scanConversation(
 		messageKeys: [],
 		messageCount: 0,
 		nonObjectMessages: 0,
+		omittedMessageTimes: [],
 	};
 	const invalid = (): never => {
 		const uuid = result.fields.get("uuid");
@@ -203,8 +207,11 @@ export async function scanConversation(
 		}
 		if (typeof item !== "object" || item === null || Array.isArray(item)) {
 			result.nonObjectMessages += 1;
+			result.omittedMessageTimes.push(null);
 			return;
 		}
+		if (messageIdentity(item) === null)
+			result.omittedMessageTimes.push(messageOmissionTimestamp(item));
 		const createdAt = (item as Record<string, unknown>).created_at;
 		result.messageKeys.push({
 			index,
@@ -380,6 +387,7 @@ export async function scanConversation(
 						result.messageKeys = [];
 						result.messageCount = 0;
 						result.nonObjectMessages = 0;
+						result.omittedMessageTimes = [];
 						result.chatMessages = code === 0x5b ? "array" : "other";
 					}
 					if (code === 0x22) {
