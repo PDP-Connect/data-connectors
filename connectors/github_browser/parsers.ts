@@ -482,10 +482,23 @@ function locateSection(
 		return { entries: null, unreadable: !structure };
 	}
 	const nodes = headings.flatMap(sectionNodes);
+	const entries = anchorsIn(nodes, entrySelector);
 	const leftover = classifyNodes(nodes, (node) => node.matches("a[href]")).unknown;
+	// Text-free avatars and badges remain entries when their anchor drifts.
+	// Check roots and descendants; consuming an ancestor cannot hide extra images.
+	const candidateSelector = 'li, [role="listitem"], .avatar-group-item, img';
+	const candidates = nodes.flatMap((node) => [
+		...(node.matches(candidateSelector) ? [node] : []),
+		...Array.from(node.querySelectorAll(candidateSelector)),
+	]);
+	const accounted = candidates.every((candidate) => entries.some((entry) => {
+		const image = entry.querySelector("img");
+		return candidate === entry || candidate.contains(entry) ||
+			(image !== null && (candidate === image || candidate.contains(image)));
+	}));
 	return {
-		entries: anchorsIn(nodes, entrySelector),
-		unreadable: nodes.some(isUnreadable) || leftover.length > 0,
+		entries,
+		unreadable: nodes.some(isUnreadable) || leftover.length > 0 || !accounted,
 	};
 }
 

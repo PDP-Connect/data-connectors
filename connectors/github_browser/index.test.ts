@@ -16,7 +16,7 @@ function delayedPage(readyHtml: string) {
 			currentUrl = url;
 			calls.push("goto");
 		},
-		url: () => currentUrl,
+		evaluate: async () => currentUrl,
 		waitForFunction: async (
 			predicate: unknown,
 			argument: { minimumDays: number; selector: string },
@@ -70,7 +70,7 @@ test("contribution wait timeout returns HTML for the collector to reject as inco
 			currentUrl = url;
 			calls.push("goto");
 		},
-		url: () => currentUrl,
+		evaluate: async () => currentUrl,
 		waitForFunction: async () => {
 			calls.push("waitForCalendar");
 			throw new Error("timeout");
@@ -109,7 +109,7 @@ for (const [name, html, expected] of contributionReadinessFixtures()) {
 		let observed: unknown;
 		const page = {
 			goto: async () => undefined,
-			url: () => "https://github.com/sample-user",
+			evaluate: async () => "https://github.com/sample-user",
 			content: async () => html,
 			waitForFunction: async (
 				predicate: (argument: unknown) => unknown,

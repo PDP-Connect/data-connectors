@@ -64,7 +64,7 @@ export async function openContributionPage(
 	}
 	return {
 		requestedUrl: url,
-		currentUrl: page.url(),
+		currentUrl: await page.evaluate(() => location.href),
 		html: await page.content(),
 	};
 }
@@ -84,7 +84,7 @@ async function openGitHubPage(
 				.catch(() => undefined);
 			return {
 				requestedUrl: url,
-				currentUrl: page.url(),
+				currentUrl: await page.evaluate(() => location.href),
 				html: await page.content(),
 			};
 		} catch (error) {
