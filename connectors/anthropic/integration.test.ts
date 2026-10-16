@@ -2978,12 +2978,27 @@ test("completion boundary: malformed child list before manifest classification",
 	);
 });
 
-test("completion control: a genuine mixed project is not a missing messages list", async () => {
-	const { proofs } = await runCompletionExport("manifest", [
+test("completion boundary: project shape in a conversations part cannot hide a missing messages list", async () => {
+	const { proofs, protocolMessages } = await runCompletionExport("manifest", [
 		{ uuid: "known-empty", chat_messages: [] },
 		{ uuid: "actual-project", docs: [] },
 	]);
-	assert.equal(proofs.length, 1);
+	assert.equal(proofs.length, 0);
+	const skip = skipsOf(protocolMessages).find((s) => s.stream === "messages");
+	assert.equal(skip?.reason, "export_conversation_incomplete");
+	assert.equal(
+		(skip?.diagnostics as Record<string, unknown>)?.conversation_id,
+		"actual-project",
+	);
+	assert.equal(
+		protocolMessages.some(
+			(message) =>
+				message.type === "STATE" &&
+				message.stream === "messages" &&
+				"synced_at" in (message.cursor as Record<string, unknown>),
+		),
+		false,
+	);
 });
 test("completion control: malformed conversation without competing project shape withholds proof", async () => {
 	const { proofs } = await runCompletionExport("manifest", [
@@ -3768,8 +3783,26 @@ test("manifest category boundary: absent projects with a cross-classified projec
 	assert.equal(run.proofFor("projects").length, 0);
 	assert.equal(run.proofFor("project_documents").length, 0);
 	assert.equal(run.proofFor("account_profile").length, 0);
-	assertSelfMapped(run, "conversations", 1);
-	assertSelfMapped(run, "messages", 0);
+	// A project shape in this category still has an omitted conversation list.
+	assert.equal(run.proofFor("conversations").length, 0);
+	assert.equal(run.proofFor("messages").length, 0);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 0);
+	const skip = skipsOf(run.protocolMessages).find((s) => s.stream === "messages");
+	assert.equal(skip?.reason, "export_conversation_incomplete");
+	assert.equal(
+		(skip?.diagnostics as Record<string, unknown>)?.conversation_id,
+		"p1",
+	);
+	assert.equal(
+		run.protocolMessages.some(
+			(message) =>
+				message.type === "STATE" &&
+				message.stream === "messages" &&
+				"synced_at" in (message.cursor as Record<string, unknown>),
+		),
+		false,
+	);
 });
 
 test("manifest category boundary: absent conversations with a cross-classified conversation cannot prove conversations or messages", async () => {
@@ -3832,8 +3865,26 @@ test("manifest category boundary: projects found in conversations do not count t
 	assert.equal(run.recordsOf("project_documents").length, 2);
 	assert.equal(run.proofFor("projects").length, 0);
 	assert.equal(run.proofFor("project_documents").length, 0);
-	assertSelfMapped(run, "conversations", 1);
-	assertSelfMapped(run, "messages", 1);
+	// A project shape in this category still has an omitted conversation list.
+	assert.equal(run.proofFor("conversations").length, 0);
+	assert.equal(run.proofFor("messages").length, 0);
+	assert.equal(run.recordsOf("conversations").length, 1);
+	assert.equal(run.recordsOf("messages").length, 1);
+	const skip = skipsOf(run.protocolMessages).find((s) => s.stream === "messages");
+	assert.equal(skip?.reason, "export_conversation_incomplete");
+	assert.equal(
+		(skip?.diagnostics as Record<string, unknown>)?.conversation_id,
+		"proj-1",
+	);
+	assert.equal(
+		run.protocolMessages.some(
+			(message) =>
+				message.type === "STATE" &&
+				message.stream === "messages" &&
+				"synced_at" in (message.cursor as Record<string, unknown>),
+		),
+		false,
+	);
 });
 
 test("manifest category boundary: conversations found in projects do not count toward a present conversations category", async () => {
@@ -5457,7 +5508,10 @@ test("oversized omission: malformed envelope names the conversation and skips bo
 });
 
 for (const [label, children] of [
+	["missing list", undefined],
 	["malformed list", null],
+	["scalar list", 7],
+	["object list", {}],
 	["non-object child", [null]],
 	["unparseable child", [{ text: "missing identity" }]],
 ] as const) {
@@ -5578,6 +5632,7 @@ for (const mode of ["buffered", "streaming", "manifest"] as const) {
 }
 
 for (const [label, children] of [
+	["missing list", undefined],
 	["malformed list", null],
 	["non-object child", [null]],
 	["unparseable child", [{ text: "missing identity" }]],
@@ -5620,6 +5675,77 @@ for (const [label, children] of [
 		);
 		for (const stream of ["messages", "conversations"])
 			assert.equal(coverageOf(run.protocolMessages, stream).length, 0);
+		assert.equal(
+			run.protocolMessages.some(
+				(message) =>
+					message.type === "STATE" &&
+					message.stream === "messages" &&
+					"synced_at" in (message.cursor as Record<string, unknown>),
+			),
+			false,
+		);
+	});
+}
+
+for (const partial of [{ uuid: "partial-parent" }, {}]) {
+	test(`manifest omission: all-unmatched entry ${"uuid" in partial ? "with identity" : "without identity"} beside a valid entry`, async () => {
+		const run = await runFullCompletion("manifest", {
+			streams: ["conversations", "messages"],
+			partitions: [
+				{
+					category: "conversations",
+					part: 0,
+					entries: [
+						{ name: "partial.json", content: [partial] },
+						{
+							name: "valid.json",
+							content: [
+								{
+									uuid: "valid-parent",
+									chat_messages: [
+										{ uuid: "valid-message", sender: "human", text: "kept" },
+									],
+								},
+							],
+						},
+					],
+				},
+				{
+					category: "light_metadata",
+					part: 0,
+					entries: [{ name: "users.json", content: [] }],
+				},
+			],
+		});
+		assert.deepEqual(
+			run.recordsOf("messages").map((record) => record.data.id),
+			["valid-message"],
+		);
+		assert.deepEqual(
+			run.recordsOf("conversations").map((record) => record.data.id),
+			["valid-parent"],
+		);
+		const skips = skipsOf(run.protocolMessages);
+		if ("uuid" in partial) {
+			const named = skips.filter(
+				(skip) =>
+					skip.stream === "messages" &&
+					skip.reason === "export_conversation_incomplete",
+			);
+			assert.equal(named.length, 1);
+			assert.equal(
+				(named[0]?.diagnostics as Record<string, unknown>)?.conversation_id,
+				"partial-parent",
+			);
+		}
+		assert.ok(
+			skips.some(
+				(skip) =>
+					skip.stream === ("uuid" in partial ? "conversations" : "messages") &&
+					skip.reason === "export_items_unparseable",
+			),
+		);
+		assert.equal(coverageOf(run.protocolMessages, "messages").length, 0);
 		assert.equal(
 			run.protocolMessages.some(
 				(message) =>
