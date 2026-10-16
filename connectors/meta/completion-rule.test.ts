@@ -14,18 +14,18 @@ import { validateRecord } from "./schemas.ts";
 
 for (const wantsProfile of [false, true]) {
 	for (const { label, user, proven } of [
-		{ label: "unobserved", user: null, proven: true },
-		{ label: "unknown", user: {}, proven: true },
-		{ label: "null", user: { media_count: null }, proven: true },
-		{ label: "malformed", user: { media_count: "0" }, proven: true },
-		{ label: "negative", user: { media_count: -1 }, proven: true },
-		{ label: "fractional", user: { media_count: 0.5 }, proven: true },
-		{ label: "different id", user: { id: "other", media_count: 0 }, proven: true },
-		{ label: "different username", user: { username: "other", media_count: 0 }, proven: true },
+		{ label: "unobserved", user: null, proven: false },
+		{ label: "unknown", user: {}, proven: false },
+		{ label: "null", user: { media_count: null }, proven: false },
+		{ label: "malformed", user: { media_count: "0" }, proven: false },
+		{ label: "negative", user: { media_count: -1 }, proven: false },
+		{ label: "fractional", user: { media_count: 0.5 }, proven: false },
+		{ label: "different id", user: { id: "other", media_count: 0 }, proven: false },
+		{ label: "different username", user: { username: "other", media_count: 0 }, proven: false },
 		{ label: "positive", user: { media_count: 3 }, proven: false },
 		{ label: "proven zero", user: { media_count: 0 }, proven: true },
 	]) {
-		test(`empty timeline uses explicit source end unless exact count contradicts: ${label}, profile requested=${wantsProfile}`, async () => {
+		test(`empty timeline requires same-owner exact zero: ${label}, profile requested=${wantsProfile}`, async () => {
 			const requested = [...(wantsProfile ? ["profile"] : []), "posts", "post_likes"];
 			const { ctx, emitNavigation, emitRequest, emitResponse, failures, harness } = setup(requested);
 			let pendingResolve: ((response: Response) => void) | null = null;
@@ -54,7 +54,7 @@ for (const wantsProfile of [false, true]) {
 				}
 				if (pendingResolve) {
 					const response = nonterminalPostsResponse([], null, ctx.page);
-					response.json = async () => ({ data: {
+					response.json = async () => ({ data: { user: {id: "u1", username: "testuser"},
 						xdt_api__v1__feed__user_timeline_graphql_connection: {
 							edges: [], page_info: { end_cursor: null, has_next_page: false },
 						},
@@ -535,7 +535,7 @@ test("completion rule: a non-meta error inside the posts walk fails posts and po
 	);
 });
 
-test("completion rule: explicit empty following payload completes without a failure", async () => {
+test("completion rule: explicit empty following payload without profile total remains unproven", async () => {
 	const { ctx, failures, harness } = setup(
 		["following"],
 		[{ json: { users: [], has_more: false, next_max_id: null, status: "ok" }, status: 200 }],
@@ -547,17 +547,17 @@ test("completion rule: explicit empty following payload completes without a fail
 		FAST_ADS_CLOCK,
 		FAST_PROFILE_CLOCK,
 	);
-	assert.deepEqual(failures, []);
+	assert.deepEqual(failures, ["following"]);
 	assert.deepEqual(harness.emitted, []);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "SKIP_RESULT"),
-		false,
+		true,
 	);
 	assert.equal(
 		harness.protocolMessages.some(
 			(message) => message.type === "STATE" && message.stream === "following",
 		),
-		true,
+		false,
 	);
 });
 
@@ -824,13 +824,23 @@ async function sourceRun(options: {
  stream: "posts" | "post_likes" | "following";
  total?: unknown; pageInfo?: unknown; followingEnd?: boolean | undefined;
  likeCount?: number | undefined; duplicate?: boolean;
+ owner?: unknown; empty?: boolean; profile?: boolean; challenge?: "dom" | "body" | "late"; profileOwner?: unknown;
+ extraStreams?: string[]; envelopeOwner?: unknown; nodeOwner?: unknown;
 }) {
- const following = [{ pk: "f1", username: "one" }];
- const result = setup([options.stream], [{ status: 200, json: {
+ const following = options.empty ? [] : [{ pk: "f1", username: "one" }];
+ const owner = options.owner === undefined ? {id: "u1", username: "testuser"} : options.owner;
+ const result = setup([options.stream, ...(options.profile ? ["profile"] : []), ...(options.extraStreams ?? [])], [{ status: 200, json: {
+  owner,
   users: options.duplicate ? [...following, ...following] : following,
   ...(options.followingEnd !== undefined ? { has_more: options.followingEnd } : {}),
  } }]);
  const {ctx, emitNavigation, emitRequest, emitResponse} = result;
+ ctx.reportStreamFailure = async () => { assert.fail("enrichment must not report a fatal stream failure"); };
+ let challenge = options.challenge === "dom";
+ ctx.progress = async message => { if (options.challenge === "late" && message === "Fetching Instagram following list") challenge = true; };
+ const evaluate = ctx.page.evaluate;
+ ctx.page.evaluate = ((fn: unknown, arg?: unknown) => String(fn).includes("verificationCode")
+  ? Promise.resolve(challenge) : evaluate(fn as never, arg as never)) as Page["evaluate"];
  let pending: ((response: Response) => void) | null = null;
  ctx.page.waitForResponse = (() => new Promise<Response>(resolve => { pending = resolve; })) as Page["waitForResponse"];
  ctx.page.goto = (() => {
@@ -839,15 +849,16 @@ async function sourceRun(options: {
    status: () => 200, url: () => "https://www.instagram.com/api/graphql",
    request: () => ({ method: () => "POST", postData: () => "PolarisProfilePageContentQuery" }),
    json: async () => ({ data: { user: { id: "u1", username: "testuser",
-    media_count: options.total, following_count: options.total } } }),
+    media_count: options.total, following_count: options.total,
+    ...(options.profileOwner && typeof options.profileOwner === "object" ? options.profileOwner : {}) } } }),
   });
   if (pending) {
-   const edge = {node: {id: "p1", caption: {text: "Preserved caption"},
+   const edge = {node: {...(options.nodeOwner !== undefined ? {user: options.nodeOwner} : {}), id: "p1", caption: {text: "Preserved caption"},
     like_count: options.likeCount,
     facepile_top_likers: [{id: "l1", username: "liker", profile_pic_url: ""}]}};
    const response = nonterminalPostsResponse(options.duplicate ? [edge, edge] : [edge], null, ctx.page);
-   response.json = async () => ({data: {xdt_api__v1__feed__user_timeline_graphql_connection: {
-    edges: options.duplicate ? [edge, edge] : [edge],
+   response.json = async () => ({...(options.challenge === "body" ? {challenge: {url: "/challenge/"}} : {}), data: {...(options.envelopeOwner !== undefined ? {user: options.envelopeOwner} : {}), xdt_api__v1__feed__user_timeline_graphql_connection: {
+    owner, edges: options.empty ? [] : options.duplicate ? [edge, edge] : [edge],
     ...(options.pageInfo !== undefined ? {page_info: options.pageInfo} : {}),
    }}});
    emitRequest(response.request());
@@ -919,3 +930,69 @@ for (const completeLooking of [true, false, undefined]) {
   assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete"));
  });
 }
+
+for (const stream of ["posts", "following"] as const) {
+ for (const owner of [null, {id: "other"}, {username: "other"}, {id: "u1", username: "other"}]) {
+  for (const exact of [false, true]) {
+   test(`response owner mismatch or absent blocks ${stream}, owner=${JSON.stringify(owner)}, exact=${exact}`, async () => {
+    const harness = await sourceRun({stream, owner, total: exact ? 1 : undefined,
+     pageInfo: {has_next_page: false}, followingEnd: false});
+    assert.equal(harness.emitted.length, 1);
+    assert.equal(harness.protocolMessages.some(m => m.type === "STATE" || m.type === "DETAIL_COVERAGE"), false);
+   });
+  }
+ }
+ for (const total of [undefined, null, 1, 0]) {
+  test(`empty ${stream} requires same-owner zero total: ${total}`, async () => {
+   const harness = await sourceRun({stream, total, empty: true, pageInfo: {has_next_page: false}, followingEnd: false});
+   assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), total === 0);
+   assert.equal(harness.emitted.length, 0);
+  });
+ }
+ test(`empty ${stream} rejects different-owner profile zero`, async () => {
+  const harness = await sourceRun({stream, total: 0, profileOwner: {id: "other"}, empty: true,
+   pageInfo: {has_next_page: false}, followingEnd: false});
+  assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
+ });
+}
+
+for (const challenge of ["dom", "body", "late"] as const) {
+ for (const empty of [false, true]) {
+  test(`authentication veto blocks whole run, keeps upserts: ${challenge}, empty=${empty}`, async () => {
+   const harness = await sourceRun({stream: "posts", extraStreams: ["post_likes", "following"],
+    challenge, empty, total: empty ? 0 : 1, likeCount: 1,
+    pageInfo: {has_next_page: false}, followingEnd: false});
+   assert.equal(harness.protocolMessages.some(m => m.type === "STATE" || m.type === "DETAIL_COVERAGE"), false);
+   assert.equal(harness.emitted.length, empty ? 0 : 3);
+   for (const stream of ["posts", "post_likes", "following"]) {
+    assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream && isRetryable(m)));
+   }
+  });
+ }
+}
+
+test("profile enrichment retryable skip leaves other stream STATE intact", async () => {
+ const harness = await sourceRun({stream: "posts", extraStreams: ["following"], profile: true,
+  total: 1, pageInfo: {has_next_page: false}, followingEnd: false});
+ assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === "profile" && isRetryable(m)));
+ for (const stream of ["posts", "following"]) assert.ok(harness.protocolMessages.some(m => m.type === "STATE" && m.stream === stream));
+ assert.ok(harness.emitted.some(r => r.stream === "profile"));
+});
+
+for (const nodeOwner of [{id: "u1", username: "testuser"}, {id: "other"}]) {
+ test(`timeline media-owner evidence: ${JSON.stringify(nodeOwner)}`, async () => {
+  const harness = await sourceRun({stream: "posts", owner: null, nodeOwner, total: 1, pageInfo: {has_next_page: false}});
+  assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), nodeOwner.id === "u1");
+ });
+}
+test("matching timeline owner cannot override mismatched envelope owner", async () => {
+ const harness = await sourceRun({stream: "posts", envelopeOwner: {id: "other"}, total: 1, pageInfo: {has_next_page: false}});
+ assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
+ assert.equal(harness.emitted.length, 1);
+});
+
+test("matching envelope cannot override mismatched media owner", async () => {
+ const harness = await sourceRun({stream: "posts", nodeOwner: {id: "other"}, total: 1, pageInfo: {has_next_page: false}});
+ assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), false);
+ assert.equal(harness.emitted.length, 1);
+});
