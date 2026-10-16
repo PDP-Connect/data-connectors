@@ -1623,8 +1623,20 @@ export function classifyAdsDialogInPage(args: {
 			return false;
 		},
 	] as const;
-	// Hidden rows in hidden lists remain source evidence in the active dialog.
-	if (Array.from(dialog.querySelectorAll('[role="listitem"]')).some(hasHiddenRealText)) return loading;
+	// Hidden rows in hidden lists remain source evidence in the active dialog,
+	// unless a hidden row repeats a row that is visible: the earlier screen of a
+	// View all dialog stays in the DOM, and no data is lost behind it.
+	const visibleRowTexts = new Set(
+		Array.from(dialog.querySelectorAll('[role="listitem"]'))
+			.filter(visible)
+			.map((row) => normalize(row.textContent ?? "")),
+	);
+	const [hasUnreadHiddenText] = [
+		(row: Element): boolean =>
+			hasHiddenRealText(row) &&
+			(visible(row) || !visibleRowTexts.has(normalize(row.textContent ?? ""))),
+	] as const;
+	if (Array.from(dialog.querySelectorAll('[role="listitem"]')).some(hasUnreadHiddenText)) return loading;
 	const items: string[] = [];
 	let allListsComplete = true;
 	let sawUnknownList = false;
@@ -1674,7 +1686,11 @@ export function classifyAdsDialogInPage(args: {
 						visible(control) && visibleText(control) === requiredAffordance,
 				);
 				if (!hasAffordance) {
-					if (hasControl && !visibleText(row, true) && isKnownUiText(fullText)) knownUiRows += 1;
+					// Only a row that is one control and nothing else proves an interface row.
+					const rowControls = Array.from(row.querySelectorAll(controlSelector));
+					const onlyControl = rowControls.length === 1 &&
+						normalize(row.textContent ?? "") === normalize(rowControls[0]?.textContent ?? "");
+					if (onlyControl && isKnownUiText(fullText)) knownUiRows += 1;
 					else if (hasControl) sawUnknownList = true;
 					continue;
 				}
@@ -1693,7 +1709,7 @@ export function classifyAdsDialogInPage(args: {
 		}
 		if (
 			Array.from(currentList.querySelectorAll('[role="listitem"]')).some(
-				(row) => !visible(row) && hasHiddenRealText(row),
+				(row) => !visible(row) && hasUnreadHiddenText(row),
 			)
 		) {
 			return loading;
@@ -2009,6 +2025,7 @@ function inspectDialogExpansion(args: {
   .filter(control => normalize(control.textContent ?? "").toLowerCase() === args.label.toLowerCase());
  const shown = controls.find(visible) as HTMLElement | undefined;
  const rows: AdsTraversalRow[] = [];
+ const hiddenRows: Element[] = [];
  let unreadable = false;
  for (const row of Array.from(dialog.querySelectorAll('[role="listitem"]'))) {
   const rowControls = Array.from(row.querySelectorAll('a, button, [role="button"], [role="link"]'));
@@ -2016,10 +2033,7 @@ function inspectDialogExpansion(args: {
   const onlyControl = rowControls.length === 1 && normalize(row.textContent ?? "") === normalize(rowControls[0]?.textContent ?? "");
   if (onlyControl && (controls.includes(rowControls[0]!) ||
    (args.label === "View all" && normalize(rowControls[0]?.textContent ?? "") === "Removed categories"))) continue;
-  if (!visible(row)) {
-   if (!state.unresolvedRows.includes(row)) state.unresolvedRows.push(row);
-   unreadable = true; continue;
-  }
+  if (!visible(row)) { hiddenRows.push(row); continue; }
   const texts: string[] = [];
   let hiddenField = false;
   const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
@@ -2051,6 +2065,26 @@ function inspectDialogExpansion(args: {
   }
   rows.push({name, description});
   state.unresolvedRows = state.unresolvedRows.filter(previous => !(previous === row || row.contains(previous)) || !visible(previous));
+ }
+ // A hidden row is resolved only when the same name and description are read
+ // visibly now; the earlier screen of View all stays in the DOM behind the new one.
+ const readKeys = new Set(rows.map(row => JSON.stringify(row)));
+ for (const row of hiddenRows) {
+  const texts: string[] = [];
+  const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+   const text = normalize(node.textContent ?? "");
+   if (!text) continue;
+   const control = node.parentElement?.closest('button, [role="button"]');
+   if (args.label === "View all" && control && normalize(control.textContent ?? "") === "Remove") continue;
+   texts.push(text);
+  }
+  const name = args.label === "View all" ? texts[0] : normalize(texts.join(" "));
+  const description = args.label === "View all" ? texts[1] ?? null : null;
+  const repeated = Boolean(name) && (args.label !== "View all" || texts.length <= 2) &&
+   readKeys.has(JSON.stringify({name, description}));
+  if (repeated) state.unresolvedRows = state.unresolvedRows.filter(previous => previous !== row);
+  else if (!state.unresolvedRows.includes(row)) state.unresolvedRows.push(row);
  }
  unreadable ||= state.unresolvedRows.length > 0;
  const keys = rows.map(row => JSON.stringify(row));

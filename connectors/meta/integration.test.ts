@@ -3694,7 +3694,7 @@ test("scrapeAdvertisers reports a missing advertisers link on the Manage info ta
 	});
 });
 
-test("scrapeTargetingCategories withholds completion when View all leaves an unresolved hidden data list", async () => {
+test("scrapeTargetingCategories completes the live View all screen: the earlier screen stays hidden and Removed categories is interface", async () => {
 	const result = await withAccountsCenterPage(
 		htmlPage(
 			categoriesControl(`
@@ -3711,6 +3711,32 @@ test("scrapeTargetingCategories withholds completion when View all leaves an unr
 	assert.deepEqual(result, {
 		items: [
 			{ description: "Based on activity", name: "Category A" },
+			{ description: "Based on activity", name: "Category B" },
+		],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
+test("scrapeTargetingCategories withholds completion when the hidden earlier View all screen holds a category the new screen does not show", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div id="first-screen" role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div><div role="listitem"><span>Category Z</span><span>Based on activity</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', () => {
+					document.querySelector('#first-screen').style.display = 'none';
+					document.querySelector('#dialog-view-all').style.display = 'none';
+					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div><div role="listitem"><span>Category B</span><span>Based on activity</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem"><div role="button">Removed categories</div></div></div>');
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: "Based on activity", name: "Category A" },
+			{ description: "Based on activity", name: "Category Z" },
 			{ description: "Based on activity", name: "Category B" },
 		],
 		reached: false,
