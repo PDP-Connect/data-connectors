@@ -40,9 +40,18 @@ export async function openContributionPage(
 			: new Error("github_browser_navigation_failed");
 	try {
 		const ready = await page.waitForFunction(
-			({ minimumDays, selector }) =>
-				Boolean(document.querySelector("h2#js-contribution-activity-description")) &&
-				document.querySelectorAll(selector).length >= minimumDays,
+			({ minimumDays, selector }) => {
+				const heading = document.querySelector("h2#js-contribution-activity-description");
+				const cells = Array.from(document.querySelectorAll(selector));
+				if (heading === null || cells.length < minimumDays) return false;
+				const pending = '[aria-busy="true"], [data-loading="true"], .loading, .AnimatedEllipsis, .skeleton, .Skeleton, include-fragment[src]';
+				const unreadable = (node: Element): boolean =>
+					node.closest(pending) !== null || node.querySelector(pending) !== null;
+				const graph = heading.closest(".js-yearly-contributions, .js-calendar-graph")
+					?? heading.parentElement;
+				return !unreadable(heading) && (graph === null || !unreadable(graph)) &&
+					cells.every((cell) => !unreadable(cell));
+			},
 			{
 				minimumDays: CONTRIBUTION_CALENDAR_MINIMUM_DAYS,
 				selector: CONTRIBUTION_CALENDAR_SELECTOR,

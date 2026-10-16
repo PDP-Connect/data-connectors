@@ -14,15 +14,18 @@ length. Consumers that read the legacy envelope should ignore the added top-leve
 is changed in this repository, so a live adapter read remains to be verified.
 
 Repository and starred snapshots need a recognized list or explicit empty message,
-and the collector follows GitHub's next link until it ends. Contributions require
+and the collector follows validated next links. A nonempty terminal page also needs
+an explicit disabled-next control or an exact unfiltered page-one count. Unknown
+continuations, deferred fragments, unaccounted children, and busy source slots veto
+completion. Contributions require
 count evidence for every date in the covered views. Search history requires GitHub
 to report complete results with a consistent total count. Otherwise the stream
 emits `SKIP_RESULT` and no completion state.
 
 
-The contract is checked against main at
-`2817254df4c097a8002cc7f7716c3fe6c494ace7`: all six existing streams keep their
-aggregate envelopes and snapshot primary keys. Partial runs retain readable rows
+The branch contract keeps all six existing aggregate envelopes and snapshot primary
+keys. These tests establish branch shape, not byte-level parity with current main;
+that downstream parity remains a separate owner check. Partial runs retain readable rows
 in that same envelope and emit `SKIP_RESULT`, without `STATE` or full-scan
 `DETAIL_COVERAGE`. Missing mapped fields are omitted rather than fabricated as
 zero, empty strings, empty arrays, or null. Consumers must not interpret omitted

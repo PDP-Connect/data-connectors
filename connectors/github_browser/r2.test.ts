@@ -46,7 +46,7 @@ test("inventory continuation cannot change selection or duplicate parameters", (
   const result = inspectInventoryEnd({
    page: page(url, owner), username: "sample-user", stream: "repositories",
    pageNumber: 1, parsedRows: 1, rejectedRows: 0, noProgress: false,
-   explicitEmpty: false, hasRecognizedList: true,
+   explicitEmpty: false, hasRecognizedList: true, renderComplete: true, hasUnknownContinuation: false, terminalProof: null,
    nextUrl: "https://github.com/sample-user?page=2&tab=repositories" + suffix,
   });
   assert.equal(result.nextUrl, null, suffix);

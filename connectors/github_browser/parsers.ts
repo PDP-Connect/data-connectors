@@ -143,9 +143,9 @@ function insideOverlay(node: Element, scope: Element): boolean {
 
 function isUnreadable(node: Element): boolean {
 	return (
-		node.closest('[aria-busy="true"]') !== null ||
+		node.closest('[aria-busy="true"], .loading, .skeleton, .Skeleton, .placeholder, include-fragment') !== null ||
 		Array.from(
-			node.querySelectorAll('[aria-busy="true"], .AnimatedEllipsis, .loading'),
+			node.querySelectorAll('[aria-busy="true"], .AnimatedEllipsis, .loading, .skeleton, .Skeleton, .placeholder, include-fragment'),
 		).some((marker) => !insideOverlay(marker, node)) ||
 		/^(?:loading(?:\.{3}|…)?|unavailable|failed to load)$/iu.test(text(node))
 	);
@@ -188,26 +188,64 @@ function recordField<T extends object, K extends keyof T>(
 	else row[key] = value;
 }
 
-// GitHub renders an optional slot only when it has a value. An absent element
-// is a field-level omission; a present element that cannot be read vetoes.
+// Missing selectors are omissions only when independent row structure proves readiness.
 function recordOptional<T extends object, K extends keyof T>(
 	row: T,
 	key: K,
 	node: Element | null,
 	read: (node: Element) => T[K] | undefined,
 	unreadableFields: string[],
+	omissionProven = false,
 ): void {
-	if (node === null) return;
+	if (node === null) {
+		if (!omissionProven) unreadableFields.push(String(key));
+		return;
+	}
 	recordField(row, key, read(node), unreadableFields);
 }
 
+// Walk the actual child structure, not just matching li descendants. Unknown
+// children are candidates too: identity-less placeholders must be rejected.
 function cardRows(list: Element | null): Element[] {
 	if (list === null) return [];
-	return Array.from(list.querySelectorAll("li")).filter((row) => {
-		if (insideOverlay(row, list)) return false;
-		const parentRow = row.parentElement?.closest("li");
-		return !parentRow || !list.contains(parentRow);
+	const rows: Element[] = [];
+	const visit = (node: Element): void => {
+		for (const child of Array.from(node.children)) {
+			if (child.matches(OVERLAY_SELECTOR) || insideOverlay(child, list)) continue;
+			if (child.matches(".blankslate, [data-testid='empty-state']")) continue;
+			if (child.matches("ul, ol")) visit(child);
+			else if (child.children.length > 0 &&
+				Array.from(child.children).every((entry) => entry.matches(OVERLAY_SELECTOR))) continue;
+			else rows.push(child);
+		}
+	};
+	visit(list);
+	return rows;
+}
+
+// Only known semantic leaves may disappear from this fully rendered layout.
+// Retained text under renamed selectors, unknown empty placeholders, and lazy
+// fragments veto omissions, even when all required fields can still be read.
+function knownRowLayout(row: Element, selector: string): boolean {
+	if (isUnreadable(row)) return false;
+	const known = Array.from(row.querySelectorAll(selector));
+	return Array.from(row.querySelectorAll("*")).every((node) => {
+		if (node.matches(OVERLAY_SELECTOR) || insideOverlay(node, row)) return true;
+		if (known.some((slot) => slot === node || slot.contains(node))) return true;
+		if (node.children.length === 0) return false;
+		return Array.from(node.childNodes).every((child) =>
+			child.nodeType !== 3 || !(child.textContent ?? "").trim());
 	});
+}
+
+function collectionAccounted(list: Element | null, entries: Element[]): boolean {
+	if (list === null || isUnreadable(list)) return false;
+	const visit = (node: Element): boolean => Array.from(node.children).every((child) => {
+		if (child.matches(OVERLAY_SELECTOR) || insideOverlay(child, list)) return true;
+		if (entries.includes(child)) return !isUnreadable(child);
+		return child.matches("ul, ol") && visit(child);
+	});
+	return visit(list);
 }
 
 function starredList(document: Document): Element | null {
@@ -297,10 +335,15 @@ export function parseProfilePage(
 				fullName,
 				url: `https://github.com/${fullName}`,
 			};
-			const unreadableSlots: string[] = isUnreadable(item) ? ["card"] : [];
-			recordOptional(card, "description", item.querySelector("p.pinned-item-desc"), sourceText, unreadableSlots);
-			recordOptional(card, "language", item.querySelector('[itemprop="programmingLanguage"]'), sourceText, unreadableSlots);
-			recordOptional(card, "stars", item.querySelector('a[href$="/stargazers"]'), sourceCount, unreadableSlots);
+			const pinnedLayout = item.matches("li") &&
+				item.querySelector(".pinned-item-list-item") !== null &&
+				item.querySelector("p.pinned-item-desc") !== null &&
+				item.querySelector("p.f6") !== null &&
+				knownRowLayout(item, 'a[href], p.pinned-item-desc, p.f6:empty, [itemprop="programmingLanguage"]');
+			const unreadableSlots: string[] = pinnedLayout ? [] : ["card"];
+			recordOptional(card, "description", item.querySelector("p.pinned-item-desc"), sourceText, unreadableSlots, pinnedLayout);
+			recordOptional(card, "language", item.querySelector('[itemprop="programmingLanguage"]'), sourceText, unreadableSlots, pinnedLayout);
+			recordOptional(card, "stars", item.querySelector('a[href$="/stargazers"]'), sourceCount, unreadableSlots, pinnedLayout);
 			if (unreadableSlots.length > 0) rejectedEntries += 1;
 			row.pinnedRepositories?.push(card);
 		}
@@ -308,7 +351,7 @@ export function parseProfilePage(
 
 	const organizations = Array.from(document.querySelectorAll(".avatar-group-item"));
 	const orgList = document.querySelector(".avatar-group, [data-testid='organizations'], [aria-label='Organizations']");
-	if (orgList !== null && isUnreadable(orgList)) unreadableFields.push("organizations");
+	if (!collectionAccounted(orgList, organizations)) unreadableFields.push("organizations");
 	if (organizations.length === 0 && (orgList === null || isUnreadable(orgList))) {
 		if (!unreadableFields.includes("organizations")) unreadableFields.push("organizations");
 	} else {
@@ -338,7 +381,7 @@ export function parseProfilePage(
 	const achievementCards = Array.from(document.querySelectorAll(achievementSelector))
 		.filter((card) => !card.parentElement?.closest(achievementSelector));
 	const achievementList = document.querySelector(".profile-achievements, .js-profile-achievements, [data-testid='achievements']");
-	if (achievementList !== null && isUnreadable(achievementList)) unreadableFields.push("achievements");
+	if (!collectionAccounted(achievementList, achievementCards)) unreadableFields.push("achievements");
 	if (achievementCards.length === 0 && (achievementList === null || isUnreadable(achievementList))) {
 		if (!unreadableFields.includes("achievements")) unreadableFields.push("achievements");
 	} else {
@@ -390,17 +433,20 @@ export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryR
 		}
 		seen.add(url);
 		const row: RepositoryRow = { id: url, name, url };
-		const missing: string[] = [];
+		const layout = source.matches("li") && source.querySelector("h3 a") !== null &&
+			source.querySelector("span.Label") !== null && sourceTime(source.querySelector("relative-time")) !== undefined &&
+			knownRowLayout(source, 'h3, p[itemprop="description"], [itemprop="programmingLanguage"], a[href$="/stargazers"], a[href$="/forks"], span.Label, relative-time, a.topic-tag, .topics-row-container:empty, [data-testid="repository-topics"]:empty');
+		const missing: string[] = layout ? [] : ["rowLayout"];
 		if (isUnreadable(source)) missing.push("row");
-		recordOptional(row, "description", source.querySelector('p[itemprop="description"]'), sourceText, missing);
-		recordOptional(row, "language", source.querySelector('[itemprop="programmingLanguage"]'), sourceText, missing);
-		recordOptional(row, "stars", source.querySelector('a[href$="/stargazers"]'), sourceCount, missing);
-		recordOptional(row, "forks", source.querySelector('a[href$="/forks"]'), sourceCount, missing);
+		recordOptional(row, "description", source.querySelector('p[itemprop="description"]'), sourceText, missing, layout);
+		recordOptional(row, "language", source.querySelector('[itemprop="programmingLanguage"]'), sourceText, missing, layout);
+		recordOptional(row, "stars", source.querySelector('a[href$="/stargazers"]'), sourceCount, missing, layout);
+		recordOptional(row, "forks", source.querySelector('a[href$="/forks"]'), sourceCount, missing, layout);
 		recordField(row, "visibility", sourceText(source.querySelector("span.Label")), missing);
 		recordField(row, "updatedAt", sourceTime(source.querySelector("relative-time")), missing);
 		const topics = Array.from(source.querySelectorAll("a.topic-tag"));
 		const topicList = source.querySelector(".topics-row-container, [data-testid='repository-topics']");
-		if (topics.length === 0 && topicList !== null && isUnreadable(topicList)) {
+		if (!layout || (topicList !== null && (isUnreadable(topicList) || !collectionAccounted(topicList, topics)))) {
 			missing.push("topics");
 		} else if (topics.length > 0 || topicList !== null) {
 			row.topics = [];
@@ -444,11 +490,14 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 		}
 		seen.add(url);
 		const row: StarredRow = { id: url, fullName, url };
-		const missing: string[] = [];
+		const layout = source.matches("li") && source.querySelector("h3 a") !== null &&
+			sourceTime(source.querySelector("relative-time")) !== undefined &&
+			knownRowLayout(source, 'h3, p, [itemprop="programmingLanguage"], [data-ga-click*="Repository, language"], a[href$="/stargazers"], relative-time');
+		const missing: string[] = layout ? [] : ["rowLayout"];
 		if (isUnreadable(source)) missing.push("row");
-		recordOptional(row, "description", source.querySelector("p"), sourceText, missing);
-		recordOptional(row, "language", source.querySelector('[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]'), sourceText, missing);
-		recordOptional(row, "stars", source.querySelector('a[href$="/stargazers"]'), sourceCount, missing);
+		recordOptional(row, "description", source.querySelector("p"), sourceText, missing, layout);
+		recordOptional(row, "language", source.querySelector('[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]'), sourceText, missing, layout);
+		recordOptional(row, "stars", source.querySelector('a[href$="/stargazers"]'), sourceCount, missing, layout);
 		recordField(row, "updatedAt", sourceTime(source.querySelector("relative-time")), missing);
 		unreadableFields.push(...missing.map((field) => `${index}.${field}`));
 		rows.push(row);
@@ -482,12 +531,36 @@ export function inspectInventoryPage(
 			: /(?:hasn['’]t starred any|has no starred|you don['’]t have any starred) repositories yet/iu.test(
 					emptyText,
 				);
-	const next =
-		stream === "starred"
-			? document.querySelector(
-					'a.next_page[rel="next"], a[rel="next"][href*="page="]',
-				)
-			: document.querySelector('a.next_page[rel="next"]');
+	const controls = Array.from(document.querySelectorAll('a, button, form, include-fragment, [aria-busy="true"], .loading, .skeleton, .placeholder'));
+	const relevant = controls.filter((node) => node.closest(OVERLAY_SELECTOR) === null);
+	const nextLinks = relevant.filter((node) => node.matches('a[rel~="next"]'));
+	const next = nextLinks[0] ?? null;
+	const hasUnknownContinuation = nextLinks.length > 1 || relevant.some((node) => {
+		if (node.matches('include-fragment, [aria-busy="true"], .loading, .skeleton, .placeholder')) return true;
+		const label = `${text(node)} ${node.getAttribute("aria-label") ?? ""}`;
+		const continuation = /^(?:next|load more|show more)(?:\s|$)/iu.test(label.trim()) ||
+			node.matches('[rel~="next"], .next_page') ||
+			/[?&](?:after|page)=/u.test(node.getAttribute("action") ?? "");
+		if (node === next) return !node.getAttribute("href")?.trim();
+		if (node.matches("a[href]")) {
+			try {
+				const target = new URL(node.getAttribute("href") ?? "", "https://github.com");
+				if (target.searchParams.has("after") || Number(target.searchParams.get("page")) > pageNumber) return true;
+			} catch { return true; }
+		}
+		if (!continuation) return false;
+		return !node.matches('[disabled], [aria-disabled="true"], .disabled');
+	});
+	const disabledNext = Array.from(document.querySelectorAll('.next_page.disabled, .next_page[aria-disabled="true"], .paginate-container [rel~="next"][aria-disabled="true"], .pagination [rel~="next"][disabled]'))
+		.some((node) => node.closest(OVERLAY_SELECTOR) === null && !node.hasAttribute("href") && !isUnreadable(node));
+	const countNode = document.querySelector(stream === "repositories"
+		? '[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter, [data-tab-item="repositories"] [class*="CounterLabel-CounterLabel"]'
+		: '[data-tab-item="stars"] .Counter, a[href*="tab=stars"] .Counter, [data-tab-item="stars"] [class*="CounterLabel-CounterLabel"]');
+	const countText = sourceText(countNode);
+	const exactCount = countText !== undefined && /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(countText)
+		? Number(countText.replaceAll(",", "")) : null;
+	const countMismatch = countNode !== null && exactCount === null ||
+		pageNumber === 1 && next === null && exactCount !== null && exactCount !== parsedRows;
 	const href = next?.getAttribute("href") ?? null;
 	let nextUrl: string | null = null;
 	if (href !== null) {
@@ -507,6 +580,9 @@ export function inspectInventoryPage(
 		noProgress,
 		explicitEmpty,
 		hasRecognizedList: list !== null,
+		renderComplete: list !== null && !isUnreadable(list) && !countMismatch,
+		hasUnknownContinuation,
+		terminalProof: disabledNext ? "disabled_next" : pageNumber === 1 && exactCount === parsedRows ? "exact_count" : null,
 		nextUrl,
 	});
 	const parsed = stream === "repositories" ? parseRepositoriesPage(page.html) : parseStarredPage(page.html);
@@ -533,6 +609,10 @@ export function parseContributionHtml(html: string): {
 	const cells = document.querySelectorAll(
 		"td.ContributionCalendar-day, rect.day",
 	);
+	const unreadableFields: string[] = [];
+	if (Array.from(cells).some((cell) => isUnreadable(cell)) ||
+		Array.from(document.querySelectorAll(".ContributionCalendar, .js-calendar-graph, .js-yearly-contributions")).some(isUnreadable))
+		unreadableFields.push("calendar");
 	const seenDates = new Set<string>();
 	for (const cell of cells) {
 		const date = cell.getAttribute("data-date");
@@ -581,14 +661,14 @@ export function parseContributionHtml(html: string): {
 		});
 	}
 	const headingMatch = /([\d,]+)\s+contribution/iu.exec(
-		text(contributionHeading(document)),
+		sourceText(contributionHeading(document)) ?? "",
 	);
 	return {
 		days,
 		rejectedDays,
 		rawDays: cells.length,
-		complete: rejectedDays === 0 && headingMatch?.[1] !== undefined,
-		unreadableFields: headingMatch?.[1] ? [] : ["total"],
+		complete: rejectedDays === 0 && headingMatch?.[1] !== undefined && unreadableFields.length === 0,
+		unreadableFields: headingMatch?.[1] ? unreadableFields : [...unreadableFields, "total"],
 		total: headingMatch?.[1]
 			? toInt(headingMatch[1])
 			: days.reduce((total, day) => total + day.count, 0),

@@ -27,6 +27,9 @@ function inventoryEvidence(
 		noProgress: false,
 		explicitEmpty: false,
 		hasRecognizedList: true,
+		renderComplete: true,
+		hasUnknownContinuation: false,
+		terminalProof: "disabled_next",
 		nextUrl: null,
 		...overrides,
 	};
@@ -125,4 +128,43 @@ test("a remaining or no-progress continuation cannot prove completion", () => {
 	);
 	assert.equal(noProgress.complete, false);
 	assert.equal(noProgress.reason, "no_progress");
+});
+
+test("nonempty inventory requires independent render and terminal evidence", () => {
+	assert.equal(inspectInventoryEnd(inventoryEvidence({ terminalProof: null })).complete, false);
+	const incomplete = inspectInventoryEnd(inventoryEvidence({ renderComplete: false }));
+	assert.equal(incomplete.complete, false);
+	assert.equal(incomplete.reason, "render_incomplete");
+	assert.equal(inspectInventoryEnd(inventoryEvidence({
+		renderComplete: false, hasRecognizedList: false,
+	})).reason, "unreadable_list");
+	assert.equal(inspectInventoryEnd(inventoryEvidence({ terminalProof: "exact_count" })).complete, true);
+	const url = "https://github.com/sample-user?tab=repositories&page=2";
+	assert.equal(inspectInventoryEnd(inventoryEvidence({
+		page: { requestedUrl: url, currentUrl: url, html: ownerPage },
+		pageNumber: 2,
+		terminalProof: "exact_count",
+	})).complete, false);
+	assert.equal(inspectInventoryEnd(inventoryEvidence({
+		page: { requestedUrl: url, currentUrl: url, html: ownerPage },
+		pageNumber: 2,
+		terminalProof: "disabled_next",
+	})).complete, true);
+});
+
+test("unknown continuation vetoes terminal and explicit empty evidence", () => {
+	for (const explicitEmpty of [false, true]) {
+		const result = inspectInventoryEnd(inventoryEvidence({
+			hasUnknownContinuation: true,
+			explicitEmpty,
+			parsedRows: explicitEmpty ? 0 : 1,
+		}));
+		assert.equal(result.complete, false);
+		assert.equal(result.nextUrl, null);
+	}
+	assert.equal(inspectInventoryEnd(inventoryEvidence({
+		explicitEmpty: true,
+		parsedRows: 0,
+		renderComplete: false,
+	})).complete, false);
 });

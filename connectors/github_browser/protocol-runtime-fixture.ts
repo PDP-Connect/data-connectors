@@ -13,7 +13,7 @@ const fixture = (name: string): string =>
 		"utf8",
 	);
 const profile = fixture("profile.html");
-const repository = fixture("repositories.html");
+const repository = fixture("repositories.html") + '<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
 const events = JSON.parse(fixture("events.json")) as unknown;
 const history = JSON.parse(fixture("history-issue.json")) as {
 	items: unknown[];
@@ -80,7 +80,7 @@ runConnector({
 					if (url.includes("tab=stars"))
 						return page(
 							url,
-							'<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="user-starred-repos"><p>sample-user hasn\'t starred any repositories yet</p></div></main>',
+							'<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="user-starred-repos"><p class="blankslate">sample-user hasn\'t starred any repositories yet</p></div></main>',
 						);
 					if (url.endsWith("github.com/")) return page(url, profile);
 					return ++profileLoads === 1

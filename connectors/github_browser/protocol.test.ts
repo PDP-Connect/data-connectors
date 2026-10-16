@@ -24,6 +24,8 @@ const apiObservation = (requestedUrl: string, data: unknown) => ({
 const profilePlaceholder =
 	'<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><span class="p-name">Sample User</span>';
 const withOwner = (html: string) => `${profilePlaceholder}${html}`;
+const terminalInventory =
+	'<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
 
 const readFixture = (name: string): Promise<string> =>
 	readFile(
@@ -113,7 +115,7 @@ test("collector uses the contribution page loader that waits for rendered calend
 
 test("browser collection emits valid records and state for each selected legacy stream", async () => {
 	const profile = await readFixture("profile.html");
-	const repositories = await readFixture("repositories.html");
+	const repositories = await readFixture("repositories.html") + terminalInventory;
 	const contributionFixture = await readFixture("contributions.html");
 	const contributionHeader = contributionFixture.split("<td")[0] ?? "";
 	const events: unknown = JSON.parse(await readFixture("events.json"));
@@ -160,7 +162,7 @@ test("browser collection emits valid records and state for each selected legacy 
 				? withOwner(repositories)
 				: url.includes("tab=stars")
 					? withOwner(
-							'<main><div id="user-starred-repos"><p>sample-user hasn\'t starred any repositories yet</p></div></main>',
+							'<main><div id="user-starred-repos"><p class="blankslate">sample-user hasn\'t starred any repositories yet</p></div></main>',
 						)
 					: url.endsWith("github.com/")
 						? profile
@@ -439,7 +441,8 @@ test("starred inventory enters the legacy page-one fallback and follows its cont
 		`<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/first">sample-owner/first</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/first/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div><a rel="next" href="/stars/sample-user?page=2">Next</a></main>`,
 	);
 	const second = withOwner(
-		'<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/second">sample-owner/second</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/second/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div></main>',
+		'<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/second">sample-owner/second</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/second/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div></main>' +
+			terminalInventory,
 	);
 	await collectGitHubBrowser(
 		{

@@ -128,7 +128,7 @@ test("repository and starred pages require list or explicit empty evidence", () 
 			stream === "repositories"
 				? "user-repositories-list"
 				: "user-starred-repos";
-		const html = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><ul id="${list}"><li><h3><a href="/sample-user/demo">demo</a></h3><p itemprop="description"></p><span itemprop="programmingLanguage"></span><a href="/sample-user/demo/stargazers">0</a><a href="/sample-user/demo/forks">0</a><span class="Label">Public</span><div class="topics-row-container"></div><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul><a class="next_page" rel="next" href="/sample-user?page=2&tab=${stream === "repositories" ? "repositories" : "stars"}&after=cursor">Next</a></main>`;
+		const html = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><ul id="${list}"><li><h3><a href="/sample-user/demo">demo</a></h3><p itemprop="description"></p><span itemprop="programmingLanguage"></span><a href="/sample-user/demo/stargazers">0</a>${stream === "repositories" ? '<a href="/sample-user/demo/forks">0</a><span class="Label">Public</span><div class="topics-row-container"></div>' : ""}<relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul><a class="next_page" rel="next" href="/sample-user?page=2&tab=${stream === "repositories" ? "repositories" : "stars"}&after=cursor">Next</a></main>`;
 		assert.equal(
 			inspectInventoryPage(
 				inventoryObservation(stream, html, 1),
@@ -493,7 +493,8 @@ test("profile partial collection entries preserve known fields and count missing
 	assert.equal(pinned.row?.pinnedRepositories?.[0]?.fullName, "sample-user/demo");
 	assert.equal(pinned.row?.pinnedRepositories?.[0]?.description, "Known");
 	assert.equal(pinned.row?.pinnedRepositories?.[0]?.stars, undefined);
-	assert.equal(pinned.complete, true);
+	assert.equal(pinned.complete, false);
+	assert.equal(pinned.rejectedEntries, 1);
 	const malformedPinned = parseProfilePage(html.replace('<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><li><a href="/sample-user/demo">demo</a><a href="/sample-user/demo/stargazers">many</a></li></div>'), "https://github.com/sample-user");
 	assert.equal(malformedPinned.complete, false);
 	const broken = parseProfilePage(html.replace('<div class="profile-achievements"></div>', '<div class="profile-achievements"><div class="js-achievement-card">Unreadable</div></div>'), "https://github.com/sample-user");
@@ -532,11 +533,13 @@ test("current GitHub profile: contribution heading, tab counter, badges and empt
 	// An empty rendered details list proves company, location and website are unset.
 	for (const key of ["company", "location", "website"] as const)
 		assert.equal(key in (parsed.row ?? {}), false);
-	// The page renders no follower elements: those fields are omitted, not unreadable.
+	// Missing follower slots and collection containers do not prove omission.
 	for (const key of ["followers", "following"] as const)
 		assert.equal(key in (parsed.row ?? {}), false);
-	assert.deepEqual(parsed.unreadableFields, []);
-	assert.equal(parsed.complete, true);
+	for (const key of ["followers", "following", "organizations", "achievements"])
+		assert.equal(parsed.unreadableFields.includes(key), true);
+	assert.equal(parsed.row?.organizations?.[0]?.login, "sample-org");
+	assert.equal(parsed.complete, false);
 });
 
 test("profile details list with an entry that has no readable fields stays unreadable", () => {
@@ -619,9 +622,19 @@ test("a rendered repository row without optional slots omits those fields and co
 		assert.equal(key in row, false, key);
 	}
 	assert.equal(validateRecord("repositories", { id: "sample-user:repositories", repositories: parsed.rows }).ok, true);
+	const owned = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>${bare}`;
 	assert.deepEqual(
 		inspectInventoryPage(
-			inventoryObservation("repositories", `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>${bare}`, 1),
+			inventoryObservation("repositories", owned, 1),
+			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
+		),
+		{ valid: false, nextUrl: null, reason: "terminal_unverified" },
+	);
+	const terminal = owned +
+		'<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
+	assert.deepEqual(
+		inspectInventoryPage(
+			inventoryObservation("repositories", terminal, 1),
 			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
 		),
 		{ valid: true, nextUrl: null, reason: "terminal_list" },
@@ -647,14 +660,15 @@ test("a starred row without optional slots omits them and a malformed star count
 	assert.equal(parseStarredPage(base('<a href="/sample-owner/demo/stargazers">many</a>')).complete, false);
 });
 
-test("a profile without follower elements omits those fields; an unreadable one vetoes", async () => {
+test("a profile without follower evidence retains other fields but cannot complete", async () => {
 	const html = await fixture("profile.html");
 	const bare = parseProfilePage(
 		html.replace('<a href="/sample-user?tab=followers"><span>42</span></a>', "").replace('<a href="/sample-user?tab=following"><span>7</span></a>', ""),
 		"https://github.com/sample-user",
 	);
-	assert.equal(bare.complete, true);
-	assert.deepEqual(bare.unreadableFields, []);
+	assert.equal(bare.complete, false);
+	assert.deepEqual(bare.unreadableFields, ["followers", "following"]);
+	assert.equal(bare.row?.contributionsLastYear, 1234);
 	assert.equal("followers" in (bare.row ?? {}), false);
 	assert.equal("following" in (bare.row ?? {}), false);
 	for (const changed of [
@@ -665,13 +679,21 @@ test("a profile without follower elements omits those fields; an unreadable one 
 	}
 });
 
-test("a fully rendered pinned card without optional slots omits them and a loading card vetoes", async () => {
+test("link-only pinned cards lack render proof while known empty slots preserve completeness", async () => {
 	const html = await fixture("profile.html");
 	const empty = '<div class="js-pinned-items-reorder-container"></div>';
 	const card = (inner: string): string => `<div class="js-pinned-items-reorder-container"><li><a href="/sample-user/demo">demo</a>${inner}</li></div>`;
 	const bare = parseProfilePage(html.replace(empty, card("")), "https://github.com/sample-user");
-	assert.equal(bare.complete, true);
+	assert.equal(bare.complete, false);
+	assert.equal(bare.rejectedEntries, 1);
+	assert.equal(bare.row?.pinnedRepositories?.[0]?.fullName, "sample-user/demo");
 	const pinned = bare.row?.pinnedRepositories?.[0] ?? {};
 	for (const key of ["description", "language", "stars"]) assert.equal(key in pinned, false, key);
 	assert.equal(parseProfilePage(html.replace(empty, card('<p class="pinned-item-desc" aria-busy="true">x</p>')), "https://github.com/sample-user").complete, false);
+	const renderedCard = '<div class="js-pinned-items-reorder-container"><li><div class="pinned-item-list-item"><a href="/sample-user/demo"><span class="repo">demo</span></a><p class="pinned-item-desc"></p><p class="f6"></p></div></li></div>';
+	const rendered = parseProfilePage(html.replace(empty, renderedCard), "https://github.com/sample-user");
+	assert.equal(rendered.complete, true);
+	assert.equal(rendered.row?.pinnedRepositories?.[0]?.description, "");
+	for (const key of ["language", "stars"])
+		assert.equal(key in (rendered.row?.pinnedRepositories?.[0] ?? {}), false, key);
 });

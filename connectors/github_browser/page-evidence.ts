@@ -19,6 +19,9 @@ export interface InventoryEndEvidence {
 	readonly noProgress: boolean;
 	readonly explicitEmpty: boolean;
 	readonly hasRecognizedList: boolean;
+	readonly renderComplete: boolean;
+	readonly hasUnknownContinuation: boolean;
+	readonly terminalProof: "disabled_next" | "exact_count" | null;
 	readonly nextUrl: string | null;
 }
 
@@ -30,9 +33,12 @@ export interface InventoryEndResult {
 		| "wrong_navigation"
 		| "wrong_owner"
 		| "unreadable_list"
+		| "render_incomplete"
 		| "discarded_rows"
 		| "no_progress"
 		| "remaining_continuation"
+		| "unknown_continuation"
+		| "terminal_unverified"
 		| "empty_unverified"
 		| "terminal_list";
 }
@@ -59,6 +65,10 @@ export function inspectInventoryEnd(
 		return { complete: false, nextUrl: null, reason: "no_progress" };
 	if (!evidence.hasRecognizedList && !evidence.explicitEmpty)
 		return { complete: false, nextUrl: null, reason: "unreadable_list" };
+	if (evidence.hasUnknownContinuation)
+		return { complete: false, nextUrl: null, reason: "unknown_continuation" };
+	if (!evidence.renderComplete)
+		return { complete: false, nextUrl: null, reason: "render_incomplete" };
 	if (evidence.nextUrl !== null) {
 		const next = validContinuation(
 			evidence.nextUrl,
@@ -77,6 +87,11 @@ export function inspectInventoryEnd(
 	}
 	if (evidence.parsedRows === 0)
 		return { complete: false, nextUrl: null, reason: "empty_unverified" };
+	// Readable rows prove only that those rows exist. Completion also requires
+	// an explicit end marker, or an exact whole-inventory count on page one.
+	if (evidence.terminalProof !== "disabled_next" &&
+		!(evidence.terminalProof === "exact_count" && pageNumber === 1))
+		return { complete: false, nextUrl: null, reason: "terminal_unverified" };
 	return { complete: true, nextUrl: null, reason: "terminal_list" };
 }
 

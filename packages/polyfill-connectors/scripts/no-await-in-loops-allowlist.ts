@@ -1785,14 +1785,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/github_browser/index.ts",
-			line: 70,
+			line: 79,
 			column: 4,
 			category: "bounded_retry_polling",
 			note: "Retry navigation only after the prior shared-page navigation attempt fails.",
 		},
 		{
 			path: "connectors/github_browser/protocol.test.ts",
-			line: 409,
+			line: 411,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "Run each incomplete search case before checking its stream outcome.",

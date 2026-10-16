@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseHTML } from "linkedom";
 import { openContributionPage } from "./index.ts";
 
 function delayedPage(readyHtml: string) {
@@ -88,3 +89,47 @@ test("contribution wait timeout returns HTML for the collector to reject as inco
 	assert.equal(html.html, partialHtml);
 	assert.deepEqual(calls, ["goto", "waitForCalendar", "content"]);
 });
+
+function contributionReadinessFixtures(): readonly [string, string, boolean][] {
+	const cells = Array.from({ length: 365 }, (_, index) =>
+		`<td class="ContributionCalendar-day" data-date="${new Date(Date.UTC(2025, 0, index + 1)).toISOString().slice(0, 10)}" data-count="0"></td>`).join("");
+	const html = `<main><section class="js-yearly-contributions"><h2 id="js-contribution-activity-description">0 contributions</h2><table class="ContributionCalendar-grid"><tbody><tr>${cells}</tr></tbody></table></section></main>`;
+	return [
+		["fully rendered graph", html, true],
+		["busy graph", html.replace("<section ", '<section aria-busy="true" '), false],
+		["busy heading", html.replace("<h2 ", '<h2 aria-busy="true" '), false],
+		["busy cell", html.replace("<td ", '<td aria-busy="true" '), false],
+		["loading graph", html.replace('class="ContributionCalendar-grid"', 'class="ContributionCalendar-grid loading"'), false],
+		["deferred graph", html.replace("</table>", '<include-fragment src="/calendar"></include-fragment></table>'), false],
+	];
+}
+
+for (const [name, html, expected] of contributionReadinessFixtures()) {
+	test(`contribution readiness checks retained cells: ${name}`, async () => {
+		let observed: unknown;
+		const page = {
+			goto: async () => undefined,
+			url: () => "https://github.com/sample-user",
+			content: async () => html,
+			waitForFunction: async (
+				predicate: (argument: unknown) => unknown,
+				argument: unknown,
+			) => {
+				const previous = Object.getOwnPropertyDescriptor(globalThis, "document");
+				Object.defineProperty(globalThis, "document", {
+					configurable: true,
+					value: parseHTML(html).document,
+				});
+				try {
+					observed = predicate(argument);
+				} finally {
+					if (previous) Object.defineProperty(globalThis, "document", previous);
+					else Reflect.deleteProperty(globalThis, "document");
+				}
+				return { dispose: async () => undefined };
+			},
+		};
+		await openContributionPage(page as never, "https://github.com/sample-user");
+		assert.equal(observed, expected);
+	});
+}
