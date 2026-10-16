@@ -17,6 +17,33 @@ type ClassifierArgs = Parameters<typeof classifyAdsDialogInPage>[0];
 type Classification = ReturnType<typeof classifyAdsDialogInPage>;
 type AdsClock = Parameters<typeof scrapeAdTopics>[1];
 
+for (const [listCounts, rowCounts] of [
+ ['aria-setsize="1"', 'aria-setsize="2"'],
+ ['aria-setsize="1" aria-rowcount="2"', ''],
+ ['aria-rowcount="1"', 'aria-rowcount="2"'],
+ ['aria-setsize="1"', 'aria-setsize="1" aria-rowcount="2"'],
+]) {
+ test(`conflicting ads totals stay partial: ${listCounts} / ${rowCounts}`, () => {
+  const result = classify(`<section role="dialog"><div role="list" ${listCounts}><div role="listitem" ${rowCounts} aria-posinset="1"><span>Acme</span><button>Remove</button></div></div></section>`, advertisersArgs);
+  assert.equal(result.kind, "data");
+  if (result.kind === "data") {
+   assert.deepEqual(result.items, ["Acme"]);
+   assert.equal(result.complete, false);
+  }
+ });
+}
+test("category pre-expansion unavailable positive count cannot become authoritative empty", async () => {
+ const { document, page } = makeDomPage(
+  '<div role="tab">Manage info</div><div role="tabpanel"><a>Categories used to reach you</a></div><section id="categories" role="dialog"><div role="list" aria-setsize="2"></div><p role="alert">Something went wrong</p><button>View all</button></section>',
+  { onViewAllClick: () => {
+   const dialog = document.querySelector("#categories");
+   if (dialog) dialog.innerHTML = '<div role="list"></div><p>No categories</p>';
+  } },
+ );
+ assert.equal((await scrapeTargetingCategories(page, makeClock())).reached, false);
+});
+
+
 function parseStyle(raw: string | null): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const declaration of (raw ?? "").split(";")) {

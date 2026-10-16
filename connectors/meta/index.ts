@@ -155,14 +155,14 @@ import {
 	FOLLOWING_MAX_PAGES,
 	FOLLOWING_PAGE_LIMIT,
 	followingRecord,
-	followingUserId,
 	postLikeRecords,
 	postRecord,
 	profileCountsFromGraphQL,
 	profileEnrichmentIsComplete,
 	profileRecord,
+	profileSourceFieldsAreReadable,
 } from "./parsers.ts";
-import { validateRecord } from "./schemas.ts";
+import { adsSchema, followingSchema, profileSchema, validateRecord } from "./schemas.ts";
 import type {
 	InstagramFollowingPage,
 	InstagramFollowingUser,
@@ -1390,13 +1390,6 @@ export async function fetchAllFollowing(
 				(json.status !== undefined && json.status !== "ok") ||
 				json.error !== undefined ||
 				!Array.isArray(json.users) ||
-				json.users.some(
-					(user) =>
-						!user ||
-						typeof user !== "object" ||
-						!user.username ||
-						!followingUserId(user),
-				) ||
 				(json.next_max_id != null && typeof json.next_max_id !== "string") ||
 				typeof json.has_more !== "boolean" ||
 				(json.has_more === true && !json.next_max_id) ||
@@ -1406,8 +1399,21 @@ export async function fetchAllFollowing(
 					"meta_following_page_unavailable: following response did not prove a successful page",
 				);
 			}
-			const pageUsers = json.users;
+			const pageUsers: InstagramFollowingUser[] = [];
+			let unreadable = false;
+			for (const user of json.users) {
+				const record = user && typeof user === "object" ? followingRecord(user) : null;
+				if (!record || !followingSchema.safeParse(record).success) {
+					unreadable = true;
+					continue;
+				}
+				pageUsers.push(user);
+			}
+			// Preserve the readable subset of this page as well as earlier pages.
 			users.push(...pageUsers);
+			if (unreadable) {
+				throw new Error("meta_following_unreadable_row: a mapped following row was unreadable");
+			}
 			await progress?.("Fetched Instagram following page", {
 				item_count: pageUsers.length,
 				page_index: pageNumber,
@@ -1662,26 +1668,16 @@ export function classifyAdsDialogInPage(args: {
 			if (lists.length > 1) sawUnknownList = true;
 			continue;
 		}
-		const listTotal =
-			readPositiveInteger(currentList.getAttribute("aria-setsize")) ??
-			readPositiveInteger(currentList.getAttribute("aria-rowcount"));
-		const rowTotals = Array.from(
-			currentList.querySelectorAll('[role="listitem"]'),
-		)
-			.filter(visible)
-			.map((row) => readPositiveInteger(row.getAttribute("aria-setsize")))
-			.filter((value): value is number => value !== null);
 		const rowPositions = Array.from(
 			currentList.querySelectorAll('[role="listitem"]'),
 		)
 			.filter(visible)
 			.map((row) => readPositiveInteger(row.getAttribute("aria-posinset")))
 			.filter((value): value is number => value !== null);
-		const rowTotal =
-			rowTotals.length > 0 && rowTotals.every((value) => value === rowTotals[0])
-				? (rowTotals[0] ?? null)
-				: null;
-		const sourceTotal = listTotal ?? rowTotal;
+		// Every supplied list/row count is evidence; precedence hides conflicts.
+		const sourceTotal = advertisedCounts.length > 0 &&
+			advertisedCounts.every((count) => count === advertisedCounts[0])
+			? (advertisedCounts[0] ?? null) : null;
 		const positionsProveComplete =
 			rowPositions.length === 0
 				? true
@@ -2121,7 +2117,8 @@ export async function scrapeTargetingCategories(
 	if (
 		finalCategories?.kind === "verified_empty" &&
 		beforeExpansion?.kind !== "data" &&
-		beforeExpansion?.kind !== "loading"
+		beforeExpansion?.kind !== "loading" &&
+		beforeExpansion.hasPositiveSourceTotal !== true
 	) {
 		await closeDialog(page);
 		return {
@@ -2327,7 +2324,8 @@ export async function collectAllStreams(
 		);
 		const profileUserMatchesIdentity = Boolean(
 			profileUser?.id === identity.id &&
-			profileUser.username?.toLowerCase() === identity.username.toLowerCase(),
+			typeof profileUser.username === "string" &&
+			profileUser.username.toLowerCase() === identity.username.toLowerCase(),
 		);
 		const trustedProfileUser = profileUserMatchesIdentity ? profileUser : null;
 		const counts = profileCountsFromGraphQL(
@@ -2335,9 +2333,12 @@ export async function collectAllStreams(
 				? { data: { data: { user: trustedProfileUser } } }
 				: null,
 		);
+		const readableSources = profileSourceFieldsAreReadable(user) &&
+			profileSourceFieldsAreReadable(trustedProfileUser);
 		const profile = profileRecord(user, counts, trustedProfileUser) ?? identity;
-		await emitRecord("profile", profile as RecordData);
-		if (!profileEnrichmentIsComplete(trustedProfileUser)) {
+		const validProfile = profileSchema.safeParse(profile).success;
+		if (validProfile) await emitRecord("profile", profile as RecordData);
+		if (!readableSources || !validProfile || !profileEnrichmentIsComplete(trustedProfileUser)) {
 			await reportCollectionFailure(
 				ctx,
 				"profile",
@@ -2479,15 +2480,26 @@ export async function collectAllStreams(
 		const categories = await scrapeSurface("targeting_categories", () =>
 			scrapeTargetingCategories(page, adsClock),
 		);
-		const reachedSurfaces = [advertisers, adTopics, categories]
-			.filter((surface) => surface.reached)
-			.map((surface) => surface.surface);
 		const ads = buildAdRecords({
 			adTopics: adTopics.items,
 			advertisers: advertisers.items,
 			categories: categories.items,
 		});
-		for (const ad of ads) {
+		const readableAds = ads.filter((ad) => adsSchema.safeParse(ad).success);
+		const sourceCounts = [
+			["advertiser", "advertisers", advertisers.items.length],
+			["ad_topic", "ad_topics", adTopics.items.length],
+			["ad_category", "targeting_categories", categories.items.length],
+		] as const;
+		const unreadableSurfaces = new Set<AdsSurface>(
+			sourceCounts.filter(([kind, , count]) =>
+				readableAds.filter((ad) => ad.kind === kind).length !== count,
+			).map(([, surface]) => surface),
+		);
+		const reachedSurfaces = [advertisers, adTopics, categories]
+			.filter((surface) => surface.reached && !unreadableSurfaces.has(surface.surface))
+			.map((surface) => surface.surface);
+		for (const ad of readableAds) {
 			await emitRecord("ads", ad as RecordData);
 		}
 		await emitDetailCoverage(ctx, {

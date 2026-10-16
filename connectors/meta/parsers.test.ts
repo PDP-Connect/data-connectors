@@ -21,6 +21,24 @@ import {
 } from "./parsers.ts";
 import type { InstagramTimelineEdge, InstagramWebInfoUser } from "./types.ts";
 
+for (const field of ["full_name", "biography", "profile_pic_url", "external_url"] as const) {
+ for (const value of [{ text: "Alice" }, 42, false]) {
+  test(`profile unreadable ${field} ${JSON.stringify(value)} is incomplete`, () => {
+   const user = { id: "u1", username: "alice", follower_count: 1, following_count: 2, media_count: 3, is_verified: false, [field]: value };
+   assert.equal(profileEnrichmentIsComplete(user as never), false);
+  });
+ }
+}
+for (const field of ["follower_count", "following_count", "media_count"] as const) {
+ test(`profile fractional ${field} is not an invented integer`, () => {
+  const user = { id: "u1", username: "alice", follower_count: 1, following_count: 2, media_count: 3, is_verified: false, [field]: 1.5 };
+  assert.equal(profileEnrichmentIsComplete(user), false);
+  const counts = profileCountsFromGraphQL({ data: { data: { user } } });
+  assert.equal(counts[field === "media_count" ? "post_count" : field], null);
+ });
+}
+
+
 // ─── isoFromTakenAt ─────────────────────────────────────────────────────
 
 test("isoFromTakenAt: converts unix seconds to ISO", () => {

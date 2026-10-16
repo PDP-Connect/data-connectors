@@ -10,6 +10,21 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import { classifyAdsDialogInPage, collectAllStreams } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
+for (const malformed of [{ is_verified: "false" }, { is_private: 1 }, { full_name: {} }, { profile_pic_url: "invalid" }, { pk: 12 }, { username: 12 }]) {
+ for (const later of [false, true]) {
+  test(`following malformed ${JSON.stringify(malformed)} later=${later} preserves readable rows without STATE`, async () => {
+   const terminal = { status: 200, json: { status: "ok", users: [{ pk: "bad", username: "bad", ...malformed }, { pk: "good", username: "good" }], has_more: false, next_max_id: null } };
+   const prefix = { status: 200, json: { users: [{ pk: "prefix", username: "prefix" }], has_more: true, next_max_id: "next" } };
+   const { ctx, failures, harness } = setup(["following"], later ? [prefix, terminal] : [terminal]);
+   await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+   assert.deepEqual(failures, ["following"]);
+   assert.deepEqual(harness.emitted.map(record => record.data.username), later ? ["prefix", "good"] : ["good"]);
+   assert.equal(harness.protocolMessages.some(message => message.type === "STATE"), false);
+  });
+ }
+}
+
+
 const FAST_POSTS_CLOCK = { sleep: async (): Promise<void> => undefined };
 const FAST_ADS_CLOCK = {
 	now: () => 0,
@@ -115,6 +130,9 @@ function setup(streams: string[], followingPages: unknown[] = []) {
 	return {
 		ctx,
 		emitNavigation,
+		emitResponse: (response: unknown) => {
+			for (const listener of responseListeners) listener(response);
+		},
 		emitRequest: (request: unknown) => {
 			for (const listener of requestListeners) listener(request);
 		},
@@ -681,4 +699,54 @@ test("completion rule: a capped following walk keeps its users and reports follo
 		harness.protocolMessages.some((message) => message.type === "STATE"),
 		false,
 	);
+});
+
+for (const malformed of [
+ { full_name: { text: "Alice" } }, { biography: 17 },
+ { profile_pic_url: false }, { external_url: {} }, { media_count: 1.5 },
+ { is_private: "false" }, { is_business_account: 1 },
+ { profile_pic_url: "invalid-url" },
+]) {
+ test(`profile unreadable mapped source retains retryable gap: ${JSON.stringify(malformed)}`, async () => {
+  const { ctx, failures, harness, emitResponse } = setup(["profile"]);
+  const observed = { id: "u1", username: "testuser", follower_count: 1, following_count: 2, media_count: 3, is_verified: false, ...malformed };
+  ctx.page.goto = (() => {
+   emitResponse({
+    status: () => 200,
+    url: () => "https://www.instagram.com/graphql/query/",
+    request: () => ({
+     headers: () => ({}), method: () => "POST",
+     postData: () => "fb_api_req_friendly_name=ProfilePageQuery",
+    }),
+    json: async () => ({ data: { data: { user: observed } } }),
+   });
+   return Promise.resolve(null);
+  }) as Page["goto"];
+  await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+  assert.deepEqual(failures, ["profile"]);
+  assert.equal(harness.protocolMessages.some(message => message.type === "STATE"), false);
+  for (const record of harness.emitted) {
+   assert.notEqual(record.data.post_count, 1);
+  }
+ });
+}
+
+test("ads schema-rejected rows preserve readable records and suppress surface coverage", async () => {
+ const { ctx, failures, harness } = setup(["ads"]);
+ ctx.page.waitForFunction = (() => Promise.resolve(true)) as unknown as Page["waitForFunction"];
+ ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
+  if (arg && typeof arg === "object" && "emptyMessage" in arg) {
+   return Promise.resolve(arg.emptyMessage === "No advertisers"
+    ? { kind: "data", complete: true, items: ["Readable advertiser", "x".repeat(501)] }
+    : { kind: "verified_empty" });
+  }
+  const source = String(fn);
+  return Promise.resolve(source.includes("advertiser") || source.includes("Manage info") || source.includes("Categories used to reach you"));
+ }) as Page["evaluate"];
+ let now = 0;
+ await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, {
+  now: () => now, sleep: async (ms: number) => { now += ms; },
+ }, FAST_PROFILE_CLOCK);
+ assert.deepEqual(failures, ["ads"]);
+ assert.deepEqual(harness.emitted.map(record => record.data.name), ["Readable advertiser"]);
 });

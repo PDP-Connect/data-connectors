@@ -46,7 +46,7 @@ export function nullIfEmpty(value: string | null | undefined): string | null {
 	if (value === null || value === undefined) {
 		return null;
 	}
-	return value.length > 0 ? value : null;
+	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 /** Instagram media nodes carry `taken_at` in unix seconds (occasionally
@@ -109,10 +109,10 @@ export function mediaTypeOf(node: {
  *  null. Guards against the field being absent, non-numeric, or negative —
  *  never guessed, never coerced from a different shape. */
 function nonNegativeIntOrNull(value: number | null | undefined): number | null {
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
 		return null;
 	}
-	return Math.trunc(value);
+	return value;
 }
 
 /**
@@ -144,14 +144,31 @@ export function profileCountsFromGraphQL(
 /** The legacy profile read is complete only when the observed profile user
  *  carries its three counts and the verified flag. Missing values are gaps,
  *  not evidence that the corresponding fields are empty. */
+/** Validate source values before nullable normalization can erase bad types. */
+export function profileSourceFieldsAreReadable(
+ user: InstagramProfilePageUser | InstagramWebInfoUser | null | undefined,
+): boolean {
+ if (!user) return true;
+ const fields = user as unknown as Record<string, unknown>;
+ return ["full_name", "biography", "profile_pic_url", "external_url"].every(
+  (key) => fields[key] == null || typeof fields[key] === "string",
+ ) && ["is_private", "is_verified", "is_business_account"].every(
+  (key) => fields[key] == null || typeof fields[key] === "boolean",
+ ) && ["follower_count", "following_count", "media_count"].every(
+  (key) => fields[key] == null || (typeof fields[key] === "number" &&
+   Number.isInteger(fields[key]) && fields[key] >= 0),
+ );
+}
+
 export function profileEnrichmentIsComplete(
 	user: InstagramProfilePageUser | null | undefined,
 ): boolean {
 	return (
 		user !== null &&
 		user !== undefined &&
-		Boolean(user.id) &&
-		Boolean(user.username) &&
+		typeof user.id === "string" && user.id.length > 0 &&
+		typeof user.username === "string" && user.username.length > 0 &&
+		profileSourceFieldsAreReadable(user) &&
 		nonNegativeIntOrNull(user.follower_count) !== null &&
 		nonNegativeIntOrNull(user.following_count) !== null &&
 		nonNegativeIntOrNull(user.media_count) !== null &&
