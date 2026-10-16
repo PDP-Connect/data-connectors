@@ -214,6 +214,12 @@ test("saved_tracks schema preserves a row with no URI identity or save date", ()
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("top_artists schema accepts a record whose genres field is absent", () => {
+	const { genres: _genres, ...withoutGenres } = TOP_ARTIST_RECORD;
+	assert.equal(validateRecord("top_artists", withoutGenres).ok, true);
+	assert.equal(validateRecord("top_artists", { ...withoutGenres, genres: "pop" }).ok, false);
+});
+
 test("top_artists schema accepts each of the two time windows", () => {
 	for (const time_range of ["short_term", "long_term"]) {
 		const result = topArtistsSchema.safeParse({

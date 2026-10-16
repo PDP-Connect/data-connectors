@@ -1484,6 +1484,31 @@ test("profile collection preserves an explicitly empty source image URL", async 
 	]);
 });
 
+test("profile with the image key absent from both sources omits the image field", async () => {
+	const result = await collectSavedTracks(
+		() => ({
+			data: {
+				me: {
+					profile: {
+						username: "synthetic-user",
+						name: "Synthetic user",
+						uri: "spotify:user:synthetic-user",
+					},
+				},
+			},
+		}),
+		{
+			requested: ["profile"],
+			profileEnrichment: { uri: "spotify:user:synthetic-user" },
+		},
+	);
+	const profile = result.emittedRecords.find((r) => r.stream === "profile");
+	assert.ok(profile, "profile row is emitted");
+	assert.equal(Object.hasOwn(profile.data, "images"), false);
+	assert.equal(profile.data.followers, null);
+	assert.equal(profile.data.following, null);
+});
+
 test("malformed profile image data withholds the whole row and coverage", async () => {
 	const result = await collectSavedTracks(
 		() => ({
@@ -2144,7 +2169,7 @@ test("fields the source operations never carry are not gaps: playlist public/col
 	assert.equal(result.emittedRecords[0]?.data.isrc, null);
 });
 
-test("a profile image absent from one source is read from the other, absent from both is empty, absent counts are null, and malformed withholds the row", async () => {
+test("a profile image absent from one source is read from the other, absent from both is omitted, absent counts are null, and malformed withholds the row", async () => {
 	const profile = (imageUrl?: string) => () => ({
 		data: {
 			me: {
@@ -2175,7 +2200,7 @@ test("a profile image absent from one source is read from the other, absent from
 		requested: ["profile"],
 		profileEnrichment: enrichment(),
 	});
-	assert.deepEqual(neither.emittedRecords[0]?.data.images, []);
+	assert.equal(Object.hasOwn(neither.emittedRecords[0]?.data ?? {}, "images"), false);
 	const noCounts = await collectSavedTracks(profile(), {
 		requested: ["profile"],
 		profileEnrichment: { uri: "spotify:user:synthetic-user" },

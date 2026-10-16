@@ -127,7 +127,7 @@ export const profileSchema = z.object({
 		.string()
 		.regex(/^spotify:user:.+$/, "must be a Spotify user URI")
 		.nullable(),
-	images: spotifyImagesSchema,
+	images: spotifyImagesSchema.optional(),
 	// Same-account user-profile-view following_count. Null when enrichment is
 	// unavailable or its URI does not match the authenticated identity.
 	following: z.number().int().min(0).nullable(),
@@ -165,7 +165,7 @@ export const topArtistsSchema = z.object({
 	id: spotifyIdSchema,
 	uri: spotifyUriSchema.nullable(),
 	name: pdppSafeText.max(1000),
-	genres: z.array(pdppSafeText.max(200)),
+	genres: z.array(pdppSafeText.max(200)).optional(),
 	popularity: z.number().int().min(0).max(100).nullable(),
 	followers: z.number().int().min(0).nullable(),
 	time_range: z.enum(["short_term", "long_term"]),

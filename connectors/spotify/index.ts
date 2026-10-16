@@ -320,12 +320,17 @@ export function parseTopRows(payloads: unknown[], stream: "top_artists" | "top_t
 			const fields: FieldRead<unknown>[] = [uri, rawId, name];
 			let extra: Record<string, unknown>;
 			if (stream === "top_artists") {
-				const genres = readStringList(readPath(entity, "genres"), "genres");
+				// Genres are not always carried (observed live); an absent key omits the
+				// field, while a present malformed value is still a gap.
+				const rawGenres = readPath(entity, "genres");
+				const genres = rawGenres === undefined
+					? { kind: "EXPLICIT_EMPTY" as const, value: [] as string[] }
+					: readStringList(rawGenres, "genres");
 				const followers = notCarried(readNestedCount(entity, "stats", "followers", "followers"), null);
 				const popularity = notCarried(readCount(readPath(entity, "popularity"), "popularity"), null);
 				fields.push(genres, followers, popularity);
 				extra = {
-					genres: fieldValue(genres),
+					...(rawGenres === undefined ? {} : { genres: fieldValue(genres) }),
 					followers: fieldValue(followers),
 					popularity: fieldValue(popularity),
 				};
@@ -1319,8 +1324,8 @@ async function collectSpotifyWebData(
 					);
 				}
 				// Either source may carry the image. Both omit the key for a profile
-				// with no image (observed live), so absent from both is an empty
-				// image list; a malformed value is still a gap.
+				// with no image (observed live). Absent from both asserts nothing, so
+				// the image field is omitted; a malformed value is still a gap.
 				const profileImageRead = readString(pa.imageUrl, "profile_image_url");
 				const enrichmentImageRead = readString(
 					enrichmentRecord.image_url,
@@ -1355,10 +1360,9 @@ async function collectSpotifyWebData(
 					display_name: profileName,
 					followers,
 					uri: identityUri,
-					images:
-						imageUrl !== null
-							? [{ url: imageUrl, width: null, height: null }]
-							: [],
+					...(imageUrl !== null
+						? { images: [{ url: imageUrl, width: null, height: null }] }
+						: {}),
 					following,
 				};
 				result.sourceCounts.profile = { considered: 1, covered: 1 };

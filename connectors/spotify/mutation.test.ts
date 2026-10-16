@@ -1182,6 +1182,30 @@ test("top rows: a field the operation never carries is null, a malformed one wit
 		"top_artists",
 		"short_term",
 	);
-	assert.equal(artists.rows.length, 0, "genres has no representable null");
-	assert.equal(artists.withheld, 1);
+	assert.equal(artists.rows.length, 1, "an absent genres key still emits the row");
+	assert.equal(artists.withheld, 0);
+	assert.equal(Object.hasOwn(artists.rows[0] ?? {}, "genres"), false, "genres is omitted, not invented");
+	const withGenres = (genres: unknown) =>
+		parseTopRows(
+			[
+				{
+					data: {
+						me: {
+							profile: {
+								topArtists: {
+									totalCount: 1,
+									items: [{ data: { uri: "spotify:artist:a1", profile: { name: "A" }, genres } }],
+								},
+							},
+						},
+					},
+				},
+			],
+			"top_artists",
+			"short_term",
+		);
+	assert.deepEqual(withGenres([]).rows[0]?.genres, []);
+	assert.equal(withGenres([1]).rows.length, 0, "a malformed genres is a gap");
+	assert.equal(withGenres([1]).withheld, 1);
+	assert.equal(withGenres("pop").withheld, 1);
 });
