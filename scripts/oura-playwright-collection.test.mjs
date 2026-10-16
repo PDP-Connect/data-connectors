@@ -122,6 +122,7 @@ const authorizeAttemptHarness = (redirectError) => {
     "  error.telemetryError = { errorClass, code, reason, step };",
     "  return error;",
     "};",
+    credentialSource("const OAUTH_ERROR_CODES =", "const buildResult ="),
     credentialSource("const runAuthorizeAttempt =", "// ── Auth orchestration"),
     "globalThis.connector = { runAuthorizeAttempt };",
   ].join("\n");
@@ -292,21 +293,40 @@ test("does not propagate raw portal application-list failure text", async () => 
 });
 
 test("does not propagate a raw OAuth redirect error into its failure reason", async () => {
-  const canary = "CANARY_SECRET_xyz";
-  const { runAuthorizeAttempt } = authorizeAttemptHarness(canary);
+  // The first canary is rejected by a character/length filter; the other two
+  // pass it, so only an allowlist of OAuth codes keeps them out.
+  for (const canary of ["CANARY_SECRET_xyz", "private_customer_identifier", "canarysecret"]) {
+    const { runAuthorizeAttempt } = authorizeAttemptHarness(canary);
+    const payloads = [];
+    const page = { setData: async (key, value) => { payloads.push({ key, value }); } };
 
-  let error;
+    let error;
+    await assert.rejects(
+      () => runAuthorizeAttempt("client-id", "person@example.test", null, false),
+      (caught) => {
+        error = caught;
+        return true;
+      },
+    );
+    assert.ok(error?.telemetryError, error?.stack || String(error));
+    assert.equal(error.telemetryError.code, "authorize_declined");
+    assert.doesNotMatch(error?.message || "", new RegExp(canary), canary);
+    assert.match(error?.message || "", /OAuth error/);
+    await captureCredentialFailure(page, error);
+    assertPayloadsHide(payloads, canary);
+  }
+});
+
+test("reports a standard OAuth authorization error code from the redirect", async () => {
+  const { runAuthorizeAttempt } = authorizeAttemptHarness("access_denied");
   await assert.rejects(
     () => runAuthorizeAttempt("client-id", "person@example.test", null, false),
     (caught) => {
-      error = caught;
+      assert.equal(caught.telemetryError.code, "authorize_declined");
+      assert.match(caught.message, /\(access_denied\)/);
       return true;
     },
   );
-  assert.ok(error?.telemetryError, error?.stack || String(error));
-  assert.equal(error.telemetryError.code, "authorize_declined");
-  assert.doesNotMatch(error?.message || "", new RegExp(canary));
-  assert.match(error?.message || "", /OAuth error/);
 });
 
 test("marks a 50-page cursor cap as degraded while retaining collected rows", async () => {

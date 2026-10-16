@@ -219,7 +219,7 @@ const safeErrorTag = (err) => inferErrorClass(String((err && err.message) || err
 const OAUTH_ERROR_CODES = new Set([
   "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
   "unsupported_grant_type", "invalid_scope", "access_denied", "server_error",
-  "temporarily_unavailable",
+  "temporarily_unavailable", "unsupported_response_type",
 ]);
 
 const buildResult = ({ requestedScopes, scopes, errors, exportSummary }) => ({
@@ -2086,7 +2086,7 @@ const runAuthorizeAttempt = async (clientId, email, signInMethod, autoAllow) => 
   const redirect = await readRedirectParams();
   if (redirect?.error) {
     if (signInMethod && redirect.error !== "access_denied") return { retry: true };
-    const errorCode = typeof redirect.error === "string" && /^[a-z_]{1,40}$/.test(redirect.error)
+    const errorCode = OAUTH_ERROR_CODES.has(redirect.error)
       ? redirect.error
       : "OAuth error";
     throw makeFatalRunError("auth_failed", CODES.authorizeDeclined, `Oura authorization was declined (${errorCode}).`, STEPS.authorize);
