@@ -4,9 +4,9 @@
 /**
  * Schema tests for the Spotify connector. Parsing is inline in index.ts (no
  * parsers.ts), so these assert the schema against literal records shaped
- * exactly as the four `emitRecord(...)` literals build them — the
- * authoritative emitted shape. All four streams are exercised, including the
- * composite recently_played id and the time_range enum on top_artists.
+ * shaped exactly as the `emitRecord(...)` literals build them — the
+ * authoritative emitted shape. The newer context and bounded ranking streams
+ * are covered alongside the original streams.
  */
 
 import assert from "node:assert/strict";
@@ -16,10 +16,48 @@ import {
 	playlistsSchema,
 	profileSchema,
 	recentlyPlayedSchema,
+	recentlyPlayedContextsSchema,
 	savedTracksSchema,
 	topArtistsSchema,
+	topTracksSchema,
 	validateRecord,
 } from "./schemas.ts";
+
+test("new Spotify stream schemas accept the mapped context and ranking records", () => {
+	assert.equal(
+		recentlyPlayedContextsSchema.safeParse({
+			id: "spotify:album:album1",
+			uri: "spotify:album:album1",
+			last_played_time: 1720000000123,
+			last_played_track_uri: null,
+		}).success,
+		true,
+	);
+	assert.equal(
+		topArtistsSchema.safeParse({
+			id: "artist1",
+			uri: "spotify:artist:artist1",
+			name: "Artist One",
+			genres: [],
+			followers: null,
+			popularity: null,
+			time_range: "short_term",
+		}).success,
+		true,
+	);
+	assert.equal(
+		topTracksSchema.safeParse({
+			id: "track1",
+			uri: "spotify:track:track1",
+			name: "Track One",
+			artist_names: [],
+			album_name: null,
+			duration_ms: null,
+			time_range: "long_term",
+		}).success,
+		true,
+	);
+});
 
 const PLAYLIST_RECORD = {
 	id: "37i9dQZF1DXcBWIGoYBM5M",
@@ -53,6 +91,7 @@ const SAVED_TRACK_RECORD = {
 
 const TOP_ARTIST_RECORD = {
 	id: "06HL4z0CvFAxyc27GXpf02",
+	uri: "spotify:artist:06HL4z0CvFAxyc27GXpf02",
 	name: "Taylor Swift",
 	genres: ["pop", "pop dance"],
 	popularity: 100,
@@ -175,8 +214,14 @@ test("saved_tracks schema preserves a row with no URI identity or save date", ()
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("top_artists schema accepts each of the three time windows", () => {
-	for (const time_range of ["short_term", "medium_term", "long_term"]) {
+test("top_artists schema accepts a record whose genres field is absent", () => {
+	const { genres: _genres, ...withoutGenres } = TOP_ARTIST_RECORD;
+	assert.equal(validateRecord("top_artists", withoutGenres).ok, true);
+	assert.equal(validateRecord("top_artists", { ...withoutGenres, genres: "pop" }).ok, false);
+});
+
+test("top_artists schema accepts each of the two time windows", () => {
+	for (const time_range of ["short_term", "long_term"]) {
 		const result = topArtistsSchema.safeParse({
 			...TOP_ARTIST_RECORD,
 			time_range,
@@ -193,7 +238,7 @@ test("recently_played schema accepts a representative emitted record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("top_artists schema rejects a time_range outside the three fixed windows", () => {
+test("top_artists schema rejects a time_range outside the two fixed windows", () => {
 	assert.equal(
 		topArtistsSchema.safeParse({ ...TOP_ARTIST_RECORD, time_range: "all_time" })
 			.success,
@@ -236,7 +281,7 @@ test("validateRecord routes by stream and passes unknown streams through", () =>
 	);
 	assert.equal(validateRecord("playlist_items", PLAYLIST_ITEM_RECORD).ok, true);
 	assert.equal(validateRecord("profile", PROFILE_RECORD).ok, true);
-	assert.equal(validateRecord("top_tracks", { id: "x" }).ok, true);
+	assert.equal(validateRecord("top_tracks", { id: "x" }).ok, false);
 });
 
 test("playlist_items schema accepts a representative emitted record", () => {

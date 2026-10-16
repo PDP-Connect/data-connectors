@@ -56,6 +56,8 @@ const DELIBERATELY_TIMELESS: Record<string, string> = {
 		"a standing account snapshot (id, display name, follower count), not an event",
 	"spotify/top_artists":
 		"a computed ranking over a window, not a moment the owner lived",
+	"spotify/top_tracks":
+		"a computed ranking over a window, not a moment the owner lived",
 	"steam/profile": "a standing profile snapshot",
 	"steam/steam_level": "a standing scalar with no timestamp",
 	"usaa/accounts":

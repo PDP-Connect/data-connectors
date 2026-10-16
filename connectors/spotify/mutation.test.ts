@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { completeSourceFields } from "./__fixtures__/complete-source-fields.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
@@ -15,10 +16,238 @@ import type {
 import {
 	createSpotifyCycleDetector,
 	hasSpotifySession,
+	parseRecentContextRows,
+	parseTopRows,
 	spotifyCollect,
 	spotifyTotp,
 } from "./index.ts";
 import { playlistItemsSchema } from "./schemas.ts";
+
+test("recent context rows keep covered rows and withhold malformed rows whole", () => {
+	const result = parseRecentContextRows([
+		{
+			playContexts: [
+				{
+					uri: "spotify:album:album1",
+					lastPlayedTime: 1720000000123,
+					lastPlayedTrackUri: "spotify:track:track1",
+				},
+				{
+					uri: "spotify:album:album2",
+					lastPlayedTime: "malformed",
+					lastPlayedTrackUri: null,
+				},
+				{
+					uri: "spotify:album:album3",
+					lastPlayedTime: 1720000000124,
+				},
+			],
+		},
+	]);
+	assert.equal(result.considered, 3);
+	assert.equal(result.rows.length, 1);
+	assert.equal(result.withheld, 2);
+	assert.deepEqual(result.rows[0], {
+		id: "spotify:album:album1",
+		uri: "spotify:album:album1",
+		last_played_time: 1720000000123,
+		last_played_track_uri: "spotify:track:track1",
+	});
+});
+
+test("top track rows are withheld whole when a mapped artist field is malformed", () => {
+	const page = (items: unknown[]) => ({
+		data: { me: { profile: { topTracks: { items, totalCount: items.length } } } },
+	});
+	const good = {
+		data: {
+			uri: "spotify:track:track1",
+			name: "Track One",
+			artists: { items: [{ profile: { name: "Artist One" } }] },
+			albumOfTrack: { name: "Album One" },
+			trackDuration: { totalMilliseconds: 123000 },
+		},
+	};
+	const malformed = {
+		data: {
+			uri: "spotify:track:track2",
+			name: "Track Two",
+			artists: { items: [{ profile: {} }] },
+			albumOfTrack: { name: "Album Two" },
+			trackDuration: { totalMilliseconds: 124000 },
+		},
+	};
+	const result = parseTopRows([page([good, malformed])], "top_tracks", "short_term");
+	assert.equal(result.considered, 2);
+	assert.equal(result.rows.length, 1);
+	assert.equal(result.withheld, 1);
+	assert.equal(result.rows[0]?.id, "track1");
+});
+
+test("ranked-list coverage counts only inspected rows, not rows outside the cap", () => {
+	const page = {
+		data: {
+			me: {
+				profile: {
+					topTracks: {
+						items: [
+							{
+								data: {
+									uri: "spotify:track:track1",
+									name: "Track One",
+									artists: { items: [] },
+									albumOfTrack: { name: "Album One" },
+									trackDuration: { totalMilliseconds: 123000 },
+								},
+							},
+						],
+						totalCount: 500,
+					},
+				},
+			},
+		},
+	};
+	const result = parseTopRows([page], "top_tracks", "short_term");
+	assert.equal(result.considered, 1);
+	assert.equal(result.rows.length, 1);
+	assert.equal(result.withheld, 0);
+});
+
+test("bounded Spotify streams emit typed gaps and never claim full-scan STATE", async () => {
+	const data = {
+		...webFixture,
+		recent_context_pages: [
+			{
+				playContexts: [
+					{
+						uri: "spotify:album:album1",
+						lastPlayedTime: 1720000000123,
+						lastPlayedTrackUri: null,
+					},
+				],
+			},
+		],
+		top_artist_pages: [
+			{
+				timeRange: "SHORT_TERM",
+				payload: {
+					data: {
+						me: {
+							profile: {
+								topArtists: {
+									totalCount: 1,
+									items: [{ data: { uri: "spotify:artist:artist1", name: "Artist One", genres: [], stats: { followers: 1 }, popularity: 5 } }],
+								},
+							},
+						},
+					},
+				},
+			},
+		],
+		top_track_pages: [
+			{
+				timeRange: "LONG_TERM",
+				payload: {
+					data: {
+						me: {
+							profile: {
+								topTracks: {
+									totalCount: 1,
+									items: [{ data: { uri: "spotify:track:track1", name: "Track One", artists: { items: [] }, albumOfTrack: { name: null }, trackDuration: { totalMilliseconds: 1 } } }],
+								},
+							},
+						},
+					},
+				},
+			},
+		],
+		recently_played_contexts: [
+			{
+				uri: "spotify:album:album1",
+				last_played_time: 1720000000123,
+				last_played_track_uri: null,
+			},
+		],
+		sourceCounts: {
+			recently_played_contexts: { considered: 1, covered: 1 },
+			top_artists: { considered: 1, covered: 1 },
+			top_tracks: { considered: 1, covered: 1 },
+		},
+	};
+	const names = ["recently_played_contexts", "top_artists", "top_tracks"];
+	const { ctx, emittedRecords, messages } = makeContext(data, names);
+	await spotifyCollect(ctx);
+	assert.equal(
+		emittedRecords.filter((record) => names.includes(record.stream)).length,
+		3,
+	);
+	assert.equal(
+		messages.some(
+			(message) =>
+				message.type === "STATE" && names.includes(message.stream),
+		),
+		false,
+	);
+	const gaps = messages.filter((message) => message.type === "SKIP_RESULT");
+	assert.deepEqual(
+		gaps.map((message) => message.type === "SKIP_RESULT" ? [message.stream, message.reason] : null),
+		[
+			["recently_played_contexts", "spotify_recent_context_boundary_unverified"],
+			["top_artists", "spotify_ranked_list_capped"],
+			["top_tracks", "spotify_ranked_list_capped"],
+		],
+	);
+});
+
+test("recent contexts request their profile query hash and remain explicitly incomplete", async () => {
+	const requestedOperations: string[] = [];
+	const result = await collectWithInPageFetch(
+		["recently_played_contexts"],
+		(operationName) => {
+			requestedOperations.push(operationName);
+			return { data: { me: { profile: { username: "test-user" } } } };
+		},
+	);
+	assert.deepEqual(requestedOperations, ["profileAttributes"]);
+	assert.equal(
+		result.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "spotify_recent_context_boundary_unverified",
+		),
+		true,
+	);
+});
+
+test("ranked-list query hash is discovered and a short page continues to the reported total", async () => {
+	const offsets: number[] = [];
+	const result = await collectWithInPageFetch(["top_artists"], (operationName, variables) => {
+		assert.equal(operationName, "userTopContent");
+		const input = variables.topArtistsInput as { offset: number };
+		offsets.push(input.offset);
+		const offset = input.offset;
+		return {
+			data: {
+				me: {
+					profile: {
+						topArtists: {
+							items: offset === 0
+								? [{ data: { uri: "spotify:artist:artist1", name: "Artist One", genres: [], stats: { followers: 1 }, popularity: 5 } }]
+								: [
+									{ data: { uri: "spotify:artist:artist2", name: "Artist Two", genres: [], stats: { followers: 2 }, popularity: 6 } },
+									{ data: { uri: "spotify:artist:artist3", name: "Artist Three", genres: [], stats: { followers: 3 }, popularity: 7 } },
+								],
+							totalCount: 3,
+						},
+					},
+				},
+			},
+		};
+	});
+	assert.deepEqual(offsets, [0, 1, 0, 1]);
+	assert.equal(result.emittedRecords.filter((record) => record.stream === "top_artists").length, 6);
+	assert.equal(result.messages.some((message) => message.type === "STATE" && message.stream === "top_artists"), false);
+});
 
 function makeContext(
 	webResult: Record<string, unknown>,
@@ -222,7 +451,7 @@ test("spotify browser collect skips Web API-only streams during stage 1", async 
 			.filter((message) => message.type === "SKIP_RESULT")
 			.map((message) => message.stream)
 			.sort(),
-		["recently_played", "top_artists"],
+		["top_artists"],
 	);
 });
 
@@ -309,6 +538,9 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 			if (url === "https://open.spotifycdn.com/bundle.js") {
 				return new Response(bundle, { status: 200 });
 			}
+			if (url.startsWith("https://spclient.wg.spotify.com/recently-played/")) {
+				return new Response(JSON.stringify({ playContexts: [] }), { status: 200 });
+			}
 			if (url === "https://api-partner.spotify.com/pathfinder/v2/query") {
 				const body = JSON.parse(String(init?.body)) as {
 					operationName: string;
@@ -346,7 +578,8 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 				if (body.operationName === "fetchPlaylist") {
 					const id = String(body.variables.uri).split(":").pop();
 					return new Response(
-						JSON.stringify({
+						JSON.stringify(
+							completeSourceFields(body.operationName, {
 							data: {
 								playlistV2: {
 									uri: `spotify:playlist:${id}`,
@@ -363,13 +596,14 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 									images: { items: [] },
 								},
 							},
-						}),
+						})),
 						{ status: 200 },
 					);
 				}
 				if (body.operationName === "fetchLibraryTracks") {
 					return new Response(
-						JSON.stringify({
+						JSON.stringify(
+							completeSourceFields(body.operationName, {
 							data: {
 								me: {
 									library: {
@@ -378,6 +612,7 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 											totalCount: 3,
 											items: [
 												{
+													addedAt: { isoString: null },
 													track: {
 														uri: "spotify:track:missingDate",
 														data: {
@@ -411,6 +646,7 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 														uri: "spotify:track:unknownExplicit",
 														data: {
 															name: "Unknown Explicit",
+															contentRating: null,
 															artists: { items: [] },
 															albumOfTrack: { artists: { items: [] } },
 														},
@@ -421,7 +657,7 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 									},
 								},
 							},
-						}),
+						})),
 						{ status: 200 },
 					);
 				}
@@ -443,8 +679,8 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 			},
 			page: {
 				goto: () => Promise.resolve(null),
-				evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
-					fn(arg),
+				evaluate: (source: string) =>
+					(0, eval)(source) as Promise<unknown>,
 			} as never,
 			progress: (message) => {
 				progressMessages.push(message);
@@ -534,6 +770,7 @@ function spotifyWebFixtureBundle(): string {
 		["fetchPlaylist", "b".repeat(64)],
 		["libraryV3", "c".repeat(64)],
 		["profileAttributes", "d".repeat(64)],
+		["userTopContent", "e".repeat(64)],
 	]
 		.map(([name, hash]) => `new a.b("${name}","query","${hash}"`)
 		.join(";");
@@ -587,12 +824,19 @@ async function collectWithInPageFetch(
 			if (url === "https://open.spotifycdn.com/bundle.js") {
 				return new Response(spotifyWebFixtureBundle(), { status: 200 });
 			}
+			if (url.startsWith("https://spclient.wg.spotify.com/recently-played/")) {
+				return new Response(JSON.stringify({ playContexts: [] }), { status: 200 });
+			}
 			if (url === "https://api-partner.spotify.com/pathfinder/v2/query") {
 				const body = JSON.parse(String(init?.body)) as {
 					operationName: string;
 					variables: Record<string, unknown>;
 				};
-				const result = graphql(body.operationName, body.variables);
+				const raw = graphql(body.operationName, body.variables);
+				const result =
+					raw instanceof Response
+						? raw
+						: completeSourceFields(body.operationName, raw);
 				return result instanceof Response
 					? result
 					: new Response(JSON.stringify(result), { status: 200 });
@@ -611,8 +855,8 @@ async function collectWithInPageFetch(
 				},
 				page: {
 					goto: () => Promise.resolve(null),
-					evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
-						fn(arg),
+					evaluate: (source: string) =>
+						(0, eval)(source) as Promise<unknown>,
 				} as never,
 				progress: () => Promise.resolve(),
 				requested: new Map<string, StreamScope>(
@@ -886,4 +1130,82 @@ test("spotify browser parser rejects repeated full saved-track pages", async () 
 			};
 		},
 	);
+});
+
+test("top rows: a field the operation never carries is null, a malformed one withholds the row", () => {
+	const page = (items: unknown[]) => ({
+		data: { me: { profile: { topTracks: { items, totalCount: items.length } } } },
+	});
+	const track = (id: string, extra: Record<string, unknown>) => ({
+		data: {
+			uri: `spotify:track:${id}`,
+			name: `Track ${id}`,
+			artists: { items: [{ profile: { name: "Artist" } }] },
+			albumOfTrack: { name: "Album" },
+			...extra,
+		},
+	});
+	const result = parseTopRows(
+		[
+			page([
+				track("absent", {}),
+				track("malformed", { trackDuration: [] }),
+				track("present", { trackDuration: { totalMilliseconds: 5 } }),
+			]),
+		],
+		"top_tracks",
+		"short_term",
+	);
+	assert.deepEqual(
+		result.rows.map((row) => [row.id, row.duration_ms]),
+		[
+			["absent", null],
+			["present", 5],
+		],
+	);
+	assert.equal(result.withheld, 1);
+	const artists = parseTopRows(
+		[
+			{
+				data: {
+					me: {
+						profile: {
+							topArtists: {
+								totalCount: 1,
+								items: [{ data: { uri: "spotify:artist:a1", profile: { name: "A" } } }],
+							},
+						},
+					},
+				},
+			},
+		],
+		"top_artists",
+		"short_term",
+	);
+	assert.equal(artists.rows.length, 1, "an absent genres key still emits the row");
+	assert.equal(artists.withheld, 0);
+	assert.equal(Object.hasOwn(artists.rows[0] ?? {}, "genres"), false, "genres is omitted, not invented");
+	const withGenres = (genres: unknown) =>
+		parseTopRows(
+			[
+				{
+					data: {
+						me: {
+							profile: {
+								topArtists: {
+									totalCount: 1,
+									items: [{ data: { uri: "spotify:artist:a1", profile: { name: "A" }, genres } }],
+								},
+							},
+						},
+					},
+				},
+			],
+			"top_artists",
+			"short_term",
+		);
+	assert.deepEqual(withGenres([]).rows[0]?.genres, []);
+	assert.equal(withGenres([1]).rows.length, 0, "a malformed genres is a gap");
+	assert.equal(withGenres([1]).withheld, 1);
+	assert.equal(withGenres("pop").withheld, 1);
 });
