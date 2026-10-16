@@ -450,7 +450,6 @@ test("historical backfill and mutable refresh have separate progress within a 90
 
 test("a failed mutable refresh preserves the prior refresh watermark and safe historical cursor", async () => {
   const today = new Date().toISOString().slice(0, 10);
-  const refreshFrom = shifted(today, -2);
   const priorRefresh = shifted(today, -3);
   await withBrowser(async () => new Response("{}", { status: 500 }), async () => {
     const h = harness(["activity"], page(HOME), {
