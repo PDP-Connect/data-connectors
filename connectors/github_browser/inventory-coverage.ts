@@ -17,6 +17,7 @@ export function fullInventoryCoverage(
 		considered: number;
 		covered: number;
 	},
+	reason?: string,
 ): EmittedMessage {
 	const { considered, covered } = enumeration;
 	if (
@@ -44,8 +45,8 @@ export function fullInventoryCoverage(
 		type: "SKIP_RESULT",
 		stream,
 		reason: "inventory_not_proven_complete",
-		message: "Source enumeration did not prove the inventory complete.",
+		message: `Source enumeration did not prove the inventory complete${reason ? `: ${reason}` : ""}.`,
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
-		diagnostics: { enumeration },
+		diagnostics: { enumeration, ...(reason ? { reason } : {}) },
 	};
 }

@@ -200,3 +200,117 @@ test("contribution source totals are independent of loading layout diagnostics",
  const html = '<h2 id="js-contribution-activity-description" aria-busy="true">3 contributions</h2><td class="ContributionCalendar-day" data-date="2026-01-01" data-count="3" data-level="2"></td>';
  assert.equal(parseContributionHtml(html).complete, true);
 });
+
+const starRows = '<div id="user-starred-repos"><ul><li><h3><a href="/sample-user/demo">sample-user/demo</a></h3><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div>';
+const starCount = (total: number) => `<a data-tab-item="stars" href="/sample-user?tab=stars"><span class="Counter">${total}</span></a>`;
+const restRepo = { full_name: "sample-user/demo", html_url: "https://github.com/sample-user/demo" };
+for (const primary of [starRows, "<main>Unreadable list</main>"]) {
+ test(`starred: fallback retains primary exact total with ${primary.includes("user-starred") ? "readable" : "unreadable"} list`, async () => {
+  const visits: string[] = [];
+  const result = await run("starred", { openPage: async url => {
+   visits.push(url);
+   return page(url, owner + (url.includes("/stars/") ? starRows + terminal : primary + starCount(2)));
+  } });
+  assertIncomplete(result, "starred");
+  assert.ok(visits.some(url => url.includes("/stars/")));
+  const skip = result.messages.find(m => m.type === "SKIP_RESULT");
+  assert.equal((skip?.diagnostics as { reason: string }).reason, "total_mismatch");
+  assert.match(String(skip?.message), /total_mismatch/u);
+ });
+}
+test("starred: conflicting exact totals across routes cannot complete", async () => {
+ const result = await run("starred", { openPage: async url => page(url, owner +
+  (url.includes("/stars/") ? starRows + starCount(1) + terminal : starRows + starCount(2))) });
+ assertIncomplete(result, "starred");
+ assert.equal((result.messages.find(m => m.type === "SKIP_RESULT")?.diagnostics as { reason: string }).reason, "source_total_changed");
+});
+test("starred: agreeing route totals complete only after the fallback reads every item", async () => {
+ const twoRows = starRows.replace("</ul>", '<li><h3><a href="/sample-user/other">sample-user/other</a></h3></li></ul>');
+ const result = await run("starred", { openPage: async url => page(url, owner +
+  (url.includes("/stars/") ? twoRows + starCount(2) + terminal : starRows + starCount(2))) });
+ assert.equal((result.records[0]?.starred as unknown[]).length, 2);
+ assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
+});
+test("starred: empty REST first page proves a zero-star snapshot without a counter or paginator", async () => {
+ const urls: string[] = [];
+ const result = await run("starred", {
+  openPage: async url => page(url, owner + '<div id="user-starred-repos"><div class="blankslate">You don’t have any starred repositories yet.</div></div>'),
+  fetchPublicJson: async url => {
+   urls.push(url); return { requestedUrl: url, responseUrl: url, status: 200, data: [] };
+  },
+ });
+ assert.deepEqual(result.records[0]?.starred, []);
+ assert.deepEqual(urls, ["https://api.github.com/users/sample-user/starred?per_page=100&page=1"]);
+ assert.ok(result.messages.some(m => m.type === "STATE"));
+ assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
+});
+for (const [label, data, link, complete] of [
+ ["observed missing Link", [restRepo], null, true],
+ ["last-page Link", [restRepo], '<https://api.github.com/users/sample-user/starred?page=1>; rel="prev"', true],
+ ["unobserved Link", [restRepo], undefined, false],
+ ["wrong count", [], null, false],
+ ["wrong repository", [{ full_name: "sample-user/other", html_url: "https://github.com/sample-user/other" }], null, false],
+ ["malformed repository", [{ full_name: "sample-user/demo" }], null, false],
+ ["duplicate repository", [restRepo, restRepo], null, false],
+] as const) {
+ test(`starred REST evidence: ${label}`, async () => {
+  const result = await run("starred", {
+   openPage: async url => page(url, owner + starRows),
+   fetchPublicJson: async url => ({ requestedUrl: url, responseUrl: url, status: 200, data, link }),
+  });
+  if (!complete) assertIncomplete(result, "starred");
+  else assert.equal((result.records[0]?.starred as unknown[]).length, 1);
+ });
+}
+test("starred: REST continuation is read before completion", async () => {
+ const urls: string[] = [];
+ const twoRows = starRows.replace("</ul>", '<li><h3><a href="/sample-user/other">sample-user/other</a></h3></li></ul>');
+ const result = await run("starred", {
+  openPage: async url => page(url, owner + twoRows),
+  fetchPublicJson: async url => {
+   urls.push(url);
+   const first = new URL(url).searchParams.get("page") === "1";
+   return { requestedUrl: url, responseUrl: url, status: 200,
+    data: first ? [restRepo] : [{ full_name: "sample-user/other", html_url: "https://github.com/sample-user/other" }],
+    link: first ? '<https://api.github.com/users/sample-user/starred?per_page=100&page=2>; rel="next"' : null };
+  },
+ });
+ assert.equal(urls.length, 2);
+ assert.equal((result.records[0]?.starred as unknown[]).length, 2);
+});
+for (const failure of ["redirect", "status", "shape", "throw"]) {
+ test(`starred: REST ${failure} preserves the prior snapshot`, async () => {
+  const result = await run("starred", {
+   openPage: async url => page(url, owner + starRows),
+   fetchPublicJson: async url => {
+    if (failure === "throw") throw new Error("fixture source unavailable");
+    return { requestedUrl: url, responseUrl: failure === "redirect" ? "https://api.github.com/users/other/starred" : url,
+     status: failure === "status" ? 403 : 200, data: failure === "shape" ? {} : [restRepo], link: null };
+   },
+  });
+  assertIncomplete(result, "starred");
+ });
+}
+test("starred: wrong fallback owner reports its specific withholding reason", async () => {
+ const result = await run("starred", { openPage: async url => page(url,
+  (url.includes("/stars/") ? owner.replaceAll("sample-user", "other-user") : owner) + starRows) });
+ assertIncomplete(result, "starred");
+ const skip = result.messages.find(m => m.type === "SKIP_RESULT");
+ assert.equal((skip?.diagnostics as { reason: string }).reason, "wrong_owner");
+ assert.match(String(skip?.message), /wrong_owner/u);
+});
+
+for (const counter of [false, true]) {
+ test(`starred: zero-star fallback without profile markup, All stars counter ${counter}`, async () => {
+  const result = await run("starred", {
+   openPage: async url => page(url, url.includes("/stars/")
+    ? '<meta name="user-login" content="sample-user">' + (counter
+     ? '<a href="/stars/sample-user"><span class="Counter">0</span> All stars</a>' : "")
+    : owner + '<div id="user-starred-repos"><div class="blankslate">You don’t have any starred repositories yet.</div></div>'),
+   fetchPublicJson: async url => ({ requestedUrl: url, responseUrl: url, status: 200, data: [], link: null }),
+  });
+  assert.deepEqual(result.records[0]?.starred, []);
+  assert.ok(result.messages.some(m => m.type === "STATE"));
+  assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
+ });
+}

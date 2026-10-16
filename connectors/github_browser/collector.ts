@@ -133,7 +133,7 @@ export async function collectGitHubBrowser(
 		await context.emit(fullInventoryCoverage(stream, {
 			kind: "enumerated", complete: false,
 			considered: counts?.considered ?? 0, covered: counts?.covered ?? 0,
-		}));
+		}, reason));
 	};
 	const emitEntity = async (stream: string, data: object): Promise<boolean> => {
 		const record = data as RecordData;
@@ -197,6 +197,11 @@ export async function collectGitHubBrowser(
 			const seen = new Set<string>();
 			let covered = 0;
 			let expectedTotal: number | null = null;
+			const exactTotals = new Set<number>();
+			const retainTotal = (proof: ReturnType<typeof inspectInventoryPage>): void => {
+				if (proof.total !== null && proof.reason !== "wrong_navigation" && proof.reason !== "wrong_owner")
+					exactTotals.add(proof.total);
+			};
 			let entriesComplete = true;
 			let rejected = 0;
 			let url = inventoryUrl(username, stream, 1);
@@ -204,11 +209,19 @@ export async function collectGitHubBrowser(
 				let page = await services.openPage(url);
 				let parsed = inventoryRows(stream, page.html);
 				let proof = inspectInventoryPage(page, stream, username, pageNumber, new Set([...seen, ...parsed.rows.map(row => row.id)]).size, rejected + parsed.rejectedRows);
+				retainTotal(proof);
 				if (stream === "starred" && pageNumber === 1 && (proof.reason === "terminal_unverified" || proof.reason === "unreadable_list")) {
+					const primary = { parsed, proof };
 					url = `${GITHUB}/stars/${username}?page=1`;
 					page = await services.openPage(url);
 					parsed = inventoryRows(stream, page.html);
 					proof = inspectInventoryPage(page, stream, username, pageNumber, parsed.rows.length, parsed.rejectedRows);
+					retainTotal(proof);
+					// An unreadable alternate route must not discard a readable primary list.
+					if (proof.reason === "unreadable_list" && primary.proof.reason === "terminal_unverified") {
+						parsed = primary.parsed;
+						proof = primary.proof;
+					}
 				}
 				if (proof.reason === "wrong_navigation" || proof.reason === "wrong_owner") {
 					await incomplete(stream, proof.reason); return;
@@ -220,20 +233,28 @@ export async function collectGitHubBrowser(
 					seen.add(row.id);
 					if (await emitEntity(stream, row)) covered += 1;
 				}
-				if (proof.total !== null) {
-					if (expectedTotal !== null && expectedTotal !== proof.total) {
-						await incomplete(stream, "source_total_changed"); return;
-					}
-					expectedTotal = proof.total;
+				if (exactTotals.size > 1) {
+					await incomplete(stream, "source_total_changed"); return;
 				}
+				expectedTotal = exactTotals.values().next().value ?? null;
 				const totalMatches = expectedTotal !== null && expectedTotal === seen.size;
+				if (proof.nextUrl === null && expectedTotal !== null && !totalMatches) {
+					await incomplete(stream, "total_mismatch", { considered: expectedTotal, covered }); return;
+				}
 				if (entriesComplete && rejected === 0 && proof.nextUrl === null &&
-					(proof.complete || proof.reason === "terminal_unverified") &&
-					covered === seen.size && (totalMatches || (proof.complete && expectedTotal === null))) {
-					await complete(stream, { considered: seen.size, covered }); return;
+					(proof.complete || proof.reason === "terminal_unverified") && covered === seen.size) {
+					if (totalMatches || (proof.complete && expectedTotal === null)) {
+						await complete(stream, { considered: seen.size, covered }); return;
+					}
+					if (stream === "starred") {
+						const rest = await inspectStarredRest(services, username, seen);
+						if (rest === null) await complete(stream, { considered: seen.size, covered });
+						else await incomplete(stream, rest, { considered: seen.size, covered });
+						return;
+					}
 				}
 				if (proof.nextUrl === null) {
-					await incomplete(stream, "source_inventory_evidence_unavailable", { considered: expectedTotal ?? seen.size, covered }); return;
+					await incomplete(stream, proof.reason, { considered: expectedTotal ?? seen.size, covered }); return;
 				}
 				url = proof.nextUrl;
 			}
@@ -524,4 +545,33 @@ function apiWindowEnded(link: string | null | undefined): boolean {
 	if (link === undefined) return false;
 	if (link === null) return true;
 	return !/;\s*rel\s*=\s*(?:"[^"]*\bnext\b[^"]*"|next\b)/iu.test(link);
+}
+
+/** REST supplies enumeration evidence; browser rows remain the emitted payload. */
+async function inspectStarredRest(
+	services: BrowserServices,
+	username: string,
+	browserRepos: ReadonlySet<string>,
+): Promise<string | null> {
+	const seen = new Set<string>();
+	for (let page = 1; page <= INVENTORY_PAGE_LIMIT; page += 1) {
+		const url = `${API}/users/${username}/starred?per_page=100&page=${page}`;
+		const response = await services.fetchPublicJson(url);
+		if (!apiResponseMatches(response, url) || !Array.isArray(response.data))
+			return "invalid_starred_rest_response";
+		for (const raw of response.data) {
+			const repo = asRecord(raw);
+			const name = repo?.full_name;
+			if (typeof name !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(name) ||
+				repo?.html_url !== `${GITHUB}/${name}` || seen.has(repo.html_url))
+				return "invalid_or_duplicate_rows";
+			seen.add(repo.html_url as string);
+		}
+		if ((page === 1 && response.data.length === 0) || apiWindowEnded(response.link)) {
+			if (seen.size !== browserRepos.size) return "total_mismatch";
+			if (Array.from(seen).some(repo => !browserRepos.has(repo))) return "repository_mismatch";
+			return null;
+		}
+	}
+	return "end_not_proven";
 }

@@ -55,7 +55,7 @@ export function inspectInventoryEnd(
 		return { complete: false, nextUrl: null, reason: "wrong_navigation" };
 	if (!isExpectedRequest(page.requestedUrl, stream, username, pageNumber))
 		return { complete: false, nextUrl: null, reason: "wrong_navigation" };
-	if (!hasExpectedOwner(page.html, username))
+	if (!hasExpectedOwner(page.html, username, stream === "starred" ? page.currentUrl : undefined))
 		return { complete: false, nextUrl: null, reason: "wrong_owner" };
 	if (!evidence.hasRecognizedList)
 		return { complete: false, nextUrl: null, reason: "unreadable_list" };
@@ -121,14 +121,22 @@ export function sameNavigation(
 	}
 }
 
-export function hasExpectedOwner(html: string, username: string): boolean {
+export function hasExpectedOwner(html: string, username: string, currentUrl?: string): boolean {
 	const { document } = parseHTML(html);
 	const meta = document.querySelector('meta[name="user-login"]');
-	const nickname = document.querySelector("span.p-nickname");
-	return (
-		meta?.getAttribute("content") === username &&
-		nickname?.textContent?.trim() === username
-	);
+	if (meta?.getAttribute("content") !== username) return false;
+	// The stars listing has no profile nickname. Its exact owner route and
+	// signed-in identity bind it instead; request selection is checked above.
+	if (currentUrl !== undefined) {
+		try {
+			const url = new URL(currentUrl);
+			if (url.origin === "https://github.com" && !url.username && !url.password &&
+				url.pathname === `/stars/${username}`) return true;
+		} catch {
+			return false;
+		}
+	}
+	return document.querySelector("span.p-nickname")?.textContent?.trim() === username;
 }
 
 export function inspectProfilePage(

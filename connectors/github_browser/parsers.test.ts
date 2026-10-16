@@ -633,3 +633,76 @@ test("link-only pinned cards lack render proof while known empty slots preserve 
 	for (const key of ["language", "stars"])
 		assert.equal(key in (rendered.row?.pinnedRepositories?.[0] ?? {}), false, key);
 });
+
+test("owner repository tab counters remain authoritative inside the site header", () => {
+	const owner = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>';
+	const list = '<main><ul id="user-repositories-list"></ul></main>';
+	const tab = (count: string, href = "/sample-user?tab=repositories"): string =>
+		`<a data-tab-item="repositories" href="${href}">Repositories <span class="Counter">${count}</span></a>`;
+	const header = (contents: string): string => `<div class="js-header-wrapper"><nav>${contents}</nav></div>`;
+	const inspect = (navigation: string) => inspectInventoryPage(
+		inventoryObservation("repositories", owner + navigation + list, 1),
+		"repositories", "sample-user", 1, 0, 0,
+	);
+	assert.deepEqual(inspect(header(tab("0"))), {
+		valid: true, complete: true, total: 0, nextUrl: null, reason: "terminal_list",
+	});
+	assert.equal(inspect(header(tab("0") + tab("0"))).complete, true);
+	for (const contents of [tab("0") + tab("1"), tab("1k"), tab("Loading")]) {
+		const proof = inspect(header(contents));
+		assert.equal(proof.total, null);
+		assert.equal(proof.reason, "unknown_continuation");
+	}
+	for (const navigation of [
+		header(tab("0", "/other-user?tab=repositories")),
+		header(tab("0", "/sample-user?tab=repositories&type=public")),
+		header(tab("0", "/sample-user?tab=repositories&tab=repositories")),
+		header(`<dialog>${tab("0")}</dialog>`),
+		`<footer><nav>${tab("0")}</nav></footer>`,
+		`<div class="js-header-wrapper">${tab("0")}</div>`,
+	]) {
+		const proof = inspect(navigation);
+		assert.equal(proof.total, null);
+		assert.equal(proof.reason, "terminal_unverified");
+	}
+});
+
+test("All stars totals are exact, owner-bound, unfiltered and reconciled with profile tabs", () => {
+	const url = "https://github.com/stars/sample-user?page=1";
+	const owner = '<meta name="user-login" content="sample-user">';
+	const list = '<main><ul id="user-starred-repos"></ul></main>';
+	const allStars = (count: string, href = "/stars/sample-user", label = "All stars"): string =>
+		`<a href="${href}"><span class="Counter">${count}</span> ${label}</a>`;
+	const profileTab = (count: string): string =>
+		`<nav><a href="/sample-user?tab=stars">Stars <span class="Counter">${count}</span></a></nav>`;
+	const inspect = (navigation: string) => inspectInventoryPage(
+		{ requestedUrl: url, currentUrl: url, html: owner + navigation + list },
+		"starred", "sample-user", 1, 0, 0,
+	);
+	assert.deepEqual(inspect(allStars("0")), {
+		valid: true, complete: true, total: 0, nextUrl: null, reason: "terminal_list",
+	});
+	assert.equal(inspect(allStars("0") + allStars("0") + profileTab("0")).complete, true);
+	for (const navigation of [
+		allStars("0") + allStars("1"), allStars("0") + profileTab("1"),
+		allStars("1k"), allStars("Loading"),
+	]) {
+		const proof = inspect(navigation);
+		assert.equal(proof.total, null);
+		assert.equal(proof.reason, "unknown_continuation");
+	}
+	for (const navigation of [
+		allStars("0", "/stars/other-user"),
+		allStars("0", "/stars/sample-user?type=public"),
+		allStars("0", "/stars/sample-user/some-list"),
+		allStars("0", "/stars/sample-user#list"),
+		allStars("0", "https://example.test/stars/sample-user"),
+		allStars("0", "/stars/sample-user", "Lists"),
+		`<dialog>${allStars("0")}</dialog>`,
+		`<footer>${allStars("0")}</footer>`,
+	]) {
+		const proof = inspect(navigation);
+		assert.equal(proof.total, null);
+		assert.equal(proof.reason, "terminal_unverified");
+	}
+});

@@ -783,16 +783,31 @@ export function inspectInventoryPage(
 	const { document } = parseHTML(page.html);
 	const tab = stream === "repositories" ? "repositories" : "stars";
 	const list = stream === "repositories" ? document.querySelector("#user-repositories-list") : starredList(document);
-	// Only the owner's unfiltered profile tab can supply this inventory's total.
+	// Only the owner's unfiltered tab or All stars link supplies an exact total.
+	const counterSelector = '.Counter, [class*="CounterLabel-CounterLabel"]';
 	const tabs = Array.from(document.querySelectorAll("a[href]")).filter(link => {
 		const href = githubUrl(link.getAttribute("href"));
-		if (href === null || link.closest(OVERLAY_SELECTOR) !== null || siteChrome(link, list)) return false;
+		if (href === null || link.closest(OVERLAY_SELECTOR) !== null) return false;
 		const url = new URL(href);
-		return url.pathname === `/${username}` && !url.hash &&
+		if (url.hash) return false;
+		const nav = link.closest('nav, [role="navigation"], .UnderlineNav');
+		const profileTab = url.pathname === `/${username}` &&
 			url.searchParams.get("tab") === tab && Array.from(url.searchParams.keys()).length === 1 &&
-			(link.getAttribute("data-tab-item") === tab || link.closest('nav, [role="navigation"], .UnderlineNav') !== null);
+			(link.getAttribute("data-tab-item") === tab || nav !== null);
+		let allStars = false;
+		if (stream === "starred" && url.pathname === `/stars/${username}` && !url.search) {
+			const label = link.cloneNode(true) as Element;
+			for (const counter of Array.from(label.querySelectorAll(counterSelector))) counter.remove();
+			allStars = /^All stars$/iu.test(text(label));
+		}
+		// GitHub puts the profile tab navigation inside the site header wrapper.
+		// Keep excluding generic chrome and footer links; only owner tab-nav is exempt.
+		const headerTab = profileTab && nav !== null &&
+			link.closest('.js-header-wrapper, .header-wrapper, [role="banner"]') !== null &&
+			link.closest('footer, [role="contentinfo"]') === null;
+		return (profileTab || allStars) && (!siteChrome(link, list) || headerTab);
 	});
-	const counters = tabs.flatMap(link => Array.from(link.querySelectorAll('.Counter, [class*="CounterLabel-CounterLabel"]')));
+	const counters = tabs.flatMap(link => Array.from(link.querySelectorAll(counterSelector)));
 	const values = counters.map(node => {
 		const raw = text(node);
 		return /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(raw) &&

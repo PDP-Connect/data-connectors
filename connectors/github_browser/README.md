@@ -19,12 +19,18 @@ observations are not the same as observing an absent Link header. Invalid,
 duplicate, redirected, failed, or incomplete API responses withhold the inventory
 snapshot. Abbreviated counters cannot establish exact totals.
 
+Starred inventories can also use REST enumeration through an observed Link end
+or an empty first page. Its distinct repository identities must match the browser
+rows. Every validated exact counter from the primary and fallback routes remains
+binding; conflicting counters or a row-count mismatch withhold the snapshot.
+
 ## Incomplete runs
 
 Incomplete inventories emit no RECORD, STATE or self DETAIL_COVERAGE and derive
 no deletes, preserving the prior snapshot. The retryable
 `inventory_not_proven_complete` SKIP_RESULT is supplied by a connector-local
 compatibility helper (TODO #418). Profile presence is not an inventory claim.
+The skip message and diagnostics include the specific source withholding reason.
 
 PageShim's six-scope and streaming gates use internally consistent source totals
 and explicit pagination evidence. The separate failed-starred-stream regression

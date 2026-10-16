@@ -1398,16 +1398,24 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 	assertCleanRun(r);
 	assert.equal(r.result["github.starred"], undefined);
-	assert.deepEqual(r.result.errors, [
+	// The host projects the SKIP_RESULT message, not its reason code. The
+	// message names the specific withholding cause after a fixed prefix.
+	assert.equal(r.result.errors.length, 1);
+	const [error] = r.result.errors;
+	assert.match(
+		error.reason,
+		/^Source enumeration did not prove the inventory complete(: .+)?\.$/,
+	);
+	assert.deepEqual(
+		{ ...error, reason: undefined },
 		{
 			errorClass: "runtime_error",
-			// The host projects the SKIP_RESULT message, not its reason code.
-			reason: "Source enumeration did not prove the inventory complete.",
+			reason: undefined,
 			disposition: "omitted",
 			scope: "github.starred",
 			phase: "collect",
 		},
-	]);
+	);
 });
 
 test("oura_browser: a failed daily-data window reports the stream instead of Complete", {
