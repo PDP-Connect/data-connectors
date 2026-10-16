@@ -1897,6 +1897,11 @@ export function makeEmitRecord(deps: {
 	): boolean => {
 		const omitted = new Set((options.omissions ?? []).map((o) => o.field));
 		if (data.id == null || omitted.has("id")) return false;
+		// Resource exclusion is sufficient even when consent time is unreadable.
+		// An omitted identity above cannot supply this independent proof.
+		const rs = resFilters.get(stream);
+		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
+			return true;
 		if (requested.get(stream)?.time_range) {
 			const consent = timeRangeFieldFor(stream);
 			if (

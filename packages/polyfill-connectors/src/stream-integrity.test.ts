@@ -23,7 +23,11 @@ const STATE = (stream: string): EmittedMessage => ({
 /** Run the fixture connector through the real runtime and return the wire, minus PROGRESS. */
 type StreamRequest =
 	| string
-	| { name: string; time_range?: { since?: string; until?: string } };
+	| {
+			name: string;
+			resources?: string[];
+			time_range?: { since?: string; until?: string };
+	  };
 
 async function wire(
 	steps: unknown[],
@@ -598,6 +602,65 @@ test("runtime: a malformed row provably outside the time range does not starve t
 		[{ name: "items", time_range: since }],
 	);
 	assert.deepEqual(summary(inRangeBad), [
+		"SKIP_RESULT:items:record_fields_unavailable",
+		`SKIP_RESULT:items:${CHECKPOINT_WITHHELD_REASON}`,
+		"DONE:succeeded",
+	]);
+});
+
+test("runtime: resource exclusion is independent of an unreadable consent timestamp", async () => {
+	const scope = [
+		{
+			name: "items",
+			resources: ["A"],
+			time_range: { since: "2026-10-01T00:00:00Z" },
+		},
+	];
+	const malformed = (id: string) => ({
+		op: "record",
+		stream: "items",
+		data: { id, updated_at: null },
+		omissions: [
+			{ field: "updated_at", reason: "updated_at: not an ISO 8601 date" },
+		],
+	});
+	const selected = {
+		op: "record",
+		stream: "items",
+		data: { id: "A", title: "A", updated_at: "2026-10-10T00:00:00Z" },
+	};
+	const excluded = await wire(
+		[malformed("B"), selected, { op: "emit", msg: STATE("items") }],
+		scope,
+	);
+	assert.deepEqual(summary(excluded), [
+		"RECORD:items:A",
+		"STATE:items",
+		"DONE:succeeded",
+	]);
+	const unreadableSelected = await wire(
+		[malformed("A"), { op: "emit", msg: STATE("items") }],
+		scope,
+	);
+	assert.deepEqual(summary(unreadableSelected), [
+		"SKIP_RESULT:items:record_fields_unavailable",
+		`SKIP_RESULT:items:${CHECKPOINT_WITHHELD_REASON}`,
+		"DONE:succeeded",
+	]);
+	const unreadableId = await wire(
+		[
+			{
+				...malformed("B"),
+				omissions: [
+					{ field: "id", reason: "id: unreadable" },
+					{ field: "updated_at", reason: "updated_at: unreadable" },
+				],
+			},
+			{ op: "emit", msg: STATE("items") },
+		],
+		scope,
+	);
+	assert.deepEqual(summary(unreadableId), [
 		"SKIP_RESULT:items:record_fields_unavailable",
 		`SKIP_RESULT:items:${CHECKPOINT_WITHHELD_REASON}`,
 		"DONE:succeeded",

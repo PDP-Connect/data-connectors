@@ -4221,7 +4221,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 2497,
+			line: 2502,
 			column: 7,
 			category: "shared_mutable_accumulator",
 			note: "closeBrowserContextPagesExcept(): loop body mutates a shared closed accumulator the next iteration reads",
@@ -4354,7 +4354,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/connector-runtime.ts",
-			line: 1952,
+			line: 1957,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "makeEmitRecord(): a gated tombstone and its withheld notice must reach the wire in order",
