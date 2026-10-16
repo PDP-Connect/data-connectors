@@ -1045,3 +1045,29 @@ test("review r4: reported skip alone with equal nonempty keys withholds key-only
 	assert.equal(out.some((message) => message.type === "DETAIL_COVERAGE"), false);
 	assert.equal(out[0]?.type === "SKIP_RESULT" ? out[0].reason : null, CHECKPOINT_WITHHELD_REASON);
 });
+
+test("empty coverage passes without loss but cannot override a reported skip", () => {
+	for (const counts of [{ considered: 0, covered: 0 }, {}]) {
+		const claim: EmittedMessage = {
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream: "items",
+			state_stream: "items",
+			required_keys: [],
+			hydrated_keys: [],
+			...counts,
+		};
+		const clean = createStreamIntegrity();
+		assert.deepEqual(clean.gate(claim), [claim]);
+		assert.deepEqual(clean.gate(STATE("items")), [STATE("items")]);
+		const lost = createStreamIntegrity();
+		lost.gate({
+			type: "SKIP_RESULT",
+			stream: "items",
+			reason: "timeline_points_not_found",
+			message: "source was not found",
+		});
+		assert.equal(lost.gate(claim).some((message) => message.type === "DETAIL_COVERAGE"), false);
+		assert.equal(lost.gate(STATE("items")).some((message) => message.type === "STATE"), false);
+	}
+});

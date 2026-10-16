@@ -480,40 +480,99 @@ test("google_maps rejects scalar, empty, and unknown-key-only roots without zero
 	await Promise.all(cases.map(runCase));
 });
 
-test("google_maps keeps a recognized empty array as a valid empty counterweight", async () => {
-	const importRoot = await mkdtemp(
-		join(tmpdir(), "pdpp-google-maps-empty-shape-"),
-	);
-	try {
-		await writeFile(
-			join(importRoot, "Timeline.json"),
-			JSON.stringify({ timelineObjects: [] }),
-		);
-		const { messages } = await runImport(importRoot);
+for (const source of [
+	{ timelineObjects: [] },
+	{ locations: [] },
+	{ semanticSegments: [] },
+	[],
+]) {
+	test(`google_maps proves recognized empty source ${JSON.stringify(source)} on both streams`, async () => {
+		const importRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-empty-shape-"));
+		try {
+			await writeFile(join(importRoot, "Timeline.json"), JSON.stringify(source));
+			const { messages } = await runImport(importRoot, {}, [
+				"timeline_points",
+				"timeline_segments",
+			]);
+			assert.equal(messages.some((message) => message.type === "RECORD"), false);
+			assert.equal(messages.some((message) => message.type === "SKIP_RESULT"), false);
+			for (const stream of ["timeline_points", "timeline_segments"]) {
+				assert.ok(messages.some(
+					(message) => message.type === "STATE" && message.stream === stream,
+				));
+				const coverage = messages.find(
+					(message) => message.type === "DETAIL_COVERAGE" && message.stream === stream,
+				);
+				assert.ok(coverage?.type === "DETAIL_COVERAGE");
+				assert.equal(coverage.considered, 0);
+				assert.equal(coverage.covered, 0);
+				assert.deepEqual(coverage.required_keys, []);
+				assert.deepEqual(coverage.hydrated_keys, []);
+			}
+		} finally {
+			await rm(importRoot, { force: true, recursive: true });
+		}
+	});
+}
 
-		assert.ok(
-			messages.some(
-				(message) =>
-					message.type === "SKIP_RESULT" &&
-					message.reason === "timeline_points_not_found",
-			),
-		);
-		// FOLLOW-UP (google_maps): a parsed, recognized empty array is proven
-		// empty, but the connector still reports `timeline_points_not_found`,
-		// an undeclared loss skip. The runtime therefore withholds the
-		// timeline_points STATE and turns the 0/0 coverage into unknown. Stop
-		// emitting that skip for a parsed empty array (keep it for a missing
-		// one) so the proven-empty checkpoint can be saved.
-		assert.equal(
-			messages.some(
-				(message) =>
-					message.type === "STATE" && message.stream === "timeline_points",
-			),
-			false,
-		);
+test("google_maps does not mistake a directory with no export for proven empty", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-no-export-"));
+	try {
+		const { messages } = await runImport(importRoot, {}, [
+			"timeline_points",
+			"timeline_segments",
+		]);
+		for (const stream of ["timeline_points", "timeline_segments"]) {
+			assert.ok(messages.some(
+				(message) => message.type === "SKIP_RESULT" &&
+					message.stream === stream && message.reason === `${stream}_not_found`,
+			));
+		}
+		assert.equal(messages.some((message) => message.type === "STATE"), false);
+		assert.equal(messages.some((message) => message.type === "DETAIL_COVERAGE"), false);
+	} finally {
+		await rm(importRoot, { force: true, recursive: true });
+	}
+});
+
+for (const content of [
+	'{"timelineObjects":[],"locations":{}}',
+	'{"timelineObjects":[]} trailing',
+	'{"timelineObjects":[',
+]) {
+	test(`google_maps empty evidence cannot hide invalid input ${content}`, async () => {
+		const importRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-empty-invalid-"));
+		try {
+			await writeFile(join(importRoot, "Records.json"), '{"locations":[]}');
+			await writeFile(join(importRoot, "Timeline.json"), content);
+			const { messages } = await runImport(importRoot, {}, [
+				"timeline_points",
+				"timeline_segments",
+			]);
+			assert.ok(messages.some((message) => message.type === "SKIP_RESULT" &&
+				["unsupported_shape", "invalid_json"].includes(message.reason)));
+			assert.equal(messages.some((message) => message.type === "STATE"), false);
+			assert.equal(messages.some((message) => message.type === "DETAIL_COVERAGE"), false);
+		} finally {
+			await rm(importRoot, { force: true, recursive: true });
+		}
+	});
+}
+
+test("google_maps empty arrays cannot hide an unaccounted source element", async () => {
+	const importRoot = await mkdtemp(join(tmpdir(), "pdpp-google-maps-empty-unaccounted-"));
+	try {
+		await writeFile(join(importRoot, "Records.json"), '{"locations":[]}');
+		await writeFile(join(importRoot, "Timeline.json"), '{"locations":[{}]}');
+		const { messages } = await runImport(importRoot);
+		assert.ok(messages.some((message) => message.type === "SKIP_RESULT" &&
+			message.reason === "element_unaccounted"));
+		assert.ok(messages.some((message) => message.type === "SKIP_RESULT" &&
+			message.reason === "timeline_points_not_found"));
+		assert.equal(messages.some((message) => message.type === "STATE"), false);
 		const coverage = pointsCoverage(messages);
-		assert.equal(coverage.considered, undefined);
-		assert.equal(coverage.covered, undefined);
+		assert.equal(coverage.considered, 1);
+		assert.equal(coverage.covered, 0);
 	} finally {
 		await rm(importRoot, { force: true, recursive: true });
 	}
