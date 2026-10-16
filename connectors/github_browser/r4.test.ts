@@ -107,6 +107,35 @@ test("r5 an empty state with unaccounted toolbar text cannot prove completion", 
 	);
 });
 
+// Structure of the live empty starred page: the list container also holds a
+// page title, the search form, a screen-reader results line and an empty state
+// whose copy carries an ordinary (non-repository) link.
+const liveEmptyStarred = (extra = "", titleLink = "", blankslateLink = '<a class="Link--inTextBlock" href="/explore">Explore</a>'): string =>
+	`<main><turbo-frame id="user-starred-repos"><div class="gutter"><div class="col"><div class="position-relative"><h2 class="f3-light">Stars${titleLink}</h2><div class="d-flex"><form class="subnav-search"><primer-text-field><label class="sr-only">Search</label><input class="FormField-input" type="text"><button type="button"><span class="Button-content"><span class="Button-label">Search</span></span></button></primer-text-field></form></div></div><span class="sr-only js-starred-repos-search-results">0 results</span>${extra}<div class="mt-5 blankslate"><svg class="octicon"><path d=""/></svg><h3>You don’t have any starred repositories yet.</h3><p>Star repositories to save them. ${blankslateLink}</p></div></div></div></turbo-frame></main>`;
+const emptyStarredVerdict = (html: string) => {
+	const url = "https://github.com/sample-user?page=1&tab=stars";
+	return inspectInventoryPage({ requestedUrl: url, currentUrl: url, html: owner + html + terminal }, "starred", "sample-user", 1, 0, 0);
+};
+
+test("r7 list chrome and an empty state with an ordinary link still prove an empty starred list", () => {
+	const parsed = parseStarredPage(liveEmptyStarred());
+	assert.equal(parsed.rejectedRows, 0);
+	assert.equal(parsed.complete, true);
+	assert.equal(emptyStarredVerdict(liveEmptyStarred()).valid, true);
+});
+
+test("r7 list chrome does not excuse stray text, a title link to a repository, or an entry link in the empty state", () => {
+	for (const html of [
+		liveEmptyStarred('<div class="stray">sample-owner / demo</div>'),
+		liveEmptyStarred("", '<a href="/sample-owner/demo">sample-owner / demo</a>'),
+		liveEmptyStarred("", "", '<a href="/sample-owner/demo">sample-owner / demo</a>'),
+		liveEmptyStarred("<ul><li>sample-owner / demo</li></ul>"),
+	]) {
+		assert.equal(parseStarredPage(html).complete, false);
+		assert.equal(emptyStarredVerdict(html).valid, false);
+	}
+});
+
 test("r4 an empty blankslate list needs no particular wording", () => {
 	const html = '<main><div id="user-starred-repos"><div><div class="blankslate"><h3>Nothing here</h3></div></div></div></main>';
 	const url = "https://github.com/sample-user?page=1&tab=stars";

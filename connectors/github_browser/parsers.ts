@@ -258,12 +258,20 @@ function cardRows(roots: Element | null | Array<Element | null>): Element[] {
 function unaccountedRepositories(list: Element | null, rows: Element[]): number {
 	if (list === null) return 0;
 	const empty = rows.length === 0 ? listEmptyStates(list, rows) : [];
+	// A subtree that holds no list item and no repository link has no entry to lose.
+	const entryFree = (element: Element): boolean => element.querySelector("li, [role='listitem']") === null &&
+		!Array.from(element.querySelectorAll("a[href]")).some((link) => repositoryName(link.getAttribute("href")) !== null);
+	// The list container also holds the page's own search, filter and sort
+	// controls, a page-level h1/h2 title and a screen-reader results line. Entry
+	// titles are h3 links, so none of these can stand in for a dropped entry.
+	const listChrome = `${CONTROL_SELECTOR}, [role="search"], h1, h2, .sr-only, svg, canvas, script, style`;
 	const visit = (node: Node): number => {
 		if (node.nodeType === 3) return (node.textContent ?? "").trim() ? 1 : 0;
 		if (node.nodeType !== 1) return 0;
 		const element = node as Element;
 		if (rows.includes(element) || element.matches(OVERLAY_SELECTOR) || insideOverlay(element, list)) return 0;
-		if (empty.includes(element) && element.querySelector("a[href], li, [role='listitem']") === null) return 0;
+		if (empty.includes(element) && entryFree(element)) return 0;
+		if (element !== list && element.matches(listChrome) && entryFree(element)) return 0;
 		if (element.matches("a[href], li, [role='listitem']")) return 1;
 		const children = Array.from(element.childNodes);
 		if (children.length === 0 && !element.matches("ul, ol")) return 1;
