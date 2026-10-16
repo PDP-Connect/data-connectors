@@ -18,6 +18,61 @@ type ClassifierArgs = Parameters<typeof classifyAdsDialogInPage>[0];
 type Classification = ReturnType<typeof classifyAdsDialogInPage>;
 type AdsClock = Parameters<typeof scrapeAdTopics>[1];
 
+test("legacy advertiser hidden control text vetoes completion", () => {
+ const result = classify('<section role="dialog"><div role="list" aria-setsize="1"><div role="listitem">A</div><div role="listitem" style="display:none"><button>B</button></div></div></section>', {emptyMessage: "No advertisers"});
+ assert.notEqual(result.kind === "data" && result.complete, true);
+});
+
+test("removed hidden advertiser field remains unresolved after visible growth", async () => {
+ const {document, page} = makeDomPage('<div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a></div><section role="dialog"><div role="list" aria-setsize="2"><div role="listitem"><button>A</button><span id="hidden-field" style="display:none">Withheld B</span></div></div><button id="expand">See more</button></section>', {onViewAllClick: () => {
+  document.querySelector("#hidden-field")?.remove();
+  document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><button>C</button></div>');
+  document.querySelector("#expand")?.remove();
+ }});
+ const result = await scrapeAdvertisers(page, makeClock());
+ assert.equal(result.reached, false);
+ assert.ok(result.items.includes("C"));
+});
+
+
+for (const hidden of ["row", "list", "field", "zero-height"] as const) {
+ test(`advertiser hidden ${hidden} cannot certify visible growth`, async () => {
+  const hiddenRow = '<div role="listitem"' + (hidden === "row" ? ' style="display:none"' : hidden === "zero-height" ? ' style="height:0"' : '') + '><button' + (hidden === "field" ? ' style="display:none"' : '') + '>Hidden B</button></div>';
+  const {document, page} = makeDomPage(`
+   <div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a></div>
+   <section role="dialog"><div role="list" id="visible-list"><div role="listitem"><button>Visible A</button></div>${hidden === "list" ? "" : hiddenRow}</div>
+   ${hidden === "list" ? '<div role="list" style="display:none">' + hiddenRow + '</div>' : ""}
+   <button id="expand">See more</button></section>`, {onViewAllClick: () => {
+    document.querySelector("#visible-list")!.insertAdjacentHTML("beforeend", '<div role="listitem"><button>Visible C</button></div>');
+    document.querySelector("#expand")?.remove();
+   }});
+  const result = await scrapeAdvertisers(page, makeClock());
+  assert.equal(result.reached, false);
+  assert.ok(result.items.includes("Visible A"));
+  assert.ok(result.items.includes("Visible C"));
+ });
+}
+
+for (const name of ["Remove", "Removed categories"]) {
+ for (const description of ["Remove", "Removed categories", "Based on activity"]) {
+  for (const expand of [false, true]) {
+   test(`category fields retain interface-label collisions: ${name}/${description}/${expand}`, async () => {
+    const {document, page} = makeDomPage(`
+     <div role="tab">Manage info</div><div role="tabpanel"><a>Categories used to reach you</a></div>
+     <section role="dialog"><div role="list" ${expand ? "" : 'aria-setsize="1"'}>
+     <div role="listitem"><span>${name}</span><span>${description}</span><button>Remove</button></div></div>
+     ${expand ? '<button id="expand">View all</button>' : ""}</section>`, {onViewAllClick: () => {
+      document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><span>Travel</span><button>Remove</button></div>');
+      document.querySelector("#expand")?.remove();
+     }});
+    const result = await scrapeTargetingCategories(page, makeClock());
+    assert.deepEqual(result.items, [{name, description}, ...(expand ? [{name: "Travel", description: null}] : [])]);
+    assert.equal(result.reached, true);
+   });
+  }
+ }
+}
+
 for (const [listCounts, rowCounts] of [
  ['aria-setsize="1"', 'aria-setsize="2"'],
  ['aria-setsize="1" aria-rowcount="2"', ''],
@@ -744,7 +799,7 @@ test("scrapeTargetingCategories: extraction stays in the dialog whose source tot
 	});
 });
 
-test("classifyAdsDialogInPage: known UI-only topic rows require an explicit empty message", () => {
+test("classifyAdsDialogInPage: a real topic matching an interface label remains data", () => {
 	for (const marker of ["", "<p>No ad topics</p>"]) {
 		assert.deepEqual(
 			classify(
@@ -754,7 +809,7 @@ test("classifyAdsDialogInPage: known UI-only topic rows require an explicit empt
 					uiOnlyPatternSource: "^(?:special topic|see less)$",
 				},
 			),
-			{ kind: marker ? "verified_empty" : "unavailable" },
+			{ complete: false, items: ["Special topic"], kind: "data" },
 		);
 	}
 });

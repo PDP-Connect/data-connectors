@@ -417,7 +417,7 @@ function makeFakePage(options: {
 					uiOnlyPatternSource?: string;
 				};
 				if (args.emptyMessage === "No categories") {
-					const items = options.categoryRows?.map((row) => row.name) ?? [];
+					const items = options.categoryRows?.map((row) => [row.name, row.description].filter(Boolean).join(" ")) ?? [];
 					if (items.length > 0) {
 						return Promise.resolve({
 							complete: options.categoryComplete === true,
@@ -2610,8 +2610,8 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 	}> = [
 		{
 			body: '<div role="dialog"><h2>Ad topics</h2><div role="list" style="display:none"><div role="listitem">Travel</div></div></div>',
-			expected: { kind: "unavailable" },
-			name: "hidden list",
+			expected: { kind: "loading" },
+			name: "hidden list holding data",
 		},
 		{
 			body: '<div role="dialog"><div role="progressbar" aria-label="Loading ad topics"></div><div role="list" style="min-height:40px"></div></div>',
@@ -2624,9 +2624,14 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 			name: "later populated list without a source total",
 		},
 		{
-			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div>',
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button>Special topic</button></div><div role="listitem"><button>See less</button></div></div></div>',
 			expected: { kind: "unavailable" },
-			name: "ui-only list without an empty message",
+			name: "control-only interface rows without an empty message",
+		},
+		{
+			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div>',
+			expected: { complete: false, items: ["Special topic", "See less"], kind: "data" },
+			name: "plain-text rows named like interface labels are data",
 		},
 		{
 			body: '<div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><span style="display:none">Travel</span><button>See less</button></div></div></div>',
@@ -2644,9 +2649,9 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 			name: "hidden listitem sibling keeps a visible topic loading",
 		},
 		{
-			body: '<div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div>',
+			body: '<div role="dialog"><div role="list"><div role="listitem"><button>Special topic</button></div><div role="listitem"><button>See less</button></div></div><div>No ad topics</div></div>',
 			expected: { kind: "verified_empty" },
-			name: "live ui-only structure with empty copy",
+			name: "control-only interface rows with empty copy",
 		},
 	];
 	const topicArgs = {
@@ -2675,7 +2680,7 @@ test("classifyAdsDialogInPage returns closed states for reviewer fixtures", asyn
 		await page.setContent(`
 			<html><body>
 				<div role="dialog"><h2>Ad topics</h2><div role="list">
-					<div role="listitem">Special topic</div>
+					<div role="listitem"><button>Special topic</button></div>
 					<div role="listitem"><span id="topic" style="display:none">Travel</span><button>See less</button></div>
 				</div></div>
 			</body></html>`);
@@ -2847,32 +2852,22 @@ test("scrapeAdTopics keeps hidden later list data unavailable", async () => {
 	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
 });
 
-test("scrapeAdTopics collects visible rows when another list row is hidden but cannot complete without a source total", async () => {
+test("scrapeAdTopics keeps visible rows unavailable while another list holds hidden data", async () => {
 	const result = await withAccountsCenterPage(
 		'<html><body><div role="dialog"><div role="list"><div role="listitem">Visible topic</div></div><div role="list" style="display:none"><div role="listitem">Hidden topic</div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
-	assert.deepEqual(result, {
-		items: ["Visible topic"],
-		reached: false,
-		step: "destination_list_not_found",
-		surface: "ad_topics",
-	});
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
 });
 
-test("scrapeAdTopics completes visible rows beside a hidden list when the source total matches", async () => {
+test("scrapeAdTopics keeps visible rows unavailable beside a hidden data list even when the source total matches", async () => {
 	const result = await withAccountsCenterPage(
 		'<html><body><div role="dialog"><div role="list" aria-setsize="1"><div role="listitem">Visible topic</div></div><div role="list" style="display:none"><div role="listitem">Hidden topic</div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
-	assert.deepEqual(result, {
-		items: ["Visible topic"],
-		reached: true,
-		step: null,
-		surface: "ad_topics",
-	});
+	assert.deepEqual(result, AD_TOPICS_UNAVAILABLE);
 });
 
 test("scrapeAdTopics keeps a transient topic followed by hidden data unavailable", async () => {
@@ -2948,7 +2943,7 @@ test("scrapeAdTopics ignores hidden list rows and hidden empty marker", async ()
 test("scrapeAdTopics keeps settled UI-only rows without an empty marker unavailable", async () => {
 	const clock = makeVirtualAdsClock();
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem"><button type="button">See less</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, clock),
 	);
 
@@ -2956,9 +2951,23 @@ test("scrapeAdTopics keeps settled UI-only rows without an empty marker unavaila
 	assert.ok(clock.now() >= 2_500, "the UI-only rows settled before rejection");
 });
 
+test("scrapeAdTopics reads plain-text rows named like interface labels as data", async () => {
+	const result = await withAccountsCenterPage(
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div></div></body></html>',
+		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: ["Special topic", "See less"],
+		reached: false,
+		step: "destination_list_not_found",
+		surface: "ad_topics",
+	});
+});
+
 test("scrapeAdTopics accepts UI-only rows with an empty marker as verified empty", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><div role="list"><div role="listitem">Special topic</div><div role="listitem">See less</div></div><div>No ad topics</div></div></body></html>',
+		'<html><body><div role="dialog"><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem"><button type="button">See less</button></div></div><div>No ad topics</div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -2972,7 +2981,7 @@ test("scrapeAdTopics accepts UI-only rows with an empty marker as verified empty
 
 test("scrapeAdTopics collects visible real rows alongside UI-only rows but cannot complete without a source total", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem">Travel</div><div role="listitem">See less</div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem">Travel</div><div role="listitem"><button type="button">See less</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -2986,7 +2995,7 @@ test("scrapeAdTopics collects visible real rows alongside UI-only rows but canno
 
 test("scrapeAdTopics completes real rows alongside UI-only rows when row ARIA positions match", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem" aria-posinset="1" aria-setsize="1">Travel</div><div role="listitem">See less</div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem" aria-posinset="1" aria-setsize="1">Travel</div><div role="listitem"><button type="button">See less</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -3000,7 +3009,7 @@ test("scrapeAdTopics completes real rows alongside UI-only rows when row ARIA po
 
 test("scrapeAdTopics keeps unknown control rows unavailable", async () => {
 	const result = await withAccountsCenterPage(
-		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem">Special topic</div><div role="listitem"><button type="button">Manage topic preferences</button></div></div></div></body></html>',
+		'<html><body><div role="dialog"><h2>Ad topics</h2><div role="list"><div role="listitem"><button type="button">Special topic</button></div><div role="listitem"><button type="button">Manage topic preferences</button></div></div></div></body></html>',
 		(page) => scrapeAdTopics(page, makeVirtualAdsClock()),
 	);
 
@@ -3019,7 +3028,7 @@ test("scrapeAdTopics ignores hidden text beside visible controls", async () => {
 const hiddenTopicRevealPage = (rowAttributes: string): string => `
 	<html><body>
 		<div role="dialog"><h2>Ad topics</h2><div role="list">
-			<div role="listitem">Special topic</div>
+			<div role="listitem"><button type="button">Special topic</button></div>
 			<div role="listitem"${rowAttributes}>
 				<span id="topic" style="display:none">Travel</span><button>See less</button>
 			</div>
@@ -3103,13 +3112,14 @@ test("scrapeTargetingCategories keeps a self-hiding View all without new rows pa
 const expandedCategoriesPage = (
 	firstListAttributes: string,
 	laterListAttributes: string,
+	hiddenCategoryList = "",
 ): string =>
 	htmlPage(
 		categoriesControl(`
 			${insertDialog(`<div role="dialog"><div role="list"${firstListAttributes}><div role="listitem"><span>Category A</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>`)}
 			document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
 				event.currentTarget.style.display = 'none';
-				document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"${laterListAttributes}><div role="listitem"><span>Category B</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem" style="display:none"><span>Hidden Category</span><button role="button">Remove</button></div></div>');
+				document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"${laterListAttributes}><div role="listitem"><span>Category B</span><button role="button">Remove</button></div></div>${hiddenCategoryList}');
 			});`),
 	);
 
@@ -3140,6 +3150,40 @@ test("scrapeTargetingCategories completes expanded dialog lists when each source
 		items: [
 			{ description: null, name: "Category A" },
 			{ description: null, name: "Category B" },
+		],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
+test("scrapeTargetingCategories withholds completion when a hidden category row with data remains after View all", async () => {
+	const result = await withAccountsCenterPage(
+		expandedCategoriesPage("", "", '<div role="list"><div role="listitem" style="display:none"><span>Hidden Category</span><button role="button">Remove</button></div></div>'),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.equal(result.reached, false);
+	assert.equal(result.step, "destination_list_not_found");
+});
+
+test("scrapeTargetingCategories completes categories that carry a description", async () => {
+	const result = await withAccountsCenterPage(
+		htmlPage(
+			categoriesControl(`
+				${insertDialog('<div role="dialog"><div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div></div><button role="button" id="dialog-view-all">View all</button></div>')}
+				document.querySelector('#dialog-view-all').addEventListener('click', (event) => {
+					event.currentTarget.style.display = 'none';
+					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category B</span><span>Based on activity</span><button role="button">Remove</button></div></div>');
+				});`),
+		),
+		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
+	);
+
+	assert.deepEqual(result, {
+		items: [
+			{ description: "Based on activity", name: "Category A" },
+			{ description: "Based on activity", name: "Category B" },
 		],
 		reached: true,
 		step: null,
@@ -3650,7 +3694,7 @@ test("scrapeAdvertisers reports a missing advertisers link on the Manage info ta
 	});
 });
 
-test("scrapeTargetingCategories completes the live View all screen: the earlier screen stays hidden and Removed categories is interface", async () => {
+test("scrapeTargetingCategories withholds completion when View all leaves an unresolved hidden data list", async () => {
 	const result = await withAccountsCenterPage(
 		htmlPage(
 			categoriesControl(`
@@ -3669,8 +3713,8 @@ test("scrapeTargetingCategories completes the live View all screen: the earlier 
 			{ description: "Based on activity", name: "Category A" },
 			{ description: "Based on activity", name: "Category B" },
 		],
-		reached: true,
-		step: null,
+		reached: false,
+		step: "destination_list_not_found",
 		surface: "targeting_categories",
 	});
 });

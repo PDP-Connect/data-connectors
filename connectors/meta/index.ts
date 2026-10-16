@@ -1518,7 +1518,9 @@ export function classifyAdsDialogInPage(args: {
 			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
 				const parent = node.parentElement;
 				if (!parent || !visible(parent)) continue;
-				if (excludeControls && parent.closest(controlSelector)) continue;
+				const control = parent.closest(controlSelector);
+				if (excludeControls && control && (!args.requiredAffordance ||
+					normalize(control.textContent ?? "") === args.requiredAffordance)) continue;
 				const value = normalize(node.textContent ?? "");
 				if (value) text.push(value);
 			}
@@ -1613,13 +1615,16 @@ export function classifyAdsDialogInPage(args: {
 			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
 				const parent = node.parentElement;
 				if (!parent || visible(parent)) continue;
-				if (parent.closest(controlSelector)) continue;
+				const control = parent.closest(controlSelector);
+				if (args.rowsAreControls !== true && control && isKnownUiText(normalize(control.textContent ?? ""))) continue;
 				const value = normalize(node.textContent ?? "");
-				if (value && !isKnownUiText(value)) return true;
+				if (value) return true;
 			}
 			return false;
 		},
 	] as const;
+	// Hidden rows in hidden lists remain source evidence in the active dialog.
+	if (Array.from(dialog.querySelectorAll('[role="listitem"]')).some(hasHiddenRealText)) return loading;
 	const items: string[] = [];
 	let allListsComplete = true;
 	let sawUnknownList = false;
@@ -1669,16 +1674,16 @@ export function classifyAdsDialogInPage(args: {
 						visible(control) && visibleText(control) === requiredAffordance,
 				);
 				if (!hasAffordance) {
-					if (isKnownUiText(fullText)) knownUiRows += 1;
+					if (hasControl && !visibleText(row, true) && isKnownUiText(fullText)) knownUiRows += 1;
 					else if (hasControl) sawUnknownList = true;
 					continue;
 				}
 			}
 			const itemText =
-				uiOnlyPattern && hasControl && args.rowsAreControls !== true
+				(uiOnlyPattern || args.requiredAffordance) && hasControl && args.rowsAreControls !== true
 					? visibleText(row, true)
 					: fullText;
-			if (!itemText || (uiOnlyPattern?.test(itemText) ?? false)) {
+			if (!itemText || (args.rowsAreControls === true && hasControl && (uiOnlyPattern?.test(itemText) ?? false))) {
 				if (isKnownUiText(fullText) || isKnownUiText(itemText)) knownUiRows += 1;
 				else if (hasControl) sawUnknownList = true;
 				continue;
@@ -1966,7 +1971,7 @@ const ADS_EXPANSION_WAIT_MS = 10_000;
 type AdsTraversalRow = { description: string | null; name: string };
 type AdsTraversalState = {
  token: string; dialog: Element; lists: Element[]; url: string;
- rows: AdsTraversalRow[]; failed: boolean;
+ rows: AdsTraversalRow[]; unresolvedRows: Element[]; failed: boolean;
 };
 
 /** Browser-local references bind every sample and click to one document/dialog.
@@ -1989,7 +1994,7 @@ function inspectDialogExpansion(args: {
  );
  const lists = Array.from(dialog?.querySelectorAll('[role="list"]') ?? []);
  if (args.initialize && dialog) {
-  doc.__pdppAdsTraversal = { token: args.token, dialog, lists, url: document.URL, rows: [], failed: false };
+  doc.__pdppAdsTraversal = { token: args.token, dialog, lists, url: document.URL, rows: [], unresolvedRows: [], failed: false };
  }
  const state = doc.__pdppAdsTraversal;
  if (!state || state.token !== args.token) return {clicked: false, visible: false, failed: true, loading: false, rows: []};
@@ -2006,19 +2011,35 @@ function inspectDialogExpansion(args: {
  const rows: AdsTraversalRow[] = [];
  let unreadable = false;
  for (const row of Array.from(dialog.querySelectorAll('[role="listitem"]'))) {
-  if (controls.some(control => row.contains(control))) continue;
-  if (!visible(row)) continue;
+  const rowControls = Array.from(row.querySelectorAll('a, button, [role="button"], [role="link"]'));
+  // Only a single control with no other field text proves an interface row.
+  const onlyControl = rowControls.length === 1 && normalize(row.textContent ?? "") === normalize(rowControls[0]?.textContent ?? "");
+  if (onlyControl && (controls.includes(rowControls[0]!) ||
+   (args.label === "View all" && normalize(rowControls[0]?.textContent ?? "") === "Removed categories"))) continue;
+  if (!visible(row)) {
+   if (!state.unresolvedRows.includes(row)) state.unresolvedRows.push(row);
+   unreadable = true; continue;
+  }
   const texts: string[] = [];
+  let hiddenField = false;
   const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
    const parent = node.parentElement;
    const text = normalize(node.textContent ?? "");
    if (!text) continue;
-   if (!parent || !visible(parent)) { unreadable = true; continue; }
-   if (args.label === "View all" && (text === "Remove" || text === "Removed categories")) continue;
+   if (!parent || !visible(parent)) {
+    hiddenField = true;
+    if (parent && !state.unresolvedRows.includes(parent)) state.unresolvedRows.push(parent);
+    unreadable = true; continue;
+   }
+   if (args.label === "View all") {
+    const control = parent.closest('button, [role="button"]');
+    if (control && normalize(control.textContent ?? "") === "Remove") continue;
+   }
    texts.push(text);
   }
-  if (args.label === "View all" && texts.length === 0) continue;
+  if (hiddenField) continue;
+  if (args.label === "View all" && (texts.length === 0 || texts.length > 2)) { unreadable = true; continue; }
   if (args.label === "View all" && !Array.from(row.querySelectorAll('button, [role="button"]'))
    .some(control => visible(control) && normalize(control.textContent ?? "") === "Remove")) {
    unreadable = true; continue;
@@ -2029,7 +2050,9 @@ function inspectDialogExpansion(args: {
    unreadable = true; continue;
   }
   rows.push({name, description});
+  state.unresolvedRows = state.unresolvedRows.filter(previous => !(previous === row || row.contains(previous)) || !visible(previous));
  }
+ unreadable ||= state.unresolvedRows.length > 0;
  const keys = rows.map(row => JSON.stringify(row));
  const retained = state.rows.every(row => keys.includes(JSON.stringify(row)));
  if (!retained || new Set(rows.map(row => row.name)).size !== rows.length) state.failed = true;
@@ -2343,14 +2366,17 @@ export async function scrapeTargetingCategories(
 		.catch(() => ({failed: true, loading: false, rows: [] as AdsTraversalRow[]}));
 	const items = [...traversal.rows];
 	for (const row of final.rows) {
-		if (!items.some(previous => previous.name === row.name)) items.push(row);
+		if (!items.some(previous => JSON.stringify(previous) === JSON.stringify(row))) items.push(row);
 	}
 	const safe = !traversal.failed && !final.failed && !final.loading;
 	const empty = safe && items.length === 0 && finalCategories?.kind === "verified_empty" &&
 		beforeExpansion.kind !== "data" && beforeExpansion.kind !== "loading" &&
 		beforeExpansion.hasPositiveSourceTotal !== true;
 	const reached = empty || (safe && items.length > 0 && finalCategories?.kind === "data" &&
-		finalCategories.complete && items.length === finalCategories.items.length);
+		finalCategories.complete && items.length === finalCategories.items.length &&
+		items.length === final.rows.length &&
+		items.every(row => final.rows.some(current => JSON.stringify(current) === JSON.stringify(row))) &&
+		items.every(row => finalCategories.items.includes([row.name, row.description].filter(Boolean).join(" "))));
 	await closeDialog(page);
 	return {items, reached, step: reached ? (empty ? "reached_empty" : null) : "destination_list_not_found", surface: "targeting_categories"};
 }
