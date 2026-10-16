@@ -1,0 +1,12 @@
+{
+	"name": "groupme-mutation-tools",
+	"private": true,
+	"type": "module",
+	"license": "Apache-2.0",
+	"dependencies": {
+		"@stryker-mutator/core": "10.0.0",
+		"@stryker-mutator/vitest-runner": "10.0.0",
+		"vitest": "4.1.12",
+		"vite": "8.3.2"
+	}
+}
