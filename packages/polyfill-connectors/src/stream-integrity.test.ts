@@ -180,7 +180,11 @@ test("runtime: a withheld row is never emitted in part, and its enumerated key c
 		],
 	});
 	const coverage = messages.find((m) => m.type === "DETAIL_COVERAGE");
-	assert.equal(coverage, undefined, "an uncounted refusal withholds the completion claim");
+	assert.equal(
+		coverage,
+		undefined,
+		"an uncounted refusal withholds the completion claim",
+	);
 });
 
 test("runtime: a record without an id is refused visibly and withholds STATE", async () => {
@@ -420,7 +424,11 @@ test("runtime: a declared resume-safe skip lets the connector's STATE pass, but 
 		"the declaration is visible on the wire",
 	);
 	const coverage = messages.find((m) => m.type === "DETAIL_COVERAGE");
-	assert.equal(coverage, undefined, "full coverage is withheld after a reported skip");
+	assert.equal(
+		coverage,
+		undefined,
+		"full coverage is withheld after a reported skip",
+	);
 });
 
 test("runtime: an unknown resume-safe basis is no declaration", async () => {
@@ -669,7 +677,11 @@ test("runtime: a detail stream's loss withholds its checkpoint parent's STATE", 
 		"DONE:succeeded",
 	]);
 	const coverage = messages.find((m) => m.type === "DETAIL_COVERAGE");
-	assert.equal(coverage, undefined, "the refused key cannot support a completion claim");
+	assert.equal(
+		coverage,
+		undefined,
+		"the refused key cannot support a completion claim",
+	);
 });
 
 // ─── The rule itself (pure) ─────────────────────────────────────────────
@@ -1019,15 +1031,29 @@ for (const [name, counts, reportedSkip] of [
 			...counts,
 		};
 		const out = integrity.gate(claim);
-		assert.equal(out.some((message) => message.type === "DETAIL_COVERAGE"), false);
+		assert.equal(
+			out.some((message) => message.type === "DETAIL_COVERAGE"),
+			false,
+		);
 		assert.equal(out.length, 1);
 		assert.equal(out[0]?.type, "SKIP_RESULT");
 		assert.ok(out[0]?.type === "SKIP_RESULT");
 		assert.equal(out[0].reason, CHECKPOINT_WITHHELD_REASON);
-		assert.equal((out[0].diagnostics as { withheld: string }).withheld, "DETAIL_COVERAGE");
-		assert.deepEqual(claim.required_keys, ["A"], "do not fabricate a denominator");
+		assert.equal(
+			(out[0].diagnostics as { withheld: string }).withheld,
+			"DETAIL_COVERAGE",
+		);
+		assert.deepEqual(
+			claim.required_keys,
+			["A"],
+			"do not fabricate a denominator",
+		);
 		assert.deepEqual(claim.hydrated_keys, ["A"], "do not fabricate hydration");
-		assert.deepEqual(integrity.gate(claim), [], "repeated claims remain withheld after the one-time notice");
+		assert.deepEqual(
+			integrity.gate(claim),
+			[],
+			"repeated claims remain withheld after the one-time notice",
+		);
 	});
 }
 
@@ -1042,8 +1068,14 @@ test("review r4: reported skip alone with equal nonempty keys withholds key-only
 		required_keys: ["A"],
 		hydrated_keys: ["A"],
 	});
-	assert.equal(out.some((message) => message.type === "DETAIL_COVERAGE"), false);
-	assert.equal(out[0]?.type === "SKIP_RESULT" ? out[0].reason : null, CHECKPOINT_WITHHELD_REASON);
+	assert.equal(
+		out.some((message) => message.type === "DETAIL_COVERAGE"),
+		false,
+	);
+	assert.equal(
+		out[0]?.type === "SKIP_RESULT" ? out[0].reason : null,
+		CHECKPOINT_WITHHELD_REASON,
+	);
 });
 
 test("empty coverage passes without loss but cannot override a reported skip", () => {
@@ -1067,7 +1099,13 @@ test("empty coverage passes without loss but cannot override a reported skip", (
 			reason: "timeline_points_not_found",
 			message: "source was not found",
 		});
-		assert.equal(lost.gate(claim).some((message) => message.type === "DETAIL_COVERAGE"), false);
-		assert.equal(lost.gate(STATE("items")).some((message) => message.type === "STATE"), false);
+		assert.equal(
+			lost.gate(claim).some((message) => message.type === "DETAIL_COVERAGE"),
+			false,
+		);
+		assert.equal(
+			lost.gate(STATE("items")).some((message) => message.type === "STATE"),
+			false,
+		);
 	}
 });

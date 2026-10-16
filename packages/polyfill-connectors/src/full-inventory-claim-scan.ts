@@ -162,8 +162,10 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 		if (!isNode(pattern)) return;
 		if (pattern.type === "Identifier")
 			bind(scope, String(pattern.name), undefined, null);
-		else if (pattern.type === "AssignmentPattern") bindPattern(pattern.left, scope);
-		else if (pattern.type === "RestElement") bindPattern(pattern.argument, scope);
+		else if (pattern.type === "AssignmentPattern")
+			bindPattern(pattern.left, scope);
+		else if (pattern.type === "RestElement")
+			bindPattern(pattern.argument, scope);
 		else if (pattern.type === "ArrayPattern") {
 			for (const item of (pattern.elements as unknown[]) ?? [])
 				bindPattern(item, scope);
@@ -200,7 +202,10 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			return;
 		}
 		if (!isNode(node)) return;
-		if (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") {
+		if (
+			node.type === "FunctionDeclaration" ||
+			node.type === "ClassDeclaration"
+		) {
 			const name = nameOf(node.id);
 			if (name) bind(outer, name, undefined, null);
 		}
@@ -220,7 +225,12 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			const local = nameOf(node.local);
 			const imported = nameOf(node.imported);
 			if (local)
-				bind(scope, local, undefined, imported && HELPERS.has(imported) ? imported : null);
+				bind(
+					scope,
+					local,
+					undefined,
+					imported && HELPERS.has(imported) ? imported : null,
+				);
 		} else if (node.type === "ImportNamespaceSpecifier") {
 			const local = nameOf(node.local);
 			if (local) bind(scope, local, undefined, "namespace");
@@ -260,7 +270,10 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 		resolved.set(binding, value);
 		return value;
 	};
-	const resolveExpression = (expression: unknown, scope: Scope): string | null => {
+	const resolveExpression = (
+		expression: unknown,
+		scope: Scope,
+	): string | null => {
 		if (!isNode(expression)) return null;
 		if (expression.type === "Identifier") {
 			const name = String(expression.name);
@@ -278,7 +291,8 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			const member = nameOf(expression.property);
 			if (
 				(!expression.computed ||
-					(isNode(expression.property) && expression.property.type === "StringLiteral")) &&
+					(isNode(expression.property) &&
+						expression.property.type === "StringLiteral")) &&
 				member &&
 				HELPERS.has(member) &&
 				resolveExpression(expression.object, scope) === "namespace"
@@ -293,7 +307,7 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 	const helperOf = (expression: unknown): string | null =>
 		resolveExpression(
 			expression,
-			isNode(expression) ? scopes.get(expression) ?? root : root,
+			isNode(expression) ? (scopes.get(expression) ?? root) : root,
 		);
 	const isSelfClaim = (object: unknown, stateKey: string): boolean => {
 		if (!isNode(object) || object.type !== "ObjectExpression") return false;

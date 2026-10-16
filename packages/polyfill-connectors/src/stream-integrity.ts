@@ -354,7 +354,8 @@ const NOTICE_TEXT: Record<WithheldKind, string> = {
 		"checkpoint not saved; the next run reads this stream again from the previous checkpoint",
 	delete:
 		"deletes not applied; rows not read in this run are not treated as gone",
-	DETAIL_COVERAGE: "coverage claim withheld or corrected because the stream is incomplete",
+	DETAIL_COVERAGE:
+		"coverage claim withheld or corrected because the stream is incomplete",
 	STREAM_EVIDENCE: "stream evidence corrected to count only rows stored",
 	DETAIL_GAP_RECOVERED:
 		"gap recovery not recorded; the refused record's gap stays pending",
@@ -541,7 +542,8 @@ export function createStreamIntegrity(
 		// the documented key-length fallback when neither count was supplied.
 		const readsFull =
 			covered === undefined
-				? considered !== undefined || hydrated_keys.length >= msg.required_keys.length
+				? considered !== undefined ||
+					hydrated_keys.length >= msg.required_keys.length
 				: considered === undefined || covered >= considered;
 		if (loss.skipReasons.size > 0 && readsFull) return false;
 		// After a refusal, a report missing either count, or whose denominator
@@ -553,7 +555,8 @@ export function createStreamIntegrity(
 			(covered === undefined ||
 				considered === undefined ||
 				considered < loss.refused)
-		) return false;
+		)
+			return false;
 		const corrected =
 			covered === undefined
 				? undefined

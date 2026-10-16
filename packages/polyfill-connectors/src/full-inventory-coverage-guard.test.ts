@@ -219,7 +219,11 @@ test("review r4: cross-scope alias oscillation terminates with lexical counts", 
 		}
 		claim("items", 1);
 	`);
-	assert.equal(result.error, undefined, "scanner must terminate within the subprocess deadline");
+	assert.equal(
+		result.error,
+		undefined,
+		"scanner must terminate within the subprocess deadline",
+	);
 	assert.equal(result.status, 0, String(result.stderr));
 	assert.deepEqual(JSON.parse(String(result.stdout)), { counts: COUNT(1, 1) });
 });
@@ -233,13 +237,18 @@ test("review r4: a shadowed alias cycle fails closed within a bounded subprocess
 			left("items", 1);
 		}
 	`);
-	assert.equal(result.error, undefined, "cycle detection must terminate within the subprocess deadline");
+	assert.equal(
+		result.error,
+		undefined,
+		"cycle detection must terminate within the subprocess deadline",
+	);
 	assert.equal(result.status, 0, String(result.stderr));
 	assert.match(JSON.parse(String(result.stdout)).error ?? "", /alias cycle/);
 });
 
 test("review r4: alias chains resolve in their declaration scope", () => {
-	assert.deepEqual(scanFullInventoryClaims(`
+	assert.deepEqual(
+		scanFullInventoryClaims(`
 		import { buildFullScanCoverageMessage as full } from "x";
 		const first = full;
 		const second = first;
@@ -247,11 +256,14 @@ test("review r4: alias chains resolve in their declaration scope", () => {
 			const full = () => {};
 			second("items", 1);
 		}
-	`), COUNT(1, 0));
+	`),
+		COUNT(1, 0),
+	);
 });
 
 test("review r4: parameters and local namespace bindings shadow imported helpers", () => {
-	assert.deepEqual(scanFullInventoryClaims(`
+	assert.deepEqual(
+		scanFullInventoryClaims(`
 		import { buildFullScanCoverageMessage as claim } from "x";
 		import * as runtime from "x";
 		function inner(claim: unknown, runtime: unknown) {
@@ -260,5 +272,7 @@ test("review r4: parameters and local namespace bindings shadow imported helpers
 		}
 		claim("items", 1);
 		runtime.buildFullScanCoverageMessage("items", 1);
-	`), COUNT(2, 0));
+	`),
+		COUNT(2, 0),
+	);
 });
