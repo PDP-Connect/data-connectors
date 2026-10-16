@@ -12,6 +12,8 @@ const repository = z.object({
 	language: z.string(),
 	stars: z.number(),
 	forks: z.number(),
+	forkedFrom: z.string(),
+	license: z.string(),
 	visibility: z.string(),
 	topics: z.array(z.string()),
 	updatedAt: z.string().nullable(),
@@ -22,6 +24,9 @@ const starred = z.object({
 	description: z.string(),
 	language: z.string().nullable(),
 	stars: z.number(),
+	forks: z.number(),
+	forkedFrom: z.string(),
+	license: z.string(),
 	updatedAt: z.string().nullable(),
 }).partial().required({ fullName: true, url: true });
 const event = z.object({
@@ -78,6 +83,8 @@ const schemas = {
 				description: z.string(),
 				language: z.string().nullable(),
 				stars: z.number(),
+				forks: z.number(),
+				forkedFrom: z.string(),
 			}).partial().required({ fullName: true }),
 		),
 		organizations: z.array(

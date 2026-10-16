@@ -41,6 +41,8 @@ export interface LegacyProfile {
 	pinnedRepositories: Array<{
 		description: string;
 		fullName: string;
+		forkedFrom: string;
+		forks: number;
 		language: string | null;
 		stars: number;
 		url: string | null;
@@ -54,8 +56,10 @@ export interface LegacyProfile {
 export interface LegacyRepository {
 	id: string;
 	description: string;
+	forkedFrom: string;
 	forks: number;
 	language: string;
+	license: string;
 	name: string;
 	stars: number;
 	topics: string[];
@@ -67,8 +71,11 @@ export interface LegacyRepository {
 export interface LegacyStarredRepository {
 	id: string;
 	description: string;
+	forkedFrom: string;
+	forks: number;
 	fullName: string;
 	language: string | null;
+	license: string;
 	stars: number;
 	updatedAt: string | null;
 	url: string;

@@ -13,11 +13,20 @@ length. Consumers that read the legacy envelope should ignore the added top-leve
 `id`; PDPP consumers must retain it for filtering and upserts. No downstream adapter
 is changed in this repository, so a live adapter read remains to be verified.
 
-Repository and starred snapshots need a recognized list or explicit empty message,
-and the collector follows validated next links. A nonempty terminal page also needs
-an explicit disabled-next control or an exact unfiltered page-one count. Unknown
-continuations, deferred fragments, unaccounted children, and busy source slots veto
-completion. Contributions require
+Repository and starred snapshots need a recognized list or an empty-state message
+with no rows, and the collector follows validated next links. A nonempty terminal
+page also needs an explicit disabled-next control or an exact unfiltered page-one
+count. Unknown continuations, deferred fragments, unaccounted entries, and busy
+source slots veto completion.
+
+An absent optional value is omitted only from a fully rendered row or page. Row
+content is classified, not matched to a layout: controls, icons and presentational
+markup are chrome, the license and "Forked from" lines are parsed into `license` and
+`forkedFrom`, and any other text we do not read vetoes completion. Profile sections
+are found by heading text and link targets rather than container classes; a section
+missing from a page with the profile header, avatar and Overview/Repositories tabs is
+omitted, and followers or following are omitted only when the page has no such link.
+Contributions require
 count evidence for every date in the covered views. Search history requires GitHub
 to report complete results with a consistent total count. Otherwise the stream
 emits `SKIP_RESULT` and no completion state.

@@ -379,9 +379,9 @@ test("profile completeness distinguishes readable zeroes and empty fields from a
 	for (const unreadable of [
 		html.replace("<span>42</span>", "<span>Loading</span>"),
 		html.replace('<div class="p-note"></div>', ""),
-		html.replace('<div class="js-pinned-items-reorder-container"></div>', ""),
-		html.replace('<div class="avatar-group"></div>', ""),
-		html.replace('<div class="profile-achievements"></div>', ""),
+		// Without the profile structure, absent follower links prove nothing.
+		html.replace(/<nav>.*?<\/nav>/u, "").replace('<a href="/sample-user?tab=followers"><span>42</span></a>', ""),
+		html.replace('<div class="avatar-group"></div>', '<div class="avatar-group loading"></div>'),
 	]) {
 		const parsed = parseProfilePage(unreadable, "https://github.com/sample-user");
 		assert.equal(parsed.complete, false);
@@ -533,13 +533,12 @@ test("current GitHub profile: contribution heading, tab counter, badges and empt
 	// An empty rendered details list proves company, location and website are unset.
 	for (const key of ["company", "location", "website"] as const)
 		assert.equal(key in (parsed.row ?? {}), false);
-	// Missing follower slots and collection containers do not prove omission.
+	// The page has no follower links and is recognisably a profile, so both are omitted.
 	for (const key of ["followers", "following"] as const)
 		assert.equal(key in (parsed.row ?? {}), false);
-	for (const key of ["followers", "following", "organizations", "achievements"])
-		assert.equal(parsed.unreadableFields.includes(key), true);
+	assert.deepEqual(parsed.unreadableFields, []);
 	assert.equal(parsed.row?.organizations?.[0]?.login, "sample-org");
-	assert.equal(parsed.complete, false);
+	assert.equal(parsed.complete, true);
 });
 
 test("profile details list with an entry that has no readable fields stays unreadable", () => {
@@ -660,17 +659,19 @@ test("a starred row without optional slots omits them and a malformed star count
 	assert.equal(parseStarredPage(base('<a href="/sample-owner/demo/stargazers">many</a>')).complete, false);
 });
 
-test("a profile without follower evidence retains other fields but cannot complete", async () => {
+test("a profile without follower links is omitted when recognisable and unreadable when not", async () => {
 	const html = await fixture("profile.html");
-	const bare = parseProfilePage(
-		html.replace('<a href="/sample-user?tab=followers"><span>42</span></a>', "").replace('<a href="/sample-user?tab=following"><span>7</span></a>', ""),
-		"https://github.com/sample-user",
-	);
-	assert.equal(bare.complete, false);
-	assert.deepEqual(bare.unreadableFields, ["followers", "following"]);
+	const links = (text: string): string => text
+		.replace('<a href="/sample-user?tab=followers"><span>42</span></a>', "")
+		.replace('<a href="/sample-user?tab=following"><span>7</span></a>', "");
+	const bare = parseProfilePage(links(html), "https://github.com/sample-user");
+	assert.equal(bare.complete, true);
 	assert.equal(bare.row?.contributionsLastYear, 1234);
 	assert.equal("followers" in (bare.row ?? {}), false);
 	assert.equal("following" in (bare.row ?? {}), false);
+	const unrecognised = parseProfilePage(links(html).replace(/<nav>.*?<\/nav>/u, ""), "https://github.com/sample-user");
+	assert.equal(unrecognised.complete, false);
+	for (const key of ["followers", "following"]) assert.ok(unrecognised.unreadableFields.includes(key), key);
 	for (const changed of [
 		html.replace("<span>42</span>", "<span>lots</span>"),
 		html.replace("<span>7</span>", "<span>Loading</span>"),

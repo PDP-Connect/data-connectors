@@ -143,9 +143,7 @@ const profileCollectionMutations: Array<[string, string, string]> = [
 	["pinned non-li wrapper", '<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><div role="listitem"><a href="/sample-owner/deferred">deferred</a></div></div>'],
 	["pinned link-only card", '<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><ol><li><a href="/sample-owner/deferred">deferred</a></li></ol></div>'],
 	["pinned placeholder", '<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><div class="skeleton"></div></div>'],
-	["organization selector drift", '<div class="avatar-group"></div>', '<div class="avatar-group"><a class="OrganizationItem" href="/sample-org"><img alt="@sample-org" src="https://avatars.githubusercontent.com/u/2"></a></div>'],
 	["organization placeholder", '<div class="avatar-group"></div>', '<div class="avatar-group"><div class="skeleton"></div></div>'],
-	["achievement selector drift", '<div class="profile-achievements"></div>', '<div class="profile-achievements"><a href="/sample-user/badges/sample"><img alt="Achievement: Sample Badge" src="https://github.githubassets.com/assets/sample.png"></a></div>'],
 	["achievement placeholder", '<div class="profile-achievements"></div>', '<div class="profile-achievements"><div class="skeleton"></div></div>'],
 ];
 for (const [label, before, after] of profileCollectionMutations) {
@@ -156,6 +154,18 @@ for (const [label, before, after] of profileCollectionMutations) {
 		assert.equal(parsed.complete, false);
 		assert.ok(parsed.rejectedEntries > 0 || parsed.unreadableFields.length > 0);
 		assertPartial(await collect("profile", html), "profile");
+	});
+}
+
+// Sections are anchored by heading and links, so renamed container classes are still read.
+for (const [collection, before, after] of [
+	["organizations", '<div class="avatar-group"></div>', '<div class="avatar-group"><a class="OrganizationItem" href="/sample-org"><img alt="@sample-org" src="https://avatars.githubusercontent.com/u/2"></a></div>'],
+	["achievements", '<div class="profile-achievements"></div>', '<div class="profile-achievements"><a href="/sample-user?achievement=sample&tab=achievements"><img alt="Achievement: Sample Badge" src="https://github.githubassets.com/assets/sample.png"></a></div>'],
+] as const) {
+	test(`r3 profile ${collection} are read by heading and link when container classes drift`, async () => {
+		const parsed = parseProfilePage((await fixture("profile.html")).replace(before, after), "https://github.com/sample-user");
+		assert.equal(parsed.row?.[collection]?.length, 1);
+		assert.equal(parsed.complete, true);
 	});
 }
 

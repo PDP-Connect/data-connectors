@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -126,6 +126,12 @@
 								},
 								"stars": {
 									"type": "number"
+								},
+								"forks": {
+									"type": "number"
+								},
+								"forkedFrom": {
+									"type": "string"
 								}
 							},
 							"required": [
@@ -255,6 +261,12 @@
 								"forks": {
 									"type": "number"
 								},
+								"forkedFrom": {
+									"type": "string"
+								},
+								"license": {
+									"type": "string"
+								},
 								"visibility": {
 									"type": "string"
 								},
@@ -327,6 +339,15 @@
 								},
 								"stars": {
 									"type": "number"
+								},
+								"forks": {
+									"type": "number"
+								},
+								"forkedFrom": {
+									"type": "string"
+								},
+								"license": {
+									"type": "string"
 								},
 								"updatedAt": {
 									"type": [
