@@ -57,6 +57,10 @@ export function inspectInventoryEnd(
 		return { complete: false, nextUrl: null, reason: "wrong_navigation" };
 	if (!hasExpectedOwner(page.html, username))
 		return { complete: false, nextUrl: null, reason: "wrong_owner" };
+	if (!evidence.hasRecognizedList)
+		return { complete: false, nextUrl: null, reason: "unreadable_list" };
+	if (evidence.hasUnknownContinuation)
+		return { complete: false, nextUrl: null, reason: "unknown_continuation" };
 	if (evidence.nextUrl !== null) {
 		const next = validContinuation(
 			evidence.nextUrl,
@@ -68,6 +72,8 @@ export function inspectInventoryEnd(
 			? { complete: false, nextUrl: next, reason: "remaining_continuation" }
 			: { complete: false, nextUrl: null, reason: "wrong_navigation" };
 	}
+	if (evidence.rejectedRows > 0)
+		return { complete: false, nextUrl: null, reason: "discarded_rows" };
 	if (evidence.terminalProof === null)
 		return { complete: false, nextUrl: null, reason: "terminal_unverified" };
 	return { complete: true, nextUrl: null, reason: "terminal_list" };

@@ -362,7 +362,7 @@ test("repository completeness requires identity and readable row fields", async 
 test("starred parsing is bounded to a recognized list and never consumes unrelated main links", () => {
 	const html = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><li><h3><a href="/sponsors/sample-user">Sponsors</a></h3></li><div>Loading</div></main>';
 	assert.deepEqual(parseStarredPage(html).rows, []);
-	assert.equal(inspectInventoryPage(inventoryObservation("starred", html, 1), "starred", "sample-user", 1, 0, 0).reason, "terminal_unverified");
+	assert.equal(inspectInventoryPage(inventoryObservation("starred", html, 1), "starred", "sample-user", 1, 0, 0).reason, "unreadable_list");
 	const forgedEmpty = html.replace("Loading", "You don’t have any starred repositories yet");
 	assert.equal(inspectInventoryPage(inventoryObservation("starred", forgedEmpty, 1), "starred", "sample-user", 1, 0, 0).valid, false);
 	const unreadable = parseStarredPage('<ul id="user-starred-repos"><li>Loading</li></ul>');

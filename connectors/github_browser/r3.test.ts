@@ -78,6 +78,66 @@ for (const stream of ["repositories", "starred"] as const) {
    owner + rows + count("1") + '<main>Rate limit exceeded</main><div>Unknown text</div><include-fragment></include-fragment>') });
   assert.equal(result.records.length, 1);
  });
+ test(`${stream}: terminal pagination cannot hide a rejected second entry`, async () => {
+  const broken = rows.replace("</ul>", '<li><h3><a href="/missing">Unread entry</a></h3></li></ul>');
+  assertIncomplete(await run(stream, { openPage: async url => page(url, owner + broken + terminal) }), stream);
+ });
+ test(`${stream}: terminal pagination cannot certify an absent list`, async () => {
+  assertIncomplete(await run(stream, { openPage: async url => page(url, owner + terminal) }), stream);
+ });
+ test(`${stream}: rejected entries on earlier pages remain a veto`, async () => {
+  const broken = rows.replace("</ul>", '<li><h3><a href="/missing">Unread entry</a></h3></li></ul>');
+  const result = await run(stream, { openPage: async url => page(url, owner +
+   (new URL(url).searchParams.get("page") === "2" ? rows.replaceAll("demo", "other") + terminal :
+    broken + `<div class="pagination"><a rel="next" href="/sample-user?page=2&tab=${tab}">Next</a></div>`)) });
+  assertIncomplete(result, stream);
+ });
+ test(`${stream}: an earlier unrelated paginator cannot hide the list continuation`, async () => {
+  const visits: string[] = [];
+  const result = await run(stream, { openPage: async url => {
+   visits.push(url);
+   return page(url, owner + '<aside><div class="pagination"><span>1</span></div></aside>' + rows +
+    (new URL(url).searchParams.get("page") === "2" ? "" :
+     `<div class="pagination"><a rel="next" href="/sample-user?page=2&tab=${tab}">Next</a></div>`));
+  } });
+  assertIncomplete(result, stream);
+  assert.ok(visits.some(url => new URL(url).searchParams.get("page") === "2"));
+ });
+ for (const other of [
+  count("1").replaceAll("/sample-user?", "/other-user?"),
+  count("1").replace(`tab=${tab}"`, `tab=${tab}&q=partial"`),
+  count("1").replace("data-tab-item", "data-unrelated"),
+ ]) test(`${stream}: unrelated or filtered counters do not certify the list: ${other}`, async () => {
+  assertIncomplete(await run(stream, { openPage: async url => page(url, owner + other + rows) }), stream);
+ });
+ test(`${stream}: conflicting profile counters defeat terminal evidence`, async () => {
+  assertIncomplete(await run(stream, { openPage: async url => page(url, owner + count("1") + count("2") + rows + terminal) }), stream);
+ });
+ test(`${stream}: ambiguous list paginators defeat exact counters`, async () => {
+  const ambiguous = rows.replace("</ul></div>", `</ul>${terminal}</div>`);
+  assertIncomplete(await run(stream, { openPage: async url => page(url, owner + count("1") + ambiguous +
+   `<div class="pagination"><a rel="next" href="/sample-user?page=2&tab=${tab}">Next</a></div>`) }), stream);
+ });
+ test(`${stream}: list chrome and best-effort fields do not veto exact totals`, async () => {
+  const chrome = rows.replace("</ul></div>", '</ul><div>Sort options</div><span></span><a href="/settings/profile">Settings</a></div>');
+  const result = await run(stream, { openPage: async url => page(url, owner + count("1") + chrome) });
+  assert.equal(result.records.length, 1);
+ });
+
+ test(`${stream}: two adjacent candidate paginators are ambiguous`, async () => {
+  assertIncomplete(await run(stream, { openPage: async url => page(url, owner + count("1") + rows + terminal +
+   `<div class="pagination"><a rel="next" href="/sample-user?page=2&tab=${tab}">Next</a></div>`) }), stream);
+ });
+ test(`${stream}: foreign pagination links cannot certify the list`, async () => {
+  assertIncomplete(await run(stream, { openPage: async url => page(url, owner + rows +
+   '<div class="pagination"><a href="/other-user?tab=repositories&page=1">Previous</a></div>') }), stream);
+ });
+ test(`${stream}: paginator chrome inside the list is not an entry`, async () => {
+  const result = await run(stream, { openPage: async url => page(url, owner + rows.replace("</ul></div>",
+   '</ul><div class="pagination"><ul><li><span class="next_page disabled">Next</span></li></ul></div></div>')) });
+  assert.equal(result.records.length, 1);
+ });
+
 }
 function calendar(start: string, end: string, evidence: "match" | "mismatch" | "absent") {
  let cells = "";

@@ -124,6 +124,8 @@ export interface ParsedItem<T> {
 	unreadableFields: string[];
 }
 export interface ParsedInventory<T> {
+	// Entry accounting is separate from best-effort row field diagnostics.
+	entriesComplete: boolean;
 	rows: T[];
 	rejectedRows: number;
 	rawRows: number;
@@ -240,7 +242,7 @@ function cardRows(roots: Element | null | Array<Element | null>): Element[] {
 		const isList = node.matches("ul, ol");
 		for (const child of Array.from(node.children)) {
 			if (child.matches(OVERLAY_SELECTOR) || insideOverlay(child, list)) continue;
-			if (child.matches(EMPTY_STATE)) continue;
+			if (child.matches(`${EMPTY_STATE}, .paginate-container, .pagination`)) continue;
 			if (child.matches("ul, ol") || (!isList && !child.matches("li, [role='listitem']"))) visit(child, list);
 			else if (child.children.length > 0 &&
 				Array.from(child.children).every((entry) => entry.matches(OVERLAY_SELECTOR))) continue;
@@ -255,7 +257,7 @@ function cardRows(roots: Element | null | Array<Element | null>): Element[] {
 
 // Account for wrapper text and text-free candidates, not just heading links.
 // Empty-state copy is evidence only with zero rows and no surviving entry link.
-function unaccountedRepositories(list: Element | null, rows: Element[]): number {
+function unaccountedRepositories(list: Element | null, rows: Element[], entriesOnly = false): number {
 	if (list === null) return 0;
 	const empty = rows.length === 0 ? listEmptyStates(list, rows) : [];
 	// Guard targets conservatively, independently of strict row identity: query
@@ -264,7 +266,8 @@ function unaccountedRepositories(list: Element | null, rows: Element[]): number 
 		if (!link.matches("a[href]")) return false;
 		try {
 			const url = new URL(link.getAttribute("href") ?? "", "https://github.com");
-			return url.origin === "https://github.com" && url.pathname.split("/").filter(Boolean).length === 2;
+			return url.origin === "https://github.com" && (entriesOnly
+				? repositoryName(url.pathname) !== null : url.pathname.split("/").filter(Boolean).length === 2);
 		} catch {
 			return true; // An unreadable destination cannot prove entry-free chrome.
 		}
@@ -276,17 +279,20 @@ function unaccountedRepositories(list: Element | null, rows: Element[]): number 
 	// The list container also holds the page's own search, filter and sort
 	// controls, a page-level h1/h2 title and a screen-reader results line. Entry
 	// titles are h3 links, so none of these can stand in for a dropped entry.
-	const listChrome = `${CONTROL_SELECTOR}, [role="search"], h1, h2, .sr-only, svg, canvas, script, style`;
+	const listChrome = `${CONTROL_SELECTOR}, [role="search"], h1, h2, .sr-only, .paginate-container, .pagination, svg, canvas, script, style`;
 	const visit = (node: Node): number => {
-		if (node.nodeType === 3) return (node.textContent ?? "").trim() ? 1 : 0;
+		if (node.nodeType === 3) return !entriesOnly && (node.textContent ?? "").trim() ? 1 : 0;
 		if (node.nodeType !== 1) return 0;
 		const element = node as Element;
 		if (rows.includes(element) || element.matches(OVERLAY_SELECTOR) || insideOverlay(element, list)) return 0;
 		if (empty.includes(element) && entryFree(element)) return 0;
+		if (entriesOnly && element.matches(".paginate-container, .pagination") &&
+			element.querySelector("h3") === null && !Array.from(element.querySelectorAll("a[href]")).some(repositoryTarget)) return 0;
 		if (element !== list && element.matches(listChrome) && entryFree(element)) return 0;
-		if (element.matches("a[href], li, [role='listitem']")) return 1;
+		if (element.matches("li, [role='listitem']") ||
+			(element.matches("a[href]") && (!entriesOnly || repositoryTarget(element)))) return 1;
 		const children = Array.from(element.childNodes);
-		if (children.length === 0 && !element.matches("ul, ol")) return 1;
+		if (children.length === 0 && !element.matches("ul, ol")) return entriesOnly ? 0 : 1;
 		return children.reduce((sum, child) => sum + visit(child), 0);
 	};
 	return list.matches("a[href], li, [role='listitem']") ? visit(list) :
@@ -709,8 +715,8 @@ export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryR
 	}
 	if (list === null || isUnreadable(list)) unreadableFields.push("list");
 	if (sourceRows.length > 0 && listEmptyStates(list, sourceRows).length > 0) unreadableFields.push("emptyStateWithRows");
-	rejectedRows += unaccountedRepositories(list, sourceRows);
-	return { rows, rejectedRows, rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
+	rejectedRows += unaccountedRepositories(list, sourceRows, true);
+	return { rows, rejectedRows, entriesComplete: list !== null && rejectedRows === 0 && !unreadableFields.includes("emptyStateWithRows"), rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
 }
 
 export function parseStarredHtml(html: string): StarredRow[] {
@@ -761,8 +767,8 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 	}
 	if (list === null || isUnreadable(list)) unreadableFields.push("list");
 	if (sourceRows.length > 0 && listEmptyStates(list, sourceRows).length > 0) unreadableFields.push("emptyStateWithRows");
-	rejectedRows += unaccountedRepositories(list, sourceRows);
-	return { rows, rejectedRows, rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
+	rejectedRows += unaccountedRepositories(list, sourceRows, true);
+	return { rows, rejectedRows, entriesComplete: list !== null && rejectedRows === 0 && !unreadableFields.includes("emptyStateWithRows"), rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
 }
 
 export function inspectInventoryPage(
@@ -776,25 +782,64 @@ export function inspectInventoryPage(
 ): { valid: boolean; complete: boolean; total: number | null; nextUrl: string | null; reason: string } {
 	const { document } = parseHTML(page.html);
 	const tab = stream === "repositories" ? "repositories" : "stars";
-	const countNode = document.querySelector(
-		`[data-tab-item="${tab}"] .Counter, a[href*="tab=${tab}"] .Counter, [data-tab-item="${tab}"] [class*="CounterLabel-CounterLabel"], a[href*="tab=${tab}"] [class*="CounterLabel-CounterLabel"]`);
-	const raw = text(countNode);
-	const total = /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(raw)
-		&& Number.isSafeInteger(Number(raw.replaceAll(",", "")))
-		? Number(raw.replaceAll(",", "")) : null;
-	// Only GitHub's pagination component states an end. A missing component
-	// is not evidence. Disabled next controls may retain an href.
-	const pagination = Array.from(document.querySelectorAll(".paginate-container, .pagination"))
-		.find(node => node.closest(OVERLAY_SELECTOR) === null && !siteChrome(node, null)) ?? null;
-	const next = pagination?.querySelector('[rel~="next"], .next_page') ?? null;
+	const list = stream === "repositories" ? document.querySelector("#user-repositories-list") : starredList(document);
+	// Only the owner's unfiltered profile tab can supply this inventory's total.
+	const tabs = Array.from(document.querySelectorAll("a[href]")).filter(link => {
+		const href = githubUrl(link.getAttribute("href"));
+		if (href === null || link.closest(OVERLAY_SELECTOR) !== null || siteChrome(link, list)) return false;
+		const url = new URL(href);
+		return url.pathname === `/${username}` && !url.hash &&
+			url.searchParams.get("tab") === tab && Array.from(url.searchParams.keys()).length === 1 &&
+			(link.getAttribute("data-tab-item") === tab || link.closest('nav, [role="navigation"], .UnderlineNav') !== null);
+	});
+	const counters = tabs.flatMap(link => Array.from(link.querySelectorAll('.Counter, [class*="CounterLabel-CounterLabel"]')));
+	const values = counters.map(node => {
+		const raw = text(node);
+		return /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(raw) &&
+			Number.isSafeInteger(Number(raw.replaceAll(",", ""))) ? Number(raw.replaceAll(",", "")) : null;
+	});
+	const counterAmbiguous = values.length > 0 && (values.includes(null) || new Set(values).size !== 1);
+	const total = counterAmbiguous ? null : values[0] ?? null;
+	// Select only pagination inside the list or directly following its wrapper.
+	// Nested .pagination within .paginate-container is one component, not two.
+	const selector = ".paginate-container, .pagination";
+	const candidates = new Set<Element>();
+	if (list !== null) {
+		for (const node of Array.from(list.querySelectorAll(selector))) {
+			if (node.closest(OVERLAY_SELECTOR) === null && !cardRows(list).some(row => row.contains(node)))
+				candidates.add(node);
+		}
+		for (let scope: Element | null = list; scope !== null; scope = scope.parentElement) {
+			let sibling = scope.nextElementSibling;
+			while (sibling !== null && (tabs.includes(sibling) || sibling.matches(selector))) {
+				if (sibling.matches(selector)) candidates.add(sibling);
+				sibling = sibling.nextElementSibling;
+			}
+		}
+	}
+	const paginators = Array.from(candidates).filter(node =>
+		!Array.from(candidates).some(other => other !== node && other.contains(node)));
+	const pagination = paginators.length === 1 ? paginators[0] : null;
+	const nextControls = Array.from(pagination?.querySelectorAll('[rel~="next"], .next_page') ?? []);
+	const next = nextControls[0] ?? null;
 	const disabled = next?.matches('[disabled], [aria-disabled="true"], .disabled') ?? false;
-	const nextUrl = next !== null && !disabled
-		? githubUrl(next.getAttribute("href")) : null;
+	const nextUrl = next !== null && !disabled ? githubUrl(next.getAttribute("href")) : null;
+	const foreignPagination = Array.from(pagination?.querySelectorAll("a[href]") ?? []).some(link => {
+		const href = githubUrl(link.getAttribute("href"));
+		if (href === null) return true;
+		const url = new URL(href);
+		const starsRoute = stream === "starred" && url.pathname === `/stars/${username}`;
+		return !(starsRoute || (url.pathname === `/${username}` && url.searchParams.get("tab") === tab)) ||
+			!!url.hash || Array.from(url.searchParams.keys()).some(key =>
+				!["tab", "page", "after"].includes(key) || url.searchParams.getAll(key).length !== 1);
+	});
+	const ambiguous = counterAmbiguous || foreignPagination || paginators.length > 1 || nextControls.length > 1 ||
+		(next !== null && !disabled && nextUrl === null);
 	const terminal = pagination !== null && (disabled || next === null);
 	const result = inspectInventoryEnd({
 		page, username, stream, pageNumber, parsedRows, rejectedRows, noProgress,
-		explicitEmpty: false, hasRecognizedList: true, renderComplete: true,
-		hasUnknownContinuation: false,
+		explicitEmpty: false, hasRecognizedList: list !== null, renderComplete: true,
+		hasUnknownContinuation: ambiguous,
 		terminalProof: total !== null ? (total === parsedRows ? "exact_count" : null)
 			: terminal ? "disabled_next" : null,
 		nextUrl,

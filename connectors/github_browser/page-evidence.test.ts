@@ -78,11 +78,12 @@ test("inventory end evidence is bound to the exact owner request and navigation"
 	);
 });
 
-test("source end proof does not use page-layout diagnostics", () => {
+test("source end proof rejects entry loss, absent lists and ambiguous evidence", () => {
  assert.equal(inspectInventoryEnd(inventoryEvidence({
-  rejectedRows: 9, noProgress: true, hasRecognizedList: false,
-  renderComplete: false, hasUnknownContinuation: true,
+  noProgress: true, renderComplete: false,
  })).complete, true);
+ for (const overrides of [{ rejectedRows: 1 }, { hasRecognizedList: false }, { hasUnknownContinuation: true }])
+  assert.equal(inspectInventoryEnd(inventoryEvidence(overrides)).complete, false);
  assert.equal(inspectInventoryEnd(inventoryEvidence({ terminalProof: null, explicitEmpty: true })).complete, false);
 });
 test("an explicit continuation must be walked", () => {

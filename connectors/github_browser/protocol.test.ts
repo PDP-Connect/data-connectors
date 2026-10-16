@@ -263,17 +263,20 @@ test("incomplete or contradictory history search cannot emit a completed snapsho
 		{ items: [], total_count: 2, incomplete_results: false },
 	]) {
 		const messages: Array<{ type: string }> = [];
+		const records: unknown[] = [];
+		const prior = { fetched_at: "2020-01-01" };
+		const state = { history: prior };
 		await collectGitHubBrowser(
 			{
 				emit: async (message) => {
 					messages.push(message);
 				},
-				emitRecord: async () => {
-					throw new Error("unexpected history record");
+				emitRecord: async (_stream, data) => {
+					records.push(data);
 				},
 				progress: async () => {},
 				requested: new Set(["history"]),
-				state: {},
+				state,
 			},
 			{
 				fetchPublicJson: async (url: string) => apiObservation(url, response),
@@ -282,6 +285,10 @@ test("incomplete or contradictory history search cannot emit a completed snapsho
 				sleep: async () => {},
 			},
 		);
+		assert.deepEqual(records, []);
+		assert.deepEqual(state, { history: prior });
+		assert.equal(state.history, prior);
+		assert.ok(!messages.some((message) => message.type === "DETAIL_COVERAGE"));
 		assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
 		assert.ok(!messages.some((message) => message.type === "STATE"));
 	}
