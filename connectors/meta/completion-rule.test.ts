@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import "./ads-dom.test.ts";
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -10,6 +11,73 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import { classifyAdsDialogInPage, collectAllStreams } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
+
+for (const wantsProfile of [false, true]) {
+	for (const { label, user, proven } of [
+		{ label: "unobserved", user: null, proven: false },
+		{ label: "unknown", user: {}, proven: false },
+		{ label: "null", user: { media_count: null }, proven: false },
+		{ label: "malformed", user: { media_count: "0" }, proven: false },
+		{ label: "negative", user: { media_count: -1 }, proven: false },
+		{ label: "fractional", user: { media_count: 0.5 }, proven: false },
+		{ label: "different id", user: { id: "other", media_count: 0 }, proven: false },
+		{ label: "different username", user: { username: "other", media_count: 0 }, proven: false },
+		{ label: "positive", user: { media_count: 3 }, proven: false },
+		{ label: "proven zero", user: { media_count: 0 }, proven: true },
+	]) {
+		test(`empty timeline requires same-identity zero: ${label}, profile requested=${wantsProfile}`, async () => {
+			const requested = [...(wantsProfile ? ["profile"] : []), "posts", "post_likes"];
+			const { ctx, emitNavigation, emitRequest, emitResponse, failures, harness } = setup(requested);
+			let pendingResolve: ((response: Response) => void) | null = null;
+			let profileReads = 0;
+			ctx.progress = async (message) => {
+				if (message === "Fetching Instagram profile counts") profileReads += 1;
+			};
+			ctx.page.waitForResponse = (() => new Promise<Response>((resolve) => {
+				pendingResolve = resolve;
+			})) as Page["waitForResponse"];
+			ctx.page.goto = (() => {
+				emitNavigation();
+				if (user !== null) {
+					emitResponse({
+						url: () => "https://www.instagram.com/api/graphql",
+						request: () => ({
+							method: () => "POST",
+							postData: () => "PolarisProfilePageContentQuery",
+						}),
+						status: () => 200,
+						json: async () => ({ data: { user: {
+							id: "u1", username: "testuser", follower_count: 1,
+							following_count: 1, is_verified: false, ...user,
+						} } }),
+					});
+				}
+				if (pendingResolve) {
+					const response = nonterminalPostsResponse([], null, ctx.page);
+					response.json = async () => ({ data: {
+						xdt_api__v1__feed__user_timeline_graphql_connection: {
+							edges: [], page_info: { end_cursor: null, has_next_page: false },
+						},
+					} });
+					emitRequest(response.request());
+					pendingResolve(response);
+					pendingResolve = null;
+				}
+				return Promise.resolve(null);
+			}) as Page["goto"];
+			await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+			for (const stream of ["posts", "post_likes"]) {
+				assert.equal(harness.protocolMessages.some(message => message.type === "STATE" && message.stream === stream), proven, `${stream} STATE`);
+				assert.equal(failures.includes(stream), !proven, `${stream} failure`);
+			}
+			assert.equal(profileReads, 1, "profile-count evidence is gathered independently of requested output");
+			if (!wantsProfile) {
+				assert.equal(failures.includes("profile"), false);
+				assert.equal(harness.emitted.some(record => record.stream === "profile"), false);
+			}
+		});
+	}
+}
 for (const malformed of [{ is_verified: "false" }, { is_private: 1 }, { full_name: {} }, { profile_pic_url: "invalid" }, { pk: 12 }, { username: 12 }]) {
  for (const later of [false, true]) {
   test(`following malformed ${JSON.stringify(malformed)} later=${later} preserves readable rows without STATE`, async () => {
@@ -582,7 +650,8 @@ test("completion rule: a capped posts walk reports both requested streams as fai
 		})) as Page["waitForResponse"];
 	ctx.page.goto = (() => {
 		emitNavigation();
-		respond();
+		// Profile evidence navigation has no pending timeline response.
+		if (pendingResolve) respond();
 		return Promise.resolve(null);
 	}) as Page["goto"];
 	const evaluate = ctx.page.evaluate;
@@ -636,7 +705,8 @@ test("completion rule: a capped posts walk keeps emitted records and fails only 
 		})) as Page["waitForResponse"];
 	ctx.page.goto = (() => {
 		emitNavigation();
-		respond();
+		// Profile evidence navigation has no pending timeline response.
+		if (pendingResolve) respond();
 		return Promise.resolve(null);
 	}) as Page["goto"];
 	const evaluate = ctx.page.evaluate;

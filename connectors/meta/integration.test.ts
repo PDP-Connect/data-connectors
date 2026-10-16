@@ -384,6 +384,24 @@ function makeFakePage(options: {
 		},
 		evaluate: (fn: unknown, arg?: unknown): Promise<unknown> => {
 			const fnSource = String(fn);
+			if (
+				typeof arg === "object" &&
+				arg !== null &&
+				"token" in arg &&
+				"click" in arg &&
+				"label" in arg
+			) {
+				// Traversal probe: the scripted dialog is already fully expanded, so no
+				// control is offered and the rows read are the scripted category rows.
+				const { label } = arg as { label: string };
+				return Promise.resolve({
+					clicked: false,
+					failed: false,
+					loading: false,
+					rows: label === "View all" ? (options.categoryRows ?? []) : [],
+					visible: false,
+				});
+			}
 			if (fnSource.includes("classifyAdsDialogInPage")) {
 				if (options.dialogClassifications) {
 					const index = Math.min(
@@ -865,6 +883,14 @@ test("collectAllStreams: a post_likes-only request does not emit an unrequested 
 		fetchScript: {},
 		harness,
 		postsScript: [EMPTY_POSTS],
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 0,
+			username: "testuser",
+		},
 		requestedStreams: ["post_likes"],
 	});
 
@@ -873,6 +899,7 @@ test("collectAllStreams: a post_likes-only request does not emit an unrequested 
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(
@@ -967,6 +994,14 @@ test("collectAllStreams: a terminal empty posts fixture completes with zero reco
 		fetchScript: {},
 		harness,
 		postsScript: [{ json, status: 200 }],
+		profilePageUser: {
+			follower_count: 12,
+			following_count: 8,
+			id: "u1",
+			is_verified: false,
+			media_count: 0,
+			username: "testuser",
+		},
 		requestedStreams: ["posts", "post_likes"],
 	});
 
@@ -975,6 +1010,7 @@ test("collectAllStreams: a terminal empty posts fixture completes with zero reco
 		NO_DELAY,
 		TEST_POSTS_CLOCK,
 		makeVirtualAdsClock(),
+		TEST_PROFILE_CLOCK,
 	);
 
 	assert.deepEqual(harness.emitted, []);
@@ -2544,6 +2580,14 @@ const AD_TOPICS_UNAVAILABLE = {
 	step: "destination_list_not_found",
 	surface: "ad_topics",
 } as const;
+// A row read before the dialog failed stays emitted; completion is what fails.
+const CATEGORIES_UNAVAILABLE_AFTER_ROW = {
+	items: [{ description: null, name: "Category A" }],
+	reached: false,
+	step: "destination_list_not_found",
+	surface: "targeting_categories",
+} as const;
+
 const CATEGORIES_UNAVAILABLE = {
 	items: [],
 	reached: false,
@@ -3035,7 +3079,7 @@ test("scrapeAdTopics accepts a visible exact empty marker", async () => {
 
 // ─── scrapeTargetingCategories ───────────────────────────────────────────
 
-test("scrapeTargetingCategories treats a View all that hides itself without new rows as exhausted", async () => {
+test("scrapeTargetingCategories keeps a self-hiding View all without new rows partial", async () => {
 	const result = await withAccountsCenterPage(
 		htmlPage(
 			'<button role="button">View all</button>',
@@ -3050,8 +3094,8 @@ test("scrapeTargetingCategories treats a View all that hides itself without new 
 
 	assert.deepEqual(result, {
 		items: [{ description: null, name: "Category" }],
-		reached: true,
-		step: null,
+		reached: false,
+		step: "destination_list_not_found",
 		surface: "targeting_categories",
 	});
 });
@@ -3161,7 +3205,7 @@ test("scrapeTargetingCategories returns unavailable when the dialog list is repl
 		(page) => scrapeTargetingCategories(page),
 	);
 
-	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE_AFTER_ROW);
 });
 
 test("scrapeTargetingCategories waits out a busy dialog before completing after View all", async () => {
@@ -3280,7 +3324,7 @@ test("scrapeTargetingCategories rejects rows when a visible category error is pr
 		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
 	);
 
-	assert.deepEqual(result, CATEGORIES_UNAVAILABLE);
+	assert.deepEqual(result, CATEGORIES_UNAVAILABLE_AFTER_ROW);
 });
 
 test("scrapeTargetingCategories accepts explicit empty categories marker", async () => {
@@ -3614,14 +3658,17 @@ test("scrapeTargetingCategories completes the live View all screen: the earlier 
 				document.querySelector('#dialog-view-all').addEventListener('click', () => {
 					document.querySelector('#first-screen').style.display = 'none';
 					document.querySelector('#dialog-view-all').style.display = 'none';
-					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem"><div role="button">Removed categories</div></div></div>');
+					document.querySelector('[role="dialog"]').insertAdjacentHTML('beforeend', '<div role="list"><div role="listitem"><span>Category A</span><span>Based on activity</span><button role="button">Remove</button></div><div role="listitem"><span>Category B</span><span>Based on activity</span><button role="button">Remove</button></div></div><div role="list"><div role="listitem"><div role="button">Removed categories</div></div></div>');
 				});`),
 		),
 		(page) => scrapeTargetingCategories(page, makeVirtualAdsClock()),
 	);
 
 	assert.deepEqual(result, {
-		items: [{ description: "Based on activity", name: "Category A" }],
+		items: [
+			{ description: "Based on activity", name: "Category A" },
+			{ description: "Based on activity", name: "Category B" },
+		],
 		reached: true,
 		step: null,
 		surface: "targeting_categories",

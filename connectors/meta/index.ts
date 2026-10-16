@@ -1478,6 +1478,7 @@ export function classifyAdsDialogInPage(args: {
 	 *  a list with no ARIA totals is the whole list the source offers. Supplied
 	 *  totals still must agree. */
 	expansionExhausted?: true;
+	traversalToken?: string;
 	requiredAffordance?: string;
 	/** Rows are themselves controls (live advertiser rows), so their text
 	 *  counts even though it sits inside a control. */
@@ -1531,6 +1532,11 @@ export function classifyAdsDialogInPage(args: {
 		(candidate) => candidate.querySelector('[role="list"]') !== null,
 	);
 	if (!dialog) return { kind: "unavailable" };
+	if (args.traversalToken) {
+		const state = (document as Document & { __pdppAdsTraversal?: AdsTraversalState }).__pdppAdsTraversal;
+		if (!state || state.token !== args.traversalToken || state.failed ||
+			state.dialog !== dialog || state.url !== document.URL) return {kind: "unavailable"};
+	}
 	const text = visibleText(dialog);
 	const [readPositiveInteger] = [
 		(raw: string | null): number | null => {
@@ -1957,133 +1963,168 @@ const ADS_SEE_MORE_RE = /^see more$/i;
 const ADS_MAX_EXPANSIONS = 50;
 const ADS_EXPANSION_WAIT_MS = 10_000;
 
-/** Visible expansion control of the open dialog, optionally clicked. The
- *  advertisers dialog shows a few rows and a "See more" control that loads
- *  the rest in one step (confirmed live 2026-10-16). `dataRows` excludes the
- *  row that holds the control itself. */
-function inspectDialogExpansion(args: { click: boolean; label: string }): {
-	clicked: boolean;
-	dataRows: number;
-	present: boolean;
-	visible: boolean;
-} {
-	const [visible] = [
-		(element: Element): boolean => {
-			if (!element.isConnected) return false;
-			for (
-				let current: Element | null = element;
-				current;
-				current = current.parentElement
-			) {
-				const style = getComputedStyle(current);
-				if (
-					style.display === "none" ||
-					style.visibility === "hidden" ||
-					style.visibility === "collapse" ||
-					style.opacity === "0"
-				) {
-					return false;
-				}
-			}
-			const rect = element.getBoundingClientRect();
-			return rect.width > 0 && rect.height > 0;
-		},
-	] as const;
-	const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
-		(candidate) =>
-			visible(candidate) && candidate.querySelector('[role="list"]') !== null,
-	);
-	if (!dialog)
-		return { clicked: false, dataRows: 0, present: false, visible: false };
-	const label = args.label.toLowerCase();
-	const controls = Array.from(
-		dialog.querySelectorAll('a, button, [role="button"], [role="link"]'),
-	).filter(
-		(control) =>
-			(control.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase() ===
-			label,
-	);
-	const shown = controls.find(visible) as HTMLElement | undefined;
-	let clicked = false;
-	if (args.click && shown) {
-		shown.click();
-		clicked = true;
-	}
-	return {
-		clicked,
-		dataRows: Array.from(dialog.querySelectorAll('[role="listitem"]')).filter(
-			(row) => !controls.some((control) => row.contains(control)),
-		).length,
-		present: controls.length > 0,
-		visible: shown !== undefined,
-	};
+type AdsTraversalRow = { description: string | null; name: string };
+type AdsTraversalState = {
+ token: string; dialog: Element; lists: Element[]; url: string;
+ rows: AdsTraversalRow[]; failed: boolean;
+};
+
+/** Browser-local references bind every sample and click to one document/dialog.
+ * The serialized token alone cannot revive the proof after navigation. */
+function inspectDialogExpansion(args: {
+ click: boolean; label: string; token: string; initialize?: boolean;
+}): { clicked: boolean; visible: boolean; failed: boolean; loading: boolean; rows: AdsTraversalRow[] } {
+ const doc = document as Document & { __pdppAdsTraversal?: AdsTraversalState };
+ const [visible] = [(element: Element): boolean => {
+  if (!element.isConnected) return false;
+  for (let current: Element | null = element; current; current = current.parentElement) {
+   const style = getComputedStyle(current);
+   if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
+  }
+  const rect = element.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+ }] as const;
+ const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).find(
+  candidate => visible(candidate) && candidate.querySelector('[role="list"]') !== null,
+ );
+ const lists = Array.from(dialog?.querySelectorAll('[role="list"]') ?? []);
+ if (args.initialize && dialog) {
+  doc.__pdppAdsTraversal = { token: args.token, dialog, lists, url: document.URL, rows: [], failed: false };
+ }
+ const state = doc.__pdppAdsTraversal;
+ if (!state || state.token !== args.token) return {clicked: false, visible: false, failed: true, loading: false, rows: []};
+ if (!dialog || dialog !== state.dialog || document.URL !== state.url ||
+  state.lists.some(list => !lists.includes(list))) {
+  state.failed = true;
+  return {clicked: false, visible: false, failed: true, loading: false, rows: state.rows};
+ }
+ state.lists = lists;
+ const [normalize] = [(text: string) => text.replace(/\s+/g, " ").trim()] as const;
+ const controls = Array.from(dialog.querySelectorAll('a, button, [role="button"], [role="link"]'))
+  .filter(control => normalize(control.textContent ?? "").toLowerCase() === args.label.toLowerCase());
+ const shown = controls.find(visible) as HTMLElement | undefined;
+ const rows: AdsTraversalRow[] = [];
+ let unreadable = false;
+ for (const row of Array.from(dialog.querySelectorAll('[role="listitem"]'))) {
+  if (controls.some(control => row.contains(control))) continue;
+  if (!visible(row)) continue;
+  const texts: string[] = [];
+  const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+   const parent = node.parentElement;
+   const text = normalize(node.textContent ?? "");
+   if (!text) continue;
+   if (!parent || !visible(parent)) { unreadable = true; continue; }
+   if (args.label === "View all" && (text === "Remove" || text === "Removed categories")) continue;
+   texts.push(text);
+  }
+  if (args.label === "View all" && texts.length === 0) continue;
+  if (args.label === "View all" && !Array.from(row.querySelectorAll('button, [role="button"]'))
+   .some(control => visible(control) && normalize(control.textContent ?? "") === "Remove")) {
+   unreadable = true; continue;
+  }
+  const name = args.label === "View all" ? texts[0] : normalize(texts.join(" "));
+  const description = args.label === "View all" ? texts[1] ?? null : null;
+  if (!name || name.length > 500 || (description !== null && description.length > 2000)) {
+   unreadable = true; continue;
+  }
+  rows.push({name, description});
+ }
+ const keys = rows.map(row => JSON.stringify(row));
+ const retained = state.rows.every(row => keys.includes(JSON.stringify(row)));
+ if (!retained || new Set(rows.map(row => row.name)).size !== rows.length) state.failed = true;
+ // Keep every readable record even if a later sample loses it or shows an error.
+ for (const row of rows) {
+  if (!state.rows.some(previous => JSON.stringify(previous) === JSON.stringify(row))) state.rows.push(row);
+ }
+ const text = normalize(dialog.textContent ?? "");
+ const error = Array.from(document.querySelectorAll('input[type="password"], form[action*="/login"], form[action*="/challenge"]')).some(visible) ||
+  Array.from(dialog.querySelectorAll('[role="alert"]')).some(visible) ||
+  /\b(?:could not be loaded|try again|temporarily unavailable|something went wrong|error loading)\b/i.test(text);
+ if (error) state.failed = true;
+ const loading = dialog.matches('[aria-busy="true"]') ||
+  Array.from(dialog.querySelectorAll('[aria-busy="true"], [role="progressbar"]')).some(visible) ||
+  /\b(?:loading|please wait)\b/i.test(text);
+ // A busy dialog is transient: it blocks acceptance until idle but is not a
+ // lasting defect of the baseline.
+ const failed = state.failed || unreadable;
+ // Snapshot before dispatch: a synchronous handler must not move the baseline.
+ const snapshot = {clicked: false, visible: Boolean(shown), failed, loading, rows: rows.slice()};
+ if (state.failed) snapshot.rows = state.rows.slice();
+ if (args.click && shown && !state.failed) {
+  shown.click();
+  snapshot.clicked = true;
+ }
+ return snapshot;
 }
 
-/**
- * Click the dialog's expansion control until it is gone. True only when each
- * click loaded more rows, the control then went away (or was never offered),
- * and nothing stalled: the list holds every row the source offers.
- */
+let adsTraversalSequence = 0;
 async function expandAdsDialog(
-	page: Page,
-	label: string,
-	clock: AdsSettleClock,
-): Promise<boolean> {
-	let clickedOnce = false;
-	let stalled = false;
-	const walk = await walkPagesWithCeiling({
-		fetchPage: async () => {
-			const before = await page.evaluate(inspectDialogExpansion, {
-				click: true,
-				label,
-			});
-			if (!before.clicked) return false;
-			clickedOnce = true;
-			const deadline = clock.now() + ADS_EXPANSION_WAIT_MS;
-			await page
-				.waitForFunction(
-					([name, rowsBefore]: readonly [string, number]) => {
-						const dialog = Array.from(
-							document.querySelectorAll('[role="dialog"]'),
-						).find((candidate) => candidate.querySelector('[role="list"]'));
-						if (!dialog) return false;
-						const controls = Array.from(
-							dialog.querySelectorAll('a, button, [role="button"], [role="link"]'),
-						).filter(
-							(control) =>
-								(control.textContent ?? "")
-									.replace(/\s+/g, " ")
-									.trim()
-									.toLowerCase() === name,
-						);
-						return (
-							Array.from(dialog.querySelectorAll('[role="listitem"]')).filter(
-								(row) => !controls.some((control) => row.contains(control)),
-							).length > rowsBefore
-						);
-					},
-					[label.toLowerCase(), before.dataRows] as const,
-					{ timeout: Math.max(1, deadline - clock.now()) },
-				)
-				.catch((): undefined => undefined);
-			const after = await page.evaluate(inspectDialogExpansion, {
-				click: false,
-				label,
-			});
-			if (after.dataRows <= before.dataRows) {
-				stalled = true;
-				return false;
-			}
-			return after.visible;
-		},
-		maxPages: ADS_MAX_EXPANSIONS,
-	});
-	if (walk.truncated || stalled) return false;
-	const final = await page.evaluate(inspectDialogExpansion, {
-		click: false,
-		label,
-	});
-	return !final.visible && (clickedOnce || !final.present);
+ page: Page, label: string, clock: AdsSettleClock,
+): Promise<{ exhausted: boolean; failed: boolean; token: string; rows: AdsTraversalRow[] }> {
+ const token = `meta-ads-${++adsTraversalSequence}`;
+ let rows: AdsTraversalRow[] = [];
+ let clickedOnce = false;
+ let failed = false;
+ const sample = async (click: boolean, initialize = false) => {
+  const result = await page.evaluate(inspectDialogExpansion, {click, initialize, label, token});
+  const validated = result.rows.filter(row => {
+   const records = buildAdRecords({adTopics: [],
+    advertisers: label === "See more" ? [row.name] : [],
+    categories: label === "View all" ? [row] : []});
+   return records.length === 1 && adsSchema.safeParse(records[0]).success;
+  });
+  result.failed ||= validated.length !== result.rows.length;
+  result.rows = validated;
+  for (const row of result.rows) {
+   if (!rows.some(previous => JSON.stringify(previous) === JSON.stringify(row))) rows.push(row);
+  }
+  return result;
+ };
+ const initial = await sample(false, true);
+ // Wake on real page time: rows load on the page's own timers, not on the
+ // injected clock, so one in-page wait covers the first stretch.
+ const awaitPageGrowth = async (rowsBefore: number, deadline: number): Promise<void> => {
+  await Promise.resolve().then(() => page.waitForFunction(([name, count]: readonly [string, number]) => {
+   const dialog = Array.from(document.querySelectorAll('[role="dialog"]'))
+    .find(candidate => candidate.querySelector('[role="list"]'));
+   if (!dialog) return false;
+   const controls = Array.from(dialog.querySelectorAll('a, button, [role="button"], [role="link"]'))
+    .filter(control => (control.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase() === name);
+   return Array.from(dialog.querySelectorAll('[role="listitem"]')).filter(row => {
+    if (controls.some(control => row.contains(control))) return false;
+    const rect = row.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+   }).length > count;
+  }, [label.toLowerCase(), rowsBefore] as const, {timeout: Math.max(1, deadline - clock.now())})).catch((): undefined => undefined);
+ };
+ const waitForGrowth = async (before: AdsTraversalRow[], deadline: number, wake = true): Promise<Awaited<ReturnType<typeof sample>>> => {
+  if (wake) await awaitPageGrowth(before.length, deadline);
+  const after = await sample(false);
+  const keys = after.rows.map(row => JSON.stringify(row));
+  const retained = before.every(row => keys.includes(JSON.stringify(row)));
+  if (!retained || (!after.failed && !after.loading && after.rows.length > before.length) || clock.now() >= deadline) return after;
+  await clock.sleep(250);
+  return waitForGrowth(before, deadline, false);
+ };
+ const walk = await walkPagesWithCeiling({
+  maxPages: ADS_MAX_EXPANSIONS,
+  fetchPage: async () => {
+   const before = await sample(true);
+   if (!before.clicked) { failed ||= before.failed; return false; }
+   clickedOnce = true;
+   const after = await waitForGrowth(before.rows, clock.now() + ADS_EXPANSION_WAIT_MS);
+   const keys = after.rows.map(row => JSON.stringify(row));
+   if (after.failed || after.loading || after.rows.length <= before.rows.length ||
+    !before.rows.every(row => keys.includes(JSON.stringify(row)))) {
+    failed = true; return false;
+   }
+   return after.visible;
+  },
+ }).catch(() => { failed = true; return {truncated: false}; });
+ const final = await sample(false).catch(() => ({failed: true, loading: false, visible: false, rows: []}));
+ failed ||= walk.truncated || final.failed || final.loading;
+ return {exhausted: clickedOnce && !initial.failed && !failed && !final.visible, failed: failed || (initial.failed && !clickedOnce), token, rows};
 }
 
 /** Advertisers via Manage info → "Advertisers using your activity or
@@ -2132,16 +2173,20 @@ async function scrapeAdvertisersFromManageInfo(
 		await closeDialog(page);
 		return failed("destination_list_not_found");
 	}
-	const exhausted = await expandAdsDialog(page, "See more", clock);
+	const traversal = await expandAdsDialog(page, "See more", clock);
 	const result = await scrapeDialogListItems(
-		page,
-		"No advertisers",
-		ADS_SEE_MORE_RE,
-		clock,
-		{ rowsAreControls: true, ...(exhausted ? { expansionExhausted: true as const } : {}) },
-	);
+		page, "No advertisers", ADS_SEE_MORE_RE, clock,
+		{ rowsAreControls: true, traversalToken: traversal.token,
+			...(traversal.exhausted ? { expansionExhausted: true as const } : {}) },
+	).catch(() => ({items: [] as string[], reached: false, step: "destination_list_not_found" as const}));
+	const final = await page.evaluate(inspectDialogExpansion, {click: false, label: "See more", token: traversal.token})
+		.catch(() => ({failed: true, loading: false, rows: [] as AdsTraversalRow[]}));
+	const names = new Set([...traversal.rows, ...final.rows].map(row => row.name));
+	for (const name of result.items) names.add(name);
+	const reached = result.reached && !traversal.failed && !final.failed && !final.loading &&
+		(result.items.length === names.size || (names.size === 0 && result.reached));
 	await closeDialog(page);
-	return { ...result, surface: "advertisers" };
+	return { items: [...names], reached, step: reached ? result.step : "destination_list_not_found", surface: "advertisers" };
 }
 
 const ADS_EMPTY_LIST_SETTLE_MS = 2_500;
@@ -2289,209 +2334,25 @@ export async function scrapeTargetingCategories(
 		classifyAdsDialogInPage,
 		classificationArgs,
 	);
-	const clickedViewAll = await page.evaluate(() => {
-		const [visible] = [
-			(element: Element): boolean => {
-				if (!element.isConnected) return false;
-				const rect = element.getBoundingClientRect();
-				for (
-					let current: Element | null = element;
-					current;
-					current = current.parentElement
-				) {
-					const style = getComputedStyle(current);
-					if (
-						style.display === "none" ||
-						style.visibility === "hidden" ||
-						style.visibility === "collapse" ||
-						style.opacity === "0"
-					) {
-						return false;
-					}
-				}
-				return rect.width > 0 && rect.height > 0;
-			},
-		] as const;
-		const dialog = Array.from(
-			document.querySelectorAll('[role="dialog"]'),
-		).find(
-			(candidate) =>
-				visible(candidate) && candidate.querySelector('[role="list"]') !== null,
-		);
-		const btns = dialog?.querySelectorAll('button, [role="button"]') ?? [];
-		for (const btn of Array.from(btns)) {
-			if (visible(btn) && (btn.textContent ?? "").trim() === "View all") {
-				(btn as HTMLElement).click();
-				return true;
-			}
-		}
-		return false;
-	});
-	const viewAllExpanded =
-		!clickedViewAll ||
-		(await waitForAdsCondition(page, () => {
-			const [visible] = [
-				(element: Element): boolean => {
-					if (!element.isConnected) return false;
-					const rect = element.getBoundingClientRect();
-					for (
-						let current: Element | null = element;
-						current;
-						current = current.parentElement
-					) {
-						const style = getComputedStyle(current);
-						if (
-							style.display === "none" ||
-							style.visibility === "hidden" ||
-							style.visibility === "collapse" ||
-							style.opacity === "0"
-						) {
-							return false;
-						}
-					}
-					return rect.width > 0 && rect.height > 0;
-				},
-			] as const;
-			const dialog = Array.from(
-				document.querySelectorAll('[role="dialog"]'),
-			).find(
-				(candidate) =>
-					visible(candidate) &&
-					candidate.querySelector('[role="list"]') !== null,
-			);
-			const btns = dialog?.querySelectorAll('button, [role="button"]') ?? [];
-			return !Array.from(btns).some(
-				(btn) => visible(btn) && (btn.textContent ?? "").trim() === "View all",
-			);
-		}));
-	// Clicking "View all" until it is gone shows every category the source
-	// offers; the live dialog carries no ARIA totals to prove that otherwise.
-	const finalCategories = viewAllExpanded
-		? await waitForStableAdsDialog(
-				page,
-				{
-					...classificationArgs,
-					...(clickedViewAll ? { expansionExhausted: true as const } : {}),
-				},
-				clock,
-			)
-		: null;
-	if (
-		finalCategories?.kind === "verified_empty" &&
-		beforeExpansion?.kind !== "data" &&
-		beforeExpansion?.kind !== "loading" &&
-		beforeExpansion.hasPositiveSourceTotal !== true
-	) {
-		await closeDialog(page);
-		return {
-			items: [],
-			reached: true,
-			step: "reached_empty",
-			surface: "targeting_categories",
-		};
+	const traversal = await expandAdsDialog(page, "View all", clock);
+	const finalCategories = await waitForStableAdsDialog(page, {
+		...classificationArgs, traversalToken: traversal.token,
+		...(traversal.exhausted ? {expansionExhausted: true as const} : {}),
+	}, clock).catch(() => null);
+	const final = await page.evaluate(inspectDialogExpansion, {click: false, label: "View all", token: traversal.token})
+		.catch(() => ({failed: true, loading: false, rows: [] as AdsTraversalRow[]}));
+	const items = [...traversal.rows];
+	for (const row of final.rows) {
+		if (!items.some(previous => previous.name === row.name)) items.push(row);
 	}
-	if (finalCategories?.kind !== "data") {
-		await closeDialog(page);
-		return {
-			items: [],
-			reached: false,
-			step: "destination_list_not_found",
-			surface: "targeting_categories",
-		};
-	}
-
-	const categories = await page.evaluate(() => {
-		const [visible] = [
-			(element: Element): boolean => {
-				if (!element.isConnected) return false;
-				const rect = element.getBoundingClientRect();
-				for (
-					let current: Element | null = element;
-					current;
-					current = current.parentElement
-				) {
-					const style = getComputedStyle(current);
-					if (
-						style.display === "none" ||
-						style.visibility === "hidden" ||
-						style.visibility === "collapse" ||
-						style.opacity === "0"
-					) {
-						return false;
-					}
-				}
-				return rect.width > 0 && rect.height > 0;
-			},
-		] as const;
-		const dialog = Array.from(
-			document.querySelectorAll('[role="dialog"]'),
-		).find(
-			(candidate) =>
-				visible(candidate) && candidate.querySelector('[role="list"]') !== null,
-		);
-		const lists = Array.from(
-			dialog?.querySelectorAll('[role="list"]') ?? [],
-		).filter(visible);
-		if (lists.length === 0) {
-			return { items: [], reached: false };
-		}
-		const items = lists.flatMap((list) =>
-			Array.from(list.querySelectorAll('[role="listitem"]')).filter(visible),
-		);
-		const seen = new Set<string>();
-		const out: Array<{ description: string | null; name: string }> = [];
-		for (const item of items) {
-			const removeBtn = item.querySelector('button, [role="button"]');
-			if (
-				!removeBtn ||
-				!visible(removeBtn) ||
-				(removeBtn.textContent ?? "").trim() !== "Remove"
-			) {
-				continue;
-			}
-			const texts: string[] = [];
-			const walker = document.createTreeWalker(
-				item,
-				NodeFilter.SHOW_TEXT,
-				null,
-			);
-			let node = walker.nextNode();
-			while (node) {
-				const parent = node.parentElement;
-				const t =
-					parent && visible(parent) ? (node.textContent ?? "").trim() : "";
-				if (t && t !== "Remove" && t !== "Removed categories") {
-					texts.push(t);
-				}
-				node = walker.nextNode();
-			}
-			const name = texts[0];
-			if (!name || seen.has(name)) {
-				continue;
-			}
-			seen.add(name);
-			out.push({ description: texts[1] ?? null, name });
-		}
-		return { items: out, reached: true };
-	});
+	const safe = !traversal.failed && !final.failed && !final.loading;
+	const empty = safe && items.length === 0 && finalCategories?.kind === "verified_empty" &&
+		beforeExpansion.kind !== "data" && beforeExpansion.kind !== "loading" &&
+		beforeExpansion.hasPositiveSourceTotal !== true;
+	const reached = empty || (safe && items.length > 0 && finalCategories?.kind === "data" &&
+		finalCategories.complete && items.length === finalCategories.items.length);
 	await closeDialog(page);
-	return {
-		items: categories.items,
-		reached:
-			categories.reached &&
-			categories.items.length > 0 &&
-			categories.items.length === finalCategories.items.length &&
-			finalCategories.complete,
-		step:
-			categories.reached &&
-			viewAllExpanded &&
-			categories.items.length > 0 &&
-			categories.items.length === finalCategories.items.length &&
-			finalCategories.complete
-				? null
-				: "destination_list_not_found",
-		surface: "targeting_categories",
-	};
+	return {items, reached, step: reached ? (empty ? "reached_empty" : null) : "destination_list_not_found", surface: "targeting_categories"};
 }
 
 // ─── Collect ────────────────────────────────────────────────────────────
@@ -2576,10 +2437,10 @@ export async function collectAllStreams(
 		}
 	}
 
-	// The owner's own post count, when the profile page proved one. An empty
-	// timeline that contradicts it is not evidence of zero posts.
+	// Empty timelines need a positively read zero for this identity, even
+	// when profile output was not requested. Unknown is not proof of empty.
 	let observedPostCount: number | null = null;
-	if (wantsProfile && user && identity) {
+	if ((wantsProfile || wantsPosts || wantsPostLikes) && user && identity) {
 		await progress("Fetching Instagram profile counts");
 		const profileUser = await fetchProfilePageUser(
 			page,
@@ -2599,17 +2460,19 @@ export async function collectAllStreams(
 				: null,
 		);
 		observedPostCount = counts.post_count;
-		const readableSources = profileSourceFieldsAreReadable(user) &&
-			profileSourceFieldsAreReadable(trustedProfileUser);
-		const profile = profileRecord(user, counts, trustedProfileUser) ?? identity;
-		const validProfile = profileSchema.safeParse(profile).success;
-		if (validProfile) await emitRecord("profile", profile as RecordData);
-		if (!readableSources || !validProfile || !profileEnrichmentIsComplete(trustedProfileUser)) {
-			await reportCollectionFailure(
-				ctx,
-				"profile",
-				"Instagram profile enrichment was incomplete; the emitted profile is a partial record.",
-			);
+		if (wantsProfile) {
+			const readableSources = profileSourceFieldsAreReadable(user) &&
+				profileSourceFieldsAreReadable(trustedProfileUser);
+			const profile = profileRecord(user, counts, trustedProfileUser) ?? identity;
+			const validProfile = profileSchema.safeParse(profile).success;
+			if (validProfile) await emitRecord("profile", profile as RecordData);
+			if (!readableSources || !validProfile || !profileEnrichmentIsComplete(trustedProfileUser)) {
+				await reportCollectionFailure(
+					ctx,
+					"profile",
+					"Instagram profile enrichment was incomplete; the emitted profile is a partial record.",
+				);
+			}
 		}
 	}
 
@@ -2664,8 +2527,8 @@ export async function collectAllStreams(
 			}
 			if (
 				sourceEdgeCount === 0 &&
-				observedPostCount !== null &&
-				observedPostCount > 0
+				!truncated &&
+				observedPostCount !== 0
 			) {
 				for (const stream of ["posts", "post_likes"].filter((name) =>
 					requested.has(name),
@@ -2673,7 +2536,7 @@ export async function collectAllStreams(
 					await reportCollectionFailure(
 						ctx,
 						stream,
-						"Instagram reported posts on the profile but the timeline returned none; the empty list was not proven.",
+						"Instagram returned no timeline posts without a proven same-identity profile post count of zero; the empty list was not proven.",
 					);
 				}
 			} else if (sourceEdgeCount === 0 && !truncated) {

@@ -10,6 +10,7 @@ import type { Page } from "playwright";
 import {
 	classifyAdsDialogInPage,
 	scrapeAdTopics,
+	scrapeAdvertisers,
 	scrapeTargetingCategories,
 } from "./index.ts";
 
@@ -133,6 +134,11 @@ function makeDomPage(
 ): { document: Document; page: Page; window: Window } {
 	const { document, window } = parseHTML(`<html><body>${html}</body></html>`);
 	installGeometry(window);
+	for (const button of Array.from(document.querySelectorAll("button"))) {
+		if (/^(View all|See more)$/.test(button.textContent ?? "")) {
+			button.addEventListener("click", () => hooks.onViewAllClick?.());
+		}
+	}
 	const evaluate = (fn: unknown, arg?: unknown): Promise<unknown> => {
 		const result = runInNewContext(`(${String(fn)})(arg)`, {
 			arg,
@@ -147,9 +153,6 @@ function makeDomPage(
 			},
 			NodeFilter: { SHOW_TEXT: 4 },
 		});
-		if (result === true && String(fn).includes('button, [role="button"]')) {
-			hooks.onViewAllClick?.();
-		}
 		if (result === undefined) {
 			return Promise.resolve(undefined);
 		}
@@ -158,8 +161,8 @@ function makeDomPage(
 	const page = {
 		evaluate,
 		goto: () => Promise.resolve(null),
-		waitForFunction: (fn: unknown): Promise<unknown> =>
-			evaluate(fn).then((value) => {
+		waitForFunction: (fn: unknown, arg?: unknown): Promise<unknown> =>
+			evaluate(fn, arg).then((value) => {
 				if (!value) throw new Error("condition not ready");
 				return value;
 			}),
@@ -777,7 +780,7 @@ for (const replacement of [
 		);
 		const result = await scrapeTargetingCategories(page, makeClock());
 		assert.equal(result.reached, false);
-		assert.deepEqual(result.items, []);
+		assert.deepEqual(result.items, [{ description: null, name: "Music" }]);
 	});
 }
 
@@ -790,3 +793,54 @@ test("classifyAdsDialogInPage: visible source empty message proves a zero-height
 		{ kind: "verified_empty" },
 	);
 });
+
+for (const surface of ["advertisers", "categories"] as const) {
+ for (const scenario of ["missing", "noop", "duplicates", "virtualized", "replaced", "error", "valid", "second-noop", "navigation", "lost-document-token", "late-replaced", "invalid", "multi", "script-error", "signout"] as const) {
+  test(`traversal proof: ${surface} ${scenario} retains rows and fails closed unless every click grows`, async () => {
+   const label = surface === "advertisers" ? "See more" : "View all";
+   const row = (name: string) => surface === "advertisers"
+    ? `<div role="listitem"><button>${name}</button></div>`
+    : `<div role="listitem"><span>${name}</span><button>Remove</button></div>`;
+   let clicks = 0;
+   const {document, page} = makeDomPage(`
+    <div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a><a>Categories used to reach you</a></div>
+    <section role="dialog"><div role="list">${row("Row A")}${row("Row B")}</div>
+    ${scenario === "missing" ? "" : `<button id="expand">${label}</button>`}</section>`, {
+    onViewAllClick: () => {
+     clicks += 1;
+     const list = document.querySelector('[role="list"]')!;
+     if (scenario === "duplicates") list.insertAdjacentHTML("beforeend", row("Row A"));
+     if (scenario === "virtualized") list.innerHTML = row("Row C") + row("Row D") + row("Row E");
+     if (scenario === "replaced") document.querySelector('[role="dialog"]')!.outerHTML = `<section role="dialog"><div role="list">${row("Row C")}${row("Row D")}${row("Row E")}</div></section>`;
+     if (["valid", "navigation", "lost-document-token", "late-replaced", "script-error"].includes(scenario) || (scenario === "second-noop" && clicks === 1)) list.insertAdjacentHTML("beforeend", row("Row C"));
+     if (scenario === "multi") list.insertAdjacentHTML("beforeend", row(clicks === 1 ? "Row C" : "Row D"));
+     if (scenario === "invalid") list.insertAdjacentHTML("beforeend", row("x".repeat(501)));
+     if (scenario === "navigation") Object.defineProperty(document, "URL", {value: "https://accountscenter.instagram.com/other/", configurable: true});
+     if (scenario === "lost-document-token") delete (document as Document & {__pdppAdsTraversal?: unknown}).__pdppAdsTraversal;
+     if (scenario === "signout") { list.insertAdjacentHTML("beforeend", row("Row C")); document.body.insertAdjacentHTML("beforeend", '<form action="/accounts/login/"><input type="password"></form>'); }
+     if (scenario === "error") list.insertAdjacentHTML("afterend", '<p role="alert">Something went wrong</p>');
+     if (!((scenario === "second-noop" || scenario === "multi") && clicks === 1)) document.querySelector("#expand")?.remove();
+    },
+   });
+   const evaluate = page.evaluate;
+   page.evaluate = ((fn: unknown, arg?: unknown) => {
+    if (scenario === "script-error" && clicks > 0 && String(fn).includes("__pdppAdsTraversal")) return Promise.reject(new Error("context destroyed"));
+    return evaluate(fn as never, arg as never);
+   }) as Page["evaluate"];
+   const clock = makeClock(now => {
+    if (scenario === "late-replaced" && clicks > 0 && now >= 500) {
+     document.querySelector('[role="dialog"]')!.outerHTML = `<section role="dialog"><div role="list">${row("Row C")}${row("Row D")}${row("Row E")}</div></section>`;
+    }
+   });
+   const result = surface === "advertisers"
+    ? await scrapeAdvertisers(page, clock)
+    : await scrapeTargetingCategories(page, clock);
+   assert.equal(result.reached, scenario === "valid" || scenario === "multi");
+   const names = result.items.map(item => typeof item === "string" ? item : item.name);
+   assert.ok(names.includes("Row A"), "retain previously readable Row A");
+   assert.ok(names.includes("Row B"), "retain previously readable Row B");
+   if (scenario === "multi") assert.deepEqual(names, ["Row A", "Row B", "Row C", "Row D"]);
+   if (scenario === "valid") assert.deepEqual(names, ["Row A", "Row B", "Row C"]);
+  });
+ }
+}
