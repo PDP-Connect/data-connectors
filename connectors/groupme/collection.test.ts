@@ -16,6 +16,12 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
+import {
+	__resetHttpGovernorForTests,
+	__setZeroDelayHttpGovernorForTests,
+	collectGroups,
+} from "./index.ts";
 
 describe("GroupMe collection behavior", () => {
 	describe("response wrapper parsing", () => {
@@ -167,13 +173,37 @@ describe("GroupMe collection behavior", () => {
 	});
 
 	describe("X-Access-Token header authentication", () => {
-		it("sends token via header, not query string", () => {
-			const token = "test-oauth-token-12345";
-			const headers = { "X-Access-Token": token };
-
-			// Verify header is set (not ?token=...) to avoid URL logging/leaks
-			assert.strictEqual(headers["X-Access-Token"], token);
-			assert.ok(!("token" in headers));
+		it("sends token via header, not query string", async () => {
+			const token = "synthetic-groupme-auth-token";
+			const requests: Array<{ url: URL; headers: Headers }> = [];
+			const originalFetch = globalThis.fetch;
+			__setZeroDelayHttpGovernorForTests();
+			globalThis.fetch = async (input, init) => {
+				requests.push({
+					url: new URL(input instanceof Request ? input.url : input.toString()),
+					headers: new Headers(init?.headers),
+				});
+				return new Response(JSON.stringify({ response: [] }), { status: 200 });
+			};
+			try {
+				await collectGroups(
+					token,
+					openFingerprintCursor(undefined),
+					async () => {},
+					async () => {},
+				);
+				assert.strictEqual(requests.length, 1);
+				const request = requests[0]!;
+				assert.strictEqual(request.url.pathname, "/v3/groups");
+				assert.strictEqual(request.headers.get("X-Access-Token"), token);
+				assert.strictEqual(request.url.username, "");
+				assert.strictEqual(request.url.password, "");
+				assert.ok(!request.url.searchParams.has("token"));
+				assert.ok(!request.url.toString().includes(token));
+			} finally {
+				globalThis.fetch = originalFetch;
+				__resetHttpGovernorForTests();
+			}
 		});
 
 		it("rejects 401/403 with auth_failed error", () => {
