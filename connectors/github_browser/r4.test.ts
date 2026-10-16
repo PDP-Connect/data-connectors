@@ -410,3 +410,41 @@ for (const [stream, html] of [
   assert.ok(result.messages.some((message) => message.type === "SKIP_RESULT"));
  });
 }
+
+for (const suffix of ["", "#readme", "?tab=readme", "?tab=readme#readme"]) {
+	for (const placement of ["button", "title", "empty copy"] as const) {
+		test(`r8 repository target in ${placement} vetoes empty inventory despite suffix ${suffix || "(none)"}`, () => {
+			const link = `<a class="btn" href="/sample-owner/deferred${suffix}">deferred</a>`;
+			const html = placement === "button" ? liveEmptyStarred(link) :
+				placement === "title" ? liveEmptyStarred("", link) : liveEmptyStarred("", "", link);
+			const parsed = parseStarredPage(html);
+			assert.equal(parsed.rawRows, 0);
+			assert.ok(parsed.rejectedRows > 0);
+			assert.equal(parsed.complete, false);
+			assert.equal(emptyStarredVerdict(html).valid, false);
+		});
+	}
+	test(`r8 direct button repository target vetoes nonempty terminal inventories despite suffix ${suffix || "(none)"}`, () => {
+		const extra = `<a class="btn" href="/sample-owner/deferred${suffix}">deferred</a>`;
+		for (const stream of ["repositories", "starred"] as const) {
+			const html = stream === "repositories" ? repositories(repositoryRow()).replace("</ul>", `</ul>${extra}`) :
+				`<div id="user-starred-repos"><ul>${starredRow()}</ul>${extra}</div>`;
+			const parsed = stream === "repositories" ? parseRepositoriesPage(html) : parseStarredPage(html);
+			assert.equal(parsed.rows.length, 1);
+			assert.ok(parsed.rejectedRows > 0);
+			assert.equal(parsed.complete, false);
+			const url = `https://github.com/sample-user?page=1&tab=${stream === "repositories" ? "repositories" : "stars"}`;
+			assert.equal(inspectInventoryPage(page(url, owner + html + terminal), stream, "sample-user", 1, 1, 0).valid, false);
+		}
+	});
+}
+
+test("r8 an empty-state candidate that is itself a list item cannot be exempted", () => {
+	for (const node of ['<li class="blankslate"></li>', '<div role="listitem" class="blankslate"></div>']) {
+		const html = `<main><div id="user-starred-repos">${node}</div></main>`;
+		const parsed = parseStarredPage(html);
+		assert.ok(parsed.rejectedRows > 0);
+		assert.equal(parsed.complete, false);
+		assert.equal(emptyStarredVerdict(html).valid, false);
+	}
+});

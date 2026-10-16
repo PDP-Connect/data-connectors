@@ -258,9 +258,21 @@ function cardRows(roots: Element | null | Array<Element | null>): Element[] {
 function unaccountedRepositories(list: Element | null, rows: Element[]): number {
 	if (list === null) return 0;
 	const empty = rows.length === 0 ? listEmptyStates(list, rows) : [];
-	// A subtree that holds no list item and no repository link has no entry to lose.
-	const entryFree = (element: Element): boolean => element.querySelector("li, [role='listitem']") === null &&
-		!Array.from(element.querySelectorAll("a[href]")).some((link) => repositoryName(link.getAttribute("href")) !== null);
+	// Guard targets conservatively, independently of strict row identity: query
+	// strings and fragments do not make an owner/repository path ordinary chrome.
+	const repositoryTarget = (link: Element): boolean => {
+		if (!link.matches("a[href]")) return false;
+		try {
+			const url = new URL(link.getAttribute("href") ?? "", "https://github.com");
+			return url.origin === "https://github.com" && url.pathname.split("/").filter(Boolean).length === 2;
+		} catch {
+			return true; // An unreadable destination cannot prove entry-free chrome.
+		}
+	};
+	// Include the candidate itself; querySelector only inspects descendants.
+	const entryFree = (element: Element): boolean => !element.matches("li, [role='listitem']") &&
+		element.querySelector("li, [role='listitem']") === null && !repositoryTarget(element) &&
+		!Array.from(element.querySelectorAll("a[href]")).some(repositoryTarget);
 	// The list container also holds the page's own search, filter and sort
 	// controls, a page-level h1/h2 title and a screen-reader results line. Entry
 	// titles are h3 links, so none of these can stand in for a dropped entry.
