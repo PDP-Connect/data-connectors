@@ -221,7 +221,7 @@ test("scenario-record: without --record-har, no HAR/storageState files are produ
 
 // ─── recording ON produces a HAR + storageState at the requested path ─────
 
-test("scenario-record --record-har: produces a redacted HAR and a storageState file next to the scenario, stamped recorded-browser", async () => {
+test("scenario-record --record-har: produces a private replay-faithful HAR and a storageState file next to the scenario, stamped recorded-browser", async () => {
 	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-record-har-on-test-"));
 	const scenarioPath = join(tmpDir, "with-har.scenario.json");
 	const provider = await startStubProvider();
@@ -338,10 +338,13 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 			result.stdout,
 			/run 1: HAR=.*with-har\.scenario\.artifacts-[^/]+\/run1\.har/,
 		);
-		assert.match(result.stdout, /redacted from the HAR:/);
-		assert.match(result.stdout, /NOT redacted:/);
+		assert.match(result.stdout, /PRIVATE LOCAL CAPTURE/);
+		assert.doesNotMatch(
+			result.stdout + result.stderr,
+			/super-secret-session-value|super-secret-bearer-token|hunter2|acct_12345/,
+		);
 
-		// ── redaction actually removed the sensitive fields from the written file ──
+		// Local captures preserve synthetic replay identities; diagnostics above do not.
 		const har = JSON.parse(readFileSync(harFullPath, "utf8")) as {
 			log: {
 				entries: Array<{
@@ -370,18 +373,17 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 			(h) => h.name.toLowerCase() === "set-cookie",
 		);
 		assert.ok(
-			cookieHeader &&
-				!cookieHeader.value.includes("super-secret-session-value"),
-			"Cookie header value must be redacted",
+			cookieHeader && cookieHeader.value.includes("super-secret-session-value"),
+			"Cookie header value must remain intact in the private local capture",
 		);
 		assert.ok(
-			authHeader && !authHeader.value.includes("super-secret-bearer-token"),
-			"Authorization header value must be redacted",
+			authHeader && authHeader.value.includes("super-secret-bearer-token"),
+			"Authorization header value must remain intact in the private local capture",
 		);
 		assert.ok(
 			setCookieHeader &&
-				!setCookieHeader.value.includes("super-secret-session-value"),
-			"Set-Cookie header value must be redacted",
+				setCookieHeader.value.includes("super-secret-session-value"),
+			"Set-Cookie header value must remain intact in the private local capture",
 		);
 		const reqCookies = entry.request.cookies as Array<{
 			name: string;
@@ -392,24 +394,24 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 			value: string;
 		}>;
 		assert.ok(
-			!reqCookies.some((c) => c.value.includes("super-secret-session-value")),
-			"request cookies[] must be redacted",
+			reqCookies.some((c) => c.value.includes("super-secret-session-value")),
+			"request cookies[] must remain intact in the private local capture",
 		);
 		assert.ok(
-			!resCookies.some((c) => c.value.includes("super-secret-session-value")),
-			"response cookies[] must be redacted",
+			resCookies.some((c) => c.value.includes("super-secret-session-value")),
+			"response cookies[] must remain intact in the private local capture",
 		);
 		const postData = entry.request.postData as {
 			params: Array<{ name: string; value: string }>;
 			text: string;
 		};
 		assert.ok(
-			!postData.text.includes("hunter2"),
-			"postData.text must be redacted for a credential-shaped form post",
+			postData.text.includes("hunter2"),
+			"postData.text must remain intact in the private local capture for a credential-shaped form post",
 		);
 		assert.ok(
-			!postData.params.some((p) => p.value === "hunter2"),
-			"postData.params must be redacted for a credential-shaped form post",
+			postData.params.some((p) => p.value === "hunter2"),
+			"postData.params must remain intact in the private local capture for a credential-shaped form post",
 		);
 
 		// ── residual exposure is honest: response BODY content is untouched ──
@@ -438,7 +440,7 @@ test("scenario-record --record-har: produces a redacted HAR and a storageState f
 	}
 });
 
-test("scenario-record --record-har: a swallowed HAR scrub failure makes the capture incomplete", async () => {
+test("scenario-record --record-har: a swallowed HAR scrub failure publishes no capture", async () => {
 	const tmpDir = mkdtempSync(
 		join(tmpdir(), "scenario-record-har-scrub-failure-test-"),
 	);
@@ -462,15 +464,8 @@ test("scenario-record --record-har: a swallowed HAR scrub failure makes the capt
 			},
 		);
 		assert.notEqual(result.code, 0);
-		assert.match(result.stderr, /HAR scrub failed; capture is not redacted/);
-		const scenario = JSON.parse(
-			readFileSync(scenarioPath, "utf8"),
-		) as ConnectorScenario;
-		assert.equal(scenario.capture.complete, false);
-		assert.equal(
-			scenario.runs[0]?.environment?.network?.driver,
-			"recorded-http",
-		);
+		assert.match(result.stderr, /capture failed/);
+		assert.equal(existsSync(scenarioPath), false);
 		assert.doesNotMatch(result.stdout, /redacted from the HAR/);
 	} finally {
 		await provider.close();
@@ -676,5 +671,52 @@ test("scenario-record --record-har: a connector that never launches a browser (-
 	} finally {
 		await provider.close();
 		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("failed DONE plus a scrub failure cannot publish or overwrite a capture", () => {
+	const dir = mkdtempSync(join(tmpdir(), "scenario-integrity-synthetic-"));
+	try {
+		const entrypoint = join(dir, "synthetic.ts");
+		const scenarioPath = join(dir, "prior.scenario.json");
+		const prior = "synthetic prior artifact\n";
+		writeFileSync(scenarioPath, prior);
+		writeFileSync(
+			entrypoint,
+			`
+import { writeFileSync } from "node:fs";
+process.stdin.once("data", () => {
+	const path = process.env.PDPP_SCENARIO_HAR_RECORD_PATH;
+	if (!path) throw new Error("missing synthetic HAR path");
+	writeFileSync(path + ".scrub-failed", "failed");
+	process.stdout.write(JSON.stringify({
+		type: "DONE", status: "failed", records_emitted: 0,
+		error: { code: "collection_failed", message: "SYNTHETIC_PRIVATE_ERROR", retryable: false }
+	}) + "\\n");
+	process.exit(0);
+});
+`,
+		);
+		const result = runRecordCli(
+			[
+				"synthetic-integrity",
+				"--entrypoint",
+				entrypoint,
+				"--runs",
+				"1",
+				"--record-har",
+				"--out",
+				scenarioPath,
+			],
+			{},
+		);
+		assert.notEqual(result.code, 0);
+		assert.equal(readFileSync(scenarioPath, "utf8"), prior);
+		assert.doesNotMatch(
+			result.stdout + result.stderr,
+			/SYNTHETIC_PRIVATE_ERROR/,
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
 	}
 });

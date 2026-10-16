@@ -225,6 +225,25 @@ export interface RawTraceMessage {
 }
 
 /**
+ * Replay errors may embed payload-derived text, so a failure detail is the
+ * error message only for errors whose message is built from fixed strings
+ * and counts: `TraceNormalizationError`, or any error carrying
+ * `safeDiagnostic: true` (the replay-protocol and exit-status errors of
+ * `bin/scenario-verify.ts`, `UnconsumedInteractionsError`). Anything else
+ * collapses to the fixed omission text.
+ */
+export function replayFailureDetail(err: unknown): string {
+	if (
+		err instanceof TraceNormalizationError ||
+		(err instanceof Error &&
+			(err as { safeDiagnostic?: unknown }).safeDiagnostic === true)
+	) {
+		return err.message;
+	}
+	return "scenario replay failed; diagnostic payload omitted";
+}
+
+/**
  * Thrown by `normalizeTraceMessage`/`buildProtocolTrace` when a message's
  * `type` is one of the six tracked completeness-bearing kinds but the
  * message fails that kind's strict shape check — see this module's
@@ -332,7 +351,7 @@ function requireOptionalNonNegativeInteger(
 	if (parsed === undefined) {
 		throw new TraceNormalizationError(
 			rawType,
-			`${fieldName} is present but not a non-negative integer: ${JSON.stringify(value)}`,
+			`${fieldName} is present but not a non-negative integer: [redacted]`,
 		);
 	}
 	return parsed;
@@ -365,7 +384,7 @@ function requireOptionalIdString(
 	if (typeof value !== "string") {
 		throw new TraceNormalizationError(
 			rawType,
-			`${fieldName} is present but not a string: ${JSON.stringify(value)}`,
+			`${fieldName} is present but not a string: [redacted]`,
 		);
 	}
 	return value;
@@ -399,14 +418,14 @@ function assertDetailLocatorShape(raw: RawTraceMessage): void {
 	) {
 		throw new TraceNormalizationError(
 			"DETAIL_GAP",
-			`detail_locator is required and must be an object, got ${JSON.stringify(locator)}`,
+			`detail_locator is required and must be an object, got [redacted]`,
 		);
 	}
 	const { kind } = locator as Record<string, unknown>;
 	if (typeof kind !== "string" || kind.trim().length === 0) {
 		throw new TraceNormalizationError(
 			"DETAIL_GAP",
-			`detail_locator.kind is required and must be a non-blank string, got ${JSON.stringify(kind)}`,
+			`detail_locator.kind is required and must be a non-blank string, got [redacted]`,
 		);
 	}
 }
@@ -447,7 +466,7 @@ function asKeyArray(
 		if (typeof element !== "string" && typeof element !== "number") {
 			throw new TraceNormalizationError(
 				rawType,
-				`${fieldName}[${String(index)}] is ${JSON.stringify(element)} — every element must be string|number`,
+				`${fieldName}[${String(index)}] is [redacted] — every element must be string|number`,
 			);
 		}
 	});
@@ -494,7 +513,7 @@ function normalizeRecoveryHint(
 	if (typeof hint !== "object" || hint === null || Array.isArray(hint)) {
 		throw new TraceNormalizationError(
 			rawType,
-			`recovery_hint is present but neither a string nor an object: ${JSON.stringify(hint)}`,
+			`recovery_hint is present but neither a string nor an object: [redacted]`,
 		);
 	}
 	const record = hint as Record<string, unknown>;
@@ -502,13 +521,13 @@ function normalizeRecoveryHint(
 	if (typeof action !== "string") {
 		throw new TraceNormalizationError(
 			rawType,
-			`recovery_hint is an object but action is missing or not a string (required on the object form): ${JSON.stringify(hint)}`,
+			`recovery_hint is an object but action is missing or not a string (required on the object form): [redacted]`,
 		);
 	}
 	if (retryable !== undefined && typeof retryable !== "boolean") {
 		throw new TraceNormalizationError(
 			rawType,
-			`recovery_hint.retryable is present but not a boolean: ${JSON.stringify(retryable)}`,
+			`recovery_hint.retryable is present but not a boolean: [redacted]`,
 		);
 	}
 	return { action, ...(retryable === undefined ? {} : { retryable }) };
@@ -552,7 +571,7 @@ function normalizeContinuation(raw: unknown):
 		// biome-ignore lint/style/useErrorCause: TraceNormalizationError's constructor (this file) takes a plain string reason, matching every other throw site in this module — the validator's message is already folded into that reason string, so nothing is lost by not also attaching `cause`.
 		throw new TraceNormalizationError(
 			"SKIP_RESULT",
-			`continuation failed the runtime's own validateRuntimeContinuationFact check: ${err instanceof Error ? err.message : String(err)} (value: ${JSON.stringify(raw)})`,
+			"continuation failed the runtime validation check",
 		);
 	}
 	return raw;
@@ -600,7 +619,7 @@ function assertDetailCoverageReferenceOnly(raw: RawTraceMessage): void {
 	if (raw.reference_only !== true) {
 		throw new TraceNormalizationError(
 			"DETAIL_COVERAGE",
-			`reference_only must be the fixed literal true, got ${JSON.stringify(raw.reference_only)}`,
+			`reference_only must be the fixed literal true, got [redacted]`,
 		);
 	}
 }
@@ -691,7 +710,7 @@ function assertDetailGapFixedLiterals(raw: RawTraceMessage): void {
 	) {
 		throw new TraceNormalizationError(
 			"DETAIL_GAP",
-			`status/retryable/reference_only must be the fixed literals "pending"/true/true, got ${JSON.stringify({ status: raw.status, retryable: raw.retryable, reference_only: raw.reference_only })}`,
+			`status/retryable/reference_only must be the fixed literals "pending"/true/true, got [redacted]`,
 		);
 	}
 }
@@ -744,7 +763,7 @@ function normalizeNetworkPressure(
 	) {
 		throw new TraceNormalizationError(
 			rawType,
-			`${fieldPath} is missing one or more required string fields (error_class, method, endpoint_route): ${JSON.stringify(pressure)}`,
+			`${fieldPath} is missing one or more required string fields (error_class, method, endpoint_route): [redacted]`,
 		);
 	}
 	const status =
@@ -934,7 +953,9 @@ function normalizeDetailGapLastError(
 	return {
 		...(lastErrorClass === undefined ? {} : { lastErrorClass }),
 		...(lastErrorHttpStatus === undefined ? {} : { lastErrorHttpStatus }),
-		...(lastErrorMessage === undefined ? {} : { lastErrorMessage }),
+		...(lastErrorMessage === undefined
+			? {}
+			: { lastErrorMessage: `sha256:${hashCanonicalJson(lastErrorMessage)}` }),
 		...(lastErrorNetworkPressure === undefined
 			? {}
 			: { lastErrorNetworkPressure }),
@@ -1102,7 +1123,7 @@ function normalizeDetailGapAttempted(
 	if (stream === undefined || gapId === undefined || leaseId === undefined) {
 		throw new TraceNormalizationError(
 			"DETAIL_GAP_ATTEMPTED",
-			`missing or non-string stream, gap_id, or lease_id (all required strings on the wire): ${JSON.stringify({ stream: raw.stream, gap_id: raw.gap_id, lease_id: raw.lease_id })}`,
+			`missing or non-string stream, gap_id, or lease_id (all required strings on the wire): [redacted]`,
 		);
 	}
 	if (raw.reference_only !== true) {
@@ -1142,7 +1163,7 @@ function normalizeDetailGapRecovered(
 	if (stream === undefined || gapId === undefined) {
 		throw new TraceNormalizationError(
 			"DETAIL_GAP_RECOVERED",
-			`missing or non-string stream or gap_id (both required strings on the wire): ${JSON.stringify({ stream: raw.stream, gap_id: raw.gap_id })}`,
+			`missing or non-string stream or gap_id (both required strings on the wire): [redacted]`,
 		);
 	}
 	if (raw.reference_only !== true) {
@@ -1216,7 +1237,7 @@ function normalizeDone(raw: RawTraceMessage): NormalizedTraceEntry {
 	if (recordsEmitted === undefined || recordsEmitted < 0) {
 		throw new TraceNormalizationError(
 			"DONE",
-			`records_emitted is required and must be a non-negative finite number, got ${JSON.stringify(raw.records_emitted)}`,
+			`records_emitted is required and must be a non-negative finite number, got [redacted]`,
 		);
 	}
 	const error = assertDiagnosticObjectShape("DONE", "error", raw.error);
@@ -1234,14 +1255,14 @@ function normalizeDone(raw: RawTraceMessage): NormalizedTraceEntry {
 		if (errorMessage === undefined) {
 			throw new TraceNormalizationError(
 				"DONE",
-				`error is present but message is missing or not a string (required on the wire whenever error is present): ${JSON.stringify(error)}`,
+				`error is present but message is missing or not a string (required on the wire whenever error is present): [redacted]`,
 			);
 		}
 		errorRetryable = error.retryable;
 		if (typeof errorRetryable !== "boolean") {
 			throw new TraceNormalizationError(
 				"DONE",
-				`error is present but retryable is missing or not a boolean (required on the wire whenever error is present): ${JSON.stringify(error)}`,
+				`error is present but retryable is missing or not a boolean (required on the wire whenever error is present): [redacted]`,
 			);
 		}
 		errorMessageDigest = digestTraceValue(errorMessage);
@@ -1293,7 +1314,7 @@ function normalizeDetailGapsPageRequest(
 	if (raw.reference_only !== true) {
 		throw new TraceNormalizationError(
 			"DETAIL_GAPS_PAGE_REQUEST",
-			`reference_only must be the fixed literal true, got ${JSON.stringify(raw.reference_only)}`,
+			`reference_only must be the fixed literal true, got [redacted]`,
 		);
 	}
 	const maxBytes =
@@ -1316,7 +1337,7 @@ function normalizeDetailGapsPageRequest(
 			if (typeof entry !== "string") {
 				throw new TraceNormalizationError(
 					"DETAIL_GAPS_PAGE_REQUEST",
-					`streams[${String(index)}] is ${JSON.stringify(entry)} — every element must be a string`,
+					`streams[${String(index)}] is [redacted] — every element must be a string`,
 				);
 			}
 		});
@@ -1756,7 +1777,7 @@ function verifyStream(
 				kind: "record_hash",
 				runIndex,
 				stream,
-				detail: `record[${String(i)}] differs; fields=[${Object.keys(actualProjections[i] ?? {}).join(", ")}]`,
+				detail: `record[${String(i)}] differs`,
 			});
 		}
 		// Only a record this run actually emitted has an id/op/projected value
@@ -1801,7 +1822,7 @@ function verifyRunProtocolTrace(
 			{
 				kind: "trace_normalization_error",
 				runIndex,
-				detail: err instanceof Error ? err.message : String(err),
+				detail: replayFailureDetail(err),
 			},
 		];
 	}
@@ -1993,7 +2014,7 @@ async function verifyRun(
 			if (typeof msg.stream !== "string" || msg.stream.length === 0) {
 				throw new TraceNormalizationError(
 					"STATE",
-					`emitted with invalid stream ${JSON.stringify(msg.stream)} - nonempty string required`,
+					`emitted with invalid stream [redacted] - nonempty string required`,
 				);
 			}
 			stateMessages.push({ stream: msg.stream, cursor: msg.cursor });
@@ -2013,7 +2034,7 @@ async function verifyRun(
 		failures.push({
 			kind: "replay_mismatch",
 			runIndex,
-			detail: err instanceof Error ? err.message : String(err),
+			detail: replayFailureDetail(err),
 		});
 		return { failures };
 	}
@@ -2024,7 +2045,7 @@ async function verifyRun(
 		failures.push({
 			kind: "unconsumed_interactions",
 			runIndex,
-			detail: err instanceof Error ? err.message : String(err),
+			detail: replayFailureDetail(err),
 		});
 	}
 
@@ -2041,7 +2062,7 @@ async function verifyRun(
 			failures.push({
 				kind: "outcome_changed",
 				runIndex,
-				detail: `outcome changed: old=${JSON.stringify(run.expected.outcome)} new=${JSON.stringify(actualOutcome ?? null)}`,
+				detail: "outcome changed; compare normalized outcome digests",
 			});
 		}
 	}
@@ -2067,7 +2088,7 @@ async function verifyRun(
 		failures.push({
 			kind: "stream_set_mismatch",
 			runIndex,
-			detail: `actual emitted stream set differs from expected — extra: [${extraStreams.join(", ")}], missing: [${missingStreams.join(", ")}]`,
+			detail: `actual emitted stream set differs from expected — extra count=${String(extraStreams.length)}, missing count=${String(missingStreams.length)}`,
 		});
 	}
 
@@ -2107,7 +2128,7 @@ async function verifyRun(
 		failures.push({
 			kind: "final_state",
 			runIndex,
-			detail: `final_state differs; fields=[${Object.keys(finalState as Record<string, unknown>).join(", ")}]`,
+			detail: "final_state differs",
 		});
 	}
 

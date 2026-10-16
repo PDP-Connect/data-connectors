@@ -27,8 +27,9 @@
  * or attach to an operator-visible remote CDP browser such as n.eko.
  */
 
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { chmod, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Browser, BrowserContext, chromium, Page } from "playwright";
@@ -128,34 +129,14 @@ export interface AcquireIsolatedBrowserOptions {
 	 * Remote recording is meant for a dedicated sandbox browser or profile
 	 * signed in to a test account; attach warns when other pages are open.
 	 *
-	 * `content: "embed"` (inline base64/text in the HAR JSON, chosen over
-	 * Playwright's zip-friendly `"attach"`) is a deliberate choice: a replay
-	 * half needs a HAR whose response bodies are actually present to route
-	 * requests from (`context.routeFromHAR`) — `"omit"` would produce a HAR
-	 * that satisfies nothing downstream. A single embedded JSON file is also
-	 * the easiest shape for this module's own post-close redaction pass (see
-	 * `scrubHarFileOrThrow`) to reason about: one file, one parse, no
-	 * companion resource directory to also scrub. The cost is size and secret
-	 * exposure inside `content.text` — mitigated by the redaction pass
-	 * stripping `Set-Cookie`/`Authorization`/etc. headers but NOT by touching
-	 * response bodies.
-	 *
-	 * RESIDUAL EXPOSURE: response/request BODIES are embedded verbatim.
-	 * Unlike the existing fetch-preload's structured per-field JSON body
-	 * capture (which this harness never applies to HAR — a HAR entry's body
-	 * is an opaque blob with unknown shape per provider), this driver cannot
-	 * safely redact arbitrary body content field-by-field. A HAR captured
-	 * this way is local-only territory, same as every other capture artifact
-	 * this package's recorders produce — never committed or shared without a
-	 * scrub pass.
-	 *
-	 * Known gap, verified unexercised as of this change: `recordHar` does
-	 * NOT capture WebSocket frames, and a page's native download flow can
-	 * bypass HAR capture entirely. Checked against the connector fleet
-	 * (2026-08-21): zero of the 45 connectors use WebSocket/EventSource/SSE,
-	 * and none drive a browser download. Both gaps are real limitations of
-	 * this driver, left unaddressed because nothing currently exercises them
-	 * — not because they were solved.
+	 * Captures are sensitive, LOCAL-ONLY replay inputs. Embedded bodies,
+	 * request queries/forms/headers, and session state must retain their
+	 * identity for sound offline replay. They are never sanitized for
+	 * publication and MUST NOT be committed, reported, or shared.
+	 * `scrubHarFileOrThrow` validates the private capture and replaces it
+	 * atomically with mode 0600. Malformed captures fail closed. Diagnostic
+	 * errors and logs never contain provider payloads or CDP endpoints.
+	 * WebSocket frames remain outside this HAR driver's replay contract.
 	 */
 	harRecording?: { path: string };
 	headless?: boolean;
@@ -187,33 +168,12 @@ export interface AcquireIsolatedBrowserOptions {
 	 */
 	remoteCdpUrl?: string;
 	/**
-	 * Opt-in capture of this context's `storageState()` (cookies +
-	 * localStorage/origins) at release time, WRITTEN TO ITS OWN FILE — never
-	 * embedded in the HAR. Companion to `harRecording`, addressing a gap a
-	 * HAR alone cannot close: `launchPersistentContext` reuses a WARM
-	 * profile with existing session cookies, so replaying the HAR's captured
-	 * requests against a fresh/anonymous context hits the provider's own
-	 * login wall in the replaying page's JS and never reaches the recorded
-	 * request shapes at all. Recording the session alongside the HAR lets a
-	 * replay half seed a matching starting session.
-	 *
-	 * DELIBERATELY UNREDACTED, and this is a stated decision, not an
-	 * oversight: `storageState()`'s cookies ARE the live session — the value
-	 * of the session cookie is the credential that keeps the replaying page
-	 * logged in. Blanking it the way `harRecording`'s redaction pass blanks
-	 * HAR headers/cookies would produce a file that LOOKS like a safety
-	 * measure but actually just breaks the one thing this capture exists to
-	 * provide, without removing any real risk (the HAR's own cookie headers
-	 * are already redacted independently; this file is the one place a real,
-	 * usable session snapshot must exist for replay to be possible at all).
-	 * Treat a written storageState file as carrying live, unredacted
-	 * credentials — AT LEAST as sensitive as a raw capture's local-only
-	 * bodies, arguably more so (a session cookie is immediately, directly
-	 * usable by anyone who reads it; a HAR body needs the specific provider
-	 * context to be useful). Callers MUST NOT commit, share, or embed this
-	 * file's contents anywhere a HAR or capture JSON might otherwise be
-	 * shared after a scrub pass — there is no scrub pass that makes a live
-	 * session cookie safe to publish.
+	 * Opt-in local-only replay session capture. Cookies, localStorage and
+	 * origin data remain unchanged because they seed offline replay.
+	 * The snapshot is sensitive, may contain live session credentials, and
+	 * MUST NOT be committed, reported or shared. It is shape-validated and
+	 * atomically written with mode 0600; capture failures have fixed,
+	 * payload-free diagnostics and leave no pending session artifact.
 	 */
 	storageStateRecording?: { path: string };
 	/**
@@ -631,20 +591,12 @@ export class CdpAttachSessionRaceExhaustedError extends Error {
 	}
 }
 
-function redactCdpUrlsInText(message: string): string {
-	return message.replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, (url) =>
-		redactCdpUrl(url),
-	);
+function redactCdpUrlsInText(_message: string): string {
+	return "provider details withheld";
 }
 
-function redactCdpError(error: unknown): Error {
-	const message = redactCdpUrlsInText(
-		error instanceof Error ? error.message : String(error),
-	);
-	if (error instanceof Error && message === error.message) return error;
-	const safe = new Error(message);
-	if (error instanceof Error) safe.name = error.name;
-	return safe;
+function redactCdpError(_error: unknown): Error {
+	return new Error("Remote browser operation failed");
 }
 
 const REMOTE_CDP_ATTACH_MAX_ATTEMPTS = 4;
@@ -746,7 +698,7 @@ export async function runCdpAttemptWithRaceGuard<TBrowser>({
 		// unhandled-rejection handling (process crash) still applies to unrelated
 		// failures. We must never silently swallow another subsystem's rejection.
 		host.off("unhandledRejection", onUnhandledRejection);
-		throw reason;
+		throw redactCdpError(reason);
 	};
 
 	host.on("unhandledRejection", onUnhandledRejection);
@@ -857,13 +809,9 @@ export async function connectOverCdpWithRetry<TBrowser>({
 				// A different failure entirely (auth, unreachable endpoint, real
 				// browser crash) — fail fast, removing credential-bearing URLs
 				// before a caller logs the error.
-				if (err instanceof Error) {
-					const message = redactCdpUrlsInText(err.message);
-					if (message !== err.message) {
-						throw new Error(message, { cause: redactCdpError(err) });
-					}
-				}
-				throw err;
+				throw new Error("Remote browser attach failed", {
+					cause: redactCdpError(err),
+				});
 			}
 			if (attempt === maxAttempts) {
 				// The ONLY point that knows the bounded retry budget was exhausted
@@ -873,14 +821,14 @@ export async function connectOverCdpWithRetry<TBrowser>({
 			}
 			process.stderr.write(
 				"[browser-launch] remote CDP attach hit transient session-closed race " +
-					`profile=${profileName} url=${redactedUrl} attempt=${attempt}/${maxAttempts}; ` +
+					`profile=${profileName} url=${redactCdpUrl(redactedUrl)} attempt=${attempt}/${maxAttempts}; ` +
 					`retrying in ${retryDelayMs}ms\n`,
 			);
 			await sleep(retryDelayMs);
 		}
 	}
-	// Unreachable: the loop either returns or throws. Rethrow defensively.
-	throw lastErr;
+	// Unreachable with a positive budget; never expose the raw provider error.
+	throw redactCdpError(lastErr);
 }
 
 /**
@@ -1164,7 +1112,7 @@ export async function startRemoteCdpHarRecording({
 		);
 		onFailure?.();
 		await browser.close().catch(() => undefined);
-		throw err;
+		throw new Error("Remote HAR recording could not start");
 	}
 }
 
@@ -1196,75 +1144,9 @@ export function warnIfRecordingSharedRemoteBrowser(
 	}
 }
 
-export function redactCdpUrl(rawUrl: string): string {
-	try {
-		const url = new URL(rawUrl);
-		url.username = "";
-		url.password = "";
-		for (const name of new Set(url.searchParams.keys())) {
-			if (SENSITIVE_QUERY_PARAMETER_RE.test(name)) {
-				url.searchParams.set(name, REDACTED_HAR_HEADER_PLACEHOLDER);
-			}
-		}
-		url.hash = "";
-		return url.toString();
-	} catch {
-		return "unparseable";
-	}
-}
-
-// ─── HAR secret-hygiene pass (post-close) ─────────────────────────────────
-//
-// Playwright's own `recordHar` has no redaction knob — it captures headers,
-// cookies, and bodies verbatim. This package's existing recorder
-// (subprocess-fetch-preloads.ts's record preload) never persists
-// Cookie/Set-Cookie/Authorization at all (its capture shape doesn't even
-// have a request-header field), redacts credential-shaped query params by
-// name, and (src/interaction-handler.ts's `SECRET_FIELD_RE`) never persists
-// a credentials-kind prompt response. This pass follows the SAME posture at
-// the HAR layer: strip session/auth-carrying HEADERS and HAR's own
-// structured `cookies[]` arrays (both request and response sides) plus
-// credential-shaped request POST DATA. It does NOT touch response/request
-// BODY content (see `harRecording`'s doc comment for why that's a stated,
-// deliberate gap, not an oversight).
-
-/** Case-insensitive header names stripped from every HAR entry, both
- *  request and response sides. `cookie`/`set-cookie` carry session
- *  identity; `authorization` carries bearer/basic credentials;
- *  `x-csrf-token`/`x-xsrf-token` are the common CSRF-header spellings this
- *  package's connectors and their providers use. Matched by exact
- *  lower-cased name, not a substring/regex, so an unrelated header that
- *  merely CONTAINS one of these words (unlikely, but the query-param
- *  redaction elsewhere in this package uses substring matching precisely
- *  because query param names are freeform — HTTP header names are not) is
- *  never mistakenly dropped. */
-const REDACTED_HAR_HEADER_NAMES = new Set([
-	"cookie",
-	"set-cookie",
-	"authorization",
-	"x-csrf-token",
-	"x-xsrf-token",
-]);
-
-const REDACTED_HAR_HEADER_PLACEHOLDER = "[redacted-by-scenario-record]";
-const SENSITIVE_QUERY_PARAMETER_RE =
-	/(?:token|auth|session|code|key|sig|secret|password|passwd|pwd|credential|assertion|jwt|ticket|nonce|api[-_]?key|client[-_]?secret|access[-_]?key)/i;
-const AUTH_ENDPOINT_RE =
-	/(?:^|\/)(?:auth|authenticate|oauth|authorize|authorization|login|log-in|session|signin|sign-in|callback)(?:\/|$)/i;
-
-function redactUrlQuery(rawUrl: string): string {
-	try {
-		const url = new URL(rawUrl);
-		const redactAll = AUTH_ENDPOINT_RE.test(url.pathname);
-		for (const name of new Set(url.searchParams.keys())) {
-			if (redactAll || SENSITIVE_QUERY_PARAMETER_RE.test(name)) {
-				url.searchParams.set(name, REDACTED_HAR_HEADER_PLACEHOLDER);
-			}
-		}
-		return url.toString();
-	} catch {
-		return rawUrl;
-	}
+/** Diagnostic URLs never contain any part of a recorded CDP endpoint. */
+export function redactCdpUrl(_rawUrl: string): string {
+	return "[redacted-cdp-url]";
 }
 
 interface HarNameValue {
@@ -1279,10 +1161,20 @@ interface HarPostDataParam {
 }
 
 interface HarRequestOrResponse {
+	method?: string;
+	status?: number;
 	cookies?: HarNameValue[];
 	headers?: HarNameValue[];
+	queryString?: HarNameValue[];
 	url?: string;
+	redirectURL?: string;
 	postData?: { mimeType?: string; params?: HarPostDataParam[]; text?: string };
+	content?: {
+		size?: number;
+		mimeType?: string;
+		text?: string;
+		encoding?: string;
+	};
 }
 
 interface HarEntry {
@@ -1294,208 +1186,221 @@ interface HarDocument {
 	log?: { entries?: HarEntry[] };
 }
 
-/** Redacts headers matching `REDACTED_HAR_HEADER_NAMES`, returning a NEW
- *  array (does not mutate the input) with matching entries' `value`
- *  replaced by the placeholder — the header NAME is kept (so a reader can
- *  still see e.g. "an Authorization header was sent here" without learning
- *  its value), matching this package's existing posture of recording the
- *  SHAPE of what happened without the secret itself. */
-function redactHeaders(headers: HarNameValue[]): HarNameValue[] {
-	return headers.map((header) =>
-		REDACTED_HAR_HEADER_NAMES.has(header.name.toLowerCase())
-			? { name: header.name, value: REDACTED_HAR_HEADER_PLACEHOLDER }
-			: header,
-	);
+function isCaptureObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** HAR's own structured `cookies[]` array (distinct from the `Cookie`/
- *  `Set-Cookie` HEADER, which `redactHeaders` also strips — Playwright
- *  populates both independently, so both must be redacted or the cookie
- *  value survives in the array even with the header blanked). Keeps the
- *  cookie NAME, drops the value. */
-function redactCookies(cookies: HarNameValue[]): HarNameValue[] {
-	return cookies.map((cookie) => ({
-		name: cookie.name,
-		value: REDACTED_HAR_HEADER_PLACEHOLDER,
-	}));
+function harValidationFailure(): Error {
+	return new Error("HAR capture validation failed");
+}
+
+function validateCaptureUrl(value: unknown, base?: string): void {
+	if (typeof value !== "string") {
+		throw harValidationFailure();
+	}
+	if (value === "" && base !== undefined) {
+		return;
+	}
+	try {
+		const url = base === undefined ? new URL(value) : new URL(value, base);
+		if (url.protocol !== "http:" && url.protocol !== "https:") {
+			throw harValidationFailure();
+		}
+	} catch {
+		throw harValidationFailure();
+	}
+}
+
+function validateCaptureNameValues(value: unknown): void {
+	if (value === undefined) {
+		return;
+	}
+	if (
+		!Array.isArray(value) ||
+		value.some(
+			(entry: unknown) =>
+				!isCaptureObject(entry) ||
+				typeof entry.name !== "string" ||
+				typeof entry.value !== "string",
+		)
+	) {
+		throw harValidationFailure();
+	}
 }
 
 /**
- * Redacts a request's `postData` when it looks like a credential
- * submission — mirrors this package's existing "never persist a real
- * credential value" posture rather than inventing a new philosophy: a login
- * POST is exactly the browser-driven analogue of the Collection Profile
- * `credentials`-kind INTERACTION that CLI already redacts unconditionally.
- * Heuristic, not a parser: `application/x-www-form-urlencoded` or
- * `multipart/form-data` bodies whose PARSED fields (Playwright already
- * gives us `params[]` for these content types) include a name matching
- * `CREDENTIAL_FORM_FIELD_RE` (password/passwd/pwd/secret/token/otp/pin) get
- * every param value blanked — a JSON login body has no such structured
- * `params[]` from Playwright, so it falls through unredacted; see
- * `harRecording`'s doc comment on residual exposure for that
- * honestly-stated gap.
+ * Historical API name retained for callers. This validates a LOCAL-ONLY,
+ * sensitive HAR; it does not make it safe to commit, report or share.
+ * Preserve all request identities and bodies for sound offline replay.
+ * Privacy is enforced at diagnostic/output boundaries and by private atomic
+ * persistence. No payload-derived value may appear in validation errors.
  */
-const CREDENTIAL_FORM_FIELD_RE =
-	/pass(word|wd)?|\bpwd\b|secret|token|\botp\b|\bpin\b/i;
-
-type HarPostData = NonNullable<HarRequestOrResponse["postData"]>;
-
-function looksLikeCredentialFormPost(postData: HarPostData): boolean {
-	if (!postData.params) {
-		return false;
-	}
-	return postData.params.some(
-		(param) =>
-			param.type?.toLowerCase() === "password" ||
-			CREDENTIAL_FORM_FIELD_RE.test(param.name),
-	);
-}
-
-function redactPostData(postData: HarPostData): HarPostData {
-	if (!looksLikeCredentialFormPost(postData)) {
-		return postData;
-	}
-	const out: HarPostData = {};
-	if (postData.mimeType !== undefined) {
-		out.mimeType = postData.mimeType;
-	}
-	if (postData.text !== undefined) {
-		out.text = REDACTED_HAR_HEADER_PLACEHOLDER;
-	}
-	if (postData.params) {
-		out.params = postData.params.map((param) => ({
-			name: param.name,
-			value: REDACTED_HAR_HEADER_PLACEHOLDER,
-		}));
-	}
-	return out;
-}
-
-function redactHarRequestOrResponse(
-	side: HarRequestOrResponse,
-): HarRequestOrResponse {
-	const out: HarRequestOrResponse = { ...side };
-	if (side.url !== undefined) {
-		out.url = redactUrlQuery(side.url);
-	}
-	if (side.headers) {
-		out.headers = redactHeaders(side.headers);
-	}
-	if (side.cookies) {
-		out.cookies = redactCookies(side.cookies);
-	}
-	if (side.postData) {
-		out.postData = redactPostData(side.postData);
-	}
-	return out;
-}
-
-/** Pure redaction of one parsed HAR document — exported so this exact
- *  transform is independently unit-testable against a synthetic HAR
- *  without touching the filesystem. See the module-scope "HAR secret-
- *  hygiene pass" comment above for the full posture and what is
- *  deliberately NOT redacted (response/request body content). */
 export function redactHarDocument(har: HarDocument): HarDocument {
-	const entries = har.log?.entries;
-	if (!entries) {
-		return har;
+	if (
+		!isCaptureObject(har) ||
+		!isCaptureObject(har.log) ||
+		!Array.isArray(har.log.entries)
+	) {
+		throw harValidationFailure();
 	}
-	return {
-		...har,
-		log: {
-			...har.log,
-			entries: entries.map((entry) => {
-				const out: HarEntry = { ...entry };
-				if (entry.request) {
-					out.request = redactHarRequestOrResponse(entry.request);
+	for (const entry of har.log.entries) {
+		if (
+			!isCaptureObject(entry) ||
+			!isCaptureObject(entry.request) ||
+			!isCaptureObject(entry.response)
+		) {
+			throw harValidationFailure();
+		}
+		const request = entry.request;
+		const response = entry.response;
+		validateCaptureUrl(request.url);
+		if (
+			typeof request.method !== "string" ||
+			!/^[A-Z]+$/.test(request.method) ||
+			typeof response.status !== "number" ||
+			!Number.isInteger(response.status) ||
+			response.status < 0 ||
+			response.status > 599
+		) {
+			throw harValidationFailure();
+		}
+		validateCaptureNameValues(request.headers);
+		validateCaptureNameValues(response.headers);
+		validateCaptureNameValues(request.cookies);
+		validateCaptureNameValues(response.cookies);
+		validateCaptureNameValues(request.queryString);
+		if (response.redirectURL !== undefined) {
+			validateCaptureUrl(response.redirectURL, request.url as string);
+		}
+		for (const side of [request, response]) {
+			for (const key of ["postData", "content"]) {
+				const body = side[key];
+				if (
+					body !== undefined &&
+					(!isCaptureObject(body) ||
+						(body.text !== undefined && typeof body.text !== "string"))
+				) {
+					throw harValidationFailure();
 				}
-				if (entry.response) {
-					out.response = redactHarRequestOrResponse(entry.response);
-				}
-				return out;
-			}),
-		},
-	};
+			}
+		}
+	}
+	return har;
 }
 
-/**
- * Reads the HAR JSON at `path`, applies `redactHarDocument`, and writes it
- * back 0600. A missing, unparseable, or unwritable file throws so the caller
- * cannot report an unscrubbed capture as redacted. The mode is set
- * EXPLICITLY (not left to Playwright's own create-time umask-dependent
- * default) — this package never trusts umask for a file that may hold real
- * captured data.
- *
- * EXPORTED so test fixtures that simulate a browser-driven connector
- * WITHOUT a real Chromium (this package's convention — see
- * `browser-launch.test.ts`'s module comment) can call the SAME redaction
- * `acquireIsolatedBrowser`'s `release()` runs, instead of a test double
- * re-implementing (and potentially drifting from) this logic.
- */
 function markHarScrubFailure(path: string): void {
 	try {
 		writeFileSync(`${path}.scrub-failed`, "", { mode: 0o600 });
 		chmodSync(`${path}.scrub-failed`, 0o600);
 	} catch {
-		// The scrub failure still propagates; the capture owner also treats an
-		// absent HAR as incomplete if this marker could not be written.
+		// A missing artifact is independently incomplete even without a marker.
 	}
 }
 
+/** Private local capture only. Existing destinations remain intact on failure. */
+export async function writePrivateCaptureJsonAtomically(
+	path: string,
+	value: unknown,
+): Promise<void> {
+	const temporaryPath = `${path}.${randomUUID()}.tmp`;
+	try {
+		await writeFile(temporaryPath, JSON.stringify(value), {
+			mode: 0o600,
+			flag: "wx",
+		});
+		await chmod(temporaryPath, 0o600);
+		await rm(`${path}.scrub-failed`, { force: true });
+		await rename(temporaryPath, path);
+	} catch {
+		throw new Error("Private capture persistence failed");
+	} finally {
+		await rm(temporaryPath, { force: true }).catch(() => {});
+	}
+}
+
+async function discardInvalidCapture(path: string): Promise<void> {
+	markHarScrubFailure(path);
+	await rm(path, { force: true }).catch(() => {});
+}
+
+/** Atomic private replacement; failures remove the invalid pending capture. */
 export async function scrubHarFileOrThrow(path: string): Promise<void> {
 	let raw: string;
 	try {
 		raw = await readFile(path, "utf8");
-	} catch (err) {
-		markHarScrubFailure(path);
-		throw new Error("HAR scrub failed: recorded HAR file is missing", {
-			cause: err,
-		});
+	} catch {
+		await discardInvalidCapture(path);
+		throw new Error("HAR scrub failed: recorded HAR file is missing");
 	}
 	let parsed: HarDocument;
 	try {
 		parsed = JSON.parse(raw) as HarDocument;
-	} catch (err) {
-		markHarScrubFailure(path);
-		throw new Error("HAR scrub failed: captured HAR is not valid JSON", {
-			cause: err,
-		});
+	} catch {
+		await discardInvalidCapture(path);
+		throw new Error("HAR scrub failed: captured HAR is not valid JSON");
 	}
-	const redacted = redactHarDocument(parsed);
 	try {
-		// `mode` on writeFile only applies at file CREATION; the HAR already
-		// exists (Playwright created it), so force 0600 explicitly afterward.
-		await writeFile(path, JSON.stringify(redacted), "utf8");
-		await chmod(path, 0o600);
-	} catch (err) {
-		markHarScrubFailure(path);
-		throw new Error("HAR scrub failed: could not persist redacted HAR", {
-			cause: err,
-		});
+		await writePrivateCaptureJsonAtomically(path, redactHarDocument(parsed));
+	} catch {
+		await discardInvalidCapture(path);
+		throw new Error(
+			"HAR scrub failed: validation or atomic persistence failed",
+		);
 	}
 }
 
-/**
- * Writes `context.storageState()` to `path`, 0600, UNREDACTED (see
- * `storageStateRecording`'s doc comment on `AcquireIsolatedBrowserOptions`
- * for why redacting this file would defeat its purpose). Best-effort: a
- * failure here (context already unusable, disk error) logs a warning and
- * returns without throwing — `storageStateRecordingOutcome()` is the
- * caller-facing honest signal for "no session snapshot exists"; this
- * function does not duplicate that reporting, it only guarantees a failure
- * here can never block `release()`'s subsequent `context.close()`.
- */
-async function writeStorageStateBestEffort(
+/** Shape validation only: values remain sensitive, local-only replay inputs. */
+export function validateLocalStorageState(state: unknown): void {
+	const invalid = () => new Error("Storage-state capture validation failed");
+	if (
+		!isCaptureObject(state) ||
+		!Array.isArray(state.cookies) ||
+		!Array.isArray(state.origins)
+	) {
+		throw invalid();
+	}
+	for (const cookie of state.cookies) {
+		if (
+			!isCaptureObject(cookie) ||
+			typeof cookie.name !== "string" ||
+			typeof cookie.value !== "string"
+		) {
+			throw invalid();
+		}
+	}
+	for (const origin of state.origins) {
+		if (
+			!isCaptureObject(origin) ||
+			typeof origin.origin !== "string" ||
+			!Array.isArray(origin.localStorage)
+		) {
+			throw invalid();
+		}
+		for (const item of origin.localStorage) {
+			if (
+				!isCaptureObject(item) ||
+				typeof item.name !== "string" ||
+				typeof item.value !== "string"
+			) {
+				throw invalid();
+			}
+		}
+	}
+}
+
+/** A failed attempt retains the prior snapshot and never exposes provider errors. */
+export async function writeStorageStateBestEffort(
 	context: BrowserContext,
 	path: string,
 ): Promise<void> {
 	try {
 		const state = await context.storageState();
-		await writeFile(path, JSON.stringify(state), { mode: 0o600 });
-	} catch (err) {
+		validateLocalStorageState(state);
+		await writePrivateCaptureJsonAtomically(path, state);
+	} catch {
+		markHarScrubFailure(path);
 		process.stderr.write(
-			`[browser-launch] failed to capture storageState to ${path}: ` +
-				`${err instanceof Error ? err.message : String(err)}. Replay will have no seeded session for this capture.\n`,
+			"[browser-launch] storage-state capture failed; no new session artifact was published.\n",
 		);
 	}
 }
@@ -1523,6 +1428,9 @@ export async function fileFlushOutcome(
 	path: string,
 ): Promise<{ flushed: boolean; path: string }> {
 	try {
+		if (existsSync(`${path}.scrub-failed`)) {
+			return { path, flushed: false };
+		}
 		const info = await stat(path);
 		return { path, flushed: info.isFile() && info.size > 0 };
 	} catch {
@@ -1822,10 +1730,9 @@ async function publishCdpEndpointFromLaunch({
 			return;
 		}
 		publishCdpEndpointToEnv({ host: "127.0.0.1", port });
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
+	} catch {
 		process.stderr.write(
-			`[browser-launch] CDP endpoint publication failed: ${message}; streaming will be unavailable for this run.\n`,
+			"[browser-launch] CDP endpoint publication failed; streaming will be unavailable for this run.\n",
 		);
 	}
 }

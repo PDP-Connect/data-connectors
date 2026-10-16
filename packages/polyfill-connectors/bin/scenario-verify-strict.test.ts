@@ -2438,7 +2438,7 @@ function writeApiRequestFallbackScenario(dir: string): {
 	return { scenarioPath, claimPath: join(dir, "claim.json") };
 }
 
-test("ApiRequestFallbackMatchLimitation: an EXACT context.request match carries no fallback limitation", () => {
+test("APIRequestContext replay rejects even an exact URL when effective defaults are unobservable", () => {
 	const tmpDir = mkdtempSync(join(tmpdir(), "api-request-exact-test-"));
 	try {
 		const { scenarioPath, claimPath } = writeApiRequestFallbackScenario(tmpDir);
@@ -2465,29 +2465,23 @@ test("ApiRequestFallbackMatchLimitation: an EXACT context.request match carries 
 				timeout: 60_000,
 			},
 		);
-		assert.equal(
+		// An exact URL cannot establish context-injected headers/cookies.
+		assert.notEqual(
 			result.status,
 			0,
-			`expected success; stdout=${result.stdout} stderr=${result.stderr}`,
+			"unobservable effective identity must fail closed",
 		);
-		assert.ok(
-			!result.stdout.includes("served by approximate HAR match"),
-			`exact match must not carry the fallback limitation; stdout=${result.stdout}`,
+		assert.doesNotMatch(
+			result.stdout + result.stderr,
+			/https:\/\/example\.test\/data/,
 		);
-		const claim = JSON.parse(readFileSync(claimPath, "utf8")) as {
-			limitations: string[];
-		};
-		assert.ok(
-			!claim.limitations.some((l) =>
-				l.includes("served by approximate HAR match"),
-			),
-		);
+		assert.doesNotMatch(result.stdout, /served by approximate HAR match/);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });
 
-test("ApiRequestFallbackMatchLimitation: a context.request call served by the APPROXIMATE (fallback) match carries the limitation in both stdout and the committed claim", () => {
+test("ApiRequestFallbackMatchLimitation: a different semantic query fails instead of fabricating a fallback response", () => {
 	const tmpDir = mkdtempSync(join(tmpdir(), "api-request-fallback-test-"));
 	try {
 		const { scenarioPath, claimPath } = writeApiRequestFallbackScenario(tmpDir);
@@ -2516,24 +2510,16 @@ test("ApiRequestFallbackMatchLimitation: a context.request call served by the AP
 				timeout: 60_000,
 			},
 		);
-		assert.equal(
+		assert.notEqual(
 			result.status,
 			0,
-			`expected success; stdout=${result.stdout} stderr=${result.stderr}`,
+			"unknown request identity must fail closed",
 		);
-		assert.match(
-			result.stdout,
-			/context\.request: 1 request\(s\) served by approximate HAR match \(same path, differing query\); not an exact replay/,
+		assert.doesNotMatch(
+			result.stdout + result.stderr,
+			/https:\/\/example\.test\/data/,
 		);
-		const claim = JSON.parse(readFileSync(claimPath, "utf8")) as {
-			limitations: string[];
-		};
-		assert.ok(
-			claim.limitations.some((l) =>
-				l.includes("served by approximate HAR match"),
-			),
-			`expected the fallback limitation in the committed claim; got: ${JSON.stringify(claim.limitations)}`,
-		);
+		assert.doesNotMatch(result.stdout, /served by approximate HAR match/);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
@@ -2560,7 +2546,7 @@ const CLOCK_TRACE_STUB_PATH = join(
  *  `expected.records` from whatever the FIRST (expected-to-mismatch) verify
  *  pass's `--dump-records` actually produced, and returns the paths so the
  *  caller can run a second, expected-to-pass verify. Reading back the
- *  ACTUAL projected record (rather than hand-predicting it) is deliberate:
+ *  ACTUAL comparison digest (rather than hand-predicting it) is deliberate:
  *  see scenario-clock-trace-stub-connector.ts's module comment on why this
  *  fixture's exact clock-call COUNT at any given point isn't something a
  *  test can reliably predict (the shared runtime's own Date.now() calls are
@@ -2628,9 +2614,12 @@ function recordMutateAndRebuildExpected(
 		`expected the first pass to fail on the now-stale expected.records; stdout=${firstPass.stdout}`,
 	);
 	const dumped = JSON.parse(
-		readFileSync(join(dumpDir, "run0-items.json"), "utf8"),
-	) as Array<{ actual_sha256: string; id: string }>;
-	const probe = dumped.find((d) => d.id === "probe");
+		readFileSync(
+			join(dumpDir, `run0-stream-${hashCanonicalJson("items")}.json`),
+			"utf8",
+		),
+	) as Array<{ actual_sha256: string; id_digest: string }>;
+	const probe = dumped.find((d) => d.id_digest === hashCanonicalJson("probe"));
 	assert.ok(
 		probe,
 		`expected a dumped 'probe' record; got: ${JSON.stringify(dumped)}`,

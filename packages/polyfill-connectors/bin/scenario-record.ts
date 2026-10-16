@@ -25,8 +25,8 @@
  * connector. `--runs 1` captures only the full-refresh run.
  *
  * Writes a `pdpp.connector-scenario/1` (src/scenario/format.ts) JSON file to
- * `--out` or the default `runs/<connector>/<iso>-scenario.json` (runs/ is
- * gitignored — this is a local capture artifact, not a committed fixture).
+ * `--out` outside the checkout, or the default private directory
+ * `~/.pdpp/scenarios-<connector>/<iso>-scenario.json`.
  *
  * capture.evidence_class is computed MECHANICALLY from what this run actually
  * observed — never a hardcoded constant (see src/scenario/format.ts's
@@ -48,7 +48,7 @@
  *
  * capture.complete reflects recorder finalization honestly per the task's
  * verification-capture semantics: if ANY interaction fails to record, or
- * either subprocess run fails to reach a "succeeded" DONE, the scenario
+ * either subprocess run has an invalid outcome or unclean exit, the scenario
  * (if written at all) is marked complete:false and this command exits
  * non-zero. A scenario with complete:false must not be treated as a
  * trustworthy replay fixture (see format.ts's ScenarioCapture doc comment).
@@ -96,25 +96,11 @@
  * INSTANT is the SAME `run.clock.fixed_now` every run already stamps
  * (pre-existing, driver-neutral) — no separate/parallel clock mechanism.
  *
- * SECRET HYGIENE: browser-launch.ts's `release()` redacts the HAR in place
- * before this CLI ever reads it — Cookie/Set-Cookie/Authorization/
- * x-csrf-token/x-xsrf-token headers and HAR `cookies[]` entries (both
- * request and response sides) are stripped (name kept, value replaced), and
- * form-encoded POST bodies whose field names look like credentials
- * (password/secret/token/otp/pin) are blanked — see browser-launch.ts's
- * "HAR secret-hygiene pass" module section for the exact posture, which
- * matches (does not invent a parallel philosophy from) this file's existing
- * `isCredentialsPrompt`/`isOtpPrompt` redaction for Collection Profile
- * INTERACTION prompts. Response/request BODY CONTENT is NOT redacted (a HAR
- * body is an opaque blob with unknown shape — this harness cannot safely
- * apply per-field redaction to it the way it does for the fetch-preload's
- * structured JSON capture), and the storageState file is DELIBERATELY
- * UNREDACTED (a session cookie's value IS the credential replay needs to
- * stay logged in — see `AcquireIsolatedBrowserOptions.storageStateRecording`'s
- * doc comment). Both files are `capture.privacy_class: "local-only"`
- * territory, same as the scenario JSON itself — never committed or shared
- * without a manual scrub pass. `main()` prints exactly what was and was not
- * redacted after every `--record-har` run (`printBrowserCaptureSummary`).
+ * PRIVATE CAPTURE CONTRACT: HAR request/response bodies, query identities,
+ * authentication headers and session state remain intact for offline replay.
+ * These local-only artifacts are sensitive, never sanitized or safe to commit.
+ * They are validated and published atomically with restrictive permissions.
+ * Diagnostic traces/logs retain only safe categories and value digests.
  *
  * NO AUTOMATIC RE-RECORD: this flag only ever runs on an explicit human
  * invocation of this CLI. There is no timer, interval, or staleness-driven
@@ -132,9 +118,8 @@
  * `{"at": <ms>, "message": <message>}`, INTERACTION prompts included. The
  * directory is prepared before the connector starts (created or tightened
  * to 0700) and each run's file is truncated and set 0600 at the start of
- * the run, so a rerun never appends to an old transcript. Off by default. The transcript holds record VALUES (it is
- * the connector's output, unredacted), so it is `local-only` like the
- * storageState file: never commit or share it.
+ * the run, so a rerun never appends to an old transcript. Off by default.
+ * Only timestamps, closed protocol type names and message digests are logged.
  *
  * KNOWN GAP, VERIFIED UNEXERCISED: `recordHar` does not capture WebSocket/
  * EventSource/SSE frames, and a browser download's body can bypass HAR
@@ -224,13 +209,23 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import {
+	basename,
+	dirname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+	sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashCanonicalJson } from "@pdpp/collector-runtime";
 import type { InteractionResponse } from "@pdpp/connector-protocol/connector-runtime-protocol";
@@ -239,6 +234,9 @@ import {
 	fileFlushOutcome,
 	HAR_RECORD_PATH_ENV,
 	STORAGE_STATE_RECORD_PATH_ENV,
+	scrubHarFileOrThrow,
+	validateLocalStorageState,
+	writePrivateCaptureJsonAtomically,
 } from "../src/browser-launch.ts";
 import {
 	packageRoot as PACKAGE_ROOT,
@@ -560,8 +558,9 @@ function buildPartialCaptureEvidence(
 	for (const msg of messages) {
 		const raw = msg as unknown as { stream?: unknown; type: string };
 		if (raw.type === "RECORD" && typeof raw.stream === "string") {
-			streamRecordCounts[raw.stream] =
-				(streamRecordCounts[raw.stream] ?? 0) + 1;
+			const streamDigest = `stream-sha256:${hashCanonicalJson(raw.stream)}`;
+			streamRecordCounts[streamDigest] =
+				(streamRecordCounts[streamDigest] ?? 0) + 1;
 		}
 	}
 	return {
@@ -570,8 +569,8 @@ function buildPartialCaptureEvidence(
 			? {}
 			: {
 					lastMessage: {
-						type: lastMessageSeenAt.type,
-						label: lastMessageSeenAt.label,
+						type: "protocol_message",
+						label: `message-sha256:${hashCanonicalJson(lastMessageSeenAt.label)}`,
 						agoMs: firedAt - lastMessageSeenAt.at,
 					},
 				}),
@@ -1027,7 +1026,39 @@ export function resolvePreAnsweredValue(
 
 export function defaultOutPath(connector: string, isoStamp: string): string {
 	const safeStamp = isoStamp.replace(/:/g, "-");
-	return join(PACKAGE_ROOT, "runs", connector, `${safeStamp}-scenario.json`);
+	const safeConnector = connector.replace(/[^a-zA-Z0-9_-]/g, "_");
+	return join(
+		homedir(),
+		".pdpp",
+		`scenarios-${safeConnector}`,
+		`${safeStamp}-scenario.json`,
+	);
+}
+
+/** Local recordings contain personal data and must never be published in a checkout. */
+export function assertPrivateCaptureDestination(
+	outPath: string,
+	repoRoot = REPO_ROOT,
+): void {
+	const suffix: string[] = [];
+	let existing = resolve(outPath);
+	while (!existsSync(existing)) {
+		suffix.unshift(basename(existing));
+		existing = dirname(existing);
+	}
+	const resolvedDestination = resolve(realpathSync(existing), ...suffix);
+	for (const candidate of [resolve(outPath), resolvedDestination]) {
+		const pathFromRepo = relative(realpathSync(repoRoot), candidate);
+		const outside =
+			pathFromRepo === ".." ||
+			pathFromRepo.startsWith(`..${sep}`) ||
+			isAbsolute(pathFromRepo);
+		if (!outside) {
+			throw new Error(
+				"scenario recording destination must be outside the repository",
+			);
+		}
+	}
 }
 
 interface ResolvedConnector {
@@ -1140,27 +1171,24 @@ export type ProtocolViolationReason =
  *  exit — see that type's doc comment for the rationale. Split out of
  *  `runRecordSubprocess`'s `close` handler purely to stay under this
  *  package's cognitive-complexity lint ceiling. */
-function computeProtocolViolation(args: {
+export function computeProtocolViolation(args: {
 	code: number | null;
 	doneCount: number;
 	messageAfterDone: boolean;
 	messages: readonly ProtocolMessage[];
 	signal: NodeJS.Signals | null;
 }): ProtocolViolationReason | undefined {
-	const succeededDone = args.messages.find(
-		(m) => m.type === "DONE" && m.status === "succeeded",
-	);
-	// A FAILED DONE legitimately exits non-zero — see the matching comment in
-	// bin/connector-dev.ts. Only a claimed SUCCESS that the exit/signal then
-	// contradicts is dishonest.
-	const nonzeroExitAfterSucceededDone =
-		Boolean(succeededDone) && (args.code !== 0 || Boolean(args.signal));
+	const terminalDone = args.messages.find((m) => m.type === "DONE");
+	// Scenario outcomes describe collection results, never process crashes.
+	// A captured/replayed expected failure must still terminate cleanly.
+	const uncleanExitAfterDone =
+		Boolean(terminalDone) && (args.code !== 0 || args.signal !== null);
 	let violation: ProtocolViolationReason | undefined;
 	if (args.doneCount > 1) {
 		violation = "multiple_done";
 	} else if (args.messageAfterDone) {
 		violation = "message_after_done";
-	} else if (nonzeroExitAfterSucceededDone) {
+	} else if (uncleanExitAfterDone) {
 		violation = "nonzero_exit_after_done";
 	}
 	return violation;
@@ -1402,7 +1430,24 @@ export function appendScenarioTranscript(
 	message: unknown,
 	at: number,
 ): void {
-	appendFileSync(path, `${JSON.stringify({ at, message })}\n`);
+	let messageDigest: string;
+	try {
+		messageDigest = hashCanonicalJson(message);
+	} catch {
+		throw new Error("scenario transcript: message digest failed");
+	}
+	let messageType = "unknown";
+	try {
+		assertKnownMessageType(message);
+		messageType = (message as { type: string }).type;
+	} catch {
+		// Unknown protocol values must not become diagnostic metadata.
+	}
+	// A transcript is a diagnostic, not a second private payload recording.
+	appendFileSync(
+		path,
+		`${JSON.stringify({ at, type: messageType, message_digest: messageDigest })}\n`,
+	);
 }
 
 /**
@@ -1930,7 +1975,7 @@ async function recordOneRun(
 		const names = result.unansweredInteractions.map((u) => u.kind);
 		return {
 			ok: false,
-			reason: `unanswered interaction prompt(s) — count=${String(names.length)} kinds=[${names.join(", ")}]`,
+			reason: `unanswered interaction prompt(s) — count=${String(names.length)}`,
 			interactions: result.interactions,
 			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
@@ -1946,7 +1991,7 @@ async function recordOneRun(
 	if (result.protocolViolation) {
 		return {
 			ok: false,
-			reason: `protocol_violation: ${result.protocolViolation} (DONE status=${done?.status ?? "none"}, exit code=${String(result.code)}, signal=${String(result.signal)})`,
+			reason: `protocol_violation: ${result.protocolViolation} (DONE status=${done?.status === "succeeded" || done?.status === "failed" ? done.status : "missing_or_invalid"}, exit code=${String(result.code)}, signal=${String(result.signal)})`,
 			interactions: result.interactions,
 			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
@@ -1958,8 +2003,13 @@ async function recordOneRun(
 	}
 	if (done?.status !== "succeeded") {
 		return {
-			ok: false,
-			reason: `connector run did not reach a succeeded DONE (status=${done?.status ?? "missing"})`,
+			// Every independent integrity check above has passed. A declared
+			// collection failure is an outcome only when the process exited cleanly.
+			ok:
+				result.code === 0 &&
+				result.signal === null &&
+				summarizeRunOutcome(protocolTrace) !== undefined,
+			reason: `connector run did not reach a succeeded DONE (status=${done?.status === "succeeded" || done?.status === "failed" ? done.status : "missing_or_invalid"})`,
 			interactions: result.interactions,
 			clockTrace: result.clockTrace,
 			normalizerNames: result.normalizerNames,
@@ -2172,15 +2222,37 @@ async function recordOneRunWithOptionalHar(
 			storageStatePath,
 		},
 	);
-	const harScrubFailed = existsSync(`${harPath}.scrub-failed`);
+	const harScrubFailed =
+		existsSync(`${harPath}.scrub-failed`) ||
+		existsSync(`${storageStatePath}.scrub-failed`);
 	if (harScrubFailed) {
-		result.ok = false;
-		result.reason = "HAR scrub failed; capture is not redacted";
+		throw new Error("scenario capture rejected: privacy validation failed");
+	}
+	// Validate at the publication boundary too: existence is not proof that
+	// a child supplied a validated private artifact.
+	if (existsSync(harPath)) {
+		await scrubHarFileOrThrow(harPath);
+	}
+	if (existsSync(storageStatePath)) {
+		try {
+			const state: unknown = JSON.parse(readFileSync(storageStatePath, "utf8"));
+			validateLocalStorageState(state);
+			await writePrivateCaptureJsonAtomically(storageStatePath, state);
+		} catch {
+			rmSync(storageStatePath, { force: true });
+			throw new Error(
+				"scenario capture rejected: storage privacy validation failed",
+			);
+		}
 	}
 	const [harOutcome, storageStateOutcome] = await Promise.all([
 		fileFlushOutcome(harPath),
 		fileFlushOutcome(storageStatePath),
 	]);
+	if (harOutcome.flushed !== storageStateOutcome.flushed) {
+		result.ok = false;
+		result.reason = "incomplete browser capture artifacts";
+	}
 	const harEntryCount =
 		harOutcome.flushed && !harScrubFailed
 			? countHarEntriesForRecord(harPath)
@@ -2233,10 +2305,15 @@ function resolveRunEnvironment(
 	return { network: { driver: "recorded-http" } };
 }
 
-/** Drives run 1 (always) and, when requested and run 1 succeeded, run 2
- *  (seeded from run 1's actual committed state). Split out of `main` purely
- *  to stay under this package's cognitive-complexity lint ceiling — behavior
- *  is unchanged from the inline version. */
+/** Capture integrity is authoritative; an expected outcome never repairs it. */
+export function isRunCaptureComplete(run: {
+	ok: boolean;
+	protocolTrace: NormalizedTraceEntry[];
+}): boolean {
+	return run.ok;
+}
+
+/** Capture run 1, then optionally run 2 after a successful collection. */
 async function captureRuns(
 	args: CliArgs,
 	connectorPath: string,
@@ -2265,7 +2342,7 @@ async function captureRuns(
 	const runs: ScenarioRun[] = [];
 	const browserCaptures: Array<BrowserCaptureArtifact | undefined> = [];
 	const run1Outcome = summarizeRunOutcome(run1.protocolTrace);
-	let complete = run1.ok || run1Outcome !== undefined;
+	let complete = isRunCaptureComplete(run1);
 	const normalizerNames = new Set(run1.normalizerNames);
 
 	// FIX 5 — modality-neutral envelope, resolved honestly per run by
@@ -2305,7 +2382,7 @@ async function captureRuns(
 		process.stderr.write(`FAILED run 1: ${run1.reason ?? "unknown"}\n`);
 	}
 
-	if (run1.ok && args.runs === 2) {
+	if (run1.ok && run1Outcome?.status !== "failed" && args.runs === 2) {
 		process.stdout.write(
 			`RECORDING ${args.connector} — run 2 (incremental, ${summarizeSeededState(run1.finalState)})\n`,
 		);
@@ -2324,7 +2401,7 @@ async function captureRuns(
 			normalizerNames.add(name);
 		}
 		const run2Outcome = summarizeRunOutcome(run2.protocolTrace);
-		complete = complete && (run2.ok || run2Outcome !== undefined);
+		complete = complete && isRunCaptureComplete(run2);
 		runs.push({
 			clock: { fixed_now: run2StartedAt, trace: run2.clockTrace },
 			environment: resolveRunEnvironment(
@@ -2349,7 +2426,7 @@ async function captureRuns(
 				: {}),
 		});
 		browserCaptures.push(run2Capture);
-		if (!run2.ok && run2Outcome === undefined) {
+		if (!run2.ok) {
 			process.stderr.write(`FAILED run 2: ${run2.reason ?? "unknown"}\n`);
 		}
 	}
@@ -2412,7 +2489,7 @@ function finalizeBrowserCaptures(
 	// capture crashed here after both runs had already succeeded, losing the
 	// whole capture. Earlier runs only survived because `runs/<connector>/` had
 	// been created by a previous non-HAR capture.
-	mkdirSync(scenarioDir, { recursive: true });
+	mkdirSync(scenarioDir, { recursive: true, mode: 0o700 });
 	const outBaseName = basename(outPath).replace(JSON_EXTENSION_RE, "");
 	const captures = runs.flatMap((run, index) => {
 		const capture = browserCaptures[index];
@@ -2655,15 +2732,8 @@ function printBrowserCaptureSummary(
 		);
 	}
 	process.stdout.write(
-		"  redacted from the HAR: Cookie/Set-Cookie headers, Authorization headers, x-csrf-token/x-xsrf-token headers, " +
-			"HAR cookies[] entries (both request and response sides), and form-encoded POST fields whose name looks like a " +
-			"credential (password/secret/token/otp/pin) — header/cookie NAMES are kept, values replaced with a placeholder.\n",
-	);
-	process.stdout.write(
-		"  NOT redacted: response/request BODY content (JSON bodies, non-form POST data) and the storageState file, " +
-			"which is deliberately UNREDACTED (a session cookie's value IS the credential replay needs) — see " +
-			"src/browser-launch.ts's `storageStateRecording` doc comment. Treat both HAR and storageState files as " +
-			"capture.privacy_class: local-only; never share or commit either without a manual scrub pass.\n",
+		"  PRIVATE LOCAL CAPTURE: HAR bodies, request identities and session credentials are retained for offline replay. " +
+			"These files are not sanitized; never share or commit them. Files use mode 0600 and atomic replacement.\n",
 	);
 }
 
@@ -2678,18 +2748,16 @@ function printBrowserCaptureSummary(
  */
 function writeScenarioAtomically(outPath: string, contents: string): void {
 	const dir = dirname(outPath);
-	mkdirSync(dir, { recursive: true });
-	const tmpPath = join(
-		dir,
-		`.tmp-${String(process.pid)}-${String(Date.now())}-${basename(outPath)}`,
-	);
-	writeFileSync(tmpPath, contents, { mode: 0o600 });
-	// writeFileSync's mode option only applies at file CREATION; if outPath
-	// (or, defensively, this fresh tmp file for some platform-specific reason)
-	// pre-existed with looser permissions, force 0600 explicitly rather than
-	// trusting the create-time mode.
-	chmodSync(tmpPath, 0o600);
-	renameSync(tmpPath, outPath);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const staging = mkdtempSync(join(dir, ".scenario-write-"));
+	const tmpPath = join(staging, "capture.json");
+	try {
+		writeFileSync(tmpPath, contents, { mode: 0o600, flag: "wx" });
+		chmodSync(tmpPath, 0o600);
+		renameSync(tmpPath, outPath);
+	} finally {
+		rmSync(staging, { recursive: true, force: true });
+	}
 }
 
 /**
@@ -2801,6 +2869,7 @@ async function main(): Promise<void> {
 		const outPath = args.out
 			? resolve(args.out)
 			: defaultOutPath(args.connector, capturedAt);
+		assertPrivateCaptureDestination(outPath);
 		// Move any workspace-temp HAR/storageState next to the scenario file and
 		// rewrite each affected run's environment.network to the final
 		// scenario-relative filenames — MUST happen before writeScenarioAtomically
@@ -2860,9 +2929,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			process.exitCode = 1;
 			return;
 		}
-		const message =
-			err instanceof Error ? (err.stack ?? err.message) : String(err);
-		process.stderr.write(`[scenario-record] FATAL: ${message}\n`);
+		process.stderr.write(
+			"[scenario-record] FATAL: capture failed; diagnostic payload omitted\n",
+		);
 		process.exitCode = 1;
 	});
 }

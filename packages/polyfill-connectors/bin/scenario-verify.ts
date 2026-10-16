@@ -42,24 +42,12 @@
  * this CLI drives the exact same connector code as a real subprocess), so a
  * fixed total-duration kill was just as wrong here.
  *
- * `--dump-records <dir>` (also `PDPP_SCENARIO_DUMP_DIR=<dir>`; the flag wins
- * when both are set) writes the mismatched records of every FAILING stream to
- * `<dir>/run<N>-<stream>.json` — a `record_hash` failure's printed `detail`
- * names only the two hex digests, not what changed, which made a real
- * intermittent reddit replay mismatch undiagnosable. Each entry is `{id, op,
- * expected_sha256, actual_sha256, projected}`, where `projected` is the exact
- * object that was hashed (after `exclude_keys` removal and canonicalization)
- * — a scenario stores only expected HASHES, never record bodies, so the
- * expected content itself can never be shown; diff `projected` against a dump
- * from a passing replay, or re-record the scenario. `--dump-all-records`
- * additionally dumps every record of a mismatching stream, not just the
- * mismatched ones (for diffing two full replays). Writes NOTHING when there
- * is no mismatch (not even the directory). Dump files are personal data
- * pulled from a real replayed response: the directory is created mode 0700
- * and every file mode 0600, and a WARNING line is printed whenever anything
- * is written — never commit or share a dump. This CLI never invents its own
- * dump path; it only ever writes to the directory the caller explicitly
- * named.
+ * `--dump-records <dir>` (or PDPP_SCENARIO_DUMP_DIR) writes only
+ * comparison digests for mismatching records. IDs and stream filenames are
+ * hashed; projected record values never enter diagnostic dumps.
+ * `--dump-all-records` includes all comparisons in a mismatching stream.
+ * No mismatch means no directory or files. Directories use mode 0700 and
+ * files mode 0600. Replay payloads remain in protected local captures.
  *
  * Exit code: 0 when every run passes; non-zero when any run fails (prints
  * the structured failure list `verifyScenario` returns) or the scenario
@@ -107,7 +95,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalJson } from "@pdpp/collector-runtime";
+import { canonicalJson, hashCanonicalJson } from "@pdpp/collector-runtime";
 import type { InteractionResponse } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { config as dotenvConfig } from "dotenv";
 import { BROWSER_HEADLESS_ENV } from "../src/browser-launch.ts";
@@ -197,7 +185,7 @@ export interface CliArgs {
 	 *  alongside it. */
 	dumpAllRecords: boolean;
 	/** `--dump-records <dir>`: on a mismatch, write the mismatched records of
-	 *  every failing stream to `<dir>/run<N>-<stream>.json` — see this file's
+	 *  every failing stream to `<dir>/run<N>-stream-<digest>.json` — see this file's
 	 *  module doc comment. `undefined` here does not necessarily mean dumping
 	 *  is off: `PDPP_SCENARIO_DUMP_DIR` can still enable it — resolve the
 	 *  effective directory via `resolveDumpRecordsDir`, never this field
@@ -245,18 +233,11 @@ function usageAndExit(code: number): never {
 		`Known connectors: ${KNOWN_CONNECTOR_NAMES.join(", ")}\n`,
 	);
 	process.stderr.write(
-		"--dump-records <dir> (also PDPP_SCENARIO_DUMP_DIR=<dir>; the flag wins over the env var):\n" +
-			"  on a mismatch, write the mismatched records of each failing stream to\n" +
-			"  <dir>/run<N>-<stream>.json, each entry {id, op, expected_sha256,\n" +
-			"  actual_sha256, projected}. A scenario stores only expected hashes, not\n" +
-			"  record bodies, so expected content can't be shown directly - diff\n" +
-			"  `projected` against a dump from a passing replay, or re-record the\n" +
-			"  scenario. Writes nothing when there is no mismatch. Dump files are\n" +
-			"  personal data: directory mode 0700, file mode 0600 - never commit or\n" +
-			"  share them.\n" +
-			"--dump-all-records: with dumping active, also dump every record of a\n" +
-			"  mismatching stream, not just the mismatched ones (for diffing two\n" +
-			"  replays).\n",
+		"--dump-records <dir> (also PDPP_SCENARIO_DUMP_DIR):\n" +
+			"  write payload-free comparison digests for mismatched records.\n" +
+			"  Stream filenames and IDs are hashed; projected values are omitted.\n" +
+			"  Writes nothing when there is no mismatch; modes 0700/0600.\n" +
+			"--dump-all-records: include every comparison of a mismatching stream.\n",
 	);
 	process.exit(code);
 }
@@ -924,10 +905,17 @@ function scriptedInteractionResponse(
  *       "extra output that happened to still parse".
  */
 class SubprocessProtocolViolationError extends Error {
+	/** Fixed-string message; see `replayFailureDetail` in src/scenario/verify.ts. */
+	readonly safeDiagnostic = true;
 	constructor(message: string, options?: ErrorOptions) {
 		super(message, options);
 		this.name = "SubprocessProtocolViolationError";
 	}
+}
+
+/** Message carries only counts, seq numbers, an exit code, a signal name or a DONE status. */
+class SafeReplayDiagnosticError extends Error {
+	readonly safeDiagnostic = true;
 }
 
 function isDoneLine(parsed: unknown): parsed is ProtocolMessage {
@@ -1045,8 +1033,9 @@ function buildPartialCaptureEvidence(
 	for (const msg of messages) {
 		const raw = msg as unknown as { stream?: unknown; type: string };
 		if (raw.type === "RECORD" && typeof raw.stream === "string") {
-			streamRecordCounts[raw.stream] =
-				(streamRecordCounts[raw.stream] ?? 0) + 1;
+			const streamDigest = `stream-sha256:${hashCanonicalJson(raw.stream)}`;
+			streamRecordCounts[streamDigest] =
+				(streamRecordCounts[streamDigest] ?? 0) + 1;
 		}
 	}
 	return {
@@ -1055,8 +1044,8 @@ function buildPartialCaptureEvidence(
 			? {}
 			: {
 					lastMessage: {
-						type: lastMessageSeenAt.type,
-						label: lastMessageSeenAt.label,
+						type: "protocol_message",
+						label: `message-sha256:${hashCanonicalJson(lastMessageSeenAt.label)}`,
 						agoMs: firedAt - lastMessageSeenAt.at,
 					},
 				}),
@@ -1216,6 +1205,24 @@ export function createInactivityWatchdog(
  * env, for a browser-driven run — see `runCollector`'s
  * `browserPreloadPath` branch).
  */
+/** Unsupported API attempts are an independent replay-integrity failure. */
+export function assertNoUnsupportedApiRequests(count: number): void {
+	if (count > 0)
+		throw new Error("unsupported API request attempted during replay");
+}
+
+export function isReplayExitAccepted(
+	code: number | null,
+	signal: NodeJS.Signals | null,
+	allowExpectedFailure: boolean,
+	doneStatus: unknown,
+): boolean {
+	// Expected DONE failures do not authorize nonzero exits or signals.
+	void allowExpectedFailure;
+	void doneStatus;
+	return signal === null && code === 0;
+}
+
 function runReplaySubprocess(args: {
 	allowExpectedFailure?: boolean;
 	bridgeUrl?: string;
@@ -1527,7 +1534,7 @@ function runReplaySubprocess(args: {
 			if (nextInteractionCursor < args.userInteractions.length) {
 				const unconsumed = args.userInteractions.slice(nextInteractionCursor);
 				rejectPromise(
-					new Error(
+					new SafeReplayDiagnosticError(
 						`scenario replay: ${String(unconsumed.length)} recorded user_interactions entry(ies) were never consumed ` +
 							`(the connector emitted fewer INTERACTIONs than the scenario recorded): seq [${unconsumed.map((u) => u.seq).join(", ")}]`,
 					),
@@ -1548,23 +1555,27 @@ function runReplaySubprocess(args: {
 				.reverse()
 				.find((m) => m.type === "DONE");
 			const doneStatus =
-				lastDone && typeof lastDone.status === "string"
+				lastDone?.status === "failed" || lastDone?.status === "succeeded"
 					? `; DONE status=${lastDone.status}`
-					: "; DONE status=missing";
+					: "; DONE status=missing_or_invalid";
 			if (signal !== null) {
 				rejectPromise(
-					new Error(
+					new SafeReplayDiagnosticError(
 						`scenario replay: subprocess was terminated by signal ${signal}${doneStatus}`,
 					),
 				);
 				return;
 			}
 			if (
-				code !== 0 &&
-				!(args.allowExpectedFailure === true && lastDone?.status === "failed")
+				!isReplayExitAccepted(
+					code,
+					signal,
+					args.allowExpectedFailure === true,
+					lastDone?.status,
+				)
 			) {
 				rejectPromise(
-					new Error(
+					new SafeReplayDiagnosticError(
 						`scenario replay: subprocess exited with nonzero code ${String(code)}${doneStatus}`,
 					),
 				);
@@ -1613,34 +1624,8 @@ function printFailures(failures: readonly VerifyFailure[]): void {
 	}
 }
 
-/**
- * Writes `<dumpDir>/run<N>-<stream>.json` for every stream `verifyScenario`
- * reported via its `onStreamMismatch` listener (src/scenario/verify.ts) —
- * see this file's module doc comment for the full `--dump-records`/
- * `--dump-all-records` contract. `dumped.projected` is the exact value
- * `verifyStream` hashed to get `actual_sha256` (`projectRecordForComparison`
- * output — `exclude_keys` already removed, canonical-JSON-ready), so
- * `hashCanonicalJson(dumped.projected) === dumped.actual_sha256` always
- * holds; that round trip is what lets a maintainer trust the dump actually
- * reproduces what failed, rather than a reconstruction that might not match.
- *
- * Writes NOTHING — not even the directory — when no stream in `mismatches`
- * has an entry to dump (either `mismatches` is empty, or `dumpAllRecords` is
- * false and every stream's hashes happen to already agree despite a count/ids
- * failure — e.g. a purely-missing trailing record has nothing to project).
- * `dumpDir` is always the caller's own explicit `--dump-records`/
- * `PDPP_SCENARIO_DUMP_DIR` value (`resolveDumpRecordsDir`) — this function
- * never invents a path, so it can never write inside the repo unless the
- * caller explicitly pointed it there.
- *
- * Dump files are personal data pulled from a real (if replayed) provider
- * response: the directory is created mode 0700 and every file mode 0600 —
- * `chmodSync` after each create because `mkdirSync`/`writeFileSync`'s own
- * `mode` option is still subject to the process umask, which could otherwise
- * leave either more permissive than intended regardless of the requested
- * mode.
- */
-function writeMismatchDumps(
+/** Writes payload-free comparison digests with hashed stream filenames and IDs. */
+export function writeMismatchDumps(
 	dumpDir: string,
 	dumpAllRecords: boolean,
 	mismatches: readonly {
@@ -1662,9 +1647,12 @@ function writeMismatchDumps(
 			chmodSync(dumpDir, 0o700);
 			dirCreated = true;
 		}
-		const filePath = join(dumpDir, `run${String(runIndex)}-${stream}.json`);
+		const filePath = join(
+			dumpDir,
+			`run${String(runIndex)}-stream-${hashCanonicalJson(stream)}.json`,
+		);
 		const payload = records.map((c) => ({
-			id: c.id,
+			id_digest: hashCanonicalJson(c.id),
 			op: c.op,
 			// `null`, not an omitted key: an actual record beyond the scenario's
 			// expected length has no expected hash at all — a fixed-shape literal
@@ -1672,7 +1660,6 @@ function writeMismatchDumps(
 			// sometimes present and sometimes not.
 			expected_sha256: c.expected_sha256 ?? null,
 			actual_sha256: c.actual_sha256,
-			projected: c.projected,
 		}));
 		writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, {
 			mode: 0o600,
@@ -1684,7 +1671,7 @@ function writeMismatchDumps(
 	}
 	if (dirCreated) {
 		process.stdout.write(
-			"  WARNING: dump directory contains collected personal data - do not commit or share it\n",
+			"  Diagnostic dumps contain comparison digests only\n",
 		);
 	}
 }
@@ -2190,7 +2177,7 @@ async function main(): Promise<void> {
 			!(allowExpectedFailure && done?.status === "failed")
 		) {
 			throw new Error(
-				`replay run ${String(runIndex)} did not reach a succeeded DONE (status=${done?.status ?? "missing"})`,
+				`replay run ${String(runIndex)} did not reach a succeeded DONE (status=${done?.status === "succeeded" || done?.status === "failed" ? done.status : "missing_or_invalid"})`,
 			);
 		}
 		const { records, stateMessages } = messagesToRecordsAndState(
@@ -2288,6 +2275,7 @@ async function main(): Promise<void> {
 				? {}
 				: { clockTrace: run.clock.trace }),
 		});
+		let unsupportedApiRequestCount = 0;
 		let result: {
 			code: number | null;
 			messages: ProtocolMessage[];
@@ -2335,7 +2323,14 @@ async function main(): Promise<void> {
 				const reportRaw = readFileSync(fallbackReportPath, "utf8");
 				const parsed = JSON.parse(reportRaw) as {
 					fallbackMatchCount?: unknown;
+					unsupportedApiRequestCount?: unknown;
 				};
+				if (
+					typeof parsed.unsupportedApiRequestCount === "number" &&
+					parsed.unsupportedApiRequestCount > 0
+				) {
+					unsupportedApiRequestCount = parsed.unsupportedApiRequestCount;
+				}
 				if (typeof parsed.fallbackMatchCount === "number") {
 					apiRequestFallbackMatchTotal += parsed.fallbackMatchCount;
 				}
@@ -2357,6 +2352,7 @@ async function main(): Promise<void> {
 			}
 			rmSync(clockReportPath, { force: true });
 		}
+		assertNoUnsupportedApiRequests(unsupportedApiRequestCount);
 		emitReplayResult(
 			runIndex,
 			scenario.runs[runIndex]?.expected.outcome !== undefined,
@@ -2473,10 +2469,10 @@ async function main(): Promise<void> {
 				? undefined
 				: (info) => streamMismatches.push(info),
 		);
-	} catch (err) {
-		const message =
-			err instanceof Error ? (err.stack ?? err.message) : String(err);
-		process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
+	} catch {
+		process.stderr.write(
+			"[scenario-verify] FATAL: verification failed; diagnostic payload omitted\n",
+		);
 		process.exitCode = 1;
 		cleanupScenarioEvidenceWorkspace(isolationWorkspace);
 		return;
@@ -2903,9 +2899,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 			process.exitCode = 1;
 			return;
 		}
-		const message =
-			err instanceof Error ? (err.stack ?? err.message) : String(err);
-		process.stderr.write(`[scenario-verify] FATAL: ${message}\n`);
+		process.stderr.write(
+			"[scenario-verify] FATAL: verification failed; diagnostic payload omitted\n",
+		);
 		process.exitCode = 1;
 	});
 }

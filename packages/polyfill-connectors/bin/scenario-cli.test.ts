@@ -488,15 +488,15 @@ test("scenario-record + scenario-verify: record against a stub connector's loopb
 	}
 });
 
-// ─── --dump-records: a failed replay's mismatched records, written for a
-// maintainer to actually look at (the motivating case: a real 1-in-41
-// intermittent reddit replay mismatch whose printed detail line named only
-// two hashes, with no way to see what had changed). ─────────────────────────
+// ─── --dump-records: digest-only comparison evidence for failed replay.
+// Local recordings hold the values; diagnostic exports cannot carry them. ──
 
-test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on failure (hash round-trips from `projected`), honors flag-over-env precedence, enforces 0700/0600 modes, writes nothing on a pass, and leaves the no-flag path unchanged", async (t) => {
+test("scenario-verify --dump-records: exports exact mismatch digests without payloads or raw identities, honors flag-over-env precedence, enforces 0700/0600 modes, writes nothing on a pass, and leaves the no-flag path unchanged", async (t) => {
 	const stubProvider = await startStubProvider();
 	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-dump-test-"));
 	const scenarioPath = join(tmpDir, "stub.scenario.json");
+	const dumpFileName = `run0-stream-${hashCanonicalJson("items")}.json`;
+	const payloadSentinel = "SYNTHETIC_DUMP_PAYLOAD_SENTINEL";
 
 	try {
 		const recordResult = runRecordCli(
@@ -525,7 +525,7 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 
 		// ── Regression anchor: a passing verify with no dump flag/env present,
 		// run twice, to prove the feature is a no-op when unused — no new
-		// "dumped"/"WARNING" lines leak into the default path's stdout. ──
+		// diagnostic dump lines leak into the default path's stdout. ──
 		const baselineVerify = runVerifyCli(
 			[...verifyBaseArgs, scenarioPath],
 			verifyEnv,
@@ -534,7 +534,7 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		assert.doesNotMatch(baselineVerify.stdout, /dumped \d+ mismatched record/);
 		assert.doesNotMatch(
 			baselineVerify.stdout,
-			/WARNING: dump directory contains collected personal data/,
+			/Diagnostic dumps contain comparison digests only/,
 		);
 		const regressionVerify = runVerifyCli(
 			[...verifyBaseArgs, scenarioPath],
@@ -591,12 +591,11 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 				"test setup: expected at least one item in the tampered page",
 			);
 		}
-		firstItem.value = "TAMPERED-FOR-DUMP";
+		firstItem.value = payloadSentinel;
 		writeFileSync(tamperedPath, JSON.stringify(tampered, null, 2));
 
-		// ── --dump-records on a mismatch: writes exactly the mismatched
-		// record(s), the directory/file modes are 0700/0600, and the hash
-		// round-trips from the dumped `projected` value. ──
+		// ── --dump-records on a mismatch: writes exact comparison digests,
+		// with 0700/0600 modes and no projected values or raw identities. ──
 		const flagDumpDir = join(tmpDir, "dump-flag");
 		const flagVerify = runVerifyCli(
 			[...verifyBaseArgs, tamperedPath, "--dump-records", flagDumpDir],
@@ -607,7 +606,7 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		assert.match(flagVerify.stdout, /dumped \d+ mismatched record\(s\) to /);
 		assert.match(
 			flagVerify.stdout,
-			/WARNING: dump directory contains collected personal data/,
+			/Diagnostic dumps contain comparison digests only/,
 		);
 
 		const dirMode = statSync(flagDumpDir).mode & 0o777;
@@ -616,7 +615,9 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 			0o700,
 			`dump dir mode expected 0700, got ${dirMode.toString(8)}`,
 		);
-		const dumpFilePath = join(flagDumpDir, "run0-items.json");
+		assert.deepEqual(readdirSync(flagDumpDir), [dumpFileName]);
+		assert.doesNotMatch(dumpFileName, /items/);
+		const dumpFilePath = join(flagDumpDir, dumpFileName);
 		assert.equal(existsSync(dumpFilePath), true);
 		const fileMode = statSync(dumpFilePath).mode & 0o777;
 		assert.equal(
@@ -625,26 +626,29 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 			`dump file mode expected 0600, got ${fileMode.toString(8)}`,
 		);
 
-		const dumped = JSON.parse(readFileSync(dumpFilePath, "utf8")) as Array<{
+		const dumpedText = readFileSync(dumpFilePath, "utf8");
+		const dumped = JSON.parse(dumpedText) as Array<{
 			actual_sha256: string;
 			expected_sha256: string | null;
-			id: string;
+			id_digest: string;
 			op: string;
-			projected: unknown;
 		}>;
 		assert.equal(
 			dumped.length,
 			1,
 			"exactly one record (item-1) actually mismatched by content",
 		);
-		assert.equal(dumped[0]?.id, "item-1");
+		assert.deepEqual(Object.keys(dumped[0] ?? {}).sort(), [
+			"actual_sha256",
+			"expected_sha256",
+			"id_digest",
+			"op",
+		]);
+		assert.equal(dumped[0]?.id_digest, hashCanonicalJson("item-1"));
 		assert.equal(dumped[0]?.op, "upsert");
 		assert.notEqual(dumped[0]?.expected_sha256, dumped[0]?.actual_sha256);
-		assert.equal(
-			hashCanonicalJson(dumped[0]?.projected),
-			dumped[0]?.actual_sha256,
-			"hashing the dumped `projected` value must reproduce the dumped actual_sha256 exactly",
-		);
+		assert.match(dumped[0]?.actual_sha256 ?? "", /^[0-9a-f]{64}$/);
+		assert.match(dumped[0]?.expected_sha256 ?? "", /^[0-9a-f]{64}$/);
 
 		// ── PDPP_SCENARIO_DUMP_DIR alone also enables dumping. ──
 		const envDumpDir = join(tmpDir, "dump-env");
@@ -654,7 +658,7 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		});
 		assert.notEqual(envVerify.code, 0);
 		assert.equal(
-			existsSync(join(envDumpDir, "run0-items.json")),
+			existsSync(join(envDumpDir, dumpFileName)),
 			true,
 			"PDPP_SCENARIO_DUMP_DIR alone must enable dumping",
 		);
@@ -668,7 +672,7 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		);
 		assert.notEqual(precedenceVerify.code, 0);
 		assert.equal(
-			existsSync(join(flagWinsDir, "run0-items.json")),
+			existsSync(join(flagWinsDir, dumpFileName)),
 			true,
 			"the --dump-records flag's directory must receive the dump",
 		);
@@ -692,14 +696,39 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 			verifyEnv,
 		);
 		assert.notEqual(dumpAllVerify.code, 0);
-		const dumpAllRecords = JSON.parse(
-			readFileSync(join(dumpAllDir, "run0-items.json"), "utf8"),
-		) as Array<{ id: string }>;
+		assert.deepEqual(readdirSync(dumpAllDir), [dumpFileName]);
+		const dumpAllText = readFileSync(join(dumpAllDir, dumpFileName), "utf8");
+		const dumpAllRecords = JSON.parse(dumpAllText) as Array<{
+			id_digest: string;
+		}>;
 		assert.deepEqual(
-			dumpAllRecords.map((r) => r.id),
-			["item-1", "item-2", "item-3"],
-			"--dump-all-records must dump every record of the stream, not just the mismatched one",
+			dumpAllRecords.map((r) => r.id_digest),
+			["item-1", "item-2", "item-3"].map((id) => hashCanonicalJson(id)),
+			"--dump-all-records must include every record identity digest",
 		);
+		assert.ok(
+			dumpAllRecords.every(
+				(record) =>
+					Object.keys(record).sort().join(",") ===
+					"actual_sha256,expected_sha256,id_digest,op",
+			),
+		);
+		const diagnosticOutput = [
+			dumpedText,
+			dumpAllText,
+			readFileSync(join(envDumpDir, dumpFileName), "utf8"),
+			readFileSync(join(flagWinsDir, dumpFileName), "utf8"),
+			envVerify.stdout,
+			envVerify.stderr,
+			precedenceVerify.stdout,
+			precedenceVerify.stderr,
+			flagVerify.stdout,
+			flagVerify.stderr,
+			dumpAllVerify.stdout,
+			dumpAllVerify.stderr,
+		].join("\n");
+		assert.equal(diagnosticOutput.includes(payloadSentinel), false);
+		assert.doesNotMatch(diagnosticOutput, /item-[123]|"projected"/);
 
 		t.diagnostic(`flag verify stdout:\n${flagVerify.stdout}`);
 	} finally {
@@ -2265,7 +2294,7 @@ test("scenario-record leaves no pdpp-scenario-* files in its private temp direct
 	}
 });
 
-test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol messages to run<N>.jsonl (dir 0700, files 0600); unset writes nothing", async () => {
+test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol digests to run<N>.jsonl (dir 0700, files 0600); unset writes nothing", async () => {
 	const stubProvider = await startStubProvider();
 	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-cli-transcript-test-"));
 	const transcriptDir = join(tmpDir, "transcript");
@@ -2301,12 +2330,24 @@ test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol m
 				.filter((line) => line.length > 0)
 				.map(
 					(line) =>
-						JSON.parse(line) as { at: number; message: { type: string } },
+						JSON.parse(line) as {
+							at: number;
+							type: string;
+							message_digest: string;
+						},
 				);
 			assert.ok(lines.length > 0, `${name} is empty`);
 			assert.ok(lines.every((line) => typeof line.at === "number"));
-			assert.ok(lines.some((line) => line.message.type === "RECORD"));
-			assert.equal(lines.at(-1)?.message.type, "DONE");
+			assert.ok(lines.some((line) => line.type === "RECORD"));
+			assert.equal(lines.at(-1)?.type, "DONE");
+			for (const line of lines) {
+				assert.deepEqual(Object.keys(line).sort(), [
+					"at",
+					"message_digest",
+					"type",
+				]);
+				assert.match(line.message_digest, /^[0-9a-f]{64}$/);
+			}
 		}
 
 		const sizesBefore = ["run1.jsonl", "run2.jsonl"].map(
@@ -2338,7 +2379,7 @@ test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol m
 	}
 });
 
-test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR tightens a pre-existing dir to 0700, truncates an old run file to 0600, and records INTERACTION prompts", () => {
+test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR tightens a pre-existing dir to 0700, truncates an old run file to 0600, and records INTERACTION metadata without prompt values", () => {
 	const tmpDir = mkdtempSync(
 		join(tmpdir(), "scenario-cli-transcript-interaction-"),
 	);
@@ -2380,9 +2421,21 @@ test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR tightens a pre-existing dir 
 		const types = text
 			.split("\n")
 			.filter((line) => line.length > 0)
-			.map(
-				(line) =>
-					(JSON.parse(line) as { message: { type: string } }).message.type,
+			.map((line) =>
+				(() => {
+					const entry = JSON.parse(line) as {
+						at: number;
+						type: string;
+						message_digest: string;
+					};
+					assert.deepEqual(Object.keys(entry).sort(), [
+						"at",
+						"message_digest",
+						"type",
+					]);
+					assert.match(entry.message_digest, /^[0-9a-f]{64}$/);
+					return entry.type;
+				})(),
 			);
 		assert.ok(types.includes("INTERACTION"), `types: ${types.join(",")}`);
 		assert.equal(types.at(-1), "DONE");
@@ -3345,11 +3398,17 @@ test("scenario-record --timeout: the watchdog DOES fire on a genuine hang, print
 		);
 		// Partial evidence: this run emitted exactly one `items` record before
 		// hanging.
-		assert.match(recordResult.stderr, /observed so far: items=1 record\(s\)/);
+		const streamKey = `stream-sha256:${hashCanonicalJson("items")}`;
+		const messageLabel = `message-sha256:${hashCanonicalJson("stream=items")}`;
+		assert.ok(
+			recordResult.stderr.includes(`observed so far: ${streamKey}=1 record(s)`),
+			"the digested stream still has its exact observed record count",
+		);
 		assert.match(
 			recordResult.stderr,
-			/last message seen: stream=items \(\d+s ago\)/,
+			new RegExp(`last message seen: ${messageLabel} \\(\\d+s ago\\)`),
 		);
+		assert.doesNotMatch(recordResult.stderr, /\bitems\b/);
 		assert.match(recordResult.stderr, /incomplete by rule \(killed mid-run\)/);
 		assert.ok(
 			!existsSync(scenarioPath),
@@ -3502,11 +3561,17 @@ test("scenario-verify --timeout: the watchdog DOES fire on a genuine hang during
 			/at .*scenario-verify\.ts/,
 			"a watchdog verdict must never print a stack trace",
 		);
-		assert.match(verifyResult.stderr, /observed so far: items=1 record\(s\)/);
+		const streamKey = `stream-sha256:${hashCanonicalJson("items")}`;
+		const messageLabel = `message-sha256:${hashCanonicalJson("stream=items")}`;
+		assert.ok(
+			verifyResult.stderr.includes(`observed so far: ${streamKey}=1 record(s)`),
+			"the digested stream still has its exact observed record count",
+		);
 		assert.match(
 			verifyResult.stderr,
-			/last message seen: stream=items \(\d+s ago\)/,
+			new RegExp(`last message seen: ${messageLabel} \\(\\d+s ago\\)`),
 		);
+		assert.doesNotMatch(verifyResult.stderr, /\bitems\b/);
 		assert.match(verifyResult.stderr, /incomplete by rule \(killed mid-run\)/);
 		// Watchdog kills are diagnosed verdicts, not ordinary replay mismatches
 		// — must NOT be reported through the normal per-run FAIL listing.

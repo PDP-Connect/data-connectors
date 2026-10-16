@@ -40,6 +40,8 @@ import {
 	type UnhandledRejectionHost,
 	warnIfRecordingSharedRemoteBrowser,
 	withScenarioClockPaused,
+	writePrivateCaptureJsonAtomically,
+	writeStorageStateBestEffort,
 } from "./browser-launch.ts";
 
 const ENV_VARS = [
@@ -992,7 +994,7 @@ test("remote CDP HAR start failure disconnects without closing any page", async 
 			},
 			profileName: "remote_har_test",
 		}),
-		/har start refused/,
+		/Remote HAR recording could not start/,
 	);
 	// The fake context exposes no pages and no close(), so the only way to
 	// pass is to disconnect the client and touch nothing else.
@@ -1236,13 +1238,10 @@ test("connectOverCdpWithRetry rethrows a typed CdpAttachSessionRaceExhaustedErro
 			assert.equal(err.code, "browser_surface_attach_exhausted");
 			assert.match(
 				err.message,
-				/session closed/i,
-				"original race message preserved for diagnostics",
+				/attach-session race/i,
+				"stable failure category remains available without provider details",
 			);
-			assert.ok(
-				err.cause instanceof Error,
-				"original error preserved as cause",
-			);
+			assert.ok(err.cause instanceof Error, "a payload-free cause is retained");
 			return true;
 		},
 	);
@@ -1297,7 +1296,7 @@ test("connectOverCdpWithRetry fails fast on a non-race error (no retry, no sleep
 					return Promise.resolve();
 				},
 			}),
-		/ECONNREFUSED/,
+		/Remote browser attach failed/,
 	);
 	assert.equal(attempts, 1, "non-race error is not retried");
 	assert.equal(slept, 0, "no sleep on a fail-fast error");
@@ -1482,7 +1481,7 @@ test("runCdpAttemptWithRaceGuard does NOT swallow an unrelated unhandled rejecti
 		caught instanceof Error,
 		"the non-race rejection was re-thrown, not swallowed",
 	);
-	assert.match((caught as Error).message, /unrelated subsystem failure/);
+	assert.equal((caught as Error).message, "Remote browser operation failed");
 	assert.equal(
 		fake2.listenerCount(),
 		0,
@@ -1668,176 +1667,73 @@ function harWithOneEntry(overrides: {
 	};
 }
 
-test("redactHarDocument: strips Cookie/Authorization request headers (keeps the name, blanks the value)", () => {
+test("redactHarDocument: local HAR retains request header identities for replay", () => {
 	const har = harWithOneEntry({
 		requestHeaders: [
-			{ name: "Cookie", value: "session=super-secret" },
-			{ name: "authorization", value: "Bearer super-secret-token" },
+			{ name: "Cookie", value: "synthetic-session" },
+			{ name: "Authorization", value: "Bearer synthetic-token" },
 			{ name: "accept", value: "application/json" },
 		],
 	});
-	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
-	const headers = redacted.log.entries[0]?.request.headers as Array<{
-		name: string;
-		value: string;
-	}>;
-	const cookie = headers.find((h) => h.name === "Cookie");
-	const auth = headers.find((h) => h.name === "authorization");
-	const accept = headers.find((h) => h.name === "accept");
-	assert.ok(
-		cookie && !cookie.value.includes("super-secret"),
-		"Cookie value must be redacted",
-	);
-	assert.equal(cookie?.name, "Cookie", "header NAME is preserved");
-	assert.ok(
-		auth && !auth.value.includes("super-secret-token"),
-		"Authorization value must be redacted",
-	);
-	assert.equal(
-		accept?.value,
-		"application/json",
-		"an unrelated header must survive untouched",
-	);
+	assert.deepEqual(redactHarDocument(har), har);
 });
 
-test("redactHarDocument: strips Set-Cookie response headers and x-csrf-token/x-xsrf-token headers case-insensitively", () => {
+test("redactHarDocument: local HAR retains response auth headers for replay", () => {
 	const har = harWithOneEntry({
 		responseHeaders: [
-			{ name: "Set-Cookie", value: "session=super-secret; Path=/" },
-			{ name: "X-CSRF-Token", value: "csrf-secret-value" },
-			{ name: "x-xsrf-token", value: "xsrf-secret-value" },
+			{ name: "Set-Cookie", value: "session=synthetic-session; Path=/" },
+			{ name: "X-CSRF-Token", value: "synthetic-csrf" },
+			{ name: "x-xsrf-token", value: "synthetic-xsrf" },
 			{ name: "content-type", value: "application/json" },
 		],
 	});
-	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
-	const headers = redacted.log.entries[0]?.response.headers as Array<{
-		name: string;
-		value: string;
-	}>;
-	for (const name of ["Set-Cookie", "X-CSRF-Token", "x-xsrf-token"]) {
-		const header = headers.find((h) => h.name === name);
-		assert.ok(header, `${name} header should still be present (name kept)`);
-		assert.ok(
-			!header?.value.includes("secret"),
-			`${name} value must be redacted`,
-		);
+	assert.deepEqual(redactHarDocument(har), har);
+});
+
+test("redactHarDocument: local HAR retains both cookie representations", () => {
+	const har = harWithOneEntry({
+		requestCookies: [{ name: "session", value: "synthetic-session" }],
+		responseCookies: [{ name: "session", value: "synthetic-session" }],
+	});
+	assert.deepEqual(redactHarDocument(har), har);
+});
+
+test("redactHarDocument: local HAR preserves form identity without changing request bytes", () => {
+	const har = harWithOneEntry({
+		requestPostData: {
+			mimeType: "application/x-www-form-urlencoded",
+			text: "username=synthetic-user&password=synthetic-password",
+			params: [
+				{ name: "username", value: "synthetic-user" },
+				{ name: "password", value: "synthetic-password" },
+			],
+		},
+	});
+	assert.deepEqual(redactHarDocument(har), har);
+});
+
+test("redactHarDocument: local HAR preserves query values and request identity", () => {
+	for (const requestUrl of [
+		"https://synthetic.test/oauth/callback?code=synthetic-code&state=synthetic-state",
+		"https://synthetic.test/api/data?access_token=synthetic-token&page=2",
+		"https://synthetic.test/api/profile?id=A",
+	]) {
+		const har = harWithOneEntry({ requestUrl });
+		assert.deepEqual(redactHarDocument(har), har);
 	}
-	assert.equal(
-		headers.find((h) => h.name === "content-type")?.value,
-		"application/json",
-	);
 });
 
-test("redactHarDocument: strips HAR cookies[] arrays on both request and response sides", () => {
-	const har = harWithOneEntry({
-		requestCookies: [{ name: "session", value: "super-secret-session" }],
-		responseCookies: [{ name: "session", value: "super-secret-session" }],
-	});
-	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
-	const reqCookies = redacted.log.entries[0]?.request.cookies as Array<{
-		name: string;
-		value: string;
-	}>;
-	const resCookies = redacted.log.entries[0]?.response.cookies as Array<{
-		name: string;
-		value: string;
-	}>;
-	assert.equal(reqCookies[0]?.name, "session");
-	assert.ok(!reqCookies[0]?.value.includes("super-secret-session"));
-	assert.ok(!resCookies[0]?.value.includes("super-secret-session"));
-});
-
-test("redactHarDocument: blanks a credential-shaped form POST (password field) — both text and params", () => {
+test("redactHarDocument: local HAR preserves pwd form data for exact replay", () => {
 	const har = harWithOneEntry({
 		requestPostData: {
 			mimeType: "application/x-www-form-urlencoded",
-			text: "username=alice&password=hunter2",
-			params: [
-				{ name: "username", value: "alice" },
-				{ name: "password", value: "hunter2" },
-			],
+			params: [{ name: "pwd", value: "synthetic-password" }],
 		},
 	});
-	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
-	const postData = redacted.log.entries[0]?.request.postData as {
-		mimeType: string;
-		params: Array<{ name: string; value: string }>;
-		text: string;
-	};
-	assert.equal(
-		postData.mimeType,
-		"application/x-www-form-urlencoded",
-		"mimeType is preserved",
-	);
-	assert.ok(
-		!postData.text.includes("hunter2"),
-		"postData.text must be redacted",
-	);
-	assert.ok(
-		postData.params.every((p) => p.value !== "hunter2"),
-		"every param value must be redacted once the post looks like a credential submission",
-	);
-	assert.equal(
-		postData.params.find((p) => p.name === "username")?.name,
-		"username",
-		"field NAMES are preserved",
-	);
+	assert.deepEqual(redactHarDocument(har), har);
 });
 
-test("redactHarDocument: removes sensitive query values and all login endpoint query values", () => {
-	const har = harWithOneEntry({
-		requestUrl:
-			"https://provider.example.test/oauth/callback?code=synthetic-code&state=public-state&view=compact",
-	});
-	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
-	const url = redacted.log.entries[0]?.request.url;
-	assert.ok(url);
-	assert.doesNotMatch(url, /synthetic-code|public-state/);
-	assert.doesNotMatch(url, /compact/);
-	const authHar = harWithOneEntry({
-		requestUrl:
-			"https://provider.example.test/authenticate?next=%2Fhome&tenant=synthetic-tenant",
-	});
-	const authRedacted = redactHarDocument(authHar) as ReturnType<
-		typeof harWithOneEntry
-	>;
-	assert.doesNotMatch(
-		authRedacted.log.entries[0]?.request.url ?? "",
-		/home|synthetic-tenant/,
-	);
-	const apiHar = harWithOneEntry({
-		requestUrl:
-			"https://provider.example.test/api/data?access_token=synthetic-token&page=2",
-	});
-	const apiRedacted = redactHarDocument(apiHar) as ReturnType<
-		typeof harWithOneEntry
-	>;
-	const apiUrl = apiRedacted.log.entries[0]?.request.url ?? "";
-	assert.doesNotMatch(apiUrl, /synthetic-token/);
-	assert.match(apiUrl, /page=2/);
-});
-
-test("redactHarDocument: redacts pwd form fields", () => {
-	const har = harWithOneEntry({
-		requestPostData: {
-			mimeType: "application/x-www-form-urlencoded",
-			text: "user=synthetic-user&pwd=synthetic-password",
-			params: [
-				{ name: "user", value: "synthetic-user" },
-				{ name: "pwd", value: "synthetic-password" },
-			],
-		},
-	});
-	const redacted = redactHarDocument(har) as ReturnType<typeof harWithOneEntry>;
-	const postData = redacted.log.entries[0]?.request.postData;
-	assert.ok(postData);
-	assert.doesNotMatch(postData.text ?? "", /synthetic-password/);
-	assert.ok(
-		postData.params?.every((param) => param.value !== "synthetic-password"),
-	);
-});
-
-test("redactHarDocument: redacts fields marked type=password regardless of field name", () => {
+test("redactHarDocument: local HAR preserves password-typed fields for exact replay", () => {
 	const har = harWithOneEntry({
 		requestPostData: {
 			mimeType: "application/x-www-form-urlencoded",
@@ -1846,11 +1742,7 @@ test("redactHarDocument: redacts fields marked type=password regardless of field
 			],
 		},
 	});
-	const redacted = redactHarDocument(har);
-	assert.equal(
-		redacted.log?.entries?.[0]?.request?.postData?.params?.[0]?.value,
-		"[redacted-by-scenario-record]",
-	);
+	assert.deepEqual(redactHarDocument(har), har);
 });
 
 test("redactCdpUrl: removes userinfo and credential query values", () => {
@@ -1861,7 +1753,7 @@ test("redactCdpUrl: removes userinfo and credential query values", () => {
 		redacted,
 		/synthetic-user|synthetic-password|synthetic-token/,
 	);
-	assert.match(redacted, /view=compact/);
+	assert.equal(redacted, "[redacted-cdp-url]");
 });
 
 test("connectOverCdpWithRetry: redacts credential URLs from both the error and its cause", async () => {
@@ -1923,15 +1815,17 @@ test("redactHarDocument: does NOT redact response/request body content — state
 	);
 });
 
-test("redactHarDocument: a HAR with no log.entries is returned unchanged (no throw)", () => {
-	const empty = { log: {} };
-	assert.deepEqual(redactHarDocument(empty), empty);
-	assert.deepEqual(redactHarDocument({}), {});
+test("redactHarDocument: incomplete HAR structure fails without echoing values", () => {
+	assert.throws(
+		() => redactHarDocument({ log: {} }),
+		/HAR capture validation failed/,
+	);
+	assert.throws(() => redactHarDocument({}), /HAR capture validation failed/);
 });
 
 // ─── scrubHarFileOrThrow (file-level strictness) ───────────────────────────
 
-test("scrubHarFileOrThrow: redacts a real file on disk in place, 0600", async () => {
+test("scrubHarFileOrThrow: preserves a private local capture, 0600", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-redact-test-"));
 	try {
 		const harPath = join(dir, "capture.har");
@@ -1952,7 +1846,7 @@ test("scrubHarFileOrThrow: redacts a real file on disk in place, 0600", async ()
 			name: string;
 			value: string;
 		}>;
-		assert.ok(!headers[0]?.value.includes("s3cr3t"));
+		assert.equal(headers[0]?.value, "s3cr3t");
 		const info = await stat(harPath);
 		// 0600 => only owner read/write bits set.
 		// biome-ignore lint/suspicious/noBitwiseOperators: masking a real POSIX file mode, not a boolean/logic bug
@@ -1975,19 +1869,14 @@ test("scrubHarFileOrThrow: a missing file fails loudly", async () => {
 	}
 });
 
-test("scrubHarFileOrThrow: an unparseable file fails loudly and preserves bytes", async () => {
+test("scrubHarFileOrThrow: an unparseable file fails closed and removes bytes", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-redact-garbage-test-"));
 	try {
 		const harPath = join(dir, "garbage.har");
 		await writeFile(harPath, "not valid json {{{", "utf8");
 		await assert.rejects(() => scrubHarFileOrThrow(harPath), /HAR.*valid JSON/);
 		assert.ok(existsSync(`${harPath}.scrub-failed`));
-		const stillThere = await readFile(harPath, "utf8");
-		assert.equal(
-			stillThere,
-			"not valid json {{{",
-			"an unparseable file is left byte-for-byte unmodified",
-		);
+		assert.equal(existsSync(harPath), false);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -2047,4 +1936,300 @@ test("HAR_RECORD_PATH_ENV and STORAGE_STATE_RECORD_PATH_ENV have stable names", 
 		STORAGE_STATE_RECORD_PATH_ENV,
 		"PDPP_SCENARIO_STORAGE_STATE_RECORD_PATH",
 	);
+});
+
+test("HAR privacy: local artifact preserves URL copies and header identities without diagnostic output", () => {
+	const secret = "SYNTHETIC_PRIVATE_SENTINEL";
+	const har = {
+		_private: secret,
+		log: {
+			_private: secret,
+			entries: [
+				{
+					_private: secret,
+					request: {
+						method: "GET",
+						url: `https://${secret}:${secret}@synthetic.test/callback?code=${secret}#${secret}`,
+						queryString: [
+							{ name: "code", value: secret },
+							{ name: "code", value: secret },
+						],
+						headers: [
+							"Proxy-Authorization",
+							"X-Api-Key",
+							"X-Auth-Token",
+							"X-Custom",
+						].map((name) => ({ name, value: secret })),
+						_private: secret,
+					},
+					response: {
+						status: 302,
+						redirectURL: `/callback?code=${secret}#${secret}`,
+						headers: [
+							{
+								name: "Location",
+								value: `https://synthetic.test/callback?code=${secret}`,
+							},
+							{ name: "Referer", value: `/callback?code=${secret}` },
+							{ name: "Proxy-Authorization", value: secret },
+							{ name: "X-Auth-Token", value: secret },
+						],
+						_private: secret,
+					},
+				},
+			],
+		},
+	};
+	assert.deepEqual(redactHarDocument(har), har);
+});
+
+test("HAR privacy: local artifact preserves supported and opaque request body identities", () => {
+	const secret = "SYNTHETIC_BODY_SENTINEL";
+	const cases = [
+		{
+			mimeType: "application/json",
+			text: JSON.stringify({ password: secret }),
+		},
+		{
+			mimeType: "application/x-www-form-urlencoded",
+			text: `password=${secret}`,
+		},
+		{ mimeType: "multipart/form-data; boundary=synthetic", text: secret },
+		{
+			mimeType: "application/octet-stream",
+			text: Buffer.from(secret).toString("base64"),
+		},
+		...["password", "code", "session", "assertion", "credential", "search"].map(
+			(name) => ({
+				mimeType: "application/x-www-form-urlencoded",
+				params: [{ name, value: secret }],
+			}),
+		),
+	];
+	for (const requestPostData of cases) {
+		const har = harWithOneEntry({ requestPostData });
+		assert.deepEqual(redactHarDocument(har), har);
+	}
+});
+
+test("HAR privacy: local artifact preserves JSON, HTML and downloaded bytes", () => {
+	for (const content of [
+		{ text: '{"token":"SYNTHETIC_RESPONSE_SENTINEL"}' },
+		{ text: "<html>SYNTHETIC_RESPONSE_SENTINEL</html>" },
+		{
+			text: Buffer.from("SYNTHETIC_RESPONSE_SENTINEL").toString("base64"),
+			encoding: "base64",
+		},
+	]) {
+		const har = harWithOneEntry({ responseContent: content });
+		assert.deepEqual(redactHarDocument(har), har);
+	}
+});
+
+test("HAR privacy: malformed URL and malformed HAR fail closed without raw values", () => {
+	for (const value of [
+		harWithOneEntry({ requestUrl: "SYNTHETIC_URL_SENTINEL" }),
+		{ log: { entries: "SYNTHETIC_STRUCTURE_SENTINEL" } },
+	]) {
+		let caught: unknown;
+		try {
+			redactHarDocument(value as Parameters<typeof redactHarDocument>[0]);
+		} catch (error) {
+			caught = error;
+		}
+		assert.ok(caught instanceof Error);
+		assert.match(caught.message, /HAR capture validation failed/);
+		assert.doesNotMatch(caught.message, /SYNTHETIC_/);
+		assert.equal(caught.cause, undefined);
+	}
+});
+
+test("HAR privacy: rejected capture leaves no raw artifact or payload-bearing error cause", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-private-test-"));
+	try {
+		const path = join(dir, "capture.har");
+		await writeFile(path, "{SYNTHETIC_FILE_SENTINEL");
+		await assert.rejects(
+			() => scrubHarFileOrThrow(path),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.doesNotMatch(error.message, /SYNTHETIC_FILE_SENTINEL/);
+				assert.equal(error.cause, undefined);
+				return true;
+			},
+		);
+		assert.equal(existsSync(path), false);
+		assert.equal(existsSync(`${path}.scrub-failed`), true);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("storage privacy: replay session stays local and is atomically private", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-storage-private-test-"));
+	try {
+		const path = join(dir, "storage.json");
+		await writeFile(path, "synthetic-old-state", { mode: 0o644 });
+		const before = await stat(path);
+		const state = {
+			cookies: [{ name: "session", value: "SYNTHETIC_COOKIE_SENTINEL" }],
+			origins: [
+				{
+					origin: "https://synthetic.test",
+					localStorage: [
+						{ name: "token", value: "SYNTHETIC_LOCAL_STORAGE_SENTINEL" },
+					],
+				},
+			],
+		};
+		const context = {
+			storageState: async () => state,
+		} as unknown as Parameters<typeof writeStorageStateBestEffort>[0];
+		await writeStorageStateBestEffort(context, path);
+		assert.deepEqual(JSON.parse(await readFile(path, "utf8")), state);
+		const after = await stat(path);
+		assert.notEqual(before.ino, after.ino);
+		// biome-ignore lint/suspicious/noBitwiseOperators: inspect POSIX file permissions
+		assert.equal(after.mode & 0o777, 0o600);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("storage privacy: an empty synthetic session is written as empty state, 0600", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-storage-empty-test-"));
+	try {
+		const path = join(dir, "storage.json");
+		const context = {
+			storageState: async () => ({ cookies: [], origins: [] }),
+		} as unknown as Parameters<typeof writeStorageStateBestEffort>[0];
+		await writeStorageStateBestEffort(context, path);
+		assert.deepEqual(JSON.parse(await readFile(path, "utf8")), {
+			cookies: [],
+			origins: [],
+		});
+		// biome-ignore lint/suspicious/noBitwiseOperators: inspect POSIX file permissions
+		assert.equal((await stat(path)).mode & 0o777, 0o600);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("CDP diagnostics never retain free-form provider values or nested causes", async () => {
+	let caught: unknown;
+	try {
+		await connectOverCdpWithRetry({
+			connect: () =>
+				Promise.reject(
+					new Error("SYNTHETIC_CDP_MESSAGE_SENTINEL", {
+						cause: new Error("SYNTHETIC_CDP_CAUSE_SENTINEL"),
+					}),
+				),
+			profileName: "synthetic",
+			redactedUrl: "SYNTHETIC_CDP_URL_SENTINEL",
+			maxAttempts: 1,
+			runAttempt: directAttempt,
+		});
+	} catch (error) {
+		caught = error;
+	}
+	assert.ok(caught instanceof Error);
+	assert.doesNotMatch(String(caught.stack), /SYNTHETIC_CDP_/);
+	assert.doesNotMatch(String(caught.cause), /SYNTHETIC_CDP_/);
+});
+
+test("storage diagnostics never echo provider failures or output paths", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-storage-diagnostics-"));
+	const original = process.stderr.write;
+	let output = "";
+	try {
+		process.stderr.write = ((chunk: unknown) => {
+			output += String(chunk);
+			return true;
+		}) as typeof process.stderr.write;
+		const path = join(dir, "SYNTHETIC_STORAGE_PATH_SENTINEL.json");
+		const context = {
+			storageState: () =>
+				Promise.reject(new Error("SYNTHETIC_STORAGE_ERROR_SENTINEL")),
+		} as unknown as Parameters<typeof writeStorageStateBestEffort>[0];
+		await writeStorageStateBestEffort(context, path);
+		assert.doesNotMatch(output, /SYNTHETIC_STORAGE_/);
+		assert.equal(existsSync(path), false);
+	} finally {
+		process.stderr.write = original;
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("scrubHarFileOrThrow: atomic replacement retires a stale failure marker", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-har-atomic-"));
+	try {
+		const path = join(dir, "capture.har");
+		const har = harWithOneEntry({
+			responseContent: { text: "SYNTHETIC_LOCAL_BODY" },
+		});
+		await writeFile(path, JSON.stringify(har), { mode: 0o644 });
+		await writeFile(`${path}.scrub-failed`, "");
+		const before = await stat(path);
+		await scrubHarFileOrThrow(path);
+		const after = await stat(path);
+		assert.notEqual(before.ino, after.ino);
+		assert.deepEqual(JSON.parse(await readFile(path, "utf8")), har);
+		assert.equal(existsSync(`${path}.scrub-failed`), false);
+		// biome-ignore lint/suspicious/noBitwiseOperators: inspect POSIX file permissions
+		assert.equal(after.mode & 0o777, 0o600);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("private capture writer retains the prior artifact when serialization fails", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-capture-atomic-failure-"));
+	try {
+		const path = join(dir, "capture.json");
+		await writeFile(path, "SYNTHETIC_PREVIOUS_CAPTURE", { mode: 0o600 });
+		const before = await stat(path);
+		await assert.rejects(
+			() =>
+				writePrivateCaptureJsonAtomically(path, {
+					toJSON: () => {
+						throw new Error("SYNTHETIC_SERIALIZATION_SENTINEL");
+					},
+				}),
+			(error: unknown) => {
+				assert.ok(error instanceof Error);
+				assert.doesNotMatch(
+					String(error.stack),
+					/SYNTHETIC_SERIALIZATION_SENTINEL/,
+				);
+				assert.equal(error.cause, undefined);
+				return true;
+			},
+		);
+		assert.equal(await readFile(path, "utf8"), "SYNTHETIC_PREVIOUS_CAPTURE");
+		assert.equal((await stat(path)).ino, before.ino);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("storage provider failure retains the prior snapshot and invalidates this attempt", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pdpp-storage-atomic-failure-"));
+	try {
+		const path = join(dir, "state.json");
+		const previous = JSON.stringify({ cookies: [], origins: [] });
+		await writeFile(path, previous, { mode: 0o600 });
+		const before = await stat(path);
+		const context = {
+			storageState: () =>
+				Promise.reject(new Error("SYNTHETIC_PROVIDER_FAILURE")),
+		} as unknown as Parameters<typeof writeStorageStateBestEffort>[0];
+		await writeStorageStateBestEffort(context, path);
+		assert.equal(await readFile(path, "utf8"), previous);
+		assert.equal((await stat(path)).ino, before.ino);
+		assert.equal(existsSync(`${path}.scrub-failed`), true);
+		assert.equal((await fileFlushOutcome(path)).flushed, false);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });

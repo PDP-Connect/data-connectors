@@ -48,6 +48,7 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	mkdirSync,
@@ -326,7 +327,7 @@ test("findApiRequestHarMatch: an exact method+URL match (incl. query string) alw
 	assert.equal(match?.response?.content?.text, "exact");
 });
 
-test("findApiRequestHarMatch: GET falls back to the same origin+pathname entry sharing the most query-name/value agreement, ignoring an unrelated same-pathname entry with a disjoint query", () => {
+test("findApiRequestHarMatch: GET rejects query overlap without full URL equivalence", () => {
 	const entries = [
 		// Disjoint query (no shared param NAMES with the live request) —
 		// never a plausible match, must be skipped even though it shares
@@ -352,10 +353,14 @@ test("findApiRequestHarMatch: GET falls back to the same origin+pathname entry s
 		"GET",
 		"https://x.example/athlete/training_activities?page=1&per_page=1",
 	);
-	assert.equal(match?.response?.content?.text, "fallback-match");
+	assert.equal(
+		match,
+		undefined,
+		"query-name overlap cannot prove request equivalence",
+	);
 });
 
-test("findApiRequestHarMatch: GET fallback picks the HIGHEST-scoring candidate when several share the pathname and at least one query name", () => {
+test("findApiRequestHarMatch: GET rejects partial query scores and extra recorded parameters", () => {
 	const entries = [
 		// Shares both names; only `page` agrees in value (score 1). Not an
 		// exact match (per_page differs), so it's a genuine fallback
@@ -382,7 +387,11 @@ test("findApiRequestHarMatch: GET fallback picks the HIGHEST-scoring candidate w
 		"GET",
 		"https://x.example/list?page=1&per_page=5",
 	);
-	assert.equal(match?.response?.content?.text, "both-shared-values-match");
+	assert.equal(
+		match,
+		undefined,
+		"partial scores must never select a different request",
+	);
 });
 
 test("findApiRequestHarMatch: no entry shares even one query parameter NAME at the same pathname — returns undefined rather than guessing", () => {
@@ -559,7 +568,7 @@ function seqEntry(fields: {
 const STATUS_URL = "https://example.test/api/export/status";
 const GRAPHQL_URL = "https://example.test/graphql";
 
-test("sequentialHarResponseGroups: a polled URL whose responses differ replays in recorded order; identical repeats and single entries are left to routeFromHAR", () => {
+test("sequentialHarResponseGroups: identifies ambiguous requests without inventing polling order", () => {
 	const groups = sequentialHarResponseGroups([
 		// Out of file order on purpose: the rule orders by start time.
 		seqEntry({
@@ -592,7 +601,7 @@ test("sequentialHarResponseGroups: a polled URL whose responses differ replays i
 	assert.equal(groups.size, 1);
 	assert.deepEqual(
 		[...groups.values()][0]?.map((e) => e.response.status),
-		[404, 404, 200],
+		[200, 404, 404],
 	);
 });
 
@@ -662,6 +671,9 @@ async function generatedSequentialRoute(
 ): Promise<
 	| ((request: {
 			contentType?: string;
+			headers?: Record<string, string>;
+			omitAllHeaders?: boolean;
+			omitBodyBuffer?: boolean;
 			method: string;
 			postData: string | null;
 			url: string;
@@ -703,7 +715,7 @@ async function generatedSequentialRoute(
 			"createHash",
 			"HAR_PATH",
 			"Buffer",
-			`${source.slice(begin, end)}\nreturn installSequentialHarRoutes;`,
+			`${source.slice(source.indexOf("// BEGIN strictHarRequestIdentity"), begin)}\n${source.slice(begin, end)}\nreturn installSequentialHarRoutes;`,
 		)(readFileSync, createHash, harPath, Buffer) as (
 			context: unknown,
 		) => Promise<void>;
@@ -727,8 +739,30 @@ async function generatedSequentialRoute(
 			};
 			await installed({
 				request: () => ({
-					headers: () =>
-						request.contentType ? { "content-type": request.contentType } : {},
+					...(request.omitAllHeaders
+						? {}
+						: {
+								allHeaders: async () => ({
+									...request.headers,
+									...(request.contentType
+										? { "content-type": request.contentType }
+										: {}),
+								}),
+							}),
+					...(request.omitBodyBuffer
+						? {}
+						: {
+								postDataBuffer: () =>
+									request.postData === null
+										? null
+										: Buffer.from(request.postData, "utf8"),
+							}),
+					headers: () => ({
+						...request.headers,
+						...(request.contentType
+							? { "content-type": request.contentType }
+							: {}),
+					}),
 					method: () => request.method,
 					postData: () => request.postData,
 					url: () => request.url,
@@ -755,7 +789,7 @@ async function generatedSequentialRoute(
 	});
 }
 
-test("generated installSequentialHarRoutes: serves a polled URL in recorded order (equal-size bodies), repeats the last, and leaves other requests to routeFromHAR", async () => {
+test("generated installSequentialHarRoutes: aborts ambiguous polling responses and directly fulfills a unique request", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({
 			url: STATUS_URL,
@@ -778,32 +812,20 @@ test("generated installSequentialHarRoutes: serves a polled URL in recorded orde
 	]);
 	assert.ok(route, "a differing group installs the route");
 	const poll = { method: "GET", postData: null, url: STATUS_URL };
-	assert.deepEqual(await route(poll), {
-		body: '{"state":"busy"}',
-		kind: "fulfill",
-		status: 200,
-	});
-	assert.deepEqual(await route(poll), {
-		body: '{"state":"done"}',
-		kind: "fulfill",
-		status: 200,
-	});
-	assert.deepEqual(await route(poll), {
-		body: '{"state":"done"}',
-		kind: "fulfill",
-		status: 200,
-	});
+	assert.deepEqual(await route(poll), { kind: "abort" });
+	assert.deepEqual(await route(poll), { kind: "abort" });
+	assert.deepEqual(await route(poll), { kind: "abort" });
 	assert.deepEqual(
 		await route({
 			method: "GET",
 			postData: null,
 			url: "https://example.test/api/me",
 		}),
-		{ kind: "fallback" },
+		{ kind: "fulfill", body: "{}", status: 200 },
 	);
 });
 
-test("generated installSequentialHarRoutes: replays the same endpoint across volatile query changes", async () => {
+test("generated installSequentialHarRoutes: rejects changed credentials and pagination identities", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({
 			url: "https://youtube.test/api/profile?key=synthetic-key&continuation=first",
@@ -825,7 +847,7 @@ test("generated installSequentialHarRoutes: replays the same endpoint across vol
 			postData: null,
 			url: "https://youtube.test/api/profile?key=replay-key&continuation=replay-first",
 		}),
-		{ body: '{"profile":"synthetic-first"}', kind: "fulfill", status: 200 },
+		{ kind: "abort" },
 	);
 	assert.deepEqual(
 		await route({
@@ -833,11 +855,11 @@ test("generated installSequentialHarRoutes: replays the same endpoint across vol
 			postData: null,
 			url: "https://youtube.test/api/profile?continuation=replay-second&key=replay-key",
 		}),
-		{ body: '{"profile":"synthetic-second"}', kind: "fulfill", status: 200 },
+		{ kind: "abort" },
 	);
 });
 
-test("generated installSequentialHarRoutes: matches a single synthetic HAR entry despite volatile query values", async () => {
+test("generated installSequentialHarRoutes: rejects a singleton with changed credential query values", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({
 			url: "https://youtube.test/api/profile?key=synthetic-key&session=recorded-session",
@@ -856,11 +878,11 @@ test("generated installSequentialHarRoutes: matches a single synthetic HAR entry
 			postData: null,
 			url: "https://youtube.test/api/profile?session=replay-session&key=replay-key",
 		}),
-		{ body: '{"profile":"synthetic-profile"}', kind: "fulfill", status: 200 },
+		{ kind: "abort" },
 	);
 });
 
-test("generated installSequentialHarRoutes: matches a GET by endpoint and query overlap when an opaque query value changes", async () => {
+test("generated installSequentialHarRoutes: rejects changed opaque query values", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({
 			url: "https://example.test/api/profile?viewer_context=captured&hl=en",
@@ -876,11 +898,11 @@ test("generated installSequentialHarRoutes: matches a GET by endpoint and query 
 			postData: null,
 			url: "https://example.test/api/profile?viewer_context=replayed&hl=en",
 		}),
-		{ body: '{"profile":true}', kind: "fulfill", status: 200 },
+		{ kind: "abort" },
 	);
 });
 
-test("generated installSequentialHarRoutes: matches the sole GET response for an endpoint when its query shape changes", async () => {
+test("generated installSequentialHarRoutes: rejects a singleton with a different query shape", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({
 			url: "https://example.test/api/profile?viewer_context=captured",
@@ -896,11 +918,11 @@ test("generated installSequentialHarRoutes: matches the sole GET response for an
 			postData: null,
 			url: "https://example.test/api/profile?replay_context=replayed",
 		}),
-		{ body: '{"profile":true}', kind: "fulfill", status: 200 },
+		{ kind: "abort" },
 	);
 });
 
-test("generated installSequentialHarRoutes: volatile query identities replay by request identity instead of HAR order", async () => {
+test("generated installSequentialHarRoutes: exact cursor identities replay independently of HAR order", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({
 			url: "https://example.test/api/profile?continuation=first",
@@ -954,23 +976,22 @@ test("generated installSequentialHarRoutes: two POSTs to one URL with different 
 		}),
 	]);
 	assert.ok(route);
-	// B first, although A was recorded first: B is not a sequence and falls
-	// back to routeFromHAR (which matches the POST body); A keeps its order.
+	// B is uniquely identified. A has divergent responses and is ambiguous.
 	assert.deepEqual(
 		await route({ method: "POST", postData: '{"op":"B"}', url: GRAPHQL_URL }),
-		{ kind: "fallback" },
+		{ body: '{"b":1}', kind: "fulfill", status: 200 },
 	);
 	assert.deepEqual(
 		await route({ method: "POST", postData: '{"op":"A"}', url: GRAPHQL_URL }),
-		{ body: '{"a":1}', kind: "fulfill", status: 200 },
+		{ kind: "abort" },
 	);
 	assert.deepEqual(
 		await route({ method: "POST", postData: '{"op":"A"}', url: GRAPHQL_URL }),
-		{ body: '{"a":2}', kind: "fulfill", status: 200 },
+		{ kind: "abort" },
 	);
 });
 
-test("generated installSequentialHarRoutes: installs nothing when no request identity has differing responses", async () => {
+test("generated installSequentialHarRoutes: installs strict routing even for singleton identities", async () => {
 	const route = await generatedSequentialRoute([
 		seqEntry({
 			method: "POST",
@@ -989,7 +1010,11 @@ test("generated installSequentialHarRoutes: installs nothing when no request ide
 			seconds: 2,
 		}),
 	]);
-	assert.equal(route, null);
+	assert.ok(route);
+	assert.deepEqual(
+		await route({ method: "POST", postData: '{"op":"C"}', url: GRAPHQL_URL }),
+		{ kind: "abort" },
+	);
 });
 
 const UPLOAD_URL = "https://example.test/upload";
@@ -1101,7 +1126,7 @@ test("sequentialHarResponseGroups: multipart bodies match across random boundari
 			group.some((e) => e.request.url === `${UPLOAD_URL}/bin`),
 		),
 		false,
-		"the opaque-body entries stay with routeFromHAR",
+		"opaque-body entries cannot establish an identity",
 	);
 });
 
@@ -1110,9 +1135,8 @@ test("generated installSequentialHarRoutes and sequentialHarResponseGroups agree
 	const groups = sequentialHarResponseGroups(fixture);
 	const route = await generatedSequentialRoute(fixture);
 	assert.ok(route);
-	// Every recorded request identity, asked as often as it was recorded plus
-	// one: the generated route must serve exactly the TS rule's sequence (the
-	// last entry repeating), or fall back where the rule has no group.
+	// Repeating a request cannot turn an ambiguous or opaque identity into
+	// permission to fabricate a response.
 	const asked = new Set<string>();
 	for (const entry of fixture) {
 		const contentType = entry.request.headers[0]?.value;
@@ -1143,20 +1167,22 @@ test("generated installSequentialHarRoutes and sequentialHarResponseGroups agree
 				url: entry.request.url,
 				...(contentType ? { contentType } : {}),
 			});
-			if (!group) {
-				assert.deepEqual(served, { kind: "fallback" }, key);
-				continue;
+			if (
+				group ||
+				(entry.request.bodySize > 0 && entry.request.postData === undefined)
+			) {
+				assert.deepEqual(served, { kind: "abort" }, key);
+			} else {
+				assert.deepEqual(
+					served,
+					{
+						body: entry.response.content.text,
+						kind: "fulfill",
+						status: entry.response.status,
+					},
+					key,
+				);
 			}
-			const expected = group[Math.min(i, group.length - 1)];
-			assert.deepEqual(
-				served,
-				{
-					body: expected?.response.content.text,
-					kind: "fulfill",
-					status: expected?.response.status,
-				},
-				key,
-			);
 		}
 	}
 	assert.equal(
@@ -1164,4 +1190,528 @@ test("generated installSequentialHarRoutes and sequentialHarResponseGroups agree
 		3,
 		"polled GET, POST op A, and the multipart upload",
 	);
+});
+
+// Synthetic request identities only. These regressions prohibit guessed responses.
+test("strict identity: a singleton wrong-query GET and ambiguous exact GET cannot match", () => {
+	const url = "https://example.test/profile?id=A";
+	assert.equal(
+		findApiRequestHarMatch(
+			[harEntry("GET", url, 200, "A")],
+			"GET",
+			"https://example.test/profile?id=B",
+		),
+		undefined,
+	);
+	assert.equal(
+		findApiRequestHarMatch(
+			[harEntry("GET", url, 200, "A"), harEntry("GET", url, 200, "B")],
+			"GET",
+			url,
+		),
+		undefined,
+	);
+});
+
+test("strict identity: API POST bodies select their own response and reject unknown bodies", () => {
+	const entries = ["A", "B"].map((op) => ({
+		...harEntry("POST", GRAPHQL_URL, 200, op),
+		request: {
+			method: "POST",
+			url: GRAPHQL_URL,
+			postData: { text: JSON.stringify({ op }) },
+		},
+	}));
+	const match = findApiRequestHarMatch as (
+		...args: unknown[]
+	) => ApiRequestHarEntry | undefined;
+	assert.equal(
+		match(entries, "POST", GRAPHQL_URL, '{"op":"B"}')?.response?.content?.text,
+		"B",
+	);
+	assert.equal(match(entries, "POST", GRAPHQL_URL, '{"op":"C"}'), undefined);
+});
+
+test("strict identity: browser rejects unknown singleton IDs and unknown cursors", async () => {
+	await Promise.all(
+		[["id=A"], ["cursor=A", "cursor=B"]].map(async (recorded) => {
+			const route = await generatedSequentialRoute(
+				recorded.map((query, i) =>
+					seqEntry({
+						url: "https://example.test/profile?" + query,
+						status: 200,
+						body: String(i),
+						seconds: i,
+					}),
+				),
+			);
+			assert.ok(route);
+			assert.deepEqual(
+				await route({
+					method: "GET",
+					postData: null,
+					url:
+						"https://example.test/profile?" +
+						(recorded.length === 1 ? "id=B" : "cursor=C"),
+				}),
+				{ kind: "abort" },
+			);
+		}),
+	);
+});
+
+async function generatedApiBridge(entries: unknown[]): Promise<
+	((urlOrRequest: unknown, options?: unknown) => Promise<never>) & {
+		childSource: string;
+	}
+> {
+	return withTmpDirAsync(async (dir) => {
+		const harPath = join(dir, "synthetic.har");
+		writeFileSync(harPath, JSON.stringify({ log: { entries } }));
+		const preloadPath = writeBrowserHarReplayPreload(
+			{
+				fixedNowIso: undefined,
+				harPath,
+				storageStatePath: join(dir, "synthetic-state.json"),
+				harEntryCount: entries.length,
+			},
+			{},
+		);
+		let source: string;
+		try {
+			source = readFileSync(preloadPath, "utf8");
+		} finally {
+			rmSync(preloadPath, { force: true });
+		}
+		const begin = source.indexOf("// BEGIN strictHarRequestIdentity");
+		const end = source.indexOf("// BEGIN installSequentialHarRoutes");
+		assert.ok(begin >= 0 && end > begin);
+		const childSource =
+			"let apiRequestFallbackMatchCount = 0; let apiRequestUnsupportedCount = 0;\n" +
+			source.slice(begin, end);
+		// Never alter the unit-test runner's exit code when exercising denial.
+		const fakeProcess = {
+			exitCode: 0,
+			once: (_event: string, _listener: () => void) => {},
+		};
+		const install = new Function(
+			"readFileSync",
+			"HAR_PATH",
+			"Buffer",
+			"createHash",
+			"process",
+			childSource + "\nreturn installApiRequestContextHarBridge;",
+		)(readFileSync, harPath, Buffer, createHash, fakeProcess) as (
+			context: unknown,
+		) => void;
+		const request = Object.create({});
+		install({ request });
+		return Object.assign(request.fetch.bind(request), { childSource });
+	});
+}
+
+test("strict identity: pure JSON/form body matching is sound while all API body options remain unsupported", async () => {
+	const entries = [
+		{
+			...harEntry("POST", GRAPHQL_URL, 200, "A"),
+			request: {
+				method: "POST",
+				url: GRAPHQL_URL,
+				postData: {
+					text: '{"op":"A","variables":{"x":1}}',
+					mimeType: "application/json",
+				},
+				headers: [{ name: "content-type", value: "application/json" }],
+			},
+		},
+		{
+			...harEntry("POST", GRAPHQL_URL, 200, "B"),
+			request: {
+				method: "POST",
+				url: GRAPHQL_URL,
+				postData: {
+					text: '{"op":"B","variables":{"x":1}}',
+					mimeType: "application/json",
+				},
+				headers: [{ name: "content-type", value: "application/json" }],
+			},
+		},
+		{
+			...harEntry("POST", UPLOAD_URL, 200, "form-B"),
+			request: {
+				method: "POST",
+				url: UPLOAD_URL,
+				postData: {
+					text: "op=B",
+					mimeType: "application/x-www-form-urlencoded",
+				},
+				headers: [
+					{ name: "content-type", value: "application/x-www-form-urlencoded" },
+				],
+			},
+		},
+	];
+	assert.equal(
+		findApiRequestHarMatch(
+			entries,
+			"POST",
+			GRAPHQL_URL,
+			'{"variables":{"x":1},"op":"B"}',
+			{ "content-type": "application/json" },
+		)?.response?.content?.text,
+		"B",
+	);
+	assert.equal(
+		findApiRequestHarMatch(entries, "POST", UPLOAD_URL, "op=B", {
+			"content-type": "application/x-www-form-urlencoded",
+		})?.response?.content?.text,
+		"form-B",
+	);
+	assert.equal(
+		findApiRequestHarMatch(entries, "POST", GRAPHQL_URL, '{"op":"C"}', {
+			"content-type": "application/json",
+		}),
+		undefined,
+	);
+	const fetch = await generatedApiBridge(entries);
+	await Promise.all(
+		[
+			{ method: "POST", data: { op: "B", variables: { x: 1 } } },
+			{
+				method: "POST",
+				data: '{"op":"B","variables":{"x":1}}',
+				headers: { "content-type": "application/json" },
+			},
+			{ method: "POST", form: { op: "B" } },
+			{ method: "POST", multipart: { op: "B" } },
+		].map(async (options) => {
+			await assert.rejects(
+				() => fetch(GRAPHQL_URL, options),
+				/effective request identity unavailable/,
+			);
+		}),
+	);
+});
+
+test("strict identity: API bridge miss and unsupported inputs never disclose URL or body values", async () => {
+	const fetch = await generatedApiBridge([]);
+	await Promise.all(
+		[
+			{},
+			{ method: "POST", multipart: { value: "SYNTHETIC_PRIVATE_BODY" } },
+		].map(async (options) => {
+			await assert.rejects(
+				() =>
+					fetch(
+						"https://example.test/private?token=SYNTHETIC_PRIVATE_URL",
+						options,
+					),
+				(error: unknown) => {
+					assert.ok(error instanceof Error);
+					assert.doesNotMatch(
+						String(error.stack),
+						/SYNTHETIC_PRIVATE|https:|token=/,
+					);
+					assert.equal(error.cause, undefined);
+					return true;
+				},
+			);
+		}),
+	);
+});
+
+test("strict identity: pure matcher respects authorization, custom headers and Vary", () => {
+	const url = "https://example.test/private";
+	const entries = ["A", "B"].map((value) => ({
+		...harEntry("GET", url, 200, value),
+		request: {
+			method: "GET",
+			url,
+			headers: [
+				{ name: "authorization", value },
+				{ name: "x-view", value },
+			],
+		},
+		response: {
+			status: 200,
+			content: { text: value },
+			headers: [{ name: "vary", value: "x-view" }],
+		},
+	}));
+	assert.equal(
+		findApiRequestHarMatch(entries, "GET", url, undefined, {
+			authorization: "B",
+			"x-view": "B",
+		})?.response?.content?.text,
+		"B",
+	);
+	assert.equal(
+		findApiRequestHarMatch(entries, "GET", url, undefined, {
+			authorization: "C",
+			"x-view": "B",
+		}),
+		undefined,
+	);
+	assert.equal(findApiRequestHarMatch(entries, "GET", url), undefined);
+	assert.equal(
+		findApiRequestHarMatch(
+			[
+				{
+					...harEntry("GET", url, 200, "wildcard"),
+					response: {
+						status: 200,
+						content: { text: "wildcard" },
+						headers: [{ name: "vary", value: "*" }],
+					},
+				},
+			],
+			"GET",
+			url,
+		),
+		undefined,
+	);
+});
+
+test("strict identity: browser rejects indistinguishable requests with divergent responses", async () => {
+	const route = await generatedSequentialRoute([
+		seqEntry({ url: STATUS_URL, status: 404, body: "pending", seconds: 1 }),
+		seqEntry({ url: STATUS_URL, status: 200, body: "ready", seconds: 2 }),
+	]);
+	assert.ok(route);
+	assert.deepEqual(
+		await route({ method: "GET", postData: null, url: STATUS_URL }),
+		{ kind: "abort" },
+	);
+});
+
+test("replay response JSON errors do not expose synthetic payload fragments", async () => {
+	const response = buildApiResponseFromHarEntry(
+		harEntry(
+			"GET",
+			"https://example.test/json",
+			200,
+			'{"SYNTHETIC_PRIVATE_JSON": broken}',
+		),
+	);
+	await assert.rejects(
+		() => response.json(),
+		(error: unknown) => {
+			assert.ok(error instanceof Error);
+			assert.doesNotMatch(String(error.stack), /SYNTHETIC_PRIVATE_JSON/);
+			assert.equal(error.cause, undefined);
+			return true;
+		},
+	);
+});
+
+test("strict identity: JSON normalization cannot collapse lossy numbers or duplicate keys", () => {
+	const entries = [
+		{
+			...harEntry("POST", GRAPHQL_URL, 200, "large"),
+			request: {
+				method: "POST",
+				url: GRAPHQL_URL,
+				headers: [{ name: "content-type", value: "application/json" }],
+				postData: { text: '{"n":9007199254740993}' },
+			},
+		},
+		{
+			...harEntry("POST", GRAPHQL_URL, 200, "duplicate"),
+			request: {
+				method: "POST",
+				url: GRAPHQL_URL,
+				headers: [{ name: "content-type", value: "application/json" }],
+				postData: { text: '{"op":"A","op":"B"}' },
+			},
+		},
+	];
+	assert.equal(
+		findApiRequestHarMatch(
+			entries,
+			"POST",
+			GRAPHQL_URL,
+			'{"n":9007199254740992}',
+			{ "content-type": "application/json" },
+		),
+		undefined,
+	);
+	assert.equal(
+		findApiRequestHarMatch(entries, "POST", GRAPHQL_URL, '{"op":"B"}', {
+			"content-type": "application/json",
+		}),
+		undefined,
+	);
+});
+
+test("strict identity: Vary can make otherwise incidental browser headers relevant", async () => {
+	const url = "https://example.test/vary";
+	const entries = ["A", "B"].map((value, i) => ({
+		...seqEntry({ url, status: 200, body: value, seconds: i }),
+		request: { method: "GET", url, headers: [{ name: "User-Agent", value }] },
+		response: {
+			status: 200,
+			content: { text: value },
+			headers: [{ name: "Vary", value: "User-Agent" }],
+		},
+	}));
+	const route = await generatedSequentialRoute(entries);
+	assert.ok(route);
+	assert.deepEqual(
+		await route({
+			method: "GET",
+			postData: null,
+			url,
+			headers: { "user-agent": "B" },
+		}),
+		{ body: "B", kind: "fulfill", status: 200 },
+	);
+	assert.deepEqual(await route({ method: "GET", postData: null, url }), {
+		kind: "abort",
+	});
+});
+
+test("browser evidence diagnostics never expose malformed session data or evidence paths", () => {
+	withTmpDir((dir) => {
+		writeHar(join(dir, "run-0.har"), 1);
+		writeFileSync(
+			join(dir, "run-0.storage-state.json"),
+			'{"SYNTHETIC_PRIVATE_SESSION": broken}',
+		);
+		for (const run of [
+			browserRun({}),
+			browserRun({ har_path: "SYNTHETIC_PRIVATE_HAR_PATH" }),
+			browserRun({ storage_state_path: "SYNTHETIC_PRIVATE_SESSION_PATH" }),
+			{
+				...browserRun({}),
+				environment: { network: { driver: "SYNTHETIC_PRIVATE_DRIVER" } },
+			} as unknown as ScenarioRun,
+		]) {
+			assert.throws(
+				() => resolveBrowserEvidence(dir, run),
+				(error: unknown) => {
+					assert.ok(error instanceof BrowserReplayEvidenceError);
+					assert.doesNotMatch(String(error.stack), /SYNTHETIC_PRIVATE/);
+					assert.equal(error.cause, undefined);
+					return true;
+				},
+			);
+		}
+	});
+});
+
+test("strict identity: multipart framing cannot collide with literal field contents", async () => {
+	const recorded = multipart("AAA", "--BOUNDARY");
+	const different = multipart("BBB", "--BBB");
+	assert.notEqual(
+		sequentialHarRequestKey(
+			"POST",
+			UPLOAD_URL,
+			recorded,
+			"multipart/form-data; boundary=AAA",
+		),
+		sequentialHarRequestKey(
+			"POST",
+			UPLOAD_URL,
+			different,
+			"multipart/form-data; boundary=BBB",
+		),
+	);
+	const route = await generatedSequentialRoute([
+		seqEntry({
+			method: "POST",
+			url: UPLOAD_URL,
+			postData: recorded,
+			contentType: "multipart/form-data; boundary=AAA",
+			status: 200,
+			body: "synthetic",
+			seconds: 1,
+		}),
+	]);
+	assert.ok(route);
+	assert.deepEqual(
+		await route({
+			method: "POST",
+			url: UPLOAD_URL,
+			postData: different,
+			contentType: "multipart/form-data; boundary=BBB",
+		}),
+		{ kind: "abort" },
+	);
+});
+
+test("strict identity: browser aborts when complete headers or body bytes are unavailable", async () => {
+	const route = await generatedSequentialRoute([
+		seqEntry({
+			method: "POST",
+			url: GRAPHQL_URL,
+			postData: "synthetic",
+			status: 200,
+			body: "response",
+			seconds: 1,
+		}),
+	]);
+	assert.ok(route);
+	await Promise.all(
+		[{ omitAllHeaders: true }, { omitBodyBuffer: true }].map(
+			async (missing) => {
+				assert.deepEqual(
+					await route({
+						method: "POST",
+						url: GRAPHQL_URL,
+						postData: "synthetic",
+						...missing,
+					}),
+					{ kind: "abort" },
+				);
+			},
+		),
+	);
+});
+
+test("API bridge fails closed when context-added effective identity cannot be observed", async () => {
+	const url = "https://example.test/public";
+	const fetch = await generatedApiBridge([harEntry("GET", url, 200, "public")]);
+	// Neither an exact URL nor a Request's headers proves that fetch will not
+	// add context defaults or cookies. Both must stay unsupported.
+	await Promise.all(
+		[
+			url,
+			{
+				url: () => url,
+				method: () => "GET",
+				headers: () => ({}),
+				allHeaders: async () => ({}),
+				postData: () => null,
+				postDataBuffer: () => null,
+			},
+		].map(async (request) => {
+			await assert.rejects(() => fetch(request));
+		}),
+	);
+});
+
+test("caught unsupported API replay stays a process failure even after process.exit(0)", async () => {
+	const fetch = await generatedApiBridge([]);
+	const program =
+		fetch.childSource +
+		[
+			"const request = Object.create({});",
+			"installApiRequestContextHarBridge({ request });",
+			'try { await request.fetch("https://example.test/synthetic"); } catch {}',
+			"process.stdout.write(String(apiRequestUnsupportedCount));",
+			"process.exit(0);",
+		].join("\n");
+	const child = spawnSync(
+		process.execPath,
+		["--input-type=module", "-e", program],
+		{ encoding: "utf8", timeout: 10_000 },
+	);
+	assert.equal(child.signal, null);
+	assert.equal(
+		child.status,
+		1,
+		"catching replay denial and explicitly exiting zero must not mask it",
+	);
+	assert.equal(child.stdout, "1");
+	assert.equal(child.stderr, "");
 });

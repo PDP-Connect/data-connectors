@@ -333,7 +333,7 @@ test("unmatched request: a collector request with no recorded interaction fails 
 	assert.equal(result.pass, false);
 	const mismatch = result.failures.find((f) => f.kind === "replay_mismatch");
 	assert.ok(mismatch, "expected a replay_mismatch failure");
-	assert.match(mismatch?.detail ?? "", /no recorded interaction matches/);
+	assert.match(mismatch?.detail ?? "", /diagnostic payload omitted/);
 });
 
 test("unconsumed interaction: a recorded interaction the collector never requests fails verification", async () => {
@@ -349,7 +349,7 @@ test("unconsumed interaction: a recorded interaction the collector never request
 		(f) => f.kind === "unconsumed_interactions",
 	);
 	assert.ok(unconsumed, "expected an unconsumed_interactions failure");
-	assert.match(unconsumed?.detail ?? "", /seq \[2\]/);
+	assert.match(unconsumed?.detail ?? "", /diagnostic payload omitted/);
 });
 
 test("tampered response body: a mutated recorded response makes the record hash mismatch fail verification", async () => {
@@ -365,7 +365,7 @@ test("tampered response body: a mutated recorded response makes the record hash 
 	assert.equal(result.pass, false);
 	const hashFailure = result.failures.find((f) => f.kind === "record_hash");
 	assert.ok(hashFailure, "expected a record_hash failure");
-	assert.match(hashFailure?.detail ?? "", /fields=\[id, name\]/);
+	assert.doesNotMatch(hashFailure?.detail ?? "", /fields=/);
 });
 
 test("onStreamMismatch: fires for a record_hash mismatch, carrying the mismatched record's id/op/hashes and the exact projected object that was hashed", async () => {
@@ -750,7 +750,7 @@ test("verifyScenario never throws even when the collector's fetch call raises Sc
 	assert.equal(result.pass, false);
 	const mismatch = result.failures.find((f) => f.kind === "replay_mismatch");
 	assert.ok(mismatch, "expected a replay_mismatch failure");
-	assert.match(mismatch?.detail ?? "", /method expected="POST" actual="GET"/);
+	assert.match(mismatch?.detail ?? "", /diagnostic payload omitted/);
 });
 
 test("ScenarioMismatchError.nearestMiss names the differing component directly (unit-level, bypassing verifyScenario)", async () => {
@@ -977,11 +977,8 @@ test("query normalizers: a normalized param that differs WITHOUT the value being
 	assert.equal(result.pass, false);
 	const mismatch = result.failures.find((f) => f.kind === "replay_mismatch");
 	assert.ok(mismatch, "expected a replay_mismatch failure");
-	assert.match(
-		mismatch?.detail ?? "",
-		/normalized query param "cursor" differs/,
-	);
-	assert.match(mismatch?.detail ?? "", /not provider-issued/);
+	assert.match(mismatch?.detail ?? "", /diagnostic payload omitted/);
+	assert.match(mismatch?.detail ?? "", /diagnostic payload omitted/);
 });
 
 test("normalizer misuse guard: a page-swap scenario (page=1 vs page=2 with `page` normalized) fails instead of silently serving the wrong page", async () => {
@@ -1034,7 +1031,7 @@ test("normalizer misuse guard: a page-swap scenario (page=1 vs page=2 with `page
 	assert.equal(result.pass, false);
 	const mismatch = result.failures.find((f) => f.kind === "replay_mismatch");
 	assert.ok(mismatch, "expected a replay_mismatch failure");
-	assert.match(mismatch?.detail ?? "", /normalized query param "page" differs/);
+	assert.match(mismatch?.detail ?? "", /diagnostic payload omitted/);
 });
 
 test("query normalizers: without the normalizer entry, a differing cursor value fails the match", async () => {
@@ -3372,4 +3369,81 @@ test("P2-2 negative control: DETAIL_GAP_ATTEMPTED with a numeric gap_id (wrong n
 		},
 	];
 	assert.throws(() => buildProtocolTrace(malformed), TraceNormalizationError);
+});
+
+test("record mismatch diagnostics never expose payload field names", async () => {
+	const scenario = toyScenario([widgetsInteraction(1, "w1")]);
+	scenario.runs[0]!.interactions[0]!.response.body = {
+		id: "w1",
+		SYNTHETIC_PRIVATE_FIELD_NAME: "synthetic",
+	};
+	const result = await verifyScenario(scenario, toyCollector);
+	assert.equal(result.pass, false);
+	assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_PRIVATE_FIELD_NAME/);
+});
+
+// Synthetic sentinels only: no provider captures or credentials.
+test("protocol diagnostics never persist free-form last_error messages", () => {
+	const trace = buildProtocolTrace([
+		{
+			type: "DETAIL_GAP",
+			stream: "widgets",
+			record_key: "synthetic-key",
+			reason: "rate_limited",
+			status: "pending",
+			retryable: true,
+			reference_only: true,
+			detail_locator: { kind: "synthetic" },
+			last_error: { message: "SYNTHETIC_PRIVATE_DIAGNOSTIC" },
+		},
+	]);
+	assert.doesNotMatch(JSON.stringify(trace), /SYNTHETIC_PRIVATE_DIAGNOSTIC/);
+});
+
+test("malformed protocol diagnostics never serialize rejected values", () => {
+	for (const message of [
+		{
+			type: "DONE",
+			status: "failed",
+			records_emitted: 0,
+			error: { message: "SYNTHETIC_PRIVATE_DIAGNOSTIC" },
+		},
+		{
+			type: "DONE",
+			status: "failed",
+			records_emitted: 0,
+			error: {
+				message: { private: "SYNTHETIC_PRIVATE_DIAGNOSTIC" },
+				retryable: false,
+			},
+		},
+		{
+			type: "DONE",
+			status: "failed",
+			records_emitted: "SYNTHETIC_PRIVATE_DIAGNOSTIC",
+		},
+	]) {
+		assert.throws(
+			() => buildProtocolTrace([message]),
+			(error: unknown) => {
+				assert.ok(error instanceof TraceNormalizationError);
+				assert.doesNotMatch(
+					String(error.stack),
+					/SYNTHETIC_PRIVATE_DIAGNOSTIC/,
+				);
+				return true;
+			},
+		);
+	}
+});
+
+test("collector errors remain failures without exposing payload text", async () => {
+	const result = await verifyScenario(
+		toyScenario([widgetsInteraction(1, "w1")]),
+		async () => {
+			throw new Error("SYNTHETIC_PRIVATE_DIAGNOSTIC");
+		},
+	);
+	assert.equal(result.pass, false);
+	assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_PRIVATE_DIAGNOSTIC/);
 });

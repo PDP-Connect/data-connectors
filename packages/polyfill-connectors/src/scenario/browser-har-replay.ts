@@ -341,12 +341,17 @@ function countHarEntries(harPath: string): number {
 	return Array.isArray(entries) ? entries.length : 0;
 }
 
-/** The subset of a HAR entry's shape the APIRequestContext → HAR bridge
- *  (see `findApiRequestHarMatch`/`buildApiResponseFromHarEntry` below, and
- *  `installApiRequestContextHarBridge`'s generated-source mirror in
- *  `writeBrowserHarReplayPreload`) reads. */
+/** The HAR shape used by pure identity/response helpers and the generated
+ *  strict browser matcher. APIRequestContext replay itself is unsupported
+ *  until its effective context-added request identity can be observed. */
 export interface ApiRequestHarEntry {
-	request?: { method?: unknown; url?: unknown };
+	request?: {
+		method?: unknown;
+		url?: unknown;
+		bodySize?: unknown;
+		headers?: readonly { name?: unknown; value?: unknown }[];
+		postData?: { text?: unknown; mimeType?: unknown };
+	};
 	response?: {
 		content?: { encoding?: unknown; text?: unknown };
 		headers?: readonly { name?: unknown; value?: unknown }[];
@@ -355,148 +360,254 @@ export interface ApiRequestHarEntry {
 	};
 }
 
+function replayHeaders(input: unknown): Record<string, string> | undefined {
+	const result: Record<string, string> = Object.create(null);
+	if (input === undefined || input === null) return result;
+	if (typeof input !== "object") return undefined;
+	const entries = Array.isArray(input)
+		? input.map((h) => [h?.name, h?.value])
+		: Object.entries(input);
+	for (const [name, value] of entries) {
+		if (typeof name !== "string" || typeof value !== "string") return undefined;
+		const key = name.toLowerCase();
+		if (Object.hasOwn(result, key)) return undefined;
+		result[key] = value;
+	}
+	return result;
+}
+function replayContentType(value: unknown): string {
+	if (typeof value !== "string") return "";
+	const media = value.split(";")[0]?.trim().toLowerCase() ?? "";
+	const cleaned =
+		media === "multipart/form-data"
+			? value.replace(/;\s*boundary=(?:"[^"]+"|[^;]+)/i, "")
+			: value;
+	return [
+		media,
+		...cleaned
+			.split(";")
+			.slice(1)
+			.map((part) => part.trim()),
+	].join(";");
+}
+function replayBody(value: unknown, contentType: unknown): string | undefined {
+	if (value === undefined || value === null) return "";
+	if (typeof value !== "string") return undefined;
+	const type = replayContentType(contentType).split(";")[0] ?? "";
+	if (type === "application/json" || type.endsWith("+json")) {
+		try {
+			const canonical = (item: unknown): unknown => {
+				if (Array.isArray(item)) return item.map(canonical);
+				if (item !== null && typeof item === "object")
+					return Object.fromEntries(
+						Object.keys(item)
+							.sort()
+							.map((key) => [
+								key,
+								canonical((item as Record<string, unknown>)[key]),
+							]),
+					);
+				return item;
+			};
+			const parsed = JSON.parse(value);
+			// A lossy parse (duplicate keys, rounded numbers, unusual escapes) cannot
+			// justify normalization. Keep the exact bytes for those requests.
+			const compact = (value.match(/"(?:\\.|[^"\\])*"|[^\s]/g) ?? []).join("");
+			if (compact !== JSON.stringify(parsed)) return "raw:" + value;
+			return "json:" + JSON.stringify(canonical(parsed));
+		} catch {
+			return undefined;
+		}
+	}
+	if (type === "multipart/form-data") {
+		const boundary = /boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(
+			String(contentType),
+		);
+		const token = boundary?.[1] ?? boundary?.[2];
+		if (!token) return undefined;
+		// Only framing lines are volatile. Never replace boundary-like field values.
+		return JSON.stringify(
+			value
+				.split("\r\n")
+				.map((line) =>
+					line === "--" + token
+						? ["boundary"]
+						: line === "--" + token + "--"
+							? ["end"]
+							: ["data", line],
+				),
+		);
+	}
+	return value;
+}
+function replayHeaderIdentity(
+	headers: Record<string, string>,
+	vary: readonly string[],
+): string {
+	const names = new Set(Object.keys(headers));
+	for (const name of vary) names.add(name);
+	return JSON.stringify(
+		[...names]
+			.filter(
+				(name) =>
+					vary.includes(name) ||
+					!/^(?:host|content-length|connection|accept-encoding|user-agent|sec-ch-ua.*|sec-fetch-.*)$/.test(
+						name,
+					),
+			)
+			.sort()
+			.map((name) => [
+				name,
+				name === "content-type"
+					? replayContentType(headers[name])
+					: (headers[name] ?? null),
+			]),
+	);
+}
+function replayVary(entry: ApiRequestHarEntry): string[] | undefined {
+	const values = (entry.response?.headers ?? [])
+		.filter((header) => String(header.name).toLowerCase() === "vary")
+		.map((header) => header.value);
+	if (values.some((value) => typeof value !== "string")) return undefined;
+	const names = values
+		.join(",")
+		.split(",")
+		.map((name) => name.trim().toLowerCase())
+		.filter(Boolean);
+	return names.includes("*") ? undefined : names;
+}
+function strictHarMatches<T extends ApiRequestHarEntry>(
+	entries: readonly T[],
+	method: string,
+	url: string,
+	body: unknown,
+	headersInput: unknown,
+): T[] {
+	const headers = replayHeaders(headersInput);
+	if (!headers || typeof url !== "string") return [];
+	let normalizedUrl: string;
+	try {
+		normalizedUrl = new URL(url).href;
+	} catch {
+		return [];
+	}
+	return entries.filter((entry) => {
+		const request = entry.request;
+		if (
+			!request ||
+			request.method !== method ||
+			typeof request.url !== "string"
+		)
+			return false;
+		try {
+			if (new URL(request.url).href !== normalizedUrl) return false;
+		} catch {
+			return false;
+		}
+		if (
+			typeof request.bodySize === "number" &&
+			request.bodySize > 0 &&
+			!(
+				typeof request.postData?.text === "string" &&
+				request.postData.text.length > 0
+			)
+		)
+			return false;
+		if (request.postData && typeof request.postData.text !== "string")
+			return false;
+		const recordedHeaders = replayHeaders(request.headers);
+		const vary = replayVary(entry);
+		if (!recordedHeaders || !vary) return false;
+		if (
+			vary.some(
+				(name) =>
+					!Object.hasOwn(recordedHeaders, name) ||
+					!Object.hasOwn(headers, name),
+			)
+		)
+			return false;
+		if (
+			!recordedHeaders["content-type"] &&
+			typeof request.postData?.mimeType === "string"
+		)
+			recordedHeaders["content-type"] = request.postData.mimeType;
+		const recordedBody = replayBody(
+			request.postData?.text,
+			recordedHeaders["content-type"],
+		);
+		const liveBody = replayBody(body, headers["content-type"]);
+		return (
+			recordedBody !== undefined &&
+			liveBody !== undefined &&
+			recordedBody === liveBody &&
+			replayHeaderIdentity(recordedHeaders, vary) ===
+				replayHeaderIdentity(headers, vary)
+		);
+	});
+}
+
 /**
- * Finds the HAR entry a `context.request` (Playwright `APIRequestContext`)
- * call should be served from — the pure matching rule
- * `installApiRequestContextHarBridge`'s generated-source mirror
- * duplicates inline inside the subprocess preload (that duplication is
- * necessarily by copy, not import — see this file's "APIRequestContext →
- * HAR bridge" module comment and `writeBrowserHarReplayPreload`'s own doc
- * comment on why a generated preload can't import this package's module
- * graph). Exported and unit-tested here specifically so the ONE place the
- * matching logic can be verified deterministically is a plain function
- * call, not a spawned browser subprocess.
- *
- * An EXACT match (method + full URL including the query string) wins
- * whenever one exists. Only for `GET` does this fall back to the
- * highest-scoring same-origin-and-pathname entry that shares at least one
- * query parameter NAME with the live request (zero shared names is "not a
- * plausible match", never guessed) — scored by how many of those shared
- * names also agree in VALUE, ties broken by file order. A mutating method
- * never falls back: it must match exactly or not at all.
+ * Pure lookup for an explicitly supplied complete request identity.
+ * Exact URL, canonical body and response-varying headers are required.
+ * No pagination, credential or other query fields are erased.
+ * This does not prove APIRequestContext's effective request is observable:
+ * the generated API bridge rejects all fetches until that capability exists.
+ * The generated browser route mirrors the same strict identity rules.
  */
 export function findApiRequestHarMatch(
 	entries: readonly ApiRequestHarEntry[],
 	method: string,
 	urlString: string,
+	body?: unknown,
+	headers?: unknown,
 ): ApiRequestHarEntry | undefined {
-	for (const entry of entries) {
-		if (entry.request?.method === method && entry.request?.url === urlString) {
-			return entry;
-		}
-	}
-	if (method !== "GET") {
-		return undefined;
-	}
-	let live: URL;
-	try {
-		live = new URL(urlString);
-	} catch {
-		return undefined;
-	}
-	const liveKeys = new Set(live.searchParams.keys());
-	let best: ApiRequestHarEntry | undefined;
-	let bestScore = -1;
-	for (const entry of entries) {
-		if (
-			entry.request?.method !== method ||
-			typeof entry.request.url !== "string"
-		) {
-			continue;
-		}
-		let candidate: URL;
-		try {
-			candidate = new URL(entry.request.url);
-		} catch {
-			continue;
-		}
-		if (
-			candidate.origin !== live.origin ||
-			candidate.pathname !== live.pathname
-		) {
-			continue;
-		}
-		const sharedKeys = [...liveKeys].filter((k) =>
-			candidate.searchParams.has(k),
-		);
-		if (sharedKeys.length === 0) {
-			continue;
-		}
-		const score = sharedKeys.filter(
-			(k) => live.searchParams.get(k) === candidate.searchParams.get(k),
-		).length;
-		if (score > bestScore) {
-			bestScore = score;
-			best = entry;
-		}
-	}
-	return best;
+	const matches = strictHarMatches(entries, method, urlString, body, headers);
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 /**
  * A HAR entry as `sequentialHarResponseGroups` reads it: the request's
  * method, URL and body, the response's status and body, and start time.
  */
-export interface SequentialHarEntry {
-	request?: {
-		bodySize?: unknown;
-		headers?: readonly { name?: unknown; value?: unknown }[];
-		method?: unknown;
-		postData?: { text?: unknown };
-		url?: unknown;
-	};
-	response?: {
-		content?: { encoding?: unknown; text?: unknown };
-		status?: unknown;
-	};
+export interface SequentialHarEntry extends ApiRequestHarEntry {
 	startedDateTime?: unknown;
 }
 
 const sha256 = (value: string): string =>
 	createHash("sha256").update(value).digest("hex");
 
-/** The multipart boundary of a content-type value, as Playwright reads it. */
-function multipartBoundary(contentType: unknown): string | undefined {
-	if (
-		typeof contentType !== "string" ||
-		!contentType.includes("multipart/form-data")
-	) {
-		return undefined;
-	}
-	return /boundary=(\S+)/.exec(contentType)?.[1];
-}
-
 /**
- * The identity a recorded or live request is replayed by: method, URL and
- * the request body (hashed). A multipart body is compared without its
- * boundary, which is random per request, as Playwright's own HAR matcher
- * does. Two POSTs to one GraphQL URL with different bodies are different
- * requests and never share a sequence.
+ * Payload-free identity key. Only JSON key ordering and multipart framing
+ * boundaries are canonicalized; complete URL/query semantics are preserved.
  */
 export function sequentialHarRequestKey(
 	method: unknown,
 	url: unknown,
 	postData: unknown,
 	contentType?: unknown,
+	headersInput?: unknown,
+	vary: readonly string[] = [],
 ): string {
-	const body = typeof postData === "string" ? postData : "";
-	const boundary = multipartBoundary(contentType);
-	const normalized = boundary ? body.replaceAll(boundary, "") : body;
-	return `${String(method)} ${String(url)} ${sha256(normalized)}`;
-}
-
-function headerValue(
-	headers: readonly { name?: unknown; value?: unknown }[] | undefined,
-	name: string,
-): unknown {
-	return headers?.find((header) => String(header.name).toLowerCase() === name)
-		?.value;
+	const headers = replayHeaders(headersInput) ?? {};
+	if (typeof contentType === "string") headers["content-type"] = contentType;
+	let normalizedUrl = String(url);
+	try {
+		normalizedUrl = new URL(normalizedUrl).href;
+	} catch {}
+	return sha256(
+		JSON.stringify([
+			method,
+			normalizedUrl,
+			replayBody(postData, contentType),
+			replayHeaderIdentity(headers, vary),
+		]),
+	);
 }
 
 /**
  * A recorded request that HAD a body the HAR kept no text for (a binary
  * octet-stream upload): its identity cannot be known, so it is never
- * sequenced and stays with routeFromHAR.
+ * sequenced; the generated strict route aborts it.
  */
 function hasOpaqueBody(entry: SequentialHarEntry): boolean {
 	const text = entry.request?.postData?.text;
@@ -510,24 +621,14 @@ function hasOpaqueBody(entry: SequentialHarEntry): boolean {
 
 /** Status plus the hash of the actual response body (not its size). */
 function responseIdentity(entry: SequentialHarEntry): string {
-	const content = entry.response?.content;
-	const text = typeof content?.text === "string" ? content.text : "";
-	return `${String(entry.response?.status)}:${String(content?.encoding ?? "")}:${sha256(text)}`;
+	return sha256(JSON.stringify(entry.response ?? {}));
 }
 
 /**
- * `routeFromHAR` answers every request with the FIRST matching entry, so a
- * URL the connector polls (an export status that answered 404 and later 200)
- * replays "not ready" forever. This groups entries by full request identity
- * (`sequentialHarRequestKey`) and returns, in recorded order, the groups
- * whose responses DIFFER in status or body content; the replay preload
- * serves those in order (the last one repeats) and leaves every other
- * request to `routeFromHAR`. A group whose responses are all identical is
- * left out: order cannot change what it replays.
- *
- * The pure rule the generated preload's `installSequentialHarRoutes` mirrors
- * inline (by copy, not import; see `findApiRequestHarMatch`). The generated
- * copy is exercised directly in browser-har-replay.test.ts.
+ * Legacy-named inspection helper: returns groups whose full request identities
+ * are indistinguishable but whose responses differ. These groups are ambiguous
+ * and the generated route ABORTS them; timestamps do not authorize sequencing.
+ * Identical repeated responses are safe to fulfill without choosing an order.
  */
 export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
 	entries: readonly T[],
@@ -537,11 +638,20 @@ export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
 		if (hasOpaqueBody(entry)) {
 			continue;
 		}
+		const headers = replayHeaders(entry.request?.headers);
+		const vary = replayVary(entry);
+		if (!headers || !vary) continue;
+		const contentType =
+			headers["content-type"] ?? entry.request?.postData?.mimeType;
+		if (replayBody(entry.request?.postData?.text, contentType) === undefined)
+			continue;
 		const key = sequentialHarRequestKey(
 			entry.request?.method,
 			entry.request?.url,
 			entry.request?.postData?.text,
-			headerValue(entry.request?.headers, "content-type"),
+			contentType,
+			headers,
+			vary,
 		);
 		const group = groups.get(key);
 		if (group) {
@@ -555,12 +665,7 @@ export function sequentialHarResponseGroups<T extends SequentialHarEntry>(
 		if (group.length < 2 || new Set(group.map(responseIdentity)).size < 2) {
 			continue;
 		}
-		const started = (entry: T): number =>
-			Date.parse(String(entry.startedDateTime));
-		sequential.set(
-			key,
-			[...group].sort((left, right) => started(left) - started(right)),
-		);
+		sequential.set(key, [...group]);
 	}
 	return sequential;
 }
@@ -601,7 +706,14 @@ export function buildApiResponseFromHarEntry(entry: ApiRequestHarEntry): {
 			}
 			return out;
 		},
-		json: () => Promise.resolve(JSON.parse(bodyBuffer.toString("utf8"))),
+		json: () =>
+			Promise.resolve().then(() => {
+				try {
+					return JSON.parse(bodyBuffer.toString("utf8"));
+				} catch {
+					throw new SyntaxError("HAR replay response is not valid JSON");
+				}
+			}),
 		ok: () => status >= 200 && status < 300,
 		status: () => status,
 		statusText: () =>
@@ -641,7 +753,7 @@ export function resolveBrowserEvidence(
 	const network = run.environment?.network;
 	if (network?.driver !== "recorded-browser") {
 		throw new BrowserReplayEvidenceError(
-			`browser replay requires run.environment.network.driver === "recorded-browser" — this run declares ${JSON.stringify(network?.driver)}`,
+			'browser replay requires run.environment.network.driver === "recorded-browser"',
 		);
 	}
 	const {
@@ -674,24 +786,21 @@ export function resolveBrowserEvidence(
 	);
 	if (!existsSync(harPath)) {
 		throw new BrowserReplayEvidenceError(
-			`browser replay: HAR file not found at ${harPath} (run.environment.network.har_path)`,
+			"browser replay: HAR file not found (run.environment.network.har_path)",
 		);
 	}
 	if (!existsSync(storageStatePath)) {
 		throw new BrowserReplayEvidenceError(
-			`browser replay requires the captured session state — storage_state_path ${storageStatePath} does not exist ` +
+			"browser replay requires the captured session state — storage_state_path file does not exist " +
 				"(run.environment.network.storage_state_path)",
 		);
 	}
 	let storageStateParsed: unknown;
 	try {
 		storageStateParsed = JSON.parse(readFileSync(storageStatePath, "utf8"));
-	} catch (err) {
+	} catch {
 		throw new BrowserReplayEvidenceError(
-			`browser replay requires the captured session state — storage_state_path ${storageStatePath} is not valid JSON: ${
-				err instanceof Error ? err.message : String(err)
-			}`,
-			{ cause: err },
+			"browser replay requires the captured session state — storage_state_path file is not valid JSON",
 		);
 	}
 	if (
@@ -700,7 +809,7 @@ export function resolveBrowserEvidence(
 		Array.isArray(storageStateParsed)
 	) {
 		throw new BrowserReplayEvidenceError(
-			`browser replay requires the captured session state — storage_state_path ${storageStatePath} does not contain a storage-state object`,
+			"browser replay requires the captured session state — storage_state_path file does not contain a storage-state object",
 		);
 	}
 	const harEntryCount =
@@ -709,7 +818,7 @@ export function resolveBrowserEvidence(
 			: countHarEntries(harPath);
 	if (harEntryCount <= 0) {
 		throw new BrowserReplayEvidenceError(
-			`browser replay: HAR at ${harPath} declares har_entry_count ${JSON.stringify(declaredHarEntryCount)} — no recorded entries to replay`,
+			"browser replay: no recorded entries to replay (har_entry_count)",
 		);
 	}
 	return {
@@ -851,12 +960,13 @@ const HAR_PATH = ${JSON.stringify(evidence.harPath)};
 // preload shape).
 const FALLBACK_REPORT_PATH = ${JSON.stringify(options.fallbackReportPath ?? null)};
 let apiRequestFallbackMatchCount = 0;
+let apiRequestUnsupportedCount = 0;
 if (FALLBACK_REPORT_PATH) {
   process.on("exit", () => {
     try {
       writeFileSync(
         FALLBACK_REPORT_PATH,
-        JSON.stringify({ fallbackMatchCount: apiRequestFallbackMatchCount }),
+        JSON.stringify({ fallbackMatchCount: apiRequestFallbackMatchCount, unsupportedApiRequestCount: apiRequestUnsupportedCount }),
       );
     } catch {
       // Best-effort, same posture as this file's other process.on("exit")
@@ -959,268 +1069,121 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 
-// ── APIRequestContext → HAR bridge ──────────────────────────────────────
-//
-// \`context.request\`/\`page.context().request\` (Playwright's
-// \`APIRequestContext\`, used by every browser connector's own
-// "is this session still signed in" probe — strava_browser's
-// \`probeStravaSession\`, spotify's \`hasSpotifySession\`, github_browser's
-// \`probeGitHubBrowserSession\`) is a STRUCTURALLY SEPARATE network path
-// from the browser's own page/CDP traffic: it issues its HTTP call
-// directly from the Playwright driver process, never touching the
-// browser engine. Confirmed empirically (both directions, against this
-// exact patchright version): a \`context.request.get()\` call made while
-// \`recordHar\` is active does NOT appear in the resulting HAR, and the
-// identical call made while \`context.routeFromHAR(har, { notFound:
-// "abort" })\` is active still reaches the REAL network instead of being
-// served OR aborted — \`context.routeFromHAR\`'s interception is built on
-// \`context.route()\`, which only ever patches CDP-level network
-// interception for pages in that context (see \`HarRouter.addContextRoute\`
-// in patchright/playwright-core's own client code), and \`context.request\`
-// never goes through \`context.route()\` at all.
-//
-// Left unpatched, this is a double failure: at RECORD time, the
-// probe's traffic is invisible to the recorder, so no scenario can ever
-// capture it; at REPLAY time, inside this driver's network-isolated
-// sandbox (isolation.ts), the same call fails closed (no egress) rather
-// than failing because of anything about the SCENARIO — \`probeStravaSession\`
-// (etc.) swallows that failure and reports "not logged in", and the
-// connector falls through to its real login-wall navigation, which was
-// never recorded either (the capture session was already warm) — exactly
-// the \`net::ERR_FAILED\` at the login URL this bridge exists to fix.
-//
-// This patches \`APIRequestContext.prototype.fetch\` (the one method
-// \`get\`/\`post\`/\`put\`/\`patch\`/\`head\` all funnel through — confirmed in
-// patchright/playwright-core's \`lib/client/fetch.js\`) to serve EVERY
-// \`context.request\` call from THIS run's OWN HAR file, in-process,
-// instead of ever reaching the real network — closing the same "never
-// silently fall through to the real network" egress-denial gap
-// \`notFound: "abort"\` already closes for ordinary page traffic.
-//
-// Matching: an EXACT match (method + full URL, including the query
-// string) is tried first, so a recording that captures this exact call
-// (once the paired RECORD-side fix lands) always wins. Only for GET (a
-// mutating method always requires an exact match — never guessed) does
-// this fall back to the same pathname with the HIGHEST-scoring query:
-// among HAR entries sharing this request's method + origin + pathname
-// that share AT LEAST ONE query parameter NAME with the live request
-// (zero shared names is "not a plausible match", never guessed), pick
-// the one whose shared parameter NAMES agree in VALUE most often, tying
-// on file order. This is deliberately generic (no per-connector/
-// per-field allowlist) — a probe's own page-size/pagination choice is
-// exactly the kind of parameter that legitimately differs between two
-// calls to the identical liveness check without it being a different
-// request in any sense the probe cares about.
-let harEntriesCache;
-function loadHarEntriesForApiRequestBridge() {
-  if (harEntriesCache) return harEntriesCache;
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(HAR_PATH, "utf8"));
-  } catch {
-    harEntriesCache = [];
-    return harEntriesCache;
+// ── Strict browser identities and APIRequestContext egress denial ────────
+// APIRequestContext adds context headers/cookies after fetch receives its
+// arguments. This bridge has no supported observation of that final request.
+// A Request.allHeaders() snapshot does not prove API defaults are absent.
+// Consequently ALL APIRequestContext fetches (string/Request, any body options)
+// fail closed. Do not restore compatibility by guessing from options or HAR
+// order. Browser routes below observe the actual request with allHeaders()
+// and postDataBuffer(); the pure exported matcher is not an API support claim.
+// BEGIN strictHarRequestIdentity
+function replayHeaders(input) {
+  const result = Object.create(null);
+  if (input === undefined || input === null) return result;
+  if (typeof input !== "object") return undefined;
+  const entries = Array.isArray(input) ? input.map((h) => [h?.name, h?.value]) : Object.entries(input);
+  for (const [name, value] of entries) {
+    if (typeof name !== "string" || typeof value !== "string") return undefined;
+    const key = name.toLowerCase();
+    if (Object.hasOwn(result, key)) return undefined;
+    result[key] = value;
   }
-  const entries = parsed && parsed.log && parsed.log.entries;
-  harEntriesCache = Array.isArray(entries) ? entries : [];
-  return harEntriesCache;
+  return result;
 }
-function findApiRequestHarMatch(method, urlString) {
-  const entries = loadHarEntriesForApiRequestBridge();
-  for (const entry of entries) {
-    if (entry.request?.method === method && entry.request?.url === urlString) {
-      return entry;
-    }
-  }
-  if (method !== "GET") {
-    return undefined;
-  }
-  let live;
-  try {
-    live = new URL(urlString);
-  } catch {
-    return undefined;
-  }
-  const liveKeys = new Set(live.searchParams.keys());
-  let best;
-  let bestScore = -1;
-  for (const entry of entries) {
-    if (entry.request?.method !== method) {
-      continue;
-    }
-    let candidate;
+function replayContentType(value) {
+  if (typeof value !== "string") return "";
+  const media = value.split(";")[0]?.trim().toLowerCase() ?? "";
+  const cleaned = media === "multipart/form-data" ? value.replace(/;\\s*boundary=(?:"[^"]+"|[^;]+)/i, "") : value;
+  return [media, ...cleaned.split(";").slice(1).map((part) => part.trim())].join(";");
+}
+function replayBody(value, contentType) {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") return undefined;
+  const type = replayContentType(contentType).split(";")[0];
+  if (type === "application/json" || type.endsWith("+json")) {
     try {
-      candidate = new URL(entry.request.url);
-    } catch {
-      continue;
-    }
-    if (candidate.origin !== live.origin || candidate.pathname !== live.pathname) {
-      continue;
-    }
-    const sharedKeys = [...liveKeys].filter((k) => candidate.searchParams.has(k));
-    if (sharedKeys.length === 0) {
-      continue;
-    }
-    const score = sharedKeys.filter(
-      (k) => live.searchParams.get(k) === candidate.searchParams.get(k),
-    ).length;
-    if (score > bestScore) {
-      bestScore = score;
-      best = entry;
-    }
+      const canonical = (item) => {
+        if (Array.isArray(item)) return item.map(canonical);
+        if (item !== null && typeof item === "object") return Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonical(item[key])]));
+        return item;
+      };
+      const parsed = JSON.parse(value);
+      // A lossy parse (duplicate keys, rounded numbers, unusual escapes) cannot
+      // justify normalization. Keep the exact bytes for those requests.
+      const compact = (value.match(/"(?:\\\\.|[^"\\\\])*"|[^\\s]/g) ?? []).join("");
+      if (compact !== JSON.stringify(parsed)) return "raw:" + value;
+      return "json:" + JSON.stringify(canonical(parsed));
+    } catch { return undefined; }
   }
-  return best;
+  if (type === "multipart/form-data") {
+    const boundary = /boundary=(?:"([^"]+)"|([^;\\s]+))/i.exec(String(contentType));
+    const token = boundary?.[1] ?? boundary?.[2];
+    if (!token) return undefined;
+    // Only framing lines are volatile. Never replace boundary-like field values.
+    return JSON.stringify(value.split("\\r\\n").map((line) => line === "--" + token ? ["boundary"] : line === "--" + token + "--" ? ["end"] : ["data", line]));
+  }
+  return value;
 }
-// Minimal APIResponse polyfill — only the surface this package's current
-// APIRequestContext callers use (status/ok/text/json/dispose). Throws (via
-// the real method simply being absent) for anything else, same as this
-// file's module doc comment's "zero of this package's connectors use
-// either surface" precedent elsewhere: narrower is more honest than a
-// speculative full polyfill.
-function buildApiResponseFromHarEntry(entry) {
-  const response = entry.response ?? {};
-  const content = response.content ?? {};
-  const rawText = typeof content.text === "string" ? content.text : "";
-  const bodyBuffer = content.encoding === "base64"
-    ? Buffer.from(rawText, "base64")
-    : Buffer.from(rawText, "utf8");
-  const status = typeof response.status === "number" ? response.status : 0;
-  return {
-    status: () => status,
-    statusText: () => response.statusText ?? "",
-    ok: () => status >= 200 && status < 300,
-    url: () => entry.request?.url ?? "",
-    headers: () => {
-      const out = {};
-      for (const h of response.headers ?? []) {
-        out[String(h.name).toLowerCase()] = h.value;
-      }
-      return out;
-    },
-    body: async () => bodyBuffer,
-    text: async () => bodyBuffer.toString("utf8"),
-    json: async () => JSON.parse(bodyBuffer.toString("utf8")),
-    dispose: async () => {},
-  };
+function replayHeaderIdentity(headers, vary) {
+  const names = new Set(Object.keys(headers));
+  for (const name of vary) names.add(name);
+  return JSON.stringify([...names].filter((name) => vary.includes(name) || !/^(?:host|content-length|connection|accept-encoding|user-agent|sec-ch-ua.*|sec-fetch-.*)$/.test(name)).sort().map((name) => [name, name === "content-type" ? replayContentType(headers[name]) : headers[name] ?? null]));
 }
+function replayVary(entry) {
+  const values = (entry.response?.headers ?? []).filter((header) => String(header.name).toLowerCase() === "vary").map((header) => header.value);
+  if (values.some((value) => typeof value !== "string")) return undefined;
+  const names = values.join(",").split(",").map((name) => name.trim().toLowerCase()).filter(Boolean);
+  return names.includes("*") ? undefined : names;
+}
+function strictHarMatches(entries, method, url, body, headersInput) {
+  const headers = replayHeaders(headersInput);
+  if (!headers || typeof url !== "string") return [];
+  let normalizedUrl;
+  try { normalizedUrl = new URL(url).href; } catch { return []; }
+  return entries.filter((entry) => {
+    const request = entry.request;
+    if (!request || request.method !== method || typeof request.url !== "string") return false;
+    try { if (new URL(request.url).href !== normalizedUrl) return false; } catch { return false; }
+    if (typeof request.bodySize === "number" && request.bodySize > 0 && !(typeof request.postData?.text === "string" && request.postData.text.length > 0)) return false;
+    if (request.postData && typeof request.postData.text !== "string") return false;
+    const recordedHeaders = replayHeaders(request.headers);
+    const vary = replayVary(entry);
+    if (!recordedHeaders || !vary) return false;
+    if (vary.some((name) => !Object.hasOwn(recordedHeaders, name) || !Object.hasOwn(headers, name))) return false;
+    if (!recordedHeaders["content-type"] && typeof request.postData?.mimeType === "string") recordedHeaders["content-type"] = request.postData.mimeType;
+    const recordedBody = replayBody(request.postData?.text, recordedHeaders["content-type"]);
+    const liveBody = replayBody(body, headers["content-type"]);
+    return recordedBody !== undefined && liveBody !== undefined && recordedBody === liveBody &&
+      replayHeaderIdentity(recordedHeaders, vary) === replayHeaderIdentity(headers, vary);
+  });
+}
+
 function installApiRequestContextHarBridge(context) {
   const proto = Object.getPrototypeOf(context.request);
-  if (proto.__pdppHarBridgeInstalled) {
-    return;
-  }
+  if (proto.__pdppHarBridgeInstalled) return;
   proto.__pdppHarBridgeInstalled = true;
-  proto.fetch = async function pdppReplayApiRequestContextFetch(urlOrRequest, options) {
-    const isRequestObject = urlOrRequest !== null && typeof urlOrRequest === "object";
-    const url = isRequestObject ? urlOrRequest.url() : urlOrRequest;
-    const method = String(
-      options?.method ?? (isRequestObject ? urlOrRequest.method() : "GET") ?? "GET",
-    ).toUpperCase();
-    const entry = findApiRequestHarMatch(method, url);
-    if (!entry) {
-      throw new TypeError(
-        \`apiRequestContext.fetch: \${method} \${url} has no matching HAR entry \` +
-          "(recorded-browser replay's APIRequestContext bridge — browser-har-replay.ts)",
-      );
+  proto.fetch = async function pdppReplayApiRequestContextFetch() {
+    if (apiRequestUnsupportedCount === 0) {
+      // A caught denial, including a later process.exit(0), is still a failed replay.
+      process.once("exit", () => { process.exitCode = 1; });
     }
-    // Exact vs fallback is cheap to re-derive here (same two fields the
-    // exact-match pass inside findApiRequestHarMatch already checked) —
-    // see claims.ts's ApiRequestFallbackMatchLimitation for why this count
-    // must be disclosed.
-    if (!(entry.request?.method === method && entry.request?.url === url)) {
-      apiRequestFallbackMatchCount += 1;
-    }
-    return buildApiResponseFromHarEntry(entry);
+    apiRequestUnsupportedCount += 1;
+    process.exitCode = 1;
+    throw new TypeError("apiRequestContext.fetch: effective request identity unavailable; replay unsupported");
   };
 }
+
 // BEGIN installSequentialHarRoutes
-// Polled URLs replay in recorded order. Inline mirror of
-// sequentialHarResponseGroups (browser-har-replay.ts), which is the tested
-// rule: routeFromHAR answers every request with the FIRST matching entry, so
-// for one request identity (method, URL, request body) whose responses
-// differ in status or body content the entries are served in recorded order
-// (the last one repeats). Registered AFTER routeFromHAR, so it is consulted
-// first; any other request falls back to routeFromHAR.
+// Exact semantic identities only. Unknown, opaque and ambiguous requests
+// abort before routeFromHAR can guess. Timing never disambiguates responses.
 async function installSequentialHarRoutes(context) {
-  let har;
+  let entries = [];
   try {
-    har = JSON.parse(readFileSync(HAR_PATH, "utf8"));
-  } catch {
-    return;
-  }
-  const sha256 = (value) => createHash("sha256").update(value).digest("hex");
-  const multipartBoundary = (contentType) =>
-    typeof contentType === "string" && contentType.includes("multipart/form-data")
-      ? /boundary=(\\S+)/.exec(contentType)?.[1]
-      : undefined;
-  const requestKey = (method, url, postData, contentType) => {
-    const body = typeof postData === "string" ? postData : "";
-    const boundary = multipartBoundary(contentType);
-    return String(method) + " " + String(url) + " " + sha256(boundary ? body.replaceAll(boundary, "") : body);
-  };
-  const matchRequestKey = (method, url, postData, contentType) => {
-    const body = typeof postData === "string" ? postData : "";
-    const boundary = multipartBoundary(contentType);
-    let normalizedUrl = String(url);
-    try {
-      const parsedUrl = new URL(normalizedUrl);
-      for (const key of [...parsedUrl.searchParams.keys()]) {
-        if (/^(?:access_)?token$|^(?:auth|session|code|key|sig|signature|nonce|cursor|continuation|pagetoken|nextpagetoken|requestid)$/i.test(key)) parsedUrl.searchParams.delete(key);
-      }
-      parsedUrl.searchParams.sort();
-      normalizedUrl = parsedUrl.toString();
-    } catch {}
-    return String(method) + " " + normalizedUrl + " " + sha256(boundary ? body.replaceAll(boundary, "") : body);
-  };
-  const headerValue = (headers, name) =>
-    (headers ?? []).find((header) => String(header.name).toLowerCase() === name)?.value;
-  const hasOpaqueBody = (entry) => {
-    const text = entry.request?.postData?.text;
-    const bodySize = entry.request?.bodySize;
-    return typeof bodySize === "number" && bodySize > 0 && !(typeof text === "string" && text.length > 0);
-  };
-  const responseIdentity = (entry) => {
-    const content = entry.response?.content;
-    const text = typeof content?.text === "string" ? content.text : "";
-    return String(entry.response?.status) + ":" + String(content?.encoding ?? "") + ":" + sha256(text);
-  };
-  const groups = new Map();
-  const entriesByKey = new Map();
-  const unmatchedQueryCursors = new Map();
-  const queriedGetEntriesByPath = new Map();
-  for (const entry of har.log?.entries ?? []) {
-    if (hasOpaqueBody(entry)) continue;
-    const key = requestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text, headerValue(entry.request?.headers, "content-type"));
-    try {
-      const parsedUrl = new URL(String(entry.request?.url));
-      if (String(entry.request?.method).toUpperCase() === "GET" && parsedUrl.searchParams.size > 0) {
-        const pathKey = parsedUrl.origin + parsedUrl.pathname;
-        const matching = queriedGetEntriesByPath.get(pathKey);
-        if (matching) matching.push(entry);
-        else queriedGetEntriesByPath.set(pathKey, [entry]);
-      }
-    } catch {}
-    let hasVolatileQuery = false;
-    try {
-      const parsedUrl = new URL(String(entry.request?.url));
-      hasVolatileQuery = [...parsedUrl.searchParams.keys()].some((name) => /^(?:access_)?token$|^(?:auth|session|code|key|sig|signature|nonce|cursor|continuation|pagetoken|nextpagetoken|requestid)$/i.test(name));
-    } catch {}
-    if (hasVolatileQuery) {
-      const matchKey = matchRequestKey(entry.request?.method, entry.request?.url, entry.request?.postData?.text, headerValue(entry.request?.headers, "content-type"));
-      const matching = entriesByKey.get(matchKey);
-      if (matching) matching.push(entry);
-      else entriesByKey.set(matchKey, [entry]);
-    }
-    const group = groups.get(key);
-    if (group) group.push(entry);
-    else groups.set(key, [entry]);
-  }
-  const sequences = new Map();
-  for (const [key, group] of groups) {
-    if (group.length < 2 || new Set(group.map(responseIdentity)).size < 2) continue;
-    const started = (entry) => Date.parse(String(entry.startedDateTime));
-    sequences.set(key, { entries: [...group].sort((a, b) => started(a) - started(b)), next: 0 });
-  }
-  if (entriesByKey.size === 0 && sequences.size === 0 && queriedGetEntriesByPath.size === 0) return;
+    const har = JSON.parse(readFileSync(HAR_PATH, "utf8"));
+    if (Array.isArray(har.log?.entries)) entries = har.log.entries;
+  } catch {}
+  const responseIdentity = (entry) => JSON.stringify(entry.response ?? {});
   const fulfillEntry = async (route, entry) => {
     if (!(entry.response?.status > 0)) return route.abort();
     const content = entry.response.content ?? {};
@@ -1236,86 +1199,24 @@ async function installSequentialHarRoutes(context) {
     await route.fulfill({ status: entry.response.status, headers, body });
   };
   await context.route("**/*", async (route) => {
-    const request = route.request();
-    const key = requestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]);
-    const sequence = sequences.get(key);
-    if (sequence) {
-      const entry = sequence.entries[Math.min(sequence.next, sequence.entries.length - 1)];
-      sequence.next += 1;
-      await fulfillEntry(route, entry);
-      return;
-    }
-    const entries = entriesByKey.get(matchRequestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]));
-    if (entries?.length) {
-      const exactEntry = entries.find((entry) => entry.request?.url === request.url());
-      if (exactEntry) {
-        await fulfillEntry(route, exactEntry);
-        return;
-      }
-      let bestEntry = null;
-      let bestScore = 0;
-      let tied = false;
-      for (const candidate of entries) {
-        const candidateUrl = new URL(String(candidate.request?.url));
-        const requestUrl = new URL(request.url());
-        let score = 0;
-        for (const [name, value] of requestUrl.searchParams) {
-          if (candidateUrl.searchParams.has(name)) score += candidateUrl.searchParams.getAll(name).includes(value) ? 2 : 1;
-        }
-        if (score > bestScore) {
-          bestEntry = candidate;
-          bestScore = score;
-          tied = false;
-        } else if (score > 0 && score === bestScore) tied = true;
-      }
-      if (bestEntry && !tied) {
-        await fulfillEntry(route, bestEntry);
-        return;
-      }
-      if (entries?.length) {
-        const cursor = unmatchedQueryCursors.get(matchRequestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"])) ?? 0;
-        unmatchedQueryCursors.set(matchRequestKey(request.method(), request.url(), request.postData(), request.headers()["content-type"]), cursor + 1);
-        await fulfillEntry(route, entries[Math.min(cursor, entries.length - 1)]);
-        return;
-      }
-    }
-    if (request.method().toUpperCase() === "GET") {
-      try {
-        const requestUrl = new URL(request.url());
-        const candidates = queriedGetEntriesByPath.get(requestUrl.origin + requestUrl.pathname) ?? [];
-        if (candidates.some((entry) => entry.request?.url === request.url())) return route.fallback();
-        if (candidates.length === 1) {
-          await fulfillEntry(route, candidates[0]);
-          return;
-        }
-        let bestEntry = null;
-        let bestScore = 0;
-        let tied = false;
-        for (const candidate of candidates) {
-          const candidateUrl = new URL(String(candidate.request?.url));
-          let score = 0;
-          for (const [name, value] of requestUrl.searchParams) {
-            if (!candidateUrl.searchParams.has(name)) continue;
-            score += candidateUrl.searchParams.getAll(name).includes(value) ? 2 : 1;
-          }
-          if (score > bestScore) {
-            bestEntry = candidate;
-            bestScore = score;
-            tied = false;
-          } else if (score > 0 && score === bestScore) {
-            tied = true;
-          }
-        }
-        if (bestEntry && !tied) {
-          await fulfillEntry(route, bestEntry);
-          return;
-        }
-      } catch {}
-    }
-    return route.fallback();
+    try {
+      const request = route.request();
+      if (typeof request.allHeaders !== "function" || typeof request.postDataBuffer !== "function") return route.abort();
+      const headers = await request.allHeaders();
+      if (!headers || typeof headers !== "object" || Array.isArray(headers)) return route.abort();
+      const body = request.postData();
+      const bytes = request.postDataBuffer();
+      if (bytes === null ? body !== null && body !== undefined : !Buffer.isBuffer(bytes) || !Buffer.from(body ?? "", "utf8").equals(bytes)) return route.abort();
+      const matches = strictHarMatches(entries, request.method(), request.url(), body, headers);
+      if (matches.length === 0) return route.abort();
+      if (new Set(matches.map(responseIdentity)).size !== 1) return route.abort();
+      const entry = matches[0];
+      return await fulfillEntry(route, entry);
+    } catch { return route.abort(); }
   });
 }
 // END installSequentialHarRoutes
+
 const ISOLATED_PROFILE_DIRS = [];
 let isolatedProfileCleanupRegistered = false;
 function freshIsolatedProfileDir() {
@@ -1381,7 +1282,7 @@ import("patchright").then((patchright) => {
     // silently reach the real network.
     await context.routeFromHAR(HAR_PATH, { notFound: "abort" });
     await installSequentialHarRoutes(context);
-    // See this file's "APIRequestContext → HAR bridge" comment above —
+    // APIRequestContext has no observable complete identity here, so deny it —
     // context.request never goes through context.routeFromHAR at all, so
     // without this it would silently reach the real network (or, under
     // this driver's network-isolated sandbox, simply fail closed for a
