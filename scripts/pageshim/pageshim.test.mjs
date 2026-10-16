@@ -1401,7 +1401,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(r.result.errors, [
 		{
 			errorClass: "runtime_error",
-			reason: "inventory_not_proven_complete",
+			// The host projects the SKIP_RESULT message, not its reason code.
+			reason: "Source enumeration did not prove the inventory complete.",
 			disposition: "omitted",
 			scope: "github.starred",
 			phase: "collect",
