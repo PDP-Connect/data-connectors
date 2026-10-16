@@ -585,18 +585,19 @@ export function responseOwnerMatches(value: unknown, owner: ValidatedOwner): boo
 		usernames.every(name => typeof name === "string" && name.toLowerCase() === owner.username.toLowerCase());
 }
 
-function inventoryResponseOwnerMatches(body: unknown, owner: ValidatedOwner): boolean {
+function inventoryResponseOwnerMatches(body: unknown, owner: ValidatedOwner, requireOwner = true): boolean {
 	if (!body || typeof body !== "object") return false;
 	const value = body as Record<string, unknown>;
 	const identities = [value.owner, value.user];
 	if (value.user_id !== undefined) identities.push({user_id: value.user_id});
 	const supplied = identities.filter(identity => identity !== undefined && identity !== null);
-	return supplied.length > 0 && supplied.every(identity => responseOwnerMatches(identity, owner));
+	return (!requireOwner || supplied.length > 0) && supplied.every(identity => responseOwnerMatches(identity, owner));
 }
 
 
 function timelineOwnerMatches(data: unknown, connection: InstagramTimelineConnection, owner: ValidatedOwner): boolean {
-	const containers = [data, connection] as Array<Record<string, unknown> | null | undefined>;
+	const viewer = data && typeof data === "object" ? (data as Record<string, unknown>).xdt_viewer : null;
+	const containers = [data, connection, viewer && typeof viewer === "object" ? viewer : null] as Array<Record<string, unknown> | null | undefined>;
 	const identities = containers.flatMap(value => value
 		? [value.owner, value.user, ...(value.user_id !== undefined ? [{user_id: value.user_id}] : [])]
 			.filter(identity => identity !== undefined && identity !== null)
@@ -1406,11 +1407,12 @@ export async function fetchAllFollowing(
 	) => Promise<void>,
 	delay: (ms: number) => Promise<void> = politeDelay,
 	username = "",
-): Promise<{ sourceEnd: boolean; truncated: boolean; users: InstagramFollowingUser[]; ownerBound: boolean }> {
+): Promise<{ sourceEnd: boolean; truncated: boolean; users: InstagramFollowingUser[]; ownerBound: boolean; ownerConflict: boolean }> {
 	const users: InstagramFollowingUser[] = [];
 	let maxId: string | null = null;
 	let sourceEnd = false;
 	let ownerBound = true;
+	let ownerConflict = false;
 
 	const walk = await walkPagesWithCeiling({
 		fetchPage: async (pageNumber) => {
@@ -1425,6 +1427,8 @@ export async function fetchAllFollowing(
 			);
 			observeAuthentication(page, json, status);
 			ownerBound &&= inventoryResponseOwnerMatches(json, {id: userId, username});
+			// An absent response owner is allowed only with an owner-bound exact profile total.
+			ownerConflict ||= !inventoryResponseOwnerMatches(json, {id: userId, username}, false);
 			capture?.captureHttp(
 				`following-page-${String(pageNumber - 1).padStart(3, "0")}`,
 				json,
@@ -1482,7 +1486,7 @@ export async function fetchAllFollowing(
 			: error;
 	});
 
-	return { sourceEnd, truncated: walk.truncated, users: dedupeFollowingByUsername(users), ownerBound };
+	return { sourceEnd, truncated: walk.truncated, users: dedupeFollowingByUsername(users), ownerBound, ownerConflict };
 }
 
 // ─── Ads (Accounts Center DOM scrape) ──────────────────────────────────────
@@ -2486,7 +2490,6 @@ type EmittedMessage = Parameters<BrowserCollectContext["emit"]>[0];
 // `fullInventoryCoverage` (connector-runtime.ts) so meta need not touch the
 // shared runtime. Same message shapes and reason. Replace with the shared
 // helper once #418 merges.
-const INVENTORY_NOT_PROVEN_REASON = "inventory_not_proven_complete";
 
 function fullInventoryCoverage(
 	stream: string, read: number, complete: boolean, why: string,
@@ -2494,7 +2497,7 @@ function fullInventoryCoverage(
 	if (!complete) return [{
 		type: "SKIP_RESULT",
 		stream,
-		reason: INVENTORY_NOT_PROVEN_REASON,
+		reason: "inventory_not_proven_complete",
 		message: `The ${stream} list read in this run is not proven complete: ${why}.`,
 		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		diagnostics: { items_read: read, reason: why },
@@ -2692,12 +2695,14 @@ export async function collectAllStreams(
 			await progress("Fetching Instagram following list");
 			let users: InstagramFollowingUser[] = [];
 			let ownerBound = false;
+			let ownerConflict = false;
 			let sourceEnd = false;
 			let readable = true;
 			try {
 				const result = await fetchAllFollowing(page, identity.id, capture, progress, delay, identity.username);
 				users = result.users;
 				ownerBound = result.ownerBound;
+				ownerConflict = result.ownerConflict;
 				sourceEnd = result.sourceEnd;
 			} catch (error) {
 				readable = false;
@@ -2705,7 +2710,7 @@ export async function collectAllStreams(
 			}
 			await emitFollowingRecords(ctx, users);
 			await queueInventoryResult(ctx, "following", users.length,
-				readable && ownerBound && sourceInventoryComplete(users.length, observedFollowingCount, sourceEnd),
+				readable && !ownerConflict && sourceInventoryComplete(users.length, observedFollowingCount, sourceEnd && ownerBound),
 				readable ? undefined : "the following read failed before the source's end");
 		}
 
