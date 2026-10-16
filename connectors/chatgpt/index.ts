@@ -7524,11 +7524,7 @@ export async function collectChatGpt(
 	if (requested.has("conversations") || requested.has("messages")) {
 		await runConversationsAndMessagesStreams(deps, state);
 	}
-	if (
-		requested.has("account_profile") ||
-		requested.has("conversation_usage") ||
-		requested.has("usage_summary")
-	) {
+	if (requested.has("account_profile") || requested.has("usage_summary")) {
 		await runUsageStreams(deps, state, chatGptUsageHooks);
 	}
 }

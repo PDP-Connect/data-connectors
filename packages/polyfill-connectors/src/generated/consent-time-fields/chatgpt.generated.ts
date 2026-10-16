@@ -18,7 +18,6 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	chatgpt: {
 		account_plan: null,
 		account_profile: null,
-		conversation_usage: { field: "create_time", format: "date-time" },
 		conversations: { field: "update_time", format: "date-time" },
 		custom_gpts: { field: "created_at", format: "date-time" },
 		custom_instructions: { field: "updated_at", format: "date-time" },

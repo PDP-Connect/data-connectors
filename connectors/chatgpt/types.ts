@@ -131,7 +131,7 @@ export interface ChatGptFetchResult {
  * before a response leaves the page. Each returns counts, flags and slugs only.
  */
 export type ChatGptUsageProjection =
-	| "conversation_usage"
+	| "conversation_detail"
 	| "conversation_list"
 	| "shared_conversation_ids"
 	| "memory_stats"

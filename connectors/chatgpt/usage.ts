@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Usage metadata for the `account_profile`, `conversation_usage` and
- * `usage_summary` streams.
+ * Usage metadata for the `account_profile` and `usage_summary` streams.
+ * Both are account-level aggregates; nothing per conversation is emitted.
  *
  * Privacy contract: these streams carry NO message text, conversation titles
  * or snippets, memory contents, custom-instruction text, task titles or
  * prompts, attachment or file names, tool or action names, email, name,
  * phone, picture, region name, organisation names or provider ids.
- * Conversation and GPT ids are replaced by salted one-way references.
+ * Provider ids are used inside the run only (to merge lists, pick the
+ * sample and count distinct GPTs and projects) and are never emitted.
  *
  * Every read is made through `chatGptUsageFetchInBrowser`, which runs inside
  * the chatgpt.com page and reduces each response to numbers, booleans,
@@ -50,7 +51,6 @@
  */
 
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { tsToIso } from "./parsers.ts";
 import type {
 	ChatGptAuth,
 	ChatGptFetchResult,
@@ -360,7 +360,7 @@ export async function chatGptUsageFetchInBrowser(
 		project(raw: unknown): unknown {
 			const j = h.isObj(raw) ? raw : {};
 			switch (projection) {
-				case "conversation_usage":
+				case "conversation_detail":
 					return Array.isArray(raw)
 						? raw.map((c) => h.conversation(c))
 						: h.conversation(raw);
@@ -675,97 +675,6 @@ export function usageCaptureRoute(path: string): string {
 	return `${route}?${params.join("&")}`;
 }
 
-// ─── Opaque references ─────────────────────────────────────────────────
-
-const SHA256_K = new Uint32Array([
-	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-	0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-	0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-	0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-	0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-	0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-]);
-
-/**
- * Dependency-free SHA-256 (same algorithm as the PageShim anthropic-export
- * shim). node:crypto is stubbed on the PageShim host, so the references must
- * not depend on it.
- */
-export function sha256Hex(input: string): string {
-	const msg = new TextEncoder().encode(input);
-	const bitLen = msg.length * 8;
-	const padded = new Uint8Array((((msg.length + 9 + 63) >> 6) << 6) >>> 0);
-	padded.set(msg);
-	padded[msg.length] = 0x80;
-	const view = new DataView(padded.buffer);
-	view.setUint32(padded.length - 8, Math.floor(bitLen / 2 ** 32));
-	view.setUint32(padded.length - 4, bitLen >>> 0);
-	const H = new Uint32Array([
-		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
-		0x1f83d9ab, 0x5be0cd19,
-	]);
-	const W = new Uint32Array(64);
-	const rotr = (x: number, n: number): number => (x >>> n) | (x << (32 - n));
-	const w = (i: number): number => W[i] ?? 0;
-	for (let off = 0; off < padded.length; off += 64) {
-		for (let i = 0; i < 16; i++) W[i] = view.getUint32(off + i * 4);
-		for (let i = 16; i < 64; i++) {
-			const s0 = rotr(w(i - 15), 7) ^ rotr(w(i - 15), 18) ^ (w(i - 15) >>> 3);
-			const s1 = rotr(w(i - 2), 17) ^ rotr(w(i - 2), 19) ^ (w(i - 2) >>> 10);
-			W[i] = (w(i - 16) + s0 + w(i - 7) + s1) >>> 0;
-		}
-		let [a, b, c, d, e, f, g, h] = [
-			H[0] ?? 0,
-			H[1] ?? 0,
-			H[2] ?? 0,
-			H[3] ?? 0,
-			H[4] ?? 0,
-			H[5] ?? 0,
-			H[6] ?? 0,
-			H[7] ?? 0,
-		];
-		for (let i = 0; i < 64; i++) {
-			const t1 =
-				(h +
-					(rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) +
-					((e & f) ^ (~e & g)) +
-					(SHA256_K[i] ?? 0) +
-					w(i)) >>>
-				0;
-			const t2 =
-				((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) +
-					((a & b) ^ (a & c) ^ (b & c))) >>>
-				0;
-			h = g;
-			g = f;
-			f = e;
-			e = (d + t1) >>> 0;
-			d = c;
-			c = b;
-			b = a;
-			a = (t1 + t2) >>> 0;
-		}
-		const add = [a, b, c, d, e, f, g, h];
-		for (let i = 0; i < 8; i++) H[i] = ((H[i] ?? 0) + (add[i] ?? 0)) >>> 0;
-	}
-	return [...H].map((x) => x.toString(16).padStart(8, "0")).join("");
-}
-
-/**
- * One-way reference for a provider id. Stable across runs (so it can be a
- * primary key), not reversible from the output alone. Anyone who already
- * holds the raw id (the owner, OpenAI) can recompute it: it hides ids from a
- * data recipient, not from the provider.
- */
-export function usageRef(kind: "c" | "g", raw: string): string {
-	return `${kind}_${sha256Hex(`pdpp.chatgpt.usage.v1\u0000${kind}\u0000${raw}`).slice(0, 32)}`;
-}
-
 // ─── Projection readers (node side; the page is not trusted) ───────────
 
 export const USAGE_FEATURES = [
@@ -959,24 +868,15 @@ export function lastActivityOf(c: UsageListItem): number | null {
 	return ts.length > 0 ? Math.max(...ts) : null;
 }
 
-// ─── conversation_usage record ─────────────────────────────────────────
+// ─── Conversation classification ──────────────────────────────────────
 
 export type DetailStatus = "fetched" | "not_fetched" | "unavailable" | "failed";
-/**
- * Why detail was (or was not) read for a conversation:
- *   sampled  — one of the N most recently updated conversations (default run).
- *   selected — named by the run's scope (resources, a time window) or a full
- *              detail run.
- *   not_read — list fields only; detail-derived fields are null.
- */
-export type DetailBasis = "sampled" | "selected" | "not_read";
 
 export type GizmoKind = "none" | "custom_gpt" | "project" | "other";
 
 /**
- * Projects are gizmos of type "snorlax"; their ids start "g-p-". Custom GPT
- * ids start "g-". Both rules are read from public descriptions of the web
- * app, not from a captured response in this repo.
+ * Projects are gizmos whose ids start "g-p-" (verified live); custom GPT ids
+ * start "g-". gizmo_type "snorlax" also marks a project.
  */
 export function gizmoKind(
 	gizmoId: string | null,
@@ -988,59 +888,6 @@ export function gizmoKind(
 	return "other";
 }
 
-export interface ConversationUsageInput {
-	listItem: UsageListItem;
-	projection: ConversationUsageProjection | null;
-	detail: DetailBasis;
-	detailStatus: DetailStatus;
-	/** Raw conversation ids that have a share link; null when shares were not read. */
-	sharedIds: ReadonlySet<string> | null;
-}
-
-/** Build one `conversation_usage` record. Never reads a title or any text. */
-export function buildConversationUsageRecord({
-	listItem: c,
-	projection: p,
-	detail,
-	detailStatus,
-	sharedIds,
-}: ConversationUsageInput): RecordData {
-	// List fields only, so a record's list-derived part does not change with
-	// whether detail was read this run (the hold-over gate compares it).
-	const gizmoId = c.gizmo_id ?? c.template_id;
-	const kind = gizmoKind(gizmoId, null);
-	const counts = p?.counts ?? null;
-	return {
-		id: usageRef("c", c.id),
-		create_time: tsToIso(c.create_time),
-		update_time: tsToIso(c.update_time),
-		is_archived: c.is_archived,
-		is_pinned: c.is_pinned,
-		is_shared: sharedIds ? sharedIds.has(c.id) : null,
-		is_temporary_chat: c.is_temporary_chat,
-		is_do_not_remember: c.is_do_not_remember,
-		is_automation: c.is_automation,
-		in_workspace: c.in_workspace,
-		gizmo_kind: kind,
-		gizmo_ref: gizmoId && kind !== "none" ? usageRef("g", gizmoId) : null,
-		detail,
-		detail_status: detailStatus,
-		message_counts: counts ? { ...counts } : null,
-		turn_count: counts ? counts.user : null,
-		branch_count: p ? p.branch_count : null,
-		nodes_total: p ? p.nodes_total : null,
-		models: p ? p.models.map((m) => ({ ...m })) : null,
-		features: p ? { ...p.features } : null,
-		user_attachments: p ? p.user_attachments : null,
-		user_images: p ? p.user_images : null,
-		user_chars_total: p ? p.user_chars_total : null,
-		user_chars_max: p ? p.user_chars_max : null,
-		assistant_chars_total: p ? p.assistant_chars_total : null,
-		first_message_at: p ? tsToIso(p.first_message_at) : null,
-		last_message_at: p ? tsToIso(p.last_message_at) : null,
-	};
-}
-
 // ─── usage_summary record ──────────────────────────────────────────────
 
 export interface UsageClientContext {
@@ -1049,14 +896,16 @@ export interface UsageClientContext {
 	network_country: string | null;
 }
 
-/** How this run chose which conversations to read in detail. */
-export type DetailMode = "sample" | "all" | "selected" | "none";
+/** Whether this run read a detail sample. */
+export type DetailMode = "sample" | "none";
 
 export interface UsageSummaryConversation {
 	list: UsageListItem;
-	record: RecordData;
+	/** Detail projection when this conversation was read this run. */
 	projection: ConversationUsageProjection | null;
-	/** One of the N most recently updated conversations the sample targeted. */
+	/** Outcome of this run's detail read; not_fetched when not targeted. */
+	detailStatus: DetailStatus;
+	/** One of this run's N most recently updated conversations. */
 	inSample: boolean;
 }
 
@@ -1079,6 +928,8 @@ export interface ProjectListingCoverage {
 
 export interface UsageSummaryInput {
 	conversations: readonly UsageSummaryConversation[];
+	/** Raw ids of conversations with a share link; null when shares were not read. */
+	sharedIds: ReadonlySet<string> | null;
 	client: UsageClientContext;
 	coverage: {
 		archived_listing: "read" | "not_available";
@@ -1231,9 +1082,8 @@ export function buildUsageSummaryRecord(input: UsageSummaryInput): RecordData {
 		detail_failed: 0,
 		detail_not_read: 0,
 	};
-	for (const { list: c, record: r } of input.conversations) {
+	for (const { list: c, detailStatus: status } of input.conversations) {
 		totals.conversations += 1;
-		const status = r.detail_status as DetailStatus;
 		if (status === "fetched") coverage.detail_fetched += 1;
 		else if (status === "unavailable") coverage.detail_unavailable += 1;
 		else if (status === "failed") coverage.detail_failed += 1;
@@ -1245,15 +1095,17 @@ export function buildUsageSummaryRecord(input: UsageSummaryInput): RecordData {
 		if (c.is_automation === true) totals.automation_conversations += 1;
 		if (c.is_do_not_remember === true)
 			totals.do_not_remember_conversations += 1;
-		if (r.is_shared === null) sharedKnown = false;
-		else if (r.is_shared === true) totals.shared += 1;
-		const gref = typeof r.gizmo_ref === "string" ? r.gizmo_ref : null;
-		if (r.gizmo_kind === "custom_gpt") {
+		if (input.sharedIds === null) sharedKnown = false;
+		else if (input.sharedIds.has(c.id)) totals.shared += 1;
+		// Raw gizmo ids are only counted here; none is emitted.
+		const gizmoId = c.gizmo_id ?? c.template_id;
+		const kind = gizmoKind(gizmoId, null);
+		if (kind === "custom_gpt") {
 			totals.custom_gpt_conversations += 1;
-			if (gref) gizmos.custom_gpt.add(gref);
-		} else if (r.gizmo_kind === "project") {
+			if (gizmoId) gizmos.custom_gpt.add(gizmoId);
+		} else if (kind === "project") {
 			totals.project_conversations += 1;
-			if (gref) gizmos.project.add(gref);
+			if (gizmoId) gizmos.project.add(gizmoId);
 		}
 		if (c.create_time !== null) {
 			const lp = local(c.create_time);
@@ -1501,7 +1353,7 @@ export function buildAccountProfileRecord(
 				? null
 				: wholeMonthsBetween(userCreated, input.nowMs),
 		country: meCountry ?? networkCountry,
-		// SUB-NATIONAL (e.g. a voivodeship/state code). Together with other
+		// SUB-NATIONAL (e.g. a state or province code). Together with other
 		// fields it raises re-identification risk; whether to coarsen or drop
 		// it is a legal decision, not made here.
 		region_code: matchOrNull(me.region_code, REGION_CODE),

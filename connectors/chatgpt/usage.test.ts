@@ -20,7 +20,6 @@ import type {
 import {
 	type AccountProfileInput,
 	buildAccountProfileRecord,
-	buildConversationUsageRecord,
 	buildUsageSummaryRecord,
 	type ChatGptUsageFetchArgs,
 	type ConversationUsageProjection,
@@ -28,11 +27,9 @@ import {
 	gizmoKind,
 	readConversationListPage,
 	readConversationUsageProjection,
-	sha256Hex,
 	type UsageListItem,
 	type UsageSummaryConversation,
 	usageCaptureRoute,
-	usageRef,
 } from "./usage.ts";
 import {
 	CHATGPT_USAGE_DETAIL_ENV,
@@ -282,7 +279,7 @@ function inPage(
 
 test("conversation projection keeps counts, models and features and drops every text", async () => {
 	installFakeSite(siteRoutes());
-	const res = await inPage(`/conversation/${CANARY_ID}`, "conversation_usage");
+	const res = await inPage(`/conversation/${CANARY_ID}`, "conversation_detail");
 	assert.equal(res.status, 200);
 	// The raw id is still inside the page result (it is hashed node-side);
 	// strip it before the leak check of the page boundary itself.
@@ -333,13 +330,13 @@ test("conversation projection keeps counts, models and features and drops every 
 
 test("batch projection maps every element and a non-200 returns no body", async () => {
 	installFakeSite(siteRoutes());
-	const batch = await inPage("/conversations/batch", "conversation_usage", {
+	const batch = await inPage("/conversations/batch", "conversation_detail", {
 		method: "POST",
 		body: { conversation_ids: [CANARY_ID, "other-id"] },
 	});
 	assert.ok(Array.isArray(batch.json));
 	assert.equal((batch.json as unknown[]).length, 1);
-	const missing = await inPage("/conversation/missing", "conversation_usage");
+	const missing = await inPage("/conversation/missing", "conversation_detail");
 	assert.equal(missing.status, 404);
 	assert.equal(missing.json, null);
 });
@@ -533,7 +530,7 @@ test("the in-page function is self-contained (survives toString re-evaluation)",
 	) as typeof chatGptUsageFetchInBrowser;
 	const call = (path: string, projection: ChatGptUsageProjection) =>
 		rebuilt({ auth: AUTH, method: "GET", path, projection, timeoutMs: 5000 });
-	const res = await call(`/conversation/${CANARY_ID}`, "conversation_usage");
+	const res = await call(`/conversation/${CANARY_ID}`, "conversation_detail");
 	assert.equal(readConversationUsageProjection(res.json)?.counts.user, 2);
 	const facts = await call(
 		"/accounts/check/v4-2023-04-27",
@@ -548,16 +545,6 @@ test("the in-page function is self-contained (survives toString re-evaluation)",
 });
 
 // ─── Records ──────────────────────────────────────────────────────────────
-
-test("sha256Hex matches the standard digest and refs are stable and typed", () => {
-	assert.equal(
-		sha256Hex("abc"),
-		"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-	);
-	assert.equal(usageRef("c", CANARY_ID), usageRef("c", CANARY_ID));
-	assert.notEqual(usageRef("c", CANARY_ID), usageRef("g", CANARY_ID));
-	assert.match(usageRef("g", "g-abc"), /^g_[0-9a-f]{32}$/);
-});
 
 test("gizmo kind distinguishes projects and custom GPTs", () => {
 	assert.equal(gizmoKind(null, null), "none");
@@ -584,83 +571,6 @@ const listItem = (
 	is_automation: false,
 	in_workspace: false,
 	...extra,
-});
-
-async function projectionOf(
-	raw: unknown,
-): Promise<ConversationUsageProjection> {
-	installFakeSite({ "/conversation/x": () => json(raw) });
-	const res = await inPage("/conversation/x", "conversation_usage");
-	const p = readConversationUsageProjection(res.json);
-	assert.ok(p);
-	return p;
-}
-
-test("conversation_usage record validates and carries no title, id or text", async () => {
-	const projection = await projectionOf(CANARY_CONVERSATION);
-	const record = buildConversationUsageRecord({
-		listItem: listItem(CANARY_ID, {
-			gizmo_id: "g-p-CANARYPROJECT123",
-		}),
-		projection,
-		detail: "sampled",
-		detailStatus: "fetched",
-		sharedIds: new Set([CANARY_ID]),
-	});
-	assert.equal(validateRecord("conversation_usage", record).ok, true);
-	assert.equal(record.gizmo_kind, "project");
-	assert.equal(record.is_shared, true);
-	assert.equal("is_starred" in record, false);
-	assert.equal("default_model_slug" in record, false);
-	assert.equal("latest_assistant_turn_at" in record, false);
-	assert.equal(record.turn_count, 2);
-	assert.equal(record.detail, "sampled");
-	assert.equal(record.id, usageRef("c", CANARY_ID));
-	assertNoLeak(record, "conversation_usage record");
-});
-
-test("a not-read record has null detail fields, keeps list fields and validates", () => {
-	const record = buildConversationUsageRecord({
-		listItem: listItem(CANARY_ID, {
-			template_id: "g-p-CANARYPROJECT",
-			is_pinned: true,
-			is_temporary_chat: true,
-		}),
-		projection: null,
-		detail: "not_read",
-		detailStatus: "not_fetched",
-		sharedIds: null,
-	});
-	assert.equal(validateRecord("conversation_usage", record).ok, true);
-	assert.equal(record.gizmo_kind, "project");
-	assert.equal(record.is_pinned, true);
-	assert.equal(record.is_temporary_chat, true);
-	assert.equal(record.message_counts, null);
-	assert.equal(record.models, null);
-	assert.equal(record.is_shared, null);
-	assert.equal(record.create_time, "2025-10-09T08:53:20.000Z");
-	assertNoLeak(record, "not-read record");
-});
-
-test("the schema rejects a record that smuggles a title or free-text slug", () => {
-	const record = buildConversationUsageRecord({
-		listItem: listItem(CANARY_ID),
-		projection: null,
-		detail: "not_read",
-		detailStatus: "not_fetched",
-		sharedIds: null,
-	});
-	assert.equal(
-		validateRecord("conversation_usage", { ...record, title: "x" }).ok,
-		false,
-	);
-	assert.equal(
-		validateRecord("conversation_usage", {
-			...record,
-			models: [{ slug: "My Secret Model", assistant_messages: 1 }],
-		}).ok,
-		false,
-	);
 });
 
 // ─── Summary ──────────────────────────────────────────────────────────────
@@ -726,18 +636,11 @@ function summaryFor(timezone: string | null) {
 		projection: ConversationUsageProjection | null,
 		inSample: boolean,
 	): UsageSummaryConversation => {
-		const list = listItem(id, item);
 		return {
-			list,
+			list: listItem(id, item),
 			projection,
+			detailStatus: projection ? "fetched" : "not_fetched",
 			inSample,
-			record: buildConversationUsageRecord({
-				listItem: list,
-				projection,
-				detail: inSample ? "sampled" : "not_read",
-				detailStatus: projection ? "fetched" : "not_fetched",
-				sharedIds: new Set(),
-			}),
 		};
 	};
 	return buildUsageSummaryRecord({
@@ -777,6 +680,7 @@ function summaryFor(timezone: string | null) {
 				false,
 			),
 		],
+		sharedIds: new Set(),
 		client: { timezone, browser_language: "pl-PL", network_country: "PL" },
 		coverage: {
 			archived_listing: "read",
@@ -965,6 +869,7 @@ test("account_profile falls back to the network country and labels it", () => {
 interface FakeApiCall {
 	path: string;
 	projection: ChatGptUsageProjection | undefined;
+	body: unknown;
 }
 
 /** Paths whose fetch throws, by class, to exercise error classification. */
@@ -981,7 +886,7 @@ function fakeApi(
 	const api: ChatGptApi = {
 		auth: () => Promise.resolve(AUTH),
 		async fetch(path, opts = {}) {
-			calls.push({ path, projection: opts.projection });
+			calls.push({ path, projection: opts.projection, body: opts.body });
 			const bare = path.split("?")[0] ?? path;
 			const cls = throwing[bare];
 			if (cls) throw new Error(`fake ${cls}`);
@@ -1013,7 +918,6 @@ function runHarness(
 		site?: SiteOptions;
 		routes?: Record<string, Route>;
 		throwing?: Throwing;
-		scope?: Record<string, unknown>;
 		state?: CollectContext["state"];
 	} = {},
 ) {
@@ -1041,14 +945,7 @@ function runHarness(
 		emit: harness.emit,
 		emitRecord: harness.emitRecord,
 		progress: () => Promise.resolve(),
-		requested: new Map(
-			streams.map((name) => [
-				name,
-				name === "conversation_usage" && opts.scope
-					? { name, ...opts.scope }
-					: { name },
-			]),
-		),
+		requested: new Map(streams.map((name) => [name, { name }])),
 	};
 	return {
 		run: () => runUsageStreams(deps, opts.state ?? {}, hooks),
@@ -1076,22 +973,27 @@ function sub(
 
 const many = (n: number) => Array.from({ length: n }, (_, i) => rawListItem(i));
 
-test("a full run of all three streams emits valid records and leaks no canary anywhere", async () => {
+test("a full run of both streams emits valid records and leaks no canary anywhere", async () => {
 	const { run, harness, calls } = runHarness([
 		"account_profile",
-		"conversation_usage",
 		"usage_summary",
 	]);
 	await run();
 	assert.deepEqual(harness.skipped, []);
-	const usage = records(harness, "conversation_usage");
-	assert.equal(usage.length, 2);
-	const canary = usage.find((r) => r.id === usageRef("c", CANARY_ID));
-	assert.equal(canary?.gizmo_kind, "project");
-	assert.equal(canary?.is_shared, true);
-	assert.equal(canary?.detail, "sampled");
+	// Account-level records only: nothing per conversation.
+	assert.deepEqual([...new Set(harness.emitted.map((e) => e.stream))].sort(), [
+		"account_profile",
+		"usage_summary",
+	]);
+	assert.equal(harness.emitted.length, 2);
 	const [summary] = records(harness, "usage_summary");
 	assert.ok(summary);
+	const totals = sub(summary, "totals");
+	assert.equal(totals.conversations, 2);
+	assert.equal(totals.shared, 1);
+	assert.equal(totals.project_conversations, 1);
+	assert.equal(totals.custom_gpt_conversations, 1);
+	assert.equal(sub(summary, "detail_sample").n_read, 2);
 	const [profile] = records(harness, "account_profile");
 	assert.ok(profile);
 	assert.equal(profile.country, "PL");
@@ -1118,7 +1020,7 @@ test("a full run of all three streams emits valid records and leaks no canary an
 	assertNoLeak(harness.protocolMessages, "protocol messages");
 	assert.equal(
 		harness.protocolMessages.filter((m) => m.type === "DETAIL_COVERAGE").length,
-		3,
+		2,
 	);
 });
 
@@ -1162,63 +1064,56 @@ test("an exact multiple of the page size ends on the empty page", async () => {
 	);
 });
 
-test("the default run reads detail only for the 30 most recently updated conversations", async () => {
-	const { run, harness, calls } = runHarness(
-		["conversation_usage", "usage_summary"],
-		{ site: { conversations: many(120) } },
-	);
+test("the default run reads detail only for this run's 30 most recently updated conversations", async () => {
+	// The newest 30 by update time are 0..29: exactly those are read, and the
+	// sample's sums cover exactly those 30.
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		site: { conversations: many(120) },
+	});
 	await run();
-	assert.equal(resolveUsageDetailPlan({}).kind, "sample");
+	assert.equal(resolveUsageDetailPlan({}).size, DEFAULT_DETAIL_SAMPLE);
 	const batches = calls.filter((c) => c.path === "/conversations/batch");
 	assert.equal(batches.length, DEFAULT_DETAIL_SAMPLE / 10);
+	const asked = batches.flatMap(
+		(c) => (c.body as { conversation_ids: string[] }).conversation_ids,
+	);
+	assert.deepEqual(
+		[...asked].sort(),
+		Array.from({ length: 30 }, (_, i) => rawConvId(i)).sort(),
+	);
 	assert.ok(!calls.some((c) => c.path.startsWith("/conversation/")));
-	const usage = records(harness, "conversation_usage");
-	assert.equal(usage.length, 120);
-	const sampled = usage.filter((r) => r.detail === "sampled");
-	assert.equal(sampled.length, 30);
-	const newest = new Set(
-		Array.from({ length: 30 }, (_, i) => usageRef("c", rawConvId(i))),
-	);
-	assert.ok(sampled.every((r) => newest.has(String(r.id))));
-	const notRead = usage.filter((r) => r.detail === "not_read");
-	assert.ok(
-		notRead.every((r) => r.models === null && r.message_counts === null),
-	);
-	assert.ok(notRead.every((r) => r.detail_status === "not_fetched"));
 	const [summary] = records(harness, "usage_summary");
-	const sample = summary?.detail_sample as Record<string, unknown>;
+	const sample = sub(summary, "detail_sample");
 	assert.equal(sample.n_conversations, 30);
 	assert.equal(sample.n_read, 30);
 	assert.equal(sample.complete, true);
+	// The canary detail has 2 user messages: sums are exactly 30 conversations.
+	assert.equal(sample.user_messages, 60);
 	assert.equal(sample.window_end, new Date(BASE * 1000).toISOString());
 	assert.equal(
 		sample.window_start,
 		new Date((BASE - 29 * 3600) * 1000).toISOString(),
 	);
 	assert.equal(sub(summary, "coverage").detail_mode, "sample");
-	// No partial marker: an unread conversation is by design, not a gap.
+	assert.equal(sub(summary, "coverage").detail_fetched, 30);
+	assert.equal(sub(summary, "coverage").detail_not_read, 90);
 	assert.equal(
 		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
 		0,
 	);
 });
 
-test("the dev override reads every conversation or none", async () => {
-	process.env[CHATGPT_USAGE_DETAIL_ENV] = "all";
-	const all = runHarness(["conversation_usage", "usage_summary"], {
+test("the dev override changes the sample size or turns detail off", async () => {
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "10";
+	const ten = runHarness(["usage_summary"], {
 		site: { conversations: many(45) },
 	});
-	await all.run();
-	assert.ok(
-		records(all.harness, "conversation_usage").every(
-			(r) => r.detail === "selected" && r.detail_status === "fetched",
-		),
-	);
-	const [s] = records(all.harness, "usage_summary");
-	assert.equal(sub(s, "coverage").detail_mode, "all");
+	await ten.run();
+	const [s] = records(ten.harness, "usage_summary");
+	assert.equal(sub(s, "detail_sample").n_conversations, 10);
 
 	process.env[CHATGPT_USAGE_DETAIL_ENV] = "none";
-	const none = runHarness(["conversation_usage", "usage_summary"]);
+	const none = runHarness(["usage_summary"]);
 	await none.run();
 	assert.ok(
 		!none.calls.some((c) => /^\/conversations?\/[a-z0-9]/.test(c.path)),
@@ -1226,39 +1121,6 @@ test("the dev override reads every conversation or none", async () => {
 	const [n] = records(none.harness, "usage_summary");
 	assert.equal(n?.detail_sample, null);
 	assert.equal(sub(n, "coverage").detail_mode, "none");
-});
-
-test("scope resources on conversation_usage read detail for exactly those conversations", async () => {
-	const want = [rawConvId(70), rawConvId(90)];
-	const { run, harness, calls } = runHarness(["conversation_usage"], {
-		site: { conversations: many(100) },
-		scope: { resources: want.map((id) => usageRef("c", id)) },
-	});
-	await run();
-	const batch = calls.filter((c) => c.path === "/conversations/batch");
-	assert.equal(batch.length, 1);
-	const read = records(harness, "conversation_usage").filter(
-		(r) => r.detail_status === "fetched",
-	);
-	assert.deepEqual(
-		read.map((r) => r.detail),
-		["selected", "selected"],
-	);
-});
-
-test("a time window on conversation_usage alone reads every conversation inside it and nothing else", async () => {
-	const since = new Date((BASE - 4.5 * 3600) * 1000).toISOString();
-	const { run, harness } = runHarness(["conversation_usage"], {
-		site: { conversations: many(60) },
-		scope: { time_range: { since } },
-	});
-	await run();
-	const read = records(harness, "conversation_usage").filter(
-		(r) => r.detail_status === "fetched",
-	);
-	// Created at update - 10 min: conversations 0..4 fall after `since`.
-	assert.equal(read.length, 5);
-	assert.ok(read.every((r) => r.detail === "selected"));
 });
 
 test("archived conversations are listed in a second pass; an unserved archive listing is labelled", async () => {
@@ -1280,8 +1142,8 @@ test("archived conversations are listed in a second pass; an unserved archive li
 	assert.equal(sub(t, "coverage").archived_listing, "not_available");
 });
 
-test("a failed list page withholds the summary and marks both streams partial", async () => {
-	const { run, harness } = runHarness(["conversation_usage", "usage_summary"], {
+test("a failed list page withholds the summary and marks it partial", async () => {
+	const { run, harness } = runHarness(["usage_summary"], {
 		site: { conversations: many(250), failListPages: [1] },
 	});
 	await run();
@@ -1290,23 +1152,21 @@ test("a failed list page withholds the summary and marks both streams partial", 
 		(m) => m.type === "SKIP_RESULT",
 	);
 	assert.deepEqual(
-		skips
-			.map((m) => [
-				(m as { stream?: string }).stream,
-				(m as { reason?: string }).reason,
-			])
-			.sort(),
-		[
-			["conversation_usage", "conversation_list_unstable"],
-			["usage_summary", "conversation_list_unstable"],
-		],
+		skips.map((m) => [
+			(m as { stream?: string }).stream,
+			(m as { reason?: string }).reason,
+		]),
+		[["usage_summary", "conversation_list_unstable"]],
 	);
-	// Only the pages before the failure are used.
-	assert.equal(records(harness, "conversation_usage").length, 100);
+	// No STATE is written for a withheld summary.
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "STATE").length,
+		0,
+	);
 });
 
 test("an unserved batch endpoint falls back to single reads", async () => {
-	const { run, harness, calls } = runHarness(["conversation_usage"], {
+	const { run, harness, calls } = runHarness(["usage_summary"], {
 		routes: {
 			...siteRoutes(),
 			"/conversations/batch": () => json({ detail: "nope" }, 404),
@@ -1314,11 +1174,8 @@ test("an unserved batch endpoint falls back to single reads", async () => {
 	});
 	await run();
 	assert.ok(calls.some((c) => c.path === `/conversation/${CANARY_ID}`));
-	assert.ok(
-		records(harness, "conversation_usage").some(
-			(r) => r.detail_status === "fetched",
-		),
-	);
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "detail_sample").n_read, 2);
 });
 
 test("a deferred sample is labelled incomplete without failing the summary", async () => {
@@ -1395,57 +1252,6 @@ test("account_profile alone reads no conversation list or detail", async () => {
 	);
 });
 
-test("conversation_usage alone reads no profile endpoint", async () => {
-	const { run, calls } = runHarness(["conversation_usage"]);
-	await run();
-	assert.ok(
-		!calls.some((c) =>
-			/^\/(me|memories|user_system_messages|settings|accounts|cdn-cgi|tasks)/.test(
-				c.path,
-			),
-		),
-		JSON.stringify(calls.map((c) => c.path)),
-	);
-});
-
-test("a conversation read on an earlier run is not re-emitted with nulls when it leaves the sample", async () => {
-	process.env[CHATGPT_USAGE_DETAIL_ENV] = "all";
-	const first = runHarness(["conversation_usage"], {
-		site: { conversations: many(40) },
-	});
-	await first.run();
-	const stateMsg = first.harness.protocolMessages.find(
-		(m) => m.type === "STATE",
-	) as { cursor?: Record<string, unknown> } | undefined;
-	assert.ok(stateMsg?.cursor);
-	assert.equal(
-		Object.keys(stateMsg.cursor.detailed as Record<string, string>).length,
-		40,
-	);
-
-	delete process.env[CHATGPT_USAGE_DETAIL_ENV];
-	const second = runHarness(["conversation_usage"], {
-		site: { conversations: many(40) },
-		state: { conversation_usage: stateMsg.cursor },
-	});
-	await second.run();
-	// The 30 sampled are byte-identical to run 1 except the `detail` marker;
-	// the 10 not sampled are held back rather than downgraded.
-	const emitted = records(second.harness, "conversation_usage");
-	assert.ok(emitted.every((r) => r.detail_status === "fetched"));
-	const state2 = second.harness.protocolMessages.find(
-		(m) => m.type === "STATE",
-	) as { cursor?: Record<string, unknown> } | undefined;
-	assert.equal(
-		Object.keys(state2?.cursor?.detailed as Record<string, string>).length,
-		40,
-	);
-	assert.equal(
-		Object.keys(state2?.cursor?.fingerprints as Record<string, string>).length,
-		40,
-	);
-});
-
 test("the stateless host mode emits without fingerprint STATE", async () => {
 	process.env[CHATGPT_USAGE_STATELESS_ENV] = "1";
 	const { run, harness } = runHarness(["usage_summary", "account_profile"]);
@@ -1501,7 +1307,7 @@ test("project conversations missing from the main list are added from per-projec
 	];
 	const pageTwo = Array.from({ length: 11 }, (_, k) => projectItem(14 + k));
 	const { run, harness, calls } = runHarness(
-		["account_profile", "conversation_usage", "usage_summary"],
+		["account_profile", "usage_summary"],
 		{
 			site: {
 				conversations: main,
@@ -1510,19 +1316,6 @@ test("project conversations missing from the main list are added from per-projec
 		},
 	);
 	await run();
-	const usage = records(harness, "conversation_usage");
-	assert.equal(usage.length, 25);
-	const fromProject = usage.find((r) => r.id === usageRef("c", rawConvId(20)));
-	assert.equal(fromProject?.gizmo_kind, "project");
-	assert.equal(fromProject?.gizmo_ref, usageRef("g", "g-p-CANARYPROJECTA"));
-	// Numeric epochs are read as well as ISO strings.
-	assert.equal(
-		fromProject?.update_time,
-		new Date((BASE - 20 * 3600) * 1000).toISOString(),
-	);
-	// The duplicate keeps its main-list entry (no project gizmo there).
-	const dup = usage.find((r) => r.id === usageRef("c", rawConvId(0)));
-	assert.equal(dup?.gizmo_kind, "none");
 	const [summary] = records(harness, "usage_summary");
 	assert.deepEqual(sub(summary, "coverage").project_listing, {
 		sidebar: "ok",
@@ -1532,7 +1325,14 @@ test("project conversations missing from the main list are added from per-projec
 		truncated: false,
 		conversations_added: 20,
 	});
-	assert.equal(sub(summary, "totals").project_conversations, 20);
+	const totals = sub(summary, "totals");
+	assert.equal(totals.conversations, 25);
+	// Project items carry no gizmo id; the project is assigned. The duplicate
+	// of conversation 0 keeps its main-list entry (no gizmo).
+	assert.equal(totals.project_conversations, 20);
+	assert.equal(totals.projects_used, 1);
+	// Numeric epochs are read: the newest project item sets last activity.
+	assert.equal(summary?.last_activity_at, new Date(BASE * 1000).toISOString());
 	// Cursor paging: cursor=0, then the returned cursor.
 	assert.deepEqual(
 		calls
@@ -1648,7 +1448,7 @@ test("fixture capture of projected usage reads never names a raw id (index.ts ca
 		page: fakePage as never,
 	});
 	await api.fetch(`/conversation/${CANARY_ID}`, {
-		projection: "conversation_usage",
+		projection: "conversation_detail",
 	});
 	await api.fetch("/gizmos/g-p-CANARYPROJECTA/conversations?cursor=0", {
 		projection: "conversation_list",
@@ -1664,72 +1464,6 @@ test("fixture capture of projected usage reads never names a raw id (index.ts ca
 function isProjectedArg(arg: unknown): arg is ChatGptUsageFetchArgs {
 	return typeof arg === "object" && arg !== null && "projection" in arg;
 }
-
-test("an incomplete list keeps prior STATE instead of narrowing it", async () => {
-	const first = runHarness(["conversation_usage"], {
-		site: { conversations: many(250) },
-	});
-	await first.run();
-	const state1 = first.harness.protocolMessages.find(
-		(m) => m.type === "STATE",
-	) as { cursor: Record<string, Record<string, unknown>> } | undefined;
-	assert.ok(state1);
-	assert.equal(Object.keys(state1.cursor.fingerprints ?? {}).length, 250);
-	const detailed1 = Object.keys(state1.cursor.detailed ?? {});
-	assert.equal(detailed1.length, DEFAULT_DETAIL_SAMPLE);
-
-	const second = runHarness(["conversation_usage"], {
-		site: { conversations: many(250), failListPages: [1] },
-		state: { conversation_usage: state1.cursor },
-	});
-	await second.run();
-	const state2 = second.harness.protocolMessages.find(
-		(m) => m.type === "STATE",
-	) as { cursor: Record<string, Record<string, unknown>> } | undefined;
-	assert.ok(state2);
-	// Only page 0 was read, yet every prior fingerprint and carried detail stays.
-	assert.equal(Object.keys(state2.cursor.fingerprints ?? {}).length, 250);
-	assert.deepEqual(
-		Object.keys(state2.cursor.detailed ?? {}).sort(),
-		[...detailed1].sort(),
-	);
-	assert.ok(
-		second.harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
-	);
-});
-
-test("detail read earlier survives a flag change and unreadable shares", async () => {
-	process.env[CHATGPT_USAGE_DETAIL_ENV] = "all";
-	const first = runHarness(["conversation_usage"], {
-		site: { conversations: many(10) },
-	});
-	await first.run();
-	const state1 = first.harness.protocolMessages.find(
-		(m) => m.type === "STATE",
-	) as { cursor: Record<string, unknown> } | undefined;
-	assert.ok(state1);
-
-	process.env[CHATGPT_USAGE_DETAIL_ENV] = "1";
-	const pinned = many(10).map((c, i) =>
-		i === 7 ? { ...c, pinned_time: "2026-10-15T00:00:00Z" } : c,
-	);
-	const second = runHarness(["conversation_usage"], {
-		site: { conversations: pinned, sharesDown: true },
-		state: { conversation_usage: state1.cursor },
-	});
-	await second.run();
-	const emitted = records(second.harness, "conversation_usage");
-	// Every record changed (is_shared is now null), and none lost its detail.
-	assert.equal(emitted.length, 10);
-	for (const r of emitted) {
-		assert.equal(r.is_shared, null);
-		assert.equal(r.detail_status, "fetched");
-		assert.ok(r.message_counts !== null);
-	}
-	const seventh = emitted.find((r) => r.id === usageRef("c", rawConvId(7)));
-	assert.equal(seventh?.is_pinned, true);
-	assert.equal(seventh?.detail, "selected");
-});
 
 test("cursor steps honour explicit ends, empty pages and repeated cursors", () => {
 	const seen = new Set(["a", "b"]);

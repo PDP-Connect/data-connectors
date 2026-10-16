@@ -191,14 +191,13 @@ export const accountPlanSchema = z.object({
 		.nullable(),
 });
 
-// ─── account_profile / conversation_usage / usage_summary ───────────────
+// ─── account_profile / usage_summary ──────────────────────────────────────
 // Metadata only. Every object is strict and every string is an enum, a
 // bounded slug, a code or an opaque reference, so no free text (titles,
 // message bodies, names, emails, org titles, tool or action names) can be
 // stored even if a builder regresses.
 
 const usageSlug = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,63}$/);
-const usageRef = z.string().regex(/^[cg]_[0-9a-f]{32}$/);
 const count = z.number().int().min(0).max(1_000_000_000);
 const share = z.number().min(0).max(1);
 const average = z.number().min(0).max(1_000_000_000);
@@ -299,48 +298,6 @@ export const accountProfileSchema = z
 	})
 	.strict();
 
-export const conversationUsageSchema = z
-	.object({
-		id: usageRef,
-		create_time: looseTimestamp.nullable(),
-		update_time: looseTimestamp.nullable(),
-		is_archived: z.boolean().nullable(),
-		is_pinned: z.boolean().nullable(),
-		is_shared: z.boolean().nullable(),
-		is_temporary_chat: z.boolean().nullable(),
-		is_do_not_remember: z.boolean().nullable(),
-		is_automation: z.boolean().nullable(),
-		in_workspace: z.boolean().nullable(),
-		gizmo_kind: z.enum(["none", "custom_gpt", "project", "other"]),
-		gizmo_ref: usageRef.nullable(),
-		detail: z.enum(["sampled", "selected", "not_read"]),
-		detail_status: z.enum(["fetched", "not_fetched", "unavailable", "failed"]),
-		message_counts: z
-			.object({
-				user: count,
-				assistant: count,
-				tool: count,
-				system: count,
-				other: count,
-				hidden: count,
-			})
-			.strict()
-			.nullable(),
-		turn_count: count.nullable(),
-		branch_count: count.nullable(),
-		nodes_total: count.nullable(),
-		models: usageModelCounts.nullable(),
-		features: usageFeatureCounts.nullable(),
-		user_attachments: count.nullable(),
-		user_images: count.nullable(),
-		user_chars_total: count.nullable(),
-		user_chars_max: count.nullable(),
-		assistant_chars_total: count.nullable(),
-		first_message_at: looseTimestamp.nullable(),
-		last_message_at: looseTimestamp.nullable(),
-	})
-	.strict();
-
 const perConversation = z
 	.object({ mean: average.nullable(), median: count.nullable() })
 	.strict();
@@ -359,7 +316,7 @@ export const usageSummarySchema = z
 				conversations_listed: count,
 				archived_listing: z.enum(["read", "not_available"]),
 				list_pages: count,
-				detail_mode: z.enum(["sample", "all", "selected", "none"]),
+				detail_mode: z.enum(["sample", "none"]),
 				project_listing: z
 					.object({
 						sidebar: sourceStatus,
@@ -472,7 +429,6 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	account_plan: accountPlanSchema,
 	shared_conversations: sharedConversationSchema,
 	account_profile: accountProfileSchema,
-	conversation_usage: conversationUsageSchema,
 	usage_summary: usageSummarySchema,
 };
 

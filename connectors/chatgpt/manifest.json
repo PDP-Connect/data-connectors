@@ -678,7 +678,7 @@
 					"region_code": {
 						"type": ["string", "null"],
 						"pattern": "^[A-Z0-9]{1,3}$",
-						"description": "SUB-NATIONAL subdivision code from the account profile (for example a state or voivodeship code). Raises re-identification risk together with other fields; whether to coarsen or drop it is pending legal review. The region name is not collected."
+						"description": "SUB-NATIONAL subdivision code from the account profile (for example a state or province code). Raises re-identification risk together with other fields; whether to coarsen or drop it is pending legal review. The region name is not collected."
 					},
 					"geography_source": {
 						"type": ["string", "null"],
@@ -951,287 +951,6 @@
 			"freshness_strategy": "scheduled_window"
 		},
 		{
-			"name": "conversation_usage",
-			"required": false,
-			"description": "Per-conversation usage metadata with no text. For every conversation, from the conversation list and the per-project conversation lists: timestamps, archive/pin/share flags, temporary, do-not-remember and automation flags, custom GPT or project membership (as opaque references). For the conversations read in detail (by default the 30 most recently updated; all of them, or a chosen set, on request): message counts by role, models used, tool and feature use counts, branch count and character counts.",
-			"compaction_fingerprint": {
-				"exclude_keys": []
-			},
-			"display": {
-				"label": "How you use ChatGPT, per conversation",
-				"detail": "For each conversation: when it was created and last updated, whether it is archived, pinned, shared, temporary or automated, and whether it ran in a custom GPT or a project. For your most recent conversations (and any you choose) also how many messages you and ChatGPT sent, which models answered, which tools were used (search, code, images, canvas, deep research, memory, files, voice) and how long your messages were, as numbers. No titles, message text, file names, GPT names or ids are collected; conversations and GPTs are identified only by one-way references."
-			},
-			"semantics": "mutable_state",
-			"schema": {
-				"type": "object",
-				"properties": {
-					"id": {
-						"type": "string",
-						"pattern": "^c_[0-9a-f]{32}$",
-						"description": "Opaque one-way reference to the conversation (salted SHA-256 of its id). Not the ChatGPT conversation id."
-					},
-					"create_time": {
-						"type": ["string", "null"],
-						"format": "date-time",
-						"x_pdpp_role": "event-time"
-					},
-					"update_time": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"is_archived": {
-						"type": ["boolean", "null"]
-					},
-					"is_pinned": {
-						"type": ["boolean", "null"]
-					},
-					"is_shared": {
-						"type": ["boolean", "null"],
-						"description": "True when the conversation has a share link; null when shares could not be read."
-					},
-					"is_temporary_chat": {
-						"type": ["boolean", "null"]
-					},
-					"is_do_not_remember": {
-						"type": ["boolean", "null"]
-					},
-					"is_automation": {
-						"type": ["boolean", "null"],
-						"description": "True for conversations started by a scheduled task or other automation."
-					},
-					"in_workspace": {
-						"type": ["boolean", "null"]
-					},
-					"gizmo_kind": {
-						"type": "string",
-						"enum": ["none", "custom_gpt", "project", "other"],
-						"x_pdpp_role": "secondary"
-					},
-					"gizmo_ref": {
-						"type": ["string", "null"],
-						"pattern": "^g_[0-9a-f]{32}$",
-						"description": "Opaque one-way reference to the custom GPT or project. Not the GPT id."
-					},
-					"detail": {
-						"type": "string",
-						"enum": ["sampled", "selected", "not_read"],
-						"description": "Why the per-message fields were or were not read. sampled: one of the most recently updated conversations a default run reads (30). selected: named by the run's scope (resources or a time window) or a full-detail run. not_read: list fields only; per-message fields are null. A conversation read on an earlier run is not re-sent with nulls while its list fields are unchanged."
-					},
-					"detail_status": {
-						"type": "string",
-						"enum": ["fetched", "not_fetched", "unavailable", "failed"],
-						"description": "Outcome of the detail read: fetched, unavailable (403/404), failed, or not_fetched (not targeted this run, or a deferral stopped the run first)."
-					},
-					"message_counts": {
-						"type": ["object", "null"],
-						"properties": {
-							"user": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"assistant": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"tool": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"system": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"other": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"hidden": {
-								"type": "integer",
-								"minimum": 0
-							}
-						},
-						"required": [
-							"user",
-							"assistant",
-							"tool",
-							"system",
-							"other",
-							"hidden"
-						],
-						"additionalProperties": false
-					},
-					"turn_count": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"branch_count": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"nodes_total": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"models": {
-						"type": ["array", "null"],
-						"maxItems": 500,
-						"items": {
-							"type": "object",
-							"properties": {
-								"slug": {
-									"type": "string",
-									"pattern": "^[a-z0-9][a-z0-9._:-]{0,63}$"
-								},
-								"assistant_messages": {
-									"type": "integer",
-									"minimum": 0
-								}
-							},
-							"required": ["slug", "assistant_messages"],
-							"additionalProperties": false
-						}
-					},
-					"features": {
-						"type": ["object", "null"],
-						"properties": {
-							"web_search": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"code_interpreter": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"image_generation": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"canvas": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"deep_research": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"memory_update": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"file_search": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"reasoning": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"voice": {
-								"type": "integer",
-								"minimum": 0
-							},
-							"other_tool": {
-								"type": "integer",
-								"minimum": 0
-							}
-						},
-						"required": [
-							"web_search",
-							"code_interpreter",
-							"image_generation",
-							"canvas",
-							"deep_research",
-							"memory_update",
-							"file_search",
-							"reasoning",
-							"voice",
-							"other_tool"
-						],
-						"additionalProperties": false
-					},
-					"user_attachments": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"user_images": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"user_chars_total": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"user_chars_max": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"assistant_chars_total": {
-						"type": ["integer", "null"],
-						"minimum": 0
-					},
-					"first_message_at": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					},
-					"last_message_at": {
-						"type": ["string", "null"],
-						"format": "date-time"
-					}
-				},
-				"required": [
-					"id",
-					"create_time",
-					"update_time",
-					"is_archived",
-					"is_pinned",
-					"is_shared",
-					"is_temporary_chat",
-					"is_do_not_remember",
-					"is_automation",
-					"in_workspace",
-					"gizmo_kind",
-					"gizmo_ref",
-					"detail",
-					"detail_status",
-					"message_counts",
-					"turn_count",
-					"branch_count",
-					"nodes_total",
-					"models",
-					"features",
-					"user_attachments",
-					"user_images",
-					"user_chars_total",
-					"user_chars_max",
-					"assistant_chars_total",
-					"first_message_at",
-					"last_message_at"
-				],
-				"additionalProperties": false
-			},
-			"primary_key": ["id"],
-			"consent_time_field": "create_time",
-			"selection": {
-				"fields": true,
-				"resources": true
-			},
-			"incremental": true,
-			"query": {
-				"range_filters": {
-					"create_time": ["gte", "gt", "lte", "lt"],
-					"update_time": ["gte", "gt", "lte", "lt"],
-					"first_message_at": ["gte", "gt", "lte", "lt"],
-					"last_message_at": ["gte", "gt", "lte", "lt"]
-				},
-				"aggregations": {
-					"count": true,
-					"group_by_time": ["create_time", "update_time"]
-				}
-			},
-			"coverage_strategy": "full_inventory",
-			"freshness_strategy": "scheduled_window"
-		},
-		{
 			"name": "usage_summary",
 			"required": false,
 			"description": "Aggregate ChatGPT usage with no text. Exact, from every conversation's list entry: totals and flags (archived, pinned, shared, temporary, automation), custom GPT and project share, conversations per month, active days, longest streak, first and last activity, hour-of-day and day-of-week of conversation starts. Sample-based and labelled as such: message counts, model mix and feature use over the most recently updated conversations.",
@@ -1282,7 +1001,7 @@
 							},
 							"detail_mode": {
 								"type": "string",
-								"enum": ["sample", "all", "selected", "none"]
+								"enum": ["sample", "none"]
 							},
 							"project_listing": {
 								"type": "object",
@@ -1827,9 +1546,6 @@
 					"name": "usage_summary"
 				},
 				{
-					"name": "conversation_usage"
-				},
-				{
 					"name": "account_plan"
 				}
 			]
@@ -1847,7 +1563,6 @@
 		"branch_tip_missing": "A conversation points at a message we couldn't find, so part of it is missing",
 		"branch_truncated": "A conversation is missing earlier messages from its current thread",
 		"conversation_list_unstable": "ChatGPT's conversation list changed between checks, so try again",
-		"detail_fetch_capped": "We read usage details for some conversations only; the rest are read on a later run",
 		"empty_detail": "We opened this conversation but found no messages to import",
 		"http_error": "We hit a network problem talking to the service",
 		"missing_mapping": "We opened this conversation but it had no message data to read",
