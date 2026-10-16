@@ -39,7 +39,7 @@
  */
 
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { afterAll, beforeAll, test } from "vitest";
 import {
 	assertUserFacingProgress,
 	setConnectorDiagnosticSink,
@@ -73,10 +73,10 @@ const PAGE_SIZE = 100;
 // this file take minutes and fail on wall-clock rather than behavior. Swap in
 // a zero-delay governor for the duration of this file only; production
 // `collect()` never calls this override.
-before(() => {
+beforeAll(() => {
 	__setZeroDelayHttpGovernorForTests();
 });
-after(() => {
+afterAll(() => {
 	__resetHttpGovernorForTests();
 });
 

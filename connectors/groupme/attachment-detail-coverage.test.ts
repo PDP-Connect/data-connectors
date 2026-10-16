@@ -21,8 +21,8 @@
  */
 
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
 import { evaluateStreamCoherence } from "@pdpp/reference-contract/evidence";
+import { afterAll, beforeAll, test } from "vitest";
 import type {
 	CollectContext,
 	EmittedMessage,
@@ -44,10 +44,10 @@ import { validateRecord } from "./schemas.ts";
 
 const TOKEN = "test-access-token";
 
-before(() => {
+beforeAll(() => {
 	__setZeroDelayHttpGovernorForTests();
 });
-after(() => {
+afterAll(() => {
 	__resetHttpGovernorForTests();
 });
 
