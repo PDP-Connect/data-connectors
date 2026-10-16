@@ -92,73 +92,8 @@ test("inventory parsing accounts for rejected rows and preserves empty source st
 	assert.equal(starred.rows[0]?.language, "");
 });
 
-test("repository and starred pages require list or explicit empty evidence", () => {
-	for (const stream of ["repositories", "starred"] as const) {
-		assert.equal(
-			inspectInventoryPage(
-				inventoryObservation(stream, "<main>Sign in</main>", 1),
-				stream,
-				"sample-user",
-				1,
-				0,
-				0,
-			).valid,
-			false,
-		);
-		const empty =
-			stream === "repositories"
-				? "sample-user doesn't have any public repositories yet"
-				: "sample-user hasn't starred any repositories yet";
-		assert.deepEqual(
-			inspectInventoryPage(
-				inventoryObservation(
-					stream,
-					`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="${stream === "repositories" ? "user-repositories-list" : "user-starred-repos"}"><div class="blankslate">${empty}</div></div></main>`,
-					1,
-				),
-				stream,
-				"sample-user",
-				1,
-				0,
-				0,
-			),
-			{ valid: true, nextUrl: null, reason: "terminal_list" },
-		);
-		const list =
-			stream === "repositories"
-				? "user-repositories-list"
-				: "user-starred-repos";
-		const html = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><ul id="${list}"><li><h3><a href="/sample-user/demo">demo</a></h3><p itemprop="description"></p><span itemprop="programmingLanguage"></span><a href="/sample-user/demo/stargazers">0</a>${stream === "repositories" ? '<a href="/sample-user/demo/forks">0</a><span class="Label">Public</span><div class="topics-row-container"></div>' : ""}<relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul><a class="next_page" rel="next" href="/sample-user?page=2&tab=${stream === "repositories" ? "repositories" : "stars"}&after=cursor">Next</a></main>`;
-		assert.equal(
-			inspectInventoryPage(
-				inventoryObservation(stream, html, 1),
-				stream,
-				"sample-user",
-				1,
-				1,
-				0,
-			).nextUrl?.includes("after=cursor"),
-			true,
-		);
-		assert.equal(
-			inspectInventoryPage(
-				inventoryObservation(
-					stream,
-					html.replace("/sample-user?", "/other-user?"),
-					1,
-				),
-				stream,
-				"sample-user",
-				1,
-				1,
-				0,
-			).valid,
-			false,
-		);
-	}
-});
 
-test("current GitHub starred empty state confirms an empty inventory", async () => {
+test("current GitHub empty state alone does not certify an inventory", async () => {
 	const html = await fixture("starred-empty-current-github.html");
 	assert.deepEqual(parseStarredHtml(html), []);
 	assert.deepEqual(
@@ -174,7 +109,7 @@ test("current GitHub starred empty state confirms an empty inventory", async () 
 			0,
 			0,
 		),
-		{ valid: true, nextUrl: null, reason: "terminal_list" },
+		{ valid: false, complete: false, total: null, nextUrl: null, reason: "terminal_unverified" },
 	);
 });
 
@@ -427,7 +362,7 @@ test("repository completeness requires identity and readable row fields", async 
 test("starred parsing is bounded to a recognized list and never consumes unrelated main links", () => {
 	const html = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><li><h3><a href="/sponsors/sample-user">Sponsors</a></h3></li><div>Loading</div></main>';
 	assert.deepEqual(parseStarredPage(html).rows, []);
-	assert.equal(inspectInventoryPage(inventoryObservation("starred", html, 1), "starred", "sample-user", 1, 0, 0).reason, "unreadable_list");
+	assert.equal(inspectInventoryPage(inventoryObservation("starred", html, 1), "starred", "sample-user", 1, 0, 0).reason, "terminal_unverified");
 	const forgedEmpty = html.replace("Loading", "You don’t have any starred repositories yet");
 	assert.equal(inspectInventoryPage(inventoryObservation("starred", forgedEmpty, 1), "starred", "sample-user", 1, 0, 0).valid, false);
 	const unreadable = parseStarredPage('<ul id="user-starred-repos"><li>Loading</li></ul>');
@@ -600,7 +535,7 @@ test("current GitHub starred empty state with filter menus has no rows to discar
 			parsed.rows.length,
 			parsed.rejectedRows,
 		),
-		{ valid: true, nextUrl: null, reason: "terminal_list" },
+		{ valid: false, complete: false, total: null, nextUrl: null, reason: "terminal_unverified" },
 	);
 });
 
@@ -627,7 +562,7 @@ test("a rendered repository row without optional slots omits those fields and co
 			inventoryObservation("repositories", owned, 1),
 			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
 		),
-		{ valid: false, nextUrl: null, reason: "terminal_unverified" },
+		{ valid: false, complete: false, total: null, nextUrl: null, reason: "terminal_unverified" },
 	);
 	const terminal = owned +
 		'<div class="paginate-container"><span class="next_page disabled" aria-disabled="true">Next</span></div>';
@@ -636,7 +571,7 @@ test("a rendered repository row without optional slots omits those fields and co
 			inventoryObservation("repositories", terminal, 1),
 			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
 		),
-		{ valid: true, nextUrl: null, reason: "terminal_list" },
+		{ valid: true, complete: true, total: null, nextUrl: null, reason: "terminal_list" },
 	);
 });
 

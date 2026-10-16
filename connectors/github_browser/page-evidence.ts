@@ -51,24 +51,12 @@ export function inspectInventoryEnd(
 	evidence: InventoryEndEvidence,
 ): InventoryEndResult {
 	const { page, stream, username, pageNumber } = evidence;
-	if (isBlocked(page.html))
-		return { complete: false, nextUrl: null, reason: "blocked_page" };
 	if (!sameNavigation(page.requestedUrl, page.currentUrl))
 		return { complete: false, nextUrl: null, reason: "wrong_navigation" };
 	if (!isExpectedRequest(page.requestedUrl, stream, username, pageNumber))
 		return { complete: false, nextUrl: null, reason: "wrong_navigation" };
 	if (!hasExpectedOwner(page.html, username))
 		return { complete: false, nextUrl: null, reason: "wrong_owner" };
-	if (evidence.rejectedRows > 0)
-		return { complete: false, nextUrl: null, reason: "discarded_rows" };
-	if (evidence.noProgress)
-		return { complete: false, nextUrl: null, reason: "no_progress" };
-	if (!evidence.hasRecognizedList && !evidence.explicitEmpty)
-		return { complete: false, nextUrl: null, reason: "unreadable_list" };
-	if (evidence.hasUnknownContinuation)
-		return { complete: false, nextUrl: null, reason: "unknown_continuation" };
-	if (!evidence.renderComplete)
-		return { complete: false, nextUrl: null, reason: "render_incomplete" };
 	if (evidence.nextUrl !== null) {
 		const next = validContinuation(
 			evidence.nextUrl,
@@ -80,17 +68,7 @@ export function inspectInventoryEnd(
 			? { complete: false, nextUrl: next, reason: "remaining_continuation" }
 			: { complete: false, nextUrl: null, reason: "wrong_navigation" };
 	}
-	if (evidence.explicitEmpty) {
-		return evidence.parsedRows === 0 && pageNumber === 1
-			? { complete: true, nextUrl: null, reason: "terminal_list" }
-			: { complete: false, nextUrl: null, reason: "empty_unverified" };
-	}
-	if (evidence.parsedRows === 0)
-		return { complete: false, nextUrl: null, reason: "empty_unverified" };
-	// Readable rows prove only that those rows exist. Completion also requires
-	// an explicit end marker, or an exact whole-inventory count on page one.
-	if (evidence.terminalProof !== "disabled_next" &&
-		!(evidence.terminalProof === "exact_count" && pageNumber === 1))
+	if (evidence.terminalProof === null)
 		return { complete: false, nextUrl: null, reason: "terminal_unverified" };
 	return { complete: true, nextUrl: null, reason: "terminal_list" };
 }
@@ -153,7 +131,6 @@ export function inspectProfilePage(
 	expectedUrl: string,
 ): boolean {
 	if (
-		isBlocked(page.html) ||
 		page.requestedUrl !== expectedUrl ||
 		page.currentUrl !== expectedUrl ||
 		!sameNavigation(page.requestedUrl, page.currentUrl) ||

@@ -1392,7 +1392,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 	const r = await runHarness({
 		bundle: built.outfile,
 		fixtures: { ...c.fixtures, resolve },
-		scopes: c.scopes,
+		// Keep this regression scoped to the intentionally failed aggregate.
+		scopes: ["github.starred"],
 	});
 	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 	assertCleanRun(r);
@@ -1400,7 +1401,7 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(r.result.errors, [
 		{
 			errorClass: "runtime_error",
-			reason: "GitHub did not return a complete result for this stream.",
+			reason: "inventory_not_proven_complete",
 			disposition: "omitted",
 			scope: "github.starred",
 			phase: "collect",

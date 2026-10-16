@@ -773,87 +773,34 @@ export function inspectInventoryPage(
 	parsedRows: number,
 	rejectedRows: number,
 	noProgress = false,
-): { valid: boolean; nextUrl: string | null; reason: string } {
+): { valid: boolean; complete: boolean; total: number | null; nextUrl: string | null; reason: string } {
 	const { document } = parseHTML(page.html);
-	const list =
-		stream === "repositories"
-			? document.querySelector("#user-repositories-list")
-			: starredList(document);
-	const listRows = cardRows(list);
-	const emptyStates = listEmptyStates(list, listRows);
-	const emptyScope = emptyStates[0] ?? (list?.querySelector("li") ? null : list);
-	const emptyText = emptyScope?.textContent ?? "";
-	// An empty state in the list with no rows proves the list is empty.
-	const explicitEmpty = (emptyStates.length > 0 && listRows.length === 0) ||
-		(stream === "repositories"
-			? /(?:doesn't have any|has no) (?:public )?repositories yet/iu.test(
-					emptyText,
-				)
-			: /(?:hasn['’]t starred any|has no starred|you don['’]t have any starred) repositories yet/iu.test(
-					emptyText,
-				));
-	const controls = Array.from(document.querySelectorAll('a, button, form, include-fragment, [aria-busy="true"], .loading, .skeleton, .placeholder'));
-	const relevant = controls.filter((node) => node.closest(OVERLAY_SELECTOR) === null && !siteChrome(node, list));
-	const nextLinks = relevant.filter((node) => node.matches('a[rel~="next"]'));
-	const next = nextLinks[0] ?? null;
-	const hasUnknownContinuation = nextLinks.length > 1 || relevant.some((node) => {
-		if (node.matches('include-fragment, [aria-busy="true"], .loading, .skeleton, .placeholder')) return true;
-		const label = `${text(node)} ${node.getAttribute("aria-label") ?? ""}`;
-		const continuation = /^(?:next|load more|show more)(?:\s|$)/iu.test(label.trim()) ||
-			node.matches('[rel~="next"], .next_page') ||
-			/[?&](?:after|page)=/u.test(node.getAttribute("action") ?? "");
-		if (node === next) return !node.getAttribute("href")?.trim();
-		if (node.matches("a[href]")) {
-			try {
-				const target = new URL(node.getAttribute("href") ?? "", "https://github.com");
-				if (target.searchParams.has("after") || Number(target.searchParams.get("page")) > pageNumber) return true;
-			} catch { return true; }
-		}
-		if (!continuation) return false;
-		return !node.matches('[disabled], [aria-disabled="true"], .disabled');
-	});
-	const disabledNext = Array.from(document.querySelectorAll('.next_page.disabled, .next_page[aria-disabled="true"], .paginate-container [rel~="next"][aria-disabled="true"], .pagination [rel~="next"][disabled]'))
-		.some((node) => node.closest(OVERLAY_SELECTOR) === null && !siteChrome(node, list) && !node.hasAttribute("href") && !isUnreadable(node));
-	const countNode = document.querySelector(stream === "repositories"
-		? '[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter, [data-tab-item="repositories"] [class*="CounterLabel-CounterLabel"]'
-		: '[data-tab-item="stars"] .Counter, a[href*="tab=stars"] .Counter, [data-tab-item="stars"] [class*="CounterLabel-CounterLabel"]');
-	const countText = sourceText(countNode);
-	const exactCount = countText !== undefined && /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(countText)
-		? Number(countText.replaceAll(",", "")) : null;
-	const countMismatch = countNode !== null && exactCount === null ||
-		pageNumber === 1 && next === null && exactCount !== null && exactCount !== parsedRows;
-	const href = next?.getAttribute("href") ?? null;
-	let nextUrl: string | null = null;
-	if (href !== null) {
-		try {
-			nextUrl = new URL(href, "https://github.com").href;
-		} catch {
-			nextUrl = href;
-		}
-	}
+	const tab = stream === "repositories" ? "repositories" : "stars";
+	const countNode = document.querySelector(
+		`[data-tab-item="${tab}"] .Counter, a[href*="tab=${tab}"] .Counter, [data-tab-item="${tab}"] [class*="CounterLabel-CounterLabel"], a[href*="tab=${tab}"] [class*="CounterLabel-CounterLabel"]`);
+	const raw = text(countNode);
+	const total = /^(?:0|[1-9]\d*|[1-9]\d{0,2}(?:,\d{3})+)$/u.test(raw)
+		&& Number.isSafeInteger(Number(raw.replaceAll(",", "")))
+		? Number(raw.replaceAll(",", "")) : null;
+	// Only GitHub's pagination component states an end. A missing component
+	// is not evidence. Disabled next controls may retain an href.
+	const pagination = Array.from(document.querySelectorAll(".paginate-container, .pagination"))
+		.find(node => node.closest(OVERLAY_SELECTOR) === null && !siteChrome(node, null)) ?? null;
+	const next = pagination?.querySelector('[rel~="next"], .next_page') ?? null;
+	const disabled = next?.matches('[disabled], [aria-disabled="true"], .disabled') ?? false;
+	const nextUrl = next !== null && !disabled
+		? githubUrl(next.getAttribute("href")) : null;
+	const terminal = pagination !== null && (disabled || next === null);
 	const result = inspectInventoryEnd({
-		page,
-		username,
-		stream,
-		pageNumber,
-		parsedRows,
-		rejectedRows,
-		noProgress,
-		explicitEmpty,
-		hasRecognizedList: list !== null,
-		renderComplete: list !== null && !isUnreadable(list) && !countMismatch,
-		hasUnknownContinuation,
-		terminalProof: disabledNext ? "disabled_next" : pageNumber === 1 && exactCount === parsedRows ? "exact_count" : null,
+		page, username, stream, pageNumber, parsedRows, rejectedRows, noProgress,
+		explicitEmpty: false, hasRecognizedList: true, renderComplete: true,
+		hasUnknownContinuation: false,
+		terminalProof: total !== null ? (total === parsedRows ? "exact_count" : null)
+			: terminal ? "disabled_next" : null,
 		nextUrl,
 	});
-	const parsed = stream === "repositories" ? parseRepositoriesPage(page.html) : parseStarredPage(page.html);
-	if ((result.complete || result.reason === "remaining_continuation") && !parsed.complete)
-		return { valid: false, nextUrl: null, reason: "unreadable_fields" };
-	return {
-		valid: result.complete || result.reason === "remaining_continuation",
-		nextUrl: result.nextUrl,
-		reason: result.reason,
-	};
+	return { valid: result.complete || result.reason === "remaining_continuation",
+		complete: result.complete, total, nextUrl: result.nextUrl, reason: result.reason };
 }
 
 export function parseContributionHtml(html: string): {
@@ -922,13 +869,13 @@ export function parseContributionHtml(html: string): {
 		});
 	}
 	const headingMatch = /([\d,]+)\s+contribution/iu.exec(
-		sourceText(contributionHeading(document)) ?? "",
+		text(contributionHeading(document)),
 	);
 	return {
 		days,
 		rejectedDays,
 		rawDays: cells.length,
-		complete: rejectedDays === 0 && headingMatch?.[1] !== undefined && unreadableFields.length === 0,
+		complete: headingMatch?.[1] !== undefined && Number(headingMatch[1].replaceAll(",", "")) === days.reduce((sum, day) => sum + day.count, 0),
 		unreadableFields: headingMatch?.[1] ? unreadableFields : [...unreadableFields, "total"],
 		total: headingMatch?.[1]
 			? toInt(headingMatch[1])

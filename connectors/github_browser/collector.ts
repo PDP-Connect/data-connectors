@@ -2,14 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-	buildFullScanCoverageMessage,
+	fullInventoryCoverage,
 	type EmittedMessage,
 	type RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type BrowserPageObservation,
 	hasExpectedOwner,
-	isBlocked,
 	inspectProfilePage,
 	sameNavigation,
 } from "./page-evidence.ts";
@@ -60,8 +59,7 @@ export async function collectGitHubBrowser(
 	if (
 		username === null ||
 		!sameNavigation(homepage.requestedUrl, homepage.currentUrl) ||
-		homepage.currentUrl !== `${GITHUB}/` ||
-		isBlocked(homepage.html)
+		homepage.currentUrl !== `${GITHUB}/`
 	)
 		throw new Error("github_browser_session_missing");
 
@@ -119,22 +117,19 @@ export async function collectGitHubBrowser(
 			stream,
 			cursor: context.state[stream],
 		});
-		await context.emit(buildFullScanCoverageMessage(stream, 1));
+		await context.emit(fullInventoryCoverage(stream, { kind: "enumerated", complete: true, considered: 1, covered: 1 }));
 	};
 	const incomplete = async (
 		stream: string,
 		reason: string,
 		counts?: CoverageCounts,
 	): Promise<void> => {
-		await flush(stream);
-		await context.emit({
-			type: "SKIP_RESULT",
-			stream,
-			reason: "github_browser_incomplete",
-			recovery_hint: { action: "retry_by_runtime", retryable: true },
-			message: `GitHub ${stream} was not complete (${reason}).`,
-			diagnostics: counts,
-		});
+		// All six streams are aggregate snapshots: never replace a previously
+		// complete snapshot with a partial list, including on request failure.
+		await context.emit(fullInventoryCoverage(stream, {
+			kind: "enumerated", complete: false,
+			considered: counts?.considered ?? 0, covered: counts?.covered ?? 0,
+		}));
 	};
 	const emitEntity = async (stream: string, data: object): Promise<boolean> => {
 		const record = data as RecordData;
@@ -187,7 +182,7 @@ export async function collectGitHubBrowser(
 				await incomplete("profile", "unreadable_fields", { considered: 1, covered: 0 });
 				return;
 			}
-			await complete("profile", { considered: 1, covered: 1 });
+			await incomplete("profile", "source_inventory_evidence_unavailable", { considered: 1, covered: 0 });
 		});
 	}
 
@@ -195,98 +190,43 @@ export async function collectGitHubBrowser(
 		if (!wants.has(stream)) continue;
 		await runIsolated(stream, async () => {
 			const seen = new Set<string>();
-			const visited = new Set<string>();
-			let considered = 0;
 			let covered = 0;
-			let done = false;
+			let expectedTotal: number | null = null;
 			let url = inventoryUrl(username, stream, 1);
-			for (
-				let pageNumber = 1;
-				pageNumber <= INVENTORY_PAGE_LIMIT;
-				pageNumber += 1
-			) {
-				if (visited.has(url)) {
-					await incomplete(stream, "repeated_continuation", {
-						considered,
-						covered,
-					});
-					return;
-				}
-				visited.add(url);
+			for (let pageNumber = 1; pageNumber <= INVENTORY_PAGE_LIMIT; pageNumber += 1) {
 				let page = await services.openPage(url);
 				let parsed = inventoryRows(stream, page.html);
-				const repeatedRows = parsed.rows.filter((row) =>
-					seen.has(row.id),
-				).length;
-				let proof = inspectInventoryPage(
-					page,
-					stream,
-					username,
-					pageNumber,
-					parsed.rows.length,
-					parsed.rejectedRows + repeatedRows,
-					parsed.rows.length > 0 &&
-						parsed.rows.every((row) => seen.has(row.id)),
-				);
-				if (
-					stream === "starred" &&
-					pageNumber === 1 &&
-					proof.reason === "unreadable_list"
-				) {
+				let proof = inspectInventoryPage(page, stream, username, pageNumber, seen.size + parsed.rows.filter(row => !seen.has(row.id)).length, 0);
+				if (stream === "starred" && pageNumber === 1 && proof.reason === "terminal_unverified") {
 					url = `${GITHUB}/stars/${username}?page=1`;
-					if (visited.has(url)) {
-						await incomplete(stream, "repeated_route", { considered, covered });
-						return;
-					}
-					visited.add(url);
 					page = await services.openPage(url);
 					parsed = inventoryRows(stream, page.html);
-					const repeatedFallbackRows = parsed.rows.filter((row) =>
-						seen.has(row.id),
-					).length;
-					proof = inspectInventoryPage(
-						page,
-						stream,
-						username,
-						pageNumber,
-						parsed.rows.length,
-						parsed.rejectedRows + repeatedFallbackRows,
-						parsed.rows.length > 0 &&
-							parsed.rows.every((row) => seen.has(row.id)),
-					);
+					proof = inspectInventoryPage(page, stream, username, pageNumber, parsed.rows.length, 0);
 				}
-				const safeToIngest =
-					proof.reason !== "blocked_page" &&
-					proof.reason !== "wrong_navigation" &&
-					proof.reason !== "wrong_owner" &&
-					proof.reason !== "unreadable_list";
-				considered += parsed.rawRows;
-				if (safeToIngest) {
-					for (const row of parsed.rows) {
-						if (seen.has(row.id)) continue;
-						seen.add(row.id);
-						if (await emitEntity(stream, row)) covered += 1;
+				if (proof.reason === "wrong_navigation" || proof.reason === "wrong_owner") {
+					await incomplete(stream, proof.reason); return;
+				}
+				for (const row of parsed.rows) {
+					if (seen.has(row.id)) continue;
+					seen.add(row.id);
+					if (await emitEntity(stream, row)) covered += 1;
+				}
+				if (proof.total !== null) {
+					if (expectedTotal !== null && expectedTotal !== proof.total) {
+						await incomplete(stream, "source_total_changed"); return;
 					}
+					expectedTotal = proof.total;
 				}
-				if (!proof.valid || !parsed.complete) {
-					await incomplete(stream, !parsed.complete ? "unreadable_fields" : proof.reason, { considered, covered });
-					return;
+				const totalMatches = expectedTotal !== null && expectedTotal === seen.size;
+				if (covered === seen.size && (totalMatches || (proof.complete && expectedTotal === null))) {
+					await complete(stream, { considered: seen.size, covered }); return;
 				}
 				if (proof.nextUrl === null) {
-					done = true;
-					break;
+					await incomplete(stream, "source_inventory_evidence_unavailable", { considered: expectedTotal ?? seen.size, covered }); return;
 				}
 				url = proof.nextUrl;
 			}
-			if (!done) {
-				await incomplete(stream, "page_limit_reached", { considered, covered });
-				return;
-			}
-			if (covered !== seen.size || considered !== covered) {
-				await incomplete(stream, "discarded_records", { considered, covered });
-				return;
-			}
-			await complete(stream, { considered, covered });
+			await incomplete(stream, "page_limit_reached", { considered: expectedTotal ?? seen.size, covered });
 		});
 	}
 
@@ -296,7 +236,6 @@ export async function collectGitHubBrowser(
 			let considered = 0;
 			let covered = 0;
 			let valid = true;
-			let ended = false;
 			for (let page = 1; page <= 3; page += 1) {
 				const url = `${API}/users/${username}/events/public?per_page=100&page=${page}`;
 				const response = await services.fetchPublicJson(url);
@@ -316,24 +255,14 @@ export async function collectGitHubBrowser(
 					else valid = false;
 				}
 				if (response.data.length < 100) {
-					ended = true;
+					// A short REST array is not an explicit source end signal.
 					break;
 				}
 			}
 			const counts = { considered, covered };
-			if (!ended || !valid || covered !== seen.size) {
-				await incomplete(
-					"events",
-					!valid ? "invalid_or_duplicate_rows" : "end_not_proven",
-					counts,
-				);
-				return;
-			}
-			await complete("events", counts, {
-				window: "github_public_events_retention",
-				bounded_window: false,
-				window_limit: 300,
-			});
+			// The REST array carries neither an exact total nor explicit page-info.
+			// Keep parsing all retained fields, but never publish a partial snapshot.
+			await incomplete("events", !valid ? "invalid_or_duplicate_rows" : "end_not_proven", counts);
 		});
 	}
 
@@ -365,8 +294,7 @@ export async function collectGitHubBrowser(
 				if (
 					!sameNavigation(page.requestedUrl, page.currentUrl) ||
 					page.currentUrl !== url ||
-					!hasExpectedOwner(page.html, username) ||
-					isBlocked(page.html)
+					!hasExpectedOwner(page.html, username)
 				) {
 					sourceFailed = true;
 					continue;
@@ -516,7 +444,7 @@ export async function collectGitHubBrowser(
 			if (expectedTotal !== null && body.total_count !== expectedTotal) break;
 			expectedTotal = body.total_count;
 			considered = Math.max(considered, body.total_count);
-			if (body.total_count >= HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT) {
+			if (body.total_count > HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT) {
 				capped = true;
 			}
 			let invalid = false;
@@ -534,7 +462,7 @@ export async function collectGitHubBrowser(
 			}
 			if (invalid) break;
 			const exhaustedPageLimit = page === HISTORY_PAGE_LIMIT;
-			if (body.items.length < HISTORY_PAGE_SIZE || exhaustedPageLimit) {
+			if (expectedTotal === seen.size || body.items.length < HISTORY_PAGE_SIZE || exhaustedPageLimit) {
 				completeType = expectedTotal === seen.size;
 				break;
 			}

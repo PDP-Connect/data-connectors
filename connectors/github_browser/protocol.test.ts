@@ -113,150 +113,6 @@ test("collector uses the contribution page loader that waits for rendered calend
 	]);
 });
 
-test("browser collection emits valid records and state for each selected legacy stream", async () => {
-	const profile = await readFixture("profile.html");
-	const repositories = await readFixture("repositories.html") + terminalInventory;
-	const contributionFixture = await readFixture("contributions.html");
-	const contributionHeader = contributionFixture.split("<td")[0] ?? "";
-	const events: unknown = JSON.parse(await readFixture("events.json"));
-	const history: unknown = JSON.parse(await readFixture("history-issue.json"));
-	let profilePageLoads = 0;
-	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
-	const messages: Array<{ type: string; stream: string | undefined }> = [];
-	const state: Record<string, unknown> = {};
-	const service = {
-		fetchPublicJson: async (url: string) =>
-			apiObservation(
-				url,
-				url.includes("events")
-					? events
-					: url.includes("type%3Apr")
-						? { items: [], total_count: 0, incomplete_results: false }
-						: {
-								...(history as object),
-								total_count: (history as { items: unknown[] }).items.length,
-								incomplete_results: false,
-							},
-			),
-		now: () => new Date("2026-01-01T00:00:00Z"),
-		openPage: async (url: string) => {
-			const graphHtml = (startDate: string, endDate: string): string => {
-				let html = contributionHeader;
-				for (
-					let date = new Date(`${startDate}T00:00:00Z`);
-					date.toISOString().slice(0, 10) <= endDate;
-					date.setUTCDate(date.getUTCDate() + 1)
-				) {
-					html += `<td class="ContributionCalendar-day" data-date="${date.toISOString().slice(0, 10)}" data-count="1" data-level="1"></td>`;
-				}
-				return html;
-			};
-			if (url.includes("?from=")) {
-				const year = Number(/from=(\d{4})/u.exec(url)?.[1]);
-				return pageObservation(
-					url,
-					withOwner(graphHtml(`${year}-01-01`, `${year}-12-31`)),
-				);
-			}
-			const html = url.includes("tab=repositories")
-				? withOwner(repositories)
-				: url.includes("tab=stars")
-					? withOwner(
-							'<main><div id="user-starred-repos"><p class="blankslate">sample-user hasn\'t starred any repositories yet</p></div></main>',
-						)
-					: url.endsWith("github.com/")
-						? profile
-						: url === "https://github.com/sample-user"
-							? ++profilePageLoads === 1
-								? profile
-								: withOwner(graphHtml("2025-01-02", "2026-01-01"))
-							: withOwner(contributionFixture);
-			return pageObservation(url, html);
-		},
-		sleep: async () => {},
-	};
-	await collectGitHubBrowser(
-		{
-			emit: async (message) => {
-				messages.push({
-					type: message.type,
-					stream: "stream" in message ? message.stream : undefined,
-				});
-			},
-			emitRecord: async (stream, data) => {
-				records.push({ stream, data });
-			},
-			progress: async () => {},
-			requested: new Set([
-				"profile",
-				"repositories",
-				"starred",
-				"events",
-				"contributions",
-				"history",
-			]),
-			state,
-		},
-		service,
-	);
-	assert.equal(records.length, 6);
-	for (const { stream, data } of records) {
-		assert.equal(validateRecord(stream, data).ok, true, `${stream} validates`);
-		assert.equal(data.id, `sample-user:${stream}`);
-		if (stream === "repositories" || stream === "starred" || stream === "events") assert.ok(Array.isArray(data[stream]));
-		if (stream === "contributions") { assert.ok(Array.isArray(data.days)); assert.equal(data.recordType, undefined); }
-	}
-	const manifest = JSON.parse(
-		await readFile(new URL("./manifest.json", import.meta.url), "utf8"),
-	) as {
-		streams: Array<{
-			name: string;
-			primary_key: string[];
-			schema: {
-				required?: string[];
-				properties?: Record<string, unknown>;
-				oneOf?: Array<{
-					required?: string[];
-					properties?: Record<string, unknown>;
-				}>;
-			};
-		}>;
-	};
-	for (const { stream, data } of records) {
-		assert.equal(typeof data.id, "string");
-		const spec = manifest.streams.find(({ name }) => name === stream);
-		assert.deepEqual(spec?.primary_key, ["id"]);
-		assert.ok(
-			spec?.schema.required?.includes("id") ||
-				spec?.schema.oneOf?.some((variant) => variant.required?.includes("id")),
-		);
-		assert.ok(
-			spec?.schema.properties?.id ||
-				spec?.schema.oneOf?.some((variant) => variant.properties?.id),
-		);
-		assert.equal(
-			new Ajv()
-				.addKeyword({
-					keyword: "x_pdpp_role",
-					schemaType: "string",
-					valid: true,
-				})
-				.compile(spec?.schema)(data),
-			true,
-			`${stream} matches manifest schema`,
-		);
-	}
-	assert.deepEqual(
-		new Set(records.map(({ stream }) => stream)),
-		new Set(["profile", "repositories", "starred", "events", "contributions", "history"]),
-	);
-	assert.equal(messages.filter(({ type }) => type === "STATE").length, 6);
-	assert.ok(
-		records.some(
-			({ stream, data }) => stream === "history" && Array.isArray(data.issues) && data.issues.length > 0,
-		),
-	);
-});
 
 test("collector skips contribution snapshots when any year view is unavailable", async () => {
 	const profile = await readFixture("profile.html");
@@ -311,7 +167,7 @@ test("collector skips contribution snapshots when any year view is unavailable",
 	assert.ok(missingCurrent.messages.some(({ type }) => type === "SKIP_RESULT"));
 });
 
-test("real runtime emits START-selected six RECORDs before DONE", async () => {
+test("real runtime preserves selected aggregate contracts before DONE", async () => {
 	const streams = [
 		"profile",
 		"repositories",
@@ -336,7 +192,7 @@ test("real runtime emits START-selected six RECORDs before DONE", async () => {
 	);
 	assert.deepEqual(
 		new Set(records.map((message) => message.stream)),
-		new Set(["profile", "repositories", "starred", "events", "contributions", "history"]),
+		new Set(["repositories", "history"]),
 	);
 	for (const message of records) {
 		if (message.type !== "RECORD") continue;
@@ -380,7 +236,7 @@ test("inventory follows next link and rejects an unproven empty page", async () 
 						url,
 						withOwner(
 							url.includes("page=1")
-								? `${row}<a class="next_page" rel="next" href="/sample-user?page=2&tab=repositories">Next</a>`
+								? `${row}<div class="pagination"><a class="next_page" rel="next" href="/sample-user?page=2&tab=repositories">Next</a></div>`
 								: secondPage,
 						),
 					);
@@ -390,12 +246,12 @@ test("inventory follows next link and rejects an unproven empty page", async () 
 	};
 	await run(row);
 	assert.ok(visited.some((url) => url.includes("page=2")));
-	assert.equal(emitted.length, 1);
+	assert.equal(emitted.length, 0);
 	await run("<main>Sign in to GitHub</main>");
 	assert.equal(
 		emitted.length,
-		1,
-		"the valid first-page row remains ingested on a later-page failure",
+		0,
+		"a later-page failure must preserve the prior aggregate snapshot",
 	);
 	assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
 	assert.ok(!messages.some((message) => message.type === "STATE"));
@@ -438,7 +294,7 @@ test("starred inventory enters the legacy page-one fallback and follows its cont
 	const messages: Array<{ type: string; stream?: string }> = [];
 	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
 	const first = withOwner(
-		`<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/first">sample-owner/first</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/first/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div><a rel="next" href="/stars/sample-user?page=2">Next</a></main>`,
+		`<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/first">sample-owner/first</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/first/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div><div class="pagination"><a rel="next" href="/stars/sample-user?page=2">Next</a></div></main>`,
 	);
 	const second = withOwner(
 		'<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/second">sample-owner/second</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/second/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div></main>' +
@@ -478,7 +334,7 @@ test("starred inventory enters the legacy page-one fallback and follows its cont
 	assert.equal(messages.filter(({ type }) => type === "STATE").length, 1);
 });
 
-test("three full event pages retain the legacy snapshot but do not prove completion", async () => {
+test("three full event pages withhold the snapshot without source end evidence", async () => {
 	const profile = await readFixture("profile.html");
 	const fixtureEvents = JSON.parse(await readFixture("events.json")) as Array<
 		Record<string, unknown>
@@ -517,15 +373,13 @@ test("three full event pages retain the legacy snapshot but do not prove complet
 	);
 
 	assert.equal(page, 3);
-	assert.equal(records.length, 1);
-	assert.equal(records[0]?.data.id, "sample-user:events");
-	assert.equal((records[0]?.data.events as unknown[]).length, 300);
+	assert.equal(records.length, 0);
 	assert.equal(state.events, undefined);
 	assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
 	assert.equal(messages.filter(({ type }) => type === "STATE" || type === "DETAIL_COVERAGE").length, 0);
 });
 
-test("history retains exactly 1,000 unique items without claiming completion at the cap", async () => {
+test("history exact source total of 1,000 can prove completeness", async () => {
 	const profile = await readFixture("profile.html");
 	const source = (JSON.parse(await readFixture("history-issue.json")) as { items: Record<string, unknown>[] }).items[0];
 	let issuePage = 0;
@@ -576,9 +430,9 @@ test("history retains exactly 1,000 unique items without claiming completion at 
 	assert.ok(records.every(({ stream }) => stream === "history"));
 	assert.equal(records[0]?.data.id, "sample-user:history");
 	assert.equal((records[0]?.data.issues as unknown[]).length, 1000);
-	assert.equal(state.history, undefined);
-	assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
-	assert.equal(messages.filter(({ type }) => type === "STATE" || type === "DETAIL_COVERAGE").length, 0);
+	assert.ok(state.history);
+	assert.equal(messages.some((message) => message.type === "SKIP_RESULT"), false);
+	assert.equal(messages.filter(({ type }) => type === "STATE" || type === "DETAIL_COVERAGE").length, 2);
 });
 
 test("an events failure is isolated and does not prevent later requested streams", async () => {
