@@ -335,6 +335,93 @@ test("ordinary resume: a persisted cursor resumes forward via after_id and stops
 	})();
 });
 
+test("ordinary resume: equal timestamps with advancing IDs collect and advance across pages", async () => {
+	const page1 = Array.from({ length: PAGE_SIZE }, (_, i) =>
+		groupMessage({ id: `m-tie-${String(i)}`, created_at: 1_700_000_200 }),
+	);
+	const page2 = [
+		groupMessage({ id: "m-tie-100", created_at: 1_700_000_200 }),
+		groupMessage({ id: "m-tie-101", created_at: 1_700_000_200 }),
+	];
+	const walk = stubGroupWalk({
+		messagePages: [
+			{ body: { response: { count: 102, messages: page1 } } },
+			{ body: { response: { count: 102, messages: page2 } } },
+		],
+	});
+	const afterIds: unknown[] = [];
+	try {
+		const { emitRecord, emitted } = makeHarness();
+		const outcome = await collectGroupMessages(
+			TOKEN,
+			openFingerprintCursor(new Map()),
+			undefined,
+			undefined,
+			async (_message, extra) => {
+				if (extra?.phase === "fetch" && extra.after_id !== undefined) {
+					afterIds.push(extra.after_id);
+				}
+			},
+			emitRecord,
+			null,
+			{ "group-1": "m-old-cursor" },
+		);
+
+		assert.equal(
+			outcome.failed,
+			false,
+			"equal timestamps with advancing IDs must not fail the forward walk",
+		);
+		assert.equal(walk.fetchCount(), 2, "the short second page ends the walk");
+		assert.deepEqual(afterIds, ["m-old-cursor", "m-tie-99"]);
+		assert.equal(outcome.considered, 102);
+		assert.deepEqual(
+			emitted
+				.filter((record) => record.stream === "group_messages")
+				.map((record) => record.data.id),
+			[...page1, ...page2].map((message) => message.id),
+			"every tied message emits in provider order",
+		);
+		assert.equal(outcome.nextCursors["group-1"], "m-tie-101");
+	} finally {
+		walk.restore();
+	}
+});
+
+test("ordinary resume: forward-fetch progress remains nonblank without pinning copy", async () => {
+	const walk = stubGroupWalk({
+		messagePages: [{ body: { response: { count: 0, messages: [] } } }],
+	});
+	const fetchProgress: string[] = [];
+	try {
+		const { emitRecord } = makeHarness();
+		const outcome = await collectGroupMessages(
+			TOKEN,
+			openFingerprintCursor(new Map()),
+			undefined,
+			undefined,
+			async (message, extra) => {
+				if (extra?.phase === "fetch" && extra.after_id !== undefined) {
+					fetchProgress.push(message);
+				}
+			},
+			emitRecord,
+			null,
+			{ "group-1": "m-old-cursor" },
+		);
+
+		assert.equal(outcome.failed, false);
+		assert.equal(fetchProgress.length, 1, "the forward-fetch callback ran");
+		assert.ok(
+			fetchProgress[0]?.trim(),
+			"forward-fetch progress must contain a user-facing message",
+		);
+		assertUserFacingProgress(fetchProgress.map((message) => ({ message })));
+	} finally {
+		walk.restore();
+	}
+});
+
 test("ordinary resume: no new messages (empty forward page) leaves the cursor unchanged and considered at 0", () => {
 	const walk = stubGroupWalk({
 		messagePages: [{ body: { response: { count: 0, messages: [] } } }],
