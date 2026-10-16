@@ -25,6 +25,7 @@ import {
 	type ConversationUsageProjection,
 	chatGptUsageFetchInBrowser,
 	gizmoKind,
+	mergeListItems,
 	readConversationListPage,
 	readConversationUsageProjection,
 	type UsageListItem,
@@ -686,6 +687,7 @@ function summaryFor(timezone: string | null) {
 			archived_listing: "read",
 			list_pages: 2,
 			detail_mode: "sample",
+			listing_complete: true,
 			project_listing: {
 				sidebar: "ok",
 				projects: 1,
@@ -751,6 +753,7 @@ test("usage_summary aggregates list fields exactly and labels the detail sample"
 		archived_listing: "read",
 		list_pages: 2,
 		detail_mode: "sample",
+		listing_complete: true,
 		project_listing: {
 			sidebar: "ok",
 			projects: 1,
@@ -1327,9 +1330,9 @@ test("project conversations missing from the main list are added from per-projec
 	});
 	const totals = sub(summary, "totals");
 	assert.equal(totals.conversations, 25);
-	// Project items carry no gizmo id; the project is assigned. The duplicate
-	// of conversation 0 keeps its main-list entry (no gizmo).
-	assert.equal(totals.project_conversations, 20);
+	// Project items carry no gizmo id; the project is assigned. Conversation 0
+	// is in both lists: the copies merge, and it counts as a project one.
+	assert.equal(totals.project_conversations, 21);
 	assert.equal(totals.projects_used, 1);
 	// Numeric epochs are read: the newest project item sets last activity.
 	assert.equal(summary?.last_activity_at, new Date(BASE * 1000).toISOString());
@@ -1373,6 +1376,10 @@ test("a failing project listing is counted, not fatal", async () => {
 		truncated: false,
 		conversations_added: 1,
 	});
+	// The summary is built but labelled: the listing, and so the sample,
+	// may miss the newest conversations.
+	assert.equal(sub(summary, "coverage").listing_complete, false);
+	assert.equal(sub(summary, "detail_sample").complete, false);
 	assert.equal(
 		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
 		0,
@@ -1428,8 +1435,8 @@ test("fixture capture of projected usage reads never names a raw id (index.ts ca
 	);
 	const captured: unknown[] = [];
 	const capture = {
-		captureHttp: (label: string, _body: unknown, meta: unknown) => {
-			captured.push({ label, meta });
+		captureHttp: (label: string, body: unknown, meta: unknown) => {
+			captured.push({ label, meta, body });
 		},
 	} as unknown as Parameters<typeof createChatGptApi>[0]["capture"];
 	const fakePage = {
@@ -1453,10 +1460,27 @@ test("fixture capture of projected usage reads never names a raw id (index.ts ca
 	await api.fetch("/gizmos/g-p-CANARYPROJECTA/conversations?cursor=0", {
 		projection: "conversation_list",
 	});
-	assert.equal(captured.length, 2);
+	await api.fetch("/conversations?offset=0&limit=100&order=updated", {
+		projection: "conversation_list",
+	});
+	await api.fetch("/conversations/batch", {
+		method: "POST",
+		body: { conversation_ids: [CANARY_ID] },
+		projection: "conversation_detail",
+	});
+	await api.fetch("/gizmos/snorlax/sidebar", { projection: "project_sidebar" });
+	assert.equal(captured.length, 5);
+	// Bodies keep their shape (counts, flags) but no id or cursor.
+	const list = captured[2] as {
+		body: { items: Array<Record<string, unknown>> };
+	};
+	assert.equal(list.body.items[0]?.id, "{conversation_id}");
+	assert.equal(typeof list.body.items[0]?.update_time, "number");
 	const text = JSON.stringify(captured);
 	assert.ok(!text.includes(CANARY_ID), text);
 	assert.ok(!text.includes("g-p-"), text);
+	assert.ok(!text.includes("00000000-0000-4000-9000-"), text);
+	assert.ok(!/cursor-CANARY/i.test(text), text);
 	assert.match(text, /\{conversation_id\}/);
 	assert.match(text, /\{gizmo_id\}/);
 });
@@ -1596,4 +1620,100 @@ test("the project listing stops at the run-wide project and page budget", async 
 	);
 	assert.equal(unbounded.truncated, false);
 	assert.equal(unbounded.items.length, 5);
+});
+
+test("a complete listing labels the summary complete", async () => {
+	const { run, harness } = runHarness(["usage_summary"], {
+		site: { conversations: many(3) },
+	});
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	assert.equal(sub(summary, "coverage").listing_complete, true);
+	assert.equal(sub(summary, "detail_sample").complete, true);
+});
+
+test("copies of one conversation across listings merge to the freshest view", async () => {
+	// Conversation 50 is stale in the main list (old update, no gizmo) and
+	// fresh in a project listing: the merged entry is the newest conversation,
+	// is sampled first and counts as a project conversation.
+	const stale = rawListItem(50);
+	const fresh = {
+		...projectItem(50),
+		update_time: BASE + 3600,
+		create_time: BASE - 999_999,
+	};
+	const { run, harness, calls } = runHarness(["usage_summary"], {
+		site: {
+			conversations: [...many(5), stale],
+			projects: { "g-p-CANARYPROJECTA": [[fresh]] },
+		},
+	});
+	process.env[CHATGPT_USAGE_DETAIL_ENV] = "1";
+	await run();
+	const [summary] = records(harness, "usage_summary");
+	const totals = sub(summary, "totals");
+	assert.equal(totals.conversations, 6);
+	assert.equal(totals.project_conversations, 1);
+	assert.equal(
+		sub(sub(summary, "coverage"), "project_listing").conversations_added,
+		0,
+	);
+	assert.equal(
+		summary?.last_activity_at,
+		new Date((BASE + 3600) * 1000).toISOString(),
+	);
+	assert.equal(
+		summary?.first_activity_at,
+		new Date((BASE - 999_999) * 1000).toISOString(),
+	);
+	const batch = calls.find((c) => c.path === "/conversations/batch");
+	assert.ok(batch);
+	assert.deepEqual(
+		(batch.body as { conversation_ids: string[] }).conversation_ids,
+		[rawConvId(50)],
+	);
+});
+
+test("mergeListItems is order-independent for timestamps, flags and gizmo", () => {
+	const a: UsageListItem = {
+		id: "x",
+		create_time: 100,
+		update_time: 200,
+		latest_assistant_turn_at: null,
+		is_pinned: false,
+		gizmo_id: null,
+		template_id: null,
+		is_archived: null,
+		is_temporary_chat: false,
+		is_do_not_remember: null,
+		is_automation: false,
+		in_workspace: false,
+	};
+	const b: UsageListItem = {
+		...a,
+		create_time: 50,
+		update_time: null,
+		is_pinned: true,
+		gizmo_id: "g-p-1",
+		is_archived: false,
+	};
+	for (const m of [mergeListItems(a, b), mergeListItems(b, a)]) {
+		assert.equal(m.create_time, 50);
+		assert.equal(m.update_time, 200);
+		assert.equal(m.is_pinned, true);
+		assert.equal(m.gizmo_id, "g-p-1");
+		assert.equal(m.is_archived, false);
+	}
+});
+
+test("the summary and profile advertise no resource selection", () => {
+	const manifest = JSON.parse(
+		readFileSync(join(dirname(FIXTURES), "manifest.json"), "utf8"),
+	) as {
+		streams: Array<{ name: string; selection?: { resources?: boolean } }>;
+	};
+	for (const name of ["usage_summary", "account_profile"]) {
+		const stream = manifest.streams.find((s) => s.name === name);
+		assert.equal(stream?.selection?.resources, false, name);
+	}
 });

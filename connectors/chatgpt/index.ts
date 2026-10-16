@@ -112,7 +112,11 @@ import type {
 	RawMemoryEntry,
 	RawSharedConversation,
 } from "./types.ts";
-import { chatGptUsageFetchInBrowser, usageCaptureRoute } from "./usage.ts";
+import {
+	chatGptUsageFetchInBrowser,
+	usageCaptureBody,
+	usageCaptureRoute,
+} from "./usage.ts";
 import { runUsageStreams, type UsageStreamHooks } from "./usage-stream.ts";
 
 // schemas.js is a plain-JS Zod validator; cast at the boundary to the
@@ -1944,7 +1948,12 @@ export function createChatGptApi({
 						// Projected usage reads name provider ids in the path; capture
 						// them under a route template so no raw id reaches a fixture.
 						const capturePath = projection ? usageCaptureRoute(path) : path;
-						capture.captureHttp(`${method}-${capturePath}`, result.json, {
+						// Their bodies carry raw ids too (the connector needs them in
+						// memory); capture a copy with ids and cursors replaced.
+						const captureBody = projection
+							? usageCaptureBody(result.json)
+							: result.json;
+						capture.captureHttp(`${method}-${capturePath}`, captureBody, {
 							status: result.status,
 							path: capturePath,
 							method,

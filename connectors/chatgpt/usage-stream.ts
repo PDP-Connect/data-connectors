@@ -65,6 +65,7 @@ import {
 	type ConversationUsageProjection,
 	type DetailStatus,
 	lastActivityOf,
+	mergeListItems,
 	type ProfileSourceStatus,
 	readClientContext,
 	readConversationListPage,
@@ -820,15 +821,17 @@ async function runUsageSummary(
 		});
 		return;
 	}
+	// Listings overlap; merge copies of one conversation field by field.
 	const byId = new Map<string, UsageListItem>();
 	for (const c of [...main.items, ...archived.items]) {
-		if (!byId.has(c.id)) byId.set(c.id, c);
+		const seen = byId.get(c.id);
+		byId.set(c.id, seen ? mergeListItems(seen, c) : c);
 	}
 	let projectAdded = 0;
 	for (const c of projectPass.items) {
-		if (byId.has(c.id)) continue;
-		byId.set(c.id, c);
-		projectAdded += 1;
+		const seen = byId.get(c.id);
+		if (!seen) projectAdded += 1;
+		byId.set(c.id, seen ? mergeListItems(seen, c) : c);
 	}
 	const items = [...byId.values()].sort(
 		(a, b) => (lastActivityOf(b) ?? 0) - (lastActivityOf(a) ?? 0),
@@ -865,6 +868,11 @@ async function runUsageSummary(
 			archived_listing: archivedRead ? "read" : "not_available",
 			list_pages: main.pages + archived.pages,
 			detail_mode: plan.size > 0 ? "sample" : "none",
+			listing_complete:
+				projectPass.failed === 0 &&
+				!projectPass.truncated &&
+				(projectPass.sidebar === "ok" ||
+					projectPass.sidebar === "not_available"),
 			project_listing: {
 				sidebar: projectPass.sidebar,
 				projects: projectPass.projects,

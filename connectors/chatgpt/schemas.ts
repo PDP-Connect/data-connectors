@@ -317,6 +317,7 @@ export const usageSummarySchema = z
 				archived_listing: z.enum(["read", "not_available"]),
 				list_pages: count,
 				detail_mode: z.enum(["sample", "none"]),
+				listing_complete: z.boolean(),
 				project_listing: z
 					.object({
 						sidebar: sourceStatus,

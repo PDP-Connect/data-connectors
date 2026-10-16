@@ -675,6 +675,36 @@ export function usageCaptureRoute(path: string): string {
 	return `${route}?${params.join("&")}`;
 }
 
+const CAPTURE_ID_KEYS: Record<string, string> = {
+	id: "{conversation_id}",
+	conversation_id: "{conversation_id}",
+	gizmo_id: "{gizmo_id}",
+	template_id: "{gizmo_id}",
+	project_ids: "{gizmo_id}",
+	cursor: "{redacted}",
+};
+
+/**
+ * Copy of a projected usage body safe to capture as a fixture: every value
+ * under an id-bearing key (conversation, gizmo and template ids, project id
+ * lists) and every cursor becomes a placeholder. Counts, flags and
+ * timestamps are kept, so the fixture still shows the shape.
+ */
+export function usageCaptureBody(body: unknown): unknown {
+	if (Array.isArray(body)) return body.map((v) => usageCaptureBody(v));
+	if (typeof body !== "object" || body === null) return body;
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(body)) {
+		const placeholder = CAPTURE_ID_KEYS[k];
+		if (placeholder !== undefined && v !== null && v !== undefined) {
+			out[k] = Array.isArray(v) ? v.map(() => placeholder) : placeholder;
+		} else {
+			out[k] = usageCaptureBody(v);
+		}
+	}
+	return out;
+}
+
 // ─── Projection readers (node side; the page is not trusted) ───────────
 
 export const USAGE_FEATURES = [
@@ -860,6 +890,42 @@ export function readConversationListPage(
 	return { items, raw_count: rawCount };
 }
 
+const maxOrNull = (a: number | null, b: number | null): number | null =>
+	a === null ? b : b === null ? a : Math.max(a, b);
+const minOrNull = (a: number | null, b: number | null): number | null =>
+	a === null ? b : b === null ? a : Math.min(a, b);
+const orFlag = (a: boolean | null, b: boolean | null): boolean | null =>
+	a === true || b === true ? true : a === false || b === false ? false : null;
+
+/**
+ * Merge two list entries for the same conversation (main, archived and
+ * project listings overlap). Timestamps take the freshest view (latest
+ * update, earliest create), flags are OR-ed, and a gizmo or template id from
+ * either copy is kept, so the order the listings arrive in does not matter.
+ */
+export function mergeListItems(
+	a: UsageListItem,
+	b: UsageListItem,
+): UsageListItem {
+	return {
+		id: a.id,
+		create_time: minOrNull(a.create_time, b.create_time),
+		update_time: maxOrNull(a.update_time, b.update_time),
+		latest_assistant_turn_at: maxOrNull(
+			a.latest_assistant_turn_at,
+			b.latest_assistant_turn_at,
+		),
+		is_pinned: orFlag(a.is_pinned, b.is_pinned),
+		gizmo_id: a.gizmo_id ?? b.gizmo_id,
+		template_id: a.template_id ?? b.template_id,
+		is_archived: orFlag(a.is_archived, b.is_archived),
+		is_temporary_chat: orFlag(a.is_temporary_chat, b.is_temporary_chat),
+		is_do_not_remember: orFlag(a.is_do_not_remember, b.is_do_not_remember),
+		is_automation: orFlag(a.is_automation, b.is_automation),
+		in_workspace: orFlag(a.in_workspace, b.in_workspace),
+	};
+}
+
 /** Latest known activity on a conversation from list fields. */
 export function lastActivityOf(c: UsageListItem): number | null {
 	const ts = [c.update_time, c.latest_assistant_turn_at, c.create_time].filter(
@@ -936,6 +1002,14 @@ export interface UsageSummaryInput {
 		list_pages: number;
 		detail_mode: DetailMode;
 		project_listing: ProjectListingCoverage;
+		/**
+		 * False when the project listing was incomplete (sidebar failed or
+		 * partial, a project failed, or the budget truncated it). The summary is
+		 * still built from what was listed, but it may miss conversations and
+		 * the sample may miss the newest ones, so `detail_sample.complete` is
+		 * false too.
+		 */
+		listing_complete: boolean;
 	};
 	/** False when a provider deferral stopped the sample before every target was tried. */
 	sampleComplete: boolean;
@@ -1143,6 +1217,7 @@ export function buildUsageSummaryRecord(input: UsageSummaryInput): RecordData {
 			archived_listing: input.coverage.archived_listing,
 			list_pages: input.coverage.list_pages,
 			detail_mode: input.coverage.detail_mode,
+			listing_complete: input.coverage.listing_complete,
 			project_listing: { ...input.coverage.project_listing },
 			...coverage,
 		},
@@ -1226,7 +1301,7 @@ function buildDetailSample(input: UsageSummaryInput): RecordData | null {
 		basis: "most_recently_updated",
 		n_conversations: sample.length,
 		n_read: read.length,
-		complete: input.sampleComplete,
+		complete: input.sampleComplete && input.coverage.listing_complete,
 		window_start: isoOrNull(
 			windowTimes.length > 0 ? Math.min(...windowTimes) : null,
 		),

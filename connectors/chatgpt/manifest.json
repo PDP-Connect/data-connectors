@@ -935,7 +935,7 @@
 			"primary_key": ["id"],
 			"selection": {
 				"fields": true,
-				"resources": true
+				"resources": false
 			},
 			"incremental": true,
 			"query": {
@@ -1003,6 +1003,10 @@
 								"type": "string",
 								"enum": ["sample", "none"]
 							},
+							"listing_complete": {
+								"type": "boolean",
+								"description": "False when the project listing was incomplete (sidebar failed or partial, a project listing failed, or the run-wide budget truncated it). The summary is still built from what was listed but may miss conversations; detail_sample.complete is then false as well. An incomplete main or archived list withholds the summary instead."
+							},
 							"project_listing": {
 								"type": "object",
 								"description": "Project conversations are listed per project (they are missing from the main list). sidebar: outcome of the read that names the projects; failed: projects whose listing stopped early; conversations_added: conversations found only through a project.",
@@ -1064,6 +1068,7 @@
 							"archived_listing",
 							"list_pages",
 							"detail_mode",
+							"listing_complete",
 							"project_listing",
 							"detail_fetched",
 							"detail_unavailable",
@@ -1452,7 +1457,7 @@
 			"primary_key": ["id"],
 			"selection": {
 				"fields": true,
-				"resources": true
+				"resources": false
 			},
 			"incremental": true,
 			"query": {
