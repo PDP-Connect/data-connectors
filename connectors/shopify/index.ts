@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.28)
+ * PDPP Shopify (Shop app) Connector (v0.2.29)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
@@ -47,6 +47,7 @@
  * normalization and schema validation.
  *
  * CHANGES
+ *   v0.2.29 (2026-10-16) — recognize shop.com redirects and preserve order identities.
  *   v0.2.28 (2026-10-15) — bound browser reads, withhold incomplete rows, and
  *     require request-bound terminal evidence before pruning.
  *   v0.2.27 (2026-10-15) — restore bootstrap and continuation loading, bind
@@ -80,6 +81,7 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
+	canonicalShopUrl,
 	collectAllOrderRefs,
 	extractOrdersWithCoverage,
 	hasDeclaredOrderTotal,
@@ -87,6 +89,7 @@ import {
 	hasOrderCountMismatch,
 	hasOrdersConnection,
 	hasVerifiedOrdersEnd,
+	isShopOrigin,
 	parseDomOrderCards,
 	resolveOrderId,
 } from "./parsers.ts";
@@ -207,9 +210,15 @@ export function shopSkipDiagnosticsInPage(): ShopSkipDiagnostics {
 	}
 	interface WindowWithApolloState { __APOLLO_STATE__?: Record<string, unknown> }
 	const ssrState = (window as Window & WindowWithApolloState).__APOLLO_STATE__;
-	const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="shop.app"]'));
+	const links = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
 	const cardKeys = new Set(
 		links.flatMap((link) => {
+			try {
+				const origin = new URL(link.getAttribute("href") ?? "", location.href).origin;
+				if (origin !== "https://shop.app" && origin !== "https://shop.com") return [];
+			} catch {
+				return [];
+			}
 			const card = link.closest(
 				'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
 			) ?? link;
@@ -298,7 +307,13 @@ export function readShopOrderPageEvidenceInPage(): ShopOrderPageEvidence {
 		);
 	});
 	const domCardCount = new Set(
-		Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="shop.app"]')).flatMap((link) => {
+		Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]')).flatMap((link) => {
+			try {
+				const origin = new URL(link.getAttribute("href") ?? "", location.href).origin;
+				if (origin !== "https://shop.app" && origin !== "https://shop.com") return [];
+			} catch {
+				return [];
+			}
 			const card = link.closest('.order-card, [data-testid*="order"], [data-test*="order"], div[class]') ?? link;
 			const text = (card.textContent ?? "").replace(/\s+/g, " ").trim();
 			return /(?:\$\s*[\d,]+(?:\.\d{1,2})?|[\d,]+(?:\.\d{1,2})?\s*(?:USD|EUR|GBP|CAD)\b)/i.test(text) ||
@@ -309,7 +324,7 @@ export function readShopOrderPageEvidenceInPage(): ShopOrderPageEvidence {
 		url: `${url.origin}${url.pathname}${url.search}`,
 		navigation: String(performance.timeOrigin),
 		orderContext,
-		blocked: login || blockedText || url.origin !== "https://shop.app" || url.pathname !== "/account/order-history",
+		blocked: login || blockedText || (url.origin !== "https://shop.app" && url.origin !== "https://shop.com") || url.pathname !== "/account/order-history",
 		pageHeight: Math.max(document.body?.scrollHeight ?? 0, document.documentElement?.scrollHeight ?? 0),
 		domHasContinuation,
 		domHasEndMarker,
@@ -471,7 +486,7 @@ export function hasVerifiedEmptyOrderHistoryInPage(): boolean {
 		"your order history is empty",
 	]);
 	if (
-		location.origin !== "https://shop.app" ||
+		(location.origin !== "https://shop.app" && location.origin !== "https://shop.com") ||
 		location.pathname !== "/account/order-history" ||
 		document.querySelector(
 			'input[type="email"], input[name="email"], input[type="password"], input[autocomplete="one-time-code"], input[name="code"]',
@@ -624,7 +639,7 @@ export function orderRecord(order: ParsedOrder): RecordData {
 		currency: order.currency,
 		item_count: order.itemCount,
 		line_item_titles: order.lineItemTitles,
-		detail_url: order.detailUrl,
+		detail_url: canonicalShopUrl(order.detailUrl),
 	};
 }
 
@@ -918,7 +933,7 @@ function resolveOrderIdentity(order: ParsedOrder): string | null {
 	try {
 		const url = new URL(id);
 		const pathId = url.pathname.match(/^\/orders?\/([^/]+)\/?$/)?.[1];
-		if (url.origin === "https://shop.app" && pathId) {
+		if (isShopOrigin(url.origin) && pathId) {
 			return `shop-order:${decodeURIComponent(pathId)}`;
 		}
 	} catch {
@@ -1315,8 +1330,8 @@ async function hasShopOrderHistorySession(page: Page): Promise<boolean> {
 	try {
 		const currentUrl = new URL(page.url());
 		if (
-			currentUrl.origin !== "https://shop.app" ||
-			!currentUrl.pathname.startsWith("/account/order-history")
+			!isShopOrigin(currentUrl.origin) ||
+			currentUrl.pathname !== "/account/order-history"
 		) {
 			return false;
 		}

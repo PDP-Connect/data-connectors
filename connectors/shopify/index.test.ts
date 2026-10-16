@@ -28,6 +28,7 @@ import type {
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	collectShopify,
+	orderRecord,
 	walkOrdersCache,
 	evaluateShopReaderInMainWorld,
 	ensureShopifySession,
@@ -1479,3 +1480,57 @@ function letSwitchingEvidence(): () => Promise<{
 		domHasContinuation: false, domHasEndMarker: true, domCardCount: 1,
 	});
 }
+
+test("Shop session accepts shop.com redirect with tracking parameters without handoff", async () => {
+	const navigations: string[] = [];
+	const page = Object.assign({} as Page, {
+		goto: async (url: string) => { navigations.push(url); return null; },
+		url: () => "https://shop.com/account/order-history?_m_id=fixture&_m_attempted=1",
+		waitForFunction: async () => ({}),
+		evaluate: async (reader: unknown) => reader === hasShopOrderHistoryContextInPage,
+	});
+	await ensureShopifySession({
+		capture: null, page,
+		manualLogin: async () => { throw new Error("already signed in"); },
+		sendInteraction: async (): Promise<never> => { throw new Error("unexpected handoff"); },
+	});
+	assert.deepEqual(navigations, ["https://shop.app/account/order-history"]);
+});
+
+test("Shop page readers recognize both origins and reject lookalike order pages and cards", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("**/*", (route) => route.fulfill({
+			status: 200, contentType: "text/html",
+			body: '<div id="root"><h1>Orders</h1><span>No orders yet</span></div>',
+		}));
+		for (const origin of ["https://shop.app", "https://shop.com", "https://shop.com.evil"]) {
+			await page.goto(origin + "/account/order-history?_m_id=fixture&_m_attempted=1");
+			await page.evaluate(installApolloFixtureInPage, makeCacheWithVerifiedEmptyOrdersConnection());
+			const trusted = origin !== "https://shop.com.evil";
+			assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).blocked, !trusted);
+			assert.equal(await page.evaluate(hasVerifiedEmptyOrderHistoryInPage), trusted);
+		}
+		await page.goto("https://shop.com/account/order-history");
+		for (const origin of ["https://shop.app", "https://shop.com", "https://shop.com.evil", "http://shop.com"]) {
+			await page.setContent(`<div class="order-card"><a href="${origin}/orders/fixture">Acme Goods</a><div>2 items · $19.99</div></div>`);
+			const count = origin === "https://shop.app" || origin === "https://shop.com" ? 1 : 0;
+			assert.equal((await page.evaluate(shopSkipDiagnosticsInPage)).dom_card_count, count);
+			assert.equal((await page.evaluate(readShopOrderPageEvidenceInPage)).domCardCount, count);
+		}
+	} finally {
+		await browser.close();
+	}
+});
+
+test("Shop order records keep the same primary key and fingerprint fields across domains", () => {
+	const order = {
+		id: "https://shop.app/orders/same-order", detailUrl: "https://shop.app/orders/same-order",
+		currency: "USD", itemCount: 1, lineItemTitles: [], merchantName: "Acme",
+		orderNumber: null, placedAt: null, status: "Delivered", totalCents: 1000,
+	};
+	assert.deepEqual(orderRecord({
+		...order, id: "https://shop.com/orders/same-order", detailUrl: "https://shop.com/orders/same-order",
+	}), orderRecord(order));
+});

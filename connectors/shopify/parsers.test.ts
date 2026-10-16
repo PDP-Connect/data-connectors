@@ -454,3 +454,16 @@ test("a connected cursor chain has no outstanding continuation after its termina
 	assert.equal(hasVerifiedOrdersEnd(cache), true);
 	assert.equal(hasNextOrdersPage(cache), false, "historical first-page continuation is already fulfilled");
 });
+
+
+test("Shop DOM links canonicalize both origins and reject lookalikes", () => {
+	const card = (origin: string) => `<div class="order-card"><a href="${origin}/orders/same-order">Acme Goods</a><div>2 items · $19.99</div></div>`;
+	const expected = parseDomOrderCards(card("https://shop.app"));
+	assert.equal(expected.length, 1);
+	assert.deepEqual(parseDomOrderCards(card("https://shop.com")), expected);
+	for (const origin of ["https://shop.com.evil", "https://shop.app.evil", "http://shop.com", "https://shop.com:444", "https://evil.test/?shop.com"]) {
+		assert.deepEqual(parseDomOrderCards(card(origin)), [], origin);
+	}
+	const mixed = '<div class="order-card"><a href="https://shop.com/merchant/acme">Acme Goods</a><div>2 items · $19.99</div><a href="https://shop.app/orders/same-order">View order</a></div>';
+	assert.equal(parseDomOrderCards(mixed)[0]?.id, "https://shop.app/orders/same-order");
+});

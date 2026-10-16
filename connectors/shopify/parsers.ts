@@ -19,6 +19,25 @@ import { parseHTML } from "linkedom";
 import type { ApolloCache, ApolloCacheEntry, ParsedOrder } from "./types.ts";
 import { isApolloRef } from "./types.ts";
 
+/** Exact origins only: reject lookalikes, alternate schemes, and ports. */
+export function isShopOrigin(origin: string): boolean {
+	return origin === "https://shop.app" || origin === "https://shop.com";
+}
+
+/** Preserve historical shop.app identities when Shop changes its serving domain. */
+export function canonicalShopUrl(value: string): string {
+	try {
+		const url = new URL(value);
+		if (isShopOrigin(url.origin)) {
+			url.hostname = "shop.app";
+			return url.href;
+		}
+	} catch {
+		// Non-URL source IDs retain their original namespace.
+	}
+	return value;
+}
+
 const CENTS_PER_UNIT = 100;
 const SHOP_ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const PAGINATED_LIST_KEY_RE = /^deliveriesOrdersList:/;
@@ -42,7 +61,7 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 	const orders: ParsedOrder[] = [];
 	const seen = new Set<string>();
 	for (const link of document.querySelectorAll<HTMLAnchorElement>(
-		'a[href*="shop.app"]',
+		"a[href]",
 	)) {
 		const href = link.getAttribute("href") ?? "";
 		let url: URL;
@@ -51,7 +70,7 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		} catch {
 			continue;
 		}
-		if (url.origin !== "https://shop.app") continue;
+		if (!isShopOrigin(url.origin)) continue;
 		const card =
 			link.closest<HTMLElement>(
 				'.order-card, [data-testid*="order"], [data-test*="order"], div[class]',
@@ -85,8 +104,8 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 		const status = text.match(SHOP_STATUS_RE)?.[0] ?? null;
 		orders.push({
 			currency: money ? (money[3]?.toUpperCase() ?? "USD") : null,
-			detailUrl: orderUrl.href,
-			id: orderUrl.href,
+			detailUrl: canonicalShopUrl(orderUrl.href),
+			id: canonicalShopUrl(orderUrl.href),
 			itemCount: itemCount ? Number(itemCount[1]) : null,
 			lineItemTitles: [],
 			merchantName,
@@ -101,7 +120,7 @@ export function parseDomOrderCards(html: string): ParsedOrder[] {
 
 function resolveCardOrderUrl(card: Element, fallback: URL): URL {
 	for (const cardLink of card.querySelectorAll<HTMLAnchorElement>(
-		'a[href*="shop.app"]',
+		"a[href]",
 	)) {
 		const href = cardLink.getAttribute("href") ?? "";
 		let url: URL;
@@ -110,7 +129,7 @@ function resolveCardOrderUrl(card: Element, fallback: URL): URL {
 		} catch {
 			continue;
 		}
-		if (url.origin === "https://shop.app" && /\/orders?\//.test(url.pathname)) {
+		if (isShopOrigin(url.origin) && /\/orders?\//.test(url.pathname)) {
 			return url;
 		}
 	}
@@ -347,7 +366,7 @@ export function hasOrderCountMismatch(cache: ApolloCache): boolean {
 
 /** The one source ID normalization path used by parsing and coverage checks. */
 export function resolveOrderId(value: unknown): string | null {
-	if (typeof value === "string") return value.length > 0 ? value : null;
+	if (typeof value === "string") return value.length > 0 ? canonicalShopUrl(value) : null;
 	if (typeof value === "number" && Number.isFinite(value)) return String(value);
 	return null;
 }
