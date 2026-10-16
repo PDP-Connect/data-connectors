@@ -314,7 +314,7 @@ test("seven-day sleep consent requests and emits only its seven source days", as
     assert.deepEqual(h.failures, []);
   });
   assert.equal(requests.length, 1);
-  assert.ok(requests[0].includes("start=2020-01-02&end=2020-01-08"));
+  assert.ok(requests[0]?.includes("start=2020-01-02&end=2020-01-08"));
 });
 
 test("one failed window preserves successful records but reports failure and a safe retry cursor", async () => {
