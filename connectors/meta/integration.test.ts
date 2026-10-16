@@ -567,7 +567,7 @@ function makeCtx(args: {
 	const { calls, page } = makeFakePage({
 		...args.pageOptions,
 		fetchScript: args.fetchScript,
-		profileEnvelope: args.profileEnvelope,
+		...(args.profileEnvelope === undefined ? {} : { profileEnvelope: args.profileEnvelope }),
 		...(args.postsScript ? { postsScript: args.postsScript } : {}),
 		...(args.profilePageUser ? { profilePageUser: args.profilePageUser } : {}),
 		webInfoUser:
