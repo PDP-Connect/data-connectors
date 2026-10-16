@@ -207,7 +207,9 @@ test("CI installs isolated tools before verification without changing mutation g
 	assert.ok(install < ci.indexOf("run: npm run test"));
 	// Root helper tests sit outside the package glob, so CI must name them.
 	const helperTests = ci.indexOf(
-		"run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs",
+		"run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs",
 	);
-	assert.ok(helperTests > install && helperTests < ci.indexOf("run: npm run verify"));
+	assert.ok(
+		helperTests > install && helperTests < ci.indexOf("run: npm run verify"),
+	);
 });

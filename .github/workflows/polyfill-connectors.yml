@@ -114,7 +114,7 @@ jobs:
 
       - name: Test GroupMe mutation helpers
         # Root helper tests fall outside the package's scripts/**/*.test.mjs glob.
-        run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs
+        run: node --test scripts/groupme-mutation/dispatch.test.mjs scripts/groupme-mutation/tools.test.mjs scripts/groupme-mutation/select.test.mjs
 
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
