@@ -125,7 +125,7 @@ export async function collectGitHubBrowser(
 		counts?: CoverageCounts,
 	): Promise<void> => {
 		if (stream === "profile") {
-			await context.emit({ type: "SKIP_RESULT", stream, reason, message: reason,
+			await context.emit({ type: "SKIP_RESULT", stream, reason: "github_browser_incomplete", message: `GitHub did not return a complete result for this stream: ${reason}.`, diagnostics: { cause: reason },
 				recovery_hint: { action: "retry_by_runtime", retryable: true } });
 			return;
 		}
