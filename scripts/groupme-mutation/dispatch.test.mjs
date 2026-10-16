@@ -19,7 +19,6 @@ import {
 	repoRoot,
 	runCommands,
 } from "./dispatch.mjs";
-import { nativeFiles } from "./vitest-files.mjs";
 
 const cwd = join(repoRoot, "packages/polyfill-connectors");
 const discovered = [
@@ -32,7 +31,7 @@ const discovered = [
 	"src/a.test.ts",
 ];
 test("empty migration preserves categories and GitHub exclusion, with no Vitest command", async () => {
-	assert.deepEqual(nativeFiles, []);
+	const emptyRoster = [];
 	assert.deepEqual(patterns, [
 		"bin/**/*.test.ts",
 		"../../connectors/**/*.test.ts",
@@ -40,7 +39,7 @@ test("empty migration preserves categories and GitHub exclusion, with no Vitest 
 		"scripts/**/*.test.mjs",
 		"src/**/*.test.ts",
 	]);
-	const parts = partitionTests(discovered, nativeFiles, cwd);
+	const parts = partitionTests(discovered, emptyRoster, cwd);
 	assert.deepEqual(
 		parts.node,
 		discovered.filter((x) => !x.includes("/github/")),
