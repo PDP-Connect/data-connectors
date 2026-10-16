@@ -414,17 +414,14 @@ test("repository completeness requires identity and readable row fields", async 
 	const wrongRoute = parseRepositoriesPage(html.replace('href="/sample-user/demo"', 'href="/sponsors/sample-user"'));
 	assert.equal(wrongRoute.rejectedRows, 1);
 	for (const unreadable of [
-		html.replace('<a href="/sample-user/demo/stargazers">12</a>', ""),
 		html.replace('<a href="/sample-user/demo/forks">2</a>', '<a href="/sample-user/demo/forks">Loading</a>'),
-		html.replace('<a class="topic-tag" href="/topics/fixture">fixture</a>', ""),
+		html.replace('<a href="/sample-user/demo/stargazers">12</a>', '<a href="/sample-user/demo/stargazers">many</a>'),
 		html.replace('<relative-time datetime="2026-01-02T00:00:00Z"></relative-time>', ""),
 	]) {
 		const parsed = parseRepositoriesPage(unreadable);
 		assert.equal(parsed.rows.length, 1);
 		assert.equal(parsed.complete, false);
 	}
-	const absent = parseRepositoriesPage(html.replace('<a href="/sample-user/demo/stargazers">12</a>', ""));
-	assert.equal(absent.rows[0]?.stars, undefined);
 });
 
 test("starred parsing is bounded to a recognized list and never consumes unrelated main links", () => {
@@ -496,7 +493,9 @@ test("profile partial collection entries preserve known fields and count missing
 	assert.equal(pinned.row?.pinnedRepositories?.[0]?.fullName, "sample-user/demo");
 	assert.equal(pinned.row?.pinnedRepositories?.[0]?.description, "Known");
 	assert.equal(pinned.row?.pinnedRepositories?.[0]?.stars, undefined);
-	assert.equal(pinned.complete, false);
+	assert.equal(pinned.complete, true);
+	const malformedPinned = parseProfilePage(html.replace('<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><li><a href="/sample-user/demo">demo</a><a href="/sample-user/demo/stargazers">many</a></li></div>'), "https://github.com/sample-user");
+	assert.equal(malformedPinned.complete, false);
 	const broken = parseProfilePage(html.replace('<div class="profile-achievements"></div>', '<div class="profile-achievements"><div class="js-achievement-card">Unreadable</div></div>'), "https://github.com/sample-user");
 	assert.equal(broken.complete, false);
 	assert.equal(broken.rejectedEntries, 1);
@@ -533,9 +532,11 @@ test("current GitHub profile: contribution heading, tab counter, badges and empt
 	// An empty rendered details list proves company, location and website are unset.
 	for (const key of ["company", "location", "website"] as const)
 		assert.equal(key in (parsed.row ?? {}), false);
-	// The page shows no follower counts, so the profile must not claim completion.
-	assert.deepEqual(parsed.unreadableFields, ["followers", "following"]);
-	assert.equal(parsed.complete, false);
+	// The page renders no follower elements: those fields are omitted, not unreadable.
+	for (const key of ["followers", "following"] as const)
+		assert.equal(key in (parsed.row ?? {}), false);
+	assert.deepEqual(parsed.unreadableFields, []);
+	assert.equal(parsed.complete, true);
 });
 
 test("profile details list with an entry that has no readable fields stays unreadable", () => {
@@ -599,4 +600,78 @@ test("current GitHub starred empty state with filter menus has no rows to discar
 		),
 		{ valid: true, nextUrl: null, reason: "terminal_list" },
 	);
+});
+
+test("a rendered repository row without optional slots omits those fields and counts as read", async () => {
+	const html = await fixture("repositories.html");
+	const bare = html
+		.replace('<p itemprop="description">Synthetic fixture repository</p>', "")
+		.replace('<span itemprop="programmingLanguage">TypeScript</span>', "")
+		.replace('<a href="/sample-user/demo/stargazers">12</a>', "")
+		.replace('<a href="/sample-user/demo/forks">2</a>', "")
+		.replace('<a class="topic-tag" href="/topics/fixture">fixture</a>', "");
+	const parsed = parseRepositoriesPage(bare);
+	assert.equal(parsed.rows.length, 1);
+	assert.deepEqual(parsed.unreadableFields, []);
+	assert.equal(parsed.complete, true);
+	const row = parsed.rows[0] ?? ({} as Record<string, unknown>);
+	for (const key of ["description", "language", "stars", "forks", "topics"]) {
+		assert.equal(key in row, false, key);
+	}
+	assert.equal(validateRecord("repositories", { id: "sample-user:repositories", repositories: parsed.rows }).ok, true);
+	assert.deepEqual(
+		inspectInventoryPage(
+			inventoryObservation("repositories", `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>${bare}`, 1),
+			"repositories", "sample-user", 1, parsed.rows.length, parsed.rejectedRows,
+		),
+		{ valid: true, nextUrl: null, reason: "terminal_list" },
+	);
+});
+
+test("a repository row slot that is present but malformed or loading still vetoes", async () => {
+	const html = await fixture("repositories.html");
+	for (const changed of [
+		html.replace('<a href="/sample-user/demo/stargazers">12</a>', '<a href="/sample-user/demo/stargazers">many</a>'),
+		html.replace("<li>", '<li aria-busy="true">'),
+		html.replace('<span itemprop="programmingLanguage">TypeScript</span>', '<span itemprop="programmingLanguage" class="loading">Loading</span>'),
+	]) {
+		assert.equal(parseRepositoriesPage(changed).complete, false);
+	}
+});
+
+test("a starred row without optional slots omits them and a malformed star count vetoes", () => {
+	const base = (inner: string): string => `<main><ul id="user-starred-repos"><li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3>${inner}<relative-time datetime="2026-01-02T00:00:00Z"></relative-time></li></ul></main>`;
+	const bare = parseStarredPage(base(""));
+	assert.equal(bare.complete, true);
+	for (const key of ["description", "language", "stars"]) assert.equal(key in (bare.rows[0] ?? {}), false, key);
+	assert.equal(parseStarredPage(base('<a href="/sample-owner/demo/stargazers">many</a>')).complete, false);
+});
+
+test("a profile without follower elements omits those fields; an unreadable one vetoes", async () => {
+	const html = await fixture("profile.html");
+	const bare = parseProfilePage(
+		html.replace('<a href="/sample-user?tab=followers"><span>42</span></a>', "").replace('<a href="/sample-user?tab=following"><span>7</span></a>', ""),
+		"https://github.com/sample-user",
+	);
+	assert.equal(bare.complete, true);
+	assert.deepEqual(bare.unreadableFields, []);
+	assert.equal("followers" in (bare.row ?? {}), false);
+	assert.equal("following" in (bare.row ?? {}), false);
+	for (const changed of [
+		html.replace("<span>42</span>", "<span>lots</span>"),
+		html.replace("<span>7</span>", "<span>Loading</span>"),
+	]) {
+		assert.equal(parseProfilePage(changed, "https://github.com/sample-user").complete, false);
+	}
+});
+
+test("a fully rendered pinned card without optional slots omits them and a loading card vetoes", async () => {
+	const html = await fixture("profile.html");
+	const empty = '<div class="js-pinned-items-reorder-container"></div>';
+	const card = (inner: string): string => `<div class="js-pinned-items-reorder-container"><li><a href="/sample-user/demo">demo</a>${inner}</li></div>`;
+	const bare = parseProfilePage(html.replace(empty, card("")), "https://github.com/sample-user");
+	assert.equal(bare.complete, true);
+	const pinned = bare.row?.pinnedRepositories?.[0] ?? {};
+	for (const key of ["description", "language", "stars"]) assert.equal(key in pinned, false, key);
+	assert.equal(parseProfilePage(html.replace(empty, card('<p class="pinned-item-desc" aria-busy="true">x</p>')), "https://github.com/sample-user").complete, false);
 });

@@ -188,6 +188,19 @@ function recordField<T extends object, K extends keyof T>(
 	else row[key] = value;
 }
 
+// GitHub renders an optional slot only when it has a value. An absent element
+// is a field-level omission; a present element that cannot be read vetoes.
+function recordOptional<T extends object, K extends keyof T>(
+	row: T,
+	key: K,
+	node: Element | null,
+	read: (node: Element) => T[K] | undefined,
+	unreadableFields: string[],
+): void {
+	if (node === null) return;
+	recordField(row, key, read(node), unreadableFields);
+}
+
 function cardRows(list: Element | null): Element[] {
 	if (list === null) return [];
 	return Array.from(list.querySelectorAll("li")).filter((row) => {
@@ -254,8 +267,9 @@ export function parseProfilePage(
 		recordField(row, "website", sourceAttribute(document.querySelector('[itemprop="url"]'), "href"), unreadableFields);
 	}
 	recordField(row, "avatarUrl", sourceAttribute(document.querySelector("img.avatar-user"), "src"), unreadableFields);
-	recordField(row, "followers", sourceCount(document.querySelector('a[href$="?tab=followers"] span, a[href$="?tab=followers"]')), unreadableFields);
-	recordField(row, "following", sourceCount(document.querySelector('a[href$="?tab=following"] span, a[href$="?tab=following"]')), unreadableFields);
+	// The profile renders followers and following only when it has them.
+	recordOptional(row, "followers", document.querySelector('a[href$="?tab=followers"] span, a[href$="?tab=followers"]'), sourceCount, unreadableFields);
+	recordOptional(row, "following", document.querySelector('a[href$="?tab=following"] span, a[href$="?tab=following"]'), sourceCount, unreadableFields);
 	// The tab shows the count in a counter label plus a visually hidden "(n)" copy.
 	const repoCountNode = document.querySelector('[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter, [data-tab-item="repositories"] [class*="CounterLabel-CounterLabel"], a[href*="tab=repositories"] [class*="CounterLabel-CounterLabel"]')
 		?? document.querySelector('[data-tab-item="repositories"], a[href*="tab=repositories"]');
@@ -279,17 +293,16 @@ export function parseProfilePage(
 				rejectedEntries += 1;
 				continue;
 			}
-			const description = sourceText(item.querySelector("p.pinned-item-desc"));
-			const language = sourceText(item.querySelector('[itemprop="programmingLanguage"]'));
-			const stars = sourceCount(item.querySelector('a[href$="/stargazers"]'));
-			if (description === undefined || language === undefined || stars === undefined) rejectedEntries += 1;
-			row.pinnedRepositories?.push({
+			const card: NonNullable<ProfileRow["pinnedRepositories"]>[number] = {
 				fullName,
 				url: `https://github.com/${fullName}`,
-				...(description === undefined ? {} : { description }),
-				...(language === undefined ? {} : { language }),
-				...(stars === undefined ? {} : { stars }),
-			});
+			};
+			const unreadableSlots: string[] = isUnreadable(item) ? ["card"] : [];
+			recordOptional(card, "description", item.querySelector("p.pinned-item-desc"), sourceText, unreadableSlots);
+			recordOptional(card, "language", item.querySelector('[itemprop="programmingLanguage"]'), sourceText, unreadableSlots);
+			recordOptional(card, "stars", item.querySelector('a[href$="/stargazers"]'), sourceCount, unreadableSlots);
+			if (unreadableSlots.length > 0) rejectedEntries += 1;
+			row.pinnedRepositories?.push(card);
 		}
 	}
 
@@ -378,17 +391,18 @@ export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryR
 		seen.add(url);
 		const row: RepositoryRow = { id: url, name, url };
 		const missing: string[] = [];
-		recordField(row, "description", sourceText(source.querySelector('p[itemprop="description"]')), missing);
-		recordField(row, "language", sourceText(source.querySelector('[itemprop="programmingLanguage"]')), missing);
-		recordField(row, "stars", sourceCount(source.querySelector('a[href$="/stargazers"]')), missing);
-		recordField(row, "forks", sourceCount(source.querySelector('a[href$="/forks"]')), missing);
+		if (isUnreadable(source)) missing.push("row");
+		recordOptional(row, "description", source.querySelector('p[itemprop="description"]'), sourceText, missing);
+		recordOptional(row, "language", source.querySelector('[itemprop="programmingLanguage"]'), sourceText, missing);
+		recordOptional(row, "stars", source.querySelector('a[href$="/stargazers"]'), sourceCount, missing);
+		recordOptional(row, "forks", source.querySelector('a[href$="/forks"]'), sourceCount, missing);
 		recordField(row, "visibility", sourceText(source.querySelector("span.Label")), missing);
 		recordField(row, "updatedAt", sourceTime(source.querySelector("relative-time")), missing);
 		const topics = Array.from(source.querySelectorAll("a.topic-tag"));
 		const topicList = source.querySelector(".topics-row-container, [data-testid='repository-topics']");
-		if (topics.length === 0 && (topicList === null || isUnreadable(topicList))) {
+		if (topics.length === 0 && topicList !== null && isUnreadable(topicList)) {
 			missing.push("topics");
-		} else {
+		} else if (topics.length > 0 || topicList !== null) {
 			row.topics = [];
 			for (const topic of topics) {
 				const value = sourceText(topic);
@@ -431,9 +445,10 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 		seen.add(url);
 		const row: StarredRow = { id: url, fullName, url };
 		const missing: string[] = [];
-		recordField(row, "description", sourceText(source.querySelector("p")), missing);
-		recordField(row, "language", sourceText(source.querySelector('[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]')), missing);
-		recordField(row, "stars", sourceCount(source.querySelector('a[href$="/stargazers"]')), missing);
+		if (isUnreadable(source)) missing.push("row");
+		recordOptional(row, "description", source.querySelector("p"), sourceText, missing);
+		recordOptional(row, "language", source.querySelector('[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]'), sourceText, missing);
+		recordOptional(row, "stars", source.querySelector('a[href$="/stargazers"]'), sourceCount, missing);
 		recordField(row, "updatedAt", sourceTime(source.querySelector("relative-time")), missing);
 		unreadableFields.push(...missing.map((field) => `${index}.${field}`));
 		rows.push(row);
