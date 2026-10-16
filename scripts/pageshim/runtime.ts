@@ -503,7 +503,8 @@ export async function runOnPageShim(
 			: null;
 	const pendingRecords: Record<string, Rec[]> = {};
 	// Buffered records have not reached the host when collect emits STATE.
-	// Keep the latest checkpoint until their result payload is acknowledged.
+	// Stage the latest checkpoint before completion. The host commits it only
+	// when result completion succeeds (after record chunks on a thin host).
 	const bufferedStates = new Map<string, unknown>();
 	const flushBufferedStates = async (): Promise<void> => {
 		for (const [scope, cursor] of bufferedStates) {
@@ -1031,6 +1032,13 @@ export async function runOnPageShim(
 		const scopes: Record<string, unknown> = {};
 		for (const [stream, recs] of Object.entries(records))
 			scopes[`${prefix}${stream}`] = connector.toScope(stream, recs);
+		// A successful checkpoint proves coverage of this window, even when no
+		// rows exist in it. An empty scope is only this run's payload; requested
+		// bounds and deferred/partial errors still describe its coverage.
+		for (const stream of checkpointedStreams) {
+			if (!checkpointBlockedStreams.has(stream) && !detailGapStreams.has(stream))
+				scopes[`${prefix}${stream}`] ??= connector.toScope(stream, []);
+		}
 		const completionStatus = (summary: { count: number; label: string }) =>
 			errors.some((error) => error.errorClass === "partial")
 				? `Partial: ${summary.count} ${summary.label}`
@@ -1071,8 +1079,8 @@ export async function runOnPageShim(
 				`PageShim result exceeds the ${RESULT_CHUNK_MAX_UNITS}-unit legacy bridge limit; this host does not accept streamed results`,
 			);
 		}
-		await shim.setData("result", done);
 		await flushBufferedStates();
+		await shim.setData("result", done);
 		await shim.setData("status", completionStatus(done.exportSummary));
 	} catch (error) {
 		const reason = (

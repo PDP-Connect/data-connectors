@@ -509,6 +509,7 @@ export async function runHarness({
 	const pageNavigations = [];
 	const data = {};
 	const states = { ...initialState };
+	const pendingStates = {};
 	const stateMessages = [];
 	let failedResultWrite = false;
 	let eventOrder = 0;
@@ -601,8 +602,10 @@ export async function runHarness({
 						if (resultStreamNeverAck) return new Promise(() => {});
 						if (a[0] === "result:done") resultDoneAttemptOrder = ++eventOrder;
 						const ack = await streamHost.setData(a[0], a[1]);
-						if (a[0] === "result:done")
+						if (a[0] === "result:done") {
 							resultWriteOrder = resultDoneAttemptOrder;
+							Object.assign(states, pendingStates);
+						}
 						return ack;
 					}
 					if (a[0] === "result") {
@@ -619,6 +622,8 @@ export async function runHarness({
 							return { __shimError: "synthetic result write failed" };
 						}
 						result = nextResult;
+						if (!nextResult?.errors?.some((error) => error.disposition === "fatal"))
+							Object.assign(states, pendingStates);
 					} else if (a[0] === "STATE") {
 						if (
 							!scopes.some(
@@ -635,7 +640,8 @@ export async function runHarness({
 						const message = JSON.parse(JSON.stringify(a[1]));
 						stateAckOrder = ++eventOrder;
 						stateMessages.push(message);
-						states[message.stream] = message.cursor;
+						// STATE ack stages a cursor; only accepted result completion commits it.
+						pendingStates[message.stream] = message.cursor;
 					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":

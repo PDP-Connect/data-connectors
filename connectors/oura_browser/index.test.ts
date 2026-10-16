@@ -78,10 +78,10 @@ function harness(names: string[], browserPage: Page, state: Record<string, unkno
   return { ctx, messages, records, failures };
 }
 
-function savedCursor(messages: EmittedMessage[]): { next_day?: string } {
+function savedCursor(messages: EmittedMessage[]): { next_day?: string; refresh_from?: string; failed_windows?: Array<{ start: string; end: string }> } {
   const message = messages.find((item) => item.type === "STATE");
   assert.equal(message?.type, "STATE");
-  return message.cursor as { next_day?: string };
+  return message.cursor as { next_day?: string; refresh_from?: string; failed_windows?: Array<{ start: string; end: string }> };
 }
 
 test("browser profile uses a publishable identity and keeps PAT setup separate", () => {
@@ -217,7 +217,7 @@ test("failed required window reports runtime failure and saves retry state", asy
     ]);
     assert.ok(h.messages.some((m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed"));
     assert.deepEqual(h.messages.find((m) => m.type === "STATE")?.cursor, {
-      next_day: today, requested_since: today, failed_windows: [{ start: today, end: today }],
+      next_day: today, refresh_from: today, requested_since: today, failed_windows: [{ start: today, end: today }],
     });
     retryState = savedCursor(h.messages);
   });
@@ -345,4 +345,141 @@ test("readiness and activity enforce full-date consent on returned calendar days
       assert.deepEqual(h.failures, []);
     });
   }
+});
+
+function shifted(value: string, days: number): string {
+  const date = new Date(`${value}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+test("consecutive runs refresh mutable rows for today and the previous two days in every stream", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const since = shifted(today, -2);
+  const days = [since, shifted(today, -1), today];
+  let version = 1;
+  const requests: string[] = [];
+  await withBrowser(async (input) => {
+    requests.push(String(input));
+    return Response.json({
+      daily_sleeps: days.map((day, i) => ({ id: UUID(i + 1), day, score: 70 + version })),
+      daily_readinesses: days.map((day, i) => ({ id: UUID(i + 11), day, score: 60 + version })),
+      daily_activities: days.map((day, i) => ({ id: UUID(i + 21), day, steps: 1000 * version })),
+    });
+  }, async () => {
+    const streams = ["sleep", "readiness", "activity"];
+    const first = harness(streams, page(HOME), {}, { since });
+    await collectOuraBrowser(first.ctx);
+    const state = Object.fromEntries(first.messages.filter((message) => message.type === "STATE")
+      .map((message) => [message.stream, message.cursor]));
+    version = 2;
+    const second = harness(streams, page(HOME), state, { since });
+    await collectOuraBrowser(second.ctx);
+    for (const stream of streams) {
+      const records = second.records.filter((record) => record.stream === stream);
+      assert.deepEqual(records.map((record) => record.data.day), days);
+      const field = stream === "activity" ? "steps" : stream === "sleep" ? "sleep_score" : "score";
+      const value = stream === "activity" ? 2000 : stream === "sleep" ? 72 : 62;
+      assert.ok(records.every((record) => record.data[field] === value));
+    }
+    for (const message of second.messages) {
+      if (message.type !== "STATE") continue;
+      assert.equal((message.cursor as { next_day: string }).next_day, next(today));
+      assert.equal((message.cursor as { refresh_from: string }).refresh_from, since);
+    }
+  });
+  assert.equal(requests.length, 6);
+  assert.ok(requests.every((url) => url.includes(`start=${since}&end=${today}`)));
+});
+
+test("a row arriving after an empty current-day response is collected on the next run", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  let synced = false;
+  await withBrowser(async () => Response.json({
+    daily_sleeps: synced ? [{ id: UUID(1), day: today, score: 84 }] : [],
+  }), async () => {
+    const first = harness(["sleep"], page(HOME), {}, { since: today });
+    await collectOuraBrowser(first.ctx);
+    assert.equal(first.records.length, 0);
+    const cursor = savedCursor(first.messages);
+    assert.equal(cursor.next_day, next(today));
+    assert.equal(cursor.refresh_from, today);
+    synced = true;
+    const second = harness(["sleep"], page(HOME), { sleep: cursor }, { since: today });
+    await collectOuraBrowser(second.ctx);
+    assert.equal(second.records.length, 1);
+    assert.equal(second.records[0]?.data.sleep_score, 84);
+    assert.equal(savedCursor(second.messages).next_day, next(today));
+  });
+});
+
+test("historical backfill and mutable refresh have separate progress within a 90-day budget", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const refreshFrom = shifted(today, -2);
+  const requests: Array<{ start: string; end: string }> = [];
+  let version = 1;
+  await withBrowser(async (input) => {
+    const params = new URL(String(input), HOME).searchParams;
+    requests.push({ start: params.get("start")!, end: params.get("end")! });
+    return Response.json({ daily_activities: [{ id: UUID(1), day: today, steps: version * 1000 }] });
+  }, async () => {
+    const first = harness(["activity"], page(HOME), {}, { since: "2020-01-01" });
+    await collectOuraBrowser(first.ctx);
+    const cursor = savedCursor(first.messages);
+    assert.equal(cursor.next_day, shifted("2020-01-01", 87));
+    assert.equal(cursor.refresh_from, refreshFrom);
+    assert.equal(first.records.length, 1);
+    assert.equal(first.records[0]?.data.steps, 1000);
+    const firstRequests = requests.splice(0);
+    assert.equal(firstRequests.reduce((days, window) =>
+      days + (Date.parse(window.end) - Date.parse(window.start)) / 86_400_000 + 1, 0), 90);
+    assert.deepEqual(firstRequests.at(-1), { start: refreshFrom, end: today });
+    version = 2;
+    const second = harness(["activity"], page(HOME), { activity: cursor }, { since: "2020-01-01" });
+    await collectOuraBrowser(second.ctx);
+    assert.equal(requests[0]?.start, cursor.next_day);
+    assert.deepEqual(requests.at(-1), { start: refreshFrom, end: today });
+    assert.equal(savedCursor(second.messages).next_day, shifted("2020-01-01", 174));
+    assert.equal(savedCursor(second.messages).refresh_from, refreshFrom);
+    assert.equal(second.records.length, 1);
+    assert.equal(second.records[0]?.data.steps, 2000);
+    assert.ok(second.messages.some((message) =>
+      message.type === "SKIP_RESULT" && message.reason === "oura_browser_window_deferred"));
+  });
+});
+
+test("a failed mutable refresh preserves the prior refresh watermark and safe historical cursor", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const refreshFrom = shifted(today, -2);
+  const priorRefresh = shifted(today, -3);
+  await withBrowser(async () => new Response("{}", { status: 500 }), async () => {
+    const h = harness(["activity"], page(HOME), {
+      activity: { next_day: next(today), refresh_from: priorRefresh, requested_since: "2020-01-01" },
+    }, { since: "2020-01-01" });
+    await collectOuraBrowser(h.ctx);
+    assert.deepEqual(h.failures, [{ stream: "activity", retryable: true }]);
+    assert.equal(savedCursor(h.messages).next_day, next(today));
+    assert.equal(savedCursor(h.messages).refresh_from, priorRefresh);
+    assert.deepEqual(savedCursor(h.messages).failed_windows,
+      [{ start: refreshFrom, end: today }]);
+  });
+});
+
+test("legacy forward cursors still refresh recent days, and consent clips the overlap", async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const since = shifted(today, -1);
+  const requests: string[] = [];
+  await withBrowser(async (input) => {
+    requests.push(String(input));
+    return Response.json({ daily_activities: [] });
+  }, async () => {
+    const h = harness(["activity"], page(HOME), {
+      activity: { next_day: next(today), requested_since: since },
+    }, { since, until: today });
+    await collectOuraBrowser(h.ctx);
+    assert.equal(savedCursor(h.messages).refresh_from, since);
+    assert.equal(savedCursor(h.messages).next_day, next(today));
+  });
+  assert.equal(requests.length, 1);
+  assert.ok(requests[0]?.includes(`start=${since}&end=${since}`));
 });

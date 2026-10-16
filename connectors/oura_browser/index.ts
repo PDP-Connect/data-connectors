@@ -20,6 +20,7 @@ const ORIGIN = new URL(HOME).origin;
 // Include today in the initial 90-day snapshot.
 const INITIAL_LOOKBACK_DAYS = 89;
 const MAX_WINDOW_DAYS = 90;
+const MUTABLE_OVERLAP_DAYS = 2;
 const CHUNK_DAYS = 30;
 
 interface DailySleep {
@@ -207,7 +208,9 @@ function addDays(value: string, days: number): string {
 }
 
 interface OuraCursor {
+  // Historical backfill progress is independent of the mutable recent days.
   next_day?: string;
+  refresh_from?: string;
   requested_since?: string;
   failed_windows?: Array<{ start: string; end: string }>;
   last_day?: string;
@@ -360,7 +363,7 @@ function activityRecord(row: DailyActivity): RecordData {
 }
 
 export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date(Date.now()).toISOString().slice(0, 10);
   for (const stream of ["sleep", "readiness", "activity"] as const) {
     if (!ctx.requested.has(stream)) continue;
     const previous = ctx.state[stream] as OuraCursor | undefined;
@@ -375,32 +378,65 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       : today;
     const requestedEnd = untilEnd < today ? untilEnd : today;
     const startDate = startDateFor(ctx, stream, today);
-    if (startDate > requestedEnd) continue;
-    const cappedEnd = addDays(startDate, MAX_WINDOW_DAYS - 1);
-    const endDate = cappedEnd < requestedEnd ? cappedEnd : requestedEnd;
-    const { data, failedWindows, completedThrough, retryable } = await fetchWindow(ctx, stream, startDate, endDate);
-    let records: RecordData[];
-    if (stream === "sleep") {
-      const scores = new Map((data.daily_sleeps ?? []).map((row) => [row.day, row]));
-      const sessions = data.sleeps ?? [];
-      records = [
-        ...sessions.map((row) => sleepRecord(row, scores.get(row.day))),
-        ...(data.daily_sleeps ?? []).map(dailyScoreRecord),
-      ];
-    } else if (stream === "readiness") {
-      const rows = data.daily_readinesses ?? [];
-      records = rows.map(readinessRecord);
-    } else {
-      const rows = data.daily_activities ?? [];
-      records = rows.map(activityRecord);
+    const overlapStart = addDays(today, -MUTABLE_OVERLAP_DAYS);
+    const refreshStart = requestedSince && requestedSince > overlapStart ? requestedSince : overlapStart;
+    const refreshDays = refreshStart <= requestedEnd
+      ? (day(requestedEnd).getTime() - day(refreshStart).getTime()) / 86_400_000 + 1 : 0;
+    const historicalEnd = refreshDays > 0 ? addDays(refreshStart, -1) : requestedEnd;
+    // Reserve the recent overlap within the same 90-day budget, even while a
+    // multi-run historical backfill is still pending.
+    const cappedEnd = addDays(startDate, MAX_WINDOW_DAYS - refreshDays - 1);
+    const endDate = cappedEnd < historicalEnd ? cappedEnd : historicalEnd;
+    const windows: Array<{ start: string; end: string }> = [];
+    if (startDate <= endDate) windows.push({ start: startDate, end: endDate });
+    if (refreshDays > 0) {
+      const historical = windows[0];
+      if (historical && addDays(historical.end, 1) === refreshStart) historical.end = requestedEnd;
+      else windows.push({ start: refreshStart, end: requestedEnd });
     }
-    for (const record of records) {
-      // Source days are calendar dates. Do not trust the endpoint to enforce
-      // its window: full-date consent is inclusive since, exclusive until
-      // (requestedEnd already subtracts the exclusive until date).
-      const recordDay = record.day;
-      if (typeof recordDay !== "string" || recordDay < startDate || recordDay > endDate) continue;
-      await ctx.emitRecord(stream, record);
+    if (windows.length === 0) continue;
+    const failedWindows: Array<{ start: string; end: string }> = [];
+    let retryable = true;
+    let nextDay = startDate;
+    let refreshSucceeded = false;
+    for (const window of windows) {
+      const result = await fetchWindow(ctx, stream, window.start, window.end);
+      const { data, completedThrough } = result;
+      failedWindows.push(...result.failedWindows);
+      retryable &&= result.retryable;
+      // A recent refresh must never jump the cursor over uncollected history
+      // or a failed historical window.
+      if (window.start <= nextDay && nextDay <= addDays(window.end, 1)) {
+        const completedNext = addDays(completedThrough, 1);
+        if (completedNext > nextDay) nextDay = completedNext;
+      }
+      if (refreshDays > 0 && window.end === requestedEnd &&
+          !result.failedWindows.some((failed) => failed.end >= refreshStart)) {
+        refreshSucceeded = true;
+      }
+      let records: RecordData[];
+      if (stream === "sleep") {
+        const scores = new Map((data.daily_sleeps ?? []).map((row) => [row.day, row]));
+        const sessions = data.sleeps ?? [];
+        records = [
+          ...sessions.map((row) => sleepRecord(row, scores.get(row.day))),
+          ...(data.daily_sleeps ?? []).map(dailyScoreRecord),
+        ];
+      } else if (stream === "readiness") {
+        const rows = data.daily_readinesses ?? [];
+        records = rows.map(readinessRecord);
+      } else {
+        const rows = data.daily_activities ?? [];
+        records = rows.map(activityRecord);
+      }
+      for (const record of records) {
+        // Source days are calendar dates. Do not trust the endpoint to enforce
+        // its window: full-date consent is inclusive since, exclusive until
+        // (requestedEnd already subtracts the exclusive until date).
+        const recordDay = record.day;
+        if (typeof recordDay !== "string" || recordDay < window.start || recordDay > window.end) continue;
+        await ctx.emitRecord(stream, record);
+      }
     }
     if (failedWindows.length > 0) {
       await ctx.reportStreamFailure?.(
@@ -409,7 +445,7 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
         { retryable }
       );
     }
-    if (endDate < requestedEnd) {
+    if (startDate <= historicalEnd && endDate < historicalEnd) {
       await ctx.emit({
         type: "SKIP_RESULT", stream, reason: "oura_browser_window_deferred",
         message: `Oura ${stream} stopped at ${endDate}; later days remain for the next run.`,
@@ -422,7 +458,8 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       type: "STATE",
       stream,
       cursor: {
-        next_day: addDays(completedThrough, 1),
+        next_day: nextDay,
+        ...(refreshDays > 0 ? { refresh_from: refreshSucceeded ? refreshStart : previous?.refresh_from ?? refreshStart } : {}),
         requested_since: requestedSince ?? previous?.requested_since ?? null,
         failed_windows: failedWindows,
       },
