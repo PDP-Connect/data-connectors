@@ -196,8 +196,8 @@ async function collectSavedTracks(
 				},
 				page: {
 					goto: () => Promise.resolve(null),
-					evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
-						fn(arg),
+					evaluate: (source: string) =>
+						(0, eval)(source) as Promise<unknown>,
 				} as never,
 				progress: () => Promise.resolve(),
 				requested: new Map<string, StreamScope>(
@@ -1508,6 +1508,51 @@ test("profile with the image key absent from both sources omits the image field"
 	assert.equal(profile.data.followers, null);
 	assert.equal(profile.data.following, null);
 });
+
+for (const [label, sourceImage, enrichmentImage, expected] of [
+	["null/null", { imageUrl: null }, { image_url: null }, []],
+	["null/absent", { imageUrl: null }, {}, []],
+	["absent/null", {}, { image_url: null }, []],
+	["absent/absent", {}, {}, undefined],
+] as const) {
+	test(`profile image ${label} follows the explicit-empty contract`, async () => {
+		const result = await collectSavedTracks(
+			() => ({
+				data: {
+					me: {
+						profile: {
+							username: "synthetic-user",
+							name: "Synthetic user",
+							uri: "spotify:user:synthetic-user",
+							...sourceImage,
+						},
+					},
+				},
+			}),
+			{
+				requested: ["profile"],
+				profileEnrichment: {
+					uri: "spotify:user:synthetic-user",
+					...enrichmentImage,
+				},
+			},
+		);
+		const profile = result.emittedRecords.find((r) => r.stream === "profile");
+		assert.ok(profile, "profile row is emitted");
+		if (expected === undefined) {
+			assert.equal(Object.hasOwn(profile.data, "images"), false);
+		} else {
+			assert.deepEqual(profile.data.images, expected);
+		}
+		const coverage = result.messages.find(
+			(m) => m.type === "DETAIL_COVERAGE" && m.stream === "profile",
+		);
+		assert.equal(
+			coverage?.type === "DETAIL_COVERAGE" ? coverage.covered : null,
+			1,
+		);
+	});
+}
 
 test("malformed profile image data withholds the whole row and coverage", async () => {
 	const result = await collectSavedTracks(

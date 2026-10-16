@@ -632,16 +632,13 @@ async function ensureSpotifySession({
 	if (!ready) throw new Error("spotify_session_dead");
 }
 
-async function collectSpotifyWebData(
-	page: BrowserCollectContext["page"],
-	requestedStreams: string[],
-): Promise<BrowserCollectResult> {
-	await openSpotify(page);
-	const evaluated = await page.evaluate(async (requested) => {
-		// tsx/esbuild wraps nested named functions in `__name(...)`, a helper that
-		// exists only in the Node bundle, not in this serialized in-page closure.
-		(globalThis as { __name?: <T>(target: T) => T }).__name ??= (target) =>
-			target;
+/**
+ * Runs inside the Spotify page via `page.evaluate`, so it must be
+ * self-contained: it is serialized with `toString()`.
+ */
+export const spotifyPageCollector = async (
+	requested: string[],
+): Promise<BrowserData> => {
 		const wanted = new Set(requested);
 		const result: BrowserData = {
 			completion: {},
@@ -1323,15 +1320,17 @@ async function collectSpotifyWebData(
 						"spotify_profile_field_unavailable:enrichment_identity_mismatch",
 					);
 				}
-				// Either source may carry the image. Both omit the key for a profile
-				// with no image (observed live). Absent from both asserts nothing, so
-				// the image field is omitted; a malformed value is still a gap.
-				const profileImageRead = readString(pa.imageUrl, "profile_image_url");
-				const enrichmentImageRead = readString(
-					enrichmentRecord.image_url,
-					"profile_enrichment_image_url",
-				);
-				const imageReads = [profileImageRead, enrichmentImageRead];
+				// Either source may carry the image. Absent from both asserts nothing
+				// (omit `images`); an explicit null from either, with no URL from
+				// either, is the source saying "no image" (`images: []`). A URL from
+				// either source wins; a malformed value is still a gap.
+				const imageReads = [
+					readString(pa.imageUrl, "profile_image_url"),
+					readString(
+						enrichmentRecord.image_url,
+						"profile_enrichment_image_url",
+					),
+				];
 				for (const read of imageReads) {
 					if (read.kind === "UNAVAILABLE" && !read.reason.endsWith("_missing")) {
 						requireField(read, "spotify_profile");
@@ -1341,6 +1340,9 @@ async function collectSpotifyWebData(
 					imageReads
 						.map((read) => (read.kind === "UNAVAILABLE" ? null : read.value))
 						.find((value) => value !== null) ?? null;
+				const imageExplicitlyEmpty = imageReads.some(
+					(read) => read.kind === "EXPLICIT_EMPTY",
+				);
 				// The enrichment payload omits a zero count (observed live), so an
 				// absent count is unknown (null), not a gap; a present one is checked.
 				const followers = Object.hasOwn(enrichmentRecord, "followers_count")
@@ -1362,7 +1364,9 @@ async function collectSpotifyWebData(
 					uri: identityUri,
 					...(imageUrl !== null
 						? { images: [{ url: imageUrl, width: null, height: null }] }
-						: {}),
+						: imageExplicitlyEmpty
+							? { images: [] }
+							: {}),
 					following,
 				};
 				result.sourceCounts.profile = { considered: 1, covered: 1 };
@@ -2225,7 +2229,29 @@ async function collectSpotifyWebData(
 		}
 
 		return result;
-	}, requestedStreams);
+};
+
+/**
+ * tsx/esbuild wrap nested named functions in `__name(...)`, a helper that
+ * exists in the Node bundle but not in the page. Binding it lexically around
+ * the serialized callback keeps the page's globals untouched (esbuild would
+ * rename a `__name` declared inside the callback itself).
+ */
+export function spotifyPageEvaluateSource(
+	requested: string[],
+	collector: (requested: string[]) => Promise<BrowserData> = spotifyPageCollector,
+): string {
+	return `(async () => {\nconst __name = (target) => target;\nreturn (${collector.toString()})(${JSON.stringify(requested)});\n})()`;
+}
+
+async function collectSpotifyWebData(
+	page: BrowserCollectContext["page"],
+	requestedStreams: string[],
+): Promise<BrowserCollectResult> {
+	await openSpotify(page);
+	const evaluated = (await page.evaluate(
+		spotifyPageEvaluateSource(requestedStreams),
+	)) as BrowserData;
 	if (requestedStreams.includes("recently_played_contexts")) {
 		const recent = parseRecentContextRows(evaluated.recent_context_pages ?? []);
 		evaluated.recently_played_contexts = recent.rows;

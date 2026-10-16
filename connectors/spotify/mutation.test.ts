@@ -679,8 +679,8 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 			},
 			page: {
 				goto: () => Promise.resolve(null),
-				evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
-					fn(arg),
+				evaluate: (source: string) =>
+					(0, eval)(source) as Promise<unknown>,
 			} as never,
 			progress: (message) => {
 				progressMessages.push(message);
@@ -855,8 +855,8 @@ async function collectWithInPageFetch(
 				},
 				page: {
 					goto: () => Promise.resolve(null),
-					evaluate: (fn: (arg: string[]) => Promise<unknown>, arg: string[]) =>
-						fn(arg),
+					evaluate: (source: string) =>
+						(0, eval)(source) as Promise<unknown>,
 				} as never,
 				progress: () => Promise.resolve(),
 				requested: new Map<string, StreamScope>(
