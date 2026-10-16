@@ -30,9 +30,12 @@ import { escapedLengthExceeds, INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
 
 /** A syntax failure, carrying only the identity scanned before the failure. */
 export class InvalidConversationObjectError extends Error {
-	constructor(readonly conversationId: string | null) {
+	readonly conversationId: string | null;
+
+	constructor(conversationId: string | null) {
 		super("invalid conversation object while scanning");
 		this.name = "InvalidConversationObjectError";
+		this.conversationId = conversationId;
 	}
 }
 

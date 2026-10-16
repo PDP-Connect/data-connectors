@@ -1500,21 +1500,29 @@ export async function collectAnthropic({
 		}
 		rawMessageIds.add(message.id);
 	};
-	const accountRawConversation = (raw: unknown) => {
+	const accountRawConversation = async (raw: unknown) => {
 		accountRawConversationSource(raw);
 		if (!(wantsMessages && isPlainObject(raw))) {
 			if (wantsMessages) completeMessages = false;
 			return;
 		}
 		const { chat_messages } = raw;
-		const parent = Array.isArray(chat_messages)
-			? parseConversationHeader(raw, 0)
-			: null;
-		if (!(accountMessageParent(parent, Array.isArray(chat_messages)) && parent))
-			return;
-		for (const child of chat_messages as unknown[]) {
-			accountMessageChild(parseMessage(child, parent.id));
+		const parent = parseConversationHeader(raw, 0);
+		const messagesAccounted = accountMessageParent(
+			parent,
+			Array.isArray(chat_messages),
+		);
+		if (!parent) return;
+		let omittedMessages = !Array.isArray(chat_messages);
+		if (messagesAccounted && Array.isArray(chat_messages)) {
+			for (const child of chat_messages) {
+				const message = parseMessage(child, parent.id);
+				accountMessageChild(message);
+				if (!message) omittedMessages = true;
+			}
 		}
+		if (omittedMessages && isWithinTimeWindow(raw.updated_at))
+			await reportConversationOmission(parent.id, [MESSAGES_STREAM]);
 	};
 	const markDelivered = (
 		delivered: Set<string>,
@@ -1719,24 +1727,27 @@ export async function collectAnthropic({
 	// spent export reference or reads an export, so later STATE builds on it.
 	let priorCursor = readConversationsCursor(state);
 
-	// Actual oversized omissions must also block successful checkpoints,
+	// Actual conversation omissions must also block successful checkpoints,
 	// not merely withhold full-scan coverage. Successfully streamed records
 	// (including envelopes too large for a raw blob) are unaffected.
-	const oversizedSkipped = new Set<string>();
-	const reportOversizedOmission = async (
+	const conversationSkipped = new Set<string>();
+	const reportConversationOmission = async (
 		conversationId: string | null,
 		streams: readonly string[],
-		startOffset: number,
+		startOffset?: number,
 	) => {
 		for (const stream of streams) {
 			if (!requested.has(stream)) continue;
-			oversizedSkipped.add(stream);
+			conversationSkipped.add(stream);
 			if (stream === CONVERSATIONS_STREAM) conversationsExact = false;
 			if (stream === MESSAGES_STREAM) completeMessages = false;
 			await emit({
 				type: "SKIP_RESULT",
 				stream,
-				reason: "export_oversized_conversation_incomplete",
+				reason:
+					startOffset === undefined
+						? "export_conversation_incomplete"
+						: "export_oversized_conversation_incomplete",
 				message:
 					`Conversation ${conversationId ?? "(identity unavailable)"} could not be fully read, ` +
 					`so ${stream} is incomplete and was not checkpointed.`,
@@ -1746,7 +1757,7 @@ export async function collectAnthropic({
 				},
 				diagnostics: {
 					...(conversationId === null ? {} : { conversation_id: conversationId }),
-					source_offset: startOffset,
+					...(startOffset === undefined ? {} : { source_offset: startOffset }),
 				},
 			});
 		}
@@ -1914,7 +1925,7 @@ export async function collectAnthropic({
 				parsed.droppedProjects + unclassifiedEntries.projects,
 			],
 		];
-		const skipped = new Set(oversizedSkipped);
+		const skipped = new Set(conversationSkipped);
 		if (conversationsSourceMissing) {
 			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
 				if (!requested.has(stream)) {
@@ -2113,7 +2124,7 @@ export async function collectAnthropic({
 		}
 		let droppedConversations = 0;
 		const processConversation = async (raw: unknown) => {
-			accountRawConversation(raw);
+			await accountRawConversation(raw);
 			const updatedAt =
 				typeof raw === "object" && raw !== null && !Array.isArray(raw)
 					? (raw as Record<string, unknown>).updated_at
@@ -2178,7 +2189,7 @@ export async function collectAnthropic({
 			} catch (error) {
 				// Do not swallow host/read failures or downstream sink errors.
 				if (!(error instanceof InvalidConversationObjectError)) throw error;
-				await reportOversizedOmission(
+				await reportConversationOmission(
 					error.conversationId,
 					[CONVERSATIONS_STREAM, MESSAGES_STREAM],
 					value.startOffset,
@@ -2233,7 +2244,7 @@ export async function collectAnthropic({
 					else omittedMessages = true;
 				}
 				if (omittedMessages)
-					await reportOversizedOmission(
+					await reportConversationOmission(
 						conversation.id,
 						[MESSAGES_STREAM],
 						value.startOffset,
@@ -2626,7 +2637,7 @@ export async function collectAnthropic({
 			if (Array.isArray(conversationsJson)) {
 				conversationsBoundary = true;
 				for (const raw of conversationsJson) {
-					accountRawConversation(raw);
+					await accountRawConversation(raw);
 				}
 			} else {
 				completeMessages = false;
@@ -2814,7 +2825,7 @@ export async function collectAnthropic({
 			// another category's measured boundary or prove an empty stream.
 			if (result.category === "conversations") {
 				for (const raw of classified.conversations) {
-					accountRawConversation(raw);
+					await accountRawConversation(raw);
 				}
 			} else if (classified.conversations.length > 0) {
 				conversationsExact = false;

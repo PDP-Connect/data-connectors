@@ -1951,7 +1951,7 @@ test("collectAnthropic: manifest conversations entry with an unparseable item sk
 	assert.doesNotMatch(progressText, new RegExp(secret));
 });
 
-test("collectAnthropic: manifest conversation without chat_messages is imported like the nonce path", async () => {
+test("collectAnthropic: manifest conversation without chat_messages imports its parent but leaves messages incomplete", async () => {
 	const { emitted, protocolMessages } = await runManifest([
 		{
 			category: "conversations",
@@ -1967,7 +1967,17 @@ test("collectAnthropic: manifest conversation without chat_messages is imported 
 		},
 	]);
 
-	assert.equal(skipsOf(protocolMessages).length, 0);
+	const skips = skipsOf(protocolMessages);
+	assert.equal(skips.length, 1);
+	const skip = skips[0];
+	assert.ok(skip);
+	assert.equal(skip.stream, "messages");
+	assert.equal(skip.reason, "export_conversation_incomplete");
+	assert.equal(
+		(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
+		"conv-2",
+	);
+	assertNoSyncedAt(protocolMessages, ["messages"]);
 	assert.equal(emitted.filter((r) => r.stream === "conversations").length, 2);
 });
 
@@ -3179,7 +3189,7 @@ async function runFullCompletion(
 	}));
 	const context = makeContext({
 		streams,
-		testOverrides: input.testOverrides,
+		...(input.testOverrides ? { testOverrides: input.testOverrides } : {}),
 		fetchStub:
 			mode === "manifest"
 				? manifestFetchStub(tokens)
@@ -5429,7 +5439,10 @@ test("oversized omission: malformed envelope names the conversation and skips bo
 		const skip = skipsOf(protocolMessages).find((s) => s.stream === stream);
 		assert.ok(skip, `${stream} must explicitly report a partial outcome`);
 		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
-		assert.equal(skip.diagnostics?.conversation_id, "broken-envelope");
+		assert.equal(
+			(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
+			"broken-envelope",
+		);
 		assert.equal(coverageOf(protocolMessages, stream).length, 0);
 		assert.equal(
 			protocolMessages.some(
@@ -5475,7 +5488,10 @@ for (const [label, children] of [
 		const skip = skipsOf(protocolMessages).find((s) => s.stream === "messages");
 		assert.ok(skip, "an omitted message must explicitly make messages partial");
 		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
-		assert.equal(skip.diagnostics?.conversation_id, "partial-parent");
+		assert.equal(
+			(skip.diagnostics as Record<string, unknown> | undefined)?.conversation_id,
+			"partial-parent",
+		);
 		assert.equal(coverageOf(protocolMessages, "messages").length, 0);
 		assert.equal(
 			protocolMessages.some(
@@ -5485,6 +5501,78 @@ for (const [label, children] of [
 					"synced_at" in (m.cursor as Record<string, unknown>),
 			),
 			false,
+		);
+	});
+}
+
+for (const mode of ["buffered", "streaming"] as const) {
+	for (const [label, children] of [
+		["missing list", undefined],
+		["malformed list", null],
+		["non-object child", [null]],
+		["unparseable child", [{ text: "missing identity" }]],
+	] as const) {
+		test(`normal omission ${mode}: ${label} names its parent and withholds the messages checkpoint`, async () => {
+			const run = await runFullCompletion(mode, {
+				streams: ["conversations", "messages"],
+				conversations: [
+					{ uuid: "partial-parent", chat_messages: children },
+					{
+						uuid: "valid-parent",
+						chat_messages: [
+							{ uuid: "valid-message", sender: "human", text: "kept" },
+						],
+					},
+				],
+				projects: [],
+			});
+			assert.equal(run.recordsOf("conversations").length, 2);
+			assert.deepEqual(
+				run.recordsOf("messages").map((record) => record.data.id),
+				["valid-message"],
+			);
+			const skips = skipsOf(run.protocolMessages);
+			assert.equal(skips.length, 1);
+			const skip = skips[0];
+			assert.ok(skip);
+			assert.equal(skip.stream, "messages");
+			assert.equal(skip.reason, "export_conversation_incomplete");
+			assert.equal(
+				(skip.diagnostics as Record<string, unknown> | undefined)
+					?.conversation_id,
+				"partial-parent",
+			);
+			assert.deepEqual(skip.recovery_hint, {
+				action: "retry_on_connector_upgrade",
+				retryable: false,
+			});
+			assert.equal(coverageOf(run.protocolMessages, "messages").length, 0);
+			assert.equal(
+				run.protocolMessages.some(
+					(message) =>
+						message.type === "STATE" &&
+						message.stream === "messages" &&
+						"synced_at" in (message.cursor as Record<string, unknown>),
+				),
+				false,
+			);
+		});
+	}
+	test(`normal omission ${mode}: an empty child list still checkpoints messages`, async () => {
+		const run = await runFullCompletion(mode, {
+			streams: ["messages"],
+			conversations: [{ uuid: "empty-parent", chat_messages: [] }],
+			projects: [],
+		});
+		assert.deepEqual(skipsOf(run.protocolMessages), []);
+		assert.equal(
+			run.protocolMessages.some(
+				(message) =>
+					message.type === "STATE" &&
+					message.stream === "messages" &&
+					"synced_at" in (message.cursor as Record<string, unknown>),
+			),
+			true,
 		);
 	});
 }
