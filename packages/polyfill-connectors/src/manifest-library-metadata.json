@@ -250,7 +250,8 @@
 		"manifest": {
 			"connector_key": "github-browser",
 			"reason_display_messages": {
-				"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+				"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+				"inventory_not_proven_complete": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 			}
 		}
 	},
