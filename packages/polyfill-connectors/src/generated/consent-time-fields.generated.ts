@@ -243,6 +243,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		readiness: null,
 		sleep: null,
 	},
+	perplexity: {
+		conversations: { field: "update_time", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
+	},
 	pocket: {
 		items: { field: "time_added", format: "date-time" },
 	},

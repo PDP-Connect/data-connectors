@@ -529,6 +529,21 @@
 		}
 	},
 	{
+		"file": "perplexity.json",
+		"manifest": {
+			"connector_key": "perplexity",
+			"reason_display_messages": {
+				"covered_in_full": "All Perplexity threads in the selected time range have already been collected.",
+				"collection_interrupted": "Perplexity stopped answering partway through, so some threads are missing. The next run continues from where this one stopped.",
+				"nothing_in_range": "There are no Perplexity threads in the selected time range.",
+				"records_unreadable": "Some threads in your Perplexity library couldn't be read and were skipped — everything else was collected normally.",
+				"sign_in_required": "Perplexity needs you to sign in (and pass its human check) before this can continue.",
+				"source_limit_reached": "This run reached a Perplexity limit. The next run will retry the remaining threads.",
+				"source_unreadable": "Perplexity answered with a shape this connector doesn't recognise, so nothing more was read. Perplexity may have changed its site — please report this rather than retrying."
+			}
+		}
+	},
+	{
 		"file": "shopify.json",
 		"manifest": {
 			"connector_key": "shopify",
