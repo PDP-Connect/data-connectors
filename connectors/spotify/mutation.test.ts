@@ -1131,3 +1131,57 @@ test("spotify browser parser rejects repeated full saved-track pages", async () 
 		},
 	);
 });
+
+test("top rows: a field the operation never carries is null, a malformed one withholds the row", () => {
+	const page = (items: unknown[]) => ({
+		data: { me: { profile: { topTracks: { items, totalCount: items.length } } } },
+	});
+	const track = (id: string, extra: Record<string, unknown>) => ({
+		data: {
+			uri: `spotify:track:${id}`,
+			name: `Track ${id}`,
+			artists: { items: [{ profile: { name: "Artist" } }] },
+			albumOfTrack: { name: "Album" },
+			...extra,
+		},
+	});
+	const result = parseTopRows(
+		[
+			page([
+				track("absent", {}),
+				track("malformed", { trackDuration: [] }),
+				track("present", { trackDuration: { totalMilliseconds: 5 } }),
+			]),
+		],
+		"top_tracks",
+		"short_term",
+	);
+	assert.deepEqual(
+		result.rows.map((row) => [row.id, row.duration_ms]),
+		[
+			["absent", null],
+			["present", 5],
+		],
+	);
+	assert.equal(result.withheld, 1);
+	const artists = parseTopRows(
+		[
+			{
+				data: {
+					me: {
+						profile: {
+							topArtists: {
+								totalCount: 1,
+								items: [{ data: { uri: "spotify:artist:a1", profile: { name: "A" } } }],
+							},
+						},
+					},
+				},
+			},
+		],
+		"top_artists",
+		"short_term",
+	);
+	assert.equal(artists.rows.length, 0, "genres has no representable null");
+	assert.equal(artists.withheld, 1);
+});

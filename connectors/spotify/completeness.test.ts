@@ -1917,8 +1917,6 @@ test("playlist item containers that are not objects withhold the row instead of 
 test("a field absent from a playlist detail or item withholds the row, while an explicit null is kept", async () => {
 	const absentDetail = [
 		"name",
-		"public",
-		"collaborative",
 		"revisionId",
 		"description",
 		"followers",
@@ -2018,12 +2016,23 @@ test("a field absent from a playlist detail or item withholds the row, while an 
 	});
 });
 
+
+function complete(id: string) {
+	const row = savedTrack(id);
+	Object.assign(row.track.data, {
+		duration: { totalMilliseconds: 1000 },
+		contentRating: { label: "NONE" },
+		popularity: 10,
+		externalIds: { isrc: null },
+		albumOfTrack: { name: "Album", artists: { items: [] } },
+	});
+	return row;
+}
+
 test("a field absent from a saved track withholds the row and STATE, while an explicit null is kept", async () => {
 	const absent: Array<[string, (row: ReturnType<typeof savedTrack>) => void]> = [
 		["duration", (row) => delete row.track.data.duration],
 		["contentRating", (row) => delete row.track.data.contentRating],
-		["popularity", (row) => delete row.track.data.popularity],
-		["externalIds", (row) => delete row.track.data.externalIds],
 		["artists", (row) => delete row.track.data.artists],
 		["albumOfTrack", (row) => delete row.track.data.albumOfTrack],
 		[
@@ -2036,17 +2045,6 @@ test("a field absent from a saved track withholds the row and STATE, while an ex
 			(row) => delete (row as { addedAt?: unknown }).addedAt,
 		],
 	];
-	const complete = (id: string) => {
-		const row = savedTrack(id);
-		Object.assign(row.track.data, {
-			duration: { totalMilliseconds: 1000 },
-			contentRating: { label: "NONE" },
-			popularity: 10,
-			externalIds: { isrc: null },
-			albumOfTrack: { name: "Album", artists: { items: [] } },
-		});
-		return row;
-	};
 	for (const [key, remove] of absent) {
 		const row = complete("gap");
 		remove(row);
@@ -2103,4 +2101,90 @@ test("a nonempty short playlist detail page without a total cannot be counted as
 		},
 		{ requested: ["playlists"] },
 	);
+});
+
+test("fields the source operations never carry are not gaps: playlist public/collaborative, saved-track popularity, and track ids derived from the URI", async () => {
+	const playlists = await collectSavedTracks(
+		(offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") return playlistLibraryResponse();
+			const response = playlistDetailResponse(String(variables?.uri), offset, [
+				completePlaylistTrackItem(),
+			]) as { data: { playlistV2: Record<string, unknown> } };
+			delete response.data.playlistV2.public;
+			delete response.data.playlistV2.collaborative;
+			const item = (
+				response.data.playlistV2.content as {
+					items: Array<{ itemV2: { data: Record<string, unknown> } }>;
+				}
+			).items[0];
+			delete item?.itemV2.data.id;
+			return response;
+		},
+		{ requested: ["playlists", "playlist_items"], completeFixtures: false },
+	);
+	const playlist = playlists.emittedRecords.find(
+		(record) => record.stream === "playlists",
+	)?.data;
+	assert.equal(playlist?.public, null);
+	assert.equal(playlist?.collaborative, null);
+	assert.equal(
+		playlists.emittedRecords.find((record) => record.stream === "playlist_items")
+			?.data.track_id,
+		"t1",
+	);
+	const saved = complete("no-id");
+	delete saved.track.data.id;
+	delete saved.track.data.popularity;
+	delete saved.track.data.externalIds;
+	const result = await collectSavedTracks(() => savedResponse([saved], 1), {
+		completeFixtures: false,
+	});
+	assert.equal(result.emittedRecords[0]?.data.id, "no-id");
+	assert.equal(result.emittedRecords[0]?.data.popularity, null);
+	assert.equal(result.emittedRecords[0]?.data.isrc, null);
+});
+
+test("a profile image absent from one source is read from the other, absent from both is empty, absent counts are null, and malformed withholds the row", async () => {
+	const profile = (imageUrl?: string) => () => ({
+		data: {
+			me: {
+				profile: {
+					username: "synthetic-user",
+					name: "Synthetic user",
+					uri: "spotify:user:synthetic-user",
+					...(imageUrl === undefined ? {} : { imageUrl }),
+				},
+			},
+		},
+	});
+	const enrichment = (image?: string) => ({
+		uri: "spotify:user:synthetic-user",
+		followers_count: 1,
+		following_count: 1,
+		...(image === undefined ? {} : { image_url: image }),
+	});
+	const fromEnrichment = await collectSavedTracks(profile(), {
+		requested: ["profile"],
+		profileEnrichment: enrichment("https://example.test/a.png"),
+	});
+	assert.deepEqual(fromEnrichment.emittedRecords[0]?.data.images, [
+		{ url: "https://example.test/a.png", width: null, height: null },
+	]);
+	assert.equal(fromEnrichment.emittedRecords[0]?.data.followers, 1);
+	const neither = await collectSavedTracks(profile(), {
+		requested: ["profile"],
+		profileEnrichment: enrichment(),
+	});
+	assert.deepEqual(neither.emittedRecords[0]?.data.images, []);
+	const noCounts = await collectSavedTracks(profile(), {
+		requested: ["profile"],
+		profileEnrichment: { uri: "spotify:user:synthetic-user" },
+	});
+	assert.equal(noCounts.emittedRecords[0]?.data.followers, null);
+	assert.equal(noCounts.emittedRecords[0]?.data.following, null);
+	const malformed = await collectSavedTracks(profile(), {
+		requested: ["profile"],
+		profileEnrichment: { ...enrichment(), image_url: 42 },
+	});
+	assert.deepEqual(malformed.emittedRecords, []);
 });

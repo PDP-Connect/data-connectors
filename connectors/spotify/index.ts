@@ -126,7 +126,16 @@ type TopTimeRange = "short_term" | "long_term";
 type FieldRead<T> =
 	| { kind: "READ"; value: T }
 	| { kind: "EXPLICIT_EMPTY"; value: T }
+	// The operation's response never carries this field (observed live), so
+	// null is the contract value; a present value is still validated.
+	| { kind: "NOT_CARRIED"; value: T }
 	| { kind: "UNAVAILABLE"; reason: string };
+
+function notCarried<T>(read: FieldRead<T>, value: T): FieldRead<T> {
+	return read.kind === "UNAVAILABLE" && read.reason.endsWith("_missing")
+		? { kind: "NOT_CARRIED", value }
+		: read;
+}
 
 function readText(value: unknown, field: string): FieldRead<string | null> {
 	if (value === null) {
@@ -312,8 +321,8 @@ export function parseTopRows(payloads: unknown[], stream: "top_artists" | "top_t
 			let extra: Record<string, unknown>;
 			if (stream === "top_artists") {
 				const genres = readStringList(readPath(entity, "genres"), "genres");
-				const followers = readNestedCount(entity, "stats", "followers", "followers");
-				const popularity = readCount(readPath(entity, "popularity"), "popularity");
+				const followers = notCarried(readNestedCount(entity, "stats", "followers", "followers"), null);
+				const popularity = notCarried(readCount(readPath(entity, "popularity"), "popularity"), null);
 				fields.push(genres, followers, popularity);
 				extra = {
 					genres: fieldValue(genres),
@@ -333,7 +342,7 @@ export function parseTopRows(payloads: unknown[], stream: "top_artists" | "top_t
 								? { kind: "EXPLICIT_EMPTY" as const, value: [] }
 								: { kind: "UNAVAILABLE" as const, reason: "artist_names_malformed" };
 				const albumName = readNestedText(entity, "albumOfTrack", "name", "album_name");
-				const duration = readNestedCount(entity, "trackDuration", "totalMilliseconds", "duration_ms");
+				const duration = notCarried(readNestedCount(entity, "trackDuration", "totalMilliseconds", "duration_ms"), null);
 				fields.push(artistNames, albumName, duration);
 				extra = {
 					artist_names: fieldValue(artistNames),
@@ -624,6 +633,10 @@ async function collectSpotifyWebData(
 ): Promise<BrowserCollectResult> {
 	await openSpotify(page);
 	const evaluated = await page.evaluate(async (requested) => {
+		// tsx/esbuild wraps nested named functions in `__name(...)`, a helper that
+		// exists only in the Node bundle, not in this serialized in-page closure.
+		(globalThis as { __name?: <T>(target: T) => T }).__name ??= (target) =>
+			target;
 		const wanted = new Set(requested);
 		const result: BrowserData = {
 			completion: {},
@@ -1305,26 +1318,38 @@ async function collectSpotifyWebData(
 						"spotify_profile_field_unavailable:enrichment_identity_mismatch",
 					);
 				}
-				const profileImage = requireField(
-					readString(pa.imageUrl, "profile_image_url"),
-					"spotify_profile",
+				// Either source may carry the image. Both omit the key for a profile
+				// with no image (observed live), so absent from both is an empty
+				// image list; a malformed value is still a gap.
+				const profileImageRead = readString(pa.imageUrl, "profile_image_url");
+				const enrichmentImageRead = readString(
+					enrichmentRecord.image_url,
+					"profile_enrichment_image_url",
 				);
-				const enrichmentImage = requireField(
-					readString(
-						enrichmentRecord.image_url,
-						"profile_enrichment_image_url",
-					),
-					"spotify_profile",
-				);
-				const imageUrl = profileImage ?? enrichmentImage;
-				const followers = requireField(
-					readCount(enrichmentRecord.followers_count, "profile_followers"),
-					"spotify_profile",
-				);
-				const following = requireField(
-					readCount(enrichmentRecord.following_count, "profile_following"),
-					"spotify_profile",
-				);
+				const imageReads = [profileImageRead, enrichmentImageRead];
+				for (const read of imageReads) {
+					if (read.kind === "UNAVAILABLE" && !read.reason.endsWith("_missing")) {
+						requireField(read, "spotify_profile");
+					}
+				}
+				const imageUrl =
+					imageReads
+						.map((read) => (read.kind === "UNAVAILABLE" ? null : read.value))
+						.find((value) => value !== null) ?? null;
+				// The enrichment payload omits a zero count (observed live), so an
+				// absent count is unknown (null), not a gap; a present one is checked.
+				const followers = Object.hasOwn(enrichmentRecord, "followers_count")
+					? requireField(
+							readCount(enrichmentRecord.followers_count, "profile_followers"),
+							"spotify_profile",
+						)
+					: null;
+				const following = Object.hasOwn(enrichmentRecord, "following_count")
+					? requireField(
+							readCount(enrichmentRecord.following_count, "profile_following"),
+							"spotify_profile",
+						)
+					: null;
 				result.profile = {
 					id: username,
 					display_name: profileName,
@@ -1573,14 +1598,20 @@ async function collectSpotifyWebData(
 									readString(pl.name, "playlist_name"),
 									"spotify_playlist",
 								);
-								publicValue = requireField(
-									readBoolean(pl.public, "playlist_public"),
-									"spotify_playlist",
-								);
-								collaborativeValue = requireField(
-									readBoolean(pl.collaborative, "playlist_collaborative"),
-									"spotify_playlist",
-								);
+								// The playlistV2 operation does not carry `public`; null is the
+								// contract value for it, not a gap. A present value is validated.
+								publicValue = Object.hasOwn(pl, "public")
+									? requireField(
+											readBoolean(pl.public, "playlist_public"),
+											"spotify_playlist",
+										)
+									: null;
+								collaborativeValue = Object.hasOwn(pl, "collaborative")
+									? requireField(
+											readBoolean(pl.collaborative, "playlist_collaborative"),
+											"spotify_playlist",
+										)
+									: null;
 								const snapshotSource = Object.hasOwn(pl, "revisionId")
 									? pl.revisionId
 									: pl.snapshotId;
@@ -1711,10 +1742,14 @@ async function collectSpotifyWebData(
 								readString(child(addedBy, "name"), "playlist_added_by"),
 								"spotify_playlist",
 							);
-							const sourceTrackId = requireField(
-								readString(trackData.id, "playlist_track_id"),
-								"spotify_playlist",
-							);
+							// Track data identifies the track by URI; an `id` key is optional
+							// but, when present, must agree with the URI.
+							const sourceTrackId = Object.hasOwn(trackData, "id")
+								? requireField(
+										readString(trackData.id, "playlist_track_id"),
+										"spotify_playlist",
+									)
+								: null;
 							const trackId = spotifyTrackId(
 								trackUri,
 								sourceTrackId,
@@ -1889,7 +1924,11 @@ async function collectSpotifyWebData(
 						const t = trackData;
 						const uriSource = trackContainer._uri ?? trackContainer.uri;
 						const trackUri = requireField(readString(uriSource, "track_uri"));
-						const sourceTrackId = requireField(readString(t.id, "track_id"));
+						// Track data identifies the track by URI; an `id` key is optional
+						// but, when present, must agree with the URI.
+						const sourceTrackId = Object.hasOwn(t, "id")
+							? requireField(readString(t.id, "track_id"))
+							: null;
 						const id = spotifyTrackId(
 							trackUri,
 							sourceTrackId,
@@ -1972,15 +2011,17 @@ async function collectSpotifyWebData(
 							throw new Error(
 								"spotify_saved_tracks_field_unavailable:track_name_missing",
 							);
-						const popularity = requireField(
-							readPopularity(t.popularity),
-							"spotify_saved_tracks",
-						);
-						const externalIds = sourceContainer(
-							t.externalIds,
-							"external_ids",
-							"spotify_saved_tracks",
-						);
+						const popularity = Object.hasOwn(t, "popularity")
+							? requireField(readPopularity(t.popularity), "spotify_saved_tracks")
+							: null;
+						// Tracks without external ids omit the container (observed live).
+						const externalIds = Object.hasOwn(t, "externalIds")
+							? sourceContainer(
+									t.externalIds,
+									"external_ids",
+									"spotify_saved_tracks",
+								)
+							: null;
 						const isrc = requireField(
 							readString(child(externalIds, "isrc"), "track_isrc"),
 							"spotify_saved_tracks",
