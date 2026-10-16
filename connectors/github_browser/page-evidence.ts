@@ -95,6 +95,7 @@ function isExpectedRequest(
 		return (
 			url.origin === "https://github.com" &&
 			(profileRoute || starsRoute) &&
+			validSelection(url, starsRoute) &&
 			Number(url.searchParams.get("page")) === pageNumber &&
 			(starsRoute || url.searchParams.get("tab") === expectedTab)
 		);
@@ -137,24 +138,21 @@ export function inspectProfilePage(
 	expectedUrl: string,
 ): boolean {
 	if (
+		isBlocked(page.html) ||
 		page.requestedUrl !== expectedUrl ||
 		page.currentUrl !== expectedUrl ||
 		!sameNavigation(page.requestedUrl, page.currentUrl) ||
 		!hasExpectedOwner(page.html, username)
 	)
 		return false;
-	const { document } = parseHTML(page.html);
-	return (
-		document.querySelector("span.p-name") !== null &&
-		document.querySelector('a[href*="tab=repositories"]') !== null &&
-		document.querySelector('a[href$="?tab=followers"]') !== null &&
-		document.querySelector('a[href$="?tab=following"]') !== null
-	);
+	// Field readability is tracked separately by parseProfilePage. An owner-bound
+	// partial profile may be ingested without receiving completion authority.
+	return true;
 }
 
-function isBlocked(html: string): boolean {
+export function isBlocked(html: string): boolean {
 	const { document } = parseHTML(html);
-	const body = document.querySelector("main")?.textContent ?? "";
+	const body = Array.from(document.querySelectorAll("main")).map((node) => node.textContent ?? "").join(" ");
 	return /(?:sign in to github|you must be signed in|account suspended|page not found|rate limit exceeded|verify your account)/iu.test(
 		body,
 	);
@@ -179,6 +177,7 @@ function validContinuation(
 		if (
 			url.origin !== "https://github.com" ||
 			!validPath ||
+			!validSelection(url, url.pathname === `/stars/${username}`) ||
 			!validTab ||
 			!Number.isInteger(page) ||
 			page !== pageNumber
@@ -188,4 +187,13 @@ function validContinuation(
 	} catch {
 		return null;
 	}
+}
+
+/** Inventory routes are unfiltered. Reject selection-changing and duplicate params. */
+function validSelection(url: URL, starsRoute: boolean): boolean {
+	const allowed = starsRoute ? ["page", "after"] : ["page", "tab", "after"];
+	return url.username === "" && url.password === "" && url.hash === "" &&
+		(!url.searchParams.has("after") || (url.searchParams.get("after")?.trim().length ?? 0) > 0) &&
+		Array.from(url.searchParams.keys()).every((key) =>
+			allowed.includes(key) && url.searchParams.getAll(key).length === 1);
 }

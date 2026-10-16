@@ -9,13 +9,17 @@ import {
 	inspectInventoryPage,
 	parseContributionHtml,
 	parseLegacyEvent,
+	parseLegacyEventPageItem,
+	parseLegacyHistoryPageItem,
+	parseLegacyHistoryItem,
 	parseProfileHtml,
+	parseProfilePage,
 	parseRepositoriesHtml,
 	parseRepositoriesPage,
 	parseStarredHtml,
 	parseStarredPage,
 } from "./parsers.ts";
-import { validateRecord } from "./schemas.ts";
+import { validateEntity, validateRecord } from "./schemas.ts";
 
 const fixture = (name: string): Promise<string> =>
 	readFile(
@@ -64,8 +68,9 @@ test("synthetic browser HTML retains legacy profile and repository fields", asyn
 	);
 	assert.equal(repositories[0]?.name, "demo");
 	assert.equal(repositories[0]?.stars, 12);
+	assert.equal(validateRecord("repositories", { id: "sample-user:repositories", repositories }).ok, true);
 	assert.equal(
-		validateRecord("repositories", { ...(repositories[0] ?? {}) } as Parameters<
+		validateEntity("repositories", { ...(repositories[0] ?? {}) } as Parameters<
 			typeof validateRecord
 		>[1]).ok,
 		true,
@@ -82,7 +87,7 @@ test("inventory parsing accounts for rejected rows and preserves empty source st
 	assert.equal(repositories.rows[0]?.language, "");
 
 	const starred = parseStarredPage(
-		'<main><ul><li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3><span itemprop="programmingLanguage"></span></li></ul></main>',
+		'<main><ul id="user-starred-repos"><li><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3><span itemprop="programmingLanguage"></span></li></ul></main>',
 	);
 	assert.equal(starred.rows[0]?.language, "");
 });
@@ -108,7 +113,7 @@ test("repository and starred pages require list or explicit empty evidence", () 
 			inspectInventoryPage(
 				inventoryObservation(
 					stream,
-					`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main>${empty}</main>`,
+					`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="${stream === "repositories" ? "user-repositories-list" : "user-starred-repos"}">${empty}</div></main>`,
 					1,
 				),
 				stream,
@@ -123,7 +128,7 @@ test("repository and starred pages require list or explicit empty evidence", () 
 			stream === "repositories"
 				? "user-repositories-list"
 				: "user-starred-repos";
-		const html = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><ul id="${list}"></ul><a class="next_page" rel="next" href="/sample-user?page=2&tab=${stream === "repositories" ? "repositories" : "stars"}&after=cursor">Next</a></main>`;
+		const html = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><ul id="${list}"><li><h3><a href="/sample-user/demo">demo</a></h3><p itemprop="description"></p><span itemprop="programmingLanguage"></span><a href="/sample-user/demo/stargazers">0</a><a href="/sample-user/demo/forks">0</a><span class="Label">Public</span><div class="topics-row-container"></div><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul><a class="next_page" rel="next" href="/sample-user?page=2&tab=${stream === "repositories" ? "repositories" : "stars"}&after=cursor">Next</a></main>`;
 		assert.equal(
 			inspectInventoryPage(
 				inventoryObservation(stream, html, 1),
@@ -294,8 +299,9 @@ test("browser events recover legacy details from nested GitHub event payloads", 
 	assert.equal(pullRequest?.body, "Description");
 	assert.equal(pullRequest?.url, "https://github.com/sample-user/demo/pull/4");
 	assert.equal(pullRequest?.branch, "feature/parity");
+	assert.equal(validateRecord("events", { id: "sample-user:events", events: [pullRequest], fetchedAt: "2026-01-02T00:00:00Z", windowDescription: "Fixture window" }).ok, true);
 	assert.equal(
-		validateRecord("events", { ...(pullRequest ?? {}) } as Parameters<
+		validateEntity("events", { ...(pullRequest ?? {}) } as Parameters<
 			typeof validateRecord
 		>[1]).ok,
 		true,
@@ -338,4 +344,177 @@ test("browser events recover legacy details from nested GitHub event payloads", 
 	});
 	// The legacy formatter preserves an explicitly empty release name.
 	assert.equal(release?.title, "");
+});
+
+test("missing profile counts and strings remain unknown rather than fabricated", () => {
+	const row = parseProfileHtml('<span class="p-nickname">sample-user</span><a href="/sample-user?tab=followers">Loading</a>', "https://github.com/sample-user");
+	assert.equal(row?.followers, undefined);
+	assert.equal(row?.bio, undefined);
+});
+
+test("missing repository fields remain unknown and empty names are rejected", () => {
+	const rows = parseRepositoriesPage('<ul id="user-repositories-list"><li><h3><a href="/sample-user/demo">demo</a></h3></li><li><h3><a href="/sample-user/empty"></a></h3></li></ul>');
+	assert.equal(rows.rows[0]?.stars, undefined);
+	assert.equal(rows.rows[0]?.topics, undefined);
+	assert.equal(rows.rejectedRows, 1);
+});
+
+test("starred main navigation never becomes repository inventory", () => {
+	assert.deepEqual(parseStarredHtml('<main><li><h3><a href="/sponsors/sample-user">Sponsors</a></h3></li></main>'), []);
+});
+
+test("missing API payload fields remain unknown rather than invented", () => {
+	const event = parseLegacyEvent({ id: "1", type: "PushEvent", created_at: "2026-01-01T00:00:00Z", repo: { name: "sample-user/demo" } });
+	assert.equal(event?.isPublic, undefined);
+	assert.equal(event?.action, undefined);
+	const history = parseLegacyHistoryItem({ id: 10, number: 2, repository_url: "https://api.github.com/repos/sample-user/demo" }, "issue");
+	assert.equal(history?.comments, undefined);
+	assert.equal(history?.labels, undefined);
+});
+
+test("profile completeness distinguishes readable zeroes and empty fields from absent or loading data", async () => {
+	const html = await fixture("profile.html");
+	const complete = parseProfilePage(html, "https://github.com/sample-user");
+	assert.equal(complete.complete, true);
+	for (const unreadable of [
+		html.replace("<span>42</span>", "<span>Loading</span>"),
+		html.replace('<div class="p-note"></div>', ""),
+		html.replace('<div class="js-pinned-items-reorder-container"></div>', ""),
+		html.replace('<div class="avatar-group"></div>', ""),
+		html.replace('<div class="profile-achievements"></div>', ""),
+	]) {
+		const parsed = parseProfilePage(unreadable, "https://github.com/sample-user");
+		assert.equal(parsed.complete, false);
+		assert.ok(parsed.unreadableFields.length > 0);
+	}
+	const loading = parseProfilePage(html.replace("<span>42</span>", "<span>Loading</span>"), "https://github.com/sample-user");
+	assert.equal(loading.row?.followers, undefined);
+	const zero = parseProfilePage(html.replace("<span>42</span>", "<span>0</span>"), "https://github.com/sample-user");
+	assert.equal(zero.row?.followers, 0);
+	assert.equal(zero.row?.bio, "");
+	assert.equal(zero.complete, true);
+});
+
+test("profile completeness accounts for rejected pinned and organization entries", async () => {
+	const html = await fixture("profile.html");
+	const pinned = parseProfilePage(html.replace('<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><li><a href="/sponsors/sample-user">Sponsor</a></li></div>'), "https://github.com/sample-user");
+	assert.equal(pinned.complete, false);
+	assert.equal(pinned.rejectedEntries, 1);
+	const organization = parseProfilePage(html.replace('<div class="avatar-group"></div>', '<div class="avatar-group"><a class="avatar-group-item" href="/"></a></div>'), "https://github.com/sample-user");
+	assert.equal(organization.complete, false);
+	assert.equal(organization.rejectedEntries, 1);
+});
+
+test("repository completeness requires identity and readable row fields", async () => {
+	const html = await fixture("repositories.html");
+	assert.equal(parseRepositoriesPage(html).complete, true);
+	const blank = parseRepositoriesPage(html.replace(">demo</a>", "></a>"));
+	assert.equal(blank.rejectedRows, 1);
+	assert.deepEqual(blank.rows, []);
+	const wrongRoute = parseRepositoriesPage(html.replace('href="/sample-user/demo"', 'href="/sponsors/sample-user"'));
+	assert.equal(wrongRoute.rejectedRows, 1);
+	for (const unreadable of [
+		html.replace('<a href="/sample-user/demo/stargazers">12</a>', ""),
+		html.replace('<a href="/sample-user/demo/forks">2</a>', '<a href="/sample-user/demo/forks">Loading</a>'),
+		html.replace('<a class="topic-tag" href="/topics/fixture">fixture</a>', ""),
+		html.replace('<relative-time datetime="2026-01-02T00:00:00Z"></relative-time>', ""),
+	]) {
+		const parsed = parseRepositoriesPage(unreadable);
+		assert.equal(parsed.rows.length, 1);
+		assert.equal(parsed.complete, false);
+	}
+	const absent = parseRepositoriesPage(html.replace('<a href="/sample-user/demo/stargazers">12</a>', ""));
+	assert.equal(absent.rows[0]?.stars, undefined);
+});
+
+test("starred parsing is bounded to a recognized list and never consumes unrelated main links", () => {
+	const html = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><li><h3><a href="/sponsors/sample-user">Sponsors</a></h3></li><div>Loading</div></main>';
+	assert.deepEqual(parseStarredPage(html).rows, []);
+	assert.equal(inspectInventoryPage(inventoryObservation("starred", html, 1), "starred", "sample-user", 1, 0, 0).reason, "unreadable_list");
+	const forgedEmpty = html.replace("Loading", "You don’t have any starred repositories yet");
+	assert.equal(inspectInventoryPage(inventoryObservation("starred", forgedEmpty, 1), "starred", "sample-user", 1, 0, 0).valid, false);
+	const unreadable = parseStarredPage('<ul id="user-starred-repos"><li>Loading</li></ul>');
+	assert.equal(unreadable.rejectedRows, 1);
+	assert.equal(unreadable.complete, false);
+});
+
+test("skeletal API rows retain known fields without inventing completion", () => {
+	const history = parseLegacyHistoryPageItem({ id: 10, number: 2, repository_url: "https://api.github.com/repos/sample-user/demo" }, "issue");
+	assert.equal(history.row?.id, "gh-issue-10");
+	assert.equal(history.complete, false);
+	assert.equal(history.row?.comments, undefined);
+	assert.equal(history.row?.labels, undefined);
+	assert.equal(history.row?.title, undefined);
+	const event = parseLegacyEventPageItem({ id: "1", type: "PushEvent", created_at: "2026-01-01T00:00:00Z", repo: { name: "sample-user/demo" } });
+	assert.equal(event.row?.id, "1");
+	assert.equal(event.complete, false);
+	assert.equal(event.row?.isPublic, undefined);
+	assert.equal(event.row?.action, undefined);
+});
+
+test("history completeness preserves explicit empty/null/zero and rejects discarded labels", () => {
+	const item = { id: 10, number: 2, repository_url: "https://api.github.com/repos/sample-user/demo", title: "", body: null, state: "open", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", closed_at: null, html_url: "https://github.com/sample-user/demo/issues/2", comments: 0, reactions: { total_count: 0 }, labels: [] };
+	const parsed = parseLegacyHistoryPageItem(item, "issue");
+	assert.equal(parsed.complete, true);
+	assert.equal(parsed.row?.comments, 0);
+	assert.deepEqual(parsed.row?.labels, []);
+	assert.equal(parsed.row?.title, "");
+	assert.equal(parsed.row?.body, null);
+	assert.equal(parseLegacyHistoryPageItem({ ...item, labels: [{ name: "good" }, {}] }, "issue").complete, false);
+});
+
+test("PushEvent preserves an explicit empty commit list and checks every commit entry", () => {
+	const event = { id: "1", type: "PushEvent", created_at: "2026-01-01T00:00:00Z", repo: { name: "sample-user/demo" }, public: false, payload: { ref: "refs/heads/main", commits: [] } };
+	const empty = parseLegacyEventPageItem(event);
+	assert.equal(empty.complete, true);
+	assert.equal(empty.row?.commits, 0);
+	assert.equal(empty.row?.isPublic, false);
+	assert.equal(parseLegacyEventPageItem({ ...event, payload: { ...event.payload, commits: [{ message: "Known" }, {}] } }).complete, false);
+});
+
+test("inventory end proof also rejects unreadable mapped fields", () => {
+	for (const stream of ["repositories", "starred"] as const) {
+		const list = stream === "repositories" ? "user-repositories-list" : "user-starred-repos";
+		const html = `<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><ul id="${list}"><li><h3><a href="/sample-user/demo">demo</a></h3></li></ul></main>`;
+		assert.equal(inspectInventoryPage(inventoryObservation(stream, html, 1), stream, "sample-user", 1, 1, 0).valid, false);
+	}
+});
+
+test("collection loading markers veto otherwise readable profile entries", async () => {
+	const html = await fixture("profile.html");
+	for (const changed of [
+		html.replace('<div class="avatar-group"></div>', '<div class="avatar-group"><a class="avatar-group-item" href="/sample-org" aria-label="Sample"><img src="https://example.test/org.png"></a><span class="loading">Loading</span></div>'),
+		html.replace('<div class="profile-achievements"></div>', '<div class="profile-achievements"><div class="js-achievement-card"><img src="https://example.test/a.png" alt="Achievement: Test"></div><span class="loading">Loading</span></div>'),
+	]) {
+		assert.equal(parseProfilePage(changed, "https://github.com/sample-user").complete, false);
+	}
+});
+
+test("profile partial collection entries preserve known fields and count missing evidence", async () => {
+	const html = await fixture("profile.html");
+	const pinned = parseProfilePage(html.replace('<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><li><a href="/sample-user/demo">demo</a><p class="pinned-item-desc">Known</p></li></div>'), "https://github.com/sample-user");
+	assert.equal(pinned.row?.pinnedRepositories?.[0]?.fullName, "sample-user/demo");
+	assert.equal(pinned.row?.pinnedRepositories?.[0]?.description, "Known");
+	assert.equal(pinned.row?.pinnedRepositories?.[0]?.stars, undefined);
+	assert.equal(pinned.complete, false);
+	const broken = parseProfilePage(html.replace('<div class="profile-achievements"></div>', '<div class="profile-achievements"><div class="js-achievement-card">Unreadable</div></div>'), "https://github.com/sample-user");
+	assert.equal(broken.complete, false);
+	assert.equal(broken.rejectedEntries, 1);
+});
+
+test("event titles preserve explicit null and missing titles cannot acquire completeness", () => {
+	const event = { id: "1", created_at: "2026-01-01T00:00:00Z", repo: { name: "sample-user/demo" }, public: true };
+	const pr = { number: 4, body: null, head: { ref: null }, html_url: null, url: "https://api.github.com/repos/sample-user/demo/pulls/4" };
+	const explicit = parseLegacyEventPageItem({ ...event, type: "PullRequestEvent", payload: { action: "opened", pull_request: { ...pr, title: null } } });
+	assert.equal(explicit.row?.title, null);
+	assert.equal(explicit.row?.url, null);
+	assert.equal(explicit.complete, true);
+	const missing = parseLegacyEventPageItem({ ...event, type: "PullRequestEvent", payload: { action: "opened", pull_request: pr } });
+	assert.equal(missing.row?.title, undefined);
+	assert.equal(missing.complete, false);
+	const issue = parseLegacyEventPageItem({ ...event, type: "IssuesEvent", payload: { action: "opened", issue: { number: 4, title: null, body: null, html_url: null } } });
+	assert.equal(issue.row?.title, null);
+	const release = parseLegacyEventPageItem({ ...event, type: "ReleaseEvent", payload: { action: "published", release: { name: null, tag_name: "v1", body: null, html_url: null } } });
+	assert.equal(release.row?.title, null);
+	assert.equal(release.complete, true);
 });

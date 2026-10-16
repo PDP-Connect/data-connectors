@@ -18,3 +18,24 @@ and the collector follows GitHub's next link until it ends. Contributions requir
 count evidence for every date in the covered views. Search history requires GitHub
 to report complete results with a consistent total count. Otherwise the stream
 emits `SKIP_RESULT` and no completion state.
+
+
+The contract is checked against main at
+`2817254df4c097a8002cc7f7716c3fe6c494ace7`: all six existing streams keep their
+aggregate envelopes and snapshot primary keys. Partial runs retain readable rows
+in that same envelope and emit `SKIP_RESULT`, without `STATE` or full-scan
+`DETAIL_COVERAGE`. Missing mapped fields are omitted rather than fabricated as
+zero, empty strings, empty arrays, or null. Consumers must not interpret omitted
+fields or a partial snapshot as evidence of source deletion.
+
+A full 300-event window and a search total at or above 1,000 are partial. Counts,
+schema acceptance, or reaching a request cap cannot establish completeness.
+Inventory continuations must remain on the same unfiltered selection. Blocked
+pages veto profile, inventory, and contribution ingestion before valid-looking
+chrome or calendar cells are considered.
+
+The session probe and collection bootstrap both accept GitHub's signed-in
+`user-login` metadata on the dashboard; profile-only nickname chrome is not a
+dashboard requirement. Collection still checks the exact homepage navigation and
+known blocking evidence. Synthetic checks cover this parity; a live signed-in
+session and downstream Personal Server/OpenPet behavior remain unverified.

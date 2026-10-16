@@ -34,7 +34,7 @@ function graph(start: string, end: string): string {
 		date.toISOString().slice(0, 10) <= end;
 		date.setUTCDate(date.getUTCDate() + 1)
 	) {
-		html += `<td class="ContributionCalendar-day" data-date="${date.toISOString().slice(0, 10)}" data-count="1"></td>`;
+		html += `<td class="ContributionCalendar-day" data-date="${date.toISOString().slice(0, 10)}" data-count="1" data-level="1"></td>`;
 	}
 	return html;
 }
@@ -80,7 +80,7 @@ runConnector({
 					if (url.includes("tab=stars"))
 						return page(
 							url,
-							'<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="user-starred-repos"></div><p>sample-user hasn\'t starred any repositories yet</p></main>',
+							'<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="user-starred-repos"><p>sample-user hasn\'t starred any repositories yet</p></div></main>',
 						);
 					if (url.endsWith("github.com/")) return page(url, profile);
 					return ++profileLoads === 1

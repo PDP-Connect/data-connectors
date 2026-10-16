@@ -9666,7 +9666,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.0",
+				"version": "0.3.1",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9842,46 +9842,57 @@
 					{
 						"name": "repositories",
 						"required": true,
-						"description": "One user-owned repository row from the signed-in user’s repository inventory. Stable row IDs allow valid pages to ingest before the inventory reaches a proven end.",
+						"description": "Repositories displayed in the signed-in user's repositories tab.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "secondary"
 								},
-								"name": {
-									"type": "string"
-								},
-								"url": {
-									"type": "string"
-								},
-								"description": {
-									"type": "string"
-								},
-								"language": {
-									"type": "string"
-								},
-								"stars": {
-									"type": "number"
-								},
-								"forks": {
-									"type": "number"
-								},
-								"visibility": {
-									"type": "string"
-								},
-								"topics": {
+								"repositories": {
 									"type": "array",
 									"items": {
-										"type": "string"
+										"type": "object",
+										"properties": {
+											"name": {
+												"type": "string"
+											},
+											"url": {
+												"type": "string"
+											},
+											"description": {
+												"type": "string"
+											},
+											"language": {
+												"type": "string"
+											},
+											"stars": {
+												"type": "number"
+											},
+											"forks": {
+												"type": "number"
+											},
+											"visibility": {
+												"type": "string"
+											},
+											"topics": {
+												"type": "array",
+												"items": {
+													"type": "string"
+												}
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											}
+										},
+										"required": ["name", "url"],
+										"additionalProperties": false
 									}
-								},
-								"updatedAt": {
-									"type": ["string", "null"]
 								}
 							},
-							"required": ["id", "name", "url"],
+							"required": ["id", "repositories"],
 							"additionalProperties": false
 						},
 						"primary_key": ["id"],
@@ -9896,34 +9907,45 @@
 					{
 						"name": "starred",
 						"required": true,
-						"description": "One starred repository row from the signed-in user’s starred inventory. Stable row IDs allow valid pages to ingest before the inventory reaches a proven end.",
+						"description": "Repositories displayed in the signed-in user's starred list.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": "string",
+									"x_pdpp_role": "secondary"
 								},
-								"fullName": {
-									"type": "string"
-								},
-								"url": {
-									"type": "string"
-								},
-								"description": {
-									"type": "string"
-								},
-								"language": {
-									"type": "string"
-								},
-								"stars": {
-									"type": "number"
-								},
-								"updatedAt": {
-									"type": ["string", "null"]
+								"starred": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"fullName": {
+												"type": "string"
+											},
+											"url": {
+												"type": "string"
+											},
+											"description": {
+												"type": "string"
+											},
+											"language": {
+												"type": "string"
+											},
+											"stars": {
+												"type": "number"
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											}
+										},
+										"required": ["fullName", "url"],
+										"additionalProperties": false
+									}
 								}
 							},
-							"required": ["fullName", "id", "url"],
+							"required": ["id", "starred"],
 							"additionalProperties": false
 						},
 						"primary_key": ["id"],
@@ -9938,7 +9960,7 @@
 					{
 						"name": "events",
 						"required": true,
-						"description": "One public event row in GitHub’s retained public-event window. Three full 100-row pages prove the declared 300-event window; this is not lifetime history.",
+						"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -9946,41 +9968,61 @@
 								"id": {
 									"type": "string"
 								},
-								"type": {
+								"events": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"type": {
+												"type": "string"
+											},
+											"createdAt": {
+												"type": "string"
+											},
+											"repo": {
+												"type": "string"
+											},
+											"repoUrl": {
+												"type": "string"
+											},
+											"action": {
+												"type": ["string", "null"]
+											},
+											"title": {
+												"type": ["string", "null"]
+											},
+											"body": {
+												"type": ["string", "null"]
+											},
+											"url": {
+												"type": ["string", "null"]
+											},
+											"branch": {
+												"type": ["string", "null"]
+											},
+											"commits": {
+												"type": ["number", "null"]
+											},
+											"isPublic": {
+												"type": "boolean"
+											}
+										},
+										"required": ["id", "type", "repo"],
+										"additionalProperties": false
+									}
+								},
+								"fetchedAt": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
+								},
+								"windowDescription": {
 									"type": "string"
-								},
-								"createdAt": {
-									"type": "string"
-								},
-								"repo": {
-									"type": "string"
-								},
-								"repoUrl": {
-									"type": "string"
-								},
-								"action": {
-									"type": ["string", "null"]
-								},
-								"title": {
-									"type": ["string", "null"]
-								},
-								"body": {
-									"type": ["string", "null"]
-								},
-								"url": {
-									"type": ["string", "null"]
-								},
-								"branch": {
-									"type": ["string", "null"]
-								},
-								"commits": {
-									"type": ["number", "null"]
-								},
-								"isPublic": {
-									"type": "boolean"
 								}
 							},
-							"required": ["id", "type", "createdAt", "repo", "isPublic"],
+							"required": ["id", "events", "fetchedAt"],
 							"additionalProperties": false
 						},
 						"primary_key": ["id"],
@@ -9995,117 +10037,88 @@
 					{
 						"name": "contributions",
 						"required": true,
-						"description": "Contribution day rows plus one summary row from the rolling year and three prior calendar-year views. The summary is emitted only when every date in all four views is covered.",
+						"description": "One legacy aggregate of contribution days and available summaries. Missing or blocked year views retain readable days without completion; completion requires all four views.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
 							"properties": {
 								"id": {
 									"type": "string"
-								}
-							},
-							"oneOf": [
-								{
-									"type": "object",
+								},
+								"totalContributionsLastYear": {
+									"type": ["number", "null"]
+								},
+								"yearTotals": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"year": {
+												"type": "number"
+											},
+											"total": {
+												"type": "number"
+											}
+										},
+										"required": ["year", "total"],
+										"additionalProperties": false
+									}
+								},
+								"days": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"date": {
+												"type": "string"
+											},
+											"count": {
+												"type": "number"
+											},
+											"level": {
+												"type": ["number", "null"]
+											}
+										},
+										"required": ["date", "count"],
+										"additionalProperties": false
+									}
+								},
+								"monthlyTotals": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"month": {
+												"type": "string"
+											},
+											"count": {
+												"type": "number"
+											}
+										},
+										"required": ["month", "count"],
+										"additionalProperties": false
+									}
+								},
+								"topDay": {
+									"type": ["object", "null"],
 									"properties": {
-										"recordType": {
-											"const": "day",
-											"type": "string"
-										},
-										"id": {
-											"type": "string"
-										},
 										"date": {
 											"type": "string"
 										},
 										"count": {
 											"type": "number"
-										},
-										"level": {
-											"type": ["number", "null"]
 										}
 									},
-									"required": ["recordType", "id", "date", "count", "level"],
+									"required": ["date", "count"],
 									"additionalProperties": false
 								},
-								{
-									"type": "object",
-									"properties": {
-										"recordType": {
-											"const": "summary",
-											"type": "string"
-										},
-										"id": {
-											"type": "string"
-										},
-										"username": {
-											"type": "string"
-										},
-										"fetchedAt": {
-											"type": "string"
-										},
-										"totalContributionsLastYear": {
-											"type": "number"
-										},
-										"yearTotals": {
-											"type": "array",
-											"items": {
-												"type": "object",
-												"properties": {
-													"year": {
-														"type": "number"
-													},
-													"total": {
-														"type": "number"
-													}
-												},
-												"required": ["year", "total"],
-												"additionalProperties": false
-											}
-										},
-										"monthlyTotals": {
-											"type": "array",
-											"items": {
-												"type": "object",
-												"properties": {
-													"month": {
-														"type": "string"
-													},
-													"count": {
-														"type": "number"
-													}
-												},
-												"required": ["month", "count"],
-												"additionalProperties": false
-											}
-										},
-										"topDay": {
-											"type": ["object", "null"],
-											"properties": {
-												"date": {
-													"type": "string"
-												},
-												"count": {
-													"type": "number"
-												}
-											},
-											"required": ["date", "count"],
-											"additionalProperties": false
-										}
-									},
-									"required": [
-										"recordType",
-										"id",
-										"username",
-										"fetchedAt",
-										"totalContributionsLastYear",
-										"yearTotals",
-										"monthlyTotals",
-										"topDay"
-									],
-									"additionalProperties": false
+								"fetchedAt": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
 								}
-							]
+							},
+							"required": ["id", "days", "fetchedAt"],
+							"additionalProperties": false
 						},
 						"primary_key": ["id"],
 						"selection": {
@@ -10119,7 +10132,7 @@
 					{
 						"name": "history",
 						"required": true,
-						"description": "One authored issue or pull request row from GitHub Search. Each type has a 1,000-result window. Larger result sets retain the newest window as partial data and do not advance completion.",
+						"description": "One legacy aggregate snapshot of authored issues and pull requests. At or above 1,000 results per type, readable rows are retained without completion.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10127,59 +10140,143 @@
 								"id": {
 									"type": "string"
 								},
-								"type": {
-									"type": "string"
-								},
-								"number": {
-									"type": ["number", "null"]
-								},
-								"title": {
-									"type": ["string", "null"]
-								},
-								"body": {
-									"type": ["string", "null"]
-								},
-								"state": {
-									"type": ["string", "null"]
-								},
-								"createdAt": {
-									"type": ["string", "null"]
-								},
-								"updatedAt": {
-									"type": ["string", "null"]
-								},
-								"closedAt": {
-									"type": ["string", "null"]
-								},
-								"mergedAt": {
-									"type": ["string", "null"]
-								},
-								"url": {
-									"type": ["string", "null"]
-								},
-								"repo": {
-									"type": "string"
-								},
-								"repoUrl": {
-									"type": ["string", "null"]
-								},
-								"labels": {
+								"pullRequests": {
 									"type": "array",
 									"items": {
-										"type": "string"
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"type": {
+												"type": "string"
+											},
+											"number": {
+												"type": ["number", "null"]
+											},
+											"title": {
+												"type": ["string", "null"]
+											},
+											"body": {
+												"type": ["string", "null"]
+											},
+											"state": {
+												"type": ["string", "null"]
+											},
+											"createdAt": {
+												"type": ["string", "null"]
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											},
+											"closedAt": {
+												"type": ["string", "null"]
+											},
+											"mergedAt": {
+												"type": ["string", "null"]
+											},
+											"url": {
+												"type": ["string", "null"]
+											},
+											"repo": {
+												"type": "string"
+											},
+											"repoUrl": {
+												"type": ["string", "null"]
+											},
+											"labels": {
+												"type": "array",
+												"items": {
+													"type": "string"
+												}
+											},
+											"comments": {
+												"type": "number"
+											},
+											"reactionsTotal": {
+												"type": "number"
+											},
+											"isDraft": {
+												"type": "boolean"
+											}
+										},
+										"required": ["id", "type", "repo"],
+										"additionalProperties": false
 									}
 								},
-								"comments": {
-									"type": "number"
+								"issues": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"type": {
+												"type": "string"
+											},
+											"number": {
+												"type": ["number", "null"]
+											},
+											"title": {
+												"type": ["string", "null"]
+											},
+											"body": {
+												"type": ["string", "null"]
+											},
+											"state": {
+												"type": ["string", "null"]
+											},
+											"createdAt": {
+												"type": ["string", "null"]
+											},
+											"updatedAt": {
+												"type": ["string", "null"]
+											},
+											"closedAt": {
+												"type": ["string", "null"]
+											},
+											"mergedAt": {
+												"type": ["string", "null"]
+											},
+											"url": {
+												"type": ["string", "null"]
+											},
+											"repo": {
+												"type": "string"
+											},
+											"repoUrl": {
+												"type": ["string", "null"]
+											},
+											"labels": {
+												"type": "array",
+												"items": {
+													"type": "string"
+												}
+											},
+											"comments": {
+												"type": "number"
+											},
+											"reactionsTotal": {
+												"type": "number"
+											},
+											"isDraft": {
+												"type": "boolean"
+											}
+										},
+										"required": ["id", "type", "repo"],
+										"additionalProperties": false
+									}
 								},
-								"reactionsTotal": {
-									"type": "number"
+								"fetchedAt": {
+									"type": "string",
+									"x_pdpp_role": "secondary"
 								},
-								"isDraft": {
-									"type": "boolean"
+								"windowDescription": {
+									"type": "string"
 								}
 							},
-							"required": ["id", "type", "repo"],
+							"required": ["id", "pullRequests", "issues", "fetchedAt"],
 							"additionalProperties": false
 						},
 						"primary_key": ["id"],

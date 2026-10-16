@@ -160,7 +160,7 @@ test("browser collection emits valid records and state for each selected legacy 
 				? withOwner(repositories)
 				: url.includes("tab=stars")
 					? withOwner(
-							'<main><div id="user-starred-repos"></div><p>sample-user hasn\'t starred any repositories yet</p></main>',
+							'<main><div id="user-starred-repos"><p>sample-user hasn\'t starred any repositories yet</p></div></main>',
 						)
 					: url.endsWith("github.com/")
 						? profile
@@ -197,8 +197,13 @@ test("browser collection emits valid records and state for each selected legacy 
 		},
 		service,
 	);
-	for (const { stream, data } of records)
+	assert.equal(records.length, 6);
+	for (const { stream, data } of records) {
 		assert.equal(validateRecord(stream, data).ok, true, `${stream} validates`);
+		assert.equal(data.id, `sample-user:${stream}`);
+		if (stream === "repositories" || stream === "starred" || stream === "events") assert.ok(Array.isArray(data[stream]));
+		if (stream === "contributions") { assert.ok(Array.isArray(data.days)); assert.equal(data.recordType, undefined); }
+	}
 	const manifest = JSON.parse(
 		await readFile(new URL("./manifest.json", import.meta.url), "utf8"),
 	) as {
@@ -241,12 +246,12 @@ test("browser collection emits valid records and state for each selected legacy 
 	}
 	assert.deepEqual(
 		new Set(records.map(({ stream }) => stream)),
-		new Set(["profile", "repositories", "events", "contributions", "history"]),
+		new Set(["profile", "repositories", "starred", "events", "contributions", "history"]),
 	);
 	assert.equal(messages.filter(({ type }) => type === "STATE").length, 6);
 	assert.ok(
 		records.some(
-			({ stream, data }) => stream === "history" && data.type === "issue",
+			({ stream, data }) => stream === "history" && Array.isArray(data.issues) && data.issues.length > 0,
 		),
 	);
 });
@@ -329,7 +334,7 @@ test("real runtime emits START-selected six RECORDs before DONE", async () => {
 	);
 	assert.deepEqual(
 		new Set(records.map((message) => message.stream)),
-		new Set(["profile", "repositories", "events", "contributions", "history"]),
+		new Set(["profile", "repositories", "starred", "events", "contributions", "history"]),
 	);
 	for (const message of records) {
 		if (message.type !== "RECORD") continue;
@@ -425,16 +430,16 @@ test("incomplete or contradictory history search cannot emit a completed snapsho
 	}
 });
 
-test("starred inventory follows the legacy /stars route and main-list fallback", async () => {
+test("starred inventory enters the legacy page-one fallback and follows its continuation", async () => {
 	const profile = await readFixture("profile.html");
 	const visits: string[] = [];
 	const messages: Array<{ type: string; stream?: string }> = [];
 	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
 	const first = withOwner(
-		`<main><ul><li><h3><a href="/sample-owner/first">sample-owner/first</a></h3></li></ul><a rel="next" href="/stars/sample-user?page=2">Next</a></main>`,
+		`<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/first">sample-owner/first</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/first/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div><a rel="next" href="/stars/sample-user?page=2">Next</a></main>`,
 	);
 	const second = withOwner(
-		'<main><ul><li><h3><a href="/sample-owner/second">sample-owner/second</a></h3></li></ul></main>',
+		'<main><div id="user-starred-repos"><ul><li><h3><a href="/sample-owner/second">sample-owner/second</a></h3><p></p><span itemprop="programmingLanguage"></span><a href="/sample-owner/second/stargazers">0</a><relative-time datetime="2026-01-01T00:00:00Z"></relative-time></li></ul></div></main>',
 	);
 	await collectGitHubBrowser(
 		{
@@ -454,7 +459,7 @@ test("starred inventory follows the legacy /stars route and main-list fallback",
 			openPage: async (url) => {
 				visits.push(url);
 				if (url === "https://github.com/") return pageObservation(url, profile);
-				return pageObservation(url, url.includes("page=2") ? second : first);
+				return pageObservation(url, url.includes("tab=stars") ? withOwner("<main>Loading...</main>") : url.includes("page=2") ? second : first);
 			},
 			sleep: async () => {},
 		},
@@ -463,11 +468,14 @@ test("starred inventory follows the legacy /stars route and main-list fallback",
 	assert.ok(
 		visits.some((url) => url === "https://github.com/stars/sample-user?page=2"),
 	);
-	assert.equal(records.length, 2);
+	assert.ok(visits.includes("https://github.com/stars/sample-user?page=1"));
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.data.id, "sample-user:starred");
+	assert.equal((records[0]?.data.starred as unknown[]).length, 2);
 	assert.equal(messages.filter(({ type }) => type === "STATE").length, 1);
 });
 
-test("three full event pages prove the declared 300-event window", async () => {
+test("three full event pages retain the legacy snapshot but do not prove completion", async () => {
 	const profile = await readFixture("profile.html");
 	const fixtureEvents = JSON.parse(await readFixture("events.json")) as Array<
 		Record<string, unknown>
@@ -506,15 +514,17 @@ test("three full event pages prove the declared 300-event window", async () => {
 	);
 
 	assert.equal(page, 3);
-	assert.equal(records.length, 300);
-	assert.equal(state.events?.bounded_window, true);
-	assert.equal(state.events?.window_limit, 300);
-	assert.ok(messages.some((message) => message.type === "DETAIL_COVERAGE"));
-	assert.equal(messages.filter(({ type }) => type === "STATE").length, 1);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.data.id, "sample-user:events");
+	assert.equal((records[0]?.data.events as unknown[]).length, 300);
+	assert.equal(state.events, undefined);
+	assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
+	assert.equal(messages.filter(({ type }) => type === "STATE" || type === "DETAIL_COVERAGE").length, 0);
 });
 
-test("history accepts exactly 1,000 unique items at a full terminal page", async () => {
+test("history retains exactly 1,000 unique items without claiming completion at the cap", async () => {
 	const profile = await readFixture("profile.html");
+	const source = (JSON.parse(await readFixture("history-issue.json")) as { items: Record<string, unknown>[] }).items[0];
 	let issuePage = 0;
 	const messages: Array<{ type: string; stream?: string }> = [];
 	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
@@ -542,6 +552,7 @@ test("history accepts exactly 1,000 unique items at a full terminal page", async
 				const page = issuePage++;
 				return apiObservation(url, {
 					items: Array.from({ length: 100 }, (_, index) => ({
+						...source,
 						id: page * 100 + index + 1,
 						number: page * 100 + index + 1,
 						repository_url:
@@ -558,11 +569,13 @@ test("history accepts exactly 1,000 unique items at a full terminal page", async
 	);
 
 	assert.equal(issuePage, 10);
-	assert.equal(records.length, 1000);
+	assert.equal(records.length, 1);
 	assert.ok(records.every(({ stream }) => stream === "history"));
-	assert.equal(state.history?.bounded_window, true);
-	assert.equal(state.history?.window_limit_per_type, 1000);
-	assert.equal(messages.filter(({ type }) => type === "STATE").length, 1);
+	assert.equal(records[0]?.data.id, "sample-user:history");
+	assert.equal((records[0]?.data.issues as unknown[]).length, 1000);
+	assert.equal(state.history, undefined);
+	assert.ok(messages.some((message) => message.type === "SKIP_RESULT"));
+	assert.equal(messages.filter(({ type }) => type === "STATE" || type === "DETAIL_COVERAGE").length, 0);
 });
 
 test("an events failure is isolated and does not prevent later requested streams", async () => {

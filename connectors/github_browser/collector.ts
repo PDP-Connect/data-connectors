@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-	buildDetailCoverageMessage,
 	buildFullScanCoverageMessage,
 	type EmittedMessage,
 	type RecordData,
@@ -10,6 +9,7 @@ import {
 import {
 	type BrowserPageObservation,
 	hasExpectedOwner,
+	isBlocked,
 	inspectProfilePage,
 	sameNavigation,
 } from "./page-evidence.ts";
@@ -17,14 +17,14 @@ import {
 	buildContributionSnapshot,
 	inspectInventoryPage,
 	parseContributionHtml,
-	parseLegacyEvent,
-	parseLegacyHistoryItem,
+	parseLegacyEventPageItem,
+	parseLegacyHistoryPageItem,
 	parseLoggedInUsername,
-	parseProfileHtml,
+	parseProfilePage,
 	parseRepositoriesPage,
 	parseStarredPage,
 } from "./parsers.ts";
-import { resolveRecordId, validateRecord } from "./schemas.ts";
+import { validateEntity, validateRecord } from "./schemas.ts";
 import type { BrowserServices, LegacyContributionDay } from "./types.ts";
 
 const GITHUB = "https://github.com";
@@ -61,17 +61,55 @@ export async function collectGitHubBrowser(
 		username === null ||
 		!sameNavigation(homepage.requestedUrl, homepage.currentUrl) ||
 		homepage.currentUrl !== `${GITHUB}/` ||
-		!hasExpectedOwner(homepage.html, username)
+		isBlocked(homepage.html)
 	)
 		throw new Error("github_browser_session_missing");
 
 	const wants = context.requested;
 	const snapshotId = (stream: string): string => `${username}:${stream}`;
+	const pending = new Map<string, RecordData[]>();
+	const flushed = new Map<string, boolean>();
+	const flush = async (stream: string, allowEmpty = false): Promise<boolean> => {
+		if (flushed.has(stream)) return flushed.get(stream) === true;
+		const rows = pending.get(stream) ?? [];
+		if (rows.length === 0 && !allowEmpty) return false;
+		let data: RecordData;
+		const fetchedAt = services.now().toISOString();
+		if (stream === "profile") data = { ...rows[0], id: snapshotId(stream) };
+		else if (stream === "repositories" || stream === "starred")
+			data = { id: snapshotId(stream), [stream]: rows.map(({ id: _id, ...row }) => row) };
+		else if (stream === "events") data = {
+			id: snapshotId(stream), events: rows, fetchedAt,
+			windowDescription: "GitHub public events API retention window (up to 300 events).",
+		};
+		else if (stream === "history") data = {
+			id: snapshotId(stream), issues: rows.filter((row) => row.type === "issue"),
+			pullRequests: rows.filter((row) => row.type === "pr"), fetchedAt,
+			windowDescription: "GitHub Search API results, capped at 1,000 items per type.",
+		};
+		else {
+			const summary = rows.find((row) => row.recordType === "summary");
+			const { recordType: _type, username: _username, id: _id, ...fields } = summary ?? {};
+			data = { ...fields, id: snapshotId(stream), fetchedAt,
+				days: rows.filter((row) => row.recordType === "day").map(
+					({ recordType: _kind, id: _key, ...day }) => day),
+			};
+		}
+		const validated = validateRecord(stream, data);
+		flushed.set(stream, validated.ok);
+		if (!validated.ok) return false;
+		await context.emitRecord(stream, validated.data);
+		return true;
+	};
 	const complete = async (
 		stream: string,
 		counts: CoverageCounts,
 		metadata: Record<string, unknown> = {},
 	): Promise<void> => {
+		if (!(await flush(stream, true))) {
+			await incomplete(stream, "invalid_snapshot_shape", counts);
+			return;
+		}
 		context.state[stream] = {
 			fetched_at: services.now().toISOString(),
 			...metadata,
@@ -81,25 +119,14 @@ export async function collectGitHubBrowser(
 			stream,
 			cursor: context.state[stream],
 		});
-		await context.emit(buildFullScanCoverageMessage(stream, counts.covered));
+		await context.emit(buildFullScanCoverageMessage(stream, 1));
 	};
 	const incomplete = async (
 		stream: string,
 		reason: string,
 		counts?: CoverageCounts,
 	): Promise<void> => {
-		if (counts) {
-			await context.emit(
-				buildDetailCoverageMessage({
-					stream,
-					stateStream: stream,
-					requiredKeys: [],
-					hydratedKeys: [],
-					considered: counts.considered,
-					covered: counts.covered,
-				}),
-			);
-		}
+		await flush(stream);
 		await context.emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -110,13 +137,12 @@ export async function collectGitHubBrowser(
 		});
 	};
 	const emitEntity = async (stream: string, data: object): Promise<boolean> => {
-		const recordData = data as RecordData;
-		const id = resolveRecordId(stream, recordData);
-		if (id === null) return false;
-		const record = { ...recordData, id };
-		const validated = validateRecord(stream, record);
+		const record = data as RecordData;
+		const validated = validateEntity(stream, record);
 		if (!validated.ok) return false;
-		await context.emitRecord(stream, validated.data);
+		const rows = pending.get(stream) ?? [];
+		rows.push(validated.data);
+		pending.set(stream, rows);
 		return true;
 	};
 	const runIsolated = async (
@@ -138,7 +164,8 @@ export async function collectGitHubBrowser(
 				await incomplete("profile", "wrong_page_or_owner");
 				return;
 			}
-			const record = parseProfileHtml(page.html, url);
+			const parsed = parseProfilePage(page.html, url);
+			const record = parsed.row;
 			if (record === null || record.username !== username) {
 				await incomplete("profile", "unreadable_profile");
 				return;
@@ -152,6 +179,10 @@ export async function collectGitHubBrowser(
 					considered: 1,
 					covered: 0,
 				});
+				return;
+			}
+			if (!parsed.complete) {
+				await incomplete("profile", "unreadable_fields", { considered: 1, covered: 0 });
 				return;
 			}
 			await complete("profile", { considered: 1, covered: 1 });
@@ -235,8 +266,8 @@ export async function collectGitHubBrowser(
 						if (await emitEntity(stream, row)) covered += 1;
 					}
 				}
-				if (!proof.valid) {
-					await incomplete(stream, proof.reason, { considered, covered });
+				if (!proof.valid || !parsed.complete) {
+					await incomplete(stream, !parsed.complete ? "unreadable_fields" : proof.reason, { considered, covered });
 					return;
 				}
 				if (proof.nextUrl === null) {
@@ -264,7 +295,6 @@ export async function collectGitHubBrowser(
 			let covered = 0;
 			let valid = true;
 			let ended = false;
-			let boundedWindow = false;
 			for (let page = 1; page <= 3; page += 1) {
 				const url = `${API}/users/${username}/events/public?per_page=100&page=${page}`;
 				const response = await services.fetchPublicJson(url);
@@ -272,7 +302,9 @@ export async function collectGitHubBrowser(
 					break;
 				considered += response.data.length;
 				for (const raw of response.data) {
-					const event = parseLegacyEvent(raw);
+					const parsed = parseLegacyEventPageItem(raw);
+					const event = parsed.row;
+					if (!parsed.complete) valid = false;
 					if (event === null || seen.has(event.id)) {
 						valid = false;
 						continue;
@@ -284,10 +316,6 @@ export async function collectGitHubBrowser(
 				if (response.data.length < 100) {
 					ended = true;
 					break;
-				}
-				if (page === 3) {
-					ended = true;
-					boundedWindow = true;
 				}
 			}
 			const counts = { considered, covered };
@@ -301,7 +329,7 @@ export async function collectGitHubBrowser(
 			}
 			await complete("events", counts, {
 				window: "github_public_events_retention",
-				bounded_window: boundedWindow,
+				bounded_window: false,
 				window_limit: 300,
 			});
 		});
@@ -335,12 +363,14 @@ export async function collectGitHubBrowser(
 				if (
 					!sameNavigation(page.requestedUrl, page.currentUrl) ||
 					page.currentUrl !== url ||
-					!hasExpectedOwner(page.html, username)
+					!hasExpectedOwner(page.html, username) ||
+					isBlocked(page.html)
 				) {
 					sourceFailed = true;
 					continue;
 				}
 				const graph = parseContributionHtml(page.html);
+				if (!graph.complete) sourceFailed = true;
 				considered += graph.rawDays;
 				rejected += graph.rejectedDays;
 				graphs.push({ ...graph, year: itemYear });
@@ -484,12 +514,14 @@ export async function collectGitHubBrowser(
 			if (expectedTotal !== null && body.total_count !== expectedTotal) break;
 			expectedTotal = body.total_count;
 			considered = Math.max(considered, body.total_count);
-			if (body.total_count > HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT) {
+			if (body.total_count >= HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT) {
 				capped = true;
 			}
 			let invalid = false;
 			for (const raw of body.items) {
-				const item = parseLegacyHistoryItem(raw, type);
+				const parsed = parseLegacyHistoryPageItem(raw, type);
+				const item = parsed.row;
+				if (!parsed.complete) invalid = true;
 				if (item === null || seen.has(item.id)) {
 					invalid = true;
 					continue;
@@ -502,11 +534,6 @@ export async function collectGitHubBrowser(
 			const exhaustedPageLimit = page === HISTORY_PAGE_LIMIT;
 			if (body.items.length < HISTORY_PAGE_SIZE || exhaustedPageLimit) {
 				completeType = expectedTotal === seen.size;
-				if (
-					exhaustedPageLimit &&
-					expectedTotal === HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT
-				)
-					completeType = true;
 				break;
 			}
 			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);

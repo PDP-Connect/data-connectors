@@ -47,7 +47,9 @@ function githubUrl(href: string | null | undefined): string | null {
 	if (href === null || href === undefined || href === "") return null;
 	try {
 		const url = new URL(href, "https://github.com");
-		return url.hostname === "github.com" ? url.href : null;
+		return url.origin === "https://github.com" && !url.username && !url.password
+			? url.href
+			: null;
 	} catch {
 		return null;
 	}
@@ -56,10 +58,14 @@ function githubUrl(href: string | null | undefined): string | null {
 function repositoryName(href: string | null): string | null {
 	if (href === null) return null;
 	try {
-		const parts = new URL(href, "https://github.com").pathname
+		const absolute = githubUrl(href);
+		if (absolute === null) return null;
+		const url = new URL(absolute);
+		if (url.search || url.hash) return null;
+		const parts = url.pathname
 			.split("/")
 			.filter(Boolean);
-		if (parts.length !== 2) return null;
+		if (parts.length !== 2 || !/^[a-zA-Z0-9-]{1,39}$/u.test(parts[0] ?? "") || !/^[a-zA-Z0-9_.-]+$/u.test(parts[1] ?? "")) return null;
 		const blocked = new Set([
 			"features",
 			"topics",
@@ -74,6 +80,10 @@ function repositoryName(href: string | null): string | null {
 			"notifications",
 			"explore",
 			"stars",
+			"sponsors",
+			"search",
+			"security",
+			"enterprise",
 		]);
 		return blocked.has(parts[0]?.toLowerCase() ?? "")
 			? null
@@ -92,214 +102,303 @@ export function parseLoggedInUsername(html: string): string | null {
 	return login && /^[a-zA-Z0-9-]{1,39}$/u.test(login) ? login : null;
 }
 
+
+export type ProfileRow = Omit<Partial<LegacyProfile>, "pinnedRepositories" | "organizations" | "achievements"> &
+	Pick<LegacyProfile, "username" | "profileUrl"> & {
+		pinnedRepositories?: Array<Partial<LegacyProfile["pinnedRepositories"][number]> & { fullName: string }>;
+		organizations?: Array<Partial<LegacyProfile["organizations"][number]> & { login: string; url: string }>;
+		achievements?: Array<Partial<LegacyProfile["achievements"][number]> & { name: string }>;
+	};
+export type RepositoryRow = Partial<LegacyRepository> &
+	Pick<LegacyRepository, "id" | "name" | "url">;
+export type StarredRow = Partial<LegacyStarredRepository> &
+	Pick<LegacyStarredRepository, "id" | "fullName" | "url">;
+export type EventRow = Partial<LegacyEvent> &
+	Pick<LegacyEvent, "id" | "type" | "createdAt" | "repo" | "repoUrl">;
+export type HistoryRow = Partial<LegacyHistoryItem> &
+	Pick<LegacyHistoryItem, "id" | "type" | "repo" | "repoUrl">;
+
+export interface ParsedItem<T> {
+	row: T | null;
+	complete: boolean;
+	unreadableFields: string[];
+}
+export interface ParsedInventory<T> {
+	rows: T[];
+	rejectedRows: number;
+	rawRows: number;
+	complete: boolean;
+	unreadableFields: string[];
+}
+
+function isUnreadable(node: Element): boolean {
+	return (
+		node.closest('[aria-busy="true"]') !== null ||
+		node.querySelector('[aria-busy="true"], .AnimatedEllipsis, .loading') !== null ||
+		/^(?:loading(?:\.{3}|…)?|unavailable|failed to load)$/iu.test(text(node))
+	);
+}
+
+function sourceText(node: Element | null): string | undefined {
+	return node === null || isUnreadable(node) ? undefined : text(node);
+}
+
+function sourceAttribute(
+	node: Element | null,
+	attribute: string,
+): string | undefined {
+	return node === null || isUnreadable(node)
+		? undefined
+		: (node.getAttribute(attribute) ?? undefined);
+}
+
+function sourceCount(node: Element | null): number | undefined {
+	const raw = sourceText(node);
+	if (raw === undefined) return undefined;
+	const match = /^([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?[km]?)(?:\s+(?:followers?|following|repositories|stars?|forks?))?$/iu.exec(raw);
+	if (!match?.[1]) return undefined;
+	const value = toInt(match[1]);
+	return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function sourceTime(node: Element | null): string | undefined {
+	const value = sourceAttribute(node, "datetime");
+	return value && Number.isFinite(Date.parse(value)) ? value : undefined;
+}
+
+function recordField<T extends object, K extends keyof T>(
+	row: T,
+	key: K,
+	value: T[K] | undefined,
+	unreadableFields: string[],
+): void {
+	if (value === undefined) unreadableFields.push(String(key));
+	else row[key] = value;
+}
+
+function cardRows(list: Element | null): Element[] {
+	if (list === null) return [];
+	return Array.from(list.querySelectorAll("li")).filter((row) => {
+		const parentRow = row.parentElement?.closest("li");
+		return !parentRow || !list.contains(parentRow);
+	});
+}
+
+function starredList(document: Document): Element | null {
+	return document.querySelector(
+		"#user-starred-repos, #user-profile-frame .js-starred-repos, #user-profile-frame [data-testid='starred-repositories']",
+	);
+}
+
 export function parseProfileHtml(
 	html: string,
 	profileUrl: string,
-): LegacyProfile | null {
-	const { document } = parseHTML(html);
-	const username = text(document.querySelector("span.p-nickname"));
-	if (!/^[a-zA-Z0-9-]{1,39}$/u.test(username)) return null;
-
-	const pinnedRepositories = Array.from(
-		document.querySelectorAll(
-			".js-pinned-items-reorder-container li, ol.pinned-items-reorder-list li",
-		),
-	)
-		.map((item) => {
-			const link = item.querySelector('a[href*="/"]');
-			const href = link?.getAttribute("href") ?? null;
-			const fullName = repositoryName(href);
-			if (!fullName) return null;
-			const stars = text(item.querySelector('a[href$="/stargazers"]'));
-			const language = text(
-				item.querySelector('[itemprop="programmingLanguage"]'),
-			);
-			return {
-				description: text(item.querySelector("p.pinned-item-desc")),
-				fullName,
-				language,
-				stars: toInt(stars),
-				url: `https://github.com/${fullName}`,
-			};
-		})
-		.filter((item): item is NonNullable<typeof item> => item !== null);
-
-	const organizations = Array.from(
-		document.querySelectorAll('a.avatar-group-item[href^="/"]'),
-	)
-		.map((link) => {
-			const href = link.getAttribute("href") ?? "";
-			const login = href.replace(/^\//u, "").split("/")[0] ?? "";
-			if (login === "") return null;
-			const image = link.querySelector("img");
-			return {
-				avatarUrl: image?.getAttribute("src") ?? null,
-				label:
-					link.getAttribute("aria-label") ??
-					image?.getAttribute("alt") ??
-					login,
-				login,
-				url: `https://github.com${href}`,
-			};
-		})
-		.filter((item): item is NonNullable<typeof item> => item !== null);
-
-	const achievements = Array.from(
-		document.querySelectorAll(
-			'.js-achievement-card img, a[href*="/achievements/"] img',
-		),
-	)
-		.map((image) => {
-			const name = (image.getAttribute("alt") ?? "")
-				.replace(/^Achievement:\s*/iu, "")
-				.trim();
-			return name ? { iconUrl: image.getAttribute("src"), name } : null;
-		})
-		.filter((item): item is NonNullable<typeof item> => item !== null);
-
-	const countMatch = /([\d,]+)\s+contribution/iu.exec(
-		text(document.querySelector("h2.f4.text-normal.mb-2")),
-	);
-	const followers = text(
-		document.querySelector(
-			'a[href$="?tab=followers"] span, a[href$="?tab=followers"]',
-		),
-	);
-	const following = text(
-		document.querySelector(
-			'a[href$="?tab=following"] span, a[href$="?tab=following"]',
-		),
-	);
-	const repoCountNode =
-		document.querySelector(
-			'[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter',
-		) ??
-		document.querySelector(
-			'[data-tab-item="repositories"], a[href*="tab=repositories"]',
-		);
-	const blog = document.querySelector('[itemprop="url"]')?.getAttribute("href");
-
-	return {
-		achievements,
-		avatarUrl:
-			document.querySelector("img.avatar-user")?.getAttribute("src") ?? "",
-		bio: text(document.querySelector("div.p-note")),
-		company: text(document.querySelector('[itemprop="worksFor"]')),
-		contributionsLastYear: countMatch?.[1] ? toInt(countMatch[1]) : null,
-		followers: toInt(followers),
-		following: toInt(following),
-		fullName: text(document.querySelector("span.p-name")),
-		location: text(document.querySelector('[itemprop="homeLocation"]')),
-		organizations,
-		pinnedRepositories,
-		profileUrl,
-		repositoryCount: toInt(text(repoCountNode)),
-		username,
-		website: blog ?? "",
-	};
+): ProfileRow | null {
+	return parseProfilePage(html, profileUrl).row;
 }
 
-export function parseRepositoriesHtml(html: string): LegacyRepository[] {
+export function parseProfilePage(
+	html: string,
+	profileUrl: string,
+): ParsedItem<ProfileRow> & { rejectedEntries: number } {
+	const { document } = parseHTML(html);
+	const username = sourceText(document.querySelector("span.p-nickname"));
+	const unreadableFields: string[] = [];
+	let rejectedEntries = 0;
+	if (!username || !/^[a-zA-Z0-9-]{1,39}$/u.test(username))
+		return { row: null, complete: false, unreadableFields: ["username"], rejectedEntries };
+
+	const row: ProfileRow = { username, profileUrl };
+	for (const [key, selector] of [
+		["fullName", "span.p-name"],
+		["bio", "div.p-note"],
+		["company", '[itemprop="worksFor"]'],
+		["location", '[itemprop="homeLocation"]'],
+	] as const)
+		recordField(row, key, sourceText(document.querySelector(selector)), unreadableFields);
+	recordField(row, "website", sourceAttribute(document.querySelector('[itemprop="url"]'), "href"), unreadableFields);
+	recordField(row, "avatarUrl", sourceAttribute(document.querySelector("img.avatar-user"), "src"), unreadableFields);
+	recordField(row, "followers", sourceCount(document.querySelector('a[href$="?tab=followers"] span, a[href$="?tab=followers"]')), unreadableFields);
+	recordField(row, "following", sourceCount(document.querySelector('a[href$="?tab=following"] span, a[href$="?tab=following"]')), unreadableFields);
+	const repoCountNode = document.querySelector('[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter')
+		?? document.querySelector('[data-tab-item="repositories"], a[href*="tab=repositories"]');
+	recordField(row, "repositoryCount", sourceCount(repoCountNode), unreadableFields);
+	const contributionText = sourceText(document.querySelector("h2.f4.text-normal.mb-2"));
+	const countMatch = contributionText === undefined ? null : /^([\d,]+)\s+contributions?\b/iu.exec(contributionText);
+	recordField(row, "contributionsLastYear", countMatch?.[1] ? toInt(countMatch[1]) : undefined, unreadableFields);
+
+
+	const pinnedList = document.querySelector(".js-pinned-items-reorder-container, ol.pinned-items-reorder-list");
+	if (pinnedList === null) {
+		unreadableFields.push("pinnedRepositories");
+	} else {
+		const pinnedRows = cardRows(pinnedList);
+		if (isUnreadable(pinnedList)) unreadableFields.push("pinnedRepositories");
+		if (pinnedRows.length > 0 || !isUnreadable(pinnedList)) row.pinnedRepositories = [];
+		for (const item of pinnedRows) {
+			const link = item.querySelector("a[href]");
+			const fullName = repositoryName(link?.getAttribute("href") ?? null);
+			if (!fullName || !sourceText(link)) {
+				rejectedEntries += 1;
+				continue;
+			}
+			const description = sourceText(item.querySelector("p.pinned-item-desc"));
+			const language = sourceText(item.querySelector('[itemprop="programmingLanguage"]'));
+			const stars = sourceCount(item.querySelector('a[href$="/stargazers"]'));
+			if (description === undefined || language === undefined || stars === undefined) rejectedEntries += 1;
+			row.pinnedRepositories?.push({
+				fullName,
+				url: `https://github.com/${fullName}`,
+				...(description === undefined ? {} : { description }),
+				...(language === undefined ? {} : { language }),
+				...(stars === undefined ? {} : { stars }),
+			});
+		}
+	}
+
+	const organizations = Array.from(document.querySelectorAll(".avatar-group-item"));
+	const orgList = document.querySelector(".avatar-group, [data-testid='organizations'], [aria-label='Organizations']");
+	if (orgList !== null && isUnreadable(orgList)) unreadableFields.push("organizations");
+	if (organizations.length === 0 && (orgList === null || isUnreadable(orgList))) {
+		if (!unreadableFields.includes("organizations")) unreadableFields.push("organizations");
+	} else {
+		row.organizations = [];
+		for (const link of organizations) {
+			const href = githubUrl(link.getAttribute("href"));
+			const path = href ? new URL(href).pathname : "";
+			const login = /^\/([a-zA-Z0-9-]{1,39})$/u.exec(path)?.[1];
+			if (!login || href === null) {
+				rejectedEntries += 1;
+				continue;
+			}
+			const image = link.querySelector("img");
+			const avatarUrl = sourceAttribute(image, "src");
+			const label = sourceAttribute(link, "aria-label") ?? sourceAttribute(image, "alt");
+			if (avatarUrl === undefined || label === undefined) rejectedEntries += 1;
+			row.organizations.push({
+				login,
+				url: href,
+				...(avatarUrl === undefined ? {} : { avatarUrl }),
+				...(label === undefined ? {} : { label }),
+			});
+		}
+	}
+
+	const achievementSelector = '.js-achievement-card, a[href*="/achievements/"]';
+	const achievementCards = Array.from(document.querySelectorAll(achievementSelector))
+		.filter((card) => !card.parentElement?.closest(achievementSelector));
+	const achievementList = document.querySelector(".profile-achievements, .js-profile-achievements, [data-testid='achievements']");
+	if (achievementList !== null && isUnreadable(achievementList)) unreadableFields.push("achievements");
+	if (achievementCards.length === 0 && (achievementList === null || isUnreadable(achievementList))) {
+		if (!unreadableFields.includes("achievements")) unreadableFields.push("achievements");
+	} else {
+		row.achievements = [];
+		for (const card of achievementCards) {
+			const image = card.querySelector("img");
+			const name = sourceAttribute(image, "alt")?.replace(/^Achievement:\s*/iu, "").trim();
+			if (!name) {
+				rejectedEntries += 1;
+				continue;
+			}
+			const iconUrl = sourceAttribute(image, "src");
+			if (iconUrl === undefined) rejectedEntries += 1;
+			row.achievements.push({ name, ...(iconUrl === undefined ? {} : { iconUrl }) });
+		}
+	}
+	if (rejectedEntries > 0) unreadableFields.push("collectionEntries");
+	return { row, complete: unreadableFields.length === 0, unreadableFields, rejectedEntries };
+}
+
+export function parseRepositoriesHtml(html: string): RepositoryRow[] {
 	return parseRepositoriesPage(html).rows;
 }
 
-export function parseRepositoriesPage(html: string): {
-	rows: LegacyRepository[];
-	rejectedRows: number;
-	rawRows: number;
-} {
+export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryRow> {
 	const { document } = parseHTML(html);
-	const records: LegacyRepository[] = [];
+	const list = document.querySelector("#user-repositories-list");
+	const sourceRows = cardRows(list);
+	const rows: RepositoryRow[] = [];
+	const unreadableFields: string[] = [];
 	let rejectedRows = 0;
-	const sourceRows = document.querySelectorAll("#user-repositories-list li");
-	for (const row of sourceRows) {
-		const link = row.querySelector("h3 a");
-		const url = githubUrl(link?.getAttribute("href"));
-		if (!link || url === null) {
+	const seen = new Set<string>();
+	for (const [index, source] of sourceRows.entries()) {
+		const link = source.querySelector("h3 a");
+		const repo = repositoryName(link?.getAttribute("href") ?? null);
+		const name = sourceText(link);
+		if (!repo || !name) {
 			rejectedRows += 1;
-			continue;
-		}
-		const topics = Array.from(row.querySelectorAll("a.topic-tag")).map(
-			(topic) => text(topic),
-		);
-		records.push({
-			description: text(row.querySelector('p[itemprop="description"]')),
-			forks: toInt(text(row.querySelector('a[href$="/forks"]'))),
-			language: text(row.querySelector('[itemprop="programmingLanguage"]')),
-			id: url,
-			name: text(link),
-			stars: toInt(text(row.querySelector('a[href$="/stargazers"]'))),
-			topics,
-			updatedAt:
-				row.querySelector("relative-time")?.getAttribute("datetime") ?? null,
-			url,
-			visibility: text(row.querySelector("span.Label")),
-		});
-	}
-	return { rows: records, rejectedRows, rawRows: sourceRows.length };
-}
-
-export function parseStarredHtml(html: string): LegacyStarredRepository[] {
-	return parseStarredPage(html).rows;
-}
-
-export function parseStarredPage(html: string): {
-	rows: LegacyStarredRepository[];
-	rejectedRows: number;
-	rawRows: number;
-} {
-	const { document } = parseHTML(html);
-	const records = new Map<string, LegacyStarredRepository>();
-	let rejectedRows = 0;
-	const list = document.querySelector(
-		"#user-starred-repos, #user-profile-frame",
-	);
-	const sourceRows = list
-		? list.querySelectorAll("li")
-		: Array.from(document.querySelectorAll("main li")).filter((row) =>
-				row.querySelector("h3 a[href], a[href*='/']"),
-			);
-	for (const row of sourceRows) {
-		let repo: string | null = null;
-		let repoLink: Element | null = null;
-		for (const link of row.querySelectorAll("h3 a[href], a[href]")) {
-			const candidate = repositoryName(link.getAttribute("href"));
-			if (candidate) {
-				repo = candidate;
-				repoLink = link;
-				break;
-			}
-		}
-		if (repo === null || repoLink === null) {
-			if (row.querySelector("h3 a[href], a[href*='/']")) rejectedRows += 1;
 			continue;
 		}
 		const url = `https://github.com/${repo}`;
-		if (records.has(url)) {
+		if (seen.has(url)) {
 			rejectedRows += 1;
 			continue;
 		}
-		const language = text(
-			row.querySelector(
-				'[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]',
-			),
-		);
-		records.set(url, {
-			description: text(row.querySelector("p")),
-			fullName: text(repoLink),
-			id: url,
-			language,
-			stars: toInt(text(row.querySelector('a[href$="/stargazers"]'))),
-			updatedAt:
-				row.querySelector("relative-time")?.getAttribute("datetime") ?? null,
-			url,
-		});
+		seen.add(url);
+		const row: RepositoryRow = { id: url, name, url };
+		const missing: string[] = [];
+		recordField(row, "description", sourceText(source.querySelector('p[itemprop="description"]')), missing);
+		recordField(row, "language", sourceText(source.querySelector('[itemprop="programmingLanguage"]')), missing);
+		recordField(row, "stars", sourceCount(source.querySelector('a[href$="/stargazers"]')), missing);
+		recordField(row, "forks", sourceCount(source.querySelector('a[href$="/forks"]')), missing);
+		recordField(row, "visibility", sourceText(source.querySelector("span.Label")), missing);
+		recordField(row, "updatedAt", sourceTime(source.querySelector("relative-time")), missing);
+		const topics = Array.from(source.querySelectorAll("a.topic-tag"));
+		const topicList = source.querySelector(".topics-row-container, [data-testid='repository-topics']");
+		if (topics.length === 0 && (topicList === null || isUnreadable(topicList))) {
+			missing.push("topics");
+		} else {
+			row.topics = [];
+			for (const topic of topics) {
+				const value = sourceText(topic);
+				if (value === undefined || value === "") missing.push("topics");
+				else row.topics.push(value);
+			}
+		}
+		unreadableFields.push(...missing.map((field) => `${index}.${field}`));
+		rows.push(row);
 	}
-	return {
-		rows: [...records.values()],
-		rejectedRows,
-		rawRows: sourceRows.length,
-	};
+	if (list === null || isUnreadable(list)) unreadableFields.push("list");
+	return { rows, rejectedRows, rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
+}
+
+export function parseStarredHtml(html: string): StarredRow[] {
+	return parseStarredPage(html).rows;
+}
+
+export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
+	const { document } = parseHTML(html);
+	const list = starredList(document);
+	const sourceRows = cardRows(list);
+	const rows: StarredRow[] = [];
+	const unreadableFields: string[] = [];
+	let rejectedRows = 0;
+	const seen = new Set<string>();
+	for (const [index, source] of sourceRows.entries()) {
+		const link = source.querySelector("h3 a[href]");
+		const repo = repositoryName(link?.getAttribute("href") ?? null);
+		const fullName = sourceText(link);
+		if (!repo || !fullName) {
+			rejectedRows += 1;
+			continue;
+		}
+		const url = `https://github.com/${repo}`;
+		if (seen.has(url)) {
+			rejectedRows += 1;
+			continue;
+		}
+		seen.add(url);
+		const row: StarredRow = { id: url, fullName, url };
+		const missing: string[] = [];
+		recordField(row, "description", sourceText(source.querySelector("p")), missing);
+		recordField(row, "language", sourceText(source.querySelector('[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]')), missing);
+		recordField(row, "stars", sourceCount(source.querySelector('a[href$="/stargazers"]')), missing);
+		recordField(row, "updatedAt", sourceTime(source.querySelector("relative-time")), missing);
+		unreadableFields.push(...missing.map((field) => `${index}.${field}`));
+		rows.push(row);
+	}
+	if (list === null || isUnreadable(list)) unreadableFields.push("list");
+	return { rows, rejectedRows, rawRows: sourceRows.length, complete: rejectedRows === 0 && unreadableFields.length === 0, unreadableFields };
 }
 
 export function inspectInventoryPage(
@@ -315,10 +414,10 @@ export function inspectInventoryPage(
 	const list =
 		stream === "repositories"
 			? document.querySelector("#user-repositories-list")
-			: document.querySelector(
-					"#user-starred-repos, #user-profile-frame, main",
-				);
-	const emptyText = document.querySelector("main")?.textContent ?? "";
+			: starredList(document);
+	const emptyScope = list?.querySelector(".blankslate, [data-testid='empty-state']")
+		?? (list?.querySelector("li") ? null : list);
+	const emptyText = emptyScope?.textContent ?? "";
 	const explicitEmpty =
 		stream === "repositories"
 			? /(?:doesn't have any|has no) (?:public )?repositories yet/iu.test(
@@ -354,6 +453,9 @@ export function inspectInventoryPage(
 		hasRecognizedList: list !== null,
 		nextUrl,
 	});
+	const parsed = stream === "repositories" ? parseRepositoriesPage(page.html) : parseStarredPage(page.html);
+	if ((result.complete || result.reason === "remaining_continuation") && !parsed.complete)
+		return { valid: false, nextUrl: null, reason: "unreadable_fields" };
 	return {
 		valid: result.complete || result.reason === "remaining_continuation",
 		nextUrl: result.nextUrl,
@@ -366,17 +468,19 @@ export function parseContributionHtml(html: string): {
 	rejectedDays: number;
 	rawDays: number;
 	total: number;
+	complete: boolean;
+	unreadableFields: string[];
 } {
 	const { document } = parseHTML(html);
 	const days: LegacyContributionDay[] = [];
 	let rejectedDays = 0;
 	const cells = document.querySelectorAll(
-		"td.ContributionCalendar-day[data-date], rect.day[data-date]",
+		"td.ContributionCalendar-day, rect.day",
 	);
 	const seenDates = new Set<string>();
 	for (const cell of cells) {
 		const date = cell.getAttribute("data-date");
-		if (date === null || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
+		if (date === null || !/^\d{4}-\d{2}-\d{2}$/u.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) {
 			rejectedDays += 1;
 			continue;
 		}
@@ -408,12 +512,16 @@ export function parseContributionHtml(html: string): {
 		}
 		seenDates.add(date);
 		const rawLevel = cell.getAttribute("data-level");
-		const level = rawLevel === null ? null : Number(rawLevel);
+		const level = rawLevel === null || !/^[0-4]$/u.test(rawLevel) ? null : Number(rawLevel);
+		if (level === null) {
+			rejectedDays += 1;
+			continue;
+		}
 		days.push({
 			count,
 			date,
 			id: date,
-			level: level !== null && Number.isFinite(level) ? level : null,
+			level,
 		});
 	}
 	const headingMatch = /([\d,]+)\s+contribution/iu.exec(
@@ -423,6 +531,8 @@ export function parseContributionHtml(html: string): {
 		days,
 		rejectedDays,
 		rawDays: cells.length,
+		complete: rejectedDays === 0 && headingMatch?.[1] !== undefined,
+		unreadableFields: headingMatch?.[1] ? [] : ["total"],
 		total: headingMatch?.[1]
 			? toInt(headingMatch[1])
 			: days.reduce((total, day) => total + day.count, 0),
@@ -430,7 +540,7 @@ export function parseContributionHtml(html: string): {
 }
 
 export function buildContributionSnapshot(
-	graphs: Array<{ days: LegacyContributionDay[]; total: number; year: number }>,
+	graphs: Array<{ days: LegacyContributionDay[]; total: number; year: number; complete?: boolean }>,
 	fetchedAt: string,
 ): LegacyContributions | null {
 	const fetchedDate = /^\d{4}-\d{2}-\d{2}/u.exec(fetchedAt)?.[0];
@@ -440,7 +550,7 @@ export function buildContributionSnapshot(
 		!Number.isFinite(fetchedYear) ||
 		graphs.length !== 4 ||
 		new Set(graphs.map((graph) => graph.year)).size !== 4 ||
-		graphs.some((graph, index) => graph.year !== fetchedYear - index)
+		graphs.some((graph, index) => graph.year !== fetchedYear - index || graph.complete === false)
 	) {
 		return null;
 	}
@@ -504,7 +614,130 @@ export function buildContributionSnapshot(
 	};
 }
 
-export function parseLegacyEvent(raw: unknown): LegacyEvent | null {
+
+export function parseLegacyEvent(raw: unknown): EventRow | null {
+	return parseLegacyEventPageItem(raw).row;
+}
+
+export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
+	const source = objectValue(raw);
+	const publicValue = source.public;
+	const hasPayload = typeof source.payload === "object" && source.payload !== null && !Array.isArray(source.payload);
+	const value = legacyEventValues({
+		...source,
+		public: typeof publicValue === "boolean" ? publicValue : undefined,
+	});
+	if (value === null) return { row: null, complete: false, unreadableFields: ["identity"] };
+	const row: EventRow = { ...value };
+	const unreadableFields: string[] = [];
+	const details = ["action", "title", "body", "url", "branch", "commits"] as const;
+	if (typeof publicValue !== "boolean") {
+		delete row.isPublic;
+		unreadableFields.push("public");
+	}
+	if (!hasPayload) {
+		for (const key of details) delete row[key];
+		unreadableFields.push("payload");
+		return { row, complete: false, unreadableFields };
+	}
+	const payload = objectValue(source.payload);
+	const pr = objectValue(payload.pull_request);
+	const issue = objectValue(payload.issue);
+	const comment = objectValue(payload.comment);
+	const review = objectValue(payload.review);
+	const release = objectValue(payload.release);
+	const forkee = objectValue(payload.forkee);
+	const nullableText = (input: unknown): boolean => input === null || typeof input === "string";
+	const nullableNumber = (input: unknown): boolean => input === null || (typeof input === "number" && Number.isSafeInteger(input) && input >= 0);
+	const requireField = (key: typeof details[number], readable: boolean): void => {
+		if (!readable) {
+			delete row[key];
+			unreadableFields.push(key);
+		}
+	};
+	switch (value.type) {
+		case "PushEvent": {
+			const commits = Array.isArray(payload.commits) ? payload.commits : undefined;
+			requireField("title", commits !== undefined && (commits.length === 0 || typeof objectValue(commits[0]).message === "string"));
+			requireField("branch", typeof payload.ref === "string");
+			requireField("commits", commits !== undefined
+				? commits.every((commit) => typeof objectValue(commit).message === "string")
+				: nullableNumber(payload.size));
+			break;
+		}
+		case "PullRequestEvent":
+			requireField("action", typeof payload.action === "string");
+			requireField("title", nullableText(pr.title));
+			if (pr.title === null) row.title = null;
+			requireField("body", nullableText(pr.body));
+			requireField("url", nullableText(pr.html_url) || typeof pr.url === "string");
+			if (pr.html_url === null) row.url = null;
+			requireField("branch", nullableText(objectValue(pr.head).ref));
+			break;
+		case "PullRequestReviewEvent":
+			requireField("action", typeof review.state === "string");
+			requireField("title", nullableText(pr.title));
+			requireField("body", nullableText(review.body));
+			requireField("url", nullableText(review.html_url));
+			break;
+		case "PullRequestReviewCommentEvent":
+		case "CommitCommentEvent":
+			requireField("body", nullableText(comment.body));
+			requireField("url", nullableText(comment.html_url));
+			break;
+		case "IssuesEvent":
+			requireField("action", typeof payload.action === "string");
+			requireField("title", nullableText(issue.title));
+			if (issue.title === null) row.title = null;
+			requireField("body", nullableText(issue.body));
+			requireField("url", nullableText(issue.html_url));
+			break;
+		case "IssueCommentEvent":
+			requireField("title", nullableText(issue.title));
+			requireField("body", nullableText(comment.body));
+			requireField("url", nullableText(comment.html_url));
+			break;
+		case "CreateEvent":
+		case "DeleteEvent":
+			requireField("action", typeof payload.ref_type === "string");
+			requireField("title", nullableText(payload.ref));
+			requireField("branch", typeof payload.ref_type === "string" && (payload.ref_type !== "branch" || typeof payload.ref === "string"));
+			if (value.type === "CreateEvent") requireField("body", nullableText(payload.description));
+			break;
+		case "ForkEvent":
+			requireField("title", typeof forkee.full_name === "string");
+			requireField("url", typeof forkee.html_url === "string");
+			break;
+		case "WatchEvent":
+			requireField("action", typeof payload.action === "string");
+			break;
+		case "ReleaseEvent":
+			requireField("action", typeof payload.action === "string");
+			if (release.name === undefined && typeof release.tag_name === "string") unreadableFields.push("title");
+			else requireField("title", nullableText(release.name));
+			if (release.name === null) row.title = null;
+			requireField("body", nullableText(release.body));
+			requireField("url", nullableText(release.html_url));
+			break;
+		case "GollumEvent": {
+			const pages = Array.isArray(payload.pages) ? payload.pages : undefined;
+			const first = objectValue(pages?.[0]);
+			requireField("title", pages !== undefined && (pages.length === 0 || nullableText(first.title)));
+			requireField("url", pages !== undefined && (pages.length === 0 || nullableText(first.html_url)));
+			requireField("body", pages !== undefined);
+			if (pages?.some((page) => typeof page !== "object" || page === null || Array.isArray(page))) unreadableFields.push("pages");
+			break;
+		}
+		default:
+			for (const key of ["action", "title", "body", "url"] as const)
+				requireField(key, nullableText(payload[key]));
+			requireField("branch", nullableText(payload.ref));
+			requireField("commits", nullableNumber(payload.size));
+	}
+	return { row, complete: unreadableFields.length === 0, unreadableFields };
+}
+
+function legacyEventValues(raw: unknown): LegacyEvent | null {
 	const parsed = eventApiSchema.safeParse(raw);
 	if (!parsed.success) return null;
 	const current = eventRecord({
@@ -541,7 +774,7 @@ export function parseLegacyEvent(raw: unknown): LegacyEvent | null {
 			extras.title = stringValue(firstCommit.message)?.split("\n")[0] ?? null;
 			extras.branch = branch(ref);
 			extras.commits = Array.isArray(payload.commits)
-				? payload.commits.length || numberValue(payload.size)
+				? payload.commits.length
 				: numberValue(payload.size);
 			break;
 		case "PullRequestEvent": {
@@ -671,50 +904,74 @@ function stringValue(value: unknown): string | null {
 	return typeof value === "string" ? value : null;
 }
 
+
 export function parseLegacyHistoryItem(
 	raw: unknown,
 	type: "issue" | "pr",
-): LegacyHistoryItem | null {
+): HistoryRow | null {
+	return parseLegacyHistoryPageItem(raw, type).row;
+}
+
+export function parseLegacyHistoryPageItem(
+	raw: unknown,
+	type: "issue" | "pr",
+): ParsedItem<HistoryRow> {
 	const item = objectValue(raw);
 	const repositoryApiUrl = stringValue(item.repository_url);
-	const repo = repositoryApiUrl?.replace("https://api.github.com/repos/", "");
-	const number = typeof item.number === "number" ? item.number : null;
-	const rawId = typeof item.id === "number" ? String(item.id) : null;
-	if (!repo || (!rawId && number === null)) return null;
-	const pullRequest = objectValue(item.pull_request);
-	const reactions = objectValue(item.reactions);
-	const labels = Array.isArray(item.labels)
-		? item.labels
-				.map((label) => stringValue(objectValue(label).name))
-				.filter((label): label is string => label !== null)
-		: [];
-	const createdAt = stringValue(item.created_at);
-	const updatedAt = stringValue(item.updated_at);
-	const mergedAt = stringValue(pullRequest.merged_at);
-	const state = stringValue(item.state);
-	const draft =
-		type === "pr" &&
-		mergedAt === null &&
-		state === "open" &&
-		item.draft === true;
-	return {
-		body: stringValue(item.body)?.slice(0, 500) ?? null,
-		closedAt: stringValue(item.closed_at),
-		comments: typeof item.comments === "number" ? item.comments : 0,
-		createdAt,
-		id: `gh-${type}-${rawId ?? String(number)}`,
-		isDraft: draft,
-		labels,
-		mergedAt,
-		number,
-		reactionsTotal:
-			typeof reactions.total_count === "number" ? reactions.total_count : 0,
+	const repo = repositoryApiUrl?.startsWith("https://api.github.com/repos/")
+		? repositoryName(repositoryApiUrl.replace("https://api.github.com/repos/", "https://github.com/"))
+		: null;
+	const positiveId = (input: unknown): number | undefined =>
+		typeof input === "number" && Number.isSafeInteger(input) && input > 0 ? input : undefined;
+	const number = positiveId(item.number);
+	const rawId = positiveId(item.id);
+	if (!repo || (rawId === undefined && number === undefined))
+		return { row: null, complete: false, unreadableFields: ["identity"] };
+	const row: HistoryRow = {
+		id: `gh-${type}-${rawId ?? number}`,
+		type,
 		repo,
 		repoUrl: `https://github.com/${repo}`,
-		state,
-		title: stringValue(item.title),
-		type,
-		updatedAt,
-		url: stringValue(item.html_url),
 	};
+	const unreadableFields: string[] = [];
+	const nullableText = (input: unknown): string | null | undefined =>
+		input === null || typeof input === "string" ? input : undefined;
+	const count = (input: unknown): number | undefined =>
+		typeof input === "number" && Number.isSafeInteger(input) && input >= 0 ? input : undefined;
+	recordField(row, "number", number, unreadableFields);
+	recordField(row, "title", nullableText(item.title), unreadableFields);
+	const body = nullableText(item.body);
+	recordField(row, "body", typeof body === "string" ? body.slice(0, 500) : body, unreadableFields);
+	recordField(row, "state", nullableText(item.state), unreadableFields);
+	for (const [key, sourceKey] of [
+		["createdAt", "created_at"],
+		["updatedAt", "updated_at"],
+		["closedAt", "closed_at"],
+	] as const) {
+		const value = nullableText(item[sourceKey]);
+		recordField(row, key, typeof value === "string" && !Number.isFinite(Date.parse(value)) ? undefined : value, unreadableFields);
+	}
+	recordField(row, "url", nullableText(item.html_url), unreadableFields);
+	recordField(row, "comments", count(item.comments), unreadableFields);
+	recordField(row, "reactionsTotal", count(objectValue(item.reactions).total_count), unreadableFields);
+	if (Array.isArray(item.labels)) {
+		row.labels = [];
+		for (const label of item.labels) {
+			const name = stringValue(objectValue(label).name);
+			if (name === null) unreadableFields.push("labels");
+			else row.labels.push(name);
+		}
+	} else unreadableFields.push("labels");
+	if (type === "issue") {
+		row.mergedAt = null;
+		row.isDraft = false;
+	} else {
+		const merged = nullableText(objectValue(item.pull_request).merged_at);
+		recordField(row, "mergedAt", typeof merged === "string" && !Number.isFinite(Date.parse(merged)) ? undefined : merged, unreadableFields);
+		if (typeof item.draft === "boolean" && row.mergedAt !== undefined && row.state !== undefined)
+			row.isDraft = row.mergedAt === null && row.state === "open" && item.draft;
+		else unreadableFields.push("isDraft");
+	}
+	return { row, complete: unreadableFields.length === 0, unreadableFields };
 }
+
