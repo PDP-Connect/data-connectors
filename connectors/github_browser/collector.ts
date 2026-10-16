@@ -1,9 +1,9 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-	type EmittedMessage,
-	type RecordData,
+import type {
+	EmittedMessage,
+	RecordData,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { fullInventoryCoverage } from "./inventory-coverage.ts";
 import {
