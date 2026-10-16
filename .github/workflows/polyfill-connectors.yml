@@ -109,6 +109,9 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: npx playwright install --with-deps chromium
 
+      - name: Install isolated mutation tools
+        run: npm ci --prefix scripts/groupme-mutation/tools --ignore-scripts --no-audit --no-fund
+
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
         run: npm run verify
