@@ -2625,6 +2625,27 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/index.test.ts",
+			line: 542,
+			column: 9,
+			category: "test_assertion_sequencing",
+			note: "Run each covered-checkpoint case against a fresh harness before asserting its acknowledgement.",
+		},
+		{
+			path: "connectors/oura_browser/index.test.ts",
+			line: 552,
+			column: 9,
+			category: "test_assertion_sequencing",
+			note: "Run each invalid-checkpoint case against a fresh harness before asserting it neither acknowledges nor fetches.",
+		},
+		{
+			path: "connectors/oura_browser/index.test.ts",
+			line: 561,
+			column: 9,
+			category: "test_assertion_sequencing",
+			note: "Run each gap or mismatched-consent case against a fresh harness before asserting it fetches and moves the checkpoint.",
+		},
+		{
+			path: "connectors/oura_browser/index.test.ts",
 			line: 338,
 			column: 5,
 			category: "test_assertion_sequencing",
