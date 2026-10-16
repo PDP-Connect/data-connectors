@@ -1606,6 +1606,43 @@
           "iconKey": "oura",
           "defaultScope": "oura.readiness"
         }
+      },
+      {
+        "connectorId": "oura-playwright",
+        "company": "oura",
+        "version": "3.1.3",
+        "name": "Oura Ring",
+        "status": "stable",
+        "description": "Exports your Oura Ring readiness scores, sleep data, and daily activity via the official Oura API V2, using a personal API application on your own Oura developer account. Creates that application through the Developer Portal's registration API (the Create New form is the fallback), covers Oura's pages from document start on hosts that offer page.addInitScript, retries the portal API's edge-generated 401s, settles the portal's post-sign-in bounce, and follows the portal's better-auth sign-in. Logs only a fixed failure class when a navigation fails, never the OAuth authorize URL.",
+        "sourceFiles": {
+          "script": "oura/oura-playwright.js",
+          "metadata": "oura/oura-playwright.json"
+        },
+        "publishedAt": "2026-10-16T00:00:00Z",
+        "sourceTag": "tnunamak/oura-playwright-3.1.3",
+        "sourceCommit": "08c6480a96760db83ed11c05a7424de50b9ca7ed",
+        "releaseId": "connectors-08c6480a9676",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:a26e1d7c6fb5cf8dc6069ab4dd6cca924f9ed1575f22c1eae6025850da462479",
+        "scriptSha256": "sha256:f0dfd2ee50be9ebe525f33ccfa9ad541f9edd476ab974d51b16a3bad794af1f4",
+        "artifactSha256": "sha256:00c38c768ab75d56cc9d9852e148fbea1cfc320a98735c25686634ca4f34fa10",
+        "artifactPath": "artifacts/oura-playwright/oura-playwright-3.1.3.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/08c6480a96760db83ed11c05a7424de50b9ca7ed/artifacts/oura-playwright/oura-playwright-3.1.3.tgz",
+        "scopes": [
+          "oura.readiness",
+          "oura.sleep",
+          "oura.activity"
+        ],
+        "consumerMetadata": {
+          "sourceId": "oura",
+          "displayName": "Oura Ring",
+          "brandDomain": "ouraring.com",
+          "aliases": [
+            "ouraring"
+          ],
+          "iconKey": "oura",
+          "defaultScope": "oura.readiness"
+        }
       }
     ],
     "shop-playwright": [
