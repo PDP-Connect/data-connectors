@@ -1,20 +1,40 @@
 # GitHub browser record contract
 
-This profile keeps the six legacy stream envelopes: `profile` fields, `repositories`,
-`starred`, `events`, `contributions`, and `history`. Each record also has a top-level
-`id` of `<username>:<stream>`. The ID is the PDPP record key and the manifest primary
-key. It does not change when a snapshot is fetched again. `fetchedAt` remains an
-observation time in the envelopes that already had it.
+All six streams keep their legacy aggregate envelopes and stable primary keys
+`<username>:<stream>`. Unread fields are omitted, not filled with synthetic values.
 
-The array streams are snapshots under one key per user and stream. Their list items
-keep the legacy field names and item IDs. The `profile.repositoryCount` field is the
-number displayed on GitHub, which can differ from the collected repository list
-length. Consumers that read the legacy envelope should ignore the added top-level
-`id`; PDPP consumers must retain it for filtering and upserts. No downstream adapter
-is changed in this repository, so a live adapter read remains to be verified.
+## Source evidence
 
-Repository and starred snapshots need a recognized list or explicit empty message,
-and the collector follows GitHub's next link until it ends. Contributions require
-count evidence for every date in the covered views. Search history requires GitHub
-to report complete results with a consistent total count. Otherwise the stream
-emits `SKIP_RESULT` and no completion state.
+| Stream | Evidence for emitting the snapshot |
+| --- | --- |
+| profile | Validated profile identity and page navigation establish singleton presence. Embedded pinned repositories, organizations and achievements remain best-effort; no self inventory coverage or deletes. |
+| repositories | Exact repository counter matching distinct rows, or explicit pagination end without a conflicting counter. |
+| starred | Exact Stars counter matching distinct rows, or explicit pagination end without a conflicting counter. |
+| events | Validated REST pages followed through an observed Link header without rel=next, or an empty page. Window: up to 300 events from the past 90 days. |
+| history | Stable Search total_count, incomplete_results=false, validated distinct rows for both types. Exact total matching completes ordinary searches; totals above 1,000 complete on the observed API end or 1,000 distinct items in the documented per-type window. |
+| contributions | Every requested view's exact heading total matches the sum of distinct day counts; four-view/date-window checks still apply. |
+
+Short pages and local page budgets never prove completion. Missing header
+observations are not the same as observing an absent Link header. Invalid,
+duplicate, redirected, failed, or incomplete API responses withhold the inventory
+snapshot. Abbreviated counters cannot establish exact totals.
+
+Starred inventories can also use REST enumeration through an observed Link end
+or an empty first page. Its distinct repository identities must match the browser
+rows. Every validated exact counter from the primary and fallback routes remains
+binding; conflicting counters or a row-count mismatch withhold the snapshot.
+
+## Incomplete runs
+
+Incomplete inventories emit no RECORD, STATE or self DETAIL_COVERAGE and derive
+no deletes, preserving the prior snapshot. The retryable
+`inventory_not_proven_complete` SKIP_RESULT is supplied by a connector-local
+compatibility helper (TODO #418). Profile presence is not an inventory claim.
+The skip message and diagnostics include the specific source withholding reason.
+
+PageShim's six-scope and streaming gates use internally consistent source totals
+and explicit pagination evidence. The separate failed-starred-stream regression
+still requires the stable omitted error. Tests cover partial profile lists,
+observed REST pagination, unread continuations and capped history windows.
+
+Live signed-in behavior and Personal Server projection parity are not verified here.

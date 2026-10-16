@@ -9668,7 +9668,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.2.32",
+				"version": "0.3.2",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9775,6 +9775,12 @@
 											},
 											"stars": {
 												"type": "number"
+											},
+											"forks": {
+												"type": "number"
+											},
+											"forkedFrom": {
+												"type": "string"
 											}
 										},
 										"required": ["fullName"],
@@ -9876,6 +9882,12 @@
 											"forks": {
 												"type": "number"
 											},
+											"forkedFrom": {
+												"type": "string"
+											},
+											"license": {
+												"type": "string"
+											},
 											"visibility": {
 												"type": "string"
 											},
@@ -9938,6 +9950,15 @@
 											"stars": {
 												"type": "number"
 											},
+											"forks": {
+												"type": "number"
+											},
+											"forkedFrom": {
+												"type": "string"
+											},
+											"license": {
+												"type": "string"
+											},
 											"updatedAt": {
 												"type": ["string", "null"]
 											}
@@ -9962,7 +9983,7 @@
 					{
 						"name": "events",
 						"required": true,
-						"description": "Recent public activity events (up to 300 events and GitHub's retention window).",
+						"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10012,7 +10033,7 @@
 												"type": "boolean"
 											}
 										},
-										"required": ["id", "type", "createdAt", "repo", "isPublic"],
+										"required": ["id", "type", "repo"],
 										"additionalProperties": false
 									}
 								},
@@ -10039,7 +10060,7 @@
 					{
 						"name": "contributions",
 						"required": true,
-						"description": "Contribution graph days and summaries for four year views. A snapshot is emitted only when all four views are complete; missing history reports the stream as incomplete.",
+						"description": "One legacy aggregate of contribution days and available summaries. Missing or blocked year views retain readable days without completion; completion requires all four views.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10134,7 +10155,7 @@
 					{
 						"name": "history",
 						"required": true,
-						"description": "Authored issues and pull requests from GitHub Search, capped at 1,000 results per type.",
+						"description": "One legacy aggregate snapshot of authored issues and pull requests. At or above 1,000 results per type, readable rows are retained without completion.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10318,7 +10339,8 @@
 					}
 				],
 				"reason_display_messages": {
-					"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+					"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+					"inventory_not_proven_complete": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 				},
 				"mobile": {
 					"pageshim": {

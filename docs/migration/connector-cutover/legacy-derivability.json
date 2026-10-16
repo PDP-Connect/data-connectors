@@ -1124,5 +1124,151 @@
       "Browser fixture tests prove day-only dates, page order, and bounded 50-record batches resumed by the last-seen video identity. The Vana projection still selects the legacy top 50 most recent items. The old Takeout derivability test is retained under connectors/youtube_takeout. Vana must update its projection binding from watched_at sorting to position ordering before the cutover; this repository does not ship that projection. Authenticated live browser proof remains outstanding."
     ],
     "status": "in_progress"
+  },
+  {
+    "scope": "github.profile",
+    "connector_key": "github-browser",
+    "streams": [
+      "profile"
+    ],
+    "derivable": {
+      "username": "profile.username",
+      "fullName": "profile.fullName",
+      "bio": "profile.bio",
+      "company": "profile.company",
+      "location": "profile.location",
+      "website": "profile.website",
+      "avatarUrl": "profile.avatarUrl",
+      "followers": "profile.followers",
+      "following": "profile.following",
+      "repositoryCount": "profile.repositoryCount (displayed source count)",
+      "profileUrl": "profile.profileUrl",
+      "pinnedRepositories[]": "profile.pinnedRepositories[]",
+      "organizations[]": "profile.organizations[]",
+      "achievements[]": "profile.achievements[]",
+      "contributionsLastYear": "profile.contributionsLastYear"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Manifest identity is github-browser (runtime registration name github_browser). The browser profile uses one stable ID per profile row and one source-derived ID per repository, starred repository, event, contribution day/summary, issue, or pull request row. These are entity records, not the old aggregate envelopes.",
+      "Profile state is emitted only when the request URL, final navigation, owner identity, and profile record shape agree. Missing optional strings remain empty strings when the source supplies them."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.repositories",
+    "connector_key": "github-browser",
+    "streams": [
+      "repositories"
+    ],
+    "derivable": {
+      "repositories[].name": "repositories.name",
+      "repositories[].url": "repositories.url",
+      "repositories[].description": "repositories.description",
+      "repositories[].language": "repositories.language",
+      "repositories[].stars": "repositories.stars",
+      "repositories[].forks": "repositories.forks",
+      "repositories[].visibility": "repositories.visibility",
+      "repositories[].topics": "repositories.topics",
+      "repositories[].updatedAt": "repositories.updatedAt"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Manifest identity is github-browser (runtime registration name github_browser). The browser profile uses one stable ID per profile row and one source-derived ID per repository, starred repository, event, contribution day/summary, issue, or pull request row. These are entity records, not the old aggregate envelopes.",
+      "Inventory rows are ingested as stable per-repository upserts before enumeration ends. A page cap, rejected row, cycle, wrong owner/navigation, or remaining continuation emits a retryable skip and no complete state."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.starred",
+    "connector_key": "github-browser",
+    "streams": [
+      "starred"
+    ],
+    "derivable": {
+      "starred[].fullName": "starred.fullName",
+      "starred[].url": "starred.url",
+      "starred[].description": "starred.description",
+      "starred[].language": "starred.language",
+      "starred[].stars": "starred.stars",
+      "starred[].updatedAt": "starred.updatedAt"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Manifest identity is github-browser (runtime registration name github_browser). The browser profile uses one stable ID per profile row and one source-derived ID per repository, starred repository, event, contribution day/summary, issue, or pull request row. These are entity records, not the old aggregate envelopes.",
+      "Supports both /{username}?tab=stars and /stars/{username} navigation shapes plus the legacy generic rel=next selector and main-list row fallback. Empty is complete only on the recognized first-page empty message."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.events",
+    "connector_key": "github-browser",
+    "streams": [
+      "events"
+    ],
+    "derivable": {
+      "events[].id": "events.id",
+      "events[].type": "events.type",
+      "events[].createdAt": "events.createdAt",
+      "events[].repo": "events.repo",
+      "events[].repoUrl": "events.repoUrl",
+      "events[].action": "events.action",
+      "events[].title": "events.title",
+      "events[].body": "events.body",
+      "events[].url": "events.url",
+      "events[].branch": "events.branch",
+      "events[].commits": "events.commits",
+      "events[].isPublic": "events.isPublic",
+      "fetchedAt": "STATE cursor fetched_at",
+      "windowDescription": "constant: GitHub public events retention window (up to 300 events)"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Manifest identity is github-browser (runtime registration name github_browser). The browser profile uses one stable ID per profile row and one source-derived ID per repository, starred repository, event, contribution day/summary, issue, or pull request row. These are entity records, not the old aggregate envelopes.",
+      "Three full pages of 100 rows prove the declared public-retention window and are explicitly bounded; this does not claim lifetime event completeness. A short page is the ordinary terminal proof."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.contributions",
+    "connector_key": "github-browser",
+    "streams": [
+      "contributions"
+    ],
+    "derivable": {
+      "days[].date": "contributions recordType=day: date",
+      "days[].count": "contributions recordType=day: count",
+      "days[].level": "contributions recordType=day: level",
+      "totalContributionsLastYear": "contributions recordType=summary: totalContributionsLastYear",
+      "yearTotals[]": "contributions recordType=summary: yearTotals[]",
+      "monthlyTotals[]": "contributions recordType=summary: monthlyTotals[]",
+      "topDay": "contributions recordType=summary: topDay",
+      "fetchedAt": "contributions recordType=summary: fetchedAt"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Manifest identity is github-browser (runtime registration name github_browser). The browser profile uses one stable ID per profile row and one source-derived ID per repository, starred repository, event, contribution day/summary, issue, or pull request row. These are entity records, not the old aggregate envelopes.",
+      "Each daily row is ingested independently. The summary row and complete state require coverage of every expected date across the rolling year and three prior calendar-year views. A missing view retains known daily rows and reports a gap without advancing state."
+    ],
+    "status": "derivable"
+  },
+  {
+    "scope": "github.history",
+    "connector_key": "github-browser",
+    "streams": [
+      "history"
+    ],
+    "derivable": {
+      "pullRequests[].*": "history rows where type=pr; fields retain legacy names",
+      "issues[].*": "history rows where type=issue; fields retain legacy names",
+      "fetchedAt": "STATE cursor fetched_at",
+      "windowDescription": "constant: GitHub Search results, capped at 1,000 items per type"
+    },
+    "not_derivable": [],
+    "semantic_notes": [
+      "Manifest identity is github-browser (runtime registration name github_browser). The browser profile uses one stable ID per profile row and one source-derived ID per repository, starred repository, event, contribution day/summary, issue, or pull request row. These are entity records, not the old aggregate envelopes.",
+      "Issue and pull-request searches are isolated. Stable per-item IDs allow valid rows from a partial search to ingest without replacing unseen rows. Stable total_count, unique ID count, incomplete_results=false and end evidence are required. Exactly 1,000 unique results on page ten complete the declared cap; counts above 1,000 retain the newest 1,000 and remain partial with a gap."
+    ],
+    "status": "derivable"
   }
 ]
