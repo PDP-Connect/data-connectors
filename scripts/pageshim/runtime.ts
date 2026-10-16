@@ -356,6 +356,8 @@ export interface PageshimConnector {
 	collect: (ctx: Record<string, unknown>) => Promise<void>;
 	/** PDPP records of one stream -> the scope payload the host stores. */
 	toScope: (stream: string, records: Rec[]) => unknown;
+	/** Generic collectors use successful STATE to acknowledge empty covered ranges. */
+	emptyScopeFromCheckpoint?: boolean;
 	/** Optional incremental form for connectors whose scope value is one record array. */
 	streamScopeRecords?: {
 		/** Large streams first; later streams remain buffered until the active scope closes. */
@@ -1035,7 +1037,7 @@ export async function runOnPageShim(
 		// A successful checkpoint proves coverage of this window, even when no
 		// rows exist in it. An empty scope is only this run's payload; requested
 		// bounds and deferred/partial errors still describe its coverage.
-		for (const stream of checkpointedStreams) {
+		for (const stream of connector.emptyScopeFromCheckpoint ? checkpointedStreams : []) {
 			if (!checkpointBlockedStreams.has(stream) && !detailGapStreams.has(stream))
 				scopes[`${prefix}${stream}`] ??= connector.toScope(stream, []);
 		}
@@ -1079,8 +1081,8 @@ export async function runOnPageShim(
 				`PageShim result exceeds the ${RESULT_CHUNK_MAX_UNITS}-unit legacy bridge limit; this host does not accept streamed results`,
 			);
 		}
-		await flushBufferedStates();
 		await shim.setData("result", done);
+		await flushBufferedStates();
 		await shim.setData("status", completionStatus(done.exportSummary));
 	} catch (error) {
 		const reason = (

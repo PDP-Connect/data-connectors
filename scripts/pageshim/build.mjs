@@ -269,6 +269,7 @@ function requestedScopeEntries(page: ShimPage): unknown {
     ),
     collect: (ctx) => collect(ctx as never),
     toScope: (_stream, records) => ({ records }),
+    emptyScopeFromCheckpoint: true,
     summarize: (scopes) => {
       const counts = Object.fromEntries(config.streams.map((stream) => [
         stream,

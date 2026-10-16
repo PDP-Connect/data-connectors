@@ -461,7 +461,7 @@ test("a failed mutable refresh preserves the prior refresh watermark and safe hi
     assert.equal(savedCursor(h.messages).next_day, next(today));
     assert.equal(savedCursor(h.messages).refresh_from, priorRefresh);
     assert.deepEqual(savedCursor(h.messages).failed_windows,
-      [{ start: refreshFrom, end: today }]);
+      [{ start: priorRefresh, end: today }]);
   });
 });
 
@@ -482,4 +482,43 @@ test("legacy forward cursors still refresh recent days, and consent clips the ov
   });
   assert.equal(requests.length, 1);
   assert.ok(requests[0]?.includes(`start=${since}&end=${since}`));
+});
+
+test("covered bounded acknowledgement does not replace uncovered or full-refresh collection", async () => {
+  const range = { since: "2020-01-01", until: "2020-01-08" };
+  const requests: Array<{ start: string; end: string }> = [];
+  await withBrowser(async (input) => {
+    const params = new URL(String(input), HOME).searchParams;
+    requests.push({ start: params.get("start")!, end: params.get("end")! });
+    return Response.json({ daily_sleeps: [] });
+  }, async () => {
+    const covered = { next_day: "2020-01-08", requested_since: range.since, failed_windows: [] };
+    const ack = harness(["sleep"], page(HOME), { sleep: covered }, range);
+    await collectOuraBrowser(ack.ctx);
+    assert.deepEqual(requests.splice(0), []);
+    assert.deepEqual(ack.messages, [{ type: "STATE", stream: "sleep", cursor: covered }]);
+
+    const uncovered = harness(["sleep"], page(HOME), { sleep: { ...covered, next_day: "2020-01-05" } }, range);
+    await collectOuraBrowser(uncovered.ctx);
+    assert.deepEqual(requests.splice(0), [{ start: "2020-01-05", end: "2020-01-07" }]);
+
+    const differentConsent = harness(["sleep"], page(HOME), { sleep: { ...covered, requested_since: "2020-01-02" } }, range);
+    await collectOuraBrowser(differentConsent.ctx);
+    assert.deepEqual(requests.splice(0), [{ start: "2020-01-01", end: "2020-01-07" }]);
+
+    const full = harness(["sleep"], page(HOME), { sleep: covered }, range);
+    full.ctx.collectionMode = "full_refresh";
+    await collectOuraBrowser(full.ctx);
+    assert.deepEqual(requests.splice(0), [{ start: "2020-01-01", end: "2020-01-07" }]);
+
+    const failed = harness(["sleep"], page(HOME), { sleep: { ...covered,
+      failed_windows: [{ start: "2020-01-03", end: "2020-01-04" }] } }, range);
+    await collectOuraBrowser(failed.ctx);
+    assert.deepEqual(requests.splice(0), [{ start: "2020-01-03", end: "2020-01-07" }]);
+
+    const invalid = harness(["sleep"], page(HOME), { sleep: covered }, { since: "2020-01-08", until: "2020-01-01" });
+    await collectOuraBrowser(invalid.ctx);
+    assert.deepEqual(requests, []);
+    assert.deepEqual(invalid.messages, []);
+  });
 });

@@ -512,6 +512,7 @@ export async function runHarness({
 	const pendingStates = {};
 	const stateMessages = [];
 	let failedResultWrite = false;
+	let acceptedLegacyResult = false;
 	let eventOrder = 0;
 	let stateAckOrder = 0;
 	let resultDoneAttemptOrder = 0;
@@ -622,7 +623,10 @@ export async function runHarness({
 							return { __shimError: "synthetic result write failed" };
 						}
 						result = nextResult;
-						if (!nextResult?.errors?.some((error) => error.disposition === "fatal"))
+						acceptedLegacyResult = nextResult !== null &&
+							Array.isArray(nextResult.errors) &&
+							!nextResult.errors.some((error) => error.disposition === "fatal");
+						if (acceptedLegacyResult)
 							Object.assign(states, pendingStates);
 					} else if (a[0] === "STATE") {
 						if (
@@ -640,8 +644,11 @@ export async function runHarness({
 						const message = JSON.parse(JSON.stringify(a[1]));
 						stateAckOrder = ++eventOrder;
 						stateMessages.push(message);
-						// STATE ack stages a cursor; only accepted result completion commits it.
+						// Thin-host STATE stays staged until result:done. Legacy results
+						// arrive first, so their subsequent acknowledged STATE can commit.
 						pendingStates[message.stream] = message.cursor;
+						if (acceptedLegacyResult)
+							states[message.stream] = message.cursor;
 					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":

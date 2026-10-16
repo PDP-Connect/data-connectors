@@ -216,6 +216,11 @@ interface OuraCursor {
   last_day?: string;
 }
 
+function isUtcDay(value: string | undefined): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    requestedUtcDay(value) === value;
+}
+
 function startDateFor(ctx: BrowserCollectContext, stream: string, endDate: string): string {
   const cursor = ctx.state[stream] as OuraCursor | undefined;
   const requestedSince = requestedUtcDay(ctx.requested.get(stream)?.time_range?.since);
@@ -379,9 +384,25 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
     const requestedEnd = untilEnd < today ? untilEnd : today;
     const startDate = startDateFor(ctx, stream, today);
     const overlapStart = addDays(today, -MUTABLE_OVERLAP_DAYS);
-    const refreshStart = requestedSince && requestedSince > overlapStart ? requestedSince : overlapStart;
-    const refreshDays = refreshStart <= requestedEnd
-      ? (day(requestedEnd).getTime() - day(refreshStart).getTime()) / 86_400_000 + 1 : 0;
+    // A failed run cannot commit STATE. Anchor retries to the last committed
+    // overlap, not today's moving lower bound, including legacy persisted gaps.
+    let refreshStart = overlapStart;
+    if (ctx.collectionMode !== "full_refresh") {
+      if (isUtcDay(previous?.refresh_from) && previous.refresh_from < refreshStart)
+        refreshStart = previous.refresh_from;
+      for (const failed of previous?.failed_windows ?? []) {
+        if (isUtcDay(failed.start) && isUtcDay(failed.end) &&
+            failed.start <= failed.end && failed.start <= requestedEnd &&
+            (!requestedSince || failed.end >= requestedSince) && failed.start < refreshStart)
+          refreshStart = failed.start;
+      }
+    }
+    if (requestedSince && requestedSince > refreshStart) refreshStart = requestedSince;
+    // Retire the oldest refresh debt first, within the same per-run budget.
+    const refreshEnd = addDays(refreshStart, MAX_WINDOW_DAYS - 1) < requestedEnd
+      ? addDays(refreshStart, MAX_WINDOW_DAYS - 1) : requestedEnd;
+    const refreshDays = refreshStart <= refreshEnd
+      ? (day(refreshEnd).getTime() - day(refreshStart).getTime()) / 86_400_000 + 1 : 0;
     const historicalEnd = refreshDays > 0 ? addDays(refreshStart, -1) : requestedEnd;
     // Reserve the recent overlap within the same 90-day budget, even while a
     // multi-run historical backfill is still pending.
@@ -391,10 +412,21 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
     if (startDate <= endDate) windows.push({ start: startDate, end: endDate });
     if (refreshDays > 0) {
       const historical = windows[0];
-      if (historical && addDays(historical.end, 1) === refreshStart) historical.end = requestedEnd;
-      else windows.push({ start: refreshStart, end: requestedEnd });
+      if (historical && addDays(historical.end, 1) === refreshStart) historical.end = refreshEnd;
+      else windows.push({ start: refreshStart, end: refreshEnd });
     }
-    if (windows.length === 0) continue;
+    if (windows.length === 0) {
+      // A valid checkpoint proves this bounded request is already covered.
+      // Re-acknowledge it unchanged so both hosts complete with an empty scope.
+      if (ctx.collectionMode !== "full_refresh" && requestedSince && until &&
+          requestedSince <= requestedEnd && previous?.requested_since === requestedSince &&
+          isUtcDay(previous.next_day) && previous.next_day > requestedEnd &&
+          !(previous.failed_windows ?? []).some(({ start, end }) =>
+            start <= requestedEnd && end >= requestedSince)) {
+        await ctx.emit({ type: "STATE", stream, cursor: previous });
+      }
+      continue;
+    }
     const failedWindows: Array<{ start: string; end: string }> = [];
     let retryable = true;
     let nextDay = startDate;
@@ -410,7 +442,7 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
         const completedNext = addDays(completedThrough, 1);
         if (completedNext > nextDay) nextDay = completedNext;
       }
-      if (refreshDays > 0 && window.end === requestedEnd &&
+      if (refreshDays > 0 && window.end === refreshEnd &&
           !result.failedWindows.some((failed) => failed.end >= refreshStart)) {
         refreshSucceeded = true;
       }
@@ -445,10 +477,11 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
         { retryable }
       );
     }
-    if (startDate <= historicalEnd && endDate < historicalEnd) {
+    if ((startDate <= historicalEnd && endDate < historicalEnd) ||
+        (refreshDays > 0 && refreshEnd < requestedEnd)) {
       await ctx.emit({
         type: "SKIP_RESULT", stream, reason: "oura_browser_window_deferred",
-        message: `Oura ${stream} stopped at ${endDate}; later days remain for the next run.`,
+        message: `Oura ${stream} has deferred days remaining for the next run.`,
         // Deferred work, not unavailable data: the STATE cursor below resumes at
         // the next day, so the host must treat this stream as retryable.
         recovery_hint: { action: "retry_by_runtime", retryable: true },
@@ -459,7 +492,9 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       stream,
       cursor: {
         next_day: nextDay,
-        ...(refreshDays > 0 ? { refresh_from: refreshSucceeded ? refreshStart : previous?.refresh_from ?? refreshStart } : {}),
+        ...(refreshDays > 0 ? { refresh_from: refreshSucceeded
+          ? (refreshEnd < requestedEnd ? addDays(refreshEnd, 1) : (requestedSince && requestedSince > overlapStart ? requestedSince : overlapStart))
+          : refreshStart } : {}),
         requested_since: requestedSince ?? previous?.requested_since ?? null,
         failed_windows: failedWindows,
       },
