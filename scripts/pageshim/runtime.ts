@@ -517,6 +517,7 @@ export async function runOnPageShim(
 	};
 	const streamCounts: Record<string, number> = {};
 	let streamProtocolUsed = false;
+	let legacyResultAccepted = false;
 	let activeStream: string | null = null;
 	let activeSequence = 0;
 	let activeRecordCount = 0;
@@ -1082,6 +1083,7 @@ export async function runOnPageShim(
 			);
 		}
 		await shim.setData("result", done);
+		legacyResultAccepted = true;
 		await flushBufferedStates();
 		await shim.setData("status", completionStatus(done.exportSummary));
 	} catch (error) {
@@ -1100,7 +1102,10 @@ export async function runOnPageShim(
 		// Keep the records collected before the failure in the host's partial
 		// result, as when every record was sent on its own.
 		if (!streamSendFailed) await flushStreamText(true).catch(() => undefined);
-		if (!streamProtocolUsed && !streamingHost)
+		// A legacy payload can already back committed checkpoints. Preserve it
+		// after a later STATE or status failure, reporting the error separately.
+		// Only a run with no accepted payload may emit an empty fatal result.
+		if (!streamProtocolUsed && !streamingHost && !legacyResultAccepted)
 			await shim.setData("result", result({}, [fatal]));
 		await shim.setData("error", fatal.reason);
 	} finally {

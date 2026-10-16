@@ -3512,3 +3512,60 @@ test("oura_browser: persisted refresh debt respects consent and the budget on bo
 		}
 	}
 });
+
+for (const [failure, options, committedScopes] of [
+	["second STATE", { failStateWriteAt: 2 }, ["oura.sleep"]],
+	["final status", { failFinalStatusWrite: true }, ["oura.sleep", "oura.readiness", "oura.activity"]],
+]) {
+	test(`oura_browser: accepted legacy payload survives failed ${failure} write`, { timeout: 180_000 }, async () => {
+		const { pageshimCase: c } = await import("./fixtures/oura_browser.mjs");
+		const built = await buildPageshim({
+			connector: "oura_browser",
+			outfile: join(out, `oura-accepted-payload-${failure.replaceAll(" ", "-")}.js`),
+		});
+		const writes = [];
+		const r = await runHarness({
+			bundle: built.outfile,
+			fixtures: c.fixtures,
+			scopes: c.scopes.map((name) => ({
+				name, time_range: { since: "2026-09-22", until: "2026-09-25" },
+			})),
+			clockNowMs: Date.parse("2026-10-16T12:00:00Z"),
+			observeBridge(method, args, reply) {
+				if (method === "setData") writes.push({ key: args[0], value: args[1], reply });
+			},
+			...options,
+		});
+		assert.deepEqual(r.ret, { ok: true });
+		assertCleanRun(r);
+		assert.equal(r.data.error, `synthetic ${failure === "second STATE" ? "STATE" : "final status"} write failed`);
+		assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+		assert.deepEqual(Object.keys(r.states), committedScopes);
+		assert.deepEqual(r.stateMessages.map(({ stream }) => stream), committedScopes);
+		const payloadWrites = writes.filter(({ key }) => key === "result");
+		const accepted = JSON.parse(payloadWrites[0].value);
+		assert.equal(payloadWrites[0].reply?.__shimError, undefined);
+		assert.deepEqual(accepted.exportSummary, c.exportSummary);
+		assert.deepEqual(accepted.errors, []);
+		assert.ok(writes.indexOf(payloadWrites[0]) < writes.findIndex(({ key }) => key === "STATE"));
+		// The harness must keep committed cursors even if a later result write
+		// replaces the payload. Every committed checkpoint needs its rows.
+		for (const scope of committedScopes) {
+			assert.equal(r.states[scope].next_day, "2026-09-25");
+			assert.equal(accepted[scope].records.length, c.exportSummary.details[scope.slice("oura.".length)]);
+			assert.deepEqual(r.result[scope]?.records, accepted[scope].records, scope);
+		}
+		assert.deepEqual(r.result, accepted, "late failures must not replace the accepted payload");
+		assert.equal(payloadWrites.length, 1, "report late failures separately through error");
+		const stateWrites = writes.filter(({ key }) => key === "STATE");
+		assert.equal(stateWrites.length, failure === "second STATE" ? 2 : 3);
+		if (failure === "second STATE") {
+			assert.equal(stateWrites[1].reply.__shimError, "synthetic STATE write failed");
+			assert.equal(r.states["oura.readiness"], undefined);
+			assert.equal(r.states["oura.activity"], undefined);
+		} else {
+			assert.ok(writes.findIndex(({ key, value }) => key === "status" && /^Complete!/.test(value)) >
+				writes.lastIndexOf(stateWrites.at(-1)));
+		}
+	});
+}

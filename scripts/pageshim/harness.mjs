@@ -470,6 +470,8 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
+ * @param {number} [o.failStateWriteAt] reject this one-based STATE attempt before acknowledgement or commit
+ * @param {boolean} [o.failFinalStatusWrite] reject Complete/Partial status before storing it
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {(args: {url:string,loggedIn:boolean,call:number}) => string|undefined} [o.fixtures.failGoto] return an error to emulate a PageShim navigation failure
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
@@ -495,6 +497,8 @@ export async function runHarness({
 	timerScale = 1,
 	stateAckDelayMs = 0,
 	failResultWrite = false,
+	failStateWriteAt = 0,
+	failFinalStatusWrite = false,
 	resultStreamNeverAck = false,
 	readBridgeLatencyMs = 0,
 	clockNowMs,
@@ -511,6 +515,7 @@ export async function runHarness({
 	const states = { ...initialState };
 	const pendingStates = {};
 	const stateMessages = [];
+	let stateWriteAttempts = 0;
 	let failedResultWrite = false;
 	let acceptedLegacyResult = false;
 	let eventOrder = 0;
@@ -610,8 +615,6 @@ export async function runHarness({
 						return ack;
 					}
 					if (a[0] === "result") {
-						await streamHost.setData("result", a[1]);
-						resultWriteOrder = ++eventOrder;
 						const nextResult = a[1] == null ? null : JSON.parse(a[1]);
 						if (
 							failResultWrite &&
@@ -622,6 +625,10 @@ export async function runHarness({
 							failedResultWrite = true;
 							return { __shimError: "synthetic result write failed" };
 						}
+						await streamHost.setData("result", a[1]);
+						resultWriteOrder = ++eventOrder;
+						// Accepted replacements really overwrite the payload; committed
+						// cursors are not rolled back if a later result is empty/fatal.
 						result = nextResult;
 						acceptedLegacyResult = nextResult !== null &&
 							Array.isArray(nextResult.errors) &&
@@ -637,6 +644,8 @@ export async function runHarness({
 							)
 						)
 							return { __shimError: "invalid PDPP STATE message" };
+						if (++stateWriteAttempts === failStateWriteAt)
+							return { __shimError: "synthetic STATE write failed" };
 						if (stateAckDelayMs > 0)
 							await new Promise((resolve) =>
 								setTimeout(resolve, stateAckDelayMs),
@@ -649,6 +658,12 @@ export async function runHarness({
 						pendingStates[message.stream] = message.cursor;
 						if (acceptedLegacyResult)
 							states[message.stream] = message.cursor;
+					} else if (
+						failFinalStatusWrite &&
+						a[0] === "status" &&
+						/^(Complete!|Partial:)/.test(String(a[1]))
+					) {
+						return { __shimError: "synthetic final status write failed" };
 					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
