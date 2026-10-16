@@ -993,7 +993,6 @@ export async function fetchAllPosts(
 	const matchingResponses: PostsTimelineResponse[] = [];
 	const initialResponses: PostsTimelineResponse[] = [];
 	let lastConsumedIndex = -1;
-	let initialPageIndex = -1;
 	let walkGeneration = 0;
 	let documentGeneration = 0;
 	let acceptedDocumentGeneration: number | null = null;
@@ -1239,7 +1238,6 @@ export async function fetchAllPosts(
 				const consumedIndex = matchingResponses.indexOf(response);
 				if (consumedIndex >= 0) {
 					lastConsumedIndex = consumedIndex;
-					if (pageNumber === 1) initialPageIndex = consumedIndex;
 				}
 				const connection = await readTimelineConnection(response, page, owner);
 				ownerBound &&= connection?.ownerBound === true;
@@ -1323,74 +1321,59 @@ export async function fetchAllPosts(
 		);
 	}
 	if (sawTerminalPage && initialPageWasTerminal) {
-		const lastResponse = (await legacyInitialCapture) ?? terminalResponse;
-		legacyCaptureController.abort();
-		const settledConnection = lastResponse
-			? await readTimelineConnection(
-					lastResponse as {
-						json: () => Promise<unknown>;
-						status: () => number;
-					}, page, owner,
-				)
-			: null;
-		if (lastResponse && !settledConnection) {
+		try {
+			const lastResponse = (await legacyInitialCapture) ?? terminalResponse;
+			legacyCaptureController.abort();
+			// Reconcile every observed initial-page snapshot in order, not only
+			// the last one. A later response cannot erase validated records.
+			const responses = initialResponses.slice();
+			if (lastResponse && !responses.includes(lastResponse as PostsTimelineResponse)) {
+				responses.push(lastResponse as PostsTimelineResponse);
+			}
+			let settleFailure: Error | undefined;
+			for (const response of responses) {
+				const connection = await readTimelineConnection(response, page, owner);
+				if (!connection) {
+					settleFailure ??= new Error(
+						"meta_posts_timeline_unavailable: matching timeline response was not a successful complete page",
+					);
+					continue;
+				}
+				if (connection.ownerConflict) {
+					settleFailure ??= new Error("meta_posts_owner_conflict");
+					continue;
+				}
+				ownerBound &&= connection.ownerBound === true;
+				const responseIds = new Set<string>();
+				for (const edge of connection.edges) {
+					if (!edge?.node || typeof edge.node !== "object") {
+						unrecordableSourceEdges += 1;
+						continue;
+					}
+					const id = edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
+					if (!id) {
+						unrecordableSourceEdges += 1;
+						continue;
+					}
+					responseIds.add(id);
+					if (seenIds.has(id)) continue;
+					seenIds.add(id);
+					edges.push(edge);
+				}
+				if ([...seenIds].some(id => !responseIds.has(id))) {
+					settleFailure ??= new Error(
+						"meta_posts_timeline_contradictory: a timeline response omitted posts the source had already returned",
+					);
+				}
+				sawTerminalPage = connection.page_info?.has_next_page === false ||
+					(connection.page_info?.has_next_page == null && connection.page_info?.end_cursor === null);
+			}
+			sourceEdgeCount = edges.length + unrecordableSourceEdges;
+			if (settleFailure) throw settleFailure;
+		} catch (error) {
+			legacyCaptureController.abort();
 			stopObserving();
-			throw new Error(
-				"meta_posts_timeline_unavailable: matching timeline response was not a successful complete page",
-			);
-		}
-		if (settledConnection?.edges.length === 0 && initialPageIndex >= 0) {
-			// Legacy capture is last-wins, but an empty last response after a
-			// populated one is contradictory evidence, not proof of zero posts.
-			const windowConnections = await Promise.all(
-				matchingResponses
-					.slice(initialPageIndex)
-					.map((candidate) =>
-						readTimelineConnection(candidate as PostsTimelineResponse, page, owner),
-					),
-			);
-			if (
-				windowConnections.some(
-					(connection) => (connection?.edges.length ?? 0) > 0,
-				)
-			) {
-				stopObserving();
-				throw new Error(
-					"meta_posts_timeline_contradictory: an empty timeline response followed posts the source had already returned",
-				);
-			}
-		}
-		if (settledConnection?.ownerConflict) {
-			stopObserving();
-			throw new PartialWalkFailure(new Error("meta_posts_owner_conflict"), edges);
-		}
-		if (settledConnection) {
-			ownerBound &&= settledConnection.ownerBound === true;
-			edges.length = 0;
-			seenIds.clear();
-			sourceEdgeCount = settledConnection.edges.length;
-			unrecordableSourceEdges = 0;
-			for (const edge of settledConnection.edges) {
-				if (!edge?.node || typeof edge.node !== "object") {
-					unrecordableSourceEdges += 1;
-					continue;
-				}
-				const id =
-					edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
-				if (!id) {
-					unrecordableSourceEdges += 1;
-					continue;
-				}
-				if (seenIds.has(id)) {
-					continue;
-				}
-				seenIds.add(id);
-				edges.push(edge);
-			}
-			if (settledConnection.page_info?.has_next_page !== false &&
-				!(settledConnection.page_info?.has_next_page == null && settledConnection.page_info?.end_cursor === null)) {
-				sawTerminalPage = false;
-			}
+			throw edges.length > 0 ? new PartialWalkFailure(error, edges) : error;
 		}
 	}
 	stopObserving();

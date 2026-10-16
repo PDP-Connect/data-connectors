@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
-import { fetchAllPosts } from "./index.ts";
+import { collectAllStreams, fetchAllPosts } from "./index.ts";
 
 const NO_DELAY = (): Promise<void> => Promise.resolve();
 const FAST_POSTS_CLOCK = { sleep: async (): Promise<void> => undefined };
@@ -1011,5 +1011,84 @@ for (const mediaCount of [0, 5]) {
 			},
 		]);
 		assert.equal(pdpp, "not-proven");
+	});
+}
+
+function settledPost(id: string) {
+	return { node: { id, taken_at: 1_700_000_001, like_count: 1,
+		facepile_top_likers: [{ id: `liker-${id}`, username: `liker_${id}` }] } };
+}
+
+function ownerTimeline(ids: string[]): RawEnvelope {
+	const body = timelineEnvelope(ids.map(settledPost), { has_next_page: false });
+	(body.data as RawEnvelope).user = { id: "u1", username: "testuser" };
+	return body;
+}
+
+async function collectWithSettledResponses(responses: Array<Exclude<ScriptedPostsPage, null>>) {
+	let emitLate = (_response: Exclude<ScriptedPostsPage, null>): void => {};
+	const page = makePostsPage({ postsScript: [responses[0]!], exposeEmit: emit => { emitLate = emit; } });
+	const goto = page.goto.bind(page);
+	const evaluate = page.evaluate.bind(page);
+	let fetchingPosts = false;
+	let followingReads = 0;
+	page.goto = ((...args: Parameters<Page["goto"]>) => fetchingPosts ? goto(...args) : Promise.resolve(null)) as Page["goto"];
+	page.evaluate = ((fn: unknown, arg?: unknown) => {
+		if (String(fn).includes("PolarisViewer")) return Promise.resolve({ id: "u1", username: "testuser" });
+		if (arg && typeof arg === "object" && "path" in arg) {
+			followingReads += 1;
+			return Promise.resolve({ status: 200, json: { status: "ok", users: [{ pk: "followed", username: "followed" }], has_more: false, next_max_id: null } });
+		}
+		return evaluate(fn as Parameters<Page["evaluate"]>[0]);
+	}) as Page["evaluate"];
+	const emitted: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const messages: Array<{ type: string; stream?: string; reason?: string; recovery_hint?: { retryable?: boolean } }> = [];
+	const ctx = {
+		page, capture: null, requested: new Set(["posts", "post_likes", "following"]),
+		progress: async (message: string) => { if (message === "Fetching Instagram posts") fetchingPosts = true; },
+		emitRecord: async (stream: string, data: Record<string, unknown>) => { emitted.push({ stream, data }); },
+		emit: async (message: typeof messages[number]) => { messages.push(message); },
+	} as unknown as Parameters<typeof collectAllStreams>[0];
+	const late = responses.slice(1);
+	let now = 0;
+	let nextResponseAt = 1_500;
+	const postsClock = { sleep: async (ms: number) => {
+		now += ms;
+		if (now >= nextResponseAt) {
+			const response = late.shift();
+			if (response) emitLate(response);
+			nextResponseAt += 2_000;
+		}
+	} };
+	await collectAllStreams(ctx, NO_DELAY, postsClock, { now: () => 0, sleep: NO_DELAY }, FAST_POSTS_CLOCK);
+	return { emitted, messages, followingReads };
+}
+
+for (const { label, late, expected, complete } of [
+	{ label: "shrinking terminal", late: [{ status: 200, json: ownerTimeline(["A"]) }], expected: ["A", "B"], complete: false },
+	{ label: "empty terminal", late: [{ status: 200, json: ownerTimeline([]) }], expected: ["A", "B"], complete: false },
+	{ label: "HTTP failure", late: [{ status: 500, json: {} }], expected: ["A", "B"], complete: false },
+	{ label: "malformed envelope", late: [{ status: 200, json: { data: {} } }], expected: ["A", "B"], complete: false },
+	{ label: "error envelope", late: [{ status: 200, json: { ...ownerTimeline(["A"]), errors: [{ message: "failed" }] } }], expected: ["A", "B"], complete: false },
+	{ label: "intermediate inventory then shrink", late: [{ status: 200, json: ownerTimeline(["A", "B", "C"]) }, { status: 200, json: ownerTimeline(["A", "B"]) }], expected: ["A", "B", "C"], complete: false },
+	{ label: "intermediate inventory then failure", late: [{ status: 200, json: ownerTimeline(["A", "B", "C"]) }, { status: 500, json: {} }], expected: ["A", "B", "C"], complete: false },
+	{ label: "stable terminal control", late: [{ status: 200, json: ownerTimeline(["A", "B"]) }], expected: ["A", "B"], complete: true },
+	{ label: "growing terminal control", late: [{ status: 200, json: ownerTimeline(["A", "B", "C"]) }], expected: ["A", "B", "C"], complete: true },
+]) {
+	test(`collectAllStreams: settle ${label} preserves validated posts and likes with unknown profile count`, async () => {
+		const { emitted, messages, followingReads } = await collectWithSettledResponses([{ status: 200, json: ownerTimeline(["A", "B"]) }, ...late]);
+		assert.deepEqual(emitted.filter(row => row.stream === "posts").map(row => row.data.id), expected);
+		assert.deepEqual(emitted.filter(row => row.stream === "post_likes").map(row => row.data.post_id), expected);
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), complete, `${stream} completion`);
+			const skip = messages.find(message => message.type === "SKIP_RESULT" && message.stream === stream);
+			assert.equal(Boolean(skip), !complete);
+			if (!complete) {
+				assert.equal(skip?.reason, "inventory_not_proven_complete");
+				assert.equal(skip?.recovery_hint?.retryable, true);
+			}
+		}
+		assert.equal(followingReads, 1, "later requested stream still runs");
+		assert.ok(emitted.some(row => row.stream === "following" && row.data.id === "followed"));
 	});
 }
