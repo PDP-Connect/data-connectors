@@ -56,10 +56,11 @@
  *     `considered` minus the refused rows, so the report can never read
  *     complete after a loss. After a refusal, a report missing either count,
  *     or whose `considered` is below the refused rows (for example 0/0),
- *     contradicts the run and loses both counts: it reads unknown. After a
- *     rule-3 skip, a report that reads full (`covered >= considered`, or
- *     `considered` with no `covered`) loses both counts too; a report that
- *     already shows a shortfall stays.
+ *     contradicts the run and is withheld, with the typed loss notice. The
+ *     protocol has no explicit unknown field: stripping counts alone would
+ *     let consumers fall back to equal key-set lengths and read complete.
+ *     After a rule-3 skip, a report that reads full (including the key-length
+ *     fallback) is withheld too; a report that already shows a shortfall stays.
  *   - `STREAM_EVIDENCE` for the stream: every refusal the connector could
  *     not see (schema, missing id) moves from `outcomes.emitted` to
  *     `outcomes.unaccounted`, with no assumption that it overlaps rows
@@ -120,7 +121,8 @@
  * "Key enumerated" and "row withheld" are separate facts. The source listed
  * the key, so a withheld row is never absent: the stream cannot delete it
  * (no `delete` passes once a row is withheld), `DETAIL_COVERAGE` keeps it in
- * `required_keys` but not in `hydrated_keys` (unaccounted, not missing), and
+ * `required_keys` but not in `hydrated_keys` when coverage can be corrected;
+ * otherwise the claim is withheld (unaccounted, not missing). In either case
  * the stored copy from an earlier run stays as it was.
  *
  * DETAIL_GAP AND CHECKPOINTS VERSUS DELETES
@@ -352,7 +354,7 @@ const NOTICE_TEXT: Record<WithheldKind, string> = {
 		"checkpoint not saved; the next run reads this stream again from the previous checkpoint",
 	delete:
 		"deletes not applied; rows not read in this run are not treated as gone",
-	DETAIL_COVERAGE: "coverage report corrected to count only rows stored",
+	DETAIL_COVERAGE: "coverage claim withheld or corrected because the stream is incomplete",
 	STREAM_EVIDENCE: "stream evidence corrected to count only rows stored",
 	DETAIL_GAP_RECOVERED:
 		"gap recovery not recorded; the refused record's gap stays pending",
@@ -512,7 +514,8 @@ export function createStreamIntegrity(
 	};
 
 	/**
-	 * Correct a coverage report, or return null when it needs no change.
+	 * Correct a coverage report, return null when unchanged, or false to
+	 * withhold a claim whose denominator is unknown or contradicts the loss.
 	 *
 	 * What a coverage report must never do after a loss is read complete.
 	 * `covered` is capped at `considered` minus the refused rows, so a run
@@ -526,7 +529,7 @@ export function createStreamIntegrity(
 	const rewriteCoverage = (
 		msg: DetailCoverageMessage,
 		loss: StreamLoss,
-	): DetailCoverageMessage | null => {
+	): DetailCoverageMessage | null | false => {
 		const { considered, covered, ...rest } = msg;
 		const hydrated_keys = msg.hydrated_keys.filter(
 			(key) => !loss.refusedKeys.has(String(key)),
@@ -534,26 +537,23 @@ export function createStreamIntegrity(
 		const keysChanged = hydrated_keys.length !== msg.hydrated_keys.length;
 		// After a reported skip the runtime cannot count what was lost, so a
 		// report that reads full (or could read full from the collected count)
-		// becomes unknown. A report that already shows a shortfall stays.
+		// is withheld. A report that already shows a shortfall stays. Include
+		// the documented key-length fallback when neither count was supplied.
 		const readsFull =
 			covered === undefined
-				? considered !== undefined
+				? considered !== undefined || hydrated_keys.length >= msg.required_keys.length
 				: considered === undefined || covered >= considered;
-		if (loss.skipReasons.size > 0 && readsFull)
-			return { ...rest, hydrated_keys };
+		if (loss.skipReasons.size > 0 && readsFull) return false;
 		// After a refusal, a report missing either count, or whose denominator
 		// cannot hold the refused rows, contradicts the run: it becomes
-		// unknown. Counts are never inferred.
+		// unknown, so withhold the entire claim. Removing counts alone would
+		// leave a key-length completion claim. Counts are never inferred.
 		if (
 			loss.refused > 0 &&
 			(covered === undefined ||
 				considered === undefined ||
 				considered < loss.refused)
-		) {
-			if (covered === undefined && considered === undefined && !keysChanged)
-				return null;
-			return { ...rest, hydrated_keys };
-		}
+		) return false;
 		const corrected =
 			covered === undefined
 				? undefined
@@ -637,7 +637,7 @@ export function createStreamIntegrity(
 				if (rewritten === null) return [msg];
 				return [
 					...notice(msg.stream, [msg.stream], "DETAIL_COVERAGE"),
-					rewritten,
+					...(rewritten === false ? [] : [rewritten]),
 				];
 			}
 			case "STREAM_EVIDENCE": {
