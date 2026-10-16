@@ -177,7 +177,11 @@ import {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { attachDownloadQueue } from "../../packages/polyfill-connectors/src/download-queue.ts";
 import { savePlaywrightDownload } from "../../packages/polyfill-connectors/src/playwright-download.ts";
-import { BufferMeter, scanConversation } from "./oversize-conversation.ts";
+import {
+	BufferMeter,
+	InvalidConversationObjectError,
+	scanConversation,
+} from "./oversize-conversation.ts";
 import {
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
@@ -1328,12 +1332,19 @@ export async function collectAnthropic({
 	const wantsMessages = requested.has(MESSAGES_STREAM);
 	const wantsProjects = requested.has(PROJECTS_STREAM);
 	const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
-	const windowSince =
-		requested.get(CONVERSATIONS_STREAM)?.time_range?.since ??
-		requested.get(MESSAGES_STREAM)?.time_range?.since;
-	const windowSinceMs = windowSince ? Date.parse(windowSince) : Number.NaN;
+	// A parent is worth reading if either requested scope can use it. An
+	// absent lower bound in any requested scope makes this coarse union
+	// unbounded; final selection still belongs to each record's own scope.
+	const windowSinceMs = Math.min(
+		...[CONVERSATIONS_STREAM, MESSAGES_STREAM]
+			.filter((stream) => requested.has(stream))
+			.map((stream) => {
+				const since = requested.get(stream)?.time_range?.since;
+				return since ? Date.parse(since) : Number.NEGATIVE_INFINITY;
+			}),
+	);
 	const isWithinTimeWindow = (value: unknown): boolean => {
-		if (!windowSince) return true;
+		if (!Number.isFinite(windowSinceMs)) return true;
 		if (typeof value !== "string") return false;
 		const updatedAt = Date.parse(value);
 		return Number.isFinite(updatedAt) && updatedAt >= windowSinceMs;
@@ -1708,6 +1719,39 @@ export async function collectAnthropic({
 	// spent export reference or reads an export, so later STATE builds on it.
 	let priorCursor = readConversationsCursor(state);
 
+	// Actual oversized omissions must also block successful checkpoints,
+	// not merely withhold full-scan coverage. Successfully streamed records
+	// (including envelopes too large for a raw blob) are unaffected.
+	const oversizedSkipped = new Set<string>();
+	const reportOversizedOmission = async (
+		conversationId: string | null,
+		streams: readonly string[],
+		startOffset: number,
+	) => {
+		for (const stream of streams) {
+			if (!requested.has(stream)) continue;
+			oversizedSkipped.add(stream);
+			if (stream === CONVERSATIONS_STREAM) conversationsExact = false;
+			if (stream === MESSAGES_STREAM) completeMessages = false;
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "export_oversized_conversation_incomplete",
+				message:
+					`Conversation ${conversationId ?? "(identity unavailable)"} could not be fully read, ` +
+					`so ${stream} is incomplete and was not checkpointed.`,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
+				diagnostics: {
+					...(conversationId === null ? {} : { conversation_id: conversationId }),
+					source_offset: startOffset,
+				},
+			});
+		}
+	};
+
 	/**
 	 * Emit the parsed export. Callers must first confirm the archive layout
 	 * was recognized; only then is an empty result real evidence of an empty
@@ -1830,7 +1874,7 @@ export async function collectAnthropic({
 		if (wantsMessages) {
 			for (const message of parsed.messages) {
 				if (
-					windowSince &&
+					Number.isFinite(windowSinceMs) &&
 					!inWindowConversationIds.has(message.conversation_id)
 				)
 					continue;
@@ -1870,7 +1914,7 @@ export async function collectAnthropic({
 				parsed.droppedProjects + unclassifiedEntries.projects,
 			],
 		];
-		const skipped = new Set<string>();
+		const skipped = new Set(oversizedSkipped);
 		if (conversationsSourceMissing) {
 			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
 				if (!requested.has(stream)) {
@@ -2122,13 +2166,25 @@ export async function collectAnthropic({
 		}) => {
 			const chunks = (start: number, end: number) =>
 				entryRangeChunks(readChunk, entry, start, end);
-			const scan = await scanConversation(
-				chunks(value.startOffset, value.endOffset),
-				value.startOffset,
-				CONVERSATION_SCAN_FIELDS,
-				bufferMeter,
-				testOverrides?.inlineTextMaxUnits,
-			);
+			let scan: Awaited<ReturnType<typeof scanConversation>>;
+			try {
+				scan = await scanConversation(
+					chunks(value.startOffset, value.endOffset),
+					value.startOffset,
+					CONVERSATION_SCAN_FIELDS,
+					bufferMeter,
+					testOverrides?.inlineTextMaxUnits,
+				);
+			} catch (error) {
+				// Do not swallow host/read failures or downstream sink errors.
+				if (!(error instanceof InvalidConversationObjectError)) throw error;
+				await reportOversizedOmission(
+					error.conversationId,
+					[CONVERSATIONS_STREAM, MESSAGES_STREAM],
+					value.startOffset,
+				);
+				return;
+			}
 			const header = Object.fromEntries(scan.fields);
 			const conversation = parseConversationHeader(
 				header,
@@ -2154,6 +2210,7 @@ export async function collectAnthropic({
 				return;
 			}
 			if (wantsMessages) {
+				let omittedMessages = !chatMessagesIsArray || scan.nonObjectMessages > 0;
 				const ordered = [...scan.messageKeys].sort(
 					(a, b) => a.sortTime - b.sortTime || a.index - b.index,
 				);
@@ -2173,7 +2230,14 @@ export async function collectAnthropic({
 					);
 					if (messagesAccounted) accountMessageChild(message);
 					if (message) await emitMessage(message);
+					else omittedMessages = true;
 				}
+				if (omittedMessages)
+					await reportOversizedOmission(
+						conversation.id,
+						[MESSAGES_STREAM],
+						value.startOffset,
+					);
 			}
 			if (
 				wantsConversations &&

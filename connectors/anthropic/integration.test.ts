@@ -3095,6 +3095,7 @@ async function runFullCompletion(
 		explicitEmptyProjectsPart?: boolean;
 		streams?: string[];
 		scope?: Record<string, Record<string, unknown>>;
+		testOverrides?: AnthropicTestOverrides;
 		recoveryOnly?: boolean;
 		detailGaps?: BrowserCollectContext["detailGaps"];
 		unknownEntry?: boolean;
@@ -3178,6 +3179,7 @@ async function runFullCompletion(
 	}));
 	const context = makeContext({
 		streams,
+		testOverrides: input.testOverrides,
 		fetchStub:
 			mode === "manifest"
 				? manifestFetchStub(tokens)
@@ -5349,3 +5351,140 @@ test("collectAnthropic: organization selection prefers chat, then claude_pro, th
 		"org-chat",
 	]);
 });
+
+for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) {
+	for (const unboundedMessages of [false, true]) {
+		test(`scope union ${mode}: June conversations preserve May messages with ${unboundedMessages ? "unbounded" : "January"} messages`, async () => {
+			const conversation = (month: string) => ({
+				uuid: `conv-${month}`,
+				created_at: `2026-${month}-15T00:00:00.000Z`,
+				updated_at: `2026-${month}-15T00:00:00.000Z`,
+				chat_messages: [
+					{
+						uuid: `msg-${month}`,
+						sender: "human",
+						created_at: `2026-${month}-15T00:00:00.000Z`,
+						text: "synthetic",
+					},
+				],
+			});
+			const run = await runFullCompletion(
+				mode === "oversized" ? "streaming" : mode,
+				{
+					streams: ["conversations", "messages"],
+					conversations: [
+						conversation("05"),
+						conversation("06"),
+						conversation("07"),
+					],
+					projects: [],
+					scope: {
+						conversations: {
+							time_range: {
+								since: "2026-06-01T00:00:00Z",
+								until: "2026-06-30T23:59:59Z",
+							},
+						},
+						messages: unboundedMessages
+							? {}
+							: {
+									time_range: {
+										since: "2026-01-01T00:00:00Z",
+										until: "2026-06-30T23:59:59Z",
+									},
+								},
+					},
+					...(mode === "oversized"
+						? { testOverrides: { maxBufferedObjectUnits: 64 } }
+						: {}),
+				},
+			);
+			assert.deepEqual(
+				run.recordsOf("messages").map((r) => r.data.id),
+				unboundedMessages
+					? ["msg-05", "msg-06", "msg-07"]
+					: ["msg-05", "msg-06"],
+			);
+			assert.deepEqual(
+				run.recordsOf("conversations").map((r) => r.data.id),
+				["conv-06"],
+			);
+			assert.deepEqual(skipsOf(run.protocolMessages), []);
+		});
+	}
+}
+
+test("oversized omission: malformed envelope names the conversation and skips both requested scopes without synced_at", async () => {
+	const raw = `[{"uuid":"broken-envelope","padding":"${"x".repeat(1024)}","chat_messages":[{"uuid":"broken-message","text":}]}]`;
+	const { emitted, protocolMessages } = await runOldFormat(
+		[{ name: "conversations.json", content: new RawJson(raw) }],
+		{
+			streams: ["conversations", "messages"],
+			streaming: true,
+			testOverrides: { maxBufferedObjectUnits: 64 },
+		},
+	);
+	assert.equal(emitted.length, 0);
+	for (const stream of ["conversations", "messages"]) {
+		const skip = skipsOf(protocolMessages).find((s) => s.stream === stream);
+		assert.ok(skip, `${stream} must explicitly report a partial outcome`);
+		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
+		assert.equal(skip.diagnostics?.conversation_id, "broken-envelope");
+		assert.equal(coverageOf(protocolMessages, stream).length, 0);
+		assert.equal(
+			protocolMessages.some(
+				(m) =>
+					m.type === "STATE" &&
+					m.stream === stream &&
+					"synced_at" in (m.cursor as Record<string, unknown>),
+			),
+			false,
+		);
+	}
+});
+
+for (const [label, children] of [
+	["malformed list", null],
+	["non-object child", [null]],
+	["unparseable child", [{ text: "missing identity" }]],
+] as const) {
+	test(`oversized omission: ${label} names its parent and withholds the messages checkpoint`, async () => {
+		const { emitted, protocolMessages } = await runOldFormat(
+			[
+				{
+					name: "conversations.json",
+					content: [
+						{
+							uuid: "partial-parent",
+							padding: "x".repeat(1024),
+							chat_messages: children,
+						},
+					],
+				},
+			],
+			{
+				streams: ["conversations", "messages"],
+				streaming: true,
+				testOverrides: { maxBufferedObjectUnits: 64 },
+			},
+		);
+		assert.equal(
+			emitted.filter((r) => r.stream === "conversations").length,
+			1,
+		);
+		const skip = skipsOf(protocolMessages).find((s) => s.stream === "messages");
+		assert.ok(skip, "an omitted message must explicitly make messages partial");
+		assert.equal(skip.reason, "export_oversized_conversation_incomplete");
+		assert.equal(skip.diagnostics?.conversation_id, "partial-parent");
+		assert.equal(coverageOf(protocolMessages, "messages").length, 0);
+		assert.equal(
+			protocolMessages.some(
+				(m) =>
+					m.type === "STATE" &&
+					m.stream === "messages" &&
+					"synced_at" in (m.cursor as Record<string, unknown>),
+			),
+			false,
+		);
+	});
+}
