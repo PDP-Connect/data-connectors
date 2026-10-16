@@ -547,7 +547,7 @@ export async function fetchProfilePageUser(
 		status: response.status(),
 	});
 	observeAuthentication(page, envelope, response.status());
-	return envelope?.data?.user ?? null;
+	return successfulFinalEnvelope(envelope) ? envelope?.data?.user ?? null : null;
 }
 
 
@@ -895,6 +895,19 @@ type PostsTimelineResponse = Parameters<typeof isPostsTimelineResponse>[0] & {
 	status: () => number;
 };
 
+/** Missing status flags are allowed by GraphQL; explicit failure or partiality is not evidence. */
+function successfulFinalEnvelope(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const body = value as TimelineEnvelope & { is_final?: unknown; partial?: unknown };
+	return body.ok !== false &&
+		body.error === undefined && body.errorCode === undefined && body.error_code === undefined &&
+		(body.status === undefined || body.status === "ok") &&
+		body.is_final !== false && body.partial !== true &&
+		body.extensions?.code !== "UNAUTHENTICATED" &&
+		body.extensions?.is_final !== false && body.extensions?.partial !== true &&
+		(body.errors == null || (Array.isArray(body.errors) && body.errors.length === 0));
+}
+
 async function readTimelineConnection(response: {
 	json: () => Promise<unknown>;
 	status: () => number;
@@ -907,20 +920,7 @@ async function readTimelineConnection(response: {
 	try {
 		const body = (await response.json()) as TimelineEnvelope;
 		if (page) observeAuthentication(page, body, status);
-		if (
-			body?.ok === false ||
-			body?.error !== undefined ||
-			body?.errorCode !== undefined ||
-			body?.error_code !== undefined ||
-			(body?.status !== undefined && body.status !== "ok") ||
-			body?.extensions?.code === "UNAUTHENTICATED" ||
-			body?.extensions?.is_final === false ||
-			body?.extensions?.partial === true ||
-			(body?.errors != null &&
-				(!Array.isArray(body.errors) || body.errors.length > 0))
-		) {
-			return null;
-		}
+		if (!successfulFinalEnvelope(body)) return null;
 		const connection =
 			body?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
 		const edges = connection?.edges;
@@ -982,7 +982,6 @@ export async function fetchAllPosts(
 	ownerBound: boolean;
 }> {
 	const edges: InstagramTimelineEdge[] = [];
-	const seenIds = new Set<string>();
 	const postIndexes = new Map<string, number>();
 	const readableVersions = new Map<string, InstagramTimelineEdge>();
 	let conflictingVersions = false;
@@ -1011,7 +1010,6 @@ export async function fetchAllPosts(
 		const index = postIndexes.get(id);
 		if (index === undefined) {
 			postIndexes.set(id, edges.length);
-			seenIds.add(id);
 			edges.push(edge);
 			return;
 		}
@@ -1122,6 +1120,55 @@ export async function fetchAllPosts(
 			generation.document === acceptedDocumentGeneration
 		);
 	};
+	// Reconciliation consumes every observed response in arrival order. Its cursor
+	// is independent of the index used to select the next pagination response.
+	let reconciledIndex = -1;
+	let observationFailure: Error | undefined;
+	const connections = new Map<PostsTimelineResponse, CompleteTimelineConnection | null>();
+	const cursorSnapshots = new Map<string, Set<string>>();
+	const reconcileObserved = async (through?: PostsTimelineResponse): Promise<void> => {
+		const limit = through ? matchingResponses.indexOf(through) : undefined;
+		while (reconciledIndex + 1 < matchingResponses.length &&
+			(limit === undefined || reconciledIndex < limit)) {
+			const response = matchingResponses[++reconciledIndex]!;
+			if (!responseIsCurrentWalk(response)) continue;
+			const connection = await readTimelineConnection(response, page, owner);
+			connections.set(response, connection);
+			ownerBound &&= connection?.ownerBound === true;
+			if (!connection || connection.ownerConflict) {
+				observationFailure ??= new Error(connection?.ownerConflict
+					? "meta_posts_owner_conflict"
+					: "meta_posts_timeline_unavailable: matching timeline response was not a successful complete page");
+				continue;
+			}
+			const cursor = JSON.stringify(valuesForVariableKeys(
+				postsRequestVariables(response.request()), POSTS_CURSOR_VARIABLES,
+			).filter(value => value !== null && value !== "").map(String).sort());
+			const responseIds = new Set<string>();
+			for (const edge of connection.edges) {
+				const id = edge?.node?.id ?? edge?.node?.pk ?? edge?.node?.media_id ?? edge?.node?.code;
+				if (typeof id !== "string" || !id) {
+					unrecordableSourceEdges += 1;
+					continue;
+				}
+				responseIds.add(id);
+				reconcilePost(edge, id);
+			}
+			const previousIds = cursorSnapshots.get(cursor);
+			if (previousIds && [...previousIds].some(id => !responseIds.has(id))) {
+				observationFailure ??= new Error(
+					"meta_posts_timeline_contradictory: a timeline response omitted posts the source had already returned",
+				);
+			}
+			cursorSnapshots.set(cursor, new Set([...(previousIds ?? []), ...responseIds]));
+			if (terminalResponse && responseMatchesCursor(response,
+				initialPageWasTerminal ? null : expectedTerminalCursor)) {
+				sawTerminalPage = connection.page_info?.has_next_page === false ||
+					(connection.page_info?.has_next_page == null && connection.page_info?.end_cursor === null);
+			}
+		}
+	};
+	let expectedTerminalCursor: string | null = null;
 	const onResponse = (response: unknown): void => {
 		try {
 			const navigationResponse = response as {
@@ -1286,11 +1333,16 @@ export async function fetchAllPosts(
 						return false;
 					}
 				}
+				// waitForResponse is also an observation when the event listener did
+				// not receive this response (for example, an adapter without fan-out).
+				if (!matchingResponses.includes(response)) matchingResponses.push(response);
 				const consumedIndex = matchingResponses.indexOf(response);
 				if (consumedIndex >= 0) {
 					lastConsumedIndex = consumedIndex;
 				}
-				const connection = await readTimelineConnection(response, page, owner);
+				const before = edges.length;
+				await reconcileObserved(response);
+				const connection = connections.get(response) ?? null;
 				ownerBound &&= connection?.ownerBound === true;
 				if (!connection) {
 					throw new Error(
@@ -1305,19 +1357,6 @@ export async function fetchAllPosts(
 					connection,
 					{ status: response.status() },
 				);
-				const before = edges.length;
-				for (const edge of connection.edges) {
-					if (!edge?.node || typeof edge.node !== "object") {
-						unrecordableSourceEdges += 1;
-						continue;
-					}
-					const id = edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
-					if (typeof id !== "string" || !id) {
-						unrecordableSourceEdges += 1;
-						continue;
-					}
-					reconcilePost(edge, id);
-				}
 				await progress?.("Fetched Instagram posts page", {
 					item_count: edges.length - before,
 					page_index: pageNumber,
@@ -1337,6 +1376,7 @@ export async function fetchAllPosts(
 					(pageInfo?.has_next_page == null && pageInfo?.end_cursor === null)) {
 					sawTerminalPage = true;
 					terminalResponse = response;
+					expectedTerminalCursor = expectedCursor;
 					initialPageWasTerminal ||= pageNumber === 1;
 					return false;
 				}
@@ -1348,6 +1388,7 @@ export async function fetchAllPosts(
 		});
 	} catch (error) {
 		legacyCaptureController.abort();
+		await reconcileObserved();
 		stopObserving();
 		throw sawValidResponse && edges.length > 0
 			? new PartialWalkFailure(error, edges)
@@ -1363,59 +1404,16 @@ export async function fetchAllPosts(
 			"meta_posts_response_not_observed: profile page never triggered the posts timeline request",
 		);
 	}
-	if (sawTerminalPage && initialPageWasTerminal) {
-		try {
-			const lastResponse = (await legacyInitialCapture) ?? terminalResponse;
-			legacyCaptureController.abort();
-			// Reconcile every observed initial-page snapshot in order, not only
-			// the last one. A later response cannot erase validated records.
-			const responses = initialResponses.slice();
-			if (lastResponse && !responses.includes(lastResponse as PostsTimelineResponse)) {
-				responses.push(lastResponse as PostsTimelineResponse);
-			}
-			let settleFailure: Error | undefined;
-			for (const response of responses) {
-				const connection = await readTimelineConnection(response, page, owner);
-				if (!connection) {
-					settleFailure ??= new Error(
-						"meta_posts_timeline_unavailable: matching timeline response was not a successful complete page",
-					);
-					continue;
-				}
-				if (connection.ownerConflict) {
-					settleFailure ??= new Error("meta_posts_owner_conflict");
-					continue;
-				}
-				ownerBound &&= connection.ownerBound === true;
-				const responseIds = new Set<string>();
-				for (const edge of connection.edges) {
-					if (!edge?.node || typeof edge.node !== "object") {
-						unrecordableSourceEdges += 1;
-						continue;
-					}
-					const id = edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
-					if (typeof id !== "string" || !id) {
-						unrecordableSourceEdges += 1;
-						continue;
-					}
-					responseIds.add(id);
-					reconcilePost(edge, id);
-				}
-				if ([...seenIds].some(id => !responseIds.has(id))) {
-					settleFailure ??= new Error(
-						"meta_posts_timeline_contradictory: a timeline response omitted posts the source had already returned",
-					);
-				}
-				sawTerminalPage = connection.page_info?.has_next_page === false ||
-					(connection.page_info?.has_next_page == null && connection.page_info?.end_cursor === null);
-			}
-			sourceEdgeCount = edges.length + unrecordableSourceEdges;
-			if (settleFailure) throw settleFailure;
-		} catch (error) {
-			legacyCaptureController.abort();
-			stopObserving();
-			throw edges.length > 0 ? new PartialWalkFailure(error, edges) : error;
-		}
+	try {
+		if (sawTerminalPage && initialPageWasTerminal) await legacyInitialCapture;
+		legacyCaptureController.abort();
+		await reconcileObserved();
+		if (initialPageWasTerminal) sourceEdgeCount = edges.length + unrecordableSourceEdges;
+		if (observationFailure) throw observationFailure;
+	} catch (error) {
+		legacyCaptureController.abort();
+		stopObserving();
+		throw edges.length > 0 ? new PartialWalkFailure(error, edges) : error;
 	}
 	stopObserving();
 	if (conflictingVersions) {

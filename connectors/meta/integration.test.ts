@@ -118,6 +118,7 @@ function makeFakePage(options: {
 	categoryEmptyMessage?: boolean;
 	challengePage?: boolean;
 	profilePageUser?: unknown;
+	profileEnvelope?: Record<string, unknown>;
 	webInfoUser?: unknown;
 }): {
 	calls: string[];
@@ -161,7 +162,7 @@ function makeFakePage(options: {
 		const profileResponse = profilePageUser
 			? {
 					json: () =>
-						Promise.resolve({ data: { user: profilePageUser } }),
+						Promise.resolve({ data: { user: profilePageUser }, ...options.profileEnvelope }),
 					request: () => ({
 						headers: () => ({ "x-fb-friendly-name": "ProfilePageQuery" }),
 						method: () => "POST",
@@ -558,6 +559,7 @@ function makeCtx(args: {
 	fetchScript: Record<string, ScriptedFetch[]>;
 	harness: ReturnType<typeof makeRecordingEmit>;
 	profilePageUser?: unknown;
+	profileEnvelope?: Record<string, unknown>;
 	postsScript?: ScriptedPostsPage[];
 	requestedStreams: string[];
 	webInfoUser?: unknown;
@@ -565,6 +567,7 @@ function makeCtx(args: {
 	const { calls, page } = makeFakePage({
 		...args.pageOptions,
 		fetchScript: args.fetchScript,
+		profileEnvelope: args.profileEnvelope,
 		...(args.postsScript ? { postsScript: args.postsScript } : {}),
 		...(args.profilePageUser ? { profilePageUser: args.profilePageUser } : {}),
 		webInfoUser:
@@ -3820,6 +3823,41 @@ for (const { label, mediaCount, proven } of [
 				!proven,
 				`${stream} SKIP_RESULT`,
 			);
+		}
+	});
+}
+
+
+for (const [label, envelope, complete] of [
+	["valid final", { status: "ok", extensions: { is_final: true } }, true],
+	["failed status", { status: "fail" }, false],
+	["not ok", { ok: false }, false],
+	["GraphQL errors", { errors: [{ message: "incomplete" }] }, false],
+	["partial extension", { extensions: { partial: true } }, false],
+	["nonfinal extension", { extensions: { is_final: false } }, false],
+	["nonfinal envelope", { is_final: false }, false],
+	["partial envelope", { partial: true }, false],
+	["error envelope", { error: "failed" }, false],
+	["malformed errors", { errors: {} }, false],
+	["different owner", { data: { user: { id: "other", username: "testuser", media_count: 0, following_count: 0 } } }, false],
+	["unbound owner", { data: { user: { media_count: 0, following_count: 0 } } }, false],
+] as const) {
+	test(`collectAllStreams: ${label} profile zero counts with empty inventories`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			harness, requestedStreams: ["posts", "post_likes", "following"],
+			profilePageUser: { id: "u1", username: "testuser", media_count: 0, following_count: 0 },
+			profileEnvelope: envelope,
+			postsScript: [EMPTY_POSTS],
+			fetchScript: { "/api/v1/friendships/u1/following/": [
+				{ status: 200, json: { status: "ok", users: [], has_more: false, next_max_id: null } },
+			] },
+		});
+		await collectAllStreams(ctx, NO_DELAY, TEST_POSTS_CLOCK, makeVirtualAdsClock(), TEST_PROFILE_CLOCK);
+		assert.equal(harness.emitted.length, 0);
+		for (const stream of ["posts", "post_likes", "following"]) {
+			assert.equal(harness.protocolMessages.some(m => m.type === "STATE" && m.stream === stream), complete, `${stream} STATE`);
+			assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.stream === stream), !complete, `${stream} SKIP_RESULT`);
 		}
 	});
 }

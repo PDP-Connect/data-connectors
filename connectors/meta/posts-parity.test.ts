@@ -1025,9 +1025,9 @@ function ownerTimeline(ids: string[]): RawEnvelope {
 	return body;
 }
 
-async function collectWithSettledResponses(responses: Array<Exclude<ScriptedPostsPage, null>>) {
+async function collectWithSettledResponses(responses: Array<Exclude<ScriptedPostsPage, null>>, continuation?: Exclude<ScriptedPostsPage, null>) {
 	let emitLate = (_response: Exclude<ScriptedPostsPage, null>): void => {};
-	const page = makePostsPage({ postsScript: [responses[0]!], exposeEmit: emit => { emitLate = emit; } });
+	const page = makePostsPage({ postsScript: [responses[0]!, ...(continuation ? [continuation] : [])], exposeEmit: emit => { emitLate = emit; } });
 	const goto = page.goto.bind(page);
 	const evaluate = page.evaluate.bind(page);
 	let fetchingPosts = false;
@@ -1054,13 +1054,13 @@ async function collectWithSettledResponses(responses: Array<Exclude<ScriptedPost
 	let nextResponseAt = 1_500;
 	const postsClock = { sleep: async (ms: number) => {
 		now += ms;
-		if (now >= nextResponseAt) {
+		if (!continuation && now >= nextResponseAt) {
 			const response = late.shift();
 			if (response) emitLate(response);
 			nextResponseAt += 2_000;
 		}
 	} };
-	await collectAllStreams(ctx, NO_DELAY, postsClock, { now: () => 0, sleep: NO_DELAY }, FAST_POSTS_CLOCK);
+	await collectAllStreams(ctx, async () => { if (continuation) { for (const response of late.splice(0)) emitLate(response); } }, postsClock, { now: () => 0, sleep: NO_DELAY }, FAST_POSTS_CLOCK);
 	return { emitted, messages, followingReads };
 }
 
@@ -1155,6 +1155,34 @@ for (const kind of ["changed", "unreadable", "identical"] as const) {
 				assert.deepEqual(failure.partial[0]?.node.facepile_top_likers.map(liker => liker.id), kind === "changed" ? ["L1", "L2"] : ["L1"]);
 				return true;
 			});
+		}
+	});
+}
+
+
+for (const kind of ["changed", "unreadable", "failed", "identical"] as const) {
+	test(`collectAllStreams: consumed cursor repeat during pagination delay (${kind})`, async () => {
+		const first = { id: "A", taken_at: 1_700_000_001, caption: { text: "first" }, like_count: 1, facepile_top_likers: [{ id: "L1" }] };
+		const later = kind === "changed" ? { ...first, caption: { text: "latest" }, like_count: 2, facepile_top_likers: [{ id: "L2" }] }
+			: kind === "unreadable" ? { ...first, taken_at: "bad", facepile_top_likers: [{ id: "L2" }] } : first;
+		const firstPage = (node: Record<string, unknown>) => {
+			const body = versionTimeline(node);
+			((body.data as RawEnvelope).xdt_api__v1__feed__user_timeline_graphql_connection as RawEnvelope).page_info = { has_next_page: true, end_cursor: "next" };
+			return body;
+		};
+		const { emitted, messages } = await collectWithSettledResponses([
+			{ status: 200, json: firstPage(first) },
+			{ status: kind === "failed" ? 500 : 200, json: firstPage(later) },
+		], { status: 200, after: "next", json: ownerTimeline(["B"]) });
+		const post = emitted.find(row => row.stream === "posts" && row.data.id === "A");
+		assert.equal(post?.data.caption, kind === "changed" ? "latest" : "first");
+		assert.equal(post?.data.like_count, kind === "changed" ? 2 : 1);
+		assert.deepEqual(emitted.filter(row => row.stream === "post_likes" && row.data.post_id === "A").map(row => row.data.user_id),
+			kind === "changed" || kind === "unreadable" ? ["L1", "L2"] : ["L1"]);
+		assert.ok(emitted.some(row => row.stream === "posts" && row.data.id === "B"), "pagination still advances");
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(messages.some(m => m.type === "STATE" && m.stream === stream), kind === "identical", `${stream} STATE`);
+			assert.equal(messages.some(m => m.type === "SKIP_RESULT" && m.stream === stream), kind !== "identical");
 		}
 	});
 }
