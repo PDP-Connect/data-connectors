@@ -137,3 +137,13 @@ test("profile Loading counts cannot become a destructive zero snapshot", async (
  assert.equal(result.state.profile, undefined);
  assert.equal(result.messages.some(({ type }) => type === "STATE" || type === "DETAIL_COVERAGE"), false);
 });
+test("profile is read through the loader that waits for the late contribution heading", async () => {
+ const shell = (await fixture("profile-current-github.html")).replace(/<h2 id="js-contribution-activity-description"[\s\S]*?<\/h2>/u, "");
+ const loaded: string[] = [];
+ const result = await collect(["profile"], {
+  openPage: async (url) => page(url, url === "https://github.com/" ? owner : shell),
+  openContributionPage: async (url) => { loaded.push(url); return page(url, owner + shell.replace("</main>", '<h2 id="js-contribution-activity-description" class="f4 text-normal mb-2">1,234 contributions in the last year</h2></main>')); },
+ });
+ assert.deepEqual(loaded, ["https://github.com/sample-user"]);
+ assert.equal(result.records[0]?.data.contributionsLastYear, 1234);
+});

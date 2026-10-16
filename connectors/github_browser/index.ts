@@ -41,7 +41,7 @@ export async function openContributionPage(
 	try {
 		const ready = await page.waitForFunction(
 			({ minimumDays, selector }) =>
-				Boolean(document.querySelector("h2.f4.text-normal.mb-2")) &&
+				Boolean(document.querySelector("h2#js-contribution-activity-description")) &&
 				document.querySelectorAll(selector).length >= minimumDays,
 			{
 				minimumDays: CONTRIBUTION_CALENDAR_MINIMUM_DAYS,

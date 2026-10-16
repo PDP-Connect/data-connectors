@@ -131,10 +131,22 @@ export interface ParsedInventory<T> {
 	unreadableFields: string[];
 }
 
+// Menus and dialogs embedded in a row (star-list pickers, filter menus) carry
+// their own loading panels and menu items. They are not part of the data.
+const OVERLAY_SELECTOR =
+	'dialog, [role="dialog"], [role="menu"], [role="listbox"], action-menu, select-panel, details-menu, [popover]';
+
+function insideOverlay(node: Element, scope: Element): boolean {
+	const overlay = node.closest(OVERLAY_SELECTOR);
+	return overlay !== null && overlay !== scope && scope.contains(overlay);
+}
+
 function isUnreadable(node: Element): boolean {
 	return (
 		node.closest('[aria-busy="true"]') !== null ||
-		node.querySelector('[aria-busy="true"], .AnimatedEllipsis, .loading') !== null ||
+		Array.from(
+			node.querySelectorAll('[aria-busy="true"], .AnimatedEllipsis, .loading'),
+		).some((marker) => !insideOverlay(marker, node)) ||
 		/^(?:loading(?:\.{3}|…)?|unavailable|failed to load)$/iu.test(text(node))
 	);
 }
@@ -179,6 +191,7 @@ function recordField<T extends object, K extends keyof T>(
 function cardRows(list: Element | null): Element[] {
 	if (list === null) return [];
 	return Array.from(list.querySelectorAll("li")).filter((row) => {
+		if (insideOverlay(row, list)) return false;
 		const parentRow = row.parentElement?.closest("li");
 		return !parentRow || !list.contains(parentRow);
 	});
@@ -187,6 +200,20 @@ function cardRows(list: Element | null): Element[] {
 function starredList(document: Document): Element | null {
 	return document.querySelector(
 		"#user-starred-repos, #user-profile-frame .js-starred-repos, #user-profile-frame [data-testid='starred-repositories']",
+	);
+}
+
+/**
+ * The profile page has several h2.f4.text-normal.mb-2-style headings (for
+ * example "Popular repositories"). Only the contribution heading counts.
+ */
+function contributionHeading(document: Document): Element | null {
+	return (
+		document.querySelector("h2#js-contribution-activity-description") ??
+		Array.from(document.querySelectorAll("h2.f4.text-normal.mb-2")).find(
+			(heading) => /\bcontributions?\b/iu.test(text(heading)),
+		) ??
+		null
 	);
 }
 
@@ -212,18 +239,28 @@ export function parseProfilePage(
 	for (const [key, selector] of [
 		["fullName", "span.p-name"],
 		["bio", "div.p-note"],
-		["company", '[itemprop="worksFor"]'],
-		["location", '[itemprop="homeLocation"]'],
 	] as const)
 		recordField(row, key, sourceText(document.querySelector(selector)), unreadableFields);
-	recordField(row, "website", sourceAttribute(document.querySelector('[itemprop="url"]'), "href"), unreadableFields);
+	// GitHub renders company, location and website only when set. A rendered
+	// details list with no entries proves none is set; otherwise absence is unreadable.
+	const details = document.querySelector("ul.vcard-details");
+	const noDetailsSet = details !== null && !isUnreadable(details) && details.children.length === 0;
+	if (!noDetailsSet) {
+		for (const [key, selector] of [
+			["company", '[itemprop="worksFor"]'],
+			["location", '[itemprop="homeLocation"]'],
+		] as const)
+			recordField(row, key, sourceText(document.querySelector(selector)), unreadableFields);
+		recordField(row, "website", sourceAttribute(document.querySelector('[itemprop="url"]'), "href"), unreadableFields);
+	}
 	recordField(row, "avatarUrl", sourceAttribute(document.querySelector("img.avatar-user"), "src"), unreadableFields);
 	recordField(row, "followers", sourceCount(document.querySelector('a[href$="?tab=followers"] span, a[href$="?tab=followers"]')), unreadableFields);
 	recordField(row, "following", sourceCount(document.querySelector('a[href$="?tab=following"] span, a[href$="?tab=following"]')), unreadableFields);
-	const repoCountNode = document.querySelector('[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter')
+	// The tab shows the count in a counter label plus a visually hidden "(n)" copy.
+	const repoCountNode = document.querySelector('[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter, [data-tab-item="repositories"] [class*="CounterLabel-CounterLabel"], a[href*="tab=repositories"] [class*="CounterLabel-CounterLabel"]')
 		?? document.querySelector('[data-tab-item="repositories"], a[href*="tab=repositories"]');
 	recordField(row, "repositoryCount", sourceCount(repoCountNode), unreadableFields);
-	const contributionText = sourceText(document.querySelector("h2.f4.text-normal.mb-2"));
+	const contributionText = sourceText(contributionHeading(document));
 	const countMatch = contributionText === undefined ? null : /^([\d,]+)\s+contributions?\b/iu.exec(contributionText);
 	recordField(row, "contributionsLastYear", countMatch?.[1] ? toInt(countMatch[1]) : undefined, unreadableFields);
 
@@ -284,7 +321,7 @@ export function parseProfilePage(
 		}
 	}
 
-	const achievementSelector = '.js-achievement-card, a[href*="/achievements/"]';
+	const achievementSelector = '.js-achievement-card, a[href*="/achievements/"], a[href*="achievement="][href*="tab=achievements"]';
 	const achievementCards = Array.from(document.querySelectorAll(achievementSelector))
 		.filter((card) => !card.parentElement?.closest(achievementSelector));
 	const achievementList = document.querySelector(".profile-achievements, .js-profile-achievements, [data-testid='achievements']");
@@ -293,6 +330,7 @@ export function parseProfilePage(
 		if (!unreadableFields.includes("achievements")) unreadableFields.push("achievements");
 	} else {
 		row.achievements = [];
+		const seenAchievements = new Set<string>();
 		for (const card of achievementCards) {
 			const image = card.querySelector("img");
 			const name = sourceAttribute(image, "alt")?.replace(/^Achievement:\s*/iu, "").trim();
@@ -300,6 +338,9 @@ export function parseProfilePage(
 				rejectedEntries += 1;
 				continue;
 			}
+			// The sidebar renders the same badges once per responsive layout.
+			if (seenAchievements.has(name)) continue;
+			seenAchievements.add(name);
 			const iconUrl = sourceAttribute(image, "src");
 			if (iconUrl === undefined) rejectedEntries += 1;
 			row.achievements.push({ name, ...(iconUrl === undefined ? {} : { iconUrl }) });
@@ -525,7 +566,7 @@ export function parseContributionHtml(html: string): {
 		});
 	}
 	const headingMatch = /([\d,]+)\s+contribution/iu.exec(
-		text(document.querySelector("h2.f4.text-normal.mb-2")),
+		text(contributionHeading(document)),
 	);
 	return {
 		days,

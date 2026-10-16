@@ -518,3 +518,85 @@ test("event titles preserve explicit null and missing titles cannot acquire comp
 	assert.equal(release.row?.title, null);
 	assert.equal(release.complete, true);
 });
+
+test("current GitHub profile: contribution heading, tab counter, badges and empty details are read", async () => {
+	const parsed = parseProfilePage(
+		await fixture("profile-current-github.html"),
+		"https://github.com/sample-user",
+	);
+	assert.equal(parsed.row?.contributionsLastYear, 1234);
+	assert.equal(parsed.row?.repositoryCount, 8);
+	assert.deepEqual(parsed.row?.achievements, [
+		{ name: "Sample Badge", iconUrl: "https://github.githubassets.com/assets/sample-badge.png" },
+	]);
+	assert.equal(parsed.row?.pinnedRepositories?.[0]?.stars, 5);
+	// An empty rendered details list proves company, location and website are unset.
+	for (const key of ["company", "location", "website"] as const)
+		assert.equal(key in (parsed.row ?? {}), false);
+	// The page shows no follower counts, so the profile must not claim completion.
+	assert.deepEqual(parsed.unreadableFields, ["followers", "following"]);
+	assert.equal(parsed.complete, false);
+});
+
+test("profile details list with an entry that has no readable fields stays unreadable", () => {
+	const parsed = parseProfilePage(
+		'<span class="p-nickname">sample-user</span><ul class="vcard-details"><li class="vcard-detail">?</li></ul>',
+		"https://github.com/sample-user",
+	);
+	for (const key of ["company", "location", "website"])
+		assert.equal(parsed.unreadableFields.includes(key), true);
+});
+
+test("contribution total comes from the contribution heading, not an earlier similar heading", () => {
+	const parsed = parseContributionHtml(
+		'<h2 class="f4 mb-2 text-normal">Popular repositories</h2><h2 id="js-contribution-activity-description" class="f4 text-normal mb-2">1 contribution in 2025</h2><td class="ContributionCalendar-day" data-date="2025-01-01" data-count="1" data-level="1"></td>',
+	);
+	assert.equal(parsed.total, 1);
+	assert.equal(parsed.complete, true);
+	assert.deepEqual(parsed.unreadableFields, []);
+	const missing = parseContributionHtml(
+		'<h2 class="f4 mb-2 text-normal">Popular repositories</h2><td class="ContributionCalendar-day" data-date="2025-01-01" data-count="1" data-level="1"></td>',
+	);
+	assert.equal(missing.complete, false);
+});
+
+test("loading panels inside a row's menus do not make a rendered repository list unreadable", async () => {
+	const html = await fixture("repositories-current-github.html");
+	const parsed = parseRepositoriesPage(html);
+	assert.equal(parsed.rows.length, 1);
+	assert.equal(parsed.rawRows, 1);
+	assert.deepEqual(parsed.unreadableFields, []);
+	assert.equal(parsed.complete, true);
+	// A loading marker on the list itself still withholds completion.
+	assert.equal(
+		parseRepositoriesPage(html.replace('id="user-repositories-list"', 'id="user-repositories-list" aria-busy="true"')).complete,
+		false,
+	);
+	assert.equal(
+		parseRepositoriesPage(html.replace("<ul>", '<ul><li aria-busy="true"><h3><a href="/sample-user/other">other</a></h3></li>')).complete,
+		false,
+	);
+});
+
+test("current GitHub starred empty state with filter menus has no rows to discard", async () => {
+	const html = await fixture("starred-empty-with-menus-current-github.html");
+	const parsed = parseStarredPage(html);
+	assert.equal(parsed.rawRows, 0);
+	assert.equal(parsed.rejectedRows, 0);
+	assert.equal(parsed.complete, true);
+	assert.deepEqual(
+		inspectInventoryPage(
+			inventoryObservation(
+				"starred",
+				`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>${html}`,
+				1,
+			),
+			"starred",
+			"sample-user",
+			1,
+			parsed.rows.length,
+			parsed.rejectedRows,
+		),
+		{ valid: true, nextUrl: null, reason: "terminal_list" },
+	);
+});

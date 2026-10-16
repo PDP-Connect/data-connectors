@@ -159,7 +159,9 @@ export async function collectGitHubBrowser(
 	if (wants.has("profile")) {
 		await runIsolated("profile", async () => {
 			const url = `${GITHUB}/${username}`;
-			const page = await services.openPage(url);
+			// The contribution heading loads after the profile shell, so read the
+			// profile through the loader that waits for the contribution section.
+			const page = await (services.openContributionPage ?? services.openPage)(url);
 			if (!inspectProfilePage(page, username, url)) {
 				await incomplete("profile", "wrong_page_or_owner");
 				return;
