@@ -416,13 +416,15 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       else windows.push({ start: refreshStart, end: refreshEnd });
     }
     if (windows.length === 0) {
-      // A valid checkpoint proves this bounded request is already covered.
+      // A valid checkpoint for the same consent proves the request is covered,
+      // including requests with an omitted lower or upper bound.
       // Re-acknowledge it unchanged so both hosts complete with an empty scope.
-      if (ctx.collectionMode !== "full_refresh" && requestedSince && until &&
-          requestedSince <= requestedEnd && previous?.requested_since === requestedSince &&
+      if (ctx.collectionMode !== "full_refresh" && previous &&
+          (!requestedSince || requestedSince <= requestedEnd) &&
+          (previous.requested_since ?? undefined) === requestedSince &&
           isUtcDay(previous.next_day) && previous.next_day > requestedEnd &&
           !(previous.failed_windows ?? []).some(({ start, end }) =>
-            start <= requestedEnd && end >= requestedSince)) {
+            start <= requestedEnd && (!requestedSince || end >= requestedSince))) {
         await ctx.emit({ type: "STATE", stream, cursor: previous });
       }
       continue;

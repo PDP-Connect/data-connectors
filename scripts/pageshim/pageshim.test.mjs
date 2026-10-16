@@ -3569,3 +3569,56 @@ for (const [failure, options, committedScopes] of [
 		}
 	});
 }
+
+test("oura_browser: until-only consecutive runs acknowledge covered state on both hosts", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+	const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-until-only.js") });
+	const until = "2026-10-15";
+	for (const resultStreaming of [false, true]) {
+		const fixture = recordingDailyFixture();
+		const run = (initialState, suffix) => runHarness({ bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve: fixture.resolve },
+			scopes: [{ name: "oura.sleep", time_range: { until } }],
+			initialState, resultStreaming, clockNowMs: Date.parse("2026-10-18T12:00:00Z"),
+			resultSpoolDirectory: join(out, "oura-until-" + resultStreaming + "-" + until.replaceAll(":", "-") + "-" + suffix) });
+		const first = await run({}, "first");
+		assertCleanRun(first);
+		assert.equal(first.data.error, undefined);
+		assert.match(first.data.status, /^Complete!/);
+		assert.ok((resultStreaming ? first.streamDone : first.result).exportSummary.count > 0);
+		assert.equal(first.states["oura.sleep"].next_day, "2026-10-15");
+		assert.equal(first.states["oura.sleep"].requested_since, null);
+		fixture.windows.length = 0;
+		const second = await run(first.states, "second");
+		assertCleanRun(second);
+		assert.equal(second.data.error, undefined);
+		assert.match(second.data.status, /^Complete!/);
+		assert.deepEqual(fixture.windows, []);
+		assert.deepEqual(second.states, first.states);
+		assert.deepEqual(second.stateMessages.map(({ cursor }) => cursor), [first.states["oura.sleep"]]);
+		const result = resultStreaming ? second.streamDone : second.result;
+		assert.deepEqual(result.errors, []);
+		assert.equal(result.exportSummary.count, 0);
+		const scope = resultStreaming ? JSON.parse(await readFile(second.streamScopeFiles["oura.sleep"], "utf8")) : second.result["oura.sleep"];
+		assert.deepEqual(scope.records, []);
+		if (resultStreaming) assert.equal(second.streamResult.completed, true);
+
+		const different = await run({ "oura.sleep": { ...first.states["oura.sleep"], requested_since: "2026-10-01" } }, "different-consent");
+		assertCleanRun(different);
+		assert.deepEqual(fixture.windows, []);
+		assert.deepEqual(different.stateMessages, []);
+		// The hosts differ on empty-run status; neither may acknowledge this cursor.
+
+		// The manifest uses a date consent field: instant bounds are unsupported
+		// by the host, independently of the collector's UTC window arithmetic.
+		const instant = await runHarness({ bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve: fixture.resolve },
+			scopes: [{ name: "oura.sleep", time_range: { until: "2026-10-15T12:00:00Z" } }],
+			resultStreaming, clockNowMs: Date.parse("2026-10-18T12:00:00Z"),
+			resultSpoolDirectory: join(out, "oura-instant-unsupported-" + resultStreaming) });
+		assertCleanRun(instant);
+		assert.deepEqual(instant.stateMessages, []);
+		const instantErrors = resultStreaming ? instant.data.error : instant.result.errors;
+		assert.match(JSON.stringify(instantErrors), /date/);
+	}
+});

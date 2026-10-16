@@ -521,3 +521,53 @@ test("covered bounded acknowledgement does not replace uncovered or full-refresh
     assert.deepEqual(invalid.messages, []);
   });
 });
+
+test("omitted-since coverage requires a valid same-consent checkpoint without gaps", async () => {
+  const now = Date.now;
+  Date.now = () => Date.parse("2026-10-18T12:00:00Z");
+  try {
+    const requests: string[] = [];
+    await withBrowser(async (input) => {
+      requests.push(String(input));
+      return Response.json({ daily_sleeps: [] });
+    }, async () => {
+      const range = { until: "2026-10-15" };
+      const covered = { next_day: "2026-10-15", requested_since: null, failed_windows: [] };
+      for (const cursor of [
+        covered,
+        { next_day: covered.next_day },
+        { ...covered, failed_windows: [{ start: "2026-10-15", end: "2026-10-16" }] },
+      ]) {
+        const h = harness(["sleep"], page(HOME), { sleep: cursor }, range);
+        await collectOuraBrowser(h.ctx);
+        assert.deepEqual(h.messages, [{ type: "STATE", stream: "sleep", cursor }]);
+        assert.deepEqual(requests, []);
+      }
+      for (const state of [
+        {},
+        { sleep: { ...covered, requested_since: "2026-10-01" } },
+        { sleep: { ...covered, next_day: "2026-02-30" } },
+      ]) {
+        const h = harness(["sleep"], page(HOME), state, { until: "2020-01-01" });
+        await collectOuraBrowser(h.ctx);
+        assert.deepEqual(h.messages, []);
+        assert.deepEqual(requests, []);
+      }
+      for (const cursor of [
+        { ...covered, next_day: "2026-10-13" },
+        { ...covered, failed_windows: [{ start: "2026-10-13", end: "2026-10-14" }] },
+      ]) {
+        const h = harness(["sleep"], page(HOME), { sleep: cursor }, range);
+        await collectOuraBrowser(h.ctx);
+        assert.equal(requests.splice(0).length, 1);
+        assert.notDeepEqual(savedCursor(h.messages), cursor);
+      }
+      const full = harness(["sleep"], page(HOME), { sleep: covered }, range);
+      full.ctx.collectionMode = "full_refresh";
+      await collectOuraBrowser(full.ctx);
+      assert.ok(requests.length > 0);
+    });
+  } finally {
+    Date.now = now;
+  }
+});

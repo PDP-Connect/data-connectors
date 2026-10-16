@@ -2597,7 +2597,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 426,
+			line: 428,
 			column: 9,
 			category: "ordered_protocol_emission",
 			note: "Re-acknowledge each covered stream's unchanged checkpoint in requested stream order.",
@@ -2611,14 +2611,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 435,
+			line: 437,
 			column: 22,
 			category: "ordered_browser_interaction",
 			note: "Oura fetches each refresh and backfill window on the authenticated browser page in order.",
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 470,
+			line: 472,
 			column: 9,
 			category: "ordered_protocol_emission",
 			note: "Oura records are emitted in fetched stream order before the checkpoint.",
