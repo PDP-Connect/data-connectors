@@ -5790,130 +5790,296 @@ for (const children of [undefined, null]) {
 
 for (const mode of ["buffered", "streaming", "oversized", "manifest"] as const) {
 	for (const withConversations of [false, true]) {
-		for (const [label, parentTimes, children, omitted] of [
+		for (const [label, parentTimes, children, outside] of [
 			[
-				"old parent fallback",
+				"parent upper bound before since",
 				{ updated_at: "2026-05-15T00:00:00Z" },
 				[{ text: "missing identity" }],
-				false,
+				"before",
 			],
 			[
 				"old child in a current parent",
 				{ updated_at: "2026-06-15T00:00:00Z" },
 				[{ text: "missing identity", created_at: "2026-05-15T00:00:00Z" }],
-				false,
+				"before",
 			],
 			[
 				"current child in an old parent",
 				{ updated_at: "2026-05-15T00:00:00Z" },
 				[{ text: "missing identity", created_at: "2026-06-01T00:00:00Z" }],
-				true,
+				null,
 			],
 			[
-				"current parent fallback",
+				"parent upper bound in window",
 				{ updated_at: "2026-06-15T00:00:00Z" },
 				[{ text: "missing identity" }],
-				true,
+				null,
 			],
-			["unknown timestamps", {}, [{ text: "missing identity" }], true],
+			["unknown timestamps", {}, [{ text: "missing identity" }], null],
 			[
 				"invalid timestamps",
 				{ updated_at: "not-a-date", created_at: null },
 				[{ text: "missing identity", created_at: "not-a-date" }],
-				true,
+				null,
 			],
 			[
 				"invalid child time with old parent",
 				{ updated_at: "2026-05-15T00:00:00Z" },
 				[{ text: "missing identity", created_at: "not-a-date" }],
-				false,
+				"before",
 			],
 			[
 				"non-object child in old parent",
 				{ updated_at: "2026-05-15T00:00:00Z" },
 				[null],
-				false,
+				"before",
 			],
 			[
 				"non-object child with unknown time",
 				{},
 				[null],
-				true,
+				null,
 			],
 			[
 				"malformed list in old parent",
 				{ updated_at: "2026-05-15T00:00:00Z" },
 				null,
-				false,
+				"before",
 			],
-			["malformed list with unknown time", {}, null, true],
-		] as const) {
-			test(`message omission window ${mode}: ${label}, ${withConversations ? "with unbounded conversations" : "messages alone"}`, async () => {
-				const run = await runFullCompletion(
-					mode === "oversized" ? "streaming" : mode,
+			["malformed list with unknown time", {}, null, null],
+			[
+				"unknown child in spanning parent",
+				{
+					created_at: "2026-05-15T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[{ text: "missing identity" }],
+				null,
+			],
+			[
+				"non-object child in spanning parent",
+				{
+					created_at: "2026-05-15T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[null],
+				null,
+			],
+			[
+				"malformed list in spanning parent",
+				{
+					created_at: "2026-05-15T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				null,
+				null,
+			],
+			[
+				"unknown child in parent created after until",
+				{
+					created_at: "2026-07-01T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[{ text: "missing identity" }],
+				"after",
+			],
+			[
+				"non-object child in parent created after until",
+				{
+					created_at: "2026-07-01T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[null],
+				"after",
+			],
+			[
+				"malformed list in parent created after until",
+				{
+					created_at: "2026-07-01T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				null,
+				"after",
+			],
+			[
+				"missing upper bound with old creation",
+				{ created_at: "2026-05-15T00:00:00Z" },
+				[{ text: "missing identity" }],
+				null,
+			],
+			[
+				"invalid upper bound with old creation",
+				{
+					created_at: "2026-05-15T00:00:00Z",
+					updated_at: "not-a-date",
+				},
+				[{ text: "missing identity" }],
+				null,
+			],
+			[
+				"missing lower bound with late update",
+				{ updated_at: "2026-07-15T00:00:00Z" },
+				[{ text: "missing identity" }],
+				null,
+			],
+			[
+				"invalid lower bound with late update",
+				{
+					created_at: "not-a-date",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[{ text: "missing identity" }],
+				null,
+			],
+			[
+				"parent upper bound touches since",
+				{
+					created_at: "2026-05-15T00:00:00Z",
+					updated_at: "2026-06-01T00:00:00Z",
+				},
+				[null],
+				null,
+			],
+			[
+				"parent lower bound touches until",
+				{
+					created_at: "2026-06-30T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				null,
+				null,
+			],
+			[
+				"dated child after until in spanning parent",
+				{
+					created_at: "2026-05-15T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[{ text: "missing identity", created_at: "2026-07-01T00:00:00Z" }],
+				"after",
+			],
+			[
+				"dated child in window overrides late parent bounds",
+				{
+					created_at: "2026-07-01T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[{ text: "missing identity", created_at: "2026-06-15T00:00:00Z" }],
+				null,
+			],
+			[
+				"child updated timestamp after until",
+				{
+					created_at: "2026-05-15T00:00:00Z",
+					updated_at: "2026-06-15T00:00:00Z",
+				},
+				[
 					{
-						streams: withConversations
-							? ["conversations", "messages"]
-							: ["messages"],
-						scope: {
-							messages: { time_range: { since: "2026-06-01T00:00:00Z" } },
-						},
-						conversations: [
-							{
-								uuid: "partial-parent",
-								...parentTimes,
-								chat_messages: children,
-							},
-							{
-								uuid: "valid-parent",
-								updated_at: "2026-06-15T00:00:00Z",
-								chat_messages: [
-									{
-										uuid: "june-message",
-										created_at: "2026-06-15T00:00:00Z",
-										sender: "human",
-										text: "kept",
-									},
-								],
-							},
-						],
-						projects: [],
-						testOverrides: {
-							initialDelayMs: 0,
-							...(mode === "oversized" ? { maxBufferedObjectUnits: 16 } : {}),
-						},
+						text: "missing identity",
+						created_at: "not-a-date",
+						updated_at: "2026-07-01T00:00:00Z",
 					},
+				],
+				"after",
+			],
+			[
+				"child creation takes precedence over update",
+				{
+					created_at: "2026-07-01T00:00:00Z",
+					updated_at: "2026-07-15T00:00:00Z",
+				},
+				[
+					{
+						text: "missing identity",
+						created_at: "2026-06-30T00:00:00Z",
+						updated_at: "2026-07-01T00:00:00Z",
+					},
+				],
+				null,
+			],
+		] as const) {
+			for (const [windowLabel, timeRange] of [
+				["since-only", { since: "2026-06-01T00:00:00Z" }],
+				[
+					"finite",
+					{
+						since: "2026-06-01T00:00:00Z",
+						until: "2026-06-30T00:00:00Z",
+					},
+				],
+				["until-only", { until: "2026-06-30T00:00:00Z" }],
+			] as const) {
+				const omitted = !(
+					(outside === "before" && "since" in timeRange) ||
+					(outside === "after" && "until" in timeRange)
 				);
-				assert.deepEqual(
-					run.recordsOf("messages").map((record) => record.data.id),
-					["june-message"],
-				);
-				const skips = skipsOf(run.protocolMessages).filter(
-					(skip) => skip.stream === "messages",
-				);
-				assert.equal(skips.length, omitted ? 1 : 0);
-				if (omitted) {
-					assert.equal(
-						skips[0]?.reason,
-						mode === "oversized"
-							? "export_oversized_conversation_incomplete"
-							: "export_conversation_incomplete",
+				test(`message omission window ${mode} ${windowLabel}: ${label}, ${withConversations ? "with unbounded conversations" : "messages alone"}`, async () => {
+					const run = await runFullCompletion(
+						mode === "oversized" ? "streaming" : mode,
+						{
+							streams: withConversations
+								? ["conversations", "messages"]
+								: ["messages"],
+							scope: {
+								messages: { time_range: timeRange },
+							},
+							conversations: [
+								{
+									uuid: "partial-parent",
+									...parentTimes,
+									chat_messages: children,
+								},
+								{
+									uuid: "valid-parent",
+									updated_at: "2026-06-15T00:00:00Z",
+									chat_messages: [
+										{
+											uuid: "june-message",
+											created_at: "2026-06-15T00:00:00Z",
+											sender: "human",
+											text: "kept",
+										},
+									],
+								},
+							],
+							projects: [],
+							testOverrides: {
+								initialDelayMs: 0,
+								...(mode === "oversized" ? { maxBufferedObjectUnits: 16 } : {}),
+							},
+						},
 					);
-					assert.equal(
-						(skips[0]?.diagnostics as Record<string, unknown>)?.conversation_id,
-						"partial-parent",
+					assert.deepEqual(
+						run.recordsOf("messages").map((record) => record.data.id),
+						["june-message"],
 					);
-				}
-				assert.equal(
-					run.protocolMessages.some(
-						(message) =>
-							message.type === "STATE" &&
-							message.stream === "messages" &&
-							"synced_at" in (message.cursor as Record<string, unknown>),
-					),
-					!omitted,
-				);
-			});
+					const skips = skipsOf(run.protocolMessages).filter(
+						(skip) => skip.stream === "messages",
+					);
+					assert.equal(skips.length, omitted ? 1 : 0);
+					if (omitted) {
+						assert.equal(
+							skips[0]?.reason,
+							mode === "oversized"
+								? "export_oversized_conversation_incomplete"
+								: "export_conversation_incomplete",
+						);
+						assert.equal(
+							(skips[0]?.diagnostics as Record<string, unknown>)?.conversation_id,
+							"partial-parent",
+						);
+					}
+					assert.equal(
+						run.protocolMessages.some(
+							(message) =>
+								message.type === "STATE" &&
+								message.stream === "messages" &&
+								"synced_at" in (message.cursor as Record<string, unknown>),
+						),
+						!omitted,
+					);
+				});
+			}
 		}
 	}
 }

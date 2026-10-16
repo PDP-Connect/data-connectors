@@ -1351,8 +1351,9 @@ export async function collectAnthropic({
 		return Number.isFinite(updatedAt) && updatedAt >= windowSinceMs;
 	};
 	// A sibling conversation scope must not widen messages' omission window.
-	// Prefer the child's raw time, then the parent's. Unknown dates cannot
-	// prove an omission out of scope.
+	// Only a child's own usable time locates it at a point. An undated
+	// child could fall anywhere between the parent's creation and update;
+	// missing or invalid endpoints leave that side of the interval unbounded.
 	const messagesWindow = requested.get(MESSAGES_STREAM)?.time_range;
 	const messagesSinceMs = Date.parse(messagesWindow?.since ?? "");
 	const messagesUntilMs = Date.parse(messagesWindow?.until ?? "");
@@ -1360,17 +1361,27 @@ export async function collectAnthropic({
 		childTime: number | null,
 		parent: Record<string, unknown>,
 	): boolean => {
-		const time =
-			childTime ??
-			[parent.updated_at, parent.created_at]
-				.map((value) =>
-					typeof value === "string" ? Date.parse(value) : Number.NaN,
-				)
-				.find(Number.isFinite);
-		return (
-			time === undefined ||
-			((!Number.isFinite(messagesSinceMs) || time >= messagesSinceMs) &&
-				(!Number.isFinite(messagesUntilMs) || time <= messagesUntilMs))
+		if (childTime !== null) {
+			return (
+				(!Number.isFinite(messagesSinceMs) || childTime >= messagesSinceMs) &&
+				(!Number.isFinite(messagesUntilMs) || childTime <= messagesUntilMs)
+			);
+		}
+		const parentCreatedMs =
+			typeof parent.created_at === "string"
+				? Date.parse(parent.created_at)
+				: Number.NaN;
+		const parentUpdatedMs =
+			typeof parent.updated_at === "string"
+				? Date.parse(parent.updated_at)
+				: Number.NaN;
+		return !(
+			(Number.isFinite(messagesSinceMs) &&
+				Number.isFinite(parentUpdatedMs) &&
+				parentUpdatedMs < messagesSinceMs) ||
+			(Number.isFinite(messagesUntilMs) &&
+				Number.isFinite(parentCreatedMs) &&
+				parentCreatedMs > messagesUntilMs)
 		);
 	};
 	if ((wantsConversations || wantsProjects) && !isRecordSelected) {
