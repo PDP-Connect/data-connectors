@@ -335,6 +335,37 @@ test("ordinary resume: a persisted cursor resumes forward via after_id and stops
 	})();
 });
 
+test("forward malformed null preserves valid-prefix emission before failed outcome", async () => {
+	// Pins EXISTING partial-emission behavior; this is not an endorsement.
+	const walk = stubGroupWalk({
+		groupsListBody: [group({ id: "group-1" })],
+		messagePages: [{
+			body: { response: { count: 2, messages: [
+				groupMessage({ id: "m1", created_at: 1_700_000_001, attachments: [] }),
+				null,
+			] } },
+		}],
+	});
+	try {
+		const { emitRecord, emitted } = makeHarness();
+		const outcome = await collectGroupMessages(
+			TOKEN, openFingerprintCursor(new Map()), undefined, undefined,
+			noopProgress, emitRecord, null, { "group-1": "m0" }, "incremental",
+		);
+		assert.deepEqual(
+			emitted.filter((r) => r.stream === "group_messages")
+				.map((r) => (r.data as { id: string }).id),
+			["m1"],
+			"existing partial-emission behavior preserves exactly the valid prefix",
+		);
+		assert.equal(outcome.failed, true);
+		assert.deepEqual(outcome.nextCursors, {});
+		assert.equal(walk.fetchCount(), 1);
+	} finally {
+		walk.restore();
+	}
+});
+
 test("ordinary resume: equal timestamps with advancing IDs collect and advance across pages", async () => {
 	const page1 = Array.from({ length: PAGE_SIZE }, (_, i) =>
 		groupMessage({ id: `m-tie-${String(i)}`, created_at: 1_700_000_200 }),

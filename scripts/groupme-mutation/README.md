@@ -41,6 +41,12 @@ Missing tests, zero completed tests, compile or runtime errors, timeouts, static
 
 Survivors and timeouts are listed in `summary.json`. They do not change the exit code. Timeouts are never counted as kills. Canary-only runs do not prove changed code.
 
+Non-canary `Killed` counts are official Stryker outcomes validated for positive completed tests and reported killers, not proof of assertion-only failure or runtime activation. Only the canary has the stronger owner-receipt proof.
+
+### Known dispositions
+
+For JSON arrays, id1 (`i <= messages.length`) is equivalent: the extra iteration has `curr` undefined and the guard skips it. Id2 (`i >= messages.length`) and id3 (`i -= 1`) can fail to terminate; their timeouts are not kills. Id9 (`prev && curr` to `true`) and id10 (to `prev || curr`) survived the 18-mutant slice because a JSON `null` element reaches the guard. The native null-prefix test pins that existing partial emission without endorsing it; by hand-applied mutation it fails under both id9 and id10 and passes on unmodified code. That is a local check, not a new Stryker run.
+
 ## Artifacts
 
 In the report directory: `summary.json` (outcome, selection, canary proof, counts, survivors, timeouts), `selection.json`, `stryker.log`, `mutation.json` (Stryker's JSON report), `index.html`, `events/` (Stryker's event-recorder files: plan, tested, report), and `owner-receipt.jsonl`.

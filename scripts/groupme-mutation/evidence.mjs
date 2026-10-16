@@ -98,14 +98,16 @@ export function verifyInvocation({
 			throw new Error("tested and reported status differ for mutant " + id);
 
 	// ID-only lifecycle events remain valid; supplied identities must agree.
-	const point = (p) => [p?.line, p?.column];
+	const point = (p, offset = 0) => [p?.line + offset, p?.column + offset];
+	// Actions run 38945513812: plan locations are 0-based; tested/report are 1-based.
 	const checkIdentity = (actual, expected, label) => {
+		const offset = label === "planned" ? 1 : 0;
 		for (const key of ["mutatorName", "replacement"]) {
 			if (Object.hasOwn(actual, key) && actual[key] !== expected[key])
 				throw new Error(label + " identity " + key + " differs for mutant " + expected.id);
 		}
 		if (Object.hasOwn(actual, "location") &&
-			JSON.stringify([point(actual.location?.start), point(actual.location?.end)]) !==
+			JSON.stringify([point(actual.location?.start, offset), point(actual.location?.end, offset)]) !==
 			JSON.stringify([point(expected.location?.start), point(expected.location?.end)]))
 			throw new Error(label + " identity location differs for mutant " + expected.id);
 	};

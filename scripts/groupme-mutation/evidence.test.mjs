@@ -60,7 +60,16 @@ function invocation(overrides = {}) {
 	};
 	const plan = (id, activation = "runtime") => ({
 		plan: "Run",
-		mutant: { id },
+		mutant: {
+			...structuredClone(mutants.find((m) => m.id === id)),
+			location: Object.fromEntries(
+				Object.entries(mutants.find((m) => m.id === id).location)
+					.map(([edge, point]) => [edge, {
+						line: point.line - 1,
+						column: point.column - 1,
+					}]),
+			),
+		},
 		runOptions: { activeMutant: { id }, mutantActivation: activation },
 	});
 	const receipt = {
@@ -86,7 +95,7 @@ function invocation(overrides = {}) {
 		},
 		...mutants.map((m) => ({
 			name: "onMutantTested",
-			data: { id: m.id, status: m.status },
+			data: structuredClone(m),
 		})),
 	];
 	return {
@@ -103,6 +112,36 @@ function invocation(overrides = {}) {
 
 function verify(overrides) {
 	return verifyInvocation(invocation(overrides));
+}
+
+test("real Stryker plan locations are zero-based while tested/report locations are one-based", () => {
+	const input = invocation();
+	const plans = input.events.find((e) => e.name === "onMutationTestingPlanReady").data.mutantPlans;
+	for (const plan of plans) {
+		const report = input.report.files[canary.file].mutants.find((m) => m.id === plan.mutant.id);
+		const tested = input.events.find((e) => e.name === "onMutantTested" && e.data.id === report.id).data;
+		for (const edge of ["start", "end"]) {
+			assert.equal(plan.mutant.location[edge].line, report.location[edge].line - 1);
+			assert.equal(plan.mutant.location[edge].column, report.location[edge].column - 1);
+		}
+		assert.deepEqual(tested.location, report.location);
+	}
+	assert.equal(verifyInvocation(input).canary.id, "6");
+});
+
+for (const origin of ["planned", "tested"]) {
+	for (const edge of ["start", "end"]) {
+		for (const axis of ["line", "column"]) {
+			test(origin + " location rejects a one-unit mismatch in " + edge + "." + axis, () => {
+				const input = invocation();
+				const data = origin === "planned"
+					? input.events.find((e) => e.name === "onMutationTestingPlanReady").data.mutantPlans[1].mutant
+					: input.events.find((e) => e.name === "onMutantTested" && e.data.id === "0").data;
+				data.location[edge][axis] += 1;
+				assert.throws(() => verifyInvocation(input), new RegExp(origin + " identity location differs for mutant 0"));
+			});
+		}
+	}
 }
 
 test("a complete invocation proves the canary and reports changed-code statuses", () => {
