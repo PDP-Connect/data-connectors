@@ -1987,7 +1987,8 @@ const ADS_EXPANSION_WAIT_MS = 10_000;
 type AdsTraversalRow = { description: string | null; name: string };
 type AdsTraversalState = {
  token: string; dialog: Element; lists: Element[]; url: string;
- rows: AdsTraversalRow[]; unresolvedRows: Element[]; failed: boolean;
+ // Immutable JSON name/description signatures; null means unreadable forever.
+ rows: AdsTraversalRow[]; unresolvedRows: (string | null)[]; failed: boolean;
 };
 
 /** Browser-local references bind every sample and click to one document/dialog.
@@ -2043,7 +2044,6 @@ function inspectDialogExpansion(args: {
    if (!text) continue;
    if (!parent || !visible(parent)) {
     hiddenField = true;
-    if (parent && !state.unresolvedRows.includes(parent)) state.unresolvedRows.push(parent);
     unreadable = true; continue;
    }
    if (args.label === "View all") {
@@ -2052,7 +2052,7 @@ function inspectDialogExpansion(args: {
    }
    texts.push(text);
   }
-  if (hiddenField) continue;
+  if (hiddenField) { hiddenRows.push(row); continue; }
   if (args.label === "View all" && (texts.length === 0 || texts.length > 2)) { unreadable = true; continue; }
   if (args.label === "View all" && !Array.from(row.querySelectorAll('button, [role="button"]'))
    .some(control => visible(control) && normalize(control.textContent ?? "") === "Remove")) {
@@ -2064,10 +2064,9 @@ function inspectDialogExpansion(args: {
    unreadable = true; continue;
   }
   rows.push({name, description});
-  state.unresolvedRows = state.unresolvedRows.filter(previous => !(previous === row || row.contains(previous)) || !visible(previous));
  }
- // A hidden row is resolved only when the same name and description are read
- // visibly now; the earlier screen of View all stays in the DOM behind the new one.
+ // Capture evidence before any click can mutate or reuse these nodes. Never
+ // discharge prior evidence by node identity, visibility, or freshly changed text.
  const readKeys = new Set(rows.map(row => JSON.stringify(row)));
  for (const row of hiddenRows) {
   const texts: string[] = [];
@@ -2081,11 +2080,15 @@ function inspectDialogExpansion(args: {
   }
   const name = args.label === "View all" ? texts[0] : normalize(texts.join(" "));
   const description = args.label === "View all" ? texts[1] ?? null : null;
-  const repeated = Boolean(name) && (args.label !== "View all" || texts.length <= 2) &&
-   readKeys.has(JSON.stringify({name, description}));
-  if (repeated) state.unresolvedRows = state.unresolvedRows.filter(previous => previous !== row);
-  else if (!state.unresolvedRows.includes(row)) state.unresolvedRows.push(row);
+  const evidence = name && name.length <= 500 &&
+   (description === null || description.length <= 2000) &&
+   (args.label !== "View all" || texts.length <= 2)
+   ? JSON.stringify({name, description}) : null;
+  if (!state.unresolvedRows.includes(evidence)) state.unresolvedRows.push(evidence);
  }
+ // Only matching visible evidence resolves a captured signature. An unreadable
+ // sentinel remains unresolved even if its original node later becomes readable.
+ state.unresolvedRows = state.unresolvedRows.filter(evidence => evidence === null || !readKeys.has(evidence));
  unreadable ||= state.unresolvedRows.length > 0;
  const keys = rows.map(row => JSON.stringify(row));
  const retained = state.rows.every(row => keys.includes(JSON.stringify(row)));

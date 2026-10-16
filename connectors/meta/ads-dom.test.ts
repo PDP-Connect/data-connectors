@@ -18,6 +18,38 @@ type ClassifierArgs = Parameters<typeof classifyAdsDialogInPage>[0];
 type Classification = ReturnType<typeof classifyAdsDialogInPage>;
 type AdsClock = Parameters<typeof scrapeAdTopics>[1];
 
+for (const initialName of ["B", ""] as const) {
+ for (const finalName of ["B", "C"] as const) {
+  test(`hidden advertiser evidence survives node reuse: ${initialName || "unreadable"} to ${finalName}`, async () => {
+   const {document, page} = makeDomPage('<div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a></div><section role="dialog"><div role="list" aria-setsize="3"><div role="listitem"><button>A</button></div><div role="listitem" id="hidden-row" style="display:none"><button>' + initialName + '</button></div></div><button id="expand">See more</button></section>', {onViewAllClick: () => {
+    const row = document.querySelector("#hidden-row")!;
+    row.querySelector("button")!.textContent = finalName;
+    row.removeAttribute("style");
+    document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><button>D</button></div>');
+    document.querySelector("#expand")?.remove();
+   }});
+   const result = await scrapeAdvertisers(page, makeClock());
+   assert.deepEqual(result.items, ["A", finalName, "D"]);
+   assert.equal(result.reached, initialName === "B" && finalName === "B");
+  });
+ }
+}
+
+for (const changed of [false, true]) {
+ test(`hidden category description resolves only matching evidence: changed=${changed}`, async () => {
+  const {document, page} = makeDomPage('<div role="tab">Manage info</div><div role="tabpanel"><a>Categories used to reach you</a></div><section role="dialog"><div role="list" aria-setsize="3"><div role="listitem"><span>A</span><button>Remove</button></div><div role="listitem"><span>B</span><span id="hidden-description" style="display:none">Original</span><button>Remove</button></div></div><button id="expand">View all</button></section>', {onViewAllClick: () => {
+   const field = document.querySelector("#hidden-description")!;
+   if (changed) field.textContent = "Changed";
+   field.removeAttribute("style");
+   document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><span>D</span><button>Remove</button></div>');
+   document.querySelector("#expand")?.remove();
+  }});
+  const result = await scrapeTargetingCategories(page, makeClock());
+  assert.deepEqual(result.items, [{name: "A", description: null}, {name: "B", description: changed ? "Changed" : "Original"}, {name: "D", description: null}]);
+  assert.equal(result.reached, !changed);
+ });
+}
+
 test("legacy advertiser hidden control text vetoes completion", () => {
  const result = classify('<section role="dialog"><div role="list" aria-setsize="1"><div role="listitem">A</div><div role="listitem" style="display:none"><button>B</button></div></div></section>', {emptyMessage: "No advertisers"});
  assert.notEqual(result.kind === "data" && result.complete, true);
