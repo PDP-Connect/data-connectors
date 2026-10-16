@@ -14,18 +14,18 @@ import { validateRecord } from "./schemas.ts";
 
 for (const wantsProfile of [false, true]) {
 	for (const { label, user, proven } of [
-		{ label: "unobserved", user: null, proven: false },
-		{ label: "unknown", user: {}, proven: false },
-		{ label: "null", user: { media_count: null }, proven: false },
-		{ label: "malformed", user: { media_count: "0" }, proven: false },
-		{ label: "negative", user: { media_count: -1 }, proven: false },
-		{ label: "fractional", user: { media_count: 0.5 }, proven: false },
-		{ label: "different id", user: { id: "other", media_count: 0 }, proven: false },
-		{ label: "different username", user: { username: "other", media_count: 0 }, proven: false },
+		{ label: "unobserved", user: null, proven: true },
+		{ label: "unknown", user: {}, proven: true },
+		{ label: "null", user: { media_count: null }, proven: true },
+		{ label: "malformed", user: { media_count: "0" }, proven: true },
+		{ label: "negative", user: { media_count: -1 }, proven: true },
+		{ label: "fractional", user: { media_count: 0.5 }, proven: true },
+		{ label: "different id", user: { id: "other", media_count: 0 }, proven: true },
+		{ label: "different username", user: { username: "other", media_count: 0 }, proven: true },
 		{ label: "positive", user: { media_count: 3 }, proven: false },
 		{ label: "proven zero", user: { media_count: 0 }, proven: true },
 	]) {
-		test(`empty timeline requires same-identity zero: ${label}, profile requested=${wantsProfile}`, async () => {
+		test(`empty timeline uses explicit source end unless exact count contradicts: ${label}, profile requested=${wantsProfile}`, async () => {
 			const requested = [...(wantsProfile ? ["profile"] : []), "posts", "post_likes"];
 			const { ctx, emitNavigation, emitRequest, emitResponse, failures, harness } = setup(requested);
 			let pendingResolve: ((response: Response) => void) | null = null;
@@ -171,7 +171,10 @@ function setup(streams: string[], followingPages: unknown[] = []) {
 		context: {} as BrowserCollectContext["context"],
 		credentials: {},
 		detailGaps: [],
-		emit: harness.emit,
+		emit: async (message) => {
+			if (message.type === "SKIP_RESULT" && message.reason === "inventory_not_proven_complete") failures.push(message.stream);
+			await harness.emit(message);
+		},
 		emitRecord: harness.emitRecord,
 		emittedAt: "2026-09-22T12:00:00.000Z",
 		page: page as Page,
@@ -225,25 +228,15 @@ test("completion rule: unavailable posts and child likes report retryable stream
 	);
 });
 
-test("completion rule: a context without stream failure reporting cannot return success", async () => {
-	const { ctx } = setup(["posts"]);
+test("completion rule: incomplete inventory emits retryable skip without a failure callback", async () => {
+	const { ctx, harness } = setup(["posts"]);
 	delete ctx.reportStreamFailure;
-	await assert.rejects(
-		collectAllStreams(
-			ctx,
-			async () => undefined,
-			FAST_POSTS_CLOCK,
-			FAST_ADS_CLOCK,
-			FAST_PROFILE_CLOCK,
-		),
-		(error: unknown) =>
-			error instanceof Error &&
-			"code" in error &&
-			error.code === "stream_collection_failed",
-	);
+	await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+	assert.ok(harness.protocolMessages.some(message => message.type === "SKIP_RESULT" &&
+		message.reason === "inventory_not_proven_complete" && isRetryable(message)));
 });
 
-test("completion rule: missing ads controls report a retryable stream failure", async () => {
+test("completion rule: missing ads controls skip only the ads stream as unproven", async () => {
 	const { ctx, failures, harness } = setup(["ads"]);
 	await collectAllStreams(
 		ctx,
@@ -316,7 +309,7 @@ test("completion rule: ads cannot claim empty after a positive source count disa
 	);
 });
 
-test("completion rule: a page script error during ads scraping fails only the ads stream", async () => {
+test("completion rule: a page script error during ads scraping skips only the ads stream", async () => {
 	const { ctx, failures, harness } = setup(["ads"]);
 	const page = ctx.page as Partial<Page>;
 	const baseEvaluate = page.evaluate as Page["evaluate"];
@@ -674,7 +667,7 @@ test("completion rule: a capped posts walk reports both requested streams as fai
 			.filter((message) => message.type === "SKIP_RESULT")
 			.map((message) => `${message.stream}:${message.reason}`)
 			.sort(),
-		["post_likes:stream_collection_failed", "posts:stream_collection_failed"],
+		["post_likes:inventory_not_proven_complete", "posts:inventory_not_proven_complete"],
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -763,7 +756,7 @@ test("completion rule: a capped following walk keeps its users and reports follo
 		harness.protocolMessages
 			.filter((message) => message.type === "SKIP_RESULT")
 			.map((message) => message.reason),
-		["stream_collection_failed"],
+		["inventory_not_proven_complete"],
 	);
 	assert.equal(
 		harness.protocolMessages.some((message) => message.type === "STATE"),
@@ -820,3 +813,109 @@ test("ads schema-rejected rows preserve readable records and suppress surface co
  assert.deepEqual(failures, ["ads"]);
  assert.deepEqual(harness.emitted.map(record => record.data.name), ["Readable advertiser"]);
 });
+
+
+function isRetryable(message: {recovery_hint?: unknown}): boolean {
+ const hint = message.recovery_hint;
+ return typeof hint === "object" && hint !== null && (hint as {retryable?: unknown}).retryable === true;
+}
+
+async function sourceRun(options: {
+ stream: "posts" | "post_likes" | "following";
+ total?: unknown; pageInfo?: unknown; followingEnd?: boolean | undefined;
+ likeCount?: number | undefined; duplicate?: boolean;
+}) {
+ const following = [{ pk: "f1", username: "one" }];
+ const result = setup([options.stream], [{ status: 200, json: {
+  users: options.duplicate ? [...following, ...following] : following,
+  ...(options.followingEnd !== undefined ? { has_more: options.followingEnd } : {}),
+ } }]);
+ const {ctx, emitNavigation, emitRequest, emitResponse} = result;
+ let pending: ((response: Response) => void) | null = null;
+ ctx.page.waitForResponse = (() => new Promise<Response>(resolve => { pending = resolve; })) as Page["waitForResponse"];
+ ctx.page.goto = (() => {
+  emitNavigation();
+  if (options.total !== undefined) emitResponse({
+   status: () => 200, url: () => "https://www.instagram.com/api/graphql",
+   request: () => ({ method: () => "POST", postData: () => "PolarisProfilePageContentQuery" }),
+   json: async () => ({ data: { user: { id: "u1", username: "testuser",
+    media_count: options.total, following_count: options.total } } }),
+  });
+  if (pending) {
+   const edge = {node: {id: "p1", caption: {text: "Preserved caption"},
+    like_count: options.likeCount,
+    facepile_top_likers: [{id: "l1", username: "liker", profile_pic_url: ""}]}};
+   const response = nonterminalPostsResponse(options.duplicate ? [edge, edge] : [edge], null, ctx.page);
+   response.json = async () => ({data: {xdt_api__v1__feed__user_timeline_graphql_connection: {
+    edges: options.duplicate ? [edge, edge] : [edge],
+    ...(options.pageInfo !== undefined ? {page_info: options.pageInfo} : {}),
+   }}});
+   emitRequest(response.request());
+   pending(response); pending = null;
+  }
+  return Promise.resolve(null);
+ }) as Page["goto"];
+ await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK);
+ return result.harness;
+}
+
+for (const stream of ["posts", "following"] as const) {
+ for (const {name, total, end, complete} of [
+  {name: "exact total", total: 1, end: false, complete: true},
+  {name: "explicit source end", total: undefined, end: true, complete: true},
+  {name: "mismatched total vetoes end", total: 2, end: true, complete: false},
+  {name: "no evidence", total: undefined, end: false, complete: false},
+  {name: "abbreviated total", total: "1.2k", end: false, complete: false},
+ ]) {
+  test(`source evidence: ${stream} ${name}`, async () => {
+   const harness = await sourceRun({stream, total,
+    pageInfo: end ? {has_next_page: false} : undefined,
+    followingEnd: end ? false : undefined, duplicate: true});
+   assert.equal(harness.emitted.length, 1, "distinct readable item retained");
+   assert.equal(harness.protocolMessages.some(m => m.type === "DETAIL_COVERAGE"), complete);
+   assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), complete);
+   const skips = harness.protocolMessages.filter(m => m.type === "SKIP_RESULT");
+   assert.equal(skips.some(m => m.reason === "inventory_not_proven_complete" && isRetryable(m)), !complete);
+   assert.ok(harness.protocolMessages.every(m => (m as {op?: string}).op !== "delete"), "no deletes without proof");
+   if (stream === "posts") assert.equal(harness.emitted[0]?.data.caption, "Preserved caption");
+  });
+ }
+}
+
+for (const {name, count, complete} of [
+ {name: "exact per-post like total", count: 1, complete: true},
+ {name: "sample smaller than like total", count: 2, complete: false},
+ {name: "no like total", count: undefined, complete: false},
+]) {
+ test(`source evidence: post_likes ${name}`, async () => {
+  const harness = await sourceRun({stream: "post_likes", total: 1,
+   pageInfo: {has_next_page: false}, likeCount: count});
+  assert.equal(harness.emitted.length, 1);
+  assert.equal(harness.emitted[0]?.data.profile_pic_url, "", "retain actual empty source value");
+  assert.equal(harness.protocolMessages.some(m => m.type === "DETAIL_COVERAGE"), complete);
+  assert.equal(harness.protocolMessages.some(m => m.type === "STATE"), complete);
+  assert.equal(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" &&
+   m.reason === "inventory_not_proven_complete"), !complete);
+ });
+}
+
+for (const completeLooking of [true, false, undefined]) {
+ test(`ads stays upsert-only without genuine source evidence: diagnostic=${completeLooking}`, async () => {
+  const {ctx, harness} = setup(["ads"]);
+  ctx.page.waitForFunction = (() => Promise.resolve(true)) as unknown as Page["waitForFunction"];
+  ctx.page.evaluate = ((fn: unknown, arg?: unknown) => {
+   if (arg && typeof arg === "object" && "emptyMessage" in arg) {
+    return Promise.resolve(arg.emptyMessage === "No advertisers" ?
+     {kind: "data", complete: completeLooking, items: ["Read advertiser"]} : {kind: "verified_empty"});
+   }
+   return Promise.resolve(String(fn).includes("advertiser"));
+  }) as Page["evaluate"];
+  let now = 0;
+  await collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, {
+   now: () => now, sleep: async (ms: number) => {now += ms;},
+  }, FAST_PROFILE_CLOCK);
+  assert.deepEqual(harness.emitted.map(r => r.data.name), ["Read advertiser"]);
+  assert.equal(harness.protocolMessages.some(m => m.type === "DETAIL_COVERAGE" || m.type === "STATE"), false);
+  assert.ok(harness.protocolMessages.some(m => m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete"));
+ });
+}

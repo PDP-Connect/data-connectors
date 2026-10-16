@@ -27,7 +27,6 @@ import type {
 	BrowserCollectContext,
 	EmittedMessage,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { buildRunSummary } from "../../packages/polyfill-connectors/src/run-summary.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	classifyAdsDialogInPage,
@@ -846,14 +845,18 @@ test("collectAllStreams: posts and post_likes both derive from the same timeline
 	assert.equal(unkeyedLike.user_id, "");
 	assert.equal(unkeyedLike.id, "");
 	assert.equal(unkeyedLike.pk, "");
-	assert.equal(
-		harness.protocolMessages.some((m) => m.type === "STATE"),
-		false,
-		"posts is incremental: false / full_inventory — it must not claim a cursor via STATE",
+	// The walk ended on the source's own end signal, but
+	// one liker has no source identity: posts completes, post_likes does not.
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((m) => m.type === "STATE")
+			.map((m) => (m as { stream: string }).stream),
+		["posts"],
 	);
+	assert.deepEqual(unprovenInventories(harness), ["post_likes"]);
 });
 
-test("collectAllStreams: posts never emits STATE, requested or not", async () => {
+test("collectAllStreams: an unrequested posts stream never emits STATE", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1023,36 +1026,46 @@ test("collectAllStreams: a terminal empty posts fixture completes with zero reco
 	);
 });
 
-test("collectAllStreams: populated posts fixture emits records without empty state", async () => {
-	const harness = makeRecordingEmit(validateRecord);
-	const json = JSON.parse(
+test("collectAllStreams: populated posts fixture emits records and completes only on the source's end signal", async () => {
+	const fixture = JSON.parse(
 		await readFile(
 			new URL("./fixtures/posts.loaded.json", import.meta.url),
 			"utf8",
 		),
 	);
-	const { ctx } = makeCtx({
-		fetchScript: {},
-		harness,
-		postsScript: [{ json, status: 200 }],
-		requestedStreams: ["posts"],
-	});
+	const withoutEnd = structuredClone(fixture);
+	delete withoutEnd.data.xdt_api__v1__feed__user_timeline_graphql_connection
+		.page_info;
+	for (const { json, complete } of [
+		{ json: fixture, complete: true },
+		{ json: withoutEnd, complete: false },
+	]) {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			fetchScript: {},
+			harness,
+			postsScript: [{ json, status: 200 }],
+			requestedStreams: ["posts"],
+		});
 
-	await collectAllStreams(
-		ctx,
-		NO_DELAY,
-		TEST_POSTS_CLOCK,
-		makeVirtualAdsClock(),
-	);
+		await collectAllStreams(
+			ctx,
+			NO_DELAY,
+			TEST_POSTS_CLOCK,
+			makeVirtualAdsClock(),
+		);
 
-	assert.equal(
-		harness.emitted.filter((record) => record.stream === "posts").length,
-		1,
-	);
-	assert.equal(
-		harness.protocolMessages.some((message) => message.type === "STATE"),
-		false,
-	);
+		assert.equal(
+			harness.emitted.filter((record) => record.stream === "posts").length,
+			1,
+			"the post row upserts with or without an end signal",
+		);
+		assert.equal(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+			complete,
+		);
+		assert.deepEqual(unprovenInventories(harness), complete ? [] : ["posts"]);
+	}
 });
 
 test("collectAllStreams: failed posts fixture cannot complete as empty", async () => {
@@ -1232,37 +1245,41 @@ test("collectAllStreams: an empty nonterminal timeline does not complete posts",
 	);
 });
 
-test("collectAllStreams: a login challenge cannot turn an empty response into completion", async () => {
-	const harness = makeRecordingEmit(validateRecord);
-	const json = JSON.parse(
+test("collectAllStreams: a login challenge neither proves nor vetoes an empty timeline; the source's end signal decides", async () => {
+	const ended = JSON.parse(
 		await readFile(
 			new URL("./fixtures/posts.empty.json", import.meta.url),
 			"utf8",
 		),
 	);
-	const { ctx } = makeCtx({
-		fetchScript: {},
-		harness,
-		pageOptions: { challengePage: true },
-		postsScript: [{ json, status: 200 }],
-		requestedStreams: ["posts"],
-	});
+	const unended = structuredClone(ended);
+	delete unended.data.xdt_api__v1__feed__user_timeline_graphql_connection
+		.page_info;
+	for (const { json, complete } of [
+		{ json: ended, complete: true },
+		{ json: unended, complete: false },
+	]) {
+		const harness = makeRecordingEmit(validateRecord);
+		const { ctx } = makeCtx({
+			fetchScript: {},
+			harness,
+			pageOptions: { challengePage: true },
+			postsScript: [{ json, status: 200 }],
+			requestedStreams: ["posts"],
+		});
 
-	await collectAllStreams(
-		ctx,
-		NO_DELAY,
-		TEST_POSTS_CLOCK,
-		makeVirtualAdsClock(),
-	);
-	assert.equal(
-		harness.protocolMessages.some((message) => message.type === "STATE"),
-		false,
-	);
-	assert.ok(
-		harness.protocolMessages.some(
-			(message) => message.type === "SKIP_RESULT" && message.stream === "posts",
-		),
-	);
+		await collectAllStreams(
+			ctx,
+			NO_DELAY,
+			TEST_POSTS_CLOCK,
+			makeVirtualAdsClock(),
+		);
+		assert.equal(
+			harness.protocolMessages.some((message) => message.type === "STATE"),
+			complete,
+		);
+		assert.deepEqual(unprovenInventories(harness), complete ? [] : ["posts"]);
+	}
 });
 
 test("scrapeAdvertisers distinguishes explicit empty, populated, and failed fixtures", async () => {
@@ -1490,7 +1507,7 @@ test("collectAllStreams: following accepts the record builder's id fallback when
 	assert.deepEqual(streamFailures(harness), []);
 });
 
-test("collectAllStreams: following hitting the page ceiling reports a stream failure instead of silently truncating", async () => {
+test("collectAllStreams: following hitting the page ceiling keeps its rows and is not proven complete instead of silently truncating", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const fetchScript: Record<string, ScriptedFetch[]> = {};
 	// Every page reports a next cursor forever — forces the FOLLOWING_MAX_PAGES ceiling.
@@ -1518,9 +1535,10 @@ test("collectAllStreams: following hitting the page ceiling reports a stream fai
 	);
 
 	const skip = harness.protocolMessages.find(
-		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+		(m) =>
+			m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
 	);
-	assert.ok(skip, "expected a stream_collection_failed SKIP_RESULT");
+	assert.ok(skip, "expected an inventory_not_proven_complete SKIP_RESULT");
 	assert.equal((skip as { stream: string }).stream, "following");
 	assert.ok(
 		harness.emitted.some((e) => e.stream === "following"),
@@ -1568,12 +1586,24 @@ const recordIndex = (
 		(m) => m.type === "RECORD" && m.stream === stream,
 	);
 
-const failureIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
+/** Streams whose inventory was not proven complete: rows upsert, no STATE. */
+const unprovenInventories = (
+	harness: ReturnType<typeof makeRecordingEmit>,
+): string[] =>
+	harness.protocolMessages
+		.filter(
+			(m) =>
+				m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
+		)
+		.map((m) => String((m as { stream: string }).stream))
+		.sort();
+
+const unprovenIndex = (harness: ReturnType<typeof makeRecordingEmit>): number =>
 	harness.protocolMessages.findIndex(
-		(m) => m.type === "SKIP_RESULT" && m.reason === "stream_collection_failed",
+		(m) => m.type === "SKIP_RESULT" && m.reason === "inventory_not_proven_complete",
 	);
 
-test("collectAllStreams: a posts timeout after a valid page emits that page, then reports the failure", async () => {
+test("collectAllStreams: a posts timeout after a valid page emits that page, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1593,9 +1623,9 @@ test("collectAllStreams: a posts timeout after a valid page emits that page, the
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["post_likes", "posts"]);
+	assert.deepEqual(unprovenInventories(harness), ["post_likes", "posts"]);
 	assert.ok(
-		recordIndex(harness, "posts") < failureIndex(harness),
+		recordIndex(harness, "posts") < unprovenIndex(harness),
 		"records are emitted before the failure is reported",
 	);
 	assert.equal(
@@ -1605,7 +1635,7 @@ test("collectAllStreams: a posts timeout after a valid page emits that page, the
 	);
 });
 
-test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then reports the failure", async () => {
+test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1629,15 +1659,15 @@ test("collectAllStreams: an HTTP 503 on a later posts page emits earlier pages, 
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1", "p2"],
 	);
-	assert.deepEqual(streamFailures(harness), ["posts"]);
-	assert.ok(recordIndex(harness, "posts") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["posts"]);
+	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error while advancing posts keeps the earlier page", async () => {
+test("collectAllStreams: a browser error while advancing posts keeps the earlier page and is not proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1658,11 +1688,11 @@ test("collectAllStreams: a browser error while advancing posts keeps the earlier
 		harness.emitted.filter((e) => e.stream === "posts").map((e) => e.data.id),
 		["p1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["post_likes", "posts"]);
-	assert.ok(recordIndex(harness, "posts") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["post_likes", "posts"]);
+	assert.ok(recordIndex(harness, "posts") < unprovenIndex(harness));
 });
 
-test("collectAllStreams: a first-page posts failure emits nothing and reports the failure", async () => {
+test("collectAllStreams: a first-page posts failure emits nothing and skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {},
@@ -1679,10 +1709,10 @@ test("collectAllStreams: a first-page posts failure emits nothing and reports th
 	);
 
 	assert.equal(harness.emitted.filter((e) => e.stream === "posts").length, 0);
-	assert.deepEqual(streamFailures(harness), ["posts"]);
+	assert.deepEqual(unprovenInventories(harness), ["posts"]);
 });
 
-test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then reports the failure", async () => {
+test("collectAllStreams: an HTTP 503 on a later following page emits earlier pages, then skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1715,15 +1745,15 @@ test("collectAllStreams: an HTTP 503 on a later following page emits earlier pag
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "STATE"),
 		false,
 	);
 });
 
-test("collectAllStreams: a browser error on a later following page keeps earlier pages", async () => {
+test("collectAllStreams: a browser error on a later following page keeps earlier pages and is not proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1757,11 +1787,11 @@ test("collectAllStreams: a browser error on a later following page keeps earlier
 			.map((e) => e.data.username),
 		["followed1"],
 	);
-	assert.deepEqual(streamFailures(harness), ["following"]);
-	assert.ok(recordIndex(harness, "following") < failureIndex(harness));
+	assert.deepEqual(unprovenInventories(harness), ["following"]);
+	assert.ok(recordIndex(harness, "following") < unprovenIndex(harness));
 });
 
-test("collectAllStreams: a first-page following failure emits nothing and reports the failure", async () => {
+test("collectAllStreams: a first-page following failure emits nothing and skips the stream as unproven", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { ctx } = makeCtx({
 		fetchScript: {
@@ -1784,7 +1814,7 @@ test("collectAllStreams: a first-page following failure emits nothing and report
 		harness.emitted.filter((e) => e.stream === "following").length,
 		0,
 	);
-	assert.deepEqual(streamFailures(harness), ["following"]);
+	assert.deepEqual(unprovenInventories(harness), ["following"]);
 });
 
 // ─── Invariant 5: ads merges three DOM-scraped lists with a kind discriminator ──
@@ -1851,29 +1881,10 @@ test("collectAllStreams: ads completes independently when profile web_info is un
 	);
 	assert.deepEqual(streamFailures(harness), ["profile"]);
 	assert.equal(calls.includes("/accounts/web_info/"), true);
-	assert.deepEqual(
-		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
-		{
-			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			reference_only: true,
-			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			state_stream: "ads",
-			stream: "ads",
-			type: "DETAIL_COVERAGE",
-		},
-	);
-	assert.deepEqual(
-		buildRunSummary(harness.protocolMessages, {
-			connector: "meta",
-			finished_at: EMITTED_AT,
-			started_at: EMITTED_AT,
-			tool_version: "test",
-		}).done.coverage,
-		{ considered: 3, covered: 3, streams: ["ads"] },
-	);
+	assertAdsUnproven(harness);
 });
 
-test("collectAllStreams: ads all reached with empty lists emits complete surface coverage", async () => {
+test("collectAllStreams: ads all reached with empty lists stays unproven without a source total", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -1917,30 +1928,9 @@ test("collectAllStreams: ads all reached with empty lists emits complete surface
 	);
 
 	assert.equal(harness.emitted.length, 0);
-	assert.deepEqual(
-		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
-		{
-			hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			reference_only: true,
-			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			state_stream: "ads",
-			stream: "ads",
-			type: "DETAIL_COVERAGE",
-		},
-	);
-	assert.deepEqual(
-		buildRunSummary(harness.protocolMessages, {
-			connector: "meta",
-			finished_at: EMITTED_AT,
-			started_at: EMITTED_AT,
-			tool_version: "test",
-		}).done.coverage,
-		{ considered: 3, covered: 3, streams: ["ads"] },
-	);
-	assert.equal(
-		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
-		false,
-	);
+	// Every section read as empty, but the dialogs state no exact total and no
+	// end signal, so the empty list is not proven.
+	assertAdsUnproven(harness);
 });
 
 test("collectAllStreams: positive advertiser source count vetoes stale empty copy", async () => {
@@ -1960,18 +1950,15 @@ test("collectAllStreams: positive advertiser source count vetoes stale empty cop
 		),
 	});
 
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["ad_topics", "targeting_categories"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
 	assertAdsStreamFailure(harness, "advertisers");
 });
 
-test("collectAllStreams: nonempty ads without source total emits records but fails completion", async () => {
+test("collectAllStreams: nonempty ads without source total emits records but is not proven complete", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
@@ -2017,20 +2004,8 @@ test("collectAllStreams: nonempty ads without source total emits records but fai
 		"ad_topic",
 		"advertiser",
 	]);
-	const skip = harness.protocolMessages.find(
-		(message) => message.type === "SKIP_RESULT" && message.stream === "ads",
-	);
-	assert.ok(
-		skip?.type === "SKIP_RESULT",
-		"nonempty ads without source total must fail the stream",
-	);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		harness.protocolMessages.some(
-			(message) => message.type === "STATE" && message.stream === "ads",
-		),
-		false,
-	);
+	// The rows upsert; without a source total the list is not proven.
+	assertAdsUnproven(harness);
 });
 
 test("scrapeAdvertisers waits for items that arrive after the list shell", async () => {
@@ -2172,7 +2147,7 @@ test("scrapeTargetingCategories ignores hidden stale dialogs before the active c
 	}
 });
 
-test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_RESULT", async () => {
+test("collectAllStreams: ads missing a surface keeps its rows and skips only the ads stream", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	const { page, waitRejections } = makeFakePage({
 		categoriesAvailable: false,
@@ -2213,50 +2188,77 @@ test("collectAllStreams: ads missing a surface emits partial coverage and SKIP_R
 		makeVirtualAdsClock(),
 	);
 
+	// An unreachable optional section never fails the run: the ads rows that
+	// were read still upsert and only the ads stream is skipped, retryably.
 	assert.deepEqual(
-		harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE"),
-		{
-			hydrated_keys: ["advertisers", "ad_topics"],
-			reference_only: true,
-			required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-			state_stream: "ads",
-			stream: "ads",
-			type: "DETAIL_COVERAGE",
-		},
+		harness.emitted.map((record) => record.data.kind).sort(),
+		["ad_topic", "advertiser"],
 	);
-	assert.deepEqual(
-		buildRunSummary(harness.protocolMessages, {
-			connector: "meta",
-			finished_at: EMITTED_AT,
-			started_at: EMITTED_AT,
-			tool_version: "test",
-		}).done.coverage,
-		{ considered: 3, covered: 2, streams: ["ads"] },
-	);
-	const skip = harness.protocolMessages.find(
-		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
-			m.type === "SKIP_RESULT" && m.stream === "ads",
-	);
-	assert.ok(skip, "partial ads scrape must emit a stream-level SKIP_RESULT");
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		"Instagram ads scan could not reach targeting_categories",
-	);
-	assert.deepEqual(skip.recovery_hint, {
-		action: "retry_by_runtime",
-		retryable: true,
-	});
-	assert.equal(
-		harness.protocolMessages.some(
-			(message) => message.type === "STATE" && message.stream === "ads",
-		),
-		false,
-	);
+	assertAdsStreamFailure(harness, "targeting_categories");
+	assert.deepEqual(streamFailures(harness), []);
 	assert.ok(
 		waitRejections.some((condition) => condition.includes("Manage info")),
 		"an unavailable Manage info tab must reject its Playwright-style wait",
 	);
+});
+
+test("collectAllStreams: an unreachable ads section does not fail the run or the other streams", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const { ctx } = makeCtx({
+		fetchScript: {
+			"/api/v1/friendships/u1/following/": [
+				{
+					json: {
+						has_more: false,
+						next_max_id: null,
+						users: [{ pk: "f1", username: "followed1" }],
+					},
+					status: 200,
+				},
+			],
+		},
+		harness,
+		pageOptions: {
+			categoriesAvailable: false,
+			dialogComplete: [true, true],
+			dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
+		},
+		requestedStreams: ["following", "ads"],
+	});
+
+	await collectAllStreams(
+		ctx,
+		NO_DELAY,
+		TEST_POSTS_CLOCK,
+		makeVirtualAdsClock(),
+	);
+
+	// The run reports no stream failure, so the runtime ends it DONE succeeded.
+	assert.deepEqual(streamFailures(harness), []);
+	// Ads rows still upsert; the unreachable section becomes a retryable skip
+	// for the ads stream only.
+	assert.deepEqual(
+		harness.emitted
+			.filter((record) => record.stream === "ads")
+			.map((record) => record.data.kind)
+			.sort(),
+		["ad_topic", "advertiser"],
+	);
+	assertAdsStreamFailure(harness, "targeting_categories");
+	// The other stream completes from its own end signal and keeps its STATE.
+	assert.deepEqual(
+		harness.emitted
+			.filter((record) => record.stream === "following")
+			.map((record) => record.data.username),
+		["followed1"],
+	);
+	assert.deepEqual(
+		harness.protocolMessages
+			.filter((m) => m.type === "STATE")
+			.map((m) => (m as { stream: string }).stream),
+		["following"],
+	);
+	assert.deepEqual(unprovenInventories(harness), ["ads"]);
 });
 
 test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", async () => {
@@ -2310,11 +2312,9 @@ test("collectAllStreams: dialog without its intended list emits SKIP_RESULT", as
 		skip,
 		"a dialog without its list must not count as a reached surface",
 	);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		"Instagram ads scan could not reach advertisers, ad_topics",
-	);
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.ok(skip.message?.includes("advertisers ("));
+	assert.ok(skip.message?.includes("ad_topics ("));
 });
 
 test("collectAllStreams: successful category clicks without a destination list emit SKIP_RESULT", async () => {
@@ -2367,11 +2367,8 @@ test("collectAllStreams: successful category clicks without a destination list e
 		skip,
 		"clicking through without a destination list must not count as reached",
 	);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		"Instagram ads scan could not reach targeting_categories",
-	);
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.ok(skip.message?.includes("targeting_categories ("));
 });
 
 test("collectAllStreams: ads navigation failure reports only a bounded surface step", async () => {
@@ -2402,8 +2399,8 @@ test("collectAllStreams: ads navigation failure reports only a bounded surface s
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
 	assert.ok(skip);
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(skip.message, "Instagram ads scan could not reach ad_topics");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.ok(skip.message?.includes("ad_topics ("));
 	assert.deepEqual(
 		harness.emitted.map((record) => record.data.kind),
 		["advertiser", "ad_category"],
@@ -2539,23 +2536,22 @@ async function collectAdsInChromium(pages: {
 function adsCoverage(
 	harness: ReturnType<typeof makeRecordingEmit>,
 ): EmittedMessage | undefined {
-	return harness.protocolMessages.find((m) => m.type === "DETAIL_COVERAGE");
+	return harness.protocolMessages.find(
+		(m) => m.type === "DETAIL_COVERAGE" && m.stream === "ads",
+	);
 }
 
-function assertAdsStreamFailure(
+/** Ads rows still upsert; an unproven ads scan becomes a retryable skip for
+ * that stream only, never coverage or STATE. */
+function assertAdsUnproven(
 	harness: ReturnType<typeof makeRecordingEmit>,
-	missingSurfaces: string,
-): void {
+): Extract<EmittedMessage, { type: "SKIP_RESULT" }> {
 	const skip = harness.protocolMessages.find(
 		(m): m is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
 			m.type === "SKIP_RESULT" && m.stream === "ads",
 	);
-	assert.ok(skip, "an unreached ads surface must fail the ads stream");
-	assert.equal(skip.reason, "stream_collection_failed");
-	assert.equal(
-		skip.message,
-		`Instagram ads scan could not reach ${missingSurfaces}`,
-	);
+	assert.ok(skip, "an unproven ads scan must skip the ads stream");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
 	assert.deepEqual(skip.recovery_hint, {
 		action: "retry_by_runtime",
 		retryable: true,
@@ -2566,6 +2562,21 @@ function assertAdsStreamFailure(
 		),
 		false,
 	);
+	assert.equal(adsCoverage(harness), undefined, "layout never earns coverage");
+	return skip;
+}
+
+function assertAdsStreamFailure(
+	harness: ReturnType<typeof makeRecordingEmit>,
+	missingSurfaces: string,
+): void {
+	const skip = assertAdsUnproven(harness);
+	for (const surface of missingSurfaces.split(", ")) {
+		assert.ok(
+			skip.message?.includes(`${surface} (`),
+			`the skip names the unreached ${surface} section`,
+		);
+	}
 }
 
 const ADVERTISERS_UNAVAILABLE = {
@@ -3432,18 +3443,7 @@ test("collectAllStreams: category View all ignores hidden page-wide buttons afte
 		),
 	});
 
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
-	assert.equal(
-		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
-		false,
-	);
+	assertAdsUnproven(harness);
 	assert.deepEqual(
 		harness.emitted
 			.filter((record) => record.stream === "ads")
@@ -3452,7 +3452,7 @@ test("collectAllStreams: category View all ignores hidden page-wide buttons afte
 	);
 });
 
-test("collectAllStreams: category-only ads reach reports an ads stream failure", async () => {
+test("collectAllStreams: category-only ads reach skips only the ads stream as unproven", async () => {
 	const harness = await collectAdsInChromium({
 		adTopics: BLANK_AD_TOPICS_PAGE,
 		ads: htmlPage(
@@ -3465,14 +3465,11 @@ test("collectAllStreams: category-only ads reach reports an ads stream failure",
 		),
 	});
 
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["targeting_categories"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
 	assert.deepEqual(
 		harness.emitted.map((record) => record.data.kind),
 		["ad_category"],
@@ -3494,18 +3491,15 @@ test("collectAllStreams: settled blank advertiser and ad-topic lists report an a
 	});
 
 	assert.equal(harness.emitted.length, 0);
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["targeting_categories"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
 	assertAdsStreamFailure(harness, "advertisers, ad_topics");
 });
 
-test("collectAllStreams: verified empty ad topics alone reports an ads stream failure", async () => {
+test("collectAllStreams: verified empty ad topics alone skips only the ads stream as unproven", async () => {
 	const harness = await collectAdsInChromium({
 		adTopics: EMPTY_AD_TOPICS_PAGE,
 		ads: htmlPage(
@@ -3519,14 +3513,11 @@ test("collectAllStreams: verified empty ad topics alone reports an ads stream fa
 	});
 
 	assert.equal(harness.emitted.length, 0);
-	assert.deepEqual(adsCoverage(harness), {
-		hydrated_keys: ["ad_topics"],
-		reference_only: true,
-		required_keys: ["advertisers", "ad_topics", "targeting_categories"],
-		state_stream: "ads",
-		stream: "ads",
-		type: "DETAIL_COVERAGE",
-	});
+	assert.equal(
+		adsCoverage(harness),
+		undefined,
+		"ads layout never earns surface coverage",
+	);
 	assertAdsStreamFailure(harness, "advertisers, targeting_categories");
 });
 

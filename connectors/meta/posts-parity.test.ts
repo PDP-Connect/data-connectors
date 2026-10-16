@@ -301,7 +301,11 @@ async function pdppPostsDecision(
 		if (result.edges.length > 0) {
 			return "data";
 		}
-		return result.sourceEdgeCount === 0 ? "empty" : "not-proven";
+		// Empty is claimed only from the source's own end signal, never from
+		// the absence of edges or from how the page looks.
+		return result.sourceEdgeCount === 0 && result.sourceEnd
+			? "empty"
+			: "not-proven";
 	} catch (error) {
 		assert.ok(error instanceof Error);
 		assert.match(error.message, /^meta_posts_/);
@@ -924,26 +928,17 @@ test("fetchAllPosts: GET graphqlLegacy URL is deliberately stricter than legacy 
 	assert.equal(pdpp, "not-proven");
 });
 
-test("fetchAllPosts: redirect login URL prevents terminal empty completion", async () => {
-	await assert.rejects(
-		fetchAllPosts(
-			makePostsPage({
-				challengeUrl: "https://www.instagram.com/accounts/login/",
-				postsScript: [
-					{
-						json: timelineEnvelope([], { has_next_page: false }),
-						status: 200,
-					},
-				],
-			}),
-			"testuser",
-			null,
-			async () => undefined,
-			NO_DELAY,
-			FAST_POSTS_CLOCK,
-		),
-		/meta_posts_login_challenge/,
+test("fetchAllPosts: a login URL neither proves nor vetoes the source's end signal", async () => {
+	const withEnd = await pdppPostsDecision(
+		[{ json: timelineEnvelope([], { has_next_page: false }), status: 200 }],
+		{ challengeUrl: "https://www.instagram.com/accounts/login/" },
 	);
+	assert.equal(withEnd, "empty", "explicit source end decides, page layout does not");
+	const withoutEnd = await pdppPostsDecision(
+		[{ json: timelineEnvelope([], null), status: 200 }],
+		{ challengeUrl: "https://www.instagram.com/accounts/login/" },
+	);
+	assert.equal(withoutEnd, "not-proven", "no source end signal means no completeness");
 });
 
 for (const challengeDom of [
@@ -952,26 +947,17 @@ for (const challengeDom of [
 	"verification_code",
 	"challenge_form",
 ] as const) {
-	test(`fetchAllPosts: same-URL ${challengeDom} challenge prevents terminal empty completion`, async () => {
-		await assert.rejects(
-			fetchAllPosts(
-				makePostsPage({
-					challengeDom,
-					postsScript: [
-						{
-							json: timelineEnvelope([], { has_next_page: false }),
-							status: 200,
-						},
-					],
-				}),
-				"testuser",
-				null,
-				async () => undefined,
-				NO_DELAY,
-				FAST_POSTS_CLOCK,
-			),
-			/meta_posts_login_challenge/,
+	test(`fetchAllPosts: same-URL ${challengeDom} challenge neither proves nor vetoes the source's end signal`, async () => {
+		const withEnd = await pdppPostsDecision(
+			[{ json: timelineEnvelope([], { has_next_page: false }), status: 200 }],
+			{ challengeDom },
 		);
+		assert.equal(withEnd, "empty", "explicit source end decides, page layout does not");
+		const withoutEnd = await pdppPostsDecision(
+			[{ json: timelineEnvelope([], null), status: 200 }],
+			{ challengeDom },
+		);
+		assert.equal(withoutEnd, "not-proven", "no source end signal means no completeness");
 	});
 }
 

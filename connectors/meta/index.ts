@@ -144,9 +144,9 @@ import type { Frame, Page, Request } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import {
 	type BrowserCollectContext,
+	buildDetailCoverageMessage,
 	createConnectorFailure,
 	type EnsureSessionArgs,
-	emitDetailCoverage,
 	type ProbeSessionArgs,
 	politeDelay,
 	type RecordData,
@@ -569,9 +569,6 @@ interface TimelineEnvelope {
 
 type CompleteTimelineConnection = InstagramTimelineConnection & {
 	edges: InstagramTimelineEdge[];
-	page_info: NonNullable<InstagramTimelineConnection["page_info"]> & {
-		has_next_page: boolean;
-	};
 };
 
 /**
@@ -793,24 +790,13 @@ export async function waitForLegacyPostsCapture(
 	return null;
 }
 
-function isLoginOrChallengeUrl(rawUrl: string): boolean {
-	try {
-		const url = new URL(rawUrl);
-		return /\/(?:accounts\/login|challenge|challenge_action|accounts\/onetap)\b/.test(
-			url.pathname,
-		);
-	} catch {
-		return false;
-	}
-}
-
 /**
  * Page-side login/challenge detector. It must stay self-contained because
  * Playwright serializes it into the page. Only challenge controls count:
  * the captcha widget, the email re-login form, the verification-code
  * inputs and a form posting to /challenge/. Bare words such as "challenge"
  * or "checkpoint" are ordinary profile text (a username, a bio) and prove
- * nothing; URL-level challenges are caught by isLoginOrChallengeUrl.
+ * nothing.
  */
 export function pageShowsLoginOrChallengeControls(): boolean {
 	const text = document.body?.innerText.toLowerCase() ?? "";
@@ -827,18 +813,6 @@ export function pageShowsLoginOrChallengeControls(): boolean {
 			),
 		)
 	);
-}
-
-async function hasLoginOrChallengePageState(page: Page): Promise<boolean> {
-	if (isLoginOrChallengeUrl(page.url())) return true;
-	try {
-		await page.waitForFunction(pageShowsLoginOrChallengeControls, undefined, {
-			timeout: 500,
-		});
-		return true;
-	} catch {
-		return false;
-	}
 }
 
 type PostsTimelineResponse = Parameters<typeof isPostsTimelineResponse>[0] & {
@@ -879,18 +853,14 @@ async function readTimelineConnection(response: {
 			!Array.isArray(edges) ||
 			edges.some(
 				(edge) => !edge || typeof edge.node !== "object" || edge.node === null,
-			) ||
-			typeof pageInfo?.has_next_page !== "boolean"
+			)
 		) {
 			return null;
 		}
 		return {
 			...connection,
 			edges,
-			page_info: {
-				...pageInfo,
-				has_next_page: pageInfo.has_next_page,
-			},
+			page_info: pageInfo ?? null,
 		};
 	} catch {
 		return null;
@@ -931,6 +901,7 @@ export async function fetchAllPosts(
 ): Promise<{
 	edges: InstagramTimelineEdge[];
 	sourceEdgeCount: number;
+	sourceEnd: boolean;
 	truncated: boolean;
 }> {
 	const edges: InstagramTimelineEdge[] = [];
@@ -1241,12 +1212,14 @@ export async function fetchAllPosts(
 					);
 				}
 				expectedContinuationCursor = pageInfo?.end_cursor ?? null;
-				if (pageInfo?.has_next_page === false) {
+				if (pageInfo?.has_next_page === false ||
+					(pageInfo?.has_next_page == null && pageInfo?.end_cursor === null)) {
 					sawTerminalPage = true;
 					terminalResponse = response;
 					initialPageWasTerminal ||= pageNumber === 1;
 					return false;
 				}
+				if (pageInfo?.has_next_page !== true) return false;
 				await delay(1500);
 				return true;
 			},
@@ -1329,34 +1302,20 @@ export async function fetchAllPosts(
 				seenIds.add(id);
 				edges.push(edge);
 			}
-			if (settledConnection.page_info.has_next_page === true) {
+			if (settledConnection.page_info?.has_next_page !== false &&
+				!(settledConnection.page_info?.has_next_page == null && settledConnection.page_info?.end_cursor === null)) {
 				sawTerminalPage = false;
 			}
 		}
 	}
 	stopObserving();
 	if (unrecordableSourceEdges > 0) {
-		throw new Error(
-			"meta_posts_unrecordable_edges: posts timeline included source edges without recordable post ids",
+		throw new PartialWalkFailure(
+			new Error("meta_posts_unrecordable_edges: posts included unreadable ids"),
+			edges,
 		);
 	}
-	if (!sawTerminalPage && !walk.truncated) {
-		const failure = new Error(
-			"meta_posts_terminal_page_not_observed: posts timeline did not include a terminal page",
-		);
-		throw edges.length > 0 ? new PartialWalkFailure(failure, edges) : failure;
-	}
-	if (
-		sawTerminalPage &&
-		sourceEdgeCount === 0 &&
-		(await hasLoginOrChallengePageState(page))
-	) {
-		throw new Error(
-			"meta_posts_login_challenge: empty timeline observed while login or challenge state is active",
-		);
-	}
-
-	return { edges, sourceEdgeCount, truncated: walk.truncated };
+	return { edges, sourceEdgeCount, sourceEnd: sawTerminalPage, truncated: walk.truncated };
 }
 
 // ─── Following (paginated friendships listing) ─────────────────────────────
@@ -1370,9 +1329,10 @@ export async function fetchAllFollowing(
 		extra?: Record<string, unknown>,
 	) => Promise<void>,
 	delay: (ms: number) => Promise<void> = politeDelay,
-): Promise<{ truncated: boolean; users: InstagramFollowingUser[] }> {
+): Promise<{ sourceEnd: boolean; truncated: boolean; users: InstagramFollowingUser[] }> {
 	const users: InstagramFollowingUser[] = [];
 	let maxId: string | null = null;
+	let sourceEnd = false;
 
 	const walk = await walkPagesWithCeiling({
 		fetchPage: async (pageNumber) => {
@@ -1398,7 +1358,7 @@ export async function fetchAllFollowing(
 				json.error !== undefined ||
 				!Array.isArray(json.users) ||
 				(json.next_max_id != null && typeof json.next_max_id !== "string") ||
-				typeof json.has_more !== "boolean" ||
+				(json.has_more != null && typeof json.has_more !== "boolean") ||
 				(json.has_more === true && !json.next_max_id) ||
 				(json.has_more === false && Boolean(json.next_max_id))
 			) {
@@ -1426,6 +1386,7 @@ export async function fetchAllFollowing(
 				page_index: pageNumber,
 				total_seen: users.length,
 			});
+			sourceEnd = json.has_more === false;
 			if (!json?.next_max_id) {
 				return false;
 			}
@@ -1441,7 +1402,7 @@ export async function fetchAllFollowing(
 			: error;
 	});
 
-	return { truncated: walk.truncated, users: dedupeFollowingByUsername(users) };
+	return { sourceEnd, truncated: walk.truncated, users: dedupeFollowingByUsername(users) };
 }
 
 // ─── Ads (Accounts Center DOM scrape) ──────────────────────────────────────
@@ -2418,6 +2379,60 @@ export async function scrapeTargetingCategories(
 	return {items, reached, step: reached ? (empty ? "reached_empty" : null) : "destination_list_not_found", surface: "targeting_categories"};
 }
 
+
+/** Only exact source totals or an explicit source end can prove a list.
+ * A contradictory exact total vetoes an end signal; abbreviated counts do not. */
+export function sourceInventoryComplete(
+	read: number, sourceTotal: unknown, sourceEnd: boolean,
+): boolean {
+	const exact = typeof sourceTotal === "number" &&
+		Number.isSafeInteger(sourceTotal) && sourceTotal >= 0;
+	return exact ? sourceTotal === read : sourceEnd;
+}
+
+/** The facepile is normally a sample. It is exhaustive only when its distinct
+ * source identities equal the source's exact like_count for this specific post. */
+export function postLikesAreComplete(edge: InstagramTimelineEdge): boolean {
+	const likers = edge.node.facepile_top_likers;
+	if (!Array.isArray(likers)) return edge.node.like_count === 0;
+	const ids = likers.map(liker => liker.id || liker.pk);
+	if (ids.some(id => typeof id !== "string" || id.length === 0)) return false;
+	return sourceInventoryComplete(new Set(ids).size, edge.node.like_count, false);
+}
+
+type EmittedMessage = Parameters<BrowserCollectContext["emit"]>[0];
+
+// TODO(#418, tnunamak/pdpp-runtime-integrity-1016): this mirrors #418's
+// `fullInventoryCoverage` (connector-runtime.ts) so meta need not touch the
+// shared runtime. Same message shapes and reason. Replace with the shared
+// helper once #418 merges.
+const INVENTORY_NOT_PROVEN_REASON = "inventory_not_proven_complete";
+
+function fullInventoryCoverage(
+	stream: string, read: number, complete: boolean, why: string,
+): EmittedMessage[] {
+	if (!complete) return [{
+		type: "SKIP_RESULT",
+		stream,
+		reason: INVENTORY_NOT_PROVEN_REASON,
+		message: `The ${stream} list read in this run is not proven complete: ${why}.`,
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		diagnostics: { items_read: read, reason: why },
+	}];
+	return [buildDetailCoverageMessage({
+		stream, stateStream: stream, requiredKeys: [], hydratedKeys: [],
+		considered: read, covered: read,
+	})];
+}
+
+async function emitInventoryResult(
+	ctx: BrowserCollectContext, stream: string, read: number, complete: boolean,
+	why = "the source gave no exact total matching the items read and no end signal",
+): Promise<void> {
+	for (const message of fullInventoryCoverage(stream, read, complete, why)) await ctx.emit(message);
+	if (complete) await ctx.emit({ type: "STATE", stream, cursor: {} });
+}
+
 // ─── Collect ────────────────────────────────────────────────────────────
 
 async function reportCollectionFailure(
@@ -2475,7 +2490,7 @@ export async function collectAllStreams(
 	adsClock: AdsSettleClock = realAdsSettleClock,
 	profileClock: ProfileCaptureClock = realProfileCaptureClock,
 ): Promise<void> {
-	const { capture, emit, emitRecord, page, progress, requested } = ctx;
+	const { capture, emitRecord, page, progress, requested } = ctx;
 
 	const wantsProfile = requested.has("profile");
 	const wantsPosts = requested.has("posts");
@@ -2503,7 +2518,8 @@ export async function collectAllStreams(
 	// Empty timelines need a positively read zero for this identity, even
 	// when profile output was not requested. Unknown is not proof of empty.
 	let observedPostCount: number | null = null;
-	if ((wantsProfile || wantsPosts || wantsPostLikes) && user && identity) {
+	let observedFollowingCount: number | null = null;
+	if ((wantsProfile || wantsPosts || wantsPostLikes || wantsFollowing) && user && identity) {
 		await progress("Fetching Instagram profile counts");
 		const profileUser = await fetchProfilePageUser(
 			page,
@@ -2523,6 +2539,7 @@ export async function collectAllStreams(
 				: null,
 		);
 		observedPostCount = counts.post_count;
+		observedFollowingCount = counts.following_count;
 		if (wantsProfile) {
 			const readableSources = profileSourceFieldsAreReadable(user) &&
 				profileSourceFieldsAreReadable(trustedProfileUser);
@@ -2541,121 +2558,45 @@ export async function collectAllStreams(
 
 	if ((wantsPosts || wantsPostLikes) && identity) {
 		await progress("Fetching Instagram posts");
-		let postsResult: Awaited<ReturnType<typeof fetchAllPosts>> | null = null;
+		let edges: InstagramTimelineEdge[] = [];
+		let sourceEnd = false;
+		let readable = true;
 		try {
-			postsResult = await fetchAllPosts(
-					page,
-					identity.username,
-				capture,
-				progress,
-				delay,
-				postsClock,
-				identity.id,
-			);
+			const result = await fetchAllPosts(page, identity.username, capture, progress, delay, postsClock, identity.id);
+			edges = result.edges;
+			sourceEnd = result.sourceEnd;
 		} catch (error) {
-			// Any failure of the timeline walk (a rejected page evaluation, a
-			// destroyed execution context, a meta_posts_* proof failure) leaves
-			// the list unproven, so it fails these streams, not the whole run.
-			// Pages read and validated before the failure are still emitted.
-			if (error instanceof PartialWalkFailure) {
-				await emitPostRecords(ctx, error.partial);
-			}
-			const failedStreams = ["posts", "post_likes"].filter((stream) =>
-				requested.has(stream),
-			);
-			for (const stream of failedStreams) {
-				await reportCollectionFailure(
-					ctx,
-					stream,
-					"Instagram posts were unavailable because the timeline did not load to completion.",
-				);
-			}
+			readable = false;
+			if (error instanceof PartialWalkFailure) edges = [...error.partial];
 		}
-		if (postsResult) {
-			const { edges, sourceEdgeCount, truncated } = postsResult;
-			await emitPostRecords(ctx, edges);
-			if (truncated) {
-				// No later run resumes past the cap, so the records above are a
-				// prefix, not the list: report every requested stream the cap
-				// affects instead of finishing them (§5.5).
-				for (const stream of ["posts", "post_likes"].filter((name) =>
-					requested.has(name),
-				)) {
-					await reportCollectionFailure(
-						ctx,
-						stream,
-						`Instagram posts stopped at the ${POSTS_MAX_PAGES}-page limit with more pages still listed (${edges.length} posts read).`,
-					);
-				}
-			}
-			if (
-				sourceEdgeCount === 0 &&
-				!truncated &&
-				observedPostCount !== 0
-			) {
-				for (const stream of ["posts", "post_likes"].filter((name) =>
-					requested.has(name),
-				)) {
-					await reportCollectionFailure(
-						ctx,
-						stream,
-						"Instagram returned no timeline posts without a proven same-identity profile post count of zero; the empty list was not proven.",
-					);
-				}
-			} else if (sourceEdgeCount === 0 && !truncated) {
-				if (wantsPosts) {
-					await emit({ cursor: {}, stream: "posts", type: "STATE" });
-				}
-				if (wantsPostLikes) {
-					await emit({ cursor: {}, stream: "post_likes", type: "STATE" });
-				}
-			}
+		await emitPostRecords(ctx, edges);
+		const postsComplete = readable && sourceInventoryComplete(edges.length, observedPostCount, sourceEnd);
+		const postsWhy = readable ? undefined : "the posts read failed before the source's end";
+		if (wantsPosts) await emitInventoryResult(ctx, "posts", edges.length, postsComplete, postsWhy);
+		if (wantsPostLikes) {
+			const likes = edges.flatMap(postLikeRecords);
+			await emitInventoryResult(ctx, "post_likes", likes.length,
+				postsComplete && edges.every(postLikesAreComplete), postsWhy);
 		}
 	}
 
 	if (wantsFollowing && identity) {
 		await progress("Fetching Instagram following list");
-		let followingResult: Awaited<ReturnType<typeof fetchAllFollowing>>;
-		let followingComplete = false;
+		let users: InstagramFollowingUser[] = [];
+		let sourceEnd = false;
+		let readable = true;
 		try {
-			followingResult = await fetchAllFollowing(
-				page,
-				identity.id,
-				capture,
-				progress,
-				delay,
-			);
-			followingComplete = !followingResult.truncated;
+			const result = await fetchAllFollowing(page, identity.id, capture, progress, delay);
+			users = result.users;
+			sourceEnd = result.sourceEnd;
 		} catch (error) {
-			// Same rule as posts: every enumeration failure, including a rejected
-			// page evaluation, must reach reportStreamFailure for following, and
-			// pages read before it are still emitted.
-			if (error instanceof PartialWalkFailure) {
-				await emitFollowingRecords(ctx, error.partial);
-			}
-			await reportCollectionFailure(
-				ctx,
-				"following",
-				"Instagram following could not be read to completion.",
-			);
-			followingResult = { truncated: false, users: [] };
+			readable = false;
+			if (error instanceof PartialWalkFailure) users = [...error.partial];
 		}
-		const { truncated, users } = followingResult;
 		await emitFollowingRecords(ctx, users);
-		if (truncated) {
-			// D6: following must be complete or fail honestly. The legacy
-			// connector silently stopped at ~1000 accounts; no later run resumes
-			// past the cap, so report the stream failed and keep the records.
-			await reportCollectionFailure(
-				ctx,
-				"following",
-				`Instagram following stopped at the ${FOLLOWING_MAX_PAGES}-page limit (${users.length} accounts) with more pages still listed.`,
-			);
-		} else if (followingComplete) {
-			// A no-cursor heartbeat records the positive terminal-page proof for
-			// this full enumeration, including a valid empty following list.
-			await emit({ cursor: {}, stream: "following", type: "STATE" });
-		}
+		await emitInventoryResult(ctx, "following", users.length,
+			readable && sourceInventoryComplete(users.length, observedFollowingCount, sourceEnd),
+			readable ? undefined : "the following read failed before the source's end");
 	}
 
 	if (wantsAds) {
@@ -2692,47 +2633,20 @@ export async function collectAllStreams(
 			categories: categories.items,
 		});
 		const readableAds = ads.filter((ad) => adsSchema.safeParse(ad).success);
-		const sourceCounts = [
-			["advertiser", "advertisers", advertisers.items.length],
-			["ad_topic", "ad_topics", adTopics.items.length],
-			["ad_category", "targeting_categories", categories.items.length],
-		] as const;
-		const unreadableSurfaces = new Set<AdsSurface>(
-			sourceCounts.filter(([kind, , count]) =>
-				readableAds.filter((ad) => ad.kind === kind).length !== count,
-			).map(([, surface]) => surface),
-		);
-		const reachedSurfaces = [advertisers, adTopics, categories]
-			.filter((surface) => surface.reached && !unreadableSurfaces.has(surface.surface))
-			.map((surface) => surface.surface);
 		for (const ad of readableAds) {
 			await emitRecord("ads", ad as RecordData);
 		}
-		await emitDetailCoverage(ctx, {
-			hydratedKeys: reachedSurfaces,
-			requiredKeys: ADS_REQUIRED_SURFACES,
-			stateStream: "ads",
-			stream: "ads",
-		});
-		const missingSurfaces = ADS_REQUIRED_SURFACES.filter(
-			(surface) => !reachedSurfaces.includes(surface),
-		);
-		if (missingSurfaces.length > 0) {
-			await progress("Instagram ads scan incomplete", { stream: "ads" });
-			process.stderr.write(
-				`[meta-ads] ${JSON.stringify({
-					missing_surfaces: missingSurfaces,
-					surface_steps: [advertisers, adTopics, categories]
-						.filter((surface) => surface.step !== null)
-						.map(({ step, surface }) => ({ surface, step })),
-				})}\n`,
-			);
-			await reportCollectionFailure(
-				ctx,
-				"ads",
-				`Instagram ads scan could not reach ${missingSurfaces.join(", ")}`,
-			);
-		}
+		// The retained live dialogs state neither exact totals nor a terminal
+		// pagination signal. Layout/expansion diagnostics never prove inventory.
+		// An unreachable sub-section only names itself in the skip: the rows
+		// above still upsert and the other streams finish with their STATE.
+		const unreached = [advertisers, adTopics, categories]
+			.filter((scrape) => !scrape.reached)
+			.map((scrape) => `${scrape.surface} (${scrape.step ?? "unread"})`);
+		await emitInventoryResult(ctx, "ads", readableAds.length, false,
+			unreached.length > 0
+				? `the ads sections not reached: ${unreached.join(", ")}`
+				: undefined);
 	}
 }
 
