@@ -394,7 +394,14 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       const rows = data.daily_activities ?? [];
       records = rows.map(activityRecord);
     }
-    for (const record of records) await ctx.emitRecord(stream, record);
+    for (const record of records) {
+      // Source days are calendar dates. Do not trust the endpoint to enforce
+      // its window: full-date consent is inclusive since, exclusive until
+      // (requestedEnd already subtracts the exclusive until date).
+      const recordDay = record.day;
+      if (typeof recordDay !== "string" || recordDay < startDate || recordDay > endDate) continue;
+      await ctx.emitRecord(stream, record);
+    }
     if (failedWindows.length > 0) {
       await ctx.reportStreamFailure?.(
         stream,

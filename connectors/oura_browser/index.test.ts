@@ -296,3 +296,53 @@ test("changed response shape is a non-retryable failed window", async () => {
     assert.equal(savedCursor(h.messages).next_day, today);
   });
 });
+
+test("seven-day sleep consent requests and emits only its seven source days", async () => {
+  const requests: string[] = [];
+  await withBrowser(async (input) => {
+    requests.push(String(input));
+    const url = new URL(String(input), HOME);
+    const days: string[] = [];
+    for (let day = url.searchParams.get("start")!; day <= url.searchParams.get("end")!; day = next(day)) days.push(day);
+    days.unshift("2020-01-01");
+    days.push("2020-01-09");
+    return Response.json({ daily_sleeps: days.map((day, i) => ({ id: UUID(i + 1), day, score: 80 })) });
+  }, async () => {
+    const h = harness(["sleep"], page(HOME), {}, { since: "2020-01-02", until: "2020-01-09" });
+    await collectOuraBrowser(h.ctx);
+    assert.deepEqual(h.records.map((r) => r.data.day), ["2020-01-02", "2020-01-03", "2020-01-04", "2020-01-05", "2020-01-06", "2020-01-07", "2020-01-08"]);
+    assert.deepEqual(h.failures, []);
+  });
+  assert.equal(requests.length, 1);
+  assert.ok(requests[0].includes("start=2020-01-02&end=2020-01-08"));
+});
+
+test("one failed window preserves successful records but reports failure and a safe retry cursor", async () => {
+  let requests = 0;
+  await withBrowser(async (input) => {
+    if (++requests === 2) return new Response("{}", { status: 500 });
+    const day = new URL(String(input), HOME).searchParams.get("start")!;
+    return Response.json({ daily_sleeps: [{ id: UUID(requests), day, score: 80 }] });
+  }, async () => {
+    const h = harness(["sleep"], page(HOME), {}, { since: "2020-01-01", until: "2020-03-31" });
+    await collectOuraBrowser(h.ctx);
+    assert.equal(requests, 3);
+    assert.equal(h.records.length, 2);
+    assert.deepEqual(h.failures, [{ stream: "sleep", retryable: true }]);
+    assert.equal(savedCursor(h.messages).next_day, "2020-01-31");
+  });
+});
+
+test("readiness and activity enforce full-date consent on returned calendar days", async () => {
+  for (const stream of ["readiness", "activity"]) {
+    await withBrowser(async () => Response.json({
+      [stream === "readiness" ? "daily_readinesses" : "daily_activities"]:
+        ["2020-01-01", "2020-01-02", "2020-01-08", "2020-01-09"].map((day, i) => ({ id: UUID(i + 1), day, score: 80 })),
+    }), async () => {
+      const h = harness([stream], page(HOME), {}, { since: "2020-01-02", until: "2020-01-09" });
+      await collectOuraBrowser(h.ctx);
+      assert.deepEqual(h.records.map((r) => r.data.day), ["2020-01-02", "2020-01-08"]);
+      assert.deepEqual(h.failures, []);
+    });
+  }
+});

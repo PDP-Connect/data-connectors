@@ -3180,3 +3180,60 @@ test("discord_browser: a session that expires part way ends the run", {
 		reset();
 	}
 });
+
+test("oura_browser: generic adapter honors seven-day consent before fetching and emitting", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+	const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura_browser-seven-days.js") });
+	const fixture = recordingDailyFixture({ extraDays: ["2020-01-01", "2020-01-09"] });
+	const r = await runHarness({
+		bundle: built.outfile, fixtures: { ...c.fixtures, resolve: fixture.resolve },
+		scopes: [{ name: "oura.sleep", time_range: { since: "2020-01-02", until: "2020-01-09" } }],
+	});
+	assert.deepEqual(r.ret, { ok: true });
+	assert.deepEqual(fixture.windows, [{ start: "2020-01-02", end: "2020-01-08" }]);
+	assert.deepEqual(r.result.errors, [], JSON.stringify(r.result));
+	assert.deepEqual(r.result["oura.sleep"].records.map((row) => row.day),
+		["2020-01-02", "2020-01-03", "2020-01-04", "2020-01-05", "2020-01-06", "2020-01-07", "2020-01-08"]);
+	assert.deepEqual(r.result.errors, []);
+	assert.match(r.data.status, /^Complete!/);
+});
+
+test("oura_browser: one failed window after successful data never reports Complete", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+	const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura_browser-partial-window.js") });
+	for (const resultStreaming of [false, true]) {
+		const fixture = recordingDailyFixture({ failWindow: 1 });
+		const r = await runHarness({
+			bundle: built.outfile, fixtures: { ...c.fixtures, resolve: fixture.resolve },
+			scopes: ["oura.sleep"], resultStreaming,
+			resultSpoolDirectory: join(out, "oura-partial-" + resultStreaming),
+		});
+		assert.deepEqual(r.ret, { ok: true });
+		assert.equal(fixture.windows.length, 3);
+		assert.match(r.data.status, /^Partial:/);
+		const result = resultStreaming ? r.streamDone : r.result;
+		assert.deepEqual(result.errors.map((e) => [e.scope, e.errorClass, e.disposition]),
+			[["oura.sleep", "partial", "degraded"]]);
+		assert.ok(result.exportSummary.count > 0);
+	}
+});
+
+test("oura_browser: scope metadata rejects unsupported selections before data collection", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+	const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura_browser-scope-metadata.js") });
+	for (const selection of [{ resources: ["selected-id"] }, { fields: ["id", "day"] }]) {
+		const fixture = recordingDailyFixture();
+		const r = await runHarness({ bundle: built.outfile, fixtures: { ...c.fixtures, resolve: fixture.resolve },
+			scopes: [{ name: "oura.sleep", ...selection }] });
+		assert.deepEqual(r.ret, { ok: true });
+		assert.deepEqual(fixture.windows, []);
+		assert.ok(r.result.errors.some((error) => /scope_not_supported/.test(error.reason)));
+		assert.ok(r.result.errors.some((error) => error.disposition === "fatal"));
+		assert.doesNotMatch(r.data.status ?? "", /^Complete!/);
+	}
+	const legacy = await runHarness({ bundle: built.outfile, fixtures: c.fixtures,
+		scopes: ["oura.sleep"], legacyScopeBridge: true });
+	assert.deepEqual(legacy.ret, { ok: true });
+	assert.deepEqual(legacy.result.errors, []);
+	assert.ok(legacy.result["oura.sleep"].records.length > 0);
+});

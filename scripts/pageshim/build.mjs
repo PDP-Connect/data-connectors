@@ -220,6 +220,7 @@ function genericPageshimEntry(connector, manifest, config) {
 import * as implementation from ${JSON.stringify(connectorModule)};
 import * as schemaModule from ${JSON.stringify(schemasModule)};
 import { runOnPageShim, type ShimPage } from ${JSON.stringify(join(HERE, "runtime.ts"))};
+import { applyRequestedScopeEntries } from ${JSON.stringify(join(HERE, "requested-scope-entries.ts"))};
 type GenericConfig = {
 	platform: string;
 	scopes: string[];
@@ -246,6 +247,11 @@ const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "
     ...config,
     validateRecord: validateRecord as never,
     probe: (pw) => probe(pw as never),
+    prepareRequested: (requested) => applyRequestedScopeEntries(
+      requested,
+      (page as ShimPage & { requestedScopeEntries?: () => unknown }).requestedScopeEntries?.(),
+      config.platform,
+    ),
     collect: (ctx) => collect(ctx as never),
     toScope: (_stream, records) => ({ records }),
     summarize: (scopes) => {

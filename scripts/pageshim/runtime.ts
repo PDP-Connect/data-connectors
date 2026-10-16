@@ -351,6 +351,8 @@ export interface PageshimConnector {
 	prepareProbe?: (
 		page: ReturnType<typeof playwrightPageFacade>,
 	) => Promise<void>;
+	/** Runs before makeEmitRecord snapshots per-stream resource selection. */
+	prepareRequested?: (requested: Parameters<typeof makeEmitRecord>[0]["requested"]) => void;
 	collect: (ctx: Record<string, unknown>) => Promise<void>;
 	/** PDPP records of one stream -> the scope payload the host stores. */
 	toScope: (stream: string, records: Rec[]) => unknown;
@@ -472,6 +474,13 @@ export async function runOnPageShim(
 				},
 			]),
 	);
+	if (!initError && connector.prepareRequested) {
+		try {
+			connector.prepareRequested(requested);
+		} catch (error) {
+			initError = error;
+		}
+	}
 	const records: Record<string, Rec[]> = {};
 	const errors: ConnectorError[] = [];
 	const state: Record<string, unknown> = {};
