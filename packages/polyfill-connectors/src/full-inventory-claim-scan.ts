@@ -310,7 +310,21 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 			isNode(expression) ? (scopes.get(expression) ?? root) : root,
 		);
 	const isSelfClaim = (object: unknown, stateKey: string): boolean => {
-		if (!isNode(object) || object.type !== "ObjectExpression") return false;
+		// A factored or computed config may claim self coverage. Without a
+		// complete proof of its runtime properties, count it conservatively
+		// rather than letting a refactor remove the claim from the ratchet.
+		if (!isNode(object) || object.type !== "ObjectExpression") return true;
+		// Spreads can supply or overwrite either identity, including when
+		// explicit stream/state properties otherwise appear to differ.
+		const properties = Array.isArray(object.properties)
+			? object.properties
+			: [];
+		if (
+			properties.some(
+				(entry) => isNode(entry) && entry.type === "SpreadElement",
+			)
+		)
+			return true;
 		const stream = comparableOf(property(object, "stream"), source);
 		const state = comparableOf(property(object, stateKey), source);
 		return stream !== null && stream === state;

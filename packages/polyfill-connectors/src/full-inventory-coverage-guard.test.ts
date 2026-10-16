@@ -51,7 +51,11 @@ const BASELINE: Readonly<Record<string, ClaimCounts>> = {
 	"connectors/spotify/index.ts": { full_scan: 0, self_coverage: 2 },
 	"connectors/steam/index.ts": { full_scan: 0, self_coverage: 6 },
 	"connectors/uber/index.ts": { full_scan: 0, self_coverage: 1 },
-	"connectors/usaa/index.ts": { full_scan: 0, self_coverage: 5 },
+	// 6th claim: emitStatementCoverage passes computeStatementCoverage().coverage
+	// (statement-coverage.ts, stream === stateStream) as a factored config the
+	// pre-#418-triage scanner could not see. Its denominator is the enumerated
+	// documents index and required === hydrated ∪ gap by construction.
+	"connectors/usaa/index.ts": { full_scan: 0, self_coverage: 6 },
 	"connectors/venmo/index.ts": { full_scan: 0, self_coverage: 3 },
 	"connectors/whatsapp/index.ts": { full_scan: 0, self_coverage: 3 },
 	"connectors/ynab/index.ts": { full_scan: 0, self_coverage: 2 },
@@ -105,6 +109,46 @@ const COUNT = (full_scan: number, self_coverage: number): ClaimCounts => ({
 });
 
 const SCAN_CASES: ReadonlyArray<[string, string, ClaimCounts]> = [
+	[
+		"an inline self-coverage proof",
+		'emitDetailCoverage(ctx, { stream: "items", stateStream: "items", requiredKeys: [], hydratedKeys: [], considered: 1, covered: 1 });',
+		COUNT(0, 1),
+	],
+	[
+		"a factored self-coverage proof cannot evade the ratchet",
+		'const proof = { stream: "items", stateStream: "items", requiredKeys: [], hydratedKeys: [], considered: 1, covered: 1 }; emitDetailCoverage(ctx, proof);',
+		COUNT(0, 1),
+	],
+	[
+		"an aliased self-coverage proof cannot evade the ratchet",
+		'const proof = { stream: "items", stateStream: "items" }; const alias = proof; buildDetailCoverageMessage(alias);',
+		COUNT(0, 1),
+	],
+	[
+		"a spread self-coverage proof cannot evade the ratchet",
+		'const proof = { stream: "items", stateStream: "items" }; emitDetailCoverage(ctx, { ...proof });',
+		COUNT(0, 1),
+	],
+	[
+		"a spread overriding an apparent non-self proof fails closed",
+		'const proof = { stateStream: "items" }; emitDetailCoverage(ctx, { stream: "items", stateStream: "parents", ...proof });',
+		COUNT(0, 1),
+	],
+	[
+		"an unresolved config returned by a function fails closed",
+		"buildDetailCoverageMessage(makeProof());",
+		COUNT(0, 1),
+	],
+	[
+		"an unresolved config parameter fails closed",
+		"function report(proof: unknown) { emitDetailCoverage(ctx, proof); }",
+		COUNT(0, 1),
+	],
+	[
+		"a spread self DETAIL_COVERAGE literal cannot evade the ratchet",
+		'const proof = { stream: "items", state_stream: "items" }; emit({ type: "DETAIL_COVERAGE", ...proof });',
+		COUNT(0, 1),
+	],
 	[
 		"a plain call",
 		'import { buildFullScanCoverageMessage } from "x";\nbuildFullScanCoverageMessage("a", 1);',
