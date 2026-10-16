@@ -95,20 +95,20 @@ test("r4 a starred row with chrome, forks and a license line is complete and par
 	assert.equal(validateRecord("starred", { id: "sample-user:starred", starred: parsed.rows.map(({ id: _id, ...rest }) => rest) }).ok, true);
 });
 
-test("r4 a blankslate nested under wrappers with zero rows is a proven empty list", () => {
+test("r5 an empty state with unaccounted toolbar text cannot prove completion", () => {
 	const parsed = parseStarredPage(emptyStarred);
 	assert.equal(parsed.rawRows, 0);
-	assert.equal(parsed.rejectedRows, 0);
-	assert.equal(parsed.complete, true);
+	assert.ok(parsed.rejectedRows > 0);
+	assert.equal(parsed.complete, false);
 	const url = "https://github.com/sample-user?page=1&tab=stars";
 	assert.deepEqual(
 		inspectInventoryPage({ requestedUrl: url, currentUrl: url, html: owner + emptyStarred }, "starred", "sample-user", 1, 0, 0),
-		{ valid: true, nextUrl: null, reason: "terminal_list" },
+		{ valid: false, nextUrl: null, reason: "unreadable_fields" },
 	);
 });
 
 test("r4 an empty blankslate list needs no particular wording", () => {
-	const html = emptyStarred.replace("You don’t have any starred repositories yet.", "Nothing here").replace("Star repositories to save them for later.", "");
+	const html = '<main><div id="user-starred-repos"><div><div class="blankslate"><h3>Nothing here</h3></div></div></div></main>';
 	const url = "https://github.com/sample-user?page=1&tab=stars";
 	assert.equal(inspectInventoryPage({ requestedUrl: url, currentUrl: url, html: owner + html }, "starred", "sample-user", 1, 0, 0).valid, true);
 });
@@ -261,11 +261,11 @@ const completed = (result: Awaited<ReturnType<typeof collect>>, stream: string):
 	result.messages.some((message) => message.type === "STATE" && message.stream === stream) &&
 	!result.messages.some((message) => message.type === "SKIP_RESULT");
 
-test("r4 the three previously vetoed streams complete from live-shaped pages", async () => {
+test("r5 readable profiles and repositories complete; unaccounted starred chrome vetoes", async () => {
 	const repos = await collect("repositories", repositories(repositoryRow({ fork: true, license: true })) + terminal);
 	assert.equal(completed(repos, "repositories"), true);
 	assert.equal((repos.records[0]?.data.repositories as Array<Record<string, unknown>>)[0]?.license, "MIT License");
-	assert.equal(completed(await collect("starred", emptyStarred), "starred"), true);
+	assert.equal(completed(await collect("starred", emptyStarred), "starred"), false);
 	assert.equal(completed(await collect("profile", profile()), "profile"), true);
 });
 
@@ -280,15 +280,15 @@ test("r4 a blankslate beside a row vetoes the stream", async () => {
 	assert.equal(completed(await collect("starred", html), "starred"), false);
 });
 
-test("r4 list chrome beside the rows is not a row, and a feature prompt is not a contradiction", () => {
+test("r5 unaccounted list chrome and feature prompts veto while retaining rows", () => {
 	const chrome = '<div class="toolbar"><h2>Repositories</h2><span class="sr-only">8 results</span></div><div class="paginate-container"><a rel="next" href="/sample-user?page=2&tab=repositories">Next</a></div>';
 	const parsed = parseRepositoriesPage(`<div id="user-repositories-list">${chrome}<ul>${repositoryRow()}</ul>${listPromo}</div>`);
 	assert.equal(parsed.rawRows, 1);
-	assert.equal(parsed.rejectedRows, 0);
-	assert.equal(parsed.complete, true);
+	assert.ok(parsed.rejectedRows > 0);
+	assert.equal(parsed.complete, false);
 	const starred = parseStarredPage(`<turbo-frame id="user-starred-repos">${listPromo}<ul>${starredRow()}</ul></turbo-frame>`);
 	assert.equal(starred.rawRows, 1);
-	assert.equal(starred.complete, true);
+	assert.equal(starred.complete, false);
 });
 
 test("r4 repository links outside any list entry are discarded rows, not an empty list", () => {
@@ -302,8 +302,82 @@ test("r4 repository links outside any list entry are discarded rows, not an empt
 test("r4 a deferred fragment in the site header is not a continuation, one in the page body is", async () => {
 	const header = '<div class="header-wrapper js-header-wrapper"><include-fragment class="is-error"><div class="blankslate"><h3>Oh no!</h3></div></include-fragment></div>';
 	const url = "https://github.com/sample-user?page=1&tab=stars";
+	const cleanEmpty = '<main><div id="user-starred-repos"><div class="blankslate">Nothing</div></div></main>';
 	const verdict = (html: string) => inspectInventoryPage({ requestedUrl: url, currentUrl: url, html: owner + html }, "starred", "sample-user", 1, 0, 0);
-	assert.equal(verdict(header + emptyStarred).valid, true);
-	assert.equal(verdict(emptyStarred + '<include-fragment src="/sample-user?tab=stars&page=2"></include-fragment>').valid, false);
-	assert.equal(completed(await collect("starred", header + emptyStarred), "starred"), true);
+	assert.equal(verdict(header + cleanEmpty).valid, true);
+	assert.equal(verdict(cleanEmpty + '<include-fragment src="/sample-user?tab=stars&page=2"></include-fragment>').valid, false);
+	assert.equal(completed(await collect("starred", header + cleanEmpty), "starred"), true);
 });
+
+test("r5 numeric controls cannot hide in a second or consumed starred paragraph", () => {
+ for (const html of [
+  starredRow("<p><button>Watch 12</button></p>"),
+  starredRow().replace("Synthetic starred repository", "<button>Watch 12</button>"),
+  starredRow("<p>Unparsed information</p>"),
+  starredRow("<p><button>3</button></p>").replace('<a href="/sample-owner/demo/stargazers"><svg class="octicon"></svg>3</a>', ""),
+ ]) {
+  const parsed = parseStarredPage(`<ul id="user-starred-repos">${html}</ul>`);
+  assert.equal(parsed.rows.length, 1);
+  assert.equal(parsed.complete, false);
+ }
+});
+
+for (const extra of ['<div class="Box-row">Fetching another repository</div>', '<a href="/sample-owner/deferred">deferred</a>', 'Loose row text', '<div class="Box-row"><a href="/sample-owner/deferred"></a></div>']) {
+ test(`r5 unaccounted wrapper content vetoes inventory: ${extra}`, () => {
+  assert.equal(parseRepositoriesPage(repositories(repositoryRow()).replace("</ul>", `</ul>${extra}`)).complete, false);
+  assert.equal(parseStarredPage(`<div id="user-starred-repos"><ul>${starredRow()}</ul>${extra}</div>`).complete, false);
+  assert.equal(parseProfilePage(profile({ pinned: `<div><h2>Popular repositories</h2><div>${extra}</div></div>` }), profileUrl).complete, false);
+ });
+}
+
+test("r5 main and inventory footer continuation cannot be site chrome", () => {
+ const url = "https://github.com/sample-user?page=1&tab=repositories";
+ const next = '<a rel="next" href="/sample-user?page=2&tab=repositories">Next</a>';
+ for (const attrs of ["", 'role="contentinfo"', 'role="banner"']) {
+  const html = `<main>${repositories(repositoryRow()).replace("</ul>", `</ul><footer ${attrs}>${next}</footer>`)}${terminal}</main>`;
+  const result = inspectInventoryPage(page(url, owner + html), "repositories", "sample-user", 1, 1, 0);
+  assert.ok(!result.valid || result.nextUrl !== null);
+ }
+ const chromeOnly = owner + repositories(repositoryRow()) + `<footer role="contentinfo">${terminal}</footer>`;
+ assert.equal(inspectInventoryPage(page(url, chromeOnly), "repositories", "sample-user", 1, 1, 0).valid, false);
+});
+
+for (const kind of ["followers", "following"]) {
+ test(`r5 every duplicate ${kind} count must be readable`, () => {
+  for (const bad of ["lots", ""]) {
+   const followers = `<a href="/sample-user?tab=${kind}">42 ${kind}</a><a href="/sample-user?tab=${kind}"><span>${bad}</span> ${kind}</a>`;
+   const parsed = parseProfilePage(profile({ followers }), profileUrl);
+   assert.equal(parsed.complete, false);
+   assert.ok(parsed.unreadableFields.includes(kind));
+  }
+ });
+}
+
+test("r5 renamed organization and pinned sections cannot omit surviving entries", () => {
+ assert.equal(parseProfilePage(profile({ sidebar: '<div><h2>Groups</h2><a href="/orgs/sample-org"><img></a></div>' }), profileUrl).complete, false);
+ assert.equal(parseProfilePage(profile({ pinned: '<div><h2>Selected work</h2><div><a href="/sample-owner/demo"></a></div></div>' }), profileUrl).complete, false);
+});
+
+test("r5 a text-free direct pinned section entry cannot disappear", () => {
+ const parsed = parseProfilePage(profile({ pinned: '<div><h2>Popular repositories</h2><a href="/sample-owner/deferred"></a></div>' }), profileUrl);
+ assert.equal(parsed.complete, false);
+});
+test("r5 a page-main footer outside the inventory follows its next link", () => {
+ const url = "https://github.com/sample-user?page=1&tab=repositories";
+ const html = owner + `<main>${repositories(repositoryRow())}<footer role="contentinfo"><a rel="next" href="/sample-user?page=2&tab=repositories">Next</a></footer>${terminal}</main>`;
+ const result = inspectInventoryPage(page(url, html), "repositories", "sample-user", 1, 1, 0);
+ assert.equal(result.valid, true);
+ assert.equal(result.nextUrl, "https://github.com/sample-user?page=2&tab=repositories");
+});
+for (const [stream, html] of [
+ ["starred", `<ul id="user-starred-repos">${starredRow("<p><button>Watch 12</button></p>")}</ul>`],
+ ["repositories", repositories(repositoryRow()).replace("</ul>", '</ul><div>Fetching another repository</div>')],
+ ["profile", profile({ followers: '<a href="/sample-user?tab=followers">42 followers</a><a href="/sample-user?tab=followers">lots followers</a>' })],
+] as const) {
+ test(`r5 ${stream} retains readable records without completion authority`, async () => {
+  const result = await collect(stream, html + terminal);
+  assert.ok(result.records.length > 0);
+  assert.equal(result.messages.some((message) => message.type === "STATE" || message.type === "DETAIL_COVERAGE"), false);
+  assert.ok(result.messages.some((message) => message.type === "SKIP_RESULT"));
+ });
+}

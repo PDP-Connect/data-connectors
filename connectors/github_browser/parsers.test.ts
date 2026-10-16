@@ -113,7 +113,7 @@ test("repository and starred pages require list or explicit empty evidence", () 
 			inspectInventoryPage(
 				inventoryObservation(
 					stream,
-					`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="${stream === "repositories" ? "user-repositories-list" : "user-starred-repos"}">${empty}</div></main>`,
+					`<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span><main><div id="${stream === "repositories" ? "user-repositories-list" : "user-starred-repos"}"><div class="blankslate">${empty}</div></div></main>`,
 					1,
 				),
 				stream,

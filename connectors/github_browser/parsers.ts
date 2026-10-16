@@ -189,6 +189,8 @@ function recordField<T extends object, K extends keyof T>(
 }
 
 // Missing selectors are omissions only when independent row structure proves readiness.
+// Residual limit: text-free drift may omit an optional FIELD, never an entry;
+// collection accounting must independently reject surviving unaccounted rows.
 function recordOptional<T extends object, K extends keyof T>(
 	row: T,
 	key: K,
@@ -207,6 +209,14 @@ function recordOptional<T extends object, K extends keyof T>(
 // Site-wide header and footer carry their own deferred fragments and menus.
 // They say nothing about the inventory's own continuation.
 const SITE_CHROME = '.js-header-wrapper, .header-wrapper, [role="banner"], [role="contentinfo"], footer';
+
+function siteChrome(node: Element, list: Element | null): boolean {
+	if (node.closest('main, [role="main"]') !== null || list?.contains(node)) return false;
+	const region = node.closest(SITE_CHROME);
+	return region !== null && region.closest('main, [role="main"]') === null &&
+		(list === null || !region.contains(list)) &&
+		region.querySelector('main, [role="main"]') === null;
+}
 
 const EMPTY_STATE = ".blankslate, [data-testid='empty-state']";
 
@@ -243,13 +253,24 @@ function cardRows(roots: Element | null | Array<Element | null>): Element[] {
 	return rows;
 }
 
-// Repository links in the container that no row accounts for mean the page
-// lays rows out in a way we do not read.
+// Account for wrapper text and text-free candidates, not just heading links.
+// Empty-state copy is evidence only with zero rows and no surviving entry link.
 function unaccountedRepositories(list: Element | null, rows: Element[]): number {
 	if (list === null) return 0;
-	return Array.from(list.querySelectorAll("h3 a[href]")).filter((link) =>
-		repositoryName(link.getAttribute("href")) !== null && !insideOverlay(link, list) &&
-		!rows.some((row) => row.contains(link))).length;
+	const empty = rows.length === 0 ? listEmptyStates(list, rows) : [];
+	const visit = (node: Node): number => {
+		if (node.nodeType === 3) return (node.textContent ?? "").trim() ? 1 : 0;
+		if (node.nodeType !== 1) return 0;
+		const element = node as Element;
+		if (rows.includes(element) || element.matches(OVERLAY_SELECTOR) || insideOverlay(element, list)) return 0;
+		if (empty.includes(element) && element.querySelector("a[href], li, [role='listitem']") === null) return 0;
+		if (element.matches("a[href], li, [role='listitem']")) return 1;
+		const children = Array.from(element.childNodes);
+		if (children.length === 0 && !element.matches("ul, ol")) return 1;
+		return children.reduce((sum, child) => sum + visit(child), 0);
+	};
+	return list.matches("a[href], li, [role='listitem']") ? visit(list) :
+		Array.from(list.childNodes).reduce((sum, node) => sum + visit(node), 0);
 }
 
 // Content inside a row is classified, not matched against a layout. Controls,
@@ -288,9 +309,16 @@ function classifyNodes(nodes: Iterable<Node>, isKnown: (node: Element) => boolea
 		}
 		if (child.nodeType !== 1) return;
 		const node = child as Element;
-		if (node.matches(CHROME_SELECTOR) || isKnown(node)) return;
+		if (node.matches(CHROME_SELECTOR)) return;
 		if (node.matches(CONTROL_SELECTOR)) {
 			if (/\d/u.test(text(node))) data.unknown.push(text(node));
+			return;
+		}
+		// Inspect controls even under a consumed description or other known ancestor.
+		if (isKnown(node)) {
+			for (const control of Array.from(node.querySelectorAll(CONTROL_SELECTOR))) {
+				if (control.closest(CHROME_SELECTOR) === null && /\d/u.test(text(control))) data.unknown.push(text(control));
+			}
 			return;
 		}
 		const parent = forkParent(node);
@@ -401,11 +429,11 @@ function followCount(document: Document, kind: "followers" | "following", struct
 	if (links.length === 0) return structure ? { kind: "omitted" } : { kind: "unreadable" };
 	const values = links.map(sourceCount).filter((value): value is number => value !== undefined);
 	const distinct = new Set(values);
-	if (links.some(isUnreadable) || distinct.size !== 1) return { kind: "unreadable" };
+	if (values.length !== links.length || links.some(isUnreadable) || distinct.size !== 1) return { kind: "unreadable" };
 	return { kind: "read", value: values[0] ?? 0 };
 }
 
-const ORGANIZATION_HOOKS = '.avatar-group-item, [itemprop="follows"], .avatar-group, [data-testid="organizations"], [aria-label="Organizations"], a[data-hovercard-type="organization"]';
+const ORGANIZATION_HOOKS = 'a[href^="/orgs/"], .avatar-group-item, [itemprop="follows"], .avatar-group, [data-testid="organizations"], [aria-label="Organizations"], a[data-hovercard-type="organization"]';
 const ACHIEVEMENT_CARD = '.js-achievement-card, a[href*="/achievements/"], a[href*="achievement="][href*="tab=achievements"]';
 const ACHIEVEMENT_HOOKS = `${ACHIEVEMENT_CARD}, img.achievement-badge-sidebar, .profile-achievements, .js-profile-achievements, [data-testid="achievements"]`;
 
@@ -503,7 +531,9 @@ export function parseProfilePage(
 		unreadableFields.push("pinnedRepositories");
 	if (pinnedRoots.length > 0 || pinnedHeadings.length > 0) {
 		row.pinnedRepositories = [];
-		for (const item of cardRows(pinnedRoots)) {
+		const pinnedRows = cardRows(pinnedRoots);
+		for (const root of pinnedRoots) rejectedEntries += unaccountedRepositories(root, pinnedRows);
+		for (const item of pinnedRows) {
 			const link = item.querySelector("a[href]");
 			const fullName = repositoryName(link?.getAttribute("href") ?? null);
 			if (!fullName || !sourceText(link)) {
@@ -531,7 +561,13 @@ export function parseProfilePage(
 		}
 	}
 
-	const organizations = locateSection(document, /^organizations?\b/iu, "a[href]", ORGANIZATION_HOOKS, ".avatar-group-item", structure);
+	// Renamed headings/containers cannot make surviving repository entries vanish.
+	const unclaimedPins = Array.from(document.querySelectorAll("a[href]")).filter((link) =>
+		repositoryName(link.getAttribute("href")) !== null && link.closest(OVERLAY_SELECTOR) === null &&
+		!siteChrome(link, pinnedContainer) && !pinnedRoots.some((root) => root.contains(link)));
+	if (unclaimedPins.length > 0) unreadableFields.push("pinnedRepositories");
+
+	const organizations = locateSection(document, /^organizations?\b/iu, "a[href]", ORGANIZATION_HOOKS, '.avatar-group-item, a[href^="/orgs/"]', structure);
 	if (organizations.unreadable) unreadableFields.push("organizations");
 	if (organizations.entries !== null) {
 		row.organizations = [];
@@ -671,15 +707,16 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 		}
 		seen.add(url);
 		const row: StarredRow = { id: url, fullName, url };
-		const data = classifyRow(source, (node) => node.matches(
-			'h3 a, p, [itemprop="programmingLanguage"], [data-ga-click*="Repository, language"], a[href$="/stargazers"], a[href$="/forks"], relative-time'));
+		const description = source.querySelector("p");
+		const data = classifyRow(source, (node) => node === description || node.matches(
+			'h3 a, [itemprop="programmingLanguage"], [data-ga-click*="Repository, language"], a[href$="/stargazers"], a[href$="/forks"], relative-time'));
 		const layout = renderedRow(source,
 			source.matches("li") && source.querySelector("h3 a") !== null &&
 				sourceTime(source.querySelector("relative-time")) !== undefined,
 			data);
 		const missing: string[] = layout ? [] : ["rowLayout"];
 		if (isUnreadable(source)) missing.push("row");
-		recordOptional(row, "description", source.querySelector("p"), sourceText, missing, layout);
+		recordOptional(row, "description", description, sourceText, missing, layout);
 		recordOptional(row, "language", source.querySelector('[itemprop="programmingLanguage"], [data-ga-click*="Repository, language"]'), sourceText, missing, layout);
 		recordOptional(row, "stars", source.querySelector('a[href$="/stargazers"]'), sourceCount, missing, layout);
 		recordOptional(row, "forks", source.querySelector('a[href$="/forks"]'), sourceCount, missing, layout);
@@ -723,7 +760,7 @@ export function inspectInventoryPage(
 					emptyText,
 				));
 	const controls = Array.from(document.querySelectorAll('a, button, form, include-fragment, [aria-busy="true"], .loading, .skeleton, .placeholder'));
-	const relevant = controls.filter((node) => node.closest(OVERLAY_SELECTOR) === null && node.closest(SITE_CHROME) === null);
+	const relevant = controls.filter((node) => node.closest(OVERLAY_SELECTOR) === null && !siteChrome(node, list));
 	const nextLinks = relevant.filter((node) => node.matches('a[rel~="next"]'));
 	const next = nextLinks[0] ?? null;
 	const hasUnknownContinuation = nextLinks.length > 1 || relevant.some((node) => {
@@ -743,7 +780,7 @@ export function inspectInventoryPage(
 		return !node.matches('[disabled], [aria-disabled="true"], .disabled');
 	});
 	const disabledNext = Array.from(document.querySelectorAll('.next_page.disabled, .next_page[aria-disabled="true"], .paginate-container [rel~="next"][aria-disabled="true"], .pagination [rel~="next"][disabled]'))
-		.some((node) => node.closest(OVERLAY_SELECTOR) === null && !node.hasAttribute("href") && !isUnreadable(node));
+		.some((node) => node.closest(OVERLAY_SELECTOR) === null && !siteChrome(node, list) && !node.hasAttribute("href") && !isUnreadable(node));
 	const countNode = document.querySelector(stream === "repositories"
 		? '[data-tab-item="repositories"] .Counter, a[href*="tab=repositories"] .Counter, [data-tab-item="repositories"] [class*="CounterLabel-CounterLabel"]'
 		: '[data-tab-item="stars"] .Counter, a[href*="tab=stars"] .Counter, [data-tab-item="stars"] [class*="CounterLabel-CounterLabel"]');
