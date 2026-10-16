@@ -671,11 +671,23 @@ async function collectSpotifyWebData(
 			field: string,
 			prefix: string,
 		): Record<string, unknown> | null {
-			if (value === undefined || value === null) return null;
+			if (value === undefined) {
+				throw new Error(`${prefix}_field_unavailable:${field}_missing`);
+			}
+			if (value === null) return null;
 			if (!isRecord(value)) {
 				throw new Error(`${prefix}_field_unavailable:${field}_malformed`);
 			}
 			return value;
+		}
+
+		// A child of an explicitly null container is explicitly null; a child
+		// that is absent from a present container stays undefined (a gap).
+		function child(
+			container: Record<string, unknown> | null,
+			key: string,
+		): unknown {
+			return container === null ? null : container[key];
 		}
 
 		function isFieldUnavailable(error: unknown, prefix: string): boolean {
@@ -710,7 +722,10 @@ async function collectSpotifyWebData(
 			isValid: (candidate: unknown) => candidate is T,
 			emptyValue: T,
 		): SourceFieldRead<T> {
-			if (value === undefined || value === null) {
+			if (value === undefined) {
+				return { kind: "UNAVAILABLE", reason: `${field}_missing` };
+			}
+			if (value === null) {
 				return { kind: "EXPLICIT_EMPTY", value: emptyValue };
 			}
 			return isValid(value)
@@ -788,7 +803,10 @@ async function collectSpotifyWebData(
 			if (!isRecord(page)) {
 				throw new Error(`${field}_response_invalid`);
 			}
-			const pagingInfo = sourceContainer(page.pagingInfo, "paging_info", field);
+			const pagingInfo =
+					page.pagingInfo === undefined
+						? null
+						: sourceContainer(page.pagingInfo, "paging_info", field);
 			const directOffset = page.offset;
 			const nestedOffset = pagingInfo?.offset;
 			if (
@@ -819,7 +837,10 @@ async function collectSpotifyWebData(
 		function imageRecords(
 			images: unknown,
 		): SourceFieldRead<Array<{ height: null; url: string; width: null }>> {
-			if (images === undefined || images === null) {
+			if (images === undefined) {
+				return { kind: "UNAVAILABLE", reason: "playlist_images_missing" };
+			}
+			if (images === null) {
 				return { kind: "EXPLICIT_EMPTY", value: [] };
 			}
 			if (!isRecord(images)) {
@@ -870,7 +891,10 @@ async function collectSpotifyWebData(
 			value: unknown,
 			field: string,
 		): SourceFieldRead<string[]> {
-			if (value === undefined || value === null) {
+			if (value === undefined) {
+				return { kind: "UNAVAILABLE", reason: `${field}_missing` };
+			}
+			if (value === null) {
 				return { kind: "EXPLICIT_EMPTY", value: [] };
 			}
 			if (!Array.isArray(value))
@@ -896,7 +920,10 @@ async function collectSpotifyWebData(
 			value: unknown,
 			field: string,
 		): SourceFieldRead<string[]> {
-			if (value === undefined || value === null) {
+			if (value === undefined) {
+				return { kind: "UNAVAILABLE", reason: `${field}_container_missing` };
+			}
+			if (value === null) {
 				return { kind: "EXPLICIT_EMPTY", value: [] };
 			}
 			if (!isRecord(value) || !Array.isArray(value.items)) {
@@ -1567,13 +1594,13 @@ async function collectSpotifyWebData(
 									"spotify_playlist",
 								);
 								const owner = sourceContainer(
-									ownerValue?.data,
+									child(ownerValue, "data"),
 									"owner_data",
 									"spotify_playlist",
 								);
-								const ownerUri = readString(owner?.uri, "playlist_owner_uri");
+								const ownerUri = readString(child(owner, "uri"), "playlist_owner_uri");
 								const ownerNameRead = readString(
-									owner?.name,
+									child(owner, "name"),
 									"playlist_owner_name",
 								);
 								ownerId = idFromUri(requireField(ownerUri, "spotify_playlist"));
@@ -1638,7 +1665,7 @@ async function collectSpotifyWebData(
 								"spotify_playlist",
 							);
 							const albumName = requireField(
-								readString(album?.name, "playlist_album_name"),
+								readString(child(album, "name"), "playlist_album_name"),
 								"spotify_playlist",
 							);
 							const durationContainer = sourceContainer(
@@ -1648,7 +1675,7 @@ async function collectSpotifyWebData(
 							);
 							const duration = requireField(
 								readCount(
-									durationContainer?.totalMilliseconds,
+									child(durationContainer, "totalMilliseconds"),
 									"playlist_track_duration",
 								),
 								"spotify_playlist",
@@ -1659,7 +1686,7 @@ async function collectSpotifyWebData(
 								"spotify_playlist",
 							);
 							const addedAtValue = requireField(
-								readString(addedAtContainer?.isoString, "playlist_added_at"),
+								readString(child(addedAtContainer, "isoString"), "playlist_added_at"),
 								"spotify_playlist",
 							);
 							if (
@@ -1676,12 +1703,12 @@ async function collectSpotifyWebData(
 								"spotify_playlist",
 							);
 							const addedBy = sourceContainer(
-								addedByContainer?.data,
+								child(addedByContainer, "data"),
 								"added_by_data",
 								"spotify_playlist",
 							);
 							const addedByName = requireField(
-								readString(addedBy?.name, "playlist_added_by"),
+								readString(child(addedBy, "name"), "playlist_added_by"),
 								"spotify_playlist",
 							);
 							const sourceTrackId = requireField(
@@ -1850,7 +1877,7 @@ async function collectSpotifyWebData(
 							"spotify_saved_tracks",
 						);
 						const trackData = sourceContainer(
-							trackContainer?.data,
+							child(trackContainer, "data"),
 							"track_data",
 							"spotify_saved_tracks",
 						);
@@ -1886,7 +1913,7 @@ async function collectSpotifyWebData(
 							"spotify_saved_tracks",
 						);
 						const albumArtistContainer = sourceContainer(
-							album?.artists,
+							child(album, "artists"),
 							"album_artists",
 							"spotify_saved_tracks",
 						);
@@ -1894,7 +1921,7 @@ async function collectSpotifyWebData(
 							sourceArtists(albumArtistContainer, "album_artists"),
 						);
 						const albumName = requireField(
-							readString(album?.name, "album_name"),
+							readString(child(album, "name"), "album_name"),
 						);
 						const durationContainer = sourceContainer(
 							t.duration,
@@ -1902,7 +1929,7 @@ async function collectSpotifyWebData(
 							"spotify_saved_tracks",
 						);
 						const duration = requireField(
-							readCount(durationContainer?.totalMilliseconds, "duration"),
+							readCount(child(durationContainer, "totalMilliseconds"), "duration"),
 						);
 						const contentRating = sourceContainer(
 							t.contentRating,
@@ -1910,7 +1937,7 @@ async function collectSpotifyWebData(
 							"spotify_saved_tracks",
 						);
 						const contentLabel = requireField(
-							readString(contentRating?.label, "content_rating_label"),
+							readString(child(contentRating, "label"), "content_rating_label"),
 						);
 						if (
 							contentLabel !== null &&
@@ -1928,7 +1955,7 @@ async function collectSpotifyWebData(
 							"spotify_saved_tracks",
 						);
 						const addedAt = requireField(
-							readString(addedAtContainer?.isoString, "added_at"),
+							readString(child(addedAtContainer, "isoString"), "added_at"),
 						);
 						if (
 							addedAt !== null &&
@@ -1955,7 +1982,7 @@ async function collectSpotifyWebData(
 							"spotify_saved_tracks",
 						);
 						const isrc = requireField(
-							readString(externalIds?.isrc, "track_isrc"),
+							readString(child(externalIds, "isrc"), "track_isrc"),
 							"spotify_saved_tracks",
 						);
 						coveredRowCount += 1;

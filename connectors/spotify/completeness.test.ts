@@ -7,6 +7,7 @@ import type {
 	EmittedMessage,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { completeSourceFields } from "./__fixtures__/complete-source-fields.ts";
 import { hasSpotifyEndProof } from "./completion-evidence.ts";
 import { spotifyCollect } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -36,15 +37,14 @@ function savedTrack(
 	id: string,
 	options: { addedAt?: string | null; uri?: string } = {},
 ): {
-	addedAt?: { isoString: unknown };
+	addedAt: { isoString: unknown };
 	track: { uri?: unknown; data: Record<string, unknown> };
 } {
 	return {
-		...("addedAt" in options
-			? options.addedAt === null
-				? {}
-				: { addedAt: { isoString: options.addedAt } }
-			: { addedAt: { isoString: "2024-01-01T00:00:00Z" } }),
+		addedAt: {
+			isoString:
+				"addedAt" in options ? options.addedAt : "2024-01-01T00:00:00Z",
+		},
 		track: {
 			...(options.uri === undefined
 				? { uri: `spotify:track:${id}` }
@@ -74,6 +74,8 @@ async function collectSavedTracks(
 		profileEnrichment?: unknown;
 		profileEnrichmentStatus?: number;
 		onFailure?: (result: FailedCollectionCapture) => void;
+		/** Set false to send fixtures exactly as written, with no absent field filled. */
+		completeFixtures?: boolean;
 	} = {},
 ) {
 	const originalFetch = globalThis.fetch;
@@ -167,12 +169,16 @@ async function collectSavedTracks(
 			if (body.operationName === "fetchLibraryTracks")
 				requests.push(body.variables.offset);
 			operations.push({ name: body.operationName, variables: body.variables });
-			const response = graphql(
+			const authored = graphql(
 				body.variables.offset,
 				operations.length,
 				body.operationName,
 				body.variables,
 			);
+			const response =
+				options.completeFixtures === false
+					? authored
+					: completeSourceFields(body.operationName, authored);
 			return new Response(JSON.stringify(response), { status: 200 });
 		}
 		throw new Error(`unexpected synthetic request: ${url}`);
@@ -1753,5 +1759,348 @@ test("Spotify end proof requires the exact player navigation, owner, request, an
 	assert.equal(
 		hasSpotifyEndProof({ ...evidence, discardedCount: 1 }, expected),
 		false,
+	);
+});
+
+function playlistLibraryResponse(): unknown {
+	return {
+		data: {
+			me: {
+				libraryV3: {
+					offset: 0,
+					totalCount: 1,
+					items: [
+						{
+							item: {
+								data: { __typename: "Playlist", uri: "spotify:playlist:pl1" },
+							},
+						},
+					],
+				},
+			},
+		},
+	};
+}
+
+function completePlaylistTrackItem(): Record<string, unknown> {
+	return {
+		addedAt: { isoString: "2024-01-01T00:00:00Z" },
+		addedBy: { data: { name: "Adder" } },
+		itemV2: {
+			data: {
+				__typename: "Track",
+				id: "t1",
+				uri: "spotify:track:t1",
+				name: "Track",
+				artists: { items: [] },
+				albumOfTrack: { name: "Album" },
+				trackDuration: { totalMilliseconds: 1000 },
+			},
+		},
+	};
+}
+
+function playlistDetailResponse(
+	uri: string,
+	offset: unknown,
+	items: unknown[],
+	overrides: Record<string, unknown> = {},
+): unknown {
+	return {
+		data: {
+			playlistV2: {
+				uri,
+				name: "Playlist",
+				public: false,
+				collaborative: false,
+				revisionId: "revision",
+				description: null,
+				followers: 0,
+				images: { items: [] },
+				ownerV2: { data: { uri: "spotify:user:owner", name: "Owner" } },
+				content: { totalCount: items.length, offset, items },
+				...overrides,
+			},
+		},
+	};
+}
+
+function playlistCoverage(
+	messages: EmittedMessage[],
+	stream: string,
+): { considered: number; covered: number } | null {
+	const message = messages.find(
+		(candidate) =>
+			candidate.type === "DETAIL_COVERAGE" && candidate.stream === stream,
+	);
+	return message?.type === "DETAIL_COVERAGE"
+		? { considered: message.considered ?? -1, covered: message.covered ?? -1 }
+		: null;
+}
+
+test("playlist detail containers that are not objects withhold the row instead of reading as empty", async () => {
+	for (const malformed of [
+		{ ownerV2: false },
+		{ ownerV2: [] },
+		{ ownerV2: { data: [] } },
+		{ images: [] },
+	]) {
+		const result = await collectSavedTracks(
+			(offset, _index, operationName, variables) =>
+				operationName === "libraryV3"
+					? playlistLibraryResponse()
+					: playlistDetailResponse(
+							String(variables?.uri),
+							offset,
+							[],
+							malformed,
+						),
+			{ requested: ["playlists"], completeFixtures: false },
+		);
+		assert.deepEqual(
+			result.emittedRecords.filter((record) => record.stream === "playlists"),
+			[],
+		);
+		assert.deepEqual(playlistCoverage(result.messages, "playlists"), {
+			considered: 1,
+			covered: 0,
+		});
+	}
+});
+
+test("playlist item containers that are not objects withhold the row instead of reading as empty", async () => {
+	const mutations: Array<(item: Record<string, unknown>) => void> = [
+		(item) => {
+			item.addedBy = false;
+		},
+		(item) => {
+			item.addedBy = { data: [] };
+		},
+		(item) => {
+			item.addedAt = [];
+		},
+		(item) => {
+			(item.itemV2 as { data: Record<string, unknown> }).data.artists = false;
+		},
+		(item) => {
+			(item.itemV2 as { data: Record<string, unknown> }).data.albumOfTrack =
+				[];
+		},
+		(item) => {
+			(item.itemV2 as { data: Record<string, unknown> }).data.trackDuration =
+				[];
+		},
+	];
+	for (const mutate of mutations) {
+		const result = await collectSavedTracks(
+			(offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") return playlistLibraryResponse();
+				const item = completePlaylistTrackItem();
+				mutate(item);
+				return playlistDetailResponse(String(variables?.uri), offset, [item]);
+			},
+			{ requested: ["playlist_items"], completeFixtures: false },
+		);
+		assert.deepEqual(
+			result.emittedRecords.filter(
+				(record) => record.stream === "playlist_items",
+			),
+			[],
+		);
+		assert.deepEqual(playlistCoverage(result.messages, "playlist_items"), {
+			considered: 1,
+			covered: 0,
+		});
+	}
+});
+
+test("a field absent from a playlist detail or item withholds the row, while an explicit null is kept", async () => {
+	const absentDetail = [
+		"name",
+		"public",
+		"collaborative",
+		"revisionId",
+		"description",
+		"followers",
+		"images",
+		"ownerV2",
+	];
+	for (const key of absentDetail) {
+		const result = await collectSavedTracks(
+			(offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") return playlistLibraryResponse();
+				const response = playlistDetailResponse(
+					String(variables?.uri),
+					offset,
+					[],
+				) as { data: { playlistV2: Record<string, unknown> } };
+				delete response.data.playlistV2[key];
+				return response;
+			},
+			{ requested: ["playlists"], completeFixtures: false },
+		);
+		assert.deepEqual(playlistCoverage(result.messages, "playlists"), {
+			considered: 1,
+			covered: 0,
+		});
+		assert.equal(
+			result.emittedRecords.some((record) => record.stream === "playlists"),
+			false,
+			`absent ${key} must withhold the playlist`,
+		);
+	}
+	const explicit = await collectSavedTracks(
+		(offset, _index, operationName, variables) =>
+			operationName === "libraryV3"
+				? playlistLibraryResponse()
+				: playlistDetailResponse(String(variables?.uri), offset, [], {
+						description: null,
+						followers: null,
+						images: null,
+					}),
+		{ requested: ["playlists"], completeFixtures: false },
+	);
+	assert.deepEqual(playlistCoverage(explicit.messages, "playlists"), {
+		considered: 1,
+		covered: 1,
+	});
+
+	const absentItem: Array<[string, (item: Record<string, unknown>) => void]> = [
+		["addedAt", (item) => delete item.addedAt],
+		["addedBy", (item) => delete item.addedBy],
+		[
+			"artists",
+			(item) =>
+				delete (item.itemV2 as { data: Record<string, unknown> }).data.artists,
+		],
+		[
+			"albumOfTrack",
+			(item) =>
+				delete (item.itemV2 as { data: Record<string, unknown> }).data
+					.albumOfTrack,
+		],
+		[
+			"trackDuration",
+			(item) =>
+				delete (item.itemV2 as { data: Record<string, unknown> }).data
+					.trackDuration,
+		],
+	];
+	for (const [key, remove] of absentItem) {
+		const result = await collectSavedTracks(
+			(offset, _index, operationName, variables) => {
+				if (operationName === "libraryV3") return playlistLibraryResponse();
+				const item = completePlaylistTrackItem();
+				remove(item);
+				return playlistDetailResponse(String(variables?.uri), offset, [item]);
+			},
+			{ requested: ["playlist_items"], completeFixtures: false },
+		);
+		assert.deepEqual(
+			playlistCoverage(result.messages, "playlist_items"),
+			{ considered: 1, covered: 0 },
+			`absent ${key} must withhold the playlist item`,
+		);
+	}
+	const explicitItem = await collectSavedTracks(
+		(offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") return playlistLibraryResponse();
+			const item = completePlaylistTrackItem();
+			item.addedBy = null;
+			item.addedAt = { isoString: null };
+			return playlistDetailResponse(String(variables?.uri), offset, [item]);
+		},
+		{ requested: ["playlist_items"], completeFixtures: false },
+	);
+	assert.deepEqual(playlistCoverage(explicitItem.messages, "playlist_items"), {
+		considered: 1,
+		covered: 1,
+	});
+});
+
+test("a field absent from a saved track withholds the row and STATE, while an explicit null is kept", async () => {
+	const absent: Array<[string, (row: ReturnType<typeof savedTrack>) => void]> = [
+		["duration", (row) => delete row.track.data.duration],
+		["contentRating", (row) => delete row.track.data.contentRating],
+		["popularity", (row) => delete row.track.data.popularity],
+		["externalIds", (row) => delete row.track.data.externalIds],
+		["artists", (row) => delete row.track.data.artists],
+		["albumOfTrack", (row) => delete row.track.data.albumOfTrack],
+		[
+			"albumOfTrack.artists",
+			(row) =>
+				delete (row.track.data.albumOfTrack as Record<string, unknown>).artists,
+		],
+		[
+			"addedAt",
+			(row) => delete (row as { addedAt?: unknown }).addedAt,
+		],
+	];
+	const complete = (id: string) => {
+		const row = savedTrack(id);
+		Object.assign(row.track.data, {
+			duration: { totalMilliseconds: 1000 },
+			contentRating: { label: "NONE" },
+			popularity: 10,
+			externalIds: { isrc: null },
+			albumOfTrack: { name: "Album", artists: { items: [] } },
+		});
+		return row;
+	};
+	for (const [key, remove] of absent) {
+		const row = complete("gap");
+		remove(row);
+		const result = await collectSavedTracks(
+			() => savedResponse([complete("whole"), row], 2),
+			{ completeFixtures: false },
+		);
+		assert.deepEqual(
+			result.emittedRecords.map((record) => record.data.id),
+			["whole"],
+			`absent ${key} must withhold the row`,
+		);
+		assert.deepEqual(playlistCoverage(result.messages, "saved_tracks"), {
+			considered: 2,
+			covered: 1,
+		});
+		assert.ok(
+			!result.messages.some(
+				(message) =>
+					message.type === "STATE" && message.stream === "saved_tracks",
+			),
+		);
+	}
+	const explicit = complete("explicit");
+	Object.assign(explicit.track.data, {
+		duration: null,
+		contentRating: null,
+		popularity: null,
+		externalIds: null,
+		artists: null,
+		albumOfTrack: null,
+	});
+	const kept = await collectSavedTracks(() => savedResponse([explicit], 1), {
+		completeFixtures: false,
+	});
+	assert.equal(kept.emittedRecords.length, 1);
+	assert.deepEqual(playlistCoverage(kept.messages, "saved_tracks"), {
+		considered: 1,
+		covered: 1,
+	});
+});
+
+test("a nonempty short playlist detail page without a total cannot be counted as complete", async () => {
+	await assertRejectedWithoutAuthority(
+		(offset, _index, operationName, variables) => {
+			if (operationName === "libraryV3") return playlistLibraryResponse();
+			const response = playlistDetailResponse(String(variables?.uri), offset, [
+				completePlaylistTrackItem(),
+			]) as {
+				data: { playlistV2: { content: Record<string, unknown> } };
+			};
+			delete response.data.playlistV2.content.totalCount;
+			return response;
+		},
+		{ requested: ["playlists"] },
 	);
 });

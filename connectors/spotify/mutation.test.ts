@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { completeSourceFields } from "./__fixtures__/complete-source-fields.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
@@ -577,7 +578,8 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 				if (body.operationName === "fetchPlaylist") {
 					const id = String(body.variables.uri).split(":").pop();
 					return new Response(
-						JSON.stringify({
+						JSON.stringify(
+							completeSourceFields(body.operationName, {
 							data: {
 								playlistV2: {
 									uri: `spotify:playlist:${id}`,
@@ -594,13 +596,14 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 									images: { items: [] },
 								},
 							},
-						}),
+						})),
 						{ status: 200 },
 					);
 				}
 				if (body.operationName === "fetchLibraryTracks") {
 					return new Response(
-						JSON.stringify({
+						JSON.stringify(
+							completeSourceFields(body.operationName, {
 							data: {
 								me: {
 									library: {
@@ -609,6 +612,7 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 											totalCount: 3,
 											items: [
 												{
+													addedAt: { isoString: null },
 													track: {
 														uri: "spotify:track:missingDate",
 														data: {
@@ -642,6 +646,7 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 														uri: "spotify:track:unknownExplicit",
 														data: {
 															name: "Unknown Explicit",
+															contentRating: null,
 															artists: { items: [] },
 															albumOfTrack: { artists: { items: [] } },
 														},
@@ -652,7 +657,7 @@ test("spotify browser parser paginates library, skips undated saved tracks, and 
 									},
 								},
 							},
-						}),
+						})),
 						{ status: 200 },
 					);
 				}
@@ -827,7 +832,11 @@ async function collectWithInPageFetch(
 					operationName: string;
 					variables: Record<string, unknown>;
 				};
-				const result = graphql(body.operationName, body.variables);
+				const raw = graphql(body.operationName, body.variables);
+				const result =
+					raw instanceof Response
+						? raw
+						: completeSourceFields(body.operationName, raw);
 				return result instanceof Response
 					? result
 					: new Response(JSON.stringify(result), { status: 200 });
