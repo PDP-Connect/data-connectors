@@ -2581,8 +2581,8 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 		},
 	]);
 	assert.ok(
-		first.stateAckOrder < first.resultWriteOrder,
-		"the runtime must await the shell's STATE acknowledgement before publishing the result",
+		first.resultWriteOrder < first.stateAckOrder,
+		"the runtime must publish buffered records before writing their checkpoint",
 	);
 	assert.ok(
 		!first.log.some((line) => line.includes("91000000000")),
@@ -2631,11 +2631,11 @@ test("strava_browser: STATE resumes a synthetic multi-run detail backfill", {
 	const failed = await run(third.states, { failResultWrite: true });
 	assert.deepEqual(failed.ret, { ok: true }, failed.log.slice(-20).join("\n"));
 	assert.equal(failed.data.error, "synthetic result write failed");
-	assert.equal(failed.stateMessages[0].cursor.pending_detail_ids.length, 0);
+	assert.deepEqual(failed.stateMessages, []);
 	assert.deepEqual(
 		failed.states,
 		third.states,
-		"a failed result write must not commit the staged cursor",
+		"a failed result write must not send a checkpoint",
 	);
 });
 
@@ -3215,6 +3215,8 @@ test("oura_browser: one failed window after successful data never reports Comple
 		assert.deepEqual(result.errors.map((e) => [e.scope, e.errorClass, e.disposition]),
 			[["oura.sleep", "partial", "degraded"]]);
 		assert.ok(result.exportSummary.count > 0);
+		assert.deepEqual(r.stateMessages, []);
+		assert.deepEqual(r.states, {});
 	}
 });
 
@@ -3236,4 +3238,79 @@ test("oura_browser: scope metadata rejects unsupported selections before data co
 	assert.deepEqual(legacy.ret, { ok: true });
 	assert.deepEqual(legacy.result.errors, []);
 	assert.ok(legacy.result["oura.sleep"].records.length > 0);
+});
+
+test("oura_browser: legacy Proxy without optional scope metadata collects string scopes", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/oura_browser.mjs");
+	const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-legacy-proxy.js") });
+	const r = await runHarness({ bundle: built.outfile, fixtures: c.fixtures,
+		scopes: ["oura.sleep"], missingScopeEntries: true, supportsStateArgument: false });
+	assert.deepEqual(r.ret, { ok: true });
+	assert.equal(r.data.error, undefined);
+	assert.deepEqual(r.result.errors, []);
+	assert.ok(r.result["oura.sleep"].records.length > 0);
+	assert.match(r.data.status, /^Complete!/);
+	assert.deepEqual(r.stateMessages, []);
+	assertCleanRun(r);
+});
+
+test("oura_browser: capped coverage persists ordered STATE and resumes on both hosts", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+	const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-resume.js") });
+	const scopes = [{ name: "oura.sleep", time_range: { since: "2020-01-01", until: "2021-01-01" } }];
+	for (const resultStreaming of [false, true]) {
+		const run = async (initialState = {}, options = {}) => {
+			const fixture = recordingDailyFixture();
+			const writes = [];
+			const r = await runHarness({ bundle: built.outfile,
+				fixtures: { ...c.fixtures, resolve: fixture.resolve }, scopes,
+				initialState, resultStreaming, stateAckDelayMs: 25,
+				resultSpoolDirectory: join(out, "oura-resume-" + resultStreaming + "-" + (initialState["oura.sleep"]?.next_day ?? "first") + "-" + (options.supportsStateArgument !== false)),
+				observeBridge(method, args) { if (method === "setData") writes.push(args[0]); },
+				...options });
+			assert.deepEqual(r.ret, { ok: true });
+			assert.equal(r.data.error, undefined);
+			assert.match(r.data.status, /^Partial:/);
+			const result = resultStreaming ? r.streamDone : r.result;
+			assert.equal(result.exportSummary.count, 90);
+			assert.deepEqual(result.errors.map(({ errorClass, code, recovery_hint }) => ({ errorClass, code, recovery_hint })), [{
+				errorClass: "partial", code: "oura_browser_window_deferred",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			}]);
+			assertCleanRun(r);
+			return { r, windows: fixture.windows, writes };
+		};
+		const first = await run();
+		assert.equal(first.windows[0].start, "2020-01-01");
+		assert.equal(first.windows.at(-1).end, "2020-03-30");
+		assert.equal(first.r.states["oura.sleep"].next_day, "2020-03-31");
+		assert.equal(first.r.stateMessages.length, 1);
+		const payload = resultStreaming ? "result:scope-done" : "result";
+		assert.ok(first.writes.indexOf(payload) < first.writes.indexOf("STATE"));
+		if (resultStreaming) assert.ok(first.writes.indexOf("STATE") < first.writes.indexOf("result:done"));
+		const second = await run(first.r.states);
+		assert.equal(second.windows[0].start, "2020-03-31");
+		assert.equal(second.windows.at(-1).end, "2020-06-28");
+		assert.equal(second.r.states["oura.sleep"].next_day, "2020-06-29");
+		const legacy = await run({}, { supportsStateArgument: false });
+		assert.equal(legacy.windows[0].start, "2020-01-01");
+		assert.deepEqual(legacy.r.stateMessages, []);
+	}
+});
+
+test("oura_browser: failed buffered payload never advances STATE", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+	const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-result-failure.js") });
+	for (const resultStreaming of [false, true]) {
+		const fixture = recordingDailyFixture();
+		const r = await runHarness({ bundle: built.outfile,
+			fixtures: { ...c.fixtures, resolve: fixture.resolve },
+			scopes: [{ name: "oura.sleep", time_range: { since: "2020-01-01", until: "2020-01-08" } }],
+			resultStreaming, resultSpoolDirectory: join(out, "oura-rejected-" + resultStreaming),
+			...(resultStreaming ? { resultStreamFailure: { key: "result:chunk", sequence: 0 } } : { failResultWrite: true }) });
+		assert.deepEqual(r.ret, { ok: true });
+		assert.ok(r.data.error);
+		assert.deepEqual(r.stateMessages, []);
+		assert.deepEqual(r.states, {});
+	}
 });

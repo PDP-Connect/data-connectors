@@ -386,6 +386,8 @@ type ConnectorError = {
 	disposition: string;
 	scope?: string;
 	phase: string;
+	code?: string;
+	recovery_hint?: { action: string; retryable: boolean };
 };
 
 class FatalRunError extends Error {
@@ -491,6 +493,7 @@ export async function runOnPageShim(
 	// collected in full, so no records means the account has none.
 	const checkpointedStreams = new Set<string>();
 	const skippedStreams = new Set<string>();
+	const checkpointBlockedStreams = new Set<string>();
 	const streamedStreams = new Set<string>();
 	// A thin host accepts streamed results only (mobile-host-v1 amendment A6).
 	const streamingHost = hostAcceptsStreamedResults(pageShim);
@@ -499,6 +502,16 @@ export async function runOnPageShim(
 			? connector.streamScopeRecords
 			: null;
 	const pendingRecords: Record<string, Rec[]> = {};
+	// Buffered records have not reached the host when collect emits STATE.
+	// Keep the latest checkpoint until their result payload is acknowledged.
+	const bufferedStates = new Map<string, unknown>();
+	const flushBufferedStates = async (): Promise<void> => {
+		for (const [scope, cursor] of bufferedStates) {
+			if (checkpointBlockedStreams.has(scope.slice(prefix.length))) continue;
+			await shim.setData("STATE", { type: "STATE", stream: scope, cursor });
+			bufferedStates.delete(scope);
+		}
+	};
 	const streamCounts: Record<string, number> = {};
 	let streamProtocolUsed = false;
 	let activeStream: string | null = null;
@@ -761,12 +774,17 @@ export async function runOnPageShim(
 				if (!scope) throw new Error(`unsupported STATE stream: ${stream}`);
 				// A checkpoint must not reach the host before the records it covers.
 				await flushStreamText(true);
-				if (supportsState)
-					await shim.setData("STATE", {
-						type: "STATE",
-						stream: scope,
-						cursor: msg.cursor,
-					});
+				if (supportsState && !checkpointBlockedStreams.has(stream)) {
+					if (!streamConfig || stream !== streamConfig.order[0]) {
+						bufferedStates.set(scope, msg.cursor);
+					} else {
+						await shim.setData("STATE", {
+							type: "STATE",
+							stream: scope,
+							cursor: msg.cursor,
+						});
+					}
+				}
 				state[stream] = msg.cursor;
 				checkpointedStreams.add(stream);
 				return;
@@ -774,21 +792,35 @@ export async function runOnPageShim(
 			case "SKIP_RESULT": {
 				const stream = String(msg.stream);
 				skippedStreams.add(stream);
+				const hint = msg.recovery_hint as
+					| { action?: unknown; retryable?: unknown }
+					| undefined;
+				const deferredCoverage =
+					String(msg.reason).endsWith("_deferred") &&
+					hint?.action === "retry_by_runtime" &&
+					hint.retryable === true;
+				// Intentional omissions and failed windows cannot advance coverage.
+				// A capped, retryable prefix can resume from its acknowledged rows.
+				if (!deferredCoverage) checkpointBlockedStreams.add(stream);
 				const reason = String(msg.message ?? msg.reason).slice(
 					0,
 					ERROR_TEXT_MAX_UNITS,
 				);
 				errors.push({
-					// A failed stream leaves requested data uncollected, so the
-					// run is partial; other skips are intentional omissions.
+					// Failed or deferred coverage leaves requested data uncollected.
+					// Other skips remain intentional omissions.
 					errorClass:
-						msg.reason === "stream_collection_failed"
+						(msg.reason === "stream_collection_failed" || deferredCoverage)
 							? "partial"
 							: inferErrorClass(reason),
 					reason,
 					disposition: (streamCounts[stream] ?? 0) ? "degraded" : "omitted",
 					scope: `${prefix}${stream}`,
 					phase: "collect",
+					...(deferredCoverage ? {
+						code: String(msg.reason),
+						recovery_hint: { action: "retry_by_runtime", retryable: true },
+					} : {}),
 				});
 				return;
 			}
@@ -981,6 +1013,7 @@ export async function runOnPageShim(
 				await finishStreamScope();
 			}
 			if (streamedScopeCount > 0) {
+				await flushBufferedStates();
 				const exportSummary = streamConfig.summarizeCounts(streamCounts);
 				await sendStreamMessage("result:done", {
 					scopeCount: streamedScopeCount,
@@ -1021,6 +1054,7 @@ export async function runOnPageShim(
 					chunkCount: activeSequence,
 				});
 			}
+			await flushBufferedStates();
 			const exportSummary = connector.summarize(scopes);
 			await sendStreamMessage("result:done", {
 				scopeCount: scopeEntries.length,
@@ -1038,6 +1072,7 @@ export async function runOnPageShim(
 			);
 		}
 		await shim.setData("result", done);
+		await flushBufferedStates();
 		await shim.setData("status", completionStatus(done.exportSummary));
 	} catch (error) {
 		const reason = (

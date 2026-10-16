@@ -108,6 +108,7 @@ async function hostMain({
 	timerScale,
 	clockNowMs,
 	includeScopeEntries,
+	omitScopeEntries,
 	thinHost,
 }) {
 	window.__pageshimEnv = env || {};
@@ -212,6 +213,7 @@ async function hostMain({
 	};
 	if (Object.keys(impl).join() !== methods.join())
 		throw new Error("harness shim drifted from SHIM_METHODS");
+	if (omitScopeEntries) delete impl.requestedScopeEntries;
 	const page = new Proxy(impl, {
 		get(t, k) {
 			if (typeof k === "symbol" || k === "then") return undefined;
@@ -497,6 +499,7 @@ export async function runHarness({
 	readBridgeLatencyMs = 0,
 	clockNowMs,
 	legacyScopeBridge = false,
+	missingScopeEntries = false,
 	acceptLegacyResult,
 	observeBridge,
 }) {
@@ -506,7 +509,6 @@ export async function runHarness({
 	const pageNavigations = [];
 	const data = {};
 	const states = { ...initialState };
-	const stagedStates = {};
 	const stateMessages = [];
 	let failedResultWrite = false;
 	let eventOrder = 0;
@@ -633,7 +635,7 @@ export async function runHarness({
 						const message = JSON.parse(JSON.stringify(a[1]));
 						stateAckOrder = ++eventOrder;
 						stateMessages.push(message);
-						stagedStates[message.stream] = message.cursor;
+						states[message.stream] = message.cursor;
 					} else data[a[0]] = a[1];
 					return null;
 				case "setProgress":
@@ -785,22 +787,11 @@ export async function runHarness({
 			timerScale,
 			clockNowMs,
 			includeScopeEntries: !legacyScopeBridge,
+			omitScopeEntries: missingScopeEntries,
 			thinHost: resultStreaming,
 		});
 		sampling = false;
 		await sampler;
-		if (
-			ret?.ok &&
-			data.error == null &&
-			(result || streamHost.doneValue)
-		) {
-			for (const [scope, cursor] of Object.entries(stagedStates)) {
-				if (result && !Object.hasOwn(result, scope)) continue;
-				const errors = result?.errors ?? streamHost.doneValue?.errors ?? [];
-				if (errors.some((error) => error.scope === scope)) continue;
-				states[scope] = cursor;
-			}
-		}
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));
 		return {
 			ret,
