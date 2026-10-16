@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buildFullScanCoverageMessage, type EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 
 // TODO #418: replace this local compatibility helper with the shared runtime export.
 /**
@@ -19,10 +19,26 @@ export function fullInventoryCoverage(
 	},
 ): EmittedMessage {
 	const { considered, covered } = enumeration;
-	if (enumeration.kind === "enumerated" && enumeration.complete &&
-		Number.isSafeInteger(considered) && considered >= 0 &&
-		Number.isSafeInteger(covered) && covered === considered) {
-		return buildFullScanCoverageMessage(stream, considered);
+	if (
+		enumeration.kind === "enumerated" &&
+		enumeration.complete &&
+		Number.isSafeInteger(considered) &&
+		considered >= 0 &&
+		Number.isSafeInteger(covered) &&
+		covered === considered
+	) {
+		// Same shape as the runtime's buildFullScanCoverageMessage. Built here so
+		// the host-portable collector imports no runtime value.
+		return {
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream,
+			state_stream: stream,
+			required_keys: [],
+			hydrated_keys: [],
+			considered,
+			covered: considered,
+		};
 	}
 	return {
 		type: "SKIP_RESULT",
@@ -33,4 +49,3 @@ export function fullInventoryCoverage(
 		diagnostics: { enumeration },
 	};
 }
-
