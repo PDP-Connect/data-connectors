@@ -127,45 +127,174 @@ export function scanFullInventoryClaims(source: string): ClaimCounts {
 		);
 
 	const counts: ClaimCounts = { full_scan: 0, self_coverage: 0 };
-	const aliases = new Map<string, string>(
-		[...HELPERS].map((helper) => [helper, helper]),
-	);
-	const namespaces = new Set<string>();
-	visit(ast, (node) => {
+	// Bind declarations to their lexical scope before resolving any aliases.
+	// A file-wide name map oscillates when nested scopes reuse an alias.
+	interface Scope {
+		parent?: Scope;
+		hoists: boolean;
+		bindings: Map<string, Binding>;
+	}
+	interface Binding {
+		scope: Scope;
+		init?: unknown;
+		value?: string | null;
+	}
+	const root: Scope = { hoists: true, bindings: new Map() };
+	const scopes = new WeakMap<AstNode, Scope>();
+	const bindings: Binding[] = [];
+	const bind = (
+		scope: Scope,
+		name: string,
+		init?: unknown,
+		value?: string | null,
+	): void => {
+		const binding: Binding = {
+			scope,
+			init,
+			...(value === undefined ? {} : { value }),
+		};
+		scope.bindings.set(name, binding);
+		bindings.push(binding);
+	};
+	// Destructured parameters/locals also shadow imports. Only plain const
+	// aliases and namespace members carry helper identity.
+	const bindPattern = (pattern: unknown, scope: Scope): void => {
+		if (!isNode(pattern)) return;
+		if (pattern.type === "Identifier")
+			bind(scope, String(pattern.name), undefined, null);
+		else if (pattern.type === "AssignmentPattern") bindPattern(pattern.left, scope);
+		else if (pattern.type === "RestElement") bindPattern(pattern.argument, scope);
+		else if (pattern.type === "ArrayPattern") {
+			for (const item of (pattern.elements as unknown[]) ?? [])
+				bindPattern(item, scope);
+		} else if (pattern.type === "ObjectPattern") {
+			for (const item of (pattern.properties as unknown[]) ?? [])
+				if (isNode(item))
+					bindPattern(
+						item.type === "RestElement" ? item.argument : item.value,
+						scope,
+					);
+		}
+	};
+	const functionTypes = new Set([
+		"FunctionDeclaration",
+		"FunctionExpression",
+		"ArrowFunctionExpression",
+		"ObjectMethod",
+		"ClassMethod",
+		"ClassPrivateMethod",
+	]);
+	const blockTypes = new Set([
+		"BlockStatement",
+		"CatchClause",
+		"ForStatement",
+		"ForInStatement",
+		"ForOfStatement",
+		"SwitchStatement",
+		"ClassDeclaration",
+		"ClassExpression",
+	]);
+	const collect = (node: unknown, outer: Scope, parent?: AstNode): void => {
+		if (Array.isArray(node)) {
+			for (const child of node) collect(child, outer, parent);
+			return;
+		}
+		if (!isNode(node)) return;
+		if (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") {
+			const name = nameOf(node.id);
+			if (name) bind(outer, name, undefined, null);
+		}
+		const isFunction = functionTypes.has(node.type);
+		const scope: Scope =
+			isFunction || blockTypes.has(node.type)
+				? { parent: outer, hoists: isFunction, bindings: new Map() }
+				: outer;
+		scopes.set(node, scope);
+		if (isFunction) {
+			if (node.type === "FunctionExpression") bindPattern(node.id, scope);
+			for (const param of (node.params as unknown[]) ?? [])
+				bindPattern(param, scope);
+		} else if (node.type === "CatchClause") bindPattern(node.param, scope);
+		else if (node.type === "ClassExpression") bindPattern(node.id, scope);
 		if (node.type === "ImportSpecifier") {
-			const imported = nameOf(node.imported);
 			const local = nameOf(node.local);
-			if (imported && local && HELPERS.has(imported))
-				aliases.set(local, imported);
+			const imported = nameOf(node.imported);
+			if (local)
+				bind(scope, local, undefined, imported && HELPERS.has(imported) ? imported : null);
 		} else if (node.type === "ImportNamespaceSpecifier") {
 			const local = nameOf(node.local);
-			if (local) namespaces.add(local);
+			if (local) bind(scope, local, undefined, "namespace");
+		} else if (node.type === "ImportDefaultSpecifier") {
+			bindPattern(node.local, scope);
+		} else if (node.type === "VariableDeclarator") {
+			let targetScope = scope;
+			if (parent?.type === "VariableDeclaration" && parent.kind === "var")
+				while (!targetScope.hoists && targetScope.parent)
+					targetScope = targetScope.parent;
+			const name = nameOf(node.id);
+			if (name) {
+				// The initializer resolves where it was declared, including for var.
+				const binding: Binding = { scope, init: node.init };
+				targetScope.bindings.set(name, binding);
+				bindings.push(binding);
+			} else bindPattern(node.id, targetScope);
 		}
-	});
-	/** The helper an expression names: an alias, or a namespace member. */
-	const helperOf = (expression: unknown): string | null => {
+		for (const [key, child] of Object.entries(node))
+			if (key !== "loc" && key !== "errors" && typeof child === "object")
+				collect(child, scope, node);
+	};
+	collect(ast, root);
+
+	const resolved = new Map<Binding, string | null>();
+	const resolving = new Set<Binding>();
+	const resolveBinding = (binding: Binding): string | null => {
+		if (resolved.has(binding)) return resolved.get(binding) ?? null;
+		if (resolving.has(binding))
+			throw new Error("full-inventory claim scan: unresolvable alias cycle");
+		resolving.add(binding);
+		const value =
+			binding.value !== undefined
+				? binding.value
+				: resolveExpression(binding.init, binding.scope);
+		resolving.delete(binding);
+		resolved.set(binding, value);
+		return value;
+	};
+	const resolveExpression = (expression: unknown, scope: Scope): string | null => {
 		if (!isNode(expression)) return null;
-		if (expression.type === "Identifier")
-			return aliases.get(String(expression.name)) ?? null;
+		if (expression.type === "Identifier") {
+			const name = String(expression.name);
+			for (
+				let current: Scope | undefined = scope;
+				current;
+				current = current.parent
+			) {
+				const binding = current.bindings.get(name);
+				if (binding) return resolveBinding(binding);
+			}
+			return HELPERS.has(name) ? name : null;
+		}
 		if (expression.type === "MemberExpression") {
 			const member = nameOf(expression.property);
-			if (member && HELPERS.has(member)) return member;
+			if (
+				(!expression.computed ||
+					(isNode(expression.property) && expression.property.type === "StringLiteral")) &&
+				member &&
+				HELPERS.has(member) &&
+				resolveExpression(expression.object, scope) === "namespace"
+			)
+				return member;
 		}
 		return null;
 	};
-	// Re-bindings, repeated until stable so a chain of consts resolves.
-	for (let changed = true; changed; ) {
-		changed = false;
-		visit(ast, (node) => {
-			if (node.type !== "VariableDeclarator") return;
-			const target = nameOf(node.id);
-			const helper = helperOf(node.init);
-			if (target && helper && aliases.get(target) !== helper) {
-				aliases.set(target, helper);
-				changed = true;
-			}
-		});
-	}
+	// Resolve each declaration once, including unused cyclic aliases: a partial
+	// scan of an unresolvable source must fail closed, never return a count.
+	for (const binding of bindings) resolveBinding(binding);
+	const helperOf = (expression: unknown): string | null =>
+		resolveExpression(
+			expression,
+			isNode(expression) ? scopes.get(expression) ?? root : root,
+		);
 	const isSelfClaim = (object: unknown, stateKey: string): boolean => {
 		if (!isNode(object) || object.type !== "ObjectExpression") return false;
 		const stream = comparableOf(property(object, "stream"), source);
