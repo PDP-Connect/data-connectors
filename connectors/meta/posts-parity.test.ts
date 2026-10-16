@@ -1092,3 +1092,69 @@ for (const { label, late, expected, complete } of [
 		assert.ok(emitted.some(row => row.stream === "following" && row.data.id === "followed"));
 	});
 }
+
+function versionTimeline(node: Record<string, unknown>): RawEnvelope {
+	const body = timelineEnvelope([{ node }], { has_next_page: false });
+	(body.data as RawEnvelope).user = { id: "u1", username: "testuser" };
+	return body;
+}
+
+for (const scenario of [
+	{ label: "growing likers", later: { like_count: 2, facepile_top_likers: [{ id: "L1" }, { id: "L2" }] }, caption: "first", count: 2, likes: ["L1", "L2"], complete: false },
+	{ label: "changed caption", later: { caption: { text: "latest" } }, caption: "latest", count: 1, likes: ["L1"], complete: false },
+	{ label: "changed unmapped field", later: { source_extra: "changed" }, caption: "first", count: 1, likes: ["L1"], complete: false },
+	{ label: "malformed later post", later: { taken_at: "bad" }, caption: "first", count: 1, likes: ["L1"], complete: false },
+	{ label: "malformed later likers", later: { facepile_top_likers: [null, { id: "L2" }] }, caption: "first", count: 1, likes: ["L1", "L2"], complete: false },
+	{ label: "replacement liker sample", later: { facepile_top_likers: [{ id: "L2" }] }, caption: "first", count: 1, likes: ["L1", "L2"], complete: false },
+	{ label: "identical repeat", later: {}, caption: "first", count: 1, likes: ["L1"], complete: true },
+]) {
+	test(`collectAllStreams: same post version ${scenario.label}`, async () => {
+		const first = { id: "A", taken_at: 1_700_000_001, caption: { text: "first" }, like_count: 1, facepile_top_likers: [{ id: "L1" }] };
+		const { emitted, messages } = await collectWithSettledResponses([
+			{ status: 200, json: versionTimeline(first) },
+			{ status: 200, json: versionTimeline({ ...first, ...scenario.later }) },
+		]);
+		const posts = emitted.filter(row => row.stream === "posts");
+		assert.equal(posts.length, 1);
+		assert.equal(posts[0]?.data.caption, scenario.caption);
+		assert.equal(posts[0]?.data.like_count, scenario.count);
+		const likes = emitted.filter(row => row.stream === "post_likes");
+		assert.deepEqual(likes.map(row => row.data.user_id), scenario.likes);
+		assert.deepEqual(likes.map(row => row.data.liker_ordinal), scenario.likes.map((_, i) => i));
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), scenario.complete, `${stream} completion`);
+			const skips = messages.filter(message => message.type === "SKIP_RESULT" && message.stream === stream);
+			assert.equal(skips.length, scenario.complete ? 0 : 1);
+			if (!scenario.complete) {
+				assert.equal(skips[0]?.reason, "inventory_not_proven_complete");
+				assert.equal(skips[0]?.recovery_hint?.retryable, true);
+			}
+		}
+	});
+}
+
+for (const kind of ["changed", "unreadable", "identical"] as const) {
+	test(`fetchAllPosts: paginated duplicate is validated before deduplication (${kind})`, async () => {
+		const first = { id: "A", taken_at: 1_700_000_001, like_count: 1, facepile_top_likers: [{ id: "L1" }] };
+		const later = kind === "changed" ? { ...first, like_count: 2, facepile_top_likers: [{ id: "L2" }] }
+			: kind === "unreadable" ? { ...first, taken_at: "bad" } : { ...first };
+		const read = fetchAllPosts(makePostsPage({ postsScript: [
+			{ status: 200, json: timelineEnvelope([{ node: first }], { has_next_page: true, end_cursor: "next" }) },
+			{ status: 200, after: "next", json: timelineEnvelope([{ node: later }], { has_next_page: false }) },
+		] }), "testuser", null, undefined, NO_DELAY, FAST_POSTS_CLOCK);
+		if (kind === "identical") {
+			const result = await read;
+			assert.equal(result.edges.length, 1);
+			assert.equal(result.sourceEnd, true);
+		} else {
+			await assert.rejects(read, (error: unknown) => {
+				const failure = error as Error & { partial: Array<{ node: typeof first }> };
+				assert.match(failure.message, /meta_posts_timeline_contradictory/);
+				assert.equal(failure.partial.length, 1);
+				assert.equal(failure.partial[0]?.node.like_count, kind === "changed" ? 2 : 1);
+				assert.deepEqual(failure.partial[0]?.node.facepile_top_likers.map(liker => liker.id), kind === "changed" ? ["L1", "L2"] : ["L1"]);
+				return true;
+			});
+		}
+	});
+}

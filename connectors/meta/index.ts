@@ -139,6 +139,7 @@
  *   v0.1.0 — scaffold: session probe only, unconditional SKIP_RESULT.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Frame, Page, Request } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
@@ -982,6 +983,56 @@ export async function fetchAllPosts(
 }> {
 	const edges: InstagramTimelineEdge[] = [];
 	const seenIds = new Set<string>();
+	const postIndexes = new Map<string, number>();
+	const readableVersions = new Map<string, InstagramTimelineEdge>();
+	let conflictingVersions = false;
+	// Validate each observation before considering its id a duplicate. Keep the
+	// raw readable snapshot separate from the merged liker sample for comparison.
+	const reconcilePost = (edge: InstagramTimelineEdge, id: string): void => {
+		let readable = false;
+		try {
+			const record = postRecord(edge);
+			readable = record !== null && postsSchema.safeParse(record).success;
+		} catch { /* Keep an earlier readable post, if any. */ }
+		let likesReadable = true;
+		const likers: NonNullable<InstagramTimelineEdge["node"]["facepile_top_likers"]> = [];
+		try {
+			for (const like of postLikeRecords(edge, () => { likesReadable = false; })) {
+				if (!postLikesSchema.safeParse(like).success) { likesReadable = false; continue; }
+				likers.push(edge.node.facepile_top_likers![like.liker_ordinal]!);
+			}
+		} catch { likesReadable = false; }
+		if (!readable || !likesReadable) conflictingVersions = true;
+		const previousVersion = readableVersions.get(id);
+		if (readable) {
+			if (previousVersion && !isDeepStrictEqual(previousVersion.node, edge.node)) conflictingVersions = true;
+			readableVersions.set(id, edge);
+		}
+		const index = postIndexes.get(id);
+		if (index === undefined) {
+			postIndexes.set(id, edges.length);
+			seenIds.add(id);
+			edges.push(edge);
+			return;
+		}
+		const previous = edges[index]!;
+		// Preserve legacy ordinals for identical repeats, including anonymous likers.
+		if (isDeepStrictEqual(previous.node, edge.node)) return;
+		const union: typeof likers = [];
+		for (const candidate of [previous, { node: { ...edge.node, facepile_top_likers: likers } }]) {
+			for (const like of postLikeRecords(candidate)) {
+				if (!postLikesSchema.safeParse(like).success) continue;
+				const liker = candidate.node.facepile_top_likers![like.liker_ordinal]!;
+				const existing = union.findIndex(item => like.user_id
+					? (item.id || item.pk) === like.user_id
+					: isDeepStrictEqual(item, liker));
+				if (existing < 0) union.push(liker);
+				else union[existing] = liker;
+			}
+		}
+		edges[index] = { ...(readable ? edge : previous),
+			node: { ...(readable ? edge.node : previous.node), facepile_top_likers: union } };
+	};
 	let sawValidResponse = false;
 	let ownerBound = true;
 	const owner = {id: expectedUserId ?? "", username};
@@ -1254,29 +1305,21 @@ export async function fetchAllPosts(
 					connection,
 					{ status: response.status() },
 				);
-				const pageEdges = (connection?.edges ?? []).filter((edge) => {
+				const before = edges.length;
+				for (const edge of connection.edges) {
 					if (!edge?.node || typeof edge.node !== "object") {
 						unrecordableSourceEdges += 1;
-						return false;
+						continue;
 					}
-					const id =
-						edge.node.id ??
-						edge.node.pk ??
-						edge.node.media_id ??
-						edge.node.code;
-					if (!id) {
+					const id = edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
+					if (typeof id !== "string" || !id) {
 						unrecordableSourceEdges += 1;
-						return false;
+						continue;
 					}
-					if (seenIds.has(id)) {
-						return false;
-					}
-					seenIds.add(id);
-					return true;
-				});
-				edges.push(...pageEdges);
+					reconcilePost(edge, id);
+				}
 				await progress?.("Fetched Instagram posts page", {
-					item_count: pageEdges.length,
+					item_count: edges.length - before,
 					page_index: pageNumber,
 					total_seen: edges.length,
 				});
@@ -1351,14 +1394,12 @@ export async function fetchAllPosts(
 						continue;
 					}
 					const id = edge.node.id ?? edge.node.pk ?? edge.node.media_id ?? edge.node.code;
-					if (!id) {
+					if (typeof id !== "string" || !id) {
 						unrecordableSourceEdges += 1;
 						continue;
 					}
 					responseIds.add(id);
-					if (seenIds.has(id)) continue;
-					seenIds.add(id);
-					edges.push(edge);
+					reconcilePost(edge, id);
 				}
 				if ([...seenIds].some(id => !responseIds.has(id))) {
 					settleFailure ??= new Error(
@@ -1377,6 +1418,12 @@ export async function fetchAllPosts(
 		}
 	}
 	stopObserving();
+	if (conflictingVersions) {
+		throw new PartialWalkFailure(
+			new Error("meta_posts_timeline_contradictory: post versions changed or were unreadable"),
+			edges,
+		);
+	}
 	if (unrecordableSourceEdges > 0) {
 		throw new PartialWalkFailure(
 			new Error("meta_posts_unrecordable_edges: posts included unreadable ids"),
