@@ -12,7 +12,10 @@ import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/s
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
+	type EmitDeps,
 	fetchOrderDetail,
+	newOrderItemsCoverage,
+	processListOrder,
 	type RunFlags,
 	recoverPendingOrderItemDetailGaps,
 } from "./index.ts";
@@ -228,6 +231,65 @@ test("fetchOrderDetail: without a card a slow append is waited for, not missed",
 			assert.ok(Number(snapshots) >= 10, `snapshots=${String(snapshots)}`);
 		},
 	);
+});
+
+test("a canceled order that declares 0 items keeps the rows its captured page lists", async () => {
+	await withDetailPage(fixture("order-detail.html"), async (page) => {
+		const harness = makeRecordingEmit(validateRecord);
+		const coverage = newOrderItemsCoverage();
+		const deps: EmitDeps = {
+			emit: harness.emit,
+			emitItems: true,
+			emitRecord: harness.emitRecord,
+			emittedAt: "2026-10-17T12:00:00.000Z",
+			orderItemsCoverage: coverage,
+			ordersCoverage: undefined,
+			ordersFingerprintCursor: undefined,
+			progress: (): Promise<void> => Promise.resolve(),
+			sendInteraction: (): ReturnType<
+				BrowserCollectContext["sendInteraction"]
+			> => {
+				throw new Error("sendInteraction should not be called");
+			},
+			waitForHydration: immediateWait,
+			wantsItems: true,
+			wantsOrders: true,
+		};
+		await processListOrder(
+			page,
+			deps,
+			{
+				detailAttempts: 0,
+				isManualRun: false,
+				manualRepairAttempted: false,
+				sessionRepairRequired: false,
+			},
+			{
+				fulfillmentLocation: null,
+				fulfillmentMethod: "curbside",
+				itemCount: 0,
+				orderDateRaw: "October 4, 2025",
+				orderId: "HEB1000000001",
+				source: "dom",
+				status: "Order canceled",
+				statusCode: null,
+				storeName: null,
+				timeslotEnd: null,
+				timeslotStart: null,
+				total: "$0.00",
+				unfulfilledCount: 0,
+			},
+		);
+		assert.deepEqual(coverage.hydrated, ["HEB1000000001"]);
+		assert.deepEqual(coverage.empty, []);
+		assert.deepEqual(coverage.gap, []);
+		assert.equal(
+			harness.emitted.filter((record) => record.stream === "order_items")
+				.length,
+			3,
+			"a position-free page under a card of 0 now yields its rows, not an empty claim",
+		);
+	});
 });
 
 test("gap recovery hydrates an old order from the captured page and closes its gap", async () => {
