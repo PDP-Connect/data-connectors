@@ -232,6 +232,39 @@ test("buildRunSummary: DETAIL_COVERAGE without explicit considered/covered falls
 	});
 });
 
+test("buildRunSummary: accounts for empty and unchanged keys, with explicit covered precedence", () => {
+	const coverage = {
+		type: "DETAIL_COVERAGE" as const,
+		reference_only: true as const,
+		stream: "order_details",
+		state_stream: "orders",
+		required_keys: ["a", "b", "c", "d"],
+		hydrated_keys: ["a"],
+		empty_keys: ["b"],
+		unchanged_keys: ["c", "d"],
+	};
+	assert.deepEqual(buildRunSummary([coverage], META).done.coverage, {
+		considered: 4,
+		covered: 4,
+		streams: ["order_details"],
+	});
+});
+
+test("buildRunSummary: explicit covered wins over new key arrays", () => {
+	const coverage = {
+		type: "DETAIL_COVERAGE" as const,
+		reference_only: true as const,
+		stream: "order_details",
+		state_stream: "orders",
+		required_keys: ["a", "b"],
+		hydrated_keys: ["a"],
+		empty_keys: ["b"],
+		unchanged_keys: [],
+		covered: 0,
+	};
+	assert.equal(buildRunSummary([coverage], META).done.coverage?.covered, 0);
+});
+
 test("buildRunSummary: duration_ms is non-negative even with an implausible finished_at", () => {
 	const summary = buildRunSummary([], {
 		...META,

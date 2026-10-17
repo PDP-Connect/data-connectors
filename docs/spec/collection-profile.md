@@ -928,15 +928,29 @@ declared constraint.
 `INTERACTION.kind` that the manifest does not declare.
 
 `protocol_capabilities` declares optional wire features that the connector
-requires. A runtime MUST advertise its supported protocol version and
-capabilities before placement. It MUST reject a connector with an unsupported
-required capability before spawn.
+requires, except for the advisory capability below. A runtime MUST advertise
+its supported protocol version and capabilities before placement. It MUST
+reject a connector with an unsupported required capability before spawn.
 
-The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7)
-and `OBSERVATION` (since 0.2.0, Section 5.10). A connector that can emit one
-of these messages MUST declare that value. A runtime that does not advertise a
-declared capability MUST NOT start that connector. A runtime that implements
-profile version 0.2.0 MUST advertise and support `OBSERVATION`.
+The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7),
+`OBSERVATION` (since 0.2.0, Section 5.10), and `DETAIL_COVERAGE_KEY_SETS`
+(since 0.2.0, Section 5.6). A connector that can emit `STREAM_EVIDENCE` or
+`OBSERVATION` MUST declare that value. A runtime that does not advertise one
+of those declared capabilities MUST NOT start that connector. A runtime that
+implements profile version 0.2.0 MUST advertise and support `OBSERVATION`.
+
+A connector that can emit `empty_keys` or `unchanged_keys` MUST declare
+`DETAIL_COVERAGE_KEY_SETS`. This is the only advisory capability. A runtime
+that does not advertise it MUST still start a connector that declares it.
+That connector reports every key it accounts for without a record in
+`hydrated_keys`, as in 0.1.0.
+
+A runtime that advertises `DETAIL_COVERAGE_KEY_SETS` MUST credit a hydrated
+key of a declaring connector only when it accepted a `RECORD` of the detail
+stream for that key in the same run. The record's primary key equals the key,
+or its foreign key to the parent named by a manifest relationship equals the
+key. For a connector that does not declare this capability, the runtime
+keeps the 0.1.0 crediting.
 
 A connector that does not declare `OBSERVATION` is diagnosed from runtime
 records alone (Section 5.11). A runtime MUST NOT record that connector as
@@ -1098,6 +1112,7 @@ The runtime sends `START` to initialize one run.
   "run_id": "run-abc123",
   "now": "2026-09-02T00:00:00Z",
   "collection_mode": "incremental",
+  "protocol_capabilities": ["DETAIL_COVERAGE_KEY_SETS"],
   "scope": {
     "streams": [
       {
@@ -1121,6 +1136,7 @@ The runtime sends `START` to initialize one run.
 | `collection_mode` | REQUIRED `full_refresh` or `incremental`. |
 | `state` | REQUIRED map of prior connector-owned state, or `null` when no prior state applies. |
 | `bindings` | REQUIRED map of binding names to descriptors available for this run. |
+| `protocol_capabilities` | OPTIONAL array of the capability names the runtime supports (Section 3.4). Absence means the empty set. |
 | `now` | OPTIONAL [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) date-time with a time-zone offset. It is the run's notion of the current time. |
 
 Each scope stream has a REQUIRED `name`. `resources` is an OPTIONAL array of
@@ -1362,11 +1378,47 @@ one checkpoint-parent boundary.
 }
 ```
 
+When `START.protocol_capabilities` includes `DETAIL_COVERAGE_KEY_SETS`, a
+connector can report empty and unchanged detail separately:
+
+```json
+{
+  "type": "DETAIL_COVERAGE",
+  "reference_only": true,
+  "stream": "item_details",
+  "state_stream": "items",
+  "required_keys": ["item-1", "item-2", "item-3"],
+  "hydrated_keys": ["item-1"],
+  "empty_keys": ["item-2"],
+  "unchanged_keys": ["item-3"],
+  "gap_keys": []
+}
+```
+
 `reference_only: true`, `stream`, `state_stream`, `required_keys`, and
-`hydrated_keys` are REQUIRED. `gap_keys` is OPTIONAL. Each key is a string or
-number. Each key array MUST contain no duplicate. Every hydrated or gap key
-MUST also be a required key. A gap key counts as accounted only when the runtime
+`hydrated_keys` are REQUIRED. `gap_keys`, `empty_keys`, and `unchanged_keys`
+are OPTIONAL. `empty_keys` lists required keys the connector verified have no
+detail this run, for example an account with no transactions.
+`unchanged_keys` lists required keys whose detail the connector verified
+unchanged since a prior run and so did not re-emit, for example a fingerprint
+match. Empty and unchanged keys count as accounted.
+
+Each key is a string or number. Each key array MUST contain no duplicate.
+Every hydrated, empty, unchanged, or gap key MUST also be a required key.
+A key MUST appear in at most one of `hydrated_keys`, `empty_keys`,
+`unchanged_keys`, and `gap_keys`. A runtime MUST reject a message that repeats
+a key across these arrays. A gap key counts as accounted only when the runtime
 observed a matching `DETAIL_GAP` for the same stream, key, and parent boundary.
+
+A connector MUST emit `empty_keys` or `unchanged_keys` only when
+`START.protocol_capabilities` includes `DETAIL_COVERAGE_KEY_SETS`. Otherwise,
+it lists each key it accounts for without a record in `hydrated_keys`.
+
+A connector that declares `DETAIL_COVERAGE_KEY_SETS` and runs on a runtime that
+advertises it MUST report each key it accounts for without a record in
+`empty_keys` or `unchanged_keys`. That runtime credits a hydrated key only when
+a record backs it (Section 3.4). A key without a record in `hydrated_keys` is
+not credited, so its parent checkpoint stays ineligible to commit.
 
 A `parent_streams` stream emits at most one final coverage message for each
 declared parent boundary evaluated in a run. It emits the message after the

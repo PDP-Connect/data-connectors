@@ -178,6 +178,14 @@ function latestRecordEmittedAt(
 	return latest;
 }
 
+function optionalCoverageKeyCount(
+	message: DetailCoverageMessage,
+	field: "empty_keys" | "unchanged_keys",
+): number {
+	const value = (message as unknown as Record<string, unknown>)[field];
+	return Array.isArray(value) ? value.length : 0;
+}
+
 function buildCoverage(
 	messages: readonly EmittedMessage[],
 ): RunSummaryCoverage | undefined {
@@ -191,7 +199,11 @@ function buildCoverage(
 	for (const message of coverageMessages) {
 		streamNames.add(message.stream);
 		considered += message.considered ?? message.required_keys.length;
-		covered += message.covered ?? message.hydrated_keys.length;
+		covered +=
+			message.covered ??
+			message.hydrated_keys.length +
+				optionalCoverageKeyCount(message, "empty_keys") +
+				optionalCoverageKeyCount(message, "unchanged_keys");
 	}
 	return { considered, covered, streams: [...streamNames] };
 }

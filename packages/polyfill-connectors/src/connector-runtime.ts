@@ -234,6 +234,8 @@ interface BaseCollectContext {
 	/** Uses the same id, resource, and time gates as emitRecord, without effects. */
 	isRecordSelected?: (stream: string, data: RecordData) => boolean;
 	emittedAt: string;
+	/** Capabilities advertised by the host in START. */
+	hostCapabilities?: readonly string[] | undefined;
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
 	/**
 	 * SLVP-ideal §4.3: when true, the connector MUST run its gap-recovery pass
@@ -587,6 +589,9 @@ function makeShapeAnomalyReport(
 	};
 }
 
+/** Host support for explicit empty and unchanged detail key sets. */
+export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS";
+
 /**
  * Inputs for a per-run detail coverage report. A list+detail connector passes
  * the keys it considered for detail (`requiredKeys`, the denominator) and the
@@ -619,6 +624,12 @@ export interface DetailCoverageParams {
 	covered?: number;
 	/** Keys for which a DETAIL_GAP was emitted and should be retried next run. */
 	gapKeys?: ReadonlyArray<string | number>;
+	/** Required keys verified to have no detail this run. */
+	emptyKeys?: ReadonlyArray<string | number>;
+	/** Required keys verified unchanged and not re-emitted. */
+	unchangedKeys?: ReadonlyArray<string | number>;
+	/** Pass ctx.hostCapabilities to negotiate the wire shape. */
+	hostCapabilities?: ReadonlyArray<string> | undefined;
 	/** Subset of requiredKeys whose detail was fetched and emitted. */
 	hydratedKeys: ReadonlyArray<string | number>;
 	/** Keys skipped by explicit policy, such as selection scope. */
@@ -646,18 +657,65 @@ export function buildDetailCoverageMessage(
 		stateStream,
 		requiredKeys,
 		hydratedKeys,
+		emptyKeys,
+		unchangedKeys,
+		hostCapabilities,
 		gapKeys,
 		optionalSkipKeys,
 		considered,
 		covered,
 	} = params;
+	const hasNewKeys = Boolean(emptyKeys?.length || unchangedKeys?.length);
+	const supportsKeySets = hostCapabilities?.includes(
+		DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+	);
+	let reportedHydratedKeys = [...hydratedKeys];
+	if (hasNewKeys) {
+		const seen = new Map<string, string>();
+		const sets = {
+			hydratedKeys,
+			emptyKeys,
+			unchangedKeys,
+			gapKeys,
+			optionalSkipKeys,
+		};
+		for (const [name, keys] of Object.entries(sets)) {
+			for (const key of keys ?? []) {
+				const normalized = String(key);
+				const previous = seen.get(normalized);
+				if (previous !== undefined && previous !== name) {
+					throw new Error(
+						`Detail coverage key ${JSON.stringify(normalized)} appears in ${previous} and ${name}`,
+					);
+				}
+				seen.set(normalized, name);
+			}
+		}
+		if (!supportsKeySets) {
+			const folded = new Map<string, string | number>();
+			for (const key of [
+				...hydratedKeys,
+				...(emptyKeys ?? []),
+				...(unchangedKeys ?? []),
+			]) {
+				if (!folded.has(String(key))) folded.set(String(key), key);
+			}
+			reportedHydratedKeys = [...folded.values()];
+		}
+	}
 	return {
 		type: "DETAIL_COVERAGE",
 		reference_only: true,
 		stream,
 		state_stream: stateStream,
 		required_keys: [...requiredKeys],
-		hydrated_keys: [...hydratedKeys],
+		hydrated_keys: reportedHydratedKeys,
+		...(supportsKeySets && emptyKeys?.length
+			? { empty_keys: [...emptyKeys] }
+			: {}),
+		...(supportsKeySets && unchangedKeys?.length
+			? { unchanged_keys: [...unchangedKeys] }
+			: {}),
 		// Only emit `considered` when the connector supplied a non-negative integer.
 		// The runtime re-validates and drops anything unsafe to `unknown`; omitting
 		// it here keeps a no-considered run byte-identical to the prior shape.
@@ -1383,6 +1441,7 @@ export function runConnector(config: RunConnectorConfig): void {
 
 		const baseCtx: BaseCollectContext = {
 			scope: startMsg.scope,
+			hostCapabilities: readHostCapabilities(startMsg),
 			state: startMsg.state ?? {},
 			requested,
 			credentials,
@@ -1458,6 +1517,25 @@ export function runConnector(config: RunConnectorConfig): void {
 }
 
 // ─── run() helpers (top-level so each is independently readable) ───────
+
+/**
+ * Read the optional capabilities advertised by START. A list with any
+ * non-string or empty member is malformed and yields none, so a damaged START
+ * never turns a capability on.
+ */
+export function readHostCapabilities(start: unknown): readonly string[] {
+	if (typeof start !== "object" || start === null) return [];
+	const capabilities: unknown = Reflect.get(start, "protocol_capabilities");
+	if (!Array.isArray(capabilities)) return [];
+	if (
+		!capabilities.every(
+			(value): value is string => typeof value === "string" && value.length > 0,
+		)
+	) {
+		return [];
+	}
+	return [...new Set(capabilities)];
+}
 
 /**
  * Read the first line of stdin and parse it as a START message. Throws

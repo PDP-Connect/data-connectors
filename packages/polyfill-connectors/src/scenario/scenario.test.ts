@@ -44,6 +44,92 @@ import {
 	UnknownMessageTypeError,
 } from "./wire-registry.ts";
 
+function keysetCoverageMessage() {
+	return {
+		type: "DETAIL_COVERAGE",
+		reference_only: true,
+		stream: "widgets",
+		state_stream: "widgets",
+		required_keys: ["w1", 2, "w3"],
+		hydrated_keys: ["w1"],
+	};
+}
+
+test("coverage trace preserves empty and unchanged arrays including empty arrays", () => {
+	for (const keys of [[2, "w3"], []]) {
+		const message = {
+			...keysetCoverageMessage(),
+			empty_keys: keys,
+			unchanged_keys: keys,
+		};
+		assert.deepEqual(buildProtocolTrace([message]), [
+			{
+				kind: "detail_coverage",
+				stream: "widgets",
+				state_stream: "widgets",
+				required_keys: ["w1", 2, "w3"],
+				hydrated_keys: ["w1"],
+				empty_keys: keys,
+				unchanged_keys: keys,
+			},
+		]);
+	}
+});
+
+test("coverage trace keeps absent keysets absent for old recordings", () => {
+	assert.deepEqual(buildProtocolTrace([keysetCoverageMessage()]), [
+		{
+			kind: "detail_coverage",
+			stream: "widgets",
+			state_stream: "widgets",
+			required_keys: ["w1", 2, "w3"],
+			hydrated_keys: ["w1"],
+		},
+	]);
+});
+
+for (const field of ["empty_keys", "unchanged_keys"]) {
+	test(`coverage trace strictly rejects malformed ${field}`, () => {
+		for (const value of ["not-an-array", null, [false], [{}]]) {
+			assert.throws(
+				() =>
+					buildProtocolTrace([{ ...keysetCoverageMessage(), [field]: value }]),
+				(error: unknown) =>
+					error instanceof TraceNormalizationError &&
+					error.message.includes(field),
+			);
+		}
+	});
+
+	test(`replay detects changed ${field} coverage`, async () => {
+		const scenario = toyScenario([widgetsInteraction(1, "w1")]);
+		const run = scenario.runs[0];
+		assert.ok(run);
+		const coverage = { ...keysetCoverageMessage(), [field]: [2] };
+		run.expected.protocol_trace = buildProtocolTrace([coverage]);
+		const matching: RunCollector = async (index, context) => {
+			await toyCollector(index, context);
+			context.emit({ ...coverage, type: "TRACE", rawType: coverage.type });
+		};
+		assert.equal((await verifyScenario(scenario, matching)).pass, true);
+		const changed: RunCollector = async (index, context) => {
+			await toyCollector(index, context);
+			context.emit({
+				...coverage,
+				type: "TRACE",
+				rawType: coverage.type,
+				[field]: ["w3"],
+			});
+		};
+		const result = await verifyScenario(scenario, changed);
+		assert.equal(result.pass, false);
+		assert.deepEqual(
+			result.failures.map((failure) => failure.kind),
+			["trace_mismatch"],
+		);
+	});
+}
+
 function canonicalHash(value: unknown): string {
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }

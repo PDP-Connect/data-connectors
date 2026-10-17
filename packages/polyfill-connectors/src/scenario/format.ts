@@ -572,6 +572,8 @@ export type NormalizedTraceEntry =
 			state_stream: string;
 			required_keys: Array<string | number>;
 			hydrated_keys: Array<string | number>;
+			empty_keys?: Array<string | number>;
+			unchanged_keys?: Array<string | number>;
 			gap_keys?: Array<string | number>;
 			optional_skip_keys?: Array<string | number>;
 			considered?: number;

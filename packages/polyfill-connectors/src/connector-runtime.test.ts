@@ -9,6 +9,7 @@ import {
 	manualBrowserLogin,
 	type PrepareBrowserInteractionTargetArgs,
 } from "./browser-handoff.ts";
+import * as runtime from "./connector-runtime.ts";
 import {
 	type BrowserLaunchSource,
 	type BrowserRuntimeVisibility,
@@ -1256,6 +1257,222 @@ test("makeTracer.stop() is idempotent — second call does not retry against a d
 			process.env.PDPP_TRACE = previousTrace;
 		}
 	}
+});
+
+test("detail coverage negotiates separate empty and unchanged key sets", () => {
+	const params = {
+		stream: "details",
+		stateStream: "items",
+		requiredKeys: ["h", "e", "u"],
+		hydratedKeys: ["h"],
+		emptyKeys: ["e"],
+		unchangedKeys: ["u"],
+		hostCapabilities: ["DETAIL_COVERAGE_KEY_SETS"],
+		considered: 7,
+		covered: 6,
+	};
+	assert.equal(
+		runtime.DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+		"DETAIL_COVERAGE_KEY_SETS",
+	);
+	assert.deepEqual(buildDetailCoverageMessage(params), {
+		type: "DETAIL_COVERAGE",
+		reference_only: true,
+		stream: "details",
+		state_stream: "items",
+		required_keys: ["h", "e", "u"],
+		hydrated_keys: ["h"],
+		empty_keys: ["e"],
+		unchanged_keys: ["u"],
+		considered: 7,
+		covered: 6,
+	});
+});
+
+test("legacy hosts fold key sets in order with String-key deduplication", () => {
+	for (const hostCapabilities of [undefined, [], ["OTHER"]]) {
+		const params = {
+			stream: "details",
+			stateStream: "items",
+			requiredKeys: [1, 2, 3],
+			hydratedKeys: [1, "1"],
+			emptyKeys: [2, "2"],
+			unchangedKeys: [3, "3"],
+			considered: 9,
+			covered: 8,
+			...(hostCapabilities === undefined ? {} : { hostCapabilities }),
+		};
+		assert.deepEqual(buildDetailCoverageMessage(params), {
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream: "details",
+			state_stream: "items",
+			required_keys: [1, 2, 3],
+			hydrated_keys: [1, 2, 3],
+			considered: 9,
+			covered: 8,
+		});
+	}
+});
+
+test("empty new sets preserve the legacy shape and overlap behavior", () => {
+	const original = {
+		stream: "details",
+		stateStream: "items",
+		requiredKeys: [1],
+		hydratedKeys: [1, "1"],
+		gapKeys: [1],
+		optionalSkipKeys: [1],
+	};
+	for (const hostCapabilities of [undefined, ["DETAIL_COVERAGE_KEY_SETS"]]) {
+		const params = {
+			...original,
+			emptyKeys: [],
+			unchangedKeys: [],
+			...(hostCapabilities === undefined ? {} : { hostCapabilities }),
+		};
+		assert.deepEqual(
+			buildDetailCoverageMessage(params),
+			buildDetailCoverageMessage(original),
+		);
+		assert.equal(
+			JSON.stringify(buildDetailCoverageMessage(params)),
+			JSON.stringify(buildDetailCoverageMessage(original)),
+		);
+	}
+});
+
+test("new key sets reject every cross-set overlap in both host modes", () => {
+	const names = [
+		"hydratedKeys",
+		"emptyKeys",
+		"unchangedKeys",
+		"gapKeys",
+		"optionalSkipKeys",
+	] as const;
+	for (const hostCapabilities of [[], ["DETAIL_COVERAGE_KEY_SETS"]]) {
+		for (let i = 0; i < names.length; i += 1) {
+			for (let j = i + 1; j < names.length; j += 1) {
+				const first = names[i]!;
+				const second = names[j]!;
+				const params = {
+					stream: "details",
+					stateStream: "items",
+					requiredKeys: [7],
+					hydratedKeys: [] as (string | number)[],
+					emptyKeys: ["sentinel"] as (string | number)[],
+					unchangedKeys: [] as (string | number)[],
+					gapKeys: [] as (string | number)[],
+					optionalSkipKeys: [] as (string | number)[],
+					hostCapabilities,
+				};
+				params[first] = [7];
+				params[second] = ["7"];
+				assert.throws(
+					() => buildDetailCoverageMessage(params),
+					(error: unknown) =>
+						error instanceof Error &&
+						error.message.includes("7") &&
+						error.message.includes(first) &&
+						error.message.includes(second),
+				);
+			}
+		}
+	}
+});
+
+test("negotiated key sets omit empty members and copy supplied arrays", () => {
+	const emptyKeys = ["e"];
+	const unchangedKeys = ["u"];
+	const params = {
+		stream: "details",
+		stateStream: "items",
+		requiredKeys: ["e", "u"],
+		hydratedKeys: [],
+		emptyKeys,
+		unchangedKeys,
+		hostCapabilities: ["DETAIL_COVERAGE_KEY_SETS"],
+	};
+	const message = buildDetailCoverageMessage(params);
+	emptyKeys.push("later");
+	unchangedKeys.push("later");
+	assert.deepEqual(Reflect.get(message, "empty_keys"), ["e"]);
+	assert.deepEqual(Reflect.get(message, "unchanged_keys"), ["u"]);
+	assert.equal(
+		"unchanged_keys" in
+			buildDetailCoverageMessage({ ...params, unchangedKeys: [] }),
+		false,
+	);
+	assert.equal(
+		"empty_keys" in buildDetailCoverageMessage({ ...params, emptyKeys: [] }),
+		false,
+	);
+});
+
+test("readHostCapabilities rejects a malformed list and de-duplicates a valid one", () => {
+	for (const start of [
+		undefined,
+		null,
+		1,
+		"START",
+		{},
+		{ protocol_capabilities: null },
+		{ protocol_capabilities: "DETAIL_COVERAGE_KEY_SETS" },
+	]) {
+		assert.deepEqual(runtime.readHostCapabilities(start), []);
+	}
+	for (const capabilities of [
+		[null, "DETAIL_COVERAGE_KEY_SETS"],
+		["DETAIL_COVERAGE_KEY_SETS", 2],
+		["DETAIL_COVERAGE_KEY_SETS", ""],
+		["DETAIL_COVERAGE_KEY_SETS", false],
+		["DETAIL_COVERAGE_KEY_SETS", {}],
+	]) {
+		assert.deepEqual(
+			runtime.readHostCapabilities({
+				type: "START",
+				protocol_capabilities: capabilities,
+			}),
+			[],
+			JSON.stringify(capabilities),
+		);
+	}
+	assert.deepEqual(
+		runtime.readHostCapabilities({
+			type: "START",
+			protocol_capabilities: [
+				"DETAIL_COVERAGE_KEY_SETS",
+				"OTHER",
+				"DETAIL_COVERAGE_KEY_SETS",
+			],
+		}),
+		["DETAIL_COVERAGE_KEY_SETS", "OTHER"],
+	);
+});
+
+test("a malformed START capability list keeps the legacy detail coverage shape", () => {
+	const hostCapabilities = runtime.readHostCapabilities({
+		type: "START",
+		protocol_capabilities: [null, "DETAIL_COVERAGE_KEY_SETS"],
+	});
+	assert.deepEqual(
+		buildDetailCoverageMessage({
+			stream: "details",
+			stateStream: "items",
+			requiredKeys: ["h", "e"],
+			hydratedKeys: ["h"],
+			emptyKeys: ["e"],
+			hostCapabilities,
+		}),
+		{
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream: "details",
+			state_stream: "items",
+			required_keys: ["h", "e"],
+			hydrated_keys: ["h", "e"],
+		},
+	);
 });
 
 test("buildDetailCoverageMessage emits a valid reference-only DETAIL_COVERAGE", () => {
