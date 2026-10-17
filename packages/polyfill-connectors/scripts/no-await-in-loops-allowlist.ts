@@ -2323,6 +2323,13 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 			note: "Run 42,120 two-response ordering comparisons sequentially to bound isolated VM context memory.",
 		},
 		{
+			path: "connectors/meta/posts-parity.test.ts",
+			line: 1071,
+			column: 18,
+			category: "test_assertion_sequencing",
+			note: "Collect the same timeline from each GraphQL path in turn before comparing the two results.",
+		},
+		{
 			path: "connectors/meta/index.ts",
 			line: 1137,
 			column: 23,
