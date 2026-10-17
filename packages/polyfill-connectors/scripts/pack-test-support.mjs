@@ -55,3 +55,20 @@ export async function packPackage(cwd, destination, run) {
 	);
 	return path.join(destination, produced[0]);
 }
+
+/**
+ * The arguments of the plain install of the packed tarball. The check exists
+ * to run the package's install hook, so both flags are explicit: npm 11 and
+ * later skip hooks that are not approved, and a global npm config can set
+ * ignore-scripts. A command-line flag outranks that config.
+ */
+export function installArguments(tarball) {
+	return [
+		"install",
+		"--no-audit",
+		"--no-fund",
+		"--ignore-scripts=false",
+		"--dangerously-allow-all-scripts",
+		tarball,
+	];
+}

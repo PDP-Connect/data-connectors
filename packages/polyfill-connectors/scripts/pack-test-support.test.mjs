@@ -6,7 +6,11 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { packEnvironment, packPackage } from "./pack-test-support.mjs";
+import {
+	installArguments,
+	packEnvironment,
+	packPackage,
+} from "./pack-test-support.mjs";
 
 test("concurrent packs preserve root tarballs and use distinct destinations", async (t) => {
 	const root = await mkdtemp(path.join(tmpdir(), "pack-support-"));
@@ -88,4 +92,17 @@ test("pack subprocess environment is allowlisted and run-local", () => {
 	assert.equal(env.npm_config_cache, path.join("/run/example", "npm-cache"));
 	assert.equal(env.PATCHRIGHT_SKIP_BROWSER_DOWNLOAD, "");
 	assert.equal(env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD, "");
+});
+
+test("the install command forces the install hook to run", () => {
+	const args = installArguments("/run/example/pack/pdpp.tgz");
+	assert.ok(
+		args.includes("--ignore-scripts=false"),
+		"a global ignore-scripts must not skip the hook",
+	);
+	assert.ok(
+		args.includes("--dangerously-allow-all-scripts"),
+		"npm 11 and later must not hold the hook back for approval",
+	);
+	assert.equal(args.at(-1), "/run/example/pack/pdpp.tgz");
 });

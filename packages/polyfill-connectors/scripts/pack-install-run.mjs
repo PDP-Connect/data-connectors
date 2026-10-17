@@ -21,7 +21,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { packEnvironment, packPackage } from "./pack-test-support.mjs";
+import {
+	installArguments,
+	packEnvironment,
+	packPackage,
+} from "./pack-test-support.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -129,17 +133,10 @@ async function main() {
 		log(
 			"Installing the packed tarball with a plain `npm install` (postinstall forced to run)...",
 		);
-		const install = await run(
-			"npm",
-			[
-				"install",
-				"--no-audit",
-				"--no-fund",
-				"--dangerously-allow-all-scripts",
-				tarball,
-			],
-			{ cwd: projectDir, env },
-		);
+		const install = await run("npm", installArguments(tarball), {
+			cwd: projectDir,
+			env,
+		});
 
 		assert.doesNotMatch(
 			`${install.stdout}\n${install.stderr}`,
