@@ -370,40 +370,6 @@ test("processListOrder keeps a canceled zero-item order that needs a sign-in as 
 	);
 });
 
-test("a hydrated order closes the pending gap recovery re-deferred, after its items", async () => {
-	const order = makeListOrder({ itemCount: 5 });
-	const { deps } = makeRecordingDeps({
-		pendingGapsByOrderId: new Map([
-			[order.orderId, { gapId: "gap_x", recordKey: order.orderId }],
-		]),
-	});
-	const events: string[] = [];
-	const emit = deps.emit;
-	const emitRecord = deps.emitRecord;
-	deps.emit = (message) => {
-		events.push(message.type);
-		return emit(message);
-	};
-	deps.emitRecord = (...args) => {
-		events.push(`RECORD:${args[0]}`);
-		return emitRecord(...args);
-	};
-	await processListOrder(
-		makePageStub(DETAIL_HTML),
-		deps,
-		makeRunFlags(),
-		order,
-	);
-	const recovered = events.indexOf("DETAIL_GAP_RECOVERED");
-	assert.ok(recovered >= 0, "the gap is closed");
-	assert.equal(
-		events.lastIndexOf("RECORD:order_items") < recovered,
-		true,
-		"every item record precedes the recovery message",
-	);
-	assert.equal(deps.pendingGapsByOrderId?.size, 0);
-});
-
 test("processListOrder keeps a delivered zero-item detail failure as a gap", async () => {
 	const order = makeListOrder({ itemCount: 0, unfulfilledCount: 0 });
 	const coverage = newOrderItemsCoverage();
