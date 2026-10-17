@@ -72,6 +72,7 @@ import {
 	resolveOrderDetail,
 	runForwardScan,
 } from "./index.ts";
+import type { OrderItemTally } from "./item-count-anchor.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
 
@@ -502,6 +503,7 @@ test("emitOrderItemsCoverage: gap marks an actionable degradation (not optional 
 	const coverage: OrderItemsCoverage = {
 		required: ["a", "b"],
 		hydrated: ["a"],
+		empty: [],
 		gap: ["b"],
 	};
 	await emitOrderItemsCoverage(deps, coverage);
@@ -3181,6 +3183,80 @@ test("fetchOrderDetail: debug switch emits safe per-poll surface diagnostics", a
 	}
 });
 
+/** Fetch a variant of the 20-row static fixture, returning the result with
+ *  every diagnostic line the fetch wrote. */
+async function fetchTallFixtureWithDiagnostics(html: string): Promise<{
+	lines: string[];
+	result: Awaited<ReturnType<typeof fetchOrderDetail>>;
+}> {
+	const browser = await chromium.launch({ headless: true });
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const page = await browser.newPage();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB-PARSE-LOSS",
+			async (route) => {
+				await route.fulfill({ body: html, contentType: "text/html" });
+			},
+		);
+		const result = await fetchOrderDetail(page, "HEB-PARSE-LOSS", {
+			detailSurfaceTimeoutMs: 5000,
+			expectedItemCount: 20,
+			waitForHydration: immediateWait,
+		});
+		return { lines, result };
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+}
+
+const UNPARSED_ROWS_LINE_PREFIX = "[heb-diagnostic] detail_rows_unparsed ";
+
+test("fetchOrderDetail: rows the parser cannot read are counted in the run log and the order still hydrates", async () => {
+	const tall = readFileSync(
+		join(FIXTURES_DIR, "order-detail-static-tall.html"),
+		"utf8",
+	);
+	// The first two rows lose their name text, and the parser drops a line with
+	// no name. The fixture builds its rows in a script, so the template changes.
+	const { lines, result } = await fetchTallFixtureWithDiagnostics(
+		tall.replace(
+			"Static item ${index}",
+			() => "${index < 2 ? '' : 'Static item ' + index}",
+		),
+	);
+
+	assert.equal(result.status, "hydrated");
+	assert.equal(
+		result.status === "hydrated" ? result.detail.items.length : 0,
+		18,
+	);
+	assert.deepEqual(
+		lines.filter((line) => line.startsWith(UNPARSED_ROWS_LINE_PREFIX)),
+		[`${UNPARSED_ROWS_LINE_PREFIX}{"collected":20,"parsed":18}`],
+	);
+});
+
+test("fetchOrderDetail: a page whose every collected row parses writes no unparsed-rows line", async () => {
+	const tall = readFileSync(
+		join(FIXTURES_DIR, "order-detail-static-tall.html"),
+		"utf8",
+	);
+	const { lines, result } = await fetchTallFixtureWithDiagnostics(tall);
+
+	assert.equal(result.status, "hydrated");
+	assert.equal(
+		result.status === "hydrated" ? result.detail.items.length : 0,
+		20,
+	);
+	assert.deepEqual(
+		lines.filter((line) => line.startsWith(UNPARSED_ROWS_LINE_PREFIX)),
+		[],
+	);
+});
+
 test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap, not partial hydrated data", async () => {
 	// Deliberately expect more than this fixture exposes.
 	const clock = withPollClock(makeLazyLoadPageStub(100), 1);
@@ -3704,6 +3780,339 @@ test("processListOrder keeps fully collected items and reports a remaining count
 		);
 	} finally {
 		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+/** Three rows: 2 units, a weighed row with a fractional first number, 1 unit.
+ *  The weighed row has no whole quantity, so the order's units are unknown. */
+function syntheticWeighedRowFixture(): string {
+	const quantities = ["Qty: 2", "Qty: 1.2 of 1.2 lbs", "Qty: 1"];
+	const rows = quantities
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
+}
+
+/** Fields of the first `[heb-diagnostic] <event> {...}` line, or undefined. */
+function diagnosticFields(
+	lines: readonly string[],
+	event: string,
+): Record<string, unknown> | undefined {
+	const prefix = `[heb-diagnostic] ${event} `;
+	const line = lines.find((candidate) => candidate.startsWith(prefix));
+	return line ? JSON.parse(line.slice(prefix.length)) : undefined;
+}
+
+test("fetchOrderDetail: a surface that never settles leaves its counters in a diagnostic line", async () => {
+	// Rows carry a positional index, so no content-identity proof applies, and
+	// one weighed row has a fractional quantity, so the units cannot be summed
+	// against the card's 6. Nothing can prove this list complete.
+	const rows = ["Qty: 2", "Qty: 1.2 of 1.2 lbs", "Qty: 1"]
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow" data-index="${index}"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	const fixtureHtml = `<html><body><main><ul>${rows}</ul></main></body></html>`;
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/synthetic-positional-order",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+
+		const result = await fetchOrderDetail(page, "synthetic-positional-order", {
+			detailSurfaceTimeoutMs: 1_500,
+			expectedItemCount: 6,
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "failed");
+		assert.equal(
+			result.status === "failed" ? result.failureKind : null,
+			"detail_surface_timeout",
+		);
+		const fields = diagnosticFields(diagnosticLines, "detail_fetch_failed");
+		assert.ok(fields, "the failure leaves a diagnostic line");
+		assert.equal(typeof fields.ms, "number");
+		assert.equal(typeof fields.polls, "number");
+		assert.deepEqual(
+			{
+				kind: fields.kind,
+				settle: fields.settle,
+				rows: fields.rows,
+				mounted: fields.mounted,
+				exp: fields.exp,
+				obs: fields.obs,
+				unk_qty: fields.unk_qty,
+				scheme: fields.scheme,
+				unmounted: fields.unmounted,
+				err: fields.err,
+			},
+			{
+				kind: "detail_surface_timeout",
+				settle: "timeout",
+				rows: 3,
+				mounted: 3,
+				exp: 6,
+				obs: "unknown",
+				unk_qty: 1,
+				scheme: "position:data-index",
+				unmounted: 0,
+				err: "none",
+			},
+			"the counters show why no proof applied: positional rows and an unsummable weighed row",
+		);
+		assert.match(result.diagnostic ?? "", /scheme=position:data-index/);
+		assert.match(result.diagnostic ?? "", /unknown_unit_rows=1/);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+test("fetchOrderDetail: a navigation failure leaves a diagnostic line with no surface counters", async () => {
+	const page = makePageStub({
+		content: DETAIL_HTML,
+		throwsNTimes: 99,
+	});
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	try {
+		const result = await fetchOrderDetail(page, "HEB1000000001", {
+			waitForHydration: immediateWait,
+		});
+		assert.equal(result.status, "failed");
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const fields = diagnosticFields(diagnosticLines, "detail_fetch_failed");
+	assert.ok(fields);
+	assert.equal(fields.kind, "navigation_retry_exhausted");
+	assert.equal("rows" in fields, false);
+});
+
+test("processListOrder says nothing about a shortfall when the order's units cannot be summed", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticWeighedRowFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000002",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps, emitted } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000002", itemCount: 6 }),
+		);
+
+		assert.equal(
+			emitted.filter((record) => record.stream === "order_items").length,
+			3,
+			"the rows are delivered whole",
+		);
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+			"three rows against a card of six units is not evidence of missing items",
+		);
+		assert.deepEqual(
+			itemCountTallies,
+			[],
+			"an order whose units are unknown joins no run-level shortfall tally",
+		);
+		assert.ok(
+			diagnosticLines.includes(
+				'[heb-diagnostic] item_count_reconciliation {"card_units":6,"product_rows":3,"fulfilled_units":"unknown","fractional_qty_rows":1,"unparsed_qty_rows":0,"whole_qty_rows":2,"reason":"unit_and_row_counts_differ"}',
+			),
+			"the diagnostic line still says why the units are unknown",
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+/** A static detail page whose rows carry the given quantity texts. */
+function quantityRowsFixture(quantities: readonly string[]): string {
+	const rows = quantities
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
+}
+
+const repeat = (text: string, times: number): string[] =>
+	Array.from({ length: times }, () => text);
+
+// Shapes of real orders, as counts only: the card's unit count, how many rows
+// the page lists, and what the quantities add up to. A real account showed no
+// rule that turns rows into the card's count, so only a whole-number total
+// strictly below the card is called a shortfall.
+const UNIT_SHAPES: readonly {
+	card: number;
+	collected: number | null;
+	name: string;
+	quantities: string[];
+	shortfall: boolean;
+}[] = [
+	{
+		name: "a card equal to the whole-number units",
+		card: 13,
+		quantities: ["Qty: 3", "Qty: 2", "Qty: 2", ...repeat("Qty: 1", 6)],
+		collected: 13,
+		shortfall: false,
+	},
+	{
+		name: "a card one unit above the whole-number units",
+		card: 66,
+		quantities: [...repeat("Qty: 2", 29), ...repeat("Qty: 1", 7)],
+		collected: 65,
+		shortfall: true,
+	},
+	{
+		name: "a card with one weighed row among whole quantities",
+		card: 40,
+		quantities: [
+			...repeat("Qty: 1", 11),
+			...repeat("Qty: 2", 14),
+			"Qty: 2.01 of 2.01 lbs",
+		],
+		collected: null,
+		shortfall: false,
+	},
+];
+
+for (const shape of UNIT_SHAPES) {
+	test(`processListOrder unit anchor: ${shape.name}`, async () => {
+		const browser = await chromium.launch({ headless: true });
+		try {
+			const page = await browser.newPage();
+			const fixtureHtml = quantityRowsFixture(shape.quantities);
+			await page.route(
+				"https://www.heb.com/my-account/order-history/HEB000000000004",
+				async (route) => {
+					await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+				},
+			);
+			const progressMessages: string[] = [];
+			const itemCountTallies: OrderItemTally[] = [];
+			const { deps, emitted } = makeRecordingDeps({
+				itemCountTallies,
+				orderItemsCoverage: newOrderItemsCoverage(),
+				progress: async (message) => {
+					progressMessages.push(message);
+				},
+			});
+
+			await processListOrder(
+				page,
+				deps,
+				makeRunFlags(),
+				makeListOrder({ orderId: "HEB000000000004", itemCount: shape.card }),
+			);
+
+			assert.equal(
+				emitted.filter((record) => record.stream === "order_items").length,
+				shape.quantities.length,
+				"every row is delivered whatever the card says",
+			);
+			assert.deepEqual(deps.orderItemsCoverage?.gap, []);
+			assert.equal(
+				progressMessages.includes(
+					"An order's item count did not match its details",
+				),
+				shape.shortfall,
+			);
+			assert.deepEqual(
+				itemCountTallies,
+				shape.collected === null
+					? []
+					: [
+							{
+								orderId: "HEB000000000004",
+								declaredItemCount: shape.card,
+								collectedItemCount: shape.collected,
+							},
+						],
+			);
+		} finally {
+			await browser.close();
+		}
+	});
+}
+
+test("processListOrder tallies a known surplus without telling the owner anything is missing", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticStaticQuantityFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000003",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+
+		// The page holds 84 units. H-E-B restates a card downward after a refund,
+		// so holding more than the card says is preserved, not reported.
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000003", itemCount: 80 }),
+		);
+
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+		);
+		assert.deepEqual(itemCountTallies, [
+			{
+				orderId: "HEB000000000003",
+				declaredItemCount: 80,
+				collectedItemCount: 84,
+			},
+		]);
+	} finally {
 		await browser.close();
 	}
 });

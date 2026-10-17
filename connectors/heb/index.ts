@@ -142,18 +142,52 @@ interface DetailSurfaceState {
 
 interface DetailSurfaceDiagnostics {
 	actionableControl: string | null;
+	atEnd: boolean;
 	clientHeight: number;
 	collectedRows: number;
+	errorKind: DetailSurfaceErrorKind | null;
 	expectedUnits: number | null;
+	/** Distinct product links that were mounted, then unmounted by the list's
+	 *  virtualizer. Nonzero means the list was not fully mounted at once. */
+	hrefsEverUnmounted: number;
+	/** The key scheme rows were collected under, e.g. `content:href`. */
+	identityScheme: string | null;
 	lastAction: string | null;
 	lastError: string | null;
 	loading: boolean;
+	/** Rows mounted in the last snapshot, against `collectedRows` over the run. */
+	mountedRows: number;
 	scrollHeight: number;
 	scrollTop: number;
 	settlement: DetailSurfaceSettlement;
 	snapshots: number;
+	stablePolls: number;
 	staticListEvidence: StaticListEvidence;
 	observedUnits: number | null;
+	/** Collected rows whose quantity is not a whole number, which is what keeps
+	 *  `observedUnits` unknown. */
+	unknownUnitRows: number;
+}
+
+/** Why the surface read failed outright, without the free text of the error. */
+type DetailSurfaceErrorKind =
+	| "ambiguous_repeat"
+	| "evaluate_failed"
+	| "no_positional_identity";
+
+function detailSurfaceErrorKind(
+	lastError: string | null,
+	ambiguousContentHref: string | null,
+): DetailSurfaceErrorKind | null {
+	if (!lastError) {
+		return null;
+	}
+	if (ambiguousContentHref !== null) {
+		return "ambiguous_repeat";
+	}
+	return lastError.includes("explicit positional identity")
+		? "no_positional_identity"
+		: "evaluate_failed";
 }
 
 interface DetailSurfaceResult {
@@ -425,10 +459,37 @@ function detailSurfaceErrorMessage(
 		`static_evidence=${diagnostics.staticListEvidence ?? "none"}`,
 		`loading=${diagnostics.loading}`,
 		`action=${diagnostics.lastAction ?? "none"}`,
+		`scheme=${diagnostics.identityScheme ?? "none"}`,
+		`mounted_rows=${diagnostics.mountedRows}`,
+		`unmounted_hrefs=${diagnostics.hrefsEverUnmounted}`,
+		`unknown_unit_rows=${diagnostics.unknownUnitRows}`,
+		`at_end=${diagnostics.atEnd}`,
+		`stable_polls=${diagnostics.stablePolls}`,
 		...(diagnostics.lastError
 			? [`error=${diagnostics.lastError.slice(0, 160)}`]
 			: []),
 	].join(";");
+}
+
+/** The surface counters as short diagnostic fields: counts and labels only,
+ *  never page text, so the run log can say why an order never settled. */
+function detailSurfaceFields(diagnostics: DetailSurfaceDiagnostics) {
+	return {
+		settle: diagnostics.settlement,
+		rows: diagnostics.collectedRows,
+		mounted: diagnostics.mountedRows,
+		exp: diagnostics.expectedUnits ?? "unknown",
+		obs: diagnostics.observedUnits ?? "unknown",
+		unk_qty: diagnostics.unknownUnitRows,
+		scheme: diagnostics.identityScheme ?? "none",
+		unmounted: diagnostics.hrefsEverUnmounted,
+		at_end: diagnostics.atEnd,
+		loading: diagnostics.loading,
+		ctl: diagnostics.actionableControl !== null,
+		stable: diagnostics.stablePolls,
+		static: diagnostics.staticListEvidence ?? "none",
+		err: diagnostics.errorKind ?? "none",
+	};
 }
 
 async function collectDetailSurface(
@@ -700,12 +761,17 @@ async function collectDetailSurface(
 	}
 	const diagnostics: DetailSurfaceDiagnostics = {
 		actionableControl: latest.actionableControl,
+		atEnd: latest.atEnd,
 		clientHeight: latest.clientHeight,
 		collectedRows: collected.size,
+		errorKind: detailSurfaceErrorKind(lastError, ambiguousContentHref),
 		expectedUnits,
+		hrefsEverUnmounted: contentHrefEverUnmounted.size,
+		identityScheme: collectedScheme,
 		lastAction,
 		lastError,
 		loading: latest.loading,
+		mountedRows: latest.rowCount,
 		scrollHeight: latest.scrollHeight,
 		scrollTop: latest.scrollTop,
 		staticListEvidence: fullyCollectedStaticList
@@ -713,7 +779,11 @@ async function collectDetailSurface(
 			: latest.staticListEvidence,
 		settlement,
 		snapshots,
+		stablePolls,
 		observedUnits,
+		unknownUnitRows: [...collectedUnits.values()].filter(
+			(units) => units === null,
+		).length,
 	};
 	const html =
 		collected.size > 0
@@ -819,6 +889,8 @@ export type DetailFetchResult =
 	| {
 			detail: OrderDetail;
 			diagnostic?: string;
+			/** Collected rows the parser could not read, so `detail` lacks them. */
+			droppedRows?: number;
 			elapsedMs?: number;
 			pollCount?: number;
 			status: "hydrated";
@@ -837,8 +909,21 @@ export type DetailFetchResult =
 			failureKind: DetailFailureKind;
 			pollCount?: number;
 			reason: HebDetailGapReason;
+			/** The requested order's own page settled with no item rows at all. This
+			 *  is the only failed read that can stand behind an empty claim. */
+			settledEmpty?: true;
 			status: "failed";
 	  };
+
+/** Whether the browser is still on the order's own detail page, not on a
+ *  redirect target such as the order list or an error page. */
+function landedOnOrderPage(url: string, orderId: string): boolean {
+	try {
+		return new URL(url).pathname.split("/").filter(Boolean).at(-1) === orderId;
+	} catch {
+		return false;
+	}
+}
 
 const SIGNIN_URL_RE = /\/(sign-in|login|challenge|checkpoint)/i;
 // Amazon's navigation-retry shape (connectors/amazon/index.ts): retry only
@@ -851,13 +936,19 @@ const DETAIL_RETRY_COUNT = 2;
 const DETAIL_RETRY_MIN_TIMEOUT_MS = 1500;
 const DETAIL_RETRY_FACTOR = 2;
 
-async function navigateToOrderDetail(page: Page, url: string): Promise<void> {
-	await pRetry(
-		async (): Promise<void> => {
-			await page.goto(url, {
+/** Navigate to the order page and return the final response's HTTP status, or
+ *  null when the browser reports none. */
+async function navigateToOrderDetail(
+	page: Page,
+	url: string,
+): Promise<number | null> {
+	return await pRetry(
+		async (): Promise<number | null> => {
+			const response = await page.goto(url, {
 				waitUntil: "domcontentloaded",
 				timeout: NAV_TIMEOUT_MS,
 			});
+			return response?.status() ?? null;
 		},
 		{
 			retries: DETAIL_RETRY_COUNT,
@@ -892,19 +983,35 @@ export async function fetchOrderDetail(
 		elapsedMs: Math.max(0, Date.now() - startedAt),
 		pollCount,
 	});
+	let navigationStatus: number | null = null;
 	const failed = (
 		failureKind: DetailFailureKind,
 		diagnostic?: string,
-	): DetailFetchResult => ({
-		...(diagnostic ? { diagnostic } : {}),
-		...metrics(),
-		failureKind,
-		reason: reasonForDetailFailure(failureKind),
-		status: "failed",
-	});
+		surface?: DetailSurfaceDiagnostics,
+		settledEmpty = false,
+	): DetailFetchResult => {
+		const measured = metrics();
+		// The host keeps no detail for a gap, so the run log is the only place a
+		// repeated failure can explain itself.
+		connectorDiagnostic("heb", "detail_fetch_failed", {
+			kind: failureKind,
+			ms: measured.elapsedMs,
+			polls: measured.pollCount,
+			...(navigationStatus === null ? {} : { http: navigationStatus }),
+			...(surface ? detailSurfaceFields(surface) : {}),
+		});
+		return {
+			...(diagnostic ? { diagnostic } : {}),
+			...measured,
+			failureKind,
+			reason: reasonForDetailFailure(failureKind),
+			...(settledEmpty ? { settledEmpty: true as const } : {}),
+			status: "failed",
+		};
+	};
 	const url = `https://www.heb.com/my-account/order-history/${orderId}`;
 	try {
-		await navigateToOrderDetail(page, url);
+		navigationStatus = await navigateToOrderDetail(page, url);
 	} catch (err) {
 		// pRetry's shouldRetry gate (RETRYABLE_ERROR_RE) only lets transient
 		// transport errors consume the retry budget — a non-retryable error
@@ -960,7 +1067,11 @@ export async function fetchOrderDetail(
 		} else if (surface.diagnostics.settlement === "timeout") {
 			failureKind = "detail_surface_timeout";
 		}
-		return failed(failureKind, detailSurfaceErrorMessage(surface.diagnostics));
+		return failed(
+			failureKind,
+			detailSurfaceErrorMessage(surface.diagnostics),
+			surface.diagnostics,
+		);
 	}
 
 	const landedUrl = page.url();
@@ -997,10 +1108,29 @@ export async function fetchOrderDetail(
 		return failed(
 			"parse_missing",
 			detailSurfaceErrorMessage(surface.diagnostics),
+			surface.diagnostics,
+			surface.diagnostics.collectedRows === 0 &&
+				landedOnOrderPage(landedUrl, orderId) &&
+				(navigationStatus === null || navigationStatus < 400),
 		);
+	}
+	// The parser drops a line with no name or product id without a word, so a
+	// hydrated order can hold fewer lines than the surface collected. The order
+	// still hydrates and its readable lines are emitted; the run log carries the
+	// difference, and the result says so, so a caller can keep a prior gap open.
+	const droppedRows = Math.max(
+		0,
+		surface.diagnostics.collectedRows - detail.items.length,
+	);
+	if (droppedRows > 0) {
+		connectorDiagnostic("heb", "detail_rows_unparsed", {
+			collected: surface.diagnostics.collectedRows,
+			parsed: detail.items.length,
+		});
 	}
 	return {
 		detail,
+		droppedRows,
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
 		...metrics(),
 		status: "hydrated",
@@ -1319,13 +1449,14 @@ async function reportEmptyPageDiagnostics(
 // ─── Coverage accounting (order_items detail hydration) ───────────────────
 
 export interface OrderItemsCoverage {
+	empty: string[];
 	gap: string[];
 	hydrated: string[];
 	required: string[];
 }
 
 export function newOrderItemsCoverage(): OrderItemsCoverage {
-	return { gap: [], hydrated: [], required: [] };
+	return { empty: [], gap: [], hydrated: [], required: [] };
 }
 
 /**
@@ -1359,10 +1490,11 @@ export function newOrdersCoverage(): OrdersCoverage {
  *  - `hydrated` — the detail page fetched and parsed.
  *  - `gap`      — the detail fetch was attempted but degraded, or the order
  *                 never reached the detail lane (e.g., unparseable order date).
- * Both outcomes remain in the required denominator — the order was enumerated
+ *  - `empty`    — the order was canceled and has nothing to hydrate.
+ * All outcomes remain in the required denominator — the order was enumerated
  * by the parent list scan and must not silently vanish from coverage.
  */
-export type DetailOutcome = "hydrated" | "gap";
+export type DetailOutcome = "hydrated" | "gap" | "empty";
 
 export function recordDetailOutcome(
 	coverage: OrderItemsCoverage,
@@ -1372,6 +1504,8 @@ export function recordDetailOutcome(
 	coverage.required.push(orderId);
 	if (outcome === "hydrated") {
 		coverage.hydrated.push(orderId);
+	} else if (outcome === "empty") {
+		coverage.empty.push(orderId);
 	} else {
 		coverage.gap.push(orderId);
 	}
@@ -1430,7 +1564,10 @@ export interface RunFlags {
 	sessionRepairRequired: boolean;
 }
 
+type PendingGapRef = { gapId: string; recordKey: string | number };
+
 export interface EmitDeps extends HydrationDeps {
+	pendingGapsByOrderId?: Map<string, PendingGapRef>;
 	capture?: BrowserCollectContext["capture"];
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 	emit: BrowserCollectContext["emit"];
@@ -1625,6 +1762,7 @@ function readRecoverableHebOrderDetailGap(
 }
 
 export interface HebDetailRecoveryDeps extends HydrationDeps {
+	pendingGapsByOrderId?: Map<string, PendingGapRef>;
 	capture?: BrowserCollectContext["capture"];
 	detailGaps: readonly BrowserCollectContext["detailGaps"][number][];
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
@@ -1676,6 +1814,10 @@ async function recoverPendingOrderItemDetailGapPage(
 						locator.orderDate,
 					),
 				);
+				deps.pendingGapsByOrderId?.set(locator.orderId, {
+					gapId: locator.gapId,
+					recordKey: locator.recordKey,
+				});
 				reDeferred += 1;
 				continue;
 			}
@@ -1718,6 +1860,10 @@ async function recoverPendingOrderItemDetailGapPage(
 				{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
 			),
 		);
+		deps.pendingGapsByOrderId?.set(locator.orderId, {
+			gapId: locator.gapId,
+			recordKey: locator.recordKey,
+		});
 		reDeferred += 1;
 	}
 	return { recovered, reDeferred, skipped };
@@ -1727,8 +1873,17 @@ export async function recoverPendingOrderItemDetailGaps(
 	page: Page,
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
-): Promise<{ recovered: number; stoppedWithPending: boolean }> {
+): Promise<{
+	recovered: number;
+	stoppedWithPending: boolean;
+	unreconciledPending: boolean;
+}> {
 	let recovered = 0;
+	// Gaps this run could not settle, across every page: a page that recovered
+	// something still leaves its other gaps pending, and the last page the host
+	// returns is empty whatever happened on the pages before it.
+	let leftPending = 0;
+	let unreconciledPending = false;
 	let gaps = deps.detailGaps;
 	while (gaps.length > 0) {
 		const result = await recoverPendingOrderItemDetailGapPage(
@@ -1738,18 +1893,35 @@ export async function recoverPendingOrderItemDetailGaps(
 			gaps,
 		);
 		recovered += result.recovered;
+		leftPending += result.reDeferred + result.skipped;
+		unreconciledPending ||= result.skipped > 0;
 		if (!deps.requestDetailGapPage) {
 			return {
 				recovered,
-				stoppedWithPending: result.reDeferred + result.skipped > 0,
+				stoppedWithPending: leftPending > 0,
+				unreconciledPending,
 			};
 		}
 		if (result.recovered === 0 && result.reDeferred + result.skipped > 0) {
-			return { recovered, stoppedWithPending: true };
+			// A single lease-only probe distinguishes exhaustion from unseen gaps
+			// without spending attempts or retrying this no-progress page.
+			try {
+				const unseen = await deps.requestDetailGapPage({
+					streams: ["order_items"],
+				});
+				unreconciledPending ||= unseen.length > 0;
+			} catch {
+				unreconciledPending = true;
+			}
+			return { recovered, stoppedWithPending: true, unreconciledPending };
 		}
 		gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
 	}
-	return { recovered, stoppedWithPending: false };
+	return {
+		recovered,
+		stoppedWithPending: leftPending > 0,
+		unreconciledPending,
+	};
 }
 
 export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -1764,6 +1936,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 ): Promise<{
 	recovered: number;
 	stoppedWithPending: boolean;
+	unreconciledPending: boolean;
 	suppressForward: boolean;
 }> {
 	if (!options.wantsItems) {
@@ -1788,6 +1961,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 		return {
 			recovered: 0,
 			stoppedWithPending: pendingItemGaps > 0,
+			unreconciledPending: pendingItemGaps > 0,
 			suppressForward,
 		};
 	}
@@ -1887,16 +2061,85 @@ async function emitOrderAndItems(
 				card_units: listOrder.itemCount,
 				product_rows: detail.items.length,
 				fulfilled_units: fulfilledUnits ?? "unknown",
+				...(fulfilledUnits === null ? quantityShapeCounts(detail.items) : {}),
 				reason: "unit_and_row_counts_differ",
 			});
-			await deps.progress("An order's item count did not match its details");
 		}
-		deps.itemCountTallies?.push({
-			orderId: listOrder.orderId,
-			declaredItemCount: listOrder.itemCount,
-			collectedItemCount: fulfilledUnits ?? detail.items.length,
-		});
+		// Units are known only when every row has a whole quantity. Without them
+		// the card's count has nothing to be compared with: a 2x line is one row
+		// and a weighed line is a fraction, so a row count cannot show that items
+		// are missing. Only a known shortfall reaches the owner or the run tally.
+		if (fulfilledUnits !== null) {
+			if (
+				listOrder.itemCount !== null &&
+				fulfilledUnits < listOrder.itemCount
+			) {
+				await deps.progress("An order's item count did not match its details");
+			}
+			deps.itemCountTallies?.push({
+				orderId: listOrder.orderId,
+				declaredItemCount: listOrder.itemCount,
+				collectedItemCount: fulfilledUnits,
+			});
+		}
 	}
+}
+
+/** How each row's quantity parsed, as counts only, so an order whose
+ *  fulfilled units are unknown says why in its diagnostic line. */
+function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
+	fractional_qty_rows: number;
+	unparsed_qty_rows: number;
+	whole_qty_rows: number;
+} {
+	const counts = {
+		fractional_qty_rows: 0,
+		unparsed_qty_rows: 0,
+		whole_qty_rows: 0,
+	};
+	for (const { quantity } of items) {
+		if (quantity === null) {
+			counts.unparsed_qty_rows += 1;
+		} else if (Number.isSafeInteger(quantity)) {
+			counts.whole_qty_rows += 1;
+		} else {
+			counts.fractional_qty_rows += 1;
+		}
+	}
+	return counts;
+}
+
+/** Close the pending gap that gap recovery re-deferred for this order, if any,
+ *  once this run has settled the order: its items were just delivered, or the
+ *  order's own page showed none and H-E-B declares none. No item record is
+ *  invented. */
+async function closePendingGap(
+	deps: Pick<EmitDeps, "emit" | "pendingGapsByOrderId">,
+	orderId: string,
+): Promise<void> {
+	const ref = deps.pendingGapsByOrderId?.get(orderId);
+	if (!ref) {
+		return;
+	}
+	await deps.emit({
+		type: "DETAIL_GAP_RECOVERED",
+		reference_only: true,
+		gap_id: ref.gapId,
+		stream: "order_items",
+		record_key: ref.recordKey,
+	});
+	deps.pendingGapsByOrderId?.delete(orderId);
+}
+
+/** Whether H-E-B's own status for the order says it was canceled: the card's
+ *  status text ("Order canceled") or the structured status code. A pending
+ *  "Cancel order" button or a cancellation request does not match. */
+export function isCanceledOrder(
+	order: Pick<ListPageOrder, "status" | "statusCode">,
+): boolean {
+	return [order.status, order.statusCode].some(
+		(value) => typeof value === "string" && /cancel+ed/i.test(value),
+	);
 }
 
 /** Process one list-page order: fetch detail (if in scope), account for
@@ -1911,7 +2154,7 @@ async function fetchDetailAndRecordCoverage(
 	flags: RunFlags,
 	listOrder: ListPageOrder,
 	orderDate: string,
-): Promise<OrderDetail | null> {
+): Promise<{ complete: boolean; detail: OrderDetail } | null> {
 	const result = await resolveOrderDetail(page, flags, listOrder.orderId, {
 		...(deps.capture ? { capture: deps.capture } : {}),
 		detailSurfaceTimeoutMs: deps.detailSurfaceTimeoutMs,
@@ -1925,6 +2168,25 @@ async function fetchDetailAndRecordCoverage(
 		result.failureKind === "session_repair_required"
 	) {
 		flags.sessionRepairRequired = true;
+	}
+	// H-E-B shows a canceled order as "$0.00, 0 items", and its page may still
+	// list rows; they are collected like any other order's. Only when the
+	// order's own page settles with no rows at all do the page and the card agree
+	// that there is nothing to hydrate, and the order is accounted for as empty
+	// instead of staying a gap that no retry can close. A page that lists rows
+	// this connector cannot key, or that never settles, proves nothing about the
+	// order's items and stays a gap. The failed fetch has already logged why.
+	if (
+		result.status === "failed" &&
+		result.settledEmpty === true &&
+		isCanceledOrder(listOrder) &&
+		listOrder.itemCount === 0
+	) {
+		if (deps.orderItemsCoverage) {
+			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "empty");
+		}
+		await closePendingGap(deps, listOrder.orderId);
+		return null;
 	}
 	if (deps.orderItemsCoverage) {
 		const outcome: DetailOutcome =
@@ -1943,7 +2205,9 @@ async function fetchDetailAndRecordCoverage(
 			);
 		}
 	}
-	return result.status === "hydrated" ? result.detail : null;
+	return result.status === "hydrated"
+		? { complete: (result.droppedRows ?? 0) === 0, detail: result.detail }
+		: null;
 }
 
 export async function processListOrder(
@@ -1991,7 +2255,7 @@ export async function processListOrder(
 		return;
 	}
 
-	const detail = deps.wantsItems
+	const fetched = deps.wantsItems
 		? await fetchDetailAndRecordCoverage(
 				page,
 				deps,
@@ -2000,8 +2264,17 @@ export async function processListOrder(
 				orderDate,
 			)
 		: null;
+	const detail = fetched?.detail ?? null;
 
 	await emitOrderAndItems(deps, listOrder, detail, orderDate);
+	// The scan has just delivered every item of this order. A gap that recovery
+	// re-deferred for it earlier in the run, such as a legacy gap with no date to
+	// emit items under, is settled now that the list card supplied the date. A
+	// page with a row the parser could not read delivered less than the order
+	// holds, so its prior gap stays open.
+	if (fetched?.complete && deps.emitItems) {
+		await closePendingGap(deps, listOrder.orderId);
+	}
 }
 
 /**
@@ -2393,10 +2666,12 @@ export async function emitOrderItemsCoverage(
 		stream: "order_items",
 		stateStream: "orders",
 		requiredKeys: coverage.required,
-		hydratedKeys: coverage.hydrated,
+		// "empty" is folded into hydrated because the host has no separate set yet;
+		// when it accepts DETAIL_COVERAGE_KEY_SETS this becomes empty_keys.
+		hydratedKeys: [...coverage.hydrated, ...coverage.empty],
 		gapKeys: coverage.gap,
 		considered: coverage.required.length,
-		covered: coverage.hydrated.length,
+		covered: coverage.hydrated.length + coverage.empty.length,
 	});
 }
 
@@ -2628,8 +2903,8 @@ export function nutritionCoverageBlockReason(
  *  a suppressed order scan are budget or transient outcomes that a rerun can
  *  finish. The page cap and the item-count shortfall are the same on every
  *  run. An incremental run always stops at its resume boundary by design, so
- *  that cause does not clear on a rerun either; only a collection change
- *  (a full re-walk for nutrition) can fix it. */
+ *  that cause does not clear on a rerun either; only a `full_refresh` run,
+ *  which ignores the boundary and re-walks the history, can fix it. */
 export function nutritionCoverageRecoveryHint(
 	cause: NutritionCoverageCause,
 ):
@@ -2818,6 +3093,7 @@ export const hebConnector: BrowserConnectorConfig = {
 	},
 	async collect(ctx: BrowserCollectContext): Promise<void> {
 		const {
+			collectionMode,
 			scope,
 			state,
 			emitRecord,
@@ -2851,7 +3127,13 @@ export const hebConnector: BrowserConnectorConfig = {
 		const collectNutritionTargets = wantsNutrition;
 
 		const ordersState = (state.orders ?? {}) as OrdersStateShape;
-		const boundary = resumeBoundary(ordersState.checkpoint);
+		// An explicit full refresh ignores the resume checkpoint and walks the
+		// whole order history, which is the only run that can complete nutrition
+		// for an account whose history is longer than the boundary page.
+		const boundary =
+			collectionMode === "full_refresh"
+				? null
+				: resumeBoundary(ordersState.checkpoint);
 		// A committed `orders` checkpoint is this connection's own record that
 		// H-E-B has listed orders for this account before. It is what makes a
 		// later "no order history" page a contradiction to escalate rather than
@@ -2882,7 +3164,9 @@ export const hebConnector: BrowserConnectorConfig = {
 			manualRepairAttempted: false,
 			sessionRepairRequired: false,
 		};
+		const pendingGapsByOrderId = new Map<string, PendingGapRef>();
 		const deps: EmitDeps = {
+			pendingGapsByOrderId,
 			...(capture ? { capture } : {}),
 			emit: async (message) => {
 				// List-walk helpers describe an unproven enumeration with a raw
@@ -2928,6 +3212,7 @@ export const hebConnector: BrowserConnectorConfig = {
 			{
 				...(capture ? { capture } : {}),
 				detailGaps: ctx.detailGaps,
+				pendingGapsByOrderId,
 				reportStreamFailure,
 				emit,
 				emitRecord,
@@ -2984,6 +3269,11 @@ export const hebConnector: BrowserConnectorConfig = {
 			return;
 		}
 		const { newestOrderDate, stoppedAtBoundary, truncated } = scan;
+		// Recovery's own record of what it could not settle, less what the forward
+		// scan has since delivered or proven empty: pending whatever made the page
+		// loop stop.
+		const gapsStillPending =
+			gapRecovery.unreconciledPending || pendingGapsByOrderId.size > 0;
 
 		if (wantsOrders && !truncated) {
 			// A truncated scan emits no finishing `orders` STATE: it failed the
@@ -3000,7 +3290,7 @@ export const hebConnector: BrowserConnectorConfig = {
 
 		if (orderItemsCoverage && wantsItems) {
 			await emitOrderItemsCoverage(deps, orderItemsCoverage);
-			if (orderItemsCoverage.gap.length > 0 || gapRecovery.stoppedWithPending) {
+			if (orderItemsCoverage.gap.length > 0 || gapsStillPending) {
 				await reportStreamFailure?.(
 					"order_items",
 					"H-E-B order detail enumeration has unresolved gaps.",
@@ -3046,9 +3336,7 @@ export const hebConnector: BrowserConnectorConfig = {
 				orderItemsRequested: collectItemEvidence,
 				ordersRequested: true,
 				ordersTruncated: truncated,
-				unrecoveredPriorOrderItemGapCount: gapRecovery.stoppedWithPending
-					? 1
-					: 0,
+				unrecoveredPriorOrderItemGapCount: gapsStillPending ? 1 : 0,
 			};
 			const coverageBlockCause = nutritionCoverageBlockCause(coverageGate);
 			if (coverageBlockCause) {
@@ -3066,8 +3354,7 @@ export const hebConnector: BrowserConnectorConfig = {
 						order_item_evidence_collected_internally:
 							wantsNutrition && !wantsItems,
 						orders_truncated: truncated,
-						unrecovered_prior_order_item_gap_count:
-							gapRecovery.stoppedWithPending ? 1 : 0,
+						unrecovered_prior_order_item_gap_count: gapsStillPending ? 1 : 0,
 					},
 				);
 			} else {
