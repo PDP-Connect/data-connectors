@@ -72,6 +72,7 @@ import {
 	resolveOrderDetail,
 	runForwardScan,
 } from "./index.ts";
+import type { OrderItemTally } from "./item-count-anchor.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
 
@@ -3704,6 +3705,124 @@ test("processListOrder keeps fully collected items and reports a remaining count
 		);
 	} finally {
 		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+/** Three rows: 2 units, a weighed row with a fractional first number, 1 unit.
+ *  The weighed row has no whole quantity, so the order's units are unknown. */
+function syntheticWeighedRowFixture(): string {
+	const quantities = ["Qty: 2", "Qty: 1.2 of 1.2 lbs", "Qty: 1"];
+	const rows = quantities
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
+}
+
+test("processListOrder says nothing about a shortfall when the order's units cannot be summed", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticWeighedRowFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000002",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps, emitted } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000002", itemCount: 6 }),
+		);
+
+		assert.equal(
+			emitted.filter((record) => record.stream === "order_items").length,
+			3,
+			"the rows are delivered whole",
+		);
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+			"three rows against a card of six units is not evidence of missing items",
+		);
+		assert.deepEqual(
+			itemCountTallies,
+			[],
+			"an order whose units are unknown joins no run-level shortfall tally",
+		);
+		assert.ok(
+			diagnosticLines.includes(
+				'[heb-diagnostic] item_count_reconciliation {"card_units":6,"product_rows":3,"fulfilled_units":"unknown","fractional_qty_rows":1,"unparsed_qty_rows":0,"whole_qty_rows":2,"reason":"unit_and_row_counts_differ"}',
+			),
+			"the diagnostic line still says why the units are unknown",
+		);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+test("processListOrder tallies a known surplus without telling the owner anything is missing", async () => {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const fixtureHtml = syntheticStaticQuantityFixture();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB000000000003",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const progressMessages: string[] = [];
+		const itemCountTallies: OrderItemTally[] = [];
+		const { deps } = makeRecordingDeps({
+			itemCountTallies,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+		});
+
+		// The page holds 84 units. H-E-B restates a card downward after a refund,
+		// so holding more than the card says is preserved, not reported.
+		await processListOrder(
+			page,
+			deps,
+			makeRunFlags(),
+			makeListOrder({ orderId: "HEB000000000003", itemCount: 80 }),
+		);
+
+		assert.equal(
+			progressMessages.includes(
+				"An order's item count did not match its details",
+			),
+			false,
+		);
+		assert.deepEqual(itemCountTallies, [
+			{
+				orderId: "HEB000000000003",
+				declaredItemCount: 80,
+				collectedItemCount: 84,
+			},
+		]);
+	} finally {
 		await browser.close();
 	}
 });
