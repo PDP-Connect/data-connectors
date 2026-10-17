@@ -111,6 +111,8 @@ async function hostMain({
 	omitScopeEntries,
 	thinHost,
 }) {
+	// Deadline time must continue advancing when fixture calendar time is frozen.
+	const elapsedNow = performance.now.bind(performance);
 	window.__pageshimEnv = env || {};
 	if (Number.isFinite(clockNowMs)) Date.now = () => clockNowMs;
 	if (timerScale !== 1) {
@@ -157,10 +159,10 @@ async function hostMain({
 		waitForSelector: async (selector, options) => {
 			const timeout = options?.timeout ?? 30000;
 			const state = options?.state || "visible";
-			const started = Date.now();
+			const started = elapsedNow();
 			for (;;) {
 				if (await call("selectorState", [String(selector), state])) return;
-				if (Date.now() - started >= timeout)
+				if (elapsedNow() - started >= timeout)
 					throw new Error(
 						`waitForSelector timed out after ${timeout}ms: ${selector}`,
 					);
@@ -194,8 +196,8 @@ async function hostMain({
 		promptUser: async (msg, check, interval) => {
 			await call("setData", ["status", msg]);
 			await call("promptUser", []);
-			const started = Date.now();
-			while (Date.now() - started < loginWaitMs) {
+			const started = elapsedNow();
+			while (elapsedNow() - started < loginWaitMs) {
 				let ok = false;
 				try {
 					ok = await check();
