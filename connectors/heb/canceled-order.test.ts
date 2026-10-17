@@ -36,6 +36,19 @@ function noopSendInteraction(): ReturnType<
 
 const immediateWait = (): Promise<void> => Promise.resolve();
 
+/** Make every `setTimeout` fire on the next microtask so a collect run does not
+ *  wait out its polite delays. Returns the restore function. */
+function collapseTimers(): () => void {
+	const original = globalThis.setTimeout;
+	globalThis.setTimeout = ((callback: () => void) => {
+		queueMicrotask(callback);
+		return 0;
+	}) as unknown as typeof setTimeout;
+	return () => {
+		globalThis.setTimeout = original;
+	};
+}
+
 function makeRecordingDeps(overrides: Partial<EmitDeps> = {}): RecordingDeps {
 	const harness = makeRecordingEmit(validateRecord);
 	const deps: EmitDeps = {
@@ -88,15 +101,6 @@ function makeListOrder(overrides: Partial<ListPageOrder> = {}): ListPageOrder {
 		...overrides,
 	};
 }
-
-const NEVER_CALLED_PAGE = new Proxy(
-	{},
-	{
-		get(): never {
-			throw new Error("page must not be touched in this test");
-		},
-	},
-) as Page;
 
 const DETAIL_HTML = `<html><body><main><ul>${[0, 1, 2]
 	.map(
@@ -230,6 +234,15 @@ function makeContext(
 	return ctx as unknown as TestContext;
 }
 
+async function collectQuickly(ctx: BrowserCollectContext): Promise<void> {
+	const restoreTimers = collapseTimers();
+	try {
+		await hebConnector.collect(ctx);
+	} finally {
+		restoreTimers();
+	}
+}
+
 function onePageCanceledOrdersList(): string {
 	const html = readFileSync(
 		join(
@@ -269,7 +282,11 @@ test("isCanceledOrder recognizes canceled statuses, not cancellation requests", 
 	}
 });
 
-test("processListOrder accounts for canceled orders without touching the page", async () => {
+const NO_ROWS_HTML = "<html><body><main>no items here</main></body></html>";
+const SIGN_IN_HTML =
+	'<html><body><main><form><input type="password" name="password"></form></main></body></html>';
+
+test("processListOrder accounts for a canceled zero-item order whose page cannot be read as empty", async () => {
 	const order = makeListOrder({
 		itemCount: 0,
 		status: "Order canceled",
@@ -279,7 +296,17 @@ test("processListOrder accounts for canceled orders without touching the page", 
 	const { deps, emitted, protocolMessages } = makeRecordingDeps({
 		orderItemsCoverage: coverage,
 	});
-	await processListOrder(NEVER_CALLED_PAGE, deps, makeRunFlags(), order);
+	const visited: string[] = [];
+	await processListOrder(
+		makePageStub(NO_ROWS_HTML, visited),
+		deps,
+		makeRunFlags(),
+		order,
+	);
+	assert.ok(
+		visited.some((url) => url.includes("/my-account/order-history/")),
+		"the page is fetched first; the declared zero is only the fallback",
+	);
 	assert.deepEqual(coverage.required, [order.orderId]);
 	assert.deepEqual(coverage.empty, [order.orderId]);
 	assert.deepEqual(coverage.hydrated, []);
@@ -292,6 +319,89 @@ test("processListOrder accounts for canceled orders without touching the page", 
 		protocolMessages.some((message) => message.type === "DETAIL_GAP"),
 		false,
 	);
+});
+
+test("processListOrder collects the rows a canceled zero-item order's page does list", async () => {
+	const order = makeListOrder({
+		itemCount: 0,
+		status: "Order canceled",
+		unfulfilledCount: 0,
+	});
+	const coverage = newOrderItemsCoverage();
+	const { deps, emitted } = makeRecordingDeps({ orderItemsCoverage: coverage });
+	await processListOrder(
+		makePageStub(DETAIL_HTML),
+		deps,
+		makeRunFlags(),
+		order,
+	);
+	assert.deepEqual(coverage.hydrated, [order.orderId]);
+	assert.deepEqual(coverage.empty, []);
+	assert.deepEqual(coverage.gap, []);
+	assert.equal(
+		emitted.filter((record) => record.stream === "order_items").length,
+		3,
+		"the rows H-E-B shows are kept, not replaced by an empty claim",
+	);
+});
+
+test("processListOrder keeps a canceled zero-item order that needs a sign-in as a gap", async () => {
+	const order = makeListOrder({
+		itemCount: 0,
+		status: "Order canceled",
+		unfulfilledCount: 0,
+	});
+	const coverage = newOrderItemsCoverage();
+	const { deps, protocolMessages } = makeRecordingDeps({
+		orderItemsCoverage: coverage,
+	});
+	await processListOrder(
+		makePageStub(SIGN_IN_HTML),
+		deps,
+		makeRunFlags(),
+		order,
+	);
+	assert.deepEqual(coverage.empty, []);
+	assert.deepEqual(coverage.gap, [order.orderId]);
+	assert.equal(
+		protocolMessages.filter((message) => message.type === "DETAIL_GAP").length,
+		1,
+		"a sign-in problem is not a declared-empty order",
+	);
+});
+
+test("a hydrated order closes the pending gap recovery re-deferred, after its items", async () => {
+	const order = makeListOrder({ itemCount: 5 });
+	const { deps } = makeRecordingDeps({
+		pendingGapsByOrderId: new Map([
+			[order.orderId, { gapId: "gap_x", recordKey: order.orderId }],
+		]),
+	});
+	const events: string[] = [];
+	const emit = deps.emit;
+	const emitRecord = deps.emitRecord;
+	deps.emit = (message) => {
+		events.push(message.type);
+		return emit(message);
+	};
+	deps.emitRecord = (...args) => {
+		events.push(`RECORD:${args[0]}`);
+		return emitRecord(...args);
+	};
+	await processListOrder(
+		makePageStub(DETAIL_HTML),
+		deps,
+		makeRunFlags(),
+		order,
+	);
+	const recovered = events.indexOf("DETAIL_GAP_RECOVERED");
+	assert.ok(recovered >= 0, "the gap is closed");
+	assert.equal(
+		events.lastIndexOf("RECORD:order_items") < recovered,
+		true,
+		"every item record precedes the recovery message",
+	);
+	assert.equal(deps.pendingGapsByOrderId?.size, 0);
 });
 
 test("processListOrder keeps a delivered zero-item detail failure as a gap", async () => {
@@ -340,11 +450,11 @@ test("emitOrderItemsCoverage folds empty orders into hydrated coverage", async (
 	});
 });
 
-test("collect completes a canceled-only history without visiting order detail", async () => {
+test("collect completes a canceled-only history whose detail page has no rows", async () => {
 	const visited: string[] = [];
-	const page = makePageStub(onePageCanceledOrdersList(), visited);
+	const page = makePageStub(onePageCanceledOrdersList(), visited, NO_ROWS_HTML);
 	const ctx = makeContext(["orders", "order_items"], page);
-	await hebConnector.collect(ctx);
+	await collectQuickly(ctx);
 	assert.deepEqual(ctx.reportedStreamFailures, []);
 	assert.equal(
 		ctx.protocolMessages.some((message) => message.type === "DETAIL_GAP"),
@@ -355,9 +465,9 @@ test("collect completes a canceled-only history without visiting order detail", 
 		["orders"],
 	);
 	assert.ok(visited.some((url) => url.includes("/my-account/your-orders")));
-	assert.equal(
+	assert.ok(
 		visited.some((url) => url.includes("/my-account/order-history/")),
-		false,
+		"the order page is fetched before the declared zero is accepted",
 	);
 });
 
@@ -399,7 +509,7 @@ test("collect hydrates a canceled card with a positive item count", async () => 
 		["orders", "order_items"],
 		makePageStub(listHtml, visited, DETAIL_HTML),
 	);
-	await hebConnector.collect(ctx);
+	await collectQuickly(ctx);
 	assert.deepEqual(ctx.reportedStreamFailures, []);
 	assert.equal(
 		ctx.protocolMessages.some((message) => message.type === "DETAIL_GAP"),
@@ -506,7 +616,7 @@ for (const scenario of [
 				},
 			},
 		);
-		await hebConnector.collect(ctx);
+		await collectQuickly(ctx);
 		assert.equal(probeCalls, 1);
 		const recovered = ctx.protocolMessages.filter(
 			(message) => message.type === "DETAIL_GAP_RECOVERED",
