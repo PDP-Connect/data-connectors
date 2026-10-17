@@ -469,6 +469,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {boolean} [o.supportsStateArgument] model an older shell with a two-argument runner
  * @param {boolean} [o.resultStreaming] model the thin host: offer page.input and accept only streamed results
  * @param {boolean} [o.acceptLegacyResult] also accept a one-message result (default: only without resultStreaming)
+ * @param {boolean} [o.fixtureReady] await fixture load instead of the host navigation delay
  * @param {number} [o.timerScale] scale browser timers for bounded synthetic fixtures
  * @param {number} [o.stateAckDelayMs] delay STATE bridge acknowledgements
  * @param {boolean} [o.failResultWrite] fail the first successful result write
@@ -487,6 +488,7 @@ export async function runHarness({
 	supportsStateArgument = true,
 	loginAfterMs = 0,
 	gotoDelayMs = 2000,
+	fixtureReady = false,
 	loginWaitMs = 120_000,
 	env = {},
 	resultStreaming = false,
@@ -600,9 +602,10 @@ export async function runHarness({
 						});
 						if (failure) return { __shimError: String(failure) };
 						await target
-							.goto(a[0], { waitUntil: "commit" })
+							.goto(a[0], { waitUntil: fixtureReady ? "load" : "commit" })
 							.catch((e) => log.push(`goto error ${e.message}`));
-						await new Promise((r) => setTimeout(r, gotoDelayMs));
+						if (!fixtureReady)
+							await new Promise((r) => setTimeout(r, gotoDelayMs));
 					}
 					return null;
 				case "setData":
@@ -857,4 +860,17 @@ export async function runHarness({
 		for (const entry of streamHost.files.values()) await entry.handle?.close();
 		await browser.close();
 	}
+}
+
+// Ordinary fixture runs opt into load readiness. Explicit timing controls keep
+// authentic wall-clock behavior, including the 45-second sign-in regression.
+export function runFixtureHarness(options) {
+	return runHarness({
+		...options,
+		fixtureReady: options.fixtureReady ?? (
+			options.loginAfterMs === undefined &&
+			options.gotoDelayMs === undefined &&
+			options.timerScale === undefined
+		),
+	});
 }
