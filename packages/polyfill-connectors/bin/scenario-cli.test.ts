@@ -63,7 +63,12 @@ import {
 	computeDeclarationDigest,
 	computeSourceDigest,
 } from "../src/scenario/validate.ts";
-import { createInactivityWatchdog as createRecordInactivityWatchdog } from "./scenario-record.ts";
+import { assertValidInteractionMessage } from "../src/scenario/wire-registry.ts";
+import {
+	createInactivityWatchdog as createRecordInactivityWatchdog,
+	MAX_SELECTION_CONTEXT_LENGTH,
+	selectionContextKey,
+} from "./scenario-record.ts";
 import {
 	assertNoPostRunSourceMutation,
 	createInactivityWatchdog as createVerifyInactivityWatchdog,
@@ -664,7 +669,10 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		const envLosesDir = join(tmpDir, "dump-env-loses");
 		const precedenceVerify = runVerifyCli(
 			[...verifyBaseArgs, tamperedPath, "--dump-records", flagWinsDir],
-			{ ...verifyEnv, PDPP_SCENARIO_DUMP_DIR: envLosesDir },
+			{
+				...verifyEnv,
+				PDPP_SCENARIO_DUMP_DIR: envLosesDir,
+			},
 		);
 		assert.notEqual(precedenceVerify.code, 0);
 		assert.equal(
@@ -694,7 +702,9 @@ test("scenario-verify --dump-records: dumps exactly the mismatched record(s) on 
 		assert.notEqual(dumpAllVerify.code, 0);
 		const dumpAllRecords = JSON.parse(
 			readFileSync(join(dumpAllDir, "run0-items.json"), "utf8"),
-		) as Array<{ id: string }>;
+		) as Array<{
+			id: string;
+		}>;
 		assert.deepEqual(
 			dumpAllRecords.map((r) => r.id),
 			["item-1", "item-2", "item-3"],
@@ -2331,6 +2341,201 @@ test("scenario-record: PDPP_SCENARIO_TRANSCRIPT_DIR writes each run's protocol m
 		);
 	} finally {
 		await stubProvider.close().catch(() => undefined);
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: raw observation advisory compares two synthetic runs and keeps one-run captures insufficient", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "scenario-raw-observations-test-"));
+	const fixturePath = join(
+		packageScratchDir(),
+		`scenario-raw-observations-${String(process.pid)}.ts`,
+	);
+	const firstClockCanary = "CLOCK_FIRST_PRIVATE_CANARY";
+	const secondClockCanary = "CLOCK_SECOND_PRIVATE_CANARY";
+	const idCanary = "RECORD_ID_PRIVATE_CANARY";
+	const dynamicKeyCanary = "DYNAMIC_KEY_PRIVATE_CANARY";
+	writeFileSync(
+		fixturePath,
+		`import { runConnector } from "../src/connector-runtime.ts";
+runConnector({
+  name: "raw-observation-smoke",
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, emitRecord, state }) {
+    const repeated = Object.hasOwn(state, "items");
+    await emitRecord("items", {
+      id: ${JSON.stringify(idCanary)},
+      clock: repeated ? ${JSON.stringify(secondClockCanary)} : ${JSON.stringify(firstClockCanary)},
+      stable: "business-field-canary",
+      [${JSON.stringify(dynamicKeyCanary)}]: "dynamic-value-canary",
+    });
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+
+`,
+	);
+	try {
+		const twoRun = runRecordCli(
+			[
+				"raw-observation-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--out",
+				join(tmpDir, "two-runs.scenario.json"),
+			],
+			{},
+		);
+		assert.equal(twoRun.code, 0, twoRun.stderr);
+		assert.match(
+			twoRun.stdout,
+			/\(undeclared stream\): differences-observed \(1 repeated identities; sample limit 50, retained 1, truncated false\)/,
+		);
+		assert.match(
+			twoRun.stdout,
+			/raw changes in unnamed or undeclared fields: 1/,
+		);
+		assert.match(twoRun.stdout, /Manifest\/schema metadata was unavailable/);
+		for (const canary of [
+			firstClockCanary,
+			secondClockCanary,
+			idCanary,
+			dynamicKeyCanary,
+			"business-field-canary",
+			"dynamic-value-canary",
+		]) {
+			assert.equal(twoRun.stdout.includes(canary), false);
+			assert.equal(twoRun.stderr.includes(canary), false);
+		}
+
+		const oneRun = runRecordCli(
+			[
+				"raw-observation-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--runs",
+				"1",
+				"--out",
+				join(tmpDir, "one-run.scenario.json"),
+			],
+			{},
+		);
+		assert.equal(oneRun.code, 0, oneRun.stderr);
+		assert.match(
+			oneRun.stdout,
+			/\(undeclared stream\): insufficient-repeat-observations \(0 repeated identities; sample limit 50, retained 1, truncated false\)/,
+		);
+		assert.match(
+			oneRun.stdout,
+			/total identity limit: 250; generic unknown-stream bucket limit: 50; truncation: false/,
+		);
+		assert.equal(oneRun.stdout.includes(firstClockCanary), false);
+		assert.equal(oneRun.stdout.includes(idCanary), false);
+	} finally {
+		rmSync(fixturePath, { force: true });
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: bound synthetic manifest reports declared changes and hides record data", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-bound-raw-observation-"),
+	);
+	const connectorKey = "bound_raw_observation_fixture";
+	const connectorDir = join(tmpDir, "connectors", connectorKey);
+	const connectorPath = join(connectorDir, "index.ts");
+	const manifestPath = join(connectorDir, "manifest.json");
+	const firstCanary = "BOUND_FIRST_VALUE_PRIVATE_CANARY";
+	const secondCanary = "BOUND_SECOND_VALUE_PRIVATE_CANARY";
+	const firstClockCanary = "BOUND_FIRST_CLOCK_PRIVATE_CANARY";
+	const secondClockCanary = "BOUND_SECOND_CLOCK_PRIVATE_CANARY";
+	const idCanary = "BOUND_ID_PRIVATE_CANARY";
+	const dynamicKey = "dynamic_BOUND_PRIVATE_KEY";
+	mkdirSync(connectorDir, { recursive: true });
+	writeFileSync(
+		connectorPath,
+		`import { runConnector } from "../../../../src/connector-runtime.ts";
+runConnector({
+  name: ${JSON.stringify(connectorKey)},
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, emitRecord, state }) {
+    const repeated = Object.hasOwn(state, "items");
+    await emitRecord("items", {
+      id: ${JSON.stringify(idCanary)},
+      created_at: repeated ? ${JSON.stringify(secondCanary)} : ${JSON.stringify(firstCanary)},
+      clock: repeated ? ${JSON.stringify(secondClockCanary)} : ${JSON.stringify(firstClockCanary)},
+      [${JSON.stringify(dynamicKey)}]: "dynamic_PRIVATE_VALUE",
+    });
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+`,
+	);
+	writeFileSync(
+		manifestPath,
+		JSON.stringify({
+			connector_id:
+				"https://registry.pdpp.dev/connectors/bound-raw-observation-fixture",
+			connector_key: connectorKey,
+			protocol_version: "0.1.0",
+			version: "0.0.0-test",
+			streams: [
+				{
+					name: "items",
+					primary_key: ["id"],
+					compaction_fingerprint: { exclude_keys: ["clock"] },
+					schema: {
+						type: "object",
+						properties: {
+							id: { type: "string" },
+							created_at: { type: "string" },
+							clock: { type: "string" },
+							stable: { type: "string" },
+						},
+					},
+				},
+			],
+		}),
+	);
+	try {
+		const result = runRecordCli(
+			[connectorKey, "--out", join(tmpDir, "bound.scenario.json")],
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+			},
+		);
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(
+			result.stdout,
+			/items: differences-observed \(1 repeated identities; sample limit 200, retained 1, truncated false\)/,
+		);
+		assert.match(
+			result.stdout,
+			/raw changed fields: clock \(1\), created_at \(1\)/,
+		);
+		assert.match(result.stdout, /raw changed fields: [^\n]*created_at \(1\)/);
+		assert.match(result.stdout, /raw changed fields: [^\n]*clock \(1\)/);
+		assert.match(
+			result.stdout,
+			/changed after declared comparison exclusions: created_at \(1\)/,
+		);
+		assert.doesNotMatch(
+			result.stdout,
+			/changed after declared comparison exclusions: [^\n]*clock/,
+		);
+		for (const canary of [
+			firstCanary,
+			secondCanary,
+			firstClockCanary,
+			secondClockCanary,
+			idCanary,
+			dynamicKey,
+			"dynamic_PRIVATE_VALUE",
+		]) {
+			assert.equal(result.stdout.includes(canary), false);
+			assert.equal(result.stderr.includes(canary), false);
+		}
+	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
 });
@@ -4031,4 +4236,342 @@ test("scenario-verify: replay subprocess forces PLAYWRIGHT_BROWSERS_PATH and PDP
 		rmSync(tmpDir, { recursive: true, force: true });
 		rmSync(connectorPath, { force: true });
 	}
+});
+
+// ─── raw observation advisory: selection context, typed wire keys, deep schemas ───
+
+function writeBoundObservationFixture(options: {
+	collectBody: string;
+	connectorKey: string;
+	schemaJson: string;
+	tmpDir: string;
+}): void {
+	const connectorDir = join(options.tmpDir, "connectors", options.connectorKey);
+	mkdirSync(connectorDir, { recursive: true });
+	writeFileSync(
+		join(connectorDir, "index.ts"),
+		`import { runConnector } from "../../../../src/connector-runtime.ts";
+runConnector({
+  name: ${JSON.stringify(options.connectorKey)},
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, emitRecord, sendInteraction, state }) {
+    const repeated = Object.hasOwn(state, "items");
+${options.collectBody}
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+`,
+	);
+	writeFileSync(
+		join(connectorDir, "manifest.json"),
+		`{"connector_id":"https://registry.pdpp.dev/connectors/${options.connectorKey.replaceAll("_", "-")}","connector_key":${JSON.stringify(options.connectorKey)},"protocol_version":"0.1.0","version":"0.0.0-test","streams":[{"name":"items","primary_key":["id"],"schema":${options.schemaJson}}]}`,
+	);
+}
+
+/** Reads every INTERACTION the connector actually put on the wire (from the
+ *  recorder's transcript) and runs the repo's own wire validator over it, so
+ *  a fixture that drifts outside the closed kind enum fails here instead of
+ *  silently passing a recorder that does not validate. Returns the count. */
+function assertTranscriptInteractionsContractValid(
+	transcriptDir: string,
+): number {
+	let count = 0;
+	for (const file of readdirSync(transcriptDir)) {
+		for (const line of readFileSync(join(transcriptDir, file), "utf8").split(
+			"\n",
+		)) {
+			if (line.length === 0) {
+				continue;
+			}
+			const { message } = JSON.parse(line) as {
+				message: Parameters<typeof assertValidInteractionMessage>[0];
+			};
+			if (message.type === "INTERACTION") {
+				assertValidInteractionMessage(message);
+				count += 1;
+			}
+		}
+	}
+	return count;
+}
+
+const SELECTION_FIXTURE_BODY = `    const selection = await sendInteraction({
+      kind: "manual_action",
+      message: "SELECTION_PROMPT_PRIVATE_CANARY",
+      request_id: process.env.SELECTION_FIXTURE_SAME === "1" ? "pick" : repeated ? "pick-second" : "pick-first",
+    });
+    if (selection.status !== "success") throw new Error("selection not answered");
+    await emitRecord("items", { id: "same-stream-local-id", label: repeated ? "second" : "first" });`;
+
+const SIMPLE_SCHEMA = JSON.stringify({
+	type: "object",
+	properties: { id: { type: "string" }, label: { type: "string" } },
+});
+
+test("scenario-record: advisory omits repeated-key comparisons when the runs answered different selections", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-selection-context-"),
+	);
+	const connectorKey = "selection_context_fixture";
+	writeBoundObservationFixture({
+		collectBody: SELECTION_FIXTURE_BODY,
+		connectorKey,
+		schemaJson: SIMPLE_SCHEMA,
+		tmpDir,
+	});
+	try {
+		const differentTranscript = join(tmpDir, "transcript-different");
+		const sameTranscript = join(tmpDir, "transcript-same");
+		const differentSelections = runRecordCli(
+			[
+				connectorKey,
+				"--out",
+				join(tmpDir, "different.scenario.json"),
+				"--answer",
+				"pick-first=SELECTION_ACCOUNT_A_CANARY",
+				"--answer",
+				"pick-second=SELECTION_ACCOUNT_B_CANARY",
+			],
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				PDPP_SCENARIO_TRANSCRIPT_DIR: differentTranscript,
+			},
+		);
+		assert.equal(differentSelections.code, 0, differentSelections.stderr);
+		assert.equal(
+			assertTranscriptInteractionsContractValid(differentTranscript),
+			2,
+		);
+		assert.match(
+			differentSelections.stdout,
+			/items: insufficient-repeat-observations \(0 repeated identities;/,
+		);
+		assert.match(
+			differentSelections.stdout,
+			/limitation: [^\n]*scope or selection context/,
+		);
+
+		const sameSelection = runRecordCli(
+			[
+				connectorKey,
+				"--out",
+				join(tmpDir, "same.scenario.json"),
+				"--answer",
+				"pick=SELECTION_ACCOUNT_A_CANARY",
+			],
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+				PDPP_SCENARIO_TRANSCRIPT_DIR: sameTranscript,
+				SELECTION_FIXTURE_SAME: "1",
+			},
+		);
+		assert.equal(sameSelection.code, 0, sameSelection.stderr);
+		assert.equal(assertTranscriptInteractionsContractValid(sameTranscript), 2);
+		assert.match(
+			sameSelection.stdout,
+			/items: differences-observed \(1 repeated identities;/,
+		);
+		for (const output of [differentSelections, sameSelection]) {
+			for (const canary of [
+				"SELECTION_PROMPT_PRIVATE_CANARY",
+				"SELECTION_ACCOUNT_A_CANARY",
+				"SELECTION_ACCOUNT_B_CANARY",
+				"same-stream-local-id",
+			]) {
+				assert.equal(output.stdout.includes(canary), false);
+				assert.equal(output.stderr.includes(canary), false);
+			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: advisory keeps wire key [x] distinct from the scalar string whose text is [x]", () => {
+	const tmpDir = mkdtempSync(join(packageScratchDir(), "scenario-wire-key-"));
+	const fixturePath = join(tmpDir, "wire-key-fixture.ts");
+	writeFileSync(
+		fixturePath,
+		`import { runConnector } from "../../src/connector-runtime.ts";
+runConnector({
+  name: "wire-key-smoke",
+  validateRecord: (_stream, data) => ({ ok: true, data }),
+  async collect({ emit, state }) {
+    const repeated = Object.hasOwn(state, "items");
+    const same = process.env.WIRE_KEY_FIXTURE_SAME === "1";
+    await emit({
+      type: "RECORD",
+      stream: "items",
+      key: repeated && !same ? '["wire-key-canary"]' : ["wire-key-canary"],
+      data: { id: "wire-key-canary", value: repeated ? "second" : "first" },
+      emitted_at: new Date().toISOString(),
+    });
+    await emit({ type: "STATE", stream: "items", cursor: { marker: "local" } });
+  },
+});
+`,
+	);
+	try {
+		const distinct = runRecordCli(
+			[
+				"wire-key-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--out",
+				join(tmpDir, "distinct.scenario.json"),
+			],
+			{},
+		);
+		assert.equal(distinct.code, 0, distinct.stderr);
+		assert.match(
+			distinct.stdout,
+			/\(undeclared stream\): insufficient-repeat-observations \(0 repeated identities;/,
+		);
+		const same = runRecordCli(
+			[
+				"wire-key-smoke",
+				"--entrypoint",
+				fixturePath,
+				"--out",
+				join(tmpDir, "same.scenario.json"),
+			],
+			{ WIRE_KEY_FIXTURE_SAME: "1" },
+		);
+		assert.equal(same.code, 0, same.stderr);
+		assert.match(
+			same.stdout,
+			/\(undeclared stream\): differences-observed \(1 repeated identities;/,
+		);
+		for (const output of [distinct, same]) {
+			assert.equal(output.stdout.includes("wire-key-canary"), false);
+			assert.equal(output.stderr.includes("wire-key-canary"), false);
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-record: a deeply nested declared schema cannot abort capture before run 1", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-deep-schema-"),
+	);
+	const connectorKey = "deep_schema_fixture";
+	const depth = 20_000;
+	const deepSchema = `{"type":"object","properties":{"id":{"type":"string"},"label":{"type":"string"},"deep":${'{"properties":{"a":'.repeat(depth)}{}${"}}".repeat(depth)}}}`;
+	writeBoundObservationFixture({
+		collectBody: `    await emitRecord("items", { id: "deep-schema-id", label: repeated ? "second" : "first" });`,
+		connectorKey,
+		schemaJson: deepSchema,
+		tmpDir,
+	});
+	try {
+		const result = runRecordCli(
+			[connectorKey, "--out", join(tmpDir, "deep.scenario.json")],
+			{
+				PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+			},
+		);
+		assert.equal(result.code, 0, result.stderr);
+		assert.match(result.stdout, /RECORDING [^\n]* run 1/);
+		assert.match(result.stdout, /complete: true/);
+		assert.match(
+			result.stdout,
+			/limitation: [^\n]*(schema|metadata)[^\n]*(bounded|unavailable|omitted)/i,
+		);
+		assert.equal(result.stdout.includes("deep-schema-id"), false);
+		assert.equal(result.stderr.includes("RangeError"), false);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+const OTP_FIXTURE_BODY = `    const different = process.env.OTP_FIXTURE_IDENTICAL !== "1";
+    const otp = await sendInteraction({
+      kind: "otp",
+      message: different
+        ? repeated ? "OTP_ACCOUNT_B_PROMPT_CANARY" : "OTP_ACCOUNT_A_PROMPT_CANARY"
+        : "OTP_SHARED_PROMPT_CANARY",
+      request_id: different ? (repeated ? "otp-second" : "otp-first") : "otp",
+    });
+    if (otp.status !== "success") throw new Error("otp not answered");
+    await emitRecord("items", { id: "same-stream-local-id", label: repeated ? "second" : "first" });`;
+
+test("scenario-record: advisory treats any OTP exchange as unknown context and omits cross-run comparisons", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-otp-context-"),
+	);
+	const connectorKey = "otp_context_fixture";
+	writeBoundObservationFixture({
+		collectBody: OTP_FIXTURE_BODY,
+		connectorKey,
+		schemaJson: SIMPLE_SCHEMA,
+		tmpDir,
+	});
+	try {
+		const cases = [
+			{
+				name: "different",
+				answers: [
+					"otp-first=OTP_CODE_A_CANARY",
+					"otp-second=OTP_CODE_B_CANARY",
+				],
+				env: {},
+			},
+			{
+				name: "identical",
+				answers: ["otp=OTP_CODE_A_CANARY"],
+				env: { OTP_FIXTURE_IDENTICAL: "1" },
+			},
+		];
+		for (const { name, answers, env } of cases) {
+			const transcriptDir = join(tmpDir, `transcript-${name}`);
+			const result = runRecordCli(
+				[
+					connectorKey,
+					"--out",
+					join(tmpDir, `${name}.scenario.json`),
+					...answers.flatMap((answer) => ["--answer", answer]),
+				],
+				{
+					PDPP_CONNECTOR_PATHS_TEST_ROOT: tmpDir,
+					PDPP_SCENARIO_TRANSCRIPT_DIR: transcriptDir,
+					...env,
+				},
+			);
+			assert.equal(result.code, 0, result.stderr);
+			assert.equal(assertTranscriptInteractionsContractValid(transcriptDir), 2);
+			assert.match(result.stdout, /user_interactions recorded: 2/);
+			assert.match(
+				result.stdout,
+				/items: insufficient-repeat-observations \(0 repeated identities;/,
+				`${name} OTP inputs must stay unknown`,
+			);
+			assert.match(
+				result.stdout,
+				/limitation: [^\n]*scope or selection context/,
+			);
+			for (const canary of [
+				"OTP_ACCOUNT_A_PROMPT_CANARY",
+				"OTP_ACCOUNT_B_PROMPT_CANARY",
+				"OTP_SHARED_PROMPT_CANARY",
+				"OTP_CODE_A_CANARY",
+				"OTP_CODE_B_CANARY",
+				"same-stream-local-id",
+			]) {
+				assert.equal(result.stdout.includes(canary), false);
+				assert.equal(result.stderr.includes(canary), false);
+			}
+		}
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("selection context is kept up to exactly 65,536 serialized characters and unknown beyond", () => {
+	// JSON.stringify(["x"...]) adds 4 characters: [ " " ].
+	const atLimit = "a".repeat(MAX_SELECTION_CONTEXT_LENGTH - 4);
+	assert.equal(MAX_SELECTION_CONTEXT_LENGTH, 65_536);
+	assert.equal(selectionContextKey([atLimit])?.length, 65_536);
+	assert.equal(selectionContextKey([`${atLimit}a`]), undefined);
+	assert.equal(selectionContextKey([]), "[]");
 });
