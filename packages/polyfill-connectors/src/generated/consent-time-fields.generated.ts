@@ -71,12 +71,14 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	},
 	chatgpt: {
 		account_plan: null,
+		account_profile: null,
 		conversations: { field: "update_time", format: "date-time" },
 		custom_gpts: { field: "created_at", format: "date-time" },
 		custom_instructions: { field: "updated_at", format: "date-time" },
 		memories: { field: "created_at", format: "date-time" },
 		messages: { field: "create_time", format: "date-time" },
 		shared_conversations: { field: "created_at", format: "date-time" },
+		usage_summary: null,
 	},
 	claude_code: {
 		attachments: { field: "timestamp", format: "date-time" },

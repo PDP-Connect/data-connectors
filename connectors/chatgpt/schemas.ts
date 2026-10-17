@@ -191,6 +191,221 @@ export const accountPlanSchema = z.object({
 		.nullable(),
 });
 
+// ─── account_profile / usage_summary ──────────────────────────────────────
+// Metadata only. Every object is strict and every string is an enum, a
+// bounded slug, a code or an opaque reference, so no free text (titles,
+// message bodies, names, emails, org titles, tool or action names) can be
+// stored even if a builder regresses.
+
+const usageSlug = z.string().regex(/^[a-z0-9][a-z0-9._:-]{0,63}$/);
+const count = z.number().int().min(0).max(1_000_000_000);
+const share = z.number().min(0).max(1);
+const average = z.number().min(0).max(1_000_000_000);
+const usageFeatureCounts = z
+	.object({
+		web_search: count,
+		code_interpreter: count,
+		image_generation: count,
+		canvas: count,
+		deep_research: count,
+		memory_update: count,
+		file_search: count,
+		reasoning: count,
+		voice: count,
+		other_tool: count,
+	})
+	.strict();
+const usageModelCounts = z
+	.array(z.object({ slug: usageSlug, assistant_messages: count }).strict())
+	.max(500);
+const sourceStatus = z.enum(["ok", "not_available", "failed", "partial"]);
+
+export const accountProfileSchema = z
+	.object({
+		id: z.literal("account_profile"),
+		user_created_at: looseTimestamp.nullable(),
+		chatgpt_account_created_at: looseTimestamp.nullable(),
+		tenure_months: count.nullable(),
+		country: z
+			.string()
+			.regex(/^[A-Z]{2}$/)
+			.nullable(),
+		// Sub-national code: re-identification risk; coarsening is a legal call.
+		region_code: z
+			.string()
+			.regex(/^[A-Z0-9]{1,3}$/)
+			.nullable(),
+		geography_source: z.enum(["account_profile", "network"]).nullable(),
+		network_country: z
+			.string()
+			.regex(/^[A-Z]{2}$/)
+			.nullable(),
+		billing_currency: z
+			.string()
+			.regex(/^[A-Z]{3}$/)
+			.nullable(),
+		mfa_enabled: z.boolean().nullable(),
+		email_domain_type: usageSlug.nullable(),
+		org_count: count.nullable(),
+		has_non_personal_org: z.boolean().nullable(),
+		workspace_type: usageSlug.nullable(),
+		is_deactivated: z.boolean().nullable(),
+		data_residency_region: usageSlug.nullable(),
+		compute_residency_region: usageSlug.nullable(),
+		is_gratis: z.boolean().nullable(),
+		is_trial: z.boolean().nullable(),
+		trial_state: usageSlug.nullable(),
+		has_previously_paid_subscription: z.boolean().nullable(),
+		last_expired_subscription_was_gratis: z.boolean().nullable(),
+		purchase_origin_platform: usageSlug.nullable(),
+		is_delinquent: z.boolean().nullable(),
+		in_grace_period: z.boolean().nullable(),
+		account_feature_flag_count: count.nullable(),
+		enabled_beta_features: z
+			.array(z.string().regex(/^[a-z0-9_]{1,64}$/))
+			.max(256)
+			.nullable(),
+		beta_feature_flag_count: count.nullable(),
+		custom_instructions_enabled: z.boolean().nullable(),
+		custom_instructions_about_user_set: z.boolean().nullable(),
+		custom_instructions_response_style_set: z.boolean().nullable(),
+		custom_instructions_name_set: z.boolean().nullable(),
+		custom_instructions_role_set: z.boolean().nullable(),
+		custom_instructions_traits_set: z.boolean().nullable(),
+		custom_instructions_other_set: z.boolean().nullable(),
+		personality_set: z.boolean().nullable(),
+		traits_enabled: z.boolean().nullable(),
+		disabled_tools_count: count.nullable(),
+		memory_count: count.nullable(),
+		memory_tokens_used: count.nullable(),
+		memory_tokens_max: count.nullable(),
+		project_count: count.nullable(),
+		project_file_count: count.nullable(),
+		scheduled_task_count: count.nullable(),
+		scheduled_tasks_by_status: z.record(usageSlug, count).nullable(),
+		source_status: z
+			.object({
+				me: sourceStatus,
+				accounts_check: sourceStatus,
+				beta_features: sourceStatus,
+				custom_instructions: sourceStatus,
+				memories: sourceStatus,
+				projects: sourceStatus,
+				tasks: sourceStatus,
+				network: sourceStatus,
+			})
+			.strict(),
+	})
+	.strict();
+
+const perConversation = z
+	.object({ mean: average.nullable(), median: count.nullable() })
+	.strict();
+
+export const usageSummarySchema = z
+	.object({
+		id: z.literal("usage_summary"),
+		timezone: z
+			.string()
+			.regex(/^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$/)
+			.max(64),
+		timezone_source: z.enum(["browser", "default_utc"]),
+		activity_basis: z.literal("conversation_timestamps"),
+		coverage: z
+			.object({
+				conversations_listed: count,
+				archived_listing: z.enum(["read", "not_available"]),
+				list_pages: count,
+				detail_mode: z.enum(["sample", "none"]),
+				listing_complete: z.boolean(),
+				project_listing: z
+					.object({
+						sidebar: sourceStatus,
+						projects: count,
+						pages: count,
+						failed: count,
+						truncated: z.boolean(),
+						conversations_added: count,
+					})
+					.strict(),
+				detail_fetched: count,
+				detail_unavailable: count,
+				detail_failed: count,
+				detail_not_read: count,
+			})
+			.strict(),
+		first_activity_at: looseTimestamp.nullable(),
+		last_activity_at: looseTimestamp.nullable(),
+		history_span_days: count.nullable(),
+		active_days: count,
+		longest_streak_days: count,
+		totals: z
+			.object({
+				conversations: count,
+				archived: count,
+				pinned: count,
+				shared: count.nullable(),
+				in_workspace: count,
+				custom_gpt_conversations: count,
+				project_conversations: count,
+				temporary_conversations: count,
+				automation_conversations: count,
+				do_not_remember_conversations: count,
+				custom_gpts_used: count,
+				projects_used: count,
+			})
+			.strict(),
+		custom_gpt_share: share.nullable(),
+		project_share: share.nullable(),
+		months: z
+			.array(
+				z
+					.object({
+						month: z.string().regex(/^\d{4}-\d{2}$/),
+						conversations_created: count,
+						conversations_last_active: count,
+						active_days: count,
+					})
+					.strict(),
+			)
+			.max(1200),
+		hour_of_day: z.array(count).length(24),
+		day_of_week: z.array(count).length(7),
+		detail_sample: z
+			.object({
+				basis: z.literal("most_recently_updated"),
+				n_conversations: count,
+				n_read: count,
+				complete: z.boolean(),
+				window_start: looseTimestamp.nullable(),
+				window_end: looseTimestamp.nullable(),
+				user_messages: count,
+				assistant_messages: count,
+				tool_messages: count,
+				user_attachments: count,
+				user_images: count,
+				user_chars_total: count,
+				regenerated_or_edited_conversations: count,
+				messages_per_conversation: perConversation,
+				user_messages_per_conversation: perConversation,
+				user_chars_mean_per_message: count.nullable(),
+				models: usageModelCounts,
+				feature_conversations: usageFeatureCounts,
+			})
+			.strict()
+			.nullable(),
+		locale: z
+			.object({
+				browser_language: z
+					.string()
+					.regex(/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/)
+					.max(35)
+					.nullable(),
+			})
+			.strict(),
+	})
+	.strict();
+
 // ─── shared_conversations ───────────────────────────────────────────────
 
 export const sharedConversationSchema = z.object({
@@ -214,6 +429,8 @@ export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	custom_instructions: customInstructionsSchema,
 	account_plan: accountPlanSchema,
 	shared_conversations: sharedConversationSchema,
+	account_profile: accountProfileSchema,
+	usage_summary: usageSummarySchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);
