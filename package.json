@@ -57,7 +57,8 @@
     "manifest-schema:test": "node --test ./schemas/connector-manifest.schema.test.mjs ./schemas/connector-binding-grammar.test.mjs ./schemas/observation.schema.test.mjs",
     "polyfill-library-metadata:generate": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs",
     "polyfill-library-metadata:check": "node ./scripts/generate-polyfill-library-manifest-metadata.mjs --check",
-    "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts"
+    "connector-stdout-console:check": "node --import tsx ./packages/polyfill-connectors/scripts/check-connector-stdout-console.ts",
+    "groupme-mutation": "node --import tsx --test scripts/groupme-mutation/run.test.ts && node --import tsx scripts/groupme-mutation/run.ts"
   },
   "devDependencies": {
     "esbuild": "0.28.2",

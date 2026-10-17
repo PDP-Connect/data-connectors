@@ -2079,7 +2079,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/groupme/incremental-frontier.test.ts",
-			line: 546,
+			line: 633,
 			column: 16,
 			category: "test_assertion_sequencing",
 			note: "cappedForwardWalk(): deliberately reimplements a page-capped pagination loop to prove the >old-cap discriminator test actually fails under the old (removed) cap — sequential by design, not production code",
@@ -3899,10 +3899,10 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "scripts/run-tests.mjs",
-			line: 34,
+			line: 31,
 			column: 2,
 			category: "dependent_file_cursor",
-			note: "collectTestFiles(): sequential glob() per fixed test-directory pattern; trivial fixed-size loop over 5 patterns, no reason to parallelize",
+			note: "run-tests.mjs top-level discovery: sequential glob() per fixed test-directory pattern (the 5 patterns exported by scripts/groupme-mutation/dispatch.mjs); trivial fixed-size loop, no reason to parallelize",
 		},
 		{
 			path: "src/adaptive-lane.ts",

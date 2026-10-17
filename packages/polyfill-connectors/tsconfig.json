@@ -36,6 +36,11 @@
 		"noEmit": true,
 		"skipLibCheck": true,
 		"types": ["node"],
+		"paths": {
+			"vitest": [
+				"../../scripts/groupme-mutation/tools/node_modules/vitest/dist/index.d.ts"
+			]
+		},
 
 		// We run .ts directly via tsx; no emitted .js to import. Biome's
 		// useImportExtensions enforces explicit .ts extensions on local
