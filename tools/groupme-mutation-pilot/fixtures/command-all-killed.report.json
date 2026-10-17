@@ -1,0 +1,28 @@
+{
+	"schemaVersion": "1.0",
+	"files": {
+		"src/example.ts": {
+			"source": "const ordered = left < right;",
+			"mutants": [
+				{
+					"id": "a-mutant-id",
+					"location": {
+						"start": { "line": 1, "column": 24 },
+						"end": { "line": 1, "column": 35 }
+					},
+					"mutatorName": "EqualityOperator",
+					"replacement": "left >= right",
+					"status": "Killed",
+					"testsCompleted": 1,
+					"killedBy": ["0"],
+					"statusReason": "synthetic command result"
+				}
+			]
+		}
+	},
+	"testFiles": {
+		"all-tests": {
+			"tests": [{ "id": "0", "name": "All tests" }]
+		}
+	}
+}

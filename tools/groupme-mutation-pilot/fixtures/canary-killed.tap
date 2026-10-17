@@ -1,0 +1,30 @@
+TAP version 13
+1..4
+ok 1 - unrelated passing check
+not ok 2 - repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError
+  ---
+  type: test
+  location: /repo/connectors/groupme/incremental-frontier.test.ts:628:1
+  failureType: testCodeFailure
+  error: |-
+    a non-ascending forward page must fail, not be silently trusted
+
+    false !== true
+  code: ERR_ASSERTION
+  name: AssertionError
+  expected: true
+  actual: false
+  operator: strictEqual
+  stack: |-
+    TestContext.<anonymous> (file:///repo/connectors/groupme/incremental-frontier.test.ts:656:12)
+  ...
+# Subtest: one existing skipped check
+ok 3 - one existing skipped check # SKIP not applicable
+# Subtest: another existing skipped check
+ok 4 - another existing skipped check # SKIP not applicable
+# tests 4
+# pass 1
+# fail 1
+# cancelled 0
+# skipped 2
+# todo 0

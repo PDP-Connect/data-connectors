@@ -1,0 +1,10 @@
+{
+	"name": "@pdpp/groupme-mutation-pilot",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"devDependencies": {
+		"@stryker-mutator/core": "10.0.0",
+		"tap-parser": "18.3.4"
+	}
+}

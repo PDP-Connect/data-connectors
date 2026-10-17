@@ -1,0 +1,100 @@
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+name: GroupMe mutation pilot (diagnostic)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "connectors/groupme/**"
+      - "packages/polyfill-connectors/src/**"
+      - "packages/polyfill-connectors/vendor/pdpp-reference-contract-0.0.1.tgz"
+      - "tools/groupme-mutation-pilot/**"
+      - ".github/workflows/groupme-mutation-pilot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  mutation-pilot:
+    name: Stryker command runner ${{ matrix.mode }} (diagnostic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [a1, a2]
+    env:
+      PILOT_MODE: ${{ matrix.mode }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      PR_MERGE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Record provenance and resource boundary
+        run: |
+          mkdir -p reports
+          printf '{"status":"started","mode":"%s","runId":"%s","job":"%s"}\n' "$PILOT_MODE" "$GITHUB_RUN_ID" "$GITHUB_JOB" > reports/job.state.json
+          git rev-parse HEAD > reports/checkout-head.txt
+          printf '%s\n' "$PR_HEAD_SHA" > reports/pr-head.txt
+          printf '%s\n' "$PR_BASE_SHA" > reports/pr-base.txt
+          printf '%s\n' "$PR_MERGE_SHA" > reports/pr-merge.txt
+          git merge-base "$PR_BASE_SHA" HEAD > reports/merge-base.txt
+          git status --porcelain=v1 > reports/checkout-status.txt
+          node --version > reports/versions.txt
+          npm --version >> reports/versions.txt
+          node -e 'const os=require("node:os");const fs=require("node:fs");const p="/sys/fs/cgroup/memory.max";console.log(JSON.stringify({platform:process.platform,arch:process.arch,logicalCpus:os.cpus().length,availableParallelism:os.availableParallelism(),hostMemoryBytes:os.totalmem(),cgroupMemoryLimit:fs.existsSync(p)?fs.readFileSync(p,"utf8").trim():null,strykerConcurrency:2,nodeTestConcurrency:"Node 24 default; no --test-concurrency override"},null,2))' > reports/resources.json
+          node --help | rg -- '--test-concurrency' > reports/node-test-concurrency-help.txt || true
+          git ls-files connectors/groupme packages/polyfill-connectors/src packages/polyfill-connectors/vendor/pdpp-reference-contract-0.0.1.tgz packages/connector-protocol tools/groupme-mutation-pilot package.json package-lock.json .github/workflows/groupme-mutation-pilot.yml | while IFS= read -r path; do sha256sum "$path"; done > reports/source-hashes.txt
+          printf '{"event":"tool-versions","mode":"%s","strykerCore":"10.0.0","tapParser":"18.3.4","typescript":"7.0.2"}\n' "$PILOT_MODE" >> reports/timing.jsonl
+
+      - name: Install project and task-local pilot dependencies
+        run: |
+          set -o pipefail
+          for target in project pilot; do
+            start=$(date +%s%3N)
+            if [ "$target" = project ]; then
+              npm ci --ignore-scripts 2>&1 | tee reports/install-project.log
+            else
+              npm ci --prefix tools/groupme-mutation-pilot --ignore-scripts 2>&1 | tee reports/install-pilot.log
+            fi
+            end=$(date +%s%3N)
+            printf '{"event":"dependency-install","target":"%s","durationMs":%s}\n' "$target" "$((end-start))" >> reports/timing.jsonl
+          done
+
+      - name: Run report-integrity controls
+        run: node --test tools/groupme-mutation-pilot/report-integrity.test.mjs
+
+      - name: Run pinned 14-file external baseline
+        run: node tools/groupme-mutation-pilot/measure.mjs baseline
+
+      - name: Run ${{ matrix.mode }} Stryker command-runner pilot
+        timeout-minutes: 16
+        run: node tools/groupme-mutation-pilot/measure.mjs ${{ matrix.mode }}
+
+      - name: Require complete manifest, baseline and canary assertion
+        run: node tools/groupme-mutation-pilot/summarize.mjs ${{ matrix.mode }}
+
+      - name: Hash receipts and finalize job marker
+        if: always()
+        run: |
+          if [ -f reports/job.state.json ]; then
+          printf '{"status":"%s","mode":"%s","runId":"%s","job":"%s"}\n' "${{ job.status }}" "$PILOT_MODE" "$GITHUB_RUN_ID" "$GITHUB_JOB" > reports/job.final.json
+          fi
+          find reports -type f ! -name artifact-hashes.txt -print0 | sort -z | xargs -0 -r sha256sum > reports/artifact-hashes.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: groupme-mutation-pilot-${{ matrix.mode }}-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 14
