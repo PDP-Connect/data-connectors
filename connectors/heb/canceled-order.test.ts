@@ -776,6 +776,30 @@ test("a zero-row page that moved off the order's URL is not the order's own page
 	);
 });
 
+test("an error page with no rows is not an empty canceled order", async () => {
+	// The order's URL answers HTTP 500 with a body that has no item rows, which
+	// is what an empty canceled order's page looks like to the row selector.
+	await withOrderPage(
+		(route) =>
+			route.fulfill({
+				body: NO_ROWS_HTML,
+				contentType: "text/html",
+				status: 500,
+			}),
+		async (page) => {
+			const { coverage, protocolMessages } =
+				await processCanceledZeroItemOrder(page);
+			assert.deepEqual(coverage.empty, []);
+			assert.deepEqual(coverage.gap, ["HEB1000000001"]);
+			assert.equal(
+				protocolMessages.filter((message) => message.type === "DETAIL_GAP")
+					.length,
+				1,
+			);
+		},
+	);
+});
+
 // ─── Gap recovery accounting ───────────────────────────────────────────────
 
 const DATED_GAP = (orderId: string, gapId: string) =>
@@ -906,3 +930,56 @@ test("collect closes a legacy dateless gap once the forward scan delivers the or
 		1,
 	);
 });
+
+// A page whose rows the parser can only partly read delivered less than the
+// order holds. Its readable rows are emitted, but a prior gap for the order
+// is not closed on that evidence.
+for (const { name, secondRowName, closes } of [
+	{ name: "every row reads", secondRowName: "Second widget", closes: true },
+	{ name: "one row has no name", secondRowName: "", closes: false },
+]) {
+	test(`the forward scan ${closes ? "closes" : "keeps"} a prior gap when ${name}`, async () => {
+		const orderId = "HEB1000000001";
+		const html = `<html><body><main><ul>${[
+			"First widget",
+			secondRowName,
+		]
+			.map(
+				(label, index) =>
+					`<li data-index="${index}"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/${600 + index}">${label}</a><span data-qe-id="orderItemQty">Qty: 1</span></li>`,
+			)
+			.join("")}</ul></main></body></html>`;
+		await withOrderPage(
+			(route) => route.fulfill({ body: html, contentType: "text/html" }),
+			async (page) => {
+				const pending = new Map([
+					[orderId, { gapId: "gap_prior", recordKey: orderId }],
+				]);
+				const coverage = newOrderItemsCoverage();
+				const { deps, emitted, protocolMessages } = makeRecordingDeps({
+					orderItemsCoverage: coverage,
+					pendingGapsByOrderId: pending,
+				});
+				await processListOrder(
+					page,
+					deps,
+					makeRunFlags(),
+					makeListOrder({ itemCount: 2 }),
+				);
+				assert.deepEqual(coverage.hydrated, [orderId]);
+				assert.equal(
+					emitted.filter((record) => record.stream === "order_items").length,
+					closes ? 2 : 1,
+					"the readable rows are emitted either way",
+				);
+				assert.equal(
+					protocolMessages.filter(
+						(message) => message.type === "DETAIL_GAP_RECOVERED",
+					).length,
+					closes ? 1 : 0,
+				);
+				assert.equal(pending.has(orderId), !closes);
+			},
+		);
+	});
+}
