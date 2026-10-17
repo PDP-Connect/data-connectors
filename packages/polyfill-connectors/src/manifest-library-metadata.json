@@ -498,6 +498,15 @@
 		}
 	},
 	{
+		"file": "meta.json",
+		"manifest": {
+			"connector_key": "meta",
+			"reason_display_messages": {
+				"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
+			}
+		}
+	},
+	{
 		"file": "netflix_export.json",
 		"manifest": {
 			"connector_key": "netflix-export",

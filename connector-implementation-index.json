@@ -15044,7 +15044,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.26",
+				"version": "0.4.30",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15074,6 +15074,9 @@
 					"public_listing": {
 						"tier": "development"
 					}
+				},
+				"reason_display_messages": {
+					"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
 				},
 				"streams": [
 					{
@@ -16096,7 +16099,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.37",
+				"version": "0.1.38",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {

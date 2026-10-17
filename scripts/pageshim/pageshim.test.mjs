@@ -3622,3 +3622,39 @@ test("oura_browser: until-only consecutive runs acknowledge covered state on bot
 		assert.match(JSON.stringify(instantErrors), /date/);
 	}
 });
+
+test("oura_browser: narrow then wider consent retains clipped debt on both hosts", { timeout: 180_000 }, async () => {
+  const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+  const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-clipped-debt.js") });
+  for (const resultStreaming of [false, true]) for (const debt of ["failed", "refresh"]) {
+    const fixture = recordingDailyFixture();
+    const run = (initialState, until) => runHarness({ bundle: built.outfile,
+      fixtures: { ...c.fixtures, resolve: fixture.resolve },
+      scopes: [{ name: "oura.sleep", time_range: { since: "2026-01-01", until } }],
+      initialState, resultStreaming, clockNowMs: Date.parse("2026-10-17T12:00:00Z"),
+      resultSpoolDirectory: join(out, `oura-clipped-${resultStreaming}-${debt}-${until}`) });
+    const first = await run({ "oura.sleep": { next_day: "2026-10-18", requested_since: "2026-01-01",
+      refresh_from: debt === "refresh" ? "2026-01-01" : "2026-10-15",
+      failed_windows: debt === "failed" ? [{ start: "2026-01-01", end: "2026-01-10" }] : [] } }, "2026-01-05");
+    assertCleanRun(first);
+    assert.equal(first.data.error, undefined);
+    assert.match(first.data.status, /^Complete!/);
+    assert.deepEqual(fixture.windows.splice(0), [{ start: "2026-01-01", end: "2026-01-04" }]);
+    const cursor = first.states["oura.sleep"];
+    if (debt === "failed") assert.deepEqual(cursor.failed_windows, [{ start: "2026-01-05", end: "2026-01-10" }]);
+    assert.equal(cursor.refresh_from, "2026-01-05");
+    const second = await run(first.states, "2026-01-11");
+    assertCleanRun(second);
+    assert.equal(second.data.error, undefined);
+    assert.match(second.data.status, /^Complete!/);
+    assert.deepEqual(fixture.windows, [{ start: "2026-01-05", end: "2026-01-10" }]);
+    const result = resultStreaming ? second.streamDone : second.result;
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.exportSummary.count, 6);
+    const scope = resultStreaming ? JSON.parse(await readFile(second.streamScopeFiles["oura.sleep"], "utf8")) : second.result["oura.sleep"];
+    assert.deepEqual(scope.records.map(({ day }) => day),
+      ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-10"]);
+    assert.deepEqual(second.states["oura.sleep"].failed_windows, []);
+    assert.equal(second.states["oura.sleep"].next_day, "2026-10-18");
+  }
+});
