@@ -3884,6 +3884,117 @@ test("processListOrder says nothing about a shortfall when the order's units can
 	}
 });
 
+/** A static detail page whose rows carry the given quantity texts. */
+function quantityRowsFixture(quantities: readonly string[]): string {
+	const rows = quantities
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
+}
+
+const repeat = (text: string, times: number): string[] =>
+	Array.from({ length: times }, () => text);
+
+// Shapes of real orders, as counts only: the card's unit count, how many rows
+// the page lists, and what the quantities add up to. A real account showed no
+// rule that turns rows into the card's count, so only a whole-number total
+// strictly below the card is called a shortfall.
+const UNIT_SHAPES: readonly {
+	card: number;
+	collected: number | null;
+	name: string;
+	quantities: string[];
+	shortfall: boolean;
+}[] = [
+	{
+		name: "a card equal to the whole-number units",
+		card: 13,
+		quantities: ["Qty: 3", "Qty: 2", "Qty: 2", ...repeat("Qty: 1", 6)],
+		collected: 13,
+		shortfall: false,
+	},
+	{
+		name: "a card one unit above the whole-number units",
+		card: 66,
+		quantities: [...repeat("Qty: 2", 29), ...repeat("Qty: 1", 7)],
+		collected: 65,
+		shortfall: true,
+	},
+	{
+		name: "a card with one weighed row among whole quantities",
+		card: 40,
+		quantities: [
+			...repeat("Qty: 1", 11),
+			...repeat("Qty: 2", 14),
+			"Qty: 2.01 of 2.01 lbs",
+		],
+		collected: null,
+		shortfall: false,
+	},
+];
+
+for (const shape of UNIT_SHAPES) {
+	test(`processListOrder unit anchor: ${shape.name}`, async () => {
+		const browser = await chromium.launch({ headless: true });
+		try {
+			const page = await browser.newPage();
+			const fixtureHtml = quantityRowsFixture(shape.quantities);
+			await page.route(
+				"https://www.heb.com/my-account/order-history/HEB000000000004",
+				async (route) => {
+					await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+				},
+			);
+			const progressMessages: string[] = [];
+			const itemCountTallies: OrderItemTally[] = [];
+			const { deps, emitted } = makeRecordingDeps({
+				itemCountTallies,
+				orderItemsCoverage: newOrderItemsCoverage(),
+				progress: async (message) => {
+					progressMessages.push(message);
+				},
+			});
+
+			await processListOrder(
+				page,
+				deps,
+				makeRunFlags(),
+				makeListOrder({ orderId: "HEB000000000004", itemCount: shape.card }),
+			);
+
+			assert.equal(
+				emitted.filter((record) => record.stream === "order_items").length,
+				shape.quantities.length,
+				"every row is delivered whatever the card says",
+			);
+			assert.deepEqual(deps.orderItemsCoverage?.gap, []);
+			assert.equal(
+				progressMessages.includes(
+					"An order's item count did not match its details",
+				),
+				shape.shortfall,
+			);
+			assert.deepEqual(
+				itemCountTallies,
+				shape.collected === null
+					? []
+					: [
+							{
+								orderId: "HEB000000000004",
+								declaredItemCount: shape.card,
+								collectedItemCount: shape.collected,
+							},
+						],
+			);
+		} finally {
+			await browser.close();
+		}
+	});
+}
+
 test("processListOrder tallies a known surplus without telling the owner anything is missing", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
