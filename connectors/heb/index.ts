@@ -141,6 +141,34 @@ interface DetailSurfaceState {
 	scrollHeight: number;
 	scrollTop: number;
 	staticListEvidence: StaticListEvidence;
+	/** Whether rows without a positional attribute may be keyed by content with
+	 *  no card: `allowed`, or why not. `unneeded` when the card guides the keys
+	 *  or every row is positional. Diagnostic only. */
+	cardless?: CardlessVerdict;
+}
+
+type CardlessVerdict =
+	| "allowed"
+	| "clipped_or_scroller"
+	| "mixed_positions"
+	| "not_document"
+	| "unneeded";
+
+const CARDLESS_VERDICTS: readonly CardlessVerdict[] = [
+	"allowed",
+	"clipped_or_scroller",
+	"mixed_positions",
+	"not_document",
+	"unneeded",
+];
+
+/** The in-page function names its verdict in the error it throws when it cannot
+ *  key a row, because a throw returns no state to read it from. */
+function cardlessVerdictFromError(
+	message: string | null,
+): CardlessVerdict | undefined {
+	const named = /cardless=(\w+)/.exec(message ?? "")?.[1];
+	return CARDLESS_VERDICTS.find((verdict) => verdict === named);
 }
 
 interface DetailSurfaceDiagnostics {
@@ -155,6 +183,8 @@ interface DetailSurfaceDiagnostics {
 	hrefsEverUnmounted: number;
 	/** The key scheme rows were collected under, e.g. `content:href`. */
 	identityScheme: string | null;
+	/** Why rows could or could not be keyed by content without a card. */
+	cardless: CardlessVerdict | "n/a";
 	lastAction: string | null;
 	lastError: string | null;
 	loading: boolean;
@@ -322,12 +352,36 @@ function inspectAndAdvanceDetailSurface(input: {
 		}
 	}
 	const scrollsWithDocument = scrollPort === rootScroller;
-	const cardlessContentIdentity =
+	// A page that gives some rows a position and not others is not one list we
+	// can key two ways at once, so mixed pages never take the card-less path.
+	// (No named helper here: this function is serialized into the page, and a
+	// named arrow would pick up the bundler's `__name` wrapper, which the page
+	// does not define.)
+	const positionedRows = rowLinks.filter((link) =>
+		["data-index", "aria-posinset"].some((attribute) =>
+			(link.closest("li") ?? link).getAttribute(attribute)?.trim(),
+		),
+	).length;
+	const cardCannotGuide =
+		expectedItemCount === null || rowLinks.length > expectedItemCount;
+	let cardless: CardlessVerdict = "unneeded";
+	if (
 		staticListEvidence === null &&
 		rowLinks.length > 0 &&
-		scrollsWithDocument &&
-		!clippedOrScrolledApart &&
-		(expectedItemCount === null || rowLinks.length > expectedItemCount);
+		cardCannotGuide &&
+		positionedRows < rowLinks.length
+	) {
+		if (positionedRows > 0) {
+			cardless = "mixed_positions";
+		} else if (!scrollsWithDocument) {
+			cardless = "not_document";
+		} else if (clippedOrScrolledApart) {
+			cardless = "clipped_or_scroller";
+		} else {
+			cardless = "allowed";
+		}
+	}
+	const cardlessContentIdentity = cardless === "allowed";
 	const canAttemptVirtualizedContentIdentity =
 		guidedContentIdentity || cardlessContentIdentity;
 	const rows = rowLinks.map((link, itemIndex) => {
@@ -357,7 +411,9 @@ function inspectAndAdvanceDetailSurface(input: {
 				? `content:href=${href}`
 				: null);
 		if (!key) {
-			throw new Error("detail row has no explicit positional identity");
+			throw new Error(
+				`detail row has no explicit positional identity (cardless=${cardless})`,
+			);
 		}
 		const department =
 			itemRow
@@ -460,6 +516,7 @@ function inspectAndAdvanceDetailSurface(input: {
 		scrollHeight,
 		scrollTop,
 		staticListEvidence,
+		cardless,
 	};
 }
 
@@ -505,6 +562,7 @@ function detailSurfaceErrorMessage(
 		`loading=${diagnostics.loading}`,
 		`action=${diagnostics.lastAction ?? "none"}`,
 		`scheme=${diagnostics.identityScheme ?? "none"}`,
+		`cardless=${diagnostics.cardless}`,
 		`mounted_rows=${diagnostics.mountedRows}`,
 		`unmounted_hrefs=${diagnostics.hrefsEverUnmounted}`,
 		`unknown_unit_rows=${diagnostics.unknownUnitRows}`,
@@ -527,6 +585,7 @@ function detailSurfaceFields(diagnostics: DetailSurfaceDiagnostics) {
 		obs: diagnostics.observedUnits ?? "unknown",
 		unk_qty: diagnostics.unknownUnitRows,
 		scheme: diagnostics.identityScheme ?? "none",
+		cardless: diagnostics.cardless,
 		unmounted: diagnostics.hrefsEverUnmounted,
 		at_end: diagnostics.atEnd,
 		loading: diagnostics.loading,
@@ -824,6 +883,7 @@ async function collectDetailSurface(
 		expectedUnits,
 		hrefsEverUnmounted: contentHrefEverUnmounted.size,
 		identityScheme: collectedScheme,
+		cardless: latest.cardless ?? cardlessVerdictFromError(lastError) ?? "n/a",
 		lastAction,
 		lastError,
 		loading: latest.loading,

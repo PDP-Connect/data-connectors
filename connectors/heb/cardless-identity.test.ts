@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import { chromium, type Page } from "playwright";
+import { setConnectorDiagnosticSink } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
@@ -31,6 +32,29 @@ const fixture = (name: string): string =>
 	readFileSync(join(FIXTURES_DIR, name), "utf8");
 
 const immediateWait = (): Promise<void> => Promise.resolve();
+
+/** Fetch a page and also return the fields of its detail_fetch_failed line. */
+async function fetchWithDiagnostics(
+	page: Page,
+	deps: Parameters<typeof fetchOrderDetail>[2],
+): Promise<{
+	fields: Record<string, unknown> | undefined;
+	result: Awaited<ReturnType<typeof fetchOrderDetail>>;
+}> {
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const result = await fetchOrderDetail(page, "HEB1000000001", deps);
+		const prefix = "[heb-diagnostic] detail_fetch_failed ";
+		const line = lines.find((candidate) => candidate.startsWith(prefix));
+		return {
+			fields: line ? JSON.parse(line.slice(prefix.length)) : undefined,
+			result,
+		};
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+}
 
 async function withDetailPage<T>(
 	html: string,
@@ -94,28 +118,56 @@ test("fetchOrderDetail: a 20-row static list in the document flow hydrates witho
 	);
 });
 
-for (const name of [
-	"order-detail-second-section-scroller.html",
-	"order-detail-positional-then-unpositioned.html",
-	"order-detail-unattributed-large-virtualized.html",
-	"order-detail-virtualized-ambiguous-repeat.html",
-	"order-detail-missing-row-identity.html",
-	"order-detail-unanchored-remount.html",
-]) {
+// Each fixture is refused for its own reason, and the diagnostic names it.
+for (const [name, verdict] of [
+	["order-detail-second-section-scroller.html", "clipped_or_scroller"],
+	["order-detail-mixed-positions.html", "mixed_positions"],
+	["order-detail-unattributed-large-virtualized.html", undefined],
+	["order-detail-virtualized-ambiguous-repeat.html", undefined],
+	["order-detail-missing-row-identity.html", "not_document"],
+	["order-detail-unanchored-remount.html", "clipped_or_scroller"],
+] as const) {
 	test(`fetchOrderDetail: ${name} still fails closed without a card`, async () => {
 		await withDetailPage(fixture(name), async (page) => {
-			const result = await fetchOrderDetail(page, "HEB1000000001", {
+			const { fields, result } = await fetchWithDiagnostics(page, {
 				detailSurfaceTimeoutMs: 4_000,
 				waitForHydration: immediateWait,
 			});
 			assert.equal(
 				result.status,
 				"failed",
-				"a list that scrolls inside its own port, remounts, or hides rows cannot be proven complete without a card",
+				"a list that scrolls inside its own port, remounts, mixes row kinds or hides rows cannot be proven complete without a card",
 			);
+			if (verdict !== undefined) {
+				assert.equal(fields?.cardless, verdict);
+			}
 		});
 	});
 }
+
+test("fetchOrderDetail: a list swapped from positional to unpositioned rows is refused after the quiet period", async () => {
+	await withDetailPage(
+		fixture("order-detail-positional-then-unpositioned.html"),
+		async (page) => {
+			const { fields, result } = await fetchWithDiagnostics(page, {
+				detailSurfaceTimeoutMs: 6_000,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(result.status, "failed");
+			// The second list was keyed by content, sat at its end, and stayed quiet
+			// for the whole card-less window. Only the memory of the positional
+			// rows kept it from being accepted alone.
+			assert.equal(fields?.scheme, "content:href");
+			assert.equal(fields?.cardless, "allowed");
+			assert.equal(fields?.at_end, true);
+			assert.ok(
+				Number(fields?.stable) >= 8,
+				`stable=${String(fields?.stable)}`,
+			);
+			assert.equal(fields?.rows, 2);
+		},
+	);
+});
 
 test("fetchOrderDetail: a document-flow virtualizer fails closed without a card because rows unmount", async () => {
 	await withDetailPage(
@@ -149,6 +201,12 @@ test("fetchOrderDetail: without a card a slow append is waited for, not missed",
 				4,
 				"the two rows appended 1.4 s after load are part of the list",
 			);
+			// Polling began before the append and waited out the card-less quiet
+			// period after it; a late start or a short window would use far fewer.
+			const snapshots = /snapshots=(\d+)/.exec(
+				result.status === "hydrated" ? (result.diagnostic ?? "") : "",
+			)?.[1];
+			assert.ok(Number(snapshots) >= 10, `snapshots=${String(snapshots)}`);
 		},
 	);
 });
