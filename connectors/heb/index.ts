@@ -1086,6 +1086,15 @@ export async function fetchOrderDetail(
 			surface.diagnostics,
 		);
 	}
+	// The parser drops a line with no name or product id without a word, so a
+	// hydrated order can hold fewer lines than the surface collected. The order
+	// still hydrates; the run log carries the difference.
+	if (detail.items.length < surface.diagnostics.collectedRows) {
+		connectorDiagnostic("heb", "detail_rows_unparsed", {
+			collected: surface.diagnostics.collectedRows,
+			parsed: detail.items.length,
+		});
+	}
 	return {
 		detail,
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
