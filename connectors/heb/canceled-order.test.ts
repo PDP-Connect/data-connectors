@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
-import type { Page } from "playwright";
+import { chromium, type Page } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
@@ -17,6 +17,7 @@ import {
 	isCanceledOrder,
 	newOrderItemsCoverage,
 	processListOrder,
+	recoverPendingOrderItemDetailGaps,
 	type RunFlags,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -112,9 +113,13 @@ const DETAIL_HTML = `<html><body><main><ul>${[0, 1, 2]
 function makePageStub(
 	html: string,
 	visited: string[] = [],
-	detailHtml = html,
+	detailHtmlFor: string | ((orderUrl: string) => string) = html,
 ): Page {
 	let currentUrl = "about:blank";
+	const currentDetailHtml = (): string =>
+		typeof detailHtmlFor === "function"
+			? detailHtmlFor(currentUrl)
+			: detailHtmlFor;
 	return new Proxy(
 		{},
 		{
@@ -133,7 +138,7 @@ function makePageStub(
 					return (): Promise<string> =>
 						Promise.resolve(
 							currentUrl.includes("/my-account/order-history/")
-								? detailHtml
+								? currentDetailHtml()
 								: html,
 						);
 				}
@@ -141,8 +146,9 @@ function makePageStub(
 					return (): string => currentUrl;
 				}
 				if (prop === "evaluate") {
-					return (): Promise<unknown> =>
-						Promise.resolve({
+					return (): Promise<unknown> => {
+						const detailHtml = currentDetailHtml();
+						return Promise.resolve({
 							actionableControl: null,
 							actionPerformed: null,
 							atEnd: true,
@@ -162,6 +168,7 @@ function makePageStub(
 							scrollTop: 0,
 							staticListEvidence: "declared_count",
 						});
+					};
 				}
 				throw new Error(`unexpected page.${String(prop)} in test stub`);
 			},
@@ -173,6 +180,7 @@ const EMITTED_AT = "2026-10-05T12:00:00.000Z";
 
 type TestContext = BrowserCollectContext & {
 	emitted: { stream: string }[];
+	events: ReturnType<typeof makeRecordingEmit>["events"];
 	protocolMessages: EmittedMessage[];
 	reportedStreamFailures: Extract<EmittedMessage, { type: "SKIP_RESULT" }>[];
 };
@@ -196,6 +204,7 @@ function makeContext(
 		page,
 		progress: (): Promise<void> => Promise.resolve(),
 		emitted: harness.emitted,
+		events: harness.events,
 		protocolMessages: harness.protocolMessages,
 		recoveryOnly: false,
 		reportedStreamFailures,
@@ -228,6 +237,7 @@ function makeContext(
 		...overrides,
 	} satisfies Record<string, unknown> & {
 		emitted: { stream: string }[];
+		events: ReturnType<typeof makeRecordingEmit>["events"];
 		protocolMessages: EmittedMessage[];
 		reportedStreamFailures: Extract<EmittedMessage, { type: "SKIP_RESULT" }>[];
 	};
@@ -286,7 +296,7 @@ const NO_ROWS_HTML = "<html><body><main>no items here</main></body></html>";
 const SIGN_IN_HTML =
 	'<html><body><main><form><input type="password" name="password"></form></main></body></html>';
 
-test("processListOrder accounts for a canceled zero-item order whose page cannot be read as empty", async () => {
+test("processListOrder accounts for a canceled zero-item order whose page shows no rows as empty", async () => {
 	const order = makeListOrder({
 		itemCount: 0,
 		status: "Order canceled",
@@ -632,3 +642,267 @@ for (const scenario of [
 		}
 	});
 }
+
+// ─── The declared zero is only believed on a page that shows zero rows ─────
+// The tests above answer `evaluate` from a stub. These load real HTML in
+// Chromium, so the fallback is decided by what a page contains.
+
+const FIXTURES_DIR = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"__fixtures__",
+);
+
+async function withOrderPage<T>(
+	handler: Parameters<Page["route"]>[1],
+	run: (page: Page) => Promise<T>,
+): Promise<T> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.heb.com/**", handler);
+		return await run(page);
+	} finally {
+		await browser.close();
+	}
+}
+
+async function processCanceledZeroItemOrder(
+	page: Page,
+): Promise<{
+	coverage: ReturnType<typeof newOrderItemsCoverage>;
+	emitted: RecordingDeps["emitted"];
+	protocolMessages: EmittedMessage[];
+}> {
+	const order = makeListOrder({
+		itemCount: 0,
+		status: "Order canceled",
+		unfulfilledCount: 0,
+	});
+	const coverage = newOrderItemsCoverage();
+	const { deps, emitted, protocolMessages } = makeRecordingDeps({
+		orderItemsCoverage: coverage,
+	});
+	await processListOrder(page, deps, makeRunFlags(), order);
+	return { coverage, emitted, protocolMessages };
+}
+
+test("a canceled zero-item order whose own page settles with no rows is empty", async () => {
+	await withOrderPage(
+		(route) => route.fulfill({ body: NO_ROWS_HTML, contentType: "text/html" }),
+		async (page) => {
+			const { coverage, emitted, protocolMessages } =
+				await processCanceledZeroItemOrder(page);
+			assert.deepEqual(coverage.empty, ["HEB1000000001"]);
+			assert.deepEqual(coverage.gap, []);
+			assert.equal(
+				protocolMessages.some((message) => message.type === "DETAIL_GAP"),
+				false,
+			);
+			assert.equal(
+				emitted.some((record) => record.stream === "order_items"),
+				false,
+			);
+		},
+	);
+});
+
+test("a canceled zero-item order whose rows no identity can key stays a gap, not an empty claim", async () => {
+	// Rows inside a scroll port with no position attribute: the surface cannot
+	// show that the mounted rows are the whole list, with or without a card.
+	const unkeyable = readFileSync(
+		join(FIXTURES_DIR, "order-detail-missing-row-identity.html"),
+		"utf8",
+	);
+	await withOrderPage(
+		(route) => route.fulfill({ body: unkeyable, contentType: "text/html" }),
+		async (page) => {
+			const { coverage, emitted, protocolMessages } =
+				await processCanceledZeroItemOrder(page);
+			assert.deepEqual(
+				coverage.empty,
+				[],
+				"the page shows rows; saying it has none would contradict it",
+			);
+			assert.deepEqual(coverage.gap, ["HEB1000000001"]);
+			assert.equal(
+				protocolMessages.filter((message) => message.type === "DETAIL_GAP")
+					.length,
+				1,
+			);
+			assert.equal(
+				emitted.some((record) => record.stream === "order_items"),
+				false,
+			);
+		},
+	);
+});
+
+test("a canceled zero-item order whose rows the parser cannot read stays a gap", async () => {
+	// Rows keyed by position but without a name: the page lists items, so a
+	// parse failure on them is not the same as an empty order.
+	const unreadable = `<html><body><main><ul>${[0, 1]
+		.map(
+			(index) =>
+				`<li data-index="${index}"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/${500 + index}"></a><span data-qe-id="orderItemQty">Qty: 1</span></li>`,
+		)
+		.join("")}</ul></main></body></html>`;
+	await withOrderPage(
+		(route) => route.fulfill({ body: unreadable, contentType: "text/html" }),
+		async (page) => {
+			const { coverage } = await processCanceledZeroItemOrder(page);
+			assert.deepEqual(coverage.empty, []);
+			assert.deepEqual(coverage.gap, ["HEB1000000001"]);
+		},
+	);
+});
+
+test("a zero-row page that moved off the order's URL is not the order's own page", async () => {
+	// A client-side router sending the browser to another route, such as the
+	// order list, when the order is not found.
+	const movedOn = `${NO_ROWS_HTML}<script>history.replaceState(null, "", "/my-account/your-orders")</script>`;
+	await withOrderPage(
+		(route) => route.fulfill({ body: movedOn, contentType: "text/html" }),
+		async (page) => {
+			const { coverage, protocolMessages } =
+				await processCanceledZeroItemOrder(page);
+			assert.deepEqual(coverage.empty, []);
+			assert.deepEqual(coverage.gap, ["HEB1000000001"]);
+			assert.equal(
+				protocolMessages.filter((message) => message.type === "DETAIL_GAP")
+					.length,
+				1,
+			);
+		},
+	);
+});
+
+// ─── Gap recovery accounting ───────────────────────────────────────────────
+
+const DATED_GAP = (orderId: string, gapId: string) =>
+	({
+		gap_id: gapId,
+		record_key: orderId,
+		reference_only: true,
+		status: "pending",
+		stream: "order_items",
+		detail_locator: {
+			kind: "heb.order_detail",
+			order_id: orderId,
+			order_date: "2026-05-20",
+		},
+	}) satisfies BrowserCollectContext["detailGaps"][number];
+
+test("recovery keeps a gap pending when a page that recovered one gap is followed by an empty page", async () => {
+	// Page one recovers order A and fails order B; the host then has nothing
+	// more to lease. Stopping on an empty page must not read as "nothing is
+	// pending": B was re-deferred and is still open.
+	const orderA = "HEB7000000001";
+	const orderB = "HEB7000000002";
+	const harness = makeRecordingEmit(validateRecord);
+	const pending = new Map<string, { gapId: string; recordKey: string | number }>();
+	const page = makePageStub(
+		NO_ROWS_HTML,
+		[],
+		(url) => (url.includes(orderA) ? DETAIL_HTML : NO_ROWS_HTML),
+	);
+	let pagesRequested = 0;
+	const result = await recoverPendingOrderItemDetailGaps(
+		page,
+		{
+			detailGaps: [DATED_GAP(orderA, "gap_a"), DATED_GAP(orderB, "gap_b")],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			emittedAt: EMITTED_AT,
+			pendingGapsByOrderId: pending,
+			requestDetailGapPage: () => {
+				pagesRequested += 1;
+				return Promise.resolve([]);
+			},
+			sendInteraction: noopSendInteraction,
+			waitForHydration: immediateWait,
+		},
+		makeRunFlags(),
+	);
+	assert.equal(pagesRequested, 1);
+	assert.equal(result.recovered, 1);
+	assert.equal(result.stoppedWithPending, true);
+	assert.deepEqual([...pending.keys()], [orderB]);
+});
+
+test("collect fails order_items when a mixed recovery page leaves a gap it cannot read", async () => {
+	const ctx = makeContext(
+		["orders", "order_items"],
+		makePageStub(onePageCanceledOrdersList(), [], DETAIL_HTML),
+		{
+			detailGaps: [
+				DATED_GAP("HEB7000000001", "gap_recovered"),
+				{
+					gap_id: "gap_unreadable",
+					record_key: "unknown",
+					reference_only: true,
+					status: "pending",
+					stream: "order_items",
+				},
+			],
+		},
+	);
+	await collectQuickly(ctx);
+	assert.equal(
+		ctx.protocolMessages.filter((message) => message.type === "DETAIL_GAP_RECOVERED")
+			.length,
+		1,
+	);
+	assert.ok(
+		ctx.reportedStreamFailures.some(
+			(message) =>
+				message.stream === "order_items" &&
+				message.message.includes("unresolved gaps"),
+		),
+		"one gap was recovered and one cannot be read; the run still has an open gap",
+	);
+});
+
+test("collect closes a legacy dateless gap once the forward scan delivers the order", async () => {
+	// The gap has no date, so recovery cannot emit items for it and re-defers it.
+	// The order is on the list page, which supplies the date, and its detail
+	// hydrates: the items are delivered and the gap is settled in the same run.
+	const orderId = "HEB1029384600";
+	const listHtml = onePageCanceledOrdersList().replace(
+		"<!-- -->0<!-- --> <!-- -->items",
+		"<!-- -->12<!-- --> <!-- -->items",
+	);
+	const ctx = makeContext(
+		["orders", "order_items"],
+		makePageStub(listHtml, [], DETAIL_HTML),
+		{
+			detailGaps: [
+				{
+					gap_id: "gap_dateless",
+					record_key: orderId,
+					reference_only: true,
+					status: "pending",
+					stream: "order_items",
+					detail_locator: { kind: "heb.order_detail", order_id: orderId },
+				},
+			],
+		},
+	);
+	await collectQuickly(ctx);
+	assert.deepEqual(ctx.reportedStreamFailures, []);
+	const recoveredAt = ctx.events.findIndex(
+		(event) =>
+			event.kind === "message" &&
+			event.message.type === "DETAIL_GAP_RECOVERED" &&
+			event.message.gap_id === "gap_dateless",
+	);
+	assert.notEqual(recoveredAt, -1, "the settled gap is closed");
+	const lastItemAt = ctx.events.findLastIndex(
+		(event) => event.kind === "record" && event.stream === "order_items",
+	);
+	assert.ok(lastItemAt !== -1 && lastItemAt < recoveredAt, "items first");
+	assert.equal(
+		ctx.protocolMessages.filter((message) => message.type === "DETAIL_GAP_RECOVERED")
+			.length,
+		1,
+	);
+});

@@ -1025,8 +1025,21 @@ export type DetailFetchResult =
 			failureKind: DetailFailureKind;
 			pollCount?: number;
 			reason: HebDetailGapReason;
+			/** The requested order's own page settled with no item rows at all. This
+			 *  is the only failed read that can stand behind an empty claim. */
+			settledEmpty?: true;
 			status: "failed";
 	  };
+
+/** Whether the browser is still on the order's own detail page, not on a
+ *  redirect target such as the order list or an error page. */
+function landedOnOrderPage(url: string, orderId: string): boolean {
+	try {
+		return new URL(url).pathname.split("/").filter(Boolean).at(-1) === orderId;
+	} catch {
+		return false;
+	}
+}
 
 const SIGNIN_URL_RE = /\/(sign-in|login|challenge|checkpoint)/i;
 // Amazon's navigation-retry shape (connectors/amazon/index.ts): retry only
@@ -1084,6 +1097,7 @@ export async function fetchOrderDetail(
 		failureKind: DetailFailureKind,
 		diagnostic?: string,
 		surface?: DetailSurfaceDiagnostics,
+		settledEmpty = false,
 	): DetailFetchResult => {
 		const measured = metrics();
 		// The host keeps no detail for a gap, so the run log is the only place a
@@ -1099,6 +1113,7 @@ export async function fetchOrderDetail(
 			...measured,
 			failureKind,
 			reason: reasonForDetailFailure(failureKind),
+			...(settledEmpty ? { settledEmpty: true as const } : {}),
 			status: "failed",
 		};
 	};
@@ -1202,6 +1217,8 @@ export async function fetchOrderDetail(
 			"parse_missing",
 			detailSurfaceErrorMessage(surface.diagnostics),
 			surface.diagnostics,
+			surface.diagnostics.collectedRows === 0 &&
+				landedOnOrderPage(landedUrl, orderId),
 		);
 	}
 	// The parser drops a line with no name or product id without a word, so a
@@ -1963,6 +1980,10 @@ export async function recoverPendingOrderItemDetailGaps(
 	unreconciledPending: boolean;
 }> {
 	let recovered = 0;
+	// Gaps this run could not settle, across every page: a page that recovered
+	// something still leaves its other gaps pending, and the last page the host
+	// returns is empty whatever happened on the pages before it.
+	let leftPending = 0;
 	let unreconciledPending = false;
 	let gaps = deps.detailGaps;
 	while (gaps.length > 0) {
@@ -1973,11 +1994,12 @@ export async function recoverPendingOrderItemDetailGaps(
 			gaps,
 		);
 		recovered += result.recovered;
+		leftPending += result.reDeferred + result.skipped;
 		unreconciledPending ||= result.skipped > 0;
 		if (!deps.requestDetailGapPage) {
 			return {
 				recovered,
-				stoppedWithPending: result.reDeferred + result.skipped > 0,
+				stoppedWithPending: leftPending > 0,
 				unreconciledPending,
 			};
 		}
@@ -1996,7 +2018,11 @@ export async function recoverPendingOrderItemDetailGaps(
 		}
 		gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
 	}
-	return { recovered, stoppedWithPending: false, unreconciledPending };
+	return {
+		recovered,
+		stoppedWithPending: leftPending > 0,
+		unreconciledPending,
+	};
 }
 
 export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -2184,18 +2210,10 @@ function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
 	return counts;
 }
 
-/** Failures that mean the detail page was loaded but could not be read or
- *  settled, as opposed to a sign-in, navigation or budget problem. */
-const UNREADABLE_DETAIL_KINDS: ReadonlySet<DetailFailureKind> = new Set([
-	"detail_surface_error",
-	"detail_surface_incomplete",
-	"detail_surface_timeout",
-	"parse_missing",
-]);
-
 /** Close the pending gap that gap recovery re-deferred for this order, if any,
- *  once H-E-B's declared zero settles it. Nothing is left to deliver, so no item
- *  record can be filtered or rejected on the way. No item records are invented. */
+ *  once this run has settled the order: its items were just delivered, or the
+ *  order's own page showed none and H-E-B declares none. No item record is
+ *  invented. */
 async function closePendingGap(
 	deps: Pick<EmitDeps, "emit" | "pendingGapsByOrderId">,
 	orderId: string,
@@ -2253,15 +2271,17 @@ async function fetchDetailAndRecordCoverage(
 		flags.sessionRepairRequired = true;
 	}
 	// H-E-B shows a canceled order as "$0.00, 0 items", and its page may still
-	// list rows; they are collected like any other order's. When the page cannot
-	// be read or settled, the declared zero is the answer: there is nothing to
-	// hydrate, so the order is accounted for as empty instead of staying a gap
-	// that no retry can close. The failed fetch has already logged why.
+	// list rows; they are collected like any other order's. Only when the
+	// order's own page settles with no rows at all do the page and the card agree
+	// that there is nothing to hydrate, and the order is accounted for as empty
+	// instead of staying a gap that no retry can close. A page that lists rows
+	// this connector cannot key, or that never settles, proves nothing about the
+	// order's items and stays a gap. The failed fetch has already logged why.
 	if (
 		result.status === "failed" &&
+		result.settledEmpty === true &&
 		isCanceledOrder(listOrder) &&
-		listOrder.itemCount === 0 &&
-		UNREADABLE_DETAIL_KINDS.has(result.failureKind)
+		listOrder.itemCount === 0
 	) {
 		if (deps.orderItemsCoverage) {
 			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "empty");
@@ -2345,6 +2365,12 @@ export async function processListOrder(
 		: null;
 
 	await emitOrderAndItems(deps, listOrder, detail, orderDate);
+	// The scan has just delivered every item of this order. A gap that recovery
+	// re-deferred for it earlier in the run, such as a legacy gap with no date to
+	// emit items under, is settled now that the list card supplied the date.
+	if (detail && deps.emitItems) {
+		await closePendingGap(deps, listOrder.orderId);
+	}
 }
 
 /**
@@ -3339,9 +3365,11 @@ export const hebConnector: BrowserConnectorConfig = {
 			return;
 		}
 		const { newestOrderDate, stoppedAtBoundary, truncated } = scan;
+		// Recovery's own record of what it could not settle, less what the forward
+		// scan has since delivered or proven empty: pending whatever made the page
+		// loop stop.
 		const gapsStillPending =
-			gapRecovery.stoppedWithPending &&
-			(gapRecovery.unreconciledPending || pendingGapsByOrderId.size > 0);
+			gapRecovery.unreconciledPending || pendingGapsByOrderId.size > 0;
 
 		if (wantsOrders && !truncated) {
 			// A truncated scan emits no finishing `orders` STATE: it failed the
