@@ -571,3 +571,79 @@ test("omitted-since coverage requires a valid same-consent checkpoint without ga
     Date.now = now;
   }
 });
+
+test("clipped requests retain failed and refresh debt for a wider retry", async () => {
+  const now = Date.now;
+  Date.now = () => Date.parse("2026-10-17T12:00:00Z");
+  try {
+    for (const debt of ["failed", "refresh"] as const) {
+      const requests: Array<{ start: string; end: string }> = [];
+      await withBrowser(async (input) => {
+        const params = new URL(String(input), HOME).searchParams;
+        requests.push({ start: params.get("start")!, end: params.get("end")! });
+        return Response.json({ daily_sleeps: [] });
+      }, async () => {
+        const initial = { next_day: "2026-10-18", requested_since: "2026-01-01",
+          refresh_from: debt === "refresh" ? "2026-01-01" : "2026-10-15",
+          failed_windows: debt === "failed" ? [{ start: "2026-01-01", end: "2026-01-10" }] : [] };
+        const narrow = harness(["sleep"], page(HOME), { sleep: initial },
+          { since: "2026-01-01", until: "2026-01-05" });
+        await collectOuraBrowser(narrow.ctx);
+        const cursor = savedCursor(narrow.messages);
+        assert.deepEqual(requests.splice(0), [{ start: "2026-01-01", end: "2026-01-04" }]);
+        if (debt === "failed") assert.deepEqual(cursor.failed_windows,
+          [{ start: "2026-01-05", end: "2026-01-10" }]);
+        assert.equal(cursor.refresh_from, "2026-01-05");
+        const wide = harness(["sleep"], page(HOME), { sleep: cursor },
+          { since: "2026-01-01", until: "2026-01-11" });
+        await collectOuraBrowser(wide.ctx);
+        assert.deepEqual(requests, [{ start: "2026-01-05", end: "2026-01-10" }]);
+        assert.deepEqual(savedCursor(wide.messages).failed_windows, []);
+        assert.equal(savedCursor(wide.messages).refresh_from, "2026-01-11");
+        assert.deepEqual(wide.failures, []);
+        assert.equal(wide.messages.some((m) => m.type === "SKIP_RESULT"), false);
+      });
+    }
+  } finally { Date.now = now; }
+});
+
+test("debt subtraction preserves both clipped sides and unattempted refresh watermarks", async () => {
+  const now = Date.now;
+  Date.now = () => Date.parse("2026-10-17T12:00:00Z");
+  try {
+    await withBrowser(async () => Response.json({ daily_sleeps: [] }), async () => {
+      const debt = [{ start: "2026-01-01", end: "2026-01-10" },
+        { start: "2026-02-01", end: "2026-02-03" }];
+      const split = harness(["sleep"], page(HOME), { sleep: {
+        next_day: "2026-10-18", requested_since: "2026-01-03",
+        refresh_from: "2026-10-15", failed_windows: debt,
+      } }, { since: "2026-01-03", until: "2026-01-05" });
+      await collectOuraBrowser(split.ctx);
+      assert.deepEqual(savedCursor(split.messages).failed_windows, [
+        { start: "2026-01-01", end: "2026-01-02" },
+        { start: "2026-01-05", end: "2026-01-10" }, debt[1],
+      ]);
+      assert.deepEqual(split.failures, []);
+      const historical = harness(["sleep"], page(HOME), { sleep: {
+        next_day: "2026-01-01", requested_since: "2026-01-01",
+        refresh_from: "2026-01-08", failed_windows: [debt[1]],
+      } }, { since: "2026-01-01", until: "2026-01-05" });
+      await collectOuraBrowser(historical.ctx);
+      assert.equal(savedCursor(historical.messages).refresh_from, "2026-01-08");
+      assert.deepEqual(savedCursor(historical.messages).failed_windows, [debt[1]]);
+    });
+    await withBrowser(async () => new Response("{}", { status: 500 }), async () => {
+      const h = harness(["sleep"], page(HOME), { sleep: {
+        next_day: "2026-10-18", requested_since: "2026-01-01", refresh_from: "2026-01-01",
+        failed_windows: [{ start: "2026-01-01", end: "2026-01-10" }],
+      } }, { since: "2026-01-01", until: "2026-01-05" });
+      await collectOuraBrowser(h.ctx);
+      assert.equal(savedCursor(h.messages).refresh_from, "2026-01-01");
+      assert.deepEqual(savedCursor(h.messages).failed_windows, [
+        { start: "2026-01-05", end: "2026-01-10" },
+        { start: "2026-01-01", end: "2026-01-04" },
+      ]);
+      assert.deepEqual(h.failures, [{ stream: "sleep", retryable: true }]);
+    });
+  } finally { Date.now = now; }
+});

@@ -2611,17 +2611,24 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 437,
+			line: 440,
 			column: 22,
 			category: "ordered_browser_interaction",
 			note: "Oura fetches each refresh and backfill window on the authenticated browser page in order.",
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 472,
+			line: 484,
 			column: 9,
 			category: "ordered_protocol_emission",
 			note: "Oura records are emitted in fetched stream order before the checkpoint.",
+		},
+		{
+			path: "connectors/oura_browser/index.test.ts",
+			line: 581,
+			column: 7,
+			category: "test_assertion_sequencing",
+			note: "Run the failed-window and refresh-debt cases in turn under the frozen clock before asserting each retained debt.",
 		},
 		{
 			path: "connectors/oura_browser/index.test.ts",
