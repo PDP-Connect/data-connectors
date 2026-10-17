@@ -1518,19 +1518,23 @@ export function runConnector(config: RunConnectorConfig): void {
 
 // ─── run() helpers (top-level so each is independently readable) ───────
 
-/** Read the optional capabilities advertised by START. */
+/**
+ * Read the optional capabilities advertised by START. A list with any
+ * non-string or empty member is malformed and yields none, so a damaged START
+ * never turns a capability on.
+ */
 export function readHostCapabilities(start: unknown): readonly string[] {
 	if (typeof start !== "object" || start === null) return [];
 	const capabilities: unknown = Reflect.get(start, "protocol_capabilities");
 	if (!Array.isArray(capabilities)) return [];
-	return [
-		...new Set(
-			capabilities.filter(
-				(value): value is string =>
-					typeof value === "string" && value.length > 0,
-			),
-		),
-	];
+	if (
+		!capabilities.every(
+			(value): value is string => typeof value === "string" && value.length > 0,
+		)
+	) {
+		return [];
+	}
+	return [...new Set(capabilities)];
 }
 
 /**

@@ -1409,7 +1409,7 @@ test("negotiated key sets omit empty members and copy supplied arrays", () => {
 	);
 });
 
-test("readHostCapabilities filters malformed and duplicate capabilities", () => {
+test("readHostCapabilities rejects a malformed list and de-duplicates a valid one", () => {
 	for (const start of [
 		undefined,
 		null,
@@ -1421,22 +1421,57 @@ test("readHostCapabilities filters malformed and duplicate capabilities", () => 
 	]) {
 		assert.deepEqual(runtime.readHostCapabilities(start), []);
 	}
-	const capabilities = [
-		"DETAIL_COVERAGE_KEY_SETS",
-		"",
-		null,
-		2,
-		false,
-		{},
-		"OTHER",
-		"DETAIL_COVERAGE_KEY_SETS",
-	];
+	for (const capabilities of [
+		[null, "DETAIL_COVERAGE_KEY_SETS"],
+		["DETAIL_COVERAGE_KEY_SETS", 2],
+		["DETAIL_COVERAGE_KEY_SETS", ""],
+		["DETAIL_COVERAGE_KEY_SETS", false],
+		["DETAIL_COVERAGE_KEY_SETS", {}],
+	]) {
+		assert.deepEqual(
+			runtime.readHostCapabilities({
+				type: "START",
+				protocol_capabilities: capabilities,
+			}),
+			[],
+			JSON.stringify(capabilities),
+		);
+	}
 	assert.deepEqual(
 		runtime.readHostCapabilities({
 			type: "START",
-			protocol_capabilities: capabilities,
+			protocol_capabilities: [
+				"DETAIL_COVERAGE_KEY_SETS",
+				"OTHER",
+				"DETAIL_COVERAGE_KEY_SETS",
+			],
 		}),
 		["DETAIL_COVERAGE_KEY_SETS", "OTHER"],
+	);
+});
+
+test("a malformed START capability list keeps the legacy detail coverage shape", () => {
+	const hostCapabilities = runtime.readHostCapabilities({
+		type: "START",
+		protocol_capabilities: [null, "DETAIL_COVERAGE_KEY_SETS"],
+	});
+	assert.deepEqual(
+		buildDetailCoverageMessage({
+			stream: "details",
+			stateStream: "items",
+			requiredKeys: ["h", "e"],
+			hydratedKeys: ["h"],
+			emptyKeys: ["e"],
+			hostCapabilities,
+		}),
+		{
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream: "details",
+			state_stream: "items",
+			required_keys: ["h", "e"],
+			hydrated_keys: ["h", "e"],
+		},
 	);
 });
 
