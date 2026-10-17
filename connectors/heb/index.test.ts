@@ -33,7 +33,10 @@ import {
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import {
+	type EmittedRecord,
+	makeRecordingEmit,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	buildOrdersStateCursor,
 	classifyEmptyListPage,
@@ -52,6 +55,7 @@ import {
 	HEB_REPAIR_RETRY_DELAY_MAX_MS,
 	HEB_REPAIR_RETRY_DELAY_MIN_MS,
 	hebAllowsInteractiveAuthRepair,
+	hebConnector,
 	type NutritionTarget,
 	newOrderItemsCoverage,
 	newOrdersCoverage,
@@ -216,6 +220,230 @@ const NO_DETAIL_HTML = "<html><body><main>no items here</main></body></html>";
 const PASSWORD_FORM_HTML = `<html><body><main>
   <form><input type="password" name="password" /></form>
 </main></body></html>`;
+
+interface SyntheticProviderBody {
+	orderDate: string;
+	quantity: number;
+	lineTotal: string;
+}
+
+function syntheticOrderList(body: SyntheticProviderBody): string {
+	const [year, month, day] = body.orderDate.split("-").map(Number);
+	const date = new Date(Date.UTC(year ?? 2026, (month ?? 1) - 1, day ?? 1));
+	const dateLabel = new Intl.DateTimeFormat("en-US", {
+		day: "numeric",
+		month: "short",
+		timeZone: "UTC",
+		year: "numeric",
+	}).format(date);
+	return `<html><body><main><div data-qe-id="orderResults"><div><div><div data-qe-id="orderDetailsCard"><div><p data-qe-id="orderDetailsHeader">Curbside at H-E-B Synthetic Store</p><p data-qe-id="orderDetailsDate">${dateLabel}, 11:00am–12:00pm</p><p data-qe-id="orderDetailsTotal">Total: <span>${body.lineTotal}, ${body.quantity} items</span><br>Status: <span data-qe-id="orderDetailsStatus">Delivered</span></p></div><div><a data-qe-id="viewDetailsButton" href="/my-account/order-history/HEB1000000001">View details</a></div></div></div></div></div><nav aria-label="Pagination Navigation"><a href="/my-account/your-orders?page=1">1</a></nav></main></body></html>`;
+}
+
+function syntheticOrderDetail(body: SyntheticProviderBody): string {
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic groceries</h2><ul><li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic-widget/9001">Synthetic Widget</a><span data-qe-id="checkoutItemPrice">${body.lineTotal}</span><span data-qe-id="orderItemQty">Qty: ${body.quantity}</span></li></ul></section></main></body></html>`;
+}
+
+const SYNTHETIC_ORDER: SyntheticProviderBody = {
+	lineTotal: "$10.00",
+	orderDate: "2026-07-14",
+	quantity: 1,
+};
+
+async function collectSyntheticHeb(input: {
+	body: SyntheticProviderBody;
+	emittedAt: string;
+	state: Record<string, unknown>;
+	streams: string[];
+}): Promise<{
+	emitted: EmittedRecord[];
+	protocolMessages: EmittedMessage[];
+}> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const listBody = syntheticOrderList(input.body);
+		const detailBody = syntheticOrderDetail(input.body);
+		// Keep every request local to these synthetic provider responses.
+		await page.route("**/*", (route) => route.abort());
+		await page.route(
+			"https://www.heb.com/my-account/your-orders?page=1",
+			(route) => route.fulfill({ body: listBody, contentType: "text/html" }),
+		);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB1000000001",
+			(route) => route.fulfill({ body: detailBody, contentType: "text/html" }),
+		);
+		const harness = makeRecordingEmit(validateRecord);
+		const streams = input.streams.map((name) => ({ name }));
+		const context: BrowserCollectContext = {
+			assist: async () => {
+				throw new Error("synthetic collect must not request assistance");
+			},
+			capture: null,
+			collectionMode: "incremental",
+			completeAssistance: async () => {},
+			context: page.context(),
+			credentials: {},
+			detailGaps: [],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			// All fixture records are selected; this run exercises mapping only.
+			isRecordSelected: (_stream, _data) => true,
+			emittedAt: input.emittedAt,
+			page,
+			progress: async () => {},
+			recoveryOnly: false,
+			reportStreamFailure: async () => {},
+			requestDetailGapPage: async () => [],
+			requested: new Map(streams.map((stream) => [stream.name, stream])),
+			scope: { streams },
+			sendInteraction: async () => {
+				throw new Error("synthetic collect must not request interaction");
+			},
+			state: input.state,
+		};
+		await hebConnector.collect(context);
+		return {
+			emitted: harness.emitted,
+			protocolMessages: harness.protocolMessages,
+		};
+	} finally {
+		await browser.close();
+	}
+}
+
+test("collect: identical synthetic provider bodies map to identical RECORD data across collection clocks", async () => {
+	const clocks = ["2026-08-20T12:00:00.000Z", "2026-09-21T12:00:00.000Z"];
+	const [firstClock, secondClock] = clocks;
+	assert.ok(firstClock && secondClock);
+	// Each stream set launches its own browser and shares no state, so the sets run concurrently.
+	await Promise.all(
+		[["order_items"], ["orders", "order_items"]].map(async (streams) => {
+			const first = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: firstClock,
+				state: {},
+				streams,
+			});
+			const second = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: secondClock,
+				state: {},
+				streams,
+			});
+			const firstRecords = first.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const secondRecords = second.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const expectedStreams = streams.includes("orders")
+				? ["orders", "order_items"]
+				: ["order_items"];
+			assert.deepEqual(
+				firstRecords.map((record) => record.stream),
+				expectedStreams,
+				"the first mapping run emits every selected stream record",
+			);
+			assert.deepEqual(
+				secondRecords.map((record) => record.stream),
+				expectedStreams,
+				"independent empty state keeps the second mapping run complete",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data),
+				secondRecords.map((record) => record.data),
+				"raw RECORD data must not depend on the collection clock",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data.id),
+				secondRecords.map((record) => record.data.id),
+				"matching cardinality and keys prove no record was suppressed",
+			);
+		}),
+	);
+});
+
+test("collect: state-seeded repeat keeps all selected records and exposes business changes", async () => {
+	const first = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		emittedAt: "2026-08-20T12:00:00.000Z",
+		state: {},
+		streams: ["orders", "order_items"],
+	});
+	const firstOrders = first.emitted.filter(
+		(record) => record.stream === "orders",
+	);
+	const firstItems = first.emitted.filter(
+		(record) => record.stream === "order_items",
+	);
+	assert.equal(firstOrders.length, 1, "the first run emits one fixture order");
+	assert.equal(firstOrders[0]?.data.id, "HEB1000000001");
+	assert.equal(firstItems.length, 1, "the first run emits one fixture item");
+	assert.equal(firstItems[0]?.data.id, "HEB1000000001|9001");
+
+	const firstOrdersStates = first.protocolMessages.filter(
+		(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
+			message.type === "STATE" && message.stream === "orders",
+	);
+	assert.equal(firstOrdersStates.length, 1, "the first run emits one orders STATE");
+	const firstOrdersState = firstOrdersStates[0];
+	assert.ok(firstOrdersState);
+	const cursor = firstOrdersState.cursor;
+	assert.ok(
+		cursor && typeof cursor === "object" && !Array.isArray(cursor),
+		"the orders STATE carries its cursor object",
+	);
+	const firstOrdersCursor = cursor as Record<string, unknown>;
+	assert.equal(firstOrdersCursor.checkpoint, "2026-07-14");
+	const fingerprints = firstOrdersCursor.fingerprints;
+	assert.ok(
+		fingerprints &&
+			typeof fingerprints === "object" &&
+			!Array.isArray(fingerprints),
+		"the orders cursor carries a fingerprint map",
+	);
+	const fingerprintEntries = Object.entries(
+		fingerprints as Record<string, unknown>,
+	);
+	assert.deepEqual(
+		fingerprintEntries.map(([id]) => id),
+		["HEB1000000001"],
+		"the fingerprint map contains the selected source order",
+	);
+	assert.ok(
+		fingerprintEntries.every(
+			([, fingerprint]) =>
+				typeof fingerprint === "string" && /^[a-f0-9]{40}$/.test(fingerprint),
+		),
+		"each source fingerprint is a SHA-1 hex digest",
+	);
+
+	const changedBody: SyntheticProviderBody = {
+		lineTotal: "$12.00",
+		orderDate: "2026-07-15",
+		quantity: 2,
+	};
+	const repeated = await collectSyntheticHeb({
+		body: changedBody,
+		emittedAt: "2026-09-21T12:00:00.000Z",
+		state: { orders: firstOrdersCursor },
+		streams: ["orders", "order_items"],
+	});
+	const orders = repeated.emitted.filter(
+		(record) => record.stream === "orders",
+	);
+	const items = repeated.emitted.filter(
+		(record) => record.stream === "order_items",
+	);
+	assert.equal(orders.length, 1, "the state-seeded order remains selected");
+	assert.equal(items.length, 1, "the state-seeded item remains selected");
+	assert.equal(orders[0]?.data.order_date, "2026-07-15");
+	assert.equal(items[0]?.data.order_date, "2026-07-15");
+	assert.equal(items[0]?.data.line_total, "$12.00");
+	assert.equal(items[0]?.data.line_total_cents, 1200);
+	assert.equal(items[0]?.data.quantity, 2);
+});
 
 /** A minimal Page stub backing fetchOrderDetail/processListOrder: goto always
  *  resolves (or throws once per `throwsNTimes` to exercise the retry path),
