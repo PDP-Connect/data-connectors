@@ -197,6 +197,7 @@ export interface RawTraceMessage {
 	covered?: unknown;
 	detail?: unknown;
 	detail_locator?: unknown;
+	empty_keys?: unknown;
 	error?: unknown;
 	gap_id?: unknown;
 	gap_keys?: unknown;
@@ -221,6 +222,7 @@ export interface RawTraceMessage {
 	stream?: unknown;
 	streams?: unknown;
 	type: string;
+	unchanged_keys?: unknown;
 }
 
 /**
@@ -630,6 +632,12 @@ function normalizeDetailCoverage(raw: RawTraceMessage): NormalizedTraceEntry {
 	}
 	assertDetailCoverageReferenceOnly(raw);
 	const gapKeys = asKeyArray("DETAIL_COVERAGE", "gap_keys", raw.gap_keys);
+	const emptyKeys = asKeyArray("DETAIL_COVERAGE", "empty_keys", raw.empty_keys);
+	const unchangedKeys = asKeyArray(
+		"DETAIL_COVERAGE",
+		"unchanged_keys",
+		raw.unchanged_keys,
+	);
 	const optionalSkipKeys = asKeyArray(
 		"DETAIL_COVERAGE",
 		"optional_skip_keys",
@@ -652,6 +660,8 @@ function normalizeDetailCoverage(raw: RawTraceMessage): NormalizedTraceEntry {
 		required_keys: requiredKeys,
 		hydrated_keys: hydratedKeys,
 		...(gapKeys === undefined ? {} : { gap_keys: gapKeys }),
+		...(emptyKeys === undefined ? {} : { empty_keys: emptyKeys }),
+		...(unchangedKeys === undefined ? {} : { unchanged_keys: unchangedKeys }),
 		...(optionalSkipKeys === undefined
 			? {}
 			: { optional_skip_keys: optionalSkipKeys }),
