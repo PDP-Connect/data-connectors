@@ -24,9 +24,28 @@ const MAX_ORDER_HISTORY_API_PAGES = 100;
 const MAX_CONSECUTIVE_PAGE_FAILURES = 3;
 const DEFAULT_READ_BUDGET_MS = 1_500;
 
+export interface OrderHistoryPageIdentity {
+	url: string;
+	navigation: string;
+}
+
+// Provenance is kept outside Apollo's entity namespace and survives cached reads.
+const cacheIdentities = new WeakMap<ApolloCache, Readonly<OrderHistoryPageIdentity>>();
+
+export function orderHistoryCacheIdentity(cache: ApolloCache | null): Readonly<OrderHistoryPageIdentity> | null {
+	return cache === null ? null : cacheIdentities.get(cache) ?? null;
+}
+
+export function sameOrderHistoryPage(
+	left: Readonly<OrderHistoryPageIdentity>, right: Readonly<OrderHistoryPageIdentity>,
+): boolean {
+	return left.url === right.url && left.navigation === right.navigation;
+}
+
 export interface OrderHistoryApiRequest {
 	after: string | null;
 	pageSize: number;
+	identity?: Readonly<OrderHistoryPageIdentity>;
 }
 
 export interface OrderHistoryApiReply {
@@ -45,8 +64,12 @@ export type FetchOrderHistoryPage = (request: OrderHistoryApiRequest) => Promise
  * `status: 0` reply the caller treats as an unusable page.
  */
 export async function fetchOrderHistoryPageInPage(
-	request: { after: string | null; pageSize: number },
+	request: OrderHistoryApiRequest,
 ): Promise<{ status: number; body: unknown }> {
+	const sourceUrl = new URL(location.href);
+	const identity = request.identity ?? {
+		url: `${sourceUrl.origin}${sourceUrl.pathname}`, navigation: String(performance.timeOrigin),
+	};
 	const params: Record<string, string> = {
 		pageSize: String(request.pageSize),
 		archived: "false",
@@ -61,6 +84,10 @@ export async function fetchOrderHistoryPageInPage(
 	];
 	let reply: { status: number; body: unknown } = { status: 0, body: null };
 	for (const attempt of attempts) {
+		const beforeUrl = new URL(location.href);
+		if (`${beforeUrl.origin}${beforeUrl.pathname}` !== identity.url || String(performance.timeOrigin) !== identity.navigation) {
+			return { status: 0, body: null };
+		}
 		try {
 			const response = await fetch(attempt.url, {
 				method: attempt.method,
@@ -76,7 +103,28 @@ export async function fetchOrderHistoryPageInPage(
 			} catch {
 				// A non-JSON reply is an unusable page, reported as `body: null`.
 			}
-			if (response.status === 200 && body !== null) return { status: response.status, body };
+			const afterUrl = new URL(location.href);
+			if (`${afterUrl.origin}${afterUrl.pathname}` !== identity.url || String(performance.timeOrigin) !== identity.navigation) {
+				return { status: 0, body: null };
+			}
+			// Mirror readOrderHistoryConnection without outer helpers: this function
+			// is serialized into the page. Error-bearing partial data is not usable.
+			if (response.status === 200 && typeof body === "object" && body !== null && !Array.isArray(body)) {
+				const envelope = body as Record<string, unknown>;
+				const connection = envelope.deliveriesOrdersList;
+				if (typeof connection === "object" && connection !== null && !Array.isArray(connection)) {
+					const list = connection as Record<string, unknown>;
+					const pageInfo = list.pageInfo;
+					if ([envelope, list].every((value) =>
+						(value.error === undefined || value.error === null) &&
+						(value.errors === undefined || value.errors === null || (Array.isArray(value.errors) && value.errors.length === 0)) &&
+						(value.partial === undefined || value.partial === false)) &&
+						Array.isArray(list.nodes) && typeof pageInfo === "object" && pageInfo !== null && !Array.isArray(pageInfo) &&
+						typeof (pageInfo as Record<string, unknown>).hasNextPage === "boolean") {
+						return { status: response.status, body };
+					}
+				}
+			}
 			if (reply.status === 0) reply = { status: response.status, body };
 		} catch {
 			// A network failure is an unusable page; the next form may still work.
@@ -98,9 +146,14 @@ interface OrderHistoryConnection {
 /** The connection of one reply, or `null` when the reply is not a usable authenticated page. */
 export function readOrderHistoryConnection(reply: OrderHistoryApiReply): OrderHistoryConnection | null {
 	if (reply.status !== 200 || !isRecord(reply.body)) return null;
-	if (reply.body.error !== undefined && reply.body.error !== null) return null;
 	const connection = reply.body.deliveriesOrdersList;
 	if (!isRecord(connection) || !Array.isArray(connection.nodes) || !isRecord(connection.pageInfo)) return null;
+	for (const envelope of [reply.body, connection]) {
+		if (envelope.error !== undefined && envelope.error !== null) return null;
+		if (envelope.errors !== undefined && envelope.errors !== null &&
+			(!Array.isArray(envelope.errors) || envelope.errors.length > 0)) return null;
+		if (envelope.partial !== undefined && envelope.partial !== false) return null;
+	}
 	if (typeof connection.pageInfo.hasNextPage !== "boolean") return null;
 	return {
 		...connection,
@@ -160,6 +213,7 @@ function writeOrder(cache: ApolloCache, order: Record<string, unknown>): string 
 
 export interface OrderHistoryApiPage {
 	after: string | null;
+	identity?: Readonly<OrderHistoryPageIdentity>;
 	connection: OrderHistoryConnection;
 }
 
@@ -192,7 +246,7 @@ export interface OrderHistoryApiReader {
 	/** Fetches further pages within a small time box and returns the cache read so far. */
 	read(): Promise<ApolloCache | null>;
 	/** True only when Shop's first page is an empty, terminal list that states no other total. */
-	provesEmptyHistory(): boolean;
+	provesEmptyHistory(): Promise<boolean>;
 }
 
 /**
@@ -204,11 +258,14 @@ export interface OrderHistoryApiReader {
  */
 export function createOrderHistoryApiReader({
 	fetchPage,
+	readPageIdentity,
 	maxPages = MAX_ORDER_HISTORY_API_PAGES,
 	readBudgetMs = DEFAULT_READ_BUDGET_MS,
 	now = Date.now,
 }: {
 	fetchPage: FetchOrderHistoryPage;
+	/** Required for browser-backed readers; omitted only by synthetic fetchers. */
+	readPageIdentity?: () => Promise<OrderHistoryPageIdentity | null>;
 	maxPages?: number;
 	readBudgetMs?: number;
 	now?: () => number;
@@ -218,19 +275,36 @@ export function createOrderHistoryApiReader({
 	let nextAfter: string | null = null;
 	let ended = false;
 	let consecutiveFailures = 0;
+	let identity: Readonly<OrderHistoryPageIdentity> | null = null;
+	let invalidated = false;
+	const ownsPage = async (): Promise<boolean> => {
+		if (invalidated) return false;
+		if (!readPageIdentity) return true;
+		const current = await readPageIdentity().catch(() => null);
+		if (current === null || current.navigation.length === 0 ||
+			(identity !== null && !sameOrderHistoryPage(identity, current))) {
+			invalidated = true;
+			return false;
+		}
+		identity ??= Object.freeze({ url: current.url, navigation: current.navigation });
+		return true;
+	};
 	return {
 		async read() {
+			if (!(await ownsPage())) return null;
 			const deadline = now() + readBudgetMs;
 			while (!ended && pages.length < maxPages && consecutiveFailures < MAX_CONSECUTIVE_PAGE_FAILURES) {
-				const connection = readOrderHistoryConnection(
-					await fetchPage({ after: nextAfter, pageSize: ORDER_HISTORY_API_PAGE_SIZE }),
-				);
+				if (!(await ownsPage())) return null;
+				const reply = await fetchPage({ after: nextAfter, pageSize: ORDER_HISTORY_API_PAGE_SIZE,
+					...(identity === null ? {} : { identity }) });
+				if (!(await ownsPage())) return null;
+				const connection = readOrderHistoryConnection(reply);
 				if (!connection) {
 					consecutiveFailures += 1;
 					break;
 				}
 				consecutiveFailures = 0;
-				pages.push({ after: nextAfter, connection });
+				pages.push({ after: nextAfter, connection, ...(identity === null ? {} : { identity }) });
 				const cursor = connection.pageInfo.endCursor;
 				if (!connection.pageInfo.hasNextPage || typeof cursor !== "string" || cursor.length === 0 || cursors.has(cursor)) {
 					// A page that says more exist but gives no new cursor ends the walk
@@ -242,9 +316,13 @@ export function createOrderHistoryApiReader({
 				}
 				if (now() >= deadline) break;
 			}
-			return pages.length === 0 ? null : orderHistoryPagesToCache(pages);
+			if (!(await ownsPage()) || pages.length === 0) return null;
+			const cache = orderHistoryPagesToCache(pages);
+			if (identity !== null) cacheIdentities.set(cache, identity);
+			return cache;
 		},
-		provesEmptyHistory() {
+		async provesEmptyHistory() {
+			if (!(await ownsPage())) return false;
 			const [first] = pages;
 			return pages.length === 1 && first !== undefined && first.connection.nodes.length === 0 &&
 				!first.connection.pageInfo.hasNextPage &&

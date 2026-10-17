@@ -23,6 +23,7 @@ import {
 	isShopOrderHistoryReadyInPage,
 	readShopOrderPageEvidenceInPage,
 } from "./index.ts";
+import { fetchOrderHistoryPageInPage } from "./order-history-api.ts";
 import { validateRecord } from "./schemas.ts";
 
 const ORDER_A = "11111111-aaaa-4aaa-8aaa-111111111111";
@@ -87,6 +88,7 @@ interface ShopComFixture {
 	api: (params: Record<string, string>) => { status: number; body: unknown };
 	/** When set, every POST gets this bare status, so only the GET form can succeed. */
 	postStatus?: number;
+	postBody?: unknown;
 }
 
 /**
@@ -105,7 +107,7 @@ async function serveShopCom(page: Page, fixture: ShopComFixture): Promise<Array<
 				: Object.fromEntries(url.searchParams);
 			requests.push({ method, ...params });
 			const reply = method === "POST" && fixture.postStatus !== undefined
-				? { status: fixture.postStatus, body: null }
+				? { status: fixture.postStatus, body: fixture.postBody ?? null }
 				: fixture.api(params);
 			await route.fulfill({ status: reply.status, contentType: "application/json", body: JSON.stringify(reply.body) });
 		} else if (url.origin === "https://shop.com") {
@@ -291,5 +293,68 @@ test("an unauthorized order-history reply yields no orders and no completeness c
 		assert.equal(run.emitted.length, 0);
 		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
 		assert.ok(run.protocolMessages.some((message) => message.type === "SKIP_RESULT"));
+	});
+});
+
+
+for (const [label, postBody] of [
+	["error", { error: "POST_NOT_SUPPORTED" }],
+	["malformed", {}],
+	["partial", { ...historyBody([orderNode(ORDER_B)], { hasNextPage: false, endCursor: null }) as object,
+		errors: [{ message: "partial failure" }] }],
+] as const) {
+	test(`HTTP 200 ${label} POST envelopes use one validated GET fallback`, async () => {
+		await withPage(async (page) => {
+			const requests = await serveShopCom(page, {
+				html: SIGNED_IN_PAGE, postStatus: 200, postBody,
+				api: () => ({ status: 200, body: historyBody([orderNode(ORDER_A)], { hasNextPage: false, endCursor: null }) }),
+			});
+			const run = await runCollect(page);
+			assert.deepEqual(run.emitted.map((record) => record.data.id), [ORDER_A]);
+			assert.deepEqual(requests.map((request) => request.method), ["POST", "GET"]);
+			assert.equal(run.protocolMessages.filter((message) => message.type === "STATE").length, 1);
+		});
+	});
+}
+
+test("invalid POST and GET later-page envelopes keep earlier orders and emit the retryable incomplete skip", async () => {
+	await withPage(async (page) => {
+		const requests = await serveShopCom(page, {
+			html: SIGNED_IN_PAGE,
+			api: (params) => ({ status: 200, body: params.after === undefined
+				? historyBody([orderNode(ORDER_A)], { hasNextPage: true, endCursor: "cursor-1" })
+				: { ...historyBody([orderNode(ORDER_B)], { hasNextPage: false, endCursor: null }) as object,
+					errors: [{ message: "partial failure" }] } }),
+		});
+		const state = { orders: { fingerprints: { prior: "keep-me" } } };
+		const originalState = structuredClone(state);
+		const run = await runCollect(page, state);
+		assert.deepEqual(run.emitted.map((record) => record.data.id), [ORDER_A]);
+		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+		const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+		assert.ok(skip?.type === "SKIP_RESULT");
+		assert.equal(skip.reason, "inventory_not_proven_complete");
+		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.deepEqual(state, originalState);
+		assert.deepEqual(requests.filter((request) => request.after !== undefined).map((request) => request.method),
+			["POST", "GET", "POST", "GET", "POST", "GET"]);
+	});
+});
+
+
+test("the GET fallback cannot move to a different order-history document", async () => {
+	await withPage(async (page) => {
+		const requests = await serveShopCom(page, {
+			html: SIGNED_IN_PAGE,
+			api: () => ({ status: 200, body: historyBody([orderNode(ORDER_A)], { hasNextPage: false, endCursor: null }) }),
+		});
+		await page.goto("https://shop.com/account/order-history");
+		await page.route("**/web/api/order-history", async (route) => {
+			await page.evaluate(() => history.replaceState(null, "", "/account/settings"));
+			await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ error: "POST_NOT_SUPPORTED" }) });
+		});
+		const reply = await page.evaluate(fetchOrderHistoryPageInPage, { after: null, pageSize: 10 });
+		assert.deepEqual(reply, { status: 0, body: null });
+		assert.deepEqual(requests, [], "the fallback GET must not run after navigation changes");
 	});
 });

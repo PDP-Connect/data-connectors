@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.30)
+ * PDPP Shopify (Shop app) Connector (v0.2.31)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
@@ -103,7 +103,10 @@ import {
 	parseDomOrderCards,
 	resolveOrderId,
 } from "./parsers.ts";
-import { createOrderHistoryApiReader, fetchOrderHistoryPageInPage } from "./order-history-api.ts";
+import {
+	createOrderHistoryApiReader, fetchOrderHistoryPageInPage, orderHistoryCacheIdentity,
+	sameOrderHistoryPage, type OrderHistoryPageIdentity,
+} from "./order-history-api.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache, ParsedOrder } from "./types.ts";
 
@@ -652,6 +655,7 @@ export function orderRecord(order: ParsedOrder): RecordData {
  *  Extracted so a fake `readCache`/`scroll` pair can drive the exact same
  *  loop `collectShopify` uses without a real browser. */
 export interface CacheWalkArgs {
+	initialPageIdentity?: Readonly<OrderHistoryPageIdentity> | null;
 	initialCache?: ApolloCache | null;
 	initialOrders?: ParsedOrder[];
 	readDomOrders?: () => Promise<ParsedOrder[]>;
@@ -705,7 +709,8 @@ export async function walkOrdersCache(
 	const operationTimeoutMs = args.browserOperationTimeoutMs ?? DEFAULT_BROWSER_OPERATION_TIMEOUT_MS;
 	let cache = args.initialCache ?? null;
 	let pageEvidence: ShopOrderPageEvidence | null = null;
-	let boundPageIdentity: { url: string; navigation: string } | null = null;
+	const initialCacheIdentity = orderHistoryCacheIdentity(cache);
+	let boundPageIdentity = args.initialPageIdentity ?? initialCacheIdentity;
 	const currentPageEvidence = (): ShopOrderPageEvidence | null => pageEvidence;
 	const currentBoundPageIdentity = (): { url: string; navigation: string } | null => boundPageIdentity;
 	const orders = new Map<string, ParsedOrder>();
@@ -780,6 +785,8 @@ export async function walkOrdersCache(
 	if (args.initialCache) mergeCoverage(args.initialCache);
 	for (const order of args.initialOrders ?? []) mergeDomOrder(order);
 	const read = async (): Promise<boolean> => {
+		if (initialCacheIdentity !== null && boundPageIdentity !== null &&
+			!sameOrderHistoryPage(initialCacheIdentity, boundPageIdentity)) return false;
 		const before = readPageEvidence
 			? await withBrowserOperationBudget("page_evidence_read", readPageEvidence, deadlineAt, operationTimeoutMs)
 			: undefined;
@@ -787,7 +794,8 @@ export async function walkOrdersCache(
 			pageEvidence = before;
 			if (
 				before.blocked || !before.orderContext ||
-				!isShopOrderHistoryPageUrl(before.url) || before.navigation.length === 0
+				!isShopOrderHistoryPageUrl(before.url) || before.navigation.length === 0 ||
+				(boundPageIdentity !== null && !sameOrderHistoryPage(boundPageIdentity, before))
 			) return false;
 		}
 		const refreshed = await withBrowserOperationBudget("apollo_cache_read", readCache, deadlineAt, operationTimeoutMs).catch((cause: unknown) => {
@@ -806,6 +814,12 @@ export async function walkOrdersCache(
 					(boundPageIdentity.url !== after.url || boundPageIdentity.navigation !== after.navigation))
 			) return false;
 			boundPageIdentity ??= { url: after.url, navigation: after.navigation };
+		}
+		const source = orderHistoryCacheIdentity(refreshed);
+		if (source !== null) {
+			if ((boundPageIdentity !== null && !sameOrderHistoryPage(boundPageIdentity, source)) ||
+				(after !== undefined && !sameOrderHistoryPage(after, source))) return false;
+			boundPageIdentity ??= source;
 		}
 		freshCache = refreshed;
 		if (refreshed) {
@@ -1106,12 +1120,14 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 		return;
 	}
 	refreshDiagnostics();
+	let initialPageIdentity: Readonly<OrderHistoryPageIdentity> | null = null;
 	if (args.readPageEvidence) {
 		try {
 			const page = await withBrowserOperationBudget(
 				"page_evidence_read", args.readPageEvidence, runDeadlineAt, operationTimeoutMs,
 			);
-			if (page.blocked || !page.orderContext || !isShopOrderHistoryPageUrl(page.url)) {
+			initialPageIdentity = { url: page.url, navigation: page.navigation };
+			if (page.blocked || !page.orderContext || !isShopOrderHistoryPageUrl(page.url) || page.navigation.length === 0) {
 				await emit({
 					type: "SKIP_RESULT", stream: ORDERS_STREAM,
 					reason: page.blocked ? "shopify_signed_out_or_blocked" : "shopify_order_history_unconfirmed",
@@ -1162,6 +1178,7 @@ export async function collectShopify(args: CollectShopifyArgs): Promise<void> {
 			}
 			: await walkOrdersCache({
 		initialCache: evidence.cache,
+		initialPageIdentity,
 		initialOrders: evidence.orders,
 		browserOperationTimeoutMs: operationTimeoutMs,
 		runDeadlineAt,
@@ -1447,6 +1464,10 @@ export async function collect(
 	// block the typed readiness/operation failure emitted by collectShopify.
 	let latestDiagnostics = EMPTY_SHOP_DIAGNOSTICS;
 	const orderHistoryApi = createOrderHistoryApiReader({
+		readPageIdentity: async () => {
+			const evidence = await evaluateShopReaderInMainWorld(page, readShopOrderPageEvidenceInPage);
+			return evidence.blocked || !evidence.orderContext || !isShopOrderHistoryPageUrl(evidence.url) ? null : evidence;
+		},
 		fetchPage: (request) => page.evaluate(fetchOrderHistoryPageInPage, request),
 	});
 
@@ -1474,7 +1495,7 @@ export async function collect(
 			return latestDiagnostics;
 		},
 		readVerifiedEmptyState: async () =>
-			orderHistoryApi.provesEmptyHistory() ||
+			(await orderHistoryApi.provesEmptyHistory()) ||
 			evaluateShopReaderInMainWorld(page, hasVerifiedEmptyOrderHistoryInPage),
 		scroll: async () => {
 			await page.evaluate(scrollToBottomInPage);

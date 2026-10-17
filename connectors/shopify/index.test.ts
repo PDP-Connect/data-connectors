@@ -41,6 +41,7 @@ import {
 	isShopOrderHistoryReadyInPage,
 	shopSkipDiagnosticsInPage,
 } from "./index.ts";
+import { createOrderHistoryApiReader } from "./order-history-api.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ApolloCache } from "./types.ts";
 
@@ -1555,4 +1556,67 @@ test("Shop order records keep the same primary key and fingerprint fields across
 	assert.deepEqual(orderRecord({
 		...order, id: "https://shop.com/orders/same-order", detailUrl: "https://shop.com/orders/same-order",
 	}), orderRecord(order));
+});
+
+
+test("a terminal API cache from readiness cannot rebind to the next navigation", async () => {
+	let navigation = "nav-1";
+	let fetches = 0;
+	const identity = () => ({ url: "https://shop.com/account/order-history", navigation });
+	const reader = createOrderHistoryApiReader({
+		readPageIdentity: async () => identity(),
+		fetchPage: async () => {
+			fetches += 1;
+			return { status: 200, body: { deliveriesOrdersList: {
+				nodes: [{ __typename: "Order", id: "A", createdAt: "2026-01-15T10:00:00Z",
+					displayStatus: "paid", effectiveTotalPrice: { amount: "1", currencyCode: "USD" },
+					totalItemCount: 1, shop: { name: "Shop" }, lineItems: { nodes: [{ productTitle: "Item" }] } }],
+				pageInfo: { hasNextPage: false, endCursor: null },
+			} } };
+		},
+	});
+	const initialCache = await reader.read();
+	assert.ok(initialCache);
+	navigation = "nav-2";
+	const result = await walkOrdersCache({
+		initialCache, readCache: () => reader.read(),
+		readPageEvidence: async () => ({ ...identity(), orderContext: true, blocked: false,
+			pageHeight: 100, domHasContinuation: false, domCardCount: 0 }),
+		scroll: async () => undefined,
+	});
+	assert.equal(result.complete, false);
+	assert.equal(fetches, 1);
+	const fallback = await walkOrdersCache({
+		initialCache, initialPageIdentity: identity(),
+		readCache: async () => structuredClone(initialCache),
+		readPageEvidence: async () => ({ ...identity(), orderContext: true, blocked: false,
+			pageHeight: 100, domHasContinuation: false, domCardCount: 0 }),
+		scroll: async () => undefined,
+	});
+	assert.equal(fallback.complete, false, "a newer fallback cannot legitimize an older readiness cache");
+});
+
+test("readiness navigation survives into the walk and cannot prune prior fingerprints", async () => {
+	for (const changed of ["navigation", "url"] as const) {
+		const run = makeRecordingEmit(validateRecord);
+		const state = { orders: { fingerprints: { prior: "keep-me" } } };
+		const originalState = structuredClone(state);
+		let read = false;
+		await collectShopify({
+			emit: run.emit, emitRecord: run.emitRecord,
+			progress: async () => undefined, requested: requestedMap(["orders"]), state,
+			readPageEvidence: async () => ({
+				url: read && changed === "url" ? "https://shop.app/account/order-history" : "https://shop.com/account/order-history",
+				navigation: read && changed === "navigation" ? "nav-2" : "nav-1",
+				orderContext: true, blocked: false, pageHeight: 100, domHasContinuation: false, domCardCount: 0,
+			}),
+			readCache: async () => { read = true; return makeCache(["Order:1"], false); },
+			cacheWaitTimeoutMs: 0, scroll: async () => undefined,
+		});
+		assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false, changed);
+		const skip = run.protocolMessages.find((message) => message.type === "SKIP_RESULT");
+		assert.ok(skip?.type === "SKIP_RESULT");
+		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.deepEqual(state, originalState);
+	}
 });

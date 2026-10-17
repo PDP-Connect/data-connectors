@@ -272,3 +272,49 @@ test("only an empty terminal first page that states no other total proves an emp
 	assert.equal(await proves(reply([orderNode(ORDER_A)], { hasNextPage: false })), false);
 	assert.equal(await proves({ status: 401, body: { error: "UNAUTHORIZED" } }), false);
 });
+
+
+test("every API page and terminal cache read stays bound to the originating document", async () => {
+	for (const phase of ["during_fetch", "between_pages", "cached_terminal", "cached_empty"] as const) {
+		let navigation = "nav-1";
+		let fetches = 0;
+		const reader = createOrderHistoryApiReader({
+			readPageIdentity: async () => ({ url: "https://shop.com/account/order-history", navigation }),
+			readBudgetMs: phase === "between_pages" ? 0 : 1_500,
+			fetchPage: async () => {
+				fetches += 1;
+				if (phase === "during_fetch") navigation = "nav-2";
+				return reply(phase === "cached_empty" ? [] : [orderNode(ORDER_A)],
+					phase === "between_pages" ? { hasNextPage: true, endCursor: "cursor-1" } : { hasNextPage: false });
+			},
+		});
+		const first = await reader.read();
+		if (phase === "during_fetch") assert.equal(first, null);
+		else assert.ok(first);
+		navigation = "nav-2";
+		assert.equal(await reader.provesEmptyHistory(), false, "empty proof checks its source before reuse");
+		assert.equal(await reader.read(), null, phase);
+		assert.equal(await reader.provesEmptyHistory(), false);
+		assert.equal(fetches, 1, "a changed document must not fetch the old cursor");
+		navigation = "nav-1";
+		assert.equal(await reader.read(), null, "rejected readers stay rejected");
+	}
+});
+
+test("HTTP 200 error and partial envelopes cannot add nodes or close a valid earlier page", async () => {
+	for (const envelope of [{ error: "POST_NOT_SUPPORTED" }, { errors: [{ message: "partial failure" }] }, { partial: true }]) {
+		const terminal = reply([orderNode(ORDER_B)], { hasNextPage: false });
+		const invalid = { status: 200, body: { ...(terminal.body as Record<string, unknown>), ...envelope } };
+		assert.equal(readOrderHistoryConnection(invalid), null);
+		const reader = createOrderHistoryApiReader({
+			fetchPage: async ({ after }) => after === null
+				? reply([orderNode(ORDER_A)], { hasNextPage: true, endCursor: "cursor-1" }) : invalid,
+		});
+		for (let attempt = 0; attempt < 4; attempt += 1) {
+			const cache = await reader.read();
+			assert.ok(cache);
+			assert.deepEqual(extractOrdersWithCoverage(cache).orders.map((order) => order.id), [ORDER_A]);
+			assert.equal(hasVerifiedOrdersEnd(cache), false);
+		}
+	}
+});
