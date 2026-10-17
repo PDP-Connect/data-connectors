@@ -110,6 +110,12 @@ jobs:
         working-directory: packages/polyfill-connectors
         run: npx playwright install --with-deps chromium
 
+      - name: Install GroupMe Vitest pilot types for workspace typecheck
+        if: hashFiles('connectors/groupme/*.vitest.ts') != ''
+        run: |
+          npm ci --prefix tools/groupme-mutation-pilot --ignore-scripts
+          ln -s ../tools/groupme-mutation-pilot/node_modules/vitest node_modules/vitest
+
       - name: Verify (typecheck + biome check)
         working-directory: packages/polyfill-connectors
         run: npm run verify

@@ -1,0 +1,128 @@
+name: GroupMe Vitest mutation pilot
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "connectors/groupme/**"
+      - "tools/groupme-mutation-pilot/**"
+      - ".github/workflows/groupme-vitest-mutation-pilot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  groupme-vitest-mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+      - name: Install, verify baseline, and run bounded mutation campaign
+        env:
+          PILOT_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PILOT_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p reports/mutation/evidence
+          step_start="$(date +%s%3N)"
+          printf '{"event":"step-wrapper-start","unixMs":%s}\n' "$step_start" > reports/mutation/evidence/step-state.jsonl
+          if [ "${PILOT_ARM_TIMED:-0}" != "1" ]; then
+            export PILOT_ARM_TIMED=1
+            if /usr/bin/time -v -o reports/mutation/evidence/pilot-step.time timeout --signal=TERM --kill-after=20s 16m bash "$BASH_SOURCE" "$@"; then
+              exit 0
+            else
+              code=$?
+              cpu_accounting=complete-command-boundary
+              if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then cpu_accounting=incomplete-timeout-or-killed-descendants; fi
+              printf '{"event":"step-wrapper-timeout-or-failure","exitCode":%s,"cpuAccounting":"%s","unixMs":%s}\n' "$code" "$cpu_accounting" "$(date +%s%3N)" >> reports/mutation/evidence/step-state.jsonl
+              exit "$code"
+            fi
+          fi
+          : > reports/mutation/evidence/timing.jsonl
+          step_start="$(date +%s%3N)"
+          printf '{"event":"step-start","unixMs":%s}\n' "$step_start" > reports/mutation/evidence/step-state.jsonl
+          checkout_sha="$(git rev-parse HEAD)"
+          [ "$checkout_sha" = "$PILOT_PR_HEAD" ] || { echo "checkout is not the exact PR head" >&2; exit 1; }
+          git cat-file -e "$PILOT_PR_BASE^{commit}"
+          merge_base="$(git merge-base "$PILOT_PR_BASE" "$PILOT_PR_HEAD")"
+          printf 'checkout=%s\nbase=%s\nhead=%s\nmerge-base=%s\n' "$checkout_sha" "$PILOT_PR_BASE" "$PILOT_PR_HEAD" "$merge_base" > reports/mutation/evidence/versions.txt
+          printf 'checkout=%s\nbase=%s\nhead=%s\nmerge-base=%s\n' "$checkout_sha" "$PILOT_PR_BASE" "$PILOT_PR_HEAD" "$merge_base" > reports/mutation/evidence/checkout-composition.txt
+          sha256sum connectors/groupme/index.ts package-lock.json tools/groupme-mutation-pilot/package.json tools/groupme-mutation-pilot/package-lock.json tools/groupme-mutation-pilot/vitest.config.ts tools/groupme-mutation-pilot/native-owner-result-receipt.ts tools/groupme-mutation-pilot/record-runtime-settings.mjs tools/groupme-mutation-pilot/stryker.config.mjs tools/groupme-mutation-pilot/stryker.owner-canary.config.mjs tools/groupme-mutation-pilot/stryker.instrumented-baseline.config.mjs tools/groupme-mutation-pilot/owner-canary-proof.mjs tools/groupme-mutation-pilot/owner-canary-proof.test.mjs tools/groupme-mutation-pilot/validate-evidence.mjs .github/workflows/groupme-vitest-mutation-pilot.yml .github/workflows/polyfill-connectors.yml > reports/mutation/evidence/source-config-hashes.txt
+          sha256sum connectors/groupme/*.test.ts connectors/groupme/*.vitest.ts >> reports/mutation/evidence/source-config-hashes.txt
+          printf '%s\n' connectors/groupme/*.test.ts > reports/mutation/evidence/node-test-files.txt
+          printf '%s\n' connectors/groupme/*.vitest.ts > reports/mutation/evidence/vitest-test-files.txt
+          run_phase() {
+            name="$1"
+            shift
+            start="$(date +%s%3N)"
+            printf '{"event":"phase-start","phase":"%s","unixMs":%s}\n' "$name" "$start" >> reports/mutation/evidence/step-state.jsonl
+            printf 'PHASE_START phase=%s unixMs=%s\n' "$name" "$start"
+            if /usr/bin/time -v -o "reports/mutation/evidence/${name}.time" "$@" > >(tee "reports/mutation/evidence/${name}.stdout") 2> >(tee "reports/mutation/evidence/${name}.stderr" >&2); then
+              code=0
+            else
+              code=$?
+            fi
+            end="$(date +%s%3N)"
+            cpu_accounting=complete-command-boundary
+            if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then cpu_accounting=incomplete-timeout-or-killed-descendants; fi
+            printf '{"phase":"%s","exitCode":%s,"wallMs":%s,"cpuAccounting":"%s"}\n' "$name" "$code" "$((end-start))" "$cpu_accounting" >> reports/mutation/evidence/timing.jsonl
+            printf '{"event":"phase-complete","phase":"%s","exitCode":%s,"unixMs":%s}\n' "$name" "$code" "$end" >> reports/mutation/evidence/step-state.jsonl
+            if [ "$code" -ne 0 ]; then printf 'PHASE_FAILURE phase=%s exitCode=%s unixMs=%s\n' "$name" "$code" "$end"; fi
+            printf 'PHASE_COMPLETE phase=%s exitCode=%s unixMs=%s wallMs=%s\n' "$name" "$code" "$end" "$((end-start))"
+            return "$code"
+          }
+
+          failure=0
+          if ! run_phase install-root npm ci --ignore-scripts; then failure=1; fi
+          if ! run_phase install-vitest-pilot npm ci --prefix tools/groupme-mutation-pilot --ignore-scripts; then failure=1; fi
+          if [ "$failure" -eq 0 ]; then
+            ln -s ../tools/groupme-mutation-pilot/node_modules/vitest node_modules/vitest
+            printf 'node=%s\nnpm=%s\n' "$(node --version)" "$(npm --version)" >> reports/mutation/evidence/versions.txt
+            if ! node tools/groupme-mutation-pilot/record-runtime-settings.mjs; then
+              printf '{"event":"preflight-failure","phase":"resolved-runtime-metadata","unixMs":%s}\n' "$(date +%s%3N)" >> reports/mutation/evidence/step-state.jsonl
+              exit 1
+            fi
+            cat reports/mutation/evidence/resource-settings.json
+            printf 'GNU /usr/bin/time records command-boundary user+system CPU and maxRSS, the maximum individual-process high-water mark (not aggregate process-tree peak). A timeout or killed descendant tree makes CPU accounting incomplete.\n' > reports/mutation/evidence/resource-settings.txt
+            if ! run_phase baseline-node node --import tsx --test --test-reporter=tap connectors/groupme/*.test.ts; then failure=1; fi
+            if ! run_phase baseline-vitest tools/groupme-mutation-pilot/node_modules/.bin/vitest run --config tools/groupme-mutation-pilot/vitest.config.ts --reporter=json --outputFile=reports/mutation/evidence/vitest-baseline.json; then failure=1; fi
+            if ! run_phase owner-baseline tools/groupme-mutation-pilot/node_modules/.bin/vitest run --config tools/groupme-mutation-pilot/vitest.config.ts connectors/groupme/incremental-frontier.vitest.ts --testNamePattern='^repeated/nonprogressing cursor: a forward page violating documented ascending order fails as NonProgressError$' --reporter=json --outputFile=reports/mutation/evidence/vitest-owner-baseline.json; then failure=1; fi
+            if ! run_phase baseline-instrumented tools/groupme-mutation-pilot/node_modules/.bin/stryker run tools/groupme-mutation-pilot/stryker.instrumented-baseline.config.mjs --logLevel info; then failure=1; fi
+          fi
+          if [ "$failure" -eq 0 ]; then
+            export PILOT_NATIVE_OWNER_RECEIPT="$GITHUB_WORKSPACE/reports/mutation/evidence/native-owner-results.jsonl"
+            : > "$PILOT_NATIVE_OWNER_RECEIPT"
+            if ! run_phase owner-canary tools/groupme-mutation-pilot/node_modules/.bin/stryker run tools/groupme-mutation-pilot/stryker.owner-canary.config.mjs --logLevel info; then failure=1; fi
+            unset PILOT_NATIVE_OWNER_RECEIPT
+          fi
+          if [ "$failure" -eq 0 ]; then
+            if ! run_phase mutation tools/groupme-mutation-pilot/node_modules/.bin/stryker run tools/groupme-mutation-pilot/stryker.config.mjs --logLevel info; then failure=1; fi
+          fi
+
+          step_end="$(date +%s%3N)"
+          printf '{"phase":"pilot-step-end-to-end","exitCode":%s,"wallMs":%s}\n' "$failure" "$((step_end-step_start))" >> reports/mutation/evidence/timing.jsonl
+          printf '{"event":"step-complete","exitCode":%s,"unixMs":%s}\n' "$failure" "$step_end" >> reports/mutation/evidence/step-state.jsonl
+          printf 'No standalone build. GNU /usr/bin/time measures each command boundary and the whole pilot step; user+system CPU and maxRSS cover the command process boundary, with maxRSS meaning the maximum individual-process high-water mark, not aggregate process-tree peak. The Stryker mutation phase includes startup, instrumentation, dry-run, planning, mutant execution, and reporting; event-recorder separates dry-run test net/overhead time. Step end-to-end includes installs, baselines, and native owner-scoped canary. GitHub job time adds checkout, Node setup, and artifact upload. A timeout or killed descendant tree marks CPU accounting incomplete.\n' > reports/mutation/evidence/measurement-boundary.txt
+          if [ "$failure" -ne 0 ]; then exit 1; fi
+      - name: Validate test parity and mutation evidence
+        run: |
+          set -euo pipefail
+          grep -Fx '# tests 221' reports/mutation/evidence/baseline-node.stdout
+          grep -Fx '# pass 219' reports/mutation/evidence/baseline-node.stdout
+          grep -Fx '# fail 0' reports/mutation/evidence/baseline-node.stdout
+          grep -Fx '# skipped 2' reports/mutation/evidence/baseline-node.stdout
+          node --test tools/groupme-mutation-pilot/owner-canary-proof.test.mjs
+          node tools/groupme-mutation-pilot/validate-evidence.mjs
+      - name: Upload mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: groupme-vitest-mutation-pilot-${{ github.run_id }}
+          path: reports/mutation/
+          if-no-files-found: error
