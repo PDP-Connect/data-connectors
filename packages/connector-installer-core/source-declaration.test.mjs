@@ -468,3 +468,46 @@ describe("source declarations — connector fleet", () => {
     );
   });
 });
+
+describe("GitHub API and browser source separation", () => {
+  const github = JSON.parse(
+    readFileSync(new URL("../../connectors/github/manifest.json", import.meta.url), "utf8"),
+  );
+  const browser = JSON.parse(
+    readFileSync(new URL("../../connectors/github_browser/manifest.json", import.meta.url), "utf8"),
+  );
+
+  it("declares distinct sources that each build a valid declaration", () => {
+    assert.notEqual(github.source.id, browser.source.id);
+    assert.equal(github.source.id, "https://registry.pdpp.dev/sources/github_api");
+    assert.equal(browser.source.id, "https://registry.pdpp.dev/sources/github");
+    for (const profile of [github, browser]) {
+      const result = validateSourceDeclaration(buildSourceDeclaration([profile]));
+      assert.equal(result.ok, true, JSON.stringify(result.errors));
+    }
+  });
+
+  it("rejects combining artifacts that disagree on source.id", () => {
+    assert.throws(
+      () => buildSourceDeclaration([github, browser]),
+      /disagree on source\.id/,
+    );
+  });
+
+  it("rejects incompatible shared stream contracts even under the same source", () => {
+    const sameSource = structuredClone(github);
+    sameSource.source = structuredClone(browser.source);
+    assert.throws(
+      () => buildSourceDeclaration([sameSource, browser]),
+      /stream "(repositories|starred|events|contributions)" differs/,
+    );
+  });
+
+  it("pins the four overlapping stream names for any future reconciliation", () => {
+    const browserNames = new Set(browser.streams.map((stream) => stream.name));
+    assert.deepEqual(
+      github.streams.map((stream) => stream.name).filter((name) => browserNames.has(name)).sort(),
+      ["contributions", "events", "repositories", "starred"],
+    );
+  });
+});
