@@ -2175,6 +2175,36 @@ function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
 	return counts;
 }
 
+/** Failures that mean the detail page was loaded but could not be read or
+ *  settled, as opposed to a sign-in, navigation or budget problem. */
+const UNREADABLE_DETAIL_KINDS: ReadonlySet<DetailFailureKind> = new Set([
+	"detail_surface_error",
+	"detail_surface_incomplete",
+	"detail_surface_timeout",
+	"parse_missing",
+]);
+
+/** Close the pending gap that gap recovery re-deferred for this order, if any,
+ *  once the forward scan has settled the order itself (its items are emitted, or
+ *  H-E-B declares it empty). No item records are invented. */
+async function closePendingGap(
+	deps: Pick<EmitDeps, "emit" | "pendingGapsByOrderId">,
+	orderId: string,
+): Promise<void> {
+	const ref = deps.pendingGapsByOrderId?.get(orderId);
+	if (!ref) {
+		return;
+	}
+	await deps.emit({
+		type: "DETAIL_GAP_RECOVERED",
+		reference_only: true,
+		gap_id: ref.gapId,
+		stream: "order_items",
+		record_key: ref.recordKey,
+	});
+	deps.pendingGapsByOrderId?.delete(orderId);
+}
+
 /** Whether H-E-B's own status for the order says it was canceled: the card's
  *  status text ("Order canceled") or the structured status code. A pending
  *  "Cancel order" button or a cancellation request does not match. */
@@ -2199,29 +2229,6 @@ async function fetchDetailAndRecordCoverage(
 	listOrder: ListPageOrder,
 	orderDate: string,
 ): Promise<OrderDetail | null> {
-	// H-E-B shows a canceled order as "$0.00, 0 items". With 0 expected units
-	// the surface cannot key rows the page may still list, so the fetch failed
-	// on every run and the gap never closed. There is nothing to hydrate: the
-	// order is accounted for as empty, and items stored earlier stay as they
-	// are. A canceled card that still declares items is fetched as usual.
-	if (isCanceledOrder(listOrder) && listOrder.itemCount === 0) {
-		if (deps.orderItemsCoverage) {
-			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "empty");
-		}
-		const ref = deps.pendingGapsByOrderId?.get(listOrder.orderId);
-		if (ref) {
-			await deps.emit({
-				type: "DETAIL_GAP_RECOVERED",
-				reference_only: true,
-				gap_id: ref.gapId,
-				stream: "order_items",
-				record_key: ref.recordKey,
-			});
-			deps.pendingGapsByOrderId?.delete(listOrder.orderId);
-		}
-		connectorDiagnostic("heb", "canceled_order_skipped", { card_units: 0 });
-		return null;
-	}
 	const result = await resolveOrderDetail(page, flags, listOrder.orderId, {
 		...(deps.capture ? { capture: deps.capture } : {}),
 		detailSurfaceTimeoutMs: deps.detailSurfaceTimeoutMs,
@@ -2235,6 +2242,23 @@ async function fetchDetailAndRecordCoverage(
 		result.failureKind === "session_repair_required"
 	) {
 		flags.sessionRepairRequired = true;
+	}
+	// H-E-B shows a canceled order as "$0.00, 0 items", and its page may still
+	// list rows; they are collected like any other order's. When the page cannot
+	// be read or settled, the declared zero is the answer: there is nothing to
+	// hydrate, so the order is accounted for as empty instead of staying a gap
+	// that no retry can close. The failed fetch has already logged why.
+	if (
+		result.status === "failed" &&
+		isCanceledOrder(listOrder) &&
+		listOrder.itemCount === 0 &&
+		UNREADABLE_DETAIL_KINDS.has(result.failureKind)
+	) {
+		if (deps.orderItemsCoverage) {
+			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "empty");
+		}
+		await closePendingGap(deps, listOrder.orderId);
+		return null;
 	}
 	if (deps.orderItemsCoverage) {
 		const outcome: DetailOutcome =
@@ -2312,6 +2336,9 @@ export async function processListOrder(
 		: null;
 
 	await emitOrderAndItems(deps, listOrder, detail, orderDate);
+	if (detail) {
+		await closePendingGap(deps, listOrder.orderId);
+	}
 }
 
 /**
