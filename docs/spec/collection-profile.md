@@ -1414,6 +1414,12 @@ A connector MUST emit `empty_keys` or `unchanged_keys` only when
 `START.protocol_capabilities` includes `DETAIL_COVERAGE_KEY_SETS`. Otherwise,
 it lists each key it accounts for without a record in `hydrated_keys`.
 
+A connector that declares `DETAIL_COVERAGE_KEY_SETS` and runs on a runtime that
+advertises it MUST report each key it accounts for without a record in
+`empty_keys` or `unchanged_keys`. That runtime credits a hydrated key only when
+a record backs it (Section 3.4). A key without a record in `hydrated_keys` is
+not credited, so its parent checkpoint stays ineligible to commit.
+
 A `parent_streams` stream emits at most one final coverage message for each
 declared parent boundary evaluated in a run. It emits the message after the
 last related `RECORD` or `DETAIL_GAP`. A runtime MUST reject coverage for an
