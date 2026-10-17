@@ -142,18 +142,52 @@ interface DetailSurfaceState {
 
 interface DetailSurfaceDiagnostics {
 	actionableControl: string | null;
+	atEnd: boolean;
 	clientHeight: number;
 	collectedRows: number;
+	errorKind: DetailSurfaceErrorKind | null;
 	expectedUnits: number | null;
+	/** Distinct product links that were mounted, then unmounted by the list's
+	 *  virtualizer. Nonzero means the list was not fully mounted at once. */
+	hrefsEverUnmounted: number;
+	/** The key scheme rows were collected under, e.g. `content:href`. */
+	identityScheme: string | null;
 	lastAction: string | null;
 	lastError: string | null;
 	loading: boolean;
+	/** Rows mounted in the last snapshot, against `collectedRows` over the run. */
+	mountedRows: number;
 	scrollHeight: number;
 	scrollTop: number;
 	settlement: DetailSurfaceSettlement;
 	snapshots: number;
+	stablePolls: number;
 	staticListEvidence: StaticListEvidence;
 	observedUnits: number | null;
+	/** Collected rows whose quantity is not a whole number, which is what keeps
+	 *  `observedUnits` unknown. */
+	unknownUnitRows: number;
+}
+
+/** Why the surface read failed outright, without the free text of the error. */
+type DetailSurfaceErrorKind =
+	| "ambiguous_repeat"
+	| "evaluate_failed"
+	| "no_positional_identity";
+
+function detailSurfaceErrorKind(
+	lastError: string | null,
+	ambiguousContentHref: string | null,
+): DetailSurfaceErrorKind | null {
+	if (!lastError) {
+		return null;
+	}
+	if (ambiguousContentHref !== null) {
+		return "ambiguous_repeat";
+	}
+	return lastError.includes("explicit positional identity")
+		? "no_positional_identity"
+		: "evaluate_failed";
 }
 
 interface DetailSurfaceResult {
@@ -425,10 +459,37 @@ function detailSurfaceErrorMessage(
 		`static_evidence=${diagnostics.staticListEvidence ?? "none"}`,
 		`loading=${diagnostics.loading}`,
 		`action=${diagnostics.lastAction ?? "none"}`,
+		`scheme=${diagnostics.identityScheme ?? "none"}`,
+		`mounted_rows=${diagnostics.mountedRows}`,
+		`unmounted_hrefs=${diagnostics.hrefsEverUnmounted}`,
+		`unknown_unit_rows=${diagnostics.unknownUnitRows}`,
+		`at_end=${diagnostics.atEnd}`,
+		`stable_polls=${diagnostics.stablePolls}`,
 		...(diagnostics.lastError
 			? [`error=${diagnostics.lastError.slice(0, 160)}`]
 			: []),
 	].join(";");
+}
+
+/** The surface counters as short diagnostic fields: counts and labels only,
+ *  never page text, so the run log can say why an order never settled. */
+function detailSurfaceFields(diagnostics: DetailSurfaceDiagnostics) {
+	return {
+		settle: diagnostics.settlement,
+		rows: diagnostics.collectedRows,
+		mounted: diagnostics.mountedRows,
+		exp: diagnostics.expectedUnits ?? "unknown",
+		obs: diagnostics.observedUnits ?? "unknown",
+		unk_qty: diagnostics.unknownUnitRows,
+		scheme: diagnostics.identityScheme ?? "none",
+		unmounted: diagnostics.hrefsEverUnmounted,
+		at_end: diagnostics.atEnd,
+		loading: diagnostics.loading,
+		ctl: diagnostics.actionableControl !== null,
+		stable: diagnostics.stablePolls,
+		static: diagnostics.staticListEvidence ?? "none",
+		err: diagnostics.errorKind ?? "none",
+	};
 }
 
 async function collectDetailSurface(
@@ -700,12 +761,17 @@ async function collectDetailSurface(
 	}
 	const diagnostics: DetailSurfaceDiagnostics = {
 		actionableControl: latest.actionableControl,
+		atEnd: latest.atEnd,
 		clientHeight: latest.clientHeight,
 		collectedRows: collected.size,
+		errorKind: detailSurfaceErrorKind(lastError, ambiguousContentHref),
 		expectedUnits,
+		hrefsEverUnmounted: contentHrefEverUnmounted.size,
+		identityScheme: collectedScheme,
 		lastAction,
 		lastError,
 		loading: latest.loading,
+		mountedRows: latest.rowCount,
 		scrollHeight: latest.scrollHeight,
 		scrollTop: latest.scrollTop,
 		staticListEvidence: fullyCollectedStaticList
@@ -713,7 +779,11 @@ async function collectDetailSurface(
 			: latest.staticListEvidence,
 		settlement,
 		snapshots,
+		stablePolls,
 		observedUnits,
+		unknownUnitRows: [...collectedUnits.values()].filter(
+			(units) => units === null,
+		).length,
 	};
 	const html =
 		collected.size > 0
@@ -895,13 +965,25 @@ export async function fetchOrderDetail(
 	const failed = (
 		failureKind: DetailFailureKind,
 		diagnostic?: string,
-	): DetailFetchResult => ({
-		...(diagnostic ? { diagnostic } : {}),
-		...metrics(),
-		failureKind,
-		reason: reasonForDetailFailure(failureKind),
-		status: "failed",
-	});
+		surface?: DetailSurfaceDiagnostics,
+	): DetailFetchResult => {
+		const measured = metrics();
+		// The host keeps no detail for a gap, so the run log is the only place a
+		// repeated failure can explain itself.
+		connectorDiagnostic("heb", "detail_fetch_failed", {
+			kind: failureKind,
+			ms: measured.elapsedMs,
+			polls: measured.pollCount,
+			...(surface ? detailSurfaceFields(surface) : {}),
+		});
+		return {
+			...(diagnostic ? { diagnostic } : {}),
+			...measured,
+			failureKind,
+			reason: reasonForDetailFailure(failureKind),
+			status: "failed",
+		};
+	};
 	const url = `https://www.heb.com/my-account/order-history/${orderId}`;
 	try {
 		await navigateToOrderDetail(page, url);
@@ -960,7 +1042,11 @@ export async function fetchOrderDetail(
 		} else if (surface.diagnostics.settlement === "timeout") {
 			failureKind = "detail_surface_timeout";
 		}
-		return failed(failureKind, detailSurfaceErrorMessage(surface.diagnostics));
+		return failed(
+			failureKind,
+			detailSurfaceErrorMessage(surface.diagnostics),
+			surface.diagnostics,
+		);
 	}
 
 	const landedUrl = page.url();
@@ -997,6 +1083,7 @@ export async function fetchOrderDetail(
 		return failed(
 			"parse_missing",
 			detailSurfaceErrorMessage(surface.diagnostics),
+			surface.diagnostics,
 		);
 	}
 	return {

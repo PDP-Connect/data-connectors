@@ -3722,6 +3722,110 @@ function syntheticWeighedRowFixture(): string {
 	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic department</h2><ul>${rows}</ul></section></main></body></html>`;
 }
 
+/** Fields of the first `[heb-diagnostic] <event> {...}` line, or undefined. */
+function diagnosticFields(
+	lines: readonly string[],
+	event: string,
+): Record<string, unknown> | undefined {
+	const prefix = `[heb-diagnostic] ${event} `;
+	const line = lines.find((candidate) => candidate.startsWith(prefix));
+	return line ? JSON.parse(line.slice(prefix.length)) : undefined;
+}
+
+test("fetchOrderDetail: a surface that never settles leaves its counters in a diagnostic line", async () => {
+	// Rows carry a positional index, so no content-identity proof applies, and
+	// one weighed row has a fractional quantity, so the units cannot be summed
+	// against the card's 6. Nothing can prove this list complete.
+	const rows = ["Qty: 2", "Qty: 1.2 of 1.2 lbs", "Qty: 1"]
+		.map(
+			(quantity, index) =>
+				`<li data-qe-id="itemRow" data-index="${index}"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic/${index + 1}">Synthetic item ${index + 1}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">${quantity}</span></li>`,
+		)
+		.join("");
+	const fixtureHtml = `<html><body><main><ul>${rows}</ul></main></body></html>`;
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/synthetic-positional-order",
+			async (route) => {
+				await route.fulfill({ body: fixtureHtml, contentType: "text/html" });
+			},
+		);
+		const diagnosticLines: string[] = [];
+		setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+
+		const result = await fetchOrderDetail(page, "synthetic-positional-order", {
+			detailSurfaceTimeoutMs: 1_500,
+			expectedItemCount: 6,
+			waitForHydration: immediateWait,
+		});
+
+		assert.equal(result.status, "failed");
+		assert.equal(
+			result.status === "failed" ? result.failureKind : null,
+			"detail_surface_timeout",
+		);
+		const fields = diagnosticFields(diagnosticLines, "detail_fetch_failed");
+		assert.ok(fields, "the failure leaves a diagnostic line");
+		assert.equal(typeof fields.ms, "number");
+		assert.equal(typeof fields.polls, "number");
+		assert.deepEqual(
+			{
+				kind: fields.kind,
+				settle: fields.settle,
+				rows: fields.rows,
+				mounted: fields.mounted,
+				exp: fields.exp,
+				obs: fields.obs,
+				unk_qty: fields.unk_qty,
+				scheme: fields.scheme,
+				unmounted: fields.unmounted,
+				err: fields.err,
+			},
+			{
+				kind: "detail_surface_timeout",
+				settle: "timeout",
+				rows: 3,
+				mounted: 3,
+				exp: 6,
+				obs: "unknown",
+				unk_qty: 1,
+				scheme: "position:data-index",
+				unmounted: 0,
+				err: "none",
+			},
+			"the counters show why no proof applied: positional rows and an unsummable weighed row",
+		);
+		assert.match(result.diagnostic ?? "", /scheme=position:data-index/);
+		assert.match(result.diagnostic ?? "", /unknown_unit_rows=1/);
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+});
+
+test("fetchOrderDetail: a navigation failure leaves a diagnostic line with no surface counters", async () => {
+	const page = makePageStub({
+		content: DETAIL_HTML,
+		throwsNTimes: 99,
+	});
+	const diagnosticLines: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnosticLines.push(line));
+	try {
+		const result = await fetchOrderDetail(page, "HEB1000000001", {
+			waitForHydration: immediateWait,
+		});
+		assert.equal(result.status, "failed");
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	const fields = diagnosticFields(diagnosticLines, "detail_fetch_failed");
+	assert.ok(fields);
+	assert.equal(fields.kind, "navigation_retry_exhausted");
+	assert.equal("rows" in fields, false);
+});
+
 test("processListOrder says nothing about a shortfall when the order's units cannot be summed", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
