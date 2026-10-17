@@ -706,10 +706,15 @@ test("a canceled zero-item order whose own page settles with no rows is empty", 
 	);
 });
 
-test("a canceled zero-item order whose page lists rows with no position stays a gap, not an empty claim", async () => {
-	const captured = readFileSync(join(FIXTURES_DIR, "order-detail.html"), "utf8");
+test("a canceled zero-item order whose rows no identity can key stays a gap, not an empty claim", async () => {
+	// Rows inside a scroll port with no position attribute: the surface cannot
+	// show that the mounted rows are the whole list, with or without a card.
+	const unkeyable = readFileSync(
+		join(FIXTURES_DIR, "order-detail-missing-row-identity.html"),
+		"utf8",
+	);
 	await withOrderPage(
-		(route) => route.fulfill({ body: captured, contentType: "text/html" }),
+		(route) => route.fulfill({ body: unkeyable, contentType: "text/html" }),
 		async (page) => {
 			const { coverage, emitted, protocolMessages } =
 				await processCanceledZeroItemOrder(page);

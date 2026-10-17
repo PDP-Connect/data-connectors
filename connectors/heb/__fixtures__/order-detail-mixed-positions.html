@@ -1,0 +1,34 @@
+<!-- Synthetic adversarial fixture: the first row carries a positional attribute
+     and the second does not, then two more rows append about a second and a
+     half later. A snapshot that mixes the two kinds cannot be keyed one way, and
+     classifying the whole page by its first row would let the positional path
+     accept the first two rows after a short quiet period and miss the append. -->
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+      }
+      li {
+        height: 40px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <ul id="rows" style="list-style: none; margin: 0; padding: 0">
+        <li data-qe-id="itemRow" data-index="0"><a data-qe-id="itemRowDetailsName" href="/product-detail/mixed/1">Mixed 1</a></li>
+        <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/mixed/2">Mixed 2</a></li>
+      </ul>
+    </main>
+    <script>
+      setTimeout(() => {
+        document.querySelector("#rows").insertAdjacentHTML(
+          "beforeend",
+          '<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/mixed/3">Mixed 3</a></li><li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/mixed/4">Mixed 4</a></li>',
+        );
+      }, 1400);
+    </script>
+  </body>
+</html>

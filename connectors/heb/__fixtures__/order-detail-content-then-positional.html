@@ -1,0 +1,26 @@
+<!-- Synthetic adversarial fixture: unpositioned rows in the document flow are
+     replaced, after a moment, by rows that carry data-index. With no card, the
+     rows collected under the first identity scheme are dropped on the change,
+     so a pass that accepted the second list alone would keep only that. -->
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <ul id="rows"></ul>
+    </main>
+    <script>
+      const rows = document.querySelector("#rows");
+      const render = (name, attributes) =>
+        [0, 1]
+          .map(
+            (index) =>
+              `<li data-qe-id="itemRow"${attributes(index)}><a data-qe-id="itemRowDetailsName" href="/product-detail/swap/${name}${index}">Swap ${name}${index}</a><span data-qe-id="orderItemQty">Qty: 1</span></li>`
+          )
+          .join("");
+      rows.innerHTML = render("a", () => "");
+      setTimeout(() => {
+        rows.innerHTML = render("b", (index) => ` data-index="${index}"`);
+      }, 700);
+    </script>
+  </body>
+</html>

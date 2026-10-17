@@ -1,0 +1,23 @@
+<!-- Synthetic adversarial fixture: a virtualizer keeps its two row elements and
+     rebinds them, after a moment, to two other lines of the same product. The
+     elements and the product link never leave the page, so a pass keyed by link
+     or by element presence sees one unchanging list and keeps only the second
+     pair. -->
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <ul>
+        <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/recycle/7">Recycled product</a><span data-qe-id="orderItemQty">Qty: 1</span></li>
+        <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/recycle/7">Recycled product</a><span data-qe-id="orderItemQty">Qty: 2</span></li>
+      </ul>
+    </main>
+    <script>
+      const quantities = document.querySelectorAll('[data-qe-id="orderItemQty"]');
+      setTimeout(() => {
+        quantities[0].textContent = "Qty: 3";
+        quantities[1].textContent = "Qty: 4";
+      }, 900);
+    </script>
+  </body>
+</html>

@@ -113,6 +113,9 @@ export const HEB_REPAIR_RETRY_DELAY_MAX_MS = 2500;
 const DETAIL_SURFACE_TIMEOUT_MS = 30_000;
 const DETAIL_SURFACE_POLL_MS = 250;
 const DETAIL_SURFACE_STABLE_POLLS = 3;
+// With no card count to bound the list, a quiet surface is the only evidence of
+// its end, so it must stay quiet longer (about two seconds) before it counts.
+const DETAIL_SURFACE_CARDLESS_STABLE_POLLS = 8;
 const DETAIL_SURFACE_DEBUG_ENV = "HEB_DETAIL_SURFACE_DEBUG";
 const DETAIL_SURFACE_DEBUG_MIN_ITEM_COUNT = 26;
 const DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT = 2;
@@ -123,7 +126,13 @@ type StaticListEvidence = "declared_count" | "fully_mounted" | null;
 interface DetailSurfaceRow {
 	html: string;
 	key: string;
+	/** Which DOM element this row is, numbered by first sight. A row replaced by
+	 *  a new element, even with the same product link, gets a new number. */
+	mount: number;
 	qtyShape?: string | null;
+	/** The row's visible text, whitespace collapsed. An element that shows other
+	 *  text than it did is a row bound to other data. */
+	text: string;
 	unitCount: number | null;
 }
 
@@ -138,6 +147,34 @@ interface DetailSurfaceState {
 	scrollHeight: number;
 	scrollTop: number;
 	staticListEvidence: StaticListEvidence;
+	/** Whether rows without a positional attribute may be keyed by content with
+	 *  no card: `allowed`, or why not. `unneeded` when the card guides the keys
+	 *  or every row is positional. Diagnostic only. */
+	cardless?: CardlessVerdict;
+}
+
+type CardlessVerdict =
+	| "allowed"
+	| "clipped_or_scroller"
+	| "mixed_positions"
+	| "not_document"
+	| "unneeded";
+
+const CARDLESS_VERDICTS: readonly CardlessVerdict[] = [
+	"allowed",
+	"clipped_or_scroller",
+	"mixed_positions",
+	"not_document",
+	"unneeded",
+];
+
+/** The in-page function names its verdict in the error it throws when it cannot
+ *  key a row, because a throw returns no state to read it from. */
+function cardlessVerdictFromError(
+	message: string | null,
+): CardlessVerdict | undefined {
+	const named = /cardless=(\w+)/.exec(message ?? "")?.[1];
+	return CARDLESS_VERDICTS.find((verdict) => verdict === named);
 }
 
 interface DetailSurfaceDiagnostics {
@@ -152,6 +189,8 @@ interface DetailSurfaceDiagnostics {
 	hrefsEverUnmounted: number;
 	/** The key scheme rows were collected under, e.g. `content:href`. */
 	identityScheme: string | null;
+	/** Why rows could or could not be keyed by content without a card. */
+	cardless: CardlessVerdict | "n/a";
 	lastAction: string | null;
 	lastError: string | null;
 	loading: boolean;
@@ -173,7 +212,8 @@ interface DetailSurfaceDiagnostics {
 type DetailSurfaceErrorKind =
 	| "ambiguous_repeat"
 	| "evaluate_failed"
-	| "no_positional_identity";
+	| "no_positional_identity"
+	| "scheme_changed";
 
 function detailSurfaceErrorKind(
 	lastError: string | null,
@@ -184,6 +224,9 @@ function detailSurfaceErrorKind(
 	}
 	if (ambiguousContentHref !== null) {
 		return "ambiguous_repeat";
+	}
+	if (lastError.includes("identity scheme changed")) {
+		return "scheme_changed";
 	}
 	return lastError.includes("explicit positional identity")
 		? "no_positional_identity"
@@ -280,13 +323,92 @@ function inspectAndAdvanceDetailSurface(input: {
 	// unanchored-remount.html): both of those fixtures are called with NO
 	// expectedItemCount, so this condition is false for them and they keep
 	// throwing exactly as before.
-	const canAttemptVirtualizedContentIdentity =
+	const guidedContentIdentity =
 		expectedItemCount !== null &&
 		staticListEvidence === null &&
 		rowLinks.length > 0 &&
 		rowLinks.length < expectedItemCount;
+	// With no usable card count (none was passed, or it is at or below the
+	// mounted rows, as for a canceled order that declares 0) a document-flow list
+	// that no ancestor clips may still be keyed by content. `collectDetailSurface`
+	// then accepts it only when every row is mounted at once and none was ever
+	// unmounted, which needs no card. A list inside its own scroll port or a
+	// clipped shell can hide rows from this view, so it still fails closed. Every
+	// row's containers are checked, not only the first row's, because a later
+	// section can sit in its own scroller. A row's own box is not a container:
+	// cards clip their own overflow for rounded corners and ellipses.
+	const rootScroller = document.scrollingElement ?? document.documentElement;
+	const seenContainers = new Set<Element>();
+	let clippedOrScrolledApart = false;
+	for (const link of rowLinks) {
+		const itemRow = link.closest("li") ?? link;
+		for (
+			let current: Element | null = itemRow.parentElement;
+			current && !seenContainers.has(current);
+			current = current.parentElement
+		) {
+			seenContainers.add(current);
+			const overflow = getComputedStyle(current).overflowY;
+			if (overflow === "hidden" || overflow === "clip") {
+				clippedOrScrolledApart = true;
+			} else if (
+				(overflow === "auto" || overflow === "scroll") &&
+				current.scrollHeight > current.clientHeight &&
+				current !== rootScroller &&
+				current !== document.documentElement
+			) {
+				clippedOrScrolledApart = true;
+			}
+		}
+	}
+	const scrollsWithDocument = scrollPort === rootScroller;
+	// A page that gives some rows a position and not others is not one list we
+	// can key two ways at once, so mixed pages never take the card-less path.
+	// (No named helper here: this function is serialized into the page, and a
+	// named arrow would pick up the bundler's `__name` wrapper, which the page
+	// does not define.)
+	const positionedRows = rowLinks.filter((link) =>
+		["data-index", "aria-posinset"].some((attribute) =>
+			(link.closest("li") ?? link).getAttribute(attribute)?.trim(),
+		),
+	).length;
+	const cardCannotGuide =
+		expectedItemCount === null || rowLinks.length > expectedItemCount;
+	let cardless: CardlessVerdict = "unneeded";
+	if (
+		staticListEvidence === null &&
+		rowLinks.length > 0 &&
+		cardCannotGuide &&
+		positionedRows < rowLinks.length
+	) {
+		if (positionedRows > 0) {
+			cardless = "mixed_positions";
+		} else if (!scrollsWithDocument) {
+			cardless = "not_document";
+		} else if (clippedOrScrolledApart) {
+			cardless = "clipped_or_scroller";
+		} else {
+			cardless = "allowed";
+		}
+	}
+	const cardlessContentIdentity = cardless === "allowed";
+	const canAttemptVirtualizedContentIdentity =
+		guidedContentIdentity || cardlessContentIdentity;
+	// Element numbers live on the page, so they survive from poll to poll. (No
+	// named helper: this function is serialized into the page.)
+	const mounts = ((
+		window as unknown as {
+			__hebRowMounts?: { ids: WeakMap<Element, number>; next: number };
+		}
+	).__hebRowMounts ??= { ids: new WeakMap(), next: 1 });
 	const rows = rowLinks.map((link, itemIndex) => {
 		const itemRow = link.closest("li") ?? link;
+		let mount = mounts.ids.get(itemRow);
+		if (mount === undefined) {
+			mount = mounts.next;
+			mounts.next += 1;
+			mounts.ids.set(itemRow, mount);
+		}
 		const qtyText =
 			itemRow.querySelector('[data-qe-id="orderItemQty"]')?.textContent ?? "";
 		// H-E-B writes weighed quantities as "Qty: N of M lbs". N is the
@@ -312,7 +434,9 @@ function inspectAndAdvanceDetailSurface(input: {
 				? `content:href=${href}`
 				: null);
 		if (!key) {
-			throw new Error("detail row has no explicit positional identity");
+			throw new Error(
+				`detail row has no explicit positional identity (cardless=${cardless})`,
+			);
 		}
 		const department =
 			itemRow
@@ -329,6 +453,8 @@ function inspectAndAdvanceDetailSurface(input: {
 		return {
 			html: wrappedHtml,
 			key,
+			mount,
+			text: (itemRow.textContent ?? "").replace(/\s+/g, " ").trim(),
 			qtyShape:
 				debugDiagnostics && unitCount === null
 					? /^Qty\s*:/i.test(qtyText.trim())
@@ -415,6 +541,7 @@ function inspectAndAdvanceDetailSurface(input: {
 		scrollHeight,
 		scrollTop,
 		staticListEvidence,
+		cardless,
 	};
 }
 
@@ -460,6 +587,7 @@ function detailSurfaceErrorMessage(
 		`loading=${diagnostics.loading}`,
 		`action=${diagnostics.lastAction ?? "none"}`,
 		`scheme=${diagnostics.identityScheme ?? "none"}`,
+		`cardless=${diagnostics.cardless}`,
 		`mounted_rows=${diagnostics.mountedRows}`,
 		`unmounted_hrefs=${diagnostics.hrefsEverUnmounted}`,
 		`unknown_unit_rows=${diagnostics.unknownUnitRows}`,
@@ -482,6 +610,7 @@ function detailSurfaceFields(diagnostics: DetailSurfaceDiagnostics) {
 		obs: diagnostics.observedUnits ?? "unknown",
 		unk_qty: diagnostics.unknownUnitRows,
 		scheme: diagnostics.identityScheme ?? "none",
+		cardless: diagnostics.cardless,
 		unmounted: diagnostics.hrefsEverUnmounted,
 		at_end: diagnostics.atEnd,
 		loading: diagnostics.loading,
@@ -551,6 +680,62 @@ async function collectDetailSurface(
 	const contentHrefEverUnmounted = new Set<string>();
 	const failedQuantityRows = new Map<string, { row: number; shape: string }>();
 	let ambiguousContentHref: string | null = null;
+	// Which row elements the page has shown, and what each showed. A static list
+	// never loses an element or shows other text in one: a virtualizer that swaps
+	// in new rows, or rebinds the elements it has to other lines, even lines with
+	// the same product link, changes the list while key-by-href sees none of it.
+	let previousMounts = new Map<number, string>();
+	let rowElementEverChanged = false;
+	let unguidedSchemeChange = false;
+	// A scheme change drops what was collected. Whatever the card says, the rows
+	// mounted afterwards are then not shown to be the whole list by sitting still.
+	let destructiveSchemeReset = false;
+
+	/** The completion verdict for the latest snapshot. The poll loop and the final
+	 *  settlement must agree, so both read it here. Content keys minted with no
+	 *  usable card (see the cardless branch of inspectAndAdvanceDetailSurface) are
+	 *  accepted on the structural proof alone, after a longer quiet period; a
+	 *  missing or too-small card is not evidence either way. */
+	const assessCompletion = (): {
+		accepted: boolean;
+		fullyCollectedStaticList: boolean;
+		observedUnits: number | null;
+	} => {
+		const observedUnits = knownUnitTotal(collectedUnits.values());
+		const contentKeysWithoutCard =
+			collectedScheme === "content:href" &&
+			(expectedUnits === null || expectedUnits <= latest.rowCount);
+		const quiet =
+			latest.atEnd &&
+			!latest.loading &&
+			!latest.actionableControl &&
+			stablePolls >=
+				(contentKeysWithoutCard
+					? DETAIL_SURFACE_CARDLESS_STABLE_POLLS
+					: DETAIL_SURFACE_STABLE_POLLS);
+		const fullyCollectedStaticList =
+			quiet &&
+			collectedScheme === "content:href" &&
+			contentHrefEverUnmounted.size === 0 &&
+			collected.size === latest.rowCount &&
+			!destructiveSchemeReset &&
+			!(contentKeysWithoutCard && rowElementEverChanged);
+		const declaredCountRowsCollected =
+			expectedUnits !== null &&
+			latest.staticListEvidence === "declared_count" &&
+			collected.size >= expectedUnits;
+		return {
+			accepted:
+				quiet &&
+				(fullyCollectedStaticList ||
+					(!contentKeysWithoutCard &&
+						(expectedUnits === null ||
+							(observedUnits !== null && observedUnits >= expectedUnits) ||
+							declaredCountRowsCollected))),
+			fullyCollectedStaticList,
+			observedUnits,
+		};
+	};
 
 	while (Date.now() - startedAt < timeoutMs) {
 		try {
@@ -573,6 +758,21 @@ async function collectDetailSurface(
 		// scheme are comparable, so a scheme change restarts collection.
 		const scheme = identitySchemeOf(latest.rows);
 		if (scheme !== null && scheme !== collectedScheme) {
+			// A card at least as large as the mounted rows still has to be met by
+			// what remains after the clear. Without one nothing would notice that
+			// the rows collected so far were dropped, in either direction, so the
+			// change ends collection.
+			if (
+				collectedScheme !== null &&
+				!(expectedUnits !== null && expectedUnits >= latest.rowCount)
+			) {
+				unguidedSchemeChange = true;
+				lastError ??=
+					"detail identity scheme changed during traversal with no card to cover it";
+			}
+			if (collectedScheme !== null) {
+				destructiveSchemeReset = true;
+			}
 			collected.clear();
 			collectedUnits.clear();
 			contentHrefMountedLastSnapshot.clear();
@@ -611,6 +811,13 @@ async function collectDetailSurface(
 				}
 			}
 		}
+		const mountsNow = new Map(latest.rows.map((row) => [row.mount, row.text]));
+		for (const [mount, text] of previousMounts) {
+			if (mountsNow.get(mount) !== text) {
+				rowElementEverChanged = true;
+			}
+		}
+		previousMounts = mountsNow;
 		for (const href of contentHrefMountedLastSnapshot) {
 			if (!mountedContentHrefs.has(href)) {
 				contentHrefEverUnmounted.add(href);
@@ -692,6 +899,9 @@ async function collectDetailSurface(
 				qty_failures: qtyFailures,
 			});
 		}
+		if (unguidedSchemeChange) {
+			break;
+		}
 		if (ambiguousContentHref) {
 			// A repeated product whose two mounted appearances were never
 			// co-mounted cannot be proven complete under content identity — see
@@ -700,57 +910,16 @@ async function collectDetailSurface(
 			// is reported as an error (not a silent hydrate) below.
 			break;
 		}
-		const fullyCollectedStaticList =
-			latest.atEnd &&
-			!latest.loading &&
-			!latest.actionableControl &&
-			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			collectedScheme === "content:href" &&
-			contentHrefEverUnmounted.size === 0 &&
-			collected.size === latest.rowCount;
-		const declaredCountRowsCollected =
-			expectedUnits !== null &&
-			latest.staticListEvidence === "declared_count" &&
-			collected.size >= expectedUnits;
-		if (
-			latest.atEnd &&
-			!latest.loading &&
-			!latest.actionableControl &&
-			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			(expectedUnits === null ||
-				(observedUnits !== null && observedUnits >= expectedUnits) ||
-				declaredCountRowsCollected ||
-				fullyCollectedStaticList)
-		) {
+		if (assessCompletion().accepted) {
 			break;
 		}
 		await page.waitForTimeout(DETAIL_SURFACE_POLL_MS);
 	}
 
 	const timedOut = Date.now() - startedAt >= timeoutMs;
-	const observedUnits = knownUnitTotal(collectedUnits.values());
-	const fullyCollectedStaticList =
-		latest.atEnd &&
-		!latest.loading &&
-		!latest.actionableControl &&
-		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		collectedScheme === "content:href" &&
-		contentHrefEverUnmounted.size === 0 &&
-		collected.size === latest.rowCount;
-	const declaredCountRowsCollected =
-		expectedUnits !== null &&
-		latest.staticListEvidence === "declared_count" &&
-		collected.size >= expectedUnits;
-	const complete =
-		!lastError &&
-		latest.atEnd &&
-		!latest.loading &&
-		!latest.actionableControl &&
-		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		(expectedUnits === null ||
-			(observedUnits !== null && observedUnits >= expectedUnits) ||
-			declaredCountRowsCollected ||
-			fullyCollectedStaticList);
+	const { accepted, fullyCollectedStaticList, observedUnits } =
+		assessCompletion();
+	const complete = !lastError && accepted;
 	let settlement: DetailSurfaceSettlement = "incomplete";
 	if (lastError) {
 		settlement = "error";
@@ -768,6 +937,9 @@ async function collectDetailSurface(
 		expectedUnits,
 		hrefsEverUnmounted: contentHrefEverUnmounted.size,
 		identityScheme: collectedScheme,
+		// A snapshot that threw leaves `latest` at the previous one, so the verdict
+		// the error names for the current page wins over the stale state.
+		cardless: cardlessVerdictFromError(lastError) ?? latest.cardless ?? "n/a",
 		lastAction,
 		lastError,
 		loading: latest.loading,
