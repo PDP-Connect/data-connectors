@@ -2,6 +2,8 @@
 
 Record a connector run, then replay the captured scenario against the connector subprocess. The verifier compares records, cursor state, and captured completeness messages. It does not start the reference implementation or require a pdpp checkout.
 
+See the [scenario consumer contract](docs/scenario-consumer-contract.md) for the `pdpp.connector-scenario/1` format and versioned CLI contract.
+
 Run commands from this package directory with Node 24:
 
 ```sh
