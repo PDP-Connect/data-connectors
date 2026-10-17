@@ -664,16 +664,29 @@ describe("C-T3 named packaging refusals and the Gmail repair", () => {
 		assert.equal(deferred.hostProvided[0].package, "patchright");
 	});
 
+	it("slack builds and verifies with slackdump declared as a host-provisioned tool", () => {
+		const artifact = join(workspace, "slack");
+		const built = build(["--connector", "slack", "--out", artifact]);
+		assert.equal(built.status, 0, `${built.stdout}\n${built.stderr}`);
+		const verified = verify(artifact);
+		assert.equal(verified.status, 0, `${verified.stdout}\n${verified.stderr}`);
+		// The host can only tell that slackdump is missing if the published
+		// profile still carries the detect recipe.
+		const profile = JSON.parse(readFileSync(join(artifact, "collection-profile.json"), "utf8"));
+		const [slackdump] = profile.runtime_requirements.external_tools;
+		assert.equal(slackdump.name, "slackdump");
+		assert.equal(slackdump.detect.executable_env_override, "SLACKDUMP_BIN");
+	});
+
 	for (const [connector, binary] of [
-		["slack", "SLACKDUMP_BIN"],
 		["signal", "SIGTOP_BIN"],
 		["google_messages", "GMCLI_BIN"],
 	]) {
 		it(`${connector} refuses its unbundled native helper ${binary}`, () => {
 			const result = build(["--connector", connector, "--out", join(workspace, connector)]);
 			assert.notEqual(result.status, 0);
-			assert.ok(result.stderr.includes(`resolves an executable from PATH or $${binary}`), result.stderr);
-			assert.match(result.stderr, /per-platform tool layer must land first/);
+			assert.ok(result.stderr.includes(`resolves $${binary}`), result.stderr);
+			assert.match(result.stderr, /runtime_requirements\.external_tools.*detect\.executable_env_override/);
 		});
 	}
 });
