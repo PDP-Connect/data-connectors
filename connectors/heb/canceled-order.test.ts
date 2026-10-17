@@ -411,3 +411,148 @@ test("collect hydrates a canceled card with a positive item count", async () => 
 	);
 	assert.ok(visited.some((url) => url.includes("/my-account/order-history/")));
 });
+
+for (const scenario of [
+	{
+		name: "matching canceled gap",
+		orderId: "HEB1029384600",
+		unreadable: false,
+		nutrition: false,
+		probe: "empty",
+	},
+	{
+		name: "unlisted pending gap",
+		orderId: "HEB9999999999",
+		unreadable: false,
+		nutrition: false,
+		probe: "empty",
+	},
+	{
+		name: "matching gap plus unreadable gap",
+		orderId: "HEB1029384600",
+		unreadable: true,
+		nutrition: false,
+		probe: "empty",
+	},
+	{
+		name: "matching canceled gap with nutrition",
+		orderId: "HEB1029384600",
+		unreadable: false,
+		nutrition: true,
+		probe: "empty",
+	},
+	{
+		name: "unseen gap on probe",
+		orderId: "HEB1029384600",
+		unreadable: false,
+		nutrition: false,
+		probe: "unseen",
+	},
+	{
+		name: "rejected gap probe",
+		orderId: "HEB1029384600",
+		unreadable: false,
+		nutrition: false,
+		probe: "reject",
+	},
+]) {
+	test(`collect reconciles pending gaps from canceled zero-item evidence: ${scenario.name}`, async () => {
+		const detailGaps: BrowserCollectContext["detailGaps"][number][] = [
+			{
+				gap_id: "gap_canceled",
+				record_key: scenario.orderId,
+				reference_only: true,
+				status: "pending",
+				stream: "order_items",
+				detail_locator: {
+					kind: "heb.order_detail",
+					order_id: scenario.orderId,
+					order_date: "2026-05-20",
+				},
+			},
+		];
+		if (scenario.unreadable) {
+			detailGaps.push({
+				gap_id: "gap_unreadable",
+				record_key: "unknown",
+				reference_only: true,
+				status: "pending",
+				stream: "order_items",
+			});
+		}
+		let probeCalls = 0;
+		const ctx = makeContext(
+			["orders", "order_items", ...(scenario.nutrition ? ["nutrition"] : [])],
+			makePageStub(
+				onePageCanceledOrdersList(),
+				[],
+				"<html><body><main>no items here</main></body></html>",
+			),
+			{
+				detailGaps,
+				requestDetailGapPage: async () => {
+					probeCalls += 1;
+					if (scenario.probe === "reject") throw new Error("probe unavailable");
+					return scenario.probe === "unseen"
+						? [
+								{
+									gap_id: "gap_unseen",
+									record_key: "unseen",
+									status: "pending",
+									stream: "order_items",
+								},
+							]
+						: [];
+				},
+			},
+		);
+		await hebConnector.collect(ctx);
+		assert.equal(probeCalls, 1);
+		const recovered = ctx.protocolMessages.filter(
+			(message) => message.type === "DETAIL_GAP_RECOVERED",
+		);
+		assert.deepEqual(
+			recovered,
+			scenario.orderId === "HEB1029384600"
+				? [
+						{
+							type: "DETAIL_GAP_RECOVERED",
+							reference_only: true,
+							gap_id: "gap_canceled",
+							stream: "order_items",
+							record_key: scenario.orderId,
+						},
+					]
+				: [],
+		);
+		assert.equal(
+			ctx.reportedStreamFailures.some(
+				(message) => message.stream === "order_items",
+			),
+			scenario.unreadable ||
+				scenario.orderId !== "HEB1029384600" ||
+				scenario.probe !== "empty",
+		);
+		assert.equal(
+			ctx.emitted.filter((record) => record.stream === "order_items").length,
+			0,
+		);
+		assert.ok(
+			ctx.protocolMessages.some(
+				(message) =>
+					message.type === "DETAIL_COVERAGE" &&
+					message.stream === "order_items" &&
+					message.hydrated_keys?.includes("HEB1029384600"),
+			),
+		);
+		if (scenario.nutrition) {
+			assert.deepEqual(ctx.reportedStreamFailures, []);
+			assert.ok(
+				ctx.protocolMessages.some(
+					(message) =>
+						message.type === "STATE" && message.stream === "nutrition",
+				),
+			);
+		}
+	});
+}

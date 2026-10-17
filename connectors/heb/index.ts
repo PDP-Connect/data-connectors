@@ -1521,7 +1521,10 @@ export interface RunFlags {
 	sessionRepairRequired: boolean;
 }
 
+type PendingGapRef = { gapId: string; recordKey: string | number };
+
 export interface EmitDeps extends HydrationDeps {
+	pendingGapsByOrderId?: Map<string, PendingGapRef>;
 	capture?: BrowserCollectContext["capture"];
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 	emit: BrowserCollectContext["emit"];
@@ -1716,6 +1719,7 @@ function readRecoverableHebOrderDetailGap(
 }
 
 export interface HebDetailRecoveryDeps extends HydrationDeps {
+	pendingGapsByOrderId?: Map<string, PendingGapRef>;
 	capture?: BrowserCollectContext["capture"];
 	detailGaps: readonly BrowserCollectContext["detailGaps"][number][];
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
@@ -1767,6 +1771,10 @@ async function recoverPendingOrderItemDetailGapPage(
 						locator.orderDate,
 					),
 				);
+				deps.pendingGapsByOrderId?.set(locator.orderId, {
+					gapId: locator.gapId,
+					recordKey: locator.recordKey,
+				});
 				reDeferred += 1;
 				continue;
 			}
@@ -1809,6 +1817,10 @@ async function recoverPendingOrderItemDetailGapPage(
 				{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
 			),
 		);
+		deps.pendingGapsByOrderId?.set(locator.orderId, {
+			gapId: locator.gapId,
+			recordKey: locator.recordKey,
+		});
 		reDeferred += 1;
 	}
 	return { recovered, reDeferred, skipped };
@@ -1818,8 +1830,13 @@ export async function recoverPendingOrderItemDetailGaps(
 	page: Page,
 	deps: HebDetailRecoveryDeps,
 	flags: RunFlags,
-): Promise<{ recovered: number; stoppedWithPending: boolean }> {
+): Promise<{
+	recovered: number;
+	stoppedWithPending: boolean;
+	unreconciledPending: boolean;
+}> {
 	let recovered = 0;
+	let unreconciledPending = false;
 	let gaps = deps.detailGaps;
 	while (gaps.length > 0) {
 		const result = await recoverPendingOrderItemDetailGapPage(
@@ -1829,18 +1846,30 @@ export async function recoverPendingOrderItemDetailGaps(
 			gaps,
 		);
 		recovered += result.recovered;
+		unreconciledPending ||= result.skipped > 0;
 		if (!deps.requestDetailGapPage) {
 			return {
 				recovered,
 				stoppedWithPending: result.reDeferred + result.skipped > 0,
+				unreconciledPending,
 			};
 		}
 		if (result.recovered === 0 && result.reDeferred + result.skipped > 0) {
-			return { recovered, stoppedWithPending: true };
+			// A single lease-only probe distinguishes exhaustion from unseen gaps
+			// without spending attempts or retrying this no-progress page.
+			try {
+				const unseen = await deps.requestDetailGapPage({
+					streams: ["order_items"],
+				});
+				unreconciledPending ||= unseen.length > 0;
+			} catch {
+				unreconciledPending = true;
+			}
+			return { recovered, stoppedWithPending: true, unreconciledPending };
 		}
 		gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
 	}
-	return { recovered, stoppedWithPending: false };
+	return { recovered, stoppedWithPending: false, unreconciledPending };
 }
 
 export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -1855,6 +1884,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 ): Promise<{
 	recovered: number;
 	stoppedWithPending: boolean;
+	unreconciledPending: boolean;
 	suppressForward: boolean;
 }> {
 	if (!options.wantsItems) {
@@ -1879,6 +1909,7 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 		return {
 			recovered: 0,
 			stoppedWithPending: pendingItemGaps > 0,
+			unreconciledPending: pendingItemGaps > 0,
 			suppressForward,
 		};
 	}
@@ -2058,6 +2089,17 @@ async function fetchDetailAndRecordCoverage(
 	if (isCanceledOrder(listOrder) && listOrder.itemCount === 0) {
 		if (deps.orderItemsCoverage) {
 			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "empty");
+		}
+		const ref = deps.pendingGapsByOrderId?.get(listOrder.orderId);
+		if (ref) {
+			await deps.emit({
+				type: "DETAIL_GAP_RECOVERED",
+				reference_only: true,
+				gap_id: ref.gapId,
+				stream: "order_items",
+				record_key: ref.recordKey,
+			});
+			deps.pendingGapsByOrderId?.delete(listOrder.orderId);
 		}
 		connectorDiagnostic("heb", "canceled_order_skipped", { card_units: 0 });
 		return null;
@@ -3041,7 +3083,9 @@ export const hebConnector: BrowserConnectorConfig = {
 			manualRepairAttempted: false,
 			sessionRepairRequired: false,
 		};
+		const pendingGapsByOrderId = new Map<string, PendingGapRef>();
 		const deps: EmitDeps = {
+			pendingGapsByOrderId,
 			...(capture ? { capture } : {}),
 			emit: async (message) => {
 				// List-walk helpers describe an unproven enumeration with a raw
@@ -3087,6 +3131,7 @@ export const hebConnector: BrowserConnectorConfig = {
 			{
 				...(capture ? { capture } : {}),
 				detailGaps: ctx.detailGaps,
+				pendingGapsByOrderId,
 				reportStreamFailure,
 				emit,
 				emitRecord,
@@ -3143,6 +3188,9 @@ export const hebConnector: BrowserConnectorConfig = {
 			return;
 		}
 		const { newestOrderDate, stoppedAtBoundary, truncated } = scan;
+		const gapsStillPending =
+			gapRecovery.stoppedWithPending &&
+			(gapRecovery.unreconciledPending || pendingGapsByOrderId.size > 0);
 
 		if (wantsOrders && !truncated) {
 			// A truncated scan emits no finishing `orders` STATE: it failed the
@@ -3159,7 +3207,7 @@ export const hebConnector: BrowserConnectorConfig = {
 
 		if (orderItemsCoverage && wantsItems) {
 			await emitOrderItemsCoverage(deps, orderItemsCoverage);
-			if (orderItemsCoverage.gap.length > 0 || gapRecovery.stoppedWithPending) {
+			if (orderItemsCoverage.gap.length > 0 || gapsStillPending) {
 				await reportStreamFailure?.(
 					"order_items",
 					"H-E-B order detail enumeration has unresolved gaps.",
@@ -3205,9 +3253,7 @@ export const hebConnector: BrowserConnectorConfig = {
 				orderItemsRequested: collectItemEvidence,
 				ordersRequested: true,
 				ordersTruncated: truncated,
-				unrecoveredPriorOrderItemGapCount: gapRecovery.stoppedWithPending
-					? 1
-					: 0,
+				unrecoveredPriorOrderItemGapCount: gapsStillPending ? 1 : 0,
 			};
 			const coverageBlockCause = nutritionCoverageBlockCause(coverageGate);
 			if (coverageBlockCause) {
@@ -3225,8 +3271,7 @@ export const hebConnector: BrowserConnectorConfig = {
 						order_item_evidence_collected_internally:
 							wantsNutrition && !wantsItems,
 						orders_truncated: truncated,
-						unrecovered_prior_order_item_gap_count:
-							gapRecovery.stoppedWithPending ? 1 : 0,
+						unrecovered_prior_order_item_gap_count: gapsStillPending ? 1 : 0,
 					},
 				);
 			} else {
