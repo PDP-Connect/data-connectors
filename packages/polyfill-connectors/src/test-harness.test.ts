@@ -21,10 +21,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { assertUserFacingProgress } from "./connector-diagnostic.ts";
 import { packageRoot as PACKAGE_ROOT } from "./connector-paths.ts";
-import type { EmittedMessage, ValidateRecord } from "./connector-runtime.ts";
+import {
+	type EmittedMessage,
+	politeDelay,
+	type ValidateRecord,
+} from "./connector-runtime.ts";
 import {
 	makeRecordingEmit,
 	runConnectorProtocolSubprocess,
+	skipPoliteDelays,
 } from "./test-harness.ts";
 
 const fixturePath = (name: string): string =>
@@ -378,4 +383,55 @@ test("runConnectorProtocolSubprocess: stream failure evidence forces failed DONE
 	assert.equal(done.status, "failed");
 	assert.equal(done.error?.code, "stream_collection_failed");
 	assert.equal(done.error?.retryable, true);
+});
+
+// ─── skipPoliteDelays ────────────────────────────────────────────────────
+
+/** Run `body` while recording the delay every `setTimeout` call hands to the
+ *  timer underneath whatever `body` installs on top of it. */
+async function recordTimerDelays(
+	body: () => Promise<void>,
+): Promise<(number | undefined)[]> {
+	const seen: (number | undefined)[] = [];
+	const original = globalThis.setTimeout;
+	globalThis.setTimeout = ((
+		handler: () => void,
+		delay?: number,
+		...args: unknown[]
+	) => {
+		seen.push(delay);
+		return original(handler, delay, ...args);
+	}) as unknown as typeof setTimeout;
+	try {
+		await body();
+	} finally {
+		globalThis.setTimeout = original;
+	}
+	return seen;
+}
+
+test("skipPoliteDelays: a politeDelay pause fires on the next tick and other timers keep their delay", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const restore = skipPoliteDelays();
+		try {
+			clearTimeout(setTimeout(() => undefined, 12_345));
+			await politeDelay(9_999);
+		} finally {
+			restore();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[12_345, 0],
+		"the watchdog-style timer keeps 12345 ms; only the pause armed inside politeDelay becomes 0 ms",
+	);
+});
+
+test("skipPoliteDelays: the restore function puts the previous timer back", () => {
+	const before = globalThis.setTimeout;
+	const restore = skipPoliteDelays();
+	assert.notEqual(globalThis.setTimeout, before);
+	restore();
+	assert.equal(globalThis.setTimeout, before);
 });

@@ -11,12 +11,13 @@
 
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { BrowserContext, Page } from "playwright";
 import {
 	assertUserFacingProgress,
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
+import { skipPoliteDelays } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	driveExport,
 	type EmitDeps,
@@ -24,6 +25,10 @@ import {
 	runSingleLadderAttempt,
 	tryExportLadder,
 } from "./index.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 type FieldName = "start" | "end";
 
