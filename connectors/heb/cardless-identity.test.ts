@@ -167,26 +167,81 @@ test("fetchOrderDetail: a page that turns mixed after a good snapshot is reporte
 	);
 });
 
-test("fetchOrderDetail: a list swapped from positional to unpositioned rows is refused after the quiet period", async () => {
-	await withDetailPage(
-		fixture("order-detail-positional-then-unpositioned.html"),
-		async (page) => {
+// With no card, an identity scheme change drops what was collected under the
+// first scheme and nothing would notice, so the change itself ends collection.
+for (const [name, fixtureName] of [
+	["positional to unpositioned", "order-detail-positional-then-unpositioned.html"],
+	["unpositioned to positional", "order-detail-content-then-positional.html"],
+] as const) {
+	test(`fetchOrderDetail: a list swapped from ${name} rows is refused when the scheme changes`, async () => {
+		await withDetailPage(fixture(fixtureName), async (page) => {
 			const { fields, result } = await fetchWithDiagnostics(page, {
 				detailSurfaceTimeoutMs: 6_000,
 				waitForHydration: immediateWait,
 			});
 			assert.equal(result.status, "failed");
-			// The second list was keyed by content, sat at its end, and stayed quiet
-			// for the whole card-less window. Only the memory of the positional
-			// rows kept it from being accepted alone.
-			assert.equal(fields?.scheme, "content:href");
-			assert.equal(fields?.cardless, "allowed");
-			assert.equal(fields?.at_end, true);
+			assert.equal(fields?.err, "scheme_changed");
+			assert.equal(fields?.rows, 2, "only the second list is left to see");
 			assert.ok(
-				Number(fields?.stable) >= 8,
-				`stable=${String(fields?.stable)}`,
+				Number(fields?.ms) < 4_000,
+				`it fails at the change, not at the deadline: ms=${String(fields?.ms)}`,
 			);
-			assert.equal(fields?.rows, 2);
+		});
+	});
+}
+
+test("fetchOrderDetail: a card that covers the mounted rows still lets a scheme change settle", async () => {
+	await withDetailPage(
+		fixture("order-detail-positional-then-unpositioned.html"),
+		async (page) => {
+			const result = await fetchOrderDetail(page, "HEB1000000001", {
+				detailSurfaceTimeoutMs: 6_000,
+				expectedItemCount: 2,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(
+				result.status,
+				"hydrated",
+				"the card's count is met by the rows that remain",
+			);
+		},
+	);
+});
+
+test("fetchOrderDetail: lines of one product replaced by other lines of it are not accepted without a card", async () => {
+	await withDetailPage(
+		fixture("order-detail-same-href-replaced.html"),
+		async (page) => {
+			const { fields, result } = await fetchWithDiagnostics(page, {
+				detailSurfaceTimeoutMs: 5_000,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(
+				result.status,
+				"failed",
+				"the product link never left the page, but the first two lines did",
+			);
+			assert.equal(fields?.scheme, "content:href");
+			assert.equal(fields?.settle, "timeout");
+		},
+	);
+});
+
+test("fetchOrderDetail: two lines of one product that stay mounted are both kept without a card", async () => {
+	await withDetailPage(
+		fixture("order-detail-same-href-static.html"),
+		async (page) => {
+			const result = await fetchOrderDetail(page, "HEB1000000001", {
+				detailSurfaceTimeoutMs: 5_000,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(result.status, "hydrated");
+			assert.deepEqual(
+				result.status === "hydrated"
+					? result.detail.items.map((item) => item.quantity)
+					: [],
+				[1, 2],
+			);
 		},
 	);
 });

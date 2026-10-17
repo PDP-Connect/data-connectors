@@ -126,6 +126,9 @@ type StaticListEvidence = "declared_count" | "fully_mounted" | null;
 interface DetailSurfaceRow {
 	html: string;
 	key: string;
+	/** Which DOM element this row is, numbered by first sight. A row replaced by
+	 *  a new element, even with the same product link, gets a new number. */
+	mount: number;
 	qtyShape?: string | null;
 	unitCount: number | null;
 }
@@ -206,7 +209,8 @@ interface DetailSurfaceDiagnostics {
 type DetailSurfaceErrorKind =
 	| "ambiguous_repeat"
 	| "evaluate_failed"
-	| "no_positional_identity";
+	| "no_positional_identity"
+	| "scheme_changed";
 
 function detailSurfaceErrorKind(
 	lastError: string | null,
@@ -217,6 +221,9 @@ function detailSurfaceErrorKind(
 	}
 	if (ambiguousContentHref !== null) {
 		return "ambiguous_repeat";
+	}
+	if (lastError.includes("identity scheme changed")) {
+		return "scheme_changed";
 	}
 	return lastError.includes("explicit positional identity")
 		? "no_positional_identity"
@@ -384,8 +391,21 @@ function inspectAndAdvanceDetailSurface(input: {
 	const cardlessContentIdentity = cardless === "allowed";
 	const canAttemptVirtualizedContentIdentity =
 		guidedContentIdentity || cardlessContentIdentity;
+	// Element numbers live on the page, so they survive from poll to poll. (No
+	// named helper: this function is serialized into the page.)
+	const mounts = ((
+		window as unknown as {
+			__hebRowMounts?: { ids: WeakMap<Element, number>; next: number };
+		}
+	).__hebRowMounts ??= { ids: new WeakMap(), next: 1 });
 	const rows = rowLinks.map((link, itemIndex) => {
 		const itemRow = link.closest("li") ?? link;
+		let mount = mounts.ids.get(itemRow);
+		if (mount === undefined) {
+			mount = mounts.next;
+			mounts.next += 1;
+			mounts.ids.set(itemRow, mount);
+		}
 		const qtyText =
 			itemRow.querySelector('[data-qe-id="orderItemQty"]')?.textContent ?? "";
 		// H-E-B writes weighed quantities as "Qty: N of M lbs". N is the
@@ -430,6 +450,7 @@ function inspectAndAdvanceDetailSurface(input: {
 		return {
 			html: wrappedHtml,
 			key,
+			mount,
 			qtyShape:
 				debugDiagnostics && unitCount === null
 					? /^Qty\s*:/i.test(qtyText.trim())
@@ -655,10 +676,12 @@ async function collectDetailSurface(
 	const contentHrefEverUnmounted = new Set<string>();
 	const failedQuantityRows = new Map<string, { row: number; shape: string }>();
 	let ambiguousContentHref: string | null = null;
-	// A surface that ever showed positional rows and later fell back to content
-	// keys may have swapped its list. The scheme change clears what was
-	// collected, so this flag keeps a card-less pass from accepting the rest.
-	let sawPositionalScheme = false;
+	// Which row elements the page has shown. A static list never loses one: a
+	// virtualizer that swaps in new rows, even rows with the same product link as
+	// the ones they replace, removes elements, and key-by-href would not see it.
+	let previousMounts = new Set<number>();
+	let rowElementEverRemoved = false;
+	let unguidedSchemeChange = false;
 
 	/** The completion verdict for the latest snapshot. The poll loop and the final
 	 *  settlement must agree, so both read it here. Content keys minted with no
@@ -687,7 +710,7 @@ async function collectDetailSurface(
 			collectedScheme === "content:href" &&
 			contentHrefEverUnmounted.size === 0 &&
 			collected.size === latest.rowCount &&
-			!(contentKeysWithoutCard && sawPositionalScheme);
+			!(contentKeysWithoutCard && rowElementEverRemoved);
 		const declaredCountRowsCollected =
 			expectedUnits !== null &&
 			latest.staticListEvidence === "declared_count" &&
@@ -725,10 +748,19 @@ async function collectDetailSurface(
 		// than the truth. Only rows sharing the latest snapshot's
 		// scheme are comparable, so a scheme change restarts collection.
 		const scheme = identitySchemeOf(latest.rows);
-		if (scheme?.startsWith("position:")) {
-			sawPositionalScheme = true;
-		}
 		if (scheme !== null && scheme !== collectedScheme) {
+			// A card at least as large as the mounted rows still has to be met by
+			// what remains after the clear. Without one nothing would notice that
+			// the rows collected so far were dropped, in either direction, so the
+			// change ends collection.
+			if (
+				collectedScheme !== null &&
+				!(expectedUnits !== null && expectedUnits >= latest.rowCount)
+			) {
+				unguidedSchemeChange = true;
+				lastError ??=
+					"detail identity scheme changed during traversal with no card to cover it";
+			}
 			collected.clear();
 			collectedUnits.clear();
 			contentHrefMountedLastSnapshot.clear();
@@ -767,6 +799,13 @@ async function collectDetailSurface(
 				}
 			}
 		}
+		const mountsNow = new Set(latest.rows.map((row) => row.mount));
+		for (const mount of previousMounts) {
+			if (!mountsNow.has(mount)) {
+				rowElementEverRemoved = true;
+			}
+		}
+		previousMounts = mountsNow;
 		for (const href of contentHrefMountedLastSnapshot) {
 			if (!mountedContentHrefs.has(href)) {
 				contentHrefEverUnmounted.add(href);
@@ -847,6 +886,9 @@ async function collectDetailSurface(
 				stable_polls: stablePolls,
 				qty_failures: qtyFailures,
 			});
+		}
+		if (unguidedSchemeChange) {
+			break;
 		}
 		if (ambiguousContentHref) {
 			// A repeated product whose two mounted appearances were never

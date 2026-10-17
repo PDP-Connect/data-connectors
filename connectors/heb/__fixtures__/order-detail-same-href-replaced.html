@@ -1,0 +1,26 @@
+<!-- Synthetic adversarial fixture: two purchased lines of one product are
+     replaced, after the page has been quiet for a moment, by two other lines of
+     the same product. The product link never leaves the page, so a pass keyed by
+     link alone sees one unchanging list and keeps only the second pair. -->
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <ul id="rows"></ul>
+    </main>
+    <script>
+      const rows = document.querySelector("#rows");
+      const render = (quantities) =>
+        quantities
+          .map(
+            (quantity) =>
+              `<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/repeat/9">Repeated product</a><span data-qe-id="orderItemQty">Qty: ${quantity}</span></li>`
+          )
+          .join("");
+      rows.innerHTML = render([1, 2]);
+      setTimeout(() => {
+        rows.innerHTML = render([3, 4]);
+      }, 900);
+    </script>
+  </body>
+</html>
