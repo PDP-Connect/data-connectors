@@ -227,6 +227,42 @@ test("fetchOrderDetail: lines of one product replaced by other lines of it are n
 	);
 });
 
+test("fetchOrderDetail: row elements rebound to other lines of one product are not accepted without a card", async () => {
+	await withDetailPage(
+		fixture("order-detail-in-place-recycled.html"),
+		async (page) => {
+			const { fields, result } = await fetchWithDiagnostics(page, {
+				detailSurfaceTimeoutMs: 5_000,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(
+				result.status,
+				"failed",
+				"the elements and the product link stayed, but the lines they show changed",
+			);
+			assert.equal(fields?.settle, "timeout");
+		},
+	);
+});
+
+test("fetchOrderDetail: a scheme change under a card larger than the mounted rows is not settled by sitting still", async () => {
+	await withDetailPage(
+		fixture("order-detail-positional-then-unpositioned.html"),
+		async (page) => {
+			const result = await fetchOrderDetail(page, "HEB1000000001", {
+				detailSurfaceTimeoutMs: 4_000,
+				expectedItemCount: 10,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(
+				result.status,
+				"failed",
+				"the card says 10, the rows collected before the change were dropped, and 2 are mounted",
+			);
+		},
+	);
+});
+
 test("fetchOrderDetail: two lines of one product that stay mounted are both kept without a card", async () => {
 	await withDetailPage(
 		fixture("order-detail-same-href-static.html"),

@@ -130,6 +130,9 @@ interface DetailSurfaceRow {
 	 *  a new element, even with the same product link, gets a new number. */
 	mount: number;
 	qtyShape?: string | null;
+	/** The row's visible text, whitespace collapsed. An element that shows other
+	 *  text than it did is a row bound to other data. */
+	text: string;
 	unitCount: number | null;
 }
 
@@ -451,6 +454,7 @@ function inspectAndAdvanceDetailSurface(input: {
 			html: wrappedHtml,
 			key,
 			mount,
+			text: (itemRow.textContent ?? "").replace(/\s+/g, " ").trim(),
 			qtyShape:
 				debugDiagnostics && unitCount === null
 					? /^Qty\s*:/i.test(qtyText.trim())
@@ -676,12 +680,16 @@ async function collectDetailSurface(
 	const contentHrefEverUnmounted = new Set<string>();
 	const failedQuantityRows = new Map<string, { row: number; shape: string }>();
 	let ambiguousContentHref: string | null = null;
-	// Which row elements the page has shown. A static list never loses one: a
-	// virtualizer that swaps in new rows, even rows with the same product link as
-	// the ones they replace, removes elements, and key-by-href would not see it.
-	let previousMounts = new Set<number>();
-	let rowElementEverRemoved = false;
+	// Which row elements the page has shown, and what each showed. A static list
+	// never loses an element or shows other text in one: a virtualizer that swaps
+	// in new rows, or rebinds the elements it has to other lines, even lines with
+	// the same product link, changes the list while key-by-href sees none of it.
+	let previousMounts = new Map<number, string>();
+	let rowElementEverChanged = false;
 	let unguidedSchemeChange = false;
+	// A scheme change drops what was collected. Whatever the card says, the rows
+	// mounted afterwards are then not shown to be the whole list by sitting still.
+	let destructiveSchemeReset = false;
 
 	/** The completion verdict for the latest snapshot. The poll loop and the final
 	 *  settlement must agree, so both read it here. Content keys minted with no
@@ -710,7 +718,8 @@ async function collectDetailSurface(
 			collectedScheme === "content:href" &&
 			contentHrefEverUnmounted.size === 0 &&
 			collected.size === latest.rowCount &&
-			!(contentKeysWithoutCard && rowElementEverRemoved);
+			!destructiveSchemeReset &&
+			!(contentKeysWithoutCard && rowElementEverChanged);
 		const declaredCountRowsCollected =
 			expectedUnits !== null &&
 			latest.staticListEvidence === "declared_count" &&
@@ -761,6 +770,9 @@ async function collectDetailSurface(
 				lastError ??=
 					"detail identity scheme changed during traversal with no card to cover it";
 			}
+			if (collectedScheme !== null) {
+				destructiveSchemeReset = true;
+			}
 			collected.clear();
 			collectedUnits.clear();
 			contentHrefMountedLastSnapshot.clear();
@@ -799,10 +811,10 @@ async function collectDetailSurface(
 				}
 			}
 		}
-		const mountsNow = new Set(latest.rows.map((row) => row.mount));
-		for (const mount of previousMounts) {
-			if (!mountsNow.has(mount)) {
-				rowElementEverRemoved = true;
+		const mountsNow = new Map(latest.rows.map((row) => [row.mount, row.text]));
+		for (const [mount, text] of previousMounts) {
+			if (mountsNow.get(mount) !== text) {
+				rowElementEverChanged = true;
 			}
 		}
 		previousMounts = mountsNow;
