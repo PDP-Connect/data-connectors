@@ -223,6 +223,12 @@ export function postRecord(edge: InstagramTimelineEdge): PostRecord | null {
 	if (!node || typeof node !== "object") return null;
 	const timestamp = node.taken_at ?? node.taken_at_timestamp;
 	if (timestamp != null && isoFromTakenAt(node.taken_at, node.taken_at_timestamp) === null) return null;
+	// A caption is absent, null, or an object whose text is a string or null.
+	// Any other shape is unreadable, so the post is too.
+	const caption: unknown = node.caption;
+	if (caption != null && (typeof caption !== "object" || Array.isArray(caption))) return null;
+	const captionText: unknown = (caption as { text?: unknown } | null | undefined)?.text;
+	if (captionText != null && typeof captionText !== "string") return null;
 	const id = node.id ?? node.pk ?? node.media_id ?? node.code ?? null;
 	if (!id) {
 		return null;

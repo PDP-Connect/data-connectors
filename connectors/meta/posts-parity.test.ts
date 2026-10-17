@@ -20,6 +20,7 @@ type ScriptedPostsPage = {
 	operationName?: string;
 	ownerId?: string;
 	postData?: string;
+	requestUrl?: string;
 	status: number;
 	username?: string;
 	url?: string;
@@ -205,7 +206,7 @@ function makePostsPage(options: {
 			headers: () => ({ "x-fb-friendly-name": operationName }),
 			method: () => scripted.method ?? "POST",
 			postData: () => postData,
-			url: () => scripted.url ?? "https://www.instagram.com/graphql/query/",
+			url: () => scripted.requestUrl ?? scripted.url ?? "https://www.instagram.com/graphql/query/",
 		};
 		return {
 			json: () => Promise.resolve(scripted.json),
@@ -1062,6 +1063,60 @@ async function collectWithSettledResponses(responses: Array<Exclude<ScriptedPost
 	} };
 	await collectAllStreams(ctx, async () => { if (continuation) { for (const response of late.splice(0)) emitLate(response); } }, postsClock, { now: () => 0, sleep: NO_DELAY }, FAST_POSTS_CLOCK);
 	return { emitted, messages, followingReads };
+}
+
+test("collectAllStreams: POST /api/graphql completes posts and likes like /graphql/query", async () => {
+	const results = [];
+	for (const path of ["/graphql/query", "/api/graphql"]) {
+		const result = await collectWithSettledResponses([{
+			json: ownerTimeline(["A"]),
+			method: "POST",
+			status: 200,
+			url: `https://www.instagram.com${path}`,
+		}]);
+		assert.deepEqual(
+			result.emitted.filter(row => row.stream === "posts").map(row => row.data.id),
+			["A"],
+		);
+		assert.deepEqual(
+			result.emitted.filter(row => row.stream === "post_likes").map(row => ({
+				post_id: row.data.post_id,
+				user_id: row.data.user_id,
+			})),
+			[{ post_id: "A", user_id: "liker-A" }],
+		);
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(result.messages.filter(message => message.type === "STATE" && message.stream === stream).length, 1, `${path}: ${stream} completion`);
+			assert.equal(result.messages.some(message => message.type === "SKIP_RESULT" && message.stream === stream), false);
+		}
+		results.push(result);
+	}
+	assert.deepEqual(results[1]?.emitted, results[0]?.emitted, "both endpoints emit identical records");
+});
+
+for (const path of ["/api/graphqlx", "/notgraphql/"]) {
+	for (const rejectedUrl of ["request", "response"] as const) {
+		test(`collectAllStreams: POST ${path} ${rejectedUrl} is not a posts timeline`, async () => {
+			// Keep the other URL valid so each guard is exercised independently.
+			const validUrl = "https://www.instagram.com/api/graphql";
+			const lookalikeUrl = `https://www.instagram.com${path}`;
+			const { emitted, messages } = await collectWithSettledResponses([{
+				json: ownerTimeline(["A"]),
+				method: "POST",
+				requestUrl: rejectedUrl === "request" ? lookalikeUrl : validUrl,
+				status: 200,
+				url: rejectedUrl === "response" ? lookalikeUrl : validUrl,
+			}]);
+			for (const stream of ["posts", "post_likes"]) {
+				assert.deepEqual(emitted.filter(row => row.stream === stream), []);
+				assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), false);
+				const skips = messages.filter(message => message.type === "SKIP_RESULT" && message.stream === stream);
+				assert.equal(skips.length, 1);
+				assert.equal(skips[0]?.reason, "inventory_not_proven_complete");
+				assert.equal(skips[0]?.recovery_hint?.retryable, true);
+			}
+		});
+	}
 }
 
 for (const { label, late, expected, complete } of [

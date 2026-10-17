@@ -579,3 +579,13 @@ test("buildAdRecords: ad ids are unique across kinds even with matching names", 
 	const ids = new Set(records.map((r) => r.id));
 	assert.equal(ids.size, 3);
 });
+
+test("postRecord: a malformed caption container makes the post unreadable", () => {
+	for (const caption of ["source text", 42, false, [], { text: 7 }]) {
+		assert.equal(postRecord({ node: { id: "p1", caption } as never }), null);
+	}
+	assert.equal(postRecord({ node: { id: "p1" } })?.caption, null);
+	assert.equal(postRecord({ node: { id: "p1", caption: null } as never })?.caption, null);
+	assert.equal(postRecord({ node: { id: "p1", caption: { text: null } } as never })?.caption, null);
+	assert.equal(postRecord({ node: { id: "p1", caption: { text: "hi" } } as never })?.caption, "hi");
+});
