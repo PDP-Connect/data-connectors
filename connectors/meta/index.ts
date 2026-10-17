@@ -682,7 +682,9 @@ function isPostsTimelineRequest(
 	return (
 		responsePage === page &&
 		requestFrame === page.mainFrame() &&
-		request.url().includes("/graphql/") &&
+		// Served from `/graphql/query` until 2026-10-16 and from `/api/graphql`
+		// (no trailing slash) since; both are the same GraphQL endpoint.
+		/\/graphql(?:[/?]|$)/.test(request.url()) &&
 		request.method() === "POST" &&
 		/(?:PolarisProfilePostsQuery|PolarisProfilePostsTabContentQuery_connection|ProfilePostsQuery|UserMediaQuery)/.test(
 			operation,
@@ -810,7 +812,7 @@ function isPostsTimelineResponse(
 	page: Page,
 ): boolean {
 	return (
-		response.url().includes("/graphql/") &&
+		/\/graphql(?:[/?]|$)/.test(response.url()) &&
 		isPostsTimelineRequest(response.request(), page)
 	);
 }
