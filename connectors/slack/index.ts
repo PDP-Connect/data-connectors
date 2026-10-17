@@ -61,7 +61,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import {
@@ -122,6 +122,7 @@ import {
 	SLACK_API_RETRYABLE_FAILURE_RE,
 	SlackApiAuthError,
 } from "./slack-api.ts";
+import { materializeSlackdumpApiConfig } from "./slackdump-api-config.ts";
 import type {
 	CanvasRow,
 	ChannelRow,
@@ -3644,11 +3645,11 @@ async function ensureArchiveOnDisk(deps: EnsureArchiveDeps): Promise<void> {
 			// from Slack = process aborts with exit 6). Bumping those retries to 20
 			// aligns them with tier_2 (rate-limit retries), letting the same
 			// exponential-backoff policy ride out server-side hiccups. See
-			// config/slackdump-api-config.toml.
-			const apiConfigPath = new URL(
-				"../../config/slackdump-api-config.toml",
-				import.meta.url,
-			).pathname;
+			// the embedded config in slackdump-api-config.ts.
+			// Materialize next to the archive in its existing durable state directory.
+			const apiConfigPath = await materializeSlackdumpApiConfig(
+				dirname(archivePath),
+			);
 			await runArchiveOrResume({
 				apiConfigPath,
 				archivePath,
