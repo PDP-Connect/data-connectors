@@ -1,0 +1,55 @@
+<!-- Synthetic adversarial fixture: a document-flow virtualized list. Fifty rows
+     are laid out absolutely in a tall container and only the rows near the
+     viewport are mounted, so earlier rows unmount as the page scrolls. Rows have
+     no positional attribute and no ancestor scrolls or clips. With no card count
+     there is no proof that the mounted window ever held every row at once. -->
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+      }
+      #list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        position: relative;
+      }
+      .row {
+        height: 80px;
+        left: 0;
+        position: absolute;
+        right: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <ul id="list"></ul>
+    </main>
+    <script>
+      const total = 50;
+      const rowHeight = 80;
+      const list = document.getElementById("list");
+      list.style.height = `${total * rowHeight}px`;
+      function render() {
+        const top = window.scrollY;
+        const bottom = top + window.innerHeight;
+        const first = Math.max(0, Math.floor(top / rowHeight) - 1);
+        const last = Math.min(total - 1, Math.ceil(bottom / rowHeight) + 1);
+        list.innerHTML = "";
+        for (let index = first; index <= last; index += 1) {
+          const item = document.createElement("li");
+          item.setAttribute("data-qe-id", "itemRow");
+          item.className = "row";
+          item.style.top = `${index * rowHeight}px`;
+          item.innerHTML = `<a data-qe-id="itemRowDetailsName" href="/product-detail/virtual/${index}">Item ${index}</a><span data-qe-id="checkoutItemPrice">$1.00</span><span data-qe-id="orderItemQty">Qty: 1</span>`;
+          list.appendChild(item);
+        }
+      }
+      window.addEventListener("scroll", render);
+      render();
+    </script>
+  </body>
+</html>

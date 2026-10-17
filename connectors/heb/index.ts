@@ -280,11 +280,40 @@ function inspectAndAdvanceDetailSurface(input: {
 	// unanchored-remount.html): both of those fixtures are called with NO
 	// expectedItemCount, so this condition is false for them and they keep
 	// throwing exactly as before.
-	const canAttemptVirtualizedContentIdentity =
+	const guidedContentIdentity =
 		expectedItemCount !== null &&
 		staticListEvidence === null &&
 		rowLinks.length > 0 &&
 		rowLinks.length < expectedItemCount;
+	// With no usable card count (none was passed, or it is at or below the
+	// mounted rows, as for a canceled order that declares 0) a document-flow list
+	// that no ancestor clips may still be keyed by content. `collectDetailSurface`
+	// then accepts it only when every row is mounted at once and none was ever
+	// unmounted, which needs no card. A list inside its own scroll port or a
+	// clipped shell can hide rows from this view, so it still fails closed.
+	let clipped = false;
+	for (
+		let current: Element | null = row;
+		current;
+		current = current.parentElement
+	) {
+		const overflow = getComputedStyle(current).overflowY;
+		if (overflow === "hidden" || overflow === "clip") {
+			clipped = true;
+			break;
+		}
+	}
+	const scrollsWithDocument =
+		scrollPort === document.scrollingElement ||
+		scrollPort === document.documentElement;
+	const cardlessContentIdentity =
+		staticListEvidence === null &&
+		rowLinks.length > 0 &&
+		scrollsWithDocument &&
+		!clipped &&
+		(expectedItemCount === null || rowLinks.length > expectedItemCount);
+	const canAttemptVirtualizedContentIdentity =
+		guidedContentIdentity || cardlessContentIdentity;
 	const rows = rowLinks.map((link, itemIndex) => {
 		const itemRow = link.closest("li") ?? link;
 		const qtyText =
@@ -712,15 +741,22 @@ async function collectDetailSurface(
 			expectedUnits !== null &&
 			latest.staticListEvidence === "declared_count" &&
 			collected.size >= expectedUnits;
+		// Content keys minted with no usable card (see the cardless branch of
+		// inspectAndAdvanceDetailSurface) are accepted on the structural proof
+		// alone; a missing or too-small card is not evidence either way.
+		const contentKeysWithoutCard =
+			collectedScheme === "content:href" &&
+			(expectedUnits === null || expectedUnits <= latest.rowCount);
 		if (
 			latest.atEnd &&
 			!latest.loading &&
 			!latest.actionableControl &&
 			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			(expectedUnits === null ||
-				(observedUnits !== null && observedUnits >= expectedUnits) ||
-				declaredCountRowsCollected ||
-				fullyCollectedStaticList)
+			(fullyCollectedStaticList ||
+				(!contentKeysWithoutCard &&
+					(expectedUnits === null ||
+						(observedUnits !== null && observedUnits >= expectedUnits) ||
+						declaredCountRowsCollected)))
 		) {
 			break;
 		}
@@ -741,16 +777,20 @@ async function collectDetailSurface(
 		expectedUnits !== null &&
 		latest.staticListEvidence === "declared_count" &&
 		collected.size >= expectedUnits;
+	const contentKeysWithoutCard =
+		collectedScheme === "content:href" &&
+		(expectedUnits === null || expectedUnits <= latest.rowCount);
 	const complete =
 		!lastError &&
 		latest.atEnd &&
 		!latest.loading &&
 		!latest.actionableControl &&
 		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		(expectedUnits === null ||
-			(observedUnits !== null && observedUnits >= expectedUnits) ||
-			declaredCountRowsCollected ||
-			fullyCollectedStaticList);
+		(fullyCollectedStaticList ||
+			(!contentKeysWithoutCard &&
+				(expectedUnits === null ||
+					(observedUnits !== null && observedUnits >= expectedUnits) ||
+					declaredCountRowsCollected)));
 	let settlement: DetailSurfaceSettlement = "incomplete";
 	if (lastError) {
 		settlement = "error";
