@@ -11,18 +11,25 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, test } from "node:test";
+import { after, afterEach, beforeEach, test } from "node:test";
 import type { Page } from "playwright";
 import {
 	assertUserFacingProgress,
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { openFingerprintCursor } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import {
+	makeRecordingEmit,
+	skipPoliteDelays,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import * as connector from "./index.ts";
 import * as parsers from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 /** Diagnostic lines written during the current test. */
 const diagnostics: string[] = [];

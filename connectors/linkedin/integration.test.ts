@@ -16,16 +16,23 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { BrowserContext, Cookie, Page } from "playwright";
 import type {
 	BrowserCollectContext,
 	EmittedMessage,
 	StreamScope,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import {
+	makeRecordingEmit,
+	skipPoliteDelays,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { collectLinkedIn, ensureLinkedInSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
 

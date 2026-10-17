@@ -16,10 +16,13 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import type { Page } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import {
+	makeRecordingEmit,
+	skipPoliteDelays,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	buildNutritionRecord,
 	buildOrderItemRecord,
@@ -27,13 +30,17 @@ import {
 	collectOrders,
 	collectProfile,
 	discoverOrderStubs,
-	OrderEnumerationUnprovenError,
 	lookupNutritionForProduct,
+	OrderEnumerationUnprovenError,
 	orderDetailCountsMatch,
 } from "./index.ts";
 import { parseOrderSearchPageDom } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { OrderStub } from "./types.ts";
+
+// Pacing pauses are anti-bot courtesy that these tests do not assert on, so
+// they fire on the next tick instead of sleeping.
+after(skipPoliteDelays());
 
 // Shape confirmed against a live capture 2026-09-22 (see parsers.ts's
 // parseAmazonProfileDom header comment): the header greeting
