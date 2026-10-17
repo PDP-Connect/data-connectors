@@ -907,8 +907,21 @@ export type DetailFetchResult =
 			failureKind: DetailFailureKind;
 			pollCount?: number;
 			reason: HebDetailGapReason;
+			/** The requested order's own page settled with no item rows at all. This
+			 *  is the only failed read that can stand behind an empty claim. */
+			settledEmpty?: true;
 			status: "failed";
 	  };
+
+/** Whether the browser is still on the order's own detail page, not on a
+ *  redirect target such as the order list or an error page. */
+function landedOnOrderPage(url: string, orderId: string): boolean {
+	try {
+		return new URL(url).pathname.split("/").filter(Boolean).at(-1) === orderId;
+	} catch {
+		return false;
+	}
+}
 
 const SIGNIN_URL_RE = /\/(sign-in|login|challenge|checkpoint)/i;
 // Amazon's navigation-retry shape (connectors/amazon/index.ts): retry only
@@ -966,6 +979,7 @@ export async function fetchOrderDetail(
 		failureKind: DetailFailureKind,
 		diagnostic?: string,
 		surface?: DetailSurfaceDiagnostics,
+		settledEmpty = false,
 	): DetailFetchResult => {
 		const measured = metrics();
 		// The host keeps no detail for a gap, so the run log is the only place a
@@ -981,6 +995,7 @@ export async function fetchOrderDetail(
 			...measured,
 			failureKind,
 			reason: reasonForDetailFailure(failureKind),
+			...(settledEmpty ? { settledEmpty: true as const } : {}),
 			status: "failed",
 		};
 	};
@@ -1084,6 +1099,8 @@ export async function fetchOrderDetail(
 			"parse_missing",
 			detailSurfaceErrorMessage(surface.diagnostics),
 			surface.diagnostics,
+			surface.diagnostics.collectedRows === 0 &&
+				landedOnOrderPage(landedUrl, orderId),
 		);
 	}
 	// The parser drops a line with no name or product id without a word, so a
@@ -2066,18 +2083,10 @@ function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
 	return counts;
 }
 
-/** Failures that mean the detail page was loaded but could not be read or
- *  settled, as opposed to a sign-in, navigation or budget problem. */
-const UNREADABLE_DETAIL_KINDS: ReadonlySet<DetailFailureKind> = new Set([
-	"detail_surface_error",
-	"detail_surface_incomplete",
-	"detail_surface_timeout",
-	"parse_missing",
-]);
-
 /** Close the pending gap that gap recovery re-deferred for this order, if any,
- *  once H-E-B's declared zero settles it. Nothing is left to deliver, so no item
- *  record can be filtered or rejected on the way. No item records are invented. */
+ *  once H-E-B's declared zero settles it and the order's own page showed no rows.
+ *  Nothing is left to deliver, so no item record can be filtered or rejected on
+ *  the way. No item records are invented. */
 async function closePendingGap(
 	deps: Pick<EmitDeps, "emit" | "pendingGapsByOrderId">,
 	orderId: string,
@@ -2135,15 +2144,17 @@ async function fetchDetailAndRecordCoverage(
 		flags.sessionRepairRequired = true;
 	}
 	// H-E-B shows a canceled order as "$0.00, 0 items", and its page may still
-	// list rows; they are collected like any other order's. When the page cannot
-	// be read or settled, the declared zero is the answer: there is nothing to
-	// hydrate, so the order is accounted for as empty instead of staying a gap
-	// that no retry can close. The failed fetch has already logged why.
+	// list rows; they are collected like any other order's. Only when the
+	// order's own page settles with no rows at all do the page and the card agree
+	// that there is nothing to hydrate, and the order is accounted for as empty
+	// instead of staying a gap that no retry can close. A page that lists rows
+	// this connector cannot key, or that never settles, proves nothing about the
+	// order's items and stays a gap. The failed fetch has already logged why.
 	if (
 		result.status === "failed" &&
+		result.settledEmpty === true &&
 		isCanceledOrder(listOrder) &&
-		listOrder.itemCount === 0 &&
-		UNREADABLE_DETAIL_KINDS.has(result.failureKind)
+		listOrder.itemCount === 0
 	) {
 		if (deps.orderItemsCoverage) {
 			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "empty");

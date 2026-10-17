@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { EmittedMessage } from "@pdpp/connector-protocol";
-import type { Page } from "playwright";
+import { chromium, type Page } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
@@ -286,7 +286,7 @@ const NO_ROWS_HTML = "<html><body><main>no items here</main></body></html>";
 const SIGN_IN_HTML =
 	'<html><body><main><form><input type="password" name="password"></form></main></body></html>';
 
-test("processListOrder accounts for a canceled zero-item order whose page cannot be read as empty", async () => {
+test("processListOrder accounts for a canceled zero-item order whose page shows no rows as empty", async () => {
 	const order = makeListOrder({
 		itemCount: 0,
 		status: "Order canceled",
@@ -632,3 +632,131 @@ for (const scenario of [
 		}
 	});
 }
+
+// ─── The declared zero is only believed on a page that shows zero rows ─────
+// The tests above answer `evaluate` from a stub. These load real HTML in
+// Chromium, so the fallback is decided by what a page contains.
+
+const FIXTURES_DIR = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"__fixtures__",
+);
+
+async function withOrderPage<T>(
+	handler: Parameters<Page["route"]>[1],
+	run: (page: Page) => Promise<T>,
+): Promise<T> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.heb.com/**", handler);
+		return await run(page);
+	} finally {
+		await browser.close();
+	}
+}
+
+async function processCanceledZeroItemOrder(
+	page: Page,
+): Promise<{
+	coverage: ReturnType<typeof newOrderItemsCoverage>;
+	emitted: RecordingDeps["emitted"];
+	protocolMessages: EmittedMessage[];
+}> {
+	const order = makeListOrder({
+		itemCount: 0,
+		status: "Order canceled",
+		unfulfilledCount: 0,
+	});
+	const coverage = newOrderItemsCoverage();
+	const { deps, emitted, protocolMessages } = makeRecordingDeps({
+		orderItemsCoverage: coverage,
+	});
+	await processListOrder(page, deps, makeRunFlags(), order);
+	return { coverage, emitted, protocolMessages };
+}
+
+test("a canceled zero-item order whose own page settles with no rows is empty", async () => {
+	await withOrderPage(
+		(route) => route.fulfill({ body: NO_ROWS_HTML, contentType: "text/html" }),
+		async (page) => {
+			const { coverage, emitted, protocolMessages } =
+				await processCanceledZeroItemOrder(page);
+			assert.deepEqual(coverage.empty, ["HEB1000000001"]);
+			assert.deepEqual(coverage.gap, []);
+			assert.equal(
+				protocolMessages.some((message) => message.type === "DETAIL_GAP"),
+				false,
+			);
+			assert.equal(
+				emitted.some((record) => record.stream === "order_items"),
+				false,
+			);
+		},
+	);
+});
+
+test("a canceled zero-item order whose page lists rows with no position stays a gap, not an empty claim", async () => {
+	const captured = readFileSync(join(FIXTURES_DIR, "order-detail.html"), "utf8");
+	await withOrderPage(
+		(route) => route.fulfill({ body: captured, contentType: "text/html" }),
+		async (page) => {
+			const { coverage, emitted, protocolMessages } =
+				await processCanceledZeroItemOrder(page);
+			assert.deepEqual(
+				coverage.empty,
+				[],
+				"the page shows rows; saying it has none would contradict it",
+			);
+			assert.deepEqual(coverage.gap, ["HEB1000000001"]);
+			assert.equal(
+				protocolMessages.filter((message) => message.type === "DETAIL_GAP")
+					.length,
+				1,
+			);
+			assert.equal(
+				emitted.some((record) => record.stream === "order_items"),
+				false,
+			);
+		},
+	);
+});
+
+test("a canceled zero-item order whose rows the parser cannot read stays a gap", async () => {
+	// Rows keyed by position but without a name: the page lists items, so a
+	// parse failure on them is not the same as an empty order.
+	const unreadable = `<html><body><main><ul>${[0, 1]
+		.map(
+			(index) =>
+				`<li data-index="${index}"><a data-qe-id="itemRowDetailsName" href="/product-detail/widget/${500 + index}"></a><span data-qe-id="orderItemQty">Qty: 1</span></li>`,
+		)
+		.join("")}</ul></main></body></html>`;
+	await withOrderPage(
+		(route) => route.fulfill({ body: unreadable, contentType: "text/html" }),
+		async (page) => {
+			const { coverage } = await processCanceledZeroItemOrder(page);
+			assert.deepEqual(coverage.empty, []);
+			assert.deepEqual(coverage.gap, ["HEB1000000001"]);
+		},
+	);
+});
+
+test("a zero-row page that moved off the order's URL is not the order's own page", async () => {
+	// A client-side router sending the browser to another route, such as the
+	// order list, when the order is not found.
+	const movedOn = `${NO_ROWS_HTML}<script>history.replaceState(null, "", "/my-account/your-orders")</script>`;
+	await withOrderPage(
+		(route) => route.fulfill({ body: movedOn, contentType: "text/html" }),
+		async (page) => {
+			const { coverage, protocolMessages } =
+				await processCanceledZeroItemOrder(page);
+			assert.deepEqual(coverage.empty, []);
+			assert.deepEqual(coverage.gap, ["HEB1000000001"]);
+			assert.equal(
+				protocolMessages.filter((message) => message.type === "DETAIL_GAP")
+					.length,
+				1,
+			);
+		},
+	);
+});
