@@ -17,6 +17,7 @@ import {
 	isCanceledOrder,
 	newOrderItemsCoverage,
 	processListOrder,
+	recoverPendingOrderItemDetailGaps,
 	type RunFlags,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -112,9 +113,13 @@ const DETAIL_HTML = `<html><body><main><ul>${[0, 1, 2]
 function makePageStub(
 	html: string,
 	visited: string[] = [],
-	detailHtml = html,
+	detailHtmlFor: string | ((orderUrl: string) => string) = html,
 ): Page {
 	let currentUrl = "about:blank";
+	const currentDetailHtml = (): string =>
+		typeof detailHtmlFor === "function"
+			? detailHtmlFor(currentUrl)
+			: detailHtmlFor;
 	return new Proxy(
 		{},
 		{
@@ -133,7 +138,7 @@ function makePageStub(
 					return (): Promise<string> =>
 						Promise.resolve(
 							currentUrl.includes("/my-account/order-history/")
-								? detailHtml
+								? currentDetailHtml()
 								: html,
 						);
 				}
@@ -141,8 +146,9 @@ function makePageStub(
 					return (): string => currentUrl;
 				}
 				if (prop === "evaluate") {
-					return (): Promise<unknown> =>
-						Promise.resolve({
+					return (): Promise<unknown> => {
+						const detailHtml = currentDetailHtml();
+						return Promise.resolve({
 							actionableControl: null,
 							actionPerformed: null,
 							atEnd: true,
@@ -162,6 +168,7 @@ function makePageStub(
 							scrollTop: 0,
 							staticListEvidence: "declared_count",
 						});
+					};
 				}
 				throw new Error(`unexpected page.${String(prop)} in test stub`);
 			},
@@ -173,6 +180,7 @@ const EMITTED_AT = "2026-10-05T12:00:00.000Z";
 
 type TestContext = BrowserCollectContext & {
 	emitted: { stream: string }[];
+	events: ReturnType<typeof makeRecordingEmit>["events"];
 	protocolMessages: EmittedMessage[];
 	reportedStreamFailures: Extract<EmittedMessage, { type: "SKIP_RESULT" }>[];
 };
@@ -196,6 +204,7 @@ function makeContext(
 		page,
 		progress: (): Promise<void> => Promise.resolve(),
 		emitted: harness.emitted,
+		events: harness.events,
 		protocolMessages: harness.protocolMessages,
 		recoveryOnly: false,
 		reportedStreamFailures,
@@ -228,6 +237,7 @@ function makeContext(
 		...overrides,
 	} satisfies Record<string, unknown> & {
 		emitted: { stream: string }[];
+		events: ReturnType<typeof makeRecordingEmit>["events"];
 		protocolMessages: EmittedMessage[];
 		reportedStreamFailures: Extract<EmittedMessage, { type: "SKIP_RESULT" }>[];
 	};
@@ -758,5 +768,136 @@ test("a zero-row page that moved off the order's URL is not the order's own page
 				1,
 			);
 		},
+	);
+});
+
+// ─── Gap recovery accounting ───────────────────────────────────────────────
+
+const DATED_GAP = (orderId: string, gapId: string) =>
+	({
+		gap_id: gapId,
+		record_key: orderId,
+		reference_only: true,
+		status: "pending",
+		stream: "order_items",
+		detail_locator: {
+			kind: "heb.order_detail",
+			order_id: orderId,
+			order_date: "2026-05-20",
+		},
+	}) satisfies BrowserCollectContext["detailGaps"][number];
+
+test("recovery keeps a gap pending when a page that recovered one gap is followed by an empty page", async () => {
+	// Page one recovers order A and fails order B; the host then has nothing
+	// more to lease. Stopping on an empty page must not read as "nothing is
+	// pending": B was re-deferred and is still open.
+	const orderA = "HEB7000000001";
+	const orderB = "HEB7000000002";
+	const harness = makeRecordingEmit(validateRecord);
+	const pending = new Map<string, { gapId: string; recordKey: string | number }>();
+	const page = makePageStub(
+		NO_ROWS_HTML,
+		[],
+		(url) => (url.includes(orderA) ? DETAIL_HTML : NO_ROWS_HTML),
+	);
+	let pagesRequested = 0;
+	const result = await recoverPendingOrderItemDetailGaps(
+		page,
+		{
+			detailGaps: [DATED_GAP(orderA, "gap_a"), DATED_GAP(orderB, "gap_b")],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			emittedAt: EMITTED_AT,
+			pendingGapsByOrderId: pending,
+			requestDetailGapPage: () => {
+				pagesRequested += 1;
+				return Promise.resolve([]);
+			},
+			sendInteraction: noopSendInteraction,
+			waitForHydration: immediateWait,
+		},
+		makeRunFlags(),
+	);
+	assert.equal(pagesRequested, 1);
+	assert.equal(result.recovered, 1);
+	assert.equal(result.stoppedWithPending, true);
+	assert.deepEqual([...pending.keys()], [orderB]);
+});
+
+test("collect fails order_items when a mixed recovery page leaves a gap it cannot read", async () => {
+	const ctx = makeContext(
+		["orders", "order_items"],
+		makePageStub(onePageCanceledOrdersList(), [], DETAIL_HTML),
+		{
+			detailGaps: [
+				DATED_GAP("HEB7000000001", "gap_recovered"),
+				{
+					gap_id: "gap_unreadable",
+					record_key: "unknown",
+					reference_only: true,
+					status: "pending",
+					stream: "order_items",
+				},
+			],
+		},
+	);
+	await collectQuickly(ctx);
+	assert.equal(
+		ctx.protocolMessages.filter((message) => message.type === "DETAIL_GAP_RECOVERED")
+			.length,
+		1,
+	);
+	assert.ok(
+		ctx.reportedStreamFailures.some(
+			(message) =>
+				message.stream === "order_items" &&
+				message.message.includes("unresolved gaps"),
+		),
+		"one gap was recovered and one cannot be read; the run still has an open gap",
+	);
+});
+
+test("collect closes a legacy dateless gap once the forward scan delivers the order", async () => {
+	// The gap has no date, so recovery cannot emit items for it and re-defers it.
+	// The order is on the list page, which supplies the date, and its detail
+	// hydrates: the items are delivered and the gap is settled in the same run.
+	const orderId = "HEB1029384600";
+	const listHtml = onePageCanceledOrdersList().replace(
+		"<!-- -->0<!-- --> <!-- -->items",
+		"<!-- -->12<!-- --> <!-- -->items",
+	);
+	const ctx = makeContext(
+		["orders", "order_items"],
+		makePageStub(listHtml, [], DETAIL_HTML),
+		{
+			detailGaps: [
+				{
+					gap_id: "gap_dateless",
+					record_key: orderId,
+					reference_only: true,
+					status: "pending",
+					stream: "order_items",
+					detail_locator: { kind: "heb.order_detail", order_id: orderId },
+				},
+			],
+		},
+	);
+	await collectQuickly(ctx);
+	assert.deepEqual(ctx.reportedStreamFailures, []);
+	const recoveredAt = ctx.events.findIndex(
+		(event) =>
+			event.kind === "message" &&
+			event.message.type === "DETAIL_GAP_RECOVERED" &&
+			event.message.gap_id === "gap_dateless",
+	);
+	assert.notEqual(recoveredAt, -1, "the settled gap is closed");
+	const lastItemAt = ctx.events.findLastIndex(
+		(event) => event.kind === "record" && event.stream === "order_items",
+	);
+	assert.ok(lastItemAt !== -1 && lastItemAt < recoveredAt, "items first");
+	assert.equal(
+		ctx.protocolMessages.filter((message) => message.type === "DETAIL_GAP_RECOVERED")
+			.length,
+		1,
 	);
 });

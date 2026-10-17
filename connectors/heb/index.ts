@@ -1862,6 +1862,10 @@ export async function recoverPendingOrderItemDetailGaps(
 	unreconciledPending: boolean;
 }> {
 	let recovered = 0;
+	// Gaps this run could not settle, across every page: a page that recovered
+	// something still leaves its other gaps pending, and the last page the host
+	// returns is empty whatever happened on the pages before it.
+	let leftPending = 0;
 	let unreconciledPending = false;
 	let gaps = deps.detailGaps;
 	while (gaps.length > 0) {
@@ -1872,11 +1876,12 @@ export async function recoverPendingOrderItemDetailGaps(
 			gaps,
 		);
 		recovered += result.recovered;
+		leftPending += result.reDeferred + result.skipped;
 		unreconciledPending ||= result.skipped > 0;
 		if (!deps.requestDetailGapPage) {
 			return {
 				recovered,
-				stoppedWithPending: result.reDeferred + result.skipped > 0,
+				stoppedWithPending: leftPending > 0,
 				unreconciledPending,
 			};
 		}
@@ -1895,7 +1900,11 @@ export async function recoverPendingOrderItemDetailGaps(
 		}
 		gaps = await deps.requestDetailGapPage({ streams: ["order_items"] });
 	}
-	return { recovered, stoppedWithPending: false, unreconciledPending };
+	return {
+		recovered,
+		stoppedWithPending: leftPending > 0,
+		unreconciledPending,
+	};
 }
 
 export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
@@ -2084,9 +2093,9 @@ function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
 }
 
 /** Close the pending gap that gap recovery re-deferred for this order, if any,
- *  once H-E-B's declared zero settles it and the order's own page showed no rows.
- *  Nothing is left to deliver, so no item record can be filtered or rejected on
- *  the way. No item records are invented. */
+ *  once this run has settled the order: its items were just delivered, or the
+ *  order's own page showed none and H-E-B declares none. No item record is
+ *  invented. */
 async function closePendingGap(
 	deps: Pick<EmitDeps, "emit" | "pendingGapsByOrderId">,
 	orderId: string,
@@ -2238,6 +2247,12 @@ export async function processListOrder(
 		: null;
 
 	await emitOrderAndItems(deps, listOrder, detail, orderDate);
+	// The scan has just delivered every item of this order. A gap that recovery
+	// re-deferred for it earlier in the run, such as a legacy gap with no date to
+	// emit items under, is settled now that the list card supplied the date.
+	if (detail && deps.emitItems) {
+		await closePendingGap(deps, listOrder.orderId);
+	}
 }
 
 /**
@@ -3232,9 +3247,11 @@ export const hebConnector: BrowserConnectorConfig = {
 			return;
 		}
 		const { newestOrderDate, stoppedAtBoundary, truncated } = scan;
+		// Recovery's own record of what it could not settle, less what the forward
+		// scan has since delivered or proven empty: pending whatever made the page
+		// loop stop.
 		const gapsStillPending =
-			gapRecovery.stoppedWithPending &&
-			(gapRecovery.unreconciledPending || pendingGapsByOrderId.size > 0);
+			gapRecovery.unreconciledPending || pendingGapsByOrderId.size > 0;
 
 		if (wantsOrders && !truncated) {
 			// A truncated scan emits no finishing `orders` STATE: it failed the
