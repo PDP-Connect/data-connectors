@@ -25,7 +25,7 @@ import { deflateRawSync } from "node:zlib";
 import { buildPageshim } from "./build.mjs";
 import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
-import { runHarness } from "./harness.mjs";
+import { runFixtureHarness as runHarness } from "./harness.mjs";
 
 const scratchRoot = fileURLToPath(
 	new URL("../../.tmp/pageshim/", import.meta.url),
