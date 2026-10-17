@@ -3183,6 +3183,80 @@ test("fetchOrderDetail: debug switch emits safe per-poll surface diagnostics", a
 	}
 });
 
+/** Fetch a variant of the 20-row static fixture, returning the result with
+ *  every diagnostic line the fetch wrote. */
+async function fetchTallFixtureWithDiagnostics(html: string): Promise<{
+	lines: string[];
+	result: Awaited<ReturnType<typeof fetchOrderDetail>>;
+}> {
+	const browser = await chromium.launch({ headless: true });
+	const lines: string[] = [];
+	setConnectorDiagnosticSink((line) => lines.push(line));
+	try {
+		const page = await browser.newPage();
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB-PARSE-LOSS",
+			async (route) => {
+				await route.fulfill({ body: html, contentType: "text/html" });
+			},
+		);
+		const result = await fetchOrderDetail(page, "HEB-PARSE-LOSS", {
+			detailSurfaceTimeoutMs: 5000,
+			expectedItemCount: 20,
+			waitForHydration: immediateWait,
+		});
+		return { lines, result };
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+		await browser.close();
+	}
+}
+
+const UNPARSED_ROWS_LINE_PREFIX = "[heb-diagnostic] detail_rows_unparsed ";
+
+test("fetchOrderDetail: rows the parser cannot read are counted in the run log and the order still hydrates", async () => {
+	const tall = readFileSync(
+		join(FIXTURES_DIR, "order-detail-static-tall.html"),
+		"utf8",
+	);
+	// The first two rows lose their name text, and the parser drops a line with
+	// no name. The fixture builds its rows in a script, so the template changes.
+	const { lines, result } = await fetchTallFixtureWithDiagnostics(
+		tall.replace(
+			"Static item ${index}",
+			() => "${index < 2 ? '' : 'Static item ' + index}",
+		),
+	);
+
+	assert.equal(result.status, "hydrated");
+	assert.equal(
+		result.status === "hydrated" ? result.detail.items.length : 0,
+		18,
+	);
+	assert.deepEqual(
+		lines.filter((line) => line.startsWith(UNPARSED_ROWS_LINE_PREFIX)),
+		[`${UNPARSED_ROWS_LINE_PREFIX}{"collected":20,"parsed":18}`],
+	);
+});
+
+test("fetchOrderDetail: a page whose every collected row parses writes no unparsed-rows line", async () => {
+	const tall = readFileSync(
+		join(FIXTURES_DIR, "order-detail-static-tall.html"),
+		"utf8",
+	);
+	const { lines, result } = await fetchTallFixtureWithDiagnostics(tall);
+
+	assert.equal(result.status, "hydrated");
+	assert.equal(
+		result.status === "hydrated" ? result.detail.items.length : 0,
+		20,
+	);
+	assert.deepEqual(
+		lines.filter((line) => line.startsWith(UNPARSED_ROWS_LINE_PREFIX)),
+		[],
+	);
+});
+
 test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap, not partial hydrated data", async () => {
 	// Deliberately expect more than this fixture exposes.
 	const clock = withPollClock(makeLazyLoadPageStub(100), 1);
