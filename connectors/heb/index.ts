@@ -889,6 +889,8 @@ export type DetailFetchResult =
 	| {
 			detail: OrderDetail;
 			diagnostic?: string;
+			/** Collected rows the parser could not read, so `detail` lacks them. */
+			droppedRows?: number;
 			elapsedMs?: number;
 			pollCount?: number;
 			status: "hydrated";
@@ -934,13 +936,19 @@ const DETAIL_RETRY_COUNT = 2;
 const DETAIL_RETRY_MIN_TIMEOUT_MS = 1500;
 const DETAIL_RETRY_FACTOR = 2;
 
-async function navigateToOrderDetail(page: Page, url: string): Promise<void> {
-	await pRetry(
-		async (): Promise<void> => {
-			await page.goto(url, {
+/** Navigate to the order page and return the final response's HTTP status, or
+ *  null when the browser reports none. */
+async function navigateToOrderDetail(
+	page: Page,
+	url: string,
+): Promise<number | null> {
+	return await pRetry(
+		async (): Promise<number | null> => {
+			const response = await page.goto(url, {
 				waitUntil: "domcontentloaded",
 				timeout: NAV_TIMEOUT_MS,
 			});
+			return response?.status() ?? null;
 		},
 		{
 			retries: DETAIL_RETRY_COUNT,
@@ -975,6 +983,7 @@ export async function fetchOrderDetail(
 		elapsedMs: Math.max(0, Date.now() - startedAt),
 		pollCount,
 	});
+	let navigationStatus: number | null = null;
 	const failed = (
 		failureKind: DetailFailureKind,
 		diagnostic?: string,
@@ -988,6 +997,7 @@ export async function fetchOrderDetail(
 			kind: failureKind,
 			ms: measured.elapsedMs,
 			polls: measured.pollCount,
+			...(navigationStatus === null ? {} : { http: navigationStatus }),
 			...(surface ? detailSurfaceFields(surface) : {}),
 		});
 		return {
@@ -1001,7 +1011,7 @@ export async function fetchOrderDetail(
 	};
 	const url = `https://www.heb.com/my-account/order-history/${orderId}`;
 	try {
-		await navigateToOrderDetail(page, url);
+		navigationStatus = await navigateToOrderDetail(page, url);
 	} catch (err) {
 		// pRetry's shouldRetry gate (RETRYABLE_ERROR_RE) only lets transient
 		// transport errors consume the retry budget — a non-retryable error
@@ -1100,13 +1110,19 @@ export async function fetchOrderDetail(
 			detailSurfaceErrorMessage(surface.diagnostics),
 			surface.diagnostics,
 			surface.diagnostics.collectedRows === 0 &&
-				landedOnOrderPage(landedUrl, orderId),
+				landedOnOrderPage(landedUrl, orderId) &&
+				(navigationStatus === null || navigationStatus < 400),
 		);
 	}
 	// The parser drops a line with no name or product id without a word, so a
 	// hydrated order can hold fewer lines than the surface collected. The order
-	// still hydrates; the run log carries the difference.
-	if (detail.items.length < surface.diagnostics.collectedRows) {
+	// still hydrates and its readable lines are emitted; the run log carries the
+	// difference, and the result says so, so a caller can keep a prior gap open.
+	const droppedRows = Math.max(
+		0,
+		surface.diagnostics.collectedRows - detail.items.length,
+	);
+	if (droppedRows > 0) {
 		connectorDiagnostic("heb", "detail_rows_unparsed", {
 			collected: surface.diagnostics.collectedRows,
 			parsed: detail.items.length,
@@ -1114,6 +1130,7 @@ export async function fetchOrderDetail(
 	}
 	return {
 		detail,
+		droppedRows,
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
 		...metrics(),
 		status: "hydrated",
@@ -2137,7 +2154,7 @@ async function fetchDetailAndRecordCoverage(
 	flags: RunFlags,
 	listOrder: ListPageOrder,
 	orderDate: string,
-): Promise<OrderDetail | null> {
+): Promise<{ complete: boolean; detail: OrderDetail } | null> {
 	const result = await resolveOrderDetail(page, flags, listOrder.orderId, {
 		...(deps.capture ? { capture: deps.capture } : {}),
 		detailSurfaceTimeoutMs: deps.detailSurfaceTimeoutMs,
@@ -2188,7 +2205,9 @@ async function fetchDetailAndRecordCoverage(
 			);
 		}
 	}
-	return result.status === "hydrated" ? result.detail : null;
+	return result.status === "hydrated"
+		? { complete: (result.droppedRows ?? 0) === 0, detail: result.detail }
+		: null;
 }
 
 export async function processListOrder(
@@ -2236,7 +2255,7 @@ export async function processListOrder(
 		return;
 	}
 
-	const detail = deps.wantsItems
+	const fetched = deps.wantsItems
 		? await fetchDetailAndRecordCoverage(
 				page,
 				deps,
@@ -2245,12 +2264,15 @@ export async function processListOrder(
 				orderDate,
 			)
 		: null;
+	const detail = fetched?.detail ?? null;
 
 	await emitOrderAndItems(deps, listOrder, detail, orderDate);
 	// The scan has just delivered every item of this order. A gap that recovery
 	// re-deferred for it earlier in the run, such as a legacy gap with no date to
-	// emit items under, is settled now that the list card supplied the date.
-	if (detail && deps.emitItems) {
+	// emit items under, is settled now that the list card supplied the date. A
+	// page with a row the parser could not read delivered less than the order
+	// holds, so its prior gap stays open.
+	if (fetched?.complete && deps.emitItems) {
 		await closePendingGap(deps, listOrder.orderId);
 	}
 }
