@@ -542,6 +542,45 @@ test("collect: nutrition still fails when the resume boundary stops the walk bef
 	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
 });
 
+test("collect: a full refresh ignores the resume boundary, so nutrition completes over a long history", async () => {
+	const dateForPage = (pageNum: number): string =>
+		pageNum === 1 ? "Jul 1, 2026" : "Jan 5, 2026";
+	const pagesRead = new Set<number>();
+	const restoreTimers = collapseTimers();
+	try {
+		const ctx = makeContext(
+			["nutrition"],
+			makeCollectPage({
+				detailHtml: WIDGET_DETAIL_HTML,
+				listHtml: "",
+				listHtmlForPage: (pageNum) => {
+					pagesRead.add(pageNum);
+					return pagedOrdersList(pageNum, 3, dateForPage);
+				},
+			}),
+			{
+				collectionMode: "full_refresh",
+				state: { orders: { checkpoint: "2026-07-01" } },
+			},
+		);
+
+		await hebConnector.collect(ctx);
+
+		assert.deepEqual(
+			[...pagesRead],
+			[1, 2, 3],
+			"the history that stops an incremental run at page 2 is read to its last page",
+		);
+		assert.equal(ctx.reportedStreamFailures.length, 0);
+		assert.deepEqual(
+			findMessages(ctx.protocolMessages, "STATE").map((state) => state.stream),
+			["nutrition"],
+		);
+	} finally {
+		restoreTimers();
+	}
+});
+
 async function collectOverPageCeiling(streams: readonly string[]) {
 	const dateForPage = (pageNum: number): string => {
 		const day = 60 - pageNum;

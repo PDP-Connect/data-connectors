@@ -2628,8 +2628,8 @@ export function nutritionCoverageBlockReason(
  *  a suppressed order scan are budget or transient outcomes that a rerun can
  *  finish. The page cap and the item-count shortfall are the same on every
  *  run. An incremental run always stops at its resume boundary by design, so
- *  that cause does not clear on a rerun either; only a collection change
- *  (a full re-walk for nutrition) can fix it. */
+ *  that cause does not clear on a rerun either; only a `full_refresh` run,
+ *  which ignores the boundary and re-walks the history, can fix it. */
 export function nutritionCoverageRecoveryHint(
 	cause: NutritionCoverageCause,
 ):
@@ -2818,6 +2818,7 @@ export const hebConnector: BrowserConnectorConfig = {
 	},
 	async collect(ctx: BrowserCollectContext): Promise<void> {
 		const {
+			collectionMode,
 			scope,
 			state,
 			emitRecord,
@@ -2851,7 +2852,13 @@ export const hebConnector: BrowserConnectorConfig = {
 		const collectNutritionTargets = wantsNutrition;
 
 		const ordersState = (state.orders ?? {}) as OrdersStateShape;
-		const boundary = resumeBoundary(ordersState.checkpoint);
+		// An explicit full refresh ignores the resume checkpoint and walks the
+		// whole order history, which is the only run that can complete nutrition
+		// for an account whose history is longer than the boundary page.
+		const boundary =
+			collectionMode === "full_refresh"
+				? null
+				: resumeBoundary(ordersState.checkpoint);
 		// A committed `orders` checkpoint is this connection's own record that
 		// H-E-B has listed orders for this account before. It is what makes a
 		// later "no order history" page a contradiction to escalate rather than
