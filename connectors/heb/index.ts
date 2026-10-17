@@ -1406,13 +1406,14 @@ async function reportEmptyPageDiagnostics(
 // ─── Coverage accounting (order_items detail hydration) ───────────────────
 
 export interface OrderItemsCoverage {
+	empty: string[];
 	gap: string[];
 	hydrated: string[];
 	required: string[];
 }
 
 export function newOrderItemsCoverage(): OrderItemsCoverage {
-	return { gap: [], hydrated: [], required: [] };
+	return { empty: [], gap: [], hydrated: [], required: [] };
 }
 
 /**
@@ -1446,10 +1447,11 @@ export function newOrdersCoverage(): OrdersCoverage {
  *  - `hydrated` — the detail page fetched and parsed.
  *  - `gap`      — the detail fetch was attempted but degraded, or the order
  *                 never reached the detail lane (e.g., unparseable order date).
- * Both outcomes remain in the required denominator — the order was enumerated
+ *  - `empty`    — the order was canceled and has nothing to hydrate.
+ * All outcomes remain in the required denominator — the order was enumerated
  * by the parent list scan and must not silently vanish from coverage.
  */
-export type DetailOutcome = "hydrated" | "gap";
+export type DetailOutcome = "hydrated" | "gap" | "empty";
 
 export function recordDetailOutcome(
 	coverage: OrderItemsCoverage,
@@ -1459,6 +1461,8 @@ export function recordDetailOutcome(
 	coverage.required.push(orderId);
 	if (outcome === "hydrated") {
 		coverage.hydrated.push(orderId);
+	} else if (outcome === "empty") {
+		coverage.empty.push(orderId);
 	} else {
 		coverage.gap.push(orderId);
 	}
@@ -2022,6 +2026,17 @@ function quantityShapeCounts(items: readonly { quantity: number | null }[]): {
 	return counts;
 }
 
+/** Whether H-E-B's own status for the order says it was canceled: the card's
+ *  status text ("Order canceled") or the structured status code. A pending
+ *  "Cancel order" button or a cancellation request does not match. */
+export function isCanceledOrder(
+	order: Pick<ListPageOrder, "status" | "statusCode">,
+): boolean {
+	return [order.status, order.statusCode].some(
+		(value) => typeof value === "string" && /cancel+ed/i.test(value),
+	);
+}
+
 /** Process one list-page order: fetch detail (if in scope), account for
  *  coverage, emit gaps, and emit the order + item records. */
 /** The `deps.wantsItems` branch of `processListOrder`: fetch the order
@@ -2035,6 +2050,18 @@ async function fetchDetailAndRecordCoverage(
 	listOrder: ListPageOrder,
 	orderDate: string,
 ): Promise<OrderDetail | null> {
+	// H-E-B shows a canceled order as "$0.00, 0 items". With 0 expected units
+	// the surface cannot key rows the page may still list, so the fetch failed
+	// on every run and the gap never closed. There is nothing to hydrate: the
+	// order is accounted for as empty, and items stored earlier stay as they
+	// are. A canceled card that still declares items is fetched as usual.
+	if (isCanceledOrder(listOrder) && listOrder.itemCount === 0) {
+		if (deps.orderItemsCoverage) {
+			recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, "empty");
+		}
+		connectorDiagnostic("heb", "canceled_order_skipped", { card_units: 0 });
+		return null;
+	}
 	const result = await resolveOrderDetail(page, flags, listOrder.orderId, {
 		...(deps.capture ? { capture: deps.capture } : {}),
 		detailSurfaceTimeoutMs: deps.detailSurfaceTimeoutMs,
@@ -2516,10 +2543,12 @@ export async function emitOrderItemsCoverage(
 		stream: "order_items",
 		stateStream: "orders",
 		requiredKeys: coverage.required,
-		hydratedKeys: coverage.hydrated,
+		// "empty" is folded into hydrated because the host has no separate set yet;
+		// when it accepts DETAIL_COVERAGE_KEY_SETS this becomes empty_keys.
+		hydratedKeys: [...coverage.hydrated, ...coverage.empty],
 		gapKeys: coverage.gap,
 		considered: coverage.required.length,
-		covered: coverage.hydrated.length,
+		covered: coverage.hydrated.length + coverage.empty.length,
 	});
 }
 

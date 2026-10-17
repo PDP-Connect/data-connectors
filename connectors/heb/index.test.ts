@@ -503,6 +503,7 @@ test("emitOrderItemsCoverage: gap marks an actionable degradation (not optional 
 	const coverage: OrderItemsCoverage = {
 		required: ["a", "b"],
 		hydrated: ["a"],
+		empty: [],
 		gap: ["b"],
 	};
 	await emitOrderItemsCoverage(deps, coverage);
