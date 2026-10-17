@@ -113,6 +113,9 @@ export const HEB_REPAIR_RETRY_DELAY_MAX_MS = 2500;
 const DETAIL_SURFACE_TIMEOUT_MS = 30_000;
 const DETAIL_SURFACE_POLL_MS = 250;
 const DETAIL_SURFACE_STABLE_POLLS = 3;
+// With no card count to bound the list, a quiet surface is the only evidence of
+// its end, so it must stay quiet longer (about two seconds) before it counts.
+const DETAIL_SURFACE_CARDLESS_STABLE_POLLS = 8;
 const DETAIL_SURFACE_DEBUG_ENV = "HEB_DETAIL_SURFACE_DEBUG";
 const DETAIL_SURFACE_DEBUG_MIN_ITEM_COUNT = 26;
 const DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT = 2;
@@ -290,27 +293,40 @@ function inspectAndAdvanceDetailSurface(input: {
 	// that no ancestor clips may still be keyed by content. `collectDetailSurface`
 	// then accepts it only when every row is mounted at once and none was ever
 	// unmounted, which needs no card. A list inside its own scroll port or a
-	// clipped shell can hide rows from this view, so it still fails closed.
-	let clipped = false;
-	for (
-		let current: Element | null = row;
-		current;
-		current = current.parentElement
-	) {
-		const overflow = getComputedStyle(current).overflowY;
-		if (overflow === "hidden" || overflow === "clip") {
-			clipped = true;
-			break;
+	// clipped shell can hide rows from this view, so it still fails closed. Every
+	// row's containers are checked, not only the first row's, because a later
+	// section can sit in its own scroller. A row's own box is not a container:
+	// cards clip their own overflow for rounded corners and ellipses.
+	const rootScroller = document.scrollingElement ?? document.documentElement;
+	const seenContainers = new Set<Element>();
+	let clippedOrScrolledApart = false;
+	for (const link of rowLinks) {
+		const itemRow = link.closest("li") ?? link;
+		for (
+			let current: Element | null = itemRow.parentElement;
+			current && !seenContainers.has(current);
+			current = current.parentElement
+		) {
+			seenContainers.add(current);
+			const overflow = getComputedStyle(current).overflowY;
+			if (overflow === "hidden" || overflow === "clip") {
+				clippedOrScrolledApart = true;
+			} else if (
+				(overflow === "auto" || overflow === "scroll") &&
+				current.scrollHeight > current.clientHeight &&
+				current !== rootScroller &&
+				current !== document.documentElement
+			) {
+				clippedOrScrolledApart = true;
+			}
 		}
 	}
-	const scrollsWithDocument =
-		scrollPort === document.scrollingElement ||
-		scrollPort === document.documentElement;
+	const scrollsWithDocument = scrollPort === rootScroller;
 	const cardlessContentIdentity =
 		staticListEvidence === null &&
 		rowLinks.length > 0 &&
 		scrollsWithDocument &&
-		!clipped &&
+		!clippedOrScrolledApart &&
 		(expectedItemCount === null || rowLinks.length > expectedItemCount);
 	const canAttemptVirtualizedContentIdentity =
 		guidedContentIdentity || cardlessContentIdentity;
@@ -580,6 +596,55 @@ async function collectDetailSurface(
 	const contentHrefEverUnmounted = new Set<string>();
 	const failedQuantityRows = new Map<string, { row: number; shape: string }>();
 	let ambiguousContentHref: string | null = null;
+	// A surface that ever showed positional rows and later fell back to content
+	// keys may have swapped its list. The scheme change clears what was
+	// collected, so this flag keeps a card-less pass from accepting the rest.
+	let sawPositionalScheme = false;
+
+	/** The completion verdict for the latest snapshot. The poll loop and the final
+	 *  settlement must agree, so both read it here. Content keys minted with no
+	 *  usable card (see the cardless branch of inspectAndAdvanceDetailSurface) are
+	 *  accepted on the structural proof alone, after a longer quiet period; a
+	 *  missing or too-small card is not evidence either way. */
+	const assessCompletion = (): {
+		accepted: boolean;
+		fullyCollectedStaticList: boolean;
+		observedUnits: number | null;
+	} => {
+		const observedUnits = knownUnitTotal(collectedUnits.values());
+		const contentKeysWithoutCard =
+			collectedScheme === "content:href" &&
+			(expectedUnits === null || expectedUnits <= latest.rowCount);
+		const quiet =
+			latest.atEnd &&
+			!latest.loading &&
+			!latest.actionableControl &&
+			stablePolls >=
+				(contentKeysWithoutCard
+					? DETAIL_SURFACE_CARDLESS_STABLE_POLLS
+					: DETAIL_SURFACE_STABLE_POLLS);
+		const fullyCollectedStaticList =
+			quiet &&
+			collectedScheme === "content:href" &&
+			contentHrefEverUnmounted.size === 0 &&
+			collected.size === latest.rowCount &&
+			!(contentKeysWithoutCard && sawPositionalScheme);
+		const declaredCountRowsCollected =
+			expectedUnits !== null &&
+			latest.staticListEvidence === "declared_count" &&
+			collected.size >= expectedUnits;
+		return {
+			accepted:
+				quiet &&
+				(fullyCollectedStaticList ||
+					(!contentKeysWithoutCard &&
+						(expectedUnits === null ||
+							(observedUnits !== null && observedUnits >= expectedUnits) ||
+							declaredCountRowsCollected))),
+			fullyCollectedStaticList,
+			observedUnits,
+		};
+	};
 
 	while (Date.now() - startedAt < timeoutMs) {
 		try {
@@ -601,6 +666,9 @@ async function collectDetailSurface(
 		// than the truth. Only rows sharing the latest snapshot's
 		// scheme are comparable, so a scheme change restarts collection.
 		const scheme = identitySchemeOf(latest.rows);
+		if (scheme?.startsWith("position:")) {
+			sawPositionalScheme = true;
+		}
 		if (scheme !== null && scheme !== collectedScheme) {
 			collected.clear();
 			collectedUnits.clear();
@@ -729,68 +797,16 @@ async function collectDetailSurface(
 			// is reported as an error (not a silent hydrate) below.
 			break;
 		}
-		const fullyCollectedStaticList =
-			latest.atEnd &&
-			!latest.loading &&
-			!latest.actionableControl &&
-			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			collectedScheme === "content:href" &&
-			contentHrefEverUnmounted.size === 0 &&
-			collected.size === latest.rowCount;
-		const declaredCountRowsCollected =
-			expectedUnits !== null &&
-			latest.staticListEvidence === "declared_count" &&
-			collected.size >= expectedUnits;
-		// Content keys minted with no usable card (see the cardless branch of
-		// inspectAndAdvanceDetailSurface) are accepted on the structural proof
-		// alone; a missing or too-small card is not evidence either way.
-		const contentKeysWithoutCard =
-			collectedScheme === "content:href" &&
-			(expectedUnits === null || expectedUnits <= latest.rowCount);
-		if (
-			latest.atEnd &&
-			!latest.loading &&
-			!latest.actionableControl &&
-			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			(fullyCollectedStaticList ||
-				(!contentKeysWithoutCard &&
-					(expectedUnits === null ||
-						(observedUnits !== null && observedUnits >= expectedUnits) ||
-						declaredCountRowsCollected)))
-		) {
+		if (assessCompletion().accepted) {
 			break;
 		}
 		await page.waitForTimeout(DETAIL_SURFACE_POLL_MS);
 	}
 
 	const timedOut = Date.now() - startedAt >= timeoutMs;
-	const observedUnits = knownUnitTotal(collectedUnits.values());
-	const fullyCollectedStaticList =
-		latest.atEnd &&
-		!latest.loading &&
-		!latest.actionableControl &&
-		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		collectedScheme === "content:href" &&
-		contentHrefEverUnmounted.size === 0 &&
-		collected.size === latest.rowCount;
-	const declaredCountRowsCollected =
-		expectedUnits !== null &&
-		latest.staticListEvidence === "declared_count" &&
-		collected.size >= expectedUnits;
-	const contentKeysWithoutCard =
-		collectedScheme === "content:href" &&
-		(expectedUnits === null || expectedUnits <= latest.rowCount);
-	const complete =
-		!lastError &&
-		latest.atEnd &&
-		!latest.loading &&
-		!latest.actionableControl &&
-		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		(fullyCollectedStaticList ||
-			(!contentKeysWithoutCard &&
-				(expectedUnits === null ||
-					(observedUnits !== null && observedUnits >= expectedUnits) ||
-					declaredCountRowsCollected)));
+	const { accepted, fullyCollectedStaticList, observedUnits } =
+		assessCompletion();
+	const complete = !lastError && accepted;
 	let settlement: DetailSurfaceSettlement = "incomplete";
 	if (lastError) {
 		settlement = "error";

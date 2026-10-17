@@ -3603,9 +3603,11 @@ function syntheticStaticQuantityFixture(): string {
 // items were lost. These tests prove the content-identity fallback (see
 // inspectAndAdvanceDetailSurface's `content:href=` key and
 // collectDetailSurface's ambiguous-href guard) closes that gap without
-// weakening the existing fail-closed tests above (which never pass a large
-// expectedItemCount, so they are unaffected — see
-// canAttemptVirtualizedContentIdentity's guard in index.ts).
+// weakening the existing fail-closed tests above. Those fixtures keep failing
+// because of their geometry, not because of a large expectedItemCount: one
+// scrolls inside its own port and one hides its rows in a clipped shell, and
+// content keys without a card are allowed only for unclipped document-flow
+// lists (see cardlessContentIdentity in index.ts).
 
 test("fetchOrderDetail: static 58-row detail reconciles 84 units, including weighed Qty rows", async () => {
 	const browser = await chromium.launch({ headless: true });

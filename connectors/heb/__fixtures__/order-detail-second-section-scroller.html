@@ -1,0 +1,44 @@
+<!-- Synthetic adversarial fixture: the first department is an ordinary list in
+     the document flow, but the second department scrolls inside its own
+     container and mounts only the rows near its top (a windowed list). A check
+     that looks only at the first row's containers would call the whole page
+     document-flow and certify the mounted rows as the complete list. -->
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+      }
+      li {
+        height: 40px;
+      }
+      #second {
+        height: 80px;
+        overflow-y: auto;
+      }
+      #second .reserve {
+        height: 600px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <h2 data-qe-id="orderDetailsGroupTitle">Produce</h2>
+        <ul>
+          <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/first/1">First 1</a></li>
+          <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/first/2">First 2</a></li>
+        </ul>
+      </section>
+      <section id="second">
+        <h2 data-qe-id="orderDetailsGroupTitle">Dairy</h2>
+        <ul>
+          <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/second/1">Second 1</a></li>
+          <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/second/2">Second 2</a></li>
+        </ul>
+        <div class="reserve"></div>
+      </section>
+    </main>
+  </body>
+</html>

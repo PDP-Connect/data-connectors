@@ -95,6 +95,8 @@ test("fetchOrderDetail: a 20-row static list in the document flow hydrates witho
 });
 
 for (const name of [
+	"order-detail-second-section-scroller.html",
+	"order-detail-positional-then-unpositioned.html",
 	"order-detail-unattributed-large-virtualized.html",
 	"order-detail-virtualized-ambiguous-repeat.html",
 	"order-detail-missing-row-identity.html",
@@ -128,6 +130,24 @@ test("fetchOrderDetail: a document-flow virtualizer fails closed without a card 
 				result.status === "failed" ? result.failureKind : null,
 				"detail_surface_error",
 				"it is keyed by content, then refused because no structural proof of a complete list exists",
+			);
+		},
+	);
+});
+
+test("fetchOrderDetail: without a card a slow append is waited for, not missed", async () => {
+	await withDetailPage(
+		fixture("order-detail-delayed-append.html"),
+		async (page) => {
+			const result = await fetchOrderDetail(page, "HEB1000000001", {
+				detailSurfaceTimeoutMs: 10_000,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(result.status, "hydrated");
+			assert.equal(
+				result.status === "hydrated" ? result.detail.items.length : 0,
+				4,
+				"the two rows appended 1.4 s after load are part of the list",
 			);
 		},
 	);

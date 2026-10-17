@@ -1,0 +1,41 @@
+<!-- Synthetic adversarial fixture: the page first shows two rows that carry a
+     positional attribute, then, on the first scroll, swaps the list for two
+     other rows that carry none. Collection restarts when the identity scheme
+     changes, so without run-wide memory the second pair would pass as a whole,
+     complete list and the first pair would be lost. -->
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+      }
+      li {
+        height: 80px;
+      }
+      #spacer {
+        height: 3000px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <ul id="rows" style="list-style: none; margin: 0; padding: 0">
+        <li data-qe-id="itemRow" data-index="0"><a data-qe-id="itemRowDetailsName" href="/product-detail/a/1">A1</a></li>
+        <li data-qe-id="itemRow" data-index="1"><a data-qe-id="itemRowDetailsName" href="/product-detail/a/2">A2</a></li>
+      </ul>
+      <div id="spacer"></div>
+    </main>
+    <script>
+      let swapped = false;
+      window.addEventListener("scroll", () => {
+        if (swapped) {
+          return;
+        }
+        swapped = true;
+        document.querySelector("#rows").innerHTML =
+          '<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/b/1">B1</a></li><li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/b/2">B2</a></li>';
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,33 @@
+<!-- Synthetic fixture: a document-flow list shows two rows, then appends two
+     more about a second and a half later with no loading marker and no
+     control. With a card count the list is checked against it. With none, only
+     a longer quiet period keeps a slow append from being missed. -->
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+      }
+      li {
+        height: 40px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <ul id="rows" style="list-style: none; margin: 0; padding: 0">
+        <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/late/1">Late 1</a></li>
+        <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/late/2">Late 2</a></li>
+      </ul>
+    </main>
+    <script>
+      setTimeout(() => {
+        document.querySelector("#rows").insertAdjacentHTML(
+          "beforeend",
+          '<li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/late/3">Late 3</a></li><li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/late/4">Late 4</a></li>',
+        );
+      }, 1400);
+    </script>
+  </body>
+</html>
