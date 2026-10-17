@@ -603,18 +603,44 @@ export async function hasSpotifySession(
 	}
 }
 
-async function ensureSpotifySession({
-	assist,
-	capture,
-	completeAssistance,
-	page,
-	sendInteraction,
-}: EnsureSessionArgs): Promise<void> {
+/**
+ * Only an owner signing in at the secure browser repairs a dead Spotify
+ * session; there is no stored credential to replay. A run the host did not
+ * start by hand (`scheduled`, `retry`, `webhook`) has no owner there, so it
+ * must fail instead of holding a browser lane through the 30-minute handoff.
+ * Absent trigger metadata is a local or test run and keeps the handoff, as in
+ * whoop, heb and chatgpt.
+ */
+export function spotifyAllowsInteractiveSignIn(
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	const trigger = env.PDPP_RUN_TRIGGER_KIND?.trim();
+	return !trigger || trigger === "manual";
+}
+
+export async function ensureSpotifySession(
+	{
+		assist,
+		capture,
+		completeAssistance,
+		page,
+		progress,
+		sendInteraction,
+	}: EnsureSessionArgs,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
 	if (await hasSpotifySession(page)) return;
+	if (!spotifyAllowsInteractiveSignIn(env)) {
+		await progress(
+			"Spotify needs you to sign in. Start a manual run to open the secure browser.",
+		);
+		throw new Error("spotify_session_required");
+	}
 	await page.goto(
 		"https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F",
 		{ waitUntil: "domcontentloaded" },
 	);
+	await progress("Waiting for you to sign in to Spotify");
 	const ready = await manualBrowserLogin({
 		assist,
 		capture,
