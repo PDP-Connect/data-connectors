@@ -145,6 +145,25 @@ for (const [name, verdict] of [
 	});
 }
 
+test("fetchOrderDetail: a page that turns mixed after a good snapshot is reported with its current verdict", async () => {
+	await withDetailPage(
+		fixture("order-detail-late-position.html"),
+		async (page) => {
+			const { fields, result } = await fetchWithDiagnostics(page, {
+				detailSurfaceTimeoutMs: 5_000,
+				waitForHydration: immediateWait,
+			});
+			assert.equal(result.status, "failed");
+			assert.equal(fields?.err, "no_positional_identity");
+			assert.equal(
+				fields?.cardless,
+				"mixed_positions",
+				"the earlier snapshot was allowed; the page that failed is mixed",
+			);
+		},
+	);
+});
+
 test("fetchOrderDetail: a list swapped from positional to unpositioned rows is refused after the quiet period", async () => {
 	await withDetailPage(
 		fixture("order-detail-positional-then-unpositioned.html"),

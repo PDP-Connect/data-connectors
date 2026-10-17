@@ -1,0 +1,34 @@
+<!-- Synthetic adversarial fixture: two rows with no positional attribute are
+     keyed by content and sit quiet, then a third row that carries a positional
+     attribute appears. The page is now mixed, so the next snapshot cannot be
+     keyed and the surface fails. The diagnostic must name the current verdict
+     for that page, not the one from the earlier, successful snapshot. -->
+<!doctype html>
+<html>
+  <head>
+    <style>
+      body {
+        margin: 0;
+      }
+      li {
+        height: 40px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <ul id="rows" style="list-style: none; margin: 0; padding: 0">
+        <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/late/1">Late 1</a></li>
+        <li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/late/2">Late 2</a></li>
+      </ul>
+    </main>
+    <script>
+      setTimeout(() => {
+        document.querySelector("#rows").insertAdjacentHTML(
+          "beforeend",
+          '<li data-qe-id="itemRow" data-index="9"><a data-qe-id="itemRowDetailsName" href="/product-detail/late/3">Late 3</a></li>',
+        );
+      }, 700);
+    </script>
+  </body>
+</html>

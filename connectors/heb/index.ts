@@ -883,7 +883,9 @@ async function collectDetailSurface(
 		expectedUnits,
 		hrefsEverUnmounted: contentHrefEverUnmounted.size,
 		identityScheme: collectedScheme,
-		cardless: latest.cardless ?? cardlessVerdictFromError(lastError) ?? "n/a",
+		// A snapshot that threw leaves `latest` at the previous one, so the verdict
+		// the error names for the current page wins over the stale state.
+		cardless: cardlessVerdictFromError(lastError) ?? latest.cardless ?? "n/a",
 		lastAction,
 		lastError,
 		loading: latest.loading,
