@@ -40,6 +40,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createConnectorHttpGovernor } from "../../packages/polyfill-connectors/src/connector-http-governor.ts";
 import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { ynabPacingProfile } from "../../packages/polyfill-connectors/src/provider-profile.ts";
 import {
@@ -50,10 +51,22 @@ import {
 	aggregateScheduledTransactionsCoverage,
 	type BudgetCtx,
 	collectScheduledTransactions,
+	createYnabRequest,
 	type ScheduledTransactionsBudgetFact,
 	ynab,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
+
+// The production governor with pacing opted out, so a test goes through the
+// real request and error path without waiting out the provider's 20 s floor.
+const unpacedYnab = createYnabRequest(
+	createConnectorHttpGovernor({
+		maxAttempts: 1,
+		name: "ynab",
+		pacingInitialIntervalMs: 0,
+		profile: ynabPacingProfile(),
+	}),
+);
 
 const BUDGET_A = "44444444-4444-4444-8444-444444444444";
 const BUDGET_B = "55555555-5555-4555-8555-555555555555";
@@ -435,7 +448,7 @@ test("aggregate: no facts (stream not requested / no budgets) -> not proven", ()
 test("collect(): failed fetch never reaches the coverage emit (no DETAIL_COVERAGE, no STATE for scheduled_transactions)", async () => {
 	const restore = stubFetchFailure();
 	try {
-		const { ctx, messages } = makeCtx(BUDGET_A, {}, ynab);
+		const { ctx, messages } = makeCtx(BUDGET_A, {}, unpacedYnab);
 		await assert.rejects(() => collectScheduledTransactions(ctx));
 		// The top-level collect() loop only reaches the post-loop aggregate-and-emit
 		// step if collectForBudget resolves for every budget; a thrown fetch error

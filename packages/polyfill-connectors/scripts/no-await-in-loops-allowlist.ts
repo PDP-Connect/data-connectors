@@ -441,14 +441,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/anthropic/integration.test.ts",
-			line: 5238,
+			line: 5241,
 			column: 18,
 			category: "test_assertion_sequencing",
 			note: "New tests: each case runs a collection and asserts its ordered per-case side effects.",
 		},
 		{
 			path: "connectors/anthropic/integration.test.ts",
-			line: 5289,
+			line: 5292,
 			column: 41,
 			category: "test_assertion_sequencing",
 			note: "New tests: each case runs a collection and asserts its ordered per-case side effects.",
@@ -2541,21 +2541,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/linkedin/integration.test.ts",
-			line: 701,
+			line: 708,
 			column: 17,
 			category: "test_assertion_sequencing",
 			note: "Two-run upsert scenarios mock global fetch and must not overlap.",
 		},
 		{
 			path: "connectors/linkedin/integration.test.ts",
-			line: 861,
+			line: 868,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "The truncated-section cases share buildCtx's global fetch shim, so their runs must not overlap.",
 		},
 		{
 			path: "connectors/linkedin/integration.test.ts",
-			line: 1878,
+			line: 1885,
 			column: 3,
 			category: "test_assertion_sequencing",
 			note: "The UPSERT-ONLY fixture cases share buildCtx's global fetch shim, so their runs must not overlap.",
@@ -3437,7 +3437,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/usaa/export-dialog-resilience.test.ts",
-			line: 1098,
+			line: 1103,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "legacy STATE replay loop: each format's transactions cursor is the next format's persisted input, so iterations cannot run in parallel",
@@ -3549,7 +3549,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/usaa/integration.test.ts",
-			line: 1162,
+			line: 1167,
 			column: 19,
 			category: "test_assertion_sequencing",
 			note: "driveExport(): test drives/asserts an ordered per-case side effect",
@@ -4830,7 +4830,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/test-harness.test.ts",
-			line: 351,
+			line: 356,
 			column: 18,
 			category: "bounded_retry_polling",
 			note: "runConnectorProtocolSubprocess grandchild test: poll the grandchild's /proc stat until it exits or the deadline passes; each probe must observe the state the previous one left",

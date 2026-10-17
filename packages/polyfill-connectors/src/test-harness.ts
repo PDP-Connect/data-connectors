@@ -464,3 +464,37 @@ export function runConnectorProtocolSubprocess(
 		child.stdin?.end(stringifyForJsonl(options.start));
 	});
 }
+
+const POLITE_DELAY_FRAME = /\bat politeDelay \(/;
+
+/**
+ * Make `politeDelay` pauses fire on the next timer tick until the returned
+ * function runs.
+ *
+ * `politeDelay` is the runtime's anti-bot pacing pause. A test that walks
+ * pages through a connector pays it on every page (2.5 s per Whole Foods
+ * navigation, about half a second per heb list page) and does not assert on
+ * it. Only timers armed from inside `politeDelay` are shortened, found by the
+ * call stack, so a watchdog, a polling interval or Playwright's own timeout
+ * in the code under test keeps its real duration.
+ *
+ * It patches `globalThis.setTimeout` for the whole process: install it once
+ * per test file with `after(skipPoliteDelays())`, which also restores it.
+ */
+export function skipPoliteDelays(): () => void {
+	const realSetTimeout = globalThis.setTimeout;
+	globalThis.setTimeout = ((
+		handler: () => void,
+		delay?: number,
+		...args: unknown[]
+	) => {
+		const isPause =
+			typeof delay === "number" &&
+			delay > 0 &&
+			POLITE_DELAY_FRAME.test(new Error().stack ?? "");
+		return realSetTimeout(handler, isPause ? 0 : delay, ...args);
+	}) as unknown as typeof setTimeout;
+	return () => {
+		globalThis.setTimeout = realSetTimeout;
+	};
+}
