@@ -2185,8 +2185,8 @@ const UNREADABLE_DETAIL_KINDS: ReadonlySet<DetailFailureKind> = new Set([
 ]);
 
 /** Close the pending gap that gap recovery re-deferred for this order, if any,
- *  once the forward scan has settled the order itself (its items are emitted, or
- *  H-E-B declares it empty). No item records are invented. */
+ *  once H-E-B's declared zero settles it. Nothing is left to deliver, so no item
+ *  record can be filtered or rejected on the way. No item records are invented. */
 async function closePendingGap(
 	deps: Pick<EmitDeps, "emit" | "pendingGapsByOrderId">,
 	orderId: string,
@@ -2336,9 +2336,6 @@ export async function processListOrder(
 		: null;
 
 	await emitOrderAndItems(deps, listOrder, detail, orderDate);
-	if (detail) {
-		await closePendingGap(deps, listOrder.orderId);
-	}
 }
 
 /**
