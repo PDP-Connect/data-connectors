@@ -2429,14 +2429,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/linkedin/index.ts",
-			line: 771,
+			line: 806,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collectLinkedIn(): each profile section stream emits its records, coverage and gap before the next stream starts.",
 		},
 		{
 			path: "connectors/linkedin/index.ts",
-			line: 931,
+			line: 966,
 			column: 3,
 			category: "ordered_protocol_emission",
 			note: "emitRows(): covered rows must reach the sink in source order before the stream's coverage result.",
