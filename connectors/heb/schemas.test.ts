@@ -300,6 +300,20 @@ test("validateRecord rejects a malformed orders record via shape check", () => {
 	assert.equal(result.ok, false);
 });
 
+test("profile schema preserves array and boolean legacy contracts", () => {
+	assert.equal(profileSchema.safeParse({
+		...PROFILE_RECORD, delivery_addresses: null,
+	}).success, false);
+	assert.equal(profileSchema.safeParse({
+		...PROFILE_RECORD,
+		delivery_addresses: [{ ...PROFILE_RECORD.delivery_addresses[0], is_primary: null }],
+	}).success, false);
+	assert.equal(profileSchema.safeParse({
+		...PROFILE_RECORD,
+		delivery_addresses: [{ ...PROFILE_RECORD.delivery_addresses[0], is_primary: false }],
+	}).success, true);
+});
+
 test("profile schema accepts a parser-shaped record", () => {
 	const result = profileSchema.safeParse(PROFILE_RECORD);
 	assert.ok(result.success, JSON.stringify(result.error?.issues));

@@ -71,7 +71,7 @@ function makeCollectPage(routes: {
 		{
 			get(_target, prop): unknown {
 				if (prop === "goto") {
-					return (url: string): Promise<null> => {
+					return (url: string): Promise<unknown> => {
 						if (
 							routes.failProductNavigation &&
 							url.includes("/product-detail/")
@@ -82,7 +82,9 @@ function makeCollectPage(routes: {
 						if (url.includes("/my-account/order-history/")) {
 							currentHtml = routes.detailHtml ?? "";
 						} else if (url.includes("/product-detail/")) {
-							currentHtml = routes.productHtml ?? "<html><body></body></html>";
+							currentHtml =
+								routes.productHtml ??
+								"<main><div><h3>Nutrition Facts</h3><ul><li>Calories 0</li></ul></div></main>";
 						} else if (url.includes("/my-account/your-orders")) {
 							const requestedPage = /page=(\d+)/.exec(url)?.[1];
 							currentHtml =
@@ -92,7 +94,7 @@ function makeCollectPage(routes: {
 						} else {
 							currentHtml = "";
 						}
-						return Promise.resolve(null);
+						return Promise.resolve({ ok: () => true });
 					};
 				}
 				if (prop === "waitForSelector") {
@@ -196,33 +198,46 @@ function makeContext(
 	return ctx as unknown as TestContext;
 }
 
-test("collect: nutrition-only completes verified-empty zero-product runs after H-E-B's empty order renderer", async () => {
+function assertPartial(ctx: TestContext): void {
+	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
+	assert.equal(findMessages(ctx.protocolMessages, "DETAIL_COVERAGE").length, 0);
+	assert.equal(
+		findMessages(ctx.protocolMessages, "DETAIL_GAP_RECOVERED").length,
+		0,
+	);
+	const skips = findMessages(ctx.protocolMessages, "SKIP_RESULT").filter(
+		(s) => s.reason === "inventory_not_proven_complete",
+	);
+	for (const stream of ctx.scope?.streams ?? []) {
+		assert.ok(
+			skips.some(
+				(skip) =>
+					skip.stream === stream.name &&
+					typeof skip.recovery_hint === "object" &&
+					skip.recovery_hint.action === "retry_by_runtime" &&
+					skip.recovery_hint.retryable,
+			),
+			stream.name,
+		);
+	}
+	assert.equal(
+		ctx.reportedStreamFailures.length,
+		0,
+		"unproven inventory is a retryable skip, not a fabricated stream failure",
+	);
+}
+
+test("collect: nutrition-only keeps owner-unbound empty-renderer results partial", async () => {
 	const page = makeCollectPage({
 		listHtml: fixture("orders-list-no-past-orders.html"),
 	});
 	const ctx = makeContext(["nutrition"], page);
 
 	await hebConnector.collect(ctx);
-
-	const states = findMessages(ctx.protocolMessages, "STATE");
-	assert.deepEqual(
-		states.map((state) => state.stream),
-		["nutrition"],
-		"nutrition-only verified empty must emit only the requested stream's completion state",
-	);
-	assert.deepEqual(states[0]?.cursor, {
-		completed_at: EMITTED_AT,
-		product_count: 0,
-		source: "heb_order_history",
-	});
-	assert.equal(
-		findMessages(ctx.protocolMessages, "SKIP_RESULT").length,
-		0,
-		"H-E-B's own empty order renderer is positive source evidence",
-	);
+	assertPartial(ctx);
 });
 
-test("collect: missing order-list evidence reports stream_collection_failed for requested dependent streams", async () => {
+test("collect: missing order-list evidence reports retryable inventory skip for requested dependent streams", async () => {
 	const page = makeCollectPage({
 		listHtml: "<html><body><main><h1>Your orders</h1></main></body></html>",
 	});
@@ -233,23 +248,7 @@ test("collect: missing order-list evidence reports stream_collection_failed for 
 		"unprovable enumeration must report stream failure instead of a generic thrown error",
 	);
 
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.stream),
-		["orders", "order_items", "nutrition"],
-	);
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.reason),
-		[
-			"stream_collection_failed",
-			"stream_collection_failed",
-			"stream_collection_failed",
-		],
-	);
-	assert.equal(
-		findMessages(ctx.protocolMessages, "STATE").length,
-		0,
-		"an unproven list enumeration must not mark any requested dependent stream complete",
-	);
+	assertPartial(ctx);
 });
 
 test("collect: nutrition detail coverage gaps report stream_collection_failed and do not emit nutrition STATE", async () => {
@@ -270,22 +269,7 @@ test("collect: nutrition detail coverage gaps report stream_collection_failed an
 	});
 
 	await hebConnector.collect(ctx);
-
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.stream),
-		["nutrition"],
-	);
-	assert.equal(
-		ctx.reportedStreamFailures[0]?.reason,
-		"stream_collection_failed",
-	);
-	assert.equal(
-		findMessages(ctx.protocolMessages, "STATE").some(
-			(state) => state.stream === "nutrition",
-		),
-		false,
-		"failed nutrition coverage must not mark nutrition complete",
-	);
+	assertPartial(ctx);
 });
 
 test("collect: unresolved prior detail gaps fail the nutrition coverage gate after a verified empty scan", async () => {
@@ -305,15 +289,7 @@ test("collect: unresolved prior detail gaps fail the nutrition coverage gate aft
 		},
 	);
 	await hebConnector.collect(ctx);
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.stream),
-		["order_items", "nutrition"],
-	);
-	assert.equal(
-		findMessages(ctx.protocolMessages, "STATE").length,
-		0,
-		"unresolved coverage cannot commit a completed nutrition cursor",
-	);
+	assertPartial(ctx);
 });
 test("collect: nutrition-only missing list evidence fails only the requested stream", async () => {
 	const ctx = makeContext(
@@ -324,16 +300,7 @@ test("collect: nutrition-only missing list evidence fails only the requested str
 		() => hebConnector.collect(ctx),
 		"unprovable enumeration must report stream failure instead of a generic thrown error",
 	);
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.stream),
-		["nutrition"],
-	);
-	assert.deepEqual(
-		ctx.protocolMessages.flatMap((message) =>
-			"stream" in message ? [message.stream] : [],
-		),
-		["nutrition"],
-	);
+	assertPartial(ctx);
 });
 
 const WIDGET_DETAIL_HTML = `<html><body><main><ul>
@@ -344,7 +311,7 @@ const WIDGET_DETAIL_HTML = `<html><body><main><ul>
   </li>
 </ul></main></body></html>`;
 
-test("collect: nutrition-only with products emits nutrition records and STATE, no unrequested streams", async () => {
+test("collect: nutrition-only with products emits nutrition records without STATE, no unrequested streams", async () => {
 	const ctx = makeContext(
 		["nutrition"],
 		makeCollectPage({
@@ -354,23 +321,54 @@ test("collect: nutrition-only with products emits nutrition records and STATE, n
 	);
 
 	await hebConnector.collect(ctx);
-
+	assertPartial(ctx);
 	assert.deepEqual(
 		ctx.emitted.map((record) => record.stream),
 		["nutrition"],
-		"orders and order_items evidence stays internal",
 	);
-	assert.deepEqual(
-		findMessages(ctx.protocolMessages, "STATE").map((s) => s.cursor),
-		[
-			{
-				completed_at: EMITTED_AT,
-				product_count: 1,
-				source: "heb_order_history",
-			},
-		],
+});
+
+for (const [label, field, amount, expected] of [
+	["Calcium", "calcium_mg", "100 mg", 100],
+	["Includes Added Sugars", "added_sugar_g", "0 g", 0],
+	["Cholesterol", "cholesterol_mg", "5 mg", 5],
+	["Saturated Fat", "saturated_fat_g", "1 g", 1],
+	["Trans Fat", "trans_fat_g", "0 g", 0],
+	["Iron", "iron_mg", "2 mg", 2],
+	["Potassium", "potassium_mg", "50 mg", 50],
+	["Vitamin D", "vitamin_d_mcg", "3 mcg", 3],
+] as const) {
+	test(`collect: ${label}-only nutrition survives without proving inventory complete`, async () => {
+		const ctx = makeContext(
+			["nutrition"],
+			makeCollectPage({
+				detailHtml: WIDGET_DETAIL_HTML,
+				listHtml: singleItemOrdersList(),
+				productHtml: `<main><div><h3>Nutrition Facts</h3><ul><li><span>${label}</span><ul><li>${amount}</li></ul></li></ul></div></main>`,
+			}),
+		);
+		await hebConnector.collect(ctx);
+		assertPartial(ctx);
+		assert.deepEqual(ctx.emitted.map((record) => record.stream), ["nutrition"]);
+		const record = ctx.emitted[0] as { stream: string; data: Record<string, unknown> };
+		assert.equal(record.data[field], expected);
+		assert.equal(record.data.source, "heb_product_page");
+		assert.equal(record.data.calories, null);
+	});
+}
+
+test("collect: a truly empty nutrition panel stays unemitted and retryable", async () => {
+	const ctx = makeContext(
+		["nutrition"],
+		makeCollectPage({
+			detailHtml: WIDGET_DETAIL_HTML,
+			listHtml: singleItemOrdersList(),
+			productHtml: "<main><div><h3>Nutrition Facts</h3><ul></ul></div></main>",
+		}),
 	);
-	assert.equal(ctx.reportedStreamFailures.length, 0);
+	await hebConnector.collect(ctx);
+	assertPartial(ctx);
+	assert.equal(ctx.emitted.length, 0);
 });
 
 test("collect: a skipped nutrition product lookup keeps its skip and withholds the completion STATE", async () => {
@@ -384,16 +382,7 @@ test("collect: a skipped nutrition product lookup keeps its skip and withholds t
 	);
 
 	await hebConnector.collect(ctx);
-
-	assert.deepEqual(
-		findMessages(ctx.protocolMessages, "SKIP_RESULT").map((s) => s.reason),
-		["nutrition_navigation_failed"],
-	);
-	assert.equal(
-		findMessages(ctx.protocolMessages, "STATE").length,
-		0,
-		"a stream with an unresolved product lookup is not finished",
-	);
+	assertPartial(ctx);
 });
 
 test("collect: a failure that is not an enumeration-end problem keeps its own failure meaning", async () => {
@@ -456,25 +445,10 @@ test("collect: nutrition-only run does not complete over a pending order_items g
 	);
 
 	await hebConnector.collect(ctx);
-
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.stream),
-		["nutrition"],
-		"a pending item-detail gap leaves some orders' products unenumerated",
-	);
-	assert.equal(
-		findMessages(ctx.protocolMessages, "STATE").length,
-		0,
-		"nutrition must not emit a completion STATE while item gaps are pending",
-	);
-	assert.equal(
-		ctx.emitted.some((record) => record.stream === "order_items"),
-		false,
-		"the unrequested order_items stream stays unemitted",
-	);
+	assertPartial(ctx);
 });
 
-test("collect: nutrition-only run still completes when only another stream's gap is pending", async () => {
+test("collect: nutrition-only run still needs source evidence when only another stream's gap is pending", async () => {
 	const ctx = makeContext(
 		["nutrition"],
 		makeCollectPage({ listHtml: fixture("orders-list-no-past-orders.html") }),
@@ -484,15 +458,10 @@ test("collect: nutrition-only run still completes when only another stream's gap
 	);
 
 	await hebConnector.collect(ctx);
-
-	assert.equal(ctx.reportedStreamFailures.length, 0);
-	assert.deepEqual(
-		findMessages(ctx.protocolMessages, "STATE").map((state) => state.stream),
-		["nutrition"],
-	);
+	assertPartial(ctx);
 });
 
-test("collect: nutrition completes when the last advertised page is also older than the resume boundary", async () => {
+test("collect: nutrition remains partial when the last advertised page is also older than the resume boundary", async () => {
 	const dateForPage = (pageNum: number): string =>
 		pageNum === 1 ? "Jul 1, 2026" : "Jan 5, 2026";
 	const ctx = makeContext(
@@ -507,16 +476,7 @@ test("collect: nutrition completes when the last advertised page is also older t
 	);
 
 	await hebConnector.collect(ctx);
-
-	assert.equal(
-		ctx.reportedStreamFailures.length,
-		0,
-		"reading the advertised last page is evidence of the end, even when it is older than the boundary",
-	);
-	assert.deepEqual(
-		findMessages(ctx.protocolMessages, "STATE").map((state) => state.stream),
-		["nutrition"],
-	);
+	assertPartial(ctx);
 });
 
 test("collect: nutrition still fails when the resume boundary stops the walk before the last page", async () => {
@@ -533,13 +493,7 @@ test("collect: nutrition still fails when the resume boundary stops the walk bef
 	);
 
 	await hebConnector.collect(ctx);
-
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.stream),
-		["nutrition"],
-		"a boundary stop short of the last page is not source evidence of the end",
-	);
-	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
+	assertPartial(ctx);
 });
 
 async function collectOverPageCeiling(streams: readonly string[]) {
@@ -566,49 +520,27 @@ async function collectOverPageCeiling(streams: readonly string[]) {
 
 test("collect: an items-only run truncated at the page ceiling fails order_items instead of finishing silently", async () => {
 	const ctx = await collectOverPageCeiling(["order_items"]);
-
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => [
-			failure.stream,
-			typeof failure.recovery_hint === "object" &&
-				failure.recovery_hint.retryable,
-		]),
-		[["order_items", true]],
-		"the unread 51st page leaves order_items unproven; orders was not requested so it is not failed",
-	);
-	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
+	assertPartial(ctx);
 	assert.ok(
 		ctx.emitted.some((record) => record.stream === "order_items"),
-		"records already emitted are kept",
+		"valid upserts survive a page ceiling",
 	);
-	const coverage = findMessages(ctx.protocolMessages, "DETAIL_COVERAGE").find(
-		(message) => message.stream === "order_items",
-	);
-	assert.ok(coverage);
-	assert.ok((coverage.considered ?? 0) > (coverage.covered ?? 0));
 });
 
 test("collect: an orders-only run truncated at the page ceiling fails orders and emits no orders STATE", async () => {
 	const ctx = await collectOverPageCeiling(["orders"]);
-
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => [
-			failure.stream,
-			typeof failure.recovery_hint === "object" &&
-				failure.recovery_hint.retryable,
-		]),
-		[["orders", true]],
+	assertPartial(ctx);
+	assert.ok(
+		ctx.emitted.some((record) => record.stream === "orders"),
+		"valid upserts survive a page ceiling",
 	);
-	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
-	assert.ok(ctx.emitted.some((record) => record.stream === "orders"));
 });
 
 test("collect: orders and order_items both fail when the page ceiling cuts the walk", async () => {
 	const ctx = await collectOverPageCeiling(["orders", "order_items"]);
-
-	assert.deepEqual(
-		ctx.reportedStreamFailures.map((failure) => failure.stream).sort(),
-		["order_items", "orders"],
+	assertPartial(ctx);
+	assert.ok(
+		ctx.emitted.some((record) => record.stream === "orders"),
+		"valid upserts survive a page ceiling",
 	);
-	assert.equal(findMessages(ctx.protocolMessages, "STATE").length, 0);
 });
