@@ -210,6 +210,7 @@ test("profile: navigation during record delivery prevents a profile checkpoint",
 				message.type === "SKIP_RESULT" &&
 				message.stream === "profile" &&
 				message.reason === "inventory_not_proven_complete" &&
+				typeof message.recovery_hint === "object" &&
 				message.recovery_hint?.action === "retry_by_runtime" &&
 				message.recovery_hint?.retryable === true &&
 				(message.diagnostics as Record<string, unknown>)?.source_reason === "icloud_navigation_changed",
