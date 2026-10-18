@@ -6,7 +6,7 @@
 // so a regression in it goes unseen.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -38,28 +38,81 @@ function trackedTests() {
 	})
 		.split("\n")
 		.filter(Boolean)
-		.filter((f) => !f.split("/").some((s) => s === "node_modules" || s === "vendor"));
+		.filter(
+			(f) => !f.split("/").some((s) => s === "node_modules" || s === "vendor"),
+		);
 }
 
-// Whitespace/quote-separated tokens of `text`, with leading "./" removed.
-function tokens(text) {
-	return new Set(text.split(/[\s"'`=]+/).map(norm));
+const TEST_FILE = /\.test\.(?:mjs|ts)$/;
+
+// Test files that a shell command actually passes to `node --test`. Only a
+// command segment that starts with node (after env assignments and an optional
+// test-sandbox wrapper) counts, so a path in an echo, a comment or an argument
+// to another program is not mistaken for a run.
+export function nodeTestFiles(command) {
+	const files = new Set();
+	for (const rawSegment of command.split(/&&|\|\||[;|\n]/)) {
+		const segment = rawSegment.replace(/(^|\s)#.*$/, "");
+		const words = segment.trim().split(/\s+/).filter(Boolean);
+		let i = 0;
+		while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++;
+		if (words[i]?.endsWith("test-sandbox")) {
+			const end = words.indexOf("--", i);
+			if (end === -1) continue;
+			i = end + 1;
+		}
+		if (words[i] !== "node" || !words.slice(i + 1).includes("--test")) continue;
+		for (const word of words.slice(i + 1)) {
+			const file = norm(word.replace(/^["']|["']$/g, ""));
+			if (!file.startsWith("-") && TEST_FILE.test(file)) files.add(file);
+		}
+	}
+	return files;
 }
 
-function packageScriptTokens() {
-	const { scripts } = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-	return tokens(Object.values(scripts).join("\n"));
+function packageScriptFiles() {
+	const { scripts } = JSON.parse(
+		readFileSync(path.join(root, "package.json"), "utf8"),
+	);
+	return new Set(Object.values(scripts).flatMap((c) => [...nodeTestFiles(c)]));
 }
 
-function workflowTokens() {
+// The shell text of every `run:` step: an inline value, or a `|`/`>` block.
+export function workflowRunCommands(yaml) {
+	const commands = [];
+	const lines = yaml.split("\n");
+	for (let i = 0; i < lines.length; i++) {
+		const match = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(lines[i]);
+		if (!match) continue;
+		const value = match[2].trim();
+		if (!/^[|>][-+]?$/.test(value)) {
+			commands.push(value);
+			continue;
+		}
+		const block = [];
+		const indent = match[1].length;
+		while (i + 1 < lines.length) {
+			const next = lines[i + 1];
+			if (next.trim() !== "" && next.length - next.trimStart().length <= indent)
+				break;
+			block.push(next);
+			i++;
+		}
+		commands.push(block.join("\n"));
+	}
+	return commands;
+}
+
+function workflowFiles() {
 	const dir = path.join(root, ".github/workflows");
-	const text = readdirSync(dir)
-		.filter((f) => /\.ya?ml$/.test(f))
-		.map((f) => readFileSync(path.join(dir, f), "utf8"))
-		.flatMap((t) => t.split("\n"))
-		.filter((line) => !line.trimStart().startsWith("#"))
-		.join("\n");
-	return tokens(text);
+	return new Set(
+		readdirSync(dir)
+			.filter((f) => /\.ya?ml$/.test(f))
+			.flatMap((f) =>
+				workflowRunCommands(readFileSync(path.join(dir, f), "utf8")),
+			)
+			.flatMap((c) => [...nodeTestFiles(c)]),
+	);
 }
 
 function polyfillRunnerFiles() {
@@ -72,13 +125,15 @@ function polyfillRunnerFiles() {
 		out
 			.split("\n")
 			.filter(Boolean)
-			.map((f) => path.relative(root, path.resolve(cwd, f)).split(path.sep).join("/")),
+			.map((f) =>
+				path.relative(root, path.resolve(cwd, f)).split(path.sep).join("/"),
+			),
 	);
 }
 
 function coverage() {
-	const scripts = packageScriptTokens();
-	const workflows = workflowTokens();
+	const scripts = packageScriptFiles();
+	const workflows = workflowFiles();
 	const runner = polyfillRunnerFiles();
 	return (file) => scripts.has(file) || workflows.has(file) || runner.has(file);
 }
@@ -99,8 +154,49 @@ test("MANUAL entries exist and are not covered by any lane", () => {
 	const covered = coverage();
 	const stale = [];
 	for (const file of MANUAL.keys()) {
-		if (!existsSync(path.join(root, file))) stale.push(`${file}: no longer exists`);
-		else if (covered(file)) stale.push(`${file}: is covered by a lane; remove it from MANUAL`);
+		if (!existsSync(path.join(root, file)))
+			stale.push(`${file}: no longer exists`);
+		else if (covered(file))
+			stale.push(`${file}: is covered by a lane; remove it from MANUAL`);
 	}
 	assert.deepEqual(stale, [], `stale MANUAL entries:\n  ${stale.join("\n  ")}`);
+});
+
+test("only real node --test arguments count as coverage", () => {
+	const run = (c) => [...nodeTestFiles(c)];
+	assert.deepEqual(run("node --test ./a.test.mjs b.test.ts"), [
+		"a.test.mjs",
+		"b.test.ts",
+	]);
+	assert.deepEqual(
+		run(
+			"npm run x && scripts/test-sandbox/test-sandbox --net host -- node --test c.test.mjs",
+		),
+		["c.test.mjs"],
+	);
+	assert.deepEqual(run("FOO=1 node --import tsx --test d.test.ts"), [
+		"d.test.ts",
+	]);
+	assert.deepEqual(run("node --test e.test.mjs # f.test.mjs"), ["e.test.mjs"]);
+	assert.deepEqual(run("echo node --test g.test.mjs"), []);
+	assert.deepEqual(run("node scripts/build.mjs h.test.mjs"), []);
+	assert.deepEqual(run("cat i.test.mjs"), []);
+	const yaml = [
+		"jobs:",
+		"  x:",
+		"    name: j.test.mjs",
+		"    steps:",
+		"      - name: Test k.test.mjs",
+		"        env:",
+		"          FILE: l.test.mjs",
+		"        run: node --test m.test.mjs",
+		"      - run: |",
+		"          echo n.test.mjs",
+		"          node --test o.test.mjs",
+		"      - run: node p.test.mjs",
+	].join("\n");
+	assert.deepEqual(
+		workflowRunCommands(yaml).flatMap((c) => [...nodeTestFiles(c)]),
+		["m.test.mjs", "o.test.mjs"],
+	);
 });
