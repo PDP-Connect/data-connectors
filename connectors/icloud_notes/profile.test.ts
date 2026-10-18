@@ -26,6 +26,7 @@ function fixture(
 	const page = {
 		url: () => href,
 		evaluate: async (_fn: unknown, arg: unknown) => {
+			if (arg === "icloud-notes-location") return href;
 			if (arg === undefined) {
 				return { href, readyState: "complete", blocked: false };
 			}
@@ -208,7 +209,11 @@ test("profile: navigation during record delivery prevents a profile checkpoint",
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "profile" &&
-				message.reason === "icloud_navigation_changed",
+				message.reason === "inventory_not_proven_complete" &&
+				typeof message.recovery_hint === "object" &&
+				message.recovery_hint?.action === "retry_by_runtime" &&
+				message.recovery_hint?.retryable === true &&
+				(message.diagnostics as Record<string, unknown>)?.source_reason === "icloud_navigation_changed",
 		),
 	);
 });

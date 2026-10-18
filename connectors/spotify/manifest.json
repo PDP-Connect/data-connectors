@@ -9,7 +9,7 @@
 	},
 	"connector_key": "spotify",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-	"version": "0.1.31",
+	"version": "0.1.34",
 	"display_name": "Spotify",
 	"brand": {
 		"icon": "icon.svg",
@@ -18,10 +18,12 @@
 	"runtime_requirements": {
 		"bindings": {
 			"network": {
-				"required": true
+				"required": true,
+				"features": ["same_origin_page_fetch"]
 			},
 			"browser": {
-				"required": true
+				"required": true,
+				"features": ["page_navigation", "page_script_evaluation"]
 			}
 		}
 	},
@@ -476,6 +478,14 @@
 			"freshness_strategy": "manual_as_of"
 		}
 	],
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "spotify",
+			"collect_export": "spotifyMobileCollect",
+			"probe_export": "probeSpotifyMobileSession",
+			"login_url": "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+		}
+	},
 	"reason_display_messages": {
 		"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 		"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",

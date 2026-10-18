@@ -80,8 +80,13 @@ function readFileAtCommit(commit, path, { cwd }) {
   }
 }
 
+// npm scripts in either package.json are developer and test commands. The
+// artifact builder reads only dependencies and engines from them, so a new or
+// changed script must not force every connector to take a version bump.
+const SCRIPT_FREE_INPUTS = new Set(["package.json", `${PACKAGE_ROOT}/package.json`]);
+
 function artifactInputContent(path, content) {
-  if (path !== "package.json" || content === null) return content;
+  if (!SCRIPT_FREE_INPUTS.has(path) || content === null) return content;
   const packageMetadata = JSON.parse(content.toString("utf8"));
   delete packageMetadata.scripts;
   return Buffer.from(JSON.stringify(packageMetadata));
