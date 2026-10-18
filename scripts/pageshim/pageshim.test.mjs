@@ -3939,14 +3939,14 @@ test("youtube: avatar click exposes owner identity and own-channel about navigat
 	}
 });
 
-test("youtube: profile email comes from the Switch account view's own header on both hosts", { timeout: 180_000 }, async () => {
+for (const handlerOn of ["renderer", "anchor"]) test(`youtube: profile email comes from the Switch account view's own header on both hosts (handler on ${handlerOn})`, { timeout: 180_000 }, async () => {
 	const fx = await import("./fixtures/youtube.mjs");
-	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-switch-email.js") });
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, `youtube-switch-email-${handlerOn}.js`) });
 	for (const resultStreaming of [false, true]) {
 		const run = await runHarness({ bundle: built.outfile,
-			fixtures: { ...fx.youtubeFixtures, resolve: fx.switchAccountEmailFixture },
+			fixtures: { ...fx.youtubeFixtures, resolve: (raw) => fx.switchAccountEmailFixture(raw, handlerOn) },
 			scopes: ["youtube.profile"], resultStreaming,
-			resultSpoolDirectory: join(out, `youtube-switch-email-${resultStreaming}`) });
+			resultSpoolDirectory: join(out, `youtube-switch-email-${handlerOn}-${resultStreaming}`) });
 		assertCleanRun(run);
 		assert.deepEqual(run.ret, { ok: true });
 		const result = resultStreaming ? run.streamDone : run.result;

@@ -87,9 +87,15 @@ export function readOwnAccount(doc: Document = document): {
 
 /**
  * Opens the avatar menu's "Switch account" view, where YouTube shows the
- * signed-in Google account's email. Returns whether the item was found.
+ * signed-in Google account's email. Resolves true only once the view's own
+ * header is present, not merely after the click: the handler may sit on the
+ * item renderer or on its nested endpoint anchor, so the anchor is clicked
+ * (the event still bubbles to a renderer-level handler).
  */
-export function openSwitchAccount(doc: Document = document): boolean {
+export async function openSwitchAccount(
+	doc: Document = document,
+	timeoutMs = 4_000,
+): Promise<boolean> {
 	const item = Array.from(
 		doc.querySelectorAll<HTMLElement>(
 			"ytd-multi-page-menu-renderer ytd-compact-link-renderer",
@@ -103,8 +109,24 @@ export function openSwitchAccount(doc: Document = document): boolean {
 				.toLowerCase() === "switch account",
 	);
 	if (!item) return false;
-	item.click();
-	return true;
+	(item.querySelector<HTMLElement>("a#endpoint, #endpoint") ?? item).click();
+	// Inline, no helper bindings: this reader is serialized into the page.
+	const headerSelector = "ytd-google-account-header-renderer";
+	if (doc.querySelector(headerSelector)) return true;
+	const view = doc.defaultView;
+	if (!view) return false;
+	return new Promise<boolean>((resolve) => {
+		const observer = new view.MutationObserver(() => {
+			if (!doc.querySelector(headerSelector)) return;
+			observer.disconnect();
+			resolve(true);
+		});
+		observer.observe(doc, { childList: true, subtree: true });
+		view.setTimeout(() => {
+			observer.disconnect();
+			resolve(doc.querySelector(headerSelector) !== null);
+		}, timeoutMs);
+	});
 }
 
 /**

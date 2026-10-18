@@ -682,9 +682,12 @@ test("profile emits email-only authenticated accounts without a channel link", a
 });
 
 const SWITCH_ACCOUNT_MENU =
-	'<ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>';
+	'<ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a id="endpoint"><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>';
 
-async function collectProfileWithSwitchView(switchView: string) {
+async function collectProfileWithSwitchView(
+	switchView: string,
+	handlerOn: "renderer" | "anchor" = "renderer",
+) {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -692,7 +695,7 @@ async function collectProfileWithSwitchView(switchView: string) {
 			const url = new URL(route.request().url());
 			let body = "";
 			if (url.pathname === "/")
-				body = `<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span><span id="email"></span></ytd-active-account-header-renderer>${SWITCH_ACCOUNT_MENU}<script>document.querySelector("ytd-compact-link-renderer").addEventListener("click", () => document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(switchView)}))</script>`;
+				body = `<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span><span id="email"></span></ytd-active-account-header-renderer>${SWITCH_ACCOUNT_MENU}<script>document.querySelector(${JSON.stringify(handlerOn === "anchor" ? "a#endpoint" : "ytd-compact-link-renderer")}).addEventListener("click", () => document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(switchView)}))</script>`;
 			else if (url.pathname === "/@owner")
 				body =
 					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';
@@ -728,6 +731,14 @@ test("profile reads the owner's email from the Switch account view, not other li
 	assert.equal(records.length, 1);
 	assert.equal(records[0]?.email, "owner@example.com");
 	assert.equal(records[0]?.title, "Real Owner");
+});
+
+test("profile reads the email when the Switch account click handler is on the nested anchor", async () => {
+	const records = await collectProfileWithSwitchView(
+		'<ytd-google-account-header-renderer><yt-formatted-string id="email">owner@example.com</yt-formatted-string></ytd-google-account-header-renderer>',
+		"anchor",
+	);
+	assert.equal(records[0]?.email, "owner@example.com");
 });
 
 test("profile omits email when the Switch account view does not show one", async () => {
