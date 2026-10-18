@@ -150,6 +150,7 @@ function makeFakePage(
 	}
 	const queryCallIndex: Record<string, number> = { folders: 0, notes: 0 };
 	const evaluate = (_fn: unknown, arg: unknown): Promise<unknown> => {
+		if (arg === "icloud-notes-location") return Promise.resolve(currentUrl);
 		if (arg === undefined) {
 			const onReadinessEvaluationPending =
 				readiness.onReadinessEvaluationPending;
@@ -256,7 +257,8 @@ function makeFakePage(
 				readyState = readiness.readyStateAfterWait;
 			}
 		},
-		reload: async () => {
+		goto: async (url: string) => {
+			currentUrl = url;
 			readiness.onReload?.();
 			if (readiness.reloadReadyState !== undefined) {
 				readyState = readiness.reloadReadyState;
@@ -1526,7 +1528,7 @@ test("collectAllStreams: throws when the CloudKit config cannot be resolved (aut
 	const page = {
 		evaluate: (_fn: unknown, arg: unknown): Promise<unknown> =>
 			Promise.resolve(
-				arg === undefined
+				arg === "icloud-notes-location" ? "https://www.icloud.com/notes" : arg === undefined
 					? {
 							href: "https://www.icloud.com/notes",
 							readyState: "complete",

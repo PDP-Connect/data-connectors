@@ -3658,3 +3658,57 @@ test("oura_browser: narrow then wider consent retains clipped debt on both hosts
     assert.equal(second.states["oura.sleep"].next_day, "2026-10-18");
   }
 });
+
+test("icloud_notes: owner-bound profile, browser decompression and state replay", { timeout: 120_000 }, async () => {
+	const { pageshimCase: c, bodyText } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes.js") });
+	const run = (options = {}) => runHarness({
+		bundle: built.outfile, fixtures: c.fixtures, scopes: c.scopes,
+		gotoDelayMs: 0, loginWaitMs: 1000, ...options,
+	});
+	const first = await run();
+	assertCleanRun(first);
+	assert.equal(first.data.error, undefined, JSON.stringify(first.result?.errors));
+	assert.deepEqual(first.result.errors, []);
+	assert.deepEqual(first.result["icloud.profile"].records, [{ id: "12345", user_name: "Synthetic Owner" }]);
+	assert.equal(first.result["icloud.notes"].records.length, 3);
+	for (const row of first.result["icloud.notes"].records) {
+		assert.equal(row.text_content, bodyText);
+		assert.equal(row.folder_name, "Work");
+	}
+	assert.equal(first.calls.httpFetch, undefined, "CloudKit must use credentialed page fetch");
+	assert.deepEqual(Object.keys(first.states).sort(), [...c.scopes].sort());
+	const replay = await run({ initialState: first.states });
+	assertCleanRun(replay);
+	assert.deepEqual(replay.result.errors, []);
+	assert.equal(replay.result.exportSummary.count, 0);
+	assert.deepEqual(replay.states, first.states);
+	const rejected = await run({ failResultWrite: true });
+	assert.deepEqual(rejected.states, {}, "unaccepted result must not commit STATE");
+	const oldHost = await run({ supportsStateArgument: false });
+	assertCleanRun(oldHost);
+	assert.deepEqual(oldHost.states, {});
+});
+
+test("icloud_notes: failed continuation preserves readable rows and never checkpoints notes", { timeout: 120_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-partial.js") });
+	let noteCalls = 0;
+	const fixtures = { ...c.fixtures, resolve(url, request) {
+		const response = c.fixtures.resolve(url, request);
+		if (!url.includes("/records/query")) return response;
+		const body = JSON.parse(request.postData);
+		if (body.query.filterBy[0].fieldValue.value !== "recents") return response;
+		noteCalls++;
+		return noteCalls === 1
+			? { ...response, body: JSON.stringify({ ...JSON.parse(response.body), continuationMarker: "next" }) }
+			: { ...response, status: 500, body: JSON.stringify({ error: "synthetic failure" }) };
+	} };
+	const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes, gotoDelayMs: 0, loginWaitMs: 1000 });
+	assertCleanRun(r);
+	assert.equal(r.result["icloud.notes"].records.length, 3);
+	assert.ok(r.result.errors.some(error => error.scope === "icloud.notes"));
+	assert.equal(r.states["icloud.notes"], undefined);
+	assert.ok(r.states["icloud.profile"]);
+	assert.ok(r.states["icloud.folders"]);
+});

@@ -26,6 +26,7 @@ function fixture(
 	const page = {
 		url: () => href,
 		evaluate: async (_fn: unknown, arg: unknown) => {
+			if (arg === "icloud-notes-location") return href;
 			if (arg === undefined) {
 				return { href, readyState: "complete", blocked: false };
 			}

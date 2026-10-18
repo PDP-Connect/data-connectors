@@ -9,11 +9,12 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deflateRawSync, deflateSync, gzipSync } from "node:zlib";
+import { deflateRawSync, deflateSync, gzipSync, gunzipSync, inflateSync, inflateRawSync } from "node:zlib";
 import {
 	buildFolderRecord,
 	buildNoteRecord,
 	decodeBase64Text,
+	decompressBytes,
 	epochMsToIso,
 	extractCleanText,
 	extractNoteText,
@@ -24,7 +25,7 @@ import {
 } from "./parsers.ts";
 import type { CloudKitRecord } from "./types.ts";
 
-test("readCloudKitRecordType: only known discriminators route and unknown shapes stay unavailable", () => {
+test("readCloudKitRecordType: only known discriminators route and unknown shapes stay unavailable", async () => {
 	assert.deepEqual(readCloudKitRecordType({ recordType: "Note" }), {
 		kind: "READ",
 		value: "Note",
@@ -57,12 +58,12 @@ test("readCloudKitRecordType: only known discriminators route and unknown shapes
 
 // ─── decodeBase64Text ────────────────────────────────────────────────────
 
-test("decodeBase64Text: decodes a base64 UTF-8 string", () => {
+test("decodeBase64Text: decodes a base64 UTF-8 string", async () => {
 	const encoded = Buffer.from("Grocery list", "utf-8").toString("base64");
 	assert.equal(decodeBase64Text(encoded), "Grocery list");
 });
 
-test("decodeBase64Text: null for absent or non-string input and preserves an empty source value", () => {
+test("decodeBase64Text: null for absent or non-string input and preserves an empty source value", async () => {
 	assert.equal(decodeBase64Text(undefined), null);
 	assert.equal(decodeBase64Text(null), null);
 	assert.equal(decodeBase64Text(""), "");
@@ -72,11 +73,11 @@ test("decodeBase64Text: null for absent or non-string input and preserves an emp
 
 // ─── epochMsToIso ────────────────────────────────────────────────────────
 
-test("epochMsToIso: converts a positive epoch-ms number to ISO-8601", () => {
+test("epochMsToIso: converts a positive epoch-ms number to ISO-8601", async () => {
 	assert.equal(epochMsToIso(1_700_000_000_000), "2023-11-14T22:13:20.000Z");
 });
 
-test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number input", () => {
+test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number input", async () => {
 	assert.equal(epochMsToIso(0), "1970-01-01T00:00:00.000Z");
 	assert.equal(epochMsToIso(-5), null);
 	assert.equal(epochMsToIso(Number.NaN), null);
@@ -87,13 +88,13 @@ test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number
 
 // ─── extractCleanText / extractNoteText (heuristic decode) ─────────────
 
-test("extractCleanText: extracts a run of printable prose from decompressed bytes", () => {
+test("extractCleanText: extracts a run of printable prose from decompressed bytes", async () => {
 	const text = "Grocery list: milk, eggs, bread.";
 	const decompressed = Buffer.from(text, "utf-8");
 	assert.equal(extractCleanText(decompressed), text);
 });
 
-test("extractCleanText: drops short runs (<4 chars) and low-signal binary noise", () => {
+test("extractCleanText: drops short runs (<4 chars) and low-signal binary noise", async () => {
 	// Two short "AB" tokens surrounded by control bytes that don't form a
 	// ≥4-char printable run, plus one real prose run.
 	const bytes = Buffer.concat([
@@ -107,58 +108,58 @@ test("extractCleanText: drops short runs (<4 chars) and low-signal binary noise"
 	assert.ok(!result?.includes("AB"));
 });
 
-test("extractCleanText: returns null when no run clears the clean-character ratio", () => {
+test("extractCleanText: returns null when no run clears the clean-character ratio", async () => {
 	// A run of printable-but-not-prose-like characters (repeated symbols)
 	// with a clean ratio at or below the 0.6 threshold.
 	const noisy = "@#$%^&*<>{}[]~`|\\@#$%^&*<>{}[]~`|\\";
 	assert.equal(extractCleanText(Buffer.from(noisy, "utf-8")), null);
 });
 
-test("extractNoteText: decodes a synthetic gzip-compressed note body (labelled synthetic)", () => {
+test("extractNoteText: decodes a synthetic gzip-compressed note body (labelled synthetic)", async () => {
 	const text =
 		"Meeting notes: discuss Q3 roadmap and follow up with the design team.";
 	const compressed = gzipSync(Buffer.from(text, "utf-8"));
 	const base64 = compressed.toString("base64");
-	assert.equal(extractNoteText(base64), text);
+	assert.equal(await extractNoteText(base64), text);
 });
 
-test("extractNoteText: decodes a synthetic zlib-deflate-compressed note body", () => {
+test("extractNoteText: decodes a synthetic zlib-deflate-compressed note body", async () => {
 	const text = "Second synthetic fixture using zlib deflate, not gzip.";
 	const compressed = deflateSync(Buffer.from(text, "utf-8"));
 	const base64 = compressed.toString("base64");
-	assert.equal(extractNoteText(base64), text);
+	assert.equal(await extractNoteText(base64), text);
 });
 
-test("extractNoteText: decodes a synthetic raw-deflate-compressed note body", () => {
+test("extractNoteText: decodes a synthetic raw-deflate-compressed note body", async () => {
 	const text = "Third synthetic fixture using raw deflate.";
 	const compressed = deflateRawSync(Buffer.from(text, "utf-8"));
 	const base64 = compressed.toString("base64");
-	assert.equal(extractNoteText(base64), text);
+	assert.equal(await extractNoteText(base64), text);
 });
 
-test("extractNoteText: null for absent/empty/non-string input", () => {
-	assert.equal(extractNoteText(undefined), null);
-	assert.equal(extractNoteText(null), null);
-	assert.equal(extractNoteText(""), null);
+test("extractNoteText: null for absent/empty/non-string input", async () => {
+	assert.equal(await extractNoteText(undefined), null);
+	assert.equal(await extractNoteText(null), null);
+	assert.equal(await extractNoteText(""), null);
 });
 
-test("extractNoteText: null for base64 input that decompresses under no tried format", () => {
+test("extractNoteText: null for base64 input that decompresses under no tried format", async () => {
 	const garbage = Buffer.from("not compressed data at all", "utf-8").toString(
 		"base64",
 	);
-	assert.equal(extractNoteText(garbage), null);
+	assert.equal(await extractNoteText(garbage), null);
 });
 
-test("extractNoteText: null for input that isn't valid base64-decodable bytes at all", () => {
+test("extractNoteText: null for input that isn't valid base64-decodable bytes at all", async () => {
 	// Buffer.from(..., 'base64') never throws in Node (it tolerates invalid
 	// chars), so this exercises the decompress-failure path, not a base64
 	// parse failure — kept as a documented behavior check.
-	assert.equal(extractNoteText("!!!not-base64!!!"), null);
+	assert.equal(await extractNoteText("!!!not-base64!!!"), null);
 });
 
 // ─── isDeletedNote ───────────────────────────────────────────────────────
 
-test("readDeletedNote: sparse absence is false, malformed present values stay unavailable", () => {
+test("readDeletedNote: sparse absence is false, malformed present values stay unavailable", async () => {
 	assert.deepEqual(
 		readDeletedNote({ fields: { Deleted: { value: 1 } } } as CloudKitRecord),
 		{ kind: "READ", value: true },
@@ -209,7 +210,7 @@ function b64(s: string): string {
 	return Buffer.from(s, "utf-8").toString("base64");
 }
 
-test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes schema shape", () => {
+test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes schema shape", async () => {
 	const bodyText = "A synthetic note body used only for this unit test.";
 	const compressedBody = gzipSync(Buffer.from(bodyText, "utf-8")).toString(
 		"base64",
@@ -229,7 +230,7 @@ test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes sche
 		},
 	};
 
-	const built = buildNoteRecord(record, new Map([["folder-xyz-789", "Work"]]));
+	const built = await buildNoteRecord(record, new Map([["folder-xyz-789", "Work"]]));
 	assert.ok(built);
 	assert.deepEqual(built, {
 		id: "note-abc-123",
@@ -245,7 +246,7 @@ test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes sche
 	});
 });
 
-test("buildNoteRecord: explicit empty CloudKit values map to empty output values", () => {
+test("buildNoteRecord: explicit empty CloudKit values map to empty output values", async () => {
 	const record: CloudKitRecord = {
 		recordName: "note-minimal",
 		recordType: "Note",
@@ -260,7 +261,7 @@ test("buildNoteRecord: explicit empty CloudKit values map to empty output values
 			TextDataEncrypted: { value: "" },
 		},
 	};
-	const built = buildNoteRecord(record);
+	const built = await buildNoteRecord(record);
 	assert.ok(built);
 	assert.equal(built.title, null);
 	assert.equal(built.snippet, null);
@@ -271,8 +272,8 @@ test("buildNoteRecord: explicit empty CloudKit values map to empty output values
 	assert.equal(built.text_content, null);
 });
 
-test("readNoteRecord: absent mapped fields remain unavailable", () => {
-	const result = readNoteRecord({
+test("readNoteRecord: absent mapped fields remain unavailable", async () => {
+	const result = await readNoteRecord({
 		recordName: "note-missing-fields",
 		recordType: "Note",
 		fields: {},
@@ -291,8 +292,8 @@ test("readNoteRecord: absent mapped fields remain unavailable", () => {
 	);
 });
 
-test("readNoteRecord: CloudKit sparse optional fields use legacy empty defaults", () => {
-	const result = readNoteRecord({
+test("readNoteRecord: CloudKit sparse optional fields use legacy empty defaults", async () => {
+	const result = await readNoteRecord({
 		recordName: "note-sparse-defaults",
 		recordType: "Note",
 		fields: {
@@ -312,8 +313,8 @@ test("readNoteRecord: CloudKit sparse optional fields use legacy empty defaults"
 	assert.equal(result.record?.text_content, null);
 });
 
-test("readNoteRecord: an unresolved folder reference leaves folder_name unavailable", () => {
-	const result = readNoteRecord(
+test("readNoteRecord: an unresolved folder reference leaves folder_name unavailable", async () => {
+	const result = await readNoteRecord(
 		{
 			recordName: "note-unresolved-folder",
 			recordType: "Note",
@@ -340,8 +341,8 @@ test("readNoteRecord: an unresolved folder reference leaves folder_name unavaila
 	);
 });
 
-test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable", () => {
-	const result = readNoteRecord({
+test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable", async () => {
+	const result = await readNoteRecord({
 		recordName: "note-undecodable-body",
 		recordType: "Note",
 		fields: {
@@ -364,9 +365,9 @@ test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable"
 	);
 });
 
-test("readNoteRecord: compressed attachment-only body is explicitly empty text", () => {
+test("readNoteRecord: compressed attachment-only body is explicitly empty text", async () => {
 	const attachmentOnlyBody = gzipSync(Buffer.from([0x01, 0x02, 0x03, 0x04]));
-	const result = readNoteRecord({
+	const result = await readNoteRecord({
 		recordName: "note-attachment-only",
 		recordType: "Note",
 		fields: {
@@ -388,7 +389,7 @@ test("readNoteRecord: compressed attachment-only body is explicitly empty text",
 	);
 });
 
-test("buildNoteRecord: falls back to Folders[0] when Folder is absent", () => {
+test("buildNoteRecord: falls back to Folders[0] when Folder is absent", async () => {
 	const record: CloudKitRecord = {
 		recordName: "note-folders-array",
 		recordType: "Note",
@@ -396,11 +397,11 @@ test("buildNoteRecord: falls back to Folders[0] when Folder is absent", () => {
 			Folders: { value: [{ recordName: "folder-from-array" }] },
 		},
 	};
-	const built = buildNoteRecord(record);
+	const built = await buildNoteRecord(record);
 	assert.equal(built?.folder_id, "folder-from-array");
 });
 
-test("buildNoteRecord: falls back to created/modified.timestamp when field-level dates are absent", () => {
+test("buildNoteRecord: falls back to created/modified.timestamp when field-level dates are absent", async () => {
 	const record: CloudKitRecord = {
 		recordName: "note-timestamp-fallback",
 		recordType: "Note",
@@ -417,18 +418,18 @@ test("buildNoteRecord: falls back to created/modified.timestamp when field-level
 		created: { timestamp: 1_700_000_000_000 },
 		modified: { timestamp: 1_700_100_000_000 },
 	};
-	const built = buildNoteRecord(record);
+	const built = await buildNoteRecord(record);
 	assert.equal(built?.created_at, "2023-11-14T22:13:20.000Z");
 	assert.equal(built?.modified_at, "2023-11-16T02:00:00.000Z");
 });
 
-test("buildNoteRecord: null when recordName is absent (unusable record)", () => {
-	assert.equal(buildNoteRecord({ fields: {} } as CloudKitRecord), null);
+test("buildNoteRecord: null when recordName is absent (unusable record)", async () => {
+	assert.equal(await buildNoteRecord({ fields: {} } as CloudKitRecord), null);
 });
 
 // ─── buildFolderRecord ───────────────────────────────────────────────────
 
-test("buildFolderRecord: maps a well-formed CloudKit Folder record", () => {
+test("buildFolderRecord: maps a well-formed CloudKit Folder record", async () => {
 	const record: CloudKitRecord = {
 		recordName: "folder-abc",
 		recordType: "Folder",
@@ -440,7 +441,7 @@ test("buildFolderRecord: maps a well-formed CloudKit Folder record", () => {
 	});
 });
 
-test("buildFolderRecord: null when recordName is absent", () => {
+test("buildFolderRecord: null when recordName is absent", async () => {
 	assert.equal(
 		buildFolderRecord({
 			fields: { TitleEncrypted: { value: b64("Work") } },
@@ -449,7 +450,7 @@ test("buildFolderRecord: null when recordName is absent", () => {
 	);
 });
 
-test("readFolderRecord: absent and explicit empty titles fall back to recordName", () => {
+test("readFolderRecord: absent and explicit empty titles fall back to recordName", async () => {
 	const absent = readFolderRecord({
 		recordName: "folder-no-title",
 		recordType: "Folder",
@@ -470,4 +471,28 @@ test("readFolderRecord: absent and explicit empty titles fall back to recordName
 		}),
 		{ id: "folder-empty-title", name: "folder-empty-title" },
 	);
+});
+
+
+test("browser decoder byte parity with Node across gzip, deflate and raw-deflate", async () => {
+	const vectors = [
+		Buffer.from("Synthetic note: café, emoji 📝 and ASCII text."),
+		Buffer.from([0xef, 0xbb, 0xbf, 0x41, 0x42, 0x43, 0x44, 0xff, 0xc3, 0x28]),
+		Buffer.from([0, 1, 2, 3]),
+		Buffer.alloc(0),
+	];
+	for (const [format, compress, decompress] of [
+		["gzip", gzipSync, gunzipSync],
+		["deflate", deflateSync, inflateSync],
+		["deflate-raw", deflateRawSync, inflateRawSync],
+	] as const) {
+		for (const vector of vectors) {
+			const compressed = compress(vector);
+			const decoded = await decompressBytes(compressed, format);
+			assert.deepEqual(decoded, new Uint8Array(decompress(compressed)));
+			assert.equal(decodeBase64Text(vector.toString("base64")), vector.toString("utf-8"));
+			assert.equal(await extractNoteText(compressed.toString("base64")), extractCleanText(vector));
+		}
+		assert.equal(await decompressBytes(new Uint8Array([1, 2, 3]), format), null);
+	}
 });

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP iCloud Notes Connector (manifest v0.1.24)
+ * PDPP iCloud Notes Connector (manifest v0.1.25)
  *
  * Greenfield PDPP Collection Profile connector, ported from the legacy CG
  * script `connectors/apple/icloud-notes-playwright.js` (read-only prior
@@ -333,6 +333,18 @@ function queryUrl(config: CloudKitConfigLive): string {
 	return `${config.ckBaseUrl}/database/1/com.apple.notes/production/private/records/query?dsid=${config.dsid}`;
 }
 
+async function readPageUrl(page: Page): Promise<string> {
+	return page.evaluate(() => window.location.href, "icloud-notes-location");
+}
+
+/** Observational owner probe for PageShim; never enters credentials. */
+export async function probeICloudNotesSession(page: Page): Promise<boolean> {
+	const before = await readPageUrl(page);
+	if (!isICloudNotesUrl(before)) return false;
+	const config = await resolveCloudKitConfig(page);
+	return config !== null && remainsInICloudNotes(await readPageUrl(page), before);
+}
+
 function isICloudNotesUrl(value: string): boolean {
 	try {
 		const url = new URL(value);
@@ -484,7 +496,7 @@ async function walkQueryPages(
 	let marker: string | undefined;
 	let pageCount = 0;
 	while (true) {
-		if (!remainsInICloudNotes(page.url(), pageUrl)) {
+		if (!remainsInICloudNotes(await readPageUrl(page), pageUrl)) {
 			return {
 				records,
 				complete: false,
@@ -509,7 +521,7 @@ async function walkQueryPages(
 		});
 		const response = await cloudKitQuery(page, url, requestBody);
 		pageCount += 1;
-		if (!remainsInICloudNotes(page.url(), pageUrl)) {
+		if (!remainsInICloudNotes(await readPageUrl(page), pageUrl)) {
 			return {
 				records,
 				complete: false,
@@ -701,7 +713,7 @@ function widenProgress(
 async function requireNotesPage(page: Page): Promise<string> {
 	const deadline = Date.now() + NOTES_READINESS_BUDGET_MS;
 	for (let attempt = 0; attempt < NOTES_READINESS_ATTEMPTS; attempt += 1) {
-		const currentHref = page.url();
+		const currentHref = await readPageUrl(page);
 		if (!isICloudNotesUrl(currentHref)) {
 			throw new Error(
 				"icloud_wrong_page: collection requires the iCloud Notes route",
@@ -725,7 +737,7 @@ async function requireNotesPage(page: Page): Promise<string> {
 				if (error === READINESS_DEADLINE) break;
 			}
 		}
-		const afterWaitHref = page.url();
+		const afterWaitHref = await readPageUrl(page);
 		if (!isICloudNotesUrl(afterWaitHref)) {
 			throw new Error(
 				"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
@@ -761,7 +773,7 @@ async function requireNotesPage(page: Page): Promise<string> {
 			// Navigation can detach the execution context briefly. Recheck route,
 			// then reload only while the owner page is still inside Notes.
 		}
-		const afterProbeHref = page.url();
+		const afterProbeHref = await readPageUrl(page);
 		if (!isICloudNotesUrl(afterProbeHref)) {
 			throw new Error(
 				"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
@@ -788,7 +800,7 @@ async function requireNotesPage(page: Page): Promise<string> {
 		if (attempt + 1 >= NOTES_READINESS_ATTEMPTS) break;
 		const reloadBudget = deadline - Date.now();
 		if (reloadBudget <= 0) break;
-		const beforeReloadHref = page.url();
+		const beforeReloadHref = await readPageUrl(page);
 		if (!isICloudNotesUrl(beforeReloadHref)) {
 			throw new Error(
 				"icloud_wrong_page: navigation left the iCloud Notes route before readiness recovery reload",
@@ -797,7 +809,7 @@ async function requireNotesPage(page: Page): Promise<string> {
 		try {
 			await withinReadinessBudget(
 				() =>
-					page.reload({
+					page.goto(beforeReloadHref, {
 						waitUntil: "domcontentloaded",
 						timeout: Math.min(
 							NOTES_READINESS_OPERATION_TIMEOUT_MS,
@@ -922,7 +934,7 @@ export async function collectAllStreams(
 	if (!config) {
 		throw new Error("icloud_auth_failed: could not resolve CloudKit config");
 	}
-	if (!remainsInICloudNotes(page.url(), pageUrl)) {
+	if (!remainsInICloudNotes(await readPageUrl(page), pageUrl)) {
 		throw new Error(
 			"icloud_navigation_changed: page changed while resolving CloudKit owner",
 		);
@@ -936,7 +948,7 @@ export async function collectAllStreams(
 			excludeFromFingerprint: [],
 		});
 		if (cursor.shouldEmit(profile)) await emitRecord("profile", profile);
-		if (remainsInICloudNotes(page.url(), pageUrl)) {
+		if (remainsInICloudNotes(await readPageUrl(page), pageUrl)) {
 			cursor.dropUnseenIds();
 			await emit({
 				type: "STATE",
@@ -1072,7 +1084,7 @@ export async function collectAllStreams(
 					fieldOmissions,
 					omittedRowDiagnostics,
 				) ??
-				(!remainsInICloudNotes(page.url(), pageUrl)
+				(!remainsInICloudNotes(await readPageUrl(page), pageUrl)
 					? {
 							reason: "icloud_navigation_changed",
 							message:
@@ -1091,7 +1103,7 @@ export async function collectAllStreams(
 				await emitStreamFailure(emit, "folders", failure);
 			} else if (
 				hasBoundEndProof(folderWalk, pageUrl, config, "folders") &&
-				remainsInICloudNotes(page.url(), pageUrl)
+				remainsInICloudNotes(await readPageUrl(page), pageUrl)
 			) {
 				cursor.dropUnseenIds();
 				await emit({
@@ -1182,7 +1194,7 @@ export async function collectAllStreams(
 				});
 				continue;
 			}
-			const result = readNoteRecord(record, folderNames, {
+			const result = await readNoteRecord(record, folderNames, {
 				unavailableFolderIds,
 				folderScanComplete,
 			});
@@ -1254,7 +1266,7 @@ export async function collectAllStreams(
 				intentionalExclusions,
 			};
 		}
-		if (!failure && !remainsInICloudNotes(page.url(), pageUrl)) {
+		if (!failure && !remainsInICloudNotes(await readPageUrl(page), pageUrl)) {
 			failure = {
 				reason: "icloud_navigation_changed",
 				message:
