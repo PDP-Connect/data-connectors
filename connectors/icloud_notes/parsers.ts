@@ -22,7 +22,6 @@
  * community schemas exist but adopting one is out of scope for this cut.
  */
 
-import { gunzipSync, inflateRawSync, inflateSync } from "node:zlib";
 import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
 
 // ─── Base64 / timestamp helpers ─────────────────────────────────────────
@@ -35,10 +34,14 @@ export function decodeBase64Text(value: unknown): string | null {
 		return null;
 	}
 	try {
-		return Buffer.from(value, "base64").toString("utf-8");
+		return new TextDecoder("utf-8", { ignoreBOM: true }).decode(base64Bytes(value));
 	} catch {
 		return null;
 	}
+}
+
+function base64Bytes(value: string): Uint8Array {
+	return Uint8Array.from(atob(value.replace(/=+$/, "")), (char) => char.charCodeAt(0));
 }
 
 function isBase64(value: string): boolean {
@@ -46,10 +49,9 @@ function isBase64(value: string): boolean {
 	if (value.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
 		return false;
 	}
-	const decoded = Buffer.from(value, "base64");
-	return (
-		decoded.toString("base64").replace(/=+$/, "") === value.replace(/=+$/, "")
-	);
+	try {
+		return btoa(atob(value.replace(/=+$/, ""))).replace(/=+$/, "") === value.replace(/=+$/, "");
+	} catch { return false; }
 }
 
 /** CloudKit timestamps are epoch milliseconds. Returns null for anything
@@ -67,19 +69,14 @@ export function epochMsToIso(value: unknown): string | null {
 const DECOMPRESS_FORMATS = ["gzip", "deflate", "deflate-raw"] as const;
 type DecompressFormat = (typeof DECOMPRESS_FORMATS)[number];
 
-function decompressBytes(
+export async function decompressBytes(
 	bytes: Uint8Array,
 	format: DecompressFormat,
-): Buffer | null {
-	const input = Buffer.from(bytes);
+): Promise<Uint8Array | null> {
 	try {
-		if (format === "gzip") {
-			return gunzipSync(input);
-		}
-		if (format === "deflate") {
-			return inflateSync(input);
-		}
-		return inflateRawSync(input);
+		const input = new Uint8Array(bytes);
+		const stream = new Blob([input]).stream().pipeThrough(new DecompressionStream(format));
+		return new Uint8Array(await new Response(stream).arrayBuffer());
 	} catch {
 		return null;
 	}
@@ -97,7 +94,7 @@ const CLEAN_RATIO_THRESHOLD = 0.6;
  *  as legacy `extractCleanText`: a run of ≥4 printable characters counts as
  *  prose only if >60% of its characters are common prose/punctuation. */
 export function extractCleanText(decompressed: Uint8Array): string | null {
-	const fullText = Buffer.from(decompressed).toString("utf-8");
+	const fullText = new TextDecoder("utf-8", { ignoreBOM: true }).decode(decompressed);
 	const runs: string[] = [];
 	for (const match of fullText.matchAll(PRINTABLE_RUN_RE)) {
 		const run = match[0];
@@ -121,15 +118,15 @@ type NoteTextExtraction =
 	| { kind: "EXPLICIT_EMPTY" }
 	| { kind: "UNAVAILABLE"; reason: "body_text_unreadable" };
 
-function readCompressedNoteText(base64Data: string): NoteTextExtraction {
-	let bytes: Buffer;
+async function readCompressedNoteText(base64Data: string): Promise<NoteTextExtraction> {
+	let bytes: Uint8Array;
 	try {
-		bytes = Buffer.from(base64Data, "base64");
+		bytes = base64Bytes(base64Data);
 	} catch {
 		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 	}
 	for (const format of DECOMPRESS_FORMATS) {
-		const decompressed = decompressBytes(bytes, format);
+		const decompressed = await decompressBytes(bytes, format);
 		if (!decompressed) {
 			continue;
 		}
@@ -139,9 +136,9 @@ function readCompressedNoteText(base64Data: string): NoteTextExtraction {
 	return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 }
 
-export function extractNoteText(base64Data: unknown): string | null {
+export async function extractNoteText(base64Data: unknown): Promise<string | null> {
 	if (typeof base64Data !== "string" || base64Data.length === 0) return null;
-	const result = readCompressedNoteText(base64Data);
+	const result = await readCompressedNoteText(base64Data);
 	return result.kind === "READ" ? result.value : null;
 }
 
@@ -445,9 +442,9 @@ function timestampField(
 	return iso === null ? unavailable("invalid_timestamp", raw.value) : read(iso);
 }
 
-function bodyTextField(
+async function bodyTextField(
 	fields: Record<string, CloudKitFieldValue> | undefined,
-): FieldRead<string | null> {
+): Promise<FieldRead<string | null>> {
 	// TextDataEncrypted is required content: missing is a gap, while a present
 	// null/empty body is explicit empty and a malformed body remains unavailable.
 	const raw = fieldValue(fields, "TextDataEncrypted");
@@ -457,7 +454,7 @@ function bodyTextField(
 		return unavailable("expected_base64_body", raw.value);
 	if (!isBase64(raw.value))
 		return unavailable("invalid_base64_body", raw.value);
-	const extraction = readCompressedNoteText(raw.value);
+	const extraction = await readCompressedNoteText(raw.value);
 	if (extraction.kind === "UNAVAILABLE")
 		return unavailable(extraction.reason, raw.value);
 	return extraction.kind === "EXPLICIT_EMPTY"
@@ -521,14 +518,14 @@ export function readDeletedNote(record: CloudKitRecord): FieldRead<boolean> {
  *  capability map's field mapping, `folder_id` is the CloudKit `recordName`
  *  of the parent folder (a foreign key into the `folders` stream). The
  *  adjacent `folder_name` projection preserves the legacy resolved title. */
-export function readNoteRecord(
+export async function readNoteRecord(
 	record: CloudKitRecord,
 	folderNames: ReadonlyMap<string, string> = new Map(),
 	options: {
 		unavailableFolderIds?: ReadonlySet<string>;
 		folderScanComplete?: boolean;
 	} = {},
-): RecordRead<NoteRecord> {
+): Promise<RecordRead<NoteRecord>> {
 	const recordName = resolveCloudKitRecordId(record);
 	if (recordName === null) {
 		return {
@@ -566,7 +563,7 @@ export function readNoteRecord(
 		modifiedMetadata.present,
 	);
 	const hasAttachments = attachmentsField(fields);
-	const textContent = bodyTextField(fields);
+	const textContent = await bodyTextField(fields);
 	let folderName: FieldRead<string | null>;
 	if (folderId.kind === "UNAVAILABLE") {
 		folderName = unavailable(
@@ -621,12 +618,11 @@ export function readNoteRecord(
 	};
 }
 
-export function buildNoteRecord(
+export async function buildNoteRecord(
 	record: CloudKitRecord,
 	folderNames: ReadonlyMap<string, string> = new Map(),
-): NoteRecord | null {
-	return readNoteRecord(record, folderNames, { folderScanComplete: true })
-		.record;
+): Promise<NoteRecord | null> {
+	return (await readNoteRecord(record, folderNames, { folderScanComplete: true })).record;
 }
 
 /** Build a `folders` stream record from a raw CloudKit `Folder` record.

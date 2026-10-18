@@ -3674,6 +3674,163 @@ test("oura_browser: narrow then wider consent retains clipped debt on both hosts
   }
 });
 
+test("icloud_notes: owner-bound profile, browser decompression and state replay", { timeout: 120_000 }, async () => {
+	const { pageshimCase: c, bodyText } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes.js") });
+	const evaluateSizes = [];
+	const run = (options = {}) => runHarness({
+		bundle: built.outfile, fixtures: c.fixtures, scopes: c.scopes,
+		observeBridge: (method, args) => { if (method === "evaluate") evaluateSizes.push(args[0].length); },
+		gotoDelayMs: 0, loginWaitMs: 1000, ...options,
+	});
+	const first = await run();
+	assertCleanRun(first);
+	assert.equal(first.data.error, undefined, JSON.stringify(first.result?.errors));
+	assert.deepEqual(first.result.errors, []);
+	assert.deepEqual(first.result["icloud.profile"].records, [{ id: "12345", user_name: "Synthetic Owner" }]);
+	assert.equal(first.result["icloud.notes"].records.length, 3);
+	for (const row of first.result["icloud.notes"].records) {
+		assert.equal(row.text_content, bodyText);
+		assert.equal(row.folder_name, "Work");
+	}
+	assert.equal(first.calls.httpFetch, undefined, "CloudKit must use credentialed page fetch");
+	assert.deepEqual(Object.keys(first.states).sort(), [...c.scopes].sort());
+	const replay = await run({ initialState: first.states });
+	assertCleanRun(replay);
+	assert.deepEqual(replay.result.errors, []);
+	assert.equal(replay.result.exportSummary.count, 0);
+	assert.deepEqual(replay.states, first.states);
+	const rejected = await run({ failResultWrite: true });
+	assert.deepEqual(rejected.states, {}, "unaccepted result must not commit STATE");
+	const oldHost = await run({ supportsStateArgument: false });
+	assertCleanRun(oldHost);
+	assert.deepEqual(oldHost.states, {});
+	assert.ok(evaluateSizes.length > 0 && Math.max(...evaluateSizes) <= 65_536);
+});
+
+
+test("icloud_notes: readiness location failures are bounded and recover on the PageShim host", { timeout: 180_000 }, async (t) => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud-location-base.js") });
+	const source = readFileSync(built.outfile, "utf8");
+	for (const locationRead of [1, 2, 3, 4]) {
+		for (const failure of ["pending", "destroyed", "navigation"]) {
+			await t.test(`location ${locationRead}: ${failure}`, async () => {
+				// Inject only at the host bridge boundary, leaving the production
+				// collector and PageShim facade unchanged. The session probe owns
+				// the first two tagged reads; readiness starts with the third.
+				const bundle = join(out, `icloud-location-${locationRead}-${failure}.js`);
+				writeFileSync(bundle, `
+const locationHost = page;
+let locationReads = 0;
+let readinessProbes = 0;
+let locationFailed = false;
+page = new Proxy(locationHost, {
+	get(target, key) {
+		if (key !== "evaluate") return target[key];
+		return async (code) => {
+			if (code.includes("icloud-notes-location")) {
+				locationReads++;
+				if (locationReads >= 2 + ${locationRead} &&
+					(${JSON.stringify(failure)} === "pending" || !locationFailed)) {
+					locationFailed = true;
+					await target.setData("locationFixtureReads", locationReads - 2);
+					if (${JSON.stringify(failure)} === "pending") return new Promise(() => {});
+					return { type: "error", message: "Execution context was destroyed, most likely because of a navigation" };
+				}
+				if (locationFailed && ${JSON.stringify(failure)} === "navigation") {
+					return { type: "value", value: "https://www.icloud.com/mail" };
+				}
+			}
+			const result = await target.evaluate(code);
+			if (code.includes("error-page") && ++readinessProbes === 1 && ${locationRead} === 4) {
+				return { type: "value", value: { ...result.value, readyState: "loading" } };
+			}
+			return result;
+		};
+	},
+});
+` + source);
+				const started = Date.now();
+				const r = await runHarness({
+					bundle, fixtures: c.fixtures, scopes: c.scopes,
+					gotoDelayMs: 0, loginWaitMs: 1000,
+					// Accelerate only the fixture's timers, not production constants.
+					timerScale: failure === "pending" ? 0.02 : 1,
+				});
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.ok(r.data.locationFixtureReads >= locationRead, "fault must hit readiness, after session probing");
+				if (failure === "destroyed") {
+					assert.equal(r.data.error, undefined);
+					assert.deepEqual(r.result.errors, []);
+					assert.equal(r.result.exportSummary.count, 5);
+					assert.equal(r.calls.goto, locationRead === 4 ? 1 : 2, "recover only after a fresh Notes route check");
+				} else {
+					assert.match(r.data.error, failure === "pending" ? /icloud_readiness_exhausted/ : /icloud_wrong_page/);
+					assert.deepEqual(r.states, {});
+					assert.equal(r.calls.goto, 1, "no recovery navigation without a readable Notes route");
+					assert.equal(r.result.exportSummary.count, 0);
+					if (failure === "pending") {
+						assert.ok(Date.now() - started < 20_000, "never-settling locations must terminate within a bounded fixture");
+					}
+				}
+			});
+		}
+	}
+});
+test("icloud_notes: failed continuation preserves readable rows and never checkpoints notes", { timeout: 120_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-partial.js") });
+	let noteCalls = 0;
+	const fixtures = { ...c.fixtures, resolve(url, request) {
+		const response = c.fixtures.resolve(url, request);
+		if (!url.includes("/records/query")) return response;
+		const body = JSON.parse(request.postData);
+		if (body.query.filterBy[0].fieldValue.value !== "recents") return response;
+		noteCalls++;
+		return noteCalls === 1
+			? { ...response, body: JSON.stringify({ ...JSON.parse(response.body), continuationMarker: "next" }) }
+			: { ...response, status: 500, body: JSON.stringify({ error: "synthetic failure" }) };
+	} };
+	const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes, gotoDelayMs: 0, loginWaitMs: 1000 });
+	assertCleanRun(r);
+	assert.equal(r.result["icloud.notes"].records.length, 3);
+	assert.ok(r.result.errors.some(error => error.scope === "icloud.notes"));
+	assert.match(r.data.status, /^Partial:/);
+	assert.equal(r.states["icloud.notes"], undefined);
+	assert.ok(r.states["icloud.profile"]);
+	assert.ok(r.states["icloud.folders"]);
+});
+
+test("icloud_notes: thin host commits all streams only after accepted completion", { timeout: 120_000 }, async () => {
+ const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+ const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-thin.js") });
+ const run = (options = {}) => runHarness({
+  bundle: built.outfile, fixtures: c.fixtures, scopes: c.scopes,
+  resultStreaming: true, resultSpoolDirectory: join(out, "icloud-thin-" + Math.random()),
+  gotoDelayMs: 0, loginWaitMs: 1000, ...options,
+ });
+ const first = await run();
+ assertCleanRun(first);
+ assert.equal(first.data.error, undefined);
+ assert.equal(first.streamResult.completed, true);
+ assert.deepEqual(first.streamDone.errors, []);
+ assert.equal(first.streamDone.exportSummary.count, 5);
+ assert.deepEqual(Object.keys(first.states).sort(), [...c.scopes].sort());
+ const replay = await run({ initialState: first.states });
+ assertCleanRun(replay);
+ assert.deepEqual(replay.streamDone.errors, []);
+ assert.equal(replay.streamDone.exportSummary.count, 0);
+ assert.deepEqual(replay.states, first.states);
+ for (const key of ["result:chunk", "result:done"]) {
+  const rejected = await run({ resultStreamFailure: { key, ...(key === "result:chunk" ? { sequence: 0 } : {}) } });
+  assertCleanRun(rejected);
+  assert.ok(rejected.data.error);
+  assert.deepEqual(rejected.states, {});
+ }
+});
+
 test("youtube: verified empty history commits STATE only on a state-capable host", { timeout: 180_000 }, async () => {
 	const { youtubeFixtures } = await import("./fixtures/youtube.mjs");
 	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-state.js") });
@@ -4034,4 +4191,118 @@ test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeo
 		assert.ok(r.result.errors.length > 0);
 		assert.doesNotMatch(r.data.status, /^Complete!/);
 	});
+});
+
+test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", { timeout: 180_000 }, async (t) => {
+ const { createLinkedInFixtures, pageshimCase: c } = await import("./fixtures/linkedin.mjs");
+ const built = await buildPageshim({ connector: "linkedin", outfile: join(out, "linkedin-evidence.js") });
+ const run = (fixtures, options = {}) => runHarness({
+  bundle: built.outfile, fixtures, scopes: c.scopes, gotoDelayMs: 0, timerScale: 0.01,
+  ...options,
+ });
+ await t.test("complete six-stream inventory and bounded page calls", async () => {
+  const fixtures = createLinkedInFixtures();
+  const calls = [];
+  const r = await run(fixtures, { initialState: { "linkedin.profile": { prior: true } },
+   observeBridge: (method, args) => { if (method === "evaluate") calls.push(String(args[0])); } });
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result.exportSummary, c.exportSummary);
+  assert.match(r.data.status, /^Complete!/);
+  assert.deepEqual(Object.keys(r.states).sort(), [...c.scopes].sort());
+  for (const scope of c.scopes) assert.ok(r.states[scope].full_scan_at);
+  assert.equal(r.result["linkedin.profile"].records[0].connection_count, 1);
+  assert.equal(r.result["linkedin.connections"].records[0].id, "urn:li:fsd_profile:conn-1");
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((code) => code.length <= 65_536));
+  assert.equal(r.calls.httpFetch, undefined);
+  assert.ok(fixtures.requests.length > 0);
+  assert.ok(fixtures.requests.every((request) => request.csrf === "synthetic-csrf"));
+  // The only navigation is collect's feed visit; the probe is observational.
+  assert.deepEqual(r.pageNavigations, ["https://www.linkedin.com/feed/"]);
+ });
+ await t.test("old shells do not persist STATE", async () => {
+  const initialState = { "linkedin.profile": { prior: true } };
+  const r = await run(createLinkedInFixtures(), { supportsStateArgument: false, initialState });
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.stateMessages, []);
+  assert.deepEqual(r.states, initialState);
+ });
+ await t.test("rejected streamed completion does not commit STATE", async () => {
+  const initialState = { "linkedin.profile": { prior: true } };
+  const r = await run(createLinkedInFixtures(), {
+   initialState, resultStreaming: true, resultStreamFailure: { key: "result:done" },
+   resultSpoolDirectory: join(out, "linkedin-rejected-state"),
+  });
+  assertCleanRun(r);
+  assert.ok(r.data.error);
+  assert.deepEqual(r.states, initialState);
+ });
+ await t.test("owner-proven empty sections and connections remain complete", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.pathname.endsWith("connectionsSummary/")) body.numConnections = 0;
+   if (url.pathname.endsWith("/connections")) { body.elements = []; body.paging.total = 0; }
+   if (url.searchParams.has("memberIdentity")) {
+    for (const key of ["profilePositionGroups", "profileEducations", "profileSkills", "profileLanguages"]) {
+     body.elements[0][key] = { elements: [], paging: { start: 0, total: 0 } };
+    }
+   }
+   return body;
+  });
+  const r = await run(fixtures);
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.equal(r.result.exportSummary.count, 1);
+  for (const scope of c.scopes.slice(1)) {
+   assert.deepEqual(r.result[scope].records, []);
+   assert.ok(r.states[scope].full_scan_at);
+  }
+ });
+ const cases = [
+  ["summary owner mismatch", "connections", (url, body) => {
+   if (url.pathname.endsWith("connectionsSummary/")) body.entityUrn = "urn:li:fsd_connectionsSummary:99";
+   return body;
+  }, 1],
+  ["summary total changes", "connections", (url, body, requests) => {
+   if (url.pathname.endsWith("connectionsSummary/") && requests.filter((r) => r.path.endsWith("connectionsSummary/")).length > 1) body.numConnections = 2;
+   return body;
+  }, 1],
+  ["missing summary", "connections", (url, body) => url.pathname.endsWith("connectionsSummary/") ? { fixtureStatus: 404 } : body, 1],
+  ["paging total mismatch", "connections", (url, body) => {
+   if (url.pathname.endsWith("/connections")) body.paging.total = 2;
+   return body;
+  }, 1],
+  ["source-404 connection enrichment", "connections", (url, body) => url.searchParams.has("ids") ? { fixtureStatus: 404 } : body, 0],
+  ["section total mismatch", "skills", (url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].profileSkills.paging.total = 2;
+   return body;
+  }, 0],
+  ["profile owner mismatch", "skills", (url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].entityUrn = "urn:li:fsd_profile:99";
+   return body;
+  }, 1],
+ ];
+ for (const [name, stream, transform, expectedRows] of cases) {
+  await t.test(name + " retains readable upserts without STATE", async () => {
+   const scope = "linkedin." + stream;
+   const initialState = { [scope]: { prior: true } };
+   const r = await run(createLinkedInFixtures(transform), { scopes: [scope], initialState });
+   assertCleanRun(r);
+   assert.match(r.data.status, /^Partial:/);
+   assert.equal(r.result[scope]?.records.length ?? 0, expectedRows);
+   assert.deepEqual(r.states, initialState);
+   assert.deepEqual(r.stateMessages, []);
+   assert.ok(r.result.errors.some((e) => e.scope === scope && e.errorClass === "partial"));
+  });
+ }
+ await t.test("successful JSON without owner identity cannot pass the probe", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => url.pathname === "/voyager/api/me" ? {} : body);
+  const r = await run(fixtures, { loginWaitMs: 50 });
+  assertCleanRun(r);
+  assert.equal(r.result.errors[0].errorClass, "auth_failed");
+  assert.equal(r.calls.showBrowser, 1);
+  assert.ok(fixtures.requests.every((request) => request.path === "/voyager/api/me"));
+  assert.deepEqual(r.stateMessages, []);
+ });
 });
