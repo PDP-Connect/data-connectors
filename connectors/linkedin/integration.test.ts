@@ -657,7 +657,6 @@ test("collectLinkedIn: dash failure keeps /me profile fields and reports unavail
 	// /me supplies name, headline and picture, but the dash-only fields are
 	// unreadable, so the profile row is withheld rather than emitted partial.
 	assert.deepEqual(withheldFieldsOf(recording, "profile"), [
-		"connection_count",
 		"current_company",
 		"current_position_title",
 		"industry",
@@ -815,7 +814,7 @@ test("collectLinkedIn: incomplete nested position paging withholds the experienc
 	);
 });
 
-test("collectLinkedIn: failed connection paging vetoes profile coverage", async () => {
+test("collectLinkedIn: failed connection paging leaves profile count null", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const route = (path: string): unknown => {
 		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
@@ -827,15 +826,13 @@ test("collectLinkedIn: failed connection paging vetoes profile coverage", async 
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
-	// An unverified walk makes connection_count unreadable, so the profile is
-	// withheld: never emitted with a `null` count or without the field.
-	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
+	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, null);
 	assert.equal(claimsFullCoverage(recording, "profile"), false);
 	assert.ok(
 		skipResults(recording).some(
 			(skip) =>
 				skip.stream === "profile" &&
-				unavailableFieldsOf(skip).includes("connection_count"),
+				!unavailableFieldsOf(skip).includes("connection_count"),
 		),
 	);
 });
@@ -858,9 +855,7 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	// An unverified walk makes connection_count unreadable, so the profile is
-	// withheld: never emitted with a `null` count or without the field.
-	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
+	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, null);
 	assert.equal(
 		recording.events.some(
 			(event) =>
@@ -915,9 +910,8 @@ test("collectLinkedIn: repeated connection pages cannot prove a count or emit du
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	// An unverified walk makes connection_count unreadable, so the profile is
-	// withheld: never emitted with a `null` count or without the field.
-	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
+	// Missing dash fields still withhold the row; the count fallback is independent.
+	assert.ok(!withheldFieldsOf(recording, "profile").includes("connection_count"));
 	const connections = recording.emitted.filter(
 		(event) => event.stream === "connections",
 	);
@@ -945,9 +939,8 @@ test("collectLinkedIn: mismatched paging start vetoes connection completeness", 
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	// An unverified walk makes connection_count unreadable, so the profile is
-	// withheld: never emitted with a `null` count or without the field.
-	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
+	// Missing dash fields still withhold the row; the count fallback is independent.
+	assert.ok(!withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.protocolMessages.some(
 			(message) =>
@@ -974,9 +967,8 @@ test("collectLinkedIn: a short reported full page cannot prove connection end", 
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	// An unverified walk makes connection_count unreadable, so the profile is
-	// withheld: never emitted with a `null` count or without the field.
-	assert.ok(withheldFieldsOf(recording, "profile").includes("connection_count"));
+	// Missing dash fields still withhold the row; the count fallback is independent.
+	assert.ok(!withheldFieldsOf(recording, "profile").includes("connection_count"));
 	assert.equal(
 		recording.protocolMessages.some(
 			(message) =>
@@ -1401,7 +1393,6 @@ test("collectLinkedIn: malformed current-position and location values veto profi
 	// The group's own experience row is uncovered (malformed title), so both
 	// projections from it are unreadable, as is the malformed location.
 	assert.deepEqual(withheldFieldsOf(recording, "profile"), [
-		"connection_count",
 		"current_company",
 		"current_position_title",
 		"location",
@@ -1818,7 +1809,7 @@ test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration count
 				};
 				expectedCounts.skills = one ? 1 : 0;
 				expectedCounts.connections = one ? 1 : 0;
-				delete expectedCounts.profile;
+				// Profile count remains readable independently of continuation.
 			}
 			const recording = makeRecordingEmit(validateRecord);
 			const ctx = buildCtx(ALL_STREAMS, recording);
@@ -1844,13 +1835,10 @@ test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration count
 					return ctx.emitRecord(...args);
 				},
 			});
-			delete expectedCounts.profile;
+			// Profile remains an upsert when identity proof is absent.
 			assertUpsertOnly(recording, expectedCounts);
 			if (fixture === "next-empty" || fixture === "next-one") {
-				assert.ok(
-					withheldFieldsOf(recording, "profile").includes("connection_count"),
-					"an advertised continuation makes the exact connection count unavailable",
-				);
+				assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 1);
 			}
 			if (fixture === "nested-one" || fixture === "next-one") {
 				assert.equal(recording.emitted.find((row) => row.stream === "skills")?.data.id, skill.entityUrn);
@@ -1885,8 +1873,10 @@ async function collectProof(options: {
 } = {}) {
 	const recording = makeRecordingEmit(validateRecord);
 	const paths: string[] = [];
+	const progressMessages: string[] = [];
 	let summaryReads = 0;
 	const ctx = buildCtx(ALL_STREAMS, recording);
+	ctx.progress = async (message) => { progressMessages.push(message); };
 	ctx.page = makeFakePage((path) => {
 		paths.push(path);
 		if (path === "/voyager/api/me") return options.me ?? PROOF_ME;
@@ -1905,7 +1895,7 @@ async function collectProof(options: {
 		return { _error: "http_404" };
 	});
 	await collectLinkedIn(ctx);
-	return { recording, paths, summaryReads };
+	return { recording, paths, summaryReads, progressMessages };
 }
 
 test("provider evidence: complete inventories emit RECORD, coverage, then STATE", async () => {
@@ -1987,3 +1977,35 @@ test("provider evidence: nested experience count and owner identity independentl
 		assert.equal(claimsFullCoverage(second.recording, stream), false);
 	}
 });
+
+
+test("profile count uses owner summary while withheld connection enrichment remains unproven", async () => {
+	const total = { ...PROOF_SUMMARY, numConnections: 354 };
+	const { recording } = await collectProof({
+		before: total, after: total, resolution: { _error: "http_404" },
+	});
+	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 354);
+	assert.equal(claimsFullCoverage(recording, "profile"), true);
+	assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "profile"), true);
+	assert.equal(claimsFullCoverage(recording, "connections"), false);
+	assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "connections"), false);
+});
+
+for (const [summary, reason] of [
+	[{ entityUrn: PROOF_SUMMARY.entityUrn }, "summary_total_invalid"],
+	[{ ...PROOF_SUMMARY, entityUrn: "urn:li:fsd_connectionsSummary:99" }, "summary_owner_mismatch"],
+	[{ _error: "http_503" }, "summary_request_failed"],
+] as const) {
+	test(`profile count nullable fallback preserves profile for ${reason}`, async () => {
+		const { recording, progressMessages } = await collectProof({ before: summary, after: summary });
+		const profile = recording.emitted.find((row) => row.stream === "profile")?.data;
+		assert.ok(profile);
+		assert.equal(profile.connection_count, null);
+		assert.equal(profile.full_name, "Anon Member");
+		assert.equal(claimsFullCoverage(recording, "profile"), true);
+		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "profile"), true);
+		assert.equal(claimsFullCoverage(recording, "connections"), false);
+		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "connections"), false);
+		assert.ok(progressMessages.includes(`LinkedIn profile connection_count=null: ${reason}`));
+	});
+}

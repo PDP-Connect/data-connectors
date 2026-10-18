@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.27)
+ * PDPP LinkedIn Connector (v0.3.28)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -84,6 +84,7 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import {
 	type FieldRead,
+	EMPTY,
 	firstOf,
 	isRecord,
 	read,
@@ -713,12 +714,9 @@ export async function collectLinkedIn(
 	}
 	const dashProfile = dashProfileResult.profile;
 
-	// `profile.connection_count` is only available from the connections
-	// listing (legacy: `profileResult.connections = totalAvailable ||
-	// connectionRecords.length`, set AFTER the connections fetch completes) —
-	// nowhere on /me or the dash profile payload. Walk the listing here, before
-	// emitting `profile`, whenever either stream is requested, and reuse the
-	// same walk for the `connections` stream below.
+	// The profile count is the owner-bound source summary, independent of
+	// connection enumeration or enrichment proof. Reuse the summary reads
+	// for the connections stream without coupling profile emission to its walk.
 	let connectionsResult: ConnectionsResult | null = null;
 	let beforeSummary: ReturnType<typeof summaryEvidence> = { reason: "summary_request_failed" };
 	let afterSummary: ReturnType<typeof summaryEvidence> = { reason: "summary_request_failed" };
@@ -736,16 +734,16 @@ export async function collectLinkedIn(
 		afterSummary = summaryEvidence(await voyagerFetch(page,
 			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-after"), meResult);
 	}
-	const walkEvidence = connectionsResult ? connectionEvidence({
-		before: beforeSummary, after: afterSummary,
-		distinctCount: connectionsResult.elements.length,
-		missingUrnCount: connectionsResult.missingUrnCount,
-		terminationReason: connectionsResult.terminationReason,
-		pageTotal: connectionsResult.total, confirmation,
-	}) : "connection_walk_unavailable";
-	const connectionCount: FieldRead<number> =
-		!walkEvidence && beforeSummary.total !== undefined
-			? read(beforeSummary.total) : unavailable("walk_unverified");
+	// schemas.ts requires this key and permits null. The explicit profile
+	// fallback uses null when the summary is unreadable or not owner-bound;
+	// whole-record upserts can therefore clear a previously stored count.
+	const connectionCount: FieldRead<number> = beforeSummary.total !== undefined
+		? read(beforeSummary.total) : EMPTY;
+	if (wantsProfileFields && beforeSummary.reason) {
+		await progress(`LinkedIn profile connection_count=null: ${beforeSummary.reason}`, {
+			stream: "profile",
+		});
+	}
 	const ownerEvidence = profileEvidence(meResult, dashProfile);
 
 	const sink: StreamSink = { emit, emitRecord, progress, isRecordSelected: ctx.isRecordSelected };

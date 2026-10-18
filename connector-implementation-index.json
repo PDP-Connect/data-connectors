@@ -14492,7 +14492,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.27",
+				"version": "0.3.28",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14568,7 +14568,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "Exact number of connections observed only after a verified end-of-list. Null when paging ends on an error, malformed page, or page budget."
+									"description": "Owner-bound connectionsSummary.numConnections, independent of connection enumeration. Null when the summary total is unavailable or fails owner validation; this can clear a previously stored count."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],

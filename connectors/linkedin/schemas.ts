@@ -20,7 +20,8 @@
  * Every field is present on an emitted record: a Personal Server upsert
  * replaces the whole record, so a row with an unreadable field is withheld,
  * never emitted partial (see field-read.ts). `null` means the source says the
- * field is empty.
+ * field is empty, except profile.connection_count: its explicit nullable
+ * fallback represents an unavailable owner-bound summary total.
  */
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";

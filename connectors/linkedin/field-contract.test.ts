@@ -1034,7 +1034,7 @@ const VERIFIED_EMPTY_CONNECTIONS: Routes["connections"] = (start) => ({
 	paging: { count: 40, start },
 });
 
-test("r1: a repeated connections page withholds coverage and connection_count", async () => {
+test("r1: a repeated connections page withholds coverage independently of profile count", async () => {
 	const members = Array.from({ length: 40 }, (_, index) => ({
 		connectedMember: `urn:li:fsd_profile:a${index}`,
 		createdAt: 1_700_000_000_000,
@@ -1058,7 +1058,7 @@ test("r1: a repeated connections page withholds coverage and connection_count", 
 	assert.equal(outcomeOf(recording, "connections").complete, false);
 	const profile = outcomeOf(recording, "profile");
 	assert.equal(profile.complete, false);
-	assertWithheld(profile, ["connection_count"]);
+	assert.equal(profile.records[0]?.connection_count, 1);
 });
 
 test("r1: a basic-fallback {} profile is never complete, and its sections are unavailable", async () => {
