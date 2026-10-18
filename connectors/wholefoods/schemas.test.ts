@@ -77,12 +77,12 @@ test("orders schema accepts null order_date/total_cents (unparseable source)", (
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("orders schema rejects null item_count because source completeness must be proven", () => {
+test("orders schema accepts unknown item_count while source completeness is unproven", () => {
 	const result = ordersSchema.safeParse({
 		...ORDER_RECORD,
 		item_count: null,
 	});
-	assert.equal(result.success, false);
+	assert.equal(result.success, true);
 });
 
 test("orders schema rejects an order_date with a fabricated time component", () => {
@@ -127,6 +127,7 @@ test("order_items schema strips an unknown nutrition field rather than emitting 
 });
 
 const NUTRITION_RECORD = {
+	id: PRODUCT_ID,
 	calories: 105,
 	carbs_g: 27,
 	confidence: "high" as const,
