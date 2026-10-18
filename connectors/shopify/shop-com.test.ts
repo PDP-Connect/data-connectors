@@ -188,7 +188,7 @@ test("sign-in labels that only start with 'Sign in' are not prompts, and hidden 
 	});
 });
 
-test("a signed-in shop.com session opens order history without a sign-in handoff, and a signed-out one fails closed", async () => {
+test("a signed-in shop.com session skips handoff, and a signed-out one fails closed after handoff", async () => {
 	await withPage(async (page) => {
 		await serveShopCom(page, { html: SIGNED_IN_PAGE, api: () => ({ status: 200, body: null }) });
 		await ensureShopifySession({
@@ -202,7 +202,7 @@ test("a signed-in shop.com session opens order history without a sign-in handoff
 		await assert.rejects(
 			() => ensureShopifySession({
 				capture: null, page: page as unknown as PlaywrightPage,
-				manualLogin: async () => { throw new Error("must stop before a handoff"); },
+				manualLogin: async () => undefined,
 				sendInteraction: async (): Promise<never> => { throw new Error("unexpected handoff"); },
 			}),
 			/shopify_signed_out_or_blocked/,
@@ -358,3 +358,58 @@ test("the GET fallback cannot move to a different order-history document", async
 		assert.deepEqual(requests, [], "the fallback GET must not run after navigation changes");
 	});
 });
+
+[
+	["sign-in", SIGNED_OUT_PAGE],
+	["email", '<main><input type="email" name="email"></main>'],
+	["OTP", '<main><input autocomplete="one-time-code" name="code"></main>'],
+].forEach(([label, html]) => {
+	test(`${label} wall hands off, rechecks the session, then collects authenticated orders`, async () => {
+		await withPage(async (page) => {
+			const fixture: ShopComFixture = {
+				html: html!,
+				api: () => ({ status: 200, body: historyBody([orderNode(ORDER_A)], { hasNextPage: false, endCursor: null }) }),
+			};
+			const requests = await serveShopCom(page, fixture);
+			let handoffs = 0;
+			await ensureShopifySession({
+				capture: null, page: page as unknown as PlaywrightPage,
+				manualLogin: async () => {
+					handoffs += 1;
+					assert.equal(await page.evaluate(hasShopSignInWallInPage), true);
+					assert.deepEqual(requests, []);
+					fixture.html = SIGNED_IN_PAGE;
+				},
+				sendInteraction: async (): Promise<never> => { throw new Error("unexpected handoff"); },
+			});
+			assert.equal(handoffs, 1);
+			assert.equal(await page.evaluate(hasShopOrderHistoryContextInPage), true);
+			const run = await runCollect(page);
+			assert.deepEqual(run.emitted.map((record) => record.data.id), [ORDER_A]);
+			assert.equal(run.protocolMessages.filter((message) => message.type === "STATE").length, 1);
+		});
+	});
+
+	test(`${label} wall still present after handoff fails without records or completeness`, async () => {
+		await withPage(async (page) => {
+			const requests = await serveShopCom(page, {
+				html: html!,
+				api: () => ({ status: 200, body: historyBody([orderNode(ORDER_A)], { hasNextPage: false, endCursor: null }) }),
+			});
+			let handoffs = 0;
+			await assert.rejects(() => ensureShopifySession({
+				capture: null, page: page as unknown as PlaywrightPage,
+				manualLogin: async () => { handoffs += 1; },
+				sendInteraction: async (): Promise<never> => { throw new Error("unexpected handoff"); },
+			}), /shopify_signed_out_or_blocked/);
+			assert.equal(handoffs, 1);
+			const run = await runCollect(page);
+			assert.equal(run.emitted.length, 0);
+			assert.equal(run.protocolMessages.some((message) => message.type === "STATE"), false);
+			assert.ok(run.protocolMessages.some((message) =>
+				message.type === "SKIP_RESULT" && message.reason === "shopify_signed_out_or_blocked"));
+			assert.deepEqual(requests, []);
+		});
+	});
+});
+

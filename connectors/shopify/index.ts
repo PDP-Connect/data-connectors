@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Shopify (Shop app) Connector (v0.2.31)
+ * PDPP Shopify (Shop app) Connector (v0.2.32)
  *
  * Collects order history from https://shop.app/account/order-history via a
  * logged-in browser session. Shop app is a React/Apollo Client SPA; this
@@ -1403,12 +1403,7 @@ export async function ensureShopifySession({
 	if (await hasShopOrderHistorySession(page)) {
 		return;
 	}
-	if (typeof page.evaluate === "function") {
-		const signedOutWall = await withBrowserOperationBudget(
-			"auth_wall_probe", () => page.evaluate(hasShopSignInWallInPage), Date.now() + 1_000, 1_000,
-		).catch(() => false);
-		if (signedOutWall) throw new Error("shopify_signed_out_or_blocked");
-	}
+	// A sign-in wall is the reason to request manual login, not to abort it.
 
 	if (manualLogin) {
 		await manualLogin();
@@ -1432,7 +1427,7 @@ export async function ensureShopifySession({
 
 	await openOrderHistory(page);
 	if (!(await hasShopOrderHistorySession(page))) {
-		throw new Error("shopify_login_manual_incomplete");
+		throw new Error("shopify_signed_out_or_blocked");
 	}
 }
 

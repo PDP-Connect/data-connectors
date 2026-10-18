@@ -125,7 +125,7 @@ test("Shop sign-in rejects a completed handoff without an authenticated order pa
 					throw new Error("manualAction should be injected in this test");
 				},
 			}),
-		/shopify_login_manual_incomplete/,
+		/shopify_signed_out_or_blocked/,
 	);
 });
 
