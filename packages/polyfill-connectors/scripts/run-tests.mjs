@@ -43,7 +43,9 @@ const patterns = [
 // bwrap blocks nested namespaces, so these run in the `namespaces` lane
 // (`test-sandbox --isolate cgroup`) and every other file runs in `sandboxed`.
 // src/test-runner-contract.test.ts reads this list by scanning this file.
-// Package-relative paths.
+// Package-relative paths. The lane runs one file at a time: these files share
+// the repository root as global state (isolation-mechanism plants sockets
+// under it that scenario-verify-strict's isolation scan then refuses).
 const NAMESPACE_TESTS = new Set([
 	"bin/scenario-cli.test.ts",
 	"bin/scenario-fidelity.test.ts",
@@ -82,7 +84,7 @@ const child = spawn(
 		"--test",
 		"--import",
 		"tsx",
-		`--test-concurrency=${rawConcurrency}`,
+		`--test-concurrency=${lane === "namespaces" ? "1" : rawConcurrency}`,
 		"--test-timeout=120000",
 		...files,
 	],
