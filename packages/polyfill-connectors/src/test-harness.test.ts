@@ -482,3 +482,41 @@ test("runConnectorProtocolSubprocess: stream failure evidence forces failed DONE
 	assert.equal(done.error?.code, "stream_collection_failed");
 	assert.equal(done.error?.retryable, true);
 });
+
+/** `emitted_at` is each run's own clock; blank it so two runs of one fixture compare. */
+function withoutEmittedAt(
+	messages: readonly EmittedMessage[],
+): EmittedMessage[] {
+	return messages.map((message) => {
+		if (message.type !== "RECORD") {
+			return message;
+		}
+		return { ...message, emitted_at: "" };
+	});
+}
+
+test("runConnectorProtocolSubprocess: retainRawStdout false keeps the parsed messages and returns no raw text", async () => {
+	const retained = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: fixturePath("protocol-subprocess-non-browser.ts"),
+		start: { type: "START", scope: { streams: [{ name: "items" }] } },
+	});
+	const dropped = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: fixturePath("protocol-subprocess-non-browser.ts"),
+		retainRawStdout: false,
+		start: { type: "START", scope: { streams: [{ name: "items" }] } },
+	});
+
+	assert.deepEqual(
+		withoutEmittedAt(dropped.messages),
+		withoutEmittedAt(retained.messages),
+	);
+	assert.equal(dropped.rawStdout, "");
+
+	const rawLines = retained.rawStdout.split("\n").filter((line) => line !== "");
+	assert.deepEqual(
+		rawLines.map((line) => JSON.parse(line)),
+		retained.messages,
+	);
+});
