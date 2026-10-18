@@ -6,6 +6,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { chromium } from "playwright";
 import { runHarness } from "./harness.mjs";
 
 const root = join(process.cwd(), ".scratch", "pageshim-cleanup-test");
@@ -45,12 +46,20 @@ test("a run that ends before loginAfterMs never signs in afterwards", async () =
 	const bundle = await evaluateFailureBundle();
 	const calls = [];
 	const fixtures = fixtureFor((value) => calls.push(value));
-	await runHarness({
-		bundle,
-		fixtures,
-		scopes: ["chatgpt.conversations"],
-		loginAfterMs: 600,
-	}).catch(() => {});
+	await assert.rejects(
+		runHarness({
+			bundle,
+			fixtures,
+			scopes: ["chatgpt.conversations"],
+			loginAfterMs: 600,
+		}),
+		/Execution context was destroyed|Target (page, context or browser has been )?closed/,
+	);
+	assert.equal(
+		calls[0],
+		false,
+		"the run failed before the login timer was armed",
+	);
 	const callsAtReturn = calls.length;
 	await sleep(1000);
 	assert.deepEqual(calls.slice(callsAtReturn), [], "late setLoggedIn call");
@@ -71,6 +80,59 @@ test("a failed evaluation leaves no unhandled rejection from the heap sampler", 
 		}).catch(() => {});
 		await sleep(300);
 	} finally {
+		process.off("unhandledRejection", listener);
+	}
+	assert.deepEqual(unhandled, []);
+});
+
+test("a heap sample that rejects while the run is pending is not an unhandled rejection", async () => {
+	// A bundle that outlives several 50 ms samples.
+	const bundle = await writeBundle(
+		"slow",
+		"await new Promise((resolve) => setTimeout(resolve, 600));",
+	);
+	const unhandled = [];
+	const listener = (reason) => unhandled.push(String(reason));
+	process.on("unhandledRejection", listener);
+	const launch = chromium.launch;
+	let rejectedSamples = 0;
+	// Make Performance.getMetrics fail from the third sample on, as a closed
+	// session or a crashed target would, while runner.evaluate is still pending.
+	chromium.launch = async (...args) => {
+		const browser = await launch.apply(chromium, args);
+		const newContext = browser.newContext.bind(browser);
+		browser.newContext = async (...contextArgs) => {
+			const context = await newContext(...contextArgs);
+			const newCDPSession = context.newCDPSession.bind(context);
+			context.newCDPSession = async (...sessionArgs) => {
+				const session = await newCDPSession(...sessionArgs);
+				const send = session.send.bind(session);
+				let samples = 0;
+				session.send = (method, ...rest) => {
+					if (method === "Performance.getMetrics" && ++samples > 2) {
+						rejectedSamples++;
+						return Promise.reject(new Error("session closed"));
+					}
+					return send(method, ...rest);
+				};
+				return session;
+			};
+			return context;
+		};
+		return browser;
+	};
+	try {
+		const run = await runHarness({
+			bundle,
+			fixtures: fixtureFor(),
+			scopes: ["chatgpt.conversations"],
+			sampleHeap: true,
+		}).catch((error) => error);
+		await sleep(300);
+		assert.ok(rejectedSamples > 0, "no sample was made to reject");
+		assert.equal(run.ret?.ok, true, String(run));
+	} finally {
+		chromium.launch = launch;
 		process.off("unhandledRejection", listener);
 	}
 	assert.deepEqual(unhandled, []);

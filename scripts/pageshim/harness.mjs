@@ -802,7 +802,9 @@ export async function runHarness({
 					await new Promise((resolve) => setTimeout(resolve, 50));
 				}
 				await sample();
-			})();
+				// A failed sample (closed session, crashed target) is not a result; the
+				// handler is attached here so it cannot go unhandled while evaluate runs.
+			})().catch(() => {});
 		}
 
 		if (loginAfterMs === Number.POSITIVE_INFINITY) {
@@ -873,8 +875,7 @@ export async function runHarness({
 	} finally {
 		clearTimeout(loginTimer);
 		sampling = false;
-		// The session may already be closed; a failed last sample is not a result.
-		await sampler?.catch(() => {});
+		await sampler;
 		for (const entry of streamHost.files.values())
 			await entry.handle?.close().catch(() => {});
 		await browser.close();
