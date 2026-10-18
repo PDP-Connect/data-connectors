@@ -21,7 +21,12 @@ test("package test runner bounds file concurrency and retains a finite hang guar
 	]) {
 		const runner = await readFile(new URL(path, import.meta.url), "utf8");
 
-		assert.match(runner, /process\.env\.TEST_CONCURRENCY \?\? "2"/, path);
+		// test:fast (`--fast`) defaults to 4; everything else to 2.
+		assert.match(
+			runner,
+			/process\.env\.TEST_CONCURRENCY \?\? (?:"2"|\(fast \? "4" : "2"\))/,
+			path,
+		);
 		assert.match(runner, /--test-concurrency=\$\{[^}`]*rawConcurrency\}/, path);
 		assert.match(runner, /--test-timeout=120000/, path);
 		assert.doesNotMatch(runner, /--test-timeout=30000/, path);
