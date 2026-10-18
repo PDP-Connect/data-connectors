@@ -3708,6 +3708,77 @@ test("icloud_notes: owner-bound profile, browser decompression and state replay"
 	assert.ok(evaluateSizes.length > 0 && Math.max(...evaluateSizes) <= 65_536);
 });
 
+
+test("icloud_notes: readiness location failures are bounded and recover on the PageShim host", { timeout: 180_000 }, async (t) => {
+	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud-location-base.js") });
+	const source = readFileSync(built.outfile, "utf8");
+	for (const locationRead of [1, 2, 3, 4]) {
+		for (const failure of ["pending", "destroyed", "navigation"]) {
+			await t.test(`location ${locationRead}: ${failure}`, async () => {
+				// Inject only at the host bridge boundary, leaving the production
+				// collector and PageShim facade unchanged. The session probe owns
+				// the first two tagged reads; readiness starts with the third.
+				const bundle = join(out, `icloud-location-${locationRead}-${failure}.js`);
+				writeFileSync(bundle, `
+const locationHost = page;
+let locationReads = 0;
+let readinessProbes = 0;
+let locationFailed = false;
+page = new Proxy(locationHost, {
+	get(target, key) {
+		if (key !== "evaluate") return target[key];
+		return async (code) => {
+			if (code.includes("icloud-notes-location")) {
+				locationReads++;
+				if (locationReads >= 2 + ${locationRead} &&
+					(${JSON.stringify(failure)} === "pending" || !locationFailed)) {
+					locationFailed = true;
+					await target.setData("locationFixtureReads", locationReads - 2);
+					if (${JSON.stringify(failure)} === "pending") return new Promise(() => {});
+					return { type: "error", message: "Execution context was destroyed, most likely because of a navigation" };
+				}
+				if (locationFailed && ${JSON.stringify(failure)} === "navigation") {
+					return { type: "value", value: "https://www.icloud.com/mail" };
+				}
+			}
+			const result = await target.evaluate(code);
+			if (code.includes("error-page") && ++readinessProbes === 1 && ${locationRead} === 4) {
+				return { type: "value", value: { ...result.value, readyState: "loading" } };
+			}
+			return result;
+		};
+	},
+});
+` + source);
+				const started = Date.now();
+				const r = await runHarness({
+					bundle, fixtures: c.fixtures, scopes: c.scopes,
+					gotoDelayMs: 0, loginWaitMs: 1000,
+					// Accelerate only the fixture's timers, not production constants.
+					timerScale: failure === "pending" ? 0.02 : 1,
+				});
+				assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+				assertCleanRun(r);
+				assert.ok(r.data.locationFixtureReads >= locationRead, "fault must hit readiness, after session probing");
+				if (failure === "destroyed") {
+					assert.equal(r.data.error, undefined);
+					assert.deepEqual(r.result.errors, []);
+					assert.equal(r.result.exportSummary.count, 5);
+					assert.equal(r.calls.goto, locationRead === 4 ? 1 : 2, "recover only after a fresh Notes route check");
+				} else {
+					assert.match(r.data.error, failure === "pending" ? /icloud_readiness_exhausted/ : /icloud_wrong_page/);
+					assert.deepEqual(r.states, {});
+					assert.equal(r.calls.goto, 1, "no recovery navigation without a readable Notes route");
+					assert.equal(r.result.exportSummary.count, 0);
+					if (failure === "pending") {
+						assert.ok(Date.now() - started < 20_000, "never-settling locations must terminate within a bounded fixture");
+					}
+				}
+			});
+		}
+	}
+});
 test("icloud_notes: failed continuation preserves readable rows and never checkpoints notes", { timeout: 120_000 }, async () => {
 	const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
 	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-partial.js") });

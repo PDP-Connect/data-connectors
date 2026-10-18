@@ -1505,6 +1505,90 @@ test("collectAllStreams: pending readiness evaluations are bounded and cannot st
 	);
 });
 
+
+for (const locationRead of [1, 2, 3, 4]) {
+	test(`collectAllStreams: location read ${locationRead} never settling stays within the readiness deadline`, async (t) => {
+		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+		const harness = makeRecordingEmit(validateRecord);
+		let reads = 0;
+		let validations = 0;
+		let reloads = 0;
+		const page = makeFakePage([], undefined, {
+			readyState: "loading",
+			onValidate: () => { validations += 1; },
+			onReload: () => { reloads += 1; },
+		});
+		const evaluate = page.evaluate.bind(page);
+		page.evaluate = ((_fn: unknown, arg: unknown) => {
+			if (arg === "icloud-notes-location" && ++reads >= locationRead) {
+				return new Promise(() => {});
+			}
+			return evaluate(_fn as never, arg);
+		}) as Page["evaluate"];
+		let settled = false;
+		const collection = assert.rejects(
+			collectAllStreams(makeCtx(page, harness, ["notes"])),
+			/icloud_readiness_exhausted/,
+		).then(() => { settled = true; });
+		for (let elapsed = 0; elapsed <= 20_000 && !settled; elapsed += 1000) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			if (elapsed < 20_000) t.mock.timers.tick(1000);
+		}
+		assert.equal(settled, true, "location reads must not escape the shared 20 s deadline");
+		await collection;
+		assert.ok(Date.now() <= 20_000);
+		assert.ok(reads >= locationRead);
+		assert.equal(validations, 0);
+		assert.equal(reloads, 0, "an unreadable current route must never be reloaded");
+		assert.equal(harness.events.length, 0);
+	});
+
+	test(`collectAllStreams: location read ${locationRead} destroyed context recovers safely`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		let reads = 0;
+		let reloads = 0;
+		const page = makeFakePage([folderQueryResponse()], undefined, {
+			...(locationRead === 4 ? { readyState: "loading", readyStateAfterWait: "loading" } : {}),
+			onReload: () => { reloads += 1; },
+			reloadReadyState: "complete",
+		});
+		const evaluate = page.evaluate.bind(page);
+		let probes = 0;
+		page.evaluate = ((fn: unknown, arg: unknown) => {
+			if (arg === "icloud-notes-location" && ++reads === locationRead) {
+				return Promise.reject(new Error("Execution context was destroyed, most likely because of a navigation"));
+			}
+			if (arg === undefined && ++probes > 1) {
+				return Promise.resolve({ href: "https://www.icloud.com/notes", readyState: "complete", blocked: false });
+			}
+			return evaluate(fn as never, arg);
+		}) as Page["evaluate"];
+		await collectAllStreams(makeCtx(page, harness, ["folders"]));
+		assert.ok(reads > locationRead, "the transient location failure must retry");
+		assert.equal(reloads, locationRead === 4 ? 0 : 1);
+		assert.ok(harness.protocolMessages.some((message) => message.type === "STATE"));
+	});
+}
+
+test("collectAllStreams: location failure followed by navigation away vetoes recovery reload", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let reloads = 0;
+	const page = makeFakePage([], undefined, {
+		onReload: () => { reloads += 1; },
+	}) as Page & { setUrl: (url: string) => void };
+	const evaluate = page.evaluate.bind(page);
+	let reads = 0;
+	page.evaluate = ((fn: unknown, arg: unknown) => {
+		if (arg === "icloud-notes-location" && ++reads === 2) {
+			page.setUrl("https://www.icloud.com/mail");
+			return Promise.reject(new Error("Execution context was destroyed"));
+		}
+		return evaluate(fn as never, arg);
+	}) as Page["evaluate"];
+	await assert.rejects(collectAllStreams(makeCtx(page, harness, ["notes"])), /icloud_wrong_page/);
+	assert.equal(reloads, 0);
+	assert.equal(harness.events.length, 0);
+});
 test("collectAllStreams: navigation change vetoes a terminal query response", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	let page!: Page & { setUrl: (url: string) => void };

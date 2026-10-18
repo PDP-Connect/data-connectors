@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP iCloud Notes Connector (manifest v0.1.27)
+ * PDPP iCloud Notes Connector (manifest v0.1.28)
  *
  * Greenfield PDPP Collection Profile connector, ported from the legacy CG
  * script `connectors/apple/icloud-notes-playwright.js` (read-only prior
@@ -710,94 +710,122 @@ function widenProgress(
 	return progress;
 }
 
+class NotesReadinessVeto extends Error {}
+
 async function requireNotesPage(page: Page): Promise<string> {
 	const deadline = Date.now() + NOTES_READINESS_BUDGET_MS;
 	for (let attempt = 0; attempt < NOTES_READINESS_ATTEMPTS; attempt += 1) {
-		const currentHref = await readPageUrl(page);
-		if (!isICloudNotesUrl(currentHref)) {
-			throw new Error(
-				"icloud_wrong_page: collection requires the iCloud Notes route",
+		try {
+			const currentHref = await withinReadinessBudget(
+				() => readPageUrl(page),
+				deadline,
 			);
-		}
-		const remaining = deadline - Date.now();
-		if (remaining <= 0) break;
-		// Test membership before reading: the thin facade records missing members.
-		if ("waitForLoadState" in page && typeof page.waitForLoadState === "function") {
+			if (!isICloudNotesUrl(currentHref)) {
+				throw new NotesReadinessVeto(
+					"icloud_wrong_page: collection requires the iCloud Notes route",
+				);
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) break;
+			// Test membership before reading: the thin facade records missing members.
+			if ("waitForLoadState" in page && typeof page.waitForLoadState === "function") {
+				try {
+					await withinReadinessBudget(
+						() => page.waitForLoadState("load", {
+							timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, remaining),
+						}),
+						deadline,
+					);
+				} catch (error) {
+					if (error === READINESS_DEADLINE) break;
+				}
+			}
+			const afterWaitHref = await withinReadinessBudget(
+				() => readPageUrl(page),
+				deadline,
+			);
+			if (!isICloudNotesUrl(afterWaitHref)) {
+				throw new NotesReadinessVeto(
+					"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
+				);
+			}
+			let pageState: {
+				href: string;
+				readyState: string;
+				blocked: boolean;
+			} | null = null;
+			let probeTimedOut = false;
 			try {
-				await withinReadinessBudget(
-					() => page.waitForLoadState("load", {
-						timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, remaining),
-					}),
+				pageState = await withinReadinessBudget(
+					() =>
+						page.evaluate(() => {
+							const blockedNodes = document.querySelectorAll(
+								'form[action*="signin" i], input#account_name_text_field, iframe[src*="captcha" i], [data-testid="error-page"]',
+							);
+							let blocked = false;
+							for (let index = 0; index < blockedNodes.length; index += 1) {
+								if (blockedNodes[index]?.getClientRects().length) blocked = true;
+							}
+							return {
+								href: window.location.href,
+								readyState: document.readyState,
+								blocked,
+							};
+						}),
 					deadline,
 				);
 			} catch (error) {
-				if (error === READINESS_DEADLINE) break;
+				if (error === READINESS_DEADLINE) probeTimedOut = true;
+				// Navigation can detach the execution context briefly. Recheck route,
+				// then reload only while the owner page is still inside Notes.
 			}
-		}
-		const afterWaitHref = await readPageUrl(page);
-		if (!isICloudNotesUrl(afterWaitHref)) {
-			throw new Error(
-				"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
-			);
-		}
-		let pageState: {
-			href: string;
-			readyState: string;
-			blocked: boolean;
-		} | null = null;
-		let probeTimedOut = false;
-		try {
-			pageState = await withinReadinessBudget(
-				() =>
-					page.evaluate(() => {
-						const blockedNodes = document.querySelectorAll(
-							'form[action*="signin" i], input#account_name_text_field, iframe[src*="captcha" i], [data-testid="error-page"]',
-						);
-						let blocked = false;
-						for (let index = 0; index < blockedNodes.length; index += 1) {
-							if (blockedNodes[index]?.getClientRects().length) blocked = true;
-						}
-						return {
-							href: window.location.href,
-							readyState: document.readyState,
-							blocked,
-						};
-					}),
+			if (pageState?.blocked) {
+				throw new NotesReadinessVeto(
+					"icloud_page_blocked: sign-in, captcha, or error UI is visible",
+				);
+			}
+			if (pageState && !isICloudNotesUrl(pageState.href)) {
+				throw new NotesReadinessVeto(
+					"icloud_wrong_page: the document navigated away from iCloud Notes",
+				);
+			}
+			const afterProbeHref = await withinReadinessBudget(
+				() => readPageUrl(page),
 				deadline,
 			);
+			if (!isICloudNotesUrl(afterProbeHref)) {
+				throw new NotesReadinessVeto(
+					"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
+				);
+			}
+			if (probeTimedOut || Date.now() >= deadline) break;
+			if (
+				pageState?.readyState === "complete" &&
+				pageState.href === afterWaitHref &&
+				Date.now() < deadline
+			) {
+				return afterWaitHref;
+			}
 		} catch (error) {
-			if (error === READINESS_DEADLINE) probeTimedOut = true;
-			// Navigation can detach the execution context briefly. Recheck route,
-			// then reload only while the owner page is still inside Notes.
-		}
-		const afterProbeHref = await readPageUrl(page);
-		if (!isICloudNotesUrl(afterProbeHref)) {
-			throw new Error(
-				"icloud_wrong_page: navigation left the iCloud Notes route during readiness recovery",
-			);
-		}
-		if (probeTimedOut || Date.now() >= deadline) break;
-		if (pageState?.blocked) {
-			throw new Error(
-				"icloud_page_blocked: sign-in, captcha, or error UI is visible",
-			);
-		}
-		if (pageState && !isICloudNotesUrl(pageState.href)) {
-			throw new Error(
-				"icloud_wrong_page: the document navigated away from iCloud Notes",
-			);
-		}
-		if (
-			pageState?.readyState === "complete" &&
-			pageState.href === afterWaitHref &&
-			Date.now() < deadline
-		) {
-			return afterWaitHref;
+			if (error instanceof NotesReadinessVeto) throw error;
+			if (error === READINESS_DEADLINE) break;
+			// A location evaluation can lose its execution context just like the
+			// document probe. Recheck the route before any recovery navigation.
 		}
 		if (attempt + 1 >= NOTES_READINESS_ATTEMPTS) break;
 		const reloadBudget = deadline - Date.now();
 		if (reloadBudget <= 0) break;
-		const beforeReloadHref = await readPageUrl(page);
+		let beforeReloadHref: string;
+		try {
+			beforeReloadHref = await withinReadinessBudget(
+				() => readPageUrl(page),
+				deadline,
+			);
+		} catch (error) {
+			if (error === READINESS_DEADLINE) break;
+			// Never reload a stale URL when the current route cannot be read.
+			continue;
+		}
 		if (!isICloudNotesUrl(beforeReloadHref)) {
 			throw new Error(
 				"icloud_wrong_page: navigation left the iCloud Notes route before readiness recovery reload",
