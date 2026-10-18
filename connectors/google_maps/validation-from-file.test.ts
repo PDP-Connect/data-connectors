@@ -623,7 +623,7 @@ test("outcome proof: a 110 MiB sparse Timeline export separates streaming from w
 		// generating a core dump for this expected negative-control outcome.
 		const heapLimitMiB = 128;
 		// A hang guard, not a speed bound: on a 4-vCPU CI runner with four test
-		// files at once, the streaming pass alone took 38.6 s.
+		// files at once, the streaming pass ran past 30 s (the whole test took 38.6 s).
 		const timeoutMs = 90_000;
 		type OracleOutcome = {
 			error: (Error & { code?: string }) | undefined;
