@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP iCloud Notes Connector (manifest v0.1.25)
+ * PDPP iCloud Notes Connector (manifest v0.1.26)
  *
  * Greenfield PDPP Collection Profile connector, ported from the legacy CG
  * script `connectors/apple/icloud-notes-playwright.js` (read-only prior
@@ -38,7 +38,7 @@
  * raises a `credentials` prompt. See that module's header for the full
  * rationale.
  *
- * CloudKit query surface: same-origin `page.evaluate(fetch(...))` calls
+ * CloudKit query surface: credentialed cross-origin `page.evaluate(fetch(...))` calls
  * against `${ckBaseUrl}/database/1/com.apple.notes/production/private/
  * records/query?dsid=${dsid}`, exactly as the legacy script did — this is a
  * cookie-authenticated call and must run from the page's own JS context.
@@ -721,16 +721,13 @@ async function requireNotesPage(page: Page): Promise<string> {
 		}
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) break;
-		if (typeof page.waitForLoadState === "function") {
+		// Test membership before reading: the thin facade records missing members.
+		if ("waitForLoadState" in page && typeof page.waitForLoadState === "function") {
 			try {
 				await withinReadinessBudget(
-					() =>
-						page.waitForLoadState("load", {
-							timeout: Math.min(
-								NOTES_READINESS_OPERATION_TIMEOUT_MS,
-								remaining,
-							),
-						}),
+					() => page.waitForLoadState("load", {
+						timeout: Math.min(NOTES_READINESS_OPERATION_TIMEOUT_MS, remaining),
+					}),
 					deadline,
 				);
 			} catch (error) {

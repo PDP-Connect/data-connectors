@@ -3714,3 +3714,31 @@ test("icloud_notes: failed continuation preserves readable rows and never checkp
 	assert.ok(r.states["icloud.profile"]);
 	assert.ok(r.states["icloud.folders"]);
 });
+
+test("icloud_notes: thin host commits all streams only after accepted completion", { timeout: 120_000 }, async () => {
+ const { pageshimCase: c } = await import("./fixtures/icloud_notes.mjs");
+ const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes-thin.js") });
+ const run = (options = {}) => runHarness({
+  bundle: built.outfile, fixtures: c.fixtures, scopes: c.scopes,
+  resultStreaming: true, resultSpoolDirectory: join(out, "icloud-thin-" + Math.random()),
+  gotoDelayMs: 0, loginWaitMs: 1000, ...options,
+ });
+ const first = await run();
+ assertCleanRun(first);
+ assert.equal(first.data.error, undefined);
+ assert.equal(first.streamResult.completed, true);
+ assert.deepEqual(first.streamDone.errors, []);
+ assert.equal(first.streamDone.exportSummary.count, 5);
+ assert.deepEqual(Object.keys(first.states).sort(), [...c.scopes].sort());
+ const replay = await run({ initialState: first.states });
+ assertCleanRun(replay);
+ assert.deepEqual(replay.streamDone.errors, []);
+ assert.equal(replay.streamDone.exportSummary.count, 0);
+ assert.deepEqual(replay.states, first.states);
+ for (const key of ["result:chunk", "result:done"]) {
+  const rejected = await run({ resultStreamFailure: { key, ...(key === "result:chunk" ? { sequence: 0 } : {}) } });
+  assertCleanRun(rejected);
+  assert.ok(rejected.data.error);
+  assert.deepEqual(rejected.states, {});
+ }
+});
