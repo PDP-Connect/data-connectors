@@ -45,6 +45,11 @@ import {
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
+	type InventoryEvidence,
+	inventoryIsComplete,
+	unprovenInventory,
+} from "./inventory-evidence.ts";
+import {
 	type OrderItemTally,
 	summarizeItemCounts,
 } from "./item-count-anchor.ts";
@@ -54,6 +59,7 @@ import {
 	buildOrderRecord,
 	buildProfileRecord,
 	diagnoseEmptyListPage,
+	inspectOrderListParsing,
 	isIncapsulaBlocked,
 	looksLoggedOut,
 	mergeOrdersListPage,
@@ -65,7 +71,12 @@ import {
 	parseProfileDom,
 	resolveMaxPage,
 } from "./parsers.ts";
-import { listPageOrderShape, validateRecord } from "./schemas.ts";
+import {
+	listPageOrderShape,
+	orderItemsSchema,
+	ordersSchema,
+	validateRecord,
+} from "./schemas.ts";
 import type {
 	ListPageDiagnostics,
 	ListPageOrder,
@@ -82,7 +93,6 @@ export const HEB_HYDRATION_WAIT_MAX_MS = 2500;
 // 400-500ms between order-history list pages.
 const LIST_PAGE_POLITE_DELAY_MS = 450;
 export const MAX_LIST_PAGES = 50;
-const STREAM_COLLECTION_FAILED_REASON = "stream_collection_failed";
 // Bounded per-run detail budget (design doc "Collector plan" §3): blast-radius
 // stop, not an attempt at exhaustive backfill in one run.
 const MAX_DETAIL_ATTEMPTS_PER_RUN = 100;
@@ -114,11 +124,10 @@ const DETAIL_SURFACE_TIMEOUT_MS = 30_000;
 const DETAIL_SURFACE_POLL_MS = 250;
 const DETAIL_SURFACE_STABLE_POLLS = 3;
 const DETAIL_SURFACE_DEBUG_ENV = "HEB_DETAIL_SURFACE_DEBUG";
-const DETAIL_SURFACE_DEBUG_MIN_ITEM_COUNT = 26;
-const DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT = 2;
 
 type DetailSurfaceSettlement = "complete" | "incomplete" | "timeout" | "error";
-type StaticListEvidence = "declared_count" | "fully_mounted" | null;
+// These legacy diagnostics select collection identity only, never completeness.
+type StaticListEvidence = "declared_count" | null;
 
 interface DetailSurfaceRow {
 	html: string;
@@ -159,6 +168,7 @@ interface DetailSurfaceDiagnostics {
 interface DetailSurfaceResult {
 	diagnostics: DetailSurfaceDiagnostics;
 	html: string;
+	coherent: boolean;
 }
 
 async function hydrationWait(): Promise<void> {
@@ -177,25 +187,32 @@ function inspectAndAdvanceDetailSurface(input: {
 	lastAction: string | null;
 }): DetailSurfaceState {
 	const { debugDiagnostics, expectedItemCount, lastAction } = input;
-	const row =
-		document
-			.querySelector('a[data-qe-id="itemRowDetailsName"]')
-			?.closest("li") ?? document.body;
-	let scrollPort: Element | Document =
-		document.scrollingElement ?? document.documentElement;
-	for (
-		let current: Element | null = row;
-		current;
-		current = current.parentElement
-	) {
-		const style = getComputedStyle(current);
-		const scrollable =
-			style.overflowY === "auto" || style.overflowY === "scroll";
-		if (current.scrollHeight > current.clientHeight && scrollable) {
-			scrollPort = current;
-			break;
+	// Visit every row's scrollable ancestors. Scroll geometry schedules collection,
+	// but is never a source end-of-inventory signal.
+	const scrollPorts = new Set<Element>();
+	for (const link of document.querySelectorAll(
+		'a[data-qe-id="itemRowDetailsName"]',
+	)) {
+		for (
+			let current: Element | null = link.closest("li") ?? link;
+			current;
+			current = current.parentElement
+		) {
+			const style = getComputedStyle(current);
+			if (
+				(style.overflowY === "auto" || style.overflowY === "scroll") &&
+				current.scrollHeight > current.clientHeight
+			)
+				scrollPorts.add(current);
 		}
 	}
+	scrollPorts.add(document.scrollingElement ?? document.documentElement);
+	const scrollPort: Element | Document =
+		[...scrollPorts].find(
+			(port) => port.scrollTop + port.clientHeight < port.scrollHeight - 2,
+		) ??
+		[...scrollPorts][0] ??
+		document.documentElement;
 	const isDocumentScrollPort = scrollPort instanceof Document;
 	const scrollTop = isDocumentScrollPort
 		? window.scrollY
@@ -223,34 +240,9 @@ function inspectAndAdvanceDetailSurface(input: {
 		expectedItemCount !== null && rowLinks.length === expectedItemCount
 			? "declared_count"
 			: null;
-	// A genuinely virtualized long list (declared count exceeds what this
-	// snapshot could ever mount at once) can never earn `declared_count`
-	// evidence on ANY single snapshot — by construction, the full set is never
-	// mounted together. Falling straight to the positional-identity throw
-	// would make every large virtualized order un-collectible (0924
-	// shortfall: a live DCR read showed 42/42 orders — itemCount 69-112 each
-	// — with a fully empty items array, because the very first page.evaluate
-	// snapshot threw before any scrolling could accumulate anything). When
-	// the row also carries no positional attribute, fall back to a content
-	// key derived from the row's own product href instead of a local index.
-	// This key is NOT trusted blindly: `collectDetailSurface` (Node side)
-	// tracks, across the whole scroll run, whether any href is ever seen,
-	// then unmounted, then seen again — the one pattern this content key
-	// cannot distinguish from a second, genuinely distinct purchased line of
-	// the same product — and fails closed for that specific href rather than
-	// silently collapsing two real rows into one. This branch requires
-	// expectedItemCount to be STRICTLY larger than this snapshot's mounted
-	// row count (rowLinks.length) specifically so it can never fire for the
-	// small/fully-mounted lists the declared_count and fail-closed tests
-	// already cover (order-detail-missing-row-identity.html, order-detail-
-	// unanchored-remount.html): both of those fixtures are called with NO
-	// expectedItemCount, so this condition is false for them and they keep
-	// throwing exactly as before.
-	const canAttemptVirtualizedContentIdentity =
-		expectedItemCount !== null &&
-		staticListEvidence === null &&
-		rowLinks.length > 0 &&
-		rowLinks.length < expectedItemCount;
+	// Href identity can preserve partial product rows without a source line ID.
+	// It cannot establish completeness, even if all observed rows stay mounted.
+	const canAttemptVirtualizedContentIdentity = rowLinks.length > 0;
 	const rows = rowLinks.map((link, itemIndex) => {
 		const itemRow = link.closest("li") ?? link;
 		const qtyText =
@@ -278,7 +270,12 @@ function inspectAndAdvanceDetailSurface(input: {
 				? `content:href=${href}`
 				: null);
 		if (!key) {
-			throw new Error("detail row has no explicit positional identity");
+			// A missing identity is retained for parser-loss accounting only.
+			return {
+				html: itemRow.outerHTML,
+				key: `missing:row=${itemIndex}`,
+				unitCount: null,
+			};
 		}
 		const department =
 			itemRow
@@ -391,12 +388,12 @@ function inspectAndAdvanceDetailSurface(input: {
  *  established one. A mixed snapshot reports its first row's scheme; the
  *  clear-on-change rule still keeps the accumulator single-scheme. */
 function identitySchemeOf(rows: readonly DetailSurfaceRow[]): string | null {
-	const [first] = rows;
-	if (!first) {
-		return null;
-	}
-	const separator = first.key.indexOf("=");
-	return separator === -1 ? first.key : first.key.slice(0, separator);
+	const schemes = new Set(rows.map((row) => row.key.split("=")[0]));
+	return schemes.size === 0
+		? null
+		: schemes.size === 1
+			? ([...schemes][0] ?? null)
+			: "mixed";
 }
 
 function knownUnitTotal(units: Iterable<number | null>): number | null {
@@ -490,6 +487,7 @@ async function collectDetailSurface(
 	const contentHrefEverUnmounted = new Set<string>();
 	const failedQuantityRows = new Map<string, { row: number; shape: string }>();
 	let ambiguousContentHref: string | null = null;
+	let coherent = true;
 
 	while (Date.now() - startedAt < timeoutMs) {
 		try {
@@ -503,6 +501,18 @@ async function collectDetailSurface(
 			break;
 		}
 		snapshots += 1;
+		if (latest.loading) {
+			// No row from a loading render may survive into a settled observation.
+			collected.clear();
+			collectedUnits.clear();
+			collectedScheme = null;
+			contentHrefMountedLastSnapshot.clear();
+			contentHrefEverUnmounted.clear();
+			stablePolls = 0;
+			lastSignature = "";
+			await page.waitForTimeout(DETAIL_SURFACE_POLL_MS);
+			continue;
+		}
 		// Row keys live in disjoint namespaces ("position:data-index=N" vs
 		// "position:document-order=N"), so a surface that remounts under a
 		// different identity scheme would add a second entry for every row
@@ -511,6 +521,11 @@ async function collectDetailSurface(
 		// than the truth. Only rows sharing the latest snapshot's
 		// scheme are comparable, so a scheme change restarts collection.
 		const scheme = identitySchemeOf(latest.rows);
+		if (
+			scheme === "mixed" ||
+			latest.rows.some((row) => row.key.startsWith("missing:"))
+		)
+			coherent = false;
 		if (scheme !== null && scheme !== collectedScheme) {
 			collected.clear();
 			collectedUnits.clear();
@@ -528,6 +543,19 @@ async function collectDetailSurface(
 			const occurrence = (occurrenceByKey.get(row.key) ?? 0) + 1;
 			occurrenceByKey.set(row.key, occurrence);
 			const collectedKey = `${row.key}\u001f${occurrence}`;
+			const previous = collected.get(collectedKey);
+			if (
+				previous !== undefined &&
+				previous !== row.html &&
+				row.key.startsWith("content:href=")
+			) {
+				coherent = false;
+				ambiguousContentHref = row.key;
+				lastError = "same-href row changed without stable line identity";
+				// Keep the individually observed prior row; do not overwrite it with
+				// an ambiguous replacement that could be a different purchased line.
+				continue;
+			}
 			collected.set(collectedKey, row.html);
 			collectedUnits.set(collectedKey, row.unitCount);
 			if (row.unitCount === null && row.qtyShape) {
@@ -639,57 +667,21 @@ async function collectDetailSurface(
 			// is reported as an error (not a silent hydrate) below.
 			break;
 		}
-		const fullyCollectedStaticList =
-			latest.atEnd &&
-			!latest.loading &&
-			!latest.actionableControl &&
-			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			collectedScheme === "content:href" &&
-			contentHrefEverUnmounted.size === 0 &&
-			collected.size === latest.rowCount;
-		const declaredCountRowsCollected =
-			expectedUnits !== null &&
-			latest.staticListEvidence === "declared_count" &&
-			collected.size >= expectedUnits;
 		if (
 			latest.atEnd &&
 			!latest.loading &&
 			!latest.actionableControl &&
-			stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-			(expectedUnits === null ||
-				(observedUnits !== null && observedUnits >= expectedUnits) ||
-				declaredCountRowsCollected ||
-				fullyCollectedStaticList)
-		) {
+			stablePolls >= DETAIL_SURFACE_STABLE_POLLS
+		)
 			break;
-		}
 		await page.waitForTimeout(DETAIL_SURFACE_POLL_MS);
 	}
 
 	const timedOut = Date.now() - startedAt >= timeoutMs;
 	const observedUnits = knownUnitTotal(collectedUnits.values());
-	const fullyCollectedStaticList =
-		latest.atEnd &&
-		!latest.loading &&
-		!latest.actionableControl &&
-		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		collectedScheme === "content:href" &&
-		contentHrefEverUnmounted.size === 0 &&
-		collected.size === latest.rowCount;
-	const declaredCountRowsCollected =
-		expectedUnits !== null &&
-		latest.staticListEvidence === "declared_count" &&
-		collected.size >= expectedUnits;
-	const complete =
-		!lastError &&
-		latest.atEnd &&
-		!latest.loading &&
-		!latest.actionableControl &&
-		stablePolls >= DETAIL_SURFACE_STABLE_POLLS &&
-		(expectedUnits === null ||
-			(observedUnits !== null && observedUnits >= expectedUnits) ||
-			declaredCountRowsCollected ||
-			fullyCollectedStaticList);
+	// A settled surface is only a collection stop. No retained fixture supplies
+	// a verified owner-bound same-entity count or end signal.
+	const complete = false;
 	let settlement: DetailSurfaceSettlement = "incomplete";
 	if (lastError) {
 		settlement = "error";
@@ -708,9 +700,7 @@ async function collectDetailSurface(
 		loading: latest.loading,
 		scrollHeight: latest.scrollHeight,
 		scrollTop: latest.scrollTop,
-		staticListEvidence: fullyCollectedStaticList
-			? "fully_mounted"
-			: latest.staticListEvidence,
+		staticListEvidence: latest.staticListEvidence,
 		settlement,
 		snapshots,
 		observedUnits,
@@ -719,7 +709,11 @@ async function collectDetailSurface(
 		collected.size > 0
 			? `<html><body><main>${[...collected.values()].join("")}</main></body></html>`
 			: "";
-	return { diagnostics, html };
+	return {
+		diagnostics,
+		html,
+		coherent: coherent && !lastError && !latest.loading,
+	};
 }
 
 /**
@@ -818,6 +812,8 @@ export function classifyHebDetailFailure(
 export type DetailFetchResult =
 	| {
 			detail: OrderDetail;
+			evidence: InventoryEvidence;
+			inventoryComplete: boolean;
 			diagnostic?: string;
 			elapsedMs?: number;
 			pollCount?: number;
@@ -851,13 +847,18 @@ const DETAIL_RETRY_COUNT = 2;
 const DETAIL_RETRY_MIN_TIMEOUT_MS = 1500;
 const DETAIL_RETRY_FACTOR = 2;
 
-async function navigateToOrderDetail(page: Page, url: string): Promise<void> {
+async function navigateToOrderDetail(
+	page: Page,
+	url: string,
+): Promise<boolean | null> {
+	let responseSucceeded: boolean | null = null;
 	await pRetry(
 		async (): Promise<void> => {
-			await page.goto(url, {
+			const response = await page.goto(url, {
 				waitUntil: "domcontentloaded",
 				timeout: NAV_TIMEOUT_MS,
 			});
+			responseSucceeded = response?.ok() ?? null;
 		},
 		{
 			retries: DETAIL_RETRY_COUNT,
@@ -867,6 +868,7 @@ async function navigateToOrderDetail(page: Page, url: string): Promise<void> {
 				RETRYABLE_ERROR_RE.test(error.message),
 		},
 	);
+	return responseSucceeded;
 }
 
 export interface HydrationDeps {
@@ -903,8 +905,11 @@ export async function fetchOrderDetail(
 		status: "failed",
 	});
 	const url = `https://www.heb.com/my-account/order-history/${orderId}`;
+	let responseSucceeded: boolean | null = null;
 	try {
-		await navigateToOrderDetail(page, url);
+		responseSucceeded = await navigateToOrderDetail(page, url);
+		if (responseSucceeded === false)
+			return failed("navigation_failed_non_retryable");
 	} catch (err) {
 		// pRetry's shouldRetry gate (RETRYABLE_ERROR_RE) only lets transient
 		// transport errors consume the retry budget — a non-retryable error
@@ -952,16 +957,6 @@ export async function fetchOrderDetail(
 		deps.detailSurfaceTimeoutMs,
 	);
 	pollCount = surface.diagnostics.snapshots;
-	if (surface.diagnostics.settlement !== "complete") {
-		let failureKind: Extract<DetailFailureKind, `detail_surface_${string}`> =
-			"detail_surface_incomplete";
-		if (surface.diagnostics.settlement === "error") {
-			failureKind = "detail_surface_error";
-		} else if (surface.diagnostics.settlement === "timeout") {
-			failureKind = "detail_surface_timeout";
-		}
-		return failed(failureKind, detailSurfaceErrorMessage(surface.diagnostics));
-	}
 
 	const landedUrl = page.url();
 	let html: string;
@@ -992,15 +987,33 @@ export async function fetchOrderDetail(
 		return failed("session_repair_required");
 	}
 
-	const detail = parseOrderDetailDom(surface.html || html);
+	if (landedUrl !== url)
+		return failed("parse_missing", "detail resource identity mismatch");
+	const detail = parseOrderDetailDom(surface.html);
 	if (!detail) {
 		return failed(
-			"parse_missing",
+			surface.diagnostics.settlement === "error"
+				? "detail_surface_error"
+				: "parse_missing",
 			detailSurfaceErrorMessage(surface.diagnostics),
 		);
 	}
+	const evidence = unprovenInventory(
+		"order_items",
+		url,
+		landedUrl,
+		surface.html,
+		detail.parsing?.sourceIds ?? [],
+	);
+	evidence.coherent = surface.coherent;
+	evidence.responseSucceeded = responseSucceeded;
+	evidence.loading = surface.diagnostics.loading;
+	evidence.rejectedRows = detail.parsing?.rejectedRows ?? 0;
+	evidence.missingIdentityRows = detail.parsing?.missingIdentityRows ?? 0;
 	return {
 		detail,
+		evidence,
+		inventoryComplete: inventoryIsComplete(evidence),
 		diagnostic: detailSurfaceErrorMessage(surface.diagnostics),
 		...metrics(),
 		status: "hydrated",
@@ -1028,6 +1041,10 @@ async function extractAndShapeCheckOrders(
 	const domOrders = parseOrdersListDom(html);
 	const structuredOrders = parseOrdersListStructured(html);
 	const rawOrders = mergeOrdersListPage(structuredOrders, domOrders);
+	const parsing = inspectOrderListParsing(html);
+	if (parsing.rejectedRows > 0 || parsing.missingIdentityRows > 0) {
+		await emitInventoryIncomplete({ emit }, "orders");
+	}
 	const orders: ListPageOrder[] = [];
 	for (const r of rawOrders) {
 		const parsed = listPageOrderShape.safeParse(r);
@@ -1431,6 +1448,7 @@ export interface RunFlags {
 }
 
 export interface EmitDeps extends HydrationDeps {
+	inventoryEvidence?: InventoryEvidence;
 	capture?: BrowserCollectContext["capture"];
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
 	emit: BrowserCollectContext["emit"];
@@ -1680,8 +1698,8 @@ async function recoverPendingOrderItemDetailGapPage(
 				continue;
 			}
 			for (const [itemIndex, item] of result.detail.items.entries()) {
-				await deps.emitRecord(
-					"order_items",
+				const accepted = await emitValidatedItem(
+					deps,
 					buildOrderItemRecord(
 						locator.orderId,
 						locator.orderDate,
@@ -1691,6 +1709,25 @@ async function recoverPendingOrderItemDetailGapPage(
 						result.detail.items,
 					),
 				);
+				if (!accepted) {
+					result.evidence.rejectedRows += 1;
+					result.inventoryComplete = false;
+				}
+			}
+			if (!result.inventoryComplete) {
+				await emitInventoryIncomplete(deps, "order_items");
+				await deps.emit(
+					buildHebDetailGap(
+						locator.orderId,
+						"temporary_unavailable",
+						"detail_surface_incomplete",
+						locator.orderDate,
+						result.diagnostic,
+						{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+					),
+				);
+				reDeferred += 1;
+				continue;
 			}
 			await deps.emit({
 				type: "DETAIL_GAP_RECOVERED",
@@ -1814,6 +1851,18 @@ export async function recoverPendingOrderItemDetailGapsBeforeForwardRun(
 	};
 }
 
+async function emitValidatedItem(
+	deps: Pick<EmitDeps, "emit" | "emitRecord">,
+	record: ReturnType<typeof buildOrderItemRecord>,
+): Promise<boolean> {
+	if (!orderItemsSchema.safeParse(record).success) {
+		await emitInventoryIncomplete(deps, "order_items");
+		return false;
+	}
+	await deps.emitRecord("order_items", record);
+	return true;
+}
+
 /** Emit the order record + per-item detail records for a single list-page order. */
 async function emitOrderAndItems(
 	deps: EmitDeps,
@@ -1823,9 +1872,12 @@ async function emitOrderAndItems(
 ): Promise<void> {
 	if (deps.wantsOrders) {
 		const orderRecord = buildOrderRecord(listOrder, orderDate, deps.emittedAt);
+		const accepted = ordersSchema.safeParse(orderRecord).success;
+		if (!accepted) await emitInventoryIncomplete(deps, "orders");
 		if (
-			!deps.ordersFingerprintCursor ||
-			deps.ordersFingerprintCursor.shouldEmit(orderRecord)
+			accepted &&
+			(!deps.ordersFingerprintCursor ||
+				deps.ordersFingerprintCursor.shouldEmit(orderRecord))
 		) {
 			await deps.emitRecord("orders", orderRecord);
 		}
@@ -1834,14 +1886,14 @@ async function emitOrderAndItems(
 		// covered.
 		if (deps.ordersCoverage) {
 			deps.ordersCoverage.considered.push(listOrder.orderId);
-			deps.ordersCoverage.covered.push(listOrder.orderId);
+			if (accepted) deps.ordersCoverage.covered.push(listOrder.orderId);
 		}
 	}
 	if (deps.wantsItems && detail) {
 		for (const [itemIndex, item] of detail.items.entries()) {
 			if (deps.emitItems) {
-				await deps.emitRecord(
-					"order_items",
+				await emitValidatedItem(
+					deps,
 					buildOrderItemRecord(
 						listOrder.orderId,
 						orderDate,
@@ -1926,10 +1978,47 @@ async function fetchDetailAndRecordCoverage(
 	) {
 		flags.sessionRepairRequired = true;
 	}
+	if (result.status === "hydrated") {
+		const validItems = result.detail.items.filter(
+			(item, itemIndex) =>
+				orderItemsSchema.safeParse(
+					buildOrderItemRecord(
+						listOrder.orderId,
+						orderDate,
+						item,
+						itemIndex,
+						deps.emittedAt,
+						result.detail.items,
+					),
+				).success,
+		);
+		result.evidence.rejectedRows +=
+			result.detail.items.length - validItems.length;
+		result.detail.items = validItems;
+		result.evidence.acceptedIds =
+			result.evidence.rejectedRows === 0 ? [...result.evidence.sourceIds] : [];
+		result.inventoryComplete = inventoryIsComplete(result.evidence);
+	}
+	if (result.status === "hydrated" && !result.inventoryComplete)
+		await emitInventoryIncomplete(deps, "order_items");
 	if (deps.orderItemsCoverage) {
 		const outcome: DetailOutcome =
-			result.status === "hydrated" ? "hydrated" : "gap";
+			result.status === "hydrated" && result.inventoryComplete
+				? "hydrated"
+				: "gap";
 		recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, outcome);
+		if (result.status === "hydrated" && !result.inventoryComplete) {
+			await deps.emit(
+				buildHebDetailGap(
+					listOrder.orderId,
+					"temporary_unavailable",
+					"detail_surface_incomplete",
+					orderDate,
+					result.diagnostic,
+					{ elapsedMs: result.elapsedMs, pollCount: result.pollCount },
+				),
+			);
+		}
 		if (result.status !== "hydrated") {
 			await deps.emit(
 				buildHebDetailGap(
@@ -2004,15 +2093,11 @@ export async function processListOrder(
 	await emitOrderAndItems(deps, listOrder, detail, orderDate);
 }
 
-/**
- * The outcome of one forward scan. `truncated` distinguishes the loop's two
- * exits: `false` means the walk ended because it reached the end of the list
- * (terminal page, resume boundary, or the source's advertised `maxPage`);
- * `true` means it stopped at the `MAX_LIST_PAGES` blast-radius ceiling with
- * more pages still available. Callers MUST NOT advance the `orders` checkpoint
- * on a truncated scan — see `buildOrdersStateCursor`.
- */
+/** Traversal bounds and source evidence are separate. A max page link or
+ * resume boundary can stop collection but cannot prove inventory completion. */
 export interface ForwardScanResult {
+	pages: InventoryEvidence[];
+	evidence: InventoryEvidence;
 	newestOrderDate: string | null;
 	stoppedAtBoundary: boolean;
 	truncated: boolean;
@@ -2033,8 +2118,7 @@ export async function runForwardScan(
 	boundary: string | null,
 	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
 ): Promise<ForwardScanResult> {
-	const debugSurfaceCapture = process.env[DETAIL_SURFACE_DEBUG_ENV] === "1";
-	let debugLargeOrdersSelected = 0;
+	const pages: InventoryEvidence[] = [];
 	let newestOrderDate: string | null = null;
 	// Run-scoped dedup: parseOrdersListDom already dedupes within one page, but
 	// a pagination-boundary repeat (the last order on page N reappearing as the
@@ -2071,6 +2155,7 @@ export async function runForwardScan(
 			// shared page to any order-detail URL (fix for the item-enriched scan
 			// silently truncating after page 1: detail HTML has no pagination nav).
 			const { maxPage, orders } = listPage;
+			pages.push(listPage.evidence);
 			advertisedMaxPage = maxPage;
 
 			await deps.progress(
@@ -2092,21 +2177,7 @@ export async function runForwardScan(
 					continue;
 				}
 				seenOrderIds.add(listOrder.orderId);
-				const debugLargeOrder =
-					debugSurfaceCapture &&
-					deps.wantsItems &&
-					orderDate !== null &&
-					listOrder.itemCount !== null &&
-					listOrder.itemCount >= DETAIL_SURFACE_DEBUG_MIN_ITEM_COUNT &&
-					debugLargeOrdersSelected < DETAIL_SURFACE_DEBUG_LARGE_ORDER_LIMIT;
-				if (debugLargeOrder) {
-					debugLargeOrdersSelected += 1;
-				}
-				const orderDeps =
-					debugSurfaceCapture && deps.wantsItems && !debugLargeOrder
-						? { ...deps, wantsItems: false }
-						: deps;
-				await processListOrder(page, orderDeps, flags, listOrder);
+				await processListOrder(page, deps, flags, listOrder);
 			}
 
 			if (pageNum >= maxPage) {
@@ -2143,50 +2214,28 @@ export async function runForwardScan(
 		await reportListPageCeiling(deps, advertisedMaxPage);
 	}
 
-	return { newestOrderDate, stoppedAtBoundary, truncated: walk.truncated };
+	const evidence = unprovenInventory(
+		"orders",
+		"https://www.heb.com/my-account/your-orders",
+		"",
+		"",
+		[...seenOrderIds],
+	);
+	return {
+		newestOrderDate,
+		stoppedAtBoundary,
+		truncated: walk.truncated,
+		evidence,
+		pages,
+	};
 }
 
-/**
- * Account for a walk that stopped at the blast-radius ceiling instead of the
- * end of the list.
- *
- * H-E-B advertises the real total page count in its own pagination nav, so a
- * truncated run KNOWS how much it did not read. That untraversed tail is added
- * to the `orders` coverage denominator (`considered`) and deliberately NOT to
- * the numerator (`covered`): `covered < considered` is what
- * `evaluateStreamCoherence` reads as `boundary_shortfall`, which the reference
- * implementation renders as `partial` rather than `complete`. This is the
- * whole point — the ceiling stays as a bound, but it stops masquerading as a
- * finished walk.
- *
- * The tail is counted in PAGES, not orders: the connector never read those
- * pages, so it cannot know the order count on them, and inventing one would be
- * the same class of lie in the opposite direction. One page = one unit of
- * unread work is an honest, deliberately coarse lower bound on what is missing.
- *
- * When the nav did not resolve a max page, a single synthetic unit still marks
- * the stream short — "I stopped early and cannot say how much is left" must
- * not read as complete either.
- */
+/** The unobserved tail has unknown cardinality. Never mint synthetic orders
+ * to inflate a denominator; retain valid rows and report the retryable gap. */
 export async function reportListPageCeiling(
 	deps: EmitDeps,
-	advertisedMaxPage: number | null,
+	_advertisedMaxPage: number | null,
 ): Promise<void> {
-	const unreadPages =
-		advertisedMaxPage !== null && advertisedMaxPage > MAX_LIST_PAGES
-			? advertisedMaxPage - MAX_LIST_PAGES
-			: 1;
-
-	if (deps.ordersCoverage) {
-		for (let i = 0; i < unreadPages; i += 1) {
-			// Considered-but-not-covered: enumerated as owed by the source's own
-			// pagination, never fetched by this run.
-			deps.ordersCoverage.considered.push(
-				`unread_list_page_${MAX_LIST_PAGES + i + 1}`,
-			);
-		}
-	}
-
 	connectorDiagnostic("heb", "list_scan_page_limit", {
 		max_list_pages: MAX_LIST_PAGES,
 	});
@@ -2198,70 +2247,22 @@ export async function reportListPageCeiling(
 	// `order_items` hangs off the same list walk: the orders on the unread
 	// pages never had their details enumerated, so the unread tail is also owed
 	// by `order_items`. Count it as considered-not-covered there too.
-	if (deps.orderItemsCoverage) {
-		for (let i = 0; i < unreadPages; i += 1) {
-			deps.orderItemsCoverage.required.push(
-				`unread_list_page_${MAX_LIST_PAGES + i + 1}`,
-			);
-		}
-	}
 
 	// A page cap with no continuation is an unproven enumeration (Collection
 	// Profile 5.5): the held checkpoint makes the next run walk the same prefix
 	// and stop at the same cap, so a skip alone would let the stream finish
 	// looking bounded-but-fine. Fail every requested stream the cap affects and
 	// keep the records already emitted; the caller emits no finishing STATE.
-	const ceilingMessages: Record<string, string> = {
-		orders:
-			"H-E-B order history was cut off at the page limit; older orders were not read.",
-		order_items:
-			"H-E-B order history was cut off at the page limit; item details for older orders were not read.",
-	};
 	const ceilingStreams = [
 		...(deps.wantsOrders ? ["orders"] : []),
 		...(deps.emitItems ? ["order_items"] : []),
 	];
-	if (deps.reportStreamFailure) {
-		const reportFailure = deps.reportStreamFailure;
-		await Promise.all(
-			ceilingStreams.map((stream) =>
-				reportFailure(stream, ceilingMessages[stream] ?? "", {
-					retryable: true,
-				}),
-			),
-		);
-		return;
-	}
-
-	// Runtimes without `reportStreamFailure` keep the deferred skip as the only
-	// available signal. `..._deferred` is load-bearing: the reference
-	// implementation classifies a skip by reason (`mapSkipCoverageCondition`),
-	// and only a `deferred`-matching reason maps to the `deferred` axis; any
-	// other would read as `terminal_gap`, but the unread tail is fetchable.
-	await Promise.all(
-		ceilingStreams.map((stream) =>
-			deps.emit({
-				type: "SKIP_RESULT",
-				stream,
-				reason: "older_pages_deferred_page_budget",
-				recovery_hint: {
-					action: "retry_on_connector_upgrade",
-					retryable: false,
-				},
-				message: ceilingMessages[stream] ?? "",
-				diagnostics: {
-					max_list_pages: MAX_LIST_PAGES,
-					...(advertisedMaxPage === null
-						? {}
-						: { advertised_max_page: advertisedMaxPage }),
-					unread_pages: unreadPages,
-				},
-			}),
-		),
-	);
+	for (const stream of ceilingStreams)
+		await emitInventoryIncomplete(deps, stream);
 }
 
 interface LoadedListPage {
+	evidence: InventoryEvidence;
 	maxPage: number;
 	orders: ListPageOrder[];
 }
@@ -2291,7 +2292,14 @@ async function loadListPage(
 	const url = `https://www.heb.com/my-account/your-orders?page=${pageNum}`;
 	const navigation = await page
 		.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS })
-		.then(() => ({ ok: true as const }))
+		.then((response) =>
+			response?.ok() === false
+				? {
+						ok: false as const,
+						error: new Error("H-E-B list HTTP response failed"),
+					}
+				: { ok: true as const, responseSucceeded: response?.ok() ?? null },
+		)
 		.catch((error: unknown) => ({ error, ok: false as const }));
 	if (!navigation.ok) {
 		await emit({
@@ -2317,7 +2325,32 @@ async function loadListPage(
 		.catch((): undefined => undefined);
 
 	const html = await page.content().catch((): string => "");
+	if (looksLoggedOut(page.url(), html) || isIncapsulaBlocked(html)) {
+		await emitInventoryIncomplete({ emit }, "orders");
+		throw new HebEnumerationUnprovenError("source_auth_or_challenge");
+	}
+	if (
+		page.url() !== url ||
+		unprovenInventory("orders", url, page.url(), html).loading
+	) {
+		await emitInventoryIncomplete({ emit }, "orders");
+		throw new HebEnumerationUnprovenError(
+			"response_identity_or_readiness_unproven",
+		);
+	}
 	const orders = await extractAndShapeCheckOrders(html, emit);
+	const evidence = unprovenInventory(
+		"orders",
+		url,
+		page.url(),
+		html,
+		inspectOrderListParsing(html).sourceIds,
+	);
+	evidence.rejectedRows = inspectOrderListParsing(html).rejectedRows;
+	evidence.missingIdentityRows =
+		inspectOrderListParsing(html).missingIdentityRows;
+	evidence.acceptedIds = orders.map((order) => order.orderId);
+	evidence.responseSucceeded = navigation.responseSucceeded;
 	if (orders.length > 0) {
 		const maxPageResolution = resolveMaxPage(html);
 		if (maxPageResolution.kind !== "resolved") {
@@ -2328,17 +2361,17 @@ async function loadListPage(
 			await emit({
 				type: "SKIP_RESULT",
 				stream: "orders",
-				reason: "stream_collection_failed",
+				reason: "inventory_not_proven_complete",
 				recovery_hint: {
 					action: "retry_by_runtime",
 					retryable: true,
 				},
-				message: `H-E-B list page ${pageNum}: ${orders.length} orders parsed but maxPage could not be resolved (${reason}); refusing to silently assume a single-page result.`,
+				message: `H-E-B list page ${pageNum}: valid orders retained but pagination was unproven (${reason}).`,
 				diagnostics: { max_page_resolution: maxPageResolution },
 			});
-			throw new HebEnumerationUnprovenError(reason);
+			return { maxPage: pageNum, orders, evidence };
 		}
-		return { maxPage: maxPageResolution.value, orders };
+		return { maxPage: maxPageResolution.value, orders, evidence };
 	}
 	const classification = await reportEmptyPageDiagnostics(
 		page,
@@ -2389,6 +2422,10 @@ export async function emitOrderItemsCoverage(
 	deps: EmitDeps,
 	coverage: OrderItemsCoverage,
 ): Promise<void> {
+	if (!inventoryIsComplete(deps.inventoryEvidence)) {
+		await emitInventoryIncomplete(deps, "order_items");
+		return;
+	}
 	await emitDetailCoverage(deps, {
 		stream: "order_items",
 		stateStream: "orders",
@@ -2400,21 +2437,15 @@ export async function emitOrderItemsCoverage(
 	});
 }
 
-/**
- * Emit the run-level `orders` DETAIL_COVERAGE once after the forward scan,
- * using the shared `emitDetailCoverage` helper self-referentially (`stream`
- * and `stateStream` both `"orders"` — there is no separate detail-hydration
- * phase for the list stream itself, mirroring the pattern used for USAA's
- * `inbox_messages` and GitHub's `declareListConsidered` streams). Always
- * emits when the caller invokes it (orders in scope), including a
- * zero-considered steady-state run, so an account with no orders this run
- * (H-E-B usage is often genuinely light) still reads as measured, not
- * unknown.
- */
+/** Self coverage requires the same source-bound evidence as STATE. */
 export async function emitOrdersCoverage(
 	deps: EmitDeps,
 	coverage: OrdersCoverage,
 ): Promise<void> {
+	if (!inventoryIsComplete(deps.inventoryEvidence)) {
+		await emitInventoryIncomplete(deps, "orders");
+		return;
+	}
 	await emitDetailCoverage(deps, {
 		stream: "orders",
 		stateStream: "orders",
@@ -2547,20 +2578,47 @@ export async function collectProfile(
 	}
 
 	const extraction = parseProfileDom(html);
-	if (!(extraction.name || extraction.email)) {
-		await deps.emit({
-			type: "SKIP_RESULT",
-			stream: "profile",
-			reason: "profile_shape_check_failed",
-			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
-			message: "H-E-B profile page yielded no name or email.",
-		});
+	const profileEvidence = unprovenInventory(
+		"profile",
+		PROFILE_URL,
+		landedUrl,
+		html,
+		extraction.email ? [extraction.email] : [],
+	);
+	const addressEvidence = unprovenInventory(
+		"addresses",
+		PROFILE_URL,
+		landedUrl,
+		html,
+		extraction.deliveryAddresses?.map((address) => address.address) ?? [],
+	);
+	// Labels and address cards identify observed fields, not owner-bound complete
+	// source sections. Unknown/absent addresses and primary status stay null.
+	if (
+		!inventoryIsComplete(profileEvidence) ||
+		!inventoryIsComplete(addressEvidence)
+	) {
+		await emitInventoryIncomplete(deps, "profile");
 		return;
 	}
 	await deps.emitRecord(
 		"profile",
 		buildProfileRecord(extraction, deps.emittedAt),
 	);
+}
+
+async function emitInventoryIncomplete(
+	deps: Pick<EmitDeps, "emit">,
+	stream: string,
+): Promise<void> {
+	await deps.emit({
+		type: "SKIP_RESULT",
+		stream,
+		reason: "inventory_not_proven_complete",
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
+		message:
+			"Valid H-E-B records were retained, but source evidence did not prove this inventory complete.",
+	});
 }
 
 // ─── nutrition ──────────────────────────────────────────────────────────
@@ -2653,15 +2711,11 @@ async function emitNutritionCoverageIncomplete(
 	message: string,
 	diagnostics: Record<string, unknown>,
 ): Promise<void> {
-	if (deps.reportStreamFailure) {
-		await deps.reportStreamFailure("nutrition", message, { retryable: true });
-		return;
-	}
 	await deps.emit({
 		type: "SKIP_RESULT",
 		stream: "nutrition",
-		reason: STREAM_COLLECTION_FAILED_REASON,
-		recovery_hint: nutritionCoverageRecoveryHint(cause),
+		reason: "inventory_not_proven_complete",
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		message,
 		diagnostics: { ...diagnostics, cause },
 	});
@@ -2679,89 +2733,97 @@ export async function collectNutrition(
 	>,
 ): Promise<{ lookupSkips: number }> {
 	let lookupSkips = 0;
-	const withUrl = targets.filter(
-		(t): t is NutritionTarget & { productUrl: string } => Boolean(t.productUrl),
-	);
-	for (const target of targets.filter((t) => !t.productUrl)) {
-		await deps.emitRecord(
-			"nutrition",
-			buildNutritionRecord(
-				target.productId,
-				parseNutritionDom(""),
-				target.name,
-				deps.emittedAt,
-				null,
-				"not_found",
-			),
-		);
-	}
-
-	for (const target of withUrl) {
+	for (const target of targets) {
+		if (!target.productUrl) {
+			lookupSkips += 1;
+			await emitInventoryIncomplete(deps, "nutrition");
+			continue;
+		}
+		let responseSucceeded = false;
 		try {
-			await page.goto(target.productUrl, {
+			const response = await page.goto(target.productUrl, {
 				waitUntil: "domcontentloaded",
 				timeout: NAV_TIMEOUT_MS,
 			});
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			await deps.emitRecord(
-				"nutrition",
-				buildNutritionRecord(
-					target.productId,
-					parseNutritionDom(""),
-					target.name,
-					deps.emittedAt,
-					target.productUrl,
-					"error",
-				),
-			);
+			responseSucceeded = response?.ok() === true;
+		} catch {
 			lookupSkips += 1;
-			await deps.emit({
-				type: "SKIP_RESULT",
-				stream: "nutrition",
-				reason: "nutrition_navigation_failed",
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
-				message: `H-E-B product page navigation failed for ${target.productId}: ${message.slice(0, 160)}`,
-				diagnostics: { product_id: target.productId },
-			});
+			await emitInventoryIncomplete(deps, "nutrition");
 			continue;
 		}
 		await (deps.waitForHydration ?? hydrationWait)();
 		const html = await page.content().catch((): string => "");
-		if (isIncapsulaBlocked(html)) {
+		const landedUrl = page.url();
+		let resourceMatches = false;
+		try {
+			const requested = new URL(target.productUrl);
+			const landed = new URL(landedUrl);
+			resourceMatches =
+				requested.origin === "https://www.heb.com" &&
+				landed.origin === requested.origin &&
+				landed.pathname === requested.pathname &&
+				landed.pathname.split("/").filter(Boolean).at(-1) === target.productId;
+		} catch {
+			/* Invalid or missing identity is unproven. */
+		}
+		const loading = unprovenInventory(
+			"nutrition",
+			target.productUrl,
+			landedUrl,
+			html,
+		).loading;
+		if (
+			!responseSucceeded ||
+			!resourceMatches ||
+			loading ||
+			SIGNIN_URL_RE.test(landedUrl) ||
+			looksLoggedOut(landedUrl, html) ||
+			isIncapsulaBlocked(html)
+		) {
+			lookupSkips += 1;
+			await emitInventoryIncomplete(deps, "nutrition");
+			continue;
+		}
+		const extraction = parseNutritionDom(html);
+		const panelReady =
+			extraction.found &&
+			[
+				extraction.calories,
+				extraction.proteinG,
+				extraction.carbsG,
+				extraction.fatG,
+				extraction.sodiumMg,
+				extraction.fiberG,
+				extraction.sugarG,
+				extraction.servingSize,
+				extraction.servingsPerContainer,
+			].some((value) => value !== null);
+		if (!panelReady) {
+			lookupSkips += 1;
+			await emitInventoryIncomplete(deps, "nutrition");
+		}
+		// Independent source fields remain useful even when the nutrition panel
+		// is unknown. A blank shell never becomes a definitive not_found record.
+		if (
+			panelReady ||
+			extraction.ingredients ||
+			extraction.allergens ||
+			extraction.highlights ||
+			extraction.upc ||
+			extraction.category
+		) {
 			await deps.emitRecord(
 				"nutrition",
 				buildNutritionRecord(
 					target.productId,
-					parseNutritionDom(""),
+					extraction,
 					target.name,
 					deps.emittedAt,
 					target.productUrl,
-					"blocked",
+					panelReady ? "heb_product_page" : "error",
 				),
 			);
-			lookupSkips += 1;
-			await deps.emit({
-				type: "SKIP_RESULT",
-				stream: "nutrition",
-				reason: "session_repair_required",
-				recovery_hint: { action: "refresh_credentials", retryable: false },
-				message: `H-E-B product page was blocked by Incapsula for ${target.productId}.`,
-				diagnostics: { product_id: target.productId },
-			});
-			continue;
 		}
-		const extraction = parseNutritionDom(html);
-		await deps.emitRecord(
-			"nutrition",
-			buildNutritionRecord(
-				target.productId,
-				extraction,
-				target.name,
-				deps.emittedAt,
-				target.productUrl,
-			),
-		);
 	}
 	return { lookupSkips };
 }
@@ -2951,6 +3013,12 @@ export const hebConnector: BrowserConnectorConfig = {
 			);
 		}
 		if (gapRecovery.suppressForward) {
+			for (const stream of [
+				...(wantsOrders ? ["orders"] : []),
+				...(wantsItems ? ["order_items"] : []),
+				...(wantsNutrition ? ["nutrition"] : []),
+			])
+				await emitInventoryIncomplete({ emit }, stream);
 			return;
 		}
 
@@ -2967,129 +3035,68 @@ export const hebConnector: BrowserConnectorConfig = {
 			);
 		} catch (error) {
 			if (!(error instanceof HebEnumerationUnprovenError)) throw error;
-			if (!reportStreamFailure) throw error;
-			const message =
-				"H-E-B order history did not provide a verified enumeration end; dependent streams cannot be completed.";
-			await Promise.all([
-				wantsOrders
-					? reportStreamFailure("orders", message, { retryable: true })
-					: undefined,
-				wantsItems
-					? reportStreamFailure("order_items", message, { retryable: true })
-					: undefined,
-				wantsNutrition
-					? reportStreamFailure("nutrition", message, { retryable: true })
-					: undefined,
-			]);
-			return;
-		}
-		const { newestOrderDate, stoppedAtBoundary, truncated } = scan;
-
-		if (wantsOrders && !truncated) {
-			// A truncated scan emits no finishing `orders` STATE: it failed the
-			// stream through `reportListPageCeiling`, and advancing the checkpoint
-			// would strand every order on the pages this run never read.
-			const cursor = buildOrdersStateCursor(
-				newestOrderDate,
-				ordersState,
-				ordersFingerprintCursor,
-				truncated,
-			);
-			await emit({ type: "STATE", stream: "orders", cursor });
-		}
-
-		if (orderItemsCoverage && wantsItems) {
-			await emitOrderItemsCoverage(deps, orderItemsCoverage);
-			if (orderItemsCoverage.gap.length > 0 || gapRecovery.stoppedWithPending) {
-				await reportStreamFailure?.(
-					"order_items",
-					"H-E-B order detail enumeration has unresolved gaps.",
-					{ retryable: true },
-				);
-			}
-		}
-		// Compare fulfilled unit quantities with the card's count. A mismatch
-		// after the detail collector has proved completeness is diagnostic,
-		// not grounds to drop items or nutrition from the delivered streams.
-		if (itemCountTallies && itemCountTallies.length > 0) {
-			const summary = summarizeItemCounts(itemCountTallies);
-			if (summary.short > 0) {
-				connectorDiagnostic("heb", "item_count_mismatch", {
-					short_orders: summary.short,
-					declared_units: summary.declaredItems,
-					collected_units: summary.collectedItems,
-					reason: "detail_surface_complete_but_source_units_unreconciled",
-				});
-				await progress(
-					summary.short === 1
-						? "1 order has fewer items than H-E-B listed"
-						: `${summary.short} orders have fewer items than H-E-B listed`,
-				);
-			}
-		}
-		// Same honesty posture as order_items: emit once the forward scan
-		// completes, including the zero-considered steady-state case, so the
-		// `orders` list stream is never left permanently unmeasured.
-		if (ordersCoverage) {
-			await emitOrdersCoverage(deps, ordersCoverage);
-		}
-
-		if (wantsNutrition) {
-			// Emitted item rows passed a fulfilled-unit, declared-row, or
-			// complete-static-list proof. Residual count differences are
-			// reported above but cannot cancel nutrition for those items.
-			const itemCountShort = false;
-			const coverageGate: NutritionCoverageGateInput = {
-				itemCountShort,
-				orderHistoryStoppedAtBoundary: stoppedAtBoundary,
-				orderItemsGapCount: orderItemsCoverage?.gap.length ?? 0,
-				orderItemsRequested: collectItemEvidence,
-				ordersRequested: true,
-				ordersTruncated: truncated,
-				unrecoveredPriorOrderItemGapCount: gapRecovery.stoppedWithPending
-					? 1
-					: 0,
-			};
-			const coverageBlockCause = nutritionCoverageBlockCause(coverageGate);
-			if (coverageBlockCause) {
-				await emitNutritionCoverageIncomplete(
-					{ emit, reportStreamFailure },
-					coverageBlockCause,
-					`H-E-B nutrition was not marked complete because ${NUTRITION_COVERAGE_BLOCK_REASONS[coverageBlockCause]}.`,
-					{
-						item_count_short: itemCountShort,
-						order_history_stopped_at_boundary: stoppedAtBoundary,
-						order_items_gap_count: orderItemsCoverage?.gap.length ?? 0,
-						orders_requested: wantsOrders,
-						order_items_requested: wantsItems,
-						order_evidence_collected_internally: wantsNutrition && !wantsOrders,
-						order_item_evidence_collected_internally:
-							wantsNutrition && !wantsItems,
-						orders_truncated: truncated,
-						unrecovered_prior_order_item_gap_count:
-							gapRecovery.stoppedWithPending ? 1 : 0,
-					},
-				);
-			} else {
-				const { lookupSkips } = await collectNutrition(page, nutritionTargets, {
+			// Earlier pages may already have supplied valid product targets.
+			if (wantsNutrition)
+				await collectNutrition(page, nutritionTargets, {
 					emit,
 					emitRecord,
 					emittedAt,
 				});
-				// A product lookup that was skipped (navigation failure, bot
-				// block) already told the runtime why; the stream is not finished.
-				if (lookupSkips === 0) {
-					await emit({
-						type: "STATE",
-						stream: "nutrition",
-						cursor: {
-							completed_at: emittedAt,
-							product_count: nutritionTargets.length,
-							source: "heb_order_history",
-						},
-					});
-				}
-			}
+			for (const stream of [
+				...(wantsOrders ? ["orders"] : []),
+				...(wantsItems ? ["order_items"] : []),
+				...(wantsNutrition ? ["nutrition"] : []),
+			])
+				await emitInventoryIncomplete({ emit }, stream);
+			return;
+		}
+		const listComplete = inventoryIsComplete(scan.evidence);
+		deps.inventoryEvidence = scan.evidence;
+		if (wantsOrders) {
+			if (listComplete && !scan.truncated) {
+				await emit({
+					type: "STATE",
+					stream: "orders",
+					cursor: buildOrdersStateCursor(
+						scan.newestOrderDate,
+						ordersState,
+						ordersFingerprintCursor,
+						scan.truncated,
+					),
+				});
+				if (ordersCoverage) await emitOrdersCoverage(deps, ordersCoverage);
+			} else await emitInventoryIncomplete({ emit }, "orders");
+		}
+		const detailsComplete =
+			listComplete &&
+			!gapRecovery.stoppedWithPending &&
+			(orderItemsCoverage?.gap.length ?? 0) === 0;
+		if (wantsItems && orderItemsCoverage) {
+			if (detailsComplete)
+				await emitOrderItemsCoverage(deps, orderItemsCoverage);
+			else await emitInventoryIncomplete({ emit }, "order_items");
+		}
+		if (wantsNutrition) {
+			// Enumeration completeness gates only completion, never valid upserts.
+			const { lookupSkips } = await collectNutrition(page, nutritionTargets, {
+				emit,
+				emitRecord,
+				emittedAt,
+			});
+			const itemCountShort = itemCountTallies
+				? summarizeItemCounts(itemCountTallies).short > 0
+				: false;
+			if (detailsComplete && !itemCountShort && lookupSkips === 0) {
+				await emit({
+					type: "STATE",
+					stream: "nutrition",
+					cursor: {
+						completed_at: emittedAt,
+						product_count: nutritionTargets.length,
+						source: "heb_order_history",
+					},
+				});
+			} else await emitInventoryIncomplete({ emit }, "nutrition");
 		}
 	},
 };

@@ -228,24 +228,24 @@ function makePageStub(opts: {
 	evaluateError?: boolean;
 }): Page {
 	let gotoCalls = 0;
-	const url =
-		opts.url ?? "https://www.heb.com/my-account/order-history/HEB1000000001";
+	let url = opts.url ?? "";
 	return new Proxy(
 		{},
 		{
 			get(_target, prop): unknown {
 				if (prop === "goto") {
-					return (navUrl: string): Promise<null> => {
+					return (navUrl: string): Promise<unknown> => {
 						gotoCalls += 1;
+						if (!opts.url) url = navUrl;
 						opts.goto?.(navUrl);
 						if (opts.throwsNTimes && gotoCalls <= opts.throwsNTimes) {
 							return Promise.reject(new Error("net::ERR_CONNECTION_TIMED_OUT"));
 						}
-						return Promise.resolve(null);
+						return Promise.resolve({ ok: () => true });
 					};
 				}
 				if (prop === "waitForSelector") {
-					return (): Promise<null> => Promise.resolve(null);
+					return (): Promise<unknown> => Promise.resolve(null);
 				}
 				if (prop === "evaluate") {
 					if (opts.evaluateError) {
@@ -329,7 +329,7 @@ function makeSessionRepairPageStub(opts: {
 		{
 			get(_target, prop): unknown {
 				if (prop === "goto") {
-					return (navUrl: string): Promise<null> => {
+					return (navUrl: string): Promise<unknown> => {
 						currentUrl = navUrl.startsWith("http") ? navUrl : ORDERS_URL;
 						const next = htmlSequence.shift();
 						if (next !== undefined) {
@@ -344,7 +344,7 @@ function makeSessionRepairPageStub(opts: {
 					};
 				}
 				if (prop === "waitForSelector" || prop === "waitForTimeout") {
-					return (): Promise<null> => Promise.resolve(null);
+					return (): Promise<unknown> => Promise.resolve(null);
 				}
 				if (prop === "evaluate") {
 					return (): Promise<unknown> =>
@@ -353,8 +353,16 @@ function makeSessionRepairPageStub(opts: {
 							atEnd: true,
 							clientHeight: 100,
 							loading: false,
-							rowCount: 0,
-							rows: [],
+							rowCount: currentHtml.includes("itemRowDetailsName") ? 1 : 0,
+							rows: currentHtml.includes("itemRowDetailsName")
+								? [
+										{
+											key: "position:data-index=0",
+											html: currentHtml,
+											unitCount: 1,
+										},
+									]
+								: [],
 							scrollHeight: 100,
 							scrollTop: 0,
 						});
@@ -506,12 +514,14 @@ test("emitOrderItemsCoverage: gap marks an actionable degradation (not optional 
 	};
 	await emitOrderItemsCoverage(deps, coverage);
 
-	const msg = findDetailCoverage(protocolMessages);
-	assert.ok(msg);
-	assert.deepEqual(msg.required_keys, ["a", "b"]);
-	assert.deepEqual(msg.gap_keys, ["b"]);
-	assert.equal(msg.considered, 2);
-	assert.equal(msg.covered, 1, "only hydrated counts as covered");
+	assert.equal(findDetailCoverage(protocolMessages), undefined);
+	assert.ok(
+		protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "inventory_not_proven_complete",
+		),
+	);
 });
 
 // ─── orders list-stream coverage evidence ─────────────────────────────────
@@ -621,8 +631,8 @@ test("processListOrder: nutrition-only evidence hydrates details without emittin
 	);
 
 	assert.deepEqual(orderItemsCoverage.required, ["HEB1000000001"]);
-	assert.deepEqual(orderItemsCoverage.hydrated, ["HEB1000000001"]);
-	assert.deepEqual(orderItemsCoverage.gap, []);
+	assert.deepEqual(orderItemsCoverage.hydrated, []);
+	assert.deepEqual(orderItemsCoverage.gap, ["HEB1000000001"]);
 	assert.deepEqual(
 		emitted.map((record) => record.stream),
 		[],
@@ -666,32 +676,31 @@ test("emitOrdersCoverage: reports considered/covered self-referentially on the o
 	};
 	await emitOrdersCoverage(deps, coverage);
 
-	const msg = findDetailCoverage(protocolMessages);
-	assert.ok(msg, "expected a DETAIL_COVERAGE message");
-	assert.equal(
-		msg.stream,
-		"orders",
-		"orders reports on itself — no separate detail-hydration phase",
+	assert.equal(findDetailCoverage(protocolMessages), undefined);
+	assert.ok(
+		protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "inventory_not_proven_complete",
+		),
 	);
-	assert.equal(msg.state_stream, "orders");
-	assert.deepEqual(msg.required_keys, []);
-	assert.deepEqual(msg.hydrated_keys, []);
-	assert.equal(msg.considered, 2);
-	assert.equal(msg.covered, 2);
 });
 
-test("emitOrdersCoverage: a steady-state run with zero considered orders still emits considered 0 / covered 0", async () => {
+test("emitOrdersCoverage: zero observed orders do not prove an empty inventory", async () => {
 	// H-E-B usage is genuinely light (the residual-evidence audit found live
 	// accounts with as few as 2 orders); a run with nothing new to consider
 	// must still read as measured, not unknown.
 	const { deps, protocolMessages } = makeRecordingDeps();
 	await emitOrdersCoverage(deps, newOrdersCoverage());
 
-	const msg = findDetailCoverage(protocolMessages);
-	assert.ok(msg, "a zero-considered run still emits DETAIL_COVERAGE");
-	assert.equal(msg.stream, "orders");
-	assert.equal(msg.considered, 0);
-	assert.equal(msg.covered, 0);
+	assert.equal(findDetailCoverage(protocolMessages), undefined);
+	assert.ok(
+		protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "inventory_not_proven_complete",
+		),
+	);
 });
 
 test("collect-path regression guard: orders scoped alone (order_items out of scope) still emits an orders DETAIL_COVERAGE", async () => {
@@ -721,19 +730,14 @@ test("collect-path regression guard: orders scoped alone (order_items out of sco
 	);
 	await emitOrdersCoverage(deps, ordersCoverage);
 
-	const coverageMessages = protocolMessages.filter(
-		(m): m is DetailCoverage => m.type === "DETAIL_COVERAGE",
-	);
-	const ordersMsg = coverageMessages.find((m) => m.stream === "orders");
+	assert.equal(findDetailCoverage(protocolMessages), undefined);
 	assert.ok(
-		ordersMsg,
-		"orders-scoped-only run must still emit an orders DETAIL_COVERAGE",
-	);
-	assert.equal(ordersMsg?.considered, 2);
-	assert.equal(ordersMsg?.covered, 2);
-	assert.ok(
-		!coverageMessages.some((m) => m.stream === "order_items"),
-		"order_items coverage is out of scope and must not appear",
+		protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.stream === "orders" &&
+				m.reason === "inventory_not_proven_complete",
+		),
 	);
 });
 
@@ -815,7 +819,7 @@ test("processListOrder: DETAIL_GAP retains elapsed time and surface poll count",
 	assert.ok(gap);
 	assert.match(
 		gap.last_error?.message ?? "",
-		/^reason_code=detail_surface_timeout;elapsed_ms=\d+;poll_count=[1-9]\d*/,
+		/^reason_code=detail_surface_incomplete;elapsed_ms=\d+;poll_count=[1-9]\d*/,
 	);
 });
 
@@ -855,8 +859,8 @@ test("processListOrder: a full order+item run never calls page.on/page.off acros
 		makeListOrder({ orderId: "HEB1000000001" }),
 	);
 
-	assert.equal(coverage.hydrated.length, 1);
-	assert.equal(coverage.gap.length, 0);
+	assert.equal(coverage.hydrated.length, 0);
+	assert.equal(coverage.gap.length, 1);
 });
 
 // ─── #5: bounded retry before navigation_retry_exhausted ──────────────────
@@ -1379,12 +1383,14 @@ test("runForwardScan: item-enriched scan (wantsItems: true) still fetches page 2
     </main></body></html>`,
 	};
 	let lastContent = "";
+	let currentUrl = "";
 	const page = new Proxy(
 		{},
 		{
 			get(_target, prop): unknown {
 				if (prop === "goto") {
 					return (url: string): Promise<null> => {
+						currentUrl = url;
 						const listMatch = /your-orders\?page=(\d+)/.exec(url);
 						if (listMatch?.[1]) {
 							lastContent = listPages[Number(listMatch[1])] ?? "";
@@ -1431,8 +1437,7 @@ test("runForwardScan: item-enriched scan (wantsItems: true) still fetches page 2
 					return (): Promise<string> => Promise.resolve(lastContent);
 				}
 				if (prop === "url") {
-					return (): string =>
-						"https://www.heb.com/my-account/order-history/current";
+					return (): string => currentUrl;
 				}
 				throw new Error(
 					`unexpected page.${String(prop)} in item-enriched pagination test stub`,
@@ -1483,12 +1488,14 @@ test("runForwardScan: page 2's goto() rejecting must not be classified as termin
 	// exactly what classifyEmptyListPage's terminal branch would accept.
 	const staleAfterFailedNav = `<html><body><h3>Order History</h3><nav aria-label="breadcrumb"></nav></body></html>`;
 	let lastContent = "";
+	let currentUrl = "";
 	const page = new Proxy(
 		{},
 		{
 			get(_target, prop): unknown {
 				if (prop === "goto") {
 					return (url: string): Promise<null> => {
+						currentUrl = url;
 						const m = /your-orders\?page=(\d+)/.exec(url);
 						const pageNum = m?.[1] ? Number(m[1]) : 1;
 						if (pageNum === 1) {
@@ -1508,8 +1515,7 @@ test("runForwardScan: page 2's goto() rejecting must not be classified as termin
 					return (): Promise<string> => Promise.resolve(lastContent);
 				}
 				if (prop === "url") {
-					return (): string =>
-						"https://www.heb.com/my-account/your-orders?page=2";
+					return (): string => currentUrl;
 				}
 				throw new Error(
 					`unexpected page.${String(prop)} in failed-nav test stub`,
@@ -1539,12 +1545,14 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
     ${paginationNav}
   </main></body></html>`;
 	let lastContent = "";
+	let currentUrl = "";
 	const page = new Proxy(
 		{},
 		{
 			get(_target, prop): unknown {
 				if (prop === "goto") {
 					return (url: string): Promise<null> => {
+						currentUrl = url;
 						const pageNum = Number(
 							/your-orders\?page=(\d+)/.exec(url)?.[1] ?? 1,
 						);
@@ -1565,8 +1573,7 @@ test("runForwardScan: page 2's failed navigation cannot parse stale order cards 
 					return (): Promise<string> => Promise.resolve(lastContent);
 				}
 				if (prop === "url") {
-					return (): string =>
-						"https://www.heb.com/my-account/your-orders?page=2";
+					return (): string => currentUrl;
 				}
 				throw new Error(
 					`unexpected page.${String(prop)} in stale-card test stub`,
@@ -1621,7 +1628,8 @@ test("runForwardScan: a falsy goto rejection cannot parse stale page content", a
 		},
 		waitForSelector: (): Promise<null> => Promise.resolve(null),
 		content: (): Promise<string> => Promise.resolve(pageHtml),
-		url: (): string => "https://www.heb.com/my-account/your-orders?page=2",
+		url: (): string =>
+			`https://www.heb.com/my-account/your-orders?page=${navigations}`,
 	});
 
 	await assert.rejects(
@@ -1877,13 +1885,14 @@ test("runForwardScan: H-E-B's real 'No past orders' page completes the scan inst
 	// stored records: one scrape of a single connection returned orders from
 	// four different H-E-B stores).
 	await emitOrdersCoverage(deps, ordersCoverage);
-	const coverage = findDetailCoverage(protocolMessages);
+	assert.equal(findDetailCoverage(protocolMessages), undefined);
 	assert.ok(
-		coverage,
-		"the orders stream must still report coverage on an empty run",
+		protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "inventory_not_proven_complete",
+		),
 	);
-	assert.equal(coverage.considered, 0);
-	assert.equal(coverage.covered, 0);
 });
 
 test("runForwardScan: an empty page WITHOUT the empty-state marker still aborts as selector_drift", async () => {
@@ -2512,7 +2521,7 @@ function makeLegacyGapWithoutDate(
 	};
 }
 
-test("recoverPendingOrderItemDetailGaps: hydrates a pending order_items gap and emits DETAIL_GAP_RECOVERED", async () => {
+test("recoverPendingOrderItemDetailGaps: retains valid rows and keeps an unproven gap pending", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const flags = makeRunFlags();
 	const page = makePageStub({ content: DETAIL_HTML });
@@ -2530,8 +2539,8 @@ test("recoverPendingOrderItemDetailGaps: hydrates a pending order_items gap and 
 		flags,
 	);
 
-	assert.equal(result.recovered, 1);
-	assert.equal(result.stoppedWithPending, false);
+	assert.equal(result.recovered, 0);
+	assert.equal(result.stoppedWithPending, true);
 	assert.ok(
 		emitted.some(
 			(r) => r.stream === "order_items" && r.data.order_id === "HEB1000000001",
@@ -2539,13 +2548,11 @@ test("recoverPendingOrderItemDetailGaps: hydrates a pending order_items gap and 
 		"the recovered gap's items must emit as real order_items records",
 	);
 	const recovered = findDetailGapRecovered(protocolMessages);
-	assert.equal(recovered.length, 1);
-	assert.equal(recovered[0]?.gap_id, "gap_HEB1000000001");
-	assert.equal(recovered[0]?.record_key, "HEB1000000001");
+	assert.equal(recovered.length, 0);
 	assert.equal(
 		findDetailGaps(protocolMessages).length,
-		0,
-		"a recovered gap must not re-emit a new pending gap",
+		1,
+		"unproven recovery retains the pending gap",
 	);
 });
 
@@ -2668,7 +2675,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 		{ recoveryOnly: true, wantsItems: true, wantsNutrition: true },
 	);
 
-	assert.equal(result.recovered, 1);
+	assert.equal(result.recovered, 0);
 	assert.equal(
 		result.suppressForward,
 		true,
@@ -2679,7 +2686,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: recoveryOnly suppresses
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "nutrition" &&
-				message.reason === "stream_collection_failed",
+				message.reason === "inventory_not_proven_complete",
 		),
 		"nutrition must be marked incomplete before the recovery-only return",
 	);
@@ -2714,7 +2721,7 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "nutrition" &&
-				message.reason === "stream_collection_failed",
+				message.reason === "inventory_not_proven_complete",
 		),
 		"nutrition must be marked incomplete when the 100-detail budget suppresses the forward scan",
 	);
@@ -2862,12 +2869,11 @@ test("runForwardScan: hitting MAX_LIST_PAGES does not report the orders stream c
 		"the ceiling bounds the walk at MAX_LIST_PAGES pages",
 	);
 
-	// The honesty contract: `covered` must fall short of `considered` so the
-	// reference implementation derives `partial`, not `complete`.
+	assert.equal(ordersCoverage.considered.length, HEB_MAX_LIST_PAGES);
 	assert.ok(
-		ordersCoverage.covered.length < ordersCoverage.considered.length,
-		"a truncated walk must report covered < considered so coverage reads partial, not complete; " +
-			`got considered=${ordersCoverage.considered.length} covered=${ordersCoverage.covered.length}`,
+		ordersCoverage.considered.every(
+			(id) => !id.startsWith("unread_list_page_"),
+		),
 	);
 });
 
@@ -2966,6 +2972,7 @@ function makeLazyLoadPageStub(totalItems: number): Page {
 	let itemsRendered = viewportItems;
 	let firstVisibleItem = 0;
 	let scrolls = 0;
+	let currentUrl = "";
 	const maxScrolls = Math.ceil(totalItems / 10); // Load ~10 items per scroll
 
 	return new Proxy(
@@ -2973,7 +2980,8 @@ function makeLazyLoadPageStub(totalItems: number): Page {
 		{
 			get(_target, prop): unknown {
 				if (prop === "goto") {
-					return (): Promise<null> => {
+					return (url: string): Promise<null> => {
+						currentUrl = url;
 						itemsRendered = Math.min(15, totalItems);
 						firstVisibleItem = 0;
 						scrolls = 0;
@@ -3049,8 +3057,7 @@ function makeLazyLoadPageStub(totalItems: number): Page {
 					};
 				}
 				if (prop === "url") {
-					return (): string =>
-						"https://www.heb.com/my-account/order-history/HEB123";
+					return (): string => currentUrl;
 				}
 				throw new Error(`unexpected page.${String(prop)} in lazy-load test`);
 			},
@@ -3196,12 +3203,9 @@ test("fetchOrderDetail: an incomplete bounded surface becomes an observable gap,
 		clock.restore();
 	}
 
-	assert.equal(result.status, "failed");
-	assert.ok(
-		result.failureKind === "detail_surface_timeout" ||
-			result.failureKind === "detail_surface_incomplete",
-		`unexpected settlement: ${result.failureKind}`,
-	);
+	assert.equal(result.status, "hydrated");
+	if (result.status !== "hydrated") return;
+	assert.equal(result.inventoryComplete, false);
 	assert.match(result.diagnostic ?? "", /detail_surface_(timeout|incomplete)/);
 	assert.ok(
 		Number.isFinite(result.elapsedMs),
@@ -3246,8 +3250,9 @@ test("fetchOrderDetail: a visible no-op control fails closed when no declared co
 			waitForHydration: immediateWait,
 		});
 
-		assert.equal(result.status, "failed");
-		assert.equal(result.failureKind, "detail_surface_timeout");
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.inventoryComplete, false);
 		assert.match(result.diagnostic ?? "", /action=control:Load more/);
 	} finally {
 		await browser.close();
@@ -3279,8 +3284,9 @@ test("fetchOrderDetail: a visible no-op control blocks the declared-count settle
 			waitForHydration: immediateWait,
 		});
 
-		assert.equal(result.status, "failed");
-		assert.equal(result.failureKind, "detail_surface_timeout");
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.inventoryComplete, false);
 		assert.match(result.diagnostic ?? "", /action=control:Load more/);
 	} finally {
 		await browser.close();
@@ -3335,9 +3341,9 @@ test("fetchOrderDetail: a row without provider or positional identity fails clos
 			waitForHydration: immediateWait,
 		});
 
-		assert.equal(result.status, "failed");
-		assert.equal(result.failureKind, "detail_surface_error");
-		assert.match(result.diagnostic ?? "", /explicit positional identity/);
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.inventoryComplete, false);
 	} finally {
 		await browser.close();
 	}
@@ -3368,10 +3374,10 @@ test("fetchOrderDetail: an unanchored remounting window fails closed instead of 
 			waitForHydration: immediateWait,
 		});
 
-		assert.equal(result.status, "failed");
-		assert.equal(result.failureKind, "detail_surface_error");
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.inventoryComplete, false);
 		assert.match(result.diagnostic ?? "", /static_evidence=none/);
-		assert.match(result.diagnostic ?? "", /explicit positional identity/);
 	} finally {
 		await browser.close();
 	}
@@ -3568,8 +3574,9 @@ test("fetchOrderDetail: continuous remounts with matching count fail closed with
 			waitForHydration: immediateWait,
 		});
 
-		assert.equal(result.status, "failed");
-		assert.equal(result.failureKind, "detail_surface_timeout");
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.inventoryComplete, false);
 	} finally {
 		await browser.close();
 	}
@@ -3637,7 +3644,7 @@ test("fetchOrderDetail: static 58-row detail reconciles 84 units, including weig
 	}
 });
 
-test("processListOrder keeps fully collected items and reports a remaining count mismatch via PROGRESS", async () => {
+test("processListOrder retains 58 rows at 85-vs-84 and emits a retryable inventory skip", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const page = await browser.newPage();
@@ -3697,10 +3704,12 @@ test("processListOrder keeps fully collected items and reports a remaining count
 		assert.equal(
 			protocolMessages.filter(
 				(message) =>
-					message.type === "SKIP_RESULT" && message.stream === "order_items",
+					message.type === "SKIP_RESULT" &&
+					message.stream === "order_items" &&
+					message.reason === "inventory_not_proven_complete",
 			).length,
-			0,
-			"a delivered order_items stream must not also emit SKIP_RESULT",
+			1,
+			"valid partial rows require the retryable inventory skip",
 		);
 	} finally {
 		setConnectorDiagnosticSink(undefined);
@@ -3778,8 +3787,9 @@ test("fetchOrderDetail: a repeated product that is never co-mounted under conten
 			waitForHydration: immediateWait,
 		});
 
-		assert.equal(result.status, "failed");
-		assert.equal(result.failureKind, "detail_surface_error");
+		assert.equal(result.status, "hydrated");
+		if (result.status !== "hydrated") return;
+		assert.equal(result.inventoryComplete, false);
 		assert.match(result.diagnostic ?? "", /ambiguous repeated product/);
 	} finally {
 		await browser.close();
@@ -3815,8 +3825,8 @@ const SYNTHETIC_NUTRITION_HTML = `<html><body><main>
   </div>
 </main></body></html>`;
 
-test("collectProfile emits a profile record on a healthy page", async () => {
-	const { deps, emitted } = makeRecordingDeps();
+test("collectProfile withholds an aggregate without complete owner-bound sections", async () => {
+	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const page = makePageStub({ content: SYNTHETIC_PROFILE_HTML });
 
 	await collectProfile(page, {
@@ -3827,10 +3837,14 @@ test("collectProfile emits a profile record on a healthy page", async () => {
 	});
 
 	const profileRecords = emitted.filter((r) => r.stream === "profile");
-	assert.equal(profileRecords.length, 1);
-	assert.equal(profileRecords[0]?.data.name, "Jamie Shopper");
-	assert.equal(profileRecords[0]?.data.email, "shopper@example.com");
-	assert.equal(profileRecords[0]?.data.id, "profile");
+	assert.equal(profileRecords.length, 0);
+	assert.ok(
+		protocolMessages.some(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "inventory_not_proven_complete",
+		),
+	);
 });
 
 test("collectProfile emits SKIP_RESULT (not a null-only record) when no fields are found", async () => {
@@ -4040,32 +4054,14 @@ test("collectNutrition covers products past the former 50-lookup limit and recor
 	});
 
 	const outcomes = emitted.filter((record) => record.stream === "nutrition");
-	assert.equal(outcomes.length, targets.length);
-	assert.deepEqual(
-		new Set(outcomes.map((record) => record.data.product_id)),
-		new Set(targets.map((target) => target.productId)),
-	);
+	assert.equal(outcomes.length, targets.length - 2);
 	assert.equal(
-		outcomes.find((record) => record.data.product_id === targets[1]?.productId)
-			?.data.source,
-		"not_found",
-	);
-	assert.equal(
-		outcomes.find((record) => record.data.product_id === targets[51]?.productId)
-			?.data.source,
-		"error",
-	);
-	assert.ok(
-		protocolMessages.some(
+		protocolMessages.filter(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "nutrition_navigation_failed",
-		),
-	);
-	assert.equal(
-		protocolMessages.filter((message) => message.type === "SKIP_RESULT").length,
-		1,
-		"only the failed navigation should mark nutrition incomplete",
+				message.reason === "inventory_not_proven_complete",
+		).length,
+		2,
 	);
 });
 
@@ -4093,27 +4089,20 @@ test("collectNutrition retains blocked outcomes with the observed product URL", 
 		},
 	);
 
-	const nutritionRecord = emitted.find(
-		(record) => record.stream === "nutrition",
-	);
-	assert.equal(nutritionRecord?.data.source, "blocked");
 	assert.equal(
-		nutritionRecord?.data.product_url,
-		"https://www.heb.com/product-detail/heb-milk/123456789",
+		emitted.filter((record) => record.stream === "nutrition").length,
+		0,
 	);
-	assert.equal(nutritionRecord?.data.calories, null);
 	assert.ok(
 		protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.stream === "nutrition" &&
-				message.reason === "session_repair_required",
+				message.reason === "inventory_not_proven_complete",
 		),
-		"blocked record must retain the existing repair diagnostic",
 	);
 });
 
-test("collectNutrition emits an explicit not_found outcome for products without product_url", async () => {
+test("collectNutrition reports unknown retryable lookup for products without product_url", async () => {
 	const { deps, emitted, protocolMessages } = makeRecordingDeps();
 	const targets: NutritionTarget[] = [
 		{ name: "No URL Item", productId: "999", productUrl: null },
@@ -4126,16 +4115,16 @@ test("collectNutrition emits an explicit not_found outcome for products without 
 		waitForHydration: immediateWait,
 	});
 
-	const outcome = emitted.find((r) => r.stream === "nutrition");
-	assert.equal(outcome?.data.product_id, "999");
-	assert.equal(outcome?.data.product_url, null);
-	assert.equal(outcome?.data.source, "not_found");
-	assert.equal(outcome?.data.confidence, "low");
-	assert.equal(outcome?.data.calories, null);
 	assert.equal(
-		protocolMessages.filter((message) => message.type === "SKIP_RESULT").length,
+		emitted.filter((record) => record.stream === "nutrition").length,
 		0,
-		"not_found is a complete outcome for a product without a URL",
+	);
+	assert.ok(
+		protocolMessages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "inventory_not_proven_complete",
+		),
 	);
 });
 
@@ -4166,7 +4155,7 @@ test("reportListPageCeiling: the page-cap skip waits for a connector upgrade, be
 	await reportListPageCeiling(deps, HEB_MAX_LIST_PAGES + 3);
 	const skip = protocolMessages.find((m) => m.type === "SKIP_RESULT");
 	assert.equal(skip?.type, "SKIP_RESULT");
-	assert.equal(skip.reason, "older_pages_deferred_page_budget");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
 	assertUserFacingProgress(
 		progressTexts.map((message) => ({ type: "PROGRESS", message })),
 	);
@@ -4174,8 +4163,8 @@ test("reportListPageCeiling: the page-cap skip waits for a connector upgrade, be
 		`Stopped after ${String(HEB_MAX_LIST_PAGES)} pages of orders; older orders were not read`,
 	]);
 	assert.deepEqual(skip.recovery_hint, {
-		action: "retry_on_connector_upgrade",
-		retryable: false,
+		action: "retry_by_runtime",
+		retryable: true,
 	});
 });
 

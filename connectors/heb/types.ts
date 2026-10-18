@@ -46,6 +46,12 @@ export interface DetailItem {
 
 export interface OrderDetail {
 	items: DetailItem[];
+	parsing?: {
+		observedRows: number;
+		rejectedRows: number;
+		missingIdentityRows: number;
+		sourceIds: string[];
+	};
 }
 
 // Shape of the emitted `orders` stream record. Field names + nullability
@@ -126,7 +132,7 @@ export type MaxPageResolution =
  *  identity of its own beyond the parent profile — it stays an array field). */
 export interface DeliveryAddress {
 	address: string;
-	is_primary: boolean;
+	is_primary: boolean | null;
 	label: string | null;
 }
 
@@ -137,7 +143,7 @@ export interface DeliveryAddress {
  *  scrapeProfile()). `id` is synthesized (this connector has one account per
  *  connection, so a fixed literal id is stable and unique within the stream). */
 export interface ProfileRecord {
-	delivery_addresses: DeliveryAddress[];
+	delivery_addresses: DeliveryAddress[] | null;
 	email: string | null;
 	id: string;
 	name: string | null;

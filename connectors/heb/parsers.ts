@@ -722,7 +722,25 @@ export function parseOrderDetailDom(html: string): OrderDetail | null {
 	if (items.length === 0) {
 		return null;
 	}
-	return { items };
+	return {
+		items,
+		parsing: {
+			observedRows: links.length,
+			rejectedRows: links.length - items.length,
+			missingIdentityRows: links.filter(
+				(link) => !link.getAttribute("href")?.trim(),
+			).length,
+			sourceIds: links.map((link) => {
+				const row = itemRowFor(link);
+				return (
+					row.getAttribute("data-index") ??
+					row.getAttribute("aria-posinset") ??
+					link.getAttribute("href") ??
+					""
+				);
+			}),
+		},
+	};
 }
 
 // ─── Incapsula block detection ────────────────────────────────────────────
@@ -1019,7 +1037,7 @@ function parseDeliveryAddresses(document: Document): DeliveryAddress[] {
 		const label = (labelEl?.firstChild?.textContent ?? "").trim();
 		addresses.push({
 			address,
-			is_primary: cardText.includes("Primary"),
+			is_primary: cardText.includes("Primary") ? true : null,
 			label: label || null,
 		});
 	}
@@ -1030,14 +1048,17 @@ function parseDeliveryAddresses(document: Document): DeliveryAddress[] {
  *  whose text is exactly the field label, then reads its sibling's text —
  *  no free-text regex over concatenated innerText. */
 export function parseProfileDom(html: string): {
-	deliveryAddresses: DeliveryAddress[];
+	deliveryAddresses: DeliveryAddress[] | null;
 	email: string | null;
 	name: string | null;
 	phone: string | null;
 } {
 	const { document } = parseHTML(html);
 	return {
-		deliveryAddresses: parseDeliveryAddresses(document),
+		deliveryAddresses:
+			parseDeliveryAddresses(document).length > 0
+				? parseDeliveryAddresses(document)
+				: null,
 		email: labeledFieldValue(document, "Email"),
 		name: labeledFieldValue(document, "Name"),
 		phone: labeledFieldValue(document, "Mobile number"),
@@ -1046,7 +1067,7 @@ export function parseProfileDom(html: string): {
 
 export function buildProfileRecord(
 	extraction: {
-		deliveryAddresses: DeliveryAddress[];
+		deliveryAddresses: DeliveryAddress[] | null;
 		email: string | null;
 		name: string | null;
 		phone: string | null;
@@ -1147,12 +1168,6 @@ function parseNutrientList(panel: Element): {
 			}
 		}
 	}
-	// H-E-B omits the calorie row entirely for 0-calorie products (water,
-	// spices). A nutrition panel with nutrients but no parsed calorie row is
-	// that honest zero, not a parse failure.
-	if (calories === null && nutrients.size > 0) {
-		calories = 0;
-	}
 	return { calories, nutrients };
 }
 
@@ -1170,7 +1185,7 @@ function parseServingInfo(panel: Element): {
 	let servingSize: string | null = null;
 	for (const [index, div] of divs.entries()) {
 		if (SERVING_SIZE_LABEL_RE.test(normText(div) ?? "")) {
-			servingSize = normText(divs[index + 1] ?? div.nextElementSibling);
+			servingSize = normText(divs[index + 1] ?? div.nextElementSibling) || null;
 			break;
 		}
 	}
@@ -1185,9 +1200,14 @@ function parseIngredientsAndAllergens(document: Document): {
 	const ingredientsHeading = headings.find(
 		(h4) => normText(h4) === "Ingredients",
 	);
+	const ingredientFallback =
+		ingredientsHeading?.parentElement?.lastElementChild;
 	const ingredients = ingredientsHeading
-		? (normText(ingredientsHeading.nextElementSibling) ??
-			normText(ingredientsHeading.parentElement?.lastElementChild ?? null))
+		? normText(ingredientsHeading.nextElementSibling) ||
+			normText(
+				ingredientFallback === ingredientsHeading ? null : ingredientFallback,
+			) ||
+			null
 		: null;
 
 	const allergensHeading = headings.find((h4) =>
@@ -1196,8 +1216,12 @@ function parseIngredientsAndAllergens(document: Document): {
 	let allergens: string | null = null;
 	if (allergensHeading) {
 		const raw =
-			normText(allergensHeading.nextElementSibling) ??
-			normText(allergensHeading.parentElement?.lastElementChild ?? null) ??
+			normText(allergensHeading.nextElementSibling) ||
+			normText(
+				allergensHeading.parentElement?.lastElementChild === allergensHeading
+					? null
+					: allergensHeading.parentElement?.lastElementChild,
+			) ||
 			"";
 		const match = CONTAINS_ALLERGENS_RE.exec(raw);
 		if (match?.[1]) {
@@ -1258,9 +1282,10 @@ function parseUpc(document: Document): string | null {
 export function parseNutritionDom(html: string): NutritionDomExtraction {
 	const { document } = parseHTML(html);
 	const panelHeading = findNutritionPanelHeading(document);
+	const independent = parseIngredientsAndAllergens(document);
 	const empty: NutritionDomExtraction = {
 		addedSugarG: null,
-		allergens: null,
+		allergens: independent.allergens,
 		calciumMg: null,
 		calories: null,
 		carbsG: null,
@@ -1269,10 +1294,10 @@ export function parseNutritionDom(html: string): NutritionDomExtraction {
 		fatG: null,
 		fiberG: null,
 		found: false,
-		highlights: null,
-		ingredients: null,
+		highlights: parseHighlights(document),
+		ingredients: independent.ingredients,
 		ironMg: null,
-		name: null,
+		name: normText(document.querySelector("h1")) || null,
 		potassiumMg: null,
 		proteinG: null,
 		saturatedFatG: null,
@@ -1309,7 +1334,7 @@ export function parseNutritionDom(html: string): NutritionDomExtraction {
 		highlights: parseHighlights(document),
 		ingredients,
 		ironMg: nutrientNumber(nutrients, "Iron"),
-		name: normText(document.querySelector("h1")),
+		name: normText(document.querySelector("h1")) || null,
 		potassiumMg: nutrientNumber(nutrients, "Potassium"),
 		proteinG: nutrientNumber(nutrients, "Protein"),
 		saturatedFatG: nutrientNumber(nutrients, "Saturated Fat"),
@@ -1334,7 +1359,7 @@ export function buildNutritionRecord(
 	sourceOverride?: NutritionSource,
 ): NutritionRecord {
 	const source: NutritionSource =
-		sourceOverride ?? (extraction.found ? "heb_product_page" : "not_found");
+		sourceOverride ?? (extraction.found ? "heb_product_page" : "error");
 	return {
 		added_sugar_g: extraction.addedSugarG,
 		allergens: extraction.allergens,
@@ -1365,5 +1390,35 @@ export function buildNutritionRecord(
 		trans_fat_g: extraction.transFatG,
 		upc: extraction.upc,
 		vitamin_d_mcg: extraction.vitaminDMcg,
+	};
+}
+
+/** Observable parser loss before merging/deduplication. These are source row
+ * identities, not a fabricated count or a proof of inventory completion. */
+export function inspectOrderListParsing(html: string): {
+	sourceIds: string[];
+	rejectedRows: number;
+	missingIdentityRows: number;
+} {
+	const { document } = parseHTML(html);
+	const props = readNextDataPageProps(html);
+	const structured = props && Array.isArray(props.orders) ? props.orders : [];
+	const links = [
+		...document.querySelectorAll<HTMLAnchorElement>(
+			'a[href*="/my-account/order-history/"]',
+		),
+	];
+	const domIds = links.map(
+		(link) =>
+			ORDER_LINK_HREF_RE.exec(link.getAttribute("href") ?? "")?.[1] ?? "",
+	);
+	const structuredIds = structured.map(
+		(row) => parseStructuredOrderRow(row)?.orderId ?? "",
+	);
+	const missing = [...domIds, ...structuredIds].filter((id) => !id).length;
+	return {
+		sourceIds: [...new Set([...domIds, ...structuredIds].filter(Boolean))],
+		rejectedRows: missing,
+		missingIdentityRows: missing,
 	};
 }
