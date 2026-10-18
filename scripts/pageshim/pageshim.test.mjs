@@ -1398,6 +1398,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 	assertCleanRun(r);
 	assert.equal(r.result["github.starred"], undefined);
+	assert.equal(r.data.error, undefined);
+	assert.match(r.data.status, /^Partial:/);
 	// The host projects the SKIP_RESULT message, not its reason code. The
 	// message names the specific withholding cause after a fixed prefix.
 	assert.equal(r.result.errors.length, 1);
@@ -1409,7 +1411,7 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(
 		{ ...error, reason: undefined },
 		{
-			errorClass: "runtime_error",
+			errorClass: "partial",
 			reason: undefined,
 			disposition: "omitted",
 			scope: "github.starred",

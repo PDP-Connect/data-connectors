@@ -196,10 +196,10 @@ test("parseOrderDetailDom ignores footer/cross-sell links outside purchasedItems
 	assert.equal(detail.items[0]?.productId, "B01ABCDEFG");
 });
 
-test("parseOrderDetailDom defaults quantity to 1 when the row has no Qty text", () => {
+test("parseOrderDetailDom preserves unknown quantity when the row has no Qty text", () => {
 	const html = `<html><body>${purchasedItemRow({ asin: "B01ABCDEFG", name: "Single item" })}</body></html>`;
 	const detail = parseOrderDetailDom(html);
-	assert.equal(detail.items[0]?.quantity, 1);
+	assert.equal(detail.items[0]?.quantity, null);
 });
 
 test("parseOrderDetailDom retains an online row without an ASIN for order accounting", () => {
@@ -228,10 +228,7 @@ test("parseOrderDetailDom still rejects a source product row with no usable name
 	const html = `<div data-component="purchasedItemsRightGrid">
 		<div data-component="itemTitle"><a href="/dp/B01ABCDEFG"></a></div>
 	</div>`;
-	assert.throws(
-		() => parseOrderDetailDom(html),
-		/has no source product name/,
-	);
+	assert.throws(() => parseOrderDetailDom(html), /has no source product name/);
 });
 
 // ─── Shared value parsing ──────────────────────────────────────────────────
@@ -492,9 +489,7 @@ test("parseOrderSearchPageDom records the distinct product ASINs each order's se
 
 test("a hidden empty-orders element is not an empty state", () => {
 	assert.equal(
-		hasOrderSearchEmptyState(
-			'<div class="no-orders" hidden>No orders</div>',
-		),
+		hasOrderSearchEmptyState('<div class="no-orders" hidden>No orders</div>'),
 		false,
 	);
 	assert.equal(
