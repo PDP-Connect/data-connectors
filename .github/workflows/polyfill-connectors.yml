@@ -122,6 +122,15 @@ jobs:
         # package-local verification scope.
         run: npm run connector-stdout-console:check
 
+      - name: Allow unprivileged user namespaces for the isolation tests
+        # Ubuntu 24.04 runners restrict unprivileged user namespaces through
+        # AppArmor, so every test in scripts/test-lanes.mjs's NAMESPACE_TESTS
+        # that needs bwrap or unshare skipped here ("network isolation
+        # unavailable on this host"). Those tests prove the scenario sandbox
+        # that keeps connectors off the network; lifting the restriction on this
+        # throwaway runner lets them run.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Test
         working-directory: packages/polyfill-connectors
         # Excludes the @pdpp/reference-contract-dependent suites; see
