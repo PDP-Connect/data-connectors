@@ -7,20 +7,23 @@
 // can be left out by path.
 import { spawn } from "node:child_process";
 import { glob } from "node:fs/promises";
+import { EXCLUDED_TESTS, NAMESPACE_TESTS } from "./test-lanes.mjs";
 
 // Gate B finding B2 restored the other 7 previously-excluded semantic/
 // conformance tests (vendored @pdpp/reference-contract now carries an
 // `evidence` subpath, and a local reference-implementation-stand-in carries
 // RUNTIME_GENERIC_REASON_CODES — see vendor/README.md and
 // src/reference-implementation-stand-in/README.md for exact provenance).
-// connectors/github/index.test.ts remains excluded: it drives GitHub
-// connector collection against a REAL in-memory instance of the reference
-// implementation's own ingest pipeline (server/db.ts, server/records.ts —
-// thousands of lines each, not a narrow leaf contract), so it cannot be
-// bridged with a minimal stand-in without misrepresenting what it tests. Its
-// closure is the required cross-repository semantic CI job (Gate B findings
-// B2/B5), not a local vendor addition.
-const EXCLUDED = new Set(["../../connectors/github/index.test.ts"]);
+// Files no lane can run are listed in EXCLUDED_TESTS (scripts/test-lanes.mjs).
+// connectors/github/index.test.ts drives the connector against the reference
+// implementation's own ingest pipeline, which is not in this repository. The
+// cross-repository job that once ran it was retired (pdpp#284; see
+// .github/workflows/cross-repo-integrity.yml), so today it runs nowhere.
+const EXCLUDED = new Set(
+	[...EXCLUDED_TESTS].map((file) =>
+		file.startsWith("connectors/") ? `../../${file}` : file,
+	),
+);
 
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const rawConcurrency = process.env.TEST_CONCURRENCY ?? "2";
@@ -39,26 +42,13 @@ const patterns = [
 	"src/**/*.test.ts",
 ];
 
-// Tests that create their own bwrap/unshare namespaces. The test-sandbox's
-// bwrap blocks nested namespaces, so these run in the `namespaces` lane
-// (`test-sandbox --isolate cgroup`) and every other file runs in `sandboxed`.
-// src/test-runner-contract.test.ts reads this list by scanning this file.
-// Package-relative paths. The lane runs one file at a time: these files share
-// the repository root as global state (isolation-mechanism plants sockets
-// under it that scenario-verify-strict's isolation scan then refuses).
-const NAMESPACE_TESTS = new Set([
-	"bin/scenario-cli.test.ts",
-	"bin/scenario-fidelity.test.ts",
-	"bin/scenario-verify-strict.test.ts",
-	"src/scenario/filesystem-input.test.ts",
-	"src/scenario/isolation-mechanism.test.ts",
-]);
-
 const args = process.argv.slice(2);
 const laneIndex = args.indexOf("--lane");
 const lane = laneIndex === -1 ? undefined : args[laneIndex + 1];
 if (lane !== undefined && lane !== "sandboxed" && lane !== "namespaces") {
-	console.error(`--lane must be "sandboxed" or "namespaces", got ${JSON.stringify(lane)}`);
+	console.error(
+		`--lane must be "sandboxed" or "namespaces", got ${JSON.stringify(lane)}`,
+	);
 	process.exit(2);
 }
 
@@ -66,7 +56,8 @@ const files = [];
 for (const pattern of patterns) {
 	for await (const entry of glob(pattern)) {
 		const inLane =
-			lane === undefined || NAMESPACE_TESTS.has(entry) === (lane === "namespaces");
+			lane === undefined ||
+			NAMESPACE_TESTS.has(entry) === (lane === "namespaces");
 		if (!EXCLUDED.has(entry) && inLane) {
 			files.push(entry);
 		}

@@ -39,6 +39,7 @@
     "tar": "^7.5.22"
   },
   "scripts": {
+    "test:fast": "npm --prefix packages/polyfill-connectors run test:fast --",
     "test:tooling": "scripts/test-sandbox/test-sandbox -- node --test scripts/test-sandbox/vendored-copy.test.mjs",
     "test:pageshim": "scripts/test-sandbox/test-sandbox -- node --test scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs",
     "test": "npm run connector-implementation-index:check && npm run historical-contract:test && npm run release-index:test && npm run installer:test && npm run manifest-schema:test && npm run cross-repo-integrity:test && npm run test:tooling && npm --prefix packages/polyfill-connectors test && npm run test:pageshim",

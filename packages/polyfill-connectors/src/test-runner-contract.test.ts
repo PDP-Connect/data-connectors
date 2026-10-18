@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import { glob, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { NAMESPACE_TESTS } from "../scripts/test-lanes.mjs";
 
 test("package test runner bounds file concurrency and retains a finite hang guard", async () => {
 	// "npm test" runs scripts/run-tests.mjs (not a literal `node --test ...` in
@@ -20,7 +21,12 @@ test("package test runner bounds file concurrency and retains a finite hang guar
 	]) {
 		const runner = await readFile(new URL(path, import.meta.url), "utf8");
 
-		assert.match(runner, /process\.env\.TEST_CONCURRENCY \?\? "2"/, path);
+		// test:fast (`--fast`) defaults to 4; everything else to 2.
+		assert.match(
+			runner,
+			/process\.env\.TEST_CONCURRENCY \?\? (?:"2"|\(fast \? "4" : "2"\))/,
+			path,
+		);
 		assert.match(runner, /--test-concurrency=\$\{[^}`]*rawConcurrency\}/, path);
 		assert.match(runner, /--test-timeout=120000/, path);
 		assert.doesNotMatch(runner, /--test-timeout=30000/, path);
@@ -29,15 +35,7 @@ test("package test runner bounds file concurrency and retains a finite hang guar
 
 test("NAMESPACE_TESTS lists exactly the files that need their own namespaces", async () => {
 	const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-	const runner = await readFile(
-		new URL("../scripts/run-tests.mjs", import.meta.url),
-		"utf8",
-	);
-	const block = /const NAMESPACE_TESTS = new Set\(\[([^\]]*)\]\)/.exec(runner);
-	assert.ok(block, "scripts/run-tests.mjs must define NAMESPACE_TESTS");
-	const listed = new Set(
-		[...(block[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1] as string),
-	);
+	const listed: ReadonlySet<string> = NAMESPACE_TESTS;
 
 	for (const entry of listed) {
 		assert.ok(
@@ -70,6 +68,6 @@ test("NAMESPACE_TESTS lists exactly the files that need their own namespaces", a
 	assert.deepEqual(
 		missing,
 		[],
-		"these files need their own namespaces; add them to NAMESPACE_TESTS in scripts/run-tests.mjs",
+		"these files need their own namespaces; add them to NAMESPACE_TESTS in scripts/test-lanes.mjs",
 	);
 });
