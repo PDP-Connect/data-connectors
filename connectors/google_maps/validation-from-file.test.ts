@@ -561,7 +561,9 @@ test("validateGoogleMapsTimelineArtifactFromFile: a large sparse export never ca
 	}
 });
 
-test("outcome proof: a 110 MiB sparse Timeline export separates streaming from whole-buffer parsing at one heap limit", async () => {
+test("outcome proof: a 110 MiB sparse Timeline export separates streaming from whole-buffer parsing at one heap limit", {
+	timeout: 240_000,
+}, async () => {
 	// Deterministic worker-thread oracle, not an in-process memory-delta
 	// measurement (the prior in-process external-memory-delta test here was
 	// proven decorative by mutation testing -- it passed even when reverted
@@ -620,7 +622,9 @@ test("outcome proof: a 110 MiB sparse Timeline export separates streaming from w
 		// A worker resource limit reports OOM without aborting the process or
 		// generating a core dump for this expected negative-control outcome.
 		const heapLimitMiB = 128;
-		const timeoutMs = 30_000;
+		// A hang guard, not a speed bound: on a 4-vCPU CI runner with four test
+		// files at once, the streaming pass alone took 38.6 s.
+		const timeoutMs = 90_000;
 		type OracleOutcome = {
 			error: (Error & { code?: string }) | undefined;
 			exitCode: number;
