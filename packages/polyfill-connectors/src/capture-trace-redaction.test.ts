@@ -40,6 +40,7 @@ import test from "node:test";
 
 import { chromium } from "playwright";
 
+import { connectorDir } from "./connector-paths.ts";
 import { makeTracer } from "./connector-runtime.ts";
 import {
 	type CaptureSession,
@@ -408,6 +409,9 @@ test("no screenshot is written when the page cannot build a credential mask", as
 });
 
 test("screenshot capture masks a one-time code rendered as readable text", async () => {
+	// Without PDPP_CAPTURE_ROOT_DIR, createCaptureSession writes under
+	// connectors/<name>/, so the finally removes that whole tree.
+	const connectorName = `shot_${process.pid}_${Date.now()}`;
 	const browser = await chromium.launch();
 	try {
 		const context = await browser.newContext();
@@ -418,7 +422,7 @@ test("screenshot capture masks a one-time code rendered as readable text", async
 		await page.fill("#t", "482913");
 
 		const captured = await withCaptureEnv(async () => {
-			const capture = createCaptureSession(`shot_${process.pid}_${Date.now()}`);
+			const capture = createCaptureSession(connectorName);
 			assert.ok(capture);
 			capture.registerSecrets([SECRET]);
 			await capture.captureDom(page, "otp-after-submit");
@@ -464,9 +468,9 @@ test("screenshot capture masks a one-time code rendered as readable text", async
 			magenta > 0,
 			"expected a mask overlay covering the credential fields in the screenshot",
 		);
-		rmSync(captured, { force: true, recursive: true });
 		await context.close();
 	} finally {
+		rmSync(connectorDir(connectorName), { force: true, recursive: true });
 		await browser.close();
 	}
 });
