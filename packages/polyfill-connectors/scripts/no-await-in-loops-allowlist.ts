@@ -3983,7 +3983,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "scripts/run-tests.mjs",
-			line: 57,
+			line: 59,
 			column: 2,
 			category: "dependent_file_cursor",
 			note: "collectTestFiles(): sequential glob() per fixed test-directory pattern; trivial fixed-size loop over 5 patterns, no reason to parallelize",
@@ -4613,7 +4613,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/test-runner-contract.test.ts",
-			line: 58,
+			line: 53,
 			column: 3,
 			category: "dependent_file_cursor",
 			note: "NAMESPACE_TESTS guard: sequential glob() per runner pattern, the same fixed-size loop run-tests.mjs uses",

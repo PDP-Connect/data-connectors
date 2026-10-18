@@ -112,7 +112,7 @@ function main(): void {
 	};
 
 	console.error(`[test:related] ${selection.reason}`);
-	const rawConcurrency = process.env.TEST_CONCURRENCY ?? (fast ? "4" : "2");
+	const rawConcurrency = process.env.TEST_CONCURRENCY ?? "4";
 	if (!POSITIVE_INTEGER.test(rawConcurrency)) {
 		console.error(
 			`TEST_CONCURRENCY must be a positive integer, got ${JSON.stringify(rawConcurrency)}`,
@@ -125,7 +125,7 @@ function main(): void {
 	if (selection.kind === "FULL_SUITE") {
 		if (fast) {
 			console.error(
-				`[test:fast] FULL_SUITE: ${selection.reason}. Running the full sandboxed lane (about 9 minutes at concurrency 4).`,
+				`[test:fast] FULL_SUITE: ${selection.reason}. Running the full sandboxed lane (about 7 minutes).`,
 			);
 		}
 		ok = runInLane("sandboxed", [
