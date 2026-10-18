@@ -1869,7 +1869,7 @@ const PROOF_ME = {
 	},
 };
 function proofProfile(): Record<string, any> {
-	const profile: Record<string, any> = structuredClone(DASH_PROFILE_RESPONSE.elements[0]);
+	const profile: Record<string, any> = structuredClone(DASH_PROFILE_RESPONSE.elements[0]) as Record<string, any>;
 	profile.entityUrn = "urn:li:fsd_profile:12";
 	profile.publicIdentifier = "anon-member";
 	profile.profileEducations.elements[0].entityUrn = "urn:li:education:1";
