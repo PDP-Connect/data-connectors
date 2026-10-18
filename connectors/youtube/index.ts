@@ -1697,7 +1697,9 @@ export async function collectYoutubeBrowser(
 						handle: channel.handle,
 						avatar_url: channel.avatar_url,
 						subscriber_count: parseCount(channel.subscriber_count_text),
-						subscriber_count_text: channel.subscriber_count_text,
+						...(channel.subscriber_count_text
+							? { subscriber_count_text: channel.subscriber_count_text }
+							: {}),
 						description: channel.description,
 						is_verified: channel.is_verified,
 						notifications: channel.notifications,

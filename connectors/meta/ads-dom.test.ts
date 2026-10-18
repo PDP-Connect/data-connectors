@@ -10,12 +10,127 @@ import type { Page } from "playwright";
 import {
 	classifyAdsDialogInPage,
 	scrapeAdTopics,
+	scrapeAdvertisers,
 	scrapeTargetingCategories,
 } from "./index.ts";
 
 type ClassifierArgs = Parameters<typeof classifyAdsDialogInPage>[0];
 type Classification = ReturnType<typeof classifyAdsDialogInPage>;
 type AdsClock = Parameters<typeof scrapeAdTopics>[1];
+
+for (const initialName of ["B", ""] as const) {
+ for (const finalName of ["B", "C"] as const) {
+  test(`hidden advertiser evidence survives node reuse: ${initialName || "unreadable"} to ${finalName}`, async () => {
+   const {document, page} = makeDomPage('<div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a></div><section role="dialog"><div role="list" aria-setsize="3"><div role="listitem"><button>A</button></div><div role="listitem" id="hidden-row" style="display:none"><button>' + initialName + '</button></div></div><button id="expand">See more</button></section>', {onViewAllClick: () => {
+    const row = document.querySelector("#hidden-row")!;
+    row.querySelector("button")!.textContent = finalName;
+    row.removeAttribute("style");
+    document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><button>D</button></div>');
+    document.querySelector("#expand")?.remove();
+   }});
+   const result = await scrapeAdvertisers(page, makeClock());
+   assert.deepEqual(result.items, ["A", finalName, "D"]);
+   assert.equal(result.reached, initialName === "B" && finalName === "B");
+  });
+ }
+}
+
+for (const changed of [false, true]) {
+ test(`hidden category description resolves only matching evidence: changed=${changed}`, async () => {
+  const {document, page} = makeDomPage('<div role="tab">Manage info</div><div role="tabpanel"><a>Categories used to reach you</a></div><section role="dialog"><div role="list" aria-setsize="3"><div role="listitem"><span>A</span><button>Remove</button></div><div role="listitem"><span>B</span><span id="hidden-description" style="display:none">Original</span><button>Remove</button></div></div><button id="expand">View all</button></section>', {onViewAllClick: () => {
+   const field = document.querySelector("#hidden-description")!;
+   if (changed) field.textContent = "Changed";
+   field.removeAttribute("style");
+   document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><span>D</span><button>Remove</button></div>');
+   document.querySelector("#expand")?.remove();
+  }});
+  const result = await scrapeTargetingCategories(page, makeClock());
+  assert.deepEqual(result.items, [{name: "A", description: null}, {name: "B", description: changed ? "Changed" : "Original"}, {name: "D", description: null}]);
+  assert.equal(result.reached, !changed);
+ });
+}
+
+test("legacy advertiser hidden control text vetoes completion", () => {
+ const result = classify('<section role="dialog"><div role="list" aria-setsize="1"><div role="listitem">A</div><div role="listitem" style="display:none"><button>B</button></div></div></section>', {emptyMessage: "No advertisers"});
+ assert.notEqual(result.kind === "data" && result.complete, true);
+});
+
+test("removed hidden advertiser field remains unresolved after visible growth", async () => {
+ const {document, page} = makeDomPage('<div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a></div><section role="dialog"><div role="list" aria-setsize="2"><div role="listitem"><button>A</button><span id="hidden-field" style="display:none">Withheld B</span></div></div><button id="expand">See more</button></section>', {onViewAllClick: () => {
+  document.querySelector("#hidden-field")?.remove();
+  document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><button>C</button></div>');
+  document.querySelector("#expand")?.remove();
+ }});
+ const result = await scrapeAdvertisers(page, makeClock());
+ assert.equal(result.reached, false);
+ assert.ok(result.items.includes("C"));
+});
+
+
+for (const hidden of ["row", "list", "field", "zero-height"] as const) {
+ test(`advertiser hidden ${hidden} cannot certify visible growth`, async () => {
+  const hiddenRow = '<div role="listitem"' + (hidden === "row" ? ' style="display:none"' : hidden === "zero-height" ? ' style="height:0"' : '') + '><button' + (hidden === "field" ? ' style="display:none"' : '') + '>Hidden B</button></div>';
+  const {document, page} = makeDomPage(`
+   <div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a></div>
+   <section role="dialog"><div role="list" id="visible-list"><div role="listitem"><button>Visible A</button></div>${hidden === "list" ? "" : hiddenRow}</div>
+   ${hidden === "list" ? '<div role="list" style="display:none">' + hiddenRow + '</div>' : ""}
+   <button id="expand">See more</button></section>`, {onViewAllClick: () => {
+    document.querySelector("#visible-list")!.insertAdjacentHTML("beforeend", '<div role="listitem"><button>Visible C</button></div>');
+    document.querySelector("#expand")?.remove();
+   }});
+  const result = await scrapeAdvertisers(page, makeClock());
+  assert.equal(result.reached, false);
+  assert.ok(result.items.includes("Visible A"));
+  assert.ok(result.items.includes("Visible C"));
+ });
+}
+
+for (const name of ["Remove", "Removed categories"]) {
+ for (const description of ["Remove", "Removed categories", "Based on activity"]) {
+  for (const expand of [false, true]) {
+   test(`category fields retain interface-label collisions: ${name}/${description}/${expand}`, async () => {
+    const {document, page} = makeDomPage(`
+     <div role="tab">Manage info</div><div role="tabpanel"><a>Categories used to reach you</a></div>
+     <section role="dialog"><div role="list" ${expand ? "" : 'aria-setsize="1"'}>
+     <div role="listitem"><span>${name}</span><span>${description}</span><button>Remove</button></div></div>
+     ${expand ? '<button id="expand">View all</button>' : ""}</section>`, {onViewAllClick: () => {
+      document.querySelector('[role="list"]')!.insertAdjacentHTML("beforeend", '<div role="listitem"><span>Travel</span><button>Remove</button></div>');
+      document.querySelector("#expand")?.remove();
+     }});
+    const result = await scrapeTargetingCategories(page, makeClock());
+    assert.deepEqual(result.items, [{name, description}, ...(expand ? [{name: "Travel", description: null}] : [])]);
+    assert.equal(result.reached, true);
+   });
+  }
+ }
+}
+
+for (const [listCounts, rowCounts] of [
+ ['aria-setsize="1"', 'aria-setsize="2"'],
+ ['aria-setsize="1" aria-rowcount="2"', ''],
+ ['aria-rowcount="1"', 'aria-rowcount="2"'],
+ ['aria-setsize="1"', 'aria-setsize="1" aria-rowcount="2"'],
+]) {
+ test(`conflicting ads totals stay partial: ${listCounts} / ${rowCounts}`, () => {
+  const result = classify(`<section role="dialog"><div role="list" ${listCounts}><div role="listitem" ${rowCounts} aria-posinset="1"><span>Acme</span><button>Remove</button></div></div></section>`, advertisersArgs);
+  assert.equal(result.kind, "data");
+  if (result.kind === "data") {
+   assert.deepEqual(result.items, ["Acme"]);
+   assert.equal(result.complete, false);
+  }
+ });
+}
+test("category pre-expansion unavailable positive count cannot become authoritative empty", async () => {
+ const { document, page } = makeDomPage(
+  '<div role="tab">Manage info</div><div role="tabpanel"><a>Categories used to reach you</a></div><section id="categories" role="dialog"><div role="list" aria-setsize="2"></div><p role="alert">Something went wrong</p><button>View all</button></section>',
+  { onViewAllClick: () => {
+   const dialog = document.querySelector("#categories");
+   if (dialog) dialog.innerHTML = '<div role="list"></div><p>No categories</p>';
+  } },
+ );
+ assert.equal((await scrapeTargetingCategories(page, makeClock())).reached, false);
+});
+
 
 function parseStyle(raw: string | null): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -106,6 +221,11 @@ function makeDomPage(
 ): { document: Document; page: Page; window: Window } {
 	const { document, window } = parseHTML(`<html><body>${html}</body></html>`);
 	installGeometry(window);
+	for (const button of Array.from(document.querySelectorAll("button"))) {
+		if (/^(View all|See more)$/.test(button.textContent ?? "")) {
+			button.addEventListener("click", () => hooks.onViewAllClick?.());
+		}
+	}
 	const evaluate = (fn: unknown, arg?: unknown): Promise<unknown> => {
 		const result = runInNewContext(`(${String(fn)})(arg)`, {
 			arg,
@@ -120,9 +240,6 @@ function makeDomPage(
 			},
 			NodeFilter: { SHOW_TEXT: 4 },
 		});
-		if (result === true && String(fn).includes('button, [role="button"]')) {
-			hooks.onViewAllClick?.();
-		}
 		if (result === undefined) {
 			return Promise.resolve(undefined);
 		}
@@ -131,8 +248,8 @@ function makeDomPage(
 	const page = {
 		evaluate,
 		goto: () => Promise.resolve(null),
-		waitForFunction: (fn: unknown): Promise<unknown> =>
-			evaluate(fn).then((value) => {
+		waitForFunction: (fn: unknown, arg?: unknown): Promise<unknown> =>
+			evaluate(fn, arg).then((value) => {
 				if (!value) throw new Error("condition not ready");
 				return value;
 			}),
@@ -158,6 +275,51 @@ test("classifyAdsDialogInPage: visible explicit empty message is verified empty"
 			advertisersArgs,
 		),
 		{ kind: "verified_empty" },
+	);
+});
+
+for (const { attribute, args, name } of [
+	{ attribute: "aria-setsize", args: advertisersArgs, name: "advertisers" },
+	{ attribute: "aria-rowcount", args: advertisersArgs, name: "advertisers" },
+	{
+		attribute: "aria-setsize",
+		args: { emptyMessage: "No ad topics" },
+		name: "ad topics",
+	},
+	{
+		attribute: "aria-rowcount",
+		args: { emptyMessage: "No ad topics" },
+		name: "ad topics",
+	},
+	{
+		attribute: "aria-setsize",
+		args: { emptyMessage: "No categories", requiredAffordance: "Remove" },
+		name: "categories",
+	},
+	{
+		attribute: "aria-rowcount",
+		args: { emptyMessage: "No categories", requiredAffordance: "Remove" },
+		name: "categories",
+	},
+]) {
+	test(`classifyAdsDialogInPage: positive ${attribute} vetoes ${name} empty copy`, () => {
+		assert.deepEqual(
+			classify(
+				`<section role="dialog"><div role="list" ${attribute}="2"></div><p>${args.emptyMessage}</p></section>`,
+				args,
+			),
+			{ hasPositiveSourceTotal: true, kind: "loading" },
+		);
+	});
+}
+
+test("classifyAdsDialogInPage: positive source total remains explicit empty-proof veto evidence", () => {
+	assert.deepEqual(
+		classify(
+			`<section role="dialog"><div role="list" aria-setsize="2"></div><p>No advertisers</p></section>`,
+			advertisersArgs,
+		),
+		{ hasPositiveSourceTotal: true, kind: "loading" },
 	);
 });
 
@@ -498,7 +660,7 @@ test("classifyAdsDialogInPage: hidden unresolved item text keeps the surface loa
 			`,
 			advertisersArgs,
 		),
-		{ kind: "loading" },
+		{ hasPositiveSourceTotal: true, kind: "loading" },
 	);
 });
 
@@ -574,6 +736,34 @@ test("scrapeTargetingCategories: waits for rows appended after visible View all"
 	assert.ok(clock.nowValue >= 3_000);
 });
 
+test("scrapeTargetingCategories: expands before classifying hidden category rows", async () => {
+	const { document, page } = makeDomPage(
+		`
+		<div role="tab">Manage info</div>
+		<div role="tabpanel"><a>Categories used to reach you</a></div>
+		<section role="dialog">
+			<div role="list" aria-setsize="1">
+				<div role="listitem" aria-posinset="1"><span style="display:none">Music</span><button>Remove</button></div>
+			</div>
+			<button id="view-all">View all</button>
+		</section>
+	`,
+		{
+			onViewAllClick: () => {
+				document.querySelector("span")?.setAttribute("style", "display:inline");
+				document.querySelector("#view-all")?.remove();
+			},
+		},
+	);
+
+	assert.deepEqual(await scrapeTargetingCategories(page, makeClock()), {
+		items: [{ description: null, name: "Music" }],
+		reached: true,
+		step: null,
+		surface: "targeting_categories",
+	});
+});
+
 test("scrapeTargetingCategories: an empty message after View all cannot erase categories already seen", async () => {
 	const { document, page } = makeDomPage(
 		`
@@ -641,7 +831,7 @@ test("scrapeTargetingCategories: extraction stays in the dialog whose source tot
 	});
 });
 
-test("classifyAdsDialogInPage: known UI-only topic rows require an explicit empty message", () => {
+test("classifyAdsDialogInPage: a real topic matching an interface label remains data", () => {
 	for (const marker of ["", "<p>No ad topics</p>"]) {
 		assert.deepEqual(
 			classify(
@@ -651,7 +841,7 @@ test("classifyAdsDialogInPage: known UI-only topic rows require an explicit empt
 					uiOnlyPatternSource: "^(?:special topic|see less)$",
 				},
 			),
-			{ kind: marker ? "verified_empty" : "unavailable" },
+			{ complete: false, items: ["Special topic"], kind: "data" },
 		);
 	}
 });
@@ -677,7 +867,7 @@ for (const replacement of [
 		);
 		const result = await scrapeTargetingCategories(page, makeClock());
 		assert.equal(result.reached, false);
-		assert.deepEqual(result.items, []);
+		assert.deepEqual(result.items, [{ description: null, name: "Music" }]);
 	});
 }
 
@@ -690,3 +880,54 @@ test("classifyAdsDialogInPage: visible source empty message proves a zero-height
 		{ kind: "verified_empty" },
 	);
 });
+
+for (const surface of ["advertisers", "categories"] as const) {
+ for (const scenario of ["missing", "noop", "duplicates", "virtualized", "replaced", "error", "valid", "second-noop", "navigation", "lost-document-token", "late-replaced", "invalid", "multi", "script-error", "signout"] as const) {
+  test(`traversal proof: ${surface} ${scenario} retains rows and fails closed unless every click grows`, async () => {
+   const label = surface === "advertisers" ? "See more" : "View all";
+   const row = (name: string) => surface === "advertisers"
+    ? `<div role="listitem"><button>${name}</button></div>`
+    : `<div role="listitem"><span>${name}</span><button>Remove</button></div>`;
+   let clicks = 0;
+   const {document, page} = makeDomPage(`
+    <div role="tab">Manage info</div><div role="tabpanel"><a>Advertisers using your activity</a><a>Categories used to reach you</a></div>
+    <section role="dialog"><div role="list">${row("Row A")}${row("Row B")}</div>
+    ${scenario === "missing" ? "" : `<button id="expand">${label}</button>`}</section>`, {
+    onViewAllClick: () => {
+     clicks += 1;
+     const list = document.querySelector('[role="list"]')!;
+     if (scenario === "duplicates") list.insertAdjacentHTML("beforeend", row("Row A"));
+     if (scenario === "virtualized") list.innerHTML = row("Row C") + row("Row D") + row("Row E");
+     if (scenario === "replaced") document.querySelector('[role="dialog"]')!.outerHTML = `<section role="dialog"><div role="list">${row("Row C")}${row("Row D")}${row("Row E")}</div></section>`;
+     if (["valid", "navigation", "lost-document-token", "late-replaced", "script-error"].includes(scenario) || (scenario === "second-noop" && clicks === 1)) list.insertAdjacentHTML("beforeend", row("Row C"));
+     if (scenario === "multi") list.insertAdjacentHTML("beforeend", row(clicks === 1 ? "Row C" : "Row D"));
+     if (scenario === "invalid") list.insertAdjacentHTML("beforeend", row("x".repeat(501)));
+     if (scenario === "navigation") Object.defineProperty(document, "URL", {value: "https://accountscenter.instagram.com/other/", configurable: true});
+     if (scenario === "lost-document-token") delete (document as Document & {__pdppAdsTraversal?: unknown}).__pdppAdsTraversal;
+     if (scenario === "signout") { list.insertAdjacentHTML("beforeend", row("Row C")); document.body.insertAdjacentHTML("beforeend", '<form action="/accounts/login/"><input type="password"></form>'); }
+     if (scenario === "error") list.insertAdjacentHTML("afterend", '<p role="alert">Something went wrong</p>');
+     if (!((scenario === "second-noop" || scenario === "multi") && clicks === 1)) document.querySelector("#expand")?.remove();
+    },
+   });
+   const evaluate = page.evaluate;
+   page.evaluate = ((fn: unknown, arg?: unknown) => {
+    if (scenario === "script-error" && clicks > 0 && String(fn).includes("__pdppAdsTraversal")) return Promise.reject(new Error("context destroyed"));
+    return evaluate(fn as never, arg as never);
+   }) as Page["evaluate"];
+   const clock = makeClock(now => {
+    if (scenario === "late-replaced" && clicks > 0 && now >= 500) {
+     document.querySelector('[role="dialog"]')!.outerHTML = `<section role="dialog"><div role="list">${row("Row C")}${row("Row D")}${row("Row E")}</div></section>`;
+    }
+   });
+   const result = surface === "advertisers"
+    ? await scrapeAdvertisers(page, clock)
+    : await scrapeTargetingCategories(page, clock);
+   assert.equal(result.reached, scenario === "valid" || scenario === "multi");
+   const names = result.items.map(item => typeof item === "string" ? item : item.name);
+   assert.ok(names.includes("Row A"), "retain previously readable Row A");
+   assert.ok(names.includes("Row B"), "retain previously readable Row B");
+   if (scenario === "multi") assert.deepEqual(names, ["Row A", "Row B", "Row C", "Row D"]);
+   if (scenario === "valid") assert.deepEqual(names, ["Row A", "Row B", "Row C"]);
+  });
+ }
+}

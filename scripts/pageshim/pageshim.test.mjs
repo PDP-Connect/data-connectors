@@ -23,6 +23,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 import { buildPageshim } from "./build.mjs";
+import { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } from "./crypto-regressions.mjs";
 import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
@@ -131,6 +132,18 @@ for (const name of pageShimConnectors(
 					connector: name,
 					outfile: join(out, `${name}.js`),
 				});
+		await t.test("shared hash parity, page-only admission and bundle impact", async () => {
+			assertHashParity();
+			assertPageOnlyAdmission();
+			const before = await buildPageshim({
+				connector: name,
+				outfile: join(out, name + "-before-crypto.js"),
+				cryptoHashShim: false,
+			});
+			const beforeHash = bundleSha256(before.outfile), afterHash = bundleSha256(built.outfile);
+			console.log("PAGESHIM_CRYPTO_IMPACT " + JSON.stringify({connector:name,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash}));
+			if (name === "chatgpt") await assertFingerprintBundle(buildPageshim, join(out, "fingerprint-crypto.js"));
+		});
 		const run = (o) =>
 			runHarness({ bundle: built.outfile, fixtures: c.fixtures, ...o });
 
@@ -219,7 +232,7 @@ for (const name of pageShimConnectors(
 				requestedScopes:
 					name === "chatgpt"
 						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.scopes,
+						: c.allScopes ?? c.scopes,
 			});
 		});
 
@@ -231,7 +244,7 @@ for (const name of pageShimConnectors(
 				requestedScopes:
 					name === "chatgpt"
 						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.scopes,
+						: c.allScopes ?? c.scopes,
 			});
 		});
 
@@ -1398,6 +1411,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 	assertCleanRun(r);
 	assert.equal(r.result["github.starred"], undefined);
+	assert.equal(r.data.error, undefined);
+	assert.match(r.data.status, /^Partial:/);
 	// The host projects the SKIP_RESULT message, not its reason code. The
 	// message names the specific withholding cause after a fixed prefix.
 	assert.equal(r.result.errors.length, 1);
@@ -1409,7 +1424,7 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(
 		{ ...error, reason: undefined },
 		{
-			errorClass: "runtime_error",
+			errorClass: "partial",
 			reason: undefined,
 			disposition: "omitted",
 			scope: "github.starred",
@@ -3621,4 +3636,255 @@ test("oura_browser: until-only consecutive runs acknowledge covered state on bot
 		const instantErrors = resultStreaming ? instant.data.error : instant.result.errors;
 		assert.match(JSON.stringify(instantErrors), /date/);
 	}
+});
+
+test("oura_browser: narrow then wider consent retains clipped debt on both hosts", { timeout: 180_000 }, async () => {
+  const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+  const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-clipped-debt.js") });
+  for (const resultStreaming of [false, true]) for (const debt of ["failed", "refresh"]) {
+    const fixture = recordingDailyFixture();
+    const run = (initialState, until) => runHarness({ bundle: built.outfile,
+      fixtures: { ...c.fixtures, resolve: fixture.resolve },
+      scopes: [{ name: "oura.sleep", time_range: { since: "2026-01-01", until } }],
+      initialState, resultStreaming, clockNowMs: Date.parse("2026-10-17T12:00:00Z"),
+      resultSpoolDirectory: join(out, `oura-clipped-${resultStreaming}-${debt}-${until}`) });
+    const first = await run({ "oura.sleep": { next_day: "2026-10-18", requested_since: "2026-01-01",
+      refresh_from: debt === "refresh" ? "2026-01-01" : "2026-10-15",
+      failed_windows: debt === "failed" ? [{ start: "2026-01-01", end: "2026-01-10" }] : [] } }, "2026-01-05");
+    assertCleanRun(first);
+    assert.equal(first.data.error, undefined);
+    assert.match(first.data.status, /^Complete!/);
+    assert.deepEqual(fixture.windows.splice(0), [{ start: "2026-01-01", end: "2026-01-04" }]);
+    const cursor = first.states["oura.sleep"];
+    if (debt === "failed") assert.deepEqual(cursor.failed_windows, [{ start: "2026-01-05", end: "2026-01-10" }]);
+    assert.equal(cursor.refresh_from, "2026-01-05");
+    const second = await run(first.states, "2026-01-11");
+    assertCleanRun(second);
+    assert.equal(second.data.error, undefined);
+    assert.match(second.data.status, /^Complete!/);
+    assert.deepEqual(fixture.windows, [{ start: "2026-01-05", end: "2026-01-10" }]);
+    const result = resultStreaming ? second.streamDone : second.result;
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.exportSummary.count, 6);
+    const scope = resultStreaming ? JSON.parse(await readFile(second.streamScopeFiles["oura.sleep"], "utf8")) : second.result["oura.sleep"];
+    assert.deepEqual(scope.records.map(({ day }) => day),
+      ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-10"]);
+    assert.deepEqual(second.states["oura.sleep"].failed_windows, []);
+    assert.equal(second.states["oura.sleep"].next_day, "2026-10-18");
+  }
+});
+
+test("meta: independent streams preserve posts gaps, WebCrypto ids and accepted STATE on both hosts", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-all.js")});
+ for (const resultStreaming of [false, true]) {
+  const codes = [];
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
+   scopes: ["profile", "posts", "post_likes", "following", "ads"].map(s => "instagram." + s),
+   initialState: {"instagram.posts": {old: true}}, resultStreaming,
+   resultSpoolDirectory: join(out, "meta-all-" + resultStreaming),
+   observeBridge: (method, args) => { if (method === "evaluate") codes.push(args[0].length); },
+  });
+  assertCleanRun(r);
+  assert.deepEqual(r.ret, {ok: true});
+  assert.equal(r.data.error, undefined);
+  assert.match(r.data.status, /^Partial:/);
+  const result = resultStreaming ? r.streamDone : r.result;
+  assert.deepEqual(result.errors.map(e => e.scope), ["instagram.posts", "instagram.post_likes", "instagram.ads"]);
+  assert.ok(result.errors.every(e => /not proven complete/.test(e.reason)));
+  for (const error of result.errors.slice(0, 2)) {
+   assert.match(error.reason, /passive GraphQL.*page-minted/);
+  }
+  assert.deepEqual(r.stateMessages.map(m => m.stream), ["instagram.following"]);
+  assert.deepEqual(r.states["instagram.following"], {});
+  const scope = async name => resultStreaming
+   ? JSON.parse(await readFile(r.streamScopeFiles["instagram." + name], "utf8"))
+   : r.result["instagram." + name];
+  assert.equal((await scope("profile")).records.length, 1);
+  assert.equal((await scope("following")).records.length, 1);
+  const ads = (await scope("ads")).records;
+  assert.equal(ads.length, 3);
+  for (const row of ads) assert.equal(row.id, createHash("sha256").update(row.kind + "|" + row.name).digest("hex").slice(0, 32));
+  assert.ok(codes.length > 0 && Math.max(...codes) <= 65_536);
+  if (resultStreaming) {
+   assert.equal(r.streamResult.completed, true);
+   assert.equal(r.streamScopeFiles["instagram.posts"], undefined);
+  } else assert.equal(r.result["instagram.posts"], undefined);
+ }
+});
+
+test("meta: following empty, contradictory, owner and partial-page evidence never fabricate completion", {timeout: 180_000}, async () => {
+ const {createMetaFixtures, owner} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-following-evidence.js")});
+ const row = {pk: "one", username: "one"};
+ const cases = [
+  {name: "empty proven", options: {total: 0, followingPages: [{owner, users: [], has_more: false}]}, count: 0, complete: true},
+  {name: "empty unknown", options: {profile: {following_count: null}, followingPages: [{owner, users: [], has_more: false}]}, count: 0, complete: false},
+  {name: "wrong total", options: {total: 2}, count: 1, complete: false},
+  {name: "foreign owner", options: {followingPages: [{owner: {id: "other"}, users: [row], has_more: false}]}, count: 0, complete: false},
+  {name: "partial page", options: {total: 2, followingPages: [
+   {owner, users: [row], has_more: true, next_max_id: "next"},
+   {owner, users: [{pk: "bad"}], has_more: false},
+  ]}, count: 1, complete: false},
+  {name: "late logout", options: {logoutAtEnd: true}, count: 1, complete: false},
+ ];
+ for (const c of cases) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(c.options),
+   scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}}});
+  assertCleanRun(r);
+  assert.equal(r.data.error, undefined, c.name);
+  assert.equal(r.result["instagram.following"]?.records.length ?? 0, c.count, c.name);
+  assert.equal(r.stateMessages.length, c.complete ? 1 : 0, c.name);
+  assert.equal(r.result.errors.length, c.complete ? 0 : 1, c.name);
+  assert.match(r.data.status, c.complete ? /^Complete!/ : /^Partial:/, c.name);
+  if (!c.complete) assert.match(r.result.errors[0].reason, /not proven complete/, c.name);
+ }
+});
+
+test("meta: missing profile fields remain a partial owner profile and legacy hosts never receive STATE", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-profile-partial.js")});
+ for (const options of [
+  {profileFailure: true}, {profile: {id: "other"}}, {profile: {media_count: null}},
+  {profileEnvelope: {ok: false}}, {profileEnvelope: {error_code: "partial"}},
+  {profileEnvelope: {errors: ["unreadable"]}},
+  {profileEnvelope: {extensions: {is_final: false}}},
+ ]) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(options),
+   scopes: ["instagram.profile", "instagram.following"], supportsStateArgument: false});
+  assertCleanRun(r);
+  assert.equal(r.data.error, undefined);
+  assert.equal(r.result["instagram.profile"].records[0].id, "owner-1");
+  assert.ok(r.result.errors.some(e => e.scope === "instagram.profile"));
+  assert.match(r.data.status, /^Partial:/);
+  assert.deepEqual(r.stateMessages, []);
+ }
+});
+
+test("meta: rejected streamed completion never commits following STATE", {timeout: 60_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-rejected-state.js")});
+ const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
+  scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}},
+  resultStreaming: true, resultSpoolDirectory: join(out, "meta-rejected-state"),
+  resultStreamFailure: {key: "result:done"},
+ });
+ assertCleanRun(r);
+ assert.ok(r.data.error);
+ assert.deepEqual(r.states, {"instagram.following": {old: true}});
+ assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+ assert.notEqual(r.streamResult.completed, true);
+});
+
+test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-seven-streams.js") });
+	for (const resultStreaming of [false, true]) {
+		const r = await runHarness({ bundle: built.outfile, fixtures: c.fixtures,
+			scopes: c.scopes, resultStreaming, gotoDelayMs: 0,
+			resultSpoolDirectory: join(out, "spotify-seven-" + resultStreaming) });
+		assert.deepEqual(r.ret, { ok: true });
+		assertCleanRun(r);
+		assert.equal(r.data.error, undefined);
+		assert.match(r.data.status, /^Partial:/);
+		const result = resultStreaming ? r.streamDone : r.result;
+		assert.deepEqual(result.exportSummary, c.exportSummary);
+		assert.deepEqual(result.errors, c.partialErrors);
+		assert.equal(result.errors.length, 3, "no failure companion for an incomplete inventory");
+		for (const stream of ["recently_played_contexts", "top_artists", "top_tracks"]) {
+			assert.equal(r.states["spotify." + stream], undefined);
+		}
+		assert.equal(r.states["spotify.saved_tracks"].completion.rows, 1);
+		if (resultStreaming) {
+			assert.equal(r.streamResult.completed, true);
+			assert.equal(r.streamResult.scopeCount, 7);
+		}
+	}
+});
+
+test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeout: 180_000 }, async (t) => {
+	const fx = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-state.js") });
+	const scopes = ["spotify.saved_tracks"];
+	const scope = "spotify.saved_tracks";
+	const options = { bundle: built.outfile, fixtures: fx.spotifyFixtures, scopes, gotoDelayMs: 0 };
+	await t.test("many source pages keep evaluate source bounded and preserve every row", async () => {
+		const offsets = [];
+		const evaluateSizes = [];
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const base = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return base;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return base;
+			const offset = body.variables.offset;
+			offsets.push(offset);
+			return { ...base, body: JSON.stringify({ data: { me: { library: { tracks: {
+				offset, totalCount: 301,
+				items: Array.from({ length: Math.min(100, 301 - offset) }, (_, i) => fx.savedTrack("track" + (offset + i))),
+			} } } } }) };
+		} };
+		const r = await runHarness({ ...options, fixtures, observeBridge(method, args) {
+			if (method === "evaluate") evaluateSizes.push(String(args[0]).length);
+		} });
+		assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.equal(r.result[scope].records.length, 301);
+		assert.deepEqual(offsets, [0, 100, 200, 300]);
+		assert.ok(evaluateSizes.every((size) => size <= 65_536), String(Math.max(...evaluateSizes)));
+		assert.ok(r.calls.evaluate > offsets.length);
+		assert.equal(r.states[scope].completion.rows, 301);
+		assert.equal(r.states[scope].completion.pages, 4);
+	});
+	await t.test("initial state survives failed result acceptance and old hosts receive no STATE", async () => {
+		const prior = { full_scan_at: "2026-01-01T00:00:00.000Z", marker: "synthetic-prior" };
+		const failed = await runHarness({ ...options, initialState: { [scope]: prior }, failResultWrite: true });
+		assertCleanRun(failed);
+		assert.deepEqual(failed.states[scope], prior);
+		const old = await runHarness({ ...options, supportsStateArgument: false });
+		assertCleanRun(old);
+		assert.deepEqual(old.stateMessages, []);
+		assert.equal(old.result[scope].records.length, 1);
+		const streamed = await runHarness({ ...options, resultStreaming: true,
+			resultSpoolDirectory: join(out, "spotify-state-stream") });
+		assertCleanRun(streamed);
+		assert.equal(streamed.streamResult.completed, true);
+		assert.equal(streamed.states[scope].completion.rows, 1);
+	});
+	await t.test("an unavailable source row upserts covered rows, remains partial, and cannot advance STATE", async () => {
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const response = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return response;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return response;
+			const valid = fx.savedTrack("covered");
+			const invalid = fx.savedTrack("unavailable");
+			delete invalid.track.data.name;
+			return { ...response, body: JSON.stringify({ data: { me: { library: { tracks: {
+				offset: 0, totalCount: 2, items: [valid, invalid],
+			} } } } }) };
+		} };
+		const r = await runHarness({ ...options, fixtures });
+		assertCleanRun(r);
+		assert.equal(r.result[scope].records.length, 1);
+		assert.match(r.data.status, /^Partial:/);
+		assert.ok(r.result.errors.some((error) => /inventory completeness is unproven/.test(error.reason)));
+		assert.equal(r.states[scope], undefined);
+	});
+	await t.test("unbound pagination totals never commit STATE", async () => {
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const response = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return response;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return response;
+			const payload = JSON.parse(response.body);
+			delete payload.data.me.library.tracks.totalCount;
+			return { ...response, body: JSON.stringify(payload) };
+		} };
+		const r = await runHarness({ ...options, fixtures });
+		assertCleanRun(r);
+		assert.equal(r.states[scope], undefined);
+		assert.ok(r.result.errors.length > 0);
+		assert.doesNotMatch(r.data.status, /^Complete!/);
+	});
 });

@@ -28,6 +28,7 @@ import {
 	type SpotifyEndEvidence,
 } from "./completion-evidence.ts";
 import { validateRecord } from "./schemas.ts";
+export { spotifyMobileCollect, probeSpotifyMobileSession } from "./mobile.ts";
 
 const API = "https://api.spotify.com/v1";
 const SPOTIFY_WEB_HOME = "https://open.spotify.com/";
@@ -92,7 +93,7 @@ interface SpotifyProfile {
 	uri?: string;
 }
 
-interface BrowserData {
+export interface BrowserData {
 	completion: Partial<
 		Record<"playlists" | "playlist_items" | "saved_tracks", SpotifyEndEvidence>
 	>;
@@ -638,6 +639,7 @@ async function ensureSpotifySession({
  */
 export const spotifyPageCollector = async (
 	requested: string[],
+	fetch: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<BrowserData> => {
 		const wanted = new Set(requested);
 		const result: BrowserData = {
@@ -2247,9 +2249,10 @@ export function spotifyPageEvaluateSource(
 async function collectSpotifyWebData(
 	page: BrowserCollectContext["page"],
 	requestedStreams: string[],
+	evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>,
 ): Promise<BrowserCollectResult> {
 	await openSpotify(page);
-	const evaluated = (await page.evaluate(
+	const evaluated = evaluateData ? await evaluateData(page, requestedStreams) : (await page.evaluate(
 		spotifyPageEvaluateSource(requestedStreams),
 	)) as BrowserData;
 	if (requestedStreams.includes("recently_played_contexts")) {
@@ -2323,10 +2326,10 @@ export async function spotifyCollect({
 }: Pick<
 	BrowserCollectContext,
 	"emit" | "emitRecord" | "page" | "progress" | "requested"
->): Promise<void> {
+>, evaluateData?: (page: BrowserCollectContext["page"], streams: string[]) => Promise<BrowserData>): Promise<void> {
 	const requestedNames = [...requested.keys()];
 	await progress("Fetching Spotify data");
-	const data = await collectSpotifyWebData(page, requestedNames);
+	const data = await collectSpotifyWebData(page, requestedNames, evaluateData);
 	if (requested.has("profile") && data.profile) {
 		if (!validateRecord("profile", data.profile).ok) {
 			data.profile = null;
