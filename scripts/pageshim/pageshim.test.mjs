@@ -23,6 +23,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 import { buildPageshim } from "./build.mjs";
+import { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } from "./crypto-regressions.mjs";
 import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
@@ -131,6 +132,18 @@ for (const name of pageShimConnectors(
 					connector: name,
 					outfile: join(out, `${name}.js`),
 				});
+		await t.test("shared hash parity, page-only admission and bundle impact", async () => {
+			assertHashParity();
+			assertPageOnlyAdmission();
+			const before = await buildPageshim({
+				connector: name,
+				outfile: join(out, name + "-before-crypto.js"),
+				cryptoHashShim: false,
+			});
+			const beforeHash = bundleSha256(before.outfile), afterHash = bundleSha256(built.outfile);
+			console.log("PAGESHIM_CRYPTO_IMPACT " + JSON.stringify({connector:name,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash}));
+			if (name === "chatgpt") await assertFingerprintBundle(buildPageshim, join(out, "fingerprint-crypto.js"));
+		});
 		const run = (o) =>
 			runHarness({ bundle: built.outfile, fixtures: c.fixtures, ...o });
 
