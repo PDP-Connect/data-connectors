@@ -19,7 +19,10 @@
 name: Connector artifact gate
 
 on:
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # runs no CI here; the batch PR into main runs all of it.
   pull_request:
+    branches: [main]
   push:
     branches: [main]
 
