@@ -8,6 +8,6 @@ missing or unusable (macOS, GitHub runners), it runs the command directly and sa
 in the receipt.
 
 Source: `dotfiles/ai/skills/local/test-architecture/scripts/test-sandbox`
-Commit: `7e2e01c1550a04ee24b6c46596fd879168321324`
+Commit: `1a72d0ad479082c6666faa338bb8db869d31d9fa`
 
 Do not edit here. Update the canonical copy, re-vendor, then update the `.sha256`.
