@@ -13768,7 +13768,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13803,6 +13803,39 @@
 					}
 				},
 				"streams": [
+					{
+						"name": "profile",
+						"description": "The signed-in iCloud account from the existing session validate response. The optional user_name is dsInfo.fullName, omitted when absent or unreadable; no additional network request or inferred fallback is used.",
+						"display": {
+							"label": "Your iCloud account",
+							"detail": "Account identity and source-stated display name."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The signed-in account's dsInfo.dsid from session validation."
+								},
+								"user_name": {
+									"type": "string",
+									"description": "Source-stated dsInfo.fullName, omitted when absent or unreadable.",
+									"x_pdpp_role": "primary-title"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"required": false
+					},
 					{
 						"name": "notes",
 						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index. The legacy folder-name projection depends on the folders stream; collection fetches that dependency even when only notes are requested.",
