@@ -139,6 +139,8 @@ test("a large synthetic WhatsApp .txt export (well past the old 1 GiB cap) parse
 				WHATSAPP_EXPORT_DIR: importRoot,
 			},
 			peakRssPollIntervalMs: 25,
+			// Only parsed messages are asserted on, so skip the raw stdout copy.
+			retainRawStdout: false,
 			start: {
 				scope: { streams: [{ name: "chats" }, { name: "messages" }] },
 				type: "START",

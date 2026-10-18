@@ -190,6 +190,10 @@ export interface ConnectorSubprocessOptions {
 	 *  poll timer is pure overhead for the many tests that don't need a
 	 *  memory proof. */
 	peakRssPollIntervalMs?: number;
+	/** Set false for a run whose stdout is too large to hold twice: `rawStdout`
+	 *  is then "" and `messages` is unchanged. Callers that assert on
+	 *  `rawStdout` must keep the default (true). */
+	retainRawStdout?: boolean;
 	start: {
 		/** Mirrors the real runtime's START `collection_mode` field, so a test can
 		 *  exercise the owner-triggered full-refresh bypass end to end rather than
@@ -273,6 +277,7 @@ export function runConnectorProtocolSubprocess(
 	options: ConnectorSubprocessOptions,
 ): Promise<ConnectorSubprocessResult> {
 	const timeoutMs = options.timeoutMs ?? 15_000;
+	const retainRawStdout = options.retainRawStdout ?? true;
 
 	return new Promise((resolve, reject) => {
 		const child = spawn(
@@ -371,7 +376,9 @@ export function runConnectorProtocolSubprocess(
 
 		child.stdout?.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
-			rawStdout += text;
+			if (retainRawStdout) {
+				rawStdout += text;
+			}
 			stdoutBuffer += text;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
