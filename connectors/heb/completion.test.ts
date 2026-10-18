@@ -63,6 +63,8 @@ function makeCollectPage(routes: {
 	/** Overrides `listHtml` per `?page=N`, for multi-page order history. */
 	listHtmlForPage?: (pageNum: number) => string;
 	productHtml?: string;
+	/** Collects every URL the page is sent to, in order. */
+	visits?: string[];
 }): Page {
 	let currentUrl = "about:blank";
 	let currentHtml = routes.listHtml;
@@ -72,6 +74,7 @@ function makeCollectPage(routes: {
 			get(_target, prop): unknown {
 				if (prop === "goto") {
 					return (url: string): Promise<unknown> => {
+						routes.visits?.push(url);
 						if (
 							routes.failProductNavigation &&
 							url.includes("/product-detail/")
@@ -543,4 +546,80 @@ test("collect: orders and order_items both fail when the page ceiling cuts the w
 		ctx.emitted.some((record) => record.stream === "orders"),
 		"valid upserts survive a page ceiling",
 	);
+});
+
+/** `count` pending order_items gaps for orders that are not on the list page.
+ *  H-E-B's order page carries no completeness signal, so a hydrated order
+ *  stays a gap and a backlog like this one only grows. */
+function backlogGaps(count: number): BrowserCollectContext["detailGaps"] {
+	return Array.from({ length: count }, (_, index) => {
+		const orderId = `HEB${String(3_000_000_000 + index)}`;
+		return {
+			detail_locator: {
+				kind: "heb.order_detail",
+				order_id: orderId,
+				order_date: "2026-06-01",
+			},
+			gap_id: `gap_${orderId}`,
+			record_key: orderId,
+			reference_only: true,
+			status: "pending",
+			stream: "order_items",
+		} as const;
+	});
+}
+
+const LISTED_ORDER_IDS = ["HEB1029384600", "HEB1029384700", "HEB1029384756"];
+
+async function collectOverBacklog(count: number): Promise<{
+	ctx: TestContext;
+	fetchedBacklog: number;
+	fetchedListed: string[];
+}> {
+	const visits: string[] = [];
+	const ctx = makeContext(
+		["orders", "order_items"],
+		makeCollectPage({
+			detailHtml: WIDGET_DETAIL_HTML,
+			listHtml: singleItemOrdersList(),
+			visits,
+		}),
+		{ detailGaps: backlogGaps(count) },
+	);
+	const restoreTimers = collapseTimers();
+	try {
+		await hebConnector.collect(ctx);
+	} finally {
+		restoreTimers();
+	}
+	const fetched = visits
+		.filter((url) => url.includes("/my-account/order-history/"))
+		.map((url) => url.slice(url.lastIndexOf("/") + 1));
+	return {
+		ctx,
+		fetchedBacklog: fetched.filter((id) => !LISTED_ORDER_IDS.includes(id))
+			.length,
+		fetchedListed: fetched.filter((id) => LISTED_ORDER_IDS.includes(id)),
+	};
+}
+
+test("collect: a backlog of unprovable order_items gaps does not starve the scan for new orders", async () => {
+	const { ctx, fetchedBacklog, fetchedListed } = await collectOverBacklog(100);
+
+	assertPartial(ctx);
+	assert.ok(
+		ctx.emitted.some((record) => record.stream === "orders"),
+		"the order list was scanned for new orders",
+	);
+	assert.deepEqual([...fetchedListed].sort(), LISTED_ORDER_IDS);
+	assert.equal(fetchedBacklog, 50, "the old-gap pass took half the budget");
+});
+
+test("collect: a backlog within the old-gap share is retried in full alongside the scan", async () => {
+	const { ctx, fetchedBacklog, fetchedListed } = await collectOverBacklog(50);
+
+	assertPartial(ctx);
+	assert.ok(ctx.emitted.some((record) => record.stream === "orders"));
+	assert.deepEqual([...fetchedListed].sort(), LISTED_ORDER_IDS);
+	assert.equal(fetchedBacklog, 50);
 });

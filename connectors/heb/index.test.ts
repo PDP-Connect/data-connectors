@@ -70,6 +70,7 @@ import {
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	reportListPageCeiling,
 	resolveOrderDetail,
+	rotateGapBacklog,
 	runForwardScan,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -2730,6 +2731,143 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: exhausted detail budget
 		0,
 		"budget exhaustion must not fabricate nutrition rows",
 	);
+});
+
+// A hydrated H-E-B order stays a pending gap (its detail page carries no
+// completeness signal), so a backlog of gaps that can never clear builds up.
+
+function makeBacklog(
+	count: number,
+): BrowserCollectContext["detailGaps"][number][] {
+	return Array.from({ length: count }, (_, index) =>
+		makeGap(`HEB${String(4_000_000_000 + index)}`),
+	);
+}
+
+async function recoverBacklog(
+	count: number,
+	options: { emittedAt?: string; recoveryOnly?: boolean } = {},
+) {
+	const { deps, protocolMessages } = makeRecordingDeps();
+	const flags = makeRunFlags();
+	const result = await recoverPendingOrderItemDetailGapsBeforeForwardRun(
+		makePageStub({ content: DETAIL_HTML }),
+		{
+			detailGaps: makeBacklog(count),
+			emit: deps.emit,
+			emitRecord: deps.emitRecord,
+			emittedAt: options.emittedAt ?? deps.emittedAt,
+			sendInteraction: deps.sendInteraction,
+			waitForHydration: deps.waitForHydration,
+		},
+		flags,
+		{
+			recoveryOnly: options.recoveryOnly ?? false,
+			wantsItems: true,
+			wantsNutrition: false,
+		},
+	);
+	const attempted = findDetailGaps(protocolMessages).map((gap) =>
+		String(gap.record_key),
+	);
+	return { attempted, flags, protocolMessages, result };
+}
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a backlog of unprovable gaps leaves half the detail budget to the forward scan", async () => {
+	const { attempted, flags, protocolMessages, result } =
+		await recoverBacklog(100);
+
+	assert.equal(flags.detailAttempts, 50);
+	assert.equal(attempted.length, 50, "only the gaps it retried are re-emitted");
+	assert.equal(
+		result.suppressForward,
+		false,
+		"the scan for new orders still runs",
+	);
+	assert.equal(result.stoppedWithPending, true);
+	assert.equal(result.recovered, 0);
+	assert.equal(findDetailGapRecovered(protocolMessages).length, 0);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a backlog within the recovery share is retried in full, in order", async () => {
+	const { attempted, flags, result } = await recoverBacklog(50);
+
+	assert.deepEqual(
+		attempted,
+		makeBacklog(50).map((gap) => String(gap.record_key)),
+	);
+	assert.equal(flags.detailAttempts, 50);
+	assert.equal(result.suppressForward, false);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a recovery-only run may spend the whole detail budget", async () => {
+	const { flags, result } = await recoverBacklog(100, { recoveryOnly: true });
+
+	assert.equal(flags.detailAttempts, 100);
+	assert.equal(
+		result.suppressForward,
+		true,
+		"recovery-only still skips the forward scan",
+	);
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: an over-share backlog starts at a different gap each run", async () => {
+	const ids = makeBacklog(100).map((gap) => String(gap.record_key));
+	const midnight = await recoverBacklog(100, {
+		emittedAt: "2026-10-18T00:00:00.000Z",
+	});
+	const midnightAgain = await recoverBacklog(100, {
+		emittedAt: "2026-10-18T00:00:00.000Z",
+	});
+	const morning = await recoverBacklog(100, {
+		emittedAt: "2026-10-18T06:00:00.000Z",
+	});
+
+	assert.deepEqual(
+		midnight.attempted,
+		midnightAgain.attempted,
+		"one run time always takes the same turn",
+	);
+	assert.notDeepEqual(midnight.attempted, morning.attempted);
+	for (const { attempted } of [midnight, morning]) {
+		const positions = attempted.map((id) => ids.indexOf(id));
+		for (const [index, position] of positions.entries()) {
+			if (index === 0) continue;
+			assert.equal(
+				position,
+				((positions[index - 1] ?? 0) + 1) % ids.length,
+				"each run retries a run of neighbouring gaps",
+			);
+		}
+	}
+});
+
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: every pending gap gets a turn over a day of hourly runs", async () => {
+	const runs = await Promise.all(
+		Array.from({ length: 24 }, (_, hour) =>
+			recoverBacklog(100, {
+				emittedAt: `2026-10-18T${String(hour).padStart(2, "0")}:00:00.000Z`,
+			}),
+		),
+	);
+
+	const turns = new Set(runs.flatMap((run) => run.attempted));
+	assert.equal(turns.size, 100);
+});
+
+test("rotateGapBacklog: leaves a backlog the run can afford alone and otherwise only turns it", () => {
+	const gaps = Array.from({ length: 10 }, (_, index) => index);
+
+	assert.equal(rotateGapBacklog(gaps, 10, "any run"), gaps);
+	const turned = rotateGapBacklog(gaps, 4, "any run");
+	assert.notEqual(turned, gaps);
+	assert.deepEqual(
+		[...turned].sort((a, b) => a - b),
+		gaps,
+		"no gap is lost or repeated",
+	);
+	const start = turned[0] ?? 0;
+	assert.deepEqual(turned, [...gaps.slice(start), ...gaps.slice(0, start)]);
 });
 
 test("recoverPendingOrderItemDetailGapsBeforeForwardRun: order_items out of scope skips recovery entirely", async () => {
