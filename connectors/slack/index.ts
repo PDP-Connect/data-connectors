@@ -3606,8 +3606,8 @@ export function pruneRequestedFingerprintCursors(
 const CHANNEL_LISTING_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
- * The channels a run with a narrowed CHANNEL_TYPES may archive, and the set of
- * IDs whose records it may emit.
+ * The channels a run with a narrowed CHANNEL_TYPES may archive, which are also
+ * the only channels whose records it may emit.
  *
  * It lists every channel the signed-in user can see, keeps those of the chosen
  * types (and, when the run already names channels, only those among them), and
@@ -3676,7 +3676,10 @@ export async function resolveTypedChannelScope(input: {
 			`No channel you can see is of a chosen type${explicit.length > 0 ? " and also in the channels this run names" : ""}, so nothing was downloaded.`,
 		);
 	}
-	return { allowed: new Set(typed), channels };
+	// The record guard allows exactly the channels this run archives. A set wider
+	// than that, such as every channel of the chosen types, would let a channel
+	// the allowlist left out through when an archive or an API returns it.
+	return { allowed: new Set(channels), channels };
 }
 
 interface EnsureArchiveDeps {

@@ -304,6 +304,24 @@ test("records of an excluded type are dropped even when the archive holds them",
 	assert.deepEqual(outcome.recordChannels("channels"), PUBLIC);
 });
 
+test("an allowlist also bounds the records, even from an archive that returns more", async () => {
+	// C0PUBLIC2 is of the chosen type but not on the allowlist: the archive is
+	// asked only for C0PUBLIC1, and a record of C0PUBLIC2 that comes back anyway
+	// must not be emitted.
+	const outcome = await runWithFakeSlackdump({
+		allowlist: "C0PUBLIC1",
+		archiveEverything: true,
+		types: "public",
+	});
+
+	assert.equal(outcome.done?.status, "succeeded");
+	assert.deepEqual(positionalChannels(outcome.archiveCalls[0] ?? []), [
+		"C0PUBLIC1",
+	]);
+	assert.deepEqual(outcome.recordChannels("messages"), ["C0PUBLIC1"]);
+	assert.deepEqual(outcome.recordChannels("channels"), ["C0PUBLIC1"]);
+});
+
 test("private and direct messages can be chosen without the public channels", async () => {
 	const outcome = await runWithFakeSlackdump({ types: "private,im" });
 

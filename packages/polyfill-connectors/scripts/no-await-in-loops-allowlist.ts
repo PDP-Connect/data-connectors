@@ -3073,7 +3073,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/slack/index.ts",
-			line: 4051,
+			line: 4054,
 			column: 28,
 			category: "dependent_file_cursor",
 			note: "reclaimUploads(): sequential file/dir walk, incremental byte-offset read, or one-way fs mutation",
