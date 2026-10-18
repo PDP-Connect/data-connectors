@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { glob, readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 test("package test runner bounds file concurrency and retains a finite hang guard", async () => {
 	// "npm test" runs scripts/run-tests.mjs (not a literal `node --test ...` in
@@ -23,4 +25,50 @@ test("package test runner bounds file concurrency and retains a finite hang guar
 		assert.match(runner, /--test-timeout=120000/, path);
 		assert.doesNotMatch(runner, /--test-timeout=30000/, path);
 	}
+});
+
+test("NAMESPACE_TESTS lists exactly the files that need their own namespaces", async () => {
+	const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+	const runner = await readFile(
+		new URL("../scripts/run-tests.mjs", import.meta.url),
+		"utf8",
+	);
+	const block = /const NAMESPACE_TESTS = new Set\(\[([^\]]*)\]\)/.exec(runner);
+	assert.ok(block, "scripts/run-tests.mjs must define NAMESPACE_TESTS");
+	const listed = new Set(
+		[...(block[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1] as string),
+	);
+
+	for (const entry of listed) {
+		assert.ok(
+			existsSync(`${packageRoot}${entry}`),
+			`NAMESPACE_TESTS entry does not exist: ${entry}`,
+		);
+	}
+
+	// The patterns run-tests.mjs globs; this file and the runner are not in them.
+	const needsNamespaces =
+		/namespaceSkip|bwrapUsable|unshareUsable|bindMountCapable|spawn(?:Sync)?\(\s*["'`](?:bwrap|unshare)["'`]/;
+	const missing: string[] = [];
+	for (const pattern of [
+		"bin/**/*.test.ts",
+		"../../connectors/**/*.test.ts",
+		"scripts/related-tests/*.test.ts",
+		"src/**/*.test.ts",
+	]) {
+		for await (const entry of glob(pattern, { cwd: packageRoot })) {
+			if (entry === "src/test-runner-contract.test.ts") {
+				continue;
+			}
+			const text = await readFile(`${packageRoot}${entry}`, "utf8");
+			if (needsNamespaces.test(text) && !listed.has(entry)) {
+				missing.push(entry);
+			}
+		}
+	}
+	assert.deepEqual(
+		missing,
+		[],
+		"these files need their own namespaces; add them to NAMESPACE_TESTS in scripts/run-tests.mjs",
+	);
 });

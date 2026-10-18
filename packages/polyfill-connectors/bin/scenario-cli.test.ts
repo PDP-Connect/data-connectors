@@ -59,6 +59,7 @@ import { hashCanonicalJson } from "@pdpp/collector-runtime";
 import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import { getConnectorPaths } from "../src/orchestrator.ts";
 import type { ConnectorScenario } from "../src/scenario/format.ts";
+import { namespaceSkip } from "../src/scenario/namespace-skip.ts";
 import {
 	computeDeclarationDigest,
 	computeSourceDigest,
@@ -2106,6 +2107,7 @@ test("scenario-verify: under namespace isolation, a fixture connector's spawned 
 	);
 	const capability = isNamespaceIsolationAvailable();
 	if (!capability.available) {
+		namespaceSkip(true);
 		t.skip(`network isolation unavailable on this host: ${capability.reason}`);
 		return;
 	}

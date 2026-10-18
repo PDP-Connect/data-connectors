@@ -38,13 +38,42 @@ const patterns = [
 	"scripts/**/*.test.mjs",
 	"src/**/*.test.ts",
 ];
+
+// Tests that create their own bwrap/unshare namespaces. The test-sandbox's
+// bwrap blocks nested namespaces, so these run in the `namespaces` lane
+// (`test-sandbox --isolate cgroup`) and every other file runs in `sandboxed`.
+// src/test-runner-contract.test.ts reads this list by scanning this file.
+// Package-relative paths.
+const NAMESPACE_TESTS = new Set([
+	"bin/scenario-cli.test.ts",
+	"bin/scenario-fidelity.test.ts",
+	"bin/scenario-verify-strict.test.ts",
+	"src/scenario/filesystem-input.test.ts",
+	"src/scenario/isolation-mechanism.test.ts",
+]);
+
+const args = process.argv.slice(2);
+const laneIndex = args.indexOf("--lane");
+const lane = laneIndex === -1 ? undefined : args[laneIndex + 1];
+if (lane !== undefined && lane !== "sandboxed" && lane !== "namespaces") {
+	console.error(`--lane must be "sandboxed" or "namespaces", got ${JSON.stringify(lane)}`);
+	process.exit(2);
+}
+
 const files = [];
 for (const pattern of patterns) {
 	for await (const entry of glob(pattern)) {
-		if (!EXCLUDED.has(entry)) {
+		const inLane =
+			lane === undefined || NAMESPACE_TESTS.has(entry) === (lane === "namespaces");
+		if (!EXCLUDED.has(entry) && inLane) {
 			files.push(entry);
 		}
 	}
+}
+
+if (args.includes("--list")) {
+	console.log(files.join("\n"));
+	process.exit(0);
 }
 
 const child = spawn(
@@ -57,6 +86,9 @@ const child = spawn(
 		"--test-timeout=120000",
 		...files,
 	],
-	{ stdio: "inherit" },
+	{
+		stdio: "inherit",
+		env: lane === undefined ? process.env : { ...process.env, TEST_LANE: lane },
+	},
 );
 child.on("exit", (code) => process.exit(code ?? 1));
