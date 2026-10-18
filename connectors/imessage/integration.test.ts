@@ -127,29 +127,32 @@ function runImessage(
 test("iMessage reports failed DONE when chat.db exists but cannot be queried", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "pdpp-imessage-"));
 	const dbPath = join(dir, "chat.db");
-	await writeFile(dbPath, "not a sqlite database");
+	try {
+		await writeFile(dbPath, "not a sqlite database");
 
-	const result = await runConnectorProtocolSubprocess({
-		allowFailedDone: true,
-		cwd: PACKAGE_ROOT,
-		entrypoint: ENTRYPOINT,
-		env: { IMESSAGE_DB_PATH: dbPath },
-		start: {
-			type: "START",
-			scope: { streams: [{ name: "messages" }] },
-			state: {},
-		},
-	});
+		const result = await runConnectorProtocolSubprocess({
+			allowFailedDone: true,
+			cwd: PACKAGE_ROOT,
+			entrypoint: ENTRYPOINT,
+			env: { IMESSAGE_DB_PATH: dbPath },
+			start: {
+				type: "START",
+				scope: { streams: [{ name: "messages" }] },
+				state: {},
+			},
+		});
 
-	const done = result.messages.findLast(
-		(msg): msg is Extract<EmittedMessage, { type: "DONE" }> =>
-			msg.type === "DONE",
-	);
-	assert.equal(done?.status, "failed");
-	assert.equal(done?.records_emitted, 0);
-	assert.match(done?.error?.message ?? "", /imessage_db_query_failed/);
-	assert.equal(states(result.messages).length, 0);
-	await rm(dir, { force: true, recursive: true });
+		const done = result.messages.findLast(
+			(msg): msg is Extract<EmittedMessage, { type: "DONE" }> =>
+				msg.type === "DONE",
+		);
+		assert.equal(done?.status, "failed");
+		assert.equal(done?.records_emitted, 0);
+		assert.match(done?.error?.message ?? "", /imessage_db_query_failed/);
+		assert.equal(states(result.messages).length, 0);
+	} finally {
+		await rm(dir, { force: true, recursive: true });
+	}
 });
 
 // ─── messages: one-to-one and cursor carry-forward ───────────────────────────
