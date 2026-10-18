@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.26)
+ * PDPP LinkedIn Connector (v0.3.27)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -102,6 +102,7 @@ import {
 	connectionEnrichmentIsReadable,
 	type DashProfileSource,
 } from "./parsers.ts";
+import { connectionEvidence, profileEvidence, sectionEvidence, summaryEvidence } from "./evidence.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
 	VoyagerConnectionElement,
@@ -285,7 +286,7 @@ interface ConnectionsResult {
 	observed: number;
 	missingUrnCount: number;
 	terminationReason:
-		| "verified_end"
+		| "observed_end_unproven"
 		| "continuation_advertised"
 		| "page_error"
 		| "malformed_page"
@@ -295,15 +296,14 @@ interface ConnectionsResult {
 }
 
 /** Walk the owner's connections list and retain why the walk stopped.
- *  Empty and short pages, or a page that reaches a verified provider total,
- *  prove the list end only when the provider does not also advertise a next
- *  page. A continuation link vetoes those local end signals. Fetch errors,
- *  malformed pages, and the local page cap do not prove the list end.
- *  `paging.total` was absent from the observed live response. */
+ *  Empty/short pages and paging totals are observations, never inventory proof.
+ *  Stable owner summaries, distinct emitted URNs, and an independent empty
+ *  confirmation at the summary total are required by connectionEvidence. */
 async function fetchConnections(
 	page: Page,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
+	expectedTotal?: number,
 ): Promise<ConnectionsResult> {
 	const elements: VoyagerConnectionElement[] = [];
 	const seenUrns = new Set<string>();
@@ -389,7 +389,7 @@ async function fetchConnections(
 		if (page_elements.length === 0) {
 			if (continuationAdvertised) return finish("continuation_advertised");
 			return total === null || elements.length === total
-				? finish("verified_end")
+				? finish("observed_end_unproven")
 				: finish("malformed_page");
 		}
 		const fingerprint = JSON.stringify(
@@ -431,11 +431,11 @@ async function fetchConnections(
 			...(total === null ? {} : { total }),
 		});
 		if (continuationAdvertised) return finish("continuation_advertised");
-		if (total !== null && elements.length === total) {
-			return finish("verified_end");
+		if ((total !== null && elements.length === total) || elements.length === expectedTotal) {
+			return finish("observed_end_unproven");
 		}
 		if (page_elements.length < CONNECTIONS_PAGE_SIZE) {
-			return total === null ? finish("verified_end") : finish("malformed_page");
+			return total === null ? finish("observed_end_unproven") : finish("malformed_page");
 		}
 		start += CONNECTIONS_PAGE_SIZE;
 		await politeDelay(PAGE_DELAY_MS);
@@ -720,19 +720,35 @@ export async function collectLinkedIn(
 	// emitting `profile`, whenever either stream is requested, and reuse the
 	// same walk for the `connections` stream below.
 	let connectionsResult: ConnectionsResult | null = null;
+	let beforeSummary: ReturnType<typeof summaryEvidence> = { reason: "summary_request_failed" };
+	let afterSummary: ReturnType<typeof summaryEvidence> = { reason: "summary_request_failed" };
+	let confirmation: unknown = null;
 	if (wantsProfileFields || wantsConnections) {
+		beforeSummary = summaryEvidence(await voyagerFetch(page,
+			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-before"), meResult);
 		await progress("Fetching LinkedIn connections", { stream: "connections" });
-		connectionsResult = await fetchConnections(page, progress, capture);
+		connectionsResult = await fetchConnections(page, progress, capture, beforeSummary.total);
+		if (beforeSummary.total !== undefined && beforeSummary.total <= CONNECTIONS_MAX) {
+			confirmation = await voyagerFetch(page,
+				`/voyager/api/relationships/dash/connections?count=${CONNECTIONS_PAGE_SIZE}&q=search&sortType=RECENTLY_ADDED&start=${beforeSummary.total}`,
+				capture, "connections-confirmation");
+		}
+		afterSummary = summaryEvidence(await voyagerFetch(page,
+			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-after"), meResult);
 	}
-	// A partial walk never supplies an exact connection_count. Even when the
-	// server gave a total earlier in the walk, completion still needs positive
-	// end-of-list evidence.
+	const walkEvidence = connectionsResult ? connectionEvidence({
+		before: beforeSummary, after: afterSummary,
+		distinctCount: connectionsResult.elements.length,
+		missingUrnCount: connectionsResult.missingUrnCount,
+		terminationReason: connectionsResult.terminationReason,
+		pageTotal: connectionsResult.total, confirmation,
+	}) : "connection_walk_unavailable";
 	const connectionCount: FieldRead<number> =
-		connectionsResult?.terminationReason === "verified_end"
-			? read(connectionsResult.elements.length)
-			: unavailable("walk_unverified");
+		!walkEvidence && beforeSummary.total !== undefined
+			? read(beforeSummary.total) : unavailable("walk_unverified");
+	const ownerEvidence = profileEvidence(meResult, dashProfile);
 
-	const sink: StreamSink = { emit, emitRecord, progress };
+	const sink: StreamSink = { emit, emitRecord, progress, isRecordSelected: ctx.isRecordSelected };
 
 	if (wantsProfileFields) {
 		await emitRows(
@@ -746,7 +762,8 @@ export async function collectLinkedIn(
 				publicIdentifier: publicIdentifier.value,
 			}),
 			{
-				enumerated: true,
+				enumerated: !ownerEvidence,
+				diagnostics: { evidence_reason: ownerEvidence },
 				gapReason:
 					dashProfileResult.source === "unavailable"
 						? "dashProfileUnavailable"
@@ -767,14 +784,15 @@ export async function collectLinkedIn(
 			continue;
 		}
 		await emitRows(sink, section.stream, section.build(items.value), {
-			enumerated: true,
+			enumerated: !ownerEvidence && !sectionEvidence(dashProfile, section.key),
+			diagnostics: { evidence_reason: ownerEvidence ?? sectionEvidence(dashProfile, section.key) },
 			gapReason: "profileSectionFieldsUnreadable",
 		});
 	}
 
 	if (wantsConnections && connectionsResult) {
 		const { elements, terminationReason } = connectionsResult;
-		const connectionsComplete = terminationReason === "verified_end";
+
 		const memberUrns = elements
 			.map((e) => e.connectedMember)
 			.filter((u): u is string => typeof u === "string" && u.trim().length > 0);
@@ -819,13 +837,20 @@ export async function collectLinkedIn(
 				},
 			);
 		}
+		const rows = buildConnectionRows(elements, (urn) => resolvedProfiles.get(urn)?.profile);
+		const emittedUrns = new Set(rows.records.filter((row) => ctx.isRecordSelected?.("connections", row) ?? true).map((row) => row.id));
+		const withheldCount = elements.length - emittedUrns.size;
+		const evidenceReason = withheldCount > 0 ? "linkedin_connection_enrichment_incomplete" :
+			connectionEvidence({
+				before: beforeSummary, after: afterSummary, distinctCount: emittedUrns.size,
+				missingUrnCount: connectionsResult.missingUrnCount, terminationReason,
+				pageTotal: connectionsResult.total, confirmation,
+			});
+		const connectionsComplete = !evidenceReason;
 		await emitRows(
 			sink,
 			"connections",
-			buildConnectionRows(
-				elements,
-				(urn) => resolvedProfiles.get(urn)?.profile,
-			),
+			rows,
 			{
 				enumerated: connectionsComplete,
 				gapReason:
@@ -833,6 +858,11 @@ export async function collectLinkedIn(
 						? "connectionEnrichmentIncomplete"
 						: "connectionFieldsUnreadable",
 				diagnostics: {
+					evidence_reason: evidenceReason,
+					withheld_count: withheldCount,
+					distinct_emitted_count: emittedUrns.size,
+					summary_before: beforeSummary.total,
+					summary_after: afterSummary.total,
 					termination_reason: terminationReason,
 					observed_count: connectionsResult.observed,
 					total: connectionsResult.total,
@@ -874,6 +904,7 @@ const PROFILE_SECTIONS: ReadonlyArray<{
 ];
 
 interface StreamSink {
+	isRecordSelected?: BrowserCollectContext["isRecordSelected"];
 	emit: BrowserCollectContext["emit"];
 	emitRecord: BrowserCollectContext["emitRecord"];
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
@@ -894,12 +925,8 @@ const ROW_GAP_REASON: Record<RowGapReason, string> = {
 	connectionFieldsUnreadable: "linkedin_fields_unreadable",
 };
 
-/**
- * LinkedIn is UPSERT-ONLY: covered rows may be emitted, but enumeration
- * never authorizes replacement. Keep field/row diagnostics and incomplete
- * coverage evidence, and emit exactly one canonical gap even for a readable
- * empty stream or a walk whose existing detector reports a verified end.
- */
+/** Only provider-proved inventories with every row covered advance STATE.
+ * Unproven streams retain readable upserts and one canonical retryable gap. */
 async function emitRows(
 	sink: StreamSink,
 	stream: string,
@@ -915,7 +942,14 @@ async function emitRows(
 	for (const record of rows.records) {
 		await sink.emitRecord(stream, record);
 	}
-	if (options.enumerated && rows.covered < rows.considered) {
+	const selectedCount = rows.records.filter((record) => sink.isRecordSelected?.(stream, record) ?? true).length;
+	if (options.enumerated && rows.covered === rows.considered && selectedCount === rows.records.length) {
+		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
+		await sink.emit({ type: "STATE", stream, cursor: { full_scan_at: new Date().toISOString() } });
+		return;
+	}
+	if (rows.covered < rows.considered &&
+		(stream !== "connections" || options.diagnostics?.missing_urn_count === 0)) {
 		await sink.emit(coverageMessage(stream, rows.considered, rows.covered));
 	}
 	await sink.emit({
@@ -928,6 +962,7 @@ async function emitRows(
 			...(rows.covered < rows.considered
 				? { source_reason: ROW_GAP_REASON[gapReason] }
 				: {}),
+			selected_count: selectedCount,
 			considered: rows.considered,
 			covered: rows.covered,
 			omitted_rows: rows.omittedRows,

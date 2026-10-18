@@ -30,7 +30,11 @@ import { validateRecord } from "./schemas.ts";
 const EMITTED_AT = "2026-09-22T12:00:00.000Z";
 
 const ME_RESPONSE = {
+	plainId: 12,
 	miniProfile: {
+		entityUrn: "urn:li:fs_miniProfile:12",
+		dashEntityUrn: "urn:li:fsd_profile:12",
+		objectUrn: "urn:li:member:12",
 		firstName: "Anon",
 		lastName: "Member",
 		occupation: "Staff Engineer at Acme",
@@ -149,6 +153,7 @@ const RESOLVED_PROFILES = {
  *  `page.evaluate` returns in production: the parsed JSON body, or
  *  `{ _error }` for a failed/unhandled path. */
 function routeVoyagerPath(path: string): unknown {
+	if (path === "/voyager/api/relationships/connectionsSummary/") return { entityUrn: "urn:li:fsd_connectionsSummary:12", numConnections: 1 };
 	if (path.startsWith("/voyager/api/me")) {
 		return ME_RESPONSE;
 	}
@@ -156,7 +161,7 @@ function routeVoyagerPath(path: string): unknown {
 		return DASH_PROFILE_RESPONSE;
 	}
 	if (path.startsWith("/voyager/api/relationships/dash/connections")) {
-		return CONNECTIONS_PAGE_1;
+		return path.endsWith("&start=1") ? { elements: [], paging: { start: 1, total: 1 } } : CONNECTIONS_PAGE_1;
 	}
 	if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
 		return RESOLVED_PROFILES;
@@ -581,7 +586,7 @@ test("collectLinkedIn: full run emits a validated record for every requested str
 	)?.data;
 	assert.equal(connectionRecord?.id, "urn:li:fsd_profile:conn-1");
 	assert.equal(connectionRecord?.full_name, "Jamie Lee");
-	assert.equal(claimsFullCoverage(recording, "connections"), false);
+	assert.equal(claimsFullCoverage(recording, "connections"), true);
 });
 
 test("collectLinkedIn: requesting only 'profile' still fetches connections for connection_count, without emitting connections records", async () => {
@@ -652,6 +657,7 @@ test("collectLinkedIn: dash failure keeps /me profile fields and reports unavail
 	// /me supplies name, headline and picture, but the dash-only fields are
 	// unreadable, so the profile row is withheld rather than emitted partial.
 	assert.deepEqual(withheldFieldsOf(recording, "profile"), [
+		"connection_count",
 		"current_company",
 		"current_position_title",
 		"industry",
@@ -694,6 +700,7 @@ test("collectLinkedIn: an empty decoration does not block a later usable decorat
 	const recording = makeRecordingEmit(validateRecord);
 	let decorationAttempts = 0;
 	const route = (path: string): unknown => {
+		if (path === "/voyager/api/relationships/connectionsSummary/") return { entityUrn: "urn:li:fsd_connectionsSummary:12", numConnections: 0 };
 		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
 		if (path.includes("decorationId=")) {
 			decorationAttempts += 1;
@@ -1394,6 +1401,7 @@ test("collectLinkedIn: malformed current-position and location values veto profi
 	// The group's own experience row is uncovered (malformed title), so both
 	// projections from it are unreadable, as is the malformed location.
 	assert.deepEqual(withheldFieldsOf(recording, "profile"), [
+		"connection_count",
 		"current_company",
 		"current_position_title",
 		"location",
@@ -1836,6 +1844,7 @@ test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration count
 					return ctx.emitRecord(...args);
 				},
 			});
+			delete expectedCounts.profile;
 			assertUpsertOnly(recording, expectedCounts);
 			if (fixture === "next-empty" || fixture === "next-one") {
 				assert.ok(
@@ -1847,5 +1856,134 @@ test("collectLinkedIn: every stream remains UPSERT-ONLY across enumeration count
 				assert.equal(recording.emitted.find((row) => row.stream === "skills")?.data.id, skill.entityUrn);
 			}
 		});
+	}
+});
+
+// Provider-backed evidence fixtures are synthetic and keep exact response shapes.
+const PROOF_ME = {
+	...ME_RESPONSE, plainId: 12,
+	miniProfile: { ...ME_RESPONSE.miniProfile,
+		entityUrn: "urn:li:fs_miniProfile:12",
+		dashEntityUrn: "urn:li:fsd_profile:12",
+		objectUrn: "urn:li:member:12",
+	},
+};
+function proofProfile(): Record<string, any> {
+	const profile: Record<string, any> = structuredClone(DASH_PROFILE_RESPONSE.elements[0]);
+	profile.entityUrn = "urn:li:fsd_profile:12";
+	profile.publicIdentifier = "anon-member";
+	profile.profileEducations.elements[0].entityUrn = "urn:li:education:1";
+	profile.profilePositionGroups.elements[0].entityUrn = "urn:li:positionGroup:1";
+	profile.profilePositionGroups.elements[0].profilePositionInPositionGroup.elements[0].entityUrn = "urn:li:position:1";
+	return profile;
+}
+const PROOF_SUMMARY = { entityUrn: "urn:li:fsd_connectionsSummary:12", numConnections: 1 };
+async function collectProof(options: {
+	profile?: Record<string, any>;
+	before?: unknown; after?: unknown; confirmation?: unknown;
+	connections?: unknown; resolution?: unknown; me?: unknown;
+} = {}) {
+	const recording = makeRecordingEmit(validateRecord);
+	const paths: string[] = [];
+	let summaryReads = 0;
+	const ctx = buildCtx(ALL_STREAMS, recording);
+	ctx.page = makeFakePage((path) => {
+		paths.push(path);
+		if (path === "/voyager/api/me") return options.me ?? PROOF_ME;
+		if (path === "/voyager/api/relationships/connectionsSummary/") {
+			return ++summaryReads === 1 ? options.before ?? PROOF_SUMMARY : options.after ?? PROOF_SUMMARY;
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")) {
+			return { elements: [options.profile ?? proofProfile()] };
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) return options.resolution ?? RESOLVED_PROFILES;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
+			return start === 0 ? options.connections ?? { elements: CONNECTIONS_PAGE_1.elements } :
+				options.confirmation ?? { elements: [], paging: { start: 1, total: 1 } };
+		}
+		return { _error: "http_404" };
+	});
+	await collectLinkedIn(ctx);
+	return { recording, paths, summaryReads };
+}
+
+test("provider evidence: complete inventories emit RECORD, coverage, then STATE", async () => {
+	const { recording, paths, summaryReads } = await collectProof();
+	assert.equal(summaryReads, 2);
+	assert.equal(skipResults(recording).length, 0);
+	assert.equal(paths.filter((path) => path.includes("connectionsSummary")).length, 2);
+	assert.ok(paths.some((path) => path.endsWith("&start=1")));
+	for (const stream of ALL_STREAMS) {
+		assert.equal(claimsFullCoverage(recording, stream), true, stream);
+		const stateIndex = recording.events.findIndex((event) => event.kind === "message" && event.message.type === "STATE" && event.message.stream === stream);
+		const coverageIndex = recording.events.findIndex((event) => event.kind === "message" && event.message.type === "DETAIL_COVERAGE" && event.message.stream === stream);
+		const rowIndex = recording.events.findIndex((event) => event.kind === "record" && event.stream === stream);
+		assert.ok(rowIndex >= 0 && rowIndex < coverageIndex && coverageIndex < stateIndex, stream);
+	}
+});
+
+test("provider evidence: proved zero totals cover empty sections and connections", async () => {
+	const profile = proofProfile();
+	for (const key of ["profilePositionGroups", "profileEducations", "profileSkills", "profileLanguages"]) {
+		profile[key] = { elements: [], paging: { start: 0, total: 0 } };
+	}
+	const zero = { ...PROOF_SUMMARY, numConnections: 0 };
+	const { recording, paths } = await collectProof({ profile, before: zero, after: zero,
+		connections: { elements: [], paging: { start: 0, total: 0 } } });
+	assert.equal(skipResults(recording).length, 0);
+	assert.equal(paths.filter((path) => path.endsWith("&start=0")).length, 2);
+	for (const stream of ALL_STREAMS) assert.equal(claimsFullCoverage(recording, stream), true, stream);
+});
+
+for (const [name, options, reason] of [
+	["missing summary", { before: { _error: "http_404" } }, "summary_request_failed"],
+	["changed summary", { after: { ...PROOF_SUMMARY, numConnections: 2 } }, "summary_total_changed"],
+	["wrong summary owner", { before: { ...PROOF_SUMMARY, entityUrn: "urn:li:fsd_connectionsSummary:123" } }, "summary_owner_mismatch"],
+	["malformed summary total", { before: { ...PROOF_SUMMARY, numConnections: "1" } }, "summary_total_invalid"],
+	["missing confirmation", { confirmation: { _error: "http_503" } }, "connection_confirmation_missing"],
+	["nonempty confirmation", { confirmation: { elements: CONNECTIONS_PAGE_1.elements } }, "connection_confirmation_missing"],
+	["contradictory confirmation", { confirmation: { elements: [], paging: { start: 0 } } }, "connection_confirmation_malformed"],
+	["confirmation continuation", { confirmation: { elements: [], paging: { links: [{}] } } }, "connection_confirmation_malformed"],
+	["summary exceeds distinct rows", { before: { ...PROOF_SUMMARY, numConnections: 2 }, after: { ...PROOF_SUMMARY, numConnections: 2 } }, "connection_total_mismatch"],
+	["source 404 is withheld", { resolution: { _error: "http_404" } }, "linkedin_connection_enrichment_incomplete"],
+] as const) {
+	test(`provider evidence: ${name} prevents connection STATE and full coverage`, async () => {
+		const { recording } = await collectProof(options);
+		assert.equal(claimsFullCoverage(recording, "connections"), false);
+		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "connections"), false);
+		const gap = skipResults(recording).find((message) => message.stream === "connections");
+		assert.equal(diagnosticsOf(gap ?? {}).evidence_reason, reason);
+		if (name === "source 404 is withheld") {
+			assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 0);
+			assert.equal(diagnosticsOf(gap ?? {}).withheld_count, 1);
+		}
+	});
+}
+
+for (const [stream, key] of [["education", "profileEducations"], ["skills", "profileSkills"], ["languages", "profileLanguages"], ["experience", "profilePositionGroups"]] as const) {
+	for (const defect of ["total", "duplicate", "missing-urn", "continuation"]) {
+		test(`provider evidence: ${stream} ${defect} vetoes inventory proof`, async () => {
+			const profile = proofProfile();
+			const collection = profile[key];
+			if (defect === "total") collection.paging.total += 1;
+			if (defect === "duplicate") { collection.elements.push(collection.elements[0]); collection.paging.total = 2; }
+			if (defect === "missing-urn") delete collection.elements[0].entityUrn;
+			if (defect === "continuation") collection.paging.links = [{ rel: "next" }];
+			const { recording } = await collectProof({ profile });
+			assert.equal(claimsFullCoverage(recording, stream), false);
+			assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === stream), false);
+		});
+	}
+}
+test("provider evidence: nested experience count and owner identity independently veto proof", async () => {
+	const profile = proofProfile();
+	profile.profilePositionGroups.elements[0].profilePositionInPositionGroup.paging.total = 2;
+	const first = await collectProof({ profile });
+	assert.equal(claimsFullCoverage(first.recording, "experience"), false);
+	profile.entityUrn = "urn:li:fsd_profile:123";
+	const second = await collectProof({ profile });
+	for (const stream of ALL_STREAMS.filter((stream) => stream !== "connections")) {
+		assert.equal(claimsFullCoverage(second.recording, stream), false);
 	}
 });

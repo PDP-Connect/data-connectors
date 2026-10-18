@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { connectionEvidence, collectionEvidence, profileEvidence, sectionEvidence, summaryEvidence } from "./evidence.ts";
 
-const me = { miniProfile: { dashEntityUrn: "urn:li:fsd_profile:12", publicIdentifier: "owner" } };
+const me = { plainId: 12, miniProfile: { entityUrn: "urn:li:fs_miniProfile:12", objectUrn: "urn:li:member:12", dashEntityUrn: "urn:li:fsd_profile:12", publicIdentifier: "owner" } };
 const profile = { entityUrn: "urn:li:fsd_profile:12", publicIdentifier: "owner" };
 const collection = () => ({ elements: [{ entityUrn: "urn:1" }], paging: { start: 0, total: 1 } });
 

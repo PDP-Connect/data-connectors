@@ -24,13 +24,15 @@ export function summaryEvidence(summary: unknown, me: unknown):
 	{ total: number; reason?: undefined } | { total?: undefined; reason: string } {
 	if (!isRecord(summary) || Object.hasOwn(summary, "_error")) return { reason: "summary_request_failed" };
 	if (!safeTotal(summary.numConnections)) return { reason: "summary_total_invalid" };
-	if (!isRecord(me) || !isRecord(me.miniProfile) || !identity(me.miniProfile.dashEntityUrn)) {
+	if (!isRecord(me) || !isRecord(me.miniProfile) || !safeTotal(me.plainId) || !identity(me.miniProfile.dashEntityUrn)) {
 		return { reason: "owner_identity_missing" };
 	}
-	const owner = me.miniProfile.dashEntityUrn;
-	const member = owner.startsWith("urn:li:fsd_profile:") ? owner.slice("urn:li:fsd_profile:".length) : "";
+	const member = String(me.plainId);
+	if (me.miniProfile.dashEntityUrn !== `urn:li:fsd_profile:${member}` ||
+		me.miniProfile.entityUrn !== `urn:li:fs_miniProfile:${member}` ||
+		me.miniProfile.objectUrn !== `urn:li:member:${member}`) return { reason: "owner_identity_missing" };
 	if (!member || !identity(summary.entityUrn) ||
-		!summary.entityUrn.split(/[:(),]/u).includes(member)) return { reason: "summary_owner_mismatch" };
+		!/^urn:li:[^:]+:[^:]+$/u.test(summary.entityUrn) || summary.entityUrn.split(":").at(-1) !== member) return { reason: "summary_owner_mismatch" };
 	return { total: summary.numConnections };
 }
 
@@ -39,6 +41,7 @@ export function collectionEvidence(value: unknown): EvidenceFailure {
 	if (!isRecord(value.paging) || value.paging.start !== 0 || !safeTotal(value.paging.total)) {
 		return "collection_paging_invalid";
 	}
+	if (value.paging.links !== undefined && (!Array.isArray(value.paging.links) || value.paging.links.length > 0)) return "collection_continuation_advertised";
 	const ids = new Set<string>();
 	for (const element of value.elements) {
 		if (!isRecord(element) || !identity(element.entityUrn)) return "collection_urn_missing";
@@ -94,7 +97,8 @@ export function connectionEvidence(args: {
 		const paging = confirmation.paging;
 		if (!isRecord(paging) ||
 			(Object.hasOwn(paging, "start") && paging.start !== before.total) ||
-			(Object.hasOwn(paging, "total") && paging.total !== before.total)) return "connection_confirmation_malformed";
+			(Object.hasOwn(paging, "total") && paging.total !== before.total) ||
+			(Object.hasOwn(paging, "links") && (!Array.isArray(paging.links) || paging.links.length > 0))) return "connection_confirmation_malformed";
 	}
 	return undefined;
 }
