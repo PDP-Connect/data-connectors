@@ -13769,7 +13769,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.28",
+				"version": "0.1.29",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13786,6 +13786,7 @@
 				"mobile": {
 					"pageshim": {
 						"entry": "icloud_notes.ts",
+						"scope_prefix": "icloud_notes",
 						"login_url": "https://www.icloud.com/notes"
 					}
 				},
@@ -25866,10 +25867,11 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.33",
+				"version": "0.2.35",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
+						"scope_prefix": "youtube",
 						"login_url": "https://www.youtube.com/"
 					}
 				},
@@ -25938,7 +25940,8 @@
 									"type": ["string", "null"]
 								},
 								"email": {
-									"type": ["string", "null"]
+									"type": ["string", "null"],
+									"description": "Signed-in Google account email, read from the avatar menu's Switch account header; omitted when the menu shows none."
 								},
 								"joined_at": {
 									"type": ["string", "null"]
