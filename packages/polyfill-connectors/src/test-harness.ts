@@ -374,8 +374,11 @@ export function runConnectorProtocolSubprocess(
 			);
 		}, timeoutMs);
 
-		child.stdout?.on("data", (chunk: Buffer) => {
-			const text = chunk.toString();
+		// Decode as streams, not per chunk: a multi-byte character split across
+		// two pipe chunks would otherwise become U+FFFD in both halves.
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (text: string) => {
 			if (retainRawStdout) {
 				rawStdout += text;
 			}
@@ -389,8 +392,8 @@ export function runConnectorProtocolSubprocess(
 			}
 		});
 
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr?.on("data", (text: string) => {
+			stderr += text;
 		});
 
 		child.on("error", (err) => {
