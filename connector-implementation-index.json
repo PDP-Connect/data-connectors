@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.50",
+				"version": "0.2.51",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -977,7 +977,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.3",
+				"version": "0.3.4",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -4242,7 +4242,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.54",
+				"version": "0.2.55",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -6973,7 +6973,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9668,7 +9668,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.3",
+				"version": "0.3.4",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -13039,7 +13039,7 @@
 				},
 				"connector_key": "heb",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-				"version": "0.6.17",
+				"version": "0.6.20",
 				"display_name": "H-E-B",
 				"runtime_requirements": {
 					"bindings": {
@@ -13404,7 +13404,7 @@
 					{
 						"name": "nutrition",
 						"required": false,
-						"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Incapsula blocks emit source=blocked with no nutrition values and a session-repair diagnostic. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
+						"description": "Nutrition facts and lookup outcomes per unique H-E-B product ordered. Product URLs are retained from order-item source evidence; Unread, loading, mismatched or blocked product responses remain retryable unknown lookups; safely observed product fields are retained. Common nutrient field names (calories, protein_g, carbs_g, fat_g, sodium_mg, fiber_g, sugar_g, serving_size, servings_per_container) share the wholefoods.nutrition contract shape per the cutover capability map's lead_decision for heb.nutrition; H-E-B's extra legacy fields (vitamins, minerals, upc, ingredients, allergens, category, highlights) are additional optional fields.",
 						"display": {
 							"label": "Your H-E-B product nutrition",
 							"detail": "Calories, macros, vitamins/minerals, serving size, ingredients, and allergens for products in your orders."
@@ -13596,6 +13596,7 @@
 					}
 				],
 				"reason_display_messages": {
+					"inventory_not_proven_complete": "H-E-B did not provide enough source evidence to prove this inventory complete. Valid records were kept; the next run will try again",
 					"empty_page_before_max_page": "We hit an empty page of orders before we expected to, so we stopped to check rather than assume we were done",
 					"heb_empty_history_after_prior_orders": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone",
 					"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
@@ -13603,7 +13604,7 @@
 					"list_page_shape_check_failed": "The page didn't look like we expected",
 					"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 					"nutrition_source_coverage_incomplete": "We did not mark H-E-B nutrition complete because the order history or order-item detail coverage is incomplete",
-					"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
+					"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Valid records were retained; the unread tail remains unproven",
 					"pagination_exhausted": "We reached the end of the available pages",
 					"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 					"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
@@ -13768,7 +13769,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.23",
+				"version": "0.1.24",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13803,6 +13804,39 @@
 					}
 				},
 				"streams": [
+					{
+						"name": "profile",
+						"description": "The signed-in iCloud account from the existing session validate response. The optional user_name is dsInfo.fullName, omitted when absent or unreadable; no additional network request or inferred fallback is used.",
+						"display": {
+							"label": "Your iCloud account",
+							"detail": "Account identity and source-stated display name."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The signed-in account's dsInfo.dsid from session validation."
+								},
+								"user_name": {
+									"type": "string",
+									"description": "Source-stated dsInfo.fullName, omitted when absent or unreadable.",
+									"x_pdpp_role": "primary-title"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"required": false
+					},
 					{
 						"name": "notes",
 						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index. The legacy folder-name projection depends on the folders stream; collection fetches that dependency even when only notes are requested.",
@@ -15044,7 +15078,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.25",
+				"version": "0.4.29",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15074,6 +15108,9 @@
 					"public_listing": {
 						"tier": "development"
 					}
+				},
+				"reason_display_messages": {
+					"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
 				},
 				"streams": [
 					{
@@ -16096,7 +16133,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.36",
+				"version": "0.1.38",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -17323,7 +17360,7 @@
 				},
 				"connector_key": "shopify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/shopify",
-				"version": "0.2.26",
+				"version": "0.2.32",
 				"display_name": "Shopify Shop",
 				"brand": {
 					"icon": "icon.svg",
@@ -17431,10 +17468,14 @@
 					}
 				],
 				"reason_display_messages": {
+					"shopify_browser_operation_timeout": "Shop did not respond within the collection time budget. Retry the collection.",
+					"shopify_signed_out_or_blocked": "Sign in to Shop and open your order history before retrying.",
 					"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
 					"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
 					"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
+					"inventory_not_proven_complete": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
 					"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
+					"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
 					"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
 				}
 			}
@@ -19366,7 +19407,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.32",
+				"version": "0.1.34",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -19375,10 +19416,12 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_navigation", "page_script_evaluation"]
 						}
 					}
 				},
@@ -19833,6 +19876,14 @@
 						"freshness_strategy": "manual_as_of"
 					}
 				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "spotify",
+						"collect_export": "spotifyMobileCollect",
+						"probe_export": "probeSpotifyMobileSession",
+						"login_url": "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+					}
+				},
 				"reason_display_messages": {
 					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
@@ -20455,7 +20506,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.32",
+				"version": "0.1.33",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -22427,7 +22478,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.31",
+				"version": "0.3.33",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -22547,7 +22598,7 @@
 									"type": ["integer", "null"]
 								},
 								"item_count": {
-									"type": "integer"
+									"type": ["integer", "null"]
 								}
 							},
 							"required": ["id", "item_count"]
@@ -22607,6 +22658,15 @@
 									"type": ["number", "null"]
 								},
 								"unit_price_cents": {
+									"type": ["integer", "null"]
+								},
+								"quantity_unit": {
+									"type": ["string", "null"]
+								},
+								"price_unit": {
+									"type": ["string", "null"]
+								},
+								"line_total_cents": {
 									"type": ["integer", "null"]
 								}
 							},
@@ -22685,11 +22745,14 @@
 								},
 								"servings_per_container": {
 									"type": ["number", "null"]
+								},
+								"id": {
+									"type": "string"
 								}
 							},
-							"required": ["product_id", "source", "confidence"]
+							"required": ["id", "product_id", "source", "confidence"]
 						},
-						"primary_key": ["product_id"],
+						"primary_key": ["id"],
 						"selection": {
 							"fields": true,
 							"resources": true
@@ -22707,7 +22770,8 @@
 				"reason_display_messages": {
 					"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 					"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
-					"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
+					"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
+					"inventory_not_proven_complete": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh."
 				}
 			}
 		},
@@ -23630,7 +23694,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.8",
+				"version": "0.1.9",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25736,7 +25800,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.30",
+				"version": "0.2.31",
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -25889,7 +25953,7 @@
 								},
 								"subscriber_count_text": {
 									"type": ["string", "null"],
-									"description": "Browser-visible raw subscriber count for legacy projection."
+									"description": "Browser-visible raw subscriber count for legacy projection; omitted when no count text is rendered."
 								}
 							},
 							"required": ["id"]

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Page } from "playwright";
-import { fetchAllPosts } from "./index.ts";
+import { collectAllStreams, fetchAllPosts } from "./index.ts";
 
 const NO_DELAY = (): Promise<void> => Promise.resolve();
 const FAST_POSTS_CLOCK = { sleep: async (): Promise<void> => undefined };
@@ -13,12 +13,16 @@ type RawEnvelope = Record<string, unknown>;
 type PostsDecision = "data" | "empty" | "not-proven";
 
 type ScriptedPostsPage = {
+	after?: string | null;
 	fromCurrentPage?: boolean;
 	json: unknown;
 	method?: string;
 	operationName?: string;
+	ownerId?: string;
 	postData?: string;
+	requestUrl?: string;
 	status: number;
+	username?: string;
 	url?: string;
 } | null;
 
@@ -54,7 +58,11 @@ function legacyPostsDecision(raw: unknown): PostsDecision {
 	return edges.length === 0 ? "empty" : "data";
 }
 
-type ChallengeDom = "captcha" | "email" | "verification_code" | "challenge_form";
+type ChallengeDom =
+	| "captcha"
+	| "email"
+	| "verification_code"
+	| "challenge_form";
 
 // Text and controls the fake page exposes to the serialized in-page detector.
 const CHALLENGE_DOMS: Record<
@@ -76,6 +84,8 @@ const CHALLENGE_DOMS: Record<
 function makePostsPage(options: {
 	challengeUrl?: string;
 	challengeDom?: ChallengeDom;
+	oldNavigationResponse?: Exclude<ScriptedPostsPage, null>;
+	oldDocumentRequestDuringGoto?: Exclude<ScriptedPostsPage, null>;
 	/** Ordinary profile text with no challenge controls (username, bio). */
 	profileText?: string;
 	exposeEmit?: (
@@ -85,8 +95,16 @@ function makePostsPage(options: {
 }): Page {
 	const queue = [...options.postsScript];
 	const responseListeners = new Set<(response: unknown) => void>();
+	const requestListeners = new Set<(request: unknown) => void>();
+	const navigationListeners = new Set<(frame: unknown) => void>();
 	let pendingResolve: ((value: unknown) => void) | null = null;
 	let pendingPredicate: ((value: unknown) => boolean) | null = null;
+	let currentNavigationRequest: unknown = null;
+	let frameUrl = options.challengeUrl ?? "https://www.instagram.com/testuser/";
+	const mainFrame = {
+		page: () => page,
+		url: () => frameUrl,
+	};
 
 	const page = {
 		evaluate: (fn: unknown): Promise<unknown> => {
@@ -96,17 +114,38 @@ function makePostsPage(options: {
 			return Promise.resolve(undefined);
 		},
 		goto: (): Promise<null> => {
+			emitNavigationRequest();
+			if (options.oldDocumentRequestDuringGoto) {
+				frameUrl = "https://www.instagram.com/testuser/";
+				for (const listener of navigationListeners) listener(mainFrame);
+				emitResponse(options.oldDocumentRequestDuringGoto);
+			}
+			if (options.oldNavigationResponse) {
+				emitResponse(options.oldNavigationResponse, false);
+			}
+			emitNavigationResponse();
+			frameUrl = "https://www.instagram.com/testuser/";
+			for (const listener of navigationListeners) listener(mainFrame);
 			resolveNextResponse();
 			return Promise.resolve(null);
 		},
+		mainFrame: () => mainFrame,
 		off: (event: string, listener: (response: unknown) => void): void => {
 			if (event === "response") {
 				responseListeners.delete(listener);
+			} else if (event === "request") {
+				requestListeners.delete(listener);
+			} else if (event === "framenavigated") {
+				navigationListeners.delete(listener);
 			}
 		},
 		on: (event: string, listener: (response: unknown) => void): void => {
 			if (event === "response") {
 				responseListeners.add(listener);
+			} else if (event === "request") {
+				requestListeners.add(listener);
+			} else if (event === "framenavigated") {
+				navigationListeners.add(listener);
 			}
 		},
 		url: () => options.challengeUrl ?? "https://www.instagram.com/testuser/",
@@ -153,25 +192,62 @@ function makePostsPage(options: {
 	function buildResponse(scripted: Exclude<ScriptedPostsPage, null>): unknown {
 		const operationName = scripted.operationName ?? "PolarisProfilePostsQuery";
 		const postData =
-			scripted.postData ?? `fb_api_req_friendly_name=${operationName}`;
+			scripted.postData ??
+			new URLSearchParams({
+				fb_api_req_friendly_name: operationName,
+				variables: JSON.stringify({
+					after: scripted.after ?? null,
+					user_id: scripted.ownerId ?? "u1",
+					username: scripted.username ?? "testuser",
+				}),
+			}).toString();
+		const request = {
+			frame: () => mainFrame,
+			headers: () => ({ "x-fb-friendly-name": operationName }),
+			method: () => scripted.method ?? "POST",
+			postData: () => postData,
+			url: () => scripted.requestUrl ?? scripted.url ?? "https://www.instagram.com/graphql/query/",
+		};
 		return {
 			json: () => Promise.resolve(scripted.json),
-			request: () => ({
-				frame: () => ({
-					page: () =>
-						scripted.fromCurrentPage === false ? ({} as Page) : page,
-				}),
-				headers: () => ({ "x-fb-friendly-name": operationName }),
-				method: () => scripted.method ?? "POST",
-				postData: () => postData,
-			}),
+			request: () =>
+				scripted.fromCurrentPage === false
+					? { ...request, frame: () => ({ page: () => ({}) as Page }) }
+					: request,
 			status: () => scripted.status,
 			url: () => scripted.url ?? "https://www.instagram.com/graphql/query/",
 		};
 	}
 
-	function emitResponse(scripted: Exclude<ScriptedPostsPage, null>): void {
+	function emitNavigationRequest(): void {
+		const request = {
+			frame: () => mainFrame,
+			isNavigationRequest: () => true,
+			redirectedFrom: () => null,
+			url: () => "https://www.instagram.com/testuser/",
+		};
+		currentNavigationRequest = request;
+		for (const listener of requestListeners) listener(request);
+	}
+
+	function emitNavigationResponse(): void {
+		const response = {
+			request: () => currentNavigationRequest,
+			status: () => 200,
+			url: () => "https://www.instagram.com/testuser/",
+		};
+		for (const listener of responseListeners) listener(response);
+	}
+
+	function emitResponse(
+		scripted: Exclude<ScriptedPostsPage, null>,
+		includeRequest = true,
+	): void {
 		const response = buildResponse(scripted);
+		if (includeRequest) {
+			const request = (response as { request: () => unknown }).request();
+			for (const listener of requestListeners) listener(request);
+		}
 		for (const listener of responseListeners) {
 			listener(response);
 		}
@@ -189,6 +265,10 @@ function makePostsPage(options: {
 			return;
 		}
 		const response = buildResponse(scripted);
+		const request = (response as { request: () => unknown }).request();
+		for (const listener of requestListeners) {
+			listener(request);
+		}
 		for (const listener of responseListeners) {
 			listener(response);
 		}
@@ -205,6 +285,8 @@ async function pdppPostsDecision(
 	options: {
 		challengeDom?: ChallengeDom;
 		challengeUrl?: string;
+		oldNavigationResponse?: Exclude<ScriptedPostsPage, null>;
+		oldDocumentRequestDuringGoto?: Exclude<ScriptedPostsPage, null>;
 		profileText?: string;
 	} = {},
 ): Promise<PostsDecision> {
@@ -220,7 +302,11 @@ async function pdppPostsDecision(
 		if (result.edges.length > 0) {
 			return "data";
 		}
-		return result.sourceEdgeCount === 0 ? "empty" : "not-proven";
+		// Empty is claimed only from the source's own end signal, never from
+		// the absence of edges or from how the page looks.
+		return result.sourceEdgeCount === 0 && result.sourceEnd
+			? "empty"
+			: "not-proven";
 	} catch (error) {
 		assert.ok(error instanceof Error);
 		assert.match(error.message, /^meta_posts_/);
@@ -278,6 +364,52 @@ test("fetchAllPosts: terminal empty is complete only when legacy would also be e
 
 	assert.equal(legacyPostsDecision(raw), "empty");
 	assert.equal(pdpp, "empty");
+});
+
+test("fetchAllPosts: same-tab response from an earlier navigation cannot prove empty", async () => {
+	const pdpp = await pdppPostsDecision([null], {
+		oldNavigationResponse: {
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+		},
+	});
+
+	assert.equal(pdpp, "not-proven");
+});
+
+test("fetchAllPosts: old document request during navigation cannot prove empty", async () => {
+	const pdpp = await pdppPostsDecision([null], {
+		oldDocumentRequestDuringGoto: {
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+		},
+	});
+
+	assert.equal(pdpp, "not-proven");
+});
+
+test("fetchAllPosts: response for another owner cannot prove empty", async () => {
+	const pdpp = await pdppPostsDecision([
+		{
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+			username: "different-user",
+		},
+	]);
+
+	assert.equal(pdpp, "not-proven");
+});
+
+test("fetchAllPosts: continuation-only empty response cannot prove the initial page empty", async () => {
+	const pdpp = await pdppPostsDecision([
+		{
+			after: "continuation-cursor",
+			json: timelineEnvelope([], { has_next_page: false }),
+			status: 200,
+		},
+	]);
+
+	assert.equal(pdpp, "not-proven");
 });
 
 test("fetchAllPosts: posts parity matrix keeps PDPP empty inside the legacy empty boundary", async () => {
@@ -506,6 +638,32 @@ test("fetchAllPosts: header-only posts operation is not legacy timeline evidence
 	assert.equal(pdpp, "not-proven");
 });
 
+test("fetchAllPosts: fallback scroll acquires the initial response after legacy polling", async () => {
+	const result = await fetchAllPosts(
+		makePostsPage({
+			postsScript: [
+				null,
+				{
+					json: timelineEnvelope([{ node: { id: "fallback-post" } }], {
+						has_next_page: false,
+					}),
+					status: 200,
+				},
+			],
+		}),
+		"testuser",
+		null,
+		async () => undefined,
+		NO_DELAY,
+		FAST_POSTS_CLOCK,
+	);
+
+	assert.deepEqual(
+		result.edges.map((edge) => edge.node.id),
+		["fallback-post"],
+	);
+});
+
 test("fetchAllPosts: walks an empty first page when it advertises a next page", async () => {
 	const result = await fetchAllPosts(
 		makePostsPage({
@@ -518,6 +676,7 @@ test("fetchAllPosts: walks an empty first page when it advertises a next page", 
 					status: 200,
 				},
 				{
+					after: "next",
 					json: timelineEnvelope(
 						[{ node: { id: "page-2", taken_at: 1_700_000_001 } }],
 						{ has_next_page: false },
@@ -553,7 +712,7 @@ test("fetchAllPosts: unrecordable source edges fail instead of silently completi
 					},
 				],
 			}),
-			"testuser",
+				"testuser",
 			null,
 			async () => undefined,
 			NO_DELAY,
@@ -645,6 +804,7 @@ test("fetchAllPosts: a page the client fetches during the polite delay is walked
 					status: 200,
 				},
 				{
+					after: "after-b",
 					json: timelineEnvelope(
 						[{ node: { id: "c1", taken_at: 1_700_000_001 } }],
 						{ has_next_page: false },
@@ -661,6 +821,7 @@ test("fetchAllPosts: a page the client fetches during the polite delay is walked
 			if (delays === 1) {
 				// Instagram's own scroll sentinel fetched page 2 while we waited.
 				emitDuringDelay({
+					after: "after-a",
 					json: timelineEnvelope(
 						[{ node: { id: "b1", taken_at: 1_700_000_002 } }],
 						{ end_cursor: "after-b", has_next_page: true },
@@ -768,26 +929,17 @@ test("fetchAllPosts: GET graphqlLegacy URL is deliberately stricter than legacy 
 	assert.equal(pdpp, "not-proven");
 });
 
-test("fetchAllPosts: redirect login URL prevents terminal empty completion", async () => {
-	await assert.rejects(
-		fetchAllPosts(
-			makePostsPage({
-				challengeUrl: "https://www.instagram.com/accounts/login/",
-				postsScript: [
-					{
-						json: timelineEnvelope([], { has_next_page: false }),
-						status: 200,
-					},
-				],
-			}),
-			"testuser",
-			null,
-			async () => undefined,
-			NO_DELAY,
-			FAST_POSTS_CLOCK,
-		),
-		/meta_posts_login_challenge/,
+test("fetchAllPosts: a login URL neither proves nor vetoes the source's end signal", async () => {
+	const withEnd = await pdppPostsDecision(
+		[{ json: timelineEnvelope([], { has_next_page: false }), status: 200 }],
+		{ challengeUrl: "https://www.instagram.com/accounts/login/" },
 	);
+	assert.equal(withEnd, "empty", "explicit source end decides, page layout does not");
+	const withoutEnd = await pdppPostsDecision(
+		[{ json: timelineEnvelope([], null), status: 200 }],
+		{ challengeUrl: "https://www.instagram.com/accounts/login/" },
+	);
+	assert.equal(withoutEnd, "not-proven", "no source end signal means no completeness");
 });
 
 for (const challengeDom of [
@@ -796,26 +948,17 @@ for (const challengeDom of [
 	"verification_code",
 	"challenge_form",
 ] as const) {
-	test(`fetchAllPosts: same-URL ${challengeDom} challenge prevents terminal empty completion`, async () => {
-		await assert.rejects(
-			fetchAllPosts(
-				makePostsPage({
-					challengeDom,
-					postsScript: [
-						{
-							json: timelineEnvelope([], { has_next_page: false }),
-							status: 200,
-						},
-					],
-				}),
-				"testuser",
-				null,
-				async () => undefined,
-				NO_DELAY,
-				FAST_POSTS_CLOCK,
-			),
-			/meta_posts_login_challenge/,
+	test(`fetchAllPosts: same-URL ${challengeDom} challenge neither proves nor vetoes the source's end signal`, async () => {
+		const withEnd = await pdppPostsDecision(
+			[{ json: timelineEnvelope([], { has_next_page: false }), status: 200 }],
+			{ challengeDom },
 		);
+		assert.equal(withEnd, "empty", "explicit source end decides, page layout does not");
+		const withoutEnd = await pdppPostsDecision(
+			[{ json: timelineEnvelope([], null), status: 200 }],
+			{ challengeDom },
+		);
+		assert.equal(withoutEnd, "not-proven", "no source end signal means no completeness");
 	});
 }
 
@@ -836,7 +979,7 @@ for (const profileText of [
 				],
 				profileText,
 			}),
-			"challenge_runner",
+			"testuser",
 			null,
 			async () => undefined,
 			NO_DELAY,
@@ -869,5 +1012,232 @@ for (const mediaCount of [0, 5]) {
 			},
 		]);
 		assert.equal(pdpp, "not-proven");
+	});
+}
+
+function settledPost(id: string) {
+	return { node: { id, taken_at: 1_700_000_001, like_count: 1,
+		facepile_top_likers: [{ id: `liker-${id}`, username: `liker_${id}` }] } };
+}
+
+function ownerTimeline(ids: string[]): RawEnvelope {
+	const body = timelineEnvelope(ids.map(settledPost), { has_next_page: false });
+	(body.data as RawEnvelope).user = { id: "u1", username: "testuser" };
+	return body;
+}
+
+async function collectWithSettledResponses(responses: Array<Exclude<ScriptedPostsPage, null>>, continuation?: Exclude<ScriptedPostsPage, null>) {
+	let emitLate = (_response: Exclude<ScriptedPostsPage, null>): void => {};
+	const page = makePostsPage({ postsScript: [responses[0]!, ...(continuation ? [continuation] : [])], exposeEmit: emit => { emitLate = emit; } });
+	const goto = page.goto.bind(page);
+	const evaluate = page.evaluate.bind(page);
+	let fetchingPosts = false;
+	let followingReads = 0;
+	page.goto = ((...args: Parameters<Page["goto"]>) => fetchingPosts ? goto(...args) : Promise.resolve(null)) as Page["goto"];
+	page.evaluate = ((fn: unknown, arg?: unknown) => {
+		if (String(fn).includes("PolarisViewer")) return Promise.resolve({ id: "u1", username: "testuser" });
+		if (arg && typeof arg === "object" && "path" in arg) {
+			followingReads += 1;
+			return Promise.resolve({ status: 200, json: { status: "ok", users: [{ pk: "followed", username: "followed" }], has_more: false, next_max_id: null } });
+		}
+		return evaluate(fn as Parameters<Page["evaluate"]>[0]);
+	}) as Page["evaluate"];
+	const emitted: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const messages: Array<{ type: string; stream?: string; reason?: string; recovery_hint?: { retryable?: boolean } }> = [];
+	const ctx = {
+		page, capture: null, requested: new Set(["posts", "post_likes", "following"]),
+		progress: async (message: string) => { if (message === "Fetching Instagram posts") fetchingPosts = true; },
+		emitRecord: async (stream: string, data: Record<string, unknown>) => { emitted.push({ stream, data }); },
+		emit: async (message: typeof messages[number]) => { messages.push(message); },
+	} as unknown as Parameters<typeof collectAllStreams>[0];
+	const late = responses.slice(1);
+	let now = 0;
+	let nextResponseAt = 1_500;
+	const postsClock = { sleep: async (ms: number) => {
+		now += ms;
+		if (!continuation && now >= nextResponseAt) {
+			const response = late.shift();
+			if (response) emitLate(response);
+			nextResponseAt += 2_000;
+		}
+	} };
+	await collectAllStreams(ctx, async () => { if (continuation) { for (const response of late.splice(0)) emitLate(response); } }, postsClock, { now: () => 0, sleep: NO_DELAY }, FAST_POSTS_CLOCK);
+	return { emitted, messages, followingReads };
+}
+
+test("collectAllStreams: POST /api/graphql completes posts and likes like /graphql/query", async () => {
+	const results = [];
+	for (const path of ["/graphql/query", "/api/graphql"]) {
+		const result = await collectWithSettledResponses([{
+			json: ownerTimeline(["A"]),
+			method: "POST",
+			status: 200,
+			url: `https://www.instagram.com${path}`,
+		}]);
+		assert.deepEqual(
+			result.emitted.filter(row => row.stream === "posts").map(row => row.data.id),
+			["A"],
+		);
+		assert.deepEqual(
+			result.emitted.filter(row => row.stream === "post_likes").map(row => ({
+				post_id: row.data.post_id,
+				user_id: row.data.user_id,
+			})),
+			[{ post_id: "A", user_id: "liker-A" }],
+		);
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(result.messages.filter(message => message.type === "STATE" && message.stream === stream).length, 1, `${path}: ${stream} completion`);
+			assert.equal(result.messages.some(message => message.type === "SKIP_RESULT" && message.stream === stream), false);
+		}
+		results.push(result);
+	}
+	assert.deepEqual(results[1]?.emitted, results[0]?.emitted, "both endpoints emit identical records");
+});
+
+for (const path of ["/api/graphqlx", "/notgraphql/"]) {
+	for (const rejectedUrl of ["request", "response"] as const) {
+		test(`collectAllStreams: POST ${path} ${rejectedUrl} is not a posts timeline`, async () => {
+			// Keep the other URL valid so each guard is exercised independently.
+			const validUrl = "https://www.instagram.com/api/graphql";
+			const lookalikeUrl = `https://www.instagram.com${path}`;
+			const { emitted, messages } = await collectWithSettledResponses([{
+				json: ownerTimeline(["A"]),
+				method: "POST",
+				requestUrl: rejectedUrl === "request" ? lookalikeUrl : validUrl,
+				status: 200,
+				url: rejectedUrl === "response" ? lookalikeUrl : validUrl,
+			}]);
+			for (const stream of ["posts", "post_likes"]) {
+				assert.deepEqual(emitted.filter(row => row.stream === stream), []);
+				assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), false);
+				const skips = messages.filter(message => message.type === "SKIP_RESULT" && message.stream === stream);
+				assert.equal(skips.length, 1);
+				assert.equal(skips[0]?.reason, "inventory_not_proven_complete");
+				assert.equal(skips[0]?.recovery_hint?.retryable, true);
+			}
+		});
+	}
+}
+
+for (const { label, late, expected, complete } of [
+	{ label: "shrinking terminal", late: [{ status: 200, json: ownerTimeline(["A"]) }], expected: ["A", "B"], complete: false },
+	{ label: "empty terminal", late: [{ status: 200, json: ownerTimeline([]) }], expected: ["A", "B"], complete: false },
+	{ label: "HTTP failure", late: [{ status: 500, json: {} }], expected: ["A", "B"], complete: false },
+	{ label: "malformed envelope", late: [{ status: 200, json: { data: {} } }], expected: ["A", "B"], complete: false },
+	{ label: "error envelope", late: [{ status: 200, json: { ...ownerTimeline(["A"]), errors: [{ message: "failed" }] } }], expected: ["A", "B"], complete: false },
+	{ label: "intermediate inventory then shrink", late: [{ status: 200, json: ownerTimeline(["A", "B", "C"]) }, { status: 200, json: ownerTimeline(["A", "B"]) }], expected: ["A", "B", "C"], complete: false },
+	{ label: "intermediate inventory then failure", late: [{ status: 200, json: ownerTimeline(["A", "B", "C"]) }, { status: 500, json: {} }], expected: ["A", "B", "C"], complete: false },
+	{ label: "stable terminal control", late: [{ status: 200, json: ownerTimeline(["A", "B"]) }], expected: ["A", "B"], complete: true },
+	{ label: "growing terminal control", late: [{ status: 200, json: ownerTimeline(["A", "B", "C"]) }], expected: ["A", "B", "C"], complete: true },
+]) {
+	test(`collectAllStreams: settle ${label} preserves validated posts and likes with unknown profile count`, async () => {
+		const { emitted, messages, followingReads } = await collectWithSettledResponses([{ status: 200, json: ownerTimeline(["A", "B"]) }, ...late]);
+		assert.deepEqual(emitted.filter(row => row.stream === "posts").map(row => row.data.id), expected);
+		assert.deepEqual(emitted.filter(row => row.stream === "post_likes").map(row => row.data.post_id), expected);
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), complete, `${stream} completion`);
+			const skip = messages.find(message => message.type === "SKIP_RESULT" && message.stream === stream);
+			assert.equal(Boolean(skip), !complete);
+			if (!complete) {
+				assert.equal(skip?.reason, "inventory_not_proven_complete");
+				assert.equal(skip?.recovery_hint?.retryable, true);
+			}
+		}
+		assert.equal(followingReads, 1, "later requested stream still runs");
+		assert.ok(emitted.some(row => row.stream === "following" && row.data.id === "followed"));
+	});
+}
+
+function versionTimeline(node: Record<string, unknown>): RawEnvelope {
+	const body = timelineEnvelope([{ node }], { has_next_page: false });
+	(body.data as RawEnvelope).user = { id: "u1", username: "testuser" };
+	return body;
+}
+
+for (const scenario of [
+	{ label: "growing likers", later: { like_count: 2, facepile_top_likers: [{ id: "L1" }, { id: "L2" }] }, caption: "first", count: 2, likes: ["L1", "L2"], complete: false },
+	{ label: "changed caption", later: { caption: { text: "latest" } }, caption: "latest", count: 1, likes: ["L1"], complete: false },
+	{ label: "changed unmapped field", later: { source_extra: "changed" }, caption: "first", count: 1, likes: ["L1"], complete: false },
+	{ label: "malformed later post", later: { taken_at: "bad" }, caption: "first", count: 1, likes: ["L1"], complete: false },
+	{ label: "malformed later likers", later: { facepile_top_likers: [null, { id: "L2" }] }, caption: "first", count: 1, likes: ["L1", "L2"], complete: false },
+	{ label: "replacement liker sample", later: { facepile_top_likers: [{ id: "L2" }] }, caption: "first", count: 1, likes: ["L1", "L2"], complete: false },
+	{ label: "identical repeat", later: {}, caption: "first", count: 1, likes: ["L1"], complete: true },
+]) {
+	test(`collectAllStreams: same post version ${scenario.label}`, async () => {
+		const first = { id: "A", taken_at: 1_700_000_001, caption: { text: "first" }, like_count: 1, facepile_top_likers: [{ id: "L1" }] };
+		const { emitted, messages } = await collectWithSettledResponses([
+			{ status: 200, json: versionTimeline(first) },
+			{ status: 200, json: versionTimeline({ ...first, ...scenario.later }) },
+		]);
+		const posts = emitted.filter(row => row.stream === "posts");
+		assert.equal(posts.length, 1);
+		assert.equal(posts[0]?.data.caption, scenario.caption);
+		assert.equal(posts[0]?.data.like_count, scenario.count);
+		const likes = emitted.filter(row => row.stream === "post_likes");
+		assert.deepEqual(likes.map(row => row.data.user_id), scenario.likes);
+		assert.deepEqual(likes.map(row => row.data.liker_ordinal), scenario.likes.map((_, i) => i));
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(messages.some(message => message.type === "STATE" && message.stream === stream), scenario.complete, `${stream} completion`);
+			const skips = messages.filter(message => message.type === "SKIP_RESULT" && message.stream === stream);
+			assert.equal(skips.length, scenario.complete ? 0 : 1);
+			if (!scenario.complete) {
+				assert.equal(skips[0]?.reason, "inventory_not_proven_complete");
+				assert.equal(skips[0]?.recovery_hint?.retryable, true);
+			}
+		}
+	});
+}
+
+for (const kind of ["changed", "unreadable", "identical"] as const) {
+	test(`fetchAllPosts: paginated duplicate is validated before deduplication (${kind})`, async () => {
+		const first = { id: "A", taken_at: 1_700_000_001, like_count: 1, facepile_top_likers: [{ id: "L1" }] };
+		const later = kind === "changed" ? { ...first, like_count: 2, facepile_top_likers: [{ id: "L2" }] }
+			: kind === "unreadable" ? { ...first, taken_at: "bad" } : { ...first };
+		const read = fetchAllPosts(makePostsPage({ postsScript: [
+			{ status: 200, json: timelineEnvelope([{ node: first }], { has_next_page: true, end_cursor: "next" }) },
+			{ status: 200, after: "next", json: timelineEnvelope([{ node: later }], { has_next_page: false }) },
+		] }), "testuser", null, undefined, NO_DELAY, FAST_POSTS_CLOCK);
+		if (kind === "identical") {
+			const result = await read;
+			assert.equal(result.edges.length, 1);
+			assert.equal(result.sourceEnd, true);
+		} else {
+			await assert.rejects(read, (error: unknown) => {
+				const failure = error as Error & { partial: Array<{ node: typeof first }> };
+				assert.match(failure.message, /meta_posts_timeline_contradictory/);
+				assert.equal(failure.partial.length, 1);
+				assert.equal(failure.partial[0]?.node.like_count, kind === "changed" ? 2 : 1);
+				assert.deepEqual(failure.partial[0]?.node.facepile_top_likers.map(liker => liker.id), kind === "changed" ? ["L1", "L2"] : ["L1"]);
+				return true;
+			});
+		}
+	});
+}
+
+
+for (const kind of ["changed", "unreadable", "failed", "identical"] as const) {
+	test(`collectAllStreams: consumed cursor repeat during pagination delay (${kind})`, async () => {
+		const first = { id: "A", taken_at: 1_700_000_001, caption: { text: "first" }, like_count: 1, facepile_top_likers: [{ id: "L1" }] };
+		const later = kind === "changed" ? { ...first, caption: { text: "latest" }, like_count: 2, facepile_top_likers: [{ id: "L2" }] }
+			: kind === "unreadable" ? { ...first, taken_at: "bad", facepile_top_likers: [{ id: "L2" }] } : first;
+		const firstPage = (node: Record<string, unknown>) => {
+			const body = versionTimeline(node);
+			((body.data as RawEnvelope).xdt_api__v1__feed__user_timeline_graphql_connection as RawEnvelope).page_info = { has_next_page: true, end_cursor: "next" };
+			return body;
+		};
+		const { emitted, messages } = await collectWithSettledResponses([
+			{ status: 200, json: firstPage(first) },
+			{ status: kind === "failed" ? 500 : 200, json: firstPage(later) },
+		], { status: 200, after: "next", json: ownerTimeline(["B"]) });
+		const post = emitted.find(row => row.stream === "posts" && row.data.id === "A");
+		assert.equal(post?.data.caption, kind === "changed" ? "latest" : "first");
+		assert.equal(post?.data.like_count, kind === "changed" ? 2 : 1);
+		assert.deepEqual(emitted.filter(row => row.stream === "post_likes" && row.data.post_id === "A").map(row => row.data.user_id),
+			kind === "changed" || kind === "unreadable" ? ["L1", "L2"] : ["L1"]);
+		assert.ok(emitted.some(row => row.stream === "posts" && row.data.id === "B"), "pagination still advances");
+		for (const stream of ["posts", "post_likes"]) {
+			assert.equal(messages.some(m => m.type === "STATE" && m.stream === stream), kind === "identical", `${stream} STATE`);
+			assert.equal(messages.some(m => m.type === "SKIP_RESULT" && m.stream === stream), kind !== "identical");
+		}
 	});
 }

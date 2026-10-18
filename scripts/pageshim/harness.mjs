@@ -27,6 +27,31 @@ import { ResultStreamHarness } from "./result-stream-harness.mjs";
 
 const PAGE_BRIDGE_MAX_UNITS = 256 * 1024;
 
+// Fetch credentials mode is not a wire header: even include can send no cookie,
+// and preflights omit cookies. Default fixture policy allows the requesting
+// Origin with credentials. Public fixtures can explicitly select "wildcard";
+// explicit response CORS headers are authoritative (including negative tests).
+export function fixtureCorsHeaders(requestHeaders, responseHeaders = {}, policy = "origin") {
+	const headers = Object.fromEntries(
+		Object.entries(responseHeaders).map(([key, value]) => [key.toLowerCase(), value]),
+	);
+	const origin = requestHeaders.origin;
+	if (!("access-control-allow-origin" in headers)) {
+		headers["access-control-allow-origin"] = origin && policy !== "wildcard" ? origin : "*";
+		if (origin && policy !== "wildcard") headers["access-control-allow-credentials"] ??= "true";
+	}
+	if (headers["access-control-allow-origin"] !== "*") {
+		const vary = String(headers.vary ?? "").split(",").map((part) => part.trim()).filter(Boolean);
+		if (!vary.some((part) => part.toLowerCase() === "origin") && !vary.includes("*")) vary.push("Origin");
+		headers.vary = vary.join(", ");
+	}
+	if (requestHeaders["access-control-request-method"])
+		headers["access-control-allow-methods"] ??= requestHeaders["access-control-request-method"];
+	if (requestHeaders["access-control-request-headers"])
+		headers["access-control-allow-headers"] ??= requestHeaders["access-control-request-headers"];
+	return headers;
+}
+
 function jsonPayloadUnits(value) {
 	if (value === null) return 4;
 	if (typeof value === "string") {
@@ -551,7 +576,7 @@ export async function runHarness({
 			});
 			return route.fulfill({
 				...f,
-				headers: { "access-control-allow-origin": "*" },
+				headers: fixtureCorsHeaders(request.headers(), f.headers, fixtures.cors),
 			});
 		});
 		const target = await context.newPage();

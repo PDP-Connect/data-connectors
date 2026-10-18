@@ -16,7 +16,20 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
+
+// Fixture-only suite: navigation is scripted, so production politeness waits add no evidence.
+const fixtureSetTimeout = globalThis.setTimeout;
+before(() => {
+	globalThis.setTimeout = ((fn: () => void) => {
+		fn();
+		return 0;
+	}) as unknown as typeof setTimeout;
+});
+after(() => {
+	globalThis.setTimeout = fixtureSetTimeout;
+});
+
 import type { Page } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
@@ -27,8 +40,8 @@ import {
 	collectOrders,
 	collectProfile,
 	discoverOrderStubs,
-	OrderEnumerationUnprovenError,
 	lookupNutritionForProduct,
+	OrderEnumerationUnprovenError,
 	orderDetailCountsMatch,
 } from "./index.ts";
 import { parseOrderSearchPageDom } from "./parsers.ts";
@@ -156,7 +169,7 @@ test("buildOrderRecord + buildOrderItemRecord validate and order-before-items wh
 	assert.equal(harness.emitted[0]?.stream, "orders");
 	assert.equal(harness.emitted[0]?.data.id, STUB.orderId);
 	assert.equal(harness.emitted[0]?.data.order_date, "2026-03-03");
-	assert.equal(harness.emitted[0]?.data.total_cents, 398);
+	assert.equal(harness.emitted[0]?.data.total_cents, null);
 	assert.equal(harness.emitted[1]?.stream, "order_items");
 	assert.equal(harness.emitted[1]?.data.order_id, STUB.orderId);
 	assert.equal(harness.emitted[1]?.data.product_id, "B01ABCDEFG");
@@ -164,7 +177,7 @@ test("buildOrderRecord + buildOrderItemRecord validate and order-before-items wh
 
 test("buildOrderRecord reports the source-declared zero item count for an empty order", () => {
 	const record = buildOrderRecord(EMPTY_STUB, null, []);
-	assert.equal(record.item_count, 0);
+	assert.equal(record.item_count, null);
 	assert.equal(record.total_cents, null);
 });
 
@@ -807,12 +820,28 @@ async function runCollectOrders(
 	}> = [];
 	await collectOrders({
 		credentials: {},
-		emit: harness.emit,
+		emit: async (message) => {
+			await harness.emit(message);
+			if (
+				message.type === "SKIP_RESULT" &&
+				message.reason === "inventory_not_proven_complete"
+			) {
+				failures.push({
+					stream: message.stream,
+					message: message.message ?? "",
+					retryable:
+						typeof message.recovery_hint === "object"
+							? message.recovery_hint?.retryable
+							: undefined,
+				});
+			}
+		},
 		emitRecord: harness.emitRecord,
 		page,
 		progress: noProgress,
-		reportStreamFailure: (stream, message, options) => {
-			failures.push({ stream, message, retryable: options?.retryable });
+		reportStreamFailure: (_stream, _message, options) => {
+			// Genuine runtime failure reporting is distinct from inventory incompleteness.
+			assert.equal(options?.retryable, true);
 			return Promise.resolve();
 		},
 		requested: new Map(requested.map((stream) => [stream, {}])) as never,
@@ -826,25 +855,31 @@ const stateStreams = (harness: ReturnType<typeof makeRecordingEmit>) =>
 		.filter((m) => m.type === "STATE")
 		.map((m) => (m as unknown as { stream: string }).stream);
 
-test("collectOrders completes orders on the source's own empty-state page", async () => {
+test("collectOrders retains partial orders on the source's own empty-state page", async () => {
 	const emptyShell =
 		'<div class="your-orders-content-container"><input id="searchOrdersInput"><p>No orders</p></div>';
 	const { failures, harness } = await runCollectOrders(
 		ordersSite([emptyShell], ""),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 	assert.equal(harness.emitted.length, 0);
 });
 
-test("collectOrders completes orders when the last page shows a disabled Next", async () => {
+test("collectOrders retains partial orders when the last page shows a disabled Next", async () => {
 	const { failures, harness } = await runCollectOrders(
 		ordersSite([searchPage(1, [[ORDER_A, "B012345678"]], false)], DETAIL_HTML),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 	assert.deepEqual(
 		harness.emitted.map((r) => r.stream),
 		["orders", "order_items"],
@@ -875,8 +910,12 @@ test("collectOrders reports every requested order stream failed when the list en
 		["orders", "order_items"],
 	);
 	assert.equal(
-		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
-		0,
+		harness.protocolMessages.filter(
+			(m) =>
+				m.type === "SKIP_RESULT" &&
+				m.reason === "inventory_not_proven_complete",
+		).length,
+		2,
 	);
 });
 
@@ -952,8 +991,11 @@ test("collectOrders completes on the real-shape zero-order count element", async
 		ordersSite([empty], ""),
 		ALL_ORDER_STREAMS,
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders", "nutrition"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
 test("one page of rows with no pagination markup is unproven until a live capture shows the end signal", async () => {
@@ -986,10 +1028,13 @@ test("collectOrders fails every requested stream when a proven order's detail co
 	assert.match(failures[0]?.message ?? "", /no items and no cancellation/);
 	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.length, 0);
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.stream, "orders");
+	assert.equal(harness.emitted[0]?.data.item_count, null);
+	assert.equal(harness.emitted[0]?.data.total_cents, null);
 });
 
-test("collectOrders still completes a cancelled order whose detail renders no items", async () => {
+test("collectOrders remain partials a cancelled order whose detail renders no items", async () => {
 	const { failures, harness } = await runCollectOrders(
 		ordersSite(
 			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
@@ -997,8 +1042,11 @@ test("collectOrders still completes a cancelled order whose detail renders no it
 		),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 	assert.deepEqual(
 		harness.emitted.map((r) => r.stream),
 		["orders"],
@@ -1018,7 +1066,10 @@ test("collectOrders fails every requested stream when the detail grid container 
 		ALL_ORDER_STREAMS.map((s) => [s, true]),
 	);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.length, 0);
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.stream, "orders");
+	assert.equal(harness.emitted[0]?.data.item_count, null);
+	assert.equal(harness.emitted[0]?.data.total_cents, null);
 });
 
 test("collectOrders fails every requested stream when a delivery item row is an empty shell", async () => {
@@ -1034,7 +1085,10 @@ test("collectOrders fails every requested stream when a delivery item row is an 
 		ALL_ORDER_STREAMS.map((s) => [s, true]),
 	);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.length, 0);
+	assert.equal(harness.emitted.length, 1);
+	assert.equal(harness.emitted[0]?.stream, "orders");
+	assert.equal(harness.emitted[0]?.data.item_count, null);
+	assert.equal(harness.emitted[0]?.data.total_cents, null);
 });
 
 const TWO_ROW_SEARCH = searchPage(
@@ -1055,10 +1109,13 @@ test("collectOrders fails order_items when the detail lists fewer rows than the 
 		ordersSite([TWO_ROW_SEARCH], ONE_ITEM_DETAIL),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failedStreams(failures), [["order_items", true]]);
+	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
+		["order_items", true],
+	]);
 	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
 	// The order row is proven by the search list; the rows read are kept.
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.deepEqual(stateStreams(harness), []);
 	assert.deepEqual(
 		harness.emitted.map((r) => r.stream),
 		["orders", "order_items"],
@@ -1075,13 +1132,14 @@ test("collectOrders fails nutrition without its finishing STATE on an unreconcil
 		ALL_ORDER_STREAMS,
 	);
 	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
 		["order_items", true],
 		["nutrition", true],
 	]);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
-test("collectOrders completes every stream when the detail count matches the search count", async () => {
+test("collectOrders keeps all streams partial when parsed detail counts match search counts", async () => {
 	const { failures, harness } = await runCollectOrders(
 		ordersSite(
 			[
@@ -1095,8 +1153,11 @@ test("collectOrders completes every stream when the detail count matches the sea
 		),
 		ALL_ORDER_STREAMS,
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders", "nutrition"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
 /** A site whose navigation fails for URLs matched by `fails`. */
@@ -1190,8 +1251,11 @@ test("collectOrders fails order_items when a higher quantity offsets a missing p
 		ordersSite([TWO_ROW_SEARCH], ONE_ITEM_DETAIL.replace("Qty: 1", "Qty: 2")),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failedStreams(failures), [["order_items", true]]);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
+		["order_items", true],
+	]);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
 test("collectOrders still accepts a repeated product whose units fold into one detail row", async () => {
@@ -1210,8 +1274,11 @@ test("collectOrders still accepts a repeated product whose units fold into one d
 		),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
 const HIDDEN_EMPTY_STATES = [
@@ -1249,8 +1316,11 @@ test("a visible empty-state element is still the source's own empty state", asyn
 		),
 		["orders"],
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
 const ORDER_C = "333-3333333-3333333";
@@ -1356,7 +1426,10 @@ for (const [label, wrap] of HIDDEN_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 0);
+		assert.equal(harness.emitted.length, 1);
+		assert.equal(harness.emitted[0]?.stream, "orders");
+		assert.equal(harness.emitted[0]?.data.item_count, null);
+		assert.equal(harness.emitted[0]?.data.total_cents, null);
 	});
 
 	test(`collectOrders fails every requested stream on hidden pagination (${label})`, async () => {
@@ -1391,7 +1464,10 @@ for (const [label, wrap] of HIDDEN_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 0);
+		assert.equal(harness.emitted.length, 1);
+		assert.equal(harness.emitted[0]?.stream, "orders");
+		assert.equal(harness.emitted[0]?.data.item_count, null);
+		assert.equal(harness.emitted[0]?.data.total_cents, null);
 	});
 }
 
@@ -1401,8 +1477,11 @@ test("collectOrders fails order_items when a hidden detail row cannot offset the
 		ordersSite([TWO_ROW_SEARCH], detail),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failedStreams(failures), [["order_items", true]]);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.deepEqual(failedStreams(failures), [
+		["orders", true],
+		["order_items", true],
+	]);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
 test("collectOrders ignores a hidden search row when it counts the order's items", async () => {
@@ -1416,11 +1495,14 @@ test("collectOrders ignores a hidden search row when it counts the order's items
 		ordersSite([search], ONE_ITEM_DETAIL),
 		["orders", "order_items"],
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
-test("a visible cancellation marker and visible pagination still complete", async () => {
+test("a visible cancellation marker and visible pagination remain partial", async () => {
 	const { failures, harness } = await runFast(
 		ordersSite(
 			[searchPage(1, [[ORDER_A, "B012345678"]], false)],
@@ -1428,8 +1510,11 @@ test("a visible cancellation marker and visible pagination still complete", asyn
 		),
 		ALL_ORDER_STREAMS,
 	);
-	assert.deepEqual(failures, []);
-	assert.deepEqual(stateStreams(harness), ["orders", "nutrition"]);
+	assert.ok(
+		failures.length > 0 &&
+			failures.every((failure) => failure.retryable === true),
+	);
+	assert.deepEqual(stateStreams(harness), []);
 });
 
 function ordersSiteByOrder(
@@ -1501,9 +1586,10 @@ test("partial delivery keeps reading after the first unreadable detail", async (
 	assert.deepEqual(stateStreams(harness), []);
 	assert.deepEqual(
 		harness.emitted.map((r) => r.stream),
-		["orders", "order_items"],
+		["orders", "orders", "order_items"],
 	);
-	assert.equal(harness.emitted[0]?.data.id, ORDER_B);
+	assert.equal(harness.emitted[0]?.data.id, ORDER_A);
+	assert.equal(harness.emitted[1]?.data.id, ORDER_B);
 });
 
 test("a proven list keeps reading after one unreadable detail, then fails without STATE", async () => {
@@ -1535,7 +1621,7 @@ test("a proven list keeps reading after one unreadable detail, then fails withou
 	assert.match(failures[0]?.message ?? "", /no items and no cancellation/);
 	assert.match(failures[0]?.message ?? "", /1 of 2 orders/);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.filter((r) => r.stream === "orders").length, 1);
+	assert.equal(harness.emitted.filter((r) => r.stream === "orders").length, 2);
 });
 
 // ─── Review round (latest): inert ancestry; partial-delivery navigation ──
@@ -1559,7 +1645,10 @@ for (const [label, wrap] of INERT_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 0);
+		assert.equal(harness.emitted.length, 1);
+		assert.equal(harness.emitted[0]?.stream, "orders");
+		assert.equal(harness.emitted[0]?.data.item_count, null);
+		assert.equal(harness.emitted[0]?.data.total_cents, null);
 	});
 
 	test(`collectOrders fails every requested stream on inert pagination (${label})`, async () => {
@@ -1592,7 +1681,10 @@ for (const [label, wrap] of INERT_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 0);
+		assert.equal(harness.emitted.length, 1);
+		assert.equal(harness.emitted[0]?.stream, "orders");
+		assert.equal(harness.emitted[0]?.data.item_count, null);
+		assert.equal(harness.emitted[0]?.data.total_cents, null);
 	});
 }
 
@@ -1687,7 +1779,7 @@ for (const failure of [
 		// The order read before the failure is kept.
 		assert.deepEqual(
 			harness.emitted.map((r) => r.stream),
-			["orders", "order_items"],
+			["orders", "order_items", "orders"],
 		);
 		assert.equal(harness.emitted[0]?.data.id, ORDER_A);
 	});

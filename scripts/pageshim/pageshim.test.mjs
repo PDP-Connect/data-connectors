@@ -1398,6 +1398,8 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
 	assertCleanRun(r);
 	assert.equal(r.result["github.starred"], undefined);
+	assert.equal(r.data.error, undefined);
+	assert.match(r.data.status, /^Partial:/);
 	// The host projects the SKIP_RESULT message, not its reason code. The
 	// message names the specific withholding cause after a fixed prefix.
 	assert.equal(r.result.errors.length, 1);
@@ -1409,7 +1411,7 @@ test("github_browser: an incomplete stream is an omitted error", {
 	assert.deepEqual(
 		{ ...error, reason: undefined },
 		{
-			errorClass: "runtime_error",
+			errorClass: "partial",
 			reason: undefined,
 			disposition: "omitted",
 			scope: "github.starred",
@@ -3621,4 +3623,153 @@ test("oura_browser: until-only consecutive runs acknowledge covered state on bot
 		const instantErrors = resultStreaming ? instant.data.error : instant.result.errors;
 		assert.match(JSON.stringify(instantErrors), /date/);
 	}
+});
+
+test("oura_browser: narrow then wider consent retains clipped debt on both hosts", { timeout: 180_000 }, async () => {
+  const { pageshimCase: c, recordingDailyFixture } = await import("./fixtures/oura_browser.mjs");
+  const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-clipped-debt.js") });
+  for (const resultStreaming of [false, true]) for (const debt of ["failed", "refresh"]) {
+    const fixture = recordingDailyFixture();
+    const run = (initialState, until) => runHarness({ bundle: built.outfile,
+      fixtures: { ...c.fixtures, resolve: fixture.resolve },
+      scopes: [{ name: "oura.sleep", time_range: { since: "2026-01-01", until } }],
+      initialState, resultStreaming, clockNowMs: Date.parse("2026-10-17T12:00:00Z"),
+      resultSpoolDirectory: join(out, `oura-clipped-${resultStreaming}-${debt}-${until}`) });
+    const first = await run({ "oura.sleep": { next_day: "2026-10-18", requested_since: "2026-01-01",
+      refresh_from: debt === "refresh" ? "2026-01-01" : "2026-10-15",
+      failed_windows: debt === "failed" ? [{ start: "2026-01-01", end: "2026-01-10" }] : [] } }, "2026-01-05");
+    assertCleanRun(first);
+    assert.equal(first.data.error, undefined);
+    assert.match(first.data.status, /^Complete!/);
+    assert.deepEqual(fixture.windows.splice(0), [{ start: "2026-01-01", end: "2026-01-04" }]);
+    const cursor = first.states["oura.sleep"];
+    if (debt === "failed") assert.deepEqual(cursor.failed_windows, [{ start: "2026-01-05", end: "2026-01-10" }]);
+    assert.equal(cursor.refresh_from, "2026-01-05");
+    const second = await run(first.states, "2026-01-11");
+    assertCleanRun(second);
+    assert.equal(second.data.error, undefined);
+    assert.match(second.data.status, /^Complete!/);
+    assert.deepEqual(fixture.windows, [{ start: "2026-01-05", end: "2026-01-10" }]);
+    const result = resultStreaming ? second.streamDone : second.result;
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.exportSummary.count, 6);
+    const scope = resultStreaming ? JSON.parse(await readFile(second.streamScopeFiles["oura.sleep"], "utf8")) : second.result["oura.sleep"];
+    assert.deepEqual(scope.records.map(({ day }) => day),
+      ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-10"]);
+    assert.deepEqual(second.states["oura.sleep"].failed_windows, []);
+    assert.equal(second.states["oura.sleep"].next_day, "2026-10-18");
+  }
+});
+
+test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-seven-streams.js") });
+	for (const resultStreaming of [false, true]) {
+		const r = await runHarness({ bundle: built.outfile, fixtures: c.fixtures,
+			scopes: c.scopes, resultStreaming, gotoDelayMs: 0,
+			resultSpoolDirectory: join(out, "spotify-seven-" + resultStreaming) });
+		assert.deepEqual(r.ret, { ok: true });
+		assertCleanRun(r);
+		assert.equal(r.data.error, undefined);
+		assert.match(r.data.status, /^Partial:/);
+		const result = resultStreaming ? r.streamDone : r.result;
+		assert.deepEqual(result.exportSummary, c.exportSummary);
+		assert.deepEqual(result.errors, c.partialErrors);
+		assert.equal(result.errors.length, 3, "no failure companion for an incomplete inventory");
+		for (const stream of ["recently_played_contexts", "top_artists", "top_tracks"]) {
+			assert.equal(r.states["spotify." + stream], undefined);
+		}
+		assert.equal(r.states["spotify.saved_tracks"].completion.rows, 1);
+		if (resultStreaming) {
+			assert.equal(r.streamResult.completed, true);
+			assert.equal(r.streamResult.scopeCount, 7);
+		}
+	}
+});
+
+test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeout: 180_000 }, async (t) => {
+	const fx = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-state.js") });
+	const scopes = ["spotify.saved_tracks"];
+	const scope = "spotify.saved_tracks";
+	const options = { bundle: built.outfile, fixtures: fx.spotifyFixtures, scopes, gotoDelayMs: 0 };
+	await t.test("many source pages keep evaluate source bounded and preserve every row", async () => {
+		const offsets = [];
+		const evaluateSizes = [];
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const base = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return base;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return base;
+			const offset = body.variables.offset;
+			offsets.push(offset);
+			return { ...base, body: JSON.stringify({ data: { me: { library: { tracks: {
+				offset, totalCount: 301,
+				items: Array.from({ length: Math.min(100, 301 - offset) }, (_, i) => fx.savedTrack("track" + (offset + i))),
+			} } } } }) };
+		} };
+		const r = await runHarness({ ...options, fixtures, observeBridge(method, args) {
+			if (method === "evaluate") evaluateSizes.push(String(args[0]).length);
+		} });
+		assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.equal(r.result[scope].records.length, 301);
+		assert.deepEqual(offsets, [0, 100, 200, 300]);
+		assert.ok(evaluateSizes.every((size) => size <= 65_536), String(Math.max(...evaluateSizes)));
+		assert.ok(r.calls.evaluate > offsets.length);
+		assert.equal(r.states[scope].completion.rows, 301);
+		assert.equal(r.states[scope].completion.pages, 4);
+	});
+	await t.test("initial state survives failed result acceptance and old hosts receive no STATE", async () => {
+		const prior = { full_scan_at: "2026-01-01T00:00:00.000Z", marker: "synthetic-prior" };
+		const failed = await runHarness({ ...options, initialState: { [scope]: prior }, failResultWrite: true });
+		assertCleanRun(failed);
+		assert.deepEqual(failed.states[scope], prior);
+		const old = await runHarness({ ...options, supportsStateArgument: false });
+		assertCleanRun(old);
+		assert.deepEqual(old.stateMessages, []);
+		assert.equal(old.result[scope].records.length, 1);
+		const streamed = await runHarness({ ...options, resultStreaming: true,
+			resultSpoolDirectory: join(out, "spotify-state-stream") });
+		assertCleanRun(streamed);
+		assert.equal(streamed.streamResult.completed, true);
+		assert.equal(streamed.states[scope].completion.rows, 1);
+	});
+	await t.test("an unavailable source row upserts covered rows, remains partial, and cannot advance STATE", async () => {
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const response = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return response;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return response;
+			const valid = fx.savedTrack("covered");
+			const invalid = fx.savedTrack("unavailable");
+			delete invalid.track.data.name;
+			return { ...response, body: JSON.stringify({ data: { me: { library: { tracks: {
+				offset: 0, totalCount: 2, items: [valid, invalid],
+			} } } } }) };
+		} };
+		const r = await runHarness({ ...options, fixtures });
+		assertCleanRun(r);
+		assert.equal(r.result[scope].records.length, 1);
+		assert.match(r.data.status, /^Partial:/);
+		assert.ok(r.result.errors.some((error) => /inventory completeness is unproven/.test(error.reason)));
+		assert.equal(r.states[scope], undefined);
+	});
+	await t.test("unbound pagination totals never commit STATE", async () => {
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const response = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return response;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return response;
+			const payload = JSON.parse(response.body);
+			delete payload.data.me.library.tracks.totalCount;
+			return { ...response, body: JSON.stringify(payload) };
+		} };
+		const r = await runHarness({ ...options, fixtures });
+		assertCleanRun(r);
+		assert.equal(r.states[scope], undefined);
+		assert.ok(r.result.errors.length > 0);
+		assert.doesNotMatch(r.data.status, /^Complete!/);
+	});
 });

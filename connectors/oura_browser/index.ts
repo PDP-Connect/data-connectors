@@ -430,6 +430,9 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       continue;
     }
     const failedWindows: Array<{ start: string; end: string }> = [];
+    // Preserve unattempted debt outside this run; new failures replace attempted parts.
+    let remainingFailed = (previous?.failed_windows ?? []).filter(({ start, end }) =>
+      isUtcDay(start) && isUtcDay(end) && start <= end);
     let retryable = true;
     let nextDay = startDate;
     let refreshSucceeded = false;
@@ -437,6 +440,15 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       const result = await fetchWindow(ctx, stream, window.start, window.end);
       const { data, completedThrough } = result;
       failedWindows.push(...result.failedWindows);
+      remainingFailed = remainingFailed.flatMap((failed) => {
+        if (failed.end < window.start || failed.start > window.end) return [failed];
+        return [
+          ...(failed.start < window.start
+            ? [{ start: failed.start, end: addDays(window.start, -1) }] : []),
+          ...(failed.end > window.end
+            ? [{ start: addDays(window.end, 1), end: failed.end }] : []),
+        ];
+      });
       retryable &&= result.retryable;
       // A recent refresh must never jump the cursor over uncollected history
       // or a failed historical window.
@@ -495,10 +507,12 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext): Promise<vo
       cursor: {
         next_day: nextDay,
         ...(refreshDays > 0 ? { refresh_from: refreshSucceeded
-          ? (refreshEnd < requestedEnd ? addDays(refreshEnd, 1) : (requestedSince && requestedSince > overlapStart ? requestedSince : overlapStart))
-          : refreshStart } : {}),
+          // A clipped until does not prove recovery through today's overlap.
+          ? (refreshEnd < overlapStart ? addDays(refreshEnd, 1) : (requestedSince && requestedSince > overlapStart ? requestedSince : overlapStart))
+          : refreshStart } : (isUtcDay(previous?.refresh_from)
+            ? { refresh_from: previous.refresh_from } : {})),
         requested_since: requestedSince ?? previous?.requested_since ?? null,
-        failed_windows: failedWindows,
+        failed_windows: [...remainingFailed, ...failedWindows],
       },
     });
   }

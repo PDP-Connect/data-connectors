@@ -1,0 +1,9 @@
+<!doctype html><style>.port{height:100px;overflow-y:auto}li{height:150px}</style><main>
+<section class="port" id="left"><ul><li data-index="0"><a data-qe-id="itemRowDetailsName" href="/product-detail/first/500">First</a></li></ul></section>
+<section class="port" id="right"><ul><li data-index="2"><a data-qe-id="itemRowDetailsName" href="/product-detail/third/502">Third</a></li></ul></section>
+</main><script>
+for (const [id,index] of [["left",1],["right",3]]) {
+ const port=document.getElementById(id);
+ port.addEventListener("scroll",()=>{ if(port.dataset.loaded)return;port.dataset.loaded="true";port.querySelector("ul").insertAdjacentHTML("beforeend",'<li data-index="'+index+'"><a data-qe-id="itemRowDetailsName" href="/product-detail/extra/'+(500+index)+'">Extra '+index+'</a></li>');});
+}
+</script>

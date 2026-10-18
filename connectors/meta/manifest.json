@@ -9,7 +9,7 @@
 	},
 	"connector_key": "meta",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-	"version": "0.4.25",
+	"version": "0.4.29",
 	"display_name": "Instagram (Meta)",
 	"brand": {
 		"icon": "icon.svg",
@@ -39,6 +39,9 @@
 		"public_listing": {
 			"tier": "development"
 		}
+	},
+	"reason_display_messages": {
+		"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
 	},
 	"streams": [
 		{
