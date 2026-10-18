@@ -25,7 +25,7 @@ The root `npm test` runs these lanes, each in its own sandbox:
 
 ## What is shared, per-worker, per-test, locked
 
-- Shared: the checkout, `node_modules`, the Playwright browser cache, the built PageShim bundles of one run. Tests treat them as read-only, except that the namespace tests plant and remove sockets under the repository root (see below).
+- Shared: the checkout, `node_modules`, the Playwright browser cache, the built PageShim bundles of one run. Tests treat them as read-only, with two exceptions: the namespace tests plant and remove sockets under the repository root (see below), and PageShim tests build bundles under `.tmp/pageshim/` and `.scratch/`, removing them after a passing run.
 - Per test file: one `node --test` child process. Module state (PageShim fixture modules with `setLoggedIn`) is per file; tests in one file run one after another.
 - Per test: temp directories (`mkdtemp` under the sandbox's private `/tmp`), local HTTP servers on port 0, iMessage `chat.db` files, PageShim browsers (one Chromium per `runHarness`, about 140 ms to start).
 - Locked (serial): the namespaces lane. Its files share the repository root as global state (`isolation-mechanism.test.ts` plants sockets under it that `scenario-verify-strict.test.ts`'s isolation scan refuses), so one run executes them one at a time. Nothing locks them across two runs in the same checkout, so do not run two suites in one checkout at once.
