@@ -26,8 +26,40 @@ export function testFileArgument(testFile: string): string {
 	return testFile;
 }
 
+const FAST_BASE_CANDIDATES = [
+	["merge-base", "HEAD", "origin/main"],
+	["rev-parse", "--verify", "main"],
+] as const;
+
+/** `--fast` default base: merge-base with origin/main, else main, else HEAD. */
+function resolveFastBase(): string {
+	for (const args of FAST_BASE_CANDIDATES) {
+		try {
+			const ref = execFileSync("git", [...args], {
+				cwd: PACKAGE_ROOT,
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+			if (ref) {
+				console.error(
+					`[test:fast] base ${ref.slice(0, 12)} (from ${args.join(" ")})`,
+				);
+				return ref;
+			}
+		} catch {
+			// try the next candidate
+		}
+	}
+	console.error("[test:fast] base HEAD (no origin/main or main found)");
+	return "HEAD";
+}
+
 function main(): void {
-	const [baseRef] = process.argv.slice(2);
+	const rawArgs = process.argv.slice(2);
+	const fast = rawArgs.includes("--fast");
+	const baseRef =
+		rawArgs.find((arg) => arg !== "--fast") ??
+		(fast ? resolveFastBase() : undefined);
 	if (!baseRef) {
 		console.error("usage: pnpm test:related <base-ref>");
 		process.exit(1);
@@ -48,7 +80,19 @@ function main(): void {
 	};
 
 	console.error(`[test:related] ${selection.reason}`);
+	const rawConcurrency = process.env.TEST_CONCURRENCY ?? (fast ? "4" : "2");
 	if (selection.kind === "FULL_SUITE") {
+		if (fast) {
+			console.error(
+				`[test:fast] FULL_SUITE: ${selection.reason}. Running the full sandboxed lane (about 9 minutes at concurrency 4).`,
+			);
+			execFileSync("node", ["scripts/run-tests.mjs", "--lane", "sandboxed"], {
+				cwd: PACKAGE_ROOT,
+				stdio: "inherit",
+				env: { ...process.env, TEST_CONCURRENCY: rawConcurrency },
+			});
+			return;
+		}
 		execFileSync("node", ["scripts/run-tests.mjs"], {
 			cwd: PACKAGE_ROOT,
 			stdio: "inherit",
@@ -56,7 +100,6 @@ function main(): void {
 		return;
 	}
 
-	const rawConcurrency = process.env.TEST_CONCURRENCY ?? "2";
 	if (!POSITIVE_INTEGER.test(rawConcurrency)) {
 		console.error(
 			`TEST_CONCURRENCY must be a positive integer, got ${JSON.stringify(rawConcurrency)}`,
