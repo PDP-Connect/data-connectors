@@ -45,9 +45,9 @@ export const profileSchema = z.object({
 
 /**
  * orders stream (manifest required: id). One record per Whole Foods order.
- * `total_cents` is null when any detail item lacks a price. `item_count`
- * is the source-backed count from the complete search-page item rows and is
- * required so downstream legacy projections never receive an unproven count.
+ * `total_cents` and `item_count` remain null without complete, source-bound
+ * item inventory evidence. Parsed row counts and partial price sums are not
+ * order aggregates.
  * `order_date` is a
  * date-only ISO-8601 string (source precision — Amazon's order pages never
  * expose a time-of-day, so a datetime would fabricate precision, violating
@@ -55,7 +55,7 @@ export const profileSchema = z.object({
  */
 export const ordersSchema = z.object({
 	id: z.string().min(1).max(200),
-	item_count: z.number().int().min(0),
+	item_count: z.number().int().min(0).nullable(),
 	order_date: z
 		.string()
 		.regex(ISO_DATE_RE, "order_date must be YYYY-MM-DD")
@@ -81,6 +81,9 @@ export const orderItemsSchema = z.object({
 	product_url: z.url().nullable(),
 	quantity: z.number().min(0).nullable(),
 	unit_price_cents: z.number().int().min(0).nullable(),
+	quantity_unit: z.string().nullable().optional(),
+	price_unit: z.string().nullable().optional(),
+	line_total_cents: z.number().int().min(0).nullable().optional(),
 });
 
 /**
@@ -91,29 +94,35 @@ export const orderItemsSchema = z.object({
  * produced facts or which observed failure occurred. `confidence` reflects
  * match certainty for facts and is low for unsuccessful outcomes.
  */
-export const nutritionSchema = z.object({
-	calories: z.number().min(0).nullable(),
-	carbs_g: z.number().min(0).nullable(),
-	confidence: z.enum(["high", "medium", "low"]),
-	fat_g: z.number().min(0).nullable(),
-	fiber_g: z.number().min(0).nullable(),
-	name: pdppSafeText.max(1000).nullable(),
-	product_id: z
-		.string()
-		.regex(/^[A-Z0-9]{10}$/, "product_id must be a 10-char Amazon ASIN"),
-	protein_g: z.number().min(0).nullable(),
-	serving_size: z.string().max(200).nullable(),
-	servings_per_container: z.number().min(0).nullable(),
-	sodium_mg: z.number().min(0).nullable(),
-	source: z.enum([
-		"wholefoods_product_page",
-		"usda_fdc",
-		"not_found",
-		"error",
-		"blocked",
-	]),
-	sugar_g: z.number().min(0).nullable(),
-});
+export const nutritionSchema = z
+	.object({
+		id: z.string().regex(/^[A-Z0-9]{10}$/),
+		calories: z.number().min(0).nullable(),
+		carbs_g: z.number().min(0).nullable(),
+		confidence: z.enum(["high", "medium", "low"]),
+		fat_g: z.number().min(0).nullable(),
+		fiber_g: z.number().min(0).nullable(),
+		name: pdppSafeText.max(1000).nullable(),
+		product_id: z
+			.string()
+			.regex(/^[A-Z0-9]{10}$/, "product_id must be a 10-char Amazon ASIN"),
+		protein_g: z.number().min(0).nullable(),
+		serving_size: z.string().max(200).nullable(),
+		servings_per_container: z.number().min(0).nullable(),
+		sodium_mg: z.number().min(0).nullable(),
+		source: z.enum([
+			"wholefoods_product_page",
+			"usda_fdc",
+			"not_found",
+			"error",
+			"blocked",
+		]),
+		sugar_g: z.number().min(0).nullable(),
+	})
+	.refine((record) => record.id === record.product_id, {
+		message: "nutrition id must equal its source product_id",
+		path: ["id"],
+	});
 
 /**
  * Stream → schema registry. Single source of truth for the streams this
