@@ -178,6 +178,8 @@ test("every declared mobile connector remains PageShim eligible", () => {
 			browser: ["page_script_evaluation", "page_navigation"],
 		},
 		youtube: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
 		meta: {
 			network: ["same_origin_page_fetch"],
