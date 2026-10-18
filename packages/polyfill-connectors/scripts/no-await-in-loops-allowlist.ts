@@ -4746,7 +4746,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/test-fixtures/scenario-watchdog-paced-connector.ts",
-			line: 65,
+			line: 76,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collect(): each record's pacing sleep must complete before that record's own RECORD emission so the watchdog-window proof observes real inter-record gaps, not a burst",
