@@ -378,7 +378,7 @@ function searchProductsAppearInDetail(
 
 function buildOrderRecord(
 	stub: OrderStub,
-	_orderDateRaw: string | null,
+	orderDateRaw: string | null,
 	_items: readonly OrderDetailItem[],
 ): OrderRecord {
 	// Parsed rows do not establish the complete source item inventory.
@@ -387,7 +387,7 @@ function buildOrderRecord(
 	return {
 		id: stub.orderId,
 		item_count: null,
-		order_date: parseOrderDateIso(stub.orderDateRaw),
+		order_date: parseOrderDateIso(stub.orderDateRaw ?? orderDateRaw),
 		order_url: stub.orderUrl,
 		status: null,
 		total_cents: null,

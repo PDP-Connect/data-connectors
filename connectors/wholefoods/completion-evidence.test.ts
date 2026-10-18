@@ -59,6 +59,48 @@ test("unproven order totals and absent quantity stay unknown", () => {
 	assert.equal(order.total_cents, null);
 });
 
+test("order-bound detail date survives a missing search-stub date", () => {
+	const detail = parseOrderDetailDom(`<html><body>
+		<div>Order placed March 3, 2026</div>
+		<div data-component="purchasedItemsRightGrid"><a href="/dp/B012345678">Source product</a> Qty: 1 $2.50</div>
+	</body></html>`);
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.orderDateRaw, "March 3, 2026");
+	const order = buildOrderRecord(
+		{
+			orderId: "order",
+			orderUrl: "https://www.amazon.com/order",
+			orderDateRaw: null,
+			expectedItemCount: 1,
+		},
+		detail.orderDateRaw,
+		detail.items,
+	);
+	assert.equal(order.order_date, "2026-03-03");
+	assert.equal(order.item_count, null);
+	assert.equal(order.total_cents, null);
+});
+
+test("unrelated body date is never used as the order date", () => {
+	const detail = parseOrderDetailDom(`<html><body>
+		<div>Return eligible until April 3, 2026</div>
+		<div data-component="purchasedItemsRightGrid"><a href="/dp/B012345678">Source product</a> Qty: 1 $2.50</div>
+	</body></html>`);
+	assert.equal(detail.items.length, 1);
+	assert.equal(detail.orderDateRaw, null);
+	const order = buildOrderRecord(
+		{
+			orderId: "order",
+			orderUrl: "https://www.amazon.com/order",
+			orderDateRaw: null,
+			expectedItemCount: 1,
+		},
+		detail.orderDateRaw,
+		detail.items,
+	);
+	assert.equal(order.order_date, null);
+});
+
 test("USDA absent serving units never imply grams", () => {
 	const facts = mapUsdaNutrients(
 		{

@@ -482,7 +482,10 @@ function detailOrderDate(document: Document): string | null {
 	const dateMatch =
 		/(?:Order Placed|Ordered|Order placed)[:\s]*([A-Z][a-z]+ \d+, \d{4})/i.exec(
 			pageText,
-		) ?? /([A-Z][a-z]+ \d+, \d{4})/.exec(pageText);
+		) ??
+		/Purchased on\s+(?:[A-Z][a-z]+,\s*)?([A-Z][a-z]+ \d+, \d{4})/i.exec(
+			textOf(renderedFirst(document, "#ufpo-order-status-secondary")),
+		);
 	return dateMatch?.[1] ?? null;
 }
 
