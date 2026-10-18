@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { stringifyForJsonl } from "@pdpp/connector-protocol";
 import type {
 	DetailGapStartEntry,
@@ -33,6 +33,56 @@ import type {
 } from "./connector-runtime.ts";
 
 const VM_RSS_STATUS_RE = /VmRSS:\s*(\d+)\s*kB/;
+
+function killLinuxProcessTree(rootPid: number): void {
+	const kill = (pid: number): void => {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+		}
+	};
+
+	for (let pass = 0; pass < 2; pass += 1) {
+		const childrenByParent = new Map<number, number[]>();
+		for (const entry of readdirSync("/proc", { withFileTypes: true })) {
+			if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) continue;
+			const pid = Number(entry.name);
+			try {
+				const stat = readFileSync(`/proc/${entry.name}/stat`, "utf8");
+				const fields = stat
+					.slice(stat.lastIndexOf(")") + 1)
+					.trim()
+					.split(/\s+/u);
+				const parentPid = Number(fields[1]);
+				if (!Number.isSafeInteger(parentPid)) continue;
+				const children = childrenByParent.get(parentPid) ?? [];
+				children.push(pid);
+				childrenByParent.set(parentPid, children);
+			} catch {
+				// A process can exit while /proc is being scanned.
+			}
+		}
+
+		const descendants: number[] = [];
+		const pending = [rootPid];
+		const seen = new Set(pending);
+		while (pending.length > 0) {
+			const parentPid = pending.shift();
+			if (parentPid === undefined) continue;
+			for (const pid of childrenByParent.get(parentPid) ?? []) {
+				if (seen.has(pid)) continue;
+				seen.add(pid);
+				descendants.push(pid);
+				pending.push(pid);
+			}
+		}
+
+		for (const pid of descendants.reverse()) kill(pid);
+	}
+
+	kill(rootPid);
+}
 
 /** A record that passed (or bypassed) shape-check and would flow
  *  downstream as a RECORD in production. */
@@ -208,7 +258,6 @@ export function runConnectorProtocolSubprocess(
 					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
 					...options.env,
 				},
-				detached: process.platform !== "win32",
 				stdio: ["pipe", "pipe", "pipe"],
 			},
 		);
@@ -253,26 +302,16 @@ export function runConnectorProtocolSubprocess(
 			fn();
 		};
 
-		const killProcessGroup = (): void => {
-			if (process.platform === "win32") {
-				if (!child.killed) child.kill("SIGKILL");
+		const killChildTree = (): void => {
+			if (process.platform === "linux" && child.pid) {
+				killLinuxProcessTree(child.pid);
 				return;
 			}
-			if (!child.pid) return;
-			try {
-				process.kill(-child.pid, "SIGKILL");
-			} catch (error) {
-				if (
-					(error as NodeJS.ErrnoException).code !== "ESRCH" &&
-					!child.killed
-				) {
-					child.kill("SIGKILL");
-				}
-			}
+			if (!child.killed) child.kill("SIGKILL");
 		};
 
 		const rejectAndKill = (error: Error): void => {
-			killProcessGroup();
+			killChildTree();
 			finish(() => reject(error));
 		};
 
@@ -327,7 +366,6 @@ export function runConnectorProtocolSubprocess(
 		// is documented to fire only after the stdio streams have ended, so every
 		// byte the child wrote is guaranteed parsed into `messages` by then.
 		child.on("close", (code, signal) => {
-			killProcessGroup();
 			if (stdoutBuffer.trim()) {
 				parseLine(stdoutBuffer);
 			}

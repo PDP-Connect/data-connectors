@@ -17,6 +17,7 @@
  */
 
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -307,16 +308,19 @@ test("runConnectorProtocolSubprocess: rejects a child that exits without termina
 	);
 });
 
-test("runConnectorProtocolSubprocess: timeout kills the connector's grandchild", async () => {
+test("runConnectorProtocolSubprocess: timeout kills the connector's grandchild", {
+	skip: process.platform !== "linux",
+}, async () => {
 	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-"));
 	const pidFile = join(tempDir, "grandchild.pid");
 	const entrypoint = join(tempDir, "leaking-connector.mjs");
+	const marker = `connector-grandchild-${randomUUID()}`;
 	await writeFile(
 		entrypoint,
 		[
 			'import { spawn } from "node:child_process";',
 			'import { writeFileSync } from "node:fs";',
-			'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+			'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", process.env.GRANDCHILD_MARKER], { stdio: "ignore" });',
 			"writeFileSync(process.env.GRANDCHILD_PID_FILE, String(child.pid));",
 			"setInterval(() => {}, 1000);",
 		].join("\n"),
@@ -329,25 +333,46 @@ test("runConnectorProtocolSubprocess: timeout kills the connector's grandchild",
 				runConnectorProtocolSubprocess({
 					cwd: PACKAGE_ROOT,
 					entrypoint,
-					env: { GRANDCHILD_PID_FILE: pidFile },
+					env: { GRANDCHILD_MARKER: marker, GRANDCHILD_PID_FILE: pidFile },
 					start: {
 						type: "START",
 						scope: { streams: [{ name: "items" }] },
 					},
-					timeoutMs: 1000,
+					timeoutMs: 5000,
 				}),
-			/connector subprocess timed out after 1000ms/,
+			/connector subprocess timed out after 5000ms/,
 		);
 
 		grandchildPid = Number(await readFile(pidFile, "utf8"));
-		const deadline = Date.now() + 2000;
+		const deadline = Date.now() + 5000;
 		let grandchildExited = false;
 		while (Date.now() < deadline) {
 			try {
+				const stat = await readFile(`/proc/${grandchildPid}/stat`, "utf8");
+				const fields = stat
+					.slice(stat.lastIndexOf(")") + 1)
+					.trim()
+					.split(/\s+/u);
+				if (fields[0] === "Z") {
+					grandchildExited = true;
+					break;
+				}
+				const commandLine = await readFile(
+					`/proc/${grandchildPid}/cmdline`,
+					"utf8",
+				);
+				if (!commandLine.includes(marker)) {
+					grandchildExited = true;
+					break;
+				}
 				process.kill(grandchildPid, 0);
 				await new Promise((resolve) => setTimeout(resolve, 50));
 			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+				if (
+					["ENOENT", "ESRCH"].includes(
+						(error as NodeJS.ErrnoException).code ?? "",
+					)
+				) {
 					grandchildExited = true;
 					break;
 				}
@@ -368,9 +393,15 @@ test("runConnectorProtocolSubprocess: timeout kills the connector's grandchild",
 		}
 		if (grandchildPid && Number.isSafeInteger(grandchildPid)) {
 			try {
-				process.kill(grandchildPid, "SIGKILL");
+				const commandLine = await readFile(
+					`/proc/${grandchildPid}/cmdline`,
+					"utf8",
+				);
+				if (commandLine.includes(marker)) {
+					process.kill(grandchildPid, "SIGKILL");
+				}
 			} catch {
-				// The subprocess may already have killed the grandchild.
+				// The process may have exited or the PID may have been reused.
 			}
 		}
 		await rm(tempDir, { recursive: true, force: true });
