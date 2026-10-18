@@ -19,7 +19,6 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"discord_browser",
 		"github_browser",
 		"icloud_notes",
-		},
 		"linkedin",
 		"meta",
 		"oura_browser",
