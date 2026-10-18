@@ -18,5 +18,6 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	icloud_notes: {
 		folders: null,
 		notes: null,
+		profile: null,
 	},
 };

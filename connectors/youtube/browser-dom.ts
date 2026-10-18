@@ -187,7 +187,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 	description: string | null;
 	is_verified: boolean | null;
 	notifications: boolean | null;
-	subscriber_count_text: string | null;
+	subscriber_count_text?: string;
 }> {
 	return Array.from(doc.querySelectorAll("ytd-channel-renderer"))
 		.flatMap((node) => {
@@ -209,6 +209,9 @@ export function readSubscriptions(doc: Document = document): Array<{
 				'ytd-subscription-notification-toggle-button-renderer-next button, [aria-label*="All notifications"], yt-button-shape[aria-label*="notification"] button, [aria-label*="notifications"]',
 			);
 			const bellLabel = bell?.getAttribute("aria-label")?.toLowerCase() ?? "";
+			const subscriberCountText = node
+				.querySelector("#metadata span#video-count")
+				?.textContent?.trim();
 			return [
 				{
 					channel_url: url.href,
@@ -224,10 +227,9 @@ export function readSubscriptions(doc: Document = document): Array<{
 						node
 							.querySelector("yt-formatted-string#description")
 							?.textContent?.trim() || null,
-					subscriber_count_text:
-						node
-							.querySelector("#metadata span#video-count")
-							?.textContent?.trim() || null,
+					...(subscriberCountText
+						? { subscriber_count_text: subscriberCountText }
+						: {}),
 					is_verified: badgeArea
 						? Boolean(
 								badgeArea.querySelector(
