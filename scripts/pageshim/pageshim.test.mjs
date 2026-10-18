@@ -3675,10 +3675,13 @@ test("meta: independent streams preserve posts gaps, WebCrypto ids and accepted 
   assertCleanRun(r);
   assert.deepEqual(r.ret, {ok: true});
   assert.equal(r.data.error, undefined);
+  assert.match(r.data.status, /^Partial:/);
   const result = resultStreaming ? r.streamDone : r.result;
   assert.deepEqual(result.errors.map(e => e.scope), ["instagram.posts", "instagram.post_likes", "instagram.ads"]);
   assert.ok(result.errors.every(e => /not proven complete/.test(e.reason)));
-  assert.match(result.errors[0].reason, /passive GraphQL.*page-minted/);
+  for (const error of result.errors.slice(0, 2)) {
+   assert.match(error.reason, /passive GraphQL.*page-minted/);
+  }
   assert.deepEqual(r.stateMessages.map(m => m.stream), ["instagram.following"]);
   assert.deepEqual(r.states["instagram.following"], {});
   const scope = async name => resultStreaming
@@ -3720,6 +3723,7 @@ test("meta: following empty, contradictory, owner and partial-page evidence neve
   assert.equal(r.result["instagram.following"]?.records.length ?? 0, c.count, c.name);
   assert.equal(r.stateMessages.length, c.complete ? 1 : 0, c.name);
   assert.equal(r.result.errors.length, c.complete ? 0 : 1, c.name);
+  assert.match(r.data.status, c.complete ? /^Complete!/ : /^Partial:/, c.name);
   if (!c.complete) assert.match(r.result.errors[0].reason, /not proven complete/, c.name);
  }
 });
@@ -3739,6 +3743,22 @@ test("meta: missing profile fields remain a partial owner profile and legacy hos
   assert.equal(r.data.error, undefined);
   assert.equal(r.result["instagram.profile"].records[0].id, "owner-1");
   assert.ok(r.result.errors.some(e => e.scope === "instagram.profile"));
+  assert.match(r.data.status, /^Partial:/);
   assert.deepEqual(r.stateMessages, []);
  }
+});
+
+test("meta: rejected streamed completion never commits following STATE", {timeout: 60_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-rejected-state.js")});
+ const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
+  scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}},
+  resultStreaming: true, resultSpoolDirectory: join(out, "meta-rejected-state"),
+  resultStreamFailure: {key: "result:done"},
+ });
+ assertCleanRun(r);
+ assert.ok(r.data.error);
+ assert.deepEqual(r.states, {"instagram.following": {old: true}});
+ assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+ assert.notEqual(r.streamResult.completed, true);
 });
