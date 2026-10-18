@@ -958,6 +958,120 @@ test("classifyHebDetailFailure: a non-retryable navigation failure classifies as
 	);
 });
 
+// ─── HTTP status of the detail navigation ─────────────────────────────────
+// `page.goto` resolves with a response for a 403 or a 503; it throws only for
+// transport failures. The status has to be weighed against what the page
+// says: a challenge or sign-in page behind a 403 is a dead session, and a 5xx
+// is transient, so neither is a connector defect.
+
+const ORDER_DETAIL_URL =
+	"https://www.heb.com/my-account/order-history/HEB1000000001";
+
+function readFixture(name: string): string {
+	return readFileSync(join(FIXTURES_DIR, name), "utf8");
+}
+
+/** A detail page whose `goto` answers with the next status in `statuses`
+ *  (the last one repeats) and then serves `content` at `landedUrl`. */
+function makeStatusPageStub(opts: {
+	content: string;
+	landedUrl?: string;
+	statuses: number[];
+}): { gotoCalls: () => number; page: Page } {
+	let gotoCalls = 0;
+	const base = makePageStub({
+		content: opts.content,
+		...(opts.landedUrl ? { url: opts.landedUrl } : {}),
+	});
+	const page = new Proxy(base, {
+		get(target, prop): unknown {
+			if (prop === "goto") {
+				return (): Promise<unknown> => {
+					const status =
+						opts.statuses[Math.min(gotoCalls, opts.statuses.length - 1)] ?? 200;
+					gotoCalls += 1;
+					return Promise.resolve({
+						ok: () => status >= 200 && status < 300,
+						status: () => status,
+					});
+				};
+			}
+			return Reflect.get(target, prop);
+		},
+	});
+	return { gotoCalls: () => gotoCalls, page };
+}
+
+const fetchWithoutWaiting = (page: Page) =>
+	fetchOrderDetail(page, "HEB1000000001", {
+		navigationRetryMinTimeoutMs: 1,
+		waitForHydration: immediateWait,
+	});
+
+for (const [label, content] of [
+	["Incapsula block page", readFixture("incapsula-block.html")],
+	["Imperva incident report", readFixture("incapsula-json-block.html")],
+] as const) {
+	test(`fetchOrderDetail: an HTTP 403 carrying the ${label} asks for session repair`, async () => {
+		const { page } = makeStatusPageStub({
+			content,
+			landedUrl: ORDER_DETAIL_URL,
+			statuses: [403],
+		});
+		const result = await fetchWithoutWaiting(page);
+		assert.equal(result.status, "failed");
+		assert.equal(result.failureKind, "session_repair_required");
+	});
+}
+
+test("fetchOrderDetail: an HTTP 403 that lands on the sign-in page asks for session repair", async () => {
+	const { page } = makeStatusPageStub({
+		content: PASSWORD_FORM_HTML,
+		landedUrl: "https://www.heb.com/login",
+		statuses: [403],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "session_repair_required");
+});
+
+test("fetchOrderDetail: an HTTP 404 on an ordinary page stays a non-retryable failure and is tried once", async () => {
+	const { gotoCalls, page } = makeStatusPageStub({
+		content: NO_DETAIL_HTML,
+		landedUrl: ORDER_DETAIL_URL,
+		statuses: [404],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "navigation_failed_non_retryable");
+	assert.equal(gotoCalls(), 1);
+});
+
+for (const status of [500, 502, 503, 504]) {
+	test(`fetchOrderDetail: an HTTP ${String(status)} is retried and the order is read when the retry succeeds`, async () => {
+		const { gotoCalls, page } = makeStatusPageStub({
+			content: DETAIL_HTML,
+			landedUrl: ORDER_DETAIL_URL,
+			statuses: [status, 200],
+		});
+		const result = await fetchWithoutWaiting(page);
+		assert.equal(result.status, "hydrated");
+		assert.equal(gotoCalls(), 2);
+	});
+}
+
+test("fetchOrderDetail: an HTTP 503 on every attempt is retry-exhausted, a retryable gap, not a connector defect", async () => {
+	const { gotoCalls, page } = makeStatusPageStub({
+		content: NO_DETAIL_HTML,
+		landedUrl: ORDER_DETAIL_URL,
+		statuses: [503],
+	});
+	const result = await fetchWithoutWaiting(page);
+	assert.equal(result.status, "failed");
+	assert.equal(result.failureKind, "navigation_retry_exhausted");
+	assert.equal(gotoCalls(), 3, "one attempt and two retries");
+});
+
 // ─── design.md Decision 4: owner-started manual repair vs unattended latch ─
 
 test("hebAllowsInteractiveAuthRepair: true when PDPP_RUN_TRIGGER_KIND is 'manual'", () => {
