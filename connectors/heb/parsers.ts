@@ -791,7 +791,7 @@ const IMPERVA_PROXY_ID_RE = /"proxyId"\s*:/;
 const IMPERVA_INCIDENT_MAX_BYTES = 4000;
 
 function isImpervaIncidentReport(html: string): boolean {
-	if (html.length > IMPERVA_INCIDENT_MAX_BYTES) {
+	if (Buffer.byteLength(html, "utf8") > IMPERVA_INCIDENT_MAX_BYTES) {
 		return false;
 	}
 	if (!IMPERVA_INCIDENT_ID_RE.test(html)) {
