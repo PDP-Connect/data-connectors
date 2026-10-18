@@ -115,7 +115,7 @@ features it needs, and describes the streams it can emit.
 
 | Field | Requirement |
 | --- | --- |
-| `protocol_version` | REQUIRED. It MUST be `"0.1.0"` for this profile version. |
+| `protocol_version` | REQUIRED. It MUST be `"0.1.0"` or `"0.2.0"`. It MUST be `"0.2.0"` when the manifest uses a member or capability that Section 8 lists as added in 0.2.0. |
 | `connector_key` | REQUIRED operational identifier. It MUST match `^[a-z0-9][a-z0-9._-]*$`. |
 | `version` | REQUIRED non-empty connector version string. |
 | `display_name` | REQUIRED non-empty display name. |
@@ -1055,8 +1055,9 @@ This version does not define the syntax of a rule's match condition
 (Section 5.13). A runtime records a match for a declared rule only from its
 own observations.
 
-A manifest that declares `diagnostic_descriptors` or the `OBSERVATION`
-capability declares `protocol_version` `0.2.0`.
+A manifest that declares `diagnostic_descriptors`, the `OBSERVATION`
+capability, or the `DETAIL_COVERAGE_KEY_SETS` capability declares
+`protocol_version` `0.2.0`.
 
 ## 4. Run protocol
 
@@ -1903,8 +1904,10 @@ advertises. A new optional message that an older fail-closed runtime would
 reject requires capability negotiation and a runtime-first rollout.
 
 Version 0.2.0 adds the `OBSERVATION` capability and message, the
-`diagnostic_descriptors` manifest member, `DONE.error.basis`, and Sections
-5.11 to 5.13. Every valid 0.1.0 exchange stays valid. A 0.2.0 runtime
+`DETAIL_COVERAGE_KEY_SETS` capability with the `empty_keys` and
+`unchanged_keys` members of `DETAIL_COVERAGE`, the `diagnostic_descriptors`
+manifest member, `DONE.error.basis`, and Sections 5.11 to 5.13. Every valid
+0.1.0 exchange stays valid. A 0.2.0 runtime
 presents the recovery hints of 0.1.0 connectors through the gate of
 Section 5.11.
 

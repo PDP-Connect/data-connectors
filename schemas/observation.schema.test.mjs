@@ -116,13 +116,26 @@ test("every manifest's diagnostic_descriptors validates and names only declared 
   }
 });
 
-test("a manifest that uses the 0.2.0 diagnostic members declares protocol_version 0.2.0", () => {
+test("a manifest that uses a 0.2.0 member or capability declares protocol_version 0.2.0", () => {
   for (const { path, manifest } of connectorManifests()) {
-    const usesObservation = (manifest.protocol_capabilities ?? []).includes("OBSERVATION");
-    if (usesObservation || manifest.diagnostic_descriptors !== undefined) {
+    const capabilities = manifest.protocol_capabilities ?? [];
+    const usesVersion02 =
+      capabilities.includes("OBSERVATION") ||
+      capabilities.includes("DETAIL_COVERAGE_KEY_SETS") ||
+      manifest.diagnostic_descriptors !== undefined;
+    if (usesVersion02) {
       assert.equal(manifest.protocol_version, "0.2.0", path);
     }
   }
+});
+
+test("the profile accepts both protocol versions and ties 0.2.0 to its additions", () => {
+  assert.match(profile, /\| `protocol_version` \| REQUIRED\. It MUST be `"0\.1\.0"` or `"0\.2\.0"`\./);
+  assert.match(
+    profile,
+    /`DETAIL_COVERAGE_KEY_SETS`\s+capability declares\s+`protocol_version` `0\.2\.0`/,
+  );
+  assert.match(profile, /Version 0\.2\.0 adds[^.]*`DETAIL_COVERAGE_KEY_SETS` capability/s);
 });
 
 test("the profile states its version as 0.2.0", () => {

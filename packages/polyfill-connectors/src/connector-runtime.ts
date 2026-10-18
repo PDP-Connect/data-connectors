@@ -354,8 +354,16 @@ interface BaseRunConnectorConfig {
 	 * `waitForElementExpectation`) as `OBSERVATION` messages, and cites them in
 	 * `DONE.error.basis`. Without it the same facts go to standard error as
 	 * diagnostic lines and never reach the wire.
+	 *
+	 * `"DETAIL_COVERAGE_KEY_SETS"` is declared by a connector that reports
+	 * `empty_keys` or `unchanged_keys` through `buildDetailCoverageMessage`. It
+	 * is advisory: a runtime that does not advertise it still starts the
+	 * connector, and the helper then reports those keys in `hydrated_keys`.
 	 */
-	protocolCapabilities?: readonly (typeof OBSERVATION_CAPABILITY)[];
+	protocolCapabilities?: readonly (
+		| typeof OBSERVATION_CAPABILITY
+		| typeof DETAIL_COVERAGE_KEY_SETS_CAPABILITY
+	)[];
 	/**
 	 * Optional post-commit hook. Runs ONLY on a successful run, AFTER the
 	 * runtime has acknowledged durable ingest (stdin EOF) and immediately
@@ -642,6 +650,17 @@ export interface DetailCoverageParams {
 	stream: string;
 }
 
+/** Keys with equal `String` forms collapse to the first one seen, in order. */
+function distinctKeys(
+	keys: ReadonlyArray<string | number>,
+): Array<string | number> {
+	const unique = new Map<string, string | number>();
+	for (const key of keys) {
+		if (!unique.has(String(key))) unique.set(String(key), key);
+	}
+	return [...unique.values()];
+}
+
 /**
  * Build one parent-boundary DETAIL_COVERAGE message after that detail work
  * settles. A shared detail stream emits one message per independently
@@ -669,21 +688,34 @@ export function buildDetailCoverageMessage(
 	const supportsKeySets = hostCapabilities?.includes(
 		DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
 	);
-	let reportedHydratedKeys = [...hydratedKeys];
+	// A report that uses the new sets leaves with duplicate-free arrays whichever
+	// mode the host is in (Collection Profile Section 5.6). The legacy fold below
+	// already merges equal keys, so a host upgrade must not start rejecting what
+	// it accepted before. A report that does not use them keeps its arrays as
+	// given.
+	const distinct = (keys: ReadonlyArray<string | number> | undefined) =>
+		hasNewKeys && keys ? distinctKeys(keys) : keys;
+	const required = distinct(requiredKeys) ?? [];
+	const hydrated = distinct(hydratedKeys) ?? [];
+	const empty = distinct(emptyKeys);
+	const unchanged = distinct(unchangedKeys);
+	const gaps = distinct(gapKeys);
+	const optionalSkips = distinct(optionalSkipKeys);
+	let reportedHydratedKeys = [...hydrated];
 	if (hasNewKeys) {
 		const seen = new Map<string, string>();
 		const sets = {
-			hydratedKeys,
-			emptyKeys,
-			unchangedKeys,
-			gapKeys,
-			optionalSkipKeys,
+			hydratedKeys: hydrated,
+			emptyKeys: empty,
+			unchangedKeys: unchanged,
+			gapKeys: gaps,
+			optionalSkipKeys: optionalSkips,
 		};
 		for (const [name, keys] of Object.entries(sets)) {
 			for (const key of keys ?? []) {
 				const normalized = String(key);
 				const previous = seen.get(normalized);
-				if (previous !== undefined && previous !== name) {
+				if (previous !== undefined) {
 					throw new Error(
 						`Detail coverage key ${JSON.stringify(normalized)} appears in ${previous} and ${name}`,
 					);
@@ -692,15 +724,11 @@ export function buildDetailCoverageMessage(
 			}
 		}
 		if (!supportsKeySets) {
-			const folded = new Map<string, string | number>();
-			for (const key of [
-				...hydratedKeys,
-				...(emptyKeys ?? []),
-				...(unchangedKeys ?? []),
-			]) {
-				if (!folded.has(String(key))) folded.set(String(key), key);
-			}
-			reportedHydratedKeys = [...folded.values()];
+			reportedHydratedKeys = distinctKeys([
+				...hydrated,
+				...(empty ?? []),
+				...(unchanged ?? []),
+			]);
 		}
 	}
 	return {
@@ -708,13 +736,11 @@ export function buildDetailCoverageMessage(
 		reference_only: true,
 		stream,
 		state_stream: stateStream,
-		required_keys: [...requiredKeys],
+		required_keys: [...required],
 		hydrated_keys: reportedHydratedKeys,
-		...(supportsKeySets && emptyKeys?.length
-			? { empty_keys: [...emptyKeys] }
-			: {}),
-		...(supportsKeySets && unchangedKeys?.length
-			? { unchanged_keys: [...unchangedKeys] }
+		...(supportsKeySets && empty?.length ? { empty_keys: [...empty] } : {}),
+		...(supportsKeySets && unchanged?.length
+			? { unchanged_keys: [...unchanged] }
 			: {}),
 		// Only emit `considered` when the connector supplied a non-negative integer.
 		// The runtime re-validates and drops anything unsafe to `unknown`; omitting
@@ -730,9 +756,9 @@ export function buildDetailCoverageMessage(
 		...(typeof covered === "number" && Number.isInteger(covered) && covered >= 0
 			? { covered }
 			: {}),
-		...(gapKeys?.length ? { gap_keys: [...gapKeys] } : {}),
-		...(optionalSkipKeys?.length
-			? { optional_skip_keys: [...optionalSkipKeys] }
+		...(gaps?.length ? { gap_keys: [...gaps] } : {}),
+		...(optionalSkips?.length
+			? { optional_skip_keys: [...optionalSkips] }
 			: {}),
 	};
 }

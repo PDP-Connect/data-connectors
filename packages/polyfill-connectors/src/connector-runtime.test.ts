@@ -30,6 +30,7 @@ import {
 	isReusableBrowserRunPage,
 	makeBrowserInteractionKeepalive,
 	makeTracer,
+	type NonBrowserConnectorConfig,
 	resolveBrowserLaunchSource,
 	resolveBrowserRuntimeVisibility,
 	runtimeOwnsBrowserPages,
@@ -1379,6 +1380,75 @@ test("new key sets reject every cross-set overlap in both host modes", () => {
 			}
 		}
 	}
+});
+
+test("a report that uses the new sets leaves duplicate-free in both host modes", () => {
+	const params = {
+		stream: "details",
+		stateStream: "items",
+		requiredKeys: ["e", "e", 1, "1"],
+		hydratedKeys: [] as (string | number)[],
+		emptyKeys: ["e", "e"],
+		unchangedKeys: [2, "2"],
+		gapKeys: ["g", "g"],
+		optionalSkipKeys: [3, "3"],
+	};
+	const shared = {
+		type: "DETAIL_COVERAGE",
+		reference_only: true,
+		stream: "details",
+		state_stream: "items",
+		required_keys: ["e", 1],
+		gap_keys: ["g"],
+		optional_skip_keys: [3],
+	};
+	assert.deepEqual(
+		buildDetailCoverageMessage({
+			...params,
+			hostCapabilities: ["DETAIL_COVERAGE_KEY_SETS"],
+		}),
+		{
+			...shared,
+			hydrated_keys: [],
+			empty_keys: ["e"],
+			unchanged_keys: [2],
+		},
+	);
+	assert.deepEqual(buildDetailCoverageMessage(params), {
+		...shared,
+		hydrated_keys: ["e", 2],
+	});
+});
+
+test("a report that does not use the new sets keeps its arrays as given", () => {
+	assert.deepEqual(
+		buildDetailCoverageMessage({
+			stream: "details",
+			stateStream: "items",
+			requiredKeys: [1, 1],
+			hydratedKeys: [1, "1"],
+			gapKeys: [2, 2],
+			optionalSkipKeys: [3, 3],
+			hostCapabilities: ["DETAIL_COVERAGE_KEY_SETS"],
+		}),
+		{
+			type: "DETAIL_COVERAGE",
+			reference_only: true,
+			stream: "details",
+			state_stream: "items",
+			required_keys: [1, 1],
+			hydrated_keys: [1, "1"],
+			gap_keys: [2, 2],
+			optional_skip_keys: [3, 3],
+		},
+	);
+});
+
+test("a key-set adopter can declare its capability in the typed runner config", () => {
+	const declared: NonNullable<
+		NonBrowserConnectorConfig["protocolCapabilities"]
+	> = ["OBSERVATION", runtime.DETAIL_COVERAGE_KEY_SETS_CAPABILITY];
+	assert.deepEqual(declared, ["OBSERVATION", "DETAIL_COVERAGE_KEY_SETS"]);
 });
 
 test("negotiated key sets omit empty members and copy supplied arrays", () => {
