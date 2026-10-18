@@ -219,7 +219,7 @@ for (const name of pageShimConnectors(
 				requestedScopes:
 					name === "chatgpt"
 						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.scopes,
+						: c.allScopes ?? c.scopes,
 			});
 		});
 
@@ -231,7 +231,7 @@ for (const name of pageShimConnectors(
 				requestedScopes:
 					name === "chatgpt"
 						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.scopes,
+						: c.allScopes ?? c.scopes,
 			});
 		});
 
@@ -3717,6 +3717,108 @@ test("youtube: incomplete subscriptions preserve observed rows and fail closed",
 	assert.equal(run.result.errors.length, 1);
 	assert.match(run.data.status, /^Partial:/);
 	assert.deepEqual(run.states, {});
+});
+
+test("meta: independent streams preserve posts gaps, WebCrypto ids and accepted STATE on both hosts", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-all.js")});
+ for (const resultStreaming of [false, true]) {
+  const codes = [];
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
+   scopes: ["profile", "posts", "post_likes", "following", "ads"].map(s => "instagram." + s),
+   initialState: {"instagram.posts": {old: true}}, resultStreaming,
+   resultSpoolDirectory: join(out, "meta-all-" + resultStreaming),
+   observeBridge: (method, args) => { if (method === "evaluate") codes.push(args[0].length); },
+  });
+  assertCleanRun(r);
+  assert.deepEqual(r.ret, {ok: true});
+  assert.equal(r.data.error, undefined);
+  assert.match(r.data.status, /^Partial:/);
+  const result = resultStreaming ? r.streamDone : r.result;
+  assert.deepEqual(result.errors.map(e => e.scope), ["instagram.posts", "instagram.post_likes", "instagram.ads"]);
+  assert.ok(result.errors.every(e => /not proven complete/.test(e.reason)));
+  for (const error of result.errors.slice(0, 2)) {
+   assert.match(error.reason, /passive GraphQL.*page-minted/);
+  }
+  assert.deepEqual(r.stateMessages.map(m => m.stream), ["instagram.following"]);
+  assert.deepEqual(r.states["instagram.following"], {});
+  const scope = async name => resultStreaming
+   ? JSON.parse(await readFile(r.streamScopeFiles["instagram." + name], "utf8"))
+   : r.result["instagram." + name];
+  assert.equal((await scope("profile")).records.length, 1);
+  assert.equal((await scope("following")).records.length, 1);
+  const ads = (await scope("ads")).records;
+  assert.equal(ads.length, 3);
+  for (const row of ads) assert.equal(row.id, createHash("sha256").update(row.kind + "|" + row.name).digest("hex").slice(0, 32));
+  assert.ok(codes.length > 0 && Math.max(...codes) <= 65_536);
+  if (resultStreaming) {
+   assert.equal(r.streamResult.completed, true);
+   assert.equal(r.streamScopeFiles["instagram.posts"], undefined);
+  } else assert.equal(r.result["instagram.posts"], undefined);
+ }
+});
+
+test("meta: following empty, contradictory, owner and partial-page evidence never fabricate completion", {timeout: 180_000}, async () => {
+ const {createMetaFixtures, owner} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-following-evidence.js")});
+ const row = {pk: "one", username: "one"};
+ const cases = [
+  {name: "empty proven", options: {total: 0, followingPages: [{owner, users: [], has_more: false}]}, count: 0, complete: true},
+  {name: "empty unknown", options: {profile: {following_count: null}, followingPages: [{owner, users: [], has_more: false}]}, count: 0, complete: false},
+  {name: "wrong total", options: {total: 2}, count: 1, complete: false},
+  {name: "foreign owner", options: {followingPages: [{owner: {id: "other"}, users: [row], has_more: false}]}, count: 0, complete: false},
+  {name: "partial page", options: {total: 2, followingPages: [
+   {owner, users: [row], has_more: true, next_max_id: "next"},
+   {owner, users: [{pk: "bad"}], has_more: false},
+  ]}, count: 1, complete: false},
+  {name: "late logout", options: {logoutAtEnd: true}, count: 1, complete: false},
+ ];
+ for (const c of cases) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(c.options),
+   scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}}});
+  assertCleanRun(r);
+  assert.equal(r.data.error, undefined, c.name);
+  assert.equal(r.result["instagram.following"]?.records.length ?? 0, c.count, c.name);
+  assert.equal(r.stateMessages.length, c.complete ? 1 : 0, c.name);
+  assert.equal(r.result.errors.length, c.complete ? 0 : 1, c.name);
+  assert.match(r.data.status, c.complete ? /^Complete!/ : /^Partial:/, c.name);
+  if (!c.complete) assert.match(r.result.errors[0].reason, /not proven complete/, c.name);
+ }
+});
+
+test("meta: missing profile fields remain a partial owner profile and legacy hosts never receive STATE", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-profile-partial.js")});
+ for (const options of [
+  {profileFailure: true}, {profile: {id: "other"}}, {profile: {media_count: null}},
+  {profileEnvelope: {ok: false}}, {profileEnvelope: {error_code: "partial"}},
+  {profileEnvelope: {errors: ["unreadable"]}},
+  {profileEnvelope: {extensions: {is_final: false}}},
+ ]) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(options),
+   scopes: ["instagram.profile", "instagram.following"], supportsStateArgument: false});
+  assertCleanRun(r);
+  assert.equal(r.data.error, undefined);
+  assert.equal(r.result["instagram.profile"].records[0].id, "owner-1");
+  assert.ok(r.result.errors.some(e => e.scope === "instagram.profile"));
+  assert.match(r.data.status, /^Partial:/);
+  assert.deepEqual(r.stateMessages, []);
+ }
+});
+
+test("meta: rejected streamed completion never commits following STATE", {timeout: 60_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-rejected-state.js")});
+ const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
+  scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}},
+  resultStreaming: true, resultSpoolDirectory: join(out, "meta-rejected-state"),
+  resultStreamFailure: {key: "result:done"},
+ });
+ assertCleanRun(r);
+ assert.ok(r.data.error);
+ assert.deepEqual(r.states, {"instagram.following": {old: true}});
+ assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+ assert.notEqual(r.streamResult.completed, true);
 });
 
 test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {

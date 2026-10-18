@@ -15108,7 +15108,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.29",
+				"version": "0.4.31",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15117,10 +15117,16 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
 						}
 					}
 				},
@@ -15427,7 +15433,16 @@
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
-				]
+				],
+				"mobile": {
+					"pageshim": {
+						"entry": "meta.ts",
+						"scope_prefix": "instagram",
+						"login_url": "https://www.instagram.com/accounts/login/",
+						"collect_export": "collectAllStreams",
+						"probe_export": "probeMetaSession"
+					}
+				}
 			}
 		},
 		{
