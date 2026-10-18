@@ -328,6 +328,49 @@ test("collect: nutrition-only with products emits nutrition records without STAT
 	);
 });
 
+for (const [label, field, amount, expected] of [
+	["Calcium", "calcium_mg", "100 mg", 100],
+	["Includes Added Sugars", "added_sugar_g", "0 g", 0],
+	["Cholesterol", "cholesterol_mg", "5 mg", 5],
+	["Saturated Fat", "saturated_fat_g", "1 g", 1],
+	["Trans Fat", "trans_fat_g", "0 g", 0],
+	["Iron", "iron_mg", "2 mg", 2],
+	["Potassium", "potassium_mg", "50 mg", 50],
+	["Vitamin D", "vitamin_d_mcg", "3 mcg", 3],
+] as const) {
+	test(`collect: ${label}-only nutrition survives without proving inventory complete`, async () => {
+		const ctx = makeContext(
+			["nutrition"],
+			makeCollectPage({
+				detailHtml: WIDGET_DETAIL_HTML,
+				listHtml: singleItemOrdersList(),
+				productHtml: `<main><div><h3>Nutrition Facts</h3><ul><li><span>${label}</span><ul><li>${amount}</li></ul></li></ul></div></main>`,
+			}),
+		);
+		await hebConnector.collect(ctx);
+		assertPartial(ctx);
+		assert.deepEqual(ctx.emitted.map((record) => record.stream), ["nutrition"]);
+		const record = ctx.emitted[0] as { stream: string; data: Record<string, unknown> };
+		assert.equal(record.data[field], expected);
+		assert.equal(record.data.source, "heb_product_page");
+		assert.equal(record.data.calories, null);
+	});
+}
+
+test("collect: a truly empty nutrition panel stays unemitted and retryable", async () => {
+	const ctx = makeContext(
+		["nutrition"],
+		makeCollectPage({
+			detailHtml: WIDGET_DETAIL_HTML,
+			listHtml: singleItemOrdersList(),
+			productHtml: "<main><div><h3>Nutrition Facts</h3><ul></ul></div></main>",
+		}),
+	);
+	await hebConnector.collect(ctx);
+	assertPartial(ctx);
+	assert.equal(ctx.emitted.length, 0);
+});
+
 test("collect: a skipped nutrition product lookup keeps its skip and withholds the completion STATE", async () => {
 	const ctx = makeContext(
 		["nutrition"],
