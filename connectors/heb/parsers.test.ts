@@ -1219,10 +1219,10 @@ test("parseProfileDom does not use a profile field label as an address", () => {
 	]);
 });
 
-test("parseProfileDom returns nulls and an empty address list when labels are absent", () => {
+test("parseProfileDom returns nulls and unknown address inventory when labels are absent", () => {
 	const result = parseProfileDom("<html><body><main></main></body></html>");
 	assert.deepEqual(result, {
-		deliveryAddresses: [],
+		deliveryAddresses: null,
 		email: null,
 		name: null,
 		phone: null,
@@ -1260,6 +1260,26 @@ test("buildProfileRecord builds the fixed-literal-id profile record", () => {
 	});
 });
 
+test("buildProfileRecord withholds unread address and primary observations", () => {
+	const fields = { email: "shopper@example.com", name: "Reader", phone: null };
+	assert.equal(buildProfileRecord({
+		...fields, deliveryAddresses: null,
+	}, "2026-10-18T00:00:00Z"), null);
+	assert.equal(buildProfileRecord({
+		...fields, deliveryAddresses: [{
+			address: "Austin, TX 78701", label: null, is_primary: null,
+		}],
+	}, "2026-10-18T00:00:00Z"), null);
+	for (const is_primary of [true, false]) {
+		const record = buildProfileRecord({
+			...fields, deliveryAddresses: [{
+				address: "Austin, TX 78701", label: null, is_primary,
+			}],
+		}, "2026-10-18T00:00:00Z");
+		assert.equal(record?.delivery_addresses[0]?.is_primary, is_primary);
+	}
+});
+
 test("parseNutritionDom extracts a full nutrition panel structurally", () => {
 	const result = parseNutritionDom(SYNTHETIC_NUTRITION_HTML);
 	assert.equal(result.found, true);
@@ -1289,7 +1309,7 @@ test("parseNutritionDom reports found:false honestly when no panel exists", () =
 	const result = parseNutritionDom(SYNTHETIC_NUTRITION_NOT_FOUND_HTML);
 	assert.equal(result.found, false);
 	assert.equal(result.calories, null);
-	assert.equal(result.name, null);
+	assert.equal(result.name, "Generic Product With No Panel");
 });
 
 test("buildNutritionRecord uses heb_product_page source when a panel was found", () => {
@@ -1316,7 +1336,7 @@ test("buildNutritionRecord uses heb_product_page source when a panel was found",
 	});
 });
 
-test("buildNutritionRecord uses not_found source and the fallback name when no panel exists", () => {
+test("buildNutritionRecord uses unknown error outcome and observed product name when no panel exists", () => {
 	const extraction = parseNutritionDom(SYNTHETIC_NUTRITION_NOT_FOUND_HTML);
 	const record = buildNutritionRecord(
 		"999",
@@ -1325,9 +1345,9 @@ test("buildNutritionRecord uses not_found source and the fallback name when no p
 		"2026-07-14T12:00:00.000Z",
 		"https://www.heb.com/product-detail/unknown/999",
 	);
-	assert.equal(record.source, "not_found");
+	assert.equal(record.source, "error");
 	assert.equal(record.confidence, "low");
-	assert.equal(record.name, "Fallback Item Name");
+	assert.equal(record.name, "Generic Product With No Panel");
 	assert.equal(record.calories, null);
 	assert.deepEqual(record.images, {
 		full: "https://images.heb.com/is/image/HEBGrocery/999-1",
