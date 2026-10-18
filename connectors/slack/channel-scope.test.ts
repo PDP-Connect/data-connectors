@@ -20,6 +20,7 @@ import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-h
 import {
 	emitMessagesPass,
 	FINGERPRINT_EXCLUDE,
+	runCanvasesStream,
 	runChannelMembershipsStream,
 	runChannelsStream,
 	type StreamDeps,
@@ -213,4 +214,73 @@ test("messages: a scoped pass counts, emits and advances cursors only for channe
 	);
 	assert.equal(result.maxMessageTs, "1714032840.123456");
 	assert.deepEqual(idsOf(recording, "messages", "channel_id"), ["C0PUBLIC1"]);
+});
+
+// A canvas is a quip FILE row. Its channel is the file row's, or else the
+// channel whose newest record says it owns the canvas.
+function makeCanvasDb(): DatabaseSync {
+	const db = makeDb();
+	db.exec(
+		"CREATE TABLE FILE (ID TEXT, FILENAME TEXT, URL TEXT, MODE TEXT, CHANNEL_ID TEXT, MESSAGE_ID INTEGER, DATA TEXT, CHUNK_ID INTEGER)",
+	);
+	const insert = db.prepare(
+		"INSERT INTO FILE (ID, FILENAME, URL, MODE, CHANNEL_ID, MESSAGE_ID, DATA, CHUNK_ID) VALUES (?, ?, ?, 'quip', ?, NULL, '{}', 1)",
+	);
+	const canvases: ReadonlyArray<readonly [string, string | null]> = [
+		["F0PUBLIC1", "C0PUBLIC1"],
+		["F0PRIVATE", "G0PRIVATE1"],
+		["F0DIRECT1", "D0DIRECT01"],
+		["F0LOOSE01", null],
+		// No channel on the file row, but the private channel's own record owns it.
+		["F0OWNED01", null],
+	];
+	for (const [id, channel] of canvases) {
+		insert.run(id, `${id}.canvas`, `https://files.slack.com/${id}`, channel);
+	}
+	db.prepare(
+		"INSERT INTO CHANNEL (ID, NAME, DATA, CHUNK_ID) VALUES (?, ?, ?, 2)",
+	).run(
+		"G0PRIVATE1",
+		"board",
+		JSON.stringify({
+			id: "G0PRIVATE1",
+			name: "board",
+			is_group: true,
+			is_private: true,
+			properties: { canvas: { file_id: "F0OWNED01", is_empty: false } },
+		}),
+	);
+	return db;
+}
+
+async function runCanvases(channelScope?: ReadonlySet<string>) {
+	const { deps, recording } = setup(channelScope);
+	await runCanvasesStream({ ...deps, db: makeCanvasDb() });
+	return recording;
+}
+
+test("canvases: without a scope every canvas is read and counted", async () => {
+	const recording = await runCanvases();
+
+	assert.deepEqual(idsOf(recording, "canvases", "id"), [
+		"F0DIRECT1",
+		"F0LOOSE01",
+		"F0OWNED01",
+		"F0PRIVATE",
+		"F0PUBLIC1",
+	]);
+	assert.equal(coverage(recording, "canvases").considered, 5);
+});
+
+test("canvases: a scoped run keeps a canvas by its owning channel and one that belongs to no channel", async () => {
+	const recording = await runCanvases(new Set(["C0PUBLIC1"]));
+
+	assert.deepEqual(
+		idsOf(recording, "canvases", "id"),
+		["F0LOOSE01", "F0PUBLIC1"],
+		"the private and DM canvases go, including the one only its channel's own record claims",
+	);
+	const report = coverage(recording, "canvases");
+	assert.equal(report.considered, 2, "the archive held five; two are in scope");
+	assert.equal(report.covered, 2);
 });

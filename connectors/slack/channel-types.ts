@@ -155,18 +155,23 @@ export function selectChannelIdsByType(
 }
 
 /**
- * The channels a run may archive. An explicit scope (an allowlist or a
- * grant's channels) narrows the type-selected set and never widens it, and an
- * empty result is returned as empty so the caller can refuse to archive: an
- * empty positional list means "every channel" to slackdump.
+ * The channels a run may archive: those of the chosen types that every
+ * restriction the run carries also names. A restriction is an allowlist or a
+ * grant's channels. Each present restriction narrows the set and none widens
+ * it, so two restrictions are intersected, never united. A restriction that is
+ * present but names nothing leaves nothing, which is different from no
+ * restriction at all. An empty result is returned as empty so the caller can
+ * refuse to archive: an empty positional list means "every channel" to
+ * slackdump.
  */
 export function channelsForRun(
-	explicit: readonly string[],
+	restrictions: readonly (readonly string[])[],
 	typeSelected: readonly string[],
 ): string[] {
-	if (explicit.length === 0) return [...typeSelected];
-	const allowed = new Set(typeSelected);
-	return [...new Set(explicit)].filter((id) => allowed.has(id));
+	const sets = restrictions.map((restriction) => new Set(restriction));
+	return [...new Set(typeSelected)].filter((id) =>
+		sets.every((set) => set.has(id)),
+	);
 }
 
 /** Streams whose records name a channel in `id` or `channel_id`. */

@@ -185,16 +185,35 @@ test("a channel listed twice under one type is kept once", () => {
 	);
 });
 
-test("an explicit scope narrows the type selection and never widens it", () => {
+test("a restriction narrows the type selection and never widens it", () => {
 	const typed = ["C0PUBLIC1", "C0PUBLIC2"];
-	assert.deepEqual(channelsForRun([], typed), typed);
-	assert.deepEqual(channelsForRun(["C0PUBLIC2", "D0DIRECT01"], typed), [
+	assert.deepEqual(channelsForRun([], typed), typed, "no restriction at all");
+	assert.deepEqual(channelsForRun([["C0PUBLIC2", "D0DIRECT01"]], typed), [
 		"C0PUBLIC2",
 	]);
-	assert.deepEqual(channelsForRun(["D0DIRECT01"], typed), []);
-	assert.deepEqual(channelsForRun(["C0PUBLIC1", "C0PUBLIC1"], typed), [
+	assert.deepEqual(channelsForRun([["D0DIRECT01"]], typed), []);
+	assert.deepEqual(channelsForRun([["C0PUBLIC1", "C0PUBLIC1"]], typed), [
 		"C0PUBLIC1",
 	]);
+});
+
+test("two restrictions are intersected, not united", () => {
+	const typed = ["C0PUBLIC1", "C0PUBLIC2"];
+	assert.deepEqual(
+		channelsForRun([["C0PUBLIC1", "C0PUBLIC2"], ["C0PUBLIC1"]], typed),
+		["C0PUBLIC1"],
+		"a grant naming both and an allowlist naming one leave one",
+	);
+	assert.deepEqual(
+		channelsForRun([["C0PUBLIC1"], ["C0PUBLIC2"]], typed),
+		[],
+		"disjoint restrictions leave nothing",
+	);
+});
+
+test("a restriction that is present but empty leaves nothing instead of everything", () => {
+	assert.deepEqual(channelsForRun([[]], ["C0PUBLIC1"]), []);
+	assert.deepEqual(channelsForRun([["C0PUBLIC1"], []], ["C0PUBLIC1"]), []);
 });
 
 const ALLOWED = new Set(["C0PUBLIC1"]);

@@ -162,6 +162,8 @@ function positionalChannels(argv: readonly string[]): string[] {
 async function runWithFakeSlackdump(options: {
 	allowlist?: string;
 	archiveEverything?: boolean;
+	/** The channels a grant names, as the `messages` stream's `resources`. */
+	grantChannels?: readonly string[];
 	listMode?: "fail" | "garbage" | "ok";
 	listing?: unknown;
 	skipSlackdump?: boolean;
@@ -205,7 +207,17 @@ async function runWithFakeSlackdump(options: {
 			},
 			start: {
 				type: "START",
-				scope: { streams: [{ name: "messages" }, { name: "channels" }] },
+				scope: {
+					streams: [
+						{
+							name: "messages",
+							...(options.grantChannels === undefined
+								? {}
+								: { resources: [...options.grantChannels] }),
+						},
+						{ name: "channels" },
+					],
+				},
 			},
 		});
 		const calls: string[][] = await readFile(log, "utf8")
@@ -383,6 +395,80 @@ test("an allowlist narrows the chosen types and never adds a channel of another 
 		...DIRECT,
 		...GROUP_DIRECT,
 	]);
+});
+
+test("a grant's channels narrow the chosen types the same way", async () => {
+	const outcome = await runWithFakeSlackdump({
+		archiveEverything: true,
+		grantChannels: ["C0PUBLIC1", "D0DIRECT01"],
+		types: "public",
+	});
+
+	assert.equal(outcome.done?.status, "succeeded");
+	assert.deepEqual(positionalChannels(outcome.archiveCalls[0] ?? []), [
+		"C0PUBLIC1",
+	]);
+	assert.deepEqual(outcome.recordChannels("messages"), ["C0PUBLIC1"]);
+	assert.deepEqual(outcome.recordChannels("channels"), ["C0PUBLIC1"]);
+	assertNothingOutsideWasTouched(outcome, [
+		"C0PUBLIC2",
+		...PRIVATE,
+		...DIRECT,
+		...GROUP_DIRECT,
+	]);
+});
+
+test("a grant and an allowlist that overlap are intersected, never united", async () => {
+	// Each names one channel the other does not. A union would archive
+	// C0PUBLIC1, C0PUBLIC2 and G0PRIVATE1 (less the excluded type); only the
+	// channel both name may be read.
+	const outcome = await runWithFakeSlackdump({
+		allowlist: "C0PUBLIC2,G0PRIVATE1",
+		archiveEverything: true,
+		grantChannels: ["C0PUBLIC1", "C0PUBLIC2"],
+		types: "public",
+	});
+
+	assert.equal(outcome.done?.status, "succeeded");
+	assert.deepEqual(positionalChannels(outcome.archiveCalls[0] ?? []), [
+		"C0PUBLIC2",
+	]);
+	assert.deepEqual(outcome.recordChannels("messages"), ["C0PUBLIC2"]);
+	assert.deepEqual(outcome.recordChannels("channels"), ["C0PUBLIC2"]);
+	assertNothingOutsideWasTouched(outcome, [
+		"C0PUBLIC1",
+		...PRIVATE,
+		...DIRECT,
+		...GROUP_DIRECT,
+	]);
+});
+
+test("a grant and an allowlist with no channel in common stop the run instead of archiving either", async () => {
+	const outcome = await runWithFakeSlackdump({
+		allowlist: "C0PUBLIC2",
+		grantChannels: ["C0PUBLIC1"],
+		types: "public",
+	});
+
+	assert.equal(outcome.done?.status, "failed");
+	assert.match(outcome.done?.error?.message ?? "", /every list of channels/);
+	assert.equal(
+		outcome.archiveCalls.length,
+		0,
+		"an empty intersection must not fall back to either list or to every channel",
+	);
+	assert.deepEqual(outcome.recordChannels("messages"), []);
+});
+
+test("a grant that names no channel is no restriction, not an empty one", async () => {
+	const outcome = await runWithFakeSlackdump({
+		grantChannels: [],
+		types: "public",
+	});
+
+	assert.equal(outcome.done?.status, "succeeded");
+	assert.deepEqual(positionalChannels(outcome.archiveCalls[0] ?? []), PUBLIC);
+	assert.deepEqual(outcome.recordChannels("messages"), PUBLIC);
 });
 
 test("the default (every type) lists nothing and archives as it always did", async () => {

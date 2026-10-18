@@ -3426,20 +3426,31 @@ export async function runCanvasesStream(deps: StreamDeps): Promise<void> {
 		return;
 	}
 	const channelCanvasIndex = buildChannelCanvasIndex(chanRows);
-	for (const r of canvasRows) {
-		await deps.emitRecord("canvases", buildCanvasRecord(r, channelCanvasIndex));
+	// The record's channel is the file row's, else the owning channel's. A
+	// canvas outside any channel has no channel to scope by and stays.
+	const records = canvasRows
+		.map((r) => buildCanvasRecord(r, channelCanvasIndex))
+		.filter(
+			(record) =>
+				!deps.channelScope ||
+				record.channel_id == null ||
+				deps.channelScope.has(String(record.channel_id)),
+		);
+	for (const record of records) {
+		await deps.emitRecord("canvases", record);
 	}
 	// `canvases` is the one Slack stream where `considered` is objectively
 	// honest: it full-syncs every run (NOT fingerprint-suppressed, unlike
 	// workspace/users/files/channels/channel_memberships), and every enumerated
 	// `canvasRows` row is emitted unconditionally — so `collected` equals the
 	// enumerated quip-file inventory, never a churn-reduced subset. Declaring
-	// `canvasRows.length` (the deduped MODE='quip' count read at the query site)
-	// as `considered` lets the report read a real `complete` when every canvas
-	// emitted, and an honest `partial` if a canvas was weighed but dropped (e.g.
-	// by record-shape validation). The denominator is measured here, never
-	// aliased to the emitted count.
-	await deps.emit(buildFullScanCoverageMessage("canvases", canvasRows.length));
+	// `records.length` (the deduped MODE='quip' count read at the query site,
+	// less the canvases a channel scope leaves out) as `considered` lets the
+	// report read a real `complete` when every canvas emitted, and an honest
+	// `partial` if a canvas was weighed but dropped (e.g. by record-shape
+	// validation). The denominator is measured here, never aliased to the
+	// emitted count.
+	await deps.emit(buildFullScanCoverageMessage("canvases", records.length));
 }
 
 /**
@@ -3453,11 +3464,19 @@ export async function runStarsStream(
 	token: string,
 	cookie: string,
 ): Promise<void> {
-	const items = await fetchAllStars(token, cookie);
-	for (const item of items) {
-		await deps.emitRecord("stars", buildStarRecord(item));
+	// A star on an item outside any channel has no channel to scope by and stays.
+	const records = (await fetchAllStars(token, cookie))
+		.map(buildStarRecord)
+		.filter(
+			(record) =>
+				!deps.channelScope ||
+				record.channel_id == null ||
+				deps.channelScope.has(String(record.channel_id)),
+		);
+	for (const record of records) {
+		await deps.emitRecord("stars", record);
 	}
-	await deps.emit(buildFullScanCoverageMessage("stars", items.length));
+	await deps.emit(buildFullScanCoverageMessage("stars", records.length));
 }
 
 export async function runUserGroupsStream(
@@ -3524,7 +3543,9 @@ export async function runDmReadStatesStream(
 	token: string,
 	cookie: string,
 ): Promise<void> {
-	const dmChannelIds = currentDmMpimChannelIds(deps.db);
+	const dmChannelIds = currentDmMpimChannelIds(deps.db).filter(
+		(id) => !deps.channelScope || deps.channelScope.has(id),
+	);
 	const states = await fetchDmReadStates(token, cookie, dmChannelIds);
 	for (const state of states) {
 		await deps.emitRecord(
@@ -3633,8 +3654,9 @@ const CHANNEL_LISTING_TIMEOUT_MS = 30 * 60 * 1000;
  * the only channels whose records it may emit.
  *
  * It lists every channel the signed-in user can see, keeps those of the chosen
- * types (and, when the run already names channels, only those among them), and
- * returns their IDs for `archive` to take as its positional arguments. It runs
+ * types that every restriction the run carries also names (a grant's channels
+ * and the allowlist are intersected, never united), and returns their IDs for
+ * `archive` to take as its positional arguments. It runs
  * before anything is downloaded, so a channel of an excluded type never
  * reaches the disk. It fails closed: a listing that cannot be run or read, a
  * channel that cannot be placed in one type, and a selection that matches no
@@ -3645,12 +3667,17 @@ const CHANNEL_LISTING_TIMEOUT_MS = 30 * 60 * 1000;
 export async function resolveTypedChannelScope(input: {
 	childEnv: NodeJS.ProcessEnv;
 	cookie: string;
-	explicit: readonly string[];
 	progress: CollectContext["progress"];
+	/**
+	 * The restrictions the run carries, one list per source (the grant's
+	 * channels, the allowlist). Only a present source appears, and the channels
+	 * must satisfy all of them.
+	 */
+	restrictions: readonly (readonly string[])[];
 	selected: ReadonlySet<ChannelType>;
 	token: string;
 }): Promise<{ allowed: ReadonlySet<string>; channels: string[] }> {
-	const { childEnv, cookie, explicit, progress, selected, token } = input;
+	const { childEnv, cookie, progress, restrictions, selected, token } = input;
 	if (process.env.PDPP_SLACK_SKIP_SLACKDUMP === "1") {
 		throw new ChannelTypeError(
 			"needs_slackdump",
@@ -3686,17 +3713,17 @@ export async function resolveTypedChannelScope(input: {
 		);
 	}
 	const typed = selectChannelIdsByType(listing, selected);
-	const channels = channelsForRun(explicit, typed);
+	const channels = channelsForRun(restrictions, typed);
 	slackDiagnostic("channel_types_resolved", {
 		archive_channels: channels.length,
-		explicit_channels: explicit.length,
+		restrictions: restrictions.length,
 		matching_channels: typed.length,
 		selected_types: [...selected].sort().join(","),
 	});
 	if (channels.length === 0) {
 		throw new ChannelTypeError(
 			"no_channels",
-			`No channel you can see is of a chosen type${explicit.length > 0 ? " and also in the channels this run names" : ""}, so nothing was downloaded.`,
+			`No channel you can see is of a chosen type${restrictions.length > 0 ? " and also in every list of channels this run names" : ""}, so nothing was downloaded.`,
 		);
 	}
 	// The record guard allows exactly the channels this run archives. A set wider
@@ -4106,8 +4133,13 @@ if (isMainModule(import.meta.url)) {
 				? await resolveTypedChannelScope({
 						childEnv,
 						cookie,
-						explicit: explicitChannels,
 						progress,
+						restrictions: [
+							...(msgResFilter ? [[...msgResFilter]] : []),
+							...(opts.CHANNEL_ALLOWLIST.length > 0
+								? [opts.CHANNEL_ALLOWLIST]
+								: []),
+						],
 						selected: selectedTypes,
 						token,
 					})
