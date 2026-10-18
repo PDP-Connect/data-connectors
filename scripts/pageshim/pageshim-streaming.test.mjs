@@ -337,6 +337,7 @@ test("streaming bounds each transfer while spooling a 150 MB result", {
 			fixtures,
 			scopes: ["chatgpt.conversations", "chatgpt.messages"],
 			resultStreaming: true,
+			sampleHeap: true,
 			resultSpoolDirectory: spoolDirectory,
 		});
 		assert.equal(run.ret.ok, true, run.log.slice(-20).join("\n"));
@@ -396,6 +397,7 @@ test("CDP heap sampling catches a retained allocation above the streaming bound"
 			scopes: ["chatgpt.conversations", "chatgpt.messages"],
 			resultStreaming: true,
 			resultSpoolDirectory: spoolDirectory,
+			sampleHeap: true,
 		});
 		assert.ok(
 			run.maxHeapBytes > 64 * 1024 * 1024,
