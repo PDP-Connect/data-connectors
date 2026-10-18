@@ -21,13 +21,17 @@ traversal is not supported by this adapter: the facade lacks response events,
 and a direct in-page browse fetch needs equivalent owner-bound response parsing
 and row accounting before it can replace Desktop's correlated response/DOM proof.
 
-The existing shared PageShim runtime does not classify
-inventory_not_proven_complete as partial. A regression test deliberately exposes
-its incorrect Complete status for a nonempty prefix. This is a shared-runtime
-integration blocker, not permission to relabel ordinary incomplete inventory as
-a genuine stream failure or emit an unsupported checkpoint.
+The shared PageShim runtime classifies inventory_not_proven_complete as Partial.
+Regression coverage checks the 50-row cap, Partial status and absence of STATE
+on both one-message and streaming hosts, including a saved complete cursor.
+No stream_collection_failed companion is needed for an ordinary incomplete
+inventory. Owner-bound, source-verified empty history retains its empty STATE.
 
 ## Device validation still required
+
+Capabilities declare same_origin_page_fetch for page-origin requests and
+page_script_evaluation for in-page scripts (including fetch of any origin).
+There is no cross_origin capability. Actual device CORS behavior remains unverified.
 
 Fixtures are synthetic Chromium harness evidence, not a real mobile device run.
 Verify mobile WebView DOM/layout parity (especially m.youtube.com redirects),

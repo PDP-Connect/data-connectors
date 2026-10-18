@@ -30,10 +30,12 @@ export const pageshimCase = {
 	exportSummary: { count: 12, label: "records", details },
 	emptyExportSummary: { count: 0, label: "records", details: Object.fromEntries(Object.keys(details).map((s) => [s, 0])) },
 };
-export function historyPrefixFixture() {
+export function historyPrefixFixture(count = 1) {
+	const videos = Array.from({ length: count }, (_, index) => ({ videoRenderer: { videoId: count === 1 ? "synthetic-history" : `synthetic-history-${index}` } }));
+	const rows = videos.map(({ videoRenderer: { videoId } }) => `<ytd-video-renderer><a href="/watch?v=${videoId}"></a><h3>Synthetic history</h3></ytd-video-renderer>`).join("");
 	const data = { contents: { twoColumnBrowseResultsRenderer: { tabs: [{ tabRenderer: { selected: true, content: { sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [
-		{ videoRenderer: { videoId: "synthetic-history" } },
+		...videos,
 		{ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: "synthetic-next" } } } },
 	] } }] } } } }] } } };
-	return html('<!doctype html><html><body>' + avatar + '<ytd-item-section-renderer><div id="header"><span id="title">Today</span></div><ytd-video-renderer><a href="/watch?v=synthetic-history"></a><h3>Synthetic history</h3></ytd-video-renderer><ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer><script>window.ytInitialData=' + JSON.stringify(data) + '</script></body></html>');
+	return html('<!doctype html><html><body>' + avatar + '<ytd-item-section-renderer><div id="header"><span id="title">Today</span></div>' + rows + '<ytd-continuation-item-renderer></ytd-continuation-item-renderer></ytd-item-section-renderer><script>window.ytInitialData=' + JSON.stringify(data) + '</script></body></html>');
 }

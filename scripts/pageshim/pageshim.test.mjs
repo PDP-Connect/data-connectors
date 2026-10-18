@@ -3680,17 +3680,25 @@ test("youtube: capped history upserts the prefix without claiming completion or 
 	const fx = await import("./fixtures/youtube.mjs");
 	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-prefix.js") });
 	const fixtures = { ...fx.youtubeFixtures, resolve: (raw) =>
-		new URL(raw).pathname === "/feed/history" ? fx.historyPrefixFixture() : fx.resolveFixture(raw) };
-	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"],
+		new URL(raw).pathname === "/feed/history" ? fx.historyPrefixFixture(60) : fx.resolveFixture(raw) };
+	for (const resultStreaming of [false, true]) {
+	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"], resultStreaming,
+		resultSpoolDirectory: join(out, `youtube-prefix-${resultStreaming}`),
 		initialState: { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } } });
 	assert.deepEqual(run.ret, { ok: true });
 	assertCleanRun(run);
-	assert.equal(run.result["youtube.watch_history"].records.length, 1);
-	assert.equal(run.result["youtube.watch_history"].records[0].id, createHash("sha256").update("history|synthetic-history").digest("hex").slice(0, 24));
-	assert.match(run.result.errors[0].reason, /inventory_not_proven_complete/);
+	const result = resultStreaming ? run.streamDone : run.result;
+	const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8")) : run.result["youtube.watch_history"];
+	assert.equal(scope.records.length, 50);
+	assert.deepEqual(scope.records.map((row) => row.video_id), Array.from({ length: 50 }, (_, index) => `synthetic-history-${index}`));
+	assert.equal(scope.records[0].id, createHash("sha256").update("history|synthetic-history-0").digest("hex").slice(0, 24));
+	assert.match(result.errors[0].reason, /inventory_not_proven_complete/);
 	assert.deepEqual(run.states, { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } });
 	assert.deepEqual(run.stateMessages, []);
+	assert.equal(result.errors.length, 1);
+	assert.equal(result.errors[0].errorClass, "partial");
 	assert.match(run.data.status, /^Partial:/);
+	}
 });
 
 test("youtube: incomplete subscriptions preserve observed rows and fail closed", { timeout: 180_000 }, async () => {

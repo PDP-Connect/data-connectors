@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.32",
+	"version": "0.2.33",
 	"mobile": { "pageshim": { "entry": "youtube.ts", "login_url": "https://www.youtube.com/" } },
 	"display_name": "YouTube",
 	"brand": {
