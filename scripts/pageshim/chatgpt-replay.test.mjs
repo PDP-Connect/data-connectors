@@ -112,6 +112,49 @@ test("reverse-projects retained ChatGPT records into list pages and details", ()
 	assert.equal(projected.stats.messages, 2);
 });
 
+test("reverse-projects ChatGPT 0.3.0 record ids and links back to node ids", () => {
+	const message = (node, parent, children, role) => ({
+		id: `conv-a:${node}`,
+		node_id: node,
+		conversation_id: "conv-a",
+		parent_id: parent === null ? null : `conv-a:${parent}`,
+		children_ids: children.map((child) => `conv-a:${child}`),
+		role,
+		content: `safe synthetic ${node}`,
+		content_type: "text",
+		create_time: "2025-01-01T00:00:00.000Z",
+		on_current_branch: true,
+	});
+	const projected = projectChatGptExport({
+		"chatgpt.conversations": {
+			conversations: [
+				{
+					id: "conv-a",
+					title: "safe synthetic title",
+					create_time: "2025-01-01T00:00:00.000Z",
+					update_time: "2025-01-01T00:01:00.000Z",
+					current_node: "msg-b",
+					message_count_on_current_branch: 2,
+				},
+			],
+		},
+		"chatgpt.messages": {
+			messages: [
+				message("msg-a", null, ["msg-b"], "user"),
+				message("msg-b", "msg-a", [], "assistant"),
+			],
+		},
+	});
+	const mapping = projected.detail("conv-a").mapping;
+	assert.deepEqual(Object.keys(mapping), ["msg-a", "msg-b"]);
+	assert.deepEqual(
+		[mapping["msg-b"].id, mapping["msg-b"].message.id, mapping["msg-b"].parent],
+		["msg-b", "msg-b", "msg-a"],
+	);
+	assert.deepEqual(mapping["msg-a"].children, ["msg-b"]);
+	assert.equal(projected.listPage(0).items[0].current_node, "msg-b");
+});
+
 // Bridge budget for a full-size run of the real ChatGPT PageShim bundle.
 // Before #340 this shape cost one `setData` per record and per comma and one
 // `setProgress` per conversation: 8,409 `setData` and 630 `setProgress` calls

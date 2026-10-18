@@ -101,13 +101,8 @@ test("spoolMessageBlob: survives short writes and produces the exact JSON bytes"
 		const text = `${"é😀\u0000".repeat(40_000)}end`;
 		const ref = measureMessageBlob(text);
 		assert.ok(ref);
-		const event = spoolMessageBlob(
-			dir,
-			["c1", "m1"],
-			text,
-			ref,
-			(fd, buffer, offset) =>
-				writeSync(fd, buffer, offset, Math.min(7_001, buffer.length - offset)),
+		const event = spoolMessageBlob(dir, "m1", text, ref, (fd, buffer, offset) =>
+			writeSync(fd, buffer, offset, Math.min(7_001, buffer.length - offset)),
 		);
 		const bytes = readFileSync(join(dir, event.file));
 		assert.equal(bytes.toString("utf8"), JSON.stringify(text));
@@ -124,11 +119,11 @@ test("spoolMessageBlob: a failed write or a text that differs from the measured 
 		const ref = measureMessageBlob("hello");
 		assert.ok(ref);
 		assert.throws(
-			() => spoolMessageBlob(dir, ["c1", "m1"], "hello", ref, () => 0),
+			() => spoolMessageBlob(dir, "m1", "hello", ref, () => 0),
 			/no progress/,
 		);
 		assert.throws(
-			() => spoolMessageBlob(dir, ["c1", "m1"], "HELLO", ref),
+			() => spoolMessageBlob(dir, "m1", "HELLO", ref),
 			/differ from the measured/,
 		);
 		assert.deepEqual(readdirSync(dir), []);

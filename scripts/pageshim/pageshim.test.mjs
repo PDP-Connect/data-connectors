@@ -739,7 +739,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		);
 		assert.deepEqual(
 			ranged.result["chatgpt.messages"].records.map((record) => record.id),
-			["msg-3-a"],
+			["conv-3:msg-3-a"],
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
 
@@ -762,7 +762,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 			messagesOnly.result["chatgpt.messages"].records.map(
 				(record) => record.id,
 			),
-			["msg-3-a"],
+			["conv-3:msg-3-a"],
 		);
 		assert.equal(bundleSha256(built.outfile), digest);
 
@@ -784,7 +784,7 @@ test("chatgpt: one publishing bundle handles full, ranged, legacy, and invalid r
 		assert.deepEqual(offsetBounds.result.errors, []);
 		assert.deepEqual(
 			offsetBounds.result["chatgpt.messages"].records.map((record) => record.id),
-			["msg-3-a"],
+			["conv-3:msg-3-a"],
 		);
 
 		// conv-3 starts at 00:00Z on 30 January, one hour after this since

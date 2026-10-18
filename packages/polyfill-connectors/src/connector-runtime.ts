@@ -193,14 +193,6 @@ export function createConnectorFailure(
 type Credentials = Record<string, string>;
 
 interface EmitRecordOptions {
-	/**
-	 * The record's key when its stream declares a composite `primary_key`: the
-	 * components in declaration order. Without it the key is `String(data.id)`,
-	 * which names a record only for a stream whose primary key is `["id"]`.
-	 * A composite key is selected by its canonical form, the minified JSON array
-	 * of the components, as a `resources` entry is.
-	 */
-	key?: readonly string[];
 	skipResourceFilter?: boolean;
 	/** Runs after all record gates and immediately before a retained RECORD. */
 	beforeEmit?: () => Promise<void>;
@@ -240,11 +232,7 @@ interface BaseCollectContext {
 		options?: EmitRecordOptions,
 	) => Promise<void>;
 	/** Uses the same id, resource, and time gates as emitRecord, without effects. */
-	isRecordSelected?: (
-		stream: string,
-		data: RecordData,
-		options?: EmitRecordOptions,
-	) => boolean;
+	isRecordSelected?: (stream: string, data: RecordData) => boolean;
 	emittedAt: string;
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>;
 	/**
@@ -1618,14 +1606,6 @@ export async function resolveCredentials(
 	}
 }
 
-/** The canonical key string a `resources` entry names: the id, or the JSON array of a composite key. */
-function canonicalRecordKey(
-	data: RecordData,
-	options: EmitRecordOptions,
-): string {
-	return options.key ? JSON.stringify(options.key) : String(data.id);
-}
-
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
 export function makeEmitRecord(deps: {
 	requested: Map<string, StreamScope>;
@@ -1678,11 +1658,7 @@ export function makeEmitRecord(deps: {
 	): "skip" | "tombstone" | "record" => {
 		if (data.id == null) return "skip";
 		const rs = resFilters.get(stream);
-		if (
-			!options.skipResourceFilter &&
-			rs &&
-			!rs.has(canonicalRecordKey(data, options))
-		)
+		if (!options.skipResourceFilter && rs && !rs.has(String(data.id)))
 			return "skip";
 		const streamScope = requested.get(stream);
 		const consent = timeRangeFieldFor(stream);
@@ -1727,7 +1703,7 @@ export function makeEmitRecord(deps: {
 			return emit({
 				type: "RECORD",
 				stream,
-				key: options.key ?? String(data.id),
+				key: String(data.id),
 				data: { id: data.id },
 				emitted_at: emittedAt,
 				op: "delete",
@@ -1746,7 +1722,7 @@ export function makeEmitRecord(deps: {
 		const record: EmittedMessage = {
 			type: "RECORD",
 			stream,
-			key: options.key ?? String(data.id),
+			key: String(data.id),
 			data,
 			emitted_at: emittedAt,
 		};

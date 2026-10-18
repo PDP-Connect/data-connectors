@@ -23,13 +23,16 @@ import {
 	extractContentParts,
 	extractMessage,
 	extractMessageWithBlob,
+	extractNonStringParts,
 	extractRawMessageText,
 	extractToolCalls,
 	flattenTreeCurrentBranch,
 	isEscapedUnit,
 	maxUpdateTimeIso,
+	messageRecordId,
 	reconcileEmittedBranchMessages,
 	resolveGizmoIsPublic,
+	toMessageRecord,
 	tsToIso,
 	unwrapGizmo,
 } from "./parsers.ts";
@@ -167,6 +170,177 @@ for (const contentType of ["text", "multimodal_text"] as const) {
 		});
 	}
 }
+
+// The `parts` stringifier of 0.2.56, which wrote every object part into
+// `content`. The text it produced for an object part must stay recoverable.
+function capturedBy0_2_56(part: unknown): string {
+	if (typeof part === "string") return part;
+	if (part && typeof part === "object") {
+		const po = part as {
+			asset_pointer?: unknown;
+			content_type?: unknown;
+			text?: unknown;
+		};
+		if (typeof po.text === "string") return po.text;
+		if (typeof po.asset_pointer === "string")
+			return `[asset:${po.asset_pointer}]`;
+		if (typeof po.content_type === "string") return `[${po.content_type}]`;
+	}
+	return "";
+}
+
+const MIXED_PARTS: unknown[] = [
+	"hello",
+	{
+		content_type: "image_asset_pointer",
+		asset_pointer: "file-service://file-1",
+		size_bytes: 120,
+		width: 10,
+		metadata: { dalle: { gen_id: "g1", prompt: "a prompt" } },
+	},
+	{
+		content_type: "audio_transcription",
+		text: "spoken words",
+		direction: "in",
+	},
+	{ content_type: "audio_asset_pointer", asset_pointer: "sediment://audio-1" },
+	{ content_type: "real_time_user_audio_video_asset_pointer" },
+	{},
+	1,
+	null,
+	["nested", { asset_pointer: "p" }],
+	"end",
+];
+
+for (const contentType of ["text", "multimodal_text"] as const) {
+	test(`non_string_parts: ${contentType} keeps every non-string part, and what 0.2.56 wrote into content is recoverable`, () => {
+		const rec = extractMessage(
+			"n1",
+			{
+				parent: null,
+				children: [],
+				message: {
+					author: { role: "user" },
+					content: { content_type: contentType, parts: MIXED_PARTS },
+				},
+			} as ChatGptNode,
+			"c1",
+			true,
+		);
+		assert.equal(rec?.content, "hello\nend", "content is the legacy join");
+		const kept = rec?.non_string_parts as { index: number; part: unknown }[];
+		const expectedIndexes = MIXED_PARTS.flatMap((part, index) =>
+			typeof part === "string" ? [] : [index],
+		);
+		assert.deepEqual(
+			kept.map((entry) => entry.index),
+			expectedIndexes,
+			"one entry per non-string part, in order, with its position in parts",
+		);
+		for (const entry of kept) {
+			assert.deepEqual(
+				entry.part,
+				MIXED_PARTS[entry.index] ?? null,
+				`part ${entry.index} is kept whole`,
+			);
+			assert.equal(
+				capturedBy0_2_56(entry.part),
+				capturedBy0_2_56(MIXED_PARTS[entry.index]),
+				`part ${entry.index}: the 0.2.56 text is reproducible from the kept part`,
+			);
+		}
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
+	});
+}
+
+test("non_string_parts: empty for string-only bodies and for content types that have no parts", () => {
+	for (const content of [
+		{ content_type: "text", parts: ["a", "b"] },
+		{ content_type: "text", parts: [] },
+		{ content_type: "text" },
+		{ content_type: "code", language: "python", text: "print(1)" },
+		{ content_type: "thoughts", thoughts: [{ summary: "s" }] },
+	]) {
+		assert.deepEqual(
+			extractNonStringParts(content),
+			[],
+			JSON.stringify(content),
+		);
+	}
+	assert.deepEqual(extractNonStringParts(undefined), []);
+});
+
+test("non_string_parts: strings at any depth, and keys, are pdpp-safe-escape-v1 encoded and decode back", () => {
+	const part = { text: "a\x00b", nested: { "k\x01": ["c\x7fd"] }, n: 3 };
+	const [entry] = extractNonStringParts({
+		content_type: "multimodal_text",
+		parts: ["x", part],
+	}) as { index: number; part: Record<string, unknown> }[];
+	assert.equal(entry?.index, 1);
+	assert.equal(entry?.part.text, "a\\u0000b");
+	assert.deepEqual(entry?.part.nested, { "k\\u0001": ["c\\u007Fd"] });
+	assert.equal(entry?.part.n, 3);
+	assert.equal(decodeEscapedText(String(entry?.part.text)), part.text);
+});
+
+test("messageRecordId / toMessageRecord: ids, parent and child links name records in the conversation, node_id keeps the source id", () => {
+	assert.equal(messageRecordId("c1", "n1"), "c1:n1");
+	const node: ChatGptNode = {
+		parent: "p1",
+		children: ["k1", "k2"],
+		message: {
+			author: { role: "user" },
+			content: { content_type: "text", parts: ["hi"] },
+		},
+	} as ChatGptNode;
+	const rec = extractMessage("n1", node, "c1", true) ?? {};
+	assert.equal(rec.id, "n1", "extraction names a node by the source's node id");
+	const wire = toMessageRecord(rec, "c1");
+	assert.equal(wire.id, "c1:n1");
+	assert.equal(wire.node_id, "n1");
+	assert.equal(wire.conversation_id, "c1");
+	assert.equal(wire.parent_id, "c1:p1");
+	assert.deepEqual(wire.children_ids, ["c1:k1", "c1:k2"]);
+	assert.equal(
+		toMessageRecord({ ...rec, parent_id: null }, "c1").parent_id,
+		null,
+	);
+	// The same node in another conversation is another record.
+	assert.notEqual(toMessageRecord(rec, "c2").id, wire.id);
+	assert.equal(toMessageRecord(rec, "c2").node_id, wire.node_id);
+});
+
+test("messages manifest: primary key is [id], and every field a wire record carries is declared", () => {
+	const manifest = JSON.parse(
+		readFileSync(join(__dirname, "manifest.json"), "utf8"),
+	) as {
+		streams: Array<{
+			name: string;
+			primary_key: string[];
+			schema: { properties: Record<string, unknown>; required: string[] };
+		}>;
+	};
+	const stream = manifest.streams.find((s) => s.name === "messages");
+	assert.deepEqual(stream?.primary_key, ["id"]);
+	const wire = toMessageRecord(
+		extractMessage("n1", textNode("hello"), "c1", true) ?? {},
+		"c1",
+	);
+	for (const key of Object.keys(wire)) {
+		assert.ok(key in (stream?.schema.properties ?? {}), `${key} is declared`);
+	}
+	for (const key of ["node_id", "non_string_parts"]) {
+		assert.ok(key in (stream?.schema.properties ?? {}), `${key} is declared`);
+		assert.equal(
+			stream?.schema.required.includes(key),
+			false,
+			`${key} is additive`,
+		);
+	}
+});
 
 test("extractContent: a body without a parts array is empty", () => {
 	assert.equal(extractContent({ content_type: "text" }), null);
@@ -373,7 +547,10 @@ test("extractMessage: control-rich text is emitted escaped with no loss marker, 
 	assert.equal(rec?.content, "a\\u0000b");
 	assert.equal("content_loss" in (rec ?? {}), false);
 	assert.equal("blob_ref" in (rec ?? {}), false);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("decodeEscapedText: NUL and other controls round-trip losslessly", () => {
@@ -386,7 +563,10 @@ test("decodeEscapedText: NUL and other controls round-trip losslessly", () => {
 		"valid pair \u{1F600} next to \x00",
 	]) {
 		const rec = extractMessage("n1", textNode(source), "c1", true);
-		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
 		assert.equal(
 			decodeEscapedText(rec?.content as string),
 			source,
@@ -445,7 +625,10 @@ test("decodeEscapedText: round-trips arbitrary strings over a hostile alphabet",
 		}
 		source += "x";
 		const rec = extractMessage("n1", textNode(source), "c1", true);
-		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
 		assert.equal(
 			decodeEscapedText(rec?.content as string),
 			source,
@@ -540,7 +723,10 @@ test("extractContentParts: only the unknown-shape fallback truncation is source-
 
 test("messages schema: a message with a blob_ref and null content validates", () => {
 	const sha256 = "a".repeat(64);
-	const base = extractMessage("n1", textNode("hello"), "c1", true) ?? {};
+	const base = toMessageRecord(
+		extractMessage("n1", textNode("hello"), "c1", true) ?? {},
+		"c1",
+	);
 	const ok = validateRecord("messages", {
 		...base,
 		content: null,
@@ -1315,7 +1501,10 @@ test("pdpp-safe-escape-v1: noncharacters on every plane are valid text and pass 
 		assert.equal(encodePdppSafeText(source), source, "so it is not escaped");
 		const rec = extractMessage("n1", textNode(source), "c1", true);
 		assert.equal(rec?.content, source);
-		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+		assert.equal(
+			validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+			true,
+		);
 	}
 });
 
@@ -1366,9 +1555,10 @@ test("messages schema: blob_ref requires null content; content may be absent but
 		size_bytes: 9,
 		sha256,
 	};
-	const base = {
-		...(extractMessage("n1", textNode("hello"), "c1", true) ?? {}),
-	};
+	const base = toMessageRecord(
+		extractMessage("n1", textNode("hello"), "c1", true) ?? {},
+		"c1",
+	);
 	assert.equal(
 		validateRecord("messages", { ...base, content: null, blob_ref }).ok,
 		true,
@@ -1411,7 +1601,10 @@ test("extractMessage: a tool-recipient body stays inline in tool_calls when cont
 			text: "print(1)",
 		},
 	]);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("extractMessage: an oversize tool-recipient body is referenced, not duplicated into tool_calls", () => {
@@ -1464,7 +1657,10 @@ test("messages schema: an arbitrary source tool call with text_ref and text is k
 	assert.deepEqual(rec?.tool_calls, [
 		{ text_ref: "source-id", text: "bo\\u0000dy" },
 	]);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 function decodeToolCallStrings(value: unknown): unknown {
@@ -1528,7 +1724,10 @@ test("tool_calls: every nested string and key from a source call is encoded and 
 		assert.equal(/[\ud800-\udfff]/u.test(str), false, "no lone surrogate");
 	}
 	assert.deepEqual(decodeToolCallStrings(rec?.tool_calls), source);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("extractMessage: an inline tool-recipient body with controls is escaped in tool_calls and round-trips", () => {
@@ -1548,7 +1747,10 @@ test("extractMessage: an inline tool-recipient body with controls is escaped in 
 	assert.equal(call.text.includes("\x00"), false);
 	assert.equal(call.text, encodePdppSafeText(text));
 	assert.equal(decodeEscapedText(call.text), text);
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 	const manifest = JSON.parse(
 		readFileSync(join(__dirname, "manifest.json"), "utf8"),
 	) as {
@@ -1602,7 +1804,10 @@ test('encodeToolCallStrings: an own "__proto__" key from JSON.parse is kept as d
 	} as ChatGptNode;
 	const rec = extractMessage("n1", node, "c1", true);
 	assert.equal(JSON.stringify(rec?.tool_calls), JSON.stringify(encoded));
-	assert.equal(validateRecord("messages", rec ?? {}).ok, true);
+	assert.equal(
+		validateRecord("messages", toMessageRecord(rec ?? {}, "c1")).ok,
+		true,
+	);
 });
 
 test("encodeToolCallStrings: nesting far deeper than the call stack is encoded without loss", () => {

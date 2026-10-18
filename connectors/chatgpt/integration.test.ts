@@ -2254,7 +2254,7 @@ test("processConversationDetail: emits one messages record per mapping node with
 		"u1 + a1 + a2 emit; root is synthetic and skipped",
 	);
 	const currentFlags = new Map(
-		msgRecords.map((r) => [r.data.id, r.data.on_current_branch]),
+		msgRecords.map((r) => [r.data.node_id, r.data.on_current_branch]),
 	);
 	assert.equal(
 		currentFlags.get("u1"),
@@ -3178,7 +3178,9 @@ test("runConversationsAndMessagesStreams: unsafe message content is emitted esca
 		2,
 		"both messages emit (unsafe with null content, safe with text)",
 	);
-	const unsafeRecord = messageRecords.find((r) => r.data.id === unsafeNodeId);
+	const unsafeRecord = messageRecords.find(
+		(r) => r.data.node_id === unsafeNodeId,
+	);
 	assert.ok(unsafeRecord, "unsafe message record must be present");
 	assert.equal(
 		unsafeRecord?.data.content,
@@ -3190,7 +3192,7 @@ test("runConversationsAndMessagesStreams: unsafe message content is emitted esca
 		(m) => m.type === "DETAIL_GAP",
 	);
 	assert.equal(lossyGaps.length, 0, "an escaped control char owes no gap");
-	const safeRecord = messageRecords.find((r) => r.data.id === safeNodeId);
+	const safeRecord = messageRecords.find((r) => r.data.node_id === safeNodeId);
 	assert.equal(
 		safeRecord?.data.content,
 		"safe reply",
@@ -3371,7 +3373,7 @@ test("runMessagesAndConversationsWithDetail: repeated recovery and forward detai
 
 	const messageIds = harness.emitted
 		.filter((record) => record.stream === "messages")
-		.map((record) => record.data.id);
+		.map((record) => record.data.node_id);
 	assert.equal(
 		detailFetches,
 		2,
@@ -12492,14 +12494,8 @@ test("processConversationDetail: a parent cycle is structurally incomplete, neve
 	);
 });
 
-test("processConversationDetail: two conversations that share a node id each keep their messages, keyed by conversation and id", async () => {
+test("processConversationDetail: two conversations that share a node id each keep their messages, under distinct record ids", async () => {
 	const { deps, emitted } = makeHarness();
-	const keys: Array<readonly string[] | undefined> = [];
-	const record = deps.emitRecord;
-	deps.emitRecord = (stream, data, options) => {
-		if (stream === "messages") keys.push(options?.key);
-		return record(stream, data, options);
-	};
 	deps.emittedMessageIdsThisRun = new Set<string>();
 	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
 	// ChatGPT copies nodes into a forked conversation: the same node ids recur.
@@ -12524,28 +12520,88 @@ test("processConversationDetail: two conversations that share a node id each kee
 	assert.deepEqual(await detailFor("convo-two"), { complete: true });
 	const messages = emitted.filter((r) => r.stream === "messages");
 	assert.deepEqual(
-		messages.map((r) => [r.data.conversation_id, r.data.id]),
+		messages.map((r) => [r.data.conversation_id, r.data.node_id, r.data.id]),
 		[
-			["convo-one", "a0"],
-			["convo-one", "a1"],
-			["convo-two", "a0"],
-			["convo-two", "a1"],
+			["convo-one", "a0", "convo-one:a0"],
+			["convo-one", "a1", "convo-one:a1"],
+			["convo-two", "a0", "convo-two:a0"],
+			["convo-two", "a1", "convo-two:a1"],
 		],
 		"the second conversation's messages are not dropped as already emitted",
 	);
-	assert.deepEqual(keys, [
-		["convo-one", "a0"],
-		["convo-one", "a1"],
-		["convo-two", "a0"],
-		["convo-two", "a1"],
-	]);
+	assert.equal(
+		new Set(messages.map((r) => r.data.id)).size,
+		messages.length,
+		"every record id is distinct, so the primary key [id] holds",
+	);
+	// Links name records, in the conversation they belong to.
+	assert.deepEqual(
+		messages.map((r) => [r.data.id, r.data.parent_id, r.data.children_ids]),
+		[
+			["convo-one:a0", null, ["convo-one:a1"]],
+			["convo-one:a1", "convo-one:a0", []],
+			["convo-two:a0", null, ["convo-two:a1"]],
+			["convo-two:a1", "convo-two:a0", []],
+		],
+	);
+	// Conversations keep source node ids, so the projection finds the tip by node_id.
 	for (const row of emitted.filter((r) => r.stream === "conversations")) {
+		assert.equal(row.data.current_node, "a1");
 		assert.equal(
 			row.data.message_count_on_current_branch,
 			2,
 			String(row.data.id),
 		);
 	}
+});
+
+test("processConversationDetail: a body with object parts emits the legacy join in content and keeps every object part", async () => {
+	const { deps, emitted } = makeHarness();
+	const image = {
+		content_type: "image_asset_pointer",
+		asset_pointer: "file-service://file-1",
+		size_bytes: 12,
+	};
+	const transcript = { content_type: "audio_transcription", text: "spoken" };
+	const result = await processConversationDetail(
+		deps,
+		makeConvo({ id: "convo-parts", current_node: "a1" }),
+		{
+			status: 200,
+			json: {
+				current_node: "a1",
+				mapping: {
+					a0: userNode(null, ["a1"], "first"),
+					a1: {
+						parent: "a0",
+						children: [],
+						message: {
+							author: { role: "user" },
+							content: {
+								content_type: "multimodal_text",
+								parts: [" lead", image, transcript, "tail "],
+							},
+						},
+					} as ChatGptNode,
+				},
+			},
+		},
+		makeEmitConversation(deps),
+	);
+	assert.deepEqual(result, { complete: true });
+	const record = emitted.find(
+		(r) => r.stream === "messages" && r.data.node_id === "a1",
+	)?.data;
+	assert.equal(record?.id, "convo-parts:a1");
+	assert.equal(record?.content, " lead\ntail ", "the legacy join, edges kept");
+	assert.deepEqual(record?.non_string_parts, [
+		{ index: 1, part: image },
+		{ index: 2, part: transcript },
+	]);
+	const plain = emitted.find(
+		(r) => r.stream === "messages" && r.data.node_id === "a0",
+	)?.data;
+	assert.deepEqual(plain?.non_string_parts, []);
 });
 
 test("processConversationDetail: a repeat detail never changes an already-emitted message's parent_id on the append-only stream", async () => {
@@ -12577,10 +12633,10 @@ test("processConversationDetail: a repeat detail never changes an already-emitte
 		makeEmitConversation(deps),
 	);
 	const a2Emits = emitted.filter(
-		(r) => r.stream === "messages" && r.data.id === "a2",
+		(r) => r.stream === "messages" && r.data.node_id === "a2",
 	);
 	assert.equal(a2Emits.length, 1, "a2 is emitted once");
-	assert.equal(a2Emits[0]?.data.parent_id, "a0");
+	assert.equal(a2Emits[0]?.data.parent_id, `${makeConvo().id}:a0`);
 	const conversations = emitted.filter((r) => r.stream === "conversations");
 	const a2InMapping = (
 		conversations[1]?.data as
@@ -12845,7 +12901,7 @@ test("processConversationDetail: oversize text is spooled whole as a blob and re
 		assert.deepEqual(outcome, { complete: true });
 		assert.equal(detailGaps(messages).length, 0);
 		const record = emitted.find(
-			(r) => r.stream === "messages" && r.data.id === "a1",
+			(r) => r.stream === "messages" && r.data.node_id === "a1",
 		);
 		assert.equal(record?.data.content, null);
 		assert.equal("content_loss" in (record?.data ?? {}), false);
@@ -12860,7 +12916,8 @@ test("processConversationDetail: oversize text is spooled whole as a blob and re
 		);
 		assert.ok(blobMessage, "a BLOB message is emitted");
 		assert.equal(blobMessage.stream, "messages");
-		assert.deepEqual(blobMessage.key, [makeConvo({}).id, "a1"]);
+		assert.equal(blobMessage.key, record?.data.id);
+		assert.equal(blobMessage.key, `${makeConvo({}).id}:a1`);
 		assert.equal(blobMessage.sha256, ref.sha256);
 		assert.equal(blobMessage.size_bytes, ref.size_bytes);
 		assert.equal(ref.blob_id, `sha256:${ref.sha256}`);
@@ -12885,9 +12942,11 @@ test("processConversationDetail: oversize text is spooled whole as a blob and re
 
 function messageRecord(
 	emitted: ReadonlyArray<{ stream: string; data: Record<string, unknown> }>,
-	id: string,
+	nodeId: string,
 ): Record<string, unknown> | undefined {
-	return emitted.find((r) => r.stream === "messages" && r.data.id === id)?.data;
+	return emitted.find(
+		(r) => r.stream === "messages" && r.data.node_id === nodeId,
+	)?.data;
 }
 
 test("processConversationDetail: oversize text on a host with no blob store is a field-level omission, not a gap", async () => {
@@ -13098,10 +13157,10 @@ test("runConversationsAndMessagesStreams: capped runs on a host with no blob sto
 
 // ─── BLOB-before-RECORD through collectChatGpt's real emitRecord wrapper ──
 
-// A message is keyed by `[conversation_id, id]`; a `resources` entry names it
-// by the minified JSON array of that pair.
-const BIG_CONVO_A0 = JSON.stringify(["big-convo", "a0"]);
-const BIG_CONVO_A1 = JSON.stringify(["big-convo", "a1"]);
+// A message is keyed by its record id, `<conversation_id>:<node_id>`; a
+// `resources` entry names it by that id.
+const BIG_CONVO_A0 = "big-convo:a0";
+const BIG_CONVO_A1 = "big-convo:a1";
 
 /**
  * Runs the real `collectChatGpt` against a fake page. Its `emitRecord` is the
@@ -13171,9 +13230,9 @@ async function collectWithOversizeMessage(
 	]);
 	const emit = (msg: EmittedMessage): Promise<void> => {
 		if (msg.type === "BLOB")
-			events.push({ kind: "BLOB", key: JSON.stringify(msg.key) });
+			events.push({ kind: "BLOB", key: String(msg.key) });
 		if (msg.type === "RECORD" && msg.stream === "messages") {
-			events.push({ kind: "RECORD", key: JSON.stringify(msg.key) });
+			events.push({ kind: "RECORD", key: String(msg.key) });
 			records.push(msg.data as Record<string, unknown>);
 		}
 		return Promise.resolve();
@@ -13217,7 +13276,7 @@ test("collectChatGpt: a blob-backed message emits its BLOB event immediately bef
 				{ kind: "RECORD", key: BIG_CONVO_A1 },
 			],
 		);
-		const record = records.find((r) => r.id === "a1");
+		const record = records.find((r) => r.node_id === "a1");
 		assert.equal(record?.content, null);
 		assert.ok(record?.blob_ref, "the record references the blob");
 		assert.equal(readdirSync(dir).length, 1, "the blob was spooled once");
@@ -13237,7 +13296,7 @@ test("collectChatGpt: a message the stream selection suppresses emits no BLOB ev
 		);
 		assert.deepEqual(events, [{ kind: "RECORD", key: BIG_CONVO_A0 }]);
 		assert.equal(
-			records.some((r) => r.id === "a1"),
+			records.some((r) => r.node_id === "a1"),
 			false,
 		);
 		assert.deepEqual(readdirSync(dir), [], "no orphan spool file");
@@ -13280,7 +13339,7 @@ test("collectChatGpt: a tool-recipient message keeps its body out of tool_calls 
 					toolNode("p".repeat(c.size)),
 				),
 			);
-			const record = records.find((r) => r.id === "a1");
+			const record = records.find((r) => r.node_id === "a1");
 			assert.ok(record, `${c.name}: record emitted`);
 			assert.deepEqual(
 				record.tool_calls,

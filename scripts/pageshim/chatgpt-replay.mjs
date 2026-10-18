@@ -25,6 +25,29 @@ const providerListItem = (record) => ({
 		record.message_count_on_current_branch ?? null,
 });
 
+/**
+ * ChatGPT 0.3.0 names a message record "<conversation_id>:<node_id>" and links
+ * its parent and children the same way; earlier versions used the bare node
+ * id. The provider API names nodes by node id, so strip the prefix from the
+ * record's id and links. A conversation id is a UUID and never contains ":",
+ * so the prefix is unambiguous.
+ */
+const withNodeIds = (record) => {
+	const prefix = `${record.conversation_id}:`;
+	const nodeId = (id) =>
+		typeof id === "string" && id.startsWith(prefix)
+			? id.slice(prefix.length)
+			: id;
+	return {
+		...record,
+		id: nodeId(record.id),
+		parent_id: nodeId(record.parent_id ?? null),
+		children_ids: Array.isArray(record.children_ids)
+			? record.children_ids.map(nodeId)
+			: [],
+	};
+};
+
 const providerNode = (record) => ({
 	id: record.id,
 	parent: record.parent_id ?? null,
@@ -71,7 +94,10 @@ export function projectChatGptExport(content, { pageSize = CHATGPT_LIST_PAGE_SIZ
 			mapping = {};
 			nodesByConversation.set(message.conversation_id, mapping);
 		}
-		if (typeof message.id === "string") mapping[message.id] = providerNode(message);
+		if (typeof message.id === "string") {
+			const node = withNodeIds(message);
+			mapping[node.id] = providerNode(node);
+		}
 	}
 	const conversationsById = new Map(items.map((item) => [item.id, item]));
 	return {

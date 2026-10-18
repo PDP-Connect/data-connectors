@@ -102,8 +102,9 @@ export function flattenTreeCurrentBranch(
 
 /**
  * Join the string entries of a `parts[]` array with "\n". Non-string entries
- * (asset pointers, nested objects) are dropped before the join and empty
- * strings are kept, so the result equals the legacy collector's
+ * (asset pointers, nested objects) are left out of the join, and are kept
+ * whole in `non_string_parts` (`extractNonStringParts`); empty strings are
+ * kept, so the result equals the legacy collector's
  * `parts.filter(p => typeof p === "string").join("\n")`. A body whose joined
  * text is empty yields null, so the message is omitted as the legacy one is.
  */
@@ -573,6 +574,35 @@ export interface ExtractedMessage {
 	sourceUnrepresentable: boolean;
 }
 
+/**
+ * The entries of a `text` or `multimodal_text` body's `parts` that are not
+ * strings (asset pointers with their size and generation metadata, audio
+ * transcripts, any other object), each as `{ index, part }` with its position in
+ * `parts`. `content` joins only the string parts, as the legacy collector does,
+ * so this field is where the rest of the body lives; an earlier collector wrote
+ * their `text` and `[asset:<pointer>]` markers into `content`, and the
+ * pointer and text are still here. Strings at any depth are
+ * pdpp-safe-escape-v1 encoded.
+ */
+export function extractNonStringParts(
+	content: ChatGptContent | undefined,
+): unknown[] {
+	if (
+		content?.content_type !== "text" &&
+		content?.content_type !== "multimodal_text"
+	) {
+		return [];
+	}
+	const kept: { index: number; part: unknown }[] = [];
+	for (const [index, part] of (Array.isArray(content.parts)
+		? content.parts
+		: []
+	).entries()) {
+		if (typeof part !== "string") kept.push({ index, part: part ?? null });
+	}
+	return encodeToolCallStrings(kept) as unknown[];
+}
+
 /** The source text of a message node, before escaping. */
 export function extractRawMessageText(node: ChatGptNode): string | null {
 	return extractContentParts(node.message?.content).raw;
@@ -601,6 +631,7 @@ export function extractMessageWithBlob(
 			role: m.author?.role ?? null,
 			content:
 				oversize || raw === null ? null : encodePdppSafeText(raw) || null,
+			non_string_parts: extractNonStringParts(m.content),
 			content_type: m.content?.content_type ?? null,
 			model_slug: m.metadata?.model_slug ?? null,
 			create_time: tsToIso(m.create_time),
@@ -619,16 +650,41 @@ export function extractMessageWithBlob(
 }
 
 /**
- * The key of a `messages` record: `[conversation_id, id]`, the manifest's
- * `primary_key`. ChatGPT reuses a node id in several conversations (forks and
- * branches copy nodes), so the node id names a message only within its
- * conversation.
+ * The `id` of a `messages` record: the conversation id and the source node id
+ * joined by ":". ChatGPT reuses a node id in several conversations (forks and
+ * branches copy nodes), so a node id names a message only within its
+ * conversation, and the record id has to carry both. ChatGPT conversation ids
+ * are UUIDs and never contain ":", so the pair is recoverable.
  */
-export function messageRecordKey(
+export function messageRecordId(
 	conversationId: string,
 	nodeId: string,
-): [string, string] {
-	return [conversationId, nodeId];
+): string {
+	return `${conversationId}:${nodeId}`;
+}
+
+/**
+ * The wire form of a message extracted by `extractMessageWithBlob`: that record
+ * names messages by the source's node ids, which is how the rest of the
+ * collector walks the tree. On the wire `id`, `parent_id` and `children_ids`
+ * are record ids (`messageRecordId`), so each of them names a `messages`
+ * record, and `node_id` keeps the source node id.
+ */
+export function toMessageRecord(
+	record: RecordData,
+	conversationId: string,
+): RecordData {
+	const scope = (nodeId: unknown) =>
+		typeof nodeId === "string" ? messageRecordId(conversationId, nodeId) : null;
+	const ownId = scope(record.id);
+	return {
+		...record,
+		...(ownId === null ? {} : { id: ownId, node_id: record.id as string }),
+		parent_id: scope(record.parent_id),
+		children_ids: Array.isArray(record.children_ids)
+			? record.children_ids.map((child) => scope(child) ?? child)
+			: [],
+	};
 }
 
 export function extractMessage(
