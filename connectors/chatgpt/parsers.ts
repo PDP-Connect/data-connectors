@@ -88,25 +88,11 @@ export function flattenTreeCurrentBranch(
 	});
 }
 
-/**
- * `String.prototype.trim` also strips VT (U+000B) and FF (U+000C), which are
- * forbidden control characters. Trimming them away before the safe-text pass
- * would lose them before the escape pass, so trim only the whitespace that is
- * not a forbidden control.
- */
-const EDGE_WHITESPACE =
-	/^[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+|[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+$/g;
-
-function trimKeepingControls(s: string): string {
-	return s.replace(EDGE_WHITESPACE, "");
-}
-
 // ─── extractContent per-content_type helpers ──────────────────────────
 //
 // Memory bound of extraction. The extractors below build the whole body: an
-// array with one entry per part, a joined string, and, when edge whitespace is
-// trimmed, possibly another copy. Transient memory is O(source payload size +
-// part count); the constants depend on the part format and the JS engine's
+// array with one entry per part, and a joined string. Transient memory is
+// O(source payload size + part count); the constants depend on the part format and the JS engine's
 // string representation (references, ropes, flattening), so no tighter factor
 // is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
 // full text, and the cap decision uses `escapedLengthExceeds` on the result.
@@ -144,7 +130,7 @@ function stringifyContentPart(p: unknown): string {
 /** Canonical user/assistant text: `{ parts: ["...", {asset_pointer}...] }`. */
 function extractTextContent(content: ChatGptContent): string | null {
 	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = trimKeepingControls(parts.map(stringifyContentPart).join("\n"));
+	const s = parts.map(stringifyContentPart).join("\n");
 	return s || null;
 }
 
@@ -155,9 +141,7 @@ function extractTextContent(content: ChatGptContent): string | null {
  */
 function extractMultimodalContent(content: ChatGptContent): string | null {
 	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = trimKeepingControls(
-		parts.map(stringifyContentPart).filter(Boolean).join("\n"),
-	);
+	const s = parts.map(stringifyContentPart).filter(Boolean).join("\n");
 	return s || null;
 }
 
@@ -177,9 +161,7 @@ function extractCodeContent(content: ChatGptContent): string | null {
  */
 function extractThoughtsContent(content: ChatGptContent): string | null {
 	const thoughts = Array.isArray(content.thoughts) ? content.thoughts : [];
-	const s = trimKeepingControls(
-		thoughts.map(stringifyThought).filter(Boolean).join("\n\n"),
-	);
+	const s = thoughts.map(stringifyThought).filter(Boolean).join("\n\n");
 	return s || null;
 }
 
@@ -216,7 +198,7 @@ function extractTetherBrowsingDisplay(content: ChatGptContent): string | null {
 	if (typeof content.result === "string" && content.result) {
 		pieces.push(content.result);
 	}
-	const s = trimKeepingControls(pieces.join("\n\n"));
+	const s = pieces.join("\n\n");
 	return s || null;
 }
 
@@ -232,7 +214,7 @@ function extractTetherQuote(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	const s = trimKeepingControls(pieces.join("\n"));
+	const s = pieces.join("\n");
 	return s || null;
 }
 
@@ -262,7 +244,7 @@ function extractModelEditableContext(content: ChatGptContent): string | null {
 	if (typeof content.repo_summary === "string" && content.repo_summary) {
 		pieces.push(content.repo_summary);
 	}
-	const s = trimKeepingControls(pieces.join("\n\n"));
+	const s = pieces.join("\n\n");
 	return s || null;
 }
 
@@ -275,7 +257,7 @@ function extractSystemError(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	return trimKeepingControls(pieces.join(": ")) || null;
+	return pieces.join(": ") || null;
 }
 
 /** User custom-instructions shape (observed on imported conversations). */
@@ -290,7 +272,7 @@ function extractUserEditableContext(content: ChatGptContent): string | null {
 	) {
 		pieces.push(content.user_instructions);
 	}
-	return trimKeepingControls(pieces.join("\n\n")) || null;
+	return pieces.join("\n\n") || null;
 }
 
 // Fallback for unrecognized shape — prefer an explicit handler. Stringify so

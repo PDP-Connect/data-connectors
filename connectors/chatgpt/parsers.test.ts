@@ -135,11 +135,12 @@ test("extractContent: text joins parts with \\n and asset-pointers render as [as
 	assert.equal(out, "hello\n[asset:file-1]\nworld");
 });
 
-test("extractContent: empty text parts → null", () => {
+test("extractContent: no text parts → null; whitespace-only text is kept as written", () => {
 	assert.equal(extractContent({ content_type: "text", parts: [] }), null);
+	assert.equal(extractContent({ content_type: "text", parts: [""] }), null);
 	assert.equal(
 		extractContent({ content_type: "text", parts: ["", "   "] }),
-		null,
+		"\n   ",
 	);
 });
 
@@ -278,10 +279,56 @@ test("extractContentParts: forbidden controls at the edges are escaped, not trim
 		extractContent({ content_type: "text", parts: ["\u000B\u000C"] }),
 		"\\u000B\\u000C",
 	);
+});
+
+test("extractContent: leading and trailing whitespace is preserved exactly, in every text-bearing shape", () => {
+	const edged = (body: string) => `  \t\n${body}\n\t \u00A0`;
+	const cases: Array<[string, Parameters<typeof extractContent>[0]]> = [
+		["text", { content_type: "text", parts: [edged("a")] }],
+		[
+			"multimodal_text",
+			{ content_type: "multimodal_text", parts: [edged("a")] },
+		],
+		[
+			"thoughts",
+			{ content_type: "thoughts", thoughts: [{ summary: edged("a") }] },
+		],
+		[
+			"tether_browsing_display",
+			{ content_type: "tether_browsing_display", result: edged("a") },
+		],
+		["tether_quote", { content_type: "tether_quote", text: edged("a") }],
+		[
+			"model_editable_context",
+			{ content_type: "model_editable_context", model_set_context: edged("a") },
+		],
+		[
+			"user_editable_context",
+			{ content_type: "user_editable_context", user_instructions: edged("a") },
+		],
+	];
+	for (const [name, content] of cases) {
+		const got = extractContent(content);
+		assert.ok(got?.includes(edged("a")), `${name}: ${JSON.stringify(got)}`);
+	}
 	assert.equal(
 		extractContentParts({ content_type: "text", parts: ["  hello \n"] }).raw,
-		"hello",
+		"  hello \n",
 	);
+	assert.equal(
+		extractContent({ content_type: "text", parts: ["\n\t "] }),
+		"\n\t ",
+	);
+});
+
+test("extractMessage: the stored record keeps edge whitespace next to escaped controls", () => {
+	const source = "\n  lead\ttab \x00 mid\x0B \n trail  \t\n";
+	const rec = extractMessage("n1", textNode(source), "c1", true);
+	assert.equal(
+		rec?.content,
+		source.replace("\x00", "\\u0000").replace("\x0B", "\\u000B"),
+	);
+	assert.equal(decodeEscapedText(rec?.content as string), source);
 });
 
 function textNode(text: string): ChatGptNode {
@@ -316,7 +363,7 @@ test("decodeEscapedText: NUL and other controls round-trip losslessly", () => {
 		assert.equal(validateRecord("messages", rec ?? {}).ok, true);
 		assert.equal(
 			decodeEscapedText(rec?.content as string),
-			source.trim(),
+			source,
 			JSON.stringify(source),
 		);
 	}
