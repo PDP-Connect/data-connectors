@@ -3,8 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /** Browser-first YouTube Collection Profile. The owner signs in in PDPP's browser. */
-import { createHash } from "node:crypto";
-import { performance } from "node:perf_hooks";
 import type { Request, Response } from "playwright";
 import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
@@ -80,11 +78,12 @@ type CoverageFact = {
 	skipped_unresolved_date_count?: number;
 };
 
-function id(value: string): string {
-	return createHash("sha256").update(value).digest("hex").slice(0, 24);
+export async function youtubeRecordId(value: string): Promise<string> {
+	const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 24);
 }
 
-function videoIdentity(video: BrowserVideo): string {
+export function videoIdentity(video: BrowserVideo): string {
 	if (video.video_id) return video.video_id;
 	const url = new URL(video.video_url);
 	url.searchParams.delete("list");
@@ -382,7 +381,7 @@ function videoFields(video: BrowserVideo) {
 	};
 }
 
-async function hasYoutubeSession(
+export async function hasYoutubeSession(
 	page: BrowserCollectContext["page"],
 ): Promise<boolean> {
 	if (
@@ -1811,7 +1810,7 @@ export async function collectYoutubeBrowser(
 					if (result) {
 						for (const video of result.items) {
 							await emit("playlist_items", {
-								id: id(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
+								id: await youtubeRecordId(`playlist_item|${playlist.id}|${videoIdentity(video)}`),
 								playlist_id: playlist.id,
 								...videoFields(video),
 							});
@@ -1846,7 +1845,7 @@ export async function collectYoutubeBrowser(
 		if (!result) continue;
 		for (const video of result.items)
 			await emit(stream, {
-				id: id(`${stream}|${videoIdentity(video)}`),
+				id: await youtubeRecordId(`${stream}|${videoIdentity(video)}`),
 				...videoFields(video),
 			});
 		if (result.verifiedEmpty)
@@ -1888,7 +1887,7 @@ export async function collectYoutubeBrowser(
 							: new Date(capturedAt);
 				}
 				await emit("watch_history", {
-					id: id(`history|${videoIdentity(video)}`),
+					id: await youtubeRecordId(`history|${videoIdentity(video)}`),
 					position,
 					watched_date: resolveWatchedDate(
 						video.watched_date_label ?? null,
@@ -1915,7 +1914,7 @@ export async function collectYoutubeBrowser(
 				if (result.stopReason) fact.stop_reason = result.stopReason;
 				fact.incomplete = !result.exhausted;
 				fact.next_checkpoint = result.checkpointAnchor
-					? id(result.checkpointAnchor)
+					? await youtubeRecordId(result.checkpointAnchor)
 					: null;
 				fact.skipped_unresolved_date_count = 0;
 				if (result.historyDiagnostics)
