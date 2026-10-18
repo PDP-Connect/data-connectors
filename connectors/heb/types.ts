@@ -132,7 +132,7 @@ export type MaxPageResolution =
  *  identity of its own beyond the parent profile — it stays an array field). */
 export interface DeliveryAddress {
 	address: string;
-	is_primary: boolean | null;
+	is_primary: boolean;
 	label: string | null;
 }
 
@@ -143,7 +143,7 @@ export interface DeliveryAddress {
  *  scrapeProfile()). `id` is synthesized (this connector has one account per
  *  connection, so a fixed literal id is stable and unique within the stream). */
 export interface ProfileRecord {
-	delivery_addresses: DeliveryAddress[] | null;
+	delivery_addresses: DeliveryAddress[];
 	email: string | null;
 	id: string;
 	name: string | null;

@@ -142,7 +142,7 @@ export const listPageOrderShape = z.object({
  */
 const deliveryAddressSchema = z.object({
 	address: pdppSafeText.min(1).max(500),
-	is_primary: z.boolean().nullable(),
+	is_primary: z.boolean(),
 	label: pdppSafeText.max(200).nullable(),
 });
 
@@ -155,7 +155,7 @@ const deliveryAddressSchema = z.object({
  * ("profile"): this connector has exactly one account per connection.
  */
 export const profileSchema = z.object({
-	delivery_addresses: deliveryAddressSchema.array().nullable(),
+	delivery_addresses: deliveryAddressSchema.array(),
 	email: z.string().email("email must be a valid email address").nullable(),
 	id: z.literal("profile"),
 	name: pdppSafeText.max(200).nullable(),

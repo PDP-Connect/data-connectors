@@ -9,7 +9,7 @@
 	},
 	"connector_key": "heb",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/heb",
-	"version": "0.6.19",
+	"version": "0.6.20",
 	"display_name": "H-E-B",
 	"runtime_requirements": {
 		"bindings": {
@@ -332,7 +332,7 @@
 						"description": "Legacy heb.profile parity field, ported from legacy connectors/heb/heb-playwright.js scrapeProfile()."
 					},
 					"delivery_addresses": {
-						"type": ["array", "null"],
+						"type": "array",
 						"description": "Legacy heb.profile parity field (deliveryAddresses[]), ported from legacy connectors/heb/heb-playwright.js scrapeProfile(). Not a child stream: an address has no identity beyond the parent profile record (D3).",
 						"items": {
 							"type": "object",
@@ -341,7 +341,7 @@
 									"type": "string"
 								},
 								"is_primary": {
-									"type": ["boolean", "null"]
+									"type": "boolean"
 								},
 								"label": {
 									"type": ["string", "null"]

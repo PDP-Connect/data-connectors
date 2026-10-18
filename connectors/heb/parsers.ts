@@ -1019,8 +1019,13 @@ function labeledFieldValue(document: Document, label: string): string | null {
  *  each `main > div > div` card with a paragraph containing a state+zip
  *  pattern is an address card; `isPrimary` comes from the literal word
  *  "Primary" appearing anywhere in the card (legacy behavior, kept as-is). */
-function parseDeliveryAddresses(document: Document): DeliveryAddress[] {
-	const addresses: DeliveryAddress[] = [];
+// Unknown observations stay internal; emitted addresses retain the legacy boolean.
+type ObservedDeliveryAddress = Omit<DeliveryAddress, "is_primary"> & {
+	is_primary: boolean | null;
+};
+
+function parseDeliveryAddresses(document: Document): ObservedDeliveryAddress[] {
+	const addresses: ObservedDeliveryAddress[] = [];
 	for (const card of document.querySelectorAll("main > div > div")) {
 		const addrEl = [...card.querySelectorAll("p")].find((paragraph) =>
 			STATE_ZIP_RE.test(normText(paragraph)),
@@ -1048,7 +1053,7 @@ function parseDeliveryAddresses(document: Document): DeliveryAddress[] {
  *  whose text is exactly the field label, then reads its sibling's text —
  *  no free-text regex over concatenated innerText. */
 export function parseProfileDom(html: string): {
-	deliveryAddresses: DeliveryAddress[] | null;
+	deliveryAddresses: ObservedDeliveryAddress[] | null;
 	email: string | null;
 	name: string | null;
 	phone: string | null;
@@ -1067,7 +1072,7 @@ export function parseProfileDom(html: string): {
 
 export function buildProfileRecord(
 	extraction: {
-		deliveryAddresses: DeliveryAddress[] | null;
+		deliveryAddresses: ObservedDeliveryAddress[] | null;
 		email: string | null;
 		name: string | null;
 		phone: string | null;
@@ -1075,9 +1080,19 @@ export function buildProfileRecord(
 	// Collection time is the envelope's job (PDPP spec-core), not `data`'s.
 	// Kept positionally so call sites and siblings stay stable.
 	_emittedAt: string,
-): ProfileRecord {
+): ProfileRecord | null {
+	if (extraction.deliveryAddresses === null) {
+		return null;
+	}
+	const addresses: DeliveryAddress[] = [];
+	for (const address of extraction.deliveryAddresses) {
+		if (address.is_primary === null) {
+			return null;
+		}
+		addresses.push({ ...address, is_primary: address.is_primary });
+	}
 	return {
-		delivery_addresses: extraction.deliveryAddresses,
+		delivery_addresses: addresses,
 		email: extraction.email,
 		id: HEB_PROFILE_RECORD_ID,
 		name: extraction.name,

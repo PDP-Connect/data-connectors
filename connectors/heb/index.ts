@@ -2593,18 +2593,17 @@ export async function collectProfile(
 		extraction.deliveryAddresses?.map((address) => address.address) ?? [],
 	);
 	// Labels and address cards identify observed fields, not owner-bound complete
-	// source sections. Unknown/absent addresses and primary status stay null.
+	// source sections. Withhold unknown addresses or unreadable primary markers.
+	const record = buildProfileRecord(extraction, deps.emittedAt);
 	if (
+		record === null ||
 		!inventoryIsComplete(profileEvidence) ||
 		!inventoryIsComplete(addressEvidence)
 	) {
 		await emitInventoryIncomplete(deps, "profile");
 		return;
 	}
-	await deps.emitRecord(
-		"profile",
-		buildProfileRecord(extraction, deps.emittedAt),
-	);
+	await deps.emitRecord("profile", record);
 }
 
 async function emitInventoryIncomplete(

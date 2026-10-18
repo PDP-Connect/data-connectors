@@ -1260,6 +1260,26 @@ test("buildProfileRecord builds the fixed-literal-id profile record", () => {
 	});
 });
 
+test("buildProfileRecord withholds unread address and primary observations", () => {
+	const fields = { email: "shopper@example.com", name: "Reader", phone: null };
+	assert.equal(buildProfileRecord({
+		...fields, deliveryAddresses: null,
+	}, "2026-10-18T00:00:00Z"), null);
+	assert.equal(buildProfileRecord({
+		...fields, deliveryAddresses: [{
+			address: "Austin, TX 78701", label: null, is_primary: null,
+		}],
+	}, "2026-10-18T00:00:00Z"), null);
+	for (const is_primary of [true, false]) {
+		const record = buildProfileRecord({
+			...fields, deliveryAddresses: [{
+				address: "Austin, TX 78701", label: null, is_primary,
+			}],
+		}, "2026-10-18T00:00:00Z");
+		assert.equal(record?.delivery_addresses[0]?.is_primary, is_primary);
+	}
+});
+
 test("parseNutritionDom extracts a full nutrition panel structurally", () => {
 	const result = parseNutritionDom(SYNTHETIC_NUTRITION_HTML);
 	assert.equal(result.found, true);
