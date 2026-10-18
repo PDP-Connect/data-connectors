@@ -59,6 +59,7 @@ import { hashCanonicalJson } from "@pdpp/collector-runtime";
 import { packageRoot as PACKAGE_ROOT } from "../src/connector-paths.ts";
 import { getConnectorPaths } from "../src/orchestrator.ts";
 import type { ConnectorScenario } from "../src/scenario/format.ts";
+import { namespaceSkip } from "../src/scenario/namespace-skip.ts";
 import {
 	computeDeclarationDigest,
 	computeSourceDigest,
@@ -2106,6 +2107,7 @@ test("scenario-verify: under namespace isolation, a fixture connector's spawned 
 	);
 	const capability = isNamespaceIsolationAvailable();
 	if (!capability.available) {
+		namespaceSkip(true);
 		t.skip(`network isolation unavailable on this host: ${capability.reason}`);
 		return;
 	}
@@ -3545,9 +3547,11 @@ test("scenario-verify --timeout: rejects a non-positive-integer value before spa
 // pure-arithmetic unit coverage of scaleReplayDelayMs/REPLAY_TIME_SCALE):
 //   1. SPEED: reusing the SAME paced watchdog fixture the inactivity-watchdog
 //      tests above already drive (src/test-fixtures/scenario-watchdog-paced-
-//      connector.ts), a replay whose live capture took multiple seconds of
-//      real inter-record pacing must complete in well under that recorded
-//      duration.
+//      connector.ts), the replay's own paced section (its sleeps, timed inside
+//      the connector, so process startup is excluded) must stay well under the
+//      recorded pacing total. The check lives in the fixture, not here: a
+//      replay runs the connector isolated, and a passing run reports nothing
+//      back to this test.
 //   2. ORDERING: src/test-fixtures/scenario-timer-ordering-connector.ts
 //      schedules a LONG timer before a SHORT one but expects the SHORT one to
 //      fire (and be recorded) first. Scaling both delays by the same
@@ -3568,6 +3572,9 @@ test("scenario-verify: a replay of the paced watchdog fixture completes well und
 	const recordCount = "3";
 	const sleepMs = "800";
 	const recordedPacingTotalMs = 3 * 800;
+	// Half the recorded pacing total. The fixture fails the replay if its
+	// paced section runs longer (see its header for why it checks itself).
+	const maxPacedMs = recordedPacingTotalMs / 2;
 
 	try {
 		const recordResult = runRecordCli(
@@ -3591,7 +3598,6 @@ test("scenario-verify: a replay of the paced watchdog fixture completes well und
 			`setup recording must succeed; stderr=${recordResult.stderr}`,
 		);
 
-		const replayStart = Date.now();
 		const verifyResult = runVerifyCli(
 			[
 				"scenario-watchdog-paced-connector",
@@ -3604,26 +3610,47 @@ test("scenario-verify: a replay of the paced watchdog fixture completes well und
 			{
 				PDPP_WATCHDOG_TEST_RECORD_COUNT: recordCount,
 				PDPP_WATCHDOG_TEST_SLEEP_MS: sleepMs,
+				PDPP_WATCHDOG_TEST_MAX_PACED_MS: String(maxPacedMs),
 			},
 		);
-		const replayDurationMs = Date.now() - replayStart;
 
 		assert.equal(
 			verifyResult.code,
 			0,
-			`replay must PASS; stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
+			`replay must PASS with its paced section under ${String(maxPacedMs)}ms; stdout=${verifyResult.stdout} stderr=${verifyResult.stderr}`,
 		);
 		assert.match(
 			verifyResult.stdout,
 			/replay time: scaled 100x \(pacing\/backoff compressed; recorded responses need no provider protection\)/,
 			`expected the time-scaling line on stdout; stdout=${verifyResult.stdout}`,
 		);
-		// Loosely bounded (well under half the recorded pacing total) to avoid
-		// flake while still proving the delays were actually scaled, not just
-		// fast this run by coincidence.
-		assert.ok(
-			replayDurationMs < recordedPacingTotalMs / 2,
-			`a replay under REPLAY_TIME_SCALE must complete in well under half the recorded pacing total (recorded pacing=${String(recordedPacingTotalMs)}ms, replay took=${String(replayDurationMs)}ms)`,
+
+		// Control: a 1 ms bound must fail the same replay, which proves the bound
+		// reached the replayed connector rather than silently not being checked.
+		const controlResult = runVerifyCli(
+			[
+				"scenario-watchdog-paced-connector",
+				scenarioPath,
+				"--entrypoint",
+				WATCHDOG_STUB_CONNECTOR_PATH,
+				"--timeout",
+				"30",
+			],
+			{
+				PDPP_WATCHDOG_TEST_RECORD_COUNT: recordCount,
+				PDPP_WATCHDOG_TEST_SLEEP_MS: sleepMs,
+				PDPP_WATCHDOG_TEST_MAX_PACED_MS: "1",
+			},
+		);
+		assert.notEqual(
+			controlResult.code,
+			0,
+			"a 1 ms paced bound must fail the replay",
+		);
+		assert.match(
+			`${controlResult.stdout}${controlResult.stderr}`,
+			/over the 1ms bound \(PDPP_WATCHDOG_TEST_MAX_PACED_MS\)/,
+			`the control must fail on the paced bound; stdout=${controlResult.stdout}`,
 		);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });

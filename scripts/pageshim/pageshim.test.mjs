@@ -33,6 +33,10 @@ const scratchRoot = fileURLToPath(
 );
 mkdirSync(scratchRoot, { recursive: true });
 const out = mkdtempSync(join(scratchRoot, "run-"));
+// A failed run keeps its directory for debugging; a passing run removes it.
+process.on("exit", (code) => {
+	if (code === 0) rmSync(out, { recursive: true, force: true });
+});
 const NODE_ONLY = new Set([
 	"crypto",
 	"fs",

@@ -8,7 +8,10 @@ name: PageShim target
 on:
   push:
     branches: [main]
-  pull_request: {}
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
+  pull_request:
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:
@@ -32,7 +35,7 @@ jobs:
           - name: connector gates
             args: --test-name-pattern="pageshim gate" scripts/pageshim/pageshim.test.mjs
           - name: regressions
-            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs
+            args: --test-skip-pattern="pageshim gate" scripts/pageshim/capabilities.test.mjs scripts/pageshim/pageshim.test.mjs scripts/pageshim/pageshim-streaming.test.mjs scripts/pageshim/chatgpt-replay.test.mjs scripts/pageshim/harness-cleanup.test.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -13769,7 +13769,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.29",
+				"version": "0.1.30",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13786,6 +13786,7 @@
 				"mobile": {
 					"pageshim": {
 						"entry": "icloud_notes.ts",
+						"scope_prefix": "icloud_notes",
 						"login_url": "https://www.icloud.com/notes"
 					}
 				},
@@ -25866,10 +25867,11 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.34",
+				"version": "0.2.35",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
+						"scope_prefix": "youtube",
 						"login_url": "https://www.youtube.com/"
 					}
 				},
