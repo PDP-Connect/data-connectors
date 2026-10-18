@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.29)
+ * PDPP LinkedIn Connector (v0.3.30)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -575,6 +575,22 @@ interface ConnectionProfileResolution {
 	malformedCount: number;
 }
 
+/** Observational PageShim probe: no navigation or cookie-jar access.
+ * Voyager reads the CSRF cookie inside the same-origin page. A successful
+ * JSON response alone is not evidence of an authenticated owner. */
+export async function probeLinkedInSession(page: Page): Promise<boolean> {
+	try {
+		const me = await voyagerFetch<VoyagerMeResponse>(page, "/voyager/api/me");
+		if (isFetchError(me) || !isRecord(me.miniProfile)) return false;
+		return profileEvidence(me, {
+			entityUrn: me.miniProfile.dashEntityUrn,
+			publicIdentifier: me.miniProfile.publicIdentifier,
+		}) === undefined;
+	} catch {
+		return false;
+	}
+}
+
 export async function hasLinkedInSessionCookie(
 	context: ProbeSessionArgs["context"],
 ): Promise<boolean> {
@@ -641,6 +657,25 @@ export async function ensureLinkedInSession(
 			"linkedin_login_incomplete: no live Voyager session after owner handoff",
 		);
 	}
+}
+
+/** Keep desktop emission unchanged while using the canonical mobile gap code. */
+export async function collectLinkedInPageShim(ctx: BrowserCollectContext): Promise<void> {
+	await collectLinkedIn({
+		...ctx,
+		emit: (message) => ctx.emit(
+			message.type === "SKIP_RESULT" && message.reason === "linkedin_enumeration_unproven"
+				? {
+					...message,
+					reason: "inventory_not_proven_complete",
+					diagnostics: {
+						...(isRecord(message.diagnostics) ? message.diagnostics : {}),
+						original_reason: message.reason,
+					},
+				}
+				: message,
+		),
+	});
 }
 
 export async function collectLinkedIn(
