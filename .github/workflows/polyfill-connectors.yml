@@ -17,6 +17,7 @@ on:
     paths:
       - "packages/polyfill-connectors/**"
       - "connectors/**"
+      - "scripts/test-sandbox/**"
       - ".github/workflows/polyfill-connectors.yml"
   # Only PRs into main. A PR into an integration branch that batches changes
   # is checked locally instead; the batch PR into main runs this workflow.
@@ -60,7 +61,7 @@ jobs:
 
           echo "$CHANGED"
 
-          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
+          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|scripts/test-sandbox/|\.github/workflows/polyfill-connectors\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -141,7 +142,10 @@ jobs:
           if unshare --user --map-root-user --net true; then
             echo "unprivileged user and network namespaces: available"
           else
-            echo "::warning::unprivileged namespaces are unavailable; the scenario-isolation tests will skip"
+            # They worked on this runner image when this step was added, so losing
+            # them is an image change to fix, not coverage to drop quietly.
+            echo "::error::unprivileged namespaces are unavailable; the scenario-isolation tests would skip"
+            exit 1
           fi
 
       - name: Test
