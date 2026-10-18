@@ -2,15 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Child-process oracle for the per-element memory bound: validates a
- * pre-built fixture file under a caller-supplied heap limit and reports the
- * result over stdout. Does no fixture construction of its own -- the
- * parent process builds the fixture file (outside any heap constraint)
- * and passes only its path and size, so this process's heap budget is
- * spent exclusively on the validation call itself.
+ * Worker-thread / child-process oracle for the per-element memory bound:
+ * validates a pre-built fixture file under a caller-supplied heap limit and
+ * reports the result over the parent port (worker) or stdout (child process).
+ * Does no fixture construction of its own -- the parent builds the fixture
+ * outside any heap constraint and passes only its path and size, so the
+ * oracle's heap budget is spent exclusively on the validation call itself.
  */
 
 import { readFileSync } from "node:fs";
+import { parentPort } from "node:worker_threads";
 import { streamGoogleMapsExport } from "./archive-stream.ts";
 import { validateGoogleMapsTimelineArtifactFromFile } from "./validation.ts";
 
@@ -24,12 +25,32 @@ if (!(path && fileSizeArg)) {
 
 const fileSize = Number(fileSizeArg);
 
+function report(result: {
+	elements?: number;
+	error?: string;
+	status?: string;
+}): void {
+	if (parentPort) {
+		parentPort.postMessage(result);
+	} else {
+		process.stdout.write(`${JSON.stringify(result)}\n`);
+	}
+}
+
+// In a worker, process.exit() can stop the thread before a just-posted
+// message is delivered, so a worker sets the exit code and ends naturally.
+function done(code: number): void {
+	if (parentPort) {
+		process.exitCode = code;
+	} else {
+		process.exit(code);
+	}
+}
+
 if (mode === "whole-buffer") {
 	const json = JSON.parse(readFileSync(path, "utf8"));
-	process.stdout.write(
-		`${JSON.stringify({ status: Array.isArray(json.locations) ? "valid" : "unsupported" })}\n`,
-	);
-	process.exit(0);
+	report({ status: Array.isArray(json.locations) ? "valid" : "unsupported" });
+	done(0);
 } else if (mode === "stream") {
 	let elements = 0;
 	streamGoogleMapsExport(path, (event) => {
@@ -38,14 +59,12 @@ if (mode === "whole-buffer") {
 		}
 	})
 		.then(() => {
-			process.stdout.write(
-				`${JSON.stringify({ elements, status: "valid" })}\n`,
-			);
-			process.exit(0);
+			report({ elements, status: "valid" });
+			done(0);
 		})
 		.catch((err) => {
-			process.stdout.write(`${JSON.stringify({ error: String(err) })}\n`);
-			process.exit(1);
+			report({ error: String(err) });
+			done(1);
 		});
 } else {
 	validateGoogleMapsTimelineArtifactFromFile(path, fileSize, {
@@ -53,11 +72,11 @@ if (mode === "whole-buffer") {
 		maxFileBytes: 200 * 1024 * 1024,
 	})
 		.then((result) => {
-			process.stdout.write(`${JSON.stringify({ status: result.status })}\n`);
-			process.exit(0);
+			report({ status: result.status });
+			done(0);
 		})
 		.catch((err) => {
-			process.stdout.write(`${JSON.stringify({ error: String(err) })}\n`);
-			process.exit(1);
+			report({ error: String(err) });
+			done(1);
 		});
 }

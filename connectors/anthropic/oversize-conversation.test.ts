@@ -406,4 +406,35 @@ test("a repeated chat_messages key: the last occurrence wins, whatever its type"
 	const mixed = await scan('{"chat_messages":[1,"a"],"chat_messages":null}');
 	assert.equal(mixed.nonObjectMessages, 0);
 	assert.equal(mixed.messageCount, 0);
+	assert.deepEqual(mixed.omittedMessageTimes, []);
+});
+
+test("scanConversation retains only omission timestamps and clears them for a replacement child list", async () => {
+	const result = await scan(
+		JSON.stringify({
+			chat_messages: [
+				{ uuid: "valid", created_at: "2026-06-15T00:00:00Z" },
+				{ uuid: "", created_at: "1970-01-01T00:00:00Z" },
+				{ created_at: "2026-05-15T00:00:00Z" },
+				{
+					uuid: 3,
+					created_at: "not-a-date",
+					updated_at: "2026-06-15T00:00:00Z",
+				},
+				{ id: "not-a-message-uuid", created_at: "not-a-date" },
+				null,
+			],
+		}),
+	);
+	assert.deepEqual(result.omittedMessageTimes, [
+		0,
+		Date.parse("2026-05-15T00:00:00Z"),
+		Date.parse("2026-06-15T00:00:00Z"),
+		null,
+		null,
+	]);
+	const replaced = await scan(
+		'{"chat_messages":[{"text":"no identity"},null],"chat_messages":[{"uuid":"kept"}]}',
+	);
+	assert.deepEqual(replaced.omittedMessageTimes, []);
 });

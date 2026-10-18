@@ -25,7 +25,7 @@ const pages: Record<string, string> = {
 	"/playlist?list=LL": card,
 	"/playlist?list=WL": card,
 	"/feed/history":
-		'<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Yesterday</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=abc123XYZ0"></a><h3 title="Real title"></h3><span class="yt-content-metadata-view-model__metadata-text">1.2K views</span></yt-lockup-view-model></ytd-item-section-renderer>',
+		'<button id="avatar-btn">Account</button><ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Yesterday</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=abc123XYZ0"></a><h3 title="Real title"></h3><span class="yt-content-metadata-view-model__metadata-text">1.2K views</span></yt-lockup-view-model></ytd-item-section-renderer><script>var ytInitialData = {"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"selected":true,"content":{"sectionListRenderer":{"contents":[{"itemSectionRenderer":{"contents":[{"videoRenderer":{"videoId":"abc123XYZ0"}}]}}]}}}}]}}};</script>',
 };
 
 test("routed browser collection emits seven schema-valid streams without a Takeout file", async () => {
@@ -34,6 +34,18 @@ test("routed browser collection emits seven schema-valid streams without a Takeo
 		const page = await browser.newPage();
 		await page.route("https://www.youtube.com/**", async (route) => {
 			const url = new URL(route.request().url());
+			if (url.pathname === "/youtubei/v1/browse") {
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({
+						onResponseReceivedActions: [
+							{ appendContinuationItemsAction: { continuationItems: [] } },
+						],
+					}),
+				});
+				return;
+			}
 			const html = pages[`${url.pathname}${url.search}`];
 			await route.fulfill({
 				status: html ? 200 : 404,
@@ -167,11 +179,11 @@ test("history waits for delayed client DOM before recording", async () => {
 		await page.route("https://www.youtube.com/**", async (route) => {
 			await route.fulfill({
 				contentType: "text/html",
-				body: `<html><body><script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Sep 22, 2026</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=delayed123"></a><h3 title="Delayed title"></h3></yt-lockup-view-model></ytd-item-section-renderer>'), 75)</script></body></html>`,
+				body: `<html><body><button id="avatar-btn">Account</button><script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Sep 22, 2026</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=delayed123"></a><h3 title="Delayed title"></h3></yt-lockup-view-model></ytd-item-section-renderer>'), 75)</script></body></html>`,
 			});
 		});
 		const records: Record<string, unknown>[] = [];
-		const skips: unknown[] = [];
+		const skips: Record<string, unknown>[] = [];
 		const failures: unknown[] = [];
 		await collectYoutubeBrowser({
 			page: page as never,
@@ -182,7 +194,7 @@ test("history waits for delayed client DOM before recording", async () => {
 				records.push(data);
 			},
 			emit: async (message) => {
-				skips.push(message);
+				skips.push(message as Record<string, unknown>);
 			},
 			reportStreamFailure: async (stream, _message, options) => {
 				failures.push([stream, options]);
@@ -193,7 +205,9 @@ test("history waits for delayed client DOM before recording", async () => {
 		assert.equal(records[0]?.video_title, "Delayed title");
 		// The page shows no end of the list: a stream failure, not a completion.
 		assert.deepEqual(failures, [["watch_history", { retryable: true }]]);
-		assert.deepEqual(skips, []);
+		assert.equal(skips.length, 1);
+		assert.equal(skips[0]?.type, "STATE");
+		assert.equal((skips[0]?.cursor as Record<string, unknown>).complete, false);
 	} finally {
 		await browser.close();
 	}

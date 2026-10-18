@@ -114,6 +114,19 @@ test("subscription controls distinguish known false from missing evidence", () =
 	assert.equal(b?.notifications, null);
 });
 
+test("subscription renderers preserve displayed counts and omit missing text", () => {
+	const html = readFileSync(
+		new URL("./__fixtures__/subscriptions-subscriber-count.html", import.meta.url),
+		"utf8",
+	);
+	const subscriptions = readSubscriptions(dom(html));
+	assert.equal(subscriptions.length, 4);
+	assert.equal(subscriptions[0]?.subscriber_count_text, "1.2M subscribers");
+	assert.equal(subscriptions[3]?.subscriber_count_text, "1,2 M d’abonnés");
+	for (const subscription of subscriptions.slice(1, 3))
+		assert.equal(Object.hasOwn(subscription, "subscriber_count_text"), false);
+});
+
 test("playlist links exclude LL and WL and keep native IDs", () => {
 	const links = readPlaylistLinks(
 		dom(

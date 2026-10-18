@@ -59,6 +59,21 @@ function str(v: unknown): string | null {
 	return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+/** Shared with the incremental scan so omissions match parseMessage exactly. */
+export function messageIdentity(raw: unknown): string | null {
+	return isRecord(raw) ? str(raw.uuid) : null;
+}
+
+/** Raw time for omission eligibility, even when a message has no identity. */
+export function messageOmissionTimestamp(raw: unknown): number | null {
+	if (!isRecord(raw)) return null;
+	for (const value of [raw.created_at, raw.updated_at]) {
+		const time = typeof value === "string" ? Date.parse(value) : Number.NaN;
+		if (Number.isFinite(time)) return time;
+	}
+	return null;
+}
+
 /**
  * Fields left absent from records, counted so the run can report one aggregate
  * (see `omittedFieldCountOf`). A field is left absent only when its text is
@@ -294,7 +309,7 @@ export function parseMessage(
 	if (!isRecord(raw)) {
 		return null;
 	}
-	const id = str(raw.uuid);
+	const id = messageIdentity(raw);
 	if (id === null) {
 		return null;
 	}

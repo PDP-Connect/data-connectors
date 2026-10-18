@@ -15,10 +15,29 @@ import {
 	postLikeRecords,
 	postRecord,
 	profileCountsFromGraphQL,
+	profileEnrichmentIsComplete,
 	profileRecord,
 	stableAdId,
 } from "./parsers.ts";
 import type { InstagramTimelineEdge, InstagramWebInfoUser } from "./types.ts";
+
+for (const field of ["full_name", "biography", "profile_pic_url", "external_url"] as const) {
+ for (const value of [{ text: "Alice" }, 42, false]) {
+  test(`profile unreadable ${field} ${JSON.stringify(value)} is incomplete`, () => {
+   const user = { id: "u1", username: "alice", follower_count: 1, following_count: 2, media_count: 3, is_verified: false, [field]: value };
+   assert.equal(profileEnrichmentIsComplete(user as never), false);
+  });
+ }
+}
+for (const field of ["follower_count", "following_count", "media_count"] as const) {
+ test(`profile fractional ${field} is not an invented integer`, () => {
+  const user = { id: "u1", username: "alice", follower_count: 1, following_count: 2, media_count: 3, is_verified: false, [field]: 1.5 };
+  assert.equal(profileEnrichmentIsComplete(user), false);
+  const counts = profileCountsFromGraphQL({ data: { user } });
+  assert.equal(counts[field === "media_count" ? "post_count" : field], null);
+ });
+}
+
 
 // ─── isoFromTakenAt ─────────────────────────────────────────────────────
 
@@ -97,7 +116,6 @@ test("profileRecord: maps web_info fields per the live-observed shape (2026-09-2
 		id: "123",
 		is_business_account: false,
 		is_private: true,
-		is_verified: false,
 		profile_pic_url: "https://cdn.example.com/pic.jpg",
 		username: "janedoe",
 	};
@@ -110,7 +128,7 @@ test("profileRecord: maps web_info fields per the live-observed shape (2026-09-2
 		id: "123",
 		is_business: false,
 		is_private: true,
-		is_verified: false,
+		is_verified: null,
 		post_count: null,
 		profile_pic_url: "https://cdn.example.com/pic.jpg",
 		username: "janedoe",
@@ -163,6 +181,74 @@ test("profileRecord: fills counts from the second arg when provided", () => {
 	assert.equal(record?.post_count, 78);
 });
 
+test("profileRecord: takes verified status only from the observed profile-page user", () => {
+	const webInfoUser: InstagramWebInfoUser = {
+		id: "123",
+		username: "person",
+	};
+	assert.equal(profileRecord(webInfoUser)?.is_verified, null);
+	assert.equal(
+		profileRecord(
+			webInfoUser,
+			{ follower_count: 1, following_count: 2, post_count: 3 },
+			{ is_verified: false },
+		)?.is_verified,
+		false,
+	);
+});
+
+test("profileRecord: overlays the captured GraphQL user fields", () => {
+	const record = profileRecord(
+		{ id: "web-id", username: "web-user", full_name: "Web name" },
+		{ follower_count: 4, following_count: 5, post_count: 6 },
+		{
+			biography: "GraphQL bio",
+			external_url: "https://example.test/profile",
+			full_name: "GraphQL name",
+			id: "graph-id",
+			is_verified: true,
+			profile_pic_url: "https://example.test/image.jpg",
+			username: "graph-user",
+		},
+	);
+	assert.deepEqual(
+		{
+			bio: record?.bio,
+			external_url: record?.external_url,
+			full_name: record?.full_name,
+			id: record?.id,
+			is_verified: record?.is_verified,
+			profile_pic_url: record?.profile_pic_url,
+			username: record?.username,
+		},
+		{
+			bio: "GraphQL bio",
+			external_url: "https://example.test/profile",
+			full_name: "GraphQL name",
+			id: "graph-id",
+			is_verified: true,
+			profile_pic_url: "https://example.test/image.jpg",
+			username: "graph-user",
+		},
+	);
+});
+
+test("profileEnrichmentIsComplete: requires counts and verified status from the captured user", () => {
+	assert.equal(profileEnrichmentIsComplete(null), false);
+	assert.equal(
+		profileEnrichmentIsComplete({
+			id: "fixture-id",
+			follower_count: 1,
+			following_count: 2,
+			media_count: 3,
+			is_verified: false,
+			username: "fixture-user",
+		}),
+		true,
+	);
+	assert.equal(profileEnrichmentIsComplete({ follower_count: 1 }), false);
+});
+
 // ─── profileCountsFromGraphQL ───────────────────────────────────────────
 // Synthetic fixture shaped like the legacy connector's captured
 // `profileData.data.data.user` (instagram-playwright.js:656-679), with
@@ -171,12 +257,10 @@ test("profileRecord: fills counts from the second arg when provided", () => {
 test("profileCountsFromGraphQL: maps follower_count/following_count/media_count->post_count", () => {
 	const counts = profileCountsFromGraphQL({
 		data: {
-			data: {
-				user: {
-					follower_count: 4200,
-					following_count: 310,
-					media_count: 88,
-				},
+			user: {
+				follower_count: 4200,
+				following_count: 310,
+				media_count: 88,
 			},
 		},
 	});
@@ -203,7 +287,7 @@ test("profileCountsFromGraphQL: all-null when undefined", () => {
 	});
 });
 
-test("profileCountsFromGraphQL: all-null when data.data.user is missing", () => {
+test("profileCountsFromGraphQL: all-null when data.user is missing", () => {
 	assert.deepEqual(profileCountsFromGraphQL({ data: {} }), {
 		follower_count: null,
 		following_count: null,
@@ -213,7 +297,7 @@ test("profileCountsFromGraphQL: all-null when data.data.user is missing", () => 
 
 test("profileCountsFromGraphQL: null for individual fields that are absent, not zero", () => {
 	const counts = profileCountsFromGraphQL({
-		data: { data: { user: { follower_count: 10 } } },
+		data: { user: { follower_count: 10 } },
 	});
 	assert.equal(counts.follower_count, 10);
 	assert.equal(counts.following_count, null);
@@ -223,12 +307,10 @@ test("profileCountsFromGraphQL: null for individual fields that are absent, not 
 test("profileCountsFromGraphQL: rejects negative or non-finite counts as null (never guessed)", () => {
 	const counts = profileCountsFromGraphQL({
 		data: {
-			data: {
-				user: {
-					follower_count: -1,
-					following_count: Number.NaN,
-					media_count: 0,
-				},
+			user: {
+				follower_count: -1,
+				following_count: Number.NaN,
+				media_count: 0,
 			},
 		},
 	});
@@ -406,6 +488,17 @@ test("followingRecord: returns null when username is missing", () => {
 	assert.equal(followingRecord({ pk: "1" }), null);
 });
 
+test("followingRecord: falls back to id when pk is empty", () => {
+	assert.deepEqual(followingRecord({ id: "valid-id", pk: "", username: "person" }), {
+		id: "valid-id",
+		username: "person",
+		full_name: null,
+		is_private: null,
+		is_verified: null,
+		profile_pic_url: null,
+	});
+});
+
 // ─── dedupeFollowingByUsername ──────────────────────────────────────────
 
 test("dedupeFollowingByUsername: drops repeats, keeps first-seen order", () => {
@@ -485,4 +578,14 @@ test("buildAdRecords: ad ids are unique across kinds even with matching names", 
 	});
 	const ids = new Set(records.map((r) => r.id));
 	assert.equal(ids.size, 3);
+});
+
+test("postRecord: a malformed caption container makes the post unreadable", () => {
+	for (const caption of ["source text", 42, false, [], { text: 7 }]) {
+		assert.equal(postRecord({ node: { id: "p1", caption } as never }), null);
+	}
+	assert.equal(postRecord({ node: { id: "p1" } })?.caption, null);
+	assert.equal(postRecord({ node: { id: "p1", caption: null } as never })?.caption, null);
+	assert.equal(postRecord({ node: { id: "p1", caption: { text: null } } as never })?.caption, null);
+	assert.equal(postRecord({ node: { id: "p1", caption: { text: "hi" } } as never })?.caption, "hi");
 });

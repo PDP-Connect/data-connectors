@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import type { BrowserPageObservation } from "./page-evidence.ts";
 
 export type GitHubBrowserCollectContext = Pick<
 	BrowserCollectContext,
@@ -9,10 +10,17 @@ export type GitHubBrowserCollectContext = Pick<
 >;
 
 export interface BrowserServices {
-	fetchPublicJson(url: string): Promise<unknown>;
+	fetchPublicJson(url: string): Promise<{
+		readonly requestedUrl: string;
+		readonly responseUrl: string;
+		readonly status: number;
+		readonly data: unknown;
+		/** Observed HTTP Link header; undefined means headers were not captured. */
+		readonly link?: string | null | undefined;
+	}>;
 	now(): Date;
-	openPage(url: string): Promise<string>;
-	openContributionPage?(url: string): Promise<string>;
+	openPage(url: string): Promise<BrowserPageObservation>;
+	openContributionPage?(url: string): Promise<BrowserPageObservation>;
 	sleep(ms: number): Promise<void>;
 }
 
@@ -35,6 +43,8 @@ export interface LegacyProfile {
 	pinnedRepositories: Array<{
 		description: string;
 		fullName: string;
+		forkedFrom: string;
+		forks: number;
 		language: string | null;
 		stars: number;
 		url: string | null;
@@ -46,9 +56,12 @@ export interface LegacyProfile {
 }
 
 export interface LegacyRepository {
+	id: string;
 	description: string;
+	forkedFrom: string;
 	forks: number;
 	language: string;
+	license: string;
 	name: string;
 	stars: number;
 	topics: string[];
@@ -58,9 +71,13 @@ export interface LegacyRepository {
 }
 
 export interface LegacyStarredRepository {
+	id: string;
 	description: string;
+	forkedFrom: string;
+	forks: number;
 	fullName: string;
 	language: string | null;
+	license: string;
 	stars: number;
 	updatedAt: string | null;
 	url: string;
@@ -82,6 +99,7 @@ export interface LegacyEvent {
 }
 
 export interface LegacyContributionDay {
+	id: string;
 	count: number;
 	date: string;
 	level: number | null;

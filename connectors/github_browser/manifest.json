@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.2.32",
+	"version": "0.3.3",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -19,16 +19,26 @@
 		"bindings": {
 			"network": {
 				"required": true,
-				"features": ["host_http_request"]
+				"features": [
+					"host_http_request"
+				]
 			},
 			"browser": {
 				"required": true,
-				"features": ["page_script_evaluation", "page_navigation", "page_content_read", "page_condition_wait", "host_http_request"]
+				"features": [
+					"page_script_evaluation",
+					"page_navigation",
+					"page_content_read",
+					"page_condition_wait",
+					"host_http_request"
+				]
 			}
 		}
 	},
 	"capabilities": {
-		"human_interaction": ["manual_action"],
+		"human_interaction": [
+			"manual_action"
+		],
 		"public_listing": {
 			"tier": "development",
 			"rationale": "Separate browser-session profile for existing Vana GitHub users. The PAT connector remains the recommended profile for new connections."
@@ -54,7 +64,9 @@
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": { "type": "string" },
+					"id": {
+						"type": "string"
+					},
 					"username": {
 						"type": "string",
 						"x_pdpp_role": "primary-title"
@@ -98,19 +110,33 @@
 									"type": "string"
 								},
 								"url": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"description": {
 									"type": "string"
 								},
 								"language": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"stars": {
 									"type": "number"
+								},
+								"forks": {
+									"type": "number"
+								},
+								"forkedFrom": {
+									"type": "string"
 								}
 							},
-							"required": ["fullName"],
+							"required": [
+								"fullName"
+							],
 							"additionalProperties": false
 						}
 					},
@@ -129,10 +155,15 @@
 									"type": "string"
 								},
 								"avatarUrl": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								}
 							},
-							"required": ["login"],
+							"required": [
+								"login"
+							],
 							"additionalProperties": false
 						}
 					},
@@ -145,21 +176,35 @@
 									"type": "string"
 								},
 								"iconUrl": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								}
 							},
-							"required": ["name"],
+							"required": [
+								"name"
+							],
 							"additionalProperties": false
 						}
 					},
 					"contributionsLastYear": {
-						"type": ["number", "null"]
+						"type": [
+							"number",
+							"null"
+						]
 					}
 				},
-				"required": ["id", "username", "profileUrl"],
+				"required": [
+					"id",
+					"username",
+					"profileUrl"
+				],
 				"additionalProperties": false
 			},
-			"primary_key": ["id"],
+			"primary_key": [
+				"id"
+			],
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -167,8 +212,15 @@
 			"incremental": false,
 			"query": {
 				"search": {
-					"lexical_fields": ["username", "bio", "company", "location"],
-					"semantic_fields": ["bio"]
+					"lexical_fields": [
+						"username",
+						"bio",
+						"company",
+						"location"
+					],
+					"semantic_fields": [
+						"bio"
+					]
 				}
 			},
 			"coverage_strategy": "singleton_presence",
@@ -182,7 +234,10 @@
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": { "type": "string", "x_pdpp_role": "secondary" },
+					"id": {
+						"type": "string",
+						"x_pdpp_role": "secondary"
+					},
 					"repositories": {
 						"type": "array",
 						"items": {
@@ -206,6 +261,12 @@
 								"forks": {
 									"type": "number"
 								},
+								"forkedFrom": {
+									"type": "string"
+								},
+								"license": {
+									"type": "string"
+								},
 								"visibility": {
 									"type": "string"
 								},
@@ -216,18 +277,29 @@
 									}
 								},
 								"updatedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								}
 							},
-							"required": ["name", "url"],
+							"required": [
+								"name",
+								"url"
+							],
 							"additionalProperties": false
 						}
 					}
 				},
-				"required": ["id", "repositories"],
+				"required": [
+					"id",
+					"repositories"
+				],
 				"additionalProperties": false
 			},
-			"primary_key": ["id"],
+			"primary_key": [
+				"id"
+			],
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -244,7 +316,10 @@
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": { "type": "string", "x_pdpp_role": "secondary" },
+					"id": {
+						"type": "string",
+						"x_pdpp_role": "secondary"
+					},
 					"starred": {
 						"type": "array",
 						"items": {
@@ -265,19 +340,39 @@
 								"stars": {
 									"type": "number"
 								},
+								"forks": {
+									"type": "number"
+								},
+								"forkedFrom": {
+									"type": "string"
+								},
+								"license": {
+									"type": "string"
+								},
 								"updatedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								}
 							},
-							"required": ["fullName", "url"],
+							"required": [
+								"fullName",
+								"url"
+							],
 							"additionalProperties": false
 						}
 					}
 				},
-				"required": ["id", "starred"],
+				"required": [
+					"id",
+					"starred"
+				],
 				"additionalProperties": false
 			},
-			"primary_key": ["id"],
+			"primary_key": [
+				"id"
+			],
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -289,12 +384,14 @@
 		{
 			"name": "events",
 			"required": true,
-			"description": "Recent public activity events (up to 300 events and GitHub's retention window).",
+			"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": { "type": "string" },
+					"id": {
+						"type": "string"
+					},
 					"events": {
 						"type": "array",
 						"items": {
@@ -316,28 +413,50 @@
 									"type": "string"
 								},
 								"action": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"title": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"body": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"url": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"branch": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"commits": {
-									"type": ["number", "null"]
+									"type": [
+										"number",
+										"null"
+									]
 								},
 								"isPublic": {
 									"type": "boolean"
 								}
 							},
-							"required": ["id", "type", "createdAt", "repo", "isPublic"],
+							"required": [
+								"id",
+								"type",
+								"repo"
+							],
 							"additionalProperties": false
 						}
 					},
@@ -349,10 +468,16 @@
 						"type": "string"
 					}
 				},
-				"required": ["id", "events", "fetchedAt"],
+				"required": [
+					"id",
+					"events",
+					"fetchedAt"
+				],
 				"additionalProperties": false
 			},
-			"primary_key": ["id"],
+			"primary_key": [
+				"id"
+			],
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -364,14 +489,19 @@
 		{
 			"name": "contributions",
 			"required": true,
-			"description": "Contribution graph days and summaries for four year views. A snapshot is emitted only when all four views are complete; missing history reports the stream as incomplete.",
+			"description": "One legacy aggregate of contribution days and available summaries. Missing or blocked year views retain readable days without completion; completion requires all four views.",
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": { "type": "string" },
+					"id": {
+						"type": "string"
+					},
 					"totalContributionsLastYear": {
-						"type": ["number", "null"]
+						"type": [
+							"number",
+							"null"
+						]
 					},
 					"yearTotals": {
 						"type": "array",
@@ -385,7 +515,10 @@
 									"type": "number"
 								}
 							},
-							"required": ["year", "total"],
+							"required": [
+								"year",
+								"total"
+							],
 							"additionalProperties": false
 						}
 					},
@@ -401,10 +534,16 @@
 									"type": "number"
 								},
 								"level": {
-									"type": ["number", "null"]
+									"type": [
+										"number",
+										"null"
+									]
 								}
 							},
-							"required": ["date", "count"],
+							"required": [
+								"date",
+								"count"
+							],
 							"additionalProperties": false
 						}
 					},
@@ -420,12 +559,18 @@
 									"type": "number"
 								}
 							},
-							"required": ["month", "count"],
+							"required": [
+								"month",
+								"count"
+							],
 							"additionalProperties": false
 						}
 					},
 					"topDay": {
-						"type": ["object", "null"],
+						"type": [
+							"object",
+							"null"
+						],
 						"properties": {
 							"date": {
 								"type": "string"
@@ -434,7 +579,10 @@
 								"type": "number"
 							}
 						},
-						"required": ["date", "count"],
+						"required": [
+							"date",
+							"count"
+						],
 						"additionalProperties": false
 					},
 					"fetchedAt": {
@@ -442,10 +590,16 @@
 						"x_pdpp_role": "secondary"
 					}
 				},
-				"required": ["id", "days", "fetchedAt"],
+				"required": [
+					"id",
+					"days",
+					"fetchedAt"
+				],
 				"additionalProperties": false
 			},
-			"primary_key": ["id"],
+			"primary_key": [
+				"id"
+			],
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -457,12 +611,14 @@
 		{
 			"name": "history",
 			"required": true,
-			"description": "Authored issues and pull requests from GitHub Search, capped at 1,000 results per type.",
+			"description": "One legacy aggregate snapshot of authored issues and pull requests. At or above 1,000 results per type, readable rows are retained without completion.",
 			"semantics": "mutable_state",
 			"schema": {
 				"type": "object",
 				"properties": {
-					"id": { "type": "string" },
+					"id": {
+						"type": "string"
+					},
 					"pullRequests": {
 						"type": "array",
 						"items": {
@@ -475,37 +631,67 @@
 									"type": "string"
 								},
 								"number": {
-									"type": ["number", "null"]
+									"type": [
+										"number",
+										"null"
+									]
 								},
 								"title": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"body": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"state": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"createdAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"updatedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"closedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"mergedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"url": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"repo": {
 									"type": "string"
 								},
 								"repoUrl": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"labels": {
 									"type": "array",
@@ -523,7 +709,11 @@
 									"type": "boolean"
 								}
 							},
-							"required": ["id", "type", "repo"],
+							"required": [
+								"id",
+								"type",
+								"repo"
+							],
 							"additionalProperties": false
 						}
 					},
@@ -539,37 +729,67 @@
 									"type": "string"
 								},
 								"number": {
-									"type": ["number", "null"]
+									"type": [
+										"number",
+										"null"
+									]
 								},
 								"title": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"body": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"state": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"createdAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"updatedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"closedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"mergedAt": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"url": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"repo": {
 									"type": "string"
 								},
 								"repoUrl": {
-									"type": ["string", "null"]
+									"type": [
+										"string",
+										"null"
+									]
 								},
 								"labels": {
 									"type": "array",
@@ -587,7 +807,11 @@
 									"type": "boolean"
 								}
 							},
-							"required": ["id", "type", "repo"],
+							"required": [
+								"id",
+								"type",
+								"repo"
+							],
 							"additionalProperties": false
 						}
 					},
@@ -599,10 +823,17 @@
 						"type": "string"
 					}
 				},
-				"required": ["id", "pullRequests", "issues", "fetchedAt"],
+				"required": [
+					"id",
+					"pullRequests",
+					"issues",
+					"fetchedAt"
+				],
 				"additionalProperties": false
 			},
-			"primary_key": ["id"],
+			"primary_key": [
+				"id"
+			],
 			"selection": {
 				"fields": true,
 				"resources": true
@@ -639,7 +870,8 @@
 		}
 	],
 	"reason_display_messages": {
-		"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+		"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+		"inventory_not_proven_complete": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 	},
 	"mobile": {
 		"pageshim": {

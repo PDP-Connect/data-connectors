@@ -220,6 +220,7 @@ function genericPageshimEntry(connector, manifest, config) {
 import * as implementation from ${JSON.stringify(connectorModule)};
 import * as schemaModule from ${JSON.stringify(schemasModule)};
 import { runOnPageShim, type ShimPage } from ${JSON.stringify(join(HERE, "runtime.ts"))};
+import { applyRequestedScopeEntries } from ${JSON.stringify(join(HERE, "requested-scope-entries.ts"))};
 type GenericConfig = {
 	platform: string;
 	scopes: string[];
@@ -241,13 +242,34 @@ const config: GenericConfig = ${JSON.stringify({
 const collect = implementation[${JSON.stringify(config.collect_export)}] as (ctx: never) => Promise<void>;
 const probe = implementation[${JSON.stringify(config.probe_export)}] as (page: never) => Promise<boolean>;
 const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "validateRecord")}] as (stream: string, record: unknown) => boolean;
-(globalThis as Record<string, unknown>).__pageshimMain = (page: ShimPage) =>
+// Older host Proxies throw when an optional member is absent. Guard only the
+// lookup: a present method must still fail closed on invalid scope metadata.
+function requestedScopeEntries(page: ShimPage): unknown {
+  let method: (() => unknown) | undefined;
+  try {
+    method = (page as ShimPage & { requestedScopeEntries?: () => unknown }).requestedScopeEntries;
+  } catch {
+    return undefined;
+  }
+  return method?.call(page);
+}
+(globalThis as Record<string, unknown>).__pageshimMain = (
+  page: ShimPage,
+  initialState: Record<string, unknown>,
+  supportsState: boolean,
+) =>
   runOnPageShim(page, {
     ...config,
     validateRecord: validateRecord as never,
     probe: (pw) => probe(pw as never),
+    prepareRequested: (requested) => applyRequestedScopeEntries(
+      requested,
+      requestedScopeEntries(page),
+      config.platform,
+    ),
     collect: (ctx) => collect(ctx as never),
     toScope: (_stream, records) => ({ records }),
+    emptyScopeFromCheckpoint: true,
     summarize: (scopes) => {
       const counts = Object.fromEntries(config.streams.map((stream) => [
         stream,
@@ -265,7 +287,7 @@ const validateRecord = schemaModule[${JSON.stringify(config.validate_export ?? "
         details,
       };
     },
-  });
+  }, initialState, supportsState);
 `,
 		loader: "ts",
 		resolveDir: REPO,

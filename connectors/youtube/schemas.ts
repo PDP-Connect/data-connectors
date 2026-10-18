@@ -39,7 +39,7 @@ export const subscriptionsSchema = z.object({
 	handle: pdppSafeText.max(200).nullable(),
 	avatar_url: urlSchema,
 	subscriber_count: z.number().int().min(0).nullable(),
-	subscriber_count_text: pdppSafeText.max(200).nullable(),
+	subscriber_count_text: pdppSafeText.max(200).nullable().optional(),
 	description: pdppSafeText.max(5000).nullable(),
 	is_verified: z.boolean().nullable(),
 	notifications: z.boolean().nullable(),

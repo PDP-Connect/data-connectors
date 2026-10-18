@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.48",
+				"version": "0.2.50",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -948,6 +948,8 @@
 					"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
 					"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 					"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
+					"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+					"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
 					"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
 				},
 				"mobile": {
@@ -975,7 +977,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.2",
+				"version": "0.3.3",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -4240,7 +4242,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.53",
+				"version": "0.2.54",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -6971,7 +6973,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.7",
+				"version": "0.1.8",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9666,7 +9668,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.2.32",
+				"version": "0.3.3",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9773,6 +9775,12 @@
 											},
 											"stars": {
 												"type": "number"
+											},
+											"forks": {
+												"type": "number"
+											},
+											"forkedFrom": {
+												"type": "string"
 											}
 										},
 										"required": ["fullName"],
@@ -9874,6 +9882,12 @@
 											"forks": {
 												"type": "number"
 											},
+											"forkedFrom": {
+												"type": "string"
+											},
+											"license": {
+												"type": "string"
+											},
 											"visibility": {
 												"type": "string"
 											},
@@ -9936,6 +9950,15 @@
 											"stars": {
 												"type": "number"
 											},
+											"forks": {
+												"type": "number"
+											},
+											"forkedFrom": {
+												"type": "string"
+											},
+											"license": {
+												"type": "string"
+											},
 											"updatedAt": {
 												"type": ["string", "null"]
 											}
@@ -9960,7 +9983,7 @@
 					{
 						"name": "events",
 						"required": true,
-						"description": "Recent public activity events (up to 300 events and GitHub's retention window).",
+						"description": "One legacy aggregate snapshot of public events. A full 300-event cap is partial and never advances completion.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10010,7 +10033,7 @@
 												"type": "boolean"
 											}
 										},
-										"required": ["id", "type", "createdAt", "repo", "isPublic"],
+										"required": ["id", "type", "repo"],
 										"additionalProperties": false
 									}
 								},
@@ -10037,7 +10060,7 @@
 					{
 						"name": "contributions",
 						"required": true,
-						"description": "Contribution graph days and summaries for four year views. A snapshot is emitted only when all four views are complete; missing history reports the stream as incomplete.",
+						"description": "One legacy aggregate of contribution days and available summaries. Missing or blocked year views retain readable days without completion; completion requires all four views.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10132,7 +10155,7 @@
 					{
 						"name": "history",
 						"required": true,
-						"description": "Authored issues and pull requests from GitHub Search, capped at 1,000 results per type.",
+						"description": "One legacy aggregate snapshot of authored issues and pull requests. At or above 1,000 results per type, readable rows are retained without completion.",
 						"semantics": "mutable_state",
 						"schema": {
 							"type": "object",
@@ -10316,7 +10339,8 @@
 					}
 				],
 				"reason_display_messages": {
-					"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+					"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+					"inventory_not_proven_complete": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 				},
 				"mobile": {
 					"pageshim": {
@@ -13744,7 +13768,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.22",
+				"version": "0.1.24",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13780,11 +13804,44 @@
 				},
 				"streams": [
 					{
+						"name": "profile",
+						"description": "The signed-in iCloud account from the existing session validate response. The optional user_name is dsInfo.fullName, omitted when absent or unreadable; no additional network request or inferred fallback is used.",
+						"display": {
+							"label": "Your iCloud account",
+							"detail": "Account identity and source-stated display name."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The signed-in account's dsInfo.dsid from session validation."
+								},
+								"user_name": {
+									"type": "string",
+									"description": "Source-stated dsInfo.fullName, omitted when absent or unreadable.",
+									"x_pdpp_role": "primary-title"
+								}
+							},
+							"required": ["id"]
+						},
+						"primary_key": ["id"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"incremental": false,
+						"coverage_strategy": "full_inventory",
+						"freshness_strategy": "scheduled_window",
+						"required": false
+					},
+					{
 						"name": "notes",
-						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index.",
+						"description": "Notes in iCloud Notes, queried from the CloudKit private database's 'recents' search index. The legacy folder-name projection depends on the folders stream; collection fetches that dependency even when only notes are requested.",
 						"display": {
 							"label": "Your iCloud notes",
-							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder assignment, attachment flag, and created/modified timestamps."
+							"detail": "Note title, snippet, best-effort extracted body text, pin state, folder name and assignment, attachment flag, and created/modified timestamps."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -13803,8 +13860,13 @@
 								"folder_id": {
 									"type": ["string", "null"]
 								},
+								"folder_name": {
+									"type": ["string", "null"],
+									"description": "Folder display name from the same folder snapshot; null when there is no folder reference or the referenced folder could not be resolved. Unresolved names are reported in the stream omission details and do not count as covered."
+								},
 								"is_pinned": {
-									"type": "boolean"
+									"type": ["boolean", "null"],
+									"description": "Whether the note is pinned, or null when CloudKit's flag could not be read. Unreadable fields are named in the stream omission gap and do not count as covered."
 								},
 								"created_at": {
 									"type": ["string", "null"],
@@ -13816,7 +13878,8 @@
 									"x_pdpp_role": "event-time"
 								},
 								"has_attachments": {
-									"type": "boolean"
+									"type": ["boolean", "null"],
+									"description": "Whether attachments exist, or null when CloudKit's attachment field could not be read. Unreadable fields are named in the stream omission gap and do not count as covered."
 								},
 								"text_content": {
 									"type": ["string", "null"],
@@ -13873,7 +13936,8 @@
 									"type": "string"
 								},
 								"name": {
-									"type": "string",
+									"type": ["string", "null"],
+									"description": "Folder title, recordName fallback for a valid empty title, or null when the title field could not be read. Unreadable fields are named in the stream omission gap and do not count as covered.",
 									"x_pdpp_role": "primary-title"
 								}
 							},
@@ -13896,7 +13960,14 @@
 					}
 				],
 				"reason_display_messages": {
-					"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+					"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
+					"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
+					"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
+					"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
+					"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
+					"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
+					"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
+					"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
 				}
 			}
 		},
@@ -14421,7 +14492,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.25",
+				"version": "0.3.26",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14497,7 +14568,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "From the connections listing's reported total, not the profile payload itself. Null when the connections listing wasn't fetched or reported no total."
+									"description": "Exact number of connections observed only after a verified end-of-list. Null when paging ends on an error, malformed page, or page budget."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],
@@ -14784,7 +14855,43 @@
 					}
 				],
 				"reason_display_messages": {
+					"linkedin_enumeration_unproven": "LinkedIn cannot verify the full inventory; readable entries are saved without replacing or deleting existing entries",
+					"absent": "LinkedIn did not provide this field",
+					"malformed": "LinkedIn returned this field in an unreadable format",
+					"invalid_value": "LinkedIn returned a value outside the expected format",
+					"source_unavailable": "LinkedIn did not return the source needed for this field",
+					"enrichment_unresolved": "LinkedIn could not resolve a connection's profile details",
+					"walk_unverified": "LinkedIn did not provide enough paging evidence to verify the full list",
+					"source_row_uncovered": "LinkedIn could not verify the source row for this derived field",
+					"withheld_unreadable_fields": "LinkedIn withheld an entry because one or more fields were unreadable",
+					"unreadable_nested_collection": "LinkedIn returned an unreadable nested collection",
+					"malformed_row": "LinkedIn returned an entry in an unreadable format",
+					"no_readable_content": "LinkedIn returned an entry with no readable content",
+					"invalid_record_shape": "LinkedIn returned an entry outside the expected record shape",
+					"id_absent": "LinkedIn did not provide the entry identifier",
+					"id_malformed": "LinkedIn returned the entry identifier in an unreadable format",
+					"id_invalid_value": "LinkedIn returned an entry identifier outside the expected format",
+					"id_source_unavailable": "LinkedIn did not return the source for the entry identifier",
+					"id_enrichment_unresolved": "LinkedIn could not resolve the connection identifier to a profile",
+					"id_walk_unverified": "LinkedIn did not verify the entry identifier in a complete list",
+					"id_source_row_uncovered": "LinkedIn could not verify the source row for the entry identifier",
+					"id_empty": "LinkedIn returned an empty entry identifier",
+					"name_absent": "LinkedIn did not provide the entry name",
+					"name_malformed": "LinkedIn returned the entry name in an unreadable format",
+					"name_invalid_value": "LinkedIn returned an entry name outside the expected format",
+					"name_source_unavailable": "LinkedIn did not return the source for the entry name",
+					"name_enrichment_unresolved": "LinkedIn could not resolve the connection name",
+					"name_walk_unverified": "LinkedIn did not verify the entry name in a complete list",
+					"name_source_row_uncovered": "LinkedIn could not verify the source row for the entry name",
+					"name_empty": "LinkedIn returned an empty entry name",
 					"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
+					"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
+					"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
+					"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+					"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
+					"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
+					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
+					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
 					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
 				}
 			}
@@ -14970,7 +15077,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.25",
+				"version": "0.4.29",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15000,6 +15107,9 @@
 					"public_listing": {
 						"tier": "development"
 					}
+				},
+				"reason_display_messages": {
+					"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
 				},
 				"streams": [
 					{
@@ -16022,7 +16132,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.35",
+				"version": "0.1.37",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -19296,7 +19406,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.25",
+				"version": "0.1.31",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -19316,7 +19426,7 @@
 					"human_interaction": ["manual_action"],
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Browser-session replacement for the legacy Spotify connector. Keeps profile, playlists, playlist items, and saved tracks without requiring owners to paste a one-hour public Web API access token."
+						"rationale": "Browser-session replacement for the legacy Spotify connector. Collects profile, playlists, playlist items, saved tracks, recent playback contexts, and bounded top artist and track rankings through the authenticated web player."
 					},
 					"refresh_policy": {
 						"recommended_mode": "manual",
@@ -19494,7 +19604,10 @@
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": ["string", "null"]
+								},
+								"identity_unresolved": {
+									"type": "boolean"
 								},
 								"name": {
 									"type": "string",
@@ -19530,7 +19643,7 @@
 									"type": "array"
 								}
 							},
-							"required": ["id", "name"]
+							"required": ["id", "identity_unresolved", "name"]
 						},
 						"primary_key": ["id"],
 						"cursor_field": "added_at",
@@ -19540,7 +19653,7 @@
 							"resources": true
 						},
 						"required": true,
-						"incremental": true,
+						"incremental": false,
 						"query": {
 							"search": {
 								"lexical_fields": ["name", "album_name"]
@@ -19553,12 +19666,12 @@
 								"added_at": ["gte", "gt", "lte", "lt"]
 							}
 						},
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
 						"name": "profile",
-						"description": "The authenticated Spotify account's own profile, from GET /me.",
+						"description": "The authenticated Spotify account's profile from the web player.",
 						"display": {
 							"label": "Your Spotify profile",
 							"detail": "Account id, display name, follower count."
@@ -19603,10 +19716,168 @@
 						},
 						"coverage_strategy": "singleton_presence",
 						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "recently_played_contexts",
+						"description": "Recently played playback contexts and each context’s last played track. Spotify returns contexts, not individual play events. The connector withholds checkpoint state unless it can verify a request-bound boundary.",
+						"display": {
+							"label": "Recently played contexts",
+							"detail": "Album, playlist, or artist context URI, its most recently played track, and last played time."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"uri": {
+									"type": "string"
+								},
+								"last_played_time": {
+									"type": "integer",
+									"minimum": 0,
+									"x_pdpp_role": "event-time"
+								},
+								"last_played_track_uri": {
+									"type": ["string", "null"]
+								}
+							},
+							"required": ["id", "uri", "last_played_time"]
+						},
+						"primary_key": ["id"],
+						"cursor_field": "last_played_time",
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"range_filters": {
+								"last_played_time": ["gt", "gte", "lte", "lt"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "top_artists",
+						"description": "Spotify’s ranked artists for short-term or long-term affinity windows. The connector requests at most 100 ranking rows per window; this is a bounded ranking snapshot, not a full inventory.",
+						"display": {
+							"label": "Your top artists",
+							"detail": "Spotify affinity ranking for each time window, limited to at most 100 rows per window. This is not a full inventory."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"uri": {
+									"type": ["string", "null"]
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"genres": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"popularity": {
+									"type": ["integer", "null"]
+								},
+								"followers": {
+									"type": ["integer", "null"]
+								},
+								"time_range": {
+									"type": "string",
+									"enum": ["short_term", "long_term"]
+								}
+							},
+							"required": ["id", "time_range"]
+						},
+						"primary_key": ["id", "time_range"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
+					},
+					{
+						"name": "top_tracks",
+						"description": "Spotify’s ranked tracks for short-term or long-term affinity windows. The connector requests at most 100 ranking rows per window; this is a bounded ranking snapshot, not a full inventory.",
+						"display": {
+							"label": "Your top tracks",
+							"detail": "Spotify affinity ranking for each time window, limited to at most 100 rows per window. This is not a full inventory."
+						},
+						"semantics": "mutable_state",
+						"schema": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"uri": {
+									"type": ["string", "null"]
+								},
+								"name": {
+									"type": "string",
+									"x_pdpp_role": "primary-title"
+								},
+								"artist_names": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"album_name": {
+									"type": ["string", "null"]
+								},
+								"duration_ms": {
+									"type": ["integer", "null"]
+								},
+								"time_range": {
+									"type": "string",
+									"enum": ["short_term", "long_term"]
+								}
+							},
+							"required": ["id", "time_range"]
+						},
+						"primary_key": ["id", "time_range"],
+						"selection": {
+							"fields": true,
+							"resources": true
+						},
+						"required": false,
+						"incremental": false,
+						"query": {
+							"search": {
+								"lexical_fields": ["name", "album_name"]
+							}
+						},
+						"coverage_strategy": "checkpoint_window",
+						"freshness_strategy": "manual_as_of"
 					}
 				],
 				"reason_display_messages": {
-					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync."
+					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
+					"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+					"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
 				}
 			}
 		},
@@ -20224,7 +20495,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.31",
+				"version": "0.1.32",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -22196,7 +22467,7 @@
 				},
 				"connector_key": "wholefoods",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/wholefoods",
-				"version": "0.3.31",
+				"version": "0.3.33",
 				"display_name": "Whole Foods",
 				"runtime_requirements": {
 					"bindings": {
@@ -22316,7 +22587,7 @@
 									"type": ["integer", "null"]
 								},
 								"item_count": {
-									"type": "integer"
+									"type": ["integer", "null"]
 								}
 							},
 							"required": ["id", "item_count"]
@@ -22376,6 +22647,15 @@
 									"type": ["number", "null"]
 								},
 								"unit_price_cents": {
+									"type": ["integer", "null"]
+								},
+								"quantity_unit": {
+									"type": ["string", "null"]
+								},
+								"price_unit": {
+									"type": ["string", "null"]
+								},
+								"line_total_cents": {
 									"type": ["integer", "null"]
 								}
 							},
@@ -22454,11 +22734,14 @@
 								},
 								"servings_per_container": {
 									"type": ["number", "null"]
+								},
+								"id": {
+									"type": "string"
 								}
 							},
-							"required": ["product_id", "source", "confidence"]
+							"required": ["id", "product_id", "source", "confidence"]
 						},
-						"primary_key": ["product_id"],
+						"primary_key": ["id"],
 						"selection": {
 							"fields": true,
 							"resources": true
@@ -22476,7 +22759,8 @@
 				"reason_display_messages": {
 					"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 					"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
-					"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
+					"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
+					"inventory_not_proven_complete": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh."
 				}
 			}
 		},
@@ -23399,7 +23683,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.7",
+				"version": "0.1.8",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25505,7 +25789,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.27",
+				"version": "0.2.31",
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -25658,7 +25942,7 @@
 								},
 								"subscriber_count_text": {
 									"type": ["string", "null"],
-									"description": "Browser-visible raw subscriber count for legacy projection."
+									"description": "Browser-visible raw subscriber count for legacy projection; omitted when no count text is rendered."
 								}
 							},
 							"required": ["id"]
@@ -25909,10 +26193,10 @@
 					{
 						"name": "watch_history",
 						"required": false,
-						"description": "Most recent 50 visible browser history entries in page order; watch dates have day precision.",
+						"description": "The latest observed history entry per video, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
 						"display": {
 							"label": "Your watch history",
-							"detail": "The latest 50 visible videos in page order. A date is recorded when its section label can be resolved; no watch time is invented."
+							"detail": "Observed videos are upserted by video identity while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -25948,7 +26232,7 @@
 								"position": {
 									"type": "integer",
 									"minimum": 0,
-									"description": "Order on the browser history page, newest first."
+									"description": "Current zero-based position on the observed browser history page, newest first; position can change when videos are re-watched or history changes."
 								},
 								"watched_date": {
 									"type": ["string", "null"],
@@ -25971,7 +26255,7 @@
 							"fields": true,
 							"resources": true
 						},
-						"incremental": false,
+						"incremental": true,
 						"query": {
 							"search": {
 								"lexical_fields": ["description"],
