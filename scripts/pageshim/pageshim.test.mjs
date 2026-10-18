@@ -23,6 +23,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 import { buildPageshim } from "./build.mjs";
+import { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } from "./crypto-regressions.mjs";
 import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
@@ -131,6 +132,18 @@ for (const name of pageShimConnectors(
 					connector: name,
 					outfile: join(out, `${name}.js`),
 				});
+		await t.test("shared hash parity, page-only admission and bundle impact", async () => {
+			assertHashParity();
+			assertPageOnlyAdmission();
+			const before = await buildPageshim({
+				connector: name,
+				outfile: join(out, name + "-before-crypto.js"),
+				cryptoHashShim: false,
+			});
+			const beforeHash = bundleSha256(before.outfile), afterHash = bundleSha256(built.outfile);
+			console.log("PAGESHIM_CRYPTO_IMPACT " + JSON.stringify({connector:name,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash}));
+			if (name === "chatgpt") await assertFingerprintBundle(buildPageshim, join(out, "fingerprint-crypto.js"));
+		});
 		const run = (o) =>
 			runHarness({ bundle: built.outfile, fixtures: c.fixtures, ...o });
 
@@ -3659,6 +3672,64 @@ test("oura_browser: narrow then wider consent retains clipped debt on both hosts
     assert.deepEqual(second.states["oura.sleep"].failed_windows, []);
     assert.equal(second.states["oura.sleep"].next_day, "2026-10-18");
   }
+});
+
+test("youtube: verified empty history commits STATE only on a state-capable host", { timeout: 180_000 }, async () => {
+	const { youtubeFixtures } = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-state.js") });
+	for (const supportsStateArgument of [true, false]) {
+		const run = await runHarness({ bundle: built.outfile, fixtures: youtubeFixtures,
+			scopes: ["youtube.watch_history"], supportsStateArgument, initialState: { "youtube.watch_history": { complete: false } } });
+		assert.deepEqual(run.ret, { ok: true });
+		assertCleanRun(run);
+		assert.deepEqual(run.result.errors, []);
+		assert.deepEqual(run.result["youtube.watch_history"].records, []);
+		if (supportsStateArgument) assert.equal(run.states["youtube.watch_history"].evidence, "youtube_page_data_empty");
+		else assert.deepEqual(run.states, { "youtube.watch_history": { complete: false } });
+	}
+});
+
+test("youtube: capped history upserts the prefix without claiming completion or checkpoint", { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-prefix.js") });
+	const fixtures = { ...fx.youtubeFixtures, resolve: (raw) =>
+		new URL(raw).pathname === "/feed/history" ? fx.historyPrefixFixture(60) : fx.resolveFixture(raw) };
+	for (const resultStreaming of [false, true]) {
+	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"], resultStreaming,
+		resultSpoolDirectory: join(out, `youtube-prefix-${resultStreaming}`),
+		initialState: { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } } });
+	assert.deepEqual(run.ret, { ok: true });
+	assertCleanRun(run);
+	const result = resultStreaming ? run.streamDone : run.result;
+	const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8")) : run.result["youtube.watch_history"];
+	assert.equal(scope.records.length, 50);
+	assert.deepEqual(scope.records.map((row) => row.video_id), Array.from({ length: 50 }, (_, index) => `synthetic-history-${index}`));
+	assert.equal(scope.records[0].id, createHash("sha256").update("history|synthetic-history-0").digest("hex").slice(0, 24));
+	assert.match(result.errors[0].reason, /inventory_not_proven_complete/);
+	assert.deepEqual(run.states, { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } });
+	assert.deepEqual(run.stateMessages, []);
+	assert.equal(result.errors.length, 1);
+	assert.equal(result.errors[0].errorClass, "partial");
+	assert.match(run.data.status, /^Partial:/);
+	}
+});
+
+test("youtube: incomplete subscriptions preserve observed rows and fail closed", { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-subscriptions-partial.js") });
+	const fixtures = { ...fx.youtubeFixtures, resolve: (raw) => {
+		const response = fx.resolveFixture(raw);
+		return new URL(raw).pathname === "/feed/channels"
+			? { ...response, body: response.body.replace(/<script>[\s\S]*?<\/script>/, "") }
+			: response;
+	} };
+	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.subscriptions"] });
+	assert.deepEqual(run.ret, { ok: true });
+	assertCleanRun(run);
+	assert.equal(run.result["youtube.subscriptions"].records.length, 4);
+	assert.equal(run.result.errors.length, 1);
+	assert.match(run.data.status, /^Partial:/);
+	assert.deepEqual(run.states, {});
 });
 
 test("meta: independent streams preserve posts gaps, WebCrypto ids and accepted STATE on both hosts", {timeout: 180_000}, async () => {
