@@ -51,9 +51,7 @@ const TEST_FILE = /\.test\.(?:mjs|ts)$/;
 // to another program is not mistaken for a run.
 export function nodeTestFiles(command) {
 	const files = new Set();
-	for (const rawSegment of command.split(/&&|\|\||[;|\n]/)) {
-		const segment = rawSegment.replace(/(^|\s)#.*$/, "");
-		const words = segment.trim().split(/\s+/).filter(Boolean);
+	for (const words of shellCommands(command)) {
 		let i = 0;
 		while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++;
 		if (words[i]?.endsWith("test-sandbox")) {
@@ -61,13 +59,75 @@ export function nodeTestFiles(command) {
 			if (end === -1) continue;
 			i = end + 1;
 		}
-		if (words[i] !== "node" || !words.slice(i + 1).includes("--test")) continue;
-		for (const word of words.slice(i + 1)) {
-			const file = norm(word.replace(/^["']|["']$/g, ""));
-			if (!file.startsWith("-") && TEST_FILE.test(file)) files.add(file);
+		if (words[i] !== "node") continue;
+		// Node options come before the entry script; only `--test` among them
+		// makes the remaining words test files.
+		let testMode = false;
+		for (let j = i + 1; j < words.length; j++) {
+			const word = words[j];
+			if (word === "--test") testMode = true;
+			else if (OPTIONS_WITH_VALUE.has(word)) j++;
+			else if (!word.startsWith("-")) {
+				if (!testMode) break;
+				const file = norm(word);
+				if (TEST_FILE.test(file)) files.add(file);
+			}
 		}
 	}
 	return files;
+}
+
+const OPTIONS_WITH_VALUE = new Set([
+	"--import",
+	"--require",
+	"-r",
+	"--loader",
+	"--experimental-loader",
+	"--env-file",
+]);
+
+// Splits shell text into simple commands (word lists), honoring single and
+// double quotes, `#` comments, and the separators ; | || && and newline.
+// Quoted text stays inside one word, so a quoted `; node --test x` is data.
+function shellCommands(text) {
+	const commands = [];
+	let words = [];
+	let word = "";
+	let inWord = false;
+	let quote = "";
+	const endWord = () => {
+		if (inWord) words.push(word);
+		word = "";
+		inWord = false;
+	};
+	const endCommand = () => {
+		endWord();
+		if (words.length > 0) commands.push(words);
+		words = [];
+	};
+	for (let k = 0; k < text.length; k++) {
+		const c = text[k];
+		if (quote) {
+			if (c === quote) quote = "";
+			else word += c;
+			continue;
+		}
+		if (c === "'" || c === '"') {
+			quote = c;
+			inWord = true;
+		} else if (c === "#" && !inWord) {
+			while (k + 1 < text.length && text[k + 1] !== "\n") k++;
+		} else if (c === ";" || c === "|" || c === "&" || c === "\n") {
+			endCommand();
+		} else if (/\s/.test(c)) {
+			endWord();
+		} else {
+			word += c;
+			inWord = true;
+		}
+	}
+	endCommand();
+	return commands;
 }
 
 function packageScriptFiles() {
@@ -180,6 +240,13 @@ test("only real node --test arguments count as coverage", () => {
 	assert.deepEqual(run("node --test e.test.mjs # f.test.mjs"), ["e.test.mjs"]);
 	assert.deepEqual(run("echo node --test g.test.mjs"), []);
 	assert.deepEqual(run("node scripts/build.mjs h.test.mjs"), []);
+	assert.deepEqual(run("node scripts/build.mjs --test h2.test.mjs"), []);
+	assert.deepEqual(
+		run("node --test a2.test.mjs # disabled; node --test b2.test.mjs"),
+		["a2.test.mjs"],
+	);
+	assert.deepEqual(run("echo 'example; node --test b3.test.mjs'"), []);
+	assert.deepEqual(run('node --test "q.test.mjs"'), ["q.test.mjs"]);
 	assert.deepEqual(run("cat i.test.mjs"), []);
 	const yaml = [
 		"jobs:",
