@@ -208,6 +208,7 @@ export function runConnectorProtocolSubprocess(
 					PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
 					...options.env,
 				},
+				detached: process.platform !== "win32",
 				stdio: ["pipe", "pipe", "pipe"],
 			},
 		);
@@ -252,10 +253,26 @@ export function runConnectorProtocolSubprocess(
 			fn();
 		};
 
-		const rejectAndKill = (error: Error): void => {
-			if (!child.killed) {
-				child.kill("SIGKILL");
+		const killProcessGroup = (): void => {
+			if (process.platform === "win32") {
+				if (!child.killed) child.kill("SIGKILL");
+				return;
 			}
+			if (!child.pid) return;
+			try {
+				process.kill(-child.pid, "SIGKILL");
+			} catch (error) {
+				if (
+					(error as NodeJS.ErrnoException).code !== "ESRCH" &&
+					!child.killed
+				) {
+					child.kill("SIGKILL");
+				}
+			}
+		};
+
+		const rejectAndKill = (error: Error): void => {
+			killProcessGroup();
 			finish(() => reject(error));
 		};
 
@@ -310,6 +327,7 @@ export function runConnectorProtocolSubprocess(
 		// is documented to fire only after the stdio streams have ended, so every
 		// byte the child wrote is guaranteed parsed into `messages` by then.
 		child.on("close", (code, signal) => {
+			killProcessGroup();
 			if (stdoutBuffer.trim()) {
 				parseLine(stdoutBuffer);
 			}
