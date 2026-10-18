@@ -90,6 +90,15 @@ import {
 	openFingerprintCursor,
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import {
+	type ChannelType,
+	ChannelTypeError,
+	channelsForRun,
+	narrowsChannelTypes,
+	parseChannelTypes,
+	restrictRecordToChannels,
+	selectChannelIdsByType,
+} from "./channel-types.ts";
+import {
 	buildCanvasRecord,
 	buildChannelCanvasIndex,
 	buildChannelMembershipRecord,
@@ -2218,8 +2227,11 @@ function buildArchiveArgs(input: ArchiveArgsInput): string[] {
 	if (opts.SKIP_FILES) {
 		args.push("-files=false");
 	}
-	// NOTE: CHANNEL_TYPES maps to `list channels -chan-types`; archive has
-	// no equivalent flag. We filter post-fetch via channel.is_im/is_mpim/etc.
+	// `archive` has no channel-type flag. CHANNEL_TYPES is applied before this
+	// point: collect() lists the channels, keeps those of the chosen types and
+	// passes only their IDs here (see resolveTypedChannelScope). An empty list
+	// would archive every channel, so a caller must never reach here with one
+	// after narrowing the types.
 	args.push(...positionalChannels);
 	return args;
 }
@@ -3591,6 +3603,82 @@ export function pruneRequestedFingerprintCursors(
 	}
 }
 
+const CHANNEL_LISTING_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * The channels a run with a narrowed CHANNEL_TYPES may archive, and the set of
+ * IDs whose records it may emit.
+ *
+ * It lists every channel the signed-in user can see, keeps those of the chosen
+ * types (and, when the run already names channels, only those among them), and
+ * returns their IDs for `archive` to take as its positional arguments. It runs
+ * before anything is downloaded, so a channel of an excluded type never
+ * reaches the disk. It fails closed: a listing that cannot be run or read, a
+ * channel that cannot be placed in one type, and a selection that matches no
+ * channel all throw, because an empty positional list makes `archive` take
+ * every channel. `PDPP_SLACK_SKIP_SLACKDUMP=1` throws too, since it would read
+ * an archive chosen without the listing.
+ */
+export async function resolveTypedChannelScope(input: {
+	childEnv: NodeJS.ProcessEnv;
+	cookie: string;
+	explicit: readonly string[];
+	progress: CollectContext["progress"];
+	selected: ReadonlySet<ChannelType>;
+	token: string;
+}): Promise<{ allowed: ReadonlySet<string>; channels: string[] }> {
+	const { childEnv, cookie, explicit, progress, selected, token } = input;
+	if (process.env.PDPP_SLACK_SKIP_SLACKDUMP === "1") {
+		throw new ChannelTypeError(
+			"needs_slackdump",
+			"Skipping the Slack download cannot be combined with a CHANNEL_TYPES that leaves a type out, because the channel types cannot be checked offline.",
+		);
+	}
+	progress("Checking which Slack channels match the chosen types");
+	await ensureWorkspaceCached({ cookie, env: childEnv, token });
+	const { stdout } = await runSlackdump(
+		[
+			"list",
+			"channels",
+			"-y",
+			"-no-encryption",
+			"-no-chan-cache",
+			"-no-json",
+			"-format",
+			"JSON",
+		],
+		{
+			env: childEnv,
+			progressLabel: "list",
+			timeoutMs: CHANNEL_LISTING_TIMEOUT_MS,
+		},
+	);
+	let listing: unknown;
+	try {
+		listing = JSON.parse(stdout);
+	} catch {
+		throw new ChannelTypeError(
+			"unreadable",
+			"The Slack channel list could not be read (it is not JSON), so no channel was downloaded.",
+		);
+	}
+	const typed = selectChannelIdsByType(listing, selected);
+	const channels = channelsForRun(explicit, typed);
+	slackDiagnostic("channel_types_resolved", {
+		archive_channels: channels.length,
+		explicit_channels: explicit.length,
+		matching_channels: typed.length,
+		selected_types: [...selected].sort().join(","),
+	});
+	if (channels.length === 0) {
+		throw new ChannelTypeError(
+			"no_channels",
+			`No channel you can see is of a chosen type${explicit.length > 0 ? " and also in the channels this run names" : ""}, so nothing was downloaded.`,
+		);
+	}
+	return { allowed: new Set(typed), channels };
+}
+
 interface EnsureArchiveDeps {
 	archivePath: string;
 	childEnv: NodeJS.ProcessEnv;
@@ -3981,10 +4069,26 @@ if (isMainModule(import.meta.url)) {
 
 			const childEnv = buildChildEnv(token, cookie);
 			const msgResFilter = resFilters.get("messages");
-			const positionalChannels: string[] = [
+			const explicitChannels: string[] = [
 				...(msgResFilter ? [...msgResFilter] : []),
 				...opts.CHANNEL_ALLOWLIST,
 			];
+			// A narrowed CHANNEL_TYPES picks the channels before anything is
+			// downloaded; the default (every type) leaves the run as it was.
+			const selectedTypes = parseChannelTypes(opts.CHANNEL_TYPES);
+			const typeScope = narrowsChannelTypes(selectedTypes)
+				? await resolveTypedChannelScope({
+						childEnv,
+						cookie,
+						explicit: explicitChannels,
+						progress,
+						selected: selectedTypes,
+						token,
+					})
+				: null;
+			const positionalChannels: string[] = typeScope
+				? typeScope.channels
+				: explicitChannels;
 			const messageFamilyRequested =
 				requested.has("messages") ||
 				requested.has("reactions") ||
@@ -4110,14 +4214,23 @@ if (isMainModule(import.meta.url)) {
 				// EmittedMessage union, so this is a contravariant widening at the call
 				// boundary, not a coercion of message shape.
 				emit: (msg) => emit(msg),
-				emitRecord: (stream, data) =>
-					stream === "messages" && msgResFilter
+				emitRecord: (stream, data) => {
+					// Whatever archive or API a record came from, a run that left a
+					// channel type out emits nothing that names a channel of it.
+					const record = typeScope
+						? restrictRecordToChannels(stream, data, typeScope.allowed)
+						: data;
+					if (record === null) {
+						return Promise.resolve(false);
+					}
+					return stream === "messages" && msgResFilter
 						? emitMessageRecordScopedByChannel({
 								channelIds: msgResFilter,
 								emitRecord: ctx.emitRecord,
-								record: data,
+								record,
 							})
-						: ctx.emitRecord(stream, data),
+						: ctx.emitRecord(stream, record);
+				},
 				emittedAt: ctx.emittedAt,
 				failedStreams: new Set(),
 				fingerprintCursors,

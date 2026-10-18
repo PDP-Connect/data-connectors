@@ -618,7 +618,7 @@
 					"CHANNEL_TYPES": {
 						"type": "array",
 						"items": { "type": "string" },
-						"description": "Channel types to export. Allowed values: public, private, im, mpim.",
+						"description": "Channel types to export. Allowed values: public, private, im, mpim. A type left out is never downloaded: the connector lists the channels first and downloads only those of the chosen types.",
 						"enum": ["public", "private", "im", "mpim"],
 						"default": ["public", "private", "im", "mpim"],
 						"declared_option_kind": "collection_scope"
