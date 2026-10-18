@@ -4137,7 +4137,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "scripts/run-tests.mjs",
-			line: 34,
+			line: 59,
 			column: 2,
 			category: "dependent_file_cursor",
 			note: "collectTestFiles(): sequential glob() per fixed test-directory pattern; trivial fixed-size loop over 5 patterns, no reason to parallelize",
@@ -4746,9 +4746,30 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "src/test-fixtures/scenario-watchdog-paced-connector.ts",
-			line: 65,
+			line: 76,
 			column: 4,
 			category: "ordered_protocol_emission",
 			note: "collect(): each record's pacing sleep must complete before that record's own RECORD emission so the watchdog-window proof observes real inter-record gaps, not a burst",
+		},
+		{
+			path: "src/test-harness.test.ts",
+			line: 351,
+			column: 18,
+			category: "bounded_retry_polling",
+			note: "runConnectorProtocolSubprocess grandchild test: poll the grandchild's /proc stat until it exits or the deadline passes; each probe must observe the state the previous one left",
+		},
+		{
+			path: "src/test-runner-contract.test.ts",
+			line: 22,
+			column: 18,
+			category: "test_assertion_sequencing",
+			note: "runner contract: read each of the two runner sources in turn and assert its concurrency and timeout flags",
+		},
+		{
+			path: "src/test-runner-contract.test.ts",
+			line: 53,
+			column: 3,
+			category: "dependent_file_cursor",
+			note: "NAMESPACE_TESTS guard: sequential glob() per runner pattern, the same fixed-size loop run-tests.mjs uses",
 		},
 	];
