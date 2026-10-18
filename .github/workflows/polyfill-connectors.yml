@@ -17,8 +17,12 @@ on:
     paths:
       - "packages/polyfill-connectors/**"
       - "connectors/**"
+      - "scripts/test-sandbox/**"
       - ".github/workflows/polyfill-connectors.yml"
-  pull_request: {}
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
+  pull_request:
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:
@@ -57,7 +61,7 @@ jobs:
 
           echo "$CHANGED"
 
-          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|\.github/workflows/polyfill-connectors\.yml$)'; then
+          if echo "$CHANGED" | grep -qE '^(connectors/|packages/polyfill-connectors/|scripts/test-sandbox/|\.github/workflows/polyfill-connectors\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
@@ -118,6 +122,31 @@ jobs:
         # This scan targets connectors/ at the repository root, outside the
         # package-local verification scope.
         run: npm run connector-stdout-console:check
+
+      - name: Allow unprivileged user namespaces for the isolation tests
+        # Ubuntu 24.04 runners restrict unprivileged user namespaces through
+        # AppArmor, so every test in scripts/test-lanes.mjs's NAMESPACE_TESTS
+        # that needs bwrap or unshare skipped here ("network isolation
+        # unavailable on this host"). Those tests prove the scenario sandbox
+        # that keeps connectors off the network; lifting the restriction on this
+        # throwaway runner lets them run.
+        run: |
+          key=kernel.apparmor_restrict_unprivileged_userns
+          if sysctl -n "$key" >/dev/null 2>&1; then
+            sudo sysctl -w "$key=0"
+          else
+            echo "$key is not present on this runner; nothing to lift"
+          fi
+          # The isolation module also drives bwrap; install it if the image lacks it.
+          command -v bwrap >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q bubblewrap; }
+          if unshare --user --map-root-user --net true; then
+            echo "unprivileged user and network namespaces: available"
+          else
+            # They worked on this runner image when this step was added, so losing
+            # them is an image change to fix, not coverage to drop quietly.
+            echo "::error::unprivileged namespaces are unavailable; the scenario-isolation tests would skip"
+            exit 1
+          fi
 
       - name: Test
         working-directory: packages/polyfill-connectors
