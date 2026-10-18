@@ -45,7 +45,10 @@ name: Cross-Repo Integrity
 # (alongside DCO and polyfill-connectors.yml's own equivalent gate). See finding 12.3.
 
 on:
-  pull_request: {}
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   schedule:
