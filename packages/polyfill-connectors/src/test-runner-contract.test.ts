@@ -54,6 +54,7 @@ test("NAMESPACE_TESTS lists exactly the files that need their own namespaces", a
 		"bin/**/*.test.ts",
 		"../../connectors/**/*.test.ts",
 		"scripts/related-tests/*.test.ts",
+		"scripts/**/*.test.mjs",
 		"src/**/*.test.ts",
 	]) {
 		for await (const entry of glob(pattern, { cwd: packageRoot })) {
