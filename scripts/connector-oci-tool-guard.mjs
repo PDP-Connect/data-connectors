@@ -29,6 +29,16 @@ import { join } from "node:path";
  * version of this check read a top-level profile.external_tools, which no
  * manifest has, so its bundled-tool refusal never fired.
  */
+/**
+ * `new URL(<specifier>, import.meta.url)` where the specifier climbs out of the
+ * module's directory. Any of the three string quotes, any spacing between the
+ * tokens, and a leading `./` are the same read, so all of them are refused. A
+ * template literal with an interpolation still starts with the literal `../`,
+ * which is enough to know it climbs out.
+ */
+const MODULE_RELATIVE_ESCAPE =
+	/new\s+URL\s*\(\s*(["'`])((?:\.\/)*\.\.\/(?:(?!\1)[^\\]|\\.)*)\1\s*,\s*import\s*\.\s*meta\s*\.\s*url\b/;
+
 export function assertNoUnbundledNativeDependency(connectorKey, profile, connectorDirectory) {
 	const externalTools = profile.runtime_requirements?.external_tools ?? [];
 	const declaresBundledTools = externalTools.some(
@@ -60,12 +70,10 @@ export function assertNoUnbundledNativeDependency(connectorKey, profile, connect
 		}
 	}
 
-	const escapingAsset = source.match(
-		/new URL\(\s*"(\.\.\/[^"]*)"\s*,\s*import\.meta\.url/,
-	);
+	const escapingAsset = source.match(MODULE_RELATIVE_ESCAPE);
 	if (escapingAsset) {
 		throw new Error(
-			`${connectorKey} reads '${escapingAsset[1]}' relative to its module, which escapes the install root once the ` +
+			`${connectorKey} reads '${escapingAsset[2]}' relative to its module, which escapes the install root once the ` +
 				"entrypoint is flattened to code/collection-profile.mjs. The bundler must rewrite that specifier first (design §1.3).",
 		);
 	}

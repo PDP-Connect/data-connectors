@@ -85,6 +85,36 @@ describe("host-provisioned external tools", () => {
     ), /escapes the install root/);
   });
 
+  const escapingSpellings = [
+    ["single quotes", "new URL('../asset.toml', import.meta.url);"],
+    ["a template literal", "new URL(`../asset.toml`, import.meta.url);"],
+    ["an interpolated template", "new URL(`../${name}.toml`, import.meta.url);"],
+    ["spacing between the tokens", "new  URL ( \"../asset.toml\" , import . meta . url );"],
+    ["arguments on separate lines", 'new URL(\n  "../asset.toml",\n  import.meta.url,\n);'],
+    ["a leading ./", 'new URL("./../asset.toml", import.meta.url);'],
+    ["a deeper climb", 'new URL("../../asset.toml", import.meta.url);'],
+  ];
+  for (const [name, spelling] of escapingSpellings) {
+    test(`refuses a module-relative asset written with ${name}`, (t) => {
+      assert.throws(() => assertNoUnbundledNativeDependency(
+        "fixture", profile(declaredTool()), fixture(t, `process.env.FOO_BIN; ${spelling}`),
+      ), /fixture reads '.*asset|fixture reads '.*name/);
+    });
+  }
+
+  test("accepts reads that stay inside the install root or are not module-relative", (t) => {
+    for (const source of [
+      'new URL("./asset.toml", import.meta.url);',
+      'new URL("asset.toml", import.meta.url);',
+      'new URL("../asset.toml", base);',
+      'const note = "see ../asset.toml";',
+    ]) {
+      assert.doesNotThrow(() => assertNoUnbundledNativeDependency(
+        "fixture", profile(declaredTool()), fixture(t, `process.env.FOO_BIN; ${source}`),
+      ), source);
+    }
+  });
+
   test("slack's real declaration passes the guard", () => {
     const directory = join(manifests, "slack");
     const manifest = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));
