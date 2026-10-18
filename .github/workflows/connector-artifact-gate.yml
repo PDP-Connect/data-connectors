@@ -1,7 +1,7 @@
 # Copyright The PDP-Connect Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# Exercise the OCI build-and-verify path on every pull request, WITHOUT any
+# Exercise the OCI build-and-verify path on every pull request into main, WITHOUT any
 # ability to publish.
 #
 # The reviewer's finding on #97: five PR-triggered workflows were green at the
@@ -20,7 +20,7 @@ name: Connector artifact gate
 
 on:
   # Only PRs into main. A PR into an integration branch that batches changes
-  # runs no CI here; the batch PR into main runs all of it.
+  # is checked locally instead; the batch PR into main runs this workflow.
   pull_request:
     branches: [main]
   push:

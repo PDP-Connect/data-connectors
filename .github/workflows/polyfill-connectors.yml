@@ -19,7 +19,7 @@ on:
       - "connectors/**"
       - ".github/workflows/polyfill-connectors.yml"
   # Only PRs into main. A PR into an integration branch that batches changes
-  # runs no CI here; the batch PR into main runs all of it.
+  # is checked locally instead; the batch PR into main runs this workflow.
   pull_request:
     branches: [main]
   workflow_dispatch: {}
