@@ -555,3 +555,27 @@ test("runConnectorProtocolSubprocess: a multi-byte character split across stdout
 		await rm(tempDir, { recursive: true, force: true });
 	}
 });
+
+test("runConnectorProtocolSubprocess: a child that exits before the first RSS tick still has a sampled peak", {
+	skip: process.platform !== "linux",
+}, async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-rss-"));
+	const entrypoint = join(tempDir, "quick-connector.mjs");
+	await writeFile(
+		entrypoint,
+		'process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");\n',
+	);
+	try {
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint,
+			// Far longer than the child lives, so only the start and output
+			// samples can produce a value.
+			peakRssPollIntervalMs: 60_000,
+			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+		});
+		assert.notEqual(result.peakRssBytes, null, "expected a sampled peak RSS");
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});

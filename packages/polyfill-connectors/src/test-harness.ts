@@ -298,22 +298,28 @@ export function runConnectorProtocolSubprocess(
 		let peakRssBytes: number | null = null;
 		let rssPoller: NodeJS.Timeout | undefined;
 		const { pid } = child;
-		if (options.peakRssPollIntervalMs && pid) {
-			rssPoller = setInterval(() => {
-				try {
-					const status = readFileSync(`/proc/${pid}/status`, "utf8");
-					const match = VM_RSS_STATUS_RE.exec(status);
-					if (match?.[1]) {
-						const bytes = Number.parseInt(match[1], 10) * 1024;
-						peakRssBytes =
-							peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
-					}
-				} catch {
-					// /proc/<pid>/status is unavailable (non-Linux, or the process
-					// already exited between the tick firing and the read) -- leave
-					// peakRssBytes at its last known value.
+		const sampleRss = (): void => {
+			try {
+				const status = readFileSync(`/proc/${pid}/status`, "utf8");
+				const match = VM_RSS_STATUS_RE.exec(status);
+				if (match?.[1]) {
+					const bytes = Number.parseInt(match[1], 10) * 1024;
+					peakRssBytes =
+						peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
 				}
-			}, options.peakRssPollIntervalMs);
+			} catch {
+				// /proc/<pid>/status is unavailable (non-Linux, or the process
+				// already exited between the tick firing and the read) -- leave
+				// peakRssBytes at its last known value.
+			}
+		};
+		const sampleRssOnOutput = Boolean(options.peakRssPollIntervalMs && pid);
+		if (sampleRssOnOutput) {
+			// The interval alone can miss a child that finishes before its first
+			// tick; sampling at start and on each stdout chunk (below) always
+			// yields a value while the child is producing records.
+			sampleRss();
+			rssPoller = setInterval(sampleRss, options.peakRssPollIntervalMs);
 		}
 
 		const messages: EmittedMessage[] = [];
@@ -379,6 +385,7 @@ export function runConnectorProtocolSubprocess(
 		child.stdout?.setEncoding("utf8");
 		child.stderr?.setEncoding("utf8");
 		child.stdout?.on("data", (text: string) => {
+			if (sampleRssOnOutput) sampleRss();
 			if (retainRawStdout) {
 				rawStdout += text;
 			}
