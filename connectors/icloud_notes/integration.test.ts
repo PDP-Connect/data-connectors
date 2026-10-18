@@ -150,6 +150,7 @@ function makeFakePage(
 	}
 	const queryCallIndex: Record<string, number> = { folders: 0, notes: 0 };
 	const evaluate = (_fn: unknown, arg: unknown): Promise<unknown> => {
+		if (arg === "icloud-notes-location") return Promise.resolve(currentUrl);
 		if (arg === undefined) {
 			const onReadinessEvaluationPending =
 				readiness.onReadinessEvaluationPending;
@@ -256,7 +257,8 @@ function makeFakePage(
 				readyState = readiness.readyStateAfterWait;
 			}
 		},
-		reload: async () => {
+		goto: async (url: string) => {
+			currentUrl = url;
 			readiness.onReload?.();
 			if (readiness.reloadReadyState !== undefined) {
 				readyState = readiness.reloadReadyState;
@@ -502,7 +504,7 @@ test("collectAllStreams: refuses malformed successful envelopes and does not che
 					(message) =>
 						message.type === "SKIP_RESULT" &&
 						message.stream === stream &&
-						message.reason === "icloud_invalid_query_response",
+						(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_invalid_query_response"),
 				),
 				"malformed envelopes must leave a durable stream gap",
 			);
@@ -532,7 +534,7 @@ test("collectAllStreams: a failed folder query leaves notes withheld without a f
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "notes" &&
-				message.reason === "icloud_omitted_rows",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_omitted_rows"),
 		),
 	);
 	assert.equal(
@@ -607,7 +609,7 @@ test("collectAllStreams: repeated continuation markers stop as a gap", async () 
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "icloud_no_progress",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_no_progress"),
 		),
 	);
 	assert.equal(
@@ -731,7 +733,9 @@ test("collectAllStreams: unknown recordType withholds both streams and preserves
 			skip && skip.type === "SKIP_RESULT",
 			`${stream} must be withheld`,
 		);
-		assert.equal(skip.reason, "icloud_omitted_rows");
+		assert.equal(skip.reason, "inventory_not_proven_complete");
+		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 		assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 			{
 				row_index: 0,
@@ -1131,7 +1135,9 @@ test("collectAllStreams: malformed Deleted controls withhold rows and preserve s
 		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
 	);
 	assert.ok(skip && skip.type === "SKIP_RESULT");
-	assert.equal(skip.reason, "icloud_omitted_rows");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 	assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 		{
 			row_index: 0,
@@ -1272,7 +1278,7 @@ test("collectAllStreams: rejected schema rows produce an omission gap and cannot
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "icloud_omitted_rows",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_omitted_rows"),
 		),
 	);
 	assert.equal(
@@ -1499,6 +1505,90 @@ test("collectAllStreams: pending readiness evaluations are bounded and cannot st
 	);
 });
 
+
+for (const locationRead of [1, 2, 3, 4]) {
+	test(`collectAllStreams: location read ${locationRead} never settling stays within the readiness deadline`, async (t) => {
+		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+		const harness = makeRecordingEmit(validateRecord);
+		let reads = 0;
+		let validations = 0;
+		let reloads = 0;
+		const page = makeFakePage([], undefined, {
+			readyState: "loading",
+			onValidate: () => { validations += 1; },
+			onReload: () => { reloads += 1; },
+		});
+		const evaluate = page.evaluate.bind(page);
+		page.evaluate = ((_fn: unknown, arg: unknown) => {
+			if (arg === "icloud-notes-location" && ++reads >= locationRead) {
+				return new Promise(() => {});
+			}
+			return evaluate(_fn as never, arg);
+		}) as Page["evaluate"];
+		let settled = false;
+		const collection = assert.rejects(
+			collectAllStreams(makeCtx(page, harness, ["notes"])),
+			/icloud_readiness_exhausted/,
+		).then(() => { settled = true; });
+		for (let elapsed = 0; elapsed <= 20_000 && !settled; elapsed += 1000) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			if (elapsed < 20_000) t.mock.timers.tick(1000);
+		}
+		assert.equal(settled, true, "location reads must not escape the shared 20 s deadline");
+		await collection;
+		assert.ok(Date.now() <= 20_000);
+		assert.ok(reads >= locationRead);
+		assert.equal(validations, 0);
+		assert.equal(reloads, 0, "an unreadable current route must never be reloaded");
+		assert.equal(harness.events.length, 0);
+	});
+
+	test(`collectAllStreams: location read ${locationRead} destroyed context recovers safely`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		let reads = 0;
+		let reloads = 0;
+		const page = makeFakePage([folderQueryResponse()], undefined, {
+			...(locationRead === 4 ? { readyState: "loading", readyStateAfterWait: "loading" } : {}),
+			onReload: () => { reloads += 1; },
+			reloadReadyState: "complete",
+		});
+		const evaluate = page.evaluate.bind(page);
+		let probes = 0;
+		page.evaluate = ((fn: unknown, arg: unknown) => {
+			if (arg === "icloud-notes-location" && ++reads === locationRead) {
+				return Promise.reject(new Error("Execution context was destroyed, most likely because of a navigation"));
+			}
+			if (arg === undefined && ++probes > 1) {
+				return Promise.resolve({ href: "https://www.icloud.com/notes", readyState: "complete", blocked: false });
+			}
+			return evaluate(fn as never, arg);
+		}) as Page["evaluate"];
+		await collectAllStreams(makeCtx(page, harness, ["folders"]));
+		assert.ok(reads > locationRead, "the transient location failure must retry");
+		assert.equal(reloads, locationRead === 4 ? 0 : 1);
+		assert.ok(harness.protocolMessages.some((message) => message.type === "STATE"));
+	});
+}
+
+test("collectAllStreams: location failure followed by navigation away vetoes recovery reload", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	let reloads = 0;
+	const page = makeFakePage([], undefined, {
+		onReload: () => { reloads += 1; },
+	}) as Page & { setUrl: (url: string) => void };
+	const evaluate = page.evaluate.bind(page);
+	let reads = 0;
+	page.evaluate = ((fn: unknown, arg: unknown) => {
+		if (arg === "icloud-notes-location" && ++reads === 2) {
+			page.setUrl("https://www.icloud.com/mail");
+			return Promise.reject(new Error("Execution context was destroyed"));
+		}
+		return evaluate(fn as never, arg);
+	}) as Page["evaluate"];
+	await assert.rejects(collectAllStreams(makeCtx(page, harness, ["notes"])), /icloud_wrong_page/);
+	assert.equal(reloads, 0);
+	assert.equal(harness.events.length, 0);
+});
 test("collectAllStreams: navigation change vetoes a terminal query response", async () => {
 	const harness = makeRecordingEmit(validateRecord);
 	let page!: Page & { setUrl: (url: string) => void };
@@ -1516,7 +1606,7 @@ test("collectAllStreams: navigation change vetoes a terminal query response", as
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "icloud_navigation_changed",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_navigation_changed"),
 		),
 	);
 });
@@ -1526,7 +1616,7 @@ test("collectAllStreams: throws when the CloudKit config cannot be resolved (aut
 	const page = {
 		evaluate: (_fn: unknown, arg: unknown): Promise<unknown> =>
 			Promise.resolve(
-				arg === undefined
+				arg === "icloud-notes-location" ? "https://www.icloud.com/notes" : arg === undefined
 					? {
 							href: "https://www.icloud.com/notes",
 							readyState: "complete",
