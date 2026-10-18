@@ -59,6 +59,20 @@ export function ownChannelFixture(raw) {
 		'<span>456 views</span><span>7 videos</span></ytd-channel-about-metadata-renderer></body></html>');
 	return resolveFixture(raw);
 }
+// Current YouTube: the avatar menu header has no email text; the Switch account
+// view shows the signed-in account's email in its own header, above a list of
+// other accounts.
+export function switchAccountEmailFixture(raw) {
+	if (new URL(raw).pathname !== "/") return ownChannelFixture(raw);
+	const menu = '<ytd-active-account-header-renderer><span id="email"></span><a href="/@synthetic-owner">Your channel</a></ytd-active-account-header-renderer>' +
+		'<ytd-multi-page-menu-renderer><ytd-compact-link-renderer id="switch"><a><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>';
+	const view = '<ytd-google-account-header-renderer><yt-formatted-string id="email">synthetic@example.test</yt-formatted-string></ytd-google-account-header-renderer>' +
+		'<ytd-account-item-renderer><span id="email">other-account@example.test</span></ytd-account-item-renderer>';
+	return html('<!doctype html><html><body>' + avatar + '<script>document.querySelector("#avatar-btn").onclick = () => {' +
+		'document.body.insertAdjacentHTML("beforeend", ' + JSON.stringify(menu) + ');' +
+		'document.querySelector("#switch").onclick = () => document.body.insertAdjacentHTML("beforeend", ' + JSON.stringify(view) + ');' +
+		'}</script></body></html>');
+}
 export function historyEvidenceLossFixture(kind) {
 	let body = sample("liked-videos-empty-tab").replaceAll("No videos in this playlist", "No watch history");
 	const login = '<a href="https://accounts.google.com/ServiceLogin">Sign in</a>';

@@ -17,6 +17,8 @@ import {
 	CHANNEL_TITLE_SELECTOR,
 	readChannelAbout,
 	readChannelPage,
+	openSwitchAccount,
+	readGoogleAccountEmail,
 	readOwnAccount,
 	readPlaylistHeader,
 	readPlaylistLinks,
@@ -495,6 +497,27 @@ async function waitForContent(
 		return state;
 	} catch {
 		return "unreadable";
+	}
+}
+
+async function readSwitchAccountEmail(
+	page: BrowserCollectContext["page"],
+): Promise<string | null> {
+	try {
+		const opened = await page.evaluate(
+			openSwitchAccount as () => ReturnType<typeof openSwitchAccount>,
+		);
+		if (opened !== true) return null;
+		const handle = await page.waitForFunction(
+			readGoogleAccountEmail as () => ReturnType<typeof readGoogleAccountEmail>,
+			undefined,
+			{ timeout: 4_000 },
+		);
+		const email = (await handle.jsonValue()) as unknown;
+		await handle.dispose();
+		return typeof email === "string" ? email : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -1564,9 +1587,15 @@ export async function collectYoutubeBrowser(
 					"youtube_profile_account_header_unreadable",
 				);
 			} else {
-				const own = await page.evaluate(
+				const account = await page.evaluate(
 					readOwnAccount as () => ReturnType<typeof readOwnAccount>,
 				);
+				// The avatar menu itself does not show the email on current YouTube;
+				// the Switch account view does, in the signed-in account's header.
+				const own = {
+					...account,
+					email: account.email ?? (await readSwitchAccountEmail(page)),
+				};
 				if (!own.channel_url) {
 					if (own.email) {
 						await emit("profile", {
@@ -1575,7 +1604,7 @@ export async function collectYoutubeBrowser(
 							channel_url: null,
 							title: null,
 							handle: null,
-							email: own.email,
+							...(own.email ? { email: own.email } : {}),
 							joined_at: null,
 							avatar_url: null,
 							description: null,
@@ -1640,7 +1669,7 @@ export async function collectYoutubeBrowser(
 								channel_url: own.channel_url,
 								title: channel.title,
 								handle: channel.handle,
-								email: own.email,
+								...(own.email ? { email: own.email } : {}),
 								joined_at: about?.joined_at ?? null,
 								avatar_url: channel.avatar_url,
 								description: about?.description ?? null,

@@ -681,6 +681,64 @@ test("profile emits email-only authenticated accounts without a channel link", a
 	}
 });
 
+const SWITCH_ACCOUNT_MENU =
+	'<ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>';
+
+async function collectProfileWithSwitchView(switchView: string) {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		await page.route("https://www.youtube.com/**", async (route) => {
+			const url = new URL(route.request().url());
+			let body = "";
+			if (url.pathname === "/")
+				body = `<button id="avatar-btn">Account</button><ytd-active-account-header-renderer><span id="channel-handle">@owner</span><span id="email"></span></ytd-active-account-header-renderer>${SWITCH_ACCOUNT_MENU}<script>document.querySelector("ytd-compact-link-renderer").addEventListener("click", () => document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(switchView)}))</script>`;
+			else if (url.pathname === "/@owner")
+				body =
+					'<link rel="canonical" href="https://www.youtube.com/channel/UCowner"><h1>Real Owner</h1>';
+			else if (url.pathname === "/@owner/about")
+				body =
+					"<ytd-channel-about-metadata-renderer><span>Joined Jan 3, 2020</span></ytd-channel-about-metadata-renderer>";
+			await route.fulfill({
+				status: body ? 200 : 404,
+				contentType: "text/html",
+				body: `<html><body>${body}</body></html>`,
+			});
+		});
+		const records: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["profile", { name: "profile" }]]) as never,
+			emitRecord: async (_stream, data) => {
+				records.push(data);
+			},
+			emit: async () => undefined,
+			progress: async () => undefined,
+		});
+		return records;
+	} finally {
+		await browser.close();
+	}
+}
+
+test("profile reads the owner's email from the Switch account view, not other listed accounts", async () => {
+	const records = await collectProfileWithSwitchView(
+		'<ytd-google-account-header-renderer><yt-formatted-string id="email">owner@example.com</yt-formatted-string></ytd-google-account-header-renderer><ytd-account-item-renderer><span id="email">other@example.com</span></ytd-account-item-renderer>',
+	);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.email, "owner@example.com");
+	assert.equal(records[0]?.title, "Real Owner");
+});
+
+test("profile omits email when the Switch account view does not show one", async () => {
+	const records = await collectProfileWithSwitchView(
+		'<ytd-google-account-header-renderer><yt-formatted-string id="email"></yt-formatted-string></ytd-google-account-header-renderer>',
+	);
+	assert.equal(records.length, 1);
+	assert.equal("email" in (records[0] ?? {}), false);
+	assert.equal(records[0]?.title, "Real Owner");
+});
+
 test("profile never reads document-level counts outside About metadata", async () => {
 	const browser = await chromium.launch({ headless: true });
 	try {

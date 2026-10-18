@@ -7,6 +7,8 @@ import { parseHTML } from "linkedom";
 import {
 	readChannelAbout,
 	readChannelPage,
+	openSwitchAccount,
+	readGoogleAccountEmail,
 	readOwnAccount,
 	readPlaylistLinks,
 	readSubscriptions,
@@ -221,4 +223,38 @@ test("history attaches a day label from the containing section", () => {
 	const [video] = readVideos("history", doc);
 	assert.equal(video?.watched_date_label, "Yesterday");
 	assert.equal(video?.video_title, "History title");
+});
+
+test("switch-account view yields only the signed-in account header's email", () => {
+	const doc = dom(`
+		<ytd-active-account-header-renderer><span id="email"></span></ytd-active-account-header-renderer>
+		<ytd-multi-page-menu-renderer>
+			<ytd-compact-link-renderer><a><span id="label">Your channel</span></a></ytd-compact-link-renderer>
+			<ytd-compact-link-renderer><a><span id="label"> Switch  account </span></a></ytd-compact-link-renderer>
+		</ytd-multi-page-menu-renderer>`);
+	assert.equal(readGoogleAccountEmail(doc), null);
+	let clicked = 0;
+	for (const item of doc.querySelectorAll("ytd-compact-link-renderer"))
+		item.addEventListener("click", () => {
+			clicked += 1;
+		});
+	assert.equal(openSwitchAccount(doc), true);
+	assert.equal(clicked, 1);
+	doc.body.insertAdjacentHTML(
+		"beforeend",
+		'<ytd-account-section-list-renderer><ytd-google-account-header-renderer><yt-formatted-string id="email">owner@example.com</yt-formatted-string></ytd-google-account-header-renderer><ytd-account-item-renderer><span id="email">other@example.com</span></ytd-account-item-renderer></ytd-account-section-list-renderer>',
+	);
+	assert.equal(readGoogleAccountEmail(doc), "owner@example.com");
+});
+
+test("switch-account email reader rejects non-email header text and a missing menu item", () => {
+	assert.equal(openSwitchAccount(dom("<div></div>")), false);
+	assert.equal(
+		readGoogleAccountEmail(
+			dom(
+				'<ytd-google-account-header-renderer><span id="email">Signed in</span></ytd-google-account-header-renderer>',
+			),
+		),
+		null,
+	);
 });

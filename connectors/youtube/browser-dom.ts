@@ -85,6 +85,42 @@ export function readOwnAccount(doc: Document = document): {
 	};
 }
 
+/**
+ * Opens the avatar menu's "Switch account" view, where YouTube shows the
+ * signed-in Google account's email. Returns whether the item was found.
+ */
+export function openSwitchAccount(doc: Document = document): boolean {
+	const item = Array.from(
+		doc.querySelectorAll<HTMLElement>(
+			"ytd-multi-page-menu-renderer ytd-compact-link-renderer",
+		),
+	).find(
+		(candidate) =>
+			candidate
+				.querySelector("#label")
+				?.textContent?.trim()
+				.replace(/\s+/g, " ")
+				.toLowerCase() === "switch account",
+	);
+	if (!item) return false;
+	item.click();
+	return true;
+}
+
+/**
+ * The signed-in account's email from the Switch account view's own header.
+ * Only that header is read: the account list below it names other accounts.
+ */
+export function readGoogleAccountEmail(doc: Document = document): string | null {
+	const text = doc
+		.querySelector("ytd-google-account-header-renderer #email")
+		?.textContent?.trim();
+	// Inline: these readers are serialized into the page without module scope.
+	return text && /^[^\s@<>"']+@[^\s@<>"'.]+\.[^\s@<>"']+$/.test(text)
+		? text
+		: null;
+}
+
 export function readChannelPage(doc: Document = document): {
 	channel_id: string | null;
 	channel_url: string;
