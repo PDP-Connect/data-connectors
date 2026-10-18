@@ -109,7 +109,14 @@ function shellCommands(text) {
 		const c = text[k];
 		if (quote) {
 			if (c === quote) quote = "";
+			else if (c === "\\" && quote === '"' && k + 1 < text.length)
+				word += text[++k];
 			else word += c;
+			continue;
+		}
+		if (c === "\\" && k + 1 < text.length) {
+			word += text[++k];
+			inWord = true;
 			continue;
 		}
 		if (c === "'" || c === '"') {
@@ -246,6 +253,8 @@ test("only real node --test arguments count as coverage", () => {
 		["a2.test.mjs"],
 	);
 	assert.deepEqual(run("echo 'example; node --test b3.test.mjs'"), []);
+	assert.deepEqual(run('echo "example\\"; node --test b4.test.mjs"'), []);
+	assert.deepEqual(run("echo example\\; node --test b5.test.mjs"), []);
 	assert.deepEqual(run('node --test "q.test.mjs"'), ["q.test.mjs"]);
 	assert.deepEqual(run("cat i.test.mjs"), []);
 	const yaml = [
