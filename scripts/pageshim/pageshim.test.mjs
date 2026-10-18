@@ -3939,6 +3939,26 @@ test("youtube: avatar click exposes owner identity and own-channel about navigat
 	}
 });
 
+for (const handlerOn of ["renderer", "anchor"]) test(`youtube: profile email comes from the Switch account view's own header on both hosts (handler on ${handlerOn})`, { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, `youtube-switch-email-${handlerOn}.js`) });
+	for (const resultStreaming of [false, true]) {
+		const run = await runHarness({ bundle: built.outfile,
+			fixtures: { ...fx.youtubeFixtures, resolve: (raw) => fx.switchAccountEmailFixture(raw, handlerOn) },
+			scopes: ["youtube.profile"], resultStreaming,
+			resultSpoolDirectory: join(out, `youtube-switch-email-${handlerOn}-${resultStreaming}`) });
+		assertCleanRun(run);
+		assert.deepEqual(run.ret, { ok: true });
+		const result = resultStreaming ? run.streamDone : run.result;
+		assert.deepEqual(result.errors, []);
+		const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.profile"], "utf8"))
+			: run.result["youtube.profile"];
+		assert.equal(scope.records.length, 1);
+		assert.equal(scope.records[0].email, "synthetic@example.test");
+		assert.equal(scope.records[0].id, "UCsyntheticOwner");
+	}
+});
+
 test("youtube: capped history upserts the prefix without claiming completion or checkpoint", { timeout: 180_000 }, async () => {
 	const fx = await import("./fixtures/youtube.mjs");
 	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-prefix.js") });
