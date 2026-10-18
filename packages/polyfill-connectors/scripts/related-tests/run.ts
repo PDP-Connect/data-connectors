@@ -15,7 +15,7 @@ import {
 	connectorsDir as CONNECTORS_ROOT,
 	packageRoot as PACKAGE_ROOT,
 } from "../../src/connector-paths.ts";
-import { NAMESPACE_TESTS } from "../namespace-tests.mjs";
+import { EXCLUDED_TESTS, NAMESPACE_TESTS } from "../test-lanes.mjs";
 
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const CLI_PATH = join(PACKAGE_ROOT, "scripts", "related-tests", "cli.ts");
@@ -145,7 +145,9 @@ function main(): void {
 		process.exit(ok ? 0 : 1);
 	}
 
-	const targets = selection.testFiles ?? [];
+	const targets = (selection.testFiles ?? []).filter(
+		(file) => !EXCLUDED_TESTS.has(file),
+	);
 	if (targets.length === 0) {
 		console.error("[test:related] no related test files; nothing to run.");
 		return;

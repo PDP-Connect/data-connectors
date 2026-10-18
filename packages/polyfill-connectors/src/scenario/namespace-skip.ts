@@ -12,7 +12,7 @@ export function namespaceSkip(unavailable: boolean): boolean {
 	if (unavailable && process.env.TEST_LANE === "sandboxed") {
 		throw new Error(
 			"this test file needs its own namespaces (bwrap/unshare) and cannot run in the sandboxed lane; " +
-				"list it in NAMESPACE_TESTS in scripts/namespace-tests.mjs",
+				"list it in NAMESPACE_TESTS in scripts/test-lanes.mjs",
 		);
 	}
 	return unavailable;

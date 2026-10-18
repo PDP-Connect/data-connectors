@@ -15,3 +15,9 @@ export const NAMESPACE_TESTS = new Set([
 	"src/scenario/filesystem-input.test.ts",
 	"src/scenario/isolation-mechanism.test.ts",
 ]);
+
+// Test files no lane runs. connectors/github/index.test.ts drives the
+// connector against the reference implementation's ingest pipeline
+// (../../reference-implementation/server/*), which is not in this repository.
+// Paths as the related-test selector reports them.
+export const EXCLUDED_TESTS = new Set(["connectors/github/index.test.ts"]);

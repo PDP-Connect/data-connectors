@@ -7,21 +7,23 @@
 // can be left out by path.
 import { spawn } from "node:child_process";
 import { glob } from "node:fs/promises";
-import { NAMESPACE_TESTS } from "./namespace-tests.mjs";
+import { EXCLUDED_TESTS, NAMESPACE_TESTS } from "./test-lanes.mjs";
 
 // Gate B finding B2 restored the other 7 previously-excluded semantic/
 // conformance tests (vendored @pdpp/reference-contract now carries an
 // `evidence` subpath, and a local reference-implementation-stand-in carries
 // RUNTIME_GENERIC_REASON_CODES — see vendor/README.md and
 // src/reference-implementation-stand-in/README.md for exact provenance).
-// connectors/github/index.test.ts remains excluded: it drives GitHub
-// connector collection against a REAL in-memory instance of the reference
-// implementation's own ingest pipeline (server/db.ts, server/records.ts —
-// thousands of lines each, not a narrow leaf contract), so it cannot be
-// bridged with a minimal stand-in without misrepresenting what it tests. Its
-// closure is the required cross-repository semantic CI job (Gate B findings
-// B2/B5), not a local vendor addition.
-const EXCLUDED = new Set(["../../connectors/github/index.test.ts"]);
+// Files no lane can run are listed in EXCLUDED_TESTS (scripts/test-lanes.mjs).
+// connectors/github/index.test.ts drives the connector against the reference
+// implementation's own ingest pipeline, which is not in this repository. The
+// cross-repository job that once ran it was retired (pdpp#284; see
+// .github/workflows/cross-repo-integrity.yml), so today it runs nowhere.
+const EXCLUDED = new Set(
+	[...EXCLUDED_TESTS].map((file) =>
+		file.startsWith("connectors/") ? `../../${file}` : file,
+	),
+);
 
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const rawConcurrency = process.env.TEST_CONCURRENCY ?? "2";

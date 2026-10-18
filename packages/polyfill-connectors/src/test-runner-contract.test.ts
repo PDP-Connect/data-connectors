@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { glob, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { NAMESPACE_TESTS } from "../scripts/namespace-tests.mjs";
+import { NAMESPACE_TESTS } from "../scripts/test-lanes.mjs";
 
 test("package test runner bounds file concurrency and retains a finite hang guard", async () => {
 	// "npm test" runs scripts/run-tests.mjs (not a literal `node --test ...` in
@@ -63,6 +63,6 @@ test("NAMESPACE_TESTS lists exactly the files that need their own namespaces", a
 	assert.deepEqual(
 		missing,
 		[],
-		"these files need their own namespaces; add them to NAMESPACE_TESTS in scripts/namespace-tests.mjs",
+		"these files need their own namespaces; add them to NAMESPACE_TESTS in scripts/test-lanes.mjs",
 	);
 });
