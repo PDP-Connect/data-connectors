@@ -23,6 +23,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { deflateRawSync } from "node:zlib";
 import { buildPageshim } from "./build.mjs";
+import { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } from "./crypto-regressions.mjs";
 import { pageShimConnectors } from "./capabilities.mjs";
 import { desktopRecords } from "./fixtures/anthropic-desktop.mjs";
 import { runHarness } from "./harness.mjs";
@@ -131,6 +132,18 @@ for (const name of pageShimConnectors(
 					connector: name,
 					outfile: join(out, `${name}.js`),
 				});
+		await t.test("shared hash parity, page-only admission and bundle impact", async () => {
+			assertHashParity();
+			assertPageOnlyAdmission();
+			const before = await buildPageshim({
+				connector: name,
+				outfile: join(out, name + "-before-crypto.js"),
+				cryptoHashShim: false,
+			});
+			const beforeHash = bundleSha256(before.outfile), afterHash = bundleSha256(built.outfile);
+			console.log("PAGESHIM_CRYPTO_IMPACT " + JSON.stringify({connector:name,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash}));
+			if (name === "chatgpt") await assertFingerprintBundle(buildPageshim, join(out, "fingerprint-crypto.js"));
+		});
 		const run = (o) =>
 			runHarness({ bundle: built.outfile, fixtures: c.fixtures, ...o });
 
@@ -219,7 +232,7 @@ for (const name of pageShimConnectors(
 				requestedScopes:
 					name === "chatgpt"
 						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.scopes,
+						: c.allScopes ?? c.scopes,
 			});
 		});
 
@@ -231,7 +244,7 @@ for (const name of pageShimConnectors(
 				requestedScopes:
 					name === "chatgpt"
 						? [...c.scopes, "chatgpt.memories", "chatgpt.account_plan"]
-						: c.scopes,
+						: c.allScopes ?? c.scopes,
 			});
 		});
 
@@ -3659,6 +3672,255 @@ test("oura_browser: narrow then wider consent retains clipped debt on both hosts
     assert.deepEqual(second.states["oura.sleep"].failed_windows, []);
     assert.equal(second.states["oura.sleep"].next_day, "2026-10-18");
   }
+});
+
+test("youtube: verified empty history commits STATE only on a state-capable host", { timeout: 180_000 }, async () => {
+	const { youtubeFixtures } = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-state.js") });
+	for (const supportsStateArgument of [true, false]) {
+		const run = await runHarness({ bundle: built.outfile, fixtures: youtubeFixtures,
+			scopes: ["youtube.watch_history"], supportsStateArgument, initialState: { "youtube.watch_history": { complete: false } } });
+		assert.deepEqual(run.ret, { ok: true });
+		assertCleanRun(run);
+		assert.deepEqual(run.result.errors, []);
+		assert.deepEqual(run.result["youtube.watch_history"].records, []);
+		if (supportsStateArgument) assert.equal(run.states["youtube.watch_history"].evidence, "youtube_page_data_empty");
+		else assert.deepEqual(run.states, { "youtube.watch_history": { complete: false } });
+	}
+});
+
+for (const kind of ["login-wall", "consent-wall", "evidence-mid-read", "session-mid-read"]) {
+	test(`youtube: empty history rejects ${kind} on both hosts`, { timeout: 180_000 }, async () => {
+		const fx = await import("./fixtures/youtube.mjs");
+		const built = await buildPageshim({ connector: "youtube", outfile: join(out, `youtube-loss-${kind}.js`) });
+		for (const resultStreaming of [false, true]) {
+			const proofs = [];
+			const batches = [];
+			const prior = { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } };
+			const run = await runHarness({ bundle: built.outfile,
+				fixtures: { ...fx.youtubeFixtures, resolve: raw => new URL(raw).pathname === "/feed/history"
+					? fx.historyEvidenceLossFixture(kind) : fx.resolveFixture(raw) },
+				scopes: ["youtube.watch_history"], initialState: structuredClone(prior), resultStreaming,
+				resultSpoolDirectory: join(out, `youtube-loss-${kind}-${resultStreaming}`),
+				observeBridge(method, args, reply) {
+					if (method !== "evaluate" || reply?.type !== "value") return;
+					reply = reply.value;
+					if (!reply || typeof reply !== "object") return;
+					if ("verifiedEmpty" in reply) proofs.push(reply);
+					if ("totalRows" in reply) batches.push(reply);
+				},
+			});
+			assertCleanRun(run);
+			assert.deepEqual(run.ret, { ok: true });
+			assert.ok(run.pageNavigations.includes("https://www.youtube.com/feed/history"), "home authentication must succeed");
+			const result = resultStreaming ? run.streamDone : run.result;
+			const file = run.streamScopeFiles["youtube.watch_history"];
+			const scope = resultStreaming ? (file ? JSON.parse(await readFile(file, "utf8")) : undefined)
+				: run.result?.["youtube.watch_history"];
+			assert.deepEqual(scope?.records ?? [], []);
+			assert.equal(result?.exportSummary.count ?? 0, 0);
+			assert.deepEqual(run.stateMessages, []);
+			assert.deepEqual(run.states, prior);
+			assert.ok(/^Partial:/.test(run.data.status ?? "") || Boolean(run.data.error), "loss must not report completion");
+			if (kind.endsWith("mid-read")) {
+				// First proof is real and positive; the row read then invalidates it.
+				// Removing the final refresh/veto in pageshim.ts would emit STATE
+				// from this stale proof and fail the state/status assertions above.
+				assert.equal(proofs[0]?.verifiedEmpty, true);
+				assert.equal(proofs[0]?.pageBlocked, false);
+				assert.equal(batches.length, 1);
+				assert.equal(batches[0].totalRows, 0);
+				assert.equal(proofs.length, 2);
+				assert.equal(proofs[1].verifiedEmpty, false);
+			}
+		}
+	});
+}
+
+test("youtube: avatar click exposes owner identity and own-channel about navigation on both hosts", { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-owner-profile.js") });
+	for (const resultStreaming of [false, true]) for (const ownChannel of [false, true]) {
+		const run = await runHarness({ bundle: built.outfile,
+			fixtures: { ...fx.youtubeFixtures, resolve: ownChannel ? fx.ownChannelFixture : fx.resolveFixture },
+			scopes: ["youtube.profile"], resultStreaming,
+			resultSpoolDirectory: join(out, `youtube-profile-${resultStreaming}-${ownChannel}`) });
+		assertCleanRun(run);
+		assert.deepEqual(run.ret, { ok: true });
+		assert.equal(run.data.error, undefined);
+		assert.match(run.data.status, /^Complete!/);
+		const result = resultStreaming ? run.streamDone : run.result;
+		assert.deepEqual(result.errors, []);
+		const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.profile"], "utf8"))
+			: run.result["youtube.profile"];
+		assert.equal(scope.records.length, 1);
+		const owner = scope.records[0];
+		assert.equal(owner.email, "synthetic@example.test");
+		assert.equal(owner.id, ownChannel ? "UCsyntheticOwner" : "synthetic@example.test");
+		if (ownChannel) {
+			assert.deepEqual(run.pageNavigations.filter(url => url.includes("/@")), [
+				"https://www.youtube.com/@synthetic-owner", "https://www.youtube.com/@synthetic-owner/about",
+			]);
+			assert.equal(owner.channel_id, "UCsyntheticOwner");
+			assert.equal(owner.channel_url, "https://www.youtube.com/@synthetic-owner");
+			assert.equal(owner.handle, "@synthetic-owner");
+			assert.equal(owner.title, "Synthetic owner");
+			assert.equal(owner.description, "Owner about-page description");
+			assert.equal(owner.joined_at, "Jan 2, 2020");
+			assert.equal(owner.country, "Canada");
+			assert.equal(owner.subscriber_count, 123);
+			assert.equal(owner.view_count, 456);
+			assert.equal(owner.video_count, 7);
+		} else {
+			assert.equal(owner.channel_url, null);
+			assert.equal(owner.channel_id, null);
+		}
+	}
+});
+
+test("youtube: capped history upserts the prefix without claiming completion or checkpoint", { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-prefix.js") });
+	const fixtures = { ...fx.youtubeFixtures, resolve: (raw) =>
+		new URL(raw).pathname === "/feed/history" ? fx.historyPrefixFixture(60) : fx.resolveFixture(raw) };
+	for (const resultStreaming of [false, true]) {
+	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.watch_history"], resultStreaming,
+		resultSpoolDirectory: join(out, `youtube-prefix-${resultStreaming}`),
+		initialState: { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } } });
+	assert.deepEqual(run.ret, { ok: true });
+	assertCleanRun(run);
+	const result = resultStreaming ? run.streamDone : run.result;
+	const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.watch_history"], "utf8")) : run.result["youtube.watch_history"];
+	assert.equal(scope.records.length, 50);
+	assert.deepEqual(scope.records.map((row) => row.video_id), Array.from({ length: 50 }, (_, index) => `synthetic-history-${index}`));
+	assert.equal(scope.records[0].id, createHash("sha256").update("history|synthetic-history-0").digest("hex").slice(0, 24));
+	assert.match(result.errors[0].reason, /inventory_not_proven_complete/);
+	assert.deepEqual(run.states, { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } });
+	assert.deepEqual(run.stateMessages, []);
+	assert.equal(result.errors.length, 1);
+	assert.equal(result.errors[0].errorClass, "partial");
+	assert.match(run.data.status, /^Partial:/);
+	}
+});
+
+test("youtube: incomplete subscriptions preserve observed rows and fail closed", { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-subscriptions-partial.js") });
+	const fixtures = { ...fx.youtubeFixtures, resolve: (raw) => {
+		const response = fx.resolveFixture(raw);
+		return new URL(raw).pathname === "/feed/channels"
+			? { ...response, body: response.body.replace(/<script>[\s\S]*?<\/script>/, "") }
+			: response;
+	} };
+	const run = await runHarness({ bundle: built.outfile, fixtures, scopes: ["youtube.subscriptions"] });
+	assert.deepEqual(run.ret, { ok: true });
+	assertCleanRun(run);
+	assert.equal(run.result["youtube.subscriptions"].records.length, 4);
+	assert.equal(run.result.errors.length, 1);
+	assert.match(run.data.status, /^Partial:/);
+	assert.deepEqual(run.states, {});
+});
+
+test("meta: independent streams preserve posts gaps, WebCrypto ids and accepted STATE on both hosts", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-all.js")});
+ for (const resultStreaming of [false, true]) {
+  const codes = [];
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
+   scopes: ["profile", "posts", "post_likes", "following", "ads"].map(s => "instagram." + s),
+   initialState: {"instagram.posts": {old: true}}, resultStreaming,
+   resultSpoolDirectory: join(out, "meta-all-" + resultStreaming),
+   observeBridge: (method, args) => { if (method === "evaluate") codes.push(args[0].length); },
+  });
+  assertCleanRun(r);
+  assert.deepEqual(r.ret, {ok: true});
+  assert.equal(r.data.error, undefined);
+  assert.match(r.data.status, /^Partial:/);
+  const result = resultStreaming ? r.streamDone : r.result;
+  assert.deepEqual(result.errors.map(e => e.scope), ["instagram.posts", "instagram.post_likes", "instagram.ads"]);
+  assert.ok(result.errors.every(e => /not proven complete/.test(e.reason)));
+  for (const error of result.errors.slice(0, 2)) {
+   assert.match(error.reason, /passive GraphQL.*page-minted/);
+  }
+  assert.deepEqual(r.stateMessages.map(m => m.stream), ["instagram.following"]);
+  assert.deepEqual(r.states["instagram.following"], {});
+  const scope = async name => resultStreaming
+   ? JSON.parse(await readFile(r.streamScopeFiles["instagram." + name], "utf8"))
+   : r.result["instagram." + name];
+  assert.equal((await scope("profile")).records.length, 1);
+  assert.equal((await scope("following")).records.length, 1);
+  const ads = (await scope("ads")).records;
+  assert.equal(ads.length, 3);
+  for (const row of ads) assert.equal(row.id, createHash("sha256").update(row.kind + "|" + row.name).digest("hex").slice(0, 32));
+  assert.ok(codes.length > 0 && Math.max(...codes) <= 65_536);
+  if (resultStreaming) {
+   assert.equal(r.streamResult.completed, true);
+   assert.equal(r.streamScopeFiles["instagram.posts"], undefined);
+  } else assert.equal(r.result["instagram.posts"], undefined);
+ }
+});
+
+test("meta: following empty, contradictory, owner and partial-page evidence never fabricate completion", {timeout: 180_000}, async () => {
+ const {createMetaFixtures, owner} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-following-evidence.js")});
+ const row = {pk: "one", username: "one"};
+ const cases = [
+  {name: "empty proven", options: {total: 0, followingPages: [{owner, users: [], has_more: false}]}, count: 0, complete: true},
+  {name: "empty unknown", options: {profile: {following_count: null}, followingPages: [{owner, users: [], has_more: false}]}, count: 0, complete: false},
+  {name: "wrong total", options: {total: 2}, count: 1, complete: false},
+  {name: "foreign owner", options: {followingPages: [{owner: {id: "other"}, users: [row], has_more: false}]}, count: 0, complete: false},
+  {name: "partial page", options: {total: 2, followingPages: [
+   {owner, users: [row], has_more: true, next_max_id: "next"},
+   {owner, users: [{pk: "bad"}], has_more: false},
+  ]}, count: 1, complete: false},
+  {name: "late logout", options: {logoutAtEnd: true}, count: 1, complete: false},
+ ];
+ for (const c of cases) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(c.options),
+   scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}}});
+  assertCleanRun(r);
+  assert.equal(r.data.error, undefined, c.name);
+  assert.equal(r.result["instagram.following"]?.records.length ?? 0, c.count, c.name);
+  assert.equal(r.stateMessages.length, c.complete ? 1 : 0, c.name);
+  assert.equal(r.result.errors.length, c.complete ? 0 : 1, c.name);
+  assert.match(r.data.status, c.complete ? /^Complete!/ : /^Partial:/, c.name);
+  if (!c.complete) assert.match(r.result.errors[0].reason, /not proven complete/, c.name);
+ }
+});
+
+test("meta: missing profile fields remain a partial owner profile and legacy hosts never receive STATE", {timeout: 180_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-profile-partial.js")});
+ for (const options of [
+  {profileFailure: true}, {profile: {id: "other"}}, {profile: {media_count: null}},
+  {profileEnvelope: {ok: false}}, {profileEnvelope: {error_code: "partial"}},
+  {profileEnvelope: {errors: ["unreadable"]}},
+  {profileEnvelope: {extensions: {is_final: false}}},
+ ]) {
+  const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(options),
+   scopes: ["instagram.profile", "instagram.following"], supportsStateArgument: false});
+  assertCleanRun(r);
+  assert.equal(r.data.error, undefined);
+  assert.equal(r.result["instagram.profile"].records[0].id, "owner-1");
+  assert.ok(r.result.errors.some(e => e.scope === "instagram.profile"));
+  assert.match(r.data.status, /^Partial:/);
+  assert.deepEqual(r.stateMessages, []);
+ }
+});
+
+test("meta: rejected streamed completion never commits following STATE", {timeout: 60_000}, async () => {
+ const {createMetaFixtures} = await import("./fixtures/meta.mjs");
+ const built = await buildPageshim({connector: "meta", outfile: join(out, "meta-rejected-state.js")});
+ const r = await runHarness({bundle: built.outfile, fixtures: createMetaFixtures(),
+  scopes: ["instagram.following"], initialState: {"instagram.following": {old: true}},
+  resultStreaming: true, resultSpoolDirectory: join(out, "meta-rejected-state"),
+  resultStreamFailure: {key: "result:done"},
+ });
+ assertCleanRun(r);
+ assert.ok(r.data.error);
+ assert.deepEqual(r.states, {"instagram.following": {old: true}});
+ assert.doesNotMatch(r.data.status ?? "", /^(Complete!|Partial:)/);
+ assert.notEqual(r.streamResult.completed, true);
 });
 
 test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {

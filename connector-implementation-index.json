@@ -380,7 +380,7 @@
 				},
 				"connector_key": "anthropic",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic",
-				"version": "0.2.51",
+				"version": "0.2.52",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "Claude (Anthropic)",
 				"brand": {
@@ -977,7 +977,7 @@
 				},
 				"connector_key": "anthropic-live",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-				"version": "0.3.4",
+				"version": "0.3.5",
 				"display_name": "Claude (Live Session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -4242,7 +4242,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.55",
+				"version": "0.2.56",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -6973,7 +6973,7 @@
 				},
 				"connector_key": "discord-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/discord-browser",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "Discord (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -9668,7 +9668,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.4",
+				"version": "0.3.5",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -14493,7 +14493,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.26",
+				"version": "0.3.29",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14569,7 +14569,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "Exact number of connections observed only after a verified end-of-list. Null when paging ends on an error, malformed page, or page budget."
+									"description": "Owner-bound connectionsSummary.numConnections, independent of connection enumeration. Falls back to the walked distinct connection count with a diagnostic when the summary is unavailable or fails owner validation; the fallback does not prove inventory completeness."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],
@@ -14893,7 +14893,37 @@
 					"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
 					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
-					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
+					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+					"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
+					"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
+					"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
+					"summary_total_invalid": "LinkedIn inventory could not be verified: summary total invalid",
+					"summary_owner_mismatch": "LinkedIn inventory could not be verified: summary owner mismatch",
+					"summary_total_changed": "LinkedIn inventory could not be verified: summary total changed",
+					"collection_malformed": "LinkedIn inventory could not be verified: collection malformed",
+					"collection_paging_invalid": "LinkedIn inventory could not be verified: collection paging invalid",
+					"collection_urn_missing": "LinkedIn inventory could not be verified: collection urn missing",
+					"collection_urn_duplicate": "LinkedIn inventory could not be verified: collection urn duplicate",
+					"collection_total_mismatch": "LinkedIn inventory could not be verified: collection total mismatch",
+					"collection_continuation_advertised": "LinkedIn inventory could not be verified: collection continuation advertised",
+					"skills_nested_unproven": "LinkedIn inventory could not be verified: skills nested unproven",
+					"connection_urn_missing": "LinkedIn inventory could not be verified: connection urn missing",
+					"connection_walk_continuation_advertised": "LinkedIn inventory could not be verified: connection walk continuation advertised",
+					"connection_walk_page_error": "LinkedIn inventory could not be verified: connection walk page error",
+					"connection_walk_malformed_page": "LinkedIn inventory could not be verified: connection walk malformed page",
+					"connection_walk_repeated_page": "LinkedIn inventory could not be verified: connection walk repeated page",
+					"connection_walk_page_budget": "LinkedIn inventory could not be verified: connection walk page budget",
+					"connection_paging_total_mismatch": "LinkedIn inventory could not be verified: connection paging total mismatch",
+					"connection_total_mismatch": "LinkedIn inventory could not be verified: connection total mismatch",
+					"connection_confirmation_missing": "LinkedIn inventory could not be verified: connection confirmation missing",
+					"connection_confirmation_malformed": "LinkedIn inventory could not be verified: connection confirmation malformed",
+					"connection_walk_unavailable": "LinkedIn inventory could not be verified: connection walk unavailable",
+					"experience_nested_collection_malformed": "LinkedIn inventory could not be verified: experience nested collection malformed",
+					"experience_nested_collection_paging_invalid": "LinkedIn inventory could not be verified: experience nested collection paging invalid",
+					"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
+					"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
+					"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
+					"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
 				}
 			}
 		},
@@ -15078,7 +15108,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.29",
+				"version": "0.4.31",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -15087,10 +15117,16 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
 						}
 					}
 				},
@@ -15397,7 +15433,16 @@
 						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					}
-				]
+				],
+				"mobile": {
+					"pageshim": {
+						"entry": "meta.ts",
+						"scope_prefix": "instagram",
+						"login_url": "https://www.instagram.com/accounts/login/",
+						"collect_export": "collectAllStreams",
+						"probe_export": "probeMetaSession"
+					}
+				}
 			}
 		},
 		{
@@ -16133,7 +16178,7 @@
 				},
 				"connector_key": "oura-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-				"version": "0.1.38",
+				"version": "0.1.39",
 				"display_name": "Oura (Browser Sign-In)",
 				"runtime_requirements": {
 					"bindings": {
@@ -19407,7 +19452,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.34",
+				"version": "0.1.35",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -20506,7 +20551,7 @@
 				},
 				"connector_key": "strava-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/strava-browser",
-				"version": "0.1.33",
+				"version": "0.1.34",
 				"display_name": "Strava (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -23694,7 +23739,7 @@
 				},
 				"connector_key": "x-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/x-browser",
-				"version": "0.1.9",
+				"version": "0.1.10",
 				"display_name": "X (Browser Sign-In)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25800,7 +25845,13 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.31",
+				"version": "0.2.33",
+				"mobile": {
+					"pageshim": {
+						"entry": "youtube.ts",
+						"login_url": "https://www.youtube.com/"
+					}
+				},
 				"display_name": "YouTube",
 				"brand": {
 					"icon": "icon.svg",
@@ -25809,10 +25860,16 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": [
+								"page_navigation",
+								"page_script_evaluation",
+								"page_condition_wait"
+							]
 						}
 					}
 				},
@@ -26281,6 +26338,7 @@
 					}
 				],
 				"reason_display_messages": {
+					"inventory_not_proven_complete": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
 					"page_unreadable": "The signed-in page did not expose a trustworthy record.",
 					"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
 					"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",
