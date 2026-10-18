@@ -14493,7 +14493,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.26",
+				"version": "0.3.29",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14569,7 +14569,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "Exact number of connections observed only after a verified end-of-list. Null when paging ends on an error, malformed page, or page budget."
+									"description": "Owner-bound connectionsSummary.numConnections, independent of connection enumeration. Falls back to the walked distinct connection count with a diagnostic when the summary is unavailable or fails owner validation; the fallback does not prove inventory completeness."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],
@@ -14893,7 +14893,37 @@
 					"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
 					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
-					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
+					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+					"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
+					"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
+					"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
+					"summary_total_invalid": "LinkedIn inventory could not be verified: summary total invalid",
+					"summary_owner_mismatch": "LinkedIn inventory could not be verified: summary owner mismatch",
+					"summary_total_changed": "LinkedIn inventory could not be verified: summary total changed",
+					"collection_malformed": "LinkedIn inventory could not be verified: collection malformed",
+					"collection_paging_invalid": "LinkedIn inventory could not be verified: collection paging invalid",
+					"collection_urn_missing": "LinkedIn inventory could not be verified: collection urn missing",
+					"collection_urn_duplicate": "LinkedIn inventory could not be verified: collection urn duplicate",
+					"collection_total_mismatch": "LinkedIn inventory could not be verified: collection total mismatch",
+					"collection_continuation_advertised": "LinkedIn inventory could not be verified: collection continuation advertised",
+					"skills_nested_unproven": "LinkedIn inventory could not be verified: skills nested unproven",
+					"connection_urn_missing": "LinkedIn inventory could not be verified: connection urn missing",
+					"connection_walk_continuation_advertised": "LinkedIn inventory could not be verified: connection walk continuation advertised",
+					"connection_walk_page_error": "LinkedIn inventory could not be verified: connection walk page error",
+					"connection_walk_malformed_page": "LinkedIn inventory could not be verified: connection walk malformed page",
+					"connection_walk_repeated_page": "LinkedIn inventory could not be verified: connection walk repeated page",
+					"connection_walk_page_budget": "LinkedIn inventory could not be verified: connection walk page budget",
+					"connection_paging_total_mismatch": "LinkedIn inventory could not be verified: connection paging total mismatch",
+					"connection_total_mismatch": "LinkedIn inventory could not be verified: connection total mismatch",
+					"connection_confirmation_missing": "LinkedIn inventory could not be verified: connection confirmation missing",
+					"connection_confirmation_malformed": "LinkedIn inventory could not be verified: connection confirmation malformed",
+					"connection_walk_unavailable": "LinkedIn inventory could not be verified: connection walk unavailable",
+					"experience_nested_collection_malformed": "LinkedIn inventory could not be verified: experience nested collection malformed",
+					"experience_nested_collection_paging_invalid": "LinkedIn inventory could not be verified: experience nested collection paging invalid",
+					"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
+					"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
+					"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
+					"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
 				}
 			}
 		},
@@ -19407,7 +19437,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.31",
+				"version": "0.1.33",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -19416,10 +19446,12 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_navigation", "page_script_evaluation"]
 						}
 					}
 				},
@@ -19874,6 +19906,14 @@
 						"freshness_strategy": "manual_as_of"
 					}
 				],
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "spotify",
+						"collect_export": "spotifyMobileCollect",
+						"probe_export": "probeSpotifyMobileSession",
+						"login_url": "https://accounts.spotify.com/en/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
+					}
+				},
 				"reason_display_messages": {
 					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",

@@ -3718,3 +3718,116 @@ test("youtube: incomplete subscriptions preserve observed rows and fail closed",
 	assert.match(run.data.status, /^Partial:/);
 	assert.deepEqual(run.states, {});
 });
+
+test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-seven-streams.js") });
+	for (const resultStreaming of [false, true]) {
+		const r = await runHarness({ bundle: built.outfile, fixtures: c.fixtures,
+			scopes: c.scopes, resultStreaming, gotoDelayMs: 0,
+			resultSpoolDirectory: join(out, "spotify-seven-" + resultStreaming) });
+		assert.deepEqual(r.ret, { ok: true });
+		assertCleanRun(r);
+		assert.equal(r.data.error, undefined);
+		assert.match(r.data.status, /^Partial:/);
+		const result = resultStreaming ? r.streamDone : r.result;
+		assert.deepEqual(result.exportSummary, c.exportSummary);
+		assert.deepEqual(result.errors, c.partialErrors);
+		assert.equal(result.errors.length, 3, "no failure companion for an incomplete inventory");
+		for (const stream of ["recently_played_contexts", "top_artists", "top_tracks"]) {
+			assert.equal(r.states["spotify." + stream], undefined);
+		}
+		assert.equal(r.states["spotify.saved_tracks"].completion.rows, 1);
+		if (resultStreaming) {
+			assert.equal(r.streamResult.completed, true);
+			assert.equal(r.streamResult.scopeCount, 7);
+		}
+	}
+});
+
+test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeout: 180_000 }, async (t) => {
+	const fx = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-state.js") });
+	const scopes = ["spotify.saved_tracks"];
+	const scope = "spotify.saved_tracks";
+	const options = { bundle: built.outfile, fixtures: fx.spotifyFixtures, scopes, gotoDelayMs: 0 };
+	await t.test("many source pages keep evaluate source bounded and preserve every row", async () => {
+		const offsets = [];
+		const evaluateSizes = [];
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const base = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return base;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return base;
+			const offset = body.variables.offset;
+			offsets.push(offset);
+			return { ...base, body: JSON.stringify({ data: { me: { library: { tracks: {
+				offset, totalCount: 301,
+				items: Array.from({ length: Math.min(100, 301 - offset) }, (_, i) => fx.savedTrack("track" + (offset + i))),
+			} } } } }) };
+		} };
+		const r = await runHarness({ ...options, fixtures, observeBridge(method, args) {
+			if (method === "evaluate") evaluateSizes.push(String(args[0]).length);
+		} });
+		assert.deepEqual(r.ret, { ok: true }, r.log.join("\n"));
+		assertCleanRun(r);
+		assert.deepEqual(r.result.errors, []);
+		assert.equal(r.result[scope].records.length, 301);
+		assert.deepEqual(offsets, [0, 100, 200, 300]);
+		assert.ok(evaluateSizes.every((size) => size <= 65_536), String(Math.max(...evaluateSizes)));
+		assert.ok(r.calls.evaluate > offsets.length);
+		assert.equal(r.states[scope].completion.rows, 301);
+		assert.equal(r.states[scope].completion.pages, 4);
+	});
+	await t.test("initial state survives failed result acceptance and old hosts receive no STATE", async () => {
+		const prior = { full_scan_at: "2026-01-01T00:00:00.000Z", marker: "synthetic-prior" };
+		const failed = await runHarness({ ...options, initialState: { [scope]: prior }, failResultWrite: true });
+		assertCleanRun(failed);
+		assert.deepEqual(failed.states[scope], prior);
+		const old = await runHarness({ ...options, supportsStateArgument: false });
+		assertCleanRun(old);
+		assert.deepEqual(old.stateMessages, []);
+		assert.equal(old.result[scope].records.length, 1);
+		const streamed = await runHarness({ ...options, resultStreaming: true,
+			resultSpoolDirectory: join(out, "spotify-state-stream") });
+		assertCleanRun(streamed);
+		assert.equal(streamed.streamResult.completed, true);
+		assert.equal(streamed.states[scope].completion.rows, 1);
+	});
+	await t.test("an unavailable source row upserts covered rows, remains partial, and cannot advance STATE", async () => {
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const response = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return response;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return response;
+			const valid = fx.savedTrack("covered");
+			const invalid = fx.savedTrack("unavailable");
+			delete invalid.track.data.name;
+			return { ...response, body: JSON.stringify({ data: { me: { library: { tracks: {
+				offset: 0, totalCount: 2, items: [valid, invalid],
+			} } } } }) };
+		} };
+		const r = await runHarness({ ...options, fixtures });
+		assertCleanRun(r);
+		assert.equal(r.result[scope].records.length, 1);
+		assert.match(r.data.status, /^Partial:/);
+		assert.ok(r.result.errors.some((error) => /inventory completeness is unproven/.test(error.reason)));
+		assert.equal(r.states[scope], undefined);
+	});
+	await t.test("unbound pagination totals never commit STATE", async () => {
+		const fixtures = { ...fx.spotifyFixtures, resolve(raw, request) {
+			const response = fx.resolveFixture(raw, request);
+			if (!raw.includes("api-partner.spotify.com")) return response;
+			const body = JSON.parse(request.postData ?? "{}");
+			if (body.operationName !== "fetchLibraryTracks") return response;
+			const payload = JSON.parse(response.body);
+			delete payload.data.me.library.tracks.totalCount;
+			return { ...response, body: JSON.stringify(payload) };
+		} };
+		const r = await runHarness({ ...options, fixtures });
+		assertCleanRun(r);
+		assert.equal(r.states[scope], undefined);
+		assert.ok(r.result.errors.length > 0);
+		assert.doesNotMatch(r.data.status, /^Complete!/);
+	});
+});
