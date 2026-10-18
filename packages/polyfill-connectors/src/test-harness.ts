@@ -190,6 +190,10 @@ export interface ConnectorSubprocessOptions {
 	 *  poll timer is pure overhead for the many tests that don't need a
 	 *  memory proof. */
 	peakRssPollIntervalMs?: number;
+	/** Set false for a run whose stdout is too large to hold twice: `rawStdout`
+	 *  is then "" and `messages` is unchanged. Callers that assert on
+	 *  `rawStdout` must keep the default (true). */
+	retainRawStdout?: boolean;
 	start: {
 		/** Mirrors the real runtime's START `collection_mode` field, so a test can
 		 *  exercise the owner-triggered full-refresh bypass end to end rather than
@@ -273,6 +277,7 @@ export function runConnectorProtocolSubprocess(
 	options: ConnectorSubprocessOptions,
 ): Promise<ConnectorSubprocessResult> {
 	const timeoutMs = options.timeoutMs ?? 15_000;
+	const retainRawStdout = options.retainRawStdout ?? true;
 
 	return new Promise((resolve, reject) => {
 		const child = spawn(
@@ -293,22 +298,28 @@ export function runConnectorProtocolSubprocess(
 		let peakRssBytes: number | null = null;
 		let rssPoller: NodeJS.Timeout | undefined;
 		const { pid } = child;
-		if (options.peakRssPollIntervalMs && pid) {
-			rssPoller = setInterval(() => {
-				try {
-					const status = readFileSync(`/proc/${pid}/status`, "utf8");
-					const match = VM_RSS_STATUS_RE.exec(status);
-					if (match?.[1]) {
-						const bytes = Number.parseInt(match[1], 10) * 1024;
-						peakRssBytes =
-							peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
-					}
-				} catch {
-					// /proc/<pid>/status is unavailable (non-Linux, or the process
-					// already exited between the tick firing and the read) -- leave
-					// peakRssBytes at its last known value.
+		const sampleRss = (): void => {
+			try {
+				const status = readFileSync(`/proc/${pid}/status`, "utf8");
+				const match = VM_RSS_STATUS_RE.exec(status);
+				if (match?.[1]) {
+					const bytes = Number.parseInt(match[1], 10) * 1024;
+					peakRssBytes =
+						peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
 				}
-			}, options.peakRssPollIntervalMs);
+			} catch {
+				// /proc/<pid>/status is unavailable (non-Linux, or the process
+				// already exited between the tick firing and the read) -- leave
+				// peakRssBytes at its last known value.
+			}
+		};
+		const sampleRssOnOutput = Boolean(options.peakRssPollIntervalMs && pid);
+		if (sampleRssOnOutput) {
+			// The interval alone can miss a child that finishes before its first
+			// tick; sampling at start and on each stdout chunk (below) always
+			// yields a value while the child is producing records.
+			sampleRss();
+			rssPoller = setInterval(sampleRss, options.peakRssPollIntervalMs);
 		}
 
 		const messages: EmittedMessage[] = [];
@@ -369,9 +380,15 @@ export function runConnectorProtocolSubprocess(
 			);
 		}, timeoutMs);
 
-		child.stdout?.on("data", (chunk: Buffer) => {
-			const text = chunk.toString();
-			rawStdout += text;
+		// Decode as streams, not per chunk: a multi-byte character split across
+		// two pipe chunks would otherwise become U+FFFD in both halves.
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (text: string) => {
+			if (sampleRssOnOutput) sampleRss();
+			if (retainRawStdout) {
+				rawStdout += text;
+			}
 			stdoutBuffer += text;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
@@ -382,8 +399,8 @@ export function runConnectorProtocolSubprocess(
 			}
 		});
 
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr?.on("data", (text: string) => {
+			stderr += text;
 		});
 
 		child.on("error", (err) => {
