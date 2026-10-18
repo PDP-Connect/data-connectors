@@ -3661,6 +3661,32 @@ test("oura_browser: narrow then wider consent retains clipped debt on both hosts
   }
 });
 
+test("spotify: seven mobile streams retain capped inventory semantics on both hosts", { timeout: 180_000 }, async () => {
+	const { pageshimCase: c } = await import("./fixtures/spotify.mjs");
+	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-seven-streams.js") });
+	for (const resultStreaming of [false, true]) {
+		const r = await runHarness({ bundle: built.outfile, fixtures: c.fixtures,
+			scopes: c.scopes, resultStreaming, gotoDelayMs: 0,
+			resultSpoolDirectory: join(out, "spotify-seven-" + resultStreaming) });
+		assert.deepEqual(r.ret, { ok: true });
+		assertCleanRun(r);
+		assert.equal(r.data.error, undefined);
+		assert.match(r.data.status, /^Partial:/);
+		const result = resultStreaming ? r.streamDone : r.result;
+		assert.deepEqual(result.exportSummary, c.exportSummary);
+		assert.deepEqual(result.errors, c.partialErrors);
+		assert.equal(result.errors.length, 3, "no failure companion for an incomplete inventory");
+		for (const stream of ["recently_played_contexts", "top_artists", "top_tracks"]) {
+			assert.equal(r.states["spotify." + stream], undefined);
+		}
+		assert.equal(r.states["spotify.saved_tracks"].completion.rows, 1);
+		if (resultStreaming) {
+			assert.equal(r.streamResult.completed, true);
+			assert.equal(r.streamResult.scopeCount, 7);
+		}
+	}
+});
+
 test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeout: 180_000 }, async (t) => {
 	const fx = await import("./fixtures/spotify.mjs");
 	const built = await buildPageshim({ connector: "spotify", outfile: join(out, "spotify-state.js") });
