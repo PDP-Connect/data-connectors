@@ -22,6 +22,15 @@ import { glob } from "node:fs/promises";
 // B2/B5), not a local vendor addition.
 const EXCLUDED = new Set(["../../connectors/github/index.test.ts"]);
 
+const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
+const rawConcurrency = process.env.TEST_CONCURRENCY ?? "2";
+if (!POSITIVE_INTEGER.test(rawConcurrency)) {
+	console.error(
+		`TEST_CONCURRENCY must be a positive integer, got ${JSON.stringify(rawConcurrency)}`,
+	);
+	process.exit(2);
+}
+
 const patterns = [
 	"bin/**/*.test.ts",
 	"../../connectors/**/*.test.ts",
@@ -44,7 +53,7 @@ const child = spawn(
 		"--test",
 		"--import",
 		"tsx",
-		"--test-concurrency=2",
+		`--test-concurrency=${rawConcurrency}`,
 		"--test-timeout=120000",
 		...files,
 	],

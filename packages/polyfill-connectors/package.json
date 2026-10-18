@@ -137,11 +137,11 @@
 		"conformance": "tsx scripts/conformance.ts",
 		"fix": "ultracite fix",
 		"postinstall": "node ./scripts/install-patchright-browser.mjs",
-		"test": "node scripts/run-tests.mjs",
-		"test:related": "node --import tsx scripts/related-tests/run.ts",
+		"test": "../../scripts/test-sandbox/test-sandbox -- node scripts/run-tests.mjs",
+		"test:related": "../../scripts/test-sandbox/test-sandbox -- node --import tsx scripts/related-tests/run.ts",
 		"typecheck": "tsc --noEmit",
 		"verify": "npm --prefix ../.. run polyfill-library-metadata:check && npm run typecheck && npm run check && npm run check:noAwaitInLoops-conformance && npm run check:noDirectCredentialEnv && npm run check:noUnnecessaryConditions-expiry",
-		"pack-install-run": "npm run build && node ./scripts/pack-install-run.mjs",
+		"pack-install-run": "npm run build && ../../scripts/test-sandbox/test-sandbox --net host -- node ./scripts/pack-install-run.mjs",
 		"prepack": "npm --prefix ../.. run polyfill-library-metadata:check && npm run build"
 	},
 	"dependencies": {
