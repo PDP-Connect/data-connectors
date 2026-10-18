@@ -286,22 +286,17 @@ async function installWithSignerSan(san, { issuer } = {}) {
     [ARTIFACT_URL]: artifact.artifactBuffer,
     [`${ARTIFACT_URL}.sigstore.json`]: Buffer.from(JSON.stringify(bundle)),
   };
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => {
+  const fetchImpl = async (url) => {
     const route = routes[String(url)];
     return route
       ? new Response(route)
       : new Response("not found\n", { status: 404, statusText: "Not Found" });
   };
-  try {
-    await fetchResolvedArtifact(
-      { mode: "remote", doc: { connectors: { [artifact.entry.connectorId]: [artifact.entry] } } },
-      artifact.entry,
-      { sigstoreVerifier: realSigstoreVerifier },
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  await fetchResolvedArtifact(
+    { mode: "remote", doc: { connectors: { [artifact.entry.connectorId]: [artifact.entry] } } },
+    artifact.entry,
+    { fetchImpl, sigstoreVerifier: realSigstoreVerifier },
+  );
 }
 
 // --- the pin ---------------------------------------------------------------
