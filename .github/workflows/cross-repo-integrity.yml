@@ -355,9 +355,8 @@ jobs:
   # integration coverage against data-connect's server is wanted, that is a deliberate,
   # separately-scoped follow-up in this repo, not a revival of this job.
   #
-  # `connectors/github/index.test.ts` and `bin/orchestrate.ts` still typecheck and run against
-  # this repo's own fixtures/mocks via this repo's normal test job — only the "against the
-  # real upstream server" cross-repo leg is gone.
+  # `connectors/github/index.test.ts` now runs nowhere: it imports ../../reference-implementation,
+  # which is not in this repo, and no job replaces the retired one. `bin/orchestrate.ts` still typechecks.
 
   pin-freshness:
     name: Pin freshness — ${{ matrix.repo.label }}
