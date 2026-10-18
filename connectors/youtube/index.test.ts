@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
@@ -12,6 +13,7 @@ import {
 	readPageReadiness,
 	resolveWatchedDate,
 } from "./index.ts";
+import { readSubscriptions } from "./browser-dom.ts";
 import { enumerationEnded, readListEnd } from "./page-evidence.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -260,6 +262,44 @@ function historyFixturePage(
 	};
 	return page;
 }
+
+test("subscriptions emit optional raw count text from channel renderers", async () => {
+	const html = readFileSync(
+		new URL("./__fixtures__/subscriptions-subscriber-count.html", import.meta.url),
+		"utf8",
+	);
+	const { document } = parseHTML(html);
+	const subscriptions = readSubscriptions(document as unknown as Document);
+	const page = new FixturePage();
+	const evaluate = page.evaluate.bind(page);
+	page.evaluate = async (fn: Function, arg?: unknown) =>
+		fn.name === "readSubscriptions" ? subscriptions : evaluate(fn, arg);
+	const records: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: page as never,
+		requested: new Map([["subscriptions", { name: "subscriptions" }]]) as never,
+		emitRecord: async (_stream, data) => {
+			records.push(data);
+		},
+		emit: async () => undefined,
+		reportStreamFailure: async () => undefined,
+		progress: async () => undefined,
+	});
+	assert.equal(records.length, 4);
+	assert.equal(records[0]?.subscriber_count_text, "1.2M subscribers");
+	assert.equal(records[0]?.subscriber_count, 1_200_000);
+	assert.equal(records[3]?.subscriber_count_text, "1,2 M d’abonnés");
+	for (const record of records.slice(1, 3)) {
+		assert.equal(Object.hasOwn(record, "subscriber_count_text"), false);
+		assert.equal(record.subscriber_count, null);
+	}
+	for (const record of records) {
+		assert.equal(validateRecord("subscriptions", record).ok, true);
+		const withoutCountText = { ...record };
+		delete withoutCountText.subscriber_count_text;
+		assert.equal(validateRecord("subscriptions", withoutCountText).ok, true);
+	}
+});
 
 test("profile skips report a redacted branch code for each unreadable page", async () => {
 	const scenarios = [
