@@ -3846,6 +3846,95 @@ test("youtube: verified empty history commits STATE only on a state-capable host
 	}
 });
 
+for (const kind of ["login-wall", "consent-wall", "evidence-mid-read", "session-mid-read"]) {
+	test(`youtube: empty history rejects ${kind} on both hosts`, { timeout: 180_000 }, async () => {
+		const fx = await import("./fixtures/youtube.mjs");
+		const built = await buildPageshim({ connector: "youtube", outfile: join(out, `youtube-loss-${kind}.js`) });
+		for (const resultStreaming of [false, true]) {
+			const proofs = [];
+			const batches = [];
+			const prior = { "youtube.watch_history": { complete: true, backfill_anchor_id: "prior" } };
+			const run = await runHarness({ bundle: built.outfile,
+				fixtures: { ...fx.youtubeFixtures, resolve: raw => new URL(raw).pathname === "/feed/history"
+					? fx.historyEvidenceLossFixture(kind) : fx.resolveFixture(raw) },
+				scopes: ["youtube.watch_history"], initialState: structuredClone(prior), resultStreaming,
+				resultSpoolDirectory: join(out, `youtube-loss-${kind}-${resultStreaming}`),
+				observeBridge(method, args, reply) {
+					if (method !== "evaluate" || reply?.type !== "value") return;
+					reply = reply.value;
+					if (!reply || typeof reply !== "object") return;
+					if ("verifiedEmpty" in reply) proofs.push(reply);
+					if ("totalRows" in reply) batches.push(reply);
+				},
+			});
+			assertCleanRun(run);
+			assert.deepEqual(run.ret, { ok: true });
+			assert.ok(run.pageNavigations.includes("https://www.youtube.com/feed/history"), "home authentication must succeed");
+			const result = resultStreaming ? run.streamDone : run.result;
+			const file = run.streamScopeFiles["youtube.watch_history"];
+			const scope = resultStreaming ? (file ? JSON.parse(await readFile(file, "utf8")) : undefined)
+				: run.result?.["youtube.watch_history"];
+			assert.deepEqual(scope?.records ?? [], []);
+			assert.equal(result?.exportSummary.count ?? 0, 0);
+			assert.deepEqual(run.stateMessages, []);
+			assert.deepEqual(run.states, prior);
+			assert.ok(/^Partial:/.test(run.data.status ?? "") || Boolean(run.data.error), "loss must not report completion");
+			if (kind.endsWith("mid-read")) {
+				// First proof is real and positive; the row read then invalidates it.
+				// Removing the final refresh/veto in pageshim.ts would emit STATE
+				// from this stale proof and fail the state/status assertions above.
+				assert.equal(proofs[0]?.verifiedEmpty, true);
+				assert.equal(proofs[0]?.pageBlocked, false);
+				assert.equal(batches.length, 1);
+				assert.equal(batches[0].totalRows, 0);
+				assert.equal(proofs.length, 2);
+				assert.equal(proofs[1].verifiedEmpty, false);
+			}
+		}
+	});
+}
+
+test("youtube: avatar click exposes owner identity and own-channel about navigation on both hosts", { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-owner-profile.js") });
+	for (const resultStreaming of [false, true]) for (const ownChannel of [false, true]) {
+		const run = await runHarness({ bundle: built.outfile,
+			fixtures: { ...fx.youtubeFixtures, resolve: ownChannel ? fx.ownChannelFixture : fx.resolveFixture },
+			scopes: ["youtube.profile"], resultStreaming,
+			resultSpoolDirectory: join(out, `youtube-profile-${resultStreaming}-${ownChannel}`) });
+		assertCleanRun(run);
+		assert.deepEqual(run.ret, { ok: true });
+		assert.equal(run.data.error, undefined);
+		assert.match(run.data.status, /^Complete!/);
+		const result = resultStreaming ? run.streamDone : run.result;
+		assert.deepEqual(result.errors, []);
+		const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.profile"], "utf8"))
+			: run.result["youtube.profile"];
+		assert.equal(scope.records.length, 1);
+		const owner = scope.records[0];
+		assert.equal(owner.email, "synthetic@example.test");
+		assert.equal(owner.id, ownChannel ? "UCsyntheticOwner" : "synthetic@example.test");
+		if (ownChannel) {
+			assert.deepEqual(run.pageNavigations.filter(url => url.includes("/@")), [
+				"https://www.youtube.com/@synthetic-owner", "https://www.youtube.com/@synthetic-owner/about",
+			]);
+			assert.equal(owner.channel_id, "UCsyntheticOwner");
+			assert.equal(owner.channel_url, "https://www.youtube.com/@synthetic-owner");
+			assert.equal(owner.handle, "@synthetic-owner");
+			assert.equal(owner.title, "Synthetic owner");
+			assert.equal(owner.description, "Owner about-page description");
+			assert.equal(owner.joined_at, "Jan 2, 2020");
+			assert.equal(owner.country, "Canada");
+			assert.equal(owner.subscriber_count, 123);
+			assert.equal(owner.view_count, 456);
+			assert.equal(owner.video_count, 7);
+		} else {
+			assert.equal(owner.channel_url, null);
+			assert.equal(owner.channel_id, null);
+		}
+	}
+});
+
 test("youtube: capped history upserts the prefix without claiming completion or checkpoint", { timeout: 180_000 }, async () => {
 	const fx = await import("./fixtures/youtube.mjs");
 	const built = await buildPageshim({ connector: "youtube", outfile: join(out, "youtube-prefix.js") });
