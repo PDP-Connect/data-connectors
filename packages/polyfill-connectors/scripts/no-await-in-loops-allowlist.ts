@@ -2233,14 +2233,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/heb/index.ts",
-			line: 3028,
+			line: 3034,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collect(): emitInventoryIncomplete(): one retryable SKIP_RESULT per requested stream, emitted in a fixed order",
 		},
 		{
 			path: "connectors/heb/index.ts",
-			line: 3057,
+			line: 3063,
 			column: 5,
 			category: "ordered_protocol_emission",
 			note: "collect(): emitInventoryIncomplete(): one retryable SKIP_RESULT per requested stream, emitted in a fixed order",

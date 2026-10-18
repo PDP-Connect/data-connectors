@@ -2887,6 +2887,7 @@ export const hebConnector: BrowserConnectorConfig = {
 	},
 	async collect(ctx: BrowserCollectContext): Promise<void> {
 		const {
+			collectionMode,
 			scope,
 			state,
 			emitRecord,
@@ -2920,7 +2921,12 @@ export const hebConnector: BrowserConnectorConfig = {
 		const collectNutritionTargets = wantsNutrition;
 
 		const ordersState = (state.orders ?? {}) as OrdersStateShape;
-		const boundary = resumeBoundary(ordersState.checkpoint);
+		// An explicit full refresh ignores the resume checkpoint and walks the
+		// whole order history.
+		const boundary =
+			collectionMode === "full_refresh"
+				? null
+				: resumeBoundary(ordersState.checkpoint);
 		// A committed `orders` checkpoint is this connection's own record that
 		// H-E-B has listed orders for this account before. It is what makes a
 		// later "no order history" page a contradiction to escalate rather than
