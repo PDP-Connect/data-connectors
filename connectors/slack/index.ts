@@ -2347,6 +2347,11 @@ type EmitRecordFn = (
  */
 export interface MessagesPassDeps {
 	/**
+	 * See `StreamDeps.channelScope`: a row of any other channel is skipped
+	 * before it is counted or can advance a cursor.
+	 */
+	channelScope?: ReadonlySet<string> | undefined;
+	/**
 	 * Only a record this reports as accepted may advance the emitting
 	 * channel's durable cursor. See `EmitRecordFn`.
 	 */
@@ -2526,6 +2531,9 @@ export async function emitMessagesPass(
 		covered: 0,
 	};
 	for (const r of rows) {
+		if (deps.channelScope && !deps.channelScope.has(r.CHANNEL_ID)) {
+			continue;
+		}
 		considered += 1;
 		// A row whose Slack `ts` will not parse gets a fabricated `sent_at`
 		// (parseMessageRow's `?? sentAtFallback`). It is still emitted — the
@@ -2594,6 +2602,14 @@ export async function emitMessagesPass(
  * untouched (their `dropUnseenIds` is never called).
  */
 export interface StreamDeps {
+	/**
+	 * The channels whose rows this run may read, when CHANNEL_TYPES leaves a type
+	 * out. A channel-bearing runner skips every other row before it reaches the
+	 * fingerprint cursor or a coverage count, so a row the record guard would
+	 * drop is never counted as covered or remembered as emitted. Unset means
+	 * every channel.
+	 */
+	channelScope?: ReadonlySet<string> | undefined;
 	db: DatabaseSync;
 	/**
 	 * Protocol-message side-channel (non-RECORD). Used today only to declare a
@@ -2936,8 +2952,11 @@ export async function runChannelsStream(deps: StreamDeps): Promise<void> {
 		if (nextRow.done) {
 			break;
 		}
-		channelsConsidered += 1;
 		const raw = nextRow.value;
+		if (deps.channelScope && !deps.channelScope.has(raw.id as string)) {
+			continue;
+		}
+		channelsConsidered += 1;
 		const r: ChannelRow = {
 			id: raw.id as string,
 			name: (raw.name as string | null) ?? null,
@@ -2981,7 +3000,9 @@ export async function runChannelsStream(deps: StreamDeps): Promise<void> {
 	}
 }
 
-async function runChannelMembershipsStream(deps: StreamDeps): Promise<void> {
+export async function runChannelMembershipsStream(
+	deps: StreamDeps,
+): Promise<void> {
 	const rows = safeAll<ChannelUserRow>(
 		deps.db,
 		`
@@ -2995,7 +3016,9 @@ async function runChannelMembershipsStream(deps: StreamDeps): Promise<void> {
 	const { considered, covered } = await runFingerprintedFullSync(
 		deps,
 		"channel_memberships",
-		rows,
+		deps.channelScope
+			? rows.filter((r) => deps.channelScope?.has(r.CHANNEL_ID))
+			: rows,
 		(r) => buildChannelMembershipRecord(r, deps.emittedAt),
 	);
 	await declareListConsidered(deps, "channel_memberships", considered, covered);
@@ -4211,6 +4234,7 @@ if (isMainModule(import.meta.url)) {
 				);
 			}
 			const deps: StreamDeps = {
+				channelScope: typeScope?.allowed,
 				db,
 				// Narrow the ctx.emit union to the single message kind StreamDeps.emit
 				// accepts (DETAIL_COVERAGE). runConnector's emit accepts the full

@@ -135,6 +135,10 @@ const SLACK_TOKEN =
 	"xoxc-1-2-3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 interface Outcome {
+	/** The `considered` and `covered` counts a stream declared, if it did. */
+	coverage: (stream: string) => { considered: number; covered: number } | null;
+	/** The record ids the `channels` stream remembered in its STATE. */
+	rememberedChannels: () => string[];
 	archiveCalls: string[][];
 	done: Extract<EmittedMessage, { type: "DONE" }> | undefined;
 	everyArgument: string;
@@ -224,6 +228,30 @@ async function runWithFakeSlackdump(options: {
 			),
 			everyArgument: calls.flat().join(" "),
 			listCalls: calls.filter((argv) => argv[0] === "list"),
+			coverage: (stream) => {
+				const report = result.messages.find(
+					(
+						message,
+					): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
+						message.type === "DETAIL_COVERAGE" && message.stream === stream,
+				);
+				return report
+					? {
+							considered: Number(report.considered),
+							covered: Number(report.covered),
+						}
+					: null;
+			},
+			rememberedChannels: () => {
+				const state = result.messages.findLast(
+					(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
+						message.type === "STATE" && message.stream === "channels",
+				);
+				const cursor = (state?.cursor ?? {}) as {
+					fingerprints?: Record<string, string>;
+				};
+				return Object.keys(cursor.fingerprints ?? {}).sort();
+			},
 			recordChannels: (stream) =>
 				records
 					.filter((record) => record.stream === stream)
@@ -302,6 +330,12 @@ test("records of an excluded type are dropped even when the archive holds them",
 	assert.deepEqual(positionalChannels(outcome.archiveCalls[0] ?? []), PUBLIC);
 	assert.deepEqual(outcome.recordChannels("messages"), PUBLIC);
 	assert.deepEqual(outcome.recordChannels("channels"), PUBLIC);
+	// The bookkeeping agrees with the output: the six channels the archive held
+	// are not counted as covered, and the channels left out are not remembered
+	// as emitted, so widening the choice later still emits them.
+	assert.deepEqual(outcome.coverage("channels"), { considered: 2, covered: 2 });
+	assert.deepEqual(outcome.coverage("messages"), { considered: 2, covered: 2 });
+	assert.deepEqual(outcome.rememberedChannels(), PUBLIC);
 });
 
 test("an allowlist also bounds the records, even from an archive that returns more", async () => {
