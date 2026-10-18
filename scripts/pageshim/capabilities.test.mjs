@@ -18,6 +18,7 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"chatgpt",
 		"discord_browser",
 		"github_browser",
+		"linkedin",
 		"meta",
 		"oura_browser",
 		"spotify",
@@ -25,7 +26,7 @@ test("PageShim eligibility follows declared runtime binding requirements", () =>
 		"x_browser",
 		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "youtube", "spotify", "meta"]) {
+	for (const name of ["strava_browser", "github_browser", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "youtube", "spotify", "meta", "linkedin"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -143,6 +144,10 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 
 test("every declared mobile connector remains PageShim eligible", () => {
 	const expected = {
+		linkedin: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		discord_browser: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_script_evaluation", "page_navigation"],
