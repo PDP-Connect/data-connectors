@@ -26,15 +26,12 @@ export async function buildAdRecordsWebCrypto(input: {
   ...input.adTopics.map(name => ({kind: "ad_topic" as const, name, description: null})),
   ...input.categories.map(row => ({kind: "ad_category" as const, ...row})),
  ];
- const out: AdRecord[] = [];
- for (const row of rows) {
-  const name = row.name.trim();
-  if (!name) continue;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${row.kind}|${name}`));
+ const named = rows.map(row => ({...row, name: row.name.trim()})).filter(row => row.name);
+ return Promise.all(named.map(async row => {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${row.kind}|${row.name}`));
   const id = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, "0")).join("").slice(0, 32);
-  out.push({...row, name, id});
- }
- return out;
+  return {...row, id} as AdRecord;
+ }));
 }
 
 /** The web profile API takes only a username and the public web app id.
