@@ -3624,6 +3624,34 @@ test("scenario-verify: a replay of the paced watchdog fixture completes well und
 			/replay time: scaled 100x \(pacing\/backoff compressed; recorded responses need no provider protection\)/,
 			`expected the time-scaling line on stdout; stdout=${verifyResult.stdout}`,
 		);
+
+		// Control: a 1 ms bound must fail the same replay, which proves the bound
+		// reached the replayed connector rather than silently not being checked.
+		const controlResult = runVerifyCli(
+			[
+				"scenario-watchdog-paced-connector",
+				scenarioPath,
+				"--entrypoint",
+				WATCHDOG_STUB_CONNECTOR_PATH,
+				"--timeout",
+				"30",
+			],
+			{
+				PDPP_WATCHDOG_TEST_RECORD_COUNT: recordCount,
+				PDPP_WATCHDOG_TEST_SLEEP_MS: sleepMs,
+				PDPP_WATCHDOG_TEST_MAX_PACED_MS: "1",
+			},
+		);
+		assert.notEqual(
+			controlResult.code,
+			0,
+			"a 1 ms paced bound must fail the replay",
+		);
+		assert.match(
+			`${controlResult.stdout}${controlResult.stderr}`,
+			/over the 1ms bound \(PDPP_WATCHDOG_TEST_MAX_PACED_MS\)/,
+			`the control must fail on the paced bound; stdout=${controlResult.stdout}`,
+		);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
