@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP LinkedIn Connector (v0.3.28)
+ * PDPP LinkedIn Connector (v0.3.29)
  *
  * Session-cookie only: no automated credential fill. LinkedIn is aggressively
  * anti-bot (manifest `bot_detection_sensitivity: "high"`), so this connector
@@ -84,7 +84,6 @@ import {
 import type { CaptureSession } from "../../packages/polyfill-connectors/src/fixture-capture.ts";
 import {
 	type FieldRead,
-	EMPTY,
 	firstOf,
 	isRecord,
 	read,
@@ -304,7 +303,6 @@ async function fetchConnections(
 	page: Page,
 	progress: (message: string, extra?: ProgressExtra) => Promise<void>,
 	capture?: CaptureSession | null,
-	expectedTotal?: number,
 ): Promise<ConnectionsResult> {
 	const elements: VoyagerConnectionElement[] = [];
 	const seenUrns = new Set<string>();
@@ -423,22 +421,15 @@ async function fetchConnections(
 			return finish("repeated_page");
 		}
 		if (missingUrn) return finish("malformed_page");
-		if (total !== null && elements.length > total) {
-			return finish("malformed_page");
-		}
 		await progress("Fetched LinkedIn connections page", {
 			count: elements.length,
 			stream: "connections",
 			...(total === null ? {} : { total }),
 		});
 		if (continuationAdvertised) return finish("continuation_advertised");
-		if ((total !== null && elements.length === total) || elements.length === expectedTotal) {
-			return finish("observed_end_unproven");
-		}
-		if (page_elements.length < CONNECTIONS_PAGE_SIZE) {
-			return total === null ? finish("observed_end_unproven") : finish("malformed_page");
-		}
-		start += CONNECTIONS_PAGE_SIZE;
+		// Summaries and totals are proof inputs, never reasons to discard later rows.
+		// Advance by observed rows so short pages also reach the source's empty end.
+		start += page_elements.length;
 		await politeDelay(PAGE_DELAY_MS);
 	}
 
@@ -725,7 +716,7 @@ export async function collectLinkedIn(
 		beforeSummary = summaryEvidence(await voyagerFetch(page,
 			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-before"), meResult);
 		await progress("Fetching LinkedIn connections", { stream: "connections" });
-		connectionsResult = await fetchConnections(page, progress, capture, beforeSummary.total);
+		connectionsResult = await fetchConnections(page, progress, capture);
 		if (beforeSummary.total !== undefined && beforeSummary.total <= CONNECTIONS_MAX) {
 			confirmation = await voyagerFetch(page,
 				`/voyager/api/relationships/dash/connections?count=${CONNECTIONS_PAGE_SIZE}&q=search&sortType=RECENTLY_ADDED&start=${beforeSummary.total}`,
@@ -734,13 +725,12 @@ export async function collectLinkedIn(
 		afterSummary = summaryEvidence(await voyagerFetch(page,
 			"/voyager/api/relationships/connectionsSummary/", capture, "connections-summary-after"), meResult);
 	}
-	// schemas.ts requires this key and permits null. The explicit profile
-	// fallback uses null when the summary is unreadable or not owner-bound;
-	// whole-record upserts can therefore clear a previously stored count.
-	const connectionCount: FieldRead<number> = beforeSummary.total !== undefined
-		? read(beforeSummary.total) : EMPTY;
+	// Preserve the observed distinct count when no owner-bound summary is usable.
+	// This fallback is an observation, not evidence of a complete inventory.
+	const walkedDistinctCount = connectionsResult?.elements.length ?? 0;
+	const connectionCount: FieldRead<number> = read(beforeSummary.total ?? walkedDistinctCount);
 	if (wantsProfileFields && beforeSummary.reason) {
-		await progress(`LinkedIn profile connection_count=null: ${beforeSummary.reason}`, {
+		await progress(`LinkedIn profile connection_count=${walkedDistinctCount} (walked distinct fallback): ${beforeSummary.reason}`, {
 			stream: "profile",
 		});
 	}

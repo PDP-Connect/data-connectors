@@ -814,7 +814,7 @@ test("collectLinkedIn: incomplete nested position paging withholds the experienc
 	);
 });
 
-test("collectLinkedIn: failed connection paging leaves profile count null", async () => {
+test("collectLinkedIn: failed connection paging falls back to zero observed connections", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const route = (path: string): unknown => {
 		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
@@ -826,7 +826,7 @@ test("collectLinkedIn: failed connection paging leaves profile count null", asyn
 	};
 	await collectLinkedIn(buildCtx(["profile"], recording, route));
 
-	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, null);
+	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 0);
 	assert.equal(claimsFullCoverage(recording, "profile"), false);
 	assert.ok(
 		skipResults(recording).some(
@@ -855,7 +855,7 @@ test("collectLinkedIn: malformed connections page withholds coverage and exact c
 	};
 	await collectLinkedIn(buildCtx(["profile", "connections"], recording, route));
 
-	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, null);
+	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 0);
 	assert.equal(
 		recording.events.some(
 			(event) =>
@@ -1875,6 +1875,7 @@ async function collectProof(options: {
 	const paths: string[] = [];
 	const progressMessages: string[] = [];
 	let summaryReads = 0;
+	let walkEnded = false;
 	const ctx = buildCtx(ALL_STREAMS, recording);
 	ctx.progress = async (message) => { progressMessages.push(message); };
 	ctx.page = makeFakePage((path) => {
@@ -1889,8 +1890,10 @@ async function collectProof(options: {
 		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) return options.resolution ?? RESOLVED_PROFILES;
 		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
 			const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
-			return start === 0 ? options.connections ?? { elements: CONNECTIONS_PAGE_1.elements } :
-				options.confirmation ?? { elements: [], paging: { start: 1, total: 1 } };
+			if (walkEnded) return options.confirmation ?? { elements: [], paging: { start, total: start } };
+			const result = start === 0 ? options.connections ?? { elements: CONNECTIONS_PAGE_1.elements } : { elements: [] };
+			if (Array.isArray((result as { elements?: unknown[] }).elements) && (result as { elements: unknown[] }).elements.length === 0) walkEnded = true;
+			return result;
 		}
 		return { _error: "http_404" };
 	});
@@ -1996,16 +1999,87 @@ for (const [summary, reason] of [
 	[{ ...PROOF_SUMMARY, entityUrn: "urn:li:fsd_connectionsSummary:99" }, "summary_owner_mismatch"],
 	[{ _error: "http_503" }, "summary_request_failed"],
 ] as const) {
-	test(`profile count nullable fallback preserves profile for ${reason}`, async () => {
+	test(`profile count walked distinct fallback preserves profile for ${reason}`, async () => {
 		const { recording, progressMessages } = await collectProof({ before: summary, after: summary });
 		const profile = recording.emitted.find((row) => row.stream === "profile")?.data;
 		assert.ok(profile);
-		assert.equal(profile.connection_count, null);
+		assert.equal(profile.connection_count, 1);
 		assert.equal(profile.full_name, "Anon Member");
 		assert.equal(claimsFullCoverage(recording, "profile"), true);
 		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "profile"), true);
 		assert.equal(claimsFullCoverage(recording, "connections"), false);
 		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "connections"), false);
-		assert.ok(progressMessages.includes(`LinkedIn profile connection_count=null: ${reason}`));
+		assert.ok(progressMessages.includes(`LinkedIn profile connection_count=1 (walked distinct fallback): ${reason}`));
 	});
 }
+
+test("summary 40 cannot stop an 80-member source walk", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const ctx = buildCtx(["connections"], recording);
+	const starts: number[] = [];
+	const members = Array.from({ length: 80 }, (_, i) => ({
+		connectedMember: `urn:li:fsd_profile:member-${i}`, createdAt: 1_700_000_000_000,
+	}));
+	ctx.page = makeFakePage((path) => {
+		if (path === "/voyager/api/relationships/connectionsSummary/") return { ...PROOF_SUMMARY, numConnections: 40 };
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
+			starts.push(start);
+			return { elements: members.slice(start, start + 40) };
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
+			return { results: Object.fromEntries(members.map(({ connectedMember }) => [connectedMember, {
+				firstName: "Member", lastName: null, headline: null, publicIdentifier: null,
+			}])) };
+		}
+		return routeVoyagerPath(path);
+	});
+	await collectLinkedIn(ctx);
+	assert.deepEqual(starts.slice(0, 3), [0, 40, 80]);
+	assert.equal(recording.emitted.length, 80);
+	assert.equal(new Set(recording.emitted.map((row) => row.data.id)).size, 80);
+	assert.equal(claimsFullCoverage(recording, "connections"), false);
+	assert.equal(recording.protocolMessages.some((message) => message.type === "STATE"), false);
+	const gap = skipResults(recording).find((message) => message.stream === "connections");
+	assert.equal(diagnosticsOf(gap ?? {}).evidence_reason, "connection_total_mismatch");
+	assert.equal(diagnosticsOf(gap ?? {}).observed_count, 80);
+	assert.equal(diagnosticsOf(gap ?? {}).withheld_count, 0);
+});
+
+for (const duplicate of [true, false]) {
+	test(`flattened experience IDs across distinct groups: duplicate=${duplicate}`, async () => {
+		const profile = proofProfile();
+		const groups = profile.profilePositionGroups;
+		const second = structuredClone(groups.elements[0]);
+		second.entityUrn = "urn:li:positionGroup:2";
+		const position = second.profilePositionInPositionGroup.elements[0];
+		position.title = "Different title";
+		if (!duplicate) position.entityUrn = "urn:li:position:2";
+		groups.elements.push(second);
+		groups.paging.total = 2;
+		groups.paging.count = 2;
+		const { recording } = await collectProof({ profile });
+		const rows = recording.emitted.filter((row) => row.stream === "experience");
+		assert.equal(rows.length, duplicate ? 1 : 2);
+		assert.equal(new Set(rows.map((row) => row.data.id)).size, rows.length);
+		assert.equal(claimsFullCoverage(recording, "experience"), !duplicate);
+		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "experience"), !duplicate);
+		if (duplicate) {
+			assert.equal(rows[0]?.data.title, "Staff Engineer");
+			const gap = skipResults(recording).find((message) => message.stream === "experience");
+			assert.equal(diagnosticsOf(gap ?? {}).evidence_reason, "experience_flattened_id_duplicate");
+			assert.deepEqual(diagnosticsOf(gap ?? {}).omitted_rows, { duplicate_experience_id: 1 });
+		}
+	});
+}
+
+test("profile fallback counts distinct walked members before failed enrichment", async () => {
+	const member = CONNECTIONS_PAGE_1.elements[0];
+	const { recording, progressMessages } = await collectProof({
+		before: { _error: "http_503" }, after: { _error: "http_503" },
+		connections: { elements: [member, member] }, resolution: { _error: "http_404" },
+	});
+	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 1);
+	assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 0);
+	assert.ok(progressMessages.includes("LinkedIn profile connection_count=1 (walked distinct fallback): summary_request_failed"));
+});

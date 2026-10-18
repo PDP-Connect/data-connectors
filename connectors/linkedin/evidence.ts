@@ -59,12 +59,22 @@ export function sectionEvidence(profile: unknown, key: string): EvidenceFailure 
 	if (reason) return reason;
 	if (!isRecord(collection) || !Array.isArray(collection.elements)) return "collection_malformed";
 	if (key === "profilePositionGroups") {
+		const flattenedIds = new Set<unknown>();
 		for (const group of collection.elements) {
 			if (!isRecord(group)) return "collection_malformed";
-			// The one supported exception: a group without a nested collection is one role.
-			if (!Object.hasOwn(group, "profilePositionInPositionGroup")) continue;
-			const nested = collectionEvidence(group.profilePositionInPositionGroup);
-			if (nested) return `experience_nested_${nested}`;
+			// Groups without positions produce one row using the group's own ID.
+			let positions = [group];
+			if (Object.hasOwn(group, "profilePositionInPositionGroup")) {
+				const nested = collectionEvidence(group.profilePositionInPositionGroup);
+				if (nested) return `experience_nested_${nested}`;
+				const nestedCollection = group.profilePositionInPositionGroup;
+				if (!isRecord(nestedCollection) || !Array.isArray(nestedCollection.elements)) return "collection_malformed";
+				if (nestedCollection.elements.length > 0) positions = nestedCollection.elements;
+			}
+			for (const position of positions) {
+				if (flattenedIds.has(position.entityUrn)) return "experience_flattened_id_duplicate";
+				flattenedIds.add(position.entityUrn);
+			}
 		}
 	}
 	if (key === "profileSkills" && collection.elements.some((entry) =>

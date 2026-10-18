@@ -14492,7 +14492,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.28",
+				"version": "0.3.29",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14568,7 +14568,7 @@
 								},
 								"connection_count": {
 									"type": ["integer", "null"],
-									"description": "Owner-bound connectionsSummary.numConnections, independent of connection enumeration. Null when the summary total is unavailable or fails owner validation; this can clear a previously stored count."
+									"description": "Owner-bound connectionsSummary.numConnections, independent of connection enumeration. Falls back to the walked distinct connection count with a diagnostic when the summary is unavailable or fails owner validation; the fallback does not prove inventory completeness."
 								},
 								"profile_picture_url": {
 									"type": ["string", "null"],
