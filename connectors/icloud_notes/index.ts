@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP iCloud Notes Connector (manifest v0.1.23)
+ * PDPP iCloud Notes Connector (manifest v0.1.24)
  *
  * Greenfield PDPP Collection Profile connector, ported from the legacy CG
  * script `connectors/apple/icloud-notes-playwright.js` (read-only prior
@@ -13,6 +13,8 @@
  * web app itself calls.
  *
  * Streams:
+ *   profile   — singleton signed-in account, keyed by validate dsInfo.dsid;
+ *               optional user_name comes directly from dsInfo.fullName.
  *   notes     — CloudKit `com.apple.notes` private-zone Note records,
  *               queried via the `recents` search index, paginated by
  *               `continuationMarker`.
@@ -67,6 +69,8 @@
  * account run is separate and only occurs when a signed-in profile exists.
  *
  * CHANGES
+ *   v0.1.24 (2026-10-17) — expose the signed-in account's source-stated
+ *     name in a singleton profile stream using the existing validate call.
  *   v0.1.23 (2026-10-15) — account for mapped-field readability, accept
  *     open Notes subroutes, add bounded readiness recovery, validate
  *     CloudKit pages, and include same-run folder names in notes projection.
@@ -103,7 +107,7 @@ import {
 	readNoteRecord,
 	resolveCloudKitRecordId,
 } from "./parsers.ts";
-import { validateRecord } from "./schemas.ts";
+import { profileSchema, validateRecord } from "./schemas.ts";
 import type {
 	CloudKitFetchResult,
 	CloudKitRecord,
@@ -162,7 +166,7 @@ interface ProgressExtra {
 export const ICLOUD_NOTES_RETRYABLE_PATTERN =
 	/ECONN|ETIMEDOUT|fetch failed|icloud_rate_limited|icloud_readiness_exhausted/i;
 
-type StreamName = "folders" | "notes";
+type StreamName = "folders" | "notes" | "profile";
 type FieldOmission = ParsedFieldOmission;
 type OmittedRowDiagnostic = {
 	row_index: number;
@@ -257,6 +261,7 @@ export async function ensureICloudNotesSession({
 interface CloudKitConfigLive {
 	ckBaseUrl: string;
 	dsid: string;
+	userName?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -300,13 +305,28 @@ async function resolveCloudKitConfig(
 	const data = result.json as CloudKitValidateResponse;
 	const dsid = data.dsInfo?.dsid;
 	const ckBaseUrl = data.webservices?.ckdatabasews?.url;
-	if ((dsid === undefined || dsid === null) && dsid !== 0) {
+	// Never coerce a malformed account identity into a singleton key.
+	if (
+		typeof dsid !== "string" &&
+		!(typeof dsid === "number" && Number.isSafeInteger(dsid) && dsid >= 0)
+	) {
 		return null;
 	}
+	const accountId = profileSchema.shape.id.safeParse(String(dsid));
+	if (!accountId.success) return null;
 	if (typeof ckBaseUrl !== "string" || ckBaseUrl.length === 0) {
 		return null;
 	}
-	return { dsid: String(dsid), ckBaseUrl };
+	// Reuse this response; do not fetch a profile or synthesize an Apple ID
+	// fallback. Missing, blank, or unreadable names remain omitted.
+	const userName = profileSchema.shape.user_name.safeParse(data.dsInfo?.fullName);
+	return {
+		dsid: accountId.data,
+		ckBaseUrl,
+		...(userName.success && userName.data !== undefined
+			? { userName: userName.data }
+			: {}),
+	};
 }
 
 function queryUrl(config: CloudKitConfigLive): string {
@@ -889,7 +909,12 @@ export async function collectAllStreams(
 	ctx: BrowserCollectContext,
 ): Promise<void> {
 	const { emit, emitRecord, page, requested, state } = ctx;
-	if (!requested.has("notes") && !requested.has("folders")) return;
+	if (
+		!requested.has("notes") &&
+		!requested.has("folders") &&
+		!requested.has("profile")
+	)
+		return;
 	const progress = widenProgress(ctx.progress);
 	const pageUrl = await requireNotesPage(page);
 
@@ -901,6 +926,32 @@ export async function collectAllStreams(
 		throw new Error(
 			"icloud_navigation_changed: page changed while resolving CloudKit owner",
 		);
+	}
+	if (requested.has("profile")) {
+		const profile = {
+			id: config.dsid,
+			...(config.userName === undefined ? {} : { user_name: config.userName }),
+		};
+		const cursor = openFingerprintCursor(state.profile, {
+			excludeFromFingerprint: [],
+		});
+		if (cursor.shouldEmit(profile)) await emitRecord("profile", profile);
+		if (remainsInICloudNotes(page.url(), pageUrl)) {
+			cursor.dropUnseenIds();
+			await emit({
+				type: "STATE",
+				stream: "profile",
+				cursor: { fingerprints: cursor.toState() },
+			});
+		} else {
+			await emitStreamFailure(emit, "profile", {
+				reason: "icloud_navigation_changed",
+				message:
+					"The iCloud Notes page changed before the profile could be checkpointed.",
+				retryable: true,
+				pageCount: 1,
+			});
+		}
 	}
 	const url = queryUrl(config);
 	const needsFolders = requested.has("folders") || requested.has("notes");

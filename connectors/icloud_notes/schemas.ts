@@ -40,6 +40,17 @@ export const noteSchema = z.object({
 	text_content: bodyTextSchema,
 });
 
+/** Account identity and display name are read from the existing validate
+ * response. An unavailable name is omitted, never filled with an ID. */
+export const profileSchema = z.object({
+	id: recordIdSchema.refine((value) => value.trim().length > 0),
+	user_name: pdppSafeText
+		.min(1)
+		.max(500)
+		.refine((value) => value.trim().length > 0)
+		.optional(),
+});
+
 export const folderSchema = z.object({
 	id: recordIdSchema,
 	name: pdppSafeText.min(1).max(500).nullable(),
@@ -50,6 +61,7 @@ export const folderSchema = z.object({
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	notes: noteSchema,
 	folders: folderSchema,
+	profile: profileSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);
