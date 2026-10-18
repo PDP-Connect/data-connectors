@@ -7,7 +7,7 @@ Every local test command runs through `scripts/test-sandbox/test-sandbox`, a ven
 | When | Command | What runs | Measured (a 24-core Linux host) |
 |---|---|---|---|
 | While editing | `npm run test:fast` (root or packages/polyfill-connectors) | Tests related to files changed since `git merge-base HEAD origin/main`, plus uncommitted and untracked files: the static import graph, plus every test in the same `connectors/<name>/` directory. Namespace tests run in their own lane. When the selector cannot trust the graph (for example a change under `scripts/related-tests/` or a deleted file), it runs the whole sandboxed lane. | one-connector edit: 42 tests, 4-10 s |
-| Same, against any base | `npm run test:related -- <base>` | Same selection; on FULL_SUITE it runs both polyfill lanes. | |
+| Same, against any base | `npm run test:related -- <base>` (in packages/polyfill-connectors) | Same selection; on FULL_SUITE it runs both polyfill lanes. | |
 | Before a PR | `npm test` (root) | Every lane in turn (below). | about 28 min, 16 of them PageShim |
 | PR into main | GitHub Actions | `verify + test`, PageShim shards, connector shards, Contract Guardrails, cross-repo integrity. PRs into other branches run no CI. On GitHub runners the sandbox also enforces (cgroup+netns). | `verify + test` Test step 699 s (was 15-18 min at concurrency 2); PageShim shards 588 s and 835 s |
 
@@ -21,14 +21,14 @@ The root `npm test` runs these lanes, each in its own sandbox:
 | polyfill `test:namespaces` | host, `--isolate cgroup` (no bwrap, so tests can create their own namespaces) | the five scenario-isolation files in NAMESPACE_TESTS, one at a time | 291 tests, 94 s |
 | `test:pageshim` | none | the files the two PageShim CI shards run | 182 tests, 950 s |
 
-`pack-install-run` (polyfill, network: host) and `npm run verify` (typecheck, biome, conformance checks) are separate commands; run `verify` before every PR.
+`npm run pack-install-run` (network: host) and `npm run verify` (typecheck, biome, conformance checks) are separate commands in packages/polyfill-connectors; run `verify` before every PR.
 
 ## What is shared, per-worker, per-test, locked
 
-- Shared and read-only: the checkout, `node_modules`, the Playwright browser cache, the built PageShim bundles of one run.
+- Shared: the checkout, `node_modules`, the Playwright browser cache, the built PageShim bundles of one run. Tests treat them as read-only, except that the namespace tests plant and remove sockets under the repository root (see below).
 - Per test file: one `node --test` child process. Module state (PageShim fixture modules with `setLoggedIn`) is per file; tests in one file run one after another.
 - Per test: temp directories (`mkdtemp` under the sandbox's private `/tmp`), local HTTP servers on port 0, iMessage `chat.db` files, PageShim browsers (one Chromium per `runHarness`, about 140 ms to start).
-- Locked (serial): the namespaces lane. Its files share the repository root as global state (`isolation-mechanism.test.ts` plants sockets under it that `scenario-verify-strict.test.ts`'s isolation scan refuses), so they never run at the same time.
+- Locked (serial): the namespaces lane. Its files share the repository root as global state (`isolation-mechanism.test.ts` plants sockets under it that `scenario-verify-strict.test.ts`'s isolation scan refuses), so one run executes them one at a time. Nothing locks them across two runs in the same checkout, so do not run two suites in one checkout at once.
 - Never shared: the network. Unit lanes have loopback only; PageShim routes deny every request that no fixture serves.
 
 ## Rules
