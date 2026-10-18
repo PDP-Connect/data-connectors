@@ -3677,8 +3677,10 @@ test("oura_browser: narrow then wider consent retains clipped debt on both hosts
 test("icloud_notes: owner-bound profile, browser decompression and state replay", { timeout: 120_000 }, async () => {
 	const { pageshimCase: c, bodyText } = await import("./fixtures/icloud_notes.mjs");
 	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes.js") });
+	const evaluateSizes = [];
 	const run = (options = {}) => runHarness({
 		bundle: built.outfile, fixtures: c.fixtures, scopes: c.scopes,
+		observeBridge: (method, args) => { if (method === "evaluate") evaluateSizes.push(args[0].length); },
 		gotoDelayMs: 0, loginWaitMs: 1000, ...options,
 	});
 	const first = await run();
@@ -3703,6 +3705,7 @@ test("icloud_notes: owner-bound profile, browser decompression and state replay"
 	const oldHost = await run({ supportsStateArgument: false });
 	assertCleanRun(oldHost);
 	assert.deepEqual(oldHost.states, {});
+	assert.ok(evaluateSizes.length > 0 && Math.max(...evaluateSizes) <= 65_536);
 });
 
 test("icloud_notes: failed continuation preserves readable rows and never checkpoints notes", { timeout: 120_000 }, async () => {
@@ -3723,6 +3726,7 @@ test("icloud_notes: failed continuation preserves readable rows and never checkp
 	assertCleanRun(r);
 	assert.equal(r.result["icloud.notes"].records.length, 3);
 	assert.ok(r.result.errors.some(error => error.scope === "icloud.notes"));
+	assert.match(r.data.status, /^Partial:/);
 	assert.equal(r.states["icloud.notes"], undefined);
 	assert.ok(r.states["icloud.profile"]);
 	assert.ok(r.states["icloud.folders"]);

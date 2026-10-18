@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP iCloud Notes Connector (manifest v0.1.26)
+ * PDPP iCloud Notes Connector (manifest v0.1.27)
  *
  * Greenfield PDPP Collection Profile connector, ported from the legacy CG
  * script `connectors/apple/icloud-notes-playwright.js` (read-only prior
@@ -661,12 +661,12 @@ async function emitStreamFailure(
 	await emit({
 		type: "SKIP_RESULT",
 		stream,
-		reason: QUERY_FAILURE_REASON_CODES[failure.reason],
+		reason: "inventory_not_proven_complete",
 		message: failure.message,
-		recovery_hint: failure.retryable
-			? { action: "retry_by_runtime", retryable: true }
-			: { action: "not_retriable", retryable: false },
+		recovery_hint: { action: "retry_by_runtime", retryable: true },
 		diagnostics: {
+			source_reason: QUERY_FAILURE_REASON_CODES[failure.reason],
+			source_retryable: failure.retryable,
 			page_count: failure.pageCount,
 			...(failure.rowsSeen === undefined
 				? {}

@@ -504,7 +504,7 @@ test("collectAllStreams: refuses malformed successful envelopes and does not che
 					(message) =>
 						message.type === "SKIP_RESULT" &&
 						message.stream === stream &&
-						message.reason === "icloud_invalid_query_response",
+						(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_invalid_query_response"),
 				),
 				"malformed envelopes must leave a durable stream gap",
 			);
@@ -534,7 +534,7 @@ test("collectAllStreams: a failed folder query leaves notes withheld without a f
 			(message) =>
 				message.type === "SKIP_RESULT" &&
 				message.stream === "notes" &&
-				message.reason === "icloud_omitted_rows",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_omitted_rows"),
 		),
 	);
 	assert.equal(
@@ -609,7 +609,7 @@ test("collectAllStreams: repeated continuation markers stop as a gap", async () 
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "icloud_no_progress",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_no_progress"),
 		),
 	);
 	assert.equal(
@@ -733,7 +733,9 @@ test("collectAllStreams: unknown recordType withholds both streams and preserves
 			skip && skip.type === "SKIP_RESULT",
 			`${stream} must be withheld`,
 		);
-		assert.equal(skip.reason, "icloud_omitted_rows");
+		assert.equal(skip.reason, "inventory_not_proven_complete");
+		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 		assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 			{
 				row_index: 0,
@@ -1133,7 +1135,9 @@ test("collectAllStreams: malformed Deleted controls withhold rows and preserve s
 		(message) => message.type === "SKIP_RESULT" && message.stream === "notes",
 	);
 	assert.ok(skip && skip.type === "SKIP_RESULT");
-	assert.equal(skip.reason, "icloud_omitted_rows");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+		assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+		assert.equal(diagnosticField(skip, "source_reason"), "icloud_omitted_rows");
 	assert.deepEqual(diagnosticField(skip, "omitted_row_diagnostics"), [
 		{
 			row_index: 0,
@@ -1274,7 +1278,7 @@ test("collectAllStreams: rejected schema rows produce an omission gap and cannot
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "icloud_omitted_rows",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_omitted_rows"),
 		),
 	);
 	assert.equal(
@@ -1518,7 +1522,7 @@ test("collectAllStreams: navigation change vetoes a terminal query response", as
 		harness.protocolMessages.some(
 			(message) =>
 				message.type === "SKIP_RESULT" &&
-				message.reason === "icloud_navigation_changed",
+				(message.reason === "inventory_not_proven_complete" && diagnosticField(message, "source_reason") === "icloud_navigation_changed"),
 		),
 	);
 });
