@@ -19450,7 +19450,7 @@
 						},
 						"RECLAIM_UPLOADS": {
 							"type": "boolean",
-							"description": "When true, attempt to reclaim previously-failed file uploads on retry (does not change which channels/messages are collected).",
+							"description": "When true, delete the downloaded file attachments from the local archive after each run's messages are saved. PDPP keeps no other copy and the export tool does not download them again, so deleted files cannot be recovered. Does not change which channels or messages are collected.",
 							"default": false,
 							"declared_option_kind": "transport"
 						}
