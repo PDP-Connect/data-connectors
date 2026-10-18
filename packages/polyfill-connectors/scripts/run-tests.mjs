@@ -7,6 +7,7 @@
 // can be left out by path.
 import { spawn } from "node:child_process";
 import { glob } from "node:fs/promises";
+import { NAMESPACE_TESTS } from "./namespace-tests.mjs";
 
 // Gate B finding B2 restored the other 7 previously-excluded semantic/
 // conformance tests (vendored @pdpp/reference-contract now carries an
@@ -39,26 +40,13 @@ const patterns = [
 	"src/**/*.test.ts",
 ];
 
-// Tests that create their own bwrap/unshare namespaces. The test-sandbox's
-// bwrap blocks nested namespaces, so these run in the `namespaces` lane
-// (`test-sandbox --isolate cgroup`) and every other file runs in `sandboxed`.
-// src/test-runner-contract.test.ts reads this list by scanning this file.
-// Package-relative paths. The lane runs one file at a time: these files share
-// the repository root as global state (isolation-mechanism plants sockets
-// under it that scenario-verify-strict's isolation scan then refuses).
-const NAMESPACE_TESTS = new Set([
-	"bin/scenario-cli.test.ts",
-	"bin/scenario-fidelity.test.ts",
-	"bin/scenario-verify-strict.test.ts",
-	"src/scenario/filesystem-input.test.ts",
-	"src/scenario/isolation-mechanism.test.ts",
-]);
-
 const args = process.argv.slice(2);
 const laneIndex = args.indexOf("--lane");
 const lane = laneIndex === -1 ? undefined : args[laneIndex + 1];
 if (lane !== undefined && lane !== "sandboxed" && lane !== "namespaces") {
-	console.error(`--lane must be "sandboxed" or "namespaces", got ${JSON.stringify(lane)}`);
+	console.error(
+		`--lane must be "sandboxed" or "namespaces", got ${JSON.stringify(lane)}`,
+	);
 	process.exit(2);
 }
 
@@ -66,7 +54,8 @@ const files = [];
 for (const pattern of patterns) {
 	for await (const entry of glob(pattern)) {
 		const inLane =
-			lane === undefined || NAMESPACE_TESTS.has(entry) === (lane === "namespaces");
+			lane === undefined ||
+			NAMESPACE_TESTS.has(entry) === (lane === "namespaces");
 		if (!EXCLUDED.has(entry) && inLane) {
 			files.push(entry);
 		}

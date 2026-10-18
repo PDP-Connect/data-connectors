@@ -15,9 +15,41 @@ import {
 	connectorsDir as CONNECTORS_ROOT,
 	packageRoot as PACKAGE_ROOT,
 } from "../../src/connector-paths.ts";
+import { NAMESPACE_TESTS } from "../namespace-tests.mjs";
 
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const CLI_PATH = join(PACKAGE_ROOT, "scripts", "related-tests", "cli.ts");
+const TEST_SANDBOX = join(
+	PACKAGE_ROOT,
+	"..",
+	"..",
+	"scripts",
+	"test-sandbox",
+	"test-sandbox",
+);
+const NODE_TEST = ["--test", "--import", "tsx", "--test-timeout=120000"];
+
+type Lane = "sandboxed" | "namespaces";
+
+/**
+ * Runs `node <args>` in its own test-sandbox: `sandboxed` with no network,
+ * `namespaces` without bwrap so its tests can create their own namespaces.
+ * Returns false if the run failed.
+ */
+function runInLane(lane: Lane, nodeArgs: readonly string[]): boolean {
+	const sandboxArgs =
+		lane === "namespaces" ? ["--isolate", "cgroup", "--net", "host"] : [];
+	try {
+		execFileSync(TEST_SANDBOX, [...sandboxArgs, "--", "node", ...nodeArgs], {
+			cwd: PACKAGE_ROOT,
+			env: { ...process.env, TEST_LANE: lane },
+			stdio: "inherit",
+		});
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 export function testFileArgument(testFile: string): string {
 	if (testFile.startsWith("connectors/")) {
@@ -81,30 +113,36 @@ function main(): void {
 
 	console.error(`[test:related] ${selection.reason}`);
 	const rawConcurrency = process.env.TEST_CONCURRENCY ?? (fast ? "4" : "2");
-	if (selection.kind === "FULL_SUITE") {
-		if (fast) {
-			console.error(
-				`[test:fast] FULL_SUITE: ${selection.reason}. Running the full sandboxed lane (about 9 minutes at concurrency 4).`,
-			);
-			execFileSync("node", ["scripts/run-tests.mjs", "--lane", "sandboxed"], {
-				cwd: PACKAGE_ROOT,
-				stdio: "inherit",
-				env: { ...process.env, TEST_CONCURRENCY: rawConcurrency },
-			});
-			return;
-		}
-		execFileSync("node", ["scripts/run-tests.mjs"], {
-			cwd: PACKAGE_ROOT,
-			stdio: "inherit",
-		});
-		return;
-	}
-
 	if (!POSITIVE_INTEGER.test(rawConcurrency)) {
 		console.error(
 			`TEST_CONCURRENCY must be a positive integer, got ${JSON.stringify(rawConcurrency)}`,
 		);
 		process.exit(2);
+	}
+	process.env.TEST_CONCURRENCY = rawConcurrency;
+
+	let ok = true;
+	if (selection.kind === "FULL_SUITE") {
+		if (fast) {
+			console.error(
+				`[test:fast] FULL_SUITE: ${selection.reason}. Running the full sandboxed lane (about 9 minutes at concurrency 4).`,
+			);
+		}
+		ok = runInLane("sandboxed", [
+			"scripts/run-tests.mjs",
+			"--lane",
+			"sandboxed",
+		]);
+		// The fast tier leaves the namespaces lane to `npm test`.
+		if (!fast) {
+			ok =
+				runInLane("namespaces", [
+					"scripts/run-tests.mjs",
+					"--lane",
+					"namespaces",
+				]) && ok;
+		}
+		process.exit(ok ? 0 : 1);
 	}
 
 	const targets = selection.testFiles ?? [];
@@ -113,21 +151,24 @@ function main(): void {
 		return;
 	}
 
-	execFileSync(
-		"node",
-		[
-			"--test",
-			"--import",
-			"tsx",
+	const namespaceTargets = targets.filter((file) => NAMESPACE_TESTS.has(file));
+	const sandboxedTargets = targets.filter((file) => !NAMESPACE_TESTS.has(file));
+	if (sandboxedTargets.length > 0) {
+		ok = runInLane("sandboxed", [
+			...NODE_TEST,
 			`--test-concurrency=${rawConcurrency}`,
-			"--test-timeout=120000",
-			...targets.map(testFileArgument),
-		],
-		{
-			cwd: PACKAGE_ROOT,
-			stdio: "inherit",
-		},
-	);
+			...sandboxedTargets.map(testFileArgument),
+		]);
+	}
+	if (namespaceTargets.length > 0) {
+		ok =
+			runInLane("namespaces", [
+				...NODE_TEST,
+				"--test-concurrency=1",
+				...namespaceTargets,
+			]) && ok;
+	}
+	process.exit(ok ? 0 : 1);
 }
 
 if (isMainModule(import.meta.url)) {
