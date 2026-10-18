@@ -532,8 +532,16 @@ export function buildExperienceRows(
 	groups: readonly unknown[],
 ): StreamRows<ExperienceRecord> {
 	const rows = emptyStreamRows<ExperienceRecord>();
+	const seenIds = new Set<unknown>();
 	for (const [groupIndex, group] of groups.entries()) {
 		for (const outcome of experienceRowsOf(group, groupIndex)) {
+			if (outcome.kind === "assembled" && isCovered(outcome)) {
+				if (seenIds.has(outcome.record.id)) {
+					addOmittedRow(rows, "duplicate_experience_id");
+					continue;
+				}
+				seenIds.add(outcome.record.id);
+			}
 			addRow(rows, outcome);
 		}
 	}
