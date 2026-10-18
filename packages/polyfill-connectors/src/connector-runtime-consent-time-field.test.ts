@@ -121,8 +121,12 @@ test("the generated consent-time-field modules match the manifests on disk", () 
 		);
 		// One slice per manifest, no extra, each current.
 		const expected = readdirSync(join(scratch, "consent-time-fields")).sort();
+		// `npm run build` (and so `npm pack`) emits .js and .d.ts next to each
+		// slice; only the generated sources are the generator's output.
 		assert.deepEqual(
-			readdirSync(join(tracked, "consent-time-fields")).sort(),
+			readdirSync(join(tracked, "consent-time-fields"))
+				.filter((name) => name.endsWith(".ts") && !name.endsWith(".d.ts"))
+				.sort(),
 			expected,
 			regenerate,
 		);
