@@ -758,3 +758,23 @@ test("fixture CORS retains explicit headers and supports credentialed cross-orig
 		"access-control-allow-methods": "POST", "access-control-allow-headers": "x-fixture",
 	});
 });
+
+test("audited crypto parity and every admitted bundle byte comparison", async () => {
+  const { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } = await import("./crypto-regressions.mjs");
+  const { pageShimConnectors } = await import("./capabilities.mjs");
+  const { fileURLToPath } = await import("node:url");
+  assertHashParity();
+  assertPageOnlyAdmission();
+  await mkdir(root, { recursive: true });
+  await assertFingerprintBundle(buildPageshim, join(root, "fingerprint-crypto.js"));
+  const report=[];
+  for (const connector of pageShimConnectors(fileURLToPath(new URL("../..",import.meta.url)))) {
+    const before=join(root,connector+"-before.js"), after=join(root,connector+"-after.js");
+    await buildPageshim({connector,outfile:before,cryptoHashShim:false});
+    await buildPageshim({connector,outfile:after});
+    const digest=async path=>createHash("sha256").update(await readFile(path)).digest("hex");
+    const beforeHash=await digest(before),afterHash=await digest(after);
+    report.push({connector,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash});
+  }
+  console.log("PAGESHIM_CRYPTO_IMPACT_SUMMARY "+JSON.stringify(report));
+});
