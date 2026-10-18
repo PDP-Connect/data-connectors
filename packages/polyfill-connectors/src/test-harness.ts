@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { type Dirent, readdirSync, readFileSync } from "node:fs";
 import { stringifyForJsonl } from "@pdpp/connector-protocol";
 import type {
 	DetailGapStartEntry,
@@ -34,18 +34,25 @@ import type {
 
 const VM_RSS_STATUS_RE = /VmRSS:\s*(\d+)\s*kB/;
 
+// Best effort: called from timer and stream callbacks, so it must never throw.
 function killLinuxProcessTree(rootPid: number): void {
 	const kill = (pid: number): void => {
 		try {
 			process.kill(pid, "SIGKILL");
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+		} catch {
+			// Already gone (ESRCH) or not ours to signal (EPERM).
 		}
 	};
 
 	for (let pass = 0; pass < 2; pass += 1) {
 		const childrenByParent = new Map<number, number[]>();
-		for (const entry of readdirSync("/proc", { withFileTypes: true })) {
+		let entries: Dirent[];
+		try {
+			entries = readdirSync("/proc", { withFileTypes: true });
+		} catch {
+			break;
+		}
+		for (const entry of entries) {
 			if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) continue;
 			const pid = Number(entry.name);
 			try {
@@ -303,6 +310,8 @@ export function runConnectorProtocolSubprocess(
 		};
 
 		const killChildTree = (): void => {
+			// Once the child has exited its pid may be reused: never signal it.
+			if (child.exitCode !== null || child.signalCode !== null) return;
 			if (process.platform === "linux" && child.pid) {
 				killLinuxProcessTree(child.pid);
 				return;
