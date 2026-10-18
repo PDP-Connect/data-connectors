@@ -70,7 +70,6 @@ import {
 	recoverPendingOrderItemDetailGapsBeforeForwardRun,
 	reportListPageCeiling,
 	resolveOrderDetail,
-	rotateGapBacklog,
 	runForwardScan,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -2811,63 +2810,18 @@ test("recoverPendingOrderItemDetailGapsBeforeForwardRun: a recovery-only run may
 	);
 });
 
-test("recoverPendingOrderItemDetailGapsBeforeForwardRun: an over-share backlog starts at a different gap each run", async () => {
-	const ids = makeBacklog(100).map((gap) => String(gap.record_key));
-	const midnight = await recoverBacklog(100, {
-		emittedAt: "2026-10-18T00:00:00.000Z",
-	});
-	const midnightAgain = await recoverBacklog(100, {
-		emittedAt: "2026-10-18T00:00:00.000Z",
-	});
-	const morning = await recoverBacklog(100, {
-		emittedAt: "2026-10-18T06:00:00.000Z",
-	});
+test("recoverPendingOrderItemDetailGapsBeforeForwardRun: an over-share backlog retries the first gaps the host served", async () => {
+	// The host serves gaps fewest-attempts first and takes back a lease the
+	// run did not settle without counting an attempt, so the leftovers lead
+	// the next run. The pass must keep the order it was given.
+	const { attempted } = await recoverBacklog(100);
 
 	assert.deepEqual(
-		midnight.attempted,
-		midnightAgain.attempted,
-		"one run time always takes the same turn",
+		attempted,
+		makeBacklog(100)
+			.slice(0, 50)
+			.map((gap) => String(gap.record_key)),
 	);
-	assert.notDeepEqual(midnight.attempted, morning.attempted);
-	for (const { attempted } of [midnight, morning]) {
-		const positions = attempted.map((id) => ids.indexOf(id));
-		for (const [index, position] of positions.entries()) {
-			if (index === 0) continue;
-			assert.equal(
-				position,
-				((positions[index - 1] ?? 0) + 1) % ids.length,
-				"each run retries a run of neighbouring gaps",
-			);
-		}
-	}
-});
-
-test("recoverPendingOrderItemDetailGapsBeforeForwardRun: every pending gap gets a turn over a day of hourly runs", async () => {
-	const runs = await Promise.all(
-		Array.from({ length: 24 }, (_, hour) =>
-			recoverBacklog(100, {
-				emittedAt: `2026-10-18T${String(hour).padStart(2, "0")}:00:00.000Z`,
-			}),
-		),
-	);
-
-	const turns = new Set(runs.flatMap((run) => run.attempted));
-	assert.equal(turns.size, 100);
-});
-
-test("rotateGapBacklog: leaves a backlog the run can afford alone and otherwise only turns it", () => {
-	const gaps = Array.from({ length: 10 }, (_, index) => index);
-
-	assert.equal(rotateGapBacklog(gaps, 10, "any run"), gaps);
-	const turned = rotateGapBacklog(gaps, 4, "any run");
-	assert.notEqual(turned, gaps);
-	assert.deepEqual(
-		[...turned].sort((a, b) => a - b),
-		gaps,
-		"no gap is lost or repeated",
-	);
-	const start = turned[0] ?? 0;
-	assert.deepEqual(turned, [...gaps.slice(start), ...gaps.slice(0, start)]);
 });
 
 test("recoverPendingOrderItemDetailGapsBeforeForwardRun: order_items out of scope skips recovery entirely", async () => {

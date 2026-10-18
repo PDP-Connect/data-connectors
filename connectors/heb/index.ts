@@ -1660,28 +1660,6 @@ export interface HebDetailRecoveryDeps extends HydrationDeps {
 	sendInteraction: BrowserCollectContext["sendInteraction"];
 }
 
-/**
- * When more gaps are pending than a run may retry, start at a different one
- * each run (seeded by the run's timestamp, so a test can pin it). Otherwise the
- * same leading gaps use every attempt and the rest, including orders whose
- * detail was never fetched, wait forever.
- */
-export function rotateGapBacklog<T>(
-	gaps: readonly T[],
-	attempts: number,
-	seed: string,
-): readonly T[] {
-	if (gaps.length <= attempts) {
-		return gaps;
-	}
-	let hash = 2_166_136_261;
-	for (const char of seed) {
-		hash = Math.imul(hash ^ (char.codePointAt(0) ?? 0), 16_777_619) >>> 0;
-	}
-	const start = hash % gaps.length;
-	return [...gaps.slice(start), ...gaps.slice(0, start)];
-}
-
 async function recoverPendingOrderItemDetailGapPage(
 	page: Page,
 	deps: HebDetailRecoveryDeps,
@@ -1692,11 +1670,7 @@ async function recoverPendingOrderItemDetailGapPage(
 	let recovered = 0;
 	let reDeferred = 0;
 	let skipped = 0;
-	for (const gap of rotateGapBacklog(
-		gaps,
-		attemptCeiling - flags.detailAttempts,
-		deps.emittedAt,
-	)) {
+	for (const gap of gaps) {
 		const locator = readRecoverableHebOrderDetailGap(gap);
 		if (!locator) {
 			if (gap.stream === "order_items" && gap.status === "pending") {
@@ -1705,7 +1679,9 @@ async function recoverPendingOrderItemDetailGapPage(
 			continue;
 		}
 		if (flags.detailAttempts >= attemptCeiling) {
-			// Past this run's share of the budget: the gap stays pending as it is.
+			// Past this run's share of the budget. The host takes back a lease the
+			// run did not settle without counting an attempt, and serves the gaps
+			// with the fewest attempts first, so these come first next run.
 			skipped += 1;
 			continue;
 		}
