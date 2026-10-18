@@ -4059,3 +4059,129 @@ test("scenario-verify: replay subprocess forces PLAYWRIGHT_BROWSERS_PATH and PDP
 		rmSync(connectorPath, { force: true });
 	}
 });
+
+function writeMultiByteConnector(directory: string): string {
+	const entrypoint = join(directory, "connector.mjs");
+	writeFileSync(
+		entrypoint,
+		`
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
+await once(process.stdin, "data");
+const emit = (message) => new Promise((resolve, reject) => {
+  process.stdout.write(JSON.stringify(message) + "\\n", (error) => error ? reject(error) : resolve());
+});
+await emit({ type: "RECORD", stream: "items", key: "utf8", emitted_at: "2026-08-01T00:00:00.000Z", data: { id: "utf8", value: "fixture" } });
+const bytes = Buffer.from(JSON.stringify({
+  type: "STATE", stream: "items", cursor: { value: "€".repeat(100_001) }
+}) + "\\n");
+// The 64 KiB split lands inside a three-byte character. Waiting after the
+// first write makes the split deterministic even when pipe reads coalesce.
+const split = 65_536;
+await new Promise((resolve, reject) => {
+  process.stdout.write(bytes.subarray(0, split), (error) => error ? reject(error) : resolve());
+});
+await delay(40);
+await new Promise((resolve, reject) => {
+  process.stdout.write(bytes.subarray(split), (error) => error ? reject(error) : resolve());
+});
+await emit({ type: "DONE", status: "succeeded", records_emitted: 1 });
+process.stdin.resume();
+`,
+	);
+	return entrypoint;
+}
+
+test("scenario-record: preserves multi-byte STATE cursors across pipe chunks", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-record-utf8-"),
+	);
+	const scenarioPath = join(tmpDir, "utf8.scenario.json");
+	try {
+		const entrypoint = writeMultiByteConnector(tmpDir);
+		const result = runRecordCli(
+			[
+				"scenario-utf8-fixture",
+				"--entrypoint",
+				entrypoint,
+				"--runs",
+				"1",
+				"--out",
+				scenarioPath,
+			],
+			{},
+		);
+		assert.equal(result.code, 0, result.stderr);
+		const scenario = JSON.parse(
+			readFileSync(scenarioPath, "utf8"),
+		) as ConnectorScenario;
+		assert.equal(scenario.capture.complete, true);
+		const finalState = scenario.runs[0]?.expected.final_state as
+			| { items?: { value?: string } }
+			| undefined;
+		assert.equal(
+			finalState?.items?.value === "€".repeat(100_001),
+			true,
+			"recorded cursor must retain every multi-byte character exactly",
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("scenario-verify: preserves multi-byte STATE cursors across pipe chunks", () => {
+	const tmpDir = mkdtempSync(
+		join(packageScratchDir(), "scenario-verify-utf8-"),
+	);
+	const scenarioPath = join(tmpDir, "utf8.scenario.json");
+	try {
+		const entrypoint = writeMultiByteConnector(tmpDir);
+		// Construct the oracle independently: a broken recorder must not hide
+		// identical corruption in the verifier by supplying a corrupted cursor.
+		const scenario: ConnectorScenario = {
+			format: "pdpp.connector-scenario/1",
+			connector: { id: "scenario-utf8-fixture" },
+			capture: {
+				captured_at: "2026-08-01T00:00:00.000Z",
+				evidence_class: "synthetic-spike",
+				privacy_class: "local-only",
+				recorder_version: "test",
+				complete: true,
+			},
+			runs: [
+				{
+					start: { scope: { streams: [{ name: "items" }] }, state: null },
+					interactions: [],
+					expected: {
+						records: {
+							items: {
+								count: 1,
+								ids: ["utf8"],
+								ops: ["upsert"],
+								record_sha256s: [
+									hashCanonicalJson({ id: "utf8", value: "fixture" }),
+								],
+							},
+						},
+						final_state: { items: { value: "€".repeat(100_001) } },
+					},
+				},
+			],
+		};
+		writeFileSync(scenarioPath, JSON.stringify(scenario));
+		const result = runVerifyCli([
+			"scenario-utf8-fixture",
+			"--entrypoint",
+			entrypoint,
+			scenarioPath,
+		]);
+		assert.equal(
+			result.code,
+			0,
+			`stdout=${result.stdout.slice(0, 2000)} stderr=${result.stderr}`,
+		);
+		assert.match(result.stdout, /run 0: PASS/);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
