@@ -26,7 +26,9 @@ const EXCLUDED = new Set(
 );
 
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
-const rawConcurrency = process.env.TEST_CONCURRENCY ?? "2";
+// Four files at a time halves the suite's wall time against two for about the
+// same CPU (measured in TESTING.md); six adds little and about 500 MB more.
+const rawConcurrency = process.env.TEST_CONCURRENCY ?? "4";
 if (!POSITIVE_INTEGER.test(rawConcurrency)) {
 	console.error(
 		`TEST_CONCURRENCY must be a positive integer, got ${JSON.stringify(rawConcurrency)}`,
