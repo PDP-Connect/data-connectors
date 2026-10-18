@@ -16,6 +16,7 @@ import {
 	packageRoot as PACKAGE_ROOT,
 } from "../../src/connector-paths.ts";
 
+const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const CLI_PATH = join(PACKAGE_ROOT, "scripts", "related-tests", "cli.ts");
 
 export function testFileArgument(testFile: string): string {
@@ -55,6 +56,14 @@ function main(): void {
 		return;
 	}
 
+	const rawConcurrency = process.env.TEST_CONCURRENCY ?? "2";
+	if (!POSITIVE_INTEGER.test(rawConcurrency)) {
+		console.error(
+			`TEST_CONCURRENCY must be a positive integer, got ${JSON.stringify(rawConcurrency)}`,
+		);
+		process.exit(2);
+	}
+
 	const targets = selection.testFiles ?? [];
 	if (targets.length === 0) {
 		console.error("[test:related] no related test files; nothing to run.");
@@ -67,7 +76,7 @@ function main(): void {
 			"--test",
 			"--import",
 			"tsx",
-			"--test-concurrency=2",
+			`--test-concurrency=${rawConcurrency}`,
 			"--test-timeout=120000",
 			...targets.map(testFileArgument),
 		],

@@ -38,6 +38,9 @@ jobs:
       - name: Test the manifest schema against the Collection Profile and manifests
         run: npm run manifest-schema:test
 
+      - name: Check the vendored test-sandbox matches its recorded hash
+        run: npm run test:tooling
+
       - name: Test publish ref gate
         run: node --test scripts/publish-ref-gate.test.mjs
 
