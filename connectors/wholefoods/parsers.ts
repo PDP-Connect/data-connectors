@@ -80,12 +80,18 @@ export function isCancelledOrderDetail(html: string): boolean {
 }
 
 /** Units on an order detail, comparable to the search page's row count: a
- *  weighed row is one search row however many lb it weighs. */
+ *  weighed row is one search row however many lb it weighs. Unknown counted
+ *  quantities return null. This heuristic never establishes completeness. */
 export function orderDetailUnitCount(
 	items: readonly OrderDetailItem[],
-): number {
+): number | null {
+	if (items.some((item) => item.quantity === null)) return null;
 	return items.reduce(
-		(sum, item) => sum + (item.quantityUnit ? 1 : (item.quantity ?? 1)),
+		(sum, item) =>
+			sum +
+			(item.quantityUnit && item.quantityUnit !== "each"
+				? 1
+				: (item.quantity ?? 0)),
 		0,
 	);
 }
@@ -382,7 +388,6 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		return { items: inStoreItems, orderDateRaw: detailOrderDate(document) };
 	}
 	const items: OrderDetailItem[] = [];
-	const seenHrefs = new Set<string>();
 	for (const itemRow of renderedAll(
 		document,
 		'[data-component="purchasedItemsRightGrid"]',
@@ -408,12 +413,6 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		// Keep an ASIN-less row for its parent order's item count. The legacy
 		// order_items schema requires a source product id, so the collector
 		// reports it and omits only that item record.
-		if (productId) {
-			if (seenHrefs.has(href)) {
-				continue;
-			}
-			seenHrefs.add(href);
-		}
 		const rowText = textOf(itemRow);
 		const quantity = QTY_RE.exec(rowText)?.[1];
 		const price = PRICE_RE.exec(rowText)?.[1];
@@ -425,7 +424,7 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 			name: sourceName,
 			productId,
 			productUrl: productId ? absoluteAmazonUrl(href) : null,
-			quantity: quantity ? Number(quantity) : 1,
+			quantity: quantity ? Number(quantity) : null,
 			unitPriceDollars: price ? Number(price) : null,
 		});
 	}
@@ -436,7 +435,7 @@ export function parseOrderDetailDom(html: string): OrderDetail {
  * Delivery orders at `/uff/your-account/order-details` use `#line-items` and
  * one `*-item-grid-row` element per search row. The captured rows have a
  * `/dp/ASIN` link and an image. Their row text may include `Qty: N`; the
- * existing online-order behavior defaults a row without Qty to one. The
+ * quantity stays unknown when no Qty is supplied. The
  * capture also exposes a dollar price in row text, which uses PRICE_RE.
  * Rows without a product link remain in order accounting but cannot produce
  * an order_items record without a source ASIN.
@@ -471,7 +470,7 @@ function parseDeliveryOrderItems(document: Document): OrderDetailItem[] | null {
 			name: linkedName || "Unlinked Whole Foods item",
 			productId,
 			productUrl: productId ? absoluteAmazonUrl(href) : null,
-			quantity: quantity ? Number(quantity) : 1,
+			quantity: quantity ? Number(quantity) : null,
 			unitPriceDollars: price ? Number(price) : null,
 		});
 	}
@@ -483,7 +482,10 @@ function detailOrderDate(document: Document): string | null {
 	const dateMatch =
 		/(?:Order Placed|Ordered|Order placed)[:\s]*([A-Z][a-z]+ \d+, \d{4})/i.exec(
 			pageText,
-		) ?? /([A-Z][a-z]+ \d+, \d{4})/.exec(pageText);
+		) ??
+		/Purchased on\s+(?:[A-Z][a-z]+,\s*)?([A-Z][a-z]+ \d+, \d{4})/i.exec(
+			textOf(renderedFirst(document, "#ufpo-order-status-secondary")),
+		);
 	return dateMatch?.[1] ?? null;
 }
 
@@ -507,7 +509,6 @@ function parseInStoreItems(document: Document): OrderDetailItem[] | null {
 		return null;
 	}
 	const items: OrderDetailItem[] = [];
-	const seenHrefs = new Set<string>();
 	for (const row of renderedAll(container, ".a-row.a-spacing-base")) {
 		const titleColumn = row.querySelector<HTMLElement>(
 			".a-column.a-span10 .a-column.a-span10",
@@ -526,12 +527,6 @@ function parseInStoreItems(document: Document): OrderDetailItem[] | null {
 		if (name.length < 3) {
 			throw new Error("Whole Foods in-store order row has no item name");
 		}
-		if (productId) {
-			if (seenHrefs.has(href)) {
-				continue;
-			}
-			seenHrefs.add(href);
-		}
 		const rowText = textOf(row).replace(WHITESPACE_RE, " ");
 		const qty = IN_STORE_QTY_RE.exec(rowText);
 		const img = row.querySelector<HTMLImageElement>(
@@ -547,8 +542,11 @@ function parseInStoreItems(document: Document): OrderDetailItem[] | null {
 			name,
 			productId,
 			productUrl: productId ? absoluteAmazonUrl(href) : null,
-			quantity: qty?.[1] ? Number(qty[1]) : 1,
-			quantityUnit: qty?.[2] ?? null,
+			quantity: qty?.[1] ? Number(qty[1]) : null,
+			quantityUnit: qty?.[2] ?? (/\beach\b/i.test(rowText) ? "each" : null),
+			priceUnit:
+				/\/(lb|oz|kg|g)\b/i.exec(rowText)?.[1]?.toLowerCase() ??
+				(/\beach\b/i.test(rowText) ? "each" : null),
 			unitPriceDollars: unitPrice ? Number(unitPrice) : null,
 		});
 	}
@@ -663,7 +661,10 @@ export function mapUsdaNutrients(
 	food: UsdaFood,
 	matchMethod: UsdaMatchMethod,
 ): NutritionFacts {
-	const servingG = food.servingSize ?? 100;
+	const servingG =
+		food.servingSizeUnit?.toLowerCase() === "g" && food.servingSize !== null
+			? food.servingSize
+			: 100;
 	const scale = servingG / 100;
 	const getRaw = (id: number): number | null => {
 		const n = food.foodNutrients.find((fn) => fn.nutrientId === id);
@@ -680,9 +681,10 @@ export function mapUsdaNutrients(
 		fatG: get(USDA_NUTRIENT_ID.fat),
 		fiberG: get(USDA_NUTRIENT_ID.fiber),
 		proteinG: get(USDA_NUTRIENT_ID.protein),
-		servingSize: food.servingSize
-			? `${food.servingSize}${food.servingSizeUnit ?? "g"}`
-			: null,
+		servingSize:
+			food.servingSize !== null && food.servingSizeUnit
+				? `${food.servingSize}${food.servingSizeUnit}`
+				: null,
 		servingsPerContainer: null,
 		sodiumMg: get(USDA_NUTRIENT_ID.sodium),
 		source: "usda_fdc",
