@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { buildPageshim } from "./build.mjs";
 import {
@@ -15,6 +15,10 @@ import { runHarness } from "./harness.mjs";
 
 const out = join(process.cwd(), ".scratch", "pageshim-chatgpt-replay-test");
 mkdirSync(out, { recursive: true });
+// Keep a failed run's bundle for debugging; remove it after a passing run.
+process.on("exit", (code) => {
+	if (code === 0) rmSync(out, { recursive: true, force: true });
+});
 
 test("reverse-projects retained ChatGPT records into list pages and details", () => {
 	const projected = projectChatGptExport({
