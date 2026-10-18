@@ -4192,3 +4192,117 @@ test("spotify: bounded pagination, source gaps, and acknowledged STATE", { timeo
 		assert.doesNotMatch(r.data.status, /^Complete!/);
 	});
 });
+
+test("linkedin: owner-bound inventories, same-origin CSRF and accepted STATE", { timeout: 180_000 }, async (t) => {
+ const { createLinkedInFixtures, pageshimCase: c } = await import("./fixtures/linkedin.mjs");
+ const built = await buildPageshim({ connector: "linkedin", outfile: join(out, "linkedin-evidence.js") });
+ const run = (fixtures, options = {}) => runHarness({
+  bundle: built.outfile, fixtures, scopes: c.scopes, gotoDelayMs: 0, timerScale: 0.01,
+  ...options,
+ });
+ await t.test("complete six-stream inventory and bounded page calls", async () => {
+  const fixtures = createLinkedInFixtures();
+  const calls = [];
+  const r = await run(fixtures, { initialState: { "linkedin.profile": { prior: true } },
+   observeBridge: (method, args) => { if (method === "evaluate") calls.push(String(args[0])); } });
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result.exportSummary, c.exportSummary);
+  assert.match(r.data.status, /^Complete!/);
+  assert.deepEqual(Object.keys(r.states).sort(), [...c.scopes].sort());
+  for (const scope of c.scopes) assert.ok(r.states[scope].full_scan_at);
+  assert.equal(r.result["linkedin.profile"].records[0].connection_count, 1);
+  assert.equal(r.result["linkedin.connections"].records[0].id, "urn:li:fsd_profile:conn-1");
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((code) => code.length <= 65_536));
+  assert.equal(r.calls.httpFetch, undefined);
+  assert.ok(fixtures.requests.length > 0);
+  assert.ok(fixtures.requests.every((request) => request.csrf === "synthetic-csrf"));
+  // The only navigation is collect's feed visit; the probe is observational.
+  assert.deepEqual(r.pageNavigations, ["https://www.linkedin.com/feed/"]);
+ });
+ await t.test("old shells do not persist STATE", async () => {
+  const initialState = { "linkedin.profile": { prior: true } };
+  const r = await run(createLinkedInFixtures(), { supportsStateArgument: false, initialState });
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.stateMessages, []);
+  assert.deepEqual(r.states, initialState);
+ });
+ await t.test("rejected streamed completion does not commit STATE", async () => {
+  const initialState = { "linkedin.profile": { prior: true } };
+  const r = await run(createLinkedInFixtures(), {
+   initialState, resultStreaming: true, resultStreamFailure: { key: "result:done" },
+   resultSpoolDirectory: join(out, "linkedin-rejected-state"),
+  });
+  assertCleanRun(r);
+  assert.ok(r.data.error);
+  assert.deepEqual(r.states, initialState);
+ });
+ await t.test("owner-proven empty sections and connections remain complete", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => {
+   if (url.pathname.endsWith("connectionsSummary/")) body.numConnections = 0;
+   if (url.pathname.endsWith("/connections")) { body.elements = []; body.paging.total = 0; }
+   if (url.searchParams.has("memberIdentity")) {
+    for (const key of ["profilePositionGroups", "profileEducations", "profileSkills", "profileLanguages"]) {
+     body.elements[0][key] = { elements: [], paging: { start: 0, total: 0 } };
+    }
+   }
+   return body;
+  });
+  const r = await run(fixtures);
+  assertCleanRun(r);
+  assert.deepEqual(r.result.errors, []);
+  assert.equal(r.result.exportSummary.count, 1);
+  for (const scope of c.scopes.slice(1)) {
+   assert.deepEqual(r.result[scope].records, []);
+   assert.ok(r.states[scope].full_scan_at);
+  }
+ });
+ const cases = [
+  ["summary owner mismatch", "connections", (url, body) => {
+   if (url.pathname.endsWith("connectionsSummary/")) body.entityUrn = "urn:li:fsd_connectionsSummary:99";
+   return body;
+  }, 1],
+  ["summary total changes", "connections", (url, body, requests) => {
+   if (url.pathname.endsWith("connectionsSummary/") && requests.filter((r) => r.path.endsWith("connectionsSummary/")).length > 1) body.numConnections = 2;
+   return body;
+  }, 1],
+  ["missing summary", "connections", (url, body) => url.pathname.endsWith("connectionsSummary/") ? { fixtureStatus: 404 } : body, 1],
+  ["paging total mismatch", "connections", (url, body) => {
+   if (url.pathname.endsWith("/connections")) body.paging.total = 2;
+   return body;
+  }, 1],
+  ["source-404 connection enrichment", "connections", (url, body) => url.searchParams.has("ids") ? { fixtureStatus: 404 } : body, 0],
+  ["section total mismatch", "skills", (url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].profileSkills.paging.total = 2;
+   return body;
+  }, 0],
+  ["profile owner mismatch", "skills", (url, body) => {
+   if (url.searchParams.has("memberIdentity")) body.elements[0].entityUrn = "urn:li:fsd_profile:99";
+   return body;
+  }, 1],
+ ];
+ for (const [name, stream, transform, expectedRows] of cases) {
+  await t.test(name + " retains readable upserts without STATE", async () => {
+   const scope = "linkedin." + stream;
+   const initialState = { [scope]: { prior: true } };
+   const r = await run(createLinkedInFixtures(transform), { scopes: [scope], initialState });
+   assertCleanRun(r);
+   assert.match(r.data.status, /^Partial:/);
+   assert.equal(r.result[scope]?.records.length ?? 0, expectedRows);
+   assert.deepEqual(r.states, initialState);
+   assert.deepEqual(r.stateMessages, []);
+   assert.ok(r.result.errors.some((e) => e.scope === scope && e.errorClass === "partial"));
+  });
+ }
+ await t.test("successful JSON without owner identity cannot pass the probe", async () => {
+  const fixtures = createLinkedInFixtures((url, body) => url.pathname === "/voyager/api/me" ? {} : body);
+  const r = await run(fixtures, { loginWaitMs: 50 });
+  assertCleanRun(r);
+  assert.equal(r.result.errors[0].errorClass, "auth_failed");
+  assert.equal(r.calls.showBrowser, 1);
+  assert.ok(fixtures.requests.every((request) => request.path === "/voyager/api/me"));
+  assert.deepEqual(r.stateMessages, []);
+ });
+});

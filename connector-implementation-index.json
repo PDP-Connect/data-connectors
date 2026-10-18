@@ -14498,7 +14498,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.29",
+				"version": "0.3.30",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14507,10 +14507,25 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "linkedin",
+						"login_url": "https://www.linkedin.com/login",
+						"login_message": "Sign in to LinkedIn, then return here.",
+						"collect_export": "collectLinkedInPageShim",
+						"probe_export": "probeLinkedInSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
 						}
 					}
 				},
@@ -14899,6 +14914,7 @@
 					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
 					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+					"inventory_not_proven_complete": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
 					"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
 					"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
 					"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
