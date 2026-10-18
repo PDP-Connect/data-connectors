@@ -88,6 +88,7 @@ import {
 	extractRawMessageText,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
+	messageRecordKey,
 	minUpdateTimeIso,
 	reconcileEmittedBranchMessages,
 	tsToIso,
@@ -2327,6 +2328,11 @@ function reportOmittedMessageContent(tally: OmittedMessageContentTally): void {
 	);
 }
 
+/** Run-scoped identity of a message: its record key as one string. */
+function runMessageKey(key: readonly string[]): string {
+	return JSON.stringify(key);
+}
+
 /** Per-run dependency bag threaded through every emit-path helper. Mirrors
  *  the amazon/chase pattern: one stable bag so collect() becomes pure
  *  orchestration and the helpers are individually testable. */
@@ -2339,15 +2345,15 @@ export interface StreamDeps {
 	emitRecord: (
 		stream: string,
 		data: RecordData,
-		options?: { beforeEmit?: () => Promise<void> },
+		options?: { beforeEmit?: () => Promise<void>; key?: readonly string[] },
 	) => Promise<void>;
 	/** Mirrors the runtime's resource/time selection gate before metadata is built. */
 	isRecordSelected?: CollectContext["isRecordSelected"];
-	/** Message IDs already emitted by earlier detail work in this run. */
+	/** Keys (`runMessageKey`) of messages already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
 	/** Run-scoped count of messages emitted without `content` (see OmittedMessageContentTally). */
 	omittedMessageContent?: OmittedMessageContentTally;
-	/** parent_id each message was emitted with this run; the stream is append-only. */
+	/** parent_id each message was emitted with this run, by `runMessageKey`; the stream is append-only. */
 	emittedMessageParentsThisRun?: Map<string, string | null>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
@@ -2876,7 +2882,15 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
-		if (deps.isRecordSelected && !deps.isRecordSelected("messages", msg)) {
+		const recordKey = messageId ? messageRecordKey(c.id, messageId) : null;
+		if (
+			deps.isRecordSelected &&
+			!deps.isRecordSelected(
+				"messages",
+				msg,
+				recordKey ? { key: recordKey } : undefined,
+			)
+		) {
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredBySelection += 1;
@@ -2884,8 +2898,10 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
+		// A node id can recur in another conversation (forks copy nodes), so
+		// "already emitted" is per conversation, like the record key.
 		const alreadyEmitted =
-			messageId !== null && alreadyEmittedIds.has(messageId);
+			recordKey !== null && alreadyEmittedIds.has(runMessageKey(recordKey));
 		// Text over the inline cap is stored whole as a Core blob, never truncated.
 		// Text no host can store (no blob spool, or over the 32 MiB blob cap) is
 		// omitted as a FIELD: the record is emitted with `content` and `blob_ref`
@@ -2952,7 +2968,10 @@ export async function processConversationDetail(
 	// reports the conversation as structurally incomplete instead.
 	let emittedParentConflict = false;
 	for (const candidate of retainedBranch) {
-		const id = typeof candidate.msg.id === "string" ? candidate.msg.id : null;
+		const id =
+			typeof candidate.msg.id === "string"
+				? runMessageKey(messageRecordKey(c.id, candidate.msg.id))
+				: null;
 		if (!id || !candidate.alreadyEmitted || !emittedParents.has(id)) continue;
 		const emittedParent = emittedParents.get(id) ?? null;
 		if (candidate.msg.parent_id !== emittedParent) {
@@ -2997,32 +3016,35 @@ export async function processConversationDetail(
 		const { msg } = candidate;
 		if (candidate.alreadyEmitted) continue;
 		const messageId = typeof msg.id === "string" ? msg.id : null;
-		if (messageId) {
-			alreadyEmittedIds.add(messageId);
-			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
+		const recordKey = messageId ? messageRecordKey(c.id, messageId) : null;
+		if (recordKey) {
+			alreadyEmittedIds.add(runMessageKey(recordKey));
+			emittedParents.set(
+				runMessageKey(recordKey),
+				(msg.parent_id as string | null) ?? null,
+			);
 		}
 		const { blob } = candidate;
 		const sourceNode = mapping[candidate.nodeId];
 		// The blob is spooled only after the runtime's selection and validation
 		// gates pass (beforeEmit), so a suppressed record leaves no orphan file,
 		// and the text is re-derived here rather than held per candidate.
-		await deps.emitRecord(
-			"messages",
-			msg,
-			blob && messageId && sourceNode
+		await deps.emitRecord("messages", msg, {
+			...(recordKey ? { key: recordKey } : {}),
+			...(blob && recordKey && sourceNode
 				? {
 						beforeEmit: () =>
 							deps.emit(
 								spoolMessageBlob(
 									blob.spoolDir,
-									messageId,
+									recordKey,
 									extractRawMessageText(sourceNode) ?? "",
 									blob.ref,
 								),
 							),
 					}
-				: undefined,
-		);
+				: {}),
+		});
 	}
 	const branchStructurallyIncomplete = await emitBranchReconciliation(
 		mapping,

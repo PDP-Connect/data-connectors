@@ -12492,6 +12492,62 @@ test("processConversationDetail: a parent cycle is structurally incomplete, neve
 	);
 });
 
+test("processConversationDetail: two conversations that share a node id each keep their messages, keyed by conversation and id", async () => {
+	const { deps, emitted } = makeHarness();
+	const keys: Array<readonly string[] | undefined> = [];
+	const record = deps.emitRecord;
+	deps.emitRecord = (stream, data, options) => {
+		if (stream === "messages") keys.push(options?.key);
+		return record(stream, data, options);
+	};
+	deps.emittedMessageIdsThisRun = new Set<string>();
+	deps.emittedMessageParentsThisRun = new Map<string, string | null>();
+	// ChatGPT copies nodes into a forked conversation: the same node ids recur.
+	const detail: ChatGptFetchResult = {
+		status: 200,
+		json: {
+			current_node: "a1",
+			mapping: {
+				a0: userNode(null, ["a1"], "first"),
+				a1: userNode("a0", [], "second", "assistant"),
+			},
+		},
+	};
+	const detailFor = (id: string) =>
+		processConversationDetail(
+			deps,
+			makeConvo({ id, current_node: "a1" }),
+			detail,
+			makeEmitConversation(deps),
+		);
+	assert.deepEqual(await detailFor("convo-one"), { complete: true });
+	assert.deepEqual(await detailFor("convo-two"), { complete: true });
+	const messages = emitted.filter((r) => r.stream === "messages");
+	assert.deepEqual(
+		messages.map((r) => [r.data.conversation_id, r.data.id]),
+		[
+			["convo-one", "a0"],
+			["convo-one", "a1"],
+			["convo-two", "a0"],
+			["convo-two", "a1"],
+		],
+		"the second conversation's messages are not dropped as already emitted",
+	);
+	assert.deepEqual(keys, [
+		["convo-one", "a0"],
+		["convo-one", "a1"],
+		["convo-two", "a0"],
+		["convo-two", "a1"],
+	]);
+	for (const row of emitted.filter((r) => r.stream === "conversations")) {
+		assert.equal(
+			row.data.message_count_on_current_branch,
+			2,
+			String(row.data.id),
+		);
+	}
+});
+
 test("processConversationDetail: a repeat detail never changes an already-emitted message's parent_id on the append-only stream", async () => {
 	const { deps, emitted, messages } = makeHarness();
 	deps.emittedMessageIdsThisRun = new Set<string>();
@@ -12804,7 +12860,7 @@ test("processConversationDetail: oversize text is spooled whole as a blob and re
 		);
 		assert.ok(blobMessage, "a BLOB message is emitted");
 		assert.equal(blobMessage.stream, "messages");
-		assert.equal(blobMessage.key, "a1");
+		assert.deepEqual(blobMessage.key, [makeConvo({}).id, "a1"]);
 		assert.equal(blobMessage.sha256, ref.sha256);
 		assert.equal(blobMessage.size_bytes, ref.size_bytes);
 		assert.equal(ref.blob_id, `sha256:${ref.sha256}`);
@@ -13042,6 +13098,11 @@ test("runConversationsAndMessagesStreams: capped runs on a host with no blob sto
 
 // ─── BLOB-before-RECORD through collectChatGpt's real emitRecord wrapper ──
 
+// A message is keyed by `[conversation_id, id]`; a `resources` entry names it
+// by the minified JSON array of that pair.
+const BIG_CONVO_A0 = JSON.stringify(["big-convo", "a0"]);
+const BIG_CONVO_A1 = JSON.stringify(["big-convo", "a1"]);
+
 /**
  * Runs the real `collectChatGpt` against a fake page. Its `emitRecord` is the
  * runtime's real gate (selection, validation, `beforeEmit`) and the connector's
@@ -13110,9 +13171,9 @@ async function collectWithOversizeMessage(
 	]);
 	const emit = (msg: EmittedMessage): Promise<void> => {
 		if (msg.type === "BLOB")
-			events.push({ kind: "BLOB", key: String(msg.key) });
+			events.push({ kind: "BLOB", key: JSON.stringify(msg.key) });
 		if (msg.type === "RECORD" && msg.stream === "messages") {
-			events.push({ kind: "RECORD", key: String(msg.key) });
+			events.push({ kind: "RECORD", key: JSON.stringify(msg.key) });
 			records.push(msg.data as Record<string, unknown>);
 		}
 		return Promise.resolve();
@@ -13150,10 +13211,10 @@ test("collectChatGpt: a blob-backed message emits its BLOB event immediately bef
 			collectWithOversizeMessage({ name: "messages" }),
 		);
 		assert.deepEqual(
-			events.filter((e) => e.key === "a1"),
+			events.filter((e) => e.key === BIG_CONVO_A1),
 			[
-				{ kind: "BLOB", key: "a1" },
-				{ kind: "RECORD", key: "a1" },
+				{ kind: "BLOB", key: BIG_CONVO_A1 },
+				{ kind: "RECORD", key: BIG_CONVO_A1 },
 			],
 		);
 		const record = records.find((r) => r.id === "a1");
@@ -13169,9 +13230,12 @@ test("collectChatGpt: a message the stream selection suppresses emits no BLOB ev
 	const dir = mkdtempSync(join(tmpdir(), "chatgpt-collect-blob-"));
 	try {
 		const { events, records } = await withBlobSpool(dir, () =>
-			collectWithOversizeMessage({ name: "messages", resources: ["a0"] }),
+			collectWithOversizeMessage({
+				name: "messages",
+				resources: [BIG_CONVO_A0],
+			}),
 		);
-		assert.deepEqual(events, [{ kind: "RECORD", key: "a0" }]);
+		assert.deepEqual(events, [{ kind: "RECORD", key: BIG_CONVO_A0 }]);
 		assert.equal(
 			records.some((r) => r.id === "a1"),
 			false,
@@ -13237,7 +13301,7 @@ test("collectChatGpt: a tool-recipient message keeps its body out of tool_calls 
 			assert.equal(record.content === null, c.blob, c.name);
 			assert.equal("content" in record, c.blob, c.name);
 			assert.equal(
-				events.some((e) => e.kind === "BLOB" && e.key === "a1"),
+				events.some((e) => e.kind === "BLOB" && e.key === BIG_CONVO_A1),
 				c.blob,
 				c.name,
 			);

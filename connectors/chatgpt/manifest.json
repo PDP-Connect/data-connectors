@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.57",
+	"version": "0.3.0",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
@@ -208,7 +208,7 @@
 				},
 				"required": ["id", "conversation_id"]
 			},
-			"primary_key": ["id"],
+			"primary_key": ["conversation_id", "id"],
 			"cursor_field": "create_time",
 			"consent_time_field": "create_time",
 			"selection": {

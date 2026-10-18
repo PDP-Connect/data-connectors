@@ -120,12 +120,13 @@ export function writeAllSync(
 
 /**
  * Writes the bytes to the host spool and returns the BLOB message to emit before
- * the record. `text` must be the text `expected` was measured from; the written
- * bytes are re-hashed and a mismatch fails instead of publishing a wrong blob.
+ * the record. `key` is the message record's key, `[conversation_id, id]`.
+ * `text` must be the text `expected` was measured from; the written bytes are
+ * re-hashed and a mismatch fails instead of publishing a wrong blob.
  */
 export function spoolMessageBlob(
 	spoolDir: string,
-	messageId: string,
+	key: readonly string[],
 	text: string,
 	expected: MessageBlobRef,
 	write?: WriteFn,
@@ -154,7 +155,7 @@ export function spoolMessageBlob(
 	const event: HostBlobMessage = {
 		type: "BLOB",
 		stream: "messages",
-		key: messageId,
+		key,
 		file,
 		mime_type: "application/json",
 		size_bytes: expected.size_bytes,

@@ -127,12 +127,50 @@ test("extractContent: undefined / empty object → null", () => {
 	assert.equal(extractContent({}), null);
 });
 
-test("extractContent: text joins parts with \\n and asset-pointers render as [asset:...]", () => {
-	const out = extractContent({
-		content_type: "text",
-		parts: ["hello", { asset_pointer: "file-1" }, { text: "world" }],
-	});
-	assert.equal(out, "hello\n[asset:file-1]\nworld");
+// The legacy collector (apps/desktop/connectors/openai/chatgpt-playwright.js,
+// walkMessages) builds text and multimodal_text content as
+// `parts.filter(p => typeof p === "string").join("\n")` and omits the message
+// when that is empty. Each case below pins one shape of that join.
+const LEGACY_JOIN_CASES: Array<[string, unknown[], string | null]> = [
+	["single string", ["hello"], "hello"],
+	["strings join with a newline", ["a", "b"], "a\nb"],
+	["edge whitespace is kept", [" a "], " a "],
+	["a trailing empty string adds a newline", [" a ", ""], " a \n"],
+	["a leading empty string adds a newline", ["", " a "], "\n a "],
+	["empty strings between strings", ["a", "", "b"], "a\n\nb"],
+	["two empty strings give a lone newline", ["", ""], "\n"],
+	["one empty string is empty", [""], null],
+	["no parts", [], null],
+	["whitespace-only strings are kept", ["", "   "], "\n   "],
+	["only object parts are empty", [{}, {}], null],
+	[
+		"object parts are dropped before the join",
+		["hello", { asset_pointer: "file-1" }, { text: "world" }, "end"],
+		"hello\nend",
+	],
+	["objects around one string", [{}, " a ", {}], " a "],
+	["an asset-only body is empty", [{ asset_pointer: "img-1" }], null],
+	["non-object, non-string parts are dropped", [1, null, true, "a"], "a"],
+];
+
+for (const contentType of ["text", "multimodal_text"] as const) {
+	for (const [name, parts, expected] of LEGACY_JOIN_CASES) {
+		test(`extractContent: ${contentType} matches the legacy join: ${name}`, () => {
+			assert.equal(
+				extractContent({ content_type: contentType, parts }),
+				expected,
+			);
+			assert.equal(
+				extractContentParts({ content_type: contentType, parts }).raw,
+				expected,
+			);
+		});
+	}
+}
+
+test("extractContent: a body without a parts array is empty", () => {
+	assert.equal(extractContent({ content_type: "text" }), null);
+	assert.equal(extractContent({ content_type: "multimodal_text" }), null);
 });
 
 test("extractContent: no text parts → null; whitespace-only text is kept as written", () => {
@@ -184,18 +222,6 @@ test("extractContent: reasoning_recap prefers `content` then falls back to `text
 		"B",
 	);
 	assert.equal(extractContent({ content_type: "reasoning_recap" }), null);
-});
-
-test("extractContent: multimodal_text renders {content_type: image_asset_pointer} tag", () => {
-	const out = extractContent({
-		content_type: "multimodal_text",
-		parts: [
-			{ content_type: "image_asset_pointer", asset_pointer: "img-1" },
-			"caption",
-		],
-	});
-	// asset_pointer wins over content_type when both present.
-	assert.equal(out, "[asset:img-1]\ncaption");
 });
 
 test("extractContent: tether_browsing_display joins summary + result with blank line", () => {

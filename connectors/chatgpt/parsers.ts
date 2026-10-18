@@ -92,57 +92,35 @@ export function flattenTreeCurrentBranch(
 //
 // Memory bound of extraction. The extractors below build the whole body: an
 // array with one entry per part, and a joined string. Transient memory is
-// O(source payload size + part count); the constants depend on the part format and the JS engine's
-// string representation (references, ropes, flattening), so no tighter factor
-// is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
+// O(source payload size + part count); the constants depend on the part format
+// and the JS engine's string representation (references, ropes, flattening),
+// so no tighter factor is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
 // full text, and the cap decision uses `escapedLengthExceeds` on the result.
 // Oversize text is not retained per candidate (a blob-backed message re-extracts
 // it once to measure and once to spool, see message-blob.ts); inline content is
 // retained by design, at most the inline cap per message.
 
 /**
- * Stringify one `parts[]` entry from text / multimodal_text bodies. Returns
- * "" for unknown shapes so the caller can filter them out via `.filter(Boolean)`.
+ * Join the string entries of a `parts[]` array with "\n". Non-string entries
+ * (asset pointers, nested objects) are dropped before the join and empty
+ * strings are kept, so the result equals the legacy collector's
+ * `parts.filter(p => typeof p === "string").join("\n")`. A body whose joined
+ * text is empty yields null, so the message is omitted as the legacy one is.
  */
-function stringifyContentPart(p: unknown): string {
-	if (typeof p === "string") {
-		return p;
-	}
-	if (p && typeof p === "object") {
-		const po = p as {
-			asset_pointer?: unknown;
-			content_type?: unknown;
-			text?: unknown;
-		};
-		if (typeof po.text === "string") {
-			return po.text;
-		}
-		if (typeof po.asset_pointer === "string") {
-			return `[asset:${po.asset_pointer}]`;
-		}
-		if (typeof po.content_type === "string") {
-			return `[${po.content_type}]`;
-		}
-	}
-	return "";
+function joinStringParts(content: ChatGptContent): string | null {
+	const parts = Array.isArray(content.parts) ? content.parts : [];
+	const s = parts.filter((p): p is string => typeof p === "string").join("\n");
+	return s || null;
 }
 
-/** Canonical user/assistant text: `{ parts: ["...", {asset_pointer}...] }`. */
+/** Canonical user/assistant text: `{ parts: ["...", ...] }`. */
 function extractTextContent(content: ChatGptContent): string | null {
-	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = parts.map(stringifyContentPart).join("\n");
-	return s || null;
+	return joinStringParts(content);
 }
 
-/**
- * Multimodal variant: same part-stringifier, but filter empties before joining
- * (a `{content_type: "image_asset_pointer"}` entry without an asset_pointer or
- * text yields "" which we drop here).
- */
+/** Multimodal variant: same string-parts join as `text`. */
 function extractMultimodalContent(content: ChatGptContent): string | null {
-	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = parts.map(stringifyContentPart).filter(Boolean).join("\n");
-	return s || null;
+	return joinStringParts(content);
 }
 
 /** Assistant-authored tool call bodies: `{ content_type: "code", language, text }`. */
@@ -638,6 +616,19 @@ export function extractMessageWithBlob(
 			on_current_branch: onCurrentBranch,
 		},
 	};
+}
+
+/**
+ * The key of a `messages` record: `[conversation_id, id]`, the manifest's
+ * `primary_key`. ChatGPT reuses a node id in several conversations (forks and
+ * branches copy nodes), so the node id names a message only within its
+ * conversation.
+ */
+export function messageRecordKey(
+	conversationId: string,
+	nodeId: string,
+): [string, string] {
+	return [conversationId, nodeId];
 }
 
 export function extractMessage(
