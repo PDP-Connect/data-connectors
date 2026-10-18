@@ -109,7 +109,9 @@ test("equal units do not hide a search product the detail page lacks", () => {
 	const { items } = parsers.parseOrderDetailDom(FIXTURE);
 	const first = items[0]?.productId;
 	assert.ok(first);
-	const all = items.map((item) => item.productId).filter((id) => id) as string[];
+	const all = items
+		.map((item) => item.productId)
+		.filter((id) => id) as string[];
 	assert.equal(
 		connector.orderDetailCountsMatch(
 			{ ...stub(A, 3), searchProductIds: all },
@@ -224,8 +226,8 @@ test("an online row without an ASIN keeps its order, omits the item record, and 
 		orders.map((record) => record.data.id),
 		[A, B],
 	);
-	assert.equal(orders[0]?.data.item_count, 1);
-	assert.equal(orders[0]?.data.total_cents, 499);
+	assert.equal(orders[0]?.data.item_count, null);
+	assert.equal(orders[0]?.data.total_cents, null);
 	assert.equal(itemRecords.length, 3);
 	assert.ok(itemRecords.every((record) => record.data.order_id === B));
 	const warning = harness.protocolMessages.find((message) => {
