@@ -131,6 +131,11 @@ test("a heap sample that rejects while the run is pending is not an unhandled re
 		await sleep(300);
 		assert.ok(rejectedSamples > 0, "no sample was made to reject");
 		assert.equal(run.ret?.ok, true, String(run));
+		assert.equal(
+			run.maxHeapBytes,
+			undefined,
+			"a failed heap sample must void the measurement",
+		);
 	} finally {
 		chromium.launch = launch;
 		process.off("unhandledRejection", listener);

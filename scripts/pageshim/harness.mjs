@@ -802,9 +802,13 @@ export async function runHarness({
 					await new Promise((resolve) => setTimeout(resolve, 50));
 				}
 				await sample();
-				// A failed sample (closed session, crashed target) is not a result; the
-				// handler is attached here so it cannot go unhandled while evaluate runs.
-			})().catch(() => {});
+				// The handler is attached here so a failed sample (closed session,
+				// crashed target) cannot go unhandled while evaluate runs. A partial
+				// measurement is not a measurement: report none, so a heap-bound
+				// assertion fails instead of passing on the samples taken so far.
+			})().catch(() => {
+				maxHeapBytes = undefined;
+			});
 		}
 
 		if (loginAfterMs === Number.POSITIVE_INFINITY) {
