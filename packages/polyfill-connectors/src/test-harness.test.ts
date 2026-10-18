@@ -520,3 +520,38 @@ test("runConnectorProtocolSubprocess: retainRawStdout false keeps the parsed mes
 		retained.messages,
 	);
 });
+
+test("runConnectorProtocolSubprocess: a multi-byte character split across stdout chunks survives", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-utf8-"));
+	const entrypoint = join(tempDir, "utf8-connector.mjs");
+	// 3-byte characters, 300 KB in one line: pipe chunks (64 KiB) cannot all
+	// end on a character boundary, so per-chunk decoding would corrupt some.
+	const text = "\u20ac".repeat(100_000);
+	await writeFile(
+		entrypoint,
+		[
+			`const text = ${JSON.stringify(text)};`,
+			'process.stdout.write(JSON.stringify({ type: "RECORD", stream: "items", data: { id: "1", text } }) + "\\n");',
+			'process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");',
+		].join("\n"),
+	);
+	try {
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint,
+			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+		});
+		const record = result.messages.find((m) => m.type === "RECORD") as
+			| { data: { text: string } }
+			| undefined;
+		assert.ok(record, "the RECORD reached messages");
+		assert.equal(
+			record.data.text.includes("\ufffd"),
+			false,
+			"no replacement characters",
+		);
+		assert.equal(record.data.text, text);
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
