@@ -13,6 +13,7 @@ import { collectGitHubBrowser } from "./collector.ts";
 import type { BrowserPageObservation } from "./page-evidence.ts";
 import { probeGitHubBrowserSession } from "./probe.ts";
 import { validateRecord } from "./schemas.ts";
+import type { BrowserServices } from "./types.ts";
 
 const CONTRIBUTION_CALENDAR_SELECTOR =
 	"td.ContributionCalendar-day[data-date], rect.day[data-date]";
@@ -96,6 +97,41 @@ async function openGitHubPage(
 		: new Error("github_browser_navigation_failed");
 }
 
+/**
+ * One unauthenticated api.github.com request, read in the page. A non-2xx
+ * answer (403/429 from the 60/h core or 10/min search limits, a 5xx) comes
+ * back as its status with no data, so the collector can withhold only the
+ * stream that asked. It used to throw `github_browser_http_<status>`.
+ */
+export async function fetchPublicJson(
+	page: Pick<BrowserCollectContext["page"], "evaluate">,
+	url: string,
+): Promise<Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>> {
+	return page.evaluate(async (target) => {
+		const response = await fetch(target, {
+			headers: {
+				Accept: "application/vnd.github+json",
+				"X-GitHub-Api-Version": "2022-11-28",
+			},
+		});
+		let data: unknown = null;
+		if (response.ok) {
+			try {
+				data = await response.json();
+			} catch {
+				data = null;
+			}
+		}
+		return {
+			requestedUrl: target,
+			responseUrl: response.url,
+			status: response.status,
+			link: response.headers.get("Link"),
+			data,
+		};
+	}, url) as Promise<Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>>;
+}
+
 async function ensureSession({
 	assist,
 	capture,
@@ -136,24 +172,7 @@ export async function collect({
 	"emit" | "emitRecord" | "page" | "progress" | "requested" | "state"
 >): Promise<void> {
 	const services = {
-		fetchPublicJson: async (url: string) =>
-			page.evaluate(async (target) => {
-				const response = await fetch(target, {
-					headers: {
-						Accept: "application/vnd.github+json",
-						"X-GitHub-Api-Version": "2022-11-28",
-					},
-				});
-				if (!response.ok)
-					throw new Error(`github_browser_http_${response.status}`);
-				return {
-					requestedUrl: target,
-					responseUrl: response.url,
-					status: response.status,
-					link: response.headers.get("Link"),
-					data: await response.json(),
-				};
-			}, url),
+		fetchPublicJson: async (url: string) => fetchPublicJson(page, url),
 		now: () => new Date(),
 		openPage: async (url: string) => openGitHubPage(page, url),
 		openContributionPage: async (url: string) =>

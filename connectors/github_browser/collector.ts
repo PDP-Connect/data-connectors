@@ -49,7 +49,13 @@ interface CoverageCounts {
 interface HistoryTypeResult extends CoverageCounts {
 	complete: boolean;
 	capped: boolean;
+	failure: string | null;
 }
+
+type ApiResponse = Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>;
+type ApiRead =
+	| { response: ApiResponse; failure: null }
+	| { response: null; failure: string };
 
 export async function collectGitHubBrowser(
 	context: BrowserCollectionPort,
@@ -145,14 +151,17 @@ export async function collectGitHubBrowser(
 		pending.set(stream, rows);
 		return true;
 	};
+	// A failed page or API read withholds the stream that made it, never the
+	// run. On the mobile PageShim host a read that outlives the bridge call
+	// timeout rejects here; the other streams still run.
 	const runIsolated = async (
 		stream: string,
 		work: () => Promise<void>,
 	): Promise<void> => {
 		try {
 			await work();
-		} catch {
-			await incomplete(stream, "source_request_failed");
+		} catch (error) {
+			await incomplete(stream, isTimeout(error) ? "source_read_timeout" : "source_request_failed");
 		}
 	};
 
@@ -260,11 +269,19 @@ export async function collectGitHubBrowser(
 			let considered = 0;
 			let covered = 0;
 			let valid = true;
+			let failure: string | null = null;
 			for (let page = 1; page <= 3; page += 1) {
 				const url = `${API}/users/${username}/events/public?per_page=100&page=${page}`;
-				const response = await services.fetchPublicJson(url);
-				if (!apiResponseMatches(response, url) || !Array.isArray(response.data))
+				const read = await readApi(services, url);
+				if (read.failure !== null) {
+					failure = read.failure;
 					break;
+				}
+				const response = read.response;
+				if (!Array.isArray(response.data)) {
+					failure = "invalid_api_response";
+					break;
+				}
 				considered += response.data.length;
 				for (const raw of response.data) {
 					const parsed = parseLegacyEventPageItem(raw);
@@ -286,7 +303,7 @@ export async function collectGitHubBrowser(
 			}
 			const counts = { considered, covered };
 			// Neither a short page nor our loop limit establishes the source end.
-			await incomplete("events", !valid ? "invalid_or_duplicate_rows" : "end_not_proven", counts);
+			await incomplete("events", !valid ? "invalid_or_duplicate_rows" : failure ?? "end_not_proven", counts);
 		});
 	}
 
@@ -397,6 +414,7 @@ export async function collectGitHubBrowser(
 					capped: false,
 					considered: 0,
 					covered: 0,
+					failure: "source_request_failed",
 				};
 			}
 			try {
@@ -407,6 +425,7 @@ export async function collectGitHubBrowser(
 					capped: false,
 					considered: 0,
 					covered: 0,
+					failure: "source_request_failed",
 				};
 			}
 			const considered = issueResult.considered + prResult.considered;
@@ -415,9 +434,10 @@ export async function collectGitHubBrowser(
 				!issueResult.complete ||
 				!prResult.complete
 			) {
+				const failure = issueResult.failure ?? prResult.failure;
 				await incomplete(
 					"history",
-					"search_incomplete",
+					failure === null ? "search_incomplete" : `search_incomplete: ${failure}`,
 					{ considered, covered },
 				);
 				return;
@@ -443,13 +463,18 @@ export async function collectGitHubBrowser(
 		let covered = 0;
 		let completeType = false;
 		let capped = false;
+		let failure: string | null = null;
 		const seen = new Set<string>();
 		for (let page = 1; page <= HISTORY_PAGE_LIMIT; page += 1) {
 			const kind = type === "pr" ? "type:pr" : "type:issue";
 			const query = encodeURIComponent(`author:${username} ${kind}`);
 			const url = `${API}/search/issues?q=${query}&sort=created&order=desc&per_page=${HISTORY_PAGE_SIZE}&page=${page}`;
-			const response = await services.fetchPublicJson(url);
-			if (!apiResponseMatches(response, url)) break;
+			const read = await readApi(services, url);
+			if (read.failure !== null) {
+				failure = read.failure;
+				break;
+			}
+			const response = read.response;
 			const body = asRecord(response.data);
 			if (
 				body === null ||
@@ -490,7 +515,7 @@ export async function collectGitHubBrowser(
 			if (body.items.length === 0 || apiWindowEnded(response.link)) break;
 			if (page < HISTORY_PAGE_LIMIT) await services.sleep(6500);
 		}
-		return { complete: completeType, capped, considered, covered };
+		return { complete: completeType, capped, considered, covered, failure };
 	}
 }
 
@@ -515,7 +540,7 @@ function inventoryRows(
 }
 
 function apiResponseMatches(
-	response: Awaited<ReturnType<BrowserServices["fetchPublicJson"]>>,
+	response: ApiResponse,
 	expectedUrl: string,
 ): boolean {
 	return (
@@ -523,6 +548,32 @@ function apiResponseMatches(
 		response.requestedUrl === expectedUrl &&
 		response.responseUrl === expectedUrl
 	);
+}
+
+/**
+ * One unauthenticated api.github.com read. GitHub answers 403 or 429 when the
+ * 60/h core or 10/min search limit is spent, and 5xx when it is unavailable.
+ * Those answers, a thrown request and a redirected or non-200 answer become a
+ * reason for the one stream that asked; they never end the run.
+ */
+async function readApi(services: BrowserServices, url: string): Promise<ApiRead> {
+	let response: ApiResponse;
+	try {
+		response = await services.fetchPublicJson(url);
+	} catch (error) {
+		return { response: null, failure: isTimeout(error) ? "api_read_timeout" : "api_request_failed" };
+	}
+	if (response.status === 403 || response.status === 429)
+		return { response: null, failure: "api_rate_limited" };
+	if (response.status >= 500) return { response: null, failure: "api_unavailable" };
+	if (!apiResponseMatches(response, url))
+		return { response: null, failure: "invalid_api_response" };
+	return { response, failure: null };
+}
+
+function isTimeout(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return /timed? ?out/iu.test(message);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -549,9 +600,10 @@ async function inspectStarredRest(
 	const seen = new Set<string>();
 	for (let page = 1; page <= INVENTORY_PAGE_LIMIT; page += 1) {
 		const url = `${API}/users/${username}/starred?per_page=100&page=${page}`;
-		const response = await services.fetchPublicJson(url);
-		if (!apiResponseMatches(response, url) || !Array.isArray(response.data))
-			return "invalid_starred_rest_response";
+		const read = await readApi(services, url);
+		if (read.failure !== null) return `starred_rest_${read.failure}`;
+		const response = read.response;
+		if (!Array.isArray(response.data)) return "invalid_starred_rest_response";
 		for (const raw of response.data) {
 			const repo = asRecord(raw);
 			const name = repo?.full_name;
