@@ -83,7 +83,23 @@ export async function decompressBytes(
 	}
 }
 
-type ProtobufField = { wireType: number; value?: Uint8Array };
+type ProtobufField = {
+	fieldNumber: number;
+	wireType: number;
+	value?: Uint8Array;
+};
+
+const NOTE_BODY_TEXT_FIELD = 1;
+const NOTE_BODY_DOCUMENT_FIELD = 2;
+const NOTE_DOCUMENT_RICH_TEXT_FIELD = 3;
+const RICH_TEXT_VALUE_FIELD = 2;
+
+type ProtobufMessage = "note_body" | "note_document" | "rich_text";
+
+type NoteTextExtraction =
+	| { kind: "READ"; value: string }
+	| { kind: "EXPLICIT_EMPTY" }
+	| { kind: "UNAVAILABLE"; reason: "body_text_unreadable" };
 
 function readVarint(
 	bytes: Uint8Array,
@@ -107,7 +123,9 @@ function parseProtobuf(bytes: Uint8Array): ProtobufField[] | null {
 		const tag = readVarint(bytes, offset);
 		if (!tag || tag[0] === 0) return null;
 		offset = tag[1];
+		const fieldNumber = tag[0] >>> 3;
 		const wireType = tag[0] & 7;
+		if (fieldNumber === 0) return null;
 		if (wireType === 0) {
 			const value = readVarint(bytes, offset);
 			if (!value) return null;
@@ -121,13 +139,17 @@ function parseProtobuf(bytes: Uint8Array): ProtobufField[] | null {
 			offset = length[1];
 			const end = offset + length[0];
 			if (end > bytes.length) return null;
-			fields.push({ wireType, value: bytes.subarray(offset, end) });
+			fields.push({
+				fieldNumber,
+				wireType,
+				value: bytes.subarray(offset, end),
+			});
 			offset = end;
 			continue;
 		} else {
 			return null;
 		}
-		fields.push({ wireType });
+		fields.push({ fieldNumber, wireType });
 	}
 	return fields;
 }
@@ -157,46 +179,103 @@ function decodeUtf8(bytes: Uint8Array): string | null {
 	}
 }
 
-function extractProtobufText(bytes: Uint8Array, depth = 0): string[] | null {
-	if (depth > 32) return null;
-	const fields = parseProtobuf(bytes);
-	if (!fields) return null;
-	if (!fields.some((field) => field.wireType === 2)) {
-		const text = decodeUtf8(bytes);
-		return text === null ? [] : [text];
+function extractProtobufText(
+	bytes: Uint8Array,
+	message: ProtobufMessage = "note_body",
+	depth = 0,
+): NoteTextExtraction {
+	if (depth > 32) {
+		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 	}
-	const text: string[] = [];
+	if (bytes.length === 0) return { kind: "EXPLICIT_EMPTY" };
+	const fields = parseProtobuf(bytes);
+	if (!fields) {
+		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+	}
+	let sawRecognizedField = false;
+	let text = "";
 	for (const field of fields) {
-		if (field.wireType !== 2 || !field.value) continue;
-		const nested = extractProtobufText(field.value, depth + 1);
-		if (nested) {
-			text.push(...nested);
+		if (
+			message === "note_body" &&
+			field.fieldNumber === NOTE_BODY_TEXT_FIELD &&
+			field.wireType === 2
+		) {
+			sawRecognizedField = true;
+			const value = field.value ? decodeUtf8(field.value) : null;
+			if (value === null) {
+				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+			}
+			text += value;
 			continue;
 		}
-		const value = decodeUtf8(field.value);
-		if (value !== null && value.length > 0) text.push(value);
+		if (
+			message === "note_body" &&
+			field.fieldNumber === NOTE_BODY_DOCUMENT_FIELD
+		) {
+			sawRecognizedField = true;
+			if (field.wireType !== 2 || !field.value) {
+				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+			}
+			const document = extractProtobufText(
+				field.value,
+				"note_document",
+				depth + 1,
+			);
+			if (document.kind === "UNAVAILABLE") return document;
+			if (document.kind === "READ") text += document.value;
+			continue;
+		}
+		if (
+			message === "note_document" &&
+			field.fieldNumber === NOTE_DOCUMENT_RICH_TEXT_FIELD &&
+			field.wireType === 2 &&
+			field.value
+		) {
+			sawRecognizedField = true;
+			const richText = extractProtobufText(
+				field.value,
+				"rich_text",
+				depth + 1,
+			);
+			if (richText.kind === "UNAVAILABLE") return richText;
+			if (richText.kind === "READ") text += richText.value;
+			continue;
+		}
+		if (
+			message === "rich_text" &&
+			field.fieldNumber === RICH_TEXT_VALUE_FIELD &&
+			field.wireType === 2
+		) {
+			sawRecognizedField = true;
+			const value = field.value ? decodeUtf8(field.value) : null;
+			if (value === null) {
+				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+			}
+			text += value;
+			continue;
+		}
+		if (message === "rich_text" && field.fieldNumber === 3) {
+			// Rich-text formatting and attachment metadata do not contain body text.
+			sawRecognizedField = true;
+		}
 	}
-	return text;
+	if (!sawRecognizedField) {
+		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
+	}
+	return text.length > 0 ? { kind: "READ", value: text } : { kind: "EXPLICIT_EMPTY" };
 }
 
 /** Decode UTF-8 strings from length-delimited rich-text protobuf fields. */
 export function extractCleanText(decompressed: Uint8Array): string | null {
-	const fields = extractProtobufText(decompressed);
-	return fields && fields.length > 0 ? fields.join("") : null;
+	const extraction = extractProtobufText(decompressed);
+	return extraction.kind === "READ" ? extraction.value : null;
 }
 
 /** Decode a note's `TextDataEncrypted` field (base64 of a compressed
- *  protobuf blob) to a best-effort text preview. Tries gzip, then raw
- *  deflate, then zlib deflate — the legacy connector tried the same three
- *  formats in the same order because the compression Apple's client uses
- *  is not documented and has been observed to vary. Returns null if the
- *  input can't be decoded under any tried format or contains no
- *  extractable prose. */
-type NoteTextExtraction =
-	| { kind: "READ"; value: string }
-	| { kind: "EXPLICIT_EMPTY" }
-	| { kind: "UNAVAILABLE"; reason: "body_text_unreadable" };
-
+ *  protobuf blob) to its text content. Tries gzip, then raw deflate, then
+ *  zlib deflate. A nonempty body with unknown structure or invalid UTF-8 is
+ *  unavailable; only recognized empty or attachment-only structures are
+ *  explicitly empty. */
 async function readCompressedNoteText(
 	base64Data: string,
 ): Promise<NoteTextExtraction> {
@@ -211,12 +290,7 @@ async function readCompressedNoteText(
 		if (!decompressed) {
 			continue;
 		}
-		const fields = extractProtobufText(decompressed);
-		if (!fields) continue;
-		const text = fields.join("");
-		return text.length > 0
-			? { kind: "READ", value: text }
-			: { kind: "EXPLICIT_EMPTY" };
+		return extractProtobufText(decompressed);
 	}
 	return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 }

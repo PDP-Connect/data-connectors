@@ -101,6 +101,41 @@ test("extractCleanText: reads UTF-8 strings from length-delimited protobuf field
 	assert.equal(extractCleanText(decompressed), text);
 });
 
+test("extractCleanText: preserves text that resembles a nested protobuf", async () => {
+	const body = Buffer.from([
+		0x0a, 0x0c, 0x52, 0x0a, 0x43, 0x61, 0x6c, 0x6c,
+		0x20, 0x41, 0x6c, 0x69, 0x63, 0x65,
+	]);
+	assert.equal(extractCleanText(body), "R\nCall Alice");
+});
+
+test("extractCleanText: recurses into the known structural field", async () => {
+	const body = encodeStructuredBodyText("Nested note");
+	assert.equal(extractCleanText(body), "Nested note");
+});
+
+test("readNoteRecord: preserves text that resembles a nested protobuf", async () => {
+	const body = Buffer.from([
+		0x0a, 0x0c, 0x52, 0x0a, 0x43, 0x61, 0x6c, 0x6c,
+		0x20, 0x41, 0x6c, 0x69, 0x63, 0x65,
+	]);
+	const result = await readNoteRecord({
+		recordName: "note-ambiguous-text",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: null },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: { value: gzipSync(body).toString("base64") },
+		},
+	});
+	assert.equal(result.record?.text_content, "R\nCall Alice");
+});
+
 test("extractCleanText: short and Unicode body text is preserved", async () => {
 	await Promise.all(
 		["a", "hi", "yes", "猫", "你好世界", "📝", "مرحبا мир 🌍", "café 世界"].map(
@@ -120,7 +155,20 @@ test("extractNoteText: decodes a synthetic gzip-compressed note body (labelled s
 
 function encodeBodyText(text: string): Buffer {
 	const value = Buffer.from(text, "utf-8");
-	return Buffer.concat([Buffer.from([0x0a, value.length]), value]);
+	return encodeLengthDelimitedField(1, value);
+}
+
+function encodeLengthDelimitedField(fieldNumber: number, value: Buffer): Buffer {
+	return Buffer.concat([
+		Buffer.from([(fieldNumber << 3) | 2, value.length]),
+		value,
+	]);
+}
+
+function encodeStructuredBodyText(text: string): Buffer {
+	const richText = encodeLengthDelimitedField(2, Buffer.from(text, "utf-8"));
+	const document = encodeLengthDelimitedField(3, richText);
+	return encodeLengthDelimitedField(2, document);
 }
 
 test("extractNoteText: preserves short and Unicode text from the protobuf body structure", async () => {
@@ -159,6 +207,38 @@ test("readNoteRecord: nonempty undecodable protobuf body is unavailable", async 
 			({ field, reason }) =>
 				field === "text_content" && reason === "body_text_unreadable",
 		),
+	);
+});
+
+test("readNoteRecord: unreadable UTF-8 in a valid body withholds the field", async () => {
+	await Promise.all(
+		[
+			Buffer.from([0x0a, 0x01, 0xff]),
+			Buffer.from([0x0a, 0x02, 0x48, 0x69, 0x0a, 0x01, 0xff]),
+		].map(async (body) => {
+			const compressed = gzipSync(body);
+			const result = await readNoteRecord({
+				recordName: "note-invalid-text-field",
+				recordType: "Note",
+				fields: {
+					TitleEncrypted: { value: null },
+					SnippetEncrypted: { value: null },
+					Folder: { value: null },
+					IsPinned: { value: null },
+					CreationDate: { value: null },
+					ModificationDate: { value: null },
+					Attachments: { value: [] },
+					TextDataEncrypted: { value: compressed.toString("base64") },
+				},
+			});
+			assert.equal(result.record?.text_content, null);
+			assert.ok(
+				result.unavailableFields.some(
+					({ field, reason }) =>
+						field === "text_content" && reason === "body_text_unreadable",
+				),
+			);
+		}),
 	);
 });
 
@@ -406,7 +486,10 @@ test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable"
 });
 
 test("readNoteRecord: compressed attachment-only body is explicitly empty text", async () => {
-	const attachmentOnlyBody = gzipSync(Buffer.from([0x10, 0x01]));
+	const attachmentMetadata = encodeLengthDelimitedField(3, Buffer.alloc(0));
+	const richText = encodeLengthDelimitedField(3, attachmentMetadata);
+	const document = encodeLengthDelimitedField(3, richText);
+	const attachmentOnlyBody = gzipSync(encodeLengthDelimitedField(2, document));
 	const result = await readNoteRecord({
 		recordName: "note-attachment-only",
 		recordType: "Note",
