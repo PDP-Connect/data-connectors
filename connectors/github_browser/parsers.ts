@@ -1083,11 +1083,12 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 	switch (value.type) {
 		case "PushEvent": {
 			const commits = Array.isArray(payload.commits) ? payload.commits : undefined;
-			requireField("title", commits !== undefined && (commits.length === 0 || typeof objectValue(commits[0]).message === "string"));
+			// GitHub may omit commit details. Legacy represents their absence as null.
+			requireField("title", payload.commits === undefined || (commits !== undefined && (commits.length === 0 || typeof objectValue(commits[0]).message === "string")));
 			requireField("branch", typeof payload.ref === "string");
 			requireField("commits", commits !== undefined
 				? commits.every((commit) => typeof objectValue(commit).message === "string")
-				: nullableNumber(payload.size));
+				: payload.commits === undefined && (payload.size === undefined || nullableNumber(payload.size)));
 			break;
 		}
 		case "PullRequestEvent":
