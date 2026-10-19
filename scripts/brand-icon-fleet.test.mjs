@@ -62,6 +62,7 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "facebook.json", // no vendored real mark; the factory agent's drawn icon was removed
   "tiktok.json", // no vendored real mark; the factory agent's drawn icon was removed
   "fitbit.json", // a mark exists; omitted by choice (trademark)
+  "character_ai.json", // no vendored real mark; the factory-drawn placeholder icon was removed
   "garmin_browser.json",
   "google_takeout.json",
   // Instinct: invite-only product launched 2026; no mark in the vendored

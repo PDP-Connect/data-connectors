@@ -21,6 +21,7 @@ export const CONNECTOR_PUBLISH_INVENTORY = Object.freeze(
     ["apple_contacts", "apple-contacts"],
     ["apple_health", "apple-health"],
     ["apple_photos", "apple-photos"],
+    ["character_ai", "character-ai"],
     ["chase", "chase"],
     ["chatgpt", "chatgpt"],
     ["claude_code", "claude-code"],
