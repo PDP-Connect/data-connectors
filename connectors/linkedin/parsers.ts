@@ -717,13 +717,29 @@ const CONNECTION_ROW = rowSpec(connectionsSchema, ["id"]);
 
 /** The fields a resolved member profile supplies to a connection row. */
 export function connectionEnrichmentReads(profile: unknown): FieldReads {
+	const sourceText = (...paths: Path[]) =>
+		firstOf(
+			paths.map((path) => textAt(profile, path)),
+			"unavailable",
+		);
+	const firstName = sourceText(["firstName"]);
+	const lastName = sourceText(["lastName"]);
+	const malformedNamePart = [firstName, lastName].find(
+		(outcome) => outcome.kind === "unavailable" && outcome.reason !== "absent",
+	);
+	const name = malformedNamePart
+		? malformedNamePart
+		: firstName.kind === "read" || lastName.kind === "read"
+			? read(
+					`${firstName.kind === "read" ? firstName.value : ""} ${lastName.kind === "read" ? lastName.value : ""}`.trim(),
+				)
+			: firstName.kind === "empty" || lastName.kind === "empty"
+				? EMPTY
+				: unavailable("absent");
 	return {
-		full_name: joinName(
-			optionalText(profile, ["firstName"]),
-			optionalText(profile, ["lastName"]),
-		),
-		headline: optionalText(profile, ["headline"], ["occupation"]),
-		profile_url: profileUrlRead(optionalText(profile, ["publicIdentifier"])),
+		full_name: name,
+		headline: sourceText(["headline"], ["occupation"]),
+		profile_url: profileUrlRead(sourceText(["publicIdentifier"])),
 	};
 }
 
@@ -734,36 +750,52 @@ export function connectionEnrichmentIsReadable(profile: unknown): boolean {
 	);
 }
 
+/** Missing optional enrichment is incomplete but not malformed source data. */
+export function connectionEnrichmentHasMalformedFields(
+	profile: unknown,
+): boolean {
+	return Object.values(connectionEnrichmentReads(profile)).some(
+		(outcome) => outcome.kind === "unavailable" && outcome.reason !== "absent",
+	);
+}
+
 /**
- * One connection row. `resolved` is the member's profile from the batch
- * resolution, or undefined when it could not be resolved: its enrichment
- * fields are then unavailable, so the row is withheld (see `addRow`).
+ * One connection row. An explicit per-member 404 means the source no longer
+ * exposes profile enrichment, so emit the relationship edge alone. Every
+ * other unreadable field withholds the whole upsert to preserve stored data.
  */
 export function connectionReads(
 	element: unknown,
 	resolved: unknown,
+	permanentlyMissing = false,
 ): FieldReads {
-	const enrichment =
-		resolved === undefined
+	const enrichment: FieldReads = permanentlyMissing
+		? {}
+		: resolved === undefined
 			? {
-					full_name: unavailable("enrichment_unresolved"),
-					headline: unavailable("enrichment_unresolved"),
-					profile_url: unavailable("enrichment_unresolved"),
+					full_name: unavailable("source_unavailable"),
+					headline: unavailable("source_unavailable"),
+					profile_url: unavailable("source_unavailable"),
 				}
 			: connectionEnrichmentReads(resolved);
-	return {
-		connected_at: firstOf(
-			[andThen(at(element, ["createdAt"]), epochMillis)],
-			"empty",
-		),
+	const reads: Record<string, FieldRead<unknown>> = {
 		id: textAt(element, ["connectedMember"]),
-		...enrichment,
 	};
+	const connectedAt = andThen(at(element, ["createdAt"]), epochMillis);
+	if (
+		connectedAt.kind !== "unavailable" ||
+		connectedAt.reason !== "absent" ||
+		!permanentlyMissing
+	) {
+		reads.connected_at = connectedAt;
+	}
+	return { ...reads, ...enrichment };
 }
 
 export function buildConnectionRows(
 	elements: readonly unknown[],
 	resolvedProfileOf: (memberUrn: string) => unknown,
+	isPermanentlyMissing: (memberUrn: string) => boolean = () => false,
 ): StreamRows<ConnectionRecord> {
 	const rows = emptyStreamRows<ConnectionRecord>();
 	for (const element of elements) {
@@ -775,6 +807,7 @@ export function buildConnectionRows(
 				connectionReads(
 					element,
 					member.kind === "read" ? resolvedProfileOf(member.value) : undefined,
+					member.kind === "read" && isPermanentlyMissing(member.value),
 				),
 			),
 		);
