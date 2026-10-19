@@ -9,7 +9,8 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.2.46",
+	"version": "0.2.56",
+	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {
 		"icon": "icon.svg",
@@ -23,11 +24,20 @@
 			},
 			"browser": {
 				"required": true,
-				"features": ["page_navigation", "page_script_evaluation", "page_condition_wait"]
+				"features": [
+					"page_navigation",
+					"page_script_evaluation",
+					"page_condition_wait"
+				]
 			}
 		}
 	},
 	"capabilities": {
+		"host_blob_write": {
+			"version": 1,
+			"max_blob_bytes": 33554432,
+			"streams": ["messages"]
+		},
 		"human_interaction": ["manual_action"],
 		"refresh_policy": {
 			"recommended_mode": "automatic",
@@ -123,6 +133,7 @@
 		},
 		{
 			"name": "messages",
+			"required": true,
 			"description": "Messages within conversations, flattened from ChatGPT's tree structure to the current-branch path. When filtering removes intermediate nodes, parent_id links to the nearest retained ancestor. The filtered message count is reported through PROGRESS.",
 			"display": {
 				"label": "Your messages",
@@ -150,7 +161,9 @@
 					},
 					"content": {
 						"type": ["string", "null"],
-						"x_pdpp_role": "primary-title"
+						"x_pdpp_role": "primary-title",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Full message text in the pdpp-safe-escape-v1 encoding. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
 					},
 					"content_type": {
 						"type": ["string", "null"]
@@ -169,13 +182,28 @@
 						"type": "array"
 					},
 					"tool_calls": {
-						"type": "array"
+						"type": "array",
+						"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+						"description": "Tool calls. Every string inside every entry, at any depth and including object keys, is in the pdpp-safe-escape-v1 encoding (decode it as content is decoded). An entry that carries a message body may use text_ref \"content\" in place of text when the message content is blob-backed (blob_ref) or omitted: the body is the content field."
 					},
 					"attachment_ids": {
 						"type": "array"
 					},
 					"on_current_branch": {
 						"type": "boolean"
+					},
+					"blob_ref": {
+						"type": "object",
+						"x_pdpp_blob_projects_field": "content",
+						"x_pdpp_blob_codec": "json-string-v1",
+						"description": "Present only when content is null because the text is over the inline cap. The blob (application/json) is the JSON string of the exact source text, with no pdpp-safe-escape-v1 escaping: JSON.parse(bytes) returns the source text for the content field.",
+						"properties": {
+							"blob_id": { "type": "string" },
+							"mime_type": { "type": "string" },
+							"size_bytes": { "type": "integer" },
+							"sha256": { "type": "string" }
+						},
+						"required": ["blob_id", "mime_type", "size_bytes", "sha256"]
 					}
 				},
 				"required": ["id", "conversation_id"]
@@ -588,7 +616,11 @@
 			"incremental": true,
 			"query": {
 				"search": {
-					"lexical_fields": ["plan_type", "plan_display_name", "subscription_plan"]
+					"lexical_fields": [
+						"plan_type",
+						"plan_display_name",
+						"subscription_plan"
+					]
 				},
 				"range_filters": {
 					"account_created_at": ["gte", "gt", "lte", "lt"],

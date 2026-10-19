@@ -24,8 +24,11 @@ import {
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
 	flattenMessageText,
+	omittedFieldCountOf,
+	oversizeTextOf,
 	parseClassifiedExport,
 	parseConversation,
+	parseConversationHeader,
 	parseExport,
 	parseJsonArrayChunks,
 	parseMessage,
@@ -33,6 +36,8 @@ import {
 	parseProjectDocument,
 	resolveExportedProfile,
 } from "./parsers.ts";
+import { decodeEscapedText } from "./safe-escape.ts";
+import { validateRecord } from "./schemas.ts";
 
 test("parseJsonArrayChunks reads bounded UTF-16 chunks and emits one value at a time", async () => {
 	const source = String.raw`[{"text":"a \"quoted\" value","nested":[1,true]},"😀",null]`;
@@ -287,7 +292,7 @@ test("parseMessage: unparseable/absent timestamp is null, never guessed", () => 
 // conversations, not just the one offending message). content must degrade
 // to null instead, matching connectors/chatgpt/parsers.ts's established
 // toSafeFullContent convention.
-test("parseMessage: a control character in content degrades content to null instead of throwing and aborting the whole export", () => {
+test("parseMessage: a control character in content is represented, not dropped", () => {
 	const record = parseMessage(
 		{
 			uuid: "m1",
@@ -297,7 +302,8 @@ test("parseMessage: a control character in content degrades content to null inst
 		"conv-1",
 	);
 	assert.ok(record);
-	assert.equal(record.content, null);
+	assert.equal(record.content, "line one\\u0000line two");
+	assert.equal(decodeEscapedText(record.content ?? ""), "line one\x00line two");
 	assert.equal(record.id, "m1");
 });
 
@@ -480,10 +486,11 @@ test("parseProject: a project with no uuid/id is dropped", () => {
 // it must degrade to a safe placeholder instead of throwing and aborting
 // the whole export (same class of real-account regression as parseMessage's
 // content test above).
-test("parseProject: a control character in name degrades to the same 'Untitled project' placeholder used for a missing name, instead of throwing", () => {
+test("parseProject: a control character in name is represented; the placeholder is only for a missing name", () => {
 	const parsed = parseProject({ uuid: "p1", name: "line one\x00line two" });
 	assert.ok(parsed);
-	assert.equal(parsed.project.name, "Untitled project");
+	assert.equal(parsed.project.name, "line one\\u0000line two");
+	assert.equal(parseProject({ uuid: "p2" })?.project.name, "Untitled project");
 });
 
 // ─── parseExport (whole-archive) ────────────────────────────────────────
@@ -840,4 +847,175 @@ test("parseClassifiedExport: pools classified raw items across parts through the
 	assert.equal(parsed.projects.length, 1);
 	assert.equal(parsed.projectDocuments.length, 1);
 	assert.equal(parsed.projectDocuments[0]?.filename, "a.md");
+});
+
+// ─── pdpp-safe-escape-v1: control characters are represented, nothing is cut ──
+
+const CTRL = "a\u0000b\u0007c\u001fd\u007fe\u0085f\ud800g\\u0001h\ttab";
+const decoded = (value: unknown) => decodeEscapedText(String(value));
+
+test("every converted conversation and message field round-trips control characters", () => {
+	const header = parseConversationHeader({ uuid: "c1", name: CTRL }, 0);
+	assert.equal(decoded(header?.title), CTRL);
+	const viaSummary = parseConversationHeader(
+		{ uuid: "c2", name: "", summary: CTRL },
+		0,
+	);
+	assert.equal(decoded(viaSummary?.title), CTRL);
+	const message = parseMessage(
+		{
+			uuid: "m1",
+			text: CTRL,
+			attachments: [{ file_name: CTRL, [CTRL]: { nested: [CTRL] }, n: 1 }],
+		},
+		"c1",
+	);
+	assert.equal(decoded(message?.content), CTRL);
+	const attachment = message?.attachments?.[0] as Record<string, unknown>;
+	assert.equal(decoded(attachment.file_name), CTRL);
+	const [key] = Object.keys(attachment).filter(
+		(k) => k !== "file_name" && k !== "n",
+	);
+	assert.equal(decoded(key), CTRL);
+	assert.deepEqual(
+		(attachment[key ?? ""] as { nested: string[] }).nested.map(decoded),
+		[CTRL],
+	);
+	assert.equal(attachment.n, 1);
+});
+
+test("every converted project and document field round-trips control characters", () => {
+	const parsed = parseProject({
+		uuid: "p1",
+		name: CTRL,
+		description: CTRL,
+		prompt_template: CTRL,
+		archived_at: CTRL,
+		creator: { uuid: "u1", full_name: CTRL },
+		docs: [
+			{
+				uuid: "d1",
+				filename: CTRL,
+				content: CTRL,
+				created_at: CTRL,
+				updated_at: CTRL,
+			},
+		],
+	});
+	assert.ok(parsed);
+	const { project, documents } = parsed;
+	for (const value of [
+		project.name,
+		project.description,
+		project.prompt_template,
+		project.archived_at,
+		project.creator?.full_name,
+	])
+		assert.equal(decoded(value), CTRL);
+	const rawDoc = project.raw_docs[0];
+	for (const value of [
+		rawDoc?.filename,
+		rawDoc?.content,
+		rawDoc?.created_at,
+		rawDoc?.updated_at,
+	])
+		assert.equal(decoded(value), CTRL);
+	assert.equal(decoded(documents[0]?.filename), CTRL);
+	assert.equal(decoded(documents[0]?.content), CTRL);
+	for (const [stream, record] of [
+		["projects", project],
+		["project_documents", documents[0]],
+	] as const)
+		assert.equal(validateRecord(stream, { ...record }).ok, true, stream);
+});
+
+test("no text field is ever truncated to a former schema cap", () => {
+	const title = "t".repeat(5000);
+	const longName = "n".repeat(3000);
+	const long = "l".repeat(70_000);
+	const header = parseConversationHeader({ uuid: "c", name: title }, 0);
+	assert.equal(header?.title, title);
+	const parsed = parseProject({
+		uuid: "p",
+		name: longName,
+		description: long,
+		prompt_template: long,
+		archived_at: "a".repeat(200),
+		creator: { full_name: longName },
+		docs: [{ uuid: "d", filename: "f".repeat(2000), content: "c" }],
+	});
+	assert.ok(parsed);
+	assert.equal(parsed.project.name, longName);
+	assert.equal(parsed.project.description, long);
+	assert.equal(parsed.project.prompt_template, long);
+	assert.equal(parsed.project.archived_at, "a".repeat(200));
+	assert.equal(parsed.project.creator?.full_name, longName);
+	assert.equal(parsed.documents[0]?.filename, "f".repeat(2000));
+	assert.equal(parsed.project.raw_docs[0]?.filename, "f".repeat(2000));
+	assert.equal(omittedFieldCountOf(parsed.project), 0);
+	assert.equal(
+		validateRecord("projects", { ...parsed.project }).ok,
+		true,
+		"the schema accepts the untruncated values",
+	);
+});
+
+test("a field whose escaped text is over the inline cap is left absent and counted, never cut", () => {
+	// 3M NULs are 3M raw units but 18M escaped: over the 10M inline cap.
+	const nuls = "\u0000".repeat(3_000_000);
+	const header = parseConversationHeader({ uuid: "c", name: nuls }, 0);
+	assert.ok(header);
+	assert.equal("title" in header, false);
+	assert.equal(omittedFieldCountOf(header), 1);
+	const parsed = parseProject({
+		uuid: "p",
+		name: "ok",
+		description: nuls,
+		prompt_template: "x".repeat(10_000_001),
+		docs: [{ uuid: "d", filename: nuls, content: "c" }],
+	});
+	assert.ok(parsed);
+	assert.equal(parsed.project.name, "ok");
+	assert.equal("description" in parsed.project, false);
+	assert.equal("prompt_template" in parsed.project, false);
+	assert.equal(omittedFieldCountOf(parsed.project), 2);
+	assert.equal("filename" in (parsed.documents[0] ?? {}), false);
+	assert.equal(omittedFieldCountOf(parsed.documents[0] ?? {}), 1);
+	assert.equal(validateRecord("conversations", { ...header }).ok, true);
+	assert.equal(validateRecord("projects", { ...parsed.project }).ok, true);
+});
+
+test("body text whose escaped form is over the inline cap becomes a blob of the RAW text", () => {
+	const raw = "\u0000".repeat(2_100_000); // 2.1M raw, 12.6M escaped
+	const message = parseMessage({ uuid: "m", text: raw }, "c");
+	assert.equal(message?.content, null);
+	assert.equal(oversizeTextOf(message ?? {}), raw);
+	const doc = parseProjectDocument({ uuid: "d", content: raw }, "p");
+	assert.equal(doc?.content, null);
+	assert.equal(oversizeTextOf(doc ?? {}), raw);
+	// Just under the cap on the escaped form stays inline.
+	const under = parseMessage(
+		{ uuid: "m2", text: "\u0000".repeat(1_600_000) },
+		"c",
+	);
+	assert.equal(typeof under?.content, "string");
+	assert.equal(oversizeTextOf(under ?? {}), null);
+});
+
+test("parseConversationHeader: a title or identity field reported over the cap is absent or unparseable, never a prefix", () => {
+	const over = (...keys: string[]) => new Set(keys);
+	const noName = parseConversationHeader(
+		{ uuid: "c", summary: "S" },
+		0,
+		over("name"),
+	);
+	assert.equal("title" in (noName ?? {}), false);
+	assert.equal(omittedFieldCountOf(noName ?? {}), 1);
+	const noSummary = parseConversationHeader({ uuid: "c" }, 0, over("summary"));
+	assert.equal("title" in (noSummary ?? {}), false);
+	assert.equal(omittedFieldCountOf(noSummary ?? {}), 1);
+	assert.equal(parseConversationHeader({ uuid: "c" }, 0, over())?.title, null);
+	assert.equal(parseConversationHeader({ id: "i" }, 0, over("uuid")), null);
+	assert.equal(parseConversationHeader({ uuid: "c" }, 0, over("id"))?.id, "c");
+	assert.equal(parseConversationHeader({}, 0, over("id")), null);
 });

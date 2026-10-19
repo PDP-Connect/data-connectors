@@ -96,6 +96,8 @@ test("large synthetic activities.csv emits with bounded RSS", async () => {
 				TZ: "UTC",
 			},
 			peakRssPollIntervalMs: 25,
+			// Only parsed messages are asserted on, so skip the raw stdout copy.
+			retainRawStdout: false,
 			start: {
 				scope: {
 					streams: [{ name: "activities" }, ],

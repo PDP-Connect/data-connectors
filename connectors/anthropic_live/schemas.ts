@@ -14,6 +14,12 @@
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
+import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
+
+// Text fields carry the pdpp-safe-escape-v1 encoding (see safe-escape.ts). The
+// only length limit is the inline cap, measured on the escaped text; a value
+// over it is left absent, never cut.
+const encodedText = pdppSafeText.max(INLINE_TEXT_MAX_UNITS);
 
 // Module-scoped regex (Biome useTopLevelRegex).
 const ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
@@ -27,7 +33,7 @@ const isoDateTimeNullable = z
 
 export const conversationsSchema = z.object({
 	id: idSchema,
-	title: pdppSafeText.max(4000).nullable(),
+	title: encodedText.nullable().optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
 	project_id: idSchema.nullable(),
@@ -41,7 +47,7 @@ export const messagesSchema = z.object({
 	conversation_id: idSchema,
 	role: z.string().min(1).max(64).nullable(),
 	parent_id: idSchema.nullable(),
-	content: pdppSafeText.max(10_000_000).nullable(),
+	content: encodedText.nullable().optional(),
 	model: z.string().min(1).max(128).nullable(),
 	// "conversation": the conversation's model when the message was collected.
 	model_source: z.literal("conversation").nullable(),

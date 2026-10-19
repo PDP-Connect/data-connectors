@@ -1504,7 +1504,8 @@ function runReplaySubprocess(args: {
 			}
 		};
 
-		childStdout.on("data", (chunk: Buffer) => {
+		childStdout.setEncoding("utf8");
+		childStdout.on("data", (chunk: string) => {
 			// Activity — resets the inactivity window (replay's scripted
 			// interaction answering never waits on a human, so this watchdog is
 			// never suspended — see this file's "Inactivity watchdog" section).
@@ -1512,7 +1513,7 @@ function runReplaySubprocess(args: {
 			if (hardFailure) {
 				return;
 			}
-			stdoutBuffer += chunk.toString();
+			stdoutBuffer += chunk;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
 				const line = stdoutBuffer.slice(0, newlineIndex);
@@ -1529,9 +1530,10 @@ function runReplaySubprocess(args: {
 				newlineIndex = stdoutBuffer.indexOf("\n");
 			}
 		});
-		childStderr.on("data", (chunk: Buffer) => {
+		childStderr.setEncoding("utf8");
+		childStderr.on("data", (chunk: string) => {
 			watchdog.touch();
-			stderr += chunk.toString();
+			stderr += chunk;
 		});
 		child.on("error", (err) => {
 			watchdog.dispose();

@@ -97,3 +97,28 @@ export const pageshimCase = {
 		details: { sleep: 0, readiness: 0, activity: 0 },
 	},
 };
+
+/** Deterministic daily responses, with optional failed windows and stray rows. */
+export function recordingDailyFixture({ failWindow = -1, extraDays = [] } = {}) {
+	const windows = [];
+	return {
+		windows,
+		resolve(raw) {
+			const url = new URL(raw);
+			if (url.pathname !== "/api/account/daily-data") return resolveFixture(raw);
+			const start = url.searchParams.get("start");
+			const end = url.searchParams.get("end");
+			windows.push({ start, end });
+			if (windows.length - 1 === failWindow) return json({ error: "unavailable" }, 500);
+			const days = [...extraDays];
+			for (let day = start; day <= end;) {
+				days.push(day);
+				day = new Date(Date.parse(day) + 86_400_000).toISOString().slice(0, 10);
+			}
+			return json({ daily_sleeps: days.map((day) => ({
+				id: "00000000-0000-4000-8000-" + day.replaceAll("-", "").padStart(12, "0"),
+				day, score: 88,
+			})) });
+		},
+	};
+}

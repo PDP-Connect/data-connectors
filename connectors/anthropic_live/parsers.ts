@@ -10,6 +10,7 @@
 
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { encodePdppSafeText, escapedLengthExceeds } from "./safe-escape.ts";
 import type {
 	RawConversation,
 	RawMessage,
@@ -51,6 +52,51 @@ function safeText(value: unknown, max: number): string | null {
 	return parsed.success ? parsed.data : null;
 }
 
+/** Why a record has a text field absent. Neither is a loss to the source: the
+ * text was far over the inline cap, and this host has no blob store to carry
+ * it. Counted, never cut to a prefix. */
+export interface TextOmissions {
+	/** A field whose escaped text passed the inline cap. */
+	exceedsInlineCap: number;
+	/** Message text over the inline cap; a blob would hold it, but this
+	 * connector has no blob host. */
+	noBlobStore: number;
+}
+
+const OMISSIONS = Symbol("anthropic_live.omissions");
+
+/** What was left out of `record` (not enumerable, so it is never emitted). */
+export function omissionsOf(record: object): TextOmissions {
+	const found = (record as { [OMISSIONS]?: TextOmissions })[OMISSIONS];
+	return found ?? { exceedsInlineCap: 0, noBlobStore: 0 };
+}
+
+/** A text field in the pdpp-safe-escape-v1 encoding (see safe-escape.ts), so
+ * control characters are represented, not dropped. Null when the source has
+ * no text; undefined (absent) when the escaped text is over the inline cap. */
+function encodedText(value: unknown): string | null | undefined {
+	const text = str(value);
+	if (text === null) return null;
+	if (escapedLengthExceeds(text).exceeds) return undefined;
+	const encoded = encodePdppSafeText(text);
+	return pdppSafeText.safeParse(encoded).success ? encoded : undefined;
+}
+
+function withOmissions<T extends object>(
+	record: T,
+	omissions: TextOmissions,
+): T {
+	if (omissions.exceedsInlineCap > 0 || omissions.noBlobStore > 0)
+		Object.defineProperty(record, OMISSIONS, { value: omissions });
+	return record;
+}
+
+function compact(record: Record<string, unknown>): Record<string, unknown> {
+	for (const key of Object.keys(record))
+		if (record[key] === undefined) delete record[key];
+	return record;
+}
+
 /**
  * `conversations` record. `message_count` is known only when the detail was
  * fetched (the list carries no count); pass null otherwise.
@@ -61,16 +107,20 @@ export function buildConversationRecord(
 ): RecordData | null {
 	const id = str(raw.uuid);
 	if (id === null) return null;
-	return {
-		id,
-		title: safeText(str(raw.name) ?? str(raw.summary), 4000),
-		create_time: isoOrNull(raw.created_at),
-		update_time: isoOrNull(raw.updated_at),
-		project_id: str(raw.project_uuid),
-		model: str(raw.model),
-		message_count: messageCount,
-		is_starred: bool(raw.is_starred),
-	};
+	const title = encodedText(str(raw.name) ?? str(raw.summary));
+	return withOmissions(
+		compact({
+			id,
+			title,
+			create_time: isoOrNull(raw.created_at),
+			update_time: isoOrNull(raw.updated_at),
+			project_id: str(raw.project_uuid),
+			model: str(raw.model),
+			message_count: messageCount,
+			is_starred: bool(raw.is_starred),
+		}) as RecordData,
+		{ exceedsInlineCap: title === undefined ? 1 : 0, noBlobStore: 0 },
+	);
 }
 
 /** Same precedence as the export parser: `text`, then the text blocks. */
@@ -86,17 +136,18 @@ export function flattenMessageText(raw: RawMessage): string {
 		.join("\n");
 }
 
-function safeJson(value: unknown): boolean {
-	if (typeof value === "string") return pdppSafeText.safeParse(value).success;
-	if (value === null || typeof value === "boolean") return true;
-	if (typeof value === "number") return Number.isFinite(value);
-	if (Array.isArray(value)) return value.every(safeJson);
-	return (
-		isRecord(value) &&
-		Object.entries(value).every(
-			([key, item]) => pdppSafeText.safeParse(key).success && safeJson(item),
-		)
-	);
+/** Every string key and value in the pdpp-safe-escape-v1 encoding. */
+function encodeJson(value: unknown): unknown {
+	if (typeof value === "string") return encodePdppSafeText(value);
+	if (Array.isArray(value)) return value.map(encodeJson);
+	if (isRecord(value))
+		return Object.fromEntries(
+			Object.entries(value).map(([key, item]) => [
+				encodePdppSafeText(key),
+				encodeJson(item),
+			]),
+		);
+	return value;
 }
 
 /**
@@ -116,20 +167,26 @@ export function buildMessageRecord(
 	if (id === null) return null;
 	const role = str(raw.sender);
 	const model = role === "assistant" ? conversationModel : null;
-	return {
-		id,
-		conversation_id: conversationId,
-		role,
-		parent_id: str(raw.parent_message_uuid),
-		content: safeText(flattenMessageText(raw), 10_000_000),
-		model,
-		model_source: model === null ? null : "conversation",
-		create_time: isoOrNull(raw.created_at),
-		update_time: isoOrNull(raw.updated_at),
-		attachments: Array.isArray(raw.attachments)
-			? raw.attachments.filter(isRecord).filter(safeJson)
-			: null,
-	};
+	const content = encodedText(flattenMessageText(raw));
+	return withOmissions(
+		compact({
+			id,
+			conversation_id: conversationId,
+			role,
+			parent_id: str(raw.parent_message_uuid),
+			// Over the inline cap the text would be a blob; this connector has
+			// no blob store, so the field is absent, never cut.
+			content,
+			model,
+			model_source: model === null ? null : "conversation",
+			create_time: isoOrNull(raw.created_at),
+			update_time: isoOrNull(raw.updated_at),
+			attachments: Array.isArray(raw.attachments)
+				? raw.attachments.filter(isRecord).map(encodeJson)
+				: null,
+		}) as RecordData,
+		{ exceedsInlineCap: 0, noBlobStore: content === undefined ? 1 : 0 },
+	);
 }
 
 function capabilities(org: RawOrganization): string[] {
