@@ -349,8 +349,10 @@ test("the credentials prompt makes no false persistence promise", async () => {
 		/persistence/i,
 		"the prompt must not promise persistence it does not provide",
 	);
+	// connector-protocol 2.5 names the missing variables in the request schema,
+	// not in the message text.
 	assert.match(
-		message,
+		JSON.stringify(calls[0]?.schema ?? {}),
 		/CHATGPT_USERNAME/,
 		"the prompt must still name what it needs",
 	);
