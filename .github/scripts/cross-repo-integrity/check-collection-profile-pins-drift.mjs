@@ -130,8 +130,7 @@ async function main() {
 
 	// The pins file and the registry are TypeScript. Node 24 strips their types on import;
 	// the pins file's only import is type-only, and the registry's other imports are
-	// relative paths inside this checkout, so neither needs an install step. This is the
-	// same no-node_modules property check-collector-definitions-drift.mjs relies on.
+	// relative paths inside this checkout, so neither needs an install step.
 	// pathToFileURL (not a `file://` template literal): the checkout paths arrive as CLI
 	// arguments and may be relative, which would otherwise be misparsed as a URL *host*.
 	const { COLLECTION_PROFILE_PINS } = await import(pathToFileURL(resolve(pinsPath)).href);

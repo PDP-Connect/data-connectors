@@ -74,11 +74,8 @@ function runComparator(fixture, { eventName, prTouches, pinnedSha = fixture.pinn
 	return { outputs, stdout };
 }
 
-test("data-connect freshness tracks the definitions snapshot and the Collection Profile pins", () => {
-	assert.equal(dataConnectMatrix.paths.includes("\n"), true);
+test("data-connect freshness tracks only the Collection Profile pins", () => {
 	assert.deepEqual(pathspecs(dataConnectMatrix), [
-		"packages/local-collector/scripts/generate-collector-definitions-snapshot.ts",
-		"packages/local-collector/src/generated/collector-definitions.generated.ts",
 		"packages/local-collector/src/generated/collection-profile-pins.generated.ts",
 	]);
 });

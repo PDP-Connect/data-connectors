@@ -11,13 +11,13 @@
 
 const PIN_FILE = ".github/cross-repo-pins.json";
 
-// check-collector-definitions-drift.mjs copies every connectors/<id>/collector-definition.ts
-// into the generator's scratch tree, so each one is an input to that drift job.
+// collector-registry.ts imports every connectors/<id>/collector-definition.ts, and the
+// collection-profile-pins job loads that registry, so each one is an input to that job.
 const COLLECTOR_DEFINITION = /^connectors\/[^/]+\/collector-definition\.ts$/;
 
 const PIN_BACKED_ARTIFACTS = {
 	"data-connect": new Set([
-		// Read by the collector-definitions and collection-profile-pins drift jobs.
+		// Read by the collection-profile-pins drift job.
 		"packages/polyfill-connectors/src/collector-registry.ts",
 		// Read by the collection-profile-pins drift job: the publish inventory.
 		"scripts/connector-publish-allowlist.mjs",

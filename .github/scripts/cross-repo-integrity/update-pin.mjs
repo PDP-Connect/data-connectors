@@ -21,7 +21,7 @@ if (!pin) {
 
 const previousSha = pin.sha;
 const driftJobs = repo === "data-connect"
-	? "(a) collector-definitions and (b) collection-profile-pins"
+	? "(b) collection-profile-pins"
 	: "(d) reference-contract";
 
 pin.sha = sha;

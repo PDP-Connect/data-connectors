@@ -210,8 +210,6 @@ jobs:
       fail-fast: false
       matrix:
         check:
-          - id: collector-definitions
-            label: local-collector definitions snapshot
           - id: reference-contract
             label: reference-contract stand-in
           # The leg below guards the seam between this repo and data-connect's local
@@ -225,9 +223,11 @@ jobs:
           # NOT check versions or digests: data-connect verifies digests and Sigstore
           # signatures at install time, and a pin that lags the latest release is its choice.
           #
-          # It is not covered by the collector-definitions leg above: that leg byte-compares
-          # the registry against data-connect's committed generated snapshot and never reads
-          # the pins file, so the registry and the snapshot can agree while the pins do not.
+          # This leg replaced the collector-definitions leg, which byte-compared the registry
+          # against data-connect's committed definitions snapshot. Since data-connect#248 the
+          # collector runs its pinned profiles, so that snapshot follows the pinned releases,
+          # not this repository's main, and data-connect's own runner.test.ts checks the
+          # snapshot against those pinned profiles.
           #
           # runner.test.ts:200 and :236 (default streams vs the connectors' own manifests) are
           # deliberately NOT reinstated here. Both files those cases compare live in THIS
@@ -273,10 +273,6 @@ jobs:
             echo "::error::pdpp checked out to $RESOLVED, not the requested pin $PDPP_SHA" >&2
             exit 1
           fi
-
-      - name: Run drift check — collector-definitions
-        if: matrix.check.id == 'collector-definitions'
-        run: node data-connectors/.github/scripts/cross-repo-integrity/check-collector-definitions-drift.mjs data-connect data-connectors
 
       - name: Run drift check — reference-contract
         if: matrix.check.id == 'reference-contract'
@@ -340,13 +336,11 @@ jobs:
             label: data-connect
             url: https://github.com/PDP-Connect/data-connect.git
             pin-output: data-connect-sha
-            # Canonical paths that back drift jobs (a) collector-definitions and (b)
-            # collection-profile-pins — see .github/cross-repo-pins.json's own note on
-            # data-connect's pin. This must cover every data-connect path those jobs actually
-            # compare: the definitions-snapshot generator + its committed output back job (a),
-            # and the committed Collection Profile pins file backs job (b) — without that last
-            # entry the pin could report fresh while job (b) validates a pins list
-            # data-connect's tracked ref has already changed.
+            # Canonical path that backs drift job (b) collection-profile-pins — see
+            # .github/cross-repo-pins.json's own note on data-connect's pin. Without it the pin
+            # could report fresh while job (b) validates a pins list data-connect's tracked ref
+            # has already changed. The definitions snapshot and its generator are no longer
+            # listed: they backed the retired collector-definitions job.
             #
             # packages/collector-runtime and packages/connector-protocol are deliberately NOT
             # listed: they backed the retired tarball-digests job, whose premise was that this
@@ -360,8 +354,6 @@ jobs:
             # there can never contribute a real diff. This list is static because GitHub
             # Actions step config isn't runtime-computed.
             paths: |-
-              packages/local-collector/scripts/generate-collector-definitions-snapshot.ts
-              packages/local-collector/src/generated/collector-definitions.generated.ts
               packages/local-collector/src/generated/collection-profile-pins.generated.ts
           - id: pdpp
             label: pdpp
