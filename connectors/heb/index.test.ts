@@ -4,7 +4,8 @@
 /**
  * Integration tests for the H-E-B connector's collect()-layer helpers.
  *
- * These tests don't spin up a browser. They stub `Page`'s minimal surface
+ * The synthetic `collect:` cases and existing detail-surface tests launch
+ * Chromium against local fixtures. Other tests stub `Page`'s minimal surface
  * (goto/waitForSelector/content/url) and drive the real exported functions
  * from index.ts, using `makeRecordingEmit(validateRecord)` so every emitted
  * record runs through the connector's real zod schema.
@@ -33,7 +34,10 @@ import {
 	setConnectorDiagnosticSink,
 } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
-import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import {
+	type EmittedRecord,
+	makeRecordingEmit,
+} from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
 	buildOrdersStateCursor,
 	classifyEmptyListPage,
@@ -52,6 +56,7 @@ import {
 	HEB_REPAIR_RETRY_DELAY_MAX_MS,
 	HEB_REPAIR_RETRY_DELAY_MIN_MS,
 	hebAllowsInteractiveAuthRepair,
+	hebConnector,
 	type NutritionTarget,
 	newOrderItemsCoverage,
 	newOrdersCoverage,
@@ -72,8 +77,13 @@ import {
 	resolveOrderDetail,
 	runForwardScan,
 } from "./index.ts";
+import { parseOrderDate, parseOrdersListDom } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
+
+// DOM fixtures contain date-only English labels; pin this test process so
+// absolute fixture dates do not depend on the host's local timezone.
+process.env.TZ = "UTC";
 
 const FIXTURES_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -216,6 +226,420 @@ const NO_DETAIL_HTML = "<html><body><main>no items here</main></body></html>";
 const PASSWORD_FORM_HTML = `<html><body><main>
   <form><input type="password" name="password" /></form>
 </main></body></html>`;
+
+interface SyntheticProviderBody {
+	orderDate: string;
+	quantity: number;
+	lineTotal: string;
+}
+
+interface SyntheticListSummary {
+	itemCount: number;
+	total: string;
+}
+
+function syntheticOrderList(
+	body: SyntheticProviderBody,
+	summary: Partial<SyntheticListSummary> = {},
+): string {
+	const [year, month, day] = body.orderDate.split("-").map(Number);
+	const date = new Date(Date.UTC(year ?? 2026, (month ?? 1) - 1, day ?? 1));
+	const dateLabel = new Intl.DateTimeFormat("en-US", {
+		day: "numeric",
+		month: "short",
+		timeZone: "UTC",
+		year: "numeric",
+	}).format(date);
+	return `<html><body><main><div data-qe-id="orderResults"><div><div><div data-qe-id="orderDetailsCard"><div><p data-qe-id="orderDetailsHeader">Curbside at H-E-B Synthetic Store</p><p data-qe-id="orderDetailsDate">${dateLabel}, 11:00am–12:00pm</p><p data-qe-id="orderDetailsTotal">Total: <span>${summary.total ?? body.lineTotal}, ${summary.itemCount ?? body.quantity} items</span><br>Status: <span data-qe-id="orderDetailsStatus">Delivered</span></p></div><div><a data-qe-id="viewDetailsButton" href="/my-account/order-history/HEB1000000001">View details</a></div></div></div></div></div><nav aria-label="Pagination Navigation"><a href="/my-account/your-orders?page=1">1</a></nav></main></body></html>`;
+}
+
+function syntheticOrderDetail(body: SyntheticProviderBody): string {
+	return `<html><body><main><section><h2 data-qe-id="orderDetailsGroupTitle">Synthetic groceries</h2><ul><li data-qe-id="itemRow"><a data-qe-id="itemRowDetailsName" href="/product-detail/synthetic-widget/9001">Synthetic Widget</a><span data-qe-id="checkoutItemPrice">${body.lineTotal}</span><span data-qe-id="orderItemQty">Qty: ${body.quantity}</span></li></ul></section></main></body></html>`;
+}
+
+const SYNTHETIC_ORDER: SyntheticProviderBody = {
+	lineTotal: "$10.00",
+	orderDate: "2026-07-14",
+	quantity: 1,
+};
+
+test("collect: synthetic fixture dates use a deterministic UTC test environment", () => {
+	assert.equal(process.env.TZ, "UTC");
+	const raw = parseOrdersListDom(syntheticOrderList(SYNTHETIC_ORDER))[0]
+		?.orderDateRaw;
+	assert.ok(raw);
+	assert.equal(parseOrderDate(raw), SYNTHETIC_ORDER.orderDate);
+});
+
+test("collect: synthetic list summary controls stay independent of detail fields", () => {
+	const summary = { itemCount: 1, total: "$10.00" };
+	const base = syntheticOrderList(SYNTHETIC_ORDER, summary);
+	assert.equal(
+		syntheticOrderList({ ...SYNTHETIC_ORDER, quantity: 2 }, summary),
+		base,
+		"detail quantity must not change the controlled list count",
+	);
+	assert.equal(
+		syntheticOrderList({ ...SYNTHETIC_ORDER, lineTotal: "$12.00" }, summary),
+		base,
+		"detail line total must not change the controlled list total",
+	);
+	assert.match(base, /\$10\.00, 1 items/);
+});
+
+interface SyntheticStreamFailure {
+	stream: string;
+	message: string;
+	options: { retryable?: boolean } | undefined;
+}
+
+async function collectSyntheticHeb(input: {
+	body: SyntheticProviderBody;
+	listSummary?: Partial<SyntheticListSummary>;
+	emittedAt: string;
+	state: Record<string, unknown>;
+	streams: string[];
+}): Promise<{
+	emitted: EmittedRecord[];
+	protocolMessages: EmittedMessage[];
+	streamFailures: SyntheticStreamFailure[];
+	progressMessages: string[];
+}> {
+	const browser = await chromium.launch({ headless: true });
+	try {
+		const page = await browser.newPage();
+		const listBody = syntheticOrderList(input.body, input.listSummary);
+		const detailBody = syntheticOrderDetail(input.body);
+		// Keep every request local to these synthetic provider responses.
+		await page.route("**/*", (route) => route.abort());
+		await page.route(
+			"https://www.heb.com/my-account/your-orders?page=1",
+			(route) => route.fulfill({ body: listBody, contentType: "text/html" }),
+		);
+		await page.route(
+			"https://www.heb.com/my-account/order-history/HEB1000000001",
+			(route) => route.fulfill({ body: detailBody, contentType: "text/html" }),
+		);
+		const harness = makeRecordingEmit(validateRecord);
+		const streams = input.streams.map((name) => ({ name }));
+		const streamFailures: SyntheticStreamFailure[] = [];
+		const progressMessages: string[] = [];
+		const context: BrowserCollectContext = {
+			assist: async () => {
+				throw new Error("synthetic collect must not request assistance");
+			},
+			capture: null,
+			collectionMode: "incremental",
+			completeAssistance: async () => {},
+			context: page.context(),
+			credentials: {},
+			detailGaps: [],
+			emit: harness.emit,
+			emitRecord: harness.emitRecord,
+			// All fixture records are selected; this run exercises mapping only.
+			isRecordSelected: (_stream, _data) => true,
+			emittedAt: input.emittedAt,
+			page,
+			progress: async (message) => {
+				progressMessages.push(message);
+			},
+			recoveryOnly: false,
+			reportStreamFailure: async (stream, message, options) => {
+				streamFailures.push({ stream, message, options });
+			},
+			requestDetailGapPage: async () => [],
+			requested: new Map(streams.map((stream) => [stream.name, stream])),
+			scope: { streams },
+			sendInteraction: async () => {
+				throw new Error("synthetic collect must not request interaction");
+			},
+			state: input.state,
+		};
+		await hebConnector.collect(context);
+		return {
+			emitted: harness.emitted,
+			protocolMessages: harness.protocolMessages,
+			streamFailures,
+			progressMessages,
+		};
+	} finally {
+		await browser.close();
+	}
+}
+
+const ORDER_STREAMS = ["orders", "order_items"];
+const SYNTHETIC_CLOCK = "2026-08-20T12:00:00.000Z";
+const SYNTHETIC_LATER_CLOCK = "2026-09-21T12:00:00.000Z";
+
+type SyntheticRun = Awaited<ReturnType<typeof collectSyntheticHeb>>;
+type SkipResult = Extract<EmittedMessage, { type: "SKIP_RESULT" }>;
+
+function onlyRecord(
+	run: SyntheticRun,
+	stream: string,
+): Record<string, unknown> {
+	const records = run.emitted.filter((record) => record.stream === stream);
+	assert.equal(records.length, 1, `expected exactly one ${stream} record`);
+	const [record] = records;
+	assert.ok(record);
+	return record.data;
+}
+
+function withoutFields(
+	data: Record<string, unknown>,
+	fields: string[],
+): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(data).filter(([key]) => !fields.includes(key)),
+	);
+}
+
+/** Current contract: the list scan has no owner-bound proof, so valid records
+ * are still emitted but no STATE cursor is written and every requested stream
+ * reports `inventory_not_proven_complete` (index.ts emitInventoryIncomplete). */
+function assertWithheldWithoutState(
+	run: SyntheticRun,
+	streams: string[],
+): void {
+	assert.deepEqual(
+		run.protocolMessages.filter((message) => message.type === "STATE"),
+		[],
+		"unproven list inventory must not emit a STATE cursor",
+	);
+	// H-E-B never calls reportStreamFailure; the withheld signal travels as SKIP_RESULT.
+	assert.deepEqual(
+		run.streamFailures,
+		[],
+		"the withheld signal is a SKIP_RESULT, not a reportStreamFailure call",
+	);
+	const skips = run.protocolMessages.filter(
+		(message): message is SkipResult => message.type === "SKIP_RESULT",
+	);
+	// A stream may be reported at more than one call site, so compare distinct
+	// values rather than the exact skip count.
+	assert.deepEqual(
+		[...new Set(skips.map((skip) => skip.reason))],
+		["inventory_not_proven_complete"],
+		"every incomplete signal carries the same reason",
+	);
+	assert.deepEqual(
+		[...new Set(skips.map((skip) => skip.stream))].sort(),
+		[...streams].sort(),
+		"the incomplete signal covers exactly the requested streams",
+	);
+}
+
+test("collect: identical synthetic provider bodies map to identical RECORD data across collection clocks", async () => {
+	// Each stream set launches its own browser and shares no state, so the sets run concurrently.
+	await Promise.all(
+		[["order_items"], ORDER_STREAMS].map(async (streams) => {
+			const first = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: SYNTHETIC_CLOCK,
+				state: {},
+				streams,
+			});
+			const second = await collectSyntheticHeb({
+				body: SYNTHETIC_ORDER,
+				emittedAt: SYNTHETIC_LATER_CLOCK,
+				state: {},
+				streams,
+			});
+			const firstRecords = first.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const secondRecords = second.emitted.filter((record) =>
+				streams.includes(record.stream),
+			);
+			const expectedStreams = streams.includes("orders")
+				? ["orders", "order_items"]
+				: ["order_items"];
+			assert.deepEqual(
+				firstRecords.map((record) => record.stream),
+				expectedStreams,
+				"the first mapping run emits every selected stream record",
+			);
+			assert.deepEqual(
+				secondRecords.map((record) => record.stream),
+				expectedStreams,
+				"the second mapping run emits every selected stream record",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data),
+				secondRecords.map((record) => record.data),
+				"raw RECORD data must not depend on the collection clock",
+			);
+			assert.deepEqual(
+				firstRecords.map((record) => record.data.id),
+				secondRecords.map((record) => record.data.id),
+				"matching cardinality and keys prove no record was suppressed",
+			);
+			assertWithheldWithoutState(first, streams);
+			assertWithheldWithoutState(second, streams);
+		}),
+	);
+});
+
+test("collect: an isolated provider orderDate change reaches orders and order_items only", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, orderDate: "2026-07-15" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(base, ORDER_STREAMS);
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseOrder = onlyRecord(base, "orders");
+	const order = onlyRecord(changed, "orders");
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(
+		order.id,
+		baseOrder.id,
+		"orderDate does not change the order identity",
+	);
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"orderDate does not change the item identity",
+	);
+	assert.deepEqual(
+		withoutFields(order, ["order_date"]),
+		withoutFields(baseOrder, ["order_date"]),
+		"unrelated order fields hold steady",
+	);
+	assert.deepEqual(
+		withoutFields(item, ["order_date"]),
+		withoutFields(baseItem, ["order_date"]),
+		"unrelated item fields hold steady",
+	);
+	assert.equal(
+		order.order_date,
+		"2026-07-15",
+		"provider orderDate maps to orders.order_date",
+	);
+	assert.equal(
+		item.order_date,
+		"2026-07-15",
+		"provider orderDate maps to order_items.order_date",
+	);
+});
+
+test("collect: an isolated provider quantity change reaches order_items.quantity", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, quantity: 2 },
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(base, ORDER_STREAMS);
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseOrder = onlyRecord(base, "orders");
+	const order = onlyRecord(changed, "orders");
+	assert.equal(baseOrder.item_count, 1);
+	assert.equal(baseOrder.total, "$10.00");
+	assert.equal(baseOrder.total_cents, 1000);
+	assert.deepEqual(order, baseOrder, "independent list summary is unchanged");
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(baseItem.quantity, 1);
+	assert.equal(baseItem.line_total, "$10.00");
+	assert.equal(baseItem.line_total_cents, 1000);
+	assert.equal(baseItem.order_date, "2026-07-14");
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"quantity does not change the item identity",
+	);
+	assert.equal(
+		item.line_total,
+		baseItem.line_total,
+		"line total is an independent provider field",
+	);
+	assert.equal(item.line_total_cents, baseItem.line_total_cents);
+	assert.equal(item.order_date, baseItem.order_date);
+	assert.deepEqual(
+		withoutFields(item, ["quantity"]),
+		withoutFields(baseItem, ["quantity"]),
+		"unrelated item fields hold steady",
+	);
+	// index.ts retains valid upserts while reporting the independent count mismatch.
+	const mismatch = "An order's item count did not match its details";
+	assert.equal(base.progressMessages.includes(mismatch), false);
+	assert.equal(changed.progressMessages.includes(mismatch), true);
+	assert.equal(
+		item.quantity,
+		2,
+		"provider quantity maps to order_items.quantity",
+	);
+});
+
+test("collect: an isolated provider lineTotal change reaches line_total and line_total_cents", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, lineTotal: "$12.00" },
+		listSummary: { itemCount: 1, total: "$10.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(base, ORDER_STREAMS);
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseOrder = onlyRecord(base, "orders");
+	const order = onlyRecord(changed, "orders");
+	assert.equal(baseOrder.item_count, 1);
+	assert.equal(baseOrder.total, "$10.00");
+	assert.equal(baseOrder.total_cents, 1000);
+	assert.deepEqual(order, baseOrder, "independent list summary is unchanged");
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(baseItem.quantity, 1);
+	assert.equal(baseItem.line_total, "$10.00");
+	assert.equal(baseItem.line_total_cents, 1000);
+	assert.equal(baseItem.order_date, "2026-07-14");
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"lineTotal does not change the item identity",
+	);
+	assert.equal(item.quantity, baseItem.quantity);
+	assert.equal(item.order_date, baseItem.order_date);
+	assert.deepEqual(
+		withoutFields(item, ["line_total", "line_total_cents"]),
+		withoutFields(baseItem, ["line_total", "line_total_cents"]),
+		"unrelated item fields hold steady",
+	);
+	assert.equal(
+		item.line_total,
+		"$12.00",
+		"provider lineTotal maps to line_total",
+	);
+	assert.equal(
+		item.line_total_cents,
+		1200,
+		"provider lineTotal maps to line_total_cents",
+	);
+});
 
 /** A minimal Page stub backing fetchOrderDetail/processListOrder: goto always
  *  resolves (or throws once per `throwsNTimes` to exercise the retry path),
