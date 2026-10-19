@@ -326,7 +326,7 @@ export async function handleInteraction(
 	const clickUrl = buildClickUrl(runId, msg.kind, id);
 
 	const ntfyPromise = notify({
-		title: `PDPP ${connectorName}: ${msg.kind} needed`,
+		title: `${connectorName}: ${msg.kind} needed`,
 		message: `${msg.message || ""}\n\nReply: write to ${respPath}`,
 		tags:
 			msg.kind === "otp" || msg.kind === "credentials"

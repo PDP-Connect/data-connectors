@@ -9,7 +9,7 @@
 	},
 	"connector_key": "steam",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/steam",
-	"version": "0.1.19",
+	"version": "0.1.20",
 	"display_name": "Steam",
 	"brand": {
 		"icon": "icon.svg",
@@ -68,7 +68,7 @@
 			"rate_limit_sensitivity": "high",
 			"bot_detection_sensitivity": "low",
 			"background_safe": true,
-			"rationale": "Steam Web API is an API-key connector with no interactive login, so unattended refresh is mechanically safe. Steam does not publish rate limits; PDPP policy is a 250ms per-request floor, honoring Retry-After when supplied, and preserving 429/throttled transient failures for recovery, with 403 treated as an authorization or visibility failure. One-hour polling is conservative to avoid community-reported multi-hour lockouts. Repeated live runs are still outstanding, which public_listing.tier:preview records — auto-enrollment gates on tier, not on refresh mode."
+			"rationale": "Steam Web API is an API-key connector with no interactive login, so unattended refresh is mechanically safe. Steam does not publish rate limits; The connector policy is a 250ms per-request floor, honoring Retry-After when supplied, and preserving 429/throttled transient failures for recovery, with 403 treated as an authorization or visibility failure. One-hour polling is conservative to avoid community-reported multi-hour lockouts. Repeated live runs are still outstanding, which public_listing.tier:preview records — auto-enrollment gates on tier, not on refresh mode."
 		},
 		"public_listing": {
 			"tier": "preview"

@@ -36,7 +36,7 @@ const NOW = new Date("2026-09-20T13:30:00.000Z");
 const read = (path: string): string =>
 	readFileSync(new URL(path, import.meta.url), "utf8");
 const MESSAGE =
-	"Sign in to Garmin Connect in the secure browser. PDPP continues on its own once you are signed in.";
+	"Sign in to Garmin Connect in the secure browser. Continues on its own once you are signed in.";
 
 // ── Layer 3.2: the real handoff against probeOnPage ────────────────────────
 

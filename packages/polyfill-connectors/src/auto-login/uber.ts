@@ -33,7 +33,7 @@ const RIDERS_ORIGIN = "https://riders.uber.com/";
 const LOGIN_URL = "https://auth.uber.com/v2/";
 const SESSION_COOKIE_NAME = "sid";
 const MANUAL_LOGIN_MESSAGE =
-	"Sign in to Uber in the secure browser. PDPP continues automatically once your session is ready.";
+	"Sign in to Uber in the secure browser. Continues automatically once your session is ready.";
 
 type SendInteraction = (
 	req: InteractionRequest,

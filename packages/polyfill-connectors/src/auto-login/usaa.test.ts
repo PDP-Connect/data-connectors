@@ -588,7 +588,7 @@ test("ensureUsaaSession self-resolves the no-credentials manual handoff via assi
 		assert.deepEqual(assistCalls[0], {
 			attachments: [{ kind: "browser_surface", role: "streaming_companion" }],
 			message:
-				"No optional USAA sign-in details were provided. Sign in to USAA in the secure browser. PDPP continues automatically when the session is ready.",
+				"No optional USAA sign-in details were provided. Sign in to USAA in the secure browser. Continues automatically when the session is ready.",
 			owner_action: "operate_attachment",
 			progress_posture: "blocked",
 			response_contract: "none",
@@ -625,7 +625,7 @@ test("ensureUsaaSession emits manual_action when USAA login navigation trips HTT
 		assert.equal(interactions.requests[0]?.kind, "manual_action");
 		assert.match(
 			interactions.requests[0]?.message ?? "",
-			/USAA could not finish sign-in automatically; open the browser to continue\. PDPP resumes when sign-in succeeds\./,
+			/USAA could not finish sign-in automatically; open the browser to continue\. Resumes when sign-in succeeds\./,
 		);
 		assert.doesNotMatch(
 			interactions.requests[0]?.message ?? "",
@@ -929,7 +929,7 @@ test("ensureUsaaSession still routes a delayed USAA source-unavailable page afte
 		assert.equal(interactions.requests[0]?.kind, "manual_action");
 		assert.match(
 			interactions.requests[0]?.message ?? "",
-			/USAA could not finish sign-in automatically; open the browser to continue\. PDPP resumes when sign-in succeeds\./,
+			/USAA could not finish sign-in automatically; open the browser to continue\. Resumes when sign-in succeeds\./,
 		);
 		// The owner-visible note distinguishing this from an unrecognized stall.
 		assert.match(
@@ -971,7 +971,7 @@ test("ensureUsaaSession routes a lockout/challenge page containing 'try again la
 		assert.equal(interactions.requests[0]?.kind, "manual_action");
 		assert.match(
 			interactions.requests[0]?.message ?? "",
-			/USAA could not finish sign-in automatically; open the browser to continue\. PDPP resumes when sign-in succeeds\./,
+			/USAA could not finish sign-in automatically; open the browser to continue\. Resumes when sign-in succeeds\./,
 		);
 		assert.doesNotMatch(
 			interactions.requests[0]?.message ?? "",

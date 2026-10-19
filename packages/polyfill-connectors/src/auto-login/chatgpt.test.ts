@@ -107,7 +107,7 @@ test("isLikelyChatGptPushApprovalText requires supporting push-approval copy", (
 test("ChatGPT push approval copy separates external approval from browser control", () => {
 	assert.match(
 		CHATGPT_PUSH_APPROVAL_PROGRESS_MESSAGE,
-		/continue automatically/i,
+		/continues automatically once ChatGPT confirms/i,
 	);
 	assert.doesNotMatch(
 		CHATGPT_PUSH_APPROVAL_PROGRESS_MESSAGE,
@@ -635,7 +635,7 @@ test("ChatGPT manual auth repair can use the secure browser without storing a pa
 			// fallback offer to sign in in the secure browser instead.
 			assert.deepEqual(assistanceMessages, [
 				"No saved ChatGPT sign-in is available for this connection. Automated sign-in was skipped. " +
-					"ChatGPT could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.",
+					"ChatGPT could not finish sign-in automatically; open the browser to continue. Resumes when sign-in succeeds.",
 			]);
 
 			const inactivePage = {

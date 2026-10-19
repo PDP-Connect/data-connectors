@@ -63,11 +63,11 @@ const USAA_ORIGIN = "https://www.usaa.com";
 const MEMBER_ID_INPUT = 'input[name="memberId"]';
 const MAX_OTP_ATTEMPTS = 3;
 const MANUAL_LOGIN_MESSAGE =
-	"USAA could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.";
+	"USAA could not finish sign-in automatically; open the browser to continue. Resumes when sign-in succeeds.";
 const MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE =
-	"No optional USAA sign-in details were provided. Sign in to USAA in the secure browser. PDPP continues automatically when the session is ready.";
+	"No optional USAA sign-in details were provided. Sign in to USAA in the secure browser. Continues automatically when the session is ready.";
 const MANUAL_LOGIN_MESSAGE_CHOICE_MISSING =
-	"USAA asked for a security code but PDPP could not find the control that sends it, so it did not request one. Choose how to receive your code in the secure browser and finish sign-in. PDPP resumes when sign-in succeeds.";
+	"USAA asked for a security code but the connector could not find the control that sends it, so it did not request one. Choose how to receive your code in the secure browser and finish sign-in. Resumes when sign-in succeeds.";
 // `classifyUsaaLoginStepFailure` returning `source_unavailable` proves only
 // that USAA's page copy matches known outage boilerplate — it does NOT prove
 // the provider is actually down. It still reaches manual_action unless this

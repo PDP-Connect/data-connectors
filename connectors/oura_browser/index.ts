@@ -132,7 +132,7 @@ export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> 
     capture,
     completeAssistance,
     isProbeSuccessful: (ok) => ok === true,
-    message: "Sign in to Oura in the secure browser, then continue. PDPP will verify the session before collecting.",
+    message: "Sign in to Oura in the secure browser, then continue. Collection starts once the session is verified.",
     page,
     probe: () => hasOuraSession(page),
     readinessProbe: hasOuraSessionOnCurrentPage,

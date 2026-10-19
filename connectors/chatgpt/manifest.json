@@ -9,7 +9,7 @@
 	},
 	"connector_key": "chatgpt",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-	"version": "0.3.0",
+	"version": "0.3.1",
 	"protocol_capabilities": ["BLOB"],
 	"display_name": "ChatGPT",
 	"brand": {

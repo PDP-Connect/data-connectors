@@ -117,15 +117,15 @@ const TRY_WITH_EMAIL_TEXT = /try with email/i;
 const STORED_CREDENTIAL_REJECTION_TEXT =
 	/incorrect email address or password|incorrect password|invalid password|wrong password|email or password is incorrect/i;
 export const CHATGPT_PUSH_APPROVAL_ASSISTANCE_MESSAGE =
-	"ChatGPT sent an app approval notification. Approve it in the ChatGPT app; PDPP will continue automatically after ChatGPT confirms the session.";
+	"ChatGPT sent an app approval notification. Approve it in the ChatGPT app; continues automatically once ChatGPT confirms the session.";
 export const CHATGPT_PUSH_APPROVAL_PROGRESS_MESSAGE =
 	CHATGPT_PUSH_APPROVAL_ASSISTANCE_MESSAGE;
 export const CHATGPT_PUSH_APPROVAL_FALLBACK_MESSAGE =
-	"ChatGPT approval did not complete automatically; open the ChatGPT app to approve it. PDPP resumes when the session continues.";
+	"ChatGPT approval did not complete automatically; open the ChatGPT app to approve it. Resumes when the session continues.";
 export const CHATGPT_BROWSER_LOGIN_ASSISTANCE_MESSAGE =
-	"ChatGPT could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.";
+	"ChatGPT could not finish sign-in automatically; open the browser to continue. Resumes when sign-in succeeds.";
 export const CHATGPT_BROWSER_LOGIN_FALLBACK_MESSAGE =
-	"ChatGPT could not finish sign-in automatically; open the browser to continue. PDPP resumes when sign-in succeeds.";
+	"ChatGPT could not finish sign-in automatically; open the browser to continue. Resumes when sign-in succeeds.";
 export const CHATGPT_SESSION_REQUIRED_NON_INTERACTIVE_MESSAGE =
 	"chatgpt_session_required: ChatGPT session is not active; start an owner-attended manual refresh to repair authentication.";
 export const CHATGPT_STORED_CREDENTIAL_REJECTED_MESSAGE =
@@ -1123,7 +1123,7 @@ async function fallbackForPostSubmitLogin({
 		...(checkpoint ? { checkpoint } : {}),
 		...(completeAssistance ? { completeAssistance } : {}),
 		diagnosticMessage:
-			"ChatGPT login submitted but session still is not active. Use the streaming companion to complete login (Cloudflare challenge, 2FA, etc.). PDPP will continue automatically after ChatGPT confirms the session.",
+			"ChatGPT login submitted but session still is not active. Use the streaming companion to complete login (Cloudflare challenge, 2FA, etc.). Continues automatically once ChatGPT confirms the session.",
 		message: CHATGPT_BROWSER_LOGIN_FALLBACK_MESSAGE,
 		page,
 		...(progress ? { progress } : {}),

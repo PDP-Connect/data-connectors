@@ -1414,7 +1414,7 @@ export async function ensureShopifySession({
 			...(completeAssistance ? { completeAssistance } : {}),
 			isProbeSuccessful: (ready) => ready,
 			message:
-				"Sign in to Shop in the secure browser. PDPP will continue when your order history is available.",
+				"Sign in to Shop in the secure browser. Continues when your order history is available.",
 			page,
 			probe: () => hasShopOrderHistorySession(page),
 			readinessProbe: (readinessPage) =>
