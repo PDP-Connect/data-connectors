@@ -93,7 +93,7 @@ test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number
 	assert.equal(epochMsToIso(undefined), null);
 });
 
-// ─── extractCleanText / extractNoteText (heuristic decode) ─────────────
+// ─── extractCleanText / extractNoteText (protobuf decode) ──────────────
 
 test("extractCleanText: reads UTF-8 strings from length-delimited protobuf fields", async () => {
 	const text = "Grocery list: milk, eggs, bread.";
@@ -112,6 +112,30 @@ test("extractCleanText: preserves text that resembles a nested protobuf", async 
 test("extractCleanText: recurses into the known structural field", async () => {
 	const body = encodeStructuredBodyText("Nested note");
 	assert.equal(extractCleanText(body), "Nested note");
+});
+
+test("extractCleanText: matches legacy runs across paragraph and marker boundaries", async () => {
+	const cases = [
+		{
+			name: "separate rich-text runs",
+			body: encodeStructuredBodyText(["First paragraph", "Second paragraph"]),
+			expected: "First paragraph\nSecond paragraph",
+		},
+		{
+			name: "inline object-replacement marker",
+			body: encodeStructuredBodyText("\uFFFCPhoto description"),
+			expected: "\uFFFCPhoto description",
+		},
+		{
+			name: "trailing line feed",
+			body: encodeStructuredBodyText("Final line\n"),
+			expected: "Final line",
+		},
+	];
+	for (const { name, body, expected } of cases) {
+		assert.equal(legacyExtractCleanText(body), expected, `${name}: legacy oracle`);
+		assert.equal(extractCleanText(body), expected, name);
+	}
 });
 
 test("readNoteRecord: preserves text that resembles a nested protobuf", async () => {
@@ -145,6 +169,18 @@ test("extractCleanText: short and Unicode body text is preserved", async () => {
 	);
 });
 
+test("extractCleanText: legacy formatting cannot drop mixed-script or emoji text", async () => {
+	const text = "English words are long enough 📝 世界";
+	const body = encodeStructuredBodyText(text);
+	const legacyText = legacyExtractCleanText(body);
+	assert.notEqual(legacyText, text);
+	assert.equal(extractCleanText(body), legacyText);
+	assert.equal(
+		[...extractCleanText(body)!].filter((character) => character.codePointAt(0)! > 0x7f).join(""),
+		[...text].filter((character) => character.codePointAt(0)! > 0x7f).join(""),
+	);
+});
+
 test("extractNoteText: decodes a synthetic gzip-compressed note body (labelled synthetic)", async () => {
 	const text =
 		"Meeting notes: discuss Q3 roadmap and follow up with the design team.";
@@ -165,10 +201,27 @@ function encodeLengthDelimitedField(fieldNumber: number, value: Buffer): Buffer 
 	]);
 }
 
-function encodeStructuredBodyText(text: string): Buffer {
-	const richText = encodeLengthDelimitedField(2, Buffer.from(text, "utf-8"));
+function encodeStructuredBodyText(text: string | readonly string[]): Buffer {
+	const runs = typeof text === "string" ? [text] : text;
+	const richText = Buffer.concat(
+		runs.map((run) => encodeLengthDelimitedField(2, Buffer.from(run, "utf-8"))),
+	);
 	const document = encodeLengthDelimitedField(3, richText);
 	return encodeLengthDelimitedField(2, document);
+}
+
+function legacyExtractCleanText(bytes: Uint8Array): string | null {
+	const fullText = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+	const textRuns: string[] = [];
+	const runRe = /[\x20-\x7E\u00A0-\uFFFF]{4,}/g;
+	for (const match of fullText.matchAll(runRe)) {
+		const run = match[0];
+		const cleanCount = (
+			run.match(/[a-zA-Z0-9 .,;:!?\x27"()\-\n\r\t\u2018\u2019\u201C\u201D\u2026\u2013\u2014]/g) ?? []
+		).length;
+		if (cleanCount / run.length > 0.6) textRuns.push(run);
+	}
+	return textRuns.length > 0 ? textRuns.join("\n") : null;
 }
 
 test("extractNoteText: preserves short and Unicode text from the protobuf body structure", async () => {

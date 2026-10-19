@@ -179,6 +179,39 @@ function decodeUtf8(bytes: Uint8Array): string | null {
 	}
 }
 
+function splitTextRuns(value: string): string[] {
+	return value
+		.split(/[\u0000-\u001F\u007F-\u009F]/)
+		.filter((run) => run.length > 0);
+}
+
+function extractLegacyTextRuns(bytes: Uint8Array): string | null {
+	const fullText = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+	const textRuns: string[] = [];
+	const runRe = /[\x20-\x7E\u00A0-\uFFFF]{4,}/g;
+	for (const match of fullText.matchAll(runRe)) {
+		const run = match[0];
+		const cleanCount = (
+			run.match(
+				/[a-zA-Z0-9 .,;:!?\x27"()\-\n\r\t\u2018\u2019\u201C\u201D\u2026\u2013\u2014]/g,
+			) ?? []
+		).length;
+		if (cleanCount / run.length > 0.6) textRuns.push(run);
+	}
+	return textRuns.length > 0 ? textRuns.join("\n") : null;
+}
+
+function legacyRenderingPreservesUnicode(
+	legacyText: string,
+	structuredText: string,
+): boolean {
+	const unicodeCharacters = (value: string) =>
+		[...value.replace(/[\u0000-\u001F\u007F-\u009F\uFFFC]/g, "")]
+			.filter((character) => (character.codePointAt(0) ?? 0) > 0x7f)
+			.join("");
+	return unicodeCharacters(legacyText) === unicodeCharacters(structuredText);
+}
+
 function extractProtobufText(
 	bytes: Uint8Array,
 	message: ProtobufMessage = "note_body",
@@ -193,7 +226,8 @@ function extractProtobufText(
 		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 	}
 	let sawRecognizedField = false;
-	let text = "";
+	let sawDocumentField = false;
+	const textParts: string[] = [];
 	for (const field of fields) {
 		if (
 			message === "note_body" &&
@@ -205,7 +239,7 @@ function extractProtobufText(
 			if (value === null) {
 				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 			}
-			text += value;
+			textParts.push(...splitTextRuns(value));
 			continue;
 		}
 		if (
@@ -213,6 +247,7 @@ function extractProtobufText(
 			field.fieldNumber === NOTE_BODY_DOCUMENT_FIELD
 		) {
 			sawRecognizedField = true;
+			sawDocumentField = true;
 			if (field.wireType !== 2 || !field.value) {
 				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 			}
@@ -222,7 +257,7 @@ function extractProtobufText(
 				depth + 1,
 			);
 			if (document.kind === "UNAVAILABLE") return document;
-			if (document.kind === "READ") text += document.value;
+			if (document.kind === "READ") textParts.push(document.value);
 			continue;
 		}
 		if (
@@ -238,7 +273,7 @@ function extractProtobufText(
 				depth + 1,
 			);
 			if (richText.kind === "UNAVAILABLE") return richText;
-			if (richText.kind === "READ") text += richText.value;
+			if (richText.kind === "READ") textParts.push(richText.value);
 			continue;
 		}
 		if (
@@ -251,7 +286,7 @@ function extractProtobufText(
 			if (value === null) {
 				return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 			}
-			text += value;
+			textParts.push(...splitTextRuns(value));
 			continue;
 		}
 		if (message === "rich_text" && field.fieldNumber === 3) {
@@ -262,7 +297,18 @@ function extractProtobufText(
 	if (!sawRecognizedField) {
 		return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 	}
-	return text.length > 0 ? { kind: "READ", value: text } : { kind: "EXPLICIT_EMPTY" };
+	if (textParts.length === 0) return { kind: "EXPLICIT_EMPTY" };
+	const structuredText = textParts.join("\n");
+	if (message === "note_body" && depth === 0 && sawDocumentField) {
+		const legacyText = extractLegacyTextRuns(bytes);
+		if (
+			legacyText !== null &&
+			legacyRenderingPreservesUnicode(legacyText, structuredText)
+		) {
+			return { kind: "READ", value: legacyText };
+		}
+	}
+	return { kind: "READ", value: structuredText };
 }
 
 /** Decode UTF-8 strings from length-delimited rich-text protobuf fields. */
