@@ -14,6 +14,25 @@ const requireTestTools = createRequire(
 const repositoryRoot = resolve(packageRoot, "../..");
 const connectorsRoot = join(repositoryRoot, "connectors");
 const vitestConfig = join(packageRoot, "vitest.config.mjs");
+const vitestBin = join(
+	packageRoot,
+	"test-tools",
+	"node_modules",
+	"vitest",
+	"vitest.mjs",
+);
+
+function requireInstalledVitest() {
+	try {
+		requireTestTools.resolve("./node_modules/vitest/package.json");
+	} catch (error) {
+		if (error?.code !== "MODULE_NOT_FOUND") throw error;
+		throw new Error(
+			"Vitest test tools are missing; run npm ci --prefix packages/polyfill-connectors/test-tools",
+			{ cause: error },
+		);
+	}
+}
 
 export function partitionTests(files, vitestFiles = VITEST_TESTS) {
 	const nodeTests = [];
@@ -48,23 +67,11 @@ export function testCommands(files, concurrency, vitestFiles = VITEST_TESTS) {
 		});
 	}
 	if (vitestTests.length > 0) {
-		let vitestBin;
-		try {
-			vitestBin = join(
-				dirname(requireTestTools.resolve("./node_modules/vitest/package.json")),
-				"vitest.mjs",
-			);
-		} catch (error) {
-			if (error?.code !== "MODULE_NOT_FOUND") throw error;
-			throw new Error(
-				"Vitest test tools are missing; run npm ci --prefix packages/polyfill-connectors/test-tools",
-				{ cause: error },
-			);
-		}
 		const exactFiles = vitestTests.map((file) =>
 			relative(repositoryRoot, resolve(packageRoot, file)).split(sep).join("/"),
 		);
 		commands.push({
+			kind: "vitest",
 			command: process.execPath,
 			env: { PDPP_VITEST_EXACT_FILES: JSON.stringify(exactFiles) },
 			args: [
@@ -83,6 +90,7 @@ export function testCommands(files, concurrency, vitestFiles = VITEST_TESTS) {
 }
 
 export async function runTestCommands(commands, env = process.env) {
+	if (commands.some(({ kind }) => kind === "vitest")) requireInstalledVitest();
 	let ok = true;
 	for (const { command, args, env: commandEnv } of commands) {
 		const result = await new Promise((done) => {

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
 	copyFileSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -17,6 +18,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { partitionTests } from "./test-dispatch.mjs";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+const missingVitestReason =
+	"Install Vitest test tools with npm ci --prefix packages/polyfill-connectors/test-tools";
+const skipVitest =
+	process.env.CI === undefined &&
+	!existsSync(
+		new URL("../test-tools/node_modules/vitest/vitest.mjs", import.meta.url),
+	)
+		? missingVitestReason
+		: false;
 
 test("nested connectors path retains its full registration", () => {
 	const file = resolve(
@@ -32,7 +42,9 @@ test("nested connectors path retains its full registration", () => {
 	);
 });
 
-test("Vitest runs only the selected file, not a same-suffix file", () => {
+test("Vitest runs only the selected file, not a same-suffix file", {
+	skip: skipVitest,
+}, () => {
 	const directory = mkdtempSync(join(tmpdir(), "vitest-exact-file-"));
 	const markerFile = join(directory, "ran.txt");
 	const file = "../../scripts/test-fixtures/vitest.fixture.ts";
@@ -95,7 +107,7 @@ test("node:test commands work when Vitest is absent", () => {
 			[
 				"--input-type=module",
 				"-e",
-				`import { testCommands } from ${JSON.stringify(moduleUrl)}; testCommands(['src/vitest.test.ts'], '1', new Set(['src/vitest.test.ts']));`,
+				`import { runTestCommands, testCommands } from ${JSON.stringify(moduleUrl)}; await runTestCommands(testCommands(['src/vitest.test.ts'], '1', new Set(['src/vitest.test.ts'])));`,
 			],
 			{
 				cwd: directory,

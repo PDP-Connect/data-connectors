@@ -13,6 +13,14 @@ import { parse } from "@babel/parser";
 import { testCommands } from "../scripts/test-dispatch.mjs";
 import { NAMESPACE_TESTS, VITEST_TESTS } from "../scripts/test-lanes.mjs";
 
+const skipVitestFixture =
+	process.env.CI === undefined &&
+	!existsSync(
+		new URL("../test-tools/node_modules/vitest/vitest.mjs", import.meta.url),
+	)
+		? "Install Vitest test tools with npm ci --prefix packages/polyfill-connectors/test-tools"
+		: false;
+
 function importsVitestValue(source: string): boolean {
 	const isVitest = (value: unknown): boolean =>
 		typeof value === "string" &&
@@ -176,7 +184,9 @@ test("Vitest registration matches every imported Vitest test in runner globs", a
 	}
 });
 
-test("real dispatch runs both kinds and reports a failing Vitest fixture", () => {
+test("real dispatch runs both kinds and reports a failing Vitest fixture", {
+	skip: skipVitestFixture,
+}, () => {
 	const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 	const markers = mkdtempSync(join(tmpdir(), "test-dispatch-"));
 	const markerFile = join(markers, "ran.txt");

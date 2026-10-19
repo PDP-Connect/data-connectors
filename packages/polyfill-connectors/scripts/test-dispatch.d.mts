@@ -9,9 +9,15 @@ export declare function testCommands(
 	files: readonly string[],
 	concurrency: string,
 	vitestFiles?: ReadonlySet<string>,
-): { command: string; args: string[]; env?: NodeJS.ProcessEnv }[];
+): {
+	kind?: "vitest";
+	command: string;
+	args: string[];
+	env?: NodeJS.ProcessEnv;
+}[];
 export declare function runTestCommands(
 	commands: readonly {
+		kind?: "vitest";
 		command: string;
 		args: readonly string[];
 		env?: NodeJS.ProcessEnv;
