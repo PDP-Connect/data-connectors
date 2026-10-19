@@ -67,6 +67,6 @@
   "devDependencies": {
     "esbuild": "0.28.2",
     "yaml": "2.9.1",
-    "zod": "4.6.6"
+    "zod": "4.6.7"
   }
 }

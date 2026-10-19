@@ -64,8 +64,8 @@ import {
 	buildDetailCoverageMessage,
 	buildDetailGap,
 	buildFullScanCoverageMessage,
-	type DetailGapMessage,
 	type EmittedMessage,
+	type RetryableDetailGapMessage,
 	runConnector,
 	type ValidateRecord,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -1967,7 +1967,7 @@ export type StatementDetailOutcome =
 	| {
 			kind: "gap";
 			id: string;
-			reason: DetailGapMessage["reason"];
+			reason: RetryableDetailGapMessage["reason"];
 			errorClass: string;
 	  };
 
@@ -2346,7 +2346,7 @@ export type AccountDetailOutcome =
 	| {
 			kind: "gap";
 			accountId: string;
-			reason: DetailGapMessage["reason"];
+			reason: RetryableDetailGapMessage["reason"];
 			errorClass: string;
 	  };
 
@@ -2499,9 +2499,9 @@ async function processAccountDownload(
  */
 export function buildAccountDetailGap(outcome: {
 	accountId: string;
-	reason: DetailGapMessage["reason"];
+	reason: RetryableDetailGapMessage["reason"];
 	errorClass: string;
-}): DetailGapMessage {
+}): RetryableDetailGapMessage {
 	return {
 		type: "DETAIL_GAP",
 		stream: "transactions",

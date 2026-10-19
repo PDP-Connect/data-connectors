@@ -94,7 +94,7 @@
  *          PDF_DOWNLOAD_SKIP_REASON pattern), never a deeper scanner —
  *          amazon's `buildOrderDetailGap`/chase's `buildAccountDetailGap`/
  *          usaa's `buildAccountTransactionDetailGap` all take `reason` as a
- *          parameter typed `DetailGapMessage["reason"]` (a closed
+ *          parameter typed `RetryableDetailGapMessage["reason"]` (a closed
  *          four-value protocol union, all four already RI-generic) but
  *          pass a call-site variable traced back through an async
  *          classifier's return value — correctly unresolved here, and
@@ -107,7 +107,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 import { parse } from "@babel/parser";
-import type { DetailGapMessage } from "@pdpp/connector-protocol";
+import type { RetryableDetailGapMessage } from "@pdpp/connector-protocol";
 
 export interface ReasonEmissionScanResult {
 	/** Reason codes resolved (directly or via one hop) to a finite literal set. */
@@ -725,10 +725,10 @@ function resolveComputedMapAccess(
  * value of this type can be anything outside the literal set, however deep
  * the runtime expression producing it is (an async classifier's return
  * type, a narrowed union member, etc.) — the protocol-level
- * `DetailGapMessage["reason"]` union (`DETAIL_GAP_MESSAGE_REASON_LITERALS`
+ * `RetryableDetailGapMessage["reason"]` union (`DETAIL_GAP_MESSAGE_REASON_LITERALS`
  * below, compile-time-checked exhaustive against the real type) is the
  * motivating case: every one of its four members is already RI-generic, so
- * a `reason: DetailGapMessage["reason"]`-typed parameter can never carry a
+ * a `reason: RetryableDetailGapMessage["reason"]`-typed parameter can never carry a
  * connector-specific code, no matter how many hops its runtime value takes
  * to compute. Returns `null` for any other annotation shape (a bare `string`,
  * an imported/cross-file type, a non-literal union member) — those stay
@@ -760,20 +760,20 @@ function resolveTypeAnnotationLiterals(
 }
 
 /**
- * `DetailGapMessage["reason"]` (imported cross-file, by TYPE only, from
+ * `RetryableDetailGapMessage["reason"]` (imported cross-file, by TYPE only, from
  * `src/connector-runtime-protocol.ts`) is a fixed, closed protocol union.
  * `resolveDetailGapMessageReasonIndexedAccess` below still matches the
- * `DetailGapMessage["reason"]` type-annotation SHAPE by name/string-literal
+ * `RetryableDetailGapMessage["reason"]` type-annotation SHAPE by name/string-literal
  * comparison at the AST level (this scanner's normal same-file resolution
  * bound genuinely cannot follow a cross-file type import at runtime) — but
  * the VALUE SET it resolves to is no longer a hand-maintained array that
  * could silently drift from the real union. `DETAIL_GAP_MESSAGE_REASON_KEYS`
- * is `satisfies Record<DetailGapMessage["reason"], true>`: TypeScript
+ * is `satisfies Record<RetryableDetailGapMessage["reason"], true>`: TypeScript
  * itself rejects this file at compile time if a key is missing (the real
  * union widens) or extra (the real union narrows) — drift is a `tsc`
  * failure, not a silent gap. `Object.keys(...)` then derives the runtime
  * array from that single compile-time-checked object, so there is exactly
- * one source of truth for "what are DetailGapMessage's reason values,"
+ * one source of truth for "what are RetryableDetailGapMessage's reason values,"
  * never two lists that could disagree.
  */
 const DETAIL_GAP_MESSAGE_REASON_KEYS = {
@@ -781,7 +781,7 @@ const DETAIL_GAP_MESSAGE_REASON_KEYS = {
 	retry_exhausted: true,
 	temporary_unavailable: true,
 	upstream_pressure: true,
-} satisfies Record<DetailGapMessage["reason"], true>;
+} satisfies Record<RetryableDetailGapMessage["reason"], true>;
 
 export const DETAIL_GAP_MESSAGE_REASON_LITERALS: readonly string[] =
 	Object.keys(DETAIL_GAP_MESSAGE_REASON_KEYS);
@@ -806,7 +806,10 @@ function resolveDetailGapMessageReasonIndexedAccess(
 		indexLiteral && isStringLiteral(indexLiteral)
 			? indexLiteral.value
 			: undefined;
-	if (objectTypeName === "DetailGapMessage" && indexValue === "reason") {
+	if (
+		objectTypeName === "RetryableDetailGapMessage" &&
+		indexValue === "reason"
+	) {
 		return [...DETAIL_GAP_MESSAGE_REASON_LITERALS];
 	}
 	return null;

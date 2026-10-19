@@ -45,7 +45,6 @@ import {
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
-	type DetailGapMessage,
 	type EmittedMessage,
 	emitDetailCoverage,
 	emitDetailGap,
@@ -53,6 +52,7 @@ import {
 	type InteractionResponse,
 	nowIso,
 	politeDelay,
+	type RetryableDetailGapMessage,
 	runConnector,
 	type ValidateRecord,
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
@@ -2590,7 +2590,7 @@ export type AccountTransactionOutcome =
 	| {
 			accountId: string;
 			kind: "gap";
-			reason: DetailGapMessage["reason"];
+			reason: RetryableDetailGapMessage["reason"];
 			errorClass: string;
 	  }
 	| { accountId: string; kind: "hydrated" | "no_activity" };
@@ -2606,8 +2606,8 @@ export type AccountTransactionOutcome =
 export function buildAccountTransactionDetailGap(outcome: {
 	accountId: string;
 	errorClass: string;
-	reason: DetailGapMessage["reason"];
-}): DetailGapMessage {
+	reason: RetryableDetailGapMessage["reason"];
+}): RetryableDetailGapMessage {
 	return {
 		type: "DETAIL_GAP",
 		stream: "transactions",

@@ -1169,7 +1169,7 @@ function makeTracingContext(
 	// lifecycle test. Cast through the structurally-sufficient subset.
 	const partial: Pick<BrowserContext, "browser" | "tracing"> = {
 		browser: () => browser as ReturnType<BrowserContext["browser"]>,
-		tracing: tracing as BrowserContext["tracing"],
+		tracing: tracing as unknown as BrowserContext["tracing"],
 	};
 	return partial as BrowserContext;
 }

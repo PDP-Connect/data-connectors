@@ -53,7 +53,6 @@ import type {
 	AssistanceCompletionStatus,
 	AssistanceRequest,
 	DetailCoverageMessage,
-	DetailGapMessage,
 	DetailGapNetworkPressure,
 	DetailGapStartEntry,
 	DetailGapsPageResponse,
@@ -62,6 +61,7 @@ import type {
 	InteractionResponse,
 	ProgressExtra,
 	RecordData,
+	RetryableDetailGapMessage,
 	ShapeAnomaly,
 	StartMessage,
 	StreamScope,
@@ -146,6 +146,7 @@ export type {
 	ProgressExtra,
 	ProviderBudgetProgress,
 	RecordData,
+	RetryableDetailGapMessage,
 	ShapeAnomaly,
 	StartMessage,
 	StreamScope,
@@ -769,13 +770,13 @@ export interface DetailGapParams {
 	/** Optional bounded error context fanned into `detail` and `last_error`. Omit both blocks when absent. */
 	error?: DetailGapErrorContext;
 	/** Optional opaque cursor the next run uses to resume the parent list at this gap. */
-	listCursor?: DetailGapMessage["list_cursor"];
+	listCursor?: RetryableDetailGapMessage["list_cursor"];
 	/** Locator the next run uses to re-hydrate this record's detail. */
-	locator: DetailGapMessage["detail_locator"];
+	locator: RetryableDetailGapMessage["detail_locator"];
 	/** Optional list/parent stream this detail stream hangs off (e.g. `accounts` for `transactions`). */
 	parentStream?: string;
 	/** Why detail could not be hydrated; drives retryability and any cooldown. */
-	reason: DetailGapMessage["reason"];
+	reason: RetryableDetailGapMessage["reason"];
 	/** Key of the record whose detail is gapped. */
 	recordKey: string | number;
 	/** The detail stream the gap belongs to. */
@@ -793,7 +794,9 @@ export interface DetailGapParams {
  * `error.message` (if any) is added to `last_error` only, since the protocol's
  * `detail` block has no `message` field.
  */
-export function buildDetailGap(params: DetailGapParams): DetailGapMessage {
+export function buildDetailGap(
+	params: DetailGapParams,
+): RetryableDetailGapMessage {
 	const {
 		stream,
 		recordKey,
@@ -803,7 +806,8 @@ export function buildDetailGap(params: DetailGapParams): DetailGapMessage {
 		listCursor,
 		error,
 	} = params;
-	let errorBlocks: Pick<DetailGapMessage, "detail" | "last_error"> = {};
+	let errorBlocks: Pick<RetryableDetailGapMessage, "detail" | "last_error"> =
+		{};
 	if (error) {
 		const sharedBlock = {
 			class: error.class,

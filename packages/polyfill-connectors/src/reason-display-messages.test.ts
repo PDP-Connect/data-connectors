@@ -487,9 +487,9 @@ test("falsifiability: a DETAIL_GAP-shaped reason: literal resolves (the real gma
 	);
 });
 
-test('DETAIL_GAP_MESSAGE_REASON_LITERALS matches the real DetailGapMessage["reason"] protocol union exactly (compile-time exhaustiveness, confirmed at runtime)', () => {
+test('DETAIL_GAP_MESSAGE_REASON_LITERALS matches the real RetryableDetailGapMessage["reason"] protocol union exactly (compile-time exhaustiveness, confirmed at runtime)', () => {
 	// The real enforcement is compile-time: DETAIL_GAP_MESSAGE_REASON_KEYS is
-	// declared `satisfies Record<DetailGapMessage["reason"], true>` in
+	// declared `satisfies Record<RetryableDetailGapMessage["reason"], true>` in
 	// reason-emission-scan.ts, so `tsc` rejects the file outright if the real
 	// union in connector-runtime-protocol.ts ever widens (a key goes missing)
 	// or narrows (an extra key appears) — verified directly by temporarily
@@ -508,33 +508,33 @@ test('DETAIL_GAP_MESSAGE_REASON_LITERALS matches the real DetailGapMessage["reas
 			"temporary_unavailable",
 			"upstream_pressure",
 		].sort(),
-		'DETAIL_GAP_MESSAGE_REASON_LITERALS must equal DetailGapMessage["reason"]\'s real members exactly ' +
+		'DETAIL_GAP_MESSAGE_REASON_LITERALS must equal RetryableDetailGapMessage["reason"]\'s real members exactly ' +
 			"— if this fails, the protocol union changed and DETAIL_GAP_MESSAGE_REASON_KEYS should already have " +
 			"failed to compile before this test ever ran",
 	);
 	for (const code of DETAIL_GAP_MESSAGE_REASON_LITERALS) {
 		assert.ok(
 			RUNTIME_GENERIC_REASON_CODES.has(code),
-			`DetailGapMessage["reason"] member ${code} must be RI-generic — the type-annotation resolution path ` +
+			`RetryableDetailGapMessage["reason"] member ${code} must be RI-generic — the type-annotation resolution path ` +
 				"(resolveTypeAnnotationLiterals) is only sound because every member of this closed union already is",
 		);
 	}
 });
 
-test('falsifiability: a DetailGapMessage["reason"]-typed parameter resolves via the compile-time-derived literal set, not a hand-maintained duplicate', () => {
+test('falsifiability: a RetryableDetailGapMessage["reason"]-typed parameter resolves via the compile-time-derived literal set, not a hand-maintained duplicate', () => {
 	// Mirrors amazon's buildOrderDetailGap / chase's buildAccountDetailGap /
 	// usaa's buildAccountTransactionDetailGap: `reason` is typed against the
-	// real cross-file DetailGapMessage["reason"] union, and the runtime value
+	// real cross-file RetryableDetailGapMessage["reason"] union, and the runtime value
 	// traces back through an unresolvable call chain — the type annotation is
 	// the ONLY thing that makes this resolvable at all.
 	withSyntheticConnectorFile(
 		"index.ts",
 		[
-			"import type { DetailGapMessage } from '../../src/connector-runtime-protocol.ts';",
-			"function buildGap(outcome: { reason: DetailGapMessage['reason'] }) {",
+			"import type { RetryableDetailGapMessage } from '../../src/connector-runtime-protocol.ts';",
+			"function buildGap(outcome: { reason: RetryableDetailGapMessage['reason'] }) {",
 			"  return { type: 'DETAIL_GAP', reason: outcome.reason };",
 			"}",
-			"function emitGap(outcome: { reason: DetailGapMessage['reason'] }) {",
+			"function emitGap(outcome: { reason: RetryableDetailGapMessage['reason'] }) {",
 			"  return buildGap(outcome);",
 			"}",
 			"export { emitGap };",
@@ -547,7 +547,7 @@ test('falsifiability: a DetailGapMessage["reason"]-typed parameter resolves via 
 			assert.deepEqual(
 				[...literalReasons].sort(),
 				[...DETAIL_GAP_MESSAGE_REASON_LITERALS].sort(),
-				"a DetailGapMessage['reason']-typed parameter must resolve to exactly the compile-time-derived literal set",
+				"a RetryableDetailGapMessage['reason']-typed parameter must resolve to exactly the compile-time-derived literal set",
 			);
 		},
 	);
