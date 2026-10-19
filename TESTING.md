@@ -1,6 +1,6 @@
 # Testing data-connectors
 
-Every local test command runs through `scripts/test-sandbox/test-sandbox`, a vendored copy of the host-wide test governor (see `scripts/test-sandbox/README.md`). It gives each run a systemd scope under the shared `agent-tests.slice` with 400% CPU, 8 GB and 4096 tasks, one of the host-wide slots, a loopback-only network unless the lane opts out, and a private `/tmp`. Stopping the scope kills every descendant. Each run prints a JSON receipt (wall, CPU, peak memory) on stderr. Where systemd user sessions, bwrap or flock are missing (macOS, GitHub runners), it runs the command directly and says so in the receipt.
+Every local test command runs through `scripts/test-sandbox/test-sandbox`, a vendored copy of the host-wide test governor (see `scripts/test-sandbox/README.md`). It gives each run a systemd scope under the shared `agent-tests.slice` with 400% CPU, 8 GB and 4096 tasks, one of the host-wide slots, a loopback-only network unless the lane opts out, and a private `/tmp`. Stopping the scope kills every descendant. Each run prints a JSON receipt (wall, CPU, peak memory) on stderr. Each layer it cannot use on a host is skipped and named in the receipt; see `scripts/test-sandbox/README.md` for what that means on macOS and on GitHub runners.
 
 ## Tiers
 
@@ -9,7 +9,7 @@ Every local test command runs through `scripts/test-sandbox/test-sandbox`, a ven
 | While editing | `npm run test:fast` (root or packages/polyfill-connectors) | Tests related to files changed since `git merge-base HEAD origin/main`, plus uncommitted and untracked files: the static import graph, plus every test in the same `connectors/<name>/` directory. Namespace tests run in their own lane. When the selector cannot trust the graph (for example a change under `scripts/related-tests/` or a deleted file), it runs the whole sandboxed lane. | one-connector edit: 42 tests, 4-10 s |
 | Same, against any base | `npm run test:related -- <base>` (in packages/polyfill-connectors) | Same selection; on FULL_SUITE it runs both polyfill lanes. | |
 | Before a PR | `npm test` (root) | Every lane in turn (below). | about 28 min, 16 of them PageShim |
-| PR into main | GitHub Actions | `verify + test`, PageShim shards, connector shards, Contract Guardrails, cross-repo integrity. PRs into other branches run no CI. On GitHub runners the sandbox also enforces (cgroup+netns). | `verify + test` Test step 699 s (was 15-18 min at concurrency 2); PageShim shards 588 s and 835 s |
+| PR into main | GitHub Actions | `verify + test`, PageShim shards, connector shards, Contract Guardrails, cross-repo integrity. PRs into other branches run no CI. `verify + test` runs its lanes in the sandbox with cgroup limits and network isolation, and Contract Guardrails with cgroup limits only; the PageShim and connector shards and cross-repo integrity run without it (each CI job is its own VM). | `verify + test` Test step 699 s (was 15-18 min at concurrency 2); PageShim shards 588 s and 835 s |
 
 The root `npm test` runs these lanes, each in its own sandbox:
 
@@ -25,10 +25,10 @@ The root `npm test` runs these lanes, each in its own sandbox:
 
 ## What is shared, per-worker, per-test, locked
 
-- Shared: the checkout, `node_modules`, the Playwright browser cache, the built PageShim bundles of one run. Tests treat them as read-only, except that the namespace tests plant and remove sockets under the repository root (see below).
+- Shared: the checkout, `node_modules`, the Playwright browser cache, the built PageShim bundles of one run. Tests write into the checkout in a few places: the namespace tests plant and remove sockets under the repository root (see below); PageShim tests build bundles under `.tmp/pageshim/` and `.scratch/`; `bin/connector-dev.test.ts` creates and removes `packages/polyfill-connectors/runs/<id>` and `connectors/<id>/`; `bin/connector-init.test.ts` scaffolds and removes `connectors/zz_init_smoke_<pid>/` and `connectors/zz_init_browser_smoke_<pid>/` (a killed run leaves them, and the manifest tests then fail); `bin/scenario-cli.test.ts` writes fixture connectors under `packages/polyfill-connectors/tmp/`; and one consent-time-field test makes a temporary directory inside `node_modules`. Do not run two suites in one checkout at once.
 - Per test file: one `node --test` child process. Module state (PageShim fixture modules with `setLoggedIn`) is per file; tests in one file run one after another.
 - Per test: temp directories (`mkdtemp` under the sandbox's private `/tmp`), local HTTP servers on port 0, iMessage `chat.db` files, PageShim browsers (one Chromium per `runHarness`, about 140 ms to start).
-- Locked (serial): the namespaces lane. Its files share the repository root as global state (`isolation-mechanism.test.ts` plants sockets under it that `scenario-verify-strict.test.ts`'s isolation scan refuses), so one run executes them one at a time. Nothing locks them across two runs in the same checkout, so do not run two suites in one checkout at once.
+- Locked (serial): the namespaces lane. Its files share the repository root as global state (`isolation-mechanism.test.ts` plants sockets under it that `scenario-verify-strict.test.ts`'s isolation scan refuses), so one run executes them one at a time. Nothing locks them across two runs in the same checkout.
 - Never shared: the network. Unit lanes have loopback only; PageShim routes deny every request that no fixture serves.
 
 ## Rules
