@@ -23,6 +23,7 @@ import {
 	readFileSync,
 	rmdirSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1066,5 +1067,64 @@ test("connector-dev CLI: a connector cannot launder its auth failure into runtim
 		assert.doesNotMatch(stdout, /may be presented as an instruction/u);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev CLI: preserves multi-byte STATE cursors across pipe chunks", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "connector-dev-utf8-"));
+	const connector = `connector-dev-utf8-${String(process.pid)}`;
+	const entrypoint = join(tmpDir, "connector.mjs");
+	const expected = "€".repeat(100_001);
+	try {
+		writeFileSync(
+			entrypoint,
+			`
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
+await once(process.stdin, "data");
+const emit = (message) => new Promise((resolve, reject) => {
+  process.stdout.write(JSON.stringify(message) + "\\n", (error) => error ? reject(error) : resolve());
+});
+await emit({ type: "RECORD", stream: "items", key: "utf8", emitted_at: "2026-08-01T00:00:00.000Z", data: { id: "utf8", value: "fixture" } });
+const bytes = Buffer.from(JSON.stringify({
+  type: "STATE", stream: "items", cursor: { value: "€".repeat(100_001) }
+}) + "\\n");
+// The 64 KiB split lands inside a three-byte character. Waiting after the
+// first write makes the split deterministic even when pipe reads coalesce.
+const split = 65_536;
+await new Promise((resolve, reject) => {
+  process.stdout.write(bytes.subarray(0, split), (error) => error ? reject(error) : resolve());
+});
+await delay(40);
+await new Promise((resolve, reject) => {
+  process.stdout.write(bytes.subarray(split), (error) => error ? reject(error) : resolve());
+});
+await emit({ type: "DONE", status: "succeeded", records_emitted: 1 });
+process.stdin.resume();
+`,
+		);
+		const result = runCli([
+			connector,
+			"--entrypoint",
+			entrypoint,
+			"--summary-out",
+			join(tmpDir, "summary.json"),
+		]);
+		assert.equal(result.code, 0, result.stderr);
+		const saved = JSON.parse(
+			readFileSync(lastStatePathFor(connector), "utf8"),
+		) as LastState;
+		assert.deepEqual(Object.keys(saved.state), ["items"]);
+		assert.equal(
+			(saved.state.items as { value: string }).value === expected,
+			true,
+			"saved cursor must retain every multi-byte character exactly",
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+		rmSync(join(PACKAGE_ROOT, "runs", connector), {
+			recursive: true,
+			force: true,
+		});
 	}
 });

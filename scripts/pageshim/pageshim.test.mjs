@@ -3680,6 +3680,12 @@ test("oura_browser: narrow then wider consent retains clipped debt on both hosts
 
 test("icloud_notes: owner-bound profile, browser decompression and state replay", { timeout: 120_000 }, async () => {
 	const { pageshimCase: c, bodyText } = await import("./fixtures/icloud_notes.mjs");
+	const manifest = JSON.parse(readFileSync(
+		new URL("../../connectors/icloud_notes/manifest.json", import.meta.url), "utf8",
+	));
+	assert.deepEqual(c.scopes, ["profile", "notes", "folders"].map(
+		(stream) => `${manifest.mobile.pageshim.scope_prefix}.${stream}`,
+	));
 	const built = await buildPageshim({ connector: "icloud_notes", outfile: join(out, "icloud_notes.js") });
 	const evaluateSizes = [];
 	const run = (options = {}) => runHarness({
@@ -3691,9 +3697,10 @@ test("icloud_notes: owner-bound profile, browser decompression and state replay"
 	assertCleanRun(first);
 	assert.equal(first.data.error, undefined, JSON.stringify(first.result?.errors));
 	assert.deepEqual(first.result.errors, []);
-	assert.deepEqual(first.result["icloud.profile"].records, [{ id: "12345", user_name: "Synthetic Owner" }]);
-	assert.equal(first.result["icloud.notes"].records.length, 3);
-	for (const row of first.result["icloud.notes"].records) {
+	assert.deepEqual(first.result.requestedScopes, c.scopes);
+	assert.deepEqual(first.result["icloud_notes.profile"].records, [{ id: "12345", user_name: "Synthetic Owner" }]);
+	assert.equal(first.result["icloud_notes.notes"].records.length, 3);
+	for (const row of first.result["icloud_notes.notes"].records) {
 		assert.equal(row.text_content, bodyText);
 		assert.equal(row.folder_name, "Work");
 	}
@@ -3799,12 +3806,12 @@ test("icloud_notes: failed continuation preserves readable rows and never checkp
 	} };
 	const r = await runHarness({ bundle: built.outfile, fixtures, scopes: c.scopes, gotoDelayMs: 0, loginWaitMs: 1000 });
 	assertCleanRun(r);
-	assert.equal(r.result["icloud.notes"].records.length, 3);
-	assert.ok(r.result.errors.some(error => error.scope === "icloud.notes"));
+	assert.equal(r.result["icloud_notes.notes"].records.length, 3);
+	assert.ok(r.result.errors.some(error => error.scope === "icloud_notes.notes"));
 	assert.match(r.data.status, /^Partial:/);
-	assert.equal(r.states["icloud.notes"], undefined);
-	assert.ok(r.states["icloud.profile"]);
-	assert.ok(r.states["icloud.folders"]);
+	assert.equal(r.states["icloud_notes.notes"], undefined);
+	assert.ok(r.states["icloud_notes.profile"]);
+	assert.ok(r.states["icloud_notes.folders"]);
 });
 
 test("icloud_notes: thin host commits all streams only after accepted completion", { timeout: 120_000 }, async () => {
@@ -3936,6 +3943,26 @@ test("youtube: avatar click exposes owner identity and own-channel about navigat
 			assert.equal(owner.channel_url, null);
 			assert.equal(owner.channel_id, null);
 		}
+	}
+});
+
+for (const handlerOn of ["renderer", "anchor"]) test(`youtube: profile email comes from the Switch account view's own header on both hosts (handler on ${handlerOn})`, { timeout: 180_000 }, async () => {
+	const fx = await import("./fixtures/youtube.mjs");
+	const built = await buildPageshim({ connector: "youtube", outfile: join(out, `youtube-switch-email-${handlerOn}.js`) });
+	for (const resultStreaming of [false, true]) {
+		const run = await runHarness({ bundle: built.outfile,
+			fixtures: { ...fx.youtubeFixtures, resolve: (raw) => fx.switchAccountEmailFixture(raw, handlerOn) },
+			scopes: ["youtube.profile"], resultStreaming,
+			resultSpoolDirectory: join(out, `youtube-switch-email-${handlerOn}-${resultStreaming}`) });
+		assertCleanRun(run);
+		assert.deepEqual(run.ret, { ok: true });
+		const result = resultStreaming ? run.streamDone : run.result;
+		assert.deepEqual(result.errors, []);
+		const scope = resultStreaming ? JSON.parse(await readFile(run.streamScopeFiles["youtube.profile"], "utf8"))
+			: run.result["youtube.profile"];
+		assert.equal(scope.records.length, 1);
+		assert.equal(scope.records[0].email, "synthetic@example.test");
+		assert.equal(scope.records[0].id, "UCsyntheticOwner");
 	}
 });
 

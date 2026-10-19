@@ -482,3 +482,100 @@ test("runConnectorProtocolSubprocess: stream failure evidence forces failed DONE
 	assert.equal(done.error?.code, "stream_collection_failed");
 	assert.equal(done.error?.retryable, true);
 });
+
+/** `emitted_at` is each run's own clock; blank it so two runs of one fixture compare. */
+function withoutEmittedAt(
+	messages: readonly EmittedMessage[],
+): EmittedMessage[] {
+	return messages.map((message) => {
+		if (message.type !== "RECORD") {
+			return message;
+		}
+		return { ...message, emitted_at: "" };
+	});
+}
+
+test("runConnectorProtocolSubprocess: retainRawStdout false keeps the parsed messages and returns no raw text", async () => {
+	const retained = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: fixturePath("protocol-subprocess-non-browser.ts"),
+		start: { type: "START", scope: { streams: [{ name: "items" }] } },
+	});
+	const dropped = await runConnectorProtocolSubprocess({
+		cwd: PACKAGE_ROOT,
+		entrypoint: fixturePath("protocol-subprocess-non-browser.ts"),
+		retainRawStdout: false,
+		start: { type: "START", scope: { streams: [{ name: "items" }] } },
+	});
+
+	assert.deepEqual(
+		withoutEmittedAt(dropped.messages),
+		withoutEmittedAt(retained.messages),
+	);
+	assert.equal(dropped.rawStdout, "");
+
+	const rawLines = retained.rawStdout.split("\n").filter((line) => line !== "");
+	assert.deepEqual(
+		rawLines.map((line) => JSON.parse(line)),
+		retained.messages,
+	);
+});
+
+test("runConnectorProtocolSubprocess: a multi-byte character split across stdout chunks survives", async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-utf8-"));
+	const entrypoint = join(tempDir, "utf8-connector.mjs");
+	// 3-byte characters, 300 KB in one line: pipe chunks (64 KiB) cannot all
+	// end on a character boundary, so per-chunk decoding would corrupt some.
+	const text = "\u20ac".repeat(100_000);
+	await writeFile(
+		entrypoint,
+		[
+			`const text = ${JSON.stringify(text)};`,
+			'process.stdout.write(JSON.stringify({ type: "RECORD", stream: "items", data: { id: "1", text } }) + "\\n");',
+			'process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1 }) + "\\n");',
+		].join("\n"),
+	);
+	try {
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint,
+			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+		});
+		const record = result.messages.find((m) => m.type === "RECORD") as
+			| { data: { text: string } }
+			| undefined;
+		assert.ok(record, "the RECORD reached messages");
+		assert.equal(
+			record.data.text.includes("\ufffd"),
+			false,
+			"no replacement characters",
+		);
+		assert.equal(record.data.text, text);
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
+
+test("runConnectorProtocolSubprocess: a child that exits before the first RSS tick still has a sampled peak", {
+	skip: process.platform !== "linux",
+}, async () => {
+	const tempDir = await mkdtemp(join(tmpdir(), "connector-subprocess-rss-"));
+	const entrypoint = join(tempDir, "quick-connector.mjs");
+	await writeFile(
+		entrypoint,
+		'process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");\n',
+	);
+	try {
+		const result = await runConnectorProtocolSubprocess({
+			cwd: PACKAGE_ROOT,
+			entrypoint,
+			// Far longer than the child lives, so only the start and output
+			// samples can produce a value.
+			peakRssPollIntervalMs: 60_000,
+			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+		});
+		assert.notEqual(result.peakRssBytes, null, "expected a sampled peak RSS");
+	} finally {
+		await rm(tempDir, { recursive: true, force: true });
+	}
+});
