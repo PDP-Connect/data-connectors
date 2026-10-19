@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type {
 	EmittedMessage,
@@ -1407,12 +1408,8 @@ test("saved-track traversal continues after a nonempty short page while totalCou
 	assert.equal(result.emittedRecords.length, 3);
 });
 
-test("equal-duration local saved tracks use full URI identities", async () => {
-	const uris = [
-		"spotify:local:Artist:Album:First%20Track:180000",
-		"spotify:local:Artist:Album:Second%20Track:180000",
-	];
-	const items = uris.map((uri) => ({
+function localSavedTrack(uri: string) {
+	return {
 		addedAt: { isoString: "2024-01-01T00:00:00Z" },
 		track: {
 			uri,
@@ -1426,18 +1423,54 @@ test("equal-duration local saved tracks use full URI identities", async () => {
 				externalIds: { isrc: null },
 			},
 		},
-	}));
+	};
+}
+
+function localSavedTrackId(uri: string): string {
+	return `local:${createHash("sha256").update(uri).digest("hex")}`;
+}
+
+test("equal-duration local saved tracks retain distinct URI-derived identities", async () => {
+	const uris = [
+		"spotify:local:Artist:Album:First%20Track:180000",
+		"spotify:local:Artist:Album:Second%20Track:180000",
+	];
+	const items = uris.map(localSavedTrack);
 	const result = await collectSavedTracks(() => savedResponse(items, 2), {
 		completeFixtures: false,
 	});
 	assert.deepEqual(
 		result.emittedRecords.map((record) => record.data.id),
+		uris.map(localSavedTrackId),
+	);
+	assert.deepEqual(
+		result.emittedRecords.map((record) => record.data.uri),
 		uris,
 	);
 	assert.equal(
 		result.messages.some(
 			(message) =>
 				message.type === "STATE" && message.stream === "saved_tracks",
+		),
+		true,
+	);
+});
+
+test("local saved track with a URI over 200 characters remains emitted", async () => {
+	const uri = `spotify:local:Artist:Album:${"A".repeat(190)}:180000`;
+	assert.ok(uri.length >= 215 && uri.length < 2000);
+	const result = await collectSavedTracks(
+		() => savedResponse([localSavedTrack(uri)], 1),
+		{ completeFixtures: false },
+	);
+	assert.equal(result.emittedRecords.length, 1);
+	const record = result.emittedRecords[0];
+	assert.equal(record?.data.id, localSavedTrackId(uri));
+	assert.equal(record?.data.uri, uri);
+	assert.equal(validateRecord("saved_tracks", record?.data).ok, true);
+	assert.equal(
+		result.messages.some(
+			(message) => message.type === "STATE" && message.stream === "saved_tracks",
 		),
 		true,
 	);

@@ -734,6 +734,13 @@ export const spotifyPageCollector = async (
 			return uriId ?? sourceTrackId;
 		}
 
+		async function localTrackId(uri: string): Promise<string> {
+			const digest = new Uint8Array(
+				await crypto.subtle.digest("SHA-256", new TextEncoder().encode(uri)),
+			);
+			return `local:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+		}
+
 		type SourceFieldRead<T> =
 			| { kind: "READ"; value: T }
 			| { kind: "EXPLICIT_EMPTY"; value: T }
@@ -1985,7 +1992,7 @@ export const spotifyPageCollector = async (
 							? requireField(readString(t.id, "track_id"))
 							: null;
 						const id = typeof trackUri === "string" && trackUri.startsWith("spotify:local:")
-							? trackUri
+							? await localTrackId(trackUri)
 							: spotifyTrackId(trackUri, sourceTrackId, "spotify_saved_tracks");
 						if (id === null) {
 							throw new Error(
