@@ -299,3 +299,50 @@ test("streams with no channel pass through untouched", () => {
 		);
 	}
 });
+
+for (const key of [
+	"is_im",
+	"is_mpim",
+	"is_private",
+	"is_group",
+	"is_channel",
+]) {
+	test(`every present ${key} must be boolean even beside a valid type flag`, () => {
+		for (const value of ["true", "false", 1, 0, null, undefined, {}, []]) {
+			const entry =
+				key === "is_channel"
+					? { is_private: true, [key]: value }
+					: { is_channel: true, [key]: value };
+			assert.equal(
+				reasonOf(() => classifyChannelType(entry)),
+				"ambiguous",
+				key,
+			);
+		}
+	});
+}
+test("a true private flag does not hide a malformed group flag", () => {
+	assert.equal(
+		reasonOf(() =>
+			classifyChannelType({
+				is_channel: true,
+				is_private: true,
+				is_group: "true",
+			}),
+		),
+		"ambiguous",
+	);
+});
+test("absent and explicitly false optional flags preserve public classification", () => {
+	assert.equal(classifyChannelType({ is_channel: true }), "public");
+	assert.equal(
+		classifyChannelType({
+			is_channel: true,
+			is_private: false,
+			is_group: false,
+			is_im: false,
+			is_mpim: false,
+		}),
+		"public",
+	);
+});

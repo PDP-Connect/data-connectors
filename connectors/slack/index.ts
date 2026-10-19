@@ -3362,10 +3362,10 @@ export async function runFilesStream(deps: StreamDeps): Promise<void> {
 	// Exclude quip/canvas files from the generic `files` stream — they are
 	// first-class records in the `canvases` stream (v0.3). Other file modes
 	// (hosted, snippet, external, tombstone) still flow here.
-	const rows = safeAll<FileRow>(
+	let rows = safeAll<FileRow & { channel_id?: unknown }>(
 		deps.db,
 		`
-    SELECT f.ID AS id, f.FILENAME AS filename, f.URL AS url, f.MODE AS mode, f.DATA AS data
+    SELECT f.ID AS id, f.FILENAME AS filename, f.URL AS url, f.MODE AS mode, f.DATA AS data${deps.channelScope ? ", f.CHANNEL_ID AS channel_id" : ""}
     FROM FILE f
     JOIN (SELECT ID, MAX(CHUNK_ID) AS mx FROM FILE GROUP BY ID) m
       ON m.ID = f.ID AND m.mx = f.CHUNK_ID
@@ -3375,6 +3375,30 @@ export async function runFilesStream(deps: StreamDeps): Promise<void> {
 	if (rows === null) {
 		markEnumerationFailed(deps, "files");
 		return;
+	}
+	if (deps.channelScope) {
+		// Keep provenance until scope is decided, before fingerprint/coverage
+		// accounting. Only the latest snapshot's associations count; an old
+		// allowed share must not authorize a newer outside-only snapshot.
+		const byId = new Map<string, typeof rows>();
+		for (const row of rows) {
+			const group = byId.get(row.id) ?? [];
+			group.push(row);
+			byId.set(row.id, group);
+		}
+		const allowed = deps.channelScope;
+		rows = [...byId.values()].flatMap((group) => {
+			const inside = group.find(
+				(row) =>
+					typeof row.channel_id === "string" && allowed.has(row.channel_id),
+			);
+			if (inside) return [inside];
+			// A null association beside an excluded one is not proof that the
+			// file is genuinely channel-less. Malformed non-null IDs fail closed.
+			return group.every((row) => row.channel_id === null)
+				? group.slice(0, 1)
+				: [];
+		});
 	}
 	const { considered, covered } = await runFingerprintedFullSync(
 		deps,

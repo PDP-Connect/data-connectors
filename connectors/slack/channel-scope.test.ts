@@ -23,6 +23,7 @@ import {
 	runCanvasesStream,
 	runChannelMembershipsStream,
 	runChannelsStream,
+	runFilesStream,
 	type StreamDeps,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -283,4 +284,112 @@ test("canvases: a scoped run keeps a canvas by its owning channel and one that b
 	const report = coverage(recording, "canvases");
 	assert.equal(report.considered, 2, "the archive held five; two are in scope");
 	assert.equal(report.covered, 2);
+});
+
+function fileScopeSetup(channelScope?: ReadonlySet<string>) {
+	const { deps, recording } = setup(channelScope);
+	deps.db.exec(
+		"CREATE TABLE FILE (ID TEXT, FILENAME TEXT, URL TEXT, MODE TEXT, CHANNEL_ID TEXT, MESSAGE_ID INTEGER, DATA TEXT, CHUNK_ID INTEGER)",
+	);
+	deps.requested = new Map([["files", { name: "files" }]]);
+	deps.fingerprintCursors.set(
+		"files",
+		openFingerprintCursor(
+			{ fingerprints: {} },
+			{ excludeFromFingerprint: FINGERPRINT_EXCLUDE.files },
+		),
+	);
+	const add = (id: string, channel: string | null, chunk = 1) => {
+		deps.db
+			.prepare(
+				"INSERT INTO FILE (ID, FILENAME, URL, MODE, CHANNEL_ID, DATA, CHUNK_ID) VALUES (?, ?, ?, 'hosted', ?, '{}', ?)",
+			)
+			.run(id, id + ".txt", "https://files.slack.com/" + id, channel, chunk);
+	};
+	return { deps, recording, add };
+}
+
+test("files: scope excludes private provenance before records, coverage and fingerprints", async () => {
+	const { deps, recording, add } = fileScopeSetup(new Set(["C0PUBLIC1"]));
+	try {
+		add("F0PUBLIC", "C0PUBLIC1");
+		add("F0PRIVATE", "G0PRIVATE1");
+		add("F0LOOSE", null);
+		await runFilesStream(deps);
+		assert.deepEqual(idsOf(recording, "files", "id"), ["F0LOOSE", "F0PUBLIC"]);
+		assert.equal(coverage(recording, "files").considered, 2);
+		assert.equal(coverage(recording, "files").covered, 2);
+		assert.deepEqual(
+			Object.keys(deps.fingerprintCursors.get("files")?.toState() ?? {}).sort(),
+			["F0LOOSE", "F0PUBLIC"],
+		);
+		// A new run seeds its fingerprint cursor from the previous checkpoint.
+		deps.fingerprintCursors.set(
+			"files",
+			openFingerprintCursor(
+				{ fingerprints: deps.fingerprintCursors.get("files")?.toState() ?? {} },
+				{ excludeFromFingerprint: FINGERPRINT_EXCLUDE.files },
+			),
+		);
+		await runFilesStream(deps);
+		assert.equal(recording.emitted.length, 2);
+	} finally {
+		deps.db.close();
+	}
+});
+
+test("files: one allowed current association admits once, outside-only and stale associations do not", async () => {
+	const { deps, recording, add } = fileScopeSetup(new Set(["C0PUBLIC1"]));
+	try {
+		add("F0SHARED", "G0PRIVATE1");
+		add("F0SHARED", "C0PUBLIC1");
+		add("F0SHARED", "C0PUBLIC1");
+		add("F0OUTSIDE", "G0PRIVATE1");
+		add("F0OUTSIDE", "D0DIRECT01");
+		add("F0MIXED", null);
+		add("F0MIXED", "G0PRIVATE1");
+		add("F0STALE", "C0PUBLIC1", 1);
+		add("F0STALE", "G0PRIVATE1", 2);
+		await runFilesStream(deps);
+		assert.deepEqual(idsOf(recording, "files", "id"), ["F0SHARED"]);
+		assert.equal(coverage(recording, "files").considered, 1);
+		assert.equal(coverage(recording, "files").covered, 1);
+		assert.deepEqual(
+			Object.keys(deps.fingerprintCursors.get("files")?.toState() ?? {}),
+			["F0SHARED"],
+		);
+	} finally {
+		deps.db.close();
+	}
+});
+
+test("files: empty channel scope retains only genuinely channel-less files", async () => {
+	const { deps, recording, add } = fileScopeSetup(new Set());
+	try {
+		add("F0PUBLIC", "C0PUBLIC1");
+		add("F0LOOSE", null);
+		await runFilesStream(deps);
+		assert.deepEqual(idsOf(recording, "files", "id"), ["F0LOOSE"]);
+		assert.equal(coverage(recording, "files").considered, 1);
+	} finally {
+		deps.db.close();
+	}
+});
+
+test("files: default scope preserves all channel associations", async () => {
+	const { deps, recording, add } = fileScopeSetup();
+	try {
+		add("F0PUBLIC", "C0PUBLIC1");
+		add("F0PRIVATE", "G0PRIVATE1");
+		add("F0LOOSE", null);
+		await runFilesStream(deps);
+		assert.deepEqual(idsOf(recording, "files", "id"), [
+			"F0LOOSE",
+			"F0PRIVATE",
+			"F0PUBLIC",
+		]);
+		assert.equal(coverage(recording, "files").considered, 3);
+	} finally {
+		deps.db.close();
+	}
 });

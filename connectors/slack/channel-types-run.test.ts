@@ -568,3 +568,26 @@ test("an unknown channel type stops the run before slackdump is run", async () =
 	);
 	assert.equal(outcome.slackdumpCalls.length, 0);
 });
+
+for (const key of [
+	"is_im",
+	"is_mpim",
+	"is_private",
+	"is_group",
+	"is_channel",
+]) {
+	test(`mixed valid and malformed ${key} stops before archive`, async () => {
+		const entry =
+			key === "is_channel"
+				? { id: "C0MALFORM", is_private: true, [key]: "true" }
+				: { id: "C0MALFORM", is_channel: true, [key]: "true" };
+		const outcome = await runWithFakeSlackdump({
+			types: "public,private",
+			listing: [...LISTING, entry],
+		});
+		assert.equal(outcome.done?.status, "failed");
+		assert.equal(outcome.archiveCalls.length, 0);
+		assert.deepEqual(outcome.recordChannels("messages"), []);
+		assert.deepEqual(outcome.recordChannels("channels"), []);
+	});
+}

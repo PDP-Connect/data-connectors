@@ -93,6 +93,20 @@ function flag(entry: Record<string, unknown>, key: string): boolean {
 export function classifyChannelType(
 	entry: Record<string, unknown>,
 ): ChannelType {
+	for (const key of [
+		"is_im",
+		"is_mpim",
+		"is_private",
+		"is_group",
+		"is_channel",
+	]) {
+		if (Object.hasOwn(entry, key) && typeof entry[key] !== "boolean") {
+			throw new ChannelTypeError(
+				"ambiguous",
+				"Slack lists a channel with a malformed type flag, so no channel was downloaded.",
+			);
+		}
+	}
 	const im = flag(entry, "is_im");
 	const mpim = flag(entry, "is_mpim");
 	const priv = flag(entry, "is_private") || flag(entry, "is_group");
