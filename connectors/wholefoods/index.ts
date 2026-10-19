@@ -993,7 +993,7 @@ async function collectOrderStubs({
 				total: consideredProductIds.size,
 			},
 		);
-		// Outcome records are retained, but no inventory checkpoint is justified.
+		// Lookup failures emit no nutrition row, and no inventory checkpoint is justified.
 	}
 	return { unreadable, unverifiedCountOrders };
 }
