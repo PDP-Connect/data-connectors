@@ -44,9 +44,9 @@
  * Exit 1: drift detected, or an input file is missing.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
  * Pure comparison; the CLI below only loads inputs and prints the result.
@@ -175,6 +175,8 @@ async function main() {
 	);
 }
 
-if (process.argv[1] === new URL(import.meta.url).pathname) {
+// Compare real paths. Run through a symlink, argv[1] keeps the link while import.meta.url is
+// resolved, so a plain comparison skips main() and exits 0 without checking anything.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	await main();
 }

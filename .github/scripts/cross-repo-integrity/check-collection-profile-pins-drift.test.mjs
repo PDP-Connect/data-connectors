@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -158,6 +158,19 @@ test("CLI exits 1 with a clear message when an input file is missing", () => {
 		const result = runCli(root, root);
 		assert.equal(result.status, 1);
 		assert.match(result.stderr, /^FAIL: data-connect Collection Profile pins not found at /m);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("CLI run through a symlinked path still checks instead of exiting 0", () => {
+	const root = mkdtempSync(join(tmpdir(), "pins-drift-link-"));
+	try {
+		const link = join(root, "check.mjs");
+		symlinkSync(SCRIPT, link);
+		const result = spawnSync(process.execPath, [link], { encoding: "utf8" });
+		assert.equal(result.status, 1, "the CLI skipped main() when run through a symlink");
+		assert.match(result.stderr, /^usage: check-collection-profile-pins-drift\.mjs /m);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
