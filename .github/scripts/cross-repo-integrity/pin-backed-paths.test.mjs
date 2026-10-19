@@ -20,23 +20,23 @@ const fixtures = [
 		pdpp: false,
 	},
 	{
-		name: "a compared bundled connector source backs data-connect freshness",
-		paths: ["connectors/codex/parsers.ts"],
+		name: "the publish inventory backs data-connect freshness",
+		paths: ["scripts/connector-publish-allowlist.mjs"],
 		dataConnect: true,
 		pdpp: false,
 	},
 	{
-		name: "test-only and fixture-only connector changes do not back the drift job",
-		paths: [
-			"connectors/codex/parsers.test.ts",
-			"connectors/codex/__fixtures__/sample.json",
-		],
+		name: "a connector source file is no longer pin-backed",
+		paths: ["connectors/codex/parsers.ts", "packages/polyfill-connectors/connectors/codex/parsers.ts"],
 		dataConnect: false,
 		pdpp: false,
 	},
 	{
-		name: "an unbundled connector does not back data-connect freshness",
-		paths: ["connectors/signal/parsers.ts"],
+		name: "a connector test or fixture is not pin-backed",
+		paths: [
+			"connectors/codex/parsers.test.ts",
+			"connectors/codex/__fixtures__/sample.json",
+		],
 		dataConnect: false,
 		pdpp: false,
 	},
@@ -69,5 +69,7 @@ for (const fixture of fixtures) {
 
 test("single-path predicate is strict about non-path inputs", () => {
 	assert.equal(isPinBackedPath("packages/polyfill-connectors/vendor/README.md", "data-connect"), false);
-	assert.equal(isPinBackedPath("connectors/codex/fixtures.ts", "data-connect"), true);
+	assert.equal(isPinBackedPath("connectors/codex/fixtures.ts", "data-connect"), false);
+	assert.equal(isPinBackedPath("scripts/connector-publish-allowlist.mjs", "data-connect"), true);
+	assert.equal(isPinBackedPath("scripts/connector-publish-allowlist.mjs", "pdpp"), false);
 });
