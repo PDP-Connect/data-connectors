@@ -228,10 +228,10 @@ async function runWithFilteredRecords(
 		},
 		emit: harness.emit,
 		emitRecord: async (stream, data) => {
-			if (excluded.has(String(data.id))) return;
+			if (excluded.has(String(data.node_id))) return;
 			await harness.emitRecord(stream, data);
 		},
-		isRecordSelected: (_stream, data) => !excluded.has(String(data.id)),
+		isRecordSelected: (_stream, data) => !excluded.has(String(data.node_id)),
 		progress: (): Promise<void> => Promise.resolve(),
 		requested: new Map([
 			["conversations", { name: "conversations" }],
@@ -290,7 +290,7 @@ test("filtered current branch fixtures reconcile count, tip, and parent chain", 
 		);
 		assert.equal(
 			branch.some(
-				(record) => record.data.id === conversation?.data.current_node,
+				(record) => record.data.node_id === conversation?.data.current_node,
 			),
 			true,
 		);
@@ -298,7 +298,8 @@ test("filtered current branch fixtures reconcile count, tip, and parent chain", 
 		const byId = new Map(
 			branch.map((record) => [String(record.data.id), record]),
 		);
-		let node = String(conversation?.data.current_node);
+		// parent_id names a record by its id, `<conversation_id>:<node_id>`.
+		let node = `convo-abc:${String(conversation?.data.current_node)}`;
 		const visited = new Set<string>();
 		while (byId.has(node) && !visited.has(node)) {
 			visited.add(node);
