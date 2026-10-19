@@ -9,17 +9,17 @@
   },
   "connector_key": "oura-browser",
   "manifest_uri": "https://registry.pdpp.dev/connectors/oura-browser",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "display_name": "Oura (Browser Sign-In)",
   "runtime_requirements": {
     "bindings": {
       "network": {
         "required": true,
-        "features": ["same_origin_page_fetch"]
+        "features": ["same_origin_page_fetch", "host_http_request"]
       },
       "browser": {
         "required": true,
-        "features": ["page_script_evaluation", "page_navigation"]
+        "features": ["page_script_evaluation", "page_navigation", "host_http_request"]
       }
     }
   },
@@ -34,7 +34,7 @@
       "rate_limit_sensitivity": "medium",
       "bot_detection_sensitivity": "medium",
       "background_safe": false,
-      "rationale": "Collection reuses the owner’s cloud.ouraring.com browser session. Existing sessions can refresh without a prompt while valid; first collection and expired sessions require the owner to sign in through the browser handoff."
+      "rationale": "Collection uses an owner-created Oura Developer Portal app and scoped API v2 OAuth token. A cached refresh token supports unattended reads; first authorization or a revoked grant requires browser sign-in."
     },
     "public_listing": {
       "tier": "development"
@@ -177,6 +177,10 @@
             "type": ["integer", "null"],
             "x_pdpp_role": "amount"
           },
+          "timestamp": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
           "temperature_deviation": {
             "type": ["number", "null"]
           },
@@ -232,6 +236,10 @@
           "score": {
             "type": ["integer", "null"],
             "x_pdpp_role": "amount"
+          },
+          "timestamp": {
+            "type": ["string", "null"],
+            "format": "date-time"
           },
           "active_calories": {
             "type": ["integer", "null"]
@@ -300,8 +308,8 @@
   "mobile": {
     "pageshim": {
       "scope_prefix": "oura",
-      "login_url": "https://cloud.ouraring.com/user/sign-in",
-      "login_message": "Sign in to Oura, then return here.",
+      "login_url": "https://developer.ouraring.com/applications",
+      "login_message": "Sign in to the Oura Developer Portal, then return here.",
       "collect_export": "collectOuraBrowser",
       "probe_export": "probeOuraBrowserSession",
       "summary": {
