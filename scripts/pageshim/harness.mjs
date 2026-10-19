@@ -499,6 +499,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {boolean} [o.failFinalStatusWrite] reject Complete/Partial status before storing it
  * @param {number} [o.loginAfterMs] start signed out; the simulated user signs in after this delay (Infinity: never)
  * @param {(args: {url:string,loggedIn:boolean,call:number}) => string|undefined} [o.fixtures.failGoto] return an error to emulate a PageShim navigation failure
+ * @param {boolean} [o.sampleHeap] poll the runner page's JS heap; maxHeapBytes is undefined without it
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  * @param {(method: string, args: unknown[], result: unknown) => void} [o.observeBridge] sees every bridge call and its reply
  */
@@ -509,6 +510,7 @@ export async function runHarness({
 	initialState = {},
 	supportsStateArgument = true,
 	loginAfterMs = 0,
+	sampleHeap = false,
 	gotoDelayMs = 2000,
 	loginWaitMs = 120_000,
 	env = {},
@@ -561,12 +563,26 @@ export async function runHarness({
 		legacyResults: acceptLegacyResult ?? !resultStreaming,
 	});
 
+	let sampling = false;
+	let sampler;
+	let loginTimer;
 	const browser = await chromium.launch({
 		headless: true,
 		args: ["--enable-precise-memory-info"],
 	});
 	try {
 		const context = await browser.newContext();
+		// Default-deny: Playwright runs the last-registered matching route
+		// first, so the fixture route below wins for fixture hosts.
+		const blockedOrigins = new Set();
+		await context.route("**/*", (route) => {
+			const { origin } = new URL(route.request().url());
+			if (!blockedOrigins.has(origin)) {
+				blockedOrigins.add(origin);
+				log.push(`[harness] blocked request to ${origin}`);
+			}
+			return route.abort("blockedbyclient");
+		});
 		await context.route(fixtures.hosts, (route) => {
 			const request = route.request();
 			const f = fixtures.resolve(request.url(), {
@@ -792,24 +808,33 @@ export async function runHarness({
 		});
 		runner.on("pageerror", (e) => log.push(`runner pageerror: ${e.message}`));
 		await runner.goto("https://runner.local/");
-		const performanceSession = await context.newCDPSession(runner);
-		await performanceSession.send("Performance.enable");
-		let sampling = true;
-		let maxHeapBytes = 0;
-		const sampleHeap = async () => {
-			const { metrics } = await performanceSession.send(
-				"Performance.getMetrics",
-			);
-			const heap = metrics.find((metric) => metric.name === "JSHeapUsedSize");
-			if (heap) maxHeapBytes = Math.max(maxHeapBytes, heap.value);
-		};
-		const sampler = (async () => {
-			while (sampling) {
-				await sampleHeap();
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
-			await sampleHeap();
-		})();
+		let maxHeapBytes;
+		if (sampleHeap) {
+			const performanceSession = await context.newCDPSession(runner);
+			await performanceSession.send("Performance.enable");
+			maxHeapBytes = 0;
+			sampling = true;
+			const sample = async () => {
+				const { metrics } = await performanceSession.send(
+					"Performance.getMetrics",
+				);
+				const heap = metrics.find((metric) => metric.name === "JSHeapUsedSize");
+				if (heap) maxHeapBytes = Math.max(maxHeapBytes, heap.value);
+			};
+			sampler = (async () => {
+				while (sampling) {
+					await sample();
+					await new Promise((resolve) => setTimeout(resolve, 50));
+				}
+				await sample();
+				// The handler is attached here so a failed sample (closed session,
+				// crashed target) cannot go unhandled while evaluate runs. A partial
+				// measurement is not a measurement: report none, so a heap-bound
+				// assertion fails instead of passing on the samples taken so far.
+			})().catch(() => {
+				maxHeapBytes = undefined;
+			});
+		}
 
 		if (loginAfterMs === Number.POSITIVE_INFINITY) {
 			harnessLoggedIn = false;
@@ -817,7 +842,7 @@ export async function runHarness({
 		} else if (loginAfterMs > 0) {
 			harnessLoggedIn = false;
 			fixtures.setLoggedIn(false);
-			setTimeout(() => {
+			loginTimer = setTimeout(() => {
 				log.push("[user] signs in");
 				harnessLoggedIn = true;
 				fixtures.setLoggedIn(true);
@@ -877,7 +902,11 @@ export async function runHarness({
 			log,
 		};
 	} finally {
-		for (const entry of streamHost.files.values()) await entry.handle?.close();
+		clearTimeout(loginTimer);
+		sampling = false;
+		await sampler;
+		for (const entry of streamHost.files.values())
+			await entry.handle?.close().catch(() => {});
 		await browser.close();
 	}
 }

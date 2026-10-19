@@ -4242,7 +4242,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.56",
+				"version": "0.3.0",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -4377,16 +4377,23 @@
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": "string",
+									"description": "Record id: the conversation id and the source node id joined by \":\" (\"<conversation_id>:<node_id>\"). ChatGPT copies message nodes into forked conversations, so a node id can recur across conversations and does not identify a message by itself. Versions before 0.3.0 used the bare node id here; node_id carries that value now."
+								},
+								"node_id": {
+									"type": "string",
+									"description": "The source's node id for this message, unique within its conversation. conversations.current_node is a node id."
 								},
 								"conversation_id": {
 									"type": "string"
 								},
 								"parent_id": {
-									"type": ["string", "null"]
+									"type": ["string", "null"],
+									"description": "Record id (the id of another messages record in this conversation) of the nearest retained ancestor, or null for the root. May name a record that was not emitted when the ancestor is the source's synthetic root."
 								},
 								"children_ids": {
-									"type": "array"
+									"type": "array",
+									"description": "Record ids of the source node's children, including children on other branches that are not emitted."
 								},
 								"role": {
 									"type": ["string", "null"],
@@ -4396,7 +4403,12 @@
 									"type": ["string", "null"],
 									"x_pdpp_role": "primary-title",
 									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
-									"description": "Full message text in the pdpp-safe-escape-v1 encoding. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
+									"description": "Full message text in the pdpp-safe-escape-v1 encoding. For text and multimodal_text bodies it is the string entries of the source parts joined with a newline, as the legacy collector joins them; the other entries are in non_string_parts. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
+								},
+								"non_string_parts": {
+									"type": "array",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "For text and multimodal_text bodies, the entries of the source parts array that are not strings (asset pointers with their size and generation metadata, audio transcripts, any other object), each { index, part } with index the position in parts. content joins only the string parts. Every string inside every entry, at any depth and including object keys, is in the pdpp-safe-escape-v1 encoding (decode it as content is decoded). Empty for other content types."
 								},
 								"content_type": {
 									"type": ["string", "null"]
@@ -9668,7 +9680,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.5",
+				"version": "0.3.6",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -13769,7 +13781,7 @@
 				},
 				"connector_key": "icloud-notes",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/icloud-notes",
-				"version": "0.1.24",
+				"version": "0.1.30",
 				"display_name": "iCloud Notes",
 				"brand": {
 					"icon": "icon.svg",
@@ -13777,12 +13789,17 @@
 				},
 				"runtime_requirements": {
 					"bindings": {
-						"network": {
-							"required": true
-						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
 						}
+					}
+				},
+				"mobile": {
+					"pageshim": {
+						"entry": "icloud_notes.ts",
+						"scope_prefix": "icloud_notes",
+						"login_url": "https://www.icloud.com/notes"
 					}
 				},
 				"capabilities": {
@@ -13961,6 +13978,7 @@
 					}
 				],
 				"reason_display_messages": {
+					"inventory_not_proven_complete": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
 					"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
 					"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
 					"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
@@ -14493,7 +14511,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.29",
+				"version": "0.3.31",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -14502,10 +14520,25 @@
 				"runtime_requirements": {
 					"bindings": {
 						"network": {
-							"required": true
+							"required": true,
+							"features": ["same_origin_page_fetch"]
 						},
 						"browser": {
-							"required": true
+							"required": true,
+							"features": ["page_script_evaluation", "page_navigation"]
+						}
+					}
+				},
+				"mobile": {
+					"pageshim": {
+						"scope_prefix": "linkedin",
+						"login_url": "https://www.linkedin.com/login",
+						"login_message": "Sign in to LinkedIn, then return here.",
+						"collect_export": "collectLinkedInPageShim",
+						"probe_export": "probeLinkedInSession",
+						"summary": {
+							"singular": "record",
+							"plural": "records"
 						}
 					}
 				},
@@ -14894,6 +14927,7 @@
 					"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 					"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
 					"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+					"inventory_not_proven_complete": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
 					"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
 					"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
 					"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
@@ -15108,7 +15142,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.31",
+				"version": "0.4.32",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -19452,7 +19486,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.35",
+				"version": "0.1.37",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -19930,6 +19964,7 @@
 					}
 				},
 				"reason_display_messages": {
+					"inventory_not_proven_complete": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
 					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 					"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
@@ -25845,10 +25880,11 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.33",
+				"version": "0.2.38",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
+						"scope_prefix": "youtube",
 						"login_url": "https://www.youtube.com/"
 					}
 				},
@@ -25917,7 +25953,8 @@
 									"type": ["string", "null"]
 								},
 								"email": {
-									"type": ["string", "null"]
+									"type": ["string", "null"],
+									"description": "Signed-in Google account email, read from the avatar menu's Switch account header; omitted when the menu shows none."
 								},
 								"joined_at": {
 									"type": ["string", "null"]
@@ -25966,10 +26003,10 @@
 					{
 						"name": "subscriptions",
 						"required": false,
-						"description": "Channels visible in the signed-in subscriptions page, up to 20.",
+						"description": "Channels visible in the signed-in subscriptions page.",
 						"display": {
 							"label": "Your subscriptions",
-							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible. Limited to 20."
+							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26033,10 +26070,10 @@
 					{
 						"name": "playlists",
 						"required": false,
-						"description": "Owner library playlists visible in the browser, up to 50.",
+						"description": "Owner library playlists visible in the browser.",
 						"display": {
 							"label": "Your playlists",
-							"detail": "Playlist titles, URLs and visible header metadata. Limited to 50."
+							"detail": "Playlist titles, URLs and visible header metadata."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26143,7 +26180,7 @@
 							"resources": true
 						},
 						"incremental": false,
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -26261,10 +26298,10 @@
 					{
 						"name": "watch_history",
 						"required": false,
-						"description": "The latest observed history entry per video, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
+						"description": "Observed history entries keyed by video and normalized viewing date, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
 						"display": {
 							"label": "Your watch history",
-							"detail": "Observed videos are upserted by video identity while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
+							"detail": "Observed viewing dates are upserted by video and viewing date while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
 						},
 						"semantics": "mutable_state",
 						"schema": {
