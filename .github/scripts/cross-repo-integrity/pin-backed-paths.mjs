@@ -9,18 +9,14 @@
  * corresponding drift job compares.
  */
 
-import { isComparedConnectorFile } from "./compared-connector-file.mjs";
-
 const PIN_FILE = ".github/cross-repo-pins.json";
-
-// The bundled set comes from the canonical registry, the same source
-// check-connector-source-drift.mjs uses. Node 24 strips the registry's types on import.
-const registryUrl = new URL("../../../packages/polyfill-connectors/src/collector-registry.ts", import.meta.url);
-const { LOCAL_COLLECTOR_DEFINITIONS } = await import(registryUrl.href);
-const BUNDLED_CONNECTOR_DIRS = LOCAL_COLLECTOR_DEFINITIONS.map((definition) => `connectors/${definition.connector_id}`);
 
 const PIN_BACKED_ARTIFACTS = {
 	"data-connect": new Set([
+		// Read by the collector-definitions and collection-profile-pins drift jobs.
+		"packages/polyfill-connectors/src/collector-registry.ts",
+		// Read by the collection-profile-pins drift job: the publish inventory.
+		"scripts/connector-publish-allowlist.mjs",
 		"packages/polyfill-connectors/vendor/SHA256SUMS",
 		"packages/polyfill-connectors/vendor/pdpp-collector-runtime-0.0.1.tgz",
 		"packages/polyfill-connectors/vendor/pdpp-connector-protocol-0.0.1.tgz",
@@ -31,19 +27,10 @@ const PIN_BACKED_ARTIFACTS = {
 	]),
 };
 
-function isComparedConnectorPath(path) {
-	const directory = BUNDLED_CONNECTOR_DIRS.find((candidate) => path.startsWith(`${candidate}/`));
-	return directory !== undefined && isComparedConnectorFile(path.slice(directory.length + 1));
-}
-
 export function isPinBackedPath(path, repo) {
 	if (path === PIN_FILE) return true;
 	if (!Object.hasOwn(PIN_BACKED_ARTIFACTS, repo)) {
 		throw new Error(`unknown pin repository: ${repo}`);
-	}
-
-	if (repo === "data-connect") {
-		return path === "packages/polyfill-connectors/src/collector-registry.ts" || isComparedConnectorPath(path) || PIN_BACKED_ARTIFACTS[repo].has(path);
 	}
 
 	return PIN_BACKED_ARTIFACTS[repo].has(path);
