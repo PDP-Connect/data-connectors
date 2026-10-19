@@ -221,6 +221,7 @@ test("a canary killed only by a test outside the owner or native files fails", (
 	foreign.report.files["connectors/groupme/index.ts"].mutants[0].killedBy = [
 		"foreign",
 	];
+	foreign.events.find(e => e.name === "onMutantTested" && e.data.id === "6").data.killedBy = ["foreign"];
 	assert.throws(
 		() => verifyInvocation(foreign),
 		/unreported test|outside native GroupMe files|not killed by its owner test/,
@@ -380,6 +381,54 @@ test("non-canary complete killed evidence is accepted", () => {
 	mutant.status = "Killed";
 	mutant.testsCompleted = 1;
 	mutant.killedBy = ["owner-test-id"];
-	input.events.find((e) => e.name === "onMutantTested" && e.data.id === mutant.id).data.status = "Killed";
+	Object.assign(input.events.find((e) => e.name === "onMutantTested" && e.data.id === mutant.id).data, { status: "Killed", testsCompleted: 1, killedBy: ["owner-test-id"] });
 	assert.equal(verifyInvocation(input).population.counts.Killed, 2);
+});
+
+for (const origin of ["planned", "tested"]) {
+	test(origin + " supplied filename must agree with the reported file", () => {
+		const input = invocation();
+		const actual = origin === "planned"
+			? input.events.find(e => e.name === "onMutationTestingPlanReady").data.mutantPlans[1].mutant
+			: input.events.find(e => e.name === "onMutantTested" && e.data.id === "0").data;
+		actual.fileName = "connectors/groupme/schemas.ts";
+		assert.throws(() => verifyInvocation(input), /file.*differs/);
+	});
+}
+for (const field of ["testsCompleted", "killedBy"]) {
+	test("supplied tested kill " + field + " must agree with the report", () => {
+		const input = invocation();
+		const reported = input.report.files[canary.file].mutants[1];
+		reported.status = "Killed"; reported.testsCompleted = 1; reported.killedBy = ["owner-test-id"];
+		const actual = input.events.find(e => e.name === "onMutantTested" && e.data.id === "0").data;
+		actual.status = "Killed"; actual.testsCompleted = 1; actual.killedBy = ["owner-test-id"];
+		actual[field] = field === "testsCompleted" ? 0 : ["different-test"];
+		assert.throws(() => verifyInvocation(input), /tested.*differs/);
+	});
+}
+test("ID-only lifecycle identity and absent optional kill facts remain valid", () => {
+	const input = invocation();
+	for (const plan of input.events.find(e => e.name === "onMutationTestingPlanReady").data.mutantPlans)
+		plan.mutant = { id: plan.mutant.id };
+	for (const event of input.events.filter(e => e.name === "onMutantTested"))
+		event.data = { id: event.data.id, status: event.data.status };
+	assert.equal(verifyInvocation(input).canary.id, "6");
+});
+
+test("official absolute filenames and resolved killer labels agree with report identities", () => {
+	const input = invocation();
+	input.report.projectRoot = "/tmp/official-project";
+	for (const plan of input.events.find(e => e.name === "onMutationTestingPlanReady").data.mutantPlans)
+		plan.mutant.fileName = input.report.projectRoot + "/" + canary.file;
+	for (const event of input.events.filter(e => e.name === "onMutantTested")) {
+		event.data.fileName = input.report.projectRoot + "/" + canary.file;
+		if (event.data.killedBy) event.data.killedBy = event.data.killedBy.map(id => {
+			for (const [file, value] of Object.entries(input.report.testFiles)) {
+				const found = value.tests.find(test => test.id === id);
+				if (found) return file + "#" + found.name;
+			}
+			return id;
+		});
+	}
+	assert.equal(verifyInvocation(input).canary.id, "6");
 });

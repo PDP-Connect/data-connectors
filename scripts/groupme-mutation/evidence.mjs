@@ -4,7 +4,7 @@
 // artifacts from that invocation: event-recorder files, the JSON report, and the owner
 // receipt lines written during the same run. Nothing here reruns or re-derives mutants.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { canary, canaryReplacementText } from "./canary.mjs";
 
 const knownStatuses = new Set([
@@ -100,7 +100,22 @@ export function verifyInvocation({
 	// ID-only lifecycle events remain valid; supplied identities must agree.
 	const point = (p, offset = 0) => [p?.line + offset, p?.column + offset];
 	// Actions run 38945513812: plan locations are 0-based; tested/report are 1-based.
+	const normalizedFile = (value) => {
+		if (typeof value !== "string") throw new Error("invalid supplied file identity");
+		const path = posix.normalize(value.replaceAll("\\", "/"));
+		if (posix.isAbsolute(path) || /^[A-Za-z]:\//.test(path)) {
+			if (typeof report.projectRoot !== "string")
+				throw new Error("absolute file identity requires projectRoot");
+			const root = posix.normalize(report.projectRoot.replaceAll("\\", "/")).replace(/\/$/, "");
+			if (!path.startsWith(root + "/")) throw new Error("file identity differs outside projectRoot");
+			return path.slice(root.length + 1);
+		}
+		return path;
+	};
 	const checkIdentity = (actual, expected, label) => {
+		if (Object.hasOwn(actual, "fileName") &&
+			normalizedFile(actual.fileName) !== normalizedFile(expected.file))
+			throw new Error(label + " identity file differs for mutant " + expected.id);
 		const offset = label === "planned" ? 1 : 0;
 		for (const key of ["mutatorName", "replacement"]) {
 			if (Object.hasOwn(actual, key) && actual[key] !== expected[key])
@@ -156,6 +171,23 @@ export function verifyInvocation({
 		for (const id of mutant.killedBy) {
 			if (!testById.has(id)) throw new Error("Killed mutant names an unreported test: " + mutant.id);
 		}
+	}
+	const killerLabel = (id) => {
+		const test = testById.get(id);
+		return test ? normalizedFile(test.file) + "#" + test.name : id;
+	};
+	const killerSet = (ids) => {
+		if (!Array.isArray(ids)) throw new Error("tested killedBy differs: invalid list");
+		return JSON.stringify([...new Set(ids.map(killerLabel))].sort());
+	};
+	for (const [id, actual] of tested) {
+		const expected = byId.get(id);
+		if (Object.hasOwn(actual, "testsCompleted") &&
+			actual.testsCompleted !== expected.testsCompleted)
+			throw new Error("tested testsCompleted differs for mutant " + id);
+		if (Object.hasOwn(actual, "killedBy") &&
+			killerSet(actual.killedBy) !== killerSet(expected.killedBy ?? []))
+			throw new Error("tested killedBy differs for mutant " + id);
 	}
 	const killers = (canaryMutant.killedBy ?? []).map((id) => {
 		const test = testById.get(id);
