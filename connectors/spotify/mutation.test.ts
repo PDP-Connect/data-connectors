@@ -197,6 +197,10 @@ test("bounded Spotify streams emit typed gaps and never claim full-scan STATE", 
 			["top_tracks", "spotify_ranked_list_capped"],
 		],
 	);
+	assert.deepEqual(
+		gaps[0]?.type === "SKIP_RESULT" ? gaps[0].recovery_hint : undefined,
+		{ action: "retry_on_connector_upgrade", retryable: false },
+	);
 });
 
 test("recent contexts request their profile query hash and remain explicitly incomplete", async () => {

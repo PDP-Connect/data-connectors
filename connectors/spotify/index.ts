@@ -2537,7 +2537,7 @@ export async function spotifyCollect({
 				stream,
 				reason: "spotify_recent_context_boundary_unverified",
 				message: "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
-				recovery_hint: { action: "retry_by_runtime", retryable: true },
+				recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
 			});
 		} else {
 			await emit({
