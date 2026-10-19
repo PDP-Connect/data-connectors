@@ -88,8 +88,10 @@ import {
 	extractRawMessageText,
 	flattenTreeCurrentBranch,
 	maxUpdateTimeIso,
+	messageRecordId,
 	minUpdateTimeIso,
 	reconcileEmittedBranchMessages,
+	toMessageRecord,
 	tsToIso,
 } from "./parsers.ts";
 import { validateRecord as validateRecordRaw } from "./schemas.ts";
@@ -2343,11 +2345,11 @@ export interface StreamDeps {
 	) => Promise<void>;
 	/** Mirrors the runtime's resource/time selection gate before metadata is built. */
 	isRecordSelected?: CollectContext["isRecordSelected"];
-	/** Message IDs already emitted by earlier detail work in this run. */
+	/** Message record ids (`messageRecordId`) already emitted by earlier detail work in this run. */
 	emittedMessageIdsThisRun?: Set<string>;
 	/** Run-scoped count of messages emitted without `content` (see OmittedMessageContentTally). */
 	omittedMessageContent?: OmittedMessageContentTally;
-	/** parent_id each message was emitted with this run; the stream is append-only. */
+	/** Source parent node id each message was emitted with this run, by record id; the stream is append-only. */
 	emittedMessageParentsThisRun?: Map<string, string | null>;
 	// Run-scoped accumulator for served 429s seen OUTSIDE the detail lane (list
 	// pagination + the non-detail streams). Read once when the detail phase starts
@@ -2867,7 +2869,11 @@ export async function processConversationDetail(
 			continue;
 		}
 
-		const messageId = typeof msg.id === "string" ? msg.id : null;
+		// A node id can recur in another conversation (forks copy nodes), so the
+		// run-wide "already emitted" identity is the record id, which is scoped by
+		// conversation.
+		const messageId =
+			typeof msg.id === "string" ? messageRecordId(c.id, msg.id) : null;
 		if (messageId && candidateIds.has(messageId)) {
 			if (onBranch) {
 				filteredBranchCount += 1;
@@ -2876,7 +2882,10 @@ export async function processConversationDetail(
 			}
 			continue;
 		}
-		if (deps.isRecordSelected && !deps.isRecordSelected("messages", msg)) {
+		if (
+			deps.isRecordSelected &&
+			!deps.isRecordSelected("messages", toMessageRecord(msg, c.id))
+		) {
 			if (onBranch) {
 				filteredBranchCount += 1;
 				filteredBySelection += 1;
@@ -2909,7 +2918,7 @@ export async function processConversationDetail(
 					spoolDir === null ? "host_blob_unavailable" : "exceeds_host_blob_cap";
 			}
 		}
-		const validation = validateRecord("messages", msg);
+		const validation = validateRecord("messages", toMessageRecord(msg, c.id));
 		if (validation && !validation.ok) {
 			rejectedByShapeAnywhere += 1;
 			if (onBranch) {
@@ -2952,7 +2961,10 @@ export async function processConversationDetail(
 	// reports the conversation as structurally incomplete instead.
 	let emittedParentConflict = false;
 	for (const candidate of retainedBranch) {
-		const id = typeof candidate.msg.id === "string" ? candidate.msg.id : null;
+		const id =
+			typeof candidate.msg.id === "string"
+				? messageRecordId(c.id, candidate.msg.id)
+				: null;
 		if (!id || !candidate.alreadyEmitted || !emittedParents.has(id)) continue;
 		const emittedParent = emittedParents.get(id) ?? null;
 		if (candidate.msg.parent_id !== emittedParent) {
@@ -2996,7 +3008,8 @@ export async function processConversationDetail(
 	for (const candidate of candidates) {
 		const { msg } = candidate;
 		if (candidate.alreadyEmitted) continue;
-		const messageId = typeof msg.id === "string" ? msg.id : null;
+		const messageId =
+			typeof msg.id === "string" ? messageRecordId(c.id, msg.id) : null;
 		if (messageId) {
 			alreadyEmittedIds.add(messageId);
 			emittedParents.set(messageId, (msg.parent_id as string | null) ?? null);
@@ -3008,7 +3021,7 @@ export async function processConversationDetail(
 		// and the text is re-derived here rather than held per candidate.
 		await deps.emitRecord(
 			"messages",
-			msg,
+			toMessageRecord(msg, c.id),
 			blob && messageId && sourceNode
 				? {
 						beforeEmit: () =>
@@ -3883,14 +3896,26 @@ async function walkConversationSearch(
 				"ChatGPT conversation search did not re-observe the saved backfill boundary",
 				{ cursor, boundary_ids: resumeBackfill.boundary_ids },
 			);
+			const observedBackfill =
+				conversationsById.size === 0
+					? {
+							position_hint: 0,
+							oldest_update_time: null,
+							boundary_ids: [],
+						}
+					: {
+							...conversationBackfillAt(conversationsById.values(), cursor),
+							// A missing boundary found during a resumed suffix scan does not
+							// establish anything about the skipped prefix. Force the next
+							// attempt to read from the start before accepting this new anchor.
+							position_hint:
+								resumeStartCursor > 0 ? 0 : cursor,
+						};
 			return {
 				items: [...conversationsById.values()],
 				truncated: true,
 				backfillItems: [...conversationsById.values()],
-				backfill: {
-					...resumeBackfill,
-					position_hint: Math.max(0, resumeStartCursor - pageSize),
-				},
+				backfill: observedBackfill,
 			};
 		}
 		return {
@@ -7405,6 +7430,15 @@ export async function collectChatGpt(
 		capture,
 	} = ctx;
 	const { page } = ctx as BrowserCollectContext;
+	const messageResources = requested.get("messages")?.resources;
+	if (
+		Array.isArray(messageResources) &&
+		messageResources.some((resource) => !String(resource).includes(":"))
+	) {
+		throw new Error(
+			"Unsupported unscoped ChatGPT message resource selector; message resources must use conversation_id:node_id",
+		);
+	}
 
 	// Run-scoped accumulator for served 429s seen outside the detail lane
 	// (list pagination + the non-detail streams). createChatGptApi bumps it
