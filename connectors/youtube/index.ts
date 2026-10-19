@@ -93,6 +93,14 @@ export function videoIdentity(video: BrowserVideo): string {
 	return url.href;
 }
 
+function historyIdentity(video: BrowserVideo, dateReference: Date): string {
+	const watchedDate = resolveWatchedDate(
+		video.watched_date_label ?? null,
+		dateReference,
+	);
+	return `${videoIdentity(video)}|${watchedDate ?? "unknown-date"}`;
+}
+
 function recordValue(value: unknown): Record<string, unknown> | null {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -991,6 +999,7 @@ async function readHistoryVideoList(
 	cursor: HistoryCursor | undefined,
 	collectionMode: BrowserCollectContext["collectionMode"],
 	emitRecord: HistoryStreamRecord,
+	identityForVideo: (video: BrowserVideo) => string,
 ): Promise<VideoReadResult> {
 	const startedAt = performance.now();
 	const responseTracker = new HistoryResponseTracker(page);
@@ -1095,7 +1104,7 @@ async function readHistoryVideoList(
 			rowsAtStart = batch.totalRows;
 			headAnchorIds = batch.rows
 				.slice(0, 3)
-				.flatMap((video) => (video ? [videoIdentity(video)] : []));
+				.flatMap((video) => (video ? [identityForVideo(video)] : []));
 		}
 		if (offset >= totalRows) {
 			await responseTracker.flush();
@@ -1225,8 +1234,10 @@ async function readHistoryVideoList(
 				break;
 			}
 			const position = offset;
-			const key = videoIdentity(video);
-			if (resumeAnchor && !resumeAnchorFound && key !== resumeAnchor) {
+			const key = identityForVideo(video);
+			const matchesResumeAnchor =
+				key === resumeAnchor || videoIdentity(video) === resumeAnchor;
+			if (resumeAnchor && !resumeAnchorFound && !matchesResumeAnchor) {
 				if (rowsSeen.has(key)) {
 					dedupedCount += 1;
 				} else {
@@ -1238,7 +1249,7 @@ async function readHistoryVideoList(
 				offset += 1;
 				continue;
 			}
-			const matchingResumeAnchor = key === resumeAnchor;
+			const matchingResumeAnchor = matchesResumeAnchor;
 			if (matchingResumeAnchor) {
 				resumeAnchorFound = true;
 				phase = "backfill";
@@ -1332,7 +1343,7 @@ async function readHistoryVideoList(
 		lastAccounted,
 		checkpointAnchor:
 			stableEnd && responseTracker.trackingComplete && lastAccounted
-				? videoIdentity(lastAccounted)
+				? identityForVideo(lastAccounted)
 				: null,
 		phase: headOnly ? "head_reconciliation" : phase,
 		...(lastAccounted ? { checkpointPosition: Math.max(0, offset - 1) } : {}),
@@ -1446,6 +1457,7 @@ function readWatchHistoryList(
 	historyCursor?: HistoryCursor,
 	collectionMode?: BrowserCollectContext["collectionMode"],
 	emitRecord?: HistoryStreamRecord,
+	identityForVideo?: (video: BrowserVideo) => string,
 ): Promise<VideoReadResult> {
 	return readHistoryVideoList(
 		page,
@@ -1454,6 +1466,7 @@ function readWatchHistoryList(
 		historyCursor,
 		collectionMode,
 		emitRecord ?? (async () => undefined),
+		identityForVideo ?? videoIdentity,
 	);
 }
 
@@ -1465,6 +1478,7 @@ async function readableVideos(
 	stream: string,
 	historyCursor?: HistoryCursor,
 	historyRecord?: HistoryStreamRecord,
+	historyIdentityForVideo?: (video: BrowserVideo) => string,
 ): Promise<VideoReadResult | null> {
 	try {
 		const result =
@@ -1476,6 +1490,7 @@ async function readableVideos(
 						historyCursor,
 						ctx.collectionMode,
 						historyRecord,
+						historyIdentityForVideo,
 					)
 				: await readPlaylistVideoList(ctx.page, url, rounds, ctx.capture);
 		if (
@@ -1896,7 +1911,14 @@ export async function collectYoutubeBrowser(
 			ctx.collectionMode === "full_refresh"
 				? undefined
 				: (ctx.state?.watch_history as HistoryCursor | undefined);
-		let dateReference: Date | null = null;
+		const browserDate = await page.evaluate(() => {
+			const now = new Date();
+			return [now.getFullYear(), now.getMonth(), now.getDate()];
+		});
+		const dateReference =
+			Array.isArray(browserDate) && browserDate.length === 3
+				? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
+				: new Date(capturedAt);
 		const result = await readableVideos(
 			ctx,
 			streams,
@@ -1905,18 +1927,8 @@ export async function collectYoutubeBrowser(
 			"watch_history",
 			priorCursor,
 			async (video, position) => {
-				if (!dateReference) {
-					const browserDate = await page.evaluate(() => {
-						const now = new Date();
-						return [now.getFullYear(), now.getMonth(), now.getDate()];
-					});
-					dateReference =
-						Array.isArray(browserDate) && browserDate.length === 3
-							? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)
-							: new Date(capturedAt);
-				}
 				await emit("watch_history", {
-					id: await youtubeRecordId(`history|${videoIdentity(video)}`),
+					id: await youtubeRecordId(`history|${historyIdentity(video, dateReference)}`),
 					position,
 					watched_date: resolveWatchedDate(
 						video.watched_date_label ?? null,
@@ -1933,6 +1945,7 @@ export async function collectYoutubeBrowser(
 					description: video.description,
 				});
 			},
+			(video) => historyIdentity(video, dateReference),
 		);
 		if (result) {
 			const fact = coverage.get("watch_history");

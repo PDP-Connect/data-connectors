@@ -25879,7 +25879,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.35",
+				"version": "0.2.36",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
@@ -26002,10 +26002,10 @@
 					{
 						"name": "subscriptions",
 						"required": false,
-						"description": "Channels visible in the signed-in subscriptions page, up to 20.",
+						"description": "Channels visible in the signed-in subscriptions page.",
 						"display": {
 							"label": "Your subscriptions",
-							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible. Limited to 20."
+							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26069,10 +26069,10 @@
 					{
 						"name": "playlists",
 						"required": false,
-						"description": "Owner library playlists visible in the browser, up to 50.",
+						"description": "Owner library playlists visible in the browser.",
 						"display": {
 							"label": "Your playlists",
-							"detail": "Playlist titles, URLs and visible header metadata. Limited to 50."
+							"detail": "Playlist titles, URLs and visible header metadata."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26297,10 +26297,10 @@
 					{
 						"name": "watch_history",
 						"required": false,
-						"description": "The latest observed history entry per video, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
+						"description": "Observed history entries keyed by video and normalized viewing date, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
 						"display": {
 							"label": "Your watch history",
-							"detail": "Observed videos are upserted by video identity while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
+							"detail": "Observed viewing dates are upserted by video and viewing date while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
 						},
 						"semantics": "mutable_state",
 						"schema": {
