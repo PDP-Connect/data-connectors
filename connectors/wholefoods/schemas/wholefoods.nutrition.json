@@ -13,32 +13,224 @@
         "additionalProperties": {
           "type": "object",
           "properties": {
-            "name": { "type": "string" },
-            "source": { "type": "string", "enum": ["wholefoods_product_page", "wholefoods_structured_data", "amazon_product_page", "usda_fdc", "not_found", "error", "blocked"] },
-            "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
-            "calories": { "type": ["number", "null"] },
-            "protein_g": { "type": ["number", "null"] },
-            "carbs_g": { "type": ["number", "null"] },
-            "fat_g": { "type": ["number", "null"] },
-            "sodium_mg": { "type": ["number", "null"] },
-            "fiber_g": { "type": ["number", "null"] },
-            "sugar_g": { "type": ["number", "null"] },
-            "servingSize": { "type": ["string", "null"] },
-            "servingsPerContainer": { "type": ["string", "null"] }
+            "name": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string",
+              "enum": [
+                "wholefoods_product_page",
+                "wholefoods_structured_data",
+                "amazon_product_page",
+                "usda_fdc",
+                "not_found",
+                "error",
+                "blocked"
+              ]
+            },
+            "confidence": {
+              "type": "string",
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            "calories": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "protein_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "carbs_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "fat_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "sodium_mg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "fiber_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "sugar_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "servingSize": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "servingsPerContainer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "added_sugar_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "allergens": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "calcium_mg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "category": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "cholesterol_mg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "ingredients": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "iron_mg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "highlights": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "potassium_mg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "rawNutritionText": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "saturated_fat_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "trans_fat_g": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "upc": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "usdaBrand": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "usdaDescription": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "usdaFdcId": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "usdaMatchMethod": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vitamin_d_mcg": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": {
+              "type": [
+                "string"
+              ]
+            }
           },
-          "required": ["name", "source"]
+          "required": [
+            "name",
+            "source"
+          ]
         }
       },
       "coverage": {
         "type": "object",
         "properties": {
-          "total": { "type": "number" },
-          "found": { "type": "number" },
-          "foundUSDA": { "type": "number" },
-          "percentCovered": { "type": "number" }
+          "total": {
+            "type": "number"
+          },
+          "found": {
+            "type": "number"
+          },
+          "foundUSDA": {
+            "type": "number"
+          },
+          "percentCovered": {
+            "type": "number"
+          }
         }
       }
     },
-    "required": ["items", "coverage"]
+    "required": [
+      "items",
+      "coverage"
+    ]
   }
 }

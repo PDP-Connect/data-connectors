@@ -340,14 +340,14 @@ test("mapUsdaNutrients falls back to per-100g scale when servingSize is absent",
 
 // ─── Nutrition: Whole Foods product page ──────────────────────────────────
 
-test("parseWholeFoodsProductPageDom prefers JSON-LD NutritionInformation when present", () => {
+test("parseWholeFoodsProductPageDom preserves legacy JSON-LD provenance", () => {
 	const html = `<html><body>
     <script type="application/ld+json">
       {"@type":"Product","nutrition":{"@type":"NutritionInformation","calories":"105 calories","proteinContent":"1.3g","servingSize":"1 medium (118g)"}}
     </script>
   </body></html>`;
 	const facts = parseWholeFoodsProductPageDom(html);
-	assert.equal(facts?.source, "wholefoods_product_page");
+	assert.equal(facts?.source, "wholefoods_structured_data");
 	assert.equal(facts?.confidence, "high");
 	assert.equal(facts?.calories, 105);
 	assert.equal(facts?.proteinG, 1.3);

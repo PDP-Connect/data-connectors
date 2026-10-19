@@ -43,7 +43,52 @@ const SERVING_SIZE_RE = /Serving [Ss]ize[:\s]*([^\n]+)/;
 const SERVINGS_PER_CONTAINER_RE =
 	/(\d+(?:\.\d+)?)\s*servings?\s*per\s*container|servings?\s*per\s*container[:\s]*(\d+(?:\.\d+)?)/i;
 const NUTRIENT_PATTERN_SOURCE =
-	"(Total Fat|Saturated Fat|Trans Fat|Cholesterol|Sodium|Total Carbohydrate|Dietary Fiber|Added Sugars|Sugars|Protein|Potassium|Calcium|Iron|Vitamin D)[:\\s]*(\\d+\\.?\\d*)";
+	"(Total Fat|Saturated Fat|Trans Fat|Cholesterol|Sodium|Total Carbohydrate|Dietary Fiber|Added Sugars|Includes Added Sugars|Sugars|Protein|Potassium|Calcium|Iron|Vitamin D)[:\\s]*(\\d+\\.?\\d*)";
+
+type NutritionDetails = Pick<
+	NutritionFacts,
+	| "addedSugarG"
+	| "allergens"
+	| "calciumMg"
+	| "category"
+	| "cholesterolMg"
+	| "fdcId"
+	| "highlights"
+	| "ingredients"
+	| "ironMg"
+	| "potassiumMg"
+	| "rawNutritionText"
+	| "saturatedFatG"
+	| "transFatG"
+	| "upc"
+	| "usdaBrand"
+	| "usdaDescription"
+	| "usdaMatchMethod"
+	| "vitaminDMcg"
+>;
+
+function emptyNutritionDetails(): NutritionDetails {
+	return {
+		addedSugarG: null,
+		allergens: null,
+		calciumMg: null,
+		category: [],
+		cholesterolMg: null,
+		fdcId: null,
+		highlights: [],
+		ingredients: null,
+		ironMg: null,
+		potassiumMg: null,
+		rawNutritionText: null,
+		saturatedFatG: null,
+		transFatG: null,
+		upc: null,
+		usdaBrand: null,
+		usdaDescription: null,
+		usdaMatchMethod: null,
+		vitaminDMcg: null,
+	};
+}
 
 const IN_STORE_ITEM_LIST_SELECTOR = "#f3_food_ItemList";
 // "Qty: 1 @ $7.99 each" | "Qty: 2.17 lb @ $6.99/lb"
@@ -411,7 +456,7 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 			continue;
 		}
 		// Keep an ASIN-less row for its parent order's item count. The legacy
-		// order_items schema requires a source product id, so the collector
+		// order_items schema requires a source product id, so the data connector
 		// reports it and omits only that item record.
 		const rowText = textOf(itemRow);
 		const quantity = QTY_RE.exec(rowText)?.[1];
@@ -643,13 +688,21 @@ export function bestUsdaMatch(
 
 // USDA nutrient ids (FoodData Central's fixed vocabulary).
 const USDA_NUTRIENT_ID = {
+	addedSugar: 1235,
+	calcium: 1087,
 	calories: 1008,
 	carbs: 1005,
+	cholesterol: 1253,
 	fat: 1004,
 	fiber: 1079,
+	iron: 1089,
+	potassium: 1092,
 	protein: 1003,
+	saturatedFat: 1258,
 	sodium: 1093,
 	sugar: 2000,
+	transFat: 1257,
+	vitaminD: 1114,
 } as const;
 
 /** Map a matched USDA food's nutrients to the connector's typed nutrition
@@ -675,12 +728,25 @@ export function mapUsdaNutrients(
 		return raw === null ? null : Math.round(raw * scale * 100) / 100;
 	};
 	return {
+		...emptyNutritionDetails(),
+		addedSugarG: get(USDA_NUTRIENT_ID.addedSugar),
+		allergens: null,
+		calciumMg: get(USDA_NUTRIENT_ID.calcium),
 		calories: get(USDA_NUTRIENT_ID.calories),
 		carbsG: get(USDA_NUTRIENT_ID.carbs),
+		category: [],
+		cholesterolMg: get(USDA_NUTRIENT_ID.cholesterol),
 		confidence: matchMethod === "upc" ? "high" : "medium",
+		fdcId: food.fdcId,
 		fatG: get(USDA_NUTRIENT_ID.fat),
 		fiberG: get(USDA_NUTRIENT_ID.fiber),
+		highlights: [],
+		ingredients: food.ingredients || null,
+		ironMg: get(USDA_NUTRIENT_ID.iron),
+		potassiumMg: get(USDA_NUTRIENT_ID.potassium),
 		proteinG: get(USDA_NUTRIENT_ID.protein),
+		rawNutritionText: null,
+		saturatedFatG: get(USDA_NUTRIENT_ID.saturatedFat),
 		servingSize:
 			food.servingSize !== null && food.servingSizeUnit
 				? `${food.servingSize}${food.servingSizeUnit}`
@@ -689,7 +755,12 @@ export function mapUsdaNutrients(
 		sodiumMg: get(USDA_NUTRIENT_ID.sodium),
 		source: "usda_fdc",
 		sugarG: get(USDA_NUTRIENT_ID.sugar),
+		transFatG: get(USDA_NUTRIENT_ID.transFat),
 		upc: food.gtinUpc,
+		usdaBrand: food.brandOwner,
+		usdaDescription: food.description,
+		usdaMatchMethod: matchMethod,
+		vitaminDMcg: get(USDA_NUTRIENT_ID.vitaminD),
 	};
 }
 
@@ -777,30 +848,52 @@ export function parseWholeFoodsProductPageDom(
 		}
 		return null;
 	});
-	if (ldNutrition) {
+	const productInfo = findInJsonLd(ldNodes, (n) =>
+		["gtin12", "gtin13", "gtin", "gtin8"].some((field) => n[field])
+			? n
+			: null,
+	);
+	const productUpc = productInfo
+		? String(
+				productInfo.gtin12 ??
+					productInfo.gtin13 ??
+					productInfo.gtin ??
+					productInfo.gtin8,
+			)
+		: null;
+	const headings = [...document.querySelectorAll("h2, h3, h4, span, div")];
+	const nutritionHeading = headings.find((el) =>
+		NUTRITION_HEADING_RE.test(textOf(el).trim()),
+	);
+	if (ldNutrition && !nutritionHeading) {
 		return {
+			...emptyNutritionDetails(),
+			addedSugarG: null,
+			allergens: null,
 			calories: numOrNull(ldNutrition.calories),
 			carbsG: numOrNull(ldNutrition.carbohydrateContent),
+			category: [],
+			cholesterolMg: numOrNull(ldNutrition.cholesterolContent),
 			confidence: "high",
 			fatG: numOrNull(ldNutrition.fatContent),
 			fiberG: numOrNull(ldNutrition.fiberContent),
+			ingredients: null,
+			potassiumMg: null,
 			proteinG: numOrNull(ldNutrition.proteinContent),
+			saturatedFatG: numOrNull(ldNutrition.saturatedFatContent),
 			servingSize:
 				typeof ldNutrition.servingSize === "string"
 					? ldNutrition.servingSize
 					: null,
 			servingsPerContainer: null,
 			sodiumMg: numOrNull(ldNutrition.sodiumContent),
-			source: "wholefoods_product_page",
+			source: "wholefoods_structured_data",
 			sugarG: numOrNull(ldNutrition.sugarContent),
-			upc: null,
+			transFatG: numOrNull(ldNutrition.transFatContent),
+			upc: productUpc,
 		};
 	}
 
-	const headings = [...document.querySelectorAll("h2, h3, h4, span, div")];
-	const nutritionHeading = headings.find((el) =>
-		NUTRITION_HEADING_RE.test(textOf(el).trim()),
-	);
 	if (!nutritionHeading) {
 		return null;
 	}
@@ -819,6 +912,8 @@ export function parseWholeFoodsProductPageDom(
 		let key = m[1] ?? "";
 		if (/^sugars$/i.test(key)) {
 			key = "Total Sugars";
+		} else if (/^added sugars$/i.test(key)) {
+			key = "Includes Added Sugars";
 		}
 		if (!nutrients.has(key) && m[2]) {
 			nutrients.set(key, Number.parseFloat(m[2]));
@@ -828,13 +923,60 @@ export function parseWholeFoodsProductPageDom(
 	const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
 	const servingsMatch = SERVINGS_PER_CONTAINER_RE.exec(allText);
 	const servingsPerContainerRaw = servingsMatch?.[1] ?? servingsMatch?.[2];
+	const nutrient = (...keys: string[]): number | null => {
+		for (const key of keys) {
+			const value = nutrients.get(key);
+			if (value !== undefined) return value;
+		}
+		return null;
+	};
+	const sectionText = (heading: RegExp): string | null => {
+		const el = headings.find((candidate) =>
+		heading.test(textOf(candidate).trim()),
+		);
+		return (
+			textOf(el?.nextElementSibling).trim() ||
+			textOf(el?.parentElement?.querySelector("p, div:last-child")).trim() ||
+			null
+		);
+	};
+	const highlights = [
+		...document.querySelectorAll<HTMLElement>(
+			'[class*="badge"], [class*="diet"], [data-testid*="badge"]',
+		),
+	].flatMap((element) => {
+		const label = textOf(element).trim();
+		return /organic|gluten.?free|vegan|non.?gmo|kosher|paleo|keto/i.test(label)
+			? [label]
+			: [];
+	});
+	const breadcrumbCategory = [
+		...document.querySelectorAll<HTMLElement>(
+			'nav[aria-label*="breadcrumb" i] a, .breadcrumb a',
+		),
+	].flatMap((element) => {
+		const label = textOf(element).trim();
+		return label && !/home|whole foods/i.test(label) ? [label] : [];
+	});
 	return {
+		...emptyNutritionDetails(),
+		addedSugarG: nutrient("Includes Added Sugars", "Added Sugars"),
+		allergens: sectionText(/allergen|contains/i),
+		calciumMg: nutrient("Calcium"),
 		calories: Number.parseInt(caloriesMatch[1] ?? "", 10),
 		carbsG: nutrients.get("Total Carbohydrate") ?? null,
+		category: breadcrumbCategory,
+		cholesterolMg: nutrient("Cholesterol"),
 		confidence: "high",
 		fatG: nutrients.get("Total Fat") ?? null,
 		fiberG: nutrients.get("Dietary Fiber") ?? null,
+		highlights,
+		ingredients: sectionText(/^ingredients$/i),
+		ironMg: nutrient("Iron"),
+		potassiumMg: nutrient("Potassium"),
 		proteinG: nutrients.get("Protein") ?? null,
+		rawNutritionText: allText.slice(0, 1000),
+		saturatedFatG: nutrient("Saturated Fat"),
 		servingSize: servingSizeMatch?.[1]?.trim() ?? null,
 		servingsPerContainer: servingsPerContainerRaw
 			? Number.parseFloat(servingsPerContainerRaw)
@@ -842,7 +984,81 @@ export function parseWholeFoodsProductPageDom(
 		sodiumMg: nutrients.get("Sodium") ?? null,
 		source: "wholefoods_product_page",
 		sugarG: nutrients.get("Total Sugars") ?? null,
-		upc: null,
+		transFatG: nutrient("Trans Fat"),
+		upc: productUpc,
+		vitaminDMcg: nutrient("Vitamin D"),
+	};
+}
+
+/** Port of the frozen legacy data connector's Amazon product-page nutrition
+ *  parser. Callers supply captured HTML in tests; this function has no I/O. */
+export function parseAmazonProductNutritionDom(
+	html: string,
+): NutritionFacts | null {
+	const { document } = parseHTML(html);
+	const bodyText = textOf(document.body);
+	const table = document.querySelector(
+		'#nic-nutrition-facts, #nutritionFacts, #nutritionalInformation_feature_div, [data-component="nutritionFacts"]',
+	);
+	const important = document.querySelector(
+		"#importantInformation, #important-information",
+	);
+	const nutritionText = textOf(table ?? important);
+	const allText = table ? nutritionText : textOf(important);
+	const caloriesMatch = CALORIES_RE.exec(allText);
+	const upcMatch = /(?:UPC|ASIN|GTIN)[:\s]*([\d-]{8,14})/i.exec(
+		textOf(document.querySelector("#detailBullets_feature_div, #prodDetails, .content")),
+	);
+	if (!caloriesMatch && !upcMatch) return null;
+	const nutrientValues = new Map<string, number>();
+	const pattern = new RegExp(NUTRIENT_PATTERN_SOURCE, "gi");
+	let match: RegExpExecArray | null = pattern.exec(allText);
+	while (match) {
+		const key = /^sugars$/i.test(match[1] ?? "")
+			? "Total Sugars"
+			: /^added sugars$/i.test(match[1] ?? "")
+				? "Includes Added Sugars"
+				: (match[1] ?? "");
+		if (key && !nutrientValues.has(key) && match[2]) {
+			nutrientValues.set(key, Number.parseFloat(match[2]));
+		}
+		match = pattern.exec(allText);
+	}
+	const get = (key: string): number | null => nutrientValues.get(key) ?? null;
+	const ingredientsNode = document.querySelector(
+		"#ingredients_feature_div, [data-component=\"ingredients\"]",
+	);
+	const ingredients = ingredientsNode
+		? textOf(ingredientsNode).replace(/^Ingredients[:\s]*/i, "").trim() || null
+		: null;
+	const allergenMatch = /Contains[:\s]*([^.\n]+(?:wheat|milk|soy|eggs?|fish|shellfish|tree nuts?|peanuts?|sesame)[^.\n]*)/i.exec(bodyText);
+	const serving = /Serving size[:\s]*([^\n]+)/i.exec(allText)?.[1]?.trim();
+	const servings = /(\d+\.?\d*)\s*servings?\s*per/i.exec(allText)?.[1];
+	return {
+		...emptyNutritionDetails(),
+		addedSugarG: get("Includes Added Sugars"),
+		allergens: allergenMatch?.[1]?.trim() ?? null,
+		calciumMg: get("Calcium"),
+		calories: caloriesMatch ? Number.parseInt(caloriesMatch[1] ?? "", 10) : null,
+		carbsG: get("Total Carbohydrate"),
+		cholesterolMg: get("Cholesterol"),
+		confidence: "medium",
+		fatG: get("Total Fat"),
+		fiberG: get("Dietary Fiber"),
+		ingredients,
+		ironMg: get("Iron"),
+		potassiumMg: get("Potassium"),
+		proteinG: get("Protein"),
+		rawNutritionText: allText.slice(0, 1000),
+		saturatedFatG: get("Saturated Fat"),
+		servingSize: serving ?? null,
+		servingsPerContainer: servings ? Number.parseFloat(servings) : null,
+		sodiumMg: get("Sodium"),
+		source: "amazon_product_page",
+		sugarG: get("Total Sugars"),
+		transFatG: get("Trans Fat"),
+		upc: upcMatch?.[1]?.replaceAll("-", "") ?? null,
+		vitaminDMcg: get("Vitamin D"),
 	};
 }
 

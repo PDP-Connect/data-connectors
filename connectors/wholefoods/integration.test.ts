@@ -175,9 +175,9 @@ test("buildOrderRecord + buildOrderItemRecord validate and order-before-items wh
 	assert.equal(harness.emitted[1]?.data.product_id, "B01ABCDEFG");
 });
 
-test("buildOrderRecord reports the source-declared zero item count for an empty order", () => {
+test("buildOrderRecord preserves the parsed zero item count for an empty order", () => {
 	const record = buildOrderRecord(EMPTY_STUB, null, []);
-	assert.equal(record.item_count, null);
+	assert.equal(record.item_count, 0);
 	assert.equal(record.total_cents, null);
 });
 
@@ -274,18 +274,36 @@ test("buildNutritionRecord shape passes schema validation for both sources", asy
 	await harness.emitRecord(
 		"nutrition",
 		buildNutritionRecord("B01ABCDEFG", "Organic Bananas", {
+			addedSugarG: null,
+			allergens: null,
+			calciumMg: null,
 			calories: 105,
 			carbsG: 27,
+			category: [],
+			cholesterolMg: null,
 			confidence: "high",
+			fdcId: null,
 			fatG: 0.4,
 			fiberG: 3.1,
+			highlights: [],
+			ingredients: null,
+			ironMg: null,
+			potassiumMg: null,
 			proteinG: 1.3,
+			rawNutritionText: null,
+			saturatedFatG: null,
 			servingSize: "1 medium (118g)",
 			servingsPerContainer: 1,
 			sodiumMg: 1,
 			source: "wholefoods_product_page",
 			sugarG: 14,
+			transFatG: null,
+			type: "https://schema.org/NutritionInformation",
 			upc: null,
+			usdaBrand: null,
+			usdaDescription: null,
+			usdaMatchMethod: null,
+			vitaminDMcg: null,
 		}),
 	);
 	assert.equal(harness.emitted.length, 1);
@@ -503,12 +521,13 @@ test("an unrecognized Whole Foods page plus empty USDA results emits error", asy
 test("Whole Foods search resolves a relative product link before reading facts", async () => {
 	const visited: string[] = [];
 	const shape: Pick<Page, "content" | "goto" | "url"> = {
-		content: () =>
-			Promise.resolve(
-				visited.length === 1
+		content: () => Promise.resolve(
+			visited.length === 1
+				? '<html><body>No nutrition panel</body></html>'
+				: visited.length === 2
 					? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
 					: '<html><body><script type="application/ld+json">{"@type":"Product","nutrition":{"@type":"NutritionInformation","calories":"105 calories"}}</script></body></html>',
-			),
+		),
 		// biome-ignore lint/suspicious/noExplicitAny: scripted Page navigation captures the actual URL supplied to Playwright.
 		goto: ((url: string) => {
 			visited.push(url);
@@ -522,13 +541,66 @@ test("Whole Foods search resolves a relative product link before reading facts",
 		"Organic Bananas",
 	);
 	assert.equal(
-		visited[1],
+		visited[2],
 		"https://www.wholefoodsmarket.com/product/organic-bananas",
 	);
 	assert.equal(
 		typeof outcome === "string" ? outcome : outcome.source,
-		"wholefoods_product_page",
+		"wholefoods_structured_data",
 	);
+});
+
+test("UPC from a scrubbed Amazon fixture routes USDA lookup before text matching", async () => {
+	const originalFetch = globalThis.fetch;
+	const requestedQueries: string[] = [];
+	globalThis.fetch = (async (input: RequestInfo | URL) => {
+		const url = new URL(String(input));
+		requestedQueries.push(url.searchParams.get("query") ?? "");
+		return new Response(
+			JSON.stringify({
+				foods: [
+					{
+						fdcId: 42,
+						description: "Apples, raw",
+						brandName: null,
+						brandOwner: "Fixture Farm",
+						gtinUpc: "012345678905",
+						servingSize: 100,
+						servingSizeUnit: "g",
+						foodNutrients: [{ nutrientId: 1008, value: 52 }],
+					},
+				],
+			}),
+			{ status: 200 },
+		);
+	}) as typeof fetch;
+	let currentUrl = "about:blank";
+	const page = {
+		content: async () =>
+			currentUrl.startsWith("https://www.amazon.com/")
+				? '<html><body><div id="detailBullets_feature_div"><li>UPC: 012345678905</li></div></body></html>'
+				: "<html><body>No matching products</body></html>",
+		goto: async (url: string) => {
+			currentUrl = url;
+			return null;
+		},
+		locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+		url: () => currentUrl,
+	} as unknown as Page;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			page,
+			"DEMO_KEY",
+			"Organic Apples",
+			"B012345678",
+		);
+		assert.equal(typeof outcome === "string" ? outcome : outcome.source, "usda_fdc");
+		assert.equal(typeof outcome === "string" ? null : outcome.usdaMatchMethod, "upc");
+		assert.equal(requestedQueries[0], "gtinUpc:012345678905");
+		assert.equal(requestedQueries.length, 1, "the UPC hit avoids text-search fallbacks");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
 });
 
 test("a rendered product without nutrition and an empty USDA result emits not_found", async () => {
@@ -542,8 +614,10 @@ test("a rendered product without nutrition and an empty USDA result emits not_fo
 		content: () =>
 			Promise.resolve(
 				visits === 1
-					? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
-					: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas"}</script></body></html>',
+					? '<html><body>No nutrition here</body></html>'
+					: visits === 2
+						? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
+						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas"}</script></body></html>',
 			),
 		goto: () => {
 			visits += 1;
@@ -578,32 +652,35 @@ test("HTTP product links and cross-origin redirects cannot supply nutrition", as
 					[
 						"http://www.wholefoodsmarket.com/product/example",
 						"http://www.wholefoodsmarket.com/product/example",
-						1,
+						2,
 					],
-					["/product/example", "https://example.com/product/example", 2],
+					["/product/example", "https://example.com/product/example", 3],
 					[
 						"/product/example",
 						"http://www.wholefoodsmarket.com/product/example",
-						2,
+						3,
 					],
 					[
 						"https://www.wholefoodsmarket.com:444/product/example",
 						"https://www.wholefoodsmarket.com:444/product/example",
-						1,
+						2,
 					],
 					[
 						"/product/example",
 						"https://www.wholefoodsmarket.com:444/product/example",
-						2,
+						3,
 					],
 				] as const
 			).map(async ([href, finalUrl, expectedVisits]) => {
 				let visits = 0;
 				const shape = {
-					content: () =>
-						Promise.resolve(
-							visits === 1 ? `<a href="${href}">Organic Bananas</a>` : facts,
-						),
+					content: () => Promise.resolve(
+						visits === 1
+							? "<html><body>No nutrition here</body></html>"
+							: visits === 2
+								? `<a href="${href}">Organic Bananas</a>`
+								: facts,
+					),
 					goto: () => {
 						visits += 1;
 						return Promise.resolve(null);
@@ -982,6 +1059,30 @@ test("collectOrders reports every requested stream failed on scaffold-only searc
 	assert.equal(harness.emitted.length, 0);
 });
 
+test("collectOrders withholds failed nutrition outcomes instead of overwriting a stored good key", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(JSON.stringify({ foods: [] }), { status: 200 })) as typeof fetch;
+	try {
+		const { harness } = await runCollectOrders(
+			ordersSite(
+				[searchPage(1, [[ORDER_A, "B012345678"]], false)],
+				DETAIL_HTML,
+			),
+			ALL_ORDER_STREAMS,
+		);
+		assert.ok(harness.emitted.some((record) => record.stream === "orders"));
+		assert.ok(harness.emitted.some((record) => record.stream === "order_items"));
+		assert.equal(
+			harness.emitted.some((record) => record.stream === "nutrition"),
+			false,
+			"an observed lookup failure has no upsert for the previous product key",
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
 test("collectOrders completes on the real-shape zero-order count element", async () => {
 	// Shape of Amazon's year filter on an empty account, captured live
 	// 2026-04-23 (scrubbed): `<span class="num-orders">0 orders</span>`.
@@ -1028,10 +1129,7 @@ test("collectOrders fails every requested stream when a proven order's detail co
 	assert.match(failures[0]?.message ?? "", /no items and no cancellation/);
 	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.length, 1);
-	assert.equal(harness.emitted[0]?.stream, "orders");
-	assert.equal(harness.emitted[0]?.data.item_count, null);
-	assert.equal(harness.emitted[0]?.data.total_cents, null);
+	assert.equal(harness.emitted.length, 0, "an unreadable refresh must not replace a stored header");
 });
 
 test("collectOrders remain partials a cancelled order whose detail renders no items", async () => {
@@ -1047,10 +1145,9 @@ test("collectOrders remain partials a cancelled order whose detail renders no it
 			failures.every((failure) => failure.retryable === true),
 	);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.deepEqual(
-		harness.emitted.map((r) => r.stream),
-		["orders"],
-	);
+	assert.deepEqual(harness.emitted.map((r) => r.stream), ["orders"]);
+	assert.equal(harness.emitted[0]?.data.status, "Cancelled");
+	assert.equal(harness.emitted[0]?.data.item_count, 0);
 });
 
 test("collectOrders fails every requested stream when the detail grid container is empty", async () => {
@@ -1066,10 +1163,7 @@ test("collectOrders fails every requested stream when the detail grid container 
 		ALL_ORDER_STREAMS.map((s) => [s, true]),
 	);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.length, 1);
-	assert.equal(harness.emitted[0]?.stream, "orders");
-	assert.equal(harness.emitted[0]?.data.item_count, null);
-	assert.equal(harness.emitted[0]?.data.total_cents, null);
+	assert.equal(harness.emitted.length, 0);
 });
 
 test("collectOrders fails every requested stream when a delivery item row is an empty shell", async () => {
@@ -1085,10 +1179,7 @@ test("collectOrders fails every requested stream when a delivery item row is an 
 		ALL_ORDER_STREAMS.map((s) => [s, true]),
 	);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.length, 1);
-	assert.equal(harness.emitted[0]?.stream, "orders");
-	assert.equal(harness.emitted[0]?.data.item_count, null);
-	assert.equal(harness.emitted[0]?.data.total_cents, null);
+	assert.equal(harness.emitted.length, 0);
 });
 
 const TWO_ROW_SEARCH = searchPage(
@@ -1114,11 +1205,11 @@ test("collectOrders fails order_items when the detail lists fewer rows than the 
 		["order_items", true],
 	]);
 	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
-	// The order row is proven by the search list; the rows read are kept.
+	// The count mismatch makes this order refresh incomplete, so withhold both rows.
 	assert.deepEqual(stateStreams(harness), []);
 	assert.deepEqual(
 		harness.emitted.map((r) => r.stream),
-		["orders", "order_items"],
+		[],
 	);
 });
 
@@ -1426,10 +1517,7 @@ for (const [label, wrap] of HIDDEN_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 1);
-		assert.equal(harness.emitted[0]?.stream, "orders");
-		assert.equal(harness.emitted[0]?.data.item_count, null);
-		assert.equal(harness.emitted[0]?.data.total_cents, null);
+		assert.equal(harness.emitted.length, 0);
 	});
 
 	test(`collectOrders fails every requested stream on hidden pagination (${label})`, async () => {
@@ -1464,10 +1552,7 @@ for (const [label, wrap] of HIDDEN_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 1);
-		assert.equal(harness.emitted[0]?.stream, "orders");
-		assert.equal(harness.emitted[0]?.data.item_count, null);
-		assert.equal(harness.emitted[0]?.data.total_cents, null);
+		assert.equal(harness.emitted.length, 0);
 	});
 }
 
@@ -1586,10 +1671,9 @@ test("partial delivery keeps reading after the first unreadable detail", async (
 	assert.deepEqual(stateStreams(harness), []);
 	assert.deepEqual(
 		harness.emitted.map((r) => r.stream),
-		["orders", "orders", "order_items"],
+		["orders", "order_items"],
 	);
-	assert.equal(harness.emitted[0]?.data.id, ORDER_A);
-	assert.equal(harness.emitted[1]?.data.id, ORDER_B);
+	assert.equal(harness.emitted[0]?.data.id, ORDER_B);
 });
 
 test("a proven list keeps reading after one unreadable detail, then fails without STATE", async () => {
@@ -1621,7 +1705,7 @@ test("a proven list keeps reading after one unreadable detail, then fails withou
 	assert.match(failures[0]?.message ?? "", /no items and no cancellation/);
 	assert.match(failures[0]?.message ?? "", /1 of 2 orders/);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.filter((r) => r.stream === "orders").length, 2);
+	assert.equal(harness.emitted.filter((r) => r.stream === "orders").length, 1);
 });
 
 // ─── Review round (latest): inert ancestry; partial-delivery navigation ──
@@ -1645,10 +1729,7 @@ for (const [label, wrap] of INERT_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 1);
-		assert.equal(harness.emitted[0]?.stream, "orders");
-		assert.equal(harness.emitted[0]?.data.item_count, null);
-		assert.equal(harness.emitted[0]?.data.total_cents, null);
+		assert.equal(harness.emitted.length, 0);
 	});
 
 	test(`collectOrders fails every requested stream on inert pagination (${label})`, async () => {
@@ -1681,10 +1762,7 @@ for (const [label, wrap] of INERT_WRAPPERS) {
 			ALL_ORDER_STREAMS.map((s) => [s, true]),
 		);
 		assert.deepEqual(stateStreams(harness), []);
-		assert.equal(harness.emitted.length, 1);
-		assert.equal(harness.emitted[0]?.stream, "orders");
-		assert.equal(harness.emitted[0]?.data.item_count, null);
-		assert.equal(harness.emitted[0]?.data.total_cents, null);
+		assert.equal(harness.emitted.length, 0);
 	});
 }
 
@@ -1779,7 +1857,7 @@ for (const failure of [
 		// The order read before the failure is kept.
 		assert.deepEqual(
 			harness.emitted.map((r) => r.stream),
-			["orders", "order_items", "orders"],
+			["orders", "order_items"],
 		);
 		assert.equal(harness.emitted[0]?.data.id, ORDER_A);
 	});

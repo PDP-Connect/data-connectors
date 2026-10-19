@@ -49,6 +49,7 @@ import {
 	ORDER_DETAIL_READY_SELECTOR,
 	orderDetailUnitCount,
 	parseAmazonProfileDom,
+	parseAmazonProductNutritionDom,
 	parseDollarsToCents,
 	parseOrderDateIso,
 	parseOrderDetailDom,
@@ -379,17 +380,15 @@ function searchProductsAppearInDetail(
 function buildOrderRecord(
 	stub: OrderStub,
 	orderDateRaw: string | null,
-	_items: readonly OrderDetailItem[],
+	items: readonly OrderDetailItem[],
+	status: OrderRecord["status"] = null,
 ): OrderRecord {
-	// Parsed rows do not establish the complete source item inventory.
-	// Keep order identity/date, but do not fabricate aggregate values.
-
 	return {
 		id: stub.orderId,
-		item_count: null,
-		order_date: parseOrderDateIso(stub.orderDateRaw ?? orderDateRaw),
+		item_count: status === "Cancelled" ? 0 : items.length,
+		order_date: parseOrderDateIso(orderDateRaw ?? stub.orderDateRaw),
 		order_url: stub.orderUrl,
-		status: null,
+		status,
 		total_cents: null,
 	};
 }
@@ -490,7 +489,16 @@ async function usdaSearch(
 async function lookupUsdaNutrition(
 	apiKey: string,
 	name: string,
+	upc: string | null,
 ): Promise<NutritionFacts | null> {
+	if (upc) {
+		const exact = await usdaSearch(apiKey, {
+			pageSize: "1",
+			query: `gtinUpc:${upc}`,
+		});
+		const match = exact[0];
+		if (match) return mapUsdaNutrients(match, "upc");
+	}
 	const cleaned = cleanProductName(name);
 	if (!cleaned || cleaned.length < 3) {
 		return null;
@@ -516,12 +524,9 @@ async function lookupUsdaNutrition(
 	return null;
 }
 
-/** Try the Whole Foods page first, then USDA FDC. A successful USDA match
- *  can supply facts after a blocked or failed Whole Foods page. Otherwise
- *  retain the observed failure; only confirmed product/no-results pages
- *  plus an empty USDA search produce not_found. The optional API key falls
- *  back to DEMO_KEY at the collect call site, matching the legacy default.
- *  Each result becomes one product-keyed nutrition record. */
+/** Follow the legacy source order: Amazon product page, Whole Foods product
+ *  page, then UPC-first/text USDA. A failed lookup returns an outcome for
+ *  diagnostics, but callers withhold that key so a refresh cannot erase facts. */
 type NutritionOutcome = NutritionFacts | "not_found" | "error" | "blocked";
 
 function isBlockedPage(html: string): boolean {
@@ -540,9 +545,36 @@ async function lookupNutritionForProduct(
 	page: Page,
 	usdaApiKey: string,
 	name: string,
+	productId = "B012345678",
 ): Promise<NutritionOutcome> {
 	const query = cleanProductName(name);
 	let sourceOutcome: "not_found" | "error" | "blocked" = "error";
+	let candidate: NutritionFacts | null = null;
+	const hasMajorMacros = (facts: NutritionFacts) =>
+		typeof facts.calories === "number" ||
+		typeof facts.proteinG === "number" ||
+		typeof facts.fatG === "number" ||
+		typeof facts.carbsG === "number";
+	try {
+		const status = await navigateAndSettle(
+			page,
+			`https://www.amazon.com/dp/${encodeURIComponent(productId)}`,
+			undefined,
+			true,
+		);
+		const amazonHtml = await page.content();
+		if (isBlockedPage(amazonHtml)) {
+			sourceOutcome = "blocked";
+		} else if (status !== null && status >= 400) {
+			sourceOutcome = "error";
+		} else {
+			candidate = parseAmazonProductNutritionDom(amazonHtml);
+			if (candidate && hasMajorMacros(candidate)) return candidate;
+			sourceOutcome = candidate ? "not_found" : "error";
+		}
+	} catch {
+		sourceOutcome = "error";
+	}
 	try {
 		if (query.length >= 3) {
 			const searchStatus = await navigateAndSettle(
@@ -584,7 +616,10 @@ async function lookupNutritionForProduct(
 							);
 						}
 						const facts = parseWholeFoodsProductPageDom(productHtml);
-						if (facts) return facts;
+						if (facts && hasMajorMacros(facts)) return facts;
+						if (facts) {
+							candidate = { ...facts, upc: facts.upc ?? candidate?.upc ?? null };
+						}
 						sourceOutcome = hasProductPageEvidence(productHtml)
 							? "not_found"
 							: "error";
@@ -602,9 +637,25 @@ async function lookupNutritionForProduct(
 		sourceOutcome = "error";
 	}
 	try {
-		return (await lookupUsdaNutrition(usdaApiKey, name)) ?? sourceOutcome;
+		const usda = await lookupUsdaNutrition(usdaApiKey, name, candidate?.upc ?? null);
+		if (usda) {
+			return {
+				...usda,
+				allergens: candidate?.allergens ?? null,
+				category: candidate?.category ?? [],
+				highlights: candidate?.highlights ?? [],
+				ingredients: candidate?.ingredients ?? null,
+				rawNutritionText: candidate?.rawNutritionText ?? null,
+				upc: candidate?.upc ?? usda.upc,
+			};
+		}
+		return candidate && hasMajorMacros(candidate) ? candidate : sourceOutcome;
 	} catch {
-		return sourceOutcome === "blocked" ? "blocked" : "error";
+		return candidate && hasMajorMacros(candidate)
+			? candidate
+			: sourceOutcome === "blocked"
+				? "blocked"
+				: "error";
 	}
 }
 
@@ -615,37 +666,75 @@ function buildNutritionRecord(
 ): NutritionRecord {
 	if (typeof facts === "string") {
 		return {
+			added_sugar_g: null,
+			allergens: null,
+			calcium_mg: null,
 			calories: null,
 			carbs_g: null,
+			category: [],
+			cholesterol_mg: null,
 			confidence: "low",
 			fat_g: null,
 			fiber_g: null,
+			highlights: [],
+			ingredients: null,
+			iron_mg: null,
 			name,
 			id: productId,
 			product_id: productId,
+			potassium_mg: null,
 			protein_g: null,
+			raw_nutrition_text: null,
+			saturated_fat_g: null,
 			serving_size: null,
 			servings_per_container: null,
 			sodium_mg: null,
 			source: facts,
 			sugar_g: null,
+			type: "https://schema.org/NutritionInformation",
+			trans_fat_g: null,
+			upc: null,
+			usda_brand: null,
+			usda_description: null,
+			usda_fdc_id: null,
+			usda_match_method: null,
+			vitamin_d_mcg: null,
 		};
 	}
 	return {
+		added_sugar_g: facts.addedSugarG,
+		allergens: facts.allergens,
+		calcium_mg: facts.calciumMg,
 		calories: facts.calories,
 		carbs_g: facts.carbsG,
+		category: facts.category,
+		cholesterol_mg: facts.cholesterolMg,
 		confidence: facts.confidence,
 		fat_g: facts.fatG,
 		fiber_g: facts.fiberG,
+		highlights: facts.highlights,
+		ingredients: facts.ingredients,
+		iron_mg: facts.ironMg,
 		name,
 		id: productId,
 		product_id: productId,
+		potassium_mg: facts.potassiumMg,
 		protein_g: facts.proteinG,
+		raw_nutrition_text: facts.rawNutritionText,
+		saturated_fat_g: facts.saturatedFatG,
 		serving_size: facts.servingSize,
 		servings_per_container: facts.servingsPerContainer,
 		sodium_mg: facts.sodiumMg,
 		source: facts.source,
 		sugar_g: facts.sugarG,
+		type: "https://schema.org/NutritionInformation",
+		trans_fat_g: facts.transFatG,
+		upc: facts.upc,
+		usda_brand: facts.usdaBrand,
+		usda_description: facts.usdaDescription,
+		usda_fdc_id: facts.fdcId,
+		usda_match_method: facts.usdaMatchMethod,
+		vitamin_d_mcg: facts.vitaminDMcg,
 	};
 }
 
@@ -678,7 +767,7 @@ function readOrderDetail(html: string): OrderDetail {
 			"Whole Foods order detail rendered no items and no cancellation evidence",
 		);
 	}
-	return detail;
+	return isCancelledOrderDetail(html) ? { ...detail, status: "Cancelled" } : detail;
 }
 
 /** Fetch, verify and emit every discovered order. Auth and readability
@@ -763,9 +852,6 @@ async function collectOrderStubs({
 				count: (unreadable?.count ?? 0) + 1,
 				first: unreadable?.first ?? error,
 			};
-			if (wantsOrders) {
-				await emitRecord("orders", buildOrderRecord(stub, null, []));
-			}
 			await emit({
 				type: "PROGRESS",
 				stream: "orders",
@@ -791,12 +877,13 @@ async function collectOrderStubs({
 		}
 		// A cancelled order with no items is the source's own statement that
 		// it has none; everything else needs a count that agrees with search.
-		if (
+		const orderDetailsVerified = !(
 			itemsWithoutAsin > 0 ||
 			buildOrderItemRecords(stub.orderId, detail.items).length !==
 				detail.items.length ||
 			(detail.items.length > 0 && !orderDetailCountsMatch(stub, detail.items))
-		) {
+		);
+		if (!orderDetailsVerified) {
 			unverifiedCountOrders += 1;
 			connectorDiagnostic("wholefoods", "order_item_count_unverified", {
 				reason: ORDER_ITEM_COUNT_UNVERIFIED_REASON,
@@ -811,18 +898,19 @@ async function collectOrderStubs({
 			});
 		}
 
-		if (wantsOrders) {
+		if (wantsOrders && orderDetailsVerified) {
 			const orderRecord = buildOrderRecord(
 				stub,
 				detail.orderDateRaw,
 				detail.items,
+				detail.status ?? null,
 			);
 			if (ordersCursor.shouldEmit(orderRecord)) {
 				await emitRecord("orders", orderRecord);
 			}
 		}
 
-		if (wantsItems) {
+		if (wantsItems && orderDetailsVerified) {
 			for (const itemRecord of buildOrderItemRecords(
 				stub.orderId,
 				detail.items,
@@ -831,7 +919,7 @@ async function collectOrderStubs({
 			}
 		}
 
-		if (wantsNutrition && nutritionCursor) {
+		if (wantsNutrition && nutritionCursor && orderDetailsVerified) {
 			for (const item of detail.items) {
 				if (!item.productId || consideredProductIds.has(item.productId)) {
 					continue;
@@ -841,6 +929,7 @@ async function collectOrderStubs({
 					page,
 					usdaApiKey,
 					item.name,
+					item.productId,
 				);
 				if (typeof facts === "string") {
 					if (facts === "blocked") nutritionCoverage.blocked += 1;
@@ -849,9 +938,11 @@ async function collectOrderStubs({
 				} else if (facts.source === "usda_fdc")
 					nutritionCoverage.foundUSDA += 1;
 				else nutritionCoverage.found += 1;
-				const record = buildNutritionRecord(item.productId, item.name, facts);
-				if (nutritionCursor.shouldEmit(record)) {
-					await emitRecord("nutrition", record);
+				if (typeof facts !== "string") {
+					const record = buildNutritionRecord(item.productId, item.name, facts);
+					if (nutritionCursor.shouldEmit(record)) {
+						await emitRecord("nutrition", record);
+					}
 				}
 				await politeDelay(POLITE_DELAY_MS);
 			}

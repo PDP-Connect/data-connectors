@@ -53,23 +53,46 @@ export interface OrderDetailItem {
 export interface OrderDetail {
 	items: OrderDetailItem[];
 	orderDateRaw: string | null;
+	status?: "Cancelled" | null;
 }
 
 /** Nutrition facts extracted from either the Whole Foods product page or
  *  the USDA FoodData Central API, normalized to one shape regardless of
  *  source. Fields absent from the source are `null`, never guessed. */
 export interface NutritionFacts {
+	addedSugarG: number | null;
+	allergens: string | null;
+	calciumMg: number | null;
 	calories: number | null;
 	carbsG: number | null;
+	category: string[];
+	cholesterolMg: number | null;
 	confidence: "high" | "medium" | "low";
+	fdcId: number | null;
 	fatG: number | null;
 	fiberG: number | null;
+	highlights: string[];
+	ingredients: string | null;
+	ironMg: number | null;
 	proteinG: number | null;
+	potassiumMg: number | null;
+	rawNutritionText: string | null;
 	servingSize: string | null;
 	servingsPerContainer: number | null;
+	saturatedFatG: number | null;
 	sodiumMg: number | null;
-	source: "usda_fdc" | "wholefoods_product_page";
+	source:
+		| "usda_fdc"
+		| "wholefoods_product_page"
+		| "wholefoods_structured_data"
+		| "amazon_product_page";
 	sugarG: number | null;
+	transFatG: number | null;
+	type?: "https://schema.org/NutritionInformation";
+	usdaBrand: string | null;
+	usdaDescription: string | null;
+	usdaMatchMethod: UsdaMatchMethod | null;
+	vitaminDMcg: number | null;
 	/** Universal Product Code, when the source page/response exposed one.
 	 *  Used to key a UPC-first USDA lookup; not itself part of the emitted
 	 *  nutrition record. */
@@ -86,6 +109,7 @@ export interface UsdaFood {
 	fdcId: number;
 	foodNutrients: readonly UsdaFoodNutrient[];
 	gtinUpc: string | null;
+	ingredients?: string | null;
 	servingSize: number | null;
 	servingSizeUnit: string | null;
 }
@@ -131,24 +155,45 @@ export interface OrderItemRecord {
 
 /** Emitted `nutrition` stream record shape. */
 export interface NutritionRecord {
+	added_sugar_g: number | null;
+	allergens: string | null;
+	calcium_mg: number | null;
 	id: string;
 	calories: number | null;
 	carbs_g: number | null;
 	confidence: "high" | "medium" | "low";
+	category: string[];
+	cholesterol_mg: number | null;
 	fat_g: number | null;
+	highlights: string[];
+	ingredients: string | null;
+	iron_mg: number | null;
 	fiber_g: number | null;
 	name: string | null;
 	product_id: string;
+	potassium_mg: number | null;
 	protein_g: number | null;
+	raw_nutrition_text: string | null;
+	saturated_fat_g: number | null;
 	serving_size: string | null;
 	servings_per_container: number | null;
 	sodium_mg: number | null;
 	source:
 		| "usda_fdc"
 		| "wholefoods_product_page"
+		| "wholefoods_structured_data"
+		| "amazon_product_page"
 		| "not_found"
 		| "error"
 		| "blocked";
 	sugar_g: number | null;
+	trans_fat_g: number | null;
+	type: "https://schema.org/NutritionInformation";
+	upc: string | null;
+	usda_brand: string | null;
+	usda_description: string | null;
+	usda_fdc_id: number | null;
+	usda_match_method: UsdaMatchMethod | null;
+	vitamin_d_mcg: number | null;
 	[field: string]: unknown;
 }
