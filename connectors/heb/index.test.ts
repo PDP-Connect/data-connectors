@@ -4,8 +4,8 @@
 /**
  * Integration tests for the H-E-B connector's collect()-layer helpers.
  *
- * Some tests (the synthetic `collect:` cases) launch Chromium against routed
- * local HTML. The rest stub `Page`'s minimal surface
+ * The synthetic `collect:` cases and existing detail-surface tests launch
+ * Chromium against local fixtures. Other tests stub `Page`'s minimal surface
  * (goto/waitForSelector/content/url) and drive the real exported functions
  * from index.ts, using `makeRecordingEmit(validateRecord)` so every emitted
  * record runs through the connector's real zod schema.
@@ -77,8 +77,13 @@ import {
 	resolveOrderDetail,
 	runForwardScan,
 } from "./index.ts";
+import { parseOrderDate, parseOrdersListDom } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageDiagnostics, ListPageOrder } from "./types.ts";
+
+// DOM fixtures contain date-only English labels; pin this test process so
+// absolute fixture dates do not depend on the host's local timezone.
+process.env.TZ = "UTC";
 
 const FIXTURES_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -257,6 +262,14 @@ const SYNTHETIC_ORDER: SyntheticProviderBody = {
 	orderDate: "2026-07-14",
 	quantity: 1,
 };
+
+test("collect: synthetic fixture dates use a deterministic UTC test environment", () => {
+	assert.equal(process.env.TZ, "UTC");
+	const raw = parseOrdersListDom(syntheticOrderList(SYNTHETIC_ORDER))[0]
+		?.orderDateRaw;
+	assert.ok(raw);
+	assert.equal(parseOrderDate(raw), SYNTHETIC_ORDER.orderDate);
+});
 
 test("collect: synthetic list summary controls stay independent of detail fields", () => {
 	const summary = { itemCount: 1, total: "$10.00" };
