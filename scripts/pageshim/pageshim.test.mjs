@@ -1437,6 +1437,47 @@ test("github_browser: an incomplete stream is an omitted error", {
 	);
 });
 
+test("github_browser: api.github.com 403/429 withholds only the API streams", {
+	timeout: 180_000,
+}, async () => {
+	const { pageshimCase: c, resolveFixture } = await import(
+		"./fixtures/github_browser.mjs"
+	);
+	const built = await buildPageshim({
+		connector: "github_browser",
+		outfile: join(out, "github_browser-rate-limited.js"),
+	});
+	// Unauthenticated api.github.com: 60/h core (events) and 10/min search.
+	const resolve = (raw) => {
+		const u = new URL(raw);
+		if (u.hostname !== "api.github.com") return resolveFixture(raw);
+		const status = u.pathname === "/search/issues" ? 429 : 403;
+		return {
+			status,
+			contentType: "application/json",
+			body: JSON.stringify({ message: "API rate limit exceeded" }),
+		};
+	};
+	const r = await runHarness({
+		bundle: built.outfile,
+		fixtures: { ...c.fixtures, resolve },
+		scopes: c.scopes,
+	});
+	assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+	assertCleanRun(r);
+	assert.equal(r.data.error, undefined);
+	assert.match(r.data.status, /^Partial:/);
+	for (const scope of ["github.profile", "github.repositories", "github.starred", "github.contributions"])
+		assert.ok(r.result[scope], `${scope} must survive the rate-limited API streams`);
+	assert.equal(r.result["github.events"], undefined);
+	assert.equal(r.result["github.history"], undefined);
+	assert.deepEqual(
+		r.result.errors.map((e) => [e.scope, e.disposition]).sort(),
+		[["github.events", "omitted"], ["github.history", "omitted"]],
+	);
+	for (const e of r.result.errors) assert.match(e.reason, /api_rate_limited/);
+});
+
 test("oura_browser: a failed daily-data window reports the stream instead of Complete", {
 	timeout: 180_000,
 }, async () => {
