@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.11)
+ * PDPP Meta (Instagram) Connector (v0.4.32)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -100,6 +100,8 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.32 — scrape legacy targeting categories before advertiser pagination
+ *     so slow advertiser expansion cannot consume their collection window.
  *   v0.4.25 — restores legacy profile capture, stream-gap reporting, initial
  *     posts polling/fallback scroll, authenticated readiness, bounded
  *     navigation retries, and expansion-first category collection.
@@ -2432,7 +2434,7 @@ export async function scrapeTargetingCategories(
 	const panelLinkReady = await waitForAdsCondition(page, () =>
 		Array.from(
 			document.querySelectorAll(
-				'[role="tabpanel"] a, [role="tabpanel"] [role="link"]',
+				'[role="tabpanel"] a, [role="tabpanel"] [role="link"], [role="tabpanel"] button, [role="tabpanel"] [role="button"]',
 			),
 		).some((link) =>
 			(link.textContent ?? "").includes("Categories used to reach you"),
@@ -2449,7 +2451,7 @@ export async function scrapeTargetingCategories(
 
 	const clickedCategories = await page.evaluate(() => {
 		const links = document.querySelectorAll(
-			'[role="tabpanel"] a, [role="tabpanel"] [role="link"]',
+			'[role="tabpanel"] a, [role="tabpanel"] [role="link"], [role="tabpanel"] button, [role="tabpanel"] [role="button"]',
 		);
 		for (const link of Array.from(links)) {
 			if ((link.textContent ?? "").includes("Categories used to reach you")) {
@@ -2798,14 +2800,16 @@ export async function collectAllStreams(
 					};
 				}
 			};
+			// Targeting categories are a legacy Ads 1.1.0 output. Read them before
+			// advertiser pagination, which can spend the run's remaining time.
+			const categories = await scrapeSurface("targeting_categories", () =>
+				scrapeTargetingCategories(page, adsClock),
+			);
 			const advertisers = await scrapeSurface("advertisers", () =>
 				scrapeAdvertisers(page, adsClock),
 			);
 			const adTopics = await scrapeSurface("ad_topics", () =>
 				scrapeAdTopics(page, adsClock),
-			);
-			const categories = await scrapeSurface("targeting_categories", () =>
-				scrapeTargetingCategories(page, adsClock),
 			);
 			const ads = await (mobile ? buildAdRecordsWebCrypto : buildAdRecords)({
 				adTopics: adTopics.items,
