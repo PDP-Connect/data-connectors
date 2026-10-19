@@ -2079,7 +2079,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/groupme/incremental-frontier.test.ts",
-			line: 546,
+			line: 633,
 			column: 16,
 			category: "test_assertion_sequencing",
 			note: "cappedForwardWalk(): deliberately reimplements a page-capped pagination loop to prove the >old-cap discriminator test actually fails under the old (removed) cap — sequential by design, not production code",
