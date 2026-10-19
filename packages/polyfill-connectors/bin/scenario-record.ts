@@ -638,6 +638,35 @@ export class WatchdogTimeoutError extends Error {
 }
 
 /**
+ * Passes connector diagnostic lines (`[<source>-diagnostic] ...`, see
+ * src/connector-diagnostic.ts) through to this CLI's stderr as they arrive.
+ * The rest of the child's stderr is still only kept for the failure reason,
+ * so a run that is killed or times out before DONE used to lose the very
+ * lines that say where it stopped. Diagnostics are bounded and non-secret by
+ * contract, so printing them live is safe.
+ *
+ * Returns a function to call with each stderr chunk; partial lines are held
+ * until their newline arrives.
+ */
+export function createDiagnosticForwarder(
+	write: (line: string) => void,
+): (chunk: string) => void {
+	let pending = "";
+	return (chunk) => {
+		pending += chunk;
+		let newline = pending.indexOf("\n");
+		while (newline >= 0) {
+			const line = pending.slice(0, newline);
+			if (/^\[[a-z0-9_]+-diagnostic\] /.test(line)) {
+				write(line);
+			}
+			pending = pending.slice(newline + 1);
+			newline = pending.indexOf("\n");
+		}
+	};
+}
+
+/**
  * Pure inactivity-timer core, extracted so its suspend/resume semantics are
  * independently unit-testable without spawning a real subprocess or a real
  * TTY (see bin/scenario-cli.test.ts's suspend/resume unit tests — an
@@ -1702,9 +1731,13 @@ function runRecordSubprocess(args: {
 			}
 		});
 		child.stderr.setEncoding("utf8");
+		const forwardDiagnostics = createDiagnosticForwarder((line) =>
+			process.stderr.write(`${line}\n`),
+		);
 		child.stderr.on("data", (chunk: string) => {
 			watchdog.touch();
 			stderr += chunk;
+			forwardDiagnostics(chunk);
 		});
 		child.on("error", (err) => {
 			watchdog.dispose();
