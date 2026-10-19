@@ -120,8 +120,9 @@ test("CI admission uses the full push range, both rename paths, and fails closed
 
 test("helper, config and isolated-lock changes admit ordinary verification; docs-only does not", async (t) => {
 	for (const name of [
-		"scripts/groupme-mutation/tools/package-lock.json",
-		"scripts/groupme-mutation/vitest.config.mjs",
+		"scripts/groupme-mutation/select.mjs",
+		"packages/polyfill-connectors/test-tools/package-lock.json",
+		"packages/polyfill-connectors/test-tools/package.json",
 		".github/scripts/groupme-mutation-admission.mjs",
 		"package.json",
 	]) {
@@ -141,6 +142,17 @@ test("helper, config and isolated-lock changes admit ordinary verification; docs
 	});
 	assert.equal(output.relevant, false);
 	assert.equal(output.mutationRequired, false);
+	const sandbox = await commitChange(
+		t,
+		"scripts/test-sandbox/test-sandbox",
+		"changed\n",
+	);
+	const sandboxOutput = admit(sandbox.repo, {
+		BEFORE_SHA: sandbox.base,
+		HEAD_SHA: sandbox.head,
+	}).output;
+	assert.equal(sandboxOutput.relevant, true);
+	assert.equal(sandboxOutput.mutationRequired, false);
 });
 
 test("both supported GroupMe production files admit the mutation run; unsupported production also admits", async (t) => {
@@ -257,13 +269,15 @@ test("the workflow keeps GroupMe evidence visible but non-required and free of h
 	const workflow = readFileSync(workflowPath, "utf8");
 	const job = workflow.slice(
 		workflow.indexOf("  groupme-mutation:\n"),
-		workflow.indexOf("  gate:\n"),
+		workflow.indexOf("\n  connector-evidence:"),
 	);
 	assert.match(job, /timeout-minutes: 20/);
 	assert.doesNotMatch(job, /continue-on-error|\|\| true/);
 	assert.doesNotMatch(job, /--mode qualify|tools\/groupme-mutation-pilot/);
 	assert.match(job, /ref: \$\{\{ needs\.changes\.outputs\.head_sha \}\}/);
-	const install = job.indexOf("npm ci --prefix scripts/groupme-mutation/tools");
+	const install = job.indexOf(
+		"npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools",
+	);
 	const run = job.indexOf("npm run groupme-mutation -- --mode diff");
 	assert.ok(
 		install > 0 && install < run,

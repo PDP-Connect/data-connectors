@@ -7,6 +7,8 @@ import { parseHTML } from "linkedom";
 import {
 	readChannelAbout,
 	readChannelPage,
+	openSwitchAccount,
+	readGoogleAccountEmail,
 	readOwnAccount,
 	readPlaylistLinks,
 	readSubscriptions,
@@ -114,6 +116,19 @@ test("subscription controls distinguish known false from missing evidence", () =
 	assert.equal(b?.notifications, null);
 });
 
+test("subscription renderers preserve displayed counts and omit missing text", () => {
+	const html = readFileSync(
+		new URL("./__fixtures__/subscriptions-subscriber-count.html", import.meta.url),
+		"utf8",
+	);
+	const subscriptions = readSubscriptions(dom(html));
+	assert.equal(subscriptions.length, 4);
+	assert.equal(subscriptions[0]?.subscriber_count_text, "1.2M subscribers");
+	assert.equal(subscriptions[3]?.subscriber_count_text, "1,2 M d’abonnés");
+	for (const subscription of subscriptions.slice(1, 3))
+		assert.equal(Object.hasOwn(subscription, "subscriber_count_text"), false);
+});
+
 test("playlist links exclude LL and WL and keep native IDs", () => {
 	const links = readPlaylistLinks(
 		dom(
@@ -208,4 +223,77 @@ test("history attaches a day label from the containing section", () => {
 	const [video] = readVideos("history", doc);
 	assert.equal(video?.watched_date_label, "Yesterday");
 	assert.equal(video?.video_title, "History title");
+});
+
+test("switch-account view yields only the signed-in account header's email", async () => {
+	const doc = dom(`
+		<ytd-active-account-header-renderer><span id="email"></span></ytd-active-account-header-renderer>
+		<ytd-multi-page-menu-renderer>
+			<ytd-compact-link-renderer><a><span id="label">Your channel</span></a></ytd-compact-link-renderer>
+			<ytd-compact-link-renderer><a><span id="label"> Switch  account </span></a></ytd-compact-link-renderer>
+		</ytd-multi-page-menu-renderer>`);
+	assert.equal(readGoogleAccountEmail(doc), null);
+	let clicked = 0;
+	for (const item of doc.querySelectorAll("ytd-compact-link-renderer"))
+		item.addEventListener("click", () => {
+			clicked += 1;
+		});
+	doc.querySelector("ytd-compact-link-renderer:last-child")?.addEventListener(
+		"click",
+		() =>
+			doc.body.insertAdjacentHTML("beforeend", SWITCH_VIEW),
+	);
+	assert.equal(await openSwitchAccount(doc), true);
+	assert.equal(clicked, 1);
+	assert.equal(readGoogleAccountEmail(doc), "owner@example.com");
+});
+
+const SWITCH_VIEW =
+	'<ytd-account-section-list-renderer><ytd-google-account-header-renderer><yt-formatted-string id="email">owner@example.com</yt-formatted-string></ytd-google-account-header-renderer><ytd-account-item-renderer><span id="email">other@example.com</span></ytd-account-item-renderer></ytd-account-section-list-renderer>';
+
+for (const placement of ["renderer", "nested anchor"] as const) {
+	test(`switch-account opens when the handler sits on the ${placement}`, async () => {
+		const doc = dom(`
+			<ytd-multi-page-menu-renderer>
+				<ytd-compact-link-renderer><a id="endpoint"><span id="label">Switch account</span></a></ytd-compact-link-renderer>
+				<ytd-account-item-renderer><a id="endpoint">other</a></ytd-account-item-renderer>
+			</ytd-multi-page-menu-renderer>`);
+		const target =
+			placement === "renderer"
+				? doc.querySelector("ytd-compact-link-renderer")
+				: doc.querySelector("ytd-compact-link-renderer a#endpoint");
+		let listed = 0;
+		doc
+			.querySelector("ytd-account-item-renderer a")
+			?.addEventListener("click", () => {
+				listed += 1;
+			});
+		target?.addEventListener("click", (event) => {
+			// A handler on the anchor must not fire for a renderer-only click.
+			if (placement === "nested anchor" && event.target !== target) return;
+			doc.body.insertAdjacentHTML("beforeend", SWITCH_VIEW);
+		});
+		assert.equal(await openSwitchAccount(doc), true);
+		assert.equal(readGoogleAccountEmail(doc), "owner@example.com");
+		assert.equal(listed, 0);
+	});
+}
+
+test("switch-account reports not opened when the view never appears", async () => {
+	const doc = dom(
+		'<ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a id="endpoint"><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>',
+	);
+	assert.equal(await openSwitchAccount(doc, 150), false);
+});
+
+test("switch-account email reader rejects non-email header text and a missing menu item", async () => {
+	assert.equal(await openSwitchAccount(dom("<div></div>")), false);
+	assert.equal(
+		readGoogleAccountEmail(
+			dom(
+				'<ytd-google-account-header-renderer><span id="email">Signed in</span></ytd-google-account-header-renderer>',
+			),
+		),
+		null,
+	);
 });

@@ -38,6 +38,8 @@
 				"export_layout_unrecognized": "Your Claude data export arrived in a format this connector does not recognize, so nothing was imported. Your existing data was not changed.",
 				"export_recently_requested": "A Claude data export was requested less than 24 hours ago. To avoid sending you another email, a new export will be requested later.",
 				"export_items_unparseable": "Some items in your Claude data export could not be read and were not imported.",
+				"export_conversation_incomplete": "Some conversations or messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
+				"export_oversized_conversation_incomplete": "Some large conversations or their messages in your Claude data export could not be fully read. Affected data has not been marked as fully imported.",
 				"export_conversations_missing": "Your Claude data export has no conversations file in a format this connector recognizes, so conversations and messages were not imported. Your existing data was not changed."
 			}
 		}
@@ -250,7 +252,8 @@
 		"manifest": {
 			"connector_key": "github-browser",
 			"reason_display_messages": {
-				"github_browser_incomplete": "GitHub did not return a complete result for this stream."
+				"github_browser_incomplete": "GitHub did not return a complete result for this stream.",
+				"inventory_not_proven_complete": "GitHub did not show that this list was read in full, so the last complete copy was kept."
 			}
 		}
 	},
@@ -366,6 +369,7 @@
 		"manifest": {
 			"connector_key": "heb",
 			"reason_display_messages": {
+				"inventory_not_proven_complete": "H-E-B did not provide enough source evidence to prove this inventory complete. Valid records were kept; the next run will try again",
 				"empty_page_before_max_page": "We hit an empty page of orders before we expected to, so we stopped to check rather than assume we were done",
 				"heb_empty_history_after_prior_orders": "H-E-B reported no order history, but we previously collected orders for this account. Your stored orders are retained and untouched. We stopped this run instead of recording an empty history, because a page showing no orders can't prove your history is gone",
 				"item_count_short": "Some orders hold fewer items than H-E-B says they contain",
@@ -373,7 +377,7 @@
 				"list_page_shape_check_failed": "The page didn't look like we expected",
 				"nutrition_navigation_failed": "We couldn't load a product page to read its nutrition facts",
 				"nutrition_source_coverage_incomplete": "We did not mark H-E-B nutrition complete because the order history or order-item detail coverage is incomplete",
-				"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Nothing was lost — the next run picks up where this one stopped",
+				"older_pages_deferred_page_budget": "We stopped after reading the most recent pages of your order history, so older orders haven't been collected yet. Valid records were retained; the unread tail remains unproven",
 				"pagination_exhausted": "We reached the end of the available pages",
 				"pagination_metadata_absent": "H-E-B didn't tell us how many pages of orders there are, so we stopped to avoid missing any",
 				"pagination_metadata_contradictory": "H-E-B gave us conflicting page-count information, so we stopped to avoid missing any orders",
@@ -405,7 +409,15 @@
 		"manifest": {
 			"connector_key": "icloud-notes",
 			"reason_display_messages": {
-				"older_pages_deferred_page_budget": "We stopped after reading a set number of pages of your iCloud notes, so older notes haven't been collected yet. Nothing was lost — the next run picks up where this one stopped"
+				"inventory_not_proven_complete": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
+				"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
+				"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
+				"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
+				"icloud_no_progress": "iCloud Notes pagination stopped. This stream was not marked complete.",
+				"icloud_omitted_rows": "Some iCloud Notes fields could not be read or stored. The affected rows are listed in the stream omission details, and the stream was not marked complete.",
+				"icloud_rate_limited": "iCloud Notes temporarily limited requests. Retry collection later.",
+				"icloud_navigation_changed": "The iCloud Notes page changed during collection. This stream was not marked complete.",
+				"icloud_readiness_exhausted": "The iCloud Notes page did not become ready within the retry budget. Collection did not start; retry when the Notes page is available."
 			}
 		}
 	},
@@ -437,8 +449,75 @@
 		"manifest": {
 			"connector_key": "linkedin",
 			"reason_display_messages": {
+				"linkedin_enumeration_unproven": "LinkedIn cannot verify the full inventory; readable entries are saved without replacing or deleting existing entries",
+				"absent": "LinkedIn did not provide this field",
+				"malformed": "LinkedIn returned this field in an unreadable format",
+				"invalid_value": "LinkedIn returned a value outside the expected format",
+				"source_unavailable": "LinkedIn did not return the source needed for this field",
+				"enrichment_unresolved": "LinkedIn could not resolve a connection's profile details",
+				"walk_unverified": "LinkedIn did not provide enough paging evidence to verify the full list",
+				"source_row_uncovered": "LinkedIn could not verify the source row for this derived field",
+				"withheld_unreadable_fields": "LinkedIn withheld an entry because one or more fields were unreadable",
+				"unreadable_nested_collection": "LinkedIn returned an unreadable nested collection",
+				"malformed_row": "LinkedIn returned an entry in an unreadable format",
+				"no_readable_content": "LinkedIn returned an entry with no readable content",
+				"invalid_record_shape": "LinkedIn returned an entry outside the expected record shape",
+				"id_absent": "LinkedIn did not provide the entry identifier",
+				"id_malformed": "LinkedIn returned the entry identifier in an unreadable format",
+				"id_invalid_value": "LinkedIn returned an entry identifier outside the expected format",
+				"id_source_unavailable": "LinkedIn did not return the source for the entry identifier",
+				"id_enrichment_unresolved": "LinkedIn could not resolve the connection identifier to a profile",
+				"id_walk_unverified": "LinkedIn did not verify the entry identifier in a complete list",
+				"id_source_row_uncovered": "LinkedIn could not verify the source row for the entry identifier",
+				"id_empty": "LinkedIn returned an empty entry identifier",
+				"name_absent": "LinkedIn did not provide the entry name",
+				"name_malformed": "LinkedIn returned the entry name in an unreadable format",
+				"name_invalid_value": "LinkedIn returned an entry name outside the expected format",
+				"name_source_unavailable": "LinkedIn did not return the source for the entry name",
+				"name_enrichment_unresolved": "LinkedIn could not resolve the connection name",
+				"name_walk_unverified": "LinkedIn did not verify the entry name in a complete list",
+				"name_source_row_uncovered": "LinkedIn could not verify the source row for the entry name",
+				"name_empty": "LinkedIn returned an empty entry name",
 				"linkedin_dash_profile_unavailable": "LinkedIn didn't return a full profile for this account",
-				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run"
+				"linkedin_profile_fields_unavailable": "LinkedIn returned only some profile fields",
+				"linkedin_profile_section_unavailable": "LinkedIn didn't return a readable profile section",
+				"linkedin_connections_page_failed": "LinkedIn stopped returning connection pages before the list ended",
+				"linkedin_connections_continuation_advertised": "LinkedIn advertised another connections page, so the exact connection count is unavailable",
+				"linkedin_connections_page_malformed": "LinkedIn returned an unreadable connection page",
+				"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
+				"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
+				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+				"inventory_not_proven_complete": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
+				"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
+				"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
+				"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
+				"summary_total_invalid": "LinkedIn inventory could not be verified: summary total invalid",
+				"summary_owner_mismatch": "LinkedIn inventory could not be verified: summary owner mismatch",
+				"summary_total_changed": "LinkedIn inventory could not be verified: summary total changed",
+				"collection_malformed": "LinkedIn inventory could not be verified: collection malformed",
+				"collection_paging_invalid": "LinkedIn inventory could not be verified: collection paging invalid",
+				"collection_urn_missing": "LinkedIn inventory could not be verified: collection urn missing",
+				"collection_urn_duplicate": "LinkedIn inventory could not be verified: collection urn duplicate",
+				"collection_total_mismatch": "LinkedIn inventory could not be verified: collection total mismatch",
+				"collection_continuation_advertised": "LinkedIn inventory could not be verified: collection continuation advertised",
+				"skills_nested_unproven": "LinkedIn inventory could not be verified: skills nested unproven",
+				"connection_urn_missing": "LinkedIn inventory could not be verified: connection urn missing",
+				"connection_walk_continuation_advertised": "LinkedIn inventory could not be verified: connection walk continuation advertised",
+				"connection_walk_page_error": "LinkedIn inventory could not be verified: connection walk page error",
+				"connection_walk_malformed_page": "LinkedIn inventory could not be verified: connection walk malformed page",
+				"connection_walk_repeated_page": "LinkedIn inventory could not be verified: connection walk repeated page",
+				"connection_walk_page_budget": "LinkedIn inventory could not be verified: connection walk page budget",
+				"connection_paging_total_mismatch": "LinkedIn inventory could not be verified: connection paging total mismatch",
+				"connection_total_mismatch": "LinkedIn inventory could not be verified: connection total mismatch",
+				"connection_confirmation_missing": "LinkedIn inventory could not be verified: connection confirmation missing",
+				"connection_confirmation_malformed": "LinkedIn inventory could not be verified: connection confirmation malformed",
+				"connection_walk_unavailable": "LinkedIn inventory could not be verified: connection walk unavailable",
+				"experience_nested_collection_malformed": "LinkedIn inventory could not be verified: experience nested collection malformed",
+				"experience_nested_collection_paging_invalid": "LinkedIn inventory could not be verified: experience nested collection paging invalid",
+				"experience_nested_collection_urn_missing": "LinkedIn inventory could not be verified: experience nested collection urn missing",
+				"experience_nested_collection_urn_duplicate": "LinkedIn inventory could not be verified: experience nested collection urn duplicate",
+				"experience_nested_collection_total_mismatch": "LinkedIn inventory could not be verified: experience nested collection total mismatch",
+				"experience_nested_collection_continuation_advertised": "LinkedIn inventory could not be verified: experience nested collection continuation advertised"
 			}
 		}
 	},
@@ -448,6 +527,15 @@
 			"connector_key": "loom",
 			"reason_display_messages": {
 				"loom_apollo_wiring_pending": "Loom support isn't wired up yet"
+			}
+		}
+	},
+	{
+		"file": "meta.json",
+		"manifest": {
+			"connector_key": "meta",
+			"reason_display_messages": {
+				"inventory_not_proven_complete": "Instagram did not show that this list was read in full, so it will be read again next time."
 			}
 		}
 	},
@@ -488,10 +576,14 @@
 		"manifest": {
 			"connector_key": "shopify",
 			"reason_display_messages": {
+				"shopify_browser_operation_timeout": "Shop did not respond within the collection time budget. Retry the collection.",
+				"shopify_signed_out_or_blocked": "Sign in to Shop and open your order history before retrying.",
 				"shopify_apollo_state_unavailable": "Couldn't read your Shop order history — try again after the page loads",
 				"shopify_order_history_evidence_timeout": "We couldn't confirm your Shop orders in time. Try again.",
 				"shopify_order_history_readiness_timeout": "Your Shop order history took too long to load. Try again.",
+				"inventory_not_proven_complete": "Shop did not confirm that your order history is complete. The orders read were saved; try again to confirm the full list",
 				"shopify_order_history_unconfirmed": "Could not confirm your Shop orders because the order list or an empty state was not available; try again after order history loads",
+				"shopify_order_rows_unresolved": "Some Shop orders could not be read completely; retry to collect them",
 				"older_pages_deferred_page_budget": "More Shop orders exist than this run collected; a later run will pick up the rest"
 			}
 		}
@@ -571,7 +663,10 @@
 		"manifest": {
 			"connector_key": "spotify",
 			"reason_display_messages": {
-				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync."
+				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
+				"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
+				"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
+				"spotify_source_row_unavailable": "Spotify returned a row with unavailable mapped fields; the whole row was withheld."
 			}
 		}
 	},
@@ -694,7 +789,8 @@
 			"reason_display_messages": {
 				"wholefoods_filter_pending": "Whole Foods filter support isn't wired up yet",
 				"wholefoods_order_item_asin_missing": "Some Whole Foods items lacked a source product ID and were omitted from item records",
-				"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history"
+				"wholefoods_order_item_count_unverified": "Some Whole Foods orders were imported, but their item counts could not be checked against your order history",
+				"inventory_not_proven_complete": "Observed Whole Foods records were imported, but the source did not prove the inventory complete. Retry to refresh."
 			}
 		}
 	},
@@ -731,6 +827,7 @@
 		"manifest": {
 			"connector_key": "youtube",
 			"reason_display_messages": {
+				"inventory_not_proven_complete": "YouTube did not provide enough source evidence to prove this list complete. Valid records were kept; the next run will try again",
 				"page_unreadable": "The signed-in page did not expose a trustworthy record.",
 				"scope_not_supported": "Watch history shows dates without watch times, so a time range cannot be applied to it.",
 				"youtube_profile_home_not_ready": "The signed-in YouTube home page did not expose the account menu.",

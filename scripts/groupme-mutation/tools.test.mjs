@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-	copyFileSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -13,17 +12,21 @@ import {
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { VITEST_TESTS } from "../../packages/polyfill-connectors/scripts/test-lanes.mjs";
 import stryker from "./stryker.config.mjs";
 import config, { pins, resolveTool, toolsRoot } from "./vitest.config.mjs";
 
 const base = fileURLToPath(new URL(".", import.meta.url));
 const repo = fileURLToPath(new URL("../../", import.meta.url));
-function child(args, cwd) {
+const groupmeFiles = [...VITEST_TESTS].filter((file) =>
+	file.startsWith("connectors/groupme/"),
+);
+function child(args, cwd, env = {}) {
 	const result = spawnSync(process.execPath, args, {
 		cwd,
 		encoding: "utf8",
 		timeout: 150000,
-		env: { ...process.env, CI: "true", NO_COLOR: "1" },
+		env: { ...process.env, CI: "true", NO_COLOR: "1", ...env },
 	});
 	assert.equal(result.error, undefined, String(result.error));
 	assert.equal(result.signal, null, result.stderr);
@@ -31,8 +34,12 @@ function child(args, cwd) {
 }
 test("exact isolated pins and conservative native configuration", () => {
 	const pkg = JSON.parse(readFileSync(join(toolsRoot, "package.json"), "utf8"));
-	assert.deepEqual(pkg.dependencies, pins);
+	assert.deepEqual(pkg.devDependencies, pins);
 	assert.equal(pkg.private, true);
+	assert.equal(
+		toolsRoot,
+		join(repo, "packages/polyfill-connectors/test-tools") + "/",
+	);
 	assert.equal(stryker.testRunner, "vitest");
 	assert.equal(stryker.coverageAnalysis, "perTest");
 	assert.deepEqual(stryker.mutate, []);
@@ -58,7 +65,8 @@ test("exact isolated pins and conservative native configuration", () => {
 	assert.equal(config.test.bail, 0);
 	assert.equal(config.test.passWithNoTests, false);
 	assert.ok(config.test.maxWorkers <= 2);
-	assert.deepEqual(config.test.include, ["connectors/groupme/*.test.ts"]);
+	assert.deepEqual(config.test.include, groupmeFiles);
+	assert.ok(groupmeFiles.length > 0);
 	assert.deepEqual(stryker.plugins, [
 		resolveTool("@stryker-mutator/vitest-runner"),
 	]);
@@ -85,23 +93,22 @@ test("both configs resolve from repository and isolated tool working directories
 test("missing and wrong isolated versions cannot fall back to root dependencies", () => {
 	const temp = mkdtempSync(join(base, ".tools-negative-"));
 	try {
-		copyFileSync(
-			join(base, "vitest.config.mjs"),
-			join(temp, "vitest.config.mjs"),
-		);
-		const url = pathToFileURL(join(temp, "vitest.config.mjs")).href;
-		let result = child(
-			[
-				"--input-type=module",
-				"-e",
-				"await import(" + JSON.stringify(url) + ")",
-			],
-			repo,
-		);
+		const url = pathToFileURL(join(base, "vitest.config.mjs")).href;
+		const load = (root) =>
+			child(
+				[
+					"--input-type=module",
+					"-e",
+					"await import(" + JSON.stringify(url) + ")",
+				],
+				repo,
+				{ GROUPME_MUTATION_TOOLS_ROOT: root },
+			);
+		let result = load(join(temp, "tools/"));
 		assert.notEqual(result.status, 0);
 		assert.match(
 			result.stderr,
-			/is not installed\. Run from the repository root: npm ci --prefix scripts\/groupme-mutation\/tools/,
+			/is not installed\. Run from the repository root: npm ci --prefix packages\/polyfill-connectors\/test-tools/,
 		);
 		const dir = join(temp, "tools/node_modules/@stryker-mutator/core");
 		mkdirSync(dir, { recursive: true });
@@ -109,14 +116,7 @@ test("missing and wrong isolated versions cannot fall back to root dependencies"
 			join(dir, "package.json"),
 			JSON.stringify({ name: "@stryker-mutator/core", version: "0.0.0" }),
 		);
-		result = child(
-			[
-				"--input-type=module",
-				"-e",
-				"await import(" + JSON.stringify(url) + ")",
-			],
-			toolsRoot,
-		);
+		result = load(join(temp, "tools/"));
 		assert.notEqual(result.status, 0);
 		assert.match(result.stderr, /Unexpected isolated tool version/);
 	} finally {
@@ -134,7 +134,7 @@ test("native Vitest executes a passing assertion and propagates a real failure",
 				";\n" +
 				"export default {...base, root: " +
 				JSON.stringify(temp) +
-				", test: {...base.test, include: ['smoke.test.mjs']}};\n",
+				", test: {...base.test, include: ['smoke.test.mjs'], setupFiles: []}};\n",
 		);
 		const fixture = join(temp, "smoke.test.mjs");
 		const cli = join(toolsRoot, "node_modules/vitest/vitest.mjs");

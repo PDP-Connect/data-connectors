@@ -47,6 +47,7 @@ function pathFlags(changed) {
 	const harness = allPaths.some(
 		(file) =>
 			file.startsWith("scripts/groupme-mutation/") ||
+			file.startsWith("packages/polyfill-connectors/test-tools/") ||
 			file === ".github/scripts/groupme-mutation-admission.mjs" ||
 			file === "package.json" ||
 			file === ".github/workflows/polyfill-connectors.yml",
@@ -58,6 +59,7 @@ function pathFlags(changed) {
 			(file) =>
 				file.startsWith("connectors/") ||
 				file.startsWith("packages/polyfill-connectors/") ||
+				file.startsWith("scripts/test-sandbox/") ||
 				file === ".github/workflows/polyfill-connectors.yml",
 		);
 	const groupme = allPaths.some(production);

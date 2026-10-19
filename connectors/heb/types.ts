@@ -46,6 +46,12 @@ export interface DetailItem {
 
 export interface OrderDetail {
 	items: DetailItem[];
+	parsing?: {
+		observedRows: number;
+		rejectedRows: number;
+		missingIdentityRows: number;
+		sourceIds: string[];
+	};
 }
 
 // Shape of the emitted `orders` stream record. Field names + nullability

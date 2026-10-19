@@ -24,7 +24,22 @@ export function pageShimIncompatibilities(manifest) {
 	const required = Object.entries(bindings).filter(([, value]) => value?.required === true);
 	const failures = [];
 	if (!required.some(([name]) => name === "browser")) failures.push("browser binding is not required");
-	if (!required.some(([name]) => name === "network")) failures.push("network binding is not required");
+	// Script-issued requests are covered by the required browser capability.
+	const pageRequests = bindings.browser?.required === true &&
+		Array.isArray(bindings.browser.features) &&
+		bindings.browser.features.includes("page_script_evaluation");
+	if (!required.some(([name]) => name === "network") && !pageRequests)
+		failures.push("network binding is not required and browser page_script_evaluation is not declared");
+	// Optional known bindings may be absent, but unknown feature names must
+	// not silently become valid just because the binding is optional.
+	for (const [name, requirement] of Object.entries(bindings)) {
+		if (requirement?.required === true) continue;
+		const supported = PAGE_SHIM_BINDING_FEATURES[name];
+		if (supported && Array.isArray(requirement?.features)) {
+			for (const feature of requirement.features)
+				if (!supported.has(feature)) failures.push(`${name} feature ${feature} is not provided`);
+		}
+	}
 	for (const [name, requirement] of required) {
 		const supported = PAGE_SHIM_BINDING_FEATURES[name];
 		if (!supported) {

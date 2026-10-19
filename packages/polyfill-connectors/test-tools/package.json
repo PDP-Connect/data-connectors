@@ -1,0 +1,11 @@
+{
+	"name": "@pdpp/polyfill-test-tools",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Isolated test runner dependencies for polyfill connectors",
+	"devDependencies": {
+		"@stryker-mutator/core": "10.0.0",
+		"@stryker-mutator/vitest-runner": "10.0.0",
+		"vitest": "4.1.12"
+	}
+}

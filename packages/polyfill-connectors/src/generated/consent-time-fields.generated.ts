@@ -197,6 +197,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	icloud_notes: {
 		folders: null,
 		notes: null,
+		profile: null,
 	},
 	imessage: {
 		attachments: null,
@@ -239,9 +240,9 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		sleep: null,
 	},
 	oura_browser: {
-		activity: null,
-		readiness: null,
-		sleep: null,
+		activity: { field: "day", format: "date" },
+		readiness: { field: "day", format: "date" },
+		sleep: { field: "day", format: "date" },
 	},
 	pocket: {
 		items: { field: "time_added", format: "date-time" },
@@ -288,7 +289,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		playlist_items: { field: "added_at", format: "date-time" },
 		playlists: null,
 		profile: null,
+		recently_played_contexts: null,
 		saved_tracks: { field: "added_at", format: "date-time" },
+		top_artists: null,
+		top_tracks: null,
 	},
 	steam: {
 		friends: null,

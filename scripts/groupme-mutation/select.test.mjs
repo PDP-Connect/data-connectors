@@ -91,7 +91,7 @@ test("tests, fixtures and helper-only changes make no changed-code proof", () =>
 	for (const path of [
 		"connectors/groupme/index.test.ts",
 		"connectors/groupme/__fixtures__/input.ts",
-		"scripts/groupme-mutation/dispatch.mjs",
+		"scripts/groupme-mutation/select.mjs",
 		"outside/path with spaces.ts",
 	]) {
 		const result = select([change(path)]);

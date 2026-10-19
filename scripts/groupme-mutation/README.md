@@ -1,6 +1,6 @@
 # GroupMe mutation evidence
 
-One official Stryker run per admitted change: Stryker 10.0.0 with default operators, `@stryker-mutator/vitest-runner` 10.0.0, Vitest 4.1.12, and `perTest` coverage. The pins live in `tools/package.json`; `vitest.config.mjs` refuses to load if they differ.
+One official Stryker run per admitted change: Stryker 10.0.0 with default operators, `@stryker-mutator/vitest-runner` 10.0.0, Vitest 4.1.12, and `perTest` coverage. The pins live in `packages/polyfill-connectors/test-tools/package.json`, the same isolated tree the ordinary Vitest lane uses; `vitest.config.mjs` refuses to load if they differ. The GroupMe subset comes from `VITEST_TESTS` in `packages/polyfill-connectors/scripts/test-lanes.mjs`; there is no separate roster.
 
 ## Scope
 
@@ -8,11 +8,12 @@ One official Stryker run per admitted change: Stryker 10.0.0 with default operat
 - A changed GroupMe production file outside that list makes the run `unsupported`. No mutation runs.
 - Tests, fixtures, docs, and other connectors are not mutated. A supported file renamed or deleted produces no mutants.
 - No blanket exclusions, no score threshold, and no custom operators.
+- The 14 native GroupMe test files are registered in `VITEST_TESTS` (`packages/polyfill-connectors/scripts/test-lanes.mjs`). Stryker derives its subset from that registry; there is no second file list.
 
 ## Run
 
 ```sh
-npm ci --prefix scripts/groupme-mutation/tools --ignore-scripts --no-audit --no-fund
+npm ci --prefix packages/polyfill-connectors/test-tools --ignore-scripts --no-audit --no-fund
 npm run groupme-mutation -- --mode diff --base <sha> --head <sha> --merge-base <sha> [--report <dir>]
 ```
 
@@ -44,6 +45,8 @@ Survivors and timeouts are listed in `summary.json`. They do not change the exit
 Non-canary `Killed` counts are official Stryker outcomes validated for positive completed tests and reported killers, not proof of assertion-only failure or runtime activation. Only the canary has the stronger owner-receipt proof.
 
 ### Known dispositions
+
+The 18-mutant slice left five original survivor-class results: id1, id9 and id10 survived; id2 and id3 timed out (nontermination, never kills). None of the five is claimed as a new official kill. The dispositions come from the existing branch evidence.
 
 For JSON arrays, id1 (`i <= messages.length`) is equivalent: the extra iteration has `curr` undefined and the guard skips it. Id2 (`i >= messages.length`) and id3 (`i -= 1`) can fail to terminate; their timeouts are not kills. Id9 (`prev && curr` to `true`) and id10 (to `prev || curr`) survived the 18-mutant slice because a JSON `null` element reaches the guard. The native null-prefix test pins that existing partial emission without endorsing it; by hand-applied mutation it fails under both id9 and id10 and passes on unmodified code. That is a local check, not a new Stryker run.
 

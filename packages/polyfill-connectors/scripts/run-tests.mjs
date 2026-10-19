@@ -1,45 +1,80 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { glob } from "node:fs/promises";
 // node --test has no "exclude this glob" flag, and --test-skip-pattern matches
 // test *names*, not file paths. This resolves the test file list explicitly so
 // files still out of scope for this repo (see tsconfig.json's exclude comment)
 // can be left out by path.
-import {
-	commandsFor,
-	partitionTests,
-	patterns,
-	runCommands,
-} from "../../../scripts/groupme-mutation/dispatch.mjs";
-import { nativeFiles } from "../../../scripts/groupme-mutation/vitest-files.mjs";
+import { glob } from "node:fs/promises";
+import { runTestCommands, testCommands } from "./test-dispatch.mjs";
+import { EXCLUDED_TESTS, NAMESPACE_TESTS } from "./test-lanes.mjs";
 
 // Gate B finding B2 restored the other 7 previously-excluded semantic/
 // conformance tests (vendored @pdpp/reference-contract now carries an
 // `evidence` subpath, and a local reference-implementation-stand-in carries
 // RUNTIME_GENERIC_REASON_CODES — see vendor/README.md and
 // src/reference-implementation-stand-in/README.md for exact provenance).
-// connectors/github/index.test.ts remains excluded: it drives GitHub
-// connector collection against a REAL in-memory instance of the reference
-// implementation's own ingest pipeline (server/db.ts, server/records.ts —
-// thousands of lines each, not a narrow leaf contract), so it cannot be
-// bridged with a minimal stand-in without misrepresenting what it tests. Its
-// closure is the required cross-repository semantic CI job (Gate B findings
-// B2/B5), not a local vendor addition.
+// Files no lane can run are listed in EXCLUDED_TESTS (scripts/test-lanes.mjs).
+// connectors/github/index.test.ts drives the connector against the reference
+// implementation's own ingest pipeline, which is not in this repository. The
+// cross-repository job that once ran it was retired (pdpp#284; see
+// .github/workflows/cross-repo-integrity.yml), so today it runs nowhere.
+const EXCLUDED = new Set(
+	[...EXCLUDED_TESTS].map((file) =>
+		file.startsWith("connectors/") ? `../../${file}` : file,
+	),
+);
+
+const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
+// Four files at a time halves the suite's wall time against two for about the
+// same CPU (measured in TESTING.md); six adds little and about 500 MB more.
+const rawConcurrency = process.env.TEST_CONCURRENCY ?? "4";
+if (!POSITIVE_INTEGER.test(rawConcurrency)) {
+	console.error(
+		`TEST_CONCURRENCY must be a positive integer, got ${JSON.stringify(rawConcurrency)}`,
+	);
+	process.exit(2);
+}
+
+const patterns = [
+	"bin/**/*.test.ts",
+	"../../connectors/**/*.test.ts",
+	"scripts/related-tests/*.test.ts",
+	"scripts/**/*.test.mjs",
+	"src/**/*.test.ts",
+];
+
+const args = process.argv.slice(2);
+const laneIndex = args.indexOf("--lane");
+const lane = laneIndex === -1 ? undefined : args[laneIndex + 1];
+if (lane !== undefined && lane !== "sandboxed" && lane !== "namespaces") {
+	console.error(
+		`--lane must be "sandboxed" or "namespaces", got ${JSON.stringify(lane)}`,
+	);
+	process.exit(2);
+}
+
 const files = [];
 for (const pattern of patterns) {
 	for await (const entry of glob(pattern)) {
-		files.push(entry);
+		const inLane =
+			lane === undefined ||
+			NAMESPACE_TESTS.has(entry) === (lane === "namespaces");
+		if (!EXCLUDED.has(entry) && inLane) {
+			files.push(entry);
+		}
 	}
 }
 
-const parts = partitionTests(files, nativeFiles, process.cwd());
-const result = await runCommands(await commandsFor(parts, process.cwd()));
-if (result.error) {
-	console.error(result.error);
+if (args.includes("--list")) {
+	console.log(files.join("\n"));
+	process.exit(0);
 }
-if (result.signal) {
-	process.kill(process.pid, result.signal);
-} else {
-	process.exitCode = result.code ?? 1;
-}
+
+const commands = testCommands(
+	files,
+	lane === "namespaces" ? "1" : rawConcurrency,
+);
+const env =
+	lane === undefined ? process.env : { ...process.env, TEST_LANE: lane };
+process.exit((await runTestCommands(commands, env)) ? 0 : 1);

@@ -305,7 +305,7 @@ async function walkSearchPages(
 				"Whole Foods order pagination served a different page than requested",
 			);
 		}
-		if (hasNextPage && rowSignature === previousRowSignature) {
+		if (rowSignature && rowSignature === previousRowSignature) {
 			throw new OrderEnumerationUnprovenError(
 				"Whole Foods order pagination repeated a page",
 			);
@@ -379,31 +379,18 @@ function searchProductsAppearInDetail(
 function buildOrderRecord(
 	stub: OrderStub,
 	orderDateRaw: string | null,
-	items: readonly OrderDetailItem[],
+	_items: readonly OrderDetailItem[],
 ): OrderRecord {
-	// A stated row total (in-store pages) is the charged amount, so it wins
-	// over unit price x quantity, which ignores promotions and weights.
-	const rowCents = (item: OrderDetailItem): number | null => {
-		const lineCents = parseDollarsToCents(item.lineTotalDollars);
-		if (lineCents !== null) {
-			return lineCents;
-		}
-		const cents = parseDollarsToCents(item.unitPriceDollars);
-		return cents === null ? null : Math.round(cents * (item.quantity ?? 1));
-	};
-	const totalCents = items.reduce(
-		(sum, item) => sum + (rowCents(item) ?? 0),
-		0,
-	);
-	const hasCompletePrices =
-		items.length > 0 && items.every((item) => rowCents(item) !== null);
+	// Parsed rows do not establish the complete source item inventory.
+	// Keep order identity/date, but do not fabricate aggregate values.
+
 	return {
 		id: stub.orderId,
-		item_count: stub.expectedItemCount,
-		order_date: parseOrderDateIso(orderDateRaw ?? stub.orderDateRaw),
+		item_count: null,
+		order_date: parseOrderDateIso(stub.orderDateRaw ?? orderDateRaw),
 		order_url: stub.orderUrl,
 		status: null,
-		total_cents: hasCompletePrices ? totalCents : null,
+		total_cents: null,
 	};
 }
 
@@ -419,7 +406,7 @@ function buildOrderItemRecord(
 			`Whole Foods order ${orderId} has an item without a source product ASIN`,
 		);
 	}
-	const id = `${orderId}#${item.productId}`;
+	const id = `${orderId}#${item.sourceLineId ?? item.productId}`;
 	return {
 		id,
 		image_url: item.imageUrl,
@@ -428,6 +415,9 @@ function buildOrderItemRecord(
 		product_id: item.productId,
 		product_url: item.productUrl,
 		quantity: item.quantity,
+		quantity_unit: item.quantityUnit ?? null,
+		price_unit: item.priceUnit ?? null,
+		line_total_cents: parseDollarsToCents(item.lineTotalDollars),
 		unit_price_cents: parseDollarsToCents(item.unitPriceDollars),
 	};
 }
@@ -439,8 +429,23 @@ export function buildOrderItemRecords(
 	orderId: string,
 	items: readonly OrderDetailItem[],
 ): OrderItemRecord[] {
+	// Without a source line ID, repeated ASINs are ambiguous: never silently
+	// merge distinct charged lines into one last-write-wins record.
+	const frequencies = new Map<string, number>();
+	for (const item of items) {
+		if (item.productId) {
+			frequencies.set(
+				item.productId,
+				(frequencies.get(item.productId) ?? 0) + 1,
+			);
+		}
+	}
 	return items
-		.filter((item) => item.productId)
+		.filter(
+			(item) =>
+				item.productId &&
+				(item.sourceLineId || frequencies.get(item.productId) === 1),
+		)
 		.map((item) => buildOrderItemRecord(orderId, item));
 }
 
@@ -616,6 +621,7 @@ function buildNutritionRecord(
 			fat_g: null,
 			fiber_g: null,
 			name,
+			id: productId,
 			product_id: productId,
 			protein_g: null,
 			serving_size: null,
@@ -632,6 +638,7 @@ function buildNutritionRecord(
 		fat_g: facts.fatG,
 		fiber_g: facts.fiberG,
 		name,
+		id: productId,
 		product_id: productId,
 		protein_g: facts.proteinG,
 		serving_size: facts.servingSize,
@@ -691,7 +698,7 @@ async function collectOrderStubs({
 	wantsItems,
 	wantsNutrition,
 	wantsOrders,
-	withFinishingState = true,
+	withFinishingState: _withFinishingState = true,
 }: {
 	credentials: BrowserCollectContext["credentials"];
 	emit: BrowserCollectContext["emit"];
@@ -727,24 +734,24 @@ async function collectOrderStubs({
 
 	let processed = 0;
 	for (const stub of stubs) {
-		await navigateOrderPage(
-			page,
-			stub.orderUrl,
-			// Confirmed live (2026-09-22, against a real order-detail page):
-			// [data-component="purchasedItemsRightGrid"] is the real per-item
-			// container; [data-component="cancelled"] covers a cancelled order,
-			// which never renders purchasedItemsRightGrid. In-store orders
-			// (`/fopo/order-details`, live 2026-09-29) render #f3_food_ItemList.
-			ORDER_DETAIL_READY_SELECTOR,
-		);
-		const html = await page.content();
-		if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
-			throw new Error(
-				`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
-			);
-		}
 		let detail: OrderDetail;
 		try {
+			await navigateOrderPage(
+				page,
+				stub.orderUrl,
+				// Confirmed live (2026-09-22, against a real order-detail page):
+				// [data-component="purchasedItemsRightGrid"] is the real per-item
+				// container; [data-component="cancelled"] covers a cancelled order,
+				// which never renders purchasedItemsRightGrid. In-store orders
+				// (`/fopo/order-details`, live 2026-09-29) render #f3_food_ItemList.
+				ORDER_DETAIL_READY_SELECTOR,
+			);
+			const html = await page.content();
+			if (isBlockedPage(html) || /<form[^>]*name=["']signIn["']/i.test(html)) {
+				throw new Error(
+					`Whole Foods order ${stub.orderId} detail was blocked or signed out`,
+				);
+			}
 			detail = readOrderDetail(html);
 		} catch (error) {
 			if (!(error instanceof OrderEnumerationUnprovenError)) {
@@ -756,6 +763,9 @@ async function collectOrderStubs({
 				count: (unreadable?.count ?? 0) + 1,
 				first: unreadable?.first ?? error,
 			};
+			if (wantsOrders) {
+				await emitRecord("orders", buildOrderRecord(stub, null, []));
+			}
 			await emit({
 				type: "PROGRESS",
 				stream: "orders",
@@ -782,8 +792,10 @@ async function collectOrderStubs({
 		// A cancelled order with no items is the source's own statement that
 		// it has none; everything else needs a count that agrees with search.
 		if (
-			detail.items.length > 0 &&
-			!orderDetailCountsMatch(stub, detail.items)
+			itemsWithoutAsin > 0 ||
+			buildOrderItemRecords(stub.orderId, detail.items).length !==
+				detail.items.length ||
+			(detail.items.length > 0 && !orderDetailCountsMatch(stub, detail.items))
 		) {
 			unverifiedCountOrders += 1;
 			connectorDiagnostic("wholefoods", "order_item_count_unverified", {
@@ -871,14 +883,8 @@ async function collectOrderStubs({
 	}
 	// A skipped order leaves its order row and items unread, so nothing that
 	// depends on the enumeration may finish.
-	const finishes = withFinishingState && unreadable === null;
-	if (wantsOrders && finishes) {
-		await emit({
-			cursor: ordersCursor.toState(),
-			stream: "orders",
-			type: "STATE",
-		});
-	}
+	// No inspected source surface supplies owner/response-bound inventory proof.
+	// Layout and matching parsed counts never authorize a checkpoint.
 	if (wantsNutrition && nutritionCursor) {
 		connectorDiagnostic("wholefoods", "nutrition_lookup_coverage", {
 			products: consideredProductIds.size,
@@ -896,22 +902,13 @@ async function collectOrderStubs({
 				total: consideredProductIds.size,
 			},
 		);
-		// An order whose item list had no end evidence leaves the nutrition
-		// enumeration open, so the finishing STATE is withheld.
-		if (unverifiedCountOrders === 0 && finishes) {
-			await emit({
-				cursor: nutritionCursor.toState(),
-				stream: "nutrition",
-				type: "STATE",
-			});
-		}
+		// Outcome records are retained, but no inventory checkpoint is justified.
 	}
 	return { unreadable, unverifiedCountOrders };
 }
 
 /** Streams whose completeness depends on the order enumeration. */
 const ORDER_DERIVED_STREAMS = ["orders", "order_items", "nutrition"] as const;
-const ORDER_ITEM_STREAMS = ["order_items", "nutrition"] as const;
 
 /** Discover and collect orders. When the enumeration cannot be proven
  *  complete, report each requested order-derived stream as failed instead of
@@ -959,17 +956,17 @@ async function collectOrders(
 			);
 		}
 		if (outcome.unverifiedCountOrders > 0) {
-			// The order rows come from the proven search list, so `orders` is
-			// complete. The item lists have no end evidence for these orders.
+			// Count/identity omissions are additional evidence of incompleteness.
+			// Search markup never proves the parent inventory complete.
 			throw new OrderItemsUnprovenError(
 				`Whole Foods order detail item counts could not be reconciled with the search counts for ${outcome.unverifiedCountOrders} of ${stubs.length} orders; the item lists have no end evidence`,
 			);
 		}
+		throw new OrderEnumerationUnprovenError(
+			"Whole Foods has no owner-bound source inventory total or end evidence",
+		);
 	} catch (error) {
 		if (!(error instanceof OrderEnumerationUnprovenError)) {
-			throw error;
-		}
-		if (!reportStreamFailure) {
 			throw error;
 		}
 		// Orders read before the list became unproven are real: deliver them
@@ -979,7 +976,8 @@ async function collectOrders(
 		let deliveryError: unknown = null;
 		if (error.partialStubs.length > 0) {
 			try {
-				await deliverPartialStubs(ctx, error.partialStubs);
+				const partial = await deliverPartialStubs(ctx, error.partialStubs);
+				deliveryError = partial.unreadable?.first ?? null;
 			} catch (caught) {
 				deliveryError = caught;
 			}
@@ -988,13 +986,24 @@ async function collectOrders(
 			deliveryError instanceof OrderEnumerationUnprovenError
 				? `${error.message}; ${deliveryError.message}`
 				: error.message;
-		const failedStreams =
-			error instanceof OrderItemsUnprovenError
-				? ORDER_ITEM_STREAMS
-				: ORDER_DERIVED_STREAMS;
+		const failedStreams = ORDER_DERIVED_STREAMS;
 		for (const stream of failedStreams) {
 			if (requested.has(stream)) {
-				await reportStreamFailure(stream, message, { retryable: true });
+				await ctx.emit({
+					type: "SKIP_RESULT",
+					stream,
+					reason: "inventory_not_proven_complete",
+					message,
+					recovery_hint: { action: "retry_by_runtime", retryable: true },
+				});
+				if (
+					reportStreamFailure &&
+					(/navigation_failed|readiness_timeout/.test(message) ||
+						(deliveryError !== null &&
+							!(deliveryError instanceof OrderEnumerationUnprovenError)))
+				) {
+					await reportStreamFailure(stream, message, { retryable: true });
+				}
 			}
 		}
 		// A signed-out or blocked page is not an enumeration verdict: after the
@@ -1015,8 +1024,8 @@ async function collectOrders(
 async function deliverPartialStubs(
 	ctx: Parameters<typeof collectOrders>[0],
 	stubs: readonly OrderStub[],
-): Promise<void> {
-	await collectOrderStubs({
+): Promise<OrderCollectionOutcome> {
+	return collectOrderStubs({
 		credentials: ctx.credentials,
 		emit: ctx.emit,
 		emitRecord: ctx.emitRecord,
@@ -1133,8 +1142,8 @@ export {
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
-	collectOrders,
 	collectOrderStubs,
+	collectOrders,
 	collectProfile,
 	discoverOrderStubs,
 	lookupNutritionForProduct,
