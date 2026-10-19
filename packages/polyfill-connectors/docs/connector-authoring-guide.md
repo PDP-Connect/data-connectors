@@ -4,12 +4,14 @@ This document captures the standards, heuristics, and earned lessons for writing
 
 The guide is written for connector *authors*. It does not describe the Collection Profile wire protocol (that's in `spec-collection-profile.md`) or the Polyfill Runtime (that's in `spec-polyfill-runtime.md`). It describes how to write the code between those two layers.
 
+Unless stated otherwise, `bin/...` CLI examples run from `packages/polyfill-connectors/`; connector source and fixture paths are repository-root relative. The root authoring loop below uses explicit full CLI paths.
+
 ## The entry point: `runConnector()`
 
 Every connector is one call to `runConnector()`. The runtime owns the Collection Profile protocol handshake (START / RECORD / STATE / SKIP_RESULT / PROGRESS / DONE), browser lifecycle, tracing, fixture capture, retryable-error detection, and terminal exit. Connectors own business logic — how records are collected, shaped, and cursored.
 
 ```js
-import { runConnector } from '../../src/connector-runtime.js';
+import { runConnector } from '../../packages/polyfill-connectors/src/connector-runtime.ts';
 import { validateRecord } from './schemas.js';
 
 runConnector({
@@ -515,7 +517,7 @@ Captured DOM is enough for parser tests and structural-selector drift checks, bu
 3. Replace a working structural selector only when the semantic candidate is unique, visible/enabled when needed, and at least as stable in captured evidence.
 4. Keep the structural fallback when the upstream component exposes weak or duplicate accessibility names.
 
-Raw locator and ARIA captures may contain owner data. They follow the same rule as raw DOM: use them locally for debugging, then scrub/review before promoting anything to `fixtures/<connector>/scrubbed/`.
+Raw locator and ARIA captures may contain owner data. They follow the same rule as raw DOM: use them locally for debugging, then scrub/review before promoting anything to `connectors/<connector>/fixtures/scrubbed/`.
 
 **Scrubbing before commit**
 
@@ -525,7 +527,7 @@ Raw fixtures contain your real PII — emails, addresses, order IDs, account num
 node --import tsx bin/scrub-fixtures.ts <connector>
 ```
 
-This applies the shared defaults in `src/scrub-defaults.ts` (emails, SSNs, credit-card-shaped digit runs, US phone numbers, labeled account numbers, deterministic street-address patterns, and labeled names) plus any connector-specific rules in `connectors/<connector>/scrub-rules.ts`. Output lands in `fixtures/<connector>/scrubbed/<runId>/`, which **is** committable after review.
+This applies the shared defaults in `src/scrub-defaults.ts` (emails, SSNs, credit-card-shaped digit runs, US phone numbers, labeled account numbers, deterministic street-address patterns, and labeled names) plus any connector-specific rules in `connectors/<connector>/scrub-rules.ts`. Output lands in `connectors/<connector>/fixtures/scrubbed/<runId>/`, which **is** committable after review.
 
 For free-form text that deterministic rules cannot classify safely, use an LLM or human reviewer to produce a structured redaction plan, then pass it to the scrubber:
 
@@ -573,15 +575,15 @@ Review the scrubbed tree by eye. The default rules are conservative but not exha
 
 Confirm the scrubbed fixture preserves parser-relevant structure before commit: selectors, object keys, stream names, timestamps that are safe to retain, and representative non-sensitive values should remain stable. Redact or replace all owner identifiers, free-form notes, account numbers, addresses, emails, phones, and platform IDs that can identify the owner. If review finds sensitive content the deterministic scrubber cannot safely classify, do not commit the fixture until a connector-specific rule or reviewed manual redaction covers it.
 
-When committing a pilot fixture, commit only `fixtures/<connector>/scrubbed/<runId>/...` and tests that consume it. Do not commit `fixtures/<connector>/raw/...` or local redaction-plan directories; keep those local unless a plan itself is synthetic and intentionally useful as test data.
+When committing a pilot fixture, commit only `connectors/<connector>/fixtures/scrubbed/<runId>/...` and tests that consume it. Do not commit `connectors/<connector>/fixtures/raw/...` or local redaction-plan directories; keep those local unless a plan itself is synthetic and intentionally useful as test data.
 
 **The `pilot-real-shape` fixture (schema-drift lock)**
 
-Each schema-bearing connector ships one canonical fixture under `fixtures/<connector>/scrubbed/pilot-real-shape/`. Its job is to lock the connector's emitted-record shape against schema drift: any later change to `schemas.ts` that would reject a row surfaces as a test failure instead of reaching production silently. Wire it in one line with the shared helper:
+Each schema-bearing connector ships one canonical fixture under `connectors/<connector>/fixtures/scrubbed/pilot-real-shape/`. Its job is to lock the connector's emitted-record shape against schema drift: any later change to `schemas.ts` that would reject a row surfaces as a test failure instead of reaching production silently. Wire it in one line with the shared helper:
 
 ```ts
 // connectors/<name>/pilot-fixture.test.ts
-import { registerPilotFixtureTests } from "../../src/pilot-fixture-test-helper.ts";
+import { registerPilotFixtureTests } from "../../packages/polyfill-connectors/src/pilot-fixture-test-helper.ts";
 import { validateRecord } from "./schemas.ts";
 
 registerPilotFixtureTests({ connector: "<name>", validateRecord });
@@ -589,17 +591,17 @@ registerPilotFixtureTests({ connector: "<name>", validateRecord });
 
 The helper registers one `node:test` case per `records/<stream>.jsonl`, parses every non-blank line, and asserts `validateRecord(stream, row).ok === true`. A missing fixture directory or an empty stream file fails the test — a `schemas.ts`-bearing connector is expected to ship this fixture (opt out only with `expectMissing: true`, and only with justification).
 
-A `pilot-real-shape` fixture is a hand-authored **synthetic-but-shape-real** record set: real field shapes and representative non-identifying values, with `[REDACTED_*]` placeholders wherever a real capture would carry owner identity. A reviewed real owner capture can calibrate the synthetic rows, but real owner rows must not be committed under `pilot-real-shape/`. If retaining a scrubbed real run as separate evidence, keep it under a run-specific `fixtures/<connector>/scrubbed/<runId>/` path and use the LLM-assisted redaction review above.
+A `pilot-real-shape` fixture is a hand-authored **synthetic-but-shape-real** record set: real field shapes and representative non-identifying values, with `[REDACTED_*]` placeholders wherever a real capture would carry owner identity. A reviewed real owner capture can calibrate the synthetic rows, but real owner rows must not be committed under `pilot-real-shape/`. If retaining a scrubbed real run as separate evidence, keep it under a run-specific `connectors/<connector>/fixtures/scrubbed/<runId>/` path and use the LLM-assisted redaction review above.
 
 The three committed pilots double as the per-shape reference for new connectors:
 
-- **Amazon — DOM shape.** `fixtures/amazon/scrubbed/pilot-real-shape/dom/` holds scrubbed `page.content()` HTML for a browser-scraped connector.
-- **GitHub — API-JSON shape.** `fixtures/github/scrubbed/pilot-real-shape/api/` holds scrubbed HTTP response bodies, and `records/*.jsonl` holds the emitted records derived from them.
-- **Reddit — records-stream shape.** `fixtures/reddit/scrubbed/pilot-real-shape/records/{submitted,comments,saved,upvoted,downvoted,hidden}.jsonl` holds the records the connector emits directly from `old.reddit.com/*.json`, with no intermediate DOM or stored HTTP-JSON layer. This is the reference for any connector whose only durable output is a JSONL record stream.
+- **Amazon — DOM shape.** `connectors/amazon/fixtures/scrubbed/pilot-real-shape/dom/` holds scrubbed `page.content()` HTML for a browser-scraped connector.
+- **GitHub — API-JSON shape.** `connectors/github/fixtures/scrubbed/pilot-real-shape/api/` holds scrubbed HTTP response bodies, and `records/*.jsonl` holds the emitted records derived from them.
+- **Reddit — records-stream shape.** `connectors/reddit/fixtures/scrubbed/pilot-real-shape/records/{submitted,comments,saved,upvoted,downvoted,hidden}.jsonl` holds the records the connector emits directly from `old.reddit.com/*.json`, with no intermediate DOM or stored HTTP-JSON layer. This is the reference for any connector whose only durable output is a JSONL record stream.
 
 **Smoke-test the capture pipeline**
 
-`node --import tsx bin/test-fixture-capture.ts` runs a self-contained end-to-end check (no network, no browser) that capture + scrub produce sanitized output from PII-bearing input. Local development writes raw captures under `fixtures/<connector>/raw/` by default; deployed reference stacks can set `PDPP_CAPTURE_ROOT_DIR` so live diagnostics live in persistent runtime storage instead of the checkout. Run the smoke after changing anything in `fixture-capture.ts`, `scrub-defaults.ts`, or `scrub-fixtures.ts`.
+`node --import tsx bin/test-fixture-capture.ts` runs a self-contained end-to-end check (no network, no browser) that capture + scrub produce sanitized output from PII-bearing input. Local development writes raw captures under `connectors/<connector>/fixtures/raw/` by default; deployed reference stacks can set `PDPP_CAPTURE_ROOT_DIR` so live diagnostics live in persistent runtime storage instead of the checkout. Run the smoke after changing anything in `fixture-capture.ts`, `scrub-defaults.ts`, or `scrub-fixtures.ts`.
 
 ### 9.2 Scenario replay evidence (`claim.json`)
 

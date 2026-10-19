@@ -313,3 +313,33 @@ test("connector-init: rejects a non-snake_case connector name before touching di
 		"should reject on invalid name shape",
 	);
 });
+
+test("connector-init: next steps keep synthetic pilots separate from reviewed real captures", () => {
+	const name = `zz_init_instructions_${String(process.pid)}`;
+	const plan = planTargets(name, "items");
+	assert.deepEqual(findCollisions(plan), []);
+	try {
+		const result = spawnSync(
+			process.execPath,
+			["--import", "tsx", "bin/connector-init.ts", name],
+			{
+				cwd: PACKAGE_ROOT,
+				env: childTestEnv(),
+				encoding: "utf8",
+				timeout: 60_000,
+			},
+		);
+		assert.equal(result.status, 0, result.stderr);
+		assert.ok(
+			result.stdout.includes(`connectors/${name}/fixtures/scrubbed/<runId>/`),
+		);
+		assert.match(result.stdout, /Keep the synthetic pilot-real-shape rows/);
+		assert.match(
+			result.stdout,
+			/Never put real owner rows under pilot-real-shape/,
+		);
+		assert.doesNotMatch(result.stdout, /replace this\s+scaffold's synthetic/);
+	} finally {
+		cleanUp(plan.connectorDir, fixturesDir(name), plan.files.manifestJson);
+	}
+});
