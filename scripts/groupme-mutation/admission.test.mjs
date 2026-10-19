@@ -159,7 +159,7 @@ for (const name of [
 	"packages/polyfill-connectors/scripts/test-lanes.mjs",
 	"packages/polyfill-connectors/vitest.config.mjs",
 ]) {
-	test("shared mutation dependency alone admits evidence: " + name, async (t) => {
+	test(`shared mutation dependency alone admits evidence: ${name}`, async (t) => {
 		const change = await commitChange(t, name, "changed\n");
 		const { result, output } = admit(change.repo, {
 			EVENT_NAME: "pull_request",
