@@ -21,7 +21,8 @@ type TokenAnswer =
 	| "empty_body"
 	| "invalid_json"
 	| "timeout"
-	| number;
+	| number
+	| { body: unknown };
 
 interface Calls {
 	assist: unknown[];
@@ -46,6 +47,7 @@ function tokenResponse(answer: TokenAnswer): {
 } {
 	const status = typeof answer === "number" ? answer : 200;
 	const body = (): unknown => {
+		if (typeof answer === "object") return answer.body;
 		switch (answer) {
 			case "signed_in":
 				return { accessToken: "fixture-token", isAnonymous: false };
@@ -325,3 +327,28 @@ test("an owner who never signs in ends the handoff without a success", async () 
 	assert.ok(calls.tokenRequests > 2, "the handoff page was checked repeatedly");
 	assert.deepEqual(calls.completed, [["assist-1", "escalated"]]);
 });
+
+for (const [label, body] of [
+	["object token", { accessToken: {}, isAnonymous: false }],
+	["numeric token", { accessToken: 123, isAnonymous: false }],
+	["empty token", { accessToken: "", isAnonymous: false }],
+	["missing flag", { accessToken: "fixture-token" }],
+	["numeric flag", { accessToken: "fixture-token", isAnonymous: 0 }],
+	["string flag", { accessToken: "fixture-token", isAnonymous: "false" }],
+	["null body", null],
+] as const) {
+	test(`parsed malformed token response (${label}) stays retryable and never continues unattended`, async () => {
+		const { args, calls } = makeSession({ body });
+		assert.equal(await probeSpotifySession(args.page), "inconclusive");
+		await assert.rejects(
+			ensureSpotifySession(args, { PDPP_RUN_TRIGGER_KIND: "scheduled" }),
+			{ message: "spotify_session_check_inconclusive" },
+		);
+		assert.equal(spotifyRetryablePattern.test("spotify_session_check_inconclusive"), true);
+		assert.deepEqual(calls.assist, []);
+		assert.deepEqual(calls.navigations, []);
+		assert.deepEqual(calls.completed, []);
+		assert.equal(calls.progress.length, 1);
+		assert.doesNotMatch(calls.progress[0] ?? "", /sign in/iu);
+	});
+}

@@ -602,7 +602,11 @@ export async function probeSpotifySession(
 				accessToken?: unknown;
 				isAnonymous?: unknown;
 			};
-			if (tokenData.accessToken && !tokenData.isAnonymous) return "signed_in";
+			if (
+				typeof tokenData.accessToken === "string" &&
+				tokenData.accessToken.trim().length > 0 &&
+				tokenData.isAnonymous === false
+			) return "signed_in";
 			return tokenData.isAnonymous === true ? "anonymous" : "inconclusive";
 		} finally {
 			await tokenResponse.dispose();
