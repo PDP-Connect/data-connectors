@@ -155,6 +155,25 @@ test("helper, config and isolated-lock changes admit ordinary verification; docs
 	assert.equal(sandboxOutput.mutationRequired, false);
 });
 
+for (const name of [
+	"packages/polyfill-connectors/scripts/test-lanes.mjs",
+	"packages/polyfill-connectors/vitest.config.mjs",
+]) {
+	test("shared mutation dependency alone admits evidence: " + name, async (t) => {
+		const change = await commitChange(t, name, "changed\n");
+		const { result, output } = admit(change.repo, {
+			EVENT_NAME: "pull_request",
+			BASE_SHA: change.base,
+			HEAD_SHA: change.head,
+		});
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(output.relevant, true, name);
+		assert.equal(output.mutationRequired, true, name);
+		assert.equal(output.harness, true, name);
+		assert.equal(output.groupme, false, name);
+	});
+}
+
 test("both supported GroupMe production files admit the mutation run; unsupported production also admits", async (t) => {
 	for (const name of [index, schemas]) {
 		const change = await commitChange(t, name, "changed\n");

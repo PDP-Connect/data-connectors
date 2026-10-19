@@ -48,6 +48,8 @@ function pathFlags(changed) {
 		(file) =>
 			file.startsWith("scripts/groupme-mutation/") ||
 			file.startsWith("packages/polyfill-connectors/test-tools/") ||
+			file === "packages/polyfill-connectors/scripts/test-lanes.mjs" ||
+			file === "packages/polyfill-connectors/vitest.config.mjs" ||
 			file === ".github/scripts/groupme-mutation-admission.mjs" ||
 			file === "package.json" ||
 			file === ".github/workflows/polyfill-connectors.yml",
