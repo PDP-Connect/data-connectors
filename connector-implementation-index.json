@@ -7018,7 +7018,7 @@
 					},
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Completed a real run on a real iPhone 12 in the Vana mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile and server list; a non-empty message history, desktop and incremental second runs are not verified. The requests were also checked by hand in one signed-in desktop session on 2026-10-08. Discord's terms forbid this kind of account automation, so the owner must accept the account risk described in the connector README before using it."
+						"rationale": "Completed a real run on a real iPhone 12 in a mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile and server list; a non-empty message history, desktop and incremental second runs are not verified. The requests were also checked by hand in one signed-in desktop session on 2026-10-08. Discord's terms forbid this kind of account automation, so the owner must accept the account risk described in the connector README before using it."
 					}
 				},
 				"streams": [
@@ -9708,7 +9708,7 @@
 					"human_interaction": ["manual_action"],
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Separate browser-session profile for existing Vana GitHub users. The PAT connector remains the recommended profile for new connections."
+						"rationale": "Separate browser-session profile for existing GitHub users. The PAT connector remains the recommended profile for new connections."
 					},
 					"refresh_policy": {
 						"recommended_mode": "manual",
@@ -20046,7 +20046,7 @@
 						"rate_limit_sensitivity": "high",
 						"bot_detection_sensitivity": "low",
 						"background_safe": true,
-						"rationale": "Steam Web API is an API-key connector with no interactive login, so unattended refresh is mechanically safe. Steam does not publish rate limits; The connector policy is a 250ms per-request floor, honoring Retry-After when supplied, and preserving 429/throttled transient failures for recovery, with 403 treated as an authorization or visibility failure. One-hour polling is conservative to avoid community-reported multi-hour lockouts. Repeated live runs are still outstanding, which public_listing.tier:preview records — auto-enrollment gates on tier, not on refresh mode."
+						"rationale": "Steam Web API is an API-key connector with no interactive login, so unattended refresh is mechanically safe. Steam does not publish rate limits; the connector policy is a 250ms per-request floor, honoring Retry-After when supplied, and preserving 429/throttled transient failures for recovery, with 403 treated as an authorization or visibility failure. One-hour polling is conservative to avoid community-reported multi-hour lockouts. Repeated live runs are still outstanding, which public_listing.tier:preview records — auto-enrollment gates on tier, not on refresh mode."
 					},
 					"public_listing": {
 						"tier": "preview"
@@ -22897,7 +22897,7 @@
 					},
 					"public_listing": {
 						"tier": "supported",
-						"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile. Promoted to supported by the repository owner for stable parity with the WHOOP connector already shipped in production Vana Desktop."
+						"rationale": "Live owner testing proved all six streams and checkpointed session reuse; first connection still requires the owner to sign in through the isolated WHOOP browser profile. Promoted to supported by the repository owner for stable parity with the WHOOP connector already shipped in the production desktop app."
 					}
 				},
 				"streams": [
@@ -23807,7 +23807,7 @@
 					},
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Completed a real run on a real iPhone 12 in the Vana mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile, posts, likes and bookmarks. Desktop, incremental second runs and Android are not verified. X's terms do not permit automated access; see the connector README for the owner's legal basis and the limits this connector keeps to."
+						"rationale": "Completed a real run on a real iPhone 12 in a mobile app on 2026-10-08/09, through the real connect flow with a signed-in owner, collecting the owner's profile, posts, likes and bookmarks. Desktop, incremental second runs and Android are not verified. X's terms do not permit automated access; see the connector README for the owner's legal basis and the limits this connector keeps to."
 					}
 				},
 				"streams": [
@@ -25921,7 +25921,7 @@
 					},
 					"public_listing": {
 						"tier": "development",
-						"rationale": "Browser replacement for seven Vana legacy YouTube scopes; live authenticated proof is required before promotion."
+						"rationale": "Browser replacement for seven legacy YouTube scopes; live authenticated proof is required before promotion."
 					}
 				},
 				"streams": [

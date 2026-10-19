@@ -205,7 +205,8 @@ test("a self-resolved browser handoff registers before emission and unregisters 
 		assist: lifecycle.assist,
 		completeAssistance: lifecycle.complete,
 		isProbeSuccessful: (ready: boolean) => ready,
-		message: "Finish sign-in in the secure browser. Continues automatically.",
+		message:
+			"Finish sign-in in the secure browser. The import continues automatically.",
 		page: ownerPage,
 		probe: (): Promise<boolean> => Promise.resolve(false),
 		readinessProbe: (): Promise<boolean> => Promise.resolve(true),

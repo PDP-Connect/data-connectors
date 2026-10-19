@@ -266,7 +266,7 @@ export function makeEnsureSession(
 			sendInteraction,
 			isProbeSuccessful: (ok) => ok === true,
 			message:
-				"Sign in to WHOOP in the secure browser. Continues on its own once you are signed in.",
+				"Sign in to WHOOP in the secure browser. The import continues on its own once you are signed in.",
 			probe: async () => isLive(await readOnOrigin(page, PROBE_PATH)),
 			readinessProbe: probeOnPage,
 			// The fifth of five streamed options; without all five the owner gets a Continue button.

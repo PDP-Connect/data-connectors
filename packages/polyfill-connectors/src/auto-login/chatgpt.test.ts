@@ -635,7 +635,7 @@ test("ChatGPT manual auth repair can use the secure browser without storing a pa
 			// fallback offer to sign in in the secure browser instead.
 			assert.deepEqual(assistanceMessages, [
 				"No saved ChatGPT sign-in is available for this connection. Automated sign-in was skipped. " +
-					"ChatGPT could not finish sign-in automatically; open the browser to continue. Resumes when sign-in succeeds.",
+					"ChatGPT could not finish sign-in automatically; open the browser to continue. The import resumes when sign-in succeeds.",
 			]);
 
 			const inactivePage = {

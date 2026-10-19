@@ -40,7 +40,7 @@
 		},
 		"public_listing": {
 			"tier": "development",
-			"rationale": "Browser replacement for seven Vana legacy YouTube scopes; live authenticated proof is required before promotion."
+			"rationale": "Browser replacement for seven legacy YouTube scopes; live authenticated proof is required before promotion."
 		}
 	},
 	"streams": [

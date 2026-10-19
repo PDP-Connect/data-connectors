@@ -50,7 +50,7 @@ const OTP_SELECTOR =
 	'input[name="otp"], input[name="verification_code"], input[autocomplete="one-time-code"]';
 const SUBMIT_BUTTON_NAME_RE = /^(log in|continue)$/i;
 const MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE =
-	"No optional Reddit sign-in details were provided. Sign in to Reddit in the secure browser. Continues automatically when the session is ready.";
+	"No optional Reddit sign-in details were provided. Sign in to Reddit in the secure browser. The import continues automatically when the session is ready.";
 
 const LOGIN_LOCATOR_PROBES: LocatorProbe[] = [
 	{
@@ -488,9 +488,9 @@ async function clickRedditLoginSubmit(
 
 function loginBlockedMessage(cfSignals: string[]): string {
 	if (cfSignals.length > 0) {
-		return `Cloudflare challenge confirmed (signals: ${cfSignals.join(", ")}). Complete the "Verify you are human" check on reddit.com in the secure browser. Continues automatically when the session is ready.`;
+		return `Cloudflare challenge confirmed (signals: ${cfSignals.join(", ")}). Complete the "Verify you are human" check on reddit.com in the secure browser. The import continues automatically when the session is ready.`;
 	}
-	return "Reddit login page did not render expected inputs and no Cloudflare challenge was detected (the page may have changed). Log in to reddit.com in the secure browser. Continues automatically when the session is ready.";
+	return "Reddit login page did not render expected inputs and no Cloudflare challenge was detected (the page may have changed). Log in to reddit.com in the secure browser. The import continues automatically when the session is ready.";
 }
 
 /**

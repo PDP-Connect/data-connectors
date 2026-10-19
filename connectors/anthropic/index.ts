@@ -215,7 +215,7 @@ const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
 export const ANTHROPIC_BROWSER_LOGIN_ASSISTANCE_MESSAGE =
-	"Sign in to Claude in the secure browser. Continues automatically once Claude confirms you're signed in.";
+	"Sign in to Claude in the secure browser. The import continues automatically once Claude confirms you're signed in.";
 
 /**
  * Probe the browser's Claude session. A dead cookie probe also opens Claude's

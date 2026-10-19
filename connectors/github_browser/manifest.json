@@ -41,7 +41,7 @@
 		],
 		"public_listing": {
 			"tier": "development",
-			"rationale": "Separate browser-session profile for existing Vana GitHub users. The PAT connector remains the recommended profile for new connections."
+			"rationale": "Separate browser-session profile for existing GitHub users. The PAT connector remains the recommended profile for new connections."
 		},
 		"refresh_policy": {
 			"recommended_mode": "manual",

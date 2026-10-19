@@ -83,7 +83,7 @@ const METHOD_LABELS: Record<string, string> = {
 	email: "Email me",
 };
 const MANUAL_LOGIN_WITHOUT_CREDENTIALS_MESSAGE =
-	"Sign in to Chase in the secure browser. Continues automatically when the session is ready.";
+	"Sign in to Chase in the secure browser. The import continues automatically when the session is ready.";
 
 /**
  * Where Chase's sign-in pair lives in the runtime-resolved `credentials`
