@@ -61,7 +61,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { isMainModule, resourceSet } from "@pdpp/connector-protocol";
 import {
@@ -509,14 +509,25 @@ async function emitUnprovenChannelDiagnostic(
 	db: DatabaseSync,
 	messageFamilyRequested: boolean,
 	memberOnly: boolean,
+	channelScope?: ReadonlySet<string>,
 ): Promise<void> {
 	if (!messageFamilyRequested) {
 		return;
 	}
-	const inventory = archiveInventoryChannelIds(db);
-	const finalized = archiveFinalizedChannelIds(db);
+	let inventory = archiveInventoryChannelIds(db);
+	let finalized = archiveFinalizedChannelIds(db);
 	if (finalized.size === 0) {
 		return;
+	}
+	if (channelScope) {
+		inventory = new Set([...inventory].filter((id) => channelScope.has(id)));
+		finalized = new Set([...finalized].filter((id) => channelScope.has(id)));
+	}
+	const reachability = archiveChannelReachability(db);
+	if (channelScope) {
+		for (const id of reachability.keys()) {
+			if (!channelScope.has(id)) reachability.delete(id);
+		}
 	}
 	const unproven = unprovenChannelIds(inventory, finalized);
 	if (unproven.length === 0) {
@@ -524,7 +535,7 @@ async function emitUnprovenChannelDiagnostic(
 	}
 	const { inScope, outOfScope } = partitionUnprovenChannels(
 		unproven,
-		archiveChannelReachability(db),
+		reachability,
 		memberOnly,
 	);
 	// Split the in-scope gap by whether slackdump ever opened a messages chunk
@@ -2162,7 +2173,12 @@ export function pickResumeTarget(
 	{
 		allowStateArchive = true,
 		forceFullArchive = false,
-	}: { allowStateArchive?: boolean; forceFullArchive?: boolean } = {},
+		scopedArchiveRoot,
+	}: {
+		allowStateArchive?: boolean;
+		forceFullArchive?: boolean;
+		scopedArchiveRoot?: string;
+	} = {},
 ): { resumeTarget: string | null; priorArchive: string | undefined } {
 	// STATE is stream-keyed per Collection Profile: state is returned as
 	// { <stream>: <cursor>, ... }. We write `archive_dir` into the messages
@@ -2171,7 +2187,15 @@ export function pickResumeTarget(
 	const legacyArchiveDir = (state as Record<string, unknown>).archive_dir as
 		| string
 		| undefined;
-	const priorArchive = messagesState?.archive_dir || legacyArchiveDir; // fallback for pre-fix state
+	const candidate = messagesState?.archive_dir || legacyArchiveDir;
+	// Only reject this workspace's generated scoped namespace and digest.
+	// A valid legacy directory is not rejected merely for containing "scoped".
+	const isScopedPrior =
+		candidate &&
+		scopedArchiveRoot &&
+		resolve(dirname(candidate)) === resolve(scopedArchiveRoot) &&
+		/^[a-f0-9]{12}$/.test(basename(candidate));
+	const priorArchive = isScopedPrior ? undefined : candidate;
 	if (forceFullArchive) {
 		// `priorArchive` is still reported: callers use it to distinguish an
 		// archive named by STATE from one merely discovered on disk, and that
@@ -4190,6 +4214,7 @@ if (isMainModule(import.meta.url)) {
 				archivePath,
 				{
 					allowStateArchive: isUnscopedMessageBoundary,
+					scopedArchiveRoot: join(baseArchivePaths.dumpDir, "archive-scoped"),
 					forceFullArchive: enumerationIncomplete,
 				},
 			);
@@ -4367,6 +4392,7 @@ if (isMainModule(import.meta.url)) {
 				db,
 				messageFamilyRequested,
 				opts.MEMBER_ONLY,
+				typeScope?.allowed,
 			);
 
 			// Register the opt-in __uploads reclaim once every archive this run
@@ -4463,7 +4489,7 @@ if (isMainModule(import.meta.url)) {
 					: priorObservedChannelIds;
 			const stateArchivePath = isUnscopedMessageBoundary
 				? archivePath
-				: (messagesState?.archive_dir ?? archivePath);
+				: (priorArchive ?? baseArchivePaths.archivePath);
 			emitStateCheckpoints({
 				archivePath: stateArchivePath,
 				baseArchiveResumedAt,

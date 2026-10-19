@@ -52,7 +52,7 @@ const LISTING = [
 // fixture for `list channels`, and writes an archive holding exactly the
 // channels named on the `archive` command line (all of them when none are).
 const FAKE_SLACKDUMP = `#!/usr/bin/env node
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -77,6 +77,10 @@ if (command === "list" && sub === "channels") {
 	process.stdout.write(JSON.stringify(listing));
 	process.exit(0);
 }
+if (command === "resume") {
+	if (!existsSync(join(argv.at(-1), "slackdump.sqlite"))) process.exit(3);
+	process.exit(0);
+}
 if (command === "archive") {
 	const valued = new Set(["-api-config", "-o", "-time-from", "-time-to"]);
 	let out = "";
@@ -98,6 +102,7 @@ if (command === "archive") {
 	const db = new DatabaseSync(join(out, "slackdump.sqlite"));
 	db.exec(\`
 		CREATE TABLE CHANNEL (ID TEXT NOT NULL, NAME TEXT, DATA TEXT, CHUNK_ID INTEGER NOT NULL);
+		CREATE TABLE CHUNK (ID INTEGER PRIMARY KEY, TYPE_ID INTEGER NOT NULL, CHANNEL_ID TEXT, FINAL INTEGER NOT NULL DEFAULT 0);
 		CREATE TABLE MESSAGE (
 			CHANNEL_ID TEXT NOT NULL, TS TEXT NOT NULL, THREAD_TS TEXT, IS_PARENT INTEGER,
 			TXT TEXT, NUM_FILES INTEGER, DATA BLOB, CHUNK_ID INTEGER NOT NULL
@@ -107,7 +112,7 @@ if (command === "archive") {
 		db.prepare("INSERT INTO CHANNEL (ID, NAME, DATA, CHUNK_ID) VALUES (?, ?, ?, ?)").run(
 			channel.id,
 			channel.name,
-			JSON.stringify(channel),
+			JSON.stringify({ ...channel, is_member: true }),
 			1,
 		);
 		const text = "hello " + channel.id;
@@ -124,6 +129,14 @@ if (command === "archive") {
 			1,
 		);
 	});
+	const finalized = JSON.parse(process.env.FAKE_FINALIZED || "[]");
+	const unfinished = JSON.parse(process.env.FAKE_UNFINISHED || "[]");
+	let chunkId = 1;
+	for (const [channels, final] of [[finalized, 1], [unfinished, 0]]) {
+		for (const id of channels) {
+			db.prepare("INSERT INTO CHUNK (ID, TYPE_ID, CHANNEL_ID, FINAL) VALUES (?, 0, ?, ?)").run(chunkId++, id, final);
+		}
+	}
 	db.close();
 	process.exit(0);
 }
@@ -135,6 +148,9 @@ const SLACK_TOKEN =
 	"xoxc-1-2-3-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 interface Outcome {
+	state: Record<string, unknown>;
+	skips: Array<Extract<EmittedMessage, { type: "SKIP_RESULT" }>>;
+	resumeCalls: string[][];
 	/** The `considered` and `covered` counts a stream declared, if it did. */
 	coverage: (stream: string) => { considered: number; covered: number } | null;
 	/** The record ids the `channels` stream remembered in its STATE. */
@@ -160,6 +176,10 @@ function positionalChannels(argv: readonly string[]): string[] {
 }
 
 async function runWithFakeSlackdump(options: {
+	root?: string;
+	state?: Record<string, unknown>;
+	finalizedChannels?: string[];
+	unfinishedChannels?: string[];
 	allowlist?: string;
 	archiveEverything?: boolean;
 	/** The channels a grant names, as the `messages` stream's `resources`. */
@@ -169,7 +189,8 @@ async function runWithFakeSlackdump(options: {
 	skipSlackdump?: boolean;
 	types?: string;
 }): Promise<Outcome> {
-	const root = await mkdtemp(join(tmpdir(), "pdpp-slack-types-"));
+	const root =
+		options.root ?? (await mkdtemp(join(tmpdir(), "pdpp-slack-types-")));
 	try {
 		const bin = join(root, "fake-slackdump.mjs");
 		const log = join(root, "calls.jsonl");
@@ -177,6 +198,7 @@ async function runWithFakeSlackdump(options: {
 		const artifactRoot = join(root, "artifacts");
 		await mkdir(artifactRoot, { recursive: true });
 		await writeFile(bin, FAKE_SLACKDUMP, "utf8");
+		await writeFile(log, "", "utf8");
 		await chmod(bin, 0o755);
 		await writeFile(
 			listingPath,
@@ -191,6 +213,8 @@ async function runWithFakeSlackdump(options: {
 				FAKE_LIST_MODE: options.listMode ?? "ok",
 				FAKE_LISTING: listingPath,
 				FAKE_LOG: log,
+				FAKE_FINALIZED: JSON.stringify(options.finalizedChannels ?? []),
+				FAKE_UNFINISHED: JSON.stringify(options.unfinishedChannels ?? []),
 				PDPP_CONNECTOR_ARTIFACT_ROOT: artifactRoot,
 				SLACKDUMP_BIN: bin,
 				SLACK_COOKIE: "xoxd-fake",
@@ -207,6 +231,7 @@ async function runWithFakeSlackdump(options: {
 			},
 			start: {
 				type: "START",
+				...(options.state ? { state: options.state } : {}),
 				scope: {
 					streams: [
 						{
@@ -232,7 +257,19 @@ async function runWithFakeSlackdump(options: {
 			(message): message is Extract<EmittedMessage, { type: "RECORD" }> =>
 				message.type === "RECORD",
 		);
+		const state: Record<string, unknown> = {};
+		for (const message of result.messages) {
+			if (message.type === "STATE") state[message.stream] = message.cursor;
+		}
 		return {
+			state,
+			skips: result.messages.filter(
+				(
+					message,
+				): message is Extract<EmittedMessage, { type: "SKIP_RESULT" }> =>
+					message.type === "SKIP_RESULT",
+			),
+			resumeCalls: calls.filter((argv) => argv[0] === "resume"),
 			archiveCalls: calls.filter((argv) => argv[0] === "archive"),
 			done: result.messages.findLast(
 				(message): message is Extract<EmittedMessage, { type: "DONE" }> =>
@@ -278,7 +315,7 @@ async function runWithFakeSlackdump(options: {
 			slackdumpCalls: calls,
 		};
 	} finally {
-		await rm(root, { recursive: true, force: true });
+		if (!options.root) await rm(root, { recursive: true, force: true });
 	}
 }
 
@@ -591,3 +628,112 @@ for (const key of [
 		assert.deepEqual(outcome.recordChannels("channels"), []);
 	});
 }
+
+for (const firstOptions of [{ types: "public" }, { allowlist: "C0PUBLIC1" }]) {
+	test(`retained storage widens after first scoped run: ${JSON.stringify(firstOptions)}`, async () => {
+		const root = await mkdtemp(join(tmpdir(), "pdpp-slack-journey-"));
+		try {
+			const first = await runWithFakeSlackdump({ root, ...firstOptions });
+			assert.equal(first.done?.status, "succeeded");
+			const second = await runWithFakeSlackdump({ root, state: first.state });
+			assert.equal(
+				second.done?.status,
+				"succeeded",
+				JSON.stringify(second.done),
+			);
+			assert.equal(
+				second.archiveCalls.length,
+				1,
+				"widening creates the base archive",
+			);
+			assert.deepEqual(
+				second
+					.recordChannels("messages")
+					.filter(
+						(id) =>
+							PRIVATE.includes(id) ||
+							DIRECT.includes(id) ||
+							GROUP_DIRECT.includes(id),
+					),
+				[...PRIVATE, ...DIRECT, ...GROUP_DIRECT].sort(),
+			);
+		} finally {
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+}
+test("widening rejects an old committed scoped pointer", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-slack-journey-"));
+	try {
+		const first = await runWithFakeSlackdump({ root, types: "public" });
+		const call = first.archiveCalls[0] ?? [];
+		const scopedPath = call[call.indexOf("-o") + 1];
+		assert.ok(scopedPath);
+		const state = {
+			...first.state,
+			messages: {
+				...(first.state.messages as object),
+				archive_dir: scopedPath,
+			},
+		};
+		const second = await runWithFakeSlackdump({ root, state });
+		assert.equal(second.done?.status, "succeeded", JSON.stringify(second.done));
+		assert.equal(second.archiveCalls.length, 1);
+		assert.equal(second.resumeCalls.length, 0);
+		assert.ok(second.recordChannels("messages").includes(DIRECT[0]!));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+test("legacy canonical pointer remains resumable even with scoped in its parent name", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pdpp-scoped-word-"));
+	try {
+		const first = await runWithFakeSlackdump({ root });
+		const archiveDir = (first.state.messages as { archive_dir: string })
+			.archive_dir;
+		const second = await runWithFakeSlackdump({
+			root,
+			state: { archive_dir: archiveDir },
+		});
+		assert.equal(second.done?.status, "succeeded", JSON.stringify(second.done));
+		assert.equal(second.archiveCalls.length, 0);
+		assert.equal(second.resumeCalls.length, 1);
+		assert.equal(second.resumeCalls[0]?.at(-1), archiveDir);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+test("excluded unfinished archive channels produce no gaps or recovery advice", async () => {
+	const outcome = await runWithFakeSlackdump({
+		types: "public",
+		archiveEverything: true,
+		finalizedChannels: PUBLIC,
+		unfinishedChannels: [DIRECT[0]!],
+	});
+	assert.equal(outcome.done?.status, "succeeded");
+	assert.deepEqual(outcome.skips, []);
+	assert.ok(
+		outcome.state.messages,
+		"excluded gaps must not veto the messages checkpoint",
+	);
+});
+test("unfinished allowed history stays visible while excluded history is omitted", async () => {
+	const outcome = await runWithFakeSlackdump({
+		types: "public",
+		archiveEverything: true,
+		finalizedChannels: [PUBLIC[0]!],
+		unfinishedChannels: [PUBLIC[1]!, DIRECT[0]!],
+	});
+	const gap = outcome.skips.find(
+		(entry) => entry.reason === "channel_history_not_finalized",
+	);
+	assert.ok(gap);
+	const text = JSON.stringify(outcome.skips);
+	assert.ok(text.includes(PUBLIC[1]!));
+	for (const id of [...PRIVATE, ...DIRECT, ...GROUP_DIRECT])
+		assert.ok(!text.includes(id), id);
+	assert.equal(
+		(gap.diagnostics as { inventory_count: number }).inventory_count,
+		2,
+	);
+});
