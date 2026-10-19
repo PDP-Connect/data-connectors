@@ -3,27 +3,27 @@
 
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { VITEST_TESTS } from "./test-lanes.mjs";
 
 const require = createRequire(import.meta.url);
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const vitestBin = join(
-	dirname(require.resolve("vitest/package.json")),
-	"vitest.mjs",
-);
+const repositoryRoot = resolve(packageRoot, "../..");
+const connectorsRoot = join(repositoryRoot, "connectors");
 const vitestConfig = join(packageRoot, "vitest.config.mjs");
 
 export function partitionTests(files, vitestFiles = VITEST_TESTS) {
 	const nodeTests = [];
 	const vitestTests = [];
 	for (const file of files) {
-		const registeredPath = file.startsWith("../../connectors/")
-			? file.slice("../../".length)
-			: file.startsWith("/") && file.includes("/connectors/")
-				? file.slice(file.lastIndexOf("/connectors/") + 1)
-				: file;
+		const absoluteFile = resolve(packageRoot, file);
+		let registeredPath = file;
+		if (absoluteFile.startsWith(`${connectorsRoot}${sep}`)) {
+			registeredPath = `connectors/${relative(connectorsRoot, absoluteFile).split(sep).join("/")}`;
+		} else if (absoluteFile.startsWith(`${packageRoot}${sep}`)) {
+			registeredPath = relative(packageRoot, absoluteFile).split(sep).join("/");
+		}
 		(vitestFiles.has(registeredPath) ? vitestTests : nodeTests).push(file);
 	}
 	return { nodeTests, vitestTests };
@@ -46,8 +46,16 @@ export function testCommands(files, concurrency, vitestFiles = VITEST_TESTS) {
 		});
 	}
 	if (vitestTests.length > 0) {
+		const vitestBin = join(
+			dirname(require.resolve("vitest/package.json")),
+			"vitest.mjs",
+		);
+		const exactFiles = vitestTests.map((file) =>
+			relative(repositoryRoot, resolve(packageRoot, file)).split(sep).join("/"),
+		);
 		commands.push({
 			command: process.execPath,
+			env: { PDPP_VITEST_EXACT_FILES: JSON.stringify(exactFiles) },
 			args: [
 				vitestBin,
 				"run",
@@ -56,7 +64,7 @@ export function testCommands(files, concurrency, vitestFiles = VITEST_TESTS) {
 				"--pool=forks",
 				`--maxWorkers=${concurrency}`,
 				"--testTimeout=120000",
-				...vitestTests,
+				...vitestTests.map((file) => resolve(packageRoot, file)),
 			],
 		});
 	}
@@ -65,11 +73,11 @@ export function testCommands(files, concurrency, vitestFiles = VITEST_TESTS) {
 
 export async function runTestCommands(commands, env = process.env) {
 	let ok = true;
-	for (const { command, args } of commands) {
+	for (const { command, args, env: commandEnv } of commands) {
 		const result = await new Promise((done) => {
 			const child = spawn(command, args, {
 				cwd: packageRoot,
-				env,
+				env: commandEnv ? { ...env, ...commandEnv } : env,
 				stdio: "inherit",
 			});
 			child.on("error", (error) => done({ error }));

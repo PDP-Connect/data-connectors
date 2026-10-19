@@ -6,11 +6,87 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { glob, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "@babel/parser";
 import { testCommands } from "../scripts/test-dispatch.mjs";
 import { NAMESPACE_TESTS, VITEST_TESTS } from "../scripts/test-lanes.mjs";
+
+function importsVitestValue(source: string): boolean {
+	const isVitest = (value: unknown): boolean =>
+		typeof value === "string" &&
+		(value === "vitest" || value.startsWith("vitest/"));
+	const ast = parse(source, {
+		sourceType: "unambiguous",
+		plugins: ["typescript"],
+	});
+	for (const statement of ast.program.body) {
+		if (
+			statement.type === "ImportDeclaration" &&
+			isVitest(statement.source.value) &&
+			statement.importKind !== "type" &&
+			(statement.specifiers.length === 0 ||
+				statement.specifiers.some(
+					(specifier) =>
+						specifier.type !== "ImportSpecifier" ||
+						specifier.importKind !== "type",
+				))
+		) {
+			return true;
+		}
+	}
+	const pending: unknown[] = [ast.program];
+	while (pending.length > 0) {
+		const node = pending.pop();
+		if (!node || typeof node !== "object") continue;
+		if (Array.isArray(node)) {
+			pending.push(...node);
+			continue;
+		}
+		const record = node as Record<string, unknown>;
+		if (record.type === "ImportExpression") {
+			const sourceNode = record.source as { value?: unknown } | undefined;
+			if (isVitest(sourceNode?.value)) return true;
+		}
+		if (record.type === "CallExpression") {
+			const callee = record.callee as
+				| { type?: unknown; name?: unknown }
+				| undefined;
+			const args = record.arguments;
+			if (
+				(callee?.type === "Import" ||
+					(callee?.type === "Identifier" && callee.name === "require")) &&
+				Array.isArray(args) &&
+				isVitest((args[0] as { value?: unknown } | undefined)?.value)
+			) {
+				return true;
+			}
+		}
+		for (const [key, value] of Object.entries(record)) {
+			if (key !== "loc" && key !== "comments" && key !== "extra")
+				pending.push(value);
+		}
+	}
+	return false;
+}
+
+test("Vitest import detection uses value imports and includes subpaths", () => {
+	for (const [source, expected] of [
+		["// import { it } from 'vitest'", false],
+		["const example = \"import { it } from 'vitest'\";", false],
+		["import type { Mock } from 'vitest'", false],
+		["import { type Mock } from 'vitest/utils'", false],
+		["import { it } from 'vitest'", true],
+		["import { type Mock, it } from 'vitest'", true],
+		["import { expect } from 'vitest/expect'", true],
+		["await import('vitest')", true],
+		["await import('vitest/utils')", true],
+		["require('vitest/expect')", true],
+	] as const) {
+		assert.equal(importsVitestValue(source), expected, source);
+	}
+});
 
 test("package test runner bounds file concurrency and retains a finite hang guard", async () => {
 	// "npm test" runs scripts/run-tests.mjs (not a literal `node --test ...` in
@@ -68,7 +144,6 @@ test("package test runner bounds file concurrency and retains a finite hang guar
 
 test("Vitest registration matches every imported Vitest test in runner globs", async () => {
 	const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-	const importsVitest = /\bfrom\s*["']vitest["']|\bimport\s*["']vitest["']/;
 	const detected = new Set<string>();
 	for (const pattern of [
 		"bin/**/*.test.ts",
@@ -79,7 +154,7 @@ test("Vitest registration matches every imported Vitest test in runner globs", a
 	]) {
 		for await (const entry of glob(pattern, { cwd: packageRoot })) {
 			const text = await readFile(join(packageRoot, entry), "utf8");
-			if (importsVitest.test(text))
+			if (importsVitestValue(text))
 				detected.add(
 					entry.startsWith("../../connectors/")
 						? entry.slice("../../".length)
@@ -97,7 +172,7 @@ test("Vitest registration matches every imported Vitest test in runner globs", a
 			? join(packageRoot, "../..", entry)
 			: join(packageRoot, entry);
 		assert.ok(existsSync(file), `VITEST_TESTS entry does not exist: ${entry}`);
-		assert.match(await readFile(file, "utf8"), importsVitest, entry);
+		assert.ok(importsVitestValue(await readFile(file, "utf8")), entry);
 	}
 });
 
@@ -183,7 +258,11 @@ test("connector registration routes a repo-relative path to Vitest", () => {
 		new Set(["connectors/groupme/example.test.ts"]),
 	);
 	assert.equal(commands.length, 1);
-	assert.ok(commands[0]?.args.includes(file));
+	assert.ok(
+		commands[0]?.args.includes(
+			resolve(fileURLToPath(new URL("..", import.meta.url)), file),
+		),
+	);
 	assert.ok(commands[0]?.args.includes("--maxWorkers=1"));
 });
 
