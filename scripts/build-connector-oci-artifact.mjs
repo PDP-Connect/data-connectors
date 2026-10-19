@@ -63,6 +63,8 @@ import {
 	validateSourceDeclaration,
 } from "../packages/connector-installer-core/source-declaration.mjs";
 import { sourceDeclarationMembers } from "./source-declaration-members.mjs";
+import { consentSlicePlugin } from "./consent-slice-resolution.mjs";
+import { renderSlice } from "../packages/polyfill-connectors/scripts/consent-time-fields-render.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageRoot = join(repoRoot, "packages", "polyfill-connectors");
@@ -330,6 +332,15 @@ async function main() {
 		minifyWhitespace: true,
 		outfile: join(codeStaging, "collection-profile.mjs"),
 		platform: "node",
+		// The runtime's consent-time-field table resolves to this connector's
+		// slice, so no other connector's fields are bundled or inventoried.
+		plugins: [
+			consentSlicePlugin({
+				repoRoot,
+				connectorDirectory: connectorDirectoryName,
+				expectedSlice: renderSlice(connectorDirectoryName, profile),
+			}),
+		],
 		sourcemap: false,
 		target: "node24",
 	});

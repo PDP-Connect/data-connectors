@@ -136,6 +136,11 @@ const LEGACY_NUTRITION_SCHEMA = loadLegacySchema("heb.nutrition.json");
 // ─── PDPP -> legacy mapping (test-only; not exported) ──────────────────────
 
 function toLegacyProfile(record: ProfileRecord): unknown {
+	if (record.delivery_addresses === null) {
+		throw new Error(
+			"Unknown address inventory cannot be derived as an empty legacy inventory",
+		);
+	}
 	return {
 		name: record.name,
 		email: record.email,

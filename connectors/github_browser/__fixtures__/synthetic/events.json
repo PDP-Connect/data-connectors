@@ -4,7 +4,7 @@
 		"type": "PushEvent",
 		"created_at": "2026-01-01T00:00:00Z",
 		"repo": { "name": "sample-user/demo" },
-		"payload": { "ref": "refs/heads/main", "size": 1 },
+		"payload": { "ref": "refs/heads/main", "size": 1, "commits": [{ "message": "Fixture commit" }] },
 		"public": true
 	}
 ]

@@ -12,3 +12,4 @@ Policy: [CONTRIBUTING.md](https://github.com/PDP-Connect/.github/blob/main/CONTR
 - Reject verbose summaries. Concise unless the change is a refactor, break, or architecture.
 - Claims about the code need a file path or a reason.
 - One change per PR. Run the repo's checks first.
+- Tests: see [TESTING.md](TESTING.md). Run `npm run test:fast` while editing and `npm test` before a PR. A fix needs a test that fails without it.

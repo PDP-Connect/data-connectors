@@ -12,6 +12,7 @@ import type {
 	FollowingRecord,
 	InstagramFollowingUser,
 	InstagramProfilePageEnvelope,
+	InstagramProfilePageUser,
 	InstagramTimelineEdge,
 	InstagramWebInfoUser,
 	PostLikeRecord,
@@ -45,7 +46,7 @@ export function nullIfEmpty(value: string | null | undefined): string | null {
 	if (value === null || value === undefined) {
 		return null;
 	}
-	return value.length > 0 ? value : null;
+	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 /** Instagram media nodes carry `taken_at` in unix seconds (occasionally
@@ -61,7 +62,8 @@ export function isoFromTakenAt(
 		return null;
 	}
 	const ms = raw > 1e12 ? raw : raw * 1000;
-	return new Date(ms).toISOString();
+	const date = new Date(ms);
+	return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 /** Best available image URL for a post: single-image posts carry
@@ -108,10 +110,10 @@ export function mediaTypeOf(node: {
  *  null. Guards against the field being absent, non-numeric, or negative —
  *  never guessed, never coerced from a different shape. */
 function nonNegativeIntOrNull(value: number | null | undefined): number | null {
-	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
 		return null;
 	}
-	return Math.trunc(value);
+	return value;
 }
 
 /**
@@ -132,12 +134,47 @@ export function profileCountsFromGraphQL(
 	following_count: number | null;
 	post_count: number | null;
 } {
-	const user = envelope?.data?.data?.user;
+	const user = envelope?.data?.user;
 	return {
 		follower_count: nonNegativeIntOrNull(user?.follower_count),
 		following_count: nonNegativeIntOrNull(user?.following_count),
 		post_count: nonNegativeIntOrNull(user?.media_count),
 	};
+}
+
+/** The legacy profile read is complete only when the observed profile user
+ *  carries its three counts and the verified flag. Missing values are gaps,
+ *  not evidence that the corresponding fields are empty. */
+/** Validate source values before nullable normalization can erase bad types. */
+export function profileSourceFieldsAreReadable(
+ user: InstagramProfilePageUser | InstagramWebInfoUser | null | undefined,
+): boolean {
+ if (!user) return true;
+ const fields = user as unknown as Record<string, unknown>;
+ return ["full_name", "biography", "profile_pic_url", "external_url"].every(
+  (key) => fields[key] == null || typeof fields[key] === "string",
+ ) && ["is_private", "is_verified", "is_business_account"].every(
+  (key) => fields[key] == null || typeof fields[key] === "boolean",
+ ) && ["follower_count", "following_count", "media_count"].every(
+  (key) => fields[key] == null || (typeof fields[key] === "number" &&
+   Number.isInteger(fields[key]) && fields[key] >= 0),
+ );
+}
+
+export function profileEnrichmentIsComplete(
+	user: InstagramProfilePageUser | null | undefined,
+): boolean {
+	return (
+		user !== null &&
+		user !== undefined &&
+		typeof user.id === "string" && user.id.length > 0 &&
+		typeof user.username === "string" && user.username.length > 0 &&
+		profileSourceFieldsAreReadable(user) &&
+		nonNegativeIntOrNull(user.follower_count) !== null &&
+		nonNegativeIntOrNull(user.following_count) !== null &&
+		nonNegativeIntOrNull(user.media_count) !== null &&
+		typeof user.is_verified === "boolean"
+	);
 }
 
 /**
@@ -155,30 +192,43 @@ export function profileRecord(
 		following_count: number | null;
 		post_count: number | null;
 	} = { follower_count: null, following_count: null, post_count: null },
+	profileUser?: InstagramProfilePageUser | null,
 ): ProfileRecord | null {
-	const id = user.id ?? user.fbid ?? null;
-	const username = user.username ?? null;
+	const id = profileUser?.id || user.id || user.fbid || null;
+	const username = profileUser?.username || user.username || null;
 	if (!id || !username) {
 		return null;
 	}
 	return {
 		id,
 		username,
-		full_name: nullIfEmpty(user.full_name),
-		bio: nullIfEmpty(user.biography),
-		profile_pic_url: nullIfEmpty(user.profile_pic_url),
-		external_url: nullIfEmpty(user.external_url),
+		full_name: nullIfEmpty(profileUser?.full_name ?? user.full_name),
+		bio: nullIfEmpty(profileUser?.biography ?? user.biography),
+		profile_pic_url: nullIfEmpty(
+			profileUser?.profile_pic_url ?? user.profile_pic_url,
+		),
+		external_url: nullIfEmpty(profileUser?.external_url ?? user.external_url),
 		follower_count: counts.follower_count,
 		following_count: counts.following_count,
 		post_count: counts.post_count,
-		is_private: user.is_private ?? null,
-		is_verified: user.is_verified ?? null,
-		is_business: user.is_business_account ?? null,
+		is_private: profileUser?.is_private ?? user.is_private ?? null,
+		is_verified: profileUser?.is_verified ?? null,
+		is_business:
+			profileUser?.is_business_account ?? user.is_business_account ?? null,
 	};
 }
 
 export function postRecord(edge: InstagramTimelineEdge): PostRecord | null {
-	const node = edge.node;
+	const node = edge?.node;
+	if (!node || typeof node !== "object") return null;
+	const timestamp = node.taken_at ?? node.taken_at_timestamp;
+	if (timestamp != null && isoFromTakenAt(node.taken_at, node.taken_at_timestamp) === null) return null;
+	// A caption is absent, null, or an object whose text is a string or null.
+	// Any other shape is unreadable, so the post is too.
+	const caption: unknown = node.caption;
+	if (caption != null && (typeof caption !== "object" || Array.isArray(caption))) return null;
+	const captionText: unknown = (caption as { text?: unknown } | null | undefined)?.text;
+	if (captionText != null && typeof captionText !== "string") return null;
 	const id = node.id ?? node.pk ?? node.media_id ?? node.code ?? null;
 	if (!id) {
 		return null;
@@ -200,15 +250,17 @@ export function postRecord(edge: InstagramTimelineEdge): PostRecord | null {
  *  bounded top-likers sample per post (no full-likers listing endpoint is
  *  reachable from a logged-in web session) — see the connector header for
  *  the honest coverage note this implies. */
-export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
+export function postLikeRecords(edge: InstagramTimelineEdge, onUnreadable?: () => void): PostLikeRecord[] {
 	const node = edge.node;
 	const postId = node.id ?? node.pk ?? node.media_id ?? node.code ?? null;
 	if (!postId) {
 		return [];
 	}
 	const likers = node.facepile_top_likers ?? [];
+	if (!Array.isArray(likers)) { onUnreadable?.(); return []; }
 	const out: PostLikeRecord[] = [];
 	for (const [liker_ordinal, liker] of likers.entries()) {
+		if (!liker || typeof liker !== "object") { onUnreadable?.(); continue; }
 		const userId = liker.id || liker.pk || "";
 		out.push({
 			liker_ordinal,
@@ -226,7 +278,7 @@ export function postLikeRecords(edge: InstagramTimelineEdge): PostLikeRecord[] {
 export function followingRecord(
 	user: InstagramFollowingUser,
 ): FollowingRecord | null {
-	const id = user.pk ?? user.id ?? null;
+	const id = followingUserId(user);
 	const username = user.username ?? null;
 	if (!id || !username) {
 		return null;
@@ -239,6 +291,10 @@ export function followingRecord(
 		is_verified: user.is_verified ?? null,
 		profile_pic_url: user.profile_pic_url ?? null,
 	};
+}
+
+export function followingUserId(user: InstagramFollowingUser): string | null {
+	return user.pk || user.id || null;
 }
 
 /** Stable id for an `ads` record: the native id when the source provides

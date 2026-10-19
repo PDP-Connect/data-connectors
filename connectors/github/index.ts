@@ -2048,7 +2048,7 @@ if (isMainModule(import.meta.url)) {
 			// shared helper — a connector author never hand-rolls rate observability.
 			const collectionRate = buildCollectionRateProgress(httpGovernor);
 			if (collectionRate) {
-				console.debug("[github-debug] collection rate", collectionRate);
+				console.error("[github-debug] collection rate", collectionRate);
 			}
 			// Persist the FINAL learned interval so the next run warm-starts from it.
 			// It rides the already-declared `user` stream cursor (re-emitted here,

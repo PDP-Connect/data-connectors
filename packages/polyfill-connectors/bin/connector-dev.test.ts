@@ -23,6 +23,7 @@ import {
 	readFileSync,
 	rmdirSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,6 +69,7 @@ const RUN_DIR_CONNECTORS = [
 	"connector-dev-done-then-exit1-fixture",
 	"connector-dev-env-echo-fixture",
 	"connector-dev-interaction-fixture",
+	"connector-dev-skip-diagnostics-fixture",
 	"connector-dev-scope-state-fixture",
 	"protocol-subprocess-fails-after-record",
 	"observation-hidden-element-fixture",
@@ -169,6 +171,104 @@ test("connector-dev CLI: succeeding fixture streams RECORD/PROGRESS/STATE lines,
 		assert.equal(summary.skips, 1);
 		assert.equal(summary.done.status, "succeeded");
 		assert.ok(summary.duration_ms >= 0);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev CLI: prints and persists sanitized SKIP_RESULT diagnostics without source values", () => {
+	const tmpDir = mkdtempSync(
+		join(tmpdir(), "connector-dev-skip-diagnostics-test-"),
+	);
+	const summaryPath = join(tmpDir, "summary.json");
+	try {
+		const result = runCli([
+			"connector-dev-skip-diagnostics-fixture",
+			"--entrypoint",
+			fixturePath("connector-dev-skip-diagnostics-fixture.ts"),
+			"--summary-out",
+			summaryPath,
+		]);
+
+		assert.equal(result.code, 0, `expected exit 0; stderr=${result.stderr}`);
+		const diagnosticLine = result.stdout
+			.split("\n")
+			.find((line) => line.trimStart().startsWith("skip-result-diagnostics "));
+		assert.ok(
+			diagnosticLine,
+			"CLI must print the SKIP_RESULT diagnostics line",
+		);
+		assert.deepEqual(
+			JSON.parse(
+				diagnosticLine.slice(
+					diagnosticLine.indexOf("skip-result-diagnostics ") + 23,
+				),
+			),
+			{
+				stream: "notes",
+				reason: "icloud_omitted_rows",
+				diagnostics: {
+					omitted_rows: 1,
+					source_rows_seen: 3,
+					note_rows_seen: 2,
+					deleted_note_rows: 1,
+					omitted_row_diagnostics: [
+						{
+							row_index: 3,
+							field_count: 1,
+							field_omissions: [],
+							row_reason: "unavailable_fields",
+						},
+					],
+					field_omissions: [
+						{
+							field: "TextDataEncrypted",
+							reason: "body_text_unreadable",
+							source_shape: {
+								type: "object",
+								keys: ["data", "format"],
+							},
+							value: { type: "string", length: 21 },
+						},
+					],
+				},
+			},
+		);
+		assert.doesNotMatch(result.stdout, /PRIVATE_NOTE_SENTINEL/);
+
+		const summary = JSON.parse(readFileSync(summaryPath, "utf8")) as RunSummary;
+		assert.deepEqual(summary.skip_results, [
+			{
+				stream: "notes",
+				reason: "icloud_omitted_rows",
+				diagnostics: {
+					omitted_rows: 1,
+					source_rows_seen: 3,
+					note_rows_seen: 2,
+					deleted_note_rows: 1,
+					omitted_row_diagnostics: [
+						{
+							row_index: 3,
+							field_count: 1,
+							field_omissions: [],
+							row_reason: "unavailable_fields",
+						},
+					],
+					field_omissions: [
+						{
+							field: "TextDataEncrypted",
+							reason: "body_text_unreadable",
+							source_shape: {
+								type: "object",
+								keys: ["data", "format"],
+							},
+							value: { type: "string", length: 21 },
+						},
+					],
+				},
+			},
+		]);
+		assert.doesNotMatch(JSON.stringify(summary), /PRIVATE_NOTE_SENTINEL/);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
@@ -967,5 +1067,64 @@ test("connector-dev CLI: a connector cannot launder its auth failure into runtim
 		assert.doesNotMatch(stdout, /may be presented as an instruction/u);
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("connector-dev CLI: preserves multi-byte STATE cursors across pipe chunks", () => {
+	const tmpDir = mkdtempSync(join(tmpdir(), "connector-dev-utf8-"));
+	const connector = `connector-dev-utf8-${String(process.pid)}`;
+	const entrypoint = join(tmpDir, "connector.mjs");
+	const expected = "€".repeat(100_001);
+	try {
+		writeFileSync(
+			entrypoint,
+			`
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
+await once(process.stdin, "data");
+const emit = (message) => new Promise((resolve, reject) => {
+  process.stdout.write(JSON.stringify(message) + "\\n", (error) => error ? reject(error) : resolve());
+});
+await emit({ type: "RECORD", stream: "items", key: "utf8", emitted_at: "2026-08-01T00:00:00.000Z", data: { id: "utf8", value: "fixture" } });
+const bytes = Buffer.from(JSON.stringify({
+  type: "STATE", stream: "items", cursor: { value: "€".repeat(100_001) }
+}) + "\\n");
+// The 64 KiB split lands inside a three-byte character. Waiting after the
+// first write makes the split deterministic even when pipe reads coalesce.
+const split = 65_536;
+await new Promise((resolve, reject) => {
+  process.stdout.write(bytes.subarray(0, split), (error) => error ? reject(error) : resolve());
+});
+await delay(40);
+await new Promise((resolve, reject) => {
+  process.stdout.write(bytes.subarray(split), (error) => error ? reject(error) : resolve());
+});
+await emit({ type: "DONE", status: "succeeded", records_emitted: 1 });
+process.stdin.resume();
+`,
+		);
+		const result = runCli([
+			connector,
+			"--entrypoint",
+			entrypoint,
+			"--summary-out",
+			join(tmpDir, "summary.json"),
+		]);
+		assert.equal(result.code, 0, result.stderr);
+		const saved = JSON.parse(
+			readFileSync(lastStatePathFor(connector), "utf8"),
+		) as LastState;
+		assert.deepEqual(Object.keys(saved.state), ["items"]);
+		assert.equal(
+			(saved.state.items as { value: string }).value === expected,
+			true,
+			"saved cursor must retain every multi-byte character exactly",
+		);
+	} finally {
+		rmSync(tmpDir, { recursive: true, force: true });
+		rmSync(join(PACKAGE_ROOT, "runs", connector), {
+			recursive: true,
+			force: true,
+		});
 	}
 });

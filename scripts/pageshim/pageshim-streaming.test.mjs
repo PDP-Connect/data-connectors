@@ -4,11 +4,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { buildPageshim } from "./build.mjs";
-import { runHarness } from "./harness.mjs";
+import { fixtureCorsHeaders, runHarness } from "./harness.mjs";
 import { ResultStreamHarness } from "./result-stream-harness.mjs";
 
 const root = join(process.cwd(), ".scratch", "pageshim-streaming-test");
@@ -337,6 +337,7 @@ test("streaming bounds each transfer while spooling a 150 MB result", {
 			fixtures,
 			scopes: ["chatgpt.conversations", "chatgpt.messages"],
 			resultStreaming: true,
+			sampleHeap: true,
 			resultSpoolDirectory: spoolDirectory,
 		});
 		assert.equal(run.ret.ok, true, run.log.slice(-20).join("\n"));
@@ -396,6 +397,7 @@ test("CDP heap sampling catches a retained allocation above the streaming bound"
 			scopes: ["chatgpt.conversations", "chatgpt.messages"],
 			resultStreaming: true,
 			resultSpoolDirectory: spoolDirectory,
+			sampleHeap: true,
 		});
 		assert.ok(
 			run.maxHeapBytes > 64 * 1024 * 1024,
@@ -645,4 +647,136 @@ test("the browser harness rejects both orders of mixed result protocols", {
 			error: "cannot mix result protocols",
 		});
 	}
+});
+
+test("coverage receipts distinguish incomplete inventory, complete runs, and real failures", {
+	timeout: 180_000,
+}, async () => {
+	const scenarios = [
+		{ name: "inventory", type: "SKIP_RESULT", reason: "inventory_not_proven_complete" },
+		{ name: "bounded", type: "SKIP_RESULT", reason: "inventory_bounded" },
+		{ name: "truncated", type: "SKIP_RESULT", reason: "pagination_cap_truncated" },
+		{ name: "counts", type: "SKIP_RESULT", reason: "inventory", diagnostics: { considered: 3, covered: 1 } },
+		{ name: "detail-counts", type: "DETAIL_COVERAGE", considered: 3, covered: 1 },
+		{ name: "detail-keys", type: "DETAIL_COVERAGE", required_keys: ["a", "b"], hydrated_keys: ["a"] },
+		{ name: "detail-gap", type: "DETAIL_COVERAGE", gap_keys: ["b"] },
+		{ name: "complete", type: "DETAIL_COVERAGE", considered: 1, covered: 1, required_keys: ["a"], hydrated_keys: ["a"], complete: true },
+		{ name: "failure", type: "DETAIL_COVERAGE", considered: 2, covered: 1, failure: true },
+		{ name: "zero-inventory", type: "SKIP_RESULT", reason: "inventory_not_proven_complete", empty: true },
+	];
+	await mkdir(root, { recursive: true });
+	for (const resultStreaming of [false, true]) {
+		for (const streamRecords of [false, true]) {
+			for (const scenario of scenarios) {
+				const { name, complete, failure, empty, ...message } = scenario;
+				const bundle = join(root, "coverage.js");
+				await buildPageshim({
+					connector: "strava_browser",
+					entryPoint: new URL("./test-fixtures/coverage-runtime.ts", import.meta.url).pathname,
+					outfile: bundle,
+					extraDefines: {
+						PAGESHIM_COVERAGE_MESSAGES: JSON.stringify([{ ...message, stream: "conversations" }]),
+						PAGESHIM_COVERAGE_THROW: String(Boolean(failure)),
+						PAGESHIM_COVERAGE_RECORD: String(!empty),
+						PAGESHIM_COVERAGE_STREAM: String(streamRecords),
+					},
+				});
+				const run = await runHarness({
+					bundle, fixtures, scopes: ["chatgpt.conversations"],
+					resultStreaming,
+					resultSpoolDirectory: join(root, `coverage-${name}-${resultStreaming}-${streamRecords}`),
+				});
+				assertCleanRun(run);
+				assert.deepEqual(run.ret, { ok: true }, name);
+				if (failure) {
+					assert.equal(run.data.error, "synthetic network failure");
+					assert.doesNotMatch(run.data.status, /^(Partial:|Complete!)/);
+					if (!resultStreaming) assert.equal(run.result.errors[0].errorClass, "network_error");
+				} else {
+					assert.equal(run.data.error, undefined, name);
+					assert.match(run.data.status, complete ? /^Complete!/ : /^Partial:/, name);
+					const errors = resultStreaming ? run.streamDone.errors : run.result.errors;
+					assert.equal(errors.length, complete ? 0 : 1, name);
+					if (!complete) assert.equal(errors[0].errorClass, "partial", name);
+				}
+			}
+		}
+	}
+});
+
+test("fixture CORS retains explicit headers and supports credentialed cross-origin fetch without cookies", {
+	timeout: 180_000,
+}, async () => {
+	await mkdir(root, { recursive: true });
+	const bundle = join(root, "cors.js");
+	await writeFile(bundle, `
+(async () => {
+	const value = await page.evaluate(\`(async () => {
+		const get = await fetch("https://api.chatgpt.test/data", { credentials: "include" });
+		const post = await fetch("https://api.chatgpt.test/data", {
+			method: "POST", credentials: "include", headers: { "X-Fixture": "yes" }, body: "test"
+		});
+		const publicResponse = await fetch("https://api.chatgpt.test/public", { credentials: "omit" });
+		let wildcardBlocked = false;
+		try { await fetch("https://api.chatgpt.test/public", { credentials: "include" }); }
+		catch { wildcardBlocked = true; }
+		return { get: await get.text(), post: await post.text(),
+			header: get.headers.get("X-Fixture-Response"), public: await publicResponse.text(), wildcardBlocked };
+	})()\`);
+	await page.setData("cors", value);
+})();`);
+	const calls = [];
+	const run = await runHarness({
+		bundle, scopes: [],
+		fixtures: {
+			...fixtures,
+			hosts: /^https:\/\/(api\.)?chatgpt\.test\//,
+			resolve(url, request) {
+				calls.push({ url, ...request });
+				if (!url.includes("api.chatgpt.test")) return fixtures.resolve();
+				return {
+					status: 200, contentType: "text/plain", body: "ok",
+					headers: url.endsWith("/public")
+						? { "Access-Control-Allow-Origin": "*" }
+						: { "X-Fixture-Response": "retained", "Access-Control-Expose-Headers": "X-Fixture-Response" },
+				};
+			},
+		},
+	});
+	assert.deepEqual(run.ret, { ok: true });
+	assert.deepEqual(run.data.cors, { get: "ok", post: "ok", header: "retained", public: "ok", wildcardBlocked: true });
+	assert.ok(calls.some((call) => call.method === "POST"));
+	assert.ok(calls.filter((call) => call.url.includes("api.chatgpt.test")).every((call) => !call.headers.cookie));
+	const wildcard = fixtureCorsHeaders({ origin: "https://chatgpt.test" }, {}, "wildcard");
+	assert.equal(wildcard["access-control-allow-origin"], "*");
+	assert.equal(wildcard["access-control-allow-credentials"], undefined);
+	assert.equal(fixtureCorsHeaders({})["access-control-allow-origin"], "*");
+	assert.deepEqual(fixtureCorsHeaders({ origin: "https://chatgpt.test",
+		"access-control-request-method": "POST", "access-control-request-headers": "x-fixture",
+	}, { Vary: "Accept-Encoding", "X-Keep": "yes" }), {
+		vary: "Accept-Encoding, Origin", "x-keep": "yes",
+		"access-control-allow-origin": "https://chatgpt.test",
+		"access-control-allow-credentials": "true",
+		"access-control-allow-methods": "POST", "access-control-allow-headers": "x-fixture",
+	});
+});
+
+test("audited crypto parity and every admitted bundle byte comparison", async () => {
+  const { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } = await import("./crypto-regressions.mjs");
+  const { pageShimConnectors } = await import("./capabilities.mjs");
+  const { fileURLToPath } = await import("node:url");
+  assertHashParity();
+  assertPageOnlyAdmission();
+  await mkdir(root, { recursive: true });
+  await assertFingerprintBundle(buildPageshim, join(root, "fingerprint-crypto.js"));
+  const report=[];
+  for (const connector of pageShimConnectors(fileURLToPath(new URL("../..",import.meta.url)))) {
+    const before=join(root,connector+"-before.js"), after=join(root,connector+"-after.js");
+    await buildPageshim({connector,outfile:before,cryptoHashShim:false});
+    await buildPageshim({connector,outfile:after});
+    const digest=async path=>createHash("sha256").update(await readFile(path)).digest("hex");
+    const beforeHash=await digest(before),afterHash=await digest(after);
+    report.push({connector,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash});
+  }
+  console.log("PAGESHIM_CRYPTO_IMPACT_SUMMARY "+JSON.stringify(report));
 });

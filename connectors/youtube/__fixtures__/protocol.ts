@@ -17,6 +17,18 @@ runConnector({
 		try {
 			const page = await browser.newPage();
 			await page.route("https://www.youtube.com/**", async (route) => {
+				if (new URL(route.request().url()).pathname === "/youtubei/v1/browse") {
+					await route.fulfill({
+						status: 200,
+						contentType: "application/json",
+						body: JSON.stringify({
+							onResponseReceivedActions: [
+								{ appendContinuationItemsAction: { continuationItems: [] } },
+							],
+						}),
+					});
+					return;
+				}
 				const row = (date: string, video: string) =>
 					`<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">${date}</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=${video}"></a><h3 title="Real title"></h3></yt-lockup-view-model></ytd-item-section-renderer>`;
 				// The page data lists all four videos and no next page: the source's end.
@@ -29,9 +41,20 @@ runConnector({
 										selected: true,
 										content: {
 											sectionListRenderer: {
-												contents: [1, 2, 3, 4].map(() => ({
-													lockupViewModel: {},
-												})),
+												contents: [
+													{
+														itemSectionRenderer: {
+															contents: [
+																"olderVideo",
+																"inRangeVideo",
+																"unknownVideo",
+																"endVideo",
+															].map((videoId) => ({
+																videoRenderer: { videoId },
+															})),
+														},
+													},
+												],
 											},
 										},
 									},
@@ -41,6 +64,7 @@ runConnector({
 					},
 				};
 				const html =
+					'<button id="avatar-btn">Account</button>' +
 					row("Sep 21, 2026", "olderVideo") +
 					row("Sep 22, 2026", "inRangeVideo") +
 					row("Unknown", "unknownVideo") +
@@ -48,7 +72,7 @@ runConnector({
 					`<script>var ytInitialData = ${JSON.stringify(pageData)};</script>`;
 				await route.fulfill({
 					contentType: "text/html",
-					body: `<html><body>${html}</body></html>`,
+					body: `<html><body><div id="contents">${html}<div id="message">No more videos</div></div></body></html>`,
 				});
 			});
 			const fastPage = new Proxy(page, {

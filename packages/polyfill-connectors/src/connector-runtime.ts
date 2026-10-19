@@ -84,7 +84,10 @@ import {
 	type CaptureSession,
 	createCaptureSession,
 } from "./fixture-capture.ts";
-import { CONSENT_TIME_FIELDS } from "./generated/consent-time-fields.generated.ts";
+import {
+	CONSENT_BOUND_CONNECTOR,
+	CONSENT_TIME_FIELDS,
+} from "./generated/consent-time-fields.generated.ts";
 import {
 	createWireObservationSink,
 	OBSERVATION_CAPABILITY,
@@ -1477,17 +1480,24 @@ async function parseStart(
  * generated table); `null` means the runtime cannot compare bounds with the
  * stream's consent field. Only a connector with no shipped manifest (a test
  * fixture) may name a `date-time` field in config, and one that has neither
- * resolves every stream to `null`.
+ * resolves every stream to `null`. A built artifact is bound to its own
+ * connector (see scripts/consent-slice-resolution.mjs); any other name throws.
  */
 export function consentTimeFieldResolver(
 	name: string,
 	timeRangeField?: string | ((stream: string) => string),
 ): (stream: string) => ConsentTimeField | null {
-	const manifestFields = Object.hasOwn(
-		CONSENT_TIME_FIELDS,
-		name.replaceAll("-", "_"),
-	)
-		? CONSENT_TIME_FIELDS[name.replaceAll("-", "_")]
+	const key = name.replaceAll("-", "_");
+	// A built artifact bundles one connector's table and is bound to it. A
+	// different name is a wiring error: it must not fall through to the
+	// unshipped-fixture path, which accepts a config `timeRangeField`.
+	if (CONSENT_BOUND_CONNECTOR !== null && key !== CONSENT_BOUND_CONNECTOR) {
+		throw new Error(
+			`runConnector: this build is bound to ${CONSENT_BOUND_CONNECTOR} but the connector is named ${JSON.stringify(name)}`,
+		);
+	}
+	const manifestFields = Object.hasOwn(CONSENT_TIME_FIELDS, key)
+		? CONSENT_TIME_FIELDS[key]
 		: undefined;
 	if (manifestFields) {
 		if (timeRangeField !== undefined) {

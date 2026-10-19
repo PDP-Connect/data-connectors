@@ -122,7 +122,7 @@
  * Known untested / unconfirmed against a real account:
  *   - The exact `/api/organizations` capability field used to select the
  *     chat-capable org (mirrors legacy: `capabilities.includes('chat')`,
- *     falling back to `capabilities.includes('claude_max')`, then the
+ *     falling back to `capabilities.includes('claude_pro')`, then the
  *     first org).
  *   - Whether claude.ai's download endpoints still gate on
  *     `Sec-Fetch-Dest: document` (the legacy connector's documented reason
@@ -132,11 +132,18 @@
  *     `attachDownloadQueue`, matching that constraint.
  *   - `docs[]` sub-field names and the multi-part category ZIP layout are
  *     NOW VERIFIED (see parsers.ts header comment) — removed from this list.
- * Host blob limit: each selected conversation or project envelope must fit
- * within 32 MiB. A larger source object is left out with its child records
- * (messages or project documents). The run reports the dropped count in a
- * PROGRESS note (no ids or titles) and does not skip those streams, so they
- * get their normal `synced_at`. A real account had one 79 MiB conversation.
+ * Host blob limit (32 MiB per blob). Each selected conversation or project
+ * raw envelope is stored whole as a Core blob, streamed into the spool chunk
+ * by chunk while its size and SHA-256 are computed (an object too large to
+ * buffer is reread from the export by offset; nothing but one message is held
+ * at a time). Message and document text over the 10M-character inline cap is
+ * not truncated: `content` is null and `blob_ref` holds the full text. Nothing
+ * is replaced by a stand-in. Content the host cannot store (an envelope or a
+ * text whose encoding is over 32 MiB) leaves its `blob_ref` (envelope) or
+ * `content` (text) field ABSENT on a record that is still emitted, so every
+ * key is accounted and every stream still proves; the run reports only an
+ * aggregate count and reason (no ids or titles) in a diagnostic and a PROGRESS
+ * note. A real account had one 79 MiB conversation.
  *
  * The nonce download can itself be a split-export manifest: on 2026-09-22 a
  * real account's download was a `manifest-<org>-...json` file (the same
@@ -146,23 +153,11 @@
  * retries the same nonce and does not request a new export.
  */
 
-import { createHash, randomUUID } from "node:crypto";
-import {
-	closeSync,
-	openSync,
-	readFileSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { closeSync, openSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	HOST_BLOB_MAX_BYTES,
-	type HostBlobMessage,
-	isMainModule,
-	validateHostBlobMessage,
-} from "@pdpp/connector-protocol";
+import { HOST_BLOB_MAX_BYTES, isMainModule } from "@pdpp/connector-protocol";
 import type { BrowserContext } from "playwright";
 import {
 	readZipEntriesFromFile,
@@ -172,6 +167,7 @@ import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/brows
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
 	type BrowserCollectContext,
+	buildFullScanCoverageMessage,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	nowIso,
@@ -182,11 +178,18 @@ import {
 import { attachDownloadQueue } from "../../packages/polyfill-connectors/src/download-queue.ts";
 import { savePlaywrightDownload } from "../../packages/polyfill-connectors/src/playwright-download.ts";
 import {
+	BufferMeter,
+	InvalidConversationObjectError,
+	scanConversation,
+} from "./oversize-conversation.ts";
+import {
 	classifyManifestPartEntries,
 	createPipelinedJsonEntryReader,
-	isoOrNull,
 	JSON_ENTRY_READ_CHUNK_UNITS,
 	type ManifestPartFile,
+	messageOmissionTimestamp,
+	omittedFieldCountOf,
+	oversizeTextOf,
 	type ParsedExport,
 	parseClassifiedExport,
 	parseConversation,
@@ -194,12 +197,19 @@ import {
 	parseExport,
 	parseJsonArrayChunks,
 	parseMessage,
+	parseProject,
+	parseProjectDocument,
 	resolveExportedProfile,
 	type SourceRecordEnvelope,
-	topLevelRawFields,
-	topLevelStringFields,
 } from "./parsers.ts";
+import { encodePdppSafeText } from "./safe-escape.ts";
 import { validateRecord } from "./schemas.ts";
+import {
+	type SpooledBlob,
+	spoolEnvelopeFromChunks,
+	spoolEnvelopeText,
+	spoolJsonText,
+} from "./source-blob.ts";
 
 const SESSION_COOKIE = /sessionKey|__Secure-next-auth.session-token/;
 const CLAUDE_ORIGIN = "https://claude.ai";
@@ -316,76 +326,75 @@ const POLL_INTERVAL_MS =
 const DOWNLOAD_TIMEOUT_MS =
 	Number(process.env.PDPP_ANTHROPIC_DOWNLOAD_TIMEOUT_MS) || 180_000;
 
+/** A conversation larger than this many UTF-16 units is read incrementally
+ * instead of being buffered whole. */
+const OVERSIZE_PARENT_UNITS = 16 * 1024 * 1024;
+/** Top-level conversation fields read from an oversized parent. */
+const CONVERSATION_SCAN_FIELDS: ReadonlySet<string> = new Set([
+	"uuid",
+	"id",
+	"name",
+	"summary",
+	"created_at",
+	"updated_at",
+	"project_uuid",
+	"is_starred",
+]);
+
 const CONVERSATIONS_STREAM = "conversations";
 const ACCOUNT_PROFILE_STREAM = "account_profile";
 const MESSAGES_STREAM = "messages";
 const PROJECTS_STREAM = "projects";
 const PROJECT_DOCUMENTS_STREAM = "project_documents";
-const OMITTED_SOURCE_BLOB_REF = {
-	blob_id: `sha256:${"0".repeat(64)}`,
-	mime_type: "application/json",
-	size_bytes: 1,
-	sha256: "0".repeat(64),
-};
-
 export type AnthropicZipEntryChunkReader = (
 	entryName: string,
 	offset: number,
 	length: number,
 ) => Promise<string>;
 
-function sourceRecordBytes(source: SourceRecordEnvelope): Buffer {
-	const bytes = Buffer.from(JSON.stringify(source), "utf8");
-	if (bytes.length === 0 || bytes.length > HOST_BLOB_MAX_BYTES) {
-		throw new Error(
-			`Anthropic ${source.stream} source record exceeds the ${HOST_BLOB_MAX_BYTES}-byte host blob limit; no export records were emitted`,
-		);
-	}
-	return bytes;
+/** Why a raw source envelope has no blob: its UTF-8 size is over the host
+ * blob cap. Named in the run diagnostic. */
+const ENVELOPE_OMITTED_REASON = "source_envelope_exceeds_host_blob_cap";
+const TEXT_ABSENT_CAP_REASON = "content_exceeds_host_blob_cap";
+const TEXT_ABSENT_NO_HOST_BLOB_REASON = "host_blob_store_unavailable";
+/** A text field passed the inline cap on a record that has no blob for it. */
+const FIELD_ABSENT_REASON = "exceeds_inline_cap";
+
+/** The buffered source envelope as a blob, or null when it passes the host
+ * blob cap. */
+function spoolSourceRecord(
+	source: SourceRecordEnvelope,
+	maxBytes = HOST_BLOB_MAX_BYTES,
+): Promise<SpooledBlob | null> {
+	return spoolEnvelopeText(
+		source.stream,
+		source.record_key,
+		JSON.stringify(source),
+		maxBytes,
+	);
 }
 
-/** True when the source envelope fits one host blob. A larger object (a
- * real account had one 79 MiB conversation) is left out and counted, so it
- * cannot block every other record in the export. */
-function fitsHostBlob(source: SourceRecordEnvelope): boolean {
-	const size = Buffer.byteLength(JSON.stringify(source), "utf8");
-	return size > 0 && size <= HOST_BLOB_MAX_BYTES;
+/** Text chunks of `[start, end)` of one export entry. */
+async function* entryRangeChunks(
+	readChunk: AnthropicZipEntryChunkReader,
+	entry: { name: string; size: number },
+	start: number,
+	end: number,
+): AsyncGenerator<string> {
+	const reader = createPipelinedJsonEntryReader(readChunk, entry, start, end);
+	for (let offset = start; offset < end; ) {
+		const text = await reader(
+			entry.name,
+			offset,
+			Math.min(JSON_ENTRY_READ_CHUNK_UNITS, end - offset),
+		);
+		if (!text || text.length > end - offset)
+			throw new Error("invalid bounded conversation reread");
+		yield text;
+		offset += text.length;
+	}
 }
 
-function spoolSourceRecord(source: SourceRecordEnvelope): {
-	event: HostBlobMessage;
-	blob_ref: Record<string, unknown>;
-} {
-	const spoolDir = process.env.PDPP_BLOB_SPOOL_DIR;
-	if (!spoolDir) {
-		throw new Error(
-			"Host blob spool is unavailable for Anthropic source records",
-		);
-	}
-	const bytes = sourceRecordBytes(source);
-	const sha256 = createHash("sha256").update(bytes).digest("hex");
-	const file = `anthropic-${randomUUID()}.json`;
-	writeFileSync(join(spoolDir, file), bytes, { flag: "wx", mode: 0o600 });
-	const event: HostBlobMessage = {
-		type: "BLOB",
-		stream: source.stream,
-		key: source.record_key,
-		file,
-		mime_type: "application/json",
-		size_bytes: bytes.length,
-		sha256,
-	};
-	validateHostBlobMessage(event);
-	return {
-		event,
-		blob_ref: {
-			blob_id: `sha256:${sha256}`,
-			mime_type: event.mime_type,
-			size_bytes: bytes.length,
-			sha256,
-		},
-	};
-}
 const ALL_STREAMS = [
 	ACCOUNT_PROFILE_STREAM,
 	CONVERSATIONS_STREAM,
@@ -551,7 +560,7 @@ async function fetchOrganizations(
 }
 
 /** Selects the chat-capable org, mirroring the legacy connector's
- * documented selection (chat, then claude_max, then first org) — an
+ * documented selection (chat, then claude_pro, then first org) — an
  * account can have several orgs, e.g. a separate API-only org, and the
  * chat/export surface only exists on the chat-capable one. */
 function selectChatOrganization(
@@ -562,7 +571,7 @@ function selectChatOrganization(
 	}
 	return (
 		orgs.find((o) => o.capabilities?.includes("chat")) ??
-		orgs.find((o) => o.capabilities?.includes("claude_max")) ??
+		orgs.find((o) => o.capabilities?.includes("claude_pro")) ??
 		orgs[0] ??
 		null
 	);
@@ -1100,6 +1109,7 @@ interface ManifestPartDownloadResult {
 	filename: string;
 	outcome: "downloaded" | "download_failed";
 	entries: ManifestPartFile[];
+	completeJsonBoundary?: boolean;
 }
 
 /**
@@ -1132,9 +1142,33 @@ async function downloadManifestPart(
 			filename: dataFile.filename,
 			outcome: "downloaded",
 			entries,
+			completeJsonBoundary: archiveEntriesMatch(attempt.zipPath, (name) =>
+				name.endsWith(".json"),
+			),
 		};
 	} finally {
 		await attempt.cleanup?.();
+	}
+}
+
+/** Unknown archive entries cannot establish a complete source boundary. */
+function archiveEntriesMatch(
+	zipPath: string,
+	known: (name: string) => boolean,
+): boolean {
+	const fd = openSync(zipPath, "r");
+	try {
+		const entries = readZipEntriesFromFile(
+			fd,
+			statSync(zipPath).size,
+			EXPORT_ZIP_POLICY,
+			{
+				requireCompleteCentralDirectory: true,
+			},
+		);
+		return entries.length > 0 && entries.every((entry) => known(entry.name));
+	} finally {
+		closeSync(fd);
 	}
 }
 
@@ -1186,7 +1220,9 @@ async function emitLayoutUnrecognizedSkip(
 	});
 	await progress(
 		"The Claude export did not contain conversations or projects in a format we recognize",
-		{ stream: CONVERSATIONS_STREAM },
+		{
+			stream: CONVERSATIONS_STREAM,
+		},
 	);
 	for (const stream of ALL_STREAMS) {
 		if (!requested.has(stream)) {
@@ -1257,14 +1293,27 @@ export async function collectAnthropic({
 	emit,
 	emitRecord,
 	isRecordSelected,
+	recoveryOnly,
+	detailGaps,
 	progress,
 	readZipEntryChunk,
 	entriesValidated,
 	storeSourceRecords = true,
+	bufferMeter = new BufferMeter(),
+	testOverrides,
 }: BrowserCollectContext & {
 	readZipEntryChunk?: AnthropicZipEntryChunkReader;
 	entriesValidated?: boolean;
 	storeSourceRecords?: boolean;
+	/** Records the largest text the oversize-parent reader held at once. */
+	bufferMeter?: BufferMeter;
+	/** Per-collection test seam. Production calls use the real limits and delay. */
+	testOverrides?: {
+		maxBufferedObjectUnits?: number;
+		maxBlobBytes?: number;
+		inlineTextMaxUnits?: number;
+		initialDelayMs?: number;
+	};
 }): Promise<void> {
 	if (requested.size === 0) {
 		return;
@@ -1276,22 +1325,64 @@ export async function collectAnthropic({
 			timeout: 30_000,
 		})
 		.catch((): undefined => undefined);
-	await politeDelay(1500);
+	const initialDelayMs = testOverrides?.initialDelayMs ?? 1500;
+	if (initialDelayMs > 0) await politeDelay(initialDelayMs);
 	const browserProfile = await readBrowserProfile(page);
 
 	const wantsConversations = requested.has(CONVERSATIONS_STREAM);
 	const wantsMessages = requested.has(MESSAGES_STREAM);
 	const wantsProjects = requested.has(PROJECTS_STREAM);
 	const wantsDocuments = requested.has(PROJECT_DOCUMENTS_STREAM);
-	const windowSince =
-		requested.get(CONVERSATIONS_STREAM)?.time_range?.since ??
-		requested.get(MESSAGES_STREAM)?.time_range?.since;
-	const windowSinceMs = windowSince ? Date.parse(windowSince) : Number.NaN;
+	// A parent is worth reading if either requested scope can use it. An
+	// absent lower bound in any requested scope makes this coarse union
+	// unbounded; final selection still belongs to each record's own scope.
+	const windowSinceMs = Math.min(
+		...[CONVERSATIONS_STREAM, MESSAGES_STREAM]
+			.filter((stream) => requested.has(stream))
+			.map((stream) => {
+				const since = requested.get(stream)?.time_range?.since;
+				return since ? Date.parse(since) : Number.NEGATIVE_INFINITY;
+			}),
+	);
 	const isWithinTimeWindow = (value: unknown): boolean => {
-		if (!windowSince) return true;
+		if (!Number.isFinite(windowSinceMs)) return true;
 		if (typeof value !== "string") return false;
 		const updatedAt = Date.parse(value);
 		return Number.isFinite(updatedAt) && updatedAt >= windowSinceMs;
+	};
+	// A sibling conversation scope must not widen messages' omission window.
+	// Only a child's own usable time locates it at a point. An undated
+	// child could fall anywhere between the parent's creation and update;
+	// missing or invalid endpoints leave that side of the interval unbounded.
+	const messagesWindow = requested.get(MESSAGES_STREAM)?.time_range;
+	const messagesSinceMs = Date.parse(messagesWindow?.since ?? "");
+	const messagesUntilMs = Date.parse(messagesWindow?.until ?? "");
+	const messageOmissionAffectsScope = (
+		childTime: number | null,
+		parent: Record<string, unknown>,
+	): boolean => {
+		if (childTime !== null) {
+			return (
+				(!Number.isFinite(messagesSinceMs) || childTime >= messagesSinceMs) &&
+				(!Number.isFinite(messagesUntilMs) || childTime <= messagesUntilMs)
+			);
+		}
+		const parentCreatedMs =
+			typeof parent.created_at === "string"
+				? Date.parse(parent.created_at)
+				: Number.NaN;
+		const parentUpdatedMs =
+			typeof parent.updated_at === "string"
+				? Date.parse(parent.updated_at)
+				: Number.NaN;
+		return !(
+			(Number.isFinite(messagesSinceMs) &&
+				Number.isFinite(parentUpdatedMs) &&
+				parentUpdatedMs < messagesSinceMs) ||
+			(Number.isFinite(messagesUntilMs) &&
+				Number.isFinite(parentCreatedMs) &&
+				parentCreatedMs > messagesUntilMs)
+		);
 	};
 	if ((wantsConversations || wantsProjects) && !isRecordSelected) {
 		throw new Error(
@@ -1299,9 +1390,418 @@ export async function collectAnthropic({
 		);
 	}
 
+	// Source identities and delivered identities are measured independently.
+	// beforeEmit is called only after runtime selection and validation; an
+	// awaited emitRecord alone can also mean silently filtered or rejected.
+	const rawMessageIds = new Set<string>();
+	const rawConversationIds = new Set<string>();
+	const deliveredMessageIds = new Set<string>();
+	let completeMessages = true;
+	// Archive-wide and per-stream source accounting for the other native
+	// streams. Each flag only ever moves from true to false.
+	let archiveComplete = true;
+	let conversationsBoundary = false;
+	let conversationsExact = true;
+	let projectsExact = true;
+	let documentsExact = true;
+	let projectsExplicitEmpty = false;
+	let ambiguousClassification = false;
+	const rawCoverageConversationIds = new Set<string>();
+	const rawProjectIds = new Set<string>();
+	const rawDocumentIds = new Set<string>();
+	const deliveredConversationIds = new Set<string>();
+	const deliveredProjectIds = new Set<string>();
+	const deliveredDocumentIds = new Set<string>();
+	const unrestrictedStream = (stream: string) => {
+		if (recoveryOnly || detailGaps?.length) {
+			return false;
+		}
+		const scope = requested.get(stream);
+		return (
+			scope !== undefined &&
+			scope.time_range === undefined &&
+			scope.resources === undefined &&
+			scope.fields === undefined
+		);
+	};
+	const accountConversationIdentity = (
+		parent: ReturnType<typeof parseConversationHeader>,
+		hasDocs: boolean,
+	) => {
+		// A conversation that also carries docs is ambiguous for every stream
+		// of this export, so it is noted whichever streams were requested.
+		if (hasDocs) {
+			ambiguousClassification = true;
+		}
+		if (!wantsConversations) {
+			return;
+		}
+		if (!parent || rawCoverageConversationIds.has(parent.id)) {
+			conversationsExact = false;
+			return;
+		}
+		rawCoverageConversationIds.add(parent.id);
+	};
+	const accountRawConversationSource = (raw: unknown) => {
+		accountConversationIdentity(
+			isPlainObject(raw) && Array.isArray(raw.chat_messages)
+				? parseConversationHeader(raw, 0)
+				: null,
+			isPlainObject(raw) && Object.hasOwn(raw, "docs"),
+		);
+	};
+	const accountRawProject = (raw: unknown) => {
+		// A project that also carries chat_messages is ambiguous the same way.
+		if (isPlainObject(raw) && Object.hasOwn(raw, "chat_messages")) {
+			ambiguousClassification = true;
+		}
+		if (!wantsProjects && !wantsDocuments) {
+			return;
+		}
+		const parsed = isPlainObject(raw) ? parseProject(raw) : null;
+		if (!isPlainObject(raw) || !parsed) {
+			projectsExact = false;
+			documentsExact = false;
+			return;
+		}
+		const projectId = parsed.project.id;
+		if (rawProjectIds.has(projectId)) {
+			projectsExact = false;
+			documentsExact = false;
+			return;
+		}
+		rawProjectIds.add(projectId);
+		// A missing, null or malformed child list is unknown, never empty.
+		if (!Array.isArray(raw.docs)) {
+			documentsExact = false;
+			return;
+		}
+		for (const rawDocument of raw.docs) {
+			const document = isPlainObject(rawDocument)
+				? parseProjectDocument(rawDocument, projectId)
+				: null;
+			if (!document || rawDocumentIds.has(document.id)) {
+				documentsExact = false;
+				continue;
+			}
+			rawDocumentIds.add(document.id);
+		}
+	};
+	const unrestrictedMessages = () => {
+		if (recoveryOnly || detailGaps?.length) {
+			return false;
+		}
+		for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
+			const scope = requested.get(stream);
+			if (
+				scope &&
+				(scope.time_range !== undefined ||
+					scope.resources !== undefined ||
+					scope.fields !== undefined)
+			) {
+				return false;
+			}
+		}
+		return wantsMessages;
+	};
+	/** The message-proof side of one conversation: its identity and whether
+	 * `chat_messages` is an array. Children follow via accountMessageChild. */
+	const accountMessageParent = (
+		parent: ReturnType<typeof parseConversationHeader>,
+		chatMessagesIsArray: boolean,
+	): boolean => {
+		if (!wantsMessages) {
+			return false;
+		}
+		if (!(chatMessagesIsArray && parent)) {
+			completeMessages = false;
+			return false;
+		}
+		if (rawConversationIds.has(parent.id)) {
+			completeMessages = false;
+		}
+		rawConversationIds.add(parent.id);
+		return true;
+	};
+	const accountMessageChild = (
+		message: ReturnType<typeof parseMessage> | null,
+	) => {
+		if (!wantsMessages) {
+			return;
+		}
+		if (!message || rawMessageIds.has(message.id)) {
+			completeMessages = false;
+			return;
+		}
+		rawMessageIds.add(message.id);
+	};
+	const accountRawConversation = async (raw: unknown) => {
+		accountRawConversationSource(raw);
+		if (!(wantsMessages && isPlainObject(raw))) {
+			if (wantsMessages) completeMessages = false;
+			return;
+		}
+		const { chat_messages } = raw;
+		const parent = parseConversationHeader(raw, 0);
+		const messagesAccounted = accountMessageParent(
+			parent,
+			Array.isArray(chat_messages),
+		);
+		if (!parent) return;
+		let omittedMessages =
+			!Array.isArray(chat_messages) && messageOmissionAffectsScope(null, raw);
+		if (messagesAccounted && Array.isArray(chat_messages)) {
+			for (const child of chat_messages) {
+				const message = parseMessage(child, parent.id);
+				accountMessageChild(message);
+				if (
+					!message &&
+					messageOmissionAffectsScope(messageOmissionTimestamp(child), raw)
+				)
+					omittedMessages = true;
+			}
+		}
+		if (omittedMessages)
+			await reportConversationOmission(parent.id, [MESSAGES_STREAM]);
+	};
+	const markDelivered = (
+		delivered: Set<string>,
+		id: string,
+		kind: "c" | "p" | "d",
+	) => {
+		if (delivered.has(id)) {
+			if (kind === "c") conversationsExact = false;
+			else if (kind === "p") projectsExact = false;
+			else documentsExact = false;
+		}
+		delivered.add(id);
+	};
+	// Records whose raw envelope or text has no blob, counted per stream for
+	// the run's aggregate disclosure (no ids, no titles).
+	const omittedEnvelopes = { conversations: 0, projects: 0 };
+	const absentText = {
+		messages: { cap: 0, host: 0 },
+		project_documents: { cap: 0, host: 0 },
+	};
+	// Text fields left absent for passing the inline cap (never cut to a
+	// prefix); counted per stream as records are emitted.
+	const omittedFields = {
+		conversations: 0,
+		projects: 0,
+		messages: 0,
+		project_documents: 0,
+	};
+	/**
+	 * Emit one record whose text may pass the inline cap. The text is never
+	 * truncated: over the inline cap `content` is null and the full text is a
+	 * Core blob; text the host cannot store as a blob (over the cap, or no blob
+	 * store) leaves `content` absent. The record is emitted in every case.
+	 */
+	const emitTextRecord = async (
+		stream: typeof MESSAGES_STREAM | typeof PROJECT_DOCUMENTS_STREAM,
+		record: { id: string; content: unknown },
+		afterSelected: () => void,
+	) => {
+		const text = oversizeTextOf(record);
+		const omitted = omittedFieldCountOf(record);
+		if (text === null) {
+			await emitRecord(stream, record, {
+				beforeEmit: () => {
+					afterSelected();
+					omittedFields[stream] += omitted;
+					return Promise.resolve();
+				},
+			});
+			return;
+		}
+		const { content: _inline, ...rest } = record;
+		let blob: SpooledBlob | null = null;
+		if (!storeSourceRecords) {
+			absentText[stream].host += 1;
+		} else if (isRecordSelected?.(stream, record) !== false) {
+			blob = await spoolJsonText(
+				stream,
+				record.id,
+				text,
+				testOverrides?.maxBlobBytes,
+			);
+			// TODO(pdpp-host-blob-cap): text over max_blob_bytes is omitted; revisit if the protocol raises the cap or adds multi-part blobs.
+			if (!blob) absentText[stream].cap += 1;
+		}
+		await emitRecord(
+			stream,
+			blob ? { ...rest, content: null, blob_ref: blob.blob_ref } : rest,
+			{
+				beforeEmit: () => {
+					afterSelected();
+					omittedFields[stream] += omitted;
+					return blob ? emit(blob.event) : Promise.resolve();
+				},
+			},
+		);
+	};
+	const emitMessage = async (
+		message: NonNullable<ReturnType<typeof parseMessage>>,
+	) => {
+		await emitTextRecord(MESSAGES_STREAM, message, () => {
+			if (deliveredMessageIds.has(message.id)) {
+				completeMessages = false;
+			}
+			deliveredMessageIds.add(message.id);
+		});
+	};
+	const emitSourceRecord = async (
+		stream: typeof CONVERSATIONS_STREAM | typeof PROJECTS_STREAM,
+		record: { id: string },
+		blob: SpooledBlob | null,
+		onSelected: () => void,
+	) => {
+		const omitted = omittedFieldCountOf(record);
+		await emitRecord(
+			stream,
+			blob ? { ...record, blob_ref: blob.blob_ref } : record,
+			{
+				beforeEmit: () => {
+					onSelected();
+					omittedFields[stream] += omitted;
+					return blob ? emit(blob.event) : Promise.resolve();
+				},
+			},
+		);
+	};
+	/** The raw envelope as a blob, or null when this host stores no blobs or
+	 * the envelope passes the host cap (then counted for the run report). */
+	const spoolEnvelope = async (
+		stream: typeof CONVERSATIONS_STREAM | typeof PROJECTS_STREAM,
+		source: () => Promise<SpooledBlob | null>,
+	): Promise<SpooledBlob | null> => {
+		if (!storeSourceRecords) return null;
+		const blob = await source();
+		// TODO(pdpp-host-blob-cap): raw envelopes over max_blob_bytes are omitted; revisit if the protocol raises the cap or adds multi-part blobs.
+		if (!blob) omittedEnvelopes[stream] += 1;
+		return blob;
+	};
+	/** Aggregate disclosure of the above: run diagnostics and one owner-facing
+	 * note per stream, with counts only. Not a gap and not a skip: every record
+	 * is still emitted and accounted. */
+	const reportOmissions = async () => {
+		const plural = (n: number) => (n === 1 ? "item" : "items");
+		const rows: Array<[string, number, string, string]> = [
+			[
+				CONVERSATIONS_STREAM,
+				omittedEnvelopes.conversations,
+				ENVELOPE_OMITTED_REASON,
+				"too large to keep a raw copy of; the {record} imported without {it}",
+			],
+			[
+				PROJECTS_STREAM,
+				omittedEnvelopes.projects,
+				ENVELOPE_OMITTED_REASON,
+				"too large to keep a raw copy of; the {record} imported without {it}",
+			],
+			[
+				MESSAGES_STREAM,
+				absentText.messages.cap,
+				TEXT_ABSENT_CAP_REASON,
+				"too large to store; the {record} imported without the text",
+			],
+			[
+				PROJECT_DOCUMENTS_STREAM,
+				absentText.project_documents.cap,
+				TEXT_ABSENT_CAP_REASON,
+				"too large to store; the {record} imported without the text",
+			],
+			[
+				MESSAGES_STREAM,
+				absentText.messages.host,
+				TEXT_ABSENT_NO_HOST_BLOB_REASON,
+				"too large for this device to store; the {record} imported without the text",
+			],
+			[
+				PROJECT_DOCUMENTS_STREAM,
+				absentText.project_documents.host,
+				TEXT_ABSENT_NO_HOST_BLOB_REASON,
+				"too large for this device to store; the {record} imported without the text",
+			],
+			...(
+				[
+					CONVERSATIONS_STREAM,
+					PROJECTS_STREAM,
+					MESSAGES_STREAM,
+					PROJECT_DOCUMENTS_STREAM,
+				] as const
+			).map((stream): [string, number, string, string] => [
+				stream,
+				omittedFields[stream],
+				FIELD_ABSENT_REASON,
+				"had a value too large to store; the {record} imported without that value",
+			]),
+		];
+		for (const [stream, count, reason, what] of rows) {
+			if (count === 0) continue;
+			connectorDiagnostic("anthropic", "export_items_too_large", {
+				stream,
+				count,
+				reason,
+				max_bytes: HOST_BLOB_MAX_BYTES,
+			});
+			const label = stream.replaceAll("_", " ");
+			await progress(
+				`${count} ${plural(count)} of ${label} in the export ${count === 1 ? "was" : "were"} ${what
+					.replace("{record}", count === 1 ? "record was" : "records were")
+					.replace("{it}", count === 1 ? "it" : "them")}`,
+				{ stream, count },
+			);
+		}
+		omittedEnvelopes.conversations = 0;
+		omittedEnvelopes.projects = 0;
+		absentText.messages = { cap: 0, host: 0 };
+		absentText.project_documents = { cap: 0, host: 0 };
+		omittedFields.conversations = 0;
+		omittedFields.projects = 0;
+		omittedFields.messages = 0;
+		omittedFields.project_documents = 0;
+	};
+
 	// The conversations cursor from STATE. The run updates it when it drops a
 	// spent export reference or reads an export, so later STATE builds on it.
 	let priorCursor = readConversationsCursor(state);
+
+	// Actual conversation omissions must also block successful checkpoints,
+	// not merely withhold full-scan coverage. Successfully streamed records
+	// (including envelopes too large for a raw blob) are unaffected.
+	const conversationSkipped = new Set<string>();
+	const reportConversationOmission = async (
+		conversationId: string | null,
+		streams: readonly string[],
+		startOffset?: number,
+	) => {
+		for (const stream of streams) {
+			if (!requested.has(stream)) continue;
+			conversationSkipped.add(stream);
+			if (stream === CONVERSATIONS_STREAM) conversationsExact = false;
+			if (stream === MESSAGES_STREAM) completeMessages = false;
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason:
+					startOffset === undefined
+						? "export_conversation_incomplete"
+						: "export_oversized_conversation_incomplete",
+				message:
+					`Conversation ${conversationId ?? "(identity unavailable)"} could not be fully read, ` +
+					`so ${stream} is incomplete and was not checkpointed.`,
+				recovery_hint: {
+					action: "retry_on_connector_upgrade",
+					retryable: false,
+				},
+				diagnostics: {
+					...(conversationId === null ? {} : { conversation_id: conversationId }),
+					...(startOffset === undefined ? {} : { source_offset: startOffset }),
+				},
+			});
+		}
+	};
 
 	/**
 	 * Emit the parsed export. Callers must first confirm the archive layout
@@ -1359,23 +1859,6 @@ export async function collectAnthropic({
 					selectedProjects.push({ record, source });
 			}
 		}
-		// A source object larger than one host blob is left out with its
-		// child records and counted below; excluded objects are never
-		// serialized.
-		const oversizedConversationIds = new Set<string>();
-		const oversizedProjectIds = new Set<string>();
-		for (const [selected, ids] of [
-			[selectedConversations, oversizedConversationIds],
-			[selectedProjects, oversizedProjectIds],
-		] as const) {
-			for (let i = selected.length - 1; i >= 0; i--) {
-				const entry = selected[i];
-				if (entry && !fitsHostBlob(entry.source)) {
-					ids.add(entry.record.id);
-					selected.splice(i, 1);
-				}
-			}
-		}
 		if (requested.has(ACCOUNT_PROFILE_STREAM)) {
 			const profile = resolveExportedProfile(
 				userFiles,
@@ -1407,16 +1890,23 @@ export async function collectAnthropic({
 					},
 				);
 			}
+			// Delivered with the old mapping, but never proven complete: users.json
+			// carries no raw field that ties its roster entry to the requested
+			// organization, so a name match cannot establish identity or ownership.
 			await emitRecord(ACCOUNT_PROFILE_STREAM, {
 				id: organizationId,
 				organization_id: organizationId,
-				full_name: profile.fullName,
+				full_name:
+					profile.fullName === null
+						? null
+						: encodePdppSafeText(profile.fullName),
 				plan:
 					browserProfileAppliesToExport &&
 					profile.metadataStatus !== "mismatch" &&
 					profile.metadataStatus !== "ambiguous" &&
-					profile.fullName !== null
-						? browserProfile.plan
+					profile.fullName !== null &&
+					browserProfile.plan !== null
+						? encodePdppSafeText(browserProfile.plan)
 						: null,
 				name_source: profile.nameSource,
 				metadata_status: profile.metadataStatus,
@@ -1424,86 +1914,58 @@ export async function collectAnthropic({
 		}
 		if (wantsConversations) {
 			for (const { record: conversation, source } of selectedConversations) {
-				if (storeSourceRecords) {
-					const blob = spoolSourceRecord(source);
-					await emitRecord(
-						CONVERSATIONS_STREAM,
-						{ ...conversation, blob_ref: blob.blob_ref },
-						{
-							beforeEmit: () => emit(blob.event),
-						},
-					);
-				} else
-					await emitRecord(CONVERSATIONS_STREAM, {
-						...conversation,
-						blob_ref: OMITTED_SOURCE_BLOB_REF,
-					});
+				const blob = await spoolEnvelope(CONVERSATIONS_STREAM, () =>
+					spoolSourceRecord(source, testOverrides?.maxBlobBytes),
+				);
+				await emitSourceRecord(CONVERSATIONS_STREAM, conversation, blob, () =>
+					markDelivered(deliveredConversationIds, conversation.id, "c"),
+				);
 			}
 		}
 		if (wantsMessages) {
 			for (const message of parsed.messages) {
-				if (oversizedConversationIds.has(message.conversation_id)) continue;
 				if (
-					windowSince &&
+					Number.isFinite(windowSinceMs) &&
 					!inWindowConversationIds.has(message.conversation_id)
 				)
 					continue;
-				await emitRecord(MESSAGES_STREAM, message);
+				await emitMessage(message);
 			}
 		}
 		if (wantsProjects) {
 			for (const { record: project, source } of selectedProjects) {
-				if (storeSourceRecords) {
-					const blob = spoolSourceRecord(source);
-					await emitRecord(
-						PROJECTS_STREAM,
-						{ ...project, blob_ref: blob.blob_ref },
-						{
-							beforeEmit: () => emit(blob.event),
-						},
-					);
-				} else
-					await emitRecord(PROJECTS_STREAM, {
-						...project,
-						blob_ref: OMITTED_SOURCE_BLOB_REF,
-					});
+				const blob = await spoolEnvelope(PROJECTS_STREAM, () =>
+					spoolSourceRecord(source, testOverrides?.maxBlobBytes),
+				);
+				await emitSourceRecord(PROJECTS_STREAM, project, blob, () =>
+					markDelivered(deliveredProjectIds, project.id, "p"),
+				);
 			}
 		}
 		if (wantsDocuments) {
 			for (const doc of parsed.projectDocuments) {
-				if (oversizedProjectIds.has(doc.project_id)) continue;
-				await emitRecord(PROJECT_DOCUMENTS_STREAM, doc);
+				await emitTextRecord(PROJECT_DOCUMENTS_STREAM, doc, () =>
+					markDelivered(deliveredDocumentIds, doc.id, "d"),
+				);
 			}
 		}
+		await reportOmissions();
 		// A dropped parent item also drops its child items (a conversation's
 		// messages, a project's documents). An unparseable item skips the
 		// parent and child streams: a skipped stream keeps its prior snapshot
-		// and gets no synced_at. An oversized item gets a PROGRESS note only.
-		const dropGroups: Array<
-			[readonly string[], number, "unparseable" | "too_large"]
-		> = [
+		// and gets no synced_at. A large item is not dropped: see
+		// reportOmissions.
+		const dropGroups: Array<[readonly string[], number]> = [
 			[
 				[CONVERSATIONS_STREAM, MESSAGES_STREAM],
 				parsed.droppedConversations + unclassifiedEntries.conversations,
-				"unparseable",
 			],
 			[
 				[PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM],
 				parsed.droppedProjects + unclassifiedEntries.projects,
-				"unparseable",
-			],
-			[
-				[CONVERSATIONS_STREAM, MESSAGES_STREAM],
-				oversizedConversationIds.size,
-				"too_large",
-			],
-			[
-				[PROJECTS_STREAM, PROJECT_DOCUMENTS_STREAM],
-				oversizedProjectIds.size,
-				"too_large",
 			],
 		];
-		const skipped = new Set<string>();
+		const skipped = new Set(conversationSkipped);
 		if (conversationsSourceMissing) {
 			for (const stream of [CONVERSATIONS_STREAM, MESSAGES_STREAM]) {
 				if (!requested.has(stream)) {
@@ -1524,35 +1986,16 @@ export async function collectAnthropic({
 				});
 			}
 		}
-		for (const [streams, count, cause] of dropGroups) {
+		for (const [streams, count] of dropGroups) {
 			if (count === 0) {
 				continue;
 			}
 			const [parent] = streams;
-			const why =
-				cause === "too_large"
-					? `exceed the ${HOST_BLOB_MAX_BYTES}-byte host blob limit`
-					: "could not be parsed";
 			const parentLabel = (parent ?? CONVERSATIONS_STREAM).replaceAll("_", " ");
-			if (cause === "too_large") {
-				connectorDiagnostic("anthropic", "export_items_too_large", {
-					stream: parent,
-					count,
-					max_bytes: HOST_BLOB_MAX_BYTES,
-				});
-			}
 			await progress(
-				cause === "too_large"
-					? `${count} ${count === 1 ? "item" : "items"} of ${parentLabel} in the export ${count === 1 ? "was" : "were"} too large to import and ${count === 1 ? "was" : "were"} skipped`
-					: `${count} ${count === 1 ? "item" : "items"} of ${parentLabel} in the export could not be read and ${count === 1 ? "was" : "were"} not imported`,
+				`${count} ${count === 1 ? "item" : "items"} of ${parentLabel} in the export could not be read and ${count === 1 ? "was" : "were"} not imported`,
 				{ stream: parent ?? CONVERSATIONS_STREAM, count },
 			);
-			// An oversized item can never reach the host, so leaving it out
-			// loses no stored record. Report it here only: a SKIP_RESULT would
-			// make Desktop drop the whole stream.
-			if (cause === "too_large") {
-				continue;
-			}
 			for (const stream of streams) {
 				if (!requested.has(stream) || skipped.has(stream)) {
 					continue;
@@ -1566,10 +2009,75 @@ export async function collectAnthropic({
 						action: "retry_on_connector_upgrade",
 						retryable: false,
 					},
-					message: `${count} ${parent} item(s) in the export ${why}, so ${stream} is incomplete and was not checkpointed.`,
+					message: `${count} ${parent} item(s) in the export could not be parsed, so ${stream} is incomplete and was not checkpointed.`,
 					diagnostics: { dropped_count: count },
 				});
 			}
+		}
+		if (
+			unrestrictedMessages() &&
+			completeMessages &&
+			!ambiguousClassification &&
+			!skipped.has(MESSAGES_STREAM) &&
+			rawMessageIds.size === deliveredMessageIds.size &&
+			[...rawMessageIds].every((id) => deliveredMessageIds.has(id))
+		) {
+			await emit(
+				buildFullScanCoverageMessage(MESSAGES_STREAM, rawMessageIds.size),
+			);
+		}
+		const sameIds = (
+			raw: ReadonlySet<string>,
+			delivered: ReadonlySet<string>,
+		) =>
+			raw.size === delivered.size && [...raw].every((id) => delivered.has(id));
+		const archiveProven = archiveComplete && !ambiguousClassification;
+		// Coverage is self-measured from raw source items and the records the
+		// runtime actually accepted; it is emitted once, after the stream's
+		// last record.
+		const conversationsProven =
+			wantsConversations &&
+			unrestrictedStream(CONVERSATIONS_STREAM) &&
+			archiveProven &&
+			conversationsBoundary &&
+			conversationsExact &&
+			!skipped.has(CONVERSATIONS_STREAM) &&
+			sameIds(rawCoverageConversationIds, deliveredConversationIds);
+		const projectsProven =
+			wantsProjects &&
+			unrestrictedStream(PROJECTS_STREAM) &&
+			archiveProven &&
+			projectsExact &&
+			!skipped.has(PROJECTS_STREAM) &&
+			(rawProjectIds.size > 0 || projectsExplicitEmpty) &&
+			sameIds(rawProjectIds, deliveredProjectIds);
+		const documentsProven =
+			wantsDocuments &&
+			projectsProven &&
+			unrestrictedStream(PROJECT_DOCUMENTS_STREAM) &&
+			documentsExact &&
+			!skipped.has(PROJECT_DOCUMENTS_STREAM) &&
+			sameIds(rawDocumentIds, deliveredDocumentIds);
+		if (conversationsProven) {
+			await emit(
+				buildFullScanCoverageMessage(
+					CONVERSATIONS_STREAM,
+					rawCoverageConversationIds.size,
+				),
+			);
+		}
+		if (projectsProven) {
+			await emit(
+				buildFullScanCoverageMessage(PROJECTS_STREAM, rawProjectIds.size),
+			);
+		}
+		if (documentsProven) {
+			await emit(
+				buildFullScanCoverageMessage(
+					PROJECT_DOCUMENTS_STREAM,
+					rawDocumentIds.size,
+				),
+			);
 		}
 		const syncedAt = nowIso();
 		if (wantsConversations) {
@@ -1622,30 +2130,27 @@ export async function collectAnthropic({
 	): Promise<void> {
 		if (!readZipEntryChunk)
 			throw new Error("Anthropic incremental export reader is unavailable");
-		const entryReader = createPipelinedJsonEntryReader(
-			readZipEntryChunk,
-			entry,
-		);
-		const readValueText = async (start: number, end: number) => {
-			const valueReader = createPipelinedJsonEntryReader(
-				readZipEntryChunk,
-				entry,
-				start,
-				end,
-			);
-			const parts: string[] = [];
-			for (let offset = start; offset < end; ) {
-				const text = await valueReader(
-					entry.name,
-					offset,
-					Math.min(JSON_ENTRY_READ_CHUNK_UNITS, end - offset),
-				);
-				if (!text || text.length > end - offset)
-					throw new Error("invalid bounded conversation reread");
-				parts.push(text);
-				offset += text.length;
+		const readChunk = readZipEntryChunk;
+		const entryReader = createPipelinedJsonEntryReader(readChunk, entry);
+		// The conversations entry is not a JSON array. Projects do not depend
+		// on it, so they still import; only an archive with no projects either
+		// is unrecognized.
+		const emitProjectsWithoutConversations = async () => {
+			if (parsedProjects.projects.length === 0) {
+				await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
+				return;
 			}
-			return parts.join("");
+			completeMessages = false;
+			archiveComplete = false;
+			await emitParsed(
+				parsedProjects,
+				organizationId,
+				userFiles,
+				browserProfileAppliesToExport,
+				exportBookkeeping,
+				undefined,
+				true,
+			);
 		};
 		if (!entriesValidated) {
 			try {
@@ -1653,14 +2158,13 @@ export async function collectAnthropic({
 			} catch (error) {
 				if ((error as { code?: string })?.code !== "INVALID_JSON_ARRAY")
 					throw error;
-				await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
+				await emitProjectsWithoutConversations();
 				return;
 			}
 		}
-		const oversizedConversationIds = new Set<string>();
 		let droppedConversations = 0;
-		let oversizedConversations = 0;
 		const processConversation = async (raw: unknown) => {
+			await accountRawConversation(raw);
 			const updatedAt =
 				typeof raw === "object" && raw !== null && !Array.isArray(raw)
 					? (raw as Record<string, unknown>).updated_at
@@ -1677,114 +2181,137 @@ export async function collectAnthropic({
 				record_key: parsed.conversation.id,
 				payload: raw as Record<string, unknown>,
 			};
-			const selected =
+			if (wantsMessages) {
+				for (const message of parsed.messages) await emitMessage(message);
+			}
+			if (
 				wantsConversations &&
-				isRecordSelected?.(CONVERSATIONS_STREAM, parsed.conversation);
-			const sourceTooLarge =
-				selected && storeSourceRecords && !fitsHostBlob(source);
-			if (sourceTooLarge) {
-				oversizedConversationIds.add(parsed.conversation.id);
-				oversizedConversations += 1;
-			}
-			if (wantsMessages && !sourceTooLarge) {
-				for (const message of parsed.messages) {
-					if (!oversizedConversationIds.has(message.conversation_id))
-						await emitRecord(MESSAGES_STREAM, message);
-				}
-			}
-			if (selected && !sourceTooLarge) {
-				if (storeSourceRecords) {
-					const blob = spoolSourceRecord(source);
-					await emitRecord(
-						CONVERSATIONS_STREAM,
-						{ ...parsed.conversation, blob_ref: blob.blob_ref },
-						{
-							beforeEmit: () => emit(blob.event),
-						},
-					);
-				} else
-					await emitRecord(CONVERSATIONS_STREAM, {
-						...parsed.conversation,
-						blob_ref: OMITTED_SOURCE_BLOB_REF,
-					});
+				isRecordSelected?.(CONVERSATIONS_STREAM, parsed.conversation)
+			) {
+				const blob = await spoolEnvelope(CONVERSATIONS_STREAM, () =>
+					spoolSourceRecord(source, testOverrides?.maxBlobBytes),
+				);
+				await emitSourceRecord(
+					CONVERSATIONS_STREAM,
+					parsed.conversation,
+					blob,
+					() =>
+						markDelivered(
+							deliveredConversationIds,
+							parsed.conversation.id,
+							"c",
+						),
+				);
 			}
 		};
-		const processConversationJson = async (rawText: string) => {
-			const fields = topLevelRawFields(
-				rawText,
-				new Set([
-					"uuid",
-					"id",
-					"name",
-					"summary",
-					"created_at",
-					"updated_at",
-					"project_uuid",
-					"is_starred",
-					"chat_messages",
-				]),
-			);
-			const header: Record<string, unknown> = {};
-			for (const [key, field] of fields) {
-				if (key === "chat_messages") continue;
-				header[key] = JSON.parse(field);
+		/**
+		 * A conversation object too large to buffer. Its fields are read in one
+		 * tokenizer pass, wherever they sit in the object; its messages are
+		 * reread one at a time by offset, in created_at order; its raw envelope
+		 * is copied to the blob spool chunk by chunk. Nothing but one message
+		 * is held at once, whatever the parent's size.
+		 */
+		const processOversizedConversation = async (value: {
+			startOffset: number;
+			endOffset: number;
+		}) => {
+			const chunks = (start: number, end: number) =>
+				entryRangeChunks(readChunk, entry, start, end);
+			let scan: Awaited<ReturnType<typeof scanConversation>>;
+			try {
+				scan = await scanConversation(
+					chunks(value.startOffset, value.endOffset),
+					value.startOffset,
+					CONVERSATION_SCAN_FIELDS,
+					bufferMeter,
+					testOverrides?.inlineTextMaxUnits,
+				);
+			} catch (error) {
+				// Do not swallow host/read failures or downstream sink errors.
+				if (!(error instanceof InvalidConversationObjectError)) throw error;
+				await reportConversationOmission(
+					error.conversationId,
+					[CONVERSATIONS_STREAM, MESSAGES_STREAM],
+					value.startOffset,
+				);
+				return;
 			}
+			const header = Object.fromEntries(scan.fields);
+			const conversation = parseConversationHeader(
+				header,
+				scan.messageCount,
+				scan.overCap,
+			);
+			const chatMessagesIsArray = scan.chatMessages === "array";
+			accountConversationIdentity(
+				chatMessagesIsArray
+					? parseConversationHeader(header, 0, scan.overCap)
+					: null,
+				scan.hasDocs,
+			);
+			const messagesAccounted = accountMessageParent(
+				conversation,
+				chatMessagesIsArray,
+			);
+			if (messagesAccounted && scan.omittedMessageTimes.length > 0)
+				completeMessages = false;
+			// The scan already saw every child. Account omissions before the
+			// coarse parent gate, without rereading out-of-window messages.
+			if (
+				wantsMessages &&
+				((!chatMessagesIsArray && messageOmissionAffectsScope(null, header)) ||
+					scan.omittedMessageTimes.some((time) =>
+						messageOmissionAffectsScope(time, header),
+					))
+			)
+				await reportConversationOmission(
+					conversation?.id ?? null,
+					[MESSAGES_STREAM],
+					value.startOffset,
+				);
 			if (!isWithinTimeWindow(header.updated_at)) return;
-			const conversation = parseConversationHeader(header, 0);
 			if (!conversation) {
 				droppedConversations += 1;
 				return;
 			}
-			const messageText = fields.get("chat_messages") ?? "[]";
-			const messages: Array<{
-				index: number;
-				sortTime: number;
-				record: ReturnType<typeof parseMessage>;
-			}> = [];
-			let messageCount = 0;
-			if (messageText.trimStart().startsWith("[")) {
-				await parseJsonArrayChunks(
-					(_name, offset, length) =>
-						Promise.resolve(messageText.slice(offset, offset + length)),
-					{ name: entry.name, size: messageText.length },
-					(rawMessage) => {
-						const index = messageCount++;
-						if (
-							typeof rawMessage !== "object" ||
-							rawMessage === null ||
-							Array.isArray(rawMessage)
-						)
-							return;
-						const item = rawMessage as Record<string, unknown>;
-						const record = parseMessage(item, conversation.id);
-						if (!record) return;
-						messages.push({
-							index,
-							sortTime:
-								typeof item.created_at === "string"
-									? Date.parse(item.created_at) || 0
-									: 0,
-							record,
-						});
-					},
-					JSON_ENTRY_READ_CHUNK_UNITS,
-					{ validatedEntry: true },
+			if (wantsMessages) {
+				const ordered = [...scan.messageKeys].sort(
+					(a, b) => a.sortTime - b.sortTime || a.index - b.index,
 				);
-			}
-			conversation.message_count = messageCount;
-			messages.sort((a, b) => a.sortTime - b.sortTime || a.index - b.index);
-			for (const message of messages) {
-				if (wantsMessages && !oversizedConversationIds.has(conversation.id))
-					await emitRecord(MESSAGES_STREAM, message.record!);
+				for (const key of ordered) {
+					const parts: string[] = [];
+					let units = 0;
+					for await (const part of chunks(key.start, key.end)) {
+						parts.push(part);
+						units += part.length;
+						bufferMeter.note(scan.retainedUnits + units);
+					}
+					// The parts and their joined copy are alive together.
+					bufferMeter.note(scan.retainedUnits + 2 * units);
+					const message = parseMessage(
+						JSON.parse(parts.join("")),
+						conversation.id,
+					);
+					if (messagesAccounted) accountMessageChild(message);
+					if (message) await emitMessage(message);
+				}
 			}
 			if (
 				wantsConversations &&
 				isRecordSelected?.(CONVERSATIONS_STREAM, conversation)
-			)
-				await emitRecord(CONVERSATIONS_STREAM, {
-					...conversation,
-					blob_ref: OMITTED_SOURCE_BLOB_REF,
-				});
+			) {
+				const blob = await spoolEnvelope(CONVERSATIONS_STREAM, () =>
+					spoolEnvelopeFromChunks(
+						CONVERSATIONS_STREAM,
+						conversation.id,
+						chunks(value.startOffset, value.endOffset),
+						testOverrides?.maxBlobBytes,
+					),
+				);
+				await emitSourceRecord(CONVERSATIONS_STREAM, conversation, blob, () =>
+					markDelivered(deliveredConversationIds, conversation.id, "c"),
+				);
+			}
 		};
 		try {
 			await parseJsonArrayChunks(
@@ -1794,62 +2321,25 @@ export async function collectAnthropic({
 				JSON_ENTRY_READ_CHUNK_UNITS,
 				{
 					validatedEntry: Boolean(entriesValidated),
-					...(entriesValidated && wantsConversations
-						? { maxBufferedObjectUnits: 16 * 1024 * 1024 }
+					...(entriesValidated
+						? {
+							maxBufferedObjectUnits:
+								testOverrides?.maxBufferedObjectUnits ??
+								OVERSIZE_PARENT_UNITS,
+						}
 						: {}),
-					onOversizedObject: async (prefix, value) => {
-						if (value.serializedLowerBoundUnits <= HOST_BLOB_MAX_BYTES + 1024) {
-							const raw = await readValueText(
-								value.startOffset,
-								value.endOffset,
-							);
-							if (storeSourceRecords)
-								await processConversation(JSON.parse(raw));
-							else await processConversationJson(raw);
-							return;
-						}
-						const fields = topLevelStringFields(
-							prefix,
-							new Set(["uuid", "id", "created_at", "updated_at"]),
-						);
-						if (!isWithinTimeWindow(fields.get("updated_at"))) return;
-						const id = fields.get("uuid") || fields.get("id");
-						if (!id) {
-							droppedConversations += 1;
-							return;
-						}
-						// The conversation's consent time, so a time-bounded run
-						// selects the same conversations here as at emission.
-						const create_time = isoOrNull(fields.get("created_at"));
-						if (isRecordSelected?.(CONVERSATIONS_STREAM, { id, create_time })) {
-							oversizedConversationIds.add(id);
-							oversizedConversations += 1;
-							return;
-						}
-						const raw = await readValueText(value.startOffset, value.endOffset);
-						if (storeSourceRecords) await processConversation(JSON.parse(raw));
-						else await processConversationJson(raw);
+					onOversizedObject: async (_prefix, value) => {
+						await processOversizedConversation(value);
 					},
 				},
 			);
 		} catch (error) {
 			if ((error as { code?: string })?.code !== "INVALID_JSON_ARRAY")
 				throw error;
-			await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
+			await emitProjectsWithoutConversations();
 			return;
 		}
 		parsedProjects.droppedConversations = droppedConversations;
-		if (oversizedConversations > 0) {
-			connectorDiagnostic("anthropic", "export_items_too_large", {
-				stream: CONVERSATIONS_STREAM,
-				count: oversizedConversations,
-				max_bytes: HOST_BLOB_MAX_BYTES,
-			});
-			await progress(
-				`${oversizedConversations} ${oversizedConversations === 1 ? "conversation" : "conversations"} in the export ${oversizedConversations === 1 ? "was" : "were"} too large to import and ${oversizedConversations === 1 ? "was" : "were"} skipped`,
-				{ stream: CONVERSATIONS_STREAM, count: oversizedConversations },
-			);
-		}
 		await emitParsed(
 			parsedProjects,
 			organizationId,
@@ -2141,7 +2631,9 @@ export async function collectAnthropic({
 						entryNames: streamedArchive.entryNames,
 					}
 				: readExportZip(attempt.zipPath);
-			if (!recognized) {
+			// Projects are read from their own entries, so a missing or
+			// unreadable conversations entry does not hide them.
+			if (!recognized && projectFiles.length === 0) {
 				// No STATE: pending_export stays so the same export is reused.
 				await emitLayoutUnrecognizedSkip(emit, progress, requested, entryNames);
 				return "done";
@@ -2159,7 +2651,17 @@ export async function collectAnthropic({
 				stream: CONVERSATIONS_STREAM,
 				cursor: priorCursor,
 			});
+			completeMessages = archiveEntriesMatch(
+				attempt.zipPath,
+				(name) =>
+					name === "conversations.json" ||
+					name === "users.json" ||
+					(name.startsWith("projects/") && name.endsWith(".json")),
+			);
+			archiveComplete = completeMessages;
+			for (const file of projectFiles) accountRawProject(file.json);
 			if (streamedArchive?.conversationsEntry) {
+				conversationsBoundary = true;
 				const parsedProjects = parseExport(
 					[],
 					projectFiles.map((file) => file.json),
@@ -2178,6 +2680,15 @@ export async function collectAnthropic({
 				);
 				return "done";
 			}
+			if (Array.isArray(conversationsJson)) {
+				conversationsBoundary = true;
+				for (const raw of conversationsJson) {
+					await accountRawConversation(raw);
+				}
+			} else {
+				completeMessages = false;
+				archiveComplete = false;
+			}
 			const parsed = parseExport(
 				conversationsJson,
 				projectFiles.map((f) => f.json),
@@ -2191,6 +2702,8 @@ export async function collectAnthropic({
 					consumed_export: pendingExport,
 					last_export_requested_at: pendingExport.requested_at,
 				},
+				undefined,
+				!Array.isArray(conversationsJson),
 			);
 			return "done";
 		} finally {
@@ -2242,6 +2755,73 @@ export async function collectAnthropic({
 			return;
 		}
 
+		// Only accept present, contiguous category-local parts starting at 0.
+		// The real part-numbering contract is not captured in our fixtures;
+		// other numbering schemes fail closed. No zero-part boundary exists.
+		const categoryBoundary = (category: string) => {
+			const parts = dataFiles
+				.filter((part) => part.category === category)
+				.map((part) => part.part)
+				.sort((a, b) => a - b);
+			return parts.length > 0 && parts.every((part, index) => part === index);
+		};
+		const conversationsManifestBoundary = categoryBoundary("conversations");
+		const projectsManifestBoundary = categoryBoundary("projects");
+		// Observed in parsers.ts and __fixtures__/split-export/manifest.json:
+		// these categories have no declared stream, but their parts still
+		// require the same archive accounting as consumed categories.
+		const knownUnconsumedCategories = new Set(["memories", "design_chats"]);
+		// parsers.ts and the split-export fixture document this exact name;
+		// other files inside light_metadata still have unknown semantics.
+		const knownUnconsumedMetadataFiles = new Set(["login_history.json"]);
+		const accountedCategories = [
+			"conversations",
+			"projects",
+			"light_metadata",
+			...knownUnconsumedCategories,
+		];
+		const partitionsContiguous = accountedCategories.every(
+			(category) =>
+				!dataFiles.some((part) => part.category === category) ||
+				categoryBoundary(category),
+		);
+		archiveComplete = completeMessages =
+			manifest.version === "1.0" &&
+			Number.isSafeInteger(manifest.total_files) &&
+			manifest.total_files === dataFiles.length &&
+			dataFiles.length === manifest.data_files.length &&
+			dataFiles.every(
+				(part) =>
+					Number.isSafeInteger(part.batch_index) &&
+					part.batch_index >= 0 &&
+					Number.isSafeInteger(part.part) &&
+					part.part >= 0,
+			) &&
+			new Set(dataFiles.map((part) => part.export_url)).size ===
+				dataFiles.length &&
+			new Set(dataFiles.map((part) => part.filename)).size ===
+				dataFiles.length &&
+			partitionsContiguous &&
+			// Missing metadata is as incomplete as a partial metadata partition:
+			// conservatively withhold archive-wide proof, but keep record delivery.
+			categoryBoundary("light_metadata") &&
+			results.every(
+				(result) =>
+					result.completeJsonBoundary === true &&
+					accountedCategories.includes(result.category) &&
+					// safeJsonParse returns null when an extra entry is unreadable.
+					(!knownUnconsumedCategories.has(result.category) ||
+						result.entries.every((entry) => entry.json !== null)) &&
+					(result.category !== "light_metadata" ||
+						result.entries.every(
+							(entry) =>
+								!knownUnconsumedMetadataFiles.has(entry.name) ||
+								entry.json !== null,
+						)),
+			);
+		completeMessages &&= conversationsManifestBoundary;
+		conversationsExact &&= conversationsManifestBoundary;
+		projectsExact &&= projectsManifestBoundary;
 		const rawConversations: unknown[] = [];
 		const rawProjects: unknown[] = [];
 		const rawUserProfiles: unknown[] = [];
@@ -2253,11 +2833,73 @@ export async function collectAnthropic({
 		// in a conversations part.
 		let conversationsSourceFound = false;
 		const outOfScopeByCategory = new Map<string, number>();
+		let unaccountedEntries = false;
 		for (const result of results) {
+			const accountedMalformedConversations = new Set<unknown>();
+			// In a conversations part, a project discriminator or unmatched shape
+			// must not hide a missing or malformed conversation child list.
+			for (const entry of result.entries) {
+				const items = Array.isArray(entry.json) ? entry.json : [entry.json];
+				if (result.category === "conversations") {
+					for (const item of items) {
+						if (
+							isPlainObject(item) &&
+							!Array.isArray(item.chat_messages)
+						) {
+							// Report the named omission before shape classification can
+							// divert this conversation to projects or leave it unmatched.
+							await accountRawConversation(item);
+							accountedMalformedConversations.add(item);
+						}
+					}
+				}
+				if (
+					items.some(
+						(item) =>
+							isPlainObject(item) &&
+							Object.hasOwn(item, "chat_messages") &&
+							!Array.isArray(item.chat_messages),
+					)
+				) {
+					completeMessages = false;
+					conversationsExact = false;
+				}
+			}
 			const classified = classifyManifestPartEntries(
 				result.category,
 				result.entries,
 			);
+			unaccountedEntries ||= classified.outOfScopeEntryNames.some(
+				(name) =>
+					!knownUnconsumedCategories.has(result.category) &&
+					(result.category !== "light_metadata" ||
+						!knownUnconsumedMetadataFiles.has(name)),
+			);
+			if (
+				result.category === "projects" &&
+				classified.emptyEntryNames.length > 0
+			) {
+				projectsExplicitEmpty = true;
+			}
+			// Cross-classified records still reach the sink, but cannot enlarge
+			// another category's measured boundary or prove an empty stream.
+			if (result.category === "conversations") {
+				for (const raw of classified.conversations) {
+					if (!accountedMalformedConversations.has(raw))
+						await accountRawConversation(raw);
+				}
+			} else if (classified.conversations.length > 0) {
+				conversationsExact = false;
+				completeMessages = false;
+			}
+			if (result.category === "projects") {
+				for (const raw of classified.projects) {
+					accountRawProject(raw);
+				}
+			} else if (classified.projects.length > 0) {
+				projectsExact = false;
+				documentsExact = false;
+			}
 			rawConversations.push(...classified.conversations);
 			rawProjects.push(...classified.projects);
 			rawUserProfiles.push(...classified.userProfiles);
@@ -2316,7 +2958,9 @@ export async function collectAnthropic({
 			});
 			await progress(
 				"Part of the Claude export is not supported yet and was skipped",
-				{ stream: CONVERSATIONS_STREAM },
+				{
+					stream: CONVERSATIONS_STREAM,
+				},
 			);
 		}
 
@@ -2327,7 +2971,9 @@ export async function collectAnthropic({
 			});
 			await progress(
 				`${unclassified.length} export item(s) were not recognized and were skipped`,
-				{ stream: CONVERSATIONS_STREAM },
+				{
+					stream: CONVERSATIONS_STREAM,
+				},
 			);
 		}
 
@@ -2341,6 +2987,18 @@ export async function collectAnthropic({
 			return;
 		}
 
+		if (
+			!conversationsSourceFound ||
+			unclassified.length > 0 ||
+			unaccountedEntries
+		) {
+			completeMessages = false;
+		}
+		if (unclassified.length > 0 || unaccountedEntries) {
+			archiveComplete = false;
+		}
+		conversationsBoundary =
+			conversationsManifestBoundary && conversationsSourceFound;
 		const parsed = parseClassifiedExport(rawConversations, rawProjects);
 		await emitParsed(
 			parsed,

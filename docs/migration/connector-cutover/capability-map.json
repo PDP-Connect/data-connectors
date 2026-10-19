@@ -672,7 +672,7 @@
               "reason": "the browser exposes a day label, not a timestamp"
             }
           ],
-          "notes": "browser history is a day-granular top-50 snapshot in page order; watch_history.position preserves that order and there is no timestamp cursor",
+          "notes": "browser history is day-granular and drains in page-order batches of at most 50, resuming from the last-seen video identity; position preserves order and no watch timestamp is fabricated",
           "status": "contracted"
         }
       ]
@@ -1429,6 +1429,162 @@
           "question": "Is friend display name/avatar load-bearing for any consumer? If yes this is add-fields work requiring a batched profile lookup (Steam ISteamUser/GetPlayerSummaries supports up to 100 steamids per call, so N+1 is avoidable). If no, record as deliberate break.",
           "lead_decision": "ADD fields persona_name, avatar_url, profile_url via batched GetPlayerSummaries (100 IDs per call)."
         }
+      ]
+    },
+    {
+      "legacy_source_id": "github",
+      "legacy_connectors": [
+        "github-playwright"
+      ],
+      "connector_key": "github-browser",
+      "oci_name": "github-browser",
+      "lane": "cut-github-browser",
+      "acquisition": "signed-in browser profile -> GitHub profile/repository pages and public events/search API",
+      "browser_profile": "github_browser",
+      "tier_target": "development until the proof gate passes",
+      "scopes": [
+        {
+          "legacy_scope": "github.profile",
+          "streams": [
+            "profile"
+          ],
+          "migration": "one profile entity row",
+          "field_map": {
+            "username": "profile.username",
+            "fullName": "profile.fullName",
+            "bio": "profile.bio",
+            "company": "profile.company",
+            "location": "profile.location",
+            "website": "profile.website",
+            "avatarUrl": "profile.avatarUrl",
+            "followers": "profile.followers",
+            "following": "profile.following",
+            "repositoryCount": "profile.repositoryCount",
+            "profileUrl": "profile.profileUrl",
+            "pinnedRepositories[]": "profile.pinnedRepositories[]",
+            "organizations[]": "profile.organizations[]",
+            "achievements[]": "profile.achievements[]",
+            "contributionsLastYear": "profile.contributionsLastYear"
+          },
+          "dropped": [],
+          "status": "implemented"
+        },
+        {
+          "legacy_scope": "github.repositories",
+          "streams": [
+            "repositories"
+          ],
+          "migration": "array projection over entity rows",
+          "field_map": {
+            "repositories[]": "repositories records",
+            "repositories[].name": "repositories.name",
+            "repositories[].url": "repositories.url",
+            "repositories[].description": "repositories.description",
+            "repositories[].language": "repositories.language",
+            "repositories[].stars": "repositories.stars",
+            "repositories[].forks": "repositories.forks",
+            "repositories[].visibility": "repositories.visibility",
+            "repositories[].topics": "repositories.topics",
+            "repositories[].updatedAt": "repositories.updatedAt"
+          },
+          "dropped": [],
+          "status": "implemented"
+        },
+        {
+          "legacy_scope": "github.starred",
+          "streams": [
+            "starred"
+          ],
+          "migration": "array projection over entity rows",
+          "field_map": {
+            "starred[]": "starred records",
+            "starred[].fullName": "starred.fullName",
+            "starred[].url": "starred.url",
+            "starred[].description": "starred.description",
+            "starred[].language": "starred.language",
+            "starred[].stars": "starred.stars",
+            "starred[].updatedAt": "starred.updatedAt"
+          },
+          "dropped": [],
+          "status": "implemented"
+        },
+        {
+          "legacy_scope": "github.events",
+          "streams": [
+            "events"
+          ],
+          "migration": "array projection over entity rows within the declared public retention window",
+          "field_map": {
+            "events[]": "events records",
+            "events[].id": "events.id",
+            "events[].type": "events.type",
+            "events[].createdAt": "events.createdAt",
+            "events[].repo": "events.repo",
+            "events[].repoUrl": "events.repoUrl",
+            "events[].action": "events.action",
+            "events[].title": "events.title",
+            "events[].body": "events.body",
+            "events[].url": "events.url",
+            "events[].branch": "events.branch",
+            "events[].commits": "events.commits",
+            "events[].isPublic": "events.isPublic"
+          },
+          "dropped": [],
+          "status": "implemented"
+        },
+        {
+          "legacy_scope": "github.contributions",
+          "streams": [
+            "contributions"
+          ],
+          "migration": "days from recordType=day and legacy aggregate fields from recordType=summary",
+          "field_map": {
+            "days[]": "contributions rows where recordType=day",
+            "days[].date": "contributions.date",
+            "days[].count": "contributions.count",
+            "days[].level": "contributions.level",
+            "totalContributionsLastYear": "contributions.totalContributionsLastYear where recordType=summary",
+            "yearTotals[]": "contributions.yearTotals[] where recordType=summary",
+            "monthlyTotals[]": "contributions.monthlyTotals[] where recordType=summary",
+            "topDay": "contributions.topDay where recordType=summary"
+          },
+          "dropped": [],
+          "status": "implemented"
+        },
+        {
+          "legacy_scope": "github.history",
+          "streams": [
+            "history"
+          ],
+          "migration": "split the entity rows by type into the legacy issues and pullRequests arrays",
+          "field_map": {
+            "issues[]": "history rows where type=issue",
+            "pullRequests[]": "history rows where type=pr",
+            "*.id": "history.id",
+            "*.number": "history.number",
+            "*.title": "history.title",
+            "*.body": "history.body",
+            "*.state": "history.state",
+            "*.createdAt": "history.createdAt",
+            "*.updatedAt": "history.updatedAt",
+            "*.closedAt": "history.closedAt",
+            "*.mergedAt": "history.mergedAt",
+            "*.url": "history.url",
+            "*.repo": "history.repo",
+            "*.repoUrl": "history.repoUrl",
+            "*.labels": "history.labels",
+            "*.comments": "history.comments",
+            "*.reactionsTotal": "history.reactionsTotal",
+            "*.isDraft": "history.isDraft"
+          },
+          "dropped": [],
+          "status": "implemented"
+        }
+      ],
+      "semantic_notes": [
+        "This is the browser-session replacement. It intentionally uses connector_key github-browser, matching the manifest; github_browser is the local runtime/profile registration name. The separate PAT/API connector remains connector_key github.",
+        "Aggregate legacy envelopes are reconstructed by projection over stable entity rows. DETAIL_COVERAGE and STATE are emitted only after positive source-bound end evidence; partial rows remain ingestible without a complete checkpoint.",
+        "Events are complete only for GitHub’s declared public-retention window (up to 300); history is bounded to 1,000 results per type. These bounds do not imply lifetime completeness."
       ]
     }
   ],

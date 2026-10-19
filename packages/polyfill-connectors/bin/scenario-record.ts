@@ -1823,12 +1823,13 @@ function runRecordSubprocess(args: {
 			}
 		};
 
-		child.stdout.on("data", (chunk: Buffer) => {
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
 			// Activity — resets the inactivity window (a no-op while suspended
 			// for a pending INTERACTION; see `answerInteraction`/`handleParsedLine`
 			// above).
 			watchdog.touch();
-			stdoutBuffer += chunk.toString();
+			stdoutBuffer += chunk;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
 				const line = stdoutBuffer.slice(0, newlineIndex);
@@ -1839,9 +1840,10 @@ function runRecordSubprocess(args: {
 				newlineIndex = stdoutBuffer.indexOf("\n");
 			}
 		});
-		child.stderr.on("data", (chunk: Buffer) => {
+		child.stderr.setEncoding("utf8");
+		child.stderr.on("data", (chunk: string) => {
 			watchdog.touch();
-			stderr += chunk.toString();
+			stderr += chunk;
 		});
 		child.on("error", (err) => {
 			watchdog.dispose();

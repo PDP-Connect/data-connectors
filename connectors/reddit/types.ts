@@ -50,18 +50,14 @@ export interface RedditFetchResult {
 export interface SubmittedRecord {
 	created_utc: string;
 	domain: string | null;
-	gilded: number | null;
 	id: string;
 	is_self: boolean | null;
-	num_comments: number | null;
 	over_18: boolean | null;
 	permalink: string | null;
-	score: number | null;
 	selftext: string | null;
 	selftext_len: number | null;
 	subreddit: string | null;
 	title: string | null;
-	upvote_ratio: number | null;
 	url: string | null;
 	[field: string]: unknown;
 }
@@ -71,13 +67,11 @@ export interface CommentRecord {
 	body: string | null;
 	body_len: number | null;
 	created_utc: string;
-	gilded: number | null;
 	id: string;
 	is_top_level: boolean | null;
 	link_id: string | null;
 	parent_id: string | null;
 	permalink: string | null;
-	score: number | null;
 	subreddit: string | null;
 	[field: string]: unknown;
 }
@@ -107,15 +101,47 @@ export interface VoteRecord {
 	id: string;
 	is_post: boolean;
 	kind: string;
-	num_comments: number | null;
 	permalink: string | null;
-	score: number | null;
 	subreddit: string | null;
 	title: string | null;
 	url: string | null;
 	[field: string]: unknown;
 }
 
-export interface StreamCursor {
-	last_created_utc?: number;
+// ─── Current-stats record shapes ────────────────────────────────────────
+//
+// Volatile, source-reported metrics live in their own `<parent>_stats`
+// streams, keyed by the SAME Reddit fullname as the parent entity stream. A
+// stats record is the metrics as the source last reported them; when they were
+// read is run metadata (`emitted_at` / freshness), never a field here.
+// `created_utc` is the item's own creation time, kept as the stable source
+// time for consent/order. It is not a measurement time.
+
+/** `submitted_stats` stream record. */
+export interface SubmittedStatsRecord {
+	created_utc: string;
+	gilded: number | null;
+	id: string;
+	num_comments: number | null;
+	score: number | null;
+	upvote_ratio: number | null;
+	[field: string]: unknown;
+}
+
+/** `comments_stats` stream record. */
+export interface CommentStatsRecord {
+	created_utc: string;
+	gilded: number | null;
+	id: string;
+	score: number | null;
+	[field: string]: unknown;
+}
+
+/** Shared shape for `upvoted_stats` / `downvoted_stats` / `hidden_stats`. */
+export interface VoteStatsRecord {
+	created_utc: string;
+	id: string;
+	num_comments: number | null;
+	score: number | null;
+	[field: string]: unknown;
 }

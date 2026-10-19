@@ -14,14 +14,20 @@ const manifest = (name) =>
 test("PageShim eligibility follows declared runtime binding requirements", () => {
 	assert.deepEqual(pageShimConnectors(fileURLToPath(new URL("../..", import.meta.url))), [
 		"anthropic",
+		"anthropic_live",
 		"chatgpt",
 		"discord_browser",
 		"github_browser",
+		"icloud_notes",
+		"linkedin",
+		"meta",
 		"oura_browser",
+		"spotify",
 		"strava_browser",
 		"x_browser",
+		"youtube",
 	]);
-	for (const name of ["strava_browser", "github_browser", "oura_browser", "chatgpt", "anthropic", "x_browser", "discord_browser"]) {
+	for (const name of ["strava_browser", "github_browser", "icloud_notes", "oura_browser", "chatgpt", "anthropic", "anthropic_live", "x_browser", "discord_browser", "meta", "spotify", "youtube", "linkedin"]) {
 		const connector = manifest(name);
 		assert.equal(isPageShimCapable(connector), true, name);
 		assert.equal(connector.mobile.pageshim.enabled, undefined, `${name} must not declare eligibility`);
@@ -137,8 +143,12 @@ test("host-neutral features preserve PageShim eligibility and are schema enums",
 	assert.equal(isPageShimCapable(capabilityConnector), true);
 });
 
-test("all seven declared mobile connectors remain PageShim eligible", () => {
+test("every declared mobile connector remains PageShim eligible", () => {
 	const expected = {
+		linkedin: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		discord_browser: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_script_evaluation", "page_navigation"],
@@ -153,6 +163,9 @@ test("all seven declared mobile connectors remain PageShim eligible", () => {
 				"host_http_request",
 			],
 		},
+		icloud_notes: {
+			browser: ["page_script_evaluation", "page_navigation"],
+		},
 		oura_browser: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_script_evaluation", "page_navigation"],
@@ -165,9 +178,25 @@ test("all seven declared mobile connectors remain PageShim eligible", () => {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
 		},
+		anthropic_live: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation"],
+		},
 		x_browser: {
 			network: ["same_origin_page_fetch"],
 			browser: ["page_script_evaluation", "page_navigation"],
+		},
+		youtube: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		meta: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation", "page_condition_wait"],
+		},
+		spotify: {
+			network: ["same_origin_page_fetch"],
+			browser: ["page_navigation", "page_script_evaluation"],
 		},
 		anthropic: {
 			network: ["same_origin_page_fetch"],

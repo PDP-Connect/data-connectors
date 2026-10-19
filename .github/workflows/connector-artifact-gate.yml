@@ -1,7 +1,7 @@
 # Copyright The PDP-Connect Contributors
 # SPDX-License-Identifier: Apache-2.0
 
-# Exercise the OCI build-and-verify path on every pull request, WITHOUT any
+# Exercise the OCI build-and-verify path on every pull request into main, WITHOUT any
 # ability to publish.
 #
 # The reviewer's finding on #97: five PR-triggered workflows were green at the
@@ -19,7 +19,10 @@
 name: Connector artifact gate
 
 on:
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
   pull_request:
+    branches: [main]
   push:
     branches: [main]
 
@@ -188,6 +191,9 @@ jobs:
 
       - name: Publish allowlist and workflow contract tests
         run: node --test scripts/connector-publish-allowlist.test.mjs scripts/select-publish-target.test.mjs scripts/select-publish-connectors.test.mjs scripts/check-publish-version-bumps.test.mjs
+
+      - name: Shared source declarations and Claude publication compatibility
+        run: node --test packages/connector-installer-core/source-declaration.test.mjs scripts/anthropic-claude-source-declaration.test.mjs
 
       - name: Artifact contract tests, including the negative controls
         run: node --test scripts/connector-oci-artifact.test.mjs

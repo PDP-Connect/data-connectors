@@ -7,12 +7,15 @@
 
 import type {
 	CommentRecord,
+	CommentStatsRecord,
 	RedditChild,
 	RedditChildData,
 	RedditListing,
 	SavedRecord,
 	SubmittedRecord,
+	SubmittedStatsRecord,
 	VoteRecord,
+	VoteStatsRecord,
 } from "./types.ts";
 
 // ─── Constants ──────────────────────────────────────────────────────────
@@ -20,9 +23,7 @@ import type {
 /** Reddit's old web JSON caps per-page at 100 for listings. */
 export const PAGE_LIMIT = 100;
 
-/** Safety cap on pagination loops. 100 pages * 100 items = 10k records,
- *  plenty for any single stream in one run; incremental sync keeps
- *  subsequent runs cheap. */
+/** Safety cap on pagination loops. 100 pages * 100 items = 10k records. */
 export const MAX_PAGES = 100;
 
 /** Bound on emitted text-field length. Reddit permits up to 40k chars in
@@ -142,10 +143,6 @@ export function submittedRecord(
 		selftext_len: textLen(d.selftext ?? null),
 		is_self: d.is_self ?? null,
 		over_18: d.over_18 ?? null,
-		score: d.score ?? null,
-		num_comments: d.num_comments ?? null,
-		upvote_ratio: d.upvote_ratio ?? null,
-		gilded: d.gilded ?? null,
 		created_utc: isoFromUnix(d.created_utc) ?? "",
 	};
 }
@@ -166,8 +163,6 @@ export function commentRecord(
 		parent_id: d.parent_id ?? null,
 		is_top_level: isTopLevelComment(d.parent_id ?? null),
 		permalink: absolutePermalink(d.permalink),
-		score: d.score ?? null,
-		gilded: d.gilded ?? null,
 		created_utc: isoFromUnix(d.created_utc) ?? "",
 	};
 }
@@ -216,6 +211,41 @@ export function voteRecord(
 		body_len: textLen(d.body ?? d.selftext ?? null),
 		url: d.url ?? null,
 		permalink: absolutePermalink(d.permalink),
+		created_utc: isoFromUnix(d.created_utc) ?? "",
+	};
+}
+
+// ─── Current-stats builders ─────────────────────────────────────────────
+//
+// One record per parent entity, keyed by the same fullname, carrying only the
+// source's volatile counters. No clock of ours goes in (spec §5.2): when the
+// counters were read is the envelope's `emitted_at`.
+
+export function submittedStatsRecord(d: RedditChildData): SubmittedStatsRecord {
+	return {
+		id: d.name ?? "",
+		score: d.score ?? null,
+		num_comments: d.num_comments ?? null,
+		upvote_ratio: d.upvote_ratio ?? null,
+		gilded: d.gilded ?? null,
+		created_utc: isoFromUnix(d.created_utc) ?? "",
+	};
+}
+
+export function commentStatsRecord(d: RedditChildData): CommentStatsRecord {
+	return {
+		id: d.name ?? "",
+		score: d.score ?? null,
+		gilded: d.gilded ?? null,
+		created_utc: isoFromUnix(d.created_utc) ?? "",
+	};
+}
+
+/** Shared by the upvoted/downvoted/hidden stats streams. */
+export function voteStatsRecord(c: RedditChild): VoteStatsRecord {
+	const d = c.data;
+	return {
+		id: d.name ?? "",
 		score: d.score ?? null,
 		num_comments: d.num_comments ?? null,
 		created_utc: isoFromUnix(d.created_utc) ?? "",
@@ -250,17 +280,19 @@ export type RedditListingOrder = "action" | "created";
  *
  * For `created`-ordered listings the first child at or below the cursor
  * proves every later child is older too (the listing is sorted by the very
- * field being compared), so stopping there is correct and keeps incremental
- * runs cheap.
+ * field being compared), so stopping there is correct when a caller supplies
+ * a cursor. Reddit collection currently passes null to revisit every listed
+ * observation.
  *
  * For `action`-ordered listings that inference is invalid, and acting on it
  * loses data. `created_utc` is NOT the sort key, so a single old item near
- * the top says nothing about what follows it. The pre-fix code stopped on the
- * first such item, which for `upvoted` meant halting on item one as soon as
- * the owner upvoted anything older than the stored high-water mark — the
- * observed defect. These streams therefore always walk the full listing and
- * rely on the caller deduping by fullname (`t3_`/`t1_` ids are stable), which
- * is cheap because the walk is bounded by Reddit's own end-of-listing.
+ * the top says nothing about what follows it. Stopping at the first such item
+ * halts the walk as soon as the owner acts on something old: upvoting a 2015
+ * post today puts it at rank 1, so a stop there skips later rows whose items
+ * are newer than the cursor. These streams therefore always walk the full
+ * listing and rely on the caller deduping by fullname (`t3_`/`t1_` ids are
+ * stable), which is cheap because the walk is bounded by Reddit's own
+ * end-of-listing.
  */
 export function appendNewChildren(
 	children: readonly RedditChild[],
@@ -325,33 +357,4 @@ export function nextAfter(
 ): string | null {
 	const after = listing?.data?.after;
 	return after ? after : null;
-}
-
-/** Max created_utc epoch across a batch of children, clamped at `current`.
- *  Used to advance the per-stream STATE cursor. */
-export function maxCreatedEpoch(
-	children: readonly RedditChild[],
-	current: number,
-): number {
-	let max = current;
-	for (const c of children) {
-		const epoch = Number(c?.data?.created_utc ?? 0);
-		if (Number.isFinite(epoch) && epoch > max) {
-			max = epoch;
-		}
-	}
-	return max;
-}
-
-/** Resolve the since-cursor for a stream from the persisted state blob. */
-export function sinceFromState(
-	state: Record<string, unknown>,
-	streamName: string,
-): number | null {
-	const cursor = state[streamName] as { last_created_utc?: number } | undefined;
-	const raw = cursor?.last_created_utc;
-	if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
-		return null;
-	}
-	return raw;
 }

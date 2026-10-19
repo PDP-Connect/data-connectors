@@ -45,7 +45,9 @@ export function readOwnAccount(doc: Document = document): {
 			),
 	);
 	const menuItem = Array.from(
-		doc.querySelectorAll("ytd-multi-page-menu-renderer ytd-compact-link-renderer"),
+		doc.querySelectorAll(
+			"ytd-multi-page-menu-renderer ytd-compact-link-renderer",
+		),
 	).find((item) => {
 		const label = item
 			.querySelector("#label")
@@ -69,18 +71,76 @@ export function readOwnAccount(doc: Document = document): {
 	);
 	const href = handle?.startsWith("@")
 		? `/${handle}`
-		: link?.getAttribute("href") ?? menuLink?.getAttribute("href");
+		: (link?.getAttribute("href") ?? menuLink?.getAttribute("href"));
 	const email =
 		header.querySelector("#email, [id*='email']")?.textContent?.trim() || null;
 	const url = href ? new URL(href, "https://www.youtube.com") : null;
 	return {
 		channel_url:
 			url?.origin === "https://www.youtube.com" &&
-				!/\/(edit|create|monetization|studio)(?:[/?]|$)/.test(url.pathname)
+			!/\/(edit|create|monetization|studio)(?:[/?]|$)/.test(url.pathname)
 				? url.href
 				: null,
 		email,
 	};
+}
+
+/**
+ * Opens the avatar menu's "Switch account" view, where YouTube shows the
+ * signed-in Google account's email. Resolves true only once the view's own
+ * header is present, not merely after the click: the handler may sit on the
+ * item renderer or on its nested endpoint anchor, so the anchor is clicked
+ * (the event still bubbles to a renderer-level handler).
+ */
+export async function openSwitchAccount(
+	doc: Document = document,
+	timeoutMs = 4_000,
+): Promise<boolean> {
+	const item = Array.from(
+		doc.querySelectorAll<HTMLElement>(
+			"ytd-multi-page-menu-renderer ytd-compact-link-renderer",
+		),
+	).find(
+		(candidate) =>
+			candidate
+				.querySelector("#label")
+				?.textContent?.trim()
+				.replace(/\s+/g, " ")
+				.toLowerCase() === "switch account",
+	);
+	if (!item) return false;
+	(item.querySelector<HTMLElement>("a#endpoint, #endpoint") ?? item).click();
+	// Inline, no helper bindings: this reader is serialized into the page.
+	const headerSelector = "ytd-google-account-header-renderer";
+	if (doc.querySelector(headerSelector)) return true;
+	const view = doc.defaultView;
+	if (!view) return false;
+	return new Promise<boolean>((resolve) => {
+		const observer = new view.MutationObserver(() => {
+			if (!doc.querySelector(headerSelector)) return;
+			observer.disconnect();
+			resolve(true);
+		});
+		observer.observe(doc, { childList: true, subtree: true });
+		view.setTimeout(() => {
+			observer.disconnect();
+			resolve(doc.querySelector(headerSelector) !== null);
+		}, timeoutMs);
+	});
+}
+
+/**
+ * The signed-in account's email from the Switch account view's own header.
+ * Only that header is read: the account list below it names other accounts.
+ */
+export function readGoogleAccountEmail(doc: Document = document): string | null {
+	const text = doc
+		.querySelector("ytd-google-account-header-renderer #email")
+		?.textContent?.trim();
+	// Inline: these readers are serialized into the page without module scope.
+	return text && /^[^\s@<>"']+@[^\s@<>"'.]+\.[^\s@<>"']+$/.test(text)
+		? text
+		: null;
 }
 
 export function readChannelPage(doc: Document = document): {
@@ -145,15 +205,15 @@ export function readChannelAbout(doc: Document = document): {
 		.filter((node) => node.children.length === 0)
 		.map((node) => node.textContent?.trim() ?? "");
 	const statsText = statsRoot
-		? Array.from(statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"))
+		? Array.from(
+				statsRoot.querySelectorAll("yt-formatted-string, span, td, dd"),
+			)
 				.filter((node) => node.children.length === 0)
 				.map((node) => node.textContent?.trim() ?? "")
 		: [];
 	const joined = text.find((value) => /^joined\s+/i.test(value));
 	const country =
-		about
-			?.querySelector('[id*="country"]')
-			?.textContent?.trim() || null;
+		about?.querySelector('[id*="country"]')?.textContent?.trim() || null;
 	return {
 		joined_at: joined?.replace(/^joined\s+/i, "") ?? null,
 		description:
@@ -164,12 +224,15 @@ export function readChannelAbout(doc: Document = document): {
 				?.textContent?.trim() || null,
 		country,
 		subscriber_count_text:
-			statsText.find((value) => /subscriber/i.test(value) && /\d/.test(value)) ??
-			null,
+			statsText.find(
+				(value) => /subscriber/i.test(value) && /\d/.test(value),
+			) ?? null,
 		view_count_text:
-			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /view/i.test(value) && /\d/.test(value)) ??
+			null,
 		video_count_text:
-			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ?? null,
+			statsText.find((value) => /video/i.test(value) && /\d/.test(value)) ??
+			null,
 	};
 }
 
@@ -182,13 +245,13 @@ export function readSubscriptions(doc: Document = document): Array<{
 	description: string | null;
 	is_verified: boolean | null;
 	notifications: boolean | null;
-	subscriber_count_text: string | null;
+	subscriber_count_text?: string;
 }> {
 	return Array.from(doc.querySelectorAll("ytd-channel-renderer"))
 		.flatMap((node) => {
 			const title = node
 				.querySelector(
-					"ytd-channel-name yt-formatted-string#text, ytd-channel-name yt-formatted-string",
+					"ytd-channel-name#channel-title yt-formatted-string#text, ytd-channel-name yt-formatted-string#text, ytd-channel-name yt-formatted-string",
 				)
 				?.textContent?.trim();
 			const href = node
@@ -201,9 +264,12 @@ export function readSubscriptions(doc: Document = document): Array<{
 			if (url.origin !== "https://www.youtube.com") return [];
 			const badgeArea = node.querySelector("ytd-channel-name");
 			const bell = node.querySelector<HTMLButtonElement>(
-				'ytd-subscription-notification-toggle-button-renderer-next button, [aria-label*="notifications"]',
+				'ytd-subscription-notification-toggle-button-renderer-next button, [aria-label*="All notifications"], yt-button-shape[aria-label*="notification"] button, [aria-label*="notifications"]',
 			);
 			const bellLabel = bell?.getAttribute("aria-label")?.toLowerCase() ?? "";
+			const subscriberCountText = node
+				.querySelector("#metadata span#video-count")
+				?.textContent?.trim();
 			return [
 				{
 					channel_url: url.href,
@@ -219,12 +285,15 @@ export function readSubscriptions(doc: Document = document): Array<{
 						node
 							.querySelector("yt-formatted-string#description")
 							?.textContent?.trim() || null,
-					subscriber_count_text:
-						node
-							.querySelector("#metadata span#video-count")
-							?.textContent?.trim() || null,
+					...(subscriberCountText
+						? { subscriber_count_text: subscriberCountText }
+						: {}),
 					is_verified: badgeArea
-						? Boolean(badgeArea.querySelector("badge-shape, .badge-shape"))
+						? Boolean(
+								badgeArea.querySelector(
+									"badge-shape, .badge-shape, ytd-badge-supported-renderer badge-shape",
+								),
+							)
 						: null,
 					notifications: /all notifications/.test(bellLabel)
 						? true
@@ -241,16 +310,46 @@ export function readPlaylistLinks(
 	doc: Document = document,
 ): Array<{ id: string; url: string }> {
 	const seen = new Set<string>();
-	const links = Array.from(
-		doc.querySelectorAll<HTMLAnchorElement>('a[href*="playlist?list="]'),
+	const playlistCards = Array.from(
+		doc.querySelectorAll(
+			"ytd-playlist-renderer, ytd-grid-playlist-renderer, ytd-compact-playlist-renderer, yt-lockup-view-model",
+		),
 	);
+	const links = playlistCards.length
+		? playlistCards.flatMap((card) => {
+				const link = Array.from(
+					card.querySelectorAll<HTMLAnchorElement>('a[href*="list="]'),
+				).find((anchor) => {
+					const url = new URL(
+						anchor.getAttribute("href") ?? "",
+						"https://www.youtube.com",
+					);
+					return (
+						url.origin === "https://www.youtube.com" &&
+						url.pathname === "/playlist" &&
+						Boolean(url.searchParams.get("list"))
+					);
+				});
+				if (!link) return [];
+				if (
+					card.matches("yt-lockup-view-model") &&
+					!card.querySelector("yt-collection-thumbnail-view-model")
+				)
+					return [];
+				return [link];
+			})
+		: Array.from(doc.querySelectorAll<HTMLAnchorElement>('a[href*="list="]'));
 	return links
 		.flatMap((a) => {
 			const url = new URL(
 				a.getAttribute("href") ?? "",
 				"https://www.youtube.com",
 			);
-			if (url.origin !== "https://www.youtube.com") return [];
+			if (
+				url.origin !== "https://www.youtube.com" ||
+				url.pathname !== "/playlist"
+			)
+				return [];
 			const id = url.searchParams.get("list");
 			if (!id || id === "LL" || id === "WL" || seen.has(id)) return [];
 			seen.add(id);
@@ -292,13 +391,35 @@ export function readPlaylistHeader(doc: Document = document): {
 	};
 }
 
+export interface HistoryVideoPage {
+	readonly offset: number;
+	readonly totalRows: number;
+	readonly rows: readonly (BrowserVideo | null)[];
+}
+
+interface HistoryVideoPageRequest {
+	readonly mode: "history";
+	readonly offset: number;
+	readonly limit: number;
+}
+
 export function readVideos(
 	mode: "playlist" | "history",
+	doc?: Document,
+): BrowserVideo[];
+export function readVideos(request: HistoryVideoPageRequest): HistoryVideoPage;
+export function readVideos(
+	modeOrRequest: "playlist" | "history" | HistoryVideoPageRequest,
 	doc: Document = document,
-): BrowserVideo[] {
+): BrowserVideo[] | HistoryVideoPage {
+	const pageRequest = typeof modeOrRequest === "object" ? modeOrRequest : null;
+	const mode: "playlist" | "history" = pageRequest
+		? pageRequest.mode
+		: (modeOrRequest as "playlist" | "history");
+	const source = pageRequest ? document : doc;
 	const groups: Array<{ root: ParentNode; label: string | null }> =
 		mode === "history"
-			? Array.from(doc.querySelectorAll("ytd-item-section-renderer")).map(
+			? Array.from(source.querySelectorAll("ytd-item-section-renderer")).map(
 					(root) => ({
 						root,
 						label:
@@ -309,97 +430,133 @@ export function readVideos(
 								?.textContent?.trim() || null,
 					}),
 				)
-			: [{ root: doc, label: null }];
-	const result: BrowserVideo[] = [];
-	for (const { root, label } of groups) {
+			: [{ root: source, label: null }];
+	const nodeGroups = groups.map(({ root, label }) => {
 		const nodes =
 			mode === "history"
-				? root.querySelectorAll("yt-lockup-view-model")
+				? Array.from(
+						root.querySelectorAll("yt-lockup-view-model, ytd-video-renderer"),
+					).filter(
+						(node) =>
+							!node.matches("ytd-video-renderer") ||
+							!node.querySelector("yt-lockup-view-model"),
+					)
 				: root.querySelectorAll(
 						"yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer",
 					);
-		for (const node of nodes) {
-			const link = node.querySelector<HTMLAnchorElement>(
-				'a.yt-lockup-view-model__content-image, a.ytLockupViewModelContentImage, a.yt-lockup-metadata-view-model__title, a.ytLockupMetadataViewModelTitle, a[href*="/watch?"], a[href*="/shorts/"]',
-			);
-			const href = link?.getAttribute("href");
-			if (!href) continue;
-			const video_url = new URL(href, "https://www.youtube.com").href;
-			if (new URL(video_url).origin !== "https://www.youtube.com") continue;
-			const contentHost = (node.getAttribute("class") ?? "").includes(
-				"content-id-",
-			)
-				? node
-				: node.querySelector('[class*="content-id-"]');
-			const classId = Array.from(contentHost?.classList ?? [])
-				.find((name) => name.startsWith("content-id-"))
-				?.slice(11);
-			const video_id =
-				classId ||
-				new URL(video_url).searchParams.get("v") ||
-				/\/shorts\/([\w-]+)/.exec(video_url)?.[1] ||
-				null;
-			const titleNode = node.querySelector(
-				"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title",
-			);
-			const video_title =
-				titleNode?.getAttribute("title")?.trim() ||
-				titleNode?.textContent?.trim() ||
-				null;
-			const channelLink = node.querySelector<HTMLAnchorElement>(
-				'a[href*="/@"], a[href*="/channel/"]',
-			);
-			const avatar = node.querySelector('[aria-label^="Go to channel"]');
-			const spans = Array.from(
-				node.querySelectorAll(
-					".yt-content-metadata-view-model__metadata-text, .ytContentMetadataViewModelMetadataText",
-				),
-			);
-			const channel_title =
-				avatar
-					?.getAttribute("aria-label")
-					?.replace(/^Go to channel\s+/i, "")
-					.trim() ||
-				node
-					.querySelector("ytd-channel-name a, #channel-name a")
-					?.textContent?.trim() ||
-				spans[0]?.textContent?.trim() ||
-				null;
-			const views_text =
-				spans
-					.findLast((s) => /view/i.test(s.textContent ?? ""))
-					?.textContent?.trim() || null;
-			result.push({
-				video_id,
-				video_url,
-				video_title,
-				channel_title,
-				channel_url: channelLink?.getAttribute("href")
-					? new URL(
-							channelLink.getAttribute("href")!,
-							"https://www.youtube.com",
-						).href
-					: null,
-				duration_text:
-					node
-						.querySelector(
-							"ytd-thumbnail-overlay-time-status-renderer span, .ytBadgeShapeText, .badge-shape-wiz__text",
-						)
-						?.textContent?.trim() || null,
-				thumbnail_url:
-					node.querySelector<HTMLImageElement>(
-						"img.yt-core-image, ytd-thumbnail img, img#img",
-					)?.src ?? null,
-				watched_date_label: label,
-				views_text,
-				description:
-					node
-						.querySelector(
-							".yt-content-metadata-view-model__metadata-text-max-lines-2, .ytContentMetadataViewModelMetadataTextMaxLines2",
-						)
-						?.textContent?.trim() || null,
-			});
+		return { nodes, label };
+	});
+	const totalRows = nodeGroups.reduce(
+		(count, group) => count + group.nodes.length,
+		0,
+	);
+	const first = pageRequest ? Math.max(0, pageRequest.offset) : 0;
+	const last = pageRequest
+		? Math.min(totalRows, first + Math.max(1, pageRequest.limit))
+		: totalRows;
+	const result: Array<BrowserVideo | null> = [];
+	for (let globalIndex = first; globalIndex < last; globalIndex += 1) {
+		let localIndex = globalIndex;
+		let node: Element | null = null;
+		let label: string | null = null;
+		for (const group of nodeGroups) {
+			if (localIndex < group.nodes.length) {
+				node = group.nodes[localIndex] ?? null;
+				label = group.label;
+				break;
+			}
+			localIndex -= group.nodes.length;
 		}
+		if (!node) {
+			if (pageRequest) result.push(null);
+			continue;
+		}
+		const link = node.querySelector<HTMLAnchorElement>(
+			'a.yt-lockup-view-model__content-image, a.ytLockupViewModelContentImage, a.yt-lockup-metadata-view-model__title, a.ytLockupMetadataViewModelTitle, a[href*="/watch?"], a[href*="/shorts/"]',
+		);
+		const href = link?.getAttribute("href");
+		if (!href) {
+			if (pageRequest) result.push(null);
+			continue;
+		}
+		const video_url = new URL(href, "https://www.youtube.com").href;
+		if (new URL(video_url).origin !== "https://www.youtube.com") {
+			if (pageRequest) result.push(null);
+			continue;
+		}
+		const contentHost = (node.getAttribute("class") ?? "").includes(
+			"content-id-",
+		)
+			? node
+			: node.querySelector('[class*="content-id-"]');
+		const classId = Array.from(contentHost?.classList ?? [])
+			.find((name) => name.startsWith("content-id-"))
+			?.slice(11);
+		const video_id =
+			classId ||
+			new URL(video_url).searchParams.get("v") ||
+			/\/shorts\/([\w-]+)/.exec(video_url)?.[1] ||
+			null;
+		const titleNode = node.querySelector(
+			"h3.yt-lockup-metadata-view-model__heading-reset, h3.ytLockupMetadataViewModelHeadingReset, h3, #video-title, a#video-title span, span#video-title, a#video-title yt-formatted-string",
+		);
+		const video_title =
+			titleNode?.getAttribute("title")?.trim() ||
+			titleNode?.textContent?.trim() ||
+			null;
+		const channelLink = node.querySelector<HTMLAnchorElement>(
+			'a[href*="/@"], a[href*="/channel/"]',
+		);
+		const avatar = node.querySelector('[aria-label^="Go to channel"]');
+		const spans = Array.from(
+			node.querySelectorAll(
+				".yt-content-metadata-view-model__metadata-text, .ytContentMetadataViewModelMetadataText",
+			),
+		);
+		const channel_title =
+			avatar
+				?.getAttribute("aria-label")
+				?.replace(/^Go to channel\s+/i, "")
+				.trim() ||
+			node
+				.querySelector("ytd-channel-name a, #channel-name a")
+				?.textContent?.trim() ||
+			spans[0]?.textContent?.trim() ||
+			null;
+		const views_text =
+			spans
+				.findLast((s) => /view/i.test(s.textContent ?? ""))
+				?.textContent?.trim() || null;
+		result.push({
+			video_id,
+			video_url,
+			video_title,
+			channel_title,
+			channel_url: channelLink?.getAttribute("href")
+				? new URL(channelLink.getAttribute("href")!, "https://www.youtube.com")
+						.href
+				: null,
+			duration_text:
+				node
+					.querySelector(
+						"ytd-thumbnail-overlay-time-status-renderer span, .ytBadgeShapeText, .badge-shape-wiz__text",
+					)
+					?.textContent?.trim() || null,
+			thumbnail_url:
+				node.querySelector<HTMLImageElement>(
+					"img.yt-core-image, ytd-thumbnail img, img#img",
+				)?.src ?? null,
+			watched_date_label: label,
+			views_text,
+			description:
+				node
+					.querySelector(
+						".yt-content-metadata-view-model__metadata-text-max-lines-2, .ytContentMetadataViewModelMetadataTextMaxLines2",
+					)
+					?.textContent?.trim() || null,
+		});
 	}
-	return result;
+	return pageRequest
+		? { offset: first, totalRows, rows: result }
+		: result.filter((video): video is BrowserVideo => video !== null);
 }

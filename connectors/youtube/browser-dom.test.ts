@@ -1,14 +1,17 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 import {
 	readChannelAbout,
 	readChannelPage,
+	openSwitchAccount,
+	readGoogleAccountEmail,
 	readOwnAccount,
-	readSubscriptions,
 	readPlaylistLinks,
+	readSubscriptions,
 	readVideos,
 } from "./browser-dom.ts";
 
@@ -113,6 +116,19 @@ test("subscription controls distinguish known false from missing evidence", () =
 	assert.equal(b?.notifications, null);
 });
 
+test("subscription renderers preserve displayed counts and omit missing text", () => {
+	const html = readFileSync(
+		new URL("./__fixtures__/subscriptions-subscriber-count.html", import.meta.url),
+		"utf8",
+	);
+	const subscriptions = readSubscriptions(dom(html));
+	assert.equal(subscriptions.length, 4);
+	assert.equal(subscriptions[0]?.subscriber_count_text, "1.2M subscribers");
+	assert.equal(subscriptions[3]?.subscriber_count_text, "1,2 M d’abonnés");
+	for (const subscription of subscriptions.slice(1, 3))
+		assert.equal(Object.hasOwn(subscription, "subscriber_count_text"), false);
+});
+
 test("playlist links exclude LL and WL and keep native IDs", () => {
 	const links = readPlaylistLinks(
 		dom(
@@ -122,6 +138,46 @@ test("playlist links exclude LL and WL and keep native IDs", () => {
 	assert.deepEqual(links, [
 		{ id: "PL1", url: "https://www.youtube.com/playlist?list=PL1" },
 	]);
+});
+
+test("current lockup view-model playlist cards expose only synthetic owner playlist links", () => {
+	const html = readFileSync(
+		new URL(
+			"./__fixtures__/real-shape/playlist-index-view-model.html",
+			import.meta.url,
+		),
+		"utf8",
+	);
+	assert.deepEqual(readPlaylistLinks(dom(html)), [
+		{
+			id: "PL_SYNTHETIC_OWNER_001",
+			url: "https://www.youtube.com/playlist?list=PL_SYNTHETIC_OWNER_001",
+		},
+	]);
+});
+
+test("current lockup playlist cards are retained when classic playlist cards also render", () => {
+	const doc = dom(`
+		<ytd-playlist-renderer><a href="/playlist?list=PL_SYNTHETIC_CLASSIC_001"></a></ytd-playlist-renderer>
+		<yt-lockup-view-model><a href="/playlist?list=PL_SYNTHETIC_LOCKUP_002"></a><yt-collection-thumbnail-view-model></yt-collection-thumbnail-view-model></yt-lockup-view-model>`);
+	assert.deepEqual(
+		readPlaylistLinks(doc).map((playlist) => playlist.id),
+		["PL_SYNTHETIC_CLASSIC_001", "PL_SYNTHETIC_LOCKUP_002"],
+	);
+});
+
+test("modern video lockups with list parameters are excluded beside classic playlists", () => {
+	const html = readFileSync(
+		new URL(
+			"./__fixtures__/real-shape/playlist-index-video-lockup-mixed.html",
+			import.meta.url,
+		),
+		"utf8",
+	);
+	assert.deepEqual(
+		readPlaylistLinks(dom(html)).map((playlist) => playlist.id),
+		["PL_SYNTHETIC_CLASSIC_001"],
+	);
 });
 
 test("video and playlist URLs must resolve to YouTube", () => {
@@ -146,6 +202,20 @@ test("old and lockup playlist cards supply real video titles and URLs", () => {
 	);
 });
 
+test("current Watch Later playlist renderer shape yields synthetic video rows", () => {
+	const html = readFileSync(
+		new URL(
+			"./__fixtures__/real-shape/watch-later-playlist-items.html",
+			import.meta.url,
+		),
+		"utf8",
+	);
+	assert.deepEqual(
+		readVideos("playlist", dom(html)).map((video) => video.video_id),
+		["VIDEO_SYNTHETIC_001", "VIDEO_SYNTHETIC_002"],
+	);
+});
+
 test("history attaches a day label from the containing section", () => {
 	const doc = dom(
 		'<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Yesterday</div></div></ytd-item-section-header-renderer><yt-lockup-view-model><a href="/watch?v=abc123XYZ0"></a><h3 title="History title"></h3></yt-lockup-view-model></ytd-item-section-renderer>',
@@ -153,4 +223,77 @@ test("history attaches a day label from the containing section", () => {
 	const [video] = readVideos("history", doc);
 	assert.equal(video?.watched_date_label, "Yesterday");
 	assert.equal(video?.video_title, "History title");
+});
+
+test("switch-account view yields only the signed-in account header's email", async () => {
+	const doc = dom(`
+		<ytd-active-account-header-renderer><span id="email"></span></ytd-active-account-header-renderer>
+		<ytd-multi-page-menu-renderer>
+			<ytd-compact-link-renderer><a><span id="label">Your channel</span></a></ytd-compact-link-renderer>
+			<ytd-compact-link-renderer><a><span id="label"> Switch  account </span></a></ytd-compact-link-renderer>
+		</ytd-multi-page-menu-renderer>`);
+	assert.equal(readGoogleAccountEmail(doc), null);
+	let clicked = 0;
+	for (const item of doc.querySelectorAll("ytd-compact-link-renderer"))
+		item.addEventListener("click", () => {
+			clicked += 1;
+		});
+	doc.querySelector("ytd-compact-link-renderer:last-child")?.addEventListener(
+		"click",
+		() =>
+			doc.body.insertAdjacentHTML("beforeend", SWITCH_VIEW),
+	);
+	assert.equal(await openSwitchAccount(doc), true);
+	assert.equal(clicked, 1);
+	assert.equal(readGoogleAccountEmail(doc), "owner@example.com");
+});
+
+const SWITCH_VIEW =
+	'<ytd-account-section-list-renderer><ytd-google-account-header-renderer><yt-formatted-string id="email">owner@example.com</yt-formatted-string></ytd-google-account-header-renderer><ytd-account-item-renderer><span id="email">other@example.com</span></ytd-account-item-renderer></ytd-account-section-list-renderer>';
+
+for (const placement of ["renderer", "nested anchor"] as const) {
+	test(`switch-account opens when the handler sits on the ${placement}`, async () => {
+		const doc = dom(`
+			<ytd-multi-page-menu-renderer>
+				<ytd-compact-link-renderer><a id="endpoint"><span id="label">Switch account</span></a></ytd-compact-link-renderer>
+				<ytd-account-item-renderer><a id="endpoint">other</a></ytd-account-item-renderer>
+			</ytd-multi-page-menu-renderer>`);
+		const target =
+			placement === "renderer"
+				? doc.querySelector("ytd-compact-link-renderer")
+				: doc.querySelector("ytd-compact-link-renderer a#endpoint");
+		let listed = 0;
+		doc
+			.querySelector("ytd-account-item-renderer a")
+			?.addEventListener("click", () => {
+				listed += 1;
+			});
+		target?.addEventListener("click", (event) => {
+			// A handler on the anchor must not fire for a renderer-only click.
+			if (placement === "nested anchor" && event.target !== target) return;
+			doc.body.insertAdjacentHTML("beforeend", SWITCH_VIEW);
+		});
+		assert.equal(await openSwitchAccount(doc), true);
+		assert.equal(readGoogleAccountEmail(doc), "owner@example.com");
+		assert.equal(listed, 0);
+	});
+}
+
+test("switch-account reports not opened when the view never appears", async () => {
+	const doc = dom(
+		'<ytd-multi-page-menu-renderer><ytd-compact-link-renderer><a id="endpoint"><span id="label">Switch account</span></a></ytd-compact-link-renderer></ytd-multi-page-menu-renderer>',
+	);
+	assert.equal(await openSwitchAccount(doc, 150), false);
+});
+
+test("switch-account email reader rejects non-email header text and a missing menu item", async () => {
+	assert.equal(await openSwitchAccount(dom("<div></div>")), false);
+	assert.equal(
+		readGoogleAccountEmail(
+			dom(
+				'<ytd-google-account-header-renderer><span id="email">Signed in</span></ytd-google-account-header-renderer>',
+			),
+		),
+		null,
+	);
 });
