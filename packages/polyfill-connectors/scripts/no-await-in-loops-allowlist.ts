@@ -2275,21 +2275,21 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/icloud_notes/parsers.test.ts",
-			line: 491,
+			line: 530,
 			column: 20,
 			category: "test_assertion_sequencing",
 			note: "browser decompression parity: decodes each vector per format and compares with Node's zlib output in order",
 		},
 		{
 			path: "connectors/icloud_notes/parsers.ts",
-			line: 129,
+			line: 210,
 			column: 24,
 			category: "bounded_retry_polling",
 			note: "readCompressedNoteText(): tries each of the three compression formats in order and stops at the first that decodes",
 		},
 		{
 			path: "connectors/icloud_notes/integration.test.ts",
-			line: 1534,
+			line: 1557,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "readiness deadline test: yields to the event loop between each mocked one-second tick until the collection settles",
@@ -2324,7 +2324,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/icloud_notes/integration.test.ts",
-			line: 493,
+			line: 494,
 			column: 4,
 			category: "test_assertion_sequencing",
 			note: "malformed envelope cases are awaited so failures stay tied to the stream fixture",

@@ -9,7 +9,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deflateRawSync, deflateSync, gzipSync, gunzipSync, inflateSync, inflateRawSync } from "node:zlib";
+import {
+	deflateRawSync,
+	deflateSync,
+	gunzipSync,
+	gzipSync,
+	inflateRawSync,
+	inflateSync,
+} from "node:zlib";
 import {
 	buildFolderRecord,
 	buildNoteRecord,
@@ -88,51 +95,83 @@ test("epochMsToIso: accepts zero and rejects negative, non-finite, or non-number
 
 // ─── extractCleanText / extractNoteText (heuristic decode) ─────────────
 
-test("extractCleanText: extracts a run of printable prose from decompressed bytes", async () => {
+test("extractCleanText: reads UTF-8 strings from length-delimited protobuf fields", async () => {
 	const text = "Grocery list: milk, eggs, bread.";
-	const decompressed = Buffer.from(text, "utf-8");
+	const decompressed = encodeBodyText(text);
 	assert.equal(extractCleanText(decompressed), text);
 });
 
-test("extractCleanText: drops short runs (<4 chars) and low-signal binary noise", async () => {
-	// Two short "AB" tokens surrounded by control bytes that don't form a
-	// ≥4-char printable run, plus one real prose run.
-	const bytes = Buffer.concat([
-		Buffer.from([0x00, 0x01, 0x02]),
-		Buffer.from("AB", "utf-8"),
-		Buffer.from([0x03, 0x04]),
-		Buffer.from("A genuine sentence of prose text.", "utf-8"),
-	]);
-	const result = extractCleanText(bytes);
-	assert.ok(result?.includes("A genuine sentence of prose text."));
-	assert.ok(!result?.includes("AB"));
-});
-
-test("extractCleanText: returns null when no run clears the clean-character ratio", async () => {
-	// A run of printable-but-not-prose-like characters (repeated symbols)
-	// with a clean ratio at or below the 0.6 threshold.
-	const noisy = "@#$%^&*<>{}[]~`|\\@#$%^&*<>{}[]~`|\\";
-	assert.equal(extractCleanText(Buffer.from(noisy, "utf-8")), null);
+test("extractCleanText: short and Unicode body text is preserved", async () => {
+	await Promise.all(
+		["a", "hi", "yes", "猫", "你好世界", "📝", "مرحبا мир 🌍", "café 世界"].map(
+			async (text) =>
+				assert.equal(extractCleanText(encodeBodyText(text)), text),
+		),
+	);
 });
 
 test("extractNoteText: decodes a synthetic gzip-compressed note body (labelled synthetic)", async () => {
 	const text =
 		"Meeting notes: discuss Q3 roadmap and follow up with the design team.";
-	const compressed = gzipSync(Buffer.from(text, "utf-8"));
+	const compressed = gzipSync(encodeBodyText(text));
 	const base64 = compressed.toString("base64");
 	assert.equal(await extractNoteText(base64), text);
 });
 
+function encodeBodyText(text: string): Buffer {
+	const value = Buffer.from(text, "utf-8");
+	return Buffer.concat([Buffer.from([0x0a, value.length]), value]);
+}
+
+test("extractNoteText: preserves short and Unicode text from the protobuf body structure", async () => {
+	await Promise.all(
+		["a", "hi", "yes", "猫", "你好世界", "📝", "مرحبا мир 🌍", "café 世界"].map(
+			async (text) => {
+				const compressed = gzipSync(encodeBodyText(text));
+				assert.equal(
+					await extractNoteText(compressed.toString("base64")),
+					text,
+				);
+			},
+		),
+	);
+});
+
+test("readNoteRecord: nonempty undecodable protobuf body is unavailable", async () => {
+	const compressed = gzipSync(Buffer.from([0x00, 0xff, 0xfe, 0x80]));
+	const result = await readNoteRecord({
+		recordName: "note-undecodable-body",
+		recordType: "Note",
+		fields: {
+			TitleEncrypted: { value: null },
+			SnippetEncrypted: { value: null },
+			Folder: { value: null },
+			IsPinned: { value: null },
+			CreationDate: { value: null },
+			ModificationDate: { value: null },
+			Attachments: { value: [] },
+			TextDataEncrypted: { value: compressed.toString("base64") },
+		},
+	});
+	assert.equal(result.record?.text_content, null);
+	assert.ok(
+		result.unavailableFields.some(
+			({ field, reason }) =>
+				field === "text_content" && reason === "body_text_unreadable",
+		),
+	);
+});
+
 test("extractNoteText: decodes a synthetic zlib-deflate-compressed note body", async () => {
 	const text = "Second synthetic fixture using zlib deflate, not gzip.";
-	const compressed = deflateSync(Buffer.from(text, "utf-8"));
+	const compressed = deflateSync(encodeBodyText(text));
 	const base64 = compressed.toString("base64");
 	assert.equal(await extractNoteText(base64), text);
 });
 
 test("extractNoteText: decodes a synthetic raw-deflate-compressed note body", async () => {
 	const text = "Third synthetic fixture using raw deflate.";
-	const compressed = deflateRawSync(Buffer.from(text, "utf-8"));
+	const compressed = deflateRawSync(encodeBodyText(text));
 	const base64 = compressed.toString("base64");
 	assert.equal(await extractNoteText(base64), text);
 });
@@ -212,9 +251,7 @@ function b64(s: string): string {
 
 test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes schema shape", async () => {
 	const bodyText = "A synthetic note body used only for this unit test.";
-	const compressedBody = gzipSync(Buffer.from(bodyText, "utf-8")).toString(
-		"base64",
-	);
+	const compressedBody = gzipSync(encodeBodyText(bodyText)).toString("base64");
 	const record: CloudKitRecord = {
 		recordName: "note-abc-123",
 		recordType: "Note",
@@ -230,7 +267,10 @@ test("buildNoteRecord: maps a well-formed CloudKit Note record to the notes sche
 		},
 	};
 
-	const built = await buildNoteRecord(record, new Map([["folder-xyz-789", "Work"]]));
+	const built = await buildNoteRecord(
+		record,
+		new Map([["folder-xyz-789", "Work"]]),
+	);
 	assert.ok(built);
 	assert.deepEqual(built, {
 		id: "note-abc-123",
@@ -366,7 +406,7 @@ test("readNoteRecord: a valid base64 body that cannot be decoded is unavailable"
 });
 
 test("readNoteRecord: compressed attachment-only body is explicitly empty text", async () => {
-	const attachmentOnlyBody = gzipSync(Buffer.from([0x01, 0x02, 0x03, 0x04]));
+	const attachmentOnlyBody = gzipSync(Buffer.from([0x10, 0x01]));
 	const result = await readNoteRecord({
 		recordName: "note-attachment-only",
 		recordType: "Note",
@@ -473,7 +513,6 @@ test("readFolderRecord: absent and explicit empty titles fall back to recordName
 	);
 });
 
-
 test("browser decoder byte parity with Node across gzip, deflate and raw-deflate", async () => {
 	const vectors = [
 		Buffer.from("Synthetic note: café, emoji 📝 and ASCII text."),
@@ -490,9 +529,18 @@ test("browser decoder byte parity with Node across gzip, deflate and raw-deflate
 			const compressed = compress(vector);
 			const decoded = await decompressBytes(compressed, format);
 			assert.deepEqual(decoded, new Uint8Array(decompress(compressed)));
-			assert.equal(decodeBase64Text(vector.toString("base64")), vector.toString("utf-8"));
-			assert.equal(await extractNoteText(compressed.toString("base64")), extractCleanText(vector));
+			assert.equal(
+				decodeBase64Text(vector.toString("base64")),
+				vector.toString("utf-8"),
+			);
+			assert.equal(
+				await extractNoteText(compressed.toString("base64")),
+				extractCleanText(vector) || null,
+			);
 		}
-		assert.equal(await decompressBytes(new Uint8Array([1, 2, 3]), format), null);
+		assert.equal(
+			await decompressBytes(new Uint8Array([1, 2, 3]), format),
+			null,
+		);
 	}
 });

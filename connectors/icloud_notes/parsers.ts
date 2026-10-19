@@ -6,20 +6,10 @@
  * they unit-test in isolation — the CloudKit fetch loop and browser
  * lifecycle live in index.ts.
  *
- * KNOWN LIMITATION — heuristic note-body decode: `extractNoteText` is a
- * byte-heuristic port of the legacy `connectors/apple/icloud-notes-playwright.js`
- * `extractTextFromProtobuf`/`extractCleanText`, faithfully preserved, NOT a
- * real Apple Notes protobuf parse. `TextDataEncrypted` holds a
- * compressed protobuf-encoded rich-text document (the same on-disk format
- * Apple Notes uses locally). This function decompresses the bytes and then
- * regex-scans for runs of printable text, joining them with newlines. It
- * will drop structural information (checklists, tables, formatting,
- * attachment placeholders) and can occasionally include protobuf field
- * names or other non-prose bytes that happen to look like a printable run.
- * It is a best-effort legacy behavior being carried forward, not a design
- * choice made fresh for this connector. A real protobuf schema for Apple
- * Notes' format is not publicly documented by Apple; reverse-engineered
- * community schemas exist but adopting one is out of scope for this cut.
+ * Note bodies are compressed protobuf rich-text documents. We decode the
+ * protobuf wire structure and strict UTF-8 strings without script-based text
+ * scoring. Apple does not publish the rich-text schema, so this preserves
+ * text while omitting formatting and attachment metadata.
  */
 
 import type { CloudKitFieldValue, CloudKitRecord } from "./types.ts";
@@ -34,14 +24,18 @@ export function decodeBase64Text(value: unknown): string | null {
 		return null;
 	}
 	try {
-		return new TextDecoder("utf-8", { ignoreBOM: true }).decode(base64Bytes(value));
+		return new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+			base64Bytes(value),
+		);
 	} catch {
 		return null;
 	}
 }
 
 function base64Bytes(value: string): Uint8Array {
-	return Uint8Array.from(atob(value.replace(/=+$/, "")), (char) => char.charCodeAt(0));
+	return Uint8Array.from(atob(value.replace(/=+$/, "")), (char) =>
+		char.charCodeAt(0),
+	);
 }
 
 function isBase64(value: string): boolean {
@@ -50,8 +44,13 @@ function isBase64(value: string): boolean {
 		return false;
 	}
 	try {
-		return btoa(atob(value.replace(/=+$/, ""))).replace(/=+$/, "") === value.replace(/=+$/, "");
-	} catch { return false; }
+		return (
+			btoa(atob(value.replace(/=+$/, ""))).replace(/=+$/, "") ===
+			value.replace(/=+$/, "")
+		);
+	} catch {
+		return false;
+	}
 }
 
 /** CloudKit timestamps are epoch milliseconds. Returns null for anything
@@ -64,7 +63,7 @@ export function epochMsToIso(value: unknown): string | null {
 	return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-// ─── Heuristic note-body text extraction (ported from legacy) ──────────
+// ─── Note-body rich-text decoding ──────────────────────────────────────
 
 const DECOMPRESS_FORMATS = ["gzip", "deflate", "deflate-raw"] as const;
 type DecompressFormat = (typeof DECOMPRESS_FORMATS)[number];
@@ -75,35 +74,115 @@ export async function decompressBytes(
 ): Promise<Uint8Array | null> {
 	try {
 		const input = new Uint8Array(bytes);
-		const stream = new Blob([input]).stream().pipeThrough(new DecompressionStream(format));
+		const stream = new Blob([input])
+			.stream()
+			.pipeThrough(new DecompressionStream(format));
 		return new Uint8Array(await new Response(stream).arrayBuffer());
 	} catch {
 		return null;
 	}
 }
 
-/** Printable run length ≥4, ASCII or extended Unicode. Mirrors the legacy
- *  `/[\x20-\x7E -￿]{4,}/g` extraction pattern exactly. */
-const PRINTABLE_RUN_RE = /[\x20-\x7E -￿]{4,}/g;
-/** "Looks like prose" character class used to score each printable run,
- *  mirroring the legacy connector's clean-text heuristic. */
-const CLEAN_CHAR_RE = /[a-zA-Z0-9 .,;:!?'"()\-\n\r\t‘’“”…–—]/g;
-const CLEAN_RATIO_THRESHOLD = 0.6;
+type ProtobufField = { wireType: number; value?: Uint8Array };
 
-/** Scan decompressed bytes for runs of human-readable text. Same heuristic
- *  as legacy `extractCleanText`: a run of ≥4 printable characters counts as
- *  prose only if >60% of its characters are common prose/punctuation. */
-export function extractCleanText(decompressed: Uint8Array): string | null {
-	const fullText = new TextDecoder("utf-8", { ignoreBOM: true }).decode(decompressed);
-	const runs: string[] = [];
-	for (const match of fullText.matchAll(PRINTABLE_RUN_RE)) {
-		const run = match[0];
-		const cleanCount = (run.match(CLEAN_CHAR_RE) ?? []).length;
-		if (cleanCount / run.length > CLEAN_RATIO_THRESHOLD) {
-			runs.push(run);
-		}
+function readVarint(
+	bytes: Uint8Array,
+	offset: number,
+): [number, number] | null {
+	let value = 0;
+	for (let shift = 0; shift < 35; shift += 7) {
+		if (offset >= bytes.length) return null;
+		const byte = bytes[offset++];
+		if (byte === undefined) return null;
+		value |= (byte & 0x7f) << shift;
+		if ((byte & 0x80) === 0) return [value >>> 0, offset];
 	}
-	return runs.length > 0 ? runs.join("\n") : null;
+	return null;
+}
+
+function parseProtobuf(bytes: Uint8Array): ProtobufField[] | null {
+	const fields: ProtobufField[] = [];
+	let offset = 0;
+	while (offset < bytes.length) {
+		const tag = readVarint(bytes, offset);
+		if (!tag || tag[0] === 0) return null;
+		offset = tag[1];
+		const wireType = tag[0] & 7;
+		if (wireType === 0) {
+			const value = readVarint(bytes, offset);
+			if (!value) return null;
+			offset = value[1];
+		} else if (wireType === 1 || wireType === 5) {
+			offset += wireType === 1 ? 8 : 4;
+			if (offset > bytes.length) return null;
+		} else if (wireType === 2) {
+			const length = readVarint(bytes, offset);
+			if (!length) return null;
+			offset = length[1];
+			const end = offset + length[0];
+			if (end > bytes.length) return null;
+			fields.push({ wireType, value: bytes.subarray(offset, end) });
+			offset = end;
+			continue;
+		} else {
+			return null;
+		}
+		fields.push({ wireType });
+	}
+	return fields;
+}
+
+function decodeUtf8(bytes: Uint8Array): string | null {
+	try {
+		const value = new TextDecoder("utf-8", {
+			fatal: true,
+			ignoreBOM: true,
+		}).decode(bytes);
+		for (const character of value) {
+			const codePoint = character.codePointAt(0);
+			if (
+				codePoint !== undefined &&
+				((codePoint < 0x20 &&
+					codePoint !== 0x09 &&
+					codePoint !== 0x0a &&
+					codePoint !== 0x0d) ||
+					(codePoint >= 0x7f && codePoint <= 0x9f))
+			) {
+				return null;
+			}
+		}
+		return value;
+	} catch {
+		return null;
+	}
+}
+
+function extractProtobufText(bytes: Uint8Array, depth = 0): string[] | null {
+	if (depth > 32) return null;
+	const fields = parseProtobuf(bytes);
+	if (!fields) return null;
+	if (!fields.some((field) => field.wireType === 2)) {
+		const text = decodeUtf8(bytes);
+		return text === null ? [] : [text];
+	}
+	const text: string[] = [];
+	for (const field of fields) {
+		if (field.wireType !== 2 || !field.value) continue;
+		const nested = extractProtobufText(field.value, depth + 1);
+		if (nested) {
+			text.push(...nested);
+			continue;
+		}
+		const value = decodeUtf8(field.value);
+		if (value !== null && value.length > 0) text.push(value);
+	}
+	return text;
+}
+
+/** Decode UTF-8 strings from length-delimited rich-text protobuf fields. */
+export function extractCleanText(decompressed: Uint8Array): string | null {
+	const fields = extractProtobufText(decompressed);
+	return fields && fields.length > 0 ? fields.join("") : null;
 }
 
 /** Decode a note's `TextDataEncrypted` field (base64 of a compressed
@@ -118,7 +197,9 @@ type NoteTextExtraction =
 	| { kind: "EXPLICIT_EMPTY" }
 	| { kind: "UNAVAILABLE"; reason: "body_text_unreadable" };
 
-async function readCompressedNoteText(base64Data: string): Promise<NoteTextExtraction> {
+async function readCompressedNoteText(
+	base64Data: string,
+): Promise<NoteTextExtraction> {
 	let bytes: Uint8Array;
 	try {
 		bytes = base64Bytes(base64Data);
@@ -130,13 +211,19 @@ async function readCompressedNoteText(base64Data: string): Promise<NoteTextExtra
 		if (!decompressed) {
 			continue;
 		}
-		const text = extractCleanText(decompressed);
-		return text ? { kind: "READ", value: text } : { kind: "EXPLICIT_EMPTY" };
+		const fields = extractProtobufText(decompressed);
+		if (!fields) continue;
+		const text = fields.join("");
+		return text.length > 0
+			? { kind: "READ", value: text }
+			: { kind: "EXPLICIT_EMPTY" };
 	}
 	return { kind: "UNAVAILABLE", reason: "body_text_unreadable" };
 }
 
-export async function extractNoteText(base64Data: unknown): Promise<string | null> {
+export async function extractNoteText(
+	base64Data: unknown,
+): Promise<string | null> {
 	if (typeof base64Data !== "string" || base64Data.length === 0) return null;
 	const result = await readCompressedNoteText(base64Data);
 	return result.kind === "READ" ? result.value : null;
@@ -622,7 +709,9 @@ export async function buildNoteRecord(
 	record: CloudKitRecord,
 	folderNames: ReadonlyMap<string, string> = new Map(),
 ): Promise<NoteRecord | null> {
-	return (await readNoteRecord(record, folderNames, { folderScanComplete: true })).record;
+	return (
+		await readNoteRecord(record, folderNames, { folderScanComplete: true })
+	).record;
 }
 
 /** Build a `folders` stream record from a raw CloudKit `Folder` record.
