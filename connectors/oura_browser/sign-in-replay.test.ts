@@ -11,7 +11,7 @@ const apps = `${portal}/applications`;
 const moi = "https://moi.ouraring.com";
 const callback = "https://vana.org/oauth/oura/callback";
 
-async function withReplay(stale: boolean, run: (page: Page, state: { signOuts: () => number; appRequests: () => number; faultInjected: () => boolean }) => Promise<void>, prefixFault = false, initialSignedIn = stale) {
+async function withReplay(stale: boolean, run: (page: Page, state: { signOuts: () => number; appRequests: () => number; faultInjected: () => boolean; authorizeAttempts: () => number; tokenExchanges: () => number; dailyProbes: () => number }) => Promise<void>, prefixFault = false, initialSignedIn = stale, scopeProbeStatuses = [200]) {
 	const browser = await chromium.launch({ headless: true });
 	try {
 		const context = await browser.newContext({ serviceWorkers: "block" });
@@ -22,6 +22,10 @@ async function withReplay(stale: boolean, run: (page: Page, state: { signOuts: (
 		let appRequests = 0;
 		let faultInjected = false;
 		let oauthState = "";
+		let authorizeAttempts = 0;
+		let tokenExchanges = 0;
+		let dailyProbes = 0;
+		const exchangedCodes = new Set<string>();
 		const document = (body: string) => `<!doctype html><html><body>${body}</body></html>`;
 		await context.route("**/*", async (route) => {
 			const url = new URL(route.request().url());
@@ -59,10 +63,11 @@ async function withReplay(stale: boolean, run: (page: Page, state: { signOuts: (
 				}
 				if (url.pathname === "/oauth/v2/ext/oauth-authorize") {
 					if (url.searchParams.get("stage") !== "consent") {
+						authorizeAttempts++;
 						oauthState = url.searchParams.get("state") ?? "";
 						return html(`<script>location.replace('${moi}/authn/authentication/default_ext')</script>`);
 					}
-					return html(`<input type="checkbox" name="consent.scope.extapi:daily"><button name="submit_consent" onclick="location.href='${callback}?code=synthetic-code&state=${oauthState}'">Allow</button>`);
+					return html(`<input type="checkbox" name="consent.scope.extapi:daily"><button name="submit_consent" onclick="location.href='${callback}?code=synthetic-code-${authorizeAttempts}&state=${oauthState}'">Allow</button>`);
 				}
 			}
 			if (url.href.startsWith(callback)) return html("Callback complete");
@@ -73,10 +78,15 @@ async function withReplay(stale: boolean, run: (page: Page, state: { signOuts: (
 		const wrapped = new Proxy(page, {
 			get(target, property) {
 				if (property === "context") return () => ({ request: {
-					get: async () => ({ status: () => 200, dispose: async () => {} }),
+					get: async () => ({ status: () => scopeProbeStatuses[Math.min(dailyProbes++, scopeProbeStatuses.length - 1)], dispose: async () => {} }),
 					post: async (_url: string, options: { data: string }) => {
-						assert.match(options.data, /code=synthetic-code/);
-						return { ok: () => true, status: () => 200, json: async () => ({ access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600 }), dispose: async () => {} };
+						const code = new URLSearchParams(options.data).get("code") ?? "";
+						assert.match(code, /^synthetic-code-\d+$/);
+						assert.equal(exchangedCodes.has(code), false, "each authorization uses a fresh code");
+						exchangedCodes.add(code);
+						tokenExchanges++;
+						const access = scopeProbeStatuses.length > 1 ? `synthetic-access-${tokenExchanges}` : "synthetic-access";
+						return { ok: () => true, status: () => 200, json: async () => ({ access_token: access, refresh_token: "synthetic-refresh", expires_in: 3600 }), dispose: async () => {} };
 					},
 				} });
 				if (property === "evaluate") return async (...args: Parameters<Page["evaluate"]>) => {
@@ -91,11 +101,11 @@ async function withReplay(stale: boolean, run: (page: Page, state: { signOuts: (
 				return typeof value === "function" ? value.bind(target) : value;
 			},
 		}) as Page;
-		await run(wrapped, { signOuts: () => signOuts, appRequests: () => appRequests, faultInjected: () => faultInjected });
+		await run(wrapped, { signOuts: () => signOuts, appRequests: () => appRequests, faultInjected: () => faultInjected, authorizeAttempts: () => authorizeAttempts, tokenExchanges: () => tokenExchanges, dailyProbes: () => dailyProbes });
 	} finally { await browser.close(); }
 }
 
-async function completeSignIn(page: Page, url: string, ready: () => Promise<boolean>) {
+async function completeSignIn(page: Page, url: string, ready: () => Promise<boolean>, onManualConsent?: () => void) {
 	if (page.url() !== url) await page.goto(url);
 	if (url === apps) await page.locator("#start-sign-in").click();
 	if (page.url().startsWith(`${portal}/signin`)) {
@@ -123,6 +133,11 @@ async function completeSignIn(page: Page, url: string, ready: () => Promise<bool
 	if (page.url().includes("stage=consent")) {
 		assert.equal(await ready(), false);
 		assert.equal(await ready(), false);
+		await page.waitForURL(new RegExp(`^${callback.replaceAll(".", "\\.")}`), { timeout: 500 }).catch(() => {});
+		if (page.url().includes("stage=consent")) {
+			onManualConsent?.();
+			await page.locator('button[name="submit_consent"]').click();
+		}
 		await page.waitForURL(new RegExp(`^${callback.replaceAll(".", "\\.")}`));
 	}
 	assert.equal(await ready(), true);
@@ -167,4 +182,32 @@ test("Oura page replay retries a host-prefixed evaluation error after navigation
 		assert.equal(state.faultInjected(), true);
 		assert.equal(state.signOuts(), 0);
 	}, true, true);
+});
+
+test("Oura page replay retries an unscoped automatic grant with manual consent", { timeout: 60_000 }, async () => {
+	let manualApprovals = 0;
+	await withReplay(false, async (page, state) => {
+		const token = await ensureOuraApiAccess(page, (url, _message, ready) =>
+			completeSignIn(page, url, ready, () => { manualApprovals++; }));
+		assert.equal(token, "synthetic-access-2");
+		assert.equal(state.authorizeAttempts(), 2);
+		assert.equal(state.tokenExchanges(), 2);
+		assert.equal(state.dailyProbes(), 2);
+		assert.equal(manualApprovals, 1);
+	}, false, false, [403, 200]);
+});
+
+test("Oura page replay stops after one manual retry when daily scope is still missing", { timeout: 60_000 }, async () => {
+	let manualApprovals = 0;
+	await withReplay(false, async (page, state) => {
+		await assert.rejects(
+			ensureOuraApiAccess(page, (url, _message, ready) =>
+				completeSignIn(page, url, ready, () => { manualApprovals++; })),
+			/oura_daily_scope_missing/,
+		);
+		assert.equal(state.authorizeAttempts(), 2);
+		assert.equal(state.tokenExchanges(), 2);
+		assert.equal(state.dailyProbes(), 2);
+		assert.equal(manualApprovals, 1);
+	}, false, false, [401, 403]);
 });

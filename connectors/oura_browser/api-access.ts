@@ -288,6 +288,48 @@ async function advanceOuraSignIn(page: Page, email?: string): Promise<void> {
 	}, email).catch(() => {});
 }
 
+async function authorizeWithUser(page: Page, interact: Interact, email: string,
+	clientId: string, clientSecret: string, autoAllow: boolean): Promise<TokenEntry> {
+	const proof = await pkce(page);
+	const url = new URL(AUTHORIZE);
+	url.search = new URLSearchParams({
+		response_type: "code", client_id: clientId, redirect_uri: REDIRECT,
+		scope: SCOPE, state: proof.state, code_challenge: proof.challenge,
+		code_challenge_method: "S256", prompt: "consent",
+	}).toString();
+	let consentReadyPolls = 0;
+	let allowPressed = false;
+	await interact(url.toString(), "Approve daily Oura data access, then continue.", async () => {
+		const current = await page.evaluate(() => location.href).catch(() => "");
+		if (current.startsWith(REDIRECT)) return true;
+		await advanceOuraSignIn(page, email);
+		// Oura has recorded empty grants when Allow is pressed before its page script binds.
+		const consent = await page.evaluate(({ press }) => {
+			const box = document.querySelector<HTMLInputElement>('input[type="checkbox"][name="consent.scope.extapi:daily"]');
+			if (!box) return { ticked: false, pressed: false };
+			if (!box.checked) box.click();
+			if (!box.checked || document.readyState !== "complete") return { ticked: false, pressed: false };
+			if (press) {
+				const button = document.querySelector<HTMLButtonElement>('button[name="submit_consent"], input[name="submit_consent"], #submit_consent, button[value="submit_consent"]');
+				if (button && !button.disabled) { button.click(); return { ticked: true, pressed: true }; }
+			}
+			return { ticked: true, pressed: false };
+		}, { press: autoAllow && consentReadyPolls >= 1 && !allowPressed }).catch(() => ({ ticked: false, pressed: false }));
+		consentReadyPolls = consent.ticked ? consentReadyPolls + 1 : 0;
+		if (consent.pressed) allowPressed = true;
+		return false;
+	});
+	const redirect = new URL(await page.evaluate(() => location.href));
+	if (!redirect.href.startsWith(REDIRECT) || redirect.searchParams.get("state") !== proof.state)
+		throw new Error("oura_oauth_state_invalid");
+	const code = redirect.searchParams.get("code");
+	if (!code) throw new Error("oura_oauth_code_missing");
+	return tokenRequest(page, {
+		grant_type: "authorization_code", code, redirect_uri: REDIRECT,
+		code_verifier: proof.verifier,
+	}, clientId, clientSecret);
+}
+
 export async function ensureOuraApiAccess(page: Page, interact: Interact): Promise<string> {
 	if (await probeOuraSignInInProgress(page)) {
 		const current = await page.evaluate(() => location.href);
@@ -327,45 +369,12 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 		if (!app) throw new Error("oura_portal_session_unconfirmed");
 	}
 	const { clientId, clientSecret } = app;
-	const proof = await pkce(page);
-	const url = new URL(AUTHORIZE);
-	url.search = new URLSearchParams({
-		response_type: "code", client_id: clientId, redirect_uri: REDIRECT,
-		scope: SCOPE, state: proof.state, code_challenge: proof.challenge,
-		code_challenge_method: "S256", prompt: "consent",
-	}).toString();
-	let consentReadyPolls = 0;
-	let allowPressed = false;
-	await interact(url.toString(), "Approve daily Oura data access, then continue.", async () => {
-		const current = await page.evaluate(() => location.href).catch(() => "");
-		if (current.startsWith(REDIRECT)) return true;
-		await advanceOuraSignIn(page, email);
-		// Oura has recorded empty grants when Allow is pressed before its page script binds.
-		const consent = await page.evaluate(({ press }) => {
-			const box = document.querySelector<HTMLInputElement>('input[type="checkbox"][name="consent.scope.extapi:daily"]');
-			if (!box) return { ticked: false, pressed: false };
-			if (!box.checked) box.click();
-			if (!box.checked || document.readyState !== "complete") return { ticked: false, pressed: false };
-			if (press) {
-				const button = document.querySelector<HTMLButtonElement>('button[name="submit_consent"], input[name="submit_consent"], #submit_consent, button[value="submit_consent"]');
-				if (button && !button.disabled) { button.click(); return { ticked: true, pressed: true }; }
-			}
-			return { ticked: true, pressed: false };
-		}, { press: consentReadyPolls >= 1 && !allowPressed }).catch(() => ({ ticked: false, pressed: false }));
-		consentReadyPolls = consent.ticked ? consentReadyPolls + 1 : 0;
-		if (consent.pressed) allowPressed = true;
-		return false;
-	});
-	const redirect = new URL(await page.evaluate(() => location.href));
-	if (!redirect.href.startsWith(REDIRECT) || redirect.searchParams.get("state") !== proof.state)
-		throw new Error("oura_oauth_state_invalid");
-	const code = redirect.searchParams.get("code");
-	if (!code) throw new Error("oura_oauth_code_missing");
-	const entry = await tokenRequest(page, {
-		grant_type: "authorization_code", code, redirect_uri: REDIRECT,
-		code_verifier: proof.verifier,
-	}, clientId, clientSecret);
-	const status = await tokenStatus(page, entry.accessToken);
+	let entry = await authorizeWithUser(page, interact, email, clientId, clientSecret, true);
+	let status = await tokenStatus(page, entry.accessToken);
+	if (status === 401 || status === 403) {
+		entry = await authorizeWithUser(page, interact, email, clientId, clientSecret, false);
+		status = await tokenStatus(page, entry.accessToken);
+	}
 	if (status === 401 || status === 403) throw new Error("oura_daily_scope_missing");
 	await saveToken(page, entry);
 	return entry.accessToken;
