@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { ensureOuraApiAccess, OURA_LOGIN_URL, probeOuraPortalSession } from "../../../connectors/oura_browser/api-access.ts";
+import { ensureOuraApiAccess, OURA_LOGIN_URL, probeOuraCachedApiAccess, probeOuraPortalSession } from "../../../connectors/oura_browser/api-access.ts";
 import { collectOuraBrowser } from "../../../connectors/oura_browser/index.ts";
 import { validateRecord } from "../../../connectors/oura_browser/schemas.ts";
 import { applyRequestedScopeEntries } from "../requested-scope-entries.ts";
@@ -56,7 +56,8 @@ function withOuraTokenPost(page: ShimPage, pw: Page): Page {
 	loginUrl: OURA_LOGIN_URL,
 	loginMessage: "Sign in to the Oura Developer Portal, then return here.",
 	validateRecord,
-	probe: (pw) => probeOuraPortalSession(pw as never),
+	probe: async (pw) => Boolean(await probeOuraCachedApiAccess(withOuraTokenPost(page, pw as Page))) ||
+		probeOuraPortalSession(pw as never),
 	prepareRequested: (requested) => applyRequestedScopeEntries(requested, requestedScopeEntries(page), "oura"),
 	collect: async (ctx) => {
 		const pw = withOuraTokenPost(page, ctx.page as Page);

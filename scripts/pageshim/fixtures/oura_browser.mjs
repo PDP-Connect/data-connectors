@@ -5,7 +5,10 @@
 const json = (body, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
 const html = (body = "") => ({ status: 200, contentType: "text/html; charset=utf-8", body: `<!doctype html><html><body>${body}</body></html>` });
 const token = { accessToken: "synthetic-access", refreshToken: "synthetic-refresh", expiresAt: 4102444800000, clientId: "synthetic-app", clientSecret: "synthetic-secret" };
-const appPage = () => html(`<script>localStorage.setItem('vana:oura-connector:token', ${JSON.stringify(JSON.stringify(token))})</script>`);
+let loggedIn = true;
+const appPage = (withToken = loggedIn) => html(withToken
+	? `<script>localStorage.setItem('vana:oura-connector:token', ${JSON.stringify(JSON.stringify(token))})</script>`
+	: "");
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const DATA = {
 	sleep: [{ id: id(101), day: "2026-09-23", type: "long_sleep", bedtime_start: "2026-09-22T22:00:00+00:00", bedtime_end: "2026-09-23T06:00:00+00:00", total_sleep_duration: 28000, awake_time: 1200, deep_sleep_duration: 7200, light_sleep_duration: 12300, rem_sleep_duration: 8500, time_in_bed: 29000, efficiency: 96, latency: 500, average_heart_rate: 58, average_hrv: 42, lowest_heart_rate: 51, average_breath: 14, restless_periods: 3 }],
@@ -13,8 +16,13 @@ const DATA = {
 	daily_readiness: [{ id: id(301), day: "2026-09-23", score: 82, timestamp: "2026-09-23T08:15:00+00:00", temperature_deviation: 0.2, temperature_trend_deviation: 0.1, contributors: { recovery_index: 78 } }],
 	daily_activity: [{ id: id(401), day: "2026-09-23", score: 76, timestamp: "2026-09-23T08:15:00+00:00", steps: 7200, active_calories: 250, total_calories: 1800, equivalent_walking_distance: 3800, high_activity_time: 1000, medium_activity_time: 2000, low_activity_time: 3000, sedentary_time: 4000, resting_time: 5000, inactivity_alerts: 2, contributors: { stay_active: 80 } }],
 };
-let loggedIn = true;
-export const setLoggedIn = (value) => { loggedIn = value; };
+export const setLoggedIn = async (value, page) => {
+	loggedIn = value;
+	if (page) await page.evaluate(({ entry }) => {
+		if (entry) localStorage.setItem("vana:oura-connector:token", JSON.stringify(entry));
+		else localStorage.removeItem("vana:oura-connector:token");
+	}, { entry: value ? token : null });
+};
 function resolveApi(url, data = DATA) {
 	const endpoint = url.pathname.split("/").at(-1);
 	const start = url.searchParams.get("start_date") ?? "";
@@ -39,6 +47,15 @@ export const ouraBrowserFixtures = {
 	cors: true,
 	loginUrl: "https://developer.ouraring.com/applications",
 	homeUrl: "https://developer.ouraring.com/applications",
+};
+export const cachedTokenWithoutCookieFixtures = {
+	...ouraBrowserFixtures,
+	resolve(raw) {
+		const url = new URL(raw);
+		return url.origin === "https://developer.ouraring.com" && !url.pathname.startsWith("/api/")
+			? appPage(true) : resolveFixture(raw);
+	},
+	setLoggedIn: (value) => setLoggedIn(value),
 };
 export const pageshimCase = {
 	fixtures: ouraBrowserFixtures,

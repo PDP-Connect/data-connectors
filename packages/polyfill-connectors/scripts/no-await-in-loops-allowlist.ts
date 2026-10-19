@@ -2709,17 +2709,24 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/api-access.ts",
-			line: 33,
+			line: 35,
 			column: 21,
 			category: "dependent_pagination",
 			note: "Check the current portal session route before falling back to the previous route.",
 		},
 		{
 			path: "connectors/oura_browser/api-access.ts",
-			line: 110,
+			line: 112,
 			column: 21,
 			category: "provider_pacing_backpressure",
 			note: "Retry the portal application list after an edge authorization response.",
+		},
+		{
+			path: "connectors/oura_browser/api-access.ts",
+			line: 169,
+			column: 16,
+			category: "provider_pacing_backpressure",
+			note: "Wait for the portal API session to settle before declaring the cookie stale.",
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
@@ -2744,14 +2751,14 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 370,
+			line: 369,
 			column: 9,
 			category: "ordered_protocol_emission",
 			note: "Acknowledge a previously complete range in requested stream order.",
 		},
 		{
 			path: "connectors/oura_browser/index.ts",
-			line: 390,
+			line: 389,
 			column: 7,
 			category: "ordered_protocol_emission",
 			note: "Emit each Oura record before the stream checkpoint.",

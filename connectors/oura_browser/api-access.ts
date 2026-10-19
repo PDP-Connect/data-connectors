@@ -11,6 +11,8 @@ const TOKEN = "https://moi.ouraring.com/oauth/v2/ext/oauth-token";
 const REDIRECT = "https://vana.org/oauth/oura/callback";
 const STORAGE_KEY = "vana:oura-connector:token";
 const SCOPE = "extapi:daily";
+const PORTAL_SESSION_SETTLE_MS = 45_000;
+const PORTAL_SESSION_POLL_MS = 2_000;
 
 export const OURA_LOGIN_URL = APPLICATIONS;
 
@@ -161,6 +163,18 @@ async function application(page: Page, email: string, interact: Interact): Promi
 	return { clientId: chosen.client_id, clientSecret: chosen.client_secret };
 }
 
+async function applicationAfterSessionSettles(page: Page, email: string, interact: Interact): Promise<{ clientId: string; clientSecret: string }> {
+	const deadline = Date.now() + PORTAL_SESSION_SETTLE_MS;
+	for (;;) {
+		try { return await application(page, email, interact); }
+		catch (error) {
+			if (!(error instanceof Error) || error.message !== "oura_portal_session_unconfirmed" || Date.now() >= deadline)
+				throw error;
+			await new Promise((resolve) => setTimeout(resolve, PORTAL_SESSION_POLL_MS));
+		}
+	}
+}
+
 async function pkce(page: Page): Promise<{ challenge: string; state: string; verifier: string }> {
 	return page.evaluate(async () => {
 		const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))
@@ -179,9 +193,7 @@ export async function probeOuraPortalSession(page: Page): Promise<boolean> {
 	try { return Boolean(await portalEmail(page)); } catch { return false; }
 }
 
-export async function ensureOuraApiAccess(page: Page, interact: Interact): Promise<string> {
-	if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
-		await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
+async function reusableCachedToken(page: Page): Promise<string | null> {
 	const cached = await cachedToken(page);
 	if (cached) {
 		if (cached.expiresAt > Date.now() + 600_000) {
@@ -199,13 +211,45 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 			} catch { /* A revoked grant needs owner authorization. */ }
 		}
 	}
+	return null;
+}
+
+export async function probeOuraCachedApiAccess(page: Page): Promise<string | null> {
+	try {
+		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
+			await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
+		return await reusableCachedToken(page);
+	} catch { return null; }
+}
+
+export async function ensureOuraApiAccess(page: Page, interact: Interact): Promise<string> {
+	if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
+		await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
+	const cached = await reusableCachedToken(page);
+	if (cached) return cached;
 	let email = await portalEmail(page);
 	if (!email) {
 		await interact(APPLICATIONS, "Sign in to the Oura Developer Portal, then continue.", async () => Boolean(await portalEmail(page)));
 		email = await portalEmail(page);
 	}
 	if (!email) throw new Error("oura_portal_session_unconfirmed");
-	const { clientId, clientSecret } = await application(page, email, interact);
+	let app: { clientId: string; clientSecret: string };
+	try { app = await applicationAfterSessionSettles(page, email, interact); }
+	catch (error) {
+		if (!(error instanceof Error) || error.message !== "oura_portal_session_unconfirmed") throw error;
+		await page.evaluate(async () => {
+			await fetch("/api/auth/sign-out", {
+				method: "POST", credentials: "include",
+				headers: { "Content-Type": "application/json" }, body: "{}",
+			}).catch(() => {});
+		});
+		await interact(`${PORTAL}/signin?callbackUrl=%2Fapplications`, "Sign in to Oura again to restore your Developer Portal session.",
+			async () => Boolean(await portalEmail(page)));
+		email = await portalEmail(page);
+		if (!email) throw new Error("oura_portal_session_unconfirmed");
+		app = await applicationAfterSessionSettles(page, email, interact);
+	}
+	const { clientId, clientSecret } = app;
 	const proof = await pkce(page);
 	const url = new URL(AUTHORIZE);
 	url.search = new URLSearchParams({

@@ -3225,6 +3225,18 @@ test("oura_browser: API v2 replay preserves the legacy fields on PageShim", { ti
   assert.deepEqual(Object.keys(r.states).sort(), c.scopes.slice().sort());
 });
 
+test("oura_browser: cached API token works after the portal cookie expires", { timeout: 180_000 }, async () => {
+  const { pageshimCase: c, cachedTokenWithoutCookieFixtures } = await import("./fixtures/oura_browser.mjs");
+  const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-v2-cached-token.js") });
+  const r = await runHarness({ bundle: built.outfile, fixtures: cachedTokenWithoutCookieFixtures, scopes: c.scopes,
+    loginAfterMs: Number.POSITIVE_INFINITY, loginWaitMs: 100 });
+  assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
+  assert.equal(r.calls.showBrowser, undefined, "a valid cached token needs no sign-in");
+  assert.equal(r.data.error, undefined, r.log.slice(-20).join("\n"));
+  assert.deepEqual(r.result.errors, []);
+  assert.deepEqual(r.result.exportSummary, c.exportSummary);
+});
+
 test("oura_browser: an unproven API v2 page upserts read rows without STATE on both hosts", { timeout: 180_000 }, async () => {
   const { pageshimCase: c, resolveFixture } = await import("./fixtures/oura_browser.mjs");
   const built = await buildPageshim({ connector: "oura_browser", outfile: join(out, "oura-v2-partial.js") });
@@ -3261,7 +3273,7 @@ test("oura_browser: explicit ranges beyond 90 days fetch to the exclusive end", 
   assert.deepEqual(r.ret, { ok: true }, r.log.slice(-20).join("\n"));
   assert.deepEqual(r.result.errors, []);
   assert.equal(r.result["oura.sleep"].records.length, 92);
-  assert.equal(fixture.windows[0].start, "2020-01-01");
+  assert.ok(fixture.windows.some((window) => window.start === "2020-01-01"));
   assert.equal(fixture.windows.at(-1).end, "2020-04-02");
   assert.equal(r.states["oura.sleep"].next_day, "2020-04-02");
 });

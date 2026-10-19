@@ -18,7 +18,7 @@ const replay = JSON.parse(readFileSync(new URL("./fixtures/api-v2-replay.json", 
   daily_activity: Array<Record<string, unknown>>;
 };
 
-type Answer = { data?: Array<Record<string, unknown>>; next_token?: string | null };
+type Answer = { data?: Array<Record<string, unknown>>; next_token?: string | null; status?: number };
 function harness(options: {
   streams?: string[];
   since?: string;
@@ -35,7 +35,8 @@ function harness(options: {
       const token = url.searchParams.get("next_token");
       calls.push({ endpoint, start: url.searchParams.get("start_date"), end: url.searchParams.get("end_date"), token });
       const answer = options.answers?.(endpoint, token) ?? { data: replay[endpoint as keyof typeof replay] ?? [], next_token: null };
-      return { ok: () => true, status: () => 200, json: async () => answer, dispose: async () => {} };
+      const status = answer.status ?? 200;
+      return { ok: () => status >= 200 && status < 300, status: () => status, json: async () => answer, dispose: async () => {} };
     } } }),
   });
   const streams = options.streams ?? ["sleep", "readiness", "activity"];
@@ -104,6 +105,19 @@ test("repeated page tokens retain read rows but cannot complete inventory", asyn
   assert.equal(h.records.length, 1);
   assert.equal(h.messages.some((message) => message.type === "STATE"), false);
 });
+
+for (const status of [401, 403]) {
+  test(`page-two HTTP ${status} retains page-one rows without STATE`, async () => {
+    const h = harness({ streams: ["readiness"], answers: (_endpoint, token) =>
+      token ? { status } : { data: replay.daily_readiness, next_token: "page-two" } });
+    await collectOuraBrowser(h.ctx, "synthetic-access");
+    assert.deepEqual(h.records.map(({ data }) => data.id), [id(301)]);
+    assert.deepEqual(h.messages.filter((message) => message.type === "SKIP_RESULT").map((message) =>
+      [message.reason, message.recovery_hint]), [["inventory_not_proven_complete",
+        { action: "retry_by_runtime", retryable: true }]]);
+    assert.equal(h.messages.some((message) => message.type === "STATE"), false);
+  });
+}
 
 test("an exclusive until and a lower bound constrain requests and emitted records", async () => {
   const h = harness({ streams: ["readiness"], since: "2026-09-23T12:00:00Z", until: "2026-09-24T00:00:00Z",

@@ -307,6 +307,7 @@
   },
   "mobile": {
     "pageshim": {
+      "entry": "oura_browser.ts",
       "scope_prefix": "oura",
       "login_url": "https://developer.ouraring.com/applications",
       "login_message": "Sign in to the Oura Developer Portal, then return here.",

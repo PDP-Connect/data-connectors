@@ -135,7 +135,7 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       return { rows, complete: false };
     }
     try {
-      if (response.status() === 401 || response.status() === 403) throw new Error("oura_auth_failed");
+      if (response.status() === 401 || response.status() === 403) return { rows, complete: false };
       if (!response.ok()) return { rows, complete: false };
       const value: unknown = await response.json().catch(() => null);
       if (!value || typeof value !== "object" || Array.isArray(value)) return { rows, complete: false };
@@ -235,7 +235,6 @@ async function fetchWindow(
           data.daily_activities = [...(data.daily_activities ?? []), ...result.rows];
         }
       } catch (error) {
-        if (error instanceof Error && error.message === "oura_auth_failed") throw error;
         complete = false;
         connectorDiagnostic("oura_browser", "collection_failed", { stream, endpoint, from, to,
           detail: error instanceof Error ? error.message : String(error) });
