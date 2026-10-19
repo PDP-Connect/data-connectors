@@ -94,6 +94,7 @@ interface SpotifyProfile {
 }
 
 export interface BrowserData {
+	playlistRevisionUnproven?: boolean;
 	completion: Partial<
 		Record<"playlists" | "playlist_items" | "saved_tracks", SpotifyEndEvidence>
 	>;
@@ -719,13 +720,25 @@ export const spotifyPageCollector = async (
 			sourceId: unknown,
 			fieldPrefix: string,
 		): string | null {
-			const uriId = idFromUri(uri);
+			const parts = typeof uri === "string" ? uri.split(":") : [];
+			const uriId =
+				parts.length === 3 && parts[0] === "spotify" && parts[1] === "track"
+					? parts[2] || null
+					: null;
+			if (typeof uri === "string" && uri.length > 0 && uriId === null) return null;
 			const sourceTrackId =
 				typeof sourceId === "string" && sourceId.length > 0 ? sourceId : null;
 			if (uriId !== null && sourceTrackId !== null && uriId !== sourceTrackId) {
 				throw new Error(`${fieldPrefix}_field_unavailable:identity_conflict`);
 			}
 			return uriId ?? sourceTrackId;
+		}
+
+		async function localTrackId(uri: string): Promise<string> {
+			const digest = new Uint8Array(
+				await crypto.subtle.digest("SHA-256", new TextEncoder().encode(uri)),
+			);
+			return `local:${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 		}
 
 		type SourceFieldRead<T> =
@@ -1543,299 +1556,338 @@ export const spotifyPageCollector = async (
 			let playlistRowUnavailableCount = 0;
 			let childLastOffset = 0;
 			for (const uri of playlistUris) {
-				let offset = 0;
-				let position = 0;
-				let trackCount = 0;
-				const requestedPlaylistId = idFromUri(uri);
-				if (requestedPlaylistId === null) {
-					throw new Error("spotify_library_playlist_identity_missing");
-				}
-				let playlistName: unknown;
-				let ownerId: string | null = null;
-				let ownerName: unknown;
-				let description: unknown;
-				let publicValue: boolean | null = null;
-				let collaborativeValue: boolean | null = null;
-				let snapshotId: string | null = null;
-				let uriValue: unknown = uri;
-				let followers: number | null = null;
-				let images: Array<{ height: null; url: string; width: null }> = [];
-				let playlistRawCount = 0;
-				let playlistExpectedCount: number | null = null;
-				let playlistPageCount = 0;
-				let playlistRowAvailable = wanted.has("playlists");
-				while (true) {
-					const requestOffset = offset;
-					childLastOffset = requestOffset;
-					const plData = await gql("fetchPlaylist", {
-						uri,
-						offset,
-						limit: 100,
-						enableWatchFeedEntrypoint: false,
-					});
-					const pl = plData?.data?.playlistV2;
-					if (
-						!isRecord(pl) ||
-						typeof pl.uri !== "string" ||
-						pl.uri !== uri ||
-						!isRecord(pl.content) ||
-						!Array.isArray(pl.content.items)
-					) {
-						throw new Error("spotify_playlist_response_invalid");
+				let playlistCoherent = false;
+				for (let attempt = 0; attempt < 3; attempt += 1) {
+					const firstItemIndex = result.playlist_items.length;
+					const initialTrackCount = childTrackCount;
+					const initialCoveredCount = childTrackCoveredCount;
+					const initialUnavailableCount = childTrackUnavailableCount;
+					let revisionChanged = false;
+					let offset = 0;
+					let position = 0;
+					let trackCount = 0;
+					const requestedPlaylistId = idFromUri(uri);
+					if (requestedPlaylistId === null) {
+						throw new Error("spotify_library_playlist_identity_missing");
 					}
-					readPageOffset(pl.content, requestOffset, "spotify_playlist");
-					const items = pl.content.items;
-					if (Object.hasOwn(pl.content, "totalCount")) {
-						const parsedTotal = count(pl.content.totalCount);
-						if (parsedTotal === null)
-							throw new Error("spotify_playlist_total_invalid");
+					let playlistName: unknown;
+					let ownerId: string | null = null;
+					let ownerName: unknown;
+					let description: unknown;
+					let publicValue: boolean | null = null;
+					let collaborativeValue: boolean | null = null;
+					let snapshotId: string | null = null;
+					let uriValue: unknown = uri;
+					let followers: number | null = null;
+					let images: Array<{ height: null; url: string; width: null }> = [];
+					let playlistRawCount = 0;
+					let playlistExpectedCount: number | null = null;
+					let playlistPageCount = 0;
+					let playlistRowAvailable = wanted.has("playlists");
+					while (true) {
+						const requestOffset = offset;
+						childLastOffset = requestOffset;
+						const plData = await gql("fetchPlaylist", {
+							uri,
+							offset,
+							limit: 100,
+							enableWatchFeedEntrypoint: false,
+						});
+						const pl = plData?.data?.playlistV2;
 						if (
-							playlistExpectedCount !== null &&
-							playlistExpectedCount !== parsedTotal
+							!isRecord(pl) ||
+							typeof pl.uri !== "string" ||
+							pl.uri !== uri ||
+							!isRecord(pl.content) ||
+							!Array.isArray(pl.content.items)
 						) {
-							throw new Error("spotify_playlist_total_changed");
+							throw new Error("spotify_playlist_response_invalid");
 						}
-						playlistExpectedCount = parsedTotal;
-					}
-					if (requestOffset === 0) {
-						const responseId = idFromUri(pl.uri);
-						if (responseId === null || responseId !== requestedPlaylistId) {
-							throw new Error("spotify_playlist_identity_mismatch");
+						readPageOffset(pl.content, requestOffset, "spotify_playlist");
+						const items = pl.content.items;
+						const revisionSource = Object.hasOwn(pl, "revisionId")
+							? pl.revisionId
+							: pl.snapshotId;
+						const pageRevision =
+							typeof revisionSource === "string" && revisionSource.length > 0
+								? revisionSource
+								: null;
+						if (
+							requestOffset > 0 &&
+							(snapshotId === null || pageRevision !== snapshotId)
+						) {
+							revisionChanged = true;
+							break;
 						}
-						if (wanted.has("playlists")) {
+						if (Object.hasOwn(pl.content, "totalCount")) {
+							const parsedTotal = count(pl.content.totalCount);
+							if (parsedTotal === null)
+								throw new Error("spotify_playlist_total_invalid");
+							if (
+								playlistExpectedCount !== null &&
+								playlistExpectedCount !== parsedTotal
+							) {
+								throw new Error("spotify_playlist_total_changed");
+							}
+							playlistExpectedCount = parsedTotal;
+						}
+						if (requestOffset === 0) {
+							snapshotId = pageRevision;
+							const responseId = idFromUri(pl.uri);
+							if (responseId === null || responseId !== requestedPlaylistId) {
+								throw new Error("spotify_playlist_identity_mismatch");
+							}
+							if (wanted.has("playlists")) {
+								try {
+									playlistName = requireField(
+										readString(pl.name, "playlist_name"),
+										"spotify_playlist",
+									);
+									// The playlistV2 operation does not carry `public`; null is the
+									// contract value for it, not a gap. A present value is validated.
+									publicValue = Object.hasOwn(pl, "public")
+										? requireField(
+												readBoolean(pl.public, "playlist_public"),
+												"spotify_playlist",
+											)
+										: null;
+									collaborativeValue = Object.hasOwn(pl, "collaborative")
+										? requireField(
+												readBoolean(pl.collaborative, "playlist_collaborative"),
+												"spotify_playlist",
+											)
+										: null;
+									snapshotId = requireField(
+										readString(revisionSource, "playlist_snapshot_id"),
+										"spotify_playlist",
+									);
+									const ownerValue = sourceContainer(
+										pl.ownerV2,
+										"owner",
+										"spotify_playlist",
+									);
+									const owner = sourceContainer(
+										child(ownerValue, "data"),
+										"owner_data",
+										"spotify_playlist",
+									);
+									const ownerUri = readString(
+										child(owner, "uri"),
+										"playlist_owner_uri",
+									);
+									const ownerNameRead = readString(
+										child(owner, "name"),
+										"playlist_owner_name",
+									);
+									ownerId = idFromUri(requireField(ownerUri, "spotify_playlist"));
+									ownerName = requireField(ownerNameRead, "spotify_playlist");
+									description = requireField(
+										readString(pl.description, "playlist_description"),
+										"spotify_playlist",
+									);
+									uriValue = requireField(
+										readString(pl.uri, "playlist_uri"),
+										"spotify_playlist",
+									);
+									followers = requireField(
+										readCount(pl.followers, "playlist_followers"),
+										"spotify_playlist",
+									);
+									images = requireField(
+										imageRecords(pl.images),
+										"spotify_playlist",
+									);
+								} catch (error) {
+									if (!isFieldUnavailable(error, "spotify_playlist")) throw error;
+									playlistRowAvailable = false;
+								}
+							}
+						}
+						for (const item of items) {
+							const playlistItem = isRecord(item) ? item.itemV2 : null;
+							const trackData = isRecord(playlistItem) ? playlistItem.data : null;
+							if (
+								!isRecord(trackData) ||
+								typeof trackData.__typename !== "string"
+							) {
+								throw new Error("spotify_playlist_row_invalid");
+							}
+							const trackPosition = position;
+							position += 1;
+							if (trackData.__typename !== "Track") {
+								if (["Episode", "PodcastEpisode"].includes(trackData.__typename))
+									continue;
+								throw new Error("spotify_playlist_row_type_unrecognized");
+							}
+							trackCount += 1;
+							if (wanted.has("playlist_items")) childTrackCount += 1;
+							if (!wanted.has("playlist_items")) continue;
 							try {
-								playlistName = requireField(
-									readString(pl.name, "playlist_name"),
+								const artistNames = requireField(
+									sourceArtists(trackData.artists, "playlist_track_artists"),
 									"spotify_playlist",
 								);
-								// The playlistV2 operation does not carry `public`; null is the
-								// contract value for it, not a gap. A present value is validated.
-								publicValue = Object.hasOwn(pl, "public")
+								const trackUri = requireField(
+									readString(trackData.uri, "playlist_track_uri"),
+									"spotify_playlist",
+								);
+								const trackName = requireField(
+									readString(trackData.name, "playlist_track_name"),
+									"spotify_playlist",
+								);
+								const album = sourceContainer(
+									trackData.albumOfTrack,
+									"album",
+									"spotify_playlist",
+								);
+								const albumName = requireField(
+									readString(child(album, "name"), "playlist_album_name"),
+									"spotify_playlist",
+								);
+								const durationContainer = sourceContainer(
+									trackData.trackDuration,
+									"duration",
+									"spotify_playlist",
+								);
+								const duration = requireField(
+									readCount(
+										child(durationContainer, "totalMilliseconds"),
+										"playlist_track_duration",
+									),
+									"spotify_playlist",
+								);
+								const addedAtContainer = sourceContainer(
+									isRecord(item) ? item.addedAt : undefined,
+									"added_at",
+									"spotify_playlist",
+								);
+								const addedAtValue = requireField(
+									readString(
+										child(addedAtContainer, "isoString"),
+										"playlist_added_at",
+									),
+									"spotify_playlist",
+								);
+								if (
+									addedAtValue !== null &&
+									!Number.isFinite(Date.parse(addedAtValue))
+								) {
+									throw new Error(
+										"spotify_playlist_field_unavailable:playlist_added_at_malformed",
+									);
+								}
+								const addedByContainer = sourceContainer(
+									isRecord(item) ? item.addedBy : undefined,
+									"added_by",
+									"spotify_playlist",
+								);
+								const addedBy = sourceContainer(
+									child(addedByContainer, "data"),
+									"added_by_data",
+									"spotify_playlist",
+								);
+								const addedByName = requireField(
+									readString(child(addedBy, "name"), "playlist_added_by"),
+									"spotify_playlist",
+								);
+								// Track data identifies the track by URI; an `id` key is optional
+								// but, when present, must agree with the URI.
+								const sourceTrackId = Object.hasOwn(trackData, "id")
 									? requireField(
-											readBoolean(pl.public, "playlist_public"),
+											readString(trackData.id, "playlist_track_id"),
 											"spotify_playlist",
 										)
 									: null;
-								collaborativeValue = Object.hasOwn(pl, "collaborative")
-									? requireField(
-											readBoolean(pl.collaborative, "playlist_collaborative"),
-											"spotify_playlist",
-										)
-									: null;
-								const snapshotSource = Object.hasOwn(pl, "revisionId")
-									? pl.revisionId
-									: pl.snapshotId;
-								snapshotId = requireField(
-									readString(snapshotSource, "playlist_snapshot_id"),
+								const trackId = spotifyTrackId(
+									trackUri,
+									sourceTrackId,
 									"spotify_playlist",
 								);
-								const ownerValue = sourceContainer(
-									pl.ownerV2,
-									"owner",
-									"spotify_playlist",
-								);
-								const owner = sourceContainer(
-									child(ownerValue, "data"),
-									"owner_data",
-									"spotify_playlist",
-								);
-								const ownerUri = readString(child(owner, "uri"), "playlist_owner_uri");
-								const ownerNameRead = readString(
-									child(owner, "name"),
-									"playlist_owner_name",
-								);
-								ownerId = idFromUri(requireField(ownerUri, "spotify_playlist"));
-								ownerName = requireField(ownerNameRead, "spotify_playlist");
-								description = requireField(
-									readString(pl.description, "playlist_description"),
-									"spotify_playlist",
-								);
-								uriValue = requireField(
-									readString(pl.uri, "playlist_uri"),
-									"spotify_playlist",
-								);
-								followers = requireField(
-									readCount(pl.followers, "playlist_followers"),
-									"spotify_playlist",
-								);
-								images = requireField(
-									imageRecords(pl.images),
-									"spotify_playlist",
-								);
+								result.playlist_items.push({
+									id: `${requestedPlaylistId}:${trackPosition}`,
+									playlist_id: requestedPlaylistId,
+									track_id: trackId,
+									uri: trackUri,
+									position: trackPosition,
+									added_at: addedAtValue,
+									added_by: addedByName,
+									name: trackName ?? undefined,
+									artist_names: artistNames,
+									album_name: albumName,
+									duration_ms: duration,
+								});
+								childTrackCoveredCount += 1;
 							} catch (error) {
 								if (!isFieldUnavailable(error, "spotify_playlist")) throw error;
-								playlistRowAvailable = false;
+								childTrackUnavailableCount += 1;
 							}
 						}
-					}
-					for (const item of items) {
-						const playlistItem = isRecord(item) ? item.itemV2 : null;
-						const trackData = isRecord(playlistItem) ? playlistItem.data : null;
+						playlistRawCount += items.length;
+						playlistPageCount += 1;
+						const nextOffset = offset + items.length;
 						if (
-							!isRecord(trackData) ||
-							typeof trackData.__typename !== "string"
+							playlistExpectedCount !== null &&
+							nextOffset > playlistExpectedCount
 						) {
-							throw new Error("spotify_playlist_row_invalid");
+							throw new Error("spotify_playlist_count_mismatch");
 						}
-						const trackPosition = position;
-						position += 1;
-						if (trackData.__typename !== "Track") {
-							if (["Episode", "PodcastEpisode"].includes(trackData.__typename))
-								continue;
-							throw new Error("spotify_playlist_row_type_unrecognized");
+						if (
+							playlistExpectedCount !== null &&
+							nextOffset === playlistExpectedCount
+						) {
+							break;
 						}
-						trackCount += 1;
-						if (wanted.has("playlist_items")) childTrackCount += 1;
-						if (!wanted.has("playlist_items")) continue;
-						try {
-							const artistNames = requireField(
-								sourceArtists(trackData.artists, "playlist_track_artists"),
-								"spotify_playlist",
-							);
-							const trackUri = requireField(
-								readString(trackData.uri, "playlist_track_uri"),
-								"spotify_playlist",
-							);
-							const trackName = requireField(
-								readString(trackData.name, "playlist_track_name"),
-								"spotify_playlist",
-							);
-							const album = sourceContainer(
-								trackData.albumOfTrack,
-								"album",
-								"spotify_playlist",
-							);
-							const albumName = requireField(
-								readString(child(album, "name"), "playlist_album_name"),
-								"spotify_playlist",
-							);
-							const durationContainer = sourceContainer(
-								trackData.trackDuration,
-								"duration",
-								"spotify_playlist",
-							);
-							const duration = requireField(
-								readCount(
-									child(durationContainer, "totalMilliseconds"),
-									"playlist_track_duration",
-								),
-								"spotify_playlist",
-							);
-							const addedAtContainer = sourceContainer(
-								isRecord(item) ? item.addedAt : undefined,
-								"added_at",
-								"spotify_playlist",
-							);
-							const addedAtValue = requireField(
-								readString(child(addedAtContainer, "isoString"), "playlist_added_at"),
-								"spotify_playlist",
-							);
-							if (
-								addedAtValue !== null &&
-								!Number.isFinite(Date.parse(addedAtValue))
-							) {
-								throw new Error(
-									"spotify_playlist_field_unavailable:playlist_added_at_malformed",
-								);
-							}
-							const addedByContainer = sourceContainer(
-								isRecord(item) ? item.addedBy : undefined,
-								"added_by",
-								"spotify_playlist",
-							);
-							const addedBy = sourceContainer(
-								child(addedByContainer, "data"),
-								"added_by_data",
-								"spotify_playlist",
-							);
-							const addedByName = requireField(
-								readString(child(addedBy, "name"), "playlist_added_by"),
-								"spotify_playlist",
-							);
-							// Track data identifies the track by URI; an `id` key is optional
-							// but, when present, must agree with the URI.
-							const sourceTrackId = Object.hasOwn(trackData, "id")
-								? requireField(
-										readString(trackData.id, "playlist_track_id"),
-										"spotify_playlist",
-									)
-								: null;
-							const trackId = spotifyTrackId(
-								trackUri,
-								sourceTrackId,
-								"spotify_playlist",
-							);
-							result.playlist_items.push({
-								id: `${requestedPlaylistId}:${trackPosition}`,
-								playlist_id: requestedPlaylistId,
-								track_id: trackId,
-								uri: trackUri,
-								position: trackPosition,
-								added_at: addedAtValue,
-								added_by: addedByName,
-								name: trackName ?? undefined,
-								artist_names: artistNames,
-								album_name: albumName,
-								duration_ms: duration,
-							});
-							childTrackCoveredCount += 1;
-						} catch (error) {
-							if (!isFieldUnavailable(error, "spotify_playlist")) throw error;
-							childTrackUnavailableCount += 1;
+						if (items.length < 100 && playlistExpectedCount === null) {
+							throw new Error("spotify_playlist_terminal_unverified");
 						}
+						if (items.length === 0)
+							throw new Error("spotify_playlist_pagination_no_progress");
+						if (nextOffset <= offset) {
+							throw new Error("spotify_playlist_pagination_no_progress");
+						}
+						offset = nextOffset;
 					}
-					playlistRawCount += items.length;
-					playlistPageCount += 1;
-					const nextOffset = offset + items.length;
+					if (revisionChanged) {
+						result.playlist_items.length = firstItemIndex;
+						childTrackCount = initialTrackCount;
+						childTrackCoveredCount = initialCoveredCount;
+						childTrackUnavailableCount = initialUnavailableCount;
+						continue;
+					}
 					if (
 						playlistExpectedCount !== null &&
-						nextOffset > playlistExpectedCount
+						playlistRawCount !== playlistExpectedCount
 					) {
 						throw new Error("spotify_playlist_count_mismatch");
 					}
-					if (
-						playlistExpectedCount !== null &&
-						nextOffset === playlistExpectedCount
-					) {
-						break;
+					childRawCount += playlistRawCount;
+					childPageCount += playlistPageCount;
+					if (playlistExpectedCount === null) childCountKnown = false;
+					else childExpectedCount += playlistExpectedCount;
+					if (wanted.has("playlists") && playlistRowAvailable) {
+						result.playlists.push({
+							id: requestedPlaylistId,
+							name: playlistName,
+							owner_id: ownerId,
+							owner_name: ownerName ?? null,
+							public: publicValue,
+							collaborative: collaborativeValue,
+							track_count: trackCount,
+							snapshot_id: snapshotId,
+							description: description ?? null,
+							uri: uriValue,
+							followers,
+							images,
+						});
+					} else if (wanted.has("playlists")) {
+						playlistRowUnavailableCount += 1;
 					}
-					if (items.length < 100 && playlistExpectedCount === null) {
-						throw new Error("spotify_playlist_terminal_unverified");
-					}
-					if (items.length === 0)
-						throw new Error("spotify_playlist_pagination_no_progress");
-					if (nextOffset <= offset) {
-						throw new Error("spotify_playlist_pagination_no_progress");
-					}
-					offset = nextOffset;
+					playlistCoherent = true;
+					break;
 				}
-				if (
-					playlistExpectedCount !== null &&
-					playlistRawCount !== playlistExpectedCount
-				) {
-					throw new Error("spotify_playlist_count_mismatch");
-				}
-				childRawCount += playlistRawCount;
-				childPageCount += playlistPageCount;
-				if (playlistExpectedCount === null) childCountKnown = false;
-				else childExpectedCount += playlistExpectedCount;
-				if (wanted.has("playlists") && playlistRowAvailable) {
-					result.playlists.push({
-						id: requestedPlaylistId,
-						name: playlistName,
-						owner_id: ownerId,
-						owner_name: ownerName ?? null,
-						public: publicValue,
-						collaborative: collaborativeValue,
-						track_count: trackCount,
-						snapshot_id: snapshotId,
-						description: description ?? null,
-						uri: uriValue,
-						followers,
-						images,
-					});
-				} else if (wanted.has("playlists")) {
-					playlistRowUnavailableCount += 1;
+				if (!playlistCoherent) {
+					result.playlistRevisionUnproven = true;
+					return result;
 				}
 			}
 			if (wanted.has("playlist_items")) {
@@ -1939,11 +1991,9 @@ export const spotifyPageCollector = async (
 						const sourceTrackId = Object.hasOwn(t, "id")
 							? requireField(readString(t.id, "track_id"))
 							: null;
-						const id = spotifyTrackId(
-							trackUri,
-							sourceTrackId,
-							"spotify_saved_tracks",
-						);
+						const id = typeof trackUri === "string" && trackUri.startsWith("spotify:local:")
+							? await localTrackId(trackUri)
+							: spotifyTrackId(trackUri, sourceTrackId, "spotify_saved_tracks");
 						if (id === null) {
 							throw new Error(
 								"spotify_saved_tracks_field_unavailable:identity_missing",
@@ -2330,6 +2380,19 @@ export async function spotifyCollect({
 	const requestedNames = [...requested.keys()];
 	await progress("Fetching Spotify data");
 	const data = await collectSpotifyWebData(page, requestedNames, evaluateData);
+	if (data.playlistRevisionUnproven) {
+		for (const stream of requested.keys()) {
+			await emit({
+				type: "SKIP_RESULT",
+				stream,
+				reason: "inventory_not_proven_complete",
+				message:
+					"Spotify changed a playlist while its pages were being read; retry the inventory.",
+				recovery_hint: { action: "retry_by_runtime", retryable: true },
+			});
+		}
+		return;
+	}
 	if (requested.has("profile") && data.profile) {
 		if (!validateRecord("profile", data.profile).ok) {
 			data.profile = null;
