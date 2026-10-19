@@ -9680,7 +9680,7 @@
 				},
 				"connector_key": "github-browser",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-				"version": "0.3.6",
+				"version": "0.3.7",
 				"display_name": "GitHub (browser session)",
 				"brand": {
 					"icon": "icon.svg",
@@ -14511,7 +14511,7 @@
 				},
 				"connector_key": "linkedin",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/linkedin",
-				"version": "0.3.31",
+				"version": "0.3.32",
 				"display_name": "LinkedIn",
 				"brand": {
 					"icon": "icon.svg",
@@ -19486,7 +19486,7 @@
 				},
 				"connector_key": "spotify",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/spotify",
-				"version": "0.1.35",
+				"version": "0.1.37",
 				"display_name": "Spotify",
 				"brand": {
 					"icon": "icon.svg",
@@ -19964,6 +19964,7 @@
 					}
 				},
 				"reason_display_messages": {
+					"inventory_not_proven_complete": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
 					"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 					"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 					"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
@@ -25879,7 +25880,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.36",
+				"version": "0.2.39",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
@@ -26002,10 +26003,10 @@
 					{
 						"name": "subscriptions",
 						"required": false,
-						"description": "Channels visible in the signed-in subscriptions page, up to 20.",
+						"description": "Channels visible in the signed-in subscriptions page.",
 						"display": {
 							"label": "Your subscriptions",
-							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible. Limited to 20."
+							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26069,10 +26070,10 @@
 					{
 						"name": "playlists",
 						"required": false,
-						"description": "Owner library playlists visible in the browser, up to 50.",
+						"description": "Owner library playlists visible in the browser.",
 						"display": {
 							"label": "Your playlists",
-							"detail": "Playlist titles, URLs and visible header metadata. Limited to 50."
+							"detail": "Playlist titles, URLs and visible header metadata."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26179,7 +26180,7 @@
 							"resources": true
 						},
 						"incremental": false,
-						"coverage_strategy": "checkpoint_window",
+						"coverage_strategy": "full_inventory",
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -26297,10 +26298,10 @@
 					{
 						"name": "watch_history",
 						"required": false,
-						"description": "The latest observed history entry per video, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
+						"description": "Observed history entries keyed by video and normalized viewing date, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
 						"display": {
 							"label": "Your watch history",
-							"detail": "Observed videos are upserted by video identity while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
+							"detail": "Observed viewing dates are upserted by video and viewing date while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
 						},
 						"semantics": "mutable_state",
 						"schema": {
