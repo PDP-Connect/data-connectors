@@ -302,8 +302,7 @@ export function readSubscriptions(doc: Document = document): Array<{
 							: null,
 				},
 			];
-		})
-		.slice(0, 20);
+		});
 }
 
 export function readPlaylistLinks(
@@ -354,8 +353,7 @@ export function readPlaylistLinks(
 			if (!id || id === "LL" || id === "WL" || seen.has(id)) return [];
 			seen.add(id);
 			return [{ id, url: url.href }];
-		})
-		.slice(0, 50);
+		});
 }
 
 export function readPlaylistHeader(doc: Document = document): {

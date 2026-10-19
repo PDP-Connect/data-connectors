@@ -200,3 +200,21 @@ test("PageShim fixtures prove all six snapshots without relaxing omitted-stream 
  assert.equal(contributions?.data.totalContributionsLastYear, pageshimCase.exportSummary.details.contributions);
  assert.equal(result.messages.filter(m => m.type === "DETAIL_COVERAGE").length, 5);
 });
+
+test("events retain legacy null details when a PushEvent omits its commits list", async () => {
+ const result = await collect(["events"], {
+  fetchPublicJson: async (url) => ({
+   requestedUrl: url, responseUrl: url, status: 200, link: null,
+   data: [{ id: "push-without-commits", type: "PushEvent", public: true,
+    created_at: "2026-01-01T00:00:00Z", repo: { name: "sample-user/demo" },
+    payload: { ref: "refs/heads/main", head: "abc123" } }],
+  }),
+ });
+ assert.equal(result.records.length, 1);
+ const events = result.records[0]?.data.events as Array<Record<string, unknown>>;
+ assert.equal(events[0]?.title, null);
+ assert.equal(events[0]?.commits, null);
+ assert.equal(events[0]?.branch, "main");
+ assert.ok(result.messages.some((message) => message.type === "DETAIL_COVERAGE"));
+ assert.ok(!result.messages.some((message) => message.type === "SKIP_RESULT"));
+});

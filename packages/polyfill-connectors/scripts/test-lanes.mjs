@@ -21,3 +21,8 @@ export const NAMESPACE_TESTS = new Set([
 // (../../reference-implementation/server/*), which is not in this repository.
 // Paths as the related-test selector reports them.
 export const EXCLUDED_TESTS = new Set(["connectors/github/index.test.ts"]);
+
+// Files that run under Vitest instead of node:test. Use repo-relative
+// `connectors/...` paths for connectors and package-relative paths otherwise.
+// A file may also be in NAMESPACE_TESTS. Connector owners append paths here.
+export const VITEST_TESTS = new Set([]);
