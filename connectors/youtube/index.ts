@@ -105,8 +105,7 @@ function historyIdentity(video: BrowserVideo, dateReference: Date): string {
 		.trim()
 		.replace(/\s+/g, " ")
 		.toLowerCase();
-	const collectionDate =
-		`${dateReference.getFullYear()}-${String(dateReference.getMonth() + 1).padStart(2, "0")}-${String(dateReference.getDate()).padStart(2, "0")}`;
+	const collectionDate = localDate(dateReference);
 	return `${videoIdentity(video)}|unresolved:${collectionDate}:${sectionLabel ?? "unknown-section"}`;
 }
 
@@ -325,14 +324,19 @@ export function parseCount(value: string | null | undefined): number | null {
 }
 
 /** A section label has at most day precision. Never infer a time of day. */
+function localDate(date: Date): string {
+	const year = date.getFullYear();
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const day = String(date.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
+
 export function resolveWatchedDate(
 	label: string | null,
 	now: Date,
 ): string | null {
 	if (!label) return null;
 	const text = label.trim().toLowerCase();
-	const localDate = (date: Date) =>
-		`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 	if (text === "today") return localDate(now);
 	if (text === "yesterday")
 		return localDate(
@@ -1920,10 +1924,11 @@ export async function collectYoutubeBrowser(
 			ctx.collectionMode === "full_refresh"
 				? undefined
 				: (ctx.state?.watch_history as HistoryCursor | undefined);
-		const browserDate = await page.evaluate(() => {
+		const readBrowserDate = () => {
 			const now = new Date();
 			return [now.getFullYear(), now.getMonth(), now.getDate()];
-		});
+		};
+		const browserDate = await page.evaluate(readBrowserDate);
 		const dateReference =
 			Array.isArray(browserDate) && browserDate.length === 3
 				? new Date(browserDate[0]!, browserDate[1]!, browserDate[2]!, 12)

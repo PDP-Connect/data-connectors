@@ -848,6 +848,12 @@ test("a real continuation permits a safe incomplete checkpoint", async () => {
 });
 
 test("a parsed suffix cannot checkpoint across a malformed history card", async () => {
+	const now = new Date();
+	const collectionDate = [
+		String(now.getFullYear()),
+		String(now.getMonth() + 1).padStart(2, "0"),
+		String(now.getDate()).padStart(2, "0"),
+	].join("-");
 	const rows = Array.from({ length: 10 }, (_, index) =>
 		index === 5
 			? `<yt-lockup-view-model><h3>hydrating</h3></yt-lockup-view-model>`
@@ -869,7 +875,10 @@ test("a parsed suffix cannot checkpoint across a malformed history card", async 
 	const state = messages.find((message) => message.type === "STATE")
 		?.cursor as Record<string, unknown>;
 	assert.equal(state?.complete, false);
-	assert.equal(state?.backfill_anchor_id, "v4|unknown-date");
+	assert.equal(
+		state?.backfill_anchor_id,
+		`v4|unresolved:${collectionDate}:unknown-section`,
+	);
 	assert.equal(
 		messages.some((message) => message.reason === "stream_collection_failed"),
 		true,
@@ -1054,7 +1063,7 @@ test("unresolved relative history labels use the collection date in record ident
 		const page = new FixturePage();
 		page.evaluate = async (fn: Function, arg?: unknown) => {
 			if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
-			if (fn.toString().includes("const now = new Date()")) return browserDate;
+			if (fn.name === "readBrowserDate") return browserDate;
 			if (
 				fn.name === "readVideos" ||
 				(typeof arg === "object" && arg !== null && "offset" in arg)
