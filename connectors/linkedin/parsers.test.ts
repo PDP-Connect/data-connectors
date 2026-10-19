@@ -721,7 +721,7 @@ test("buildConnectionRows: resolved profile gives full enrichment", () => {
 	assert.equal(validateRecord("connections", rows.records[0]).ok, true);
 });
 
-test("buildConnectionRows: either malformed name part withholds the whole row", () => {
+test("buildConnectionRows: malformed enrichment is omitted while the listed edge remains", () => {
 	for (const resolved of [
 		{
 			firstName: 17,
@@ -740,10 +740,10 @@ test("buildConnectionRows: either malformed name part withholds the whole row", 
 			[{ connectedMember: "urn:li:fsd_profile:member-key" }],
 			() => resolved,
 		);
-		assert.deepEqual(rows.records, []);
+		assert.equal(rows.records.length, 1);
 		assert.equal(rows.considered, 1);
-		assert.equal(rows.covered, 0);
-		assert.equal(rows.unavailableFields.full_name?.malformed, 1);
+		assert.equal(rows.covered, 1);
+		assert.equal(Object.hasOwn(rows.records[0] ?? {}, "full_name"), false);
 	}
 });
 
@@ -782,19 +782,15 @@ test("buildConnectionRows: source-backed blank names stay blank", () => {
 	assert.equal(rows.covered, 1);
 });
 
-test("buildConnectionRows: an unresolved member is withheld whole, never emitted without its enrichment", () => {
+test("buildConnectionRows: an unresolved member keeps its edge and omits unavailable enrichment", () => {
 	const rows = buildConnectionRows(
 		[{ connectedMember: "urn:li:fsd_profile:xyz789" }],
 		() => undefined,
 	);
-	assert.deepEqual(rows.records, []);
+	assert.deepEqual(rows.records, [{ id: "urn:li:fsd_profile:xyz789" }]);
 	assert.equal(rows.considered, 1);
-	assert.equal(rows.covered, 0);
-	assert.deepEqual(rows.unavailableFields, {
-		full_name: { enrichment_unresolved: 1 },
-		headline: { enrichment_unresolved: 1 },
-		profile_url: { enrichment_unresolved: 1 },
-	});
+	assert.equal(rows.covered, 1);
+	assert.deepEqual(rows.unavailableFields, {});
 });
 
 test("buildConnectionRows: a row without a member URN cannot be keyed and is omitted", () => {

@@ -99,6 +99,7 @@ import {
 	buildProfileRows,
 	buildSkillRows,
 	collectionAt,
+	connectionEnrichmentHasMalformedFields,
 	connectionEnrichmentIsReadable,
 	type DashProfileSource,
 } from "./parsers.ts";
@@ -464,15 +465,16 @@ async function resolveConnectionProfiles(
 		const presentFields = profileFields.filter((field) =>
 			Object.hasOwn(value, field),
 		);
-		const malformed = !connectionEnrichmentIsReadable(value);
+		const malformed = connectionEnrichmentHasMalformedFields(value);
 		if (malformed) malformedUrns.add(urn);
 		if (presentFields.length === 0) return;
 		const profile = value as VoyagerResolvedProfile;
+		const complete = connectionEnrichmentIsReadable(value);
 		const prior = resolved.get(urn);
-		if (!prior || (!prior.complete && !malformed)) {
+		if (!prior || (!prior.complete && complete)) {
 			resolved.set(urn, {
 				profile,
-				complete: !malformed,
+				complete,
 			});
 		}
 	};
@@ -852,7 +854,7 @@ export async function collectLinkedIn(
 		}
 		if (resolution.malformedCount > 0) {
 			await progress(
-				`LinkedIn connections omitted malformed enrichment: malformed_enrichment=${resolution.malformedCount}`,
+				`LinkedIn connection enrichment malformed: malformed_enrichment=${resolution.malformedCount}`,
 				{
 					stream: "connections",
 					count: resolution.malformedCount,
@@ -876,10 +878,7 @@ export async function collectLinkedIn(
 			rows,
 			{
 				enumerated: connectionsComplete,
-				gapReason:
-					unresolved > 0
-						? "connectionEnrichmentIncomplete"
-						: "connectionFieldsUnreadable",
+				gapReason: "connectionFieldsUnreadable",
 				diagnostics: {
 					evidence_reason: evidenceReason,
 					withheld_count: withheldCount,
@@ -937,14 +936,12 @@ type RowGapReason =
 	| "dashProfileUnavailable"
 	| "profileFieldsUnavailable"
 	| "profileSectionFieldsUnreadable"
-	| "connectionEnrichmentIncomplete"
 	| "connectionFieldsUnreadable";
 
 const ROW_GAP_REASON: Record<RowGapReason, string> = {
 	dashProfileUnavailable: "linkedin_dash_profile_unavailable",
 	profileFieldsUnavailable: "linkedin_profile_fields_unavailable",
 	profileSectionFieldsUnreadable: "linkedin_fields_unreadable",
-	connectionEnrichmentIncomplete: "linkedin_connection_enrichment_incomplete",
 	connectionFieldsUnreadable: "linkedin_fields_unreadable",
 };
 

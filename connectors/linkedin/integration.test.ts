@@ -16,6 +16,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { BrowserContext, Cookie, Page } from "playwright";
 import type {
@@ -147,6 +148,16 @@ const RESOLVED_PROFILES = {
 			publicIdentifier: "jamielee",
 		},
 	},
+};
+
+const CONNECTION_ENRICHMENT_NOT_FOUND = JSON.parse(
+	readFileSync(
+		new URL("./fixtures/scrubbed/connection-enrichment-not-found.json", import.meta.url),
+		"utf8",
+	),
+) as {
+	listing: { elements: unknown[] };
+	profileLookup: unknown;
 };
 
 /** Route a Voyager request path to its canned response. Mirrors the shape
@@ -639,6 +650,34 @@ test("collectLinkedIn: canonical gap for a stream is emitted after that stream's
 		recordIndex < coverageIndex,
 		"RECORD must be emitted before the coverage message that summarizes it",
 	);
+});
+
+test("collectLinkedIn: keeps a listed connection when its profile lookup returns 404", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	const route = (path: string): unknown => {
+		if (path === "/voyager/api/relationships/connectionsSummary/") {
+			return { entityUrn: "urn:li:fsd_connectionsSummary:12", numConnections: 1 };
+		}
+		if (path.startsWith("/voyager/api/me")) return ME_RESPONSE;
+		if (path.startsWith("/voyager/api/relationships/dash/connections")) {
+			const start = Number(new URL(path, "https://www.linkedin.com").searchParams.get("start"));
+			return start === 0
+				? CONNECTION_ENRICHMENT_NOT_FOUND.listing
+				: { elements: [], paging: { count: 40, start, links: [] } };
+		}
+		if (path.startsWith("/voyager/api/identity/dash/profiles?ids=")) {
+			return CONNECTION_ENRICHMENT_NOT_FOUND.profileLookup;
+		}
+		return { _error: "http_404" };
+	};
+	await collectLinkedIn(buildCtx(["connections"], recording, route));
+
+	const connection = recording.emitted.find((row) => row.stream === "connections");
+	assert.deepEqual(connection?.data, {
+		connected_at: "2023-11-14T22:13:20.000Z",
+		id: "urn:li:fsd_profile:synthetic-member-001",
+	});
+	assert.equal(claimsFullCoverage(recording, "connections"), true);
 });
 
 test("collectLinkedIn: dash failure keeps /me profile fields and reports unavailable dash details", async () => {
@@ -1515,7 +1554,7 @@ test("collectLinkedIn: skill/language malformed rows preserve values and omit ro
 	);
 });
 
-test("collectLinkedIn: connection rows without URNs and unresolved enrichment are reported without invented ids", async () => {
+test("collectLinkedIn: connection rows without URNs are omitted and unresolved edges remain", async () => {
 	const recording = makeRecordingEmit(validateRecord);
 	const progressMessages: string[] = [];
 	const route = (path: string): unknown => {
@@ -1543,20 +1582,17 @@ test("collectLinkedIn: connection rows without URNs and unresolved enrichment ar
 		},
 	});
 
-	// The unresolved edge is withheld: emitting it without enrichment would
-	// erase the stored name and headline.
-	assert.deepEqual(withheldFieldsOf(recording, "connections"), [
-		"full_name",
-		"headline",
-		"profile_url",
-	]);
+	assert.deepEqual(
+		recording.emitted.filter((row) => row.stream === "connections").map((row) => row.data),
+		[{ id: "urn:li:profile:unresolved" }],
+	);
 	const coverage = recording.protocolMessages.find(
 		(
 			message,
 		): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			message.type === "DETAIL_COVERAGE" && message.stream === "connections",
 	);
-	assert.equal(coverage, undefined, "an omitted source row vetoes full coverage");
+	assert.equal(coverage, undefined, "a missing member URN vetoes full coverage");
 	assert.ok(
 		skipResults(recording).some(
 			(skip) => diagnosticsOf(skip).page_reason === "linkedin_connections_page_malformed",
@@ -1620,7 +1656,7 @@ test("collectLinkedIn: partial batches retry missing URNs and validate sourced s
 		},
 	});
 
-	assert.deepEqual(singletonRequests, [urns[1], urns[2]]);
+	assert.deepEqual(singletonRequests, urns);
 	const connections = recording.emitted.filter(
 		(event) => event.stream === "connections",
 	);
@@ -1632,16 +1668,17 @@ test("collectLinkedIn: partial batches retry missing URNs and validate sourced s
 		]),
 		[
 			[urns[0], "", ""],
-			// urns[1] (numeric first name) is withheld whole.
-			[urns[2], "Only", null],
+			[urns[1], undefined, undefined],
+			[urns[2], "Only", undefined],
 		],
 	);
+	assert.equal(Object.hasOwn(connections[1]?.data ?? {}, "headline"), false);
+	assert.equal(Object.hasOwn(connections[2]?.data ?? {}, "headline"), false);
 	const coverage = recording.protocolMessages.find(
 		(message): message is Extract<EmittedMessage, { type: "DETAIL_COVERAGE" }> =>
 			message.type === "DETAIL_COVERAGE" && message.stream === "connections",
 	);
-	assert.equal(coverage?.considered, 3);
-	assert.equal(coverage?.covered, 2);
+	assert.equal(coverage, undefined, "missing summary proof keeps the stream upsert-only");
 	assert.ok(
 		progressMessages.some((message) =>
 			message.includes("malformed_enrichment=1"),
@@ -1939,17 +1976,22 @@ for (const [name, options, reason] of [
 	["contradictory confirmation", { confirmation: { elements: [], paging: { start: 0 } } }, "connection_confirmation_malformed"],
 	["confirmation continuation", { confirmation: { elements: [], paging: { links: [{}] } } }, "connection_confirmation_malformed"],
 	["summary exceeds distinct rows", { before: { ...PROOF_SUMMARY, numConnections: 2 }, after: { ...PROOF_SUMMARY, numConnections: 2 } }, "connection_total_mismatch"],
-	["source 404 is withheld", { resolution: { _error: "http_404" } }, "linkedin_connection_enrichment_incomplete"],
+	["source 404 omits optional enrichment", { resolution: { _error: "http_404" } }, ""],
 ] as const) {
-	test(`provider evidence: ${name} prevents connection STATE and full coverage`, async () => {
+	test(`provider evidence: ${name}`, async () => {
 		const { recording } = await collectProof(options);
-		assert.equal(claimsFullCoverage(recording, "connections"), false);
-		assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "connections"), false);
-		const gap = skipResults(recording).find((message) => message.stream === "connections");
-		assert.equal(diagnosticsOf(gap ?? {}).evidence_reason, reason);
-		if (name === "source 404 is withheld") {
-			assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 0);
-			assert.equal(diagnosticsOf(gap ?? {}).withheld_count, 1);
+		if (name === "source 404 omits optional enrichment") {
+			assert.equal(claimsFullCoverage(recording, "connections"), true);
+			assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "connections"), true);
+			assert.deepEqual(
+				recording.emitted.filter((row) => row.stream === "connections").map((row) => row.data),
+				[{ connected_at: "2023-11-14T22:13:20.000Z", id: "urn:li:fsd_profile:conn-1" }],
+			);
+		} else {
+			assert.equal(claimsFullCoverage(recording, "connections"), false);
+			assert.equal(recording.protocolMessages.some((message) => message.type === "STATE" && message.stream === "connections"), false);
+			const gap = skipResults(recording).find((message) => message.stream === "connections");
+			assert.equal(diagnosticsOf(gap ?? {}).evidence_reason, reason);
 		}
 	});
 }
@@ -2080,6 +2122,6 @@ test("profile fallback counts distinct walked members before failed enrichment",
 		connections: { elements: [member, member] }, resolution: { _error: "http_404" },
 	});
 	assert.equal(recording.emitted.find((row) => row.stream === "profile")?.data.connection_count, 1);
-	assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 0);
+	assert.equal(recording.emitted.filter((row) => row.stream === "connections").length, 1);
 	assert.ok(progressMessages.includes("LinkedIn profile connection_count=1 (walked distinct fallback): summary_request_failed"));
 });

@@ -108,19 +108,18 @@ export const languagesSchema = z.object({
 });
 
 /**
- * connections stream (D7: new stream). One record per connection, keyed by
- * the connected member's URN. `full_name`/`headline`/`profile_url` are
- * `null` only when the resolved profile says so. When resolution fails for a
- * member (rate limit, restricted profile), the edge is withheld for this run
- * and reported as a retryable gap: emitting it with `null` enrichment would
- * erase the stored name and headline.
+ * connections stream (D7: new stream). One record per listed connection,
+ * keyed by the connected member's URN. Profile enrichment fields are
+ * optional: include them only when the resolved source returns a readable
+ * value or explicitly reports an empty value. An unresolved profile does not
+ * remove the relationship edge.
  */
 export const connectionsSchema = z.object({
-	connected_at: isoDateTimeNullable,
-	full_name: pdppSafeText.max(300).nullable(),
-	headline: pdppSafeText.max(1000).nullable(),
+	connected_at: isoDateTimeNullable.optional(),
+	full_name: pdppSafeText.max(300).nullable().optional(),
+	headline: pdppSafeText.max(1000).nullable().optional(),
 	id: z.string().min(1).max(300),
-	profile_url: urlNullable,
+	profile_url: urlNullable.optional(),
 });
 
 /**
