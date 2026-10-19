@@ -138,6 +138,7 @@ function makeFakePage(options: {
 	let pendingPostsResolve: ((value: unknown) => void) | null = null;
 	let pendingPostsPredicate: ((value: unknown) => boolean) | null = null;
 	let adsListWait = 0;
+	let activeAdsSurface: "categories" | "advertisers" | "ad_topics" | null = null;
 	let dialogClassificationSequenceIndex = 0;
 	let dialogScrapeCount = 0;
 	let firstDialogItemsReady = options.delayFirstDialogItems !== true;
@@ -254,6 +255,7 @@ function makeFakePage(options: {
 				return Promise.reject(new Error("scripted navigation failure"));
 			}
 			frameUrl = url ?? "https://www.instagram.com/testuser/";
+			if (frameUrl.includes("/ads/ad_topics/")) activeAdsSurface = "ad_topics";
 			currentNavigationRequest = {
 				frame: () => mainFrame,
 				isNavigationRequest: () => true,
@@ -324,6 +326,7 @@ function makeFakePage(options: {
 				return readiness(false);
 			}
 			if (source.includes("Categories used to reach you")) {
+				activeAdsSurface = "categories";
 				return readiness(options.categoriesAvailable === true);
 			}
 			if (source.includes("View all")) {
@@ -336,6 +339,9 @@ function makeFakePage(options: {
 				source.includes('[role="dialog"] [role="list"]') &&
 				!source.includes('[role="listitem"]')
 			) {
+				if (activeAdsSurface === "categories") {
+					return readiness(options.categoryDestinationReached !== false);
+				}
 				const index = adsListWait++;
 				if (index < 2) {
 					const reached = dialogReachedQueue[0];
@@ -354,6 +360,9 @@ function makeFakePage(options: {
 				source.includes('[role="dialog"] [role="list"]') &&
 				source.includes('[role="listitem"]')
 			) {
+				if (activeAdsSurface === "categories") {
+					return readiness((options.categoryRows?.length ?? 0) > 0);
+				}
 				const index = adsListWait - 1;
 				const ready =
 					index < 2
@@ -497,7 +506,12 @@ function makeFakePage(options: {
 				return Promise.resolve(options.categoriesAvailable === true);
 			}
 			if (fnSource.includes("Categories used to reach you")) {
+				activeAdsSurface = "categories";
 				return Promise.resolve(options.categoriesAvailable === true);
+			}
+			if (fnSource.includes("Advertisers using your activity")) {
+				activeAdsSurface = "advertisers";
+				return Promise.resolve(true);
 			}
 			if (fnSource.includes("View all")) {
 				return Promise.resolve(undefined);
@@ -1857,7 +1871,7 @@ test("collectAllStreams: ads completes independently when profile web_info is un
 		categoriesAvailable: true,
 		categoryComplete: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
-		dialogComplete: [true, true],
+		dialogComplete: [true, true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: null,
@@ -1997,6 +2011,7 @@ test("collectAllStreams: nonempty ads without source total emits records but is 
 	const { page } = makeFakePage({
 		categoriesAvailable: true,
 		categoryRows: [{ description: "Music affinity", name: "Music" }],
+		dialogComplete: [true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -2186,7 +2201,7 @@ test("collectAllStreams: ads missing a surface keeps its rows and skips only the
 	const harness = makeRecordingEmit(validateRecord);
 	const { page, waitRejections } = makeFakePage({
 		categoriesAvailable: false,
-		dialogComplete: [true, true],
+		dialogComplete: [true, true, true],
 		dialogScrapes: [["Acme Corp"], ["Sports & Fitness"]],
 		fetchScript: {},
 		webInfoUser: WEB_INFO_USER,
@@ -2491,11 +2506,14 @@ const advertisersControl = (dialogHtml: string): string => `
 	</script>`;
 
 /** Manage info tab and categories link that run `clickScript` on click. */
-const categoriesControl = (clickScript: string): string => `
+const categoriesControl = (
+	clickScript: string,
+	entry: "button" | "link" = "link",
+): string => `
 	<div role="tab">Manage info</div>
-	<div role="tabpanel"><div role="link">Categories used to reach you</div></div>
+	<div role="tabpanel">${entry === "button" ? "<button>Categories used to reach you</button>" : "<div role=\"link\">Categories used to reach you</div>"}</div>
 	<script>
-		document.querySelector('[role="link"]').addEventListener('click', () => {
+		document.querySelector('${entry === "button" ? "[role=tabpanel] button" : "[role=link]"}').addEventListener('click', () => {
 			${clickScript}
 		});
 	</script>`;
@@ -2512,6 +2530,7 @@ const INSTAGRAM_WEB_INFO_HTML = `<html><body><script type="application/json" dat
 async function collectAdsInChromium(pages: {
 	ads: string;
 	adTopics: string;
+	observePath?: (path: string, cookie: string) => void;
 }): Promise<ReturnType<typeof makeRecordingEmit>> {
 	const harness = makeRecordingEmit(validateRecord);
 	const browser = await chromium.launch({ headless: true });
@@ -2528,8 +2547,12 @@ async function collectAdsInChromium(pages: {
 				status: 200,
 			}),
 		);
-		await page.route(ACCOUNTS_CENTER_ROUTE, (route) =>
-			route.fulfill({
+		await page.route(ACCOUNTS_CENTER_ROUTE, (route) => {
+			pages.observePath?.(
+				new URL(route.request().url()).pathname,
+				route.request().headers().cookie ?? "",
+			);
+			return route.fulfill({
 				body: new URL(route.request().url()).pathname.startsWith(
 					"/ads/ad_topics/",
 				)
@@ -2537,8 +2560,8 @@ async function collectAdsInChromium(pages: {
 					: pages.ads,
 				contentType: "text/html",
 				status: 200,
-			}),
-		);
+			});
+		});
 		const ctx: BrowserCollectContext = {
 			assist: async (): Promise<never> => {
 				throw new Error("not implemented");
@@ -2574,6 +2597,43 @@ async function collectAdsInChromium(pages: {
 		await browser.close();
 	}
 }
+
+test("collectAllStreams: opens targeting categories before advertiser and topic pagination", async () => {
+	const requests: Array<{ cookie: string; path: string }> = [];
+	const ads = htmlPage(
+		`<button type="button" aria-label="Advertisers you saw ads from">Advertisers</button>
+		<script>document.querySelector('button').addEventListener('click', () => {
+			document.cookie = 'advertiser=1; path=/';
+			document.body.insertAdjacentHTML('beforeend', '<section role="dialog"><div role="list" aria-setsize="0"></div><p>No advertisers</p></section>');
+		});</script>`,
+		categoriesControl(
+			`document.cookie = 'targeting=1; path=/'; document.body.insertAdjacentHTML('beforeend', '<section role="dialog"><div role="list" aria-setsize="1"><div role="listitem" aria-posinset="1"><span>Sample Category</span><button>Remove</button></div></div></section>');`,
+			"button",
+		),
+	);
+	const harness = await collectAdsInChromium({
+		ads,
+		adTopics: htmlPage(
+			'<section role="dialog"><div role="list"></div><p>No ad topics</p></section>',
+		),
+		observePath: (path, cookie) => requests.push({ path, cookie }),
+	});
+
+	assert.ok(
+		requests.some(
+			({ cookie, path }) => path === "/ads/" && cookie.includes("targeting=1"),
+		) &&
+			requests.some(
+				({ cookie, path }) =>
+					path === "/ads/ad_topics/" && cookie.includes("targeting=1"),
+			),
+		`targeting categories must be clicked before advertiser pagination; visited ${JSON.stringify(requests.map(({ path, cookie }) => ({ path, targetingSeen: cookie.includes("targeting=1") })))}`,
+	);
+	assert.equal(
+		harness.emitted.filter((record) => record.data.kind === "ad_category").length,
+		1,
+	);
+});
 
 function adsCoverage(
 	harness: ReturnType<typeof makeRecordingEmit>,
