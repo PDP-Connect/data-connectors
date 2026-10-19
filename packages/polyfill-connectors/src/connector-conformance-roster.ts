@@ -29,6 +29,7 @@
 export const PRODUCTION_READY_CONNECTORS: Record<string, { testFile: string }> =
 	{
 		amazon: { testFile: "connectors/amazon/integration.test.ts" },
+		anthropic_live: { testFile: "connectors/anthropic_live/index.test.ts" },
 		apple_contacts: {
 			testFile: "connectors/apple_contacts/integration.test.ts",
 		},

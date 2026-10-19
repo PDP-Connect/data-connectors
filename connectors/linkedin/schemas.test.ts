@@ -170,6 +170,18 @@ test("connections schema accepts an unresolved connection (all enrichment null)"
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
+test("schemas reject a record with a field left out (rows are withheld, never emitted partial)", () => {
+	// A Personal Server upsert replaces the whole record, so every field is
+	// present on an emitted record; field-read.ts withholds uncovered rows.
+	assert.equal(
+		connectionsSchema.safeParse({ id: "urn:li:fsd_profile:xyz789" }).success,
+		false,
+	);
+	assert.equal(profileSchema.safeParse({ id: "alexrivera" }).success, false);
+	assert.equal(connectionsSchema.safeParse({ full_name: "A" }).success, false);
+	assert.equal(skillsSchema.safeParse({ id: "urn:skill:1" }).success, false);
+});
+
 test("profile schema rejects a non-URL public_url (parser captured a label)", () => {
 	assert.equal(
 		profileSchema.safeParse({ ...PROFILE_RECORD, public_url: "Alex Rivera" })

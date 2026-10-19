@@ -1,0 +1,25 @@
+{
+  "source": "scrubbed live capture plus structure-only fixtures curated from the live renderer and ytInitialData shapes",
+  "run": "2026-10-15T03-02-30-871Z",
+  "captures": [
+    "youtube-subscriptions",
+    "youtube-subscriptions-after-scroll",
+    "youtube-playlist-index",
+    "youtube-playlist-index-after-scroll",
+    "playlist-index-view-model.html",
+    "playlist-index-builtins-only.html",
+    "liked-videos-empty-tab.html",
+    "watch-later-playlist-items.html",
+    "subscriptions-four-source-items.html",
+    "playlist-index-empty-grid.html",
+    "playlist-index-loading-grid.html",
+    "playlist-index-unselected-tab.html",
+    "liked-videos-unrelated-empty-loading-target.html",
+    "liked-videos-consent-wall.html",
+    "liked-videos-sign-in-wall.html",
+    "liked-videos-loading.html",
+    "playlist-index-video-lockup-mixed.html"
+  ],
+  "scrubber": "packages/polyfill-connectors/bin/scrub-fixtures.ts",
+  "personalValues": "removed from captured DOM; replaced with synthetic values in added fixtures"
+}

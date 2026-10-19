@@ -70,26 +70,66 @@ export const conversationSchema = z.object({
 	gizmo_id: idSchema.nullable(),
 });
 
+const blobRefSchema = z
+	.object({
+		blob_id: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+		mime_type: z.literal("application/json"),
+		size_bytes: z.number().int().min(1).max(33_554_432),
+		sha256: z.string().regex(/^[0-9a-f]{64}$/),
+	})
+	.strict()
+	.refine((ref) => ref.blob_id === `sha256:${ref.sha256}`);
+
 // ─── messages ───────────────────────────────────────────────────────────
 
-export const messageSchema = z.object({
-	id: idSchema,
-	conversation_id: idSchema,
-	parent_id: idSchema.nullable(),
-	children_ids: z.array(idSchema),
-	// role can be user / assistant / system / tool / etc.
-	role: pdppSafeText.max(40).nullable(),
-	content: largeText.nullable(),
-	// content_type is like "text" / "code" / "multimodal_text" / etc.
-	content_type: pdppSafeText.max(60).nullable(),
-	model_slug: pdppSafeText.max(80).nullable(),
-	create_time: looseTimestamp.nullable(),
-	finish_reason: pdppSafeText.max(60).nullable(),
-	citations: z.array(z.unknown()),
-	tool_calls: z.array(z.unknown()),
-	attachment_ids: z.array(idSchema),
-	on_current_branch: z.boolean(),
-});
+// A message record id is `<conversation_id>:<node_id>`, so it can be as long as
+// two ids and the separator.
+const messageIdSchema = z
+	.string()
+	.min(1)
+	.max(257)
+	.regex(/^\S+$/, "must not contain whitespace");
+
+export const messageSchema = z
+	.object({
+		id: messageIdSchema,
+		// The source's node id; the conversation's `current_node` names one.
+		node_id: idSchema,
+		conversation_id: idSchema,
+		parent_id: messageIdSchema.nullable(),
+		children_ids: z.array(messageIdSchema),
+		// role can be user / assistant / system / tool / etc.
+		role: pdppSafeText.max(40).nullable(),
+		// A string is the text; null means the source had none, or the text is in
+		// `blob_ref`; ABSENT means the text exists but cannot be stored (no blob
+		// spool on this host, or over the 32 MiB blob cap).
+		content: largeText.nullable().optional(),
+		// Entries of the source body's `parts` that are not strings, each
+		// `{ index, part }`. Free-form; strings inside are pdpp-safe-escape-v1.
+		non_string_parts: z.array(z.unknown()),
+		// content_type is like "text" / "code" / "multimodal_text" / etc.
+		content_type: pdppSafeText.max(60).nullable(),
+		model_slug: pdppSafeText.max(80).nullable(),
+		create_time: looseTimestamp.nullable(),
+		finish_reason: pdppSafeText.max(60).nullable(),
+		citations: z.array(z.unknown()),
+		// Free-form entries: every string inside is pdpp-safe-escape-v1 encoded
+		// by the extractor (see manifest). The synthesized-call invariant is
+		// enforced where the call is built, not here.
+		tool_calls: z.array(z.unknown()),
+		attachment_ids: z.array(idSchema),
+		on_current_branch: z.boolean(),
+		// Present only when the full text exceeds the inline cap: `content` is then
+		// null and the text is a Core blob (a JSON string, application/json).
+		blob_ref: blobRefSchema.optional(),
+	})
+	.refine(
+		(message) => message.blob_ref === undefined || message.content === null,
+		{
+			message: "blob_ref requires content to be null",
+			path: ["content"],
+		},
+	);
 
 // ─── memories ───────────────────────────────────────────────────────────
 

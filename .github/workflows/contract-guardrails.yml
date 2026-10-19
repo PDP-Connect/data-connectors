@@ -14,7 +14,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -38,17 +38,14 @@ jobs:
       - name: Test the manifest schema against the Collection Profile and manifests
         run: npm run manifest-schema:test
 
+      - name: Check the vendored test-sandbox matches its recorded hash
+        run: npm run test:tooling
+
       - name: Test publish ref gate
         run: node --test scripts/publish-ref-gate.test.mjs
 
-      - name: Test publish tag guard
-        run: node --test scripts/publish-tag-guard.test.mjs
-
-      - name: Test manifest lookup classifier
-        run: node --test scripts/lookup-manifest.test.mjs
-
-      - name: Test registry rate-limit retry
-        run: node --test scripts/registry-rate-limit.test.mjs
+      - name: Test publish tag guard, manifest lookup, registry rate limit and additive schemas
+        run: npm run scripts:test
 
       - name: Check scope schemas additive (HC-COMPAT-ADDITIVE-SCHEMA-001)
         env:

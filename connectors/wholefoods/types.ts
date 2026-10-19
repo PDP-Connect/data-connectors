@@ -38,6 +38,9 @@ export interface OrderDetailItem {
 	quantity: number | null;
 	/** Unit of a weighed quantity ("lb"); absent or null for counted items. */
 	quantityUnit?: string | null;
+	priceUnit?: string | null;
+	/** Stable source line identity, when supplied by the source row. */
+	sourceLineId?: string | null;
 	/** Price per unit (per weight for a weighed item). */
 	unitPriceDollars: number | null;
 	/** Charged price of the whole row, when the page states it (in-store). */
@@ -105,7 +108,7 @@ export interface ProfileRecord {
 /** Emitted `orders` stream record shape. */
 export interface OrderRecord {
 	id: string;
-	item_count: number;
+	item_count: number | null;
 	order_date: string | null;
 	order_url: string | null;
 	status: string | null;
@@ -128,6 +131,7 @@ export interface OrderItemRecord {
 
 /** Emitted `nutrition` stream record shape. */
 export interface NutritionRecord {
+	id: string;
 	calories: number | null;
 	carbs_g: number | null;
 	confidence: "high" | "medium" | "low";

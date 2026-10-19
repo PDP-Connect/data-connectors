@@ -25,6 +25,13 @@
 import { pdppSafeText } from "@pdpp/connector-protocol/pdpp-safe-text";
 import { z } from "zod";
 import { makeValidateRecord } from "../../packages/polyfill-connectors/src/schema-registry.ts";
+import { INLINE_TEXT_MAX_UNITS } from "./safe-escape.ts";
+
+// Text fields below carry the pdpp-safe-escape-v1 encoding (see
+// safe-escape.ts), so control characters are represented, not dropped. The
+// only length limit is the inline cap, measured on the escaped text; a value
+// over it is left absent (or, for message and document content, is a blob).
+const encodedText = pdppSafeText.max(INLINE_TEXT_MAX_UNITS);
 
 // Module-scoped regex (Biome useTopLevelRegex). Manifest declares date-time
 // format; accept an ISO-8601 datetime prefix.
@@ -56,14 +63,16 @@ const blobRefSchema = z
  */
 export const conversationsSchema = z.object({
 	id: idSchema,
-	title: pdppSafeText.max(4000).nullable(),
+	title: encodedText.nullable().optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
 	project_id: idSchema.nullable(),
 	model: z.string().min(1).max(128).nullable(),
 	message_count: z.number().int().min(0).nullable(),
 	is_starred: z.boolean().nullable(),
-	blob_ref: blobRefSchema,
+	// Absent when the raw source envelope passes the host blob cap.
+	// TODO(pdpp-host-blob-cap): raw envelopes over max_blob_bytes are omitted; revisit if the protocol raises the cap or adds multi-part blobs.
+	blob_ref: blobRefSchema.optional(),
 });
 
 /**
@@ -78,7 +87,12 @@ export const messagesSchema = z.object({
 	conversation_id: idSchema,
 	role: z.string().min(1).max(64).nullable(),
 	parent_id: idSchema.nullable(),
-	content: pdppSafeText.max(10_000_000).nullable(),
+	// Full message text up to the inline cap. Longer text is not cut: `content`
+	// is null and `blob_ref` holds the full text (a JSON string, application/
+	// json). Text whose encoding passes the host blob cap has `content` and
+	// `blob_ref` both absent.
+	content: encodedText.nullable().optional(),
+	blob_ref: blobRefSchema.optional(),
 	model: z.string().min(1).max(128).nullable(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
@@ -97,19 +111,21 @@ export const messagesSchema = z.object({
  */
 export const projectsSchema = z.object({
 	id: idSchema,
-	name: pdppSafeText.max(2000),
-	description: pdppSafeText.max(65_000).nullable(),
+	// Absent only when the name's escaped text is over the inline cap (see
+	// parseProject); a project with no name at all carries the placeholder.
+	name: encodedText.optional(),
+	description: encodedText.nullable().optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
 	is_archived: z.boolean().nullable(),
-	prompt_template: pdppSafeText.max(65_000).nullable(),
+	prompt_template: encodedText.nullable().optional(),
 	creator: z
 		.object({ uuid: z.string().optional(), full_name: z.string().optional() })
 		.strict()
 		.nullable(),
 	is_private: z.boolean().nullable(),
 	is_starter_project: z.boolean().nullable(),
-	archived_at: z.string().nullable(),
+	archived_at: z.string().nullable().optional(),
 	raw_docs: z.array(
 		z
 			.object({
@@ -121,7 +137,9 @@ export const projectsSchema = z.object({
 			})
 			.strict(),
 	),
-	blob_ref: blobRefSchema,
+	// Absent when the raw source envelope passes the host blob cap.
+	// TODO(pdpp-host-blob-cap): raw envelopes over max_blob_bytes are omitted; revisit if the protocol raises the cap or adds multi-part blobs.
+	blob_ref: blobRefSchema.optional(),
 });
 
 /**
@@ -143,8 +161,10 @@ export const projectsSchema = z.object({
 export const projectDocumentsSchema = z.object({
 	id: idSchema,
 	project_id: idSchema,
-	filename: pdppSafeText.max(1024).nullable(),
-	content: pdppSafeText.max(10_000_000).nullable(),
+	filename: encodedText.nullable().optional(),
+	// Same rule as messages.content: over the inline cap the text is a blob.
+	content: encodedText.nullable().optional(),
+	blob_ref: blobRefSchema.optional(),
 	create_time: isoDateTimeNullable,
 	update_time: isoDateTimeNullable,
 });
@@ -152,8 +172,8 @@ export const projectDocumentsSchema = z.object({
 export const accountProfileSchema = z.object({
 	id: idSchema,
 	organization_id: idSchema,
-	full_name: pdppSafeText.max(2000).nullable(),
-	plan: pdppSafeText.max(2000).nullable(),
+	full_name: encodedText.nullable(),
+	plan: encodedText.nullable(),
 	name_source: z.enum(["browser_menu", "users_json", "none"]),
 	metadata_status: z.enum([
 		"valid",

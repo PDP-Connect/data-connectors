@@ -7,10 +7,14 @@
 // maps to null when the runtime cannot compare bounds with its consent field
 // (absent, a string with no format, an integer, or a date field not yet
 // enabled), so a bounded run reports scope_not_supported for it.
+// Built connector artifacts never import this file: the builders resolve it to
+// the connector's own slice under ./consent-time-fields/.
 // Regenerate with `node --experimental-strip-types
 // scripts/generate-consent-time-fields.ts` from packages/polyfill-connectors.
 
 import type { ConsentTimeField } from "../time-range.ts";
+
+export const CONSENT_BOUND_CONNECTOR: string | null = null;
 
 export const CONSENT_TIME_FIELDS: Readonly<
 	Record<string, Readonly<Record<string, ConsentTimeField | null>>>
@@ -26,6 +30,12 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		messages: { field: "create_time", format: "date-time" },
 		project_documents: { field: "create_time", format: "date-time" },
 		projects: { field: "create_time", format: "date-time" },
+	},
+	anthropic_live: {
+		account_plan: null,
+		conversations: { field: "create_time", format: "date-time" },
+		messages: { field: "create_time", format: "date-time" },
+		usage_limits: null,
 	},
 	apple_contacts: {
 		address_books: null,
@@ -187,6 +197,7 @@ export const CONSENT_TIME_FIELDS: Readonly<
 	icloud_notes: {
 		folders: null,
 		notes: null,
+		profile: null,
 	},
 	imessage: {
 		attachments: null,
@@ -229,20 +240,25 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		sleep: null,
 	},
 	oura_browser: {
-		activity: null,
-		readiness: null,
-		sleep: null,
+		activity: { field: "day", format: "date" },
+		readiness: { field: "day", format: "date" },
+		sleep: { field: "day", format: "date" },
 	},
 	pocket: {
 		items: { field: "time_added", format: "date-time" },
 	},
 	reddit: {
 		comments: { field: "created_utc", format: "date-time" },
+		comments_stats: { field: "created_utc", format: "date-time" },
 		downvoted: { field: "created_utc", format: "date-time" },
+		downvoted_stats: { field: "created_utc", format: "date-time" },
 		hidden: { field: "created_utc", format: "date-time" },
+		hidden_stats: { field: "created_utc", format: "date-time" },
 		saved: { field: "created_utc", format: "date-time" },
 		submitted: { field: "created_utc", format: "date-time" },
+		submitted_stats: { field: "created_utc", format: "date-time" },
 		upvoted: { field: "created_utc", format: "date-time" },
+		upvoted_stats: { field: "created_utc", format: "date-time" },
 	},
 	shopify: {
 		orders: { field: "order_date", format: "date-time" },
@@ -273,7 +289,10 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		playlist_items: { field: "added_at", format: "date-time" },
 		playlists: null,
 		profile: null,
+		recently_played_contexts: null,
 		saved_tracks: { field: "added_at", format: "date-time" },
+		top_artists: null,
+		top_tracks: null,
 	},
 	steam: {
 		friends: null,

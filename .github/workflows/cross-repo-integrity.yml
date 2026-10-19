@@ -45,7 +45,10 @@ name: Cross-Repo Integrity
 # (alongside DCO and polyfill-connectors.yml's own equivalent gate). See finding 12.3.
 
 on:
-  pull_request: {}
+  # Only PRs into main. A PR into an integration branch that batches changes
+  # is checked locally instead; the batch PR into main runs this workflow.
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   schedule:
@@ -84,7 +87,7 @@ jobs:
           persist-credentials: false
 
       # pin-backed-paths.mjs imports the TypeScript collector registry; Node 24 strips its types.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -238,7 +241,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0 # source-copy gate reads the vendored revision from repository history
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -352,9 +355,8 @@ jobs:
   # integration coverage against data-connect's server is wanted, that is a deliberate,
   # separately-scoped follow-up in this repo, not a revival of this job.
   #
-  # `connectors/github/index.test.ts` and `bin/orchestrate.ts` still typecheck and run against
-  # this repo's own fixtures/mocks via this repo's normal test job — only the "against the
-  # real upstream server" cross-repo leg is gone.
+  # `connectors/github/index.test.ts` now runs nowhere: it imports ../../reference-implementation,
+  # which is not in this repo, and no job replaces the retired one. `bin/orchestrate.ts` still typechecks.
 
   pin-freshness:
     name: Pin freshness — ${{ matrix.repo.label }}
