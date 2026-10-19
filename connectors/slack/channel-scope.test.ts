@@ -217,23 +217,24 @@ test("messages: a scoped pass counts, emits and advances cursors only for channe
 	assert.deepEqual(idsOf(recording, "messages", "channel_id"), ["C0PUBLIC1"]);
 });
 
+// Schema constraints from the pinned slackdump v4.4.2 migration supplied by the owner.
+// Keep both FILE fixtures faithful to its identity and provenance constraints.
+const FILE_SCHEMA = "CREATE TABLE FILE (ID TEXT NOT NULL, FILENAME TEXT, URL TEXT, MODE TEXT NOT NULL, CHANNEL_ID TEXT NOT NULL, MESSAGE_ID INTEGER, DATA BLOB NOT NULL, CHUNK_ID INTEGER NOT NULL, PRIMARY KEY (ID, CHUNK_ID))";
+
 // A canvas is a quip FILE row. Its channel is the file row's, or else the
 // channel whose newest record says it owns the canvas.
 function makeCanvasDb(): DatabaseSync {
 	const db = makeDb();
-	db.exec(
-		"CREATE TABLE FILE (ID TEXT, FILENAME TEXT, URL TEXT, MODE TEXT, CHANNEL_ID TEXT, MESSAGE_ID INTEGER, DATA TEXT, CHUNK_ID INTEGER)",
-	);
+	db.exec(FILE_SCHEMA);
 	const insert = db.prepare(
 		"INSERT INTO FILE (ID, FILENAME, URL, MODE, CHANNEL_ID, MESSAGE_ID, DATA, CHUNK_ID) VALUES (?, ?, ?, 'quip', ?, NULL, '{}', 1)",
 	);
-	const canvases: ReadonlyArray<readonly [string, string | null]> = [
+	const canvases: ReadonlyArray<readonly [string, string]> = [
 		["F0PUBLIC1", "C0PUBLIC1"],
 		["F0PRIVATE", "G0PRIVATE1"],
 		["F0DIRECT1", "D0DIRECT01"],
-		["F0LOOSE01", null],
-		// No channel on the file row, but the private channel's own record owns it.
-		["F0OWNED01", null],
+		// Both the file and owning-channel metadata identify the private channel.
+		["F0OWNED01", "G0PRIVATE1"],
 	];
 	for (const [id, channel] of canvases) {
 		insert.run(id, `${id}.canvas`, `https://files.slack.com/${id}`, channel);
@@ -265,32 +266,29 @@ test("canvases: without a scope every canvas is read and counted", async () => {
 
 	assert.deepEqual(idsOf(recording, "canvases", "id"), [
 		"F0DIRECT1",
-		"F0LOOSE01",
 		"F0OWNED01",
 		"F0PRIVATE",
 		"F0PUBLIC1",
 	]);
-	assert.equal(coverage(recording, "canvases").considered, 5);
+	assert.equal(coverage(recording, "canvases").considered, 4);
 });
 
-test("canvases: a scoped run keeps a canvas by its owning channel and one that belongs to no channel", async () => {
+test("canvases: a scoped run retains only canvases with allowed provenance", async () => {
 	const recording = await runCanvases(new Set(["C0PUBLIC1"]));
 
 	assert.deepEqual(
 		idsOf(recording, "canvases", "id"),
-		["F0LOOSE01", "F0PUBLIC1"],
-		"the private and DM canvases go, including the one only its channel's own record claims",
+		["F0PUBLIC1"],
+		"the private and DM canvases are withheld",
 	);
 	const report = coverage(recording, "canvases");
-	assert.equal(report.considered, 2, "the archive held five; two are in scope");
-	assert.equal(report.covered, 2);
+	assert.equal(report.considered, 1, "the archive held four; one is in scope");
+	assert.equal(report.covered, 1);
 });
 
 function fileScopeSetup(channelScope?: ReadonlySet<string>) {
 	const { deps, recording } = setup(channelScope);
-	deps.db.exec(
-		"CREATE TABLE FILE (ID TEXT, FILENAME TEXT, URL TEXT, MODE TEXT, CHANNEL_ID TEXT, MESSAGE_ID INTEGER, DATA TEXT, CHUNK_ID INTEGER)",
-	);
+	deps.db.exec(FILE_SCHEMA);
 	deps.requested = new Map([["files", { name: "files" }]]);
 	deps.fingerprintCursors.set(
 		"files",
@@ -314,14 +312,13 @@ test("files: scope excludes private provenance before records, coverage and fing
 	try {
 		add("F0PUBLIC", "C0PUBLIC1");
 		add("F0PRIVATE", "G0PRIVATE1");
-		add("F0LOOSE", null);
 		await runFilesStream(deps);
-		assert.deepEqual(idsOf(recording, "files", "id"), ["F0LOOSE", "F0PUBLIC"]);
-		assert.equal(coverage(recording, "files").considered, 2);
-		assert.equal(coverage(recording, "files").covered, 2);
+		assert.deepEqual(idsOf(recording, "files", "id"), ["F0PUBLIC"]);
+		assert.equal(coverage(recording, "files").considered, 1);
+		assert.equal(coverage(recording, "files").covered, 1);
 		assert.deepEqual(
 			Object.keys(deps.fingerprintCursors.get("files")?.toState() ?? {}).sort(),
-			["F0LOOSE", "F0PUBLIC"],
+			["F0PUBLIC"],
 		);
 		// A new run seeds its fingerprint cursor from the previous checkpoint.
 		deps.fingerprintCursors.set(
@@ -332,22 +329,20 @@ test("files: scope excludes private provenance before records, coverage and fing
 			),
 		);
 		await runFilesStream(deps);
-		assert.equal(recording.emitted.length, 2);
+		assert.equal(recording.emitted.length, 1);
 	} finally {
 		deps.db.close();
 	}
 });
 
-test("files: one allowed current association admits once, outside-only and stale associations do not", async () => {
+test("files: latest allowed snapshot is retained once; latest outside snapshot is withheld", async () => {
 	const { deps, recording, add } = fileScopeSetup(new Set(["C0PUBLIC1"]));
 	try {
-		add("F0SHARED", "G0PRIVATE1");
-		add("F0SHARED", "C0PUBLIC1");
-		add("F0SHARED", "C0PUBLIC1");
-		add("F0OUTSIDE", "G0PRIVATE1");
-		add("F0OUTSIDE", "D0DIRECT01");
-		add("F0MIXED", null);
-		add("F0MIXED", "G0PRIVATE1");
+		add("F0SHARED", "G0PRIVATE1", 1);
+		add("F0SHARED", "C0PUBLIC1", 2);
+		add("F0SHARED", "C0PUBLIC1", 3);
+		add("F0OUTSIDE", "G0PRIVATE1", 1);
+		add("F0OUTSIDE", "D0DIRECT01", 2);
 		add("F0STALE", "C0PUBLIC1", 1);
 		add("F0STALE", "G0PRIVATE1", 2);
 		await runFilesStream(deps);
@@ -363,14 +358,13 @@ test("files: one allowed current association admits once, outside-only and stale
 	}
 });
 
-test("files: empty channel scope retains only genuinely channel-less files", async () => {
+test("files: empty channel scope withholds every current file", async () => {
 	const { deps, recording, add } = fileScopeSetup(new Set());
 	try {
 		add("F0PUBLIC", "C0PUBLIC1");
-		add("F0LOOSE", null);
 		await runFilesStream(deps);
-		assert.deepEqual(idsOf(recording, "files", "id"), ["F0LOOSE"]);
-		assert.equal(coverage(recording, "files").considered, 1);
+		assert.deepEqual(idsOf(recording, "files", "id"), []);
+		assert.equal(coverage(recording, "files").considered, 0);
 	} finally {
 		deps.db.close();
 	}
@@ -381,15 +375,29 @@ test("files: default scope preserves all channel associations", async () => {
 	try {
 		add("F0PUBLIC", "C0PUBLIC1");
 		add("F0PRIVATE", "G0PRIVATE1");
-		add("F0LOOSE", null);
 		await runFilesStream(deps);
 		assert.deepEqual(idsOf(recording, "files", "id"), [
-			"F0LOOSE",
 			"F0PRIVATE",
 			"F0PUBLIC",
 		]);
-		assert.equal(coverage(recording, "files").considered, 3);
+		assert.equal(coverage(recording, "files").considered, 2);
 	} finally {
 		deps.db.close();
 	}
 });
+
+for (const kind of ["files", "canvases"]) {
+	test(`${kind}: FILE fixture enforces primary key and non-null channel`, () => {
+		const db = kind === "files" ? fileScopeSetup().deps.db : makeCanvasDb();
+		try {
+			const insert = db.prepare(
+				"INSERT INTO FILE (ID, CHUNK_ID, CHANNEL_ID, MODE, DATA) VALUES (?, ?, ?, 'hosted', '{}')",
+			);
+			insert.run("FCONSTRAINT", 99, "C0PUBLIC1");
+			assert.throws(() => insert.run("FCONSTRAINT", 99, "G0PRIVATE1"), /UNIQUE|PRIMARY KEY/);
+			assert.throws(() => insert.run("FNULL", 99, null), /NOT NULL/);
+		} finally {
+			db.close();
+		}
+	});
+}

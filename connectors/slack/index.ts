@@ -2227,7 +2227,8 @@ function buildArchiveArgs(input: ArchiveArgsInput): string[] {
 	if (opts.SKIP_FILES) {
 		args.push("-files=false");
 	}
-	// `archive` has no channel-type flag. CHANNEL_TYPES is applied before this
+	// `archive -chan-types` exists, but explicit positional list generation ignores
+	// it. CHANNEL_TYPES is therefore resolved before this
 	// point: collect() lists the channels, keeps those of the chosen types and
 	// passes only their IDs here (see resolveTypedChannelScope). An empty list
 	// would archive every channel, so a caller must never reach here with one
@@ -3377,28 +3378,13 @@ export async function runFilesStream(deps: StreamDeps): Promise<void> {
 		return;
 	}
 	if (deps.channelScope) {
-		// Keep provenance until scope is decided, before fingerprint/coverage
-		// accounting. Only the latest snapshot's associations count; an old
-		// allowed share must not authorize a newer outside-only snapshot.
-		const byId = new Map<string, typeof rows>();
-		for (const row of rows) {
-			const group = byId.get(row.id) ?? [];
-			group.push(row);
-			byId.set(row.id, group);
-		}
+		// FILE's primary key (ID, CHUNK_ID) makes the MAX join select one
+		// observation per file, not a complete set of current shares. Withhold
+		// a latest outside observation even if an older allowed share exists.
 		const allowed = deps.channelScope;
-		rows = [...byId.values()].flatMap((group) => {
-			const inside = group.find(
-				(row) =>
-					typeof row.channel_id === "string" && allowed.has(row.channel_id),
-			);
-			if (inside) return [inside];
-			// A null association beside an excluded one is not proof that the
-			// file is genuinely channel-less. Malformed non-null IDs fail closed.
-			return group.every((row) => row.channel_id === null)
-				? group.slice(0, 1)
-				: [];
-		});
+		rows = rows.filter(
+			(row) => typeof row.channel_id === "string" && allowed.has(row.channel_id),
+		);
 	}
 	const { considered, covered } = await runFingerprintedFullSync(
 		deps,
