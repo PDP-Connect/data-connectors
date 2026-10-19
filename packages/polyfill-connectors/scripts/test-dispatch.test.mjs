@@ -90,6 +90,25 @@ test("node:test commands work when Vitest is absent", () => {
 			},
 		);
 		assert.equal(result.status, 0, result.stderr);
+		const missing = spawnSync(
+			process.execPath,
+			[
+				"--input-type=module",
+				"-e",
+				`import { testCommands } from ${JSON.stringify(moduleUrl)}; testCommands(['src/vitest.test.ts'], '1', new Set(['src/vitest.test.ts']));`,
+			],
+			{
+				cwd: directory,
+				env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+				encoding: "utf8",
+				timeout: 10_000,
+			},
+		);
+		assert.equal(missing.status, 1);
+		assert.match(
+			missing.stderr,
+			/npm ci --prefix packages\/polyfill-connectors\/test-tools/,
+		);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });
 	}

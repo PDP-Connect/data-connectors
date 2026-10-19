@@ -87,6 +87,10 @@ jobs:
           # --test-timeout) and node:fs/promises glob() need it; the rest of
           # this repo's workflows run Node 20 for unrelated npm-only scripts.
           node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/polyfill-connectors/test-tools/package-lock.json
 
       - name: Install workspace dependencies
         # Root connector files resolve dependencies from the root workspace.
@@ -98,6 +102,9 @@ jobs:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts
+
+      - name: Install isolated Vitest test tools
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
 
       - name: Install Chromium for the capture-redaction proofs
         # `src/capture-trace-redaction.test.ts` launches a real browser: the

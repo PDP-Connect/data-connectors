@@ -38,6 +38,7 @@ The root `npm test` runs these lanes, each in its own sandbox:
 - Every tracked test file runs in a lane or is listed in `MANUAL` in `scripts/test-lanes-coverage.test.mjs` with a reason; `test:tooling` fails otherwise.
 - A test that needs its own namespaces goes in `NAMESPACE_TESTS`; in the sandboxed lane `namespaceSkip` fails instead of skipping.
 - A connector test that imports from `vitest` must have its repo-relative `connectors/.../*.test.ts` path appended to `VITEST_TESTS` in `packages/polyfill-connectors/scripts/test-lanes.mjs`. The ordinary and related runners dispatch it to pinned Vitest in the same sandbox lane as node:test files, with that lane's worker limit and timeout.
+- Before local package tests that select Vitest files (including the dispatch fixture proof), run `npm ci --prefix packages/polyfill-connectors/test-tools` from the repo root. This private tools package pins Vitest 4.1.12 outside connector artifact inputs; the polyfill CI job installs and caches it separately. The dispatcher names this install command if the package is missing.
 - Do not edit `scripts/test-sandbox/test-sandbox`; re-vendor it and update its `.sha256`.
 
 ## Gap to excellence

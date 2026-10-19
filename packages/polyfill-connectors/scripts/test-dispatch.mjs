@@ -7,8 +7,10 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { VITEST_TESTS } from "./test-lanes.mjs";
 
-const require = createRequire(import.meta.url);
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const requireTestTools = createRequire(
+	join(packageRoot, "test-tools", "package.json"),
+);
 const repositoryRoot = resolve(packageRoot, "../..");
 const connectorsRoot = join(repositoryRoot, "connectors");
 const vitestConfig = join(packageRoot, "vitest.config.mjs");
@@ -46,10 +48,19 @@ export function testCommands(files, concurrency, vitestFiles = VITEST_TESTS) {
 		});
 	}
 	if (vitestTests.length > 0) {
-		const vitestBin = join(
-			dirname(require.resolve("vitest/package.json")),
-			"vitest.mjs",
-		);
+		let vitestBin;
+		try {
+			vitestBin = join(
+				dirname(requireTestTools.resolve("./node_modules/vitest/package.json")),
+				"vitest.mjs",
+			);
+		} catch (error) {
+			if (error?.code !== "MODULE_NOT_FOUND") throw error;
+			throw new Error(
+				"Vitest test tools are missing; run npm ci --prefix packages/polyfill-connectors/test-tools",
+				{ cause: error },
+			);
+		}
 		const exactFiles = vitestTests.map((file) =>
 			relative(repositoryRoot, resolve(packageRoot, file)).split(sep).join("/"),
 		);

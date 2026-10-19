@@ -173,8 +173,7 @@
 		"@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.0.1.tgz",
 		"tsx": "^4.23.13",
 		"typescript": "7.0.2",
-		"ultracite": "7.12.2",
-		"vitest": "4.1.12"
+		"ultracite": "7.12.2"
 	},
 	"overrides": {
 		"@pdpp/collector-runtime": {

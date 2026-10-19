@@ -1,0 +1,9 @@
+{
+	"name": "@pdpp/polyfill-test-tools",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Isolated test runner dependencies for polyfill connectors",
+	"devDependencies": {
+		"vitest": "4.1.12"
+	}
+}

@@ -4760,7 +4760,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "scripts/test-dispatch.mjs",
-			line: 77,
+			line: 88,
 			column: 18,
 			category: "shared_mutable_accumulator",
 			note: "runTestCommands(): wait for node:test before starting Vitest, keeping both processes in one sandbox scope",

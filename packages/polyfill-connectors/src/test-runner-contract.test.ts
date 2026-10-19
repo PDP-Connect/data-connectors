@@ -282,3 +282,37 @@ test("a signalled child stops the dispatcher with the same signal", () => {
 	);
 	assert.equal(result.signal, "SIGTERM", result.stderr);
 });
+
+test("isolated Vitest tools are pinned and outside connector artifact inputs", async () => {
+	const packageRoot = fileURLToPath(new URL("..", import.meta.url));
+	const tools = JSON.parse(
+		await readFile(join(packageRoot, "test-tools/package.json"), "utf8"),
+	);
+	const lock = JSON.parse(
+		await readFile(join(packageRoot, "test-tools/package-lock.json"), "utf8"),
+	);
+	assert.equal(tools.devDependencies.vitest, "4.1.12");
+	assert.equal(
+		testCommands(
+			["src/registered.test.ts"],
+			"1",
+			new Set(["src/registered.test.ts"]),
+		)[0]?.args[0],
+		join(packageRoot, "test-tools/node_modules/vitest/vitest.mjs"),
+	);
+	assert.deepEqual(
+		Object.entries(lock.packages)
+			.filter(
+				([path]) =>
+					path === "node_modules/vitest" ||
+					path.endsWith("/node_modules/vitest"),
+			)
+			.map(([, entry]) => (entry as { version: string }).version),
+		["4.1.12"],
+	);
+	const artifactInputs = await readFile(
+		join(packageRoot, "../../scripts/connector-artifact-inputs.mjs"),
+		"utf8",
+	);
+	assert.doesNotMatch(artifactInputs, /test-tools/);
+});
