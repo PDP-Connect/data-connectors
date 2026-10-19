@@ -26,7 +26,7 @@ The root `npm test` runs these lanes, each in its own sandbox:
 ## What is shared, per-worker, per-test, locked
 
 - Shared: the checkout, `node_modules`, the Playwright browser cache, the built PageShim bundles of one run. Tests write into the checkout in a few places: the namespace tests plant and remove sockets under the repository root (see below); PageShim tests build bundles under `.tmp/pageshim/` and `.scratch/`; `bin/connector-dev.test.ts` creates and removes `packages/polyfill-connectors/runs/<id>` and `connectors/<id>/`; `bin/connector-init.test.ts` scaffolds and removes `connectors/zz_init_smoke_<pid>/` and `connectors/zz_init_browser_smoke_<pid>/` (a killed run leaves them, and the manifest tests then fail); `bin/scenario-cli.test.ts` writes fixture connectors under `packages/polyfill-connectors/tmp/`; and one consent-time-field test makes a temporary directory inside `node_modules`. Do not run two suites in one checkout at once.
-- Per test file: one `node --test` child process. Module state (PageShim fixture modules with `setLoggedIn`) is per file; tests in one file run one after another.
+- Per test file: node:test uses one child process; Vitest uses an isolated fork, bounded by the same lane concurrency. Module state (PageShim fixture modules with `setLoggedIn`) is per file; tests in one file run one after another.
 - Per test: temp directories (`mkdtemp` under the sandbox's private `/tmp`), local HTTP servers on port 0, iMessage `chat.db` files, PageShim browsers (one Chromium per `runHarness`, about 140 ms to start).
 - Locked (serial): the namespaces lane. Its files share the repository root as global state (`isolation-mechanism.test.ts` plants sockets under it that `scenario-verify-strict.test.ts`'s isolation scan refuses), so one run executes them one at a time. Nothing locks them across two runs in the same checkout.
 - Never shared: the network. Unit lanes have loopback only; PageShim routes deny every request that no fixture serves.
@@ -37,6 +37,7 @@ The root `npm test` runs these lanes, each in its own sandbox:
 - No retries. A test that fails only under load is a bug to fix, not to rerun.
 - Every tracked test file runs in a lane or is listed in `MANUAL` in `scripts/test-lanes-coverage.test.mjs` with a reason; `test:tooling` fails otherwise.
 - A test that needs its own namespaces goes in `NAMESPACE_TESTS`; in the sandboxed lane `namespaceSkip` fails instead of skipping.
+- A connector test that imports from `vitest` must have its repo-relative `connectors/.../*.test.ts` path appended to `VITEST_TESTS` in `packages/polyfill-connectors/scripts/test-lanes.mjs`. The ordinary and related runners dispatch it to pinned Vitest in the same sandbox lane as node:test files, with that lane's worker limit and timeout.
 - Do not edit `scripts/test-sandbox/test-sandbox`; re-vendor it and update its `.sha256`.
 
 ## Gap to excellence
