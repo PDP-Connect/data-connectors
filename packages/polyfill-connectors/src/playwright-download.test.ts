@@ -350,11 +350,12 @@ test("copyMirroredRemoteDownload: a file that lands during the last sleep is sti
 		const { writeFile } = await import("node:fs/promises");
 		const mirrored = join(dir, "artifact");
 		const target = join(dir, "out.zip");
-		// Timeout 300ms: polls at 0 and 250, last sleep 250..300. The file
-		// lands at ~270ms, after the last in-loop stat.
+		// Timeout 400ms: polls at 0 and 250, last sleep 250..400. The file
+		// lands at ~325ms, after the last in-loop stat, with 75ms of slack on
+		// each side for a loaded CI runner.
 		setTimeout(() => {
 			writeFile(mirrored, "late").catch(() => undefined);
-		}, 270);
+		}, 325);
 		const copied = await copyMirroredRemoteDownload(
 			{
 				failure: async () => null,
@@ -362,7 +363,7 @@ test("copyMirroredRemoteDownload: a file that lands during the last sleep is sti
 				saveAs: async () => undefined,
 			},
 			target,
-			{ PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS: "300" },
+			{ PDPP_REMOTE_DOWNLOAD_MIRROR_TIMEOUT_MS: "400" },
 		);
 		assert.equal(copied, "late".length);
 		assert.equal(await readFile(target, "utf8"), "late");
