@@ -536,7 +536,7 @@ test("history streams beyond one batch and checkpoints its accounted prefix", as
 		deduped_count: 0,
 		stop_reason: "source-end",
 		incomplete: false,
-		skipped_unresolved_date_count: 0,
+		unresolved_date_count: 0,
 	});
 	assert.doesNotMatch(
 		diagnostics.join("\n"),
@@ -988,6 +988,61 @@ test("history preserves the same video when its watch date differs", async () =>
 	assert.equal(history.length, 2);
 	assert.deepEqual(history.map((record) => record.watched_date_label), ["Today", "Yesterday"]);
 	assert.notEqual(history[0]?.id, history[1]?.id);
+});
+
+test("unresolved localized history dates keep section rows distinct and incomplete", async () => {
+	const page = new FixturePage();
+	page.evaluate = async (fn: Function, arg?: unknown) => {
+		if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
+		if (fn.name === "readVideos" || (typeof arg === "object" && arg !== null && "offset" in arg)) {
+			const request = arg as { offset: number; limit: number };
+			return {
+				offset: request.offset,
+				totalRows: 2,
+				rows: [
+					{ ...VIDEO, watched_date_label: "Heute" },
+					{ ...VIDEO, watched_date_label: "Gestern" },
+				].slice(request.offset, request.offset + request.limit),
+			};
+		}
+		if (fn.name === "readListEnd" || (typeof arg === "object" && arg !== null && "kind" in arg))
+			return {
+				dataReadable: true,
+				dataItemCount: 2,
+				dataHasContinuation: false,
+				domHasContinuation: false,
+				declaredTotal: 2,
+				domItemCount: 2,
+				domHasEndMarker: true,
+				verifiedEmpty: false,
+				pageBlocked: false,
+				latestHistoryResponse: null,
+			};
+		return undefined;
+	};
+	const history: Record<string, unknown>[] = [];
+	const messages: Record<string, unknown>[] = [];
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+			emitRecord: async (_stream, data) => { history.push(data); },
+			emit: async (message) => { messages.push(message as Record<string, unknown>); },
+			reportStreamFailure: async () => undefined,
+			progress: async () => undefined,
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.equal(history.length, 2);
+	assert.notEqual(history[0]?.id, history[1]?.id);
+	assert.deepEqual(history.map((record) => record.watched_date), [null, null]);
+	assert.equal((messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>)?.complete, false);
+	const coverage = diagnostics.find((line) => line.startsWith("[youtube-diagnostic] coverage "));
+	assert.ok(coverage);
+	assert.equal(JSON.parse(coverage.slice("[youtube-diagnostic] coverage ".length)).unresolved_date_count, 2);
 });
 
 test("video primary keys survive playlist index changes", async () => {

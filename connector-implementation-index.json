@@ -25879,7 +25879,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.36",
+				"version": "0.2.37",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
