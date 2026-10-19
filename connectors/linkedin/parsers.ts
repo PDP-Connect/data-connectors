@@ -718,7 +718,10 @@ const CONNECTION_ROW = rowSpec(connectionsSchema, ["id"]);
 /** The fields a resolved member profile supplies to a connection row. */
 export function connectionEnrichmentReads(profile: unknown): FieldReads {
 	const sourceText = (...paths: Path[]) =>
-		firstOf(paths.map((path) => textAt(profile, path)), "unavailable");
+		firstOf(
+			paths.map((path) => textAt(profile, path)),
+			"unavailable",
+		);
 	const firstName = sourceText(["firstName"]);
 	const lastName = sourceText(["lastName"]);
 	const malformedNamePart = [firstName, lastName].find(
@@ -757,32 +760,42 @@ export function connectionEnrichmentHasMalformedFields(
 }
 
 /**
- * One connection row. The relationship listing is the source of the edge;
- * profile enrichment is optional and contributes only fields the source
- * returned as readable or explicitly empty.
+ * One connection row. An explicit per-member 404 means the source no longer
+ * exposes profile enrichment, so emit the relationship edge alone. Every
+ * other unreadable field withholds the whole upsert to preserve stored data.
  */
 export function connectionReads(
 	element: unknown,
 	resolved: unknown,
+	permanentlyMissing = false,
 ): FieldReads {
-	const enrichment = resolved === undefined
+	const enrichment: FieldReads = permanentlyMissing
 		? {}
-		: Object.fromEntries(
-				Object.entries(connectionEnrichmentReads(resolved)).filter(
-					([, outcome]) => outcome.kind !== "unavailable",
-				),
-			) as FieldReads;
+		: resolved === undefined
+			? {
+					full_name: unavailable("source_unavailable"),
+					headline: unavailable("source_unavailable"),
+					profile_url: unavailable("source_unavailable"),
+				}
+			: connectionEnrichmentReads(resolved);
 	const reads: Record<string, FieldRead<unknown>> = {
 		id: textAt(element, ["connectedMember"]),
 	};
 	const connectedAt = andThen(at(element, ["createdAt"]), epochMillis);
-	if (connectedAt.kind !== "unavailable") reads.connected_at = connectedAt;
+	if (
+		connectedAt.kind !== "unavailable" ||
+		connectedAt.reason !== "absent" ||
+		!permanentlyMissing
+	) {
+		reads.connected_at = connectedAt;
+	}
 	return { ...reads, ...enrichment };
 }
 
 export function buildConnectionRows(
 	elements: readonly unknown[],
 	resolvedProfileOf: (memberUrn: string) => unknown,
+	isPermanentlyMissing: (memberUrn: string) => boolean = () => false,
 ): StreamRows<ConnectionRecord> {
 	const rows = emptyStreamRows<ConnectionRecord>();
 	for (const element of elements) {
@@ -794,6 +807,7 @@ export function buildConnectionRows(
 				connectionReads(
 					element,
 					member.kind === "read" ? resolvedProfileOf(member.value) : undefined,
+					member.kind === "read" && isPermanentlyMissing(member.value),
 				),
 			),
 		);

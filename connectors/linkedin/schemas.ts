@@ -110,9 +110,10 @@ export const languagesSchema = z.object({
 /**
  * connections stream (D7: new stream). One record per listed connection,
  * keyed by the connected member's URN. Profile enrichment fields are
- * optional: include them only when the resolved source returns a readable
- * value or explicitly reports an empty value. An unresolved profile does not
- * remove the relationship edge.
+ * optional for a permanently missing member. Include them only when resolved
+ * source data is readable or explicitly empty. Transient failures and
+ * malformed or incomplete data withhold the whole row so an upsert cannot
+ * erase stored values.
  */
 export const connectionsSchema = z.object({
 	connected_at: isoDateTimeNullable.optional(),

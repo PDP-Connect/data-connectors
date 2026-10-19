@@ -870,7 +870,7 @@ for (const fieldCase of FIELD_CASES) {
 		.map((source) => `${source.root}.${source.path.join(".")}`)
 		.join(" | ");
 	const title = ["connected_at", "full_name", "headline", "profile_url"].includes(fieldCase.field) && fieldCase.stream === "connections"
-		? "malformed optional source field is omitted without dropping the edge"
+		? "malformed optional source field withholds the whole edge"
 		: "malformed source never completes";
 	test(`contract: ${fieldCase.stream}.${fieldCase.field} from ${sourceNames} — ${title}`, async () => {
 		for (const injection of injectionsFor(fieldCase)) {
@@ -887,10 +887,8 @@ for (const fieldCase of FIELD_CASES) {
 				(["full_name", "headline", "profile_url"].includes(fieldCase.field) ||
 					(fieldCase.field === "connected_at" && injection.path.at(-1) === "createdAt"))
 			) {
-				assert.equal(outcome.complete, true, `${where}: optional source field blocked the listed edge`);
-				const row = outcome.records.find((record) => record.id === fieldCase.rowId);
-				assert.ok(row, `${where}: listed edge was dropped`);
-				assert.equal(Object.hasOwn(row, fieldCase.field), false, `${where}: unavailable field was invented`);
+				assert.equal(outcome.complete, false, `${where}: malformed source completed the stream`);
+				assertWithheld(outcome, [fieldCase.field], where);
 				continue;
 			}
 			assert.equal(
@@ -1135,9 +1133,9 @@ test("r1: primitive section rows and an unreadable nested collection are not cov
 	}
 });
 
-test("r1: resolver keeps source-backed blank names and omits a numeric name", async () => {
+test("r1: resolver keeps source-backed blank names and withholds a numeric name", async () => {
 	const fixture = baseFixture();
-	fixture.resolved = { firstName: "", headline: "", lastName: "" };
+	fixture.resolved = { firstName: "", headline: "", lastName: "", publicIdentifier: null };
 	const blanks = outcomeOf(await collect(routesFor(fixture)), "connections");
 	assert.equal(blanks.complete, true, JSON.stringify(blanks));
 	assert.deepEqual(blanks.records[0], {
@@ -1145,13 +1143,13 @@ test("r1: resolver keeps source-backed blank names and omits a numeric name", as
 		full_name: "",
 		headline: "",
 		id: MEMBER,
+		profile_url: null,
 	});
 
 	fixture.resolved = { firstName: 123 };
 	const numeric = outcomeOf(await collect(routesFor(fixture)), "connections");
-	assert.equal(numeric.complete, true);
-	assert.ok(numeric.records[0]);
-	assert.equal(Object.hasOwn(numeric.records[0] ?? {}, "full_name"), false);
+	assert.equal(numeric.complete, false);
+	assertWithheld(numeric, ["full_name"]);
 });
 
 test("r2: numeric title and object schoolName rows are not covered", async () => {
@@ -1312,7 +1310,7 @@ test("r3: unreadable education end points are never read as ongoing", async () =
 	}
 });
 
-test("r3: a malformed or out-of-range connection timestamp is omitted without dropping the edge", async () => {
+test("r3: a malformed or out-of-range connection timestamp withholds the edge", async () => {
 	for (const createdAt of ["bad", 1e20]) {
 		const fixture = baseFixture();
 		setPath(fixture.page, ["elements", "0", "createdAt"], createdAt);
@@ -1320,10 +1318,8 @@ test("r3: a malformed or out-of-range connection timestamp is omitted without dr
 			await collect(routesFor(fixture), ["connections"]),
 			"connections",
 		);
-		assert.equal(outcome.complete, true, String(createdAt));
-		const row = outcome.records.find((record) => record.id === MEMBER);
-		assert.ok(row, `edge was dropped for ${String(createdAt)}`);
-		assert.equal(Object.hasOwn(row, "connected_at"), false);
+		assert.equal(outcome.complete, false, String(createdAt));
+		assertWithheld(outcome, ["connected_at"], String(createdAt));
 	}
 });
 
