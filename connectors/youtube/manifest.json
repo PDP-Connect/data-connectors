@@ -9,7 +9,7 @@
 	},
 	"connector_key": "youtube",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-	"version": "0.2.35",
+	"version": "0.2.36",
 	"mobile": { "pageshim": { "entry": "youtube.ts", "scope_prefix": "youtube", "login_url": "https://www.youtube.com/" } },
 	"display_name": "YouTube",
 	"brand": {
@@ -72,7 +72,8 @@
 						"type": ["string", "null"]
 					},
 					"email": {
-						"type": ["string", "null"]
+						"type": ["string", "null"],
+						"description": "Signed-in Google account email, read from the avatar menu's Switch account header; omitted when the menu shows none."
 					},
 					"joined_at": {
 						"type": ["string", "null"]
