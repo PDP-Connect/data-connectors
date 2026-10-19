@@ -1042,7 +1042,73 @@ test("unresolved localized history dates keep section rows distinct and incomple
 	assert.equal((messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>)?.complete, false);
 	const coverage = diagnostics.find((line) => line.startsWith("[youtube-diagnostic] coverage "));
 	assert.ok(coverage);
-	assert.equal(JSON.parse(coverage.slice("[youtube-diagnostic] coverage ".length)).unresolved_date_count, 2);
+	assert.equal(
+		JSON.parse(coverage.slice("[youtube-diagnostic] coverage ".length))
+			.unresolved_date_count,
+		2,
+	);
+});
+
+test("unresolved relative history labels use the collection date in record identity", async () => {
+	const collectId = async (browserDate: [number, number, number]) => {
+		const page = new FixturePage();
+		page.evaluate = async (fn: Function, arg?: unknown) => {
+			if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
+			if (fn.toString().includes("const now = new Date()")) return browserDate;
+			if (
+				fn.name === "readVideos" ||
+				(typeof arg === "object" && arg !== null && "offset" in arg)
+			) {
+				const request = arg as { offset: number; limit: number };
+				return {
+					offset: request.offset,
+					totalRows: 1,
+					rows: [{ ...VIDEO, watched_date_label: "Heute" }].slice(
+						request.offset,
+						request.offset + request.limit,
+					),
+				};
+			}
+			if (
+				fn.name === "readListEnd" ||
+				(typeof arg === "object" && arg !== null && "kind" in arg)
+			)
+				return {
+					dataReadable: true,
+					dataItemCount: 1,
+					dataHasContinuation: false,
+					domHasContinuation: false,
+					declaredTotal: 1,
+					domItemCount: 1,
+					domHasEndMarker: true,
+					verifiedEmpty: false,
+					pageBlocked: false,
+					latestHistoryResponse: null,
+				};
+			return undefined;
+		};
+		const history: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([[
+				"watch_history",
+				{ name: "watch_history" },
+			]]) as never,
+			emitRecord: async (_stream, data) => {
+				history.push(data);
+			},
+			emit: async () => undefined,
+			reportStreamFailure: async () => undefined,
+			progress: async () => undefined,
+		});
+		return history[0]?.id;
+	};
+
+	const firstVisit = await collectId([2026, 8, 23]);
+	const laterVisit = await collectId([2026, 8, 24]);
+	assert.ok(firstVisit);
+	assert.ok(laterVisit);
+	assert.notEqual(firstVisit, laterVisit);
 });
 
 test("video primary keys survive playlist index changes", async () => {

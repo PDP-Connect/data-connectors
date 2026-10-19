@@ -105,7 +105,9 @@ function historyIdentity(video: BrowserVideo, dateReference: Date): string {
 		.trim()
 		.replace(/\s+/g, " ")
 		.toLowerCase();
-	return `${videoIdentity(video)}|${sectionLabel ? `unresolved:${sectionLabel}` : "unknown-date"}`;
+	const collectionDate =
+		`${dateReference.getFullYear()}-${String(dateReference.getMonth() + 1).padStart(2, "0")}-${String(dateReference.getDate()).padStart(2, "0")}`;
+	return `${videoIdentity(video)}|unresolved:${collectionDate}:${sectionLabel ?? "unknown-section"}`;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
