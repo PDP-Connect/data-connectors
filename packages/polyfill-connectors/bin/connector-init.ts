@@ -502,7 +502,7 @@ import type { RecordData } from "../../packages/polyfill-connectors/src/connecto
 import type { ${typeName} } from "./types.ts";
 
 // TODO: fill in the record builder once the real upstream shape is known.
-// Must emit exactly the fields declared in manifests/${name}.json's
+// Must emit exactly the fields declared in connectors/${name}/manifest.json's
 // "${stream}" stream schema (id, created_at, title).
 export function ${camelCase(stream)}Record(item: ${typeName}): RecordData {
   return {
@@ -528,7 +528,7 @@ function buildBrowserParsersTs(name: string, stream: string): string {
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { ${typeName} } from "./types.ts";
 
-// Must emit exactly the fields declared in manifests/${name}.json's
+// Must emit exactly the fields declared in connectors/${name}/manifest.json's
 // "${stream}" stream schema (id, created_at, title). Already matches the
 // row shape index.ts's extractRows() TODO returns — widen both together as
 // the real DOM shape lands.
@@ -927,13 +927,13 @@ function buildSchemasTs(name: string, stream: string): string {
 
 /**
  * Zod schemas for ${name} stream records. Shape-check-before-emit per
- * docs/connector-authoring-guide.md §3. Mirrors manifests/${name}.json's
+ * docs/connector-authoring-guide.md §3. Mirrors connectors/${name}/manifest.json's
  * "${stream}" stream schema exactly — see src/manifest-reconcile.ts (run
  * via bin/reconcile-manifests.test.ts) for the drift check across
  * manifest / SCHEMAS registry / emitted-stream literals.
  *
  * TODO: as the real upstream shape lands in parsers.ts's record builder,
- * widen these fields (and manifests/${name}.json's schema in lockstep) to
+ * widen these fields (and connectors/${name}/manifest.json's schema in lockstep) to
  * match the real payload instead of this placeholder id/created_at/title
  * shape.
  */
@@ -1064,25 +1064,26 @@ function printNextSteps(name: string, stream: string): void {
 	console.log(`
 Scaffolded connector "${name}" (stream: "${stream}").
 
-Next steps:
-  1. Read docs/connector-authoring-guide.md — the authoring conventions
+Next steps (run commands from the repository root):
+  1. Read packages/polyfill-connectors/docs/connector-authoring-guide.md — the authoring conventions
      (source-of-truth ranking, fail-loud schema discipline, naming, cursor
      discipline) every connector in this fleet follows.
   2. Edit connectors/${name}/index.ts: replace the TODO endpoint (API_URL,
      auth header shape, response envelope) with the real upstream call.
   3. Widen connectors/${name}/types.ts, parsers.ts, and schemas.ts (in
-     lockstep with manifests/${name}.json's stream schema) to match the
+     lockstep with connectors/${name}/manifest.json's stream schema) to match the
      real payload shape as you discover it.
   4. Run the connector against the real API and watch it live:
-       node --import tsx bin/connector-dev.ts ${name}
+       node --import tsx packages/polyfill-connectors/bin/connector-dev.ts ${name}
   5. Capture a real run, then replay it strictly offline to prove the
      connector against fixed evidence:
-       node --import tsx bin/scenario-record.ts ${name}
-       node --import tsx bin/scenario-verify.ts ${name}
-     Scrub the capture (see bin/scrub-fixtures.ts) before committing
-     anything under fixtures/${name}/scrubbed/, and replace this
-     scaffold's synthetic pilot-real-shape fixture with a scrubbed real
-     one once you have it.
+       node --import tsx packages/polyfill-connectors/bin/scenario-record.ts ${name}
+       node --import tsx packages/polyfill-connectors/bin/scenario-verify.ts ${name} <scenario-path>
+     Keep the synthetic pilot-real-shape rows; calibrate them from a
+     privately reviewed capture. Never put real owner rows under pilot-real-shape.
+     Keep any approved scrubbed real evidence separate under
+     connectors/${name}/fixtures/scrubbed/<runId>/.
+     See packages/polyfill-connectors/docs/connector-authoring-guide.md for review.
   6. Run the test suite for this connector:
        node --test --import tsx "connectors/${name}/**/*.test.ts"
   7. connector-dev, scenario-record, register-all, and orchestrate all
@@ -1108,12 +1109,12 @@ function printBrowserNextSteps(name: string, stream: string): void {
 	console.log(`
 Scaffolded browser connector "${name}" (stream: "${stream}").
 
-Next commands:
-  1. node --import tsx bin/connector-doctor.ts
+Next commands (run from the repository root):
+  1. node --import tsx packages/polyfill-connectors/bin/connector-doctor.ts
        Checks Node, dependencies, the Patchright Chromium revision, display
        availability, .env.local location, and ~/.pdpp/profiles — before you
        drive a real browser.
-  2. node --import tsx bin/connector-dev.ts ${name}
+  2. node --import tsx packages/polyfill-connectors/bin/connector-dev.ts ${name}
        Launches the browser, runs the session check, and hands you the
        manual-login window if the ${name} profile isn't signed in yet.
        "${name}" is already resolvable — connector-dev/orchestrate discover
@@ -1127,8 +1128,8 @@ Next commands:
      succeeding with 0 records).
 
 Widen connectors/${name}/types.ts, parsers.ts, and schemas.ts (in lockstep
-with manifests/${name}.json's stream schema) to match the real row shape as
-you discover it. See docs/connector-authoring-guide.md §0 ("Browser
+with connectors/${name}/manifest.json's stream schema) to match the real row shape as
+you discover it. See packages/polyfill-connectors/docs/connector-authoring-guide.md §0 ("Browser
 architecture") and connectors/github_browser/ for the fuller reference this
 scaffold follows.
 
