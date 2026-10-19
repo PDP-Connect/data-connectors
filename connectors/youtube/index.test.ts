@@ -1164,6 +1164,7 @@ test("empty YouTube page data completes requested empty browser lists", async ()
 		[
 			["STATE", "playlists", "youtube_page_data_empty"],
 			["STATE", "playlist_items", "youtube_page_data_empty"],
+			["DETAIL_COVERAGE", "playlist_items", undefined],
 			["STATE", "likes", "youtube_page_data_empty"],
 			["STATE", "watch_later", "youtube_page_data_empty"],
 			["STATE", "watch_history", "youtube_page_data_empty"],
@@ -2645,8 +2646,17 @@ test("built-in lists plus page-data empty evidence complete both playlist stream
 		["playlists", "playlist_items"],
 	);
 	assert.equal(records.size, 0);
+	// Desktop requires both declared inventory authority and a matching proof
+	// before an empty stream can replace stored data and serve an empty view.
+	const manifest = JSON.parse(readFileSync(new URL("./manifest.json", import.meta.url), "utf8"));
+	assert.equal(manifest.streams.find((stream: { name: string }) => stream.name === "playlist_items").coverage_strategy, "full_inventory");
+	assert.deepEqual(messages.find((message) => message.type === "DETAIL_COVERAGE" && message.stream === "playlist_items"), {
+		type: "DETAIL_COVERAGE", reference_only: true,
+		stream: "playlist_items", state_stream: "playlist_items",
+		required_keys: [], hydrated_keys: [], considered: 0, covered: 0,
+	});
 	assert.deepEqual(outcome("playlists"), ["STATE"]);
-	assert.deepEqual(outcome("playlist_items"), ["STATE"]);
+	assert.deepEqual(outcome("playlist_items"), ["STATE", "DETAIL_COVERAGE"]);
 	assert.equal(
 		messages.some((message) => message.reason === "stream_collection_failed"),
 		false,
@@ -2796,4 +2806,20 @@ test("exactly 50 history items with a next page pending checkpoint partial progr
 		"stream_collection_failed",
 		"STATE",
 	]);
+});
+
+test("playlist items prove empty only after every owned playlist and the index end", async () => {
+ for (const unreadable of [false, true]) {
+  const { records, messages } = await collectFromDocuments(
+   (url) => url.includes("feed/playlists")
+    ? `${SIGNED_IN}<a href="/playlist?list=PL1">My list</a>${pageData(tabbedData({ gridRenderer: { items: [{ gridPlaylistRenderer: { playlistId: "PL1" } }] } }))}${END_OF_PLAYLIST_INDEX}`
+    : unreadable ? `${SIGNED_IN}<main>Loading</main>`
+    : `${SIGNED_IN}<ytd-message-renderer>No videos</ytd-message-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [{ messageRenderer: { text: { simpleText: "No videos" } } }] } }] } }))}`,
+   ["playlist_items"],
+  );
+  assert.equal(records.size, 0);
+  const proof = messages.find((message) => message.type === "DETAIL_COVERAGE");
+  assert.equal(Boolean(proof), !unreadable);
+  if (proof) assert.equal(proof.considered, 0);
+ }
 });

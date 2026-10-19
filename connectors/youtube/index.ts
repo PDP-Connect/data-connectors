@@ -8,6 +8,7 @@ import { isMainModule } from "@pdpp/connector-protocol";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import {
+	buildFullScanCoverageMessage,
 	type BrowserCollectContext,
 	type EnsureSessionArgs,
 	runConnector,
@@ -661,6 +662,8 @@ async function emitVerifiedEmptyState(
 			evidence: "youtube_page_data_empty",
 		},
 	});
+	if (stream === "playlist_items")
+		await ctx.emit(buildFullScanCoverageMessage(stream, 0));
 }
 
 type ExhaustionEvidence = {
@@ -1755,6 +1758,7 @@ export async function collectYoutubeBrowser(
 	let playlistLinks: Array<{ id: string; url: string }> = [];
 	let playlistIndexReadable = true;
 	let playlistIndexVerifiedEmpty = false;
+	let playlistItemsEmptyProven = false;
 	if (requested.has("playlists") || requested.has("playlist_items")) {
 		try {
 			await page.goto(`${HOME}feed/playlists`, {
@@ -1777,6 +1781,7 @@ export async function collectYoutubeBrowser(
 					"youtube-playlist-index-after-scroll",
 				);
 				playlistLinks = result.items;
+				playlistItemsEmptyProven = result.exhausted;
 				for (const stream of ["playlists", "playlist_items"]) {
 					if (!requested.has(stream)) continue;
 					if (
@@ -1851,6 +1856,8 @@ export async function collectYoutubeBrowser(
 						SCROLLS.playlist_items,
 						"playlist_items",
 					);
+					playlistItemsEmptyProven = playlistItemsEmptyProven &&
+						result !== null && result.exhausted && result.items.length === 0;
 					if (result) {
 						for (const video of result.items) {
 							await emit("playlist_items", {
@@ -1861,6 +1868,7 @@ export async function collectYoutubeBrowser(
 						}
 					}
 				} catch {
+					playlistItemsEmptyProven = false;
 					await streams.fail(
 						"playlist_items",
 						`YouTube playlist ${playlist.id} items could not be collected.`,
@@ -1874,6 +1882,9 @@ export async function collectYoutubeBrowser(
 			if (requested.has(stream))
 				await emitVerifiedEmptyState(ctx, stream, capturedAt);
 	}
+	if (!playlistIndexVerifiedEmpty && playlistIndexReadable &&
+		playlistItemsEmptyProven && requested.has("playlist_items"))
+		await emitVerifiedEmptyState(ctx, "playlist_items", capturedAt);
 	for (const [stream, list] of [
 		["likes", "LL"],
 		["watch_later", "WL"],
