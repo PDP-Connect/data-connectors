@@ -849,7 +849,9 @@ export function parseWholeFoodsProductPageDom(
 		return null;
 	});
 	const productInfo = findInJsonLd(ldNodes, (n) =>
-		["gtin12", "gtin13", "gtin", "gtin8"].some((field) => n[field])
+		["gtin12", "gtin13", "gtin", "gtin8", "name", "nutrition"].some(
+			(field) => n[field],
+		)
 			? n
 			: null,
 	);
@@ -862,36 +864,58 @@ export function parseWholeFoodsProductPageDom(
 			)
 		: null;
 	const headings = [...document.querySelectorAll("h2, h3, h4, span, div")];
+	const productName =
+		typeof productInfo?.name === "string"
+			? productInfo.name
+			: textOf(document.querySelector("h1")).trim() || null;
+	const productCategory = productInfo?.category;
+	const category = Array.isArray(productCategory)
+		? productCategory.filter(
+				(value): value is string => typeof value === "string",
+			)
+		: typeof productCategory === "string" && productCategory
+			? [productCategory]
+			: [];
+	const productIngredients =
+		typeof productInfo?.ingredients === "string"
+			? productInfo.ingredients
+			: null;
 	const nutritionHeading = headings.find((el) =>
 		NUTRITION_HEADING_RE.test(textOf(el).trim()),
 	);
+	const structuredFacts = (): NutritionFacts | null =>
+		ldNutrition
+			? {
+					...emptyNutritionDetails(),
+					calciumMg: numOrNull(ldNutrition.calciumContent),
+					calories: numOrNull(ldNutrition.calories),
+					carbsG: numOrNull(ldNutrition.carbohydrateContent),
+					category,
+					cholesterolMg: numOrNull(ldNutrition.cholesterolContent),
+					confidence: "high",
+					fatG: numOrNull(ldNutrition.fatContent),
+					fiberG: numOrNull(ldNutrition.fiberContent),
+					ingredients: productIngredients,
+					ironMg: numOrNull(ldNutrition.ironContent),
+					potassiumMg: numOrNull(ldNutrition.potassiumContent),
+					productName,
+					proteinG: numOrNull(ldNutrition.proteinContent),
+					saturatedFatG: numOrNull(ldNutrition.saturatedFatContent),
+					servingSize:
+						typeof ldNutrition.servingSize === "string"
+							? ldNutrition.servingSize
+							: null,
+					servingsPerContainer: null,
+					sodiumMg: numOrNull(ldNutrition.sodiumContent),
+					source: "wholefoods_structured_data",
+					sugarG: numOrNull(ldNutrition.sugarContent),
+					transFatG: numOrNull(ldNutrition.transFatContent),
+					upc: productUpc,
+					vitaminDMcg: numOrNull(ldNutrition.vitaminDContent),
+				}
+			: null;
 	if (ldNutrition && !nutritionHeading) {
-		return {
-			...emptyNutritionDetails(),
-			addedSugarG: null,
-			allergens: null,
-			calories: numOrNull(ldNutrition.calories),
-			carbsG: numOrNull(ldNutrition.carbohydrateContent),
-			category: [],
-			cholesterolMg: numOrNull(ldNutrition.cholesterolContent),
-			confidence: "high",
-			fatG: numOrNull(ldNutrition.fatContent),
-			fiberG: numOrNull(ldNutrition.fiberContent),
-			ingredients: null,
-			potassiumMg: null,
-			proteinG: numOrNull(ldNutrition.proteinContent),
-			saturatedFatG: numOrNull(ldNutrition.saturatedFatContent),
-			servingSize:
-				typeof ldNutrition.servingSize === "string"
-					? ldNutrition.servingSize
-					: null,
-			servingsPerContainer: null,
-			sodiumMg: numOrNull(ldNutrition.sodiumContent),
-			source: "wholefoods_structured_data",
-			sugarG: numOrNull(ldNutrition.sugarContent),
-			transFatG: numOrNull(ldNutrition.transFatContent),
-			upc: productUpc,
-		};
+		return structuredFacts();
 	}
 
 	if (!nutritionHeading) {
@@ -903,7 +927,7 @@ export function parseWholeFoodsProductPageDom(
 	const allText = container ? textOf(container) : "";
 	const caloriesMatch = CALORIES_RE.exec(allText);
 	if (!caloriesMatch) {
-		return null;
+		return structuredFacts();
 	}
 	const nutrients = new Map<string, number>();
 	const nutrientPattern = new RegExp(NUTRIENT_PATTERN_SOURCE, "gi");
@@ -932,7 +956,7 @@ export function parseWholeFoodsProductPageDom(
 	};
 	const sectionText = (heading: RegExp): string | null => {
 		const el = headings.find((candidate) =>
-		heading.test(textOf(candidate).trim()),
+			heading.test(textOf(candidate).trim()),
 		);
 		return (
 			textOf(el?.nextElementSibling).trim() ||
@@ -987,6 +1011,7 @@ export function parseWholeFoodsProductPageDom(
 		transFatG: nutrient("Trans Fat"),
 		upc: productUpc,
 		vitaminDMcg: nutrient("Vitamin D"),
+		productName,
 	};
 }
 
@@ -1007,7 +1032,11 @@ export function parseAmazonProductNutritionDom(
 	const allText = table ? nutritionText : textOf(important);
 	const caloriesMatch = CALORIES_RE.exec(allText);
 	const upcMatch = /(?:UPC|ASIN|GTIN)[:\s]*([\d-]{8,14})/i.exec(
-		textOf(document.querySelector("#detailBullets_feature_div, #prodDetails, .content")),
+		textOf(
+			document.querySelector(
+				"#detailBullets_feature_div, #prodDetails, .content",
+			),
+		),
 	);
 	if (!caloriesMatch && !upcMatch) return null;
 	const nutrientValues = new Map<string, number>();
@@ -1026,12 +1055,17 @@ export function parseAmazonProductNutritionDom(
 	}
 	const get = (key: string): number | null => nutrientValues.get(key) ?? null;
 	const ingredientsNode = document.querySelector(
-		"#ingredients_feature_div, [data-component=\"ingredients\"]",
+		'#ingredients_feature_div, [data-component="ingredients"]',
 	);
 	const ingredients = ingredientsNode
-		? textOf(ingredientsNode).replace(/^Ingredients[:\s]*/i, "").trim() || null
+		? textOf(ingredientsNode)
+				.replace(/^Ingredients[:\s]*/i, "")
+				.trim() || null
 		: null;
-	const allergenMatch = /Contains[:\s]*([^.\n]+(?:wheat|milk|soy|eggs?|fish|shellfish|tree nuts?|peanuts?|sesame)[^.\n]*)/i.exec(bodyText);
+	const allergenMatch =
+		/Contains[:\s]*([^.\n]+(?:wheat|milk|soy|eggs?|fish|shellfish|tree nuts?|peanuts?|sesame)[^.\n]*)/i.exec(
+			bodyText,
+		);
 	const serving = /Serving size[:\s]*([^\n]+)/i.exec(allText)?.[1]?.trim();
 	const servings = /(\d+\.?\d*)\s*servings?\s*per/i.exec(allText)?.[1];
 	return {
@@ -1039,7 +1073,9 @@ export function parseAmazonProductNutritionDom(
 		addedSugarG: get("Includes Added Sugars"),
 		allergens: allergenMatch?.[1]?.trim() ?? null,
 		calciumMg: get("Calcium"),
-		calories: caloriesMatch ? Number.parseInt(caloriesMatch[1] ?? "", 10) : null,
+		calories: caloriesMatch
+			? Number.parseInt(caloriesMatch[1] ?? "", 10)
+			: null,
 		carbsG: get("Total Carbohydrate"),
 		cholesterolMg: get("Cholesterol"),
 		confidence: "medium",
@@ -1066,9 +1102,18 @@ export function parseAmazonProductNutritionDom(
  *  wholefoodsmarket.com search-results page for `productName`. Returns null
  *  when the results page has no recognizable product tile. */
 export function parseWholeFoodsSearchResultDom(html: string): string | null {
+	return parseWholeFoodsSearchResultDoms(html)[0] ?? null;
+}
+
+/** Return product links in document order so callers can verify each page's
+ * identity and continue past related products. */
+export function parseWholeFoodsSearchResultDoms(html: string): string[] {
 	const { document } = parseHTML(html);
-	const link = document.querySelector<HTMLAnchorElement>(
+	const links = document.querySelectorAll<HTMLAnchorElement>(
 		'a[href*="/product/"], a[href*="/products/"], [data-testid="product-tile"] a, .w-pie--product-tile a',
 	);
-	return link?.getAttribute("href") ?? null;
+	return [...links].flatMap((link) => {
+		const href = link.getAttribute("href");
+		return href ? [href] : [];
+	});
 }

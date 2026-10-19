@@ -136,22 +136,22 @@ test("nutrition parsing retains the legacy script's expanded nutrition payload",
 			protein_g: row.protein_g,
 			carbs_g: row.carbs_g,
 			fat_g: row.fat_g,
-		saturated_fat_g: row.saturated_fat_g,
-		trans_fat_g: row.trans_fat_g,
-		cholesterol_mg: row.cholesterol_mg,
-		added_sugar_g: row.added_sugar_g,
+			saturated_fat_g: row.saturated_fat_g,
+			trans_fat_g: row.trans_fat_g,
+			cholesterol_mg: row.cholesterol_mg,
+			added_sugar_g: row.added_sugar_g,
 			potassium_mg: row.potassium_mg,
-		calcium_mg: row.calcium_mg,
-		iron_mg: row.iron_mg,
-		vitamin_d_mcg: row.vitamin_d_mcg,
-		ingredients: row.ingredients,
-		allergens: row.allergens,
-		category: row.category,
-		upc: row.upc,
-		"@type": row.type,
+			calcium_mg: row.calcium_mg,
+			iron_mg: row.iron_mg,
+			vitamin_d_mcg: row.vitamin_d_mcg,
+			ingredients: row.ingredients,
+			allergens: row.allergens,
+			category: row.category,
+			upc: row.upc,
+			"@type": row.type,
 		},
 		{
-				calories: 52,
+			calories: 52,
 			protein_g: 0.3,
 			carbs_g: 14,
 			fat_g: 0.2,
@@ -159,18 +159,28 @@ test("nutrition parsing retains the legacy script's expanded nutrition payload",
 			trans_fat_g: 0,
 			cholesterol_mg: 0,
 			added_sugar_g: null,
-			potassium_mg: null,
-			calcium_mg: null,
-			iron_mg: null,
-			vitamin_d_mcg: null,
-			ingredients: null,
+			potassium_mg: 107,
+			calcium_mg: 6,
+			iron_mg: 0.1,
+			vitamin_d_mcg: 0,
+			ingredients: "Apples",
 			allergens: null,
-			category: [],
+			category: ["Produce"],
 			upc: "012345678905",
 			"@type": "https://schema.org/NutritionInformation",
 		},
 	);
 	assert.equal(validateRecord("nutrition", row).ok, true);
+});
+
+test("structured nutrition is used when the rendered facts heading has no calories", () => {
+	const facts = parseWholeFoodsProductPageDom(`<html><head>
+		<script type="application/ld+json">{"@type":"Product","name":"Apples","category":"Produce","ingredients":"Apples","nutrition":{"@type":"NutritionInformation","calories":"52","proteinContent":"0.3 g","carbohydrateContent":"14 g","fatContent":"0.2 g","potassiumContent":"107 mg","calciumContent":"6 mg","ironContent":"0.1 mg","vitaminDContent":"0 mcg"}}</script>
+	</head><body><section><h2>Nutrition Facts</h2><div>Serving size 1 apple</div></section></body></html>`);
+	assert.ok(facts);
+	assert.equal(facts.calories, 52);
+	assert.equal(facts.potassiumMg, 107);
+	assert.equal(facts.ingredients, "Apples");
 });
 
 test("Amazon product nutrition parser keeps Amazon-only facts and provenance", () => {

@@ -55,7 +55,7 @@ import {
 	parseOrderDetailDom,
 	parseOrderSearchPageDom,
 	parseWholeFoodsProductPageDom,
-	parseWholeFoodsSearchResultDom,
+	parseWholeFoodsSearchResultDoms,
 } from "./parsers.ts";
 import { validateRecord } from "./schemas.ts";
 import type {
@@ -589,40 +589,66 @@ async function lookupNutritionForProduct(
 			} else if (searchStatus !== null && searchStatus >= 400) {
 				sourceOutcome = "error";
 			} else {
-				const productUrl = parseWholeFoodsSearchResultDom(searchHtml);
-				if (productUrl) {
-					const resolvedUrl = new URL(productUrl, WHOLE_FOODS_ORIGIN);
-					if (resolvedUrl.origin !== WHOLE_FOODS_ORIGIN) {
-						throw new Error(
-							"Whole Foods search returned a non-Whole-Foods product URL",
-						);
-					}
-					const productStatus = await navigateAndSettle(
-						page,
-						resolvedUrl.href,
-						undefined,
-						true,
-					);
-					const productHtml = await page.content();
-					if (isBlockedPage(productHtml)) {
-						sourceOutcome = "blocked";
-					} else if (productStatus !== null && productStatus >= 400) {
-						sourceOutcome = "error";
-					} else {
-						const finalUrl = new URL(page.url());
-						if (finalUrl.origin !== WHOLE_FOODS_ORIGIN) {
+				const productUrls = parseWholeFoodsSearchResultDoms(searchHtml);
+				if (productUrls.length) {
+					for (const productUrl of productUrls) {
+						const resolvedUrl = new URL(productUrl, WHOLE_FOODS_ORIGIN);
+						if (resolvedUrl.origin !== WHOLE_FOODS_ORIGIN) {
 							throw new Error(
-								"Whole Foods product navigation left the trusted origin",
+								"Whole Foods search returned a non-Whole-Foods product URL",
 							);
 						}
-						const facts = parseWholeFoodsProductPageDom(productHtml);
-						if (facts && hasMajorMacros(facts)) return facts;
-						if (facts) {
-							candidate = { ...facts, upc: facts.upc ?? candidate?.upc ?? null };
+						const productStatus = await navigateAndSettle(
+							page,
+							resolvedUrl.href,
+							undefined,
+							true,
+						);
+						const productHtml = await page.content();
+						if (isBlockedPage(productHtml)) {
+							sourceOutcome = "blocked";
+						} else if (productStatus !== null && productStatus >= 400) {
+							sourceOutcome = "error";
+						} else {
+							const finalUrl = new URL(page.url());
+							if (finalUrl.origin !== WHOLE_FOODS_ORIGIN) {
+								throw new Error(
+									"Whole Foods product navigation left the trusted origin",
+								);
+							}
+							const facts = parseWholeFoodsProductPageDom(productHtml);
+							const expectedName = cleanProductName(name)
+								.toLowerCase()
+								.replace(/[^a-z0-9]+/g, " ")
+								.trim();
+							const actualName = facts?.productName
+								? cleanProductName(facts.productName)
+										.toLowerCase()
+										.replace(/[^a-z0-9]+/g, " ")
+										.trim()
+								: "";
+							const sameUpc = Boolean(
+								candidate?.upc && facts?.upc && candidate.upc === facts.upc,
+							);
+							const sameName = Boolean(
+								actualName && expectedName && actualName === expectedName,
+							);
+							if (facts && hasMajorMacros(facts) && (sameUpc || sameName))
+								return facts;
+							if (facts && !sameUpc && !sameName) {
+								sourceOutcome = "not_found";
+								continue;
+							}
+							if (facts) {
+								candidate = {
+									...facts,
+									upc: facts.upc ?? candidate?.upc ?? null,
+								};
+							}
+							sourceOutcome = hasProductPageEvidence(productHtml)
+								? "not_found"
+								: "error";
 						}
-						sourceOutcome = hasProductPageEvidence(productHtml)
-							? "not_found"
-							: "error";
 					}
 				} else if (
 					/\b(?:0|no)\s+(?:products|results)\b|no matching products/i.test(
@@ -637,14 +663,18 @@ async function lookupNutritionForProduct(
 		sourceOutcome = "error";
 	}
 	try {
-		const usda = await lookupUsdaNutrition(usdaApiKey, name, candidate?.upc ?? null);
+		const usda = await lookupUsdaNutrition(
+			usdaApiKey,
+			name,
+			candidate?.upc ?? null,
+		);
 		if (usda) {
 			return {
 				...usda,
 				allergens: candidate?.allergens ?? null,
 				category: candidate?.category ?? [],
 				highlights: candidate?.highlights ?? [],
-				ingredients: candidate?.ingredients ?? null,
+				ingredients: candidate?.ingredients ?? usda.ingredients ?? null,
 				rawNutritionText: candidate?.rawNutritionText ?? null,
 				upc: candidate?.upc ?? usda.upc,
 			};
@@ -767,7 +797,9 @@ function readOrderDetail(html: string): OrderDetail {
 			"Whole Foods order detail rendered no items and no cancellation evidence",
 		);
 	}
-	return isCancelledOrderDetail(html) ? { ...detail, status: "Cancelled" } : detail;
+	return isCancelledOrderDetail(html)
+		? { ...detail, status: "Cancelled" }
+		: detail;
 }
 
 /** Fetch, verify and emit every discovered order. Auth and readability

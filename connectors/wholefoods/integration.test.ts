@@ -521,13 +521,14 @@ test("an unrecognized Whole Foods page plus empty USDA results emits error", asy
 test("Whole Foods search resolves a relative product link before reading facts", async () => {
 	const visited: string[] = [];
 	const shape: Pick<Page, "content" | "goto" | "url"> = {
-		content: () => Promise.resolve(
-			visited.length === 1
-				? '<html><body>No nutrition panel</body></html>'
-				: visited.length === 2
-					? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
-					: '<html><body><script type="application/ld+json">{"@type":"Product","nutrition":{"@type":"NutritionInformation","calories":"105 calories"}}</script></body></html>',
-		),
+		content: () =>
+			Promise.resolve(
+				visited.length === 1
+					? "<html><body>No nutrition panel</body></html>"
+					: visited.length === 2
+						? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
+						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas","nutrition":{"@type":"NutritionInformation","calories":"105 calories"}}</script></body></html>',
+			),
 		// biome-ignore lint/suspicious/noExplicitAny: scripted Page navigation captures the actual URL supplied to Playwright.
 		goto: ((url: string) => {
 			visited.push(url);
@@ -594,13 +595,100 @@ test("UPC from a scrubbed Amazon fixture routes USDA lookup before text matching
 			"Organic Apples",
 			"B012345678",
 		);
-		assert.equal(typeof outcome === "string" ? outcome : outcome.source, "usda_fdc");
-		assert.equal(typeof outcome === "string" ? null : outcome.usdaMatchMethod, "upc");
+		assert.equal(
+			typeof outcome === "string" ? outcome : outcome.source,
+			"usda_fdc",
+		);
+		assert.equal(
+			typeof outcome === "string" ? null : outcome.usdaMatchMethod,
+			"upc",
+		);
 		assert.equal(requestedQueries[0], "gtinUpc:012345678905");
-		assert.equal(requestedQueries.length, 1, "the UPC hit avoids text-search fallbacks");
+		assert.equal(
+			requestedQueries.length,
+			1,
+			"the UPC hit avoids text-search fallbacks",
+		);
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+test("USDA-only nutrition preserves USDA ingredients", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () =>
+		new Response(
+			JSON.stringify({
+				foods: [
+					{
+						fdcId: 42,
+						description: "Apples, raw",
+						brandName: null,
+						brandOwner: null,
+						gtinUpc: "012345678905",
+						ingredients: "Apples",
+						servingSize: 100,
+						servingSizeUnit: "g",
+						foodNutrients: [{ nutrientId: 1008, value: 52 }],
+					},
+				],
+			}),
+			{ status: 200 },
+		)) as typeof fetch;
+	let currentUrl = "about:blank";
+	const page = {
+		content: async () =>
+			currentUrl.startsWith("https://www.amazon.com/")
+				? '<html><body><div id="detailBullets_feature_div"><li>UPC: 012345678905</li></div></body></html>'
+				: "<html><body>No matching products</body></html>",
+		goto: async (url: string) => {
+			currentUrl = url;
+			return null;
+		},
+		locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+		url: () => currentUrl,
+	} as unknown as Page;
+	try {
+		const outcome = await lookupNutritionForProduct(
+			page,
+			"DEMO_KEY",
+			"Apples",
+			"B012345678",
+		);
+		assert.equal(typeof outcome, "object");
+		assert.equal(
+			typeof outcome === "string" ? null : outcome.ingredients,
+			"Apples",
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("Whole Foods search skips a first tile whose product identity differs", async () => {
+	let currentUrl = "about:blank";
+	const page = {
+		content: async () =>
+			currentUrl.includes("/search?")
+				? '<a href="/product/pears">Organic Pears</a><a href="/product/apples">Organic Apples</a>'
+				: currentUrl.endsWith("/product/pears")
+					? '<script type="application/ld+json">{"@type":"Product","name":"Organic Pears","nutrition":{"@type":"NutritionInformation","calories":"95"}}</script>'
+					: '<script type="application/ld+json">{"@type":"Product","name":"Organic Apples","nutrition":{"@type":"NutritionInformation","calories":"52"}}</script>',
+		goto: async (url: string) => {
+			currentUrl = url;
+			return null;
+		},
+		locator: () => ({ first: () => ({ waitFor: async () => {} }) }),
+		url: () => currentUrl,
+	} as unknown as Page;
+	const outcome = await lookupNutritionForProduct(
+		page,
+		"DEMO_KEY",
+		"Organic Apples",
+		"B012345678",
+	);
+	assert.equal(typeof outcome === "string" ? null : outcome.calories, 52);
+	assert.match(currentUrl, /\/product\/apples$/);
 });
 
 test("a rendered product without nutrition and an empty USDA result emits not_found", async () => {
@@ -614,7 +702,7 @@ test("a rendered product without nutrition and an empty USDA result emits not_fo
 		content: () =>
 			Promise.resolve(
 				visits === 1
-					? '<html><body>No nutrition here</body></html>'
+					? "<html><body>No nutrition here</body></html>"
 					: visits === 2
 						? '<html><body><a href="/product/organic-bananas">Organic Bananas</a></body></html>'
 						: '<html><body><script type="application/ld+json">{"@type":"Product","name":"Organic Bananas"}</script></body></html>',
@@ -674,13 +762,14 @@ test("HTTP product links and cross-origin redirects cannot supply nutrition", as
 			).map(async ([href, finalUrl, expectedVisits]) => {
 				let visits = 0;
 				const shape = {
-					content: () => Promise.resolve(
-						visits === 1
-							? "<html><body>No nutrition here</body></html>"
-							: visits === 2
-								? `<a href="${href}">Organic Bananas</a>`
-								: facts,
-					),
+					content: () =>
+						Promise.resolve(
+							visits === 1
+								? "<html><body>No nutrition here</body></html>"
+								: visits === 2
+									? `<a href="${href}">Organic Bananas</a>`
+									: facts,
+						),
 					goto: () => {
 						visits += 1;
 						return Promise.resolve(null);
@@ -1062,7 +1151,9 @@ test("collectOrders reports every requested stream failed on scaffold-only searc
 test("collectOrders withholds failed nutrition outcomes instead of overwriting a stored good key", async () => {
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async () =>
-		new Response(JSON.stringify({ foods: [] }), { status: 200 })) as typeof fetch;
+		new Response(JSON.stringify({ foods: [] }), {
+			status: 200,
+		})) as typeof fetch;
 	try {
 		const { harness } = await runCollectOrders(
 			ordersSite(
@@ -1072,7 +1163,9 @@ test("collectOrders withholds failed nutrition outcomes instead of overwriting a
 			ALL_ORDER_STREAMS,
 		);
 		assert.ok(harness.emitted.some((record) => record.stream === "orders"));
-		assert.ok(harness.emitted.some((record) => record.stream === "order_items"));
+		assert.ok(
+			harness.emitted.some((record) => record.stream === "order_items"),
+		);
 		assert.equal(
 			harness.emitted.some((record) => record.stream === "nutrition"),
 			false,
@@ -1129,7 +1222,11 @@ test("collectOrders fails every requested stream when a proven order's detail co
 	assert.match(failures[0]?.message ?? "", /no items and no cancellation/);
 	assert.doesNotMatch(failures[0]?.message ?? "", /111-1111111-1111111/);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.equal(harness.emitted.length, 0, "an unreadable refresh must not replace a stored header");
+	assert.equal(
+		harness.emitted.length,
+		0,
+		"an unreadable refresh must not replace a stored header",
+	);
 });
 
 test("collectOrders remain partials a cancelled order whose detail renders no items", async () => {
@@ -1145,7 +1242,10 @@ test("collectOrders remain partials a cancelled order whose detail renders no it
 			failures.every((failure) => failure.retryable === true),
 	);
 	assert.deepEqual(stateStreams(harness), []);
-	assert.deepEqual(harness.emitted.map((r) => r.stream), ["orders"]);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.stream),
+		["orders"],
+	);
 	assert.equal(harness.emitted[0]?.data.status, "Cancelled");
 	assert.equal(harness.emitted[0]?.data.item_count, 0);
 });

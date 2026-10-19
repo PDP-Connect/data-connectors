@@ -75,6 +75,7 @@ export interface NutritionFacts {
 	ingredients: string | null;
 	ironMg: number | null;
 	proteinG: number | null;
+	productName?: string | null;
 	potassiumMg: number | null;
 	rawNutritionText: string | null;
 	servingSize: string | null;
