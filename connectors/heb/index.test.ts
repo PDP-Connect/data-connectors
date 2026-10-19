@@ -249,6 +249,12 @@ const SYNTHETIC_ORDER: SyntheticProviderBody = {
 	quantity: 1,
 };
 
+interface SyntheticStreamFailure {
+	stream: string;
+	message: string;
+	options: { retryable?: boolean } | undefined;
+}
+
 async function collectSyntheticHeb(input: {
 	body: SyntheticProviderBody;
 	emittedAt: string;
@@ -257,6 +263,7 @@ async function collectSyntheticHeb(input: {
 }): Promise<{
 	emitted: EmittedRecord[];
 	protocolMessages: EmittedMessage[];
+	streamFailures: SyntheticStreamFailure[];
 }> {
 	const browser = await chromium.launch({ headless: true });
 	try {
@@ -275,6 +282,7 @@ async function collectSyntheticHeb(input: {
 		);
 		const harness = makeRecordingEmit(validateRecord);
 		const streams = input.streams.map((name) => ({ name }));
+		const streamFailures: SyntheticStreamFailure[] = [];
 		const context: BrowserCollectContext = {
 			assist: async () => {
 				throw new Error("synthetic collect must not request assistance");
@@ -293,7 +301,9 @@ async function collectSyntheticHeb(input: {
 			page,
 			progress: async () => {},
 			recoveryOnly: false,
-			reportStreamFailure: async () => {},
+			reportStreamFailure: async (stream, message, options) => {
+				streamFailures.push({ stream, message, options });
+			},
 			requestDetailGapPage: async () => [],
 			requested: new Map(streams.map((stream) => [stream.name, stream])),
 			scope: { streams },
@@ -306,28 +316,88 @@ async function collectSyntheticHeb(input: {
 		return {
 			emitted: harness.emitted,
 			protocolMessages: harness.protocolMessages,
+			streamFailures,
 		};
 	} finally {
 		await browser.close();
 	}
 }
 
+const ORDER_STREAMS = ["orders", "order_items"];
+const SYNTHETIC_CLOCK = "2026-08-20T12:00:00.000Z";
+const SYNTHETIC_LATER_CLOCK = "2026-09-21T12:00:00.000Z";
+
+type SyntheticRun = Awaited<ReturnType<typeof collectSyntheticHeb>>;
+type SkipResult = Extract<EmittedMessage, { type: "SKIP_RESULT" }>;
+
+function onlyRecord(
+	run: SyntheticRun,
+	stream: string,
+): Record<string, unknown> {
+	const records = run.emitted.filter((record) => record.stream === stream);
+	assert.equal(records.length, 1, `expected exactly one ${stream} record`);
+	const [record] = records;
+	assert.ok(record);
+	return record.data;
+}
+
+function withoutFields(
+	data: Record<string, unknown>,
+	fields: string[],
+): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(data).filter(([key]) => !fields.includes(key)),
+	);
+}
+
+/** Current contract: the list scan has no owner-bound proof, so valid records
+ * are still emitted but no STATE cursor is written and every requested stream
+ * reports `inventory_not_proven_complete` (index.ts emitInventoryIncomplete). */
+function assertWithheldWithoutState(
+	run: SyntheticRun,
+	streams: string[],
+): void {
+	assert.deepEqual(
+		run.protocolMessages.filter((message) => message.type === "STATE"),
+		[],
+		"unproven list inventory must not emit a STATE cursor",
+	);
+	// H-E-B never calls reportStreamFailure; the withheld signal travels as SKIP_RESULT.
+	assert.deepEqual(
+		run.streamFailures,
+		[],
+		"the withheld signal is a SKIP_RESULT, not a reportStreamFailure call",
+	);
+	const skips = run.protocolMessages.filter(
+		(message): message is SkipResult => message.type === "SKIP_RESULT",
+	);
+	// A stream may be reported at more than one call site, so compare distinct
+	// values rather than the exact skip count.
+	assert.deepEqual(
+		[...new Set(skips.map((skip) => skip.reason))],
+		["inventory_not_proven_complete"],
+		"every incomplete signal carries the same reason",
+	);
+	assert.deepEqual(
+		[...new Set(skips.map((skip) => skip.stream))].sort(),
+		[...streams].sort(),
+		"the incomplete signal covers exactly the requested streams",
+	);
+}
+
 test("collect: identical synthetic provider bodies map to identical RECORD data across collection clocks", async () => {
-	const clocks = ["2026-08-20T12:00:00.000Z", "2026-09-21T12:00:00.000Z"];
-	const [firstClock, secondClock] = clocks;
-	assert.ok(firstClock && secondClock);
 	// Each stream set launches its own browser and shares no state, so the sets run concurrently.
 	await Promise.all(
-		[["order_items"], ["orders", "order_items"]].map(async (streams) => {
+		[["order_items"], ORDER_STREAMS].map(async (streams) => {
 			const first = await collectSyntheticHeb({
 				body: SYNTHETIC_ORDER,
-				emittedAt: firstClock,
+				emittedAt: SYNTHETIC_CLOCK,
 				state: {},
 				streams,
 			});
 			const second = await collectSyntheticHeb({
 				body: SYNTHETIC_ORDER,
-				emittedAt: secondClock,
+				emittedAt: SYNTHETIC_LATER_CLOCK,
 				state: {},
 				streams,
 			});
@@ -360,263 +430,142 @@ test("collect: identical synthetic provider bodies map to identical RECORD data 
 				secondRecords.map((record) => record.data.id),
 				"matching cardinality and keys prove no record was suppressed",
 			);
+			assertWithheldWithoutState(first, streams);
+			assertWithheldWithoutState(second, streams);
 		}),
 	);
 });
 
-test("collect: state-seeded repeat keeps all selected records and exposes business changes", async () => {
-	const first = await collectSyntheticHeb({
+test("collect: an isolated provider orderDate change reaches orders and order_items only", async () => {
+	const base = await collectSyntheticHeb({
 		body: SYNTHETIC_ORDER,
-		emittedAt: "2026-08-20T12:00:00.000Z",
+		emittedAt: SYNTHETIC_CLOCK,
 		state: {},
-		streams: ["orders", "order_items"],
+		streams: ORDER_STREAMS,
 	});
-	const firstOrders = first.emitted.filter(
-		(record) => record.stream === "orders",
-	);
-	const firstItems = first.emitted.filter(
-		(record) => record.stream === "order_items",
-	);
-	assert.equal(firstOrders.length, 1, "the first run emits one fixture order");
-	assert.equal(firstOrders[0]?.data.id, "HEB1000000001");
-	assert.equal(firstItems.length, 1, "the first run emits one fixture item");
-	assert.equal(firstItems[0]?.data.id, "HEB1000000001|9001");
-
-	const firstOrdersStates = first.protocolMessages.filter(
-		(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
-			message.type === "STATE" && message.stream === "orders",
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, orderDate: "2026-07-15" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(base, ORDER_STREAMS);
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseOrder = onlyRecord(base, "orders");
+	const order = onlyRecord(changed, "orders");
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(
+		order.id,
+		baseOrder.id,
+		"orderDate does not change the order identity",
 	);
 	assert.equal(
-		firstOrdersStates.length,
-		1,
-		"the first run emits one orders STATE",
-	);
-	const firstOrdersState = firstOrdersStates[0];
-	assert.ok(firstOrdersState);
-	const cursor = firstOrdersState.cursor;
-	assert.ok(
-		cursor && typeof cursor === "object" && !Array.isArray(cursor),
-		"the orders STATE carries its cursor object",
-	);
-	const firstOrdersCursor = cursor as Record<string, unknown>;
-	assert.equal(firstOrdersCursor.checkpoint, "2026-07-14");
-	const fingerprints = firstOrdersCursor.fingerprints;
-	assert.ok(
-		fingerprints &&
-			typeof fingerprints === "object" &&
-			!Array.isArray(fingerprints),
-		"the orders cursor carries a fingerprint map",
-	);
-	const fingerprintEntries = Object.entries(
-		fingerprints as Record<string, unknown>,
+		item.id,
+		baseItem.id,
+		"orderDate does not change the item identity",
 	);
 	assert.deepEqual(
-		fingerprintEntries.map(([id]) => id),
-		["HEB1000000001"],
-		"the fingerprint map contains the selected source order",
-	);
-	assert.ok(
-		fingerprintEntries.every(
-			([, fingerprint]) =>
-				typeof fingerprint === "string" && /^[a-f0-9]{40}$/.test(fingerprint),
-		),
-		"each source fingerprint is a SHA-1 hex digest",
-	);
-
-	const changedBody: SyntheticProviderBody = {
-		lineTotal: "$12.00",
-		orderDate: "2026-07-15",
-		quantity: 2,
-	};
-	const repeated = await collectSyntheticHeb({
-		body: changedBody,
-		emittedAt: "2026-09-21T12:00:00.000Z",
-		state: { orders: firstOrdersCursor },
-		streams: ["orders", "order_items"],
-	});
-	const orders = repeated.emitted.filter(
-		(record) => record.stream === "orders",
-	);
-	const items = repeated.emitted.filter(
-		(record) => record.stream === "order_items",
-	);
-	assert.equal(orders.length, 1, "the state-seeded order remains selected");
-	assert.equal(items.length, 1, "the state-seeded item remains selected");
-	assert.equal(orders[0]?.data.order_date, "2026-07-15");
-	assert.equal(items[0]?.data.order_date, "2026-07-15");
-	assert.equal(items[0]?.data.line_total, "$12.00");
-	assert.equal(items[0]?.data.line_total_cents, 1200);
-	assert.equal(items[0]?.data.quantity, 2);
-});
-
-function ordersCursorFromSyntheticRun(
-	run: Awaited<ReturnType<typeof collectSyntheticHeb>>,
-): Record<string, unknown> {
-	const states = run.protocolMessages.filter(
-		(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
-			message.type === "STATE" && message.stream === "orders",
-	);
-	assert.equal(states.length, 1, "collect must emit exactly one orders cursor");
-	const cursor = states[0]?.cursor;
-	assert.ok(cursor && typeof cursor === "object" && !Array.isArray(cursor));
-	const result = cursor as Record<string, unknown>;
-	assert.equal(typeof result.checkpoint, "string");
-	const fingerprints = result.fingerprints;
-	assert.ok(
-		fingerprints &&
-			typeof fingerprints === "object" &&
-			!Array.isArray(fingerprints),
-	);
-	const entries = Object.entries(fingerprints as Record<string, unknown>);
-	assert.equal(entries.length, 1, "the selected order must be fingerprinted");
-	assert.ok(
-		entries.every(
-			([, value]) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value),
-		),
-	);
-	return result;
-}
-
-function assertSyntheticOrdersCovered(
-	run: Awaited<ReturnType<typeof collectSyntheticHeb>>,
-): void {
-	const coverage = run.protocolMessages.filter(
-		(message): message is DetailCoverage =>
-			message.type === "DETAIL_COVERAGE" && message.stream === "orders",
-	);
-	assert.equal(
-		coverage.length,
-		1,
-		"suppression must still report orders coverage",
-	);
-	assert.equal(coverage[0]?.considered, 1);
-	assert.equal(coverage[0]?.covered, 1);
-	assert.equal(findDetailGaps(run.protocolMessages).length, 0);
-}
-
-test("collect: persisted orders seed suppresses unchanged provider across clocks", async () => {
-	const first = await collectSyntheticHeb({
-		body: SYNTHETIC_ORDER,
-		emittedAt: "2026-08-20T12:00:00.000Z",
-		state: {},
-		streams: ["orders", "order_items"],
-	});
-	assert.equal(
-		first.emitted.filter((record) => record.stream === "orders").length,
-		1,
-	);
-	const seed = ordersCursorFromSyntheticRun(first);
-	const repeated = await collectSyntheticHeb({
-		body: SYNTHETIC_ORDER,
-		emittedAt: "2026-09-21T12:00:00.000Z",
-		state: { orders: structuredClone(seed) },
-		streams: ["orders", "order_items"],
-	});
-	assert.equal(
-		repeated.emitted.filter((record) => record.stream === "orders").length,
-		0,
-		"persisted fingerprint must suppress unchanged orders",
-	);
-	const firstItems = first.emitted.filter(
-		(record) => record.stream === "order_items",
-	);
-	const repeatedItems = repeated.emitted.filter(
-		(record) => record.stream === "order_items",
-	);
-	assert.equal(firstItems.length, 1);
-	assert.equal(
-		repeatedItems.length,
-		1,
-		"items are emitted independently of orders suppression",
+		withoutFields(order, ["order_date"]),
+		withoutFields(baseOrder, ["order_date"]),
+		"unrelated order fields hold steady",
 	);
 	assert.deepEqual(
-		repeatedItems.map((record) => record.data),
-		firstItems.map((record) => record.data),
-		"item payload must remain stable across collection clocks",
+		withoutFields(item, ["order_date"]),
+		withoutFields(baseItem, ["order_date"]),
+		"unrelated item fields hold steady",
 	);
-	assert.deepEqual(ordersCursorFromSyntheticRun(repeated), seed);
-	assertSyntheticOrdersCovered(repeated);
+	assert.equal(
+		order.order_date,
+		"2026-07-15",
+		"provider orderDate maps to orders.order_date",
+	);
+	assert.equal(
+		item.order_date,
+		"2026-07-15",
+		"provider orderDate maps to order_items.order_date",
+	);
 });
 
-for (const field of ["orderDate", "quantity", "lineTotal"] as const) {
-	test(`collect: persisted seed exposes isolated provider ${field} change`, async () => {
-		const first = await collectSyntheticHeb({
-			body: SYNTHETIC_ORDER,
-			emittedAt: "2026-08-20T12:00:00.000Z",
-			state: {},
-			streams: ["orders", "order_items"],
-		});
-		const seed = ordersCursorFromSyntheticRun(first);
-		const body = { ...SYNTHETIC_ORDER };
-		if (field === "orderDate") body.orderDate = "2026-07-15";
-		if (field === "quantity") body.quantity = SYNTHETIC_ORDER.quantity + 1;
-		if (field === "lineTotal") body.lineTotal = "$12.00";
-		const repeated = await collectSyntheticHeb({
-			body,
-			emittedAt: "2026-09-21T12:00:00.000Z",
-			state: { orders: structuredClone(seed) },
-			streams: ["orders", "order_items"],
-		});
-		const orders = repeated.emitted.filter(
-			(record) => record.stream === "orders",
-		);
-		const items = repeated.emitted.filter(
-			(record) => record.stream === "order_items",
-		);
-		const oldItem = first.emitted.find(
-			(record) => record.stream === "order_items",
-		)?.data;
-		assert.ok(oldItem);
-		assert.equal(items.length, 1);
-		const item = items[0]?.data;
-		assert.ok(item);
-		assert.equal(
-			item.id,
-			oldItem.id,
-			"provider mutation must preserve item identity",
-		);
-		if (field === "orderDate") {
-			assert.equal(
-				orders.length,
-				1,
-				"changed order date changes the orders fingerprint",
-			);
-			assert.equal(orders[0]?.data.order_date, body.orderDate);
-			assert.equal(item.order_date, body.orderDate);
-			assert.notEqual(item.order_date, oldItem.order_date);
-			assert.equal(item.quantity, oldItem.quantity);
-			assert.equal(item.line_total, oldItem.line_total);
-		} else {
-			assert.equal(
-				orders.length,
-				0,
-				"detail-only changes do not change the list order",
-			);
-			assert.equal(item.order_date, oldItem.order_date);
-			if (field === "quantity") {
-				assert.equal(
-					item.quantity,
-					body.quantity,
-					"isolated quantity must reach the emitted field",
-				);
-				assert.notEqual(item.quantity, oldItem.quantity);
-				assert.equal(item.line_total, oldItem.line_total);
-				assert.equal(item.line_total_cents, oldItem.line_total_cents);
-			} else {
-				assert.equal(
-					item.line_total,
-					body.lineTotal,
-					"isolated line total must reach the emitted field",
-				);
-				assert.equal(item.line_total_cents, 1200);
-				assert.notEqual(item.line_total, oldItem.line_total);
-				assert.equal(item.quantity, oldItem.quantity);
-			}
-		}
-		ordersCursorFromSyntheticRun(repeated);
-		assertSyntheticOrdersCovered(repeated);
+test("collect: an isolated provider quantity change reaches order_items.quantity", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
 	});
-}
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, quantity: 2 },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"quantity does not change the item identity",
+	);
+	assert.equal(
+		item.line_total,
+		baseItem.line_total,
+		"line total is an independent provider field",
+	);
+	assert.equal(item.line_total_cents, baseItem.line_total_cents);
+	assert.equal(item.order_date, baseItem.order_date);
+	assert.deepEqual(
+		withoutFields(item, ["quantity"]),
+		withoutFields(baseItem, ["quantity"]),
+		"unrelated item fields hold steady",
+	);
+	assert.equal(
+		item.quantity,
+		2,
+		"provider quantity maps to order_items.quantity",
+	);
+});
+
+test("collect: an isolated provider lineTotal change reaches line_total and line_total_cents", async () => {
+	const base = await collectSyntheticHeb({
+		body: SYNTHETIC_ORDER,
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	const changed = await collectSyntheticHeb({
+		body: { ...SYNTHETIC_ORDER, lineTotal: "$12.00" },
+		emittedAt: SYNTHETIC_CLOCK,
+		state: {},
+		streams: ORDER_STREAMS,
+	});
+	assertWithheldWithoutState(changed, ORDER_STREAMS);
+	const baseItem = onlyRecord(base, "order_items");
+	const item = onlyRecord(changed, "order_items");
+	assert.equal(
+		item.id,
+		baseItem.id,
+		"lineTotal does not change the item identity",
+	);
+	assert.equal(item.quantity, baseItem.quantity);
+	assert.equal(item.order_date, baseItem.order_date);
+	assert.deepEqual(
+		withoutFields(item, ["line_total", "line_total_cents"]),
+		withoutFields(baseItem, ["line_total", "line_total_cents"]),
+		"unrelated item fields hold steady",
+	);
+	assert.equal(
+		item.line_total,
+		"$12.00",
+		"provider lineTotal maps to line_total",
+	);
+	assert.equal(
+		item.line_total_cents,
+		1200,
+		"provider lineTotal maps to line_total_cents",
+	);
+});
 
 /** A minimal Page stub backing fetchOrderDetail/processListOrder: goto always
  *  resolves (or throws once per `throwsNTimes` to exercise the retry path),
