@@ -88,77 +88,40 @@ export function flattenTreeCurrentBranch(
 	});
 }
 
-/**
- * `String.prototype.trim` also strips VT (U+000B) and FF (U+000C), which are
- * forbidden control characters. Trimming them away before the safe-text pass
- * would lose them before the escape pass, so trim only the whitespace that is
- * not a forbidden control.
- */
-const EDGE_WHITESPACE =
-	/^[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+|[\t\n\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]+$/g;
-
-function trimKeepingControls(s: string): string {
-	return s.replace(EDGE_WHITESPACE, "");
-}
-
 // ─── extractContent per-content_type helpers ──────────────────────────
 //
 // Memory bound of extraction. The extractors below build the whole body: an
-// array with one entry per part, a joined string, and, when edge whitespace is
-// trimmed, possibly another copy. Transient memory is O(source payload size +
-// part count); the constants depend on the part format and the JS engine's
-// string representation (references, ropes, flattening), so no tighter factor
-// is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
+// array with one entry per part, and a joined string. Transient memory is
+// O(source payload size + part count); the constants depend on the part format
+// and the JS engine's string representation (references, ropes, flattening),
+// so no tighter factor is claimed. Extraction is NOT cut short at the inline cap: a blob needs the
 // full text, and the cap decision uses `escapedLengthExceeds` on the result.
 // Oversize text is not retained per candidate (a blob-backed message re-extracts
 // it once to measure and once to spool, see message-blob.ts); inline content is
 // retained by design, at most the inline cap per message.
 
 /**
- * Stringify one `parts[]` entry from text / multimodal_text bodies. Returns
- * "" for unknown shapes so the caller can filter them out via `.filter(Boolean)`.
+ * Join the string entries of a `parts[]` array with "\n". Non-string entries
+ * (asset pointers, nested objects) are left out of the join, and are kept
+ * whole in `non_string_parts` (`extractNonStringParts`); empty strings are
+ * kept, so the result equals the legacy collector's
+ * `parts.filter(p => typeof p === "string").join("\n")`. A body whose joined
+ * text is empty yields null, so the message is omitted as the legacy one is.
  */
-function stringifyContentPart(p: unknown): string {
-	if (typeof p === "string") {
-		return p;
-	}
-	if (p && typeof p === "object") {
-		const po = p as {
-			asset_pointer?: unknown;
-			content_type?: unknown;
-			text?: unknown;
-		};
-		if (typeof po.text === "string") {
-			return po.text;
-		}
-		if (typeof po.asset_pointer === "string") {
-			return `[asset:${po.asset_pointer}]`;
-		}
-		if (typeof po.content_type === "string") {
-			return `[${po.content_type}]`;
-		}
-	}
-	return "";
+function joinStringParts(content: ChatGptContent): string | null {
+	const parts = Array.isArray(content.parts) ? content.parts : [];
+	const s = parts.filter((p): p is string => typeof p === "string").join("\n");
+	return s || null;
 }
 
-/** Canonical user/assistant text: `{ parts: ["...", {asset_pointer}...] }`. */
+/** Canonical user/assistant text: `{ parts: ["...", ...] }`. */
 function extractTextContent(content: ChatGptContent): string | null {
-	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = trimKeepingControls(parts.map(stringifyContentPart).join("\n"));
-	return s || null;
+	return joinStringParts(content);
 }
 
-/**
- * Multimodal variant: same part-stringifier, but filter empties before joining
- * (a `{content_type: "image_asset_pointer"}` entry without an asset_pointer or
- * text yields "" which we drop here).
- */
+/** Multimodal variant: same string-parts join as `text`. */
 function extractMultimodalContent(content: ChatGptContent): string | null {
-	const parts = Array.isArray(content.parts) ? content.parts : [];
-	const s = trimKeepingControls(
-		parts.map(stringifyContentPart).filter(Boolean).join("\n"),
-	);
-	return s || null;
+	return joinStringParts(content);
 }
 
 /** Assistant-authored tool call bodies: `{ content_type: "code", language, text }`. */
@@ -177,9 +140,7 @@ function extractCodeContent(content: ChatGptContent): string | null {
  */
 function extractThoughtsContent(content: ChatGptContent): string | null {
 	const thoughts = Array.isArray(content.thoughts) ? content.thoughts : [];
-	const s = trimKeepingControls(
-		thoughts.map(stringifyThought).filter(Boolean).join("\n\n"),
-	);
+	const s = thoughts.map(stringifyThought).filter(Boolean).join("\n\n");
 	return s || null;
 }
 
@@ -216,7 +177,7 @@ function extractTetherBrowsingDisplay(content: ChatGptContent): string | null {
 	if (typeof content.result === "string" && content.result) {
 		pieces.push(content.result);
 	}
-	const s = trimKeepingControls(pieces.join("\n\n"));
+	const s = pieces.join("\n\n");
 	return s || null;
 }
 
@@ -232,7 +193,7 @@ function extractTetherQuote(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	const s = trimKeepingControls(pieces.join("\n"));
+	const s = pieces.join("\n");
 	return s || null;
 }
 
@@ -262,7 +223,7 @@ function extractModelEditableContext(content: ChatGptContent): string | null {
 	if (typeof content.repo_summary === "string" && content.repo_summary) {
 		pieces.push(content.repo_summary);
 	}
-	const s = trimKeepingControls(pieces.join("\n\n"));
+	const s = pieces.join("\n\n");
 	return s || null;
 }
 
@@ -275,7 +236,7 @@ function extractSystemError(content: ChatGptContent): string | null {
 	if (typeof content.text === "string" && content.text) {
 		pieces.push(content.text);
 	}
-	return trimKeepingControls(pieces.join(": ")) || null;
+	return pieces.join(": ") || null;
 }
 
 /** User custom-instructions shape (observed on imported conversations). */
@@ -290,7 +251,7 @@ function extractUserEditableContext(content: ChatGptContent): string | null {
 	) {
 		pieces.push(content.user_instructions);
 	}
-	return trimKeepingControls(pieces.join("\n\n")) || null;
+	return pieces.join("\n\n") || null;
 }
 
 // Fallback for unrecognized shape — prefer an explicit handler. Stringify so
@@ -613,6 +574,35 @@ export interface ExtractedMessage {
 	sourceUnrepresentable: boolean;
 }
 
+/**
+ * The entries of a `text` or `multimodal_text` body's `parts` that are not
+ * strings (asset pointers with their size and generation metadata, audio
+ * transcripts, any other object), each as `{ index, part }` with its position in
+ * `parts`. `content` joins only the string parts, as the legacy collector does,
+ * so this field is where the rest of the body lives; an earlier collector wrote
+ * their `text` and `[asset:<pointer>]` markers into `content`, and the
+ * pointer and text are still here. Strings at any depth are
+ * pdpp-safe-escape-v1 encoded.
+ */
+export function extractNonStringParts(
+	content: ChatGptContent | undefined,
+): unknown[] {
+	if (
+		content?.content_type !== "text" &&
+		content?.content_type !== "multimodal_text"
+	) {
+		return [];
+	}
+	const kept: { index: number; part: unknown }[] = [];
+	for (const [index, part] of (Array.isArray(content.parts)
+		? content.parts
+		: []
+	).entries()) {
+		if (typeof part !== "string") kept.push({ index, part: part ?? null });
+	}
+	return encodeToolCallStrings(kept) as unknown[];
+}
+
 /** The source text of a message node, before escaping. */
 export function extractRawMessageText(node: ChatGptNode): string | null {
 	return extractContentParts(node.message?.content).raw;
@@ -641,6 +631,7 @@ export function extractMessageWithBlob(
 			role: m.author?.role ?? null,
 			content:
 				oversize || raw === null ? null : encodePdppSafeText(raw) || null,
+			non_string_parts: extractNonStringParts(m.content),
 			content_type: m.content?.content_type ?? null,
 			model_slug: m.metadata?.model_slug ?? null,
 			create_time: tsToIso(m.create_time),
@@ -655,6 +646,44 @@ export function extractMessageWithBlob(
 				.filter(Boolean),
 			on_current_branch: onCurrentBranch,
 		},
+	};
+}
+
+/**
+ * The `id` of a `messages` record: the conversation id and the source node id
+ * joined by ":". ChatGPT reuses a node id in several conversations (forks and
+ * branches copy nodes), so a node id names a message only within its
+ * conversation, and the record id has to carry both. ChatGPT conversation ids
+ * are UUIDs and never contain ":", so the pair is recoverable.
+ */
+export function messageRecordId(
+	conversationId: string,
+	nodeId: string,
+): string {
+	return `${conversationId}:${nodeId}`;
+}
+
+/**
+ * The wire form of a message extracted by `extractMessageWithBlob`: that record
+ * names messages by the source's node ids, which is how the rest of the
+ * collector walks the tree. On the wire `id`, `parent_id` and `children_ids`
+ * are record ids (`messageRecordId`), so each of them names a `messages`
+ * record, and `node_id` keeps the source node id.
+ */
+export function toMessageRecord(
+	record: RecordData,
+	conversationId: string,
+): RecordData {
+	const scope = (nodeId: unknown) =>
+		typeof nodeId === "string" ? messageRecordId(conversationId, nodeId) : null;
+	const ownId = scope(record.id);
+	return {
+		...record,
+		...(ownId === null ? {} : { id: ownId, node_id: record.id as string }),
+		parent_id: scope(record.parent_id),
+		children_ids: Array.isArray(record.children_ids)
+			? record.children_ids.map((child) => scope(child) ?? child)
+			: [],
 	};
 }
 

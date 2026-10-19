@@ -29,6 +29,8 @@ const VIDEO = {
 	views_text: "1.2K views",
 	description: "Snippet",
 };
+const VIDEO_HISTORY_KEY = (videoId: string) =>
+	`${videoId}|${resolveWatchedDate(VIDEO.watched_date_label, new Date())}`;
 
 function withBrowserGlobals(
 	html: string,
@@ -301,6 +303,22 @@ test("subscriptions emit optional raw count text from channel renderers", async 
 	}
 });
 
+test("subscription and playlist parsers enumerate beyond legacy caps", async () => {
+	const { readPlaylistLinks } = await import("./browser-dom.ts");
+	const subscriptions = Array.from({ length: 21 }, (_, index) =>
+		`<ytd-channel-renderer><ytd-channel-name><yt-formatted-string id="text">Channel ${index}</yt-formatted-string></ytd-channel-name><a id="main-link" href="/@channel${index}"></a></ytd-channel-renderer>`,
+	).join("");
+	const playlists = Array.from({ length: 51 }, (_, index) =>
+		`<a href="/playlist?list=PL${index + 1}">Playlist ${index + 1}</a>`,
+	).join("");
+	withBrowserGlobals(subscriptions + playlists, () => {
+		assert.equal(readSubscriptions().length, 21);
+		const found = readPlaylistLinks();
+		assert.equal(found.length, 51);
+		assert.equal(found[50]?.id, "PL51");
+	});
+});
+
 test("profile skips report a redacted branch code for each unreadable page", async () => {
 	const scenarios = [
 		{
@@ -491,9 +509,9 @@ test("history streams beyond one batch and checkpoints its accounted prefix", as
 				version: 2,
 				scope: "watch_history",
 				phase: "head_reconciliation",
-				backfill_anchor_id: "video59",
+				backfill_anchor_id: VIDEO_HISTORY_KEY("video59"),
 				position: 59,
-				head_anchor_ids: ["video0", "video1", "video2"],
+				head_anchor_ids: ["video0", "video1", "video2"].map(VIDEO_HISTORY_KEY),
 				complete: true,
 				stop_reason: "source-end",
 				evidence: "readable-data",
@@ -568,7 +586,7 @@ test("history resumes after the last seen video checkpoint", async () => {
 		first.records.map((record) => record.video_id),
 		Array.from({ length: 110 }, (_, i) => `video${i}`),
 	);
-	assert.equal(firstState.backfill_anchor_id, "video109");
+	assert.equal(firstState.backfill_anchor_id, VIDEO_HISTORY_KEY("video109"));
 	assert.equal(firstState.complete, true);
 
 	const second = await run({ watch_history: firstState });
@@ -580,7 +598,7 @@ test("history resumes after the last seen video checkpoint", async () => {
 		second.records.map((record) => record.video_id),
 		Array.from({ length: 110 }, (_, i) => `video${i}`),
 	);
-	assert.equal(secondState.backfill_anchor_id, "video109");
+	assert.equal(secondState.backfill_anchor_id, VIDEO_HISTORY_KEY("video109"));
 	assert.equal(secondState.position, 109);
 	assert.equal(secondState.complete, true);
 });
@@ -615,7 +633,7 @@ test("history checkpoints an accounted prefix but reports a pending continuation
 	const checkpoint = messages.find((message) => message.type === "STATE")
 		?.cursor as Record<string, unknown>;
 	assert.equal(failures.length, 1);
-	assert.equal(checkpoint.backfill_anchor_id, "video40");
+	assert.equal(checkpoint.backfill_anchor_id, VIDEO_HISTORY_KEY("video40"));
 	assert.equal(checkpoint.position, 40);
 	assert.equal(checkpoint.complete, false);
 	assert.equal(checkpoint.evidence, "youtube_history_safe_prefix_before_gap");
@@ -682,7 +700,7 @@ test("history source-end evidence completes the checkpoint", async () => {
 	assert.deepEqual(failures, []);
 	const state = messages.find((message) => message.type === "STATE")
 		?.cursor as Record<string, unknown>;
-	assert.equal(state.backfill_anchor_id, "video2");
+	assert.equal(state.backfill_anchor_id, VIDEO_HISTORY_KEY("video2"));
 	assert.equal(state.position, 2);
 	assert.equal(state.complete, true);
 	assert.equal(state.evidence, "readable-data");
@@ -851,7 +869,7 @@ test("a parsed suffix cannot checkpoint across a malformed history card", async 
 	const state = messages.find((message) => message.type === "STATE")
 		?.cursor as Record<string, unknown>;
 	assert.equal(state?.complete, false);
-	assert.equal(state?.backfill_anchor_id, "v4");
+	assert.equal(state?.backfill_anchor_id, "v4|unknown-date");
 	assert.equal(
 		messages.some((message) => message.reason === "stream_collection_failed"),
 		true,
@@ -915,7 +933,7 @@ test("a repeated bootstrap continuation reports a gap and never completes", asyn
 	);
 });
 
-test("repeated history videos keep the first page occurrence and one primary key", async () => {
+test("history preserves the same video when its watch date differs", async () => {
 	const page = new FixturePage();
 	page.evaluate = async (fn: Function, arg?: unknown) => {
 		if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
@@ -967,9 +985,9 @@ test("repeated history videos keep the first page occurrence and one primary key
 		reportStreamFailure: async () => undefined,
 		progress: async () => undefined,
 	});
-	assert.equal(history.length, 1);
-	assert.equal(history[0]?.position, 0);
-	assert.equal(history[0]?.watched_date_label, "Today");
+	assert.equal(history.length, 2);
+	assert.deepEqual(history.map((record) => record.watched_date_label), ["Today", "Yesterday"]);
+	assert.notEqual(history[0]?.id, history[1]?.id);
 });
 
 test("video primary keys survive playlist index changes", async () => {
@@ -1500,6 +1518,49 @@ test("a stream failure is reported once across several playlists", async () => {
 		["playlist_items", { retryable: true }],
 	]);
 	assert.deepEqual(messages, []);
+});
+
+test("playlist items reach the 51st enumerated playlist", async () => {
+	const playlists = Array.from({ length: 51 }, (_, index) => ({
+		id: `PL${index + 1}`,
+		url: `https://www.youtube.com/playlist?list=PL${index + 1}`,
+	}));
+	const page = new FixturePage();
+	const evaluate = page.evaluate.bind(page);
+	page.evaluate = async (fn: Function, arg?: unknown) => {
+		if (fn.name === "readPlaylistLinks") return playlists;
+		if (
+			fn.name === "readListEnd" &&
+			typeof arg === "object" && arg !== null && "kind" in arg
+		) {
+			const kind = (arg as { kind: string }).kind;
+			const total = kind === "playlist-index" ? 51 : 1;
+			return {
+				dataReadable: true,
+				dataItemCount: total,
+				dataHasContinuation: false,
+				domHasContinuation: false,
+				declaredTotal: total,
+				domItemCount: total,
+				domHasEndMarker: true,
+				verifiedEmpty: false,
+				pageBlocked: false,
+			};
+		}
+		return evaluate(fn, arg);
+	};
+	const items: Record<string, unknown>[] = [];
+	await collectYoutubeBrowser({
+		page: page as never,
+		requested: new Map([["playlist_items", { name: "playlist_items" }]]) as never,
+		emitRecord: async (_stream, data) => {
+			items.push(data);
+		},
+		emit: async () => undefined,
+		reportStreamFailure: async () => undefined,
+		progress: async () => undefined,
+	});
+	assert.equal(items.at(-1)?.playlist_id, "PL51");
 });
 
 // ── Source-end evidence and list scoping, run against parsed pages ──────────

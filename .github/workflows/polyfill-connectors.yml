@@ -81,12 +81,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Node 24: this package's node:test usage (--test-concurrency,
           # --test-timeout) and node:fs/promises glob() need it; the rest of
           # this repo's workflows run Node 20 for unrelated npm-only scripts.
           node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            packages/polyfill-connectors/test-tools/package-lock.json
 
       - name: Install workspace dependencies
         # Root connector files resolve dependencies from the root workspace.
@@ -98,6 +102,9 @@ jobs:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts
+
+      - name: Install isolated Vitest test tools
+        run: npm ci --ignore-scripts --prefix packages/polyfill-connectors/test-tools
 
       - name: Install Chromium for the capture-redaction proofs
         # `src/capture-trace-redaction.test.ts` launches a real browser: the
@@ -207,7 +214,7 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.connectors.outputs.list != ''
         with:
           node-version: "24"

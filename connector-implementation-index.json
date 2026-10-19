@@ -4242,7 +4242,7 @@
 				},
 				"connector_key": "chatgpt",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/chatgpt",
-				"version": "0.2.56",
+				"version": "0.3.0",
 				"protocol_capabilities": ["BLOB"],
 				"display_name": "ChatGPT",
 				"brand": {
@@ -4377,16 +4377,23 @@
 							"type": "object",
 							"properties": {
 								"id": {
-									"type": "string"
+									"type": "string",
+									"description": "Record id: the conversation id and the source node id joined by \":\" (\"<conversation_id>:<node_id>\"). ChatGPT copies message nodes into forked conversations, so a node id can recur across conversations and does not identify a message by itself. Versions before 0.3.0 used the bare node id here; node_id carries that value now."
+								},
+								"node_id": {
+									"type": "string",
+									"description": "The source's node id for this message, unique within its conversation. conversations.current_node is a node id."
 								},
 								"conversation_id": {
 									"type": "string"
 								},
 								"parent_id": {
-									"type": ["string", "null"]
+									"type": ["string", "null"],
+									"description": "Record id (the id of another messages record in this conversation) of the nearest retained ancestor, or null for the root. May name a record that was not emitted when the ancestor is the source's synthetic root."
 								},
 								"children_ids": {
-									"type": "array"
+									"type": "array",
+									"description": "Record ids of the source node's children, including children on other branches that are not emitted."
 								},
 								"role": {
 									"type": ["string", "null"],
@@ -4396,7 +4403,12 @@
 									"type": ["string", "null"],
 									"x_pdpp_role": "primary-title",
 									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
-									"description": "Full message text in the pdpp-safe-escape-v1 encoding. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
+									"description": "Full message text in the pdpp-safe-escape-v1 encoding. For text and multimodal_text bodies it is the string entries of the source parts joined with a newline, as the legacy collector joins them; the other entries are in non_string_parts. Each code unit in U+0000-0008, U+000B, U+000C, U+000E-001F, U+007F-009F or a lone surrogate (U+D800-DFFF not part of a valid pair) is written as a six-character \\uXXXX escape with uppercase hex. A source backslash that starts a \\uXXXX whose code unit is in that set or is U+005C is written \\u005C. All other text, including noncharacters and valid surrogate pairs, is unchanged. To decode, replace each \\uXXXX whose code unit is U+005C or in the escaped set with that code unit. Text whose escaped form exceeds 1048576 characters is not truncated: content is null and blob_ref holds the full text. When the text cannot be stored (the host has no blob store, or its JSON encoding exceeds 33554432 bytes) content and blob_ref are both absent from the record; the run reports a message_content_omitted diagnostic count."
+								},
+								"non_string_parts": {
+									"type": "array",
+									"x_pdpp_text_encoding": "pdpp-safe-escape-v1",
+									"description": "For text and multimodal_text bodies, the entries of the source parts array that are not strings (asset pointers with their size and generation metadata, audio transcripts, any other object), each { index, part } with index the position in parts. content joins only the string parts. Every string inside every entry, at any depth and including object keys, is in the pdpp-safe-escape-v1 encoding (decode it as content is decoded). Empty for other content types."
 								},
 								"content_type": {
 									"type": ["string", "null"]
@@ -15130,7 +15142,7 @@
 				},
 				"connector_key": "meta",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/meta",
-				"version": "0.4.31",
+				"version": "0.4.32",
 				"display_name": "Instagram (Meta)",
 				"brand": {
 					"icon": "icon.svg",
@@ -25867,7 +25879,7 @@
 				},
 				"connector_key": "youtube",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/youtube",
-				"version": "0.2.35",
+				"version": "0.2.36",
 				"mobile": {
 					"pageshim": {
 						"entry": "youtube.ts",
@@ -25990,10 +26002,10 @@
 					{
 						"name": "subscriptions",
 						"required": false,
-						"description": "Channels visible in the signed-in subscriptions page, up to 20.",
+						"description": "Channels visible in the signed-in subscriptions page.",
 						"display": {
 							"label": "Your subscriptions",
-							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible. Limited to 20."
+							"detail": "Channel titles, links, badges and notification settings when the corresponding controls are visible."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26057,10 +26069,10 @@
 					{
 						"name": "playlists",
 						"required": false,
-						"description": "Owner library playlists visible in the browser, up to 50.",
+						"description": "Owner library playlists visible in the browser.",
 						"display": {
 							"label": "Your playlists",
-							"detail": "Playlist titles, URLs and visible header metadata. Limited to 50."
+							"detail": "Playlist titles, URLs and visible header metadata."
 						},
 						"semantics": "mutable_state",
 						"schema": {
@@ -26285,10 +26297,10 @@
 					{
 						"name": "watch_history",
 						"required": false,
-						"description": "The latest observed history entry per video, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
+						"description": "Observed history entries keyed by video and normalized viewing date, reconciled from the signed-in browser list. Scheduled runs stream bounded backfill batches and refresh the recent head; completion covers the observed traversal, while YouTube history can change between runs. Watch dates have day precision.",
 						"display": {
 							"label": "Your watch history",
-							"detail": "Observed videos are upserted by video identity while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
+							"detail": "Observed viewing dates are upserted by video and viewing date while history is traversed and the recent head is refreshed. A date is recorded when its section label can be resolved; no watch time is invented."
 						},
 						"semantics": "mutable_state",
 						"schema": {

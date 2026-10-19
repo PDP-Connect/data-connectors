@@ -3,3 +3,4 @@
 
 export declare const NAMESPACE_TESTS: ReadonlySet<string>;
 export declare const EXCLUDED_TESTS: ReadonlySet<string>;
+export declare const VITEST_TESTS: ReadonlySet<string>;
