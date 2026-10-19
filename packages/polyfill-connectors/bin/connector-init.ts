@@ -502,7 +502,7 @@ import type { RecordData } from "../../packages/polyfill-connectors/src/connecto
 import type { ${typeName} } from "./types.ts";
 
 // TODO: fill in the record builder once the real upstream shape is known.
-// Must emit exactly the fields declared in manifests/${name}.json's
+// Must emit exactly the fields declared in connectors/${name}/manifest.json's
 // "${stream}" stream schema (id, created_at, title).
 export function ${camelCase(stream)}Record(item: ${typeName}): RecordData {
   return {
@@ -528,7 +528,7 @@ function buildBrowserParsersTs(name: string, stream: string): string {
 import type { RecordData } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import type { ${typeName} } from "./types.ts";
 
-// Must emit exactly the fields declared in manifests/${name}.json's
+// Must emit exactly the fields declared in connectors/${name}/manifest.json's
 // "${stream}" stream schema (id, created_at, title). Already matches the
 // row shape index.ts's extractRows() TODO returns — widen both together as
 // the real DOM shape lands.
@@ -927,13 +927,13 @@ function buildSchemasTs(name: string, stream: string): string {
 
 /**
  * Zod schemas for ${name} stream records. Shape-check-before-emit per
- * docs/connector-authoring-guide.md §3. Mirrors manifests/${name}.json's
+ * docs/connector-authoring-guide.md §3. Mirrors connectors/${name}/manifest.json's
  * "${stream}" stream schema exactly — see src/manifest-reconcile.ts (run
  * via bin/reconcile-manifests.test.ts) for the drift check across
  * manifest / SCHEMAS registry / emitted-stream literals.
  *
  * TODO: as the real upstream shape lands in parsers.ts's record builder,
- * widen these fields (and manifests/${name}.json's schema in lockstep) to
+ * widen these fields (and connectors/${name}/manifest.json's schema in lockstep) to
  * match the real payload instead of this placeholder id/created_at/title
  * shape.
  */
