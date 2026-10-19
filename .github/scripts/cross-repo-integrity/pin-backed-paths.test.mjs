@@ -26,6 +26,18 @@ const fixtures = [
 		pdpp: false,
 	},
 	{
+		name: "a connector's collector definition backs data-connect freshness",
+		paths: ["connectors/codex/collector-definition.ts"],
+		dataConnect: true,
+		pdpp: false,
+	},
+	{
+		name: "a collector-definition name below a connector's root is not pin-backed",
+		paths: ["connectors/codex/fixtures/collector-definition.ts"],
+		dataConnect: false,
+		pdpp: false,
+	},
+	{
 		name: "a connector source file is no longer pin-backed",
 		paths: ["connectors/codex/parsers.ts", "packages/polyfill-connectors/connectors/codex/parsers.ts"],
 		dataConnect: false,
@@ -72,4 +84,14 @@ test("single-path predicate is strict about non-path inputs", () => {
 	assert.equal(isPinBackedPath("connectors/codex/fixtures.ts", "data-connect"), false);
 	assert.equal(isPinBackedPath("scripts/connector-publish-allowlist.mjs", "data-connect"), true);
 	assert.equal(isPinBackedPath("scripts/connector-publish-allowlist.mjs", "pdpp"), false);
+});
+
+test("the drift workflow treats a changed collector definition as relevant", async () => {
+	const { readFile } = await import("node:fs/promises");
+	const workflow = await readFile(new URL("../../workflows/cross-repo-integrity.yml", import.meta.url), "utf8");
+	const match = workflow.match(/echo "\$CHANGED" \| grep -qE '([^']+)'/);
+	assert.ok(match, "relevance filter not found in cross-repo-integrity.yml");
+	const relevant = new RegExp(match[1]);
+	assert.ok(relevant.test("connectors/codex/collector-definition.ts"));
+	assert.ok(!relevant.test("connectors/codex/parsers.ts"));
 });

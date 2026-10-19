@@ -11,6 +11,10 @@
 
 const PIN_FILE = ".github/cross-repo-pins.json";
 
+// check-collector-definitions-drift.mjs copies every connectors/<id>/collector-definition.ts
+// into the generator's scratch tree, so each one is an input to that drift job.
+const COLLECTOR_DEFINITION = /^connectors\/[^/]+\/collector-definition\.ts$/;
+
 const PIN_BACKED_ARTIFACTS = {
 	"data-connect": new Set([
 		// Read by the collector-definitions and collection-profile-pins drift jobs.
@@ -33,6 +37,7 @@ export function isPinBackedPath(path, repo) {
 		throw new Error(`unknown pin repository: ${repo}`);
 	}
 
+	if (repo === "data-connect" && COLLECTOR_DEFINITION.test(path)) return true;
 	return PIN_BACKED_ARTIFACTS[repo].has(path);
 }
 

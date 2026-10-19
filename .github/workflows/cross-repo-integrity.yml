@@ -126,7 +126,7 @@ jobs:
           echo "data_connect_pin_backed=$DATA_CONNECT_PIN_BACKED" >> "$GITHUB_OUTPUT"
           echo "pdpp_pin_backed=$PDPP_PIN_BACKED" >> "$GITHUB_OUTPUT"
 
-          if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|scripts/connector-publish-allowlist\.mjs$|\.github/cross-repo-pins\.json$|\.github/scripts/cross-repo-integrity/|\.github/workflows/cross-repo-integrity\.yml$)'; then
+          if echo "$CHANGED" | grep -qE '^(packages/polyfill-connectors/|connectors/[^/]+/collector-definition\.ts$|scripts/connector-publish-allowlist\.mjs$|\.github/cross-repo-pins\.json$|\.github/scripts/cross-repo-integrity/|\.github/workflows/cross-repo-integrity\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
           else
             echo "relevant=false" >> "$GITHUB_OUTPUT"
