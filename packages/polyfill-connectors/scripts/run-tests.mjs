@@ -5,8 +5,8 @@
 // test *names*, not file paths. This resolves the test file list explicitly so
 // files still out of scope for this repo (see tsconfig.json's exclude comment)
 // can be left out by path.
-import { spawn } from "node:child_process";
 import { glob } from "node:fs/promises";
+import { runTestCommands, testCommands } from "./test-dispatch.mjs";
 import { EXCLUDED_TESTS, NAMESPACE_TESTS } from "./test-lanes.mjs";
 
 // Gate B finding B2 restored the other 7 previously-excluded semantic/
@@ -71,19 +71,10 @@ if (args.includes("--list")) {
 	process.exit(0);
 }
 
-const child = spawn(
-	process.execPath,
-	[
-		"--test",
-		"--import",
-		"tsx",
-		`--test-concurrency=${lane === "namespaces" ? "1" : rawConcurrency}`,
-		"--test-timeout=120000",
-		...files,
-	],
-	{
-		stdio: "inherit",
-		env: lane === undefined ? process.env : { ...process.env, TEST_LANE: lane },
-	},
+const commands = testCommands(
+	files,
+	lane === "namespaces" ? "1" : rawConcurrency,
 );
-child.on("exit", (code) => process.exit(code ?? 1));
+const env =
+	lane === undefined ? process.env : { ...process.env, TEST_LANE: lane };
+process.exit((await runTestCommands(commands, env)) ? 0 : 1);
