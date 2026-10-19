@@ -386,7 +386,11 @@ test("collect: state-seeded repeat keeps all selected records and exposes busine
 		(message): message is Extract<EmittedMessage, { type: "STATE" }> =>
 			message.type === "STATE" && message.stream === "orders",
 	);
-	assert.equal(firstOrdersStates.length, 1, "the first run emits one orders STATE");
+	assert.equal(
+		firstOrdersStates.length,
+		1,
+		"the first run emits one orders STATE",
+	);
 	const firstOrdersState = firstOrdersStates[0];
 	assert.ok(firstOrdersState);
 	const cursor = firstOrdersState.cursor;
@@ -445,7 +449,6 @@ test("collect: state-seeded repeat keeps all selected records and exposes busine
 	assert.equal(items[0]?.data.quantity, 2);
 });
 
-
 function ordersCursorFromSyntheticRun(
 	run: Awaited<ReturnType<typeof collectSyntheticHeb>>,
 ): Record<string, unknown> {
@@ -459,10 +462,18 @@ function ordersCursorFromSyntheticRun(
 	const result = cursor as Record<string, unknown>;
 	assert.equal(typeof result.checkpoint, "string");
 	const fingerprints = result.fingerprints;
-	assert.ok(fingerprints && typeof fingerprints === "object" && !Array.isArray(fingerprints));
+	assert.ok(
+		fingerprints &&
+			typeof fingerprints === "object" &&
+			!Array.isArray(fingerprints),
+	);
 	const entries = Object.entries(fingerprints as Record<string, unknown>);
 	assert.equal(entries.length, 1, "the selected order must be fingerprinted");
-	assert.ok(entries.every(([, value]) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value)));
+	assert.ok(
+		entries.every(
+			([, value]) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value),
+		),
+	);
 	return result;
 }
 
@@ -473,7 +484,11 @@ function assertSyntheticOrdersCovered(
 		(message): message is DetailCoverage =>
 			message.type === "DETAIL_COVERAGE" && message.stream === "orders",
 	);
-	assert.equal(coverage.length, 1, "suppression must still report orders coverage");
+	assert.equal(
+		coverage.length,
+		1,
+		"suppression must still report orders coverage",
+	);
 	assert.equal(coverage[0]?.considered, 1);
 	assert.equal(coverage[0]?.covered, 1);
 	assert.equal(findDetailGaps(run.protocolMessages).length, 0);
@@ -486,7 +501,10 @@ test("collect: persisted orders seed suppresses unchanged provider across clocks
 		state: {},
 		streams: ["orders", "order_items"],
 	});
-	assert.equal(first.emitted.filter((record) => record.stream === "orders").length, 1);
+	assert.equal(
+		first.emitted.filter((record) => record.stream === "orders").length,
+		1,
+	);
 	const seed = ordersCursorFromSyntheticRun(first);
 	const repeated = await collectSyntheticHeb({
 		body: SYNTHETIC_ORDER,
@@ -494,14 +512,28 @@ test("collect: persisted orders seed suppresses unchanged provider across clocks
 		state: { orders: structuredClone(seed) },
 		streams: ["orders", "order_items"],
 	});
-	assert.equal(repeated.emitted.filter((record) => record.stream === "orders").length, 0,
-		"persisted fingerprint must suppress unchanged orders");
-	const firstItems = first.emitted.filter((record) => record.stream === "order_items");
-	const repeatedItems = repeated.emitted.filter((record) => record.stream === "order_items");
+	assert.equal(
+		repeated.emitted.filter((record) => record.stream === "orders").length,
+		0,
+		"persisted fingerprint must suppress unchanged orders",
+	);
+	const firstItems = first.emitted.filter(
+		(record) => record.stream === "order_items",
+	);
+	const repeatedItems = repeated.emitted.filter(
+		(record) => record.stream === "order_items",
+	);
 	assert.equal(firstItems.length, 1);
-	assert.equal(repeatedItems.length, 1, "items are emitted independently of orders suppression");
-	assert.deepEqual(repeatedItems.map((record) => record.data), firstItems.map((record) => record.data),
-		"item payload must remain stable across collection clocks");
+	assert.equal(
+		repeatedItems.length,
+		1,
+		"items are emitted independently of orders suppression",
+	);
+	assert.deepEqual(
+		repeatedItems.map((record) => record.data),
+		firstItems.map((record) => record.data),
+		"item payload must remain stable across collection clocks",
+	);
 	assert.deepEqual(ordersCursorFromSyntheticRun(repeated), seed);
 	assertSyntheticOrdersCovered(repeated);
 });
@@ -525,31 +557,57 @@ for (const field of ["orderDate", "quantity", "lineTotal"] as const) {
 			state: { orders: structuredClone(seed) },
 			streams: ["orders", "order_items"],
 		});
-		const orders = repeated.emitted.filter((record) => record.stream === "orders");
-		const items = repeated.emitted.filter((record) => record.stream === "order_items");
-		const oldItem = first.emitted.find((record) => record.stream === "order_items")?.data;
+		const orders = repeated.emitted.filter(
+			(record) => record.stream === "orders",
+		);
+		const items = repeated.emitted.filter(
+			(record) => record.stream === "order_items",
+		);
+		const oldItem = first.emitted.find(
+			(record) => record.stream === "order_items",
+		)?.data;
 		assert.ok(oldItem);
 		assert.equal(items.length, 1);
 		const item = items[0]?.data;
 		assert.ok(item);
-		assert.equal(item.id, oldItem.id, "provider mutation must preserve item identity");
+		assert.equal(
+			item.id,
+			oldItem.id,
+			"provider mutation must preserve item identity",
+		);
 		if (field === "orderDate") {
-			assert.equal(orders.length, 1, "changed order date changes the orders fingerprint");
+			assert.equal(
+				orders.length,
+				1,
+				"changed order date changes the orders fingerprint",
+			);
 			assert.equal(orders[0]?.data.order_date, body.orderDate);
 			assert.equal(item.order_date, body.orderDate);
 			assert.notEqual(item.order_date, oldItem.order_date);
 			assert.equal(item.quantity, oldItem.quantity);
 			assert.equal(item.line_total, oldItem.line_total);
 		} else {
-			assert.equal(orders.length, 0, "detail-only changes do not change the list order");
+			assert.equal(
+				orders.length,
+				0,
+				"detail-only changes do not change the list order",
+			);
 			assert.equal(item.order_date, oldItem.order_date);
 			if (field === "quantity") {
-				assert.equal(item.quantity, body.quantity, "isolated quantity must reach the emitted field");
+				assert.equal(
+					item.quantity,
+					body.quantity,
+					"isolated quantity must reach the emitted field",
+				);
 				assert.notEqual(item.quantity, oldItem.quantity);
 				assert.equal(item.line_total, oldItem.line_total);
 				assert.equal(item.line_total_cents, oldItem.line_total_cents);
 			} else {
-				assert.equal(item.line_total, body.lineTotal, "isolated line total must reach the emitted field");
+				assert.equal(
+					item.line_total,
+					body.lineTotal,
+					"isolated line total must reach the emitted field",
+				);
 				assert.equal(item.line_total_cents, 1200);
 				assert.notEqual(item.line_total, oldItem.line_total);
 				assert.equal(item.quantity, oldItem.quantity);
