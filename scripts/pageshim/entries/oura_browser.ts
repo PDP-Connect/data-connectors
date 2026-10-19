@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { ensureOuraApiAccess, OURA_LOGIN_URL, probeOuraCachedApiAccess, probeOuraPortalSession } from "../../../connectors/oura_browser/api-access.ts";
+import { ensureOuraApiAccess, OURA_LOGIN_URL, probeOuraCachedApiAccess, probeOuraPortalSession, probeOuraSignInInProgress } from "../../../connectors/oura_browser/api-access.ts";
 import { collectOuraBrowser } from "../../../connectors/oura_browser/index.ts";
 import { validateRecord } from "../../../connectors/oura_browser/schemas.ts";
 import { applyRequestedScopeEntries } from "../requested-scope-entries.ts";
@@ -57,13 +57,15 @@ function withOuraTokenPost(page: ShimPage, pw: Page): Page {
 	loginMessage: "Sign in to the Oura Developer Portal, then return here.",
 	validateRecord,
 	probe: async (pw) => Boolean(await probeOuraCachedApiAccess(withOuraTokenPost(page, pw as Page))) ||
-		probeOuraPortalSession(pw as never),
+		await probeOuraSignInInProgress(pw as Page) || await probeOuraPortalSession(pw as Page),
 	prepareRequested: (requested) => applyRequestedScopeEntries(requested, requestedScopeEntries(page), "oura"),
 	collect: async (ctx) => {
 		const pw = withOuraTokenPost(page, ctx.page as Page);
 		const token = await ensureOuraApiAccess(pw, async (url, message, ready) => {
-			await page.showBrowser(url);
-			await pw.goto(url, { waitUntil: "domcontentloaded" });
+			const current = await pw.evaluate(() => location.href).catch(() => "");
+			await page.showBrowser(current === url ? undefined : url);
+			if (current !== url)
+				await pw.goto(url, { waitUntil: "domcontentloaded" });
 			const completed = await page.promptUser(message, ready, 2000);
 			if (!completed) throw new Error("oura_authorization_incomplete");
 			await page.goHeadless();

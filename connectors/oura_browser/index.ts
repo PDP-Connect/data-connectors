@@ -14,7 +14,7 @@ import type {
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
-import { ensureOuraApiAccess, probeOuraPortalSession, readOuraCachedAccessToken } from "./api-access.ts";
+import { ensureOuraApiAccess, probeOuraPortalSession, probeOuraSignInInProgress, readOuraCachedAccessToken } from "./api-access.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
 // Include today in the initial 90-day snapshot.
@@ -89,12 +89,13 @@ interface OuraDailyData {
 }
 
 export async function probeOuraBrowserSession(page: BrowserCollectContext["page"]): Promise<boolean> {
-  return probeOuraPortalSession(page);
+  return (await probeOuraSignInInProgress(page)) || probeOuraPortalSession(page);
 }
 
 export async function ensureOuraSession(args: EnsureSessionArgs): Promise<void> {
   await ensureOuraApiAccess(args.page, async (url, message, ready) => {
-    await args.page.goto(url, { waitUntil: "domcontentloaded" });
+    if (await args.page.evaluate(() => location.href).catch(() => "") !== url)
+      await args.page.goto(url, { waitUntil: "domcontentloaded" });
     const ok = await manualBrowserLogin({
       assist: args.assist,
       capture: args.capture,
@@ -419,7 +420,7 @@ if (isMainModule(import.meta.url)) {
     retryablePattern: /oura_api_(?:429|5\d\d)|fetch failed|network|timeout|aborted|inventory_not_proven_complete/i,
     browser: { profileName: "oura_browser" },
     ensureSession: ensureOuraSession,
-    probeSession: ({ page }) => probeOuraPortalSession(page),
+    probeSession: ({ page }) => probeOuraBrowserSession(page),
     collect: collectOuraBrowser,
   });
 }

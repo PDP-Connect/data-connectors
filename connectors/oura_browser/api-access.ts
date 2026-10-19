@@ -13,6 +13,8 @@ const STORAGE_KEY = "vana:oura-connector:token";
 const SCOPE = "extapi:daily";
 const PORTAL_SESSION_SETTLE_MS = 45_000;
 const PORTAL_SESSION_POLL_MS = 2_000;
+const PORTAL_SETTLE_MS = 1_500;
+const PORTAL_SETTLE_TIMEOUT_MS = 15_000;
 
 export const OURA_LOGIN_URL = APPLICATIONS;
 
@@ -105,24 +107,47 @@ async function tokenStatus(page: Page, accessToken: string): Promise<number> {
 	try { return response.status(); } finally { await response.dispose(); }
 }
 
-async function portalApplications(page: Page): Promise<Array<Record<string, unknown>>> {
-	const value: unknown = await page.evaluate(async () => {
-		if (location.origin !== "https://developer.ouraring.com") throw new Error("oura_portal_origin");
-		for (let attempt = 0; attempt < 12; attempt++) {
-			const response = await fetch("/api/extapi/v2/oauth/applications", { credentials: "include" });
-			if (response.ok) return response.json();
-			if (response.status !== 401 && response.status !== 403) throw new Error(`oura_portal_${response.status}`);
-			await new Promise((resolve) => setTimeout(resolve, 500));
+async function waitForPortalSettled(page: Page): Promise<void> {
+	const deadline = Date.now() + PORTAL_SETTLE_TIMEOUT_MS;
+	let stableUrl = "";
+	let stableSince = 0;
+	while (Date.now() < deadline) {
+		const url = await page.evaluate(() => location.href).catch(() => "");
+		if (url !== stableUrl) { stableUrl = url; stableSince = Date.now(); }
+		else if (url.startsWith(PORTAL) && Date.now() - stableSince >= PORTAL_SETTLE_MS) return;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+}
+
+async function portalApplications(page: Page): Promise<Array<Record<string, unknown>> | null> {
+	let value: unknown;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			value = await page.evaluate(async () => {
+				if (location.origin !== "https://developer.ouraring.com") throw new Error("oura_portal_origin");
+				for (let edgeAttempt = 0; edgeAttempt < 12; edgeAttempt++) {
+					const response = await fetch("/api/extapi/v2/oauth/applications", { credentials: "include" });
+					if (response.ok) return response.json();
+					if (response.status !== 401 && response.status !== 403) throw new Error(`oura_portal_${response.status}`);
+					await new Promise((resolve) => setTimeout(resolve, 500));
+				}
+				return null;
+			});
+			break;
+		} catch (error) {
+			if (attempt === 2) throw error;
+			await waitForPortalSettled(page);
 		}
-		throw new Error("oura_portal_session_unconfirmed");
-	});
+	}
+	if (value === null) return null;
 	if (!Array.isArray(value) || value.some((app) => !app || typeof app !== "object" || Array.isArray(app)))
 		throw new Error("oura_portal_invalid_applications");
 	return value as Array<Record<string, unknown>>;
 }
 
-async function application(page: Page, email: string, interact: Interact): Promise<{ clientId: string; clientSecret: string }> {
+async function application(page: Page, email: string, interact: Interact): Promise<{ clientId: string; clientSecret: string } | null> {
 	let apps = await portalApplications(page);
+	if (!apps) return null;
 	const usable = (app: Record<string, unknown>) => typeof app.client_id === "string" &&
 		Array.isArray(app.redirect_uris) && app.redirect_uris.includes(REDIRECT) &&
 		Array.isArray(app.scopes) && app.scopes.includes(SCOPE);
@@ -146,15 +171,17 @@ async function application(page: Page, email: string, interact: Interact): Promi
 		}, email);
 		if (created) {
 			apps = await portalApplications(page);
+			if (!apps) return null;
 			chosen = apps.find((app) => app.application_name === "Personal access" && usable(app));
 		}
 		if (!chosen) {
 			await interact(APPLICATIONS,
 				"Create a personal Oura API app with scope extapi:daily and redirect URI https://vana.org/oauth/oura/callback, then continue.",
 				async () => {
-					try { return (await portalApplications(page)).some(usable); } catch { return false; }
+					try { return (await portalApplications(page))?.some(usable) ?? false; } catch { return false; }
 				});
 			apps = await portalApplications(page);
+			if (!apps) return null;
 			chosen = apps.find(usable);
 		}
 	}
@@ -163,15 +190,13 @@ async function application(page: Page, email: string, interact: Interact): Promi
 	return { clientId: chosen.client_id, clientSecret: chosen.client_secret };
 }
 
-async function applicationAfterSessionSettles(page: Page, email: string, interact: Interact): Promise<{ clientId: string; clientSecret: string }> {
+async function applicationAfterSessionSettles(page: Page, email: string, interact: Interact): Promise<{ clientId: string; clientSecret: string } | null> {
+	await waitForPortalSettled(page);
 	const deadline = Date.now() + PORTAL_SESSION_SETTLE_MS;
 	for (;;) {
-		try { return await application(page, email, interact); }
-		catch (error) {
-			if (!(error instanceof Error) || error.message !== "oura_portal_session_unconfirmed" || Date.now() >= deadline)
-				throw error;
-			await new Promise((resolve) => setTimeout(resolve, PORTAL_SESSION_POLL_MS));
-		}
+		const app = await application(page, email, interact);
+		if (app || Date.now() >= deadline) return app;
+		await new Promise((resolve) => setTimeout(resolve, PORTAL_SESSION_POLL_MS));
 	}
 }
 
@@ -216,27 +241,75 @@ async function reusableCachedToken(page: Page): Promise<string | null> {
 
 export async function probeOuraCachedApiAccess(page: Page): Promise<string | null> {
 	try {
-		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
-			await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
+		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL) return null;
 		return await reusableCachedToken(page);
 	} catch { return null; }
 }
 
+export async function probeOuraSignInInProgress(page: Page): Promise<boolean> {
+	return page.evaluate(() => location.origin === "https://moi.ouraring.com" &&
+		location.pathname.startsWith("/authn/")).catch(() => false);
+}
+
+async function advanceOuraSignIn(page: Page, email?: string): Promise<void> {
+	await page.evaluate((knownEmail) => {
+		if (location.origin === "https://developer.ouraring.com" && location.pathname.startsWith("/signin")) {
+			const button = [...document.querySelectorAll("button")].find((item) => /sign in/i.test(item.innerText));
+			if (button && !(window as Window & { __vanaSignInClicked?: boolean }).__vanaSignInClicked) {
+				(window as Window & { __vanaSignInClicked?: boolean }).__vanaSignInClicked = true;
+				button.click();
+			}
+			return;
+		}
+		if (location.origin !== "https://moi.ouraring.com" || !location.pathname.startsWith("/authn/")) return;
+		if (document.querySelector('input#otp-code, input[autocomplete="one-time-code"], input[name="otp"]')) return;
+		const input = document.querySelector<HTMLInputElement>('input#username, input[type="email"]');
+		if (input && knownEmail) {
+			if (input.value !== knownEmail) {
+				const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+				setter?.call(input, knownEmail);
+				input.dispatchEvent(new Event("input", { bubbles: true }));
+			}
+			const form = input.form;
+			if (form && !(window as Window & { __vanaEmailSubmitted?: boolean }).__vanaEmailSubmitted) {
+				(window as Window & { __vanaEmailSubmitted?: boolean }).__vanaEmailSubmitted = true;
+				form.requestSubmit();
+			}
+			return;
+		}
+		if (document.readyState !== "complete") return;
+		const choices = [...document.querySelectorAll<HTMLButtonElement>('button[name="selectedId"], input[type="submit"][name="selectedId"]')]
+			.filter((item) => item.id !== "passkey-button" && !/passkey/i.test(item.value));
+		const choice = choices.length === 1 ? choices[0] : choices.find((item) => /e-?mail|otp|code/i.test(`${item.value} ${item.innerText}`));
+		if (choice && !(window as Window & { __vanaChoseEmailCode?: boolean }).__vanaChoseEmailCode) {
+			(window as Window & { __vanaChoseEmailCode?: boolean }).__vanaChoseEmailCode = true;
+			choice.click();
+		}
+	}, email).catch(() => {});
+}
+
 export async function ensureOuraApiAccess(page: Page, interact: Interact): Promise<string> {
-	if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
+	if (await probeOuraSignInInProgress(page)) {
+		const current = await page.evaluate(() => location.href);
+		await interact(current, "Finish signing in to Oura.", async () => {
+			await advanceOuraSignIn(page);
+			return Boolean(await portalEmail(page));
+		});
+	} else if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
 		await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
 	const cached = await reusableCachedToken(page);
 	if (cached) return cached;
 	let email = await portalEmail(page);
 	if (!email) {
-		await interact(APPLICATIONS, "Sign in to the Oura Developer Portal, then continue.", async () => Boolean(await portalEmail(page)));
+		await interact(APPLICATIONS, "Sign in to the Oura Developer Portal, then continue.", async () => {
+			await advanceOuraSignIn(page);
+			return Boolean(await portalEmail(page));
+		});
 		email = await portalEmail(page);
 	}
 	if (!email) throw new Error("oura_portal_session_unconfirmed");
-	let app: { clientId: string; clientSecret: string };
-	try { app = await applicationAfterSessionSettles(page, email, interact); }
-	catch (error) {
-		if (!(error instanceof Error) || error.message !== "oura_portal_session_unconfirmed") throw error;
+	let app = await applicationAfterSessionSettles(page, email, interact);
+	if (!app) {
 		await page.evaluate(async () => {
 			await fetch("/api/auth/sign-out", {
 				method: "POST", credentials: "include",
@@ -244,10 +317,14 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 			}).catch(() => {});
 		});
 		await interact(`${PORTAL}/signin?callbackUrl=%2Fapplications`, "Sign in to Oura again to restore your Developer Portal session.",
-			async () => Boolean(await portalEmail(page)));
+			async () => {
+				await advanceOuraSignIn(page);
+				return Boolean(await portalEmail(page));
+			});
 		email = await portalEmail(page);
 		if (!email) throw new Error("oura_portal_session_unconfirmed");
 		app = await applicationAfterSessionSettles(page, email, interact);
+		if (!app) throw new Error("oura_portal_session_unconfirmed");
 	}
 	const { clientId, clientSecret } = app;
 	const proof = await pkce(page);
@@ -257,14 +334,26 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 		scope: SCOPE, state: proof.state, code_challenge: proof.challenge,
 		code_challenge_method: "S256", prompt: "consent",
 	}).toString();
+	let consentReadyPolls = 0;
+	let allowPressed = false;
 	await interact(url.toString(), "Approve daily Oura data access, then continue.", async () => {
-		const current = await page.evaluate(() => location.href);
+		const current = await page.evaluate(() => location.href).catch(() => "");
 		if (current.startsWith(REDIRECT)) return true;
+		await advanceOuraSignIn(page, email);
 		// Oura has recorded empty grants when Allow is pressed before its page script binds.
-		await page.evaluate(() => {
+		const consent = await page.evaluate(({ press }) => {
 			const box = document.querySelector<HTMLInputElement>('input[type="checkbox"][name="consent.scope.extapi:daily"]');
-			if (box && !box.checked) box.click();
-		});
+			if (!box) return { ticked: false, pressed: false };
+			if (!box.checked) box.click();
+			if (!box.checked || document.readyState !== "complete") return { ticked: false, pressed: false };
+			if (press) {
+				const button = document.querySelector<HTMLButtonElement>('button[name="submit_consent"], input[name="submit_consent"], #submit_consent, button[value="submit_consent"]');
+				if (button && !button.disabled) { button.click(); return { ticked: true, pressed: true }; }
+			}
+			return { ticked: true, pressed: false };
+		}, { press: consentReadyPolls >= 1 && !allowPressed }).catch(() => ({ ticked: false, pressed: false }));
+		consentReadyPolls = consent.ticked ? consentReadyPolls + 1 : 0;
+		if (consent.pressed) allowPressed = true;
 		return false;
 	});
 	const redirect = new URL(await page.evaluate(() => location.href));
