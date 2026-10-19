@@ -536,7 +536,7 @@ test("history streams beyond one batch and checkpoints its accounted prefix", as
 		deduped_count: 0,
 		stop_reason: "source-end",
 		incomplete: false,
-		skipped_unresolved_date_count: 0,
+		unresolved_date_count: 0,
 	});
 	assert.doesNotMatch(
 		diagnostics.join("\n"),
@@ -744,7 +744,7 @@ test("history reconciliation emits a re-watched row beyond the head window", asy
 	}));
 	const { records, messages } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${END_OF_LIST}`,
+			`<ytd-item-section-renderer>${resolvedHistoryHeader}${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${END_OF_LIST}`,
 		["watch_history"],
 		undefined,
 		{ watch_history: cursor },
@@ -848,6 +848,12 @@ test("a real continuation permits a safe incomplete checkpoint", async () => {
 });
 
 test("a parsed suffix cannot checkpoint across a malformed history card", async () => {
+	const now = new Date();
+	const collectionDate = [
+		String(now.getFullYear()),
+		String(now.getMonth() + 1).padStart(2, "0"),
+		String(now.getDate()).padStart(2, "0"),
+	].join("-");
 	const rows = Array.from({ length: 10 }, (_, index) =>
 		index === 5
 			? `<yt-lockup-view-model><h3>hydrating</h3></yt-lockup-view-model>`
@@ -869,7 +875,10 @@ test("a parsed suffix cannot checkpoint across a malformed history card", async 
 	const state = messages.find((message) => message.type === "STATE")
 		?.cursor as Record<string, unknown>;
 	assert.equal(state?.complete, false);
-	assert.equal(state?.backfill_anchor_id, "v4|unknown-date");
+	assert.equal(
+		state?.backfill_anchor_id,
+		`v4|unresolved:${collectionDate}:unknown-section`,
+	);
 	assert.equal(
 		messages.some((message) => message.reason === "stream_collection_failed"),
 		true,
@@ -884,7 +893,7 @@ test("a complete HTML bootstrap ends a resumed cursor with no unread suffix", as
 	).join("");
 	const { records, messages } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${historyBootstrap(["v0", "v1", "v2"])}`,
+			`<ytd-item-section-renderer><ytd-item-section-header-renderer><div id="header"><div id="title">Today</div></div></ytd-item-section-header-renderer>${rows}</ytd-item-section-renderer>${historyBootstrap(["v0", "v1", "v2"])}`,
 		["watch_history"],
 		undefined,
 		{
@@ -988,6 +997,191 @@ test("history preserves the same video when its watch date differs", async () =>
 	assert.equal(history.length, 2);
 	assert.deepEqual(history.map((record) => record.watched_date_label), ["Today", "Yesterday"]);
 	assert.notEqual(history[0]?.id, history[1]?.id);
+});
+
+test("unresolved localized history dates keep section rows distinct and incomplete", async () => {
+	const page = new FixturePage();
+	page.evaluate = async (fn: Function, arg?: unknown) => {
+		if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
+		if (fn.name === "readVideos" || (typeof arg === "object" && arg !== null && "offset" in arg)) {
+			const request = arg as { offset: number; limit: number };
+			return {
+				offset: request.offset,
+				totalRows: 2,
+				rows: [
+					{ ...VIDEO, watched_date_label: "Heute" },
+					{ ...VIDEO, watched_date_label: "Gestern" },
+				].slice(request.offset, request.offset + request.limit),
+			};
+		}
+		if (fn.name === "readListEnd" || (typeof arg === "object" && arg !== null && "kind" in arg))
+			return {
+				dataReadable: true,
+				dataItemCount: 2,
+				dataHasContinuation: false,
+				domHasContinuation: false,
+				declaredTotal: 2,
+				domItemCount: 2,
+				domHasEndMarker: true,
+				verifiedEmpty: false,
+				pageBlocked: false,
+				latestHistoryResponse: null,
+			};
+		return undefined;
+	};
+	const history: Record<string, unknown>[] = [];
+	const messages: Record<string, unknown>[] = [];
+	const diagnostics: string[] = [];
+	setConnectorDiagnosticSink((line) => diagnostics.push(line));
+	try {
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([["watch_history", { name: "watch_history" }]]) as never,
+			emitRecord: async (_stream, data) => { history.push(data); },
+			emit: async (message) => { messages.push(message as Record<string, unknown>); },
+			reportStreamFailure: async () => undefined,
+			progress: async () => undefined,
+		});
+	} finally {
+		setConnectorDiagnosticSink(undefined);
+	}
+	assert.equal(history.length, 2);
+	assert.notEqual(history[0]?.id, history[1]?.id);
+	assert.deepEqual(history.map((record) => record.watched_date), [null, null]);
+	assert.equal((messages.find((message) => message.type === "STATE")?.cursor as Record<string, unknown>)?.complete, false);
+	const coverage = diagnostics.find((line) => line.startsWith("[youtube-diagnostic] coverage "));
+	assert.ok(coverage);
+	assert.equal(
+		JSON.parse(coverage.slice("[youtube-diagnostic] coverage ".length))
+			.unresolved_date_count,
+		2,
+	);
+});
+
+test("unresolved relative history labels use the collection date in record identity", async () => {
+	const collectId = async (browserDate: [number, number, number]) => {
+		const page = new FixturePage();
+		page.evaluate = async (fn: Function, arg?: unknown) => {
+			if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
+			if (fn.name === "readBrowserDate") return browserDate;
+			if (
+				fn.name === "readVideos" ||
+				(typeof arg === "object" && arg !== null && "offset" in arg)
+			) {
+				const request = arg as { offset: number; limit: number };
+				return {
+					offset: request.offset,
+					totalRows: 1,
+					rows: [{ ...VIDEO, watched_date_label: "Heute" }].slice(
+						request.offset,
+						request.offset + request.limit,
+					),
+				};
+			}
+			if (
+				fn.name === "readListEnd" ||
+				(typeof arg === "object" && arg !== null && "kind" in arg)
+			)
+				return {
+					dataReadable: true,
+					dataItemCount: 1,
+					dataHasContinuation: false,
+					domHasContinuation: false,
+					declaredTotal: 1,
+					domItemCount: 1,
+					domHasEndMarker: true,
+					verifiedEmpty: false,
+					pageBlocked: false,
+					latestHistoryResponse: null,
+				};
+			return undefined;
+		};
+		const history: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([[
+				"watch_history",
+				{ name: "watch_history" },
+			]]) as never,
+			emitRecord: async (_stream, data) => {
+				history.push(data);
+			},
+			emit: async () => undefined,
+			reportStreamFailure: async () => undefined,
+			progress: async () => undefined,
+		});
+		return history[0]?.id;
+	};
+
+	const firstVisit = await collectId([2026, 8, 23]);
+	const laterVisit = await collectId([2026, 8, 24]);
+	assert.ok(firstVisit);
+	assert.ok(laterVisit);
+	assert.notEqual(firstVisit, laterVisit);
+});
+
+test("resolved history dates keep the same record identity across runs", async () => {
+	const collectRecord = async (browserDate: [number, number, number]) => {
+		const page = new FixturePage();
+		page.evaluate = async (fn: Function, arg?: unknown) => {
+			if (fn.name === "hasYoutubeSessionOnCurrentPage") return true;
+			if (fn.name === "readBrowserDate") return browserDate;
+			if (
+				fn.name === "readVideos" ||
+				(typeof arg === "object" && arg !== null && "offset" in arg)
+			) {
+				const request = arg as { offset: number; limit: number };
+				return {
+					offset: request.offset,
+					totalRows: 1,
+					rows: [{ ...VIDEO, watched_date_label: "Sep 21, 2026" }].slice(
+						request.offset,
+						request.offset + request.limit,
+					),
+				};
+			}
+			if (
+				fn.name === "readListEnd" ||
+				(typeof arg === "object" && arg !== null && "kind" in arg)
+			)
+				return {
+					dataReadable: true,
+					dataItemCount: 1,
+					dataHasContinuation: false,
+					domHasContinuation: false,
+					declaredTotal: 1,
+					domItemCount: 1,
+					domHasEndMarker: true,
+					verifiedEmpty: false,
+					pageBlocked: false,
+					latestHistoryResponse: null,
+				};
+			return undefined;
+		};
+		const history: Record<string, unknown>[] = [];
+		await collectYoutubeBrowser({
+			page: page as never,
+			requested: new Map([[
+				"watch_history",
+				{ name: "watch_history" },
+			]]) as never,
+			emitRecord: async (_stream, data) => {
+				history.push(data);
+			},
+			emit: async () => undefined,
+			reportStreamFailure: async () => undefined,
+			progress: async () => undefined,
+		});
+		return history[0];
+	};
+
+	const firstRun = await collectRecord([2026, 8, 23]);
+	const secondRun = await collectRecord([2026, 8, 24]);
+	assert.ok(firstRun);
+	assert.ok(secondRun);
+	assert.equal(firstRun.watched_date, "2026-09-21");
+	assert.equal(secondRun.watched_date, "2026-09-21");
+	assert.equal(firstRun.id, secondRun.id);
 });
 
 test("video primary keys survive playlist index changes", async () => {
@@ -1634,8 +1828,11 @@ const historyBootstrap = (videoIds: string[], continuation?: string) =>
 		}),
 	);
 
+const resolvedHistoryHeader =
+	'<ytd-item-section-header-renderer><div id="header"><div id="title">Today</div></div></ytd-item-section-header-renderer>';
+
 const historyCards = (videoIds: string[]) =>
-	`<ytd-item-section-renderer>${videoIds
+	`<ytd-item-section-renderer>${resolvedHistoryHeader}${videoIds
 		.map(
 			(videoId) =>
 				`<yt-lockup-view-model><a href="/watch?v=${videoId}"></a><h3>Seen</h3></yt-lockup-view-model>`,
@@ -1993,7 +2190,7 @@ test("history streams all loaded rows and uses latest target response for end ev
 	).join("");
 	const { records, messages, outcome } = await collectFromDocuments(
 		() =>
-			`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}`,
+				`<ytd-item-section-renderer>${resolvedHistoryHeader}${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}`,
 		["watch_history"],
 	);
 	assert.equal(records.get("watch_history")?.length, 60);
@@ -2029,7 +2226,7 @@ test("latest history response can prove end despite stale bootstrap row counts",
 		).join("");
 		const { records, messages, outcome } = await collectFromDocuments(
 			() =>
-				`<ytd-item-section-renderer>${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${withEndMarker ? END_OF_LIST : ""}`,
+				`<ytd-item-section-renderer>${resolvedHistoryHeader}${rows}</ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: sourceItems } }))}${withEndMarker ? END_OF_LIST : ""}`,
 			["watch_history"],
 			undefined,
 			{},
@@ -2075,7 +2272,7 @@ test("HTML history bootstrap with one complete page proves end without a browse 
 
 test("HTML history bootstrap accounts for legacy videoRenderer rows", async () => {
 	const videoId = "legacyvid01";
-	const html = `<ytd-item-section-renderer><ytd-video-renderer><a href="/watch?v=${videoId}"></a><h3>Legacy row</h3></ytd-video-renderer></ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [{ videoRenderer: { videoId } }] } }] } }))}`;
+	const html = `<ytd-item-section-renderer>${resolvedHistoryHeader}<ytd-video-renderer><a href="/watch?v=${videoId}"></a><h3>Legacy row</h3></ytd-video-renderer></ytd-item-section-renderer>${pageData(tabbedData({ sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [{ videoRenderer: { videoId } }] } }] } }))}`;
 	const { records, messages, outcome } = await collectFromDocuments(
 		() => html,
 		["watch_history"],
