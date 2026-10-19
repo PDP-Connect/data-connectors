@@ -14,7 +14,7 @@ const metadata: RawObservationStreamMetadata[] = [
 	{
 		name: "items",
 		primaryKey: ["id"],
-		safeFieldPaths: ["id", "clock", "business", "nested", "nested.value"],
+		safeFieldPaths: ["/id", "/clock", "/business", "/nested", "/nested/value"],
 		excludedFields: ["clock"],
 	},
 ];
@@ -50,11 +50,11 @@ test("raw excluded and nested declared differences stay separate from projected 
 
 	assert.equal(summary.streams[0]?.status, "differences-observed");
 	assert.deepEqual(summary.streams[0]?.rawChangedFields, [
-		{ field: "clock", identities: 1 },
-		{ field: "nested.value", identities: 1 },
+		{ field: "/clock", identities: 1 },
+		{ field: "/nested/value", identities: 1 },
 	]);
 	assert.deepEqual(summary.streams[0]?.projectedChangedFields, [
-		{ field: "nested.value", identities: 1 },
+		{ field: "/nested/value", identities: 1 },
 	]);
 
 	const declaredMetadata = metadata[0];
@@ -72,7 +72,7 @@ test("raw excluded and nested declared differences stay separate from projected 
 		],
 	);
 	assert.deepEqual(nestedExclusion.streams[0]?.projectedChangedFields, [
-		{ field: "nested.value", identities: 1 },
+		{ field: "/nested/value", identities: 1 },
 	]);
 });
 
@@ -97,7 +97,7 @@ test("object key order is semantic-neutral while array order and missing-vs-null
 		metadata,
 	);
 	assert.deepEqual(changed.streams[0]?.rawChangedFields, [
-		{ field: "business", identities: 1 },
+		{ field: "/business", identities: 1 },
 	]);
 
 	const missingVsNull = analyzeRawObservations(
@@ -108,7 +108,7 @@ test("object key order is semantic-neutral while array order and missing-vs-null
 		metadata,
 	);
 	assert.deepEqual(missingVsNull.streams[0]?.rawChangedFields, [
-		{ field: "business", identities: 1 },
+		{ field: "/business", identities: 1 },
 	]);
 });
 
@@ -216,13 +216,13 @@ test("declared compound keys retain every typed component and oversized keys are
 			{
 				name: "items",
 				primaryKey: ["account", "item"],
-				safeFieldPaths: ["account", "item", "business"],
+				safeFieldPaths: ["/account", "/item", "/business"],
 			},
 		],
 	);
 	assert.equal(compound.streams[0]?.comparedIdentities, 1);
 	assert.deepEqual(compound.streams[0]?.rawChangedFields, [
-		{ field: "business", identities: 1 },
+		{ field: "/business", identities: 1 },
 	]);
 
 	const oversized = analyzeRawObservations(
@@ -230,7 +230,7 @@ test("declared compound keys retain every typed component and oversized keys are
 			run(1, [record("x".repeat(5000), { business: "old" })]),
 			run(2, [record("x".repeat(5000), { business: "new" })]),
 		],
-		[{ name: "items", safeFieldPaths: ["business"] }],
+		[{ name: "items", safeFieldPaths: ["/business"] }],
 	);
 	assert.equal(
 		oversized.streams[0]?.status,
@@ -298,8 +298,12 @@ test("identity limit is disclosed and values, identities, and dynamic keys stay 
 
 test("sampling gives later declared streams a bounded share of the identity budget", () => {
 	const streams: RawObservationStreamMetadata[] = [
-		{ name: "large", primaryKey: ["id"], safeFieldPaths: ["id", "value"] },
-		{ name: "items", primaryKey: ["id"], safeFieldPaths: ["id", "created_at"] },
+		{ name: "large", primaryKey: ["id"], safeFieldPaths: ["/id", "/value"] },
+		{
+			name: "items",
+			primaryKey: ["id"],
+			safeFieldPaths: ["/id", "/created_at"],
+		},
 	];
 	const records = (count: number, stream: string, value: string) =>
 		Array.from({ length: count }, (_, index) => ({
@@ -321,7 +325,7 @@ test("sampling gives later declared streams a bounded share of the identity budg
 	const items = summary.streams.find((entry) => entry.stream === "items");
 	assert.equal(items?.status, "differences-observed");
 	assert.deepEqual(items?.rawChangedFields, [
-		{ field: "created_at", identities: 2 },
+		{ field: "/created_at", identities: 2 },
 	]);
 	assert.equal(items?.sampleLimit, 2);
 	assert.ok(summary.truncated);
@@ -355,7 +359,7 @@ test("missing identity records are skipped instead of pairing canonical undefine
 			run(1, [{ data: { business: "first" }, stream: "items" }]),
 			run(2, [{ data: { business: "second" }, stream: "items" }]),
 		],
-		[{ name: "items", safeFieldPaths: ["business"] }],
+		[{ name: "items", safeFieldPaths: ["/business"] }],
 	);
 	assert.equal(summary.streams[0]?.status, "insufficient-repeat-observations");
 	assert.equal(summary.streams[0]?.comparedIdentities, 0);
@@ -384,7 +388,7 @@ test("typed wire keys keep an array key distinct from a scalar string with the s
 				},
 			]),
 		],
-		[{ name: "items", safeFieldPaths: ["business"] }],
+		[{ name: "items", safeFieldPaths: ["/business"] }],
 	);
 	assert.equal(summary.streams[0]?.comparedIdentities, 0);
 	assert.equal(summary.streams[0]?.status, "insufficient-repeat-observations");
@@ -408,11 +412,11 @@ test("typed wire keys keep an array key distinct from a scalar string with the s
 				},
 			]),
 		],
-		[{ name: "items", safeFieldPaths: ["business"] }],
+		[{ name: "items", safeFieldPaths: ["/business"] }],
 	);
 	assert.equal(sameKey.streams[0]?.comparedIdentities, 1);
 	assert.deepEqual(sameKey.streams[0]?.rawChangedFields, [
-		{ field: "business", identities: 1 },
+		{ field: "/business", identities: 1 },
 	]);
 });
 
@@ -427,11 +431,74 @@ test("limitations state the first-observation rule and what raw means without cl
 test("schema paths that were bounded at collection time are disclosed", () => {
 	const summary = analyzeRawObservations(
 		[],
-		[{ name: "items", safeFieldPaths: ["a"], schemaPathsBounded: true }],
+		[{ name: "items", safeFieldPaths: ["/a"], schemaPathsBounded: true }],
 	);
 	assert.ok(
 		summary.limitations.some((line) =>
 			line.includes("Schema field metadata was bounded"),
 		),
+	);
+});
+
+test("JSON Pointer paths distinguish literal dotted keys, nested paths and escaped tokens", () => {
+	const paths = ["/plain", "/a.b", "/a/b", "/a~1b", "/a~0b", "/", "/arr"];
+	const before = {
+		plain: 1,
+		"a.b": 1,
+		a: { b: 1 },
+		"a/b": 1,
+		"a~b": 1,
+		"": 1,
+		arr: [1],
+	};
+	const after = {
+		plain: 2,
+		"a.b": 2,
+		a: { b: 2 },
+		"a/b": 2,
+		"a~b": 2,
+		"": 2,
+		arr: [2],
+	};
+	const summary = analyzeRawObservations(
+		[run(1, [record("same", before)]), run(2, [record("same", after)])],
+		[{ name: "items", safeFieldPaths: paths }],
+	);
+	assert.deepEqual(
+		summary.streams[0]?.rawChangedFields,
+		[...paths]
+			.sort((a, b) => a.localeCompare(b))
+			.map((field) => ({ field, identities: 1 })),
+	);
+	assert.equal(summary.streams[0]?.rawUnnamedFieldIdentities, 0);
+});
+
+test("JSON Pointer whitelist does not admit a dotted alias or disclose unknown keys", () => {
+	const summary = analyzeRawObservations(
+		[
+			run(1, [
+				record("same", {
+					"a.b": 1,
+					a: { b: 1 },
+					privateKeyCanary: "PRIVATE_VALUE_1",
+				}),
+			]),
+			run(2, [
+				record("same", {
+					"a.b": 2,
+					a: { b: 2 },
+					privateKeyCanary: "PRIVATE_VALUE_2",
+				}),
+			]),
+		],
+		[{ name: "items", safeFieldPaths: ["/a/b"] }],
+	);
+	assert.deepEqual(summary.streams[0]?.rawChangedFields, [
+		{ field: "/a/b", identities: 1 },
+	]);
+	assert.equal(summary.streams[0]?.rawUnnamedFieldIdentities, 1);
+	assert.doesNotMatch(
+		JSON.stringify(summary),
+		/privateKeyCanary|PRIVATE_VALUE|a\.b/,
 	);
 });

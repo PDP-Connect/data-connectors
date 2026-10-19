@@ -268,6 +268,7 @@ import type {
 import { SCENARIO_FORMAT } from "../src/scenario/format.ts";
 import {
 	analyzeRawObservations,
+	appendObservationPath,
 	type RawObservationRun,
 	type RawObservationStreamMetadata,
 	type RawObservationSummary,
@@ -744,6 +745,7 @@ function manifestObject(value: unknown): Record<string, unknown> | undefined {
 const MAX_SCHEMA_PATH_DEPTH = 32;
 const MAX_SCHEMA_PATHS = 2000;
 
+/** Schema properties use the same RFC 6901 paths as raw observation traversal. */
 function declaredSchemaPaths(schema: unknown): {
 	bounded: boolean;
 	paths: string[];
@@ -765,7 +767,7 @@ function declaredSchemaPaths(schema: unknown): {
 			if (paths.length >= MAX_SCHEMA_PATHS) {
 				return { bounded: true, paths };
 			}
-			const path = next.prefix ? `${next.prefix}.${name}` : name;
+			const path = appendObservationPath(next.prefix, name);
 			paths.push(path);
 			if (next.depth + 1 < MAX_SCHEMA_PATH_DEPTH) {
 				pending.push({

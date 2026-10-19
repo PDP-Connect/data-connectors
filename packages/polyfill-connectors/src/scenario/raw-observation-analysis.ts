@@ -17,6 +17,7 @@ export interface RawObservationRecord {
 export interface RawObservationStreamMetadata {
 	name: string;
 	primaryKey?: readonly string[];
+	/** RFC 6901 JSON Pointers; arrays are reported atomically, without indices. */
 	safeFieldPaths: readonly string[];
 	excludedFields?: readonly string[];
 	/** Set when `safeFieldPaths` stopped at a collection bound, so deeper
@@ -31,6 +32,7 @@ export interface RawObservationRun {
 }
 
 export interface ChangedFieldCount {
+	/** RFC 6901 JSON Pointer containing declared field names only. */
 	field: string;
 	identities: number;
 }
@@ -129,7 +131,12 @@ function addChangedField(
 	}
 }
 
-/** Collect safe names directly; unknown keys only set a fixed bucket flag. */
+/** Append one RFC 6901 reference token, escaping tilde before slash. */
+export function appendObservationPath(prefix: string, key: string): string {
+	return `${prefix}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`;
+}
+
+/** Collect safe pointer names directly; unknown keys only set a fixed bucket flag. */
 function collectChangedFields(
 	left: unknown,
 	right: unknown,
@@ -160,7 +167,7 @@ function collectChangedFields(
 		if (!prefix && excludedTopLevel.has(key)) {
 			continue;
 		}
-		const path = prefix ? `${prefix}.${key}` : key;
+		const path = appendObservationPath(prefix, key);
 		if (!Object.hasOwn(right, key)) {
 			addChangedField(path, safeFields, changed);
 		} else {
@@ -180,7 +187,7 @@ function collectChangedFields(
 			!Object.hasOwn(left, key) &&
 			(prefix || !excludedTopLevel.has(key))
 		) {
-			const path = prefix ? `${prefix}.${key}` : key;
+			const path = appendObservationPath(prefix, key);
 			addChangedField(path, safeFields, changed);
 		}
 	}

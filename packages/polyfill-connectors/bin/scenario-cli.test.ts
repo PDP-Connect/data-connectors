@@ -2509,13 +2509,13 @@ runConnector({
 		);
 		assert.match(
 			result.stdout,
-			/raw changed fields: clock \(1\), created_at \(1\)/,
+			/raw changed fields: \/clock \(1\), \/created_at \(1\)/,
 		);
-		assert.match(result.stdout, /raw changed fields: [^\n]*created_at \(1\)/);
-		assert.match(result.stdout, /raw changed fields: [^\n]*clock \(1\)/);
+		assert.match(result.stdout, /raw changed fields: [^\n]*\/created_at \(1\)/);
+		assert.match(result.stdout, /raw changed fields: [^\n]*\/clock \(1\)/);
 		assert.match(
 			result.stdout,
-			/changed after declared comparison exclusions: created_at \(1\)/,
+			/changed after declared comparison exclusions: \/created_at \(1\)/,
 		);
 		assert.doesNotMatch(
 			result.stdout,
