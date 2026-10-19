@@ -6073,7 +6073,11 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 	const newcomer = makeConvo({ id: "new", update_time: 1_700_002_000 });
 	const updated = makeConvo({ id: "old-40", update_time: 1_700_003_000 });
 
-	const run = (second: boolean, omitSavedBoundary = false) => {
+	const run = (
+		second: boolean,
+		omitSavedBoundary = false,
+		rateLimitCursor?: number,
+	) => {
 		const harness = makeRecordingEmit(validateRecord);
 		const rows = (
 			second
@@ -6096,6 +6100,9 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 				const cursor = Number(
 					new URLSearchParams(path.split("?")[1]).get("cursor"),
 				);
+				if (cursor === rateLimitCursor) {
+					return { status: 429, json: null };
+				}
 				if (!second && cursor === 30) {
 					return { status: 503, json: null };
 				}
@@ -6189,6 +6196,109 @@ test("runConversationsAndMessagesStreams: a shifted list re-confirms its update-
 		),
 		false,
 		"the connector does not claim coverage when the saved boundary was not re-seen",
+	);
+	const listedAfterDeletion = new Set(
+		missingBoundaryRun.harness.emitted
+			.filter((record) => record.stream === "conversations")
+			.map((record) => record.data.id),
+	);
+	assert.ok(listedAfterDeletion.has("new"));
+	assert.ok(listedAfterDeletion.has("old-30"));
+	assert.ok(listedAfterDeletion.has("old-59"));
+	assert.equal(listedAfterDeletion.has("old-29"), false);
+	const refreshedBackfill = (
+		partialState.cursor as Record<string, unknown>
+	).backfill;
+	assert.notDeepEqual(
+		(refreshedBackfill as Record<string, unknown>).boundary_ids,
+		(firstCursor.backfill as Record<string, unknown>).boundary_ids,
+		"after a full rescan, replace a permanently missing boundary with the reached source boundary",
+	);
+
+	const suffixBackfillRun = run(true, true);
+	await runConversationsAndMessagesStreams(suffixBackfillRun.deps, {
+		conversations: {
+			backfill: {
+				position_hint: 60,
+				oldest_update_time: (firstCursor.backfill as Record<string, unknown>)
+					.oldest_update_time,
+				boundary_ids: ["deleted-boundary"],
+			},
+		},
+	});
+	const suffixState = suffixBackfillRun.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(suffixState && suffixState.type === "STATE");
+	const suffixCursor = suffixState.cursor as Record<string, unknown>;
+	const suffixUpdatedBackfill = suffixCursor.backfill as Record<string, unknown>;
+	assert.equal(
+		suffixUpdatedBackfill.position_hint,
+		0,
+		"a suffix rescan with a missing boundary restarts from the list start",
+	);
+	const restartedSuffixRun = run(true, true);
+	await runConversationsAndMessagesStreams(restartedSuffixRun.deps, {
+		conversations: suffixCursor,
+	});
+	assert.ok(
+		restartedSuffixRun.harness.emitted.some(
+			(record) =>
+				record.stream === "conversations" && record.data.id === "old-0",
+		),
+		"the restarted walk includes rows before the prior suffix cursor",
+	);
+	assert.ok(
+		restartedSuffixRun.harness.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "conversations",
+		),
+		"the restarted walk reports coverage only after it reaches its new boundary",
+	);
+
+	const rateLimitedRun = run(true, true, 30);
+	await runConversationsAndMessagesStreams(rateLimitedRun.deps, {
+		conversations: partialState.cursor as Record<string, unknown>,
+	});
+	const rateLimitedState = rateLimitedRun.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(rateLimitedState && rateLimitedState.type === "STATE");
+	assert.ok(
+		(rateLimitedState.cursor as Record<string, unknown>).backfill,
+		"a rate-limited partial walk retains resumable backfill state",
+	);
+	assert.equal(
+		rateLimitedRun.harness.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "conversations",
+		),
+		false,
+		"a rate-limited partial walk does not claim list coverage",
+	);
+
+	const resumedAfterRateLimit = run(true, true);
+	await runConversationsAndMessagesStreams(resumedAfterRateLimit.deps, {
+		conversations: rateLimitedState.cursor as Record<string, unknown>,
+	});
+	const resumedState = resumedAfterRateLimit.harness.protocolMessages.find(
+		(message) => message.type === "STATE" && message.stream === "conversations",
+	);
+	assert.ok(resumedState && resumedState.type === "STATE");
+	assert.equal(
+		(resumedState.cursor as Record<string, unknown>).backfill,
+		undefined,
+		"the retry re-observes its persisted boundary and clears backfill",
+	);
+	assert.ok(
+		resumedAfterRateLimit.harness.protocolMessages.some(
+			(message) =>
+				message.type === "DETAIL_COVERAGE" &&
+				message.stream === "conversations",
+		),
+		"coverage resumes only after the boundary is re-observed",
 	);
 });
 
@@ -13303,6 +13413,13 @@ test("collectChatGpt: a message the stream selection suppresses emits no BLOB ev
 	} finally {
 		rmSync(dir, { force: true, recursive: true });
 	}
+});
+
+test("collectChatGpt: rejects legacy bare node selectors after message ids became conversation-scoped", async () => {
+	await assert.rejects(
+		collectWithOversizeMessage({ name: "messages", resources: ["a1"] }),
+		/unsupported.*unscoped ChatGPT message resource selector/i,
+	);
 });
 
 // A tool-addressed assistant message synthesizes tool_calls[].text from the

@@ -11,6 +11,36 @@ const toEpochSeconds = (value) => {
 	return Number.isFinite(millis) ? millis / 1000 : null;
 };
 
+const decodeSafeText = (value) =>
+	typeof value === "string"
+		? value.replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => {
+				const unit = Number.parseInt(hex, 16);
+				const escaped =
+					unit === 0x5c ||
+					unit <= 0x08 ||
+					unit === 0x0b ||
+					unit === 0x0c ||
+					(unit >= 0x0e && unit <= 0x1f) ||
+					(unit >= 0x7f && unit <= 0x9f) ||
+					(unit >= 0xd8_00 && unit <= 0xdf_ff);
+				return escaped ? String.fromCharCode(unit) : match;
+			})
+		: value;
+
+const decodeSafeValue = (value) => {
+	if (typeof value === "string") return decodeSafeText(value);
+	if (Array.isArray(value)) return value.map(decodeSafeValue);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, item]) => [
+				decodeSafeText(key),
+				decodeSafeValue(item),
+			]),
+		);
+	}
+	return value;
+};
+
 const providerListItem = (record) => ({
 	id: record.id,
 	title: record.title ?? null,
@@ -57,7 +87,21 @@ const providerNode = (record) => ({
 		author: { role: record.role ?? null },
 		content: {
 			content_type: record.content_type ?? "text",
-			parts: record.content == null ? [] : [record.content],
+			// The joined content field does not retain original string boundaries.
+			// Keep it whole and append retained non-string parts in their known
+			// relative order; do not claim to recover the original part indices.
+			parts: [
+				...(record.content == null ? [] : [decodeSafeText(record.content)]),
+				...(Array.isArray(record.non_string_parts)
+					? [...record.non_string_parts]
+							.filter(
+								(entry) =>
+									entry && typeof entry === "object" && "part" in entry,
+							)
+							.sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+							.map((entry) => decodeSafeValue(entry.part))
+					: []),
+			],
 		},
 		create_time: toEpochSeconds(record.create_time),
 		metadata: {

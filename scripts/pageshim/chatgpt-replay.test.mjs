@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import test from "node:test";
 import { buildPageshim } from "./build.mjs";
 import {
 	projectChatGptExport,
@@ -153,6 +153,67 @@ test("reverse-projects ChatGPT 0.3.0 record ids and links back to node ids", () 
 	);
 	assert.deepEqual(mapping["msg-a"].children, ["msg-b"]);
 	assert.equal(projected.listPage(0).items[0].current_node, "msg-b");
+});
+
+test("reverse-projects typed ChatGPT bodies, retained object parts, and escaped strings", () => {
+	const assetRecord = {
+		content_type: "image_asset_pointer",
+		asset_pointer: "file-service://image-1",
+		details: { caption: "asset\\u0000caption" },
+	};
+	const asset = {
+		...assetRecord,
+		details: { caption: "asset\u0000caption" },
+	};
+	const transcriptRecord = {
+		content_type: "audio_transcription",
+		text: "heard\\u0000text",
+	};
+	const transcript = { ...transcriptRecord, text: "heard\u0000text" };
+	const projected = projectChatGptExport({
+		"chatgpt.conversations": {
+			conversations: [
+				{ id: "conv-mixed", title: "mixed", current_node: "m1" },
+				{ id: "conv-objects", title: "objects", current_node: "o1" },
+			],
+		},
+		"chatgpt.messages": {
+			messages: [
+				{
+					id: "conv-mixed:m1",
+					node_id: "m1",
+					conversation_id: "conv-mixed",
+					parent_id: null,
+					children_ids: [],
+					role: "user",
+					content: "lead\\u0000text\\u005Cliteral",
+					content_type: "multimodal_text",
+					non_string_parts: [
+						{ index: 1, part: assetRecord },
+						{ index: 2, part: transcriptRecord },
+					],
+				},
+				{
+					id: "conv-objects:o1",
+					node_id: "o1",
+					conversation_id: "conv-objects",
+					parent_id: null,
+					children_ids: [],
+					role: "user",
+					content: null,
+					content_type: "text",
+					non_string_parts: [{ index: 0, part: assetRecord }],
+				},
+			],
+		},
+	});
+	const mixed = projected.detail("conv-mixed").mapping.m1.message.content;
+	assert.equal(mixed.content_type, "multimodal_text");
+	assert.deepEqual(mixed.parts, ["lead\u0000text\\literal", asset, transcript]);
+	const objectsOnly =
+		projected.detail("conv-objects").mapping.o1.message.content;
+	assert.equal(objectsOnly.content_type, "text");
+	assert.deepEqual(objectsOnly.parts, [asset]);
 });
 
 // Bridge budget for a full-size run of the real ChatGPT PageShim bundle.

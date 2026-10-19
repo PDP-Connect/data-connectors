@@ -3896,14 +3896,26 @@ async function walkConversationSearch(
 				"ChatGPT conversation search did not re-observe the saved backfill boundary",
 				{ cursor, boundary_ids: resumeBackfill.boundary_ids },
 			);
+			const observedBackfill =
+				conversationsById.size === 0
+					? {
+							position_hint: 0,
+							oldest_update_time: null,
+							boundary_ids: [],
+						}
+					: {
+							...conversationBackfillAt(conversationsById.values(), cursor),
+							// A missing boundary found during a resumed suffix scan does not
+							// establish anything about the skipped prefix. Force the next
+							// attempt to read from the start before accepting this new anchor.
+							position_hint:
+								resumeStartCursor > 0 ? 0 : cursor,
+						};
 			return {
 				items: [...conversationsById.values()],
 				truncated: true,
 				backfillItems: [...conversationsById.values()],
-				backfill: {
-					...resumeBackfill,
-					position_hint: Math.max(0, resumeStartCursor - pageSize),
-				},
+				backfill: observedBackfill,
 			};
 		}
 		return {
@@ -7418,6 +7430,15 @@ export async function collectChatGpt(
 		capture,
 	} = ctx;
 	const { page } = ctx as BrowserCollectContext;
+	const messageResources = requested.get("messages")?.resources;
+	if (
+		Array.isArray(messageResources) &&
+		messageResources.some((resource) => !String(resource).includes(":"))
+	) {
+		throw new Error(
+			"Unsupported unscoped ChatGPT message resource selector; message resources must use conversation_id:node_id",
+		);
+	}
 
 	// Run-scoped accumulator for served 429s seen outside the detail lane
 	// (list pagination + the non-detail streams). createChatGptApi bumps it
