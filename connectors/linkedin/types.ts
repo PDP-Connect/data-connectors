@@ -5,8 +5,9 @@
 // connector consumes. Voyager is an internal, undocumented API — these types
 // describe only the fields the parsers read, not the full response shape.
 // Every field is optional because Voyager's decoration payloads vary by
-// account type, locale, and profile completeness; parsers must tolerate
-// absence rather than assume presence.
+// account type, locale, and profile completeness. They document the expected
+// shape only: parsers.ts reads every mapped field as `unknown` through
+// field-read.ts and never trusts these types at runtime.
 
 /** `dateRange` (dash API) or `timePeriod` (legacy API) partial-date shape. */
 export interface VoyagerDatePoint {
@@ -78,16 +79,16 @@ export interface VoyagerEducation extends VoyagerDateBearing {
 }
 
 export interface VoyagerSkill {
+	endorsementCount?: number | string;
+	endorsements?: number | string;
 	entityUrn?: string;
-	endorsementCount?: number;
-	endorsements?: number;
 	name?: string;
 }
 
 export interface VoyagerSkillCategory {
 	elements?: VoyagerSkill[];
-	endorsementCount?: number;
-	endorsements?: number;
+	endorsementCount?: number | string;
+	endorsements?: number | string;
 	entityUrn?: string;
 	name?: string;
 	skills?: VoyagerSkill[];
@@ -172,7 +173,7 @@ export interface VoyagerConnectionElement {
 
 export interface VoyagerConnectionsResponse {
 	elements?: VoyagerConnectionElement[];
-	paging?: { total?: number };
+	paging?: { count?: number; links?: unknown; start?: number; total?: number };
 }
 
 export interface VoyagerResolvedProfile {

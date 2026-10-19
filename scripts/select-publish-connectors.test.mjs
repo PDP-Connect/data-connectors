@@ -218,6 +218,27 @@ test("a root developer script does not change non-PageShim artifact identity", a
   }
 });
 
+test("a polyfill package test script does not change artifact identity, a dependency does", async () => {
+  const repo = makeRepo();
+  try {
+    const before = await artifactInputHash({ commit: repo.after, manifest: "oura", cwd: repo.dir });
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ scripts: { test: "../../scripts/test-sandbox/test-sandbox -- node scripts/run-tests.mjs" } }),
+    );
+    const scriptCommit = repo.commit("route the package test script through the sandbox");
+    assert.equal(await artifactInputHash({ commit: scriptCommit, manifest: "oura", cwd: repo.dir }), before);
+    repo.write(
+      "packages/polyfill-connectors/package.json",
+      JSON.stringify({ dependencies: { zod: "4.0.0" } }),
+    );
+    const depCommit = repo.commit("add a runtime dependency");
+    assert.notEqual(await artifactInputHash({ commit: depCommit, manifest: "oura", cwd: repo.dir }), before);
+  } finally {
+    rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test("sibling runtime metadata does not change shared SourceDeclaration identity", async () => {
   const repo = makeRepo();
   try {

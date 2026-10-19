@@ -228,7 +228,7 @@ test("runConversationsAndMessagesStreams: every conversation record emits before
 			(r) =>
 				r.stream === "messages" &&
 				typeof r.data.id === "string" &&
-				r.data.id.startsWith(`${convoId}-m`),
+				r.data.id.startsWith(`${convoId}:${convoId}-m`),
 		);
 		assert.notEqual(
 			convoIdx,
@@ -561,7 +561,10 @@ test("runConversationsAndMessagesStreams: coalesces divergent parent/message cur
 
 	assert.deepEqual(fetches, [
 		...Array.from({ length: 3 }, () => "/conversations/search?query=&cursor=0"),
-		...Array.from({ length: 2 }, () => "/conversations/search?query=&cursor=30"),
+		...Array.from(
+			{ length: 2 },
+			() => "/conversations/search?query=&cursor=30",
+		),
 		"/conversation/conv-new",
 		"/conversation/conv-mid",
 	]);

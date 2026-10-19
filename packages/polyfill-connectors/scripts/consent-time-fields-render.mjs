@@ -33,6 +33,9 @@ export const DATE_BOUND_STREAMS = new Set([
 	"garmin_browser.daily_summaries",
 	"garmin_browser.hrv",
 	"garmin_browser.training_status",
+	"oura_browser.activity",
+	"oura_browser.readiness",
+	"oura_browser.sleep",
 	"strava.activities",
 	"strava_browser.activities",
 ]);
