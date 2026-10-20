@@ -4221,6 +4221,7 @@
 					"ambiguous_multi_account_overview": "We couldn't tell which account view to use",
 					"qfx_download_failed": "We couldn't download the transactions file",
 					"qfx_parse_failed": "We couldn't read the transactions file",
+					"qfx_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 					"row_exception": "Something went wrong reading one of the rows",
 					"selectors_pending": "Support for this part of the connector isn't complete yet",
 					"statements_scrape_failed": "We couldn't read your statements page"
@@ -21801,6 +21802,7 @@
 					"credit_card_export_unverified": "We couldn't confirm the credit card export",
 					"csv_no_data_rows": "The transactions file had no rows to import",
 					"csv_no_usable_transactions": "We couldn't find any usable transactions in that file",
+					"csv_partial_parse": "We couldn't read some transaction rows, so the checkpoint hasn't moved forward",
 					"export_affordance_missing": "We couldn't find the export controls on this page — the site may have changed",
 					"export_error": "The export couldn't be downloaded",
 					"export_no_download": "The export didn't produce a downloadable file",
