@@ -725,6 +725,8 @@ for (const suffixOutcome of ["success", "empty"] as const) {
 				{ sessionDeadMidRun: false, sessionRepairAttempted: false },
 				1,
 				1,
+				undefined,
+				{ since: "2025-01-02", until: "2025-02-01" },
 			);
 			assert.ok(result);
 			await recoverServedAccountTransactionGaps(deps, [result.outcome]);
@@ -880,8 +882,8 @@ for (const suffix of ["rows", "header-only", "empty"] as const) {
 
 for (const [name, prior, since, expectGap] of [
 	["legacy unknown start", null, undefined, true],
-	["stable explicit start", null, "2025-01-02", false],
-	["stable prior watermark", "2025-02-01", undefined, false],
+	["legacy with new explicit start", null, "2025-01-02", true],
+	["legacy with watermark but no original interval", "2025-02-01", undefined, true],
 ] as const) {
 	test(`served account interval: ${name}`, async () => {
 		const probe = makePage({
@@ -927,7 +929,7 @@ for (const [name, prior, since, expectGap] of [
 		assert.ok(result);
 		assert.equal(result.outcome.kind, expectGap ? "gap" : "no_activity");
 		if (expectGap) {
-			assert.equal(result.last_date, null);
+			assert.equal(result.last_date, prior);
 			assert.equal(result.pending_export?.unknown_original, true);
 		}
 		await recoverServedAccountTransactionGaps(deps, [result.outcome]);
@@ -938,4 +940,33 @@ for (const [name, prior, since, expectGap] of [
 			expectGap ? [] : ["gap-original"],
 		);
 	});
+}
+
+for (const format of ["rows", "header-only", "empty"] as const) {
+ test(`legacy unknown interval with newly narrowed since survives STATE replay: ${format}`, async () => {
+  const account = {account_id_raw:"fixture-account", account_type:"checking", account_url:"/my/checking/fixture-account", balance_cents:0, last_four:"0000", name:"Fixture checking", raw_text:"Fixture checking"};
+  let persisted: Record<string, unknown> = {};
+  for (const since of ["2025-04-01", "2025-05-01"]) {
+   const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+   let records = 0;
+   const probe = makePage({start:{}, end:{}, outcomeForStart:()=>format==="empty"?"empty":"success",
+    csvForStart:start=>"Date,Description,Amount\n"+(format==="header-only"?"":start+",Fixture,1.00\n")});
+   const deps: EmitDeps = {emit:async m=>{messages.push(m);}, emitRecord:async()=>{records++;},
+    servedAccountTransactionGaps:new Map([["fixture-account","gap-legacy-older"]])};
+   await runTransactionsStream(deps, {} as BrowserContext, probe.page,
+    async()=>({request_id:"fixture",status:"success",type:"INTERACTION_RESPONSE"}),
+    [account], persisted, new Map([["transactions",{name:"transactions",time_range:{since}}]]),
+    {sessionDeadMidRun:false,sessionRepairAttempted:false});
+   assert.deepEqual(messages.filter(m=>m.type==="DETAIL_GAP_RECOVERED").map(m=>m.gap_id),[],
+    "current grant cannot prove the old gap's unknown original interval");
+   assert.ok(messages.some(m=>m.type==="DETAIL_GAP"));
+   if(format==="rows") assert.ok(records>0,"useful permitted suffix records remain");
+   const last=messages.filter(m=>m.type==="STATE"&&m.stream==="transactions").at(-1);
+   assert.ok(last?.type==="STATE");
+   persisted=JSON.parse(JSON.stringify({transactions:last.cursor}));
+   const saved=(persisted.transactions as Record<string,{last_date:string|null;pending_export:{unknown_original?:boolean}}> )["fixture-account"];
+   assert.equal(saved.last_date,null);
+   assert.equal(saved.pending_export.unknown_original,true,"unknown remains sticky after configuration changes");
+  }
+ });
 }

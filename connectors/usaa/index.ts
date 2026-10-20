@@ -2958,13 +2958,11 @@ export async function processAccountTransactions(
 		pending && pending.since < currentSince ? pending.since : currentSince;
 	const untilDate =
 		pending && pending.until > todayIso ? pending.until : todayIso;
-	// A moving default is not evidence for a legacy gap's unknown original start.
+	// Neither today's configuration nor a watermark proves a legacy gap's original interval.
 	const unknownOriginal =
 		pending?.unknown_original === true ||
 		(pendingValue !== undefined && !pending) ||
 		(!pending &&
-			!priorLastDate &&
-			!sinceDateCfg &&
 			deps.servedAccountTransactionGaps?.has(accountId) === true);
 	const continuation: PendingExportWindow = {
 		since: desiredSince,
