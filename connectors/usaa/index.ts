@@ -2850,23 +2850,32 @@ export async function emitTransactionsDetailCoverage(
 }
 
 export interface PendingExportWindow {
- since: string;
- until: string;
- unknown_original?: true;
+	since: string;
+	until: string;
+	unknown_original?: true;
 }
 function pendingExportWindow(value: unknown): PendingExportWindow | undefined {
- if (!value || typeof value !== "object") return undefined;
- const row = value as Record<string, unknown>;
- const isDay = (day: unknown): day is string => typeof day === "string" &&
-  /^\d{4}-\d{2}-\d{2}$/.test(day) && Number.isFinite(Date.parse(day)) &&
-  new Date(day).toISOString().slice(0,10) === day;
- if (!isDay(row.since) || !isDay(row.until) || row.since > row.until) return undefined;
- return {since:row.since,until:row.until,...(row.unknown_original === true ? {unknown_original:true as const} : {})};
+	if (!value || typeof value !== "object") return undefined;
+	const row = value as Record<string, unknown>;
+	const isDay = (day: unknown): day is string =>
+		typeof day === "string" &&
+		/^\d{4}-\d{2}-\d{2}$/.test(day) &&
+		Number.isFinite(Date.parse(day)) &&
+		new Date(day).toISOString().slice(0, 10) === day;
+	if (!isDay(row.since) || !isDay(row.until) || row.since > row.until)
+		return undefined;
+	return {
+		since: row.since,
+		until: row.until,
+		...(row.unknown_original === true
+			? { unknown_original: true as const }
+			: {}),
+	};
 }
 export interface AccountTransactionResult {
- last_date: string | null;
- outcome: AccountTransactionOutcome;
- pending_export?: PendingExportWindow;
+	last_date: string | null;
+	outcome: AccountTransactionOutcome;
+	pending_export?: PendingExportWindow;
 }
 
 /**
@@ -2944,18 +2953,28 @@ export async function processAccountTransactions(
 				.slice(0, 10)
 		: (sinceDateCfg ?? seventeenMonthsAgo);
 	const pending = pendingExportWindow(pendingValue);
- const todayIso = new Date().toISOString().slice(0,10);
- const desiredSince = pending && pending.since < currentSince ? pending.since : currentSince;
- const untilDate = pending && pending.until > todayIso ? pending.until : todayIso;
- // A moving default is not evidence for a legacy gap's unknown original start.
- const unknownOriginal = pending?.unknown_original === true ||
-  (pendingValue !== undefined && !pending) ||
-  (!pending && !priorLastDate && !sinceDateCfg && deps.servedAccountTransactionGaps?.has(accountId) === true);
- const continuation: PendingExportWindow = {since:desiredSince,until:untilDate,
-  ...(unknownOriginal ? {unknown_original:true} : {})};
- // A narrowed explicit request never authorizes fetching the older retained debt.
- const requestedSince = sinceDateCfg && sinceDateCfg > desiredSince ? sinceDateCfg : desiredSince;
- const candidateStarts = buildCandidateStarts(requestedSince);
+	const todayIso = new Date().toISOString().slice(0, 10);
+	const desiredSince =
+		pending && pending.since < currentSince ? pending.since : currentSince;
+	const untilDate =
+		pending && pending.until > todayIso ? pending.until : todayIso;
+	// A moving default is not evidence for a legacy gap's unknown original start.
+	const unknownOriginal =
+		pending?.unknown_original === true ||
+		(pendingValue !== undefined && !pending) ||
+		(!pending &&
+			!priorLastDate &&
+			!sinceDateCfg &&
+			deps.servedAccountTransactionGaps?.has(accountId) === true);
+	const continuation: PendingExportWindow = {
+		since: desiredSince,
+		until: untilDate,
+		...(unknownOriginal ? { unknown_original: true } : {}),
+	};
+	// A narrowed explicit request never authorizes fetching the older retained debt.
+	const requestedSince =
+		sinceDateCfg && sinceDateCfg > desiredSince ? sinceDateCfg : desiredSince;
+	const candidateStarts = buildCandidateStarts(requestedSince);
 
 	const { csvPath, exportEmpty, usedSince, lastDiag } = await tryExportLadder(
 		deps,
@@ -2987,7 +3006,8 @@ export async function processAccountTransactions(
 		},
 	};
 	if (!csvPath) {
-		if (exportEmpty && (incompleteWindow || unknownOriginal)) return uncoveredWindow;
+		if (exportEmpty && (incompleteWindow || unknownOriginal))
+			return uncoveredWindow;
 		if (exportEmpty) {
 			return {
 				last_date: priorLastDate || usedSince || null,
@@ -3028,7 +3048,9 @@ export async function processAccountTransactions(
 		usedSince,
 		csvResult,
 	);
- return result.outcome.kind === "gap" ? {...result,pending_export:continuation} : result;
+	return result.outcome.kind === "gap"
+		? { ...result, pending_export: continuation }
+		: result;
 }
 
 export async function runTransactionsStream(
@@ -3074,7 +3096,9 @@ export async function runTransactionsStream(
 			break;
 		}
 		const accountKey = a.account_id_raw || a.last_four || "unknown";
-		const perAccState = priorStateForTxns[accountKey] as ({last_date?:string|null;pending_export?:unknown}|undefined);
+		const perAccState = priorStateForTxns[accountKey] as
+			| { last_date?: string | null; pending_export?: unknown }
+			| undefined;
 		const priorLastDate = perAccState?.last_date ?? null;
 		const result = await processAccountTransactions(
 			deps,
@@ -3101,10 +3125,19 @@ export async function runTransactionsStream(
 		if (result.outcome.kind === "gap") {
 			await deps.emit(buildAccountTransactionDetailGap(result.outcome));
 		}
-		if (result.last_date === null && !result.pending_export && perAccState?.pending_export === undefined) continue;
-  // Persist unresolved windows even without a watermark; replacing clears settled metadata.
-  transactionsCursor[accountKey] = {last_date:result.last_date,
-   ...(result.pending_export ? {pending_export:result.pending_export} : {})};
+		if (
+			result.last_date === null &&
+			!result.pending_export &&
+			perAccState?.pending_export === undefined
+		)
+			continue;
+		// Persist unresolved windows even without a watermark; replacing clears settled metadata.
+		transactionsCursor[accountKey] = {
+			last_date: result.last_date,
+			...(result.pending_export
+				? { pending_export: result.pending_export }
+				: {}),
+		};
 		await deps.emit({
 			type: "STATE",
 			stream: "transactions",
