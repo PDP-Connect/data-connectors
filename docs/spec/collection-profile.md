@@ -1835,9 +1835,11 @@ A connector MUST distinguish a readable source value, explicit source
 emptiness, and an unavailable value that has not been established. It MUST
 NOT substitute null, an empty string, zero or a fabricated value for an
 unavailable value. Explicit emptiness can be represented only as the schema
-allows. Missing identity, unparseable date, shape rejection or unavailable
-required fields taint a known parent into connector_transform_failed debt;
-an unknown parent withholds the boundary.
+allows. Missing identity, unparseable date, shape rejection, or a required field whose
+source value was read but is missing or malformed, taints a known parent into
+connector_transform_failed debt. A value unavailable because its read failed in
+transport follows the held-record cause rule below. An unknown parent withholds
+the boundary.
 
 In this profile version, a partial record is a candidate for which only part
 of the selected record was read, or a required mapped value is unavailable
@@ -1855,8 +1857,8 @@ may be emitted. This local reason is not a new wire member or a host
 attestation that the source was fully read.
 
 For a held record with a known obligated parent, the connector MUST retain
-the candidate and account for the original obligation with the existing
-bound. The gap reason follows the cause: a read that failed in transport, such
+the candidate and account for the original obligation with a bound, retryable
+DETAIL_GAP. The gap reason follows the cause: a read that failed in transport, such
 as a sub-request returning 503, uses retryable rate_limited, retry_exhausted,
 temporary_unavailable or upstream_pressure; a missing, unparseable or malformed
 mapped value uses connector_transform_failed. Only connector_transform_failed
@@ -2557,7 +2559,7 @@ relevant producer or consumer does not establish these requirements.
 | Stale A resumes after newer B completes and settles debt | A's expected generation rejects gap creation/update/credit as well as effects/state/receipts/settlement. No phantom stale debt survives the rejected admission. |
 | Crash between state and receipt writes | Atomicity yields both committed or neither; never reusable orphan receipt. |
 | Duplicate/overlapping/foreign keys or effects after coverage finality | Reject protocol violation; no checkpoint based on reopened boundary. |
-| Unavailable value vs explicit source emptiness | An unavailable required value leaves transformation debt or withholds an unattributable boundary; explicit source emptiness remains distinct and follows the schema. No particular local API labels are required. |
+| Unavailable value vs explicit source emptiness | An unavailable required value leaves gap debt whose reason follows the cause (a transport reason for a failed read, connector_transform_failed for a missing or malformed value), or withholds an unattributable boundary; explicit source emptiness remains distinct and follows the schema. No particular local API labels are required. |
 | Shape rejection, retryable failure or deployment cap reported permanent | Reject permanent classification; source_unrepresentable cannot hide implementation debt. |
 | Old runtime/new connector; new strict-only runtime/old connector | Refuse unsupported version before spawn; no implicit downgrade or strict reinterpretation. |
 | First strict run over legacy state | Recollect; no receipt manufactured from legacy hydration, optional skip or fingerprints. |
