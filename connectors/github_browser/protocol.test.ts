@@ -722,3 +722,32 @@ for (const [field, container, brokenEntry] of [
 		});
 	}
 }
+
+
+for (const nested of [false, true]) {
+ test(`ambiguous repository rows preserve prior state with terminal pagination: ${nested ? "nested row" : "two identities"}`, async () => {
+  const messages: EmittedMessage[] = [];
+  const records: unknown[] = [];
+  const prior = { repositories: { fetched_at: "2026-10-01T00:00:00Z" } };
+  const state = structuredClone(prior);
+  const second = '<h3><a href="/sample-user/second">second</a></h3>';
+  const html = withOwner(`<main><div id="user-repositories-list"><ul><li><h3><a href="/sample-user/first">first</a></h3>${nested ? `<ul><li>${second}</li></ul>` : second}<span class="Label">Public</span><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li></ul></div>${terminalInventory}</main>`);
+  await collectGitHubBrowser({
+   emit: async message => { messages.push(message); },
+   emitRecord: async (_stream, data) => { records.push(data); },
+   progress: async () => {}, requested: new Set(["repositories"]), state,
+  }, {
+   fetchPublicJson: async url => apiObservation(url, []),
+   now: () => new Date("2026-10-20T17:00:00Z"),
+   openPage: async url => pageObservation(url, url === "https://github.com/" ? profilePlaceholder : html),
+   sleep: async () => {},
+  });
+  assert.deepEqual(records, []);
+  assert.deepEqual(state, prior);
+  assert.deepEqual(messages.map(message => message.type), ["SKIP_RESULT"]);
+  const skip = messages[0];
+  assert.ok(skip?.type === "SKIP_RESULT");
+  assert.equal(skip.stream, "repositories");
+  assert.equal(skip.reason, "inventory_not_proven_complete");
+ });
+}

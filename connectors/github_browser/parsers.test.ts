@@ -798,3 +798,35 @@ test("starred card accepts fork-parent and description links plus overlay headin
 	assert.equal(parsed.rows[0]?.forkedFrom, "upstream-owner/original");
 	assert.equal(parsed.rows[0]?.description, "Example with documentation");
 });
+
+
+test("repository rows reject multiple primary identities and nested rows", () => {
+ const heading = '<h3><a href="/sample-user/first">first</a></h3>';
+ const row = (body: string) => `<li>${body}<span class="Label">Public</span><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></li>`;
+ for (const contents of [
+  heading + '<h3><a href="/sample-user/second">second</a></h3>',
+  '<h3><a href="/sample-user/first">first</a><a href="/sample-user/second">second</a></h3>',
+  heading + `<ul>${row('<h3><a href="/sample-user/second">second</a></h3>')}</ul>`,
+  `<ul>${row(heading)}</ul>`,
+ ]) {
+  const parsed = parseRepositoriesPage(`<div id="user-repositories-list"><ul>${row(contents)}</ul></div>`);
+  assert.equal(parsed.entriesComplete, false);
+  assert.equal(parsed.complete, false);
+  assert.equal(parsed.rejectedRows, 1);
+  assert.deepEqual(parsed.rows, []);
+ }
+});
+
+
+test("repository row ignores overlay headings and keeps ordinary description and fork links", async () => {
+ const html = (await fixture("repositories.html"))
+  .replace('</h3>', '</h3><span>Forked from <a href="/upstream-owner/original">upstream-owner/original</a></span>')
+  .replace('Synthetic fixture repository', 'Read <a href="/docs-owner/guide">the guide</a>')
+  .replace('</li>', '<details-menu><h3><a href="/overlay-owner/other">Other repository</a></h3><ul><li>Menu entry</li></ul></details-menu></li>');
+ const parsed = parseRepositoriesPage(html);
+ assert.equal(parsed.entriesComplete, true);
+ assert.equal(parsed.complete, true);
+ assert.equal(parsed.rejectedRows, 0);
+ assert.equal(parsed.rows.length, 1);
+ assert.equal(parsed.rows[0]?.forkedFrom, "upstream-owner/original");
+});

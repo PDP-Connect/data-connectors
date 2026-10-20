@@ -12,10 +12,10 @@ import type { BrowserServices } from "./types.ts";
 const owner = '<meta name="user-login" content="sample-user"><span class="p-nickname">sample-user</span>';
 const page = (url: string, html: string) => ({ requestedUrl: url, currentUrl: url, html });
 const fixture = async (name: string) => readFile(new URL(`./__fixtures__/synthetic/${name}`, import.meta.url), "utf8");
-async function collect(streams: string[], overrides: Partial<BrowserServices> = {}) {
+async function collect(streams: string[], overrides: Partial<BrowserServices> = {}, initialState: Record<string, unknown> = {}) {
  const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
  const messages: Array<{ type: string; stream?: string }> = [];
- const state: Record<string, unknown> = {};
+ const state: Record<string, unknown> = structuredClone(initialState);
  await collectGitHubBrowser({
   emit: async (message) => { messages.push(message); },
   emitRecord: async (stream, data) => { records.push({ stream, data }); },
@@ -158,27 +158,32 @@ test("events complete on an empty page without relying on short-page length", as
  assert.equal(result.records.length, 1);
  assert.deepEqual(result.records[0]?.data.events, []);
 });
-for (const end of ["link", "cap", "unread"] as const) {
- test(`history above 1000 respects documented window: ${end}`, async () => {
+for (const end of ["link", "empty", "cap", "unread"] as const) {
+ test(`history above 1000 reconciles the documented window: ${end}`, async () => {
   const source = JSON.parse(await fixture("history-issue.json")).items[0];
+  const prior = { history: { fetched_at: "2025-12-01T00:00:00Z" } };
   let calls = 0;
   const result = await collect(["history"], { fetchPublicJson: async url => {
    const pr = url.includes("type%3Apr");
    const pageNumber = pr ? 0 : ++calls;
-   const last = end === "link" ? 2 : 10;
-   const size = end === "unread" ? 1 : 100;
+   const last = end === "link" ? 2 : end === "empty" ? 1 : 10;
+   const size = end === "empty" ? 0 : end === "unread" ? 1 : 100;
    return { requestedUrl: url, responseUrl: url, status: 200,
-    link: end === "cap" ? undefined : pr || pageNumber === last && end === "link" ? null : '<https://api.github.com/search/issues?page=99>; rel="next"',
+    link: end === "cap" ? undefined : pr || pageNumber === last && (end === "link" || end === "empty") ? null : '<https://api.github.com/search/issues?page=99>; rel="next"',
     data: { total_count: pr ? 0 : 1500, incomplete_results: false,
      items: pr ? [] : Array.from({ length: size }, (_, i) => ({ ...source, id: pageNumber * 100 + i, number: pageNumber * 100 + i })) } };
-  } });
-  assert.equal(calls, end === "link" ? 2 : 10);
-  assert.equal(result.records.length, end === "unread" ? 0 : 1);
-  if (end !== "unread") {
-   assert.equal((result.records[0]?.data.issues as unknown[]).length, end === "link" ? 200 : 1000);
+  } }, prior);
+  assert.equal(calls, end === "link" ? 2 : end === "empty" ? 1 : 10);
+  if (end === "cap") {
+   assert.equal(result.records.length, 1);
+   assert.equal((result.records[0]?.data.issues as unknown[]).length, 1000);
    assert.match(String(result.records[0]?.data.windowDescription), /1,000 items per type/);
-   assert.ok(result.messages.some(m => m.type === "DETAIL_COVERAGE"));
-  } else assert.equal(result.state.history, undefined);
+   assert.deepEqual(result.messages.map(message => message.type), ["STATE", "DETAIL_COVERAGE"]);
+  } else {
+   assert.deepEqual(result.records, []);
+   assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+   assert.deepEqual(result.state, prior);
+  }
  });
 }
 
@@ -262,3 +267,88 @@ test("recorded contribution overview and activity repository links are separate 
   assert.equal(parsed.row?.pinnedRepositories?.length, 1);
  }
 });
+
+
+test("profile README repository links do not veto readable pinned collections", async () => {
+ const html = await fixture("profile-with-readme-links.html");
+ const parsed = parseProfilePage(html, "https://github.com/sample-user");
+ const result = await collect(["profile"], { openPage: async url => page(url, html) });
+ assert.equal(result.records.length, 1);
+ assert.deepEqual(result.records[0]?.data.pinnedRepositories, parsed.row?.pinnedRepositories);
+ assert.equal(parsed.row?.pinnedRepositories?.length, 1);
+ assert.equal(parsed.complete, true);
+ assert.deepEqual(parsed.unreadableFields, []);
+ assert.equal(parsed.rejectedEntries, 0);
+ assert.deepEqual(result.messages.map(message => message.type), ["STATE"]);
+});
+
+test("renamed pinned headings and containers still account for recognizable cards", async () => {
+ const html = (await fixture("profile-pinned-listitem-current-github.html"))
+  .replace("Popular repositories", "Featured work")
+  .replace("js-pinned-items-reorder-container", "new-pinned-container");
+ const parsed = parseProfilePage(html, "https://github.com/sample-user");
+ const result = await collect(["profile"], { openPage: async url => page(url, html) });
+ assert.ok(parsed.unreadableFields.includes("pinnedRepositories"));
+ assert.deepEqual(result.records, []);
+ assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+});
+
+for (const marker of ["pinned-item-list-item-content", "pinned-item-desc", "pinned-item-meta"]) {
+ test(`drifted pin retains incomplete evidence from ${marker}`, async () => {
+  let html = (await fixture("profile-pinned-listitem-current-github.html"))
+   .replace("Popular repositories", "Featured work")
+   .replace("js-pinned-items-reorder-container", "new-pinned-container");
+  for (const name of ["pinned-item-list-item", "js-pinned-item-list-item", "pinned-item-list-item-content", "pinned-item-desc", "pinned-item-meta"]) {
+   if (name !== marker) html = html.replaceAll(new RegExp(`(?<=["\\s])${name}(?=["\\s])`, "gu"), "changed-pin-class");
+  }
+  const parsed = parseProfilePage(html, "https://github.com/sample-user");
+  const prior = { profile: { fetched_at: "2025-12-01T00:00:00Z" } };
+  const result = await collect(["profile"], { openPage: async url => page(url, html) }, prior);
+  assert.equal(parsed.complete, false);
+  assert.ok(parsed.unreadableFields.includes("pinnedRepositories"));
+  assert.deepEqual(result.records, []);
+  assert.deepEqual(result.messages.map(message => message.type), ["SKIP_RESULT"]);
+  assert.deepEqual(result.state, prior);
+ });
+}
+
+for (const heading of ["Pinned", "Popular repositories", "Organizations", "Achievements"]) {
+ test(`README heading ${heading} does not claim real profile collections`, async () => {
+  const html = (await fixture("profile-with-readme-links.html")).replace("Profile README", heading);
+  const parsed = parseProfilePage(html, "https://github.com/sample-user");
+  const result = await collect(["profile"], { openPage: async url => page(url, html) });
+  assert.equal(parsed.complete, true);
+  assert.equal(parsed.rejectedEntries, 0);
+  assert.deepEqual(parsed.unreadableFields, []);
+  assert.equal(result.records.length, 1);
+  assert.equal(parsed.row?.pinnedRepositories?.length, 1);
+  assert.equal(parsed.row?.organizations?.length, 1);
+  assert.equal(parsed.row?.achievements?.length, 1);
+  assert.deepEqual(result.messages.map(message => message.type), ["STATE"]);
+ });
+}
+
+test("profile bio headings and repository links are prose rather than pinned entries", async () => {
+ const html = (await fixture("profile-current-github.html")).replace('<div class="p-note user-profile-bio"></div>', '<div class="p-note user-profile-bio"><h3>Pinned</h3><a href="/bio-owner/demo">My work</a></div>');
+ const parsed = parseProfilePage(html, "https://github.com/sample-user");
+ const result = await collect(["profile"], { openPage: async url => page(url, html) });
+ assert.equal(parsed.complete, true);
+ assert.equal(parsed.rejectedEntries, 0);
+ assert.equal(result.records.length, 1);
+ assert.equal(parsed.row?.pinnedRepositories?.length, 1);
+ assert.deepEqual(result.messages.map(message => message.type), ["STATE"]);
+});
+
+for (const wrapped of [false, true]) {
+ test(`README after pinned container stays outside collection ownership: ${wrapped ? "wrapped" : "direct"}`, async () => {
+  const article = '<article class="markdown-body"><p>My <a href="/readme-owner/project">project</a></p></article>';
+  const html = (await fixture("profile-current-github.html")).replace('<h2 id="js-contribution-activity-description"', `${wrapped ? `<div>${article}</div>` : article}<h2 id="js-contribution-activity-description"`);
+  const parsed = parseProfilePage(html, "https://github.com/sample-user");
+  const result = await collect(["profile"], { openPage: async url => page(url, html) });
+  assert.equal(parsed.complete, true);
+  assert.equal(parsed.rejectedEntries, 0);
+  assert.equal(parsed.row?.pinnedRepositories?.length, 1);
+  assert.equal(result.records.length, 1);
+  assert.deepEqual(result.messages.map(message => message.type), ["STATE"]);
+ });
+}

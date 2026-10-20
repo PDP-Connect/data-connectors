@@ -411,10 +411,11 @@ function contributionHeading(document: Document): Element | null {
 }
 
 const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6, [role='heading']";
+const PROFILE_PROSE_SELECTOR = "article, .p-note, .user-profile-bio";
 
 function headingsMatching(document: Document, pattern: RegExp): Element[] {
 	return Array.from(document.querySelectorAll(HEADING_SELECTOR)).filter((heading) =>
-		pattern.test(text(heading)) && heading.closest(OVERLAY_SELECTOR) === null);
+		pattern.test(text(heading)) && heading.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null);
 }
 
 // A section is what follows its heading up to the next heading. A heading
@@ -567,9 +568,12 @@ export function parseProfilePage(
 	recordField(row, "contributionsLastYear", countMatch?.[1] ? toInt(countMatch[1]) : undefined, unreadableFields);
 
 	const pinnedHeadings = headingsMatching(document, /^(?:pinned|popular repositories)\b/iu);
-	const pinnedContainer = document.querySelector(".js-pinned-items-reorder-container, ol.pinned-items-reorder-list");
+	const pinnedContainer = Array.from(document.querySelectorAll(".js-pinned-items-reorder-container, ol.pinned-items-reorder-list"))
+		.find(node => node.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null) ?? null;
 	const pinnedRoots = pinnedHeadings.length > 0
-		? pinnedHeadings.flatMap(sectionNodes)
+		? pinnedHeadings.flatMap(sectionNodes).filter(node =>
+			node.closest(PROFILE_PROSE_SELECTOR) === null &&
+			(pinnedContainer === null || pinnedContainer.contains(node)))
 		: pinnedContainer === null ? [] : [pinnedContainer];
 	if (pinnedHeadings.length === 0 && (pinnedContainer !== null || !structure))
 		unreadableFields.push("pinnedRepositories");
@@ -607,13 +611,17 @@ export function parseProfilePage(
 		}
 	}
 
-	// Contribution activity links belong to their own sections, not the pins.
-	// Renamed pin headings/containers cannot make surviving entries vanish.
-	const unclaimedPins = Array.from(document.querySelectorAll("a[href]")).filter((link) =>
-		repositoryName(link.getAttribute("href")) !== null && link.closest(OVERLAY_SELECTOR) === null &&
-		!siteChrome(link, pinnedContainer) && !pinnedRoots.some((root) => root.contains(link)) &&
-		link.closest(".js-yearly-contributions, #js-contribution-activity") === null);
-	if (unclaimedPins.length > 0) unreadableFields.push("pinnedRepositories");
+	// README, bio and activity links are not pin candidates. Surviving pin
+	// markup still exposes entries when the heading or outer card classes change.
+	const pinnedCandidates = Array.from(document.querySelectorAll(".pinned-item-list-item, .js-pinned-item-list-item, .pinned-item-list-item-content, .pinned-item-desc, .pinned-item-meta"));
+	const unclaimedMarkers = pinnedCandidates.some(node =>
+		node.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null &&
+		!pinnedRoots.some(root => root.contains(node)));
+	const unclaimedLinks = Array.from(pinnedContainer?.querySelectorAll("a[href]") ?? []).some(link =>
+		repositoryName(link.getAttribute("href")) !== null &&
+		link.closest(`${OVERLAY_SELECTOR}, ${PROFILE_PROSE_SELECTOR}`) === null &&
+		!pinnedRoots.some(root => root.contains(link)));
+	if (unclaimedMarkers || unclaimedLinks) unreadableFields.push("pinnedRepositories");
 
 	const organizations = locateSection(document, /^organizations?\b/iu, "a[href]", ORGANIZATION_HOOKS, '.avatar-group-item, a[href^="/orgs/"]', structure);
 	if (organizations.unreadable) unreadableFields.push("organizations");
@@ -677,7 +685,14 @@ export function parseRepositoriesPage(html: string): ParsedInventory<RepositoryR
 	let rejectedRows = 0;
 	const seen = new Set<string>();
 	for (const [index, source] of sourceRows.entries()) {
-		const link = source.querySelector("h3 a");
+		const headings = Array.from(source.querySelectorAll("h3")).filter((node) => !insideOverlay(node, source));
+		const links = Array.from(source.querySelectorAll("h3 a[href]")).filter((node) => !insideOverlay(node, source));
+		if (headings.length !== 1 || links.length !== 1 ||
+			Array.from(source.querySelectorAll("li, [role='listitem']")).some((node) => !insideOverlay(node, source))) {
+			rejectedRows += 1;
+			continue;
+		}
+		const link = links[0] ?? null;
 		const repo = repositoryName(link?.getAttribute("href") ?? null);
 		const name = sourceText(link);
 		if (!repo || !name) {

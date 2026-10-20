@@ -487,8 +487,7 @@ export async function collectGitHubBrowser(
 			if (invalid) break;
 			// The API caps this search window, not the underlying authored history.
 			// Short pages and our page budget are never completion evidence.
-			if (expectedTotal === seen.size ||
-				(capped && (apiWindowEnded(response.link) || seen.size === HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT))) {
+			if (seen.size === Math.min(expectedTotal, HISTORY_PAGE_SIZE * HISTORY_PAGE_LIMIT)) {
 				completeType = true;
 				break;
 			}

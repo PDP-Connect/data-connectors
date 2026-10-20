@@ -1813,7 +1813,7 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		},
 		{
 			path: "connectors/github_browser/collector.ts",
-			line: 557,
+			line: 556,
 			column: 20,
 			category: "dependent_pagination",
 			note: "Enumerate REST starred pages until observed source end before reconciling browser repository identities.",
