@@ -624,7 +624,7 @@ test("processListOrder: narrow child resources hydrate selected child, not the p
  assert.equal(navigations,1);
  assert.equal(reads,1,"actual detail HTML must be parsed");
  const children = harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items");
- assert.equal(children.length,1,"unselected sibling must not emit");
+ assert.equal(children.length,1,"exactly the selected child must be emitted once");
  assert.ok(children[0]?.type==="RECORD");
  assert.equal(children[0].data.id,selected);
  assert.deepEqual(deps.orderItemsCoverage,{required:[list.orderId],hydrated:[list.orderId],gap:[]});
@@ -632,9 +632,9 @@ test("processListOrder: narrow child resources hydrate selected child, not the p
  assert.deepEqual(cursor.toState(),{},"partial scope must not establish a global fingerprint");
 });
 
-test("resource-excluded schema-invalid child remains debt, unlike valid excluded child", async () => {
- const {processResolvedListOrder} = await import("./index.ts");
- for (const invalid of [false,true]) {
+for (const invalid of [false,true]) {
+ test(`resource-excluded ${invalid ? "schema-invalid" : "valid"} child ${invalid ? "remains debt" : "leaves the required set"}`, async () => {
+  const {processResolvedListOrder} = await import("./index.ts");
   const list = makeListOrder({items:[]});
   const detail = makeDetail();
   if (invalid) detail.items[0]!.quantity = Number.NaN;
@@ -662,5 +662,5 @@ test("resource-excluded schema-invalid child remains debt, unlike valid excluded
   assert.equal(deps.hydratedOrders?.size,0);
   assert.deepEqual(cursor.toState(),{});
   assert.equal(harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items").length,0);
- }
-});
+ });
+}
