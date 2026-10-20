@@ -286,43 +286,92 @@ export function toIso(
 
 // ─── CSV parsing ─────────────────────────────────────────────────────────
 
-export function parseCsv(text: string): string[][] {
+export interface CsvParseResult {
+	rows: string[][];
+	malformed: boolean;
+}
+
+/** Invalid records are withheld; an unterminated quoted tail has unknown
+ * record boundaries and is never split into invented transaction rows. */
+export function parseCsvWithIntegrity(text: string): CsvParseResult {
 	const rows: string[][] = [];
 	let cur: string[] = [];
 	let field = "";
-	let inQuote = false;
+	let state: "plain" | "quoted" | "closed" | "invalid" = "plain";
+	let malformed = false;
+	let started = false;
+	const endRow = () => {
+		// Keep an empty placeholder so a malformed header cannot promote a data row.
+		rows.push(state === "invalid" ? [] : [...cur, field]);
+		cur = [];
+		field = "";
+		state = "plain";
+		started = false;
+	};
 	for (let i = 0; i < text.length; i += 1) {
 		const c = text[i];
-		if (inQuote) {
+		if (state === "quoted") {
 			if (c === '"' && text[i + 1] === '"') {
 				field += '"';
 				i += 1;
-			} else if (c === '"') {
-				inQuote = false;
-			} else {
-				field += c;
-			}
-		} else if (c === '"') {
-			inQuote = true;
-		} else if (c === ",") {
+			} else if (c === '"') state = "closed";
+			else field += c;
+			continue;
+		}
+		if (c === "\n" || c === "\r") {
+			if (c === "\r" && text[i + 1] === "\n") i += 1;
+			endRow();
+			continue;
+		}
+		started = true;
+		if (state === "invalid") continue;
+		if (c === ",") {
 			cur.push(field);
 			field = "";
-		} else if (c === "\n") {
-			cur.push(field);
-			field = "";
-			rows.push(cur);
-			cur = [];
-		} else if (c === "\r") {
-			// skip
-		} else if (c !== undefined) {
+			state = "plain";
+		} else if (c === '"' && state === "plain" && field === "") {
+			state = "quoted";
+		} else if (c === '"' || state === "closed") {
+			malformed = true;
+			state = "invalid";
+		} else {
 			field += c;
 		}
 	}
-	if (field !== "" || cur.length) {
-		cur.push(field);
-		rows.push(cur);
+	if (state === "quoted") {
+		malformed = true;
+		state = "invalid";
 	}
-	return rows;
+	if (started || cur.length || field !== "") endRow();
+	return { rows, malformed };
+}
+
+export function parseCsv(text: string): string[][] {
+	return parseCsvWithIntegrity(text).rows;
+}
+
+/** CSV exports use calendar dates, not Date's rollover or timezone parsing. */
+function csvDate(raw: string | null): string | null {
+	if (!raw) return null;
+	const value = raw.trim();
+	const iso = /^(?<y>\d{4})-(?<m>\d{1,2})-(?<d>\d{1,2})$/.exec(value)?.groups;
+	const us = /^(?<m>\d{1,2})\/(?<d>\d{1,2})\/(?<y>\d{4})$/.exec(value)?.groups;
+	const parts = iso ?? us;
+	if (!parts?.y || !parts.m || !parts.d) return null;
+	const year = Number(parts.y);
+	const month = Number(parts.m);
+	const day = Number(parts.d);
+	const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+	const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+	if (
+		year < 1 ||
+		month < 1 ||
+		month > 12 ||
+		day < 1 ||
+		day > (days[month - 1] ?? 0)
+	)
+		return null;
+	return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 interface CsvHeaderIndices {
@@ -369,7 +418,7 @@ function csvRowToTransaction({
 		return null;
 	}
 	const rawDate = idx.idxDate >= 0 ? (row[idx.idxDate] ?? null) : null;
-	const date = isoDate(rawDate);
+	const date = csvDate(rawDate);
 	if (!date) {
 		return null;
 	}

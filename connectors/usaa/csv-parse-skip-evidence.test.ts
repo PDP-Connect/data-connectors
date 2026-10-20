@@ -24,7 +24,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { emitCsvTransactions, classifyCsvTransactionResult } from "./index.ts";
+import {
+	emitCsvTransactions,
+	classifyCsvTransactionResult,
+	recoverServedAccountTransactionGaps,
+	emitTransactionsDetailCoverage,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DashboardAccount } from "./types.ts";
 
@@ -244,5 +249,106 @@ test("CSV blank separator rows are not malformed transaction candidates", async 
 		classifyCsvTransactionResult("acct-raw-0001", null, null, result).outcome
 			.kind,
 		"hydrated",
+	);
+});
+
+for (const [name, csv, count] of [
+	[
+		"stray quote preserves later siblings",
+		'Date,Description,Amount\n01/05/2026,Coffee,-4.50\n01/06/2026,PIZZA 5" PAN,-12.00\n01/07/2026,Later,0.00\n01/08/2026,Last,2.00',
+		3,
+	],
+	[
+		"unclosed quoted tail",
+		'Date,Description,Amount\n01/05/2026,Coffee,-4.50\n01/06/2026,"Unclosed,-12.00\n01/07/2026,Ambiguous,3.00',
+		1,
+	],
+	[
+		"text after closing quote",
+		'Date,Description,Amount\n01/06/2026,"Pizza"x,-12.00\n01/07/2026,Later,2.00',
+		1,
+	],
+	["malformed only", 'Date,Description,Amount\n01/06/2026,"Unclosed,-12.00', 0],
+	["malformed header", '"Date,Description,Amount', 0],
+	[
+		"invalid calendar mixed",
+		"Date,Description,Amount\n02/28/2026,Good,-4.50\n02/30/2026,Bad,12.00",
+		1,
+	],
+	["invalid calendar only", "Date,Description,Amount\n2026-02-29,Bad,12.00", 0],
+] as const) {
+	test(`CSV integrity: ${name} cannot settle a served gap`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const deps = {
+			...harness,
+			servedAccountTransactionGaps: new Map([["acct-raw-0001", "served-gap"]]),
+		};
+		const result = await emitCsvTransactions(
+			deps,
+			await writeTempCsv(csv),
+			makeAccount(),
+			"2025-01-01",
+			1,
+			1,
+		);
+		const account = classifyCsvTransactionResult(
+			"acct-raw-0001",
+			"2025-01-01",
+			"2025-01-01",
+			result,
+		);
+		assert.equal(
+			account.outcome.kind,
+			"gap",
+			"malformed source must not certify full account coverage",
+		);
+		assert.equal(account.last_date, "2025-01-01");
+		assert.equal(
+			harness.emitted.length,
+			count,
+			"retain only unambiguous valid siblings",
+		);
+		await recoverServedAccountTransactionGaps(deps, [account.outcome]);
+		await emitTransactionsDetailCoverage(deps, [account.outcome], true);
+		assert.equal(
+			harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		const coverage = harness.protocolMessages.find(
+			(m) => m.type === "DETAIL_COVERAGE",
+		);
+		assert.ok(coverage && coverage.type === "DETAIL_COVERAGE");
+		assert.deepEqual(coverage.hydrated_keys, []);
+		assert.ok(
+			harness.protocolMessages.some(
+				(m) => m.type === "SKIP_RESULT" && m.reason !== "csv_no_data_rows",
+			),
+		);
+	});
+}
+
+test("CSV integrity: quoted commas, multiline fields, escaped quotes and leap dates stay complete", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const csv =
+		'Date,Description,Amount\r\n02/29/2024,"Coffee, shop",-4.50\r\n2024-03-01,"Line one\nLine two",0.00\r\n03/02/2024,"PIZZA 5"" PAN",12.00\r\n';
+	const result = await emitCsvTransactions(
+		harness,
+		await writeTempCsv(csv),
+		makeAccount(),
+		"2023-01-01",
+		1,
+		1,
+	);
+	assert.equal(result.usableCount, 3);
+	assert.equal(result.dataRows, 3, "count logical records, not physical lines");
+	assert.equal(harness.emitted.length, 3);
+	assert.equal(
+		classifyCsvTransactionResult("acct-raw-0001", "2023-01-01", null, result)
+			.outcome.kind,
+		"hydrated",
+	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
 	);
 });

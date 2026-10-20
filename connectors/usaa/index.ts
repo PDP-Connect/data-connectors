@@ -89,7 +89,7 @@ import {
 	mmddyyyy,
 	BACKFILL_17MO as PARSERS_BACKFILL_17MO,
 	INCREMENTAL_OVERLAP_MS as PARSERS_INCREMENTAL_OVERLAP_MS,
-	parseCsv,
+	parseCsvWithIntegrity,
 	resolveAccountIdForRef,
 	rowsToTransactions,
 } from "./parsers.ts";
@@ -2480,6 +2480,7 @@ export async function tryExportLadder(
 }
 
 interface CsvTransactionEmitResult {
+	malformedCsv?: true;
 	dataRows: number;
 	latest: string | null;
 	usableCount: number;
@@ -2496,7 +2497,7 @@ export async function emitCsvTransactions(
 	fingerprintCursor?: FingerprintCursor,
 ): Promise<CsvTransactionEmitResult> {
 	const text = await readFile(csvPath, "utf8");
-	const rows = parseCsv(text);
+	const { rows, malformed } = parseCsvWithIntegrity(text);
 	const txnAccountId = a.account_id_raw || a.last_four || "unknown";
 	const txns = rowsToTransactions(rows, {
 		accountId: txnAccountId,
@@ -2510,12 +2511,12 @@ export async function emitCsvTransactions(
 	// by account ordinal (never the account number / last-four) so the run does
 	// not look complete. The caller also refuses to advance this account's
 	// transaction cursor on this outcome, so a parser fix can recover the gap.
-	// `rows.length` is the raw parsed line count; we report data-row count
-	// (rows beyond the header) to keep the number meaningful.
+	// Count only successfully tokenized logical data rows. Malformed quoting
+	// is separate evidence, never a fabricated row denominator.
 	const dataRows = rows
 		.slice(1)
 		.filter((row) => row.some((field) => field.trim())).length;
-	if (txns.length === 0) {
+	if (txns.length === 0 && !malformed) {
 		await deps.emit({
 			type: "SKIP_RESULT",
 			stream: "transactions",
@@ -2531,18 +2532,22 @@ export async function emitCsvTransactions(
 			},
 		});
 	}
-	if (txns.length > 0 && txns.length < dataRows) {
+	if (malformed || (txns.length > 0 && txns.length < dataRows)) {
 		await deps.emit({
 			type: "SKIP_RESULT",
 			stream: "transactions",
 			reason: "csv_partial_parse",
-			message: `CSV left ${dataRows - txns.length} unparsed row(s) for account ${accountOrdinal}/${accountTotal}`,
+			message: malformed
+				? `CSV quoting was malformed for account ${accountOrdinal}/${accountTotal}; complete row count is unknown`
+				: `CSV left ${dataRows - txns.length} unparsed row(s) for account ${accountOrdinal}/${accountTotal}`,
 			diagnostics: {
 				account_ordinal: accountOrdinal,
 				account_total: accountTotal,
 				data_rows: dataRows,
 				usable_rows: txns.length,
-				unparsed_rows: dataRows - txns.length,
+				...(malformed
+					? { malformed_csv: true }
+					: { unparsed_rows: dataRows - txns.length }),
 			},
 		});
 	}
@@ -2578,7 +2583,12 @@ export async function emitCsvTransactions(
 			}
 		})
 		.catch((): undefined => undefined);
-	return { dataRows, latest, usableCount: txns.length };
+	return {
+		dataRows,
+		latest,
+		usableCount: txns.length,
+		...(malformed ? { malformedCsv: true as const } : {}),
+	};
 }
 
 /**
@@ -2870,9 +2880,12 @@ export function classifyCsvTransactionResult(
 	accountId: string,
 	priorLastDate: string | null,
 	usedSince: string | null,
-	csvResult: { dataRows: number; latest: string | null; usableCount: number },
+	csvResult: CsvTransactionEmitResult,
 ): AccountTransactionResult {
-	if (csvResult.usableCount > 0 && csvResult.usableCount < csvResult.dataRows) {
+	if (
+		csvResult.malformedCsv ||
+		(csvResult.usableCount > 0 && csvResult.usableCount < csvResult.dataRows)
+	) {
 		return {
 			last_date: priorLastDate,
 			outcome: {
