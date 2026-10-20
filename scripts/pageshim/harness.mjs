@@ -485,6 +485,23 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
 	};
 }
 
+// Settles like `promise`, but rejects with the signal's reason if the signal
+// aborts first. The run's finally block then closes the browser, which ends the
+// evaluate that the caller abandoned.
+function untilAborted(promise, signal) {
+	if (!signal) return promise;
+	return Promise.race([
+		promise,
+		new Promise((_, reject) => {
+			if (signal.aborted) reject(signal.reason);
+			else
+				signal.addEventListener("abort", () => reject(signal.reason), {
+					once: true,
+				});
+		}),
+	]);
+}
+
 /**
  * @param {object} o
  * @param {string} o.bundle path to the built bundle
@@ -505,6 +522,7 @@ function exportArchive({ fixtures, evaluateInPage, data, log }) {
  * @param {boolean} [o.sampleHeap] poll the runner page's JS heap; maxHeapBytes is undefined without it
  * @param {number} [o.loginWaitMs] how long promptUser waits for the login check
  * @param {(method: string, args: unknown[], result: unknown) => void} [o.observeBridge] sees every bridge call and its reply
+ * @param {AbortSignal} [o.signal] reject the run with the signal's reason when it aborts; the browser still closes
  */
 export async function runHarness({
 	bundle,
@@ -537,6 +555,7 @@ export async function runHarness({
 	missingScopeEntries = false,
 	acceptLegacyResult,
 	observeBridge,
+	signal,
 }) {
 	const source = readFileSync(bundle, "utf8");
 	const log = [];
@@ -859,7 +878,7 @@ export async function runHarness({
 		}
 
 		const started = Date.now();
-		const ret = await runner.evaluate(hostMain, {
+		const evaluated = runner.evaluate(hostMain, {
 			source,
 			scopes,
 			initialState,
@@ -873,6 +892,7 @@ export async function runHarness({
 			omitScopeEntries: missingScopeEntries,
 			thinHost: resultStreaming,
 		});
+		const ret = await untilAborted(evaluated, signal);
 		sampling = false;
 		await sampler;
 		const stubLine = log.find((l) => l.includes("[pageshim] stubHits="));

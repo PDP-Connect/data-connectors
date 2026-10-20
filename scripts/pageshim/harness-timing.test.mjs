@@ -8,6 +8,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runFixtureHarness, runHarness } from "./harness.mjs";
 
+// A healthy run takes about 0.5 s. A hung run aborts here, so its browser closes before the timeout.
+const RUN_BOUND_MS = 15_000;
+
 async function scenario(t, source) {
 	const root = await mkdtemp(join(tmpdir(), "pageshim-timing-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
@@ -44,11 +47,18 @@ test("a frozen fixture calendar cannot freeze a login deadline", {
 	`,
 	);
 	const fixed = Date.parse("2026-10-17T12:00:00Z");
+	const bound = new AbortController();
+	const timer = setTimeout(
+		() => bound.abort(new Error(`run still pending after ${RUN_BOUND_MS} ms`)),
+		RUN_BOUND_MS,
+	);
+	t.after(() => clearTimeout(timer));
 	const result = await runHarness({
 		...options,
 		clockNowMs: fixed,
 		loginWaitMs: 50,
 		loginAfterMs: Number.POSITIVE_INFINITY,
+		signal: bound.signal,
 	});
 	assert.equal(result.data.calendar, fixed, "the page still sees the fixed date");
 	assert.deepEqual(result.ret, { ok: false, error: "login wait timed out" });
