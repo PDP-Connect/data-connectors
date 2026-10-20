@@ -34,6 +34,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import {
 	type FingerprintCursor,
 	openFingerprintCursor,
@@ -43,7 +44,12 @@ import {
 	type EmittedRecord,
 	makeRecordingEmit,
 } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { type EmitDeps, emitOrderAndItems } from "./index.ts";
+import {
+	type EmitDeps,
+	emitOrderAndItems,
+	newOrderItemsCoverage,
+	newOrdersCoverage,
+} from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { ListPageOrder, OrderDetail } from "./types.ts";
 
@@ -349,3 +355,111 @@ test("orders: connector fingerprint (excludes fetched_at) == compaction fingerpr
 		"a delivery_status move MUST produce a different fingerprint — real order state is never hidden",
 	);
 });
+
+for (const rejection of ["selection", "schema", "throw", "item"] as const) {
+	test(`actual emitter ${rejection}: rejected order bundle cannot seed a retry baseline`, async () => {
+		const cursor = openFingerprintCursor(undefined, {
+			excludeFromFingerprint: ["fetched_at"],
+		});
+		const hydratedOrders = new Map<string, string>();
+		const harness = makeRecordingEmit();
+		const runtime = makeEmitRecord({
+			requested: new Map([
+				[
+					"orders",
+					{
+						name: "orders",
+						...(rejection === "selection"
+							? { resources: ["different-order"] }
+							: {}),
+					},
+				],
+				["order_items", { name: "order_items" }],
+			]),
+			emittedAt: RUN1_AT,
+			emit: async (message) => {
+				if (rejection === "throw" && message.type === "RECORD")
+					throw new Error("write failed");
+				await harness.emit(message);
+			},
+			isTombstone: undefined,
+			timeRangeFieldFor: () => null,
+			validateRecord: (stream, data) => {
+				if (
+					(rejection === "schema" && stream === "orders") ||
+					(rejection === "item" && stream === "order_items")
+				) {
+					return {
+						ok: false,
+						issues: [{ path: "id", message: "rejected by schema" }],
+					};
+				}
+				return validateRecord(stream, data);
+			},
+		});
+		const deps: EmitDeps = {
+			...makeDeps(RUN1_AT, cursor).deps,
+			emit: harness.emit,
+			emitRecord: runtime.emit,
+			hydratedOrders,
+			ordersCoverage: newOrdersCoverage(),
+			orderItemsCoverage: newOrderItemsCoverage(),
+		};
+		const run = emitOrderAndItems(
+			deps,
+			makeListOrder(),
+			makeDetail(),
+			"2026-01-05",
+		);
+		if (rejection === "throw") await assert.rejects(run, /write failed/);
+		else await run;
+		assert.deepEqual(
+			cursor.toState(),
+			{},
+			"unaccepted bundle must not commit a fingerprint",
+		);
+		assert.equal(
+			hydratedOrders.size,
+			0,
+			"unaccepted bundle must not establish hydration",
+		);
+
+		const retryCursor = openFingerprintCursor(
+			{ fingerprints: cursor.toState() },
+			{ excludeFromFingerprint: ["fetched_at"] },
+		);
+		const retry = makeDeps(RUN2_AT, retryCursor);
+		retry.deps.hydratedOrders = hydratedOrders;
+		const retryRuntime = makeEmitRecord({
+			requested: new Map([
+				["orders", { name: "orders" }],
+				["order_items", { name: "order_items" }],
+			]),
+			emittedAt: RUN2_AT,
+			emit: harness.emit,
+			validateRecord,
+			isTombstone: undefined,
+			timeRangeFieldFor: () => null,
+		});
+		retry.deps.emitRecord = retryRuntime.emit;
+		const before = harness.protocolMessages.length;
+		await emitOrderAndItems(
+			retry.deps,
+			makeListOrder(),
+			makeDetail(),
+			"2026-01-05",
+		);
+		assert.equal(
+			harness.protocolMessages
+				.slice(before)
+				.filter((m) => m.type === "RECORD" && m.stream === "orders").length,
+			1,
+		);
+		assert.equal(
+			hydratedOrders.size,
+			1,
+			"accepted bundle establishes hydration",
+		);
+		assert.equal(Object.keys(retryCursor.toState()).length, 1);
+	});
+}
