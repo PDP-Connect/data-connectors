@@ -1831,7 +1831,7 @@ allows. Missing identity, unparseable date, shape rejection or unavailable
 required fields taint a known parent into connector_transform_failed debt;
 an unknown parent withholds the boundary.
 
-For this interim policy, a partial record is a candidate for which only part
+In this profile version, a partial record is a candidate for which only part
 of the selected record was read, or a required mapped value is unavailable
 or malformed. The connector MUST hold back the whole record; it MUST NOT emit
 an apparently complete upsert containing only the readable portion. In
@@ -2101,8 +2101,8 @@ already committed observable.
 
 #### 5.8.1 Explicit deletes before a later failure
 
-Explicit delete RECORDs are admitted as they arrive through the existing
-durable write safeguards, independently of final checkpoint sealing. A
+Valid explicit delete RECORDs MAY be durably admitted before final checkpoint
+sealing, through the existing durable write safeguards. A
 runtime MUST refuse an invalid, unauthorized or stale-generation delete.
 An admitted delete MUST retain its required attribution under Section 5.2
 and atomically invalidate every affected old or new materialization receipt
@@ -2132,8 +2132,9 @@ that failed boundary. Retrying the delete must be safe without implying that
 the rest of p1 was collected. If the first delete had stale authority, it
 would have been refused and could supply no emitted-effect credit.
 
-Empty inventory is never an implicit delete. Only an explicit, admitted,
-parent-attributed delete counts as an emitted effect; counts and failed-run
+Empty inventory is never an implicit delete. For strict detail accounting, an
+explicit delete counts as an emitted delete effect only after durable admission
+and the parent attribution required by Section 5.2; counts and failed-run
 diagnostics MUST distinguish local emission from host durable acceptance.
 A rejected delete cannot justify empty or unchanged. The existing distinction
 between attributed deletes from proven zero-child inventory (empty) and a
