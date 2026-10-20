@@ -2962,8 +2962,7 @@ export async function processAccountTransactions(
 	const unknownOriginal =
 		pending?.unknown_original === true ||
 		(pendingValue !== undefined && !pending) ||
-		(!pending &&
-			deps.servedAccountTransactionGaps?.has(accountId) === true);
+		(!pending && deps.servedAccountTransactionGaps?.has(accountId) === true);
 	const continuation: PendingExportWindow = {
 		since: desiredSince,
 		until: untilDate,
