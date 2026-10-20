@@ -25,6 +25,7 @@ import {
 	recoverServedAccountTransactionGaps,
 	runSingleLadderAttempt,
 	tryExportLadder,
+	runTransactionsStream,
 } from "./index.ts";
 
 type FieldName = "start" | "end";
@@ -38,6 +39,7 @@ interface FieldState {
 
 interface ExportPageShape {
 	outcomeForStart?: (start: string) => "success" | "failure" | "empty";
+	csvForStart?: (start: string) => string;
 	detachField?: FieldName;
 	dialog?: boolean;
 	end?: FieldState;
@@ -60,10 +62,10 @@ type Listener = (...args: unknown[]) => void;
 
 const ACCOUNT_URL = "https://www.usaa.com/my/checking/fixture-account";
 
-function makeResponse(): Record<string, unknown> {
+function makeResponse(csv?: string): Record<string, unknown> {
 	return {
 		body: async () =>
-			Buffer.from("Date,Description,Amount\n01/02/2025,Fixture,1.00\n"),
+			Buffer.from(csv ?? "Date,Description,Amount\n01/02/2025,Fixture,1.00\n"),
 		headers: () => ({
 			"content-disposition": 'attachment; filename="fixture.csv"',
 			"content-type": "text/csv",
@@ -152,7 +154,7 @@ function makePage(shape: ExportPageShape): ExportPageProbe {
 						shape.outcomeForStart(values.start) !== "success"
 					)
 						return;
-					emit("response", makeResponse());
+					emit("response", makeResponse(shape.csvForStart?.(values.start)));
 					emit("download", {});
 					return;
 				}
@@ -758,4 +760,74 @@ for (const suffixOutcome of ["success", "empty"] as const) {
 		assert.equal(retry.result.outcome.kind, "hydrated");
 		assert.ok(retry.records > 0);
 	});
+}
+
+for(const suffix of ["rows","header-only","empty"] as const) {
+ test(`persisted account interval survives next-day ${suffix} fallback`,async(t)=>{
+  const t0=Date.parse("2026-06-01T12:00:00Z");
+  t.mock.timers.enable({apis:["Date"],now:t0});
+  // Keep the calendar deterministic while allowing production deadline loops to expire.
+  const clockTick=setInterval(()=>t.mock.timers.tick(25),25);
+  t.after(()=>clearInterval(clockTick));
+  const {BACKFILL_17MO,mmddyyyy}=await import("./parsers.ts");
+  const original=new Date(t0-BACKFILL_17MO).toISOString().slice(0,10);
+  const account={account_id_raw:"fixture-account",account_type:"checking",account_url:"/my/checking/fixture-account",
+   balance_cents:0,last_four:"0000",name:"Fixture checking",raw_text:"Fixture checking"};
+  let persisted:Record<string,unknown>={};
+  async function run(day:number,full:boolean,served:boolean) {
+   t.mock.timers.setTime(t0+day*86400000);
+   const messages:Parameters<EmitDeps["emit"]>[0][]=[];
+   const probe=makePage({start:{},end:{},outcomeForStart:start=>
+    start===mmddyyyy(original)&&!full?"failure":suffix==="empty"?"empty":"success",
+    csvForStart:start=>"Date,Description,Amount\n"+(suffix==="header-only"?"":start+",Fixture,1.00\n")});
+   const deps:EmitDeps={emit:async m=>{messages.push(m);},emitRecord:async()=>{},
+    ...(served?{servedAccountTransactionGaps:new Map([["fixture-account","gap-original"]])}:{})};
+   await runTransactionsStream(deps,{} as BrowserContext,probe.page,async()=>({
+    request_id:"fixture",status:"success",type:"INTERACTION_RESPONSE"}),
+    [account],persisted,new Map([["transactions",{name:"transactions"}]]),
+    {sessionDeadMidRun:false,sessionRepairAttempted:false});
+   const states=messages.filter(m=>m.type==="STATE"&&m.stream==="transactions");
+   const lastState=states.at(-1);
+   if(lastState?.type==="STATE")persisted=JSON.parse(JSON.stringify({transactions:lastState.cursor}));
+   return {messages,starts:probe.events().filter(e=>e.startsWith("submit:"))};
+  }
+  const first=await run(0,false,false);
+  assert.ok(first.messages.some(m=>m.type==="DETAIL_GAP"));
+  const saved=(persisted.transactions as Record<string,{last_date?:string|null,pending_export?:{since:string,until:string}}>)?.["fixture-account"];
+  assert.equal(saved?.last_date,null,"no watermark is invented");
+  assert.equal(saved?.pending_export?.since,original,"original default start is durably continued");
+  const second=await run(1,false,true);
+  assert.equal(second.starts[0],"submit:"+mmddyyyy(original));
+  assert.equal(second.messages.some(m=>m.type==="DETAIL_GAP_RECOVERED"),false,"shifted default cannot settle original day");
+  const third=await run(2,true,true);
+  assert.equal(third.starts[0],"submit:"+mmddyyyy(original));
+  assert.deepEqual(third.messages.filter(m=>m.type==="DETAIL_GAP_RECOVERED").map(m=>m.gap_id),["gap-original"]);
+  assert.equal((persisted.transactions as Record<string,{pending_export?:unknown}>)["fixture-account"]?.pending_export,undefined);
+ });
+}
+
+for(const [name,prior,since,expectGap] of [
+ ["legacy unknown start",null,undefined,true],
+ ["stable explicit start",null,"2025-01-02",false],
+ ["stable prior watermark","2025-02-01",undefined,false],
+] as const) {
+ test(`served account interval: ${name}`,async()=>{
+  const probe=makePage({start:{},end:{},outcomeForStart:()=>"empty"});
+  const messages:Parameters<EmitDeps["emit"]>[0][]=[];
+  const deps:EmitDeps={emit:async m=>{messages.push(m);},emitRecord:async()=>{},
+   servedAccountTransactionGaps:new Map([["fixture-account","gap-original"]])};
+  const result=await processAccountTransactions(deps,{} as BrowserContext,probe.page,async()=>({
+   request_id:"fixture",status:"success",type:"INTERACTION_RESPONSE"}),
+   {account_id_raw:"fixture-account",account_type:"checking",account_url:"/my/checking/fixture-account",
+    balance_cents:0,last_four:"0000",name:"Fixture checking",raw_text:"Fixture checking"},
+   prior,since,"2025-01-03",{sessionDeadMidRun:false,sessionRepairAttempted:false},1,1);
+  assert.ok(result);
+  assert.equal(result.outcome.kind,expectGap?"gap":"no_activity");
+  if(expectGap) {
+   assert.equal(result.last_date,null);
+   assert.equal(result.pending_export?.unknown_original,true);
+  }
+  await recoverServedAccountTransactionGaps(deps,[result.outcome]);
+  assert.deepEqual(messages.filter(m=>m.type==="DETAIL_GAP_RECOVERED").map(m=>m.gap_id),expectGap?[]:["gap-original"]);
+ });
 }
