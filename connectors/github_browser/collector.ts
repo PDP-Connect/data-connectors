@@ -200,25 +200,26 @@ export async function collectGitHubBrowser(
 	for (const stream of ["repositories", "starred"] as const) {
 		if (!wants.has(stream)) continue;
 		await runIsolated(stream, async () => {
-			const seen = new Set<string>();
 			let covered = 0;
 			const evidence = new InventoryEvidence();
 			let endProven = false;
 			let failure: string | null = "page_limit_reached";
-			let entriesComplete = true;
-			let rejected = 0;
 			let url = inventoryUrl(username, stream, 1);
 			for (let pageNumber = 1; pageNumber <= INVENTORY_PAGE_LIMIT; pageNumber += 1) {
+				const inspect = (page: BrowserPageObservation, parsed: ReturnType<typeof inventoryRows>) => {
+					const { distinct, noProgress } = evidence.previewPage(parsed.rows.map(row => row.id));
+					return inspectInventoryPage(page, stream, username, pageNumber, distinct, parsed.rejectedRows, noProgress);
+				};
 				let page = await services.openPage(url);
 				let parsed = inventoryRows(stream, page.html);
-				let proof = inspectInventoryPage(page, stream, username, pageNumber, new Set([...seen, ...parsed.rows.map(row => row.id)]).size, rejected + parsed.rejectedRows);
+				let proof = inspect(page, parsed);
 				evidence.add(proof);
 				if (stream === "starred" && pageNumber === 1 && (proof.reason === "terminal_unverified" || proof.reason === "unreadable_list")) {
 					const primary = { parsed, proof };
 					url = `${GITHUB}/stars/${username}?page=1`;
 					page = await services.openPage(url);
 					parsed = inventoryRows(stream, page.html);
-					proof = inspectInventoryPage(page, stream, username, pageNumber, parsed.rows.length, parsed.rejectedRows);
+					proof = inspect(page, parsed);
 					evidence.add(proof);
 					// An unreadable alternate route must not discard a readable primary list.
 					if (proof.reason === "unreadable_list" && primary.proof.reason === "terminal_unverified") {
@@ -229,11 +230,8 @@ export async function collectGitHubBrowser(
 				if (proof.reason === "wrong_navigation" || proof.reason === "wrong_owner") {
 					await incomplete(stream, proof.reason); return;
 				}
-				rejected += parsed.rejectedRows;
-				entriesComplete &&= parsed.entriesComplete;
+				evidence.addPage(parsed.rows.map(row => row.id), parsed.entriesComplete, parsed.rejectedRows);
 				for (const row of parsed.rows) {
-					if (seen.has(row.id)) continue;
-					seen.add(row.id);
 					if (await emitEntity(stream, row)) covered += 1;
 				}
 				if (proof.nextUrl !== null) {
@@ -241,19 +239,18 @@ export async function collectGitHubBrowser(
 					continue;
 				}
 				failure = proof.reason;
-				if (entriesComplete && rejected === 0 &&
-					(proof.complete || proof.reason === "terminal_unverified") && covered === seen.size) {
+				if (proof.complete || proof.reason === "terminal_unverified") {
 					failure = null;
 					endProven = proof.complete;
 					if (!endProven && proof.total === null && stream === "starred") {
-						failure = await inspectStarredRest(services, username, seen, evidence);
+						failure = await inspectStarredRest(services, username, evidence.identities, evidence);
 						endProven = failure === null;
 					}
 				}
 				break;
 			}
-			const reason = evidence.decide(seen.size, endProven, failure);
-			const counts = { considered: evidence.expectedTotal ?? seen.size, covered };
+			const reason = evidence.decide(covered, endProven, failure);
+			const counts = { considered: evidence.expectedTotal ?? evidence.identities.size, covered };
 			if (reason === null) await complete(stream, counts);
 			else await incomplete(stream, reason, counts);
 		});

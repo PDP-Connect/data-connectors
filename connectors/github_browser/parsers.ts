@@ -491,8 +491,10 @@ function locateSection(
 ): Section {
 	const headings = headingsMatching(document, heading);
 	if (headings.length === 0) {
-		if (document.querySelector(hooks) !== null)
-			return { entries: anchorsIn([document.documentElement], fallbackSelector), unreadable: true };
+		const inProfile = (node: Element) => node.closest(`${PROFILE_PROSE_SELECTOR}, ${OVERLAY_SELECTOR}`) === null;
+		if (Array.from(document.querySelectorAll(hooks)).some(inProfile))
+			return { entries: Array.from(document.querySelectorAll(fallbackSelector)).filter(inProfile)
+				.filter(node => !node.parentElement?.closest(fallbackSelector)), unreadable: true };
 		return { entries: null, unreadable: !structure };
 	}
 	const nodes = headings.flatMap(sectionNodes);

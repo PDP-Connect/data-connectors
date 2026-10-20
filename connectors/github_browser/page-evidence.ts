@@ -63,6 +63,8 @@ export function inspectInventoryEnd(
 		return { complete: false, nextUrl: null, reason: "render_incomplete" };
 	if (evidence.hasUnknownContinuation)
 		return { complete: false, nextUrl: null, reason: "unknown_continuation" };
+	if (evidence.noProgress)
+		return { complete: false, nextUrl: null, reason: "no_progress" };
 	if (evidence.nextUrl !== null) {
 		const next = validContinuation(
 			evidence.nextUrl,
