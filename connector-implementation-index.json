@@ -10380,7 +10380,7 @@
 				},
 				"connector_key": "gmail",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/gmail",
-				"version": "0.2.22",
+				"version": "0.2.23",
 				"display_name": "Gmail",
 				"brand": {
 					"icon": "icon.svg",

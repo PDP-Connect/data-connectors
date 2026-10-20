@@ -568,6 +568,7 @@ export function recordAttachmentCoverage(
 	coverage: AttachmentDetailCoverage,
 	record: AttachmentRecord,
 	failure: AttachmentHydrationFailure | null = null,
+	locallyEmitted = true,
 ): void {
 	// The runtime rejects a DETAIL_COVERAGE whose required_keys repeats a key.
 	// The same attachment id can legitimately reach this accumulator twice in a
@@ -581,6 +582,10 @@ export function recordAttachmentCoverage(
 		return;
 	}
 	coverage.requiredKeys.push(record.id);
+	// Rejected or interrupted local emission keeps the obligation uncredited.
+	if (!locallyEmitted) {
+		return;
+	}
 	switch (record.hydration_status) {
 		case "hydrated":
 			coverage.hydratedKeys.push(record.id);
@@ -927,16 +932,19 @@ async function emitAttachmentRecords(
 	for (const a of attachments) {
 		const hydration = await deps.hydrateAttachment(msg, a);
 		const hydrated = hydration.record;
-		// Record the outcome BEFORE emitting so the coverage denominator counts
-		// every attempt even if the emit is scope-filtered downstream.
-		if (deps.attachmentCoverage) {
-			recordAttachmentCoverage(
-				deps.attachmentCoverage,
-				hydrated,
-				hydration.failure,
-			);
+		let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
+		try {
+			emitted = await deps.emitRecord("attachments", { ...hydrated });
+		} finally {
+			if (deps.attachmentCoverage) {
+				recordAttachmentCoverage(
+					deps.attachmentCoverage,
+					hydrated,
+					hydration.failure,
+					emitted !== false,
+				);
+			}
 		}
-		const emitted = await deps.emitRecord("attachments", { ...hydrated });
 		// Only `hydrated` may acknowledge a served gap as recovered. Unaccounted
 		// statuses (too_large, deferred) have no durable DETAIL_GAP, so there is
 		// nothing to recover.
@@ -2803,14 +2811,19 @@ async function settleServedAttachmentRecoveryAttempt(
 	hydration: AttachmentHydrationResult,
 ): Promise<void> {
 	const hydrated = hydration.record;
-	if (deps.attachmentCoverage) {
-		recordAttachmentCoverage(
-			deps.attachmentCoverage,
-			hydrated,
-			hydration.failure,
-		);
+	let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
+	try {
+		emitted = await deps.emitRecord("attachments", { ...hydrated });
+	} finally {
+		if (deps.attachmentCoverage) {
+			recordAttachmentCoverage(
+				deps.attachmentCoverage,
+				hydrated,
+				hydration.failure,
+				emitted !== false,
+			);
+		}
 	}
-	const emitted = await deps.emitRecord("attachments", { ...hydrated });
 	if (emitted && hydrated.hydration_status === "hydrated") {
 		const recoveredGaps = findRecoveredAttachmentDetailGaps(
 			deps.detailGaps,

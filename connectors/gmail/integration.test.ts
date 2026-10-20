@@ -7551,3 +7551,79 @@ test("attachmentsCoverageBoundaryEstablished: only a completed historical messag
 		"a completed historical walk has enumerated every message's attachment parts",
 	);
 });
+
+test("processMessage: rejected local attachment emission stays required-only and retries", async () => {
+	const coverage = makeAttachmentDetailCoverage();
+	const first = makeHarness({
+		attachmentCoverage: coverage,
+		hydrateAttachment: statusStampingHydrator({ "gmmsgid-1111:2": "hydrated" }),
+		requested: makeRequested(["attachments"]),
+		wantBodies: false,
+		wantMessages: false,
+	});
+	let attempts = 0;
+	first.deps.emitRecord = async () => { attempts += 1; return false; };
+	await processMessage(first.deps, makeAttachmentMsg());
+	assert.equal(attempts, 1, "the real message path attempted emission");
+	assert.deepEqual(coverage.requiredKeys, ["gmmsgid-1111:2"]);
+	assert.deepEqual(coverage.hydratedKeys, [], "a rejected record cannot credit hydration");
+	assert.deepEqual(coverage.gapKeys, []);
+	assert.equal(buildAttachmentDetailCoverageMessage(coverage).covered, 0);
+	assert.equal(first.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"), false);
+
+	const retryCoverage = makeAttachmentDetailCoverage();
+	const retry = makeHarness({
+		attachmentCoverage: retryCoverage,
+		hydrateAttachment: statusStampingHydrator({ "gmmsgid-1111:2": "hydrated" }),
+		requested: makeRequested(["attachments"]),
+		wantBodies: false,
+		wantMessages: false,
+	});
+	await processMessage(retry.deps, makeAttachmentMsg());
+	assert.equal(retry.emitted.filter((r) => r.stream === "attachments").length, 1);
+	assert.deepEqual(retryCoverage.hydratedKeys, ["gmmsgid-1111:2"]);
+});
+
+test("processMessage: throwing local attachment emission cannot credit hydration", async () => {
+	const coverage = makeAttachmentDetailCoverage();
+	const { deps } = makeHarness({
+		attachmentCoverage: coverage,
+		hydrateAttachment: statusStampingHydrator({ "gmmsgid-1111:2": "hydrated" }),
+		requested: makeRequested(["attachments"]),
+		wantBodies: false,
+		wantMessages: false,
+	});
+	deps.emitRecord = async () => { throw new Error("local emission failed"); };
+	await assert.rejects(processMessage(deps, makeAttachmentMsg()), /local emission failed/);
+	assert.deepEqual(coverage.requiredKeys, ["gmmsgid-1111:2"]);
+	assert.deepEqual(coverage.hydratedKeys, []);
+});
+
+test("recoverServedAttachmentGaps: rejected emission leaves the served gap unrecovered", async () => {
+	const message = makeServedRecoveryMsg({ attachments: [16], emailId: "gmmsgid-credit", uid: 6000 });
+	const coverage = makeAttachmentDetailCoverage();
+	const harness = makeRecordingEmit();
+	let attempts = 0;
+	const summary = await recoverServedAttachmentGaps(
+		{
+			search: mock.fn(() => Promise.resolve([6000])),
+			fetchOne: mock.fn(() => Promise.resolve(message)),
+		},
+		{
+			attachmentCoverage: coverage,
+			detailGaps: [makeServedRecoveryGap({ gapId: "gap-credit", messageId: "gmmsgid-credit", partIndex: 1 })],
+			emitProtocol: harness.emit,
+			emitRecord: async () => { attempts += 1; return false; },
+			hydrateAttachment: async (_message, attachment) => hydratedResult({
+				...attachment,
+				hydration_status: "hydrated",
+				hydration_error: null,
+			}),
+		},
+	);
+	assert.equal(attempts, 1);
+	assert.equal(summary.recovered, 0);
+	assert.deepEqual(coverage.requiredKeys, ["gmmsgid-credit:1"]);
+	assert.deepEqual(coverage.hydratedKeys, []);
+	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"), false);
+});
