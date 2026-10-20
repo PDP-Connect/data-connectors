@@ -91,9 +91,9 @@ function overUploadLimit(
 	const readable = zip ? fileSize < ZIP_MAX_CLASSIC_SIZE : fileSize <= ceiling;
 	const advice =
 		maxFileBytes < ceiling && readable
-			? " Ask your PDPP operator to raise the upload limit."
+			? " Ask your operator to raise the upload limit."
 			: "";
-	return `This export is larger than PDPP can safely process from a browser upload.${advice}`;
+	return `This export is larger than can be safely processed from a browser upload.${advice}`;
 }
 
 function baseValidation(

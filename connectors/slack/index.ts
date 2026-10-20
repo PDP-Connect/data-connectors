@@ -3963,7 +3963,7 @@ if (isMainModule(import.meta.url)) {
 				const reclaimedBytes = await reclaimUploads(archivePath);
 				log(
 					`Slack reclaim: removed __uploads/ at ${archivePath} after durable commit, reclaimed ${reclaimedBytes}B ` +
-						"(one-way: PDPP holds no copy; slackdump will not re-download these files)",
+						"(one-way: no copy is kept; slackdump will not re-download these files)",
 				);
 			}
 		},

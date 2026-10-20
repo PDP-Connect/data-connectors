@@ -265,7 +265,7 @@ export async function startEmbeddedServer({
 			{
 				client_id: OWNER_BOOTSTRAP_CLIENT,
 				metadata: {
-					client_name: "PDPP Polyfill Owner Bootstrap",
+					client_name: "Polyfill Owner Bootstrap",
 					token_endpoint_auth_method: "none",
 				},
 			},

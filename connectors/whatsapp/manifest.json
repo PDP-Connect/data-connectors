@@ -9,7 +9,7 @@
 	},
 	"connector_key": "whatsapp",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp",
-	"version": "0.2.21",
+	"version": "0.2.22",
 	"display_name": "WhatsApp (chat export)",
 	"brand": {
 		"icon": "icon.svg",
@@ -49,14 +49,14 @@
 					"label": "Media folder sync",
 					"platform": "device",
 					"posture": "advanced",
-					"detail": "Zip exports can include media files. When the import run has blob-upload support, PDPP keeps those files as WhatsApp attachment records with blob references."
+					"detail": "Zip exports can include media files. When the import run has blob-upload support, those files are kept as WhatsApp attachment records with blob references."
 				}
 			],
 			"accepted_file_extensions": [".txt", ".zip"],
 			"import_dir_env_var": "WHATSAPP_EXPORT_DIR",
 			"help_url": "https://faq.whatsapp.com/1180414079177245",
 			"help_text": "WhatsApp does not expose personal messages through an account API or OAuth grant. This source imports owner-provided chat export files.",
-			"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your PDPP operator to raise the deployment limit if your export exceeds it.",
+			"large_file_fallback": "This connector accepts uploads up to the deployment limit shown above. There is currently no alternate upload path for larger files — ask your operator to raise the deployment limit if your export exceeds it.",
 			"validation": {
 				"kind": "whatsapp_chat_export",
 				"file_backed": true,
