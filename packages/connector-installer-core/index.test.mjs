@@ -168,20 +168,16 @@ test("normalizes extracted artifact paths to the portable POSIX contract", () =>
   );
 });
 
-async function withRemoteArtifactFetch(routes, callback) {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => {
+// Injected rather than installed as the global fetch, so a test cannot leak
+// its routes into another test that runs at the same time.
+function routedFetch(routes) {
+  return async (url) => {
     const route = routes[String(url)];
     if (!route) {
       return new Response("not found\n", { status: 404, statusText: "Not Found" });
     }
     return new Response(route);
   };
-  try {
-    return await callback();
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
 }
 
 // Production hands sigstore an anchored pattern, not the bare identity, so this
@@ -215,20 +211,17 @@ async function fetchRemoteLegacyArtifactWithIdentity({
     ...entryOverrides,
   };
 
-  return withRemoteArtifactFetch(
+  return fetchResolvedArtifact(
+    { mode: "remote", doc: { connectors: { [entry.connectorId]: [entry] } } },
+    entry,
     {
-      [artifactUrl]: readFileSync(join(fixture.root, "artifact.tgz")),
-      [bundleUrl]: Buffer.from("{}\n"),
+      artifactCertificateIdentityResolver: resolver,
+      fetchImpl: routedFetch({
+        [artifactUrl]: readFileSync(join(fixture.root, "artifact.tgz")),
+        [bundleUrl]: Buffer.from("{}\n"),
+      }),
+      sigstoreVerifier: artifactVerifierFor(expectedCertificateIdentityURI),
     },
-    () =>
-      fetchResolvedArtifact(
-        { mode: "remote", doc: { connectors: { [entry.connectorId]: [entry] } } },
-        entry,
-        {
-          artifactCertificateIdentityResolver: resolver,
-          sigstoreVerifier: artifactVerifierFor(expectedCertificateIdentityURI),
-        },
-      ),
   );
 }
 
@@ -696,18 +689,15 @@ function unanchorIdentityPattern(pattern) {
 
 async function loadRemoteIndexWithIdentity({ indexUrl, accepts, log, ...options }) {
   const { bytes } = remoteIndexFixture(indexUrl);
-  return withRemoteArtifactFetch(
-    {
+  return loadConnectorIndex({
+    fetchImpl: routedFetch({
       [indexUrl]: bytes,
       [`${indexUrl}.sigstore.json`]: Buffer.from("{}\n"),
-    },
-    () =>
-      loadConnectorIndex({
-        indexUrl,
-        sigstoreVerifier: recordingIndexVerifier(accepts, log),
-        ...options,
-      }),
-  );
+    }),
+    indexUrl,
+    sigstoreVerifier: recordingIndexVerifier(accepts, log),
+    ...options,
+  });
 }
 
 test("remote index verification defaults to the PDP workflow identity", async () => {
@@ -804,17 +794,14 @@ test("index identity metadata supplied by the index itself is ignored", async ()
     },
   };
   await assert.rejects(
-    withRemoteArtifactFetch(
-      {
+    loadConnectorIndex({
+      fetchImpl: routedFetch({
         [indexUrl]: Buffer.from(JSON.stringify(doc)),
         [`${indexUrl}.sigstore.json`]: Buffer.from("{}\n"),
-      },
-      () =>
-        loadConnectorIndex({
-          indexUrl,
-          sigstoreVerifier: recordingIndexVerifier(THIRD_PARTY_INDEX_IDENTITY, log),
-        }),
-    ),
+      }),
+      indexUrl,
+      sigstoreVerifier: recordingIndexVerifier(THIRD_PARTY_INDEX_IDENTITY, log),
+    }),
     /signature verification failed/,
   );
   assert.deepEqual(log, [DEFAULT_SIGSTORE_CERTIFICATE_IDENTITY]);

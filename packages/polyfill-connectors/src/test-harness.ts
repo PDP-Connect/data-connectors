@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { type Dirent, readdirSync, readFileSync } from "node:fs";
 import { stringifyForJsonl } from "@pdpp/connector-protocol";
 import type {
 	DetailGapStartEntry,
@@ -33,6 +33,84 @@ import type {
 } from "./connector-runtime.ts";
 
 const VM_RSS_STATUS_RE = /VmRSS:\s*(\d+)\s*kB/;
+
+/** Parent pid and start time (in clock ticks since boot) from /proc/<pid>/stat. */
+function readProcStat(
+	pid: number,
+): { parentPid: number; startTime: string } | null {
+	try {
+		const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
+		// Fields after the command name, which may itself contain ") ".
+		const fields = stat
+			.slice(stat.lastIndexOf(")") + 1)
+			.trim()
+			.split(/\s+/u);
+		const parentPid = Number(fields[1]);
+		const startTime = fields[19];
+		if (!Number.isSafeInteger(parentPid) || startTime === undefined)
+			return null;
+		return { parentPid, startTime };
+	} catch {
+		return null; // The process exited while /proc was being read.
+	}
+}
+
+// Best effort: called from timer and stream callbacks, so it must never throw.
+// A pid is signalled only if it still has the start time seen in the scan, so
+// a descendant that exited and whose pid was reused is left alone.
+function killLinuxProcessTree(rootPid: number): void {
+	const kill = (pid: number, startTime?: string): void => {
+		if (startTime !== undefined && readProcStat(pid)?.startTime !== startTime) {
+			return;
+		}
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Already gone (ESRCH) or not ours to signal (EPERM).
+		}
+	};
+
+	for (let pass = 0; pass < 2; pass += 1) {
+		const childrenByParent = new Map<
+			number,
+			{ pid: number; startTime: string }[]
+		>();
+		let entries: Dirent[];
+		try {
+			entries = readdirSync("/proc", { withFileTypes: true });
+		} catch {
+			break;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) continue;
+			const pid = Number(entry.name);
+			const stat = readProcStat(pid);
+			if (!stat) continue;
+			const children = childrenByParent.get(stat.parentPid) ?? [];
+			children.push({ pid, startTime: stat.startTime });
+			childrenByParent.set(stat.parentPid, children);
+		}
+
+		const descendants: { pid: number; startTime: string }[] = [];
+		const pending = [rootPid];
+		const seen = new Set(pending);
+		while (pending.length > 0) {
+			const parentPid = pending.shift();
+			if (parentPid === undefined) continue;
+			for (const child of childrenByParent.get(parentPid) ?? []) {
+				if (seen.has(child.pid)) continue;
+				seen.add(child.pid);
+				descendants.push(child);
+				pending.push(child.pid);
+			}
+		}
+
+		for (const { pid, startTime } of descendants.reverse())
+			kill(pid, startTime);
+	}
+
+	kill(rootPid);
+}
 
 /** A record that passed (or bypassed) shape-check and would flow
  *  downstream as a RECORD in production. */
@@ -112,6 +190,10 @@ export interface ConnectorSubprocessOptions {
 	 *  poll timer is pure overhead for the many tests that don't need a
 	 *  memory proof. */
 	peakRssPollIntervalMs?: number;
+	/** Set false for a run whose stdout is too large to hold twice: `rawStdout`
+	 *  is then "" and `messages` is unchanged. Callers that assert on
+	 *  `rawStdout` must keep the default (true). */
+	retainRawStdout?: boolean;
 	start: {
 		/** Mirrors the real runtime's START `collection_mode` field, so a test can
 		 *  exercise the owner-triggered full-refresh bypass end to end rather than
@@ -195,6 +277,7 @@ export function runConnectorProtocolSubprocess(
 	options: ConnectorSubprocessOptions,
 ): Promise<ConnectorSubprocessResult> {
 	const timeoutMs = options.timeoutMs ?? 15_000;
+	const retainRawStdout = options.retainRawStdout ?? true;
 
 	return new Promise((resolve, reject) => {
 		const child = spawn(
@@ -215,22 +298,28 @@ export function runConnectorProtocolSubprocess(
 		let peakRssBytes: number | null = null;
 		let rssPoller: NodeJS.Timeout | undefined;
 		const { pid } = child;
-		if (options.peakRssPollIntervalMs && pid) {
-			rssPoller = setInterval(() => {
-				try {
-					const status = readFileSync(`/proc/${pid}/status`, "utf8");
-					const match = VM_RSS_STATUS_RE.exec(status);
-					if (match?.[1]) {
-						const bytes = Number.parseInt(match[1], 10) * 1024;
-						peakRssBytes =
-							peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
-					}
-				} catch {
-					// /proc/<pid>/status is unavailable (non-Linux, or the process
-					// already exited between the tick firing and the read) -- leave
-					// peakRssBytes at its last known value.
+		const sampleRss = (): void => {
+			try {
+				const status = readFileSync(`/proc/${pid}/status`, "utf8");
+				const match = VM_RSS_STATUS_RE.exec(status);
+				if (match?.[1]) {
+					const bytes = Number.parseInt(match[1], 10) * 1024;
+					peakRssBytes =
+						peakRssBytes === null ? bytes : Math.max(peakRssBytes, bytes);
 				}
-			}, options.peakRssPollIntervalMs);
+			} catch {
+				// /proc/<pid>/status is unavailable (non-Linux, or the process
+				// already exited between the tick firing and the read) -- leave
+				// peakRssBytes at its last known value.
+			}
+		};
+		const sampleRssOnOutput = Boolean(options.peakRssPollIntervalMs && pid);
+		if (sampleRssOnOutput) {
+			// The interval alone can miss a child that finishes before its first
+			// tick; sampling at start and on each stdout chunk (below) always
+			// yields a value while the child is producing records.
+			sampleRss();
+			rssPoller = setInterval(sampleRss, options.peakRssPollIntervalMs);
 		}
 
 		const messages: EmittedMessage[] = [];
@@ -252,10 +341,18 @@ export function runConnectorProtocolSubprocess(
 			fn();
 		};
 
-		const rejectAndKill = (error: Error): void => {
-			if (!child.killed) {
-				child.kill("SIGKILL");
+		const killChildTree = (): void => {
+			// Once the child has exited its pid may be reused: never signal it.
+			if (child.exitCode !== null || child.signalCode !== null) return;
+			if (process.platform === "linux" && child.pid) {
+				killLinuxProcessTree(child.pid);
+				return;
 			}
+			if (!child.killed) child.kill("SIGKILL");
+		};
+
+		const rejectAndKill = (error: Error): void => {
+			killChildTree();
 			finish(() => reject(error));
 		};
 
@@ -283,9 +380,15 @@ export function runConnectorProtocolSubprocess(
 			);
 		}, timeoutMs);
 
-		child.stdout?.on("data", (chunk: Buffer) => {
-			const text = chunk.toString();
-			rawStdout += text;
+		// Decode as streams, not per chunk: a multi-byte character split across
+		// two pipe chunks would otherwise become U+FFFD in both halves.
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (text: string) => {
+			if (sampleRssOnOutput) sampleRss();
+			if (retainRawStdout) {
+				rawStdout += text;
+			}
 			stdoutBuffer += text;
 			let newlineIndex = stdoutBuffer.indexOf("\n");
 			while (newlineIndex !== -1) {
@@ -296,8 +399,8 @@ export function runConnectorProtocolSubprocess(
 			}
 		});
 
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr?.on("data", (text: string) => {
+			stderr += text;
 		});
 
 		child.on("error", (err) => {

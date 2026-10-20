@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type {
 	EmittedMessage,
@@ -684,6 +685,127 @@ test("playlist pagination preserves identical track occurrences at distinct offs
 	);
 });
 
+test("same-count playlist reorder retries from offset zero and emits one coherent revision", async () => {
+	const offsets: number[] = [];
+	const item = (id: string) => ({
+		itemV2: {
+			data: {
+				__typename: "Track",
+				uri: `spotify:track:${id}`,
+				name: id,
+				artists: { items: [] },
+			},
+		},
+	});
+	let attempt = 0;
+	const result = await collectSavedTracks(
+		(offset, _index, operation) => {
+			if (operation === "libraryV3") return playlistLibraryResponse();
+			assert.equal(operation, "fetchPlaylist");
+			offsets.push(offset);
+			if (offset === 0) attempt += 1;
+			const revision = attempt === 1 && offset === 0 ? "A" : "B";
+			const ids =
+				offset === 0
+					? Array.from(
+							{ length: 100 },
+							(_, i) => `t${i + (revision === "B" ? 1 : 0)}`,
+						)
+					: ["t0"];
+			return playlistDetailResponse(
+				"spotify:playlist:pl1",
+				offset,
+				ids.map(item),
+				{
+					revisionId: revision,
+					content: { offset, totalCount: 101, items: ids.map(item) },
+				},
+			);
+		},
+		{ requested: ["playlists", "playlist_items"] },
+	);
+	assert.deepEqual(offsets, [0, 100, 0, 100]);
+	const tracks = result.emittedRecords.filter(
+		(record) => record.stream === "playlist_items",
+	);
+	assert.equal(tracks.length, 101);
+	assert.equal(tracks[0]?.data.uri, "spotify:track:t1");
+	assert.equal(tracks[99]?.data.uri, "spotify:track:t100");
+	assert.equal(tracks[100]?.data.uri, "spotify:track:t0");
+	assert.equal(
+		result.emittedRecords.find((record) => record.stream === "playlists")?.data
+			.snapshot_id,
+		"B",
+	);
+});
+
+test("changing playlist revision after bounded retries withholds completion and state", async () => {
+	const offsets: number[] = [];
+	const result = await collectSavedTracks(
+		(offset, _index, operation) => {
+			if (operation === "libraryV3") return playlistLibraryResponse();
+			assert.equal(operation, "fetchPlaylist");
+			offsets.push(offset);
+			const ids =
+				offset === 0 ? Array.from({ length: 100 }, (_, i) => `t${i}`) : ["t99"];
+			return playlistDetailResponse(
+				"spotify:playlist:pl1",
+				offset,
+				ids.map((id) => ({
+					itemV2: {
+						data: {
+							__typename: "Track",
+							uri: `spotify:track:${id}`,
+							name: id,
+							artists: { items: [] },
+						},
+					},
+				})),
+				{
+					revisionId: offset === 0 ? "A" : "B",
+					content: {
+						offset,
+						totalCount: 101,
+						items: ids.map((id) => ({
+							itemV2: {
+								data: {
+									__typename: "Track",
+									uri: `spotify:track:${id}`,
+									name: id,
+									artists: { items: [] },
+								},
+							},
+						})),
+					},
+				},
+			);
+		},
+		{ requested: ["playlists", "playlist_items"] },
+	);
+	assert.deepEqual(offsets, [0, 100, 0, 100, 0, 100]);
+	assert.deepEqual(result.emittedRecords, []);
+	assert.equal(
+		result.messages.some(
+			(message) =>
+				message.type === "STATE" || message.type === "DETAIL_COVERAGE",
+		),
+		false,
+	);
+	assert.deepEqual(
+		result.messages
+			.filter((message) => message.type === "SKIP_RESULT")
+			.map((message) => [
+				message.stream,
+				message.reason,
+				message.recovery_hint,
+			]),
+		[
+			["playlists", "inventory_not_proven_complete", { action: "retry_by_runtime", retryable: true }],
+			["playlist_items", "inventory_not_proven_complete", { action: "retry_by_runtime", retryable: true }],
+		],
+	);
+});
+
 test("playlist item completion combines terminal evidence across every playlist", async () => {
 	const result = await collectSavedTracks(
 		(_offset, _index, operationName, variables) => {
@@ -1284,6 +1406,74 @@ test("saved-track traversal continues after a nonempty short page while totalCou
 	);
 	assert.deepEqual(result.requests, [0, 2]);
 	assert.equal(result.emittedRecords.length, 3);
+});
+
+function localSavedTrack(uri: string) {
+	return {
+		addedAt: { isoString: "2024-01-01T00:00:00Z" },
+		track: {
+			uri,
+			data: {
+				id: null,
+				name: uri,
+				artists: { items: [] },
+				albumOfTrack: { name: "Album", artists: { items: [] } },
+				duration: { totalMilliseconds: 180000 },
+				contentRating: { label: "NONE" },
+				externalIds: { isrc: null },
+			},
+		},
+	};
+}
+
+function localSavedTrackId(uri: string): string {
+	return `local:${createHash("sha256").update(uri).digest("hex")}`;
+}
+
+test("equal-duration local saved tracks retain distinct URI-derived identities", async () => {
+	const uris = [
+		"spotify:local:Artist:Album:First%20Track:180000",
+		"spotify:local:Artist:Album:Second%20Track:180000",
+	];
+	const items = uris.map(localSavedTrack);
+	const result = await collectSavedTracks(() => savedResponse(items, 2), {
+		completeFixtures: false,
+	});
+	assert.deepEqual(
+		result.emittedRecords.map((record) => record.data.id),
+		uris.map(localSavedTrackId),
+	);
+	assert.deepEqual(
+		result.emittedRecords.map((record) => record.data.uri),
+		uris,
+	);
+	assert.equal(
+		result.messages.some(
+			(message) =>
+				message.type === "STATE" && message.stream === "saved_tracks",
+		),
+		true,
+	);
+});
+
+test("local saved track with a URI over 200 characters remains emitted", async () => {
+	const uri = `spotify:local:Artist:Album:${"A".repeat(190)}:180000`;
+	assert.ok(uri.length >= 215 && uri.length < 2000);
+	const result = await collectSavedTracks(
+		() => savedResponse([localSavedTrack(uri)], 1),
+		{ completeFixtures: false },
+	);
+	assert.equal(result.emittedRecords.length, 1);
+	const record = result.emittedRecords[0];
+	assert.equal(record?.data.id, localSavedTrackId(uri));
+	assert.equal(record?.data.uri, uri);
+	assert.equal(validateRecord("saved_tracks", record?.data).ok, true);
+	assert.equal(
+		result.messages.some(
+			(message) => message.type === "STATE" && message.stream === "saved_tracks",
+		),
+		true,
+	);
 });
 
 test("saved tracks preserve rows with empty or absent source metadata without inventing values", async () => {

@@ -18,6 +18,13 @@
  * another line) — proving the watchdog DOES fire on a genuine hang, killing
  * the subprocess rather than waiting out a real would-be-infinite stall.
  *
+ * When `PDPP_WATCHDOG_TEST_MAX_PACED_MS` is set, this connector times its own
+ * paced section (from before the first sleep to after the last record, with
+ * `performance.now()`, so process startup is excluded) and throws if it took
+ * longer. The replay-speed test sets it. A scenario replay runs the connector
+ * isolated, so the measurement cannot be written to a file the test reads; a
+ * failed run reports the measured duration in its DONE error message.
+ *
  * No network calls — pure timers, so this fixture works for both the
  * scenario-record (`--entrypoint`) and scenario-verify (replay) paths
  * without a synthetic HTTP provider.
@@ -54,6 +61,9 @@ runConnector({
 		const hangAfterRaw = process.env.PDPP_WATCHDOG_TEST_HANG_AFTER;
 		const hangAfter =
 			hangAfterRaw === undefined ? undefined : Number(hangAfterRaw);
+		const maxPacedMsRaw = process.env.PDPP_WATCHDOG_TEST_MAX_PACED_MS;
+		const maxPacedMs =
+			maxPacedMsRaw === undefined ? undefined : Number(maxPacedMsRaw);
 
 		await emit({
 			type: "PROGRESS",
@@ -61,6 +71,7 @@ runConnector({
 			message: "collecting paced items",
 		});
 
+		const pacedStart = performance.now();
 		for (let i = 0; i < recordCount; i += 1) {
 			await sleep(sleepMs);
 			await emitRecord("items", { id: `item-${String(i)}` });
@@ -71,6 +82,12 @@ runConnector({
 					// Intentionally never resolves.
 				});
 			}
+		}
+		const pacedMs = performance.now() - pacedStart;
+		if (maxPacedMs !== undefined && pacedMs > maxPacedMs) {
+			throw new Error(
+				`paced section took ${pacedMs.toFixed(1)}ms, over the ${String(maxPacedMs)}ms bound (PDPP_WATCHDOG_TEST_MAX_PACED_MS)`,
+			);
 		}
 
 		await emit({

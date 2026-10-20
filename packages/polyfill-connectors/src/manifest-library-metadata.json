@@ -409,6 +409,7 @@
 		"manifest": {
 			"connector_key": "icloud-notes",
 			"reason_display_messages": {
+				"inventory_not_proven_complete": "iCloud Notes could not prove this inventory complete. Readable records were preserved; retry collection.",
 				"icloud_auth_failed": "iCloud Notes did not authorize this query. Check the session and retry.",
 				"icloud_http_error": "iCloud Notes returned an HTTP error. This stream was not marked complete.",
 				"icloud_invalid_query_response": "iCloud Notes returned an unreadable response. This stream was not marked complete.",
@@ -486,6 +487,7 @@
 				"linkedin_connection_enrichment_incomplete": "LinkedIn returned some connections without readable profile details",
 				"linkedin_fields_unreadable": "LinkedIn returned some entries with details this run could not read",
 				"older_connections_deferred_page_budget": "LinkedIn has more connections than this run collected; they'll be picked up on a future run",
+				"inventory_not_proven_complete": "LinkedIn inventory could not be verified; readable entries were saved and the incomplete inventory can be retried",
 				"owner_identity_missing": "LinkedIn inventory could not be verified: owner identity missing",
 				"profile_identity_mismatch": "LinkedIn inventory could not be verified: profile identity mismatch",
 				"summary_request_failed": "LinkedIn inventory could not be verified: summary request failed",
@@ -661,6 +663,7 @@
 		"manifest": {
 			"connector_key": "spotify",
 			"reason_display_messages": {
+				"inventory_not_proven_complete": "Spotify changed a playlist while it was loading. This sync could not confirm that every item was collected; try again.",
 				"spotify_browser_stage1_deferred": "Spotify has deferred this stream in the current browser connector version. Other supported Spotify streams can still sync.",
 				"spotify_ranked_list_capped": "Spotify ranking output is limited to at most 100 rows per time window and does not represent a full inventory.",
 				"spotify_recent_context_boundary_unverified": "Spotify did not provide a request-bound terminal boundary; no checkpoint was saved.",
