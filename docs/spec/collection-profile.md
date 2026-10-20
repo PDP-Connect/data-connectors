@@ -1,8 +1,8 @@
-# PDPP Collection Profile v0.2.0
+# PDPP Collection Profile v1.0.0
 
 Status: Normative draft. This is the canonical PDPP Collection Profile.
 
-Date: 2026-10-05
+Date: 2026-10-20
 
 ## 1. Scope
 
@@ -49,6 +49,10 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 appear in all capitals.
 
 This document is normative except where a section is marked non-normative.
+Version 1.0.0 is a next-major draft, not a claim that existing connectors,
+runtimes or linked machine-readable schemas implement it. Strict accounting
+requires implementation and conformance work before accepting this version.
+The unreleased 0.2.0 diagnosis requirements are included in full.
 
 ## 2. Relationship to PDPP Core
 
@@ -80,7 +84,7 @@ features it needs, and describes the streams it can emit.
 
 ```json
 {
-  "protocol_version": "0.1.0",
+  "protocol_version": "1.0.0",
   "connector_key": "example",
   "version": "1.0.0",
   "display_name": "Example",
@@ -115,7 +119,7 @@ features it needs, and describes the streams it can emit.
 
 | Field | Requirement |
 | --- | --- |
-| `protocol_version` | REQUIRED. It MUST be `"0.1.0"` for this profile version. |
+| `protocol_version` | REQUIRED. It MUST be `"1.0.0"` for this profile version. |
 | `connector_key` | REQUIRED operational identifier. It MUST match `^[a-z0-9][a-z0-9._-]*$`. |
 | `version` | REQUIRED non-empty connector version string. |
 | `display_name` | REQUIRED non-empty display name. |
@@ -504,7 +508,7 @@ connector reads:
 | --- | --- |
 | `env_var` | REQUIRED. The environment variable through which the runtime passes the path. It MUST match `^[A-Z][A-Z0-9_]*$` and MUST be unique within `inputs`. |
 | `kind` | REQUIRED. `file` or `dir`. |
-| `access` | REQUIRED. `read` is the only v0.1 value. |
+| `access` | REQUIRED. `read` is the only v1.0 value. |
 | `accepted_extensions` | OPTIONAL non-empty array of unique lowercase extensions, each with a leading dot. It names the file types the connector reads from the input. |
 
 An input object has no other members. `inputs`, when present, is a non-empty
@@ -541,7 +545,7 @@ default. `runtime_requirements.local_paths` (Section 3.7) can still describe the
 default location and readiness checks. A confining runtime that wants the
 connector to read the default location supplies it through the `env_var`.
 
-A `filesystem` declaration without `inputs` remains valid in v0.1. It makes no
+A `filesystem` declaration without `inputs` remains valid in v1.0. It makes no
 claim about which paths the connector reads, so a runtime cannot narrow the
 binding. A runtime SHOULD tell the owner that such a connector has broad file
 access.
@@ -600,7 +604,7 @@ of declared output roots:
 | Field | Requirement |
 | --- | --- |
 | `slot` | REQUIRED. An author-local name for the output root, matching `^[a-z][a-z0-9_]*$`. |
-| `access` | REQUIRED. `write` is the only v0.1 value. |
+| `access` | REQUIRED. `write` is the only v1.0 value. |
 | `overwrite` | OPTIONAL boolean. Whether the connector may overwrite an existing file in this slot. Default false. |
 | `delete` | OPTIONAL boolean. Whether the connector may delete a file in this slot. Default false. |
 | `durable` | OPTIONAL boolean. Whether this slot persists across runs. Default false. |
@@ -932,15 +936,14 @@ requires. A runtime MUST advertise its supported protocol version and
 capabilities before placement. It MUST reject a connector with an unsupported
 required capability before spawn.
 
-The portable capabilities are `STREAM_EVIDENCE` (since 0.1.0, Section 5.7)
-and `OBSERVATION` (since 0.2.0, Section 5.10). A connector that can emit one
-of these messages MUST declare that value. A runtime that does not advertise a
-declared capability MUST NOT start that connector. A runtime that implements
-profile version 0.2.0 MUST advertise and support `OBSERVATION`.
-
-A connector that does not declare `OBSERVATION` is diagnosed from runtime
-records alone (Section 5.11). A runtime MUST NOT record that connector as
-defective because it does not declare the capability.
+DETAIL_GAP, DETAIL_COVERAGE, STREAM_EVIDENCE and OBSERVATION are mandatory
+runtime features of 1.0.0, including Sections 5.10 through 5.13 and the
+recovery-hint gate. A connector need not emit diagnostic facts on every run.
+Strict accounting MUST NOT depend on a per-feature capability, advisory flag,
+START capability list, message-content opt-in, or connector-side fold.
+PERMANENT_DETAIL_GAP is not a separate capability. Unrelated optional
+extensions and binding requirements retain their placement negotiation;
+they MUST NOT weaken mandatory accounting or diagnosis.
 
 ### 3.5 Coverage and freshness strategies
 
@@ -998,9 +1001,9 @@ Capability metadata includes `refresh_policy`, `public_listing`, `proven`,
 `setup.manual_or_upload.import_dir_env_var` is deprecated in favor of
 filesystem inputs (Section 3.3.5).
 
-These members are not part of portable v0.1 conformance. A runtime MAY support
+These members are not part of portable v1.0 conformance. A runtime MAY support
 them as implementation metadata. Any manifest member that this profile does
-not define is also outside portable v0.1. A connector MUST NOT use such a
+not define is also outside portable v1.0. A connector MUST NOT use such a
 declaration to grant itself authority, widen collection scope, or bypass owner
 approval.
 
@@ -1041,8 +1044,8 @@ This version does not define the syntax of a rule's match condition
 (Section 5.13). A runtime records a match for a declared rule only from its
 own observations.
 
-A manifest that declares `diagnostic_descriptors` or the `OBSERVATION`
-capability declares `protocol_version` `0.2.0`.
+A manifest implementing this document declares `protocol_version` `1.0.0`,
+including when it declares `diagnostic_descriptors`.
 
 ## 4. Run protocol
 
@@ -1052,7 +1055,8 @@ Standard error is diagnostic only and MUST NOT contain protocol messages.
 
 Before spawn, the runtime MUST match the bindings, binding features, and
 protocol capabilities required by the connector against its advertised support.
-A mismatch fails the run before any connector code executes.
+A mismatch fails the run before any connector code executes. Unsupported
+profile versions MUST also be refused before spawn (Section 8).
 
 The runtime sends exactly one `START` message. It is the first message on
 standard input. The connector reads it before it emits any message. A connector
@@ -1121,6 +1125,7 @@ The runtime sends `START` to initialize one run.
 | `collection_mode` | REQUIRED `full_refresh` or `incremental`. |
 | `state` | REQUIRED map of prior connector-owned state, or `null` when no prior state applies. |
 | `bindings` | REQUIRED map of binding names to descriptors available for this run. |
+| `detail_baselines` | OPTIONAL array of runtime-issued baseline receipts valid for this run (Section 5.6.3); absence means none. |
 | `now` | OPTIONAL [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) date-time with a time-zone offset. It is the run's notion of the current time. |
 
 Each scope stream has a REQUIRED `name`. `resources` is an OPTIONAL array of
@@ -1191,7 +1196,7 @@ filter precisely, but it MUST restrict what it emits.
 Runtime-specific `START` members for backfill and detail-gap recovery are
 defined in the
 [runtime note](../../packages/polyfill-connectors/docs/collection-profile-runtime.md).
-They are not portable v0.1 fields.
+They are not portable v1.0 fields.
 
 ### 5.2 `RECORD`
 
@@ -1229,6 +1234,14 @@ delete identifies a record by `stream` and `key`. As PDPP Core requires, its
 schema-required fields MAY be absent. A connector MUST NOT delete from an
 `append_only` stream.
 
+For detail accounting, a delete MUST be attributable to the parent relationship
+of its upsert. The runtime derives the parent from the retained row or an
+explicit parent_ref envelope object with stream, canonical key, and a
+relationship_id when needed. Both forms MUST agree when retained evidence
+exists; otherwise the effect is rejected. A delete with unknown parent MUST
+NOT credit any parent and withholds the affected boundary. parent_ref is
+accounting metadata, not source record data.
+
 A connector record carries no instance. Core identifies a stored record by its
 instance and canonical key, so the ingest adapter binds each connector record
 to one Core instance, the connection the run collected for, before it writes
@@ -1248,7 +1261,8 @@ watermark, such as the end of the last completed collection window. When
 
 The runtime stages `STATE` only after it durably writes all prior records. It
 commits staged state only after successful `DONE`, except for the certified
-stream-scoped failure in Section 5.8. It MUST NOT commit state after
+stream-scoped failure in Section 5.8. It MUST apply Section 5.6.3's generation fence and atomic state/receipt rules.
+It MUST NOT commit state after
 cancellation, supervisor loss, a protocol violation, an invalid exit, or an
 uncertified failed `DONE`.
 
@@ -1310,7 +1324,7 @@ enumeration finished, and ends with failed `DONE` whose `error.code` is
 failure, never an empty success.
 
 `recovery_hint` is OPTIONAL. It is either an action string or an object with a
-REQUIRED `action` string and an OPTIONAL boolean `retryable`. Portable v0.1
+REQUIRED `action` string and an OPTIONAL boolean `retryable`. Portable v1.0
 actions are `retry_by_runtime`, `retry_on_connector_upgrade`,
 `refresh_credentials`, `manual_action_required`, `update_selector`,
 `upstream_unblock`, `not_retriable`, and `unknown`.
@@ -1320,11 +1334,90 @@ connector-requested action from free-form `message`, diagnostics, or an error
 code. A valid hint is the connector's suggestion. Section 5.11 states when a
 runtime can present a hint as an instruction or act on it.
 
-### 5.6 `DETAIL_GAP` and `DETAIL_COVERAGE`
+### 5.6 Detail obligations, gaps and coverage
 
-`DETAIL_GAP` records a retryable failure for one detail record.
+This section is mandatory in 1.0.0. Legacy hydrated-presence and optional-skip
+members are not aliases for the strict contract.
 
-```json
+#### 5.6.1 Obligations and closure
+
+For every declared parent boundary, the connector MUST independently enumerate
+parents owing detail under the effective scope. Their canonical keys form
+required_keys. The set MUST NOT be derived from successful parses, emitted
+records or reported gaps. Coverage may be emitted only after parent enumeration
+closes with Section 6.1 item 14 source evidence. Without closure, the connector
+withholds coverage and the runtime MUST withhold the checkpoint. An explicitly
+closed enumeration with zero obligated parents is valid.
+
+Every required key has an obligations entry identifying its child obligation:
+either {"kind":"inventory"} or {"kind":"delta","range":...}. Inventory means
+the whole child inventory within effective scope. A delta range MUST contain
+exactly one of time_range or cursor_range. time_range has both inclusive since
+and exclusive until in the declared consent-time format. cursor_range has
+both exclusive after and inclusive through opaque JSON values in one source
+cursor domain. A shorter successful or empty fallback MUST NOT replace the
+original obligation: its uncovered interval remains outstanding.
+
+Keys MUST use Section 5.1 canonical string encoding, including composite keys.
+Numeric keys are invalid here. Every detail/parent pair MUST have one
+unambiguous declared relationship or name its declared relationship_id.
+Claims bind effective scope after policy and field normalization. Unknown
+scope membership is not a proven exclusion.
+
+#### 5.6.2 Outcomes and durable debt
+
+The four outcome sets are disjoint subsets of required_keys:
+
+- complete_keys: child enumeration closed with source evidence and every
+  candidate has a disposition: upsert, delete, suppressed-unchanged against
+  a committed baseline, or proven scope exclusion. None is unknown.
+- empty_keys: child enumeration closed with zero in-scope children for the
+  stated inventory or delta obligation. Empty never implies deletion.
+  Explicit attributed tombstones are permitted.
+- unchanged_keys: no child enumeration; a source validator covering membership,
+  content AND deletion matched a valid committed baseline for this exact
+  obligation. An unchanged parent or timestamp alone is insufficient.
+- gap_keys: matching DETAIL_GAP debt was durably recorded for the connection,
+  stream, parent, relationship, key and uncovered obligation.
+
+An absent required key is unaccounted and MUST withhold the parent checkpoint.
+A gap is accounted debt, not complete data, and MUST NOT mint a baseline or
+be displayed as successful hydration.
+
+DETAIL_GAP has REQUIRED reference_only:true, status:"pending", stream,
+parent_stream, canonical record_key, reason, boolean retryable and
+detail_locator. The locator has REQUIRED kind and obligation; other
+kind-specific fields identify the missing detail without secrets.
+relationship_id is REQUIRED if otherwise ambiguous. A partially collected
+interval MUST retain the missing interval, not reduce its identity to an
+account alone. The coverage obligation remains the original range. Its gap
+locators may name the exact uncovered subranges only when all remaining
+subranges were independently closed and accounted; all uncovered subranges
+MUST remain durable debt. The runtime checks parent/domain identity and range
+containment, and MUST NOT let a gap from another range satisfy this key.
+Whether the connector found every missing subrange remains a source assertion.
+
+Retryable reasons are rate_limited, retry_exhausted, temporary_unavailable and
+upstream_pressure, with retryable:true. Missing identity, unparseable date,
+schema rejection or parser/transform failure is recoverable implementation
+debt, not permanent source loss. It uses retryable debt and, where appropriate,
+the attributed retry_on_connector_upgrade hint under Sections 5.5 and 5.11.
+
+Permanent gaps use reason:"source_unrepresentable" and retryable:false.
+They describe detail the source in its current form cannot represent.
+A timeout, unknown field, parser bug, permission/configuration issue or
+deployment limit MUST NOT be classified permanent. status remains pending.
+The runtime MUST NOT schedule, request or offer refetch of a permanent gap.
+Missing/nonboolean retryable or mismatched reason/retryable is invalid.
+There is no capability flag for permanent gaps.
+
+A recovery MUST identify the durable gap and match its stored locator and
+obligation. A same-account success or strict subset MUST NOT clear the whole
+gap. The runtime MAY atomically replace partially recovered debt with exact
+residual obligations, but MUST preserve every uncovered part. Section 7
+leaves recovery transport to an extension; no transport can weaken this rule.
+
+~~~json
 {
   "type": "DETAIL_GAP",
   "reference_only": true,
@@ -1334,55 +1427,165 @@ runtime can present a hint as an instruction or act on it.
   "record_key": "item-1",
   "reason": "temporary_unavailable",
   "retryable": true,
-  "detail_locator": { "kind": "item", "id": "item-1" }
+  "detail_locator": {
+    "kind": "item",
+    "id": "item-1",
+    "obligation": {
+      "kind": "delta",
+      "range": { "time_range": { "since": "2026-01-01", "until": "2026-02-01" } }
+    }
+  }
 }
-```
+~~~
 
-`reference_only: true`, `status: "pending"`, `stream`, `record_key`, `reason`,
-`retryable: true`, and `detail_locator` are REQUIRED. `record_key` is a string
-or number. `detail_locator.kind` is REQUIRED. It MUST contain no secret.
-Portable reasons are `rate_limited`,
-`retry_exhausted`, `temporary_unavailable`, and `upstream_pressure`.
-`parent_stream` is REQUIRED when the detail stream has more than one declared
-parent. It MAY be omitted when the manifest gives the stream exactly one
-parent.
+#### 5.6.3 Baselines and generation fencing
 
-`DETAIL_COVERAGE` reports the complete key accounting for one detail stream and
-one checkpoint-parent boundary.
+A baseline receipt is a runtime-owned reference to a committed complete or
+empty obligation. It binds connection/source account, detail stream, parent
+stream, relationship, canonical parent key, normalized effective scope
+(resources, fields and time range), inventory/delta obligation and range,
+validator domain, and schema/transform epoch. Its non-empty opaque receipt_id
+is assigned by the runtime. Identity alone proves neither source truth nor
+write ordering.
 
-```json
+START.detail_baselines MAY provide valid receipts. Each entry contains
+receipt_id, stream, parent_stream, key, applicable relationship_id,
+effective_scope, obligation, validator_domain, transform_epoch, and the
+committed source_validator when available. The connection is fixed by runtime
+run context; a connector cannot choose it. The runtime MUST validate references
+against its durable ledger, not trust a connector's supplied copy. It MUST NOT
+mint receipts from legacy connector state.
+
+Coverage supplies baseline_refs (key to receipt-id map) wherever a claim
+uses prior state. unchanged_keys additionally supplies validators (key to
+{domain,value} map), which MUST match the retained source validator and its
+membership/content/deletion domain. A complete enumeration may suppress
+children only against the referenced committed baseline; nonexistent or
+invalidated retained children are not suppression evidence. A fully
+fingerprint-suppressed nonempty scan can be complete with a valid baseline;
+it is not empty and requires no fabricated upsert.
+
+Scope change, owner deletion, retention GC affecting baseline data,
+schema/transform change or source-account change MUST invalidate affected
+receipts and reset dependent connector state before its next collection.
+Failed or gap-covered attempts MUST NOT replace good baselines or their
+validators. Narrow-empty receipts cannot establish widened-scope emptiness
+or completion of another delta interval.
+
+Runs MUST be serialized or fenced per connection checkpoint generation.
+The runtime MUST check expected generation at durable effect publication AND
+checkpoint/receipt commit. Stale runs MUST NOT publish effects, overwrite
+state, resurrect invalidated receipts or clear newer gaps. Invalidations MUST
+advance/invalidate the generation. A final message, timestamp, random batch
+id, or atomic write without a generation check is not a fence.
+
+Eligible checkpoint state and its new receipts MUST commit atomically under
+that fence, after relevant effects and debt settle. Failure MUST leave neither
+a new receipt without state nor new state justified by an absent receipt.
+Gap credit never creates a baseline. A retained receipt cannot be reused for
+a different obligation.
+
+#### 5.6.4 Final coverage and runtime checks
+
+~~~json
 {
   "type": "DETAIL_COVERAGE",
   "reference_only": true,
   "stream": "item_details",
   "state_stream": "items",
-  "required_keys": ["item-1"],
-  "hydrated_keys": [],
-  "gap_keys": ["item-1"]
+  "required_keys": ["item-1", "item-2"],
+  "complete_keys": [],
+  "empty_keys": ["item-1"],
+  "unchanged_keys": [],
+  "gap_keys": ["item-2"],
+  "obligations": {
+    "item-1": { "kind": "inventory" },
+    "item-2": { "kind": "inventory" }
+  },
+  "validator_domain": "items-v1",
+  "transform_epoch": "details-v1"
 }
-```
+~~~
 
-`reference_only: true`, `stream`, `state_stream`, `required_keys`, and
-`hydrated_keys` are REQUIRED. `gap_keys` is OPTIONAL. Each key is a string or
-number. Each key array MUST contain no duplicate. Every hydrated or gap key
-MUST also be a required key. A gap key counts as accounted only when the runtime
-observed a matching `DETAIL_GAP` for the same stream, key, and parent boundary.
+type, reference_only:true, stream, state_stream, required_keys, all four
+outcome arrays, obligations, validator_domain and transform_epoch are REQUIRED.
+Domain and epoch are non-empty stable identifiers. transform_epoch MUST change
+whenever the schema or transformation changes the represented child state.
+Domain equality includes the validator's source account and semantics; a validator
+for membership alone cannot stand in for one covering content and deletion.
+Opaque validator/cursor values compare by typed JSON structural equality, with
+array order preserved. Scope resources/fields compare as the runtime's normalized
+sets; object member order is not identity. Time ranges MUST be well-typed and
+have since earlier than until; cursor ranges MUST be in one source domain.
+baseline_refs and validators
+are OPTIONAL maps required for the cases in Section 5.6.3. Maps MUST have no
+foreign keys; obligations MUST have exactly the required keys. Freshly
+enumerated complete/empty keys MAY supply validators for their new receipts;
+the runtime binds the domain but cannot verify the source observation.
 
-A `parent_streams` stream emits at most one final coverage message for each
-declared parent boundary evaluated in a run. It emits the message after the
-last related `RECORD` or `DETAIL_GAP`. A runtime MUST reject coverage for an
-undeclared parent. It MUST reject any `DETAIL_COVERAGE` emitted for a
-`state_stream` child.
+Key arrays MUST have no duplicates or overlap. The runtime MUST reject foreign
+outcomes, undeclared/ambiguous relationships, undeclared parents and coverage
+on a state_stream child. hydrated_keys, optional_skip_keys, considered and
+covered are invalid DETAIL_COVERAGE members in 1.0.0. Former optional skips
+must be classified by each call site: proven scope exclusions are not required,
+unrepresentable detail is permanent debt, recoverable omissions are retryable
+debt. Unknown membership cannot silently disappear.
 
-A missing coverage report or an unaccounted required key makes that parent
-checkpoint ineligible to commit. Runtime-specific `considered`, `covered`, and
-`optional_skip_keys` members do not establish portable v0.1 coverage.
+A detail stream emits at most one final coverage per evaluated parent boundary,
+after related effects and gaps. Later effects or gaps MUST NOT reopen that
+boundary. The runtime reconciles the whole sealed boundary, per parent key:
+
+| Outcome | Necessary runtime condition |
+| --- | --- |
+| complete | No rejected effect; at least one durably accepted upsert/delete OR a valid committed baseline. |
+| empty | No accepted upsert; attributed deletes permitted. |
+| unchanged | Valid matching baseline and validator for the exact obligation. |
+| gap | Matching durable gap/locator; no baseline minted from this credit. |
+
+Accepted means the durable write path accepted the effect for this run and
+parent, not that the connector called emit or one sibling succeeded.
+Verified scope exclusion is not an accepted effect. Rejected in-scope or
+unattributable effects MUST NOT vanish: a known-parent rejection forbids that
+key's complete credit; unknown parent withholds the entire affected boundary.
+
+The required set, source closure, candidate completeness, exclusion observations
+and validator truth remain connector assertions (Section 5.7). These checks
+MUST NOT be described as proof of all source data. No child-set digest or
+source-completion receipt is required; the host does not invent required_keys.
+
+#### 5.6.5 SDK integrity
+
+A conforming SDK MUST track candidates at enumeration/parse time independently
+of emission, by stream and known parent. Each candidate retains a disposition:
+upsert, delete, suppression against valid baseline, proven exclusion or unknown.
+Parsing failure MUST NOT remove it from the candidate set.
+
+A field helper such as readField distinguishes READ(value), EXPLICIT_EMPTY
+(source explicitly provides absence/emptiness), and UNAVAILABLE (not
+established). It MUST NOT substitute null, empty string, zero or fabricated
+values for unavailable. Explicit emptiness can be represented only as the
+schema allows. Missing id, unparseable date, shape rejection or unavailable
+required fields taint a known parent into retryable parser/upgrade debt;
+unknown parent withholds the boundary.
+
+emitRecord MUST return a typed LOCAL disposition distinguishing emitted upsert,
+emitted delete, scope exclusion, and rejection/unavailable. Throw/interruption
+is unsettled and MUST NOT advance fingerprints, baselines or completion.
+Only the host attests durable acceptance. SDK API spellings are not wire
+fields; these semantic distinctions are mandatory.
+
+The builder MUST require explicit parent/child enumeration-close events backed
+by Section 6.1 item 14 evidence, and refuse complete/empty without closure.
+Unknown candidates, partial parsing, unreadable required fields and unresolved
+retryable collection failures taint their key or withhold the boundary when
+unattributable. Per-stream integrity is generalized to per-parent obligations;
+an emitted-record counter is not an integrity ledger.
 
 ### 5.7 `STREAM_EVIDENCE`
 
 `STREAM_EVIDENCE` reports independently measured outcomes for a stream that
 declares `state_stream`. It reports the enumeration of the child stream. It
-never gates a checkpoint commit.
+never substitutes for DETAIL_COVERAGE or authorizes a checkpoint commit.
 
 ```json
 {
@@ -1425,7 +1628,9 @@ MUST verify two observable counts:
 
 The second check proves count equality, not gap-key identity, because the
 message contains no gap identifiers. The runtime cannot independently verify
-`unchanged`, a withheld message, or how the connector derived `considered`.
+these aggregate `unchanged` counts, a withheld message, or how the connector
+derived `considered`. This separate STREAM_EVIDENCE count is not the removed
+DETAIL_COVERAGE member.
 Those values remain connector assertions and MUST NOT be used to widen scope or
 commit a checkpoint.
 
@@ -1442,9 +1647,8 @@ boolean `retryable`. It can also include a stable snake-case `code` and a
 `recovery_hint` as defined in Section 5.5.
 
 `error.basis` is OPTIONAL. It is an array of `OBSERVATION` ids (Section 5.10)
-from the same run that the connector says caused the failure. A connector MUST
-NOT send `basis` unless it declares `OBSERVATION`, and it cites only ids that
-it emitted in the run. `basis` is a connector claim. It cannot choose the
+from the same run that the connector says caused the failure. A connector MUST NOT
+cite any id in `basis` that it did not emit as an OBSERVATION in this run. `basis` is a connector claim. It cannot choose the
 terminal event and it cannot bring a runtime record into or out of the
 diagnosis scope (Section 5.11).
 
@@ -1502,8 +1706,8 @@ owner.
 ### 5.10 `OBSERVATION`
 
 `OBSERVATION` reports one typed fact about the run: what the connector saw,
-not what it concludes. A connector MUST NOT emit it unless it declares the
-`OBSERVATION` capability (Section 3.4).
+not what it concludes. Support is mandatory in 1.0.0 (Section 3.4); no
+separate capability declaration enables or disables it.
 
 ```json
 {
@@ -1580,7 +1784,7 @@ discard the fact and record `connector_defect` with class
 
 | `reason` | Case |
 | --- | --- |
-| `undeclared_capability` | The connector did not declare `OBSERVATION`. |
+| `undeclared_capability` | Reserved for older-profile diagnostics; MUST NOT be emitted for a 1.0.0 OBSERVATION, whose separate declaration is not required. |
 | `runtime_fact_type` | The `fact` is a runtime fact type. |
 | `invalid` | The message does not match Section 5.10 and its fact type. |
 | `duplicate_id` | The `id` repeats an earlier `id` in the run. |
@@ -1675,8 +1879,7 @@ NOT present it as a provider change.
 (Section 5.5), or present it to the owner as an instruction, unless the hint's
 predicate below holds over the failure's action-eligible facts. Otherwise it
 MUST show the hint only as the connector's attributed suggestion, together
-with the diagnosis. For a connector that declares `OBSERVATION`, it also
-records `connector_defect` with class `hint_unsupported`. Records that the
+with the diagnosis. It also records `connector_defect` with class `hint_unsupported`. Records that the
 gate itself makes never satisfy a predicate.
 
 | Hint | Predicate in this version |
@@ -1754,7 +1957,7 @@ names the remaining parts. It does not define their behavior.
 
 A conforming connector:
 
-1. Declares a valid v0.1 manifest.
+1. Declares a valid v1.0 manifest.
 2. Reads one valid `START` before it emits a message.
 3. Emits only valid JSON Lines messages defined by this profile or by a
    negotiated extension.
@@ -1770,7 +1973,7 @@ A conforming connector:
     strategies.
 12. When it declares filesystem inputs, reads owner data from local paths only
     through those inputs and writes nothing under a `read` input.
-13. When it declares `OBSERVATION`, emits facts only as Section 5.10 defines,
+13. Emits OBSERVATION facts only as Section 5.10 defines,
     with no secret and no provider text in them, and cites in
     `DONE.error.basis` only ids that it emitted in the run.
 14. Reports an enumerated stream complete, by a `STATE` that marks the
@@ -1796,8 +1999,9 @@ A conforming runtime:
 5. Handles one pending interaction, limits its secret data, and returns a
    `timeout` response when the interaction times out.
 6. Stages and commits state only under Section 5.3 and Section 5.8.
-7. Validates checkpoint dependencies, coverage, and gaps. If it advertises
-   `STREAM_EVIDENCE`, it also validates that message as defined in Section 5.7.
+7. Validates checkpoint dependencies, strict coverage, baselines, gap
+   obligations and generation fences (Section 5.6), and STREAM_EVIDENCE
+   as defined in Section 5.7.
 8. Terminates a connector on a protocol violation, except that it continues
    the run after an `OBSERVATION` violation as Section 5.10.2 requires.
 9. Does not report a cancelled, abandoned, malformed, or incomplete run as
@@ -1815,6 +2019,42 @@ Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either
 claim.
 
+### 6.3 Strict-accounting conformance cases
+
+Implementations claiming 1.0.0 MUST exercise the following cases through their
+actual enumeration, local disposition, durable acceptance and commit paths.
+A test that manually constructs successful coverage without exercising the
+relevant producer or consumer does not establish these requirements.
+
+| Case | Required outcome |
+| --- | --- |
+| Narrow empty inventory, then widened scope with unchanged validator text | Invalidate old receipt/state; recollect. No empty or unchanged reuse. |
+| Complete baseline, then failed attempt with a new validator | Keep prior good baseline; never commit the failed validator as a new baseline. |
+| Only gap credit exists, then unchanged claim | Reject unchanged credit: a gap never minted a baseline. |
+| Owner deletes or GC removes a retained child | Invalidate dependent receipt/state and generation before reuse; recollect. |
+| Nonempty scan, every child suppressed against valid committed baseline | Permit complete with closure and valid reference; no new upsert required, never empty. |
+| One rejected/undateable child beside accepted siblings | Preserve valid data but taint that parent; no complete credit or unsupported checkpoint advance. |
+| Candidate cannot be assigned to a parent | Withhold the affected boundary; do not silently omit the candidate or invent a parent. |
+| Valid child excluded by proved scope constraints | Exclusion, not parse failure; no out-of-scope effect or false hydration credit. |
+| Delete the last child in a full inventory | Explicit parent-attributed delete plus closed empty inventory may commit; empty alone never deletes. |
+| Delta with only tombstones | Complete with accepted attributed deletes when the delta contains deletion candidates; empty is allowed only if zero in-scope children under the declared obligation, never inferred from zero upserts. |
+| Parent enumeration incomplete, including a missing empty-state signal | No coverage; checkpoint withheld even if all observed parents succeeded. |
+| Large-window failure followed by shorter success or empty | Keep original obligation; preserve missing interval debt and never credit the whole range from the suffix. |
+| Recovery covers only part of a gap's interval | Keep exact residual debt or retain the original gap; do not clear it by parent-key match alone. |
+| Stale concurrent completion after newer commit/invalidation | Fence rejects effects/state/receipt/gap settlement; old state cannot reappear. |
+| Crash between state and receipt writes | Atomicity yields both committed or neither; never reusable orphan receipt. |
+| Duplicate/overlapping/foreign keys or effects after coverage finality | Reject protocol violation; no checkpoint based on reopened boundary. |
+| Unknown field vs explicit source emptiness | UNAVAILABLE taints/withholds; EXPLICIT_EMPTY remains distinct and follows the schema. |
+| Shape rejection, retryable failure or deployment cap reported permanent | Reject permanent classification; source_unrepresentable cannot hide implementation debt. |
+| Old runtime/new connector; new strict-only runtime/old connector | Refuse unsupported version before spawn; no implicit downgrade or strict reinterpretation. |
+| First strict run over legacy state | Recollect; no receipt manufactured from legacy hydration, optional skip or fingerprints. |
+| 1.0.0 runtime lacks OBSERVATION or recovery-hint gate | Not conformant; refuse this version instead of partial acceptance. |
+
+Counts alone, authored screenshots, successful package installation and tests of
+helper mirrors do not prove these cases. Source closure and truthful candidate
+enumeration remain the connector's assertions even when all runtime checks pass.
+
+
 ## 7. Runtime-specific extensions
 
 This profile does not define `ASSISTANCE`, `ASSISTANCE_STATUS`,
@@ -1828,7 +2068,7 @@ declares.
 
 A runtime MAY define these features in a separately versioned extension. A
 connector MUST NOT require one without explicit capability or package-version
-coordination. None is required for v0.1 conformance.
+coordination. None is required for v1.0 conformance.
 
 ## 8. Profile versioning
 
@@ -1850,11 +2090,25 @@ support that exact version or apply an explicit compatibility rule that it
 advertises. A new optional message that an older fail-closed runtime would
 reject requires capability negotiation and a runtime-first rollout.
 
-Version 0.2.0 adds the `OBSERVATION` capability and message, the
-`diagnostic_descriptors` manifest member, `DONE.error.basis`, and Sections
-5.11 to 5.13. Every valid 0.1.0 exchange stays valid. A 0.2.0 runtime
-presents the recovery hints of 0.1.0 connectors through the gate of
-Section 5.11.
+Version 1.0.0 is the next-major strict-accounting version. It folds in all
+unreleased 0.2.0 content: OBSERVATION, diagnostic_descriptors, DONE.error.basis,
+and Sections 5.10 through 5.13. Accepting 1.0.0 requires every mandatory rule,
+not partial 0.2.0 support.
+
+A minor cannot invalidate earlier hydrated-without-record or optional_skip_keys
+exchanges. The complete/empty/unchanged/gap replacement therefore requires a
+major version. Lenient parsing, advisory flags or connector folds MUST NOT
+hide its incompatibility. Unsupported versions MUST be refused before spawn.
+
+Rollout is runtime-first. During a bounded catalog migration a runtime MAY run
+explicitly supported old-profile connectors under old rules in separate
+versioned paths. Once the catalog republishes for strict accounting, that
+deployment MUST refuse old-profile connectors; this is not a permanent
+legacy escape hatch. A new runtime MUST NOT interpret an old connector as
+1.0.0. No baseline receipt may be minted from legacy state: the first strict
+run per connection MUST recollect its obligations. An old runtime MUST refuse
+a new connector unless it implements this whole version. Publishing this
+draft changes no current deployment or independent cutover work.
 
 ## 9. Provisional source-backed fulfillment
 
@@ -1890,5 +2144,5 @@ The accepted design gives the provisional capability these constraints:
   dormant until a separate owner deletion or a later return to `retained`.
 
 The proposal remains pending OD-4. A manifest that contains this member does
-not gain v0.1 conformance, and a runtime MUST NOT infer support from the member
+not gain v1.0 conformance, and a runtime MUST NOT infer support from the member
 alone.
