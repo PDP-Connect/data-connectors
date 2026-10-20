@@ -4410,3 +4410,31 @@ test("nutritionCoverageRecoveryHint retries only the causes a rerun can clear", 
 		retry,
 	);
 });
+
+test("resolveOrderDetail: owner-started manual run — a repair at the 100-detail budget cannot fetch a 101st detail", async () => {
+	const flags: RunFlags = {
+		detailAttempts: 100,
+		isManualRun: true,
+		manualRepairAttempted: false,
+		sessionRepairRequired: true,
+	};
+	const page = makeSessionRepairPageStub({
+		htmlSequence: [LIVE_ORDERS_HTML],
+		detailHtmlAfterRepair: DETAIL_HTML,
+	});
+	const result = await resolveOrderDetail(
+		page,
+		flags,
+		"HEB1000000001",
+		immediateRepairDeps(),
+	);
+	assert.equal(
+		flags.detailAttempts,
+		100,
+		"the run must not spend a detail attempt past MAX_DETAIL_ATTEMPTS_PER_RUN",
+	);
+	assert.equal(result.status, "deferred");
+	if (result.status === "deferred") {
+		assert.equal(result.failureKind, "deferred_budget");
+	}
+});

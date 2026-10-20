@@ -1570,6 +1570,13 @@ export async function resolveOrderDetail(
 ): Promise<DetailFetchResult> {
 	if (flags.sessionRepairRequired) {
 		if (flags.isManualRun && !flags.manualRepairAttempted && repairDeps) {
+			if (flags.detailAttempts >= MAX_DETAIL_ATTEMPTS_PER_RUN) {
+				return Promise.resolve({
+					failureKind: "deferred_budget",
+					reason: reasonForDetailFailure("deferred_budget"),
+					status: "deferred",
+				});
+			}
 			const recovered = await attemptManualSessionRepair(
 				page,
 				repairDeps,
