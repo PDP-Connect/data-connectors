@@ -29,6 +29,7 @@ import type {
 
 const HASH_SLUG_LEN = 32;
 const CENTS_MULTIPLIER = 100;
+const QFX_TRANSACTION_AMOUNT_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 
 // ─── Shared module-scope regexes (Biome useTopLevelRegex) ────────────────
 // These were hoisted from page.evaluate() callbacks when we moved DOM
@@ -796,13 +797,16 @@ function extractTransactions(
 	const rawCandidateCount = txnArray.length;
 	const transactions: QfxTransaction[] = [];
 	for (const t of txnArray) {
-		const amtStr = (ofxString(ofxGet(t, "TRNAMT")) ?? "0").trim();
+		const amtStr = (ofxString(ofxGet(t, "TRNAMT")) ?? "").trim();
 		const amountCents = Math.round(Number(amtStr) * CENTS_MULTIPLIER);
 		const fitid = ofxString(ofxGet(t, "FITID")) ?? "";
 		const date = ofxDateToIso(ofxGet(t, "DTPOSTED"));
 		const parsedDate = date ? Date.parse(`${date}T00:00:00.000Z`) : Number.NaN;
 		if (
 			!(
+				QFX_TRANSACTION_AMOUNT_RE.test(amtStr) &&
+				Number.isFinite(Number(amtStr)) &&
+				Number.isSafeInteger(amountCents) &&
 				fitid.trim() &&
 				date &&
 				Number.isFinite(parsedDate) &&

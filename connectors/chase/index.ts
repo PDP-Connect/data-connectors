@@ -2193,15 +2193,29 @@ export async function emitBalancesDetailCoverage(
 	if (!(deps.wantsBalances && deps.wantsAccounts)) {
 		return;
 	}
-	const { requiredKeys, hydratedKeys, gapKeys } =
-		accountDetailCoverageKeys(outcomes);
+	const { requiredKeys, hydratedKeys, gapKeys } = accountDetailCoverageKeys(
+		outcomes.map((outcome) =>
+			outcome.kind === "gap" && outcome.balanceEmitted
+				? { kind: "hydrated", accountId: outcome.accountId }
+				: outcome,
+		),
+	);
+	// A parsed but unaccepted balance is debt, not a fabricated transport gap.
+	const actualGapKeys = gapKeys.filter((key) =>
+		outcomes.some(
+			(outcome) =>
+				outcome.accountId === key &&
+				outcome.kind === "gap" &&
+				outcome.balanceEmitted === undefined,
+		),
+	);
 	await deps.emit(
 		buildDetailCoverageMessage({
 			stream: "balances",
 			stateStream: "accounts",
 			requiredKeys,
 			hydratedKeys,
-			gapKeys,
+			gapKeys: actualGapKeys,
 			considered: outcomes.length,
 			covered: hydratedKeys.length,
 		}),
@@ -2348,6 +2362,8 @@ export type AccountDetailOutcome =
 			accountId: string;
 			reason: DetailGapMessage["reason"];
 			errorClass: string;
+			/** Independent evidence from a parsed QFX despite transaction debt. */
+			balanceEmitted?: boolean;
 	  };
 
 export function classifyNoActivityOutcome(
@@ -2495,14 +2511,21 @@ export async function processParsedAccountQfx(
 
 	let balanceEmitted = false;
 	if (deps.wantsBalances && balance) {
-		await deps.emitRecord("balances", {
-			id: `${account.internal_id}|${balance.as_of}`,
-			account_id: account.internal_id,
-			as_of: balance.as_of,
-			ledger_balance_cents: balance.ledger_cents,
-			available_balance_cents: balance.available_cents,
-		});
-		balanceEmitted = true;
+		await deps.emitRecord(
+			"balances",
+			{
+				id: `${account.internal_id}|${balance.as_of}`,
+				account_id: account.internal_id,
+				as_of: balance.as_of,
+				ledger_balance_cents: balance.ledger_cents,
+				available_balance_cents: balance.available_cents,
+			},
+			{
+				beforeEmit: async () => {
+					balanceEmitted = true;
+				},
+			},
+		);
 	}
 
 	await deps.emit({
@@ -2525,6 +2548,7 @@ export async function processParsedAccountQfx(
 			accountId: account.internal_id,
 			reason: "temporary_unavailable",
 			errorClass: "qfx_partial_parse",
+			balanceEmitted,
 		};
 	}
 	// Reached and parsed (even a 0-transaction QFX is real coverage of this
@@ -2698,6 +2722,7 @@ export async function runTransactionsAndBalances(
 	deps: EmitDeps,
 	page: Page,
 	filteredAccounts: readonly ChaseAccount[],
+	processAccount: typeof processAccountDownload = processAccountDownload,
 ): Promise<void> {
 	const outcomes: AccountDetailOutcome[] = [];
 	for (let i = 0; i < filteredAccounts.length; i += 1) {
@@ -2705,7 +2730,7 @@ export async function runTransactionsAndBalances(
 		if (!account) {
 			continue;
 		}
-		const outcome = await processAccountDownload(deps, page, account, {
+		const outcome = await processAccount(deps, page, account, {
 			index: i + 1,
 			total: filteredAccounts.length,
 		});
