@@ -786,3 +786,15 @@ test("starred cards reject multiple repository identities and nested candidate c
 		assert.deepEqual(parsed.rows, []);
 	}
 });
+
+test("starred card accepts fork-parent and description links plus overlay headings", async () => {
+	const parsed = parseStarredPage(await fixture("starred-card-with-auxiliary-links.html"));
+	assert.equal(parsed.complete, true);
+	assert.equal(parsed.entriesComplete, true);
+	assert.equal(parsed.rejectedRows, 0);
+	assert.equal(parsed.rawRows, 1);
+	assert.equal(parsed.rows.length, 1);
+	assert.equal(parsed.rows[0]?.id, "https://github.com/sample-owner/demo");
+	assert.equal(parsed.rows[0]?.forkedFrom, "upstream-owner/original");
+	assert.equal(parsed.rows[0]?.description, "Example with documentation");
+});

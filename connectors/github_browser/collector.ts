@@ -172,6 +172,11 @@ export async function collectGitHubBrowser(
 				await incomplete("profile", "unreadable_profile");
 				return;
 			}
+			if (parsed.rejectedEntries > 0 || parsed.unreadableFields.some(field =>
+				["pinnedRepositories", "organizations", "achievements", "collectionEntries"].includes(field))) {
+				await incomplete("profile", "unreadable_profile_collections");
+				return;
+			}
 			const emitted = await emitEntity("profile", {
 				id: snapshotId("profile"),
 				...record,
@@ -183,7 +188,7 @@ export async function collectGitHubBrowser(
 				});
 				return;
 			}
-			// Singleton presence only. Embedded lists are best-effort, not inventories.
+			// Singleton presence only, with readable embedded collections.
 			// Never issue self coverage or derive deletes from these fields.
 			if (await flush("profile")) {
 				context.state.profile = { fetched_at: services.now().toISOString() };

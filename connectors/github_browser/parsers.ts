@@ -593,7 +593,7 @@ export function parseProfilePage(
 			const data = classifyRow(item, (node) => node === link ||
 				node.matches('p.pinned-item-desc, [itemprop="programmingLanguage"], a[href$="/stargazers"], a[href$="/forks"], span.Label'));
 			const pinnedLayout = renderedRow(item,
-				item.matches("li") && item.querySelector(".pinned-item-list-item") !== null &&
+				item.matches("li") && (item.matches(".pinned-item-list-item") || item.querySelector(".pinned-item-list-item") !== null) &&
 					item.querySelector("p.pinned-item-desc") !== null && item.querySelector("p.f6") !== null,
 				data);
 			const unreadableSlots: string[] = pinnedLayout ? [] : ["card"];
@@ -607,10 +607,12 @@ export function parseProfilePage(
 		}
 	}
 
-	// Renamed headings/containers cannot make surviving repository entries vanish.
+	// Contribution activity links belong to their own sections, not the pins.
+	// Renamed pin headings/containers cannot make surviving entries vanish.
 	const unclaimedPins = Array.from(document.querySelectorAll("a[href]")).filter((link) =>
 		repositoryName(link.getAttribute("href")) !== null && link.closest(OVERLAY_SELECTOR) === null &&
-		!siteChrome(link, pinnedContainer) && !pinnedRoots.some((root) => root.contains(link)));
+		!siteChrome(link, pinnedContainer) && !pinnedRoots.some((root) => root.contains(link)) &&
+		link.closest(".js-yearly-contributions, #js-contribution-activity") === null);
 	if (unclaimedPins.length > 0) unreadableFields.push("pinnedRepositories");
 
 	const organizations = locateSection(document, /^organizations?\b/iu, "a[href]", ORGANIZATION_HOOKS, '.avatar-group-item, a[href^="/orgs/"]', structure);

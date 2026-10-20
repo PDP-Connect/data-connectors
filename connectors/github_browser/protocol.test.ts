@@ -6,6 +6,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runConnectorProtocolSubprocess } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { collectGitHubBrowser } from "./collector.ts";
+import { parseProfilePage } from "./parsers.ts";
+import type { EmittedMessage } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
 
 const pageObservation = (requestedUrl: string, html: string) => ({
@@ -581,7 +583,9 @@ test("compact pull-request event payloads publish the observed events window", a
 });
 
 test("two-identity starred cards cannot publish with terminal pagination and no counter", async () => {
-	const messages: Array<{ type: string }> = [];
+	const messages: EmittedMessage[] = [];
+	const prior = { starred: { fetched_at: "2026-10-01T00:00:00Z" } };
+	const state = structuredClone(prior);
 	const records: unknown[] = [];
 	const html = withOwner(`<main><turbo-frame id="user-starred-repos"><div class="col-12 d-block width-full border-bottom"><h3><a href="/sample-owner/first">sample-owner/first</a></h3><h3><a href="/sample-owner/second">sample-owner/second</a></h3><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div></turbo-frame>${terminalInventory}</main>`);
 	await collectGitHubBrowser(
@@ -590,7 +594,7 @@ test("two-identity starred cards cannot publish with terminal pagination and no 
 			emitRecord: async (_stream, data) => { records.push(data); },
 			progress: async () => {},
 			requested: new Set(["starred"]),
-			state: {},
+			state,
 		},
 		{
 			fetchPublicJson: async (url) => apiObservation(url, []),
@@ -601,6 +605,13 @@ test("two-identity starred cards cannot publish with terminal pagination and no 
 	);
 	assert.deepEqual(records, []);
 	assert.equal(messages.some(({ type }) => ["RECORD", "STATE", "DETAIL_COVERAGE"].includes(type)), false);
+	assert.deepEqual(state, prior);
+	assert.equal(messages.length, 1);
+	const skip = messages[0];
+	assert.ok(skip?.type === "SKIP_RESULT");
+	assert.equal(skip.stream, "starred");
+	assert.equal(skip.reason, "inventory_not_proven_complete");
+	assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
 });
 
 for (const countConflict of [false, true]) {
@@ -669,4 +680,45 @@ test(`overlapping contribution views ${countConflict ? "withhold conflicting cou
 	);
 });
 
+}
+
+for (const [field, container, brokenEntry] of [
+	["pinnedRepositories", '<div class="js-pinned-items-reorder-container"></div>', '<div class="js-pinned-items-reorder-container"><li><a href="/sponsors/sample-user">Sponsor</a></li></div>'],
+	["organizations", '<div class="avatar-group"></div>', '<div class="avatar-group"><a class="avatar-group-item" href="/"></a></div>'],
+	["achievements", '<div class="profile-achievements"></div>', '<div class="profile-achievements"><a href="/sample-user?achievement=badge"><img src="https://example.test/badge.png"></a></div>'],
+] as const) {
+	for (const failure of ["entry", "section"] as const) {
+		test(`profile with unreadable ${field} ${failure} preserves prior state and signals incomplete`, async () => {
+			const html = (await readFixture("profile.html")).replace(container,
+				failure === "entry" ? brokenEntry : container.replace("></div>", ' aria-busy="true"></div>'));
+			const parsed = parseProfilePage(html, "https://github.com/sample-user");
+			assert.equal(parsed.row?.username, "sample-user");
+			assert.equal(parsed.complete, false);
+			if (failure === "entry") assert.ok(parsed.rejectedEntries > 0);
+			else assert.ok(parsed.unreadableFields.includes(field));
+			const prior = { profile: { fetched_at: "2026-10-01T00:00:00Z" } };
+			const state = structuredClone(prior);
+			const messages: EmittedMessage[] = [];
+			const records: unknown[] = [];
+			await collectGitHubBrowser({
+				emit: async (message) => { messages.push(message); },
+				emitRecord: async (_stream, record) => { records.push(record); },
+				progress: async () => {},
+				requested: new Set(["profile"]), state,
+			}, {
+				fetchPublicJson: async (url) => apiObservation(url, []),
+				now: () => new Date("2026-10-20T17:00:00Z"),
+				openPage: async (url) => pageObservation(url, html),
+				sleep: async () => {},
+			});
+			assert.deepEqual(messages.map(message => message.type), ["SKIP_RESULT"]);
+			const skip = messages[0];
+			assert.ok(skip?.type === "SKIP_RESULT");
+			assert.equal(skip.stream, "profile");
+			assert.equal(skip.reason, "github_browser_incomplete");
+			assert.deepEqual(skip.recovery_hint, { action: "retry_by_runtime", retryable: true });
+			assert.deepEqual(records, []);
+			assert.deepEqual(state, prior);
+		});
+	}
 }

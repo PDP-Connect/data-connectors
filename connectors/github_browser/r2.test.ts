@@ -115,12 +115,13 @@ test("profile is read through the loader that waits for the late contribution he
  assert.equal(result.records.length, 1);
 });
 
-test("profile partial embedded lists still emit singleton presence without inventory authority", async () => {
+test("profile partial embedded lists withhold singleton snapshots", async () => {
  const html = (await fixture("profile-current-github.html")) + '<div><h2>Organizations</h2><ul><li></li></ul></div>';
  assert.equal(parseProfilePage(html, "https://github.com/sample-user").complete, false);
  const result = await collect(["profile"], { openPage: async url => page(url, html) });
- assert.equal(result.records.length, 1);
- assert.equal(result.records[0]?.data.id, "sample-user:profile");
+ assert.equal(result.records.length, 0);
+ assert.deepEqual(result.state, {});
+ assert.ok(result.messages.some(m => m.type === "SKIP_RESULT"));
  assert.equal(result.messages.some(m => m.type === "DETAIL_COVERAGE"), false);
 });
 
@@ -217,4 +218,47 @@ test("events retain legacy null details when a PushEvent omits its commits list"
  assert.equal(events[0]?.branch, "main");
  assert.ok(result.messages.some((message) => message.type === "DETAIL_COVERAGE"));
  assert.ok(!result.messages.some((message) => message.type === "SKIP_RESULT"));
+});
+
+test("profile absent optional details do not prevent a successful checkpoint", async () => {
+ const html = (await fixture("profile.html"))
+  .replace('<span itemprop="worksFor"></span><span itemprop="homeLocation"></span><a itemprop="url" href=""></a>', '<ul class="vcard-details"></ul>');
+ const parsed = parseProfilePage(html, "https://github.com/sample-user");
+ assert.equal(parsed.complete, true);
+ const result = await collect(["profile"], { openPage: async url => page(url, html) });
+ assert.equal(result.records.length, 1);
+ for (const field of ["company", "location", "website"]) {
+  assert.equal(field in (result.records[0]?.data ?? {}), false);
+ }
+ assert.ok(result.state.profile);
+ assert.deepEqual(result.messages.map(message => message.type), ["STATE"]);
+});
+
+test("recorded profile shape with pinned marker on list item publishes nested data", async () => {
+ const html = await fixture("profile-pinned-listitem-current-github.html");
+ const parsed = parseProfilePage(html, "https://github.com/sample-user");
+ assert.equal(parsed.rejectedEntries, 0);
+ assert.deepEqual(parsed.unreadableFields, []);
+ assert.equal(parsed.complete, true);
+ const result = await collect(["profile"], { openPage: async url => page(url, html) });
+ assert.equal(result.records.length, 1);
+ const record = result.records[0]?.data;
+ assert.deepEqual(record?.pinnedRepositories, [{ fullName: "sample-owner/demo", url: "https://github.com/sample-owner/demo", description: "Synthetic pinned repository", language: "TypeScript", stars: 5, forks: 2 }]);
+ assert.equal((record?.organizations as unknown[])?.length, 1);
+ assert.equal((record?.achievements as unknown[])?.length, 1);
+ assert.deepEqual(result.messages.map(message => message.type), ["STATE"]);
+});
+
+test("recorded contribution overview and activity repository links are separate from pins", async () => {
+ const base = await fixture("profile-current-github.html");
+ for (const section of [
+  '<div class="js-yearly-contributions"><div id="user-activity-overview"><a href="/activity-owner/overview">activity-owner/overview</a></div></div>',
+  '<div id="js-contribution-activity"><div class="contribution-activity-listing"><h4><a href="/activity-owner/recent">activity-owner/recent</a></h4></div></div>',
+ ]) {
+  const parsed = parseProfilePage(base.replace("</main>", `${section}</main>`), "https://github.com/sample-user");
+  assert.equal(parsed.complete, true);
+  assert.deepEqual(parsed.unreadableFields, []);
+  assert.equal(parsed.rejectedEntries, 0);
+  assert.equal(parsed.row?.pinnedRepositories?.length, 1);
+ }
 });
