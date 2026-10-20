@@ -716,3 +716,31 @@ test("All stars totals are exact, owner-bound, unfiltered and reconciled with pr
 		assert.equal(proof.reason, "terminal_unverified");
 	}
 });
+
+test("current div starred cards retain details and malformed cards remain rejected", () => {
+	const card = `<div class="col-12 d-block width-full border-bottom"><h3><a href="/sample-owner/demo">sample-owner/demo</a></h3><p>Example</p><span itemprop="programmingLanguage">TypeScript</span><a href="/sample-owner/demo/stargazers">12</a><a href="/sample-owner/demo/forks">3</a><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div>`;
+	const html = `<turbo-frame id="user-starred-repos">${card}</turbo-frame>`;
+	const parsed = parseStarredPage(html);
+	assert.equal(parsed.complete, true);
+	assert.deepEqual(parsed.unreadableFields, []);
+	assert.equal(parsed.rows[0]?.description, "Example");
+	assert.equal(parsed.rows[0]?.language, "TypeScript");
+	assert.equal(parsed.rows[0]?.stars, 12);
+	assert.equal(parsed.rows[0]?.forks, 3);
+	const damaged = parseStarredPage(html.replace(/<h3>.*?<\/h3>/u, ""));
+	assert.equal(damaged.rows.length, 0);
+	assert.equal(damaged.rejectedRows, 1);
+	assert.equal(damaged.entriesComplete, false);
+});
+
+test("compact PR acceptance still rejects wrong repositories and missing details outside that shape", () => {
+	const pr = { id: 77, number: 7, url: "https://api.github.com/repos/sample-owner/demo/pulls/7", head: { ref: "feature" }, base: { ref: "main" } };
+	for (const pull_request of [
+		{ ...pr, url: "https://api.github.com/repos/other-owner/demo/pulls/7" },
+		{ ...pr, head: {} },
+		{ ...pr, body: "Source supplied body but no title" },
+	]) {
+		const parsed = parseLegacyEventPageItem({ id: "123", type: "PullRequestEvent", public: true, created_at: "2026-10-19T12:00:00Z", repo: { name: "sample-owner/demo" }, payload: { action: "opened", number: 7, pull_request } });
+		assert.equal(parsed.complete, false);
+	}
+});
