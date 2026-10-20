@@ -7725,3 +7725,70 @@ test("resource exclusion never hides missing identity or a malformed selected ca
 	assert.equal(attachmentOutsideResourceScope(requested, { id: "abcdef:1", size_bytes: -1 } as AttachmentRecord), false);
 	assert.equal(attachmentOutsideResourceScope(requested, { id: "abcdef:2" } as AttachmentRecord), true);
 });
+
+for (const lane of ["historical", "served", "recovery-only"] as const) {
+ for (const rejectSelected of [false, true]) {
+  test(`production attachment caller preserves resources: ${lane}, schema rejected=${rejectSelected}`, async () => {
+   const message = makeServedRecoveryMsg({attachments:[16,16],emailId:"abc123",uid:321});
+   const requested = new Map<string, StreamRequest>([
+    ["attachments",{name:"attachments",resources:["abc123:1"]}],
+   ]);
+   const coverage = makeAttachmentDetailCoverage();
+   const harness = makeRecordingEmit();
+   const hydrated: string[] = [];
+   const hydrate = statusStampingHydrator({"abc123:1":"hydrated","abc123:2":"hydrated"});
+   const fetchRanges: string[] = [];
+   const client = {
+    search: async () => [321],
+    fetchOne: async () => message,
+    fetch: (range: string) => {
+     fetchRanges.push(range);
+     return (async function* () { yield message; })();
+    },
+   } as unknown as Parameters<typeof runAttachmentBackfillAndRecoveryPass>[0]["client"];
+   const served = lane !== "historical";
+   await runAttachmentBackfillAndRecoveryPass({
+    allMail:makeAllMailMailbox(),attachmentBackfillRequested:true,
+    attachmentCoverage:coverage,client,
+    deps:{
+     requested,emittedAt:FROZEN_NOW,
+     emitRecord:realResourceEmitter(requested,harness.emit),
+     ...(served?{detailGaps:[1,2].map(partIndex=>makeServedRecoveryGap({
+      gapId:`caller-gap-${partIndex}`,leaseId:`caller-lease-${partIndex}`,messageId:"abc123",partIndex,
+     }))}:{}),
+    },
+    emit:harness.emit,fetchBodiesBound:defaultFetchBodies,
+    hydrateAttachment:async(msg,attachment)=>{
+     hydrated.push(attachment.id);
+     const result=await hydrate(msg,attachment);
+     return rejectSelected?{...result,record:{...result.record,size_bytes:-1}}:result;
+    },
+    recoveredAttachmentGapIds:new Set<string>(),
+    recoveryOnly:lane==="recovery-only",
+    session:{
+     attachmentBackfill:{backfilled_through_uid:250,uidvalidity:123},
+     existsTotal:600,priorExistsTotal:undefined,fullResync:false,
+     highestModseqCursor:null,
+     messagesBackfill:{uidvalidity:123,backfilled_through_uid:0,completed_at:null},
+     priorDeltaHoldbackRuns:0,priorModseq:null,priorUidnext:500,uidnext:600,uidvalidityNum:123,
+    },
+   });
+   assert.deepEqual(hydrated,["abc123:1"],"lost resource wiring must fail before excluded bytes hydrate");
+   assert.deepEqual(coverage.requiredKeys,["abc123:1"],"excluded sibling is outside denominator");
+   assert.deepEqual(coverage.hydratedKeys,rejectSelected?[]:["abc123:1"],"only actual local acceptance credits hydration");
+   const records=harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="attachments");
+   assert.deepEqual(records.map(m=>m.type==="RECORD"?m.key:null),rejectSelected?[]:["abc123:1"]);
+   const recovered=harness.protocolMessages.filter(m=>m.type==="DETAIL_GAP_RECOVERED");
+   assert.deepEqual(recovered.map(m=>m.gap_id),served&&!rejectSelected?["caller-gap-1"]:[]);
+   if(served){
+    const attempted=harness.protocolMessages.filter(m=>m.type==="DETAIL_GAP_ATTEMPTED");
+    assert.ok(attempted.some(m=>m.gap_id==="caller-gap-2"),"scoped-out served gap is attempted, not ACKed");
+    assert.equal(harness.protocolMessages.some(m=>m.type==="DETAIL_GAP"&&m.record_key==="abc123:2"),false,"excluded served gap is not re-deferred");
+    assert.deepEqual(fetchRanges,[],"served gaps preempt historical fetch");
+   } else {
+    assert.equal(fetchRanges.length,1,"exercise actual historical caller");
+   }
+   if(rejectSelected) assert.ok(harness.protocolMessages.some(m=>m.type==="SKIP_RESULT"&&m.reason==="schema_validation_failed"));
+  });
+ }
+}
