@@ -25,10 +25,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import {
-	emitCsvTransactions,
 	classifyCsvTransactionResult,
-	recoverServedAccountTransactionGaps,
+	emitCsvTransactions,
 	emitTransactionsDetailCoverage,
+	recoverServedAccountTransactionGaps,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DashboardAccount } from "./types.ts";
@@ -90,12 +90,12 @@ test("emitCsvTransactions: CSV with data rows but zero usable transactions emits
 	assert.equal(skips.length, 1);
 	assert.equal(
 		skips[0]?.type === "SKIP_RESULT" ? skips[0].reason : "",
-		"csv_no_usable_transactions",
+		"csv_partial_parse",
 	);
 	const msg = skips[0]?.type === "SKIP_RESULT" ? skips[0].message : "";
 	assert.match(
 		msg,
-		/CSV parsed no usable transactions from 2 data row\(s\) for account 2\/3/,
+		/CSV syntax or required header was malformed for account 2\/3/,
 	);
 	assert.deepEqual(
 		skips[0]?.type === "SKIP_RESULT" ? skips[0].diagnostics : null,
@@ -103,11 +103,18 @@ test("emitCsvTransactions: CSV with data rows but zero usable transactions emits
 			account_ordinal: 2,
 			account_total: 3,
 			data_rows: 2,
+			usable_rows: 0,
+			malformed_csv: true,
 		},
 	);
 	// No account number / last-four / name in the evidence.
 	assert.doesNotMatch(msg, /0000|Test Checking|acct-raw/);
-	assert.deepEqual(result, { dataRows: 2, latest: null, usableCount: 0 });
+	assert.deepEqual(result, {
+		dataRows: 2,
+		latest: null,
+		usableCount: 0,
+		malformedCsv: true,
+	});
 });
 
 test("emitCsvTransactions: header-only CSV reports no data rows by ordinal", async () => {
@@ -269,7 +276,11 @@ for (const [name, csv, count] of [
 		1,
 	],
 	["malformed only", 'Date,Description,Amount\n01/06/2026,"Unclosed,-12.00', 0],
-	["malformed header", '"Date,Description,Amount', 0],
+	[
+		"malformed header",
+		'Da"te,Description,Amount\nDate,Description,Amount\n01/07/2026,Must not become data,1.00',
+		0,
+	],
 	[
 		"invalid calendar mixed",
 		"Date,Description,Amount\n02/28/2026,Good,-4.50\n02/30/2026,Bad,12.00",
@@ -308,6 +319,21 @@ for (const [name, csv, count] of [
 			count,
 			"retain only unambiguous valid siblings",
 		);
+		if (name === "malformed only" || name === "malformed header") {
+			assert.ok(
+				harness.protocolMessages.some(
+					(m) => m.type === "SKIP_RESULT" && m.reason === "csv_partial_parse",
+				),
+			);
+			assert.equal(
+				harness.protocolMessages.some(
+					(m) =>
+						m.type === "SKIP_RESULT" &&
+						m.reason === "csv_no_usable_transactions",
+				),
+				false,
+			);
+		}
 		await recoverServedAccountTransactionGaps(deps, [account.outcome]);
 		await emitTransactionsDetailCoverage(deps, [account.outcome], true);
 		assert.equal(
@@ -347,6 +373,93 @@ test("CSV integrity: quoted commas, multiline fields, escaped quotes and leap da
 			.outcome.kind,
 		"hydrated",
 	);
+	assert.equal(
+		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
+		false,
+	);
+});
+
+for (const [name, csv, count] of [
+	[
+		"blank amount mixed",
+		"Date,Description,Amount\n01/05/2026,Coffee,\n01/06/2026,Tea,-1.00",
+		1,
+	],
+	["invalid only", "Date,Description,Amount\n01/05/2026,Coffee,N/A", 0],
+	[
+		"no amount header",
+		"Date,Description,Debit,Credit\n01/05/2026,Coffee,1.00,",
+		0,
+	],
+	["no amount header only", "Date,Description,Debit,Credit", 0],
+	[
+		"unsafe cents",
+		"Date,Description,Amount\n01/05/2026,Coffee,900719925474099.99",
+		0,
+	],
+	["amount suffix", "Date,Description,Amount\n01/05/2026,Coffee,1.00oops", 0],
+	[
+		"ambiguous multiline fragment",
+		'Date,Description,Amount\n01/05/2026,Good,1.00\n01/06/2026,PIZZA 5" PAN,"note\n01/07/2026,Phantom,1.00\nend"\n01/08/2026,Real,2.00',
+		2,
+	],
+] as const) {
+	test(`CSV admissibility: ${name} retains debt without invented transactions`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const deps = {
+			...harness,
+			servedAccountTransactionGaps: new Map([["acct-raw-0001", "served-gap"]]),
+		};
+		const result = await emitCsvTransactions(
+			deps,
+			await writeTempCsv(csv),
+			makeAccount(),
+			"2025-01-01",
+			1,
+			1,
+		);
+		const account = classifyCsvTransactionResult(
+			"acct-raw-0001",
+			"2025-01-01",
+			null,
+			result,
+		);
+		assert.equal(account.outcome.kind, "gap");
+		assert.equal(account.last_date, "2025-01-01");
+		assert.equal(harness.emitted.length, count);
+		assert.equal(
+			harness.emitted.some((r) => r.data.description === "Phantom"),
+			false,
+		);
+		await recoverServedAccountTransactionGaps(deps, [account.outcome]);
+		assert.equal(
+			harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+	});
+}
+test("CSV initial BOM and valid money formats retain exact values", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const csv =
+		'\uFEFF"Date","Description","Amount"\r\n01/05/2026,Zero,0.00\r\n01/06/2026,Negative,-1.00\r\n01/07/2026,Positive,+2.00\r\n01/08/2026,Grouped,"$1,234.56"\r\n01/09/2026,Paren,"(3.00)"\r\n01/10/2026,"Interior\uFEFFvalue",4.00';
+	const result = await emitCsvTransactions(
+		harness,
+		await writeTempCsv(csv),
+		makeAccount(),
+		"2025-01-01",
+		1,
+		1,
+	);
+	assert.equal(
+		classifyCsvTransactionResult("acct-raw-0001", "2025-01-01", null, result)
+			.outcome.kind,
+		"hydrated",
+	);
+	assert.deepEqual(
+		harness.emitted.map((r) => r.data.amount),
+		[0, -100, 200, 123456, -300, 400],
+	);
+	assert.equal(harness.emitted.at(-1)?.data.description, "Interior\uFEFFvalue");
 	assert.equal(
 		harness.protocolMessages.some((m) => m.type === "SKIP_RESULT"),
 		false,

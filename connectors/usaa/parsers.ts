@@ -297,18 +297,21 @@ export function parseCsvWithIntegrity(text: string): CsvParseResult {
 	const rows: string[][] = [];
 	let cur: string[] = [];
 	let field = "";
-	let state: "plain" | "quoted" | "closed" | "invalid" = "plain";
+	let state: "plain" | "quoted" | "closed" = "plain";
+	let invalidRow = false;
 	let malformed = false;
 	let started = false;
 	const endRow = () => {
 		// Keep an empty placeholder so a malformed header cannot promote a data row.
-		rows.push(state === "invalid" ? [] : [...cur, field]);
+		rows.push(invalidRow ? [] : [...cur, field]);
+		invalidRow = false;
 		cur = [];
 		field = "";
 		state = "plain";
 		started = false;
 	};
-	for (let i = 0; i < text.length; i += 1) {
+	// Only the initial byte-order mark is framing, never strip field data.
+	for (let i = text.startsWith("\uFEFF") ? 1 : 0; i < text.length; i += 1) {
 		const c = text[i];
 		if (state === "quoted") {
 			if (c === '"' && text[i + 1] === '"') {
@@ -324,7 +327,6 @@ export function parseCsvWithIntegrity(text: string): CsvParseResult {
 			continue;
 		}
 		started = true;
-		if (state === "invalid") continue;
 		if (c === ",") {
 			cur.push(field);
 			field = "";
@@ -333,14 +335,18 @@ export function parseCsvWithIntegrity(text: string): CsvParseResult {
 			state = "quoted";
 		} else if (c === '"' || state === "closed") {
 			malformed = true;
-			state = "invalid";
+			invalidRow = true;
+			// A stray quote cannot open a quoted field. Keep scanning later
+			// comma-delimited fields so their quoted newlines stay in this row.
+			state = "plain";
+			field += c;
 		} else {
 			field += c;
 		}
 	}
 	if (state === "quoted") {
 		malformed = true;
-		state = "invalid";
+		invalidRow = true;
 	}
 	if (started || cur.length || field !== "") endRow();
 	return { rows, malformed };
@@ -372,6 +378,29 @@ function csvDate(raw: string | null): string | null {
 	)
 		return null;
 	return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/** Whole-field CSV money only; no substring match or fabricated zero. */
+function csvAmountToCents(raw: string): number | null {
+	const value = raw.trim();
+	const parens = value.startsWith("(") && value.endsWith(")");
+	const body = parens ? value.slice(1, -1) : value;
+	const parts =
+		/^(?<prefix>[+-]?\$?|\$[+-]?)(?<whole>\d+|\d{1,3}(?:,\d{3})+)\.(?<fraction>\d{2})$/.exec(
+			body,
+		)?.groups;
+	if (!parts?.whole || !parts.fraction) return null;
+	if (parens && /[+-]/.test(parts.prefix ?? "")) return null;
+	const cents =
+		BigInt(parts.whole.replace(COMMA_RE, "")) * 100n + BigInt(parts.fraction);
+	if (cents > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+	const sign = parens || parts.prefix?.includes("-") ? -1 : 1;
+	return cents === 0n ? 0 : Number(cents) * sign;
+}
+
+export function hasCsvTransactionHeader(header: string[] = []): boolean {
+	const idx = csvHeaderIndices(header);
+	return idx.idxDate >= 0 && idx.idxAmt >= 0;
 }
 
 interface CsvHeaderIndices {
@@ -428,6 +457,8 @@ function csvRowToTransaction({
 			? (row[idx.idxOrig] ?? "").trim() || description
 			: description;
 	const amount = idx.idxAmt >= 0 ? (row[idx.idxAmt] ?? "").trim() : "";
+	const amountCents = csvAmountToCents(amount);
+	if (amountCents === null) return null;
 	const tupleKey = `${date}|${amount}|${original}`;
 	const ord = tupleOrdinal.get(tupleKey) || 0;
 	tupleOrdinal.set(tupleKey, ord + 1);
@@ -444,7 +475,7 @@ function csvRowToTransaction({
 		description,
 		original_description: original,
 		category: categoryRaw,
-		amount: currencyToCents(amount) ?? 0,
+		amount: amountCents,
 		currency: "USD",
 		balance_after_cents: balanceRaw ? currencyToCents(balanceRaw) : null,
 		check_number: checkMatch?.[1] ?? null,
