@@ -1831,6 +1831,37 @@ allows. Missing identity, unparseable date, shape rejection or unavailable
 required fields taint a known parent into connector_transform_failed debt;
 an unknown parent withholds the boundary.
 
+For this interim policy, a partial record is a candidate for which only part
+of the selected record was read, or a required mapped value is unavailable
+or malformed. The connector MUST hold back the whole record; it MUST NOT emit
+an apparently complete upsert containing only the readable portion. In
+particular, it MUST NOT clear an existing stored field by omitting it or
+substituting null, zero or an empty value for an unreadable value. A proven
+scope projection is not a partial read; Section 5.1 still governs authorized
+field selection.
+
+A legitimate source-empty or source-absent field MUST be distinguished from
+an unavailable or malformed field, with the source basis retained in the
+candidate's local disposition. Only the schema's permitted representation
+may be emitted. This local reason is not a new wire member or a host
+attestation that the source was fully read.
+
+For a held record with a known obligated parent, the connector MUST retain
+the candidate and account for the original obligation with the existing
+bound, retryable connector_transform_failed gap. Only validated durable
+gap admission supplies accounted debt. If the parent cannot be established,
+or the gap cannot be admitted, the affected checkpoint MUST be withheld.
+A checkpoint MUST NOT skip the held record as complete, empty or unchanged.
+An otherwise eligible gap-covered checkpoint retains the original debt and
+recovery locator; it does not certify that the held record was emitted.
+
+Example: a selected transaction's identity and amount are readable, but its
+required date is malformed. Emit no transaction upsert, retain the prior
+stored row unchanged, and account for its known account's obligation with
+a matching gap. If that account is unknown, withhold the boundary instead.
+A source-explicit absent optional memo may use the schema's absence semantics;
+an unreadable memo MUST NOT be relabeled absent to overwrite a stored memo.
+
 Informative API example: a helper called readField could return READ(value),
 EXPLICIT_EMPTY or UNAVAILABLE. Neither this API spelling nor these local
 labels are wire fields.
@@ -2067,6 +2098,47 @@ run remains failed.
 If one eligible state write fails during a multi-checkpoint commit, the runtime
 MUST fail the run. It MUST make the failing checkpoint and every checkpoint
 already committed observable.
+
+#### 5.8.1 Explicit deletes before a later failure
+
+Explicit delete RECORDs are admitted as they arrive through the existing
+durable write safeguards, independently of final checkpoint sealing. A
+runtime MUST refuse an invalid, unauthorized or stale-generation delete.
+An admitted delete MUST retain its required attribution under Section 5.2
+and atomically invalidate every affected old or new materialization receipt
+and dependent state under Section 5.6.3. A later failure does not restore
+those receipts.
+
+An already durably admitted delete remains an effect if the run later fails.
+This policy does not promise rollback of accepted deletes, a transaction
+spanning the entire run, or atomic rollback across checkpoint streams.
+Replay MUST retain the existing identity, authorization, generation and
+idempotence safeguards; repeated delivery is not a new completion proof.
+
+Delete admission alone MUST NOT authorize STATE, a complete/empty receipt
+or debt settlement. For a failed or withheld checkpoint, no such new receipt,
+state advancement or settlement may be published. The certified
+stream-scoped exception in Section 5.8 still permits an independently
+eligible unaffected checkpoint; it does not make the affected boundary
+successful. Already admitted matching debt remains outstanding unless a
+later eligible full-obligation settlement commits.
+
+Example: under the current grant and fixed generation, a connector sends an
+attributed delete for child c1 of parent p1; the host admits it and invalidates
+p1's old receipt. Reading another required child then fails and the affected
+checkpoint is withheld. c1 remains deleted, the old receipt stays invalid,
+and no new complete/empty receipt or recovered-debt credit is minted from
+that failed boundary. Retrying the delete must be safe without implying that
+the rest of p1 was collected. If the first delete had stale authority, it
+would have been refused and could supply no emitted-effect credit.
+
+Empty inventory is never an implicit delete. Only an explicit, admitted,
+parent-attributed delete counts as an emitted effect; counts and failed-run
+diagnostics MUST distinguish local emission from host durable acceptance.
+A rejected delete cannot justify empty or unchanged. The existing distinction
+between attributed deletes from proven zero-child inventory (empty) and a
+delta containing deletes (complete) applies only when that boundary is
+otherwise eligible to commit.
 
 ### 5.9 `PROGRESS`
 
@@ -2423,6 +2495,15 @@ A conforming runtime:
     visible.
 12. Transmits diagnostic data only as Section 5.12 allows.
 
+13. Enforces admission and checkpoint rules for disclosed partial-record
+    outcomes: matching admitted gap debt or withholding the affected boundary,
+    never fabricated completion. Applies explicit deletes under the fixed-
+    generation fence, preserves admitted effects through later failure, and
+    distinguishes them from eligible state, receipt and debt-settlement
+    commits (Sections 5.6.5 and 5.8.1). These checks do not independently prove
+    source completeness or detect an undisclosed partial read; connector
+    integrity remains a separate conformance obligation.
+
 Connector conformance and runtime conformance are separate claims. An artifact
 registry entry or successful package installation does not establish either
 claim.
@@ -2439,6 +2520,10 @@ relevant producer or consumer does not establish these requirements.
 | Narrow empty inventory, then widened scope with unchanged validator text | Invalidate old receipt/state; recollect. No empty or unchanged reuse. |
 | Complete baseline, then parser gap with no accepted effects, then old validator matches | Keep any still-valid old receipt only as retained history; matching debt forces gap, never unchanged/complete/empty. Only a later full-obligation seal can settle it. Never install the failed validator. |
 | Only gap credit exists, then unchanged claim | Reject unchanged credit: a gap never minted a baseline. |
+| Required mapped field malformed after other fields were read | Hold the whole record; preserve the stored row. A known obligated parent requires matching admitted transformation debt; an unknown parent withholds the boundary. No apparently complete partial upsert. |
+| Source-explicit empty/absent field versus failed field read | Preserve the distinction and source basis in the local disposition; only legitimate schema-permitted emptiness/absence may be emitted. No invented null/zero or new wire field. |
+| Admitted explicit delete followed by failure of the affected checkpoint | Delete remains applied and affected old/new receipts remain invalid; publish no new state, complete/empty receipt or debt settlement for that boundary. Replay safely; do not claim whole-run rollback. |
+| Stale, unauthorized or invalid delete followed by an empty claim | Refuse the effect and emitted-effect credit; reject false empty/unchanged completion. Empty inventory alone never deletes retained rows. |
 | Owner deletes or GC removes a retained child | Invalidate dependent receipt/state and generation before reuse; recollect. |
 | Nonempty scan, every child suppressed against a valid committed complete-type receipt | Permit complete with closure and a currently valid reference; no new upsert required, never empty. An empty-type receipt cannot justify this case. |
 | One rejected or undateable child beside accepted siblings | Preserve valid data; reject complete, empty and unchanged credit for that parent. Matching gap debt can account for its uncovered obligation without withholding an otherwise eligible checkpoint. |
