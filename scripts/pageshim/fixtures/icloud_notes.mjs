@@ -40,7 +40,7 @@ export const icloudNotesFixtures = {
 };
 export const pageshimCase = {
 	fixtures: icloudNotesFixtures,
-	scopes: ["icloud.profile", "icloud.notes", "icloud.folders"],
+	scopes: ["icloud_notes.profile", "icloud_notes.notes", "icloud_notes.folders"],
 	exportSummary: { count: 5, label: "items", details: "5 iCloud items" },
 	emptyExportSummary: { count: 0, label: "items", details: "0 iCloud items" },
 };

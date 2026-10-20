@@ -183,7 +183,7 @@ export interface PriorOrdersEvidence {
  *  deletes, tombstones, or overwrites on an empty page; it only declines to
  *  advance the year cursor. */
 export const AMAZON_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE =
-	"Amazon reported no order history for a year in which PDPP previously collected orders. " +
+	"Amazon reported no order history for a year in which orders were previously collected. " +
 	"Your stored orders are retained and untouched. This run was stopped instead of recording " +
 	"an empty history, because a page showing no orders cannot prove those orders are gone.";
 

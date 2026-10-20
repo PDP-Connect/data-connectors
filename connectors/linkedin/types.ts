@@ -189,6 +189,7 @@ export interface VoyagerResolvedProfile {
 export interface VoyagerProfilesByIdResponse {
 	elements?: VoyagerResolvedProfile[];
 	results?: Record<string, VoyagerResolvedProfile | undefined>;
+	errors?: Record<string, { status?: number }>;
 }
 
 /** Shape returned by the in-page `fetchApi` wrapper: either the parsed JSON

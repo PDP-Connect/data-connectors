@@ -2528,7 +2528,7 @@ test("runForwardScan: H-E-B's real 'No past orders' page aborts when this connec
 			(m as { reason: string }).reason === "stream_collection_failed",
 	) as { message: string; diagnostics: Record<string, unknown> } | undefined;
 	assert.ok(skip, "the abort must surface a SKIP_RESULT the owner can read");
-	assert.match(skip.message, /previously collected orders/);
+	assert.match(skip.message, /orders were previously collected/);
 	assert.match(skip.message, /retained and untouched/);
 	assert.doesNotMatch(
 		skip.message,

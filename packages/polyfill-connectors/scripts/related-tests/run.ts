@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * `pnpm test:related <base-ref>` — runs `node --test` against the related
- * selection for local iteration only. See cli.ts's module comment for the
+ * `npm run test:related -- <base-ref>` — dispatches the related selection by
+ * runner kind for local iteration only. See cli.ts's module comment for the
  * fail-closed contract and why this is not a merge gate.
  */
 
@@ -27,7 +27,6 @@ const TEST_SANDBOX = join(
 	"test-sandbox",
 	"test-sandbox",
 );
-const NODE_TEST = ["--test", "--import", "tsx", "--test-timeout=120000"];
 
 type Lane = "sandboxed" | "namespaces";
 
@@ -46,7 +45,14 @@ function runInLane(lane: Lane, nodeArgs: readonly string[]): boolean {
 			stdio: "inherit",
 		});
 		return true;
-	} catch {
+	} catch (error) {
+		if (
+			error instanceof Error &&
+			"signal" in error &&
+			typeof error.signal === "string"
+		) {
+			process.kill(process.pid, error.signal);
+		}
 		return false;
 	}
 }
@@ -157,17 +163,17 @@ function main(): void {
 	const sandboxedTargets = targets.filter((file) => !NAMESPACE_TESTS.has(file));
 	if (sandboxedTargets.length > 0) {
 		ok = runInLane("sandboxed", [
-			...NODE_TEST,
-			`--test-concurrency=${rawConcurrency}`,
+			"scripts/test-dispatch.mjs",
+			rawConcurrency,
 			...sandboxedTargets.map(testFileArgument),
 		]);
 	}
 	if (namespaceTargets.length > 0) {
 		ok =
 			runInLane("namespaces", [
-				...NODE_TEST,
-				"--test-concurrency=1",
-				...namespaceTargets,
+				"scripts/test-dispatch.mjs",
+				"1",
+				...namespaceTargets.map(testFileArgument),
 			]) && ok;
 	}
 	process.exit(ok ? 0 : 1);

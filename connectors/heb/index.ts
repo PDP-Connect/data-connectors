@@ -45,6 +45,10 @@ import {
 } from "../../packages/polyfill-connectors/src/fingerprint-cursor.ts";
 import { walkPagesWithCeiling } from "../../packages/polyfill-connectors/src/page-ceiling.ts";
 import {
+	parseAccountProfile,
+	sourceReportsEmptyHistory,
+} from "./account-source.ts";
+import {
 	type InventoryEvidence,
 	inventoryIsComplete,
 	unprovenInventory,
@@ -57,7 +61,6 @@ import {
 	buildNutritionRecord,
 	buildOrderItemRecord,
 	buildOrderRecord,
-	buildProfileRecord,
 	diagnoseEmptyListPage,
 	inspectOrderListParsing,
 	isIncapsulaBlocked,
@@ -68,7 +71,6 @@ import {
 	parseOrderDetailDom,
 	parseOrdersListDom,
 	parseOrdersListStructured,
-	parseProfileDom,
 	resolveMaxPage,
 } from "./parsers.ts";
 import {
@@ -1198,7 +1200,7 @@ export const HEB_EMPTY_AFTER_RETENTION_MESSAGE =
  *  Stored records are untouched — this connector never deletes, tombstones, or
  *  overwrites on an empty page; it only declines to advance. */
 export const HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE =
-	"H-E-B reported no order history, but PDPP previously collected orders for this account. " +
+	"H-E-B reported no order history, but orders were previously collected for this account. " +
 	"Your stored orders are retained and untouched. This run was stopped instead of recording " +
 	"an empty history, because a page showing no orders cannot prove the history is gone.";
 
@@ -1471,6 +1473,8 @@ export interface RunFlags {
 }
 
 export interface EmitDeps extends HydrationDeps {
+	/** First-page authenticated source response explicitly reports no retained orders. */
+	emptyOrderHistoryProven?: boolean;
 	inventoryEvidence?: InventoryEvidence;
 	capture?: BrowserCollectContext["capture"];
 	reportStreamFailure?: BrowserCollectContext["reportStreamFailure"];
@@ -2119,6 +2123,7 @@ export async function processListOrder(
 /** Traversal bounds and source evidence are separate. A max page link or
  * resume boundary can stop collection but cannot prove inventory completion. */
 export interface ForwardScanResult {
+	sourceReportedEmpty: boolean;
 	pages: InventoryEvidence[];
 	evidence: InventoryEvidence;
 	newestOrderDate: string | null;
@@ -2142,6 +2147,7 @@ export async function runForwardScan(
 	priorOrdersEvidence: PriorOrdersEvidence = { hasPriorOrders: false },
 ): Promise<ForwardScanResult> {
 	const pages: InventoryEvidence[] = [];
+	let sourceReportedEmpty = false;
 	let newestOrderDate: string | null = null;
 	// Run-scoped dedup: parseOrdersListDom already dedupes within one page, but
 	// a pagination-boundary repeat (the last order on page N reappearing as the
@@ -2178,6 +2184,8 @@ export async function runForwardScan(
 			// shared page to any order-detail URL (fix for the item-enriched scan
 			// silently truncating after page 1: detail HTML has no pagination nav).
 			const { maxPage, orders } = listPage;
+			sourceReportedEmpty =
+				pageNum === 1 && listPage.sourceReportedEmpty === true;
 			pages.push(listPage.evidence);
 			advertisedMaxPage = maxPage;
 
@@ -2245,6 +2253,7 @@ export async function runForwardScan(
 		[...seenOrderIds],
 	);
 	return {
+		sourceReportedEmpty,
 		newestOrderDate,
 		stoppedAtBoundary,
 		truncated: walk.truncated,
@@ -2285,6 +2294,7 @@ export async function reportListPageCeiling(
 }
 
 interface LoadedListPage {
+	sourceReportedEmpty?: boolean;
 	evidence: InventoryEvidence;
 	maxPage: number;
 	orders: ListPageOrder[];
@@ -2396,6 +2406,19 @@ async function loadListPage(
 		}
 		return { maxPage: maxPageResolution.value, orders, evidence };
 	}
+	if (
+		pageNum === 1 &&
+		orders.length === 0 &&
+		navigation.responseSucceeded === true &&
+		!evidence.loading &&
+		evidence.rejectedRows === 0 &&
+		evidence.missingIdentityRows === 0 &&
+		evidence.sourceIds.length === 0 &&
+		sourceReportsEmptyHistory(html) &&
+		(!priorOrdersEvidence.hasPriorOrders ||
+			priorOrdersAreBeyondRetention(priorOrdersEvidence, new Date()))
+	)
+		return { maxPage: 1, orders, evidence, sourceReportedEmpty: true };
 	const classification = await reportEmptyPageDiagnostics(
 		page,
 		pageNum,
@@ -2445,7 +2468,10 @@ export async function emitOrderItemsCoverage(
 	deps: EmitDeps,
 	coverage: OrderItemsCoverage,
 ): Promise<void> {
-	if (!inventoryIsComplete(deps.inventoryEvidence)) {
+	if (
+		!inventoryIsComplete(deps.inventoryEvidence) &&
+		!(deps.emptyOrderHistoryProven && coverage.required.length === 0)
+	) {
 		await emitInventoryIncomplete(deps, "order_items");
 		return;
 	}
@@ -2465,7 +2491,10 @@ export async function emitOrdersCoverage(
 	deps: EmitDeps,
 	coverage: OrdersCoverage,
 ): Promise<void> {
-	if (!inventoryIsComplete(deps.inventoryEvidence)) {
+	if (
+		!inventoryIsComplete(deps.inventoryEvidence) &&
+		!(deps.emptyOrderHistoryProven && coverage.considered.length === 0)
+	) {
 		await emitInventoryIncomplete(deps, "orders");
 		return;
 	}
@@ -2559,11 +2588,13 @@ export async function collectProfile(
 		"emit" | "emitRecord" | "emittedAt" | "waitForHydration"
 	>,
 ): Promise<void> {
+	let responseSucceeded = false;
 	try {
-		await page.goto(PROFILE_URL, {
+		const response = await page.goto(PROFILE_URL, {
 			waitUntil: "domcontentloaded",
 			timeout: NAV_TIMEOUT_MS,
 		});
+		responseSucceeded = response?.ok() === true;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		await deps.emit({
@@ -2600,28 +2631,12 @@ export async function collectProfile(
 		return;
 	}
 
-	const extraction = parseProfileDom(html);
-	const profileEvidence = unprovenInventory(
-		"profile",
-		PROFILE_URL,
-		landedUrl,
-		html,
-		extraction.email ? [extraction.email] : [],
-	);
-	const addressEvidence = unprovenInventory(
-		"addresses",
-		PROFILE_URL,
-		landedUrl,
-		html,
-		extraction.deliveryAddresses?.map((address) => address.address) ?? [],
-	);
-	// Labels and address cards identify observed fields, not owner-bound complete
-	// source sections. Withhold unknown addresses or unreadable primary markers.
-	const record = buildProfileRecord(extraction, deps.emittedAt);
+	const record = parseAccountProfile(html);
 	if (
-		record === null ||
-		!inventoryIsComplete(profileEvidence) ||
-		!inventoryIsComplete(addressEvidence)
+		!responseSucceeded ||
+		landedUrl !== PROFILE_URL ||
+		unprovenInventory("profile", PROFILE_URL, landedUrl, html).loading ||
+		!record
 	) {
 		await emitInventoryIncomplete(deps, "profile");
 		return;
@@ -3080,7 +3095,9 @@ export const hebConnector: BrowserConnectorConfig = {
 				await emitInventoryIncomplete({ emit }, stream);
 			return;
 		}
-		const listComplete = inventoryIsComplete(scan.evidence);
+		const listComplete =
+			inventoryIsComplete(scan.evidence) || scan.sourceReportedEmpty;
+		deps.emptyOrderHistoryProven = scan.sourceReportedEmpty;
 		deps.inventoryEvidence = scan.evidence;
 		if (wantsOrders) {
 			if (listComplete && !scan.truncated) {

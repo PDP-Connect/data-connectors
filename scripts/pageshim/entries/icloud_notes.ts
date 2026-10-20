@@ -9,8 +9,8 @@ declare const PAGESHIM_CONNECTOR_VERSION: string;
 (globalThis as Record<string, unknown>).__pageshimMain = (
 	page: ShimPage, initialState: Record<string, unknown>, supportsState: boolean,
 ) => runOnPageShim(page, {
-	platform: "icloud",
-	scopes: ["icloud.profile", "icloud.notes", "icloud.folders"],
+	platform: "icloud_notes",
+	scopes: ["icloud_notes.profile", "icloud_notes.notes", "icloud_notes.folders"],
 	version: PAGESHIM_CONNECTOR_VERSION,
 	loginUrl: "https://www.icloud.com/notes",
 	loginMessage: "Sign in to iCloud Notes, then return here.",

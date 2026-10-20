@@ -483,3 +483,190 @@ test("an events failure is isolated and does not prevent later requested streams
 		),
 	);
 });
+
+test("current div-based starred cards publish after the exact owner total is met", async () => {
+	const messages: Array<{ type: string }> = [];
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const html =
+		withOwner(`<nav><a href="/sample-user?tab=stars" data-tab-item="stars">Stars <span class="Counter">1</span></a></nav>
+		<turbo-frame id="user-starred-repos"><div class="position-relative"><form><input name="q"></form>
+		<div class="col-12 d-block width-full tmp-py-4 border-bottom color-border-muted"><div class="d-inline-block mb-1"><h3><a href="/sample-owner/demo">sample-owner / demo</a></h3></div><p>Example repository</p><div><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div></div></div></turbo-frame>`);
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push(message);
+			},
+			emitRecord: async (stream, data) => {
+				records.push({ stream, data });
+			},
+			progress: async () => {},
+			requested: new Set(["starred"]),
+			state: {},
+		},
+		{
+			fetchPublicJson: async () => {
+				throw new Error("exact total needs no REST fallback");
+			},
+			now: () => new Date("2026-10-20T17:00:00Z"),
+			openPage: async (url) =>
+				pageObservation(
+					url,
+					url === "https://github.com/" ? profilePlaceholder : html,
+				),
+			sleep: async () => {},
+		},
+	);
+	assert.equal(records.length, 1);
+	assert.equal((records[0]?.data.starred as unknown[]).length, 1);
+	assert.deepEqual(
+		messages.map((message) => message.type),
+		["STATE", "DETAIL_COVERAGE"],
+	);
+});
+
+test("compact pull-request event payloads publish the observed events window", async () => {
+	const messages: Array<{ type: string }> = [];
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push(message);
+			},
+			emitRecord: async (stream, data) => {
+				records.push({ stream, data });
+			},
+			progress: async () => {},
+			requested: new Set(["events"]),
+			state: {},
+		},
+		{
+			fetchPublicJson: async (url) => ({
+				...apiObservation(url, [
+					{
+						id: "123",
+						type: "PullRequestEvent",
+						public: true,
+						created_at: "2026-10-19T12:00:00Z",
+						repo: { name: "sample-owner/demo" },
+						payload: {
+							action: "opened",
+							number: 7,
+							pull_request: {
+								id: 77,
+								number: 7,
+								url: "https://api.github.com/repos/sample-owner/demo/pulls/7",
+								head: { ref: "feature", sha: "abc", repo: { id: 1 } },
+								base: { ref: "main", sha: "def", repo: { id: 1 } },
+							},
+						},
+					},
+				]),
+				link: null,
+			}),
+			now: () => new Date("2026-10-20T17:00:00Z"),
+			openPage: async (url) => pageObservation(url, profilePlaceholder),
+			sleep: async () => {},
+		},
+	);
+	assert.equal(records.length, 1);
+	const events = records[0]?.data.events as Array<Record<string, unknown>>;
+	assert.equal(events.length, 1);
+	assert.equal(events[0]?.title, "PR #7 (feature)");
+	assert.equal(events[0]?.body, null);
+	assert.equal(events[0]?.url, "https://github.com/sample-owner/demo/pull/7");
+	assert.deepEqual(
+		messages.map((message) => message.type),
+		["STATE", "DETAIL_COVERAGE"],
+	);
+});
+
+test("two-identity starred cards cannot publish with terminal pagination and no counter", async () => {
+	const messages: Array<{ type: string }> = [];
+	const records: unknown[] = [];
+	const html = withOwner(`<main><turbo-frame id="user-starred-repos"><div class="col-12 d-block width-full border-bottom"><h3><a href="/sample-owner/first">sample-owner/first</a></h3><h3><a href="/sample-owner/second">sample-owner/second</a></h3><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div></turbo-frame>${terminalInventory}</main>`);
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => { messages.push(message); },
+			emitRecord: async (_stream, data) => { records.push(data); },
+			progress: async () => {},
+			requested: new Set(["starred"]),
+			state: {},
+		},
+		{
+			fetchPublicJson: async (url) => apiObservation(url, []),
+			now: () => new Date("2026-10-20T17:00:00Z"),
+			openPage: async (url) => pageObservation(url, url === "https://github.com/" ? profilePlaceholder : html),
+			sleep: async () => {},
+		},
+	);
+	assert.deepEqual(records, []);
+	assert.equal(messages.some(({ type }) => ["RECORD", "STATE", "DETAIL_COVERAGE"].includes(type)), false);
+});
+
+for (const countConflict of [false, true]) {
+test(`overlapping contribution views ${countConflict ? "withhold conflicting counts" : "may shade the same count differently"}`, async () => {
+	const records: Array<{ stream: string; data: Record<string, unknown> }> = [];
+	const messages: Array<{ type: string }> = [];
+	const now = new Date("2026-10-20T17:00:00Z");
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => {
+				messages.push(message);
+			},
+			emitRecord: async (stream, data) => {
+				records.push({ stream, data });
+			},
+			progress: async () => {},
+			requested: new Set(["contributions"]),
+			state: {},
+		},
+		{
+			now: () => now,
+			sleep: async () => {},
+			fetchPublicJson: async () => {
+				throw new Error("not used");
+			},
+			openPage: async (url) => pageObservation(url, profilePlaceholder),
+			openContributionPage: async (url) => {
+				const year = Number(/from=(\d{4})/u.exec(url)?.[1] ?? 2026);
+				const start =
+					year === 2026
+						? new Date("2025-10-21T00:00:00Z")
+						: new Date(`${year}-01-01T00:00:00Z`);
+				const end = year === 2026 ? "2026-10-20" : `${year}-12-31`;
+				const cells: string[] = [];
+				const count = countConflict && year === 2025 ? 2 : 1;
+				for (
+					let date = start;
+					date.toISOString().slice(0, 10) <= end;
+					date.setUTCDate(date.getUTCDate() + 1)
+				) {
+					cells.push(
+						`<td class="ContributionCalendar-day" data-date="${date.toISOString().slice(0, 10)}" data-count="${count}" data-level="${year === 2026 ? 2 : 1}"></td>`,
+					);
+				}
+				return pageObservation(
+					url,
+					withOwner(
+						`<h2 id="js-contribution-activity-description">${cells.length * count} contributions</h2><table>${cells.join("")}</table>`,
+					),
+				);
+			},
+		},
+	);
+	if (countConflict) {
+		assert.equal(records.length, 0);
+		assert.deepEqual(messages.map(message => message.type), ["SKIP_RESULT"]);
+		return;
+	}
+	assert.equal(records.length, 1);
+	assert.equal((records[0]?.data.days as unknown[]).length, 1389);
+	const days = records[0]?.data.days as Array<{ date: string; level: number }>;
+	assert.equal(days.find(day => day.date === "2025-10-21")?.level, 2);
+	assert.deepEqual(
+		messages.map((message) => message.type),
+		["STATE", "DETAIL_COVERAGE"],
+	);
+});
+
+}
