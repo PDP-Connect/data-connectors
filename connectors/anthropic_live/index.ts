@@ -93,7 +93,7 @@ const CLAUDE_ORIGIN = "https://claude.ai";
 const CLAUDE_HOME_URL = `${CLAUDE_ORIGIN}/new`;
 const CLAUDE_LOGIN_URL = `${CLAUDE_ORIGIN}/login`;
 export const ANTHROPIC_LIVE_LOGIN_MESSAGE =
-	"Sign in to Claude in the secure browser. PDPP continues automatically when Claude confirms the session.";
+	"Sign in to Claude in the secure browser. The import continues automatically once Claude confirms you're signed in.";
 
 const CONVERSATIONS_STREAM = "conversations";
 const MESSAGES_STREAM = "messages";

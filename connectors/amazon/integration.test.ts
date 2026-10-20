@@ -1107,7 +1107,7 @@ test("scrapeListPage: Amazon's empty-year page aborts when this year already yie
 			message.reason === "amazon_empty_history_after_prior_orders",
 	) as { diagnostics: Record<string, unknown>; message: string } | undefined;
 	assert.ok(skip, "the abort must surface a SKIP_RESULT the owner can read");
-	assert.match(skip.message, /previously collected orders/);
+	assert.match(skip.message, /orders were previously collected/);
 	assert.match(skip.message, /retained and untouched/);
 	assert.doesNotMatch(
 		skip.message,

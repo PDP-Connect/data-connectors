@@ -1550,7 +1550,7 @@ async function fillVenmoPassword(
 			...(capture ? { capture } : {}),
 			...(completeAssistance ? { completeAssistance } : {}),
 			message:
-				"Venmo is showing a human-verification challenge (CAPTCHA) that PDPP will not attempt to solve. " +
+				"Venmo is showing a human-verification challenge (CAPTCHA) that the connector will not attempt to solve. " +
 				"Complete the challenge and finish signing in to Venmo in the secure browser, then respond success.",
 			page,
 			reason: "captcha",

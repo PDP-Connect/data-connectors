@@ -113,7 +113,7 @@ async function ensureSession({
 		completeAssistance,
 		isProbeSuccessful: (result) => result === true,
 		message:
-			"Sign in to GitHub in the secure browser, then continue. PDPP will verify the session before collecting.",
+			"Sign in to GitHub in the secure browser, then continue. Collection starts once the session is verified.",
 		page,
 		probe: () => probeGitHubBrowserSession(page),
 		readinessProbe: (readinessPage) => probeGitHubBrowserSession(readinessPage),
