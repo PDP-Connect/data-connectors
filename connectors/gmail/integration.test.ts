@@ -7742,13 +7742,14 @@ for (const lane of ["historical", "served", "recovery-only"] as const) {
     search: async () => [321],
     fetchOne: async () => message,
     fetch: (range: string) => {
+     assert.equal(range,"251:499","historical metadata fetch uses exact UID boundaries");
      fetchRanges.push(range);
      return (async function* () { yield message; })();
     },
    } as unknown as Parameters<typeof runAttachmentBackfillAndRecoveryPass>[0]["client"];
    const served = lane !== "historical";
    await runAttachmentBackfillAndRecoveryPass({
-    allMail:makeAllMailMailbox(),attachmentBackfillRequested:true,
+    allMail:makeAllMailMailbox(),attachmentBackfillRequested:lane!=="recovery-only",
     attachmentCoverage:coverage,client,
     deps:{
      requested,emittedAt:FROZEN_NOW,
@@ -7782,13 +7783,34 @@ for (const lane of ["historical", "served", "recovery-only"] as const) {
    assert.deepEqual(recovered.map(m=>m.gap_id),served&&!rejectSelected?["caller-gap-1"]:[]);
    if(served){
     const attempted=harness.protocolMessages.filter(m=>m.type==="DETAIL_GAP_ATTEMPTED");
-    assert.ok(attempted.some(m=>m.gap_id==="caller-gap-2"),"scoped-out served gap is attempted, not ACKed");
+    assert.deepEqual(attempted.map(m=>({gap_id:m.gap_id,lease_id:m.lease_id})),[
+     {gap_id:"caller-gap-1",lease_id:"caller-lease-1"},
+     {gap_id:"caller-gap-2",lease_id:"caller-lease-2"},
+    ],"both served attempts retain their exact fixture lease");
     assert.equal(harness.protocolMessages.some(m=>m.type==="DETAIL_GAP"&&m.record_key==="abc123:2"),false,"excluded served gap is not re-deferred");
     assert.deepEqual(fetchRanges,[],"served gaps preempt historical fetch");
    } else {
-    assert.equal(fetchRanges.length,1,"exercise actual historical caller");
+    assert.deepEqual(fetchRanges,["251:499"],"exercise exact historical caller range");
    }
    if(rejectSelected) assert.ok(harness.protocolMessages.some(m=>m.type==="SKIP_RESULT"&&m.reason==="schema_validation_failed"));
   });
  }
 }
+
+
+test("unleased served attachment emits no DETAIL_GAP_ATTEMPTED", async () => {
+ const message=makeServedRecoveryMsg({attachments:[16],emailId:"abc123",uid:321});
+ const requested=new Map<string,StreamRequest>([["attachments",{name:"attachments",resources:["abc123:1"]}]]);
+ const harness=makeRecordingEmit();
+ const gap=makeServedRecoveryGap({gapId:"unleased-gap",messageId:"abc123",partIndex:1});
+ delete gap.lease_id;
+ assert.equal(gap.lease_id,undefined);
+ await recoverServedAttachmentGaps({
+  search:async()=>[321],fetchOne:async()=>message,
+ },{
+  requested,detailGaps:[gap],emitProtocol:harness.emit,
+  emitRecord:realResourceEmitter(requested,harness.emit),
+  hydrateAttachment:statusStampingHydrator({"abc123:1":"hydrated"}),
+ });
+ assert.equal(harness.protocolMessages.some(m=>m.type==="DETAIL_GAP_ATTEMPTED"),false);
+});
