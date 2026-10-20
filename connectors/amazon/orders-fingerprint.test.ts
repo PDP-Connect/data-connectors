@@ -537,10 +537,12 @@ test("processListOrder: time-excluded order and children require no hydration or
  });
  const deps:EmitDeps = {...makeDeps(RUN1_AT).deps,emit:harness.emit,emitRecord:runtime.emit,
   isRecordSelected:runtime.isSelected,orderItemsCoverage:newOrderItemsCoverage(),ordersCoverage:newOrdersCoverage()};
- await processListOrder({} as Parameters<typeof processListOrder>[0],deps,{
+ const flags = {
   detailAttempts:0,detailCaptured:false,failedDetailCaptured:false,repairAttempted:false,
   sessionRepairRequired:false,temporaryDetailFailures:0,
- },makeListOrder());
+ };
+ await processListOrder({} as Parameters<typeof processListOrder>[0],deps,flags,makeListOrder());
+ assert.equal(flags.detailAttempts, 0, "excluded order must not attempt detail hydration");
  assert.deepEqual(deps.orderItemsCoverage,newOrderItemsCoverage());
  assert.deepEqual(deps.ordersCoverage,newOrdersCoverage());
  assert.equal(harness.protocolMessages.length,0);
@@ -582,4 +584,83 @@ test("accepted sibling plus excluded child covers the order without caching a pa
  assert.deepEqual(deps.orderItemsCoverage,{required:[list.orderId],hydrated:[list.orderId],gap:[]});
  assert.equal(deps.hydratedOrders?.size,0);
  assert.equal(harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items").length,1);
+});
+
+test("processListOrder: narrow child resources hydrate selected child, not the parent ID", async () => {
+ const { processListOrder } = await import("./index.ts");
+ const list = makeListOrder();
+ const probe = makeDeps(RUN1_AT);
+ await emitOrderAndItems(probe.deps, list, makeDetail(), "2026-01-05");
+ const selected = probe.emitted.find(r => r.stream === "order_items")?.data.id;
+ assert.equal(typeof selected, "string");
+ assert.notEqual(selected, list.orderId, "fixture must distinguish child and parent resource IDs");
+ const harness = makeRecordingEmit();
+ const cursor = openFingerprintCursor(undefined, { excludeFromFingerprint: ["fetched_at"] });
+ const runtime = makeEmitRecord({
+  requested: new Map([["orders", {name:"orders"}], ["order_items", {name:"order_items", resources:[String(selected)]}]]),
+  emittedAt: RUN1_AT, emit:harness.emit, validateRecord, isTombstone:undefined,
+  timeRangeFieldFor:()=>({field:"order_date",format:"date"}),
+ });
+ const deps: EmitDeps = {
+  ...makeDeps(RUN1_AT, cursor).deps, emit:harness.emit, emitRecord:runtime.emit,
+  isRecordSelected:runtime.isSelected, itemResourcesRestricted:true,
+  hydratedOrders:new Map(), orderItemsCoverage:newOrderItemsCoverage(),
+ };
+ const flags = {detailAttempts:0,detailCaptured:false,failedDetailCaptured:false,repairAttempted:false,
+  sessionRepairRequired:false,temporaryDetailFailures:0};
+ let navigations = 0;
+ let reads = 0;
+ const html = '<div id="orderDetails"><div data-component="chargeSummary">Grand Total: $42.99</div>' +
+  '<div data-component="purchasedItemsRightGrid"><div data-component="itemTitle"><a href="/dp/B01ABCDEFG">Widget</a></div><div data-component="unitPrice">$39.99</div></div>' +
+  '<div data-component="purchasedItemsRightGrid"><div data-component="itemTitle"><a href="/dp/B02ABCDEFG">Other</a></div><div data-component="unitPrice">$3.00</div></div></div>';
+ const page = {
+  goto:async()=>{navigations += 1;},
+  waitForSelector:async()=>{},
+  url:()=> "https://www.amazon.com/gp/your-account/order-details?orderID=" + list.orderId,
+  content:async()=>{reads += 1;return html;},
+ } as unknown as Parameters<typeof processListOrder>[0];
+ await processListOrder(page,deps,flags,list);
+ assert.equal(flags.detailAttempts,1,"selected child requires a real detail attempt");
+ assert.equal(navigations,1);
+ assert.equal(reads,1,"actual detail HTML must be parsed");
+ const children = harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items");
+ assert.equal(children.length,1,"unselected sibling must not emit");
+ assert.ok(children[0]?.type==="RECORD");
+ assert.equal(children[0].data.id,selected);
+ assert.deepEqual(deps.orderItemsCoverage,{required:[list.orderId],hydrated:[list.orderId],gap:[]});
+ assert.equal(deps.hydratedOrders?.size,0,"partial scope must not establish global hydration");
+ assert.deepEqual(cursor.toState(),{},"partial scope must not establish a global fingerprint");
+});
+
+test("resource-excluded schema-invalid child remains debt, unlike valid excluded child", async () => {
+ const {processResolvedListOrder} = await import("./index.ts");
+ for (const invalid of [false,true]) {
+  const list = makeListOrder({items:[]});
+  const detail = makeDetail();
+  if (invalid) detail.items[0]!.quantity = Number.NaN;
+  const harness = makeRecordingEmit();
+  const cursor = openFingerprintCursor(undefined,{excludeFromFingerprint:["fetched_at"]});
+  const probe = makeDeps(RUN1_AT);
+  let checkedChild = false;
+  probe.deps.emitRecord = async (stream, data) => {
+   if (stream === "order_items") {
+    checkedChild = true;
+    assert.equal(validateRecord(stream, data).ok, !invalid, "fixture uses actual builder and schema");
+   }
+  };
+  await emitOrderAndItems(probe.deps, list, detail, "2026-01-05");
+  assert.equal(checkedChild, true);
+  const runtime = makeEmitRecord({
+   requested:new Map([["orders",{name:"orders"}],["order_items",{name:"order_items",resources:["different-child"]}]]),
+   emittedAt:RUN1_AT,emit:harness.emit,isTombstone:undefined,timeRangeFieldFor:()=>null,
+   validateRecord,
+  });
+  const deps:EmitDeps={...makeDeps(RUN1_AT,cursor).deps,emit:harness.emit,emitRecord:runtime.emit,
+   isRecordSelected:runtime.isSelected,hydratedOrders:new Map(),orderItemsCoverage:newOrderItemsCoverage()};
+  await processResolvedListOrder(deps,list,"2026-01-05",{detail,detailGapReason:"temporary_unavailable",detailFailureKind:null});
+  assert.deepEqual(deps.orderItemsCoverage,{required:invalid?[list.orderId]:[],hydrated:[],gap:[]});
+  assert.equal(deps.hydratedOrders?.size,0);
+  assert.deepEqual(cursor.toState(),{});
+  assert.equal(harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items").length,0);
+ }
 });
