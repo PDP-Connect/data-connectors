@@ -53,6 +53,7 @@ async function collectOnPreservedPage(
 		page.waitForEvent("popup"),
 		page.click("#provider"),
 	]);
+	// Navigate after the popup event so the attached HAR recorder can observe this request.
 	await popup.goto(new URL("/provider", baseUrl).toString(), {
 		waitUntil: "load",
 	});
@@ -97,6 +98,7 @@ runConnector({
 			page.waitForEvent("popup"),
 			page.click("#provider"),
 		]);
+		// Navigate after the popup event so the attached HAR recorder can observe this request.
 		await popup.goto(new URL("/provider", baseUrl).toString(), {
 			waitUntil: "load",
 		});

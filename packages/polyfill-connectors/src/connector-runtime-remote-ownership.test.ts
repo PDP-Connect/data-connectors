@@ -252,8 +252,7 @@ test("connector runs attached to an external browser close only their own pages"
 		);
 
 		if (run.record) {
-			// A second CDP client records this HAR. The fixture navigates the
-			// popup after its target is available so this tests observable traffic.
+			// Attached CDP HAR can miss a popup's first navigation; see the Known gap in browser-launch.ts (#523).
 			const har = JSON.parse(await readFile(harPath, "utf8")) as {
 				log: { entries: { request: { url: string } }[] };
 			};
