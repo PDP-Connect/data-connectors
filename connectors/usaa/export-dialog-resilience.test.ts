@@ -21,6 +21,8 @@ import {
 	driveExport,
 	type EmitDeps,
 	emitPdfStatementTransactions,
+	processAccountTransactions,
+	recoverServedAccountTransactionGaps,
 	runSingleLadderAttempt,
 	tryExportLadder,
 } from "./index.ts";
@@ -35,6 +37,7 @@ interface FieldState {
 }
 
 interface ExportPageShape {
+	outcomeForStart?: (start: string) => "success" | "failure" | "empty";
 	detachField?: FieldName;
 	dialog?: boolean;
 	end?: FieldState;
@@ -143,6 +146,12 @@ function makePage(shape: ExportPageShape): ExportPageProbe {
 				}
 				if (isSubmit) {
 					submitCount += 1;
+					events.push(`submit:${values.start}`);
+					if (
+						shape.outcomeForStart?.(values.start) &&
+						shape.outcomeForStart(values.start) !== "success"
+					)
+						return;
 					emit("response", makeResponse());
 					emit("download", {});
 					return;
@@ -223,10 +232,20 @@ function makePage(shape: ExportPageShape): ExportPageProbe {
 				}
 				return ["date-range"];
 			},
-			textContent: async (): Promise<string | null> => null,
+			textContent: async (): Promise<string | null> =>
+				isError && shape.outcomeForStart
+					? shape.outcomeForStart(values.start) === "empty"
+						? "No transactions to export"
+						: "Please try again later"
+					: null,
 			waitFor: async ({ state }: { state: string }): Promise<void> => {
 				await Promise.resolve();
-				if (state === "visible" && isError) {
+				if (
+					state === "visible" &&
+					isError &&
+					(!shape.outcomeForStart ||
+						shape.outcomeForStart(values.start) === "success")
+				) {
 					throw new Error("no dialog error is present");
 				}
 				if (state === "visible" && isDialog && shape.dialog === false) {
@@ -652,3 +671,91 @@ test("PDF parse summary shows plain progress and keeps the template counters in 
 		'[usaa-diagnostic] pdf_parse_complete {"transactions":0,"statements":0,"unknown_templates":0,"unreconciled":0}',
 	]);
 });
+
+for (const suffixOutcome of ["success", "empty"] as const) {
+	test(`account export: shorter ${suffixOutcome} cannot certify the failed original window`, async () => {
+		const run = async (fullWindowWorks: boolean) => {
+			const probe = makePage({
+				dialog: true,
+				start: {},
+				end: {},
+				outcomeForStart: (start) =>
+					start === "01/02/2025"
+						? fullWindowWorks
+							? "success"
+							: "failure"
+						: suffixOutcome,
+			});
+			const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+			let records = 0;
+			const deps: EmitDeps = {
+				emit: async (m) => {
+					messages.push(m);
+				},
+				emitRecord: async () => {
+					records += 1;
+				},
+				servedAccountTransactionGaps: new Map([
+					["fixture-account", "gap-original"],
+				]),
+			};
+			const result = await processAccountTransactions(
+				deps,
+				{} as BrowserContext,
+				probe.page,
+				async () => ({
+					request_id: "fixture",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				}),
+				{
+					account_id_raw: "fixture-account",
+					account_type: "checking",
+					account_url: "/my/checking/fixture-account",
+					balance_cents: 0,
+					last_four: "0000",
+					name: "Fixture checking",
+					raw_text: "Fixture checking",
+				},
+				null,
+				"2025-01-02",
+				"2025-01-02",
+				{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+				1,
+				1,
+			);
+			assert.ok(result);
+			await recoverServedAccountTransactionGaps(deps, [result.outcome]);
+			return { result, records, messages, events: probe.events() };
+		};
+		const partial = await run(false);
+		assert.equal(
+			partial.events.filter((e) => e.startsWith("submit:")).length,
+			2,
+			"full export failed then suffix was tried",
+		);
+		assert.equal(
+			partial.result.outcome.kind,
+			"gap",
+			"suffix success must not certify the original interval",
+		);
+		assert.equal(
+			partial.result.last_date,
+			null,
+			"uncovered history must hold the watermark",
+		);
+		assert.equal(
+			partial.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		if (suffixOutcome === "success")
+			assert.ok(partial.records > 0, "keep the useful suffix records");
+		const retry = await run(true);
+		assert.equal(
+			retry.events.find((e) => e.startsWith("submit:")),
+			"submit:01/02/2025",
+		);
+		assert.equal(retry.result.outcome.kind, "hydrated");
+		assert.ok(retry.records > 0);
+	});
+}

@@ -2908,7 +2908,7 @@ export function classifyCsvTransactionResult(
 	};
 }
 
-async function processAccountTransactions(
+export async function processAccountTransactions(
 	deps: EmitDeps,
 	context: BrowserContext,
 	page: Page,
@@ -2949,7 +2949,18 @@ async function processAccountTransactions(
 	if (streamState.sessionDeadMidRun) {
 		return null;
 	}
+	const incompleteWindow = usedSince !== null && usedSince > desiredSince;
+	const uncoveredWindow: AccountTransactionResult = {
+		last_date: priorLastDate,
+		outcome: {
+			accountId,
+			kind: "gap",
+			reason: "temporary_unavailable",
+			errorClass: "export_window_incomplete",
+		},
+	};
 	if (!csvPath) {
+		if (exportEmpty && incompleteWindow) return uncoveredWindow;
 		if (exportEmpty) {
 			return {
 				last_date: priorLastDate || usedSince || null,
@@ -2980,6 +2991,9 @@ async function processAccountTransactions(
 		accountTotal,
 		fingerprintCursor,
 	);
+	// Keep useful suffix records, but neither advance the original watermark
+	// nor acknowledge a served account gap until the requested window succeeds.
+	if (incompleteWindow) return uncoveredWindow;
 	return classifyCsvTransactionResult(
 		accountId,
 		priorLastDate,
