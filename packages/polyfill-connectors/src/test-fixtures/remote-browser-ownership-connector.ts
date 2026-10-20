@@ -53,7 +53,9 @@ async function collectOnPreservedPage(
 		page.waitForEvent("popup"),
 		page.click("#provider"),
 	]);
-	await popup.waitForLoadState();
+	await popup.goto(new URL("/provider", baseUrl).toString(), {
+		waitUntil: "load",
+	});
 	if (process.env.PDPP_OWNERSHIP_FIXTURE_DOWNLOAD === "1") {
 		// A download on the reused run page: the launcher must count it as the
 		// run's (it goes into a recording's HAR) although it did not create
@@ -95,7 +97,9 @@ runConnector({
 			page.waitForEvent("popup"),
 			page.click("#provider"),
 		]);
-		await popup.waitForLoadState();
+		await popup.goto(new URL("/provider", baseUrl).toString(), {
+			waitUntil: "load",
+		});
 		await emitRecord("items", { id: userTab });
 		if (process.env.PDPP_OWNERSHIP_FIXTURE_FAIL === "1") {
 			throw new Error("ownership fixture: deliberate collect failure");

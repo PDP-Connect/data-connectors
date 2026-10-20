@@ -169,7 +169,7 @@ test("connector runs attached to an external browser close only their own pages"
 				"set-cookie": "fixture_session=run-cookie; Path=/",
 			})
 			.end(
-				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'/provider\', \'provider\')">Sign in</button></body></html>',
+				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'about:blank\', \'provider\')">Sign in</button></body></html>',
 			);
 	});
 	await new Promise<void>((resolve) => {
@@ -252,6 +252,8 @@ test("connector runs attached to an external browser close only their own pages"
 		);
 
 		if (run.record) {
+			// A second CDP client records this HAR. The fixture navigates the
+			// popup after its target is available so this tests observable traffic.
 			const har = JSON.parse(await readFile(harPath, "utf8")) as {
 				log: { entries: { request: { url: string } }[] };
 			};
@@ -311,7 +313,7 @@ test("a preserve-page connector attached to an external browser reuses its one r
 		res
 			.writeHead(200, { "content-type": "text/html" })
 			.end(
-				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'/provider\', \'provider\')">Sign in</button></body></html>',
+				'<html><body><p id="marker">fixture run page</p><button id="provider" onclick="window.open(\'about:blank\', \'provider\')">Sign in</button></body></html>',
 			);
 	});
 	await new Promise<void>((resolve) => {
@@ -393,7 +395,7 @@ test("a download on a reused preserve-page run page is recorded into the HAR, an
 		res
 			.writeHead(200, { "content-type": "text/html" })
 			.end(
-				"<html><body><button id=\"provider\" onclick=\"window.open('/provider', 'provider')\">Sign in</button></body></html>",
+				"<html><body><button id=\"provider\" onclick=\"window.open('about:blank', 'provider')\">Sign in</button></body></html>",
 			);
 	});
 	await new Promise<void>((resolve) => {
