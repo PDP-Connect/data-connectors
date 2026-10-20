@@ -90,7 +90,11 @@ import {
 	toLabelsArray,
 	updateThreadAggregate,
 } from "./parsers.ts";
-import { validateRecord } from "./schemas.ts";
+import {
+	GMAIL_MESSAGE_ID_RE,
+	PART_INDEX_RE,
+	validateRecord,
+} from "./schemas.ts";
 import type {
 	AllMailCursor,
 	AttachmentAllMailCursor,
@@ -543,7 +547,7 @@ export interface AttachmentDetailCoverage {
 	 * `last_error_json` stays null forever (the 2026-08 Gmail 5-row defect).
 	 */
 	failedRecords: FailedAttachmentRecord[];
-	/** Local rejections hold cursors even when mailbox coverage is withheld. */
+	/** Rejections without an emitted retry locator hold both cursors. */
 	localEmitRejected: boolean;
 	gapKeys: string[];
 	hydratedKeys: string[];
@@ -757,7 +761,7 @@ async function emitAttachmentDetailCoverage(
  * attempts and a permanently-null `last_error_json`).
  */
 export function buildAttachmentDetailGap(
-	attachment: AttachmentRecord,
+	attachment: Pick<AttachmentRecord, "id" | "message_id" | "part_index">,
 	failureClass?: string,
 ): DetailGapMessage {
 	return buildDetailGap({
@@ -942,6 +946,32 @@ export function attachmentOutsideResourceScope(
 	return resources !== null && !resources.has(String(attachment.id));
 }
 
+/** Retain retry identity independently of the rejected record's schema. */
+async function emitRejectedAttachmentGap(
+	message: FetchMessageObject,
+	identity: Pick<AttachmentRecord, "id" | "message_id" | "part_index">,
+	emitProtocol: PerMessageDeps["emitProtocol"],
+): Promise<boolean> {
+	if (
+		typeof identity.message_id !== "string" ||
+		!GMAIL_MESSAGE_ID_RE.test(identity.message_id) ||
+		identity.message_id !== message.emailId ||
+		typeof identity.part_index !== "string" ||
+		!PART_INDEX_RE.test(identity.part_index) ||
+		identity.id !== `${identity.message_id}:${identity.part_index}`
+	)
+		return false;
+	try {
+		await emitProtocol(
+			buildAttachmentDetailGap(identity, "attachment_record_rejected"),
+		);
+		return true;
+	} catch {
+		// A failed protocol write leaves no durable retry obligation.
+		return false;
+	}
+}
+
 async function emitAttachmentRecords(
 	deps: PerMessageDeps,
 	msg: FetchMessageObject,
@@ -954,22 +984,46 @@ async function emitAttachmentRecords(
 		deps.recoveredAttachmentGapIds ?? new Set<string>();
 	for (const a of attachments) {
 		if (attachmentOutsideResourceScope(deps.requested, a)) continue;
+		// Capture identity before hydration or validation can alter the record.
+		const identity = {
+			id: a.id,
+			message_id: a.message_id,
+			part_index: a.part_index,
+		};
 		const hydration = await deps.hydrateAttachment(msg, a);
 		const hydrated = hydration.record;
 		let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
+		let emitFailure: { error: unknown } | undefined;
+		let gapEmitted = false;
 		try {
 			emitted = await deps.emitRecord("attachments", { ...hydrated });
+		} catch (error) {
+			emitFailure = { error };
 		} finally {
+			gapEmitted =
+				emitted === false &&
+				(await emitRejectedAttachmentGap(msg, identity, deps.emitProtocol));
 			if (deps.attachmentCoverage) {
-				if (emitted === false) deps.attachmentCoverage.localEmitRejected = true;
+				if (emitted === false && !gapEmitted) {
+					deps.attachmentCoverage.localEmitRejected = true;
+				}
+				if (
+					gapEmitted &&
+					!deps.attachmentCoverage.gapKeys.includes(identity.id)
+				) {
+					deps.attachmentCoverage.gapKeys.push(identity.id);
+				}
 				recordAttachmentCoverage(
 					deps.attachmentCoverage,
-					hydrated,
+					emitted === false ? { ...a, ...identity } : hydrated,
 					hydration.failure,
 					emitted !== false,
 				);
 			}
 		}
+		// A durable gap makes this rejection safe to continue past, including
+		// the remaining parts of this message. Otherwise preserve the failure.
+		if (emitFailure && !gapEmitted) throw emitFailure.error;
 		// Only `hydrated` may acknowledge a served gap as recovered. Unaccounted
 		// statuses (too_large, deferred) have no durable DETAIL_GAP, so there is
 		// nothing to recover.
@@ -3254,7 +3308,7 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 		await emitMessagesPass(
 			{
 				attachmentCoverage,
-				emitProtocol: emit,
+				emitProtocol: args.emit,
 				emitProgress: (m) => emit({ ...m, stream: "attachments" }),
 				emitRecord: async (stream, data, keyField): Promise<boolean> => {
 					const emitted = await args.deps.emitRecord(stream, data, keyField);
@@ -3267,7 +3321,12 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 				hydrateAttachment: args.hydrateAttachment,
 				recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
 				nowIso,
-				requested: new Map([["attachments", args.deps.requested.get("attachments") ?? { name: "attachments" }]]),
+				requested: new Map([
+					[
+						"attachments",
+						args.deps.requested.get("attachments") ?? { name: "attachments" },
+					],
+				]),
 				timeRange: args.deps.requested.get("attachments")?.time_range,
 				wantBodies: false,
 				wantMessages: false,
@@ -4812,7 +4871,7 @@ export async function runAllMailPasses(
 		fetchBodiesBound,
 	);
 
-	// Rejected attachment records have no durable retry locator; replay both walks.
+	// Replay both walks if any rejection still lacks an emitted retry locator.
 	if (attachmentCoverage?.localEmitRejected) return;
 
 	if (messageHistoryRequested && historicalFetchRange) {

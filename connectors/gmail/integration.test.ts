@@ -7877,7 +7877,11 @@ for (const rejection of ["false", "schema", "throw"] as const) {
 				attachmentBackfillRequested: true,
 				attachmentCoverage: coverage,
 				client,
-				emit: harness.emit,
+				emit: async (m) => {
+					if (reject && m.type === "DETAIL_GAP")
+						throw new Error("gap persistence unavailable");
+					await harness.emit(m);
+				},
 				deps: {
 					requested,
 					emittedAt: FROZEN_NOW,
@@ -7960,8 +7964,11 @@ test("production attachment caller restart retains messages checkpoint after loc
 	});
 	const requested = makeRequested(["attachments"]);
 	process.stdout.write = ((data: string): boolean => {
+		if (data.includes('"attachment_record_rejected"'))
+			throw new Error("gap persistence unavailable");
 		try {
-			protocol.push(JSON.parse(data) as EmittedMessage);
+			const m = JSON.parse(data) as EmittedMessage;
+			protocol.push(m);
 		} catch {
 			/* non-protocol output */
 		}
@@ -8092,4 +8099,423 @@ test("production attachment caller restart retains messages checkpoint after loc
 		process.stdout.write = originalWrite;
 		globalThis.fetch = originalFetch;
 	}
+});
+
+for (const rejection of ["schema", "throw"] as const) {
+	test(`persistent attachment rejection advances historical pages with durable retry debt: ${rejection}`, async () => {
+		const requested = makeRequested(["attachments"]);
+		const messages = [
+			makeServedRecoveryMsg({ attachments: [16], emailId: "abc123", uid: 321 }),
+			makeServedRecoveryMsg({ attachments: [16], emailId: "def456", uid: 701 }),
+			makeServedRecoveryMsg({
+				attachments: [16],
+				emailId: "fed789",
+				uid: 1101,
+			}),
+		];
+		const pending = new Map<string, DetailGapMessage>();
+		const collected: string[] = [];
+		const ranges: string[] = [];
+		const client = {
+			fetch: (range: string) => {
+				ranges.push(range);
+				const [start, end] = range.split(":").map(Number);
+				return (async function* () {
+					for (const msg of messages)
+						if (msg.uid >= start! && msg.uid <= end!) yield msg;
+				})();
+			},
+			search: async () => [321],
+			fetchOne: async () => messages[0],
+		} as unknown as Parameters<
+			typeof runAttachmentBackfillAndRecoveryPass
+		>[0]["client"];
+		let cursor: AttachmentAllMailCursor = {
+			uidvalidity: 123,
+			backfilled_through_uid: 0,
+		};
+		const hydrate = statusStampingHydrator({
+			"abc123:1": "hydrated",
+			"def456:1": "hydrated",
+			"fed789:1": "hydrated",
+		});
+		const run = async (served = false) => {
+			const harness = makeRecordingEmit();
+			const emitProtocol = async (m: EmittedMessage) => {
+				await harness.emit(m);
+				if (m.type === "DETAIL_GAP") pending.set(String(m.record_key), m);
+				if (m.type === "DETAIL_GAP_RECOVERED")
+					pending.delete(String(m.record_key));
+				if (m.type === "STATE")
+					assert.ok(
+						pending.has("abc123:1"),
+						"debt must precede cursor progress",
+					);
+			};
+			const realEmit = realResourceEmitter(requested, emitProtocol);
+			const operation = runAttachmentBackfillAndRecoveryPass({
+				allMail: makeAllMailMailbox(),
+				attachmentBackfillRequested: true,
+				attachmentCoverage: makeAttachmentDetailCoverage(),
+				client,
+				emit: emitProtocol,
+				deps: {
+					requested,
+					emittedAt: FROZEN_NOW,
+					...(served
+						? {
+								detailGaps: [
+									makeServedRecoveryGap({
+										gapId: "persistent",
+										leaseId: "retry",
+										messageId: "abc123",
+										partIndex: 1,
+									}),
+								],
+							}
+						: {}),
+					emitRecord: async (stream, data, key) => {
+						if (data.id === "abc123:1" && rejection === "throw")
+							throw new Error("persistent rejection");
+						const accepted = await realEmit(
+							stream,
+							data.id === "abc123:1" ? { ...data, size_bytes: -1 } : data,
+							key,
+						);
+						if (accepted) collected.push(String(data.id));
+						return accepted === true;
+					},
+				},
+				fetchBodiesBound: defaultFetchBodies,
+				hydrateAttachment: hydrate,
+				recoveredAttachmentGapIds: new Set(),
+				session: {
+					attachmentBackfill: cursor,
+					existsTotal: 1600,
+					priorExistsTotal: undefined,
+					fullResync: false,
+					highestModseqCursor: null,
+					messagesBackfill: {
+						uidvalidity: 123,
+						backfilled_through_uid: 0,
+						completed_at: null,
+					},
+					priorDeltaHoldbackRuns: 0,
+					priorModseq: null,
+					priorUidnext: 1601,
+					uidnext: 1601,
+					uidvalidityNum: 123,
+				},
+			});
+			if (served && rejection === "throw")
+				await assert.rejects(operation, /persistent rejection/);
+			else await operation;
+			const state = harness.protocolMessages.find(
+				(m) => m.type === "STATE" && m.stream === "attachments",
+			);
+			if (!served) {
+				assert.ok(
+					state?.type === "STATE",
+					"durable rejection gap must permit the page checkpoint",
+				);
+				cursor = (state.cursor as { all_mail: AttachmentAllMailCursor })
+					.all_mail;
+			}
+			return harness;
+		};
+		await run();
+		assert.equal(cursor.backfilled_through_uid, 321);
+		await run();
+		await run();
+		assert.deepEqual(ranges, ["1:500", "322:821", "702:1201"]);
+		assert.deepEqual(collected, ["def456:1", "fed789:1"]);
+		assert.equal(cursor.backfilled_through_uid, 1101);
+		const gap = pending.get("abc123:1");
+		assert.ok(gap);
+		assert.equal(gap.retryable, true);
+		assert.equal(gap.status, "pending");
+		assert.deepEqual(gap.detail_locator, {
+			kind: "gmail.attachment_detail",
+			message_id: "abc123",
+			part_index: "1",
+			attachment_id: "abc123:1",
+		});
+		const retry = await run(true);
+		assert.equal(
+			retry.protocolMessages.some((m) => m.type === "DETAIL_GAP_ATTEMPTED"),
+			true,
+		);
+		assert.equal(
+			retry.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		assert.equal(
+			retry.protocolMessages.filter((m) => m.type === "DETAIL_GAP").length,
+			0,
+			"served rejection retains the existing obligation without creating a new gap",
+		);
+		assert.equal(pending.size, 1);
+		assert.ok(pending.has("abc123:1"));
+	});
+}
+test("persistent attachment rejection advances messages checkpoints with durable retry debt", async () => {
+	const originalWrite = process.stdout.write;
+	const originalFetch = globalThis.fetch;
+	const protocol: EmittedMessage[] = [];
+	const ranges: string[] = [];
+	const message = makeServedRecoveryMsg({
+		attachments: [16],
+		emailId: "abc123",
+		uid: 321,
+	});
+	const requested = makeRequested(["attachments"]);
+	process.stdout.write = ((data: string): boolean => {
+		try {
+			const m = JSON.parse(data) as EmittedMessage;
+			protocol.push(m);
+		} catch {
+			/* non-protocol output */
+		}
+		return true;
+	}) as typeof process.stdout.write;
+	// All transport seams are offline. Hydration success is covered above;
+	// this caller test isolates whether a rejected record is retried at all.
+	globalThis.fetch = async () => {
+		throw new Error("offline fixture");
+	};
+	try {
+		const client = {
+			close: mock.fn(),
+			download: async () => {
+				throw new Error("offline fixture");
+			},
+			fetchOne: async () => message,
+			search: async () => [321],
+			mailbox: {
+				delimiter: "/",
+				exists: 1200,
+				flags: new Set<string>(),
+				path: "[Gmail]/All Mail",
+				uidNext: 1201,
+				uidValidity: 123n,
+			},
+			fetch: (range: string) => {
+				ranges.push(range);
+				const [start, end] = range.split(":");
+				const includesUid =
+					Number(start) <= 321 && (end === "*" || Number(end) >= 321);
+				return (async function* () {
+					if (includesUid) yield message;
+					if (Number(start) <= 701 && (end === "*" || Number(end) >= 701))
+						yield makeServedRecoveryMsg({
+							attachments: [16],
+							emailId: "def456",
+							uid: 701,
+						});
+				})();
+			},
+		} as unknown as Parameters<typeof runAllMailPasses>[0];
+		const run = async (
+			state: Record<string, unknown>,
+			reject: boolean,
+			served = false,
+		) => {
+			protocol.length = 0;
+			const attempted: string[] = [];
+			const emitRecord = realResourceEmitter(requested, async (m) => {
+				protocol.push(m);
+			});
+			await runAllMailPasses(client, makeAllMailMailbox(), state, {
+				requested,
+				...(served
+					? {
+							detailGaps: [
+								makeServedRecoveryGap({
+									gapId: "already-durable",
+									leaseId: "fixture-lease",
+									messageId: "abc123",
+									partIndex: 1,
+								}),
+							],
+						}
+					: {}),
+				emittedAt: FROZEN_NOW,
+				emitRecord: async (stream, data, keyField) => {
+					attempted.push(String(data.id));
+					return (
+						(await emitRecord(
+							stream,
+							reject && data.id === "abc123:1"
+								? { ...data, size_bytes: -1 }
+								: data,
+							keyField,
+						)) === true
+					);
+				},
+			});
+			return {
+				attempted,
+				messages: [...protocol],
+				state: protocol.find(
+					(m) => m.type === "STATE" && m.stream === "messages",
+				),
+			};
+		};
+		const first = await run({}, true);
+		assert.deepEqual(first.attempted, ["abc123:1"]);
+		assert.equal(
+			first.messages.some(
+				(m) => m.type === "DETAIL_COVERAGE" && m.stream === "attachments",
+			),
+			false,
+		);
+		const restartState =
+			first.state?.type === "STATE" ? { messages: first.state.cursor } : {};
+		const retry = await run(restartState, true);
+		assert.deepEqual(
+			retry.attempted,
+			["def456:1"],
+			"next page collects healthy later UIDs despite persistent rejection",
+		);
+		assert.deepEqual(ranges, ["1:500", "501:1000", "1201:*"]);
+		assert.ok(first.state?.type === "STATE");
+		assert.ok(
+			(first.state.cursor as { all_mail: { forward_uidnext: number } }).all_mail
+				.forward_uidnext > 321,
+		);
+		assert.equal(
+			retry.messages.some(
+				(m) =>
+					m.type === "RECORD" &&
+					m.stream === "attachments" &&
+					m.data.id === "def456:1",
+			),
+			true,
+		);
+		const gap = first.messages.find(
+			(m) => m.type === "DETAIL_GAP" && m.record_key === "abc123:1",
+		);
+		assert.ok(
+			gap?.type === "DETAIL_GAP" && gap.retryable && gap.status === "pending",
+		);
+		assert.ok(
+			first.messages.indexOf(gap) < first.messages.indexOf(first.state),
+		);
+		assert.equal(
+			first.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		assert.ok(
+			retry.state,
+			"accepted local emission allows the messages checkpoint again",
+		);
+		const servedRetry = await run(
+			{
+				messages: {
+					all_mail: { uidvalidity: 123, uidnext: 1201, forward_uidnext: 1201 },
+					backfill: {
+						uidvalidity: 123,
+						target_uid: 1200,
+						backfilled_through_uid: 1200,
+						completed_at: FROZEN_NOW,
+					},
+				},
+			},
+			true,
+			true,
+		);
+		assert.deepEqual(servedRetry.attempted, ["abc123:1"]);
+		assert.ok(
+			servedRetry.state,
+			"a pending durable gap permits messages progress after rejection",
+		);
+		assert.equal(
+			servedRetry.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+	} finally {
+		process.stdout.write = originalWrite;
+		globalThis.fetch = originalFetch;
+	}
+});
+
+for (const rejection of ["false", "throw"] as const) {
+	for (const safeIdentity of [true, false]) {
+		test(`attachment rejection retains only safe original identity: ${rejection}, safe=${safeIdentity}`, async () => {
+			const coverage = makeAttachmentDetailCoverage();
+			const harness = makeHarness({
+				attachmentCoverage: coverage,
+				requested: makeRequested(["attachments"]),
+				wantBodies: false,
+				wantMessages: false,
+				hydrateAttachment: async (_, attachment) => {
+					// Even a hydrator that mutates the input cannot rewrite retry identity.
+					Object.assign(attachment, {
+						id: "invalid",
+						message_id: "invalid",
+						part_index: "invalid",
+						size_bytes: -1,
+					});
+					return hydratedResult(attachment);
+				},
+			});
+			harness.deps.emitRecord = async () => {
+				if (rejection === "throw") throw new Error("rejected");
+				return false;
+			};
+			const message = makeServedRecoveryMsg({
+				attachments: [16],
+				emailId: safeIdentity ? "abc123" : "unsafe:identity",
+			});
+			if (rejection === "throw" && !safeIdentity)
+				await assert.rejects(processMessage(harness.deps, message), /rejected/);
+			else await processMessage(harness.deps, message);
+			assert.equal(coverage.localEmitRejected, !safeIdentity);
+			assert.deepEqual(coverage.hydratedKeys, []);
+			const gaps = harness.protocolMessages.filter(
+				(m) => m.type === "DETAIL_GAP",
+			);
+			assert.equal(gaps.length, safeIdentity ? 1 : 0);
+			if (safeIdentity) {
+				assert.deepEqual(coverage.requiredKeys, ["abc123:1"]);
+				assert.deepEqual(coverage.gapKeys, ["abc123:1"]);
+				assert.deepEqual(gaps[0]?.detail_locator, {
+					kind: "gmail.attachment_detail",
+					message_id: "abc123",
+					part_index: "1",
+					attachment_id: "abc123:1",
+				});
+			}
+		});
+	}
+}
+
+test("throwing attachment emission with durable debt still collects every sibling", async () => {
+	const coverage = makeAttachmentDetailCoverage();
+	const harness = makeHarness({
+		attachmentCoverage: coverage,
+		hydrateAttachment: statusStampingHydrator({
+			"abc123:1": "hydrated",
+			"abc123:2": "hydrated",
+			"abc123:3": "hydrated",
+		}),
+		requested: makeRequested(["attachments"]),
+		wantBodies: false,
+		wantMessages: false,
+	});
+	const attempted: string[] = [];
+	harness.deps.emitRecord = async (_, data) => {
+		attempted.push(String(data.id));
+		if (data.id === "abc123:1") throw new Error("persistent rejection");
+		return true;
+	};
+	await processMessage(
+		harness.deps,
+		makeServedRecoveryMsg({ attachments: [16, 16, 16], emailId: "abc123" }),
+	);
+	assert.deepEqual(attempted, ["abc123:1", "abc123:2", "abc123:3"]);
+	assert.deepEqual(coverage.requiredKeys, attempted);
+	assert.deepEqual(coverage.gapKeys, ["abc123:1"]);
+	assert.deepEqual(coverage.hydratedKeys, ["abc123:2", "abc123:3"]);
+	assert.equal(coverage.localEmitRejected, false);
 });
