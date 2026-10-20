@@ -993,7 +993,8 @@ manifest with a self-reference, unknown parent, duplicate parent, empty
 graph is acyclic and ends at one or more self-mapped streams. For each declared
 parent-detail boundary, the runtime MUST also reject a missing parent-side
 relationship, duplicate relationship names on that parent, an undeclared
-related stream, or a foreign-key field absent from the related stream's schema.
+related stream, a foreign-key field absent from the related stream's schema,
+or a relationship shape unsupported by Section 5.2.
 Relationship selection and attribution follow Section 5.2.
 
 ### 3.7 Implementation metadata
@@ -1134,7 +1135,7 @@ The runtime sends `START` to initialize one run.
 | `collection_mode` | REQUIRED `full_refresh` or `incremental`. |
 | `state` | REQUIRED map of prior connector-owned state, or `null` when no prior state applies. |
 | `bindings` | REQUIRED map of binding names to descriptors available for this run. |
-| `detail_baselines` | OPTIONAL array of runtime-issued baseline receipts valid for this run (Section 5.6.3); absence means none. |
+| `detail_baselines` | OPTIONAL array of runtime-issued complete/empty baseline receipts (Section 5.6.3); validity is rechecked at each use. Absence means none. |
 | `now` | OPTIONAL [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) date-time with a time-zone offset. It is the run's notion of the current time. |
 
 Each scope stream has a REQUIRED `name`. `resources` is an OPTIONAL array of
@@ -1262,6 +1263,13 @@ declaring parent's primary key. For example, conversations declares
 `{"name":"messages","stream":"messages","foreign_key":"conversation_id","cardinality":"has_many"}`;
 an upsert to messages is attributed by its `data.conversation_id`, not by
 looking for a messages field on conversations.
+
+Strict accounting in this profile supports Core relationships with
+cardinality "has_many" and one foreign_key field on each detail record
+identifying one declaring parent. The runtime MUST refuse any other
+cardinality or attribution shape for a strict boundary before spawn. This
+restriction does not redefine other Core relationship forms; they require a
+separately specified accounting mapping before this profile can use them.
 
 This profile's `relationship_id` references that existing Core
 `relationship.name`, scoped by the declaring parent stream. It does not
@@ -1430,6 +1438,13 @@ that relationship's name within the declaring parent stream.
 Claims bind effective scope after policy and field normalization. Unknown
 scope membership is not a proven exclusion.
 
+An obligation binding consists of the connection, source account, detail
+stream, parent stream, selected relationship, canonical parent key, normalized
+effective scope and original inventory/delta obligation. Connection and source
+account are distinct runtime-owned dimensions fixed for the run; reauthorizing
+the same connection to another account does not preserve the account binding.
+All debt, receipts, retry decisions and coverage credit use this binding.
+
 #### 5.6.2 Outcomes and durable debt
 
 The four outcome sets are disjoint subsets of required_keys:
@@ -1447,8 +1462,15 @@ The four outcome sets are disjoint subsets of required_keys:
   parent in this boundary; a source validator covering membership, content
   AND deletion matched a valid committed baseline for this exact obligation.
   An unchanged parent or timestamp alone is insufficient.
-- gap_keys: matching DETAIL_GAP debt was durably recorded for the connection,
-  stream, parent, relationship, key and uncovered obligation.
+- gap_keys: matching DETAIL_GAP debt remains durably recorded for the
+  obligation binding and its uncovered parts.
+
+Outstanding matching debt takes precedence over complete, empty and unchanged.
+Every matching debt binding MUST be represented when reconciling the key,
+including debt from an earlier boundary with no accepted effects. Accepted
+siblings or an otherwise valid older receipt cannot hide an unresolved sibling.
+The sole route from matching debt to complete or empty is the atomic
+full-obligation seal and settlement below. Unchanged cannot settle debt.
 
 An absent required key is unaccounted and MUST withhold the parent checkpoint.
 A gap is accounted debt, not complete data, and MUST NOT mint a baseline or
@@ -1466,9 +1488,11 @@ not a child key. A partially collected
 interval MUST retain the missing interval, not reduce its identity to an
 account alone.
 
-A gap's identity is the tuple (connection, stream, parent_stream, selected
-relationship name, canonical record_key, canonical detail_locator). The
-connection comes from runtime context, not connector input. Canonical locator
+A gap's identity is the tuple (connection, source account, stream,
+parent_stream, selected relationship name, canonical record_key, canonical
+detail_locator). Connection and source account come from runtime context,
+not connector input; neither an equal validator nor a reused connection
+identifier aliases source accounts. Canonical locator
 equality is typed JSON structural equality: object member order is ignored,
 array order and value types are preserved. The locator includes its obligation,
 so different obligations are different gap identities. Every gap lookup,
@@ -1498,9 +1522,9 @@ A connector MUST use connector_transform_failed for known-parent transformation
 debt, not a transport reason or source_unrepresentable. The runtime MUST reject
 an unknown reason or any retryable value other than the boolean paired above.
 
-Before crediting gap_keys, the runtime MUST persist each gap's normalized
-effective scope, original obligation and transform_epoch from the sealing
-DETAIL_COVERAGE. A later observation of the same gap identity under another
+Before crediting gap_keys, the runtime MUST admit the gap under Section 5.6.3's
+generation fence and persist its source-account binding, normalized effective
+scope, original obligation and transform_epoch from the sealing DETAIL_COVERAGE. A later observation of the same gap identity under another
 scope MUST NOT discard its earlier scope-bound debt; each outstanding binding
 remains until proved settled. For connector_transform_failed debt, the runtime
 MUST NOT make recovery eligible unless a later boundary for the same detail
@@ -1522,17 +1546,32 @@ detail stream MAY make it eligible for re-evaluation, but MUST NOT clear it.
 Missing/nonboolean retryable or mismatched reason/retryable is invalid.
 There is no capability flag for permanent gaps.
 
-A later sealed complete or empty outcome MUST atomically settle matching
-durable debt when it proves the full original obligation under the same
-connection, detail stream, parent stream, relationship, parent key and
-normalized scope. Settlement uses the gap identity above and Section 5.6.3's
-fence. A same-account success alone is insufficient. For time ranges, a runtime
+At a later boundary, the runtime MUST evaluate a proposed complete or empty
+seal against the full original obligation without first requiring the old
+debt to disappear. If closure, dispositions and durable effects satisfy that
+outcome under the same obligation binding, the checkpoint transaction MUST
+atomically settle all matching proved debt and publish that outcome with its
+receipt. The resulting ledger has no outstanding matching debt; otherwise
+gap precedence still applies. This is not circular permission to mark a key
+complete while its debt remains. An accepted sibling alone is insufficient.
+Settlement uses the full gap identity and Section 5.6.3's fence; success for
+another source account on the same connection cannot settle the old debt. For time ranges, a runtime
 MAY atomically replace partially recovered debt with exact residual obligations;
 for cursor ranges, only equality with the original range permits settlement.
 A new epoch makes re-evaluation eligible, not automatically complete.
 These are mandatory debt-ledger rules even without a recovery extension:
 Section 7 leaves scheduling and recovery transport to extensions, not the
 settlement of debt already proved complete or empty.
+
+Debt for a different source account remains retained under that account and
+does not enter the new account's denominator. Relationship retirement likewise
+MUST NOT alias an old name to a new one. A runtime MAY archive retired
+relationship debt outside active new-scope accounting, preserving its original
+binding and unresolved status. Migrating or settling it requires an explicit
+mapping that proves semantic relationship/scope equivalence and recollection
+of the full original obligation; a rename or equal validator is not proof.
+If no such proof exists, retain archived debt with the retirement reason,
+rather than silently settling it or blocking an unrelated new relationship.
 
 ~~~json
 {
@@ -1554,87 +1593,94 @@ settlement of debt already proved complete or empty.
 
 #### 5.6.3 Baselines and generation fencing
 
-A baseline receipt is a runtime-owned reference to a committed complete or
-empty obligation. Its binding includes connection and source account, detail
-stream, parent stream, selected relationship name, canonical parent key,
-normalized effective scope (resources, fields and time range), inventory or
-delta obligation and range, validator domain, schema and transformation epoch.
-Its non-empty opaque receipt_id is assigned by the runtime. Identity alone
-proves neither source truth nor write ordering.
+A baseline receipt is a runtime-owned reference with REQUIRED kind "complete"
+or "empty". It certifies one committed obligation binding (Section 5.6.1),
+plus validator domain, schema and transformation epoch. Its non-empty opaque
+receipt_id is assigned by the runtime. Identity alone proves neither source
+truth nor write ordering.
 
-START.detail_baselines MAY provide valid receipts. Each entry contains
-receipt_id, stream, parent_stream, key, applicable relationship_id,
-effective_scope, obligation, validator_domain, transform_epoch, and the
-committed source_validator when available. Connection and source account are
-fixed by runtime run context; a connector cannot choose them. The runtime MUST
-validate references against its durable ledger, not a connector-supplied copy.
-It MUST NOT mint receipts from legacy connector state.
+START.detail_baselines MAY provide receipts containing receipt_id, kind,
+stream, parent_stream, key, applicable relationship_id, effective_scope,
+obligation, validator_domain, transform_epoch and the committed source_validator
+when available. Connection and source account are fixed by runtime run context;
+a connector cannot choose them. The runtime MUST validate references against
+its durable ledger, not a connector-supplied copy, and MUST NOT mint receipts
+from legacy state.
 
-Coverage supplies baseline_refs (key to receipt-id map) whenever a claim uses
-prior state. unchanged_keys additionally supplies validators (key to
-{domain,value} map), matching the retained source validator and its domain
-covering membership, content and deletion. Suppression requires a valid
-committed receipt and the retained child state that receipt certifies.
-A nonempty enumeration with zero new effects MAY be complete only by reference
-to a valid complete-type receipt, never an empty-type receipt. It still
-requires enumeration closure. A proven zero-child inventory is empty.
+Coverage supplies baseline_refs (key to receipt-id map) whenever it uses prior
+state. unchanged_keys additionally supplies validators (key to {domain,value}
+map) matching a retained source validator that covers membership, content AND
+deletion for the exact obligation. Either complete-kind or empty-kind receipts
+MAY justify unchanged, but only while valid and with no outstanding matching
+debt. A matching empty receipt means the obligation remains empty, classified
+unchanged because no new enumeration occurred. Suppression additionally
+requires the retained child state certified by the receipt. A nonempty scan
+with zero new effects can be complete only using a valid complete-kind receipt
+and enumeration closure; an empty-kind receipt cannot justify it.
 
-Durable acceptance of any attributed upsert or delete MUST atomically
-invalidate all prior receipts for that connection, source account, parent,
-detail stream, relationship and normalized scope, across their obligations.
-The only exception is replacement by a new complete or empty receipt in the
-same atomic commit under the supersession rule below. After invalidation, the
-old validator MAY be kept for comparison or diagnostics, but the receipt MUST
-NOT justify unchanged, suppression or zero-effect complete. A failed or
-gap-covered attempt MUST NOT install its validator as a new baseline. It
-preserves an earlier receipt's eligibility only if no accepted effect or other
-invalidation changed what that receipt certifies.
+The runtime MUST serialize or fence every durable mutation per connection
+checkpoint. It assigns expected generation at placement and keeps it fixed
+for the run; a stale run MUST NOT refresh that expectation. Superseding
+placement or external invalidation advances the generation. At each atomic
+admission the expected generation MUST match the current ledger generation.
+This applies to upserts/deletes, receipt-dependent credit, gap creation or
+updates, gap credit, debt settlement, state and receipt publication. Stale
+work MUST NOT add, clear or rewrite debt, publish effects, overwrite state or
+resurrect receipts. A final message, timestamp or atomic write without the
+generation check is insufficient.
 
-Scope change, owner deletion, retention GC affecting baseline data, schema or
-transformation change, source-account change, and relationship rename MUST
-invalidate affected receipts and dependent connector state. For triggers known
-before launch, the runtime MUST reset this state before collection.
-Checkpoint state MUST be bound to the transformation epoch of each detail
-stream it depends on. The runtime MUST retain this binding with committed state.
-A connector that cannot establish that supplied state matches its current epoch
-MUST recollect rather than resume it. The runtime MUST NOT accept checkpoint
-progress derived from old incremental state under a new or unknown epoch. A parser-fix epoch bump intentionally costs recollection
-rather than trusting earlier transformation results.
+Durable effect admission MUST atomically invalidate all receipts whose
+certified materialization the effect changes: both previous and new parent,
+relationship and scope memberships, across obligations, for the bound source
+account. Moving a child from P1 to P2 therefore invalidates P1 as well as P2;
+the same rule covers multiple relationships and movement across time/resource
+scopes. A delete affects retained old memberships even without a new row.
+If the exact affected set cannot be proved, the runtime MUST conservatively
+invalidate a broader set, up to all receipts and dependent state for that
+detail stream and source account. Invalidation by the owning run does not
+grant it a new generation. Invalidated validators may remain comparison-only;
+they cannot justify unchanged, suppression or zero-effect complete.
 
-A connector MUST recollect instead of using a START receipt whose epoch or
-validator domain differs from its current boundary. The runtime MUST reject
-references with a different epoch, domain, source account, relationship, scope
-or obligation. Validity at START is insufficient: every receipt-dependent
-acceptance decision, including unchanged, suppression and final coverage,
-MUST check current ledger validity under the same fence as durable publication.
-A concurrent accepted effect cannot invalidate a receipt between its check
-and the acceptance that relies on it. No new digest, host claim about source
-truth, or pre-spawn epoch wire field is implied.
+Scope change, owner deletion, retention GC affecting certified data, schema or
+transformation change, source-account change and relationship rename MUST
+invalidate affected receipts and dependent state. Known pre-launch changes
+reset state before collection. Checkpoint state retains the transformation
+epoch of each dependent detail stream. Unknown or different epochs require
+recollection, not resume from old state. A parser-fix epoch bump intentionally
+costs recollection. Debt is retained under its original binding; retirement
+and account changes follow Section 5.6.2, not silent debt deletion.
 
-The runtime MUST serialize or fence runs per connection checkpoint. It assigns
-the run's expected generation at placement and keeps it fixed for that run;
-it MUST NOT refresh a stale run's expectation from the current generation.
-A superseding placement or external invalidation MUST advance the checkpoint
-generation. Invalidation caused by an owning run's accepted effects is part of
-that run's fenced publication transaction: it does not grant a new generation
-or make its invalidated receipts reusable. The expected generation MUST still
-match at durable effect publication, receipt-dependent acceptance, debt
-settlement and checkpoint/receipt commit. Stale runs MUST NOT publish effects,
-overwrite state, resurrect receipts or clear newer gaps. A timestamp, batch id,
-final message or atomic write without this check is not a fence.
+Every receipt-dependent decision MUST recheck current ledger validity, exact
+binding, epoch and domain atomically under the admission fence. START-time
+validity is insufficient. A concurrent effect cannot intervene between a
+receipt check and its dependent acceptance. Outstanding matching debt also
+prevents unchanged credit even when no effect invalidated the older receipt.
+
+Admission and checkpoint sealing are separate transactions. Valid current-
+generation effects and fully validated observed debt MAY be admitted durably
+before the final checkpoint; they survive a later unrelated checkpoint failure.
+A gap awaiting its sealing scope/epoch metadata remains provisional, confers
+no credit, and MUST NOT enter durable debt until those bindings and the
+generation are validated atomically. A stale or invalid publication MUST leave
+no newly admitted effects, debt or credit from that rejected transaction.
+Already valid admissions are not retroactively erased merely because later
+work fails. New valid debt invalidates incompatible provisional complete,
+empty or unchanged credit before that credit can be committed.
 
 Eligible checkpoint state, new receipts and proved debt settlement MUST commit
-atomically under that fence after relevant effects and debt settle. Failure
-MUST leave neither a new receipt without its checkpoint state nor state
-justified by an absent receipt. Gap credit never creates a baseline.
+atomically under the fence after reconciling the final ledger. The transaction
+checks all current matching debt, applies any full-obligation settlement,
+then validates the resulting outcome partition. Failure leaves no new receipt
+without its checkpoint, no checkpoint justified by a missing receipt, and no
+settlement from the failed transaction. Gap outcomes may checkpoint accounted
+debt but never create a baseline. A failed or gap-covered attempt MUST NOT
+install its source validator as a new baseline.
 
 There is one supersession rule: a committed complete or empty receipt MUST
-atomically replace prior receipts for the same (connection, source account,
-detail stream, parent stream, relationship, canonical parent key, normalized
-effective scope, obligation) tuple, including when epoch or validator changes.
-It MUST NOT supersede a receipt for another tuple. Effect-driven invalidation
-above can invalidate a wider set without replacing it. No receipt establishes
-emptiness or completion for a widened scope or a different delta interval.
+atomically replace prior receipts for the same obligation binding, including
+when epoch or validator changes. It MUST NOT replace a receipt for another
+binding. Effect-driven invalidation can affect a wider set without replacing
+it. No receipt proves completion for a widened scope or different delta range.
 
 #### 5.6.4 Final coverage and runtime checks
 
@@ -1688,14 +1734,15 @@ debt. Unknown membership cannot silently disappear.
 
 A detail stream emits at most one final coverage per evaluated parent boundary,
 after related effects and gaps. Later effects or gaps MUST NOT reopen that
-boundary. The runtime reconciles the whole sealed boundary, per parent key:
+boundary; a rejected late publication cannot mutate the durable ledger.
+The runtime reconciles the whole sealed boundary, per parent key:
 
 | Outcome | Necessary runtime condition |
 | --- | --- |
-| complete | No rejected effect; at least one durably accepted upsert or delete, or a currently valid committed complete-type receipt. An empty-type receipt cannot justify zero-effect complete. A proven zero-child inventory belongs in empty, not complete. |
-| empty | No rejected effect and no accepted upsert; accepted attributed deletes permitted only when derived from a proven zero-child inventory. |
-| unchanged | No attempted effects for this parent in the boundary, and a valid matching baseline and validator for the exact obligation. |
-| gap | Matching durable gap and locator; no baseline minted from this credit. |
+| complete | No rejected effect and no matching debt after the atomic settlement check; at least one durably accepted upsert/delete or a valid complete-kind receipt. An empty-kind receipt cannot justify zero-effect complete. A proven zero-child inventory belongs in empty. |
+| empty | No rejected effect, no accepted upsert and no matching debt after the atomic settlement check; attributed deletes permitted only when derived from a proven zero-child inventory. |
+| unchanged | No attempted effects and no outstanding matching debt; valid matching complete-kind or empty-kind receipt and full-obligation validator. No debt settlement is inferred from unchanged. |
+| gap | All outstanding matching debt bindings represented under the source-account binding and generation fence; no baseline minted from this credit. |
 
 Accepted means the durable write path accepted the effect for this run and
 parent, not that the connector called emit or one sibling succeeded.
@@ -1716,8 +1763,9 @@ source-completion receipt is required; the host does not invent required_keys.
 #### 5.6.5 Connector integrity
 
 A connector, directly or through a library, MUST register each candidate
-before parsing or transformation, independently of emission, by stream and
-known parent. Each candidate retains a disposition: upsert, delete,
+before parsing or transformation, independently of emission, by source account,
+stream and known parent. A candidate without attributable identity retains a
+unique boundary-local candidate identity; it is not an invented record or parent. Each candidate retains a disposition: upsert, delete,
 suppression against a valid baseline, proven exclusion or unknown.
 Parsing failure MUST NOT remove it from the candidate set. These are connector
 conformance requirements, not a separate SDK conformance class.
@@ -1779,12 +1827,23 @@ REQUIRED. Each count MUST be a non-negative integer no greater than
 `considered`.
 
 These counts use accounting identity units, not raw source-row cardinality.
-A unit is either a distinct child record key or one unresolved candidate group
-with a single gap identity as defined in Section 5.6.2. A group contains only
-candidates not counted as emitted or unchanged; a parent's accepted children
-and its unresolved group are separate units. An unattributable candidate stays
-unaccounted and MUST NOT be assigned an invented gap identity. Repeated
-observations of the same record or gap identity count once.
+There are three disjoint unit kinds:
+- a distinct canonical child record key, bound to the run's source account;
+- an unresolved candidate group with one full gap identity from Section 5.6.2,
+  including source account;
+- an ephemeral candidate unit with unique boundary-local identity when no
+  record key or attributable gap group can represent the candidate.
+
+A group contains only candidates not counted as emitted or unchanged. An
+unattributable candidate uses the third kind and remains unaccounted; it MUST
+NOT receive an invented parent, record key or gap identity. The candidate
+ledger preserves the mapping and identity across repeated observations within
+the boundary. Distinct unidentified candidates MUST NOT be collapsed together.
+Repeated observations of the same established record or gap identity count
+once. Accepted upserts AND deletes count as emitted; multiple accepted effects
+on one record key still count as one emitted unit. A parent's accepted children
+and unresolved group are separate units. Proven scope exclusions are outside
+this in-scope partition, but remain dispositions in the candidate ledger.
 
 The connector MUST register candidates at the child enumeration site before
 transformation, then retain their mapping into these disjoint units. It MUST
@@ -1808,15 +1867,18 @@ message that reopens the stream. Before it accepts the evidence, the runtime
 MUST verify two observable counts:
 
 1. `outcomes.emitted` equals the number of distinct record keys that the
-   durable write path accepted for that stream in this run.
+   durable write path accepted as upserts or deletes for that stream and source
+   account in this run.
 2. `outcomes.gapped` equals the number of distinct, unrecovered durable gap
    identities from Section 5.6.2 represented for that stream in this run. It
    counts identities, not the number of children a parent-keyed gap represents.
 
-The second check proves count equality, not gap-key identity, because the
-message contains no gap identifiers. The runtime cannot independently verify
-these aggregate `unchanged` counts, a withheld message, or how the connector
-derived `considered`. This separate STREAM_EVIDENCE count is not the removed
+The runtime can check identities already present in its message/effect and debt
+ledgers, but this aggregate contains no gap or ephemeral candidate identifiers.
+The second check proves count equality, not the connector's candidate-to-gap
+mapping. It cannot independently verify source enumeration, ephemeral-unit
+completeness, aggregate `unchanged` counts, a withheld message, or the derivation
+of `considered`. This separate STREAM_EVIDENCE count is not the removed
 DETAIL_COVERAGE member.
 Those values remain connector assertions and MUST NOT be used to widen scope or
 commit a checkpoint.
@@ -2184,7 +2246,8 @@ A conforming runtime:
 1. Validates the manifest and matches bindings, binding features, and protocol
    capabilities before spawn. It rejects unsupported profile versions and the
    missing, duplicate or invalid parent relationships, related streams and
-   foreign-key declarations listed in Sections 3.6 and 5.2 before spawn.
+   foreign-key declarations or unsupported relationship cardinality/shape listed
+   in Sections 3.6 and 5.2 before spawn.
 2. Sends one first `START` with a non-empty, resolved scope, preserving canonical
    identity and attribution-required foreign keys as ingest-required fields
    under Section 5.1's authorized projection rules. It refuses an unsatisfiable
@@ -2195,7 +2258,9 @@ A conforming runtime:
    `timeout` response when the interaction times out.
 6. Stages and commits state only under Section 5.3 and Section 5.8.
 7. Validates checkpoint dependencies, strict coverage, baselines, gap
-   obligations and generation fences (Section 5.6). If it supports the optional
+   source-account bindings, outstanding-debt precedence, old/new membership
+   invalidation and generation-fenced admission of every durable mutation
+   (Section 5.6). If it supports the optional
    STREAM_EVIDENCE capability, it also validates that message under Section 5.7.
 8. Terminates a connector on a protocol violation, except that it continues
    the run after an `OBSERVATION` violation as Section 5.10.2 requires.
@@ -2224,7 +2289,7 @@ relevant producer or consumer does not establish these requirements.
 | Case | Required outcome |
 | --- | --- |
 | Narrow empty inventory, then widened scope with unchanged validator text | Invalidate old receipt/state; recollect. No empty or unchanged reuse. |
-| Complete baseline, then failed attempt with a new validator and no accepted effects | Keep the prior baseline only while it remains valid; never install the failed validator as a new baseline. |
+| Complete baseline, then parser gap with no accepted effects, then old validator matches | Keep any still-valid old receipt only as retained history; matching debt forces gap, never unchanged/complete/empty. Only a later full-obligation seal can settle it. Never install the failed validator. |
 | Only gap credit exists, then unchanged claim | Reject unchanged credit: a gap never minted a baseline. |
 | Owner deletes or GC removes a retained child | Invalidate dependent receipt/state and generation before reuse; recollect. |
 | Nonempty scan, every child suppressed against a valid committed complete-type receipt | Permit complete with closure and a currently valid reference; no new upsert required, never empty. An empty-type receipt cannot justify this case. |
@@ -2236,7 +2301,7 @@ relevant producer or consumer does not establish these requirements.
 | Parent enumeration incomplete, including a missing empty-state signal | No coverage; checkpoint withheld even if all observed parents succeeded. |
 | Large-window failure followed by shorter success or empty | Keep original obligation; preserve missing interval debt and never credit the whole range from the suffix. |
 | Recovery covers only part of a time-range gap | Keep exact checked residual debt or retain the original gap; do not clear it by parent-key match alone. |
-| Stale concurrent completion after newer commit/invalidation | Fence rejects effects/state/receipt/gap settlement; old state cannot reappear. |
+| Stale A resumes after newer B completes and settles debt | A's expected generation rejects gap creation/update/credit as well as effects/state/receipts/settlement. No phantom stale debt survives the rejected admission. |
 | Crash between state and receipt writes | Atomicity yields both committed or neither; never reusable orphan receipt. |
 | Duplicate/overlapping/foreign keys or effects after coverage finality | Reject protocol violation; no checkpoint based on reopened boundary. |
 | Unavailable value vs explicit source emptiness | An unavailable required value leaves transformation debt or withholds an unattributable boundary; explicit source emptiness remains distinct and follows the schema. No particular local API labels are required. |
@@ -2263,7 +2328,7 @@ relevant producer or consumer does not establish these requirements.
 | Field projection omits the selected relationship's foreign key | Preserve it with canonical identity only when authorized dependency projection permits; otherwise refuse the unsatisfiable request before effects. Never stall forever after stripping attribution. |
 | Parent integer key 42, child foreign key 42, wire parent key "42" | Attribute to the same canonical identity; no string-only foreign-key restriction. |
 | Composite parent key [42,"a.b"] in one child foreign-key field | Canonicalize as ["42","a.b"] in declared primary-key order; no dot joining or invented multi-field Core relationship. |
-| Relationship name changes while source validator text stays the same | Invalidate old relationship-bound receipts and dependent state; no cross-name reuse. |
+| Relationship name retires while validator text stays the same | Invalidate receipts/state; retain old debt archived with its original binding and retirement reason, outside unrelated new-scope denominator. Mapping/settlement needs equivalence proof and full recollection, never a name alias. |
 | Opaque cursor obligation after A through D; gap claims after B through D | Reject mismatched range, regardless of apparent lexical ordering. Exact structural equality, not containment, is required. |
 | Time-range obligation has a checked accounted prefix and exact uncovered suffix | Permit residual debt only with typed checked bounds and full interval accounting. |
 | Three unparsed children share one durable parent-keyed gap identity | STREAM_EVIDENCE, when used, counts one gapped accounting unit; it must not claim three gaps or advertise the aggregate as raw child count. Mandatory integrity retains all candidates. |
@@ -2271,6 +2336,13 @@ relevant producer or consumer does not establish these requirements.
 | Accounted debt followed by sealed complete or empty proving its full original obligation | Atomically settle matching debt under the fence even without a recovery extension. Reject cross-scope, cross-parent or mismatched cursor-range settlement. |
 | Source-unrepresentable debt followed by a new transformation epoch | Re-evaluation may become eligible; epoch change alone never clears the gap. |
 | Complete claim with zero effects citing an empty-type receipt | Reject complete; require a valid complete-type receipt and closure, or genuinely prove empty. |
+| Same connection changes source account A1 to A2; A1 has gap G and A2 completes the same key | Keep G bound to A1; A2 success cannot settle, retry or credit it. Equal validators do not alias accounts. |
+| Child moves P1 to P2, changes relationship membership or crosses a time-scope boundary | Atomic effect admission invalidates receipts for both old and new memberships. Uncertain membership triggers conservative detail-stream/source-account invalidation. |
+| Valid empty-kind receipt and full membership/content/deletion validator match, with no debt | Permit unchanged; the certified obligation is still empty. Do not use that receipt for zero-effect complete of a nonempty scan. |
+| Two unattributable candidates and an accepted delete are enumerated | Two distinct ephemeral unaccounted units plus one emitted record-key unit; no invented parent/gap. Runtime cannot infer source completeness from the aggregate. |
+| Current-generation debt admitted, then unrelated checkpoint fails | Retain the valid admitted debt; do not mint receipt/state or apply failed settlement. Provisional unvalidated debt cannot become durable credit. |
+| Matching debt exists and full original obligation is freshly proved complete/empty | Atomically settle debt and publish outcome/receipt/state; if settlement fails, no complete/empty commit. Accounted remaining debt can instead checkpoint as gap. |
+| Selected relationship uses unsupported cardinality or lacks the supported child foreign-key shape | Refuse before spawn; no invented Core field or reverse attribution. |
 | 1.0.0 exchange without STREAM_EVIDENCE capability or messages | Valid when all mandatory accounting and diagnosis requirements hold. A connector requiring unsupported STREAM_EVIDENCE is refused before spawn. |
 
 Counts alone, authored screenshots, successful package installation and tests of
@@ -2334,7 +2406,8 @@ no connector entries with protocol_version below 1.0.0. From that point the
 deployment MUST refuse old-profile connectors; this is not a permanent legacy
 escape hatch. A new runtime MUST NOT interpret an old connector as 1.0.0.
 No baseline receipt may be minted from legacy state: the first strict
-run per connection MUST recollect its obligations. An old runtime MUST refuse
+run per connection/source-account binding MUST recollect its obligations;
+retained legacy debt is not silently settled or aliased across accounts. An old runtime MUST refuse
 a new connector unless it implements this whole version. Publishing this
 draft changes no current deployment or independent cutover work. Adoption of
 this draft is an explicit implementation decision, not a prerequisite for
