@@ -589,7 +589,10 @@ test("accepted sibling plus excluded child covers the order without caching a pa
 for (const priorHydrated of [false, true]) {
 test(`processListOrder: narrow child resources hydrate selected child with ${priorHydrated ? "prior unrestricted" : "clean"} baseline`, async () => {
  const { processListOrder, listSurfaceFingerprint } = await import("./index.ts");
+ const { parseOrderDate } = await import("./parsers.ts");
  const list = makeListOrder();
+ const orderDate = parseOrderDate(list.orderDateRaw);
+ assert.ok(orderDate);
  const probe = makeDeps(RUN1_AT);
  await emitOrderAndItems(probe.deps, list, makeDetail(), "2026-01-05");
  const selected = probe.emitted.find(r => r.stream === "order_items")?.data.id;
@@ -605,7 +608,7 @@ test(`processListOrder: narrow child resources hydrate selected child with ${pri
  const deps: EmitDeps = {
   ...makeDeps(RUN1_AT, cursor).deps, emit:harness.emit, emitRecord:runtime.emit,
   isRecordSelected:runtime.isSelected, itemResourcesRestricted:true,
-  hydratedOrders:new Map(priorHydrated ? [[list.orderId, listSurfaceFingerprint(list, "2026-01-05", RUN1_AT)]] : []),
+  hydratedOrders:new Map(priorHydrated ? [[list.orderId, listSurfaceFingerprint(list, orderDate, RUN1_AT)]] : []),
   orderItemsCoverage:newOrderItemsCoverage(),
  };
  const baselineBefore = new Map(deps.hydratedOrders);
@@ -668,3 +671,34 @@ for (const invalid of [false,true]) {
   assert.equal(harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items").length,0);
  });
 }
+
+test("processListOrder: unrestricted matching baseline skips detail without losing coverage", async () => {
+ const {processListOrder,listSurfaceFingerprint}=await import("./index.ts");
+ const {parseOrderDate}=await import("./parsers.ts");
+ const list=makeListOrder();
+ const orderDate=parseOrderDate(list.orderDateRaw);
+ assert.ok(orderDate);
+ const harness=makeRecordingEmit();
+ const runtime=makeEmitRecord({
+  requested:new Map([["orders",{name:"orders"}],["order_items",{name:"order_items"}]]),
+  emittedAt:RUN2_AT,emit:harness.emit,validateRecord,isTombstone:undefined,
+  timeRangeFieldFor:()=>({field:"order_date",format:"date"}),
+ });
+ const baseline=new Map([[list.orderId,listSurfaceFingerprint(list,orderDate,RUN1_AT)]]);
+ const deps:EmitDeps={...makeDeps(RUN2_AT).deps,emit:harness.emit,emitRecord:runtime.emit,
+  isRecordSelected:runtime.isSelected,itemResourcesRestricted:false,
+  hydratedOrders:new Map(baseline),orderItemsCoverage:newOrderItemsCoverage(),ordersCoverage:newOrdersCoverage()};
+ const flags={detailAttempts:0,detailCaptured:false,failedDetailCaptured:false,repairAttempted:false,
+  sessionRepairRequired:false,temporaryDetailFailures:0};
+ let navigations=0,reads=0;
+ const page={goto:async()=>{navigations++;},waitForSelector:async()=>{},
+  url:()=>"",content:async()=>{reads++;return "";}} as unknown as Parameters<typeof processListOrder>[0];
+ assert.equal(await processListOrder(page,deps,flags,list),true);
+ assert.equal(flags.detailAttempts,0);
+ assert.equal(navigations,0);
+ assert.equal(reads,0);
+ assert.equal(harness.protocolMessages.filter(m=>m.type==="RECORD").length,0);
+ assert.deepEqual(deps.orderItemsCoverage,{required:[list.orderId],hydrated:[list.orderId],gap:[]});
+ assert.deepEqual(deps.ordersCoverage,{considered:[list.orderId],covered:[list.orderId],dateDropped:[]});
+ assert.deepEqual(deps.hydratedOrders,baseline);
+});
