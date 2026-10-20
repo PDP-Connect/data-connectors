@@ -403,6 +403,42 @@
           "iconKey": "chatgpt",
           "defaultScope": "chatgpt.conversations"
         }
+      },
+      {
+        "connectorId": "chatgpt-playwright",
+        "company": "openai",
+        "version": "4.0.2",
+        "name": "ChatGPT",
+        "status": "stable",
+        "description": "Exports your email, memories, and all conversations from ChatGPT.",
+        "sourceFiles": {
+          "script": "openai/chatgpt-playwright.js",
+          "metadata": "openai/chatgpt-playwright.json"
+        },
+        "publishedAt": "2026-10-19T00:00:00Z",
+        "sourceTag": "hotfix/chatgpt-playwright-4.0.2-login-check",
+        "sourceCommit": "5ba321018c7f8d39c0f68c654b9a1715c9d17d9a",
+        "releaseId": "connectors-5ba321018c7f",
+        "pageApiVersion": 1,
+        "manifestSha256": "sha256:1e85b71fba2b977f4a39ac0bb5592ee47cbd6dcc5b0302c6089935b200fbd86f",
+        "scriptSha256": "sha256:01c9c760191368a011d9a206e61f4b4dc0fdcd5ee72a38ebab5582e45a93d7d6",
+        "artifactSha256": "sha256:26a1917ad6e7c1a9ceb24cecc373f89791d67990a4c259b698f2741fd891bd8a",
+        "artifactPath": "artifacts/chatgpt-playwright/chatgpt-playwright-4.0.2.tgz",
+        "artifactUrl": "https://raw.githubusercontent.com/PDP-Connect/data-connectors/5ba321018c7f8d39c0f68c654b9a1715c9d17d9a/artifacts/chatgpt-playwright/chatgpt-playwright-4.0.2.tgz",
+        "scopes": [
+          "chatgpt.memories",
+          "chatgpt.conversations"
+        ],
+        "consumerMetadata": {
+          "sourceId": "chatgpt",
+          "displayName": "ChatGPT",
+          "brandDomain": "chatgpt.com",
+          "aliases": [
+            "openai"
+          ],
+          "iconKey": "chatgpt",
+          "defaultScope": "chatgpt.conversations"
+        }
       }
     ],
     "claude-code-local": [
