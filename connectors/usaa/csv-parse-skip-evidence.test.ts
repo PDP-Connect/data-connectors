@@ -465,3 +465,78 @@ test("CSV initial BOM and valid money formats retain exact values", async () => 
 		false,
 	);
 });
+
+for (const header of [
+	"Debit Amount,Credit Amount",
+	"Unknown Amount",
+	"Amount,Amount",
+	"Amount,Debit Amount",
+	" Amount ,AMOUNT",
+]) {
+	for (const dataRow of [false, true]) {
+		test(`CSV signed Amount layout rejects ${header}, data=${dataRow}`, async () => {
+			const harness = makeRecordingEmit(validateRecord);
+			const deps = {
+				...harness,
+				servedAccountTransactionGaps: new Map([
+					["acct-raw-0001", "served-gap"],
+				]),
+			};
+			const csv =
+				"Date,Description," +
+				header +
+				(dataRow ? "\n01/05/2026,Coffee,1.00,0.00" : "");
+			const result = await emitCsvTransactions(
+				deps,
+				await writeTempCsv(csv),
+				makeAccount(),
+				"2025-01-01",
+				1,
+				1,
+			);
+			const account = classifyCsvTransactionResult(
+				"acct-raw-0001",
+				"2025-01-01",
+				null,
+				result,
+			);
+			assert.equal(account.outcome.kind, "gap");
+			assert.equal(account.last_date, "2025-01-01");
+			assert.equal(harness.emitted.length, 0);
+			assert.equal(result.malformedCsv, true);
+			assert.ok(
+				harness.protocolMessages.some(
+					(m) => m.type === "SKIP_RESULT" && m.reason === "csv_partial_parse",
+				),
+			);
+			await recoverServedAccountTransactionGaps(deps, [account.outcome]);
+			assert.equal(
+				harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+				false,
+			);
+		});
+	}
+}
+
+for (const header of ["Amount", " amount ", "AMOUNT"]) {
+	test(`CSV single signed header accepts normalized ${header}`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const csv =
+			"Date,Description," + header + ",Balance\n01/05/2026,Coffee,-1.00,9.00";
+		const result = await emitCsvTransactions(
+			harness,
+			await writeTempCsv(csv),
+			makeAccount(),
+			"2025-01-01",
+			1,
+			1,
+		);
+		assert.equal(
+			classifyCsvTransactionResult("acct-raw-0001", "2025-01-01", null, result)
+				.outcome.kind,
+			"hydrated",
+		);
+		assert.equal(harness.emitted[0]?.data.amount, -100);
+		assert.equal(harness.emitted[0]?.data.balance_after_cents, 900);
+	});
+}

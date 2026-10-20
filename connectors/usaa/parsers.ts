@@ -414,12 +414,24 @@ interface CsvHeaderIndices {
 
 function csvHeaderIndices(header: string[]): CsvHeaderIndices {
 	const lower = header.map((h) => h.trim().toLowerCase());
+	// Only the evidenced single signed Amount column is supported. Other
+	// amount-like labels and duplicates cannot silently choose a debit/credit side.
+	const amountColumns = lower.flatMap((h, i) =>
+		AMOUNT_HEADER_RE.test(h) ? [i] : [],
+	);
+	const firstAmount = amountColumns[0];
+	const amountIndex =
+		amountColumns.length === 1 &&
+		firstAmount !== undefined &&
+		lower[firstAmount] === "amount"
+			? firstAmount
+			: -1;
 	return {
 		idxDate: lower.findIndex((h) => DATE_HEADER_RE.test(h)),
 		idxDesc: lower.findIndex((h) => DESCRIPTION_HEADER_RE.test(h)),
 		idxOrig: lower.findIndex((h) => ORIGINAL_HEADER_RE.test(h)),
 		idxCat: lower.findIndex((h) => CATEGORY_HEADER_RE.test(h)),
-		idxAmt: lower.findIndex((h) => AMOUNT_HEADER_RE.test(h)),
+		idxAmt: amountIndex,
 		idxBal: lower.findIndex((h) => BALANCE_HEADER_RE.test(h)),
 	};
 }
