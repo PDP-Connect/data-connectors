@@ -337,6 +337,7 @@ test("streaming bounds each transfer while spooling a 150 MB result", {
 			fixtures,
 			scopes: ["chatgpt.conversations", "chatgpt.messages"],
 			resultStreaming: true,
+			sampleHeap: true,
 			resultSpoolDirectory: spoolDirectory,
 		});
 		assert.equal(run.ret.ok, true, run.log.slice(-20).join("\n"));
@@ -396,6 +397,7 @@ test("CDP heap sampling catches a retained allocation above the streaming bound"
 			scopes: ["chatgpt.conversations", "chatgpt.messages"],
 			resultStreaming: true,
 			resultSpoolDirectory: spoolDirectory,
+			sampleHeap: true,
 		});
 		assert.ok(
 			run.maxHeapBytes > 64 * 1024 * 1024,
@@ -757,4 +759,24 @@ test("fixture CORS retains explicit headers and supports credentialed cross-orig
 		"access-control-allow-credentials": "true",
 		"access-control-allow-methods": "POST", "access-control-allow-headers": "x-fixture",
 	});
+});
+
+test("audited crypto parity and every admitted bundle byte comparison", async () => {
+  const { assertHashParity, assertPageOnlyAdmission, assertFingerprintBundle } = await import("./crypto-regressions.mjs");
+  const { pageShimConnectors } = await import("./capabilities.mjs");
+  const { fileURLToPath } = await import("node:url");
+  assertHashParity();
+  assertPageOnlyAdmission();
+  await mkdir(root, { recursive: true });
+  await assertFingerprintBundle(buildPageshim, join(root, "fingerprint-crypto.js"));
+  const report=[];
+  for (const connector of pageShimConnectors(fileURLToPath(new URL("../..",import.meta.url)))) {
+    const before=join(root,connector+"-before.js"), after=join(root,connector+"-after.js");
+    await buildPageshim({connector,outfile:before,cryptoHashShim:false});
+    await buildPageshim({connector,outfile:after});
+    const digest=async path=>createHash("sha256").update(await readFile(path)).digest("hex");
+    const beforeHash=await digest(before),afterHash=await digest(after);
+    report.push({connector,before:beforeHash,after:afterHash,changed:beforeHash!==afterHash});
+  }
+  console.log("PAGESHIM_CRYPTO_IMPACT_SUMMARY "+JSON.stringify(report));
 });

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * PDPP Meta (Instagram) Connector (v0.4.11)
+ * PDPP Meta (Instagram) Connector (v0.4.32)
  *
  * Replaces the two legacy Playwright connectors
  * (`connectors/meta/instagram-playwright.js`,
@@ -100,6 +100,8 @@
  *     exemption rule).
  *
  * CHANGES
+ *   v0.4.32 — scrape legacy targeting categories before advertiser pagination
+ *     so slow advertiser expansion cannot consume their collection window.
  *   v0.4.25 — restores legacy profile capture, stream-gap reporting, initial
  *     posts polling/fallback scroll, authenticated readiness, bounded
  *     navigation retries, and expansion-first category collection.
@@ -139,7 +141,7 @@
  *   v0.1.0 — scaffold: session probe only, unconditional SKIP_RESULT.
  */
 
-import { isDeepStrictEqual } from "node:util";
+import { jsonEqual as isDeepStrictEqual } from "./mobile.ts";
 import { isMainModule } from "@pdpp/connector-protocol";
 import type { Frame, Page, Request } from "playwright";
 import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/browser-handoff.ts";
@@ -168,6 +170,7 @@ import {
 	profileRecord,
 	profileSourceFieldsAreReadable,
 } from "./parsers.ts";
+import { buildAdRecordsWebCrypto, fetchMobileProfileUser } from "./mobile.ts";
 import { adsSchema, followingSchema, postLikesSchema, postsSchema, profileSchema, validateRecord } from "./schemas.ts";
 import type {
 	InstagramFollowingPage,
@@ -323,7 +326,9 @@ async function manualLoginHandoff({
  */
 async function ensureInstagramOrigin(page: Page): Promise<boolean> {
 	try {
-		if (new URL(page.url()).origin === INSTAGRAM_ORIGIN) {
+		const hasNativeUrl = "url" in (page as unknown as Record<string, unknown>);
+		const url = hasNativeUrl ? page.url() : await page.evaluate(() => location.href);
+		if (new URL(url).origin === INSTAGRAM_ORIGIN) {
 			return true;
 		}
 	} catch {
@@ -346,6 +351,7 @@ async function instagramFetch<T>(
 			try {
 				const res = await fetch(`${origin}${evalPath}`, {
 					credentials: "include",
+					signal: AbortSignal.timeout(20_000),
 					headers: { "x-requested-with": "XMLHttpRequest", ...h },
 				});
 				const { status } = res;
@@ -380,15 +386,18 @@ async function instagramFetch<T>(
  */
 export async function fetchWebInfoUser(
 	page: Page,
+	navigate = true,
 ): Promise<InstagramWebInfoUser | null> {
-	if (!(await ensureInstagramOrigin(page))) {
+	if (navigate && !(await ensureInstagramOrigin(page))) {
 		return null;
 	}
 	try {
 		return (await page.evaluate(async (origin) => {
 		try {
+			if (location.origin !== origin) return null;
 			const response = await fetch(`${origin}/accounts/web_info/`, {
 				credentials: "include",
+				signal: AbortSignal.timeout(20_000),
 				headers: { "X-Requested-With": "XMLHttpRequest" },
 			});
 			if (!response.ok) {
@@ -2213,10 +2222,10 @@ async function expandAdsDialog(
  const sample = async (click: boolean, initialize = false) => {
   const result = await page.evaluate(inspectDialogExpansion, {click, initialize, label, token});
   const validated = result.rows.filter(row => {
-   const records = buildAdRecords({adTopics: [],
-    advertisers: label === "See more" ? [row.name] : [],
-    categories: label === "View all" ? [row] : []});
-   return records.length === 1 && adsSchema.safeParse(records[0]).success;
+   // Validation does not need a digest. Hash only accepted output records.
+   return adsSchema.safeParse({id: "00000000000000000000000000000000",
+    kind: label === "See more" ? "advertiser" : "ad_category",
+    name: row.name.trim(), description: row.description}).success;
   });
   result.failed ||= validated.length !== result.rows.length;
   result.rows = validated;
@@ -2425,7 +2434,7 @@ export async function scrapeTargetingCategories(
 	const panelLinkReady = await waitForAdsCondition(page, () =>
 		Array.from(
 			document.querySelectorAll(
-				'[role="tabpanel"] a, [role="tabpanel"] [role="link"]',
+				'[role="tabpanel"] a, [role="tabpanel"] [role="link"], [role="tabpanel"] button, [role="tabpanel"] [role="button"]',
 			),
 		).some((link) =>
 			(link.textContent ?? "").includes("Categories used to reach you"),
@@ -2442,7 +2451,7 @@ export async function scrapeTargetingCategories(
 
 	const clickedCategories = await page.evaluate(() => {
 		const links = document.querySelectorAll(
-			'[role="tabpanel"] a, [role="tabpanel"] [role="link"]',
+			'[role="tabpanel"] a, [role="tabpanel"] [role="link"], [role="tabpanel"] button, [role="tabpanel"] [role="button"]',
 		);
 		for (const link of Array.from(links)) {
 			if ((link.textContent ?? "").includes("Categories used to reach you")) {
@@ -2623,13 +2632,16 @@ export async function collectAllStreams(
 	postsClock: PostsClock = realPostsClock,
 	adsClock: AdsSettleClock = realAdsSettleClock,
 	profileClock: ProfileCaptureClock = realProfileCaptureClock,
+	mobile = false,
 ): Promise<void> {
 	const { capture, emitRecord, page, progress, requested } = ctx;
 	const authentication = {blocked: false};
 	authenticationEvidence.set(page, authentication);
+	const mobileOwner = mobile ? await fetchWebInfoUser(page) : null;
 	const pending: Array<{stream: string; read: number; complete: boolean; why?: string}> = [];
 	const checkAuthentication = async (): Promise<void> => {
-		observeAuthentication(page, null, 200, page.url());
+		const url = mobile ? await page.evaluate(() => location.href) : page.url();
+		observeAuthentication(page, null, 200, url);
 		authentication.blocked ||= await page.evaluate(pageShowsLoginOrChallengeControls).catch(() => false) === true;
 	};
 	const queueInventoryResult = async (_ctx: BrowserCollectContext, stream: string, read: number, complete: boolean, why?: string): Promise<void> => {
@@ -2649,8 +2661,10 @@ export async function collectAllStreams(
 			void read.finally(() => responseReads.delete(read));
 		} catch { /* Uninspectable response is not authentication evidence. */ }
 	};
-	page.on("response", onResponse);
-	page.on("framenavigated", onNavigation);
+	if (!mobile) {
+		page.on("response", onResponse);
+		page.on("framenavigated", onNavigation);
+	}
 	try {
 		await checkAuthentication();
 
@@ -2683,7 +2697,7 @@ export async function collectAllStreams(
 		let observedFollowingCount: number | null = null;
 		if ((wantsProfile || wantsPosts || wantsPostLikes || wantsFollowing) && user && identity) {
 			await progress("Fetching Instagram profile counts");
-			const profileUser = await fetchProfilePageUser(
+			const profileUser = mobile ? await fetchMobileProfileUser(page, identity.username, (body, status) => observeAuthentication(page, body, status)) : await fetchProfilePageUser(
 				page,
 				identity.username,
 				capture,
@@ -2723,6 +2737,7 @@ export async function collectAllStreams(
 			let readable = true;
 			let ownerBound = false;
 			try {
+				if (mobile) throw new Error("PageShim lacks passive GraphQL request/response capture; page-minted posts doc_id, variables and anti-bot parameters are not available");
 				const result = await fetchAllPosts(page, identity.username, capture, progress, delay, postsClock, identity.id);
 				edges = result.edges;
 				ownerBound = result.ownerBound;
@@ -2733,7 +2748,9 @@ export async function collectAllStreams(
 			}
 			const emitted = await emitPostRecords(ctx, edges);
 			const postsComplete = readable && ownerBound && sourceInventoryComplete(edges.length, observedPostCount, sourceEnd);
-			const postsWhy = readable ? undefined : "the posts read failed before the source's end";
+			const postsWhy = mobile
+				? "PageShim lacks passive GraphQL request/response capture; page-minted posts doc_id, variables and anti-bot parameters are not available"
+				: readable ? undefined : "the posts read failed before the source's end";
 			if (wantsPosts) await queueInventoryResult(ctx, "posts", emitted.posts, postsComplete && emitted.postsReadable, postsWhy);
 			if (wantsPostLikes) {
 				await queueInventoryResult(ctx, "post_likes", emitted.likes,
@@ -2783,16 +2800,18 @@ export async function collectAllStreams(
 					};
 				}
 			};
+			// Targeting categories are a legacy Ads 1.1.0 output. Read them before
+			// advertiser pagination, which can spend the run's remaining time.
+			const categories = await scrapeSurface("targeting_categories", () =>
+				scrapeTargetingCategories(page, adsClock),
+			);
 			const advertisers = await scrapeSurface("advertisers", () =>
 				scrapeAdvertisers(page, adsClock),
 			);
 			const adTopics = await scrapeSurface("ad_topics", () =>
 				scrapeAdTopics(page, adsClock),
 			);
-			const categories = await scrapeSurface("targeting_categories", () =>
-				scrapeTargetingCategories(page, adsClock),
-			);
-			const ads = buildAdRecords({
+			const ads = await (mobile ? buildAdRecordsWebCrypto : buildAdRecords)({
 				adTopics: adTopics.items,
 				advertisers: advertisers.items,
 				categories: categories.items,
@@ -2815,13 +2834,22 @@ export async function collectAllStreams(
 		}
 		await Promise.all(responseReads);
 		await checkAuthentication();
+		if (mobile) {
+			const finalOwner = await fetchWebInfoUser(page);
+			const before = mobileOwner ? profileRecord(mobileOwner) : null;
+			const after = finalOwner ? profileRecord(finalOwner) : null;
+			authentication.blocked ||= !before || !after ||
+				before.id !== after.id || before.username !== after.username;
+		}
 		for (const result of pending) {
 			await emitInventoryResult(ctx, result.stream, result.read, result.complete && !authentication.blocked,
 				authentication.blocked ? "Instagram signed out or requested a challenge during this run" : result.why);
 		}
 	} finally {
-		page.off("framenavigated", onNavigation);
-		page.off("response", onResponse);
+		if (!mobile) {
+			page.off("framenavigated", onNavigation);
+			page.off("response", onResponse);
+		}
 		authenticationEvidence.delete(page);
 	}
 }

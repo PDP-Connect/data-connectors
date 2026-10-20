@@ -301,9 +301,9 @@ const PAGE_DATA_HELPERS = String.raw`
 		try { return new URL(window.location.href); } catch { return null; }
 	};
 	const onPlaylistIndexPage = () => targetLocation()?.pathname === "/feed/playlists";
-	const onLikedVideosPage = () => {
+	const onPlaylistPage = () => {
 		const url = targetLocation();
-		return url?.pathname === "/playlist" && url.searchParams.get("list") === "LL";
+		return url?.pathname === "/playlist" && Boolean(url.searchParams.get("list"));
 	};
 	const onSubscriptionsPage = () => targetLocation()?.pathname === "/feed/channels";
 	const onTargetRoute = (kind) => {
@@ -439,7 +439,7 @@ const PAGE_DATA_HELPERS = String.raw`
 	const regionFacts = (data, playlistIndex) => {
 		const region = listRegion(data);
 		if (region === null) return null;
-		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, likedVideosEmpty: false, historyEmpty: false };
+		const facts = { items: 0, continuation: false, lists: 0, emptyLists: 0, emptyMessage: false, rejectedMessage: false, selectedTabContent: hasSelectedTabContent(data), loading: false, playlistIndexEmpty: false, playlistEmpty: false, historyEmpty: false };
 		const visit = (value) => {
 			if (Array.isArray(value)) {
 				for (const child of value) visit(child);
@@ -481,7 +481,7 @@ const PAGE_DATA_HELPERS = String.raw`
 			const sections = selected.length === 1 ? selected[0].content?.sectionListRenderer?.contents : null;
 			const section = Array.isArray(sections) && sections.length === 1 ? sections[0]?.itemSectionRenderer : null;
 			const sectionContents = section?.contents;
-			facts.likedVideosEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
+			facts.playlistEmpty = Array.isArray(sectionContents) && sectionContents.length === 1 &&
 				isObject(sectionContents[0]?.messageRenderer) &&
 				isRecognizedEmptyText(textFragments(sectionContents[0].messageRenderer).join(" ")) &&
 				!facts.items && !facts.continuation && !facts.loading && !facts.rejectedMessage;
@@ -518,7 +518,7 @@ const PAGE_READINESS_FUNCTION = `({ content, empty, playlistIndex }) => {
 	if (hasEnumerableContent) return "content";
 	const facts = pageDataFacts(Boolean(playlistIndex));
 	if (playlistIndex && onPlaylistIndexPage() && !hasPageWall() && !hasDomLoading() && hasOnlyBuiltInPlaylistCards() && facts.length > 0 && facts.every((f) => f.playlistIndexEmpty)) return "empty";
-	if (!playlistIndex && onLikedVideosPage() && !hasPageWall() && facts.length > 0 && facts.every((f) => f.likedVideosEmpty)) return "empty";
+	if (!playlistIndex && onPlaylistPage() && !hasPageWall() && facts.length > 0 && facts.every((f) => f.playlistEmpty)) return "empty";
 	if (playlistIndex && document.querySelector("yt-lockup-view-model")) return "content";
 	if (!playlistIndex && Array.from(document.querySelectorAll(empty)).some((node) =>
 		isRecognizedEmptyText(node.textContent ?? ""))) return "empty";
@@ -599,7 +599,7 @@ const LIST_END_FUNCTION = `(request) => {
 			(kind === "playlist-index"
 				? onPlaylistIndexPage() && hasOnlyBuiltInPlaylistCards() && facts.every((f) => f.playlistIndexEmpty)
 				: kind === "playlist"
-					? onLikedVideosPage() && !document.querySelector("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer") && facts.every((f) => f.likedVideosEmpty)
+					? onPlaylistPage() && !document.querySelector("yt-lockup-view-model, ytd-playlist-video-renderer, ytd-playlist-panel-video-renderer") && facts.every((f) => f.playlistEmpty)
 					: kind === "subscriptions"
 						? onSubscriptionsPage() && facts.every((f) => f.selectedTabContent && f.lists > 0 && f.emptyMessage && f.emptyLists === f.lists && f.items === 0 && !f.continuation && !f.loading && !f.rejectedMessage)
 						: kind === "history"

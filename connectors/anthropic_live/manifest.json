@@ -9,7 +9,7 @@
 	},
 	"connector_key": "anthropic-live",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/anthropic-live",
-	"version": "0.3.4",
+	"version": "0.3.6",
 	"display_name": "Claude (Live Session)",
 	"brand": {
 		"icon": "icon.svg",

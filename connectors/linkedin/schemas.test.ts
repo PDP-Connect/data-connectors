@@ -159,24 +159,15 @@ test("connections schema accepts a parser-shaped record", () => {
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("connections schema accepts an unresolved connection (all enrichment null)", () => {
+test("connections schema accepts an unresolved connection without enrichment", () => {
 	const result = connectionsSchema.safeParse({
-		connected_at: null,
-		full_name: null,
-		headline: null,
 		id: "urn:li:fsd_profile:xyz789",
-		profile_url: null,
 	});
 	assert.ok(result.success, JSON.stringify(result.error?.issues));
 });
 
-test("schemas reject a record with a field left out (rows are withheld, never emitted partial)", () => {
-	// A Personal Server upsert replaces the whole record, so every field is
-	// present on an emitted record; field-read.ts withholds uncovered rows.
-	assert.equal(
-		connectionsSchema.safeParse({ id: "urn:li:fsd_profile:xyz789" }).success,
-		false,
-	);
+test("connection enrichment is optional, while stream identity remains required", () => {
+	assert.equal(connectionsSchema.safeParse({ id: "urn:li:fsd_profile:xyz789" }).success, true);
 	assert.equal(profileSchema.safeParse({ id: "alexrivera" }).success, false);
 	assert.equal(connectionsSchema.safeParse({ full_name: "A" }).success, false);
 	assert.equal(skillsSchema.safeParse({ id: "urn:skill:1" }).success, false);

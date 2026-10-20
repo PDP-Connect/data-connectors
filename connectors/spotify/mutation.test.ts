@@ -197,6 +197,10 @@ test("bounded Spotify streams emit typed gaps and never claim full-scan STATE", 
 			["top_tracks", "spotify_ranked_list_capped"],
 		],
 	);
+	assert.deepEqual(
+		gaps[0]?.type === "SKIP_RESULT" ? gaps[0].recovery_hint : undefined,
+		{ action: "retry_on_connector_upgrade", retryable: false },
+	);
 });
 
 test("recent contexts request their profile query hash and remain explicitly incomplete", async () => {
@@ -1037,7 +1041,7 @@ test("spotify browser parser preserves identical playlist pages at distinct offs
 	);
 });
 
-test("spotify browser parser preserves the full playlist track URI alongside its ID", async () => {
+test("equal-duration local playlist tracks keep distinct URIs and no catalog track id", async () => {
 	const { emittedRecords } = await collectWithInPageFetch(
 		["playlist_items"],
 		(operationName) => {
@@ -1069,7 +1073,7 @@ test("spotify browser parser preserves the full playlist track URI alongside its
 					playlistV2: {
 						uri: "spotify:playlist:pl1",
 						content: {
-							totalCount: 1,
+							totalCount: 2,
 							offset: 0,
 							items: [
 								{
@@ -1082,6 +1086,16 @@ test("spotify browser parser preserves the full playlist track URI alongside its
 										},
 									},
 								},
+								{
+									itemV2: {
+										data: {
+											__typename: "Track",
+											uri: "spotify:local:Artist:Album:Other%20Track:180000",
+											name: "Other Track",
+											artists: { items: [] },
+										},
+									},
+								},
 							],
 						},
 					},
@@ -1089,15 +1103,23 @@ test("spotify browser parser preserves the full playlist track URI alongside its
 			};
 		},
 	);
-	const track = emittedRecords.find(
+	const tracks = emittedRecords.filter(
 		(record) => record.stream === "playlist_items",
 	);
-	assert.equal(track?.data.track_id, "180000");
-	assert.equal(
-		track?.data.uri,
-		"spotify:local:Artist:Album:Local%20Track:180000",
+	assert.deepEqual(
+		tracks.map((track) => track.data.uri),
+		[
+			"spotify:local:Artist:Album:Local%20Track:180000",
+			"spotify:local:Artist:Album:Other%20Track:180000",
+		],
 	);
-	assert.equal(playlistItemsSchema.safeParse(track?.data).success, true);
+	assert.deepEqual(
+		tracks.map((track) => track.data.track_id),
+		[null, null],
+	);
+	assert.ok(
+		tracks.every((track) => playlistItemsSchema.safeParse(track.data).success),
+	);
 });
 
 test("spotify browser parser rejects repeated full saved-track pages", async () => {

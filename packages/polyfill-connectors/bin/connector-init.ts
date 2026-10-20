@@ -809,7 +809,7 @@ async function ensureSession({
   // richer form once this connector is wired into a deployment that has it.
   const ready = await manualBrowserLogin({
     message:
-      "Sign in to ${displayName} in the secure browser, then continue. PDPP will verify the session before collecting.",
+      "Sign in to ${displayName} in the secure browser, then continue. Collection starts once the session is verified.",
     page,
     probe: () => probeLoggedIn(page),
     reason: "login",

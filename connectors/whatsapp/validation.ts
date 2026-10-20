@@ -154,7 +154,7 @@ function buildValidationFromSummary(
 	const warnings: string[] = [];
 	if (attachmentCount > 0 && mediaFileCount > 0) {
 		warnings.push(
-			"This export includes media files. PDPP will import them as WhatsApp attachment records.",
+			"This export includes media files. They will be imported as WhatsApp attachment records.",
 		);
 	} else if (attachmentCount > 0) {
 		warnings.push(
@@ -162,7 +162,7 @@ function buildValidationFromSummary(
 		);
 	} else if (mediaFileCount > 0) {
 		warnings.push(
-			"This zip includes media-like files, but the parsed chat text did not reference them. PDPP will still import them as attachment records for this chat.",
+			"This zip includes media-like files, but the parsed chat text did not reference them. They will still be imported as attachment records for this chat.",
 		);
 	}
 

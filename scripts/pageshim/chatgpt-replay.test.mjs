@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import test from "node:test";
 import { buildPageshim } from "./build.mjs";
 import {
 	projectChatGptExport,
@@ -15,6 +15,10 @@ import { runHarness } from "./harness.mjs";
 
 const out = join(process.cwd(), ".scratch", "pageshim-chatgpt-replay-test");
 mkdirSync(out, { recursive: true });
+// Keep a failed run's bundle for debugging; remove it after a passing run.
+process.on("exit", (code) => {
+	if (code === 0) rmSync(out, { recursive: true, force: true });
+});
 
 test("reverse-projects retained ChatGPT records into list pages and details", () => {
 	const projected = projectChatGptExport({
@@ -110,6 +114,110 @@ test("reverse-projects retained ChatGPT records into list pages and details", ()
 	});
 	assert.equal(projected.stats.conversations, 1);
 	assert.equal(projected.stats.messages, 2);
+});
+
+test("reverse-projects ChatGPT 0.3.0 record ids and links back to node ids", () => {
+	const message = (node, parent, children, role) => ({
+		id: `conv-a:${node}`,
+		node_id: node,
+		conversation_id: "conv-a",
+		parent_id: parent === null ? null : `conv-a:${parent}`,
+		children_ids: children.map((child) => `conv-a:${child}`),
+		role,
+		content: `safe synthetic ${node}`,
+		content_type: "text",
+		create_time: "2025-01-01T00:00:00.000Z",
+		on_current_branch: true,
+	});
+	const projected = projectChatGptExport({
+		"chatgpt.conversations": {
+			conversations: [
+				{
+					id: "conv-a",
+					title: "safe synthetic title",
+					create_time: "2025-01-01T00:00:00.000Z",
+					update_time: "2025-01-01T00:01:00.000Z",
+					current_node: "msg-b",
+					message_count_on_current_branch: 2,
+				},
+			],
+		},
+		"chatgpt.messages": {
+			messages: [
+				message("msg-a", null, ["msg-b"], "user"),
+				message("msg-b", "msg-a", [], "assistant"),
+			],
+		},
+	});
+	const mapping = projected.detail("conv-a").mapping;
+	assert.deepEqual(Object.keys(mapping), ["msg-a", "msg-b"]);
+	assert.deepEqual(
+		[mapping["msg-b"].id, mapping["msg-b"].message.id, mapping["msg-b"].parent],
+		["msg-b", "msg-b", "msg-a"],
+	);
+	assert.deepEqual(mapping["msg-a"].children, ["msg-b"]);
+	assert.equal(projected.listPage(0).items[0].current_node, "msg-b");
+});
+
+test("reverse-projects typed ChatGPT bodies, retained object parts, and escaped strings", () => {
+	const assetRecord = {
+		content_type: "image_asset_pointer",
+		asset_pointer: "file-service://image-1",
+		details: { caption: "asset\\u0000caption" },
+	};
+	const asset = {
+		...assetRecord,
+		details: { caption: "asset\u0000caption" },
+	};
+	const transcriptRecord = {
+		content_type: "audio_transcription",
+		text: "heard\\u0000text",
+	};
+	const transcript = { ...transcriptRecord, text: "heard\u0000text" };
+	const projected = projectChatGptExport({
+		"chatgpt.conversations": {
+			conversations: [
+				{ id: "conv-mixed", title: "mixed", current_node: "m1" },
+				{ id: "conv-objects", title: "objects", current_node: "o1" },
+			],
+		},
+		"chatgpt.messages": {
+			messages: [
+				{
+					id: "conv-mixed:m1",
+					node_id: "m1",
+					conversation_id: "conv-mixed",
+					parent_id: null,
+					children_ids: [],
+					role: "user",
+					content: "lead\\u0000text\\u005Cliteral",
+					content_type: "multimodal_text",
+					non_string_parts: [
+						{ index: 1, part: assetRecord },
+						{ index: 2, part: transcriptRecord },
+					],
+				},
+				{
+					id: "conv-objects:o1",
+					node_id: "o1",
+					conversation_id: "conv-objects",
+					parent_id: null,
+					children_ids: [],
+					role: "user",
+					content: null,
+					content_type: "text",
+					non_string_parts: [{ index: 0, part: assetRecord }],
+				},
+			],
+		},
+	});
+	const mixed = projected.detail("conv-mixed").mapping.m1.message.content;
+	assert.equal(mixed.content_type, "multimodal_text");
+	assert.deepEqual(mixed.parts, ["lead\u0000text\\literal", asset, transcript]);
+	const objectsOnly =
+		projected.detail("conv-objects").mapping.o1.message.content;
+	assert.equal(objectsOnly.content_type, "text");
+	assert.deepEqual(objectsOnly.parts, [asset]);
 });
 
 // Bridge budget for a full-size run of the real ChatGPT PageShim bundle.

@@ -21,7 +21,7 @@ export const profileSchema = z.object({
 	channel_url: urlSchema,
 	title: pdppSafeText.max(500).nullable(),
 	handle: pdppSafeText.max(200).nullable(),
-	email: pdppSafeText.max(320).nullable(),
+	email: pdppSafeText.max(320).nullable().optional(),
 	joined_at: pdppSafeText.max(40).nullable(),
 	avatar_url: urlSchema,
 	description: pdppSafeText.max(5000).nullable(),

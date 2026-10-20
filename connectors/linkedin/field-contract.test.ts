@@ -4,11 +4,11 @@
 /**
  * The field-reading contract, end to end through `collectLinkedIn`.
  *
- * LinkedIn is deliberately upsert-only until the shared enumeration-proof
- * primitive lands. These tests focus on field readability: every mapped
+ * These fixtures omit dash owner identity, so profile sections stay upsert-only.
+ * Connections supply independent summary proof. Tests focus on readability: every mapped
  * source path and container receives a malformed value, and the run must not
  * crash or emit a row with an unreadable field. Fully readable rows still
- * emit, but no fixture can authorize full-inventory replacement.
+ * emit; only streams with independent inventory evidence may report completion.
  *
  * The second half pins every concrete counterexample from the three review
  * rounds of this port.
@@ -152,7 +152,11 @@ function baseFixture(): Record<Root, Json> {
 			summary: "Writes programs.",
 		},
 		me: {
+			plainId: 12,
 			miniProfile: {
+				entityUrn: "urn:li:fs_miniProfile:12",
+				dashEntityUrn: "urn:li:fsd_profile:12",
+				objectUrn: "urn:li:member:12",
 				firstName: "Ada",
 				lastName: "Lovelace",
 				occupation: "Engineer (me)",
@@ -182,6 +186,7 @@ function baseFixture(): Record<Root, Json> {
 // ─── Harness ─────────────────────────────────────────────────────────────
 
 interface Routes {
+	summary?: Json;
 	connections?: (start: number) => Json;
 	dash?: (decoration: string | null) => Json;
 	me?: Json;
@@ -206,6 +211,7 @@ function completeCollectionsForFixture(value: unknown): unknown {
 
 function routesFor(fixture: Record<Root, Json>): Routes {
 	return {
+		summary: { entityUrn: "urn:li:fsd_connectionsSummary:12", numConnections: 1 },
 		connections: (start) =>
 			start === 0
 				? fixture.page
@@ -220,6 +226,7 @@ function routesFor(fixture: Record<Root, Json>): Routes {
 
 function fakePage(routes: Routes): Page {
 	const respond = (path: string): Json => {
+		if (path === "/voyager/api/relationships/connectionsSummary/") return routes.summary ?? { _error: "no summary route" };
 		if (path.startsWith("/voyager/api/me")) return routes.me;
 		if (
 			path.startsWith("/voyager/api/identity/dash/profiles?q=memberIdentity")
@@ -816,13 +823,13 @@ function fixtureWith(injection: Injection): Record<Root, Json> {
 
 // ─── Control: the full fixture stays readable and upsert-only ────────────
 
-test("contract control: every stream emits its fully readable rows without claiming completeness", async () => {
+test("contract control: readable rows emit and only independently proved streams complete", async () => {
 	const recording = await collect(routesFor(baseFixture()));
 	for (const stream of ALL_STREAMS) {
 		const outcome = outcomeOf(recording, stream);
 		assert.equal(
 			outcome.complete,
-			false,
+			stream === "connections",
 			`${stream} unexpectedly claims completeness: ${JSON.stringify(outcome)}`,
 		);
 		assert.ok(outcome.records.length > 0, `${stream}: no readable records emitted`);
@@ -862,7 +869,10 @@ for (const fieldCase of FIELD_CASES) {
 	const sourceNames = fieldCase.sources
 		.map((source) => `${source.root}.${source.path.join(".")}`)
 		.join(" | ");
-	test(`contract: ${fieldCase.stream}.${fieldCase.field} from ${sourceNames} — malformed source never completes`, async () => {
+	const title = ["connected_at", "full_name", "headline", "profile_url"].includes(fieldCase.field) && fieldCase.stream === "connections"
+		? "malformed optional source field withholds the whole edge"
+		: "malformed source never completes";
+	test(`contract: ${fieldCase.stream}.${fieldCase.field} from ${sourceNames} — ${title}`, async () => {
 		for (const injection of injectionsFor(fieldCase)) {
 			const where = `${injection.label} ${injection.root}.${injection.path.join(".")} = ${JSON.stringify(injection.value)}`;
 			let recording: Recording;
@@ -872,6 +882,15 @@ for (const fieldCase of FIELD_CASES) {
 				assert.fail(`${where}: collect threw ${String(error)}`);
 			}
 			const outcome = outcomeOf(recording, fieldCase.stream);
+			if (
+				fieldCase.stream === "connections" &&
+				(["full_name", "headline", "profile_url"].includes(fieldCase.field) ||
+					(fieldCase.field === "connected_at" && injection.path.at(-1) === "createdAt"))
+			) {
+				assert.equal(outcome.complete, false, `${where}: malformed source completed the stream`);
+				assertWithheld(outcome, [fieldCase.field], where);
+				continue;
+			}
 			assert.equal(
 				outcome.complete,
 				false,
@@ -997,14 +1016,14 @@ const EMPTY_VALUE_CASES: ReadonlyArray<{
 ];
 
 for (const emptyCase of EMPTY_VALUE_CASES) {
-	test(`contract: ${emptyCase.stream}.${emptyCase.field} = ${JSON.stringify(emptyCase.value)} is readable while the stream stays upsert-only`, async () => {
+	test(`contract: ${emptyCase.stream}.${emptyCase.field} = ${JSON.stringify(emptyCase.value)} is readable with independently gated inventory proof`, async () => {
 		const fixture = baseFixture();
 		setPath(fixture[emptyCase.root], emptyCase.path, emptyCase.value);
 		const outcome = outcomeOf(
 			await collect(routesFor(fixture)),
 			emptyCase.stream,
 		);
-		assert.equal(outcome.complete, false, JSON.stringify(outcome));
+		assert.equal(outcome.complete, emptyCase.stream === "connections", JSON.stringify(outcome));
 		const row = outcome.records.find((record) => record.id === emptyCase.rowId);
 		assert.ok(row, "row emitted");
 		assert.deepEqual(row[emptyCase.field], emptyCase.expected);
@@ -1027,7 +1046,7 @@ const VERIFIED_EMPTY_CONNECTIONS: Routes["connections"] = (start) => ({
 	paging: { count: 40, start },
 });
 
-test("r1: a repeated connections page withholds coverage and connection_count", async () => {
+test("r1: a repeated connections page withholds coverage independently of profile count", async () => {
 	const members = Array.from({ length: 40 }, (_, index) => ({
 		connectedMember: `urn:li:fsd_profile:a${index}`,
 		createdAt: 1_700_000_000_000,
@@ -1051,7 +1070,7 @@ test("r1: a repeated connections page withholds coverage and connection_count", 
 	assert.equal(outcomeOf(recording, "connections").complete, false);
 	const profile = outcomeOf(recording, "profile");
 	assert.equal(profile.complete, false);
-	assertWithheld(profile, ["connection_count"]);
+	assert.equal(profile.records[0]?.connection_count, 1);
 });
 
 test("r1: a basic-fallback {} profile is never complete, and its sections are unavailable", async () => {
@@ -1114,11 +1133,11 @@ test("r1: primitive section rows and an unreadable nested collection are not cov
 	}
 });
 
-test("r1: resolver keeps source-backed blank names and rejects a numeric name", async () => {
+test("r1: resolver keeps source-backed blank names and withholds a numeric name", async () => {
 	const fixture = baseFixture();
-	fixture.resolved = { firstName: "", headline: "", lastName: "" };
+	fixture.resolved = { firstName: "", headline: "", lastName: "", publicIdentifier: null };
 	const blanks = outcomeOf(await collect(routesFor(fixture)), "connections");
-	assert.equal(blanks.complete, false, JSON.stringify(blanks));
+	assert.equal(blanks.complete, true, JSON.stringify(blanks));
 	assert.deepEqual(blanks.records[0], {
 		connected_at: "2023-11-14T22:13:20.000Z",
 		full_name: "",
@@ -1291,7 +1310,7 @@ test("r3: unreadable education end points are never read as ongoing", async () =
 	}
 });
 
-test("r3: a malformed or out-of-range connection timestamp is reported, not erased or thrown", async () => {
+test("r3: a malformed or out-of-range connection timestamp withholds the edge", async () => {
 	for (const createdAt of ["bad", 1e20]) {
 		const fixture = baseFixture();
 		setPath(fixture.page, ["elements", "0", "createdAt"], createdAt);
