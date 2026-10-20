@@ -739,7 +739,16 @@ export function parseStarredPage(html: string): ParsedInventory<StarredRow> {
 	let rejectedRows = 0;
 	const seen = new Set<string>();
 	for (const [index, source] of sourceRows.entries()) {
-		const link = source.querySelector("h3 a[href]");
+		const headings = Array.from(source.querySelectorAll("h3")).filter((node) => !insideOverlay(node, source));
+		const links = Array.from(source.querySelectorAll("h3 a[href]")).filter((node) => !insideOverlay(node, source));
+		// A card is one entry only when it has one primary identity. Nested
+		// cards and extra headings cannot disappear inside an accounted row.
+		if (headings.length !== 1 || links.length !== 1 ||
+			Array.from(source.querySelectorAll(STARRED_CARD_SELECTOR)).some((node) => !insideOverlay(node, source))) {
+			rejectedRows += 1;
+			continue;
+		}
+		const link = links[0] ?? null;
 		const repo = repositoryName(link?.getAttribute("href") ?? null);
 		const fullName = sourceText(link);
 		if (!repo || !fullName) {
@@ -1095,19 +1104,31 @@ export function parseLegacyEventPageItem(raw: unknown): ParsedItem<EventRow> {
 			break;
 		}
 		case "PullRequestEvent": {
+			const expectedApiUrl = `https://api.github.com/repos/${value.repo}/pulls/${pr.number}`;
+			const validNumber = typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0;
+			const htmlPrefix = `https://github.com/${value.repo}/pull/`;
+			const htmlNumber = typeof pr.html_url === "string" && pr.html_url.startsWith(htmlPrefix)
+				? Number(pr.html_url.slice(htmlPrefix.length)) : NaN;
+			const matchingHtmlUrl = Number.isSafeInteger(htmlNumber) && htmlNumber > 0 &&
+				pr.html_url === `${htmlPrefix}${htmlNumber}` &&
+				(pr.number === undefined || pr.number === htmlNumber) &&
+				(payload.number === undefined || payload.number === htmlNumber);
 			// The Events API also returns a compact PR reference without title/body.
 			// Accept that known source shape; arbitrary missing detail still vetoes.
 			const compact = pr.title === undefined && pr.body === undefined &&
 				typeof pr.id === "number" && Number.isSafeInteger(pr.id) && pr.id > 0 &&
-				typeof pr.number === "number" && Number.isSafeInteger(pr.number) && pr.number > 0 &&
+				validNumber &&
 				payload.number === pr.number &&
-				pr.url === `https://api.github.com/repos/${objectValue(source.repo).name}/pulls/${pr.number}` &&
-				typeof objectValue(pr.head).ref === "string" && typeof objectValue(pr.base).ref === "string";
+				pr.url === expectedApiUrl &&
+				(pr.html_url === undefined || matchingHtmlUrl) &&
+				typeof objectValue(pr.head).ref === "string" && objectValue(pr.head).ref !== "" &&
+				typeof objectValue(pr.base).ref === "string" && objectValue(pr.base).ref !== "";
 			requireField("action", typeof payload.action === "string");
 			requireField("title", compact || nullableText(pr.title));
 			if (pr.title === null) row.title = null;
 			requireField("body", compact || nullableText(pr.body));
-			requireField("url", nullableText(pr.html_url) || typeof pr.url === "string");
+			requireField("url", pr.html_url === null || matchingHtmlUrl ||
+				(pr.html_url === undefined && validNumber && pr.url === expectedApiUrl));
 			if (pr.html_url === null) row.url = null;
 			requireField("branch", nullableText(objectValue(pr.head).ref));
 			break;
@@ -1228,11 +1249,8 @@ function legacyEventValues(raw: unknown): LegacyEvent | null {
 			extras.body = stringValue(pullRequest.body)?.slice(0, 280) ?? null;
 			extras.url =
 				stringValue(pullRequest.html_url) ??
-				stringValue(pullRequest.url)?.replace(
-					"api.github.com/repos",
-					"github.com",
-				) ??
-				null;
+				(pullRequest.url === `https://api.github.com/repos/${parsed.data.repo.name}/pulls/${number}`
+					? `https://github.com/${parsed.data.repo.name}/pull/${number}` : null);
 			extras.branch = prBranch;
 			break;
 		}

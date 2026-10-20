@@ -738,9 +738,51 @@ test("compact PR acceptance still rejects wrong repositories and missing details
 	for (const pull_request of [
 		{ ...pr, url: "https://api.github.com/repos/other-owner/demo/pulls/7" },
 		{ ...pr, head: {} },
+		{ ...pr, head: undefined },
+		{ ...pr, head: { ref: "" } },
+		{ ...pr, base: {} },
+		{ ...pr, base: undefined },
+		{ ...pr, base: { ref: "" } },
+		{ ...pr, html_url: "https://github.com/other-owner/other/pull/99" },
+		{ ...pr, html_url: "https://github.com/sample-owner/demo/pull/8" },
+		{ ...pr, html_url: "invalid" },
+		{ ...pr, html_url: "" },
+		{ ...pr, html_url: null },
+		{ ...pr, number: 8 },
+		{ ...pr, number: "7" },
+		{ ...pr, number: 0 },
+		{ ...pr, number: 1.5 },
+		{ ...pr, id: "77" },
+		{ ...pr, id: null },
+		{ ...pr, id: undefined },
+		{ ...pr, id: 0 },
+		{ ...pr, id: -1 },
+		{ ...pr, id: 1.5 },
+		{ ...pr, id: Number.MAX_SAFE_INTEGER + 1 },
 		{ ...pr, body: "Source supplied body but no title" },
 	]) {
 		const parsed = parseLegacyEventPageItem({ id: "123", type: "PullRequestEvent", public: true, created_at: "2026-10-19T12:00:00Z", repo: { name: "sample-owner/demo" }, payload: { action: "opened", number: 7, pull_request } });
 		assert.equal(parsed.complete, false);
+	}
+	for (const html_url of [undefined, "https://github.com/sample-owner/demo/pull/7"]) {
+		const parsed = parseLegacyEventPageItem({ id: "123", type: "PullRequestEvent", public: true, created_at: "2026-10-19T12:00:00Z", repo: { name: "sample-owner/demo" }, payload: { action: "opened", number: 7, pull_request: { ...pr, html_url } } });
+		assert.equal(parsed.complete, true);
+		assert.equal(parsed.row?.url, "https://github.com/sample-owner/demo/pull/7");
+	}
+});
+
+test("starred cards reject multiple repository identities and nested candidate cards", () => {
+	const heading = '<h3><a href="/sample-owner/demo">sample-owner/demo</a></h3>';
+	const card = (body: string) => `<div class="col-12 d-block width-full border-bottom">${body}<relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div>`;
+	for (const contents of [
+		heading + '<h3><a href="/sample-owner/other">sample-owner/other</a></h3>',
+		heading + card('<h3><a href="/sample-owner/other">sample-owner/other</a></h3>'),
+		card(heading),
+	]) {
+		const parsed = parseStarredPage(`<turbo-frame id="user-starred-repos">${card(contents)}</turbo-frame>`);
+		assert.equal(parsed.entriesComplete, false);
+		assert.equal(parsed.complete, false);
+		assert.equal(parsed.rejectedRows, 1);
+		assert.deepEqual(parsed.rows, []);
 	}
 });

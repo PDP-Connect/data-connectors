@@ -573,10 +573,34 @@ test("compact pull-request event payloads publish the observed events window", a
 	assert.equal(events.length, 1);
 	assert.equal(events[0]?.title, "PR #7 (feature)");
 	assert.equal(events[0]?.body, null);
+	assert.equal(events[0]?.url, "https://github.com/sample-owner/demo/pull/7");
 	assert.deepEqual(
 		messages.map((message) => message.type),
 		["STATE", "DETAIL_COVERAGE"],
 	);
+});
+
+test("two-identity starred cards cannot publish with terminal pagination and no counter", async () => {
+	const messages: Array<{ type: string }> = [];
+	const records: unknown[] = [];
+	const html = withOwner(`<main><turbo-frame id="user-starred-repos"><div class="col-12 d-block width-full border-bottom"><h3><a href="/sample-owner/first">sample-owner/first</a></h3><h3><a href="/sample-owner/second">sample-owner/second</a></h3><relative-time datetime="2026-10-19T00:00:00Z"></relative-time></div></turbo-frame>${terminalInventory}</main>`);
+	await collectGitHubBrowser(
+		{
+			emit: async (message) => { messages.push(message); },
+			emitRecord: async (_stream, data) => { records.push(data); },
+			progress: async () => {},
+			requested: new Set(["starred"]),
+			state: {},
+		},
+		{
+			fetchPublicJson: async (url) => apiObservation(url, []),
+			now: () => new Date("2026-10-20T17:00:00Z"),
+			openPage: async (url) => pageObservation(url, url === "https://github.com/" ? profilePlaceholder : html),
+			sleep: async () => {},
+		},
+	);
+	assert.deepEqual(records, []);
+	assert.equal(messages.some(({ type }) => ["RECORD", "STATE", "DETAIL_COVERAGE"].includes(type)), false);
 });
 
 for (const countConflict of [false, true]) {
