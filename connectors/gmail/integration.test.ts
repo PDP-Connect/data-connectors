@@ -33,6 +33,7 @@
  */
 
 import assert from "node:assert/strict";
+import { resourceSet } from "@pdpp/connector-protocol";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Readable } from "node:stream";
@@ -79,6 +80,7 @@ import {
 	advanceMessagesBackfillCursor,
 	attachmentBackfillPageByteBudget,
 	attachmentsCoverageBoundaryEstablished,
+	attachmentOutsideResourceScope,
 	buildAttachmentDetailCoverageMessage,
 	buildAttachmentDetailGap,
 	buildAttachmentTransferProgressMessage,
@@ -98,6 +100,7 @@ import {
 	type HydrateAttachmentFn,
 	isoToImapDate,
 	makeAttachmentDetailCoverage,
+	makeEmitRecord as makeGmailEmitRecord,
 	makeAttachmentHydrator,
 	parseDeltaHoldbackRuns,
 	type PerMessageDeps,
@@ -7626,4 +7629,99 @@ test("recoverServedAttachmentGaps: rejected emission leaves the served gap unrec
 	assert.deepEqual(coverage.requiredKeys, ["gmmsgid-credit:1"]);
 	assert.deepEqual(coverage.hydratedKeys, []);
 	assert.equal(harness.protocolMessages.some((m) => m.type === "DETAIL_GAP_RECOVERED"), false);
+});
+
+function realResourceEmitter(requested: Map<string, StreamRequest>, emit: RecordingHarness["emit"]) {
+	const filters = new Map<string, Set<string> | null>();
+	for (const [name, scope] of requested) filters.set(name, resourceSet(scope));
+	return makeGmailEmitRecord(filters, FROZEN_NOW, () => {}, emit);
+}
+
+test("attachment resources: real emitter excludes unselected keys before hydration and coverage", async () => {
+	const message = makeServedRecoveryMsg({ attachments: [16, 16], emailId: "abc123" });
+	const requested = new Map<string, StreamRequest>([
+		["attachments", { name: "attachments", resources: ["abc123:1"] }],
+	]);
+	const coverage = makeAttachmentDetailCoverage();
+	const hydrated: string[] = [];
+	const hydrate = statusStampingHydrator({ "abc123:1": "hydrated", "abc123:2": "hydrated" });
+	const harness = makeHarness({
+		requested, attachmentCoverage: coverage, wantMessages: false,
+		hydrateAttachment: async (msg, attachment) => {
+			hydrated.push(attachment.id);
+			return hydrate(msg, attachment);
+		},
+	});
+	harness.deps.emitRecord = realResourceEmitter(requested, harness.emit);
+	await processMessage(harness.deps, message);
+	assert.deepEqual(coverage.requiredKeys, ["abc123:1"]);
+	assert.deepEqual(coverage.hydratedKeys, ["abc123:1"], JSON.stringify(harness.protocolMessages));
+	assert.deepEqual(hydrated, ["abc123:1"]);
+	const result = buildAttachmentDetailCoverageMessage(coverage);
+	assert.equal(result.considered, 1);
+	assert.equal(result.covered, 1, "completed mailbox has no required-only excluded key blocking its checkpoint");
+	assert.equal(harness.protocolMessages.filter((m) => m.type === "RECORD" && m.stream === "attachments").length, 1);
+});
+
+test("served recovery resources: only selected attachment is hydrated, credited and acknowledged", async () => {
+	const message = makeServedRecoveryMsg({ attachments: [16, 16], emailId: "def456", uid: 6000 });
+	const requested = new Map<string, StreamRequest>([
+		["attachments", { name: "attachments", resources: ["def456:1"] }],
+	]);
+	const coverage = makeAttachmentDetailCoverage();
+	const harness = makeRecordingEmit();
+	const hydrated: string[] = [];
+	const hydrate = statusStampingHydrator({ "def456:1": "hydrated", "def456:2": "hydrated" });
+	const summary = await recoverServedAttachmentGaps(
+		{ search: mock.fn(() => Promise.resolve([6000])), fetchOne: mock.fn(() => Promise.resolve(message)) },
+		{
+			requested,
+			attachmentCoverage: coverage,
+			detailGaps: [1, 2].map((partIndex) => makeServedRecoveryGap({
+				gapId: `scope-gap-${partIndex}`, messageId: "def456", partIndex,
+			})),
+			emitProtocol: harness.emit,
+			emitRecord: realResourceEmitter(requested, harness.emit),
+			hydrateAttachment: async (msg, attachment) => {
+				hydrated.push(attachment.id);
+				return hydrate(msg, attachment);
+			},
+		},
+	);
+	assert.deepEqual(coverage.requiredKeys, ["def456:1"]);
+	assert.deepEqual(coverage.hydratedKeys, ["def456:1"]);
+	assert.deepEqual(hydrated, ["def456:1"]);
+	assert.equal(summary.recovered, 1);
+	assert.deepEqual(harness.protocolMessages.filter((m) => m.type === "DETAIL_GAP_RECOVERED").map((m) => m.gap_id), ["scope-gap-1"]);
+});
+
+test("selected schema rejection remains required debt with the real resource emitter", async () => {
+	const requested = new Map<string, StreamRequest>([
+		["attachments", { name: "attachments", resources: ["abcdef:2"] }],
+	]);
+	const coverage = makeAttachmentDetailCoverage();
+	const hydrate = statusStampingHydrator({ "abcdef:2": "hydrated" });
+	const harness = makeHarness({
+		requested, attachmentCoverage: coverage, wantMessages: false,
+		hydrateAttachment: async (msg, attachment) => {
+			const result = await hydrate(msg, attachment);
+			return { ...result, record: { ...result.record, size_bytes: -1 } };
+		},
+	});
+	harness.deps.emitRecord = realResourceEmitter(requested, harness.emit);
+	await processMessage(harness.deps, { ...makeAttachmentMsg(), emailId: "abcdef" });
+	assert.deepEqual(coverage.requiredKeys, ["abcdef:2"]);
+	assert.deepEqual(coverage.hydratedKeys, []);
+	assert.equal(harness.protocolMessages.some((m) => m.type === "SKIP_RESULT" && m.reason === "schema_validation_failed"), true);
+});
+
+test("resource exclusion never hides missing identity or a malformed selected candidate", () => {
+	const requested = new Map<string, StreamRequest>([
+		["attachments", { name: "attachments", resources: ["abcdef:1"] }],
+	]);
+	for (const id of [undefined, null, "", " ", 123, {}]) {
+		assert.equal(attachmentOutsideResourceScope(requested, { id } as unknown as AttachmentRecord), false);
+	}
+	assert.equal(attachmentOutsideResourceScope(requested, { id: "abcdef:1", size_bytes: -1 } as AttachmentRecord), false);
+	assert.equal(attachmentOutsideResourceScope(requested, { id: "abcdef:2" } as AttachmentRecord), true);
 });

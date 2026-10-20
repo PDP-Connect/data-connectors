@@ -919,6 +919,21 @@ function findRecoveredAttachmentDetailGaps(
 	return matches;
 }
 
+/** Only a known resource mismatch is an exclusion; missing identity remains debt. */
+export function attachmentOutsideResourceScope(
+	requested: ReadonlyMap<string, StreamRequest> | undefined,
+	attachment: AttachmentRecord,
+): boolean {
+	if (typeof attachment.id !== "string" || attachment.id.trim().length === 0) {
+		return false;
+	}
+	const scope = requested?.get("attachments");
+	if (!scope) return false;
+	// Same resourceSet/String(id) semantics as Gmail's actual emitter.
+	const resources = resourceSet(scope);
+	return resources !== null && !resources.has(String(attachment.id));
+}
+
 async function emitAttachmentRecords(
 	deps: PerMessageDeps,
 	msg: FetchMessageObject,
@@ -930,6 +945,7 @@ async function emitAttachmentRecords(
 	const recoveredAttachmentGapIds =
 		deps.recoveredAttachmentGapIds ?? new Set<string>();
 	for (const a of attachments) {
+		if (attachmentOutsideResourceScope(deps.requested, a)) continue;
 		const hydration = await deps.hydrateAttachment(msg, a);
 		const hydrated = hydration.record;
 		let emitted: Awaited<ReturnType<EmitRecordFn>> = false;
@@ -2912,6 +2928,7 @@ async function processServedAttachmentRecoveryGap(
 		emitProtocol: (msg: EmittedMessage) => Promise<void>;
 		emitRecord: EmitRecordFn;
 		hydrateAttachment: HydrateAttachmentFn;
+		requested?: ReadonlyMap<string, StreamRequest>;
 	},
 	state: ServedAttachmentRecoveryState,
 	byteBudget: number,
@@ -2980,6 +2997,8 @@ async function processServedAttachmentRecoveryGap(
 		return false;
 	}
 
+	if (attachmentOutsideResourceScope(deps.requested, attachment)) return false;
+
 	const attachmentBytes =
 		typeof attachment.size_bytes === "number"
 			? attachment.size_bytes
@@ -3017,6 +3036,7 @@ export async function recoverServedAttachmentGaps(
 		emitProtocol: (msg: EmittedMessage) => Promise<void>;
 		emitRecord: EmitRecordFn;
 		hydrateAttachment: HydrateAttachmentFn;
+		requested?: ReadonlyMap<string, StreamRequest>;
 		recoveredAttachmentGapIds?: Set<string>;
 	},
 ): Promise<ServedAttachmentRecoverySummary> {
@@ -3060,6 +3080,7 @@ export async function recoverServedAttachmentGaps(
 		emitProtocol: deps.emitProtocol,
 		emitRecord: deps.emitRecord,
 		hydrateAttachment: deps.hydrateAttachment,
+		...(deps.requested ? { requested: deps.requested } : {}),
 	};
 
 	for (const [index, gap] of servedGaps.entries()) {
@@ -3100,6 +3121,7 @@ async function recoverServedAttachmentGapsIfRequested(
 		emitProtocol: (msg: EmittedMessage) => Promise<void>;
 		emitRecord: EmitRecordFn;
 		hydrateAttachment: HydrateAttachmentFn;
+		requested?: ReadonlyMap<string, StreamRequest>;
 		recoveredAttachmentGapIds: Set<string>;
 	},
 ): Promise<void> {
@@ -3114,6 +3136,7 @@ async function recoverServedAttachmentGapsIfRequested(
 		emitProtocol: deps.emitProtocol,
 		emitRecord: deps.emitRecord,
 		hydrateAttachment: deps.hydrateAttachment,
+		...(deps.requested ? { requested: deps.requested } : {}),
 		recoveredAttachmentGapIds: deps.recoveredAttachmentGapIds,
 	});
 	const { attachment_hydration_failure_outcome, ...attachmentRecoveryOutcome } =
@@ -3159,6 +3182,7 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 			emitProtocol: args.emit,
 			emitRecord: args.deps.emitRecord,
 			hydrateAttachment: args.hydrateAttachment,
+			requested: args.deps.requested,
 			recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
 		});
 		return;
@@ -3177,6 +3201,7 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 			emitProtocol: args.emit,
 			emitRecord: args.deps.emitRecord,
 			hydrateAttachment: args.hydrateAttachment,
+			requested: args.deps.requested,
 			recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
 		});
 		return;
@@ -3233,7 +3258,7 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 				hydrateAttachment: args.hydrateAttachment,
 				recoveredAttachmentGapIds: args.recoveredAttachmentGapIds,
 				nowIso,
-				requested: new Map([["attachments", { name: "attachments" }]]),
+				requested: new Map([["attachments", args.deps.requested.get("attachments") ?? { name: "attachments" }]]),
 				timeRange: args.deps.requested.get("attachments")?.time_range,
 				wantBodies: false,
 				wantMessages: false,
@@ -4898,10 +4923,11 @@ export async function runAllMailPasses(
 
 // ─── emitRecord factory ─────────────────────────────────────────────────
 
-function makeEmitRecord(
+export function makeEmitRecord(
 	resFilters: Map<string, Set<string> | null>,
 	emittedAt: string,
 	incTotal: () => void,
+	write: (msg: EmittedMessage) => Promise<void> = emit,
 ): EmitRecordFn {
 	return async (
 		stream: string,
@@ -4921,7 +4947,7 @@ function makeEmitRecord(
 		// Validate record against schema.
 		const validation = validateRecord(stream, data);
 		if (!validation.ok) {
-			await emit({
+			await write({
 				type: "SKIP_RESULT",
 				stream,
 				reason: "schema_validation_failed",
@@ -4931,7 +4957,7 @@ function makeEmitRecord(
 			return false;
 		}
 
-		await emit({
+		await write({
 			type: "RECORD",
 			stream,
 			key: canonical,
