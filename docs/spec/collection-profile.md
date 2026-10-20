@@ -1603,7 +1603,8 @@ complete while its debt remains. An accepted sibling alone is insufficient.
 Settlement uses the full gap identity and Section 5.6.3's fence; success for
 another source account on the same connection cannot settle the old debt. For time ranges, a runtime
 MAY atomically replace partially recovered debt with exact residual obligations;
-for cursor ranges, only equality with the original range permits settlement.
+for cursor ranges, only equality with the original range permits settlement. The residual
+replacement is runtime-internal and has no wire message.
 A new epoch makes re-evaluation eligible, not automatically complete.
 These are mandatory debt-ledger rules even without a recovery extension:
 Section 5.6.6 supplies portable discovery and a typed recovery seal; Section 7
@@ -1805,6 +1806,13 @@ key's complete, empty and unchanged credit. It can be accounted only through
 matching durable gap debt for its uncovered obligation. An unknown parent
 withholds the entire affected boundary. A rejected last-child delete therefore
 cannot support empty credit, and any attempted delete prevents unchanged.
+A RECORD refused at durable admission for schema nonconformance, key mismatch,
+missing or disagreeing attribution, authorization or a stale generation is a
+rejected effect under this section, not a protocol violation under Section 6.2
+item 8, so the run is not terminated for it. A connector usually cannot see that
+the host rejected a record. If no matching debt was admitted for that key, the key
+is unaccounted and the affected checkpoint is withheld. Malformed wire framing,
+and duplicate or foreign effects after coverage finality, remain protocol violations.
 
 The required set, source closure, candidate completeness, exclusion observations,
 original obligation range, delta continuity, validator truth, truthful gap
@@ -1848,7 +1856,11 @@ attestation that the source was fully read.
 
 For a held record with a known obligated parent, the connector MUST retain
 the candidate and account for the original obligation with the existing
-bound, retryable connector_transform_failed gap. Only validated durable
+bound. The gap reason follows the cause: a read that failed in transport, such
+as a sub-request returning 503, uses retryable rate_limited, retry_exhausted,
+temporary_unavailable or upstream_pressure; a missing, unparseable or malformed
+mapped value uses connector_transform_failed. Only connector_transform_failed
+debt waits for a changed transform_epoch. Only validated durable
 gap admission supplies accounted debt. If the parent cannot be established,
 or the gap cannot be admitted, the affected checkpoint MUST be withheld.
 A checkpoint MUST NOT skip the held record as complete, empty or unchanged.
@@ -2140,6 +2152,12 @@ A rejected delete cannot justify empty or unchanged. The existing distinction
 between attributed deletes from proven zero-child inventory (empty) and a
 delta containing deletes (complete) applies only when that boundary is
 otherwise eligible to commit.
+
+A delete derived from the absence of a child in an inventory MUST NOT be emitted
+until that parent's child enumeration has closed with the source evidence required
+by Section 6.1 item 14. A source-positive deletion signal, such as a tombstone or a
+delete event in a delta, MAY be emitted at any time. The connector emits every
+delete explicitly; the runtime never infers a delete from absence.
 
 ### 5.9 `PROGRESS`
 
@@ -2484,7 +2502,8 @@ A conforming runtime:
    If it supports the optional
    STREAM_EVIDENCE capability, it also validates that message under Section 5.7.
 8. Terminates a connector on a protocol violation, except that it continues
-   the run after an `OBSERVATION` violation as Section 5.10.2 requires.
+   the run after an `OBSERVATION` violation as Section 5.10.2 requires. A RECORD refused at durable admission is a rejected
+   effect under Section 5.6.4, not a protocol violation.
 9. Does not report a cancelled, abandoned, malformed, or incomplete run as
    successful.
 10. If it confines filesystem access, makes only the declared filesystem
@@ -2543,6 +2562,9 @@ relevant producer or consumer does not establish these requirements.
 | Old runtime/new connector; new strict-only runtime/old connector | Refuse unsupported version before spawn; no implicit downgrade or strict reinterpretation. |
 | First strict run over legacy state | Recollect; no receipt manufactured from legacy hydration, optional skip or fingerprints. |
 | 1.0.0 runtime lacks OBSERVATION or recovery-hint gate | Not conformant; refuse this version instead of partial acceptance. |
+| Transient sub-resource failure, then recovery at the same epoch | Hold the whole record and account for the obligation with a retryable transport gap, not connector_transform_failed. Recovery at the same transform_epoch may retry under the same obligation; it settles only through the full-obligation seal, and the stored row stays unchanged until then. |
+| Listing fails mid-page after some children were not seen | No coverage for that parent and the checkpoint is withheld. No absence-derived delete is emitted for children missing from the partial listing. Source-positive tombstones already read may be emitted. |
+| RECORD refused at durable admission with no matching debt admitted | A rejected effect, not a protocol violation: the run is not terminated. The key is unaccounted and the affected checkpoint is withheld. |
 | Missing identity, invalid date, parser or shape failure with a known parent | Use connector_transform_failed with retryable:true; reject transport or permanent classification. Retain the candidate and original obligation. |
 | Unknown gap reason, missing retryable, string retryable or mismatched reason and boolean | Reject the gap; it cannot account for the key. |
 | Transformation debt at epoch A; subsequent boundary still A or epoch unknown | Keep durable debt; do not schedule, request or offer a recovery refetch. Accounted debt alone does not withhold an eligible checkpoint. |
