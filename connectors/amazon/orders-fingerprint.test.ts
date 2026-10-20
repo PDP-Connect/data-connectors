@@ -586,8 +586,9 @@ test("accepted sibling plus excluded child covers the order without caching a pa
  assert.equal(harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items").length,1);
 });
 
-test("processListOrder: narrow child resources hydrate selected child, not the parent ID", async () => {
- const { processListOrder } = await import("./index.ts");
+for (const priorHydrated of [false, true]) {
+test(`processListOrder: narrow child resources hydrate selected child with ${priorHydrated ? "prior unrestricted" : "clean"} baseline`, async () => {
+ const { processListOrder, listSurfaceFingerprint } = await import("./index.ts");
  const list = makeListOrder();
  const probe = makeDeps(RUN1_AT);
  await emitOrderAndItems(probe.deps, list, makeDetail(), "2026-01-05");
@@ -604,8 +605,10 @@ test("processListOrder: narrow child resources hydrate selected child, not the p
  const deps: EmitDeps = {
   ...makeDeps(RUN1_AT, cursor).deps, emit:harness.emit, emitRecord:runtime.emit,
   isRecordSelected:runtime.isSelected, itemResourcesRestricted:true,
-  hydratedOrders:new Map(), orderItemsCoverage:newOrderItemsCoverage(),
+  hydratedOrders:new Map(priorHydrated ? [[list.orderId, listSurfaceFingerprint(list, "2026-01-05", RUN1_AT)]] : []),
+  orderItemsCoverage:newOrderItemsCoverage(),
  };
+ const baselineBefore = new Map(deps.hydratedOrders);
  const flags = {detailAttempts:0,detailCaptured:false,failedDetailCaptured:false,repairAttempted:false,
   sessionRepairRequired:false,temporaryDetailFailures:0};
  let navigations = 0;
@@ -628,9 +631,10 @@ test("processListOrder: narrow child resources hydrate selected child, not the p
  assert.ok(children[0]?.type==="RECORD");
  assert.equal(children[0].data.id,selected);
  assert.deepEqual(deps.orderItemsCoverage,{required:[list.orderId],hydrated:[list.orderId],gap:[]});
- assert.equal(deps.hydratedOrders?.size,0,"partial scope must not establish global hydration");
+ assert.deepEqual(deps.hydratedOrders,baselineBefore,"partial scope must not establish or replace global hydration; existing proof is not used to skip this fetch");
  assert.deepEqual(cursor.toState(),{},"partial scope must not establish a global fingerprint");
 });
+}
 
 for (const invalid of [false,true]) {
  test(`resource-excluded ${invalid ? "schema-invalid" : "valid"} child ${invalid ? "remains debt" : "leaves the required set"}`, async () => {
