@@ -1175,7 +1175,7 @@ export const HEB_EMPTY_AFTER_RETENTION_MESSAGE =
  *  Stored records are untouched — this connector never deletes, tombstones, or
  *  overwrites on an empty page; it only declines to advance. */
 export const HEB_EMPTY_AFTER_PRIOR_ORDERS_MESSAGE =
-	"H-E-B reported no order history, but PDPP previously collected orders for this account. " +
+	"H-E-B reported no order history, but orders were previously collected for this account. " +
 	"Your stored orders are retained and untouched. This run was stopped instead of recording " +
 	"an empty history, because a page showing no orders cannot prove the history is gone.";
 

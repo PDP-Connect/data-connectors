@@ -447,7 +447,7 @@ export async function ensureYoutubeSession(
 		completeAssistance: args.completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
-			"Sign in to YouTube in the secure browser, then continue. PDPP will verify the session before collecting.",
+			"Sign in to YouTube in the secure browser, then continue. Collection starts once the session is verified.",
 		page: args.page,
 		probe: () => hasYoutubeSession(args.page),
 		readinessProbe: hasYoutubeSession,

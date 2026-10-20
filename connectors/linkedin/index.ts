@@ -663,7 +663,7 @@ export async function ensureLinkedInSession(
 		completeAssistance,
 		isProbeSuccessful: (ok) => ok === true,
 		message:
-			"Sign in to LinkedIn in the secure browser. PDPP will verify the session and continue automatically.",
+			"Sign in to LinkedIn in the secure browser. The session is verified, then collection continues automatically.",
 		page,
 		probe: () => checkApiAuth(page, capture),
 		readinessProbe: (readinessPage) => checkApiAuth(readinessPage, capture),

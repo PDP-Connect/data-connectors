@@ -9,7 +9,7 @@
 	},
 	"connector_key": "github-browser",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/github-browser",
-	"version": "0.3.7",
+	"version": "0.3.8",
 	"display_name": "GitHub (browser session)",
 	"brand": {
 		"icon": "icon.svg",
@@ -41,7 +41,7 @@
 		],
 		"public_listing": {
 			"tier": "development",
-			"rationale": "Separate browser-session profile for existing Vana GitHub users. The PAT connector remains the recommended profile for new connections."
+			"rationale": "Separate browser-session profile for existing GitHub users. The PAT connector remains the recommended profile for new connections."
 		},
 		"refresh_policy": {
 			"recommended_mode": "manual",
