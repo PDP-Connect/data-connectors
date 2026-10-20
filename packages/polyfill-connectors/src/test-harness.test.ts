@@ -635,3 +635,127 @@ test("skipPoliteDelays: the restore function puts the previous timer back", () =
 	restore();
 	assert.equal(globalThis.setTimeout, before);
 });
+
+test("skipPoliteDelays: overlapping installs restored first-in, first-out keep the pause skipped until the last restore", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const original = globalThis.setTimeout;
+		const restoreFirst = skipPoliteDelays();
+		const restoreSecond = skipPoliteDelays();
+		try {
+			await politeDelay(1_000);
+			restoreFirst();
+			await politeDelay(1_000);
+			restoreSecond();
+			assert.equal(
+				globalThis.setTimeout,
+				original,
+				"the last restore puts the original timer back",
+			);
+		} finally {
+			restoreFirst();
+			restoreSecond();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[0, 0],
+		"the first restore must not disable the second installation",
+	);
+});
+
+test("skipPoliteDelays: overlapping installs restored last-in, first-out keep the pause skipped until the last restore", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const original = globalThis.setTimeout;
+		const restoreFirst = skipPoliteDelays();
+		const restoreSecond = skipPoliteDelays();
+		try {
+			await politeDelay(1_000);
+			restoreSecond();
+			await politeDelay(1_000);
+			restoreFirst();
+			assert.equal(
+				globalThis.setTimeout,
+				original,
+				"the last restore puts the original timer back",
+			);
+		} finally {
+			restoreFirst();
+			restoreSecond();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[0, 0],
+		"the restore of the later installation must leave the earlier one live",
+	);
+});
+
+test("skipPoliteDelays: a repeated restore releases nothing twice", async () => {
+	const seen = await recordTimerDelays(async () => {
+		const original = globalThis.setTimeout;
+		const restoreFirst = skipPoliteDelays();
+		const restoreSecond = skipPoliteDelays();
+		try {
+			restoreFirst();
+			restoreFirst();
+			await politeDelay(1_000);
+			restoreSecond();
+			restoreSecond();
+			assert.equal(
+				globalThis.setTimeout,
+				original,
+				"the last restore puts the original timer back",
+			);
+
+			// The count stayed at zero rather than going negative, so a new
+			// installation still skips the pause.
+			const restoreThird = skipPoliteDelays();
+			try {
+				await politeDelay(1_000);
+			} finally {
+				restoreThird();
+			}
+			assert.equal(globalThis.setTimeout, original);
+		} finally {
+			restoreFirst();
+			restoreSecond();
+		}
+	});
+
+	assert.deepEqual(
+		seen,
+		[0, 0],
+		"a repeated restore must neither release the other installation nor push the count below zero",
+	);
+});
+
+test("skipPoliteDelays: a timer armed by a helper that politeDelay calls keeps its delay", async () => {
+	// The matcher keys on the `politeDelay` frame, so this stand-in carries
+	// that name. The stack assertion below shows the frame is really on the
+	// stack, so the helper's timer is kept for the right reason.
+	let stackAtHelper = "";
+	function politeDelay(ms: number): Promise<void> {
+		return armedByHelper(ms);
+	}
+	function armedByHelper(ms: number): Promise<void> {
+		stackAtHelper = new Error().stack ?? "";
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+	const seen = await recordTimerDelays(async () => {
+		const restore = skipPoliteDelays();
+		try {
+			await politeDelay(50);
+		} finally {
+			restore();
+		}
+	});
+
+	assert.match(stackAtHelper, /^\s+at politeDelay \(/m);
+	assert.deepEqual(
+		seen,
+		[50],
+		"a timer armed by a helper that politeDelay calls keeps its 50 ms delay",
+	);
+});
