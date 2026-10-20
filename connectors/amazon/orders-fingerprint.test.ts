@@ -463,3 +463,123 @@ for (const rejection of ["selection", "schema", "throw", "item"] as const) {
 		assert.equal(Object.keys(retryCursor.toState()).length, 1);
 	});
 }
+
+for (const scenario of ["parent-resource", "parent-time", "child-resource", "child-time", "parent-schema", "child-schema", "child-throw", "accepted"] as const) {
+ test(`actual production child coverage: ${scenario}`, async () => {
+  const { processResolvedListOrder } = await import("./index.ts");
+  const harness = makeRecordingEmit();
+  const cursor = openFingerprintCursor(undefined, { excludeFromFingerprint: ["fetched_at"] });
+  const deps = {
+   ...makeDeps(RUN1_AT, cursor).deps,
+   emit: harness.emit,
+   hydratedOrders: new Map<string, string>(),
+   orderItemsCoverage: newOrderItemsCoverage(),
+   ordersCoverage: newOrdersCoverage(),
+  };
+  const runtime = makeEmitRecord({
+   requested: new Map([
+    ["orders", {name:"orders", ...(scenario === "parent-resource" ? {resources:["other"]} : {}), ...(scenario === "parent-time" ? {time_range:{since:"2026-02-01"}} : {})}],
+    ["order_items", {name:"order_items",
+     ...(scenario === "child-resource" ? {resources:["other"]} : {}),
+     ...(scenario === "child-time" ? {time_range:{since:"2026-02-01"}} : {}),
+    }],
+   ]),
+   emittedAt: RUN1_AT,
+   emit: async (message) => {
+    if (scenario === "child-throw" && message.type === "RECORD" && message.stream === "order_items") throw new Error("child write failed");
+    await harness.emit(message);
+   },
+   validateRecord: (stream, data) => {
+    if ((scenario === "parent-schema" && stream === "orders") || (scenario === "child-schema" && stream === "order_items"))
+     return {ok:false, issues:[{path:"id",message:"schema rejection"}]};
+    return validateRecord(stream,data);
+   },
+   isTombstone: undefined,
+   timeRangeFieldFor: () => ({field:"order_date",format:"date"}),
+  });
+  Object.assign(deps, {emitRecord:runtime.emit, isRecordSelected:runtime.isSelected});
+  const run = processResolvedListOrder(deps, makeListOrder(), "2026-01-05", {
+   detail:makeDetail(), detailGapReason:"temporary_unavailable", detailFailureKind:null,
+  });
+  if (scenario === "child-throw") await assert.rejects(run,/child write failed/);
+  else await run;
+  const excluded = scenario === "child-resource" || scenario === "child-time";
+  const debt = scenario === "child-schema" || scenario === "child-throw";
+  assert.deepEqual(deps.orderItemsCoverage.required, excluded ? [] : [makeListOrder().orderId]);
+  assert.deepEqual(deps.orderItemsCoverage.hydrated, excluded || debt ? [] : [makeListOrder().orderId]);
+  assert.deepEqual(deps.orderItemsCoverage.gap, [], "schema/write debt is not an invented transport gap");
+  if (scenario !== "accepted") {
+   assert.equal(deps.hydratedOrders.size,0,"partial or rejected bundles cannot seed a global hydration baseline");
+   assert.deepEqual(cursor.toState(),{});
+  }
+  const retryRuntime = makeEmitRecord({
+   requested:new Map([["orders",{name:"orders"}],["order_items",{name:"order_items"}]]),
+   emittedAt:RUN2_AT, emit:harness.emit,validateRecord,isTombstone:undefined,timeRangeFieldFor:()=>({field:"order_date",format:"date"}),
+  });
+  Object.assign(deps,{emitRecord:retryRuntime.emit,isRecordSelected:retryRuntime.isSelected,
+   orderItemsCoverage:newOrderItemsCoverage(),ordersCoverage:newOrdersCoverage()});
+  await processResolvedListOrder(deps,makeListOrder(),"2026-01-05",{
+   detail:makeDetail(),detailGapReason:"temporary_unavailable",detailFailureKind:null,
+  });
+  assert.deepEqual(deps.orderItemsCoverage.required,[makeListOrder().orderId]);
+  assert.deepEqual(deps.orderItemsCoverage.hydrated,[makeListOrder().orderId]);
+  assert.equal(deps.hydratedOrders.size,1);
+ });
+}
+
+test("processListOrder: time-excluded order and children require no hydration or debt", async () => {
+ const {processListOrder} = await import("./index.ts");
+ const harness = makeRecordingEmit();
+ const runtime = makeEmitRecord({
+  requested:new Map(["orders","order_items"].map(name=>[name,{name,time_range:{since:"2026-02-01"}}])),
+  emittedAt:RUN1_AT,emit:harness.emit,validateRecord,isTombstone:undefined,
+  timeRangeFieldFor:()=>({field:"order_date",format:"date"}),
+ });
+ const deps:EmitDeps = {...makeDeps(RUN1_AT).deps,emit:harness.emit,emitRecord:runtime.emit,
+  isRecordSelected:runtime.isSelected,orderItemsCoverage:newOrderItemsCoverage(),ordersCoverage:newOrdersCoverage()};
+ await processListOrder({} as Parameters<typeof processListOrder>[0],deps,{
+  detailAttempts:0,detailCaptured:false,failedDetailCaptured:false,repairAttempted:false,
+  sessionRepairRequired:false,temporaryDetailFailures:0,
+ },makeListOrder());
+ assert.deepEqual(deps.orderItemsCoverage,newOrderItemsCoverage());
+ assert.deepEqual(deps.ordersCoverage,newOrdersCoverage());
+ assert.equal(harness.protocolMessages.length,0);
+});
+
+test("malformed source identity is not a child resource exclusion or hydration baseline", async () => {
+ const {processResolvedListOrder} = await import("./index.ts");
+ const harness=makeRecordingEmit();
+ const runtime=makeEmitRecord({
+  requested:new Map([["orders",{name:"orders"}],["order_items",{name:"order_items",resources:["other"]}]]),
+  emittedAt:RUN1_AT,emit:harness.emit,validateRecord,isTombstone:undefined,timeRangeFieldFor:()=>null,
+ });
+ const deps:EmitDeps={...makeDeps(RUN1_AT).deps,emit:harness.emit,emitRecord:runtime.emit,isRecordSelected:runtime.isSelected,
+  hydratedOrders:new Map(),orderItemsCoverage:newOrderItemsCoverage()};
+ await processResolvedListOrder(deps,makeListOrder({orderId:""}),"2026-01-05",{
+  detail:makeDetail(),detailGapReason:"temporary_unavailable",detailFailureKind:null,
+ });
+ assert.deepEqual(deps.orderItemsCoverage,{required:[""],hydrated:[],gap:[]});
+ assert.equal(deps.hydratedOrders?.size,0);
+});
+
+test("accepted sibling plus excluded child covers the order without caching a partial bundle", async () => {
+ const {processResolvedListOrder} = await import("./index.ts");
+ const harness=makeRecordingEmit();
+ const list=makeListOrder();
+ // Discover a real builder-generated child ID, never duplicate its construction rule.
+ const probe=makeDeps(RUN1_AT);
+ await emitOrderAndItems(probe.deps,list,makeDetail(),"2026-01-05");
+ const selected=probe.emitted.find(r=>r.stream==="order_items")?.data.id;
+ assert.equal(typeof selected,"string");
+ const runtime=makeEmitRecord({
+  requested:new Map([["orders",{name:"orders"}],["order_items",{name:"order_items",resources:[String(selected)]}]]),
+  emittedAt:RUN1_AT,emit:harness.emit,validateRecord,isTombstone:undefined,timeRangeFieldFor:()=>null,
+ });
+ const detail=makeDetail(); detail.items.push({...detail.items[0]!,asin:"B02ABCDEFG",name:"Other"});
+ const deps:EmitDeps={...makeDeps(RUN1_AT).deps,emit:harness.emit,emitRecord:runtime.emit,isRecordSelected:runtime.isSelected,
+  hydratedOrders:new Map(),orderItemsCoverage:newOrderItemsCoverage()};
+ await processResolvedListOrder(deps,list,"2026-01-05",{detail,detailGapReason:"temporary_unavailable",detailFailureKind:null});
+ assert.deepEqual(deps.orderItemsCoverage,{required:[list.orderId],hydrated:[list.orderId],gap:[]});
+ assert.equal(deps.hydratedOrders?.size,0);
+ assert.equal(harness.protocolMessages.filter(m=>m.type==="RECORD"&&m.stream==="order_items").length,1);
+});
