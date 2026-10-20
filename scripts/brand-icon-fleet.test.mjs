@@ -71,6 +71,7 @@ const CONNECTORS_WITHOUT_A_BRAND_MARK = new Set([
   "google_takeout.json",
   "oura.json",
   "oura_browser.json",
+  "perplexity.json", // no vendored real mark; the console uses the monogram
   "pocket.json",
   "usaa.json",
   "wholefoods.json",
