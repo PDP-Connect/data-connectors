@@ -543,6 +543,8 @@ export interface AttachmentDetailCoverage {
 	 * `last_error_json` stays null forever (the 2026-08 Gmail 5-row defect).
 	 */
 	failedRecords: FailedAttachmentRecord[];
+	/** Local rejections hold cursors even when mailbox coverage is withheld. */
+	localEmitRejected: boolean;
 	gapKeys: string[];
 	hydratedKeys: string[];
 	requiredKeys: string[];
@@ -550,7 +552,13 @@ export interface AttachmentDetailCoverage {
 
 /** Fresh, empty accumulator for one attachments detail pass. */
 export function makeAttachmentDetailCoverage(): AttachmentDetailCoverage {
-	return { failedRecords: [], gapKeys: [], hydratedKeys: [], requiredKeys: [] };
+	return {
+		failedRecords: [],
+		gapKeys: [],
+		hydratedKeys: [],
+		localEmitRejected: false,
+		requiredKeys: [],
+	};
 }
 
 /**
@@ -953,6 +961,7 @@ async function emitAttachmentRecords(
 			emitted = await deps.emitRecord("attachments", { ...hydrated });
 		} finally {
 			if (deps.attachmentCoverage) {
+				if (emitted === false) deps.attachmentCoverage.localEmitRejected = true;
 				recordAttachmentCoverage(
 					deps.attachmentCoverage,
 					hydrated,
@@ -3175,9 +3184,11 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 	recoveryOnly?: boolean;
 	session: AllMailSession;
 }): Promise<void> {
+	const attachmentCoverage =
+		args.attachmentCoverage ?? makeAttachmentDetailCoverage();
 	if (args.recoveryOnly === true) {
 		await recoverServedAttachmentGapsIfRequested(args.client, {
-			attachmentCoverage: args.attachmentCoverage,
+			attachmentCoverage,
 			detailGaps: args.deps.detailGaps,
 			emitProtocol: args.emit,
 			emitRecord: args.deps.emitRecord,
@@ -3196,7 +3207,7 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 		servedAttachmentDetailGaps(args.deps.detailGaps).length > 0;
 	if (servedAttachmentRecoveryRequested) {
 		await recoverServedAttachmentGapsIfRequested(args.client, {
-			attachmentCoverage: args.attachmentCoverage,
+			attachmentCoverage,
 			detailGaps: args.deps.detailGaps,
 			emitProtocol: args.emit,
 			emitRecord: args.deps.emitRecord,
@@ -3242,9 +3253,7 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 		const backfillSummary = createAttachmentBackfillSummary();
 		await emitMessagesPass(
 			{
-				...(args.attachmentCoverage
-					? { attachmentCoverage: args.attachmentCoverage }
-					: {}),
+				attachmentCoverage,
 				emitProtocol: emit,
 				emitProgress: (m) => emit({ ...m, stream: "attachments" }),
 				emitRecord: async (stream, data, keyField): Promise<boolean> => {
@@ -3277,6 +3286,7 @@ export async function runAttachmentBackfillAndRecoveryPass(args: {
 				backfillSummary.failed +
 				backfillSummary.unavailable_skipped,
 		});
+		if (attachmentCoverage.localEmitRejected) return;
 		await args.emit({
 			type: "STATE",
 			stream: "attachments",
@@ -4801,6 +4811,9 @@ export async function runAllMailPasses(
 		deps.emittedAt,
 		fetchBodiesBound,
 	);
+
+	// Rejected attachment records have no durable retry locator; replay both walks.
+	if (attachmentCoverage?.localEmitRejected) return;
 
 	if (messageHistoryRequested && historicalFetchRange) {
 		const historicalPageEndUid = Number(historicalFetchRange.split(":")[1]);

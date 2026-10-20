@@ -7814,3 +7814,282 @@ test("unleased served attachment emits no DETAIL_GAP_ATTEMPTED", async () => {
  });
  assert.equal(harness.protocolMessages.some(m=>m.type==="DETAIL_GAP_ATTEMPTED"),false);
 });
+
+for (const rejection of ["false", "schema", "throw"] as const) {
+	test(`production attachment caller restart retains rejected debt during incomplete messages backfill: ${rejection}`, async () => {
+		const message = makeServedRecoveryMsg({
+			attachments: [16, 16],
+			emailId: "abc123",
+			uid: 321,
+		});
+		const requested = new Map<string, StreamRequest>([
+			["attachments", { name: "attachments", resources: ["abc123:1"] }],
+		]);
+		const session: Parameters<
+			typeof runAttachmentBackfillAndRecoveryPass
+		>[0]["session"] = {
+			attachmentBackfill: { backfilled_through_uid: 250, uidvalidity: 123 },
+			existsTotal: 600,
+			priorExistsTotal: undefined,
+			fullResync: false,
+			highestModseqCursor: null,
+			messagesBackfill: {
+				uidvalidity: 123,
+				backfilled_through_uid: 0,
+				completed_at: null,
+			},
+			priorDeltaHoldbackRuns: 0,
+			priorModseq: null,
+			priorUidnext: 500,
+			uidnext: 600,
+			uidvalidityNum: 123,
+		};
+		assert.equal(attachmentsCoverageBoundaryEstablished(session), false);
+		const fetchRanges: string[] = [];
+		const client = {
+			fetch: (range: string) => {
+				fetchRanges.push(range);
+				const [start, end] = range.split(":").map(Number);
+				return (async function* () {
+					if (
+						start !== undefined &&
+						end !== undefined &&
+						start <= 321 &&
+						end >= 321
+					)
+						yield message;
+				})();
+			},
+		} as unknown as Parameters<
+			typeof runAttachmentBackfillAndRecoveryPass
+		>[0]["client"];
+		const hydrate = statusStampingHydrator({ "abc123:1": "hydrated" });
+		const run = async (
+			attachmentBackfill: AttachmentAllMailCursor,
+			reject: boolean,
+		) => {
+			const harness = makeRecordingEmit();
+			const coverage = makeAttachmentDetailCoverage();
+			const attempted: string[] = [];
+			const emitRecord = realResourceEmitter(requested, harness.emit);
+			await runAttachmentBackfillAndRecoveryPass({
+				allMail: makeAllMailMailbox(),
+				attachmentBackfillRequested: true,
+				attachmentCoverage: coverage,
+				client,
+				emit: harness.emit,
+				deps: {
+					requested,
+					emittedAt: FROZEN_NOW,
+					emitRecord: async (stream, data, keyField) => {
+						attempted.push(String(data.id));
+						if (reject && rejection === "throw")
+							throw new Error("local rejection");
+						if (reject && rejection === "false") return false;
+						return (
+							(await emitRecord(
+								stream,
+								reject ? { ...data, size_bytes: -1 } : data,
+								keyField,
+							)) === true
+						);
+					},
+				},
+				fetchBodiesBound: defaultFetchBodies,
+				hydrateAttachment: hydrate,
+				recoveredAttachmentGapIds: new Set<string>(),
+				session: { ...session, attachmentBackfill },
+			});
+			const state = harness.protocolMessages.find(
+				(m) => m.type === "STATE" && m.stream === "attachments",
+			);
+			return { harness, coverage, attempted, state };
+		};
+
+		const first = await run(session.attachmentBackfill, true);
+		assert.deepEqual(first.attempted, ["abc123:1"]);
+		assert.deepEqual(first.coverage.hydratedKeys, []);
+		// Model a restart using only emitted checkpoints, never the prior run's
+		// in-memory accumulator. This is local protocol evidence, not a host commit.
+		const restartCursor =
+			first.state?.type === "STATE"
+				? (first.state.cursor as { all_mail: AttachmentAllMailCursor }).all_mail
+				: session.attachmentBackfill;
+		const retry = await run(restartCursor, false);
+		assert.deepEqual(
+			retry.attempted,
+			["abc123:1"],
+			"restart must revisit the rejected UID",
+		);
+		assert.deepEqual(fetchRanges, ["251:499", "251:499"]);
+		assert.equal(
+			first.state,
+			undefined,
+			"rejected debt withholds the attachment checkpoint",
+		);
+		assert.deepEqual(retry.coverage.hydratedKeys, ["abc123:1"]);
+		assert.ok(
+			retry.state,
+			"successful local emission preserves normal cursor progress",
+		);
+		assert.equal(
+			first.harness.protocolMessages.some(
+				(m) => m.type === "DETAIL_COVERAGE" && m.stream === "attachments",
+			),
+			false,
+			"incomplete history must not claim whole-mailbox attachment coverage",
+		);
+		assert.equal(
+			first.harness.protocolMessages.some(
+				(m) => m.type === "DETAIL_GAP_RECOVERED",
+			),
+			false,
+		);
+	});
+}
+
+test("production attachment caller restart retains messages checkpoint after local rejection", async () => {
+	const originalWrite = process.stdout.write;
+	const originalFetch = globalThis.fetch;
+	const protocol: EmittedMessage[] = [];
+	const ranges: string[] = [];
+	const message = makeServedRecoveryMsg({
+		attachments: [16],
+		emailId: "abc123",
+		uid: 321,
+	});
+	const requested = makeRequested(["attachments"]);
+	process.stdout.write = ((data: string): boolean => {
+		try {
+			protocol.push(JSON.parse(data) as EmittedMessage);
+		} catch {
+			/* non-protocol output */
+		}
+		return true;
+	}) as typeof process.stdout.write;
+	// All transport seams are offline. Hydration success is covered above;
+	// this caller test isolates whether a rejected record is retried at all.
+	globalThis.fetch = async () => {
+		throw new Error("offline fixture");
+	};
+	try {
+		const client = {
+			close: mock.fn(),
+			download: async () => {
+				throw new Error("offline fixture");
+			},
+			fetchOne: async () => message,
+			search: async () => [321],
+			mailbox: {
+				delimiter: "/",
+				exists: 1200,
+				flags: new Set<string>(),
+				path: "[Gmail]/All Mail",
+				uidNext: 1201,
+				uidValidity: 123n,
+			},
+			fetch: (range: string) => {
+				ranges.push(range);
+				const [start, end] = range.split(":");
+				const includesUid =
+					Number(start) <= 321 && (end === "*" || Number(end) >= 321);
+				return (async function* () {
+					if (includesUid) yield message;
+				})();
+			},
+		} as unknown as Parameters<typeof runAllMailPasses>[0];
+		const run = async (
+			state: Record<string, unknown>,
+			reject: boolean,
+			served = false,
+		) => {
+			protocol.length = 0;
+			const attempted: string[] = [];
+			const emitRecord = realResourceEmitter(requested, async (m) => {
+				protocol.push(m);
+			});
+			await runAllMailPasses(client, makeAllMailMailbox(), state, {
+				requested,
+				...(served
+					? {
+							detailGaps: [
+								makeServedRecoveryGap({
+									gapId: "already-durable",
+									leaseId: "fixture-lease",
+									messageId: "abc123",
+									partIndex: 1,
+								}),
+							],
+						}
+					: {}),
+				emittedAt: FROZEN_NOW,
+				emitRecord: async (stream, data, keyField) => {
+					attempted.push(String(data.id));
+					return (
+						(await emitRecord(
+							stream,
+							reject ? { ...data, size_bytes: -1 } : data,
+							keyField,
+						)) === true
+					);
+				},
+			});
+			return {
+				attempted,
+				messages: [...protocol],
+				state: protocol.find(
+					(m) => m.type === "STATE" && m.stream === "messages",
+				),
+			};
+		};
+		const first = await run({}, true);
+		assert.deepEqual(first.attempted, ["abc123:1"]);
+		assert.equal(
+			first.messages.some(
+				(m) => m.type === "DETAIL_COVERAGE" && m.stream === "attachments",
+			),
+			false,
+		);
+		const restartState =
+			first.state?.type === "STATE" ? { messages: first.state.cursor } : {};
+		const retry = await run(restartState, false);
+		assert.deepEqual(
+			retry.attempted,
+			["abc123:1"],
+			"emitted messages checkpoint must not lose rejected debt",
+		);
+		assert.deepEqual(ranges, ["1:500", "1:500"]);
+		assert.equal(first.state, undefined);
+		assert.ok(
+			retry.state,
+			"accepted local emission allows the messages checkpoint again",
+		);
+		const servedRetry = await run(
+			{
+				messages: {
+					all_mail: { uidvalidity: 123, uidnext: 1201, forward_uidnext: 1201 },
+					backfill: {
+						uidvalidity: 123,
+						target_uid: 1200,
+						backfilled_through_uid: 1200,
+						completed_at: FROZEN_NOW,
+					},
+				},
+			},
+			true,
+			true,
+		);
+		assert.deepEqual(servedRetry.attempted, ["abc123:1"]);
+		assert.ok(
+			servedRetry.state,
+			"a pending durable gap permits messages progress after rejection",
+		);
+		assert.equal(
+			servedRetry.messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+	} finally {
+		process.stdout.write = originalWrite;
+		globalThis.fetch = originalFetch;
+	}
+});
