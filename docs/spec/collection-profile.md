@@ -983,6 +983,8 @@ A stream is its own checkpoint parent unless it declares one of these fields:
 - `state_stream` names one other stream. The declaring stream MUST use
   `coverage_strategy: "checkpoint_window"`. The stream inherits the checkpoint
   outcome of that parent and MUST NOT emit `DETAIL_COVERAGE` for itself.
+  Its known-parent gaps use the self-contained binding and durable admission
+  in Section 5.6.2, not a child coverage message or STREAM_EVIDENCE.
 - `parent_streams` names one or more other streams. The declaring stream MUST
   use `coverage_strategy: "parent_detail_accounting"`. It emits one
   `DETAIL_COVERAGE` for each parent boundary that it evaluates.
@@ -1480,13 +1482,31 @@ eligible checkpoint. Pending debt is not an unaccounted required key.
 
 DETAIL_GAP has REQUIRED reference_only:true, status:"pending", stream,
 parent_stream, canonical record_key, reason, boolean retryable and
-detail_locator. The locator has REQUIRED kind and obligation; other
+detail_locator and binding. The locator has REQUIRED kind and obligation; other
 kind-specific fields identify the missing detail without secrets.
 relationship_id names the Section 5.2 relationship and is REQUIRED if otherwise
 ambiguous. For one-to-many detail, record_key is the canonical PARENT key,
 not a child key. A partially collected
 interval MUST retain the missing interval, not reduce its identity to an
 account alone.
+
+The REQUIRED binding object has exactly these members:
+- effective_scope: the Section 5.1 scope-stream object for this detail stream,
+  including name and any resolved resources, fields and time_range;
+- obligation: the original inventory or delta obligation typed by Section 5.6.1,
+  not merely the uncovered suffix in detail_locator.obligation;
+- transform_epoch: a non-empty stable string identifying this detail stream's
+  schema and transformation, with the change requirement in Section 5.6.4.
+
+These are claims, not authority. The runtime MUST normalize effective_scope
+using the same policy and field rules as START and require equality with the
+run's effective target, then recheck the current grant at admission. It MUST
+validate the original obligation's type and authorized bounds and its relation
+to the locator obligation under the time/cursor rules below. The selected
+parent relationship and canonical parent key MUST be attributable in this
+boundary or retained authorized parent state; an invented or unknown parent
+cannot bind debt. Connection, source account and expected placement generation
+come only from runtime context, never from binding.
 
 A gap's identity is the tuple (connection, source account, stream,
 parent_stream, selected relationship name, canonical record_key, canonical
@@ -1522,9 +1542,21 @@ A connector MUST use connector_transform_failed for known-parent transformation
 debt, not a transport reason or source_unrepresentable. The runtime MUST reject
 an unknown reason or any retryable value other than the boolean paired above.
 
-Before crediting gap_keys, the runtime MUST admit the gap under Section 5.6.3's
-generation fence and persist its source-account binding, normalized effective
-scope, original obligation and transform_epoch from the sealing DETAIL_COVERAGE. A later observation of the same gap identity under another
+For both parent_streams detail and state_stream children, the runtime MUST
+validate this complete DETAIL_GAP binding and atomically admit the debt under
+Section 5.6.3's fixed placement-generation fence and current grant before
+granting any gap credit. That transaction persists the full gap identity,
+source account, normalized effective scope, original obligation and
+transform_epoch. Receipt of the message alone is not durable acceptance.
+Missing or malformed binding/epoch, unauthorized scope or unknown parent
+cannot enter durable debt or count as gapped; unvalidated staging is provisional
+and confers no credit. Invalid messages follow Section 6.2 item 8.
+A stale admission leaves no new debt or credit. DETAIL_COVERAGE, when required
+by parent_streams, MUST agree with this binding for each credited gap; it
+cannot retroactively supply missing metadata or overwrite an earlier binding.
+A state_stream child needs no DETAIL_COVERAGE for gap admission and MUST NOT
+emit one. Admitted debt does not itself authorize state commit or mint a
+baseline; checkpoint inheritance and all other commit conditions still apply. A later observation of the same gap identity under another
 scope MUST NOT discard its earlier scope-bound debt; each outstanding binding
 remains until proved settled. For connector_transform_failed debt, the runtime
 MUST NOT make recovery eligible unless a later boundary for the same detail
@@ -1583,6 +1615,11 @@ rather than silently settling it or blocking an unrelated new relationship.
   "record_key": "item-2",
   "reason": "temporary_unavailable",
   "retryable": true,
+  "binding": {
+    "effective_scope": { "name": "item_details" },
+    "obligation": { "kind": "inventory" },
+    "transform_epoch": "details-v1"
+  },
   "detail_locator": {
     "kind": "item",
     "id": "item-2",
@@ -1659,9 +1696,11 @@ prevents unchanged credit even when no effect invalidated the older receipt.
 Admission and checkpoint sealing are separate transactions. Valid current-
 generation effects and fully validated observed debt MAY be admitted durably
 before the final checkpoint; they survive a later unrelated checkpoint failure.
-A gap awaiting its sealing scope/epoch metadata remains provisional, confers
-no credit, and MUST NOT enter durable debt until those bindings and the
-generation are validated atomically. A stale or invalid publication MUST leave
+A gap awaiting validation of its own Section 5.6.2 binding remains provisional,
+confers no credit, and MUST NOT enter durable debt until its scope, original
+obligation, epoch, parent attribution, current grant and fixed generation are
+validated atomically. Neither later coverage nor optional STREAM_EVIDENCE
+can substitute for that admission. A stale or invalid publication MUST leave
 no newly admitted effects, debt or credit from that rejected transaction.
 Already valid admissions are not retroactively erased merely because later
 work fails. New valid debt invalidates incompatible provisional complete,
@@ -1872,6 +1911,9 @@ MUST verify two observable counts:
 2. `outcomes.gapped` equals the number of distinct, unrecovered durable gap
    identities from Section 5.6.2 represented for that stream in this run. It
    counts identities, not the number of children a parent-keyed gap represents.
+   Each counted identity MUST already have passed the self-contained
+   DETAIL_GAP admission in Section 5.6.2; this aggregate neither seals a gap
+   binding nor makes provisional debt durable.
 
 The runtime can check identities already present in its message/effect and debt
 ledgers, but this aggregate contains no gap or ephemeral candidate identifiers.
@@ -2331,6 +2373,8 @@ relevant producer or consumer does not establish these requirements.
 | Relationship name retires while validator text stays the same | Invalidate receipts/state; retain old debt archived with its original binding and retirement reason, outside unrelated new-scope denominator. Mapping/settlement needs equivalence proof and full recollection, never a name alias. |
 | Opaque cursor obligation after A through D; gap claims after B through D | Reject mismatched range, regardless of apparent lexical ordering. Exact structural equality, not containment, is required. |
 | Time-range obligation has a checked accounted prefix and exact uncovered suffix | Permit residual debt only with typed checked bounds and full interval accounting. |
+| state_stream child emits a known-parent gap after START | Validate DETAIL_GAP.binding against the effective target, original obligation, parent attribution and epoch; durably admit under the current grant, source account and fixed placement generation before any gap count. No child DETAIL_COVERAGE. |
+| Child gap lacks binding or epoch, names unauthorized scope or an unknown parent, or arrives from a stale placement | No durable admission or gapped credit; staging alone is provisional. Invalid messages fail; stale transactions leave no new debt. Optional STREAM_EVIDENCE cannot repair the binding. |
 | Three unparsed children share one durable parent-keyed gap identity | STREAM_EVIDENCE, when used, counts one gapped accounting unit; it must not claim three gaps or advertise the aggregate as raw child count. Mandatory integrity retains all candidates. |
 | Same record_key but different parent relationship or canonical detail_locator | Keep distinct gap identities; never deduplicate or settle by key alone. |
 | Accounted debt followed by sealed complete or empty proving its full original obligation | Atomically settle matching debt under the fence even without a recovery extension. Reject cross-scope, cross-parent or mismatched cursor-range settlement. |
@@ -2344,6 +2388,24 @@ relevant producer or consumer does not establish these requirements.
 | Matching debt exists and full original obligation is freshly proved complete/empty | Atomically settle debt and publish outcome/receipt/state; if settlement fails, no complete/empty commit. Accounted remaining debt can instead checkpoint as gap. |
 | Selected relationship uses unsupported cardinality or lacks the supported child foreign-key shape | Refuse before spawn; no invented Core field or reverse attribution. |
 | 1.0.0 exchange without STREAM_EVIDENCE capability or messages | Valid when all mandatory accounting and diagnosis requirements hold. A connector requiring unsupported STREAM_EVIDENCE is refused before spawn. |
+
+A positive state_stream sequence uses a manifest where item_bodies inherits
+items and the items relationship names item_bodies. START includes the resolved
+items and item_bodies targets. With known parent item-2, the connector registers
+three unparsed child candidates and emits one DETAIL_GAP for item_bodies,
+parent_stream items, record_key item-2, reason connector_transform_failed,
+retryable true and a shared item locator. Its binding supplies the exact
+normalized item_bodies target, original inventory obligation and non-empty
+bodies-v1 transform_epoch. The runtime validates and durably admits that gap
+under the run's source account, current grant and unchanged placement generation.
+Only then, if negotiated, STREAM_EVIDENCE may report considered:1 with
+emitted:0, unchanged:0, gapped:1, unaccounted:0. The candidate ledger still
+retains all three candidates. With parent enumeration closed, the connector
+may emit the eligible items STATE, followed by successful DONE and exit 0;
+the runtime applies the normal parent commit rules and the child inherits
+that outcome. Neither the debt nor the optional aggregate proves completion
+of the missing children. Omitting STREAM_EVIDENCE entirely remains valid
+when all mandatory accounting holds; no child DETAIL_COVERAGE is introduced.
 
 Counts alone, authored screenshots, successful package installation and tests of
 helper mirrors do not prove these cases. Source closure, truthful candidate
