@@ -21184,7 +21184,7 @@
 				},
 				"connector_key": "usaa",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/usaa",
-				"version": "0.2.17",
+				"version": "0.2.18",
 				"display_name": "USAA",
 				"runtime_requirements": {
 					"bindings": {

@@ -880,6 +880,120 @@ for (const suffix of ["rows", "header-only", "empty"] as const) {
 	});
 }
 
+for (const format of ["rows", "header-only", "empty"] as const) {
+	test(`known account interval survives interruption before recovery ACK: ${format}`, async () => {
+		const account = {
+			account_id_raw: "fixture-account",
+			account_type: "checking",
+			account_url: "/my/checking/fixture-account",
+			balance_cents: 0,
+			last_four: "0000",
+			name: "Fixture checking",
+			raw_text: "Fixture checking",
+		};
+		const original = { since: "2025-01-02", until: "2025-02-01" };
+		let persisted: Record<string, unknown> = {
+			transactions: {
+				"fixture-account": {
+					last_date: "2025-02-01",
+					pending_export: original,
+				},
+			},
+		};
+		const interrupted = new Error("stop before recovery ACK is persisted");
+		async function run(interruptRecovery: boolean) {
+			const messages: Parameters<EmitDeps["emit"]>[0][] = [];
+			const order: string[] = [];
+			const probe = makePage({
+				start: {},
+				end: {},
+				outcomeForStart: () => (format === "empty" ? "empty" : "success"),
+				csvForStart: () =>
+					"Date,Description,Amount\n" +
+					(format === "rows" ? "02/02/2025,Fixture,1.00\n" : ""),
+			});
+			const deps: EmitDeps = {
+				emit: async (message) => {
+					if (message.type === "DETAIL_GAP_RECOVERED" && interruptRecovery)
+						throw interrupted;
+					messages.push(message);
+					order.push(message.type);
+					if (message.type === "STATE" && message.stream === "transactions") {
+						// Model durable STATE delivery immediately, not after the caller returns.
+						persisted = JSON.parse(
+							JSON.stringify({ transactions: message.cursor }),
+						);
+					}
+				},
+				emitRecord: async () => {
+					order.push("RECORD");
+				},
+				servedAccountTransactionGaps: new Map([
+					["fixture-account", "gap-original"],
+				]),
+			};
+			const collect = runTransactionsStream(
+				deps,
+				{} as BrowserContext,
+				probe.page,
+				async () => ({
+					request_id: "fixture",
+					status: "success",
+					type: "INTERACTION_RESPONSE",
+				}),
+				[account],
+				persisted,
+				new Map([["transactions", { name: "transactions" }]]),
+				{ sessionDeadMidRun: false, sessionRepairAttempted: false },
+			);
+			if (interruptRecovery) {
+				await assert.rejects(collect, (error) => error === interrupted);
+			} else {
+				await collect;
+			}
+			return { messages, order, probe };
+		}
+
+		const first = await run(true);
+		assert.equal(
+			first.messages.some((message) => message.type === "DETAIL_GAP_RECOVERED"),
+			false,
+			"the crash must leave the original gap pending",
+		);
+		if (format === "rows")
+			assert.ok(first.order.includes("RECORD"), "records precede recovery");
+		// The old caller persisted the clearing STATE before the interrupted ACK.
+		// Replay must retain the known interval and recover the still-served gap.
+		const replay = await run(false);
+		const saved = (
+			persisted.transactions as Record<
+				string,
+				{ pending_export?: { unknown_original?: true } }
+			>
+		)["fixture-account"];
+		assert.equal(
+			saved?.pending_export?.unknown_original,
+			undefined,
+			"a known original interval must not become unknown_original on restart",
+		);
+		assert.equal(
+			replay.probe.events().find((event) => event.startsWith("submit:")),
+			"submit:01/02/2025",
+		);
+		assert.deepEqual(
+			replay.messages
+				.filter((message) => message.type === "DETAIL_GAP_RECOVERED")
+				.map((message) => message.gap_id),
+			["gap-original"],
+		);
+		assert.equal(saved?.pending_export, undefined);
+		const ack = replay.order.indexOf("DETAIL_GAP_RECOVERED");
+		assert.ok(ack < replay.order.indexOf("STATE"), "ACK precedes clearing proof");
+		if (format === "rows")
+			assert.ok(replay.order.indexOf("RECORD") < ack, "records precede ACK");
+	});
+}
+
 for (const [name, prior, since, expectGap] of [
 	["legacy unknown start", null, undefined, true],
 	["legacy with new explicit start", null, "2025-01-02", true],

@@ -3122,6 +3122,8 @@ export async function runTransactionsStream(
 		if (result.outcome.kind === "gap") {
 			await deps.emit(buildAccountTransactionDetailGap(result.outcome));
 		}
+		// Records are emitted; acknowledge recovery before STATE can discard its interval.
+		await recoverServedAccountTransactionGaps(deps, [result.outcome]);
 		if (
 			result.last_date === null &&
 			!result.pending_export &&
@@ -3148,7 +3150,6 @@ export async function runTransactionsStream(
 	// one means every transaction-eligible account was attempted (including
 	// the zero-eligible-accounts case, where the loop body never ran at all),
 	// so the denominator this run enumerated is genuinely complete.
-	await recoverServedAccountTransactionGaps(deps, outcomes);
 	await emitTransactionsDetailCoverage(
 		deps,
 		outcomes,
