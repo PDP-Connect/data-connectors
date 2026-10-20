@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
-import { emitCsvTransactions } from "./index.ts";
+import { emitCsvTransactions, classifyCsvTransactionResult } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 import type { DashboardAccount } from "./types.ts";
 
@@ -155,5 +155,94 @@ test("emitCsvTransactions: a parseable CSV emits transactions and NO parse-loss 
 		result,
 		{ dataRows: 2, latest: "2026-01-06", usableCount: 2 },
 		"returns parse outcome plus latest transaction date seen",
+	);
+});
+
+for (const [name, csv, count, expected] of [
+	[
+		"mixed",
+		"Date,Description,Amount\n01/05/2026,Coffee,-4.50\nnot-a-date,Unparsed,12.00\n",
+		1,
+		"gap",
+	],
+	[
+		"all-invalid",
+		"Date,Description,Amount\nnot-a-date,Unparsed,12.00\n",
+		0,
+		"gap",
+	],
+	["empty", "Date,Description,Amount\n", 0, "no_activity"],
+	["all-valid", VALID_CSV, 2, "hydrated"],
+] as const) {
+	test(`CSV ${name}: actual parser and account credit preserve unparsed debt`, async () => {
+		const harness = makeRecordingEmit(validateRecord);
+		const result = await emitCsvTransactions(
+			harness,
+			await writeTempCsv(csv),
+			makeAccount(),
+			"2025-01-01",
+			1,
+			1,
+		);
+		assert.equal(harness.emitted.length, count, "retain every valid record");
+		const account = classifyCsvTransactionResult(
+			"acct-raw-0001",
+			"2025-01-01",
+			"2025-01-01",
+			result,
+		);
+		assert.equal(account.outcome.kind, expected);
+		if (expected !== "hydrated") assert.equal(account.last_date, "2025-01-01");
+		if (name === "mixed") {
+			assert.ok(
+				harness.protocolMessages.some(
+					(m) => m.type === "SKIP_RESULT" && m.reason === "csv_partial_parse",
+				),
+			);
+		}
+	});
+}
+
+test("CSV valid rows excluded downstream do not become parse failures", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const result = await emitCsvTransactions(
+		{ ...harness, emitRecord: async () => undefined },
+		await writeTempCsv(VALID_CSV),
+		makeAccount(),
+		null,
+		1,
+		1,
+	);
+	assert.equal(
+		result.usableCount,
+		2,
+		"candidate disposition precedes local emission filtering",
+	);
+	assert.equal(
+		classifyCsvTransactionResult("acct-raw-0001", null, null, result).outcome
+			.kind,
+		"hydrated",
+	);
+	assert.equal(
+		harness.protocolMessages.filter((m) => m.type === "SKIP_RESULT").length,
+		0,
+	);
+});
+
+test("CSV blank separator rows are not malformed transaction candidates", async () => {
+	const harness = makeRecordingEmit(validateRecord);
+	const result = await emitCsvTransactions(
+		harness,
+		await writeTempCsv(VALID_CSV + "\n, ,\n"),
+		makeAccount(),
+		null,
+		1,
+		1,
+	);
+	assert.equal(result.dataRows, 2);
+	assert.equal(
+		classifyCsvTransactionResult("acct-raw-0001", null, null, result).outcome
+			.kind,
+		"hydrated",
 	);
 });

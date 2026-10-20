@@ -1454,7 +1454,7 @@ function hasParse(v: unknown): v is OfxParser {
 	);
 }
 
-async function parseQfxFile(path: string): Promise<unknown> {
+export async function parseQfxFile(path: string): Promise<unknown> {
 	// ofx-js (0.2.x) ships no declaration file. The default export has
 	// shifted shape across versions (top-level OFX, nested under default,
 	// bare parse). types/ofx-js.d.ts shims the module as `unknown`; we
@@ -2456,13 +2456,38 @@ async function processAccountDownload(
 		};
 	}
 
-	const { transactions, balance } = extractFromQfx(parsed);
+	return processParsedAccountQfx(
+		deps,
+		account,
+		activityChoice.activity,
+		parsed,
+		progressLabel,
+	);
+}
+
+/** The production extraction, emission and account-credit boundary, without browser I/O. */
+export async function processParsedAccountQfx(
+	deps: EmitDeps,
+	account: ChaseAccount,
+	activity: ActivityKind,
+	parsed: unknown,
+	progressLabel = "?/?",
+): Promise<AccountDetailOutcome> {
+	const { transactions, balance, integrity } = extractFromQfx(parsed);
+	const partial =
+		deps.wantsTransactions &&
+		(!integrity.sourceShapeValid || integrity.malformedCount > 0);
+	// Keep valid records, but never advance this account past an unknown row.
+	// An isolated cursor map also preserves the absence of a first-run cursor.
+	const transactionDeps = partial
+		? { ...deps, maxSeenByAccount: { ...deps.maxSeenByAccount } }
+		: deps;
 
 	if (deps.wantsTransactions) {
 		await emitTransactionsForAccount(
-			deps,
+			transactionDeps,
 			account,
-			activityChoice.activity,
+			activity,
 			transactions,
 			deps.transactionsFingerprintCursor,
 		);
@@ -2485,6 +2510,23 @@ async function processAccountDownload(
 		stream: "transactions",
 		message: `Parsed account ${progressLabel}: emitted ${transactions.length} transaction(s)`,
 	});
+	if (partial) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "qfx_partial_parse",
+			message:
+				"Some transaction rows could not be read; the account's saved position was kept",
+			recovery_hint: "retry_on_connector_upgrade",
+			diagnostics: { ...integrity },
+		});
+		return {
+			kind: "gap",
+			accountId: account.internal_id,
+			reason: "temporary_unavailable",
+			errorClass: "qfx_partial_parse",
+		};
+	}
 	// Reached and parsed (even a 0-transaction QFX is real coverage of this
 	// account's ledger for the window).
 	return { kind: "hydrated", accountId: account.internal_id, balanceEmitted };

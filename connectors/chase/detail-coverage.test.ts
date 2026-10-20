@@ -28,6 +28,9 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
 	EmittedMessage,
 	StreamScope,
@@ -39,6 +42,10 @@ import {
 	type EmitDeps,
 	emitStatementDetailCoverage,
 	emitTransactionsDetailCoverage,
+	emitTransactionsStateIfAny,
+	parseQfxFile,
+	processParsedAccountQfx,
+	recoverServedAccountGaps,
 	type StatementDetailOutcome,
 } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
@@ -464,4 +471,229 @@ test("emitStatementDetailCoverage: a steady-state run with zero statement rows s
 		considered: 0,
 		covered: 0,
 	});
+});
+
+// ─── Real QFX extraction -> production account credit ──────────────────
+
+const VALID_QFX_ROW =
+	"<STMTTRN><TRNTYPE>DEBIT</TRNTYPE><DTPOSTED>20260415</DTPOSTED><TRNAMT>-12.34</TRNAMT><FITID>valid-1</FITID></STMTTRN>";
+const QFX_ACCOUNT = {
+	internal_id: "ACC-QFX",
+	name: "Fixture checking",
+	type: "checking" as const,
+	last_four: "1234",
+};
+const PRIOR_QFX_CURSOR = {
+	max_seen_date: "2026-04-01",
+	last_activity: "all" as const,
+	last_fetched_at: "2026-04-02T00:00:00.000Z",
+};
+
+async function runQfxFixture(
+	rows: string,
+	options: {
+		prior?: boolean;
+		body?: string;
+		since?: string;
+	} = {},
+) {
+	const dir = await mkdtemp(join(tmpdir(), "chase-partial-qfx-"));
+	try {
+		const path = join(dir, "activity.qfx");
+		await writeFile(
+			path,
+			options.body ??
+				`<?xml version="1.0"?>
+<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD</CURDEF>
+<BANKTRANLIST><DTSTART>20260401</DTSTART><DTEND>20260422</DTEND>${rows}</BANKTRANLIST>
+</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>`,
+		);
+		const { deps, messages } = makeHarness({
+			wantsBalances: false,
+			maxSeenByAccount:
+				options.prior === false
+					? {}
+					: {
+							[QFX_ACCOUNT.internal_id]: { ...PRIOR_QFX_CURSOR },
+						},
+		});
+		if (options.since) {
+			deps.requested.set("transactions", {
+				name: "transactions",
+				time_range: { since: options.since },
+			});
+		}
+		deps.servedAccountGaps = new Map([[QFX_ACCOUNT.internal_id, "served-gap"]]);
+		const records: Record<string, unknown>[] = [];
+		const emitRecord = deps.emitRecord;
+		deps.emitRecord = async (stream, record) => {
+			// Model the runtime's proven scope exclusion, not a parser failure.
+			if (
+				stream === "transactions" &&
+				options.since &&
+				typeof record.date === "string" &&
+				record.date < options.since
+			)
+				return;
+			if (stream === "transactions") records.push(record);
+			return emitRecord(stream, record);
+		};
+		const parsed = await parseQfxFile(path);
+		const outcome = await processParsedAccountQfx(
+			deps,
+			QFX_ACCOUNT,
+			"all",
+			parsed,
+		);
+		if (outcome.kind === "gap") await deps.emit(buildAccountDetailGap(outcome));
+		await recoverServedAccountGaps(deps, [outcome]);
+		await emitTransactionsDetailCoverage(deps, [outcome]);
+		await emitTransactionsStateIfAny(deps);
+		return { deps, messages, outcome, records };
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+for (const [label, badRow] of [
+	[
+		"missing date",
+		"<STMTTRN><TRNAMT>8.00</TRNAMT><FITID>undated</FITID></STMTTRN>",
+	],
+	[
+		"missing identity",
+		"<STMTTRN><DTPOSTED>20260410</DTPOSTED><TRNAMT>8.00</TRNAMT></STMTTRN>",
+	],
+	[
+		"invalid date",
+		"<STMTTRN><DTPOSTED>20260230</DTPOSTED><TRNAMT>8.00</TRNAMT><FITID>invalid-day</FITID></STMTTRN>",
+	],
+] as const) {
+	test(`real QFX partial parse: ${label} holds account credit and prior watermark`, async () => {
+		const { deps, messages, outcome, records } = await runQfxFixture(
+			VALID_QFX_ROW + badRow,
+		);
+		assert.equal(outcome.kind, "gap");
+		assert.deepEqual(
+			records.map((r) => r.fitid),
+			["valid-1"],
+			"valid sibling is retained",
+		);
+		assert.deepEqual(
+			deps.maxSeenByAccount[QFX_ACCOUNT.internal_id],
+			PRIOR_QFX_CURSOR,
+		);
+		const coverage = coverageOf(messages);
+		assert.deepEqual(coverage?.hydrated_keys, []);
+		assert.deepEqual(coverage?.gap_keys, [QFX_ACCOUNT.internal_id]);
+		assert.equal(
+			messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+		const gap = messages.find((m) => m.type === "DETAIL_GAP");
+		assert.ok(gap && gap.type === "DETAIL_GAP");
+		assert.equal(gap.retryable, true);
+		assert.equal(gap.record_key, QFX_ACCOUNT.internal_id);
+		const state = messages.find(
+			(m) => m.type === "STATE" && m.stream === "transactions",
+		);
+		assert.ok(state && state.type === "STATE");
+		const cursor = state.cursor as { per_account?: unknown } | undefined;
+		assert.deepEqual(cursor?.per_account, {
+			[QFX_ACCOUNT.internal_id]: PRIOR_QFX_CURSOR,
+		});
+	});
+
+	test(`real QFX malformed-only: ${label} is not empty success`, async () => {
+		const { deps, messages, outcome, records } = await runQfxFixture(badRow, {
+			prior: false,
+		});
+		assert.equal(outcome.kind, "gap");
+		assert.equal(records.length, 0);
+		assert.deepEqual(deps.maxSeenByAccount, {});
+		assert.deepEqual(coverageOf(messages)?.hydrated_keys, []);
+		assert.equal(
+			messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+			false,
+		);
+	});
+}
+
+test("real QFX all-valid control credits account and advances watermark", async () => {
+	const { deps, messages, outcome, records } =
+		await runQfxFixture(VALID_QFX_ROW);
+	assert.equal(outcome.kind, "hydrated");
+	assert.equal(records.length, 1);
+	assert.equal(
+		deps.maxSeenByAccount[QFX_ACCOUNT.internal_id]?.max_seen_date,
+		"2026-04-15",
+	);
+	assert.deepEqual(coverageOf(messages)?.hydrated_keys, [
+		QFX_ACCOUNT.internal_id,
+	]);
+	assert.equal(
+		messages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+	);
+	assert.equal(
+		messages.some((m) => m.type === "DETAIL_GAP_RECOVERED"),
+		true,
+	);
+});
+
+test("real QFX source-empty control remains hydrated without inventing a cursor", async () => {
+	const { deps, messages, outcome, records } = await runQfxFixture("", {
+		prior: false,
+	});
+	assert.equal(outcome.kind, "hydrated");
+	assert.equal(records.length, 0);
+	assert.deepEqual(deps.maxSeenByAccount, {});
+	assert.deepEqual(coverageOf(messages)?.hydrated_keys, [
+		QFX_ACCOUNT.internal_id,
+	]);
+});
+
+test("real QFX missing transaction-list shape is not a proven empty ledger", async () => {
+	const { outcome } = await runQfxFixture("", {
+		body: "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD</CURDEF></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>",
+	});
+	assert.equal(outcome.kind, "gap");
+});
+
+test("real QFX partial first run retains valid rows without inventing a watermark", async () => {
+	const malformed =
+		"<STMTTRN><TRNAMT>8.00</TRNAMT><FITID>undated</FITID></STMTTRN>";
+	const { deps, outcome, records, messages } = await runQfxFixture(
+		VALID_QFX_ROW + malformed,
+		{ prior: false },
+	);
+	assert.equal(outcome.kind, "gap");
+	assert.deepEqual(
+		records.map((r) => r.fitid),
+		["valid-1"],
+	);
+	assert.deepEqual(deps.maxSeenByAccount, {});
+	assert.equal(
+		messages.some((m) => m.type === "STATE"),
+		false,
+	);
+});
+
+test("real QFX valid row excluded by scope does not become malformed debt", async () => {
+	const { outcome, records, messages } = await runQfxFixture(VALID_QFX_ROW, {
+		since: "2026-05-01",
+	});
+	assert.equal(outcome.kind, "hydrated");
+	assert.equal(
+		records.length,
+		0,
+		"recording emitter enforces the known date exclusion",
+	);
+	assert.equal(
+		messages.some((m) => m.type === "DETAIL_GAP"),
+		false,
+	);
+	assert.deepEqual(coverageOf(messages)?.hydrated_keys, [
+		QFX_ACCOUNT.internal_id,
+	]);
 });

@@ -2512,7 +2512,9 @@ export async function emitCsvTransactions(
 	// transaction cursor on this outcome, so a parser fix can recover the gap.
 	// `rows.length` is the raw parsed line count; we report data-row count
 	// (rows beyond the header) to keep the number meaningful.
-	const dataRows = Math.max(0, rows.length - 1);
+	const dataRows = rows
+		.slice(1)
+		.filter((row) => row.some((field) => field.trim())).length;
 	if (txns.length === 0) {
 		await deps.emit({
 			type: "SKIP_RESULT",
@@ -2526,6 +2528,21 @@ export async function emitCsvTransactions(
 				account_ordinal: accountOrdinal,
 				account_total: accountTotal,
 				data_rows: dataRows,
+			},
+		});
+	}
+	if (txns.length > 0 && txns.length < dataRows) {
+		await deps.emit({
+			type: "SKIP_RESULT",
+			stream: "transactions",
+			reason: "csv_partial_parse",
+			message: `CSV left ${dataRows - txns.length} unparsed row(s) for account ${accountOrdinal}/${accountTotal}`,
+			diagnostics: {
+				account_ordinal: accountOrdinal,
+				account_total: accountTotal,
+				data_rows: dataRows,
+				usable_rows: txns.length,
+				unparsed_rows: dataRows - txns.length,
 			},
 		});
 	}
@@ -2855,6 +2872,17 @@ export function classifyCsvTransactionResult(
 	usedSince: string | null,
 	csvResult: { dataRows: number; latest: string | null; usableCount: number },
 ): AccountTransactionResult {
+	if (csvResult.usableCount > 0 && csvResult.usableCount < csvResult.dataRows) {
+		return {
+			last_date: priorLastDate,
+			outcome: {
+				accountId,
+				kind: "gap",
+				reason: "temporary_unavailable",
+				errorClass: "csv_partial_parse",
+			},
+		};
+	}
 	if (csvResult.usableCount > 0) {
 		return {
 			last_date: csvResult.latest || usedSince || null,

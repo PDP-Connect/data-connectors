@@ -771,27 +771,44 @@ export function resolveAccountIdForRow(
 
 // ─── QFX structural extraction ───────────────────────────────────────────
 
+export interface QfxExtractionIntegrity {
+	rawCandidateCount: number;
+	extractedCount: number;
+	malformedCount: number;
+	sourceShapeValid: boolean;
+}
+
 function extractTransactions(
 	stmt: OfxValue,
 	currency: string,
-): QfxTransaction[] {
+): { transactions: QfxTransaction[]; integrity: QfxExtractionIntegrity } {
 	const trList = ofxGet(stmt, "BANKTRANLIST");
 	const rawTxns = ofxGet(trList, "STMTTRN");
 	let txnArray: OfxValue[];
 	if (Array.isArray(rawTxns)) {
 		txnArray = rawTxns;
-	} else if (rawTxns) {
+	} else if (rawTxns !== undefined) {
 		txnArray = [rawTxns];
 	} else {
 		txnArray = [];
 	}
+	// Count source candidates before any identity/date filtering.
+	const rawCandidateCount = txnArray.length;
 	const transactions: QfxTransaction[] = [];
 	for (const t of txnArray) {
 		const amtStr = (ofxString(ofxGet(t, "TRNAMT")) ?? "0").trim();
 		const amountCents = Math.round(Number(amtStr) * CENTS_MULTIPLIER);
 		const fitid = ofxString(ofxGet(t, "FITID")) ?? "";
 		const date = ofxDateToIso(ofxGet(t, "DTPOSTED"));
-		if (!(fitid && date)) {
+		const parsedDate = date ? Date.parse(`${date}T00:00:00.000Z`) : Number.NaN;
+		if (
+			!(
+				fitid.trim() &&
+				date &&
+				Number.isFinite(parsedDate) &&
+				new Date(parsedDate).toISOString().slice(0, 10) === date
+			)
+		) {
 			continue;
 		}
 		transactions.push({
@@ -806,7 +823,15 @@ function extractTransactions(
 			reference_number: ofxString(ofxGet(t, "REFNUM")),
 		});
 	}
-	return transactions;
+	return {
+		transactions,
+		integrity: {
+			rawCandidateCount,
+			extractedCount: transactions.length,
+			malformedCount: rawCandidateCount - transactions.length,
+			sourceShapeValid: isOfxRecord(trList) || trList === "",
+		},
+	};
 }
 
 function extractBalance(stmt: OfxValue): QfxBalance | null {
@@ -838,10 +863,21 @@ function extractBalance(stmt: OfxValue): QfxBalance | null {
  * checking/savings under BANKMSGSRSV1 > STMTTRNRS > STMTRS. Structures
  * are otherwise parallel.
  */
-export function extractFromQfx(parsed: unknown): QfxExtracted {
+export function extractFromQfx(
+	parsed: unknown,
+): QfxExtracted & { integrity: QfxExtractionIntegrity } {
 	const root: OfxValue = ofxGet(parsed, "OFX") ?? parsed;
 	if (!isOfxRecord(root)) {
-		return { transactions: [], balance: null };
+		return {
+			transactions: [],
+			balance: null,
+			integrity: {
+				rawCandidateCount: 0,
+				extractedCount: 0,
+				malformedCount: 0,
+				sourceShapeValid: false,
+			},
+		};
 	}
 
 	const cc = ofxGet(
@@ -859,13 +895,22 @@ export function extractFromQfx(parsed: unknown): QfxExtracted {
 		stmt = bank;
 	}
 	if (!stmt) {
-		return { transactions: [], balance: null };
+		return {
+			transactions: [],
+			balance: null,
+			integrity: {
+				rawCandidateCount: 0,
+				extractedCount: 0,
+				malformedCount: 0,
+				sourceShapeValid: false,
+			},
+		};
 	}
 
 	const currency = ofxString(ofxGet(stmt, "CURDEF")) ?? "USD";
-	const transactions = extractTransactions(stmt, currency);
+	const { transactions, integrity } = extractTransactions(stmt, currency);
 	const balance = extractBalance(stmt);
-	return { transactions, balance };
+	return { transactions, balance, integrity };
 }
 
 // ─── Activity choice (cursor + scope → ActivityKind) ─────────────────────
