@@ -1844,6 +1844,7 @@ function makeTwoStepVenmoPage({
 	passwordAppearsAfterNext = true,
 	passwordClearedBySubmit = false,
 	passwordFillSticks = true,
+	passwordSubmitStalls = false,
 	passwordScreenDelayMs = 0,
 	semanticSubmitVisible = true,
 	stepOneUnnamedPassword = false,
@@ -1879,6 +1880,8 @@ function makeTwoStepVenmoPage({
 	 * resolves, but the field's value stays empty.
 	 */
 	passwordFillSticks?: boolean;
+	/** The click leaves the filled password step in place with no auth outcome. */
+	passwordSubmitStalls?: boolean;
 	/**
 	 * How long Venmo's second screen takes to render after the identifier is
 	 * submitted. Non-zero is the realistic case and the ONLY one that can tell a
@@ -1927,6 +1930,9 @@ function makeTwoStepVenmoPage({
 			if (stepTwoPasswordValue === "") {
 				// Venmo's client-side "Required" validation: nothing is sent and the
 				// page stays on the password step.
+				return;
+			}
+			if (passwordSubmitStalls) {
 				return;
 			}
 			// The provider, not an account probe, leaves identity after submit.
@@ -2602,6 +2608,33 @@ test("ensureVenmoSession: a post-submit stall on the password step with an empty
 	});
 });
 
+test("ensureVenmoSession: a filled password step that never advances reports the observed stall", async () => {
+	await withVenmoCredentials(async () => {
+		const { page, submittedPasswords } = makeTwoStepVenmoPage({
+			passwordSubmitStalls: true,
+			scoringChallengeLoaded: true,
+		});
+		const { sendInteraction } = recordingSendInteraction();
+		await assert.rejects(
+			ensureVenmoSession({
+				credentials: {
+					VENMO_PASSWORD: "test-password",
+					VENMO_USERNAME: "test-user",
+				},
+				page,
+				postSubmitSettleTimeoutMs: 20,
+				sendInteraction,
+			}),
+			(error: Error) => {
+				assert.match(error.message, /^venmo_password_submit_stalled:/);
+				assert.doesNotMatch(error.message, /scored|test-password/);
+				return true;
+			},
+		);
+		assert.deepEqual(submittedPasswords, ["test-password"]);
+	});
+});
+
 // (3) The credential-resubmission guard under a TWO-submit flow. The marker
 // must bind to the PASSWORD submit, never the identifier submit — an
 // identifier is not a secret, and marking it as one would terminal runs that
@@ -2810,6 +2843,29 @@ test("ensureVenmoSession: a page with no username field still hands off with the
 			"nothing may be typed into a form the connector does not recognize",
 		);
 		assert.equal(fillCalls.password, undefined);
+	});
+});
+
+test("ensureVenmoSession: a visible CAPTCHA with no identifier is named as the challenge", async () => {
+	await withVenmoCredentials(async () => {
+		const { page } = makeTwoStepVenmoPage({
+			captchaVisible: true,
+			identifierSelectorMatches: false,
+		});
+		const { requests, sendInteraction } = recordingSendInteraction();
+		await ensureVenmoSession({
+			credentials: {
+				VENMO_PASSWORD: "test-password",
+				VENMO_USERNAME: "test-user",
+			},
+			page,
+			sendInteraction,
+		});
+		assert.match(requests[0]?.message ?? "", /CAPTCHA/);
+		assert.doesNotMatch(
+			requests[0]?.message ?? "",
+			/sign-in form did not render/,
+		);
 	});
 });
 
@@ -4224,9 +4280,11 @@ test("waitForManualLogin: a surface that never paints still reaches the owner, w
  * reached the fields, which is the step that was missing.
  */
 function makePageWithChallengeThenForm({
+	passwordOnlyAfterReveal = false,
 	transportFaultAfterSubmit = false,
 	unrecognizedVerificationAfterSubmit = false,
 }: {
+	passwordOnlyAfterReveal?: boolean;
 	transportFaultAfterSubmit?: boolean;
 	/**
 	 * After the replay submits the password, render verification COPY with no
@@ -4240,6 +4298,7 @@ function makePageWithChallengeThenForm({
 	page: Page;
 	reveal: () => void;
 	submitClicks: string[];
+	gotoUrls: string[];
 } {
 	const fillCalls: Record<string, string> = {};
 	let formPresent = false;
@@ -4252,10 +4311,14 @@ function makePageWithChallengeThenForm({
 	});
 	const absent = makeLocator({ count: 0, visible: false });
 	const submitClicks: string[] = [];
+	const gotoUrls: string[] = [];
+	let currentUrl = "https://venmo.com/";
 	const submit = makeSubmitRecordingLocator(() => {
 		submitClicks.push("click");
+		if (passwordOnlyAfterReveal) {
+			currentUrl = "https://venmo.com/";
+		}
 	});
-	let currentUrl = "https://venmo.com/";
 	const page: Pick<
 		Page,
 		| "evaluate"
@@ -4292,7 +4355,11 @@ function makePageWithChallengeThenForm({
 			return submit;
 		},
 		goto(url: string): ReturnType<Page["goto"]> {
-			currentUrl = url;
+			gotoUrls.push(url);
+			currentUrl =
+				passwordOnlyAfterReveal && url === "https://venmo.com/login"
+					? "https://id.venmo.com/signin"
+					: url;
 			return Promise.resolve(null);
 		},
 		locator(selector: string): Locator {
@@ -4314,7 +4381,7 @@ function makePageWithChallengeThenForm({
 				return absent;
 			}
 			if (selector.includes("username")) {
-				return username;
+				return passwordOnlyAfterReveal ? absent : username;
 			}
 			if (selector.includes("password")) {
 				return password;
@@ -4333,6 +4400,7 @@ function makePageWithChallengeThenForm({
 	};
 	return {
 		fillCalls,
+		gotoUrls,
 		page: page as Page,
 		reveal: () => {
 			formPresent = true;
@@ -4413,6 +4481,40 @@ test("a bot-check handoff resumes by SUBMITTING the revealed form, not by fillin
 	assert.ok(
 		submitClicks.length > 0,
 		"the revealed form must be SUBMITTED — filling it and probing an unsubmitted form loses the run",
+	);
+});
+
+test("a solved CAPTCHA revealing the password step resumes there and submits it once", async () => {
+	const { fillCalls, gotoUrls, page, reveal, submitClicks } =
+		makePageWithChallengeThenForm({ passwordOnlyAfterReveal: true });
+	let navigationsAtResponse = -1;
+	const result = await ensureVenmoSession({
+		credentials: { VENMO_PASSWORD: "pw-stored", VENMO_USERNAME: "user-stored" },
+		page,
+		sendInteraction: (
+			_req: InteractionRequest,
+		): Promise<InteractionResponse> => {
+			reveal();
+			navigationsAtResponse = gotoUrls.length;
+			return Promise.resolve({ ok: true } as unknown as InteractionResponse);
+		},
+	});
+	assert.equal(result, null, "a handoff remains unverified until collection");
+	assert.equal(
+		gotoUrls.length,
+		navigationsAtResponse,
+		"resuming must preserve the solved CAPTCHA's password screen",
+	);
+	assert.equal(fillCalls.password, "pw-stored");
+	assert.equal(
+		fillCalls.username,
+		undefined,
+		"the identifier step has already completed",
+	);
+	assert.equal(
+		submitClicks.length,
+		1,
+		"one password attempt must click Log in once",
 	);
 });
 
@@ -4905,7 +5007,7 @@ test("an identity XHR that never completes times out without navigation or probi
 			postSubmitSettleTimeoutMs: 20,
 			sendInteraction,
 		}),
-		/venmo_login_did_not_complete/,
+		/venmo_password_submit_stalled/,
 	);
 	assert.equal(fake.destroyed, false);
 	assert.equal(fake.postSubmitProbes, 0);

@@ -25090,7 +25090,7 @@
 				},
 				"connector_key": "venmo",
 				"manifest_uri": "https://registry.pdpp.dev/connectors/venmo",
-				"version": "0.2.23",
+				"version": "0.2.24",
 				"display_name": "Venmo",
 				"brand": {
 					"icon": "icon.svg",
@@ -25144,6 +25144,7 @@
 						"venmo_origin_navigation_failed",
 						"venmo_password_screen_timeout",
 						"venmo_password_field_empty_after_submit",
+						"venmo_password_submit_stalled",
 						"venmo_invisible_scoring_challenge",
 						"venmo_sms_offer_checkbox_unavailable",
 						"venmo_sms_offer_send_code_unavailable",
