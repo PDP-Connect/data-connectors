@@ -611,13 +611,16 @@ test("a capped run saves an older-history position while the next run refreshes 
 	assert.ok(secondFetch.calls.length <= MAX_TRANSACTION_PAGES);
 });
 
-test("a capped head refresh keeps the prior anchor when it has not reached it", async () => {
-	const pages = Array.from({ length: MAX_TRANSACTION_PAGES }, (_, index) => ({
-		body: { data: [story(String(90_000 - index), "2026-07-02T00:00:00Z")] },
-	}));
-	const { fetchPath } = makeScriptedFetch({
-		[`/stories/target-or-actor/${OWNER_ID}`]: pages,
-	});
+test("a capped head refresh saves a gap while advancing the old tail", async () => {
+	const burst = Array.from({ length: 500 * 50 }, (_, index) =>
+		story(String(90_000 - index), "2026-07-02T00:00:00Z"),
+	);
+	const { fetchPath, calls } = makeStatefulVenmoFetch([
+		...burst,
+		story("2000", "2026-07-01T00:00:00Z"),
+		story("1000", "2026-06-01T00:00:00Z"),
+		story("999", "2026-05-01T00:00:00Z"),
+	]);
 	const priorCursor = {
 		backfill_before_id: "1000",
 		head_anchor_id: "2000",
@@ -626,8 +629,277 @@ test("a capped head refresh keeps the prior anchor when it has not reached it", 
 	const { ctx } = makeCtx({ transactions: priorCursor }, ["transactions"]);
 	const result = await collectTransactions(ctx, fetchPath, OWNER_ID, NO_DELAY);
 	assert.equal(result.truncated, true);
-	assert.equal(result.backfillBeforeId, priorCursor.backfill_before_id);
-	assert.equal(result.headAnchorId, priorCursor.head_anchor_id);
+	assert.equal(result.backfillBeforeId, null);
+	assert.equal(result.headAnchorId, burst[0]?.id);
+	assert.equal(result.headGaps.length, 1);
+	assert.equal(result.headGaps[0]?.end_id, priorCursor.head_anchor_id);
+	assert.ok(calls.some((call) => call.includes("before_id=1000")));
+	assert.ok(calls.length <= MAX_TRANSACTION_PAGES);
+});
+
+test("a burst beyond the head budget eventually fills the head gap and old tail", async () => {
+	const pageSize = 50;
+	const original = Array.from(
+		{ length: MAX_TRANSACTION_PAGES * pageSize + pageSize },
+		(_, i) => story(String(100_000 + i), "2026-01-01T00:00:00Z"),
+	).reverse();
+	const burst = Array.from(
+		{ length: MAX_TRANSACTION_PAGES * pageSize + pageSize },
+		(_, i) => story(String(200_000 + i), "2026-02-01T00:00:00Z"),
+	).reverse();
+	let cursor: Record<string, unknown> = {};
+	const collected = new Set<string>();
+	const history = [...burst, ...original];
+	for (let run = 0; run < 5; run += 1) {
+		const backend = makeStatefulVenmoFetch(run === 0 ? original : history);
+		const result = makeCtx({ transactions: cursor }, ["transactions"]);
+		await collectAllStreams(
+			result.ctx,
+			backend.fetchPath,
+			OWNER_ID,
+			accountUser(),
+			NO_DELAY,
+		);
+		assert.ok(backend.calls.length <= MAX_TRANSACTION_PAGES);
+		const ids = result.emitted.map((entry) => entry.data.id as string);
+		assert.equal(
+			new Set(ids).size,
+			ids.length,
+			`run ${run + 1} emitted duplicates`,
+		);
+		for (const id of ids) {
+			assert.ok(!collected.has(id), `run ${run + 1} re-emitted ${id}`);
+			collected.add(id);
+		}
+		const state = result.messages.find(
+			(message) =>
+				message.type === "STATE" && message.stream === "transactions",
+		);
+		assert.ok(state && state.type === "STATE");
+		cursor = state.cursor as Record<string, unknown>;
+		if (run >= 2 && !cursor.backfill_before_id && !cursor.head_gaps) break;
+	}
+	assert.equal(collected.size, history.length, "frozen history must converge");
+	assert.equal(cursor.backfill_before_id, undefined);
+	assert.equal(cursor.head_gaps, undefined);
+	assert.ok(collected.has(original.at(-1)?.id ?? ""), "old tail was collected");
+	assert.ok(collected.has(burst.at(-1)?.id ?? ""), "head gap was collected");
+});
+
+test("a second burst preserves the first head gap's continuation", async () => {
+	const original = Array.from(
+		{ length: MAX_TRANSACTION_PAGES * 50 + 50 },
+		(_, i) => story(String(100_000 + i), "2026-01-01T00:00:00Z"),
+	).reverse();
+	const burst = (start: number, pages: number) =>
+		Array.from({ length: pages * 50 }, (_, i) =>
+			story(String(start + i), "2026-02-01T00:00:00Z"),
+		).reverse();
+	const firstBurst = burst(200_000, 800);
+	const secondBurst = burst(300_000, 600);
+	const thirdBurst = burst(400_000, 1);
+	let cursor: Record<string, unknown> = {};
+	const collected = new Set<string>();
+	for (let run = 0; run < 7; run += 1) {
+		const history =
+			run === 0
+				? original
+				: run === 1
+					? [...firstBurst, ...original]
+					: run === 2
+						? [...secondBurst, ...firstBurst, ...original]
+						: [...thirdBurst, ...secondBurst, ...firstBurst, ...original];
+		const backend = makeStatefulVenmoFetch(history);
+		const result = makeCtx({ transactions: cursor }, ["transactions"]);
+		await collectAllStreams(
+			result.ctx,
+			backend.fetchPath,
+			OWNER_ID,
+			accountUser(),
+			NO_DELAY,
+		);
+		assert.ok(backend.calls.length <= MAX_TRANSACTION_PAGES);
+		const ids = result.emitted.map((entry) => entry.data.id as string);
+		assert.equal(
+			new Set(ids).size,
+			ids.length,
+			`run ${run + 1} emitted duplicates`,
+		);
+		for (const id of ids) {
+			assert.ok(!collected.has(id), `run ${run + 1} re-emitted ${id}`);
+			collected.add(id);
+		}
+		const state = result.messages.find(
+			(message) =>
+				message.type === "STATE" && message.stream === "transactions",
+		);
+		assert.ok(state && state.type === "STATE");
+		cursor = state.cursor as Record<string, unknown>;
+		assert.ok(!Array.isArray(cursor.head_gaps) || cursor.head_gaps.length <= 4);
+		if (run === 2) {
+			assert.ok(Array.isArray(cursor.head_gaps));
+			assert.equal(cursor.head_gaps.length, 2);
+			assert.ok(
+				result.messages.some(
+					(message) =>
+						message.type === "SKIP_RESULT" &&
+						message.reason === "transactions_deferred_page_budget",
+				),
+			);
+		}
+		if (run === 3) {
+			assert.ok(Array.isArray(cursor.head_gaps));
+			assert.equal(cursor.head_gaps[0]?.start_id, thirdBurst[0]?.id);
+		}
+		if (run >= 3 && !cursor.backfill_before_id && !cursor.head_gaps) break;
+	}
+	assert.equal(
+		collected.size,
+		original.length +
+			firstBurst.length +
+			secondBurst.length +
+			thirdBurst.length,
+	);
+	assert.equal(cursor.backfill_before_id, undefined);
+	assert.equal(cursor.head_gaps, undefined);
+});
+
+test("a fresh collection retries a malformed supported payment behind the head", async () => {
+	const head = Array.from({ length: 50 }, (_, i) =>
+		story(String(7000 + i), "2026-07-02T00:00:00Z"),
+	).reverse();
+	const malformed = story("6000", "2026-07-01T00:00:00Z");
+	delete (malformed as { date_created?: string }).date_created;
+	const tail = story("5999", "2026-06-30T00:00:00Z");
+	const first = makeCtx({}, ["transactions"]);
+	await collectAllStreams(
+		first.ctx,
+		makeStatefulVenmoFetch([...head, malformed, tail]).fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	const state = first.messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.equal(
+		(state.cursor as Record<string, unknown>).head_anchor_id,
+		head[0]?.id,
+	);
+	assert.equal(
+		(state.cursor as Record<string, unknown>).backfill_before_id,
+		head.at(-1)?.id,
+	);
+	const second = makeCtx(
+		{ transactions: state.cursor as Record<string, unknown> },
+		["transactions"],
+	);
+	await collectAllStreams(
+		second.ctx,
+		makeStatefulVenmoFetch([
+			...head,
+			story("6000", "2026-07-01T00:00:00Z"),
+			tail,
+		]).fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.ok(second.emitted.some((entry) => entry.data.id === "6000"));
+});
+
+test("a malformed supported payment is retried after its date is corrected", async () => {
+	const head = Array.from({ length: 50 }, (_, i) =>
+		story(String(7000 + i), "2026-07-02T00:00:00Z"),
+	).reverse();
+	const malformed = story("6000", "2026-07-01T00:00:00Z");
+	delete (malformed as { date_created?: string }).date_created;
+	const tail = story("5999", "2026-06-30T00:00:00Z");
+	const priorCursor = {
+		backfill_before_id: head.at(-1)?.id,
+		head_anchor_id: head[0]?.id,
+	};
+	const first = makeCtx({ transactions: priorCursor }, ["transactions"]);
+	await collectAllStreams(
+		first.ctx,
+		makeStatefulVenmoFetch([...head, malformed, tail]).fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	const firstState = first.messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(firstState && firstState.type === "STATE");
+	assert.ok(
+		first.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "transactions_schema_blocked",
+		),
+	);
+	assert.equal(
+		(firstState.cursor as Record<string, unknown>).backfill_before_id,
+		priorCursor.backfill_before_id,
+	);
+	const corrected = story("6000", "2026-07-01T00:00:00Z");
+	const second = makeCtx(
+		{ transactions: firstState.cursor as Record<string, unknown> },
+		["transactions"],
+	);
+	await collectAllStreams(
+		second.ctx,
+		makeStatefulVenmoFetch([...head, corrected, tail]).fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.ok(second.emitted.some((entry) => entry.data.id === corrected.id));
+});
+
+test("a supported payment missing its story id keeps the prior backfill checkpoint", async () => {
+	const head = [story("7000", "2026-07-02T00:00:00Z")];
+	const malformed = story("6000", "2026-07-01T00:00:00Z");
+	delete (malformed as { id?: string }).id;
+	const priorCursor = { backfill_before_id: "7000", head_anchor_id: "7000" };
+	const first = makeCtx({ transactions: priorCursor }, ["transactions"]);
+	await collectAllStreams(
+		first.ctx,
+		makeStatefulVenmoFetch([...head, malformed]).fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	const state = first.messages.find(
+		(message) => message.type === "STATE" && message.stream === "transactions",
+	);
+	assert.ok(state && state.type === "STATE");
+	assert.equal(
+		(state.cursor as Record<string, unknown>).backfill_before_id,
+		"7000",
+	);
+	assert.ok(
+		first.messages.some(
+			(message) =>
+				message.type === "SKIP_RESULT" &&
+				message.reason === "transactions_schema_blocked" &&
+				message.message.includes("missing story id"),
+		),
+	);
+	const second = makeCtx(
+		{ transactions: state.cursor as Record<string, unknown> },
+		["transactions"],
+	);
+	await collectAllStreams(
+		second.ctx,
+		makeStatefulVenmoFetch([...head, story("6000", "2026-07-01T00:00:00Z")])
+			.fetchPath,
+		OWNER_ID,
+		accountUser(),
+		NO_DELAY,
+	);
+	assert.ok(second.emitted.some((entry) => entry.data.id === "6000"));
 });
 
 test("a rejected backfill record keeps its position for a later retry", async () => {
@@ -1126,6 +1398,7 @@ test("collectAllStreams: a capped Venmo transactions walk advances the head date
 	assert.ok(state && state.type === "STATE");
 	assert.deepEqual(state.cursor, {
 		last_seen_date_created: "2026-01-01T00:00:00Z",
+		version: 2,
 		head_anchor_id: "40000",
 		backfill_before_id: String(
 			40_000 + MAX_TRANSACTION_PAGES * page.length - 1,

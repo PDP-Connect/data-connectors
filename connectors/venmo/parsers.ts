@@ -81,43 +81,52 @@ function counterpartyRecord(
  * id, used only to derive `is_owner_actor` — never persisted as a foreign
  * concept in the schema beyond that one boolean.
  *
- * Returns `null` for story types this connector does not model (refunds,
+ * Returns `unsupported` for story types this connector does not model (refunds,
  * bank transfers, top-ups, card authorizations/withdrawals, disbursements —
  * see venmo_api/models/transaction.py's TransactionType enum). Those never
  * carry a `payment` object in the documented shape, so they cannot be
  * represented by this schema without inventing fields; skipping them is
  * honest non-support, not data loss of a stream we claim to cover.
  */
-export function transactionRecord(
+export function parseTransactionStory(
 	story: VenmoStory,
 	ownerId: string,
-): RecordData | null {
+):
+	| { kind: "record"; record: RecordData }
+	| { kind: "unsupported" }
+	| { kind: "invalid"; reason: "missing_id" | "missing_date_created" } {
 	const { payment } = story;
-	if (!(story.id && payment)) {
-		return null;
+	if (!payment) {
+		return { kind: "unsupported" };
 	}
 	const actionRaw = payment.action;
 	if (actionRaw !== "pay" && actionRaw !== "charge") {
-		return null;
+		return { kind: "unsupported" };
+	}
+	if (typeof story.id !== "string" || story.id.length === 0) {
+		return { kind: "invalid", reason: "missing_id" };
 	}
 	const { date_created: dateCreated } = story;
 	if (!dateCreated) {
-		return null;
+		return { kind: "invalid", reason: "missing_date_created" };
 	}
 	return {
-		id: story.id,
-		payment_id: payment.id ?? null,
-		date_created: normalizeVenmoDate(dateCreated),
-		date_updated: normalizeVenmoDate(story.date_updated),
-		date_completed: normalizeVenmoDate(payment.date_completed),
-		payment_type: actionRaw,
-		amount_cents: dollarsToCents(payment.amount),
-		audience: story.audience ?? null,
-		status: payment.status ?? null,
-		note: payment.note ?? null,
-		device_used: story.app?.name ?? null,
-		actor: counterpartyRecord(payment.actor),
-		target: counterpartyRecord(payment.target?.user),
-		is_owner_actor: payment.actor?.id === ownerId,
+		kind: "record",
+		record: {
+			id: story.id,
+			payment_id: payment.id ?? null,
+			date_created: normalizeVenmoDate(dateCreated),
+			date_updated: normalizeVenmoDate(story.date_updated),
+			date_completed: normalizeVenmoDate(payment.date_completed),
+			payment_type: actionRaw,
+			amount_cents: dollarsToCents(payment.amount),
+			audience: story.audience ?? null,
+			status: payment.status ?? null,
+			note: payment.note ?? null,
+			device_used: story.app?.name ?? null,
+			actor: counterpartyRecord(payment.actor),
+			target: counterpartyRecord(payment.target?.user),
+			is_owner_actor: payment.actor?.id === ownerId,
+		},
 	};
 }
