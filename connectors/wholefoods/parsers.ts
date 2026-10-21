@@ -9,13 +9,22 @@
 // connectors/amazon/parsers.ts uses.
 
 import { parseHTML } from "linkedom";
+import {
+	type AmazonProductObservation,
+	IDENTITY_SELECTORS,
+	normalizeGtin,
+	type OrderObservation,
+	type ProductNode,
+	type RenderedPanel,
+	resolveWholeFoodsUrl,
+	type ScopedDetail,
+	type WholeFoodsProductObservation,
+} from "./binding.ts";
 import type {
 	NutritionFacts,
 	OrderDetail,
 	OrderDetailItem,
 	OrderStub,
-	UsdaFood,
-	UsdaMatchMethod,
 	WholeFoodsProfile,
 } from "./types.ts";
 
@@ -31,19 +40,291 @@ const NAV_SIGN_IN_RE = /^\s*hello,\s*sign\s+in\s*$/i;
 const WHITESPACE_RE = /\s+/g;
 const QTY_RE = /(?:Qty|Quantity)[:\s]*(\d+(?:\.\d+)?)/i;
 const PRICE_RE = /\$(\d+(?:\.\d{2})?)/;
-const SIZE_SUFFIX_RE =
-	/,?\s*(\d+(\.\d+)?\s*)?(oz|lb|lbs|fl oz|gal|ct|pk|count|each)\.?\s*$/i;
-const PACK_SUFFIX_RE =
-	/,?\s*\d+\s+(Mega\s+)?(Rolls|Bags|Cans|Bottles|Packs?)$/i;
-const BRAND_PREFIX_RE = /^(365\s+by\s+)?Whole\s+Foods\s+Market\s*/i;
-const GENERIC_PREFIX_RE = /^(Organic|365\s+Everyday\s+Value)\s*/i;
 const NUTRITION_HEADING_RE = /nutrition\s*facts/i;
-const CALORIES_RE = /Calories[:\s]*(\d+)/i;
 const SERVING_SIZE_RE = /Serving [Ss]ize[:\s]*([^\n]+)/;
 const SERVINGS_PER_CONTAINER_RE =
 	/(\d+(?:\.\d+)?)\s*servings?\s*per\s*container|servings?\s*per\s*container[:\s]*(\d+(?:\.\d+)?)/i;
-const NUTRIENT_PATTERN_SOURCE =
-	"(Total Fat|Saturated Fat|Trans Fat|Cholesterol|Sodium|Total Carbohydrate|Dietary Fiber|Added Sugars|Sugars|Protein|Potassium|Calcium|Iron|Vitamin D)[:\\s]*(\\d+\\.?\\d*)";
+type NutritionDetails = Pick<
+	NutritionFacts,
+	| "addedSugarG"
+	| "allergens"
+	| "calciumMg"
+	| "category"
+	| "cholesterolMg"
+	| "coreStated"
+	| "highlights"
+	| "ingredients"
+	| "ironMg"
+	| "potassiumMg"
+	| "rawNutritionText"
+	| "saturatedFatG"
+	| "transFatG"
+	| "upc"
+	| "vitaminDMcg"
+>;
+
+function emptyNutritionDetails(): NutritionDetails {
+	return {
+		addedSugarG: null,
+		allergens: null,
+		calciumMg: null,
+		category: [],
+		cholesterolMg: null,
+		coreStated: [],
+		highlights: [],
+		ingredients: null,
+		ironMg: null,
+		potassiumMg: null,
+		rawNutritionText: null,
+		saturatedFatG: null,
+		transFatG: null,
+		upc: null,
+		vitaminDMcg: null,
+	};
+}
+
+// ─── Nutrition: units, GTINs and the acceptance rule ──────────────────────
+
+type MassUnit = "g" | "mg" | "mcg";
+
+const MG_PER_UNIT: Record<MassUnit, number> = { g: 1000, mg: 1, mcg: 0.001 };
+const MASS_UNIT_ALIASES: Record<string, MassUnit> = {
+	g: "g",
+	gram: "g",
+	grams: "g",
+	mg: "mg",
+	milligram: "mg",
+	milligrams: "mg",
+	mcg: "mcg",
+	ug: "mcg",
+	µg: "mcg",
+	μg: "mcg",
+	microgram: "mcg",
+	micrograms: "mcg",
+};
+const ENERGY_UNIT_ALIASES = new Set([
+	"",
+	"cal",
+	"calorie",
+	"calories",
+	"kcal",
+	"kilocalorie",
+	"kilocalories",
+]);
+/** A source states a row in one of two ways: an amount, or only an upper
+ *  bound ("<1 g"). A bound is a stated row, but it has no amount, so it is
+ *  never written as a number. */
+type Stated =
+	| { readonly bound: "exact"; readonly amount: number }
+	| { readonly bound: "less_than"; readonly limit: number };
+
+const amountOf = (stated: Stated | null): number | null =>
+	stated?.bound === "exact" ? stated.amount : null;
+
+/** An amount as a panel states it: plain, with a decimal part, or with
+ *  thousands separators ("1,200"). A number that runs into more digits or a
+ *  further separator ("12,5") is not an amount this reader can trust. */
+const AMOUNT_SOURCE =
+	"((?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?|\\.\\d+)(?!\\d|[.,]\\d)";
+/** `<`, `≤` or "less than", an amount, an optional unit (letters only, so
+ *  "2g*" and "10 g." keep their unit), and a percent sign if one follows. */
+const STATED_AMOUNT_RE = new RegExp(
+	`^[\\s:]*(<|≤|less than\\s)?\\s*${AMOUNT_SOURCE}\\s*([A-Za-zµμ]*)\\s*(%)?`,
+	"i",
+);
+const CALORIES_LABEL_RE = /Calories[:\s]*/gi;
+const AMOUNT_AT_START_RE = new RegExp(`^${AMOUNT_SOURCE}`);
+
+const parseAmount = (text: string): number =>
+	Number.parseFloat(text.replace(/,/g, ""));
+
+/** The number after a "Calories" label, if it is a clean amount. */
+function readCalories(text: string): number | null {
+	for (const label of text.matchAll(CALORIES_LABEL_RE)) {
+		const amount = AMOUNT_AT_START_RE.exec(
+			text.slice(label.index + label[0].length),
+		);
+		if (amount?.[1]) return parseAmount(amount[1]);
+	}
+	return null;
+}
+
+/** Footnotes under a panel: the daily-value note and the energy table
+ *  ("Calories per gram: Fat 9 Carbohydrate 4 Protein 4", "Calories: 2,000
+ *  2,500"). None of it is a row of this product. */
+const PANEL_FOOTNOTE_RE =
+	/Percent Daily Values?|The\s*%\s*Daily Value|Calories\s*per\s*gram|Calories\s*:\s*2,?000/i;
+const PANEL_START_RE = /Calories/i;
+
+/** A panel's text up to its structural end: its footnotes, and an
+ *  `Ingredients` heading (with or without a colon) once the panel has
+ *  started. An ingredients line before the panel is not the panel's end, and
+ *  the caller does not take rows from it. */
+function cutPanelEnd(text: string): string {
+	const footnote = text.search(PANEL_FOOTNOTE_RE);
+	const body = footnote === -1 ? text : text.slice(0, footnote);
+	const starts = [
+		body.search(PANEL_START_RE),
+		panelLabels(body)[0]?.index ?? -1,
+	].filter((at) => at >= 0);
+	if (starts.length === 0) return body;
+	const start = Math.min(...starts);
+	const heading = body.slice(start).search(/Ingredients?/i);
+	return heading === -1 ? body : body.slice(0, start + heading);
+}
+
+/** Vitamin D: 1 mcg is 40 IU, the one unambiguous IU factor a panel row uses. */
+const VITAMIN_D_IU_PER_MCG = 40;
+function roundAmount(value: number): number {
+	return Math.round(value * 1e6) / 1e6;
+}
+
+function convertMass(value: number, from: MassUnit, to: MassUnit): number {
+	return roundAmount((value * MG_PER_UNIT[from]) / MG_PER_UNIT[to]);
+}
+
+/** Read "<bound> <amount> <unit>" at the start of `text` as the row's own
+ *  unit. A bare number is already in that unit. A percentage, or a unit the
+ *  row cannot hold, states no amount, so the row is not stated (null) rather
+ *  than relabelled. */
+function statedMass(text: string, target: MassUnit): Stated | null {
+	const match = STATED_AMOUNT_RE.exec(text);
+	if (!match?.[2] || match[4]) return null;
+	const value = parseAmount(match[2]);
+	const unitText = resolveUnit(match[3] ?? "");
+	let amount: number;
+	if (unitText === "") {
+		amount = value;
+	} else if (unitText === "iu" && target === "mcg") {
+		amount = roundAmount(value / VITAMIN_D_IU_PER_MCG);
+	} else {
+		const unit = MASS_UNIT_ALIASES[unitText];
+		if (!unit) return null;
+		amount = convertMass(value, unit, target);
+	}
+	return match[1]
+		? { bound: "less_than", limit: amount }
+		: { bound: "exact", amount };
+}
+
+/** Units a panel row can state, longest first. */
+const PANEL_UNITS = ["mcg", "mg", "µg", "μg", "ug", "iu", "g"] as const;
+
+/** The unit in the letters that follow an amount. Amazon renders the panel
+ *  with no separators, so a unit can run into the next word ("3gIngredients"):
+ *  a known unit directly followed by a capital is that unit. */
+function resolveUnit(letters: string): string {
+	const lower = letters.toLowerCase();
+	if (lower in MASS_UNIT_ALIASES || lower === "iu" || lower === "")
+		return lower;
+	for (const unit of PANEL_UNITS) {
+		const next = letters[unit.length];
+		if (lower.startsWith(unit) && next !== undefined && /[A-Z]/.test(next)) {
+			return unit;
+		}
+	}
+	return lower;
+}
+
+/** A structured (JSON-LD) mass value: a number, or the same text a panel row
+ *  has. Absent or unreadable means not stated. */
+function structuredMass(raw: unknown, target: MassUnit): Stated | null {
+	if (typeof raw === "number") {
+		return Number.isFinite(raw) ? { bound: "exact", amount: raw } : null;
+	}
+	return typeof raw === "string" ? statedMass(raw, target) : null;
+}
+
+/** Energy as kilocalories. Kilojoules and other units are not stated here.
+ *  Energy needs an amount: an upper bound on calories is not a reading. */
+function structuredEnergy(raw: unknown): Stated | null {
+	if (typeof raw === "number") {
+		return Number.isFinite(raw) ? { bound: "exact", amount: raw } : null;
+	}
+	if (typeof raw !== "string") return null;
+	const match = STATED_AMOUNT_RE.exec(raw);
+	if (!match?.[2] || match[1] || match[4]) return null;
+	return ENERGY_UNIT_ALIASES.has((match[3] ?? "").toLowerCase())
+		? { bound: "exact", amount: parseAmount(match[2]) }
+		: null;
+}
+
+/** Panel rows and the unit each is stored in. Longer labels come first so
+ *  "Includes Added Sugars" is never read as "Sugars". */
+const PANEL_ROWS: readonly (readonly [
+	label: string,
+	key: string,
+	unit: MassUnit,
+])[] = [
+	["Includes Added Sugars", "Includes Added Sugars", "g"],
+	["Added Sugars", "Includes Added Sugars", "g"],
+	["Total Sugars", "Total Sugars", "g"],
+	["Total Fat", "Total Fat", "g"],
+	["Saturated Fat", "Saturated Fat", "g"],
+	["Trans Fat", "Trans Fat", "g"],
+	["Total Carbohydrates", "Total Carbohydrate", "g"],
+	["Total Carbohydrate", "Total Carbohydrate", "g"],
+	["Dietary Fiber", "Dietary Fiber", "g"],
+	["Cholesterol", "Cholesterol", "mg"],
+	["Sodium", "Sodium", "mg"],
+	["Sugars", "Total Sugars", "g"],
+	["Protein", "Protein", "g"],
+	["Potassium", "Potassium", "mg"],
+	["Calcium", "Calcium", "mg"],
+	["Iron", "Iron", "mg"],
+	["Vitamin D", "Vitamin D", "mcg"],
+];
+/** The text before a label ends in an amount and its unit ("5mg", "150kcal"):
+ *  the run-together render puts the next label right after it. */
+const AFTER_AMOUNT_UNIT_RE = /\d\s*(?:mcg|mg|µg|μg|ug|g|iu|kcal|cal)$/i;
+const PANEL_LABEL_RE = new RegExp(
+	PANEL_ROWS.map(([label]) => label).join("|"),
+	"gi",
+);
+const PANEL_ROW_BY_LABEL = new Map(
+	PANEL_ROWS.map(([label, key, unit]) => [label.toLowerCase(), { key, unit }]),
+);
+
+/** Read a rendered nutrition panel one row at a time. Amazon renders the
+ *  panel with no separators ("Total Fat12g20%Sodium480mg"), so a row's value
+ *  is the text between its label and the next label, never a search across
+ *  the whole text. The first occurrence of a row that states an amount wins;
+ *  a percentage of daily value states none. */
+function readPanelRows(panelText: string): Map<string, Stated> {
+	const labels = panelLabels(panelText);
+	const rows = new Map<string, Stated>();
+	labels.forEach((label, index) => {
+		const row = PANEL_ROW_BY_LABEL.get(label[0].toLowerCase());
+		if (!row || rows.has(row.key)) return;
+		const start = label.index + label[0].length;
+		const end = labels[index + 1]?.index ?? panelText.length;
+		const stated = statedMass(panelText.slice(start, end), row.unit);
+		if (stated) rows.set(row.key, stated);
+	});
+	return rows;
+}
+
+/** Label occurrences that start a row. A label inside a longer word
+ *  ("Environ" holds "iron") is not one; in the run-together render a
+ *  capitalised label directly after an amount and its unit ("5mgIron",
+ *  "150kcalTotal Fat", "80IUProtein") is. */
+function panelLabels(panelText: string) {
+	return [...panelText.matchAll(PANEL_LABEL_RE)].filter((label) => {
+		const previous = panelText[label.index - 1];
+		if (previous === undefined || !/[A-Za-z]/.test(previous)) return true;
+		return (
+			/[A-Z]/.test(label[0][0] ?? "") &&
+			AFTER_AMOUNT_UNIT_RE.test(panelText.slice(0, label.index))
+		);
+	});
+}
+
+const CORE_ROWS = ["calories", "carbs", "fat", "protein"] as const;
+type CoreRow = (typeof CORE_ROWS)[number];
+
+function coreStatedOf(stated: Record<CoreRow, Stated | null>): CoreRow[] {
+	return CORE_ROWS.filter((row) => stated[row] !== null);
+}
 
 const IN_STORE_ITEM_LIST_SELECTOR = "#f3_food_ItemList";
 // "Qty: 1 @ $7.99 each" | "Qty: 2.17 lb @ $6.99/lb"
@@ -52,6 +333,16 @@ const IN_STORE_QTY_RE =
 
 /** Elements that show an order-detail page has finished rendering: legacy
  *  item grid, cancelled order, sign-in form, in-store list, or delivery items. */
+/** An order detail the source rendered but whose rows cannot be read (a
+ *  product row with no name). It is that order's failure: callers translate
+ *  it into a recoverable per-order failure, unlike an unexpected error. */
+export class OrderDetailUnreadableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "OrderDetailUnreadableError";
+	}
+}
+
 export const ORDER_DETAIL_READY_SELECTOR =
 	'[data-component="purchasedItemsRightGrid"], [data-component="cancelled"], form[name="signIn"], #f3_food_ItemList, #line-items, [id$="-item-grid-row"]';
 
@@ -211,6 +502,16 @@ function renderedFirst<T extends Element = HTMLElement>(
 	selector: string,
 ): T | null {
 	return renderedAll<T>(root, selector)[0] ?? null;
+}
+
+/** Text the markup shows, including only rendered descendants. */
+function renderedTextOf(el: Element | null | undefined): string {
+	if (!el || !isRendered(el)) return "";
+	const copy = el.cloneNode(true) as Element;
+	for (const child of [...copy.querySelectorAll("*")]) {
+		if (!isRendered(child)) child.remove();
+	}
+	return textOf(copy);
 }
 
 /**
@@ -403,7 +704,9 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		const sourceName = textOf(anchor ?? title).trim();
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		if (productId && sourceName.length < 3) {
-			throw new Error("Whole Foods order item has no source product name");
+			throw new OrderDetailUnreadableError(
+				"Whole Foods order item has no source product name",
+			);
 		}
 		// A grid container with no title and no link is an empty shell, not a
 		// row: counting it would fabricate an item and hide that nothing was read.
@@ -411,7 +714,7 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 			continue;
 		}
 		// Keep an ASIN-less row for its parent order's item count. The legacy
-		// order_items schema requires a source product id, so the collector
+		// order_items schema requires a source product id, so the data connector
 		// reports it and omits only that item record.
 		const rowText = textOf(itemRow);
 		const quantity = QTY_RE.exec(rowText)?.[1];
@@ -429,6 +732,27 @@ export function parseOrderDetailDom(html: string): OrderDetail {
 		});
 	}
 	return { items, orderDateRaw: detailOrderDate(document) };
+}
+
+/** Read the order ids an order detail page renders in its header, with its
+ *  final URL. Deciding whether they belong to the requested order is
+ *  `bindOrder`'s job; incidental order-shaped text elsewhere is not read. */
+export function readOrderObservation(
+	finalUrl: string,
+	html: string,
+): OrderObservation {
+	const { document } = parseHTML(html);
+	const selectors = IDENTITY_SELECTORS.order;
+	const fromAttributes = [
+		...document.querySelectorAll(selectors.headerAttribute),
+	].flatMap((element) => {
+		const value = element.getAttribute("data-orderid")?.trim();
+		return value ? [value] : [];
+	});
+	const fromText = [...document.querySelectorAll(selectors.headerText)].flatMap(
+		(element) => textOf(element).match(/\d{3}-\d{7}-\d{7}/g) ?? [],
+	);
+	return { finalUrl, headerIds: [...fromAttributes, ...fromText] };
 }
 
 /**
@@ -454,7 +778,9 @@ function parseDeliveryOrderItems(document: Document): OrderDetailItem[] | null {
 		const productId = ASIN_FROM_HREF_RE.exec(href)?.[1] ?? null;
 		const linkedName = textOf(anchor).replace(WHITESPACE_RE, " ").trim();
 		if (productId && !linkedName) {
-			throw new Error("Whole Foods delivery item has no source product name");
+			throw new OrderDetailUnreadableError(
+				"Whole Foods delivery item has no source product name",
+			);
 		}
 		const rowText = textOf(row).replace(WHITESPACE_RE, " ").trim();
 		// An empty row element is a shell, not an item.
@@ -525,7 +851,9 @@ function parseInStoreItems(document: Document): OrderDetailItem[] | null {
 			.replace(WHITESPACE_RE, " ")
 			.trim();
 		if (name.length < 3) {
-			throw new Error("Whole Foods in-store order row has no item name");
+			throw new OrderDetailUnreadableError(
+				"Whole Foods in-store order row has no item name",
+			);
 		}
 		const rowText = textOf(row).replace(WHITESPACE_RE, " ");
 		const qty = IN_STORE_QTY_RE.exec(rowText);
@@ -591,144 +919,137 @@ export function parseDollarsToCents(
 	return Math.round(Number(m[1]) * CURRENCY_CENTS_MULTIPLIER);
 }
 
-// ─── Nutrition: name cleaning + USDA fuzzy match (pure) ───────────────────
-
-/** Strip Whole Foods brand prefixes and trailing size/pack descriptors so
- *  the cleaned name is a better USDA FDC search query. Ported verbatim
- *  (semantics preserved) from the legacy `cleanProductName`. */
-export function cleanProductName(name: string): string {
-	return name
-		.replace(BRAND_PREFIX_RE, "")
-		.replace(GENERIC_PREFIX_RE, "")
-		.replace(SIZE_SUFFIX_RE, "")
-		.replace(PACK_SUFFIX_RE, "")
-		.trim();
-}
-
-/** Fraction (0-1) of the query's significant words (length > 2) that appear
- *  in a USDA food's description + brand. Ported from the legacy
- *  `scoreMatch`. */
-export function scoreUsdaMatch(query: string, food: UsdaFood): number {
-	const qWords = query
-		.toLowerCase()
-		.split(WHITESPACE_RE)
-		.filter((w) => w.length > 2);
-	if (qWords.length === 0) {
-		return 0;
-	}
-	const haystack =
-		`${food.description} ${food.brandName ?? food.brandOwner ?? ""}`.toLowerCase();
-	const hits = qWords.filter((w) => haystack.includes(w)).length;
-	return hits / qWords.length;
-}
-
-/** Pick the best-scoring USDA food above `minScore`, or null. Ported from
- *  the legacy `bestMatch`. */
-export function bestUsdaMatch(
-	query: string,
-	foods: readonly UsdaFood[],
-	minScore = 0.4,
-): UsdaFood | null {
-	let best: UsdaFood | null = null;
-	let bestScore = 0;
-	for (const food of foods) {
-		const s = scoreUsdaMatch(query, food);
-		if (s > bestScore) {
-			best = food;
-			bestScore = s;
-		}
-	}
-	return bestScore >= minScore ? best : null;
-}
-
-// USDA nutrient ids (FoodData Central's fixed vocabulary).
-const USDA_NUTRIENT_ID = {
-	calories: 1008,
-	carbs: 1005,
-	fat: 1004,
-	fiber: 1079,
-	protein: 1003,
-	sodium: 1093,
-	sugar: 2000,
-} as const;
-
-/** Map a matched USDA food's nutrients to the connector's typed nutrition
- *  shape. USDA branded-food nutrients are per 100g; scaled to per-serving
- *  using the food's own `servingSize`, same as the legacy `mapUSDANutrients`.
- *  A food with no `servingSize` reports per-100g (scale 1) rather than
- *  guessing a serving size. */
-export function mapUsdaNutrients(
-	food: UsdaFood,
-	matchMethod: UsdaMatchMethod,
-): NutritionFacts {
-	const servingG =
-		food.servingSizeUnit?.toLowerCase() === "g" && food.servingSize !== null
-			? food.servingSize
-			: 100;
-	const scale = servingG / 100;
-	const getRaw = (id: number): number | null => {
-		const n = food.foodNutrients.find((fn) => fn.nutrientId === id);
-		return n ? n.value : null;
-	};
-	const get = (id: number): number | null => {
-		const raw = getRaw(id);
-		return raw === null ? null : Math.round(raw * scale * 100) / 100;
-	};
-	return {
-		calories: get(USDA_NUTRIENT_ID.calories),
-		carbsG: get(USDA_NUTRIENT_ID.carbs),
-		confidence: matchMethod === "upc" ? "high" : "medium",
-		fatG: get(USDA_NUTRIENT_ID.fat),
-		fiberG: get(USDA_NUTRIENT_ID.fiber),
-		proteinG: get(USDA_NUTRIENT_ID.protein),
-		servingSize:
-			food.servingSize !== null && food.servingSizeUnit
-				? `${food.servingSize}${food.servingSizeUnit}`
-				: null,
-		servingsPerContainer: null,
-		sodiumMg: get(USDA_NUTRIENT_ID.sodium),
-		source: "usda_fdc",
-		sugarG: get(USDA_NUTRIENT_ID.sugar),
-		upc: food.gtinUpc,
-	};
-}
-
 // ─── Nutrition: Whole Foods product page ──────────────────────────────────
 
 interface JsonLdNode {
 	[key: string]: unknown;
 }
 
-function findInJsonLd<T>(
-	node: unknown,
-	predicate: (n: JsonLdNode) => T | null,
-): T | null {
-	if (!node || typeof node !== "object") {
-		return null;
-	}
+/** Every object in a JSON-LD document, containers (arrays, `@graph`) and
+ *  nested values included, in document order. */
+function jsonLdObjects(node: unknown, out: JsonLdNode[] = []): JsonLdNode[] {
+	if (!node || typeof node !== "object") return out;
 	if (Array.isArray(node)) {
-		for (const item of node) {
-			const found = findInJsonLd(item, predicate);
-			if (found !== null) {
-				return found;
-			}
-		}
-		return null;
+		for (const item of node) jsonLdObjects(item, out);
+		return out;
 	}
-	const obj = node as JsonLdNode;
-	const direct = predicate(obj);
-	if (direct !== null) {
-		return direct;
+	out.push(node as JsonLdNode);
+	for (const value of Object.values(node)) jsonLdObjects(value, out);
+	return out;
+}
+
+function jsonLdTypes(node: JsonLdNode): string[] {
+	const type = node["@type"];
+	return (Array.isArray(type) ? type : [type]).flatMap((entry) =>
+		typeof entry === "string" ? [entry.replace(/^.*[/:]/, "")] : [],
+	);
+}
+
+/** The `nutrition` object a Product node carries itself. */
+function nutritionOf(product: JsonLdNode): JsonLdNode | null {
+	const nutrition = product.nutrition;
+	const candidate = Array.isArray(nutrition) ? nutrition[0] : nutrition;
+	return candidate && typeof candidate === "object"
+		? (candidate as JsonLdNode)
+		: null;
+}
+
+/** Facts from one JSON-LD nutrition object, with the identity of the node that
+ *  carries it (a node's nutrition is bound by that node's own identity). */
+function factsFromNutrition(
+	nutrition: JsonLdNode,
+	product: JsonLdNode | null,
+): NutritionFacts {
+	const mass = (field: string, unit: MassUnit) =>
+		structuredMass(nutrition[field], unit);
+	const calories = structuredEnergy(nutrition.calories);
+	const carbs = mass("carbohydrateContent", "g");
+	const fat = mass("fatContent", "g");
+	const protein = mass("proteinContent", "g");
+	const productCategory = product?.category;
+	const category = Array.isArray(productCategory)
+		? productCategory.filter(
+				(value): value is string => typeof value === "string",
+			)
+		: typeof productCategory === "string" && productCategory
+			? [productCategory]
+			: [];
+	return {
+		...emptyNutritionDetails(),
+		calciumMg: amountOf(mass("calciumContent", "mg")),
+		calories: amountOf(calories),
+		carbsG: amountOf(carbs),
+		category,
+		cholesterolMg: amountOf(mass("cholesterolContent", "mg")),
+		confidence: "high",
+		coreStated: coreStatedOf({ calories, carbs, fat, protein }),
+		fatG: amountOf(fat),
+		fiberG: amountOf(mass("fiberContent", "g")),
+		ingredients:
+			typeof product?.ingredients === "string" ? product.ingredients : null,
+		ironMg: amountOf(mass("ironContent", "mg")),
+		potassiumMg: amountOf(mass("potassiumContent", "mg")),
+		productName: typeof product?.name === "string" ? product.name : null,
+		proteinG: amountOf(protein),
+		saturatedFatG: amountOf(mass("saturatedFatContent", "g")),
+		servingSize:
+			typeof nutrition.servingSize === "string" ? nutrition.servingSize : null,
+		servingsPerContainer: null,
+		sodiumMg: amountOf(mass("sodiumContent", "mg")),
+		source: "wholefoods_structured_data",
+		sugarG: amountOf(mass("sugarContent", "g")),
+		transFatG: amountOf(mass("transFatContent", "g")),
+		upc: product ? normalizeGtin(gtinFieldOf(product)) : null,
+		vitaminDMcg: amountOf(mass("vitaminDContent", "mcg")),
+	};
+}
+
+function gtinFieldOf(product: JsonLdNode): unknown {
+	return (
+		product.gtin12 ??
+		product.gtin13 ??
+		product.gtin14 ??
+		product.gtin ??
+		product.gtin8
+	);
+}
+
+/** Every Product node on a page, recommendations included, each with the
+ *  facts of its own `nutrition`. A page with no Product node but exactly one
+ *  standalone NutritionInformation node yields that nutrition as an unnamed
+ *  node. Choosing which node the page is about is `mainSubject`'s job. */
+function productNodes(documents: unknown[]): ProductNode[] {
+	const objects = documents.flatMap((doc) => jsonLdObjects(doc));
+	const products = objects.filter((node) =>
+		jsonLdTypes(node).includes("Product"),
+	);
+	if (products.length === 0) {
+		const standalone = objects.filter((node) =>
+			jsonLdTypes(node).includes("NutritionInformation"),
+		);
+		const only = standalone.length === 1 ? standalone[0] : undefined;
+		return only
+			? [
+					{
+						name: null,
+						urls: [],
+						gtin: null,
+						facts: factsFromNutrition(only, null),
+					},
+				]
+			: [];
 	}
-	for (const value of Object.values(obj)) {
-		if (value && typeof value === "object") {
-			const found = findInJsonLd(value, predicate);
-			if (found !== null) {
-				return found;
-			}
-		}
-	}
-	return null;
+	return products.map((product) => {
+		const nutrition = nutritionOf(product);
+		return {
+			name: typeof product.name === "string" ? product.name : null,
+			urls: [product.url, product["@id"]].filter(
+				(value): value is string => typeof value === "string",
+			),
+			gtin: gtinFieldOf(product),
+			facts: nutrition ? factsFromNutrition(nutrition, product) : null,
+		};
+	});
 }
 
 function parseJsonLdScripts(document: Document): unknown[] {
@@ -747,102 +1068,380 @@ function parseJsonLdScripts(document: Document): unknown[] {
 	return parsed;
 }
 
-function numOrNull(v: unknown): number | null {
-	if (v === null || v === undefined) {
-		return null;
+/** Headings that name a part of a product page, not a product. */
+const SECTION_HEADING_RE =
+	/^(?:nutrition(?:\s+(?:facts|information|info))?|ingredients?|allergens?|contains|details|product (?:details|specifications)|customer reviews|customers also viewed|description|about(?: this item)?|highlights)\s*:?$/i;
+const PRODUCT_HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
+const PANEL_LABEL_SELECTOR = "h2, h3, h4, span, div";
+
+/** The rendered elements that label a Nutrition Facts panel: each is the
+ *  innermost element whose text holds the label, so two panels on one page
+ *  are two labels. */
+function panelLabelsOf(document: Document): Element[] {
+	const labelling = renderedAll(document, PANEL_LABEL_SELECTOR).filter((el) =>
+		NUTRITION_HEADING_RE.test(renderedTextOf(el)),
+	);
+	return labelling.filter(
+		(el) => !labelling.some((other) => other !== el && el.contains(other)),
+	);
+}
+
+/** The panel's text from its label to its structural end. */
+function panelTextFrom(container: Element): string {
+	const text = renderedTextOf(container);
+	const headingAt = text.search(NUTRITION_HEADING_RE);
+	return cutPanelEnd(headingAt === -1 ? text : text.slice(headingAt));
+}
+
+/** The element that holds a label's panel: the label's nearest block, widened
+ *  until it holds a row, but never to an element that holds another panel's
+ *  label. */
+function panelContainer(label: Element, labels: readonly Element[]): Element {
+	const first =
+		label.closest("div, section, article") ?? label.parentElement ?? label;
+	let container = first;
+	while (
+		readCalories(panelTextFrom(container)) === null &&
+		readPanelRows(panelTextFrom(container)).size === 0
+	) {
+		const parent = container.parentElement;
+		if (
+			!parent ||
+			parent.tagName.toUpperCase() === "BODY" ||
+			labels.some((other) => other !== label && parent.contains(other))
+		) {
+			return first;
+		}
+		container = parent;
 	}
-	const n =
-		typeof v === "number"
-			? v
-			: Number.parseFloat(String(v).replace(/[^\d.]/g, ""));
-	return Number.isFinite(n) ? n : null;
+	return container;
+}
+
+/** Where the page shows a panel or a detail: the smallest rendered element
+ *  that holds it and a product heading decides (see `RenderedPanel.scope`).
+ *  The last product heading before the label owns it, including when product
+ *  sections are siblings rather than wrapped in separate containers. */
+function scopeOf(
+	container: Element,
+	label: Element,
+	mainHeading: Element | null,
+): RenderedPanel["scope"] {
+	for (let node: Element | null = container; node; node = node.parentElement) {
+		// linkedom's compareDocumentPosition misorders some nested siblings.
+		// Read document order directly, stopping before this label.
+		const elements = [node, ...node.querySelectorAll("*")];
+		const beforeLabel = elements.slice(0, elements.indexOf(label));
+		const headings = beforeLabel.filter((heading) => {
+			if (!heading.matches(PRODUCT_HEADING_SELECTOR) || !isRendered(heading))
+				return false;
+			const section = heading.closest("aside, article, section");
+			if (heading !== mainHeading && section && !section.contains(label))
+				return false;
+			const text = renderedTextOf(heading).trim();
+			return (
+				text !== "" &&
+				!NUTRITION_HEADING_RE.test(text) &&
+				!SECTION_HEADING_RE.test(text)
+			);
+		});
+		if (headings.length > 0) {
+			return headings.at(-1) === mainHeading ? "main_heading" : "other_heading";
+		}
+	}
+	return "no_heading";
+}
+
+/** Every rendered "Nutrition Facts" panel that states at least one row, as
+ *  the rows it states (a partial panel stays partial), with where the page
+ *  shows it. A panel has no identity of its own; `mainSubject` decides whose
+ *  it is from its scope. */
+function renderedPanels(
+	document: Document,
+	mainHeading: Element | null,
+): RenderedPanel[] {
+	const labels = panelLabelsOf(document);
+	// One panel per container, read from its first label.
+	const containers = new Map<Element, Element>();
+	for (const label of labels) {
+		const container = panelContainer(label, labels);
+		if (!containers.has(container)) containers.set(container, label);
+	}
+	return [...containers].flatMap(([container, label]) => {
+		const allText = panelTextFrom(container);
+		const calories = readCalories(allText);
+		const rows = readPanelRows(allText);
+		if (calories === null && rows.size === 0) return [];
+		const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
+		const servingsMatch = SERVINGS_PER_CONTAINER_RE.exec(allText);
+		const servingsPerContainerRaw = servingsMatch?.[1] ?? servingsMatch?.[2];
+		const nutrient = (key: string): number | null =>
+			amountOf(rows.get(key) ?? null);
+		const facts: NutritionFacts = {
+			...emptyNutritionDetails(),
+			addedSugarG: nutrient("Includes Added Sugars"),
+			// Allergens, ingredients, badges and categories are observed on
+			// their own, with their own scope; binding adds the ones that are
+			// this product's.
+			calciumMg: nutrient("Calcium"),
+			calories,
+			carbsG: nutrient("Total Carbohydrate"),
+			cholesterolMg: nutrient("Cholesterol"),
+			confidence: "high",
+			coreStated: coreStatedOf({
+				calories:
+					calories === null ? null : { bound: "exact", amount: calories },
+				carbs: rows.get("Total Carbohydrate") ?? null,
+				fat: rows.get("Total Fat") ?? null,
+				protein: rows.get("Protein") ?? null,
+			}),
+			fatG: nutrient("Total Fat"),
+			fiberG: nutrient("Dietary Fiber"),
+			ironMg: nutrient("Iron"),
+			potassiumMg: nutrient("Potassium"),
+			proteinG: nutrient("Protein"),
+			rawNutritionText: allText.slice(0, 1000),
+			saturatedFatG: nutrient("Saturated Fat"),
+			servingSize: servingSizeMatch?.[1]?.trim() ?? null,
+			servingsPerContainer: servingsPerContainerRaw
+				? Number.parseFloat(servingsPerContainerRaw)
+				: null,
+			sodiumMg: nutrient("Sodium"),
+			source: "wholefoods_product_page",
+			sugarG: nutrient("Total Sugars"),
+			transFatG: nutrient("Trans Fat"),
+			upc: null,
+			vitaminDMcg: nutrient("Vitamin D"),
+			productName: null,
+		};
+		return [{ facts, scope: scopeOf(container, label, mainHeading) }];
+	});
+}
+
+/** Section labels whose following block states a product detail. */
+const DETAIL_SECTIONS: readonly (readonly [ScopedDetail["field"], RegExp])[] = [
+	["allergens", /^(?:allergens?|contains)\b/i],
+	["ingredients", /^ingredients:?$/i],
+];
+const BADGE_SELECTOR =
+	'[class*="badge"], [class*="diet"], [data-testid*="badge"]';
+const BADGE_RE = /organic|gluten.?free|vegan|non.?gmo|kosher|paleo|keto/i;
+
+/** Every rendered allergen, ingredient and badge statement on the page, each
+ *  with where the page shows it. Like a panel, a detail has no identity of its
+ *  own: `mainSubject` releases only the ones scoped to the bound product. */
+function scopedDetails(
+	document: Document,
+	mainHeading: Element | null,
+): ScopedDetail[] {
+	const fieldOf = (el: Element) =>
+		DETAIL_SECTIONS.find(([, re]) => re.test(renderedTextOf(el).trim()))?.[0];
+	const labelled = renderedAll(document, PANEL_LABEL_SELECTOR).filter(fieldOf);
+	// The innermost label only: a wrapper whose text starts with the label is
+	// not the label.
+	const labels = labelled.filter(
+		(el) => !labelled.some((other) => other !== el && el.contains(other)),
+	);
+	const sections = labels.flatMap((el) => {
+		const label = renderedTextOf(el).trim();
+		const field = fieldOf(el);
+		if (!field) return [];
+		const text = renderedTextOf(
+			el.nextElementSibling ??
+				el.parentElement?.querySelector("p, div:last-child"),
+		).trim();
+		return text && text !== label
+			? [{ field, text, scope: scopeOf(el, el, mainHeading) }]
+			: [];
+	});
+	const badges = renderedAll(document, BADGE_SELECTOR).flatMap((el) => {
+		const text = renderedTextOf(el).trim();
+		return BADGE_RE.test(text)
+			? [
+					{
+						field: "highlight" as const,
+						text,
+						scope: scopeOf(el, el, mainHeading),
+					},
+				]
+			: [];
+	});
+	return [...sections, ...badges];
+}
+
+/** The page's breadcrumb categories: where the site files the page, not a
+ *  statement inside it. */
+function breadcrumbCategories(document: Document): string[] {
+	return renderedAll(
+		document,
+		'nav[aria-label*="breadcrumb" i] a, .breadcrumb a',
+	).flatMap((element) => {
+		const label = renderedTextOf(element).trim();
+		return label && !/home|whole foods/i.test(label) ? [label] : [];
+	});
 }
 
 /**
- * Parse a Whole Foods product page for nutrition facts. Tries JSON-LD
- * `NutritionInformation` structured data first (high confidence, machine
- * readable); falls back to a text-pattern parse of the rendered
- * "Nutrition Facts" panel (medium-to-high confidence — page copy, not
- * structured data). Returns null when neither surface has nutrition
- * evidence — the caller decides whether to fall back to USDA.
+ * Read a Whole Foods product page into an observation: the canonical URL, the
+ * rendered heading, every Product node (each with the facts of its own
+ * `nutrition`), every rendered panel and detail with its scope, and the
+ * breadcrumb categories. It does not decide what the page is about;
+ * `mainSubject` and `bindProduct` do.
  */
-export function parseWholeFoodsProductPageDom(
+export function readWholeFoodsProductPage(
+	html: string,
+): WholeFoodsProductObservation {
+	const { document } = parseHTML(html);
+	const selectors = IDENTITY_SELECTORS.wholeFoods;
+	const heading = renderedFirst(document, selectors.heading);
+	return {
+		canonicalUrl:
+			document.querySelector(selectors.canonical)?.getAttribute("href") ?? null,
+		h1: renderedTextOf(heading).trim() || null,
+		products: productNodes(parseJsonLdScripts(document)),
+		panels: renderedPanels(document, heading),
+		details: scopedDetails(document, heading),
+		categories: breadcrumbCategories(document),
+	};
+}
+
+/** The text of a panel container without its ingredient and important-
+ *  information sections. */
+function panelText(container: Element | null): string {
+	if (!container) return "";
+	const copy = container.cloneNode(true) as Element;
+	for (const section of copy.querySelectorAll(
+		'#ingredients_feature_div, [data-component="ingredients"], #importantInformation, #important-information',
+	)) {
+		section.remove();
+	}
+	return textOf(copy);
+}
+
+/** Port of the frozen legacy data connector's Amazon product-page nutrition
+ *  parser. Callers supply captured HTML in tests; this function has no I/O.
+ *  Null when the page states no nutrition row and no UPC. A panel without a
+ *  calories row is still returned, as the rows it states. */
+export function parseAmazonProductNutritionDom(
 	html: string,
 ): NutritionFacts | null {
-	const { document } = parseHTML(html);
-	const ldNodes = parseJsonLdScripts(document);
-	const ldNutrition = findInJsonLd(ldNodes, (n) => {
-		if (n["@type"] === "NutritionInformation" || n.nutrition) {
-			return (n.nutrition ?? n) as JsonLdNode;
-		}
-		return null;
-	});
-	if (ldNutrition) {
-		return {
-			calories: numOrNull(ldNutrition.calories),
-			carbsG: numOrNull(ldNutrition.carbohydrateContent),
-			confidence: "high",
-			fatG: numOrNull(ldNutrition.fatContent),
-			fiberG: numOrNull(ldNutrition.fiberContent),
-			proteinG: numOrNull(ldNutrition.proteinContent),
-			servingSize:
-				typeof ldNutrition.servingSize === "string"
-					? ldNutrition.servingSize
-					: null,
-			servingsPerContainer: null,
-			sodiumMg: numOrNull(ldNutrition.sodiumContent),
-			source: "wholefoods_product_page",
-			sugarG: numOrNull(ldNutrition.sugarContent),
-			upc: null,
-		};
-	}
+	const read = readAmazonNutrition(parseHTML(html).document);
+	return read.statesRows || read.facts.upc ? read.facts : null;
+}
 
-	const headings = [...document.querySelectorAll("h2, h3, h4, span, div")];
-	const nutritionHeading = headings.find((el) =>
-		NUTRITION_HEADING_RE.test(textOf(el).trim()),
+/** The Amazon panel as the page states it, and whether it states any row. */
+function readAmazonNutrition(document: Document): {
+	facts: NutritionFacts;
+	statesRows: boolean;
+} {
+	const bodyText = textOf(document.body);
+	const table = document.querySelector(
+		'#nic-nutrition-facts, #nutritionFacts, #nutritionalInformation_feature_div, [data-component="nutritionFacts"]',
 	);
-	if (!nutritionHeading) {
-		return null;
-	}
-	const container =
-		nutritionHeading.closest("div, section, article") ??
-		nutritionHeading.parentElement;
-	const allText = container ? textOf(container) : "";
-	const caloriesMatch = CALORIES_RE.exec(allText);
-	if (!caloriesMatch) {
-		return null;
-	}
-	const nutrients = new Map<string, number>();
-	const nutrientPattern = new RegExp(NUTRIENT_PATTERN_SOURCE, "gi");
-	let m: RegExpExecArray | null = nutrientPattern.exec(allText);
-	while (m) {
-		let key = m[1] ?? "";
-		if (/^sugars$/i.test(key)) {
-			key = "Total Sugars";
-		}
-		if (!nutrients.has(key) && m[2]) {
-			nutrients.set(key, Number.parseFloat(m[2]));
-		}
-		m = nutrientPattern.exec(allText);
-	}
-	const servingSizeMatch = SERVING_SIZE_RE.exec(allText);
-	const servingsMatch = SERVINGS_PER_CONTAINER_RE.exec(allText);
-	const servingsPerContainerRaw = servingsMatch?.[1] ?? servingsMatch?.[2];
+	const important = document.querySelector(
+		"#importantInformation, #important-information",
+	);
+	// #nic-nutrition-facts holds the nutrient rows only; Calories and the
+	// serving size sit in the enclosing expander, so that is the panel's scope
+	// (the legacy script widens it the same way).
+	const panel =
+		table?.closest('.a-expander-content, [class*="nicSection"]') ?? table;
+	// Rows come from the nutrient table itself; the enclosing expander can
+	// hold ingredient prose before or after it. Calories and the serving size
+	// are in the expander when the table has none.
+	const rowsText = cutPanelEnd(panelText(table ?? important));
+	const allText = cutPanelEnd(panelText(panel ?? important));
+	const calories = readCalories(rowsText) ?? readCalories(allText);
+	const upcMatch = /(?:UPC|ASIN|GTIN)[:\s]*([\d-]{8,14})/i.exec(
+		textOf(
+			document.querySelector(
+				"#detailBullets_feature_div, #prodDetails, .content",
+			),
+		),
+	);
+	const amazonUpc = normalizeGtin(upcMatch?.[1]);
+	const rows = readPanelRows(rowsText);
+	const get = (key: string): number | null => amountOf(rows.get(key) ?? null);
+	const ingredientsNode = document.querySelector(
+		'#ingredients_feature_div, [data-component="ingredients"]',
+	);
+	const ingredients = ingredientsNode
+		? textOf(ingredientsNode)
+				.replace(/^Ingredients[:\s]*/i, "")
+				.trim() || null
+		: null;
+	const allergenMatch =
+		/Contains[:\s]*([^.\n]+(?:wheat|milk|soy|eggs?|fish|shellfish|tree nuts?|peanuts?|sesame)[^.\n]*)/i.exec(
+			bodyText,
+		);
+	const serving = /Serving size[:\s]*([^\n]+?)(?=\s*Calories|\n|$)/i
+		.exec(allText)?.[1]
+		?.trim();
+	const servings = /(\d+\.?\d*)\s*servings?\s*per/i.exec(allText)?.[1];
+	const facts: NutritionFacts = {
+		...emptyNutritionDetails(),
+		addedSugarG: get("Includes Added Sugars"),
+		allergens: allergenMatch?.[1]?.trim() ?? null,
+		calciumMg: get("Calcium"),
+		calories,
+		carbsG: get("Total Carbohydrate"),
+		cholesterolMg: get("Cholesterol"),
+		confidence: "medium",
+		coreStated: coreStatedOf({
+			calories: calories === null ? null : { bound: "exact", amount: calories },
+			carbs: rows.get("Total Carbohydrate") ?? null,
+			fat: rows.get("Total Fat") ?? null,
+			protein: rows.get("Protein") ?? null,
+		}),
+		fatG: get("Total Fat"),
+		fiberG: get("Dietary Fiber"),
+		ingredients,
+		ironMg: get("Iron"),
+		potassiumMg: get("Potassium"),
+		proteinG: get("Protein"),
+		rawNutritionText: allText.slice(0, 1000),
+		saturatedFatG: get("Saturated Fat"),
+		servingSize: serving ?? null,
+		servingsPerContainer: servings ? Number.parseFloat(servings) : null,
+		sodiumMg: get("Sodium"),
+		source: "amazon_product_page",
+		sugarG: get("Total Sugars"),
+		transFatG: get("Trans Fat"),
+		upc: amazonUpc,
+		vitaminDMcg: get("Vitamin D"),
+	};
+	return { facts, statesRows: calories !== null || rows.size > 0 };
+}
+
+/** What an Amazon /dp page says about which ASIN it is (the positions in
+ *  `IDENTITY_SELECTORS.amazon`), the barcode and panel it shows (each on its
+ *  own: a barcode with no panel, or a panel without calories, is still what
+ *  the page says), and whether it shows a product title. Deciding whether the
+ *  page is the requested product is `bindProduct`'s job. */
+export function readAmazonProductPage(
+	html: string,
+	finalUrl: string,
+): {
+	observation: AmazonProductObservation;
+	hasProductTitle: boolean;
+} {
+	const { document } = parseHTML(html);
+	const selectors = IDENTITY_SELECTORS.amazon;
+	const nutrition = readAmazonNutrition(document);
 	return {
-		calories: Number.parseInt(caloriesMatch[1] ?? "", 10),
-		carbsG: nutrients.get("Total Carbohydrate") ?? null,
-		confidence: "high",
-		fatG: nutrients.get("Total Fat") ?? null,
-		fiberG: nutrients.get("Dietary Fiber") ?? null,
-		proteinG: nutrients.get("Protein") ?? null,
-		servingSize: servingSizeMatch?.[1]?.trim() ?? null,
-		servingsPerContainer: servingsPerContainerRaw
-			? Number.parseFloat(servingsPerContainerRaw)
-			: null,
-		sodiumMg: nutrients.get("Sodium") ?? null,
-		source: "wholefoods_product_page",
-		sugarG: nutrients.get("Total Sugars") ?? null,
-		upc: null,
+		observation: {
+			finalUrl,
+			canonical:
+				document.querySelector(selectors.canonical)?.getAttribute("href") ??
+				null,
+			input:
+				document.querySelector(selectors.input)?.getAttribute("value") ?? null,
+			dataAsin:
+				document.querySelector(selectors.dataAsin)?.getAttribute("data-asin") ??
+				null,
+			gtin: nutrition.facts.upc,
+			panel: nutrition.statesRows ? nutrition.facts : null,
+		},
+		hasProductTitle: document.querySelector(selectors.title) !== null,
 	};
 }
 
@@ -850,9 +1449,70 @@ export function parseWholeFoodsProductPageDom(
  *  wholefoodsmarket.com search-results page for `productName`. Returns null
  *  when the results page has no recognizable product tile. */
 export function parseWholeFoodsSearchResultDom(html: string): string | null {
+	return parseWholeFoodsSearchResultDoms(html)[0] ?? null;
+}
+
+/** A search page's own "no results" message. */
+const SEARCH_EMPTY_RE =
+	/\b(?:0|no)\s+(?:products|results)\b|no matching products/i;
+
+/** What a Whole Foods search page shows: its rendered result links, and
+ *  whether it renders its own empty-state message. Text in a script, a
+ *  template or a hidden element is not shown, so it is neither. */
+export function readWholeFoodsSearchPage(html: string): {
+	urls: string[];
+	showsEmptyState: boolean;
+} {
 	const { document } = parseHTML(html);
-	const link = document.querySelector<HTMLAnchorElement>(
-		'a[href*="/product/"], a[href*="/products/"], [data-testid="product-tile"] a, .w-pie--product-tile a',
+	return {
+		urls: searchResultLinks(document),
+		showsEmptyState: renderedAll(document, "body, body *").some((el) =>
+			SEARCH_EMPTY_RE.test(
+				[...el.childNodes]
+					.filter((node) => node.nodeType === 3)
+					.map((node) => node.textContent ?? "")
+					.join(" "),
+			),
+		),
+	};
+}
+
+/** Return product links in document order so callers can verify each page's
+ * identity and continue past related products. */
+export function parseWholeFoodsSearchResultDoms(html: string): string[] {
+	return searchResultLinks(parseHTML(html).document);
+}
+
+function searchResultLinks(document: Document): string[] {
+	// Product tiles in the results grid; a link elsewhere on the page (the
+	// header, a recommendations carousel) is not a result for this search.
+	const grid = document.querySelectorAll<HTMLAnchorElement>(
+		'[data-testid="product-tile"] a, .w-pie--product-tile a',
 	);
-	return link?.getAttribute("href") ?? null;
+	const links =
+		grid.length > 0
+			? grid
+			: document.querySelectorAll<HTMLAnchorElement>(
+					'main a[href*="/product/"], main a[href*="/products/"], a[href*="/product/"], a[href*="/products/"]',
+				);
+	const seen = new Set<string>();
+	return [...links].flatMap((link) => {
+		const href = link.getAttribute("href");
+		if (
+			!href ||
+			link.closest("header, footer, nav, aside") ||
+			!isRendered(link)
+		) {
+			return [];
+		}
+		// A link off Whole Foods is not a read of this product; it is dropped
+		// here. One tile is one resolved path: relative and absolute spellings,
+		// or tracking parameters, are visited once.
+		const url = resolveWholeFoodsUrl(href);
+		if (!url) return [];
+		const path = url.pathname.replace(/\/+$/, "");
+		if (seen.has(path)) return [];
+		seen.add(path);
+		return [url.href];
+	});
 }
