@@ -136,7 +136,12 @@ test("profile: numeric account IDs remain source identities, while malformed ide
 		"x".repeat(201),
 	]) {
 		const run = fixture({ dsid, fullName: "Test User" });
-		await assert.rejects(collectAllStreams(run.ctx), /icloud_auth_failed/);
+		// A signed-in 200 response with a malformed id is an unrecognized
+		// response, not a rejected session.
+		await assert.rejects(
+			collectAllStreams(run.ctx),
+			/icloud_invalid_config_response/,
+		);
 		assert.equal(run.harness.emitted.length, 0);
 		assert.equal(run.harness.protocolMessages.length, 0);
 	}
