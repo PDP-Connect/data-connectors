@@ -124,7 +124,6 @@ import type {
 	ParseMeta,
 	StatementRecord,
 	TransactionsPriorState,
-	TransactionsStreamCursor,
 } from "./types.ts";
 
 // Explicit, literal-per-branch mapping from the statement-PDF download
@@ -2850,9 +2849,33 @@ export async function emitTransactionsDetailCoverage(
 	});
 }
 
+export interface PendingExportWindow {
+	since: string;
+	until: string;
+	unknown_original?: true;
+}
+function pendingExportWindow(value: unknown): PendingExportWindow | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const row = value as Record<string, unknown>;
+	const isDay = (day: unknown): day is string =>
+		typeof day === "string" &&
+		/^\d{4}-\d{2}-\d{2}$/.test(day) &&
+		Number.isFinite(Date.parse(day)) &&
+		new Date(day).toISOString().slice(0, 10) === day;
+	if (!isDay(row.since) || !isDay(row.until) || row.since > row.until)
+		return undefined;
+	return {
+		since: row.since,
+		until: row.until,
+		...(row.unknown_original === true
+			? { unknown_original: true as const }
+			: {}),
+	};
+}
 export interface AccountTransactionResult {
 	last_date: string | null;
 	outcome: AccountTransactionOutcome;
+	pending_export?: PendingExportWindow;
 }
 
 /**
@@ -2908,7 +2931,7 @@ export function classifyCsvTransactionResult(
 	};
 }
 
-async function processAccountTransactions(
+export async function processAccountTransactions(
 	deps: EmitDeps,
 	context: BrowserContext,
 	page: Page,
@@ -2921,15 +2944,34 @@ async function processAccountTransactions(
 	accountOrdinal: number,
 	accountTotal: number,
 	fingerprintCursor?: FingerprintCursor,
+	pendingValue?: unknown,
 ): Promise<AccountTransactionResult | null> {
 	const accountId = a.account_id_raw || a.last_four || "unknown";
-	const desiredSince = priorLastDate
+	const currentSince = priorLastDate
 		? new Date(Date.parse(priorLastDate) - INCREMENTAL_OVERLAP_MS)
 				.toISOString()
 				.slice(0, 10)
 		: (sinceDateCfg ?? seventeenMonthsAgo);
+	const pending = pendingExportWindow(pendingValue);
 	const todayIso = new Date().toISOString().slice(0, 10);
-	const candidateStarts = buildCandidateStarts(desiredSince);
+	const desiredSince =
+		pending && pending.since < currentSince ? pending.since : currentSince;
+	const untilDate =
+		pending && pending.until > todayIso ? pending.until : todayIso;
+	// Neither today's configuration nor a watermark proves a legacy gap's original interval.
+	const unknownOriginal =
+		pending?.unknown_original === true ||
+		(pendingValue !== undefined && !pending) ||
+		(!pending && deps.servedAccountTransactionGaps?.has(accountId) === true);
+	const continuation: PendingExportWindow = {
+		since: desiredSince,
+		until: untilDate,
+		...(unknownOriginal ? { unknown_original: true } : {}),
+	};
+	// A narrowed explicit request never authorizes fetching the older retained debt.
+	const requestedSince =
+		sinceDateCfg && sinceDateCfg > desiredSince ? sinceDateCfg : desiredSince;
+	const candidateStarts = buildCandidateStarts(requestedSince);
 
 	const { csvPath, exportEmpty, usedSince, lastDiag } = await tryExportLadder(
 		deps,
@@ -2940,7 +2982,7 @@ async function processAccountTransactions(
 		accountOrdinal,
 		accountTotal,
 		candidateStarts,
-		todayIso,
+		untilDate,
 		streamState,
 		() => {
 			streamState.sessionDeadMidRun = true;
@@ -2949,7 +2991,20 @@ async function processAccountTransactions(
 	if (streamState.sessionDeadMidRun) {
 		return null;
 	}
+	const incompleteWindow = usedSince !== null && usedSince > desiredSince;
+	const uncoveredWindow: AccountTransactionResult = {
+		last_date: priorLastDate,
+		pending_export: continuation,
+		outcome: {
+			accountId,
+			kind: "gap",
+			reason: "temporary_unavailable",
+			errorClass: "export_window_incomplete",
+		},
+	};
 	if (!csvPath) {
+		if (exportEmpty && (incompleteWindow || unknownOriginal))
+			return uncoveredWindow;
 		if (exportEmpty) {
 			return {
 				last_date: priorLastDate || usedSince || null,
@@ -2963,6 +3018,7 @@ async function processAccountTransactions(
 				: "export_no_download";
 		return {
 			last_date: priorLastDate,
+			pending_export: continuation,
 			outcome: {
 				accountId,
 				kind: "gap",
@@ -2980,15 +3036,21 @@ async function processAccountTransactions(
 		accountTotal,
 		fingerprintCursor,
 	);
-	return classifyCsvTransactionResult(
+	// Keep useful suffix records, but neither advance the original watermark
+	// nor acknowledge a served account gap until the requested window succeeds.
+	if (incompleteWindow || unknownOriginal) return uncoveredWindow;
+	const result = classifyCsvTransactionResult(
 		accountId,
 		priorLastDate,
 		usedSince,
 		csvResult,
 	);
+	return result.outcome.kind === "gap"
+		? { ...result, pending_export: continuation }
+		: result;
 }
 
-async function runTransactionsStream(
+export async function runTransactionsStream(
 	deps: EmitDeps,
 	context: BrowserContext,
 	page: Page,
@@ -2998,7 +3060,7 @@ async function runTransactionsStream(
 	requested: BrowserCollectContext["requested"],
 	streamState: TransactionsStreamState,
 	fingerprintCursor?: FingerprintCursor,
-): Promise<TransactionsStreamCursor> {
+): Promise<Record<string, unknown>> {
 	const stream = requested.get("transactions");
 	const rawSince = stream?.time_range?.since;
 	const parsedSince = rawSince ? Date.parse(rawSince) : Number.NaN;
@@ -3011,7 +3073,7 @@ async function runTransactionsStream(
 
 	const priorStateForTxns =
 		(state.transactions as TransactionsPriorState | undefined) ?? {};
-	const transactionsCursor: TransactionsStreamCursor = { ...priorStateForTxns };
+	const transactionsCursor: Record<string, unknown> = { ...priorStateForTxns };
 
 	const transactionAccounts = accounts.filter((a) =>
 		TRANSACTION_ACCOUNT_TYPE_RE.test(a.account_type),
@@ -3030,8 +3092,10 @@ async function runTransactionsStream(
 			});
 			break;
 		}
-		const accountKey = a.account_id_raw || "";
-		const perAccState = priorStateForTxns[accountKey];
+		const accountKey = a.account_id_raw || a.last_four || "unknown";
+		const perAccState = priorStateForTxns[accountKey] as
+			| { last_date?: string | null; pending_export?: unknown }
+			| undefined;
 		const priorLastDate = perAccState?.last_date ?? null;
 		const result = await processAccountTransactions(
 			deps,
@@ -3046,6 +3110,7 @@ async function runTransactionsStream(
 			i + 1,
 			transactionAccounts.length,
 			fingerprintCursor,
+			perAccState?.pending_export,
 		);
 		if (!result) {
 			// Session died mid-attempt: the account was never reached, so it is
@@ -3057,14 +3122,20 @@ async function runTransactionsStream(
 		if (result.outcome.kind === "gap") {
 			await deps.emit(buildAccountTransactionDetailGap(result.outcome));
 		}
-		if (result.last_date === null) {
-			// No cursor advance to record this account (e.g. a gap with no
-			// prior watermark) — preserve prior behavior of leaving the cursor
-			// untouched rather than writing a null watermark.
+		// Records are emitted; acknowledge recovery before STATE can discard its interval.
+		await recoverServedAccountTransactionGaps(deps, [result.outcome]);
+		if (
+			result.last_date === null &&
+			!result.pending_export &&
+			perAccState?.pending_export === undefined
+		)
 			continue;
-		}
-		transactionsCursor[accountKey || a.last_four || "unknown"] = {
+		// Persist unresolved windows even without a watermark; replacing clears settled metadata.
+		transactionsCursor[accountKey] = {
 			last_date: result.last_date,
+			...(result.pending_export
+				? { pending_export: result.pending_export }
+				: {}),
 		};
 		await deps.emit({
 			type: "STATE",
@@ -3079,7 +3150,6 @@ async function runTransactionsStream(
 	// one means every transaction-eligible account was attempted (including
 	// the zero-eligible-accounts case, where the loop body never ran at all),
 	// so the denominator this run enumerated is genuinely complete.
-	await recoverServedAccountTransactionGaps(deps, outcomes);
 	await emitTransactionsDetailCoverage(
 		deps,
 		outcomes,
@@ -3095,7 +3165,7 @@ async function runTransactionsStream(
  *  `readPriorTransactionFingerprints`. NOT pruned: transactions is a
  *  partial scan (see emitCsvTransactions). */
 function withTransactionFingerprints(
-	cursor: TransactionsStreamCursor,
+	cursor: Record<string, unknown>,
 	fingerprintCursor?: FingerprintCursor,
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = { ...cursor };
@@ -4191,7 +4261,7 @@ export async function collectUsaa(ctx: BrowserCollectContext): Promise<void> {
 	// the advanced per-account watermark cursor so the final transactions
 	// STATE write below preserves the incremental `last_date` progress
 	// (not just the fingerprint map).
-	let transactionsCursorAfterCsv: TransactionsStreamCursor =
+	let transactionsCursorAfterCsv: Record<string, unknown> =
 		(state.transactions as TransactionsPriorState | undefined) ?? {};
 	if (requested.has("transactions")) {
 		transactionsCursorAfterCsv = await runTransactionsStream(
