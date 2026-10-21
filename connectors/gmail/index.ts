@@ -1362,10 +1362,11 @@ export async function processMessage(
 			outcome,
 			sameOutcome(deps, { kind: "terminal", reason: "missing_message_id" }),
 		);
-		// With no record key the parts cannot be stored, but a message with no
-		// attachment parts leaves nothing unenumerated for that stream.
+		// With no record key the parts cannot be stored. Only an actual
+		// BODYSTRUCTURE with no attachment parts proves nothing is lost.
 		if (
 			deps.requested.has("attachments") &&
+			msg.bodyStructure &&
 			decodeBodystructureForAttachments(
 				msg.bodyStructure,
 				"unidentified",
@@ -1480,7 +1481,14 @@ export async function processMessage(
 				: { kind: "covered" };
 	}
 
-	if (deps.requested.has("attachments")) {
+	if (deps.requested.has("attachments") && !msg.bodyStructure) {
+		// No BODYSTRUCTURE is not an empty part list: the parts are unknown,
+		// so the UID stays owed and a later run reads it again.
+		outcome.attachments = {
+			kind: "failed",
+			failure: "bodystructure_unavailable",
+		};
+	} else if (deps.requested.has("attachments")) {
 		const owed = await emitAttachmentRecords(deps, msg, attachments);
 		outcome.attachments =
 			owed === null ? { kind: "covered" } : { kind: "failed", failure: owed };

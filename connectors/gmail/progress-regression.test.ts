@@ -1200,3 +1200,44 @@ test("attachments: a message whose parts cannot be enumerated blocks the invento
 		"a message without parts leaves nothing unenumerated",
 	);
 });
+
+test("attachments: a missing BODYSTRUCTURE is not an empty part list; the UID stays owed until it is read", async () => {
+	const full = attachmentMessage(10);
+	const { bodyStructure: _structure, ...noStructure } = full;
+	const rows = [noStructure as FetchMessageObject];
+	const m = mailbox(rows, 101);
+	const first = await run(m, {}, ["messages", "attachments"]);
+	assert.equal(
+		coverageOf(first, "attachments"),
+		undefined,
+		"no claim without enumeration",
+	);
+	assert.ok(
+		progressOf(first).debt.some(
+			(d) => d.uid === 10 && d.streams.includes("attachments"),
+		),
+		"the UID is owed for attachments",
+	);
+	// The structure is returned on the next run: the retry enumerates the part.
+	rows[0] = full;
+	const second = await run(m, first.state, ["messages", "attachments"]);
+	assert.ok(
+		second.protocol.some(
+			(e) =>
+				e.type === "DETAIL_GAP" &&
+				e.stream === "attachments" &&
+				e.record_key === "a:2",
+		),
+		"the part is enumerated on the retry",
+	);
+	// Control: an ID-less message with no BODYSTRUCTURE cannot be enumerated
+	// either, and never will be, so it is a durable shortfall.
+	const { emailId: _id, bodyStructure: _s2, ...bare } = full;
+	const c = mailbox([bare as FetchMessageObject], 101);
+	let state: Record<string, unknown> = {};
+	for (let i = 0; i < 2; i += 1) {
+		const r = await run(c, state, ["messages", "attachments"]);
+		state = r.state;
+		assert.equal(coverageOf(r, "attachments"), undefined);
+	}
+});

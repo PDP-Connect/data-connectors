@@ -2838,6 +2838,7 @@ test("runAllMailPasses: attachments-only scope keeps the bounded message lane an
 				yield makeMsg({
 					uid: range === "1201:1300" ? 1250 : 1,
 					emailId: "attachment-only-message",
+					bodyStructure: { type: "text/plain", part: "1" },
 				});
 			},
 		};
@@ -4549,11 +4550,10 @@ test("processMessage: missing X-GM-MSGID is terminal and emits nothing", async (
 	// satisfy exactOptionalPropertyTypes).
 	const { emailId: _emailId, ...rest } = makeMsg();
 	const processed = await processMessage(deps, rest);
-	// This message has no attachment parts, so attachments owe nothing.
-	assert.deepEqual(processed, {
-		messages: { kind: "terminal", reason: "missing_message_id" },
-		attachments: { kind: "covered" },
-	});
+	// No X-GM-MSGID and no BODYSTRUCTURE: the parts can never be enumerated,
+	// so attachments are terminal too (a durable shortfall in the ledger).
+	const terminal = { kind: "terminal", reason: "missing_message_id" };
+	assert.deepEqual(processed, { messages: terminal, attachments: terminal });
 	assert.equal(emitted.length, 0);
 });
 
@@ -5033,6 +5033,7 @@ test("emitMessagesPass: progress includes count and total when metadata count is
 			emailId: `gmmsgid-${i}`,
 			threadId: `gmthrid-${i}`,
 			uid: i + 1,
+			bodyStructure: { type: "text/plain", part: "1" },
 		}),
 	);
 
@@ -5046,11 +5047,10 @@ test("emitMessagesPass: progress includes count and total when metadata count is
 
 // ─── Historical attachment backfill: pin the per-UID hydration shape ────
 //
-// The connector's runAllMailPasses, when START.streamsToBackfill includes
-// "attachments", drives emitMessagesPass over the bounded historical UID
-// window in attachment-only mode (no messages, no bodies), wrapping
-// emitRecord to update the AttachmentBackfillSummary on each
-// `attachments` record. These tests pin that mode without IMAP: a
+// When only attachments still owe history, runAllMailPasses walks the
+// bounded historical page in attachment-only mode (no messages, no bodies)
+// and tallies the AttachmentBackfillSummary from the attachments it
+// hydrates. These tests pin that mode without IMAP: a
 // "historical" UID below priorUidnext is fed through the same code path
 // and we verify hydration, idempotency, and summary accounting.
 // Scope note: this asserts per-UID behavior and summary shape. Window
