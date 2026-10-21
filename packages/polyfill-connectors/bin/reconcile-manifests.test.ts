@@ -32,11 +32,12 @@ import { reconcileFromDisk } from "../src/manifest-reconcile.ts";
 function listSchemaConnectors(): string[] {
 	return (
 		readdirSync(CONNECTORS_DIR)
-			// connector-init.test.ts creates and removes reserved test fixtures
-			// (zz_init_smoke_<pid>, zz_init_browser_smoke_<pid>) in the live tree.
-			// A concurrent snapshot can observe one during cleanup (schemas before
-			// manifest), which is not connector drift.
-			.filter((name) => !name.startsWith("zz_init_"))
+			// connector-init.test.ts creates and removes test fixtures named
+			// zz_init_smoke_<pid> and zz_init_browser_smoke_<pid> in the live tree.
+			// A concurrent snapshot can list one while it is being written or
+			// removed, which is not connector drift. Match those exact names only,
+			// so a real connector with a zz_init_ prefix is still reconciled.
+			.filter((name) => !/^zz_init_(?:browser_)?smoke_\d+$/.test(name))
 			.filter((name) => existsSync(join(CONNECTORS_DIR, name, "schemas.ts")))
 			.sort()
 	);
