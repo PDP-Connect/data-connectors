@@ -182,6 +182,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["sessions","sessions_archive","state_db"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -254,6 +255,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["derived_messages"],
 			"state_stream": "sessions",
 			"freshness_strategy": "device_heartbeat"
 		},
@@ -329,6 +331,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["derived_function_calls"],
 			"state_stream": "sessions",
 			"freshness_strategy": "device_heartbeat"
 		},
@@ -387,6 +390,7 @@
 				}
 			},
 			"coverage_strategy": "full_inventory",
+			"coverage_stores": ["rules"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -444,6 +448,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["prompts"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -502,6 +507,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["skills"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -564,6 +570,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["history"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -626,6 +633,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["session_index"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -688,6 +696,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["shell_snapshots"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -750,6 +759,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["config"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -812,6 +822,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["cache"],
 			"freshness_strategy": "device_heartbeat"
 		}
 	],

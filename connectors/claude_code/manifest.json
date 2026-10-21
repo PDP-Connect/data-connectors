@@ -163,6 +163,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["projects"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -265,6 +266,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["derived_messages"],
 			"state_stream": "sessions",
 			"freshness_strategy": "device_heartbeat"
 		},
@@ -367,6 +369,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["derived_attachments"],
 			"state_stream": "sessions",
 			"freshness_strategy": "device_heartbeat"
 		},
@@ -432,6 +435,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["skills"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -504,6 +508,7 @@
 				}
 			},
 			"coverage_strategy": "checkpoint_window",
+			"coverage_stores": ["derived_memory_notes"],
 			"state_stream": "sessions",
 			"freshness_strategy": "device_heartbeat"
 		},
@@ -565,6 +570,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["commands"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -699,6 +705,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["stats_cache"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -761,6 +768,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["file_history"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -823,6 +831,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["cache"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -885,6 +894,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["backups"],
 			"freshness_strategy": "device_heartbeat"
 		},
 		{
@@ -947,6 +957,7 @@
 			"required": false,
 			"coverage_policy": "inventory_only",
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["config"],
 			"freshness_strategy": "device_heartbeat"
 		}
 	],

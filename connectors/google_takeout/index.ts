@@ -32,6 +32,7 @@ import {
 	resolveMaxMediaBytes,
 	sanitizeHydrationError,
 } from "../../packages/polyfill-connectors/src/local-media-blob-hydration.ts";
+import manifest from "./manifest.json" with { type: "json" };
 import {
 	buildLocationRecord,
 	buildPhotoRecord,
@@ -78,7 +79,7 @@ function streamLabel(stream: string): string {
 }
 
 async function emitCoverageProgress(
-	emit: CollectContext["emit"],
+	ctx: CollectContext,
 	input: {
 		items?: number;
 		reason: "collected" | "records_not_found";
@@ -87,6 +88,16 @@ async function emitCoverageProgress(
 		unsupportedFiles?: number;
 	},
 ): Promise<void> {
+	const { emit } = ctx;
+	ctx.reportCoverage?.(
+		input.stream,
+		input.stream,
+		input.status === "missing"
+			? "unavailable"
+			: (input.unsupportedFiles ?? 0) > 0
+				? "partial"
+				: "collected",
+	);
 	const items = input.items ?? 0;
 	const unsupportedFiles = input.unsupportedFiles ?? 0;
 	connectorDiagnostic("google_takeout", "coverage", {
@@ -166,7 +177,7 @@ async function collectLocationHistory(
 	const file = resolveLocationFile(importDir);
 	const json = (file ? await readJsonIf(file) : null) as LocationFile | null;
 	if (!json?.locations) {
-		await emitCoverageProgress(emit, {
+		await emitCoverageProgress(ctx, {
 			reason: "records_not_found",
 			status: "missing",
 			stream,
@@ -180,7 +191,7 @@ async function collectLocationHistory(
 		});
 		return;
 	}
-	await emitCoverageProgress(emit, {
+	await emitCoverageProgress(ctx, {
 		items: json.locations.length,
 		reason: "collected",
 		status: "collected",
@@ -194,6 +205,7 @@ async function collectLocationHistory(
 		itemOrdinal += 1;
 		const tsUnixMs = locationTimestampMs(loc);
 		if (!tsUnixMs) {
+			ctx.reportCoverage?.(stream, stream, "partial");
 			continue;
 		}
 		const ts = new Date(tsUnixMs).toISOString();
@@ -226,7 +238,7 @@ async function collectYoutubeWatchHistory(
 	);
 	const json = (await readJsonIf(path)) as WatchHistoryEntry[] | null;
 	if (!Array.isArray(json)) {
-		await emitCoverageProgress(emit, {
+		await emitCoverageProgress(ctx, {
 			reason: "records_not_found",
 			status: "missing",
 			stream,
@@ -240,7 +252,7 @@ async function collectYoutubeWatchHistory(
 		});
 		return;
 	}
-	await emitCoverageProgress(emit, {
+	await emitCoverageProgress(ctx, {
 		items: json.length,
 		reason: "collected",
 		status: "collected",
@@ -254,6 +266,7 @@ async function collectYoutubeWatchHistory(
 		itemOrdinal += 1;
 		const record = buildWatchHistoryRecord(e);
 		if (!record) {
+			ctx.reportCoverage?.(stream, stream, "partial");
 			continue;
 		}
 		if (since && record.watched_at <= since) {
@@ -280,7 +293,7 @@ async function collectSearchHistory(
 	const path = join(importDir, "My Activity", "Search", "MyActivity.json");
 	const json = (await readJsonIf(path)) as SearchHistoryEntry[] | null;
 	if (!Array.isArray(json)) {
-		await emitCoverageProgress(emit, {
+		await emitCoverageProgress(ctx, {
 			reason: "records_not_found",
 			status: "missing",
 			stream,
@@ -294,7 +307,7 @@ async function collectSearchHistory(
 		});
 		return;
 	}
-	await emitCoverageProgress(emit, {
+	await emitCoverageProgress(ctx, {
 		items: json.length,
 		reason: "collected",
 		status: "collected",
@@ -308,6 +321,7 @@ async function collectSearchHistory(
 		itemOrdinal += 1;
 		const record = buildSearchRecord(e);
 		if (!record) {
+			ctx.reportCoverage?.(stream, stream, "partial");
 			continue;
 		}
 		if (since && record.timestamp <= since) {
@@ -425,7 +439,11 @@ async function emitPhotos(
 			maxBytes,
 		);
 		if (!record) {
+			ctx.reportCoverage?.(stream, stream, "partial");
 			continue;
+		}
+		if (record.hydration_status !== "hydrated") {
+			ctx.reportCoverage?.(stream, stream, "partial");
 		}
 
 		if (since && record.event_time <= since) {
@@ -503,7 +521,7 @@ async function collectPhotos(
 	const photosDir = join(importDir, "Photos");
 
 	if (!existsSync(photosDir)) {
-		await emitCoverageProgress(emit, {
+		await emitCoverageProgress(ctx, {
 			reason: "records_not_found",
 			status: "missing",
 			stream,
@@ -524,7 +542,7 @@ async function collectPhotos(
 	try {
 		const { jsonFilenamesByDir, mediaEntries, unsupportedCount } =
 			await discoverPhotoFiles(photosDir);
-		await emitCoverageProgress(emit, {
+		await emitCoverageProgress(ctx, {
 			items: mediaEntries.length,
 			reason: "collected",
 			status: "collected",
@@ -545,6 +563,7 @@ async function collectPhotos(
 	} catch (err) {
 		// fs errors (e.g. readdir ENOENT/EACCES) embed the local path; never
 		// forward err.message verbatim into an operator-facing diagnostic.
+		ctx.reportCoverage?.(stream, stream, "failed");
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
@@ -555,6 +574,9 @@ async function collectPhotos(
 }
 
 runConnector({
+	coverageStores: Object.fromEntries(
+		manifest.streams.map((stream) => [stream.name, stream.coverage_stores]),
+	),
 	name: "google_takeout",
 	validateRecord,
 	async collect(ctx) {

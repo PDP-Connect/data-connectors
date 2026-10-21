@@ -584,7 +584,6 @@ test("runConnectorProtocolSubprocess: a child that exits before the first RSS ti
 		await rm(tempDir, { recursive: true, force: true });
 	}
 });
-
 // ─── skipPoliteDelays ────────────────────────────────────────────────────
 
 /** Run `body` while recording the delay every `setTimeout` call hands to the
@@ -758,4 +757,52 @@ test("skipPoliteDelays: a timer armed by a helper that politeDelay calls keeps i
 		[50],
 		"a timer armed by a helper that politeDelay calls keeps its 50 ms delay",
 	);
+});
+
+test("runConnector emits typed DONE coverage only for a START with collection_scope", async () => {
+	const entrypoint = fixturePath("protocol-subprocess-run-coverage.ts");
+	const cases = [
+		{
+			start: {
+				type: "START",
+				collection_scope: "unscoped",
+				scope: { streams: [{ name: "items" }] },
+			},
+			status: "collected",
+		},
+		{
+			start: {
+				type: "START",
+				collection_scope: "unscoped",
+				scope: { streams: [{ name: "items", skip_for_test: true }] },
+			},
+			status: "partial",
+		},
+		{
+			start: { type: "START", scope: { streams: [{ name: "items" }] } },
+			status: null,
+		},
+	] as const;
+	const results = await Promise.all(
+		cases.map(({ start }) =>
+			runConnectorProtocolSubprocess({
+				cwd: PACKAGE_ROOT,
+				entrypoint,
+				start: start as unknown as Parameters<
+					typeof runConnectorProtocolSubprocess
+				>[0]["start"],
+			}),
+		),
+	);
+	for (const [index, result] of results.entries()) {
+		assert.equal(result.code, 0);
+		const done = result.messages.at(-1) as Record<string, unknown>;
+		const coverage = done.coverage as
+			| { streams: { stores: { status: string }[] }[] }
+			| undefined;
+		assert.equal(
+			coverage?.streams[0]?.stores[0]?.status ?? null,
+			cases[index]?.status,
+		);
+	}
 });

@@ -98,7 +98,9 @@ import {
 	openInventoryFingerprintCursor,
 	reportLocalInventory,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
+import { createRunCoverage } from "../../packages/polyfill-connectors/src/run-coverage.ts";
 import { CodexArtifactLedger } from "./artifact-ledger.ts";
+import manifest from "./manifest.json" with { type: "json" };
 import {
 	buildPromptRecord,
 	buildRolloutOnlySessionRecord,
@@ -163,8 +165,11 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const ROLLOUT_MIME_TYPE = "application/jsonl";
 
 let stdoutDrainPromise: Promise<void> | null = null;
+let runCoverage: ReturnType<typeof createRunCoverage> | null = null;
+let stateDbQueryOutcome: "not_attempted" | "failed" | "complete" = "not_attempted";
 
 const emit = (m: EmittedMessage): void => {
+	if (m.type === "SKIP_RESULT") runCoverage?.skip(m.stream);
 	const ok = process.stdout.write(stringifyForJsonl(m));
 	if (!ok && stdoutDrainPromise === null) {
 		stdoutDrainPromise = new Promise<void>((resolve) => {
@@ -665,6 +670,7 @@ function openThreadsDb(dbPath: string): DatabaseSync | null {
 	try {
 		return new DatabaseSync(dbPath, { readOnly: true });
 	} catch {
+		stateDbQueryOutcome = "failed";
 		connectorDiagnostic("codex", "state_db_unreadable", {
 			fallback: "rollouts_only",
 		});
@@ -690,9 +696,13 @@ function* queryThreadsRows(db: DatabaseSync): Iterable<ThreadRow> {
 		for (const row of db.prepare(THREADS_QUERY).iterate()) {
 			if (isThreadRow(row)) {
 				yield row;
+			} else {
+				stateDbQueryOutcome = "failed";
 			}
 		}
+		if (stateDbQueryOutcome !== "failed") stateDbQueryOutcome = "complete";
 	} catch {
+		stateDbQueryOutcome = "failed";
 		connectorDiagnostic("codex", "state_db_query_failed", {
 			fallback: "rollouts_only",
 		});
@@ -711,18 +721,12 @@ interface LoadedFile {
 	text: string;
 }
 
-async function statAndRead(path: string): Promise<LoadedFile | null> {
-	try {
-		const st = await stat(path);
-		const preview = await readBoundedFilePreview(path);
-		if (preview === null) {
-			return null;
-		}
-		const text = preview.buffer.toString("utf8");
-		return { mtimeMs: Number(st.mtimeMs), size: Number(st.size), text };
-	} catch {
-		return null;
-	}
+async function statAndRead(path: string): Promise<LoadedFile> {
+	const st = await stat(path);
+	const preview = await readBoundedFilePreview(path);
+	if (preview === null) throw new Error("Codex supported item could not be read");
+	const text = preview.buffer.toString("utf8");
+	return { mtimeMs: Number(st.mtimeMs), size: Number(st.size), text };
 }
 
 async function emitRulesStream(
@@ -739,9 +743,6 @@ async function emitRulesStream(
 		}
 		const p = join(rulesDir, f);
 		const loaded = await statAndRead(p);
-		if (!loaded) {
-			continue;
-		}
 		const mtime = Math.floor(loaded.mtimeMs / 1000);
 		const ruleset = f.replace(RULES_SUFFIX_RE, "");
 		let idx = 0;
@@ -774,9 +775,6 @@ async function emitPromptsStream(
 		}
 		const p = join(promptsDir, f);
 		const loaded = await statAndRead(p);
-		if (!loaded) {
-			continue;
-		}
 		const { meta, body } = parseFrontmatter(loaded.text);
 		emitRecord(
 			"prompts",
@@ -800,8 +798,9 @@ async function isDirectoryPath(p: string): Promise<boolean> {
 	try {
 		const s = await stat(p);
 		return s.isDirectory();
-	} catch {
-		return false;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+		throw error;
 	}
 }
 
@@ -838,9 +837,6 @@ async function emitSkillsStream(
 		}
 		const skillMdPath = join(dirPath, "SKILL.md");
 		const loaded = await statAndRead(skillMdPath);
-		if (!loaded) {
-			continue;
-		}
 		const { meta, body } = parseFrontmatter(loaded.text);
 		emitRecord(
 			"skills",
@@ -2942,6 +2938,9 @@ async function resolveGatedInventoryRecords(
 		return inventory.recordsByStream.get(stream) ?? [];
 	}
 	return await listDirectoryInventory({
+		requireExisting: inventory.coverage.some(
+			(record) => record.store === "shell_snapshots" && record.status !== "missing",
+		),
 		tool: "codex",
 		sourceHome: codexHome,
 		relativeRoot: "shell-snapshots",
@@ -3025,6 +3024,7 @@ function makeCodexEmitRecord(deps: {
 // ─── main ───────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+	stateDbQueryOutcome = "not_attempted";
 	const startMsg = await readStartMessage();
 	if (startMsg.type !== "START") {
 		return fail("Expected START");
@@ -3033,6 +3033,17 @@ async function main(): Promise<void> {
 	const requested = buildRequestedMap(startMsg);
 	if (!requested.size) {
 		return fail("START.scope.streams is required");
+	}
+	const collectionScope = (
+		startMsg as StartMessage & { collection_scope?: unknown }
+	).collection_scope;
+	if (typeof collectionScope === "string" && collectionScope.length > 0) {
+		runCoverage = createRunCoverage(
+			Object.fromEntries(
+				manifest.streams.map((stream) => [stream.name, stream.coverage_stores]),
+			),
+			collectionScope,
+		);
 	}
 
 	// The artifact stores live with the collector runner that spawned this
@@ -3265,7 +3276,76 @@ async function collect({
 	}
 	await waitForEmitDrain();
 
-	emit({ type: "DONE", status: "succeeded", records_emitted: counters.total });
+	for (const record of inventory.coverage) {
+		if (record.stream && requested.has(record.stream)) {
+			runCoverage?.report(
+				record.stream,
+				record.store,
+				record.store === "state_db" && record.status === "collected"
+					? stateDbQueryOutcome === "complete"
+						? "collected"
+						: stateDbQueryOutcome === "failed"
+							? "failed"
+							: "partial"
+					: record.status === "collected" || record.status === "inventory_only"
+					? "collected"
+					: record.status === "missing"
+						? "unavailable"
+						: "partial",
+			);
+		}
+	}
+	for (const [stream, store] of [
+		["messages", "derived_messages"],
+		["function_calls", "derived_function_calls"],
+	] as const) {
+		if (requested.has(stream))
+			runCoverage?.report(
+				stream,
+				store,
+				rolloutScan.scanOutcome === "complete" ? "collected" : "failed",
+			);
+	}
+	if (requested.has("sessions") && rolloutScan.scanOutcome !== "complete") {
+		for (const store of ["sessions", "sessions_archive"] as const) {
+			if (
+				inventory.coverage.some(
+					(record) => record.store === store && record.status === "collected",
+				)
+			) runCoverage?.report("sessions", store, "failed");
+		}
+	}
+	if (scopeBoundsEnumeration(enumerationScope)) {
+		for (const stream of ["messages", "function_calls"]) {
+			if (requested.has(stream)) runCoverage?.scoped(stream);
+		}
+	}
+	if (captureLedger.size > 0 || captureLedger.pendingUpload > 0) {
+		for (const store of [
+			"sessions",
+			"sessions_archive",
+			"derived_messages",
+			"derived_function_calls",
+		]) {
+			for (const stream of ["sessions", "messages", "function_calls"]) {
+				if (
+					manifest.streams
+						.find((item) => item.name === stream)
+						?.coverage_stores.includes(store)
+				) {
+					runCoverage?.report(stream, store, "partial");
+				}
+			}
+		}
+	}
+	emit({
+		type: "DONE",
+		status: "succeeded",
+		records_emitted: counters.total,
+		...(runCoverage
+			? { coverage: runCoverage.done([...requested.keys()]) }
+			: {}),
+	} as EmittedMessage);
 	flushAndExit(0);
 }
 

@@ -142,6 +142,7 @@
 				}
 			},
 			"coverage_strategy": "snapshot_import_receipt",
+			"coverage_stores": ["export_dir"],
 			"freshness_strategy": "manual_as_of"
 			}
 		],

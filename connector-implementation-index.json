@@ -3616,6 +3616,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["export_dir"],
 						"freshness_strategy": "manual_as_of"
 					}
 				],
@@ -5154,6 +5155,7 @@
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
+						"coverage_stores": ["projects"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -5256,6 +5258,7 @@
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
+						"coverage_stores": ["derived_messages"],
 						"state_stream": "sessions",
 						"freshness_strategy": "device_heartbeat"
 					},
@@ -5370,6 +5373,7 @@
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
+						"coverage_stores": ["derived_attachments"],
 						"state_stream": "sessions",
 						"freshness_strategy": "device_heartbeat"
 					},
@@ -5435,6 +5439,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["skills"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -5507,6 +5512,7 @@
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
+						"coverage_stores": ["derived_memory_notes"],
 						"state_stream": "sessions",
 						"freshness_strategy": "device_heartbeat"
 					},
@@ -5568,6 +5574,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["commands"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -5743,6 +5750,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["stats_cache"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -5805,6 +5813,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["file_history"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -5867,6 +5876,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["cache"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -5929,6 +5939,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["backups"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -5991,6 +6002,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["config"],
 						"freshness_strategy": "device_heartbeat"
 					}
 				],
@@ -6275,6 +6287,7 @@
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
+						"coverage_stores": ["sessions", "sessions_archive", "state_db"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6347,6 +6360,7 @@
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
+						"coverage_stores": ["derived_messages"],
 						"state_stream": "sessions",
 						"freshness_strategy": "device_heartbeat"
 					},
@@ -6422,6 +6436,7 @@
 							}
 						},
 						"coverage_strategy": "checkpoint_window",
+						"coverage_stores": ["derived_function_calls"],
 						"state_stream": "sessions",
 						"freshness_strategy": "device_heartbeat"
 					},
@@ -6480,6 +6495,7 @@
 							}
 						},
 						"coverage_strategy": "full_inventory",
+						"coverage_stores": ["rules"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6537,6 +6553,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["prompts"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6595,6 +6612,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["skills"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6657,6 +6675,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["history"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6719,6 +6738,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["session_index"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6781,6 +6801,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["shell_snapshots"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6843,6 +6864,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["config"],
 						"freshness_strategy": "device_heartbeat"
 					},
 					{
@@ -6905,6 +6927,7 @@
 						"required": false,
 						"coverage_policy": "inventory_only",
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["cache"],
 						"freshness_strategy": "device_heartbeat"
 					}
 				],
@@ -12722,6 +12745,7 @@
 				"streams": [
 					{
 						"name": "location_history",
+						"required": true,
 						"description": "Location history from Google Maps Timeline.",
 						"display": {
 							"label": "Your Google location history",
@@ -12778,10 +12802,12 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["location_history"],
 						"freshness_strategy": "manual_as_of"
 					},
 					{
 						"name": "youtube_watch_history",
+						"required": true,
 						"description": "YouTube watch history.",
 						"display": {
 							"label": "Your YouTube watch history",
@@ -12837,10 +12863,12 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["youtube_watch_history"],
 						"freshness_strategy": "manual_as_of"
 					},
 					{
 						"name": "search_history",
+						"required": true,
 						"description": "Google search queries from My Activity.",
 						"display": {
 							"label": "Your Google search history",
@@ -12890,6 +12918,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["search_history"],
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -12992,6 +13021,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["photos"],
 						"freshness_strategy": "manual_as_of"
 					}
 				],
@@ -14473,6 +14503,7 @@
 				"streams": [
 					{
 						"name": "messages",
+						"required": true,
 						"description": "iMessage + SMS messages from ~/Library/Messages/chat.db (macOS).",
 						"display": {
 							"label": "Your iMessages",
@@ -14531,6 +14562,7 @@
 							}
 						},
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["chat_db"],
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -14568,6 +14600,7 @@
 						},
 						"incremental": false,
 						"coverage_strategy": "snapshot_import_receipt",
+						"coverage_stores": ["chat_db"],
 						"freshness_strategy": "manual_as_of"
 					},
 					{
@@ -14653,6 +14686,7 @@
 							}
 						],
 						"coverage_strategy": "parent_detail_accounting",
+						"coverage_stores": ["chat_db", "attachment_files"],
 						"freshness_strategy": "manual_as_of"
 					}
 				],

@@ -41,8 +41,9 @@ export async function readJsonIf(path: string): Promise<unknown> {
 	}
 	try {
 		return JSON.parse(await readFile(path, "utf8")) as unknown;
-	} catch {
-		return null;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+		throw error;
 	}
 }
 

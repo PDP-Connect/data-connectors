@@ -71,6 +71,7 @@ import {
 	openInventoryFingerprintCursor,
 	reportLocalInventory,
 } from "../../packages/polyfill-connectors/src/local-source-inventory.ts";
+import manifest from "./manifest.json" with { type: "json" };
 import {
 	ATTACHMENT_PREVIEW_CHARS,
 	applyProjectDirScope,
@@ -1023,7 +1024,20 @@ async function emitUsage({
 		return;
 	}
 	const statsPath = join(claudeHome, "stats-cache.json");
-	const raw = await readBoundedUtf8(statsPath);
+	let statsMissing = false;
+	try {
+		statSync(statsPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+			statsMissing = true;
+		} else {
+			throw error;
+		}
+	}
+	const raw = statsMissing ? null : await readBoundedUtf8(statsPath);
+	if (raw === null && !statsMissing) {
+		throw new Error("Claude Code usage stats could not be read");
+	}
 	// A missing file is an honest "no usage stats yet", not a read failure:
 	// buildUsageRecord(null) emits the same source="stats-cache-missing"
 	// record legacy's buildUsage returned for this case.
@@ -1043,7 +1057,7 @@ async function emitUsage({
 	} catch {
 		// Malformed JSON is a shape anomaly, not a missing-file case: don't
 		// claim stats-cache-missing for a file that exists but doesn't parse.
-		return;
+		throw new Error("Claude Code usage stats contain malformed JSON");
 	}
 	await emitRecord("usage", buildUsageRecord(parsed));
 }
@@ -1075,19 +1089,16 @@ async function emitSkills({
 		let raw: string | null;
 		try {
 			st = statSync(skillPath);
-		} catch {
-			continue;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+			throw error;
 		}
 		// Read BEFORE gating: the gate is a fact about content, so the bytes must
 		// be in hand to compute it. These files are small and were already read to
 		// build the record, so this reorder costs no extra I/O.
-		try {
-			raw = await readBoundedUtf8(skillPath);
-		} catch {
-			continue;
-		}
+		raw = await readBoundedUtf8(skillPath);
 		if (raw === null) {
-			continue;
+			throw new Error("Claude Code skill could not be read");
 		}
 		if (markFileContentAndShouldSkip(fileMtimes, newMtimes, skillPath, raw)) {
 			continue;
@@ -1125,17 +1136,13 @@ async function processSlashCommandFile(
 	let raw: string | null;
 	try {
 		st = statSync(args.full);
-	} catch {
-		return;
+	} catch (error) {
+		throw error;
 	}
 	// Content gate, not mtime — see `markFileContentAndShouldSkip`. Read first.
-	try {
-		raw = await readBoundedUtf8(args.full);
-	} catch {
-		return;
-	}
+	raw = await readBoundedUtf8(args.full);
 	if (raw === null) {
-		return;
+		throw new Error("Claude Code slash command could not be read");
 	}
 	if (
 		markFileContentAndShouldSkip(
@@ -1240,17 +1247,13 @@ async function emitProjectMemoryNotes({
 		let raw: string | null;
 		try {
 			st = statSync(fullPath);
-		} catch {
-			continue;
+		} catch (error) {
+			throw error;
 		}
 		// Content gate, not mtime — see `markFileContentAndShouldSkip`. Read first.
-		try {
-			raw = await readBoundedUtf8(fullPath);
-		} catch {
-			continue;
-		}
+		raw = await readBoundedUtf8(fullPath);
 		if (raw === null) {
-			continue;
+			throw new Error("Claude Code memory note could not be read");
 		}
 		if (markFileContentAndShouldSkip(fileMtimes, newMtimes, fullPath, raw)) {
 			continue;
@@ -2376,6 +2379,9 @@ async function emitLocalInventoryStreams(input: {
 	}
 	if (input.requested.has("file_history")) {
 		const entries = await listDirectoryInventory({
+			requireExisting: input.inventory.coverage.some(
+				(record) => record.store === "file_history" && record.status !== "missing",
+			),
 			tool: "claude_code",
 			sourceHome: input.claudeHome,
 			relativeRoot: "file-history",
@@ -2579,8 +2585,18 @@ function matchesLegacyJsonlMtime(
 if (isMainModule(import.meta.url)) {
 	runConnector({
 		name: "claude_code",
+		coverageStores: Object.fromEntries(
+			manifest.streams.map((stream) => [stream.name, stream.coverage_stores]),
+		),
 		validateRecord,
-		async collect({ state, requested, emit, emitRecord }) {
+		async collect({
+			state,
+			requested,
+			emit,
+			emitRecord,
+			reportCoverage,
+			reportCoverageScoped,
+		}) {
 			const reportedGaps = new Set<string>();
 			const reportGaps = async (gaps: ClaudeJsonlGap[] | undefined) => {
 				for (const gap of gaps ?? []) {
@@ -3240,6 +3256,35 @@ if (isMainModule(import.meta.url)) {
 					await emitLocalJsonlTelemetry(emit, telemetry);
 				};
 				await collectProjectStreams();
+				for (const record of inventory.coverage) {
+					if (record.stream && requested.has(record.stream)) {
+						reportCoverage?.(
+							record.stream,
+							record.store,
+							record.status === "collected" || record.status === "inventory_only"
+								? "collected"
+								: record.status === "missing"
+									? "unavailable"
+									: "partial",
+						);
+					}
+				}
+				for (const [stream, store] of [
+					["messages", "derived_messages"],
+					["attachments", "derived_attachments"],
+					["memory_notes", "derived_memory_notes"],
+				] as const) {
+					if (requested.has(stream))
+						reportCoverage?.(stream, store, "collected");
+				}
+				if (
+					enumerationScope?.source_roots?.length &&
+					!enumerationScope.since
+				) {
+					for (const stream of ["sessions", "messages", "attachments"]) {
+						if (requested.has(stream)) reportCoverageScoped?.(stream);
+					}
+				}
 				if (captureLedger.size > 0) {
 					// Visible, and retried: these files' mtimes were withheld above, so
 					// the next run re-examines exactly them.
@@ -3268,6 +3313,9 @@ if (isMainModule(import.meta.url)) {
 						type: "PROGRESS",
 						message: `${captureLedger.pendingUpload} Claude Code ${captureLedger.pendingUpload === 1 ? "attachment" : "attachments"} saved locally, waiting to upload`,
 					});
+				}
+				if (captureLedger.size > 0 || captureLedger.pendingUpload > 0) {
+					reportCoverage?.("attachments", "derived_attachments", "partial");
 				}
 			} finally {
 				// Releasing the outbox handle must not mask a collection failure.
