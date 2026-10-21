@@ -568,7 +568,8 @@
 		"manifest": {
 			"connector_key": "oura-browser",
 			"reason_display_messages": {
-				"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint."
+				"oura_browser_window_deferred": "This run read at most 90 days of Oura history. Later days will be retried from the saved checkpoint.",
+				"inventory_not_proven_complete": "Observed Oura records were imported, but the source did not prove the inventory complete. Retry to refresh."
 			}
 		}
 	},
