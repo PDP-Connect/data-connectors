@@ -3683,9 +3683,9 @@ export const NO_AWAIT_IN_LOOPS_ALLOWLIST: readonly NoAwaitInLoopsAllowlistEntry[
 		{
 			path: "connectors/wholefoods/index.ts",
 			line: 1132,
-			column: 5,
+			column: 6,
 			category: "ordered_protocol_emission",
-			note: "collectOrders(): reportStreamFailure(): one SKIP_RESULT per requested order stream, emitted in a fixed order; the runtime keeps the first reported failure for the failed DONE",
+			note: "collectOrders(): report failed reads in source stream order before emitting the next stream outcome.",
 		},
 		{
 			path: "connectors/wholefoods/integration.test.ts",
