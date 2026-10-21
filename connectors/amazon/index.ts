@@ -1210,6 +1210,8 @@ export interface EmitDeps {
 	 *  processListOrder records each considered order's detail outcome here and
 	 *  collect() emits one DETAIL_COVERAGE after the year loop. */
 	orderItemsCoverage?: OrderItemsCoverage | undefined;
+	isRecordSelected?: BrowserCollectContext["isRecordSelected"] | undefined;
+	itemResourcesRestricted?: boolean | undefined;
 	/** Run-level `orders` list-stream coverage accumulator. Optional so legacy
 	 *  callers/tests that only exercise emit ordering can omit it; when present,
 	 *  processListOrder records each considered order's list-accounting outcome
@@ -1250,53 +1252,118 @@ export async function emitOrderAndItems(
 	listOrder: ListPageOrder,
 	detail: OrderDetail | null,
 	orderDate: string,
-): Promise<void> {
-	if (deps.wantsOrders) {
-		// Gate on a per-order fingerprint that excludes the run-clock
-		// `fetched_at`. An order's identity (id = order id) is immutable and its
-		// total is fixed once placed, but the current (unfrozen) year is
-		// re-scraped every run and re-emitted with a fresh `fetched_at`. With
-		// this gate an already-seen order whose body is byte-identical modulo
-		// `fetched_at` is suppressed; a real field move (delivery_status /
-		// status_detail transitioning while the order ships) is a fingerprint
-		// boundary and still emits. `order_items` carries no `fetched_at`, so it
-		// does not churn on a no-op re-scrape and is left ungated.
-		//
-		// NOTE: orders is a PARTIAL scan (year-freezing skips historical years),
-		// so this cursor is never `dropUnseenIds()`d — pruning ids in years the run
-		// did not scrape would drop their fingerprints and re-churn them when the
-		// year is next (re)visited.
+): Promise<boolean> {
+	let itemsAccepted =
+		typeof listOrder.orderId === "string" && listOrder.orderId.length > 0;
+	let itemsSettled = false;
+	let itemsRequired = true;
+	try {
+		let allEmitted = itemsAccepted;
 		const orderRecord = buildOrderRecord(
 			listOrder,
 			detail,
 			orderDate,
 			deps.emittedAt,
 		);
-		if (
-			!deps.ordersFingerprintCursor ||
-			deps.ordersFingerprintCursor.shouldEmit(orderRecord)
-		) {
-			await deps.emitRecord("orders", orderRecord);
+		if (deps.wantsOrders) {
+			const excluded = isLegitimatelyExcluded(deps, "orders", orderRecord);
+			if (!excluded) deps.ordersCoverage?.considered.push(listOrder.orderId);
+			const unchanged =
+				!excluded &&
+				validateRecord("orders", orderRecord).ok &&
+				deps.ordersFingerprintCursor?.priorFingerprint(orderRecord.id) ===
+				recordFingerprint(orderRecord, ["fetched_at"]);
+			let emitted = unchanged;
+			if (!unchanged && !excluded) {
+				// beforeEmit runs only after SDK selection and validation. Fulfilment
+				// proves local emission, not durable host acceptance.
+				await deps.emitRecord("orders", orderRecord, {
+					beforeEmit: async () => {
+						emitted = true;
+					},
+				});
+			}
+			allEmitted = emitted;
+			if (emitted) deps.ordersCoverage?.covered.push(listOrder.orderId);
 		}
-		// A fingerprint-suppressed re-scrape and a fresh emit are both a real
-		// accounting decision for this order's `orders` record, so both count as
-		// covered — only a date that never parses (handled below, before this
-		// function is reached) is considered-but-not-covered.
-		if (deps.ordersCoverage) {
-			deps.ordersCoverage.considered.push(listOrder.orderId);
-			deps.ordersCoverage.covered.push(listOrder.orderId);
+		if (deps.wantsItems) {
+			const merged = mergeOrderItems(listOrder, detail);
+			// A parser/merge shortfall is not a complete local baseline either.
+			if (detail && merged.length < detail.items.length) {
+				allEmitted = false;
+				itemsAccepted = false;
+			}
+			let emittedItems = 0;
+			let excludedItems = 0;
+			for (const item of merged) {
+				const record = buildOrderItemRecord(listOrder.orderId, orderDate, item);
+				if (
+					listOrder.orderId &&
+					isLegitimatelyExcluded(deps, "order_items", record)
+				) {
+					excludedItems += 1;
+					allEmitted = false; // Do not cache a partial-scope bundle globally.
+					continue;
+				}
+				let emitted = false;
+				await deps.emitRecord(
+					"order_items",
+					record,
+					{
+						beforeEmit: async () => {
+							emitted = true;
+						},
+					},
+				);
+				if (emitted) emittedItems += 1;
+				else {
+					allEmitted = false;
+					itemsAccepted = false;
+				}
+			}
+			itemsRequired =
+				merged.length === 0 ||
+				excludedItems < merged.length ||
+				(detail !== null && merged.length < detail.items.length);
+			await emitItemCountReconciliation(deps, detail, emittedItems + excludedItems);
+			itemsSettled = true;
 		}
-	}
-	if (deps.wantsItems) {
-		const merged = mergeOrderItems(listOrder, detail);
-		for (const item of merged) {
-			await deps.emitRecord(
-				"order_items",
-				buildOrderItemRecord(listOrder.orderId, orderDate, item),
+		// Do not mutate either retry baseline until the whole requested bundle
+		// has passed the local emitter. On throw/rejection the prior state survives.
+		allEmitted = allEmitted && itemsAccepted;
+		if (allEmitted) {
+			if (deps.wantsOrders) deps.ordersFingerprintCursor?.shouldEmit(orderRecord);
+			if (detail && deps.wantsItems) {
+				deps.hydratedOrders?.set(
+					listOrder.orderId,
+					listSurfaceFingerprint(listOrder, orderDate, deps.emittedAt),
+				);
+			}
+		}
+		return allEmitted;
+	} finally {
+		if (detail && deps.wantsItems && deps.orderItemsCoverage && itemsRequired) {
+			recordDetailOutcome(
+				deps.orderItemsCoverage,
+				listOrder.orderId,
+				itemsSettled && itemsAccepted ? "hydrated" : "unaccounted",
 			);
 		}
-		await emitItemCountReconciliation(deps, detail, merged.length);
 	}
+}
+
+/** Selection is not validation: missing identities/schema failures remain debt. */
+function isLegitimatelyExcluded(
+	deps: EmitDeps,
+	stream: string,
+	record: Parameters<BrowserCollectContext["emitRecord"]>[1],
+): boolean {
+	return (
+		typeof record.id === "string" &&
+		record.id.length > 0 &&
+		validateRecord(stream, record).ok &&
+		deps.isRecordSelected?.(stream, record) === false
+	);
 }
 
 /**
@@ -1739,6 +1806,23 @@ export async function processListOrder(
 		}
 		return false;
 	}
+	// All children inherit the order date, so time exclusion is provable before
+	// hydration. A list card is NOT a complete child-resource inventory.
+	if (
+		listOrder.orderId &&
+		deps.wantsItems &&
+		!deps.itemResourcesRestricted &&
+		deps.isRecordSelected?.("order_items", {
+			id: listOrder.orderId,
+			order_date: orderDate,
+		}) === false
+	) {
+		deps = { ...deps, wantsItems: false, orderItemsCoverage: undefined };
+	}
+	const parentExcluded = !deps.wantsOrders || isLegitimatelyExcluded(
+		deps, "orders", buildOrderRecord(listOrder, null, orderDate, deps.emittedAt),
+	);
+	if (!deps.wantsItems && parentExcluded) return true;
 	// The current (and previous) year is re-listed on every run — orders are
 	// ongoing, so year-freezing never applies to it (see planIncrementalYears).
 	// An order already known-hydrated AND whose list surface has not moved
@@ -1753,7 +1837,9 @@ export async function processListOrder(
 	);
 	const priorFingerprint = deps.hydratedOrders?.get(listOrder.orderId);
 	const alreadyHydrated =
-		!deps.skipDetail && priorFingerprint === currentListFingerprint;
+		!deps.skipDetail &&
+		!deps.itemResourcesRestricted &&
+		priorFingerprint === currentListFingerprint;
 	if (
 		priorFingerprint !== undefined &&
 		priorFingerprint !== currentListFingerprint
@@ -1777,7 +1863,7 @@ export async function processListOrder(
 		// The list scan still enumerated this order and the fingerprint match is
 		// itself a real accounting decision (list surface unchanged since a prior
 		// durable emit) — considered and covered, even though nothing re-emits.
-		if (deps.ordersCoverage) {
+		if (!parentExcluded && deps.ordersCoverage) {
 			deps.ordersCoverage.considered.push(listOrder.orderId);
 			deps.ordersCoverage.covered.push(listOrder.orderId);
 		}
@@ -1789,34 +1875,46 @@ export async function processListOrder(
 		await deps.capture.captureDom(page, `order-detail-${listOrder.orderId}`);
 		flags.detailCaptured = true;
 	}
-	// A real hydration this run joins the durable known-hydrated map, keyed to
-	// the list surface observed THIS run, so a later run only skips re-fetch
-	// while that surface stays unchanged. Gated on `wantsItems`: the map's
-	// honest meaning is "order_items durably emitted", so a run scoped to
-	// `orders` only (which may still fetch detail for order enrichment) must
-	// not mark an order hydrated when no order_items record was emitted for
-	// it — a later item-scoped run needs its own real attempt.
-	if (detail && deps.wantsItems) {
-		deps.hydratedOrders?.set(listOrder.orderId, currentListFingerprint);
+	return processResolvedListOrder(deps, listOrder, orderDate, {
+		detail, detailGapReason, detailFailureKind,
+	});
+}
+
+/** Production post-hydration path, also usable by deterministic emitter tests. */
+export async function processResolvedListOrder(
+	deps: EmitDeps,
+	listOrder: ListPageOrder,
+	orderDate: string,
+	{ detail, detailGapReason, detailFailureKind }: ListOrderDetailResolution,
+): Promise<boolean> {
+	const outcome = classifyDetailOutcome(deps.skipDetail, detail);
+	if (deps.orderItemsCoverage && outcome === "gap") {
+		await deps.emit(
+			buildOrderDetailGap(
+				listOrder.orderId,
+				detailGapReason,
+				detailFailureKind ?? undefined,
+				orderDate,
+			),
+		);
 	}
-	if (deps.orderItemsCoverage) {
-		const outcome = classifyDetailOutcome(deps.skipDetail, detail);
-		recordDetailOutcome(deps.orderItemsCoverage, listOrder.orderId, outcome);
-		// Attempted-but-failed detail emits a durable DETAIL_GAP so the gap_key is
-		// backed and the checkpoint is satisfiable on recovery.
-		if (outcome === "gap") {
-			await deps.emit(
-				buildOrderDetailGap(
-					listOrder.orderId,
-					detailGapReason,
-					detailFailureKind ?? undefined,
-					orderDate,
-				),
+	try {
+		await emitOrderAndItems(
+			deps,
+			listOrder,
+			detail,
+			orderDate,
+		);
+		return true;
+	} finally {
+		if (!detail && deps.orderItemsCoverage) {
+			recordDetailOutcome(
+				deps.orderItemsCoverage,
+				listOrder.orderId,
+				outcome,
 			);
 		}
 	}
-	await emitOrderAndItems(deps, listOrder, detail, orderDate);
-	return true;
 }
 
 interface YearRunResult {
@@ -2296,6 +2394,8 @@ if (isMainModule(import.meta.url)) {
 				emittedAt,
 				hydratedOrders,
 				orderItemsCoverage,
+				isRecordSelected: ctx.isRecordSelected,
+				itemResourcesRestricted: requested.get("order_items")?.resources !== undefined,
 				ordersCoverage,
 				ordersFingerprintCursor,
 				progress,
