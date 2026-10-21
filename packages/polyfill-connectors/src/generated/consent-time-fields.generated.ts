@@ -227,6 +227,16 @@ export const CONSENT_TIME_FIELDS: Readonly<
 		posts: { field: "taken_at", format: "date-time" },
 		profile: null,
 	},
+	muse: {
+		activities: { field: "timestamp", format: "date-time" },
+		connected_apps: null,
+		conversations: { field: "created_at", format: "date-time" },
+		files: { field: "modified_at", format: "date-time" },
+		goals: { field: "created_at", format: "date-time" },
+		memory_files: { field: "modified_at", format: "date-time" },
+		messages: { field: "occurred_at", format: "date-time" },
+		scheduled_tasks: null,
+	},
 	netflix_export: {
 		viewing_activity: { field: "watched_at", format: "date-time" },
 	},
