@@ -447,13 +447,22 @@ test("the next run reads only chats that changed, plus pending gaps", async () =
 	);
 	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
 	assert.deepEqual(cov?.required_keys, [MAIN_CHAT]);
-	// The gapped chat is absent from both fully read views and sessions.get
-	// does not find it either: it is gone, so its gap is resolved.
+	// Round 9: the gapped chat is absent from both fully read views and
+	// sessions.get does not find it. Deletion is never inferred: its gap is
+	// not resolved (no DETAIL_GAP_RECOVERED without a full history read), and
+	// with no parent record nothing about it is emitted, so it stays pending.
 	assert.ok(calls.some((c) => c.method === "sessions.get"));
-	assert.deepEqual(
-		h.of("DETAIL_GAP_RECOVERED").map((x) => x.m.gap_id),
-		["g1"],
+	assert.equal(h.of("DETAIL_GAP_RECOVERED").length, 0);
+	assert.equal(h.of("DETAIL_GAP").length, 0);
+	assert.equal(
+		calls.some(
+			(c) =>
+				c.method === "chat.history" &&
+				c.params.session_id === "11111111-1111-4111-8111-111111111111",
+		),
+		false,
 	);
+	assert.deepEqual(h.failures, []);
 	assert.deepEqual(h.states("conversations")[0], {
 		version: 2,
 		chats: {
@@ -1796,4 +1805,39 @@ test("round 8 #3: an incomplete inventory recovers nothing", async () => {
 		h.failures.map((f) => f.stream),
 		["conversations", "messages"],
 	);
+});
+
+test("round 9: DETAIL_GAP_RECOVERED is emitted only after a full history read", async () => {
+	// Every chat sessions.get cannot find, after a complete inventory walk.
+	const absent = "55555555-5555-4555-8555-555555555555";
+	const { gateway } = fakeGateway();
+	const h = harness({
+		streams: ["conversations", "messages"],
+		detailGaps: [
+			{
+				gap_id: "g-absent",
+				status: "pending",
+				stream: "messages",
+				record_key: absent,
+				detail_locator: { kind: "muse.chat_history", chat_id: absent },
+			},
+			{
+				gap_id: "g-side",
+				status: "pending",
+				stream: "messages",
+				record_key: SIDE_CHAT,
+				detail_locator: { kind: "muse.chat_history", chat_id: SIDE_CHAT },
+			},
+		],
+	});
+	await collectMuseWith(h.ctx, gateway);
+	// Only the chat read in full is recovered; the absent one stays pending
+	// and is not a coverage key.
+	assert.deepEqual(
+		h.of("DETAIL_GAP_RECOVERED").map((x) => x.m.gap_id),
+		["g-side"],
+	);
+	const cov = h.of("DETAIL_COVERAGE", "messages")[0]?.m;
+	assert.equal((cov?.required_keys as string[]).includes(absent), false);
+	assert.equal(h.states("conversations").length, 1);
 });
