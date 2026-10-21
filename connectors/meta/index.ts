@@ -2865,8 +2865,9 @@ export async function collectAllStreams(
 		// A signed-out or challenged session is the run's failure, not a list
 		// that failed to prove its end: end the run as a session failure.
 		if (authentication.blocked) {
-			throw new Error(
+			throw createConnectorFailure("meta_session_required",
 				"meta_session_required: Instagram signed out or requested a challenge during this run",
+				{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
 			);
 		}
 		for (const result of pending) {

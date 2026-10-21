@@ -30,9 +30,15 @@ export interface TerminalErrorDetails {
 export class TerminalError extends Error {
 	readonly code?: string;
 	readonly retryable: boolean;
+	readonly recoveryHint?: TerminalErrorDetails["recovery_hint"];
 	constructor(
 		message: string,
-		options: { cause?: unknown; code?: string; retryable?: boolean } = {},
+		options: {
+			cause?: unknown;
+			code?: string;
+			retryable?: boolean;
+			recoveryHint?: TerminalErrorDetails["recovery_hint"];
+		} = {},
 	) {
 		super(
 			message,
@@ -40,6 +46,8 @@ export class TerminalError extends Error {
 		);
 		this.name = "TerminalError";
 		this.retryable = options.retryable ?? false;
+		if (options.recoveryHint !== undefined)
+			this.recoveryHint = options.recoveryHint;
 		if (options.code !== undefined) {
 			this.code = options.code;
 		}

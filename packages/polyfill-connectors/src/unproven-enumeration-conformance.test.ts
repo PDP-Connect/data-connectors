@@ -57,6 +57,25 @@ const doneOf = (messages: readonly EmittedMessage[]): Done => {
 	return done;
 };
 
+for (const cause of ["linkedin_session_dead", "meta_session_required"]) {
+	test(`${cause}: typed authentication failure preserves code and manual recovery on real stdout`, async () => {
+		const { code, messages } = await wire(
+			["profile"],
+			[{ type: "TERMINAL_FAILURE", code: cause }],
+		);
+		const done = doneOf(messages);
+		assert.equal(code, 1);
+		assert.equal(done.status, "failed");
+		assert.equal(done.error?.code, cause);
+		assert.equal(done.error?.retryable, false);
+		assert.deepEqual(done.error?.recovery_hint, {
+			action: "manual_action_required",
+			retryable: false,
+		});
+		assert.deepEqual(skips(messages), []);
+	});
+}
+
 for (const cause of [
 	"inventory_not_proven_complete",
 	"linkedin_enumeration_unproven",

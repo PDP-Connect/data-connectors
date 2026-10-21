@@ -6,12 +6,14 @@
 // A `REPORT_STREAM_FAILURE` entry calls `ctx.reportStreamFailure` instead.
 import type { EmittedMessage } from "@pdpp/connector-protocol";
 import {
+	createConnectorFailure,
 	runConnector,
 	type StreamFailureOptions,
 } from "../connector-runtime.ts";
 
 type FixtureStep =
 	| EmittedMessage
+	| { type: "TERMINAL_FAILURE"; code: string }
 	| {
 			type: "REPORT_STREAM_FAILURE";
 			stream: string;
@@ -29,9 +31,23 @@ runConnector({
 		steps.reduce(
 			(done, step) =>
 				done.then(() =>
-					step.type === "REPORT_STREAM_FAILURE"
-						? ctx.reportStreamFailure?.(step.stream, step.message, step.options)
-						: ctx.emit(step),
+					step.type === "TERMINAL_FAILURE"
+						? Promise.reject(
+								createConnectorFailure(step.code, "Authentication rejected.", {
+									retryable: false,
+									recoveryHint: {
+										action: "manual_action_required",
+										retryable: false,
+									},
+								}),
+							)
+						: step.type === "REPORT_STREAM_FAILURE"
+							? ctx.reportStreamFailure?.(
+									step.stream,
+									step.message,
+									step.options,
+								)
+							: ctx.emit(step),
 				),
 			Promise.resolve(),
 		),

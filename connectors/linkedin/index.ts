@@ -74,6 +74,7 @@ import { manualBrowserLogin } from "../../packages/polyfill-connectors/src/brows
 import {
 	type BrowserCollectContext,
 	buildDetailCoverageMessage,
+	createConnectorFailure,
 	type EmittedMessage,
 	type EnsureSessionArgs,
 	type ProbeSessionArgs,
@@ -240,14 +241,15 @@ async function checkApiAuth(
 }
 
 /** Fetch the full dash profile, trying each known decoration id in turn.
- *  Returns the first successful element, or null if every attempt failed
- *  (the caller still has the basic `/me` fields to fall back to). */
+ *  A successful full decoration recovers earlier failures. A weaker basic
+ *  fallback retains the failed decoration cause for unavailable sections. */
 async function fetchDashProfile(
 	page: Page,
 	publicIdentifier: string,
 	capture?: CaptureSession | null,
 ): Promise<DashProfileResult> {
 	const publicIdStr = encodeURIComponent(publicIdentifier);
+	let decorationFailure: string | undefined;
 	for (const decorationId of PROFILE_DECORATION_IDS) {
 		const result = await voyagerFetch<VoyagerDashProfilesResponse>(
 			page,
@@ -258,6 +260,7 @@ async function fetchDashProfile(
 		if (isFetchError(result) && isRejectedSession(result._error)) {
 			return { profile: null, source: "unavailable", failure: result._error };
 		}
+		if (isFetchError(result)) decorationFailure = result._error;
 		if (!isFetchError(result) && Array.isArray(result.elements)) {
 			for (const candidate of result.elements) {
 				if (isRecord(candidate) && hasRecognizedProfileField(candidate)) {
@@ -279,11 +282,13 @@ async function fetchDashProfile(
 	if (!isFetchError(basic) && Array.isArray(basic.elements)) {
 		const profile = basic.elements.find(isRecord);
 		if (profile) {
-			return { profile: profile as VoyagerProfileElement, source: "basic" };
+			return { profile: profile as VoyagerProfileElement, source: "basic",
+				...(decorationFailure ? { failure: decorationFailure } : {}),
+			};
 		}
 	}
 	return { profile: null, source: "unavailable",
-		...(isFetchError(basic) ? { failure: basic._error } : {}),
+		...(isFetchError(basic) ? { failure: basic._error } : decorationFailure ? { failure: decorationFailure } : {}),
 	};
 }
 
@@ -722,8 +727,9 @@ export async function collectLinkedIn(
 
 	const isAuthenticated = await checkApiAuth(page, capture);
 	if (!isAuthenticated) {
-		throw new Error(
+		throw createConnectorFailure("linkedin_session_dead",
 			"linkedin_session_dead: no live Voyager session (li_at/JSESSIONID cookie missing or expired); manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
 		);
 	}
 
@@ -769,7 +775,8 @@ export async function collectLinkedIn(
 	}
 	const dashProfile = dashProfileResult.profile;
 	if (dashProfileResult.failure && isRejectedSession(dashProfileResult.failure)) {
-		throw new Error("linkedin_session_dead: LinkedIn rejected the profile read; manual login required in the connector's browser profile");
+		throw createConnectorFailure("linkedin_session_dead", "linkedin_session_dead: LinkedIn rejected the profile read; manual login required in the connector's browser profile",
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } });
 	}
 
 	// The profile count is the owner-bound source summary, independent of
@@ -1019,8 +1026,9 @@ async function emitRows(
 		await sink.emitRecord(stream, record);
 	}
 	if (options.readFailure === "session_rejected") {
-		throw new Error(
+		throw createConnectorFailure("linkedin_session_dead",
 			`linkedin_session_dead: LinkedIn rejected the session while reading ${stream}; manual login required in the connector's browser profile`,
+			{ retryable: false, recoveryHint: { action: "manual_action_required", retryable: false } },
 		);
 	}
 	const selectedCount = rows.records.filter((record) => sink.isRecordSelected?.(stream, record) ?? true).length;

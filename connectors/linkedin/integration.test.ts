@@ -26,6 +26,7 @@ import type {
 } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
 import { makeEmitRecord } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
+import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import { collectLinkedIn, ensureLinkedInSession } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -62,7 +63,13 @@ for (const status of [401, 403, 429, 503]) {
 		const ctx = buildCtx(["experience"], recording, (path) => path.includes("memberIdentity=")
 			? { _error: `http_${status}` } : routeVoyagerPath(path));
 		if (status === 401 || status === 403) {
-			await assert.rejects(collectLinkedIn(ctx), /linkedin_session_dead:/);
+			await assert.rejects(collectLinkedIn(ctx), error => {
+				assert.ok(error instanceof TerminalError);
+				assert.equal(error.code, "linkedin_session_dead");
+				assert.equal(error.retryable, false);
+				assert.deepEqual(error.recoveryHint, { action: "manual_action_required", retryable: false });
+				return true;
+			});
 			assert.deepEqual(skipResults(recording), []);
 		} else {
 			await collectLinkedIn(ctx);
@@ -73,6 +80,36 @@ for (const status of [401, 403, 429, 503]) {
 		assert.equal(recording.protocolMessages.some(message => message.type === "STATE"), false);
 	});
 }
+
+for (const status of [429, 503]) {
+	test(`decorated HTTP ${status} failure survives a successful weaker basic fallback`, async () => {
+		const recording = makeRecordingEmit(validateRecord);
+		const ctx = buildCtx(["experience"], recording, path => path.includes("decorationId=")
+			? { _error: `http_${status}` } : path.includes("memberIdentity=")
+				? { elements: [{ firstName: "Anon", lastName: "Member" }] } : routeVoyagerPath(path));
+		await collectLinkedIn(ctx);
+		assert.equal(skipResults(recording).length, 1);
+		assert.equal(skipResults(recording)[0]?.reason, "stream_collection_failed");
+		assert.match(skipResults(recording)[0]?.message ?? "", new RegExp(`http_${status}`));
+		assert.equal(recording.protocolMessages.some(message => message.type === "STATE"), false);
+	});
+}
+
+test("a later successful decoration recovers an earlier failed read", async () => {
+	const recording = makeRecordingEmit(validateRecord);
+	let decoratedCalls = 0;
+	const ctx = buildCtx(["experience"], recording, path => {
+		if (!path.includes("decorationId=")) return routeVoyagerPath(path);
+		if (++decoratedCalls === 1) return { _error: "http_503" };
+		const response = { elements: [proofProfile()] };
+		return response;
+	});
+	await collectLinkedIn(ctx);
+	assert.equal(decoratedCalls, 2);
+	assert.deepEqual(skipResults(recording), []);
+	assert.equal(recording.emitted.length, 1);
+	assert.ok(recording.protocolMessages.some(message => message.type === "STATE"));
+});
 
 test("resource selection of connections does not become missing enrichment", async () => {
 	const recording = makeRecordingEmit(validateRecord);

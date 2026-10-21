@@ -9,6 +9,7 @@ import { runInNewContext } from "node:vm";
 import type { Frame, Page, Response } from "playwright";
 import type { BrowserCollectContext } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { makeRecordingEmit } from "../../packages/polyfill-connectors/src/test-harness.ts";
+import { TerminalError } from "../../packages/polyfill-connectors/src/terminal-error.ts";
 import { classifyAdsDialogInPage, collectAllStreams } from "./index.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -106,7 +107,13 @@ for (const blocked of [false, true]) {
   const {ctx, harness, failures} = setup(["posts", "following"]);
   ctx.page.evaluate = ((fn: unknown) => Promise.resolve(String(fn).includes("verificationCode") ? blocked : null)) as Page["evaluate"];
   if (blocked) {
-   await assert.rejects(collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK), /meta_session_required:/);
+   await assert.rejects(collectAllStreams(ctx, async () => undefined, FAST_POSTS_CLOCK, FAST_ADS_CLOCK, FAST_PROFILE_CLOCK), error => {
+    assert.ok(error instanceof TerminalError);
+    assert.equal(error.code, "meta_session_required");
+    assert.equal(error.retryable, false);
+    assert.deepEqual(error.recoveryHint, { action: "manual_action_required", retryable: false });
+    return true;
+   });
    assert.deepEqual(failures, []);
    assert.equal(harness.protocolMessages.some(message => message.type === "SKIP_RESULT"), false);
   } else {

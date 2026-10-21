@@ -187,9 +187,19 @@ export type { TerminalErrorDetails } from "./terminal-error.ts";
 export function createConnectorFailure(
 	code: string,
 	message: string,
-	options: { cause?: unknown; retryable?: boolean } = {},
+	options: {
+		cause?: unknown;
+		retryable?: boolean;
+		recoveryHint?: TerminalErrorDetails["recovery_hint"];
+	} = {},
 ): Error {
 	assertValidConnectorErrorCode(code);
+	if (options.recoveryHint !== undefined)
+		assertValidConnectorErrorCode(
+			typeof options.recoveryHint === "string"
+				? options.recoveryHint
+				: options.recoveryHint.action,
+		);
 	return new TerminalError(message, { ...options, code });
 }
 
@@ -502,19 +512,26 @@ export function composeNormalizedTerminalError({
 	message,
 	retryable,
 	code,
+	recoveryHint,
 	normalizeTerminalError,
 }: {
 	message: string;
 	retryable: boolean;
 	code?: string | undefined;
+	recoveryHint?: TerminalErrorDetails["recovery_hint"];
 	normalizeTerminalError: NormalizeTerminalError;
 }): TerminalErrorDetails {
 	const normalized = normalizeTerminalError({
 		message,
 		retryable,
 		...(code ? { code } : {}),
+		...(recoveryHint === undefined ? {} : { recovery_hint: recoveryHint }),
 	});
-	return code && !normalized.code ? { ...normalized, code } : normalized;
+	const withCode =
+		code && !normalized.code ? { ...normalized, code } : normalized;
+	return recoveryHint !== undefined && withCode.recovery_hint === undefined
+		? { ...withCode, recovery_hint: recoveryHint }
+		: withCode;
 }
 
 const UNEXPECTED_FAILURE_DETAIL_MAX = 300;
@@ -1079,6 +1096,7 @@ export function runConnector(config: RunConnectorConfig): void {
 		records_emitted = observedCounters?.totalEmitted ?? 0,
 		code?: string,
 		errorBasis: readonly string[] = [],
+		recoveryHint?: TerminalErrorDetails["recovery_hint"],
 	): void => {
 		// The runtime ACK handshake may outlive every ref'd process handle. Mark
 		// the natural exit path before emitting DONE so it cannot contradict the
@@ -1088,6 +1106,7 @@ export function runConnector(config: RunConnectorConfig): void {
 			message,
 			retryable,
 			code,
+			recoveryHint,
 			normalizeTerminalError,
 		});
 		// `DONE.error.basis` cites the OBSERVATION ids the failure rests on
@@ -1350,7 +1369,14 @@ export function runConnector(config: RunConnectorConfig): void {
 	run().catch((err: unknown) => {
 		const errorBasis = observationBasisOf(err);
 		if (err instanceof TerminalError) {
-			emitFailed(err.message, err.retryable, undefined, err.code, errorBasis);
+			emitFailed(
+				err.message,
+				err.retryable,
+				undefined,
+				err.code,
+				errorBasis,
+				err.recoveryHint,
+			);
 			return;
 		}
 		const message = describeUnexpectedFailure(err);
