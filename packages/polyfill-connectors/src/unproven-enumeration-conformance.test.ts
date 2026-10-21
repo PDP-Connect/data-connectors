@@ -170,6 +170,61 @@ test("a skip that is not an unproven enumeration passes through and the run stil
 	assert.equal(code, 0);
 });
 
+test("reportStreamFailure keeps the connector's own recovery hint and diagnostics", async () => {
+	const { code, messages } = await wire(
+		["notes", "profile"],
+		[
+			{ type: "STATE", stream: "profile", cursor: { done: true } },
+			{
+				type: "REPORT_STREAM_FAILURE",
+				stream: "notes",
+				message: "The source returned an unreadable page.",
+				options: {
+					recoveryHint: {
+						action: "retry_on_connector_upgrade",
+						retryable: false,
+					},
+					diagnostics: { source_reason: "icloud_invalid_query_response" },
+				},
+			},
+		],
+	);
+	assert.deepEqual(skips(messages), [
+		{
+			type: "SKIP_RESULT",
+			stream: "notes",
+			reason: "stream_collection_failed",
+			message: "The source returned an unreadable page.",
+			recovery_hint: { action: "retry_on_connector_upgrade", retryable: false },
+			diagnostics: { source_reason: "icloud_invalid_query_response" },
+		},
+	]);
+	const done = doneOf(messages);
+	assert.equal(done.status, "failed");
+	assert.equal(done.error?.code, "stream_collection_failed");
+	assert.equal(done.error?.retryable, false, "retryable follows the hint");
+	assert.equal(code, 1);
+});
+
+test("reportStreamFailure without a hint keeps the retry_by_runtime default", async () => {
+	const { messages } = await wire(
+		["notes"],
+		[
+			{
+				type: "REPORT_STREAM_FAILURE",
+				stream: "notes",
+				message: "The page did not load.",
+				options: { retryable: true },
+			},
+		],
+	);
+	assert.deepEqual(
+		skips(messages).map((m) => m.recovery_hint),
+		[{ action: "retry_by_runtime", retryable: true }],
+	);
+	assert.equal(doneOf(messages).error?.retryable, true);
+});
+
 // The runtime's browser cleanup must agree with the terminal result: a run that
 // ends failed because of a reported stream failure keeps its failure evidence.
 async function browserRun(

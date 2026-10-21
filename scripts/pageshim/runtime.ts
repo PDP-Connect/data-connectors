@@ -973,17 +973,25 @@ export async function runOnPageShim(
 			reportStreamFailure: (
 				stream: string,
 				message: string,
-				options: { retryable?: boolean } = {},
+				options: {
+					diagnostics?: Record<string, unknown>;
+					recoveryHint?: { action: string; retryable?: boolean };
+					retryable?: boolean;
+				} = {},
 			) =>
 				emit({
 					type: "SKIP_RESULT",
 					stream,
 					reason: "stream_collection_failed",
 					message,
-					recovery_hint: {
+					recovery_hint: options.recoveryHint ?? {
 						action: "retry_by_runtime",
-						retryable: options.retryable === true,
+						retryable:
+							(options.retryable ?? options.recoveryHint?.retryable) === true,
 					},
+					...(options.diagnostics === undefined
+						? {}
+						: { diagnostics: options.diagnostics }),
 				}),
 			state,
 		});

@@ -197,6 +197,12 @@ export function createConnectorFailure(
 
 type Credentials = Record<string, string>;
 
+export interface StreamFailureOptions {
+	diagnostics?: Record<string, unknown>;
+	recoveryHint?: { action: string; retryable?: boolean };
+	retryable?: boolean;
+}
+
 interface EmitRecordOptions {
 	skipResourceFilter?: boolean;
 	/** Runs after all record gates and immediately before a retained RECORD. */
@@ -256,11 +262,16 @@ interface BaseCollectContext {
 	 *
 	 * Optional for compatibility with hand-built test contexts. The real runtime
 	 * always supplies it.
+	 *
+	 * `recoveryHint` replaces the default `retry_by_runtime` hint when the
+	 * connector already knows a better one (for example an unrecognized
+	 * response that needs a connector upgrade); `retryable` then defaults to
+	 * the hint's own value. `diagnostics` passes through on the SKIP_RESULT.
 	 */
 	reportStreamFailure?: (
 		stream: string,
 		message: string,
-		options?: { retryable?: boolean },
+		options?: StreamFailureOptions,
 	) => Promise<void>;
 	requestDetailGapPage: (req?: {
 		maxBytes?: number;
@@ -1270,14 +1281,21 @@ export function runConnector(config: RunConnectorConfig): void {
 				code: "stream_failure_invalid",
 			});
 		}
-		const retryable = options.retryable === true;
+		const retryable =
+			(options.retryable ?? options.recoveryHint?.retryable) === true;
 		reportedStreamFailure ??= { message: normalizedMessage, retryable, stream };
 		await emit({
 			type: "SKIP_RESULT",
 			stream,
 			reason: "stream_collection_failed",
 			message: normalizedMessage,
-			recovery_hint: { action: "retry_by_runtime", retryable },
+			recovery_hint: options.recoveryHint ?? {
+				action: "retry_by_runtime",
+				retryable,
+			},
+			...(options.diagnostics === undefined
+				? {}
+				: { diagnostics: options.diagnostics }),
 		});
 	};
 
