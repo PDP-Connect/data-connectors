@@ -14,7 +14,7 @@ import type {
 import { connectorDiagnostic } from "../../packages/polyfill-connectors/src/connector-diagnostic.ts";
 import { runConnector } from "../../packages/polyfill-connectors/src/connector-runtime.ts";
 import { validateRecord } from "./schemas.ts";
-import { ensureOuraApiAccess, probeOuraPortalSession, probeOuraSignInInProgress, readOuraCachedAccessToken } from "./api-access.ts";
+import { ensureOuraApiAccess, type OuraApiAccess, probeOuraPortalSession, probeOuraSignInInProgress, readOuraCachedAccess } from "./api-access.ts";
 
 const API = "https://api.ouraring.com/v2/usercollection";
 // Include today in the initial 90-day snapshot.
@@ -144,8 +144,10 @@ async function fetchCollection<T extends { id: string; day: string }>(page: Brow
       if (!Array.isArray(payload.data)) return { rows, complete: false };
       let invalidRow = false;
       for (const row of payload.data) {
+        // A row without an identity or a calendar day cannot be placed in the
+        // inventory, so its page cannot prove the inventory complete.
         if (!row || typeof row !== "object" || Array.isArray(row) ||
-          typeof row.id !== "string" || typeof row.day !== "string") {
+          typeof row.id !== "string" || !row.id || !isUtcDay(row.day)) {
           invalidRow = true;
           continue;
         }
@@ -187,13 +189,15 @@ function addDays(value: string, days: number): string {
 }
 
 interface OuraCursor {
+  /** Key of the account whose inventory this cursor describes. */
+  account?: string;
   api_v2?: true;
   next_day?: string;
   refresh_from?: string;
   requested_since?: string | null;
 }
 
-function isUtcDay(value: string | undefined): value is string {
+function isUtcDay(value: unknown): value is string {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
     requestedUtcDay(value) === value;
 }
@@ -339,13 +343,31 @@ function activityRecord(row: DailyActivity): RecordData {
   };
 }
 
-export async function collectOuraBrowser(ctx: BrowserCollectContext, accessToken?: string): Promise<void> {
-  const token = accessToken ?? await readOuraCachedAccessToken(ctx.page);
+/**
+ * Oura sleep sessions carry no daily_sleep id, so a session can share a score
+ * only by day. A day maps to its score only when it has exactly one distinct
+ * score document. A day with more maps to null: no score belongs to its
+ * sessions, and each score stays a daily_score record. Page order cannot
+ * change the result.
+ */
+function dailyScoreByDay(scores: DailySleep[]): Map<string, DailySleep | null> {
+  const byDay = new Map<string, DailySleep | null>();
+  for (const score of scores) {
+    const known = byDay.get(score.day);
+    byDay.set(score.day, known === undefined || known?.id === score.id ? score : null);
+  }
+  return byDay;
+}
+
+export async function collectOuraBrowser(ctx: BrowserCollectContext, cachedAccess?: OuraApiAccess): Promise<void> {
+  const access = cachedAccess ?? await readOuraCachedAccess(ctx.page);
   const today = new Date(Date.now()).toISOString().slice(0, 10);
   for (const stream of ["sleep", "readiness", "activity"] as const) {
     if (!ctx.requested.has(stream)) continue;
     const stored = ctx.state[stream] as OuraCursor | undefined;
-    const previous = ctx.collectionMode === "full_refresh" || stored?.api_v2 !== true ? undefined : stored;
+    // A cursor written for another account says nothing about this one.
+    const previous = ctx.collectionMode === "full_refresh" || stored?.api_v2 !== true ||
+      stored.account !== access.account ? undefined : stored;
     const requestedSince = requestedUtcDay(ctx.requested.get(stream)?.time_range?.since);
     const rawUntil = ctx.requested.get(stream)?.time_range?.until;
     const until = requestedUtcDay(rawUntil);
@@ -370,13 +392,13 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, accessToken
         await ctx.emit({ type: "STATE", stream, cursor: previous });
       continue;
     }
-    const result = await fetchWindow(ctx, token, stream, startDate, endDate);
+    const result = await fetchWindow(ctx, access.accessToken, stream, startDate, endDate);
     const data = result.data;
     let records: RecordData[];
     if (stream === "sleep") {
-      const scores = new Map((data.daily_sleeps ?? []).map((row) => [row.day, row]));
+      const scores = dailyScoreByDay(data.daily_sleeps ?? []);
       records = [
-        ...(data.sleeps ?? []).map((row) => sleepRecord(row, scores.get(row.day))),
+        ...(data.sleeps ?? []).map((row) => sleepRecord(row, scores.get(row.day) ?? undefined)),
         ...(data.daily_sleeps ?? []).map(dailyScoreRecord),
       ];
     } else if (stream === "readiness") {
@@ -404,6 +426,7 @@ export async function collectOuraBrowser(ctx: BrowserCollectContext, accessToken
     await ctx.emit({
       type: "STATE", stream,
       cursor: {
+        account: access.account,
         api_v2: true,
         next_day: addDays(endDate, 1),
         refresh_from: requestedSince ?? (overlapStart < startDate ? startDate : overlapStart),

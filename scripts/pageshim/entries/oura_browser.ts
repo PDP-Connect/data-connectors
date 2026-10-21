@@ -61,7 +61,7 @@ function withOuraTokenPost(page: ShimPage, pw: Page): Page {
 	prepareRequested: (requested) => applyRequestedScopeEntries(requested, requestedScopeEntries(page), "oura"),
 	collect: async (ctx) => {
 		const pw = withOuraTokenPost(page, ctx.page as Page);
-		const token = await ensureOuraApiAccess(pw, async (url, message, ready) => {
+		const access = await ensureOuraApiAccess(pw, async (url, message, ready) => {
 			const current = await pw.evaluate(() => location.href).catch(() => "");
 			await page.showBrowser(current === url ? undefined : url);
 			if (current !== url)
@@ -70,7 +70,7 @@ function withOuraTokenPost(page: ShimPage, pw: Page): Page {
 			if (!completed) throw new Error("oura_authorization_incomplete");
 			await page.goHeadless();
 		});
-		await collectOuraBrowser(ctx as never, token);
+		await collectOuraBrowser(ctx as never, access);
 	},
 	toScope: (_stream, records) => ({ records }),
 	emptyScopeFromCheckpoint: true,

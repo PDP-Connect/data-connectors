@@ -16251,7 +16251,7 @@
 				"streams": [
 					{
 						"name": "sleep",
-						"description": "Daily sleep sessions and one record per daily sleep score, including score-only days and multiple score documents for one date. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
+						"description": "Daily sleep sessions and one record per daily sleep score, including score-only days and multiple score documents for one date. A session carries its day's score fields only when that day has exactly one score document. Initial collection covers the most recent 90 days; earlier days require a requested time range.",
 						"display": {
 							"label": "Your sleep sessions",
 							"detail": "Per-night: total sleep duration, awake time, stages (REM, deep, light), heart rate range, HRV, temperature deviation, efficiency, latency, timing, and daily score contributors."

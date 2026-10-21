@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { chromium, type Page } from "playwright";
 import { ensureOuraApiAccess, probeOuraCachedApiAccess } from "./api-access.ts";
@@ -10,6 +11,21 @@ const portal = "https://developer.ouraring.com";
 const apps = `${portal}/applications`;
 const moi = "https://moi.ouraring.com";
 const callback = "https://vana.org/oauth/oura/callback";
+const STORAGE_KEY = "vana:oura-connector:token";
+const accountKey = (email: string) => createHash("sha256").update(email).digest("hex");
+const signedInAccount = accountKey("synthetic@example.test");
+
+async function seedToken(page: Page, accessToken: string, account?: string) {
+	await page.evaluate(({ key, entry }) => localStorage.setItem(key, JSON.stringify(entry)), {
+		key: STORAGE_KEY,
+		entry: { accessToken, refreshToken: null, expiresAt: Date.now() + 3_600_000,
+			clientId: "synthetic-app", clientSecret: "synthetic-secret", ...(account ? { account } : {}) },
+	});
+}
+
+async function storedToken(page: Page): Promise<{ accessToken?: string; account?: string } | null> {
+	return page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), STORAGE_KEY);
+}
 
 async function withReplay(stale: boolean, run: (page: Page, state: { signOuts: () => number; appRequests: () => number; faultInjected: () => boolean; authorizeAttempts: () => number; tokenExchanges: () => number; dailyProbes: () => number }) => Promise<void>, prefixFault = false, initialSignedIn = stale, scopeProbeStatuses = [200]) {
 	const browser = await chromium.launch({ headless: true });
@@ -146,7 +162,7 @@ async function completeSignIn(page: Page, url: string, ready: () => Promise<bool
 test("Oura page replay completes portal OTP and OAuth OTP without replacing either page", { timeout: 60_000 }, async () => {
 	await withReplay(false, async (page, state) => {
 		const token = await ensureOuraApiAccess(page, (url, _message, ready) => completeSignIn(page, url, ready));
-		assert.equal(token, "synthetic-access");
+		assert.deepEqual(token, { accessToken: "synthetic-access", account: signedInAccount });
 		assert.equal(state.signOuts(), 0);
 	});
 });
@@ -154,7 +170,7 @@ test("Oura page replay completes portal OTP and OAuth OTP without replacing eith
 test("Oura page replay signs out a stale session after prefixed evaluation errors", { timeout: 120_000 }, async () => {
 	await withReplay(true, async (page, state) => {
 		const token = await ensureOuraApiAccess(page, (url, _message, ready) => completeSignIn(page, url, ready));
-		assert.equal(token, "synthetic-access");
+		assert.deepEqual(token, { accessToken: "synthetic-access", account: signedInAccount });
 		assert.equal(state.signOuts(), 1);
 		assert.ok(state.appRequests() >= 12);
 	});
@@ -162,15 +178,12 @@ test("Oura page replay signs out a stale session after prefixed evaluation error
 
 test("Oura page replay keeps a valid cached token while an OTP page is active", { timeout: 60_000 }, async () => {
 	await withReplay(false, async (page, state) => {
-		await page.evaluate((entry) => localStorage.setItem("vana:oura-connector:token", JSON.stringify(entry)), {
-			accessToken: "cached-access", refreshToken: "cached-refresh", expiresAt: Date.now() + 3_600_000,
-			clientId: "synthetic-app", clientSecret: "synthetic-secret",
-		});
+		await seedToken(page, "cached-access", signedInAccount);
 		await page.goto(`${moi}/authn/enter-otp?stage=first`);
 		assert.equal(await probeOuraCachedApiAccess(page), null);
 		assert.match(page.url(), /\/enter-otp/);
 		const token = await ensureOuraApiAccess(page, (url, _message, ready) => completeSignIn(page, url, ready));
-		assert.equal(token, "cached-access");
+		assert.deepEqual(token, { accessToken: "cached-access", account: signedInAccount });
 		assert.equal(state.appRequests(), 0);
 	});
 });
@@ -178,7 +191,7 @@ test("Oura page replay keeps a valid cached token while an OTP page is active", 
 test("Oura page replay retries a host-prefixed evaluation error after navigation settles", { timeout: 60_000 }, async () => {
 	await withReplay(false, async (page, state) => {
 		const token = await ensureOuraApiAccess(page, (url, _message, ready) => completeSignIn(page, url, ready));
-		assert.equal(token, "synthetic-access");
+		assert.deepEqual(token, { accessToken: "synthetic-access", account: signedInAccount });
 		assert.equal(state.faultInjected(), true);
 		assert.equal(state.signOuts(), 0);
 	}, true, true);
@@ -189,7 +202,7 @@ test("Oura page replay retries an unscoped automatic grant with manual consent",
 	await withReplay(false, async (page, state) => {
 		const token = await ensureOuraApiAccess(page, (url, _message, ready) =>
 			completeSignIn(page, url, ready, () => { manualApprovals++; }));
-		assert.equal(token, "synthetic-access-2");
+		assert.deepEqual(token, { accessToken: "synthetic-access-2", account: signedInAccount });
 		assert.equal(state.authorizeAttempts(), 2);
 		assert.equal(state.tokenExchanges(), 2);
 		assert.equal(state.dailyProbes(), 2);
@@ -210,4 +223,45 @@ test("Oura page replay stops after one manual retry when daily scope is still mi
 		assert.equal(state.dailyProbes(), 2);
 		assert.equal(manualApprovals, 1);
 	}, false, false, [401, 403]);
+});
+
+for (const [label, account] of [["another account", accountKey("previous@example.test")], ["no account", undefined]] as const) {
+	test(`Oura page replay discards a cached token bound to ${label} and authorizes the signed-in account`, { timeout: 60_000 }, async () => {
+		await withReplay(false, async (page, state) => {
+			await seedToken(page, "previous-access", account);
+			const token = await ensureOuraApiAccess(page, (url, _message, ready) => completeSignIn(page, url, ready));
+			assert.equal(state.authorizeAttempts(), 1, "the signed-in account authorizes its own grant");
+			assert.deepEqual(token, { accessToken: "synthetic-access", account: signedInAccount });
+			const stored = await storedToken(page);
+			assert.equal(stored?.accessToken, "synthetic-access");
+			assert.equal(stored?.account, signedInAccount);
+		}, false, true);
+	});
+}
+
+test("Oura page replay discards another account's token even when authorization does not finish", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page) => {
+		await seedToken(page, "previous-access", accountKey("previous@example.test"));
+		await assert.rejects(ensureOuraApiAccess(page, async () => { throw new Error("owner_left"); }), /owner_left/);
+		assert.equal(await storedToken(page), null);
+	}, false, true);
+});
+
+test("Oura page replay reuses a bound token without sign-in when no portal session is visible", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page, state) => {
+		await seedToken(page, "cached-access", accountKey("previous@example.test"));
+		assert.equal(await probeOuraCachedApiAccess(page), "cached-access");
+		const token = await ensureOuraApiAccess(page, async () => { throw new Error("sign-in requested"); });
+		assert.deepEqual(token, { accessToken: "cached-access", account: accountKey("previous@example.test") });
+		assert.equal(state.appRequests(), 0);
+	});
+});
+
+test("Oura page replay probe rejects a cached token bound to another signed-in account", { timeout: 60_000 }, async () => {
+	await withReplay(false, async (page) => {
+		await seedToken(page, "previous-access", accountKey("previous@example.test"));
+		assert.equal(await probeOuraCachedApiAccess(page), null);
+		await seedToken(page, "cached-access", signedInAccount);
+		assert.equal(await probeOuraCachedApiAccess(page), "cached-access");
+	}, false, true);
 });

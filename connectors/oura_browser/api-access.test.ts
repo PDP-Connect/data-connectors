@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type { Page } from "playwright";
 import { ensureOuraApiAccess, probeOuraCachedApiAccess, probeOuraSignInInProgress } from "./api-access.ts";
 
 const PORTAL = "https://developer.ouraring.com/applications";
+const ACCOUNT = createHash("sha256").update("synthetic@example.test").digest("hex");
 
 test("synthetic 3.1.2 flow registers an owner app, checks OAuth state and caches the scoped token", async () => {
   const previousLocation = Object.getOwnPropertyDescriptor(globalThis, "location");
@@ -21,6 +23,7 @@ test("synthetic 3.1.2 flow registers an owner app, checks OAuth state and caches
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => { storage.set(key, value); },
+    removeItem: (key: string) => { storage.delete(key); },
   } });
   Object.defineProperty(globalThis, "document", { configurable: true, value: { querySelector: () => null, querySelectorAll: () => [] } });
   globalThis.fetch = async (input, init) => {
@@ -74,9 +77,11 @@ test("synthetic 3.1.2 flow registers an owner app, checks OAuth state and caches
       current = `https://vana.org/oauth/oura/callback?code=synthetic-code&state=${state}`;
       assert.equal(await ready(), true);
     });
-    assert.equal(token, "synthetic-access");
+    assert.deepEqual(token, { accessToken: "synthetic-access", account: ACCOUNT });
     assert.ok(calls.includes("POST /api/extapi/v2/oauth/registration"));
-    assert.equal(JSON.parse(storage.get("vana:oura-connector:token") ?? "null").accessToken, token);
+    const stored = JSON.parse(storage.get("vana:oura-connector:token") ?? "null");
+    assert.equal(stored.accessToken, token.accessToken);
+    assert.equal(stored.account, ACCOUNT);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousLocation) Object.defineProperty(globalThis, "location", previousLocation);
@@ -102,6 +107,7 @@ test("a stale portal session signs out and offers a fresh sign-in", { timeout: 1
   Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => { storage.set(key, value); },
+    removeItem: (key: string) => { storage.delete(key); },
   } });
   globalThis.fetch = async (input, init) => {
     const path = String(input);
@@ -155,7 +161,7 @@ test("a stale portal session signs out and offers a fresh sign-in", { timeout: 1
         assert.equal(await ready(), true);
       }
     });
-    assert.equal(access, "fresh-access");
+    assert.deepEqual(access, { accessToken: "fresh-access", account: ACCOUNT });
     assert.equal(signOuts, 1);
     assert.equal(signIns, 1);
   } finally {

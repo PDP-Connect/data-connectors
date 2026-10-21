@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Synthetic replay of the four API v2 collection envelopes used by 3.1.2.
+import { createHash } from "node:crypto";
+
 const json = (body, status = 200) => ({ status, contentType: "application/json", body: JSON.stringify(body) });
 const html = (body = "") => ({ status: 200, contentType: "text/html; charset=utf-8", body: `<!doctype html><html><body>${body}</body></html>` });
-const token = { accessToken: "synthetic-access", refreshToken: "synthetic-refresh", expiresAt: 4102444800000, clientId: "synthetic-app", clientSecret: "synthetic-secret" };
+// A cached token is bound to the portal account that authorized it.
+const account = createHash("sha256").update("synthetic@example.test").digest("hex");
+const token = { accessToken: "synthetic-access", refreshToken: "synthetic-refresh", expiresAt: 4102444800000, clientId: "synthetic-app", clientSecret: "synthetic-secret", account };
 let loggedIn = true;
 const appPage = (withToken = loggedIn) => html(withToken
 	? `<script>localStorage.setItem('vana:oura-connector:token', ${JSON.stringify(JSON.stringify(token))})</script>`

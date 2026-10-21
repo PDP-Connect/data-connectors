@@ -24,11 +24,25 @@ interface TokenEntry {
 	expiresAt: number;
 	clientId: string;
 	clientSecret: string;
+	/** Key of the portal account that authorized this grant. */
+	account: string;
+}
+
+/** An Oura API token and the key of the account whose data it reads. */
+export interface OuraApiAccess {
+	accessToken: string;
+	account: string;
+}
+
+/** The signed-in portal account: its email and a key that does not reveal it. */
+interface PortalAccount {
+	email: string;
+	account: string;
 }
 
 type Interact = (url: string, message: string, ready: () => Promise<boolean>) => Promise<void>;
 
-async function portalEmail(page: Page): Promise<string | null> {
+async function portalAccount(page: Page): Promise<PortalAccount | null> {
 	if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
 		return null;
 	return page.evaluate(async () => {
@@ -39,8 +53,12 @@ async function portalEmail(page: Page): Promise<string | null> {
 			const value: unknown = await response.json().catch(() => null);
 			if (value && typeof value === "object" && "user" in value) {
 				const user = value.user;
-				if (user && typeof user === "object" && "email" in user && typeof user.email === "string")
-					return user.email;
+				if (user && typeof user === "object" && "email" in user && typeof user.email === "string" && user.email) {
+					// The key goes into collection state, so it is a digest, not the email.
+					const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(user.email.trim().toLowerCase()));
+					const account = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+					return { email: user.email, account };
+				}
 			}
 		}
 		return null;
@@ -54,14 +72,17 @@ async function cachedToken(page: Page): Promise<TokenEntry | null> {
 	}, STORAGE_KEY);
 	if (!value || typeof value !== "object") return null;
 	const entry = value as Record<string, unknown>;
+	// An entry without an account binding, such as one written by 3.1.2, is not reusable.
 	if (typeof entry.accessToken !== "string" || typeof entry.clientId !== "string" ||
-		typeof entry.clientSecret !== "string" || typeof entry.expiresAt !== "number") return null;
+		typeof entry.clientSecret !== "string" || typeof entry.expiresAt !== "number" ||
+		typeof entry.account !== "string" || !entry.account) return null;
 	return {
 		accessToken: entry.accessToken,
 		refreshToken: typeof entry.refreshToken === "string" ? entry.refreshToken : null,
 		expiresAt: entry.expiresAt,
 		clientId: entry.clientId,
 		clientSecret: entry.clientSecret,
+		account: entry.account,
 	};
 }
 
@@ -73,7 +94,14 @@ async function saveToken(page: Page, entry: TokenEntry): Promise<void> {
 	});
 }
 
-async function tokenRequest(page: Page, grant: Record<string, string>, clientId: string, clientSecret: string): Promise<TokenEntry> {
+async function forgetToken(page: Page): Promise<void> {
+	await page.evaluate((key) => {
+		if (location.origin === "https://developer.ouraring.com") localStorage.removeItem(key);
+	}, STORAGE_KEY);
+}
+
+async function tokenRequest(page: Page, grant: Record<string, string>, clientId: string, clientSecret: string,
+	account: string): Promise<TokenEntry> {
 	const body = new URLSearchParams({ ...grant, client_id: clientId, client_secret: clientSecret });
 	const response = await page.context().request.post(TOKEN, {
 		data: body.toString(),
@@ -93,7 +121,7 @@ async function tokenRequest(page: Page, grant: Record<string, string>, clientId:
 			accessToken: token.access_token,
 			refreshToken: typeof token.refresh_token === "string" ? token.refresh_token : grant.refresh_token ?? null,
 			expiresAt: Date.now() + (typeof token.expires_in === "number" ? token.expires_in : 86_400) * 1000,
-			clientId, clientSecret,
+			clientId, clientSecret, account,
 		};
 	} finally { await response.dispose(); }
 }
@@ -215,26 +243,30 @@ async function pkce(page: Page): Promise<{ challenge: string; state: string; ver
 }
 
 export async function probeOuraPortalSession(page: Page): Promise<boolean> {
-	try { return Boolean(await portalEmail(page)); } catch { return false; }
+	try { return Boolean(await portalAccount(page)); } catch { return false; }
 }
 
-async function reusableCachedToken(page: Page): Promise<string | null> {
+/**
+ * A cached token reads only the account that authorized it. When the portal
+ * shows another signed-in account, the token is not reusable. With no visible
+ * portal session, no other account is present, so a bound token stays usable.
+ */
+async function reusableCachedAccess(page: Page, signedIn: PortalAccount | null): Promise<OuraApiAccess | null> {
 	const cached = await cachedToken(page);
-	if (cached) {
-		if (cached.expiresAt > Date.now() + 600_000) {
-			const status = await tokenStatus(page, cached.accessToken).catch(() => 0);
-			if (status !== 401 && status !== 403) return cached.accessToken;
-		}
-		if (cached.refreshToken) {
-			try {
-				const renewed = await tokenRequest(page, {
-					grant_type: "refresh_token", refresh_token: cached.refreshToken,
-				}, cached.clientId, cached.clientSecret);
-				await saveToken(page, renewed);
-				const status = await tokenStatus(page, renewed.accessToken).catch(() => 0);
-				if (status !== 401 && status !== 403) return renewed.accessToken;
-			} catch { /* A revoked grant needs owner authorization. */ }
-		}
+	if (!cached || (signedIn && signedIn.account !== cached.account)) return null;
+	if (cached.expiresAt > Date.now() + 600_000) {
+		const status = await tokenStatus(page, cached.accessToken).catch(() => 0);
+		if (status !== 401 && status !== 403) return { accessToken: cached.accessToken, account: cached.account };
+	}
+	if (cached.refreshToken) {
+		try {
+			const renewed = await tokenRequest(page, {
+				grant_type: "refresh_token", refresh_token: cached.refreshToken,
+			}, cached.clientId, cached.clientSecret, cached.account);
+			await saveToken(page, renewed);
+			const status = await tokenStatus(page, renewed.accessToken).catch(() => 0);
+			if (status !== 401 && status !== 403) return { accessToken: renewed.accessToken, account: renewed.account };
+		} catch { /* A revoked grant needs owner authorization. */ }
 	}
 	return null;
 }
@@ -242,7 +274,8 @@ async function reusableCachedToken(page: Page): Promise<string | null> {
 export async function probeOuraCachedApiAccess(page: Page): Promise<string | null> {
 	try {
 		if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL) return null;
-		return await reusableCachedToken(page);
+		const signedIn = await portalAccount(page).catch(() => null);
+		return (await reusableCachedAccess(page, signedIn))?.accessToken ?? null;
 	} catch { return null; }
 }
 
@@ -288,7 +321,7 @@ async function advanceOuraSignIn(page: Page, email?: string): Promise<void> {
 	}, email).catch(() => {});
 }
 
-async function authorizeWithUser(page: Page, interact: Interact, email: string,
+async function authorizeWithUser(page: Page, interact: Interact, owner: PortalAccount,
 	clientId: string, clientSecret: string, autoAllow: boolean): Promise<TokenEntry> {
 	const proof = await pkce(page);
 	const url = new URL(AUTHORIZE);
@@ -302,7 +335,7 @@ async function authorizeWithUser(page: Page, interact: Interact, email: string,
 	await interact(url.toString(), "Approve daily Oura data access, then continue.", async () => {
 		const current = await page.evaluate(() => location.href).catch(() => "");
 		if (current.startsWith(REDIRECT)) return true;
-		await advanceOuraSignIn(page, email);
+		await advanceOuraSignIn(page, owner.email);
 		// Oura has recorded empty grants when Allow is pressed before its page script binds.
 		const consent = await page.evaluate(({ press }) => {
 			const box = document.querySelector<HTMLInputElement>('input[type="checkbox"][name="consent.scope.extapi:daily"]');
@@ -327,30 +360,33 @@ async function authorizeWithUser(page: Page, interact: Interact, email: string,
 	return tokenRequest(page, {
 		grant_type: "authorization_code", code, redirect_uri: REDIRECT,
 		code_verifier: proof.verifier,
-	}, clientId, clientSecret);
+	}, clientId, clientSecret, owner.account);
 }
 
-export async function ensureOuraApiAccess(page: Page, interact: Interact): Promise<string> {
+export async function ensureOuraApiAccess(page: Page, interact: Interact): Promise<OuraApiAccess> {
 	if (await probeOuraSignInInProgress(page)) {
 		const current = await page.evaluate(() => location.href);
 		await interact(current, "Finish signing in to Oura.", async () => {
 			await advanceOuraSignIn(page);
-			return Boolean(await portalEmail(page));
+			return Boolean(await portalAccount(page));
 		});
 	} else if ((await page.evaluate(() => location.origin).catch(() => "")) !== PORTAL)
 		await page.goto(APPLICATIONS, { waitUntil: "domcontentloaded" });
-	const cached = await reusableCachedToken(page);
+	// An unreadable portal session shows no other account, the same as no session.
+	let owner = await portalAccount(page).catch(() => null);
+	const cached = await reusableCachedAccess(page, owner);
 	if (cached) return cached;
-	let email = await portalEmail(page);
-	if (!email) {
+	// The entry left here cannot serve this account; another account's grant must not outlive it.
+	await forgetToken(page);
+	if (!owner) {
 		await interact(APPLICATIONS, "Sign in to the Oura Developer Portal, then continue.", async () => {
 			await advanceOuraSignIn(page);
-			return Boolean(await portalEmail(page));
+			return Boolean(await portalAccount(page));
 		});
-		email = await portalEmail(page);
+		owner = await portalAccount(page);
 	}
-	if (!email) throw new Error("oura_portal_session_unconfirmed");
-	let app = await applicationAfterSessionSettles(page, email, interact);
+	if (!owner) throw new Error("oura_portal_session_unconfirmed");
+	let app = await applicationAfterSessionSettles(page, owner.email, interact);
 	if (!app) {
 		await page.evaluate(async () => {
 			await fetch("/api/auth/sign-out", {
@@ -361,27 +397,27 @@ export async function ensureOuraApiAccess(page: Page, interact: Interact): Promi
 		await interact(`${PORTAL}/signin?callbackUrl=%2Fapplications`, "Sign in to Oura again to restore your Developer Portal session.",
 			async () => {
 				await advanceOuraSignIn(page);
-				return Boolean(await portalEmail(page));
+				return Boolean(await portalAccount(page));
 			});
-		email = await portalEmail(page);
-		if (!email) throw new Error("oura_portal_session_unconfirmed");
-		app = await applicationAfterSessionSettles(page, email, interact);
+		owner = await portalAccount(page);
+		if (!owner) throw new Error("oura_portal_session_unconfirmed");
+		app = await applicationAfterSessionSettles(page, owner.email, interact);
 		if (!app) throw new Error("oura_portal_session_unconfirmed");
 	}
 	const { clientId, clientSecret } = app;
-	let entry = await authorizeWithUser(page, interact, email, clientId, clientSecret, true);
+	let entry = await authorizeWithUser(page, interact, owner, clientId, clientSecret, true);
 	let status = await tokenStatus(page, entry.accessToken);
 	if (status === 401 || status === 403) {
-		entry = await authorizeWithUser(page, interact, email, clientId, clientSecret, false);
+		entry = await authorizeWithUser(page, interact, owner, clientId, clientSecret, false);
 		status = await tokenStatus(page, entry.accessToken);
 	}
 	if (status === 401 || status === 403) throw new Error("oura_daily_scope_missing");
 	await saveToken(page, entry);
-	return entry.accessToken;
+	return { accessToken: entry.accessToken, account: entry.account };
 }
 
-export async function readOuraCachedAccessToken(page: Page): Promise<string> {
+export async function readOuraCachedAccess(page: Page): Promise<OuraApiAccess> {
 	const token = await cachedToken(page);
 	if (!token) throw new Error("oura_api_token_missing");
-	return token.accessToken;
+	return { accessToken: token.accessToken, account: token.account };
 }
