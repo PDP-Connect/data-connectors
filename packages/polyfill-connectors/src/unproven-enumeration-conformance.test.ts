@@ -155,8 +155,7 @@ for (const [label, aFirst] of [
 				status: "failed",
 				error: {
 					code: "stream_collection_failed",
-					message:
-						"stream collection failed: a: a unproven (also failed: b)",
+					message: "stream collection failed: a: a unproven (also failed: b)",
 					retryable: true,
 				},
 			},
@@ -168,10 +167,7 @@ for (const [label, aFirst] of [
 test("DONE is not retryable when no failed stream is retryable", async () => {
 	const { messages } = await wire(
 		["a", "b"],
-		[
-			{ ...retryableReport, options: { retryable: false } },
-			upgradeOnlyCause,
-		],
+		[{ ...retryableReport, options: { retryable: false } }, upgradeOnlyCause],
 	);
 	const done = doneOf(messages);
 	assert.equal(done.error?.code, "stream_collection_failed");
